@@ -165,13 +165,13 @@ fn summary_card(st: Remote<UpdatesStatus>, selected: RwSignal<Vec<String>>, ask:
                 {(sec > 0).then(|| {
                     let names = sec_names.clone();
                     view! {
-                        <button class="btn" disabled=move || busy.get()
+                        <button class="btn ghost" disabled=move || busy.get()
                             on:click=move |_| ask.set(Some(Ask::Install { packages: names.clone(), removals: Vec::new() }))>
                             <Icon icon=icons::SHIELD_CHECK size=16 />{tr("upd.install_security")}
                         </button>
                     }
                 })}
-                <button class="btn" disabled=move || busy.get() || selected.with(Vec::is_empty)
+                <button class="btn ghost" disabled=move || busy.get() || selected.with(Vec::is_empty)
                     on:click=move |_| ask.set(Some(Ask::Install { packages: selected.get_untracked(), removals: Vec::new() }))>
                     {move || tf("upd.install_selected", &[("n", &selected.with(Vec::len).to_string())])}
                 </button>
