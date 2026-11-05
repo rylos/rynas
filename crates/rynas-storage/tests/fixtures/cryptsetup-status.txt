@@ -1,0 +1,11 @@
+/dev/mapper/rynas-vol1 is active and is in use.
+  type:    LUKS2
+  cipher:  aes-xts-plain64
+  keysize: 512 bits
+  key location: keyring
+  device:  /dev/md2
+  sector size:  4096
+  offset:  32768 sectors
+  size:    31254627336 sectors
+  mode:    read/write
+  flags:   discards

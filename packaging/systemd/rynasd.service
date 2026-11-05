@@ -1,0 +1,83 @@
+# rynasd: the privileged half of rynas. Runs as root, talks only to rynas-web over
+# /run/rynas/rynasd.sock (0660 root:rynas, peers checked with SO_PEERCRED).
+#
+# systemd owns the socket (rynasd.socket) and hands it over: the service always runs with
+# it, whether it is started at boot, by rynas-web or by the first connection. Without
+# Requires= a direct start of the service would bind its own socket, and the socket unit
+# would then refuse to start ("Socket service rynasd.service already active").
+[Unit]
+Description=rynas privileged daemon
+Documentation=https://github.com/rylos/rynas
+Requires=rynasd.socket
+After=rynasd.socket local-fs.target nss-user-lookup.target
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/rynas/rynasd --socket /run/rynas/rynasd.sock --state-dir /var/lib/rynas
+Restart=on-failure
+RestartSec=2s
+
+# Memory and tasks (docs/quality/guidelines.md §4.1, M5, M7). The cgroup includes the
+# children: mdadm, smartctl, btrfs, useradd, testparm... Idle ~10 MB, busy < 24 MB + children.
+# Above MemoryHigh the kernel reclaims and throttles; MemoryMax is the hard stop on a 4 GB NAS.
+# TasksMax: 4 blocking threads + one per disk during a SMART read (each command adds its
+# output readers) + 4 concurrent tasks with their children.
+Environment=GLIBC_TUNABLES=glibc.malloc.mmap_threshold=262144:glibc.malloc.trim_threshold=1048576:glibc.malloc.arena_max=2
+MemoryHigh=96M
+MemoryMax=256M
+TasksMax=128
+
+# /run/rynas (rynasd.sock; notify.sock, 0600 root, synodeb's notify forward) and
+# /var/lib/rynas (0700 root): auth/totp (TOTP secrets), config.db, tasks/ (task logs),
+# backup/<rev>/ (files replaced by each configuration apply), notify/ (notify.db and the
+# key of the notification target secrets), net/ (network revisions, trial marker; also used
+# by rynasctl from the rollback timer, the boot guard and the watchdog)
+RuntimeDirectory=rynas
+RuntimeDirectoryMode=0755
+# keep /run/rynas across restarts when rynasd.socket owns the socket in it
+RuntimeDirectoryPreserve=yes
+StateDirectory=rynas rynas/auth rynas/notify rynas/net
+StateDirectoryMode=0700
+UMask=0077
+
+# Hardening. rynasd will grow root tasks (mdadm, smartctl, config apply...): the
+# restrictions below fit authentication only and are relaxed as features land.
+NoNewPrivileges=yes
+# not "full": configuration applies write files in /etc (hostname, hosts, smb.conf...)
+ProtectSystem=yes
+# users and shares: useradd/userdel create and remove home directories, and shares (with
+# their ACLs) may live below /home. (ReadWritePaths=/home does not lift ProtectHome=read-only
+# on /home itself.)
+ProtectHome=no
+PrivateTmp=yes
+PrivateNetwork=no
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+# no ProtectHostname: a private UTS namespace would hide the hostname set by an apply
+# from its health check
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# AF_INET/AF_INET6 for PAM/NSS modules talking to LDAP, sssd or Kerberos over the network,
+# and for the notification channels (SMTP, ntfy, Telegram, Gotify, webhooks)
+# AF_PACKET: arping (duplicate address detection before a network change)
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6 AF_PACKET
+# Storage write side: CAP_SYS_ADMIN (partition re-read, md and dm ioctls, btrfs subvolumes),
+# CAP_SYS_RAWIO (ATA power check, hdparm), CAP_MKNOD (mdadm/dm nodes when udev is late),
+# CAP_IPC_LOCK (cryptsetup locks its key material in memory). Volumes are mounted by
+# systemd (`systemctl start <unit>.mount` from /etc/fstab), never inside this unit's own
+# mount namespace, where the mount would stay invisible to the rest of the system.
+# CAP_FSETID: restored snapshot files keep their setgid bits
+# Network (D-NET): CAP_NET_ADMIN (MTU and address repairs after a reload or a rollback,
+# ifupdown hand-back), CAP_NET_RAW (arping, ping of the gateway, diagnostics)
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_SETUID CAP_SETGID CAP_AUDIT_WRITE CAP_SYS_ADMIN CAP_SYS_RAWIO CAP_MKNOD CAP_IPC_LOCK CAP_FSETID CAP_NET_ADMIN CAP_NET_RAW
+
+[Install]
+WantedBy=multi-user.target

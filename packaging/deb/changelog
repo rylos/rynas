@@ -1,0 +1,8 @@
+rynas (0.1.0-1) trixie; urgency=medium
+
+  * First package: rynasd (PAM, TOTP) and rynas-web (API, live metrics,
+    web interface), systemd units, PAM service, fail2ban examples.
+  * The web interface is plain HTTP on port 8080 for now; HTTPS comes in a
+    later release (see README.Debian).
+
+ -- Marco Ziliani <508111+rylos@users.noreply.github.com>  Thu, 05 Nov 2026 00:35:30 +0100

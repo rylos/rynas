@@ -1,0 +1,15 @@
+/target
+/crates/rynas-ui/dist
+# local tools and agents: never in the public repo
+/.claude/
+/.serena/
+/CLAUDE.md
+/AGENTS.md
+# build artifacts
+*.deb
+*.wasm
+# editor and OS
+.idea/
+.vscode/
+*.swp
+.DS_Store

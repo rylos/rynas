@@ -1,0 +1,14 @@
+Label: 'root'  uuid: 5c2d8e1f-0a3b-4c6d-9e8f-7a6b5c4d3e2f
+	Total devices 1 FS bytes used 61203857408
+	devid    1 size 499435724800 used 88134369280 path /dev/md0
+
+Label: 'vol1'  uuid: 3e6c1f0a-9b2d-4c8e-a7f1-5d0b2c4e6a81
+	Total devices 1 FS bytes used 9812337541120
+	devid    1 size 16002569404416 used 10021857345536 path /dev/mapper/rynas-vol1
+
+Label: none  uuid: 7f00aa11-2233-4455-6677-8899aabbccdd
+	Total devices 2 FS bytes used 1202590842880
+	devid    1 size 2000397795328 used 1210180239360 path /dev/sdh1
+	devid    2 size 0 used 0 path <missing disk #2> MISSING
+	*** Some devices missing
+

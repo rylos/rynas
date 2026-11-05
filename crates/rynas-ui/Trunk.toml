@@ -1,0 +1,15 @@
+# trunk 0.22 — `trunk serve` (dev, :8081) / `trunk build --release` (dist/, embedded by rynas-web)
+[build]
+target = "index.html"
+dist = "dist"
+filehash = true
+minify = "on_release"
+
+[serve]
+addresses = ["127.0.0.1"]
+port = 8081
+open = false
+
+# API (and the SSE stream) from rynas-web during development
+[[proxy]]
+backend = "http://127.0.0.1:8080/api/"

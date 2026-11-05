@@ -1,0 +1,5 @@
+[/dev/mapper/rynas-vol1].write_io_errs    0
+[/dev/mapper/rynas-vol1].read_io_errs     0
+[/dev/mapper/rynas-vol1].flush_io_errs    0
+[/dev/mapper/rynas-vol1].corruption_errs  2
+[/dev/mapper/rynas-vol1].generation_errs  0

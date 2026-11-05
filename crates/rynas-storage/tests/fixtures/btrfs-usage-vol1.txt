@@ -1,0 +1,25 @@
+Overall:
+    Device size:		    16002569404416
+    Device allocated:		    10021857345536
+    Device unallocated:		     5980712058880
+    Device missing:		                 0
+    Device slack:		                 0
+    Used:			     9836532518912
+    Free (estimated):		     6150126264320	(min: 3159770234880)
+    Free (statfs, df):		     6150125215744
+    Data ratio:			              1.00
+    Metadata ratio:		              2.00
+    Global reserve:		         536870912	(used: 0)
+    Multiple profiles:		                no
+
+Data,single: Size:9979981414400, Used:9809568186368 (98.29%)
+   /dev/mapper/rynas-vol1	9979981414400
+
+Metadata,DUP: Size:20937965568, Used:13482393600 (64.39%)
+   /dev/mapper/rynas-vol1	41875931136
+
+System,DUP: Size:8388608, Used:1097728 (13.09%)
+   /dev/mapper/rynas-vol1	  16777216
+
+Unallocated:
+   /dev/mapper/rynas-vol1	5980712058880

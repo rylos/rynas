@@ -1,0 +1,21 @@
+[package]
+name = "rynas-services"
+description = "rynas file services: local users and groups, SMB shares (Samba), NFS exports, POSIX ACL matrix"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+rynas-api-types.workspace = true
+rynas-config.workspace = true
+rynas-tasks.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+getrandom.workspace = true
+nix = { workspace = true, features = ["fs", "dir", "ioctl"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+minijinja.workspace = true

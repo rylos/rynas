@@ -1,0 +1,4 @@
+[[user]]
+name = "tester"
+hash = "$argon2id$v=19$m=19456,t=2,p=1$dIOE9UHK9wlCKhfVzVpDYw$RHkG5Yt2dAl1BSLLC08Bh4K4LcM4H7N+4KvVnhRgfYQ"
+groups = ["rynas-admin"]

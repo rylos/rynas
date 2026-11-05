@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>rynas</title>
+  <!-- theme before any CSS: no white flash (localStorage → prefers-color-scheme) -->
+  <script>
+    (function () {
+      var d = document.documentElement, t = null, n = null;
+      try { t = localStorage.getItem("rynas.theme"); n = localStorage.getItem("rynas.density"); } catch (e) {}
+      var dark = t === "dark" || (t !== "light" && window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches);
+      d.setAttribute("data-theme", dark ? "dark" : "light");
+      d.setAttribute("data-density", n === "compact" ? "compact" : "comfortable");
+      d.style.background = dark ? "#1a1b26" : "#e6e7ed";
+      d.style.colorScheme = dark ? "dark" : "light";
+    })();
+  </script>
+  <link rel="preload" href="/fonts/inter-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link data-trunk rel="css" href="style/main.css">
+  <link data-trunk rel="copy-dir" href="assets/fonts">
+  <link data-trunk rel="copy-file" href="assets/favicon.svg">
+  <link data-trunk rel="rust" data-bin="rynas-ui" data-wasm-opt="z" data-weak-refs>
+  <style>
+    #boot { position: fixed; inset: 0; display: grid; place-items: center; }
+    #boot i { width: 40px; height: 40px; border-radius: 12px; background: linear-gradient(135deg, #7aa2f7, #bb9af7); animation: boot 1s ease-in-out infinite alternate; }
+    @keyframes boot { to { opacity: .35; transform: scale(.9); } }
+    @media (prefers-reduced-motion: reduce) { #boot i { animation: none; } }
+  </style>
+</head>
+<body>
+  <div id="boot" aria-hidden="true"><i></i></div>
+</body>
+</html>

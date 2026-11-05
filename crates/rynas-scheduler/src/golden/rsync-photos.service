@@ -1,0 +1,20 @@
+# Managed by rynas — do not edit (sha256:2b10a55b27729848e19d4b576eb88ef3cf5d3a84b1819e9bd88409fd2bdbc1b3)
+[Unit]
+Description=rynas task rsync-photos: rsync photos (100%% of them)
+Documentation=https://github.com/rylos/rynas
+After=local-fs.target network-online.target
+
+[Service]
+Type=exec
+User=alice
+StandardInput=file:/var/lib/rynas/tasks/rsync-photos/run
+ExecStart=/bin/sh -
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rynas-task-rsync-photos
+ExecStopPost=+/usr/libexec/rynas/rynasctl task-finished rsync-photos
+RuntimeMaxSec=7200
+Nice=10
+IOWeight=50
+NoNewPrivileges=yes
+PrivateTmp=yes

@@ -1,0 +1,17 @@
+26 1 0:24 /@ / rw,relatime shared:1 - btrfs /dev/nvme0n1p2 rw,ssd,space_cache=v2,subvolid=256,subvol=/@
+22 26 0:21 / /proc rw,nosuid,nodev,noexec,relatime shared:5 - proc proc rw
+23 26 0:22 / /sys rw,nosuid,nodev,noexec,relatime shared:6 - sysfs sysfs rw
+24 26 0:5 / /dev rw,nosuid shared:2 - devtmpfs devtmpfs rw,size=1904k,nr_inodes=474k,mode=755
+25 26 0:23 / /run rw,nosuid,nodev shared:12 - tmpfs tmpfs rw,size=774k,mode=755
+27 23 0:26 / /sys/fs/cgroup rw,nosuid,nodev,noexec,relatime shared:9 - cgroup2 cgroup2 rw
+30 26 0:24 /@home /home rw,relatime shared:13 - btrfs /dev/nvme0n1p2 rw,ssd,space_cache=v2,subvolid=257,subvol=/@home
+31 26 0:24 /@log /var/log rw,relatime shared:14 - btrfs /dev/nvme0n1p2 rw,ssd,space_cache=v2,subvolid=258,subvol=/@log
+32 26 259:1 / /boot/efi rw,relatime shared:15 - vfat /dev/nvme0n1p1 rw,fmask=0022,dmask=0022
+40 26 0:45 / /volume1 rw,relatime shared:20 - btrfs /dev/md2 rw,space_cache=v2,subvolid=5,subvol=/
+41 26 0:45 /shares/media /srv/media rw,relatime shared:20 - btrfs /dev/md2 rw,space_cache=v2,subvolid=5,subvol=/
+42 26 8:81 / /mnt/backup rw,relatime shared:21 - ext4 /dev/sdf1 rw
+43 25 0:50 / /run/user/1000 rw,nosuid,nodev,relatime shared:30 - tmpfs tmpfs rw,size=386k,mode=700
+44 43 0:51 / /run/user/1000/doc rw,nosuid,nodev,relatime shared:31 - fuse.portal portal rw,user_id=1000
+45 26 0:52 / /mnt/nas\040share rw,relatime shared:32 - nfs4 nas.lan:/volume1/share rw,vers=4.2
+46 26 0:60 / /var/lib/docker/overlay2/abc/merged rw,relatime - overlay overlay rw,lowerdir=x
+47 26 7:0 / /snap/core/123 ro,nodev,relatime shared:33 - squashfs /dev/loop0 ro

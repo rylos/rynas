@@ -1,0 +1,10 @@
+24 1 0:23 /@rootfs / rw,noatime shared:1 - btrfs /dev/md0 rw,ssd,discard=async,space_cache=v2,subvolid=256,subvol=/@rootfs
+25 24 0:5 / /dev rw,nosuid,relatime shared:2 - devtmpfs udev rw,size=1925428k,nr_inodes=481357,mode=755,inode64
+26 24 0:24 / /proc rw,nosuid,nodev,noexec,relatime shared:12 - proc proc rw
+27 24 0:25 / /sys rw,nosuid,nodev,noexec,relatime shared:7 - sysfs sysfs rw
+28 24 0:26 / /run rw,nosuid,nodev,noexec,relatime shared:13 - tmpfs tmpfs rw,size=391684k,mode=755,inode64
+40 24 0:23 /@home /home rw,noatime shared:21 - btrfs /dev/md0 rw,ssd,discard=async,space_cache=v2,subvolid=257,subvol=/@home
+41 24 259:1 / /boot/efi rw,relatime shared:23 - vfat /dev/nvme0n1p1 rw,fmask=0077,dmask=0077,codepage=437,iocharset=ascii,shortname=mixed,utf8,errors=remount-ro
+52 24 0:46 / /vol1 rw,noatime shared:30 - btrfs /dev/mapper/rynas-vol1 rw,compress=zstd:1,space_cache=v2,subvolid=5,subvol=/
+53 52 0:46 /photos /srv/photos rw,noatime shared:30 - btrfs /dev/mapper/rynas-vol1 rw,compress=zstd:1,space_cache=v2,subvolid=256,subvol=/photos
+60 24 0:52 / /srv/nas\040share rw,relatime shared:35 - cifs //192.0.2.10/share rw,vers=3.1.1,cache=strict,username=guest,uid=0,noforceuid,gid=0,noforcegid,addr=192.0.2.10,file_mode=0755,dir_mode=0755,soft,nounix,serverino,mapposix,rsize=4194304,wsize=4194304,bsize=1048576,echo_interval=60,actimeo=1

@@ -1,0 +1,2243 @@
+//! Tiny i18n: English (default, source language and fallback) and Italian, plus
+//! number/byte/duration formatting.
+//!
+//! The language lives in a signal, so `t()` called inside a reactive closure re-renders when the
+//! user switches language. Preference: localStorage `rynas.lang` ("en", "it" or absent = browser:
+//! Italian when the browser asks for it, English otherwise).
+//!
+//! Italian wording follows the Synology DSM glossary where an equivalent exists (Storage Manager,
+//! cartella condivisa, volume, integro/degradato…).
+
+use std::cell::Cell;
+
+use leptos::prelude::*;
+
+use crate::prefs::{storage_get, storage_set};
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Lang {
+    En,
+    It,
+}
+
+impl Lang {
+    pub fn code(self) -> &'static str {
+        match self {
+            Lang::En => "en",
+            Lang::It => "it",
+        }
+    }
+}
+
+thread_local! {
+    static LANG: Cell<Option<RwSignal<Lang>>> = const { Cell::new(None) };
+}
+
+fn sig() -> RwSignal<Lang> {
+    LANG.with(|c| match c.get() {
+        Some(s) => s,
+        None => {
+            let s = RwSignal::new(Lang::En);
+            c.set(Some(s));
+            s
+        }
+    })
+}
+
+/// Italian when the browser's preferred language is Italian, English for everything else.
+fn browser_lang() -> Lang {
+    lang_for_tag(&window().navigator().language().unwrap_or_default())
+}
+
+fn lang_for_tag(tag: &str) -> Lang {
+    if tag.get(..2).is_some_and(|p| p.eq_ignore_ascii_case("it")) { Lang::It } else { Lang::En }
+}
+
+pub fn init() {
+    let lang = match storage_get("rynas.lang").as_deref() {
+        Some("en") => Lang::En,
+        Some("it") => Lang::It,
+        _ => browser_lang(),
+    };
+    sig().set(lang);
+    apply_html_lang(lang);
+}
+
+fn apply_html_lang(lang: Lang) {
+    if let Some(el) = document().document_element() {
+        let _ = el.set_attribute("lang", lang.code());
+    }
+}
+
+/// Current language: tracked inside reactive closures, a plain read elsewhere (static labels).
+pub fn lang() -> Lang {
+    if leptos::reactive::graph::Observer::get().is_some() {
+        sig().get()
+    } else {
+        sig().get_untracked()
+    }
+}
+
+/// `None` = follow the browser.
+pub fn set_lang(lang: Option<Lang>) {
+    let l = lang.unwrap_or_else(browser_lang);
+    storage_set("rynas.lang", lang.map(Lang::code).unwrap_or(""));
+    sig().set(l);
+    apply_html_lang(l);
+}
+
+/// Stored preference: `None` means "automatic".
+pub fn lang_pref() -> Option<Lang> {
+    match storage_get("rynas.lang").as_deref() {
+        Some("en") => Some(Lang::En),
+        Some("it") => Some(Lang::It),
+        _ => None,
+    }
+}
+
+/// `"key" => "English", "Italiano";` — both texts are required (rule G8), even when they are
+/// the same word, so a forgotten translation is a compile error.
+///
+/// Keys follow `<area>.<thing>` (`sto.scrub`, `net.dns`); words shared by every area are
+/// bare (`cancel`, `save`, `edit_named`, `run_now`) or in a shared group (`col.*` column
+/// headers, `health.*`, `pending.*`, `task.st.*`). One key per text: a test fails on two keys
+/// with the same English and Italian text of more than one word.
+macro_rules! dict {
+    ($($k:literal => $en:literal, $it:literal;)*) => {
+        /// Every text back to back — key, English, Italian of each entry — with their byte
+        /// lengths: much smaller in the wasm than a `match` over 1 800 strings or a table of
+        /// string pointers.
+        static BLOB: &str = concat!($($k, $en, $it),*);
+        static LENS: &[u16] = &[$($k.len() as u16, $en.len() as u16, $it.len() as u16),*];
+    };
+}
+
+/// Start of every text in [`BLOB`] (and the end) and the entries sorted by key, built on
+/// first use.
+struct Index {
+    starts: Vec<u32>,
+    by_key: Vec<u16>,
+}
+
+impl Index {
+    fn text(&self, i: usize) -> &'static str {
+        &BLOB[self.starts[i] as usize..self.starts[i + 1] as usize]
+    }
+}
+
+thread_local! {
+    static INDEX: Index = {
+        let mut starts = Vec::with_capacity(LENS.len() + 1);
+        let mut at = 0u32;
+        starts.push(0);
+        for &l in LENS {
+            at += u32::from(l);
+            starts.push(at);
+        }
+        let mut idx = Index { starts, by_key: (0..(LENS.len() / 3) as u16).collect() };
+        let mut by_key = std::mem::take(&mut idx.by_key);
+        by_key.sort_unstable_by_key(|&e| idx.text(e as usize * 3));
+        idx.by_key = by_key;
+        idx
+    };
+}
+
+fn lookup(key: &str, lang: Lang) -> Option<&'static str> {
+    INDEX.with(|idx| {
+        let at = idx.by_key.binary_search_by(|&e| idx.text(e as usize * 3).cmp(key)).ok()?;
+        let e = idx.by_key[at] as usize * 3;
+        Some(idx.text(if lang == Lang::It { e + 2 } else { e + 1 }))
+    })
+}
+
+/// Every entry as (key, English, Italian), for the tests.
+#[cfg(test)]
+fn entries() -> Vec<(&'static str, &'static str, &'static str)> {
+    INDEX.with(|idx| (0..LENS.len() / 3).map(|e| (idx.text(e * 3), idx.text(e * 3 + 1), idx.text(e * 3 + 2))).collect())
+}
+
+/// Translate `key` in the current language (tracked). Unknown keys come back verbatim, so a
+/// missing entry is visible but never breaks the page.
+pub fn t(key: &'static str) -> &'static str {
+    lookup(key, lang()).unwrap_or(key)
+}
+
+/// Reactive translated text for a view (child or attribute): `{tr("key")}`. Every call returns
+/// the same closure type, so the rendering code is compiled once instead of once per call site
+/// (a `move || t("key")` at each site costs about 1 KB of wasm).
+pub fn tr(key: &'static str) -> impl Fn() -> &'static str + Copy + Send + Sync + 'static {
+    move || t(key)
+}
+
+/// Text for an `ApiError.code` (`err.<code>`), generic message for unknown codes.
+pub fn err_text(code: &str) -> &'static str {
+    lookup(&format!("err.{code}"), lang()).unwrap_or_else(|| t("err.generic"))
+}
+
+/// Like `t` for keys built at runtime (e.g. `led.{state}`): None when the key does not exist.
+pub fn try_t(key: &str) -> Option<&'static str> {
+    lookup(key, lang())
+}
+
+/// `t(key)` with `{name}` placeholders replaced, e.g. `tf("n.temp", &[("label", "CPU")])`.
+pub fn tf(key: &'static str, args: &[(&str, &str)]) -> String {
+    let mut s = t(key).to_string();
+    for (k, v) in args {
+        s = s.replace(&format!("{{{k}}}"), v);
+    }
+    s
+}
+
+dict! {
+    // navigation
+    "nav.dashboard" => "Dashboard", "Dashboard";
+    "nav.storage" => "Storage", "Storage";
+    "nav.files" => "Files", "File";
+    "nav.shares" => "Shared Folders", "Cartelle condivise";
+    "nav.users" => "Users & Groups", "Utenti e gruppi";
+    "nav.services" => "Services", "Servizi";
+    "nav.plugins" => "Plugins", "Plugin";
+    "nav.hardware" => "Hardware", "Hardware";
+    "nav.system" => "System", "Sistema";
+    "nav.menu" => "Menu", "Menu";
+    "nav.main" => "Main navigation", "Navigazione principale";
+    "nav.collapse" => "Collapse sidebar", "Comprimi barra laterale";
+    "nav.expand" => "Expand sidebar", "Espandi barra laterale";
+    "nav.notifications" => "Notifications", "Notifiche";
+    // app bar
+    "bar.search" => "Search or run a command…", "Cerca o esegui un comando…";
+    "bar.theme" => "Theme", "Tema";
+    "bar.user" => "Account menu", "Menu account";
+    "bar.open_menu" => "Open menu", "Apri menu";
+    "bar.demo" => "Demo data", "Dati demo";
+    "bar.demo_hint" => "The API is not responding: showing demo data", "L'API non risponde: vengono mostrati dati dimostrativi";
+    "bar.live" => "Live", "In tempo reale";
+    "bar.offline" => "Offline", "Non connesso";
+    "bar.connecting" => "Connecting…", "Connessione…";
+    "bar.logout" => "Sign out", "Esci";
+    "bar.prefs" => "Preferences", "Preferenze";
+    // notifications
+    "notif.empty" => "You're all caught up", "Nessuna notifica";
+    "notif.empty_text" => "Hardware alerts and system events will show up here.", "Qui compariranno gli avvisi hardware e gli eventi di sistema.";
+    "notif.mark_read" => "Mark all as read", "Segna tutte come lette";
+    "notif.unread" => "unread", "non lette";
+    "notif.since" => "since", "dalle";
+    "notif.fan_fail" => "Fan failure", "Guasto ventola";
+    "notif.fan_fail_text" => "{label} is not spinning or reports an alarm.", "{label} non gira o segnala un allarme.";
+    "notif.fan_fail_any" => "The hardware provider reports a fan failure.", "Il provider hardware segnala un guasto alle ventole.";
+    "notif.temp_warn" => "High temperature", "Temperatura elevata";
+    "notif.temp_crit" => "Critical temperature", "Temperatura critica";
+    "notif.temp_text" => "{label} is at {value} (threshold {limit}).", "{label} è a {value} (soglia {limit}).";
+    "notif.array_degraded" => "RAID array degraded", "Array RAID degradato";
+    "notif.array_degraded_text" => "{name} ({level}) is running without redundancy. Replace the failed disk as soon as possible.", "{name} ({level}) è senza ridondanza. Sostituisci il disco guasto il prima possibile.";
+    "notif.array_failed" => "RAID array failed", "Array RAID guasto";
+    "notif.array_failed_text" => "{name} ({level}) is inactive or has failed.", "{name} ({level}) è inattivo o guasto.";
+    "notif.array_sync" => "RAID resync in progress", "Sincronizzazione RAID in corso";
+    "notif.array_sync_text" => "{name} ({level}): {pct} complete.", "{name} ({level}): {pct} completato.";
+    "notif.volume_full" => "Volume almost full", "Volume quasi pieno";
+    "notif.volume_full_text" => "{mount} is {pct} full, {free} free.", "{mount} è pieno al {pct}, {free} liberi.";
+    // theme / density / language
+    "theme.auto" => "System", "Sistema";
+    "theme.light" => "Light", "Chiaro";
+    "theme.dark" => "Dark", "Scuro";
+    "density" => "Density", "Densità";
+    "density.comfortable" => "Comfortable", "Comoda";
+    "density.compact" => "Compact", "Compatta";
+    "language" => "Language", "Lingua";
+    "language.auto" => "Browser default", "Come il browser";
+    "lang.it" => "Italiano", "Italiano";
+    "lang.en" => "English", "English";
+    "skip" => "Skip to content", "Vai al contenuto";
+    // palette
+    "pal.placeholder" => "Search pages and actions…", "Cerca pagine e azioni…";
+    "pal.pages" => "Pages", "Pagine";
+    "pal.empty" => "No matches", "Nessun risultato";
+    "pal.hint_nav" => "navigate", "per spostarti";
+    "pal.hint_open" => "open", "per aprire";
+    "pal.hint_close" => "close", "per chiudere";
+    "pal.go" => "Go to", "Vai a";
+    "pal.theme_light" => "Switch to light theme", "Passa al tema chiaro";
+    "pal.theme_dark" => "Switch to dark theme", "Passa al tema scuro";
+    "pal.theme_auto" => "Use system theme", "Usa il tema di sistema";
+    "pal.density_comfortable" => "Comfortable density", "Densità comoda";
+    "pal.density_compact" => "Compact density", "Densità compatta";
+    "pal.lang_it" => "Language: Italian", "Lingua: italiano";
+    "pal.lang_en" => "Language: English", "Lingua: inglese";
+    "pal.toggle_sidebar" => "Toggle sidebar", "Mostra/nascondi barra laterale";
+    "pal.toggle_tasks" => "Toggle task panel", "Mostra/nascondi pannello attività";
+    "pal.edit_layout" => "Customize dashboard", "Personalizza la dashboard";
+    "pal.notifications" => "Show notifications", "Mostra notifiche";
+    // tasks / pending
+    "tasks.title" => "Tasks", "Attività";
+    "tasks.none" => "No running tasks", "Nessuna attività in corso";
+    "tasks.none_text" => "Long-running operations such as scrubs, resyncs and snapshots will appear here with progress and logs.", "Le operazioni lunghe come scrub, risincronizzazioni e snapshot compariranno qui con avanzamento e log.";
+    "tasks.running_1" => "1 running", "1 in corso";
+    "tasks.running_n" => "{n} running", "{n} in corso";
+    "tasks.last" => "Last", "Ultima";
+    "tasks.col_task" => "Task", "Attività";
+    "tasks.col_user" => "User", "Utente";
+    "tasks.col_start" => "Started", "Avvio";
+    "tasks.col_duration" => "Duration", "Durata";
+    "tasks.log" => "Task log", "Log dell'attività";
+    "tasks.cancel" => "Stop", "Interrompi";
+    "tasks.close_log" => "Close log", "Chiudi log";
+    "tasks.background" => "You can close this window: the task keeps running.", "Puoi chiudere questa finestra: l'attività continua.";
+    "task.failed" => "Failed", "Non riuscita";
+    "task.st.ok" => "OK", "OK";
+    "task.st.error" => "Error", "Errore";
+    "task.st.cancelled" => "Stopped", "Interrotta";
+    "task.st.running" => "Running", "In corso";
+    "task.st.queued" => "Queued", "In coda";
+    "task.config.apply" => "Apply configuration", "Applicazione configurazione";
+    "task.config.overwrite" => "Restore managed files", "Ripristino file gestiti";
+    "task.storage.volume-create" => "Create volume", "Creazione volume";
+    "task.storage.volume-grow" => "Expand volume", "Espansione volume";
+    "task.storage.volume-replace" => "Replace disk", "Sostituzione disco";
+    "task.storage.scrub" => "Data scrubbing", "Pulitura dati";
+    "task.storage.scrub-stop" => "Stop data scrubbing", "Arresto pulitura dati";
+    "task.storage.unlock" => "Unlock volume", "Sblocco volume";
+    "task.storage.lock" => "Lock volume", "Blocco volume";
+    "task.storage.subvolume-create" => "Create subvolume", "Creazione sottovolume";
+    "task.storage.subvolume-delete" => "Delete subvolume", "Eliminazione sottovolume";
+    "task.storage.subvolume-settings" => "Subvolume settings", "Impostazioni sottovolume";
+    "task.snapshot.run" => "Take snapshots", "Creazione snapshot";
+    "task.snapshot.restore" => "Restore from snapshot", "Ripristino da snapshot";
+    "task.snapshot.rollback" => "Roll back to snapshot", "Ritorno a snapshot";
+    "task.snapshot.delete" => "Delete snapshot", "Eliminazione snapshot";
+    "task.network.apply" => "Apply network settings", "Applicazione impostazioni di rete";
+    "task.network.rollback" => "Roll back network settings", "Annullamento impostazioni di rete";
+    "task.network.restore" => "Restore network settings", "Ripristino impostazioni di rete";
+    "task.network.rescue" => "Network rescue", "Ripristino di emergenza della rete";
+    "task.network.adopt" => "Adopt network configuration", "Adozione configurazione di rete";
+    "task.power.shutdown" => "Shut down", "Spegnimento";
+    "task.user.password" => "Set password", "Impostazione password";
+    "task.smb.recycle-cleanup" => "Empty recycle bins", "Svuotamento cestini";
+    "task.btrfs.scrub" => "Data scrubbing", "Pulitura dati";
+    "task.smart.test" => "SMART test", "Test SMART";
+    "back" => "Back", "Indietro";
+    "cancel" => "Cancel", "Annulla";
+    "pending.applying" => "Applying configuration…", "Applicazione della configurazione…";
+    "pending.applied" => "Configuration applied.", "Configurazione applicata.";
+    "pending.failed" => "Apply failed, nothing was changed.", "Applicazione non riuscita, non è stato cambiato nulla.";
+    "pending.show_log" => "Show log", "Mostra log";
+    "pending.conflict" => "Conflict", "Conflitto";
+    "pending.conflict_text" => "Someone applied a newer value after you staged a change marked Conflict. Discard your changes and make them again.", "Qualcuno ha applicato un valore più recente dopo che hai preparato una modifica segnata come Conflitto. Annulla le modifiche e rifalle.";
+    "pending.discard" => "Discard", "Annulla modifiche";
+    "pending.discard_title" => "Discard pending changes?", "Annullare le modifiche in sospeso?";
+    "pending.discard_text" => "Your {n} staged changes will be dropped. The running configuration is not touched.", "Le {n} modifiche preparate verranno eliminate. La configurazione in uso non viene toccata.";
+    "pending.review_title" => "Pending changes", "Modifiche in sospeso";
+    "pending.staged" => "Staged", "Preparata il";
+    "pending.comment" => "Comment (optional)", "Commento (facoltativo)";
+    "pending.comment_hint" => "Why this change? Stored with the revision.", "Perché questa modifica? Viene salvato con la revisione.";
+    "diff.empty" => "empty", "vuoto";
+    "diff.none" => "No differences.", "Nessuna differenza.";
+    "diff.added" => "Added", "Aggiunto";
+    "diff.removed" => "Removed", "Rimosso";
+    "diff.changed" => "Changed", "Modificato";
+    "diff.whole" => "(whole setting)", "(intera impostazione)";
+    "diff.field" => "Setting", "Impostazione";
+    "diff.kind" => "Change", "Modifica";
+    "diff.value" => "Value", "Valore";
+    "diff.to" => "becomes", "diventa";
+    "cfg.title" => "Configuration", "Configurazione";
+    "cfg.subtitle" => "Applied revisions and changes made outside rynas", "Revisioni applicate e modifiche fatte fuori da rynas";
+    "cfg.open" => "Revisions and drift", "Revisioni e differenze";
+    "cfg.open_text" => "Every apply is a revision you can inspect and restore. rynas also checks that the files it manages were not changed by hand.", "Ogni applicazione è una revisione che puoi esaminare e ripristinare. rynas controlla anche che i file che gestisce non siano stati modificati a mano.";
+    "cfg.refresh" => "Refresh", "Aggiorna";
+    "cfg.drift" => "Changes outside rynas", "Modifiche fuori da rynas";
+    "cfg.drift_text" => "These files or settings no longer match what rynas applied. Import keeps the system's version as a pending change; Restore writes the applied configuration again.", "Questi file o impostazioni non corrispondono più a ciò che rynas ha applicato. Importa tiene la versione del sistema come modifica in sospeso; Ripristina riscrive la configurazione applicata.";
+    "cfg.checked" => "{n} managed files checked.", "{n} file gestiti controllati.";
+    "cfg.no_drift" => "Everything matches", "Tutto corrisponde";
+    "cfg.drift_modified" => "Edited", "Modificato";
+    "cfg.drift_missing" => "Missing", "Mancante";
+    "cfg.state_missing" => "Missing on the system", "Mancante nel sistema";
+    "cfg.state_unmanaged" => "Created outside rynas", "Creato fuori da rynas";
+    "cfg.state_mismatch" => "Different", "Diverso";
+    "cfg.state_missing_samba" => "No SMB account", "Senza account SMB";
+    "cfg.state_missing_passwd" => "SMB account without user", "Account SMB senza utente";
+    "cfg.col_what" => "File or object", "File o oggetto";
+    "cfg.col_key" => "Setting", "Impostazione";
+    "cfg.col_state" => "State", "Stato";
+    "col.actions" => "Actions", "Azioni";
+    "cfg.import" => "Import", "Importa";
+    "cfg.import_hint" => "Keep the system's version: it becomes a pending change to review and apply", "Tieni la versione del sistema: diventa una modifica in sospeso da rivedere e applicare";
+    "cfg.overwrite" => "Restore", "Ripristina";
+    "cfg.overwrite_hint" => "Write the applied configuration again, dropping the changes made outside rynas", "Riscrivi la configurazione applicata, scartando le modifiche fatte fuori da rynas";
+    "cfg.overwrite_title" => "Restore the applied configuration?", "Ripristinare la configurazione applicata?";
+    "cfg.overwrite_text" => "The changes made outside rynas to {key} will be lost:", "Le modifiche fatte fuori da rynas a {key} andranno perse:";
+    "cfg.imported" => "{key} imported.", "{key} importato.";
+    "cfg.overwritten" => "{key} restored to the applied configuration.", "{key} riportato alla configurazione applicata.";
+    "cfg.forbidden_import" => "Only administrators can import this setting.", "Solo gli amministratori possono importare questa impostazione.";
+    "cfg.forbidden_overwrite" => "Only administrators can restore this setting.", "Solo gli amministratori possono ripristinare questa impostazione.";
+    "cfg.forbidden_restore" => "Only administrators can restore this revision: it changes privileged settings.", "Solo gli amministratori possono ripristinare questa revisione: cambia impostazioni riservate.";
+    "cfg.staged_1" => "1 change is waiting in the pending bar.", "1 modifica attende nella barra delle modifiche in sospeso.";
+    "cfg.staged_n" => "{n} changes are waiting in the pending bar.", "{n} modifiche attendono nella barra delle modifiche in sospeso.";
+    "cfg.revisions" => "Revisions", "Revisioni";
+    "cfg.no_revisions" => "Nothing has been applied yet.", "Non è stato ancora applicato nulla.";
+    "cfg.col_rev" => "Revision", "Revisione";
+    "cfg.col_date" => "Date", "Data";
+    "cfg.col_author" => "Author", "Autore";
+    "cfg.col_changes" => "Changed", "Modificato";
+    "cfg.col_comment" => "Comment", "Commento";
+    "cfg.current" => "Current", "Attuale";
+    "cfg.restored_from" => "restores #{n}", "ripristina #{n}";
+    "cfg.restore" => "Restore", "Ripristina";
+    "cfg.restore_title" => "Restore this revision?", "Ripristinare questa revisione?";
+    "cfg.restore_text" => "The settings of revision #{n} are staged as pending changes. Nothing changes until you review and apply them.", "Le impostazioni della revisione #{n} vengono preparate come modifiche in sospeso. Non cambia nulla finché non le rivedi e applichi.";
+    "cfg.restored" => "Revision #{n} staged.", "Revisione #{n} preparata.";
+    "cfg.restore_noop" => "Revision #{n} matches the current configuration: nothing to restore.", "La revisione #{n} corrisponde alla configurazione attuale: niente da ripristinare.";
+    "cfg.files" => "Files written", "File scritti";
+    "cfg.key.system.hostname" => "Host name", "Nome host";
+    "cfg.key.users" => "Users and groups", "Utenti e gruppi";
+    "cfg.key.shares" => "Shared folders", "Cartelle condivise";
+    "cfg.key.snapshots" => "Snapshots", "Snapshot";
+    "cfg.key.scheduler" => "Task Scheduler", "Utilità di pianificazione";
+    "cfg.key.synology.hw" => "Hardware settings", "Impostazioni hardware";
+    "cfg.key.power.schedule" => "Power schedule", "Accensione e spegnimento pianificati";
+    "cfg.key.network.rescue" => "Network rescue", "Ripristino di emergenza della rete";
+    "cfg.key.storage.volumes" => "Volumes", "Volumi";
+    "cfg.key.storage.disks" => "Disk settings", "Impostazioni dischi";
+    "pending.changes" => "pending changes", "modifiche in sospeso";
+    "pending.one" => "pending change", "modifica in sospeso";
+    "pending.review" => "Review", "Rivedi";
+    "pending.stale" => "The pending changes could not be refreshed: the count may be out of date.", "Impossibile aggiornare le modifiche in sospeso: il numero potrebbe non essere aggiornato.";
+    "pending.apply" => "Apply", "Applica";
+    // dashboard
+    "dash.title" => "Dashboard", "Dashboard";
+    "dash.subtitle" => "Real-time system overview", "Panoramica del sistema in tempo reale";
+    "dash.edit" => "Customize", "Personalizza";
+    "dash.done" => "Done", "Fine";
+    "dash.reset" => "Reset layout", "Ripristina layout";
+    "dash.editing" => "Editing layout", "Modifica layout";
+    "dash.edit_hint" => "Drag widgets to reorder them, or focus a handle and use the arrow keys. Changes are saved in this browser.", "Trascina i widget per riordinarli, oppure seleziona una maniglia e usa le frecce. Le modifiche sono salvate in questo browser.";
+    "dash.hidden" => "Hidden widgets", "Widget nascosti";
+    "dash.hide" => "Hide widget", "Nascondi widget";
+    "dash.move" => "Move widget", "Sposta widget";
+    "dash.size" => "Widget size", "Dimensione widget";
+    "dash.size.S" => "Small", "Piccolo";
+    "dash.size.M" => "Medium", "Medio";
+    "dash.size.L" => "Large", "Grande";
+    "dash.moved" => "{widget}: position {pos} of {count}", "{widget}: posizione {pos} di {count}";
+    "dash.all_hidden" => "All widgets are hidden", "Tutti i widget sono nascosti";
+    "dash.all_hidden_text" => "Choose Customize to bring some back.", "Scegli Personalizza per mostrarne di nuovo qualcuno.";
+    "w.system" => "System", "Sistema";
+    "w.cpu" => "CPU", "CPU";
+    "w.memory" => "Memory", "Memoria";
+    "w.network" => "Network", "Rete";
+    "w.disk_io" => "Disk I/O", "I/O dischi";
+    "w.volumes" => "Volumes", "Volumi";
+    "w.health" => "Storage health", "Stato dello storage";
+    "w.hardware" => "Hardware", "Hardware";
+    "f.model" => "Model", "Modello";
+    "f.os" => "Operating system", "Sistema operativo";
+    "f.kernel" => "Kernel", "Kernel";
+    "f.uptime" => "Uptime", "Tempo di attività";
+    "f.cpu" => "Processor", "Processore";
+    "f.threads" => "threads", "thread";
+    "f.load" => "Load average", "Carico medio";
+    "f.version" => "rynas version", "Versione rynas";
+    "f.host" => "Hostname", "Nome host";
+    "m.used" => "Used", "In uso";
+    "m.cache" => "Cache", "Cache";
+    "m.free" => "Free", "Libera";
+    "m.swap" => "Swap", "Swap";
+    "m.of" => "of", "di";
+    "m.zram_detail" => "Compressed swap in RAM: {used} of RAM used, {saved} saved, {size} capacity", "Swap compresso in RAM: {used} di RAM usati, {saved} risparmiati, capacità {size}";
+    "n.rx" => "Download", "Ricezione";
+    "n.tx" => "Upload", "Invio";
+    "n.down" => "Disconnected", "Scollegata";
+    "n.none" => "No network interfaces", "Nessuna interfaccia di rete";
+    "d.read" => "Read", "Lettura";
+    "d.write" => "Write", "Scrittura";
+    "d.busy" => "utilization", "utilizzo";
+    "v.free" => "free", "liberi";
+    "v.none" => "No volumes", "Nessun volume";
+    "v.none_text" => "No mounted file systems were found.", "Non è stato trovato alcun file system montato.";
+    "v.network" => "{n} network mounts", "{n} mount di rete";
+    "v.more" => "{n} more in Storage Manager", "Altri {n} in Storage Manager";
+    "h.sub_ok" => "No problems detected", "Nessun problema rilevato";
+    "h.sub_sync" => "Redundancy is being rebuilt", "Ridondanza in ricostruzione";
+    "h.sub_warn" => "Check the details in Storage Manager", "Controlla i dettagli in Storage Manager";
+    "v.arrays" => "RAID arrays", "Array RAID";
+    "h.disks" => "Disks", "Dischi";
+    "h.arrays" => "Arrays", "Array";
+    "h.volumes" => "Volumes", "Volumi";
+    "h.asleep" => "in standby", "in standby";
+    "h.ok" => "All storage is healthy", "Tutto lo storage è integro";
+    "h.syncing" => "A RAID array is resyncing", "Un array RAID è in sincronizzazione";
+    "h.warn" => "Attention needed", "Richiede attenzione";
+    "h.err" => "Storage failure", "Guasto dello storage";
+    "h.fullest" => "Fullest volume", "Volume più pieno";
+    "h.no_arrays" => "no RAID", "nessun RAID";
+    "per_thread" => "Per thread", "Per thread";
+    "last_min" => "Last {n} min", "Ultimi {n} min";
+    // hardware
+    "hw.fans" => "Fans", "Ventole";
+    "hw.temps" => "Temperatures", "Temperature";
+    "hw.led" => "Status LED", "LED di stato";
+    "hw.events" => "Events", "Eventi";
+    "hw.duty" => "Fan duty", "Velocità ventole";
+    "hw.fan_fail" => "Fan failure detected", "Rilevato un guasto alle ventole";
+    "hw.alarm" => "Alarm", "Allarme";
+    "hw.provider" => "Provider", "Provider";
+    "hw.stale" => "Stale data", "Dati non aggiornati";
+    "hw.updated" => "Last update", "Ultimo aggiornamento";
+    "hw.ago" => "ago", "fa";
+    "hw.none_title" => "No hardware provider", "Nessun provider hardware";
+    "hw.none_text" => "This machine does not expose fans, LEDs or drive bays through a provider (such as synohwd on Synology). Sensor temperatures are still shown on the dashboard.", "Questa macchina non espone ventole, LED o alloggiamenti tramite un provider (ad esempio synohwd sui Synology). Le temperature dei sensori restano visibili nella dashboard.";
+    "hw.no_events" => "No recent events", "Nessun evento recente";
+    "hw.subtitle" => "Fans, temperatures, status LED and platform events", "Ventole, temperature, LED di stato ed eventi della piattaforma";
+    "led.green" => "Green", "Verde";
+    "led.green-blink" => "Blinking green", "Verde lampeggiante";
+    "led.orange" => "Orange", "Arancione";
+    "led.orange-blink" => "Blinking orange", "Arancione lampeggiante";
+    "led.off" => "Off", "Spento";
+    "hw.tab_overview" => "Overview", "Panoramica";
+    "hw.tab_synology" => "Synology", "Synology";
+    "ps.title" => "Power schedule", "Pianificazione alimentazione";
+    "syn.none_title" => "Not a Synology", "Non è un Synology";
+    "syn.none_text" => "This machine is not a Synology NAS with synodeb's platform driver, so there are no fans, bay LEDs or buttons to manage here. The power schedule works on any machine.", "Questa macchina non è un NAS Synology con il driver di piattaforma di synodeb: qui non ci sono ventole, LED degli alloggiamenti o pulsanti da gestire. La pianificazione dell'alimentazione funziona su qualsiasi macchina.";
+    "syn.not_running" => "synohwd is not running: the status is not up to date and beeps or identify are unavailable. Settings can still be staged; applying them restarts synohwd.", "synohwd non è in esecuzione: lo stato non è aggiornato e i segnali acustici o l'identificazione non sono disponibili. Le impostazioni si possono comunque preparare; applicarle riavvia synohwd.";
+    "syn.foreign" => "/etc/synohwd.toml has button commands rynas does not manage ({cmds}): applying these settings replaces them.", "/etc/synohwd.toml contiene comandi dei pulsanti non gestiti da rynas ({cmds}): applicare queste impostazioni li sostituisce.";
+    "syn.platform" => "{bays} bays · {fans} fans", "{bays} alloggiamenti · {fans} ventole";
+    "syn.settings" => "Settings", "Impostazioni";
+    "syn.daemon" => "synohwd", "synohwd";
+    "syn.running" => "Running", "In esecuzione";
+    "syn.stopped" => "Not running", "Non in esecuzione";
+    "last_boot" => "Last boot", "Ultimo avvio";
+    "syn.power_led" => "Power LED", "LED di alimentazione";
+    "syn.bay_no_power" => "Disk present, bay without power", "Disco presente, alloggiamento senza alimentazione";
+    "syn.temp_last" => "Last reading before standby (the disk is not woken up)", "Ultima lettura prima dello standby (il disco non viene risvegliato)";
+    "syn.identify" => "Identify", "Identifica";
+    "syn.identifying" => "Blinking…", "Lampeggia…";
+    "syn.identify_on" => "The LED of bay {n} blinks for {s} seconds.", "Il LED dell'alloggiamento {n} lampeggia per {s} secondi.";
+    "syn.fan_mode" => "Fan speed mode", "Modalità velocità ventola";
+    "syn.fan_low" => "Quiet", "Silenziosa";
+    "syn.fan_high" => "Cool", "Raffreddamento";
+    "syn.fan_full" => "Full speed", "Velocità massima";
+    "syn.fan_low_help" => "DSM's default: the fans follow the temperature curves and stay quiet.", "Predefinita di DSM: le ventole seguono le curve di temperatura e restano silenziose.";
+    "syn.fan_high_help" => "Lower thresholds: the fans speed up earlier and the drives run cooler.", "Soglie più basse: le ventole accelerano prima e i dischi restano più freschi.";
+    "syn.fan_full_help" => "The fans always run at 99%.", "Le ventole girano sempre al 99%.";
+    "syn.full_note" => "Full speed has no curve: the fans run at 99%. The shutdown thresholds stay those of the quiet mode.", "La velocità massima non ha una curva: le ventole girano al 99%. Le soglie di spegnimento restano quelle della modalità silenziosa.";
+    "syn.fan_n" => "Fan {n}", "Ventola {n}";
+    "syn.fan_ok" => "OK", "OK";
+    "syn.fan_stopped" => "Stopped", "Ferma";
+    "syn.fan_unknown" => "Not measured", "Non misurata";
+    "syn.curve" => "Fan curve", "Curva delle ventole";
+    "syn.curve_duty" => "Current speed", "Velocità attuale";
+    "syn.curve_preview" => "Preview of the selected mode (not applied yet).", "Anteprima della modalità selezionata (non ancora applicata).";
+    "syn.cls_disk" => "Disks", "Dischi";
+    "syn.cls_nvme" => "NVMe", "NVMe";
+    "syn.cls_cpu" => "CPU", "CPU";
+    "syn.cls_nic" => "Network card", "Scheda di rete";
+    "syn.fan_period" => "Adjust every (s)", "Regola ogni (s)";
+    "syn.fan_period_help" => "Seconds between two fan adjustments (5–300).", "Secondi tra due regolazioni delle ventole (5–300).";
+    "syn.fan_min_duty" => "Minimum speed (%)", "Velocità minima (%)";
+    "syn.fan_min_duty_help" => "Floor under the curves (0–99).", "Minimo sotto le curve (0–99).";
+    "syn.hysteresis" => "Hysteresis (°C)", "Isteresi (°C)";
+    "syn.hysteresis_help" => "How far a sensor must cool below a step before the fans slow down (0–20).", "Di quanto un sensore deve scendere sotto un gradino prima che le ventole rallentino (0–20).";
+    "syn.v.range" => "Between {min} and {max}.", "Tra {min} e {max}.";
+    "syn.thermal" => "Thermal shutdown", "Spegnimento termico";
+    "syn.thermal_on" => "Shut down when too hot", "Spegni in caso di surriscaldamento";
+    "syn.thermal_help" => "synohwd powers the NAS off after two readings at or above DSM's threshold of a sensor.", "synohwd spegne il NAS dopo due letture pari o superiori alla soglia DSM di un sensore.";
+    "syn.thermal_off" => "Thermal shutdown is off: disks, NVMe drives and the CPU can overheat and be damaged if a fan fails.", "Lo spegnimento termico è disattivato: dischi, unità NVMe e CPU possono surriscaldarsi e danneggiarsi se una ventola si guasta.";
+    "syn.sensor" => "Sensor", "Sensore";
+    "syn.now_limit" => "Now / shutdown at", "Ora / spegnimento a";
+    "syn.leds_beeper" => "LEDs and beeper", "LED e cicalino";
+    "syn.disk_leds" => "Disk LEDs", "LED dei dischi";
+    "syn.disk_leds_help" => "Green when a disk is present, blinking on activity.", "Verde con il disco presente, lampeggiante durante l'attività.";
+    "syn.brightness" => "LED brightness", "Luminosità dei LED";
+    "syn.brightness_help" => "Shared by the disk LEDs; applied with the other settings.", "Comune a tutti i LED dei dischi; applicata con le altre impostazioni.";
+    "syn.beep_start" => "Beep when the NAS has started", "Segnale acustico all'avvio del NAS";
+    "syn.beep_error" => "Beep on hardware errors", "Segnale acustico in caso di errori hardware";
+    "syn.beep_error_help" => "Fan failure and thermal shutdown.", "Guasto delle ventole e spegnimento termico.";
+    "syn.test_beep" => "Test beep", "Prova segnale acustico";
+    "syn.beep_sent" => "Beep sent.", "Segnale acustico inviato.";
+    "syn.mute" => "Mute alarm", "Silenzia allarme";
+    "syn.mute_help" => "synohwd's beeps are single; muting acknowledges the open hardware notifications so their reminders stop.", "I segnali di synohwd sono singoli; silenziare conferma le notifiche hardware aperte e ne ferma i promemoria.";
+    "syn.muted" => "Alarm muted: {n} notifications acknowledged.", "Allarme silenziato: {n} notifiche confermate.";
+    "syn.buttons" => "Buttons", "Pulsanti";
+    "syn.power_button" => "Power button", "Pulsante di accensione";
+    "syn.power_button_help" => "A clean shutdown stops tasks and services in order, like DSM.", "Uno spegnimento pulito ferma attività e servizi in ordine, come DSM.";
+    "syn.pb_poweroff" => "Shut down cleanly", "Spegni in modo pulito";
+    "syn.btn_log" => "Only record it in the events", "Registra solo negli eventi";
+    "syn.btn_ignore" => "Ignore", "Ignora";
+    "reset_button" => "Reset button", "Pulsante di reset";
+    "syn.rb_rescue" => "Network rescue (double press)", "Ripristino di rete (doppia pressione)";
+    "syn.rescue_help" => "Press the reset button twice within 10 seconds: the network goes back to DHCP with a safe firewall, so you can reach the NAS again after a wrong network setting. A single press does nothing.", "Premi il pulsante di reset due volte entro 10 secondi: la rete torna in DHCP con un firewall sicuro, così puoi raggiungere di nuovo il NAS dopo un'impostazione di rete sbagliata. Una sola pressione non fa nulla.";
+    "syn.rescue_off" => "Without network rescue, a NAS with a wrong network setting can only be reached with a monitor or a serial console.", "Senza ripristino di rete, un NAS con un'impostazione di rete sbagliata si raggiunge solo con un monitor o una console seriale.";
+    "syn.power" => "Power and disks", "Alimentazione e dischi";
+    "syn.standby" => "Disk standby after (minutes)", "Standby dei dischi dopo (minuti)";
+    "syn.standby_help" => "Idle time before the bay disks spin down; 0 = never (0–330).", "Inattività prima che i dischi degli alloggiamenti si fermino; 0 = mai (0–330).";
+    "syn.ac_recovery" => "Restart after a power failure", "Riavvia dopo un'interruzione di corrente";
+    "syn.ac_recovery_help" => "Power back on automatically when the power supply returns.", "Riaccendi automaticamente quando torna l'alimentazione.";
+    "syn.wol" => "Wake-on-LAN", "Wake-on-LAN";
+    "syn.wol_help" => "Start the NAS with a magic packet on any LAN port.", "Avvia il NAS con un magic packet su qualsiasi porta LAN.";
+    "syn.macs" => "MAC addresses for Wake-on-LAN", "Indirizzi MAC per Wake-on-LAN";
+    "syn.no_macs" => "No Ethernet ports found.", "Nessuna porta Ethernet trovata.";
+    "syn.unsaved" => "Unsaved hardware settings", "Impostazioni hardware non salvate";
+    "ps.help" => "Weekly rules that start or shut down the NAS. Startup uses the RTC wake alarm, set before every shutdown; shutdowns check the system first.", "Regole settimanali che accendono o spengono il NAS. L'accensione usa la sveglia RTC, impostata prima di ogni spegnimento; gli spegnimenti controllano prima il sistema.";
+    "add_rule" => "Add rule", "Aggiungi regola";
+    "ps.edit" => "Edit rule", "Modifica regola";
+    "ps.none_title" => "No power schedule", "Nessuna pianificazione";
+    "ps.none_text" => "Add a rule to start or shut down the NAS on chosen days and times.", "Aggiungi una regola per accendere o spegnere il NAS in giorni e orari scelti.";
+    "ps.col_on" => "Enabled", "Attiva";
+    "ps.col_action" => "Action", "Azione";
+    "ps.col_busy" => "If busy", "Se occupato";
+    "ps.startup" => "Startup", "Accensione";
+    "ps.shutdown" => "Shutdown", "Spegnimento";
+    "ps.every_day" => "Every day", "Tutti i giorni";
+    "ps.enabled" => "Rule enabled", "Regola attiva";
+    "ps.time_help" => "Local time of the NAS.", "Ora locale del NAS.";
+    "ps.checks" => "Before shutting down, check", "Prima di spegnere, controlla";
+    "ps.checks_help" => "The NAS is busy when one of these checks finds work in progress.", "Il NAS è occupato quando uno di questi controlli trova lavoro in corso.";
+    "ps.check_storage" => "RAID resync or scrub running", "Risincronizzazione RAID o scrub in corso";
+    "ps.check_tasks" => "Other tasks running (snapshots, backups, apply)", "Altre attività in corso (snapshot, backup, applicazione)";
+    "ps.check_smb" => "SMB clients with open files", "Client SMB con file aperti";
+    "ps.when_busy" => "When busy", "Se occupato";
+    "ps.busy_wait" => "Wait", "Attendi";
+    "ps.busy_skip" => "Skip this shutdown", "Salta questo spegnimento";
+    "ps.busy_force" => "Shut down anyway", "Spegni comunque";
+    "ps.busy_wait_n" => "Wait up to {n} min", "Attendi fino a {n} min";
+    "ps.max_wait" => "Wait up to (minutes)", "Attendi fino a (minuti)";
+    "ps.max_wait_help" => "Checked again every minute; then the shutdown is skipped (1–720).", "Ricontrollato ogni minuto; poi lo spegnimento viene saltato (1–720).";
+    "ps.v_time" => "Choose a time.", "Scegli un orario.";
+    "ps.v_days" => "Choose at least one day.", "Scegli almeno un giorno.";
+    "ps.v_same" => "A startup and a shutdown at the same time ({when}).", "Un'accensione e uno spegnimento alla stessa ora ({when}).";
+    "ps.v_close" => "The shutdown at {down} comes less than 10 minutes after the startup at {up}.", "Lo spegnimento delle {down} arriva meno di 10 minuti dopo l'accensione delle {up}.";
+    "ps.delete_title" => "Delete this rule?", "Eliminare questa regola?";
+    "ps.delete_text" => "The rule is removed from the power schedule when the pending changes are applied.", "La regola viene tolta dalla pianificazione quando si applicano le modifiche in sospeso.";
+    "ps.next" => "Next power events", "Prossimi eventi di alimentazione";
+    "ps.next_startup" => "Next startup", "Prossima accensione";
+    "ps.next_shutdown" => "Next shutdown", "Prossimo spegnimento";
+    "ps.none" => "None scheduled", "Nessuna pianificata";
+    "ps.today" => "today", "oggi";
+    "ps.tomorrow" => "tomorrow", "domani";
+    "ps.pending_note" => "These times are those of the applied schedule: pending changes count after they are applied.", "Questi orari sono quelli della pianificazione applicata: le modifiche in sospeso valgono dopo l'applicazione.";
+    "ps.time_zone" => "Time zone", "Fuso orario";
+    "ps.wake_alarm" => "RTC wake alarm", "Sveglia RTC";
+    "ps.not_armed" => "Not set", "Non impostata";
+    "ps.arm_error" => "The wake alarm could not be set: {e}", "Non è stato possibile impostare la sveglia: {e}";
+    "ps.wake_unsupported" => "Not supported here", "Non supportata qui";
+    "ps.wake_unsupported_help" => "This machine has no RTC wake alarm: startup rules cannot start it. Shutdown rules still work.", "Questa macchina non ha una sveglia RTC: le regole di accensione non possono avviarla. Le regole di spegnimento funzionano comunque.";
+    "ps.prev_clean" => "Previous shutdown clean", "Spegnimento precedente pulito";
+    "ps.clean_yes" => "Yes", "Sì";
+    "ps.clean_no" => "No (power loss or crash)", "No (mancanza di corrente o blocco)";
+    "ps.cause_scheduled" => "Scheduled startup", "Accensione pianificata";
+    "ps.cause_watchdog" => "Watchdog reset", "Reset del watchdog";
+    "ps.cause_unknown" => "Button, Wake-on-LAN or power return", "Pulsante, Wake-on-LAN o ritorno corrente";
+    // storage
+    "sto.title" => "Storage Manager", "Storage Manager";
+    "sto.subtitle" => "Drives, RAID arrays and volumes", "Dischi, array RAID e volumi";
+    "sto.chassis" => "Chassis", "Chassis";
+    "sto.disks" => "Drives", "Dischi";
+    "sto.filesystems" => "Volumes", "Volumi";
+    "sto.bay" => "Bay", "Alloggiamento";
+    "sto.empty_bay" => "Empty", "Vuoto";
+    "sto.bays" => "Drive bays", "Alloggiamenti dei dischi";
+    "sto.m2" => "M.2", "M.2";
+    "sto.m2_slots" => "M.2 NVMe slots", "Slot M.2 NVMe";
+    "sto.asleep" => "Standby", "In standby";
+    "sto.active" => "Active", "Attivo";
+    "health.unknown" => "Unknown", "Sconosciuto";
+    "sto.not_powered" => "Powered off", "Spento";
+    "sto.name" => "Name", "Nome";
+    "sto.model" => "Model", "Modello";
+    "sto.serial" => "Serial number", "Numero di serie";
+    "sto.size" => "Capacity", "Capacità";
+    "sto.type" => "Type", "Tipo";
+    "sto.members_n" => "members", "membri";
+    "sto.level" => "Level", "Livello";
+    "sto.mount" => "Mount point", "Punto di montaggio";
+    "sto.fs" => "File system", "File system";
+    "sto.usage" => "Usage", "Utilizzo";
+    "sto.ssd" => "SSD", "SSD";
+    "sto.hdd" => "HDD", "HDD";
+    "sto.no_disks" => "No drives detected", "Nessun disco rilevato";
+    "sto.generic" => "Detected drives", "Dischi rilevati";
+    "sto.sync" => "Resync", "Sincronizzazione";
+    // storage manager (pages/storage)
+    "confirm.type_name" => "Type {name} to confirm", "Digita {name} per confermare";
+    "plan.destructive" => "Erases data", "Cancella dati";
+    "plan.erases" => "Erases {dev}", "Cancella {dev}";
+    "plan.protection" => "Redundancy", "Ridondanza";
+    "plan.raw" => "Raw capacity", "Capacità grezza";
+    "plan.steps" => "{n} steps", "{n} passaggi";
+    "plan.tol0" => "No drive may fail", "Nessun disco può guastarsi";
+    "plan.tol1" => "1 drive may fail", "Può guastarsi 1 disco";
+    "plan.toln" => "{n} drives may fail", "Possono guastarsi {n} dischi";
+    "plan.tolerance" => "Fault tolerance", "Tolleranza ai guasti";
+    "plan.usable" => "Usable", "Utilizzabile";
+    "plan.wasted" => "Unused", "Non utilizzato";
+    "plan.k.array" => "Array", "Array";
+    "plan.k.filesystem" => "File system", "File system";
+    "plan.k.filesystem_device" => "File system device", "Dispositivo del file system";
+    "plan.k.from" => "From", "Da";
+    "plan.k.to" => "To", "A";
+    "plan.k.level" => "Level", "Livello";
+    "plan.k.mapper" => "Encrypted device", "Dispositivo cifrato";
+    "plan.k.md" => "RAID device", "Dispositivo RAID";
+    "plan.k.mountpoint" => "Mount point", "Punto di montaggio";
+    "plan.k.old" => "Replaced member", "Membro sostituito";
+    "plan.k.raid_devices" => "RAID members", "Membri RAID";
+    "sto.tab.overview" => "Overview", "Panoramica";
+    "sto.create" => "Create volume", "Crea volume";
+    "sto.refresh_failed" => "Couldn't refresh the storage data.", "Impossibile aggiornare i dati di archiviazione.";
+    "sto.no_volumes" => "No volumes yet", "Ancora nessun volume";
+    "sto.no_volumes_text" => "Create a volume on the free drives to start storing data.", "Crea un volume sui dischi liberi per iniziare ad archiviare dati.";
+    "sto.free_disks" => "Drives without data: {n}. Use them for a new volume or to grow one.", "Dischi senza dati: {n}. Usali per un nuovo volume o per espanderne uno.";
+    "sto.n_disks" => "Drives: {n}", "Dischi: {n}";
+    "sto.used_n" => "Used: {n}", "Usato: {n}";
+    "sto.encrypted" => "Encrypted", "Crittografato";
+    "sto.encryption" => "Encryption", "Crittografia";
+    "sto.locked" => "Locked", "Bloccato";
+    "sto.unlocked" => "Unlocked", "Sbloccato";
+    "sto.locked_text" => "Encrypted volume: unlock it with the passphrase or the recovery key to use its data.", "Volume crittografato: sbloccalo con la passphrase o la chiave di ripristino per usarne i dati.";
+    "sto.crypt_text" => "LUKS2 encryption. Keep the recovery key and a header backup outside the NAS.", "Crittografia LUKS2. Conserva la chiave di ripristino e un backup dell'intestazione fuori dal NAS.";
+    "sto.unlock" => "Unlock", "Sblocca";
+    "sto.lock" => "Lock", "Blocca";
+    "sto.unlock_title" => "Unlock {name}", "Sblocca {name}";
+    "sto.unlock_text" => "The volume is mounted again and the shares on it come back.", "Il volume viene rimontato e le cartelle condivise su di esso tornano disponibili.";
+    "sto.pass_or_key" => "Passphrase or recovery key", "Passphrase o chiave di ripristino";
+    "sto.lock_title" => "Lock {name}", "Blocca {name}";
+    "sto.lock_text" => "The volume is unmounted and its key removed from memory. Shares and apps on it stop until it is unlocked again.", "Il volume viene smontato e la sua chiave tolta dalla memoria. Cartelle condivise e app su di esso si fermano fino al prossimo sblocco.";
+    "sto.passphrase" => "Passphrase", "Passphrase";
+    "sto.stale" => "Cached", "In cache";
+    "sto.stale_hint" => "A drive below is in standby: details come from the last reading, so it isn't woken up.", "Un disco sottostante è in standby: i dettagli vengono dall'ultima lettura, per non risvegliarlo.";
+    "sto.scrub_running" => "Scrubbing", "Pulizia dati in corso";
+    "health.healthy" => "Healthy", "Integro";
+    "sto.h.warning" => "Warning", "Avviso";
+    "sto.h.failing" => "Failing", "In avaria";
+    "health.degraded" => "Degraded", "Degradato";
+    "sto.a.failed" => "Crashed", "Arrestato";
+    "sto.a.inactive" => "Inactive", "Inattivo";
+    "sto.p.idle" => "Idle", "Inattivo";
+    "sto.p.sleep" => "Sleep", "Sospensione";
+    "sto.nvme" => "NVMe", "NVMe";
+    "sto.lvl.single" => "Single drive", "Disco singolo";
+    "sto.lvl.raid0" => "RAID 0", "RAID 0";
+    "sto.lvl.raid1" => "RAID 1", "RAID 1";
+    "sto.lvl.raid5" => "RAID 5", "RAID 5";
+    "sto.lvl.raid6" => "RAID 6", "RAID 6";
+    "sto.lvl.raid10" => "RAID 10", "RAID 10";
+    "sto.sync.resync" => "Resync", "Sincronizzazione";
+    "sto.sync.recovery" => "Rebuilding", "Ricostruzione";
+    "sto.sync.check" => "Parity check", "Controllo parità";
+    "sto.sync.repair" => "Repair", "Riparazione";
+    "sto.sync.reshape" => "Reshaping", "Rimodellamento";
+    "sto.sync.waiting" => "Waiting", "In attesa";
+    "sto.drive" => "Drive", "Disco";
+    "sto.temp" => "Temperature", "Temperatura";
+    "sto.temp_short" => "Temp.", "Temp.";
+    "sto.health" => "Health", "Integrità";
+    "sto.used_by" => "Used by", "Usato da";
+    "sto.unused" => "Not in use", "Non in uso";
+    "sto.smr_hint" => "Shingled (SMR) drive: slow rewrites, rebuilds of RAID 5/6 can take days.", "Disco shingled (SMR): riscritture lente, la ricostruzione di RAID 5/6 può durare giorni.";
+    "sto.smart" => "S.M.A.R.T.", "S.M.A.R.T.";
+    "sto.settings" => "Settings", "Impostazioni";
+    "sto.standby_note" => "This drive is in standby. Its details are not read automatically, so it isn't woken up.", "Questo disco è in standby. I dettagli non vengono letti in automatico, per non risvegliarlo.";
+    "sto.read_now" => "Read now", "Leggi ora";
+    "sto.wwn" => "WWN", "WWN";
+    "sto.firmware" => "Firmware", "Firmware";
+    "sto.rpm" => "Rotation speed", "Velocità di rotazione";
+    "sto.poh" => "Power-on time", "Tempo di accensione";
+    "sto.smart_age" => "S.M.A.R.T. read", "Lettura S.M.A.R.T.";
+    "sto.ago" => "{t} ago", "{t} fa";
+    "sto.partitions" => "Partitions", "Partizioni";
+    "sto.no_smart" => "No S.M.A.R.T. data for this drive.", "Nessun dato S.M.A.R.T. per questo disco.";
+    "sto.smart_passed" => "Passed", "Superato";
+    "sto.smart_failed" => "Failed", "Non superato";
+    "sto.smart_verdict" => "Drive self-assessment", "Autovalutazione del disco";
+    "sto.power_cycles" => "Power cycles", "Cicli di accensione";
+    "sto.life" => "Life remaining", "Vita residua";
+    "sto.written" => "Data written", "Dati scritti";
+    "sto.error_log" => "Error log entries", "Voci del registro errori";
+    "sto.selftest_running" => "Self-test running", "Autotest in corso";
+    "sto.pct_left" => "{p}% left", "{p}% rimanente";
+    "sto.read_at" => "Read at", "Letto il";
+    "sto.nvme_health" => "NVMe health", "Integrità NVMe";
+    "sto.nv_spare" => "Available spare", "Riserva disponibile";
+    "sto.nv_used" => "Endurance used", "Resistenza consumata";
+    "sto.nv_media" => "Media errors", "Errori del supporto";
+    "sto.nv_unsafe" => "Unsafe shutdowns", "Spegnimenti non sicuri";
+    "sto.nv_warn" => "Minutes over warning / critical temperature", "Minuti oltre temperatura di avviso / critica";
+    "sto.nv_crit" => "Critical warning flags", "Flag di avviso critico";
+    "sto.attributes" => "Attributes", "Attributi";
+    "sto.a_value" => "Value", "Valore";
+    "sto.a_worst" => "Worst", "Peggiore";
+    "sto.a_thresh" => "Threshold", "Soglia";
+    "sto.a_raw" => "Raw", "Grezzo";
+    "sto.a_failing" => "Failing now", "In errore ora";
+    "sto.a_failed_past" => "Failed in the past", "In errore in passato";
+    "sto.a_watch" => "Watch", "Da controllare";
+    "sto.a_ok" => "OK", "OK";
+    "sto.selftests" => "Self-test log", "Registro autotest";
+    "sto.at_hours" => "At hour", "All'ora";
+    "sto.recommended" => "Recommended for this drive type", "Consigliate per questo tipo di disco";
+    "sto.chk_ok" => "As recommended", "Come consigliato";
+    "sto.chk_differs" => "Differs", "Diversa";
+    "sto.chk_na" => "Not applicable", "Non applicabile";
+    "sto.current" => "Current", "Attuale";
+    "sto.recommended_v" => "recommended", "consigliato";
+    "sto.overrides" => "Settings of this drive", "Impostazioni di questo disco";
+    "sto.pending_note" => "A change is staged: apply it from the pending changes.", "C'è una modifica in sospeso: applicala dalle modifiche in sospeso.";
+    "sto.kernel_now" => "In use now: scheduler {s}, read-ahead {r} KiB.", "In uso ora: scheduler {s}, read-ahead {r} KiB.";
+    "sto.scheduler" => "I/O scheduler", "Scheduler I/O";
+    "sto.default_v" => "Default ({v})", "Predefinito ({v})";
+    "sto.read_ahead" => "Read-ahead (KiB)", "Read-ahead (KiB)";
+    "sto.ra_invalid" => "Read-ahead must be a number from 0 to 65536.", "Il read-ahead deve essere un numero da 0 a 65536.";
+    "sto.standby" => "Spin down after", "Standby dopo";
+    "sto.standby_hint" => "Idle time before the drive spins down (hdparm -S).", "Inattività prima che il disco si fermi (hdparm -S).";
+    "sto.hdd_only" => "Hard disks only.", "Solo dischi rigidi.";
+    "sto.not_set" => "Not set (leave the drive alone)", "Non impostato (lascia il disco com'è)";
+    "sto.never" => "Never", "Mai";
+    "sto.apm" => "Power management (APM)", "Gestione energetica (APM)";
+    // labels of the recommended-settings checks by `SettingCheck.key` (scheduler, read-ahead, APM and
+    // temperature reuse sto.scheduler, sto.read_ahead, sto.apm, sto.temp)
+    "sto.chk.write_cache" => "Write cache", "Cache di scrittura";
+    "sto.chk.trim" => "TRIM", "TRIM";
+    "sto.chk.alpm" => "SATA link power (ALPM)", "Risparmio energetico del collegamento SATA (ALPM)";
+    "sto.chk.apst" => "NVMe power states (APST)", "Stati di alimentazione NVMe (APST)";
+    "sto.apm_1" => "1 · Most power saving, spin-down allowed", "1 · Massimo risparmio, standby consentito";
+    "sto.apm_127" => "127 · Balanced, spin-down allowed", "127 · Bilanciato, standby consentito";
+    "sto.apm_128" => "128 · Balanced, no spin-down", "128 · Bilanciato, senza standby";
+    "sto.apm_254" => "254 · Best performance", "254 · Massime prestazioni";
+    "sto.apm_255" => "255 · APM off", "255 · APM disattivato";
+    "sto.staged" => "Change staged. Apply it from the pending changes.", "Modifica in sospeso. Applicala dalle modifiche in sospeso.";
+    "sto.reset_defaults" => "Use defaults", "Usa predefiniti";
+    "sto.stage" => "Stage change", "Metti in sospeso";
+    "sto.done_ok" => "Completed.", "Completato.";
+    "sto.done_err" => "The operation failed.", "L'operazione non è riuscita.";
+    "sto.vol_missing" => "Volume not found", "Volume non trovato";
+    "sto.vol_missing_text" => "It may have been renamed or removed.", "Potrebbe essere stato rinominato o rimosso.";
+    "sto.back_storage" => "Back to Storage Manager", "Torna a Storage Manager";
+    "sto.scrub" => "Data scrubbing", "Pulizia dati";
+    "sto.grow" => "Add drives", "Aggiungi dischi";
+    "sto.replace" => "Replace drive", "Sostituisci disco";
+    "sto.unmanaged" => "This volume wasn't created by rynas: it is shown, but not changed here.", "Questo volume non è stato creato da rynas: viene mostrato, ma non modificato qui.";
+    "sto.used" => "Used", "Usato";
+    "sto.free" => "Free (estimated)", "Libero (stimato)";
+    "sto.of" => "of {n}", "di {n}";
+    "sto.profiles" => "Profiles", "Profili";
+    "sto.prof.data" => "Data", "Dati";
+    "sto.prof.metadata" => "Metadata", "Metadati";
+    "sto.compression" => "Compression", "Compressione";
+    "sto.quota" => "Quota", "Quota";
+    "sto.off" => "Off", "Disattivata";
+    "sto.raid" => "RAID", "RAID";
+    "sto.md_state" => "md state", "Stato md";
+    "sto.array" => "Array", "Array";
+    "sto.mismatch" => "Mismatched blocks (last check)", "Blocchi non corrispondenti (ultimo controllo)";
+    "sto.r.active" => "Active", "Attivo";
+    "sto.r.spare" => "Spare", "Riserva";
+    "sto.r.faulty" => "Faulty", "Guasto";
+    "sto.r.rebuilding" => "Rebuilding", "In ricostruzione";
+    "sto.r.journal" => "Journal", "Journal";
+    "sto.missing_members" => "Missing members: {n}", "Membri mancanti: {n}";
+    "sto.scrub_errors" => "Errors found", "Errori trovati";
+    "sto.scrub_finished" => "No errors", "Nessun errore";
+    "sto.scrub_aborted" => "Interrupted", "Interrotta";
+    "never_run" => "Never run", "Mai eseguita";
+    "sto.scrub_text" => "Reads every block, checks the checksums and repairs from the redundant copy; the RAID parity check verifies the array too.", "Legge ogni blocco, verifica i checksum e ripara dalla copia ridondante; il controllo di parità verifica anche l'array RAID.";
+    "sto.started" => "Started", "Avviata";
+    "sto.duration" => "Duration", "Durata";
+    "sto.progress" => "Progress", "Avanzamento";
+    "sto.scrub_result" => "Result", "Risultato";
+    "sto.scrub_stop" => "Stop scrubbing", "Interrompi pulizia";
+    "run_now" => "Run now", "Esegui ora";
+    "sto.scrub_title" => "Data scrubbing on {name}", "Pulizia dati su {name}";
+    "sto.scrub_start" => "Start scrubbing", "Avvia pulizia";
+    "sto.md_check" => "Also check the RAID parity", "Controlla anche la parità RAID";
+    "sto.review_plan" => "Review plan", "Rivedi il piano";
+    "sto.hdr_saved" => "Header backup downloaded. Keep it outside the NAS, then delete it from the server.", "Backup dell'intestazione scaricato. Conservalo fuori dal NAS, poi eliminalo dal server.";
+    "sto.hdr_none" => "No header backup is waiting on the server (already deleted, or made before the last restart).", "Nessun backup dell'intestazione in attesa sul server (già eliminato o precedente all'ultimo riavvio).";
+    "sto.hdr_deleted" => "Header backup deleted from the server.", "Backup dell'intestazione eliminato dal server.";
+    "sto.hdr_download" => "Download header backup", "Scarica backup intestazione";
+    "sto.hdr_delete" => "Delete from server", "Elimina dal server";
+    "sto.rk_reveal" => "Show recovery key", "Mostra chiave di ripristino";
+    "sto.rk_title" => "Recovery key of {name}", "Chiave di ripristino di {name}";
+    "sto.rk_text" => "The recovery key opens the volume when the passphrase is lost. It can be shown only once, within an hour of the creation.", "La chiave di ripristino apre il volume se la passphrase va persa. Può essere mostrata una sola volta, entro un'ora dalla creazione.";
+    "sto.rk_gone" => "The recovery key is no longer available: it was already shown or more than an hour has passed.", "La chiave di ripristino non è più disponibile: è già stata mostrata o è passata più di un'ora.";
+    "sto.rk_once" => "This is the only time the key is shown. Store it somewhere safe outside the NAS.", "È l'unica volta che la chiave viene mostrata. Conservala in un posto sicuro fuori dal NAS.";
+    "sto.rk_stored" => "I have stored the recovery key", "Ho conservato la chiave di ripristino";
+    "sto.copy" => "Copy", "Copia";
+    "sto.download" => "Download", "Scarica";
+    "sto.done" => "Done", "Fine";
+    "sto.no_free" => "No free drives: add an empty drive first.", "Nessun disco libero: aggiungi prima un disco vuoto.";
+    "sto.keep_level" => "Keep {l}", "Mantieni {l}";
+    "sto.grow_title" => "Add drives to {name}", "Aggiungi dischi a {name}";
+    "sto.grow_text" => "The new drives join the array (more capacity or more redundancy); a level change reshapes it, which can take many hours.", "I nuovi dischi entrano nell'array (più capacità o più ridondanza); un cambio di livello lo rimodella e può richiedere molte ore.";
+    "sto.replace_title" => "Replace a drive of {name}", "Sostituisci un disco di {name}";
+    "sto.replace_text" => "The new drive is rebuilt from the others; the old one leaves the array when the rebuild ends.", "Il nuovo disco viene ricostruito dagli altri; quello vecchio esce dall'array a ricostruzione finita.";
+    "sto.replace_old" => "Drive to replace", "Disco da sostituire";
+    "sto.replace_new" => "New drive", "Nuovo disco";
+    "sto.replace_go" => "Replace", "Sostituisci";
+    "sto.subvolumes" => "Subvolumes", "Sottovolumi";
+    "sto.sub_create" => "Create subvolume", "Crea sottovolume";
+    "sto.sub_none" => "No subvolumes yet. Shared folders get their own when they are created.", "Ancora nessun sottovolume. Le cartelle condivise ne ricevono uno quando vengono create.";
+    "sto.path" => "Path", "Percorso";
+    "sto.readonly" => "Read-only", "Sola lettura";
+    "sto.inherit" => "Volume default", "Predefinita del volume";
+    "sto.system" => "System", "Sistema";
+    "sto.yes" => "Yes", "Sì";
+    "sto.no" => "No", "No";
+    "sto.sub_invalid" => "Use letters, digits, dot, underscore or dash (up to 64), starting with a letter or digit.", "Usa lettere, cifre, punto, trattino basso o trattino (fino a 64), iniziando con una lettera o una cifra.";
+    "edit_named" => "Edit {name}", "Modifica {name}";
+    "sto.sub_name_hint" => "Letters, digits, . _ - (up to 64).", "Lettere, cifre, . _ - (fino a 64).";
+    "sto.sub_compress" => "Compression (zstd)", "Compressione (zstd)";
+    "sto.sub_compress_hint" => "Turn it off for data that is already compressed: video, photos, backups, VM images.", "Disattivala per dati già compressi: video, foto, backup, immagini di VM.";
+    "sto.sub_delete" => "Delete {name}", "Elimina {name}";
+    "sto.sub_delete_text" => "The subvolume and every file in it are deleted. This cannot be undone.", "Il sottovolume e tutti i file che contiene vengono eliminati. L'operazione non può essere annullata.";
+    "sto.tuning" => "RAID tuning", "Ottimizzazione RAID";
+    "sto.stripe_text" => "A larger stripe cache speeds up RAID 5/6 writes and rebuilds at the cost of memory.", "Una stripe cache più grande accelera scritture e ricostruzioni RAID 5/6 a spese della memoria.";
+    "sto.proposal" => "rynas proposal", "Proposta di rynas";
+    "sto.stripe" => "Stripe cache (entries)", "Stripe cache (voci)";
+    "sto.kernel_default" => "Kernel default (256)", "Predefinito del kernel (256)";
+    "sto.use_proposal" => "{n} (proposal)", "{n} (proposta)";
+    "wiz.subtitle" => "Drives, RAID level and options, with the plan shown before anything changes", "Dischi, livello RAID e opzioni, con il piano mostrato prima di ogni modifica";
+    "wiz.steps" => "Steps", "Passaggi";
+    "wiz.s_disks" => "Drives", "Dischi";
+    "wiz.s_level" => "RAID level", "Livello RAID";
+    "wiz.s_options" => "Options", "Opzioni";
+    "wiz.s_review" => "Review", "Riepilogo";
+    "wiz.next" => "Next", "Avanti";
+    "wiz.pick_disks" => "Choose the drives", "Scegli i dischi";
+    "wiz.pick_text" => "Only drives without data are listed. Everything on the chosen drives will be erased.", "Sono elencati solo i dischi senza dati. Tutto ciò che c'è sui dischi scelti verrà cancellato.";
+    "wiz.in_use" => "Drives in use, not listed: {n}.", "Dischi in uso, non elencati: {n}.";
+    "wiz.selected" => "Selected: {n} · {size} raw", "Selezionati: {n} · {size} grezzi";
+    "wiz.pick_level" => "Choose the RAID level", "Scegli il livello RAID";
+    "wiz.recommended" => "Recommended", "Consigliato";
+    "wiz.min_single" => "Exactly 1 drive", "Esattamente 1 disco";
+    "wiz.min2" => "Needs 2 or more drives", "Servono almeno 2 dischi";
+    "wiz.min3" => "Needs 3 or more drives", "Servono almeno 3 dischi";
+    "wiz.min4" => "Needs 4 or more drives", "Servono almeno 4 dischi";
+    "wiz.min_even4" => "Needs an even number of drives, 4 or more", "Serve un numero pari di dischi, almeno 4";
+    "wiz.d_single" => "One drive, no redundancy; a mirror can be added later.", "Un disco, senza ridondanza; un mirror si può aggiungere in seguito.";
+    "wiz.d_raid0" => "Striping for speed: one failed drive loses everything.", "Striping per velocità: un disco guasto fa perdere tutto.";
+    "wiz.d_raid1" => "Mirror: every drive holds a full copy.", "Mirror: ogni disco contiene una copia completa.";
+    "wiz.d_raid5" => "Single parity: survives one failed drive.", "Parità singola: sopravvive a un disco guasto.";
+    "wiz.d_raid6" => "Double parity: survives two failed drives.", "Doppia parità: sopravvive a due dischi guasti.";
+    "wiz.d_raid10" => "Striped mirrors: fast, survives one failure per mirror.", "Mirror in striping: veloce, sopravvive a un guasto per mirror.";
+    "wiz.label" => "Volume name", "Nome del volume";
+    "wiz.label_hint" => "Mounted at {path}.", "Montato in {path}.";
+    "wiz.label_invalid" => "Use 1-16 lowercase letters, digits or dashes, starting with a letter.", "Usa da 1 a 16 lettere minuscole, cifre o trattini, iniziando con una lettera.";
+    "wiz.label_taken" => "A volume with this name already exists.", "Esiste già un volume con questo nome.";
+    "wiz.compress" => "Compression (zstd, level 1)", "Compressione (zstd, livello 1)";
+    "wiz.compress_hint" => "Saves space with almost no CPU cost; already compressed files are skipped. It can be turned off per subvolume.", "Risparmia spazio con un costo di CPU quasi nullo; i file già compressi vengono saltati. Si può disattivare per singolo sottovolume.";
+    "wiz.encrypt" => "Encrypt the volume (LUKS2)", "Crittografa il volume (LUKS2)";
+    "wiz.encrypt_hint" => "The volume must be unlocked after every restart. A recovery key and a header backup are created: keep both outside the NAS.", "Il volume va sbloccato dopo ogni riavvio. Vengono creati una chiave di ripristino e un backup dell'intestazione: conservali entrambi fuori dal NAS.";
+    "wiz.pass_again" => "Repeat the passphrase", "Ripeti la passphrase";
+    "wiz.pass_hint" => "8 to 512 characters. Without it (or the recovery key) the data cannot be read.", "Da 8 a 512 caratteri. Senza di essa (o la chiave di ripristino) i dati non sono leggibili.";
+    "wiz.pass_len" => "The passphrase needs 8 to 512 characters.", "La passphrase deve avere da 8 a 512 caratteri.";
+    "wiz.pass_mismatch" => "The passphrases don't match.", "Le passphrase non coincidono.";
+    "wiz.erase_title" => "All data on these drives will be erased", "Tutti i dati su questi dischi verranno cancellati";
+    "wiz.create_go" => "Erase drives and create", "Cancella i dischi e crea";
+    "wiz.creating" => "Creating {name}", "Creazione di {name}";
+    "wiz.created" => "Volume {name} created.", "Volume {name} creato.";
+    "wiz.secure_title" => "Secure the encryption now", "Metti al sicuro la crittografia ora";
+    "wiz.secure_text" => "Save the recovery key (shown once, for one hour) and the LUKS header backup outside the NAS.", "Salva fuori dal NAS la chiave di ripristino (mostrata una volta, per un'ora) e il backup dell'intestazione LUKS.";
+    "wiz.open_volume" => "Open the volume", "Apri il volume";
+    "wiz.back_review" => "Back to the review", "Torna al riepilogo";
+    // status words
+    "health.failed" => "Failed", "Guasto";
+    "health.syncing" => "Resyncing", "In sincronizzazione";
+    // generic
+    "loading" => "Loading…", "Caricamento…";
+    "error.load" => "Couldn't load data", "Impossibile caricare i dati";
+    "soon" => "Coming soon", "In arrivo";
+    "soon.files" => "A dual-pane file manager modelled on SynoFile: tabs, previews, archives you can browse like folders, and a recycle bin.", "File manager a doppio pannello sul modello di SynoFile: schede, anteprime, archivi navigabili come cartelle e cestino.";
+    "soon.plugins" => "Plugins that add pages, widgets and commands through a declarative manifest.", "Plugin che aggiungono pagine, widget e comandi tramite un manifest dichiarativo.";
+    "soon.system" => "Network, software updates, notifications, system logs and a web terminal are on the way.", "Rete, aggiornamenti software, notifiche, log di sistema e terminale web sono in arrivo.";
+    "sys.subtitle" => "System information and interface preferences", "Informazioni di sistema e preferenze dell'interfaccia";
+    "sys.info" => "System information", "Informazioni di sistema";
+    "sys.prefs" => "Interface", "Interfaccia";
+    "notfound" => "Page not found", "Pagina non trovata";
+    "notfound.text" => "This address doesn't match any section.", "Questo indirizzo non corrisponde a nessuna sezione.";
+    "back_home" => "Back to Dashboard", "Torna alla dashboard";
+    "close" => "Close", "Chiudi";
+    "copied" => "Copied", "Copiato";
+    "role.admin" => "Administrator", "Amministratore";
+    "nav.security" => "Security", "Sicurezza";
+    // sign-in
+    "login.sign_in" => "Sign in", "Accedi";
+    "username" => "User name", "Nome utente";
+    "login.password" => "Password", "Password";
+    "login.caps" => "Caps Lock is on", "Il Bloc Maiusc è attivo";
+    "login.signing_in" => "Signing in…", "Accesso in corso…";
+    "login.verify" => "Verify", "Verifica";
+    "login.wait" => "Try again in {t}", "Riprova tra {t}";
+    "login.totp_text" => "Enter the 6-digit code from your authenticator app.", "Inserisci il codice a 6 cifre dell'app di autenticazione.";
+    "login.recovery_text" => "Enter one of the recovery codes you saved when you turned on two-factor authentication. Each code works once.", "Inserisci uno dei codici di recupero salvati quando hai attivato la verifica in due passaggi. Ogni codice vale una volta sola.";
+    "login.totp_code" => "Authentication code", "Codice di autenticazione";
+    "login.recovery_code" => "Recovery code", "Codice di recupero";
+    "login.use_recovery" => "Use a recovery code", "Usa un codice di recupero";
+    "login.use_app" => "Use the authenticator app", "Usa l'app di autenticazione";
+    "login.expired" => "Your session has ended. Sign in again to continue where you left off.", "La sessione è scaduta. Accedi di nuovo per riprendere da dove eri rimasto.";
+    "login.signed_out" => "You have signed out.", "Sei uscito.";
+    "login.renew" => "Sign in again to start a new session.", "Accedi di nuovo per aprire una nuova sessione.";
+    "login.foot" => "Use your system account (administrators only).", "Usa il tuo account di sistema (solo amministratori).";
+    "login.empty" => "Enter your user name and password.", "Inserisci nome utente e password.";
+    "err.invalid_credentials" => "Wrong user name or password.", "Nome utente o password errati.";
+    "err.invalid_totp" => "That code isn't valid. Check the time on your device and try a new code.", "Codice non valido. Controlla l'ora del dispositivo e prova un codice nuovo.";
+    "err.rate_limited" => "Too many failed attempts.", "Troppi tentativi falliti.";
+    "err.auth_unavailable" => "The authentication service is unavailable. Check that rynasd is running.", "Il servizio di autenticazione non è disponibile. Controlla che rynasd sia in esecuzione.";
+    "err.network" => "Can't reach the server. Check your connection.", "Server non raggiungibile. Controlla la connessione.";
+    "err.csrf" => "Your session changed in another tab. Reload the page.", "La sessione è cambiata in un'altra scheda. Ricarica la pagina.";
+    "err.backend_unavailable" => "The rynas service is not answering. Check that rynasd is running.", "Il servizio rynas non risponde. Controlla che rynasd sia in esecuzione.";
+    "err.timeout" => "The NAS took too long to answer.", "Il NAS ha impiegato troppo a rispondere.";
+    "err.bad_gateway" => "The rynas service sent an invalid answer.", "Il servizio rynas ha inviato una risposta non valida.";
+    "err.internal" => "Internal error on the NAS. Details are in the system log.", "Errore interno del NAS. I dettagli sono nel log di sistema.";
+    "err.forbidden" => "Your account can't do this.", "Il tuo account non può farlo.";
+    "err.not_found" => "Not found.", "Non trovato.";
+    "err.retry" => "Retry", "Riprova";
+    "err.offline_title" => "Can't reach the NAS", "NAS non raggiungibile";
+    "err.offline_text" => "The web service is not answering. It may be restarting, or the network may be down. rynas keeps retrying.", "Il servizio web non risponde. Potrebbe essere in riavvio, oppure la rete non è disponibile. rynas continua a riprovare.";
+    "err.unauthenticated" => "Your session has ended.", "La sessione è scaduta.";
+    "err.bad_request" => "The request was not valid.", "La richiesta non era valida.";
+    "err.invalid_value" => "A value is not valid.", "Un valore non è valido.";
+    "err.nothing_pending" => "There are no pending changes.", "Non ci sono modifiche in sospeso.";
+    "err.conflict" => "Something changed meanwhile. Reload and try again.", "Nel frattempo qualcosa è cambiato. Ricarica e riprova.";
+    "err.busy" => "Another operation is running. Try again shortly.", "È in corso un'altra operazione. Riprova tra poco.";
+    "err.task_finished" => "The task has already finished.", "L'attività è già terminata.";
+    "err.already_exists" => "It already exists.", "Esiste già.";
+    "err.confirmation_required" => "This needs an explicit confirmation.", "Serve una conferma esplicita.";
+    "err.not_applied" => "The change was not applied.", "La modifica non è stata applicata.";
+    "err.method_not_allowed" => "Operation not supported.", "Operazione non supportata.";
+    "err.payload_too_large" => "The data sent is too large.", "I dati inviati sono troppo grandi.";
+    "err.unsupported_media_type" => "Unsupported data format.", "Formato dei dati non supportato.";
+    "err.generic" => "Something went wrong. Try again.", "Qualcosa è andato storto. Riprova.";
+    "session.expires" => "Your session expires in {n} min", "La sessione scade tra {n} min";
+    "session.expires_1" => "Your session expires in 1 min", "La sessione scade tra 1 min";
+    "session.renew" => "Sign in again", "Accedi di nuovo";
+    // shared words of the configuration pages
+    "save" => "Save", "Salva";
+    "create" => "Create", "Crea";
+    "edit" => "Edit", "Modifica";
+    "delete" => "Delete", "Elimina";
+    "reset" => "Reset", "Ripristina";
+    "off" => "Off", "Disattivato";
+    "advanced" => "Advanced", "Avanzate";
+    "col.status" => "Status", "Stato";
+    "table.no_match" => "Nothing matches the search.", "Nessun risultato per la ricerca.";
+    "form.check" => "Check the highlighted fields.", "Controlla i campi evidenziati.";
+    "form.changed_elsewhere" => "These settings were changed elsewhere while you were editing.", "Queste impostazioni sono state modificate altrove mentre le stavi modificando.";
+    "form.reload" => "Discard my edits and reload", "Scarta le mie modifiche e ricarica";
+    "toast.saved_pending" => "Saved, pending apply", "Salvato, in attesa di applicazione";
+    "pending.add" => "Pending: new", "In attesa: nuovo";
+    "pending.change" => "Pending: changed", "In attesa: modificato";
+    "pending.delete" => "Pending: removal", "In attesa: eliminazione";
+    "v.account_name" => "Lowercase letters, digits, - and _; starts with a letter or _; up to 32 characters.", "Lettere minuscole, cifre, - e _; inizia con una lettera o _; fino a 32 caratteri.";
+    "v.full_name" => "The full name cannot contain : or ,", "Il nome completo non può contenere : o ,";
+    "v.email" => "Not a valid email address.", "Indirizzo email non valido.";
+    "v.date" => "Use the format YYYY-MM-DD.", "Usa il formato AAAA-MM-GG.";
+    "v.share_name" => "Letters, digits, . - and _; starts with a letter or digit; up to 64 characters.", "Lettere, cifre, . - e _; inizia con una lettera o una cifra; fino a 64 caratteri.";
+    "v.path" => "An absolute path such as /srv/data, without .. or //.", "Un percorso assoluto come /srv/data, senza .. o //.";
+    "v.client" => "A host name, IP address, subnet (192.0.2.0/24), wildcard (*.lan) or *.", "Un nome host, indirizzo IP, sottorete (192.0.2.0/24), carattere jolly (*.lan) o *.";
+    "v.workgroup" => "1–15 characters, no spaces or \\ / : * ? \" < > | ,", "1–15 caratteri, senza spazi né \\ / : * ? \" < > | ,";
+    "v.threads" => "Between 1 and 256.", "Tra 1 e 256.";
+    "v.port" => "A port between 1 and 65535.", "Una porta tra 1 e 65535.";
+    // users and groups
+    "users.subtitle" => "Local accounts for file sharing and sign-in", "Account locali per la condivisione di file e l'accesso";
+    "users.tab_users" => "Users", "Utenti";
+    "users.tab_groups" => "Groups", "Gruppi";
+    "users.search" => "Search users", "Cerca utenti";
+    "users.create" => "Create user", "Crea utente";
+    "users.edit_title" => "Edit user {name}", "Modifica utente {name}";
+    "users.empty" => "No users yet", "Ancora nessun utente";
+    "users.empty_text" => "Create an account for each person who uses the NAS, then give it access to shared folders.", "Crea un account per ogni persona che usa il NAS, poi dagli accesso alle cartelle condivise.";
+    "users.name" => "Name", "Nome";
+    "users.name_help" => "Used to sign in; cannot be changed later.", "Serve per accedere; non si può cambiare in seguito.";
+    "users.full_name" => "Full name", "Nome completo";
+    "users.email" => "Email", "Email";
+    "users.email_help" => "For notifications to this user.", "Per le notifiche a questo utente.";
+    "users.description" => "Description", "Descrizione";
+    "users.groups" => "Groups", "Gruppi";
+    "users.no_groups" => "No groups yet: create them in the Groups tab.", "Ancora nessun gruppo: creali nella scheda Gruppi.";
+    "users.access" => "Access", "Accesso";
+    "users.admin_chip" => "Admin", "Admin";
+    "users.sec_info" => "User information", "Informazioni utente";
+    "users.sec_access" => "Access", "Accesso";
+    "users.sec_password" => "Password", "Password";
+    "users.admin" => "Administrator", "Amministratore";
+    "users.admin_help" => "Can sign in to rynas and change every setting.", "Può accedere a rynas e cambiare ogni impostazione.";
+    "users.smb" => "SMB access", "Accesso SMB";
+    "users.smb_help" => "Can open shared folders from Windows, macOS and Linux.", "Può aprire le cartelle condivise da Windows, macOS e Linux.";
+    "users.shell" => "SSH access", "Accesso SSH";
+    "users.shell_help" => "Off by default. SFTP gives file transfer only.", "Disattivato di default. SFTP consente solo il trasferimento di file.";
+    "users.shell_none" => "No SSH", "Nessun SSH";
+    "users.shell_sftp" => "SFTP only", "Solo SFTP";
+    "users.shell_shell" => "Shell", "Shell";
+    "users.disabled" => "Disable account", "Disattiva account";
+    "users.disabled_help" => "The user can't sign in or open shared folders; nothing is deleted.", "L'utente non può accedere né aprire le cartelle condivise; non viene eliminato nulla.";
+    "users.expires" => "Expires on", "Scade il";
+    "users.expires_help" => "The account stops working on this day. Empty: never.", "L'account smette di funzionare da questo giorno. Vuoto: mai.";
+    "users.set_password" => "Set password", "Imposta password";
+    "users.st_active" => "Active", "Attivo";
+    "users.st_disabled" => "Disabled", "Disattivato";
+    "users.st_expired" => "Expired", "Scaduto";
+    "users.st_password" => "Needs a password", "Serve una password";
+    "users.st_unmanaged" => "Not managed", "Non gestito";
+    "users.st_missing" => "Missing on the system", "Assente nel sistema";
+    "users.delete_title" => "Delete user {name}?", "Eliminare l'utente {name}?";
+    "users.delete_text" => "The account and its access to shared folders are removed when you apply the changes. Files in shared folders stay.", "L'account e i suoi accessi alle cartelle condivise vengono rimossi quando applichi le modifiche. I file nelle cartelle condivise restano.";
+    "users.remove_home" => "Also delete the home folder", "Elimina anche la cartella home";
+    "users.remove_home_help" => "Its files cannot be recovered after applying.", "I suoi file non si possono recuperare dopo l'applicazione.";
+    "groups.search" => "Search groups", "Cerca gruppi";
+    "groups.create" => "Create group", "Crea gruppo";
+    "groups.edit_title" => "Edit group {name}", "Modifica gruppo {name}";
+    "groups.empty" => "No groups yet", "Ancora nessun gruppo";
+    "groups.empty_text" => "Groups give the same permissions to several users at once.", "I gruppi danno le stesse autorizzazioni a più utenti insieme.";
+    "groups.name" => "Group name", "Nome gruppo";
+    "groups.gid" => "GID", "GID";
+    "smart.col_id" => "ID", "ID";
+    "groups.name_help" => "Cannot be changed later. System groups (sudo, staff, users…) are not managed here.", "Non si può cambiare in seguito. I gruppi di sistema (sudo, staff, users…) non si gestiscono qui.";
+    "groups.members" => "Members", "Membri";
+    "groups.no_members" => "No members", "Nessun membro";
+    "groups.no_users" => "No users yet.", "Ancora nessun utente.";
+    "groups.delete_title" => "Delete group {name}?", "Eliminare il gruppo {name}?";
+    "groups.delete_text" => "Members lose the permissions they had through this group when you apply the changes. The users stay.", "I membri perdono le autorizzazioni ricevute tramite questo gruppo quando applichi le modifiche. Gli utenti restano.";
+    "pw.new" => "New password", "Nuova password";
+    "pw.confirm" => "Confirm password", "Conferma password";
+    "pw.rules" => "8 to 256 characters, not the user name. A long phrase is easier to remember and harder to guess.", "Da 8 a 256 caratteri, diversa dal nome utente. Una frase lunga è più facile da ricordare e più difficile da indovinare.";
+    "pw.too_short" => "At least 8 characters.", "Almeno 8 caratteri.";
+    "pw.too_long" => "At most 256 characters.", "Al massimo 256 caratteri.";
+    "pw.control" => "Control characters are not allowed.", "I caratteri di controllo non sono ammessi.";
+    "pw.is_user" => "The password cannot be the user name.", "La password non può essere il nome utente.";
+    "pw.mismatch" => "The passwords don't match.", "Le password non coincidono.";
+    "pw.s0" => "Too short", "Troppo corta";
+    "pw.s1" => "Weak", "Debole";
+    "pw.s2" => "Fair", "Discreta";
+    "pw.s3" => "Good", "Buona";
+    "pw.s4" => "Strong", "Forte";
+    "pw.done" => "Password of {name} changed.", "Password di {name} cambiata.";
+    "pw.after_apply" => "Set the password after applying the changes: the account must exist first.", "Imposta la password dopo aver applicato le modifiche: prima l'account deve esistere.";
+    "pw.not_applied" => "This user is created when you apply the pending changes; set the password afterwards.", "Questo utente viene creato quando applichi le modifiche in attesa; imposta la password dopo.";
+    // shared folders
+    "shares.subtitle" => "Folders shared over SMB and NFS, and who can open them", "Cartelle condivise via SMB e NFS, e chi può aprirle";
+    "shares.search" => "Search shared folders", "Cerca cartelle condivise";
+    "shares.create" => "Create shared folder", "Crea cartella condivisa";
+    "shares.edit_title" => "Edit shared folder {name}", "Modifica cartella condivisa {name}";
+    "shares.editor" => "Shared folder settings", "Impostazioni della cartella condivisa";
+    "shares.empty" => "No shared folders yet", "Ancora nessuna cartella condivisa";
+    "shares.empty_text" => "Create a shared folder on a volume, then choose who can read or change its files.", "Crea una cartella condivisa su un volume, poi scegli chi può leggerne o modificarne i file.";
+    "shares.name" => "Name", "Nome";
+    "shares.name_help" => "The name clients see; cannot be changed later.", "Il nome che vedono i client; non si può cambiare in seguito.";
+    "shares.location" => "Location", "Posizione";
+    "shares.volume" => "Volume", "Volume";
+    "shares.volume_usage" => "Volume usage", "Uso del volume";
+    "shares.protocols" => "Protocols", "Protocolli";
+    "shares.no_protocol" => "Not shared", "Non condivisa";
+    "shares.recycle" => "Recycle bin", "Cestino";
+    "shares.recycle_days" => "On · {n} d", "Attivo · {n} g";
+    "shares.recycle_keep" => "On · kept", "Attivo · conservato";
+    "shares.subvolume" => "Subvolume", "Sottovolume";
+    "shares.permissions" => "Permissions", "Autorizzazioni";
+    "shares.st_ready" => "Ready", "Pronta";
+    "shares.st_missing" => "Folder missing", "Cartella assente";
+    "shares.st_on_apply" => "Created on apply", "Creata all'applicazione";
+    "shares.st_warnings" => "Warnings", "Avvisi";
+    "shares.delete_title" => "Delete shared folder {name}?", "Eliminare la cartella condivisa {name}?";
+    "shares.delete_text" => "The share and its permissions are removed when you apply the changes. The folder and its files stay on the volume.", "La condivisione e le sue autorizzazioni vengono rimosse quando applichi le modifiche. La cartella e i suoi file restano sul volume.";
+    "shares.tab_general" => "General", "Generale";
+    "shares.tab_smb" => "SMB", "SMB";
+    "shares.tab_nfs" => "NFS", "NFS";
+    "shares.loc_subvolume" => "New subvolume", "Nuovo sottovolume";
+    "shares.loc_folder" => "Existing folder", "Cartella esistente";
+    "shares.no_volumes" => "No volume found. Create one in Storage, or share an existing folder.", "Nessun volume trovato. Creane uno in Storage, oppure condividi una cartella esistente.";
+    "shares.free" => "free", "liberi";
+    "shares.subvolume_help" => "Created as {path} when you apply the changes (own snapshots and statistics).", "Creato come {path} quando applichi le modifiche (snapshot e statistiche propri).";
+    "shares.compression" => "Compression", "Compressione";
+    "shares.compression_help" => "Turn off for video, photos and backups that are already compressed.", "Disattivala per video, foto e backup già compressi.";
+    "shares.path" => "Path", "Percorso";
+    "shares.path_help" => "An existing folder on a local filesystem, ideally a btrfs subvolume.", "Una cartella esistente su un filesystem locale, meglio se un sottovolume btrfs.";
+    "shares.path_edit_help" => "Changing the path gives NFS clients a new export id: they must mount again.", "Cambiare il percorso assegna ai client NFS un nuovo id di esportazione: dovranno montarla di nuovo.";
+    "shares.smb_on" => "Share over SMB", "Condividi via SMB";
+    "shares.smb_on_help" => "Windows, macOS and Linux file sharing.", "Condivisione file per Windows, macOS e Linux.";
+    "shares.preset" => "Purpose", "Scopo";
+    "shares.preset_help" => "Sets the SMB options that suit the use.", "Imposta le opzioni SMB adatte all'uso.";
+    "shares.preset_standard" => "Standard", "Standard";
+    "shares.preset_multi" => "Also shared over NFS", "Condivisa anche via NFS";
+    "shares.preset_tm" => "Time Machine backups", "Backup Time Machine";
+    "shares.preset_huge" => "Folders with 100,000+ files", "Cartelle con oltre 100.000 file";
+    "shares.tm_size" => "Time Machine size limit", "Limite di spazio Time Machine";
+    "shares.tm_size_help" => "For example 500G or 1T. Empty: no limit.", "Per esempio 500G o 1T. Vuoto: nessun limite.";
+    "shares.browseable" => "Visible in the network", "Visibile in rete";
+    "shares.browseable_help" => "Listed when browsing the NAS; hidden shares open by name only.", "Elencata sfogliando il NAS; quelle nascoste si aprono solo per nome.";
+    "shares.recycle_on_help" => "Files deleted over SMB go to #recycle instead of disappearing.", "I file eliminati via SMB finiscono in #recycle invece di sparire.";
+    "shares.retention" => "Empty after (days)", "Svuota dopo (giorni)";
+    "shares.retention_help" => "The daily cleanup removes older items; 0 keeps them.", "La pulizia giornaliera rimuove gli elementi più vecchi; 0 li conserva.";
+    "shares.hide_dot" => "Hide dot files", "Nascondi i file che iniziano con il punto";
+    "shares.encrypt" => "Require encryption", "Richiedi la crittografia";
+    "shares.shadow" => "Previous versions", "Versioni precedenti";
+    "shares.shadow_help" => "Show snapshots in the Windows \"Previous versions\" tab.", "Mostra gli snapshot nella scheda \"Versioni precedenti\" di Windows.";
+    "shares.snap_prefix" => "Snapshot name prefix", "Prefisso del nome degli snapshot";
+    "shares.snap_prefix_help" => "Empty: the last part of the share path.", "Vuoto: l'ultima parte del percorso della condivisione.";
+    "shares.veto" => "Hidden and blocked names", "Nomi nascosti e bloccati";
+    "shares.veto_help" => "One pattern per line, for example @eaDir.", "Uno schema per riga, per esempio @eaDir.";
+    "shares.extra" => "Extra SMB options", "Opzioni SMB aggiuntive";
+    "shares.nfs_on" => "Export over NFS", "Esporta via NFS";
+    "shares.nfs_on_help" => "For Linux and other Unix clients. Clients need the same user ids.", "Per client Linux e altri Unix. I client devono avere gli stessi id utente.";
+    "nfs.rules" => "Client rules", "Regole dei client";
+    "nfs.no_rules" => "No client can mount this folder yet: add a rule.", "Nessun client può ancora montare questa cartella: aggiungi una regola.";
+    "nfs.no_rules_short" => "No clients", "Nessun client";
+    "nfs.remove_rule" => "Remove rule", "Rimuovi regola";
+    "nfs.client" => "Client", "Client";
+    "nfs.client_help" => "Host, IP, subnet, *.lan or *", "Host, IP, sottorete, *.lan o *";
+    "nfs.access" => "Access", "Accesso";
+    "nfs.squash" => "Squash", "Mappatura utenti";
+    "nfs.squash_help" => "Which client users act as the anonymous user.", "Quali utenti del client agiscono come utente anonimo.";
+    "nfs.squash_root" => "Map root to anonymous", "Mappa root su anonimo";
+    "nfs.squash_all" => "Map all users to anonymous", "Mappa tutti gli utenti su anonimo";
+    "nfs.squash_none" => "No mapping (root stays root)", "Nessuna mappatura (root resta root)";
+    "nfs.anonuid" => "Anonymous uid", "uid anonimo";
+    "nfs.anongid" => "Anonymous gid", "gid anonimo";
+    "nfs.sync" => "Synchronous writes", "Scritture sincrone";
+    "nfs.sync_help" => "Safe default; asynchronous is faster but can lose data on a power cut.", "Scelta sicura; asincrono è più veloce ma può perdere dati in caso di blackout.";
+    "nfs.crossmnt" => "Include nested mounts", "Includi i mount annidati";
+    "nfs.crossmnt_help" => "Also export subvolumes mounted below this folder.", "Esporta anche i sottovolumi montati sotto questa cartella.";
+    "perm.show" => "Show", "Mostra";
+    "perm.search" => "Search", "Cerca";
+    "perm.user" => "User", "Utente";
+    "perm.group" => "Group", "Gruppo";
+    "not_set" => "Not set", "Non impostato";
+    "perm.ro" => "Read only", "Sola lettura";
+    "perm.rw" => "Read & write", "Lettura e scrittura";
+    "perm.deny" => "No access", "Nessun accesso";
+    "perm.nobody" => "Nobody to list.", "Nessuno da elencare.";
+    "perm.empty_help" => "No permissions set: rynas leaves the folder's current permissions alone.", "Nessuna autorizzazione impostata: rynas lascia invariate le autorizzazioni attuali della cartella.";
+    "perm.rule_help" => "Only listed users and groups get in. No access wins over Read & write, which wins over Read only.", "Entrano solo gli utenti e i gruppi elencati. Nessun accesso prevale su Lettura e scrittura, che prevale su Sola lettura.";
+    "eff.title" => "Effective permissions", "Autorizzazioni effettive";
+    "eff.help" => "What a user or group really gets, counting the groups the user belongs to.", "Cosa ottiene davvero un utente o un gruppo, contando i gruppi di cui l'utente fa parte.";
+    "eff.principal" => "User or group", "Utente o gruppo";
+    "eff.choose" => "Choose…", "Scegli…";
+    "eff.unsaved" => "This shows the saved permissions; save to check your changes.", "Mostra le autorizzazioni salvate; salva per verificare le modifiche.";
+    "eff.save_first" => "Save the shared folder to check effective permissions.", "Salva la cartella condivisa per verificare le autorizzazioni effettive.";
+    "eff.none" => "No access (not set)", "Nessun accesso (non impostato)";
+    "eff.no_source" => "No entry of the matrix applies.", "Nessuna voce della tabella si applica.";
+    "eff.decisive" => "Decides", "Decide";
+    "eff.rule" => "No access wins over Read & write, which wins over Read only.", "Nessun accesso prevale su Lettura e scrittura, che prevale su Sola lettura.";
+    // file services
+    "svc.title" => "File Services", "Servizi file";
+    "svc.subtitle" => "SMB and NFS settings for every shared folder", "Impostazioni SMB e NFS per tutte le cartelle condivise";
+    "svc.smb" => "SMB", "SMB";
+    "svc.nfs" => "NFS", "NFS";
+    "svc.running" => "Running", "In esecuzione";
+    "svc.stopped" => "Stopped", "Fermo";
+    "svc.off" => "Off", "Disattivato";
+    "svc.exports" => "NFS exports", "Esportazioni NFS";
+    "svc.no_exports" => "No shared folder is exported over NFS.", "Nessuna cartella condivisa è esportata via NFS.";
+    "svc.exports_help" => "Exports and their client rules are edited in each shared folder (NFS tab).", "Le esportazioni e le regole dei client si modificano in ogni cartella condivisa (scheda NFS).";
+    "smb.enabled" => "Enable SMB", "Attiva SMB";
+    "smb.enabled_help" => "File sharing for Windows, macOS and Linux.", "Condivisione file per Windows, macOS e Linux.";
+    "smb.workgroup" => "Workgroup", "Gruppo di lavoro";
+    "smb.workgroup_help" => "Usually WORKGROUP.", "Di solito WORKGROUP.";
+    "smb.min_protocol" => "Minimum protocol", "Protocollo minimo";
+    "smb.min_protocol_help" => "SMB1 is never offered.", "SMB1 non viene mai offerto.";
+    "smb.proto_smb2" => "SMB 2.1 (Windows 7+)", "SMB 2.1 (Windows 7+)";
+    "smb.proto_smb3" => "SMB 3.0 (Windows 8+)", "SMB 3.0 (Windows 8+)";
+    "smb.proto_smb311" => "SMB 3.1.1 (Windows 10+)", "SMB 3.1.1 (Windows 10+)";
+    "smb.server_string" => "Description", "Descrizione";
+    "smb.server_string_help" => "Shown next to the NAS name in some clients.", "Mostrata accanto al nome del NAS in alcuni client.";
+    "smb.wsdd" => "Windows network discovery", "Rilevamento di rete Windows";
+    "smb.wsdd_help" => "The NAS appears under Network in Windows Explorer (WS-Discovery).", "Il NAS compare in Rete in Esplora file di Windows (WS-Discovery).";
+    "smb.mdns" => "Bonjour announcements", "Annunci Bonjour";
+    "smb.mdns_help" => "The NAS appears in the macOS Finder and on Linux (mDNS).", "Il NAS compare nel Finder di macOS e su Linux (mDNS).";
+    "smb.encrypt" => "Require encryption on every share", "Richiedi la crittografia su ogni condivisione";
+    "smb.encrypt_help" => "Clients without SMB 3 encryption cannot connect.", "I client senza crittografia SMB 3 non possono connettersi.";
+    "smb.netbios" => "NetBIOS name service", "Servizio nomi NetBIOS";
+    "smb.netbios_help" => "Only for very old clients; off by default.", "Solo per client molto vecchi; disattivato di default.";
+    "smb.interfaces" => "Listen on", "In ascolto su";
+    "smb.interfaces_help" => "Interfaces or addresses, comma separated. Empty: all.", "Interfacce o indirizzi, separati da virgole. Vuoto: tutti.";
+    "smb.extra" => "Extra global options", "Opzioni globali aggiuntive";
+    "smb.extra_help" => "key = value lines, checked with testparm when applying.", "Righe chiave = valore, verificate con testparm all'applicazione.";
+    "recycle.title" => "Empty recycle bins", "Svuota i cestini";
+    "recycle.help" => "Runs now what the daily cleanup does: removes items deleted longer ago than the retention.", "Esegue subito la pulizia giornaliera: rimuove gli elementi eliminati da più tempo della conservazione.";
+    "shares.folder" => "Shared folder", "Cartella condivisa";
+    "recycle.all" => "All with a recycle bin", "Tutte quelle con il cestino";
+    "recycle.days" => "Older than (days)", "Più vecchi di (giorni)";
+    "recycle.days_help" => "Empty: each folder's retention.", "Vuoto: la conservazione di ogni cartella.";
+    "recycle.run" => "Empty now", "Svuota ora";
+    "recycle.done" => "Recycle bins emptied.", "Cestini svuotati.";
+    "nfs.enabled" => "Enable NFS", "Attiva NFS";
+    "nfs.enabled_help" => "NFS 4.1 and 4.2 for Linux and Unix clients.", "NFS 4.1 e 4.2 per client Linux e Unix.";
+    "nfs.v3" => "Also allow NFSv3", "Consenti anche NFSv3";
+    "nfs.v3_help" => "For older clients; needs rpcbind (port 111).", "Per client più vecchi; richiede rpcbind (porta 111).";
+    "nfs.threads" => "Server threads", "Thread del server";
+    "nfs.threads_help" => "8 suits most homes and small offices.", "8 va bene per la maggior parte delle case e dei piccoli uffici.";
+    "nfs.mountd" => "mountd port", "Porta mountd";
+    "nfs.statd" => "statd port", "Porta statd";
+    "nfs.lockd" => "lockd port", "Porta lockd";
+    "nfs.ports_help" => "Fixed ports, so a firewall can allow NFSv3.", "Porte fisse, così un firewall può consentire NFSv3.";
+    // security page
+    "sec.subtitle" => "Your account, session and two-factor authentication", "Account, sessione e verifica in due passaggi";
+    "sec.account" => "Account", "Account";
+    "sec.user" => "User", "Utente";
+    "sec.role" => "Role", "Ruolo";
+    "sec.realm" => "Account type", "Tipo di account";
+    "sec.realm_pam" => "System user", "Utente di sistema";
+    "sec.realm_rynas" => "rynas user", "Utente rynas";
+    "sec.since" => "Signed in", "Accesso";
+    "sec.until" => "Session ends", "Fine sessione";
+    "sec.idle" => "Idle timeout", "Timeout di inattività";
+    "sec.idle_min" => "{n} min", "{n} min";
+    "sec.totp" => "Two-factor authentication", "Verifica in due passaggi";
+    "sec.2fa_on" => "2FA on", "2FA attiva";
+    "sec.on" => "On", "Attiva";
+    "sec.off" => "Off", "Disattivata";
+    "sec.off_text" => "Protect your account with a code from an authenticator app (Aegis, 2FAS, Google Authenticator, 1Password…) in addition to your password.", "Proteggi l'account con un codice di un'app di autenticazione (Aegis, 2FAS, Google Authenticator, 1Password…) oltre alla password.";
+    "sec.on_text" => "Signing in asks for a code from your authenticator app. Keep your recovery codes somewhere safe.", "L'accesso chiede un codice dell'app di autenticazione. Conserva i codici di recupero in un posto sicuro.";
+    "sec.other_sessions" => "Turning it on signs you out everywhere else: other browsers and devices will have to sign in again.", "Attivandola esci da tutte le altre sessioni: altri browser e dispositivi dovranno accedere di nuovo.";
+    "sec.enable" => "Set up", "Configura";
+    "sec.step_scan" => "Scan the QR code", "Scansiona il codice QR";
+    "sec.step_scan_text" => "Open your authenticator app and add an account by scanning this code.", "Apri l'app di autenticazione e aggiungi un account scansionando questo codice.";
+    "sec.qr_label" => "QR code with the two-factor authentication secret", "Codice QR con il segreto della verifica in due passaggi";
+    "sec.manual" => "Can't scan it? Enter this key:", "Non riesci a scansionarlo? Inserisci questa chiave:";
+    "sec.copy_secret" => "Copy key", "Copia chiave";
+    "sec.step_code" => "Enter the code the app shows", "Inserisci il codice mostrato dall'app";
+    "sec.activate" => "Turn on", "Attiva";
+    "sec.enabled_now" => "Two-factor authentication is on.", "La verifica in due passaggi è attiva.";
+    "sec.codes_title" => "Recovery codes", "Codici di recupero";
+    "sec.codes_text" => "Use one of these codes to sign in if you lose your phone. Each code works once. They are shown only now: save them somewhere safe.", "Usa uno di questi codici per accedere se perdi il telefono. Ogni codice vale una volta sola. Vengono mostrati solo ora: salvali in un posto sicuro.";
+    "sec.codes_file_head" => "rynas recovery codes for {user} on {host}. Each code works once.", "Codici di recupero rynas per {user} su {host}. Ogni codice vale una volta sola.";
+    "sec.copy_codes" => "Copy", "Copia";
+    "sec.download" => "Download .txt", "Scarica .txt";
+    "sec.saved" => "I saved my recovery codes", "Ho salvato i codici di recupero";
+    "sec.done" => "Done", "Fatto";
+    "sec.disable" => "Turn off", "Disattiva";
+    "sec.disable_text" => "Enter a code from your authenticator app or a recovery code to turn off two-factor authentication.", "Inserisci un codice dell'app di autenticazione o un codice di recupero per disattivare la verifica in due passaggi.";
+    "sec.code_or_recovery" => "Authentication or recovery code", "Codice di autenticazione o di recupero";
+    "sec.demo" => "Not available with demo data: there is no account to protect.", "Non disponibile con i dati demo: non c'è un account da proteggere.";
+    "err.totp_already_enabled" => "Two-factor authentication is already on.", "La verifica in due passaggi è già attiva.";
+    "err.totp_not_enrolled" => "The setup has expired. Start again.", "La configurazione è scaduta. Ricomincia.";
+    // notifications, task scheduler, snapshots (P3)
+    "open" => "Open", "Apri";
+    "day.1" => "Mon", "Lun";
+    "day.2" => "Tue", "Mar";
+    "day.3" => "Wed", "Mer";
+    "day.4" => "Thu", "Gio";
+    "day.5" => "Fri", "Ven";
+    "day.6" => "Sat", "Sab";
+    "day.7" => "Sun", "Dom";
+    "nav.snapshots" => "Snapshots", "Snapshot";
+    "nt.center" => "Notification center", "Centro notifiche";
+    "nt.subtitle" => "Events from storage, hardware, tasks and services, with acknowledgement and silences", "Eventi di storage, hardware, attività e servizi, con presa visione e silenziamenti";
+    "nt.settings" => "Notification settings", "Impostazioni notifiche";
+    "nt.settings_title" => "Notifications", "Notifiche";
+    "nt.settings_subtitle" => "Where notifications go (email, ntfy, Telegram, Gotify, webhook) and which events reach them", "Dove vanno le notifiche (email, ntfy, Telegram, Gotify, webhook) e quali eventi le raggiungono";
+    "nt.open_text" => "Delivery targets with a test message, rules by severity and category, quiet hours and silences.", "Destinazioni con messaggio di prova, regole per gravità e categoria, ore di silenzio e silenziamenti.";
+    "nt.view_all" => "All notifications", "Tutte le notifiche";
+    "nt.load_failed" => "Couldn't load the notifications.", "Impossibile caricare le notifiche.";
+    "nt.ack" => "Acknowledge", "Presa visione";
+    "nt.ack_all" => "Acknowledge all", "Presa visione di tutte";
+    "nt.acked_n" => "{n} notifications acknowledged", "Presa visione di {n} notifiche";
+    "nt.acked" => "Acknowledged", "Vista";
+    "nt.resolved" => "Resolved", "Risolta";
+    "nt.active" => "Active", "Attiva";
+    "nt.silenced" => "Silenced", "Silenziata";
+    "nt.silence" => "Silence", "Silenzia";
+    "nt.unsilence" => "Remove silence", "Rimuovi silenziamento";
+    "nt.details" => "Details", "Dettagli";
+    "nt.times" => "{n} times", "{n} volte";
+    "nt.load_more" => "Load more", "Carica altri";
+    "nt.none" => "No notifications", "Nessuna notifica";
+    "nt.none_text" => "Nothing matches these filters. Events appear here as soon as rynas records them.", "Nessuna corrispondenza con questi filtri. Gli eventi compaiono qui appena rynas li registra.";
+    "nt.col.severity" => "Severity", "Gravità";
+    "nt.col.event" => "Event", "Evento";
+    "nt.col.category" => "Category", "Categoria";
+    "nt.col.when" => "When", "Quando";
+    "nt.col.name" => "Name", "Nome";
+    "nt.col.kind" => "Type", "Tipo";
+    "nt.col.delivery" => "Sends to", "Invia a";
+    "nt.col.matches" => "Matches", "Corrisponde a";
+    "nt.col.sends_to" => "Targets", "Destinazioni";
+    "nt.col.until" => "Until", "Fino a";
+    "nt.col.created" => "Created", "Creato";
+    "nt.f.any_sev" => "Any severity", "Qualsiasi gravità";
+    "nt.f.notice" => "Notice and above", "Avviso e superiori";
+    "nt.f.warning" => "Warning and above", "Attenzione e superiori";
+    "nt.f.error" => "Error and above", "Errore e superiori";
+    "nt.f.any_cat" => "Any category", "Qualsiasi categoria";
+    "nt.f.unacked" => "Not acknowledged", "Da vedere";
+    "nt.f.all" => "All", "Tutte";
+    "nt.f.acked" => "Acknowledged", "Viste";
+    "nt.sev.info" => "Info", "Informazione";
+    "nt.sev.notice" => "Notice", "Avviso";
+    "nt.sev.warning" => "Warning", "Attenzione";
+    "nt.sev.error" => "Error", "Errore";
+    "nt.sev.critical" => "Critical", "Critico";
+    "nt.cat.storage" => "Storage", "Storage";
+    "nt.cat.hardware" => "Hardware", "Hardware";
+    "nt.cat.ups" => "UPS", "UPS";
+    "nt.cat.system" => "System", "Sistema";
+    "nt.cat.security" => "Security", "Sicurezza";
+    "nt.cat.update" => "Updates", "Aggiornamenti";
+    "nt.cat.backup" => "Backup", "Backup";
+    "nt.cat.app" => "Apps", "App";
+    "nt.cat.task" => "Tasks", "Attività";
+    "nt.source" => "Source", "Origine";
+    "nt.key" => "Key", "Chiave";
+    "nt.key_help" => "End it with * to silence every key that starts with it.", "Termina con * per silenziare tutte le chiavi che iniziano così.";
+    "nt.key_required" => "Enter a key.", "Inserisci una chiave.";
+    "nt.first" => "First seen", "Prima volta";
+    "nt.last" => "Last seen", "Ultima volta";
+    "nt.fields" => "Fields", "Campi";
+    "nt.silence_title" => "Silence notifications", "Silenzia le notifiche";
+    "nt.silence_text" => "Events with this key are still recorded but not sent, and reminders stop. Critical events are silenced too.", "Gli eventi con questa chiave restano registrati ma non vengono inviati, e i promemoria si fermano. Vengono silenziati anche gli eventi critici.";
+    "nt.silence_for" => "For", "Per";
+    "nt.for_1h" => "1 hour", "1 ora";
+    "nt.for_8h" => "8 hours", "8 ore";
+    "nt.for_1d" => "1 day", "1 giorno";
+    "nt.for_7d" => "7 days", "7 giorni";
+    "nt.for_ever" => "Until removed", "Fino alla rimozione";
+    "nt.silenced_ok" => "Silence added", "Silenziamento aggiunto";
+    "nt.tab.targets" => "Targets", "Destinazioni";
+    "nt.tab.rules" => "Rules", "Regole";
+    "nt.tab.silences" => "Silences", "Silenziamenti";
+    "nt.targets_help" => "A target is where messages go. Secrets (passwords, tokens) are write-only: they are never shown again.", "Una destinazione è dove vanno i messaggi. I segreti (password, token) si possono solo scrivere: non vengono più mostrati.";
+    "nt.rules_help" => "A rule picks events by severity, category, source or field and sends them to targets. Each target gets an event once, even when several rules match.", "Una regola sceglie gli eventi per gravità, categoria, origine o campo e li invia alle destinazioni. Ogni destinazione riceve un evento una volta sola, anche se più regole corrispondono.";
+    "nt.silences_help" => "Silenced keys are recorded but not delivered. Use * at the end to silence a whole family of events.", "Le chiavi silenziate vengono registrate ma non inviate. Usa * alla fine per silenziare un'intera famiglia di eventi.";
+    "nt.add_target" => "Add target", "Aggiungi destinazione";
+    "nt.add_silence" => "Add silence", "Aggiungi silenziamento";
+    "nt.no_targets" => "No targets", "Nessuna destinazione";
+    "nt.no_targets_text" => "Add an email account, an ntfy topic or a Telegram chat to receive notifications away from the NAS.", "Aggiungi un account email, un argomento ntfy o una chat Telegram per ricevere le notifiche lontano dal NAS.";
+    "nt.no_rules" => "No rules", "Nessuna regola";
+    "nt.no_rules_text" => "Without rules, events are only listed in the notification center.", "Senza regole gli eventi compaiono solo nel centro notifiche.";
+    "nt.no_silences" => "No silences", "Nessun silenziamento";
+    "nt.no_silences_text" => "Silence a noisy event from the notification center or add a key here.", "Silenzia un evento ripetitivo dal centro notifiche o aggiungi qui una chiave.";
+    "nt.delete_target" => "Delete target {name}?", "Eliminare la destinazione {name}?";
+    "nt.delete_target_text" => "Messages waiting for this target are dropped.", "I messaggi in attesa per questa destinazione vengono scartati.";
+    "nt.target_in_use" => "A rule still sends to this target: remove it from the rule first.", "Una regola invia ancora a questa destinazione: toglila prima dalla regola.";
+    "nt.delete_rule" => "Delete rule {name}?", "Eliminare la regola {name}?";
+    "nt.delete_rule_text" => "Events it matched are no longer sent to its targets.", "Gli eventi che selezionava non vengono più inviati alle sue destinazioni.";
+    "nt.target_saved" => "Target {name} saved", "Destinazione {name} salvata";
+    "nt.rule_saved" => "Rule {name} saved", "Regola {name} salvata";
+    "nt.test" => "Send test message", "Invia messaggio di prova";
+    "nt.test_ok" => "Test message sent to {name} ({ms} ms)", "Messaggio di prova inviato a {name} ({ms} ms)";
+    "nt.test_failed" => "Test message to {name} failed:", "Messaggio di prova a {name} non riuscito:";
+    "nt.enabled" => "Enabled", "Attiva";
+    "nt.disabled" => "Disabled", "Disattivata";
+    "nt.failing" => "Failing", "In errore";
+    "nt.delivering" => "Working", "Funzionante";
+    "nt.never_used" => "Not used yet", "Non ancora usata";
+    "nt.last_ok" => "Last delivery {when}", "Ultimo invio {when}";
+    "nt.queued" => "{n} queued", "{n} in coda";
+    "nt.quiet" => "Quiet hours", "Ore di silenzio";
+    "nt.inverted" => "Inverted", "Invertita";
+    "nt.kind.smtp" => "Email (SMTP)", "Email (SMTP)";
+    "nt.kind.ntfy" => "ntfy", "ntfy";
+    "nt.kind.telegram" => "Telegram", "Telegram";
+    "nt.kind.gotify" => "Gotify", "Gotify";
+    "nt.kind.webhook" => "Webhook", "Webhook";
+    "nt.kind.ui" => "Web interface", "Interfaccia web";
+    "nt.kind.ui_help" => "Events are always listed in the notification center: as a rule target this means no external delivery.", "Gli eventi compaiono sempre nel centro notifiche: come destinazione di una regola significa nessun invio esterno.";
+    "nt.sec.starttls" => "STARTTLS (port 587)", "STARTTLS (porta 587)";
+    "nt.sec.tls" => "TLS (port 465)", "TLS (porta 465)";
+    "nt.sec.none" => "None (local relay only)", "Nessuna (solo relay locale)";
+    "nt.m.post" => "POST", "POST";
+    "nt.m.put" => "PUT", "PUT";
+    "nt.m.get" => "GET", "GET";
+    "nt.mode.all" => "All conditions", "Tutte le condizioni";
+    "nt.mode.any" => "Any condition", "Almeno una condizione";
+    "nt.secret.password" => "Password", "Password";
+    "nt.secret.token" => "Access token", "Token di accesso";
+    "nt.secret.bot_token" => "Bot token", "Token del bot";
+    "nt.secret_name" => "Secret name", "Nome del segreto";
+    "nt.secret_set" => "Set — type to replace", "Impostato — scrivi per sostituirlo";
+    "nt.secret_remove" => "Remove", "Rimuovi";
+    "nt.f.enabled" => "Enabled", "Attiva";
+    "nt.f.language" => "Message language", "Lingua dei messaggi";
+    "nt.f.language_help" => "Subjects, severity names and dates of the messages.", "Oggetti, nomi delle gravità e date dei messaggi.";
+    "nt.f.connection" => "Connection", "Connessione";
+    "nt.f.host" => "SMTP server", "Server SMTP";
+    "nt.f.port" => "Port", "Porta";
+    "nt.f.security" => "Encryption", "Crittografia";
+    "nt.f.from" => "Sender address", "Indirizzo del mittente";
+    "nt.f.to" => "Recipients", "Destinatari";
+    "nt.f.to_help" => "One address per line, or separated by commas.", "Un indirizzo per riga, oppure separati da virgole.";
+    "nt.f.server" => "Server", "Server";
+    "nt.f.topic" => "Topic", "Argomento";
+    "nt.f.topic_help" => "Anyone who knows a topic on a public server can read it: pick a long, random name.", "Chiunque conosca un argomento su un server pubblico può leggerlo: scegli un nome lungo e casuale.";
+    "nt.f.ntfy_user_help" => "Only with password authentication; leave empty to use an access token.", "Solo con autenticazione a password; lascia vuoto per usare un token di accesso.";
+    "nt.f.chat_id" => "Chat ID", "ID della chat";
+    "nt.f.chat_id_help" => "The numeric id of the user, group or channel the bot writes to.", "L'id numerico dell'utente, del gruppo o del canale in cui scrive il bot.";
+    "nt.f.api_url" => "Bot API address", "Indirizzo della Bot API";
+    "nt.f.url" => "URL", "URL";
+    "nt.f.url_help" => "A template: {{ secrets.name }} inserts a secret.", "Un modello: {{ secrets.nome }} inserisce un segreto.";
+    "nt.f.method" => "Method", "Metodo";
+    "nt.f.headers" => "Headers", "Intestazioni";
+    "nt.f.header_name" => "Header", "Intestazione";
+    "nt.f.header_value" => "Value", "Valore";
+    "nt.f.add_header" => "Add header", "Aggiungi intestazione";
+    "nt.f.body" => "Body", "Corpo";
+    "nt.f.body_help" => "Minijinja template with subject, message, severity, events, hostname and secrets. Empty: the default JSON document.", "Modello minijinja con subject, message, severity, events, hostname e secrets. Vuoto: il documento JSON predefinito.";
+    "nt.f.secrets" => "Secrets", "Segreti";
+    "nt.f.secrets_help" => "Values used as {{ secrets.name }} in the URL, headers and body. They are never shown again.", "Valori usati come {{ secrets.nome }} in URL, intestazioni e corpo. Non vengono più mostrati.";
+    "nt.f.add_secret" => "Add secret", "Aggiungi segreto";
+    "nt.f.when" => "Which events", "Quali eventi";
+    "nt.f.min_severity" => "At least", "Almeno";
+    "nt.f.mode" => "Combine conditions", "Combina le condizioni";
+    "nt.f.mode_help" => "Only the conditions that are set count.", "Contano solo le condizioni impostate.";
+    "nt.f.categories_help" => "None selected: any category.", "Nessuna selezionata: qualsiasi categoria.";
+    "nt.f.source_help" => "Regular expression on the event source (storage, scheduler, plugin:…). Empty: any.", "Espressione regolare sull'origine dell'evento (storage, scheduler, plugin:…). Vuoto: qualsiasi.";
+    "nt.f.field" => "Field", "Campo";
+    "nt.f.value" => "Value", "Valore";
+    "nt.f.regex" => "Regex", "Regex";
+    "nt.f.add_field" => "Add field condition", "Aggiungi condizione su campo";
+    "nt.f.invert" => "Invert", "Inverti";
+    "nt.f.invert_help" => "Send the events that do NOT match the conditions.", "Invia gli eventi che NON corrispondono alle condizioni.";
+    "nt.f.deliver" => "Delivery", "Invio";
+    "nt.f.group" => "Group events for", "Raggruppa gli eventi per";
+    "nt.f.group_help" => "Events within this window go out as one message.", "Gli eventi in questo intervallo partono in un solo messaggio.";
+    "nt.f.repeat" => "Remind every", "Ricorda ogni";
+    "nt.f.repeat_help" => "While a problem stays active and unacknowledged.", "Finché un problema resta attivo e non visto.";
+    "nt.f.quiet_help" => "Non-critical events are held during these windows and sent when they end. Critical events never wait.", "Gli eventi non critici vengono trattenuti in queste fasce e inviati alla fine. Gli eventi critici non aspettano mai.";
+    "nt.f.days" => "Days", "Giorni";
+    "nt.f.from_time" => "From", "Dalle";
+    "nt.f.to_time" => "To", "Alle";
+    "nt.f.add_quiet" => "Add quiet window", "Aggiungi fascia di silenzio";
+    "nt.v.name" => "Enter a name.", "Inserisci un nome.";
+    "nt.v.host" => "Enter the SMTP server.", "Inserisci il server SMTP.";
+    "nt.v.port" => "The port must be a number from 1 to 65535.", "La porta deve essere un numero da 1 a 65535.";
+    "nt.v.addresses" => "Enter the sender and at least one recipient.", "Inserisci il mittente e almeno un destinatario.";
+    "nt.v.ntfy" => "Enter the server and the topic.", "Inserisci il server e l'argomento.";
+    "nt.v.chat_id" => "Enter the chat ID.", "Inserisci l'ID della chat.";
+    "nt.v.server" => "Enter the server address.", "Inserisci l'indirizzo del server.";
+    "nt.v.url" => "Enter the URL.", "Inserisci l'URL.";
+    "nt.v.targets" => "Pick at least one target.", "Scegli almeno una destinazione.";
+    "sch.title" => "Task Scheduler", "Utilità di pianificazione";
+    "sch.subtitle" => "Scheduled commands, scripts and maintenance, run by systemd timers", "Comandi, script e manutenzione pianificati, eseguiti dai timer di systemd";
+    "sch.open_text" => "Scheduled commands and scripts, scrubs, SMART tests, recycle bin cleanup, with run history.", "Comandi e script pianificati, scrub, test SMART, pulizia del cestino, con cronologia delle esecuzioni.";
+    "sch.create" => "Create task", "Crea attività";
+    "sch.search" => "Search tasks", "Cerca attività";
+    "sch.tab.tasks" => "Tasks", "Attività";
+    "sch.tab.timers" => "System timers", "Timer di sistema";
+    "sch.tab.cron" => "Cron entries", "Voci cron";
+    "sch.empty" => "No scheduled tasks", "Nessuna attività pianificata";
+    "sch.empty_text" => "Run a command or a script on a schedule, at boot or on demand, and get notified when it fails.", "Esegui un comando o uno script secondo una pianificazione, all'avvio o su richiesta, con notifica in caso di errore.";
+    "sch.col.enabled" => "Enabled", "Attiva";
+    "sch.col.task" => "Task", "Attività";
+    "sch.col.action" => "Action", "Azione";
+    "sch.col.schedule" => "Schedule", "Pianificazione";
+    "sch.col.last" => "Last run", "Ultima esecuzione";
+    "sch.col.started" => "Started", "Avvio";
+    "sch.col.duration" => "Duration", "Durata";
+    "sch.col.result" => "Result", "Risultato";
+    "sch.col.timer" => "Timer", "Timer";
+    "sch.col.next" => "Next run", "Prossima esecuzione";
+    "sch.col.source" => "File", "File";
+    "sch.next" => "Next: {when}", "Prossima: {when}";
+    "sch.running" => "Running", "In esecuzione";
+    "sch.started" => "{name} started", "{name} avviata";
+    "sch.not_applied" => "Apply the pending changes first: the task does not exist on the system yet.", "Applica prima le modifiche in sospeso: l'attività non esiste ancora sul sistema.";
+    "sch.history" => "Run history", "Cronologia esecuzioni";
+    "sch.history_title" => "History of {name}", "Cronologia di {name}";
+    "sch.no_runs" => "No runs yet", "Nessuna esecuzione";
+    "sch.no_runs_text" => "Runs appear here with their result and output.", "Le esecuzioni compaiono qui con risultato e output.";
+    "sch.show_output" => "Show output", "Mostra output";
+    "sch.output" => "Output", "Output";
+    "sch.no_output" => "(no output)", "(nessun output)";
+    "sch.truncated" => "Only the last {size} of the output are kept.", "Dell'output vengono conservati solo gli ultimi {size}.";
+    "sch.run.ok" => "Succeeded", "Riuscita";
+    "sch.run.failed" => "Failed", "Non riuscita";
+    "sch.run.timeout" => "Timed out", "Tempo scaduto";
+    "sch.run.exit" => "Failed (exit {code})", "Non riuscita (uscita {code})";
+    "sch.run.signal" => "Killed ({sig})", "Interrotta ({sig})";
+    "sch.delete_title" => "Delete task {name}?", "Eliminare l'attività {name}?";
+    "sch.delete_text" => "Its timer and units are removed when the changes are applied. The run history stays.", "Il timer e le unità vengono rimossi all'applicazione delle modifiche. La cronologia resta.";
+    "sch.delete_job_task" => "This task belongs to a snapshot job or a power schedule: change or delete it there.", "Questa attività appartiene a un job di snapshot o a una pianificazione di alimentazione: modificala o eliminala lì.";
+    "sch.sec.general" => "General", "Generale";
+    "sch.sec.action" => "Action", "Azione";
+    "sch.sec.schedule" => "Schedule", "Pianificazione";
+    "sch.sec.notify" => "Notifications", "Notifiche";
+    "sch.f.name" => "Name", "Nome";
+    "sch.f.id" => "ID", "ID";
+    "sch.f.id_help" => "Lowercase letters, digits and dashes; the units are rynas-task-<id>. It cannot change later.", "Lettere minuscole, cifre e trattini; le unità sono rynas-task-<id>. Non si può cambiare in seguito.";
+    "sch.f.description" => "Description", "Descrizione";
+    "sch.f.enabled" => "Enabled", "Attiva";
+    "sch.f.enabled_help" => "A disabled task keeps its settings and can still be run by hand.", "Un'attività disattivata conserva le impostazioni e si può ancora eseguire a mano.";
+    "sch.f.command" => "Command", "Comando";
+    "sch.f.command_help" => "One line, run by /bin/sh.", "Una riga, eseguita da /bin/sh.";
+    "sch.f.script" => "Script", "Script";
+    "sch.f.script_help" => "The #! line picks the interpreter (default /bin/sh). rynas stores it so that only root can change it.", "La riga #! sceglie l'interprete (predefinito /bin/sh). rynas lo conserva in modo che solo root possa modificarlo.";
+    "sch.f.user" => "Run as", "Esegui come";
+    "sch.f.user_help" => "root (administrators only) or a local user.", "root (solo amministratori) o un utente locale.";
+    "sch.f.filesystem" => "Volume", "Volume";
+    "sch.f.filesystem_help" => "Mount point of the btrfs volume to scrub.", "Punto di mount del volume btrfs da verificare.";
+    "sch.f.disk" => "Disk", "Disco";
+    "sch.f.test" => "Test", "Test";
+    "sch.f.share_help" => "Empty: every shared folder with a recycle bin.", "Vuoto: tutte le cartelle condivise con cestino.";
+    "sch.f.days" => "Keep for (days)", "Conserva per (giorni)";
+    "sch.f.days_help" => "Empty: the folder's own retention.", "Vuoto: la conservazione della cartella.";
+    "sch.f.trigger" => "Run", "Esecuzione";
+    "sch.f.repeat" => "Repeat", "Ripeti";
+    "sch.f.time" => "Time", "Ora";
+    "sch.f.every_min" => "Every (minutes)", "Ogni (minuti)";
+    "sch.f.minute" => "Minute", "Minuto";
+    "sch.f.minute_help" => "Minute past every hour.", "Minuto di ogni ora.";
+    "sch.f.weekdays" => "Days", "Giorni";
+    "sch.f.dom" => "Day of the month", "Giorno del mese";
+    "sch.f.dom_help" => "Months without this day are skipped.", "I mesi senza questo giorno vengono saltati.";
+    "sch.f.expression" => "systemd calendar expression", "Espressione di calendario systemd";
+    "sch.f.expression_help" => "OnCalendar= syntax, e.g. Mon..Fri *-*-* 02:30:00 or *-*-1,15 04:00:00.", "Sintassi OnCalendar=, es. Mon..Fri *-*-* 02:30:00 o *-*-1,15 04:00:00.";
+    "sch.f.cron" => "Cron expression", "Espressione cron";
+    "sch.f.cron_help" => "Five fields (minute hour day month weekday) or @daily, @weekly…; converted to a systemd calendar.", "Cinque campi (minuto ora giorno mese giorno-settimana) o @daily, @weekly…; convertita in un calendario systemd.";
+    "sch.f.persistent" => "Catch up missed runs", "Recupera le esecuzioni perse";
+    "sch.f.persistent_help" => "A run missed while the NAS was off happens at the next boot.", "Un'esecuzione persa mentre il NAS era spento avviene al successivo avvio.";
+    "sch.f.random" => "Random delay (seconds)", "Ritardo casuale (secondi)";
+    "sch.f.random_help" => "Spreads tasks that start at the same time.", "Distribuisce le attività che partono alla stessa ora.";
+    "sch.f.boot_delay" => "Delay after boot (seconds)", "Ritardo dopo l'avvio (secondi)";
+    "sch.f.boot_delay_help" => "Counted from the moment systemd started.", "Contato dal momento in cui systemd è partito.";
+    "sch.f.notify" => "Send a notification", "Invia una notifica";
+    "sch.f.notify_output" => "Attach the output", "Allega l'output";
+    "sch.f.notify_output_help" => "The last lines of the output go with the notification.", "Le ultime righe dell'output accompagnano la notifica.";
+    "sch.f.timeout" => "Time limit (s)", "Limite di tempo (s)";
+    "sch.f.timeout_help" => "The run is stopped after this long. Empty: no limit.", "L'esecuzione viene fermata dopo questo tempo. Vuoto: nessun limite.";
+    "sch.f.nice" => "CPU priority (nice)", "Priorità CPU (nice)";
+    "sch.f.nice_help" => "-20 to 19; empty: 10 for commands and scripts.", "Da -20 a 19; vuoto: 10 per comandi e script.";
+    "sch.f.io_weight" => "Disk priority", "Priorità disco";
+    "sch.f.io_weight_help" => "1 to 10000; empty: 100.", "Da 1 a 10000; vuoto: 100.";
+    "sch.notify.on_failure" => "When it fails", "In caso di errore";
+    "sch.notify.always" => "After every run", "Dopo ogni esecuzione";
+    "sch.notify.never" => "Never", "Mai";
+    "sch.trig.calendar" => "On a schedule", "Pianificata";
+    "sch.trig.boot" => "At boot", "All'avvio";
+    "sch.trig.manual" => "Manually", "Manuale";
+    "sch.trig.manual_help" => "No timer: the task runs only with Run now.", "Nessun timer: l'attività parte solo con Esegui ora.";
+    "sch.trig.boot_text" => "At boot (+{s} s)", "All'avvio (+{s} s)";
+    "sch.rep.minutes" => "Every few minutes", "Ogni tot minuti";
+    "sch.rep.hourly" => "Every hour", "Ogni ora";
+    "sch.rep.daily" => "Every day", "Ogni giorno";
+    "sch.rep.weekly" => "Every week", "Ogni settimana";
+    "sch.rep.monthly" => "Every month", "Ogni mese";
+    "sch.rep.custom" => "Custom (systemd)", "Personalizzata (systemd)";
+    "sch.rep.cron" => "Cron syntax", "Sintassi cron";
+    "sch.desc.minutes" => "Every {n} min", "Ogni {n} min";
+    "sch.desc.hourly" => "Hourly at :{m}", "Ogni ora ai :{m}";
+    "sch.desc.daily" => "Daily at {time}", "Ogni giorno alle {time}";
+    "sch.desc.weekly" => "{days} at {time}", "{days} alle {time}";
+    "sch.desc.monthly" => "Monthly on day {d} at {time}", "Ogni mese il giorno {d} alle {time}";
+    "sch.next_runs" => "Next runs", "Prossime esecuzioni";
+    "sch.normalized" => "systemd reads it as", "systemd la interpreta come";
+    "sch.checking" => "Checking…", "Verifica…";
+    "sch.act.command" => "Command", "Comando";
+    "sch.act.script" => "Script", "Script";
+    "sch.act.snapshot" => "Snapshot job", "Job di snapshot";
+    "sch.act.scrub" => "Volume scrub", "Scrub del volume";
+    "sch.act.smart_test" => "SMART test", "Test SMART";
+    "sch.act.recycle_cleanup" => "Recycle bin cleanup", "Pulizia del cestino";
+    "sch.act.power_shutdown" => "Scheduled shutdown", "Spegnimento pianificato";
+    "sch.smart.short" => "Short", "Breve";
+    "sch.smart.long" => "Extended", "Esteso";
+    "sch.all_shares" => "All shared folders", "Tutte le cartelle condivise";
+    "sch.target" => "Target", "Destinazione";
+    "sch.internal_help" => "A maintenance task keeps its action: only the schedule and the options can change.", "Un'attività di manutenzione mantiene la sua azione: si possono cambiare solo pianificazione e opzioni.";
+    "sch.timers_help" => "systemd timers that rynas did not create, read only.", "Timer di systemd non creati da rynas, in sola lettura.";
+    "sch.cron_help" => "Crontab lines found on the system, read only. A line with an equivalent schedule can become a rynas task (remove the cron line afterwards).", "Righe crontab trovate sul sistema, in sola lettura. Una riga con una pianificazione equivalente può diventare un'attività rynas (poi rimuovi la riga cron).";
+    "sch.no_timers" => "No other timers", "Nessun altro timer";
+    "sch.no_cron" => "No cron entries", "Nessuna voce cron";
+    "sch.convert" => "Create a task from this line", "Crea un'attività da questa riga";
+    "sch.v.id" => "Use lowercase letters, digits and dashes (at most 48), starting with a letter or digit.", "Usa lettere minuscole, cifre e trattini (al massimo 48), iniziando con una lettera o una cifra.";
+    "sch.v.action" => "Pick an action.", "Scegli un'azione.";
+    "sch.v.command" => "Enter the command.", "Inserisci il comando.";
+    "sch.v.script" => "Enter the script.", "Inserisci lo script.";
+    "sch.v.filesystem" => "Enter the volume's mount point (an absolute path).", "Inserisci il punto di mount del volume (un percorso assoluto).";
+    "sch.v.disk" => "Enter the disk (sda, nvme0n1).", "Inserisci il disco (sda, nvme0n1).";
+    "sch.v.days" => "The days must be a number.", "I giorni devono essere un numero.";
+    "sch.v.delay" => "The delay must be a number of seconds.", "Il ritardo deve essere un numero di secondi.";
+    "sch.v.calendar" => "The schedule is not valid.", "La pianificazione non è valida.";
+    "snap.title" => "Snapshots", "Snapshot";
+    "snap.subtitle" => "Point-in-time copies of shared folders, file restore and rollback", "Copie puntuali delle cartelle condivise, ripristino di file e rollback";
+    "snap.tab.snapshots" => "Snapshots", "Snapshot";
+    "snap.tab.jobs" => "Snapshot jobs", "Job di snapshot";
+    "snap.tab.system" => "System restore points", "Punti di ripristino del sistema";
+    "snap.create_job" => "Create snapshot job", "Crea job di snapshot";
+    "snap.all_jobs" => "All jobs", "Tutti i job";
+    "snap.refresh" => "Refresh", "Aggiorna";
+    "snap.none" => "No snapshots", "Nessuno snapshot";
+    "snap.none_text" => "Snapshots appear here once a job has run. Jobs are applied with the pending changes.", "Gli snapshot compaiono qui dopo la prima esecuzione di un job. I job vengono applicati con le modifiche in sospeso.";
+    "snap.col.snapshot" => "Snapshot", "Snapshot";
+    "snap.col.job" => "Job", "Job";
+    "snap.col.created" => "Taken", "Creato";
+    "snap.col.retention" => "Retention", "Conservazione";
+    "snap.col.name" => "Name", "Nome";
+    "snap.col.size" => "Size", "Dimensione";
+    "snap.col.modified" => "Modified", "Modificato";
+    "snap.col.mode" => "Permissions", "Permessi";
+    "snap.system_point" => "System restore point", "Punto di ripristino del sistema";
+    "snap.share_of" => "Shared folder {share}", "Cartella condivisa {share}";
+    "snap.readonly" => "Read-only", "Sola lettura";
+    "snap.writable" => "Writable", "Scrivibile";
+    "snap.latest" => "Latest", "Più recente";
+    "snap.latest_at" => "Latest {when}", "Ultimo {when}";
+    "snap.reason" => "Reason: {r}", "Motivo: {r}";
+    "snap.browse" => "Browse", "Sfoglia";
+    "snap.browse_title" => "Browse {id}", "Sfoglia {id}";
+    "snap.path" => "Folder", "Cartella";
+    "snap.up" => "Parent folder", "Cartella superiore";
+    "snap.empty_dir" => "This folder is empty.", "Questa cartella è vuota.";
+    "snap.truncated" => "More than 10,000 entries: only the first ones by name are listed.", "Più di 10.000 elementi: vengono elencati solo i primi per nome.";
+    "snap.restore" => "Restore", "Ripristina";
+    "snap.restore_this" => "Restore this folder", "Ripristina questa cartella";
+    "snap.restore_file" => "Restore {path}?", "Ripristinare {path}?";
+    "snap.restore_folder" => "Restore folder {path}?", "Ripristinare la cartella {path}?";
+    "snap.restore_text" => "The version in snapshot {id} goes back to the shared folder. Nothing is overwritten.", "La versione dello snapshot {id} torna nella cartella condivisa. Nulla viene sovrascritto.";
+    "snap.restore_mode" => "Where", "Dove";
+    "snap.mode.copy" => "Next to the current one", "Accanto all'attuale";
+    "snap.mode.replace" => "In place", "Al suo posto";
+    "snap.mode.copy_help" => "Restored as \"name (restored date)\" next to the current version.", "Ripristinato come \"nome (restored data)\" accanto alla versione attuale.";
+    "snap.mode.replace_help" => "The current version is first renamed to name.rynas-before-restore-<time>, then the snapshot's version takes its place.", "La versione attuale viene prima rinominata in nome.rynas-before-restore-<ora>, poi la versione dello snapshot prende il suo posto.";
+    "snap.restored" => "{path} restored", "{path} ripristinato";
+    "snap.rollback" => "Roll back", "Rollback";
+    "snap.rollback_system" => "System restore points are rolled back from the console", "I punti di ripristino del sistema si ripristinano dalla console";
+    "snap.rollback_title" => "Roll back to {id}?", "Rollback a {id}?";
+    "snap.rollback_text" => "The whole shared folder goes back to this snapshot. Its current content is kept, renamed <folder>.rynas-rollback-<time>, until you delete it.", "L'intera cartella condivisa torna a questo snapshot. Il contenuto attuale viene conservato, rinominato <cartella>.rynas-rollback-<ora>, finché non lo elimini.";
+    "snap.rollback_nfs" => "NFS clients must mount the folder again afterwards.", "I client NFS devono rimontare la cartella dopo l'operazione.";
+    "snap.rolled_back" => "Rolled back to {id}", "Rollback a {id} eseguito";
+    "snap.delete_title" => "Delete snapshot {id}?", "Eliminare lo snapshot {id}?";
+    "snap.delete_text" => "Its files can no longer be restored. This cannot be undone.", "I suoi file non si potranno più ripristinare. L'operazione non si può annullare.";
+    "snap.deleted" => "Snapshot {id} deleted", "Snapshot {id} eliminato";
+    "snap.del.latest" => "The newest snapshot of a job is kept: it is the base of the next one", "Lo snapshot più recente di un job viene conservato: è la base del successivo";
+    "snap.del.writable" => "Not a read-only snapshot: left alone", "Non è uno snapshot in sola lettura: non viene toccato";
+    "snap.del.not_subvolume" => "Not a subvolume: left alone", "Non è un subvolume: non viene toccato";
+    "snap.jobs_help" => "Each job snapshots one shared folder or subvolume on its schedule and keeps hourly, daily, weekly, monthly and yearly snapshots. A shared folder with SMB also gets Windows \"Previous versions\".", "Ogni job crea snapshot di una cartella condivisa o di un subvolume secondo la sua pianificazione e conserva snapshot orari, giornalieri, settimanali, mensili e annuali. Una cartella condivisa con SMB ottiene anche le \"Versioni precedenti\" di Windows.";
+    "snap.no_jobs" => "No snapshot jobs", "Nessun job di snapshot";
+    "snap.no_jobs_text" => "Protect a shared folder against deleted files and ransomware with hourly snapshots.", "Proteggi una cartella condivisa da file eliminati e ransomware con snapshot orari.";
+    "snap.take_now" => "Take a snapshot now", "Crea uno snapshot ora";
+    "snap.show_snapshots" => "Show the snapshots of this job", "Mostra gli snapshot di questo job";
+    "snap.delete_job" => "Delete snapshot job {name}?", "Eliminare il job di snapshot {name}?";
+    "snap.delete_job_text" => "Its schedule and the SMB previous versions go with it. Snapshots already on disk stay.", "Con il job se ne vanno la pianificazione e le versioni precedenti SMB. Gli snapshot già su disco restano.";
+    "snap.ret.none" => "Latest only", "Solo il più recente";
+    "snap.u.h" => "hourly", "orari";
+    "snap.u.d" => "daily", "giornalieri";
+    "snap.u.w" => "weekly", "settimanali";
+    "snap.u.m" => "monthly", "mensili";
+    "snap.u.y" => "yearly", "annuali";
+    "snap.preset.standard" => "Standard", "Standard";
+    "snap.preset.light" => "Light", "Leggera";
+    "snap.preset.long" => "Long", "Lunga";
+    "snap.preset.custom" => "Custom", "Personalizzata";
+    "snap.preset_keeps" => "Keeps {counts}; everything younger than {min} stays.", "Conserva {counts}; tutto ciò che ha meno di {min} resta.";
+    "snap.preview" => "Preview what would be deleted", "Anteprima di cosa verrebbe eliminato";
+    "snap.preview_counts" => "Now this retention keeps {keep} snapshots and deletes {delete}.", "Ora questa conservazione mantiene {keep} snapshot e ne elimina {delete}.";
+    "snap.preview_empty" => "There are no snapshots of this job yet.", "Non ci sono ancora snapshot di questo job.";
+    "snap.sec.source" => "What to protect", "Cosa proteggere";
+    "snap.f.name" => "Job name", "Nome del job";
+    "snap.f.name_help" => "Also the snapshot name prefix (name.YYYYMMDDTHHMM). It cannot change later.", "È anche il prefisso dei nomi degli snapshot (nome.AAAAMMGGTHHMM). Non si può cambiare in seguito.";
+    "snap.f.source" => "Source", "Origine";
+    "snap.src.path" => "Subvolume path", "Percorso del subvolume";
+    "snap.f.pick_share" => "Choose a shared folder", "Scegli una cartella condivisa";
+    "snap.f.share_help" => "Its folder must be a btrfs subvolume.", "La sua cartella deve essere un subvolume btrfs.";
+    "snap.f.subvolume" => "Subvolume", "Subvolume";
+    "snap.f.subvolume_help" => "Absolute path of a btrfs subvolume.", "Percorso assoluto di un subvolume btrfs.";
+    "snap.f.dir" => "Snapshot folder", "Cartella degli snapshot";
+    "snap.f.dir_help" => "On the same volume. Empty: .snapshots/<job> next to the subvolume.", "Sullo stesso volume. Vuoto: .snapshots/<job> accanto al subvolume.";
+    "snap.f.enabled" => "Take snapshots on schedule", "Crea snapshot secondo la pianificazione";
+    "snap.f.enabled_help" => "Off: snapshots are taken only with Take a snapshot now.", "Disattivato: gli snapshot si creano solo con Crea uno snapshot ora.";
+    "snap.f.preset" => "Keep", "Conserva";
+    "snap.f.hourly" => "Hourly", "Orari";
+    "snap.f.daily" => "Daily", "Giornalieri";
+    "snap.f.weekly" => "Weekly", "Settimanali";
+    "snap.f.monthly" => "Monthly", "Mensili";
+    "snap.f.yearly" => "Yearly", "Annuali";
+    "snap.f.min" => "Always keep", "Conserva sempre";
+    "snap.f.min_help" => "latest, all, or an age such as 1d, 12h, 2w.", "latest, all, o un'età come 1d, 12h, 2w.";
+    "snap.v.name" => "Use letters, digits, _ and - (at most 48), starting with a letter or digit.", "Usa lettere, cifre, _ e - (al massimo 48), iniziando con una lettera o una cifra.";
+    "snap.v.source" => "Choose a shared folder or enter an absolute subvolume path.", "Scegli una cartella condivisa o inserisci il percorso assoluto di un subvolume.";
+    "snap.system_help" => "Before apt installs or upgrades packages, rynas takes a read-only snapshot of the system. Rolling the system back is a console procedure.", "Prima che apt installi o aggiorni pacchetti, rynas crea uno snapshot in sola lettura del sistema. Il rollback del sistema è una procedura da console.";
+    "snap.system_enabled" => "Take restore points before updates", "Crea punti di ripristino prima degli aggiornamenti";
+    "snap.system_enabled_help" => "Requires a btrfs root filesystem.", "Richiede un filesystem di root btrfs.";
+    "snap.system_keep" => "Restore points kept", "Punti di ripristino conservati";
+    "snap.system_keep_help" => "The oldest beyond this number are deleted after a new one.", "I più vecchi oltre questo numero vengono eliminati dopo uno nuovo.";
+    "snap.system_prefix" => "Name prefix", "Prefisso del nome";
+    // network page
+    "nav.network" => "Network", "Rete";
+    "net.title" => "Network", "Rete";
+    "net.subtitle" => "Interfaces, addresses and rescue paths. Every change is tested and rolled back unless you confirm it.", "Interfacce, indirizzi e accessi di emergenza. Ogni modifica viene provata e annullata se non la confermi.";
+    "net.tab_ifaces" => "Interfaces", "Interfacce";
+    "net.tab_revisions" => "Revisions", "Revisioni";
+    "net.tab_rescue" => "Rescue access", "Accesso di emergenza";
+    "net.tab_tools" => "Diagnostics", "Diagnostica";
+    "net.summary" => "Overview", "Riepilogo";
+    "net.services" => "Network services", "Servizi di rete";
+    "net.hostname" => "Host name", "Nome host";
+    "net.mgmt" => "This session comes through", "Questa sessione arriva da";
+    "net.mgmt_unknown" => "Unknown (local or proxied connection)", "Sconosciuta (connessione locale o tramite proxy)";
+    "net.gateway" => "Default gateway", "Gateway predefinito";
+    "net.dns" => "DNS servers", "Server DNS";
+    "net.search" => "Search domains", "Domini di ricerca";
+    "net.lkg" => "Last known good revision", "Ultima revisione funzionante";
+    "net.lkg_none" => "None yet", "Nessuna per ora";
+    "net.svc_networkd" => "systemd-networkd", "systemd-networkd";
+    "net.svc_resolved" => "systemd-resolved", "systemd-resolved";
+    "net.svc_ifupdown" => "ifupdown (networking)", "ifupdown (networking)";
+    "net.svc_nm" => "NetworkManager", "NetworkManager";
+    "net.svc_avahi" => "Avahi (mDNS)", "Avahi (mDNS)";
+    "net.running" => "Running", "In esecuzione";
+    "net.not_running" => "Not running", "Non attivo";
+    "net.reason.timeout" => "not confirmed in time", "non confermata in tempo";
+    "net.reason.manual" => "rolled back by hand", "annullata a mano";
+    "net.reason.verify_failed" => "the new settings did not come up", "le nuove impostazioni non si sono attivate";
+    "net.reason.boot_guard" => "a test was interrupted by a reboot", "una prova è stata interrotta da un riavvio";
+    "net.reason.boot_check" => "no routable address after the boot", "nessun indirizzo instradabile dopo l'avvio";
+    "net.reason.watchdog" => "the network was unreachable after the boot", "la rete non era raggiungibile dopo l'avvio";
+    "net.reason.other" => "automatic", "automatico";
+    "net.rolled_back_at" => "Network settings rolled back on {date} ({reason}): revision #{rev} is active again.", "Impostazioni di rete annullate il {date} ({reason}): è di nuovo attiva la revisione #{rev}.";
+    "net.rollback_unverified" => "The restored state could not be verified: check the interfaces.", "Non è stato possibile verificare lo stato ripristinato: controlla le interfacce.";
+    "net.adopt_title" => "Network configured by ifupdown", "Rete configurata da ifupdown";
+    "net.adopt_text" => "/etc/network/interfaces configures the ports, so they are read-only here. Let rynas manage them to edit them safely (same addresses, with a timed test).", "Le porte sono configurate da /etc/network/interfaces e qui sono in sola lettura. Affidale a rynas per modificarle in sicurezza (stessi indirizzi, con prova a tempo).";
+    "net.adopt_btn" => "Let rynas manage…", "Affida a rynas…";
+    "net.adopt_dialog_text" => "rynas writes systemd-networkd files with the same addresses, keeps the original as interfaces.rynas-bak and switches from ifupdown to systemd-networkd. Bonds, bridges, VLANs and static IPv6 are not migrated yet.", "rynas scrive i file di systemd-networkd con gli stessi indirizzi, conserva l'originale come interfaces.rynas-bak e passa da ifupdown a systemd-networkd. Bond, bridge, VLAN e IPv6 statico non vengono ancora migrati.";
+    "net.adopt_when" => "When", "Quando";
+    "net.adopt_next_boot" => "At the next reboot (recommended)", "Al prossimo riavvio (consigliato)";
+    "net.adopt_next_boot_help" => "Safest when you are connected over the network: if no port has a routable address 3 minutes after the boot, ifupdown comes back.", "La scelta più sicura se sei collegato via rete: se 3 minuti dopo l'avvio nessuna porta ha un indirizzo instradabile, torna ifupdown.";
+    "net.adopt_now" => "Now, with a timed test", "Adesso, con prova a tempo";
+    "net.adopt_now_help" => "The network restarts now; confirm within the time limit or ifupdown comes back.", "La rete si riavvia subito; conferma entro il tempo limite o torna ifupdown.";
+    "net.adopt_go" => "Let rynas manage", "Affida a rynas";
+    "net.adopt_scheduled" => "Migration planned for the next reboot: {ifaces}.", "Migrazione programmata al prossimo riavvio: {ifaces}.";
+    "net.pending_title" => "Network changes not applied yet", "Modifiche di rete non ancora applicate";
+    "net.pending_text" => "Staged on {ifaces}. Nothing changes until you apply them.", "Preparate su {ifaces}. Non cambia nulla finché non le applichi.";
+    "net.review_apply" => "Review and apply…", "Rivedi e applica…";
+    "net.discard_title" => "Discard the network changes?", "Scartare le modifiche di rete?";
+    "net.discard_text" => "The staged settings of every interface are dropped. The running network does not change.", "Le impostazioni preparate di tutte le interfacce vengono eliminate. La rete in uso non cambia.";
+    "net.discarded" => "Network changes discarded", "Modifiche di rete scartate";
+    "net.apply_title" => "Apply network settings", "Applica le impostazioni di rete";
+    "net.timeout" => "Time to confirm", "Tempo per confermare";
+    "net.timeout_help" => "Without a confirmation in this time the previous settings come back by themselves.", "Senza conferma entro questo tempo tornano da sole le impostazioni precedenti.";
+    "net.seconds" => "{n} s", "{n} s";
+    "net.mgmt_touched" => "You are connected through {iface}. After Apply this page may lose the connection: open the NAS at {addrs} and confirm there.", "Sei collegato tramite {iface}. Dopo Applica questa pagina potrebbe perdere la connessione: apri il NAS su {addrs} e conferma da lì.";
+    "net.mgmt_touched_dhcp" => "You are connected through {iface}. After Apply the address may change (DHCP): reconnect through the host name, the link-local address or the address your router assigns, and confirm there.", "Sei collegato tramite {iface}. Dopo Applica l'indirizzo potrebbe cambiare (DHCP): ricollegati con il nome host, l'indirizzo link-local o l'indirizzo assegnato dal router e conferma da lì.";
+    "net.mgmt_unknown_apply" => "rynas cannot tell which interface this session uses (local or proxied connection), so the timed test is mandatory.", "rynas non sa quale interfaccia usa questa sessione (connessione locale o tramite proxy), quindi la prova a tempo è obbligatoria.";
+    "net.skip_test" => "Apply without the timed test", "Applica senza prova a tempo";
+    "net.skip_test_help" => "Only for interfaces this session does not use. There is no automatic rollback.", "Solo per interfacce che questa sessione non usa. Non c'è annullamento automatico.";
+    "net.test_mandatory" => "The timed test cannot be skipped: the change touches the connection you are using.", "La prova a tempo non si può saltare: la modifica tocca la connessione che stai usando.";
+    "net.apply_now" => "Apply now", "Applica ora";
+    "net.apply_test" => "Apply with a {n} s test", "Applica con prova di {n} s";
+    "net.trial_title" => "Confirm the new network settings", "Conferma le nuove impostazioni di rete";
+    "net.trial_text" => "Confirm within {n} s or they are rolled back to revision {rev}.", "Conferma entro {n} s o si torna alla revisione {rev}.";
+    "net.trial_deadline" => "Time is up", "Tempo scaduto";
+    "net.trial_deadline_text" => "Not confirmed: revision {rev} is being restored.", "Non confermate: si sta ripristinando la revisione {rev}.";
+    "net.trial_applying" => "Applying network settings", "Applicazione delle impostazioni di rete";
+    "net.trial_applying_text" => "Applied without a timed test. This takes a few seconds.", "Applicate senza prova a tempo. Servono pochi secondi.";
+    "net.trial_starting" => "Checking the new addresses and writing the configuration…", "Controllo dei nuovi indirizzi e scrittura della configurazione…";
+    "net.trial_who" => "Started by {user} on {ifaces}.", "Avviata da {user} su {ifaces}.";
+    "net.previous" => "the previous settings", "le impostazioni precedenti";
+    "net.left_sr" => "About {n} seconds left to confirm.", "Circa {n} secondi per confermare.";
+    "net.confirm" => "Keep these settings", "Mantieni queste impostazioni";
+    "net.rollback_now" => "Roll back now", "Annulla ora";
+    "net.no_token" => "Confirm from the browser where the change was applied, or roll it back here.", "Conferma dal browser in cui è stata applicata la modifica, oppure annullala da qui.";
+    "net.confirmed" => "Network settings kept: revision #{rev} is the last known good.", "Impostazioni di rete mantenute: la revisione #{rev} è l'ultima funzionante.";
+    "net.confirm_conflict" => "The confirmation must come over the new network: open the NAS at one of the new addresses below and confirm there.", "La conferma deve arrivare dalla nuova rete: apri il NAS su uno dei nuovi indirizzi qui sotto e conferma da lì.";
+    "net.confirm_token" => "This confirmation link is not valid for the running test.", "Questo link di conferma non vale per la prova in corso.";
+    "net.kept" => "The new network settings are kept.", "Le nuove impostazioni di rete sono state mantenute.";
+    "net.applied" => "Network settings applied.", "Impostazioni di rete applicate.";
+    "net.not_kept" => "The new network settings were not kept: the previous ones were restored.", "Le nuove impostazioni di rete non sono state mantenute: sono state ripristinate le precedenti.";
+    "net.lost_title" => "Connection lost.", "Connessione persa.";
+    "net.lost_text" => "Expected if the address of this page changed. This page keeps trying by itself; meanwhile open the NAS at a new address and confirm there.", "È normale se l'indirizzo di questa pagina è cambiato. La pagina continua a riprovare da sola; intanto apri il NAS su un nuovo indirizzo e conferma da lì.";
+    "net.lost_after" => "Not confirmed in time: the previous settings are coming back. This page reconnects by itself, or reopen {url}.", "Non confermato in tempo: stanno tornando le impostazioni precedenti. La pagina si ricollega da sola, oppure riapri {url}.";
+    "net.cands_title" => "Where the NAS answers after the change:", "Dove risponde il NAS dopo la modifica:";
+    "net.cands_text" => "Each link opens the confirmation page (sign in again if asked).", "Ogni link apre la pagina di conferma (accedi di nuovo se richiesto).";
+    "net.boot_title" => "Migration planned for the next reboot", "Migrazione programmata al prossimo riavvio";
+    "net.boot_text" => "At the next boot systemd-networkd takes over {ifaces}. If no port has a routable address 3 minutes later, ifupdown comes back by itself.", "Al prossimo avvio systemd-networkd prende in carico {ifaces}. Se dopo 3 minuti nessuna porta ha un indirizzo instradabile, torna da solo ifupdown.";
+    "net.boot_cancel" => "Cancel the migration", "Annulla la migrazione";
+    "net.col_iface" => "Interface", "Interfaccia";
+    "net.col_speed" => "Speed", "Velocità";
+    "net.col_mac" => "MAC address", "Indirizzo MAC";
+    "net.col_addresses" => "Addresses", "Indirizzi";
+    "net.col_config" => "Configuration", "Configurazione";
+    "net.col_kind" => "Type", "Tipo";
+    "net.col_ifaces" => "Interfaces", "Interfacce";
+    "net.k.ethernet" => "Ethernet", "Ethernet";
+    "net.k.bond" => "Bond", "Bond";
+    "net.k.bridge" => "Bridge", "Bridge";
+    "net.k.vlan" => "VLAN", "VLAN";
+    "net.k.loopback" => "Loopback", "Loopback";
+    "net.k.wireless" => "Wireless", "Wireless";
+    "net.k.virtual" => "Virtual", "Virtuale";
+    "net.k.other" => "Other", "Altro";
+    "net.b.networkd" => "systemd-networkd", "systemd-networkd";
+    "net.b.ifupdown" => "ifupdown", "ifupdown";
+    "net.b.nm" => "NetworkManager", "NetworkManager";
+    "net.b.none" => "Not configured", "Non configurata";
+    "net.m.dhcp" => "DHCP", "DHCP";
+    "net.m.static" => "Static", "Statico";
+    "net.m.disabled" => "Off (link-local only)", "Disattivato (solo link-local)";
+    "net.st_up" => "Connected", "Connessa";
+    "net.st_dormant" => "Cable, not up", "Cavo presente, non attiva";
+    "net.st_no_cable" => "No cable", "Nessun cavo";
+    "net.st_down" => "Down", "Disattivata";
+    "net.st_unknown" => "Unknown", "Sconosciuto";
+    "net.half_duplex" => "half duplex", "half duplex";
+    "net.dynamic" => "dynamic", "dinamico";
+    "net.configured" => "configured", "configurato";
+    "net.no_address" => "No address", "Nessun indirizzo";
+    "net.read_only" => "Read-only", "Sola lettura";
+    "net.this_connection" => "This connection", "Questa connessione";
+    "net.this_connection_help" => "You reach rynas through this interface: changes to it are always tested with a timed confirmation.", "Raggiungi rynas tramite questa interfaccia: le sue modifiche vengono sempre provate con conferma a tempo.";
+    "net.show_virtual" => "Show virtual interfaces", "Mostra interfacce virtuali";
+    "net.hidden_virtual" => "{n} virtual interfaces hidden", "{n} interfacce virtuali nascoste";
+    "net.none_text" => "The system reports no network interface rynas can show.", "Il sistema non segnala interfacce di rete da mostrare.";
+    "net.details_title" => "Details of {name}", "Dettagli di {name}";
+    "net.read_only_text" => "This interface is read-only in rynas.", "Questa interfaccia è in sola lettura in rynas.";
+    "net.mgmt_edit" => "You are connected through this interface. The change is tested with a timed confirmation; if its address changes you will reconnect at the new one.", "Sei collegato tramite questa interfaccia. La modifica viene provata con conferma a tempo; se cambia l'indirizzo ti ricollegherai a quello nuovo.";
+    "net.has_pending" => "This interface already has a staged change: you are editing it.", "Questa interfaccia ha già una modifica preparata: la stai modificando.";
+    "net.sec_ipv4" => "IPv4", "IPv4";
+    "net.sec_diff" => "Changes", "Modifiche";
+    "net.sec_details" => "Details", "Dettagli";
+    "net.sec_applied" => "Applied settings", "Impostazioni applicate";
+    "net.sec_ifupdown" => "ifupdown configuration (read-only)", "Configurazione ifupdown (sola lettura)";
+    "net.f_method" => "IPv4 address", "Indirizzo IPv4";
+    "net.f_addresses" => "Addresses", "Indirizzi";
+    "net.f_gateway" => "Gateway", "Gateway";
+    "net.f_mtu" => "MTU", "MTU";
+    "net.method_help" => "Every port also keeps a link-local rescue address.", "Ogni porta conserva anche un indirizzo link-local di emergenza.";
+    "net.addresses_help" => "One per line, with the prefix (192.0.2.10/24).", "Uno per riga, con il prefisso (192.0.2.10/24).";
+    "net.gateway_help" => "Optional; must be inside one of the addresses' subnets.", "Facoltativo; deve stare in una delle sottoreti degli indirizzi.";
+    "net.dns_help" => "One per line. With DHCP they are added to the servers the lease gives.", "Uno per riga. Con DHCP si aggiungono a quelli forniti dal server DHCP.";
+    "net.mtu_help" => "Empty: the driver default (usually 1500).", "Vuoto: il valore predefinito del driver (di solito 1500).";
+    "net.mtu_help_max" => "Empty: the driver default (usually 1500). This port accepts up to {max}.", "Vuoto: il valore predefinito del driver (di solito 1500). Questa porta accetta fino a {max}.";
+    "net.mtu_default" => "default", "predefinito";
+    "net.max" => "max", "max";
+    "net.stage" => "Stage change", "Prepara modifica";
+    "net.staged" => "Change staged: apply it from the Network page", "Modifica preparata: applicala dalla pagina Rete";
+    "net.revert" => "Drop staged change", "Elimina modifica preparata";
+    "net.no_changes" => "No changes.", "Nessuna modifica.";
+    "net.phase_note" => "IPv6 settings, bonds, VLANs and bridges are shown read-only for now.", "Per ora impostazioni IPv6, bond, VLAN e bridge sono in sola lettura.";
+    "net.driver" => "Driver", "Driver";
+    "net.backend" => "Managed by", "Gestita da";
+    "net.config_file" => "Configuration file", "File di configurazione";
+    "net.link_local" => "Link-local rescue address", "Indirizzo link-local di emergenza";
+    "net.dns_live" => "DNS of this link", "DNS di questo collegamento";
+    "net.ifu_method" => "Method", "Metodo";
+    "net.ifu_bond" => "Bond members", "Membri del bond";
+    "net.ifu_bridge" => "Bridge ports", "Porte del bridge";
+    "net.ifu_vlan" => "VLAN parent", "Interfaccia padre VLAN";
+    "net.ifu_file" => "File", "File";
+    "net.v_address" => "Use host addresses with a prefix of 8–32 (192.0.2.10/24).", "Usa indirizzi host con prefisso 8–32 (192.0.2.10/24).";
+    "net.v_addresses_none" => "A static configuration needs at least one address.", "Una configurazione statica richiede almeno un indirizzo.";
+    "net.v_gateway" => "Enter an IPv4 address.", "Inserisci un indirizzo IPv4.";
+    "net.v_gateway_subnet" => "The gateway must be inside an address's subnet and differ from it.", "Il gateway deve stare nella sottorete di un indirizzo ed essere diverso da esso.";
+    "net.v_dns" => "Enter IP addresses (IPv4 or IPv6), not names.", "Inserisci indirizzi IP (IPv4 o IPv6), non nomi.";
+    "net.v_mtu" => "MTU out of range for this port.", "MTU fuori dall'intervallo accettato da questa porta.";
+    "net.v_host" => "Enter a host name or address, without spaces.", "Inserisci un nome host o un indirizzo, senza spazi.";
+    "net.v_count" => "1 to 10.", "Da 1 a 10.";
+    "net.v_size" => "0 to 65000 bytes.", "Da 0 a 65000 byte.";
+    "net.revs_intro" => "Every change keeps a snapshot of the network before it. Restoring a revision is tested like an apply.", "Ogni modifica conserva una copia della rete precedente. Il ripristino di una revisione viene provato come un'applicazione.";
+    "net.revs_empty" => "No revisions yet", "Ancora nessuna revisione";
+    "net.revs_empty_text" => "They appear with the first applied change.", "Compaiono con la prima modifica applicata.";
+    "net.rk.snapshot" => "Snapshot before a change", "Copia prima di una modifica";
+    "net.rk.apply" => "Applied", "Applicata";
+    "net.rk.adopt" => "Adopted from ifupdown", "Adottata da ifupdown";
+    "net.rk.rescue" => "Rescue settings", "Impostazioni di emergenza";
+    "net.rk.restore" => "Restored", "Ripristinata";
+    "net.rk.other" => "Other", "Altro";
+    "net.rev_lkg" => "Last known good", "Ultima funzionante";
+    "net.rev_good" => "Good", "Funzionante";
+    "net.rev_unconfirmed" => "Not confirmed", "Non confermata";
+    "net.restore_rev" => "Restore revision #{rev}", "Ripristina la revisione #{rev}";
+    "net.restore_text" => "The network of {date} comes back with a timed test: confirm it from the restored network or it is rolled back.", "Torna la rete del {date} con una prova a tempo: confermala dalla rete ripristinata o viene annullata.";
+    "net.rescue_intro" => "Ways in when the normal address does not work. They stay on whatever the interface settings are.", "Vie d'accesso quando l'indirizzo normale non funziona. Restano attive qualunque siano le impostazioni delle interfacce.";
+    "net.mdns" => "Local name (mDNS)", "Nome locale (mDNS)";
+    "net.mdns_text" => "Computers on the same network find the NAS by this name, even when its address changes.", "I computer della stessa rete trovano il NAS con questo nome, anche se cambia indirizzo.";
+    "net.avahi_on" => "Avahi running", "Avahi attivo";
+    "net.avahi_off" => "Avahi not running", "Avahi non attivo";
+    "net.mdns_service" => "Announce rynas on the network", "Annuncia rynas nella rete";
+    "net.mdns_service_help" => "Publishes the web interface over Bonjour/mDNS (_rynas._tcp, _http._tcp). Applied with the pending changes.", "Pubblica l'interfaccia web via Bonjour/mDNS (_rynas._tcp, _http._tcp). Si applica con le modifiche in sospeso.";
+    "net.ll_title" => "Link-local addresses", "Indirizzi link-local";
+    "net.ll_text" => "Always on every port and derived from the MAC address: connect a computer straight to the port with a cable and open this address.", "Sempre attivi su ogni porta e ricavati dall'indirizzo MAC: collega un computer direttamente alla porta con un cavo e apri questo indirizzo.";
+    "net.ll_none" => "No port has a MAC address.", "Nessuna porta ha un indirizzo MAC.";
+    "net.ll_active" => "Active", "Attivo";
+    "net.ll_inactive" => "Not on the port now", "Non presente ora";
+    "net.reset_na" => "Not available on this hardware.", "Non disponibile su questo hardware.";
+    "net.reset_on" => "Restores the network", "Ripristina la rete";
+    "net.reset_off" => "Does not restore the network", "Non ripristina la rete";
+    "net.reset_pending_on" => "Will restore the network after apply", "Ripristinerà la rete dopo l'applicazione";
+    "net.reset_pending_off" => "Will stop restoring the network after apply", "Smetterà di ripristinare la rete dopo l'applicazione";
+    "net.reset_text" => "Press it twice within 10 seconds: DHCP and link-local on every port, the previous settings kept as a revision.", "Premilo due volte entro 10 secondi: DHCP e link-local su ogni porta, le impostazioni precedenti conservate come revisione.";
+    "net.reset_owner" => "Set in Hardware › Synology.", "Si imposta in Hardware › Synology.";
+    "net.reset_owner_link" => "Open Hardware", "Apri Hardware";
+    "net.tools_intro" => "Run from the NAS itself. 20 runs per minute.", "Eseguiti dal NAS stesso. 20 esecuzioni al minuto.";
+    "net.d_tool" => "Tool", "Strumento";
+    "net.d_ping" => "Ping", "Ping";
+    "net.d_trace" => "Traceroute", "Traceroute";
+    "net.d_dns" => "DNS lookup", "Ricerca DNS";
+    "net.d_host" => "Host", "Host";
+    "net.d_name" => "Name", "Nome";
+    "net.d_record" => "Record type", "Tipo di record";
+    "net.d_count" => "Packets", "Pacchetti";
+    "net.d_size" => "Payload size (bytes)", "Dimensione dati (byte)";
+    "net.d_iface" => "From interface", "Dall'interfaccia";
+    "net.d_any" => "Any", "Qualsiasi";
+    "net.d_df" => "Don't fragment", "Non frammentare";
+    "net.d_df_help" => "With a payload size, tests the path MTU (1472 bytes = MTU 1500).", "Con una dimensione dati verifica l'MTU del percorso (1472 byte = MTU 1500).";
+    "net.d_server" => "DNS server", "Server DNS";
+    "net.d_server_help" => "Optional: ask this server instead of the system resolver.", "Facoltativo: interroga questo server invece del resolver di sistema.";
+    "net.d_run" => "Run", "Esegui";
+    "net.d_ok" => "Succeeded", "Riuscito";
+    "net.d_failed" => "Failed", "Non riuscito";
+    "net.d_exit" => "exit code", "codice di uscita";
+    "net.d_output" => "Output", "Output";
+    "net.rate_limited" => "Too many runs: try again in {n} s.", "Troppe esecuzioni: riprova tra {n} s.";
+    "net.h_hop" => "Hop", "Salto";
+    "net.h_host" => "Host", "Host";
+    "net.h_loss" => "Loss", "Perdita";
+    "net.h_avg" => "Avg ms", "Media ms";
+    "net.h_best" => "Best ms", "Min ms";
+    "net.h_worst" => "Worst ms", "Max ms";
+}
+
+// ---------------------------------------------------------------- formatting
+
+fn sep() -> char {
+    if lang() == Lang::It { ',' } else { '.' }
+}
+
+/// Fixed decimals with the locale's decimal separator.
+pub fn num(v: f64, decimals: usize) -> String {
+    let s = format!("{v:.decimals$}");
+    if sep() == ',' { s.replace('.', ",") } else { s }
+}
+
+/// Up to 3 significant digits: 1.23, 12.3, 123.
+fn sig3(v: f64) -> String {
+    let d = if v >= 100.0 {
+        0
+    } else if v >= 10.0 {
+        1
+    } else {
+        2
+    };
+    num(v, d)
+}
+
+/// 1536 -> "1,50 KiB".
+pub fn bytes(n: u64) -> String {
+    const U: [&str; 7] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
+    if n < 1024 {
+        return format!("{n} B");
+    }
+    let mut v = n as f64;
+    let mut i = 0;
+    while v >= 1024.0 && i < U.len() - 1 {
+        v /= 1024.0;
+        i += 1;
+    }
+    format!("{} {}", sig3(v), U[i])
+}
+
+/// Disk sizes the way vendors print them (decimal): 4000787030016 -> "4,0 TB".
+pub fn bytes_si(n: u64) -> String {
+    const U: [&str; 6] = ["B", "kB", "MB", "GB", "TB", "PB"];
+    let mut v = n as f64;
+    let mut i = 0;
+    while v >= 1000.0 && i < U.len() - 1 {
+        v /= 1000.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{n} B")
+    } else {
+        format!("{} {}", num(v, if v >= 100.0 { 0 } else { 1 }), U[i])
+    }
+}
+
+/// Byte rate: "12,3 MiB/s".
+pub fn rate(bps: u64) -> String {
+    format!("{}/s", bytes(bps))
+}
+
+/// Network rate in bits: "940 Mbit/s".
+pub fn bitrate(bytes_per_s: u64) -> String {
+    const U: [&str; 5] = ["bit/s", "kbit/s", "Mbit/s", "Gbit/s", "Tbit/s"];
+    let mut v = bytes_per_s as f64 * 8.0;
+    let mut i = 0;
+    while v >= 1000.0 && i < U.len() - 1 {
+        v /= 1000.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{} {}", v as u64, U[0])
+    } else {
+        format!("{} {}", sig3(v), U[i])
+    }
+}
+
+/// Link speed of a port from Mbit/s: "1 Gbit", "2,5 Gbit", "100 Mbit".
+pub fn link_speed(m: u32) -> String {
+    if m >= 1000 { format!("{} Gbit", num(m as f64 / 1000.0, if m.is_multiple_of(1000) { 0 } else { 1 })) } else { format!("{m} Mbit") }
+}
+
+pub fn pct(v: f64) -> String {
+    format!("{}%", num(v, if v < 10.0 { 1 } else { 0 }))
+}
+
+pub fn celsius(v: f32) -> String {
+    format!("{}°C", num(v as f64, 0))
+}
+
+/// Date and time in the current language, e.g. "Nov 5, 2026, 12:54 AM" / "5 nov 2026, 00:54".
+pub fn datetime(ms: u64) -> String {
+    let d = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ms as f64));
+    let opts = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&opts, &"dateStyle".into(), &"medium".into());
+    let _ = js_sys::Reflect::set(&opts, &"timeStyle".into(), &"short".into());
+    d.to_locale_string(lang().code(), &opts).as_string().unwrap_or_default()
+}
+
+/// Time of day for today's moments, date and time otherwise (lists of events).
+pub fn short_when(ms: u64) -> String {
+    let d = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ms as f64));
+    let now = js_sys::Date::new_0();
+    if d.to_date_string() == now.to_date_string() { time_hm(ms as f64) } else { datetime(ms) }
+}
+
+/// Time of day "14:05" in the current language.
+pub fn time_hm(ms: f64) -> String {
+    let d = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ms));
+    let opts = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&opts, &"timeStyle".into(), &"short".into());
+    d.to_locale_time_string_with_options(lang().code(), &opts).as_string().unwrap_or_default()
+}
+
+/// Uptime-style duration: "12 g 4 h 7 min" / "12d 4h 7m".
+pub fn duration(secs: u64) -> String {
+    let (d, h, m) = (secs / 86400, secs % 86400 / 3600, secs % 3600 / 60);
+    let it = lang() == Lang::It;
+    let (ud, uh, um) = if it { (" g", " h", " min") } else { ("d", "h", "m") };
+    if d > 0 {
+        format!("{d}{ud} {h}{uh} {m}{um}")
+    } else if h > 0 {
+        format!("{h}{uh} {m}{um}")
+    } else if m > 0 {
+        format!("{m}{um}")
+    } else {
+        format!("{secs} s")
+    }
+}
+
+/// Elapsed time with seconds (task durations): "45 s", "3 min 05 s", "1 h 02 min" /
+/// "45s", "3m 05s", "1h 02m".
+pub fn elapsed(secs: u64) -> String {
+    let (h, m, s) = (secs / 3600, secs % 3600 / 60, secs % 60);
+    let it = lang() == Lang::It;
+    if h > 0 {
+        if it { format!("{h} h {m:02} min") } else { format!("{h}h {m:02}m") }
+    } else if m > 0 {
+        if it { format!("{m} min {s:02} s") } else { format!("{m}m {s:02}s") }
+    } else if it {
+        format!("{s} s")
+    } else {
+        format!("{s}s")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn elapsed_en() {
+        assert_eq!(elapsed(7), "7s");
+        assert_eq!(elapsed(185), "3m 05s");
+        assert_eq!(elapsed(3720), "1h 02m");
+    }
+
+    #[test]
+    fn browser_language() {
+        assert_eq!(lang_for_tag("it-IT"), Lang::It);
+        assert_eq!(lang_for_tag("it"), Lang::It);
+        assert_eq!(lang_for_tag("en-US"), Lang::En);
+        assert_eq!(lang_for_tag("de"), Lang::En);
+        assert_eq!(lang_for_tag(""), Lang::En);
+    }
+
+    #[test]
+    fn english_is_the_fallback() {
+        // entries without an Italian text use the English one
+        assert_eq!(lookup("nav.dashboard", Lang::It), Some("Dashboard"));
+        assert_eq!(lookup("nav.files", Lang::En), Some("Files"));
+        assert_eq!(lookup("nav.files", Lang::It), Some("File"));
+        assert_eq!(lookup("no.such.key", Lang::En), None);
+    }
+
+    #[test]
+    fn no_duplicate_texts() {
+        // keys whose text mirrors a server-side name (task types, configuration keys, plan
+        // summary fields) may repeat a UI text
+        let exempt = |k: &str| k.starts_with("task.") || k.starts_with("cfg.key.") || k.starts_with("plan.k.");
+        let mut seen = std::collections::HashMap::new();
+        let mut dups = Vec::new();
+        for (k, en, it) in entries() {
+            if exempt(k) || !en.contains(' ') {
+                continue;
+            }
+            if let Some(prev) = seen.insert((en, it), k) {
+                dups.push(format!("{prev} = {k}: {en}"));
+            }
+        }
+        assert!(dups.is_empty(), "one key per text: {dups:#?}");
+    }
+
+    /// Every string literal of the sources that looks like a key (`area.thing`, also `#area.thing`
+    /// for numeric table heads) exists in the dictionary, so a renamed key cannot leave a raw
+    /// key on screen. Literals of the same shape that are not keys are listed in `not_a_key`.
+    #[test]
+    fn used_keys_exist() {
+        fn is_key_shape(s: &str) -> bool {
+            let mut parts = s.split('.');
+            let first = parts.next().unwrap_or("");
+            let rest: Vec<&str> = parts.collect();
+            first.starts_with(|c: char| c.is_ascii_lowercase())
+                && !rest.is_empty()
+                && std::iter::once(first)
+                    .chain(rest)
+                    .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'))
+        }
+        // storage keys, event names, file system types, sample host names, source file names
+        let not_a_key = |s: &str| {
+            s.starts_with("rynas.")
+                || s.ends_with(".rs")
+                || s.starts_with("fuse.")
+                || s.contains("example")
+                || matches!(s, "a.b" | "metrics.sample" | "hardware.status" | "task.started" | "task.updated" | "task.finished")
+        };
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for e in std::fs::read_dir(dir).expect("src dir").flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs") && !p.ends_with("i18n.rs") {
+                    out.push(p);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
+        let keys: std::collections::HashSet<&str> = entries().into_iter().map(|e| e.0).collect();
+        let mut missing = Vec::new();
+        for f in files {
+            let text = std::fs::read_to_string(&f).expect("source file");
+            for (n, line) in text.lines().enumerate() {
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                // odd pieces between quotes are the literals (no key contains a quote)
+                for lit in line.split('"').skip(1).step_by(2) {
+                    let k = lit.strip_prefix('#').unwrap_or(lit);
+                    if is_key_shape(k) && !not_a_key(k) && !keys.contains(k) {
+                        missing.push(format!("{}:{}: {k}", f.display(), n + 1));
+                    }
+                }
+            }
+        }
+        assert!(missing.is_empty(), "keys used but not in the dictionary: {missing:#?}");
+    }
+
+    #[test]
+    fn keys_are_unique() {
+        let mut k: Vec<&str> = entries().into_iter().map(|e| e.0).collect();
+        k.sort_unstable();
+        let n = k.len();
+        k.dedup();
+        assert_eq!(n, k.len(), "duplicate i18n keys");
+    }
+}

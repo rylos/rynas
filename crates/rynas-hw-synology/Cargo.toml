@@ -1,0 +1,27 @@
+[package]
+name = "rynas-hw-synology"
+description = "rynas hardware provider for Synology NAS running synodeb: synohwd status, settings (/etc/synohwd.toml), FIFO commands, bay identify, DSM fan curves"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[features]
+# The configuration domain (`synology.hw`, rynas-config) runs in rynasd only. Without it the
+# crate is the status parser, the model data, the commands and the provider, which rynas-web
+# uses for /api/v1/hardware without linking the configuration store.
+default = ["domain"]
+domain = ["dep:rynas-config", "dep:toml"]
+
+[dependencies]
+rynas-api-types.workspace = true
+rynas-hw.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+tracing.workspace = true
+rynas-config = { workspace = true, optional = true }
+toml = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true

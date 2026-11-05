@@ -1,0 +1,11 @@
+#%PAM-1.0
+# PAM service of the rynas web interface, used by rynasd (root) to check passwords.
+# Install as /etc/pam.d/rynas. Without this file rynasd falls back to the "login" service.
+#
+# Only auth and account are used: rynas opens no PAM session (no pam_systemd, no
+# pam_mkhomedir), so a web login does not start a user session.
+# Who may log in is decided by rynas itself (groups rynas-admin or sudo by default),
+# pam_unix's failure delay and rynas' own rate limiting slow down guessing.
+
+@include common-auth
+@include common-account

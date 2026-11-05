@@ -1,0 +1,10 @@
+[Unit]
+Description=rynas post-boot network watchdog, 5 minutes after boot
+Documentation=https://github.com/rylos/rynas
+
+[Timer]
+OnBootSec=5min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

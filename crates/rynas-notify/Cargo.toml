@@ -1,0 +1,45 @@
+[package]
+name = "rynas-notify"
+description = "rynas notifications: the Notifier interface, health checks that emit events, and the engine (targets, rules, outbox)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[features]
+# The engine (SQLite, SMTP, HTTP channels, templates) runs in rynasd only. Without it the
+# crate is the `Notifier` trait, the event helpers and the stateful checks, which rynas-web
+# and other crates use without linking the engine.
+default = ["engine"]
+engine = [
+    "dep:rusqlite", "dep:minijinja", "dep:age", "dep:lettre", "dep:reqwest", "dep:regex-lite",
+    "dep:tokio", "dep:libc", "dep:sha2",
+]
+
+[dependencies]
+rynas-api-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+rusqlite = { workspace = true, optional = true }
+minijinja = { workspace = true, optional = true, features = ["json"] }
+age = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["rt", "time", "sync", "macros"] }
+libc = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+regex-lite = { version = "0.1.9", optional = true }
+# OpenSSL through native-tls, like the system libsqlite3/libzstd: Debian security updates
+lettre = { version = "0.11.23", optional = true, default-features = false, features = [
+    "builder", "smtp-transport", "tokio1", "tokio1-native-tls", "hostname",
+] }
+reqwest = { version = "0.13.5", optional = true, default-features = false, features = [
+    "native-tls-no-alpn",
+] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt", "time", "sync", "macros", "net", "io-util"] }
+
+[[test]]
+name = "engine"
+required-features = ["engine"]

@@ -1,0 +1,25 @@
+# rynas network boot guard (D-NET). Runs early, before systemd-networkd and ifupdown:
+# - a network change was being tested when the system went down (trial marker present):
+#   its last known good files are put back before the network starts;
+# - an ifupdown → networkd migration was planned "at the next boot": it is carried out
+#   now, and ifupdown comes back by itself if no port has a routable address 3 minutes later.
+# Without a marker it does nothing (and does not even start: see the conditions).
+[Unit]
+Description=rynas network boot guard
+Documentation=https://github.com/rylos/rynas
+DefaultDependencies=no
+After=local-fs.target
+Before=systemd-networkd.service networking.service network-pre.target
+Wants=network-pre.target
+RequiresMountsFor=/var/lib/rynas
+ConditionPathExists=|/var/lib/rynas/net/trial.json
+ConditionPathExists=|/var/lib/rynas/net/boot-adopt.json
+
+[Service]
+Type=oneshot
+# --no-flush: rynasd is not running this early (its socket would start it and wait for us)
+ExecStart=/usr/libexec/rynas/rynasctl net --no-flush boot-guard
+TimeoutStartSec=60
+
+[Install]
+WantedBy=sysinit.target

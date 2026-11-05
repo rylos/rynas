@@ -1,0 +1,38 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "configure" ]; then
+    mkdir -p /var/lib/rynas/auth
+    # system group and user of rynas-web; the group may also connect to rynasd
+    if ! getent group rynas >/dev/null; then
+        addgroup --system --quiet rynas
+    fi
+    if ! getent passwd rynas >/dev/null; then
+        adduser --system --quiet --ingroup rynas --home /var/lib/rynas \
+            --no-create-home --shell /usr/sbin/nologin rynas
+    fi
+    # members of rynas-admin (or sudo) may administer the NAS from the web
+    if ! getent group rynas-admin >/dev/null; then
+        addgroup --system --quiet rynas-admin
+        NEW_ADMIN_GROUP=1
+    fi
+
+    # /var/lib/rynas: rynas-web may enter it, rynasd keeps its secrets in auth/
+    chown root:rynas /var/lib/rynas
+    chmod 0750 /var/lib/rynas
+    chown root:root /var/lib/rynas/auth
+    chmod 0700 /var/lib/rynas/auth
+
+    if [ -n "${NEW_ADMIN_GROUP:-}" ]; then
+        cat <<'MSG'
+rynas: log in at http://<this-host>:8080/ with a system account that is a
+member of the group rynas-admin or sudo, e.g.:  adduser <user> rynas-admin
+Plain HTTP only for now: use it on a trusted LAN (see
+/usr/share/doc/rynas/README.Debian).
+MSG
+    fi
+fi
+
+#DEBHELPER#
+
+exit 0

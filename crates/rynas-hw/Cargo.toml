@@ -1,0 +1,10 @@
+[package]
+name = "rynas-hw"
+description = "rynas hardware provider interface: status and control traits shared by built-in providers and hardware plugins"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+rynas-api-types.workspace = true

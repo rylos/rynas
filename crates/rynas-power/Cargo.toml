@@ -1,0 +1,20 @@
+[package]
+name = "rynas-power"
+description = "rynas Power Schedule: weekly startup/shutdown rules, DST-safe next times, RTC wake alarm, shutdown pre-checks"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+rynas-api-types.workspace = true
+rynas-config.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+jiff.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+# tests use named zones (Europe/Rome, America/New_York) even where /usr/share/zoneinfo is missing
+jiff = { workspace = true, features = ["tzdb-bundle-always"] }

@@ -1,0 +1,8 @@
+# Managed by rynas — do not edit (sha256:20035fd06f12f40060a116087caff8d695dc7d7a83889623d8f3e3593b477520)
+[Unit]
+Description=Timer of rynas task report
+
+[Timer]
+OnBootSec=120
+AccuracySec=1s
+Unit=rynas-task-report.service

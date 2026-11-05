@@ -1,0 +1,20 @@
+[package]
+name = "rynas-storage"
+description = "rynas storage: disk inventory, SMART health, md arrays, btrfs, LUKS and volume planning"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+rynas-api-types.workspace = true
+rynas-tasks.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+tracing.workspace = true
+rynas-config.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+tempfile.workspace = true

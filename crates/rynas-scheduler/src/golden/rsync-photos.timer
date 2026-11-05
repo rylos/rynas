@@ -1,0 +1,9 @@
+# Managed by rynas — do not edit (sha256:db90dee8a08396fea246b76993d2f7b4160c05a044fb2f0823f49d82f4ec016d)
+[Unit]
+Description=Timer of rynas task rsync-photos
+
+[Timer]
+OnCalendar=Mon..Fri 02:30
+Persistent=true
+AccuracySec=1s
+Unit=rynas-task-rsync-photos.service

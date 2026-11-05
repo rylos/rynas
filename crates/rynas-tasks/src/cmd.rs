@@ -1,0 +1,471 @@
+//! External commands: argv only (never a shell), timeout, own process group, output captured.
+//! The one runner of rynas (guidelines M3): tasks, configuration appliers, file services and
+//! the storage inventory all start their commands through [`Cmd`].
+//!
+//! Every command runs in a new process group so that a timeout or a cancellation can stop
+//! the whole tree it started (`SIGTERM` to the group, `SIGKILL` after a grace period).
+//! `LC_ALL=C` keeps the output parseable.
+
+use std::ffi::{OsStr, OsString};
+use std::io::Read;
+use std::process::Stdio;
+use std::time::{Duration, Instant};
+
+use nix::sys::signal::{Signal, killpg};
+use nix::unistd::Pid;
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
+use tokio_util::sync::CancellationToken;
+
+/// Default timeout of a command.
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+/// Time between `SIGTERM` and `SIGKILL`.
+const KILL_GRACE: Duration = Duration::from_secs(3);
+/// Captured stdout/stderr are cut at this size each.
+const CAPTURE_CAP: usize = 1 << 20;
+/// `PATH` of a child started with [`Cmd::env_clear`].
+const CHILD_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+/// A command line to run.
+#[derive(Debug, Clone)]
+pub struct Cmd {
+    argv: Vec<OsString>,
+    env: Vec<(OsString, OsString)>,
+    clear_env: bool,
+    stdin: Option<Vec<u8>>,
+    timeout: Duration,
+}
+
+/// What a command printed and how it ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CmdOutput {
+    /// Exit code; `None` when killed by a signal.
+    pub code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+impl CmdOutput {
+    pub fn success(&self) -> bool {
+        self.code == Some(0)
+    }
+}
+
+#[derive(Debug)]
+pub enum CmdError {
+    /// The program could not be started.
+    Spawn(std::io::Error),
+    Timeout(Duration),
+    Cancelled,
+    /// It ran but exited with an error ([`Cmd::run_checked`] only).
+    Failed(CmdOutput),
+}
+
+impl std::fmt::Display for CmdError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CmdError::Spawn(e) => write!(f, "cannot start: {e}"),
+            CmdError::Timeout(d) => write!(f, "timed out after {} s", d.as_secs_f32()),
+            CmdError::Cancelled => write!(f, "cancelled"),
+            CmdError::Failed(o) => {
+                let last = o.stderr.lines().rev().find(|l| !l.trim().is_empty());
+                match (o.code, last) {
+                    (Some(c), Some(l)) => write!(f, "exit code {c}: {l}"),
+                    (Some(c), None) => write!(f, "exit code {c}"),
+                    (None, _) => write!(f, "killed by a signal"),
+                }
+            }
+        }
+    }
+}
+
+impl std::error::Error for CmdError {}
+
+impl Cmd {
+    pub fn new(program: impl AsRef<OsStr>) -> Self {
+        Self {
+            argv: vec![program.as_ref().to_owned()],
+            env: Vec::new(),
+            clear_env: false,
+            stdin: None,
+            timeout: DEFAULT_TIMEOUT,
+        }
+    }
+
+    pub fn arg(mut self, a: impl AsRef<OsStr>) -> Self {
+        self.argv.push(a.as_ref().to_owned());
+        self
+    }
+
+    pub fn args<I: IntoIterator<Item = S>, S: AsRef<OsStr>>(mut self, args: I) -> Self {
+        self.argv
+            .extend(args.into_iter().map(|a| a.as_ref().to_owned()));
+        self
+    }
+
+    pub fn env(mut self, k: impl AsRef<OsStr>, v: impl AsRef<OsStr>) -> Self {
+        self.env
+            .push((k.as_ref().to_owned(), v.as_ref().to_owned()));
+        self
+    }
+
+    /// Start from an empty environment: only `LC_ALL=C`, a fixed `PATH` and what
+    /// [`Cmd::env`] adds reach the child (no inherited secrets, predictable output).
+    pub fn env_clear(mut self) -> Self {
+        self.clear_env = true;
+        self
+    }
+
+    /// Bytes written to the standard input (otherwise `/dev/null`).
+    pub fn stdin(mut self, data: impl Into<Vec<u8>>) -> Self {
+        self.stdin = Some(data.into());
+        self
+    }
+
+    pub fn timeout(mut self, d: Duration) -> Self {
+        self.timeout = d;
+        self
+    }
+
+    pub fn program(&self) -> &OsStr {
+        &self.argv[0]
+    }
+
+    /// The command line for logs (arguments are not quoted: never feed it to a shell).
+    pub fn display(&self) -> String {
+        self.argv
+            .iter()
+            .map(|a| a.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn std_command(&self) -> std::process::Command {
+        use std::os::unix::process::CommandExt;
+        let mut c = std::process::Command::new(&self.argv[0]);
+        if self.clear_env {
+            c.env_clear().env("PATH", CHILD_PATH);
+        }
+        c.args(&self.argv[1..])
+            .env("LC_ALL", "C")
+            .envs(self.env.iter().map(|(k, v)| (k, v)))
+            .stdin(if self.stdin.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0);
+        c
+    }
+
+    /// Run to the end. `line` receives every output line as it arrives (stderr lines are
+    /// prefixed with "stderr: "); `cancel` stops the command early.
+    pub async fn run(
+        &self,
+        cancel: Option<&CancellationToken>,
+        line: Option<&(dyn Fn(&str) + Sync)>,
+    ) -> Result<CmdOutput, CmdError> {
+        let mut child = tokio::process::Command::from(self.std_command())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(CmdError::Spawn)?;
+        let pgid = child.id().map(|p| Pid::from_raw(p as i32));
+        if let (Some(data), Some(mut w)) = (self.stdin.clone(), child.stdin.take()) {
+            tokio::spawn(async move {
+                let _ = w.write_all(&data).await;
+            });
+        }
+        let out = child.stdout.take().expect("piped stdout");
+        let err = child.stderr.take().expect("piped stderr");
+        let never = CancellationToken::new();
+        let cancel = cancel.unwrap_or(&never);
+
+        let readers =
+            async { tokio::join!(read_lines(out, "", line), read_lines(err, "stderr: ", line)) };
+        let (status, (stdout, stderr)) = tokio::join!(
+            async {
+                let waited = tokio::select! {
+                    s = child.wait() => Ok(s),
+                    _ = tokio::time::sleep(self.timeout) => Err(CmdError::Timeout(self.timeout)),
+                    _ = cancel.cancelled() => Err(CmdError::Cancelled),
+                };
+                match waited {
+                    Ok(s) => Ok(s),
+                    Err(e) => {
+                        if let Some(g) = pgid {
+                            let _ = killpg(g, Signal::SIGTERM);
+                            if tokio::time::timeout(KILL_GRACE, child.wait())
+                                .await
+                                .is_err()
+                            {
+                                let _ = killpg(g, Signal::SIGKILL);
+                            }
+                        }
+                        let _ = child.wait().await;
+                        if let Some(g) = pgid {
+                            // leftovers of the group that ignored SIGTERM
+                            let _ = killpg(g, Signal::SIGKILL);
+                        }
+                        Err(e)
+                    }
+                }
+            },
+            readers
+        );
+        let status = status?.map_err(CmdError::Spawn)?;
+        Ok(CmdOutput {
+            code: status.code(),
+            stdout,
+            stderr,
+        })
+    }
+
+    /// Like [`Cmd::run`], but a non-zero exit is an error.
+    pub async fn run_checked(
+        &self,
+        cancel: Option<&CancellationToken>,
+        line: Option<&(dyn Fn(&str) + Sync)>,
+    ) -> Result<CmdOutput, CmdError> {
+        let o = self.run(cancel, line).await?;
+        if o.success() {
+            Ok(o)
+        } else {
+            Err(CmdError::Failed(o))
+        }
+    }
+
+    /// Synchronous variant for code that is not async (e.g. a configuration apply running on
+    /// a blocking thread). A non-zero exit is an error.
+    pub fn run_blocking(&self) -> Result<CmdOutput, CmdError> {
+        let o = self.output_blocking()?;
+        if o.success() {
+            Ok(o)
+        } else {
+            Err(CmdError::Failed(o))
+        }
+    }
+
+    /// Synchronous run that returns the output whatever the exit code (tools such as
+    /// smartctl report findings in it). Same guarantees as [`Cmd::run`]: own process group,
+    /// `SIGTERM` then `SIGKILL` to the group on timeout, output capped at 1 MiB per stream.
+    pub fn output_blocking(&self) -> Result<CmdOutput, CmdError> {
+        use std::io::Write;
+        let mut child = self.std_command().spawn().map_err(CmdError::Spawn)?;
+        let pgid = Pid::from_raw(child.id() as i32);
+        if let (Some(data), Some(mut w)) = (self.stdin.clone(), child.stdin.take()) {
+            std::thread::spawn(move || {
+                let _ = w.write_all(&data);
+            });
+        }
+        let mut out = child.stdout.take().expect("piped stdout");
+        let mut err = child.stderr.take().expect("piped stderr");
+        // both pipes are drained on small helper threads (reading one here would block the
+        // timeout check); this thread waits for the exit
+        let t_out = small_thread(move || capture(&mut out));
+        let t_err = small_thread(move || capture(&mut err));
+        let deadline = Instant::now() + self.timeout;
+        // short commands end in a few ms: poll often at first, then back off
+        let mut nap = Duration::from_millis(1);
+        let status = loop {
+            match child.try_wait().map_err(CmdError::Spawn)? {
+                Some(s) => break Ok(s),
+                None if Instant::now() >= deadline => break Err(CmdError::Timeout(self.timeout)),
+                None => {
+                    std::thread::sleep(nap.min(deadline.saturating_duration_since(Instant::now())));
+                    nap = (nap * 2).min(Duration::from_millis(50));
+                }
+            }
+        };
+        let status = match status {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = killpg(pgid, Signal::SIGTERM);
+                let end = Instant::now() + KILL_GRACE;
+                while Instant::now() < end && matches!(child.try_wait(), Ok(None)) {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                let _ = killpg(pgid, Signal::SIGKILL);
+                let _ = child.wait();
+                return Err(e);
+            }
+        };
+        Ok(CmdOutput {
+            code: status.code(),
+            stdout: t_out.join().unwrap_or_default(),
+            stderr: t_err.join().unwrap_or_default(),
+        })
+    }
+}
+
+/// A pipe reader: tiny stack, it only copies bytes.
+fn small_thread<T: Send + 'static>(
+    f: impl FnOnce() -> T + Send + 'static,
+) -> std::thread::JoinHandle<T> {
+    std::thread::Builder::new()
+        .name("cmd-pipe".into())
+        .stack_size(64 << 10)
+        .spawn(f)
+        .expect("spawning a pipe reader")
+}
+
+fn capture(r: &mut impl Read) -> String {
+    let mut buf = Vec::new();
+    let _ = r.take(CAPTURE_CAP as u64).read_to_end(&mut buf);
+    // drain the rest so the child never blocks on a full pipe
+    let _ = std::io::copy(r, &mut std::io::sink());
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+async fn read_lines(
+    r: impl AsyncRead + Unpin,
+    prefix: &str,
+    sink: Option<&(dyn Fn(&str) + Sync)>,
+) -> String {
+    let mut lines = BufReader::new(r).split(b'\n');
+    let mut captured = String::new();
+    while let Ok(Some(l)) = lines.next_segment().await {
+        let l = String::from_utf8_lossy(&l);
+        let l = l.trim_end_matches('\r');
+        if let Some(s) = sink {
+            s(&format!("{prefix}{l}"));
+        }
+        if captured.len() < CAPTURE_CAP {
+            captured.push_str(l);
+            captured.push('\n');
+        }
+    }
+    captured
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[tokio::test]
+    async fn captures_output_and_exit_code() {
+        let o = Cmd::new("sh")
+            .args(["-c", "echo out; echo err >&2; exit 3"])
+            .run(None, None)
+            .await
+            .unwrap();
+        assert_eq!(o.code, Some(3));
+        assert_eq!(o.stdout, "out\n");
+        assert_eq!(o.stderr, "err\n");
+        let e = Cmd::new("false").run_checked(None, None).await.unwrap_err();
+        assert!(matches!(e, CmdError::Failed(_)), "{e}");
+    }
+
+    #[tokio::test]
+    async fn arguments_are_not_interpreted_by_a_shell() {
+        let o = Cmd::new("echo")
+            .arg("$HOME; rm -rf /")
+            .run(None, None)
+            .await
+            .unwrap();
+        assert_eq!(o.stdout, "$HOME; rm -rf /\n");
+    }
+
+    #[tokio::test]
+    async fn stdin_and_line_sink() {
+        let seen = Mutex::new(Vec::new());
+        let sink = |l: &str| seen.lock().unwrap().push(l.to_owned());
+        let o = Cmd::new("cat")
+            .stdin("a\nb\n")
+            .run(None, Some(&sink))
+            .await
+            .unwrap();
+        assert_eq!(o.stdout, "a\nb\n");
+        assert_eq!(*seen.lock().unwrap(), ["a", "b"]);
+    }
+
+    #[tokio::test]
+    async fn timeout_kills_the_whole_process_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("survived");
+        // the grandchild would create the marker after 2 s if it outlived the group kill
+        let script = format!("(sleep 2; touch {}) & sleep 30", marker.display());
+        let t = Instant::now();
+        let e = Cmd::new("sh")
+            .args(["-c", &script])
+            .timeout(Duration::from_millis(300))
+            .run(None, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(e, CmdError::Timeout(_)), "{e}");
+        assert!(t.elapsed() < Duration::from_secs(5));
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        assert!(!marker.exists(), "grandchild survived the timeout");
+    }
+
+    #[tokio::test]
+    async fn cancellation_stops_the_command() {
+        let token = CancellationToken::new();
+        let t2 = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            t2.cancel();
+        });
+        let t = Instant::now();
+        let e = Cmd::new("sleep")
+            .arg("30")
+            .run(Some(&token), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(e, CmdError::Cancelled));
+        assert!(t.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn blocking_variant() {
+        let o = Cmd::new("sh")
+            .args(["-c", "echo hi"])
+            .run_blocking()
+            .unwrap();
+        assert_eq!(o.stdout, "hi\n");
+        let e = Cmd::new("sleep")
+            .arg("30")
+            .timeout(Duration::from_millis(200))
+            .run_blocking()
+            .unwrap_err();
+        assert!(matches!(e, CmdError::Timeout(_)));
+        let e = Cmd::new("/nonexistent/program").run_blocking().unwrap_err();
+        assert!(matches!(e, CmdError::Spawn(_)));
+        // the output of a failing command is still there
+        let o = Cmd::new("sh")
+            .args(["-c", "echo found; exit 4"])
+            .output_blocking()
+            .unwrap();
+        assert_eq!((o.code, o.stdout.as_str()), (Some(4), "found\n"));
+    }
+
+    #[test]
+    fn clean_environment() {
+        let o = Cmd::new("env").env_clear().output_blocking().unwrap();
+        let mut keys: Vec<_> = o
+            .stdout
+            .lines()
+            .filter_map(|l| l.split_once('=').map(|(k, _)| k))
+            .collect();
+        keys.sort();
+        assert_eq!(keys, ["LC_ALL", "PATH"]);
+    }
+
+    #[test]
+    fn blocking_timeout_kills_the_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("survived");
+        let script = format!("(sleep 2; touch {}) & sleep 30", marker.display());
+        let t = Instant::now();
+        let e = Cmd::new("sh")
+            .args(["-c", &script])
+            .timeout(Duration::from_millis(200))
+            .output_blocking()
+            .unwrap_err();
+        assert!(matches!(e, CmdError::Timeout(_)), "{e}");
+        assert!(t.elapsed() < Duration::from_secs(5));
+        std::thread::sleep(Duration::from_millis(2500));
+        assert!(!marker.exists(), "grandchild survived the timeout");
+    }
+}

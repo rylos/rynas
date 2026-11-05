@@ -1,0 +1,11 @@
+[package]
+name = "rynas-api-types"
+description = "Types of the rynas HTTP API, shared by the server, the web UI and plugins"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license = "Apache-2.0"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

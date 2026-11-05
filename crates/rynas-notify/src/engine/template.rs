@@ -1,0 +1,336 @@
+//! Message texts: minijinja templates with English and Italian dictionaries.
+//!
+//! One subject and one body template for every channel; the language of a target picks the
+//! dictionary (`t.*`) and the labels of severities, categories and states. Webhooks may
+//! bring their own templates (URL, headers, body) rendered with the same context plus
+//! `secrets`.
+
+use std::collections::BTreeMap;
+
+use minijinja::{Environment, Value, context};
+use rynas_api_types::notify::{EventState, Notification, NotifyLanguage, NotifySeverity};
+use serde::Serialize;
+
+use super::LocalTime;
+
+const SUBJECT: &str = "[{{ hostname }}] {% if events|length == 1 %}{{ events[0].prefix }}{{ events[0].title }}\
+{% else %}{{ events|length }} {{ t.notifications }} ({{ severity_label }}){% endif %}";
+
+const BODY: &str =
+    "{% for e in events %}{{ e.severity_label }} | {{ e.category_label }} | {{ e.time }}\
+{% if e.count > 1 %} | {{ e.count }}x{% endif %}
+{{ e.prefix }}{{ e.title }}
+{% if e.body %}{{ e.body }}
+{% endif %}{% for k, v in e.fields|items %}  {{ k }}: {{ v }}
+{% endfor %}
+{% endfor %}-- {{ '' }}
+{{ t.footer }} {{ hostname }}
+";
+
+/// Words of one language.
+struct Dict {
+    notifications: &'static str,
+    footer: &'static str,
+    resolved: &'static str,
+    reminder: &'static str,
+    test_title: &'static str,
+    test_body: &'static str,
+    severity: [&'static str; 5],
+    category: [&'static str; 9],
+}
+
+const EN: Dict = Dict {
+    notifications: "notifications",
+    footer: "rynas on",
+    resolved: "Resolved",
+    reminder: "Reminder",
+    test_title: "Test notification",
+    test_body: "If you can read this, the channel works.",
+    severity: ["Info", "Notice", "Warning", "Error", "Critical"],
+    category: [
+        "Storage", "Hardware", "UPS", "System", "Security", "Updates", "Backup", "Apps", "Tasks",
+    ],
+};
+
+const IT: Dict = Dict {
+    notifications: "notifiche",
+    footer: "rynas su",
+    resolved: "Risolto",
+    reminder: "Promemoria",
+    test_title: "Notifica di prova",
+    test_body: "Se leggi questo messaggio, il canale funziona.",
+    severity: ["Info", "Avviso", "Attenzione", "Errore", "Critico"],
+    category: [
+        "Archiviazione",
+        "Hardware",
+        "UPS",
+        "Sistema",
+        "Sicurezza",
+        "Aggiornamenti",
+        "Backup",
+        "App",
+        "Attività",
+    ],
+};
+
+fn dict(l: NotifyLanguage) -> &'static Dict {
+    match l {
+        NotifyLanguage::En => &EN,
+        NotifyLanguage::It => &IT,
+    }
+}
+
+/// Title and body of the test message of a target.
+pub fn test_texts(l: NotifyLanguage) -> (&'static str, &'static str) {
+    let d = dict(l);
+    (d.test_title, d.test_body)
+}
+
+/// One event as templates see it.
+#[derive(Debug, Clone, Serialize)]
+pub struct EventCtx {
+    pub id: u64,
+    pub title: String,
+    pub body: String,
+    pub source: String,
+    pub key: String,
+    pub category: &'static str,
+    pub category_label: &'static str,
+    pub severity: &'static str,
+    pub severity_label: &'static str,
+    pub state: &'static str,
+    /// "Resolved: ", "Reminder: " or "".
+    pub prefix: String,
+    /// Local time, "YYYY-MM-DD HH:MM".
+    pub time: String,
+    pub ts_ms: u64,
+    pub count: u32,
+    pub reminder: bool,
+    pub fields: BTreeMap<String, String>,
+}
+
+/// A rendered message for one target.
+#[derive(Debug, Clone)]
+pub struct Message {
+    pub subject: String,
+    pub text: String,
+    /// The highest severity among the events.
+    pub severity: NotifySeverity,
+    pub events: Vec<EventCtx>,
+}
+
+pub struct Templates {
+    env: Environment<'static>,
+    hostname: String,
+}
+
+pub fn fmt_time(t: LocalTime) -> String {
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}",
+        t.year, t.month, t.day, t.hour, t.minute
+    )
+}
+
+impl Templates {
+    pub fn new(hostname: &str) -> Self {
+        let mut env = Environment::new();
+        env.set_auto_escape_callback(|_| minijinja::AutoEscape::None);
+        env.add_template("subject", SUBJECT)
+            .expect("built-in subject template");
+        env.add_template("body", BODY)
+            .expect("built-in body template");
+        Self {
+            env,
+            hostname: hostname.to_string(),
+        }
+    }
+
+    pub fn hostname(&self) -> &str {
+        &self.hostname
+    }
+
+    /// The context of one event.
+    pub fn event_ctx(
+        &self,
+        n: &Notification,
+        reminder: bool,
+        lang: NotifyLanguage,
+        local: fn(u64) -> LocalTime,
+    ) -> EventCtx {
+        let d = dict(lang);
+        let prefix = if reminder {
+            format!("{}: ", d.reminder)
+        } else if n.state == EventState::Resolved {
+            format!("{}: ", d.resolved)
+        } else {
+            String::new()
+        };
+        let ci = rynas_api_types::notify::NotifyCategory::ALL
+            .iter()
+            .position(|c| *c == n.category)
+            .unwrap_or(3);
+        EventCtx {
+            id: n.id,
+            title: n.title.clone(),
+            body: n.body.clone(),
+            source: n.source.clone(),
+            key: n.key.clone(),
+            category: n.category.as_str(),
+            category_label: d.category[ci],
+            severity: n.severity.as_str(),
+            severity_label: d.severity[n.severity as usize],
+            state: n.state.as_str(),
+            prefix,
+            time: fmt_time(local(n.ts_ms)),
+            ts_ms: n.ts_ms,
+            count: n.count,
+            reminder,
+            fields: n.fields.clone(),
+        }
+    }
+
+    fn base_ctx(&self, events: &[EventCtx], lang: NotifyLanguage, sev: NotifySeverity) -> Value {
+        let d = dict(lang);
+        context! {
+            hostname => &self.hostname,
+            events => Value::from(minijinja::value::Serde(events)),
+            severity => sev.as_str(),
+            severity_label => d.severity[sev as usize],
+            t => context! {
+                notifications => d.notifications,
+                footer => d.footer,
+                resolved => d.resolved,
+                reminder => d.reminder,
+            },
+        }
+    }
+
+    /// Subject and body of a message carrying `events` (at least one).
+    pub fn render(&self, events: Vec<EventCtx>, lang: NotifyLanguage) -> Message {
+        let severity = events
+            .iter()
+            .filter_map(|e| NotifySeverity::parse(e.severity))
+            .max()
+            .unwrap_or_default();
+        let ctx = self.base_ctx(&events, lang, severity);
+        let render = |name: &str| {
+            self.env
+                .get_template(name)
+                .and_then(|t| t.render(&ctx))
+                .unwrap_or_else(|e| {
+                    tracing::error!("notification template {name}: {e}");
+                    events.first().map(|e| e.title.clone()).unwrap_or_default()
+                })
+        };
+        let subject = render("subject").replace(['\r', '\n'], " ");
+        // minijinja drops the final newline of a template
+        let text = render("body") + "\n";
+        Message {
+            subject,
+            text,
+            severity,
+            events,
+        }
+    }
+
+    /// Renders a user template (webhook URL, header or body) with the message context and
+    /// the target's secrets.
+    pub fn render_user(
+        &self,
+        source: &str,
+        msg: &Message,
+        lang: NotifyLanguage,
+        secrets: &BTreeMap<String, String>,
+    ) -> Result<String, String> {
+        let base = self.base_ctx(&msg.events, lang, msg.severity);
+        let ctx = context! {
+            subject => &msg.subject,
+            message => &msg.text,
+            secrets => Value::from(minijinja::value::Serde(secrets)),
+            ..base
+        };
+        self.env
+            .render_str(source, ctx)
+            .map_err(|e| format!("template: {e}"))
+    }
+
+    /// Checks that a user template compiles.
+    pub fn check_user(&self, source: &str) -> Result<(), String> {
+        self.env
+            .template_from_str(source)
+            .map(|_| ())
+            .map_err(|e| format!("template: {e}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rynas_api_types::notify::NotifyCategory;
+
+    fn utc(ms: u64) -> LocalTime {
+        super::super::utc_time(ms)
+    }
+
+    fn n(id: u64, state: EventState) -> Notification {
+        Notification {
+            id,
+            ts_ms: 1_762_300_800_000, // 2025-11-05 00:00 UTC
+            count: 1,
+            source: "storage".into(),
+            category: NotifyCategory::Storage,
+            severity: NotifySeverity::Critical,
+            key: "storage:md:md2:health".into(),
+            state,
+            title: "RAID md2 degraded".into(),
+            body: "1 of 2 members missing.".into(),
+            fields: [("array".to_string(), "md2".to_string())].into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn english_and_italian() {
+        let t = Templates::new("nas");
+        let ev = vec![t.event_ctx(&n(1, EventState::Firing), false, NotifyLanguage::En, utc)];
+        let m = t.render(ev, NotifyLanguage::En);
+        assert_eq!(m.subject, "[nas] RAID md2 degraded");
+        assert_eq!(
+            m.text,
+            "Critical | Storage | 2025-11-05 00:00\nRAID md2 degraded\n1 of 2 members missing.\n  array: md2\n\n-- \nrynas on nas\n"
+        );
+        let ev = vec![
+            t.event_ctx(&n(1, EventState::Resolved), false, NotifyLanguage::It, utc),
+            t.event_ctx(&n(2, EventState::Firing), true, NotifyLanguage::It, utc),
+        ];
+        let m = t.render(ev, NotifyLanguage::It);
+        assert_eq!(m.subject, "[nas] 2 notifiche (Critico)");
+        assert!(
+            m.text
+                .contains("Critico | Archiviazione | 2025-11-05 00:00\nRisolto: RAID md2 degraded")
+        );
+        assert!(m.text.contains("Promemoria: RAID md2 degraded"));
+        assert!(m.text.ends_with("-- \nrynas su nas\n"));
+    }
+
+    #[test]
+    fn user_templates_see_secrets() {
+        let t = Templates::new("nas");
+        let ev = vec![t.event_ctx(&n(1, EventState::Firing), false, NotifyLanguage::En, utc)];
+        let m = t.render(ev, NotifyLanguage::En);
+        let s: BTreeMap<String, String> = [("token".to_string(), "s3cr3t".to_string())].into();
+        let out = t
+            .render_user(
+                "{\"text\": {{ subject|tojson }}, \"sev\": \"{{ severity }}\", \"k\": \"{{ secrets.token }}\", \"n\": {{ events|length }}}",
+                &m,
+                NotifyLanguage::En,
+                &s,
+            )
+            .unwrap();
+        assert_eq!(
+            out,
+            "{\"text\": \"[nas] RAID md2 degraded\", \"sev\": \"critical\", \"k\": \"s3cr3t\", \"n\": 1}"
+        );
+        assert!(t.check_user("{% if %}").is_err());
+    }
+}

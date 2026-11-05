@@ -1,0 +1,276 @@
+//! Endpoints passed through to `rynasd` unchanged: configuration, tasks, users and shares,
+//! and the storage views rynas-web has nothing to add to.
+//!
+//! The session and CSRF checks have already run ([`crate::auth::require_session`]); the
+//! request goes on through [`RynasdClient::send`](crate::rynasd_client::RynasdClient::send)
+//! with the session user, and the answer comes back as is (status, JSON or text body, task
+//! log headers). SSE streams end with their session, like the metrics stream.
+
+use axum::body::{Body, to_bytes};
+use axum::extract::{Request, State};
+use axum::http::{HeaderName, StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{delete, get, post, put};
+use axum::{Extension, Router};
+use futures_util::StreamExt;
+use http_body_util::BodyExt;
+use rynas_api_types::{TASK_LOG_COMPLETE, TASK_LOG_NEXT_OFFSET, error_codes};
+
+use crate::app::AppState;
+use crate::auth::CurrentSession;
+use crate::conn::LocalAddr;
+use crate::error::Error;
+use rynas_auth::ipc::LOCAL_ADDR_HEADER;
+use rynas_auth::session::SessionData;
+
+/// Largest request body forwarded (guidelines M3).
+const MAX_BODY: usize = 1 << 20;
+
+/// The forwarded routes (relative to `/api/v1`). Listed one by one so that unknown paths
+/// keep the 401/404 behaviour of the rest of the API.
+pub fn routes() -> Router<AppState> {
+    Router::new()
+        .route("/config/pending", get(forward))
+        .route("/config/apply", post(forward))
+        .route("/config/discard", post(forward))
+        .route("/config/revisions", get(forward))
+        .route("/config/revisions/{n}", get(forward))
+        .route("/config/revisions/{n}/restore", post(forward))
+        .route("/config/drift", get(forward))
+        .route("/config/drift/{key}/import", post(forward))
+        .route("/config/drift/{key}/overwrite", post(forward))
+        .route("/system/hostname", get(forward).put(forward))
+        .route("/tasks", get(forward))
+        .route("/tasks/stream", get(forward))
+        .route("/tasks/{id}", get(forward))
+        .route("/tasks/{id}/log", get(forward))
+        .route("/tasks/{id}/cancel", post(forward))
+        // storage views and plans (disks are enriched with bays: crate::storage_api)
+        .route("/storage/arrays", get(forward))
+        .route("/storage/filesystems", get(forward))
+        .route("/storage/tree", get(forward))
+        .route("/storage/plan/volume", post(forward))
+        .route("/storage/plan/grow", post(forward))
+        .route("/storage/plan/replace", post(forward))
+        .route("/storage/plan/scrub", post(forward))
+        // storage write side: plans executed as tasks, LUKS, subvolumes, settings
+        .route("/storage/volumes", post(forward))
+        .route("/storage/volumes/{name}/grow", post(forward))
+        .route("/storage/volumes/{name}/replace", post(forward))
+        .route("/storage/volumes/{name}/scrub", post(forward))
+        .route("/storage/volumes/{name}/unlock", post(forward))
+        .route("/storage/volumes/{name}/lock", post(forward))
+        .route("/storage/volumes/{name}/reveal-recovery-key", post(forward))
+        .route(
+            "/storage/volumes/{name}/luks-header",
+            get(forward).delete(forward),
+        )
+        .route(
+            "/storage/volumes/{name}/settings",
+            get(forward).put(forward),
+        )
+        .route(
+            "/storage/volumes/{name}/subvolumes",
+            get(forward).post(forward),
+        )
+        .route(
+            "/storage/volumes/{name}/subvolumes/{sub}",
+            put(forward).delete(forward),
+        )
+        .route("/storage/disks/{name}/settings", get(forward).put(forward))
+        // users, groups, shares, SMB and NFS (step 8)
+        .route("/users", get(forward).post(forward))
+        .route("/users/{name}", get(forward).put(forward).delete(forward))
+        .route("/users/{name}/password", post(forward))
+        .route("/groups", get(forward).post(forward))
+        .route("/groups/{name}", get(forward).put(forward).delete(forward))
+        .route("/services/smb", get(forward).put(forward))
+        .route("/services/smb/recycle-cleanup", post(forward))
+        .route("/services/nfs", get(forward).put(forward))
+        .route("/shares", get(forward).post(forward))
+        .route("/shares/{name}", get(forward).put(forward).delete(forward))
+        .route("/shares/{name}/effective", get(forward))
+        // notifications (P3): list, ack, silences, targets, rules; live changes come on
+        // /events as `notification`
+        .route("/notifications", get(forward))
+        .route("/notifications/ack-all", post(forward))
+        .route("/notifications/silence", post(forward))
+        .route("/notifications/silences", get(forward))
+        .route("/notifications/silences/{id}", delete(forward))
+        .route("/notifications/targets", get(forward).post(forward))
+        .route(
+            "/notifications/targets/{id}",
+            get(forward).put(forward).delete(forward),
+        )
+        .route("/notifications/targets/{id}/test", post(forward))
+        .route("/notifications/rules", get(forward).post(forward))
+        .route(
+            "/notifications/rules/{id}",
+            get(forward).put(forward).delete(forward),
+        )
+        .route("/notifications/{id}/ack", post(forward))
+        // task scheduler and snapshots (P3)
+        .route("/scheduler/tasks", get(forward).post(forward))
+        .route("/scheduler/tasks/preview-calendar", post(forward))
+        .route(
+            "/scheduler/tasks/{id}",
+            get(forward).put(forward).delete(forward),
+        )
+        .route("/scheduler/tasks/{id}/run", post(forward))
+        .route("/scheduler/tasks/{id}/enable", post(forward))
+        .route("/scheduler/tasks/{id}/disable", post(forward))
+        .route("/scheduler/tasks/{id}/history", get(forward))
+        .route("/scheduler/tasks/{id}/history/{n}", get(forward))
+        .route("/scheduler/system-timers", get(forward))
+        .route("/scheduler/cron-entries", get(forward))
+        .route("/snapshots", get(forward))
+        .route("/snapshots/system", get(forward).put(forward))
+        .route("/snapshots/jobs", get(forward).post(forward))
+        .route("/snapshots/jobs/preview-retention", post(forward))
+        .route(
+            "/snapshots/jobs/{name}",
+            get(forward).put(forward).delete(forward),
+        )
+        .route("/snapshots/{id}", delete(forward))
+        .route("/snapshots/{id}/browse", get(forward))
+        .route("/snapshots/{id}/restore", post(forward))
+        .route("/snapshots/{id}/rollback", post(forward))
+        // Synology hardware (synohwd provider in rynasd) and the power schedule (P4)
+        .route("/hardware/synology/status", get(forward))
+        .route("/hardware/synology/settings", get(forward).put(forward))
+        .route("/hardware/synology/beep", post(forward))
+        .route("/hardware/synology/mute", post(forward))
+        .route("/hardware/synology/bays/{n}/identify", post(forward))
+        .route("/hardware/synology/fan-curves", get(forward))
+        .route("/power/schedule", get(forward).put(forward))
+        .route("/power/next", get(forward))
+        // network (P4): with the local address of the session's connection
+        .route("/network/interfaces", get(forward_net))
+        .route("/network/interfaces/{name}", put(forward_net))
+        .route("/network/state", get(forward_net))
+        .route("/network/discard", post(forward_net))
+        .route("/network/apply", post(forward_net))
+        .route("/network/confirm", post(forward_net))
+        .route("/network/rollback", post(forward_net))
+        .route("/network/rescue", get(forward_net).put(forward_net))
+        .route("/network/adopt", post(forward_net))
+        .route("/network/revisions", get(forward_net))
+        .route("/network/revisions/{n}/restore", post(forward_net))
+        .route("/network/diagnostics/{tool}", post(forward_net))
+}
+
+/// Headers of rynasd's answer that reach the client.
+fn passed_headers() -> [HeaderName; 7] {
+    debug_assert!(TASK_LOG_NEXT_OFFSET.eq_ignore_ascii_case("x-rynas-next-offset"));
+    debug_assert!(TASK_LOG_COMPLETE.eq_ignore_ascii_case("x-rynas-log-complete"));
+    [
+        header::CONTENT_TYPE,
+        // downloads (the LUKS header backup)
+        header::CONTENT_DISPOSITION,
+        header::RETRY_AFTER,
+        header::LOCATION,
+        // conditional reads (`/config/pending`)
+        header::ETAG,
+        HeaderName::from_static("x-rynas-next-offset"),
+        HeaderName::from_static("x-rynas-log-complete"),
+    ]
+}
+
+async fn forward(
+    State(st): State<AppState>,
+    Extension(CurrentSession(session)): Extension<CurrentSession>,
+    req: Request,
+) -> Response {
+    forward_with(st, session, req, Vec::new()).await
+}
+
+/// The network endpoints also get the local address of the connection: rynasd derives the
+/// management interface from it and checks where a confirmation arrived.
+async fn forward_net(
+    State(st): State<AppState>,
+    Extension(CurrentSession(session)): Extension<CurrentSession>,
+    local: Option<Extension<LocalAddr>>,
+    req: Request,
+) -> Response {
+    let extra = local
+        .map(|Extension(LocalAddr(a))| vec![(LOCAL_ADDR_HEADER, a.to_string())])
+        .unwrap_or_default();
+    forward_with(st, session, req, extra).await
+}
+
+async fn forward_with(
+    st: AppState,
+    session: SessionData,
+    req: Request,
+    mut extra: Vec<(&'static str, String)>,
+) -> Response {
+    let (parts, body) = req.into_parts();
+    // conditional reads: rynasd answers 304 when the entity tag still matches
+    if let Some(v) = parts
+        .headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+    {
+        extra.push(("if-none-match", v.to_string()));
+    }
+    // inside the /api/v1 nest the path is relative: /config/pending -> /v1/config/pending
+    let target = match parts.uri.query() {
+        Some(q) => format!("/v1{}?{q}", parts.uri.path()),
+        None => format!("/v1{}", parts.uri.path()),
+    };
+    let body = match to_bytes(body, MAX_BODY).await {
+        Ok(b) => b,
+        Err(_) => {
+            return Error::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                error_codes::PAYLOAD_TOO_LARGE,
+                format!("request body over {MAX_BODY} bytes"),
+            )
+            .into_response();
+        }
+    };
+    let content_type = parts.headers.get(header::CONTENT_TYPE).cloned();
+    let resp = match st
+        .rynasd
+        .send_with_headers(
+            parts.method,
+            &target,
+            Some(&session.user.username),
+            content_type,
+            body,
+            &extra,
+        )
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return Error::from(e).into_response(),
+    };
+    let (rparts, incoming) = resp.into_parts();
+    let is_sse = rparts
+        .headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("text/event-stream"));
+    let body = if is_sse {
+        let auth = st.auth.clone();
+        let id = session.id;
+        let data = incoming
+            .into_data_stream()
+            .take_while(move |_| std::future::ready(auth.sessions().is_valid(&id)));
+        // counted like /events (crate::streams); over the global cap the upstream is dropped
+        match st.streams.limit(id, data) {
+            Ok(limited) => Body::from_stream(limited),
+            Err(full) => return full.into_response(),
+        }
+    } else {
+        Body::new(incoming)
+    };
+    let mut out = Response::new(body);
+    *out.status_mut() = rparts.status;
+    for name in passed_headers() {
+        if let Some(v) = rparts.headers.get(&name) {
+            out.headers_mut().insert(name, v.clone());
+        }
+    }
+    out
+}

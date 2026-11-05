@@ -1,0 +1,50 @@
+{
+  "json_format_version": [1, 0],
+  "smartctl": {
+    "version": [7, 4],
+    "pre_release": false,
+    "svn_revision": "5530",
+    "platform_info": "x86_64-linux-6.12.48+deb13-amd64",
+    "build_info": "(local build)",
+    "argv": ["smartctl", "--json=c", "-a", "/dev/nvme0n1"],
+    "exit_status": 0
+  },
+  "local_time": {"time_t": 1793836800, "asctime": "Thu Nov  5 01:00:00 2026 CET"},
+  "device": {"name": "/dev/nvme0n1", "info_name": "/dev/nvme0n1", "type": "nvme", "protocol": "NVMe"},
+  "model_name": "WD Red SN700 500GB",
+  "serial_number": "22110D800001",
+  "firmware_version": "111150WD",
+  "nvme_pci_vendor": {"id": 5559, "subsystem_id": 5559},
+  "nvme_ieee_oui_identifier": 6980,
+  "nvme_total_capacity": 500107862016,
+  "nvme_unallocated_capacity": 0,
+  "nvme_controller_id": 0,
+  "nvme_version": {"string": "1.4", "value": 66560},
+  "nvme_number_of_namespaces": 1,
+  "nvme_namespaces": [
+    {
+      "id": 1,
+      "size": {"blocks": 976773168, "bytes": 500107862016},
+      "capacity": {"blocks": 976773168, "bytes": 500107862016},
+      "utilization": {"blocks": 976773168, "bytes": 500107862016},
+      "formatted_lba_size": 512,
+      "eui64": {"oui": 6980, "ext_id": 1121320321025}
+    }
+  ],
+  "user_capacity": {"blocks": 976773168, "bytes": 500107862016},
+  "logical_block_size": 512,
+  "smart_support": {"available": true, "enabled": true},
+  "smart_status": {"passed": true, "nvme": {"value": 0}},
+  "nvme_smart_health_information_log": {"critical_warning":0,"temperature":41,"available_spare":100,"available_spare_threshold":10,"percentage_used":3,"data_units_read":38291044,"data_units_written":54123456,"host_reads":512338901,"host_writes":1180234511,"controller_busy_time":2391,"power_cycles":88,"power_on_hours":21044,"unsafe_shutdowns":12,"media_errors":0,"num_err_log_entries":2,"warning_temp_time":0,"critical_comp_time":0,"temperature_sensors":[41,47]},
+  "temperature": {"current": 41},
+  "power_cycle_count": 88,
+  "power_on_time": {"hours": 21044},
+  "nvme_error_information_log": {"size": 256, "read": 16, "unread": 0},
+  "nvme_self_test_log": {
+    "current_self_test_operation": {"value": 0, "string": "No self-test in progress"},
+    "table": [
+      {"self_test_code": {"value": 1, "string": "Short"}, "self_test_result": {"value": 0, "string": "Completed without error"}, "power_on_hours": 21000},
+      {"self_test_code": {"value": 2, "string": "Extended"}, "self_test_result": {"value": 0, "string": "Completed without error"}, "power_on_hours": 20500}
+    ]
+  }
+}

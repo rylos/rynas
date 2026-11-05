@@ -1,0 +1,16 @@
+# Built and published outside the Debian archive: there is no ITP bug to close.
+rynas: initial-upload-closes-no-bugs
+# The web interface ships .br/.gz siblings on purpose: rynas-web serves them as is
+# (Content-Encoding) instead of compressing on every request.
+rynas: compressed-duplicate [usr/share/rynas/ui/*]
+# Latin subsets of Inter and JetBrains Mono made for the web interface, served over HTTP;
+# not system fonts and not the upstream font files.
+rynas: font-in-non-font-package [usr/share/rynas/ui/fonts/*]
+rynas: font-outside-font-dir [usr/share/rynas/ui/fonts/*]
+# The single-page application shell, not documentation.
+rynas: package-contains-documentation-outside-usr-share-doc [usr/share/rynas/ui/index.html]
+# Rust binaries: the C library is called through bounds-checked wrappers, there is no
+# _FORTIFY_SOURCE to apply.
+rynas: hardening-no-fortify-functions [usr/libexec/rynas/*]
+# cargo-deb does not write md5sums; dpkg records checksums of the installed files.
+rynas: no-md5sums-control-file

@@ -1,0 +1,93 @@
+[package]
+name = "rynas-web"
+description = "Web server and HTTP API of the rynas NAS manager, with live metrics and the web interface"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+rynas-api-types.workspace = true
+rynas-auth.workspace = true
+rynas-http.workspace = true
+rynas-storage.workspace = true
+rynas-notify.workspace = true
+rynas-hw.workspace = true
+# status parser and model data only (no configuration domain)
+rynas-hw-synology.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+axum = { workspace = true, features = ["query"] }
+tokio.workspace = true
+tower-http = { version = "0.7.1", features = ["fs", "compression-gzip", "set-header"] }
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+libc.workspace = true
+sha2.workspace = true
+base64.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+
+[dev-dependencies]
+tower = { version = "0.5.3", features = ["util"] }
+rynasd.workspace = true
+rynas-config.workspace = true
+rynas-tasks.workspace = true
+rynas-services.workspace = true
+rynas-notify = { workspace = true, features = ["engine"] }
+tempfile.workspace = true
+
+# Debian package `rynas` (both daemons, the web interface, units, PAM service).
+# Build it with packaging/build-deb.sh, not with a bare `cargo deb`: the script builds in a
+# Debian 13 container (glibc, dpkg-shlibdeps) and stages the precompressed UI and the
+# copyright file that the assets below refer to.
+[package.metadata.deb]
+name = "rynas"
+maintainer = "Marco Ziliani <508111+rylos@users.noreply.github.com>"
+copyright = "2026 Marco Ziliani"
+section = "admin"
+priority = "optional"
+depends = "$auto, adduser, libpam-runtime"
+# What the features run; a missing tool makes only its feature fail, with a clear error:
+# file services (samba, nfs-kernel-server, acl for share ACLs, avahi-daemon and wsdd2 for
+# discovery), snapshots (btrbk, btrfs-progs), storage (mdadm, cryptsetup-bin and
+# systemd-cryptsetup for encrypted volumes, gdisk, smartmontools, hdparm), network changes
+# (iputils-arping/iputils-ping: duplicate-address checks and gateway tests)
+recommends = "samba, nfs-kernel-server, acl, avahi-daemon, wsdd2, btrbk, btrfs-progs, mdadm, cryptsetup-bin, systemd-cryptsetup, smartmontools, hdparm, gdisk, iputils-arping, iputils-ping"
+# mtr-tiny: traceroute diagnostics as JSON
+suggests = "fail2ban, mtr-tiny"
+# rynas runs Samba as a standalone file server and owns smb.conf; Debian's samba recommends the
+# AD domain controller (which pulls winbind and its PAM/NSS modules): keep it out
+conflicts = "samba-ad-dc"
+extended-description = """\
+rynas manages a Debian NAS from the browser: system status, live metrics, \
+storage (RAID, btrfs, encryption), users and shares (SMB, NFS), snapshots, a task \
+scheduler and notifications, behind a PAM login with optional TOTP. It is made of two \
+processes: rynasd, a small root daemon reachable only over a Unix socket, and \
+rynas-web, the unprivileged web server and API. Plain HTTP on port 8080 for now."""
+changelog = "../../packaging/deb/changelog"
+maintainer-scripts = "../../packaging/deb/maintainer-scripts"
+assets = [
+    ["target/release/rynasd", "usr/libexec/rynas/", "755"],
+    ["target/release/rynas-web", "usr/libexec/rynas/", "755"],
+    ["target/release/rynasctl", "usr/libexec/rynas/", "755"],
+    ["../../target/deb-stage/ui/**/*", "usr/share/rynas/ui/", "644"],
+    ["../../target/deb-stage/copyright", "usr/share/doc/rynas/copyright", "644"],
+    ["../../packaging/deb/README.Debian", "usr/share/doc/rynas/", "644"],
+    ["../../packaging/deb/lintian-overrides", "usr/share/lintian/overrides/rynas", "644"],
+    ["../../packaging/deb/default/rynas-web", "etc/default/rynas-web", "644"],
+    ["../../packaging/pam.d/rynas", "etc/pam.d/rynas", "644"],
+    ["../../packaging/fail2ban/filter.d/rynas.conf", "usr/share/doc/rynas/examples/fail2ban/filter.d/", "644"],
+    ["../../packaging/fail2ban/jail.d/rynas.conf", "usr/share/doc/rynas/examples/fail2ban/jail.d/", "644"],
+]
+systemd-units = [
+    { unit-scripts = "../../packaging/systemd", unit-name = "rynasd", enable = true, start = true },
+    { unit-scripts = "../../packaging/systemd", unit-name = "rynas-web", enable = true, start = true },
+    # network safety net (D-NET): boot guard before networkd, watchdog 5 minutes after boot;
+    # neither runs at install time
+    { unit-scripts = "../../packaging/systemd", unit-name = "rynas-net-guard", enable = true, start = false },
+    { unit-scripts = "../../packaging/systemd", unit-name = "rynas-net-watchdog", enable = true, start = false },
+]

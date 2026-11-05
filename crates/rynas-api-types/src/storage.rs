@@ -1,0 +1,1026 @@
+//! Storage inventory, health, planning and execution (`/api/v1/storage/...`).
+//!
+//! The read side describes the system as it is, or a plan of commands that *would* change
+//! it. The write side executes plans as tasks and stages disk settings.
+//!
+//! | Method | Path | Body | Response |
+//! |---|---|---|---|
+//! | GET | `/api/v1/storage/disks` | | `Vec<DiskSummary>` |
+//! | GET | `/api/v1/storage/disks/{name}` | | [`DiskDetail`] |
+//! | GET | `/api/v1/storage/arrays` | | `Vec<MdArray>` |
+//! | GET | `/api/v1/storage/filesystems` | | `Vec<BtrfsFilesystem>` |
+//! | GET | `/api/v1/storage/tree` | | [`StorageTree`] |
+//! | POST | `/api/v1/storage/plan/volume` | [`VolumePlanRequest`] | [`StoragePlan`] |
+//! | POST | `/api/v1/storage/plan/grow` | [`GrowPlanRequest`] | [`StoragePlan`] |
+//! | POST | `/api/v1/storage/plan/replace` | [`ReplacePlanRequest`] | [`StoragePlan`] |
+//! | POST | `/api/v1/storage/plan/scrub` | [`ScrubPlanRequest`] | [`StoragePlan`] |
+//!
+//! The write side (volumes, subvolumes, disk settings) is listed above
+//! [`VolumeCreateRequest`].
+
+use serde::{Deserialize, Serialize};
+
+// ------------------------------------------------------------------ disks
+
+/// Disk family, which decides the recommended settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DiskKind {
+    Hdd,
+    Ssd,
+    Nvme,
+    #[default]
+    Unknown,
+}
+
+/// Power state read without waking the disk (ATA CHECK POWER MODE, `smartctl -n standby`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PowerState {
+    /// Spinning or ready (also "active or idle" when the disk does not tell them apart).
+    Active,
+    Idle,
+    /// Spun down. Reading SMART would wake it, so cached data is shown.
+    Standby,
+    Sleep,
+    #[default]
+    Unknown,
+}
+
+/// Overall verdict computed by rynas from SMART (not only the drive's own PASSED flag).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum HealthVerdict {
+    /// No SMART data (yet): disk asleep since rynasd started, no permission, unsupported.
+    #[default]
+    Unknown,
+    Healthy,
+    Warning,
+    Failing,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
+    #[default]
+    Info,
+    Warning,
+    Critical,
+}
+
+/// One reason behind a [`HealthVerdict`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct HealthReason {
+    pub severity: Severity,
+    /// Stable machine code, e.g. "reallocated_sectors", "nvme_spare_low", "crc_errors".
+    pub code: String,
+    /// One line for humans, in English; the UI may translate by `code`.
+    pub message: String,
+}
+
+/// `GET /api/v1/storage/disks`: one whole disk.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct DiskSummary {
+    /// Kernel name, e.g. "sda", "nvme0n1".
+    pub name: String,
+    /// Device node, e.g. "/dev/sda".
+    pub path: String,
+    pub model: String,
+    pub serial: String,
+    pub wwn: Option<String>,
+    pub firmware: Option<String>,
+    pub size: u64,
+    pub kind: DiskKind,
+    pub rotational: bool,
+    /// "sata", "nvme", "usb", "sas", ...
+    pub transport: String,
+    /// Bay number when a hardware provider maps it (filled by `rynas-web`).
+    pub bay: Option<u32>,
+    /// The M.2 slot of an NVMe disk when a hardware provider maps it (filled by `rynas-web`).
+    #[serde(default)]
+    pub m2: Option<M2Ref>,
+    pub power_state: PowerState,
+    pub rotation_rpm: Option<u32>,
+    pub temperature_c: Option<f32>,
+    pub power_on_hours: Option<u64>,
+    pub health: HealthVerdict,
+    pub health_reasons: Vec<HealthReason>,
+    /// Age of the SMART data behind `health`; None when there is none.
+    pub smart_age_s: Option<u64>,
+    /// What sits on the disk: "md2", "btrfs root", "crypto_LUKS", "mounted /boot"... Empty
+    /// means unused (a candidate for a new volume).
+    pub used_by: Vec<String>,
+    /// Known or detected shingled (SMR) drive: bad for RAID5/6 rebuilds.
+    pub smr: bool,
+    pub removable: bool,
+}
+
+/// The M.2 slot that holds a disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct M2Ref {
+    /// None: an M.2 slot, but which one is unknown.
+    pub number: Option<u32>,
+}
+
+/// `GET /api/v1/storage/disks/{name}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct DiskDetail {
+    pub summary: DiskSummary,
+    pub smart: Option<SmartInfo>,
+    /// Recommended (per disk type) vs current settings, read-only.
+    pub settings: Vec<SettingCheck>,
+    pub partitions: Vec<Partition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct Partition {
+    pub name: String,
+    pub size: u64,
+    pub fstype: Option<String>,
+    pub label: Option<String>,
+    pub uuid: Option<String>,
+    pub mountpoints: Vec<String>,
+    /// Devices stacked on it, e.g. ["md2"] or ["luks-1234"].
+    pub holders: Vec<String>,
+}
+
+/// SMART data as parsed from `smartctl --json=c -a`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SmartInfo {
+    /// When it was read (ms since the epoch).
+    pub read_ms: u64,
+    /// e.g. "7.4".
+    pub smartctl_version: String,
+    /// "ATA", "NVMe", "SCSI".
+    pub protocol: String,
+    /// smartctl exit status bit mask (see smartctl(8) "RETURN VALUES").
+    pub exit_status: u32,
+    /// The drive's own overall assessment, when it gave one.
+    pub passed: Option<bool>,
+    pub smart_enabled: Option<bool>,
+    pub temperature_c: Option<f32>,
+    pub power_on_hours: Option<u64>,
+    pub power_cycles: Option<u64>,
+    /// ATA attribute table (empty for NVMe).
+    pub attributes: Vec<SmartAttribute>,
+    pub nvme: Option<NvmeHealth>,
+    /// Self-test log, newest first.
+    pub self_tests: Vec<SelfTest>,
+    /// A self-test is running, with its remaining percent.
+    pub self_test_running: Option<u32>,
+    /// Recommended polling time of the short and extended self-tests, minutes.
+    pub short_test_minutes: Option<u32>,
+    pub extended_test_minutes: Option<u32>,
+    /// Number of entries in the ATA/NVMe error log.
+    pub error_log_count: Option<u64>,
+    /// Remaining life in percent for SSDs (from the wear attribute or NVMe percentage used).
+    pub life_remaining_pct: Option<u32>,
+    /// Lifetime host writes, bytes, when the drive reports them.
+    pub bytes_written: Option<u64>,
+    pub messages: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SmartAttribute {
+    pub id: u8,
+    pub name: String,
+    pub value: u32,
+    pub worst: u32,
+    pub thresh: u32,
+    pub raw: u64,
+    /// Raw value as printed by smartctl (may carry extra fields, e.g. "35 (Min/Max 18/45)").
+    pub raw_string: String,
+    pub prefailure: bool,
+    /// "" (never), "past" or "now".
+    pub when_failed: String,
+    /// One of the attributes rynas watches for the verdict.
+    pub watched: bool,
+}
+
+/// NVMe SMART / Health Information log page.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct NvmeHealth {
+    pub critical_warning: u8,
+    pub temperature_c: Option<f32>,
+    pub available_spare_pct: u32,
+    pub available_spare_threshold_pct: u32,
+    pub percentage_used: u32,
+    /// Units of 1000 × 512 bytes, as reported.
+    pub data_units_read: u64,
+    pub data_units_written: u64,
+    /// `data_units_written` in terabytes (10^12 bytes).
+    pub tb_written: f64,
+    pub tb_read: f64,
+    pub power_cycles: u64,
+    pub power_on_hours: u64,
+    pub unsafe_shutdowns: u64,
+    pub media_errors: u64,
+    pub error_log_entries: u64,
+    pub warning_temp_minutes: u64,
+    pub critical_temp_minutes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SelfTest {
+    /// "Short offline", "Extended offline", "Short", "Extended", ...
+    pub kind: String,
+    /// smartctl's status text, e.g. "Completed without error".
+    pub status: String,
+    pub passed: Option<bool>,
+    pub lifetime_hours: Option<u64>,
+    pub lba_first_error: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckStatus {
+    /// Current value matches the recommendation.
+    Ok,
+    /// Differs: the UI shows the note and, later, a "restore default" action.
+    Differs,
+    #[default]
+    Unknown,
+    NotApplicable,
+}
+
+/// A per-disk setting: what the disk type wants vs what is set now.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SettingCheck {
+    /// "scheduler", "read_ahead_kb", "write_cache", "apm", "trim", "alpm", "apst", "temperature".
+    pub key: String,
+    pub label: String,
+    pub current: Option<String>,
+    pub recommended: String,
+    pub status: CheckStatus,
+    /// Impact in one line.
+    pub note: String,
+}
+
+// ------------------------------------------------------------------ md arrays
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum MemberRole {
+    Active,
+    Spare,
+    Faulty,
+    Journal,
+    /// Being rebuilt onto (recovery target).
+    Rebuilding,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct MdMember {
+    /// Component device, e.g. "sda3".
+    pub device: String,
+    /// Whole disk it belongs to, e.g. "sda".
+    pub disk: Option<String>,
+    pub role: MemberRole,
+    /// Slot in the array (0-based), None for spares and faulty members.
+    pub slot: Option<u32>,
+    /// sysfs state, e.g. "in_sync", "faulty", "spare", "write_mostly".
+    pub state: String,
+    /// Corrected read errors counted by md.
+    pub errors: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SyncProgress {
+    /// "resync", "recovery", "check", "repair", "reshape".
+    pub action: String,
+    /// None while "DELAYED"/"PENDING".
+    pub pct: Option<f32>,
+    pub speed_kib_s: Option<u64>,
+    pub finish_s: Option<u64>,
+    /// "delayed" or "pending" when waiting for another array on the same disks.
+    pub waiting: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ArrayHealth {
+    Healthy,
+    /// Running without full redundancy.
+    Degraded,
+    /// More members missing than the level tolerates, or not running.
+    Failed,
+    Inactive,
+    #[default]
+    Unknown,
+}
+
+/// `GET /api/v1/storage/arrays`: one md array.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct MdArray {
+    /// Kernel name, e.g. "md2".
+    pub name: String,
+    pub path: String,
+    /// Array name from the superblock, e.g. "nas:2".
+    pub md_name: Option<String>,
+    pub uuid: Option<String>,
+    /// e.g. "raid5".
+    pub level: String,
+    /// e.g. "1.2".
+    pub metadata: Option<String>,
+    pub raid_disks: u32,
+    pub size: u64,
+    pub chunk_bytes: Option<u64>,
+    /// md's own state, e.g. "clean", "active", "clean, degraded, recovering".
+    pub state: String,
+    pub health: ArrayHealth,
+    /// Number of missing members.
+    pub degraded: u32,
+    pub sync: Option<SyncProgress>,
+    /// "internal", "none" or a file path.
+    pub bitmap: Option<String>,
+    pub events: Option<u64>,
+    pub mismatch_cnt: Option<u64>,
+    pub members: Vec<MdMember>,
+    /// Superblock details were not refreshed because a member disk is in standby.
+    pub stale: bool,
+}
+
+// ------------------------------------------------------------------ btrfs
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum QuotaMode {
+    #[default]
+    None,
+    /// Classic qgroups (full accounting, slow with many snapshots).
+    Qgroup,
+    /// Simple quotas (kernel 6.7+).
+    Squota,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct BtrfsDeviceErrors {
+    pub write_io: u64,
+    pub read_io: u64,
+    pub flush_io: u64,
+    pub corruption: u64,
+    pub generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct BtrfsDevice {
+    pub devid: u64,
+    /// e.g. "/dev/mapper/rynas-vol1", "/dev/md2".
+    pub path: String,
+    pub size: u64,
+    pub used: u64,
+    pub missing: bool,
+    pub errors: BtrfsDeviceErrors,
+}
+
+/// Block group profile usage, e.g. Data single, Metadata DUP.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct BtrfsProfile {
+    /// "data", "metadata", "system".
+    pub kind: String,
+    /// "single", "dup", "raid1", ...
+    pub profile: String,
+    pub size: u64,
+    pub used: u64,
+}
+
+/// State of the last btrfs scrub of a filesystem (`btrfs scrub status`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ScrubState {
+    Finished,
+    Running,
+    /// Stopped by a user (`btrfs scrub cancel`).
+    Aborted,
+    /// Stopped by an unmount or a reboot.
+    Interrupted,
+    /// No scrub ever ran.
+    #[default]
+    Never,
+    /// A status word this version does not know.
+    #[serde(other)]
+    Unknown,
+}
+
+impl ScrubState {
+    /// From btrfs-progs' `Status:` word.
+    pub fn from_btrfs(word: &str) -> Self {
+        match word.trim() {
+            "finished" => Self::Finished,
+            "running" => Self::Running,
+            "aborted" => Self::Aborted,
+            "interrupted" => Self::Interrupted,
+            "never" | "" => Self::Never,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ScrubStatus {
+    pub status: ScrubState,
+    /// As printed by btrfs-progs, e.g. "Thu Oct 22 15:35:01 2026".
+    pub started: Option<String>,
+    pub duration_s: Option<u64>,
+    pub total_bytes: Option<u64>,
+    pub scrubbed_bytes: Option<u64>,
+    pub pct: Option<f32>,
+    pub rate_bps: Option<u64>,
+    pub time_left_s: Option<u64>,
+    /// "no errors found" or e.g. "csum=3 read=1".
+    pub error_summary: String,
+    pub errors: u64,
+    pub corrected: Option<u64>,
+    pub uncorrectable: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct Subvolume {
+    pub id: u64,
+    /// Path from the top level of the filesystem, e.g. "photos", ".snapshots/photos/photos.20261105T1200".
+    pub path: String,
+    pub parent_id: u64,
+    pub generation: u64,
+    pub creation_generation: u64,
+    pub uuid: Option<String>,
+    pub parent_uuid: Option<String>,
+    pub received_uuid: Option<String>,
+    pub readonly: bool,
+    pub mountpoint: Option<String>,
+}
+
+/// `GET /api/v1/storage/filesystems`: one btrfs filesystem.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct BtrfsFilesystem {
+    pub uuid: String,
+    pub label: Option<String>,
+    /// Main mountpoint (top level first, else the shortest path); None when not mounted.
+    pub mountpoint: Option<String>,
+    pub mountpoints: Vec<String>,
+    pub devices: Vec<BtrfsDevice>,
+    pub device_size: u64,
+    pub used: u64,
+    pub free_estimated: u64,
+    pub free_min: u64,
+    pub data_ratio: f32,
+    pub metadata_ratio: f32,
+    pub profiles: Vec<BtrfsProfile>,
+    /// From the mount options, e.g. "zstd:1"; None when not compressed.
+    pub compression: Option<String>,
+    pub mount_options: Vec<String>,
+    pub quota: QuotaMode,
+    pub scrub: Option<ScrubStatus>,
+    pub subvolumes: Vec<Subvolume>,
+    /// Details come from the cache because an underlying disk is in standby.
+    pub stale: bool,
+    pub read_ms: u64,
+}
+
+// ------------------------------------------------------------------ tree
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum NodeKind {
+    Disk,
+    Partition,
+    Md,
+    Crypt,
+    Lvm,
+    Btrfs,
+    Filesystem,
+    Subvolume,
+    #[default]
+    Other,
+}
+
+/// One layer of a volume. Children are the layers *below* it (towards the disks).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct TreeNode {
+    pub kind: NodeKind,
+    pub name: String,
+    pub size: u64,
+    /// e.g. "clean", "degraded", "unlocked", "locked", "standby".
+    pub state: Option<String>,
+    /// Short extra line, e.g. "raid5, 4 disks" or "LUKS2".
+    pub detail: Option<String>,
+    pub health: HealthVerdict,
+    pub children: Vec<TreeNode>,
+}
+
+/// A volume: a filesystem with the stack of block devices under it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct VolumeTree {
+    /// Filesystem UUID.
+    pub id: String,
+    pub label: Option<String>,
+    pub fstype: String,
+    pub mountpoint: Option<String>,
+    pub size: u64,
+    pub used: u64,
+    /// Worst health of everything below.
+    pub health: HealthVerdict,
+    pub encrypted: bool,
+    /// Top layer = the device the filesystem lives on; children go down to the disks.
+    pub layers: Vec<TreeNode>,
+    pub subvolumes: Vec<TreeNode>,
+}
+
+/// `GET /api/v1/storage/tree`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct StorageTree {
+    pub volumes: Vec<VolumeTree>,
+    /// Locked LUKS containers (no filesystem visible until unlocked).
+    pub locked: Vec<TreeNode>,
+    /// Whole disks with nothing on them.
+    pub unused_disks: Vec<String>,
+}
+
+// ------------------------------------------------------------------ planning
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RaidLevel {
+    /// One disk (md RAID1 with one member, so a mirror can be added later, like DSM "Basic").
+    #[default]
+    Single,
+    Raid0,
+    Raid1,
+    Raid5,
+    Raid6,
+    Raid10,
+}
+
+/// `POST /api/v1/storage/plan/volume`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct VolumePlanRequest {
+    /// Whole disks by kernel name, e.g. ["sdb", "sdc", "sdd"].
+    pub disks: Vec<String>,
+    pub level: RaidLevel,
+    #[serde(default)]
+    pub encrypt: bool,
+    #[serde(default = "yes")]
+    pub compress: bool,
+    /// Volume label and mount name: `[a-z][a-z0-9-]{0,15}`, mounted at `/<label>`.
+    pub label: String,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// `POST /api/v1/storage/plan/grow`: add disks to an array (more mirrors, more capacity, or a
+/// level change such as RAID1 → RAID5).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct GrowPlanRequest {
+    /// e.g. "md2".
+    pub array: String,
+    pub disks: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<RaidLevel>,
+}
+
+/// `POST /api/v1/storage/plan/replace`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ReplacePlanRequest {
+    pub array: String,
+    /// Member to replace: component ("sdb3") or whole disk ("sdb").
+    pub old: String,
+    /// New whole disk.
+    pub new_disk: String,
+}
+
+/// `POST /api/v1/storage/plan/scrub`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ScrubPlanRequest {
+    /// Filesystem UUID or mountpoint.
+    pub filesystem: String,
+    /// Also run an md "check" on the arrays below (verifies RAID parity / mirrors).
+    #[serde(default = "yes")]
+    pub md_check: bool,
+}
+
+/// What a plan step does when executed (by the task engine, later).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PlanAction {
+    /// Run a program: argv only, never a shell. `stdin` names a secret to feed on standard
+    /// input (e.g. "passphrase"); it is never part of the plan.
+    Command {
+        argv: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stdin: Option<String>,
+    },
+    /// Write a value to a sysfs file, e.g. md `sync_action`.
+    WriteSysfs { path: String, value: String },
+    /// A configuration change owned by rynas-config (fstab, crypttab, mdadm.conf, ...).
+    Config { file: String, entry: String },
+    /// Wait for a condition before going on, e.g. the end of an md reshape.
+    Wait { condition: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanStep {
+    pub description: String,
+    #[serde(flatten)]
+    pub action: PlanAction,
+    /// The step destroys data on these devices.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub destroys: Vec<String>,
+}
+
+/// Answer of every `POST /api/v1/storage/plan/*`: no side effects, only what would be done.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct StoragePlan {
+    /// "create_volume", "grow_array", "replace_disk", "scrub".
+    pub operation: String,
+    /// False when `errors` is not empty: `steps` is then empty.
+    pub valid: bool,
+    /// English text of each error (logs, tooltips); the UI translates `issues` instead.
+    pub errors: Vec<String>,
+    pub warnings: Vec<String>,
+    /// The same errors as `errors`, in the same order, with a stable code and the request
+    /// field they are about, so a form can mark the right input.
+    #[serde(default)]
+    pub issues: Vec<PlanIssue>,
+    /// Sum of the selected disks.
+    pub raw_bytes: u64,
+    /// Estimated usable space of the result (before filesystem overhead).
+    pub usable_bytes: u64,
+    /// Disks that may fail without data loss.
+    pub fault_tolerance: u32,
+    /// Bytes of the selected disks that the layout cannot use (mixed sizes).
+    pub wasted_bytes: u64,
+    /// Named results, e.g. {"md": "/dev/md/vol1", "mapper": "rynas-vol1", "mountpoint": "/vol1"}.
+    pub summary: Vec<(String, String)>,
+    pub steps: Vec<PlanStep>,
+}
+
+/// Why a storage plan cannot run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanIssueCode {
+    /// The label breaks the naming rule ([`crate::validate::volume_label`]).
+    InvalidLabel,
+    /// A volume, array or mount already has that name.
+    LabelTaken,
+    /// The same disk is listed twice.
+    DiskSelectedTwice,
+    /// Wrong number of disks for the RAID level.
+    DiskCount,
+    /// No disks were selected.
+    NoDisks,
+    NoSuchDisk,
+    /// The disk holds the operating system.
+    SystemDisk,
+    /// The disk is part of an array, a mounted filesystem or another volume.
+    DiskInUse,
+    /// SMART says the disk is failing.
+    DiskFailing,
+    /// The disk is too small (for any volume, or than the members it joins or replaces).
+    DiskTooSmall,
+    NoSuchArray,
+    /// The array is degraded or failed: repair it first.
+    ArrayNotHealthy,
+    /// A resync, recovery, check or reshape is running.
+    ArrayBusy,
+    /// The array's level cannot be grown or changed by rynas.
+    LevelUnsupported,
+    /// The level change asked for is not supported.
+    LevelChangeUnsupported,
+    /// The disk to replace is not a member of the array.
+    NotAMember,
+    /// RAID0/linear: a member cannot be replaced.
+    NoRedundancy,
+    /// No healthy member left to rebuild from.
+    NoHealthyMember,
+    NoSuchFilesystem,
+    /// The filesystem is not mounted.
+    NotMounted,
+    /// A scrub is already running.
+    ScrubRunning,
+}
+
+/// One error of a [`StoragePlan`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanIssue {
+    pub code: PlanIssueCode,
+    /// Request field it is about, as in the request body: `label`, `level`, `disks`,
+    /// `array`, `old`, `new_disk`, `filesystem`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    /// The disk, array or filesystem it names, when there is one (`sdb`, `md2`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+}
+
+// ------------------------------------------------------------------ execution (write side)
+//
+// | Method | Path | Body | Response |
+// |---|---|---|---|
+// | POST | `/api/v1/storage/volumes` | [`VolumeCreateRequest`] | 202 `TaskStarted`, or 200 [`StoragePlan`] with `dry_run` |
+// | POST | `/api/v1/storage/volumes/{name}/grow` | [`VolumeGrowRequest`] | 202 / 200 (dry run) |
+// | POST | `/api/v1/storage/volumes/{name}/replace` | [`VolumeReplaceRequest`] | 202 / 200 (dry run) |
+// | POST | `/api/v1/storage/volumes/{name}/scrub` | [`VolumeScrubRequest`] | 202 / 200 (dry run) |
+// | POST | `/api/v1/storage/volumes/{name}/unlock` | [`UnlockRequest`] | 202 |
+// | POST | `/api/v1/storage/volumes/{name}/lock` | — | 202 |
+// | POST | `/api/v1/storage/volumes/{name}/reveal-recovery-key` | — | [`RecoveryKey`], once |
+// | GET/DELETE | `/api/v1/storage/volumes/{name}/luks-header` | — | `application/octet-stream` / 204 |
+// | GET/PUT | `/api/v1/storage/volumes/{name}/settings` | [`VolumeSettings`] | [`VolumeSettingsState`] |
+// | GET/POST | `/api/v1/storage/volumes/{name}/subvolumes` | [`SubvolumeCreateRequest`] | `Vec<SubvolumeInfo>` / 202 |
+// | PUT/DELETE | `/api/v1/storage/volumes/{name}/subvolumes/{sub}?confirm=` | [`SubvolumeSettings`] | 202 |
+// | GET/PUT | `/api/v1/storage/disks/{name}/settings` | [`DiskSettings`] | [`DiskSettingsState`] |
+
+/// `POST /api/v1/storage/volumes`: execute the plan of [`VolumePlanRequest`].
+///
+/// Destructive: `confirm` must be the volume label and `serials` the serial numbers of
+/// exactly the selected disks (a disk without a serial, such as a virtual disk, is named by
+/// its kernel name). `passphrase` is required with `encrypt` and travels on standard input
+/// only, never in a log.
+#[derive(Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct VolumeCreateRequest {
+    #[serde(flatten)]
+    pub plan: VolumePlanRequest,
+    #[serde(default)]
+    pub confirm: String,
+    #[serde(default)]
+    pub serials: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passphrase: Option<String>,
+    /// Validate everything (plan, confirmation, disks free) and answer the plan without
+    /// running it.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// `POST /api/v1/storage/volumes/{name}/grow`: add disks to the array of a volume.
+#[derive(Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct VolumeGrowRequest {
+    pub disks: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<RaidLevel>,
+    /// The volume label.
+    #[serde(default)]
+    pub confirm: String,
+    /// Serials of the new disks.
+    #[serde(default)]
+    pub serials: Vec<String>,
+    /// Needed when the volume is encrypted and the LUKS mapping is grown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passphrase: Option<String>,
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// `POST /api/v1/storage/volumes/{name}/replace`: replace a member (failed or not).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct VolumeReplaceRequest {
+    /// Member to replace: component ("sdb1") or whole disk ("sdb").
+    pub old: String,
+    pub new_disk: String,
+    #[serde(default)]
+    pub confirm: String,
+    /// Serial of the new disk (one entry).
+    #[serde(default)]
+    pub serials: Vec<String>,
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ScrubAction {
+    #[default]
+    Start,
+    Stop,
+}
+
+/// `POST /api/v1/storage/volumes/{name}/scrub`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct VolumeScrubRequest {
+    #[serde(default)]
+    pub action: ScrubAction,
+    /// Also run an md "check" on the arrays below.
+    #[serde(default = "yes")]
+    pub md_check: bool,
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// `POST /api/v1/storage/volumes/{name}/unlock`: the passphrase or the recovery key.
+#[derive(Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct UnlockRequest {
+    pub passphrase: String,
+}
+
+/// Answer of `POST /api/v1/storage/volumes/{name}/reveal-recovery-key`: the recovery key of a
+/// volume created encrypted, kept in memory for one hour and given out once.
+#[derive(Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct RecoveryKey {
+    pub key: String,
+}
+
+/// `Debug` without the secret fields (passphrases, recovery keys never reach a log).
+macro_rules! redacted_debug {
+    ($t:ident $(, $f:ident)*) => {
+        impl std::fmt::Debug for $t {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                let mut d = f.debug_struct(stringify!($t));
+                $( d.field(stringify!($f), &self.$f); )*
+                d.field("secret", &"<redacted>").finish()
+            }
+        }
+    };
+}
+redacted_debug!(VolumeCreateRequest, plan, confirm, serials, dry_run);
+redacted_debug!(VolumeGrowRequest, disks, level, confirm, serials, dry_run);
+redacted_debug!(UnlockRequest);
+redacted_debug!(RecoveryKey);
+
+/// A rynas volume as recorded in the configuration (key `storage.volumes`): the source of
+/// the `/etc/fstab`, `/etc/crypttab` and `/etc/mdadm/mdadm.conf` entries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct VolumeRecord {
+    pub label: String,
+    /// md array UUID as mdadm prints it (`xxxxxxxx:xxxxxxxx:xxxxxxxx:xxxxxxxx`).
+    pub md_uuid: String,
+    pub level: RaidLevel,
+    /// LUKS2 container UUID when encrypted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub luks_uuid: Option<String>,
+    /// btrfs filesystem UUID.
+    pub fs_uuid: String,
+    /// `/<label>`.
+    pub mountpoint: String,
+    /// Mount options without `nofail`/`noauto` (added by rynas), e.g. `noatime,compress=zstd:1`.
+    pub options: String,
+    #[serde(default)]
+    pub created_ms: u64,
+}
+
+/// Configuration key `storage.volumes`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct StorageVolumes {
+    #[serde(default)]
+    pub volumes: Vec<VolumeRecord>,
+}
+
+/// I/O scheduler choices of a disk queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum IoScheduler {
+    MqDeadline,
+    Bfq,
+    Kyber,
+    None,
+}
+
+impl IoScheduler {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IoScheduler::MqDeadline => "mq-deadline",
+            IoScheduler::Bfq => "bfq",
+            IoScheduler::Kyber => "kyber",
+            IoScheduler::None => "none",
+        }
+    }
+}
+
+/// Per-disk settings (D-SYSTUNE). Every field is optional: `None` keeps the default of the
+/// disk type (scheduler, read-ahead) or leaves the drive alone (APM, standby).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DiskSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduler: Option<IoScheduler>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_ahead_kb: Option<u32>,
+    /// `hdparm -B`: 1-254 (up to 127 allows spin-down), 255 turns APM off. HDDs only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apm: Option<u8>,
+    /// Spin down after this many idle seconds (`hdparm -S`, rounded up to what the drive can
+    /// express); 0 disables the timer. HDDs only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standby_s: Option<u32>,
+}
+
+impl DiskSettings {
+    pub fn is_empty(&self) -> bool {
+        *self == DiskSettings::default()
+    }
+}
+
+/// One per-disk override, matched by serial (kernel names change between boots).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DiskOverride {
+    pub serial: String,
+    #[serde(flatten)]
+    pub settings: DiskSettings,
+}
+
+/// md tuning chosen for an array (RAID5/6 only).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ArrayTuning {
+    /// As in [`VolumeRecord::md_uuid`].
+    pub md_uuid: String,
+    pub stripe_cache_size: u32,
+}
+
+/// Configuration key `storage.disks`: rendered to `/etc/udev/rules.d/69-rynas-storage.rules`
+/// together with the per-type defaults.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct StorageTuning {
+    #[serde(default)]
+    pub disks: Vec<DiskOverride>,
+    #[serde(default)]
+    pub arrays: Vec<ArrayTuning>,
+}
+
+/// `GET/PUT /api/v1/storage/disks/{name}/settings`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct DiskSettingsState {
+    pub disk: String,
+    pub serial: String,
+    pub kind: DiskKind,
+    /// What the per-type rule sets.
+    pub defaults: DiskSettings,
+    /// The applied override of this disk.
+    pub applied: Option<DiskSettings>,
+    /// The override the session user has staged (`Some` of an empty value removes it).
+    pub pending: Option<DiskSettings>,
+    /// Defaults with the applied override on top.
+    pub effective: DiskSettings,
+    pub current_scheduler: Option<String>,
+    pub current_read_ahead_kb: Option<u32>,
+}
+
+/// `PUT /api/v1/storage/volumes/{name}/settings`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct VolumeSettings {
+    /// md `stripe_cache_size` (entries of one page per member); `None` keeps the kernel
+    /// default (256). RAID5/6 only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stripe_cache_size: Option<u32>,
+}
+
+/// `GET /api/v1/storage/volumes/{name}/settings`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct VolumeSettingsState {
+    pub volume: String,
+    pub applied: VolumeSettings,
+    pub pending: Option<VolumeSettings>,
+    /// rynas' proposal for this array and this amount of RAM; applied only when chosen.
+    pub proposed_stripe_cache_size: Option<u32>,
+    /// Memory the proposal costs (entries × 4 KiB × members).
+    pub proposed_memory_bytes: Option<u64>,
+    /// What the kernel uses now.
+    pub current_stripe_cache_size: Option<u32>,
+}
+
+/// An entry of `GET /api/v1/storage/volumes/{name}/subvolumes`: the subvolumes directly
+/// below the top level of the volume.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SubvolumeInfo {
+    pub name: String,
+    /// Absolute path, e.g. "/vol1/photos".
+    pub path: String,
+    pub id: u64,
+    pub readonly: bool,
+    /// The `compression` property: None inherits the mount option, "none" disables it.
+    pub compression: Option<String>,
+    /// Created and used by rynas (`.snapshots`, `@rynas-cache`): not changed here.
+    pub system: bool,
+}
+
+/// `POST /api/v1/storage/volumes/{name}/subvolumes`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SubvolumeCreateRequest {
+    /// `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`.
+    pub name: String,
+    #[serde(flatten)]
+    pub settings: SubvolumeSettings,
+}
+
+/// `PUT /api/v1/storage/volumes/{name}/subvolumes/{sub}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubvolumeSettings {
+    /// false sets the `compression` property to "none" (video, photos, backups, VM images).
+    #[serde(default = "yes")]
+    pub compression: bool,
+    #[serde(default)]
+    pub readonly: bool,
+}
+
+impl Default for SubvolumeSettings {
+    fn default() -> Self {
+        Self {
+            compression: true,
+            readonly: false,
+        }
+    }
+}

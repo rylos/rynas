@@ -1,0 +1,95 @@
+{
+   "blockdevices": [
+      {
+         "name": "sda", "kname": "sda", "path": "/dev/sda", "type": "disk", "fstype": null, "fsver": null, "label": null, "uuid": null, "partlabel": null, "size": 8001563222016, "rota": true, "tran": "sata", "model": "WDC WD80EFZZ-68BTXN0", "serial": "WD-CA0AAAA1", "wwn": "0x5000cca0aaaa0001", "rev": "81.00A81", "mountpoints": [null], "rm": false, "hotplug": false, "maj:min": "8:0",
+         "children": [
+            {
+               "name": "sda1", "kname": "sda1", "path": "/dev/sda1", "type": "part", "fstype": "linux_raid_member", "fsver": "1.2", "label": "nas:vol1", "uuid": "6b3f0c2e-1d4a-8e7b-2c9f-0a1b2c3d4e5f", "partlabel": "rynas-data", "size": 8001427406848, "rota": true, "tran": "sata", "model": null, "serial": null, "wwn": "0x5000cca0aaaa0001", "rev": null, "mountpoints": [null], "rm": false, "hotplug": false, "maj:min": "8:1",
+               "children": [
+                  {
+                     "name": "md2", "kname": "md2", "path": "/dev/md2", "type": "raid5", "fstype": "crypto_LUKS", "fsver": "2", "label": null, "uuid": "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0", "partlabel": null, "size": 16002586181632, "rota": true, "tran": null, "model": null, "serial": null, "wwn": null, "rev": null, "mountpoints": [null], "rm": false, "hotplug": false, "maj:min": "9:2",
+                     "children": [
+                        {
+                           "name": "rynas-vol1", "kname": "dm-0", "path": "/dev/mapper/rynas-vol1", "type": "crypt", "fstype": "btrfs", "fsver": null, "label": "vol1", "uuid": "3e6c1f0a-9b2d-4c8e-a7f1-5d0b2c4e6a81", "partlabel": null, "size": 16002569404416, "rota": true, "tran": null, "model": null, "serial": null, "wwn": null, "rev": null, "mountpoints": ["/vol1"], "rm": false, "hotplug": false, "maj:min": "253:0"
+                        }
+                     ]
+                  }
+               ]
+            }
+         ]
+      },{
+         "name": "sdb", "kname": "sdb", "path": "/dev/sdb", "type": "disk", "fstype": null, "fsver": null, "label": null, "uuid": null, "partlabel": null, "size": 8001563222016, "rota": true, "tran": "sata", "model": "WDC WD80EFZZ-68BTXN0", "serial": "WD-CA0AAAA2", "wwn": "0x5000cca0aaaa0002", "rev": "81.00A81", "mountpoints": [null], "rm": false, "hotplug": false, "maj:min": "8:16",
+         "children": [
+            {
+               "name": "sdb1", "kname": "sdb1", "path": "/dev/sdb1", "type": "part", "fstype": "linux_raid_member", "fsver": "1.2", "label": "nas:vol1", "uuid": "6b3f0c2e-1d4a-8e7b-2c9f-0a1b2c3d4e5f", "partlabel": "rynas-data", "size": 8001427406848, "rota": true, "tran": "sata", "model": null, "serial": null, "wwn": "0x5000cca0aaaa0002", "rev": null, "mountpoints": [null], "rm": false, "hotplug": false, "maj:min": "8:17",
+               "children": [
+                  {
+                     "name": "md2", "kname": "md2", "path": "/dev/md2", "type": "raid5", "fstype": "crypto_LUKS", "fsver": "2", "label": null, "uuid": "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0", "partlabel": null, "size": 16002586181632, "rota": true, "tran": null, "model": null, "serial": null, "wwn": null, "rev": null, "mountpoints": [null], "rm": false, "hotplug": false, "maj:min": "9:2",
+                     "children": [
+                        {
+                           "name": "rynas-vol1", "kname": "dm-0", "path": "/dev/mapper/rynas-vol1", "type": "crypt", "fstype": "btrfs", "fsver": null, "label": "vol1", "uuid": "3e6c1f0a-9b2d-4c8e-a7f1-5d0b2c4e6a81", "partlabel": null, "size": 16002569404416, "rota": true, "tran": null, "model": null, "serial": null, "wwn": null, "rev": null, "mountpoints": ["/vol1"], "rm": false, "hotplug": false, "maj:min": "253:0"
+                        }
+                     ]
+                  }
+               ]
+            }
+         ]
+      },{
+         "name": "sdc", "kname": "sdc", "path": "/dev/sdc", "type": "disk", "fstype": null, "fsver": null, "label": null, "uuid": null, "partlabel": null, "size": 8001563222016, "rota": true, "tran": "sata", "model": "WDC WD80EFZZ-68BTXN0", "serial": "WD-CA0AAAA3", "wwn": "0x5000cca0aaaa0003", "rev": "81.00A81", "mountpoints": [null], "rm": false, "hotplug": false, "maj:min": "8:32",
+         "children": [
+            {
+               "name": "sdc1", "kname": "sdc1", "path": "/dev/sdc1", "type": "part", "fstype": "linux_raid_member", "fsver": "1.2", "label": "nas:vol1", "uuid": "6b3f0c2e-1d4a-8e7b-2c9f-0a1b2c3d4e5f", "partlabel": "rynas-data", "size": 8001427406848, "rota": true, "tran": "sata", "model": null, "serial": null, "wwn": "0x5000cca0aaaa0003", "rev": null, "mountpoints": [null], "rm": false, "hotplug": false, "maj:min": "8:33",
+               "children": [
+                  {
+                     "name": "md2", "kname": "md2", "path": "/dev/md2", "type": "raid5", "fstype": "crypto_LUKS", "fsver": "2", "label": null, "uuid": "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0", "partlabel": null, "size": 16002586181632, "rota": true, "tran": null, "model": null, "serial": null, "wwn": null, "rev": null, "mountpoints": [null], "rm": false, "hotplug": false, "maj:min": "9:2",
+                     "children": [
+                        {
+                           "name": "rynas-vol1", "kname": "dm-0", "path": "/dev/mapper/rynas-vol1", "type": "crypt", "fstype": "btrfs", "fsver": null, "label": "vol1", "uuid": "3e6c1f0a-9b2d-4c8e-a7f1-5d0b2c4e6a81", "partlabel": null, "size": 16002569404416, "rota": true, "tran": null, "model": null, "serial": null, "wwn": null, "rev": null, "mountpoints": ["/vol1"], "rm": false, "hotplug": false, "maj:min": "253:0"
+                        }
+                     ]
+                  }
+               ]
+            }
+         ]
+      },{
+         "name": "sdd", "kname": "sdd", "path": "/dev/sdd", "type": "disk", "fstype": null, "fsver": null, "label": null, "uuid": null, "partlabel": null, "size": 4000787030016, "rota": true, "tran": "sata", "model": "WDC WD40EFAX-68JH4N1", "serial": "WD-WX0BBBB4", "wwn": "0x50014ee0bbbb0004", "rev": "83.00A83", "mountpoints": [null], "rm": false, "hotplug": false, "maj:min": "8:48"
+      },{
+         "name": "sde", "kname": "sde", "path": "/dev/sde", "type": "disk", "fstype": null, "fsver": null, "label": null, "uuid": null, "partlabel": null, "size": 2000398934016, "rota": true, "tran": "sata", "model": "ST2000DM008-2FR102", "serial": "ZFL0CCC5", "wwn": "0x5000c500cccc0005", "rev": "0001", "mountpoints": [null], "rm": false, "hotplug": false, "maj:min": "8:64",
+         "children": [
+            {
+               "name": "sde1", "kname": "sde1", "path": "/dev/sde1", "type": "part", "fstype": "crypto_LUKS", "fsver": "2", "label": null, "uuid": "9a8b7c6d-5e4f-4a3b-2c1d-0e9f8a7b6c5d", "partlabel": "backup", "size": 2000397795328, "rota": true, "tran": "sata", "model": null, "serial": null, "wwn": "0x5000c500cccc0005", "rev": null, "mountpoints": [null], "rm": false, "hotplug": false, "maj:min": "8:65"
+            }
+         ]
+      },{
+         "name": "nvme0n1", "kname": "nvme0n1", "path": "/dev/nvme0n1", "type": "disk", "fstype": null, "fsver": null, "label": null, "uuid": null, "partlabel": null, "size": 500107862016, "rota": false, "tran": "nvme", "model": "WD Red SN700 500GB", "serial": "22110D800001", "wwn": "eui.e8238fa6bf530001001b448b40000001", "rev": "111150WD", "mountpoints": [null], "rm": false, "hotplug": false, "maj:min": "259:0",
+         "children": [
+            {
+               "name": "nvme0n1p1", "kname": "nvme0n1p1", "path": "/dev/nvme0n1p1", "type": "part", "fstype": "vfat", "fsver": "FAT32", "label": null, "uuid": "1A2B-3C4D", "partlabel": "EFI", "size": 536870912, "rota": false, "tran": "nvme", "model": null, "serial": null, "wwn": "eui.e8238fa6bf530001001b448b40000001", "rev": null, "mountpoints": ["/boot/efi"], "rm": false, "hotplug": false, "maj:min": "259:1"
+            },{
+               "name": "nvme0n1p2", "kname": "nvme0n1p2", "path": "/dev/nvme0n1p2", "type": "part", "fstype": "linux_raid_member", "fsver": "1.2", "label": "nas:0", "uuid": "aa11bb22-cc33-dd44-ee55-ff6677889900", "partlabel": "root", "size": 499569942528, "rota": false, "tran": "nvme", "model": null, "serial": null, "wwn": "eui.e8238fa6bf530001001b448b40000001", "rev": null, "mountpoints": [null], "rm": false, "hotplug": false, "maj:min": "259:2",
+               "children": [
+                  {
+                     "name": "md0", "kname": "md0", "path": "/dev/md0", "type": "raid1", "fstype": "btrfs", "fsver": null, "label": "root", "uuid": "5c2d8e1f-0a3b-4c6d-9e8f-7a6b5c4d3e2f", "partlabel": null, "size": 499435724800, "rota": false, "tran": null, "model": null, "serial": null, "wwn": null, "rev": null, "mountpoints": ["/home", "/"], "rm": false, "hotplug": false, "maj:min": "9:0"
+                  }
+               ]
+            }
+         ]
+      },{
+         "name": "nvme1n1", "kname": "nvme1n1", "path": "/dev/nvme1n1", "type": "disk", "fstype": null, "fsver": null, "label": null, "uuid": null, "partlabel": null, "size": 500107862016, "rota": false, "tran": "nvme", "model": "WD Red SN700 500GB", "serial": "22110D800002", "wwn": "eui.e8238fa6bf530001001b448b40000002", "rev": "111150WD", "mountpoints": [null], "rm": false, "hotplug": false, "maj:min": "259:3",
+         "children": [
+            {
+               "name": "nvme1n1p1", "kname": "nvme1n1p1", "path": "/dev/nvme1n1p1", "type": "part", "fstype": "vfat", "fsver": "FAT32", "label": null, "uuid": "5E6F-7A8B", "partlabel": "EFI", "size": 536870912, "rota": false, "tran": "nvme", "model": null, "serial": null, "wwn": "eui.e8238fa6bf530001001b448b40000002", "rev": null, "mountpoints": [null], "rm": false, "hotplug": false, "maj:min": "259:4"
+            },{
+               "name": "nvme1n1p2", "kname": "nvme1n1p2", "path": "/dev/nvme1n1p2", "type": "part", "fstype": "linux_raid_member", "fsver": "1.2", "label": "nas:0", "uuid": "aa11bb22-cc33-dd44-ee55-ff6677889900", "partlabel": "root", "size": 499569942528, "rota": false, "tran": "nvme", "model": null, "serial": null, "wwn": "eui.e8238fa6bf530001001b448b40000002", "rev": null, "mountpoints": [null], "rm": false, "hotplug": false, "maj:min": "259:5",
+               "children": [
+                  {
+                     "name": "md0", "kname": "md0", "path": "/dev/md0", "type": "raid1", "fstype": "btrfs", "fsver": null, "label": "root", "uuid": "5c2d8e1f-0a3b-4c6d-9e8f-7a6b5c4d3e2f", "partlabel": null, "size": 499435724800, "rota": false, "tran": null, "model": null, "serial": null, "wwn": null, "rev": null, "mountpoints": ["/home", "/"], "rm": false, "hotplug": false, "maj:min": "9:0"
+                  }
+               ]
+            }
+         ]
+      },{
+         "name": "zram0", "kname": "zram0", "path": "/dev/zram0", "type": "disk", "fstype": "swap", "fsver": "1", "label": "zram0", "uuid": null, "partlabel": null, "size": 2147483648, "rota": false, "tran": null, "model": null, "serial": null, "wwn": null, "rev": null, "mountpoints": ["[SWAP]"], "rm": false, "hotplug": false, "maj:min": "251:0"
+      }
+   ]
+}

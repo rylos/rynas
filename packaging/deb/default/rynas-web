@@ -1,0 +1,19 @@
+# Options of rynas-web, read by rynas-web.service (EnvironmentFile).
+# Apply changes with: systemctl restart rynas-web
+
+# Address and port of the web interface. The default listens on every IPv4
+# interface, since a NAS is usually headless and reached over the LAN.
+# Use [::]:8080 for IPv4 and IPv6 (fails if IPv6 is disabled in the kernel),
+# or 127.0.0.1:8080 behind a reverse proxy on the same host.
+# The connection is plain HTTP for now: do not expose this port to the
+# Internet (HTTPS comes in a later release).
+RYNAS_WEB_LISTEN=0.0.0.0:8080
+
+# Extra command line options, for example:
+#   --secure-cookies            behind an HTTPS reverse proxy
+#   --admin-group GROUP         who is an administrator (repeatable; replaces
+#                               the defaults rynas-admin and sudo)
+#   --session-idle-timeout SEC  default 1800
+#   --session-max-age SEC       default 43200
+# See /usr/libexec/rynas/rynas-web --help
+RYNAS_WEB_OPTS=""

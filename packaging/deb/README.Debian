@@ -1,0 +1,73 @@
+rynas for Debian
+================
+
+Services
+--------
+- rynasd.service / rynasd.socket: the privileged daemon (root). It checks
+  passwords with PAM (service /etc/pam.d/rynas) and keeps TOTP secrets in
+  /var/lib/rynas/auth (0700 root). It listens only on /run/rynas/rynasd.sock
+  (0660 root:rynas) and accepts the user rynas only.
+- rynas-web.service: the web interface and HTTP API, unprivileged (user
+  rynas). Options in /etc/default/rynas-web.
+
+Both are enabled and started on installation. Binaries live in
+/usr/libexec/rynas: they are daemons, not commands for users. rynasctl, also
+there, is the root helper of the units generated for scheduled tasks
+(rynas-task-<id>.service/.timer) and of the apt hook of system restore points
+(/etc/apt/apt.conf.d/80rynas-snapshot); both are written by rynas when the
+corresponding settings are applied, not shipped by the package.
+
+Recommended packages
+--------------------
+Each feature runs the system tools: samba, nfs-kernel-server, acl,
+avahi-daemon and wsdd2 (file services and discovery), btrbk and btrfs-progs
+(snapshots), mdadm, cryptsetup-bin, systemd-cryptsetup, gdisk, smartmontools
+and hdparm (storage). Without one of them only its feature fails, with a
+message naming the missing tool.
+
+Backup of the configuration
+---------------------------
+    /usr/libexec/rynas/rynasd export --out nas.rynasbak --passphrase-file pass.txt
+    /usr/libexec/rynas/rynasd import nas.rynasbak --passphrase-file pass.txt \
+        --owner alice [--restore-secrets] [--restore-notifications]
+
+The archive holds the configuration (scheduled tasks and snapshot jobs
+included) and the notification settings; with a passphrase also the TOTP
+secrets and the key of the notification passwords. The run history of
+scheduled tasks is not included. Import stages the configuration for review
+in the web interface; --restore-notifications needs rynasd stopped.
+
+First login
+-----------
+Open http://<nas-address>:8080/ and log in with a system account (PAM) that
+is a member of the group rynas-admin or sudo. The package does not add
+anyone to these groups. For example:
+
+    adduser alice rynas-admin
+
+Group membership is read at every login, no restart is needed.
+
+No HTTPS yet
+------------
+This release serves plain HTTP on 0.0.0.0:8080: passwords travel in clear
+text on the network. Use it on a trusted LAN only, or put an HTTPS reverse
+proxy in front of it (then listen on 127.0.0.1 and add --secure-cookies in
+/etc/default/rynas-web). Built-in HTTPS comes in a later release.
+
+fail2ban
+--------
+rynas-web throttles login attempts itself and logs failures as
+"authentication failure for USER from IP". To ban persistent guessers in the
+firewall too, install fail2ban and copy the examples:
+
+    cp /usr/share/doc/rynas/examples/fail2ban/filter.d/rynas.conf /etc/fail2ban/filter.d/
+    cp /usr/share/doc/rynas/examples/fail2ban/jail.d/rynas.conf /etc/fail2ban/jail.d/
+    systemctl reload fail2ban
+
+Removal
+-------
+"apt remove rynas" stops the services and keeps configuration and state.
+"apt purge rynas" also deletes /var/lib/rynas (configuration database, TOTP
+secrets, notification settings, task history), the scheduled task units, the
+btrbk configurations in /etc/rynas, the apt hook, and the user and groups
+rynas and rynas-admin. Shares, users and their files are left in place.

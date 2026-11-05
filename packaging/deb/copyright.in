@@ -1,0 +1,60 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: rynas
+Upstream-Contact: Marco Ziliani <508111+rylos@users.noreply.github.com>
+Source: https://github.com/rylos/rynas
+Comment:
+ rynas is source-available, not open source: its core is under the Business
+ Source License 1.1 and changes to the Apache License 2.0 four years after
+ publication. The binaries also contain statically linked Rust crates from
+ crates.io, under permissive licenses (mostly MIT and/or Apache-2.0); their
+ list is in Cargo.lock in the source.
+
+Files: *
+Copyright: 2026 Marco Ziliani
+License: BUSL-1.1
+
+Files: crates/rynas-api-types/*
+Copyright: 2026 Marco Ziliani
+License: Apache-2.0
+
+Files: crates/rynas-ui/assets/fonts/inter-latin.woff2
+Copyright: 2016 The Inter Project Authors (https://github.com/rsms/inter)
+License: OFL-1.1
+
+Files: crates/rynas-ui/assets/fonts/jbmono-latin.woff2
+Copyright: 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono)
+License: OFL-1.1
+
+Files: crates/rynas-ui/src/icons.rs
+Copyright: 2026 Lucide Icons and Contributors
+           2013-2023 Cole Bemis
+License: ISC
+
+License: Apache-2.0
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+ .
+     http://www.apache.org/licenses/LICENSE-2.0
+ .
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+ .
+ On Debian systems, the complete text of the Apache License, Version 2.0
+ can be found in "/usr/share/common-licenses/Apache-2.0".
+
+License: ISC
+ Permission to use, copy, modify, and/or distribute this software for any
+ purpose with or without fee is hereby granted, provided that the above
+ copyright notice and this permission notice appear in all copies.
+ .
+ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+ REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY
+ AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+ INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
+ LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
+ OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
+ PERFORMANCE OF THIS SOFTWARE.

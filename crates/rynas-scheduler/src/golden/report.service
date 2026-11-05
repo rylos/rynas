@@ -1,0 +1,17 @@
+# Managed by rynas — do not edit (sha256:f858e4c23f69de5a53a7c4c8b6e907be253e7234c678c6dbc10c622bd685f9c4)
+[Unit]
+Description=rynas task report: report
+Documentation=https://github.com/rylos/rynas
+After=local-fs.target network-online.target
+
+[Service]
+Type=exec
+StandardInput=file:/var/lib/rynas/tasks/report/run
+ExecStart=/usr/bin/env python3 -
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rynas-task-report
+ExecStopPost=+/usr/libexec/rynas/rynasctl task-finished report
+Nice=10
+NoNewPrivileges=yes
+PrivateTmp=yes

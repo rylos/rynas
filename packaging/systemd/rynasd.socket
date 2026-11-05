@@ -1,0 +1,16 @@
+# Socket of rynasd: it exists from boot with the right owner and mode, and rynasd is
+# started on the first connection if it is not running yet (rynasd.service requires it).
+[Unit]
+Description=rynas privileged daemon socket
+Documentation=https://github.com/rylos/rynas
+
+[Socket]
+ListenStream=/run/rynas/rynasd.sock
+SocketUser=root
+SocketGroup=rynas
+SocketMode=0660
+DirectoryMode=0755
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

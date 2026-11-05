@@ -1,0 +1,20 @@
+[package]
+name = "rynas-net"
+description = "rynas safe networking: inventory, networkd files, transactions with timed confirmation and rollback, boot guard, watchdog, rescue paths, ifupdown adoption"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+rynas-api-types.workspace = true
+rynas-config.workspace = true
+rynas-tasks.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+libc.workspace = true
+getrandom.workspace = true
+sha2.workspace = true
+# the scripted kernel of `fake` (tests here and in rynasd) lives in a temporary root
+tempfile.workspace = true

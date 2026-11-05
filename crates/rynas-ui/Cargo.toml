@@ -1,0 +1,38 @@
+[package]
+name = "rynas-ui"
+description = "rynas web interface (Leptos, client-side rendered WebAssembly)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+rynas-api-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+leptos.workspace = true
+leptos_router.workspace = true
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+js-sys.workspace = true
+console_error_panic_hook.workspace = true
+qrcodegen = "1"
+
+[dependencies.web-sys]
+workspace = true
+features = [
+  "Window", "Document", "Element", "HtmlElement", "HtmlCollection", "PointerEvent", "MouseEvent", "HtmlDivElement", "HtmlCanvasElement", "HtmlInputElement",
+  "CanvasRenderingContext2d", "CanvasGradient", "CssStyleDeclaration", "DomRect",
+  "Storage", "Navigator", "Location", "MediaQueryList",
+  "EventSource", "MessageEvent", "Event", "KeyboardEvent",
+  "Request", "RequestInit", "Response", "Headers", "AbortSignal",
+  "ResizeObserver", "ResizeObserverEntry",
+  "Blob", "BlobPropertyBag", "Url", "HtmlAnchorElement", "HtmlTextAreaElement", "HtmlDocument", "Clipboard",
+  "NodeList", "History",
+]
+
+[features]
+# Demo data set (development and screenshots only, never in release builds):
+# `trunk serve --features demo`, then `?demo` or a stopped API shows fabricated data.
+default = []
+demo = []

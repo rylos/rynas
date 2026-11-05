@@ -1,0 +1,20 @@
+[package]
+name = "rynas-btrfs"
+description = "rynas snapshots: btrbk names, subvolume ioctls, browse, restore, rollback, chain-safe delete, system restore points and the btrbk snapshot jobs domain"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+rynas-api-types.workspace = true
+rynas-config.workspace = true
+rynas-tasks.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+minijinja.workspace = true

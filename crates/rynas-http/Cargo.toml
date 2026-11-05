@@ -1,0 +1,20 @@
+[package]
+name = "rynas-http"
+description = "HTTP pieces shared by rynas-web and rynasd: request rejections as stable API errors"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+rynas-api-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+axum = { workspace = true, features = ["query"] }
+tracing.workspace = true
+# the path of a JSON error (`smb.veto_files`); axum uses the same crate for `Json`
+serde_path_to_error = "0.1.20"
+
+[dev-dependencies]
+tokio = { workspace = true }
+tower = { version = "0.5.3", features = ["util"] }

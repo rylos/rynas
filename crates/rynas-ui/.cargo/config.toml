@@ -1,0 +1,10 @@
+# Applies only to cargo runs started from this directory (trunk): the wasm UI is size
+# sensitive, so its dependencies are optimized for size too (-24 KB brotli vs opt-level 3).
+# Builds of the server from the workspace root do not see this file.
+[profile.release.package."*"]
+opt-level = "z"
+
+# Leptos type erasure for views: much smaller wasm (-85 KB brotli measured on 2026-11-05),
+# no measurable runtime cost for this UI.
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg", "erase_components"]
