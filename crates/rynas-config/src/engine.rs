@@ -58,6 +58,9 @@ pub enum ConfigError {
     NothingPending,
     /// Keys whose applied value changed after they were staged.
     Conflict(Vec<String>),
+    /// A partial apply would split keys staged together ([`Config::stage_group`]): the
+    /// pending keys of the group.
+    GroupSplit(Vec<String>),
     NotFound(String),
     /// The apply failed and was rolled back.
     Apply(String),
@@ -74,6 +77,11 @@ impl std::fmt::Display for ConfigError {
             ConfigError::Conflict(keys) => write!(
                 f,
                 "{} changed after the change was staged: discard and stage it again",
+                keys.join(", ")
+            ),
+            ConfigError::GroupSplit(keys) => write!(
+                f,
+                "{} were staged together and must be applied together: apply them from the pending changes",
                 keys.join(", ")
             ),
             ConfigError::NotFound(what) => write!(f, "{what} not found"),
@@ -344,6 +352,10 @@ impl Config {
                 "DELETE FROM pending WHERE owner = ?1 AND key = ?2",
                 params![owner, key],
             )?;
+            db.execute(
+                "DELETE FROM pending_groups WHERE owner = ?1 AND key = ?2",
+                params![owner, key],
+            )?;
             return Ok(false);
         }
         db.execute(
@@ -408,13 +420,81 @@ impl Config {
 
     /// Drops `owner`'s changeset; returns how many keys it had.
     pub fn discard(&self, owner: &str) -> Result<u32> {
-        let n = self
-            .db()
-            .execute("DELETE FROM pending WHERE owner = ?1", [owner])? as u32;
+        let db = self.db();
+        let n = db.execute("DELETE FROM pending WHERE owner = ?1", [owner])? as u32;
+        db.execute("DELETE FROM pending_groups WHERE owner = ?1", [owner])?;
+        drop(db);
         if n > 0 {
             self.pending_changed();
         }
         Ok(n)
+    }
+
+    /// Records that `keys` of `owner`'s changeset were staged together by one operation and
+    /// must be applied together: a partial apply ([`Config::apply_keys`] with keys) that
+    /// selects some of the group's pending keys but not all of them is refused with
+    /// [`ConfigError::GroupSplit`]. With `review` (a destructive change, e.g. a folder
+    /// deletion), only a full apply commits the group: any partial apply that selects one
+    /// of its keys is refused. Keys that are not pending now are left out (staging their
+    /// base value dropped the change); the group is forgotten as its keys are applied,
+    /// unstaged or discarded.
+    pub fn stage_group(&self, owner: &str, keys: &[&str], review: bool) -> Result<()> {
+        let mut pending = Vec::new();
+        for k in keys {
+            if self.pending_value(owner, k)?.is_some() {
+                pending.push(*k);
+            }
+        }
+        let keys = pending;
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let db = self.db();
+        let grp: i64 = db.query_row(
+            "SELECT COALESCE(MAX(grp), 0) + 1 FROM pending_groups WHERE owner = ?1",
+            [owner],
+            |r| r.get(0),
+        )?;
+        for k in keys {
+            db.execute(
+                "INSERT OR IGNORE INTO pending_groups (owner, grp, key, review)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![owner, grp, k, review as i64],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Refuses a partial apply of `keys` (empty: the full changeset, always allowed) that
+    /// would split a group of [`Config::stage_group`].
+    pub fn check_groups(&self, owner: &str, keys: &[String]) -> Result<()> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let db = self.db();
+        let mut st = db.prepare(
+            "SELECT g.grp, g.key, g.review FROM pending_groups g
+             JOIN pending p ON p.owner = g.owner AND p.key = g.key
+             WHERE g.owner = ?1 ORDER BY g.grp, g.key",
+        )?;
+        let rows = st
+            .query_map([owner], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)? != 0))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut groups: BTreeMap<i64, (Vec<String>, bool)> = BTreeMap::new();
+        for (g, k, review) in rows {
+            let e = groups.entry(g).or_default();
+            e.0.push(k);
+            e.1 |= review;
+        }
+        for (members, review) in groups.into_values() {
+            let selected = members.iter().filter(|k| keys.contains(k)).count();
+            if selected > 0 && (review || selected < members.len()) {
+                return Err(ConfigError::GroupSplit(members));
+            }
+        }
+        Ok(())
     }
 
     /// Applies `owner`'s changeset: render → candidates → validate → backup + atomic
@@ -448,6 +528,7 @@ impl Config {
         cancelled: &dyn Fn() -> bool,
     ) -> Result<u64> {
         let _apply = self.apply_lock.lock().unwrap();
+        self.check_groups(owner, keys)?;
         let mut pending = self.pending(owner)?;
         let selected = |k: &str| keys.is_empty() || keys.iter().any(|x| x == k);
         pending.changes.retain(|c| selected(&c.key));
@@ -810,6 +891,10 @@ impl Config {
             tx.execute("DELETE FROM managed_files WHERE key = ?1", [&s.key])?;
             tx.execute(
                 "DELETE FROM pending WHERE owner = ?1 AND key = ?2",
+                params![owner, s.key],
+            )?;
+            tx.execute(
+                "DELETE FROM pending_groups WHERE owner = ?1 AND key = ?2",
                 params![owner, s.key],
             )?;
         }

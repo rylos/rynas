@@ -256,6 +256,21 @@ async fn share_folders_from_snapshot_folder_to_deletion() {
         .collect();
     keys.sort();
     assert_eq!(keys, ["scheduler", "shares", "snapshots"]);
+    // a dialog's Save never commits the staged folder deletion, nor splits it from its jobs
+    for k in [json!(["shares"]), json!(["snapshots", "scheduler"]), json!(["shares", "snapshots", "scheduler"])] {
+        let (s, b) = call(&e, "POST", "/v1/config/apply", Some(json!({"comment": "", "keys": k}))).await;
+        assert_eq!((s, code(&b).as_str()), (StatusCode::CONFLICT, error_codes::APPLY_GROUP_SPLIT));
+    }
+    // a Save that does not touch it still works
+    let (s, b) = call(&e, "POST", "/v1/groups", Some(json!({"name": "family"}))).await;
+    assert_eq!(s, StatusCode::CREATED, "{}", String::from_utf8_lossy(&b));
+    let (s, b) = call(&e, "POST", "/v1/config/apply", Some(json!({"comment": "", "keys": ["users"]}))).await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{}", String::from_utf8_lossy(&b));
+    let t = wait_task(&e, &serde_json::from_slice::<TaskStarted>(&b).unwrap().task_id).await;
+    assert!(t.error.is_none(), "{t:?}");
+    assert!(!runs(&e).iter().any(|x| x.contains("/srv/vol1/photos")));
+    let (_, b) = call(&e, "GET", "/v1/config/pending", None).await;
+    assert_eq!(serde_json::from_slice::<PendingChanges>(&b).unwrap().changes.len(), 3);
     // the plain delete of music: its folder stays and is recorded
     let (s, _) = call(&e, "DELETE", "/v1/shares/music", None).await;
     assert_eq!(s, StatusCode::OK);

@@ -287,6 +287,10 @@ pub mod error_codes {
     pub const INVALID_VALUE: &str = "invalid_value";
     /// Apply or restore with an empty changeset (409).
     pub const NOTHING_PENDING: &str = "nothing_pending";
+    /// A partial apply (`ApplyRequest.keys`) would split changes staged together, or commit
+    /// a destructive change meant to be reviewed (a folder deletion): apply them from the
+    /// pending changes (409).
+    pub const APPLY_GROUP_SPLIT: &str = "apply_group_split";
     /// A staged value was based on a configuration that changed since: discard and stage
     /// again (409).
     pub const CONFLICT: &str = "conflict";
@@ -356,6 +360,7 @@ pub mod error_codes {
         NOT_FOUND,
         INVALID_VALUE,
         NOTHING_PENDING,
+        APPLY_GROUP_SPLIT,
         CONFLICT,
         BUSY,
         TASK_FINISHED,

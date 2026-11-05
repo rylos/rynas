@@ -203,6 +203,8 @@ async fn schedule_put(
             sched.tasks.extend(checked);
             stage(c, &owner, POWER_KEY, &s)?;
             stage(c, &owner, SCHEDULER_KEY, &sched)?;
+            // the schedule and its shutdown tasks go live together
+            c.stage_group(&owner, &[POWER_KEY, SCHEDULER_KEY], false)?;
             schedule_state(h, &owner)
         })
         .await?,

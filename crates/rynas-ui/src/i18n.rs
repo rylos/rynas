@@ -1165,6 +1165,7 @@ dict! {
     "err.bad_request" => "The request was not valid.", "La richiesta non era valida.";
     "err.invalid_value" => "A value is not valid.", "Un valore non è valido.";
     "err.nothing_pending" => "There are no pending changes.", "Non ci sono modifiche in sospeso.";
+    "err.apply_group_split" => "This change was staged together with other pending changes that must be applied with it (such as the deletion of a folder). Apply them from the pending changes bar.", "Questa modifica è in sospeso insieme ad altre che vanno applicate con lei (per esempio l'eliminazione di una cartella). Applicale dalla barra delle modifiche in sospeso.";
     "err.conflict" => "Something changed meanwhile. Reload and try again.", "Nel frattempo qualcosa è cambiato. Ricarica e riprova.";
     "err.busy" => "Another operation is running. Try again shortly.", "È in corso un'altra operazione. Riprova tra poco.";
     "err.task_finished" => "The task has already finished.", "L'attività è già terminata.";

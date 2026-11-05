@@ -245,6 +245,72 @@ fn apply_keys_applies_only_the_selected_keys() {
 }
 
 #[test]
+fn keys_staged_together_are_never_split_by_a_partial_apply() {
+    let e = env();
+    let keys = |k: &[&str]| k.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let run = |k: &[String]| e.cfg.apply_keys("alice", "alice", "", k, &|_| {}, &|| false);
+    let both = || {
+        e.cfg
+            .stage("alice", HOSTNAME_KEY, Some(hostname("nas")))
+            .unwrap();
+        e.cfg
+            .stage("alice", "test.app", Some(json!({"port": 8080, "name": "demo"})))
+            .unwrap();
+    };
+    // a plain group: only some of its keys is refused, all of them works
+    both();
+    e.cfg
+        .stage_group("alice", &[HOSTNAME_KEY, "test.app"], false)
+        .unwrap();
+    let split = || ConfigError::GroupSplit(keys(&[HOSTNAME_KEY, "test.app"]));
+    assert_eq!(run(&keys(&["test.app"])), Err(split()));
+    assert_eq!(e.cfg.pending("alice").unwrap().changes.len(), 2);
+    assert_eq!(e.cfg.check_groups("alice", &keys(&[HOSTNAME_KEY])), Err(split()));
+    run(&keys(&[HOSTNAME_KEY, "test.app"])).unwrap();
+    assert!(e.cfg.pending("alice").unwrap().changes.is_empty());
+    // a review group (destructive): no partial apply at all, the full apply commits it
+    e.cfg
+        .stage("alice", HOSTNAME_KEY, Some(hostname("bravo")))
+        .unwrap();
+    e.cfg.stage_group("alice", &[HOSTNAME_KEY], true).unwrap();
+    assert_eq!(
+        run(&keys(&[HOSTNAME_KEY])),
+        Err(ConfigError::GroupSplit(keys(&[HOSTNAME_KEY])))
+    );
+    // a partial apply that does not touch the group still works
+    e.cfg
+        .stage("alice", "test.app", Some(json!({"port": 9090, "name": "demo"})))
+        .unwrap();
+    run(&keys(&["test.app"])).unwrap();
+    assert!(read(&e.root, "/etc/app/app.conf").contains("port = 9090"));
+    apply(&e, "alice", "").unwrap();
+    assert_eq!(read(&e.root, "/etc/hostname"), "bravo\n");
+    // applied groups are forgotten: a later partial apply of the same keys works
+    e.cfg
+        .stage("alice", HOSTNAME_KEY, Some(hostname("charlie")))
+        .unwrap();
+    run(&keys(&[HOSTNAME_KEY])).unwrap();
+    // discarded and unstaged groups are forgotten too
+    both();
+    e.cfg
+        .stage_group("alice", &[HOSTNAME_KEY, "test.app"], true)
+        .unwrap();
+    e.cfg.discard("alice").unwrap();
+    both();
+    run(&keys(&["test.app"])).unwrap();
+    e.cfg
+        .stage_group("alice", &[HOSTNAME_KEY, "test.app"], false)
+        .unwrap();
+    e.cfg
+        .stage("alice", HOSTNAME_KEY, Some(hostname("charlie")))
+        .unwrap();
+    e.cfg
+        .stage("alice", "test.app", Some(json!({"port": 1, "name": "x"})))
+        .unwrap();
+    assert!(run(&keys(&["test.app"])).is_ok());
+}
+
+#[test]
 fn generic_file_domain_with_header_validator_and_unit() {
     let e = env();
     e.cfg

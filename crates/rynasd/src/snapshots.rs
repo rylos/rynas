@@ -222,6 +222,10 @@ fn save(p: &Protection, owner: &str, d: &Docs, orig: &Docs) -> Res<u32> {
         stage(c, owner, SHARES_KEY, &d.shares)?;
         n += 1;
     }
+    // a job, its scheduler task and the share's previous versions go live together
+    if n > 1 {
+        c.stage_group(owner, &[SNAPSHOTS_KEY, SCHEDULER_KEY, SHARES_KEY], false)?;
+    }
     Ok(n)
 }
 

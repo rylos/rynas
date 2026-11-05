@@ -48,6 +48,14 @@ const MIGRATIONS: &[&str] = &[
         sha256 TEXT NOT NULL,
         rev    INTEGER
     );",
+    // 2: keys of a changeset staged together that must be applied together
+    "CREATE TABLE pending_groups (
+        owner  TEXT NOT NULL,
+        grp    INTEGER NOT NULL,
+        key    TEXT NOT NULL,
+        review INTEGER NOT NULL,      -- 1: only a full apply (the pending bar) commits it
+        PRIMARY KEY (owner, grp, key)
+    );",
 ];
 
 /// Version of the schema this build writes.

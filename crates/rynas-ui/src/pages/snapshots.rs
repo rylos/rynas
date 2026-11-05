@@ -872,7 +872,8 @@ fn job_editor(init: Option<SnapshotJobView>, close: Callback<()>) -> AnyView {
             };
             match r {
                 Ok(()) => {
-                    let keys = [crate::config::keys::SNAPSHOTS, crate::config::keys::SCHEDULER];
+                    // a job also writes its scheduler task and the share's previous versions
+                    let keys = [crate::config::keys::SNAPSHOTS, crate::config::keys::SCHEDULER, crate::config::keys::SHARES];
                     if crate::config::apply_now(&keys, error).await {
                         saved_applied();
                         close.run(());

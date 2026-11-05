@@ -1025,6 +1025,7 @@ async fn share_delete(
             None
         };
         let mut n = 1;
+        let destructive = removal.is_some();
         stage_shares(s, &owner, |doc| {
             doc.shares.retain(|x| x.name != share.name);
             if let Some((r, _)) = &removal {
@@ -1046,6 +1047,11 @@ async fn share_delete(
             });
             stage(c, &owner, SCHEDULER_KEY, &sched)?;
             n += 2;
+        }
+        // the deletion is irreversible: only the pending bar's full apply commits it, never
+        // a dialog's Save of `shares` that would also split it from its jobs (review M1)
+        if destructive {
+            c.stage_group(&owner, &[SHARES_KEY, SNAPSHOTS_KEY, SCHEDULER_KEY], true)?;
         }
         Ok(n)
     })

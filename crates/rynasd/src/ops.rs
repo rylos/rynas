@@ -107,6 +107,7 @@ impl From<ConfigError> for Error {
             ConfigError::Invalid(_) => (StatusCode::BAD_REQUEST, error_codes::INVALID_VALUE),
             ConfigError::NothingPending => (StatusCode::CONFLICT, error_codes::NOTHING_PENDING),
             ConfigError::Conflict(_) => (StatusCode::CONFLICT, error_codes::CONFLICT),
+            ConfigError::GroupSplit(_) => (StatusCode::CONFLICT, error_codes::APPLY_GROUP_SPLIT),
             ConfigError::Apply(_) | ConfigError::Cancelled | ConfigError::Storage(_) => {
                 tracing::error!("configuration: {msg}");
                 (StatusCode::INTERNAL_SERVER_ERROR, error_codes::INTERNAL)
@@ -270,8 +271,12 @@ async fn apply(
     let (ops, user) = (ops(&st)?, user(&h)?);
     let Json(req) = body?;
     // refuse at once what the task would refuse, so the UI gets a plain error
-    let u = user.clone();
-    let mut p = blocking(&ops, move |c| c.pending(&u)).await?;
+    let (u, k) = (user.clone(), req.keys.clone());
+    let mut p = blocking(&ops, move |c| {
+        c.check_groups(&u, &k)?;
+        c.pending(&u)
+    })
+    .await?;
     // a dialog's Save applies only the keys it staged (guidelines A19b)
     if !req.keys.is_empty() {
         p.changes.retain(|c| req.keys.contains(&c.key));
