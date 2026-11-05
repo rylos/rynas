@@ -29,3 +29,4 @@ pub mod services;
 pub mod snapshots;
 pub mod storage_ops;
 pub mod ups;
+pub mod updates;

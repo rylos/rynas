@@ -12,6 +12,7 @@ pub mod shares;
 pub mod snapshots;
 pub mod storage;
 pub mod system;
+pub mod updates;
 pub mod users;
 
 use leptos::prelude::*;

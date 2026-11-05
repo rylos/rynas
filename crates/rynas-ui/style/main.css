@@ -1606,3 +1606,7 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
   .stage-bar { bottom: var(--s-2); }
   .stage-bar .btn { flex: 1 1 auto; justify-content: center; }
 }
+/* updates page */
+.upd-head { margin-bottom: var(--s-3); }
+.upd-list { margin: var(--s-2) 0; padding: var(--s-2) var(--s-3); list-style: none; max-height: min(240px, 40vh); overflow-y: auto; border: 1px solid var(--border); border-radius: var(--r-md); font-size: var(--fs-13); overflow-wrap: anywhere; }
+.upd-table td.mono { overflow-wrap: anywhere; }

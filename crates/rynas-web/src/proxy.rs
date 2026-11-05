@@ -148,6 +148,14 @@ pub fn routes() -> Router<AppState> {
         // read from upsd by rynas-web (`/ups`, `ups.status` events)
         .route("/ups/settings", get(forward).put(forward))
         .route("/ups/test", post(forward))
+        // system updates (P6): apt list and tasks, automatic updates, kernel / DOM
+        .route("/updates", get(forward))
+        .route("/updates/check", post(forward))
+        .route("/updates/install", post(forward))
+        .route("/updates/autoremove", post(forward))
+        .route("/updates/packages/{name}/changelog", post(forward))
+        .route("/updates/auto", get(forward).put(forward))
+        .route("/updates/kernel", get(forward))
         // network (P4): with the local address of the session's connection
         .route("/network/interfaces", get(forward_net))
         .route("/network/interfaces/{name}", put(forward_net))

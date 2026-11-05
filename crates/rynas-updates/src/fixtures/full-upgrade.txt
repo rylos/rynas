@@ -1,0 +1,46 @@
+NOTE: This is only a simulation!
+      apt-get needs root privileges for real execution.
+      Keep also in mind that locking is deactivated,
+      so don't depend on the relevance to the real current situation!
+Reading package lists...
+Building dependency tree...
+Reading state information...
+Calculating upgrade...
+The following packages were automatically installed and are no longer required:
+  linux-image-6.12.38+deb13-amd64
+Use 'apt autoremove' to remove them.
+REMOVING:
+  libfuse2t64
+
+Installing dependencies:
+  linux-image-6.12.57+deb13-amd64
+
+Upgrading:
+  base-files  libssl3t64  linux-image-amd64  openssh-client  openssh-server  openssl  samba  samba-common  tzdata
+
+Not upgrading:
+  synodeb
+
+Summary:
+  Upgrading: 9, Installing: 1, Removing: 1, Not Upgrading: 1
+Remv libfuse2t64 [2.9.9-9]
+Inst base-files [13.8] (13.8+deb13u2 Debian:13.2/stable [amd64])
+Inst libssl3t64 [3.5.1-1+deb13u1] (3.5.4-1~deb13u1 Debian-Security:13/stable-security [amd64])
+Inst openssl [3.5.1-1+deb13u1] (3.5.4-1~deb13u1 Debian-Security:13/stable-security [amd64])
+Inst linux-image-6.12.57+deb13-amd64 (6.12.57-1 Debian:13.2/stable, Debian-Security:13/stable-security [amd64])
+Inst linux-image-amd64 [6.12.38-1] (6.12.57-1 Debian:13.2/stable, Debian-Security:13/stable-security [amd64])
+Inst openssh-client [1:10.0p1-7] (1:10.0p1-7+deb13u1 Debian:13.2/stable [amd64]) []
+Inst openssh-server [1:10.0p1-7] (1:10.0p1-7+deb13u1 Debian:13.2/stable [amd64])
+Inst samba-common [2:4.22.3+dfsg-4] (2:4.22.6+dfsg-0+deb13u1 Debian:13.2/stable [all])
+Inst samba [2:4.22.3+dfsg-4] (2:4.22.6+dfsg-0+deb13u1 Debian:13.2/stable [amd64])
+Inst tzdata [2025b-4] (2025b-4+deb13u1 Debian:13.2/stable-updates [all])
+Conf base-files (13.8+deb13u2 Debian:13.2/stable [amd64])
+Conf libssl3t64 (3.5.4-1~deb13u1 Debian-Security:13/stable-security [amd64])
+Conf openssl (3.5.4-1~deb13u1 Debian-Security:13/stable-security [amd64])
+Conf linux-image-6.12.57+deb13-amd64 (6.12.57-1 Debian:13.2/stable, Debian-Security:13/stable-security [amd64])
+Conf linux-image-amd64 (6.12.57-1 Debian:13.2/stable, Debian-Security:13/stable-security [amd64])
+Conf openssh-client (1:10.0p1-7+deb13u1 Debian:13.2/stable [amd64])
+Conf openssh-server (1:10.0p1-7+deb13u1 Debian:13.2/stable [amd64])
+Conf samba-common (2:4.22.6+dfsg-0+deb13u1 Debian:13.2/stable [all])
+Conf samba (2:4.22.6+dfsg-0+deb13u1 Debian:13.2/stable [amd64])
+Conf tzdata (2025b-4+deb13u1 Debian:13.2/stable-updates [all])

@@ -225,6 +225,7 @@ fn open_config(args: &Args, system: Arc<dyn System>) -> std::io::Result<Opened> 
             web_port: args.web_port,
             https: args.web_https,
         }),
+        Arc::new(rynas_updates::AutoDomain),
     ];
     // synology.hw only on a Synology (platform driver bound, DMI)
     let synology = rynas_hw_synology::Synology::detect(&args.hw_root).map(Arc::new);
@@ -674,6 +675,14 @@ fn main() -> std::io::Result<()> {
                 }
             });
         }
+        let updates = Arc::new(rynasd::updates::Updates::new(
+            ops.clone(),
+            notifier.clone(),
+            args.dry_system,
+            config_root(&args),
+        ));
+        rynasd::updates::spawn_daily(updates.clone());
+        state.updates = Some(updates);
         state.ops = Some(ops);
         if args.storage_check_interval > 0 {
             rynasd::notifications::spawn_storage_watch(

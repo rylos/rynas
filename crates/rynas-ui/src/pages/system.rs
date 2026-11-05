@@ -90,6 +90,14 @@ pub fn System() -> impl IntoView {
                     </Show>
                 </section>
                 <section class="card widget w-12 link-card" style="--i:2">
+                    <span class="w-icon"><Icon icon=icons::DOWNLOAD size=18 /></span>
+                    <div class="link-card-text">
+                        <h2 class="w-title">{tr("upd.title")}</h2>
+                        <p class="muted small">{tr("upd.open_text")}</p>
+                    </div>
+                    <a class="btn ghost" href="/system/updates">{tr("open")}<Icon icon=icons::CHEVRON_RIGHT size=16 /></a>
+                </section>
+                <section class="card widget w-12 link-card" style="--i:3">
                     <span class="w-icon"><Icon icon=icons::CALENDAR_CLOCK size=18 /></span>
                     <div class="link-card-text">
                         <h2 class="w-title">{tr("sch.title")}</h2>
@@ -97,7 +105,7 @@ pub fn System() -> impl IntoView {
                     </div>
                     <a class="btn ghost" href="/system/scheduler">{tr("open")}<Icon icon=icons::CHEVRON_RIGHT size=16 /></a>
                 </section>
-                <section class="card widget w-12 link-card" style="--i:3">
+                <section class="card widget w-12 link-card" style="--i:4">
                     <span class="w-icon"><Icon icon=icons::BELL_RING size=18 /></span>
                     <div class="link-card-text">
                         <h2 class="w-title">{tr("nt.settings_title")}</h2>
@@ -105,7 +113,7 @@ pub fn System() -> impl IntoView {
                     </div>
                     <a class="btn ghost" href="/system/notifications">{tr("open")}<Icon icon=icons::CHEVRON_RIGHT size=16 /></a>
                 </section>
-                <section class="card widget w-12 link-card" style="--i:4">
+                <section class="card widget w-12 link-card" style="--i:5">
                     <span class="w-icon"><Icon icon=icons::HISTORY size=18 /></span>
                     <div class="link-card-text">
                         <h2 class="w-title">{tr("cfg.title")}</h2>
