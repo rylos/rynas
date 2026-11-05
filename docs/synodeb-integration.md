@@ -76,6 +76,52 @@ in synodeb 4.3; S7 needs no synodeb change. Facts for the rynas side:
   slot order from the model's power-limit table (DS923+: 00:01.2, 00:01.3; DS920+: 00:14.1,
   00:14.0); `{}` on models without a map. nvme0/nvme1 swap between boots: always go through `m2`.
 
+## Status on the rynas side: S6 and S8 (2026-11-05)
+
+**S8, control socket** (done): `rynas_hw_synology::cmd::Commander` sends microcontroller
+commands through `/run/synohwd/control.sock` when it answers `{"cmd":"ping"}` with schema 1
+(result cached 30 s, 2 s timeouts for connect, write and read), otherwise through the FIFO as
+before. `{"ok":false,"error":…}` reaches the caller as `ControlError::Failed` with synohwd's
+text (500 `internal`, the text as the message), so the beep test in the UI shows a real error. A
+socket that cannot be reached falls back to the FIFO; a request sent without an answer is not
+repeated on the FIFO (it may have run) and answers 503 `backend_unavailable`. The periodic
+status still reads `status.json`; `Commander::status()` (socket `status`) exists for places
+where freshness matters, none uses it yet. Tests with a fake socket in `cmd.rs`.
+Left: `rynas-net`'s rescue beeps (`rescue::synohwd_send`, used by `rynasctl` from the reset
+button and the boot guard) still write the FIFO directly, on purpose best effort; they could
+move to `Commander` later.
+
+**S6, root rollback** (done, not yet tried on the DS920+): `POST /api/v1/snapshots/{id}/rollback`
+on a system restore point is no longer a 409 on synodeb (`/usr/sbin/synodeb-dom` present).
+`GET /api/v1/snapshots/{id}/preview-rollback` (`RollbackPreview`: kernel the restore point boots,
+running kernel, modules present, `allowed`/`refusal`) feeds the confirmation dialog (kernel
+shown, steps, typed restore point name). The task `snapshot.rollback` runs
+`rynas_btrfs::rootfs::rollback_root`:
+1. bind-mount of the restore point read-only at `/run/rynas/rollback/<id>`; kernel from
+   `/vmlinuz` (or the newest `/boot/vmlinuz-*`), refused without `/lib/modules/<release>`;
+2. `synodeb-dom sync --root /run/rynas/rollback/<id>`; a refusal ends the task, nothing changed;
+3. top level (subvolid 5) mounted at `/run/rynas/rollback/top`; a new read-only restore point
+   of the running system (reason `before rollback`, retention not applied so the target is
+   never pruned); writable snapshot of the restore point as `@rootfs.rynas-new-<stamp>`; the
+   restore points (nested subvolumes in `@rootfs/.snapshots/rootfs`) move into it so they stay
+   listed after the reboot (skipped when the directory is its own subvolume or mount);
+   `@rootfs` → `@rootfs.rynas-rollback-<stamp>`, new → `@rootfs` (`RENAME_NOREPLACE`). Any
+   failure undoes the steps and runs `synodeb-dom sync --root /` to put the DOM entry back;
+4. unmount; the task log and a notice ask for the reboot.
+On other systems the preview says `not_synodeb` and the rollback stays a 409 with a note
+(console procedure). `rynasd --dry-system` only logs the steps (synodeb when the hardware root
+has `usr/sbin/synodeb-dom`). Tests: step order, refusal, undo and dry run with a fake
+`RootOps` (`rootfs.rs`), API refusals in `rynasd/tests/protection.rs`.
+Left:
+- run it once on the test DS920+ (and in `packaging/test-snapshots.sh`, which does not cover
+  root rollback: it needs a DOM and `synodeb-dom`);
+- confirm with synodeb that `sync --root` reads only the tree (kernel, initrd, `etc/fstab`) and
+  that the kernel rynas shows is the one it picks (`/vmlinuz` link, else newest image);
+- the replaced root `@rootfs.rynas-rollback-<stamp>` stays at the top level until deleted by
+  hand after the reboot: a cleanup action in the UI is not there yet;
+- no reboot button: the notice asks for it (no immediate reboot endpoint exists yet);
+- the btrfs default subvolume is not touched (synodeb boots with `rootflags=subvol=@rootfs`).
+
 ## S1 contract: synodeb `notify` → rynasd
 rynasd side implemented (crate `rynas-notify`, `crates/rynasd/src/notifications.rs`); the
 synodeb side is the proposal below.

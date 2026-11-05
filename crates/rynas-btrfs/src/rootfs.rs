@@ -1,0 +1,930 @@
+//! Rolling the system back to a restore point on synodeb (D-SNAP, synodeb S6).
+//!
+//! synodeb boots from the DOM (a small flash with its own kernel entries) and mounts the
+//! btrfs subvolume `@rootfs` as `/`. A rollback must change both together, or the DOM boots a
+//! kernel whose `/lib/modules` is not in the root. synodeb 4.3 gives the tool for it:
+//! `synodeb-dom sync --root DIR` rewrites the DOM boot entry from the kernel of the system at
+//! `DIR` and refuses when `DIR` lacks `/lib/modules/<release>`.
+//!
+//! [`rollback_root`] runs, in order:
+//! 1. the restore point is bind-mounted read-only at `/run/rynas/rollback/<id>`;
+//! 2. its kernel is read (`/vmlinuz` link or newest `/boot/vmlinuz-*`) and `synodeb-dom sync
+//!    --root` runs on it; a refusal stops everything, nothing has changed yet;
+//! 3. the filesystem's top level (subvolid 5) is mounted at `/run/rynas/rollback/top`; a new
+//!    read-only restore point of the running system is taken (reason "before rollback"); a
+//!    writable snapshot of the chosen restore point is created next to `@rootfs`; the restore
+//!    points (nested subvolumes inside `@rootfs`) move into it, so they stay listed after the
+//!    reboot; then `@rootfs` is renamed `@rootfs.rynas-rollback-<stamp>` and the new one takes
+//!    its name (`RENAME_NOREPLACE`, every step undone if a later one fails, and the DOM entry
+//!    synced back to the running system);
+//! 4. both mounts go away and the caller asks for a reboot. The running system keeps working
+//!    until then (it is the renamed subvolume).
+//!
+//! Every effect goes through [`RootOps`]: [`HostRoot`] on the machine, [`DryRoot`] for
+//! `rynasd --dry-system` (logs only), a recording fake in the tests.
+
+use std::collections::HashMap;
+use std::fs::File;
+use std::os::fd::AsRawFd;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::Duration;
+
+use rynas_tasks::Cmd;
+
+use crate::ioctl;
+use crate::name::stamp_seconds;
+use crate::system::{self, SystemSnapshot};
+
+/// synodeb's DOM tool (`sync --root` since synodeb 4.3).
+pub const SYNODEB_DOM: &str = "/usr/sbin/synodeb-dom";
+/// Where the rollback mounts what it needs.
+pub const RUN_DIR: &str = "/run/rynas/rollback";
+/// Reason of the restore point kept of the system being replaced.
+pub const BEFORE_REASON: &str = "before rollback";
+/// `synodeb-dom sync` writes a kernel and an initrd to the flash: give it time.
+const DOM_TIMEOUT: Duration = Duration::from_secs(180);
+const MOUNT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The kernel a root tree boots.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Kernel {
+    /// `uname -r` of the kernel image, e.g. `7.3.0-1-synodeb`.
+    pub release: Option<String>,
+    /// `/lib/modules/<release>` exists in the tree.
+    pub modules: bool,
+}
+
+/// Compares kernel releases by their numeric parts (`7.10.0` after `7.9.2`).
+fn release_key(r: &str) -> Vec<(u64, String)> {
+    r.split(['.', '-', '+', '~'])
+        .map(|p| {
+            let digits: String = p.chars().take_while(char::is_ascii_digit).collect();
+            (digits.parse().unwrap_or(0), p[digits.len()..].to_string())
+        })
+        .collect()
+}
+
+/// Whether `rel` looks like a kernel release (no path tricks).
+fn valid_release(rel: &str) -> bool {
+    !rel.is_empty()
+        && rel.len() <= 128
+        && rel != "."
+        && rel != ".."
+        && rel
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b'+' | b'~'))
+}
+
+/// The kernel of the root tree at `root` (a snapshot or its mount): the target of
+/// `/vmlinuz` (Debian's link) or else the newest `/boot/vmlinuz-*`, and whether its modules
+/// are there. Links are read, never followed out of `root`.
+pub fn snapshot_kernel(root: &Path) -> Kernel {
+    let from_link = std::fs::read_link(root.join("vmlinuz"))
+        .ok()
+        .and_then(|t| {
+            t.file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_prefix("vmlinuz-"))
+                .map(str::to_string)
+        })
+        .filter(|r| valid_release(r));
+    let release = from_link.or_else(|| {
+        let mut v: Vec<String> = std::fs::read_dir(root.join("boot"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| {
+                e.file_name()
+                    .to_str()
+                    .and_then(|n| n.strip_prefix("vmlinuz-"))
+                    .map(str::to_string)
+            })
+            .filter(|r| valid_release(r))
+            .collect();
+        v.sort_by_key(|r| release_key(r));
+        v.pop()
+    });
+    let modules = release.as_ref().is_some_and(|r| {
+        // merged /usr: /lib is the relative link `usr/lib`; an absolute one would point
+        // at the running system, so only a real directory counts
+        root.join("usr/lib/modules").join(r).is_dir()
+            || (std::fs::symlink_metadata(root.join("lib")).is_ok_and(|m| m.is_dir())
+                && root.join("lib/modules").join(r).is_dir())
+    });
+    Kernel { release, modules }
+}
+
+/// Every effect of a root rollback.
+pub trait RootOps: Send + Sync {
+    /// synodeb with a DOM tool (root rollback is only offered there).
+    fn synodeb(&self) -> bool;
+    /// `uname -r` of the running kernel.
+    fn running_kernel(&self) -> Option<String>;
+    /// The kernel of the tree mounted at `dir` (see [`snapshot_kernel`]).
+    fn kernel(&self, dir: &Path) -> Kernel {
+        snapshot_kernel(dir)
+    }
+    /// Read-only bind mount of `src` at `dir` (created).
+    fn mount_ro(&self, src: &Path, dir: &Path) -> Result<(), String>;
+    /// Mounts the top level (subvolid 5) of the root filesystem at `dir` (created); returns
+    /// the name of the root subvolume there (`@rootfs`).
+    fn mount_top(&self, dir: &Path) -> Result<String, String>;
+    /// Unmounts `dir` and removes it.
+    fn unmount(&self, dir: &Path) -> Result<(), String>;
+    /// `synodeb-dom sync --root <root>`; its output.
+    fn dom_sync(&self, root: &Path) -> Result<String, String>;
+    /// A read-only restore point of the running system, never skipped; its name.
+    fn restore_point(&self, reason: &str, now_s: i64) -> Result<String, String>;
+    /// Writable snapshot of `src` as `dir/name`.
+    fn snapshot(&self, src: &Path, dir: &Path, name: &str) -> Result<(), String>;
+    /// Names of the subvolumes directly in `dir`.
+    fn subvolumes(&self, dir: &Path) -> Result<Vec<String>, String>;
+    /// Moves the subvolume `from` to `to` (another directory of the same filesystem); an
+    /// empty placeholder directory at `to` (what a snapshot shows for a nested subvolume) is
+    /// removed first.
+    fn move_subvolume(&self, from: &Path, to: &Path) -> Result<(), String>;
+    /// `RENAME_NOREPLACE` inside `dir`, then fsync of `dir`.
+    fn rename(&self, dir: &Path, from: &str, to: &str) -> Result<(), String>;
+    /// Deletes the subvolume `dir/name`.
+    fn delete_subvolume(&self, dir: &Path, name: &str) -> Result<(), String>;
+}
+
+/// What [`rollback_root`] needs.
+#[derive(Debug, Clone)]
+pub struct RootRollback {
+    /// The restore point name (`rootfs.20261101T0300`).
+    pub id: String,
+    /// Its path on the running system (`/.snapshots/rootfs/<id>`).
+    pub snapshot: PathBuf,
+    /// The restore points directory on the running system (`/.snapshots/rootfs`).
+    pub snapshot_dir: PathBuf,
+    /// Where the root subvolume is mounted (`/`, the `subvolume` of the restore points).
+    pub root: PathBuf,
+    /// Move the restore points into the new root (the directory is inside the root
+    /// subvolume, not a separate subvolume or mount).
+    pub move_points: bool,
+    /// Mount directory (`/run/rynas/rollback`).
+    pub run_dir: PathBuf,
+    pub now_s: i64,
+}
+
+/// What a root rollback did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RolledBackRoot {
+    /// The kernel that boots next.
+    pub kernel: String,
+    /// The restore point of the replaced system.
+    pub before: String,
+    /// The replaced root subvolume, at the top of the filesystem.
+    pub kept_as: String,
+    /// Restore points moved into the new root.
+    pub moved: usize,
+}
+
+/// See the module documentation. Errors are complete sentences for the task log.
+pub fn rollback_root(
+    ops: &dyn RootOps,
+    r: &RootRollback,
+    log: &dyn Fn(&str),
+) -> Result<RolledBackRoot, String> {
+    if !ops.synodeb() {
+        return Err(
+            "rolling the system back from rynas needs synodeb (synodeb-dom); use the console procedure"
+                .into(),
+        );
+    }
+    let mnt = r.run_dir.join(&r.id);
+    log(&format!(
+        "mounting {} read-only at {}",
+        r.snapshot.display(),
+        mnt.display()
+    ));
+    ops.mount_ro(&r.snapshot, &mnt)?;
+    let out = with_snapshot(ops, r, &mnt, log);
+    if let Err(e) = ops.unmount(&mnt) {
+        log(&format!("warning: unmounting {}: {e}", mnt.display()));
+    }
+    out
+}
+
+fn with_snapshot(
+    ops: &dyn RootOps,
+    r: &RootRollback,
+    mnt: &Path,
+    log: &dyn Fn(&str),
+) -> Result<RolledBackRoot, String> {
+    let k = ops.kernel(mnt);
+    let Some(kernel) = k.release else {
+        return Err(format!(
+            "{} has no kernel (/vmlinuz or /boot/vmlinuz-*): nothing was changed",
+            r.id
+        ));
+    };
+    if !k.modules {
+        return Err(format!(
+            "{} has kernel {kernel} but not /lib/modules/{kernel}: it cannot boot; nothing was changed",
+            r.id
+        ));
+    }
+    log(&format!("the restore point boots kernel {kernel}"));
+    log(&format!("synodeb-dom sync --root {}", mnt.display()));
+    match ops.dom_sync(mnt) {
+        Ok(o) => {
+            for l in o.lines().filter(|l| !l.trim().is_empty()).take(20) {
+                log(&format!("  {l}"));
+            }
+        }
+        Err(e) => {
+            return Err(format!(
+                "synodeb-dom refused the restore point: {e}. Nothing was changed."
+            ));
+        }
+    }
+    match swap_root(ops, r, log) {
+        Ok(mut done) => {
+            done.kernel = kernel;
+            Ok(done)
+        }
+        Err(e) => {
+            log("putting the DOM boot entry back to the running system");
+            match ops.dom_sync(Path::new("/")) {
+                Ok(_) => Err(format!("{e}. The system was left as it was.")),
+                Err(e2) => Err(format!(
+                    "{e}. The root was left as it was, but synodeb-dom could not restore the DOM entry ({e2}): run `synodeb-dom sync --root /` before rebooting."
+                )),
+            }
+        }
+    }
+}
+
+/// Step 3: the btrfs part, all undone on failure.
+fn swap_root(
+    ops: &dyn RootOps,
+    r: &RootRollback,
+    log: &dyn Fn(&str),
+) -> Result<RolledBackRoot, String> {
+    let top = r.run_dir.join("top");
+    log(&format!(
+        "mounting the top level of the root filesystem at {}",
+        top.display()
+    ));
+    let root_name = ops.mount_top(&top)?;
+    let out = in_top(ops, r, &top, &root_name, log);
+    if let Err(e) = ops.unmount(&top) {
+        log(&format!("warning: unmounting {}: {e}", top.display()));
+    }
+    out
+}
+
+fn in_top(
+    ops: &dyn RootOps,
+    r: &RootRollback,
+    top: &Path,
+    root_name: &str,
+    log: &dyn Fn(&str),
+) -> Result<RolledBackRoot, String> {
+    let rel = r
+        .snapshot_dir
+        .strip_prefix(&r.root)
+        .map_err(|_| "the restore points directory is not inside the root subvolume".to_string())?;
+    let before = ops
+        .restore_point(BEFORE_REASON, r.now_s)
+        .map_err(|e| format!("restore point of the current system: {e}"))?;
+    log(&format!(
+        "the current system is kept as restore point {before}"
+    ));
+    let stamp = stamp_seconds(r.now_s);
+    let fresh = format!("{root_name}.rynas-new-{stamp}");
+    let kept = format!("{root_name}.rynas-rollback-{stamp}");
+    let old_root = top.join(root_name);
+    ops.snapshot(&old_root.join(rel).join(&r.id), top, &fresh)
+        .map_err(|e| format!("writable copy of {}: {e}", r.id))?;
+    log(&format!("created {fresh} from {}", r.id));
+    let undo_fresh = |why: String| -> String {
+        if let Err(e) = ops.delete_subvolume(top, &fresh) {
+            log(&format!("warning: deleting {fresh}: {e}"));
+        }
+        why
+    };
+    let mut moved: Vec<String> = Vec::new();
+    if r.move_points {
+        let names = ops
+            .subvolumes(&old_root.join(rel))
+            .map_err(|e| undo_fresh(format!("listing the restore points: {e}")))?;
+        for n in names {
+            let (from, to) = (
+                old_root.join(rel).join(&n),
+                top.join(&fresh).join(rel).join(&n),
+            );
+            if let Err(e) = ops.move_subvolume(&from, &to) {
+                for m in moved.iter().rev() {
+                    let _ = ops.move_subvolume(
+                        &top.join(&fresh).join(rel).join(m),
+                        &old_root.join(rel).join(m),
+                    );
+                }
+                return Err(undo_fresh(format!("moving restore point {n}: {e}")));
+            }
+            moved.push(n);
+        }
+        log(&format!(
+            "{} restore points moved into the new root",
+            moved.len()
+        ));
+    }
+    let move_back = || {
+        for m in moved.iter().rev() {
+            let _ = ops.move_subvolume(
+                &top.join(&fresh).join(rel).join(m),
+                &old_root.join(rel).join(m),
+            );
+        }
+    };
+    if let Err(e) = ops.rename(top, root_name, &kept) {
+        move_back();
+        return Err(undo_fresh(format!("renaming {root_name}: {e}")));
+    }
+    if let Err(e) = ops.rename(top, &fresh, root_name) {
+        let _ = ops.rename(top, &kept, root_name);
+        move_back();
+        return Err(undo_fresh(format!("moving {fresh} in place: {e}")));
+    }
+    log(&format!(
+        "{root_name} is now {}; the replaced root is kept as {kept} at the top of the filesystem",
+        r.id
+    ));
+    Ok(RolledBackRoot {
+        kernel: String::new(),
+        before,
+        kept_as: kept,
+        moved: moved.len(),
+    })
+}
+
+// ---------------------------------------------------------------------------------------------
+// the machine
+// ---------------------------------------------------------------------------------------------
+
+/// The root filesystem from `/proc/self/mountinfo`: (subvolume path, source device, fstype).
+fn root_mount() -> Option<(String, String, String)> {
+    let text = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+    text.lines().find_map(|l| {
+        let (pre, post) = l.split_once(" - ")?;
+        let f: Vec<&str> = pre.split(' ').collect();
+        if f.get(4) != Some(&"/") {
+            return None;
+        }
+        let mut p = post.split(' ');
+        let fstype = p.next()?.to_string();
+        let source = p.next()?.to_string();
+        Some((f.get(3)?.to_string(), source, fstype))
+    })
+}
+
+fn run(cmd: Cmd) -> Result<String, String> {
+    let shown = cmd.display();
+    match cmd.run_blocking() {
+        Ok(o) if o.success() => Ok(o.stdout),
+        Ok(o) => {
+            let text = if o.stderr.trim().is_empty() {
+                o.stdout
+            } else {
+                o.stderr
+            };
+            let last: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+            let tail = last[last.len().saturating_sub(3)..].join(" / ");
+            Err(match o.code {
+                Some(c) if !tail.is_empty() => format!("{tail} (exit code {c})"),
+                Some(c) => format!("{shown}: exit code {c}"),
+                None => format!("{shown}: killed by a signal"),
+            })
+        }
+        Err(e) => Err(format!("{shown}: {e}")),
+    }
+}
+
+/// The real thing (rynasd as root on synodeb).
+pub struct HostRoot {
+    /// The restore point settings (subvolume `/`, directory, prefix, keep, reasons log).
+    pub subvolume: PathBuf,
+    pub snapshot_dir: PathBuf,
+    pub prefix: String,
+    pub keep: u32,
+    pub reasons: PathBuf,
+}
+
+impl RootOps for HostRoot {
+    fn synodeb(&self) -> bool {
+        Path::new(SYNODEB_DOM).is_file()
+    }
+
+    fn running_kernel(&self) -> Option<String> {
+        std::fs::read_to_string("/proc/sys/kernel/osrelease")
+            .ok()
+            .map(|s| s.trim().to_string())
+    }
+
+    fn mount_ro(&self, src: &Path, dir: &Path) -> Result<(), String> {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        run(Cmd::new("mount")
+            .args(["-o", "bind,ro"])
+            .arg(src)
+            .arg(dir)
+            .timeout(MOUNT_TIMEOUT))
+        .map(drop)
+    }
+
+    fn mount_top(&self, dir: &Path) -> Result<String, String> {
+        if self.subvolume != Path::new("/") {
+            return Err(format!(
+                "restore points of {} are not of the running root (/)",
+                self.subvolume.display()
+            ));
+        }
+        let (subvol, source, fstype) =
+            root_mount().ok_or("the root filesystem is not in /proc/self/mountinfo")?;
+        if fstype != "btrfs" {
+            return Err(format!("the root filesystem is {fstype}, not btrfs"));
+        }
+        let name = subvol.trim_start_matches('/').to_string();
+        if name.is_empty() || name.contains('/') {
+            return Err(format!(
+                "the root subvolume {subvol} is not directly below the top level"
+            ));
+        }
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        run(Cmd::new("mount")
+            .args(["-t", "btrfs", "-o", "subvolid=5,noatime"])
+            .arg(&source)
+            .arg(dir)
+            .timeout(MOUNT_TIMEOUT))?;
+        Ok(name)
+    }
+
+    fn unmount(&self, dir: &Path) -> Result<(), String> {
+        run(Cmd::new("umount").arg(dir).timeout(MOUNT_TIMEOUT))?;
+        let _ = std::fs::remove_dir(dir);
+        Ok(())
+    }
+
+    fn dom_sync(&self, root: &Path) -> Result<String, String> {
+        run(Cmd::new(SYNODEB_DOM)
+            .args(["sync", "--root"])
+            .arg(root)
+            .timeout(DOM_TIMEOUT))
+    }
+
+    fn restore_point(&self, reason: &str, now_s: i64) -> Result<String, String> {
+        system::take_always(
+            &SystemSnapshot {
+                subvolume: &self.subvolume,
+                snapshot_dir: &self.snapshot_dir,
+                prefix: &self.prefix,
+                keep: self.keep,
+                reasons: Some(&self.reasons),
+            },
+            reason,
+            now_s,
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    fn snapshot(&self, src: &Path, dir: &Path, name: &str) -> Result<(), String> {
+        let s = ioctl::open_dir(src).map_err(|e| format!("{}: {e}", src.display()))?;
+        let d = ioctl::open_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        ioctl::create_snapshot(&s, &d, name, false).map_err(|e| e.to_string())
+    }
+
+    fn subvolumes(&self, dir: &Path) -> Result<Vec<String>, String> {
+        let d = ioctl::open_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let mut v = Vec::new();
+        for e in std::fs::read_dir(dir).map_err(|e| e.to_string())?.flatten() {
+            let Some(n) = e.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            if ioctl::open_dir_at(&d, &n).is_ok_and(|f| ioctl::is_subvolume(&f)) {
+                v.push(n);
+            }
+        }
+        v.sort();
+        Ok(v)
+    }
+
+    fn move_subvolume(&self, from: &Path, to: &Path) -> Result<(), String> {
+        if let Ok(m) = std::fs::symlink_metadata(to) {
+            let placeholder = m.is_dir()
+                && ioctl::open_dir(to).is_ok_and(|f| !ioctl::is_subvolume(&f))
+                && std::fs::read_dir(to).is_ok_and(|mut d| d.next().is_none());
+            if !placeholder {
+                return Err(format!("{} already exists", to.display()));
+            }
+            std::fs::remove_dir(to).map_err(|e| format!("{}: {e}", to.display()))?;
+        }
+        if let Some(p) = to.parent() {
+            std::fs::create_dir_all(p).map_err(|e| format!("{}: {e}", p.display()))?;
+        }
+        let c = |p: &Path| {
+            std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(p.as_os_str()))
+                .map_err(|e| e.to_string())
+        };
+        let (f, t) = (c(from)?, c(to)?);
+        // SAFETY: two valid C strings; AT_FDCWD with absolute paths
+        let rc = unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                f.as_ptr(),
+                libc::AT_FDCWD,
+                t.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        Ok(())
+    }
+
+    fn rename(&self, dir: &Path, from: &str, to: &str) -> Result<(), String> {
+        let d: File = ioctl::open_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        ioctl::rename_noreplace(&d, from, to).map_err(|e| e.to_string())?;
+        // SAFETY: valid descriptor
+        unsafe {
+            libc::fsync(d.as_raw_fd());
+        }
+        Ok(())
+    }
+
+    fn delete_subvolume(&self, dir: &Path, name: &str) -> Result<(), String> {
+        let d = ioctl::open_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        ioctl::destroy_subvolume(&d, name).map_err(|e| e.to_string())
+    }
+}
+
+/// `rynasd --dry-system`: every step is logged, nothing is mounted, run or renamed. The
+/// kernel is read from the restore point itself.
+pub struct DryRoot {
+    /// Pretend this is synodeb (the hardware root has `usr/sbin/synodeb-dom`).
+    pub synodeb: bool,
+    mounts: Mutex<HashMap<PathBuf, PathBuf>>,
+}
+
+impl DryRoot {
+    pub fn new(synodeb: bool) -> Self {
+        Self {
+            synodeb,
+            mounts: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl RootOps for DryRoot {
+    fn synodeb(&self) -> bool {
+        self.synodeb
+    }
+
+    fn running_kernel(&self) -> Option<String> {
+        std::fs::read_to_string("/proc/sys/kernel/osrelease")
+            .ok()
+            .map(|s| s.trim().to_string())
+    }
+
+    fn kernel(&self, dir: &Path) -> Kernel {
+        let src = self.mounts.lock().unwrap().get(dir).cloned();
+        snapshot_kernel(src.as_deref().unwrap_or(dir))
+    }
+
+    fn mount_ro(&self, src: &Path, dir: &Path) -> Result<(), String> {
+        tracing::info!("dry: mount -o bind,ro {} {}", src.display(), dir.display());
+        self.mounts
+            .lock()
+            .unwrap()
+            .insert(dir.to_path_buf(), src.to_path_buf());
+        Ok(())
+    }
+
+    fn mount_top(&self, dir: &Path) -> Result<String, String> {
+        tracing::info!(
+            "dry: mount -t btrfs -o subvolid=5 <root device> {}",
+            dir.display()
+        );
+        Ok("@rootfs".into())
+    }
+
+    fn unmount(&self, dir: &Path) -> Result<(), String> {
+        tracing::info!("dry: umount {}", dir.display());
+        self.mounts.lock().unwrap().remove(dir);
+        Ok(())
+    }
+
+    fn dom_sync(&self, root: &Path) -> Result<String, String> {
+        tracing::info!("dry: {SYNODEB_DOM} sync --root {}", root.display());
+        Ok("dry system: synodeb-dom not run".into())
+    }
+
+    fn restore_point(&self, reason: &str, now_s: i64) -> Result<String, String> {
+        let name = format!("rootfs.{}", crate::name::long_timestamp(now_s));
+        tracing::info!("dry: restore point {name} ({reason})");
+        Ok(name)
+    }
+
+    fn snapshot(&self, src: &Path, dir: &Path, name: &str) -> Result<(), String> {
+        tracing::info!(
+            "dry: btrfs subvolume snapshot {} {}/{name}",
+            src.display(),
+            dir.display()
+        );
+        Ok(())
+    }
+
+    fn subvolumes(&self, _dir: &Path) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
+
+    fn move_subvolume(&self, from: &Path, to: &Path) -> Result<(), String> {
+        tracing::info!("dry: mv {} {}", from.display(), to.display());
+        Ok(())
+    }
+
+    fn rename(&self, dir: &Path, from: &str, to: &str) -> Result<(), String> {
+        tracing::info!("dry: mv {0}/{from} {0}/{to}", dir.display());
+        Ok(())
+    }
+
+    fn delete_subvolume(&self, dir: &Path, name: &str) -> Result<(), String> {
+        tracing::info!("dry: btrfs subvolume delete {}/{name}", dir.display());
+        Ok(())
+    }
+}
+
+/// Not synodeb (and the default of tests): root rollback is refused.
+pub struct NoRoot;
+
+impl RootOps for NoRoot {
+    fn synodeb(&self) -> bool {
+        false
+    }
+    fn running_kernel(&self) -> Option<String> {
+        None
+    }
+    fn mount_ro(&self, _: &Path, _: &Path) -> Result<(), String> {
+        Err("not supported".into())
+    }
+    fn mount_top(&self, _: &Path) -> Result<String, String> {
+        Err("not supported".into())
+    }
+    fn unmount(&self, _: &Path) -> Result<(), String> {
+        Ok(())
+    }
+    fn dom_sync(&self, _: &Path) -> Result<String, String> {
+        Err("not supported".into())
+    }
+    fn restore_point(&self, _: &str, _: i64) -> Result<String, String> {
+        Err("not supported".into())
+    }
+    fn snapshot(&self, _: &Path, _: &Path, _: &str) -> Result<(), String> {
+        Err("not supported".into())
+    }
+    fn subvolumes(&self, _: &Path) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
+    fn move_subvolume(&self, _: &Path, _: &Path) -> Result<(), String> {
+        Err("not supported".into())
+    }
+    fn rename(&self, _: &Path, _: &str, _: &str) -> Result<(), String> {
+        Err("not supported".into())
+    }
+    fn delete_subvolume(&self, _: &Path, _: &str) -> Result<(), String> {
+        Err("not supported".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Records every call; `fail` names the call (prefix) that fails.
+    struct Fake {
+        calls: Mutex<Vec<String>>,
+        fail: Option<&'static str>,
+        kernel: Kernel,
+        points: Vec<String>,
+    }
+
+    impl Fake {
+        fn new(fail: Option<&'static str>) -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                fail,
+                kernel: Kernel {
+                    release: Some("7.3.0-1-synodeb".into()),
+                    modules: true,
+                },
+                points: vec!["rootfs.20261020T0300".into(), "rootfs.20261101T0300".into()],
+            }
+        }
+        fn rec(&self, c: String) -> Result<(), String> {
+            let failing = self.fail.is_some_and(|f| c.starts_with(f));
+            self.calls.lock().unwrap().push(c);
+            if failing { Err("boom".into()) } else { Ok(()) }
+        }
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl RootOps for Fake {
+        fn synodeb(&self) -> bool {
+            true
+        }
+        fn running_kernel(&self) -> Option<String> {
+            Some("7.4.0-1-synodeb".into())
+        }
+        fn kernel(&self, _: &Path) -> Kernel {
+            self.kernel.clone()
+        }
+        fn mount_ro(&self, s: &Path, d: &Path) -> Result<(), String> {
+            self.rec(format!("mount_ro {} {}", s.display(), d.display()))
+        }
+        fn mount_top(&self, d: &Path) -> Result<String, String> {
+            self.rec(format!("mount_top {}", d.display()))
+                .map(|_| "@rootfs".into())
+        }
+        fn unmount(&self, d: &Path) -> Result<(), String> {
+            self.rec(format!("unmount {}", d.display()))
+        }
+        fn dom_sync(&self, r: &Path) -> Result<String, String> {
+            self.rec(format!("dom_sync {}", r.display()))
+                .map(|_| "DEBIAN: 7.3.0-1-synodeb".into())
+        }
+        fn restore_point(&self, reason: &str, _: i64) -> Result<String, String> {
+            self.rec(format!("restore_point {reason}"))
+                .map(|_| "rootfs.20261105T1200".into())
+        }
+        fn snapshot(&self, s: &Path, d: &Path, n: &str) -> Result<(), String> {
+            self.rec(format!("snapshot {} {}/{n}", s.display(), d.display()))
+        }
+        fn subvolumes(&self, d: &Path) -> Result<Vec<String>, String> {
+            self.rec(format!("subvolumes {}", d.display()))
+                .map(|_| self.points.clone())
+        }
+        fn move_subvolume(&self, f: &Path, t: &Path) -> Result<(), String> {
+            self.rec(format!("move {} {}", f.display(), t.display()))
+        }
+        fn rename(&self, d: &Path, f: &str, t: &str) -> Result<(), String> {
+            self.rec(format!("rename {}: {f} -> {t}", d.display()))
+        }
+        fn delete_subvolume(&self, d: &Path, n: &str) -> Result<(), String> {
+            self.rec(format!("delete {}/{n}", d.display()))
+        }
+    }
+
+    fn plan() -> RootRollback {
+        RootRollback {
+            id: "rootfs.20261101T0300".into(),
+            snapshot: "/.snapshots/rootfs/rootfs.20261101T0300".into(),
+            snapshot_dir: "/.snapshots/rootfs".into(),
+            root: "/".into(),
+            move_points: true,
+            run_dir: "/run/rynas/rollback".into(),
+            now_s: 1_793_880_000,
+        }
+    }
+
+    #[test]
+    fn full_rollback_in_order() {
+        let f = Fake::new(None);
+        let r = rollback_root(&f, &plan(), &|_| {}).unwrap();
+        assert_eq!(r.kernel, "7.3.0-1-synodeb");
+        assert_eq!(r.before, "rootfs.20261105T1200");
+        assert!(
+            r.kept_as.starts_with("@rootfs.rynas-rollback-"),
+            "{}",
+            r.kept_as
+        );
+        assert_eq!(r.moved, 2);
+        let c = f.calls();
+        let stamp = stamp_seconds(plan().now_s);
+        let want = [
+            "mount_ro /.snapshots/rootfs/rootfs.20261101T0300 /run/rynas/rollback/rootfs.20261101T0300".to_string(),
+            "dom_sync /run/rynas/rollback/rootfs.20261101T0300".into(),
+            "mount_top /run/rynas/rollback/top".into(),
+            "restore_point before rollback".into(),
+            format!("snapshot /run/rynas/rollback/top/@rootfs/.snapshots/rootfs/rootfs.20261101T0300 /run/rynas/rollback/top/@rootfs.rynas-new-{stamp}"),
+            "subvolumes /run/rynas/rollback/top/@rootfs/.snapshots/rootfs".into(),
+            format!("move /run/rynas/rollback/top/@rootfs/.snapshots/rootfs/rootfs.20261020T0300 /run/rynas/rollback/top/@rootfs.rynas-new-{stamp}/.snapshots/rootfs/rootfs.20261020T0300"),
+            format!("move /run/rynas/rollback/top/@rootfs/.snapshots/rootfs/rootfs.20261101T0300 /run/rynas/rollback/top/@rootfs.rynas-new-{stamp}/.snapshots/rootfs/rootfs.20261101T0300"),
+            format!("rename /run/rynas/rollback/top: @rootfs -> @rootfs.rynas-rollback-{stamp}"),
+            format!("rename /run/rynas/rollback/top: @rootfs.rynas-new-{stamp} -> @rootfs"),
+            "unmount /run/rynas/rollback/top".into(),
+            "unmount /run/rynas/rollback/rootfs.20261101T0300".into(),
+        ];
+        assert_eq!(c, want);
+    }
+
+    #[test]
+    fn a_dom_refusal_changes_nothing() {
+        let f = Fake::new(Some("dom_sync"));
+        let e = rollback_root(&f, &plan(), &|_| {}).unwrap_err();
+        assert!(
+            e.contains("synodeb-dom refused") && e.contains("boom"),
+            "{e}"
+        );
+        let c = f.calls();
+        assert_eq!(c.len(), 3, "{c:?}");
+        assert!(c[2].starts_with("unmount /run/rynas/rollback/rootfs."));
+    }
+
+    #[test]
+    fn missing_modules_stop_before_the_dom() {
+        let mut f = Fake::new(None);
+        f.kernel.modules = false;
+        let e = rollback_root(&f, &plan(), &|_| {}).unwrap_err();
+        assert!(e.contains("/lib/modules/7.3.0-1-synodeb"), "{e}");
+        assert!(!f.calls().iter().any(|c| c.starts_with("dom_sync")));
+    }
+
+    #[test]
+    fn a_failed_swap_is_undone_and_the_dom_synced_back() {
+        // the second rename fails: the first is undone, restore points move back, the copy
+        // is deleted, the DOM goes back to the running system
+        let f = Fake::new(Some("rename /run/rynas/rollback/top: @rootfs.rynas-new"));
+        let e = rollback_root(&f, &plan(), &|_| {}).unwrap_err();
+        assert!(e.contains("left as it was"), "{e}");
+        let c = f.calls();
+        let stamp = stamp_seconds(plan().now_s);
+        let i = c
+            .iter()
+            .position(|x| x.starts_with("rename /run/rynas/rollback/top: @rootfs.rynas-new"))
+            .unwrap();
+        assert_eq!(
+            c[i + 1],
+            format!("rename /run/rynas/rollback/top: @rootfs.rynas-rollback-{stamp} -> @rootfs")
+        );
+        assert!(
+            c[i + 2].starts_with("move /run/rynas/rollback/top/@rootfs.rynas-new-")
+                && c[i + 2].ends_with("/.snapshots/rootfs/rootfs.20261101T0300")
+        );
+        assert!(c[i + 3].ends_with("/.snapshots/rootfs/rootfs.20261020T0300"));
+        assert_eq!(
+            c[i + 4],
+            format!("delete /run/rynas/rollback/top/@rootfs.rynas-new-{stamp}")
+        );
+        assert_eq!(c[i + 5], "unmount /run/rynas/rollback/top");
+        assert_eq!(c[i + 6], "dom_sync /");
+        assert!(c[i + 7].starts_with("unmount /run/rynas/rollback/rootfs."));
+    }
+
+    #[test]
+    fn refused_without_synodeb() {
+        let e = rollback_root(&NoRoot, &plan(), &|_| {}).unwrap_err();
+        assert!(e.contains("needs synodeb"), "{e}");
+    }
+
+    #[test]
+    fn kernel_of_a_tree() {
+        let d = tempfile::tempdir().unwrap();
+        let r = d.path();
+        assert_eq!(snapshot_kernel(r), Kernel::default());
+        std::fs::create_dir_all(r.join("boot")).unwrap();
+        for k in ["7.2.0-1-synodeb", "7.10.0-1-synodeb", "7.9.1-2-synodeb"] {
+            std::fs::write(r.join("boot").join(format!("vmlinuz-{k}")), "").unwrap();
+        }
+        assert_eq!(
+            snapshot_kernel(r),
+            Kernel {
+                release: Some("7.10.0-1-synodeb".into()),
+                modules: false
+            }
+        );
+        // merged /usr with the relative link
+        std::fs::create_dir_all(r.join("usr/lib/modules/7.10.0-1-synodeb")).unwrap();
+        std::os::unix::fs::symlink("usr/lib", r.join("lib")).unwrap();
+        assert!(snapshot_kernel(r).modules);
+        // Debian's /vmlinuz link wins over the newest image
+        std::os::unix::fs::symlink("boot/vmlinuz-7.2.0-1-synodeb", r.join("vmlinuz")).unwrap();
+        assert_eq!(
+            snapshot_kernel(r).release.as_deref(),
+            Some("7.2.0-1-synodeb")
+        );
+        assert!(!snapshot_kernel(r).modules);
+        assert!(!valid_release("../x") && !valid_release("") && valid_release("7.3.0-1-synodeb"));
+    }
+
+    #[test]
+    fn dry_root_reads_the_kernel_of_the_source() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("boot")).unwrap();
+        std::fs::write(d.path().join("boot/vmlinuz-7.3.0-1-synodeb"), "").unwrap();
+        std::fs::create_dir_all(d.path().join("usr/lib/modules/7.3.0-1-synodeb")).unwrap();
+        let mut p = plan();
+        p.snapshot = d.path().to_path_buf();
+        p.run_dir = d.path().join("run");
+        let r = rollback_root(&DryRoot::new(true), &p, &|_| {}).unwrap();
+        assert_eq!(r.kernel, "7.3.0-1-synodeb");
+        assert!(
+            !d.path().join("run").exists(),
+            "nothing created in dry mode"
+        );
+    }
+}

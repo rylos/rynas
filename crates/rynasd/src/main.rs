@@ -599,7 +599,16 @@ fn main() -> std::io::Result<()> {
             Arc::new(history),
             notifier.clone(),
             args.state_dir.clone(),
-        );
+        )
+        // root rollback: the machine, or (--dry-system) only logged, as synodeb when the
+        // hardware root has synodeb-dom
+        .with_root(if args.dry_system {
+            rynasd::protection::RootBackend::Custom(Arc::new(rynas_btrfs::rootfs::DryRoot::new(
+                rynas_hw::under(&args.hw_root, rynas_btrfs::rootfs::SYNODEB_DOM).is_file(),
+            )))
+        } else {
+            rynasd::protection::RootBackend::Host
+        });
         let protection = Arc::new(protection);
         state.protection = Some(protection.clone());
         state.ups = Some(Arc::new(rynasd::ups::Ups {

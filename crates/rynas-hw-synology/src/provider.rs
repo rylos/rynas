@@ -30,7 +30,7 @@ pub struct Synology {
     /// "Synology Inc. DS920+".
     model: String,
     status_path: PathBuf,
-    fifo: PathBuf,
+    commander: cmd::Commander,
     identifier: leds::Identifier,
     cache: Mutex<Option<Cached>>,
     /// The fan mode the curves call active (set from the applied settings).
@@ -57,7 +57,7 @@ impl Synology {
             model: rynas_hw::dmi_model(&root),
             product: product.into(),
             status_path: rynas_hw::under(&root, STATUS),
-            fifo: rynas_hw::under(&root, cmd::FIFO),
+            commander: cmd::Commander::under(&root),
             identifier: leds::Identifier::new(&root),
             root,
             cache: Mutex::new(None),
@@ -86,6 +86,11 @@ impl Synology {
 
     pub fn bays(&self) -> u32 {
         model::bay_count(&self.product)
+    }
+
+    /// Microcontroller commands (control socket, FIFO fallback).
+    pub fn commander(&self) -> &cmd::Commander {
+        &self.commander
     }
 
     pub fn identifier(&self) -> &leds::Identifier {
@@ -176,7 +181,7 @@ impl HardwareControl for Synology {
             BeepKind::Short => cmd::BEEP_SHORT,
             BeepKind::Long => cmd::BEEP_LONG,
         };
-        cmd::send(&self.fifo, c)
+        self.commander.send(c)
     }
 
     /// synohwd's beeps are single (`2`, `3`): no sequence it accepts stops a sound, and none

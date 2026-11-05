@@ -7,6 +7,7 @@
 //! - [`restore`]: file/folder restore (copy next to it, or replace after saving the current
 //!   version) and rollback of a whole subvolume by rename;
 //! - [`system`]: system restore points before apt (`rynasctl snapshot system`);
+//! - [`rootfs`]: rolling the system back to a restore point on synodeb (DOM kernel + `@rootfs`);
 //! - [`btrbk`]: the configuration rynas generates per job and btrbk's raw output;
 //! - [`domain`]: the `snapshots` configuration domain.
 //!
@@ -19,6 +20,7 @@ pub mod domain;
 pub mod ioctl;
 pub mod name;
 pub mod restore;
+pub mod rootfs;
 pub mod scan;
 pub mod system;
 
