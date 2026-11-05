@@ -142,6 +142,7 @@ pub fn summary(
 ) -> DiskSummary {
     let kind = disk_kind(d);
     let model = d.model.clone().unwrap_or_default();
+    let usage = disk_usage(g, &d.kname);
     let mut s = DiskSummary {
         name: d.kname.clone(),
         path: d.path.clone(),
@@ -156,7 +157,9 @@ pub fn summary(
         power_state: power,
         smr: zoned || known_smr(&model),
         removable: d.removable || d.hotplug,
-        used_by: disk_usage(g, &d.kname).used_by,
+        used_by: usage.used_by,
+        in_use: usage.in_use,
+        system: usage.system,
         model,
         ..Default::default()
     };

@@ -702,6 +702,10 @@ pub fn disk_checklist(disks: Vec<rynas_api_types::storage::DiskSummary>, chosen:
                                 <span class="muted small mono">{d.serial.clone()}</span>
                             </span>
                             {d.smr.then(|| view! { <span class="chip warn-chip" title=t("sto.smr_hint")>"SMR"</span> })}
+                            {(!d.used_by.is_empty()).then(|| {
+                                let what = d.used_by.join(", ");
+                                view! { <span class="chip warn-chip" title=tf("wiz.will_erase", &[("what", &what)])>{tr("wiz.erase_chip")}</span> }
+                            })}
                             <Status tone=htone text=t(hkey).to_string() />
                         </label>
                     </li>

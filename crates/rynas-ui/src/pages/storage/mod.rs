@@ -279,7 +279,9 @@ fn vol_of_tree(v: &VolumeTree, arrays: &[MdArray], fss: &[BtrfsFilesystem]) -> V
 
 /// Disks a new volume (or a grow / replace) may use: nothing on them, not removable.
 pub fn free_disks(s: Sto) -> Vec<DiskSummary> {
-    s.disks.get().unwrap_or_default().into_iter().filter(|d| d.used_by.is_empty() && !d.removable).collect()
+    // leftovers (old partitions, an unassembled DSM array) are erased by the plan with a warning;
+    // only live use and the system disk exclude a drive
+    s.disks.get().unwrap_or_default().into_iter().filter(|d| !d.in_use && !d.system && !d.removable).collect()
 }
 
 // ------------------------------------------------------------------ labels and tones
@@ -427,7 +429,7 @@ pub fn Storage() -> impl IntoView {
     view! {
         <div class="page">
             <PageHeader icon=icons::HARD_DRIVE title="sto.title" subtitle="sto.subtitle">
-                <a class="btn primary" href="/storage/create" aria-disabled=move || (free.get() == 0).then_some("true")>
+                <a class="btn primary" href="/storage/create" aria-disabled=move || (free.get() == 0).then_some("true") title=move || (free.get() == 0).then(|| t("sto.no_free").to_string())>
                     <Icon icon=icons::PLUS size=16 /><span class="btn-label">{tr("sto.create")}</span>
                 </a>
             </PageHeader>

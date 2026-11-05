@@ -112,8 +112,15 @@ pub struct DiskSummary {
     /// Age of the SMART data behind `health`; None when there is none.
     pub smart_age_s: Option<u64>,
     /// What sits on the disk: "md2", "btrfs root", "crypto_LUKS", "mounted /boot"... Empty
-    /// means unused (a candidate for a new volume).
+    /// means blank. Leftovers that are not live (old partitions, an unassembled array) do not
+    /// make it busy: see `in_use`.
     pub used_by: Vec<String>,
+    /// Something on it is live (mounted, assembled array, open LUKS, swap): not a candidate.
+    #[serde(default)]
+    pub in_use: bool,
+    /// Holds the operating system: never a candidate.
+    #[serde(default)]
+    pub system: bool,
     /// Known or detected shingled (SMR) drive: bad for RAID5/6 rebuilds.
     pub smr: bool,
     pub removable: bool,

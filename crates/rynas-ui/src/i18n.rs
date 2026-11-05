@@ -685,7 +685,9 @@ dict! {
     "sto.refresh_failed" => "Couldn't refresh the storage data.", "Impossibile aggiornare i dati di archiviazione.";
     "sto.no_volumes" => "No volumes yet", "Ancora nessun volume";
     "sto.no_volumes_text" => "Create a volume on the free drives to start storing data.", "Crea un volume sui dischi liberi per iniziare ad archiviare dati.";
-    "sto.free_disks" => "Drives without data: {n}. Use them for a new volume or to grow one.", "Dischi senza dati: {n}. Usali per un nuovo volume o per espanderne uno.";
+    "sto.free_disks" => "Drives available: {n}. Use them for a new volume or to grow one.", "Dischi disponibili: {n}. Usali per un nuovo volume o per espanderne uno.";
+    "wiz.erase_chip" => "Will be erased", "Verrà cancellato";
+    "wiz.will_erase" => "Existing data will be erased: {what}", "I dati esistenti verranno cancellati: {what}";
     "sto.n_disks" => "Drives: {n}", "Dischi: {n}";
     "sto.used_n" => "Used: {n}", "Usato: {n}";
     "sto.encrypted" => "Encrypted", "Crittografato";
@@ -863,7 +865,7 @@ dict! {
     "sto.copy" => "Copy", "Copia";
     "sto.download" => "Download", "Scarica";
     "sto.done" => "Done", "Fine";
-    "sto.no_free" => "No free drives: add an empty drive first.", "Nessun disco libero: aggiungi prima un disco vuoto.";
+    "sto.no_free" => "No drive available: add a drive that is not in use.", "Nessun disco disponibile: aggiungi un disco non in uso.";
     "sto.keep_level" => "Keep {l}", "Mantieni {l}";
     "sto.grow_title" => "Add drives to {name}", "Aggiungi dischi a {name}";
     "sto.grow_text" => "The new drives join the array (more capacity or more redundancy); a level change reshapes it, which can take many hours.", "I nuovi dischi entrano nell'array (più capacità o più ridondanza); un cambio di livello lo rimodella e può richiedere molte ore.";
