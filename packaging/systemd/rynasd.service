@@ -45,6 +45,8 @@ UMask=0077
 NoNewPrivileges=yes
 # not "full": configuration applies write files in /etc (hostname, hosts, smb.conf...)
 ProtectSystem=yes
+# /boot: update-initramfs after a new md array (mdadm.conf is copied into the initramfs)
+ReadWritePaths=/boot
 # users and shares: useradd/userdel create and remove home directories, and shares (with
 # their ACLs) may live below /home. (ReadWritePaths=/home does not lift ProtectHome=read-only
 # on /home itself.)

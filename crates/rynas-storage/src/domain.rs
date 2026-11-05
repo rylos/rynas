@@ -166,9 +166,14 @@ impl Applier for VolumesDomain {
             return Ok(());
         }
         (ctx.log)("storage.volumes: arrays changed, refreshing the initramfs");
-        ctx.system
-            .run(&Cmd::new("update-initramfs").arg("-u"))
-            .map(|_| ())
+        // not fatal: data arrays are assembled after the root from /etc/mdadm/mdadm.conf; the
+        // initramfs copy only matters for early assembly. A failure must not undo the volume.
+        if let Err(e) = ctx.system.run(&Cmd::new("update-initramfs").arg("-u")) {
+            (ctx.log)(&format!(
+                "storage.volumes: warning: update-initramfs failed ({e}); run `update-initramfs -u` by hand"
+            ));
+        }
+        Ok(())
     }
 
     fn reload(&self, _value: Option<&Value>, ctx: &ApplyCtx) -> Result<(), String> {
