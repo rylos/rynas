@@ -1,22 +1,37 @@
 //! UPS endpoints of the internal API (`/v1/ups/...`, public under `/api/v1/ups/...`), the
-//! `ups.safemode` configuration domain and synodeb's pre-Safe Mode hook.
+//! `ups.safemode` configuration domain, the on-battery watcher and the pre-shutdown stop.
 //!
-//! On synodeb (`/etc/synodeb/ups.conf` exists) rynas is the interface, synodeb the executor
-//! (`docs/synodeb-integration.md`, S2–S4):
-//! - `ups.safemode` owns `SAFEMODE_AFTER` and `PRE_SAFEMODE_TIMEOUT` of
-//!   `/etc/synodeb/ups.conf` (a `# BEGIN rynas ups` block; other assignments of the two keys
-//!   are dropped, the rest of the file stays synodeb's). `synodeb-ups` reads the file at
-//!   every event, so an apply needs no reload. Safe Mode also always starts on NUT low
-//!   battery and on a critical UPS (OB+LB), whichever comes first: rynas cannot turn that off.
-//! - `POST /v1/ups/test` runs `synodeb-ups test quick|deep|stop` as the task `ups.test` and
-//!   follows `synodeb-ups test result` until the UPS reports an outcome.
-//! - `POST /v1/ups/safe-mode` (root only, `rynasctl ups safe-mode <reason>` from
-//!   `/etc/synodeb/ups-pre-safemode.d/50-rynas`): cancels running rynas tasks, stops running
-//!   scheduler task units and records "Safe Mode: <reason>" as a notification, within
-//!   [`SAFE_MODE_BUDGET`].
+//! Two backends ([`UpsBackend`]); the generic one comes first:
 //!
-//! The UPS status itself is read from upsd by rynas-web (no root needed).
+//! - **NUT** (any Debian with the `nut` package, `/etc/nut` present). rynas never rewrites the
+//!   user's NUT files: upsmon keeps shutting the system down on low battery as configured.
+//!   - `ups.safemode` owns the rynas file `/etc/rynas/ups.conf` (`SHUTDOWN_AFTER`,
+//!     `STOP_TIMEOUT`). [`watch`] reads upsd every few seconds; after `SHUTDOWN_AFTER` seconds
+//!     on battery it stops rynas's work ([`stop_work`]) and asks upsmon for the shutdown
+//!     (`upsmon -c fsd`, the call NUT documents for "shut down before the battery is
+//!     critical"; `systemctl poweroff` if upsmon refuses). When the UPS turns critical (OB+LB
+//!     or FSD) it only stops rynas's work: upsmon shuts down by itself. It also records
+//!     "on battery" and "power back" as notifications.
+//!   - `POST /v1/ups/test` sends the NUT instant command (`test.battery.start.quick|deep`,
+//!     `test.battery.stop`) as the upsd user `rynas`: a managed block of
+//!     `/etc/nut/upsd.users` (`instcmds` limited to the three tests) whose password is
+//!     generated once into `/etc/rynas/nut-upsd.secret` (root, 0600) and never logged. The
+//!     block is written (and upsd reloaded) only when a test runs and it is missing or
+//!     changed; a `[rynas]` user outside the block is an error, not overwritten.
+//! - **synodeb** (`/etc/synodeb/ups.conf` exists): rynas is the interface, synodeb the
+//!   executor (`docs/synodeb-integration.md`, S2–S4).
+//!   - `ups.safemode` owns `SAFEMODE_AFTER` and `PRE_SAFEMODE_TIMEOUT` of
+//!     `/etc/synodeb/ups.conf` (a `# BEGIN rynas ups` block; other assignments of the two
+//!     keys are dropped, the rest of the file stays synodeb's). `synodeb-ups` reads the file
+//!     at every event, so an apply needs no reload.
+//!   - `POST /v1/ups/test` runs `synodeb-ups test quick|deep|stop`.
+//!   - `POST /v1/ups/safe-mode` (root only, `rynasctl ups safe-mode <reason>` from
+//!     `/etc/synodeb/ups-pre-safemode.d/50-rynas`): the same [`stop_work`].
+//!
+//! Either way the test runs as the task `ups.test`, which follows `ups.test.result` until the
+//! UPS reports an outcome. The UPS status itself is read from upsd by rynas-web (no root).
 
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,42 +45,62 @@ use axum::{Json, Router};
 use rynas_api_types::notify::{NotifyCategory, NotifySeverity};
 use rynas_api_types::ups::{
     BatteryTest, BatteryTestRequest, PRE_SAFEMODE_TIMEOUT_RANGE_S, SAFE_MODE_REASONS,
-    SAFEMODE_AFTER_RANGE_S, SafeModeReport, SafeModeRequest, UpsSettings, UpsSettingsState,
+    SAFEMODE_AFTER_RANGE_S, SafeModeReport, SafeModeRequest, UpsBackend, UpsLink, UpsSettings,
+    UpsSettingsState, UpsStatus,
 };
 use rynas_api_types::{TaskStarted, TaskStatus};
+use rynas_config::files::{self, FileKind};
 use rynas_config::{Applier, ApplyCtx, Invalid, ManagedFile};
 use rynas_notify::Notifier;
 use rynas_notify::event::oneshot;
-use rynas_tasks::Cmd;
+use rynas_tasks::{Cmd, TaskCtx};
 use serde_json::Value;
 
 use crate::ops::{Error, Ops, Res, user};
 use crate::services::{docs, stage};
 
 pub const UPS_KEY: &str = "ups.safemode";
+/// synodeb's UPS configuration (its presence selects the synodeb backend).
 pub const UPS_CONF: &str = "/etc/synodeb/ups.conf";
-/// Server-side bound of the pre-Safe Mode work (the hook's `rynasctl` waits 30 s, synodeb's
-/// `PRE_SAFEMODE_TIMEOUT` is 120 s by default for every hook together).
+/// The policy file of the NUT backend (rynas-owned, read by [`watch`]).
+pub const NUT_POLICY: &str = "/etc/rynas/ups.conf";
+pub const NUT_CONF: &str = "/etc/nut/nut.conf";
+pub const NUT_USERS: &str = "/etc/nut/upsd.users";
+/// Password of the rynas upsd user (root 0600).
+pub const NUT_SECRET: &str = "/etc/rynas/nut-upsd.secret";
+pub const NUT_USER: &str = "rynas";
+/// Keys of the two settings in synodeb's file and in the rynas file.
+const SYNODEB_KEYS: (&str, &str) = ("SAFEMODE_AFTER", "PRE_SAFEMODE_TIMEOUT");
+const NUT_KEYS: (&str, &str) = ("SHUTDOWN_AFTER", "STOP_TIMEOUT");
+/// Server-side bound of the pre-Safe Mode work of synodeb's hook (the hook's `rynasctl` waits
+/// 30 s, synodeb's `PRE_SAFEMODE_TIMEOUT` is 120 s by default for every hook together).
 pub const SAFE_MODE_BUDGET: Duration = Duration::from_secs(25);
 /// Longest wait for the outcome of a battery test.
 const QUICK_MAX: Duration = Duration::from_secs(5 * 60);
 const DEEP_MAX: Duration = Duration::from_secs(3 * 3600);
 const RESULT_EVERY: Duration = Duration::from_secs(10);
 const CMD_TIMEOUT: Duration = Duration::from_secs(30);
+/// Watcher period while a UPS answers, and while none does.
+const WATCH_EVERY: Duration = Duration::from_secs(5);
+const WATCH_IDLE: Duration = Duration::from_secs(30);
+const PATH: &str = "/usr/sbin:/usr/bin:/sbin:/bin";
 
 // ---------------------------------------------------------------------------------------------
 // the configuration domain
 // ---------------------------------------------------------------------------------------------
 
-/// `ups.safemode`: the rynas block of `/etc/synodeb/ups.conf`.
-pub struct UpsDomain;
+/// `ups.safemode`: the rynas block of `/etc/synodeb/ups.conf` (synodeb) or the rynas file
+/// `/etc/rynas/ups.conf` (NUT). Registered on every system: the file is harmless without NUT.
+pub struct UpsDomain {
+    pub synodeb: bool,
+}
 
 fn settings_of(v: &Value) -> Result<UpsSettings, Invalid> {
     serde_json::from_value(v.clone())
         .map_err(|e| Invalid::from(format!("invalid ups.safemode document: {e}")))
 }
 
-/// Checks the ranges; `SAFEMODE_AFTER` is kept in whole minutes (the UI's unit).
+/// Checks the ranges; the timer is kept in whole minutes (the UI's unit).
 pub fn normalize(s: UpsSettings) -> Result<UpsSettings, Invalid> {
     if let Some(a) = s.safemode_after_s {
         let (lo, hi) = SAFEMODE_AFTER_RANGE_S;
@@ -86,7 +121,7 @@ pub fn normalize(s: UpsSettings) -> Result<UpsSettings, Invalid> {
     Ok(s)
 }
 
-/// The block's lines.
+/// The lines of synodeb's block.
 pub fn render_block(s: &UpsSettings) -> String {
     format!(
         "# Safe Mode settings of the rynas UPS page (ups.safemode). NUT low battery and a\n\
@@ -98,8 +133,22 @@ pub fn render_block(s: &UpsSettings) -> String {
     )
 }
 
+/// The rynas policy file of the NUT backend.
+pub fn render_policy(s: &UpsSettings) -> String {
+    format!(
+        "# Shutdown policy of the rynas UPS page (ups.safemode), carried out by rynasd: after\n\
+         # SHUTDOWN_AFTER seconds on battery (0: never) rynas stops its tasks within\n\
+         # STOP_TIMEOUT seconds and asks NUT's upsmon to shut the system down (upsmon -c fsd).\n\
+         # Low battery is always handled by upsmon itself, as configured in /etc/nut.\n\
+         SHUTDOWN_AFTER={}\n\
+         STOP_TIMEOUT={}\n",
+        s.safemode_after_s.unwrap_or(0),
+        s.pre_safemode_timeout_s
+    )
+}
+
 /// The two keys as the shell would see them (the last assignment wins; comments skipped).
-pub fn parse_conf(text: &str) -> UpsSettings {
+fn parse_keys(text: &str, (after, timeout): (&str, &str)) -> UpsSettings {
     let mut s = UpsSettings::default();
     for line in text.lines() {
         let l = line.trim();
@@ -110,14 +159,36 @@ pub fn parse_conf(text: &str) -> UpsSettings {
             continue;
         };
         // `X=1 # comment` and quotes
-        let v = v.split('#').next().unwrap_or("").trim().trim_matches(['"', '\'']);
-        match (k.trim(), v.parse::<u32>()) {
-            ("SAFEMODE_AFTER", Ok(n)) => s.safemode_after_s = (n > 0).then_some(n),
-            ("PRE_SAFEMODE_TIMEOUT", Ok(n)) => s.pre_safemode_timeout_s = n,
+        let v = v
+            .split('#')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .trim_matches(['"', '\'']);
+        let (k, n) = (k.trim(), v.parse::<u32>());
+        match n {
+            Ok(n) if k == after => s.safemode_after_s = (n > 0).then_some(n),
+            Ok(n) if k == timeout => s.pre_safemode_timeout_s = n,
             _ => {}
         }
     }
     s
+}
+
+/// The settings of synodeb's `ups.conf`.
+pub fn parse_conf(text: &str) -> UpsSettings {
+    parse_keys(text, SYNODEB_KEYS)
+}
+
+/// The settings of the rynas policy file.
+pub fn parse_policy(text: &str) -> UpsSettings {
+    parse_keys(text, NUT_KEYS)
+}
+
+impl UpsDomain {
+    fn path(&self) -> &'static str {
+        if self.synodeb { UPS_CONF } else { NUT_POLICY }
+    }
 }
 
 impl Applier for UpsDomain {
@@ -136,33 +207,151 @@ impl Applier for UpsDomain {
 
     fn render(&self, value: &Value, _ctx: &ApplyCtx) -> Result<Vec<ManagedFile>, String> {
         let s = settings_of(value).map_err(|e| e.message)?;
+        if !self.synodeb {
+            return Ok(vec![ManagedFile::whole(
+                NUT_POLICY,
+                render_policy(&s),
+                true,
+            )]);
+        }
         let mut f = ManagedFile::block(UPS_CONF, "ups", render_block(&s));
-        if let rynas_config::FileKind::Block { drop_outside, .. } = &mut f.kind {
+        if let FileKind::Block { drop_outside, .. } = &mut f.kind {
             *drop_outside = vec!["SAFEMODE_AFTER=".into(), "PRE_SAFEMODE_TIMEOUT=".into()];
         }
         Ok(vec![f])
     }
 
-    /// synodeb-ups reads the file at every UPS event: nothing to reload.
+    /// Both readers (synodeb-ups, rynasd's watcher) read the file at the next power event.
     fn reload(&self, _value: Option<&Value>, ctx: &ApplyCtx) -> Result<(), String> {
-        (ctx.log)("synodeb-ups reads ups.conf at its next event: no reload needed");
+        (ctx.log)(if self.synodeb {
+            "synodeb-ups reads ups.conf at its next event: no reload needed"
+        } else {
+            "rynasd reads /etc/rynas/ups.conf at the next power event: no reload needed"
+        });
         Ok(())
     }
 
     fn import(&self, ctx: &ApplyCtx) -> Result<Option<Value>, String> {
-        let Some(text) = ctx.read(Path::new(UPS_CONF)) else {
+        let Some(text) = ctx.read(Path::new(self.path())) else {
             return Ok(None);
         };
-        serde_json::to_value(parse_conf(&text))
-            .map(Some)
-            .map_err(|e| e.to_string())
+        let s = if self.synodeb {
+            parse_conf(&text)
+        } else {
+            parse_policy(&text)
+        };
+        serde_json::to_value(s).map(Some).map_err(|e| e.to_string())
     }
 }
 
 /// Whether this machine runs synodeb's UPS layer (below the configuration root). The file,
 /// not the directory: the rynas package itself installs `/etc/synodeb/ups-pre-safemode.d/`.
 pub fn synodeb_present(root: &Path) -> bool {
-    rynas_config::files::under_root(root, Path::new(UPS_CONF)).is_file()
+    files::under_root(root, Path::new(UPS_CONF)).is_file()
+}
+
+/// The backend of this machine: synodeb (fixed at start), else NUT when its configuration
+/// directory has `nut.conf` or `upsd.users` (checked at every call: NUT may come later).
+pub fn backend_of(root: &Path, synodeb: bool) -> UpsBackend {
+    let has = |p: &str| files::under_root(root, Path::new(p)).is_file();
+    if synodeb {
+        UpsBackend::Synodeb
+    } else if has(NUT_CONF) || has(NUT_USERS) {
+        UpsBackend::Nut
+    } else {
+        UpsBackend::NotInstalled
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// the rynas upsd user (NUT backend)
+// ---------------------------------------------------------------------------------------------
+
+/// The managed block of `upsd.users`: one `instcmds` line per command, as upsd.users(5)
+/// documents, and nothing else (no `actions`, no `upsmon` role).
+pub fn users_block(password: &str) -> String {
+    let mut b = format!(
+        "# rynas sends the battery tests of its UPS page to upsd as this user.\n\
+         [{NUT_USER}]\n\tpassword = \"{password}\"\n"
+    );
+    for t in BatteryTest::ALL {
+        b.push_str(&format!("\tinstcmds = {}\n", t.nut_cmd()));
+    }
+    b
+}
+
+fn users_kind() -> FileKind {
+    FileKind::Block {
+        id: "ups".into(),
+        drop_outside: Vec::new(),
+    }
+}
+
+/// 32 random letters and digits (a word upsd takes without quoting).
+fn new_password() -> std::io::Result<String> {
+    use std::io::Read;
+    const ABC: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let mut raw = [0u8; 64];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut raw)?;
+    // rejection sampling: no modulo bias
+    let pw: String = raw
+        .iter()
+        .filter(|b| (**b as usize) < 248)
+        .take(32)
+        .map(|b| ABC[*b as usize % ABC.len()] as char)
+        .collect();
+    if pw.len() < 32 {
+        return Err(std::io::Error::other("not enough random bytes"));
+    }
+    Ok(pw)
+}
+
+/// The password of the rynas upsd user, generated on first use (root 0600 below `root`).
+pub fn nut_password(root: &Path) -> Result<String, String> {
+    let path = files::under_root(root, Path::new(NUT_SECRET));
+    if let Ok(t) = std::fs::read_to_string(&path) {
+        let pw = t.lines().next().unwrap_or("").trim().to_string();
+        if pw.len() >= 16 && rynas_nut::valid_name(&pw) {
+            return Ok(pw);
+        }
+    }
+    let pw = new_password().map_err(|e| format!("generating the upsd password: {e}"))?;
+    let cand = files::candidate_path(&path);
+    files::write_synced(&cand, format!("{pw}\n").as_bytes(), 0o600)
+        .and_then(|_| files::rename_synced(&cand, &path))
+        .map_err(|e| format!("{NUT_SECRET}: {e}"))?;
+    Ok(pw)
+}
+
+/// Makes sure `upsd.users` has the rynas block with `password`. Returns whether the file
+/// changed (upsd must then reload it). Keeps the file's mode and owner (root:nut 0640).
+pub fn ensure_nut_user(root: &Path, password: &str) -> Result<bool, String> {
+    let path = files::under_root(root, Path::new(NUT_USERS));
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("NUT is not installed or not readable ({NUT_USERS}: {e})"))?;
+    let body = users_block(password);
+    let kind = users_kind();
+    if files::current_hash(&kind, &text) == Some(files::sha256_hex(body.as_bytes())) {
+        return Ok(false);
+    }
+    let (new, _) = files::render_final(&kind, &body, Some(&text));
+    let header = format!("[{NUT_USER}]");
+    if new.lines().filter(|l| l.trim() == header).count() > 1 {
+        return Err(format!(
+            "{NUT_USERS} already has a [{NUT_USER}] user that rynas does not manage: \
+             remove or rename it to run battery tests from rynas"
+        ));
+    }
+    let meta = std::fs::metadata(&path).map_err(|e| format!("{NUT_USERS}: {e}"))?;
+    let cand = files::candidate_path(&path);
+    files::write_synced(&cand, new.as_bytes(), meta.mode() & 0o7777)
+        .and_then(|_| std::os::unix::fs::chown(&cand, Some(meta.uid()), Some(meta.gid())))
+        .and_then(|_| files::rename_synced(&cand, &path))
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&cand);
+            format!("{NUT_USERS}: {e}")
+        })?;
+    Ok(true)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -171,15 +360,36 @@ pub fn synodeb_present(root: &Path) -> bool {
 
 pub struct Ups {
     pub ops: Arc<Ops>,
-    /// Task Scheduler (its running units are stopped before Safe Mode).
+    /// Task Scheduler (its running units are stopped before the shutdown).
     pub protection: Option<Arc<crate::protection::Protection>>,
     pub notifier: Arc<dyn Notifier>,
-    /// `/etc/synodeb` exists and `ups.safemode` is registered.
-    pub available: bool,
-    /// `--dry-system`: battery tests and unit stops are only logged.
+    /// synodeb's UPS layer is here (fixed at start: the domain writes its file).
+    pub synodeb: bool,
+    /// Configuration root: NUT's files, the policy and the upsd secret are below it.
+    pub root: PathBuf,
+    /// `--dry-system`: synodeb tests, upsd reloads, unit stops and shutdowns are only logged.
     pub dry: bool,
     /// The synodeb UPS tool.
     pub synodeb_ups: PathBuf,
+    /// upsd's address.
+    pub upsd: String,
+    /// Battery test commands are sent to upsd and the watcher runs (off under
+    /// `--dry-system` unless `--upsd` names a test upsd).
+    pub talk_to_upsd: bool,
+}
+
+impl Ups {
+    pub fn backend(&self) -> UpsBackend {
+        backend_of(&self.root, self.synodeb)
+    }
+
+    /// The applied settings as the executor reads them (NUT: the rynas policy file).
+    fn policy(&self) -> UpsSettings {
+        let p = files::under_root(&self.root, Path::new(NUT_POLICY));
+        std::fs::read_to_string(p)
+            .map(|t| parse_policy(&t))
+            .unwrap_or_default()
+    }
 }
 
 pub type UpsState = Option<Arc<Ups>>;
@@ -194,13 +404,13 @@ fn ups(st: &UpsState) -> Res<Arc<Ups>> {
     })
 }
 
-fn synodeb_only(u: &Ups) -> Res<()> {
-    if u.available {
-        Ok(())
-    } else {
+fn need_backend(u: &Ups) -> Res<()> {
+    if u.backend() == UpsBackend::NotInstalled {
         Err(Error::not_found(
-            "UPS Safe Mode and battery tests need synodeb (/etc/synodeb)",
+            "UPS settings and battery tests need NUT (Debian package nut)",
         ))
+    } else {
+        Ok(())
     }
 }
 
@@ -217,13 +427,15 @@ pub fn router(st: UpsState) -> Router {
 }
 
 fn state_of(u: &Ups, owner: &str) -> Res<UpsSettingsState> {
-    if !u.available {
+    let backend = u.backend();
+    if backend == UpsBackend::NotInstalled {
         return Ok(UpsSettingsState::default());
     }
     let (eff, cur, _): (UpsSettings, UpsSettings, Option<UpsSettings>) =
         docs(&u.ops.config, owner, UPS_KEY)?;
     Ok(UpsSettingsState {
         available: true,
+        backend,
         pending: (eff != cur).then_some(eff),
         applied: cur,
     })
@@ -250,7 +462,7 @@ async fn settings_put(
     body: Result<Json<UpsSettings>, JsonRejection>,
 ) -> Res<Json<UpsSettingsState>> {
     let (u, owner) = (ups(&st)?, user(&hd)?);
-    synodeb_only(&u)?;
+    need_backend(&u)?;
     let Json(req) = body?;
     Ok(Json(
         blocking(&u, move |u| {
@@ -279,88 +491,196 @@ pub fn verdict(r: &str) -> Option<Result<(), String>> {
     }
 }
 
+fn synodeb_cmd(u: &Ups, arg: &str) -> Cmd {
+    Cmd::new(&u.synodeb_ups)
+        .args(["test", arg])
+        .env_clear()
+        .env("PATH", PATH)
+        .timeout(CMD_TIMEOUT)
+}
+
+/// The current `ups.test.result` (empty when the UPS does not report one).
+async fn current_result(u: &Ups) -> Result<String, String> {
+    if u.synodeb {
+        let o = synodeb_cmd(u, "result")
+            .run(None, None)
+            .await
+            .map_err(|e| format!("synodeb-ups test result: {e}"))?;
+        Ok(result_text(&o.stdout))
+    } else {
+        let s = rynas_nut::read(&u.upsd).await;
+        if s.link != UpsLink::Connected {
+            return Err("upsd does not answer".into());
+        }
+        Ok(s.test_result.unwrap_or_default())
+    }
+}
+
+/// Asks upsd to reload `upsd.users` (Debian's `nut-server.service` runs `upsd -c reload`).
+async fn reload_upsd(u: &Ups, ctx: &TaskCtx) -> Result<(), String> {
+    if u.dry {
+        ctx.log("dry system: would reload upsd (systemctl reload nut-server.service)");
+        return Ok(());
+    }
+    let unit = Cmd::new("systemctl")
+        .args(["reload", "nut-server.service"])
+        .env_clear()
+        .env("PATH", PATH)
+        .timeout(CMD_TIMEOUT);
+    if ctx.run(&unit).await.is_ok_and(|o| o.success()) {
+        ctx.log("upsd reloaded");
+    } else {
+        let direct = Cmd::new("upsd")
+            .args(["-c", "reload"])
+            .env_clear()
+            .env("PATH", PATH)
+            .timeout(CMD_TIMEOUT);
+        match ctx.run(&direct).await {
+            Ok(o) if o.success() => ctx.log("upsd reloaded (upsd -c reload)"),
+            Ok(o) => return Err(format!("reloading upsd: {}", o.stderr.trim())),
+            Err(e) => return Err(format!("reloading upsd: {e}")),
+        }
+    }
+    // upsd re-reads its files right after the signal
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    Ok(())
+}
+
+/// One instant command as the rynas upsd user.
+async fn nut_instcmd(u: &Ups, ups: &str, cmd: &str) -> Result<(), String> {
+    let root = u.root.clone();
+    let pw = tokio::task::spawn_blocking(move || nut_password(&root))
+        .await
+        .map_err(|e| e.to_string())??;
+    let talk = async {
+        let mut c = rynas_nut::Conn::connect(&u.upsd).await?;
+        c.login(NUT_USER, &pw).await?;
+        c.instcmd(ups, cmd).await?;
+        c.logout().await;
+        std::io::Result::Ok(())
+    };
+    match tokio::time::timeout(Duration::from_secs(10), talk).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(format!("upsd refused {cmd}: {e}")),
+        Err(_) => Err(format!("upsd did not answer {cmd} in time")),
+    }
+}
+
+/// Starts (or stops) a test on the NUT backend: checks the UPS offers it, makes sure the rynas
+/// upsd user exists, sends the instant command.
+async fn nut_send(u: &Ups, ctx: &TaskCtx, kind: BatteryTest) -> Result<(), String> {
+    let s = rynas_nut::read(&u.upsd).await;
+    let Some(name) = s.name.clone().filter(|_| s.link == UpsLink::Connected) else {
+        return Err("no UPS answers on upsd".into());
+    };
+    if !s.supports(kind) {
+        return Err(format!("the UPS does not offer {}", kind.nut_cmd()));
+    }
+    let root = u.root.clone();
+    let changed = tokio::task::spawn_blocking(move || {
+        nut_password(&root).and_then(|pw| ensure_nut_user(&root, &pw))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    if changed {
+        ctx.log("added the rynas user to /etc/nut/upsd.users (battery test commands only)");
+        reload_upsd(u, ctx).await?;
+    }
+    nut_instcmd(u, &name, kind.nut_cmd()).await?;
+    ctx.log(&format!("sent {} to {name}", kind.nut_cmd()));
+    Ok(())
+}
+
+async fn send_test(u: &Ups, ctx: &TaskCtx, kind: BatteryTest) -> Result<(), String> {
+    if !u.synodeb {
+        return nut_send(u, ctx, kind).await;
+    }
+    let out = ctx
+        .run(&synodeb_cmd(u, kind.arg()))
+        .await
+        .map_err(|e| format!("synodeb-ups test {}: {e}", kind.arg()))?;
+    if !out.success() {
+        return Err(format!(
+            "synodeb-ups test {}: {}",
+            kind.arg(),
+            out.stderr.trim().lines().last().unwrap_or("failed")
+        ));
+    }
+    Ok(())
+}
+
+async fn run_test(u: Arc<Ups>, ctx: TaskCtx, kind: BatteryTest) -> Result<(), String> {
+    if u.dry && (u.synodeb || !u.talk_to_upsd) {
+        let how = if u.synodeb {
+            format!("synodeb-ups test {}", kind.arg())
+        } else {
+            format!("INSTCMD {}", kind.nut_cmd())
+        };
+        ctx.log(&format!("dry system: would run {how}"));
+        return Ok(());
+    }
+    let before = current_result(&u).await?;
+    ctx.log(&format!("last result: {before}"));
+    send_test(&u, &ctx, kind).await?;
+    if kind == BatteryTest::Stop {
+        ctx.log("battery test stopped");
+        return Ok(());
+    }
+    let max = if kind == BatteryTest::Deep {
+        DEEP_MAX
+    } else {
+        QUICK_MAX
+    };
+    let start = tokio::time::Instant::now();
+    let mut seen_running = false;
+    let mut last = before.clone();
+    while start.elapsed() < max {
+        tokio::select! {
+            _ = tokio::time::sleep(RESULT_EVERY) => {}
+            _ = ctx.token().cancelled() => {
+                ctx.log("cancelled: stopping the battery test");
+                let _ = send_test(&u, &ctx, BatteryTest::Stop).await;
+                return Err("cancelled".into());
+            }
+        }
+        let r = match current_result(&u).await {
+            Ok(r) => r,
+            Err(e) => {
+                ctx.log(&format!("reading the result: {e}"));
+                continue;
+            }
+        };
+        if r != last {
+            ctx.log(&format!("result: {r}"));
+            last = r.clone();
+        }
+        match verdict(&r) {
+            None => seen_running = true,
+            Some(v) if seen_running || r != before => return v,
+            Some(_) => {}
+        }
+        ctx.progress((start.elapsed().as_secs() * 100 / max.as_secs()).min(99) as u8);
+    }
+    ctx.log(&format!(
+        "no new result after {} min: {last}",
+        max.as_secs() / 60
+    ));
+    Ok(())
+}
+
 async fn test(
     State(st): State<UpsState>,
     hd: HeaderMap,
     body: Result<Json<BatteryTestRequest>, JsonRejection>,
 ) -> Res<Response> {
     let (u, who) = (ups(&st)?, user(&hd)?);
-    synodeb_only(&u)?;
+    need_backend(&u)?;
     let Json(req) = body?;
     let u2 = u.clone();
-    let id = u.ops.tasks.spawn("ups.test", &who, move |ctx| async move {
-        let u = u2;
-        let kind = req.test;
-        let tool = u.synodeb_ups.display().to_string();
-        let cmd = |arg: &str| {
-            Cmd::new(&u.synodeb_ups)
-                .args(["test", arg])
-                .env_clear()
-                .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
-                .timeout(CMD_TIMEOUT)
-        };
-        if u.dry {
-            ctx.log(&format!("dry system: would run {tool} test {}", kind.arg()));
-            return Ok(());
-        }
-        let before = match ctx.run(&cmd("result")).await {
-            Ok(o) => result_text(&o.stdout),
-            Err(e) => return Err(format!("{tool} test result: {e}")),
-        };
-        ctx.log(&format!("last result: {before}"));
-        let out = ctx
-            .run(&cmd(kind.arg()))
-            .await
-            .map_err(|e| format!("{tool} test {}: {e}", kind.arg()))?;
-        if !out.success() {
-            return Err(format!(
-                "{tool} test {}: {}",
-                kind.arg(),
-                out.stderr.trim().lines().last().unwrap_or("failed")
-            ));
-        }
-        if kind == BatteryTest::Stop {
-            ctx.log("battery test stopped");
-            return Ok(());
-        }
-        let max = if kind == BatteryTest::Deep {
-            DEEP_MAX
-        } else {
-            QUICK_MAX
-        };
-        let start = tokio::time::Instant::now();
-        let mut seen_running = false;
-        let mut last = before.clone();
-        while start.elapsed() < max {
-            tokio::select! {
-                _ = tokio::time::sleep(RESULT_EVERY) => {}
-                _ = ctx.token().cancelled() => {
-                    ctx.log("cancelled: stopping the battery test");
-                    let _ = ctx.run(&cmd("stop")).await;
-                    return Err("cancelled".into());
-                }
-            }
-            let r = match cmd("result").run(None, None).await {
-                Ok(o) => result_text(&o.stdout),
-                Err(e) => {
-                    ctx.log(&format!("reading the result: {e}"));
-                    continue;
-                }
-            };
-            if r != last {
-                ctx.log(&format!("result: {r}"));
-                last = r.clone();
-            }
-            match verdict(&r) {
-                None => seen_running = true,
-                Some(v) if seen_running || r != before => return v,
-                Some(_) => {}
-            }
-            ctx.progress((start.elapsed().as_secs() * 100 / max.as_secs()).min(99) as u8);
-        }
-        ctx.log(&format!("no new result after {} min: {last}", max.as_secs() / 60));
-        Ok(())
-    })?;
+    let id = u
+        .ops
+        .tasks
+        .spawn("ups.test", &who, move |ctx| run_test(u2, ctx, req.test))?;
     Ok((StatusCode::ACCEPTED, Json(TaskStarted { task_id: id })).into_response())
 }
 
@@ -378,28 +698,45 @@ async fn safe_mode(
     if !valid_reason(&req.reason) {
         return Err(Error::invalid("reason", "unknown Safe Mode reason"));
     }
-    tracing::warn!("UPS Safe Mode ({}): stopping rynas tasks", req.reason);
+    Ok(Json(stop_work(&u, &req.reason, SAFE_MODE_BUDGET).await))
+}
+
+/// Before Safe Mode (synodeb) or the shutdown (NUT): records the reason as a critical
+/// notification, cancels running rynas tasks and stops running scheduler units, within
+/// `budget`.
+pub async fn stop_work(u: &Arc<Ups>, reason: &str, budget: Duration) -> SafeModeReport {
+    tracing::warn!("UPS {reason}: stopping rynas tasks");
+    let (title, body) = if u.synodeb {
+        (
+            format!("Safe Mode: {reason}"),
+            "The UPS started Safe Mode: rynas stops its running and scheduled tasks; services \
+             stop, volumes are unmounted and the NAS restarts when power is back.",
+        )
+    } else {
+        (
+            format!("UPS shutdown: {reason}"),
+            "The system shuts down on UPS power: rynas stops its running and scheduled tasks \
+             first.",
+        )
+    };
     let mut ev = oneshot(
         NotifyCategory::Ups,
         NotifySeverity::Critical,
         "ups",
-        format!("ups:safemode:{}", req.reason),
-        format!("Safe Mode: {}", req.reason),
+        format!("ups:safemode:{reason}"),
+        title,
     );
-    ev.body = "The UPS started Safe Mode: rynas stops its running and scheduled tasks; services \
-               stop, volumes are unmounted and the NAS restarts when power is back."
-        .into();
+    ev.body = body.into();
     u.notifier.emit(ev);
-    let report = tokio::time::timeout(SAFE_MODE_BUDGET, stop_everything(&u))
+    tokio::time::timeout(budget, stop_everything(u, budget))
         .await
         .unwrap_or_else(|_| {
-            tracing::warn!("Safe Mode: stopping took longer than {SAFE_MODE_BUDGET:?}");
+            tracing::warn!("UPS {reason}: stopping took longer than {budget:?}");
             SafeModeReport::default()
-        });
-    Ok(Json(report))
+        })
 }
 
-async fn stop_everything(u: &Arc<Ups>) -> SafeModeReport {
+async fn stop_everything(u: &Arc<Ups>, budget: Duration) -> SafeModeReport {
     let mut report = SafeModeReport::default();
     // rynas tasks (configuration applies finish by themselves: a half-done apply rolls back
     // on cancel, which is worse than letting it end)
@@ -412,6 +749,9 @@ async fn stop_everything(u: &Arc<Ups>) -> SafeModeReport {
         }
     }
     // scheduler task units: a clean stop (their own stop timeout), all together
+    let unit_timeout = budget
+        .saturating_sub(Duration::from_secs(5))
+        .max(Duration::from_secs(5));
     if let Some(p) = &u.protection {
         p.invalidate();
         let running = p.runtime().await.running.clone();
@@ -423,15 +763,15 @@ async fn stop_everything(u: &Arc<Ups>) -> SafeModeReport {
             let c = Cmd::new("systemctl")
                 .args(["stop", unit.as_str()])
                 .env_clear()
-                .timeout(SAFE_MODE_BUDGET - Duration::from_secs(5));
+                .timeout(unit_timeout);
             match c.run(None, None).await {
                 Ok(o) if o.success() => Some(unit.clone()),
                 Ok(o) => {
-                    tracing::warn!("Safe Mode: stopping {unit}: {}", o.stderr.trim());
+                    tracing::warn!("UPS stop: stopping {unit}: {}", o.stderr.trim());
                     None
                 }
                 Err(e) => {
-                    tracing::warn!("Safe Mode: stopping {unit}: {e}");
+                    tracing::warn!("UPS stop: stopping {unit}: {e}");
                     None
                 }
             }
@@ -443,17 +783,185 @@ async fn stop_everything(u: &Arc<Ups>) -> SafeModeReport {
             .collect();
     }
     // the cancelled tasks end (their commands get SIGTERM from the task runner)
-    let waits = report
-        .cancelled_tasks
-        .iter()
-        .map(|id| u.ops.tasks.wait(id));
+    let waits = report.cancelled_tasks.iter().map(|id| u.ops.tasks.wait(id));
     let _ = futures_util::future::join_all(waits).await;
     tracing::warn!(
-        "Safe Mode: cancelled tasks {:?}, stopped units {:?}",
+        "UPS stop: cancelled tasks {:?}, stopped units {:?}",
         report.cancelled_tasks,
         report.stopped_units
     );
     report
+}
+
+// ---------------------------------------------------------------------------------------------
+// the on-battery watcher (NUT backend)
+// ---------------------------------------------------------------------------------------------
+
+/// What the watcher does after a reading.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WatchAction {
+    OnBattery,
+    PowerBack,
+    /// Stop rynas's work; with `shutdown`, then ask upsmon for the shutdown.
+    Stop {
+        reason: &'static str,
+        shutdown: bool,
+    },
+}
+
+/// The watcher's memory between readings.
+#[derive(Debug, Default)]
+pub struct Watch {
+    on_battery_since: Option<tokio::time::Instant>,
+    /// The stop ran in this outage (once per outage).
+    fired: bool,
+}
+
+impl Watch {
+    /// The actions after reading `s`; `after`: the configured time on battery.
+    pub fn step(
+        &mut self,
+        s: &UpsStatus,
+        after: Option<Duration>,
+        now: tokio::time::Instant,
+    ) -> Vec<WatchAction> {
+        let mut out = Vec::new();
+        // an unanswered reading changes nothing (upsd restarting, USB hiccup)
+        if s.link != UpsLink::Connected {
+            return out;
+        }
+        let ob = s.on_battery();
+        if ob && self.on_battery_since.is_none() {
+            self.on_battery_since = Some(now);
+            out.push(WatchAction::OnBattery);
+        }
+        if !ob && !s.critical() && self.on_battery_since.take().is_some() {
+            self.fired = false;
+            out.push(WatchAction::PowerBack);
+        }
+        if s.critical() && !self.fired {
+            self.fired = true;
+            let reason = if s.has("FSD") { "fsd" } else { "lowbatt" };
+            out.push(WatchAction::Stop {
+                reason,
+                shutdown: false,
+            });
+        } else if let (Some(since), Some(after), false) = (self.on_battery_since, after, self.fired)
+            && now.duration_since(since) >= after
+        {
+            self.fired = true;
+            out.push(WatchAction::Stop {
+                reason: "waittimeup",
+                shutdown: true,
+            });
+        }
+        out
+    }
+}
+
+fn notify(u: &Ups, sev: NotifySeverity, key: &str, title: String, body: String) {
+    let mut ev = oneshot(NotifyCategory::Ups, sev, "ups", key.to_string(), title);
+    ev.body = body;
+    u.notifier.emit(ev);
+}
+
+/// The shutdown after the time on battery: upsmon's forced shutdown (it sets FSD, lets its
+/// secondaries go, runs `SHUTDOWNCMD` and powers the UPS off as configured), else poweroff.
+async fn shutdown(u: &Ups) {
+    if u.dry {
+        tracing::warn!("dry system: would run upsmon -c fsd");
+        return;
+    }
+    let fsd = Cmd::new("upsmon")
+        .args(["-c", "fsd"])
+        .env_clear()
+        .env("PATH", PATH)
+        .timeout(CMD_TIMEOUT);
+    let why = match fsd.run(None, None).await {
+        Ok(o) if o.success() => {
+            tracing::warn!("UPS: upsmon starts the shutdown");
+            return;
+        }
+        Ok(o) => o.stderr.trim().to_string(),
+        Err(e) => e.to_string(),
+    };
+    tracing::error!("UPS: upsmon -c fsd failed ({why}): systemctl poweroff");
+    notify(
+        u,
+        NotifySeverity::Error,
+        "ups:upsmon",
+        "UPS: upsmon did not take the shutdown request".into(),
+        format!("upsmon -c fsd: {why}. rynas powers the system off itself."),
+    );
+    let off = Cmd::new("systemctl")
+        .arg("poweroff")
+        .env_clear()
+        .env("PATH", PATH)
+        .timeout(CMD_TIMEOUT);
+    if let Err(e) = off.run(None, None).await {
+        tracing::error!("UPS: systemctl poweroff: {e}");
+    }
+}
+
+/// Follows the UPS on the NUT backend (see the module documentation). Runs for the life of
+/// rynasd; one upsd conversation every 5 s (30 s while no UPS answers).
+pub async fn watch(u: Arc<Ups>) {
+    let mut w = Watch::default();
+    loop {
+        let s = rynas_nut::read(&u.upsd).await;
+        let policy = if s.on_battery() || s.critical() {
+            let u2 = u.clone();
+            tokio::task::spawn_blocking(move || u2.policy())
+                .await
+                .unwrap_or_default()
+        } else {
+            UpsSettings::default()
+        };
+        let after = policy
+            .safemode_after_s
+            .map(|a| Duration::from_secs(a.into()));
+        for a in w.step(&s, after, tokio::time::Instant::now()) {
+            match a {
+                WatchAction::OnBattery => notify(
+                    &u,
+                    NotifySeverity::Warning,
+                    "ups:onbatt",
+                    "UPS on battery".into(),
+                    match policy.safemode_after_s {
+                        Some(a) => format!(
+                            "Mains power is gone. The system shuts down after {} min on \
+                             battery, or earlier on low battery.",
+                            a / 60
+                        ),
+                        None => "Mains power is gone. The system shuts down on low battery.".into(),
+                    },
+                ),
+                WatchAction::PowerBack => notify(
+                    &u,
+                    NotifySeverity::Info,
+                    "ups:online",
+                    "UPS back on mains power".into(),
+                    "Mains power is back.".into(),
+                ),
+                WatchAction::Stop {
+                    reason,
+                    shutdown: down,
+                } => {
+                    let budget = Duration::from_secs(policy.pre_safemode_timeout_s.into());
+                    stop_work(&u, reason, budget).await;
+                    if down {
+                        shutdown(&u).await;
+                    }
+                }
+            }
+        }
+        let period = if s.link == UpsLink::Connected {
+            WATCH_EVERY
+        } else {
+            WATCH_IDLE
+        };
+        tokio::time::sleep(period).await;
+    }
 }
 
 #[cfg(test)]
@@ -471,16 +979,29 @@ mod tests {
             safemode_after_s: Some(600),
             pre_safemode_timeout_s: 120,
         };
-        let kind = rynas_config::FileKind::Block {
+        let kind = FileKind::Block {
             id: "ups".into(),
             drop_outside: vec!["SAFEMODE_AFTER=".into(), "PRE_SAFEMODE_TIMEOUT=".into()],
         };
-        let (text, _) = rynas_config::files::render_final(&kind, &render_block(&want), Some(synodeb));
+        let (text, _) = files::render_final(&kind, &render_block(&want), Some(synodeb));
         assert!(text.contains("#SAFEMODE_AFTER=0\n"), "{text}");
         assert!(text.contains("DRYRUN=0\n"));
         assert!(!text.contains("=300"));
         assert!(!text.contains("\"90\""));
         assert_eq!(parse_conf(&text), want);
+    }
+
+    #[test]
+    fn policy_round_trip() {
+        let want = UpsSettings {
+            safemode_after_s: Some(900),
+            pre_safemode_timeout_s: 60,
+        };
+        let text = render_policy(&want);
+        assert_eq!(parse_policy(&text), want);
+        // the keys of one file are not read from the other
+        assert_eq!(parse_conf(&text), UpsSettings::default());
+        assert_eq!(parse_policy("SHUTDOWN_AFTER=0\n").safemode_after_s, None);
     }
 
     #[test]
@@ -512,5 +1033,120 @@ mod tests {
         assert!(verdict("Done and error").unwrap().is_err());
         assert!(verdict("Aborted").unwrap().is_err());
         assert!(valid_reason("lowbatt") && !valid_reason("rm -rf") && !valid_reason(""));
+    }
+
+    #[test]
+    fn backends() {
+        let d = tempfile::tempdir().unwrap();
+        assert_eq!(backend_of(d.path(), false), UpsBackend::NotInstalled);
+        assert_eq!(backend_of(d.path(), true), UpsBackend::Synodeb);
+        std::fs::create_dir_all(d.path().join("etc/nut")).unwrap();
+        std::fs::write(d.path().join("etc/nut/nut.conf"), "MODE=standalone\n").unwrap();
+        assert_eq!(backend_of(d.path(), false), UpsBackend::Nut);
+        assert!(!synodeb_present(d.path()));
+    }
+
+    #[test]
+    fn upsd_user_block() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let users = d.path().join("etc/nut/upsd.users");
+        // NUT not installed
+        assert!(ensure_nut_user(d.path(), "x").is_err());
+        std::fs::create_dir_all(users.parent().unwrap()).unwrap();
+        let mine = "# my users\n[upsmon]\n\tpassword = secret\n\tupsmon primary\n";
+        std::fs::write(&users, mine).unwrap();
+        std::fs::set_permissions(&users, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let pw = nut_password(d.path()).unwrap();
+        assert_eq!(pw.len(), 32);
+        assert!(rynas_nut::valid_name(&pw));
+        // generated once, root-only
+        assert_eq!(nut_password(d.path()).unwrap(), pw);
+        let secret = d.path().join("etc/rynas/nut-upsd.secret");
+        assert_eq!(std::fs::metadata(&secret).unwrap().mode() & 0o777, 0o600);
+        assert!(ensure_nut_user(d.path(), &pw).unwrap());
+        let text = std::fs::read_to_string(&users).unwrap();
+        assert!(text.starts_with(mine), "{text}");
+        assert!(text.contains("[rynas]\n"));
+        assert!(text.contains(&format!("password = \"{pw}\"")));
+        assert_eq!(text.matches("\tinstcmds = test.battery.").count(), 3);
+        assert!(!text.contains("actions") && !text.contains("upsmon master"));
+        assert_eq!(std::fs::metadata(&users).unwrap().mode() & 0o777, 0o640);
+        // unchanged: nothing written
+        assert!(!ensure_nut_user(d.path(), &pw).unwrap());
+        // drift: an edited block is put back
+        std::fs::write(&users, text.replace("test.battery.stop", "ALL")).unwrap();
+        assert!(ensure_nut_user(d.path(), &pw).unwrap());
+        assert_eq!(std::fs::read_to_string(&users).unwrap(), text);
+        // a [rynas] user of the admin's own is not overwritten
+        std::fs::write(&users, format!("{mine}[rynas]\n\tpassword = theirs\n")).unwrap();
+        let e = ensure_nut_user(d.path(), &pw).unwrap_err();
+        assert!(e.contains("does not manage") && !e.contains(&pw), "{e}");
+    }
+
+    fn reading(flags: &[&str]) -> UpsStatus {
+        UpsStatus {
+            link: UpsLink::Connected,
+            flags: flags.iter().map(|f| f.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn watcher() {
+        let t0 = tokio::time::Instant::now();
+        let min = Duration::from_secs(60);
+        let after = Some(5 * min);
+        let mut w = Watch::default();
+        assert!(w.step(&reading(&["OL", "CHRG"]), after, t0).is_empty());
+        assert_eq!(
+            w.step(&reading(&["OB", "DISCHRG"]), after, t0),
+            [WatchAction::OnBattery]
+        );
+        assert!(w.step(&reading(&["OB"]), after, t0 + 4 * min).is_empty());
+        // a lost reading does not end the outage
+        assert!(
+            w.step(&UpsStatus::default(), after, t0 + 4 * min)
+                .is_empty()
+        );
+        assert_eq!(
+            w.step(&reading(&["OB"]), after, t0 + 5 * min),
+            [WatchAction::Stop {
+                reason: "waittimeup",
+                shutdown: true
+            }]
+        );
+        // once per outage
+        assert!(
+            w.step(&reading(&["OB", "LB"]), after, t0 + 6 * min)
+                .is_empty()
+        );
+        assert_eq!(
+            w.step(&reading(&["OL"]), after, t0 + 7 * min),
+            [WatchAction::PowerBack]
+        );
+        // without the timer: only low battery stops the work, and upsmon shuts down
+        let mut w = Watch::default();
+        assert_eq!(
+            w.step(&reading(&["OB"]), None, t0),
+            [WatchAction::OnBattery]
+        );
+        assert!(w.step(&reading(&["OB"]), None, t0 + 600 * min).is_empty());
+        assert_eq!(
+            w.step(&reading(&["OB", "LB"]), None, t0 + 601 * min),
+            [WatchAction::Stop {
+                reason: "lowbatt",
+                shutdown: false
+            }]
+        );
+        // a forced shutdown asked elsewhere
+        let mut w = Watch::default();
+        assert_eq!(
+            w.step(&reading(&["OL", "FSD"]), None, t0),
+            [WatchAction::Stop {
+                reason: "fsd",
+                shutdown: false
+            }]
+        );
     }
 }

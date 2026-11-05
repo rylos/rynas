@@ -150,6 +150,12 @@ fn lookup(key: &str, lang: Lang) -> Option<&'static str> {
     })
 }
 
+/// The text of `key` in `lang`, for the tests of the pages.
+#[cfg(test)]
+pub fn text_in(lang: Lang, key: &str) -> Option<&'static str> {
+    lookup(key, lang)
+}
+
 /// Every entry as (key, English, Italian), for the tests.
 #[cfg(test)]
 fn entries() -> Vec<(&'static str, &'static str, &'static str)> {
@@ -605,9 +611,11 @@ dict! {
     "ups.f_cal" => "CAL · calibrating", "CAL · calibrazione";
     "ups.f_over" => "OVER · overloaded", "OVER · sovraccarico";
     "ups.none_title" => "No UPS connected", "Nessun UPS collegato";
-    "ups.none_text" => "The UPS service runs but reports no UPS. Connect a UPS over USB and set it up with synodeb-ups setup.", "Il servizio UPS è attivo ma non segnala alcun UPS. Collega un UPS via USB e configuralo con synodeb-ups setup.";
+    "ups.none_text" => "The UPS service runs but reports no UPS. Connect the UPS over USB and add it to NUT's ups.conf (nut-scanner finds it).", "Il servizio UPS è attivo ma non segnala alcun UPS. Collega l'UPS via USB e aggiungilo a ups.conf di NUT (nut-scanner lo trova).";
+    "ups.none_text_synodeb" => "The UPS service runs but reports no UPS. Connect a UPS over USB and set it up with synodeb-ups setup.", "Il servizio UPS è attivo ma non segnala alcun UPS. Collega un UPS via USB e configuralo con synodeb-ups setup.";
     "ups.down_title" => "UPS service not running", "Servizio UPS non attivo";
-    "ups.down_text" => "Nothing answers on the NUT port of this NAS (127.0.0.1:3493). Install and configure NUT, or run synodeb-ups setup on synodeb.", "Nessuna risposta sulla porta NUT di questo NAS (127.0.0.1:3493). Installa e configura NUT, oppure esegui synodeb-ups setup su synodeb.";
+    "ups.down_text" => "Nothing answers on the NUT port of this NAS (127.0.0.1:3493). Install NUT (Debian package nut), set up the UPS and start nut-server.", "Nessuna risposta sulla porta NUT di questo NAS (127.0.0.1:3493). Installa NUT (pacchetto Debian nut), configura l'UPS e avvia nut-server.";
+    "ups.down_text_synodeb" => "Nothing answers on the NUT port of this NAS (127.0.0.1:3493). Set up the UPS with synodeb-ups setup.", "Nessuna risposta sulla porta NUT di questo NAS (127.0.0.1:3493). Configura l'UPS con synodeb-ups setup.";
     "ups.charge" => "Battery charge", "Carica batteria";
     "ups.runtime" => "Runtime left", "Autonomia residua";
     "ups.load" => "Load", "Carico";
@@ -620,30 +628,36 @@ dict! {
     "ups.beeper_muted" => "Muted", "Silenziato";
     "ups.battery_date" => "Battery date", "Data batteria";
     "ups.driver" => "NUT name and driver", "Nome NUT e driver";
-    "ups.safemode" => "Safe Mode", "Modalità sicura";
+    "ups.safemode" => "Power failure", "Interruzione di corrente";
     "ups.lb_always" => "Safe Mode always starts when the UPS reports low battery (LB) or is critical (on battery and low battery), whichever comes first. The timer below only adds an earlier trigger.", "La modalità sicura parte sempre quando l'UPS segnala batteria scarica (LB) o è critico (a batteria e batteria scarica), qualunque cosa avvenga prima. Il timer qui sotto aggiunge solo un innesco anticipato.";
-    "ups.no_synodeb" => "Safe Mode settings and battery tests need synodeb (/etc/synodeb/ups.conf), which is not on this system.", "Le impostazioni della modalità sicura e i test batteria richiedono synodeb (/etc/synodeb/ups.conf), che non è presente su questo sistema.";
+    "ups.lb_always_nut" => "NUT's upsmon always shuts the system down when the UPS reports low battery (LB) or is critical, and rynas stops its tasks first. The timer below only adds an earlier shutdown.", "upsmon di NUT spegne sempre il sistema quando l'UPS segnala batteria scarica (LB) o è critico, e rynas prima ferma le sue attività. Il timer qui sotto aggiunge solo uno spegnimento anticipato.";
+    "ups.need_nut" => "Install NUT, the UPS service (Debian package nut), and set up the UPS: the shutdown policy and the battery tests use it.", "Installa NUT, il servizio UPS (pacchetto Debian nut), e configura l'UPS: la politica di spegnimento e i test batteria lo usano.";
     "ups.timer" => "Enter Safe Mode after a time on battery", "Entra in modalità sicura dopo un tempo a batteria";
-    "ups.timer_help" => "Like DSM: services stop, volumes are unmounted and disks spin down; the NAS restarts when power is back.", "Come DSM: i servizi si fermano, i volumi vengono smontati e i dischi si fermano; il NAS riparte al ritorno della corrente.";
+    "ups.timer_help" => "Services stop, volumes are unmounted and disks spin down; the NAS restarts when power is back.", "I servizi si fermano, i volumi vengono smontati e i dischi si fermano; il NAS riparte al ritorno della corrente.";
+    "ups.timer_nut" => "Shut down after a time on battery", "Spegni dopo un tempo a batteria";
+    "ups.timer_help_nut" => "rynas stops its tasks, then asks NUT's upsmon to shut the system down (upsmon -c fsd), with the UPS power-off configured in NUT.", "rynas ferma le sue attività, poi chiede a upsmon di NUT di spegnere il sistema (upsmon -c fsd), con lo spegnimento dell'UPS configurato in NUT.";
     "ups.minutes" => "Minutes on battery", "Minuti a batteria";
     "ups.minutes_help" => "1 to 1440 minutes.", "Da 1 a 1440 minuti.";
     "ups.pre_timeout" => "Time to stop apps and tasks (s)", "Tempo per fermare app e attività (s)";
     "ups.pre_timeout_help" => "Before Safe Mode, rynas and other hooks stop their work within this time (10 to 900 s).", "Prima della modalità sicura, rynas e gli altri hook fermano il loro lavoro entro questo tempo (da 10 a 900 s).";
-    "ups.pending_note" => "Saved, not applied yet: Safe Mode uses the applied settings.", "Salvato, non ancora applicato: la modalità sicura usa le impostazioni applicate.";
+    "ups.pre_timeout_help_nut" => "Before the shutdown, rynas stops its running tasks and scheduled jobs within this time (10 to 900 s).", "Prima dello spegnimento, rynas ferma le attività in corso e quelle pianificate entro questo tempo (da 10 a 900 s).";
+    "ups.pending_note" => "Saved, not applied yet: the UPS uses the applied settings.", "Salvato, non ancora applicato: l'UPS usa le impostazioni applicate.";
     "ups.v_minutes" => "Enter whole minutes from 1 to 1440.", "Inserisci minuti interi da 1 a 1440.";
     "ups.v_pre" => "Enter seconds from 10 to 900.", "Inserisci secondi da 10 a 900.";
     "ups.test" => "Battery test", "Test batteria";
     "ups.last_result" => "Last result", "Ultimo risultato";
     "ups.no_result" => "Not reported by the UPS", "Non segnalato dall'UPS";
     "ups.test_done" => "Battery test finished.", "Test batteria terminato.";
-    "ups.test_synodeb" => "Battery tests run through synodeb-ups, which is not on this system.", "I test batteria passano da synodeb-ups, che non è presente su questo sistema.";
+    "ups.test_unsupported" => "This UPS offers no battery test through NUT.", "Questo UPS non offre test della batteria tramite NUT.";
     "ups.test_online" => "A test can start only while the UPS is on mains power.", "Un test può partire solo mentre l'UPS è alimentato dalla rete.";
     "ups.test_lb" => "During a test, low battery still starts Safe Mode.", "Durante un test, la batteria scarica avvia comunque la modalità sicura.";
+    "ups.test_lb_nut" => "During a test, low battery still shuts the system down.", "Durante un test, la batteria scarica spegne comunque il sistema.";
     "ups.quick" => "Quick test", "Test rapido";
     "ups.deep" => "Deep test", "Test approfondito";
     "ups.stop" => "Stop test", "Ferma test";
     "ups.deep_title" => "Start a deep battery test?", "Avviare un test approfondito della batteria?";
     "ups.deep_text" => "The UPS runs on battery until it is almost empty, which can take an hour. If the battery reaches low battery (LB), the NAS enters Safe Mode: start it only when someone is present to stop the test.", "L'UPS funziona a batteria fino a scaricarla quasi del tutto, anche per un'ora. Se la batteria arriva a batteria scarica (LB), il NAS entra in modalità sicura: avvialo solo con qualcuno presente per fermare il test.";
+    "ups.deep_text_nut" => "The UPS runs on battery until it is almost empty, which can take an hour. If the battery reaches low battery (LB), NUT shuts the system down: start it only when someone is present to stop the test.", "L'UPS funziona a batteria fino a scaricarla quasi del tutto, anche per un'ora. Se la batteria arriva a batteria scarica (LB), NUT spegne il sistema: avvialo solo con qualcuno presente per fermare il test.";
     "ups.deep_start" => "Start deep test", "Avvia test approfondito";
     "ups.schedule_hint" => "To test on a schedule, add a Task Scheduler task that runs as root:", "Per un test pianificato, aggiungi un'attività in Pianificazione attività eseguita come root:";
     "ups.events" => "Recent UPS events", "Eventi UPS recenti";
@@ -1858,7 +1872,7 @@ dict! {
     "snap.root_reboot" => "A reboot is needed to finish. Until then the current system keeps running.", "Per finire serve un riavvio. Fino ad allora il sistema attuale continua a funzionare.";
     "snap.root_done" => "At the next reboot the system starts from {id} (kernel {kernel}). Reboot now to finish the rollback.", "Al prossimo riavvio il sistema parte da {id} (kernel {kernel}). Riavvia ora per completare il ripristino.";
     "snap.root_refused_title" => "{id} cannot be restored from here", "{id} non si può ripristinare da qui";
-    "snap.refusal.not_synodeb" => "Rolling the system back from rynas needs synodeb (synodeb-dom). On this system it is a console procedure.", "Il ripristino del sistema da rynas richiede synodeb (synodeb-dom). Su questo sistema è una procedura da console.";
+    "snap.refusal.not_synodeb" => "This system cannot be rolled back from the web interface: the restore point is there, going back to it is a console procedure.", "Questo sistema non si può ripristinare dall'interfaccia web: il punto di ripristino c'è, tornarci è una procedura da console.";
     "snap.refusal.no_kernel" => "The restore point has no kernel image.", "Il punto di ripristino non contiene un'immagine del kernel.";
     "snap.refusal.no_modules" => "The restore point lacks the modules of its kernel (/lib/modules): it could not boot.", "Al punto di ripristino mancano i moduli del suo kernel (/lib/modules): non potrebbe avviarsi.";
     "snap.refusal.not_readonly" => "Not a read-only snapshot.", "Non è uno snapshot in sola lettura.";
@@ -1912,7 +1926,7 @@ dict! {
     "snap.f.min_help" => "latest, all, or an age such as 1d, 12h, 2w.", "latest, all, o un'età come 1d, 12h, 2w.";
     "snap.v.name" => "Use letters, digits, _ and - (at most 48), starting with a letter or digit.", "Usa lettere, cifre, _ e - (al massimo 48), iniziando con una lettera o una cifra.";
     "snap.v.source" => "Choose a shared folder or enter an absolute subvolume path.", "Scegli una cartella condivisa o inserisci il percorso assoluto di un subvolume.";
-    "snap.system_help" => "Before apt installs or upgrades packages, rynas takes a read-only snapshot of the system. On synodeb the system can go back to one of them from the snapshot list (kernel included, reboot needed); elsewhere it is a console procedure.", "Prima che apt installi o aggiorni pacchetti, rynas crea uno snapshot in sola lettura del sistema. Su synodeb il sistema può tornare a uno di essi dalla lista degli snapshot (kernel compreso, serve un riavvio); altrove è una procedura da console.";
+    "snap.system_help" => "Before apt installs or upgrades packages, rynas takes a read-only snapshot of the system. Where the boot setup allows it, the system can go back to one of them from the snapshot list (kernel included, reboot needed); elsewhere it is a console procedure.", "Prima che apt installi o aggiorni pacchetti, rynas crea uno snapshot in sola lettura del sistema. Dove l'avvio lo consente, il sistema può tornare a uno di essi dalla lista degli snapshot (kernel compreso, serve un riavvio); altrove è una procedura da console.";
     "snap.system_enabled" => "Take restore points before updates", "Crea punti di ripristino prima degli aggiornamenti";
     "snap.system_enabled_help" => "Requires a btrfs root filesystem.", "Richiede un filesystem di root btrfs.";
     "snap.system_keep" => "Restore points kept", "Punti di ripristino conservati";
@@ -2199,7 +2213,7 @@ dict! {
     "upd.install" => "Install", "Installa";
     "upd.autoremove_title" => "Remove unused packages?", "Rimuovere i pacchetti inutilizzati?";
     "upd.autoremove_text" => "apt autoremove removes packages that nothing depends on any more.", "apt autoremove rimuove i pacchetti da cui non dipende più nulla.";
-    "upd.autoremove_warn" => "Check the list: on a Synology with synodeb it may include the previous kernel and the model package.", "Controlla l'elenco: su un Synology con synodeb può includere il kernel precedente e il pacchetto del modello.";
+    "upd.autoremove_warn" => "Check the list: it may include the previous kernel or packages the system needs to boot.", "Controlla l'elenco: può includere il kernel precedente o pacchetti che servono all'avvio del sistema.";
     "upd.remove" => "Remove", "Rimuovi";
     "upd.auto" => "Automatic updates", "Aggiornamenti automatici";
     "upd.no_unattended" => "unattended-upgrades is not installed: automatic updates will not run.", "unattended-upgrades non è installato: gli aggiornamenti automatici non verranno eseguiti.";
@@ -2236,7 +2250,6 @@ dict! {
     "upd.trial_armed" => "Armed", "Pronta";
     "upd.trial_trying" => "Trying", "In prova";
     "upd.dom_free" => "Free space on the DOM", "Spazio libero sul DOM";
-    "upd.no_synodeb" => "synodeb-dom is not installed: no Synology boot entries to show.", "synodeb-dom non è installato: nessuna voce di avvio Synology da mostrare.";
 }
 
 // ---------------------------------------------------------------- formatting
@@ -2446,9 +2459,11 @@ mod tests {
                     .chain(rest)
                     .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'))
         }
-        // storage keys, event names, file system types, sample host names, source file names
+        // storage keys, event names, file system types, NUT instant commands, sample host
+        // names, source file names
         let not_a_key = |s: &str| {
             s.starts_with("rynas.")
+                || s.starts_with("test.battery.")
                 || s.ends_with(".rs")
                 || s.starts_with("fuse.")
                 || s.contains("example")

@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 rynas-api-types.workspace = true
+rynas-nut.workspace = true
 rynas-auth.workspace = true
 rynas-http.workspace = true
 rynas-storage.workspace = true

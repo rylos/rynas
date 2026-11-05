@@ -219,6 +219,7 @@ fn ups(t: f64) -> ups::UpsStatus {
         battery_date: Some("2024/03/18".into()),
         test_result: Some("Done and passed".into()),
         driver: Some("usbhid-ups".into()),
+        commands: vec!["test.battery.start.deep".into(), "test.battery.start.quick".into(), "test.battery.stop".into()],
         read_at_ms: (t * 1000.0) as u64,
     }
 }
@@ -226,6 +227,7 @@ fn ups(t: f64) -> ups::UpsStatus {
 pub fn ups_settings() -> ups::UpsSettingsState {
     ups::UpsSettingsState {
         available: true,
+        backend: ups::UpsBackend::Nut,
         applied: ups::UpsSettings { safemode_after_s: Some(600), pre_safemode_timeout_s: 120 },
         pending: None,
     }

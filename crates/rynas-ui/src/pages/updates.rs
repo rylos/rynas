@@ -529,7 +529,6 @@ fn kernel_card(kernel: Remote<KernelStatus>) -> AnyView {
                 })}
                 {kv("upd.read_at", text(ms_text(k.read_at_ms)))}
             </dl>
-            {(!k.synodeb).then(|| view! { <p class="sec-note"><Icon icon=icons::INFO size=16 />{t("upd.no_synodeb")}</p> })}
         }
         .into_any()
     };

@@ -1,12 +1,14 @@
-//! UPS (`/api/v1/ups...`), D-UPS: a thin layer over NUT and, on synodeb, over `synodeb-ups`.
+//! UPS (`/api/v1/ups...`), D-UPS: a thin layer over NUT (any Debian with the `nut` package)
+//! and, where synodeb's UPS layer is installed, over `synodeb-ups` ([`UpsBackend`]).
 //!
 //! - [`UpsStatus`]: what upsd (`127.0.0.1:3493`, plain-text protocol) reports, read by
 //!   rynas-web every few seconds and pushed on `/api/v1/events` as `ups.status`.
-//! - [`UpsSettings`]: the configuration key `ups.safemode` (synodeb only), the rynas-owned
-//!   keys `SAFEMODE_AFTER` and `PRE_SAFEMODE_TIMEOUT` of `/etc/synodeb/ups.conf`. Safe Mode
-//!   also always starts on NUT low battery and on a critical UPS (OB+LB), whichever comes first.
-//! - [`BatteryTestRequest`]: `POST /api/v1/ups/test` runs `synodeb-ups test <kind>` as the
-//!   rynasd task `ups.test`.
+//! - [`UpsSettings`]: the configuration key `ups.safemode`: the extra "after N minutes on
+//!   battery" trigger and the time to stop work before it. Low battery and a critical UPS
+//!   (OB+LB) always end in a shutdown (NUT's upsmon) or Safe Mode (synodeb), whichever first.
+//! - [`BatteryTestRequest`]: `POST /api/v1/ups/test` sends the NUT instant command of the test
+//!   (`test.battery.start.quick|deep`, `test.battery.stop`; through `synodeb-ups test <kind>`
+//!   on synodeb) as the rynasd task `ups.test`.
 
 use serde::{Deserialize, Serialize};
 
@@ -51,6 +53,10 @@ pub struct UpsStatus {
     pub test_result: Option<String>,
     /// `driver.name` (e.g. `usbhid-ups`).
     pub driver: Option<String>,
+    /// The battery test instant commands the UPS offers (`LIST CMD`, only the
+    /// `test.battery.*` ones; see [`BatteryTest::nut_cmd`]).
+    #[serde(default)]
+    pub commands: Vec<String>,
     pub read_at_ms: u64,
 }
 
@@ -66,9 +72,34 @@ impl UpsStatus {
     pub fn low_battery(&self) -> bool {
         self.has("LB")
     }
+
+    /// Forced shutdown, or on battery with low battery: the shutdown is about to start.
+    pub fn critical(&self) -> bool {
+        self.has("FSD") || (self.on_battery() && self.low_battery())
+    }
+
+    /// The UPS offers this battery test.
+    pub fn supports(&self, test: BatteryTest) -> bool {
+        self.commands.iter().any(|c| c == test.nut_cmd())
+    }
 }
 
-/// Default `PRE_SAFEMODE_TIMEOUT` of synodeb.
+/// Who carries out the UPS policy and the battery tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum UpsBackend {
+    /// Plain NUT (`/etc/nut` exists): rynasd sends the tests to upsd with its own upsd user
+    /// and, after the configured time on battery, stops its work and asks upsmon to shut the
+    /// system down.
+    Nut,
+    /// synodeb's UPS layer (`/etc/synodeb/ups.conf`): `synodeb-ups` runs tests and Safe Mode.
+    Synodeb,
+    /// NUT is not installed.
+    #[default]
+    NotInstalled,
+}
+
+/// Default time to stop work before the shutdown (synodeb's `PRE_SAFEMODE_TIMEOUT`).
 pub const PRE_SAFEMODE_TIMEOUT_DEFAULT_S: u32 = 120;
 /// Accepted range of `SAFEMODE_AFTER` when set (1 minute .. 24 hours).
 pub const SAFEMODE_AFTER_RANGE_S: (u32, u32) = (60, 86_400);
@@ -79,11 +110,12 @@ pub const PRE_SAFEMODE_TIMEOUT_RANGE_S: (u32, u32) = (10, 900);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpsSettings {
-    /// Safe Mode after this long on battery (DSM "after N minutes"); `null`: only on low
-    /// battery (`SAFEMODE_AFTER=0`).
+    /// Shutdown (Safe Mode on synodeb) after this long on battery (DSM "after N minutes");
+    /// `null`: only on low battery.
     #[serde(default)]
     pub safemode_after_s: Option<u32>,
-    /// Time for all the pre-Safe Mode hooks together (rynas stops its tasks there).
+    /// Time to stop work before it (rynas stops its tasks there; on synodeb the time of all
+    /// the pre-Safe Mode hooks together).
     #[serde(default = "default_pre_timeout")]
     pub pre_safemode_timeout_s: u32,
 }
@@ -104,9 +136,11 @@ impl Default for UpsSettings {
 /// `GET /api/v1/ups/settings`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct UpsSettingsState {
-    /// `/etc/synodeb` exists: Safe Mode and the battery test are synodeb's. Elsewhere the
-    /// settings are read-only defaults and `PUT` answers 404.
+    /// The settings can be changed (`backend` is not `not_installed`); otherwise they are
+    /// read-only defaults and `PUT` answers 404.
     pub available: bool,
+    #[serde(default)]
+    pub backend: UpsBackend,
     pub applied: UpsSettings,
     /// The session user's staged value, when it differs.
     pub pending: Option<UpsSettings>,
@@ -121,11 +155,27 @@ pub enum BatteryTest {
 }
 
 impl BatteryTest {
+    pub const ALL: [BatteryTest; 3] = [BatteryTest::Quick, BatteryTest::Deep, BatteryTest::Stop];
+
     pub fn arg(self) -> &'static str {
         match self {
             BatteryTest::Quick => "quick",
             BatteryTest::Deep => "deep",
             BatteryTest::Stop => "stop",
+        }
+    }
+
+    /// The test of a `quick|deep|stop` argument.
+    pub fn from_arg(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|t| t.arg() == s)
+    }
+
+    /// The NUT instant command.
+    pub fn nut_cmd(self) -> &'static str {
+        match self {
+            BatteryTest::Quick => "test.battery.start.quick",
+            BatteryTest::Deep => "test.battery.start.deep",
+            BatteryTest::Stop => "test.battery.stop",
         }
     }
 }
@@ -137,14 +187,15 @@ pub struct BatteryTestRequest {
     pub test: BatteryTest,
 }
 
-/// `POST /v1/ups/safe-mode` (internal, root only): the pre-Safe Mode hook of synodeb.
+/// `POST /v1/ups/safe-mode` (internal, root only): synodeb's pre-Safe Mode hook. On plain NUT
+/// rynasd does the same by itself when the UPS turns critical or the timer expires.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SafeModeRequest {
     /// synodeb's reason: `lowbatt`, `waittimeup`, `nocomm`, `fsd`, `shutdowncmd`.
     pub reason: String,
 }
 
-/// What the pre-Safe Mode hook stopped.
+/// What the pre-shutdown stop did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SafeModeReport {
     /// rynasd tasks cancelled (ids).
@@ -153,5 +204,31 @@ pub struct SafeModeReport {
     pub stopped_units: Vec<String>,
 }
 
-/// synodeb's Safe Mode reasons.
+/// synodeb's Safe Mode reasons (rynasd's own watcher uses `lowbatt`, `fsd`, `waittimeup`).
 pub const SAFE_MODE_REASONS: &[&str] = &["lowbatt", "waittimeup", "nocomm", "fsd", "shutdowncmd"];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tests_and_commands() {
+        let u = UpsStatus {
+            commands: vec![
+                "test.battery.start.quick".into(),
+                "test.battery.stop".into(),
+            ],
+            flags: vec!["OB".into(), "LB".into()],
+            ..Default::default()
+        };
+        assert!(u.supports(BatteryTest::Quick) && u.supports(BatteryTest::Stop));
+        assert!(!u.supports(BatteryTest::Deep));
+        assert!(u.critical());
+        assert_eq!(BatteryTest::from_arg("deep"), Some(BatteryTest::Deep));
+        assert_eq!(BatteryTest::from_arg("x"), None);
+        // an older reading without the new fields still parses
+        let s: UpsSettingsState =
+            serde_json::from_str(r#"{"available":true,"applied":{},"pending":null}"#).unwrap();
+        assert_eq!(s.backend, UpsBackend::NotInstalled);
+    }
+}
