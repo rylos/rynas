@@ -42,7 +42,15 @@ pub struct Ops {
     /// [`Config::pending_generation`] after each change of a changeset (`config_pending`
     /// events of the task stream).
     pending: tokio::sync::broadcast::Sender<u64>,
+    /// Runs on the apply task's blocking thread after a successful `config.apply`, with the
+    /// keys it applied, before the task ends: state that views cache and that the apply has
+    /// just changed is read again here (the disk settings), so a client that reloads when
+    /// the task ends sees the new values.
+    pub after_apply: Option<AfterApply>,
 }
+
+/// See [`Ops::after_apply`].
+pub type AfterApply = Arc<dyn Fn(&[String], &dyn Fn(&str)) + Send + Sync>;
 
 impl Ops {
     pub fn new(config: Arc<Config>, tasks: TaskManager) -> Self {
@@ -57,6 +65,7 @@ impl Ops {
             tasks,
             admins: AdminPolicy::default(),
             pending,
+            after_apply: None,
         }
     }
 }
@@ -262,7 +271,11 @@ async fn apply(
     let Json(req) = body?;
     // refuse at once what the task would refuse, so the UI gets a plain error
     let u = user.clone();
-    let p = blocking(&ops, move |c| c.pending(&u)).await?;
+    let mut p = blocking(&ops, move |c| c.pending(&u)).await?;
+    // a dialog's Save applies only the keys it staged (guidelines A19b)
+    if !req.keys.is_empty() {
+        p.changes.retain(|c| req.keys.contains(&c.key));
+    }
     if p.changes.is_empty() {
         return Err(ConfigError::NothingPending.into());
     }
@@ -281,18 +294,28 @@ async fn apply(
     }
     let cfg = ops.config.clone();
     let owner = user.clone();
+    let after = ops.after_apply.clone();
     let id = ops
         .tasks
         .spawn("config.apply", &user, move |ctx| async move {
             let c = ctx.clone();
             tokio::task::spawn_blocking(move || {
-                cfg.apply(&owner, &owner, &req.comment, &|l| c.log(l), &|| {
+                let log = |l: &str| c.log(l);
+                let rev = cfg.apply_keys(&owner, &owner, &req.comment, &req.keys, &log, &|| {
                     c.is_cancelled()
-                })
+                })?;
+                log(&format!("revision {rev}"));
+                if let Some(after) = after {
+                    let keys = cfg
+                        .revision(rev)
+                        .map(|d| d.revision.keys)
+                        .unwrap_or_default();
+                    after(&keys, &log);
+                }
+                Ok::<_, ConfigError>(())
             })
             .await
             .map_err(|e| e.to_string())?
-            .map(|rev| ctx.log(&format!("revision {rev}")))
             .map_err(|e| e.to_string())
         })?;
     Ok((StatusCode::ACCEPTED, Json(TaskStarted { task_id: id })).into_response())

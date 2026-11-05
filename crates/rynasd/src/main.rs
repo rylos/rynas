@@ -572,20 +572,30 @@ fn main() -> std::io::Result<()> {
                 ..Default::default()
             },
         )?;
-        let mut ops = Ops::new(config, tasks);
-        ops.admins = rynasd::roles::AdminPolicy::new(args.admin_groups.clone(), state.groups);
-        let ops = Arc::new(ops);
-        state.services = Some(Arc::new(Services {
-            ops: ops.clone(),
-            users: opened.users,
-            shares: opened.shares,
-        }));
         if args.storage_loop_disks {
             tracing::warn!("loop devices count as disks (--storage-loop-disks): tests only");
             let mut s = rynas_storage::Storage::new(Arc::new(rynas_storage::host::SystemHost));
             s.loop_disks = true;
             state.storage = Arc::new(s);
         }
+        let mut ops = Ops::new(config, tasks);
+        ops.admins = rynasd::roles::AdminPolicy::new(args.admin_groups.clone(), state.groups);
+        // applied disk settings: read APM and write cache again (the SMART cache is 10 min)
+        let st = state.storage.clone();
+        ops.after_apply = Some(Arc::new(move |keys, log| {
+            if keys.iter().any(|k| k == rynas_storage::domain::TUNING_KEY) {
+                let read = st.refresh_disk_settings();
+                if !read.is_empty() {
+                    log(&format!("disk settings read again: {}", read.join(", ")));
+                }
+            }
+        }));
+        let ops = Arc::new(ops);
+        state.services = Some(Arc::new(Services {
+            ops: ops.clone(),
+            users: opened.users,
+            shares: opened.shares,
+        }));
         state.storage_ops = Some(Arc::new(rynasd::storage_ops::StorageOps::new(
             ops.clone(),
             state.storage.clone(),

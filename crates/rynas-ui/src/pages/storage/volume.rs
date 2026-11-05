@@ -1065,7 +1065,6 @@ fn StripeCache(id: String) -> impl IntoView {
     let choice = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
-    let saved = RwSignal::new(false);
     let fill = move |st: &VolumeSettingsState| {
         let v = st.pending.clone().unwrap_or_else(|| st.applied.clone());
         choice.set(v.stripe_cache_size.map(|n| n.to_string()).unwrap_or_default());
@@ -1083,19 +1082,22 @@ fn StripeCache(id: String) -> impl IntoView {
     let save = move |_| {
         busy.set(true);
         error.set(None);
-        saved.set(false);
         let body = VolumeSettings { stripe_cache_size: choice.get_untracked().parse().ok() };
         spawn_local(async move {
             let r = api::put::<_, VolumeSettingsState>(&url.get_value(), &body).await;
-            let _ = busy.try_set(false);
             match r {
                 Ok(st) => {
                     fill(&st);
-                    state.set(Some(Ok(st)));
-                    saved.set(true);
+                    let _ = state.try_set(Some(Ok(st)));
+                    // Save applies at once (guidelines A19b); read the applied state back
+                    if crate::config::apply_now(&[crate::config::keys::DISKS], error).await {
+                        crate::toast::saved_applied();
+                        load();
+                    }
                 }
                 Err(e) => error.set(Some(e.text())),
             }
+            let _ = busy.try_set(false);
         });
     };
     view! {
@@ -1123,8 +1125,7 @@ fn StripeCache(id: String) -> impl IntoView {
                             </select>
                         </label>
                         {form_error(error)}
-                        {move || saved.get().then(|| view! { {ui::note(Tone::Ok, icons::CIRCLE_CHECK, view! { {tr("sto.staged")} }.into_any())} })}
-                        <div class="card-actions"><button class="btn primary sm" type="button" disabled=move || busy.get() on:click=save>{spinner(busy)}{tr("sto.stage")}</button></div>
+                        <div class="card-actions"><button class="btn primary sm" type="button" disabled=move || busy.get() on:click=save>{spinner(busy)}{tr("save")}</button></div>
                     }
                     .into_any()
                 }

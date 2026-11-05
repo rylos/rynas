@@ -431,8 +431,26 @@ impl Config {
         log: &dyn Fn(&str),
         cancelled: &dyn Fn() -> bool,
     ) -> Result<u64> {
+        self.apply_keys(owner, author, comment, &[], log, cancelled)
+    }
+
+    /// [`Config::apply`] limited to `keys` of `owner`'s changeset (empty: all of it): the
+    /// other staged keys stay pending, untouched. Keys that are not staged are ignored;
+    /// [`ConfigError::NothingPending`] when none of them is. Conflicts count only among the
+    /// selected keys. Same pipeline, rollback and revision as a full apply.
+    pub fn apply_keys(
+        &self,
+        owner: &str,
+        author: &str,
+        comment: &str,
+        keys: &[String],
+        log: &dyn Fn(&str),
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<u64> {
         let _apply = self.apply_lock.lock().unwrap();
-        let pending = self.pending(owner)?;
+        let mut pending = self.pending(owner)?;
+        let selected = |k: &str| keys.is_empty() || keys.iter().any(|x| x == k);
+        pending.changes.retain(|c| selected(&c.key));
         if pending.changes.is_empty() {
             return Err(ConfigError::NothingPending);
         }
@@ -445,14 +463,21 @@ impl Config {
         if !conflicts.is_empty() {
             return Err(ConfigError::Conflict(conflicts));
         }
-        let restored_from: Option<u64> = self
-            .db()
-            .query_row(
-                "SELECT max(restored_from) FROM pending WHERE owner = ?1",
-                [owner],
-                |r| r.get::<_, Option<i64>>(0),
-            )?
-            .map(|v| v as u64);
+        let restored_from: Option<u64> = {
+            let db = self.db();
+            let mut st =
+                db.prepare("SELECT key, restored_from FROM pending WHERE owner = ?1")?;
+            let rows = st
+                .query_map([owner], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows.into_iter()
+                .filter(|(k, _)| selected(k))
+                .filter_map(|(_, r)| r)
+                .max()
+                .map(|v| v as u64)
+        };
         let mut steps = Vec::new();
         for c in pending.changes {
             let applier = self.applier(&c.key)?.clone();

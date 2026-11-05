@@ -19,7 +19,7 @@ use crate::form::{number_field, spinner, stale_notice, switch, Draft};
 use crate::i18n::{self, t, tr};
 use crate::icons::{self, Icon};
 use crate::live::use_live;
-use crate::toast::{saved_pending, toast};
+use crate::toast::{saved_applied, toast};
 use crate::ui::{self, Confirm, EmptyState, Meter, Remote, Skeleton, Status, Tone, WidgetHead, confirm, status, text};
 
 const SETTINGS: &str = "/api/v1/ups/settings";
@@ -319,14 +319,15 @@ fn safemode_form(settings: Remote<UpsSettingsState>, st: &UpsSettingsState) -> A
         error.set(None);
         spawn_local(async move {
             let r = api::put::<_, UpsSettingsState>(SETTINGS, &body).await;
-            busy.set(false);
             match r {
                 Ok(_) => {
-                    saved_pending();
-                    crate::config::changed();
+                    if crate::config::apply_now(&[crate::config::keys::UPS], error).await {
+                        saved_applied();
+                    }
                 }
                 Err(e) => error.set(Some(e.text())),
             }
+            let _ = busy.try_set(false);
         });
     };
     let reset = Callback::new(move |_| {

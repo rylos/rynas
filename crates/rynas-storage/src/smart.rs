@@ -6,7 +6,7 @@
 //! medium, when the disk is spun down: it prints "Device is in STANDBY mode, exit(2)".
 
 use rynas_api_types::storage::{
-    DiskKind, HealthReason, HealthVerdict, NvmeHealth, PowerState, SelfTest, Severity,
+    DiskKind, HealthReason, HealthVerdict, NvmeHealth, PowerState, ReasonArgs, SelfTest, Severity,
     SmartAttribute, SmartInfo,
 };
 use serde_json::Value;
@@ -277,13 +277,7 @@ pub fn parse(json: &str, now_ms: u64) -> SmartRead {
         info.bytes_written = ata_bytes_written(&info.attributes);
     }
 
-    let apm = v.get("ata_apm").map(|a| {
-        if bool_at(a, &["enabled"]) == Some(true) {
-            u64_at(a, &["level"]).map(|l| l as u32)
-        } else {
-            None
-        }
-    });
+    let apm = apm_of(&v);
     SmartRead::Data(Box::new(SmartData {
         model_family: str_at(&v, &["model_family"]).map(str::to_string),
         rotation_rpm: u64_at(&v, &["rotation_rate"])
@@ -295,6 +289,48 @@ pub fn parse(json: &str, now_ms: u64) -> SmartRead {
         trim_supported: bool_at(&v, &["trim", "supported"]),
         info,
     }))
+}
+
+fn apm_of(v: &Value) -> Option<Option<u32>> {
+    v.get("ata_apm").map(|a| {
+        if bool_at(a, &["enabled"]) == Some(true) {
+            u64_at(a, &["level"]).map(|l| l as u32)
+        } else {
+            None
+        }
+    })
+}
+
+/// Arguments of the quick re-read of the settings of an ATA disk after rynas changed them
+/// (APM and write cache only, no SMART data), before the device path. `-n standby`: a disk
+/// that sleeps is left alone.
+pub const SETTINGS_ARGS: &[&str] = &["--json=c", "-n", "standby", "-g", "apm", "-g", "wcache"];
+
+/// What [`SETTINGS_ARGS`] reported.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SettingsRead {
+    /// APM (as [`SmartData::apm`]) and write cache.
+    Data {
+        apm: Option<Option<u32>>,
+        write_cache: Option<bool>,
+    },
+    /// The disk sleeps (or smartctl failed): nothing was read.
+    Skipped,
+}
+
+/// Parse the output of [`SETTINGS_ARGS`].
+pub fn parse_settings(json: &str) -> SettingsRead {
+    let Ok(v) = serde_json::from_str::<Value>(json) else {
+        return SettingsRead::Skipped;
+    };
+    let exit_status = u64_at(&v, &["smartctl", "exit_status"]).unwrap_or(0);
+    if asleep_from_messages(&v).is_some() || exit_status & 0b11 != 0 {
+        return SettingsRead::Skipped;
+    }
+    SettingsRead::Data {
+        apm: apm_of(&v),
+        write_cache: bool_at(&v, &["write_cache", "enabled"]),
+    }
 }
 
 /// Normalized value of the vendor wear attribute, which counts down from 100.
@@ -329,43 +365,67 @@ fn ata_bytes_written(attrs: &[SmartAttribute]) -> Option<u64> {
     })
 }
 
-fn reason(severity: Severity, code: &str, message: String) -> HealthReason {
+fn reason(severity: Severity, code: &str, message: String, args: ReasonArgs) -> HealthReason {
     HealthReason {
         severity,
         code: code.to_string(),
         message,
+        args,
+    }
+}
+
+/// [`ReasonArgs`] with only `n`.
+fn n_arg(n: f64) -> ReasonArgs {
+    ReasonArgs {
+        n: Some(n),
+        ..Default::default()
     }
 }
 
 /// Temperature (°C) above which a disk type gets a warning / critical reason.
 pub fn temp_limits(kind: DiskKind) -> (f32, f32) {
     match kind {
-        DiskKind::Hdd => (55.0, 65.0),
-        DiskKind::Ssd => (70.0, 80.0),
-        DiskKind::Nvme => (75.0, 85.0),
-        DiskKind::Unknown => (60.0, 70.0),
+        DiskKind::Hdd => (50.0, 60.0),
+        DiskKind::Ssd => (60.0, 70.0),
+        DiskKind::Nvme => (70.0, 80.0),
+        DiskKind::Unknown => (50.0, 60.0),
     }
 }
 
 /// rynas' verdict: the drive's own PASSED flag is not enough (drives "pass" with thousands of
 /// pending sectors), so the watched counters weigh in too.
+///
+/// Reason codes and their [`ReasonArgs`]: `smart_failed`, `nvme_temperature`,
+/// `nvme_reliability`, `nvme_read_only`, `nvme_backup_failed`, `wear_out` (none);
+/// `attribute_failing`, `attribute_failed_past` (`name`: attribute and id);
+/// `reallocated_sectors`, `pending_sectors`, `offline_uncorrectable`, `reported_uncorrect`,
+/// `command_timeouts`, `crc_errors`, `load_cycles`, `media_errors`, `error_log` (`n`: count);
+/// `old_disk` (`n`: years); `temperature` (`n`: °C); `wear` (`n`: % left); `nvme_spare_low`
+/// (`n`: spare %, `limit`: threshold %); `self_test_failed` (`name`: kind, `detail`: status).
 pub fn verdict(info: &SmartInfo, kind: DiskKind) -> (HealthVerdict, Vec<HealthReason>) {
     use Severity::*;
+    let none = ReasonArgs::default;
     let mut r = Vec::new();
     if info.passed == Some(false) {
         r.push(reason(
             Critical,
             "smart_failed",
             "the drive reports SMART overall-health FAILED".into(),
+            none(),
         ));
     }
     let raw = |id: u8| info.attributes.iter().find(|a| a.id == id).map(|a| a.raw);
     for a in &info.attributes {
+        let name = || ReasonArgs {
+            name: Some(format!("{} ({})", a.name, a.id)),
+            ..Default::default()
+        };
         match a.when_failed.as_str() {
             "now" => r.push(reason(
                 Critical,
                 "attribute_failing",
                 format!("{} ({}) is below its failure threshold", a.name, a.id),
+                name(),
             )),
             "past" if a.prefailure => r.push(reason(
                 Warning,
@@ -374,6 +434,7 @@ pub fn verdict(info: &SmartInfo, kind: DiskKind) -> (HealthVerdict, Vec<HealthRe
                     "{} ({}) was below its failure threshold in the past",
                     a.name, a.id
                 ),
+                name(),
             )),
             _ => {}
         }
@@ -384,6 +445,7 @@ pub fn verdict(info: &SmartInfo, kind: DiskKind) -> (HealthVerdict, Vec<HealthRe
             sev,
             "reallocated_sectors",
             format!("{n} reallocated sectors"),
+            n_arg(n as f64),
         ));
     }
     if let Some(n) = raw(197).filter(|&n| n > 0) {
@@ -392,6 +454,7 @@ pub fn verdict(info: &SmartInfo, kind: DiskKind) -> (HealthVerdict, Vec<HealthRe
             sev,
             "pending_sectors",
             format!("{n} sectors pending reallocation (unreadable)"),
+            n_arg(n as f64),
         ));
     }
     if let Some(n) = raw(198).filter(|&n| n > 0) {
@@ -399,6 +462,7 @@ pub fn verdict(info: &SmartInfo, kind: DiskKind) -> (HealthVerdict, Vec<HealthRe
             Warning,
             "offline_uncorrectable",
             format!("{n} offline uncorrectable sectors"),
+            n_arg(n as f64),
         ));
     }
     if let Some(n) = raw(187).filter(|&n| n > 0) {
@@ -406,6 +470,7 @@ pub fn verdict(info: &SmartInfo, kind: DiskKind) -> (HealthVerdict, Vec<HealthRe
             Warning,
             "reported_uncorrect",
             format!("{n} errors that ECC could not correct"),
+            n_arg(n as f64),
         ));
     }
     // Seagate packs three 16-bit counters in 188: look at the total only
@@ -416,6 +481,7 @@ pub fn verdict(info: &SmartInfo, kind: DiskKind) -> (HealthVerdict, Vec<HealthRe
             Warning,
             "command_timeouts",
             format!("{n} command timeouts (often power or cable)"),
+            n_arg(n as f64),
         ));
     }
     if let Some(n) = raw(199).filter(|&n| n > 0) {
@@ -423,6 +489,7 @@ pub fn verdict(info: &SmartInfo, kind: DiskKind) -> (HealthVerdict, Vec<HealthRe
             Info,
             "crc_errors",
             format!("{n} interface CRC errors: check the cable or the bay connector"),
+            n_arg(n as f64),
         ));
     }
     if kind == DiskKind::Hdd
@@ -433,21 +500,34 @@ pub fn verdict(info: &SmartInfo, kind: DiskKind) -> (HealthVerdict, Vec<HealthRe
             sev,
             "load_cycles",
             format!("{n} head load cycles (rated 300-600k): aggressive head parking"),
+            n_arg(n as f64),
         ));
     }
     if let Some(h) = info.power_on_hours.filter(|&h| h > 6 * 8766) {
+        let years = (h as f64 / 8766.0 * 10.0).round() / 10.0;
         r.push(reason(
             Info,
             "old_disk",
-            format!("{:.1} years powered on", h as f64 / 8766.0),
+            format!("{years:.1} years powered on"),
+            n_arg(years),
         ));
     }
     if let Some(t) = info.temperature_c {
         let (warn, crit) = temp_limits(kind);
-        if t >= crit {
-            r.push(reason(Critical, "temperature", format!("{t:.0} °C")));
+        let sev = if t >= crit {
+            Some(Critical)
         } else if t >= warn {
-            r.push(reason(Warning, "temperature", format!("{t:.0} °C")));
+            Some(Warning)
+        } else {
+            None
+        };
+        if let Some(sev) = sev {
+            r.push(reason(
+                sev,
+                "temperature",
+                format!("{t:.0} °C"),
+                n_arg(t.round() as f64),
+            ));
         }
     }
     if let Some(n) = &info.nvme {
@@ -460,6 +540,11 @@ pub fn verdict(info: &SmartInfo, kind: DiskKind) -> (HealthVerdict, Vec<HealthRe
                     "available spare {}% (threshold {}%)",
                     n.available_spare_pct, n.available_spare_threshold_pct
                 ),
+                ReasonArgs {
+                    n: Some(n.available_spare_pct as f64),
+                    limit: Some(n.available_spare_threshold_pct as f64),
+                    ..Default::default()
+                },
             ));
         }
         if cw & 0b0000_0010 != 0 {
@@ -467,6 +552,7 @@ pub fn verdict(info: &SmartInfo, kind: DiskKind) -> (HealthVerdict, Vec<HealthRe
                 Warning,
                 "nvme_temperature",
                 "temperature out of range".into(),
+                none(),
             ));
         }
         if cw & 0b0000_0100 != 0 {
@@ -474,6 +560,7 @@ pub fn verdict(info: &SmartInfo, kind: DiskKind) -> (HealthVerdict, Vec<HealthRe
                 Critical,
                 "nvme_reliability",
                 "reliability degraded by media or internal errors".into(),
+                none(),
             ));
         }
         if cw & 0b0000_1000 != 0 {
@@ -481,6 +568,7 @@ pub fn verdict(info: &SmartInfo, kind: DiskKind) -> (HealthVerdict, Vec<HealthRe
                 Critical,
                 "nvme_read_only",
                 "media is read-only".into(),
+                none(),
             ));
         }
         if cw & 0b0001_0000 != 0 {
@@ -488,6 +576,7 @@ pub fn verdict(info: &SmartInfo, kind: DiskKind) -> (HealthVerdict, Vec<HealthRe
                 Warning,
                 "nvme_backup_failed",
                 "volatile memory backup device failed".into(),
+                none(),
             ));
         }
         if n.media_errors > 0 {
@@ -495,6 +584,7 @@ pub fn verdict(info: &SmartInfo, kind: DiskKind) -> (HealthVerdict, Vec<HealthRe
                 Warning,
                 "media_errors",
                 format!("{} media and data integrity errors", n.media_errors),
+                n_arg(n.media_errors as f64),
             ));
         }
     }
@@ -504,12 +594,14 @@ pub fn verdict(info: &SmartInfo, kind: DiskKind) -> (HealthVerdict, Vec<HealthRe
                 Critical,
                 "wear_out",
                 "rated endurance used up (100% or more)".into(),
+                none(),
             ));
         } else if life <= 20 {
             r.push(reason(
                 Warning,
                 "wear",
                 format!("{life}% of rated endurance left"),
+                n_arg(life as f64),
             ));
         }
     }
@@ -521,6 +613,11 @@ pub fn verdict(info: &SmartInfo, kind: DiskKind) -> (HealthVerdict, Vec<HealthRe
             Critical,
             "self_test_failed",
             format!("last self-test ({}): {}", t.kind, t.status),
+            ReasonArgs {
+                name: Some(t.kind.clone()),
+                detail: Some(t.status.clone()),
+                ..Default::default()
+            },
         ));
     }
     if let Some(n) = info.error_log_count.filter(|&n| n > 0)
@@ -530,6 +627,7 @@ pub fn verdict(info: &SmartInfo, kind: DiskKind) -> (HealthVerdict, Vec<HealthRe
             Info,
             "error_log",
             format!("{n} errors in the drive's error log"),
+            n_arg(n as f64),
         ));
     }
     let worst = r.iter().map(|x| x.severity).max();
@@ -630,6 +728,12 @@ mod tests {
         assert!(codes.contains(&"offline_uncorrectable"));
         assert!(codes.contains(&"self_test_failed"));
         assert!(codes.contains(&"load_cycles"));
+        // the values of the messages travel as arguments, for the translated text
+        let by = |c: &str| r.iter().find(|x| x.code == c).unwrap();
+        let re = by("reallocated_sectors");
+        assert!(re.args.n.is_some_and(|n| re.message.starts_with(&format!("{n} "))), "{re:?}");
+        let st = by("self_test_failed");
+        assert!(st.args.name.is_some() && st.args.detail.is_some(), "{st:?}");
         assert_eq!(d.info.self_tests[0].lba_first_error, Some(1_953_525_000));
         assert_eq!(d.info.exit_status, 0xc0);
     }
@@ -685,6 +789,20 @@ mod tests {
     fn standby_is_left_alone() {
         let r = parse(include_str!("../tests/fixtures/smartctl-standby.json"), 1);
         assert_eq!(r, SmartRead::Asleep(PowerState::Standby));
+        let s = parse_settings(include_str!("../tests/fixtures/smartctl-standby.json"));
+        assert_eq!(s, SettingsRead::Skipped);
+    }
+
+    #[test]
+    fn settings_reread() {
+        let j = r#"{"smartctl":{"exit_status":0},"ata_apm":{"enabled":true,"level":127},"write_cache":{"enabled":true}}"#;
+        assert_eq!(
+            parse_settings(j),
+            SettingsRead::Data { apm: Some(Some(127)), write_cache: Some(true) }
+        );
+        let off = r#"{"smartctl":{"exit_status":0},"ata_apm":{"enabled":false}}"#;
+        assert_eq!(parse_settings(off), SettingsRead::Data { apm: Some(None), write_cache: None });
+        assert_eq!(parse_settings("not json"), SettingsRead::Skipped);
     }
 
     #[test]

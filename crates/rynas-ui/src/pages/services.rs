@@ -11,7 +11,8 @@ use crate::form::{Draft, In, area_field, lens, lens_bool, select_field, stale_no
 use crate::i18n::{t, tr};
 use crate::icons::{self, Icon};
 use crate::pages::shares::share_path;
-use crate::toast::{saved_pending, toast};
+use crate::config::keys;
+use crate::toast::{saved_applied, toast};
 use crate::ui::{self, PageHeader, Remote, Tone, WidgetHead};
 
 const MIN_PROTOCOLS: &[(&str, &str)] = &[("SMB2_10", "smb.proto_smb2"), ("SMB3_00", "smb.proto_smb3"), ("SMB3_11", "smb.proto_smb311")];
@@ -114,14 +115,15 @@ fn smb_form(init: SmbSettings, server: Signal<Option<SmbSettings>>, shares: Remo
         let body = d.get_untracked();
         spawn_local(async move {
             let r = api::put::<_, SmbState>("/api/v1/services/smb", &body).await;
-            busy.set(false);
             match r {
                 Ok(_) => {
-                    saved_pending();
-                    crate::config::changed();
+                    if crate::config::apply_now(&[keys::SHARES], error).await {
+                        saved_applied();
+                    }
                 }
                 Err(e) => error.set(Some(e.text())),
             }
+            let _ = busy.try_set(false);
         });
     };
     view! {
@@ -240,14 +242,15 @@ fn nfs_form(init: NfsSettings, server: Signal<Option<NfsSettings>>) -> AnyView {
         let body = d.get_untracked();
         spawn_local(async move {
             let r = api::put::<_, NfsState>("/api/v1/services/nfs", &body).await;
-            busy.set(false);
             match r {
                 Ok(_) => {
-                    saved_pending();
-                    crate::config::changed();
+                    if crate::config::apply_now(&[keys::SHARES], error).await {
+                        saved_applied();
+                    }
                 }
                 Err(e) => error.set(Some(e.text())),
             }
+            let _ = busy.try_set(false);
         });
     };
     let num = In { kind: "number", mono: true, maxlength: 5, ..In::default() };

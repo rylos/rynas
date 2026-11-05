@@ -525,6 +525,12 @@ pub struct ApplyRequest {
     /// Free text stored with the revision.
     #[serde(default)]
     pub comment: String,
+    /// Apply only these keys of the changeset (the Save of a dialog applies what it has just
+    /// staged, guidelines A19b); the other staged keys stay pending. Empty: the whole
+    /// changeset. Keys that are not staged are ignored; none of them staged is
+    /// `409 nothing_pending`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<String>,
 }
 
 /// Answer of the endpoints that start a background task (202).

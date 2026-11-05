@@ -41,6 +41,9 @@ pub struct Config {
     pub detail: RwSignal<Option<PendingChanges>>,
     /// Task id of the apply in progress.
     pub applying: RwSignal<Option<String>>,
+    /// Task id of an apply started by the Save of a dialog or editor ([`apply_now`]) and the
+    /// error signal of that form: its progress shows inside the form ([`apply_line`]).
+    pub inline: RwSignal<Option<(String, RwSignal<Option<String>>)>>,
     pub outcome: RwSignal<Option<Outcome>>,
     pub review_open: RwSignal<bool>,
     pub discard_open: RwSignal<bool>,
@@ -102,6 +105,7 @@ impl Config {
             pending: RwSignal::new(None),
             detail: RwSignal::new(None),
             applying: RwSignal::new(None),
+            inline: RwSignal::new(None),
             outcome: RwSignal::new(None),
             review_open: RwSignal::new(false),
             discard_open: RwSignal::new(false),
@@ -176,7 +180,7 @@ impl Config {
         if self.busy.get_untracked() || self.applying.get_untracked().is_some() {
             return;
         }
-        let body = serde_json::to_string(&ApplyRequest { comment: self.comment.get_untracked().trim().to_string() }).ok();
+        let body = serde_json::to_string(&ApplyRequest { comment: self.comment.get_untracked().trim().to_string(), keys: Vec::new() }).ok();
         self.busy.set(true);
         self.outcome.set(None);
         self.review_open.set(false);
@@ -228,6 +232,72 @@ impl Config {
             }
             self.refresh();
         });
+    }
+}
+
+/// Configuration keys the forms stage (the server's domain keys), for [`apply_now`].
+pub mod keys {
+    pub const USERS: &str = "users";
+    pub const SHARES: &str = "shares";
+    pub const SNAPSHOTS: &str = "snapshots";
+    pub const SCHEDULER: &str = "scheduler";
+    pub const POWER: &str = "power.schedule";
+    pub const UPS: &str = "ups.safemode";
+    pub const UPDATES: &str = "updates.auto";
+    pub const DISKS: &str = "storage.disks";
+}
+
+/// The Save of a dialog or a single-object editor (guidelines A19b). Call it once the form's
+/// `PUT`/`POST` has staged the change: it applies only `keys` (every configuration key that
+/// endpoint can stage; keys with nothing staged are ignored, other staged keys stay in the
+/// pending bar) and waits for the `config.apply` task, whose progress [`apply_line`] shows in
+/// the form's [`crate::form::form_error`] (the one of `error`). `true` when it was applied;
+/// otherwise `error` holds the task's failure and the note that the previous settings are
+/// back in place while the change stays pending, and the caller keeps the dialog open.
+pub async fn apply_now(keys: &[&str], error: RwSignal<Option<String>>) -> bool {
+    let c = config();
+    let req = ApplyRequest { comment: String::new(), keys: keys.iter().map(|k| k.to_string()).collect() };
+    let started = api::start_task("/api/v1/config/apply", serde_json::to_string(&req).ok()).await;
+    let id = match started {
+        Ok(id) => id,
+        Err(e) => {
+            changed();
+            let _ = error.try_set(Some(e.text()));
+            return false;
+        }
+    };
+    c.applying.set(Some(id.clone()));
+    c.inline.set(Some((id.clone(), error)));
+    let res = tasks::follow(&id).await;
+    c.applying.set(None);
+    c.inline.set(None);
+    changed();
+    let fail = match res {
+        Ok(task) if task.status == TaskStatus::Ok => return true,
+        Ok(task) => format!("{} {}", task_error(&task), t("cfg.apply_kept")),
+        Err(e) => e.text(),
+    };
+    let _ = error.try_set(Some(fail));
+    false
+}
+
+/// Progress of the [`apply_now`] in flight, shown by the form error box of the form that
+/// started it (`error`): "Applying the change… 40%" and a link to the task's log.
+pub fn apply_line(error: RwSignal<Option<String>>) -> impl IntoView {
+    let c = config();
+    move || {
+        c.inline.get().filter(|(_, e)| *e == error).map(|(id, _)| {
+            let pid = id.clone();
+            let progress = move || tasks().list.with(|l| l.iter().find(|x| x.id == pid).and_then(|x| x.progress)).map(|p| i18n::pct(p as f64));
+            view! {
+                <p class="apply-line small muted" role="status" aria-live="polite">
+                    <span class="btn-spinner" aria-hidden="true"></span>
+                    <span>{tr("cfg.applying_now")}</span>
+                    <span class="tnum">{progress}</span>
+                    <button class="link-btn" type="button" on:click=move |_| tasks().show(&id)>{tr("cfg.apply_log")}</button>
+                </p>
+            }
+        })
     }
 }
 

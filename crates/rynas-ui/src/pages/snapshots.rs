@@ -19,7 +19,7 @@ use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::pages::scheduler::{TriggerEdit, run_status, trigger_text};
 use crate::tasks;
-use crate::toast::{saved_pending, toast};
+use crate::toast::{saved_applied, saved_pending, toast};
 use crate::ui::{self, Confirm, EmptyState, ErrorBox, Notice, PageHeader, Remote, Skeleton, Tone, confirm, drawer};
 
 /// `[A-Za-z0-9][A-Za-z0-9_-]{0,47}`.
@@ -870,15 +870,17 @@ fn job_editor(init: Option<SnapshotJobView>, close: Callback<()>) -> AnyView {
             } else {
                 api::put::<_, serde_json::Value>(&format!("/api/v1/snapshots/jobs/{}", api::encode(&req.job.name)), &req).await.map(|_| ())
             };
-            busy.set(false);
             match r {
                 Ok(()) => {
-                    saved_pending();
-                    crate::config::changed();
-                    close.run(());
+                    let keys = [crate::config::keys::SNAPSHOTS, crate::config::keys::SCHEDULER];
+                    if crate::config::apply_now(&keys, error).await {
+                        saved_applied();
+                        close.run(());
+                    }
                 }
                 Err(e) => error.set(Some(e.text())),
             }
+            let _ = busy.try_set(false);
         });
     });
 
@@ -960,14 +962,15 @@ fn system_panel(system: Remote<SystemSnapshots>) -> AnyView {
             error.set(None);
             spawn_local(async move {
                 let r = api::put::<_, SystemSnapshots>("/api/v1/snapshots/system", &body).await;
-                busy.set(false);
                 match r {
                     Ok(_) => {
-                        saved_pending();
-                        crate::config::changed();
+                        if crate::config::apply_now(&[crate::config::keys::SNAPSHOTS], error).await {
+                            saved_applied();
+                        }
                     }
                     Err(e) => error.set(Some(e.text())),
                 }
+                let _ = busy.try_set(false);
             });
         };
         view! {

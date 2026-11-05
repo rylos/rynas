@@ -78,8 +78,35 @@ pub struct HealthReason {
     pub severity: Severity,
     /// Stable machine code, e.g. "reallocated_sectors", "nvme_spare_low", "crc_errors".
     pub code: String,
-    /// One line for humans, in English; the UI may translate by `code`.
+    /// One line for humans, in English; the UI translates by `code` and `args`.
     pub message: String,
+    /// The values `message` names, for the translated text.
+    #[serde(default, skip_serializing_if = "ReasonArgs::is_empty")]
+    pub args: ReasonArgs,
+}
+
+/// Values of a [`HealthReason`]; which ones a code uses is documented next to the code in
+/// `rynas_storage::smart::verdict`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ReasonArgs {
+    /// A count, a temperature (°C), years or a percentage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub n: Option<f64>,
+    /// A threshold (`nvme_spare_low`: the spare threshold in %).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<f64>,
+    /// A name as the drive reports it: a SMART attribute with its id, a self-test kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// A status as the drive reports it (the result of a self-test).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+impl ReasonArgs {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// `GET /api/v1/storage/disks`: one whole disk.
@@ -252,6 +279,8 @@ pub enum CheckStatus {
     #[default]
     Unknown,
     NotApplicable,
+    /// Past a critical limit (the temperature above its critical threshold).
+    Critical,
 }
 
 /// A per-disk setting: what the disk type wants vs what is set now.
@@ -259,12 +288,45 @@ pub enum CheckStatus {
 pub struct SettingCheck {
     /// "scheduler", "read_ahead_kb", "write_cache", "apm", "trim", "alpm", "apst", "temperature".
     pub key: String,
+    /// English label (logs, CLI); the UI translates `key`.
     pub label: String,
+    /// English text of the current value; the UI translates `current_value` when present.
     pub current: Option<String>,
+    /// English text of the recommendation; the UI translates `recommended_value` when present.
     pub recommended: String,
     pub status: CheckStatus,
-    /// Impact in one line.
+    /// Impact in one line, in English; the UI translates `note_code`.
     pub note: String,
+    /// `current` as a code the UI translates; absent when `current` is a literal value (a
+    /// scheduler name, a number of KiB) shown as it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_value: Option<CheckValue>,
+    /// `recommended` as a code; absent when it is a literal value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommended_value: Option<CheckValue>,
+    /// Stable code of `note` ("sched_hdd", "apm", "trim_none"…); absent without a note.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note_code: Option<String>,
+}
+
+/// A value of a [`SettingCheck`] the UI translates by `code`; `n` is the number its text
+/// shows (a temperature in °C, a latency in µs). A client that does not know `code` shows
+/// the English text of the check.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct CheckValue {
+    pub code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub n: Option<f64>,
+}
+
+impl CheckValue {
+    pub fn code(code: &str) -> Self {
+        Self { code: code.into(), n: None }
+    }
+
+    pub fn with(code: &str, n: f64) -> Self {
+        Self { code: code.into(), n: Some(n) }
+    }
 }
 
 // ------------------------------------------------------------------ md arrays
