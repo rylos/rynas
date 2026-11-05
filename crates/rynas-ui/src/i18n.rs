@@ -5,8 +5,8 @@
 //! user switches language. Preference: localStorage `rynas.lang` ("en", "it" or absent = browser:
 //! Italian when the browser asks for it, English otherwise).
 //!
-//! Italian wording follows the Synology DSM glossary where an equivalent exists (Storage Manager,
-//! cartella condivisa, volume, integro/degradato…).
+//! Italian wording uses the common NAS vocabulary (archiviazione, cartella condivisa, volume,
+//! integro/degradato…); no product or app names of other systems (test `no_other_products`).
 
 use std::cell::Cell;
 
@@ -197,7 +197,7 @@ pub fn tf(key: &'static str, args: &[(&str, &str)]) -> String {
 dict! {
     // navigation
     "nav.dashboard" => "Dashboard", "Dashboard";
-    "nav.storage" => "Storage", "Storage";
+    "nav.storage" => "Storage", "Archiviazione";
     "nav.files" => "Files", "File";
     "nav.shares" => "Shared Folders", "Cartelle condivise";
     "nav.users" => "Users & Groups", "Utenti e gruppi";
@@ -397,7 +397,7 @@ dict! {
     "cfg.key.users" => "Users and groups", "Utenti e gruppi";
     "cfg.key.shares" => "Shared folders", "Cartelle condivise";
     "cfg.key.snapshots" => "Snapshots", "Snapshot";
-    "cfg.key.scheduler" => "Task Scheduler", "Utilità di pianificazione";
+    "cfg.key.scheduler" => "Scheduled tasks", "Attività pianificate";
     "cfg.key.synology.hw" => "Hardware settings", "Impostazioni hardware";
     "cfg.key.power.schedule" => "Power schedule", "Accensione e spegnimento pianificati";
     "cfg.key.network.rescue" => "Network rescue", "Ripristino di emergenza della rete";
@@ -460,10 +460,10 @@ dict! {
     "v.none" => "No volumes", "Nessun volume";
     "v.none_text" => "No mounted file systems were found.", "Non è stato trovato alcun file system montato.";
     "v.network" => "{n} network mounts", "{n} mount di rete";
-    "v.more" => "{n} more in Storage Manager", "Altri {n} in Storage Manager";
+    "v.more" => "{n} more in Storage", "Altri {n} in Archiviazione";
     "h.sub_ok" => "No problems detected", "Nessun problema rilevato";
     "h.sub_sync" => "Redundancy is being rebuilt", "Ridondanza in ricostruzione";
-    "h.sub_warn" => "Check the details in Storage Manager", "Controlla i dettagli in Storage Manager";
+    "h.sub_warn" => "Check the details in Storage", "Controlla i dettagli in Archiviazione";
     "v.arrays" => "RAID arrays", "Array RAID";
     "h.disks" => "Disks", "Dischi";
     "h.arrays" => "Arrays", "Array";
@@ -661,7 +661,7 @@ dict! {
     "ups.deep_text" => "The UPS runs on battery until it is almost empty, which can take an hour. If the battery reaches low battery (LB), the NAS enters Safe Mode: start it only when someone is present to stop the test.", "L'UPS funziona a batteria fino a scaricarla quasi del tutto, anche per un'ora. Se la batteria arriva a batteria scarica (LB), il NAS entra in modalità sicura: avvialo solo con qualcuno presente per fermare il test.";
     "ups.deep_text_nut" => "The UPS runs on battery until it is almost empty, which can take an hour. If the battery reaches low battery (LB), NUT shuts the system down: start it only when someone is present to stop the test.", "L'UPS funziona a batteria fino a scaricarla quasi del tutto, anche per un'ora. Se la batteria arriva a batteria scarica (LB), NUT spegne il sistema: avvialo solo con qualcuno presente per fermare il test.";
     "ups.deep_start" => "Start deep test", "Avvia test approfondito";
-    "ups.schedule_hint" => "To test on a schedule, add a Task Scheduler task that runs as root:", "Per un test pianificato, aggiungi un'attività in Pianificazione attività eseguita come root:";
+    "ups.schedule_hint" => "To test on a schedule, add a scheduled task that runs as root:", "Per un test pianificato, aggiungi un'attività pianificata eseguita come root:";
     "ups.events" => "Recent UPS events", "Eventi UPS recenti";
     "ups.no_events" => "No UPS events yet.", "Ancora nessun evento UPS.";
     "ps.col_on" => "Enabled", "Attiva";
@@ -710,7 +710,7 @@ dict! {
     "ps.cause_watchdog" => "Watchdog reset", "Reset del watchdog";
     "ps.cause_unknown" => "Button, Wake-on-LAN or power return", "Pulsante, Wake-on-LAN o ritorno corrente";
     // storage
-    "sto.title" => "Storage Manager", "Storage Manager";
+    "sto.title" => "Storage", "Archiviazione";
     "sto.subtitle" => "Drives, RAID arrays and volumes", "Dischi, array RAID e volumi";
     "sto.chassis" => "Chassis", "Chassis";
     "sto.disks" => "Drives", "Dischi";
@@ -979,7 +979,7 @@ dict! {
     "sto.done_err" => "The operation failed.", "L'operazione non è riuscita.";
     "sto.vol_missing" => "Volume not found", "Volume non trovato";
     "sto.vol_missing_text" => "It may have been renamed or removed.", "Potrebbe essere stato rinominato o rimosso.";
-    "sto.back_storage" => "Back to Storage Manager", "Torna a Storage Manager";
+    "sto.back_storage" => "Back to Storage", "Torna ad Archiviazione";
     "sto.scrub" => "Data scrubbing", "Pulizia dati";
     "sto.grow" => "Add drives", "Aggiungi dischi";
     "sto.replace" => "Replace drive", "Sostituisci disco";
@@ -1673,7 +1673,7 @@ dict! {
     "nt.v.server" => "Enter the server address.", "Inserisci l'indirizzo del server.";
     "nt.v.url" => "Enter the URL.", "Inserisci l'URL.";
     "nt.v.targets" => "Pick at least one target.", "Scegli almeno una destinazione.";
-    "sch.title" => "Task Scheduler", "Utilità di pianificazione";
+    "sch.title" => "Scheduled tasks", "Attività pianificate";
     "sch.subtitle" => "Scheduled commands, scripts and maintenance, run by systemd timers", "Comandi, script e manutenzione pianificati, eseguiti dai timer di systemd";
     "sch.open_text" => "Scheduled commands and scripts, scrubs, SMART tests, recycle bin cleanup, with run history.", "Comandi e script pianificati, scrub, test SMART, pulizia del cestino, con cronologia delle esecuzioni.";
     "sch.create" => "Create task", "Crea attività";
@@ -2451,6 +2451,8 @@ mod tests {
     #[test]
     fn no_other_products() {
         const PRODUCTS: &[&str] = &["dsm", "truenas", "unraid", "openmediavault", "omv", "qnap", "qts"];
+        // app names of other systems, matched as phrases
+        const APPS: &[&str] = &["storage manager", "task scheduler", "file station", "package center", "hyper backup", "control panel", "utilità di pianificazione"];
         // being reworded by the UPS work in progress: drop from here once it is
         const PENDING: &[&str] = &[];
         let mut hits = Vec::new();
@@ -2459,6 +2461,10 @@ mod tests {
                 let words = text.split(|c: char| !c.is_alphanumeric()).map(str::to_ascii_lowercase);
                 if let Some(w) = words.into_iter().find(|w| PRODUCTS.contains(&w.as_str())) {
                     hits.push(format!("{k}: {w}: {text}"));
+                }
+                let low = text.to_lowercase();
+                if let Some(a) = APPS.iter().find(|a| low.contains(*a)) {
+                    hits.push(format!("{k}: {a}: {text}"));
                 }
             }
         }
