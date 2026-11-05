@@ -38,6 +38,12 @@ pub fn severity_tone(s: NotifySeverity) -> Tone {
     }
 }
 
+/// Tone of a notification in the bell: a resolved event (a task that succeeded again, a
+/// problem gone) keeps the severity of the problem for delivery rules, but reads as good news.
+pub fn notification_tone(n: &Notification) -> Tone {
+    if n.state == rynas_api_types::notify::EventState::Resolved { Tone::Ok } else { severity_tone(n.severity) }
+}
+
 pub fn severity_key(s: NotifySeverity) -> &'static str {
     match s {
         NotifySeverity::Info => "nt.sev.info",
@@ -221,7 +227,7 @@ impl Notes {
         });
         let worst = Memo::new(move |_| {
             let mut tones: Vec<Tone> = alerts.with(|a| a.iter().filter(|a| !seen.with(|s| s.contains(&a.key))).map(|a| a.tone).collect());
-            server.list.with(|l| tones.extend(l.iter().map(|n| severity_tone(n.severity))));
+            server.list.with(|l| tones.extend(l.iter().map(notification_tone)));
             [Tone::Err, Tone::Warn, Tone::Info].into_iter().find(|t| tones.contains(t)).unwrap_or(Tone::Info)
         });
         Notes { alerts, server, seen, first_seen, unread, worst }
@@ -247,13 +253,14 @@ fn tone_icon(tone: Tone) -> &'static str {
     match tone {
         Tone::Err => icons::CIRCLE_X,
         Tone::Warn => icons::TRIANGLE_ALERT,
+        Tone::Ok => icons::CIRCLE_CHECK,
         _ => icons::INFO,
     }
 }
 
 /// One server notification in the popover: link to the center, acknowledge button.
 fn server_item(n: Notification, server: Server, open: RwSignal<bool>) -> AnyView {
-    let tone = severity_tone(n.severity);
+    let tone = notification_tone(&n);
     let id = n.id;
     let when = i18n::short_when(n.last_ms);
     let count = (n.count > 1).then(|| format!("×{}", n.count));
@@ -314,7 +321,6 @@ pub fn Bell() -> impl IntoView {
                 </Show>
             </button>
             <Show when=move || open.get()>
-                <div class="pop-scrim" on:click=move |_| open.set(false)></div>
                 <div class="popover notif-pop" role="dialog" aria-label=tr("nav.notifications")>
                     <div class="notif-head">
                         <span class="notif-title">{tr("nav.notifications")}</span>

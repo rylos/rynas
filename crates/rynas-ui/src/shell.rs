@@ -84,6 +84,23 @@ pub fn App() -> impl IntoView {
         }
     });
 
+    // a press outside the bell and the user menu closes them (a fixed scrim cannot do it: the
+    // app bar's backdrop-filter makes it the containing block, so the scrim covered only the bar)
+    let _ = window_event_listener(leptos::ev::pointerdown, move |e| {
+        if !(ui.user_menu_open.get_untracked() || ui.notif_open.get_untracked()) {
+            return;
+        }
+        let inside = e
+            .target()
+            .and_then(|t| wasm_bindgen::JsCast::dyn_into::<web_sys::Element>(t).ok())
+            .and_then(|el| el.closest(".pop-anchor").ok().flatten())
+            .is_some();
+        if !inside {
+            ui.user_menu_open.set(false);
+            ui.notif_open.set(false);
+        }
+    });
+
     let locked = move || auth.phase.get() == Phase::Locked;
     // the shell appears with the first session (or demo) and then stays mounted, covered by the
     // login screen while signed out, so the current route and page survive an expired session
@@ -270,7 +287,6 @@ fn UserMenu() -> impl IntoView {
                 <Icon icon=icons::CHEVRON_DOWN size=14 />
             </button>
             <Show when=move || open.get()>
-                <div class="pop-scrim" on:click=move |_| open.set(false)></div>
                 <div class="popover menu" role="menu">
                     <div class="menu-user">
                         <span class="avatar lg" aria-hidden="true">{initial}</span>

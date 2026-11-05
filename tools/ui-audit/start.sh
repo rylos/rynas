@@ -28,4 +28,4 @@ target/release/rynas-web --listen "127.0.0.1:$PORT" --rynasd-socket "$R/rynasd.s
   --auth-state-dir "$R/web" --ui-dir crates/rynas-ui/dist --synohwd-status "$H/run/synohwd/status.json" "${UPSD_ARG[@]}" > "$R/web.log" 2>&1 &
 echo $! >> "$R/pids"
 for _ in $(seq 50); do curl -s -o /dev/null "http://127.0.0.1:$PORT/" && { echo "up on http://127.0.0.1:$PORT"; exit 0; }; sleep 0.1; done
-echo down; tail -5 "$R/rynasd.log" "$R/web.log"; exit 1
+echo down; tail -n 5 "$R/rynasd.log" "$R/web.log"; exit 1

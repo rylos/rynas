@@ -269,7 +269,6 @@ kbd {
 
 /* popovers */
 .pop-anchor { position: relative; }
-.pop-scrim { position: fixed; inset: 0; z-index: 40; }
 .popover {
   position: absolute; right: 0; top: calc(100% + 8px); z-index: 41;
   min-width: 240px; padding: var(--s-2);
