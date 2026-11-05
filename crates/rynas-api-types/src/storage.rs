@@ -627,7 +627,14 @@ pub enum PlanAction {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlanStep {
+    /// English text of the step (logs, task output); the UI translates `kind` + `args`.
     pub description: String,
+    /// What the step does, for a translated text; `None` from older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<PlanStepKind>,
+    /// Values the translated text names (disk, mount point, level, number of disks).
+    #[serde(default, skip_serializing_if = "PlanArgs::is_empty")]
+    pub args: PlanArgs,
     #[serde(flatten)]
     pub action: PlanAction,
     /// The step destroys data on these devices.
@@ -644,7 +651,12 @@ pub struct StoragePlan {
     pub valid: bool,
     /// English text of each error (logs, tooltips); the UI translates `issues` instead.
     pub errors: Vec<String>,
+    /// English text of each warning (logs, CLI); the UI translates `warning_items` instead.
     pub warnings: Vec<String>,
+    /// The same warnings as `warnings`, in the same order, with a stable code and the values
+    /// their text names.
+    #[serde(default)]
+    pub warning_items: Vec<PlanWarning>,
     /// The same errors as `errors`, in the same order, with a stable code and the request
     /// field they are about, so a form can mark the right input.
     #[serde(default)]
@@ -718,6 +730,142 @@ pub struct PlanIssue {
     /// The disk, array or filesystem it names, when there is one (`sdb`, `md2`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject: Option<String>,
+}
+
+/// Values a plan warning or step names, so the UI can build the sentence in its language.
+/// Every field is optional; each code documents the ones it sets.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PlanArgs {
+    /// The disk, partition, array or mount point the text is about (`sdb`, `md2`, `/vol1`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    /// A second name: the source disk of a copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub other: Option<String>,
+    /// A list: disks, what uses a disk (`md2 (raid5)`), SMART reason codes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<RaidLevel>,
+}
+
+impl PlanArgs {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Why a storage plan deserves attention (it can still run).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanWarningCode {
+    /// `subject` holds data that will be erased; `items` names what uses it.
+    DataErased,
+    /// `subject` has SMART warnings; `items` are the reason codes.
+    SmartWarnings,
+    /// No SMART data for `subject` yet.
+    NoSmartData,
+    /// `subject` is a USB or removable disk.
+    RemovableDisk,
+    /// Disks of different sizes: `size_bytes` stay unused.
+    MixedSizes,
+    /// HDD, SSD and NVMe mixed in one array.
+    MixedKinds,
+    /// SMR disks (`items`) in a redundant array: very slow rebuilds.
+    SmrRaid,
+    /// SMR disks (`items`) without redundancy: slow sustained writes.
+    SmrSlowWrites,
+    /// One disk, no redundancy (a mirror can be added later).
+    SingleNoRedundancy,
+    /// RAID0: any disk failure loses the volume.
+    Raid0NoRedundancy,
+    /// RAID5 with large or many HDDs: consider RAID6.
+    Raid5Rebuild,
+    /// The volume is locked after every boot; keep the recovery key and header backup.
+    Encrypted,
+    CompressionOff,
+    /// SSD under LUKS: TRIM is off.
+    SsdTrimOff,
+    /// `subject` is larger than the members: the extra space stays unused.
+    DiskLargerThanMembers,
+    /// No mounted btrfs on the array: grow the filesystem by hand.
+    GrowFilesystemByHand,
+    /// `subject` is a spare: it can simply be removed.
+    SpareMember,
+    /// `subject` is an SMR disk: the rebuild may be very slow.
+    SmrSlowRebuild,
+    /// `subject` has `count` partitions: only the md members are rebuilt.
+    OtherPartitions,
+    /// Array `subject` is not healthy: a scrub can find but not repair errors.
+    ArrayNotHealthy,
+    /// A scrub reads every block, takes hours and wakes sleeping disks.
+    ScrubCost,
+    /// A code this client does not know (newer server): show the English text.
+    #[serde(other)]
+    Other,
+}
+
+/// One warning of a [`StoragePlan`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanWarning {
+    pub code: PlanWarningCode,
+    #[serde(default, skip_serializing_if = "PlanArgs::is_empty")]
+    pub args: PlanArgs,
+}
+
+/// What a [`PlanStep`] does, for a translated description. `args.subject` names the disk,
+/// partition, array or mount point where the step has one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanStepKind {
+    WipeSignatures,
+    ClearPartitionTable,
+    CreatePartition,
+    WaitUdev,
+    /// `level`, `count` disks.
+    CreateArray,
+    RecordArray,
+    LuksFormat,
+    AddRecoveryKey,
+    BackupLuksHeader,
+    UnlockVolume,
+    DeclareCrypttab,
+    CreateFilesystem,
+    MountAtBoot,
+    CreateMountPoint,
+    MountVolume,
+    CreateSnapshotSubvolume,
+    CreateCacheSubvolume,
+    DisableCowCache,
+    MirrorToRaid5,
+    AddSpares,
+    Reshape,
+    SparesToMirrors,
+    WaitReshape,
+    WaitResync,
+    GrowLuks,
+    GrowFilesystem,
+    /// Copy the partition table of `other` to `subject`.
+    CopyPartitionTable,
+    RandomizeGuids,
+    AddSpare,
+    ReplaceCopy,
+    WaitCopy,
+    RemoveReplaced,
+    MarkFailed,
+    RemoveMember,
+    AddForRebuild,
+    WaitRebuild,
+    Scrub,
+    CheckArray,
+    WaitCheck,
+    /// A kind this client does not know (newer server): show the English text.
+    #[serde(other)]
+    Other,
 }
 
 // ------------------------------------------------------------------ execution (write side)
@@ -1022,5 +1170,68 @@ impl Default for SubvolumeSettings {
             compression: true,
             readonly: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plan_warnings_and_step_kinds_round_trip() {
+        let p = StoragePlan {
+            operation: "create_volume".into(),
+            valid: true,
+            warnings: vec!["sdb: no SMART data yet".into()],
+            warning_items: vec![PlanWarning {
+                code: PlanWarningCode::NoSmartData,
+                args: PlanArgs {
+                    subject: Some("sdb".into()),
+                    ..Default::default()
+                },
+            }],
+            steps: vec![PlanStep {
+                description: "Create the md array (raid1, 2 disks)".into(),
+                kind: Some(PlanStepKind::CreateArray),
+                args: PlanArgs {
+                    level: Some(RaidLevel::Raid1),
+                    count: Some(2),
+                    ..Default::default()
+                },
+                action: PlanAction::Command {
+                    argv: vec!["mdadm".into()],
+                    stdin: None,
+                },
+                destroys: vec![],
+            }],
+            ..Default::default()
+        };
+        let j = serde_json::to_string(&p).unwrap();
+        assert!(
+            j.contains(r#""warning_items":[{"code":"no_smart_data","args":{"subject":"sdb"}}]"#),
+            "{j}"
+        );
+        assert!(
+            j.contains(r#""kind":"create_array","args":{"count":2,"level":"raid1"}"#),
+            "{j}"
+        );
+        assert_eq!(serde_json::from_str::<StoragePlan>(&j).unwrap(), p);
+    }
+
+    #[test]
+    fn older_and_newer_servers_still_parse() {
+        // an older server: no codes at all
+        let old = r#"{"operation":"scrub","valid":true,"errors":[],"warnings":["w"],"raw_bytes":0,
+            "usable_bytes":0,"fault_tolerance":0,"wasted_bytes":0,"summary":[],
+            "steps":[{"description":"d","type":"wait","condition":"c"}]}"#;
+        let p: StoragePlan = serde_json::from_str(old).unwrap();
+        assert!(p.warning_items.is_empty());
+        assert_eq!(p.steps[0].kind, None);
+        // a newer server: codes this build does not know
+        let w: PlanWarning =
+            serde_json::from_str(r#"{"code":"from_the_future","args":{"count":3}}"#).unwrap();
+        assert_eq!(w.code, PlanWarningCode::Other);
+        let k: PlanStepKind = serde_json::from_str(r#""teleport""#).unwrap();
+        assert_eq!(k, PlanStepKind::Other);
     }
 }

@@ -680,6 +680,90 @@ dict! {
     "plan.k.mountpoint" => "Mount point", "Punto di montaggio";
     "plan.k.old" => "Replaced member", "Membro sostituito";
     "plan.k.raid_devices" => "RAID members", "Membri RAID";
+    // storage plan texts by code: errors (plan.e.<PlanIssueCode>), warnings
+    // (plan.w.<PlanWarningCode>), steps (plan.s.<PlanStepKind>); {subject}, {other}, {items},
+    // {size}, {n} and {level} come from the plan
+    "plan.e.invalid_label" => "Invalid name: use 1-16 lowercase letters, digits or dashes, starting with a letter.", "Nome non valido: usa da 1 a 16 lettere minuscole, cifre o trattini, iniziando con una lettera.";
+    "plan.e.label_taken" => "A volume, array or mount point with this name already exists.", "Esiste già un volume, un array o un punto di montaggio con questo nome.";
+    "plan.e.disk_selected_twice" => "{subject}: selected twice", "{subject}: selezionato due volte";
+    "plan.e.disk_count" => "Wrong number of drives for this RAID level", "Numero di dischi non adatto a questo livello RAID";
+    "plan.e.no_disks" => "Select at least one drive", "Seleziona almeno un disco";
+    "plan.e.no_such_disk" => "{subject}: drive not found", "{subject}: disco non trovato";
+    "plan.e.system_disk" => "{subject}: holds the operating system", "{subject}: contiene il sistema operativo";
+    "plan.e.disk_in_use" => "{subject}: in use by an array, a volume or a mounted file system", "{subject}: in uso da un array, un volume o un file system montato";
+    "plan.e.disk_failing" => "{subject}: SMART reports that the drive is failing", "{subject}: secondo SMART il disco si sta guastando";
+    "plan.e.disk_too_small" => "{subject}: too small", "{subject}: troppo piccolo";
+    "plan.e.no_such_array" => "{subject}: array not found", "{subject}: array non trovato";
+    "plan.e.array_not_healthy" => "{subject} is not healthy: repair it first", "{subject} non è integro: va prima riparato";
+    "plan.e.array_busy" => "{subject} is busy (resync, check or reshape): wait for it to finish", "{subject} è occupato (risincronizzazione, controllo o rimodellamento): attendi che finisca";
+    "plan.e.level_unsupported" => "{subject}: rynas cannot grow this RAID level", "{subject}: rynas non può espandere questo livello RAID";
+    "plan.e.level_change_unsupported" => "This level change is not supported (supported: add mirrors, expand RAID 5/6, 2-drive RAID 1 to RAID 5, RAID 5 to RAID 6)", "Questo cambio di livello non è supportato (supportati: aggiunta di mirror, espansione di RAID 5/6, da RAID 1 a 2 dischi a RAID 5, da RAID 5 a RAID 6)";
+    "plan.e.not_a_member" => "{subject} is not a member of the array", "{subject} non è un membro dell'array";
+    "plan.e.no_redundancy" => "{subject} has no redundancy: a member cannot be replaced", "{subject} non ha ridondanza: un membro non si può sostituire";
+    "plan.e.no_healthy_member" => "{subject}: no healthy member left to rebuild from", "{subject}: nessun membro integro da cui ricostruire";
+    "plan.e.no_such_filesystem" => "{subject}: btrfs file system not found", "{subject}: file system btrfs non trovato";
+    "plan.e.not_mounted" => "{subject}: not mounted, it cannot be scrubbed", "{subject}: non montato, la pulizia dati non è possibile";
+    "plan.e.scrub_running" => "A scrub is already running on this file system", "Una pulizia dati è già in corso su questo file system";
+    "plan.w.data_erased" => "{subject}: the data on it will be erased ({items})", "{subject}: i dati presenti verranno cancellati ({items})";
+    "plan.w.smart_warnings" => "{subject}: SMART warnings ({items})", "{subject}: avvisi SMART ({items})";
+    "plan.w.no_smart_data" => "{subject}: no SMART data yet", "{subject}: ancora nessun dato SMART";
+    "plan.w.removable_disk" => "{subject}: USB or removable drive: unplugging it breaks the volume", "{subject}: disco USB o rimovibile: se viene scollegato, il volume smette di funzionare";
+    "plan.w.mixed_sizes" => "Drives of different sizes: each one is used up to the size of the smallest, {size} stay unused", "Dischi di dimensioni diverse: ognuno viene usato fino alla dimensione del più piccolo, {size} restano inutilizzati";
+    "plan.w.mixed_kinds" => "Mixed drive types (HDD, SSD, NVMe): the array runs at the speed of the slowest", "Tipi di disco misti (HDD, SSD, NVMe): l'array va alla velocità del più lento";
+    "plan.w.smr_raid" => "SMR drives ({items}): a rebuild can take days or fail; prefer CMR drives for RAID", "Dischi SMR ({items}): una ricostruzione può durare giorni o non riuscire; per il RAID meglio dischi CMR";
+    "plan.w.smr_slow_writes" => "SMR drives ({items}): long writes are slow", "Dischi SMR ({items}): le scritture prolungate sono lente";
+    "plan.w.single_no_redundancy" => "No redundancy: if the drive fails, the volume is lost (a mirror drive can be added later)", "Nessuna ridondanza: se il disco si guasta, il volume va perso (un disco mirror si può aggiungere in seguito)";
+    "plan.w.raid0_no_redundancy" => "RAID 0 has no redundancy: any failed drive loses the whole volume", "RAID 0 non ha ridondanza: un qualsiasi disco guasto fa perdere l'intero volume";
+    "plan.w.raid5_rebuild" => "RAID 5 with large or many HDDs: a second failure during the long rebuild loses the volume; consider RAID 6", "RAID 5 con HDD grandi o numerosi: un secondo guasto durante la lunga ricostruzione fa perdere il volume; valuta il RAID 6";
+    "plan.w.encrypted" => "Encrypted: after every restart the volume stays locked until it is unlocked in rynas; keep the recovery key and the header backup outside the NAS", "Crittografato: dopo ogni riavvio il volume resta bloccato finché non lo sblocchi da rynas; conserva la chiave di ripristino e il backup dell'intestazione fuori dal NAS";
+    "plan.w.compression_off" => "Compression off: zstd level 1 costs little CPU and usually saves space", "Compressione disattivata: zstd livello 1 usa poca CPU e di solito fa risparmiare spazio";
+    "plan.w.ssd_trim_off" => "SSD with encryption: TRIM is off because it reveals which blocks are free; enable 'discard' in crypttab if that is acceptable", "SSD con crittografia: il TRIM è disattivato perché rivela quali blocchi sono liberi; attiva 'discard' in crypttab se è accettabile";
+    "plan.w.disk_larger_than_members" => "{subject} is larger than the members: the extra space stays unused until every member is replaced", "{subject} è più grande dei membri: lo spazio in più resta inutilizzato finché non vengono sostituiti tutti i membri";
+    "plan.w.grow_filesystem_by_hand" => "No mounted btrfs on this array: grow the file system by hand", "Nessun btrfs montato su questo array: espandi il file system a mano";
+    "plan.w.spare_member" => "{subject} is a spare: it can simply be removed", "{subject} è una riserva: basta rimuoverla";
+    "plan.w.smr_slow_rebuild" => "{subject}: SMR drive, the rebuild may be very slow", "{subject}: disco SMR, la ricostruzione può essere molto lenta";
+    "plan.w.other_partitions" => "{subject} has {n} partitions: only the RAID members are rebuilt, copy the others (EFI, swap) separately", "{subject} ha {n} partizioni: vengono ricostruiti solo i membri RAID, copia a parte le altre (EFI, swap)";
+    "plan.w.array_not_healthy" => "{subject} is not healthy: without redundancy a scrub finds errors but cannot repair them", "{subject} non è integro: senza ridondanza la pulizia dati trova gli errori ma non può ripararli";
+    "plan.w.scrub_cost" => "A scrub reads every allocated block: it takes hours on large HDD volumes and wakes sleeping drives; it never runs together with replication, balance or deduplication on the same file system", "La pulizia dati legge ogni blocco allocato: su grandi volumi HDD dura ore e risveglia i dischi in standby; non viene mai eseguita insieme a replica, bilanciamento o deduplicazione sullo stesso file system";
+    "plan.s.wipe_signatures" => "Erase the signatures on {subject}", "Cancella le firme su {subject}";
+    "plan.s.clear_partition_table" => "Clear the partition table of {subject}", "Azzera la tabella delle partizioni di {subject}";
+    "plan.s.create_partition" => "Create one RAID partition on {subject}, leaving 128 MiB free at the end", "Crea una partizione RAID su {subject}, lasciando 128 MiB liberi alla fine";
+    "plan.s.wait_udev" => "Wait for the partitions to appear", "Attendi che compaiano le partizioni";
+    "plan.s.create_array" => "Create the RAID array ({level}, drives: {n})", "Crea l'array RAID ({level}, dischi: {n})";
+    "plan.s.record_array" => "Record the array so it is assembled at boot", "Registra l'array perché venga assemblato all'avvio";
+    "plan.s.luks_format" => "Format the array as LUKS2 (Argon2id, 256 MiB of memory, 4 KiB sectors)", "Formatta l'array come LUKS2 (Argon2id, 256 MiB di memoria, settori da 4 KiB)";
+    "plan.s.add_recovery_key" => "Add a recovery key (shown once: save it before going on)", "Aggiungi una chiave di ripristino (mostrata una volta: salvala prima di proseguire)";
+    "plan.s.backup_luks_header" => "Back up the LUKS header (offered for download, then removed from the NAS)", "Salva l'intestazione LUKS (offerta da scaricare, poi rimossa dal NAS)";
+    "plan.s.unlock_volume" => "Unlock the new volume", "Sblocca il nuovo volume";
+    "plan.s.declare_crypttab" => "Declare the encrypted volume, locked at boot", "Dichiara il volume crittografato, bloccato all'avvio";
+    "plan.s.create_filesystem" => "Create the btrfs file system (data single, metadata DUP)", "Crea il file system btrfs (dati single, metadati DUP)";
+    "plan.s.mount_at_boot" => "Mount the volume at boot", "Monta il volume all'avvio";
+    "plan.s.create_mount_point" => "Create the mount point {subject}", "Crea il punto di montaggio {subject}";
+    "plan.s.mount_volume" => "Mount the volume at {subject}", "Monta il volume in {subject}";
+    "plan.s.create_snapshot_subvolume" => "Create the snapshot subvolume (hidden from shares)", "Crea il sottovolume degli snapshot (nascosto alle cartelle condivise)";
+    "plan.s.create_cache_subvolume" => "Create the cache subvolume (excluded from snapshots)", "Crea il sottovolume della cache (escluso dagli snapshot)";
+    "plan.s.disable_cow_cache" => "Turn off copy-on-write on the cache subvolume", "Disattiva il copy-on-write sul sottovolume della cache";
+    "plan.s.mirror_to_raid5" => "Convert the 2-drive mirror to RAID 5 (instant, same data layout)", "Converti il mirror a 2 dischi in RAID 5 (immediato, stessa disposizione dei dati)";
+    "plan.s.add_spares" => "Add the new partitions as spares", "Aggiungi le nuove partizioni come riserve";
+    "plan.s.reshape" => "Reshape the array onto the new drives (hours to days; the volume stays online)", "Rimodella l'array sui nuovi dischi (da ore a giorni; il volume resta disponibile)";
+    "plan.s.spares_to_mirrors" => "Turn the spares into active mirrors (resync)", "Trasforma le riserve in mirror attivi (risincronizzazione)";
+    "plan.s.wait_reshape" => "Wait for the reshape to finish", "Attendi la fine del rimodellamento";
+    "plan.s.wait_resync" => "Wait for the resync to finish", "Attendi la fine della risincronizzazione";
+    "plan.s.grow_luks" => "Grow the encrypted device to the new array size", "Espandi il dispositivo cifrato alla nuova dimensione dell'array";
+    "plan.s.grow_filesystem" => "Grow the file system to the new size", "Espandi il file system alla nuova dimensione";
+    "plan.s.copy_partition_table" => "Copy the partition table of {other} to {subject}", "Copia la tabella delle partizioni di {other} su {subject}";
+    "plan.s.randomize_guids" => "Give {subject} its own partition IDs", "Assegna a {subject} identificativi di partizione propri";
+    "plan.s.add_spare" => "Add the new partition as a spare", "Aggiungi la nuova partizione come riserva";
+    "plan.s.replace_copy" => "Copy {subject} onto the new drive while it stays in the array", "Copia {subject} sul nuovo disco mentre resta nell'array";
+    "plan.s.wait_copy" => "Wait for the copy to finish", "Attendi la fine della copia";
+    "plan.s.remove_replaced" => "Remove {subject} (marked faulty by the replacement)", "Rimuovi {subject} (segnato come guasto dalla sostituzione)";
+    "plan.s.mark_failed" => "Mark {subject} as failed", "Segna {subject} come guasto";
+    "plan.s.remove_member" => "Remove {subject} from the array", "Rimuovi {subject} dall'array";
+    "plan.s.add_for_rebuild" => "Add the new partition: the rebuild starts", "Aggiungi la nuova partizione: parte la ricostruzione";
+    "plan.s.wait_rebuild" => "Wait for the rebuild to finish", "Attendi la fine della ricostruzione";
+    "plan.s.scrub" => "Verify every checksum and repair from a good copy", "Verifica ogni checksum e ripara da una copia integra";
+    "plan.s.check_array" => "Check the parity or mirrors of {subject} (read-only)", "Controlla la parità o i mirror di {subject} (sola lettura)";
+    "plan.s.wait_check" => "Wait for the check of {subject}, then read the mismatch count", "Attendi la fine del controllo di {subject}, poi leggi il numero di discrepanze";
     "sto.tab.overview" => "Overview", "Panoramica";
     "sto.create" => "Create volume", "Crea volume";
     "sto.refresh_failed" => "Couldn't refresh the storage data.", "Impossibile aggiornare i dati di archiviazione.";
@@ -2230,6 +2314,40 @@ mod tests {
             }
         }
         assert!(missing.is_empty(), "keys used but not in the dictionary: {missing:#?}");
+    }
+
+    /// Every code of the storage planner (errors, warnings, step kinds) has a text: the
+    /// variants are read from the API types source, so a new code without a key fails here.
+    #[test]
+    fn every_plan_code_has_a_text() {
+        let src = include_str!("../../rynas-api-types/src/storage.rs");
+        let keys: std::collections::HashSet<&str> = entries().into_iter().map(|e| e.0).collect();
+        let mut missing = Vec::new();
+        for (enum_name, prefix) in [("PlanIssueCode", "plan.e"), ("PlanWarningCode", "plan.w"), ("PlanStepKind", "plan.s")] {
+            let start = src.find(&format!("pub enum {enum_name} {{")).expect(enum_name);
+            let body = &src[start..start + src[start..].find("\n}").expect("enum end")];
+            let mut n = 0;
+            for line in body.lines().skip(1).map(str::trim) {
+                let Some(variant) = line.strip_suffix(',') else { continue };
+                if variant == "Other" || !variant.starts_with(|c: char| c.is_ascii_uppercase()) {
+                    continue;
+                }
+                let mut snake = String::new();
+                for (i, c) in variant.chars().enumerate() {
+                    if c.is_ascii_uppercase() && i > 0 {
+                        snake.push('_');
+                    }
+                    snake.push(c.to_ascii_lowercase());
+                }
+                n += 1;
+                let key = format!("{prefix}.{snake}");
+                if !keys.contains(key.as_str()) {
+                    missing.push(key);
+                }
+            }
+            assert!(n > 10, "{enum_name}: variants not found");
+        }
+        assert!(missing.is_empty(), "plan codes without a text: {missing:#?}");
     }
 
     #[test]

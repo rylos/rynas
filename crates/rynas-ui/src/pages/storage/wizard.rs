@@ -11,7 +11,7 @@ use rynas_api_types::storage::{RaidLevel, StoragePlan};
 use serde_json::json;
 
 use crate::tasks::TaskRun;
-use super::plan::{cap_bar, plan_view, tolerance_text};
+use super::plan::{cap_bar, plan_errors, plan_view, plan_warnings, tolerance_text};
 use super::volume::{RevealDialog, Stage, disk_checklist, level_json, start_task};
 use super::{free_disks, level_key, loading, serial_of, use_refresh, valid_label, volumes};
 use crate::api;
@@ -369,10 +369,8 @@ fn step_level(chosen: RwSignal<Vec<String>>, level: RwSignal<RaidLevel>, plans: 
                 Some(Ok(p)) => view! {
                     <div class="level-detail">
                         {p.valid.then(|| cap_bar(p.raw_bytes, p.usable_bytes, p.wasted_bytes))}
-                        {p.errors.into_iter().map(|e| view! { <p class="form-error"><Icon icon=icons::CIRCLE_X size=16 /><span>{e}</span></p> }).collect_view()}
-                        <ul class="plan-warnings">
-                            {p.warnings.into_iter().map(|w| view! { <li class="warn"><Icon icon=icons::TRIANGLE_ALERT size=14 /><span lang="en">{w}</span></li> }).collect_view()}
-                        </ul>
+                        {plan_errors(&p)}
+                        {plan_warnings(&p)}
                     </div>
                 }
                 .into_any(),
