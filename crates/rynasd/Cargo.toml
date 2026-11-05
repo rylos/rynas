@@ -32,6 +32,7 @@ rynas-hw-synology = { workspace = true, features = ["domain"] }
 rynas-power.workspace = true
 jiff.workspace = true
 rynas-net.workspace = true
+rynas-updates.workspace = true
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 
 [dev-dependencies]

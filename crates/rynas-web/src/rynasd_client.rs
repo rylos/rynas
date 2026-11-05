@@ -44,6 +44,9 @@ pub const DEFAULT_DEADLINE: Duration = Duration::from_secs(30);
 pub const NOTIFY_TEST_DEADLINE: Duration = Duration::from_secs(60);
 /// A network diagnostic (traceroute runs up to 45 s in rynasd).
 pub const DIAGNOSTICS_DEADLINE: Duration = Duration::from_secs(60);
+/// The first read of the update list after apt's state changed runs two apt simulations;
+/// the kernel card may run `synodeb-dom status` (mounts the DOM).
+pub const UPDATES_DEADLINE: Duration = Duration::from_secs(90);
 /// Largest answer read into memory by [`RynasdClient::call`] (pass-through answers stream).
 pub const MAX_ANSWER: usize = 8 << 20;
 
@@ -58,6 +61,8 @@ pub fn deadline(path: &str) -> Duration {
         NOTIFY_TEST_DEADLINE
     } else if path.starts_with("/v1/network/diagnostics/") {
         DIAGNOSTICS_DEADLINE
+    } else if path.starts_with("/v1/updates") {
+        UPDATES_DEADLINE
     } else {
         DEFAULT_DEADLINE
     }

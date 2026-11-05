@@ -943,3 +943,64 @@ change rolled back by the systemd timer with MTU and address verified, a "reboot
 trial undone by the boot guard, ifupdown adopted, expired (ifupdown back) and adopted again,
 diagnostics, deterministic link-local address active, reset-button double press with the web
 interface reachable on link-local.
+
+## API v1: system updates (P6)
+Crate `rynas-updates` (parsers, the `updates.auto` domain), served by `rynasd`
+(`crates/rynasd/src/updates.rs`, root: apt and `synodeb-dom` need it) and forwarded unchanged
+by `rynas-web` (deadline 90 s: the first read after apt's state changed runs two simulations).
+UI: System › Updates (`crates/rynas-ui/src/pages/updates.rs`). Ideas from DSM, Proxmox VE,
+Cockpit and TrueNAS: `../research/updates.md`. Types in `rynas_api_types::updates`. No new
+error codes.
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/api/v1/updates` | — | `UpdatesStatus` {apt, read_at_ms, lists_updated_ms?, packages: [`UpdatePackage` {name, arch, current?, candidate, origin, security}], removals, held, autoremovable, reboot_required, reboot_packages, error?, running_task?, unattended_installed} |
+| POST | `/api/v1/updates/check` | — | 202 (task `updates.check`: `apt-get update`) |
+| POST | `/api/v1/updates/install` | `InstallRequest` {packages (empty = all), confirm_removals} | 202 (task `updates.install`: `apt-get full-upgrade` or `install --only-upgrade -- <pkgs>`); 400 `confirmation_required` (`field` = `confirm_removals`) when a removal is not confirmed |
+| POST | `/api/v1/updates/autoremove` | `AutoremoveRequest` {packages} | 202 (task `updates.autoremove`); 400 `confirmation_required` unless `packages` is exactly what autoremove would remove |
+| POST | `/api/v1/updates/packages/{name}/changelog` | — | 202 (task `updates.changelog`: `apt-get changelog`, network; the text is the task log) |
+| GET/PUT | `/api/v1/updates/auto` | `AutoUpdates` {mode off\|security\|all, hour, minute, window_min 10–360, reboot, reboot_hour, reboot_minute} | `AutoUpdatesState` {applied, pending?, unattended_installed} (PUT stages `updates.auto`) |
+| GET | `/api/v1/updates/kernel[?refresh=1]` | — | `KernelStatus` {running, installed, synodeb, dom?: `DomStatus` {entries, default, fallback, trial none\|armed\|trying, running, outdated, kernel, kernel_old, free_bytes}, read_at_ms, error?} |
+
+Rules:
+- **Cheap reads**: the list is parsed from `apt-get -s -o Debug::NoLocking=true full-upgrade`
+  and `apt-get -s autoremove` (no python, no lock), cached until the mtime of
+  `/var/lib/dpkg/status`, `/var/cache/apt/pkgcache.bin` or `/var/lib/apt/lists` changes or an
+  `updates.*` task ends; one refresh at a time. Security = an origin from a `*-security` suite.
+  `reboot-required(.pkgs)` is read on every GET.
+- **Outside the sandbox**: rynasd has `ProtectSystem=yes` (`/usr`, `/boot` read-only: dpkg
+  and `update-initramfs` would fail) and `MemoryMax=256M`, so every apt run that writes
+  (`update`, upgrades, autoremove) goes through `systemd-run --wait --pipe --collect --quiet
+  --unit=rynas-apt-<n>` (default service environment, `Nice=5`), its output streamed into the
+  task log. Simulations and `apt-get changelog` stay inside rynasd (read-only). Cancelling or a
+  timeout stops following the unit, not dpkg (apt's lock keeps a second run out). No
+  `ReadWritePaths=/usr` in rynasd.service.
+- **Tasks**: one `updates.*` task at a time (409 `busy`). apt runs with `-y`,
+  `--force-confdef --force-confold` (local conffiles kept), `DEBIAN_FRONTEND=noninteractive`,
+  `NEEDRESTART_MODE=l` (needrestart lists, never restarts rynasd mid-task),
+  `APT_LISTCHANGES_FRONTEND=none`. Removals are checked at once against the cached simulation
+  and again by the task against a fresh one (a new removal aborts it). **autoremove is never
+  run automatically** (on synodeb it would remove the old synodeb kernel and `synology-ds923`).
+- **`updates.auto`** (order 70) → `/etc/apt/apt.conf.d/53rynas-unattended-upgrades` (after
+  Debian's `50` and synodeb's `52` file: `#clear`s and rewrites the origins, Unattended-Upgrade
+  on/off, Automatic-Reboot(-Time, -WithUsers), every `Remove-Unused-*` false, MinimalSteps;
+  synodeb's Package-Blacklist still applies; lists refreshed daily in every mode) and drop-ins
+  of `apt-daily-upgrade.timer` (window: `OnCalendar` + `RandomizedDelaySec`) and
+  `apt-daily.timer` (an hour before); apply = `daemon-reload` + restart of the installed
+  timers. Never applied: imported as `all` when some `apt.conf.d` file turns
+  unattended-upgrades on (synodeb does), else `off`. The `.deb` recommends
+  `unattended-upgrades`.
+- **Kernel / DOM**: `uname -r`, `/boot/vmlinuz-*` and `synodeb-dom status --json` (schema 1,
+  only where it exists; root, mounts the DOM): cached 6 h, `refresh=1` at most once a minute.
+  Read-only for now.
+- **Notification**: a daily check (10 min after start, then every 24 h) emits `updates:available`
+  (category `update`, `warning` with security updates, `notice` otherwise, `resolved` when
+  nothing is left); every install/check task re-evaluates it. It runs `apt-get update` itself
+  only when the lists are older than 36 h (apt's own timer normally keeps them fresh). apt
+  state is on the root SSD: no data disk is touched.
+- `--dry-system`: apt and synodeb-dom are never run; simulations and the DOM status come from
+  the fixtures of `rynas-updates`, tasks only log the command lines.
+
+Not done yet: restore point before installing (needs the root rollback work), reboot from the
+page, needrestart's service list, apt-listchanges NEWS, real-machine test (`packaging/` container
+test with a local apt repository).

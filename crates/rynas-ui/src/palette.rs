@@ -40,6 +40,7 @@ fn entries() -> Vec<Entry> {
         Entry { key: "nav.security", icon: icons::SHIELD_CHECK, action: Action::Go("/security"), hint: "" },
         Entry { key: "cfg.title", icon: icons::HISTORY, action: Action::Go("/system/configuration"), hint: "" },
         Entry { key: "sch.title", icon: icons::CALENDAR_CLOCK, action: Action::Go("/system/scheduler"), hint: "" },
+        Entry { key: "upd.title", icon: icons::DOWNLOAD, action: Action::Go("/system/updates"), hint: "" },
         Entry { key: "nt.settings_title", icon: icons::BELL_RING, action: Action::Go("/system/notifications"), hint: "" },
         Entry { key: "nt.center", icon: icons::BELL, action: Action::Go("/notifications"), hint: "" },
         Entry { key: "bar.logout", icon: icons::LOG_OUT, action: Action::SignOut, hint: "" },

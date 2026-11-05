@@ -1,0 +1,16 @@
+[package]
+name = "rynas-updates"
+description = "rynas system updates: apt simulation parser, unattended-upgrades configuration domain, synodeb-dom status"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+rynas-api-types.workspace = true
+rynas-config.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
