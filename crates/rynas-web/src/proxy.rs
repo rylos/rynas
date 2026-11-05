@@ -90,6 +90,10 @@ pub fn routes() -> Router<AppState> {
         .route("/shares", get(forward).post(forward))
         .route("/shares/{name}", get(forward).put(forward).delete(forward))
         .route("/shares/{name}/effective", get(forward))
+        .route("/shares/plan/delete", post(forward))
+        .route("/folders", get(forward))
+        .route("/folders/plan/delete", post(forward))
+        .route("/folders/{volume}/{name}", delete(forward))
         // notifications (P3): list, ack, silences, targets, rules; live changes come on
         // /events as `notification`
         .route("/notifications", get(forward))

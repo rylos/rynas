@@ -8,6 +8,7 @@ pub mod scheduler;
 pub mod network;
 pub mod security;
 pub mod services;
+pub mod share_folders;
 pub mod shares;
 pub mod snapshots;
 pub mod storage;

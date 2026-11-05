@@ -243,11 +243,10 @@ fn resolve_job(d: &Docs, mut job: SnapshotJob) -> Res<SnapshotJob> {
 }
 
 /// SMB previous versions of a share follow its job: on with the job's directory and names.
+/// Set whether SMB is on or not: the snapshot folder of the share uses the same directory.
 fn wire_shadow_copy(d: &mut Docs, job: &SnapshotJob) {
     let Some(name) = &job.share else { return };
-    if let Some(sh) = d.shares.shares.iter_mut().find(|s| &s.name == name)
-        && sh.smb.enabled
-    {
+    if let Some(sh) = d.shares.shares.iter_mut().find(|s| &s.name == name) {
         sh.smb.shadow_copy.enabled = true;
         sh.smb.shadow_copy.snapshot_dir = job.snapshot_dir.clone();
         sh.smb.shadow_copy.prefix = job.name.clone();
@@ -771,12 +770,40 @@ async fn rollback(
     if l.system {
         return root_rollback(&p, &who, id, l, sys).await;
     }
+    // the snapshot folder of the share is mounted inside the subvolume being replaced: it
+    // is unmounted first and mounted again on the new one
+    let view = {
+        let sv = l.subvolume.to_string_lossy().into_owned();
+        blocking(&p, move |p| {
+            let shares: SharesConfig = from_value(p.ops.config.applied(SHARES_KEY)?)?;
+            Ok(shares
+                .shares
+                .iter()
+                .find(|s| s.path == sv)
+                .and_then(rynas_services::snapview::wanted)
+                .map(|(path, _)| rynas_services::snapview::unit_name(&path)))
+        })
+        .await?
+    };
+    let ops = p.ops.clone();
     let task = p.ops.tasks.spawn("snapshot.rollback", &who, move |ctx| async move {
         let c = ctx.clone();
         tokio::task::spawn_blocking(move || -> Result<(), String> {
             let _lock = JobLock::acquire(&lock_path(&l.job)).map_err(|e| e.to_string())?;
+            let sys = ops.config.system();
+            if let Some(u) = &view {
+                c.log(&format!("unmounting the snapshot folder ({u})"));
+                sys.stop_unit(u)?;
+            }
             c.log(&format!("rolling {} back to {id}", l.subvolume.display()));
-            let r = restore::rollback(&l.dir.join(&id), &l.subvolume, now_s()).map_err(|e| e.to_string())?;
+            let r = restore::rollback(&l.dir.join(&id), &l.subvolume, now_s()).map_err(|e| e.to_string());
+            if let Some(u) = &view
+                && let Err(e) = sys.start_unit(u)
+            {
+                c.log(&format!("{u}: {e}"));
+            }
+            let r = r?;
+
             c.log(&format!(
                 "done; the previous content is kept as {} next to it (delete it when no longer needed). NFS clients must mount the share again.",
                 r.kept_as

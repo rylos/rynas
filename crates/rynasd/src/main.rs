@@ -189,11 +189,16 @@ fn open_config(args: &Args, system: Arc<dyn System>) -> std::io::Result<Opened> 
         (Arc::new(HostAccounts::new("/")), Arc::new(HostShares))
     };
     let users = Arc::new(UsersDomain::new(accounts.clone()));
-    let shares = Arc::new(SharesDomain::new(host, accounts).with_subvolumes(Arc::new(
-        rynasd::storage_ops::HostSubvolumes {
-            dry: args.dry_system,
-        },
-    )));
+    let shares = Arc::new(
+        SharesDomain::new(host, accounts)
+            .with_subvolumes(Arc::new(rynasd::storage_ops::HostSubvolumes {
+                dry: args.dry_system,
+            }))
+            .with_removed(Arc::new(rynas_services::removed::RemovedShares::in_dir(
+                &args.state_dir,
+            ))),
+    );
+
     // --dry-system: subvolumes probed on the host (read-only), snapshot directories logged
     let snap_host: Arc<dyn SnapshotHost> = if args.dry_system {
         Arc::new(MemorySnapshots::probing_host())

@@ -27,6 +27,7 @@ struct Env {
     acc: Arc<MemoryAccounts>,
     host: Arc<MemoryShares>,
     creator: Arc<TestCreator>,
+    removed: Arc<crate::removed::RemovedShares>,
     cfg: Config,
 }
 
@@ -52,6 +53,10 @@ impl crate::SubvolumeCreator for TestCreator {
         self.host
             .add_dir(path, Some("99999999-2222-4333-8444-555555555555"));
         Ok(())
+    }
+
+    fn volumes(&self) -> Vec<(String, String)> {
+        vec![("vol1".into(), "/srv/vol1".into())]
     }
 }
 
@@ -85,12 +90,17 @@ fn env() -> Env {
         host: host.clone(),
         calls: Mutex::new(Vec::new()),
     });
+    let removed = Arc::new(crate::removed::RemovedShares::memory());
     let cfg = Config::open(
         ConfigOptions::new(dir.path().join("state"), &root),
         sys.clone(),
         vec![
             Arc::new(UsersDomain::new(acc.clone())),
-            Arc::new(SharesDomain::new(host.clone(), acc.clone()).with_subvolumes(creator.clone())),
+            Arc::new(
+                SharesDomain::new(host.clone(), acc.clone())
+                    .with_subvolumes(creator.clone())
+                    .with_removed(removed.clone()),
+            ),
         ],
     )
     .unwrap();
@@ -101,8 +111,10 @@ fn env() -> Env {
         acc,
         host,
         creator,
+        removed,
         cfg,
     }
+
 }
 
 fn apply(e: &Env) -> Result<u64, ConfigError> {
@@ -224,6 +236,7 @@ fn shares_doc() -> SharesConfig {
                     perm(PrincipalKind::Group, "interns", Access::Deny),
                 ],
                 subvolume: None,
+                show_snapshots: false,
             },
             Share {
                 name: "media".into(),
@@ -649,6 +662,107 @@ fn a_share_can_ask_for_its_subvolume() {
         .volume = "vol1".into();
     d.shares.last_mut().unwrap().path = "/srv/other/x".into();
     assert!(bad(d).contains("is created at /srv/vol1/x"));
+}
+
+fn calls(e: &Env) -> Vec<String> {
+    std::mem::take(&mut e.sys.state().calls)
+}
+
+#[test]
+fn snapshot_folder_mount_units_follow_the_option() {
+    let e = env();
+    let mut doc = shares_doc();
+    let docs = &mut doc.shares[0];
+    docs.show_snapshots = true;
+    docs.smb.shadow_copy.snapshot_dir = "/srv/vol1/.snapshots/docs".into();
+    stage(&e, SHARES_KEY, &doc).unwrap();
+    stage(&e, USERS_KEY, &users_doc()).unwrap();
+    apply(&e).unwrap();
+    let unit = "/etc/systemd/system/srv-vol1-docs-\\x23snapshot.mount";
+    let text = read(&e.root, unit);
+    assert!(text.contains("What=/srv/vol1/.snapshots/docs\n"), "{text}");
+    assert!(text.contains("Where=/srv/vol1/docs/#snapshot\n"));
+    let target = read(&e.root, "/etc/systemd/system/rynas-snapshot-folders.target");
+    assert!(target.contains("Wants=srv-vol1-docs-\\x23snapshot.mount"));
+    let c = calls(&e);
+    let pos = |needle: &str| c.iter().position(|x| x.contains(needle));
+    let reload = pos("daemon-reload").expect("daemon-reload");
+    let enable = pos("enable --now rynas-snapshot-folders.target").expect("target enabled");
+    assert!(reload < enable, "{c:?}");
+    assert!(e.host.state().dir_log.contains(&"mkdir /srv/vol1/.snapshots/docs".to_string()));
+    // SMB shows the folder: not vetoed, excluded from the recycle bin
+    let smb = read(&e.root, "/etc/samba/smb.conf");
+    assert!(smb.contains("recycle:exclude_dir = #snapshot"), "{smb}");
+
+    // off again: the unit goes, it is stopped and its empty mount point removed
+    doc.shares[0].show_snapshots = false;
+    stage(&e, SHARES_KEY, &doc).unwrap();
+    apply(&e).unwrap();
+    assert!(!e.root.join(unit.trim_start_matches('/')).exists());
+    let c = calls(&e);
+    assert!(
+        c.iter().any(|x| x.contains("stop srv-vol1-docs-\\x23snapshot.mount")),
+        "{c:?}"
+    );
+    assert!(e.host.state().dir_log.contains(&"rmdir /srv/vol1/docs/#snapshot".to_string()));
+    let target = read(&e.root, "/etc/systemd/system/rynas-snapshot-folders.target");
+    assert!(!target.contains("Wants="));
+}
+
+#[test]
+fn deleted_shares_are_recorded_or_removed_with_their_folder() {
+    let e = env();
+    let mut doc = shares_doc();
+    stage(&e, SHARES_KEY, &doc).unwrap();
+    stage(&e, USERS_KEY, &users_doc()).unwrap();
+    apply(&e).unwrap();
+    calls(&e);
+    // "media" goes without its folder, "scans" with it
+    e.host.state().snapshots.insert(
+        "/srv/vol1/.snapshots/scans".into(),
+        vec!["scans.20261105T1200".into()],
+    );
+    doc.shares.retain(|s| s.name != "media" && s.name != "scans");
+    doc.remove_folders.push(rynas_api_types::FolderRemoval {
+        share: "scans".into(),
+        path: "/srv/vol1/scans".into(),
+        snapshots: vec![rynas_api_types::SnapshotSource {
+            dir: "/srv/vol1/.snapshots/scans".into(),
+            prefix: "scans".into(),
+        }],
+    });
+    stage(&e, SHARES_KEY, &doc).unwrap();
+    apply(&e).unwrap();
+    let c = calls(&e);
+    let smb_reload = c.iter().position(|x| x.contains("reload smbd")).unwrap();
+    let snap = c
+        .iter()
+        .position(|x| x.contains("btrfs subvolume delete /srv/vol1/.snapshots/scans/scans.20261105T1200"))
+        .expect("snapshot deleted");
+    let rm = c
+        .iter()
+        .position(|x| x.contains("rm -rf --one-file-system --preserve-root=all -- /srv/vol1/scans"))
+        .expect("folder deleted");
+    assert!(smb_reload < snap && snap < rm, "{c:?}");
+    assert!(!c.iter().any(|x| x.contains("/srv/vol1/media") && x.starts_with("run ")));
+    let rec = e.removed.find("/srv/vol1/media").expect("media recorded");
+    assert_eq!(rec.share.permissions.len(), 1);
+    assert!(e.removed.find("/srv/vol1/scans").is_none());
+
+    // a removal entry for a share that still exists is dropped by validation
+    let mut again = doc.clone();
+    again.remove_folders.push(rynas_api_types::FolderRemoval {
+        share: "docs".into(),
+        path: "/srv/vol1/docs".into(),
+        snapshots: Vec::new(),
+    });
+    stage(&e, SHARES_KEY, &again).unwrap();
+    // normalized away: nothing differs from the applied document
+    let pending = e.cfg.pending_value("admin", SHARES_KEY).unwrap().flatten();
+    let staged: SharesConfig = pending
+        .map(|v| serde_json::from_value(v).unwrap())
+        .unwrap_or_default();
+    assert!(staged.remove_folders.iter().all(|r| r.share != "docs"));
 }
 
 #[test]

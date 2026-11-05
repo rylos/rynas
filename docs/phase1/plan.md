@@ -416,8 +416,12 @@ applied it), next to the system state. Session, CSRF and error rules are those o
 | GET/PUT | `/api/v1/services/smb` | `SmbSettings` | `SmbState` {settings, pending, running} |
 | POST | `/api/v1/services/smb/recycle-cleanup?share=&days=` | — | 202 `TaskStarted` (task `smb.recycle-cleanup`) |
 | GET/PUT | `/api/v1/services/nfs` | `NfsSettings` | `NfsState` {settings, pending, running} |
-| GET/POST | `/api/v1/shares` | `Share` | `Vec<ShareView>` {share, status: {pending?, path_ok, fs_type, subvolume, warnings}} / 201 `ShareView` |
-| GET/PUT/DELETE | `/api/v1/shares/{name}` | `Share` (name cannot change; a new path gets a new fsid) | `ShareView` / `StagedChanges` |
+| GET/POST | `/api/v1/shares` | `Share` | `Vec<ShareView>` {share, status: {pending?, path_ok, fs_type, subvolume, warnings, warning_items [{code, args}]}} / 201 `ShareView` |
+| GET/PUT/DELETE | `/api/v1/shares/{name}` | `Share` (name cannot change; a new path gets a new fsid). DELETE `?remove_folder=true&confirm={name}` also stages the deletion of the folder (with its snapshots and recycle bin, at the end of the apply) and of its snapshot jobs and their scheduler tasks | `ShareView` / `StagedChanges`; 400 `confirmation_required`, 409 `conflict` when the plan forbids it |
+| POST | `/api/v1/shares/plan/delete` | `ShareDeletePlanRequest` {share} | `FolderDeletePlan` {path, share?, subvolume, size_bytes, size_partial, snapshots, recycle_bin, usages [{kind, name}], allowed, blockers} (no side effect) |
+| GET | `/api/v1/folders` | — | `Vec<UnsharedFolder>` {volume, name, path, subvolume, size_bytes?, size_partial, snapshots, removed_at_ms?, previous?}: top-level folders of the rynas volumes no share uses |
+| POST | `/api/v1/folders/plan/delete` | `FolderRef` {volume, name} | `FolderDeletePlan` |
+| DELETE | `/api/v1/folders/{volume}/{name}?confirm={name}` | — | 202 `TaskStarted` (task `shares.folder-delete`: snapshots, folder, recycle bin); 400 `confirmation_required`, 409 `conflict` |
 | GET | `/api/v1/shares/{name}/effective?principal=alice` (or `@group`) | — | `EffectivePermission` {access none/ro/rw/deny, sources [{kind, name, access, decisive}], explanation} |
 | GET | `/api/v1/config/drift` | — | `DriftReport` gains `state: Vec<StateDrift>` {key, object, kind, detail}: `unmanaged`, `missing`, `mismatch`, `missing_in_samba`, `missing_in_passwd` |
 
@@ -444,7 +448,21 @@ Users and groups (`users` key, `UsersConfig` {users, groups, remove_homes}):
 - Rollback of a failed apply reconciles back to the previous value; a home removed by `userdel -r`
   cannot come back.
 
-Shares (`shares` key, `SharesConfig` {smb, nfs, shares}):
+Shares (`shares` key, `SharesConfig` {smb, nfs, shares, remove_folders}):
+- **Snapshot folder** (`show_snapshots`, off by default): a read-only bind mount of the share's
+  snapshot directory (the job's `snapshot_dir`, wired into `smb.shadow_copy`) at
+  `<share>/#snapshot`, as a managed systemd mount unit pulled in by
+  `rynas-snapshot-folders.target` (survives reboots; rynasd's own mount namespace is private).
+  Not vetoed over SMB while shown, `recycle:exclude_dir`; NFS clients see it with `crossmnt`.
+  A rollback of the share unmounts and mounts it again. Design: `rynas_services::snapview` and
+  `docs/research/snapshots-replication.md` ("Snapshots inside the share").
+- **Deleting a share with its folder** (`remove_folders` [{share, path, snapshots [{dir,
+  prefix}]}]): runs at the end of the reconcile, after smbd and the exports stopped using the
+  folder: snapshot folder unmounted, `btrfs subvolume delete` of every snapshot, then
+  `btrfs subvolume delete --recursive` (subvolume) or `rm -rf --one-file-system` (directory).
+  Only folders directly on a rynas volume (`/<volume>/<name>`); a deleted folder cannot come back
+  on rollback. A share deleted without its folder is recorded with its settings in
+  `<state>/shares-removed.json` (200 entries) for "Unshared folders" → "Share again".
 - A share points at an **existing directory** on a local filesystem (network/FUSE refused, system
   paths refused, `..`/`//` refused), or asks for its subvolume (`subvolume` {volume,
   compression}: path `/<volume>/<name>`, created by the apply through the `SubvolumeCreator`
