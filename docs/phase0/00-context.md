@@ -23,6 +23,9 @@ server. It is built first for **synodeb** (Debian 13 on the Synology DS923+/DS92
 | License | "Orlok style" (BSL 1.1 + grant for personal/non-commercial use) |
 | Business model | like Proxmox: free community repo + paid business repo |
 | Method | small, well-defined work units; symbol-level code navigation |
+| Feature design | every new feature starts with research of the best NAS systems and tools and merges their best ideas (no reinventing); the choice is written in `docs/research/` |
+| Neutral product | the UI never compares rynas with other systems ("like DSM", "as in TrueNAS"…) and never names another product as a reference |
+| Generic first | every feature works on plain Debian; hardware or platform plugins (Synology, synodeb) add backends and screens only where that hardware is present: no screen, tab, hint or text about it elsewhere |
 
 ## Starting material (the maintainer's projects)
 

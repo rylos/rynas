@@ -201,6 +201,12 @@ first, reviewed, then used.
   the drive label); filesystem/volume usage and memory use `bytes` (IEC). The same quantity is shown with
   the same helper on every page.
 
+- G8c MUST: no comparison with other products in user-visible text ("like DSM", "DSM's default",
+  "as in Windows Server"…): describe what rynas does. Reviewers grep the dictionary for product names.
+- G8d MUST: hardware/platform-specific screens, tabs, hints and texts (Synology, synodeb, synohwd,
+  synodeb-ups, synodeb-dom) appear only when that plugin/backend is present on the machine; a generic
+  machine sees neither the screen nor a "not a Synology"/"needs synodeb" placeholder.
+
 ### 2.4 Accessibility
 - G10 MUST: every control has an accessible name (label, `aria-label` via `tr`), focus is visible
   (`:focus-visible` token outline), dialogs trap focus and restore it on close, `Esc` closes overlays.
