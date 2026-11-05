@@ -758,12 +758,25 @@ fn main() -> std::io::Result<()> {
             if args.dry_system { ", dry system" } else { "" },
         );
         // with the peer credentials of each connection: root-only routes check them
-        rynasd::server::serve(
-            PeerCheckedListener::new(listener, allowed),
-            router(state),
-            shutdown_signal(),
-        )
-        .await?;
+        // event streams (rynas-web's /events proxy) never hang up by themselves: graceful
+        // shutdown waits for them, so give open connections a moment and then exit (without
+        // this systemd waits TimeoutStopSec and kills the daemon: a "failed" unit on restart)
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let signal = async move {
+            shutdown_signal().await;
+            let _ = stop_tx.send(());
+        };
+        let server = rynasd::server::serve(PeerCheckedListener::new(listener, allowed), router(state), signal);
+        tokio::select! {
+            r = server => r?,
+            _ = async {
+                if stop_rx.await.is_ok() {
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => tracing::info!("shutdown: closing open streams"),
+        }
         if own_socket {
             let _ = std::fs::remove_file(&args.socket);
         }
