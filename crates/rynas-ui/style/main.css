@@ -740,7 +740,7 @@ kbd {
 .chassis-brand { display: flex; flex-direction: column; justify-content: space-between; align-items: center; padding: var(--s-1) var(--s-2); min-width: 56px; }
 .chassis-model { writing-mode: vertical-rl; transform: rotate(180deg); font-weight: 700; letter-spacing: .12em; font-size: var(--fs-13); color: var(--chassis-text-2); }
 .chassis-top { display: flex; flex-direction: column; align-items: center; gap: var(--s-4); }
-.chassis-led { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.chassis-led { display: flex; flex-direction: column; align-items: center; gap: var(--s-2); }
 .chassis-led-label { font-size: var(--fs-12); font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--chassis-text-2); }
 .chassis-body { display: flex; flex-direction: column; gap: var(--s-3); flex: 1; min-width: 0; }
 .bays { display: grid; grid-template-columns: repeat(var(--bays), minmax(0, 13.5rem)); gap: var(--s-3); min-width: 0; }
