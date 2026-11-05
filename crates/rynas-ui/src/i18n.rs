@@ -1383,7 +1383,7 @@ dict! {
     "eff.save_first" => "Save the shared folder to check effective permissions.", "Salva la cartella condivisa per verificare le autorizzazioni effettive.";
     "eff.none" => "No access (not set)", "Nessun accesso (non impostato)";
     "eff.no_source" => "No entry of the matrix applies.", "Nessuna voce della tabella si applica.";
-    "eff.decisive" => "Decides", "Decide";
+    "eff.decisive" => "Sets the result", "Determina il risultato";
     "eff.rule" => "No access wins over Read & write, which wins over Read only.", "Nessun accesso prevale su Lettura e scrittura, che prevale su Sola lettura.";
     // file services
     "svc.title" => "File Services", "Servizi file";
