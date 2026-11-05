@@ -56,15 +56,15 @@
   --scrim: rgba(26, 27, 38, .32);
   --qr-bg: #ffffff;
   --qr-fg: #1a1b26;
-  --chassis: #2a2c37;
-  --chassis-2: #1f2029;
-  /* the chassis drawing is always dark: its text, bays and LEDs */
-  --led-ok: #73daca; --led-warn: #e0af68; --led-err: #f7768e; --led-unknown: #a9b1d6;
-  --led-green: #3fd68f; --led-orange: #ff9e3b; --led-off: #565f89;
-  --chassis-text: #c0caf5; --chassis-text-2: #a9b1d6; --chassis-text-3: #868fb8;
-  --chassis-hi: rgba(255, 255, 255, .06); --chassis-shadow: rgba(0, 0, 0, .18);
-  --bay: #343849; --bay-2: #262936; --bay-border: #3b4261; --bay-border-hover: #6b7399;
-  --bay-empty: #22242f; --bay-empty-2: #1d1f28; --bay-grill: #1a1b26;
+  /* chassis drawing, light case: text ≥ 4.5:1 and LEDs/borders ≥ 3:1 on the bay tiles */
+  --chassis: #dfe1e8;
+  --chassis-2: #d0d3dc;
+  --led-ok: #1f6f61; --led-warn: #7f5300; --led-err: #8c4351; --led-unknown: #55586a;
+  --led-green: #13874b; --led-orange: #b85700; --led-off: #a4a8b6;
+  --chassis-text: #343b58; --chassis-text-2: #40434f; --chassis-text-3: #55586a;
+  --chassis-hi: rgba(255, 255, 255, .7); --chassis-line: rgba(52, 59, 88, .16); --chassis-shadow: rgba(26, 27, 38, .14);
+  --bay: #fbfcfd; --bay-2: #eceef3; --bay-border: #737788; --bay-border-hover: #2959aa;
+  --bay-empty: #e3e5eb; --bay-empty-2: #d6d9e1; --bay-grill: #a4a8b6;
   --on-badge: #ffffff; --on-warn-badge: #1a1b26;
   --border-raised: var(--border);
   --shadow-up: 0 -4px 16px rgba(0, 0, 0, .04);
@@ -126,9 +126,16 @@
   --shadow-pop: 0 20px 60px rgba(0, 0, 0, .55), 0 0 0 1px #3b4261;
   --glass: rgba(31, 35, 53, .78);
   --scrim: rgba(0, 0, 0, .5);
-  --chassis: #16161e;
   --track: rgba(192, 202, 245, .1);
+  /* chassis drawing, dark case */
+  --chassis: #16161e;
   --chassis-2: #0f0f15;
+  --led-ok: #73daca; --led-warn: #e0af68; --led-err: #f7768e; --led-unknown: #a9b1d6;
+  --led-green: #3fd68f; --led-orange: #ff9e3b; --led-off: #565f89;
+  --chassis-text: #c0caf5; --chassis-text-2: #a9b1d6; --chassis-text-3: #868fb8;
+  --chassis-hi: rgba(255, 255, 255, .06); --chassis-line: rgba(255, 255, 255, .06); --chassis-shadow: rgba(0, 0, 0, .18);
+  --bay: #343849; --bay-2: #262936; --bay-border: #3b4261; --bay-border-hover: #6b7399;
+  --bay-empty: #22242f; --bay-empty-2: #1d1f28; --bay-grill: #1a1b26;
   --on-badge: #1a1b26;
   --border-raised: #3b4261;
 }
@@ -717,12 +724,13 @@ kbd {
 .temp-row { display: grid; grid-template-columns: 110px 1fr 56px; align-items: center; gap: var(--s-3); font-size: var(--fs-13); }
 .temp-val { text-align: right; font-weight: 600; color: var(--tone); }
 
-/* storage page: chassis */
-/* the drawing fits its card (G7): the bays wrap to a second row instead of scrolling sideways,
-   and below 768 px the model name runs across the top instead of down the side */
-.chassis-wrap { padding: var(--s-1) var(--s-1) var(--s-2); }
+/* chassis drawing (src/chassis.rs: Storage and Hardware › Synology) */
+/* the bays sit side by side as on the unit (--bays columns, at most 216 px each, the M.2 slots
+   share the same width below them); in a narrow card they wrap two per row instead of scrolling
+   sideways (G7), and below 768 px the model name runs across the top instead of down the side */
+.chassis-wrap { padding: var(--s-1) var(--s-1) var(--s-2); container-type: inline-size; }
 .chassis {
-  display: flex; gap: var(--s-4); min-width: 0;
+  display: flex; gap: var(--s-4); width: fit-content; max-width: 100%; min-width: 0;
   padding: var(--s-4);
   border-radius: 14px;
   background: linear-gradient(180deg, var(--chassis), var(--chassis-2));
@@ -732,19 +740,20 @@ kbd {
 .chassis-brand { display: flex; flex-direction: column; justify-content: space-between; align-items: center; padding: var(--s-1) var(--s-2); min-width: 56px; }
 .chassis-model { writing-mode: vertical-rl; transform: rotate(180deg); font-weight: 700; letter-spacing: .12em; font-size: var(--fs-13); color: var(--chassis-text-2); }
 .chassis-power { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--led-green); box-shadow: 0 0 8px var(--led-green); }
+.chassis-leds { display: flex; flex-direction: column; align-items: center; gap: var(--s-3); }
 .chassis-body { display: flex; flex-direction: column; gap: var(--s-3); flex: 1; min-width: 0; }
-.bays { display: flex; flex-wrap: wrap; gap: var(--s-3); min-width: 0; }
+.bays { display: grid; grid-template-columns: repeat(var(--bays), minmax(0, 13.5rem)); gap: var(--s-3); min-width: 0; }
 /* M.2 slots: on the DS920+ they sit on the bottom, so a short row of compact tiles below the bays */
-.m2-slots { padding-top: var(--s-3); border-top: 1px solid var(--chassis-hi); }
-.bays.m2-slots > * { flex-basis: 240px; }
+.bays.m2-slots { grid-template-columns: repeat(var(--m2), minmax(0, 1fr)); padding-top: var(--s-3); border-top: 1px solid var(--chassis-line); }
+@container (max-width: 640px) { .bays, .bays.m2-slots { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .bay.m2 { min-height: 0; gap: var(--s-1); }
 .bay.m2 .bay-num { font-size: var(--fs-13); }
 .bay.m2 .bay-info { flex-direction: row; flex-wrap: wrap; align-items: center; column-gap: var(--s-3); }
 .bay.m2 .bay-size { font-size: var(--fs-13); }
 .bay.m2 .bay-model { flex-basis: 100%; }
 .bay.m2 .bay-temp { margin-top: 0; }
-/* the flex items are the bays or their list-item wrappers (bays that are buttons) */
-.bays > * { flex: 0 1 150px; min-width: 120px; }
+.bays > [role="listitem"] { display: flex; min-width: 0; }
+.bays > [role="listitem"] > .bay { flex: 1; min-width: 0; }
 .bay {
   position: relative; display: flex; flex-direction: column; gap: var(--s-2);
   width: 100%; min-height: 230px; padding: var(--s-3);
@@ -1268,8 +1277,6 @@ kbd {
   .chassis { flex-direction: column; gap: var(--s-3); padding: var(--s-3); }
   .chassis-brand { flex-direction: row; min-width: 0; padding: 0 var(--s-1); }
   .chassis-model { writing-mode: horizontal-tb; transform: none; }
-  .bays > * { flex: 1 1 120px; }
-  .bays.m2-slots > * { flex-basis: 120px; }
   .bay { min-height: 0; }
   .hw-mini { grid-template-columns: 1fr; }
   .palette { top: var(--s-2); }
@@ -1337,8 +1344,11 @@ kbd {
 }
 a.vol-card:hover { box-shadow: var(--shadow-2); transform: translateY(-1px); }
 .vol-card.locked { --tone: var(--info); }
-.vol-card-top { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; }
-.vol-card-name { font-weight: 600; font-size: var(--fs-16); color: var(--text); }
+/* name and health pill on one line (the name shortens), level and encryption chips below */
+.vol-card-top { display: flex; align-items: center; gap: var(--s-2); min-width: 0; }
+.vol-card-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; font-size: var(--fs-16); color: var(--text); }
+.vol-card-tags { display: flex; flex-wrap: wrap; gap: var(--s-1); }
+.vol-card-tags:empty { display: none; }
 .vol-card-usage { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s-2); }
 .vol-card-pct { font-size: var(--fs-24); font-weight: 600; letter-spacing: -.01em; }
 .vol-card-foot { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; }
@@ -1347,8 +1357,6 @@ a.vol-card:hover { box-shadow: var(--shadow-2); transform: translateY(-1px); }
 /* drive cards and bays become buttons that open the drawer */
 button.disk-card { text-align: left; width: 100%; transition: border-color var(--t-fast), background var(--t-fast); }
 button.disk-card:hover { border-color: var(--border-strong); background: var(--surface-hover); }
-.bays > [role="listitem"]:not(.bay) { display: flex; }
-.bays > [role="listitem"]:not(.bay) > .bay { flex: 1; min-width: 0; }
 button.bay { text-align: left; cursor: pointer; }
 .bay-health { display: inline-flex; align-items: center; gap: var(--s-1); font-weight: 600; color: var(--led-unknown); }
 .bay-health.ok { color: var(--led-ok); } .bay-health.warn { color: var(--led-warn); } .bay-health.err { color: var(--led-err); }
@@ -1562,7 +1570,6 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .hw-tabs .tabs { margin: 0; border-bottom: 0; position: static; }
 .hw-panel { display: flex; flex-direction: column; gap: var(--gap); }
 .hw-panel[hidden] { display: none; }
-.syn-leds { display: flex; flex-direction: column; align-items: center; gap: var(--s-3); }
 .bay.leds-off .bay-led { background: var(--led-off); box-shadow: none; animation: none; }
 .bay.identifying .bay-led { background: var(--led-orange); box-shadow: 0 0 8px var(--led-orange); animation: led-blink 1s steps(2) infinite; }
 .bay .bay-id { margin-top: var(--s-2); align-self: flex-start; color: var(--chassis-text); border-color: var(--bay-border); }

@@ -27,10 +27,11 @@ use rynas_api_types::storage::{
 };
 
 use crate::api;
+use crate::chassis;
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::live::use_live;
-use crate::ui::{self, EmptyState, ErrorBox, Meter, PageHeader, Skeleton, Status, Tone, temp_tone, usage_tone};
+use crate::ui::{self, EmptyState, ErrorBox, Meter, PageHeader, Skeleton, Status, Tone, usage_tone};
 
 // ------------------------------------------------------------------ store
 
@@ -421,6 +422,8 @@ pub fn Storage() -> impl IntoView {
     let bays = Memo::new(move |_| live.hardware.with(|h| h.as_ref().map(|h| h.bays.clone()).unwrap_or_default()));
     let m2 = Memo::new(move |_| live.hardware.with(|h| h.as_ref().map(|h| h.m2.clone()).unwrap_or_default()));
     let model = Memo::new(move |_| live.hardware.with(|h| h.as_ref().map(|h| h.model.clone()).unwrap_or_default()));
+    let status_led = Memo::new(move |_| live.hardware.with(|h| h.as_ref().and_then(|h| h.status_led.clone())));
+    let has_bays = Memo::new(move |_| bays.with(|b| !b.is_empty()));
     let vols = Memo::new(move |_| volumes(s));
     let free = Memo::new(move |_| free_disks(s).len());
     let selected = RwSignal::new(None::<String>);
@@ -461,12 +464,13 @@ pub fn Storage() -> impl IntoView {
                 <section class="card widget w-12" style="--i:1">
                     <h2 class="section-title">
                         <Icon icon=icons::BOX size=16 />
-                        {move || if bays.with(Vec::is_empty) { t("sto.generic") } else { t("sto.chassis") }}
+                        {move || if has_bays.get() { t("sto.chassis") } else { t("sto.generic") }}
                     </h2>
-                    {move || {
-                        let disks = s.disks.get().unwrap_or_default();
-                        let b = bays.get();
-                        if b.is_empty() { disk_grid(disks, selected) } else { chassis(model.get(), b, m2.get(), disks, selected) }
+                    // built once per kind: the chassis follows the bays and drives by itself
+                    {move || if has_bays.get() {
+                        chassis_view(s, bays, m2, model, status_led, selected)
+                    } else {
+                        (move || disk_grid(s.disks.get().unwrap_or_default(), selected)).into_any()
                     }}
                 </section>
             </Show>
@@ -487,9 +491,9 @@ fn vol_card(v: Vol, unlock: RwSignal<Option<String>>) -> AnyView {
                 <div class="vol-card-top">
                     <span class="w-icon"><Icon icon=icons::KEY size=16 /></span>
                     <a class="vol-card-name" href=href>{v.id.clone()}</a>
-                    {level.map(|l| view! { <span class="chip accent">{l}</span> })}
                     <span class="row-end"><Status tone=Tone::Info text=t("sto.locked").to_string() /></span>
                 </div>
+                <div class="vol-card-tags">{level.map(|l| view! { <span class="chip accent">{l}</span> })}</div>
                 <p class="muted small">{tr("sto.locked_text")}</p>
                 <div class="vol-card-foot">
                     <span class="muted small tnum">{i18n::bytes_si(v.size)}</span>
@@ -515,9 +519,12 @@ fn vol_card(v: Vol, unlock: RwSignal<Option<String>>) -> AnyView {
             <div class="vol-card-top">
                 <span class="w-icon"><Icon icon=icons::DATABASE size=16 /></span>
                 <span class="vol-card-name">{v.id.clone()}</span>
+                <span class="row-end"><Status tone=tone text=t(key).to_string() /></span>
+            </div>
+            // level and encryption on their own line: the name and the health pill never wrap
+            <div class="vol-card-tags">
                 {level.map(|l| view! { <span class="chip accent">{l}</span> })}
                 {v.encrypted.then(|| view! { <span class="chip" title=t("sto.encrypted")><Icon icon=icons::KEY size=12 />{tr("sto.encrypted")}</span> })}
-                <span class="row-end"><Status tone=tone text=t(key).to_string() /></span>
             </div>
             {if sized {
                 view! {
@@ -564,6 +571,27 @@ pub fn sync_row(s: &rynas_api_types::storage::SyncProgress) -> AnyView {
     .into_any()
 }
 
+/// The shared chassis drawing with the provider's bays and M.2 slots and the inventory's drives.
+fn chassis_view(s: Sto, bays: Memo<Vec<Bay>>, m2: Memo<Vec<M2Slot>>, model: Memo<String>, status_led: Memo<Option<String>>, selected: RwSignal<Option<String>>) -> AnyView {
+    let bay_slots = Memo::new(move |_| {
+        s.disks.with(|d| {
+            let d = d.as_deref().unwrap_or(&[]);
+            let mut v: Vec<_> = bays.with(|b| b.iter().map(|b| chassis::bay_slot(b.number, b.present, b.powered, b.asleep, b.celsius, b.device.clone(), d)).collect());
+            v.sort_by_key(|x| x.key);
+            v
+        })
+    });
+    let m2_slots = Memo::new(move |_| s.disks.with(|d| m2.with(|m| chassis::m2_slots(m, d.as_deref().unwrap_or(&[])))));
+    chassis::chassis(chassis::Chassis {
+        model: model.into(),
+        bays: bay_slots,
+        m2: m2_slots,
+        status_led: status_led.into(),
+        on_select: Some(Callback::new(move |name| selected.set(Some(name)))),
+        identify: None,
+    })
+}
+
 fn disk_line(d: &DiskSummary) -> String {
     format!("{} · {}", t(kind_key(d.kind)), i18n::bytes_si(d.size))
 }
@@ -601,58 +629,6 @@ fn disk_grid(disks: Vec<DiskSummary>, selected: RwSignal<Option<String>>) -> Any
     .into_any()
 }
 
-fn chassis(model: String, mut bays: Vec<Bay>, m2: Vec<M2Slot>, disks: Vec<DiskSummary>, selected: RwSignal<Option<String>>) -> AnyView {
-    bays.sort_by_key(|b| b.number);
-    let bays = bays.into_iter().map(|b| Slot {
-        title: b.number.to_string(),
-        name: format!("{} {}", t("sto.bay"), b.number),
-        present: b.present,
-        powered: b.powered,
-        asleep: b.asleep,
-        celsius: b.celsius,
-        disk: b.device.as_ref().and_then(|dev| disks.iter().find(|d| &d.name == dev)).cloned(),
-        device: b.device,
-        m2: false,
-    });
-    let m2 = m2.into_iter().map(|s| {
-        let disk = s.device.as_ref().and_then(|dev| disks.iter().find(|d| &d.name == dev)).cloned();
-        Slot {
-            title: m2_label(s.number),
-            name: m2_label(s.number),
-            present: s.present,
-            powered: s.present,
-            // NVMe drives have no provider sleep flag: the disk's own power state
-            asleep: disk.as_ref().is_some_and(|d| asleep(d.power_state)),
-            celsius: s.celsius,
-            disk,
-            device: s.device,
-            m2: true,
-        }
-    });
-    let m2: Vec<Slot> = m2.collect();
-    view! {
-        <div class="chassis-wrap">
-            <div class="chassis">
-                <div class="chassis-brand">
-                    <span class="chassis-model">{model}</span>
-                    <span class="chassis-power" aria-hidden="true"></span>
-                </div>
-                <div class="chassis-body">
-                    <div class="bays" role="list" aria-label=tr("sto.bays")>
-                        {bays.map(|s| slot_tile(s, selected)).collect_view()}
-                    </div>
-                    {(!m2.is_empty()).then(|| view! {
-                        <div class="bays m2-slots" role="list" aria-label=tr("sto.m2_slots")>
-                            {m2.into_iter().map(|s| slot_tile(s, selected)).collect_view()}
-                        </div>
-                    })}
-                </div>
-            </div>
-        </div>
-    }
-    .into_any()
-}
-
 /// "M.2 1", or plain "M.2" when the provider does not know the physical slot.
 pub fn m2_label(n: Option<u32>) -> String {
     match n {
@@ -664,86 +640,6 @@ pub fn m2_label(n: Option<u32>) -> String {
 /// Where a disk sits, for the Bay columns: "2" (bay 2), "M.2 1"; None when unknown.
 pub fn slot_text(d: &DiskSummary) -> Option<String> {
     d.bay.map(|b| b.to_string()).or_else(|| d.m2.map(|m| m2_label(m.number)))
-}
-
-/// One drive slot of the chassis drawing: a bay, or an M.2 slot (a compact tile).
-struct Slot {
-    /// Printed on the tile: "1", "M.2 1".
-    title: String,
-    /// Spoken: "Bay 1", "M.2 1".
-    name: String,
-    present: bool,
-    powered: bool,
-    asleep: bool,
-    celsius: Option<f32>,
-    disk: Option<DiskSummary>,
-    /// The provider's device name, shown when no drive summary matches it.
-    device: Option<String>,
-    m2: bool,
-}
-
-fn slot_tile(s: Slot, selected: RwSignal<Option<String>>) -> AnyView {
-    let (state_cls, state_key) = if !s.present {
-        ("vacant", "sto.empty_bay")
-    } else if !s.powered {
-        ("off", "sto.not_powered")
-    } else if s.asleep {
-        ("asleep", "sto.asleep")
-    } else {
-        ("active", "sto.active")
-    };
-    let class = format!("bay {state_cls}{}", if s.m2 { " m2" } else { "" });
-    let label = format!(
-        "{}: {}{}",
-        s.name,
-        t(state_key),
-        s.disk.as_ref().map(|d| format!(", {} {}, {}", d.model, i18n::bytes_si(d.size), t(health(d.health).1))).unwrap_or_default()
-    );
-    // M.2 slots have no drive tray: no grill
-    let grill = (!s.m2).then(|| view! { <div class="bay-grill" aria-hidden="true"></div> });
-    let Some(d) = s.disk.filter(|_| s.present) else {
-        return view! {
-            <div class=class role="listitem" aria-label=label>
-                <div class="bay-top"><span class="bay-num">{s.title}</span><span class="bay-led" aria-hidden="true"></span></div>
-                {grill}
-                <div class="bay-info">
-                    {s.device.filter(|_| s.present).map(|d| view! { <span class="bay-dev mono">{d}</span> })}
-                    <span class="bay-state">{t(state_key)}</span>
-                </div>
-            </div>
-        }
-        .into_any();
-    };
-    let (htone, hkey) = health(d.health);
-    let name = d.name.clone();
-    let tid = if s.m2 { "nvme" } else { "bay" };
-    view! {
-        <div role="listitem">
-            <button class=class type="button" aria-label=label on:click=move |_| selected.set(Some(name.clone()))>
-                <div class="bay-top">
-                    <span class="bay-num">{s.title}</span>
-                    <span class="bay-led" aria-hidden="true"></span>
-                </div>
-                {grill}
-                <div class="bay-info">
-                    <span class="bay-dev mono">{d.name.clone()}</span>
-                    <span class="bay-size">{i18n::bytes_si(d.size)}</span>
-                    <span class="bay-model" title=d.model.clone()>{d.model.clone()}</span>
-                    <span class="bay-state">
-                        {s.asleep.then(|| view! { <Icon icon=icons::MOON_STAR size=12 /> })}
-                        {t(state_key)}
-                    </span>
-                    <span class=format!("bay-health {}", htone.class())><Icon icon=htone.icon() size=12 />{t(hkey)}</span>
-                    {s.celsius.or(d.temperature_c).map(|c| view! {
-                        <span class=format!("bay-temp {}", temp_tone(tid, c).class())>
-                            <Icon icon=icons::THERMOMETER size=12 />{i18n::celsius(c)}
-                        </span>
-                    })}
-                </div>
-            </button>
-        </div>
-    }
-    .into_any()
 }
 
 /// One-line description of a disk for pickers: "sdb · HDD · 4.0 TB · WDC WD40EFRX (bay 2)".

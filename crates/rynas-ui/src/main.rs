@@ -4,6 +4,7 @@ mod alerts;
 mod api;
 mod auth;
 mod chart;
+mod chassis;
 mod config;
 #[cfg(feature = "demo")]
 mod demo;
