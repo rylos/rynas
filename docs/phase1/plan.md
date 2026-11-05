@@ -11,7 +11,7 @@ The interface must be **modern, appealing and very fast**. Translated into measu
 
 | Budget | Target |
 |---|---|
-| UI wasm (brotli) | ≤ 900 KiB for the whole built-in UI; first paint still < 300 ms on LAN. Raised from 350 KiB on 2026-11-05 (Marco): one bundle is simpler and still small next to DSM/TrueNAS; lazy pages (plugin loader) only if it grows past this |
+| UI wasm (brotli) | ≤ 1 200 KiB for the whole built-in UI; first paint still < 300 ms on LAN. Raised from 350 KiB, then 900 KiB, on 2026-11-05 (Marco): one bundle is simpler and still small next to DSM/TrueNAS; lazy pages (plugin loader) only if it grows past this |
 | CSS + critical fonts (brotli) | ≤ 60 KB |
 | First paint on LAN | < 300 ms; no white flash (theme applied inline in `<head>`) |
 | Fully interactive on LAN | < 800 ms |

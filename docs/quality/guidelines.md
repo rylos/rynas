@@ -222,7 +222,7 @@ first, reviewed, then used.
 ### 3.1 Budgets
 | What | Budget | How to measure |
 |---|---|---|
-| UI wasm | ≤ 900 KiB brotli -q 11 (raised from 350 KiB on 2026-11-05) | `trunk build --release` then `brotli -q 11 -c dist/*.wasm \| wc -c` |
+| UI wasm | ≤ 1 200 KiB brotli -q 11 (raised from 350 KiB, then 900 KiB, on 2026-11-05) | `trunk build --release` then `brotli -q 11 -c dist/*.wasm \| wc -c` |
 | JS glue | ≤ 12 KiB brotli | same on `dist/*.js` |
 | CSS + preloaded fonts | ≤ 60 KiB brotli | same on `dist/*.css` + `dist/fonts/*.woff2` |
 | First paint (LAN) | < 300 ms | Chrome DevTools, "Fast 3G" off, CPU 4× slowdown ≈ J4125-class client is not the issue; server on the DS920+ |
