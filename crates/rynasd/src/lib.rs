@@ -28,3 +28,4 @@ pub mod server;
 pub mod services;
 pub mod snapshots;
 pub mod storage_ops;
+pub mod ups;

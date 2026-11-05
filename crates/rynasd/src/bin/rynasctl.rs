@@ -19,6 +19,9 @@
 //!   (`rynas-net-watchdog.timer`), synohwd's reset-button command, a confirmation from the
 //!   console. They work without rynasd (they read and write `/var/lib/rynas/net` under its
 //!   lock) and then ask rynasd to collect the notifications they queued.
+//! - `rynasctl ups safe-mode <reason>`: synodeb's pre-Safe Mode hook
+//!   (`/etc/synodeb/ups-pre-safemode.d/50-rynas`); rynasd cancels its tasks, stops running
+//!   scheduler units and records the reason. Always exits 0: Safe Mode must go on.
 //!
 //! Talks HTTP/1.1 to rynasd's socket (root is always allowed by `SO_PEERCRED`).
 
@@ -67,6 +70,11 @@ enum Command {
         #[command(subcommand)]
         action: PowerCmd,
     },
+    /// UPS.
+    Ups {
+        #[command(subcommand)]
+        action: UpsCmd,
+    },
     /// Network safety net.
     Net {
         /// rynasd's state directory (network revisions and trial marker below `net/`).
@@ -106,6 +114,13 @@ enum PowerCmd {
         #[arg(long, default_value = "rtcwake")]
         rtcwake: String,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum UpsCmd {
+    /// Before UPS Safe Mode: stop rynas tasks gracefully and record the reason (synodeb's
+    /// lowbatt, waittimeup, nocomm, fsd, shutdowncmd).
+    SafeMode { reason: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -405,6 +420,20 @@ fn snapshot_system(a: SnapshotAction) -> ExitCode {
     }
 }
 
+fn ups(socket: &PathBuf, cmd: UpsCmd) -> ExitCode {
+    let UpsCmd::SafeMode { reason } = cmd;
+    let body = serde_json::to_vec(&rynas_api_types::ups::SafeModeRequest { reason })
+        .unwrap_or_default();
+    match request(socket, "POST", "/v1/ups/safe-mode", Some(&body)) {
+        Ok(a) if a.status / 100 == 2 => {
+            println!("rynas: {}", String::from_utf8_lossy(&a.body).trim());
+        }
+        Ok(a) => eprintln!("rynasctl: Safe Mode: {}", a.error()),
+        Err(e) => eprintln!("rynasctl: Safe Mode: {e}"),
+    }
+    ExitCode::SUCCESS
+}
+
 fn power(socket: &PathBuf, cmd: PowerCmd) -> ExitCode {
     match cmd {
         PowerCmd::ScheduledShutdown { rule } => {
@@ -585,6 +614,7 @@ fn main() -> ExitCode {
         } => job_run(&args.socket, &id),
         Command::Snapshot { action } => snapshot_system(action),
         Command::Power { action } => power(&args.socket, action),
+        Command::Ups { action } => ups(&args.socket, action),
         Command::Net {
             state_dir,
             no_flush,

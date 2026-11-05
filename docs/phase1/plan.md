@@ -807,6 +807,38 @@ power state are never touched): settings applied and synohwd restarted, beeps th
 identify and restore of the LEDs, fan curves, the schedule with its task and timer, the alarm
 armed at apply and at every stop, the next times, a scheduled shutdown skipped while SMB files
 are open and done when idle, removal with no drift left.
+## API v1: UPS (P6)
+D-UPS, choices in `../research/ups.md`. Status from NUT's upsd, read by rynas-web (non-root);
+Safe Mode settings, battery test and the pre-Safe Mode hook in rynasd (`crates/rynasd/src/ups.rs`)
+over synodeb (`../synodeb-integration.md`, S2–S4).
+
+| Method | Path | Body | Answer |
+|---|---|---|---|
+| GET | `/api/v1/ups` | — | `UpsStatus` {link connected\|not_configured\|unreachable, name?, flags [OL, OB, LB, CHRG, DISCHRG, RB, FSD…], battery_charge_pct?, battery_runtime_s?, load_pct?, input_voltage_v?, output_voltage_v?, manufacturer?, model?, serial?, beeper?, battery_date?, test_result?, driver?, read_at_ms}; served by rynas-web (last reading if younger than 5 s) |
+| GET/PUT | `/api/v1/ups/settings` | `UpsSettings` {safemode_after_s? (60–86400, whole minutes; null = off), pre_safemode_timeout_s (10–900, default 120)} | `UpsSettingsState` {available, applied, pending?}; PUT stages `ups.safemode`; 404 `not_found` without synodeb |
+| POST | `/api/v1/ups/test` | `BatteryTestRequest` {test quick\|deep\|stop} | 202 `TaskStarted` (task `ups.test`); 404 without synodeb |
+
+- upsd `127.0.0.1:3493` (`rynas-web --upsd`), plain-text protocol `LIST UPS` + `LIST VAR <ups>`
+  (first UPS), 2 s bound, no login, no child process. Polled every 5 s only while an `/events`
+  stream listens (30 s while no UPS answers); `ups.status` on `/events` on change or every 60 s;
+  `resync` `{"stream":"ups"}`.
+- `ups.safemode` (only where `/etc/synodeb/ups.conf` exists): a `# BEGIN rynas ups` block with
+  `SAFEMODE_AFTER=<s>` (0 = off) and `PRE_SAFEMODE_TIMEOUT=<s>`; other assignments of the two
+  keys outside the block are dropped, the rest of the file stays synodeb's. No reload:
+  `synodeb-ups` reads the file at every event. Import: the shell's view (last assignment wins).
+  Safe Mode also always starts on NUT LOWBATT and upsmon OB+LB (synodeb), whichever comes first.
+- `ups.test`: `synodeb-ups test result` (before), `synodeb-ups test quick|deep|stop`, then the
+  result every 10 s until it changes to an outcome (quick ≤ 5 min, deep ≤ 3 h); "error",
+  "fail", "abort" fail the task; cancel sends `test stop`. `--dry-system` only logs.
+- Internal only (root peer, `rynasctl ups safe-mode <reason>` from
+  `/etc/synodeb/ups-pre-safemode.d/50-rynas`, shipped in the package):
+  `POST /v1/ups/safe-mode` {reason} → `SafeModeReport` {cancelled_tasks, stopped_units}:
+  critical notification "Safe Mode: <reason>" (category ups), running rynas tasks cancelled
+  (not `config.*`), running scheduler units stopped, all within 25 s. The hook is bounded to
+  40 s and exits 0 without doing anything when `rynasd.service` is not active.
+- Scheduled battery test: a Task Scheduler command task as root running `synodeb-ups test
+  quick` (no dedicated task action yet).
+
 ## API v1: network (P4)
 Crate `rynas-net` (D-NET, design in `../research/network.md`), served by `rynasd`
 (`crates/rynasd/src/network.rs`) and forwarded by `rynas-web` with the session user and the

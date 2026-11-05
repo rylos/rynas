@@ -696,6 +696,11 @@ kbd {
 .hw-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--s-4); }
 .hw-sum-item { display: flex; flex-direction: column; gap: var(--s-1); align-items: flex-start; }
 .hw-sum-item strong { font-size: var(--fs-16); }
+/* hardware › UPS */
+.ups-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); margin-bottom: var(--s-4); }
+.ups-flags { display: flex; flex-wrap: wrap; gap: var(--s-1); }
+.ups-kpis { margin-bottom: var(--s-4); }
+.ups-kpis .meter { width: 100%; }
 .led-big { display: flex; align-items: center; gap: var(--s-2); }
 .led-dot { width: 12px; height: 12px; border-radius: 50%; background: var(--text-disabled); }
 .led-dot.green, .led-dot.green-blink { background: var(--led-green); box-shadow: 0 0 10px var(--led-green); }

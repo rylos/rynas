@@ -8,8 +8,10 @@
 //!   (data `PendingEvent`: some changeset may have changed, re-read `/config/pending` with
 //!   `If-None-Match`), `notification`
 //!   (data `NotificationEvent`), `hardware.status` (data `HardwareStatus`: the latest one on
-//!   connect, then on every change and at least every [`crate::metrics::HW_REPEAT`]), and
-//!   `resync` with data `{"stream":"metrics"|"tasks"|"config"|"notifications"|"hardware"}` when the
+//!   connect, then on every change and at least every [`crate::metrics::HW_REPEAT`]),
+//!   `ups.status` (data `UpsStatus`, same rule with [`crate::ups::REPEAT`]; upsd is polled
+//!   only while a stream listens), and
+//!   `resync` with data `{"stream":"metrics"|"tasks"|"config"|"notifications"|"hardware"|"ups"}` when the
 //!   client missed events and must re-read that collection. The task and notification halves follow rynasd's streams
 //!   (`/v1/tasks/stream`, `/v1/notifications/stream`) and reconnect every [`TASKS_RETRY`]
 //!   while rynasd is away; the metrics half never stops.
@@ -93,6 +95,25 @@ fn hardware(st: &AppState) -> Events {
     Box::pin(head.chain(tail))
 }
 
+/// UPS readings as `ups.status`, starting with the latest one; `resync` after a lag.
+fn ups(st: &AppState) -> Events {
+    let rx = st.ups.subscribe();
+    let head = stream::iter(
+        st.ups
+            .latest_json()
+            .map(|j| Ok(Event::default().event("ups.status").data(&*j))),
+    );
+    let tail = stream::unfold(rx, |mut rx| async move {
+        let ev = match rx.recv().await {
+            Ok(j) => Event::default().event("ups.status").data(&*j),
+            Err(RecvError::Lagged(_)) => resync("ups"),
+            Err(RecvError::Closed) => return None,
+        };
+        Some((Ok(ev), rx))
+    });
+    Box::pin(head.chain(tail))
+}
+
 /// Ends `events` when the session `id` ends (logout, idle or absolute timeout).
 fn with_session(st: &AppState, id: rynas_auth::session::SessionId, events: Events) -> Events {
     let auth = st.auth.clone();
@@ -124,7 +145,7 @@ pub async fn events(
     let user = session.user.username.clone();
     let local: Events = Box::pin(stream::select(
         metrics(&st, "metrics.sample", true),
-        hardware(&st),
+        stream::select(hardware(&st), ups(&st)),
     ));
     let merged: Events = Box::pin(stream::select(
         local,

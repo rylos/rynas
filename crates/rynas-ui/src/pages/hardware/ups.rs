@@ -1,0 +1,472 @@
+//! Hardware › UPS (DSM Control Panel › Hardware & Power › UPS): live status from upsd
+//! (`/api/v1/ups`, then `ups.status` events), the Safe Mode settings of synodeb
+//! (`/api/v1/ups/settings`, staged like every configuration change), the battery test
+//! (`POST /api/v1/ups/test`, task `ups.test`) and the recent UPS notifications.
+//!
+//! Safe Mode also always starts on NUT low battery and on a critical UPS (OB+LB), whichever
+//! comes first: the form says so next to the timer, which only adds a trigger.
+
+use leptos::prelude::*;
+use leptos::task::spawn_local;
+use rynas_api_types::notify::Notification;
+use rynas_api_types::ups::*;
+
+use crate::api;
+use crate::form::{number_field, spinner, stale_notice, switch, Draft};
+use crate::i18n::{self, t, tr};
+use crate::icons::{self, Icon};
+use crate::live::use_live;
+use crate::toast::{saved_pending, toast};
+use crate::ui::{self, Confirm, EmptyState, Meter, Remote, Skeleton, Status, Tone, WidgetHead, confirm, status, text};
+
+const SETTINGS: &str = "/api/v1/ups/settings";
+const EVENTS: &str = "/api/v1/notifications?category=ups&limit=10";
+
+/// Overall state of a reading: tone and i18n key.
+pub fn state_of(u: &UpsStatus) -> (Tone, &'static str) {
+    match u.link {
+        UpsLink::Unreachable => (Tone::Unknown, "ups.st_unreachable"),
+        UpsLink::NotConfigured => (Tone::Unknown, "ups.st_none"),
+        UpsLink::Connected if u.has("FSD") => (Tone::Err, "ups.st_fsd"),
+        UpsLink::Connected if u.on_battery() && u.low_battery() => (Tone::Err, "ups.st_critical"),
+        UpsLink::Connected if u.low_battery() => (Tone::Err, "ups.st_low"),
+        UpsLink::Connected if u.on_battery() => (Tone::Warn, "ups.st_battery"),
+        UpsLink::Connected if u.has("RB") => (Tone::Warn, "ups.st_replace"),
+        UpsLink::Connected if u.has("OL") => (Tone::Ok, "ups.st_online"),
+        UpsLink::Connected => (Tone::Unknown, "ups.st_unknown"),
+    }
+}
+
+/// i18n key of a status flag (`None`: shown as is).
+fn flag_key(f: &str) -> Option<&'static str> {
+    Some(match f {
+        "OL" => "ups.f_ol",
+        "OB" => "ups.f_ob",
+        "LB" => "ups.f_lb",
+        "CHRG" => "ups.f_chrg",
+        "DISCHRG" => "ups.f_dischrg",
+        "RB" => "ups.f_rb",
+        "FSD" => "ups.f_fsd",
+        "BYPASS" => "ups.f_bypass",
+        "CAL" => "ups.f_cal",
+        "OVER" => "ups.f_over",
+        _ => return None,
+    })
+}
+
+fn flag_tone(f: &str) -> Tone {
+    match f {
+        "OL" | "CHRG" => Tone::Ok,
+        "OB" | "DISCHRG" | "RB" | "BYPASS" | "CAL" => Tone::Warn,
+        "LB" | "FSD" | "OVER" => Tone::Err,
+        _ => Tone::Info,
+    }
+}
+
+fn charge_tone(pct: f32) -> Tone {
+    if pct < 30.0 {
+        Tone::Err
+    } else if pct < 60.0 {
+        Tone::Warn
+    } else {
+        Tone::Ok
+    }
+}
+
+fn load_tone(pct: f32) -> Tone {
+    if pct >= 90.0 {
+        Tone::Err
+    } else if pct >= 70.0 {
+        Tone::Warn
+    } else {
+        Tone::Ok
+    }
+}
+
+fn volts(v: Option<f32>) -> String {
+    v.map(|v| format!("{} V", i18n::num(v as f64, 0))).unwrap_or_else(|| "—".into())
+}
+
+fn dash(v: Option<String>) -> String {
+    v.unwrap_or_else(|| "—".into())
+}
+
+fn kv(label: &'static str, value: AnyView) -> AnyView {
+    view! { <div class="kv"><dt>{tr(label)}</dt><dd>{value}</dd></div> }.into_any()
+}
+
+// ------------------------------------------------------------------ panel
+
+pub fn panel(_active: Signal<bool>) -> AnyView {
+    let live = use_live();
+    if live.ups.with_untracked(Option::is_none) {
+        live.refresh_ups();
+    }
+    let settings = Remote::<UpsSettingsState>::with_config(SETTINGS);
+    let events = Remote::<Vec<Notification>>::new(EVENTS);
+    // a new UPS notification: read the list again
+    Effect::new(move |prev: Option<u64>| {
+        let g = crate::notify::server().map_or(0, |n| n.generation.get());
+        if prev.is_some_and(|p| p != g) {
+            events.reload();
+        }
+        g
+    });
+    #[cfg(feature = "demo")]
+    if crate::auth::auth().phase.get_untracked() == crate::auth::Phase::Demo {
+        settings.data.set(Some(crate::demo::ups_settings()));
+        events.data.set(Some(crate::demo::ups_events()));
+    }
+    view! {
+        {status_card()}
+        <div class="grid">
+            {safemode_card(settings)}
+            {test_card(settings)}
+            {events_card(events)}
+        </div>
+    }
+    .into_any()
+}
+
+fn status_card() -> AnyView {
+    let live = use_live();
+    let u = live.ups;
+    let body = move || {
+        let Some(s) = u.get() else {
+            return view! { <Skeleton lines=4 /> }.into_any();
+        };
+        if s.link != UpsLink::Connected {
+            let (title, body) = if s.link == UpsLink::NotConfigured { ("ups.none_title", "ups.none_text") } else { ("ups.down_title", "ups.down_text") };
+            return view! {
+                <EmptyState icon=icons::BATTERY_CHARGING title=Signal::derive(move || t(title).to_string()) text=Signal::derive(move || t(body).to_string())>
+                    <button class="btn ghost" on:click=move |_| live.refresh_ups()><Icon icon=icons::REFRESH_CW size=16 />{tr("err.retry")}</button>
+                </EmptyState>
+            }
+            .into_any();
+        }
+        let (tone, key) = state_of(&s);
+        let charge = s.battery_charge_pct;
+        let load = s.load_pct;
+        let aria = format!(
+            "{}: {} · {}: {}",
+            t("ups.charge"),
+            charge.map(|c| i18n::pct(c as f64)).unwrap_or_else(|| "—".into()),
+            t("ups.runtime"),
+            s.battery_runtime_s.map(i18n::duration).unwrap_or_else(|| "—".into())
+        );
+        let flags = s.flags.iter().map(|f| {
+            let txt = flag_key(f).map(|k| t(k).to_string()).unwrap_or_else(|| f.clone());
+            status(flag_tone(f), txt)
+        }).collect_view();
+        view! {
+            <div class="ups-head">
+                <Status tone=tone text=t(key).to_string() />
+                <span class="ups-flags">{flags}</span>
+            </div>
+            <div class="hw-summary ups-kpis" role="img" aria-label=aria>
+                <div class="hw-sum-item">
+                    <span class="muted small">{tr("ups.charge")}</span>
+                    <strong class="tnum">{charge.map(|c| i18n::pct(c as f64)).unwrap_or_else(|| "—".into())}</strong>
+                    {charge.map(|c| view! { <Meter pct=c as f64 tone=Signal::stored(charge_tone(c)) /> })}
+                </div>
+                <div class="hw-sum-item">
+                    <span class="muted small">{tr("ups.runtime")}</span>
+                    <strong class="tnum">{s.battery_runtime_s.map(i18n::duration).unwrap_or_else(|| "—".into())}</strong>
+                </div>
+                <div class="hw-sum-item">
+                    <span class="muted small">{tr("ups.load")}</span>
+                    <strong class="tnum">{load.map(|l| i18n::pct(l as f64)).unwrap_or_else(|| "—".into())}</strong>
+                    {load.map(|l| view! { <Meter pct=l as f64 tone=Signal::stored(load_tone(l)) /> })}
+                </div>
+                <div class="hw-sum-item">
+                    <span class="muted small">{tr("ups.input")}</span>
+                    <strong class="tnum">{volts(s.input_voltage_v)}</strong>
+                </div>
+                <div class="hw-sum-item">
+                    <span class="muted small">{tr("ups.output")}</span>
+                    <strong class="tnum">{volts(s.output_voltage_v)}</strong>
+                </div>
+            </div>
+            <dl class="kvs">
+                {kv("ups.manufacturer", text(dash(s.manufacturer.clone())))}
+                {kv("f.model", text(dash(s.model.clone())))}
+                {kv("sto.serial", view! { <span class="mono">{dash(s.serial.clone())}</span> }.into_any())}
+                {s.beeper.clone().map(|b| {
+                    let k = match b.as_str() { "enabled" => "ups.beeper_on", "disabled" => "ups.beeper_off", "muted" => "ups.beeper_muted", _ => "" };
+                    kv("ups.beeper", text(if k.is_empty() { b } else { t(k).to_string() }))
+                })}
+                {s.battery_date.clone().map(|d| kv("ups.battery_date", text(d)))}
+                {kv("ups.driver", text(format!("{} · {}", dash(s.name.clone()), dash(s.driver.clone()))))}
+                {kv("hw.updated", text(i18n::short_when(s.read_at_ms)))}
+            </dl>
+        }
+        .into_any()
+    };
+    view! {
+        <section class="card widget">
+            <WidgetHead icon=icons::BATTERY_CHARGING title="ups.status" />
+            {body}
+        </section>
+    }
+    .into_any()
+}
+
+/// Minutes in the form, seconds in the API.
+#[derive(Clone, PartialEq)]
+struct Form {
+    timer: bool,
+    minutes: String,
+    pre_timeout: String,
+}
+
+impl Form {
+    fn of(s: &UpsSettings) -> Self {
+        Form {
+            timer: s.safemode_after_s.is_some(),
+            minutes: (s.safemode_after_s.unwrap_or(300) / 60).to_string(),
+            pre_timeout: s.pre_safemode_timeout_s.to_string(),
+        }
+    }
+
+    /// The settings, or the i18n key of the first invalid field.
+    fn settings(&self) -> Result<UpsSettings, &'static str> {
+        let (lo, hi) = SAFEMODE_AFTER_RANGE_S;
+        let after = if self.timer {
+            match self.minutes.trim().parse::<u32>() {
+                Ok(m) if m * 60 >= lo && m * 60 <= hi => Some(m * 60),
+                _ => return Err("ups.v_minutes"),
+            }
+        } else {
+            None
+        };
+        let (lo, hi) = PRE_SAFEMODE_TIMEOUT_RANGE_S;
+        match self.pre_timeout.trim().parse::<u32>() {
+            Ok(p) if (lo..=hi).contains(&p) => Ok(UpsSettings { safemode_after_s: after, pre_safemode_timeout_s: p }),
+            _ => Err("ups.v_pre"),
+        }
+    }
+}
+
+fn safemode_card(settings: Remote<UpsSettingsState>) -> AnyView {
+    let body = move || {
+        if let Some(v) = settings.gate(4) {
+            return v;
+        }
+        let st = settings.data.get_untracked().unwrap_or_default();
+        if !st.available {
+            return view! {
+                <p class="sec-note"><Icon icon=icons::INFO size=16 />{tr("ups.lb_always")}</p>
+                {ui::note(Tone::Info, icons::INFO, view! { {t("ups.no_synodeb")} }.into_any())}
+            }
+            .into_any();
+        }
+        safemode_form(settings, &st)
+    };
+    view! {
+        <section class="card widget w-6">
+            <WidgetHead icon=icons::SHIELD_ALERT title="ups.safemode" />
+            {body}
+        </section>
+    }
+    .into_any()
+}
+
+fn safemode_form(settings: Remote<UpsSettingsState>, st: &UpsSettingsState) -> AnyView {
+    let init = Form::of(st.pending.as_ref().unwrap_or(&st.applied));
+    let draft = Draft::new(init, move || settings.data.with(|s| s.as_ref().map(|s| Form::of(s.pending.as_ref().unwrap_or(&s.applied)))));
+    let d = draft.d;
+    let dirty = draft.dirty();
+    let busy = RwSignal::new(false);
+    let error = RwSignal::new(None::<String>);
+    let pending = Signal::derive(move || settings.data.with(|s| s.as_ref().is_some_and(|s| s.pending.is_some())));
+    let save = move || {
+        let body = match d.with_untracked(Form::settings) {
+            Ok(b) => b,
+            Err(k) => {
+                error.set(Some(t(k).to_string()));
+                return;
+            }
+        };
+        busy.set(true);
+        error.set(None);
+        spawn_local(async move {
+            let r = api::put::<_, UpsSettingsState>(SETTINGS, &body).await;
+            busy.set(false);
+            match r {
+                Ok(_) => {
+                    saved_pending();
+                    crate::config::changed();
+                }
+                Err(e) => error.set(Some(e.text())),
+            }
+        });
+    };
+    let reset = Callback::new(move |_| {
+        draft.reset();
+        error.set(None);
+    });
+    let timer = Signal::derive(move || d.with(|f| f.timer));
+    view! {
+        <p class="sec-note"><Icon icon=icons::INFO size=16 />{tr("ups.lb_always")}</p>
+        {switch("ups.timer", Some("ups.timer_help"), timer, Callback::new(move |v| d.update(|f| f.timer = v)))}
+        <Show when=move || timer.get()>
+            {number_field("ups.minutes", Some("ups.minutes_help"), Signal::derive(move || d.with(|f| f.minutes.clone())), Callback::new(move |v| d.update(|f| f.minutes = v)), 1, 1440)}
+        </Show>
+        {number_field("ups.pre_timeout", Some("ups.pre_timeout_help"), Signal::derive(move || d.with(|f| f.pre_timeout.clone())), Callback::new(move |v| d.update(|f| f.pre_timeout = v)), 10, 900)}
+        {move || pending.get().then(|| view! { <p class="sec-note"><Icon icon=icons::INFO size=16 />{t("ups.pending_note")}</p> })}
+        {stale_notice(draft.stale, reset)}
+        {crate::form::form_error(error)}
+        <div class="btn-row">
+            <button type="button" class="btn ghost" disabled=move || !dirty.get() on:click=move |_| reset.run(())>{tr("reset")}</button>
+            <button type="button" class="btn primary" disabled=move || busy.get() || !dirty.get() on:click=move |_| save()>
+                {spinner(busy)}{tr("save")}
+            </button>
+        </div>
+    }
+    .into_any()
+}
+
+fn test_card(settings: Remote<UpsSettingsState>) -> AnyView {
+    let live = use_live();
+    let ask_deep = RwSignal::new(false);
+    let busy = RwSignal::new(None::<BatteryTest>);
+    let available = Signal::derive(move || settings.data.with(|s| s.as_ref().is_some_and(|s| s.available)));
+    let online = Signal::derive(move || live.ups.with(|u| u.as_ref().is_some_and(|u| u.link == UpsLink::Connected && u.has("OL") && !u.on_battery())));
+    let run = move |test: BatteryTest| {
+        busy.set(Some(test));
+        spawn_local(async move {
+            let body = serde_json::to_string(&BatteryTestRequest { test }).ok();
+            let r = crate::tasks::run_task("/api/v1/ups/test", body).await;
+            busy.set(None);
+            match r {
+                Ok(info) if info.status == rynas_api_types::TaskStatus::Ok => toast(Tone::Ok, t("ups.test_done").to_string()),
+                Ok(info) => toast(Tone::Err, crate::tasks::task_error(&info)),
+                Err(e) => toast(Tone::Err, e.text()),
+            }
+            live.refresh_ups();
+        });
+    };
+    let deep_dialog = move || {
+        ask_deep.get().then(|| {
+            let close = Callback::new(move |_| ask_deep.set(false));
+            confirm(Confirm::new(
+                t("ups.deep_title").to_string(),
+                t("ups.deep_text").to_string(),
+                "ups.deep_start",
+                true,
+                Callback::new(move |_| {
+                    ask_deep.set(false);
+                    run(BatteryTest::Deep);
+                }),
+                close,
+            ))
+        })
+    };
+    let result = move || {
+        let r = live.ups.with(|u| u.as_ref().and_then(|u| u.test_result.clone()));
+        match r {
+            Some(r) => {
+                let l = r.to_ascii_lowercase();
+                let tone = if l.contains("pass") {
+                    Tone::Ok
+                } else if l.contains("error") || l.contains("fail") || l.contains("abort") {
+                    Tone::Err
+                } else if l.contains("progress") {
+                    Tone::Info
+                } else {
+                    Tone::Unknown
+                };
+                status(tone, r)
+            }
+            None => text(t("ups.no_result").to_string()),
+        }
+    };
+    let can = move || available.get() && online.get() && busy.get().is_none();
+    view! {
+        <section class="card widget w-6">
+            <WidgetHead icon=icons::ACTIVITY title="ups.test" />
+            <dl class="kvs">{kv("ups.last_result", view! { <span>{result}</span> }.into_any())}</dl>
+            {move || (!available.get()).then(|| view! { {ui::note(Tone::Info, icons::INFO, view! { {t("ups.test_synodeb")} }.into_any())} })}
+            {move || (available.get() && !online.get()).then(|| view! { <p class="sec-note"><Icon icon=icons::INFO size=16 />{t("ups.test_online")}</p> })}
+            <p class="sec-note"><Icon icon=icons::TRIANGLE_ALERT size=16 />{tr("ups.test_lb")}</p>
+            <div class="btn-row">
+                <button type="button" class="btn primary" disabled=move || !can() on:click=move |_| run(BatteryTest::Quick)>
+                    {move || (busy.get() == Some(BatteryTest::Quick)).then(|| view! { <span class="btn-spinner" aria-hidden="true"></span> })}
+                    {tr("ups.quick")}
+                </button>
+                <button type="button" class="btn ghost" disabled=move || !can() on:click=move |_| ask_deep.set(true)>
+                    {move || (busy.get() == Some(BatteryTest::Deep)).then(|| view! { <span class="btn-spinner" aria-hidden="true"></span> })}
+                    {tr("ups.deep")}
+                </button>
+                <button type="button" class="btn ghost" disabled=move || !available.get() on:click=move |_| run(BatteryTest::Stop)>{tr("ups.stop")}</button>
+            </div>
+            <p class="muted small">{tr("ups.schedule_hint")}" "<code>"synodeb-ups test quick"</code></p>
+            {deep_dialog}
+        </section>
+    }
+    .into_any()
+}
+
+fn events_card(events: Remote<Vec<Notification>>) -> AnyView {
+    let body = move || {
+        if let Some(v) = events.gate(3) {
+            return v;
+        }
+        let list = events.data.get().unwrap_or_default();
+        if list.is_empty() {
+            return view! { <p class="muted">{t("ups.no_events")}</p> }.into_any();
+        }
+        view! {
+            <ul class="events">
+                {list.into_iter().map(|n| {
+                    let tone = match n.severity {
+                        rynas_api_types::notify::NotifySeverity::Critical | rynas_api_types::notify::NotifySeverity::Error => Tone::Err,
+                        rynas_api_types::notify::NotifySeverity::Warning => Tone::Warn,
+                        _ => Tone::Info,
+                    };
+                    view! {
+                        <li>
+                            <span class="mono small muted">{i18n::short_when(n.last_ms)}</span>
+                            <Status tone=tone text=t(crate::notify::severity_key(n.severity)).to_string() />
+                            <span>{n.title}</span>
+                        </li>
+                    }
+                }).collect_view()}
+            </ul>
+        }
+        .into_any()
+    };
+    view! {
+        <section class="card widget w-12">
+            <WidgetHead icon=icons::HISTORY title="ups.events" />
+            {body}
+        </section>
+    }
+    .into_any()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn states() {
+        let mut u = UpsStatus { link: UpsLink::Connected, flags: vec!["OL".into(), "CHRG".into()], ..Default::default() };
+        assert_eq!(state_of(&u).1, "ups.st_online");
+        u.flags = vec!["OB".into(), "DISCHRG".into()];
+        assert_eq!(state_of(&u).1, "ups.st_battery");
+        u.flags.push("LB".into());
+        assert_eq!(state_of(&u), (Tone::Err, "ups.st_critical"));
+        assert_eq!(state_of(&UpsStatus::default()).1, "ups.st_unreachable");
+    }
+
+    #[test]
+    fn form() {
+        let f = Form { timer: true, minutes: "5".into(), pre_timeout: "120".into() };
+        assert_eq!(f.settings(), Ok(UpsSettings { safemode_after_s: Some(300), pre_safemode_timeout_s: 120 }));
+        let off = Form { timer: false, minutes: "x".into(), ..f.clone() };
+        assert_eq!(off.settings().unwrap().safemode_after_s, None);
+        assert_eq!(Form { minutes: "0".into(), ..f.clone() }.settings(), Err("ups.v_minutes"));
+        assert_eq!(Form { pre_timeout: "5".into(), ..f }.settings(), Err("ups.v_pre"));
+    }
+}

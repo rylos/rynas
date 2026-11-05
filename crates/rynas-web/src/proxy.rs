@@ -144,6 +144,10 @@ pub fn routes() -> Router<AppState> {
         .route("/hardware/synology/fan-curves", get(forward))
         .route("/power/schedule", get(forward).put(forward))
         .route("/power/next", get(forward))
+        // UPS (P6): Safe Mode settings (synodeb) and the battery test; the status itself is
+        // read from upsd by rynas-web (`/ups`, `ups.status` events)
+        .route("/ups/settings", get(forward).put(forward))
+        .route("/ups/test", post(forward))
         // network (P4): with the local address of the session's connection
         .route("/network/interfaces", get(forward_net))
         .route("/network/interfaces/{name}", put(forward_net))

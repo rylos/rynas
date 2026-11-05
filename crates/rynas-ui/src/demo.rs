@@ -202,6 +202,63 @@ fn hardware(t: f64) -> HardwareStatus {
     }
 }
 
+fn ups(t: f64) -> ups::UpsStatus {
+    ups::UpsStatus {
+        link: ups::UpsLink::Connected,
+        name: Some("ups".into()),
+        flags: vec!["OL".into(), "CHRG".into()],
+        battery_charge_pct: Some(96.0 + wave(t, 120.0) * 4.0),
+        battery_runtime_s: Some(2_460 + (wave(t, 90.0) * 120.0) as u64),
+        load_pct: Some(17.0 + wave(t, 40.0) * 5.0),
+        input_voltage_v: Some(229.0 + wave(t, 30.0) * 3.0),
+        output_voltage_v: Some(230.0),
+        manufacturer: Some("American Power Conversion".into()),
+        model: Some("Back-UPS ES 700G".into()),
+        serial: Some("5B1234X56789".into()),
+        beeper: Some("enabled".into()),
+        battery_date: Some("2024/03/18".into()),
+        test_result: Some("Done and passed".into()),
+        driver: Some("usbhid-ups".into()),
+        read_at_ms: (t * 1000.0) as u64,
+    }
+}
+
+pub fn ups_settings() -> ups::UpsSettingsState {
+    ups::UpsSettingsState {
+        available: true,
+        applied: ups::UpsSettings { safemode_after_s: Some(600), pre_safemode_timeout_s: 120 },
+        pending: None,
+    }
+}
+
+pub fn ups_events() -> Vec<notify::Notification> {
+    let now = js_sys::Date::now() as u64;
+    let n = |id: u64, ago_min: u64, sev: notify::NotifySeverity, title: &str| notify::Notification {
+        id,
+        ts_ms: now - ago_min * 60_000,
+        last_ms: now - ago_min * 60_000,
+        count: 1,
+        source: "ups".into(),
+        category: notify::NotifyCategory::Ups,
+        severity: sev,
+        key: format!("ups:{id}"),
+        state: notify::EventState::Oneshot,
+        title: title.into(),
+        body: String::new(),
+        fields: Default::default(),
+        actions: Vec::new(),
+        silenced: false,
+        acked_ms: None,
+        acked_by: None,
+        resolved_ms: None,
+    };
+    vec![
+        n(3, 95, notify::NotifySeverity::Info, "UPS back online after 2 min on battery"),
+        n(2, 97, notify::NotifySeverity::Warning, "UPS on battery (96%, 41 min)"),
+        n(1, 3 * 1440, notify::NotifySeverity::Info, "Battery test passed"),
+    ]
+}
+
 pub fn start(live: Live) {
     live.conn.set(Conn::Demo);
     live.set_system(system());
@@ -211,12 +268,14 @@ pub fn start(live: Live) {
         live.push(sample(now - i * 1000));
     }
     live.hardware.set(Some(hardware(now as f64 / 1000.0)));
+    live.ups.set(Some(ups(now as f64 / 1000.0)));
     set_interval(
         move || {
             let now = js_sys::Date::now() as u64 / 1000 * 1000;
             live.push(sample(now));
             if now % 5000 < 1000 {
                 live.hardware.set(Some(hardware(now as f64 / 1000.0)));
+                live.ups.set(Some(ups(now as f64 / 1000.0)));
             }
         },
         Duration::from_secs(1),

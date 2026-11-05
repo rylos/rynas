@@ -16,6 +16,7 @@ mod services;
 pub mod snapshots;
 pub mod storage;
 pub mod synology;
+pub mod ups;
 pub mod validate;
 pub use services::*;
 

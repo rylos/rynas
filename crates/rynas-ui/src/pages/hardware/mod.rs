@@ -1,10 +1,11 @@
 //! Hardware (DSM Control Panel › Hardware & Power): the provider-neutral overview (fans,
 //! temperatures, status LED and events), every synohwd setting and action on a Synology
-//! ([`synology`]) and the weekly power schedule ([`power`]). A tab is mounted on its first
+//! ([`synology`]), the weekly power schedule ([`power`]) and the UPS ([`ups`]). A tab is mounted on its first
 //! visit and kept afterwards (drafts survive a tab switch).
 
 mod power;
 mod synology;
+mod ups;
 
 use leptos::prelude::*;
 
@@ -19,7 +20,7 @@ use crate::ui::{self, EmptyState, Meter, PageHeader, Pending, Status, Tone, cpu_
 #[component]
 pub fn Hardware() -> impl IntoView {
     let tab = RwSignal::new(0usize);
-    let seen = RwSignal::new([true, false, false]);
+    let seen = RwSignal::new([true, false, false, false]);
     Effect::new(move || {
         let i = tab.get();
         if !seen.with_untracked(|s| s[i]) {
@@ -37,10 +38,11 @@ pub fn Hardware() -> impl IntoView {
     view! {
         <div class="page">
             <PageHeader icon=icons::CPU title="nav.hardware" subtitle="hw.subtitle" />
-            <div class="card hw-tabs">{tabs("hwt", &["hw.tab_overview", "hw.tab_synology", "ps.title"], tab, "nav.hardware")}</div>
+            <div class="card hw-tabs">{tabs("hwt", &["hw.tab_overview", "hw.tab_synology", "ps.title", "ups.tab"], tab, "nav.hardware")}</div>
             {panel(0, overview)}
             {panel(1, synology::panel)}
             {panel(2, power::panel)}
+            {panel(3, ups::panel)}
         </div>
     }
 }
