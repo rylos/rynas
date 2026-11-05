@@ -9,13 +9,22 @@
 //!
 //! Services whose unit is not installed are skipped with a log line: the configuration is
 //! written anyway and takes effect when the package is installed.
+//!
+//! Snapshot folders (`show_snapshots`): one mount unit per share and the target that pulls
+//! them in ([`crate::snapview`]). At the end of a reconcile, shares that went away are either
+//! recorded with their settings ([`crate::removed`]) or, when deleted with their folder
+//! (`remove_folders`), removed with their snapshots ([`crate::folders::remove_folder`]).
+//! Limit: a deleted folder cannot come back on rollback.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 use std::sync::Arc;
 
 use rynas_api_types::{
-    Access, PrincipalKind, Share, SharesConfig, SmbPreset, SmbSettings, StateDrift, StateDriftKind,
+    Access, PrincipalKind, Share, ShareWarning, ShareWarningArgs, ShareWarningCode, SharesConfig,
+    SmbPreset, SmbSettings, StateDrift, StateDriftKind,
 };
+use rynas_config::files::HEADER_PREFIX;
 use rynas_config::{Applier, ApplyCtx, Candidate, Invalid, ManagedFile};
 use rynas_tasks::Cmd;
 use serde_json::Value;
@@ -23,8 +32,9 @@ use serde_json::Value;
 use crate::accounts::Accounts;
 use crate::host::{ShareHost, SubvolumeCreator};
 use crate::perm::{AclPlan, acl_plan};
+use crate::removed::RemovedShares;
 use crate::validate::{self, account_name, one_line, share_name, share_path};
-use crate::{nfs, smb};
+use crate::{folders, nfs, smb, snapview};
 
 pub const SHARES_KEY: &str = "shares";
 
@@ -47,6 +57,66 @@ pub struct SharesDomain {
     accounts: Arc<dyn Accounts>,
     /// Creates the subvolumes shares ask for; without it such shares are refused.
     subvolumes: Option<Arc<dyn SubvolumeCreator>>,
+    /// Shares removed while their folder stayed.
+    removed: Arc<RemovedShares>,
+}
+
+/// Snapshot folders of a document: mount unit → (share, share path, snapshot directory).
+fn views(c: &SharesConfig) -> BTreeMap<String, (String, String, String)> {
+    c.shares
+        .iter()
+        .filter_map(|s| {
+            snapview::wanted(s)
+                .map(|(p, d)| (snapview::unit_name(&p), (s.name.clone(), p, d)))
+        })
+        .collect()
+}
+
+fn warn(code: ShareWarningCode) -> ShareWarning {
+    ShareWarning {
+        code,
+        args: ShareWarningArgs::default(),
+    }
+}
+
+/// English text of a remark (logs, CLI, `ShareStatus.warnings`).
+pub fn warning_text(w: &ShareWarning) -> String {
+    let a = &w.args;
+    let path = a.path.as_deref().unwrap_or("");
+    let volume = a.volume.as_deref().unwrap_or("");
+    match w.code {
+        ShareWarningCode::SubvolumeOnApply => format!(
+            "{path} will be created as a subvolume of volume {volume} when the change is applied"
+        ),
+        ShareWarningCode::SubvolumeOnApplyNoCompression => format!(
+            "{path} will be created as a subvolume of volume {volume}, without compression, when the change is applied"
+        ),
+        ShareWarningCode::NotSubvolume => format!(
+            "{path} is not a btrfs subvolume: snapshots, previous versions and quotas need one"
+        ),
+        ShareWarningCode::ExtraOverrides => format!(
+            "the SMB extra option '{}' overrides a setting of rynas",
+            a.key.as_deref().unwrap_or("")
+        ),
+        ShareWarningCode::NfsUids => {
+            "NFS (sec=sys) trusts client uids: clients must use the same uids as this NAS".into()
+        }
+        ShareWarningCode::NfsServiceOff => "NFS is disabled in the NFS service settings".into(),
+        ShareWarningCode::SmbServiceOff => "SMB is disabled in the SMB service settings".into(),
+        ShareWarningCode::TimemachineNoLimit => {
+            "Time Machine without a size limit can fill the volume".into()
+        }
+        ShareWarningCode::MultiprotocolWithoutNfs => "the multi-protocol preset turns off SMB client caching; it is meant for shares also exported over NFS".into(),
+        ShareWarningCode::NoPermissions => {
+            "no permissions: the directory's own permissions apply (rynas does not set ACLs)".into()
+        }
+        ShareWarningCode::AllDenied => {
+            "every entry denies access: nobody can use this share".into()
+        }
+        ShareWarningCode::SnapshotFolderNoJob => "the snapshot folder needs a snapshot job for this share: it appears once the share has one".into(),
+        ShareWarningCode::SnapshotFolderNfs => "NFS clients see the snapshot folder only when the export includes the mounts below it (crossmnt)".into(),
+        ShareWarningCode::Other => String::new(),
+    }
 }
 
 /// Does smbd need a restart (not just a reload) to go from `a` to `b`?
@@ -68,7 +138,26 @@ impl SharesDomain {
             host,
             accounts,
             subvolumes: None,
+            removed: Arc::new(RemovedShares::memory()),
         }
+    }
+
+    /// Where shares removed without their folder are recorded.
+    pub fn with_removed(mut self, r: Arc<RemovedShares>) -> Self {
+        self.removed = r;
+        self
+    }
+
+    pub fn removed(&self) -> &Arc<RemovedShares> {
+        &self.removed
+    }
+
+    /// The mounted rynas volumes (label, mount point), when this rynasd manages volumes.
+    pub fn volumes(&self) -> Vec<(String, String)> {
+        self.subvolumes
+            .as_ref()
+            .map(|c| c.volumes())
+            .unwrap_or_default()
     }
 
     /// Lets shares ask for their subvolume ([`Share::subvolume`]).
@@ -358,6 +447,31 @@ impl SharesDomain {
             }
         }
         c.shares.sort_by_key(|s| s.name.to_ascii_lowercase());
+        // folders deleted with their share: only for shares that are gone
+        c.remove_folders
+            .retain(|r| !c.shares.iter().any(|s| s.name.eq_ignore_ascii_case(&r.share)));
+        c.remove_folders.sort_by(|a, b| a.share.cmp(&b.share));
+        c.remove_folders.dedup_by(|a, b| a.share == b.share);
+        for r in &c.remove_folders {
+            if !share_name(&r.share) || share_path(&r.path).is_err() || r.path == "/" {
+                return Err(Invalid::at(
+                    "remove_folders",
+                    format!("invalid folder removal {:?} {:?}", r.share, r.path),
+                ));
+            }
+            for s in &r.snapshots {
+                let prefix_ok = !s.prefix.is_empty()
+                    && s.prefix
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+                if share_path(&s.dir).is_err() || s.dir == "/" || !prefix_ok {
+                    return Err(Invalid::at(
+                        "remove_folders",
+                        format!("share {}: invalid snapshot directory {:?}", r.share, s.dir),
+                    ));
+                }
+            }
+        }
         let mut paths = BTreeSet::new();
         let mut fsids = BTreeSet::new();
         for s in c.shares.iter().filter(|s| s.nfs.enabled) {
@@ -377,27 +491,38 @@ impl SharesDomain {
         Ok(c)
     }
 
-    /// Remarks about a share that do not block it.
+    /// Remarks about a share that do not block it, in English.
     pub fn warnings(&self, c: &SharesConfig, s: &Share) -> Vec<String> {
+        self.warning_items(c, s).iter().map(warning_text).collect()
+    }
+
+    /// Remarks about a share that do not block it, with codes.
+    pub fn warning_items(&self, c: &SharesConfig, s: &Share) -> Vec<ShareWarning> {
         let mut w = Vec::new();
         let info = self.host.probe(&s.path);
+        let at_path = |code| ShareWarning {
+            code,
+            args: ShareWarningArgs {
+                path: Some(s.path.clone()),
+                ..Default::default()
+            },
+        };
         if let (Some(sv), false) = (&s.subvolume, info.exists) {
-            w.push(format!(
-                "{} will be created as a subvolume of volume {}{} when the change is applied",
-                s.path,
-                sv.volume,
-                if sv.compression {
-                    ""
+            w.push(ShareWarning {
+                code: if sv.compression {
+                    ShareWarningCode::SubvolumeOnApply
                 } else {
-                    ", without compression"
-                }
-            ));
+                    ShareWarningCode::SubvolumeOnApplyNoCompression
+                },
+                args: ShareWarningArgs {
+                    path: Some(s.path.clone()),
+                    volume: Some(sv.volume.clone()),
+                    key: None,
+                },
+            });
         }
         if info.exists && !info.subvolume {
-            w.push(format!(
-                "{} is not a btrfs subvolume: snapshots, previous versions and quotas need one",
-                s.path
-            ));
+            w.push(at_path(ShareWarningCode::NotSubvolume));
         }
         let managed: Vec<smb::Line> = smb::share_lines(
             &Share {
@@ -410,37 +535,134 @@ impl SharesDomain {
             info.fs_type == "btrfs",
         );
         for k in smb::overridden_keys(&managed, &s.smb.extra) {
-            w.push(format!(
-                "the SMB extra option '{k}' overrides a setting of rynas"
-            ));
+            w.push(ShareWarning {
+                code: ShareWarningCode::ExtraOverrides,
+                args: ShareWarningArgs {
+                    key: Some(k),
+                    ..Default::default()
+                },
+            });
         }
         if s.nfs.enabled {
-            w.push(
-                "NFS (sec=sys) trusts client uids: clients must use the same uids as this NAS"
-                    .into(),
-            );
+            w.push(warn(ShareWarningCode::NfsUids));
             if !c.nfs.enabled {
-                w.push("NFS is disabled in the NFS service settings".into());
+                w.push(warn(ShareWarningCode::NfsServiceOff));
             }
         }
         if s.smb.enabled && !c.smb.enabled {
-            w.push("SMB is disabled in the SMB service settings".into());
+            w.push(warn(ShareWarningCode::SmbServiceOff));
         }
         if s.smb.preset == SmbPreset::Timemachine && s.smb.timemachine_max_size.is_empty() {
-            w.push("Time Machine without a size limit can fill the volume".into());
+            w.push(warn(ShareWarningCode::TimemachineNoLimit));
         }
         if s.smb.preset == SmbPreset::Multiprotocol && !s.nfs.enabled {
-            w.push("the multi-protocol preset turns off SMB client caching; it is meant for shares also exported over NFS".into());
+            w.push(warn(ShareWarningCode::MultiprotocolWithoutNfs));
         }
         if s.permissions.is_empty() {
-            w.push(
-                "no permissions: the directory's own permissions apply (rynas does not set ACLs)"
-                    .into(),
-            );
+            w.push(warn(ShareWarningCode::NoPermissions));
         } else if s.permissions.iter().all(|p| p.access == Access::Deny) {
-            w.push("every entry denies access: nobody can use this share".into());
+            w.push(warn(ShareWarningCode::AllDenied));
+        }
+        if s.show_snapshots {
+            if snapview::wanted(s).is_none() {
+                w.push(warn(ShareWarningCode::SnapshotFolderNoJob));
+            } else if s.nfs.enabled && !s.nfs.crossmnt {
+                w.push(warn(ShareWarningCode::SnapshotFolderNfs));
+            }
         }
         w
+    }
+
+    /// Snapshot folders: stops the ones that go or change, then starts the wanted ones.
+    fn reconcile_views(
+        &self,
+        from: &SharesConfig,
+        to: &SharesConfig,
+        ctx: &ApplyCtx,
+    ) -> Result<(), String> {
+        let (old, new) = (views(from), views(to));
+        for (unit, (name, path, _)) in &old {
+            if new.get(unit) == Some(&old[unit]) {
+                continue;
+            }
+            (ctx.log)(&format!("snapshot folder of {name}: stopping {unit}"));
+            if let Err(e) = ctx.system.stop_unit(unit) {
+                (ctx.log)(&format!("{unit}: {e}"));
+            }
+            if !new.contains_key(unit) {
+                self.host.remove_empty_dir(&snapview::mount_point(path));
+            }
+        }
+        if old == new && new.is_empty() {
+            return Ok(());
+        }
+        ctx.system.daemon_reload()?;
+        if new.is_empty() {
+            return Ok(());
+        }
+        ctx.system.set_unit_enabled(snapview::TARGET, true)?;
+        for (unit, (name, _, dir)) in &new {
+            // the job's directory may come with the same apply (snapshots, after shares)
+            self.host.ensure_dir(dir)?;
+            if old.get(unit) != new.get(unit) || !ctx.system.unit_active(unit)? {
+                (ctx.log)(&format!("snapshot folder of {name}: starting {unit}"));
+                ctx.system.start_unit(unit)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Shares that went away: recorded with their settings, or deleted with their folder.
+    fn reconcile_removed(
+        &self,
+        from: &SharesConfig,
+        to: &SharesConfig,
+        ctx: &ApplyCtx,
+    ) -> Result<(), String> {
+        let volumes = self.volumes();
+        let now = rynas_tasks::now_ms();
+        for s in &from.shares {
+            if to.shares.iter().any(|x| x.name == s.name) {
+                continue;
+            }
+            match to
+                .remove_folders
+                .iter()
+                .find(|r| r.share == s.name && r.path == s.path)
+            {
+                Some(r) if to.shares.iter().any(|x| folders::is_within(&x.path, &r.path)) => {
+                    (ctx.log)(&format!(
+                        "{}: another share uses it, the folder stays",
+                        r.path
+                    ));
+                }
+                Some(r) => {
+                    (ctx.log)(&format!(
+                        "share {}: deleting {} with its snapshots",
+                        s.name, r.path
+                    ));
+                    folders::remove_folder(
+                        ctx.system,
+                        self.host.as_ref(),
+                        &volumes,
+                        &r.path,
+                        &r.snapshots,
+                        ctx.log,
+                    )?;
+                    self.removed.forget(&[&r.path])?;
+                }
+                None => {
+                    if let Err(e) = self.removed.record(s, now) {
+                        (ctx.log)(&format!("recording the settings of {}: {e}", s.name));
+                    }
+                }
+            }
+        }
+        let paths: Vec<&str> = to.shares.iter().map(|s| s.path.as_str()).collect();
+        if let Err(e) = self.removed.forget(&paths) {
+            (ctx.log)(&format!("removed shares record: {e}"));
+        }
+        Ok(())
     }
 
     fn manage_unit(&self, ctx: &ApplyCtx, unit: &str, enabled: bool) -> Result<bool, String> {
@@ -537,6 +759,38 @@ impl Applier for SharesDomain {
             ctx.render(nfs::TEMPLATE_NFS_CONF, &to_value(&nfs::conf_ctx(&c.nfs)))?,
             true,
         ));
+        // snapshot folders: one mount unit each, the target, and our units that went away
+        let wanted = views(&c);
+        for (unit, (name, path, dir)) in &wanted {
+            files.push(ManagedFile::whole(
+                format!("{}/{unit}", snapview::UNIT_DIR),
+                snapview::unit(name, path, dir),
+                true,
+            ));
+        }
+        let units: Vec<String> = wanted.keys().cloned().collect();
+        files.push(ManagedFile::whole(
+            format!("{}/{}", snapview::UNIT_DIR, snapview::TARGET),
+            snapview::target(&units),
+            true,
+        ));
+        if let Ok(rd) = std::fs::read_dir(ctx.path(Path::new(snapview::UNIT_DIR))) {
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if !name.ends_with(".mount") || wanted.contains_key(&name) {
+                    continue;
+                }
+                let ours = std::fs::read_to_string(e.path()).is_ok_and(|t| {
+                    t.starts_with(HEADER_PREFIX) && t.lines().any(|l| l == snapview::MARKER)
+                });
+                if ours {
+                    files.push(ManagedFile::absent(format!(
+                        "{}/{name}",
+                        snapview::UNIT_DIR
+                    )));
+                }
+            }
+        }
         Ok(files)
     }
 
@@ -602,6 +856,9 @@ impl Applier for SharesDomain {
             self.host.set_acl(&s.path, &plan)?;
         }
 
+        // 1b. snapshot folders, before the services that show them
+        self.reconcile_views(&from, &to, ctx)?;
+
         // 2. SMB
         if smb_running(&to) {
             if self.manage_unit(ctx, SMBD, true)? {
@@ -646,8 +903,11 @@ impl Applier for SharesDomain {
         } else if nfs_running(&to) {
             (ctx.log)(&format!("{NFS_SERVER} is not installed: skipped"));
         }
-        Ok(())
+
+        // 4. shares that went away, once no service uses their folder any more
+        self.reconcile_removed(&from, &to, ctx)
     }
+
 
     fn health(&self, value: Option<&Value>, ctx: &ApplyCtx) -> Result<(), String> {
         let c = parse(value)?;

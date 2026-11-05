@@ -1393,8 +1393,28 @@ pub struct HostSubvolumes {
     pub dry: bool,
 }
 
+/// rynas volumes in a mountinfo text: btrfs top levels mounted at `/<label>`.
+pub fn volumes_in(mountinfo: &str) -> Vec<(String, String)> {
+    let mut v: Vec<(String, String)> = rynas_storage::mounts::parse_mountinfo(mountinfo)
+        .into_iter()
+        .filter(|m| m.fstype == "btrfs" && m.root == "/")
+        .filter_map(|m| {
+            let label = m.mountpoint.strip_prefix('/')?.to_string();
+            plan::valid_label(&label).then_some((label, m.mountpoint))
+        })
+        .collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
 impl rynas_services::SubvolumeCreator for HostSubvolumes {
+    fn volumes(&self) -> Vec<(String, String)> {
+        volumes_in(&std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default())
+    }
+
     fn volume_path(&self, volume: &str) -> Result<String, String> {
+
         if !plan::valid_label(volume) {
             return Err(format!("invalid volume name {volume:?}"));
         }

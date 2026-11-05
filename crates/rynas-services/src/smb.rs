@@ -241,6 +241,10 @@ pub fn share_lines(s: &Share, btrfs: bool) -> Vec<Line> {
             l("recycle:directory_mode", "0770"),
             l("recycle:exclude", "*.tmp,~$*,.~lock*"),
         ]);
+        if s.show_snapshots {
+            // the snapshot folder is read-only: deletes there fail instead of being moved
+            v.push(l("recycle:exclude_dir", rynas_api_types::SNAPSHOT_FOLDER));
+        }
     }
     if shadow {
         v.extend([
@@ -255,8 +259,15 @@ pub fn share_lines(s: &Share, btrfs: bool) -> Vec<Line> {
             l("shadow:sort", "desc"),
         ]);
     }
-    if !smb.veto_files.is_empty() {
-        v.push(l("veto files", format!("/{}/", smb.veto_files.join("/"))));
+    // the snapshot folder, when shown, is not vetoed (it is in the default veto list)
+    let veto: Vec<&str> = smb
+        .veto_files
+        .iter()
+        .map(String::as_str)
+        .filter(|v| !(s.show_snapshots && *v == rynas_api_types::SNAPSHOT_FOLDER))
+        .collect();
+    if !veto.is_empty() {
+        v.push(l("veto files", format!("/{}/", veto.join("/"))));
     }
     v.push(l("hide dot files", yes(smb.hide_dot_files)));
     if smb.encryption_required {
@@ -340,7 +351,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_snapshot_folder_is_not_vetoed_when_shown() {
+        let mut s = Share {
+            name: "photos".into(),
+            path: "/vol1/photos".into(),
+            ..Default::default()
+        };
+        let veto = |s: &Share| {
+            share_lines(s, true)
+                .into_iter()
+                .find(|(k, _)| k == "veto files")
+                .map(|(_, v)| v)
+                .unwrap_or_default()
+        };
+        assert!(veto(&s).contains("#snapshot"));
+        s.show_snapshots = true;
+        assert!(!veto(&s).contains("#snapshot"));
+        assert!(veto(&s).contains("@eaDir"));
+        assert!(
+            share_lines(&s, true)
+                .iter()
+                .any(|(k, v)| k == "recycle:exclude_dir" && v == "#snapshot")
+        );
+    }
+
+    #[test]
     fn netbios_names() {
+
         assert_eq!(netbios_name("nas.lan"), "NAS");
         assert_eq!(netbios_name("a-very-long-hostname-x"), "A-VERY-LONG-HOS");
         assert_eq!(netbios_name(""), "RYNAS");

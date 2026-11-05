@@ -15,12 +15,18 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use rynas_api_types::scheduler::{SchedulerConfig, TaskAction};
+use rynas_api_types::snapshots::SnapshotsConfig;
 use rynas_api_types::{
-    EffectivePermission, GroupRequest, GroupView, LocalGroup, LocalUser, NfsSettings, NfsState,
-    PasswordRequest, PendingOp, PrincipalKind, Share, ShareStatus, ShareView, SharesConfig,
-    SmbSettings, SmbState, StagedChanges, TaskStarted, UserBadge, UserStatus, UserView, UsersConfig,
-    error_codes,
+    EffectivePermission, FolderDeletePlan, FolderRef, FolderRemoval, GroupRequest, GroupView,
+    LocalGroup, LocalUser, NfsSettings, NfsState, PasswordRequest, PendingOp, PrincipalKind, Share,
+    ShareDeletePlanRequest, ShareStatus, ShareView, SharesConfig, SmbSettings, SmbState,
+    SnapshotSource, StagedChanges, TaskStarted, UnsharedFolder, UserBadge, UserStatus, UserView,
+    UsersConfig, error_codes,
 };
+use rynas_btrfs::SNAPSHOTS_KEY;
+use rynas_scheduler::SCHEDULER_KEY;
+use rynas_services::folders::{self, Usages};
 use rynas_config::Config;
 use rynas_services::accounts::Secret;
 use rynas_services::perm::{Principal, effective};
@@ -109,6 +115,13 @@ pub fn router(st: SvcState) -> Router {
             get(share_get).put(share_put).delete(share_delete),
         )
         .route("/v1/shares/{share}/effective", get(share_effective))
+        .route("/v1/shares/plan/delete", post(share_delete_plan))
+        .route("/v1/folders", get(folders_list))
+        .route("/v1/folders/plan/delete", post(folder_delete_plan))
+        .route(
+            "/v1/folders/{volume}/{name}",
+            axum::routing::delete(folder_delete),
+        )
         .with_state(st)
 }
 
@@ -839,6 +852,7 @@ fn share_views(s: &Services, owner: &str) -> Res<Vec<ShareView>> {
                 fs_type: info.fs_type,
                 subvolume: info.subvolume,
                 warnings: s.shares.warnings(&eff, sh),
+                warning_items: s.shares.warning_items(&eff, sh),
             },
         }
     };
@@ -950,25 +964,459 @@ async fn share_put(
     ))
 }
 
+#[derive(Deserialize)]
+struct DeleteShareQuery {
+    /// Also delete the folder, its snapshots and its recycle bin (on apply).
+    #[serde(default)]
+    remove_folder: bool,
+    confirm: Option<String>,
+}
+
+/// Stages the deletion of a share; with `remove_folder=true&confirm=<name>` also the
+/// deletion of its folder, snapshots and recycle bin at the end of the apply, and the
+/// removal of its snapshot jobs (with their scheduler tasks).
 async fn share_delete(
     State(st): State<SvcState>,
     h: HeaderMap,
     Path(name): Path<String>,
+    Query(q): Query<DeleteShareQuery>,
 ) -> Res<Json<StagedChanges>> {
     let (s, owner) = (svc(&st)?, user(&h)?);
-    blocking(&s, move |s| {
+    if q.remove_folder && q.confirm.as_deref() != Some(name.as_str()) {
+        return Err(bad(
+            error_codes::CONFIRMATION_REQUIRED,
+            format!("deleting the folder of the share needs confirm={name}"),
+        ));
+    }
+    let staged = blocking(&s, move |s| {
+        let c = &s.ops.config;
+        let (doc, _, _): (SharesConfig, SharesConfig, _) = docs(c, &owner, SHARES_KEY)?;
+        let share = doc
+            .shares
+            .iter()
+            .find(|x| x.name.eq_ignore_ascii_case(&name))
+            .cloned()
+            .ok_or_else(|| not_found(format!("share {name}")))?;
+        let removal = if q.remove_folder {
+            let (p, sources, jobs) = delete_plan(s, &owner, &share)?;
+            if !p.allowed {
+                return Err(conflict(
+                    error_codes::CONFLICT,
+                    format!(
+                        "{} cannot be deleted: {}",
+                        p.path,
+                        p.blockers
+                            .iter()
+                            .map(|b| format!("{:?} {}", b.kind, b.name))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                ));
+            }
+            Some((
+                FolderRemoval {
+                    share: share.name.clone(),
+                    path: share.path.clone(),
+                    snapshots: sources,
+                },
+                jobs,
+            ))
+        } else {
+            None
+        };
+        let mut n = 1;
         stage_shares(s, &owner, |doc| {
-            let before = doc.shares.len();
-            doc.shares.retain(|x| !x.name.eq_ignore_ascii_case(&name));
-            if doc.shares.len() == before {
-                return Err(not_found(format!("share {name}")));
+            doc.shares.retain(|x| x.name != share.name);
+            if let Some((r, _)) = &removal {
+                doc.remove_folders.retain(|x| x.share != r.share);
+                doc.remove_folders.push(r.clone());
             }
             Ok(())
-        })
+        })?;
+        // the snapshot jobs of the folder go with it (their snapshots go with the folder)
+        if let Some((_, jobs)) = removal.filter(|(_, j)| !j.is_empty()) {
+            let (mut snaps, _, _): (SnapshotsConfig, SnapshotsConfig, _) =
+                docs(c, &owner, SNAPSHOTS_KEY)?;
+            snaps.jobs.retain(|j| !jobs.contains(&j.name));
+            stage(c, &owner, SNAPSHOTS_KEY, &snaps)?;
+            let (mut sched, _, _): (SchedulerConfig, SchedulerConfig, _) =
+                docs(c, &owner, SCHEDULER_KEY)?;
+            sched.tasks.retain(|t| {
+                !matches!(&t.action, TaskAction::Snapshot { job } if jobs.contains(job))
+            });
+            stage(c, &owner, SCHEDULER_KEY, &sched)?;
+            n += 2;
+        }
+        Ok(n)
     })
     .await?;
-    Ok(Json(StagedChanges { staged: 1 }))
+    Ok(Json(StagedChanges { staged }))
 }
+
+// ---------------------------------------------------------------------------------------------
+// folders: deletion plans, folders without a share
+// ---------------------------------------------------------------------------------------------
+
+/// Snapshot jobs (as the session user sees them) taking snapshots of `path`.
+fn jobs_of(s: &Services, owner: &str, path: &str) -> Res<Vec<(String, SnapshotSource)>> {
+    let (snaps, _, _): (SnapshotsConfig, SnapshotsConfig, _) =
+        docs(&s.ops.config, owner, SNAPSHOTS_KEY)?;
+    Ok(snaps
+        .jobs
+        .iter()
+        .filter(|j| j.subvolume.trim_end_matches('/') == path)
+        .map(|j| {
+            (
+                j.name.clone(),
+                SnapshotSource {
+                    dir: j.snapshot_dir.clone(),
+                    prefix: j.name.clone(),
+                },
+            )
+        })
+        .collect())
+}
+
+/// Every snapshot directory of a folder: its jobs, the share's previous versions, the
+/// share recorded when it was removed.
+fn snapshot_sources(
+    s: &Services,
+    owner: &str,
+    path: &str,
+    share: Option<&Share>,
+) -> Res<Vec<SnapshotSource>> {
+    let mut v: Vec<SnapshotSource> = jobs_of(s, owner, path)?.into_iter().map(|j| j.1).collect();
+    let recorded = s.shares.removed().find(path).map(|r| r.share);
+    for sh in share.into_iter().chain(recorded.as_ref()) {
+        let sc = &sh.smb.shadow_copy;
+        if !sc.snapshot_dir.is_empty() {
+            v.push(SnapshotSource {
+                dir: sc.snapshot_dir.trim_end_matches('/').to_string(),
+                prefix: rynas_services::smb::shadow_prefix(sh),
+            });
+        }
+    }
+    v.sort_by(|a, b| (&a.dir, &a.prefix).cmp(&(&b.dir, &b.prefix)));
+    v.dedup();
+    Ok(v)
+}
+
+/// Shares of the applied configuration and of the session user's changeset.
+fn all_shares(s: &Services, owner: &str) -> Res<Vec<Share>> {
+    let (eff, cur, _): (SharesConfig, SharesConfig, _) = docs(&s.ops.config, owner, SHARES_KEY)?;
+    let mut v = eff.shares;
+    let extra: Vec<Share> = cur
+        .shares
+        .into_iter()
+        .filter(|x| !v.iter().any(|y| y.name == x.name))
+        .collect();
+    v.extend(extra);
+    Ok(v)
+}
+
+/// Containers that mount `path` or something inside it (when Docker is installed).
+fn containers_using(path: &str) -> Vec<String> {
+    if !std::path::Path::new("/usr/bin/docker").exists() {
+        return Vec::new();
+    }
+    let t = std::time::Duration::from_secs(10);
+    let Ok(ids) = rynas_tasks::Cmd::new("docker")
+        .args(["ps", "-aq"])
+        .timeout(t)
+        .run_blocking()
+    else {
+        return Vec::new();
+    };
+    let ids: Vec<&str> = ids.stdout.split_whitespace().collect();
+    if ids.is_empty() {
+        return Vec::new();
+    }
+    let Ok(o) = rynas_tasks::Cmd::new("docker")
+        .args(["inspect", "-f", "{{.Name}}{{range .Mounts}} {{.Source}}{{end}}"])
+        .args(ids)
+        .timeout(t)
+        .run_blocking()
+    else {
+        return Vec::new();
+    };
+    o.stdout
+        .lines()
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            let name = it.next()?.trim_start_matches('/').to_string();
+            it.any(|src| folders::is_within(src, path) || folders::is_within(path, src))
+                .then_some(name)
+        })
+        .collect()
+}
+
+/// What else uses `path`; `share` is deleted with it (its own jobs go too).
+fn usages(
+    s: &Services,
+    owner: &str,
+    path: &str,
+    share: Option<&Share>,
+) -> Res<(Usages, Vec<String>)> {
+    let jobs = jobs_of(s, owner, path)?;
+    let (snaps, _, _): (SnapshotsConfig, SnapshotsConfig, _) =
+        docs(&s.ops.config, owner, SNAPSHOTS_KEY)?;
+    let share_jobs: Vec<String> = share
+        .map(|sh| {
+            snaps
+                .jobs
+                .iter()
+                .filter(|j| j.share.as_deref() == Some(sh.name.as_str()))
+                .map(|j| j.name.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut removed_jobs: Vec<String> = share_jobs;
+    let mut kept = Vec::new();
+    for (j, _) in jobs {
+        if share.is_some() {
+            if !removed_jobs.contains(&j) {
+                removed_jobs.push(j);
+            }
+        } else {
+            kept.push(j);
+        }
+    }
+    let others: Vec<String> = all_shares(s, owner)?
+        .into_iter()
+        .filter(|x| share.is_none_or(|sh| sh.name != x.name))
+        .filter(|x| folders::is_within(&x.path, path))
+        .map(|x| x.name)
+        .collect();
+    let (sched, _, _): (SchedulerConfig, SchedulerConfig, _) =
+        docs(&s.ops.config, owner, SCHEDULER_KEY)?;
+    let tasks = sched
+        .tasks
+        .iter()
+        .filter(|t| match &t.action {
+            TaskAction::Command { command, .. } => command.contains(path),
+            TaskAction::Script { script, .. } => script.contains(path),
+            TaskAction::RecycleCleanup { share: Some(n), .. } => {
+                share.is_some_and(|sh| &sh.name == n)
+            }
+            _ => false,
+        })
+        .map(|t| if t.name.is_empty() { t.id.clone() } else { t.name.clone() })
+        .collect();
+    Ok((
+        Usages {
+            share: share.map(|x| x.name.clone()),
+            own_nfs: share.is_some_and(|x| x.nfs.enabled),
+            shares: others,
+            jobs_removed: removed_jobs.clone(),
+            jobs_kept: kept,
+            tasks,
+            containers: containers_using(path),
+        },
+        removed_jobs,
+    ))
+}
+
+/// The plan of deleting a share with its folder, its snapshot directories and the jobs
+/// removed with it.
+fn delete_plan(
+    s: &Services,
+    owner: &str,
+    share: &Share,
+) -> Res<(FolderDeletePlan, Vec<SnapshotSource>, Vec<String>)> {
+    let sources = snapshot_sources(s, owner, &share.path, Some(share))?;
+    let (u, jobs) = usages(s, owner, &share.path, Some(share))?;
+    let p = folders::plan(
+        s.shares.host().as_ref(),
+        &s.shares.volumes(),
+        &share.path,
+        &sources,
+        u,
+    );
+    Ok((p, sources, jobs))
+}
+
+async fn share_delete_plan(
+    State(st): State<SvcState>,
+    h: HeaderMap,
+    body: Result<Json<ShareDeletePlanRequest>, JsonRejection>,
+) -> Res<Json<FolderDeletePlan>> {
+    let (s, owner) = (svc(&st)?, user(&h)?);
+    let req = json_body(body)?;
+    Ok(Json(
+        blocking(&s, move |s| {
+            let share = all_shares(s, &owner)?
+                .into_iter()
+                .find(|x| x.name.eq_ignore_ascii_case(&req.share))
+                .ok_or_else(|| not_found(format!("share {}", req.share)))?;
+            Ok(delete_plan(s, &owner, &share)?.0)
+        })
+        .await?,
+    ))
+}
+
+async fn folders_list(State(st): State<SvcState>, h: HeaderMap) -> Res<Json<Vec<UnsharedFolder>>> {
+    let (s, owner) = (svc(&st)?, user(&h)?);
+    Ok(Json(
+        blocking(&s, move |s| {
+            let paths: Vec<String> = all_shares(s, &owner)?.into_iter().map(|x| x.path).collect();
+            let removed = s.shares.removed().list();
+            let (snaps, _, _): (SnapshotsConfig, SnapshotsConfig, _) =
+                docs(&s.ops.config, &owner, SNAPSHOTS_KEY)?;
+            let of = |p: &str| -> Vec<SnapshotSource> {
+                let mut v: Vec<SnapshotSource> = snaps
+                    .jobs
+                    .iter()
+                    .filter(|j| j.subvolume.trim_end_matches('/') == p)
+                    .map(|j| SnapshotSource {
+                        dir: j.snapshot_dir.clone(),
+                        prefix: j.name.clone(),
+                    })
+                    .collect();
+                if let Some(r) = removed.iter().rev().find(|r| r.share.path == p) {
+                    let sc = &r.share.smb.shadow_copy;
+                    if !sc.snapshot_dir.is_empty() {
+                        v.push(SnapshotSource {
+                            dir: sc.snapshot_dir.trim_end_matches('/').to_string(),
+                            prefix: rynas_services::smb::shadow_prefix(&r.share),
+                        });
+                    }
+                }
+                v.sort_by(|a, b| (&a.dir, &a.prefix).cmp(&(&b.dir, &b.prefix)));
+                v.dedup();
+                v
+            };
+            Ok(folders::unshared(
+                s.shares.host().as_ref(),
+                &s.shares.volumes(),
+                &paths,
+                &removed,
+                &of,
+            ))
+        })
+        .await?,
+    ))
+}
+
+/// An existing folder without a share: its path, or why not.
+fn unshared_path(s: &Services, owner: &str, r: &FolderRef) -> Res<String> {
+    let vols = s.shares.volumes();
+    let (_, mnt) = vols
+        .iter()
+        .find(|(l, _)| *l == r.volume)
+        .ok_or_else(|| not_found(format!("volume {}", r.volume)))?;
+    if r.name.is_empty() || r.name.contains('/') || r.name == ".." {
+        return Err(Error::invalid("name", "invalid folder name"));
+    }
+    let path = format!("{}/{}", mnt.trim_end_matches('/'), r.name);
+    if folders::on_volume(&vols, &path).is_none() {
+        return Err(Error::invalid(
+            "name",
+            format!("{} is a system folder", r.name),
+        ));
+    }
+    let info = s.shares.host().probe(&path);
+    if !info.exists || !info.is_dir {
+        return Err(not_found(format!("folder {path}")));
+    }
+    if let Some(sh) = all_shares(s, owner)?
+        .into_iter()
+        .find(|x| folders::is_within(&x.path, &path))
+    {
+        return Err(conflict(
+            error_codes::CONFLICT,
+            format!("share {} uses {path}: delete the share instead", sh.name),
+        ));
+    }
+    Ok(path)
+}
+
+fn folder_plan(s: &Services, owner: &str, r: &FolderRef) -> Res<(FolderDeletePlan, Vec<SnapshotSource>)> {
+    let path = unshared_path(s, owner, r)?;
+    let sources = snapshot_sources(s, owner, &path, None)?;
+    let (u, _) = usages(s, owner, &path, None)?;
+    let p = folders::plan(
+        s.shares.host().as_ref(),
+        &s.shares.volumes(),
+        &path,
+        &sources,
+        u,
+    );
+    Ok((p, sources))
+}
+
+async fn folder_delete_plan(
+    State(st): State<SvcState>,
+    h: HeaderMap,
+    body: Result<Json<FolderRef>, JsonRejection>,
+) -> Res<Json<FolderDeletePlan>> {
+    let (s, owner) = (svc(&st)?, user(&h)?);
+    let r = json_body(body)?;
+    Ok(Json(
+        blocking(&s, move |s| Ok(folder_plan(s, &owner, &r)?.0)).await?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct ConfirmQuery {
+    confirm: Option<String>,
+}
+
+/// Task `shares.folder-delete`: deletes a folder without a share, its snapshots and its
+/// recycle bin (`?confirm=<name>`).
+async fn folder_delete(
+    State(st): State<SvcState>,
+    h: HeaderMap,
+    Path((volume, name)): Path<(String, String)>,
+    Query(q): Query<ConfirmQuery>,
+) -> Res<Response> {
+    let (s, owner) = (svc(&st)?, user(&h)?);
+    if q.confirm.as_deref() != Some(name.as_str()) {
+        return Err(bad(
+            error_codes::CONFIRMATION_REQUIRED,
+            format!("deleting a folder needs confirm={name}"),
+        ));
+    }
+    let r = FolderRef { volume, name };
+    let o = owner.clone();
+    let (p, sources) = blocking(&s, move |s| folder_plan(s, &o, &r)).await?;
+    if !p.allowed {
+        return Err(conflict(
+            error_codes::CONFLICT,
+            format!(
+                "{} cannot be deleted: {}",
+                p.path,
+                p.blockers
+                    .iter()
+                    .map(|b| format!("{:?} {}", b.kind, b.name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ));
+    }
+    let svc = s.clone();
+    let id = s
+        .ops
+        .tasks
+        .spawn("shares.folder-delete", &owner, move |ctx| async move {
+            let c = ctx.clone();
+            tokio::task::spawn_blocking(move || -> Result<(), String> {
+                let log = |l: &str| c.log(l);
+                folders::remove_folder(
+                    svc.ops.config.system(),
+                    svc.shares.host().as_ref(),
+                    &svc.shares.volumes(),
+                    &p.path,
+                    &sources,
+                    &log,
+                )?;
+                svc.shares.removed().forget(&[&p.path])
+            })
+            .await
+            .map_err(|e| e.to_string())?
+        })?;
+    Ok((StatusCode::ACCEPTED, Json(TaskStarted { task_id: id })).into_response())
+}
+
 
 #[derive(Deserialize)]
 struct EffectiveQuery {

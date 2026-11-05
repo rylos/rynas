@@ -13,14 +13,18 @@
 //! in-memory implementations for tests and `rynasd --dry-system`.
 
 pub mod accounts;
+pub mod folders;
 pub mod host;
 pub mod nfs;
 pub mod perm;
 pub mod recycle;
+pub mod removed;
 pub mod shares;
 pub mod smb;
+pub mod snapview;
 pub mod users;
 pub mod validate;
+
 
 pub use accounts::{Accounts, HostAccounts, MemoryAccounts};
 pub use host::{HostShares, MemoryShares, ShareHost, SubvolumeCreator};

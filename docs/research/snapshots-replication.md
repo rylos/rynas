@@ -182,6 +182,62 @@ File manager → right click → Previous versions
 - Using rustic in production now: it is still beta.
 - Promising "immutable" when root can remove `chattr +i`. Without a hardened pull target, say "protected", not WORM.
 
+## 5. Snapshots inside the share, deleting a share with its data, folders without a share
+
+Added 2026-11-05 for three requests of the maintainer.
+
+**What others do.**
+- *Snapshot folder in the share.* DSM shows a `#snapshot` folder at the share root when "make
+  snapshots visible" is on (names `GMT+01-2026.11.05-12.00.00`, also visible over SMB); ZFS has the
+  virtual `.zfs/snapshot/<name>` (`snapdir=hidden|visible`, mounted on access); NetApp ONTAP has
+  `~snapshot`/`.snapshot`; QNAP `@Recently-Snapshot`; snapper puts `.snapshots/<n>/snapshot` inside
+  the subvolume. Common traits: read-only, named after the snapshot, off or hidden by default,
+  never part of the next snapshot.
+- *Deleting a share.* DSM deletes the shared folder with its data (and its snapshots) after a
+  warning; TrueNAS separates the share (deleting it keeps the dataset) from the dataset (deleting
+  it asks to type its name and lists what depends on it: shares, snapshot and replication tasks).
+  OMV asks whether to delete the content too.
+- *Folders without a share.* TrueNAS lists every dataset, shared or not; DSM has no such list
+  (a folder left by a deleted share is invisible until shared again).
+
+**Choices for rynas.**
+- **Snapshot folder = one read-only bind mount per share of the job's snapshot directory**
+  (`<volume>/.snapshots/<job>` → `<share>/#snapshot`), as a managed systemd mount unit pulled in
+  by `rynas-snapshot-folders.target`. Off by default (`show_snapshots`).
+  - It follows btrbk by itself: new and pruned snapshots appear and disappear at once, no
+    reconcile per snapshot. A bind mount *per snapshot* (readable names such as `2026-11-05 12.00`)
+    was rejected: a mount pins the snapshot subvolume and the kernel refuses to delete a mounted
+    subvolume (`EBUSY`, see the 2015 btrfs "prevent deletion of mounted subvolumes" patch), so
+    retention would fail; it would also mean dozens of mounts per share. Names stay btrbk's
+    (`photos.20261105T1200`: date and time, sorted chronologically), the same names previous
+    versions use.
+  - Read-only at the VFS level (`ro,nosuid,nodev,noexec`): clients cannot create, rename or
+    delete anything; the mount point cannot be removed while mounted. The default veto list already
+    hides `#snapshot`; it is not vetoed while the folder is shown, and `recycle:exclude_dir` keeps
+    the recycle bin out of it.
+  - No snapshots of snapshots and no double counting: a btrfs snapshot never crosses a mount (the
+    snapshot holds an empty `#snapshot` directory), btrfs space accounting does not change, and
+    rynas' own walks stay on one filesystem (folder sizes, `rm --one-file-system`). There is no
+    file-level backup in rynas yet: btrbk send/receive works per subvolume and never sees the
+    mount; future file-level backups (restic) must run with `--one-file-system` or exclude
+    `#snapshot`.
+  - Survives reboots (units in `/etc/systemd/system`, rynasd's private mount namespace never
+    mounts anything itself); a share rollback unmounts it and mounts it again on the new
+    subvolume.
+  - SMB: yes. NFS: only when the export also exports the mounts below it (`crossmnt`), shown as a
+    warning on the share.
+- **Deleting a share with its data**: off by default in the delete dialog; when on, a plan
+  (size of the folder, snapshots, recycle bin, what else uses it: NFS export, snapshot jobs,
+  scheduled tasks, containers, nested shares), typed confirmation of the share name. It is staged
+  with the share deletion (and the removal of the share's snapshot jobs) and runs at the end of
+  the apply task, after the services stopped using the folder. Only folders directly on a rynas
+  volume can be deleted: a share may point at `/home/alice` or `/srv`, which rynas never deletes.
+- **Unshared folders**: the top-level folders of the rynas volumes no share uses (system names
+  `.*`, `@*`, `#*`, `lost+found` left out), with size (bounded walk), snapshots, and when the share
+  was removed. A plain share deletion records the share's settings, so "Share again" opens the
+  create form with the previous name, permissions and settings. "Delete permanently" is a task
+  with the same plan and typed confirmation.
+
 ## Sources
 - btrbk: [btrbk.conf(5)](https://digint.ch/btrbk/doc/btrbk.conf.5.html), [tags and release 0.32.7](https://github.com/digint/btrbk/tags)
 - Synology: [Snapshot Replication spec](https://www.synology.com/dsm/software_spec/snapshot_replication), [Data Protection White Paper](https://cndl.synology.cn/download/Document/Software/WhitePaper/Firmware/DSM/All/enu/Synology_Data_Protection_White_Paper.pdf)
@@ -192,6 +248,7 @@ File manager → right click → Previous versions
 - snapper and apt: [snap-apt](https://github.com/pavinjosdev/snap-apt), [Salsa MR](https://salsa.debian.org/debian/snapper/-/merge_requests/2)
 - Rust: [libbtrfsutil](https://docs.rs/crate/libbtrfsutil/0.1.0), [libbtrfsutil-sys](https://lib.rs/crates/libbtrfsutil-sys)
 - rustic: [AltLinux](https://packages.altlinux.org/en/sisyphus/srpms/rustic/3360151391433197853), [OpenBSD](https://www.openbsdhandbook.com/packages/release/sysutils/rustic/)
+- Snapshot folders and deletion: [btrfs "prevent deletion of mounted subvolumes" (LKML, 2015)](https://lore.kernel.org/lkml/20150401112242.GG6821@suse.cz/T/), [ZFS `snapdir` property](https://openzfs.github.io/openzfs-docs/man/master/7/zfsprops.7.html), [NetApp: snapshots hidden in ~snapshot](https://kb.netapp.com/on-prem/ontap/da/NAS/NAS-KBs/Snapshots_are_not_visible_inside_the_~snapshot_folder_because_they_are_marked_as_hidden), [QNAP @Recently-Snapshot](https://www.qnap.com/en/how-to/faq/con_show.php?cid=2343), [forum: DSM snapshot folder over SMB](https://www.synoforum.com/threads/hide-snapshot-folder.10074/)
 - Maintainer's projects: [btrbk-nas](https://github.com/rylos/btrbk-nas) (README, `src/btrfs.rs`), [synodeb](https://github.com/rylos/synodeb) (`pkg/synodeb/usr/sbin/synodeb-dom`)
 
 **To be verified:**

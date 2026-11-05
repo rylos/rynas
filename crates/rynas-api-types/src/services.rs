@@ -444,7 +444,20 @@ pub struct Share {
     /// leaves the permissions of the directory alone.
     #[serde(default)]
     pub permissions: Vec<Permission>,
+    /// A read-only `#snapshot` folder at the share root with the share's snapshots (one
+    /// folder each, named after the snapshot, `<prefix>.YYYYMMDDTHHMM`): a read-only bind
+    /// mount of the snapshot directory of the share (`smb.shadow_copy.snapshot_dir`, set by
+    /// its snapshot job). Off by default.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub show_snapshots: bool,
 }
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// Name of the snapshot folder inside a share ([`Share::show_snapshots`]).
+pub const SNAPSHOT_FOLDER: &str = "#snapshot";
 
 fn default_workgroup() -> String {
     "WORKGROUP".into()
@@ -557,6 +570,30 @@ pub struct SharesConfig {
     pub nfs: NfsSettings,
     #[serde(default)]
     pub shares: Vec<Share>,
+    /// Shares deleted by this change whose folder goes too, with its snapshots and recycle
+    /// bin (set by `DELETE /api/v1/shares/{name}?remove_folder=true&confirm={name}`). The
+    /// removal runs at the end of the apply, after the services stopped using the folder.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remove_folders: Vec<FolderRemoval>,
+}
+
+/// A share folder removed with its share ([`SharesConfig::remove_folders`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct FolderRemoval {
+    pub share: String,
+    /// The share's path when the removal was asked for (nothing happens if it changed).
+    pub path: String,
+    /// Snapshot directories of the folder: every `<prefix>.<timestamp>` subvolume in them
+    /// goes too.
+    #[serde(default)]
+    pub snapshots: Vec<SnapshotSource>,
+}
+
+/// A snapshot directory and the name prefix of the snapshots of one folder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SnapshotSource {
+    pub dir: String,
+    pub prefix: String,
 }
 
 /// System state of a share.
@@ -572,9 +609,74 @@ pub struct ShareStatus {
     /// The path is the root of a btrfs subvolume.
     pub subvolume: bool,
     /// Non-fatal remarks (extra options overriding managed keys, NFS clients need the
-    /// same uids...).
+    /// same uids...) in English, for logs and the CLI; the UI translates `warning_items`.
     #[serde(default)]
     pub warnings: Vec<String>,
+    /// The same remarks as `warnings`, in the same order, with a stable code and the values
+    /// their text names.
+    #[serde(default)]
+    pub warning_items: Vec<ShareWarning>,
+}
+
+/// A remark of [`ShareStatus::warning_items`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShareWarning {
+    pub code: ShareWarningCode,
+    #[serde(default, skip_serializing_if = "ShareWarningArgs::is_empty")]
+    pub args: ShareWarningArgs,
+}
+
+/// Values named by a [`ShareWarning`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ShareWarningArgs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume: Option<String>,
+    /// SMB option name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+}
+
+impl ShareWarningArgs {
+    pub fn is_empty(&self) -> bool {
+        self.path.is_none() && self.volume.is_none() && self.key.is_none()
+    }
+}
+
+/// Stable code of a share remark; unknown codes of a newer server read as `other`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShareWarningCode {
+    /// `path` is created as a subvolume of `volume` on apply.
+    SubvolumeOnApply,
+    /// The same, without compression.
+    SubvolumeOnApplyNoCompression,
+    /// `path` is not a btrfs subvolume.
+    NotSubvolume,
+    /// The SMB extra option `key` overrides a setting of rynas.
+    ExtraOverrides,
+    /// NFS clients must use the same uids.
+    NfsUids,
+    /// NFS is off in the service settings.
+    NfsServiceOff,
+    /// SMB is off in the service settings.
+    SmbServiceOff,
+    /// Time Machine without a size limit.
+    TimemachineNoLimit,
+    /// Multi-protocol preset without NFS.
+    MultiprotocolWithoutNfs,
+    /// No permissions: the folder's own permissions apply.
+    NoPermissions,
+    /// Every entry denies access.
+    AllDenied,
+    /// The snapshot folder is on but the share has no snapshot job (no snapshot directory).
+    SnapshotFolderNoJob,
+    /// The snapshot folder is visible to NFS clients only when the export includes the
+    /// mounts below it (`crossmnt`).
+    SnapshotFolderNfs,
+    #[serde(other)]
+    Other,
 }
 
 /// An entry of `GET /api/v1/shares`.
@@ -582,6 +684,102 @@ pub struct ShareStatus {
 pub struct ShareView {
     pub share: Share,
     pub status: ShareStatus,
+}
+
+// ---------------------------------------------------------------------------------------------
+// Folders: what a deletion removes, folders without a share
+// ---------------------------------------------------------------------------------------------
+
+/// `POST /api/v1/shares/plan/delete`: what deleting a share with its folder removes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ShareDeletePlanRequest {
+    pub share: String,
+}
+
+/// A top-level folder of a rynas volume (`/<volume>/<name>`): `DELETE /api/v1/folders/{volume}/{name}`
+/// and the body of `POST /api/v1/folders/plan/delete`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct FolderRef {
+    pub volume: String,
+    pub name: String,
+}
+
+/// What a folder deletion removes and what still uses the folder (no side effect).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct FolderDeletePlan {
+    pub path: String,
+    /// The share deleted with it, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share: Option<String>,
+    /// The folder is a btrfs subvolume.
+    pub subvolume: bool,
+    /// Space used by the files of the folder, its recycle bin included (one pass over the
+    /// folder, bounded in time: `size_partial` means at least this much).
+    pub size_bytes: u64,
+    pub size_partial: bool,
+    /// Snapshots deleted with the folder (their space is freed as far as nothing else
+    /// shares it).
+    pub snapshots: u32,
+    /// The folder has a `#recycle` bin (deleted with it).
+    pub recycle_bin: bool,
+    /// What else uses the folder.
+    #[serde(default)]
+    pub usages: Vec<FolderUsage>,
+    /// The deletion is possible now (`blockers` explains why not).
+    pub allowed: bool,
+    /// Usages that prevent the deletion (a subset of `usages`).
+    #[serde(default)]
+    pub blockers: Vec<FolderUsage>,
+}
+
+/// Something that uses a folder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FolderUsage {
+    pub kind: FolderUsageKind,
+    /// Share, job, task or container name.
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FolderUsageKind {
+    /// The share's own NFS export (removed with the share).
+    NfsExport,
+    /// Another share uses the folder or a folder inside it.
+    Share,
+    /// A snapshot job takes snapshots of the folder.
+    SnapshotJob,
+    /// A scheduled task names the folder or the share.
+    ScheduledTask,
+    /// A container mounts the folder or something inside it.
+    Container,
+    /// The folder is not directly on a rynas volume: rynas does not delete it.
+    NotOnVolume,
+    #[serde(other)]
+    Other,
+}
+
+/// An entry of `GET /api/v1/folders`: a top-level folder of a rynas volume that no share
+/// uses (system folders such as `.snapshots`, `#recycle` or `@rynas-cache` are left out).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct UnsharedFolder {
+    pub volume: String,
+    pub name: String,
+    pub path: String,
+    pub subvolume: bool,
+    /// See [`FolderDeletePlan::size_bytes`]; `None` when it could not be read.
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
+    #[serde(default)]
+    pub size_partial: bool,
+    pub snapshots: u32,
+    /// When the share of this folder was removed, if rynas knows.
+    #[serde(default)]
+    pub removed_at_ms: Option<u64>,
+    /// The share as it was when it was removed (name, permissions and settings), to share
+    /// the folder again.
+    #[serde(default)]
+    pub previous: Option<Share>,
 }
 
 /// `GET/PUT /api/v1/services/smb`.

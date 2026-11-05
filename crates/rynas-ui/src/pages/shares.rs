@@ -8,7 +8,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use rynas_api_types::{
     Access, EffectiveAccess, EffectivePermission, GroupView, NfsRule, NfsSquash, Permission, PrincipalKind, Share, ShareStatus,
-    ShareSubvolume, ShareView, SmbPreset, UserView,
+    ShareSubvolume, ShareView, SmbPreset, UnsharedFolder, UserView,
 };
 
 use crate::api;
@@ -16,8 +16,9 @@ use crate::form::{In, area_field, lens, lens_bool, save_bar, search_box, select_
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::live::use_live;
+use crate::pages::share_folders::{self, Target};
 use crate::toast::saved_pending;
-use crate::ui::{self, Confirm, EmptyState, Meter, PageHeader, Remote, Tone, confirm, drawer, usage_tone};
+use crate::ui::{self, EmptyState, Meter, PageHeader, Remote, Tone, drawer, usage_tone};
 
 /// `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`.
 pub fn valid_share_name(n: &str) -> bool {
@@ -55,6 +56,8 @@ fn fs_for(path: &str, fss: &[rynas_api_types::Filesystem]) -> Option<(String, u6
 struct ShareEdit {
     view: Option<ShareView>,
     tab: usize,
+    /// A new share filled in beforehand (a folder shared again).
+    prefill: Option<Share>,
 }
 
 #[component]
@@ -62,11 +65,14 @@ pub fn Shares() -> impl IntoView {
     let shares = Remote::<Vec<ShareView>>::with_config("/api/v1/shares");
     let users = Remote::<Vec<UserView>>::with_config("/api/v1/users");
     let groups = Remote::<Vec<GroupView>>::with_config("/api/v1/groups");
+    let folders = Remote::<Vec<UnsharedFolder>>::with_config("/api/v1/folders");
     let live = use_live();
     let q = RwSignal::new(String::new());
     let edit = RwSignal::new(None::<ShareEdit>);
     let del = RwSignal::new(None::<String>);
-    let create = move || edit.set(Some(ShareEdit { view: None, tab: 0 }));
+    let fdel = RwSignal::new(None::<UnsharedFolder>);
+    let create = move || edit.set(Some(ShareEdit { view: None, tab: 0, prefill: None }));
+    let share_again = Callback::new(move |f: UnsharedFolder| edit.set(Some(ShareEdit { view: None, tab: 0, prefill: Some(share_folders::reshare(&f)) })));
 
     let table = move || {
         if let Some(v) = shares.gate(5) {
@@ -94,45 +100,26 @@ pub fn Shares() -> impl IntoView {
         }
         let fss = live.storage.with(|s| s.as_ref().map(|s| s.filesystems.clone()).unwrap_or_default());
         view! {
-            {ui::table("", &["shares.name", "shares.location", "shares.volume_usage", "shares.protocols", "shares.recycle", "col.status", ""], rows.into_iter().map(|v| share_row(v, &fss, edit, del)).collect::<Vec<_>>())}
+            {ui::table("shares-table", &["shares.name", "shares.location", "shares.volume_usage", "shares.protocols", "shares.recycle", "col.status", ""], rows.into_iter().map(|v| share_row(v, &fss, edit, del)).collect::<Vec<_>>())}
         }
         .into_any()
     };
 
     let editor = move || edit.get().map(|e| share_editor(e, users, groups, Callback::new(move |_| edit.set(None))));
     let deleter = move || {
-        del.get().map(|name| {
-            let busy = RwSignal::new(false);
-            let error = RwSignal::new(None::<String>);
-            let close = Callback::new(move |_| del.set(None));
-            let n = name.clone();
-            confirm(Confirm {
-                title: tf("shares.delete_title", &[("name", &name)]),
-                text: t("shares.delete_text").to_string(),
-                action: "delete",
-                danger: true,
-                extra: None,
-                typed: Signal::stored(None),
-                busy,
-                error,
-                on_confirm: Callback::new(move |_| {
-                    busy.set(true);
-                    let n = n.clone();
-                    spawn_local(async move {
-                        let r = api::delete_empty(&format!("/api/v1/shares/{}", api::encode(&n))).await;
-                        busy.set(false);
-                        match r {
-                            Ok(()) => {
-                                saved_pending();
-                                crate::config::changed();
-                                close.run(());
-                            }
-                            Err(e) => error.set(Some(e.text())),
-                        }
-                    });
+        del.get()
+            .map(|name| share_folders::delete_dialog(Target::Share(name), Callback::new(move |_| del.set(None)), Callback::new(move |_| ())))
+    };
+    let folder_deleter = move || {
+        fdel.get().map(|f| {
+            share_folders::delete_dialog(
+                Target::Folder(Box::new(f)),
+                Callback::new(move |_| fdel.set(None)),
+                Callback::new(move |_| {
+                    folders.reload();
+                    shares.reload();
                 }),
-                on_cancel: close,
-            })
+            )
         })
     };
 
@@ -148,8 +135,10 @@ pub fn Shares() -> impl IntoView {
                 </div>
                 {table}
             </section>
+            {share_folders::unshared_section(folders, share_again, fdel)}
             {editor}
             {deleter}
+            {folder_deleter}
         </div>
     }
 }
@@ -173,10 +162,10 @@ fn share_row(v: ShareView, fss: &[rynas_api_types::Filesystem], edit: RwSignal<O
     let name = s.name.clone();
     let open = {
         let v = v.clone();
-        move |tab: usize| edit.set(Some(ShareEdit { view: Some(v.clone()), tab }))
+        move |tab: usize| edit.set(Some(ShareEdit { view: Some(v.clone()), tab, prefill: None }))
     };
     let (o1, o2, o3) = (open.clone(), open.clone(), open);
-    let warnings = v.status.warnings.join("\n");
+    let warnings = share_folders::warnings(&v.status).join("\n");
     let recycle = if s.smb.enabled && s.smb.recycle.enabled {
         let d = s.smb.recycle.retention_days;
         if d == 0 { t("shares.recycle_keep").to_string() } else { tf("shares.recycle_days", &[("n", &d.to_string())]) }
@@ -265,8 +254,8 @@ fn parse_u32(v: &str) -> u32 {
 fn share_editor(e: ShareEdit, users: Remote<Vec<UserView>>, groups: Remote<Vec<GroupView>>, close: Callback<()>) -> AnyView {
     let is_new = e.view.is_none();
     let saved = e.view.as_ref().map(|v| v.share.clone());
-    let warnings = e.view.as_ref().map(|v| v.status.warnings.clone()).unwrap_or_default();
-    let d = RwSignal::new(saved.clone().unwrap_or_else(|| Share {
+    let warnings = e.view.as_ref().map(|v| share_folders::warnings(&v.status)).unwrap_or_default();
+    let d = RwSignal::new(saved.clone().or(e.prefill).unwrap_or_else(|| Share {
         subvolume: Some(ShareSubvolume { volume: String::new(), compression: true }),
         ..Share::default()
     }));
@@ -330,7 +319,10 @@ fn share_editor(e: ShareEdit, users: Remote<Vec<UserView>>, groups: Remote<Vec<G
         {let (v, s) = lens(d, |s| s.description.clone(), |s, v| s.description = v);
          text_field("users.description", v, s, Signal::derive(|| None), In::default())}
         {location_fields(d, is_new, show)}
+        {let (v, s) = lens_bool(d, |s| s.show_snapshots, |s, v| s.show_snapshots = v);
+         switch("shares.show_snapshots", Some("shares.show_snapshots_help"), v, s)}
         {(!warnings.is_empty()).then(|| view! {
+
             {ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { <ul class="plain-list">{warnings.into_iter().map(|w| view! { <li>{w}</li> }).collect_view()}</ul> }.into_any())}
         })}
     }

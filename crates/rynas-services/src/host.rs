@@ -37,6 +37,48 @@ pub trait ShareHost: Send + Sync {
     fn get_acl(&self, path: &str) -> Result<Option<BTreeSet<String>>, String>;
     /// The systemd unit is installed (its package is).
     fn unit_installed(&self, unit: &str) -> bool;
+    /// Entries of a directory (empty when it cannot be read).
+    fn list_dir(&self, path: &str) -> Vec<DirEntryInfo>;
+    /// Space used by the files below `path` on its own filesystem (nested subvolumes and
+    /// mounts are skipped), counting for at most `budget`: `(bytes, partial)`.
+    fn tree_size(&self, path: &str, budget: Duration) -> Option<(u64, bool)>;
+    /// Snapshot names `<prefix>.<timestamp>[_N]` in `dir`.
+    fn snapshot_names(&self, dir: &str, prefix: &str) -> Vec<String>;
+    /// `mkdir -p` with mode 0755.
+    fn ensure_dir(&self, path: &str) -> Result<(), String>;
+    /// Removes `path` if it is an empty directory (nothing happens otherwise).
+    fn remove_empty_dir(&self, path: &str);
+}
+
+/// An entry of [`ShareHost::list_dir`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DirEntryInfo {
+    pub name: String,
+    pub is_dir: bool,
+    /// Root of a btrfs subvolume.
+    pub subvolume: bool,
+}
+
+/// `<prefix>.` followed by a btrbk timestamp (`YYYYMMDD[Thhmm[ss]][±hhmm]`) and an optional
+/// `_N`.
+pub fn is_snapshot_name(name: &str, prefix: &str) -> bool {
+    let Some(rest) = name
+        .strip_prefix(prefix)
+        .and_then(|r| r.strip_prefix('.'))
+    else {
+        return false;
+    };
+    let stamp = rest.split('_').next().unwrap_or("");
+    let suffix_ok = rest[stamp.len()..]
+        .strip_prefix('_')
+        .is_none_or(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    let b = stamp.as_bytes();
+    b.len() >= 8
+        && b[..8].iter().all(u8::is_ascii_digit)
+        && b[8..]
+            .iter()
+            .all(|c| c.is_ascii_digit() || matches!(c, b'T' | b'+' | b'-'))
+        && suffix_ok
 }
 
 /// Creates the btrfs subvolume of a share that asks for one, during the apply of `shares`
@@ -47,6 +89,10 @@ pub trait SubvolumeCreator: Send + Sync {
     /// Creates `path` (directly below a volume's mount point) as a subvolume; with
     /// `compression` false its `compression` property is set to "none".
     fn create(&self, path: &str, compression: bool, log: &dyn Fn(&str)) -> Result<(), String>;
+    /// The mounted rynas volumes: (label, mount point).
+    fn volumes(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
 }
 
 /// Name of a filesystem magic number (`statfs.f_type`) and whether it is remote/FUSE.
@@ -196,6 +242,97 @@ impl ShareHost for HostShares {
         .iter()
         .any(|d| std::path::Path::new(d).join(unit).exists())
     }
+
+    fn list_dir(&self, path: &str) -> Vec<DirEntryInfo> {
+        let Ok(rd) = std::fs::read_dir(path) else {
+            return Vec::new();
+        };
+        let Ok(parent_dev) = std::fs::metadata(path).map(|m| m.dev()) else {
+            return Vec::new();
+        };
+        let mut v: Vec<DirEntryInfo> = rd
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().into_string().ok()?;
+                // no symlinks followed
+                let md = std::fs::symlink_metadata(e.path()).ok()?;
+                let is_dir = md.is_dir();
+                Some(DirEntryInfo {
+                    name,
+                    is_dir,
+                    // a subvolume root: inode 256 with its own anonymous device
+                    subvolume: is_dir && md.ino() == 256 && md.dev() != parent_dev,
+                })
+            })
+            .collect();
+        v.sort_by(|a, b| a.name.cmp(&b.name));
+        v
+    }
+
+    fn tree_size(&self, path: &str, budget: Duration) -> Option<(u64, bool)> {
+        tree_size(std::path::Path::new(path), budget)
+    }
+
+    fn snapshot_names(&self, dir: &str, prefix: &str) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .map(|rd| {
+                rd.flatten()
+                    .filter_map(|e| e.file_name().into_string().ok())
+                    .filter(|n| is_snapshot_name(n, prefix))
+                    .collect()
+            })
+            .unwrap_or_default();
+        v.sort();
+        v
+    }
+
+    fn ensure_dir(&self, path: &str) -> Result<(), String> {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o755)
+            .create(path)
+            .map_err(|e| format!("{path}: {e}"))
+    }
+
+    fn remove_empty_dir(&self, path: &str) {
+        // rmdir refuses a directory that is not empty (or still a mount point)
+        let _ = std::fs::remove_dir(path);
+    }
+}
+
+/// [`ShareHost::tree_size`] on the real filesystem: `st_blocks` of every entry on the
+/// device of `root`, without following symlinks, until `budget` runs out.
+pub fn tree_size(root: &std::path::Path, budget: Duration) -> Option<(u64, bool)> {
+    let start = std::time::Instant::now();
+    let md = std::fs::symlink_metadata(root).ok()?;
+    if !md.is_dir() {
+        return Some((md.blocks() * 512, false));
+    }
+    let dev = md.dev();
+    let mut total = md.blocks() * 512;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            if start.elapsed() > budget {
+                return Some((total, true));
+            }
+            let Ok(m) = std::fs::symlink_metadata(e.path()) else {
+                continue;
+            };
+            if m.dev() != dev {
+                continue; // nested subvolume or mount (the snapshot folder)
+            }
+            total += m.blocks() * 512;
+            if m.is_dir() {
+                stack.push(e.path());
+            }
+        }
+    }
+    Some((total, false))
 }
 
 /// Paths and ACLs in memory (tests); with `probe_host`, paths are probed on the real
@@ -217,6 +354,12 @@ pub struct MemorySharesState {
     pub fail_acl: Vec<String>,
     /// Units reported as not installed (every other one is).
     pub missing_units: Vec<String>,
+    /// Snapshot names per directory.
+    pub snapshots: BTreeMap<String, Vec<String>>,
+    /// Sizes reported by `tree_size`.
+    pub sizes: BTreeMap<String, u64>,
+    /// `ensure_dir` and `remove_empty_dir` calls: `mkdir <path>`, `rmdir <path>`.
+    pub dir_log: Vec<String>,
 }
 
 impl MemoryShares {
@@ -281,6 +424,62 @@ impl ShareHost for MemoryShares {
     fn unit_installed(&self, unit: &str) -> bool {
         !self.state().missing_units.iter().any(|u| u == unit)
     }
+
+    fn list_dir(&self, path: &str) -> Vec<DirEntryInfo> {
+        let base = format!("{}/", path.trim_end_matches('/'));
+        let v: Vec<DirEntryInfo> = self
+            .state()
+            .paths
+            .iter()
+            .filter_map(|(p, i)| {
+                let name = p.strip_prefix(&base)?;
+                (!name.is_empty() && !name.contains('/') && i.exists).then(|| DirEntryInfo {
+                    name: name.to_string(),
+                    is_dir: i.is_dir,
+                    subvolume: i.subvolume,
+                })
+            })
+            .collect();
+        if v.is_empty() && self.probe_host {
+            return HostShares.list_dir(path);
+        }
+        v
+    }
+
+    fn tree_size(&self, path: &str, budget: Duration) -> Option<(u64, bool)> {
+        let known = self.state().sizes.get(path).copied();
+        if let Some(n) = known {
+            return Some((n, false));
+        }
+        if self.probe_host {
+            HostShares.tree_size(path, budget)
+        } else {
+            self.state().paths.contains_key(path).then_some((0, false))
+        }
+    }
+
+    fn snapshot_names(&self, dir: &str, prefix: &str) -> Vec<String> {
+        let known = self.state().snapshots.get(dir.trim_end_matches('/')).cloned();
+        match known {
+            Some(v) => v
+                .into_iter()
+                .filter(|n| is_snapshot_name(n, prefix))
+                .collect(),
+            None if self.probe_host => HostShares.snapshot_names(dir, prefix),
+            None => Vec::new(),
+        }
+    }
+
+    fn ensure_dir(&self, path: &str) -> Result<(), String> {
+        tracing::info!("dry system: mkdir -p {path}");
+        self.state().dir_log.push(format!("mkdir {path}"));
+        Ok(())
+    }
+
+    fn remove_empty_dir(&self, path: &str) {
+        tracing::info!("dry system: rmdir {path}");
+        self.state().dir_log.push(format!("rmdir {path}"));
+    }
 }
 
 #[cfg(test)]
@@ -307,7 +506,51 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_names_of_a_prefix() {
+        for ok in [
+            "photos.20261105",
+            "photos.20261105T1200",
+            "photos.20261105T120000+0100",
+            "photos.20261105T1200_2",
+        ] {
+            assert!(is_snapshot_name(ok, "photos"), "{ok}");
+        }
+        for bad in [
+            "photos",
+            "photos.",
+            "photos2.20261105T1200",
+            "photos.2026",
+            "photos.20261105T1200_",
+            "photos.20261105T1200_x",
+            "other.20261105T1200",
+        ] {
+            assert!(!is_snapshot_name(bad, "photos"), "{bad}");
+        }
+    }
+
+    #[test]
+    fn tree_size_stays_on_one_filesystem_without_following_symlinks() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("a/b")).unwrap();
+        std::fs::write(d.path().join("a/b/f"), vec![1u8; 64 * 1024]).unwrap();
+        std::os::unix::fs::symlink("/usr", d.path().join("link")).unwrap();
+        let (n, partial) = tree_size(d.path(), Duration::from_secs(5)).unwrap();
+        assert!(!partial);
+        assert!(n >= 64 * 1024, "{n}");
+        assert!(n < 1024 * 1024, "the symlink is not followed: {n}");
+        assert!(tree_size(&d.path().join("missing"), Duration::from_secs(1)).is_none());
+        let h = HostShares;
+        let names: Vec<String> = h
+            .list_dir(d.path().to_str().unwrap())
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(names, ["a", "link"]);
+    }
+
+    #[test]
     fn filesystem_names() {
+
         assert_eq!(fs_name(0x9123683E), ("btrfs".into(), false));
         assert_eq!(fs_name(0x6969), ("nfs".into(), true));
         assert_eq!(fs_name(0x1234).0, "0x1234");
