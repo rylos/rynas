@@ -13,7 +13,7 @@ import run_all  # noqa: E402
 
 cdp.S = OUT_DIR
 cdp.SHOTS = os.path.join(OUT_DIR, "shots")
-cdp.PORT = 9395
+cdp.PORT = int(os.environ.get("CDP_PORT", "9395"))  # another free port when a probe already runs
 
 
 async def main():

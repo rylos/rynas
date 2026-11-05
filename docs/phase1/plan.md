@@ -734,7 +734,8 @@ Synology: synology-nas platform driver bound and DMI naming Synology or a known 
 `power.schedule` (order 45, after the scheduler whose tasks run the shutdown rules). Types in
 `rynas_api_types::synology` and `rynas_api_types::power`. No new error code. On a machine that
 is not a Synology every `/hardware/synology/*` endpoint answers 404 `not_found`;
-`/api/v1/hardware` (provider-neutral summary) is unchanged.
+`/api/v1/hardware` (provider-neutral summary) is unchanged. The UI shows the Hardware › Synology
+tab only when the live provider is `synology` or `GET /hardware/synology/settings` answers (G8d).
 
 | Method | Path | Body | Response |
 |---|---|---|---|

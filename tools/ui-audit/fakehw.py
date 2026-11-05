@@ -1,8 +1,11 @@
 """Fake DS920+ tree for rynasd --hw-root (never the host's RTC/LEDs): writes the tree once, then
-refreshes synohwd's status.json every 10 s so it stays fresh. Usage: fakehw.py <root> <fixture>."""
+refreshes synohwd's status.json every 10 s so it stays fresh. Usage: fakehw.py <root> <fixture>.
+With the fixture "generic" it writes a plain PC instead (no Synology platform, no synohwd): the
+G8d check that no Synology screen, tab or hint shows up on generic hardware."""
 import json, os, sys, time
 
 root, fixture = sys.argv[1], sys.argv[2]
+generic = fixture == "generic"
 
 
 def w(rel, text):
@@ -12,9 +15,10 @@ def w(rel, text):
         f.write(text)
 
 
-os.makedirs(os.path.join(root, "sys/devices/platform/synology-nas"), exist_ok=True)
-w("sys/class/dmi/id/sys_vendor", "Synology Inc.\n")
-w("sys/class/dmi/id/product_name", "DS920+\n")
+if not generic:
+    os.makedirs(os.path.join(root, "sys/devices/platform/synology-nas"), exist_ok=True)
+w("sys/class/dmi/id/sys_vendor", "Example Corp.\n" if generic else "Synology Inc.\n")
+w("sys/class/dmi/id/product_name", "Generic PC\n" if generic else "DS920+\n")
 w("proc/uptime", "120.00 60.00\n")
 w("proc/mdstat", "Personalities : [raid1]\nunused devices: <none>\n")
 w("proc/sys/kernel/random/boot_id", open("/proc/sys/kernel/random/boot_id").read())
@@ -23,7 +27,7 @@ w("sys/class/rtc/rtc0/wakealarm", "")
 link = os.path.join(root, "sys/class/rtc/rtc0/device")
 if not os.path.islink(link):
     os.symlink("../../../devices/pnp0/00:02", link)
-for bay in range(1, 5):
+for bay in range(1, 1 if generic else 5):
     for color in ("green", "orange"):
         d = f"sys/class/leds/syno:{color}:disk{bay}"
         if color == "green":
@@ -32,6 +36,9 @@ for bay in range(1, 5):
         else:
             w(d + "/trigger", "[none] timer\n")
             w(d + "/brightness", "0\n")
+if generic:
+    while True:  # nothing to refresh; stays alive like the DS920+ tree (stop.sh kills the PID)
+        time.sleep(3600)
 base = json.load(open(fixture))
 # the DS920+'s two M.2 slots (synohwd's slot map: slot 1 = port 00:14.1, slot 2 = 00:14.0),
 # in case the fixture predates it; controller numbers swap between boots

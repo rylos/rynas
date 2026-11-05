@@ -1,5 +1,6 @@
 """Every element that scrolls sideways (inner scrollbars too), on every route, in the dialogs
 opened by the page's primary buttons and in each of their tabs; widths 1280/1024/390, en+it."""
+# ROUTES=/hardware,/network limits it to some routes; CDP_PORT picks another browser port.
 import asyncio, json, os, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
@@ -9,7 +10,7 @@ os.makedirs(os.path.join(OUT_DIR, "shots"), exist_ok=True)
 BASE_URL = os.environ.get("BASE", "http://127.0.0.1:18600")
 sys.path.insert(0, HERE)
 import cdp, run_all
-cdp.S = OUT_DIR; cdp.SHOTS = os.path.join(OUT_DIR, "shots"); cdp.PORT = 9396
+cdp.S = OUT_DIR; cdp.SHOTS = os.path.join(OUT_DIR, "shots"); cdp.PORT = int(os.environ.get("CDP_PORT", "9396"))
 
 FIND = r"""(() => { const out = [];
   for (const e of document.querySelectorAll('body *')) {
@@ -36,7 +37,7 @@ async def main():
             for w, h, m in [(1280, 860, False), (1024, 768, False), (390, 844, True)]:
                 await p.send("Emulation.setDeviceMetricsOverride", width=w, height=h, deviceScaleFactor=1, mobile=m)
                 await p.goto(run_all.BASE + "/"); await asyncio.sleep(2)
-                for route in run_all.ROUTES:
+                for route in (os.environ["ROUTES"].split(",") if os.environ.get("ROUTES") else run_all.ROUTES):
                     try: await run_all.nav(p, route)
                     except Exception as e: print("nav fail", route, e); continue
                     await asyncio.sleep(1.2)

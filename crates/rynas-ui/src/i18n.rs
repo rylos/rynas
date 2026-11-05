@@ -490,7 +490,7 @@ dict! {
     "hw.updated" => "Last update", "Ultimo aggiornamento";
     "hw.ago" => "ago", "fa";
     "hw.none_title" => "No hardware provider", "Nessun provider hardware";
-    "hw.none_text" => "This machine does not expose fans, LEDs or drive bays through a provider (such as synohwd on Synology). Sensor temperatures are still shown on the dashboard.", "Questa macchina non espone ventole, LED o alloggiamenti tramite un provider (ad esempio synohwd sui Synology). Le temperature dei sensori restano visibili nella dashboard.";
+    "hw.none_text" => "This machine does not expose fans, LEDs or drive bays through a hardware provider. Sensor temperatures are still shown on the dashboard.", "Questa macchina non espone ventole, LED o alloggiamenti tramite un provider hardware. Le temperature dei sensori restano visibili nella dashboard.";
     "hw.no_events" => "No recent events", "Nessun evento recente";
     "hw.subtitle" => "Fans, temperatures, status LED and platform events", "Ventole, temperature, LED di stato ed eventi della piattaforma";
     "led.green" => "Green", "Verde";
@@ -498,11 +498,14 @@ dict! {
     "led.orange" => "Orange", "Arancione";
     "led.orange-blink" => "Blinking orange", "Arancione lampeggiante";
     "led.off" => "Off", "Spento";
+    "hw.st_normal" => "Normal", "Stato normale";
+    "hw.st_starting" => "Starting up", "In avvio";
+    "hw.st_attention" => "Needs attention", "Attenzione";
+    "hw.st_fault" => "Fault", "Guasto";
+    "hw.fan_n" => "Fan {n}", "Ventola {n}";
     "hw.tab_overview" => "Overview", "Panoramica";
     "hw.tab_synology" => "Synology", "Synology";
     "ps.title" => "Power schedule", "Pianificazione alimentazione";
-    "syn.none_title" => "Not a Synology", "Non è un Synology";
-    "syn.none_text" => "This machine is not a Synology NAS with synodeb's platform driver, so there are no fans, bay LEDs or buttons to manage here. The power schedule works on any machine.", "Questa macchina non è un NAS Synology con il driver di piattaforma di synodeb: qui non ci sono ventole, LED degli alloggiamenti o pulsanti da gestire. La pianificazione dell'alimentazione funziona su qualsiasi macchina.";
     "syn.not_running" => "synohwd is not running: the status is not up to date and beeps or identify are unavailable. Settings can still be staged; applying them restarts synohwd.", "synohwd non è in esecuzione: lo stato non è aggiornato e i segnali acustici o l'identificazione non sono disponibili. Le impostazioni si possono comunque preparare; applicarle riavvia synohwd.";
     "syn.foreign" => "/etc/synohwd.toml has button commands rynas does not manage ({cmds}): applying these settings replaces them.", "/etc/synohwd.toml contiene comandi dei pulsanti non gestiti da rynas ({cmds}): applicare queste impostazioni li sostituisce.";
     "syn.platform" => "{bays} bays · {fans} fans", "{bays} alloggiamenti · {fans} ventole";
@@ -521,11 +524,10 @@ dict! {
     "syn.fan_low" => "Quiet", "Silenziosa";
     "syn.fan_high" => "Cool", "Raffreddamento";
     "syn.fan_full" => "Full speed", "Velocità massima";
-    "syn.fan_low_help" => "DSM's default: the fans follow the temperature curves and stay quiet.", "Predefinita di DSM: le ventole seguono le curve di temperatura e restano silenziose.";
+    "syn.fan_low_help" => "Default: the fans follow the temperature curves and stay quiet.", "Predefinita: le ventole seguono le curve di temperatura e restano silenziose.";
     "syn.fan_high_help" => "Lower thresholds: the fans speed up earlier and the drives run cooler.", "Soglie più basse: le ventole accelerano prima e i dischi restano più freschi.";
     "syn.fan_full_help" => "The fans always run at 99%.", "Le ventole girano sempre al 99%.";
     "syn.full_note" => "Full speed has no curve: the fans run at 99%. The shutdown thresholds stay those of the quiet mode.", "La velocità massima non ha una curva: le ventole girano al 99%. Le soglie di spegnimento restano quelle della modalità silenziosa.";
-    "syn.fan_n" => "Fan {n}", "Ventola {n}";
     "syn.fan_ok" => "OK", "OK";
     "syn.fan_stopped" => "Stopped", "Ferma";
     "syn.fan_unknown" => "Not measured", "Non misurata";
@@ -545,7 +547,7 @@ dict! {
     "syn.v.range" => "Between {min} and {max}.", "Tra {min} e {max}.";
     "syn.thermal" => "Thermal shutdown", "Spegnimento termico";
     "syn.thermal_on" => "Shut down when too hot", "Spegni in caso di surriscaldamento";
-    "syn.thermal_help" => "synohwd powers the NAS off after two readings at or above DSM's threshold of a sensor.", "synohwd spegne il NAS dopo due letture pari o superiori alla soglia DSM di un sensore.";
+    "syn.thermal_help" => "synohwd powers the NAS off after two readings at or above the shutdown threshold of a sensor.", "synohwd spegne il NAS dopo due letture pari o superiori alla soglia di spegnimento di un sensore.";
     "syn.thermal_off" => "Thermal shutdown is off: disks, NVMe drives and the CPU can overheat and be damaged if a fan fails.", "Lo spegnimento termico è disattivato: dischi, unità NVMe e CPU possono surriscaldarsi e danneggiarsi se una ventola si guasta.";
     "syn.sensor" => "Sensor", "Sensore";
     "syn.now_limit" => "Now / shutdown at", "Ora / spegnimento a";
@@ -564,7 +566,7 @@ dict! {
     "syn.muted" => "Alarm muted: {n} notifications acknowledged.", "Allarme silenziato: {n} notifiche confermate.";
     "syn.buttons" => "Buttons", "Pulsanti";
     "syn.power_button" => "Power button", "Pulsante di accensione";
-    "syn.power_button_help" => "A clean shutdown stops tasks and services in order, like DSM.", "Uno spegnimento pulito ferma attività e servizi in ordine, come DSM.";
+    "syn.power_button_help" => "A clean shutdown stops tasks and services in order.", "Uno spegnimento pulito ferma attività e servizi in ordine.";
     "syn.pb_poweroff" => "Shut down cleanly", "Spegni in modo pulito";
     "syn.btn_log" => "Only record it in the events", "Registra solo negli eventi";
     "syn.btn_ignore" => "Ignore", "Ignora";
@@ -2130,7 +2132,6 @@ dict! {
     "net.ll_none" => "No port has a MAC address.", "Nessuna porta ha un indirizzo MAC.";
     "net.ll_active" => "Active", "Attivo";
     "net.ll_inactive" => "Not on the port now", "Non presente ora";
-    "net.reset_na" => "Not available on this hardware.", "Non disponibile su questo hardware.";
     "net.reset_on" => "Restores the network", "Ripristina la rete";
     "net.reset_off" => "Does not restore the network", "Non ripristina la rete";
     "net.reset_pending_on" => "Will restore the network after apply", "Ripristinerà la rete dopo l'applicazione";
@@ -2442,6 +2443,26 @@ mod tests {
             }
         }
         assert!(dups.is_empty(), "one key per text: {dups:#?}");
+    }
+
+    /// G8c: the UI describes what rynas does and never compares it with another NAS system.
+    /// Platform names (Synology, synohwd, synodeb) are allowed: their texts are rendered only
+    /// where that hardware is present (G8d).
+    #[test]
+    fn no_other_products() {
+        const PRODUCTS: &[&str] = &["dsm", "truenas", "unraid", "openmediavault", "omv", "qnap", "qts"];
+        // being reworded by the UPS work in progress: drop from here once it is
+        const PENDING: &[&str] = &[];
+        let mut hits = Vec::new();
+        for (k, en, it) in entries().into_iter().filter(|e| !PENDING.contains(&e.0)) {
+            for text in [en, it] {
+                let words = text.split(|c: char| !c.is_alphanumeric()).map(str::to_ascii_lowercase);
+                if let Some(w) = words.into_iter().find(|w| PRODUCTS.contains(&w.as_str())) {
+                    hits.push(format!("{k}: {w}: {text}"));
+                }
+            }
+        }
+        assert!(hits.is_empty(), "texts naming another product: {hits:#?}");
     }
 
     /// Every string literal of the sources that looks like a key (`area.thing`, also `#area.thing`
