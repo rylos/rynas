@@ -10,8 +10,9 @@
 
 use rynas_api_types::storage::{
     ArrayHealth, DiskKind, DiskSummary, GrowPlanRequest, HealthVerdict, MdArray, MemberRole,
-    PlanAction, PlanIssue, PlanIssueCode, PlanStep, RaidLevel, ReplacePlanRequest,
-    ScrubPlanRequest, StoragePlan, VolumePlanRequest,
+    PlanAction, PlanArgs, PlanIssue, PlanIssueCode, PlanStep, PlanStepKind, PlanWarning,
+    PlanWarningCode, RaidLevel, ReplacePlanRequest, ScrubPlanRequest, StoragePlan,
+    VolumePlanRequest,
 };
 
 use crate::Inventory;
@@ -30,19 +31,50 @@ const LUKS_HEADER: u64 = 16 * MIB;
 pub const PBKDF_MEMORY_KIB: &str = "262144";
 pub const COMPRESSION: &str = "zstd:1";
 
-fn cmd(description: &str, argv: &[&str]) -> PlanStep {
+/// A step's description: what it does and the values it names. The English text is built
+/// from them ([`step_english`]), so `description` and `kind`/`args` always agree.
+struct D(PlanStepKind, PlanArgs);
+
+/// A description without values.
+fn d(kind: PlanStepKind) -> D {
+    D(kind, PlanArgs::default())
+}
+
+/// A description about one disk, partition, array or mount point.
+fn d_on(kind: PlanStepKind, subject: &str) -> D {
+    D(kind, subject_args(subject))
+}
+
+fn subject_args(subject: &str) -> PlanArgs {
+    PlanArgs {
+        subject: Some(subject.to_string()),
+        ..Default::default()
+    }
+}
+
+fn step(desc: D, action: PlanAction) -> PlanStep {
+    let D(kind, args) = desc;
     PlanStep {
-        description: description.to_string(),
-        action: PlanAction::Command {
-            argv: argv.iter().map(|s| s.to_string()).collect(),
-            stdin: None,
-        },
+        description: step_english(kind, &args),
+        kind: Some(kind),
+        args,
+        action,
         destroys: Vec::new(),
     }
 }
 
-fn cmd_secret(description: &str, argv: &[&str], secret: &str) -> PlanStep {
-    let mut s = cmd(description, argv);
+fn cmd(desc: D, argv: &[&str]) -> PlanStep {
+    step(
+        desc,
+        PlanAction::Command {
+            argv: argv.iter().map(|s| s.to_string()).collect(),
+            stdin: None,
+        },
+    )
+}
+
+fn cmd_secret(desc: D, argv: &[&str], secret: &str) -> PlanStep {
+    let mut s = cmd(desc, argv);
     if let PlanAction::Command { stdin, .. } = &mut s.action {
         *stdin = Some(secret.to_string());
     }
@@ -54,36 +86,185 @@ fn destroying(mut s: PlanStep, devs: &[&str]) -> PlanStep {
     s
 }
 
-fn config(description: &str, file: &str, entry: &str) -> PlanStep {
-    PlanStep {
-        description: description.to_string(),
-        action: PlanAction::Config {
+fn config(desc: D, file: &str, entry: &str) -> PlanStep {
+    step(
+        desc,
+        PlanAction::Config {
             file: file.into(),
             entry: entry.into(),
         },
-        destroys: Vec::new(),
-    }
+    )
 }
 
-fn wait(description: &str, condition: &str) -> PlanStep {
-    PlanStep {
-        description: description.to_string(),
-        action: PlanAction::Wait {
+fn wait(desc: D, condition: &str) -> PlanStep {
+    step(
+        desc,
+        PlanAction::Wait {
             condition: condition.into(),
         },
-        destroys: Vec::new(),
-    }
+    )
 }
 
-fn sysfs(description: &str, path: &str, value: &str) -> PlanStep {
-    PlanStep {
-        description: description.to_string(),
-        action: PlanAction::WriteSysfs {
+fn sysfs(desc: D, path: &str, value: &str) -> PlanStep {
+    step(
+        desc,
+        PlanAction::WriteSysfs {
             path: path.into(),
             value: value.into(),
         },
-        destroys: Vec::new(),
-    }
+    )
+}
+
+/// English description of a step (task log, CLI); the UI translates `kind` + `args`.
+fn step_english(kind: PlanStepKind, a: &PlanArgs) -> String {
+    use PlanStepKind as K;
+    let s = a.subject.as_deref().unwrap_or("");
+    let text = match kind {
+        K::WipeSignatures => return format!("Erase signatures on {s}"),
+        K::ClearPartitionTable => return format!("Clear the partition table of {s}"),
+        K::CreatePartition => {
+            return format!("Create one Linux RAID partition on {s}, 128 MiB left free at the end");
+        }
+        K::CreateArray => {
+            let n = a.count.unwrap_or(0);
+            return format!(
+                "Create the md array ({}, {n} disk{})",
+                a.level.map(level_name).unwrap_or(""),
+                if n == 1 { "" } else { "s" }
+            );
+        }
+        K::CreateMountPoint => return format!("Create the mount point {s}"),
+        K::MountVolume => {
+            return format!("Mount the volume at {s} (systemd mount unit from /etc/fstab)");
+        }
+        K::CopyPartitionTable => {
+            let o = a.other.as_deref().unwrap_or("");
+            return format!("Copy the partition table of {o} to {s}");
+        }
+        K::RandomizeGuids => return format!("Give {s} its own partition GUIDs"),
+        K::ReplaceCopy => return format!("Copy {s} onto the new disk while it stays in the array"),
+        K::RemoveReplaced => return format!("Remove {s} (marked faulty by the replace)"),
+        K::MarkFailed => return format!("Mark {s} as failed"),
+        K::RemoveMember => return format!("Remove {s} from the array"),
+        K::CheckArray => {
+            return format!("Check the parity/mirrors of {s} (read-only, counts mismatches)");
+        }
+        K::WaitCheck => return format!("Wait for the {s} check, then read mismatch_cnt"),
+        K::WaitUdev => "Wait for udev to create the partition nodes",
+        K::RecordArray => "Record the array so it is assembled at boot",
+        K::LuksFormat => "Format the array as LUKS2 (Argon2id, 256 MiB memory, 4 KiB sectors)",
+        K::AddRecoveryKey => "Add a recovery key (shown once: it must be saved before going on)",
+        K::BackupLuksHeader => {
+            "Back up the LUKS header (offered for download, then removed from the NAS)"
+        }
+        K::UnlockVolume => "Unlock the new volume",
+        K::DeclareCrypttab => "Declare the encrypted volume, locked at boot (noauto)",
+        K::CreateFilesystem => "Create the btrfs filesystem (data single, metadata DUP)",
+        K::MountAtBoot => "Mount the volume at boot",
+        K::CreateSnapshotSubvolume => {
+            "Create the snapshot subvolume (btrbk snapshot_dir, hidden from shares)"
+        }
+        K::CreateCacheSubvolume => {
+            "Create the cache subvolume (dedup hashfiles, excluded from snapshots)"
+        }
+        K::DisableCowCache => "Disable copy-on-write on the cache subvolume (SQLite files)",
+        K::MirrorToRaid5 => "Convert the 2-disk mirror to RAID5 (instant, same data layout)",
+        K::AddSpares => "Add the new partitions as spares",
+        K::Reshape => {
+            "Reshape the array onto the new disks (hours to days; the volume stays online)"
+        }
+        K::SparesToMirrors => "Turn the spares into active mirrors (resync)",
+        K::WaitReshape => "Wait for the reshape to finish",
+        K::WaitResync => "Wait for the resync to finish",
+        K::GrowLuks => "Grow the LUKS mapping to the new array size",
+        K::GrowFilesystem => "Grow the filesystem to the new size",
+        K::AddSpare => "Add the new partition as a spare",
+        K::WaitCopy => "Wait for the copy to finish",
+        K::AddForRebuild => "Add the new partition: the rebuild starts",
+        K::WaitRebuild => "Wait for the rebuild to finish",
+        K::Scrub => "Verify every checksum and repair from a good copy (metadata DUP, md mirrors)",
+        K::Other => "",
+    };
+    text.to_string()
+}
+
+/// Records a warning of the plan: its English text and its code with the values it names.
+fn warn(p: &mut StoragePlan, code: PlanWarningCode, args: PlanArgs) {
+    p.warnings.push(warning_english(code, &args));
+    p.warning_items.push(PlanWarning { code, args });
+}
+
+/// A warning about one disk, array or device.
+fn warn_on(p: &mut StoragePlan, code: PlanWarningCode, subject: &str) {
+    warn(p, code, subject_args(subject));
+}
+
+/// English text of a warning (logs, CLI); the UI translates `code` + `args`.
+fn warning_english(code: PlanWarningCode, a: &PlanArgs) -> String {
+    use PlanWarningCode as W;
+    let s = a.subject.as_deref().unwrap_or("");
+    let items = a.items.join(", ");
+    let text = match code {
+        W::DataErased => return format!("{s}: existing data will be erased ({items})"),
+        W::SmartWarnings => return format!("{s}: SMART warnings ({})", a.items.join("; ")),
+        W::NoSmartData => return format!("{s}: no SMART data yet"),
+        W::RemovableDisk => {
+            return format!("{s}: USB/removable disk: unplugging it breaks the volume");
+        }
+        W::MixedSizes => {
+            let gb = a.size_bytes.unwrap_or(0) as f64 / 1e9;
+            return format!(
+                "disks of different sizes: every member is used as large as the smallest, {gb:.1} GB unused"
+            );
+        }
+        W::SmrRaid => {
+            return format!(
+                "SMR (shingled) disks: {items}: rebuilds can take days or time out; prefer CMR disks for RAID"
+            );
+        }
+        W::SmrSlowWrites => return format!("SMR (shingled) disks: {items}: slow sustained writes"),
+        W::DiskLargerThanMembers => {
+            return format!(
+                "{s} is larger than the members: the extra space stays unused until every member is replaced"
+            );
+        }
+        W::SpareMember => return format!("{s} is a spare: it can simply be removed"),
+        W::SmrSlowRebuild => return format!("{s}: SMR disk, the rebuild may be very slow"),
+        W::OtherPartitions => {
+            let n = a.count.unwrap_or(0);
+            return format!(
+                "{s} has {n} partitions: only the md members are rebuilt, copy the others (EFI, swap) separately"
+            );
+        }
+        W::ArrayNotHealthy => {
+            return format!(
+                "{s} is not healthy: a scrub can find but not repair errors without redundancy"
+            );
+        }
+        W::MixedKinds => {
+            "mixed disk types (HDD/SSD/NVMe): the array runs at the speed of the slowest"
+        }
+        W::SingleNoRedundancy => {
+            "no redundancy: one disk failure loses the volume (a mirror disk can be added later)"
+        }
+        W::Raid0NoRedundancy => "RAID0 has no redundancy: any disk failure loses the whole volume",
+        W::Raid5Rebuild => {
+            "RAID5 with large or many HDDs: a second failure during the long rebuild loses the volume; consider RAID6"
+        }
+        W::Encrypted => {
+            "encrypted: the volume stays locked after every boot until unlocked from rynas; keep the recovery key and the header backup off the NAS"
+        }
+        W::CompressionOff => "compression off: zstd:1 costs little CPU and usually saves space",
+        W::SsdTrimOff => {
+            "SSD under LUKS: TRIM is off by default because it reveals which blocks are free; enable 'discard' in crypttab if that is acceptable"
+        }
+        W::GrowFilesystemByHand => "no mounted btrfs on this array: grow the filesystem by hand",
+        W::ScrubCost => {
+            "scrub reads every allocated block: it takes hours on large HDD volumes and wakes sleeping disks; it never runs together with replication, balance or dedup on the same filesystem"
+        }
+        W::Other => "",
+    };
+    text.to_string()
 }
 
 /// First partition of a disk: "sdb" → "sdb1", "nvme0n1" → "nvme0n1p1".
@@ -240,10 +421,12 @@ fn check_new_disk(
         let m = format!("{name}: in use ({})", usage.used_by.join(", "));
         fail(p, C::DiskInUse, field, Some(name), m);
     } else if !usage.used_by.is_empty() {
-        p.warnings.push(format!(
-            "{name}: existing data will be erased ({})",
-            usage.used_by.join(", ")
-        ));
+        let args = PlanArgs {
+            subject: Some(name.to_string()),
+            items: usage.used_by.clone(),
+            ..Default::default()
+        };
+        warn(p, PlanWarningCode::DataErased, args);
     }
     match d.health {
         HealthVerdict::Failing => {
@@ -257,22 +440,30 @@ fn check_new_disk(
             );
             fail(p, C::DiskFailing, field, Some(name), m)
         }
-        HealthVerdict::Warning => p.warnings.push(format!(
-            "{name}: SMART warnings ({})",
-            d.health_reasons
-                .iter()
-                .filter(|r| r.severity >= rynas_api_types::storage::Severity::Warning)
-                .map(|r| r.message.as_str())
-                .collect::<Vec<_>>()
-                .join("; ")
-        )),
-        HealthVerdict::Unknown => p.warnings.push(format!("{name}: no SMART data yet")),
+        HealthVerdict::Warning => {
+            // the English text lists the messages, the UI translates the codes
+            let bad = || {
+                d.health_reasons
+                    .iter()
+                    .filter(|r| r.severity >= rynas_api_types::storage::Severity::Warning)
+            };
+            let messages: Vec<&str> = bad().map(|r| r.message.as_str()).collect();
+            p.warnings
+                .push(format!("{name}: SMART warnings ({})", messages.join("; ")));
+            p.warning_items.push(PlanWarning {
+                code: PlanWarningCode::SmartWarnings,
+                args: PlanArgs {
+                    subject: Some(name.to_string()),
+                    items: bad().map(|r| r.code.clone()).collect(),
+                    ..Default::default()
+                },
+            });
+        }
+        HealthVerdict::Unknown => warn_on(p, PlanWarningCode::NoSmartData, name),
         HealthVerdict::Healthy => {}
     }
     if d.removable || d.transport == "usb" {
-        p.warnings.push(format!(
-            "{name}: USB/removable disk: unplugging it breaks the volume"
-        ));
+        warn_on(p, PlanWarningCode::RemovableDisk, name);
     }
     if d.size < 2 * (PART_START + END_RESERVE + MD_OVERHEAD) {
         fail(
@@ -298,20 +489,20 @@ fn partition_steps(steps: &mut Vec<PlanStep>, disk: &str, label: &str) {
     let dev = format!("/dev/{disk}");
     steps.push(destroying(
         cmd(
-            &format!("Erase signatures on {disk}"),
+            d_on(PlanStepKind::WipeSignatures, disk),
             &["wipefs", "--all", &dev],
         ),
         &[disk],
     ));
     steps.push(destroying(
         cmd(
-            &format!("Clear the partition table of {disk}"),
+            d_on(PlanStepKind::ClearPartitionTable, disk),
             &["sgdisk", "--zap-all", &dev],
         ),
         &[disk],
     ));
     steps.push(cmd(
-        &format!("Create one Linux RAID partition on {disk}, 128 MiB left free at the end"),
+        d_on(PlanStepKind::CreatePartition, disk),
         &[
             "sgdisk",
             "--new=1:0:-128M",
@@ -409,61 +600,53 @@ pub fn plan_volume(inv: &Inventory, req: &VolumePlanRequest) -> StoragePlan {
 
     // warnings about the mix
     if p.wasted_bytes > 0 && n > 1 {
-        p.warnings.push(format!(
-            "disks of different sizes: every member is used as large as the smallest, {:.1} GB unused",
-            p.wasted_bytes as f64 / 1e9
-        ));
+        let args = PlanArgs {
+            size_bytes: Some(p.wasted_bytes),
+            ..Default::default()
+        };
+        warn(&mut p, PlanWarningCode::MixedSizes, args);
     }
     let kinds: std::collections::HashSet<DiskKind> = chosen.iter().map(|d| d.kind).collect();
     if kinds.len() > 1 {
-        p.warnings.push(
-            "mixed disk types (HDD/SSD/NVMe): the array runs at the speed of the slowest".into(),
-        );
+        warn(&mut p, PlanWarningCode::MixedKinds, PlanArgs::default());
     }
-    let smr: Vec<&str> = chosen
+    let smr: Vec<String> = chosen
         .iter()
         .filter(|d| d.smr)
-        .map(|d| d.name.as_str())
+        .map(|d| d.name.clone())
         .collect();
     if !smr.is_empty() {
         let raid = !matches!(req.level, RaidLevel::Single | RaidLevel::Raid0);
-        p.warnings.push(format!(
-            "SMR (shingled) disks: {}{}",
-            smr.join(", "),
-            if raid {
-                ": rebuilds can take days or time out; prefer CMR disks for RAID"
-            } else {
-                ": slow sustained writes"
-            }
-        ));
+        let code = if raid {
+            PlanWarningCode::SmrRaid
+        } else {
+            PlanWarningCode::SmrSlowWrites
+        };
+        let args = PlanArgs {
+            items: smr,
+            ..Default::default()
+        };
+        warn(&mut p, code, args);
     }
-    match req.level {
-        RaidLevel::Single => p.warnings.push(
-            "no redundancy: one disk failure loses the volume (a mirror disk can be added later)"
-                .into(),
-        ),
-        RaidLevel::Raid0 => p.warnings.push(
-            "RAID0 has no redundancy: any disk failure loses the whole volume".into(),
-        ),
+    let level_warning = match req.level {
+        RaidLevel::Single => Some(PlanWarningCode::SingleNoRedundancy),
+        RaidLevel::Raid0 => Some(PlanWarningCode::Raid0NoRedundancy),
         RaidLevel::Raid5
-            if chosen.iter().all(|d| d.kind == DiskKind::Hdd) && (n >= 6 || min >= 10_000_000_000_000) =>
+            if chosen.iter().all(|d| d.kind == DiskKind::Hdd)
+                && (n >= 6 || min >= 10_000_000_000_000) =>
         {
-            p.warnings.push(
-                "RAID5 with large or many HDDs: a second failure during the long rebuild loses the volume; consider RAID6"
-                    .into(),
-            )
+            Some(PlanWarningCode::Raid5Rebuild)
         }
-        _ => {}
+        _ => None,
+    };
+    if let Some(code) = level_warning {
+        warn(&mut p, code, PlanArgs::default());
     }
     if req.encrypt {
-        p.warnings.push(
-            "encrypted: the volume stays locked after every boot until unlocked from rynas; keep the recovery key and the header backup off the NAS"
-                .into(),
-        );
+        warn(&mut p, PlanWarningCode::Encrypted, PlanArgs::default());
     }
     if !req.compress {
-        p.warnings
-            .push("compression off: zstd:1 costs little CPU and usually saves space".into());
+        warn(&mut p, PlanWarningCode::CompressionOff, PlanArgs::default());
     }
     if !p.errors.is_empty() {
         return finish(p);
@@ -483,10 +666,7 @@ pub fn plan_volume(inv: &Inventory, req: &VolumePlanRequest) -> StoragePlan {
     for d in &chosen {
         partition_steps(&mut steps, &d.name, label);
     }
-    steps.push(cmd(
-        "Wait for udev to create the partition nodes",
-        &["udevadm", "settle"],
-    ));
+    steps.push(cmd(d(PlanStepKind::WaitUdev), &["udevadm", "settle"]));
     let parts: Vec<String> = chosen
         .iter()
         .map(|d| format!("/dev/{}", part_name(&d.name, 1)))
@@ -515,23 +695,26 @@ pub fn plan_volume(inv: &Inventory, req: &VolumePlanRequest) -> StoragePlan {
         .collect();
     steps.push(destroying(
         cmd(
-            &format!(
-                "Create the md array ({}, {n} disk{})",
-                level_name(req.level),
-                if n == 1 { "" } else { "s" }
+            D(
+                PlanStepKind::CreateArray,
+                PlanArgs {
+                    level: Some(req.level),
+                    count: Some(n),
+                    ..Default::default()
+                },
             ),
             &argv_ref,
         ),
         &part_names,
     ));
     steps.push(config(
-        "Record the array so it is assembled at boot",
+        d(PlanStepKind::RecordArray),
         "/etc/mdadm/mdadm.conf",
         &format!("ARRAY {md} metadata=1.2 name=<host>:{label} UUID=<from mdadm --detail --brief>"),
     ));
     if req.encrypt {
         steps.push(cmd_secret(
-            "Format the array as LUKS2 (Argon2id, 256 MiB memory, 4 KiB sectors)",
+            d(PlanStepKind::LuksFormat),
             &[
                 "cryptsetup",
                 "luksFormat",
@@ -553,7 +736,7 @@ pub fn plan_volume(inv: &Inventory, req: &VolumePlanRequest) -> StoragePlan {
             "passphrase",
         ));
         steps.push(cmd_secret(
-            "Add a recovery key (shown once: it must be saved before going on)",
+            d(PlanStepKind::AddRecoveryKey),
             &[
                 "systemd-cryptenroll",
                 "--recovery-key",
@@ -563,7 +746,7 @@ pub fn plan_volume(inv: &Inventory, req: &VolumePlanRequest) -> StoragePlan {
             "passphrase",
         ));
         steps.push(cmd(
-            "Back up the LUKS header (offered for download, then removed from the NAS)",
+            d(PlanStepKind::BackupLuksHeader),
             &[
                 "cryptsetup",
                 "luksHeaderBackup",
@@ -573,24 +756,21 @@ pub fn plan_volume(inv: &Inventory, req: &VolumePlanRequest) -> StoragePlan {
             ],
         ));
         steps.push(cmd_secret(
-            "Unlock the new volume",
+            d(PlanStepKind::UnlockVolume),
             &["cryptsetup", "open", "--key-file", "-", &md, &mapper_name],
             "passphrase",
         ));
         steps.push(config(
-            "Declare the encrypted volume, locked at boot (noauto)",
+            d(PlanStepKind::DeclareCrypttab),
             "/etc/crypttab",
             &format!("{mapper_name} UUID=<luks uuid> none luks,noauto"),
         ));
         if chosen.iter().any(|d| d.kind != DiskKind::Hdd) {
-            p.warnings.push(
-                "SSD under LUKS: TRIM is off by default because it reveals which blocks are free; enable 'discard' in crypttab if that is acceptable"
-                    .into(),
-            );
+            warn(&mut p, PlanWarningCode::SsdTrimOff, PlanArgs::default());
         }
     }
     steps.push(cmd(
-        "Create the btrfs filesystem (data single, metadata DUP)",
+        d(PlanStepKind::CreateFilesystem),
         // --force: fs_dev is the array (or LUKS mapping) this plan has just created, so any
         // signature on it is a leftover of the member disks' old content, which the user
         // already agreed to erase (md --create does not zero the data area: a filesystem from
@@ -614,7 +794,7 @@ pub fn plan_volume(inv: &Inventory, req: &VolumePlanRequest) -> StoragePlan {
     // fstab first: systemd mounts the volume from it (a mount made inside rynasd's own
     // mount namespace would stay invisible to the rest of the system)
     steps.push(config(
-        "Mount the volume at boot",
+        d(PlanStepKind::MountAtBoot),
         "/etc/fstab",
         &format!(
             "UUID=<btrfs uuid> {mnt} btrfs {opts},nofail{} 0 0",
@@ -622,19 +802,19 @@ pub fn plan_volume(inv: &Inventory, req: &VolumePlanRequest) -> StoragePlan {
         ),
     ));
     steps.push(cmd(
-        &format!("Create the mount point {mnt}"),
+        d_on(PlanStepKind::CreateMountPoint, &mnt),
         &["mkdir", "-p", &mnt],
     ));
     steps.push(cmd(
-        &format!("Mount the volume at {mnt} (systemd mount unit from /etc/fstab)"),
+        d_on(PlanStepKind::MountVolume, &mnt),
         &["systemctl", "start", &mount_unit(&mnt)],
     ));
     steps.push(cmd(
-        "Create the snapshot subvolume (btrbk snapshot_dir, hidden from shares)",
+        d(PlanStepKind::CreateSnapshotSubvolume),
         &["btrfs", "subvolume", "create", &format!("{mnt}/.snapshots")],
     ));
     steps.push(cmd(
-        "Create the cache subvolume (dedup hashfiles, excluded from snapshots)",
+        d(PlanStepKind::CreateCacheSubvolume),
         &[
             "btrfs",
             "subvolume",
@@ -643,7 +823,7 @@ pub fn plan_volume(inv: &Inventory, req: &VolumePlanRequest) -> StoragePlan {
         ],
     ));
     steps.push(cmd(
-        "Disable copy-on-write on the cache subvolume (SQLite files)",
+        d(PlanStepKind::DisableCowCache),
         &["chattr", "+C", &format!("{mnt}/@rynas-cache")],
     ));
     p.summary = vec![
@@ -811,9 +991,7 @@ pub fn plan_grow(inv: &Inventory, req: &GrowPlanRequest) -> StoragePlan {
                 );
                 fail(&mut p, PlanIssueCode::DiskTooSmall, "disks", Some(name), m);
             } else if usable_partition(d.size) > part_size + 10 * END_RESERVE {
-                p.warnings.push(format!(
-                    "{name} is larger than the members: the extra space stays unused until every member is replaced"
-                ));
+                warn_on(&mut p, PlanWarningCode::DiskLargerThanMembers, name);
             }
             new.push(d);
         }
@@ -837,10 +1015,7 @@ pub fn plan_grow(inv: &Inventory, req: &GrowPlanRequest) -> StoragePlan {
     for d in &new {
         partition_steps(&mut steps, &d.name, &label);
     }
-    steps.push(cmd(
-        "Wait for udev to create the partition nodes",
-        &["udevadm", "settle"],
-    ));
+    steps.push(cmd(d(PlanStepKind::WaitUdev), &["udevadm", "settle"]));
     let mut add: Vec<String> = vec!["mdadm".into(), md.clone(), "--add".into()];
     add.extend(
         new.iter()
@@ -850,12 +1025,12 @@ pub fn plan_grow(inv: &Inventory, req: &GrowPlanRequest) -> StoragePlan {
     let raid_devices = format!("--raid-devices={new_n}");
     if from == RaidLevel::Raid1 && to == RaidLevel::Raid5 {
         steps.push(cmd(
-            "Convert the 2-disk mirror to RAID5 (instant, same data layout)",
+            d(PlanStepKind::MirrorToRaid5),
             &["mdadm", "--grow", &md, "--level=5"],
         ));
     }
     steps.push(cmd(
-        "Add the new partitions as spares",
+        d(PlanStepKind::AddSpares),
         &add.iter().map(String::as_str).collect::<Vec<_>>(),
     ));
     let mut grow = vec!["mdadm", "--grow", &md, &raid_devices];
@@ -866,38 +1041,40 @@ pub fn plan_grow(inv: &Inventory, req: &GrowPlanRequest) -> StoragePlan {
     }
     let reshape = to != RaidLevel::Raid1;
     steps.push(cmd(
-        if reshape {
-            "Reshape the array onto the new disks (hours to days; the volume stays online)"
+        d(if reshape {
+            PlanStepKind::Reshape
         } else {
-            "Turn the spares into active mirrors (resync)"
-        },
+            PlanStepKind::SparesToMirrors
+        }),
         &grow,
     ));
     steps.push(wait(
-        if reshape {
-            "Wait for the reshape to finish"
+        d(if reshape {
+            PlanStepKind::WaitReshape
         } else {
-            "Wait for the resync to finish"
-        },
+            PlanStepKind::WaitResync
+        }),
         &format!("/sys/block/{}/md/sync_action == idle", a.name),
     ));
     if reshape {
         let (mapper, mnt) = stack_above(inv, &a.name);
         if let Some(m) = &mapper {
             steps.push(cmd_secret(
-                "Grow the LUKS mapping to the new array size",
+                d(PlanStepKind::GrowLuks),
                 &["cryptsetup", "resize", "--key-file", "-", m],
                 "passphrase",
             ));
         }
         match &mnt {
             Some(m) => steps.push(cmd(
-                "Grow the filesystem to the new size",
+                d(PlanStepKind::GrowFilesystem),
                 &["btrfs", "filesystem", "resize", "max", m],
             )),
-            None => p
-                .warnings
-                .push("no mounted btrfs on this array: grow the filesystem by hand".into()),
+            None => warn(
+                &mut p,
+                PlanWarningCode::GrowFilesystemByHand,
+                PlanArgs::default(),
+            ),
         }
     }
     p.summary = vec![
@@ -951,10 +1128,7 @@ pub fn plan_replace(inv: &Inventory, req: &ReplacePlanRequest) -> StoragePlan {
         return finish(p);
     };
     if member.role == MemberRole::Spare {
-        p.warnings.push(format!(
-            "{} is a spare: it can simply be removed",
-            member.device
-        ));
+        warn_on(&mut p, PlanWarningCode::SpareMember, &member.device);
     }
     // a healthy member to copy the partition table from
     let source = a
@@ -997,10 +1171,7 @@ pub fn plan_replace(inv: &Inventory, req: &ReplacePlanRequest) -> StoragePlan {
             );
         }
         if d.smr && !matches!(a.level.as_str(), "raid1") {
-            p.warnings.push(format!(
-                "{}: SMR disk, the rebuild may be very slow",
-                d.name
-            ));
+            warn_on(&mut p, PlanWarningCode::SmrSlowRebuild, &d.name);
         }
     }
     if let Some(s) = &a.sync
@@ -1016,9 +1187,12 @@ pub fn plan_replace(inv: &Inventory, req: &ReplacePlanRequest) -> StoragePlan {
         .map(|d| d.children.len())
         .unwrap_or(0);
     if src_parts > 1 {
-        p.warnings.push(format!(
-            "{source} has {src_parts} partitions: only the md members are rebuilt, copy the others (EFI, swap) separately"
-        ));
+        let args = PlanArgs {
+            subject: Some(source.clone()),
+            count: Some(src_parts as u64),
+            ..Default::default()
+        };
+        warn(&mut p, PlanWarningCode::OtherPartitions, args);
     }
     let tol = crate::md::tolerance(&a.level, a.raid_disks);
     p.fault_tolerance = tol;
@@ -1041,14 +1215,21 @@ pub fn plan_replace(inv: &Inventory, req: &ReplacePlanRequest) -> StoragePlan {
     let mut steps = vec![
         destroying(
             cmd(
-                &format!("Erase signatures on {}", new.name),
+                d_on(PlanStepKind::WipeSignatures, &new.name),
                 &["wipefs", "--all", &new_dev],
             ),
             &[&new.name],
         ),
         destroying(
             cmd(
-                &format!("Copy the partition table of {source} to {}", new.name),
+                D(
+                    PlanStepKind::CopyPartitionTable,
+                    PlanArgs {
+                        subject: Some(new.name.clone()),
+                        other: Some(source.clone()),
+                        ..Default::default()
+                    },
+                ),
                 &[
                     "sgdisk",
                     &format!("--replicate={new_dev}"),
@@ -1058,53 +1239,47 @@ pub fn plan_replace(inv: &Inventory, req: &ReplacePlanRequest) -> StoragePlan {
             &[&new.name],
         ),
         cmd(
-            &format!("Give {} its own partition GUIDs", new.name),
+            d_on(PlanStepKind::RandomizeGuids, &new.name),
             &["sgdisk", "--randomize-guids", &new_dev],
         ),
-        cmd(
-            "Wait for udev to create the partition nodes",
-            &["udevadm", "settle"],
-        ),
+        cmd(d(PlanStepKind::WaitUdev), &["udevadm", "settle"]),
     ];
     let hot = member.role == MemberRole::Active && a.health == ArrayHealth::Healthy;
     if hot {
         // keeps full redundancy during the copy
         steps.push(cmd(
-            "Add the new partition as a spare",
+            d(PlanStepKind::AddSpare),
             &["mdadm", &md, "--add-spare", &new_part],
         ));
         steps.push(cmd(
-            &format!(
-                "Copy {} onto the new disk while it stays in the array",
-                member.device
-            ),
+            d_on(PlanStepKind::ReplaceCopy, &member.device),
             &["mdadm", &md, "--replace", &old_dev, "--with", &new_part],
         ));
         steps.push(wait(
-            "Wait for the copy to finish",
+            d(PlanStepKind::WaitCopy),
             &format!("/sys/block/{}/md/sync_action == idle", a.name),
         ));
         steps.push(cmd(
-            &format!("Remove {} (marked faulty by the replace)", member.device),
+            d_on(PlanStepKind::RemoveReplaced, &member.device),
             &["mdadm", &md, "--remove", &old_dev],
         ));
     } else {
         if member.role != MemberRole::Faulty {
             steps.push(cmd(
-                &format!("Mark {} as failed", member.device),
+                d_on(PlanStepKind::MarkFailed, &member.device),
                 &["mdadm", &md, "--fail", &old_dev],
             ));
         }
         steps.push(cmd(
-            &format!("Remove {} from the array", member.device),
+            d_on(PlanStepKind::RemoveMember, &member.device),
             &["mdadm", &md, "--remove", &old_dev],
         ));
         steps.push(cmd(
-            "Add the new partition: the rebuild starts",
+            d(PlanStepKind::AddForRebuild),
             &["mdadm", &md, "--add", &new_part],
         ));
         steps.push(wait(
-            "Wait for the rebuild to finish",
+            d(PlanStepKind::WaitRebuild),
             &format!("/sys/block/{}/md/sync_action == idle", a.name),
         ));
     }
@@ -1190,25 +1365,19 @@ pub fn plan_scrub(inv: &Inventory, req: &ScrubPlanRequest) -> StoragePlan {
     }
     for a in &arrays {
         if a.health != ArrayHealth::Healthy {
-            p.warnings.push(format!(
-                "{} is not healthy: a scrub can find but not repair errors without redundancy",
-                a.name
-            ));
+            warn_on(&mut p, PlanWarningCode::ArrayNotHealthy, &a.name);
         }
         if req.md_check {
             array_busy(a, &mut p);
         }
     }
     p.usable_bytes = fs.device_size;
-    p.warnings.push(
-        "scrub reads every allocated block: it takes hours on large HDD volumes and wakes sleeping disks; it never runs together with replication, balance or dedup on the same filesystem"
-            .into(),
-    );
+    warn(&mut p, PlanWarningCode::ScrubCost, PlanArgs::default());
     if !p.errors.is_empty() {
         return finish(p);
     }
     let mut steps = vec![cmd(
-        "Verify every checksum and repair from a good copy (metadata DUP, md mirrors)",
+        d(PlanStepKind::Scrub),
         &["btrfs", "scrub", "start", "-B", "-d", &mnt],
     )];
     if req.md_check {
@@ -1217,15 +1386,12 @@ pub fn plan_scrub(inv: &Inventory, req: &ScrubPlanRequest) -> StoragePlan {
                 continue;
             }
             steps.push(sysfs(
-                &format!(
-                    "Check the parity/mirrors of {} (read-only, counts mismatches)",
-                    a.name
-                ),
+                d_on(PlanStepKind::CheckArray, &a.name),
                 &format!("/sys/block/{}/md/sync_action", a.name),
                 "check",
             ));
             steps.push(wait(
-                &format!("Wait for the {} check, then read mismatch_cnt", a.name),
+                d_on(PlanStepKind::WaitCheck, &a.name),
                 &format!("/sys/block/{}/md/sync_action == idle", a.name),
             ));
         }
@@ -1252,6 +1418,23 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// One code per English warning, in the same order and with the same text; every step
+    /// has a kind whose English text is its description.
+    fn assert_codes_match(p: &StoragePlan) {
+        assert_eq!(p.warning_items.len(), p.warnings.len(), "{:?}", p.warnings);
+        for (w, text) in p.warning_items.iter().zip(&p.warnings) {
+            assert_ne!(w.code, PlanWarningCode::Other);
+            if w.code != PlanWarningCode::SmartWarnings {
+                assert_eq!(&warning_english(w.code, &w.args), text);
+            }
+        }
+        for s in &p.steps {
+            let kind = s.kind.expect("step kind");
+            assert_ne!(kind, PlanStepKind::Other);
+            assert_eq!(step_english(kind, &s.args), s.description);
+        }
     }
 
     #[test]
@@ -1323,6 +1506,35 @@ mod tests {
         assert_eq!(secret_steps, 3);
         assert!(p.warnings.iter().any(|w| w.contains("SMR")));
         assert!(p.warnings.iter().any(|w| w.contains("no redundancy")));
+        // every warning has its code, in the same order as the English texts
+        assert_codes_match(&p);
+        let codes: Vec<PlanWarningCode> = p.warning_items.iter().map(|w| w.code).collect();
+        assert!(
+            codes.contains(&PlanWarningCode::SingleNoRedundancy),
+            "{codes:?}"
+        );
+        assert!(codes.contains(&PlanWarningCode::Encrypted), "{codes:?}");
+        let smr = p
+            .warning_items
+            .iter()
+            .find(|w| w.code == PlanWarningCode::SmrSlowWrites)
+            .expect("SMR warning");
+        assert_eq!(smr.args.items, ["sdd"]);
+        // every step has its kind; the array step names level and disk count
+        let create = p
+            .steps
+            .iter()
+            .find(|s| s.kind == Some(PlanStepKind::CreateArray))
+            .unwrap();
+        assert_eq!(create.args.level, Some(RaidLevel::Single));
+        assert_eq!(create.args.count, Some(1));
+        assert_eq!(create.description, "Create the md array (single, 1 disk)");
+        let mount = p
+            .steps
+            .iter()
+            .find(|s| s.kind == Some(PlanStepKind::MountVolume))
+            .unwrap();
+        assert_eq!(mount.args.subject.as_deref(), Some("/vol2"));
         let usable = p.usable_bytes as f64;
         assert!(usable > 3.99e12 && usable < 4.0008e12, "{usable}");
         // config entries for fstab / crypttab / mdadm.conf
@@ -1413,6 +1625,20 @@ mod tests {
         assert!(w.contains("different sizes"), "{w}");
         assert!(w.contains("sde: existing data will be erased"), "{w}");
         assert!(w.contains("compression off"), "{w}");
+        assert_codes_match(&p);
+        let sizes = p
+            .warning_items
+            .iter()
+            .find(|w| w.code == PlanWarningCode::MixedSizes)
+            .unwrap();
+        assert_eq!(sizes.args.size_bytes, Some(p.wasted_bytes));
+        let erased = p
+            .warning_items
+            .iter()
+            .find(|w| w.code == PlanWarningCode::DataErased)
+            .unwrap();
+        assert_eq!(erased.args.subject.as_deref(), Some("sde"));
+        assert!(!erased.args.items.is_empty());
         let a = argvs(&p);
         assert!(a.iter().any(|l| l == "systemctl start backup.mount"));
         let fstab = p
@@ -1504,6 +1730,7 @@ mod tests {
             a.contains(&"btrfs filesystem resize max /vol1".to_string()),
             "{a:?}"
         );
+        assert_codes_match(&p);
         // too small disk
         let p = plan_grow(
             &inv,
@@ -1560,6 +1787,11 @@ mod tests {
         assert!(p.valid, "{:?}", p.errors);
         let a = argvs(&p);
         assert_eq!(a[1], "sgdisk --replicate=/dev/sdf /dev/sda");
+        assert_codes_match(&p);
+        let copy = &p.steps[1];
+        assert_eq!(copy.kind, Some(PlanStepKind::CopyPartitionTable));
+        assert_eq!(copy.args.subject.as_deref(), Some("sdf"));
+        assert_eq!(copy.args.other.as_deref(), Some("sda"));
         assert!(
             a.contains(&"mdadm /dev/md2 --fail /dev/sdc1".to_string()),
             "{a:?}"
@@ -1593,6 +1825,7 @@ mod tests {
             p.summary.iter().find(|(k, _)| k == "mode").unwrap().1,
             "hot replace"
         );
+        assert_codes_match(&p);
 
         let p = plan_replace(
             &inv,
@@ -1622,6 +1855,12 @@ mod tests {
         let a = argvs(&p);
         assert_eq!(a[0], "btrfs scrub start -B -d /vol1");
         assert_eq!(a[1], "echo check > /sys/block/md2/md/sync_action");
+        assert_codes_match(&p);
+        assert!(
+            p.warning_items
+                .iter()
+                .any(|w| w.code == PlanWarningCode::ScrubCost)
+        );
         let p = plan_scrub(
             &inv,
             &ScrubPlanRequest {
