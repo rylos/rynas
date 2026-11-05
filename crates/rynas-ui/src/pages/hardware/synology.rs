@@ -23,12 +23,10 @@ use crate::icons::{self, Icon};
 use crate::pages::dashboard::{led_text, led_tone};
 use crate::pages::security::copy_button;
 use crate::toast::{saved_pending, toast};
-use crate::ui::{self, EmptyState, Meter, Remote, Status, Tone, WidgetHead, status, temp_tone};
+use crate::ui::{self, EmptyState, Meter, Remote, Status, Tone, WidgetHead, status};
 
 const SETTINGS: &str = "/api/v1/hardware/synology/settings";
 const POLL: Duration = Duration::from_secs(10);
-/// Identify blink of the API's default duration.
-const IDENTIFY_S: u64 = 30;
 
 const FAN_MODES: &[(&str, &str)] = &[("low", "syn.fan_low"), ("high", "syn.fan_high"), ("full", "syn.fan_full")];
 const POWER_BUTTON: &[(&str, &str)] = &[("poweroff", "syn.pb_poweroff"), ("log", "syn.btn_log"), ("ignore", "syn.btn_ignore")];
@@ -231,12 +229,12 @@ pub fn panel(active: Signal<bool>) -> AnyView {
         // built once: the draft follows the server's settings (form::Draft); the notices of
         // the body read the current state
         let s = settings.data.get_untracked().unwrap_or_default();
-        body(s, settings, st, curves)
+        body(s, settings, st, curves, active)
     })
     .into_any()
 }
 
-fn body(s: SynologySettingsState, settings: Remote<SynologySettingsState>, st: Remote<SynologyStatus>, curves: Remote<FanCurves>) -> AnyView {
+fn body(s: SynologySettingsState, settings: Remote<SynologySettingsState>, st: Remote<SynologyStatus>, curves: Remote<FanCurves>, active: Signal<bool>) -> AnyView {
     let init = s.pending.clone().unwrap_or_else(|| s.applied.clone());
     let draft = Draft::new(init, move || settings.data.with(|s| s.as_ref().map(|s| s.pending.clone().unwrap_or_else(|| s.applied.clone()))));
     let d = draft.d;
@@ -276,13 +274,10 @@ fn body(s: SynologySettingsState, settings: Remote<SynologySettingsState>, st: R
         {(!s.foreign_commands.is_empty()).then(|| view! {
             {ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {tf("syn.foreign", &[("cmds", &s.foreign_commands.join(", "))])} }.into_any())}
         })}
-        {summary(st, s.platform.clone(), pending)}
+        {summary(st, s.platform.clone(), pending, active)}
         <section class="card widget w-12">
             <h2 class="section-title"><Icon icon=icons::BOX size=16 />{tr("sto.chassis")}</h2>
-            {st.view(5, move || {
-                let leds = d.with(|x| x.disk_leds);
-                st.data.with(|v| v.as_ref().map(|v| chassis(v, leds, running)).unwrap_or_else(|| ().into_any()))
-            })}
+            {st.view(5, move || chassis(st, d, running))}
         </section>
         <div class="grid">
             {fans_card(d, st, curves)}
@@ -310,38 +305,53 @@ fn sum_item(label: &'static str, value: AnyView) -> AnyView {
     view! { <div class="hw-sum-item"><span class="muted small">{tr(label)}</span>{value}</div> }.into_any()
 }
 
-fn summary(st: Remote<SynologyStatus>, platform: SynologyPlatform, pending: Signal<bool>) -> AnyView {
+fn summary(st: Remote<SynologyStatus>, platform: SynologyPlatform, pending: Signal<bool>, active: Signal<bool>) -> AnyView {
+    // every value is a memo: a poll only rewrites what changed, and "updated … ago" counts the
+    // seconds locally from when synohwd wrote the status
     let content = move || {
-        let Some(v) = st.data.get() else { return ().into_any() };
-        let daemon = if v.running && !v.stale {
-            status(Tone::Ok, t("syn.running").to_string())
-        } else if v.running {
-            status(Tone::Warn, t("hw.stale").to_string())
-        } else {
-            status(Tone::Err, t("syn.stopped").to_string())
+        let daemon = Memo::new(move |_| {
+            st.data.with(|v| match v {
+                Some(v) if v.running && !v.stale => (Tone::Ok, "syn.running"),
+                Some(v) if v.running => (Tone::Warn, "hw.stale"),
+                _ => (Tone::Err, "syn.stopped"),
+            })
+        });
+        let written = written_at(st);
+        let now = RwSignal::new(js_sys::Date::now());
+        if let Ok(h) = set_interval_with_handle(
+            move || {
+                if active.get_untracked() && !document().hidden() {
+                    now.set(js_sys::Date::now());
+                }
+            },
+            Duration::from_secs(1),
+        ) {
+            on_cleanup(move || h.clear());
+        }
+        let age = move || match written.get() {
+            Some(at) => format!("{} {}", i18n::duration(((now.get() - at).max(0.0) / 1000.0) as u64), t("hw.ago")),
+            None => "—".into(),
         };
-        let age = v.age_s.map(|a| format!("{} {}", i18n::duration(a), t("hw.ago"))).unwrap_or_else(|| "—".into());
-        let led = match v.status_led {
-            Some(l) => {
-                let n = led_name(l);
-                view! { <span class="led-big"><span class=format!("led-dot {n}") aria-hidden="true"></span><Status tone=led_tone(n) text=led_text(n) /></span> }.into_any()
-            }
-            None => view! { <strong>"—"</strong> }.into_any(),
-        };
-        let boot = v.boot.as_ref().map(|b| {
-            let (tone, key) = match b.cause {
-                rynas_api_types::power::BootCause::Watchdog => (Tone::Warn, "ps.cause_watchdog"),
-                rynas_api_types::power::BootCause::ScheduledStartup => (Tone::Ok, "ps.cause_scheduled"),
-                rynas_api_types::power::BootCause::Unknown => (Tone::Unknown, "ps.cause_unknown"),
-            };
-            sum_item("last_boot", status(tone, t(key).to_string()))
+        let led = Memo::new(move |_| st.data.with(|v| v.as_ref().and_then(|v| v.status_led).map(led_name)));
+        let duty = Memo::new(move |_| st.data.with(|v| v.as_ref().and_then(|v| v.fan_duty_pct)));
+        let boot = Memo::new(move |_| {
+            st.data.with(|v| {
+                v.as_ref().and_then(|v| v.boot.as_ref()).map(|b| match b.cause {
+                    rynas_api_types::power::BootCause::Watchdog => (Tone::Warn, "ps.cause_watchdog"),
+                    rynas_api_types::power::BootCause::ScheduledStartup => (Tone::Ok, "ps.cause_scheduled"),
+                    rynas_api_types::power::BootCause::Unknown => (Tone::Unknown, "ps.cause_unknown"),
+                })
+            })
         });
         view! {
-            {sum_item("syn.daemon", daemon)}
+            {sum_item("syn.daemon", (move || { let (tone, key) = daemon.get(); status(tone, t(key).to_string()) }).into_any())}
             {sum_item("hw.updated", view! { <strong class="tnum">{age}</strong> }.into_any())}
-            {sum_item("hw.led", led)}
-            {sum_item("hw.duty", view! { <strong class="tnum">{v.fan_duty_pct.map(|d| format!("{d}%")).unwrap_or_else(|| "—".into())}</strong> }.into_any())}
-            {boot}
+            {sum_item("hw.led", (move || match led.get() {
+                Some(n) => view! { <span class="led-big"><span class=format!("led-dot {n}") aria-hidden="true"></span><Status tone=led_tone(n) text=led_text(n) /></span> }.into_any(),
+                None => view! { <strong>"—"</strong> }.into_any(),
+            }).into_any())}
+            {sum_item("hw.duty", view! { <strong class="tnum">{move || pct_text(duty.get())}</strong> }.into_any())}
+            {move || boot.get().map(|(tone, key)| sum_item("last_boot", status(tone, t(key).to_string())))}
         }
         .into_any()
     };
@@ -352,98 +362,67 @@ fn summary(st: Remote<SynologyStatus>, platform: SynologyPlatform, pending: Sign
                 <strong>{platform.model.clone()}</strong>
                 <span class="muted small">{tf("syn.platform", &[("bays", &platform.bays.to_string()), ("fans", &platform.fans.to_string())])}</span>
             </div>
-            {pending.get().then(|| sum_item("syn.settings", status(Tone::Info, t("pending.change").to_string())))}
+            {move || pending.get().then(|| sum_item("syn.settings", status(Tone::Info, t("pending.change").to_string())))}
             {st.view(2, content)}
         </div>
     }
     .into_any()
 }
 
-// ------------------------------------------------------------------ chassis
-
-fn chassis(v: &SynologyStatus, disk_leds: bool, running: bool) -> AnyView {
-    let led = v.status_led.map(led_name).unwrap_or("off");
-    // the provider lists the bays in order
-    let bays = v.bays.clone();
-    view! {
-        <div class="chassis-wrap">
-            <div class="chassis" role="list" aria-label=tr("sto.chassis")>
-                <div class="chassis-brand">
-                    <span class="chassis-model">{v.model.clone()}</span>
-                    <span class="syn-leds">
-                        <span class=format!("led-dot {led}") title=format!("{}: {}", t("hw.led"), led_text(led))></span>
-                        <span class="chassis-power" title=t("syn.power_led")></span>
-                    </span>
-                </div>
-                <div class="bays">{bays.into_iter().map(|b| bay(b, disk_leds, running)).collect_view()}</div>
-            </div>
-        </div>
-    }
-    .into_any()
+/// When synohwd wrote the status, on this browser's clock: `age_s` taken back from the moment
+/// the answer arrived, kept while `read_at_ms` stays the same (no jitter from poll to poll).
+fn written_at(st: Remote<SynologyStatus>) -> Memo<Option<f64>> {
+    let anchor = Memo::new(move |prev: Option<&(Option<u64>, Option<f64>)>| {
+        let (read_at, age) = st.data.with(|v| v.as_ref().map_or((None, None), |v| (v.read_at_ms, v.age_s)));
+        if let Some(p) = prev.filter(|p| p.0.is_some() && p.0 == read_at && p.1.is_some()) {
+            return *p;
+        }
+        (read_at, age.map(|a| js_sys::Date::now() - a as f64 * 1000.0))
+    });
+    Memo::new(move |_| anchor.get().1)
 }
 
-fn bay(b: SynologyBay, disk_leds: bool, running: bool) -> AnyView {
-    let (cls, key) = if !b.present {
-        ("vacant", "sto.empty_bay")
-    } else if !b.powered {
-        ("off", "sto.not_powered")
-    } else if b.asleep {
-        ("asleep", "sto.asleep")
-    } else {
-        ("active", "sto.active")
-    };
-    // the green LED is off when disk LEDs are disabled; orange shows a bay without power
-    let led_cls = if b.present && b.powered && !disk_leds { format!("bay {cls} leds-off") } else { format!("bay {cls}") };
-    let n = b.number;
-    let label = format!(
-        "{} {n}: {}{}{}",
-        t("sto.bay"),
-        t(key),
-        b.device.as_ref().map(|d| format!(", {d}")).unwrap_or_default(),
-        b.temperature_c.map(|c| format!(", {}", i18n::celsius(c))).unwrap_or_default()
-    );
-    let blinking = RwSignal::new(false);
-    let identify = move |_| {
-        blinking.set(true);
-        spawn_local(async move {
-            let r = api::post_empty(&format!("/api/v1/hardware/synology/bays/{n}/identify"), Some(&IdentifyRequest { duration_s: None })).await;
-            match r {
-                Ok(()) => {
-                    toast(Tone::Ok, tf("syn.identify_on", &[("n", &n.to_string()), ("s", &IDENTIFY_S.to_string())]));
-                    set_timeout(move || blinking.set(false), Duration::from_secs(IDENTIFY_S));
-                }
-                Err(e) => {
-                    blinking.set(false);
-                    toast(Tone::Err, e.text());
-                }
-            }
-        });
-    };
-    view! {
-        <div class=led_cls class:identifying=move || blinking.get() role="listitem" aria-label=label>
-            <div class="bay-top"><span class="bay-num">{n}</span><span class="bay-led" aria-hidden="true"></span></div>
-            <div class="bay-grill" aria-hidden="true"></div>
-            <div class="bay-info">
-                {b.device.clone().map(|d| view! { <span class="bay-dev mono">{d}</span> })}
-                <span class="bay-state">
-                    {b.asleep.then(|| view! { <Icon icon=icons::MOON_STAR size=12 /> })}
-                    {t(key)}
-                </span>
-                {(b.present && !b.powered).then(|| view! { <span class="bay-state">{t("syn.bay_no_power")}</span> })}
-                {b.temperature_c.map(|c| view! {
-                    <span class=format!("bay-temp {}", temp_tone("bay", c).class()) title=if b.asleep { t("syn.temp_last") } else { "" }>
-                        <Icon icon=icons::THERMOMETER size=12 />{i18n::celsius(c)}
-                    </span>
-                })}
-                {b.present.then(|| view! {
-                    <button type="button" class="btn ghost sm bay-id" disabled=move || blinking.get() || !running on:click=identify>
-                        <Icon icon=icons::EYE size=14 />{move || if blinking.get() { t("syn.identifying") } else { t("syn.identify") }}
-                    </button>
-                })}
-            </div>
-        </div>
+fn pct_text(p: Option<u8>) -> String {
+    p.map(|d| format!("{d}%")).unwrap_or_else(|| "—".into())
+}
+
+// ------------------------------------------------------------------ chassis
+
+/// The shared chassis drawing with synohwd's bays, the M.2 slots of the hardware status and the
+/// drives of the storage inventory; identify and the disk-LED switch are the Synology parts.
+fn chassis(st: Remote<SynologyStatus>, d: RwSignal<SynologySettings>, running: bool) -> AnyView {
+    let live = crate::live::use_live();
+    let sto = crate::pages::storage::sto();
+    if sto.disks.with_untracked(Option::is_none) {
+        sto.refresh(false);
     }
-    .into_any()
+    let bays = Memo::new(move |_| {
+        sto.disks.with(|dk| {
+            let dk = dk.as_deref().unwrap_or(&[]);
+            let mut v: Vec<_> = st.data.with(|v| {
+                v.iter()
+                    .flat_map(|v| v.bays.iter())
+                    .map(|b| crate::chassis::bay_slot(b.number, b.present, b.powered, b.asleep, b.temperature_c, b.device.clone(), dk))
+                    .collect()
+            });
+            v.sort_by_key(|x| x.key);
+            v
+        })
+    });
+    let m2 = Memo::new(move |_| {
+        sto.disks.with(|dk| live.hardware.with(|h| h.as_ref().map(|h| crate::chassis::m2_slots(&h.m2, dk.as_deref().unwrap_or(&[]))).unwrap_or_default()))
+    });
+    let model = Memo::new(move |_| st.data.with(|v| v.as_ref().map(|v| v.model.clone()).unwrap_or_default()));
+    let led = Memo::new(move |_| st.data.with(|v| Some(v.as_ref().and_then(|v| v.status_led).map_or("off", led_name).to_string())));
+    let disk_leds = Memo::new(move |_| d.with(|x| x.disk_leds));
+    crate::chassis::chassis(crate::chassis::Chassis {
+        model: model.into(),
+        bays,
+        m2,
+        status_led: led.into(),
+        on_select: None,
+        identify: Some(crate::chassis::Identify { running: Signal::derive(move || running), disk_leds: disk_leds.into() }),
+    })
 }
 
 // ------------------------------------------------------------------ fans
@@ -462,76 +441,64 @@ fn fans_card(d: RwSignal<SynologySettings>, st: Remote<SynologyStatus>, curves: 
         FanMode::High => t("syn.fan_high_help"),
         FanMode::Full => t("syn.fan_full_help"),
     };
+    // built once: the duty and every fan row follow the status (rows keyed by fan number)
+    let duty = Memo::new(move |_| st.data.with(|v| v.as_ref().and_then(|v| v.fan_duty_pct)));
+    let fan_nums = Memo::new(move |_| st.data.with(|v| v.as_ref().map(|v| v.fans.iter().map(|f| f.number).collect::<Vec<u32>>()).unwrap_or_default()));
     let live = move || {
-        st.data.with(|v| {
-            v.as_ref().map(|v| {
-                let duty = v.fan_duty_pct.unwrap_or(0);
-                view! {
-                    <div class="sub-row"><span>{tr("hw.duty")}</span><span class="tnum">{v.fan_duty_pct.map(|d| format!("{d}%")).unwrap_or_else(|| "—".into())}</span></div>
-                    <Meter pct=f64::from(duty) />
-                    <ul class="syn-fans">
-                        {v.fans.iter().map(|f| {
-                            let (tone, key) = match f.alarm {
-                                FanAlarm::Ok => (Tone::Ok, "syn.fan_ok"),
-                                FanAlarm::Stopped => (Tone::Err, "syn.fan_stopped"),
-                                FanAlarm::Unknown => (Tone::Unknown, "syn.fan_unknown"),
-                            };
-                            view! {
-                                <li class="fan-row">
-                                    <span class=if f.alarm == FanAlarm::Stopped { "fan-icon alarm" } else { "fan-icon" }><Icon icon=icons::FAN size=16 /></span>
-                                    <span>{tf("syn.fan_n", &[("n", &f.number.to_string())])}</span>
-                                    <span class="tnum fan-rpm-s">{f.rpm.map(|r| format!("{r} rpm")).unwrap_or_else(|| "—".into())}</span>
-                                    {status(tone, t(key).to_string())}
-                                </li>
-                            }
-                        }).collect_view()}
-                    </ul>
-                }
-                .into_any()
-            })
-            .unwrap_or_else(|| ().into_any())
-        })
+        view! {
+            <div class="sub-row"><span>{tr("hw.duty")}</span><span class="tnum">{move || pct_text(duty.get())}</span></div>
+            <Meter pct=Signal::derive(move || f64::from(duty.get().unwrap_or(0))) />
+            <ul class="syn-fans">
+                <For each=move || fan_nums.get() key=|n| *n children=move |n| fan_row(st, n) />
+            </ul>
+        }
+        .into_any()
     };
     let chart = move || {
-        let mode = d.with(|s| s.fan_mode);
-        curves.data.with(|fc| {
-            let Some(fc) = fc.as_ref() else { return ().into_any() };
-            if mode == FanMode::Full {
-                return view! { <p class="sec-note"><Icon icon=icons::INFO size=16 />{t("syn.full_note")}</p> }.into_any();
-            }
-            let Some(mc) = mode_curves(fc, mode) else { return ().into_any() };
-            let shown = shown_curves(mc, &fc.readings);
-            let svg = curve_svg(&shown, &fc.readings, if mode == fc.active_mode { fc.duty_pct } else { None });
-            let aria = shown
-                .iter()
-                .map(|c| {
-                    let now = fc.readings.iter().filter(|r| r.class == c.class).filter_map(|r| r.temperature_c).fold(None::<f32>, |a, b| Some(a.map_or(b, |a| a.max(b))));
-                    match now {
+        let mode = Memo::new(move |_| d.with(|s| s.fan_mode));
+        let full = Memo::new(move |_| mode.get() == FanMode::Full);
+        let fig = Memo::new(move |_| {
+            let mode = mode.get();
+            curves.data.with(|fc| {
+                let fc = fc.as_ref()?;
+                let mc = mode_curves(fc, mode).filter(|_| mode != FanMode::Full)?;
+                let shown = shown_curves(mc, &fc.readings);
+                let svg = curve_svg(&shown, &fc.readings, if mode == fc.active_mode { fc.duty_pct } else { None });
+                let aria = shown
+                    .iter()
+                    .map(|c| match now_of(fc, c.class) {
                         Some(n) => format!("{} {} → {}%", t(class_key(c.class)), i18n::celsius(n), duty_at(c, n)),
                         None => t(class_key(c.class)).to_string(),
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            let legend = shown
-                .iter()
-                .map(|c| {
-                    let color = class_color(c.class);
-                    view! { <li><span class="dot" style=format!("background:var({color})")></span>{t(class_key(c.class))}</li> }
-                })
-                .collect_view();
-            let preview = mode != fc.active_mode;
-            view! {
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Some((svg, aria, shown.iter().map(|c| c.class).collect::<Vec<_>>(), mode != fc.active_mode))
+            })
+        });
+        let has = Memo::new(move |_| fig.with(Option::is_some));
+        let svg = Memo::new(move |_| fig.with(|f| f.as_ref().map(|f| f.0.clone()).unwrap_or_default()));
+        let aria = Memo::new(move |_| fig.with(|f| f.as_ref().map(|f| format!("{}: {}", t("syn.curve"), f.1)).unwrap_or_default()));
+        let legend = Memo::new(move |_| fig.with(|f| f.as_ref().map(|f| f.2.clone()).unwrap_or_default()));
+        let preview = Memo::new(move |_| fig.with(|f| f.as_ref().is_some_and(|f| f.3)));
+        view! {
+            {move || full.get().then(|| view! { <p class="sec-note"><Icon icon=icons::INFO size=16 />{tr("syn.full_note")}</p> })}
+            {move || has.get().then(|| view! {
                 <figure class="cv-wrap">
-                    <div role="img" aria-label=format!("{}: {aria}", t("syn.curve")) inner_html=svg></div>
+                    <div role="img" aria-label=move || aria.get() inner_html=move || svg.get()></div>
                     <figcaption>
-                        <ul class="cv-legend">{legend}<li><span class="cv-duty-key"></span>{t("syn.curve_duty")}</li></ul>
-                        {preview.then(|| view! { <span class="muted small">{t("syn.curve_preview")}</span> })}
+                        <ul class="cv-legend">
+                            {move || legend.get().into_iter().map(|c| {
+                                let color = class_color(c);
+                                view! { <li><span class="dot" style=format!("background:var({color})")></span>{tr(class_key(c))}</li> }
+                            }).collect_view()}
+                            <li><span class="cv-duty-key"></span>{tr("syn.curve_duty")}</li>
+                        </ul>
+                        {move || preview.get().then(|| view! { <span class="muted small">{tr("syn.curve_preview")}</span> })}
                     </figcaption>
                 </figure>
-            }
-            .into_any()
-        })
+            })}
+        }
+        .into_any()
     };
     view! {
         <section class="card widget w-6">
@@ -557,38 +524,74 @@ fn fans_card(d: RwSignal<SynologySettings>, st: Remote<SynologyStatus>, curves: 
     .into_any()
 }
 
+/// One fan of the status (its rpm and alarm follow the polls; the row stays).
+fn fan_row(st: Remote<SynologyStatus>, n: u32) -> AnyView {
+    let fan = Memo::new(move |_| st.data.with(|v| v.as_ref().and_then(|v| v.fans.iter().find(|f| f.number == n)).map(|f| (f.rpm, f.alarm))));
+    let rpm = Memo::new(move |_| fan.get().and_then(|f| f.0));
+    let alarm = Memo::new(move |_| fan.get().map_or(FanAlarm::Unknown, |f| f.1));
+    view! {
+        <li class="fan-row">
+            <span class=move || if alarm.get() == FanAlarm::Stopped { "fan-icon alarm" } else { "fan-icon" }><Icon icon=icons::FAN size=16 /></span>
+            <span>{move || tf("syn.fan_n", &[("n", &n.to_string())])}</span>
+            <span class="tnum fan-rpm-s">{move || rpm.get().map(|r| format!("{r} rpm")).unwrap_or_else(|| "—".into())}</span>
+            {move || {
+                let (tone, key) = match alarm.get() {
+                    FanAlarm::Ok => (Tone::Ok, "syn.fan_ok"),
+                    FanAlarm::Stopped => (Tone::Err, "syn.fan_stopped"),
+                    FanAlarm::Unknown => (Tone::Unknown, "syn.fan_unknown"),
+                };
+                status(tone, t(key).to_string())
+            }}
+        </li>
+    }
+    .into_any()
+}
+
+/// Hottest current reading of a sensor class.
+fn now_of(fc: &FanCurves, class: SensorClass) -> Option<f32> {
+    fc.readings.iter().filter(|r| r.class == class).filter_map(|r| r.temperature_c).fold(None::<f32>, |a, b| Some(a.map_or(b, |a| a.max(b))))
+}
+
+/// One sensor class of the thermal table: reading and shutdown limit follow the curves.
+fn thermal_row(rows: Memo<Vec<(SensorClass, Option<f32>, u8)>>, class: SensorClass) -> AnyView {
+    let row = Memo::new(move |_| rows.with(|r| r.iter().find(|x| x.0 == class).map(|x| (x.1, x.2))));
+    let now = Memo::new(move |_| row.get().and_then(|r| r.0));
+    let limit = Memo::new(move |_| row.get().map_or(0, |r| r.1));
+    let near = Memo::new(move |_| now.get().is_some_and(|n| n + 5.0 >= f32::from(limit.get())));
+    view! {
+        <div class="kv">
+            <dt>{tr(class_key(class))}</dt>
+            <dd class="tnum">
+                <span class=move || if near.get() { "temp-val err" } else { "muted" }>{move || now.get().map(i18n::celsius).unwrap_or_else(|| "—".into())}</span>
+                " / "
+                <strong>{move || i18n::celsius(f32::from(limit.get()))}</strong>
+            </dd>
+        </div>
+    }
+    .into_any()
+}
+
 // ------------------------------------------------------------------ thermal
 
 fn thermal_card(d: RwSignal<SynologySettings>, curves: Remote<FanCurves>) -> AnyView {
     let (on, set_on) = lens_bool(d, |s| s.thermal_shutdown, |s, v| s.thermal_shutdown = v);
-    let table = move || {
+    // rows keyed by sensor class; a poll only rewrites the readings that changed
+    let rows = Memo::new(move |_| {
         let mode = d.with(|s| s.fan_mode);
         curves.data.with(|fc| {
-            let Some(fc) = fc.as_ref() else { return ().into_any() };
-            let Some(mc) = mode_curves(fc, mode) else { return ().into_any() };
-            let rows = shown_curves(mc, &fc.readings)
-                .into_iter()
-                .map(|c| {
-                    let now = fc.readings.iter().filter(|r| r.class == c.class).filter_map(|r| r.temperature_c).fold(None::<f32>, |a, b| Some(a.map_or(b, |a| a.max(b))));
-                    let near = now.is_some_and(|n| n + 5.0 >= f32::from(c.shutdown_c));
-                    view! {
-                        <div class="kv">
-                            <dt>{t(class_key(c.class))}</dt>
-                            <dd class="tnum">
-                                <span class=if near { "temp-val err" } else { "muted" }>{now.map(i18n::celsius).unwrap_or_else(|| "—".into())}</span>
-                                " / "
-                                <strong>{i18n::celsius(f32::from(c.shutdown_c))}</strong>
-                            </dd>
-                        </div>
-                    }
-                })
-                .collect_view();
-            view! {
-                <div class="sub-row muted small"><span>{tr("syn.sensor")}</span><span>{tr("syn.now_limit")}</span></div>
-                <dl class="kvs">{rows}</dl>
-            }
-            .into_any()
+            fc.as_ref()
+                .and_then(|fc| mode_curves(fc, mode).map(|mc| shown_curves(mc, &fc.readings).into_iter().map(|c| (c.class, now_of(fc, c.class), c.shutdown_c)).collect::<Vec<_>>()))
+                .unwrap_or_default()
         })
+    });
+    let table = move || {
+        view! {
+            <div class="sub-row muted small"><span>{tr("syn.sensor")}</span><span>{tr("syn.now_limit")}</span></div>
+            <dl class="kvs">
+                <For each=move || rows.with(|r| r.iter().map(|x| x.0).collect::<Vec<_>>()) key=|c| class_key(*c) children=move |c| thermal_row(rows, c) />
+            </dl>
+        }
+        .into_any()
     };
     view! {
         <section class="card widget w-6">
@@ -741,34 +744,45 @@ fn power_card(d: RwSignal<SynologySettings>) -> AnyView {
 // ------------------------------------------------------------------ events
 
 fn events_card(st: Remote<SynologyStatus>) -> AnyView {
+    // built once: the boot lines follow the status, events are keyed rows (newest first; an
+    // event never changes, so a new one only adds its row)
     let list = move || {
-        st.data.with(|v| {
-            let Some(v) = v.as_ref() else { return ().into_any() };
-            let boot = v.boot.as_ref().map(|b| {
-                let clean = match b.previous_shutdown_clean {
-                    Some(true) => t("ps.clean_yes"),
-                    Some(false) => t("ps.clean_no"),
-                    None => "—",
-                };
-                view! {
-                    <dl class="kvs syn-boot">
-                        <div class="kv"><dt>{tr("last_boot")}</dt><dd>{i18n::datetime(b.boot_ms)}</dd></div>
-                        <div class="kv"><dt>{tr("ps.prev_clean")}</dt><dd>{clean}</dd></div>
-                    </dl>
-                }
-            });
-            let ev = if v.events.is_empty() {
-                view! { <li class="muted">{t("hw.no_events")}</li> }.into_any()
-            } else {
-                v.events
-                    .iter()
-                    .rev()
-                    .map(|e| view! { <li><span class="mono small muted">{e.at_ms.map(i18n::short_when).unwrap_or_else(|| "—".into())}</span><span>{e.text.clone()}</span></li> })
-                    .collect_view()
-                    .into_any()
-            };
-            view! { {boot}<ul class="events">{ev}</ul> }.into_any()
-        })
+        let boot = Memo::new(move |_| st.data.with(|v| v.as_ref().and_then(|v| v.boot.as_ref()).map(|b| (b.boot_ms, b.previous_shutdown_clean))));
+        let has_boot = Memo::new(move |_| boot.with(Option::is_some));
+        let events = Memo::new(move |_| {
+            st.data.with(|v| {
+                let mut seen: Vec<(Option<u64>, &str)> = Vec::new();
+                v.iter()
+                    .flat_map(|v| v.events.iter().rev())
+                    .map(|e| {
+                        // identical events (same time and text) get a running number as key
+                        let n = seen.iter().filter(|s| s.0 == e.at_ms && s.1 == e.text).count() as u32;
+                        seen.push((e.at_ms, &e.text));
+                        (e.at_ms, e.text.clone(), n)
+                    })
+                    .collect::<Vec<_>>()
+            })
+        });
+        let none = Memo::new(move |_| events.with(Vec::is_empty));
+        view! {
+            {move || has_boot.get().then(|| view! {
+                <dl class="kvs syn-boot">
+                    <div class="kv"><dt>{tr("last_boot")}</dt><dd>{move || boot.get().map(|b| i18n::datetime(b.0)).unwrap_or_default()}</dd></div>
+                    <div class="kv"><dt>{tr("ps.prev_clean")}</dt><dd>{move || match boot.get().and_then(|b| b.1) {
+                        Some(true) => t("ps.clean_yes"),
+                        Some(false) => t("ps.clean_no"),
+                        None => "—",
+                    }}</dd></div>
+                </dl>
+            })}
+            <ul class="events">
+                {move || none.get().then(|| view! { <li class="muted">{tr("hw.no_events")}</li> })}
+                <For each=move || events.get() key=|e| e.clone() let:e>
+                    <li><span class="mono small muted">{e.0.map(i18n::short_when).unwrap_or_else(|| "—".into())}</span><span>{e.1}</span></li>
+                </For>
+            </ul>
+        }
+        .into_any()
     };
     view! {
         <section class="card widget w-6">

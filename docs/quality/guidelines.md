@@ -156,6 +156,7 @@ first, reviewed, then used.
 | Static note | `ui::note` | a warning or hint next to what it concerns; not dismissable |
 | Form error | `form::form_error` | errors inside a form or dialog (`role="alert"`) |
 | Pending changes bar | `config::PendingBar` | data from `/config/pending`; pages call `config::changed()` after staging |
+| Chassis drawing | `chassis::chassis` (`src/chassis.rs`) | bays side by side and M.2 slots below, rows keyed by slot with a memo per value (a poll rewrites only what changed); provider parts optional (status LED, identify, disk LEDs off); light and dark `--chassis-*`/`--bay-*`/`--led-*` tokens |
 | Task progress | `tasks::TaskPanel`, `tasks::TaskRun`, `tasks::LogTail` | `task.*` events of `/events`; long actions go through `tasks::run_task` (or `api::start_task` + `tasks::follow`) and report the final state; no page polls a task |
 
 - G1 MUST: no `inner_html` with markup built from strings, except the static icon SVGs in `icons.rs`.
