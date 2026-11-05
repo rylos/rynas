@@ -96,6 +96,10 @@ struct Args {
     /// The web interface is served over HTTPS.
     #[arg(long)]
     web_https: bool,
+    /// NUT's upsd (battery tests, the on-battery watcher) [default: 127.0.0.1:3493]. With
+    /// --dry-system rynasd talks to upsd only when this is given (a test upsd).
+    #[arg(long)]
+    upsd: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -169,8 +173,10 @@ struct Opened {
     snapshots: Arc<SnapshotsDomain>,
     /// The Synology provider, when this machine is one.
     synology: Option<Arc<rynas_hw_synology::Synology>>,
-    /// synodeb is here: `ups.safemode` is registered.
-    ups_available: bool,
+    /// synodeb's UPS layer is here: `ups.safemode` writes its file.
+    ups_synodeb: bool,
+    /// The configuration root.
+    root: PathBuf,
 }
 
 fn open_config(args: &Args, system: Arc<dyn System>) -> std::io::Result<Opened> {
@@ -233,11 +239,12 @@ fn open_config(args: &Args, system: Arc<dyn System>) -> std::io::Result<Opened> 
         tracing::info!("hardware: Synology {} (synohwd provider)", s.product());
         domains.push(Arc::new(rynas_hw_synology::domain::SynologyDomain));
     }
-    // ups.safemode only on synodeb, which owns /etc/synodeb/ups.conf and Safe Mode
-    let ups_available = rynasd::ups::synodeb_present(&root);
-    if ups_available {
-        domains.push(Arc::new(rynasd::ups::UpsDomain));
-    }
+    // ups.safemode: synodeb's ups.conf where synodeb runs the UPS, else the rynas policy
+    // file read by rynasd's NUT watcher
+    let ups_synodeb = rynasd::ups::synodeb_present(&root);
+    domains.push(Arc::new(rynasd::ups::UpsDomain {
+        synodeb: ups_synodeb,
+    }));
     let config = Config::open(ConfigOptions::new(&args.state_dir, &root), system, domains)
         .map_err(std::io::Error::other)?;
     Ok(Opened {
@@ -246,7 +253,8 @@ fn open_config(args: &Args, system: Arc<dyn System>) -> std::io::Result<Opened> 
         shares,
         scheduler,
         snapshots,
-        ups_available,
+        ups_synodeb,
+        root,
         synology,
     })
 }
@@ -611,14 +619,26 @@ fn main() -> std::io::Result<()> {
         });
         let protection = Arc::new(protection);
         state.protection = Some(protection.clone());
-        state.ups = Some(Arc::new(rynasd::ups::Ups {
+        let ups = Arc::new(rynasd::ups::Ups {
             ops: ops.clone(),
             protection: Some(protection.clone()),
             notifier: notifier.clone(),
-            available: opened.ups_available,
+            synodeb: opened.ups_synodeb,
+            root: opened.root.clone(),
             dry: args.dry_system,
             synodeb_ups: PathBuf::from("/usr/sbin/synodeb-ups"),
-        }));
+            upsd: args
+                .upsd
+                .clone()
+                .unwrap_or_else(|| rynas_nut::UPSD.to_string()),
+            // --dry-system never talks to the host's own upsd
+            talk_to_upsd: !args.dry_system || args.upsd.is_some(),
+        });
+        // NUT backend: rynasd follows the UPS itself (synodeb-ups does it on synodeb)
+        if !ups.synodeb && ups.talk_to_upsd {
+            tokio::spawn(rynasd::ups::watch(ups.clone()));
+        }
+        state.ups = Some(ups);
         state.hardware = Some(Arc::new(rynasd::hardware::Hardware {
             ops: ops.clone(),
             synology: opened.synology,

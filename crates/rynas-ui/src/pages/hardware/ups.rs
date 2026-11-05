@@ -1,10 +1,13 @@
 //! Hardware › UPS (DSM Control Panel › Hardware & Power › UPS): live status from upsd
-//! (`/api/v1/ups`, then `ups.status` events), the Safe Mode settings of synodeb
+//! (`/api/v1/ups`, then `ups.status` events), the power failure policy
 //! (`/api/v1/ups/settings`, staged like every configuration change), the battery test
-//! (`POST /api/v1/ups/test`, task `ups.test`) and the recent UPS notifications.
+//! (`POST /api/v1/ups/test`, task `ups.test`; only the tests the UPS lists) and the recent UPS
+//! notifications.
 //!
-//! Safe Mode also always starts on NUT low battery and on a critical UPS (OB+LB), whichever
-//! comes first: the form says so next to the timer, which only adds a trigger.
+//! The texts follow the backend of `/api/v1/ups/settings`: plain NUT (shutdown through
+//! upsmon), synodeb (Safe Mode) or none (install NUT). Low battery and a critical UPS (OB+LB)
+//! always trigger it: the form says so next to the timer, which only adds a trigger. synodeb
+//! is named only where it is the backend.
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -118,7 +121,7 @@ pub fn panel(_active: Signal<bool>) -> AnyView {
         events.data.set(Some(crate::demo::ups_events()));
     }
     view! {
-        {status_card()}
+        {status_card(settings)}
         <div class="grid">
             {safemode_card(settings)}
             {test_card(settings)}
@@ -128,17 +131,35 @@ pub fn panel(_active: Signal<bool>) -> AnyView {
     .into_any()
 }
 
-fn status_card() -> AnyView {
+/// The backend of the settings (`not_installed` while they load).
+fn backend_of(settings: Remote<UpsSettingsState>) -> Signal<UpsBackend> {
+    Signal::derive(move || settings.data.with(|s| s.as_ref().map_or(UpsBackend::NotInstalled, |s| s.backend)))
+}
+
+/// i18n key of the text under "no UPS" / "UPS service not running".
+pub fn empty_text(link: UpsLink, backend: UpsBackend) -> &'static str {
+    match (link, backend == UpsBackend::Synodeb) {
+        (UpsLink::NotConfigured, true) => "ups.none_text_synodeb",
+        (UpsLink::NotConfigured, false) => "ups.none_text",
+        (_, true) => "ups.down_text_synodeb",
+        (_, false) => "ups.down_text",
+    }
+}
+
+fn status_card(settings: Remote<UpsSettingsState>) -> AnyView {
     let live = use_live();
     let u = live.ups;
+    let backend = backend_of(settings);
     let body = move || {
         let Some(s) = u.get() else {
             return view! { <Skeleton lines=4 /> }.into_any();
         };
         if s.link != UpsLink::Connected {
-            let (title, body) = if s.link == UpsLink::NotConfigured { ("ups.none_title", "ups.none_text") } else { ("ups.down_title", "ups.down_text") };
+            let title = if s.link == UpsLink::NotConfigured { "ups.none_title" } else { "ups.down_title" };
+            let link = s.link;
+            let body = move || empty_text(link, backend.get());
             return view! {
-                <EmptyState icon=icons::BATTERY_CHARGING title=Signal::derive(move || t(title).to_string()) text=Signal::derive(move || t(body).to_string())>
+                <EmptyState icon=icons::BATTERY_CHARGING title=Signal::derive(move || t(title).to_string()) text=Signal::derive(move || t(body()).to_string())>
                     <button class="btn ghost" on:click=move |_| live.refresh_ups()><Icon icon=icons::REFRESH_CW size=16 />{tr("err.retry")}</button>
                 </EmptyState>
             }
@@ -254,11 +275,7 @@ fn safemode_card(settings: Remote<UpsSettingsState>) -> AnyView {
         }
         let st = settings.data.get_untracked().unwrap_or_default();
         if !st.available {
-            return view! {
-                <p class="sec-note"><Icon icon=icons::INFO size=16 />{tr("ups.lb_always")}</p>
-                {ui::note(Tone::Info, icons::INFO, view! { {t("ups.no_synodeb")} }.into_any())}
-            }
-            .into_any();
+            return view! { {ui::note(Tone::Info, icons::INFO, view! { {t("ups.need_nut")} }.into_any())} }.into_any();
         }
         safemode_form(settings, &st)
     };
@@ -271,7 +288,18 @@ fn safemode_card(settings: Remote<UpsSettingsState>) -> AnyView {
     .into_any()
 }
 
+/// i18n keys of the policy form: the low battery statement, the timer switch and its help,
+/// the help of the stop time. synodeb enters Safe Mode, NUT's upsmon shuts down.
+pub fn policy_keys(b: UpsBackend) -> [&'static str; 4] {
+    if b == UpsBackend::Synodeb {
+        ["ups.lb_always", "ups.timer", "ups.timer_help", "ups.pre_timeout_help"]
+    } else {
+        ["ups.lb_always_nut", "ups.timer_nut", "ups.timer_help_nut", "ups.pre_timeout_help_nut"]
+    }
+}
+
 fn safemode_form(settings: Remote<UpsSettingsState>, st: &UpsSettingsState) -> AnyView {
+    let [k_lb, k_timer, k_timer_help, k_pre_help] = policy_keys(st.backend);
     let init = Form::of(st.pending.as_ref().unwrap_or(&st.applied));
     let draft = Draft::new(init, move || settings.data.with(|s| s.as_ref().map(|s| Form::of(s.pending.as_ref().unwrap_or(&s.applied)))));
     let d = draft.d;
@@ -307,12 +335,12 @@ fn safemode_form(settings: Remote<UpsSettingsState>, st: &UpsSettingsState) -> A
     });
     let timer = Signal::derive(move || d.with(|f| f.timer));
     view! {
-        <p class="sec-note"><Icon icon=icons::INFO size=16 />{tr("ups.lb_always")}</p>
-        {switch("ups.timer", Some("ups.timer_help"), timer, Callback::new(move |v| d.update(|f| f.timer = v)))}
+        <p class="sec-note"><Icon icon=icons::INFO size=16 />{tr(k_lb)}</p>
+        {switch(k_timer, Some(k_timer_help), timer, Callback::new(move |v| d.update(|f| f.timer = v)))}
         <Show when=move || timer.get()>
             {number_field("ups.minutes", Some("ups.minutes_help"), Signal::derive(move || d.with(|f| f.minutes.clone())), Callback::new(move |v| d.update(|f| f.minutes = v)), 1, 1440)}
         </Show>
-        {number_field("ups.pre_timeout", Some("ups.pre_timeout_help"), Signal::derive(move || d.with(|f| f.pre_timeout.clone())), Callback::new(move |v| d.update(|f| f.pre_timeout = v)), 10, 900)}
+        {number_field("ups.pre_timeout", Some(k_pre_help), Signal::derive(move || d.with(|f| f.pre_timeout.clone())), Callback::new(move |v| d.update(|f| f.pre_timeout = v)), 10, 900)}
         {move || pending.get().then(|| view! { <p class="sec-note"><Icon icon=icons::INFO size=16 />{t("ups.pending_note")}</p> })}
         {stale_notice(draft.stale, reset)}
         {crate::form::form_error(error)}
@@ -326,12 +354,31 @@ fn safemode_form(settings: Remote<UpsSettingsState>, st: &UpsSettingsState) -> A
     .into_any()
 }
 
+/// The command shown for a scheduled test: the quick test, else the deep one, when offered.
+pub fn schedule_command(u: &UpsStatus) -> Option<&'static str> {
+    if u.supports(BatteryTest::Quick) {
+        Some("rynasctl ups test quick")
+    } else if u.supports(BatteryTest::Deep) {
+        Some("rynasctl ups test deep")
+    } else {
+        None
+    }
+}
+
 fn test_card(settings: Remote<UpsSettingsState>) -> AnyView {
     let live = use_live();
     let ask_deep = RwSignal::new(false);
     let busy = RwSignal::new(None::<BatteryTest>);
+    let backend = backend_of(settings);
+    let loaded = Signal::derive(move || settings.data.with(Option::is_some));
     let available = Signal::derive(move || settings.data.with(|s| s.as_ref().is_some_and(|s| s.available)));
-    let online = Signal::derive(move || live.ups.with(|u| u.as_ref().is_some_and(|u| u.link == UpsLink::Connected && u.has("OL") && !u.on_battery())));
+    // memos: notes and buttons are rebuilt only when what they show changes, not at every reading
+    let connected = Memo::new(move |_| live.ups.with(|u| u.as_ref().is_some_and(|u| u.link == UpsLink::Connected)));
+    let online = Memo::new(move |_| live.ups.with(|u| u.as_ref().is_some_and(|u| u.link == UpsLink::Connected && u.has("OL") && !u.on_battery())));
+    let cmds = Memo::new(move |_| live.ups.with(|u| u.as_ref().map(|u| u.commands.clone()).unwrap_or_default()));
+    let supports = move |t: BatteryTest| cmds.with(|c| c.iter().any(|c| c == t.nut_cmd()));
+    let any = Memo::new(move |_| available.get() && BatteryTest::ALL.into_iter().any(supports));
+    let synodeb = move || backend.get() == UpsBackend::Synodeb;
     let run = move |test: BatteryTest| {
         busy.set(Some(test));
         spawn_local(async move {
@@ -351,7 +398,7 @@ fn test_card(settings: Remote<UpsSettingsState>) -> AnyView {
             let close = Callback::new(move |_| ask_deep.set(false));
             confirm(Confirm::new(
                 t("ups.deep_title").to_string(),
-                t("ups.deep_text").to_string(),
+                t(if synodeb() { "ups.deep_text" } else { "ups.deep_text_nut" }).to_string(),
                 "ups.deep_start",
                 true,
                 Callback::new(move |_| {
@@ -382,25 +429,34 @@ fn test_card(settings: Remote<UpsSettingsState>) -> AnyView {
         }
     };
     let can = move || available.get() && online.get() && busy.get().is_none();
+    let spin = move |k: BatteryTest| (busy.get() == Some(k)).then(|| view! { <span class="btn-spinner" aria-hidden="true"></span> });
+    let schedule = Memo::new(move |_| live.ups.with(|u| u.as_ref().and_then(schedule_command)).filter(|_| available.get()));
     view! {
         <section class="card widget w-6">
             <WidgetHead icon=icons::ACTIVITY title="ups.test" />
             <dl class="kvs">{kv("ups.last_result", view! { <span>{result}</span> }.into_any())}</dl>
-            {move || (!available.get()).then(|| view! { {ui::note(Tone::Info, icons::INFO, view! { {t("ups.test_synodeb")} }.into_any())} })}
-            {move || (available.get() && !online.get()).then(|| view! { <p class="sec-note"><Icon icon=icons::INFO size=16 />{t("ups.test_online")}</p> })}
-            <p class="sec-note"><Icon icon=icons::TRIANGLE_ALERT size=16 />{tr("ups.test_lb")}</p>
-            <div class="btn-row">
-                <button type="button" class="btn primary" disabled=move || !can() on:click=move |_| run(BatteryTest::Quick)>
-                    {move || (busy.get() == Some(BatteryTest::Quick)).then(|| view! { <span class="btn-spinner" aria-hidden="true"></span> })}
-                    {tr("ups.quick")}
-                </button>
-                <button type="button" class="btn ghost" disabled=move || !can() on:click=move |_| ask_deep.set(true)>
-                    {move || (busy.get() == Some(BatteryTest::Deep)).then(|| view! { <span class="btn-spinner" aria-hidden="true"></span> })}
-                    {tr("ups.deep")}
-                </button>
-                <button type="button" class="btn ghost" disabled=move || !available.get() on:click=move |_| run(BatteryTest::Stop)>{tr("ups.stop")}</button>
-            </div>
-            <p class="muted small">{tr("ups.schedule_hint")}" "<code>"synodeb-ups test quick"</code></p>
+            {move || (loaded.get() && !available.get()).then(|| view! { {ui::note(Tone::Info, icons::INFO, view! { {t("ups.need_nut")} }.into_any())} })}
+            {move || (available.get() && connected.get() && !any.get()).then(|| view! { <p class="sec-note"><Icon icon=icons::INFO size=16 />{t("ups.test_unsupported")}</p> })}
+            {move || (any.get() && !online.get()).then(|| view! { <p class="sec-note"><Icon icon=icons::INFO size=16 />{t("ups.test_online")}</p> })}
+            {move || any.get().then(|| view! {
+                <p class="sec-note"><Icon icon=icons::TRIANGLE_ALERT size=16 />{t(if synodeb() { "ups.test_lb" } else { "ups.test_lb_nut" })}</p>
+                <div class="btn-row">
+                    {supports(BatteryTest::Quick).then(|| view! {
+                        <button type="button" class="btn primary" disabled=move || !can() on:click=move |_| run(BatteryTest::Quick)>
+                            {move || spin(BatteryTest::Quick)}{tr("ups.quick")}
+                        </button>
+                    })}
+                    {supports(BatteryTest::Deep).then(|| view! {
+                        <button type="button" class="btn ghost" disabled=move || !can() on:click=move |_| ask_deep.set(true)>
+                            {move || spin(BatteryTest::Deep)}{tr("ups.deep")}
+                        </button>
+                    })}
+                    {supports(BatteryTest::Stop).then(|| view! {
+                        <button type="button" class="btn ghost" disabled=move || !available.get() on:click=move |_| run(BatteryTest::Stop)>{tr("ups.stop")}</button>
+                    })}
+                </div>
+            })}
+            {move || schedule.get().map(|c| view! { <p class="muted small">{tr("ups.schedule_hint")}" "<code>{c}</code></p> })}
             {deep_dialog}
         </section>
     }
@@ -468,5 +524,35 @@ mod tests {
         assert_eq!(off.settings().unwrap().safemode_after_s, None);
         assert_eq!(Form { minutes: "0".into(), ..f.clone() }.settings(), Err("ups.v_minutes"));
         assert_eq!(Form { pre_timeout: "5".into(), ..f }.settings(), Err("ups.v_pre"));
+    }
+
+    /// Nothing a plain Debian user sees names synodeb.
+    #[test]
+    fn neutral_without_synodeb() {
+        let keys = |b: UpsBackend| {
+            let mut k = policy_keys(b).to_vec();
+            k.push(empty_text(UpsLink::NotConfigured, b));
+            k.push(empty_text(UpsLink::Unreachable, b));
+            k
+        };
+        let generic: Vec<&str> = [UpsBackend::Nut, UpsBackend::NotInstalled].into_iter().flat_map(keys).chain(["ups.need_nut", "ups.test_unsupported", "ups.test_lb_nut", "ups.deep_text_nut", "ups.safemode", "ups.schedule_hint"]).collect();
+        for lang in [i18n::Lang::En, i18n::Lang::It] {
+            for k in &generic {
+                let s = i18n::text_in(lang, k).unwrap_or_else(|| panic!("missing {k}"));
+                assert!(!s.to_ascii_lowercase().contains("synodeb") && !s.contains("Synology") && !s.contains("DSM"), "{k}: {s}");
+            }
+        }
+        assert_eq!(empty_text(UpsLink::Unreachable, UpsBackend::Synodeb), "ups.down_text_synodeb");
+        assert_eq!(policy_keys(UpsBackend::Synodeb)[0], "ups.lb_always");
+    }
+
+    #[test]
+    fn schedule_hint() {
+        let mut u = UpsStatus { link: UpsLink::Connected, ..Default::default() };
+        assert_eq!(schedule_command(&u), None);
+        u.commands = vec!["test.battery.start.deep".into()];
+        assert_eq!(schedule_command(&u), Some("rynasctl ups test deep"));
+        u.commands.push("test.battery.start.quick".into());
+        assert_eq!(schedule_command(&u), Some("rynasctl ups test quick"));
     }
 }

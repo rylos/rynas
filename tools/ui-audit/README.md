@@ -9,6 +9,10 @@ quality reviews (docs/quality/). Nothing here touches the host system or a runni
     python3 -I tools/ui-audit/probe.py nav:/storage w:1024 shot:storage "document.title"
     tools/ui-audit/stop.sh
 
+- UPS page: `FAKE_UPS=ol|ob|lb|none` adds `fake_upsd.py` (status, `LIST CMD`, `INSTCMD`) and NUT
+  files in the dry root; `FAKE_UPS_CMDS=all|quick|none` picks the offered battery tests,
+  `FAKE_UPS_BACKEND=synodeb` the synodeb backend (see `start.sh`). The UPS page is the 4th tab of
+  `/hardware` (`#hwt-t3`): the route audits only see the first tab.
 - Login `tester` / `correct-horse` (`users.toml`, a test-only account of the local instance).
 - `BASE` changes the instance URL; `AUDIT_OUT` the output folder (default `target/ui-audit`:
   results, screenshots, browser profiles). Keep it on disk, not on a RAM tmpfs.

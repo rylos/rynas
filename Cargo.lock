@@ -3242,6 +3242,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rynas-nut"
+version = "0.1.0"
+dependencies = [
+ "rynas-api-types",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "rynas-power"
 version = "0.1.0"
 dependencies = [
@@ -3361,6 +3370,7 @@ dependencies = [
  "rynas-hw",
  "rynas-hw-synology",
  "rynas-notify",
+ "rynas-nut",
  "rynas-services",
  "rynas-storage",
  "rynas-tasks",
@@ -3397,6 +3407,7 @@ dependencies = [
  "rynas-hw-synology",
  "rynas-net",
  "rynas-notify",
+ "rynas-nut",
  "rynas-power",
  "rynas-scheduler",
  "rynas-services",

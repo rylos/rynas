@@ -1,0 +1,12 @@
+[package]
+name = "rynas-nut"
+description = "Minimal client of NUT's upsd text protocol (status, instant commands) for rynas"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+rynas-api-types.workspace = true
+tokio.workspace = true
+tracing.workspace = true

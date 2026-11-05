@@ -22,6 +22,8 @@
 //! - `rynasctl ups safe-mode <reason>`: synodeb's pre-Safe Mode hook
 //!   (`/etc/synodeb/ups-pre-safemode.d/50-rynas`); rynasd cancels its tasks, stops running
 //!   scheduler units and records the reason. Always exits 0: Safe Mode must go on.
+//! - `rynasctl ups test quick|deep|stop`: a UPS battery test through rynasd (NUT or synodeb),
+//!   followed to its outcome; the command of a scheduled battery test.
 //!
 //! Talks HTTP/1.1 to rynasd's socket (root is always allowed by `SO_PEERCRED`).
 
@@ -121,6 +123,12 @@ enum UpsCmd {
     /// Before UPS Safe Mode: stop rynas tasks gracefully and record the reason (synodeb's
     /// lowbatt, waittimeup, nocomm, fsd, shutdowncmd).
     SafeMode { reason: String },
+    /// Run a UPS battery test (quick, deep) or stop the running one (stop), and follow it to
+    /// its outcome (for Task Scheduler tasks).
+    Test {
+        /// quick, deep or stop.
+        kind: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -307,15 +315,19 @@ fn job_run(socket: &PathBuf, id: &str) -> ExitCode {
     follow(socket, id, &format!("/v1/scheduler/tasks/{id}/execute"))
 }
 
-/// Starts a rynasd task with `POST start`, prints its log as it grows and exits with its
-/// result; SIGTERM cancels it.
 fn follow(socket: &PathBuf, id: &str, start: &str) -> ExitCode {
+    follow_with(socket, id, start, None)
+}
+
+/// Starts a rynasd task with `POST start` (and `body`), prints its log as it grows and exits
+/// with its result; SIGTERM cancels it.
+fn follow_with(socket: &PathBuf, id: &str, start: &str, body: Option<&[u8]>) -> ExitCode {
     // SAFETY: the handler only stores into an atomic
     unsafe {
         libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
         libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
     }
-    let started = match request(socket, "POST", start, None) {
+    let started = match request(socket, "POST", start, body) {
         Ok(a) if a.status == 202 => {
             serde_json::from_slice::<TaskStarted>(&a.body).map_err(|e| e.to_string())
         }
@@ -421,7 +433,18 @@ fn snapshot_system(a: SnapshotAction) -> ExitCode {
 }
 
 fn ups(socket: &PathBuf, cmd: UpsCmd) -> ExitCode {
-    let UpsCmd::SafeMode { reason } = cmd;
+    let reason = match cmd {
+        UpsCmd::SafeMode { reason } => reason,
+        UpsCmd::Test { kind } => {
+            use rynas_api_types::ups::{BatteryTest, BatteryTestRequest};
+            let Some(test) = BatteryTest::from_arg(&kind) else {
+                eprintln!("rynasctl: the test is quick, deep or stop");
+                return ExitCode::FAILURE;
+            };
+            let body = serde_json::to_vec(&BatteryTestRequest { test }).unwrap_or_default();
+            return follow_with(socket, "ups.test", "/v1/ups/test", Some(&body));
+        }
+    };
     let body = serde_json::to_vec(&rynas_api_types::ups::SafeModeRequest { reason })
         .unwrap_or_default();
     match request(socket, "POST", "/v1/ups/safe-mode", Some(&body)) {
