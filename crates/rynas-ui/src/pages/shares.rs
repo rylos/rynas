@@ -100,7 +100,7 @@ pub fn Shares() -> impl IntoView {
         }
         let fss = live.storage.with(|s| s.as_ref().map(|s| s.filesystems.clone()).unwrap_or_default());
         view! {
-            {ui::table("", &["shares.name", "shares.location", "shares.volume_usage", "shares.protocols", "shares.recycle", "col.status", ""], rows.into_iter().map(|v| share_row(v, &fss, edit, del)).collect::<Vec<_>>())}
+            {ui::table("shares-table", &["shares.name", "shares.location", "shares.volume_usage", "shares.protocols", "shares.recycle", "col.status", ""], rows.into_iter().map(|v| share_row(v, &fss, edit, del)).collect::<Vec<_>>())}
         }
         .into_any()
     };

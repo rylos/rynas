@@ -1123,6 +1123,8 @@ kbd {
 .link-strong:hover:not(:disabled) { color: var(--accent); text-decoration: underline; }
 .link-strong:disabled { color: var(--text-disabled); text-decoration: line-through; }
 .table td.path-cell { white-space: normal; min-width: 200px; max-width: 360px; overflow-wrap: anywhere; }
+/* the shared folders table has seven columns: a narrower path keeps it inside its card at 1024 px */
+.shares-table td.path-cell { min-width: 120px; }
 .table td.actions { text-align: right; width: 1%; white-space: nowrap; }
 .table td.actions .icon-btn { display: inline-grid; }
 .actions-col { width: 1%; }
