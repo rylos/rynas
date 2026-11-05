@@ -739,8 +739,9 @@ kbd {
 }
 .chassis-brand { display: flex; flex-direction: column; justify-content: space-between; align-items: center; padding: var(--s-1) var(--s-2); min-width: 56px; }
 .chassis-model { writing-mode: vertical-rl; transform: rotate(180deg); font-weight: 700; letter-spacing: .12em; font-size: var(--fs-13); color: var(--chassis-text-2); }
-.chassis-power { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--led-green); box-shadow: 0 0 8px var(--led-green); }
-.chassis-leds { display: flex; flex-direction: column; align-items: center; gap: var(--s-3); }
+.chassis-top { display: flex; flex-direction: column; align-items: center; gap: var(--s-4); }
+.chassis-led { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.chassis-led-label { font-size: var(--fs-12); font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--chassis-text-2); }
 .chassis-body { display: flex; flex-direction: column; gap: var(--s-3); flex: 1; min-width: 0; }
 .bays { display: grid; grid-template-columns: repeat(var(--bays), minmax(0, 13.5rem)); gap: var(--s-3); min-width: 0; }
 /* M.2 slots: on the DS920+ they sit on the bottom, so a short row of compact tiles below the bays */
@@ -1277,6 +1278,8 @@ kbd {
   .chassis { flex-direction: column; gap: var(--s-3); padding: var(--s-3); }
   .chassis-brand { flex-direction: row; min-width: 0; padding: 0 var(--s-1); }
   .chassis-model { writing-mode: horizontal-tb; transform: none; }
+  .chassis-top { flex-direction: row; gap: var(--s-3); }
+  .chassis-led { flex-direction: row; }
   .bay { min-height: 0; }
   .hw-mini { grid-template-columns: 1fr; }
   .palette { top: var(--s-2); }

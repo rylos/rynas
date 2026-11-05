@@ -159,10 +159,18 @@ pub fn chassis(c: Chassis) -> AnyView {
         <div class="chassis-wrap">
             <div class="chassis" style=move || cols.get()>
                 <div class="chassis-brand">
-                    <span class="chassis-model">{move || c.model.get()}</span>
-                    <span class="chassis-leds">
-                        {move || has_led.get().then(|| view! { <span class=move || led_cls.get() title=led_title></span> })}
-                        <span class="chassis-power" title=tr("syn.power_led")></span>
+                    <div class="chassis-top">
+                        <span class="chassis-model">{move || c.model.get()}</span>
+                        {move || has_led.get().then(|| view! {
+                            <span class="chassis-led" title=led_title>
+                                <span class="chassis-led-label">{tr("hw.led_status_short")}</span>
+                                <span class=move || led_cls.get() aria-hidden="true"></span>
+                            </span>
+                        })}
+                    </div>
+                    <span class="chassis-led" title=tr("syn.power_led")>
+                        <span class="chassis-led-label">{tr("hw.led_power_short")}</span>
+                        <span class="led-dot green" aria-hidden="true"></span>
                     </span>
                 </div>
                 <div class="chassis-body">

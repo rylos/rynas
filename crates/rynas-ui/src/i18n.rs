@@ -515,6 +515,8 @@ dict! {
     "syn.stopped" => "Not running", "Non in esecuzione";
     "last_boot" => "Last boot", "Ultimo avvio";
     "syn.power_led" => "Power LED", "LED di alimentazione";
+    "hw.led_status_short" => "Status", "Status";
+    "hw.led_power_short" => "Power", "Power";
     "syn.bay_no_power" => "Disk present, bay without power", "Disco presente, alloggiamento senza alimentazione";
     "syn.temp_last" => "Last reading before standby (the disk is not woken up)", "Ultima lettura prima dello standby (il disco non viene risvegliato)";
     "syn.identify" => "Identify", "Identifica";
