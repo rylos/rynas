@@ -591,8 +591,13 @@ pub fn plan_volume(inv: &Inventory, req: &VolumePlanRequest) -> StoragePlan {
     }
     steps.push(cmd(
         "Create the btrfs filesystem (data single, metadata DUP)",
+        // --force: fs_dev is the array (or LUKS mapping) this plan has just created, so any
+        // signature on it is a leftover of the member disks' old content, which the user
+        // already agreed to erase (md --create does not zero the data area: a filesystem from
+        // an earlier, rolled back attempt shows through at the same offset)
         &[
             "mkfs.btrfs",
+            "--force",
             "--label",
             label,
             "--data",
@@ -1301,7 +1306,7 @@ mod tests {
                 "systemd-cryptenroll --recovery-key --unlock-key-file=/dev/stdin /dev/md/vol2",
                 "cryptsetup luksHeaderBackup /dev/md/vol2 --header-backup-file /run/rynas/luks-header-vol2.img",
                 "cryptsetup open --key-file - /dev/md/vol2 rynas-vol2",
-                "mkfs.btrfs --label vol2 --data single --metadata dup /dev/mapper/rynas-vol2",
+                "mkfs.btrfs --force --label vol2 --data single --metadata dup /dev/mapper/rynas-vol2",
                 "mkdir -p /vol2",
                 "systemctl start vol2.mount",
                 "btrfs subvolume create /vol2/.snapshots",

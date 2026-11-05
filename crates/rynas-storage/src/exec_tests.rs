@@ -104,7 +104,7 @@ async fn create_raid1_golden_sequence_and_record() {
             "udevadm settle",
             "mdadm --create /dev/md/backup --run --level=1 --raid-devices=2 --metadata=1.2 --name=backup --bitmap=internal /dev/sdd1 /dev/sde1",
             "mdadm --detail --export /dev/md/backup",
-            "mkfs.btrfs --label backup --data single --metadata dup /dev/md/backup",
+            "mkfs.btrfs --force --label backup --data single --metadata dup /dev/md/backup",
             "blkid --probe --match-tag UUID --output value /dev/md/backup",
             commit.as_str(),
             "mkdir -p /backup",
