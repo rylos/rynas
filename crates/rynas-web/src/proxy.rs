@@ -135,6 +135,7 @@ pub fn routes() -> Router<AppState> {
         .route("/snapshots/{id}/browse", get(forward))
         .route("/snapshots/{id}/restore", post(forward))
         .route("/snapshots/{id}/rollback", post(forward))
+        .route("/snapshots/{id}/preview-rollback", get(forward))
         // Synology hardware (synohwd provider in rynasd) and the power schedule (P4)
         .route("/hardware/synology/status", get(forward))
         .route("/hardware/synology/settings", get(forward).put(forward))

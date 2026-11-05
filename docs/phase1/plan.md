@@ -609,7 +609,8 @@ domain (apply with `POST /api/v1/config/apply`); actions on the system are tasks
 | GET | `/api/v1/snapshots?share=&job=` | — | `Vec<SnapshotInfo>` {id, job, share?, path, created_ms, readonly, uuid?, parent_uuid?, received_uuid?, deletion: allowed\|latest\|writable\|not_subvolume, reason?}, newest first, of the applied jobs and system restore points |
 | GET | `/api/v1/snapshots/{id}/browse?path=` | — | `SnapshotListing` {id, path, entries: [{name, kind, size_bytes, mtime_ms, mode, uid, gid, link?}], truncated} (10 000 entries max) |
 | POST | `/api/v1/snapshots/{id}/restore` | `RestoreRequest` {path, mode: copy\|replace} | 202 (task `snapshot.restore`) |
-| POST | `/api/v1/snapshots/{id}/rollback` | `RollbackRequest` {confirm: id} | 202 (task `snapshot.rollback`); 400 `confirmation_required`; 409 for system restore points |
+| POST | `/api/v1/snapshots/{id}/rollback` | `RollbackRequest` {confirm: id} | 202 (task `snapshot.rollback`); 400 `confirmation_required`; 409 for system restore points unless synodeb (root rollback, see `docs/synodeb-integration.md`, S6) |
+| GET | `/api/v1/snapshots/{id}/preview-rollback` | — | `RollbackPreview` {id, system, allowed, refusal?: not_synodeb\|no_kernel\|no_modules\|not_readonly, kernel?, running_kernel?, modules, subvolume?}; no side effect |
 | DELETE | `/api/v1/snapshots/{id}?confirm={id}` | — | 202 (task `snapshot.delete`); 400 `confirmation_required`; 409 `conflict` when the chain needs it |
 
 Internal only (rynasd, never forwarded by rynas-web, called as root by `rynasctl`; the route
@@ -701,7 +702,9 @@ Snapshots (key `snapshots`, `SnapshotsConfig` {jobs, system}):
   generation is not newer than the latest restore point (btrbk's `onchange`) or that one is less
   than 2 minutes old; the oldest beyond `keep` are deleted; reasons in
   `/var/lib/rynas/snapshots/system.jsonl` (500 lines). Rolling the system back (rename of
-  `@rootfs`, kernel on the DOM) stays a console procedure, coordinated with synodeb.
+  `@rootfs`, kernel on the DOM) is a task on synodeb (`synodeb-dom sync --root`, crate module
+  `rynas_btrfs::rootfs`, details in `docs/synodeb-integration.md`, S6) and a console
+  procedure elsewhere.
 
 `rynasd.service` gains `CAP_SYS_ADMIN` (subvolume deletion by btrbk and rynas) and `CAP_FSETID`
 (restored setgid bits). The package installs `rynasctl` and recommends `btrbk, btrfs-progs`.

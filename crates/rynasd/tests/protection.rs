@@ -25,7 +25,7 @@ use rynas_scheduler::units::Paths;
 use rynas_services::{MemoryAccounts, MemoryShares, SharesDomain, UsersDomain};
 use rynas_tasks::{TaskConfig, TaskManager};
 use rynasd::ops::Ops;
-use rynasd::protection::Protection;
+use rynasd::protection::{Protection, RootBackend};
 use rynasd::roles::AdminPolicy;
 use rynasd::server::{DaemonState, PeerCred, router};
 use serde_json::{Value, json};
@@ -56,6 +56,10 @@ struct Env {
 }
 
 fn env() -> Env {
+    env_with(RootBackend::None)
+}
+
+fn env_with(root_ops: RootBackend) -> Env {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("root");
     std::fs::create_dir_all(&root).unwrap();
@@ -63,6 +67,7 @@ fn env() -> Env {
     let acc = Arc::new(MemoryAccounts::new());
     let snap_host = Arc::new(MemorySnapshots::new());
     snap_host.add_subvolume("/srv/vol1/docs");
+    snap_host.add_subvolume(dir.path().join("rootfs").to_str().unwrap());
     let snapshots = Arc::new(SnapshotsDomain::new(snap_host));
     let uid = |u: &str| (u == "alice").then_some(1001);
     let scheduler = Arc::new(SchedulerDomain::new(Paths::default(), Arc::new(uid)));
@@ -113,7 +118,8 @@ fn env() -> Env {
         Arc::new(history),
         notifier.clone(),
         dir.path().join("state"),
-    );
+    )
+    .with_root(root_ops);
     st.protection = Some(Arc::new(protection));
     Env {
         _dir: dir,
@@ -585,4 +591,89 @@ async fn restore_and_apply_check_root_tasks() {
     assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
     let (s, b) = call(&e, "POST", "/v1/config/apply", apply_body).await;
     assert_eq!(s, StatusCode::ACCEPTED, "{}", String::from_utf8_lossy(&b));
+}
+
+/// A system restore point with a kernel and its modules (a plain directory: the scan calls
+/// it not read-only, so a real rollback is refused; the order of the steps is tested in
+/// `rynas_btrfs::rootfs`).
+async fn restore_point(e: &Env) -> String {
+    let base = e._dir.path().join("rootfs");
+    let dir = base.join(".snapshots/rootfs");
+    let id = "rootfs.20261101T0300";
+    let p = dir.join(id);
+    std::fs::create_dir_all(p.join("boot")).unwrap();
+    std::fs::write(p.join("boot/vmlinuz-7.3.0-1-synodeb"), "").unwrap();
+    std::fs::create_dir_all(p.join("usr/lib/modules/7.3.0-1-synodeb")).unwrap();
+    let body = json!({"enabled": true, "subvolume": base, "snapshot_dir": dir, "prefix": "rootfs", "keep": 5});
+    let (s, b) = call(e, "PUT", "/v1/snapshots/system", Some(body)).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    apply(e);
+    id.into()
+}
+
+#[tokio::test]
+async fn root_rollback_needs_synodeb_and_a_bootable_restore_point() {
+    use rynas_api_types::snapshots::{RollbackPreview, RollbackRefusal};
+    // not synodeb: previewed and refused with a clear reason
+    let e = env();
+    let id = restore_point(&e).await;
+    let (s, b) = call(
+        &e,
+        "GET",
+        &format!("/v1/snapshots/{id}/preview-rollback"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    let pv: RollbackPreview = serde_json::from_slice(&b).unwrap();
+    assert!(pv.system && !pv.allowed);
+    assert_eq!(pv.refusal, Some(RollbackRefusal::NotSynodeb));
+    assert_eq!(pv.kernel.as_deref(), Some("7.3.0-1-synodeb"));
+    assert!(pv.modules);
+    let (s, b) = call(
+        &e,
+        "POST",
+        &format!("/v1/snapshots/{id}/rollback"),
+        Some(json!({"confirm": id})),
+    )
+    .await;
+    assert_eq!(
+        (s, code(&b).as_str()),
+        (StatusCode::CONFLICT, error_codes::CONFLICT)
+    );
+    assert!(String::from_utf8_lossy(&b).contains("needs synodeb"));
+    // synodeb (dry): the plain directory is not a read-only restore point
+    let e = env_with(RootBackend::Custom(Arc::new(
+        rynas_btrfs::rootfs::DryRoot::new(true),
+    )));
+    let id = restore_point(&e).await;
+    let (_, b) = call(
+        &e,
+        "GET",
+        &format!("/v1/snapshots/{id}/preview-rollback"),
+        None,
+    )
+    .await;
+    let pv: RollbackPreview = serde_json::from_slice(&b).unwrap();
+    assert_eq!(pv.refusal, Some(RollbackRefusal::NotReadonly));
+    // the typed confirmation comes first
+    let (s, b) = call(
+        &e,
+        "POST",
+        &format!("/v1/snapshots/{id}/rollback"),
+        Some(json!({"confirm": "rootfs"})),
+    )
+    .await;
+    assert_eq!(
+        (s, code(&b).as_str()),
+        (StatusCode::BAD_REQUEST, error_codes::CONFIRMATION_REQUIRED)
+    );
+    let (s, _) = call(
+        &e,
+        "GET",
+        "/v1/snapshots/rootfs.20261102T0300/preview-rollback",
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
 }

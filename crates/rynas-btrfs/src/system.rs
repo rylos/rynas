@@ -55,6 +55,24 @@ pub struct SystemSnapshot<'a> {
 
 /// Takes a restore point now (`now_s`) for `reason`.
 pub fn take(s: &SystemSnapshot, reason: &str, now_s: i64) -> Result<Taken, SnapError> {
+    take_with(s, reason, now_s, false)
+}
+
+/// Like [`take`], but never skipped (the restore point a root rollback keeps of the current
+/// system, reason "before rollback").
+pub fn take_always(s: &SystemSnapshot, reason: &str, now_s: i64) -> Result<String, SnapError> {
+    match take_with(s, reason, now_s, true)? {
+        Taken::Created { name, .. } => Ok(name),
+        Taken::Skipped { latest, .. } => Ok(latest),
+    }
+}
+
+fn take_with(
+    s: &SystemSnapshot,
+    reason: &str,
+    now_s: i64,
+    force: bool,
+) -> Result<Taken, SnapError> {
     let src = ioctl::open_dir(s.subvolume)
         .map_err(|e| SnapError::Failed(format!("{}: {e}", s.subvolume.display())))?;
     if !ioctl::is_subvolume(&src) {
@@ -69,7 +87,7 @@ pub fn take(s: &SystemSnapshot, reason: &str, now_s: i64) -> Result<Taken, SnapE
     let latest = existing
         .iter()
         .find(|x| x.info.as_ref().is_some_and(|i| i.readonly));
-    if let Some(l) = latest {
+    if let Some(l) = latest.filter(|_| !force) {
         let info = ioctl::subvol_info(&src)?;
         let li = l.info.as_ref().expect("read-only implies info");
         if info.generation <= li.otransid {
@@ -105,8 +123,12 @@ pub fn take(s: &SystemSnapshot, reason: &str, now_s: i64) -> Result<Taken, SnapE
     if let Some(r) = s.reasons {
         let _ = record_reason(r, &name, reason, now_s as u64 * 1000);
     }
-    // retention: the oldest read-only ones beyond `keep`
+    // retention: the oldest read-only ones beyond `keep` (not before a rollback, which may be
+    // going back to one of them)
     let mut pruned = Vec::new();
+    if force {
+        return Ok(Taken::Created { name, pruned });
+    }
     let all = scan::scan(s.snapshot_dir, s.prefix)?;
     let ro: Vec<_> = all
         .iter()

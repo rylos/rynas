@@ -8,7 +8,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use rynas_api_types::scheduler::{TaskTrigger, TaskView};
 use rynas_api_types::snapshots::{
-    EntryKind, RestoreMode, RestoreRequest, Retention, RetentionPreset, RetentionPreview, RetentionPreviewRequest, RollbackRequest, SnapshotDeletion,
+    EntryKind, RestoreMode, RestoreRequest, Retention, RetentionPreset, RetentionPreview, RetentionPreviewRequest, RollbackPreview, RollbackRefusal, RollbackRequest, SnapshotDeletion,
     SnapshotEntry, SnapshotInfo, SnapshotJob, SnapshotJobRequest, SnapshotJobView, SnapshotListing, SystemSnapshots,
 };
 use rynas_api_types::{ShareView, TaskStarted, TaskStatus};
@@ -20,7 +20,7 @@ use crate::icons::{self, Icon};
 use crate::pages::scheduler::{TriggerEdit, run_status, trigger_text};
 use crate::tasks;
 use crate::toast::{saved_pending, toast};
-use crate::ui::{self, Confirm, EmptyState, ErrorBox, PageHeader, Remote, Skeleton, Tone, confirm, drawer};
+use crate::ui::{self, Confirm, EmptyState, ErrorBox, Notice, PageHeader, Remote, Skeleton, Tone, confirm, drawer};
 
 /// `[A-Za-z0-9][A-Za-z0-9_-]{0,47}`.
 pub fn valid_job_name(n: &str) -> bool {
@@ -114,6 +114,8 @@ fn snapshots_panel(jobs: Remote<Vec<SnapshotJobView>>, system: Remote<SystemSnap
     let err = RwSignal::new(None::<String>);
     let browse = RwSignal::new(None::<SnapshotInfo>);
     let rollback = RwSignal::new(None::<SnapshotInfo>);
+    let root = RwSignal::new(None::<(SnapshotInfo, RollbackPreview)>);
+    let notice = RwSignal::new(None::<(Tone, String)>);
     let del = RwSignal::new(None::<SnapshotInfo>);
     let load = move || {
         let f = filter.get_untracked();
@@ -169,7 +171,7 @@ fn snapshots_panel(jobs: Remote<Vec<SnapshotJobView>>, system: Remote<SystemSnap
                             let why_not = deletion_reason(s.deletion);
                             let (s1, s2, s3) = (s.clone(), s.clone(), s.clone());
                             let can_browse = s.readonly;
-                            let can_rollback = !is_system && s.deletion != SnapshotDeletion::NotSubvolume;
+                            let can_rollback = if is_system { s.readonly } else { s.deletion != SnapshotDeletion::NotSubvolume };
                             ui::row(vec![
                                 ui::cell("snap.col.snapshot", "", view! {
                                     <div class="cell-main">
@@ -199,7 +201,7 @@ fn snapshots_panel(jobs: Remote<Vec<SnapshotJobView>>, system: Remote<SystemSnap
                                         <Icon icon=icons::FOLDER_OPEN size=16 />
                                     </button>
                                     <button class="icon-btn sm" title=move || if is_system { t("snap.rollback_system") } else { t("snap.rollback") }
-                                        aria-label=format!("{}: {}", t("snap.rollback"), s.id) disabled=!can_rollback on:click=move |_| rollback.set(Some(s3.clone()))>
+                                        aria-label=format!("{}: {}", t("snap.rollback"), s.id) disabled=!can_rollback on:click=move |_| if is_system { open_root(root, s3.clone()) } else { rollback.set(Some(s3.clone())) }>
                                         <Icon icon=icons::ROTATE_CCW size=16 />
                                     </button>
                                     <button class="icon-btn sm danger" title=move || why_not.map(t).unwrap_or_else(|| t("delete"))
@@ -247,6 +249,7 @@ fn snapshots_panel(jobs: Remote<Vec<SnapshotJobView>>, system: Remote<SystemSnap
             })
         })
     };
+    let root_dialog = move || root.get().map(|(s, pv)| root_rollback_dialog(s, pv, root, notice, reload));
     let delete_dialog = move || {
         del.get().map(|s| {
             let busy = RwSignal::new(false);
@@ -284,12 +287,102 @@ fn snapshots_panel(jobs: Remote<Vec<SnapshotJobView>>, system: Remote<SystemSnap
             <select class="input filter" aria-label=tr("snap.col.job") on:change=move |ev| filter.set(event_target_value(&ev))>{job_options}</select>
             <button class="btn ghost" on:click=move |_| load()><Icon icon=icons::REFRESH_CW size=16 /><span class="btn-label">{tr("snap.refresh")}</span></button>
         </div>
+        <Notice msg=notice />
         {table}
         {move || browse.get().map(|s| browse_drawer(s, Callback::new(move |_| browse.set(None))))}
         {rollback_dialog}
+        {root_dialog}
         {delete_dialog}
     }
     .into_any()
+}
+
+// ------------------------------------------------------------------ system rollback
+
+/// Reads what a rollback to the restore point `s` does, then opens its dialog.
+fn open_root(root: RwSignal<Option<(SnapshotInfo, RollbackPreview)>>, s: SnapshotInfo) {
+    spawn_local(async move {
+        let url = format!("/api/v1/snapshots/{}/preview-rollback", api::encode(&s.id));
+        match api::get::<RollbackPreview>(&url).await {
+            Ok(pv) => root.set(Some((s, pv))),
+            Err(e) => toast(Tone::Err, e.text()),
+        }
+    });
+}
+
+fn refusal_key(r: Option<RollbackRefusal>) -> &'static str {
+    match r {
+        Some(RollbackRefusal::NotSynodeb) => "snap.refusal.not_synodeb",
+        Some(RollbackRefusal::NoKernel) => "snap.refusal.no_kernel",
+        Some(RollbackRefusal::NoModules) => "snap.refusal.no_modules",
+        Some(RollbackRefusal::NotReadonly) | None => "snap.refusal.not_readonly",
+    }
+}
+
+/// Root rollback (synodeb): the kernel that will boot, the steps, the typed restore point
+/// name; afterwards a notice asks for the reboot. A refused rollback shows why.
+fn root_rollback_dialog(s: SnapshotInfo, pv: RollbackPreview, root: RwSignal<Option<(SnapshotInfo, RollbackPreview)>>, notice: RwSignal<Option<(Tone, String)>>, reload: Callback<()>) -> AnyView {
+    let close = Callback::new(move |_| root.set(None));
+    let kernel = pv.kernel.clone().unwrap_or_else(|| t("not_set").to_string());
+    let running = pv.running_kernel.clone().unwrap_or_else(|| t("not_set").to_string());
+    let facts = view! {
+        <dl class="kvs">
+            <div class="kv"><dt>{tr("snap.root_kernel")}</dt><dd class="mono">{kernel.clone()}</dd></div>
+            <div class="kv"><dt>{tr("snap.root_running")}</dt><dd class="mono">{running}</dd></div>
+        </dl>
+    };
+    if !pv.allowed {
+        let why = refusal_key(pv.refusal);
+        let body = view! { {facts} {ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {tr(why)} }.into_any())} }.into_any();
+        let foot = view! { <button type="button" class="btn primary" data-autofocus="" on:click=move |_| close.run(())>{tr("close")}</button> }.into_any();
+        return ui::dialog(ui::DlgKind::Normal, Signal::stored(tf("snap.root_refused_title", &[("id", &s.id)])), close, body, Some(foot));
+    }
+    let busy = RwSignal::new(false);
+    let error = RwSignal::new(None::<String>);
+    let id = s.id.clone();
+    let steps = ["snap.root_step1", "snap.root_step2", "snap.root_step3", "snap.root_step4"];
+    confirm(Confirm {
+        title: tf("snap.root_title", &[("id", &s.id)]),
+        text: t("snap.root_text").to_string(),
+        action: "snap.rollback",
+        danger: true,
+        extra: Some(
+            view! {
+                {facts}
+                <p class="field-label">{tr("snap.root_steps")}</p>
+                <ol class="steps-list">{steps.into_iter().map(|k| view! { <li>{tr(k)}</li> }).collect_view()}</ol>
+                {ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {tr("snap.root_reboot")} }.into_any())}
+            }
+            .into_any(),
+        ),
+        typed: Signal::stored(Some(id.clone())),
+        busy,
+        error,
+        on_confirm: Callback::new(move |_| {
+            let (id, kernel) = (id.clone(), kernel.clone());
+            busy.set(true);
+            error.set(None);
+            spawn_local(async move {
+                let body = serde_json::to_string(&RollbackRequest { confirm: id.clone() }).ok();
+                let url = format!("/api/v1/snapshots/{}/rollback", api::encode(&id));
+                let r = match api::start_task(&url, body).await {
+                    Ok(t) => tasks::follow(&t).await,
+                    Err(e) => Err(e),
+                };
+                busy.set(false);
+                match r {
+                    Ok(task) if task.status == TaskStatus::Ok => {
+                        notice.set(Some((Tone::Warn, tf("snap.root_done", &[("id", &id), ("kernel", &kernel)]))));
+                        close.run(());
+                        reload.run(());
+                    }
+                    Ok(task) => error.set(Some(tasks::task_error(&task))),
+                    Err(e) => error.set(Some(e.text())),
+                }
+            });
+        }),
+        on_cancel: close,
+    })
 }
 
 // ------------------------------------------------------------------ browse and restore

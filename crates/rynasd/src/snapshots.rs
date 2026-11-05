@@ -19,16 +19,16 @@ use rynas_api_types::scheduler::{
     NotifyPolicy, ScheduledTask, SchedulerConfig, TaskAction, TaskTrigger,
 };
 use rynas_api_types::snapshots::{
-    RestoreRequest, RetentionPreview, RetentionPreviewRequest, RollbackRequest, SnapshotInfo,
-    SnapshotJob, SnapshotJobRequest, SnapshotJobView, SnapshotListing, SnapshotsConfig,
-    SystemSnapshots,
+    RestoreRequest, RetentionPreview, RetentionPreviewRequest, RollbackPreview, RollbackRefusal,
+    RollbackRequest, SnapshotInfo, SnapshotJob, SnapshotJobRequest, SnapshotJobView,
+    SnapshotListing, SnapshotsConfig, SystemSnapshots,
 };
 use rynas_api_types::{SharesConfig, StagedChanges, TaskStarted, error_codes};
 use rynas_btrfs::btrbk::{conf_path, parse_report, render_conf};
 use rynas_btrfs::domain::normalize_job;
 use rynas_btrfs::name::split_snapshot_name;
 use rynas_btrfs::scan::{self, JobLock, lock_path};
-use rynas_btrfs::{SNAPSHOTS_KEY, browse, restore, system};
+use rynas_btrfs::{SNAPSHOTS_KEY, browse, ioctl, restore, rootfs, system};
 use rynas_scheduler::SCHEDULER_KEY;
 use rynas_scheduler::units::timer_name;
 use rynas_services::SHARES_KEY;
@@ -58,6 +58,7 @@ pub fn router(st: ProtState) -> Router {
         .route("/v1/snapshots/{id}/browse", get(browse_dir))
         .route("/v1/snapshots/{id}/restore", post(restore_one))
         .route("/v1/snapshots/{id}/rollback", post(rollback))
+        .route("/v1/snapshots/{id}/preview-rollback", get(preview_rollback))
         .with_state(st)
 }
 
@@ -763,12 +764,12 @@ async fn rollback(
         ));
     }
     let i = id.clone();
-    let l = blocking(&p, move |p| locate(p, &i)).await?;
+    let (l, sys) = blocking(&p, move |p| {
+        Ok((locate(p, &i)?, applied_snapshots(p)?.system))
+    })
+    .await?;
     if l.system {
-        return Err(conflict(
-            error_codes::CONFLICT,
-            "the system goes back to a restore point from the console (reboot needed), not from here",
-        ));
+        return root_rollback(&p, &who, id, l, sys).await;
     }
     let task = p.ops.tasks.spawn("snapshot.rollback", &who, move |ctx| async move {
         let c = ctx.clone();
@@ -779,6 +780,141 @@ async fn rollback(
             c.log(&format!(
                 "done; the previous content is kept as {} next to it (delete it when no longer needed). NFS clients must mount the share again.",
                 r.kept_as
+            ));
+            Ok(())
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    })?;
+    Ok(started(task))
+}
+
+/// The preview of a rollback to `l`/`id` (no side effect).
+fn rollback_preview(
+    p: &Protection,
+    id: &str,
+    l: &Located,
+    sys: &SystemSnapshots,
+) -> Res<RollbackPreview> {
+    let path = l.dir.join(id);
+    let snaps = scan::scan(&l.dir, &l.job).map_err(Error::internal)?;
+    let snap = snaps
+        .iter()
+        .find(|s| s.name == id)
+        .ok_or_else(|| not_found(format!("snapshot {id}")))?;
+    let readonly = snap.info.as_ref().is_some_and(|i| i.readonly);
+    if !l.system {
+        let ok = snap.deletion != rynas_api_types::snapshots::SnapshotDeletion::NotSubvolume;
+        return Ok(RollbackPreview {
+            id: id.into(),
+            allowed: ok,
+            refusal: (!ok).then_some(RollbackRefusal::NotReadonly),
+            subvolume: Some(l.subvolume.display().to_string()),
+            ..Default::default()
+        });
+    }
+    let ops = p.root.ops(sys, &p.state_dir);
+    let k = rootfs::snapshot_kernel(&path);
+    let refusal = if !ops.synodeb() {
+        Some(RollbackRefusal::NotSynodeb)
+    } else if !readonly {
+        Some(RollbackRefusal::NotReadonly)
+    } else if k.release.is_none() {
+        Some(RollbackRefusal::NoKernel)
+    } else if !k.modules {
+        Some(RollbackRefusal::NoModules)
+    } else {
+        None
+    };
+    Ok(RollbackPreview {
+        id: id.into(),
+        system: true,
+        allowed: refusal.is_none(),
+        refusal,
+        kernel: k.release,
+        running_kernel: ops.running_kernel(),
+        modules: k.modules,
+        subvolume: None,
+    })
+}
+
+async fn preview_rollback(
+    State(st): State<ProtState>,
+    Path(id): Path<String>,
+) -> Res<Json<RollbackPreview>> {
+    let p = prot(&st)?;
+    Ok(Json(
+        blocking(&p, move |p| {
+            let l = locate(p, &id)?;
+            let sys = applied_snapshots(p)?.system;
+            rollback_preview(p, &id, &l, &sys)
+        })
+        .await?,
+    ))
+}
+
+/// Whether the restore points directory is part of the root subvolume (then the restore
+/// points move into the new root), not a subvolume or mount of its own.
+fn points_inside_root(sys: &SystemSnapshots) -> bool {
+    let dir = FsPath::new(&sys.snapshot_dir);
+    if ioctl::is_mount_point(dir) {
+        return false;
+    }
+    let uuid = |p: &FsPath| {
+        ioctl::open_dir(p)
+            .and_then(|f| ioctl::subvol_info(&f))
+            .ok()
+            .and_then(|i| i.uuid)
+    };
+    let (a, b) = (uuid(dir), uuid(FsPath::new(&sys.subvolume)));
+    a.is_some() && a == b
+}
+
+/// Root rollback (synodeb): refused up front when the preview says so, then a task.
+async fn root_rollback(
+    p: &Arc<Protection>,
+    who: &str,
+    id: String,
+    l: Located,
+    sys: SystemSnapshots,
+) -> Res<Response> {
+    let (i, s2) = (id.clone(), sys.clone());
+    let (pv, l) = blocking(p, move |p| Ok((rollback_preview(p, &i, &l, &s2)?, l))).await?;
+    if let Some(r) = pv.refusal {
+        let why = match r {
+            RollbackRefusal::NotSynodeb => {
+                "rolling the system back from rynas needs synodeb (synodeb-dom sync); on this system it is a console procedure"
+            }
+            RollbackRefusal::NoKernel => "the restore point has no kernel image",
+            RollbackRefusal::NoModules => {
+                "the restore point lacks /lib/modules of its kernel: it could not boot"
+            }
+            RollbackRefusal::NotReadonly => "not a read-only restore point",
+        };
+        return Err(conflict(error_codes::CONFLICT, why));
+    }
+    let ops = p.root.ops(&sys, &p.state_dir);
+    let task = p.ops.tasks.spawn("snapshot.rollback", who, move |ctx| async move {
+        let c = ctx.clone();
+        tokio::task::spawn_blocking(move || -> Result<(), String> {
+            let plan = rootfs::RootRollback {
+                snapshot: l.dir.join(&id),
+                snapshot_dir: l.dir.clone(),
+                move_points: points_inside_root(&sys),
+                run_dir: PathBuf::from(rootfs::RUN_DIR),
+                now_s: now_s(),
+                id,
+            };
+            c.log(&format!(
+                "rolling the system back to {} (kernel {} instead of {})",
+                plan.id,
+                pv.kernel.as_deref().unwrap_or("?"),
+                pv.running_kernel.as_deref().unwrap_or("?")
+            ));
+            let r = rootfs::rollback_root(ops.as_ref(), &plan, &|m| c.log(m))?;
+            c.log(&format!(
+                "done: reboot now to start {} with kernel {}. Until then the current system keeps running; it is kept as restore point {} (and as {} at the top of the filesystem, delete it after the reboot).",
+                plan.id, r.kernel, r.before, r.kept_as
             ));
             Ok(())
         })

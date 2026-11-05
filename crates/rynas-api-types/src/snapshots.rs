@@ -310,3 +310,44 @@ pub struct RollbackRequest {
     #[serde(default)]
     pub confirm: String,
 }
+
+/// `GET /api/v1/snapshots/{id}/preview-rollback`: what a rollback to this snapshot does,
+/// for the confirmation dialog. No side effect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RollbackPreview {
+    pub id: String,
+    /// A system restore point (root rollback, reboot needed).
+    pub system: bool,
+    /// The rollback can run from rynas (a share snapshot, or a restore point on synodeb whose
+    /// kernel modules are present).
+    pub allowed: bool,
+    /// Why not, when `allowed` is false (English, for the log; the UI shows its own text).
+    #[serde(default)]
+    pub refusal: Option<RollbackRefusal>,
+    /// Root rollback only: the kernel the restore point boots (`uname -r`).
+    #[serde(default)]
+    pub kernel: Option<String>,
+    /// Root rollback only: the kernel running now.
+    #[serde(default)]
+    pub running_kernel: Option<String>,
+    /// Root rollback only: `/lib/modules/<kernel>` is in the restore point.
+    #[serde(default)]
+    pub modules: bool,
+    /// Share rollback: the subvolume that goes back.
+    #[serde(default)]
+    pub subvolume: Option<String>,
+}
+
+/// Why a rollback cannot run from rynas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RollbackRefusal {
+    /// Root rollback needs synodeb (`synodeb-dom sync`); elsewhere it is a console procedure.
+    NotSynodeb,
+    /// The restore point has no kernel image.
+    NoKernel,
+    /// The restore point lacks `/lib/modules` of its kernel: it cannot boot.
+    NoModules,
+    /// Not a read-only snapshot.
+    NotReadonly,
+}

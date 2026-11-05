@@ -30,6 +30,9 @@ pub struct Protection {
     pub notifier: Arc<dyn Notifier>,
     /// rynasd's state directory (reasons log of system restore points, previews).
     pub state_dir: PathBuf,
+    /// Who carries out a root rollback (synodeb only): [`RootBackend::None`] until `main`
+    /// chooses the host or the dry system.
+    pub root: RootBackend,
     /// Timers and running task units, read at most every [`RUNTIME_TTL`] (guidelines S8).
     /// `(read at, read at in ms since the epoch, state)`.
     runtime: Mutex<Option<(Instant, u64, Arc<Runtime>)>>,
@@ -45,6 +48,39 @@ pub struct Runtime {
 }
 
 pub const RUNTIME_TTL: Duration = Duration::from_secs(2);
+
+/// The executor of root rollbacks ([`rynas_btrfs::rootfs`]).
+#[derive(Clone)]
+pub enum RootBackend {
+    /// Refused (tests, machines that are not synodeb are detected by the host backend too).
+    None,
+    /// The machine: mounts, `synodeb-dom sync`, renames.
+    Host,
+    /// `--dry-system` or a test fake.
+    Custom(Arc<dyn rynas_btrfs::rootfs::RootOps>),
+}
+
+impl RootBackend {
+    /// The operations, with the restore point settings `sys` and the reasons log below
+    /// `state_dir`.
+    pub fn ops(
+        &self,
+        sys: &rynas_api_types::snapshots::SystemSnapshots,
+        state_dir: &std::path::Path,
+    ) -> Arc<dyn rynas_btrfs::rootfs::RootOps> {
+        match self {
+            RootBackend::None => Arc::new(rynas_btrfs::rootfs::NoRoot),
+            RootBackend::Host => Arc::new(rynas_btrfs::rootfs::HostRoot {
+                subvolume: PathBuf::from(&sys.subvolume),
+                snapshot_dir: PathBuf::from(&sys.snapshot_dir),
+                prefix: sys.prefix.clone(),
+                keep: sys.keep,
+                reasons: rynas_btrfs::system::reasons_path(state_dir),
+            }),
+            RootBackend::Custom(o) => o.clone(),
+        }
+    }
+}
 
 impl Protection {
     #[allow(clippy::too_many_arguments)]
@@ -65,6 +101,7 @@ impl Protection {
             history,
             notifier,
             state_dir,
+            root: RootBackend::None,
             runtime: Mutex::new(None),
             runtime_flight: tokio::sync::Mutex::new(()),
         }
@@ -116,6 +153,12 @@ impl Protection {
         let r = Arc::new(r);
         *self.runtime.lock().unwrap() = Some((Instant::now(), read_ms, r.clone()));
         r
+    }
+
+    /// Sets the root rollback executor.
+    pub fn with_root(mut self, root: RootBackend) -> Self {
+        self.root = root;
+        self
     }
 
     /// Forget the cached runtime (after run now, apply).
