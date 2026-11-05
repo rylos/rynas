@@ -183,7 +183,8 @@ pub fn plan(
         size_partial: size.is_none_or(|s| s.1),
         snapshots: count_snapshots(host, snapshots),
         recycle_bin,
-        allowed: blockers.is_empty() && info.exists && info.is_dir,
+        // a symlink would make `btrfs subvolume delete` act on its target
+        allowed: blockers.is_empty() && info.exists && info.is_dir && !info.symlink,
         usages,
         blockers,
     }
@@ -211,6 +212,10 @@ pub fn remove_folder(
         ));
     }
     let info = host.probe(path);
+    if info.symlink {
+        // `btrfs subvolume delete` resolves the path: it would delete the link's target
+        return Err(format!("{path} is a symbolic link: not deleted"));
+    }
     if !info.exists {
         log(&format!("{path} does not exist any more"));
     }
@@ -380,6 +385,36 @@ mod tests {
         assert_eq!(p.blockers.len(), 2);
         let p = plan(&h, &vols(), "/srv/elsewhere", &[], Usages::default());
         assert_eq!(p.blockers[0].kind, FolderUsageKind::NotOnVolume);
+    }
+
+    #[test]
+    fn a_symlinked_folder_is_never_deleted() {
+        // /vol1/link -> another subvolume: `btrfs subvolume delete` would delete the target
+        let h = host();
+        h.state().paths.insert(
+            "/vol1/link".into(),
+            crate::host::PathInfo {
+                exists: true,
+                is_dir: true,
+                fs_type: "btrfs".into(),
+                subvolume: true,
+                symlink: true,
+                ..Default::default()
+            },
+        );
+        let p = plan(&h, &vols(), "/vol1/link", &[], Usages::default());
+        assert!(!p.allowed, "{p:?}");
+        let sys = MemorySystem::new("nas");
+        let err = remove_folder(&sys, &h, &vols(), "/vol1/link", &[], &|_| {}).unwrap_err();
+        assert!(err.contains("symbolic link"), "{err}");
+        assert!(!sys.state().calls.iter().any(|c| c.starts_with("run ")));
+        // the real probe reports the link
+        let d = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(d.path(), d.path().join("l")).unwrap();
+        let l = d.path().join("l");
+        let i = crate::host::HostShares.probe(l.to_str().unwrap());
+        assert!(i.symlink && i.is_dir, "{i:?}");
+        assert!(!crate::host::HostShares.probe(d.path().to_str().unwrap()).symlink);
     }
 
     #[test]

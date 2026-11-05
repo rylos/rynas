@@ -27,6 +27,8 @@ pub struct PathInfo {
     pub subvolume: bool,
     /// UUID of that subvolume (`btrfs subvolume show`).
     pub subvolume_uuid: Option<String>,
+    /// `path` itself is a symbolic link (the other fields describe its target).
+    pub symlink: bool,
 }
 
 pub trait ShareHost: Send + Sync {
@@ -192,6 +194,7 @@ impl ShareHost for HostShares {
         let mut info = PathInfo {
             exists: true,
             is_dir: md.is_dir(),
+            symlink: std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()),
             ..Default::default()
         };
         if let Ok(st) = nix::sys::statfs::statfs(path) {
@@ -389,6 +392,7 @@ impl MemoryShares {
                 remote: false,
                 subvolume: uuid.is_some(),
                 subvolume_uuid: uuid.map(String::from),
+                symlink: false,
             },
         );
     }
