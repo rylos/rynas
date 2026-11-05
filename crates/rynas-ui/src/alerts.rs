@@ -4,6 +4,7 @@
 
 use rynas_api_types::{HardwareStatus, MetricsSample, RaidArray, StorageOverview};
 
+use crate::i18n::tf;
 use crate::ui::{Tone, temp_limits, usage_tone};
 
 /// One active alert. `title`/`text` are i18n keys, `args` fill the `{name}` placeholders.
@@ -21,6 +22,14 @@ pub struct Alert {
 
 /// A temperature reading from any source: (id, label, °C). Bay ids are "bay{n}".
 pub type Reading = (String, String, f32);
+
+/// A fan's name in the UI language: providers name them "Fan 1", "Fan 2"…
+pub fn fan_label(label: &str) -> String {
+    match label.strip_prefix("Fan ") {
+        Some(n) if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) => tf("hw.fan_n", &[("n", n)]),
+        _ => label.to_string(),
+    }
+}
 
 /// Every temperature once: the sample's sensors plus the provider's bays that the server did
 /// not already merge into the sample (it does on Synology, the demo does not).
@@ -108,7 +117,7 @@ pub fn derive(
                 tone: Tone::Err,
                 title: "notif.fan_fail",
                 text: "notif.fan_fail_text",
-                args: vec![("label", f.label.clone())],
+                args: vec![("label", fan_label(&f.label))],
                 route: "/hardware",
             });
         }
@@ -199,6 +208,15 @@ pub fn derive(
 mod tests {
     use super::*;
     use rynas_api_types::{Bay, Fan, Filesystem, Temperature};
+
+    #[test]
+    fn fan_labels_go_through_the_dictionary() {
+        // "Fan N" from the provider becomes `hw.fan_n` ("Ventola N" in Italian); other names stay
+        assert_eq!(fan_label("Fan 10"), "Fan 10");
+        assert_eq!(fan_label("CPU fan"), "CPU fan");
+        assert_eq!(fan_label("Fan "), "Fan ");
+        assert_eq!(fan_label("Fan x"), "Fan x");
+    }
 
     fn sample(temps: &[(&str, f32)]) -> MetricsSample {
         MetricsSample {

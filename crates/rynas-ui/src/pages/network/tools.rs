@@ -174,9 +174,8 @@ pub fn rescue_panel(net: Net) -> AnyView {
                 ])
             })
             .collect();
-        let reset = if !r.synology {
-            view! { <p class="muted small">{tr("net.reset_na")}</p> }.into_any()
-        } else {
+        // the reset button is a platform feature: the section exists only where the hardware has it
+        let reset = r.synology.then(|| {
             let (tone, key) = if r.reset_button_configured { (Tone::Ok, "net.reset_on") } else { (Tone::Warn, "net.reset_off") };
             let pending = r.reset_button_pending.map(|p| ui::status(Tone::Info, t(if p { "net.reset_pending_on" } else { "net.reset_pending_off" }).to_string()));
             view! {
@@ -184,8 +183,7 @@ pub fn rescue_panel(net: Net) -> AnyView {
                 <p class="muted small">{tr("net.reset_text")}</p>
                 <p class="sec-note"><Icon icon=icons::LOCK size=16 /><span>{tr("net.reset_owner")}" "<a class="link-btn" href="/hardware">{tr("net.reset_owner_link")}</a></span></p>
             }
-            .into_any()
-        };
+        });
         view! {
             <div class="net-rescue">
                 <section class="net-rescue-sec">
@@ -209,10 +207,12 @@ pub fn rescue_panel(net: Net) -> AnyView {
                         table("net-ll", &["net.col_iface", "net.col_mac", "net.link_local", "col.status"], ll_rows)
                     }}
                 </section>
-                <section class="net-rescue-sec">
-                    <h3 class="form-section"><Icon icon=icons::ROTATE_CCW size=16 />{tr("reset_button")}</h3>
-                    {reset}
-                </section>
+                {reset.map(|reset| view! {
+                    <section class="net-rescue-sec">
+                        <h3 class="form-section"><Icon icon=icons::ROTATE_CCW size=16 />{tr("reset_button")}</h3>
+                        {reset}
+                    </section>
+                })}
             </div>
         }
         .into_any()

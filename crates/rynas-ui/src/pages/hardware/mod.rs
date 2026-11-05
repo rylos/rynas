@@ -1,25 +1,59 @@
 //! Hardware (DSM Control Panel › Hardware & Power): the provider-neutral overview (fans,
 //! temperatures, status LED and events), every synohwd setting and action on a Synology
 //! ([`synology`]), the weekly power schedule ([`power`]) and the UPS ([`ups`]). A tab is mounted on its first
-//! visit and kept afterwards (drafts survive a tab switch).
+//! visit and kept afterwards (drafts survive a tab switch). The Synology tab exists only on a
+//! Synology (G8d): the live provider says so, or the plugin's settings answer.
 
 mod power;
 mod synology;
 mod ups;
 
 use leptos::prelude::*;
+use leptos::task::spawn_local;
 
 use crate::i18n::{self, t, tr};
 use crate::icons::{self, Icon};
 use crate::live::{Res, use_live};
 use crate::alerts;
-use crate::pages::dashboard::{led_text, led_tone, temp_label};
-use crate::form::tabs;
+use crate::alerts::fan_label;
+use crate::pages::dashboard::{led_state, temp_label};
+use crate::form::tabs_shown;
 use crate::ui::{self, EmptyState, Meter, PageHeader, Pending, Status, Tone, cpu_offset, temp_limits, temp_tone};
+
+/// Index of the Synology tab.
+const SYN_TAB: usize = 1;
+
+/// The Synology plugin is present: the live provider is synohwd's, or (synohwd stopped, no
+/// status yet) the plugin's settings answer. Probed once per visit, only when the provider
+/// does not already tell.
+fn synology_present() -> Signal<bool> {
+    let hw = use_live().hardware;
+    let probed = RwSignal::new(false);
+    let asked = StoredValue::new(false);
+    Effect::new(move || {
+        let Some(provider) = hw.with(|h| h.as_ref().map(|h| h.provider.clone())) else { return };
+        if provider.as_deref() == Some("synology") || asked.get_value() {
+            return;
+        }
+        asked.set_value(true);
+        spawn_local(async move {
+            let ok = crate::api::get_text("/api/v1/hardware/synology/settings").await.is_ok();
+            probed.set(ok);
+        });
+    });
+    Signal::derive(move || probed.get() || hw.with(|h| h.as_ref().is_some_and(|h| h.provider.as_deref() == Some("synology"))))
+}
 
 #[component]
 pub fn Hardware() -> impl IntoView {
     let tab = RwSignal::new(0usize);
+    let syn = synology_present();
+    // a selected tab that stops existing falls back to the overview
+    Effect::new(move || {
+        if !syn.get() && tab.get_untracked() == SYN_TAB {
+            tab.set(0);
+        }
+    });
     let seen = RwSignal::new([true, false, false, false]);
     Effect::new(move || {
         let i = tab.get();
@@ -38,9 +72,9 @@ pub fn Hardware() -> impl IntoView {
     view! {
         <div class="page">
             <PageHeader icon=icons::CPU title="nav.hardware" subtitle="hw.subtitle" />
-            <div class="card hw-tabs">{tabs("hwt", &["hw.tab_overview", "hw.tab_synology", "ps.title", "ups.tab"], tab, "nav.hardware")}</div>
+            <div class="card hw-tabs">{tabs_shown("hwt", &["hw.tab_overview", "hw.tab_synology", "ps.title", "ups.tab"], tab, "nav.hardware", move |i| i != SYN_TAB || syn.get())}</div>
             {panel(0, overview)}
-            {panel(1, synology::panel)}
+            {move || syn.get().then(|| panel(SYN_TAB, synology::panel))}
             {panel(2, power::panel)}
             {panel(3, ups::panel)}
         </div>
@@ -83,12 +117,15 @@ fn overview(_active: Signal<bool>) -> AnyView {
                         <div class="hw-sum-item">
                             <span class="muted small">{tr("hw.led")}</span>
                             {move || match h().status_led {
-                                Some(l) => view! {
-                                    <span class="led-big">
-                                        <span class=format!("led-dot {l}") aria-hidden="true"></span>
-                                        <Status tone=led_tone(&l) text=led_text(&l) />
-                                    </span>
-                                }.into_any(),
+                                Some(l) => {
+                                    let (tone, state, colour) = led_state(&l);
+                                    view! {
+                                        <span class="led-big" title=colour>
+                                            <span class=format!("led-dot {l}") aria-hidden="true"></span>
+                                            <Status tone=tone text=state />
+                                        </span>
+                                    }.into_any()
+                                }
                                 None => view! { <span>"—"</span> }.into_any(),
                             }}
                         </div>
@@ -128,7 +165,7 @@ fn overview(_active: Signal<bool>) -> AnyView {
                                         <div class=if f.alarm { "fan-card alarm" } else { "fan-card" }>
                                             <span class="fan-big spin" style:animation-duration=dur><Icon icon=icons::FAN size=32 /></span>
                                             <div>
-                                                <div class="fan-label">{f.label}</div>
+                                                <div class="fan-label">{fan_label(&f.label)}</div>
                                                 <div class="fan-rpm tnum">{f.rpm.map(|r| r.to_string()).unwrap_or_else(|| "—".into())}<span class="kpi-unit">" rpm"</span></div>
                                             </div>
                                             {f.alarm.then(|| view! { <Status tone=Tone::Err text=t("hw.alarm").to_string() /> })}

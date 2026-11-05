@@ -358,7 +358,21 @@ pub fn number_field(label: &'static str, help: Option<&'static str>, value: Sign
 /// Tab strip (`role="tablist"`, arrow keys move between tabs). Panels use
 /// `id="{prefix}-p{i}"` and `aria-labelledby="{prefix}-t{i}"`.
 pub fn tabs(prefix: &'static str, keys: &'static [&'static str], sel: RwSignal<usize>, label: &'static str) -> AnyView {
+    tabs_shown(prefix, keys, sel, label, |_| true)
+}
+
+/// [`tabs`] where `shown(i)` decides (reactively) whether tab `i` exists: a hidden tab is not in
+/// the DOM and the arrow keys skip it (platform tabs that only exist with their hardware, G8d).
+pub fn tabs_shown(
+    prefix: &'static str,
+    keys: &'static [&'static str],
+    sel: RwSignal<usize>,
+    label: &'static str,
+    shown: impl Fn(usize) -> bool + Copy + Send + Sync + 'static,
+) -> AnyView {
     let n = keys.len();
+    // the next shown tab after `i` in direction `step` (1 or n - 1), wrapping; `i` when alone
+    let step_from = move |i: usize, step: usize| (1..=n).map(|k| (i + k * step) % n).find(|&j| shown(j)).unwrap_or(i);
     let focus_tab = move |i: usize| {
         if let Some(el) = document().get_element_by_id(&format!("{prefix}-t{i}")) {
             let _ = el.unchecked_into::<web_sys::HtmlElement>().focus();
@@ -371,6 +385,7 @@ pub fn tabs(prefix: &'static str, keys: &'static [&'static str], sel: RwSignal<u
                 .enumerate()
                 .map(|(i, k)| {
                     view! {
+                        <Show when=move || shown(i)>
                         <button
                             type="button"
                             role="tab"
@@ -382,10 +397,10 @@ pub fn tabs(prefix: &'static str, keys: &'static [&'static str], sel: RwSignal<u
                             on:click=move |_| sel.set(i)
                             on:keydown=move |ev| {
                                 let next = match ev.key().as_str() {
-                                    "ArrowRight" => (i + 1) % n,
-                                    "ArrowLeft" => (i + n - 1) % n,
-                                    "Home" => 0,
-                                    "End" => n - 1,
+                                    "ArrowRight" => step_from(i, 1),
+                                    "ArrowLeft" => step_from(i, n - 1),
+                                    "Home" => step_from(n - 1, 1),
+                                    "End" => step_from(0, n - 1),
                                     _ => return,
                                 };
                                 ev.prevent_default();
@@ -395,6 +410,7 @@ pub fn tabs(prefix: &'static str, keys: &'static [&'static str], sel: RwSignal<u
                         >
                             {tr(k)}
                         </button>
+                        </Show>
                     }
                 })
                 .collect_view()}

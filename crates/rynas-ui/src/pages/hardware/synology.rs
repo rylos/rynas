@@ -7,7 +7,8 @@
 //!   staged with one Save (pending bar, apply in the configuration page);
 //! - actions: test beep, mute, identify a bay.
 //!
-//! On a machine that is not a Synology the API answers 404: the tab says so.
+//! The tab exists only on a Synology (`super::synology_present`); should the API still answer 404
+//! the panel shows the neutral "no hardware provider" state.
 
 use std::time::Duration;
 
@@ -20,7 +21,7 @@ use crate::api;
 use crate::form::{Draft, In, stale_notice, lens, lens_bool, segmented, select_field, switch, text_field};
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
-use crate::pages::dashboard::{led_text, led_tone};
+use crate::pages::dashboard::led_state;
 use crate::pages::security::copy_button;
 use crate::toast::{saved_pending, toast};
 use crate::ui::{self, EmptyState, Meter, Remote, Status, Tone, WidgetHead, status, temp_tone};
@@ -220,7 +221,7 @@ pub fn panel(active: Signal<bool>) -> AnyView {
         if settings.err.with(|e| e.as_deref() == Some("not_found")) {
             return view! {
                 <div class="card soon">
-                    <EmptyState icon=icons::CPU title=Signal::derive(|| t("syn.none_title").to_string()) text=Signal::derive(|| t("syn.none_text").to_string()) />
+                    <EmptyState icon=icons::CPU title=Signal::derive(|| t("hw.none_title").to_string()) text=Signal::derive(|| t("hw.none_text").to_string()) />
                 </div>
             }
             .into_any();
@@ -324,7 +325,8 @@ fn summary(st: Remote<SynologyStatus>, platform: SynologyPlatform, pending: Sign
         let led = match v.status_led {
             Some(l) => {
                 let n = led_name(l);
-                view! { <span class="led-big"><span class=format!("led-dot {n}") aria-hidden="true"></span><Status tone=led_tone(n) text=led_text(n) /></span> }.into_any()
+                let (tone, state, colour) = led_state(n);
+                view! { <span class="led-big" title=colour><span class=format!("led-dot {n}") aria-hidden="true"></span><Status tone=tone text=state /></span> }.into_any()
             }
             None => view! { <strong>"—"</strong> }.into_any(),
         };
@@ -371,7 +373,7 @@ fn chassis(v: &SynologyStatus, disk_leds: bool, running: bool) -> AnyView {
                 <div class="chassis-brand">
                     <span class="chassis-model">{v.model.clone()}</span>
                     <span class="syn-leds">
-                        <span class=format!("led-dot {led}") title=format!("{}: {}", t("hw.led"), led_text(led))></span>
+                        <span class=format!("led-dot {led}") title=led_state(led).2></span>
                         <span class="chassis-power" title=t("syn.power_led")></span>
                     </span>
                 </div>
@@ -479,7 +481,7 @@ fn fans_card(d: RwSignal<SynologySettings>, st: Remote<SynologyStatus>, curves: 
                             view! {
                                 <li class="fan-row">
                                     <span class=if f.alarm == FanAlarm::Stopped { "fan-icon alarm" } else { "fan-icon" }><Icon icon=icons::FAN size=16 /></span>
-                                    <span>{tf("syn.fan_n", &[("n", &f.number.to_string())])}</span>
+                                    <span>{tf("hw.fan_n", &[("n", &f.number.to_string())])}</span>
                                     <span class="tnum fan-rpm-s">{f.rpm.map(|r| format!("{r} rpm")).unwrap_or_else(|| "—".into())}</span>
                                     {status(tone, t(key).to_string())}
                                 </li>

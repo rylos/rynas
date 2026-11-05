@@ -9,7 +9,7 @@ use rynas_api_types::{MetricsSample, ZramDevice};
 use wasm_bindgen::JsCast;
 use web_sys::{HtmlElement, PointerEvent};
 
-use crate::alerts::{self, array_status, fs_pct, storage_health};
+use crate::alerts::{self, array_status, fan_label, fs_pct, storage_health};
 use crate::chart::{LiveChart, Series, span_minutes};
 use crate::i18n::{self, t, tf, tr, try_t};
 use crate::icons::{self, Icon};
@@ -914,17 +914,25 @@ fn VolumesWidget() -> impl IntoView {
     }
 }
 
-pub fn led_tone(led: &str) -> Tone {
-    match led {
-        "green" | "green-blink" => Tone::Ok,
-        "orange" | "orange-blink" => Tone::Warn,
-        _ => Tone::Unknown,
-    }
-}
-
+/// The colour of the front status LED as words ("Blinking orange").
 pub fn led_text(led: &str) -> String {
     try_t(&format!("led.{led}")).map(str::to_string).unwrap_or_else(|| led.to_string())
 }
+
+/// What the front status LED says about the machine (the provider drives it from the health:
+/// green when all is well, blinking orange on a fan failure or a degraded array): the tone,
+/// the state in words and, for a tooltip, the LED colour ("Status LED: Green").
+pub fn led_state(led: &str) -> (Tone, String, String) {
+    let (tone, key) = match led {
+        "green" => (Tone::Ok, "hw.st_normal"),
+        "green-blink" => (Tone::Info, "hw.st_starting"),
+        "orange" | "orange-blink" => (Tone::Warn, "hw.st_attention"),
+        "off" => (Tone::Err, "hw.st_fault"),
+        _ => (Tone::Unknown, "health.unknown"),
+    };
+    (tone, t(key).to_string(), format!("{}: {}", t("hw.led"), led_text(led)))
+}
+
 
 #[component]
 fn HardwareWidget() -> impl IntoView {
@@ -934,7 +942,10 @@ fn HardwareWidget() -> impl IntoView {
     view! {
         <section class="card widget">
             <WidgetHead icon=icons::FAN title="w.hardware">
-                {move || h().status_led.map(|l| view! { <Status tone=led_tone(&l) text=format!("LED {}", led_text(&l)) /> })}
+                {move || h().status_led.map(|l| {
+                    let (tone, state, colour) = led_state(&l);
+                    view! { <span title=colour><Status tone=tone text=state /></span> }
+                })}
             </WidgetHead>
             <div class="hw-mini">
                 <div class="hw-col">
@@ -942,7 +953,7 @@ fn HardwareWidget() -> impl IntoView {
                     {move || h().fans.into_iter().map(|f| view! {
                         <div class="fan-row">
                             <span class=if f.alarm { "fan-icon alarm" } else { "fan-icon spin" }><Icon icon=icons::FAN size=16 /></span>
-                            <span>{f.label}</span>
+                            <span>{fan_label(&f.label)}</span>
                             <span class="row-end tnum">{f.rpm.map(|r| format!("{r} rpm")).unwrap_or_else(|| "—".into())}</span>
                         </div>
                     }).collect_view()}

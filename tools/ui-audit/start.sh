@@ -4,6 +4,8 @@
 # Login: tester / correct-horse (users.toml, test-only). PIDs in $R/pids (stop.sh kills them).
 # FAKE_UPS=ol|ob|lb|none: also a fake NUT upsd (fake_upsd.py) and a synodeb ups.conf in the dry
 # root, so the UPS page shows a UPS and its Safe Mode form; without it the page shows "no UPS".
+# GENERIC=1: a plain PC instead of the DS920+ (no Synology platform, no synohwd status), to check
+# that no Synology screen, tab or hint shows up on generic hardware (G8d).
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/../.." && pwd)
 PORT=${1:-18600}; R=${AUDIT_OUT:-$REPO/target/ui-audit}/rt-$PORT; H=$R/fakehw
@@ -11,7 +13,9 @@ mkdir -p "$R/state" "$R/web"; : > "$R/pids"
 cd "$REPO"
 [ -x target/release/rynasd ] && [ -x target/release/rynas-web ] || cargo build --release -p rynasd -p rynas-web
 [ -f crates/rynas-ui/dist/index.html ] || (cd crates/rynas-ui && trunk build --release)
-python3 -I "$HERE/fakehw.py" "$H" crates/rynas-web/tests/fixtures/synohwd-status.json > "$R/fakehw.log" 2>&1 &
+FIXTURE=crates/rynas-web/tests/fixtures/synohwd-status.json
+[ -n "${GENERIC:-}" ] && FIXTURE=generic
+python3 -I "$HERE/fakehw.py" "$H" "$FIXTURE" > "$R/fakehw.log" 2>&1 &
 echo $! >> "$R/pids"; sleep 1
 UPSD_ARG=(--upsd 127.0.0.1:9)   # nothing listens there: "UPS service not running"
 if [ -n "${FAKE_UPS:-}" ]; then
