@@ -130,6 +130,50 @@ async fn apply(app: &TestApp, c: &Creds, comment: &str) -> TaskInfo {
     wait_task(app, c, &started.task_id).await
 }
 
+/// A dialog's Save: `keys` limits the apply to what it staged (guidelines A19b).
+#[tokio::test]
+async fn apply_only_the_given_keys() {
+    let rig = rig().await;
+    let app = &rig.app;
+    let c = app.login().await;
+    let r = app
+        .send(
+            Method::PUT,
+            "/api/v1/system/hostname",
+            &c,
+            Some(json!({ "hostname": "nas" })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK);
+    // a key that is not staged: nothing to apply, the change stays pending
+    let r = app
+        .send(
+            Method::POST,
+            "/api/v1/config/apply",
+            &c,
+            Some(json!({ "keys": ["users"] })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::CONFLICT);
+    assert_eq!(r.code(), error_codes::NOTHING_PENDING);
+    let r = app
+        .send(
+            Method::POST,
+            "/api/v1/config/apply",
+            &c,
+            Some(json!({ "keys": ["system.hostname", "users"] })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::ACCEPTED);
+    let started: TaskStarted = r.json();
+    let t = wait_task(app, &c, &started.task_id).await;
+    assert_eq!(t.status, rynas_api_types::TaskStatus::Ok, "{t:?}");
+    let r = app.get("/api/v1/system/hostname", &c).await;
+    let h: HostnameState = r.json();
+    assert_eq!(h.applied.hostname, "nas");
+    assert_eq!(h.pending, None);
+}
+
 #[tokio::test]
 async fn hostname_stage_apply_log_revision_restore() {
     let rig = rig().await;

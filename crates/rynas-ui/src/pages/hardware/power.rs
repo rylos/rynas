@@ -17,7 +17,7 @@ use crate::form::{lens, lens_bool, number_field, save_bar, segmented, switch};
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::pages::scheduler::DAY_KEYS;
-use crate::toast::{saved_pending, toast};
+use crate::toast::{saved_applied, saved_pending, toast};
 use crate::ui::{self, Confirm, EmptyState, Remote, Tone, WidgetHead, cell, confirm, drawer, row, status, table, text};
 
 const URL: &str = "/api/v1/power/schedule";
@@ -441,14 +441,18 @@ fn editor(orig: Option<PowerRule>, rules: Signal<Vec<PowerRule>>, wake_ok: Signa
         error.set(None);
         spawn_local(async move {
             let r = stage(rs).await;
-            busy.set(false);
             match r {
                 Ok(()) => {
-                    staged();
-                    close.run(());
+                    // the power schedule also writes its scheduler tasks
+                    let keys = [crate::config::keys::POWER, crate::config::keys::SCHEDULER];
+                    if crate::config::apply_now(&keys, error).await {
+                        saved_applied();
+                        close.run(());
+                    }
                 }
                 Err(e) => error.set(Some(e.text())),
             }
+            let _ = busy.try_set(false);
         });
     });
     let tid = crate::form::fid();

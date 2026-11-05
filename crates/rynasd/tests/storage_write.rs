@@ -273,7 +273,8 @@ async fn disk_settings_are_staged() {
     assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
     let st: DiskSettingsState = serde_json::from_slice(&b).unwrap();
     assert_eq!(st.serial, "WD-WX0BBBB4");
-    assert_eq!(st.defaults.read_ahead_kb, Some(2048));
+    // read-ahead is left to the kernel (docs/research/disk-tuning.md)
+    assert_eq!(st.defaults.read_ahead_kb, None);
     assert_eq!(st.applied, None);
     let (s, b) = call(
         &e,

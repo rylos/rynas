@@ -19,7 +19,7 @@ use crate::api;
 use crate::form::{In, area_field, lens, lens_bool, number_field, save_bar, segmented, select_field, switch, tabs, text_field};
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
-use crate::toast::{saved_pending, toast};
+use crate::toast::{saved_applied, saved_pending, toast};
 use crate::ui::{self, Confirm, EmptyState, PageHeader, Remote, Tone, confirm, drawer};
 
 // ------------------------------------------------------------------ calendar builder (pure)
@@ -960,15 +960,16 @@ fn task_editor(init: ScheduledTask, is_new: bool, close: Callback<()>) -> AnyVie
             } else {
                 api::put::<_, serde_json::Value>(&format!("/api/v1/scheduler/tasks/{}", api::encode(&task.id)), &task).await.map(|_| ())
             };
-            busy.set(false);
             match r {
                 Ok(()) => {
-                    saved_pending();
-                    crate::config::changed();
-                    close.run(());
+                    if crate::config::apply_now(&[crate::config::keys::SCHEDULER], error).await {
+                        saved_applied();
+                        close.run(());
+                    }
                 }
                 Err(e) => error.set(Some(e.text())),
             }
+            let _ = busy.try_set(false);
         });
     });
 

@@ -184,7 +184,7 @@ Configuration lives in `rynasd` (`/var/lib/rynas/config.db`, crate `rynas-config
 | Method | Path | Body | Response |
 |---|---|---|---|
 | GET | `/api/v1/config/pending` | `?detail=1` | `PendingChanges` {owner, changes: [`PendingChange` {key, staged_ms, conflict, diff_count}]}: compact by default (what the pending-changes bar reads); with `detail=1` each change also has `base`, `value` (whole documents) and `diff` (the review dialog). Strong `ETag` (hash of the body); `If-None-Match` with the same tag → `304` without a body. API answers stay `no-store`, so the client keeps the tag and the last body itself |
-| POST | `/api/v1/config/apply` | `ApplyRequest` {comment} | 202 `TaskStarted` {task_id}; 409 `nothing_pending` / `conflict` |
+| POST | `/api/v1/config/apply` | `ApplyRequest` {comment, keys?} | 202 `TaskStarted` {task_id}; 409 `nothing_pending` / `conflict`. `keys` applies only those staged keys (the Save of a dialog, guidelines A19b), the rest stays pending |
 | POST | `/api/v1/config/discard` | — | 204 |
 | GET | `/api/v1/config/revisions?limit=N` (default 50, max 500) | — | `Vec<RevisionSummary>` {id, author, ts_ms, comment, keys, restored_from?}, newest first |
 | GET | `/api/v1/config/revisions/{n}` | — | `RevisionDetail` {revision, diff, files} |

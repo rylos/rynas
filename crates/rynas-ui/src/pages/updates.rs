@@ -20,7 +20,7 @@ use crate::form::{fid, form_error, lens, lens_bool, number_field, segmented, spi
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::tasks::TaskRun;
-use crate::toast::saved_pending;
+use crate::toast::saved_applied;
 use crate::ui::{self, cell, confirm, row, status, table, text, Confirm, DlgKind, EmptyState, PageHeader, Remote, Tone, WidgetHead};
 
 const URL: &str = "/api/v1/updates";
@@ -437,14 +437,15 @@ fn auto_form(s: AutoUpdatesState, auto: Remote<AutoUpdatesState>) -> AnyView {
         let body = d.get_untracked();
         spawn_local(async move {
             let r = api::put::<_, AutoUpdatesState>(AUTO, &body).await;
-            busy.set(false);
             match r {
                 Ok(_) => {
-                    saved_pending();
-                    crate::config::changed();
+                    if crate::config::apply_now(&[crate::config::keys::UPDATES], error).await {
+                        saved_applied();
+                    }
                 }
                 Err(e) => error.set(Some(e.text())),
             }
+            let _ = busy.try_set(false);
         });
     };
     let reset = Callback::new(move |_| {

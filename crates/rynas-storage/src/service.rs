@@ -139,6 +139,46 @@ impl Storage {
         c.fs.clear();
     }
 
+    /// Re-reads APM and write cache of the ATA disks after the disk settings were applied
+    /// (`smartctl -n standby -g apm -g wcache`, no SMART data), so the views show the new
+    /// values at once instead of after the next SMART read. Only disks with cached SMART are
+    /// read (the others get a full read on their next view), and never a disk that sleeps:
+    /// its power mode is checked first and smartctl gives up by itself if it went to sleep
+    /// meanwhile. Returns the disks that were read.
+    pub fn refresh_disk_settings(&self) -> Vec<String> {
+        let Ok(g) = self.graph() else {
+            return Vec::new();
+        };
+        let cached: HashSet<String> = self.cache.lock().unwrap().smart.keys().cloned().collect();
+        let mut read = Vec::new();
+        for d in g.disks() {
+            if !cached.contains(&d.kname)
+                || disk_kind(d) == DiskKind::Nvme
+                || asleep(self.power_of(d))
+            {
+                continue;
+            }
+            let mut args = smart::SETTINGS_ARGS.to_vec();
+            args.push(&d.path);
+            let Some(out) = self.run("smartctl", &args, T_SMART) else {
+                continue;
+            };
+            if let smart::SettingsRead::Data { apm, write_cache } =
+                smart::parse_settings(&out.stdout)
+            {
+                let mut c = self.cache.lock().unwrap();
+                if let Some(e) = c.smart.get_mut(&d.kname) {
+                    e.data.apm = apm;
+                    e.data.write_cache = write_cache;
+                    read.push(d.kname.clone());
+                }
+            }
+        }
+        // the list views come from the inventory: build it again with the new values
+        self.cache.lock().unwrap().inventory = None;
+        read
+    }
+
     /// The machine the storage runs on.
     pub fn host(&self) -> &Arc<dyn Host> {
         &self.host
@@ -266,7 +306,27 @@ impl Storage {
         if let Some(e) = &smart {
             ti.write_cache = e.data.write_cache;
             ti.apm = e.data.apm;
+            ti.smart_read = true;
+            let i = &e.data.info;
+            ti.power_on_hours = i.power_on_hours;
+            ti.load_cycles = i.attributes.iter().find(|a| a.id == 193).map(|a| a.raw);
         }
+        let above = g.above(name);
+        // md members and btrfs (on the disk or a partition) read ahead on their own device
+        ti.stacked = above.iter().any(|x| x.kind.starts_with("raid") || x.kind == "linear")
+            || g.get(name)
+                .into_iter()
+                .chain(above.iter().copied())
+                .any(|x| x.fstype.as_deref() == Some("btrfs"));
+        // an encrypted mapping that drops discards blocks TRIM for the whole stack
+        ti.crypt_blocks_discard = above.iter().any(|x| {
+            x.kind == "crypt"
+                && self
+                    .host
+                    .read(&format!("/sys/block/{}/queue/discard_max_bytes", x.kname))
+                    .and_then(|s| s.trim().parse::<u64>().ok())
+                    == Some(0)
+        });
         let mut on_disk: HashSet<String> = g.above(name).iter().map(|x| x.kname.clone()).collect();
         on_disk.insert(name.to_string());
         ti.online_discard = self.mounts().iter().any(|m| {
@@ -699,6 +759,34 @@ mod tests {
             .filter(|c| c.ends_with("/dev/sda") && c.starts_with("smartctl"))
             .count();
         assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn disk_settings_reread_after_apply() {
+        let mut h = host();
+        h.cmd(
+            "smartctl --json=c -n standby -g apm -g wcache /dev/sda",
+            0,
+            r#"{"smartctl":{"exit_status":0},"ata_apm":{"enabled":true,"level":127},"write_cache":{"enabled":false}}"#,
+        );
+        let h = Arc::new(h);
+        let s = Storage::new(h.clone());
+        s.disks().unwrap();
+        let apm = |s: &Storage| {
+            s.disk("sda")
+                .unwrap()
+                .settings
+                .into_iter()
+                .find(|c| c.key == "apm")
+                .and_then(|c| c.current)
+        };
+        assert_ne!(apm(&s).as_deref(), Some("127"));
+        let read = s.refresh_disk_settings();
+        assert!(read.contains(&"sda".to_string()), "{read:?}");
+        assert_eq!(apm(&s).as_deref(), Some("127"));
+        // the sleeping disk and the NVMe were not asked
+        assert!(!h.ran().iter().any(|c| c.contains("-g apm") && c.ends_with("/dev/sdd")));
+        assert!(!h.ran().iter().any(|c| c.contains("-g apm") && c.contains("nvme")));
     }
 
     #[test]

@@ -94,6 +94,12 @@ pub fn saved_pending() {
     toast(Tone::Ok, t("toast.saved_pending").to_string());
 }
 
+/// "Saved and applied": the Save of a dialog or editor staged and applied its change
+/// ([`crate::config::apply_now`]).
+pub fn saved_applied() {
+    toast(Tone::Ok, t("toast.saved_applied").to_string());
+}
+
 #[component]
 pub fn Toasts() -> impl IntoView {
     let l = list();

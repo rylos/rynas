@@ -17,7 +17,7 @@ use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::live::use_live;
 use crate::pages::share_folders::{self, Target};
-use crate::toast::saved_pending;
+use crate::toast::saved_applied;
 use crate::ui::{self, EmptyState, Meter, PageHeader, Remote, Tone, drawer, usage_tone};
 
 /// `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`.
@@ -297,15 +297,16 @@ fn share_editor(e: ShareEdit, users: Remote<Vec<UserView>>, groups: Remote<Vec<G
             } else {
                 api::put::<_, ShareView>(&format!("/api/v1/shares/{}", api::encode(&body.name)), &body).await
             };
-            busy.set(false);
             match r {
                 Ok(_) => {
-                    saved_pending();
-                    crate::config::changed();
-                    close.run(());
+                    if crate::config::apply_now(&[crate::config::keys::SHARES], error).await {
+                        saved_applied();
+                        close.run(());
+                    }
                 }
                 Err(e) => error.set(Some(e.text())),
             }
+            let _ = busy.try_set(false);
         });
     });
 

@@ -207,6 +207,44 @@ fn apply_writes_files_reloads_and_records_a_revision() {
 }
 
 #[test]
+fn apply_keys_applies_only_the_selected_keys() {
+    let e = env();
+    e.cfg
+        .stage("alice", HOSTNAME_KEY, Some(hostname("nas")))
+        .unwrap();
+    e.cfg
+        .stage("alice", "test.app", Some(json!({"port": 8080, "name": "demo"})))
+        .unwrap();
+    let keys = |k: &[&str]| k.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let run = |k: &[String]| e.cfg.apply_keys("alice", "alice", "", k, &|_| {}, &|| false);
+    // keys that are not staged select nothing
+    assert_eq!(run(&keys(&["no.such"])), Err(ConfigError::NothingPending));
+    // a key that is not staged next to one that is: only the staged one runs
+    let rev = run(&keys(&["test.app", "no.such"])).unwrap();
+    assert_eq!(e.cfg.revision(rev).unwrap().revision.keys, ["test.app"]);
+    assert!(read(&e.root, "/etc/app/app.conf").contains("port = 8080"));
+    // the other key stays pending and the system keeps its old value
+    let p = e.cfg.pending("alice").unwrap();
+    assert_eq!(p.changes.len(), 1);
+    assert_eq!(p.changes[0].key, HOSTNAME_KEY);
+    assert_eq!(read(&e.root, "/etc/hostname"), "debian\n");
+    assert_eq!(run(&keys(&["test.app"])), Err(ConfigError::NothingPending));
+    // a conflict on another key does not block the selected one
+    e.cfg
+        .stage("bob", HOSTNAME_KEY, Some(hostname("bravo")))
+        .unwrap();
+    e.cfg
+        .stage("alice", "test.app", Some(json!({"port": 9090, "name": "demo"})))
+        .unwrap();
+    apply(&e, "bob", "").unwrap();
+    assert!(run(&keys(&["test.app"])).is_ok());
+    assert_eq!(
+        run(&keys(&[HOSTNAME_KEY])),
+        Err(ConfigError::Conflict(vec![HOSTNAME_KEY.to_string()]))
+    );
+}
+
+#[test]
 fn generic_file_domain_with_header_validator_and_unit() {
     let e = env();
     e.cfg

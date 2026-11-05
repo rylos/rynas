@@ -1,6 +1,6 @@
 //! Drives: the list (health, power state, temperature, what uses each disk) and a detail drawer
 //! with SMART, the recommended settings and the per-disk overrides (standby, APM, scheduler,
-//! read-ahead), staged like every configuration change.
+//! read-ahead): Save stages and applies them at once (guidelines A19b).
 //!
 //! A disk in standby is never read automatically: SMART (even with `-n standby`) resets the idle
 //! timer of some drives, so the drawer shows the summary and waits for an explicit request.
@@ -8,7 +8,8 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use rynas_api_types::storage::{
-    CheckStatus, DiskDetail, DiskKind, DiskSettings, DiskSettingsState, DiskSummary, IoScheduler, Severity, SmartInfo,
+    CheckStatus, CheckValue, DiskDetail, DiskKind, DiskSettings, DiskSettingsState, DiskSummary, HealthReason, IoScheduler,
+    Severity, SmartInfo,
 };
 
 use super::{SubNav, asleep, health, kind_key, loading, power, stale_notice, use_refresh};
@@ -123,6 +124,14 @@ pub fn DiskDrawer(name: String, on_close: Callback<()>) -> impl IntoView {
     if summary.get_untracked().is_some_and(|d| !asleep(d.power_state)) {
         read();
     }
+    // settings applied: rynasd has read APM and write cache again, show the new values
+    // (same rule as on open: a sleeping disk keeps its last reading)
+    let on_applied = Callback::new(move |_| {
+        s.refresh(false);
+        if summary.get_untracked().is_some_and(|d| !asleep(d.power_state)) {
+            read();
+        }
+    });
     let title = Signal::derive(move || {
         summary.with(|d| d.as_ref().map(|d| format!("{} · {}", d.name, d.model))).unwrap_or_else(|| n.get_value())
     });
@@ -151,7 +160,7 @@ pub fn DiskDrawer(name: String, on_close: Callback<()>) -> impl IntoView {
                 Some(d) => match tab.get() {
                     Tab::Overview => overview_tab(d, detail, reading, read).into_any(),
                     Tab::Smart => smart_tab(d, detail, reading, read).into_any(),
-                    Tab::Settings => view! { <SettingsTab name=n.get_value() kind=d.kind detail=detail /> }.into_any(),
+                    Tab::Settings => view! { <SettingsTab name=n.get_value() kind=d.kind detail=detail on_applied=on_applied /> }.into_any(),
                 },
             }}
         </Modal>
@@ -169,8 +178,58 @@ fn standby_note(reading: RwSignal<bool>, read: impl Fn() + Copy + Send + Sync + 
     .into_any()
 }
 
-fn reason_text(code: &str, message: &str) -> String {
-    i18n::try_t(&format!("sto.reason.{code}")).map(str::to_string).unwrap_or_else(|| message.to_string())
+/// `template` with `{n}`, `{limit}`, `{name}`, `{detail}` filled; `None` when a placeholder has
+/// no value (the caller then shows the server's English text).
+fn fill_template(template: &str, vals: &[(&str, Option<String>)]) -> Option<String> {
+    let mut s = template.to_string();
+    for (k, v) in vals {
+        let ph = format!("{{{k}}}");
+        if s.contains(&ph) {
+            s = s.replace(&ph, v.as_deref()?);
+        }
+    }
+    (!s.contains('{')).then_some(s)
+}
+
+/// Translated SMART health reason (`sto.reason.<code>` with its arguments), the English
+/// message for a code or argument this UI does not know.
+fn reason_text(r: &HealthReason) -> (String, bool) {
+    let pct = |v: f64| i18n::pct(v);
+    let n = r.args.n.map(|v| match r.code.as_str() {
+        "temperature" => i18n::celsius(v as f32),
+        "nvme_spare_low" | "wear" => pct(v),
+        "old_disk" => i18n::num(v, 1),
+        _ => i18n::num(v, 0),
+    });
+    let vals = [("n", n), ("limit", r.args.limit.map(pct)), ("name", r.args.name.clone()), ("detail", r.args.detail.clone())];
+    match i18n::try_t(&format!("sto.reason.{}", r.code)).and_then(|tpl| fill_template(tpl, &vals)) {
+        Some(s) => (s, true),
+        None => (r.message.clone(), false),
+    }
+}
+
+/// Translated value of a disk check (`sto.cv.<code>`); `None` for a code this UI does not know.
+fn check_value(v: &CheckValue) -> Option<String> {
+    let n = v.n.map(|n| match v.code.as_str() {
+        "temp" | "temp_below" => i18n::celsius(n as f32),
+        "parking_rate" => i18n::num(n, 1),
+        _ => i18n::num(n, 0),
+    });
+    fill_template(i18n::try_t(&format!("sto.cv.{}", v.code))?, &[("n", n)])
+}
+
+/// A check value: translated when it has a code, the literal (or English) text otherwise.
+fn value_view(v: Option<CheckValue>, text: Option<String>) -> AnyView {
+    match v.as_ref().and_then(check_value) {
+        // translated words read as text; only literal values are monospace
+        Some(s) => view! { <span>{s}</span> }.into_any(),
+        // literal values (scheduler names, KiB) read the same in every language; an unknown
+        // code falls back to the server's English text
+        None => {
+            let lang = v.is_some().then_some("en");
+            view! { <span class="mono" lang=lang>{text.unwrap_or_else(|| "—".into())}</span> }.into_any()
+        }
+    }
 }
 
 fn overview_tab(
@@ -199,7 +258,8 @@ fn overview_tab(
                 <ul class="reasons">
                     {d.health_reasons.iter().map(|r| {
                         let tone = match r.severity { Severity::Critical => Tone::Err, Severity::Warning => Tone::Warn, Severity::Info => Tone::Info };
-                        view! { <li class=tone.class()><Icon icon=tone.icon() size=14 /><span>{reason_text(&r.code, &r.message)}</span></li> }
+                        let (text, translated) = reason_text(r);
+                        view! { <li class=tone.class()><Icon icon=tone.icon() size=14 /><span lang=(!translated).then_some("en")>{text}</span></li> }
                     }).collect_view()}
                 </ul>
             })}
@@ -329,9 +389,12 @@ fn smart_view(sm: SmartInfo) -> AnyView {
 // ------------------------------------------------------------------ settings
 
 const SCHEDULERS: [IoScheduler; 4] = [IoScheduler::MqDeadline, IoScheduler::Bfq, IoScheduler::Kyber, IoScheduler::None];
+/// The recommendation first (docs/research/disk-tuning.md: 254 or off), then the levels that
+/// let the drive park its heads and spin down by itself.
 const APM: [(u8, &str); 5] =
-    [(1, "sto.apm_1"), (127, "sto.apm_127"), (128, "sto.apm_128"), (254, "sto.apm_254"), (255, "sto.apm_255")];
-const STANDBY: [u32; 8] = [0, 600, 1200, 1800, 3600, 7200, 10800, 18000];
+    [(254, "sto.apm_254"), (255, "sto.apm_255"), (128, "sto.apm_128"), (127, "sto.apm_127"), (1, "sto.apm_1")];
+/// Spin-down is opt-in and pays only after long idle periods: 30 min at least.
+const STANDBY: [u32; 6] = [0, 1800, 3600, 7200, 10800, 18000];
 
 /// Translated label of a recommended-settings check (`SettingCheck.key`); `None` for a key this
 /// UI does not know yet (the server's English label is shown then).
@@ -345,6 +408,7 @@ fn check_label(key: &str) -> Option<&'static str> {
         "trim" => "sto.chk.trim",
         "alpm" => "sto.chk.alpm",
         "apst" => "sto.chk.apst",
+        "head_parking" => "sto.chk.head_parking",
         _ => return None,
     }))
 }
@@ -358,7 +422,13 @@ fn opt_str<T: ToString>(v: Option<T>) -> String {
 }
 
 #[component]
-fn SettingsTab(name: String, kind: DiskKind, detail: RwSignal<Option<Result<DiskDetail, String>>>) -> impl IntoView {
+fn SettingsTab(
+    name: String,
+    kind: DiskKind,
+    detail: RwSignal<Option<Result<DiskDetail, String>>>,
+    /// The settings were applied: read the disk again.
+    on_applied: Callback<()>,
+) -> impl IntoView {
     let url = StoredValue::new(format!("/api/v1/storage/disks/{}/settings", api::encode(&name)));
     let state = RwSignal::new(None::<Result<DiskSettingsState, String>>);
     let sched = RwSignal::new(String::new());
@@ -367,7 +437,6 @@ fn SettingsTab(name: String, kind: DiskKind, detail: RwSignal<Option<Result<Disk
     let standby = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
-    let saved = RwSignal::new(false);
     let fill = move |st: &DiskSettingsState| {
         let o = st.pending.clone().or_else(|| st.applied.clone()).unwrap_or_default();
         sched.set(o.scheduler.map(|s| s.as_str().to_string()).unwrap_or_default());
@@ -389,18 +458,23 @@ fn SettingsTab(name: String, kind: DiskKind, detail: RwSignal<Option<Result<Disk
     let submit = move |body: DiskSettings| {
         busy.set(true);
         error.set(None);
-        saved.set(false);
         spawn_local(async move {
             let r = api::put::<_, DiskSettingsState>(&url.get_value(), &body).await;
-            let _ = busy.try_set(false);
             match r {
-                Ok(st) => {
-                    fill(&st);
-                    state.set(Some(Ok(st)));
-                    saved.set(true);
+                // Save applies at once, only this key (guidelines A19b); then the drawer
+                // re-reads the disk, whose values rynasd has just read again
+                Ok(_) => {
+                    if crate::config::apply_now(&[crate::config::keys::DISKS], error).await {
+                        crate::toast::saved_applied();
+                        load();
+                        on_applied.run(());
+                    } else {
+                        load();
+                    }
                 }
                 Err(e) => error.set(Some(e.text())),
             }
+            let _ = busy.try_set(false);
         });
     };
     let save = move |ev: leptos::ev::SubmitEvent| {
@@ -435,6 +509,12 @@ fn SettingsTab(name: String, kind: DiskKind, detail: RwSignal<Option<Result<Disk
                             CheckStatus::Differs => (Tone::Warn, "sto.chk_differs"),
                             CheckStatus::NotApplicable => (Tone::Unknown, "sto.chk_na"),
                             CheckStatus::Unknown => (Tone::Unknown, "health.unknown"),
+                            CheckStatus::Critical => (Tone::Err, "sto.chk_crit"),
+                        };
+                        // the note by its code; the English text only for a code this UI does not know
+                        let note = match c.note_code.as_deref().and_then(|k| i18n::try_t(&format!("sto.cn.{k}"))) {
+                            Some(s) => Some((s.to_string(), None)),
+                            None => (!c.note.is_empty()).then(|| (c.note.clone(), Some("en"))),
                         };
                         view! {
                             <li>
@@ -443,10 +523,10 @@ fn SettingsTab(name: String, kind: DiskKind, detail: RwSignal<Option<Result<Disk
                                     <span class="row-end"><Status tone=tone text=t(key).to_string() /></span>
                                 </div>
                                 <div class="muted small">
-                                    {tr("sto.current")}": "<span class="mono">{c.current.unwrap_or_else(|| "—".into())}</span>
-                                    " · "{tr("sto.recommended_v")}": "<span class="mono">{c.recommended}</span>
+                                    {tr("sto.current")}": "{value_view(c.current_value, c.current)}
+                                    " · "{tr("sto.recommended_v")}": "{value_view(c.recommended_value, Some(c.recommended))}
                                 </div>
-                                {(!c.note.is_empty()).then(|| view! { <div class="muted small" lang="en">{c.note}</div> })}
+                                {note.map(|(text, lang)| view! { <div class="muted small" lang=lang>{text}</div> })}
                             </li>
                         }
                     }).collect_view()}
@@ -459,7 +539,9 @@ fn SettingsTab(name: String, kind: DiskKind, detail: RwSignal<Option<Result<Disk
                 Some(Ok(st)) => {
                     let def = st.defaults.clone();
                     let def_sched = def.scheduler.map(|s| s.as_str().to_string()).unwrap_or_else(|| "—".into());
-                    let def_ra = opt_str(def.read_ahead_kb);
+                    // no read-ahead default: the kernel's own value
+                    let def_ra = def.read_ahead_kb.map(|v| v.to_string()).unwrap_or_else(|| t("sto.kernel_default").to_string());
+                    let cur_standby = standby.get_untracked().parse::<u32>().ok().filter(|s| !STANDBY.contains(s));
                     view! {
                         <form class="form" on:submit=save>
                             {st.pending.is_some().then(|| view! {
@@ -488,8 +570,9 @@ fn SettingsTab(name: String, kind: DiskKind, detail: RwSignal<Option<Result<Disk
                                 <span class="field-label">{tr("sto.standby")}</span>
                                 <select class="input" disabled=!hdd prop:value=move || standby.get() on:change=move |ev| standby.set(event_target_value(&ev))>
                                     <option value="">{tr("sto.not_set")}</option>
-                                    {STANDBY.iter().map(|s| view! {
-                                        <option value=s.to_string()>{if *s == 0 { t("sto.never").to_string() } else { i18n::duration(*s as u64) }}</option>
+                                    // an older, shorter delay already set stays selectable
+                                    {STANDBY.iter().copied().chain(cur_standby).map(|s| view! {
+                                        <option value=s.to_string()>{if s == 0 { t("sto.never").to_string() } else { i18n::duration(s as u64) }}</option>
                                     }).collect_view()}
                                 </select>
                                 <span class="muted small">{if hdd { t("sto.standby_hint") } else { t("sto.hdd_only") }}</span>
@@ -502,14 +585,11 @@ fn SettingsTab(name: String, kind: DiskKind, detail: RwSignal<Option<Result<Disk
                                 </select>
                             </label>
                             {form_error(error)}
-                            {move || saved.get().then(|| view! {
-                                {ui::note(Tone::Ok, icons::CIRCLE_CHECK, view! { {tr("sto.staged")} }.into_any())}
-                            })}
                             <div class="dialog-foot">
                                 <button class="btn ghost" type="button" disabled=move || busy.get() on:click=move |_| submit(DiskSettings::default())>
                                     <Icon icon=icons::ROTATE_CCW size=14 />{tr("sto.reset_defaults")}
                                 </button>
-                                <button class="btn primary" type="submit" disabled=move || busy.get()>{spinner(busy)}{tr("sto.stage")}</button>
+                                <button class="btn primary" type="submit" disabled=move || busy.get()>{spinner(busy)}{tr("save")}</button>
                             </div>
                         </form>
                     }

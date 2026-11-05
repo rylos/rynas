@@ -198,17 +198,19 @@ pub fn parse_tuning(v: Option<&Value>) -> Result<StorageTuning, String> {
     }
 }
 
-/// What the per-type rule sets (docs/research/system-reliability-tweaks.md §6).
+/// What the per-type rule sets (docs/research/disk-tuning.md §3-4): the scheduler only.
+/// Read-ahead stays the kernel's (6.17+ sizes it from the device, btrfs and md read ahead on
+/// their own device), APM and spin-down stay as the drive has them unless overridden: the
+/// standby timer is opt-in.
 pub fn type_defaults(kind: DiskKind) -> DiskSettings {
-    let (scheduler, ra) = match kind {
-        DiskKind::Hdd => (IoScheduler::MqDeadline, 2048),
-        DiskKind::Ssd => (IoScheduler::MqDeadline, 256),
-        DiskKind::Nvme => (IoScheduler::None, 128),
+    let scheduler = match kind {
+        DiskKind::Hdd | DiskKind::Ssd => IoScheduler::MqDeadline,
+        DiskKind::Nvme => IoScheduler::None,
         DiskKind::Unknown => return DiskSettings::default(),
     };
     DiskSettings {
         scheduler: Some(scheduler),
-        read_ahead_kb: Some(ra),
+        read_ahead_kb: None,
         apm: None,
         standby_s: None,
     }
@@ -400,6 +402,14 @@ impl Applier for TuningDomain {
             "--subsystem-match=block",
             "--property-match=DEVTYPE=disk",
         ]))?;
+        // wait for the rules' hdparm runs, so the values read right after the apply (APM,
+        // write cache) are the new ones; a slow disk is not an apply failure
+        if let Err(e) = ctx
+            .system
+            .run(&Cmd::new("udevadm").args(["settle", "--timeout=30"]))
+        {
+            (ctx.log)(&format!("storage.disks: udevadm settle: {e}"));
+        }
         Ok(())
     }
 }
@@ -531,8 +541,9 @@ mod tests {
             }],
         };
         let r = render_rules(&c);
-        assert!(r.contains("KERNEL==\"sd*\", ATTR{queue/rotational}==\"1\", ATTR{queue/scheduler}=\"mq-deadline\", ATTR{queue/read_ahead_kb}=\"2048\"\n"), "{r}");
-        assert!(r.contains("KERNEL==\"nvme[0-9]*n[0-9]*\", ATTR{queue/scheduler}=\"none\", ATTR{queue/read_ahead_kb}=\"128\"\n"));
+        assert!(r.contains("KERNEL==\"sd*\", ATTR{queue/rotational}==\"1\", ATTR{queue/scheduler}=\"mq-deadline\"\n"), "{r}");
+        assert!(r.contains("KERNEL==\"nvme[0-9]*n[0-9]*\", ATTR{queue/scheduler}=\"none\"\n"));
+        assert!(!r.contains("read_ahead_kb"), "{r}");
         assert!(r.contains("ENV{ID_SERIAL_SHORT}==\"WD-WX12345\", ATTR{queue/scheduler}=\"bfq\", RUN+=\"/usr/sbin/hdparm -q -B 127 -S 240 $devnode\"\n"), "{r}");
         assert!(r.contains("ENV{MD_UUID}==\"0a1b2c3d:4e5f6071:8293a4b5:c6d7e8f9\", ATTR{md/stripe_cache_size}=\"4096\"\n"));
         assert_eq!(standby_code(0), 0);

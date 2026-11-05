@@ -956,7 +956,7 @@ dict! {
     "sto.read_ahead" => "Read-ahead (KiB)", "Read-ahead (KiB)";
     "sto.ra_invalid" => "Read-ahead must be a number from 0 to 65536.", "Il read-ahead deve essere un numero da 0 a 65536.";
     "sto.standby" => "Spin down after", "Standby dopo";
-    "sto.standby_hint" => "Idle time before the drive spins down (hdparm -S).", "Inattività prima che il disco si fermi (hdparm -S).";
+    "sto.standby_hint" => "Off unless you choose it: spinning down pays only for disks idle for hours, such as archive or backup disks.", "Spento finché non lo scegli: fermare il disco conviene solo se resta inattivo per ore, come un disco di archivio o di backup.";
     "sto.hdd_only" => "Hard disks only.", "Solo dischi rigidi.";
     "sto.not_set" => "Not set (leave the drive alone)", "Non impostato (lascia il disco com'è)";
     "sto.never" => "Never", "Mai";
@@ -967,14 +967,12 @@ dict! {
     "sto.chk.trim" => "TRIM", "TRIM";
     "sto.chk.alpm" => "SATA link power (ALPM)", "Risparmio energetico del collegamento SATA (ALPM)";
     "sto.chk.apst" => "NVMe power states (APST)", "Stati di alimentazione NVMe (APST)";
-    "sto.apm_1" => "1 · Most power saving, spin-down allowed", "1 · Massimo risparmio, standby consentito";
-    "sto.apm_127" => "127 · Balanced, spin-down allowed", "127 · Bilanciato, standby consentito";
-    "sto.apm_128" => "128 · Balanced, no spin-down", "128 · Bilanciato, senza standby";
-    "sto.apm_254" => "254 · Best performance", "254 · Massime prestazioni";
-    "sto.apm_255" => "255 · APM off", "255 · APM disattivato";
-    "sto.staged" => "Change staged. Apply it from the pending changes.", "Modifica in sospeso. Applicala dalle modifiche in sospeso.";
+    "sto.apm_254" => "254 · Recommended: no head parking, no spin-down by the drive", "254 · Consigliato: niente parcheggio delle testine né standby deciso dal disco";
+    "sto.apm_255" => "255 · APM off (also fine)", "255 · APM disattivato (va bene anche così)";
+    "sto.apm_128" => "128 · Saves some power, no spin-down by the drive", "128 · Un po' di risparmio, niente standby deciso dal disco";
+    "sto.apm_127" => "127 · The drive may park its heads and spin down by itself", "127 · Il disco può parcheggiare le testine e fermarsi da solo";
+    "sto.apm_1" => "1 · Most power saving: frequent head parking, wears the drive", "1 · Massimo risparmio: parcheggi frequenti delle testine, usura il disco";
     "sto.reset_defaults" => "Use defaults", "Usa predefiniti";
-    "sto.stage" => "Stage change", "Metti in sospeso";
     "sto.done_ok" => "Completed.", "Completato.";
     "sto.done_err" => "The operation failed.", "L'operazione non è riuscita.";
     "sto.vol_missing" => "Volume not found", "Volume non trovato";
@@ -2301,6 +2299,77 @@ dict! {
     "upd.trial_armed" => "Armed", "Pronta";
     "upd.trial_trying" => "Trying", "In prova";
     "upd.dom_free" => "Free space on the DOM", "Spazio libero sul DOM";
+    // ---- Save in dialogs and editors: stage + apply only that change (config::save_apply)
+    "toast.saved_applied" => "Saved and applied", "Salvato e applicato";
+    "cfg.applying_now" => "Applying the change…", "Applicazione della modifica…";
+    "cfg.apply_kept" => "The previous settings are back in place; the change stays in the pending changes.", "Sono tornate le impostazioni precedenti; la modifica resta tra quelle in sospeso.";
+    "cfg.apply_log" => "Show the log", "Mostra il registro";
+    "cfg.key.ups.safemode" => "UPS shutdown policy", "Criterio di spegnimento con l'UPS";
+    "cfg.key.updates.auto" => "Automatic updates", "Aggiornamenti automatici";
+    // ---- Disk checks (SettingCheck codes) and SMART health reasons (HealthReason codes)
+    "sto.chk_crit" => "Critical", "Critica";
+    "sto.chk.head_parking" => "Head parking", "Parcheggio delle testine";
+    "sto.cv.on" => "On", "Attiva";
+    "sto.cv.off" => "Off", "Disattivata";
+    "sto.cv.disabled" => "Disabled", "Disattivato";
+    "sto.cv.enabled" => "Enabled", "Attivo";
+    "sto.cv.unknown" => "Unknown", "Sconosciuto";
+    "sto.cv.apm_254_off" => "254 or off", "254 o disattivato";
+    "sto.cv.trim_timer_discard" => "fstrim.timer + discard mount option", "fstrim.timer + opzione di montaggio discard";
+    "sto.cv.trim_timer" => "fstrim.timer", "fstrim.timer";
+    "sto.cv.trim_discard" => "discard mount option", "opzione di montaggio discard";
+    "sto.cv.trim_none" => "None", "Nessuno";
+    "sto.cv.trim_weekly" => "fstrim.timer every week", "fstrim.timer ogni settimana";
+    "sto.cv.apst_enabled" => "Enabled (max latency {n} µs)", "Attivo (latenza massima {n} µs)";
+    "sto.cv.temp" => "{n}", "{n}";
+    "sto.cv.temp_below" => "below {n}", "sotto {n}";
+    "sto.cv.ra_default" => "kernel default (128-{n})", "predefinito del kernel (128-{n})";
+    "sto.cv.parking_rate" => "{n} per hour", "{n} all'ora";
+    "sto.cv.parking_max" => "at most {n} per hour", "al massimo {n} all'ora";
+    "sto.cn.sched_nvme" => "NVMe drives have deep hardware queues: no scheduler is fastest.", "Gli NVMe hanno code hardware profonde: senza scheduler sono più veloci.";
+    "sto.cn.sched_hdd" => "mq-deadline keeps throughput on RAID; bfq only helps desktop interactivity.", "mq-deadline mantiene le prestazioni in RAID; bfq aiuta solo la reattività di un desktop.";
+    "sto.cn.sched_flash" => "A single queue: mq-deadline and none perform the same.", "Una sola coda: mq-deadline e none si equivalgono.";
+    "sto.cn.ra_stacked" => "btrfs and md read ahead on their own device: the disk's value does not matter.", "btrfs e md fanno read-ahead sul proprio dispositivo: il valore del disco non conta.";
+    "sto.cn.ra_hdd" => "The kernel's default suits spinning disks; very large values only waste cache.", "Il valore predefinito del kernel va bene per i dischi rotativi; valori molto grandi sprecano solo cache.";
+    "sto.cn.ra_flash" => "Flash needs little read-ahead; more only wastes cache.", "La memoria flash richiede poco read-ahead; di più spreca solo cache.";
+    "sto.cn.wcache" => "Leave it on: the filesystem's flushes keep it safe, off costs a lot of speed.", "Lasciala attiva: i flush del filesystem la rendono sicura, disattivarla costa molta velocità.";
+    "sto.cn.apm" => "Levels up to 127 let the drive park its heads and spin down by itself.", "I livelli fino a 127 lasciano che il disco parcheggi le testine e si fermi da solo.";
+    "sto.cn.apm_none" => "The drive has no APM: nothing to set.", "Il disco non ha APM: non c'è niente da impostare.";
+    "sto.cn.parking" => "Frequent head unloads wear the drive: raise APM or the drive's idle timers.", "Parcheggi frequenti delle testine usurano il disco: alza l'APM o i timer di inattività del disco.";
+    "sto.cn.trim_both" => "Async discard does the work, the weekly timer is a cheap safety net.", "Il discard asincrono fa il lavoro, il timer settimanale è una rete di sicurezza che costa poco.";
+    "sto.cn.trim_timer" => "Weekly batched TRIM.", "TRIM settimanale a blocchi.";
+    "sto.cn.trim_discard" => "btrfs discard=async (the default since Linux 6.2) trims continuously.", "btrfs discard=async (predefinito da Linux 6.2) esegue il TRIM di continuo.";
+    "sto.cn.trim_none" => "Without TRIM the SSD slows down and wears faster: enable fstrim.timer.", "Senza TRIM l'SSD rallenta e si usura prima: attiva fstrim.timer.";
+    "sto.cn.trim_unsupported" => "The device does not accept discards.", "Il dispositivo non accetta i discard.";
+    "sto.cn.trim_parity_raid" => "md RAID5/6 does not pass TRIM through (devices_handle_discard_safely is off).", "md RAID5/6 non fa passare il TRIM (devices_handle_discard_safely è disattivato).";
+    "sto.cn.trim_crypt" => "The encrypted volume does not pass TRIM through: leave 10-20% of a new SSD unpartitioned.", "Il volume cifrato non fa passare il TRIM: lascia non partizionato il 10-20% di un SSD nuovo.";
+    "sto.cn.alpm" => "Saves about 1 W per SSD with no measurable cost.", "Fa risparmiare circa 1 W per SSD senza costi misurabili.";
+    "sto.cn.apst" => "Disable it only on models with known APST firmware bugs.", "Disattivalo solo sui modelli con bug noti del firmware APST.";
+    "sto.cn.temp_hdd" => "Failures rise with heat: keep hard disks below 50 °C, never above 60 °C.", "I guasti aumentano col calore: tieni i dischi rigidi sotto i 50 °C, mai sopra i 60 °C.";
+    "sto.cn.temp_nvme" => "The drive slows itself down above its warning temperature.", "Il disco rallenta da solo sopra la sua temperatura di avviso.";
+    "sto.cn.temp_other" => "Keep air flowing over the drive.", "Mantieni un flusso d'aria sul disco.";
+    "sto.reason.smart_failed" => "The drive reports its SMART overall health as FAILED.", "Il disco segnala lo stato SMART complessivo FAILED.";
+    "sto.reason.attribute_failing" => "{name} is below its failure threshold.", "{name} è sotto la soglia di guasto.";
+    "sto.reason.attribute_failed_past" => "{name} was below its failure threshold in the past.", "{name} è stato sotto la soglia di guasto in passato.";
+    "sto.reason.reallocated_sectors" => "{n} reallocated sectors.", "{n} settori riallocati.";
+    "sto.reason.pending_sectors" => "{n} sectors waiting for reallocation (unreadable).", "{n} settori in attesa di riallocazione (illeggibili).";
+    "sto.reason.offline_uncorrectable" => "{n} offline uncorrectable sectors.", "{n} settori non correggibili offline.";
+    "sto.reason.reported_uncorrect" => "{n} errors that ECC could not correct.", "{n} errori che l'ECC non ha potuto correggere.";
+    "sto.reason.command_timeouts" => "{n} command timeouts (often power or cable).", "{n} timeout dei comandi (spesso alimentazione o cavo).";
+    "sto.reason.crc_errors" => "{n} interface CRC errors: check the cable or the bay connector.", "{n} errori CRC dell'interfaccia: controlla il cavo o il connettore dell'alloggiamento.";
+    "sto.reason.load_cycles" => "{n} head load cycles (rated 300,000-600,000): aggressive head parking.", "{n} cicli di carico delle testine (nominali 300.000-600.000): parcheggio aggressivo.";
+    "sto.reason.old_disk" => "{n} years powered on.", "{n} anni di accensione.";
+    "sto.reason.temperature" => "Temperature {n}.", "Temperatura {n}.";
+    "sto.reason.nvme_spare_low" => "Available spare {n} (threshold {limit}).", "Riserva disponibile {n} (soglia {limit}).";
+    "sto.reason.nvme_temperature" => "Temperature out of range.", "Temperatura fuori intervallo.";
+    "sto.reason.nvme_reliability" => "Reliability degraded by media or internal errors.", "Affidabilità ridotta da errori del supporto o interni.";
+    "sto.reason.nvme_read_only" => "The media is read-only.", "Il supporto è in sola lettura.";
+    "sto.reason.nvme_backup_failed" => "The volatile memory backup device failed.", "Il dispositivo di backup della memoria volatile è guasto.";
+    "sto.reason.media_errors" => "{n} media and data integrity errors.", "{n} errori del supporto e di integrità dei dati.";
+    "sto.reason.wear_out" => "Rated endurance used up (100% or more).", "Resistenza nominale esaurita (100% o più).";
+    "sto.reason.wear" => "{n} of the rated endurance left.", "Resta il {n} della resistenza nominale.";
+    "sto.reason.self_test_failed" => "Last self-test ({name}): {detail}.", "Ultimo autotest ({name}): {detail}.";
+    "sto.reason.error_log" => "{n} errors in the drive's error log.", "{n} errori nel registro errori del disco.";
 }
 
 // ---------------------------------------------------------------- formatting
@@ -2569,13 +2638,74 @@ mod tests {
                 // odd pieces between quotes are the literals (no key contains a quote)
                 for lit in line.split('"').skip(1).step_by(2) {
                     let k = lit.strip_prefix('#').unwrap_or(lit);
-                    if is_key_shape(k) && !not_a_key(k) && !keys.contains(k) {
+                    // configuration keys (`config::keys`) are named by their `cfg.key.*` label
+                    let cfg_key = keys.contains(format!("cfg.key.{k}").as_str());
+                    if is_key_shape(k) && !not_a_key(k) && !keys.contains(k) && !cfg_key {
                         missing.push(format!("{}:{}: {k}", f.display(), n + 1));
                     }
                 }
             }
         }
         assert!(missing.is_empty(), "keys used but not in the dictionary: {missing:#?}");
+    }
+
+    /// Every code of the disk checks (notes, values) and of the SMART health reasons has a
+    /// text: the codes are read from the rynas-storage source (the line after the opening
+    /// parenthesis of a note tuple or a `reason(severity,` call, and `CheckValue::code/with`).
+    #[test]
+    fn every_disk_check_and_reason_code_has_a_text() {
+        let keys: std::collections::HashSet<&str> = entries().into_iter().map(|e| e.0).collect();
+        let snake = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+        let lit = |s: &str| s.strip_prefix('"').and_then(|s| s.split('"').next()).map(str::to_string);
+        let mut missing = Vec::new();
+        let mut check = |key: String| {
+            if !keys.contains(key.as_str()) {
+                missing.push(key);
+            }
+        };
+        let tuning = include_str!("../../rynas-storage/src/tuning.rs");
+        let tuning = &tuning[..tuning.find("#[cfg(test)]").unwrap_or(tuning.len())];
+        let (mut notes, mut values) = (0, 0);
+        let mut prev = "";
+        for line in tuning.lines().map(str::trim) {
+            for pat in ["CheckValue::code(\"", "CheckValue::with(\""] {
+                for part in line.split(pat).skip(1) {
+                    let code = part.split('"').next().unwrap_or_default();
+                    values += 1;
+                    check(format!("sto.cv.{code}"));
+                }
+            }
+            // a note: ("code", "text") on one line, or "code", on the line after "("
+            let note = if let Some(rest) = line.strip_prefix("(\"").filter(|r| r.contains("\", \"")) {
+                rest.split('"').next().map(str::to_string)
+            } else if prev.ends_with('(') && !prev.ends_with("check(") && line.ends_with("\",") && !line.contains(' ') {
+                lit(line)
+            } else {
+                line.strip_prefix("Some((\"").and_then(|r| r.split('"').next()).map(str::to_string)
+            };
+            if let Some(code) = note.filter(|c| snake(c)) {
+                notes += 1;
+                check(format!("sto.cn.{code}"));
+            }
+            prev = line;
+        }
+        assert!(notes > 15 && values > 10, "codes not found: {notes} notes, {values} values");
+        let smart = include_str!("../../rynas-storage/src/smart.rs");
+        let verdict = &smart[smart.find("pub fn verdict").expect("verdict")..];
+        let verdict = &verdict[..verdict.find("\n}").expect("verdict end")];
+        let mut reasons = 0;
+        let mut prev = "";
+        for line in verdict.lines().map(str::trim) {
+            if matches!(prev, "Critical," | "Warning," | "Info," | "sev,")
+                && let Some(code) = lit(line).filter(|c| snake(c))
+            {
+                reasons += 1;
+                check(format!("sto.reason.{code}"));
+            }
+            prev = line;
+        }
+        assert!(reasons > 20, "reason codes not found: {reasons}");
+        assert!(missing.is_empty(), "codes without a text: {missing:?}");
     }
 
     /// Every code of the storage planner (errors, warnings, step kinds) has a text: the

@@ -12,7 +12,7 @@ use crate::api::{self, ApiErr};
 use crate::form::{self, In, lens, lens_bool, save_bar, search_box, select_field, switch, tabs, text_field};
 use crate::i18n::{t, tf, tr};
 use crate::icons::{self, Icon};
-use crate::toast::{saved_pending, toast};
+use crate::toast::{saved_applied, saved_pending, toast};
 use crate::ui::{self, Confirm, EmptyState, PageHeader, Remote, Tone, confirm, drawer};
 
 /// `[a-z_][a-z0-9_-]{0,31}` (user and group names).
@@ -294,15 +294,16 @@ fn user_editor(e: UserEdit, all_groups: Vec<String>, close: Callback<()>) -> Any
             } else {
                 api::put::<_, UserView>(&format!("/api/v1/users/{}", api::encode(&body.name)), &body).await
             };
-            busy.set(false);
             match r {
                 Ok(_) => {
-                    saved_pending();
-                    crate::config::changed();
-                    close.run(());
+                    if crate::config::apply_now(&[crate::config::keys::USERS], error).await {
+                        saved_applied();
+                        close.run(());
+                    }
                 }
                 Err(e) => fail(&e, server, error),
             }
+            let _ = busy.try_set(false);
         });
     });
 
@@ -674,15 +675,16 @@ fn group_editor(g: GroupView, all_users: Vec<String>, close: Callback<()>) -> An
             } else {
                 api::put::<_, GroupView>(&format!("/api/v1/groups/{}", api::encode(&body.group.name)), &body).await
             };
-            busy.set(false);
             match r {
                 Ok(_) => {
-                    saved_pending();
-                    crate::config::changed();
-                    close.run(());
+                    if crate::config::apply_now(&[crate::config::keys::USERS], error).await {
+                        saved_applied();
+                        close.run(());
+                    }
                 }
                 Err(e) => fail(&e, server, error),
             }
+            let _ = busy.try_set(false);
         });
     });
 

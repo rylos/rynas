@@ -1040,6 +1040,9 @@ kbd {
 .pending-keys:not(:empty)::before { content: "· "; }
 .pending-actions { display: flex; gap: var(--s-2); margin-left: auto; }
 .pending .btn-spinner { color: var(--accent); flex: none; }
+.apply-line { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); margin: 0; }
+.apply-line .btn-spinner { color: var(--accent); flex: none; }
+.apply-line .link-btn { margin-left: 0; }
 
 /* review dialog and diffs */
 .review-key { display: flex; flex-direction: column; gap: var(--s-2); }

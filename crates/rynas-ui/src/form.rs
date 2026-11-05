@@ -37,6 +37,7 @@ pub fn spinner(busy: RwSignal<bool>) -> impl IntoView {
 /// [`crate::api::ApiErr::text`] (translated text + server detail, see [`crate::ui::err_view`]).
 pub fn form_error(error: RwSignal<Option<String>>) -> impl IntoView {
     view! {
+        {crate::config::apply_line(error)}
         <div class="form-errors" role="alert" aria-live="assertive">
             {move || error.get().map(|msg| view! {
                 <p class="form-error">

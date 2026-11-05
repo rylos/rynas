@@ -1,8 +1,12 @@
-//! Per-disk-type recommended settings compared with the current values, read-only
-//! (`docs/research/system-reliability-tweaks.md` §6, decision D-SYSTUNE). Applying them is a
-//! later job (generated udev rules with per-disk overrides).
+//! Per-disk-type recommended settings compared with the current values
+//! (`docs/research/system-reliability-tweaks.md` §6, decision D-SYSTUNE). The per-disk
+//! overrides themselves are the `storage.disks` domain ([`crate::domain`]).
+//!
+//! Every check carries codes next to its English texts (`note_code`, `current_value`,
+//! `recommended_value`) so the interface can translate them; literal values (scheduler
+//! names, KiB, ALPM policies) have no code and are shown as they are.
 
-use rynas_api_types::storage::{CheckStatus, DiskKind, SettingCheck};
+use rynas_api_types::storage::{CheckStatus, CheckValue, DiskKind, SettingCheck};
 
 use crate::host::Host;
 use crate::smart::temp_limits;
@@ -30,6 +34,37 @@ pub struct TuningInput {
     pub apst_latency_us: Option<u64>,
     pub temperature_c: Option<f32>,
     pub transport: String,
+    /// SMART was read from the drive: an absent APM then means the drive has none.
+    pub smart_read: bool,
+    /// The disk is an md member or holds btrfs: both do their own read-ahead.
+    pub stacked: bool,
+    /// An encrypted mapping above the disk does not pass discards (crypttab without
+    /// `discard`): TRIM cannot reach the device.
+    pub crypt_blocks_discard: bool,
+    /// (warning, critical) limits the drive reports itself (NVMe WCTEMP/CCTEMP, drivetemp
+    /// SCT limits); the type's table otherwise, or when the table is lower.
+    pub drive_temp_limits: Option<(f32, f32)>,
+    /// SMART 193 Load_Cycle_Count and 9 Power_On_Hours (HDD head parking).
+    pub load_cycles: Option<u64>,
+    pub power_on_hours: Option<u64>,
+}
+
+/// Head load cycles per power-on hour above which a drive parks its heads too often: the
+/// rated 600,000 cycles over five years are about 13 per hour.
+pub const PARKING_PER_HOUR: f64 = 10.0;
+/// Load cycles above which head parking is worth a look whatever the rate.
+pub const PARKING_TOTAL: u64 = 300_000;
+
+/// (warning, critical) temperature limits of a disk: the type's table, lowered to the
+/// drive's own limits when it reports lower ones (NVMe: the drive's limits replace the
+/// table, which is only the fallback).
+pub fn temp_limits_for(kind: DiskKind, drive: Option<(f32, f32)>) -> (f32, f32) {
+    let table = temp_limits(kind);
+    match drive {
+        Some(d) if kind == DiskKind::Nvme => d,
+        Some((w, c)) => (w.min(table.0), c.min(table.1)),
+        None => table,
+    }
 }
 
 /// The bracketed entry of `queue/scheduler`: "[mq-deadline] kyber bfq none".
@@ -43,21 +78,61 @@ pub fn active_scheduler(s: &str) -> Option<String> {
         })
 }
 
+/// A value of a check: its English text and, when it is not a literal, its code.
+struct Val {
+    text: String,
+    value: Option<CheckValue>,
+}
+
+/// A literal value (shown as it is in every language).
+fn lit(text: impl Into<String>) -> Val {
+    Val {
+        text: text.into(),
+        value: None,
+    }
+}
+
+/// A translatable value.
+fn coded(text: impl Into<String>, value: CheckValue) -> Val {
+    Val {
+        text: text.into(),
+        value: Some(value),
+    }
+}
+
+fn on_off(on: bool) -> Val {
+    if on {
+        coded("on", CheckValue::code("on"))
+    } else {
+        coded("off", CheckValue::code("off"))
+    }
+}
+
+/// The note of a check: its code and its English text.
+type Note = (&'static str, &'static str);
+
 fn check(
     key: &str,
     label: &str,
-    current: Option<String>,
-    recommended: &str,
+    current: Option<Val>,
+    recommended: Val,
     status: CheckStatus,
-    note: &str,
+    note: Option<Note>,
 ) -> SettingCheck {
+    let (current, current_value) = match current {
+        Some(v) => (Some(v.text), v.value),
+        None => (None, None),
+    };
     SettingCheck {
         key: key.into(),
         label: label.into(),
         current,
-        recommended: recommended.into(),
+        recommended: recommended.text,
         status,
-        note: note.into(),
+        note: note.map(|n| n.1).unwrap_or_default().into(),
+        current_value,
+        recommended_value: recommended.value,
+        note_code: note.map(|n| n.0.to_string()),
     }
 }
 
@@ -74,116 +149,233 @@ pub fn checks(i: &TuningInput) -> Vec<SettingCheck> {
     let mut v = Vec::new();
     let flash = matches!(i.kind, Ssd | Nvme);
 
-    let want_sched = match i.kind {
-        Nvme => "none",
-        _ => "mq-deadline",
+    let (want_sched, sched_ok): (&str, &[&str]) = match i.kind {
+        Nvme => ("none", &["none"]),
+        // a single NCQ queue: the difference between the two is noise
+        Ssd => ("mq-deadline / none", &["mq-deadline", "none"]),
+        _ => ("mq-deadline", &["mq-deadline"]),
     };
     v.push(check(
         "scheduler",
         "I/O scheduler",
-        i.scheduler.clone(),
-        want_sched,
-        ok_if(i.scheduler.as_ref().map(|s| s == want_sched)),
-        match i.kind {
-            Nvme => "NVMe has deep hardware queues: no scheduler is fastest",
-            Hdd => "mq-deadline keeps throughput on RAID; bfq only helps desktop interactivity",
-            _ => "mq-deadline: low overhead, bounded latency",
-        },
+        i.scheduler.clone().map(lit),
+        lit(want_sched),
+        ok_if(i.scheduler.as_ref().map(|s| sched_ok.contains(&s.as_str()))),
+        Some(match i.kind {
+            Nvme => (
+                "sched_nvme",
+                "NVMe has deep hardware queues: no scheduler is fastest",
+            ),
+            Hdd => (
+                "sched_hdd",
+                "mq-deadline keeps throughput on RAID; bfq only helps desktop interactivity",
+            ),
+            _ => (
+                "sched_flash",
+                "a single queue: mq-deadline and none perform the same",
+            ),
+        }),
     ));
 
-    let (ra_label, ra_ok): (&str, Box<dyn Fn(u32) -> bool>) = match i.kind {
-        Hdd => (
-            "2048 (1024-4096)",
-            Box::new(|kb| (1024..=4096).contains(&kb)),
-        ),
-        Ssd => ("256 (128-512)", Box::new(|kb| (128..=512).contains(&kb))),
-        Nvme => ("128", Box::new(|kb| (128..=512).contains(&kb))),
-        Unknown => ("128", Box::new(|_| true)),
+    // the kernel's default is right (6.17+ sizes it from the device); btrfs and md read
+    // ahead on their own device, so the disk's value does not matter under them
+    let (ra_lo, ra_hi) = match i.kind {
+        Hdd | Unknown => (128, 8192),
+        Ssd | Nvme => (128, 4096),
+    };
+    let (ra_status, ra_note) = if i.stacked {
+        (
+            CheckStatus::NotApplicable,
+            (
+                "ra_stacked",
+                "btrfs and md read ahead on their own device: the disk's value does not matter",
+            ),
+        )
+    } else if i.kind == Hdd {
+        (
+            ok_if(i.read_ahead_kb.map(|kb| (ra_lo..=ra_hi).contains(&kb))),
+            (
+                "ra_hdd",
+                "the kernel's default suits spinning disks; very large values only waste cache",
+            ),
+        )
+    } else {
+        (
+            ok_if(i.read_ahead_kb.map(|kb| (ra_lo..=ra_hi).contains(&kb))),
+            (
+                "ra_flash",
+                "flash needs little read-ahead; more only wastes cache",
+            ),
+        )
     };
     v.push(check(
         "read_ahead_kb",
         "Read-ahead (KiB)",
-        i.read_ahead_kb.map(|k| k.to_string()),
-        ra_label,
-        ok_if(i.read_ahead_kb.map(ra_ok)),
-        if i.kind == Hdd {
-            "large read-ahead helps streaming and RAID reads on spinning disks"
-        } else {
-            "flash needs little read-ahead; more only wastes cache"
-        },
+        i.read_ahead_kb.map(|k| lit(k.to_string())),
+        coded(
+            format!("kernel default ({ra_lo}-{ra_hi})"),
+            CheckValue::with("ra_default", ra_hi as f64),
+        ),
+        ra_status,
+        Some(ra_note),
     ));
 
     if i.kind != Nvme {
         v.push(check(
             "write_cache",
             "Write cache",
-            i.write_cache.map(|w| if w { "on" } else { "off" }.into()),
-            "on",
+            i.write_cache.map(on_off),
+            on_off(true),
             ok_if(i.write_cache),
-            "leave it on: the filesystem's flushes keep it safe, off costs a lot of speed",
+            Some((
+                "wcache",
+                "leave it on: the filesystem's flushes keep it safe, off costs a lot of speed",
+            )),
         ));
     }
 
     if i.kind == Hdd {
         let current = i.apm.map(|a| match a {
-            Some(l) => l.to_string(),
-            None => "disabled".into(),
+            Some(l) => lit(l.to_string()),
+            None => coded("disabled", CheckValue::code("disabled")),
         });
-        let status = match i.apm {
-            Some(Some(l)) => {
-                if l <= 127 {
-                    CheckStatus::Ok
-                } else {
-                    CheckStatus::Differs
-                }
-            }
-            // no APM: spin-down is left to hd-idle / -S
-            Some(None) => CheckStatus::NotApplicable,
-            None => CheckStatus::Unknown,
+        // 254 or off: no drive-initiated spin-down, no aggressive head unloading; spin-down,
+        // when wanted, is the system's job (the standby override)
+        let (status, note) = match i.apm {
+            Some(Some(l)) if l <= 127 => (
+                CheckStatus::Differs,
+                (
+                    "apm",
+                    "levels up to 127 let the drive park its heads and spin down by itself",
+                ),
+            ),
+            Some(_) => (
+                CheckStatus::Ok,
+                (
+                    "apm",
+                    "levels up to 127 let the drive park its heads and spin down by itself",
+                ),
+            ),
+            None if i.smart_read => (
+                CheckStatus::NotApplicable,
+                ("apm_none", "the drive has no APM: nothing to set"),
+            ),
+            None => (
+                CheckStatus::Unknown,
+                (
+                    "apm",
+                    "levels up to 127 let the drive park its heads and spin down by itself",
+                ),
+            ),
         };
         v.push(check(
             "apm",
             "Power management (APM)",
             current,
-            "127 (allows spin-down)",
+            coded("254 or off", CheckValue::code("apm_254_off")),
             status,
-            "levels above 127 forbid standby; many NAS drives ignore -S timers, then hd-idle does it",
+            Some(note),
         ));
+
+        // head parking: rated 600,000 load cycles, about 13 per power-on hour over 5 years
+        if let Some(lc) = i.load_cycles {
+            let rate = i
+                .power_on_hours
+                .filter(|&h| h > 0)
+                .map(|h| lc as f64 / h as f64);
+            let too_many = lc > PARKING_TOTAL || rate.is_some_and(|r| r > PARKING_PER_HOUR);
+            let current = match rate {
+                Some(r) => {
+                    let r = (r * 10.0).round() / 10.0;
+                    coded(
+                        format!("{r} per hour ({lc} in total)"),
+                        CheckValue::with("parking_rate", r),
+                    )
+                }
+                None => lit(lc.to_string()),
+            };
+            v.push(check(
+                "head_parking",
+                "Head parking",
+                Some(current),
+                coded(
+                    "at most 10 per hour",
+                    CheckValue::with("parking_max", PARKING_PER_HOUR),
+                ),
+                if too_many {
+                    CheckStatus::Differs
+                } else {
+                    CheckStatus::Ok
+                },
+                Some((
+                    "parking",
+                    "frequent head unloads wear the drive: raise APM or the drive's idle timers",
+                )),
+            ));
+        }
     }
 
     if flash {
-        let (cur, status, note) = match (i.fstrim_timer, i.online_discard) {
-            (Some(true), true) => (
-                "fstrim.timer + discard mount".to_string(),
-                CheckStatus::Differs,
-                "both online discard and the weekly timer: keep only one",
-            ),
-            (Some(true), false) => (
-                "fstrim.timer".to_string(),
-                CheckStatus::Ok,
-                "weekly batched TRIM",
-            ),
-            (_, true) => (
-                "discard mount option".to_string(),
-                CheckStatus::Ok,
-                "btrfs discard=async (default since 6.2) trims continuously",
-            ),
-            (Some(false), false) => (
-                "none".to_string(),
-                CheckStatus::Differs,
-                "without TRIM the SSD slows down and wears faster: enable fstrim.timer",
-            ),
-            (None, false) => ("unknown".to_string(), CheckStatus::Unknown, ""),
-        };
+        let (cur, status, note): (Val, CheckStatus, Option<Note>) =
+            match (i.fstrim_timer, i.online_discard) {
+                (Some(true), true) => (
+                    coded(
+                        "fstrim.timer + discard mount",
+                        CheckValue::code("trim_timer_discard"),
+                    ),
+                    CheckStatus::Ok,
+                    Some((
+                        "trim_both",
+                        "async discard does the work, the weekly timer is a cheap safety net",
+                    )),
+                ),
+                (Some(true), false) => (
+                    coded("fstrim.timer", CheckValue::code("trim_timer")),
+                    CheckStatus::Ok,
+                    Some(("trim_timer", "weekly batched TRIM")),
+                ),
+                (_, true) => (
+                    coded("discard mount option", CheckValue::code("trim_discard")),
+                    CheckStatus::Ok,
+                    Some((
+                        "trim_discard",
+                        "btrfs discard=async (default since 6.2) trims continuously",
+                    )),
+                ),
+                (Some(false), false) => (
+                    coded("none", CheckValue::code("trim_none")),
+                    CheckStatus::Differs,
+                    Some((
+                        "trim_none",
+                        "without TRIM the SSD slows down and wears faster: enable fstrim.timer",
+                    )),
+                ),
+                (None, false) => (
+                    coded("unknown", CheckValue::code("unknown")),
+                    CheckStatus::Unknown,
+                    None,
+                ),
+            };
         let (status, note) = if !i.discard_supported {
             (
                 CheckStatus::NotApplicable,
-                "the device does not accept discards",
+                Some(("trim_unsupported", "the device does not accept discards")),
             )
         } else if i.under_parity_raid {
             (
                 CheckStatus::NotApplicable,
-                "md RAID5/6 does not pass TRIM through (devices_handle_discard_safely is off)",
+                Some((
+                    "trim_parity_raid",
+                    "md RAID5/6 does not pass TRIM through (devices_handle_discard_safely is off)",
+                )),
+            )
+        } else if i.crypt_blocks_discard {
+            (
+                CheckStatus::NotApplicable,
+                Some((
+                    "trim_crypt",
+                    "the encrypted volume does not pass TRIM through: leave 10-20% of a new SSD unpartitioned",
+                )),
             )
         } else {
             (status, note)
@@ -192,7 +384,7 @@ pub fn checks(i: &TuningInput) -> Vec<SettingCheck> {
             "trim",
             "TRIM",
             Some(cur),
-            "fstrim.timer weekly",
+            coded("fstrim.timer weekly", CheckValue::code("trim_weekly")),
             status,
             note,
         ));
@@ -203,10 +395,10 @@ pub fn checks(i: &TuningInput) -> Vec<SettingCheck> {
         v.push(check(
             "alpm",
             "SATA link power (ALPM)",
-            i.alpm.clone(),
-            want,
+            i.alpm.clone().map(lit),
+            lit(want),
             ok_if(i.alpm.as_ref().map(|a| a == want)),
-            "saves about 1 W per SSD with no measurable cost",
+            Some(("alpm", "saves about 1 W per SSD with no measurable cost")),
         ));
     }
 
@@ -216,29 +408,51 @@ pub fn checks(i: &TuningInput) -> Vec<SettingCheck> {
             "NVMe power states (APST)",
             i.apst_latency_us.map(|l| {
                 if l == 0 {
-                    "disabled".into()
+                    coded("disabled", CheckValue::code("disabled"))
                 } else {
-                    format!("enabled (max latency {l} µs)")
+                    coded(
+                        format!("enabled (max latency {l} µs)"),
+                        CheckValue::with("apst_enabled", l as f64),
+                    )
                 }
             }),
-            "enabled",
+            coded("enabled", CheckValue::code("enabled")),
             ok_if(i.apst_latency_us.map(|l| l > 0)),
-            "disable only for models with known APST firmware bugs",
+            Some((
+                "apst",
+                "disable only for models with known APST firmware bugs",
+            )),
         ));
     }
 
-    let (warn, _) = temp_limits(i.kind);
+    let (warn, crit) = temp_limits_for(i.kind, i.drive_temp_limits);
+    let temp_status = match i.temperature_c {
+        Some(t) if t >= crit => CheckStatus::Critical,
+        Some(t) if t >= warn => CheckStatus::Differs,
+        Some(_) => CheckStatus::Ok,
+        None => CheckStatus::Unknown,
+    };
     v.push(check(
         "temperature",
         "Temperature",
-        i.temperature_c.map(|t| format!("{t:.0} °C")),
-        &format!("below {warn:.0} °C"),
-        ok_if(i.temperature_c.map(|t| t < warn)),
-        match i.kind {
-            Hdd => "HDDs age faster above 50-55 °C",
-            Nvme => "NVMe throttles at 70-80 °C",
-            _ => "keep airflow over the drive",
-        },
+        i.temperature_c
+            .map(|t| coded(format!("{t:.0} °C"), CheckValue::with("temp", t.round() as f64))),
+        coded(
+            format!("below {warn:.0} °C"),
+            CheckValue::with("temp_below", warn as f64),
+        ),
+        temp_status,
+        Some(match i.kind {
+            Hdd => (
+                "temp_hdd",
+                "failures rise with heat: keep hard disks below 50 °C, never above 60 °C",
+            ),
+            Nvme => (
+                "temp_nvme",
+                "the drive slows itself down above its warning temperature",
+            ),
+            _ => ("temp_other", "keep airflow over the drive"),
+        }),
     ));
     v
 }
@@ -275,6 +489,37 @@ pub fn read_sysfs(host: &dyn Host, disk: &str, input: &mut TuningInput) {
     input.apst_latency_us = host
         .read("/sys/module/nvme_core/parameters/default_ps_max_latency_us")
         .and_then(|s| s.trim().parse().ok());
+    input.drive_temp_limits = drive_temp_limits(host, disk);
+}
+
+/// The drive's own temperature limits from its hwmon device: NVMe WCTEMP/CCTEMP
+/// (`device/hwmonN`) or the drivetemp SCT limits of an ATA disk (`device/hwmon/hwmonN`),
+/// `temp1_max`/`temp1_crit` in m°C.
+pub fn drive_temp_limits(host: &dyn Host, disk: &str) -> Option<(f32, f32)> {
+    let dev = format!("/sys/block/{disk}/device");
+    let mut dirs: Vec<String> = host
+        .list(&dev)
+        .into_iter()
+        .filter(|e| e.starts_with("hwmon"))
+        .map(|e| format!("{dev}/{e}"))
+        .collect();
+    dirs.extend(
+        host.list(&format!("{dev}/hwmon"))
+            .into_iter()
+            .map(|e| format!("{dev}/hwmon/{e}")),
+    );
+    dirs.sort();
+    let milli = |p: &str| {
+        host.read(p)
+            .and_then(|s| s.trim().parse::<i64>().ok())
+            .filter(|&v| v > 0)
+            .map(|v| v as f32 / 1000.0)
+    };
+    dirs.iter().find_map(|d| {
+        let max = milli(&format!("{d}/temp1_max"))?;
+        let crit = milli(&format!("{d}/temp1_crit")).unwrap_or(max + 10.0);
+        Some((max, crit.max(max)))
+    })
 }
 
 #[cfg(test)]
@@ -312,11 +557,90 @@ mod tests {
         };
         let v = checks(&i);
         assert_eq!(by_key(&v, "scheduler").status, CheckStatus::Ok);
-        assert_eq!(by_key(&v, "read_ahead_kb").status, CheckStatus::Differs);
-        assert_eq!(by_key(&v, "apm").status, CheckStatus::Differs);
+        // the kernel's default is fine
+        assert_eq!(by_key(&v, "read_ahead_kb").status, CheckStatus::Ok);
+        // 254: no drive-initiated spin-down, no head parking
+        assert_eq!(by_key(&v, "apm").status, CheckStatus::Ok);
         assert_eq!(by_key(&v, "write_cache").status, CheckStatus::Ok);
         assert_eq!(by_key(&v, "temperature").status, CheckStatus::Ok);
-        assert!(v.iter().all(|c| c.key != "trim"));
+        assert!(v.iter().all(|c| c.key != "trim" && c.key != "head_parking"));
+    }
+
+    #[test]
+    fn hdd_research_rules() {
+        let mut i = TuningInput {
+            kind: DiskKind::Hdd,
+            read_ahead_kb: Some(16384),
+            apm: Some(Some(127)),
+            temperature_c: Some(52.0),
+            load_cycles: Some(50_000),
+            power_on_hours: Some(2_000),
+            ..Default::default()
+        };
+        let v = checks(&i);
+        assert_eq!(by_key(&v, "read_ahead_kb").status, CheckStatus::Differs);
+        assert_eq!(by_key(&v, "apm").status, CheckStatus::Differs);
+        assert_eq!(by_key(&v, "temperature").status, CheckStatus::Differs);
+        let p = by_key(&v, "head_parking");
+        assert_eq!(p.status, CheckStatus::Differs);
+        assert_eq!(p.current_value, Some(CheckValue::with("parking_rate", 25.0)));
+        // under btrfs/md the disk's read-ahead does not matter; APM off is fine
+        i.stacked = true;
+        i.apm = Some(None);
+        i.temperature_c = Some(61.0);
+        i.load_cycles = Some(10_000);
+        let v = checks(&i);
+        assert_eq!(by_key(&v, "read_ahead_kb").status, CheckStatus::NotApplicable);
+        assert_eq!(by_key(&v, "apm").status, CheckStatus::Ok);
+        assert_eq!(by_key(&v, "temperature").status, CheckStatus::Critical);
+        assert_eq!(by_key(&v, "head_parking").status, CheckStatus::Ok);
+        // no APM at all on a drive whose SMART was read
+        i.apm = None;
+        i.smart_read = true;
+        assert_eq!(by_key(&checks(&i), "apm").status, CheckStatus::NotApplicable);
+    }
+
+    #[test]
+    fn nvme_temperature_from_the_drive() {
+        let mut h = crate::host::FakeHost::default();
+        h.file("/sys/block/nvme0n1/device/hwmon3/temp1_max", "84850\n")
+            .file("/sys/block/nvme0n1/device/hwmon3/temp1_crit", "87850\n");
+        let lim = drive_temp_limits(&h, "nvme0n1");
+        assert_eq!(lim, Some((84.85, 87.85)));
+        assert_eq!(temp_limits_for(DiskKind::Nvme, lim), (84.85, 87.85));
+        assert_eq!(temp_limits_for(DiskKind::Nvme, None), (70.0, 80.0));
+        // an ATA drive's own limits only lower the table
+        assert_eq!(temp_limits_for(DiskKind::Hdd, Some((55.0, 58.0))), (50.0, 58.0));
+    }
+
+    #[test]
+    fn checks_carry_codes_for_translation() {
+        let i = TuningInput {
+            kind: DiskKind::Hdd,
+            scheduler: Some("bfq".into()),
+            write_cache: Some(false),
+            apm: Some(None),
+            temperature_c: Some(41.4),
+            ..Default::default()
+        };
+        let v = checks(&i);
+        // every check has a translatable note
+        assert!(v.iter().all(|c| c.note_code.is_some() && !c.note.is_empty()));
+        let s = by_key(&v, "scheduler");
+        assert_eq!(s.note_code.as_deref(), Some("sched_hdd"));
+        // literal values have no code
+        assert_eq!((s.current_value.clone(), s.recommended_value.clone()), (None, None));
+        let w = by_key(&v, "write_cache");
+        assert_eq!(w.current_value, Some(CheckValue::code("off")));
+        assert_eq!(w.recommended_value, Some(CheckValue::code("on")));
+        let a = by_key(&v, "apm");
+        assert_eq!(a.current.as_deref(), Some("disabled"));
+        assert_eq!(a.current_value, Some(CheckValue::code("disabled")));
+        assert_eq!(a.recommended_value, Some(CheckValue::code("apm_254_off")));
+        let t = by_key(&v, "temperature");
+        assert_eq!(t.current_value, Some(CheckValue::with("temp", 41.0)));
+        assert_eq!(t.recommended_value, Some(CheckValue::with("temp_below", 50.0)));
+        assert_eq!(t.recommended, "below 50 °C");
     }
 
     #[test]
@@ -333,13 +657,21 @@ mod tests {
             ..Default::default()
         };
         let v = checks(&i);
-        assert_eq!(by_key(&v, "trim").status, CheckStatus::Differs);
+        // async discard plus the timer: harmless, the timer finds nothing to do
+        assert_eq!(by_key(&v, "trim").status, CheckStatus::Ok);
         assert_eq!(by_key(&v, "alpm").status, CheckStatus::Differs);
+        i.scheduler = Some("none".into());
+        assert_eq!(by_key(&checks(&i), "scheduler").status, CheckStatus::Ok);
         i.under_parity_raid = true;
         assert_eq!(
             by_key(&checks(&i), "trim").status,
             CheckStatus::NotApplicable
         );
+        i.under_parity_raid = false;
+        i.crypt_blocks_discard = true;
+        let t = checks(&i);
+        assert_eq!(by_key(&t, "trim").status, CheckStatus::NotApplicable);
+        assert_eq!(by_key(&t, "trim").note_code.as_deref(), Some("trim_crypt"));
     }
 
     #[test]

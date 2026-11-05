@@ -106,6 +106,23 @@ Budgets come from `docs/phase1/plan.md`; design tokens from `docs/phase0/02-ui.m
 - A19 MUST: every configuration domain follows the step-6 model: `GET /<domain>` → `{applied, pending?, …}`,
   `PUT /<domain>` stages (200 + new state), apply/discard only through `/config/apply` and
   `/config/discard`. No endpoint writes system configuration directly.
+- A19b MUST: one rule for when a change takes effect. **A form inside a dialog or a
+  single-object editor** (one user, one share, one task, one disk, the SMB settings card)
+  has a primary **Save** that stages the change and applies **only the keys that form
+  writes**: `POST /config/apply` with `keys` (every key that endpoint can stage; keys with
+  nothing staged are ignored, so listing a superset is safe). The other staged keys of the
+  user stay in the pending bar, untouched. The apply task's progress shows inside the form,
+  a failure keeps the dialog open with the task's error and the note that the previous
+  settings are back in place (the pipeline rolled back) while the change stays pending.
+  **Row actions in lists** (enable/disable switches, deletes from a table) and page-level
+  work that is meant to be reviewed together still only stage: the global pending bar
+  applies them. Network changes keep their own trial apply (`/network/apply`). Keys are
+  whole domain documents: applying `users` from a user dialog also applies other staged
+  changes of `users`; drift detection, conflicts (only among the selected keys) and rollback
+  are those of a full apply. After an apply, state that views cache and that the apply has
+  just changed is read again before the task ends (`Ops::after_apply`: the disk settings
+  re-read APM and write cache with `smartctl -n standby -g apm -g wcache`, never waking a
+  sleeping disk), so a client that reloads on the task's end sees the new values.
 - A20 MUST: long work is a `rynas-tasks` task with a UPID, progress, log and cancel. Clients follow it
   through `/tasks/stream`; polling `/tasks/{id}` is a fallback only.
 - A21 MUST: SSE event names are `snake_case` verbs or nouns (`sample`, `started`, `updated`,
@@ -155,7 +172,8 @@ first, reviewed, then used.
 | Action outcome | `ui::Notice` | a result the user must read (restore, drift, LUKS header); tone + icon + text, dismissable, `role=status`/`alert` |
 | Static note | `ui::note` | a warning or hint next to what it concerns; not dismissable |
 | Form error | `form::form_error` | errors inside a form or dialog (`role="alert"`) |
-| Pending changes bar | `config::PendingBar` | data from `/config/pending`; pages call `config::changed()` after staging |
+| Pending changes bar | `config::PendingBar` | data from `/config/pending`; pages call `config::changed()` after staging (row actions, page-level work) |
+| Save of a dialog / editor | `config::apply_now(&[config::keys::…], error)` | after the form's PUT/POST: applies only those keys (A19b), progress in the form's `form_error` box (`config::apply_line`), `toast::saved_applied` and close on success, error + "previous settings back, change stays pending" on failure; the button says **Save**/**Create**, never "Stage" |
 | Task progress | `tasks::TaskPanel`, `tasks::TaskRun`, `tasks::LogTail` | `task.*` events of `/events`; long actions go through `tasks::run_task` (or `api::start_task` + `tasks::follow`) and report the final state; no page polls a task |
 
 - G1 MUST: no `inner_html` with markup built from strings, except the static icon SVGs in `icons.rs`.
@@ -201,6 +219,11 @@ first, reviewed, then used.
   the drive label); filesystem/volume usage and memory use `bytes` (IEC). The same quantity is shown with
   the same helper on every page.
 
+- G8e MUST: server texts that users read (check notes, recommendations, health reasons, plan
+  warnings) travel with a stable code and their values (`note_code`, `CheckValue`,
+  `HealthReason.args`, `PlanWarning.args`); the UI translates `<area>.<kind>.<code>` and fills
+  the values with the `i18n.rs` helpers, and shows the English text (`lang="en"`) only for a
+  code it does not know. A test reads the server source and fails on a code without a key.
 - G8c MUST: no comparison with other products in user-visible text ("like DSM", "DSM's default",
   "as in Windows Server"…): describe what rynas does. Reviewers grep the dictionary for product names.
 - G8d MUST: hardware/platform-specific screens, tabs, hints and texts (Synology, synodeb, synohwd,

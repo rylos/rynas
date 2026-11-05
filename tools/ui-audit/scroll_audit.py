@@ -45,7 +45,7 @@ async def main():
                     bad += await audit(p, tag)
                     n = await p.js("document.querySelectorAll('.page .btn.primary:not(dialog *), .page td.actions .icon-btn:not(dialog *)').length")
                     for i in range(n):
-                        await p.js(f"document.querySelectorAll('.page .btn.primary:not(dialog *), .page td.actions .icon-btn:not(dialog *)')[{i}].click()")
+                        await p.js(f"document.querySelectorAll('.page .btn.primary:not(dialog *), .page td.actions .icon-btn:not(dialog *)')[{i}]?.click()")
                         await asyncio.sleep(0.8)
                         if not await p.js("!!document.querySelector('dialog[open]')"): 
                             await run_all.nav(p, route); await asyncio.sleep(0.8); continue
