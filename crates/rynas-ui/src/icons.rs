@@ -79,6 +79,7 @@ pub const TIMER: &str = r#"<line x1="10" x2="14" y1="2" y2="2"/><line x1="12" x2
 pub const LIFE_BUOY: &str = r#"<circle cx="12" cy="12" r="10"/><path d="m4.93 4.93 4.24 4.24"/><path d="m14.83 9.17 4.24-4.24"/><path d="m14.83 14.83 4.24 4.24"/><path d="m9.17 14.83-4.24 4.24"/><circle cx="12" cy="12" r="4"/>"#;
 pub const EXTERNAL_LINK: &str = r#"<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>"#;
 pub const UNPLUG: &str = r#"<path d="m19 5 3-3"/><path d="m2 22 3-3"/><path d="M6.3 20.3a2.4 2.4 0 0 0 3.4 0L12 18l-6-6-2.3 2.3a2.4 2.4 0 0 0 0 3.4Z"/><path d="M7.5 13.5 10 11"/><path d="M10.5 16.5 13 14"/><path d="m12 6 6 6 2.3-2.3a2.4 2.4 0 0 0 0-3.4l-2.6-2.6a2.4 2.4 0 0 0-3.4 0Z"/>"#;
+pub const BATTERY_CHARGING: &str = r#"<path d="m11 7-3 5h4l-3 5"/><path d="M14.856 7H16a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-2.935"/><path d="M22 14v-4"/><path d="M5.14 17H4a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h2.936"/>"#;
 pub const PLAY: &str = r#"<polygon points="6 3 20 12 6 21 6 3"/>"#;
 
 pub const SEND: &str = r#"<path d="M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z"/><path d="m21.854 2.147-10.94 10.939"/>"#;

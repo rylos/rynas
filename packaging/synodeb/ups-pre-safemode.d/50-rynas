@@ -1,0 +1,17 @@
+#!/bin/sh
+# rynas: run by synodeb-ups before UPS Safe Mode, with the reason as $1 (lowbatt, waittimeup,
+# nocomm, fsd, shutdowncmd). Asks rynasd to cancel its running tasks, stop running scheduler
+# task units and record "Safe Mode: <reason>" as a notification. Bounded to 40 s (rynasd
+# itself stops after 25 s), well within PRE_SAFEMODE_TIMEOUT (120 s by default).
+# A no-op when rynasd is not running: its socket would start it, and Safe Mode must not wait.
+# Never fails: Safe Mode goes on whatever happens here.
+reason=${1:-unknown}
+case $reason in *[!a-z]*) reason=unknown ;; esac
+CTL=/usr/libexec/rynas/rynasctl
+[ -x "$CTL" ] || exit 0
+if ! systemctl is-active --quiet rynasd.service 2>/dev/null; then
+    echo "rynasd not running: nothing to stop"
+    exit 0
+fi
+timeout -k 5 40 "$CTL" ups safe-mode "$reason" || echo "rynasctl ups safe-mode: exit $?"
+exit 0

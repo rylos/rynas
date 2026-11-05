@@ -49,6 +49,8 @@ pub struct Live {
     pub system_err: RwSignal<Option<String>>,
     pub storage_err: RwSignal<Option<String>>,
     pub hardware_err: RwSignal<Option<String>>,
+    /// UPS status (`ups.status` events; `None` until the UPS page or an event asked).
+    pub ups: RwSignal<Option<rynas_api_types::ups::UpsStatus>>,
 }
 
 /// A polled resource (for error states and Retry).
@@ -65,6 +67,7 @@ struct Stream {
     es: EventSource,
     _on_sample: Closure<dyn Fn(MessageEvent)>,
     _on_hardware: Closure<dyn Fn(MessageEvent)>,
+    _on_ups: Closure<dyn Fn(MessageEvent)>,
     _on_task: Closure<dyn Fn(MessageEvent)>,
     _on_notif: Closure<dyn Fn(MessageEvent)>,
     _on_resync: Closure<dyn Fn(MessageEvent)>,
@@ -118,6 +121,7 @@ impl Live {
             system_err: RwSignal::new(None),
             storage_err: RwSignal::new(None),
             hardware_err: RwSignal::new(None),
+            ups: RwSignal::new(None),
         }
     }
 
@@ -342,6 +346,15 @@ impl Live {
         });
     }
 
+    /// Reads the UPS status now (UPS page, `resync`); later readings arrive as events.
+    pub fn refresh_ups(self) {
+        spawn_local(async move {
+            if let Ok(u) = api::get::<rynas_api_types::ups::UpsStatus>("/api/v1/ups").await {
+                self.ups.set(Some(u));
+            }
+        });
+    }
+
     fn open_stream(self) {
         let Ok(es) = EventSource::new("/api/v1/events") else {
             self.conn.set(Conn::Offline);
@@ -368,6 +381,15 @@ impl Live {
             }
         });
         let _ = es.add_event_listener_with_callback("hardware.status", on_hardware.as_ref().unchecked_ref());
+        let on_ups = Closure::<dyn Fn(MessageEvent)>::new(move |ev: MessageEvent| {
+            if let Some(txt) = ev.data().as_string()
+                && let Ok(u) = serde_json::from_str::<rynas_api_types::ups::UpsStatus>(&txt)
+                && self.ups.with_untracked(|cur| cur.as_ref() != Some(&u))
+            {
+                self.ups.set(Some(u));
+            }
+        });
+        let _ = es.add_event_listener_with_callback("ups.status", on_ups.as_ref().unchecked_ref());
         let on_task = Closure::<dyn Fn(MessageEvent)>::new(move |ev: MessageEvent| {
             if let Some(txt) = ev.data().as_string()
                 && let Ok(e) = serde_json::from_str::<TaskEvent>(&txt)
@@ -401,6 +423,8 @@ impl Live {
                 self.reload_history();
             } else if data.contains("\"hardware\"") {
                 self.refresh_hardware();
+            } else if data.contains("\"ups\"") {
+                self.refresh_ups();
             }
         });
         let _ = es.add_event_listener_with_callback("resync", on_resync.as_ref().unchecked_ref());
@@ -428,7 +452,7 @@ impl Live {
             }
         });
         es.set_onerror(Some(on_err.as_ref().unchecked_ref()));
-        let st = Stream { es, _on_sample: on_sample, _on_hardware: on_hardware, _on_task: on_task, _on_notif: on_notif, _on_resync: on_resync, _on_open: on_open, _on_err: on_err };
+        let st = Stream { es, _on_sample: on_sample, _on_hardware: on_hardware, _on_ups: on_ups, _on_task: on_task, _on_notif: on_notif, _on_resync: on_resync, _on_open: on_open, _on_err: on_err };
         STREAM.with(|s| *s.borrow_mut() = Some(st));
     }
 

@@ -15,7 +15,7 @@ synodeb; each item needs the maintainer's approval in the synodeb repo.
 | Raw uP commands (validated) | FIFO `/run/synohwd/cmd` |
 | Bay presence/power, fan rpm/alarm | sysfs `/sys/devices/platform/synology-nas`, hwmon `synology` |
 | synohwd config | `/etc/synohwd.toml` |
-| UPS state | `upsc` (NUT configured by `synodeb-ups setup`), `/etc/synodeb/ups.conf` |
+| UPS state | upsd on `127.0.0.1:3493`, text protocol (NUT configured by `synodeb-ups setup`); `SAFEMODE_AFTER`/`PRE_SAFEMODE_TIMEOUT` of `/etc/synodeb/ups.conf` are the rynas block `ups.safemode`; hook `ups-pre-safemode.d/50-rynas`; battery test via `synodeb-ups test` (see `phase1/plan.md`, API v1: UPS) |
 | Unattended-upgrades policy | `/etc/apt/apt.conf.d/52synodeb-unattended-upgrades` (read-only, respected) |
 | Notification channels | `/etc/synodeb/notify.conf` (imported once into rynas targets) |
 

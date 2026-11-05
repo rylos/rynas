@@ -58,6 +58,9 @@ pub struct DaemonState {
     pub hardware: crate::hardware::HwState,
     /// Networking (needs `ops`); `None` answers 503 on its endpoints.
     pub network: Option<Arc<crate::network::Network>>,
+    /// UPS Safe Mode settings, battery test, pre-Safe Mode hook (needs `ops`); `None`
+    /// answers 503 on its endpoints.
+    pub ups: crate::ups::UpsState,
 }
 
 impl DaemonState {
@@ -89,6 +92,7 @@ impl DaemonState {
             protection: None,
             hardware: None,
             network: None,
+            ups: None,
         }
     }
 }
@@ -156,6 +160,7 @@ pub fn router(state: DaemonState) -> Router {
         .merge(crate::hardware::router(state.hardware.clone()))
         .merge(crate::power::router(state.hardware))
         .merge(crate::network::router(state.network))
+        .merge(crate::ups::router(state.ups))
         .fallback(|| async { Error::not_found("no such endpoint") })
         // 405, query string and path rejections: ApiError bodies too
         .layer(axum::middleware::from_fn(crate::error::json_errors))

@@ -149,6 +149,8 @@ pub fn build_with_rynasd(
         secure_cookies: false,
         notifier: rynas_web::notify::WebNotifier::new(Arc::new(RynasdClient::new(socket))),
         streams: Default::default(),
+        // nothing listens there: "upsd down"
+        ups: rynas_web::ups::UpsMonitor::new("127.0.0.1:9"),
     };
     let streams = state.streams.clone();
     TestApp {

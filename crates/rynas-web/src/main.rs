@@ -27,6 +27,9 @@ struct Args {
     /// synohwd status file (hardware provider on Synology).
     #[arg(long, default_value = "/run/synohwd/status.json")]
     synohwd_status: PathBuf,
+    /// NUT upsd (UPS status, plain-text protocol).
+    #[arg(long, default_value = rynas_web::ups::UPSD)]
+    upsd: String,
     /// Socket of the root daemon rynasd (PAM users and their TOTP secrets).
     #[arg(long, default_value = rynas_auth::ipc::DEFAULT_SOCKET)]
     rynasd_socket: PathBuf,
@@ -246,7 +249,9 @@ fn main() -> std::io::Result<()> {
             mounts: rynas_web::storage::MountProber::new(),
             secure_cookies: args.secure_cookies,
             streams: Default::default(),
+            ups: rynas_web::ups::UpsMonitor::new(&args.upsd),
         };
+        state.ups.spawn();
         rynas_web::notify::spawn_hardware_watch(state.clone());
         let app = app::router(state, ui_dir.clone());
 

@@ -30,6 +30,8 @@ pub struct AppState {
     pub notifier: Arc<crate::notify::WebNotifier>,
     /// Open event streams per session and in total (guidelines M1).
     pub streams: Arc<crate::streams::StreamLimits>,
+    /// UPS status from upsd (`ups.status` events, `GET /ups`).
+    pub ups: Arc<crate::ups::UpsMonitor>,
 }
 
 pub fn router(state: AppState, ui_dir: PathBuf) -> Router {

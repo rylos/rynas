@@ -36,6 +36,7 @@ pub fn router(state: AppState) -> Router {
         .route("/storage/disks", get(storage_api::disks))
         .route("/storage/disks/{name}", get(storage_api::disk))
         .route("/hardware", get(hardware))
+        .route("/ups", get(ups))
         .merge(crate::proxy::routes())
         .route_layer(middleware::from_fn(auth::require_admin));
     let protected = Router::new()
@@ -93,6 +94,10 @@ async fn hardware(State(st): State<AppState>) -> ApiResult<HardwareStatus> {
             format!("hardware provider: {e}"),
         )),
     }
+}
+
+async fn ups(State(st): State<AppState>) -> ApiResult<rynas_api_types::ups::UpsStatus> {
+    Ok(Json(st.ups.status().await))
 }
 
 async fn storage_overview(State(st): State<AppState>) -> ApiResult<StorageOverview> {

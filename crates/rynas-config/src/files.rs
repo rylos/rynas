@@ -30,7 +30,9 @@ pub enum FileKind {
     Block {
         id: String,
         /// Lines outside the block whose first word is one of these are removed (they would
-        /// contradict the block, e.g. another `127.0.1.1` line in `/etc/hosts`).
+        /// contradict the block, e.g. another `127.0.1.1` line in `/etc/hosts`). An entry
+        /// ending in `=` matches a shell assignment (`SAFEMODE_AFTER=` drops
+        /// `SAFEMODE_AFTER=600`).
         #[serde(default)]
         drop_outside: Vec<String>,
     },
@@ -147,7 +149,10 @@ pub fn render_final(kind: &FileKind, content: &str, existing: Option<&str>) -> (
                     continue;
                 }
                 let first = line.split_whitespace().next().unwrap_or("");
-                if !first.starts_with('#') && drop_outside.iter().any(|d| d == first) {
+                let drops = |d: &String| {
+                    d == first || (d.ends_with('=') && first.starts_with(d.as_str()))
+                };
+                if !first.starts_with('#') && drop_outside.iter().any(drops) {
                     continue;
                 }
                 out.push_str(line);
