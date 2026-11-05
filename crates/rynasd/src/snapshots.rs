@@ -900,6 +900,7 @@ async fn root_rollback(
             let plan = rootfs::RootRollback {
                 snapshot: l.dir.join(&id),
                 snapshot_dir: l.dir.clone(),
+                root: PathBuf::from(&sys.subvolume),
                 move_points: points_inside_root(&sys),
                 run_dir: PathBuf::from(rootfs::RUN_DIR),
                 now_s: now_s(),

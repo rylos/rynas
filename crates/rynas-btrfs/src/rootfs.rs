@@ -159,6 +159,8 @@ pub struct RootRollback {
     pub snapshot: PathBuf,
     /// The restore points directory on the running system (`/.snapshots/rootfs`).
     pub snapshot_dir: PathBuf,
+    /// Where the root subvolume is mounted (`/`, the `subvolume` of the restore points).
+    pub root: PathBuf,
     /// Move the restore points into the new root (the directory is inside the root
     /// subvolume, not a separate subvolume or mount).
     pub move_points: bool,
@@ -284,8 +286,8 @@ fn in_top(
 ) -> Result<RolledBackRoot, String> {
     let rel = r
         .snapshot_dir
-        .strip_prefix("/")
-        .map_err(|_| "the restore points directory is not an absolute path".to_string())?;
+        .strip_prefix(&r.root)
+        .map_err(|_| "the restore points directory is not inside the root subvolume".to_string())?;
     let before = ops
         .restore_point(BEFORE_REASON, r.now_s)
         .map_err(|e| format!("restore point of the current system: {e}"))?;
@@ -434,6 +436,12 @@ impl RootOps for HostRoot {
     }
 
     fn mount_top(&self, dir: &Path) -> Result<String, String> {
+        if self.subvolume != Path::new("/") {
+            return Err(format!(
+                "restore points of {} are not of the running root (/)",
+                self.subvolume.display()
+            ));
+        }
         let (subvol, source, fstype) =
             root_mount().ok_or("the root filesystem is not in /proc/self/mountinfo")?;
         if fstype != "btrfs" {
@@ -776,6 +784,7 @@ mod tests {
             id: "rootfs.20261101T0300".into(),
             snapshot: "/.snapshots/rootfs/rootfs.20261101T0300".into(),
             snapshot_dir: "/.snapshots/rootfs".into(),
+            root: "/".into(),
             move_points: true,
             run_dir: "/run/rynas/rollback".into(),
             now_s: 1_793_880_000,
