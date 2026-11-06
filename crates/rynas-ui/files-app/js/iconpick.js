@@ -7,7 +7,7 @@ import { prefs, save } from "./prefs.js";
 import { t } from "./i18n.js";
 import { esc, baseName } from "./format.js";
 import { h } from "./ui.js";
-import { mount, realTarget, place } from "./host.js";
+import { mount, realTarget, place, bounds } from "./host.js";
 import { ICON_CHOICES, ICON_COLORS, folderIcon, autoFolderGlyph } from "./icons.js";
 
 let current = null;
@@ -85,9 +85,10 @@ export function pickIcon(at, path) {
   // beside the icon, inside the window
   const r = at instanceof Element ? at.getBoundingClientRect() : { left: at.x, right: at.x, top: at.y, bottom: at.y };
   const box = el.getBoundingClientRect();
+  const b = bounds();
   let x = r.right + 8;
-  if (x + box.width > innerWidth - 8) x = Math.max(8, r.left - box.width - 8);
-  place(el, x, Math.max(8, Math.min(r.top, innerHeight - box.height - 8)));
+  if (x + box.width > b.right - 8) x = Math.max(b.left + 8, r.left - box.width - 8);
+  place(el, x, Math.max(b.top + 8, Math.min(r.top, b.bottom - box.height - 8)));
   search.focus();
 
   const onDown = (e) => !el.contains(realTarget(e)) && close();
