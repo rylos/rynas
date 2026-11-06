@@ -253,6 +253,8 @@ pub fn ups_events() -> Vec<notify::Notification> {
         acked_ms: None,
         acked_by: None,
         resolved_ms: None,
+        code: String::new(),
+        body_format: Default::default(),
     };
     vec![
         n(3, 95, notify::NotifySeverity::Info, "UPS back online after 2 min on battery"),
