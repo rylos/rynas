@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use rynas_api_types::network::{
     InterfaceConfig, Ipv4Method, LinkKind, NetBackend, NetInterface, NetRevision,
-    NetRollbackReport, NetworkState, RescueLinkLocal, TrialKind,
+    NetRollbackReport, NetworkState, ReadOnlyCode, ReadOnlyReason, RescueLinkLocal, TrialKind,
 };
 use rynas_api_types::notify::{EventState, NewEvent, NotifyCategory, NotifySeverity};
 use rynas_config::FileKind;
@@ -332,33 +332,56 @@ impl Engine {
     }
 
     /// Why an interface cannot be edited, `None` when it can.
-    fn read_only_reason(inv: &Inventory, l: &Link) -> Option<String> {
+    fn read_only(inv: &Inventory, l: &Link) -> Option<ReadOnlyReason> {
+        let code = |code| Some(ReadOnlyReason { code, master: None });
         if l.kind == LinkKind::Loopback {
-            return Some("the loopback interface is not configurable".into());
+            return code(ReadOnlyCode::Loopback);
         }
-        if l.master.is_some() {
-            return Some(format!(
-                "enslaved to {}: bonds and bridges are configured in a later version",
-                l.master.as_deref().unwrap_or("?")
-            ));
+        if let Some(m) = &l.master {
+            return Some(ReadOnlyReason {
+                code: ReadOnlyCode::Enslaved,
+                master: Some(m.clone()),
+            });
         }
         if !(l.kind == LinkKind::Ethernet || inventory::is_port(l)) {
-            return Some("only Ethernet ports are configurable in this version".into());
+            return code(ReadOnlyCode::NotEthernet);
         }
         match inv.backend_of(l) {
             NetBackend::Networkd => None,
-            NetBackend::Ifupdown => Some(
-                "configured by ifupdown (/etc/network/interfaces): use \"let rynas manage\" first"
-                    .into(),
-            ),
-            NetBackend::NetworkManager => {
-                Some("managed by NetworkManager: rynas does not change it".into())
-            }
+            NetBackend::Ifupdown => code(ReadOnlyCode::Ifupdown),
+            NetBackend::NetworkManager => code(ReadOnlyCode::NetworkManager),
             NetBackend::None if inv.services.networkd => None,
-            NetBackend::None => Some(
-                "systemd-networkd is not running: rynas configures interfaces through it".into(),
-            ),
+            NetBackend::None => code(ReadOnlyCode::NoNetworkd),
         }
+    }
+
+    /// The English text of a read-only reason (logs, CLI, conflict messages).
+    fn read_only_text(r: &ReadOnlyReason) -> String {
+        match r.code {
+            ReadOnlyCode::Loopback => "the loopback interface is not configurable".into(),
+            ReadOnlyCode::Enslaved => format!(
+                "enslaved to {}: bonds and bridges are configured in a later version",
+                r.master.as_deref().unwrap_or("?")
+            ),
+            ReadOnlyCode::NotEthernet => {
+                "only Ethernet ports are configurable in this version".into()
+            }
+            ReadOnlyCode::Ifupdown => {
+                "configured by ifupdown (/etc/network/interfaces): use \"let rynas manage\" first"
+                    .into()
+            }
+            ReadOnlyCode::NetworkManager => {
+                "managed by NetworkManager: rynas does not change it".into()
+            }
+            ReadOnlyCode::NoNetworkd => {
+                "systemd-networkd is not running: rynas configures interfaces through it".into()
+            }
+            ReadOnlyCode::Other => "not configurable".into(),
+        }
+    }
+
+    fn read_only_reason(inv: &Inventory, l: &Link) -> Option<String> {
+        Self::read_only(inv, l).map(|r| Self::read_only_text(&r))
     }
 
     /// `GET /network/interfaces`.
@@ -381,7 +404,7 @@ impl Engine {
             } else {
                 None
             };
-            let reason = Self::read_only_reason(&inv, l);
+            let read_only = Self::read_only(&inv, l);
             out.push(NetInterface {
                 name: l.name.clone(),
                 index: l.index,
@@ -399,8 +422,9 @@ impl Engine {
                 dns: l.nd_dns.clone(),
                 backend,
                 managed_by_rynas: managed,
-                editable: reason.is_none(),
-                read_only_reason: reason,
+                editable: read_only.is_none(),
+                read_only_reason: read_only.as_ref().map(Self::read_only_text),
+                read_only,
                 config_file: l.nd_file.clone(),
                 applied,
                 pending: staged.get(&l.name).cloned(),

@@ -782,7 +782,7 @@ fn events_card(st: Remote<SynologyStatus>) -> AnyView {
             <ul class="events">
                 {move || none.get().then(|| view! { <li class="muted">{tr("hw.no_events")}</li> })}
                 <For each=move || events.get() key=|e| e.clone() let:e>
-                    <li><span class="mono small muted">{e.0.map(i18n::short_when).unwrap_or_else(|| "—".into())}</span><span>{e.1}</span></li>
+                    <li><span class="mono small muted">{e.0.map(i18n::short_when).unwrap_or_else(|| "—".into())}</span><span lang="en">{e.1}</span></li>
                 </For>
             </ul>
         }

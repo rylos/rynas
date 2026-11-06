@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
-use rynas_api_types::power::{BootCause, BootInfo, PowerSchedule, WakeArmed, WakeSupport};
+use rynas_api_types::power::{
+    BootCause, BootInfo, PowerSchedule, WakeArmError, WakeArmed, WakeSupport, WakeWarning,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::rules::wake_time;
@@ -69,16 +71,24 @@ pub fn has_wakealarm(root: &Path, rtc: &str) -> bool {
 pub fn support(root: &Path, state: &PowerState) -> WakeSupport {
     let rtc = find_rtc(root);
     let supported = rtc.as_deref().is_some_and(|r| has_wakealarm(root, r));
-    let warning = match &rtc {
-        None => Some("no real-time clock found: the NAS cannot start itself on schedule".into()),
-        Some(r) if !supported => Some(format!(
-            "{r} has no wake alarm: the NAS cannot start itself on schedule"
-        )),
-        Some(_) => state
-            .wake
-            .as_ref()
-            .and_then(|w| w.error.as_ref())
-            .map(|e| format!("the last arming of the wake alarm failed: {e}")),
+    let (warning_code, warning) = match &rtc {
+        None => (
+            Some(WakeWarning::NoRtc),
+            Some("no real-time clock found: the NAS cannot start itself on schedule".into()),
+        ),
+        Some(r) if !supported => (
+            Some(WakeWarning::NoWakeAlarm),
+            Some(format!(
+                "{r} has no wake alarm: the NAS cannot start itself on schedule"
+            )),
+        ),
+        Some(_) => {
+            let e = state.wake.as_ref().and_then(|w| w.error.as_ref());
+            (
+                e.map(|_| WakeWarning::LastArmFailed),
+                e.map(|e| format!("the last arming of the wake alarm failed: {e}")),
+            )
+        }
     };
     WakeSupport {
         supported,
@@ -89,6 +99,7 @@ pub fn support(root: &Path, state: &PowerState) -> WakeSupport {
         rtc,
         last_armed: state.wake.clone(),
         warning,
+        warning_code,
     }
 }
 
@@ -273,18 +284,21 @@ pub fn arm(i: &ArmInput, run: &SetAlarm<'_>) -> WakeArmed {
         }
         .into(),
         error: None,
+        error_code: None,
     };
-    match rtc.as_deref() {
-        Some(r) if has_wakealarm(i.root, r) => {
-            if let Err(e) = run(r, plan.as_ref().map(|(t, _)| *t)) {
-                armed.error = Some(e);
-            }
-        }
+    let failure = match rtc.as_deref() {
+        Some(r) if has_wakealarm(i.root, r) => run(r, plan.as_ref().map(|(t, _)| *t))
+            .err()
+            .map(|e| (WakeArmError::Failed, e)),
         Some(r) if plan.is_some() => {
-            armed.error = Some(format!("{r} has no wake alarm"));
+            Some((WakeArmError::NoWakeAlarm, format!("{r} has no wake alarm")))
         }
-        None if plan.is_some() => armed.error = Some("no real-time clock".into()),
-        _ => {}
+        None if plan.is_some() => Some((WakeArmError::NoRtc, "no real-time clock".into())),
+        _ => None,
+    };
+    if let Some((code, e)) = failure {
+        armed.error_code = Some(code);
+        armed.error = Some(e);
     }
     st.wake = Some(armed.clone());
     if let Err(e) = st.save(i.state_dir) {
@@ -451,12 +465,15 @@ mod tests {
             &run,
         );
         assert_eq!(a.error.as_deref(), Some("no real-time clock"));
+        assert_eq!(a.error_code, Some(WakeArmError::NoRtc));
         assert!(calls.borrow().is_empty());
         let w = support(&root, &PowerState::load(&state));
+        assert_eq!(w.warning_code, Some(WakeWarning::NoRtc));
         assert!(!w.supported && w.warning.unwrap().contains("no real-time clock"));
         // an RTC without wakealarm
         rtc(&root, "rtc0", "pnp0/00:02", false);
         let w = support(&root, &PowerState::default());
+        assert_eq!(w.warning_code, Some(WakeWarning::NoWakeAlarm));
         assert!(!w.supported && w.warning.unwrap().contains("no wake alarm"));
         // with an alarm and no schedule: cleared
         std::fs::write(root.join("sys/class/rtc/rtc0/wakealarm"), "").unwrap();
@@ -471,7 +488,7 @@ mod tests {
             },
             &run,
         );
-        assert_eq!((a.wake_ms, a.error), (None, None));
+        assert_eq!((a.wake_ms, a.error, a.error_code), (None, None, None));
         assert_eq!(calls.borrow()[0], rtcwake_args("rtc0", None));
         // a failing rtcwake is recorded, never raised
         let a = arm(
@@ -486,7 +503,9 @@ mod tests {
             &|_, _| Err("rtcwake: exit code 1".into()),
         );
         assert_eq!(a.error.as_deref(), Some("rtcwake: exit code 1"));
+        assert_eq!(a.error_code, Some(WakeArmError::Failed));
         let w = support(&root, &PowerState::load(&state));
+        assert_eq!(w.warning_code, Some(WakeWarning::LastArmFailed));
         assert!(w.supported && w.warning.unwrap().contains("failed"));
     }
 }

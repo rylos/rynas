@@ -1165,6 +1165,7 @@ kbd {
 .form-row.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .form-row[hidden] { display: none; }
 .field-help { font-size: var(--fs-12); color: var(--text-subtle); }
+.err-detail { display: block; font-size: var(--fs-12); color: var(--text-subtle); }
 .field-error { display: inline-flex; align-items: center; gap: var(--s-1); font-size: var(--fs-12); font-weight: 500; color: var(--danger); }
 .field-error:empty { display: none; }
 .input[aria-invalid="true"] { border-color: var(--danger); }

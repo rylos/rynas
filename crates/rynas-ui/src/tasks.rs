@@ -178,12 +178,14 @@ pub fn task_label(kind: &str) -> String {
     i18n::try_t(&format!("task.{kind}")).map(str::to_string).unwrap_or_else(|| kind.to_string())
 }
 
-/// One-line outcome of a finished task that did not succeed.
+/// Outcome of a finished task that did not succeed, for [`crate::ui::err_view`]: the
+/// translated status, then the task's own error message (system output, English) as the
+/// technical detail.
 pub fn task_error(task: &TaskInfo) -> String {
     match task.status {
         TaskStatus::Cancelled => t("task.st.cancelled").to_string(),
         _ => match &task.error {
-            Some(e) if !e.is_empty() => format!("{}: {e}", t("task.failed")),
+            Some(e) if !e.is_empty() => format!("{}{}{e}", t("task.failed"), crate::api::DETAIL_SEP),
             _ => t("task.failed").to_string(),
         },
     }
@@ -530,7 +532,7 @@ pub fn TaskRun(id: String, on_done: Callback<TaskInfo>) -> impl IntoView {
                 tone=Signal::derive(move || status_tone(status.get()))
             />
             {move || task.with(|t| t.as_ref().filter(|t| t.status.is_finished() && t.status != TaskStatus::Ok).map(task_error)).map(|e| view! {
-                <p class="form-error" role="alert"><Icon icon=icons::CIRCLE_X size=16 /><span>{e}</span></p>
+                <p class="form-error" role="alert"><Icon icon=icons::CIRCLE_X size=16 />{crate::ui::err_view(e)}</p>
             })}
             {crate::form::form_error(lost)}
             {crate::form::form_error(cancel_err)}

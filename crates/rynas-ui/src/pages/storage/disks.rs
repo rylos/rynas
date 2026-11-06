@@ -375,8 +375,9 @@ fn smart_view(sm: SmartInfo) -> AnyView {
                 {ui::table("compact", &["sto.type", "col.status", "#sto.at_hours"], tests.into_iter().map(|s| {
                                 let tone = match s.passed { Some(true) => Tone::Ok, Some(false) => Tone::Err, None => Tone::Unknown };
                                 ui::row(vec![
-                                    ui::cell("sto.type", "", view! { {s.kind} }.into_any()),
-                                    ui::cell("col.status", "", view! { <Status tone=tone text=s.status /> }.into_any()),
+                                    // smartctl's own words
+                                    ui::cell("sto.type", "", view! { <span lang="en">{s.kind}</span> }.into_any()),
+                                    ui::cell("col.status", "", view! { <span lang="en"><Status tone=tone text=s.status /></span> }.into_any()),
                                     ui::cell("sto.at_hours", "num", view! { {s.lifetime_hours.map(|h| h.to_string()).unwrap_or_default()} }.into_any()),
                                 ])
                             }).collect::<Vec<_>>())}

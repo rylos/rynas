@@ -520,6 +520,13 @@ fn ifupdown_is_read_only_until_adopted_then_rolled_back() {
                 .unwrap()
                 .contains("let rynas manage")
     );
+    assert_eq!(
+        lan1.read_only,
+        Some(ReadOnlyReason {
+            code: ReadOnlyCode::Ifupdown,
+            master: None
+        })
+    );
     assert_eq!(lan1.ifupdown[0].address.as_deref(), Some("192.0.2.37/24"));
     assert!(matches!(
         t.e.stage("admin", "lan1", &InterfaceConfig::default()),
@@ -635,4 +642,36 @@ fn migration_at_boot_without_address_goes_back_to_ifupdown() {
     assert_eq!(t.os.read_config(Path::new(INTERFACES)).unwrap(), IFUPDOWN);
     assert_eq!(t.os.addrs("lan1"), vec!["192.0.2.37/24"]);
     assert!(t.os.state.lock().unwrap().active["networking"]);
+}
+
+#[test]
+fn read_only_codes_keep_their_english_text() {
+    let r = |code, master: Option<&str>| {
+        Engine::read_only_text(&ReadOnlyReason {
+            code,
+            master: master.map(str::to_string),
+        })
+    };
+    assert_eq!(
+        r(ReadOnlyCode::Enslaved, Some("bond0")),
+        "enslaved to bond0: bonds and bridges are configured in a later version"
+    );
+    for c in [
+        ReadOnlyCode::Loopback,
+        ReadOnlyCode::NotEthernet,
+        ReadOnlyCode::Ifupdown,
+        ReadOnlyCode::NetworkManager,
+        ReadOnlyCode::NoNetworkd,
+        ReadOnlyCode::Other,
+    ] {
+        assert!(!r(c, None).is_empty());
+    }
+    let j = serde_json::to_string(&ReadOnlyReason {
+        code: ReadOnlyCode::NetworkManager,
+        master: None,
+    })
+    .unwrap();
+    assert_eq!(j, r#"{"code":"network_manager"}"#);
+    let unknown: ReadOnlyReason = serde_json::from_str(r#"{"code":"wifi"}"#).unwrap();
+    assert_eq!(unknown.code, ReadOnlyCode::Other);
 }

@@ -261,7 +261,7 @@ pub fn CreateVolume() -> impl IntoView {
                                 let err = task.error.clone().unwrap_or_default();
                                 view! {
                                     {ui::note(Tone::Err, icons::CIRCLE_X, view! { {tr("sto.done_err")} }.into_any())}
-                                    <p class="form-error"><Icon icon=icons::CIRCLE_X size=16 /><span>{err}</span></p>
+                                    {(!err.is_empty()).then(|| view! { <p class="form-error"><Icon icon=icons::CIRCLE_X size=16 />{ui::tech_detail(err)}</p> })}
                                     <div class="dialog-foot">
                                         <button class="btn ghost" type="button" on:click=move |_| { stage.set(Stage::Form); plan_final(); }>{tr("wiz.back_review")}</button>
                                     </div>

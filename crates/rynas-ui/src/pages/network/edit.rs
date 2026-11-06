@@ -6,7 +6,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use rynas_api_types::network::{InterfaceConfig, IpFamily, Ipv4Method, NetInterface};
 
-use super::{Net, backend_key, check, diff, diff_table, link_state, method_key, speed_text, words};
+use super::{Net, backend_key, read_only_text, check, diff, diff_table, link_state, method_key, speed_text, words};
 use crate::api;
 use crate::form::{In, area_field, save_bar, select_field, text_field};
 use crate::ui::{self, drawer};
@@ -79,10 +79,10 @@ pub fn editor(net: Net, i: NetInterface, close: Callback<()>) -> AnyView {
     let title = if i.editable { tf("edit_named", &[("name", &i.name)]) } else { tf("net.details_title", &[("name", &i.name)]) };
     let details = details(&i);
     if !i.editable {
-        let reason = i.read_only_reason.clone().unwrap_or_default();
+        let (reason, en) = read_only_text(&i);
         let body = view! {
             <div class="form">
-                {ui::note(Tone::Info, icons::LOCK, view! { {tr("net.read_only_text")}" "<span class="muted" lang="en">{reason}</span> }.into_any())}
+                {ui::note(Tone::Info, icons::LOCK, view! { {tr("net.read_only_text")}" "<span class="muted" lang=en.then_some("en")>{reason}</span> }.into_any())}
                 {details}
                 {phase_note()}
             </div>

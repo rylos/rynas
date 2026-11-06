@@ -385,7 +385,7 @@ impl TriggerEdit {
                             {(!p.normalized.is_empty()).then(|| view! { <span class="field-help">{tr("sch.normalized")}" "<code class="mono">{p.normalized.clone()}</code></span> })}
                         }.into_any(),
                         Some(p) => view! {
-                            <p class="field-error" role="alert"><Icon icon=icons::CIRCLE_X size=12 />{tr("sch.v.calendar")}" "{p.error.unwrap_or_default()}</p>
+                            <p class="field-error" role="alert"><Icon icon=icons::CIRCLE_X size=12 /><span class="err-text">{tr("sch.v.calendar")}{p.error.filter(|e| !e.is_empty()).map(ui::tech_detail)}</span></p>
                         }.into_any(),
                         None if checking => view! { <span class="muted small">{tr("sch.checking")}</span> }.into_any(),
                         None => ().into_any(),

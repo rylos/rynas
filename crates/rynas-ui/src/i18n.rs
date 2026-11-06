@@ -465,6 +465,7 @@ dict! {
     "tasks.close_log" => "Close log", "Chiudi log";
     "tasks.background" => "You can close this window: the task keeps running.", "Puoi chiudere questa finestra: l'attività continua.";
     "task.failed" => "Failed", "Non riuscita";
+    "tech_details" => "Technical details:", "Dettagli tecnici:";
     "task.st.ok" => "OK", "OK";
     "task.st.error" => "Error", "Errore";
     "task.st.cancelled" => "Stopped", "Interrotta";
@@ -537,6 +538,15 @@ dict! {
     "cfg.state_mismatch" => "Different", "Diverso";
     "cfg.state_missing_samba" => "No SMB account", "Senza account SMB";
     "cfg.state_missing_passwd" => "SMB account without user", "Account SMB senza utente";
+    "cfg.sd.samba_without_user" => "The SMB account {name} has no system user.", "L'account SMB {name} non ha un utente di sistema.";
+    "cfg.sd.user_unmanaged" => "{name} (UID {id}) was created outside rynas.", "{name} (UID {id}) è stato creato fuori da rynas.";
+    "cfg.sd.user_missing" => "{name} is in the configuration but not on the system.", "{name} è nella configurazione ma non nel sistema.";
+    "cfg.sd.user_mismatch" => "The account settings of {name} differ from the configuration.", "Le impostazioni dell'account {name} sono diverse dalla configurazione.";
+    "cfg.sd.user_without_samba" => "{name} has SMB access but no SMB account: set the password again.", "{name} ha accesso SMB ma nessun account SMB: imposta di nuovo la password.";
+    "cfg.sd.group_missing" => "The group {name} is in the configuration but not on the system.", "Il gruppo {name} è nella configurazione ma non nel sistema.";
+    "cfg.sd.group_unmanaged" => "The group {name} (GID {id}) was created outside rynas.", "Il gruppo {name} (GID {id}) è stato creato fuori da rynas.";
+    "cfg.sd.share_path_missing" => "{path} does not exist any more.", "{path} non esiste più.";
+    "cfg.sd.share_acl_differs" => "The permissions of {path} differ (group membership changed or edited by hand). Missing: {missing}. Unexpected: {extra}.", "I permessi di {path} sono diversi (appartenenza ai gruppi cambiata o modifica a mano). Mancanti: {missing}. Inattesi: {extra}.";
     "cfg.col_what" => "File or object", "File o oggetto";
     "cfg.col_key" => "Setting", "Impostazione";
     "cfg.col_state" => "State", "Stato";
@@ -885,7 +895,9 @@ dict! {
     "ps.time_zone" => "Time zone", "Fuso orario";
     "ps.wake_alarm" => "RTC wake alarm", "Sveglia RTC";
     "ps.not_armed" => "Not set", "Non impostata";
-    "ps.arm_error" => "The wake alarm could not be set: {e}", "Non è stato possibile impostare la sveglia: {e}";
+    "ps.arm_error" => "The wake alarm could not be set.", "Non è stato possibile impostare la sveglia.";
+    "ps.ww.no_rtc" => "No real-time clock found: the NAS cannot start itself on schedule.", "Nessun orologio di sistema trovato: il NAS non può accendersi da solo in base alla pianificazione.";
+    "ps.ww.no_wake_alarm" => "The clock {rtc} has no wake alarm: the NAS cannot start itself on schedule.", "L'orologio {rtc} non ha una sveglia: il NAS non può accendersi da solo in base alla pianificazione.";
     "ps.wake_unsupported" => "Not supported here", "Non supportata qui";
     "ps.wake_unsupported_help" => "This machine has no RTC wake alarm: startup rules cannot start it. Shutdown rules still work.", "Questa macchina non ha una sveglia RTC: le regole di accensione non possono avviarla. Le regole di spegnimento funzionano comunque.";
     "ps.prev_clean" => "Previous shutdown clean", "Spegnimento precedente pulito";
@@ -2077,6 +2089,9 @@ dict! {
     "snap.latest" => "Latest", "Più recente";
     "snap.latest_at" => "Latest {when}", "Ultimo {when}";
     "snap.reason" => "Reason: {r}", "Motivo: {r}";
+    "snap.why.apt" => "Before package changes", "Prima di modifiche ai pacchetti";
+    "snap.why.manual" => "Taken by hand", "Creato a mano";
+    "snap.why.before_rollback" => "System before a rollback", "Sistema prima di un rollback";
     "snap.browse" => "Browse", "Sfoglia";
     "snap.browse_title" => "Browse {id}", "Sfoglia {id}";
     "snap.path" => "Folder", "Cartella";
@@ -2301,6 +2316,12 @@ dict! {
     "net.none_text" => "The system reports no network interface rynas can show.", "Il sistema non segnala interfacce di rete da mostrare.";
     "net.details_title" => "Details of {name}", "Dettagli di {name}";
     "net.read_only_text" => "This interface is read-only in rynas.", "Questa interfaccia è in sola lettura in rynas.";
+    "net.ro.loopback" => "The loopback interface cannot be configured.", "L'interfaccia di loopback non è configurabile.";
+    "net.ro.enslaved" => "It is a port of {master}: bonds and bridges become configurable in a later version.", "È una porta di {master}: bond e bridge diventano configurabili in una versione successiva.";
+    "net.ro.not_ethernet" => "Only Ethernet ports can be configured in this version.", "In questa versione si possono configurare solo le porte Ethernet.";
+    "net.ro.ifupdown" => "Configured by ifupdown (/etc/network/interfaces): use Let rynas manage first.", "Configurata da ifupdown (/etc/network/interfaces): usa prima Affida a rynas.";
+    "net.ro.network_manager" => "Managed by NetworkManager: rynas does not change it.", "Gestita da NetworkManager: rynas non la modifica.";
+    "net.ro.no_networkd" => "systemd-networkd is not running: rynas configures the interfaces through it.", "systemd-networkd non è in esecuzione: rynas configura le interfacce tramite questo servizio.";
     "net.mgmt_edit" => "You are connected through this interface. The change is tested with a timed confirmation; if its address changes you will reconnect at the new one.", "Sei collegato tramite questa interfaccia. La modifica viene provata con conferma a tempo; se cambia l'indirizzo ti ricollegherai a quello nuovo.";
     "net.has_pending" => "This interface already has a staged change: you are editing it.", "Questa interfaccia ha già una modifica preparata: la stai modificando.";
     "net.sec_ipv4" => "IPv4", "IPv4";

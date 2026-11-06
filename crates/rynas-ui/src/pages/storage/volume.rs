@@ -143,7 +143,7 @@ fn done_view(t: &TaskInfo, on_close: Callback<()>) -> AnyView {
     let err = t.error.clone();
     view! {
         {ui::note(tone, tone.icon(), view! { {tr(key)} }.into_any())}
-        {err.map(|e| view! { <p class="form-error"><Icon icon=icons::CIRCLE_X size=16 /><span>{e}</span></p> })}
+        {err.map(|e| view! { <p class="form-error"><Icon icon=icons::CIRCLE_X size=16 />{ui::tech_detail(e)}</p> })}
         <div class="dialog-foot"><button class="btn primary" type="button" on:click=move |_| on_close.run(())>{tr("close")}</button></div>
     }
     .into_any()

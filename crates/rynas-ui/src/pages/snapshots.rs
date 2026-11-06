@@ -9,7 +9,7 @@ use leptos::task::spawn_local;
 use rynas_api_types::scheduler::{TaskTrigger, TaskView};
 use rynas_api_types::snapshots::{
     EntryKind, RestoreMode, RestoreRequest, Retention, RetentionPreset, RetentionPreview, RetentionPreviewRequest, RollbackPreview, RollbackRefusal, RollbackRequest, SnapshotDeletion,
-    SnapshotEntry, SnapshotInfo, SnapshotJob, SnapshotJobRequest, SnapshotJobView, SnapshotListing, SystemSnapshots,
+    RestorePointReason, SnapshotEntry, SnapshotInfo, SnapshotJob, SnapshotJobRequest, SnapshotJobView, SnapshotListing, SystemSnapshots,
 };
 use rynas_api_types::{ShareView, TaskStarted, TaskStatus};
 
@@ -192,7 +192,7 @@ fn snapshots_panel(jobs: Remote<Vec<SnapshotJobView>>, system: Remote<SystemSnap
                                     <div class="chips">
                                         {if s.readonly { view! { <span class="chip"><Icon icon=icons::LOCK size=12 />{tr("snap.readonly")}</span> }.into_any() } else { ui::status(Tone::Warn, t("snap.writable").to_string()) }}
                                         {(s.deletion == SnapshotDeletion::Latest).then(|| view! { <span class="chip accent">{tr("snap.latest")}</span> })}
-                                        {s.reason.clone().map(|r| view! { <span class="chip">{tf("snap.reason", &[("r", &r)])}</span> })}
+                                        {reason_text(&s).map(|r| view! { <span class="chip">{r}</span> })}
                                     </div>
                                 }
                                 .into_any()),
@@ -999,9 +999,35 @@ fn system_panel(system: Remote<SystemSnapshots>) -> AnyView {
     view! { {form} }.into_any()
 }
 
+/// Why a system restore point was taken: translated for the reasons rynas gives, the
+/// administrator's own text (`rynasctl snapshot system --reason`) as it is.
+fn reason_text(s: &SnapshotInfo) -> Option<String> {
+    let key = match s.reason_code {
+        Some(RestorePointReason::Apt) => "snap.why.apt",
+        Some(RestorePointReason::Manual) => "snap.why.manual",
+        Some(RestorePointReason::BeforeRollback) => "snap.why.before_rollback",
+        Some(RestorePointReason::Other) | None => return s.reason.as_ref().map(|r| tf("snap.reason", &[("r", r)])),
+    };
+    Some(t(key).to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restore_point_reasons() {
+        let mut s = SnapshotInfo { reason: Some("apt".into()), reason_code: Some(RestorePointReason::Apt), ..Default::default() };
+        assert_eq!(reason_text(&s).as_deref(), Some("Before package changes"));
+        // the administrator's own text, and an older server without codes
+        s.reason = Some("before upgrade".into());
+        s.reason_code = Some(RestorePointReason::Other);
+        assert_eq!(reason_text(&s).as_deref(), Some("Reason: before upgrade"));
+        s.reason_code = None;
+        assert_eq!(reason_text(&s).as_deref(), Some("Reason: before upgrade"));
+        s.reason = None;
+        assert_eq!(reason_text(&s), None);
+    }
 
     #[test]
     fn job_names() {
