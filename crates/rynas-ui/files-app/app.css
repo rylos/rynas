@@ -8,12 +8,12 @@
 
 .sf {
   /* SynoFile's names over the rynas tokens (--bg, --surface, --surface-2, --border,
-     --border-strong, --text, --accent, --accent-2, --font, --mono have the same names) */
+     --border-strong, --text, --accent, --accent-2, --font, --mono, and the file manager's own
+     --surface-3, --row-sel, --eza-* tokens come from style/main.css) */
   --muted: var(--text-muted);
   --faint: var(--text-subtle);
-  --surface-3: var(--bg-sunken);
   --accent-soft: color-mix(in oklch, var(--accent) 16%, var(--surface));
-  --sel: color-mix(in oklch, var(--accent) 24%, var(--surface));
+  --sel: var(--row-sel);
   --sel-border: var(--accent);
   --ok: var(--success);
   --ok-soft: color-mix(in oklch, var(--success-fill) 18%, var(--surface));
@@ -25,17 +25,18 @@
   --radius: var(--r-md);
   --fs: var(--fs-14);
   --row: 30px;
-  /* eza's colours over the rynas palette */
-  --t-black: var(--text);
-  --t-red: var(--danger);
-  --t-green: var(--success);
-  --t-yellow: var(--warning);
-  --t-blue: var(--accent);
-  --t-purple: var(--accent-2);
-  --t-cyan: var(--info);
-  --t-white: var(--text-muted);
-  --t-gray: var(--text-disabled);
-  --sys: var(--text-subtle); /* system folders */
+  /* eza's colours: the --eza-* tokens of style/main.css (dark = SynoFile's own terminal
+     palette, light = the rynas palette) */
+  --t-black: var(--eza-text);
+  --t-red: var(--eza-red);
+  --t-green: var(--eza-green);
+  --t-yellow: var(--eza-yellow);
+  --t-blue: var(--eza-blue);
+  --t-purple: var(--eza-purple);
+  --t-cyan: var(--eza-cyan);
+  --t-white: var(--eza-white);
+  --t-gray: var(--eza-gray);
+  --sys: var(--eza-sys); /* system folders */
 
   /* a size container: the layout follows the room the shell leaves (not the window), and
      the fixed overlays (menus, drawer, toasts, editor) stay inside the Files page;

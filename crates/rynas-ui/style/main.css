@@ -1,5 +1,6 @@
 /* rynas design system — hand written, no build step.
-   Tokens: docs/phase0/02-ui.md (Fusion / Tokyo Night palette with WCAG 2.2 fixes). */
+   Tokens: docs/phase0/02-ui.md (light: Fusion / Tokyo Night Light with WCAG 2.2 fixes;
+   dark: SynoFile's dark palette, docs/quality/guidelines.md G12). */
 
 @font-face {
   font-family: "Inter";
@@ -66,6 +67,13 @@
   --bay: #fbfcfd; --bay-2: #eceef3; --bay-border: #737788; --bay-border-hover: #2959aa;
   --bay-empty: #e3e5eb; --bay-empty-2: #d6d9e1; --bay-grill: #a4a8b6;
   --on-badge: #ffffff; --on-warn-badge: #1a1b26;
+  /* file manager rows (files-app/app.css): selection and eza's colours, light = the rynas palette */
+  --row-sel: color-mix(in oklch, var(--accent) 24%, var(--surface));
+  --surface-3: var(--bg-sunken); /* raised controls, hovered crumbs and buttons */
+  --eza-text: var(--text); --eza-red: var(--danger); --eza-green: var(--success);
+  --eza-yellow: var(--warning); --eza-blue: var(--accent); --eza-purple: var(--accent-2);
+  --eza-cyan: var(--info); --eza-white: var(--text-muted); --eza-gray: var(--text-disabled);
+  --eza-sys: var(--text-subtle);
   --border-raised: var(--border);
   --shadow-up: 0 -4px 16px rgba(0, 0, 0, .04);
 
@@ -91,53 +99,70 @@
 }
 
 :root[data-theme="dark"] {
+  /* SynoFile's dark palette (Marco 2026-11-06: as dark and readable as the file manager):
+     neutral graphite layers, near-white text; derived values keep text ≥ 4.5:1 and UI
+     borders ≥ 3:1 on every surface (table in docs/quality/guidelines.md, G12) */
   color-scheme: dark;
-  --bg: #1a1b26;
-  --bg-sunken: #16161e;
-  --surface: #24283b;
-  --surface-nav: #12121c;
-  --surface-appbar: #1f2335;
-  --surface-hover: #2f3549;
-  --surface-striped: #16161d;
-  --surface-2: #1f2335;
-  --border: #292e42;
-  --border-strong: #6b7399;
-  --text: #c0caf5;
-  --text-muted: #a9b1d6;
-  --text-subtle: #868fb8;
-  --text-disabled: #565f89;
-  --accent: #7aa2f7;
-  --accent-2: #bb9af7;
-  --info: #7dcfff;
-  --success: #73daca;
-  --success-fill: #73daca;
-  --warning: #e0af68;
-  --warning-fill: #e0af68;
-  --danger: #f7768e;
-  --on-accent: #1a1b26;
-  --c1: #7aa2f7;
-  --c2: #bb9af7;
-  --c3: #7dcfff;
-  --c4: #73daca;
-  --c5: #e0af68;
-  --chart-grid: rgba(192, 202, 245, .09);
+  --bg: #14171c;
+  --bg-sunken: #0f1216;
+  --surface: #1c2027;
+  --surface-nav: #111418;
+  --surface-appbar: #171a20;
+  --surface-hover: #2a303c;
+  --surface-striped: #191d23;
+  --surface-2: #222731;
+  --border: #2e3440;
+  --border-strong: #727b90;
+  --text: #e4e7ec;
+  --text-muted: #b0b8c4;
+  --text-subtle: #98a2b3;
+  --text-disabled: #667085;
+  --accent: #5b9cf5;
+  --accent-2: #978af7;
+  --info: #56c2e6;
+  --success: #3cc47c;
+  --success-fill: #3cc47c;
+  --warning: #e7a93a;
+  --warning-fill: #e7a93a;
+  --danger: #f37575;
+  --on-accent: #14171c;
+  --c1: #5b9cf5;
+  --c2: #978af7;
+  --c3: #56c2e6;
+  --c4: #3cc47c;
+  --c5: #e7a93a;
+  --chart-grid: rgba(228, 231, 236, .08);
   --shadow-1: none;
   --shadow-2: 0 0 0 1px rgba(255, 255, 255, .02);
-  --shadow-pop: 0 20px 60px rgba(0, 0, 0, .55), 0 0 0 1px #3b4261;
-  --glass: rgba(31, 35, 53, .78);
-  --scrim: rgba(0, 0, 0, .5);
-  --track: rgba(192, 202, 245, .1);
+  --shadow-pop: 0 10px 40px rgba(0, 0, 0, .55), 0 2px 8px rgba(0, 0, 0, .4), 0 0 0 1px #3b4252;
+  --glass: rgba(23, 26, 32, .8);
+  --scrim: rgba(0, 0, 0, .55);
+  --track: rgba(228, 231, 236, .1);
+  /* file manager rows: selection, and eza's colours over SynoFile's terminal palette
+     (system folders and the grey of empty permission bits lifted to 4.5:1 on a selected row) */
+  --row-sel: #203253;
+  --surface-3: #2a303c;
+  --eza-text: #e4e7ec;
+  --eza-red: #da8199;
+  --eza-green: #a6e3a1;
+  --eza-yellow: #f9e2af;
+  --eza-blue: #89b4fa;
+  --eza-purple: #f5c2e7;
+  --eza-cyan: #89dceb;
+  --eza-white: #bac2de;
+  --eza-gray: #949bae;
+  --eza-sys: #959cb2;
   /* chassis drawing, dark case */
-  --chassis: #16161e;
-  --chassis-2: #0f0f15;
-  --led-ok: #73daca; --led-warn: #e0af68; --led-err: #f7768e; --led-unknown: #a9b1d6;
-  --led-green: #3fd68f; --led-orange: #ff9e3b; --led-off: #565f89;
-  --chassis-text: #c0caf5; --chassis-text-2: #a9b1d6; --chassis-text-3: #868fb8;
-  --chassis-hi: rgba(255, 255, 255, .06); --chassis-line: rgba(255, 255, 255, .06); --chassis-shadow: rgba(0, 0, 0, .18);
-  --bay: #343849; --bay-2: #262936; --bay-border: #3b4261; --bay-border-hover: #6b7399;
-  --bay-empty: #22242f; --bay-empty-2: #1d1f28; --bay-grill: #1a1b26;
-  --on-badge: #1a1b26;
-  --border-raised: #3b4261;
+  --chassis: #101318;
+  --chassis-2: #0b0d10;
+  --led-ok: #3cc47c; --led-warn: #e7a93a; --led-err: #f37575; --led-unknown: #b0b8c4;
+  --led-green: #3fd68f; --led-orange: #ff9e3b; --led-off: #4a5262;
+  --chassis-text: #e4e7ec; --chassis-text-2: #b0b8c4; --chassis-text-3: #98a2b3;
+  --chassis-hi: rgba(255, 255, 255, .06); --chassis-line: rgba(255, 255, 255, .06); --chassis-shadow: rgba(0, 0, 0, .25);
+  --bay: #2f3541; --bay-2: #232832; --bay-border: #3b4252; --bay-border-hover: #727b90;
+  --bay-empty: #1f232b; --bay-empty-2: #1a1d24; --bay-grill: #14171c;
+  --on-badge: #14171c;
+  --border-raised: #3b4252;
 }
 
 :root[data-density="compact"] {
