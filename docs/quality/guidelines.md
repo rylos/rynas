@@ -239,6 +239,59 @@ first, reviewed, then used.
   `role="status"`. Charts have `role="img"` and a text `aria-label` with the current value.
 - G12 MUST: text contrast ≥ 4.5:1, UI borders/icons ≥ 3:1 in both themes (tokens in `02-ui.md` are
   already corrected; new tokens need their ratio in the PR).
+
+#### Dark theme palette (Marco 2026-11-06)
+The dark theme uses **SynoFile's dark palette** (`synofile/ui/app.css`), not Tokyo Night storm:
+neutral graphite layers and near-white text, for readability and so the file manager looks the
+same inside rynas as on its own. Roles are unchanged; values are SynoFile's, or derived from it
+where SynoFile's own value is below AA (its `--faint` #667085 is 3.3:1 on its surface, so
+`--text-subtle` is its `--muted` #98a2b3 and `--text-muted` a lighter #b0b8c4; `--border-strong`
+is lifted to #727b90 for 3:1 input borders; `--accent-2`/`--danger` slightly lighter than
+#8b7cf6/#f06b6b so they stay ≥ 4.5:1 on hovered rows and tinted chips). The light theme is the
+Tokyo Night Light palette of `02-ui.md`, unchanged.
+
+| Layer | Token | Dark |
+|---|---|---|
+| page | `--bg` / `--bg-sunken` (inputs, code) | #14171c / #0f1216 |
+| sidebar / app bar | `--surface-nav` / `--surface-appbar` | #111418 / #171a20 |
+| cards, dialogs | `--surface` / `--surface-2` / `--surface-striped` | #1c2027 / #222731 / #191d23 |
+| hover, raised controls | `--surface-hover`, `--surface-3` | #2a303c |
+| borders | `--border` / `--border-raised` / `--border-strong` | #2e3440 / #3b4252 / #727b90 |
+| text | `--text` / `--text-muted` / `--text-subtle` / `--text-disabled` | #e4e7ec / #b0b8c4 / #98a2b3 / #667085 |
+| accent | `--accent` / `--accent-2` / `--on-accent` | #5b9cf5 / #978af7 / #14171c |
+| states | `--info` / `--success` / `--warning` / `--danger` | #56c2e6 / #3cc47c / #e7a93a / #f37575 |
+| charts | `--c1`…`--c5` | accent, accent-2, info, success, warning |
+| file manager | `--row-sel`, `--eza-*` | #203253; eza's colours = SynoFile's terminal palette (#89b4fa dirs, #a6e3a1 files…), grey and system folders lifted to ≥ 4.5:1 |
+| chassis | `--chassis` / `--bay` / `--bay-2` | #101318 / #2f3541 / #232832 |
+
+Contrast (WCAG 2.x ratio, text on background; ≥ 4.5 required, `--border-strong` ≥ 3):
+
+| Token | Dark | on `bg` #14171c | on `bg-sunken` #0f1216 | on `surface` #1c2027 | on `surface-2` #222731 | on `surface-hover / surface-3` #2a303c | on `row-sel` #203253 |
+|---|---|---|---|---|---|---|---|
+| `--text` | #e4e7ec | 14.5 | 15.1 | 13.2 | 12.1 | 10.7 | 10.3 |
+| `--text-muted` | #b0b8c4 | 9.0 | 9.4 | 8.2 | 7.5 | 6.6 | 6.4 |
+| `--text-subtle` | #98a2b3 | 7.0 | 7.3 | 6.3 | 5.8 | 5.1 | 5.0 |
+| `--accent` | #5b9cf5 | 6.4 | 6.7 | 5.8 | 5.4 | 4.7 | 4.6 |
+| `--accent-2` | #978af7 | 6.2 | 6.5 | 5.7 | 5.2 | 4.6 | 4.4 |
+| `--info` | #56c2e6 | 8.8 | 9.2 | 8.0 | 7.3 | 6.5 | 6.2 |
+| `--success` | #3cc47c | 8.0 | 8.4 | 7.3 | 6.7 | 5.9 | 5.7 |
+| `--warning` | #e7a93a | 8.7 | 9.1 | 7.9 | 7.2 | 6.4 | 6.2 |
+| `--danger` | #f37575 | 6.5 | 6.8 | 5.9 | 5.4 | 4.8 | 4.6 |
+| `--border-strong` (UI) | #727b90 | 4.2 | 4.4 | 3.9 | 3.5 | 3.1 | 3.0 |
+| `--eza-blue` | #89b4fa | 8.5 | 8.9 | 7.8 | 7.1 | 6.3 | 6.1 |
+| `--eza-green` | #a6e3a1 | 12.1 | 12.6 | 11.0 | 10.1 | 8.9 | 8.6 |
+| `--eza-yellow` | #f9e2af | 14.1 | 14.8 | 12.9 | 11.8 | 10.4 | 10.1 |
+| `--eza-red` | #da8199 | 6.5 | 6.8 | 5.9 | 5.4 | 4.8 | 4.6 |
+| `--eza-purple` | #f5c2e7 | 11.8 | 12.3 | 10.7 | 9.8 | 8.7 | 8.4 |
+| `--eza-cyan` | #89dceb | 11.5 | 12.1 | 10.5 | 9.6 | 8.5 | 8.2 |
+| `--eza-white` | #bac2de | 10.1 | 10.6 | 9.2 | 8.5 | 7.5 | 7.2 |
+| `--eza-gray` | #949bae | 6.5 | 6.8 | 5.9 | 5.4 | 4.8 | 4.6 |
+| `--eza-sys` | #959cb2 | 6.6 | 6.9 | 6.0 | 5.5 | 4.8 | 4.7 |
+
+`--accent-2` on `--row-sel` (4.4) does not occur: no accent-2 text on a selected file row. Filled
+badges and buttons put `--on-accent` #14171c on the fill: 6.4 on accent, 8.0 success, 8.7 warning,
+6.5 danger. Chassis: `--chassis-text-3` 4.8 on a bay tile, LEDs ≥ 4.5 on the tile, the bay
+outline on hover 4.4 on the case. A new dark token needs its row here.
 - G13 MUST: honour `prefers-reduced-motion` (no chart slide, no skeleton shimmer).
 
 ### 2.5 Real data only
