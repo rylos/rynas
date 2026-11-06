@@ -241,6 +241,11 @@ fn open_config(
         },
         Arc::new(rynas_scheduler::domain::system_uid),
     ));
+    // hardware modules (D-MODULE): registered only where their hardware or system layer is
+    let modules = rynasd::modules::detect(&args.hw_root, &root, args.dry_system);
+    for m in modules.iter() {
+        tracing::info!("module {}", m.summary());
+    }
     let mut domains: Vec<Arc<dyn rynas_config::Applier>> = vec![
         Arc::new(HostnameDomain),
         homes.clone(),
@@ -254,6 +259,7 @@ fn open_config(
             rynasctl: PathBuf::from(rynas_btrfs::domain::RYNASCTL),
             state_dir: args.state_dir.clone(),
             hw_root: args.hw_root.clone(),
+            alarm_reader: modules.wake_clock().map(|c| c.read_by_unit.to_string()),
         }),
         Arc::new(rynas_net::rescue::RescueDomain {
             web_port: args.web_port,
@@ -261,11 +267,6 @@ fn open_config(
         }),
         Arc::new(rynas_updates::AutoDomain),
     ];
-    // hardware modules (D-MODULE): registered only where their hardware or system layer is
-    let modules = rynasd::modules::detect(&args.hw_root, &root, args.dry_system);
-    for m in modules.iter() {
-        tracing::info!("module {}", m.summary());
-    }
     domains.extend(modules.domains());
     // ups.safemode: a module layer's policy file, else the rynas policy file read by rynasd's
     // NUT watcher
@@ -706,6 +707,7 @@ fn main() -> std::io::Result<()> {
         state.hardware = Some(Arc::new(rynasd::hardware::Hardware {
             ops: ops.clone(),
             control: opened.modules.hardware_control(),
+            wake_rtc: opened.modules.wake_clock().map(|c| c.rtc_device_suffix),
             hw_root: args.hw_root.clone(),
             state_dir: args.state_dir.clone(),
             notifier: notifier.clone(),
@@ -733,14 +735,13 @@ fn main() -> std::io::Result<()> {
             .with_web(rynas_net::txn::WebInfo {
                 port: args.web_port,
                 https: args.web_https,
-            }),
+            })
+            .with_feedback(opened.modules.rescue_feedback()),
         );
-        let network = Arc::new(rynasd::network::Network::new(
-            ops.clone(),
-            net_engine,
-            notifier.clone(),
-            args.dry_system,
-        ));
+        let network = Arc::new(
+            rynasd::network::Network::new(ops.clone(), net_engine, notifier.clone(), args.dry_system)
+                .with_modules(opened.modules.clone()),
+        );
         rynasd::network::spawn_event_flush(network.clone());
         state.network = Some(network);
         // the hardware modules' routes (/v1/modules/<id>/...)

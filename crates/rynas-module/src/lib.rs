@@ -30,14 +30,22 @@
 //! - [`Module::boot`]: a [`boot::BootLayer`] when the machine boots from a device of its own
 //!   (its entries on the updates page, the boot half of a root rollback). Without one the
 //!   updates page shows the kernels in `/boot` and a root rollback is a console procedure.
+//! - [`Module::rescue_feedback`]: how the machine signals the network rescue paths (beeps,
+//!   LEDs; `rynas_net::rescue::Feedback`). Without one they are silent.
+//! - [`Module::reset_button`]: the machine's reset button and whether a double press restores
+//!   the factory network (a setting of the module's own), shown read-only on Network › Rescue.
+//! - [`Module::wake_clock`]: the real-time clock that powers the machine on and the unit that
+//!   reads its alarm at shutdown (the power schedule). Without one `rtc0` (or the first RTC).
 //!
 //! The web interface has the matching rule: a module's pages, tabs and texts live in the UI's
 //! module folder and are shown only where the module answers.
 
 use std::sync::Arc;
 
+use rynas_api_types::network::ResetButton;
 use rynas_config::{Applier, Config};
 use rynas_hw::HardwareControl;
+pub use rynas_net::rescue::{Feedback, Signal};
 
 pub mod boot;
 pub mod http;
@@ -105,6 +113,32 @@ pub trait Module: Send + Sync {
     fn boot(&self) -> Option<Arc<dyn BootLayer>> {
         None
     }
+
+    /// How the machine signals the network rescue paths.
+    fn rescue_feedback(&self) -> Option<Arc<dyn Feedback>> {
+        None
+    }
+
+    /// The reset button as `owner` sees it (staged value included); `Ok(None)` without one.
+    fn reset_button(&self, _cfg: &Config, _owner: &str) -> Result<Option<ResetButton>, String> {
+        Ok(None)
+    }
+
+    /// The real-time clock that powers the machine on.
+    fn wake_clock(&self) -> Option<WakeClock> {
+        None
+    }
+}
+
+/// The wake clock of a machine (the power schedule's startups).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WakeClock {
+    /// End of the name of the RTC's `device` (`-0030`: an I²C clock at address 0x30); that
+    /// RTC is armed instead of `rtc0`.
+    pub rtc_device_suffix: &'static str,
+    /// The unit whose stop reads the alarm (`rynas-power-wake.service` is ordered after it,
+    /// so it writes the alarm first at shutdown).
+    pub read_by_unit: &'static str,
 }
 
 /// The modules detected on this machine (none on a plain Debian).
@@ -168,6 +202,26 @@ impl Modules {
         })
     }
 
+    /// The first module's rescue feedback.
+    pub fn rescue_feedback(&self) -> Option<Arc<dyn Feedback>> {
+        self.0.iter().find_map(|m| m.rescue_feedback())
+    }
+
+    /// The first module's reset button.
+    pub fn reset_button(&self, cfg: &Config, owner: &str) -> Result<Option<ResetButton>, String> {
+        for m in &self.0 {
+            if let Some(b) = m.reset_button(cfg, owner)? {
+                return Ok(Some(b));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The first module's wake clock.
+    pub fn wake_clock(&self) -> Option<WakeClock> {
+        self.0.iter().find_map(|m| m.wake_clock())
+    }
+
     /// The first module's boot layer (one machine boots one way).
     pub fn boot(&self) -> Option<Arc<dyn BootLayer>> {
         self.0.iter().find_map(|m| m.boot())
@@ -202,7 +256,7 @@ mod tests {
         assert!(m.notify_imports().is_empty() && m.system_disk_usb_ids().is_empty());
         assert!(m.domains().is_empty() && Modules::none().is_empty());
         assert!(m.hardware_control().is_none() && m.ids() == ["bare"]);
-        assert!(m.boot().is_none());
+        assert!(m.boot().is_none() && m.rescue_feedback().is_none() && m.wake_clock().is_none());
         assert_eq!(m.iter().map(|m| m.id()).collect::<Vec<_>>(), ["bare"]);
     }
 }

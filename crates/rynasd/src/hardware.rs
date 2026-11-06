@@ -27,6 +27,8 @@ pub struct Hardware {
     pub ops: Arc<Ops>,
     /// Actions of the hardware module's provider; `None`: no module hardware.
     pub control: Option<Arc<dyn HardwareControl>>,
+    /// The hardware module's wake clock (`rynas_power::wake::find_rtc`).
+    pub wake_rtc: Option<&'static str>,
     /// Root of `/sys`, `/proc`, `/run` (tests: a fake tree).
     pub hw_root: PathBuf,
     /// rynasd's state directory (`power/state.json`).

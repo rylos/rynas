@@ -41,6 +41,14 @@ pub fn ups_key(slot: UpsSlot) -> &'static str {
     synology::ups_key(slot)
 }
 
+/// The reset button section of Network › Rescue, by the module that has the button.
+pub fn reset_button(b: &rynas_api_types::network::ResetButton) -> Option<leptos::prelude::AnyView> {
+    match b.module.as_str() {
+        "synology" => Some(synology::reset_button(b)),
+        _ => None,
+    }
+}
+
 /// The label of a notification source sent by a module's tools, if it is one.
 pub fn source_label(source: &str) -> Option<&'static str> {
     synology::source_label(source)

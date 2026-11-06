@@ -176,7 +176,7 @@ pub fn rescue_panel(net: Net) -> AnyView {
             .collect();
         // the reset button is a hardware module's feature: the section exists only where the
         // hardware has it
-        let reset = r.synology.then(|| crate::modules::synology::reset_button(&r));
+        let reset = r.reset_button.as_ref().and_then(crate::modules::reset_button);
         view! {
             <div class="net-rescue">
                 <section class="net-rescue-sec">

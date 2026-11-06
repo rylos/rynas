@@ -30,14 +30,31 @@ fn ip(s: &str) -> Option<IpAddr> {
 
 fn log(_: &str) {}
 
+/// Records the rescue signals, one per line, in `<state>/signals`.
+struct Signals(PathBuf);
+
+impl crate::rescue::Feedback for Signals {
+    fn signal(&self, s: crate::rescue::Signal) {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&self.0)
+            .unwrap();
+        writeln!(f, "{s:?}").unwrap();
+    }
+}
+
+fn signals(e: &Engine) -> String {
+    std::fs::read_to_string(e.paths.run.parent().unwrap().join("signals")).unwrap_or_default()
+}
+
 fn engine(os: &Arc<FakeOs>, state: &std::path::Path) -> Engine {
-    let mut e = Engine::new(
+    Engine::new(
         os.clone() as Arc<dyn NetOs>,
         NetPaths::new(state.join("net"), state.join("run")),
-    );
-    e.fifo = state.join("fifo");
-    std::fs::write(&e.fifo, "").unwrap();
-    e
+    )
+    .with_feedback(Some(Arc::new(Signals(state.join("signals")))))
 }
 
 /// Two ports on networkd: lan1 static 192.0.2.10/24 (rynas file), lan2 on DHCP (lease).
@@ -452,7 +469,7 @@ fn watchdog_healthy_then_rescue() {
         lan1.contains("DHCP=ipv4") && lan1.contains("LinkLocalAddressing=yes"),
         "{lan1}"
     );
-    assert_eq!(std::fs::read_to_string(&t.e.fifo).unwrap(), "3\n;\n");
+    assert_eq!(signals(&t.e), "RescueApplied\n");
     let revs = t.e.revisions().unwrap();
     assert_eq!(revs[0].kind, "rescue");
     assert!(revs[0].lkg);
@@ -476,7 +493,7 @@ fn watchdog_healthy_then_rescue() {
 fn reset_button_double_press() {
     let t = networkd_box();
     assert_eq!(t.e.reset_button(&log).unwrap(), Press::First);
-    assert_eq!(std::fs::read_to_string(&t.e.fifo).unwrap(), "2\n;\n");
+    assert_eq!(signals(&t.e), "PressAgain\n");
     t.os.sleep(Duration::from_millis(300));
     assert_eq!(t.e.reset_button(&log).unwrap(), Press::Bounce);
     t.os.sleep(Duration::from_secs(3));

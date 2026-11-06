@@ -158,6 +158,7 @@ fn env(synology: bool) -> Env {
             rynasctl: "/usr/libexec/rynas/rynasctl".into(),
             state_dir: state_dir.clone(),
             hw_root: hw.clone(),
+            alarm_reader: None,
         }),
     ];
     let synology_p = synology.then(|| Arc::new(Synology::detect(&hw).unwrap()));
@@ -209,6 +210,7 @@ fn env(synology: bool) -> Env {
     st.hardware = Some(Arc::new(Hardware {
         ops: ops.clone(),
         control: modules.hardware_control(),
+        wake_rtc: modules.wake_clock().map(|c| c.rtc_device_suffix),
         hw_root: hw.clone(),
         state_dir,
         notifier: notifier.clone(),

@@ -16,7 +16,7 @@
 //! - `rynasctl net rollback|boot-guard|watchdog|reset-button|confirm|status`: the network
 //!   safety net (D-NET): the rollback timer of an unconfirmed change, the boot guard
 //!   (`rynas-net-guard.service`, before networkd), the post-boot watchdog
-//!   (`rynas-net-watchdog.timer`), synohwd's reset-button command, a confirmation from the
+//!   (`rynas-net-watchdog.timer`), a hardware module's reset button, a confirmation from the
 //!   console. They work without rynasd (they read and write `/var/lib/rynas/net` under its
 //!   lock) and then ask rynasd to collect the notifications they queued.
 //! - `rynasctl ups safe-mode <reason>`: the pre-shutdown hook of a hardware module's UPS layer
@@ -145,7 +145,7 @@ enum NetAction {
     /// After boot: fall back to the last known good revision, then to the rescue
     /// configuration, when no connected port has a routable address.
     Watchdog,
-    /// One press of the Synology reset button (synohwd `reset_button = command:`): a second
+    /// One press of the reset button (wired by the machine's hardware module): a second
     /// press within 10 s restores the factory network.
     ResetButton,
     /// Confirm the change under test from the console (the token is printed by the API).
@@ -502,6 +502,8 @@ fn arm_wake(
         Err(_) => None,
     };
     let tz = rynas_power::system_tz();
+    // the hardware module's wake clock, when it has one
+    let clock = rynasd::modules::detect(root, std::path::Path::new("/"), false).wake_clock();
     let run = |rtc: &str, wake: Option<i64>| -> Result<(), String> {
         let args = rynas_power::wake::rtcwake_args(rtc, wake);
         println!("rynas: {rtcwake} {}", args.join(" "));
@@ -532,6 +534,7 @@ fn arm_wake(
             } else {
                 ArmReason::Shutdown
             },
+            prefer_rtc: clock.map(|c| c.rtc_device_suffix),
         },
         &run,
     );
@@ -557,10 +560,13 @@ fn arm_wake(
 }
 
 fn net_engine(state_dir: &std::path::Path) -> rynas_net::Engine {
+    let root = std::path::Path::new("/");
     rynas_net::Engine::new(
         std::sync::Arc::new(rynas_net::HostOs::new("/", false)),
         rynas_net::NetPaths::new(state_dir.join("net"), "/run/rynas"),
     )
+    // the hardware module's beeps and LEDs on the rescue paths
+    .with_feedback(rynasd::modules::detect(root, root, false).rescue_feedback())
 }
 
 fn net(socket: &PathBuf, state_dir: &std::path::Path, flush: bool, action: NetAction) -> ExitCode {

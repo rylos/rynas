@@ -14,8 +14,8 @@
 //! confirmation must arrive on an address of the new configuration.
 //!
 //! The rescue settings (`network.rescue`: Avahi service file) are a normal configuration key:
-//! `PUT /v1/network/rescue` stages, `/config/apply` applies. The Synology reset button is a
-//! setting of `synology.hw` (the only writer of `/etc/synohwd.toml`), shown here read-only.
+//! `PUT /v1/network/rescue` stages, `/config/apply` applies. A reset button is a setting of
+//! the machine's hardware module (`rynas_module::Module::reset_button`), shown here read-only.
 //!
 //! Internal only: `POST /v1/network/events/flush` (`rynasctl` after a rollback, the boot guard
 //! or the watchdog): the engine's queued events go to the notification engine.
@@ -36,10 +36,8 @@ use rynas_api_types::network::{
     NetInterface, NetRestoreRequest, NetRevision, NetworkState, PingRequest, RescueInfo,
     RescueSettings, TracerouteRequest, TrialKind,
 };
-use rynas_api_types::synology::{ResetButtonAction, SynologySettings};
 use rynas_api_types::{ApiError, TaskStarted, error_codes};
 use rynas_auth::ipc::LOCAL_ADDR_HEADER;
-use rynas_hw_synology::domain::SYNOLOGY_KEY;
 use rynas_net::diag::{self, RateLimit};
 use rynas_net::rescue::RESCUE_KEY;
 use rynas_net::txn::{Origin, Plan, new_token};
@@ -56,6 +54,8 @@ pub struct Network {
     pub diag_limit: RateLimit,
     /// `--dry-system`: no rollback timer exists, so the task rolls back at the deadline.
     pub dry: bool,
+    /// The hardware modules (the reset button).
+    pub modules: rynas_module::Modules,
 }
 
 impl Network {
@@ -66,7 +66,13 @@ impl Network {
             notifier,
             diag_limit: RateLimit::new(20, Duration::from_secs(60)),
             dry,
+            modules: rynas_module::Modules::none(),
         }
+    }
+
+    pub fn with_modules(mut self, modules: rynas_module::Modules) -> Self {
+        self.modules = modules;
+        self
     }
 
     /// Hands the engine's queued events (also those written by `rynasctl`) to the
@@ -390,24 +396,14 @@ fn rescue_info(n: &Network, owner: &str) -> Res<RescueInfo> {
     let c = &n.ops.config;
     let (eff, cur, _): (RescueSettings, RescueSettings, Option<RescueSettings>) =
         crate::services::docs(c, owner, RESCUE_KEY)?;
-    // read-only reflection of synology.hw, which owns the setting
-    let synology = c.keys().iter().any(|k| k == SYNOLOGY_KEY);
-    let (rescue_configured, rescue_pending) = if synology {
-        let (eff, cur, _): (SynologySettings, SynologySettings, Option<SynologySettings>) =
-            crate::services::docs(c, owner, SYNOLOGY_KEY)?;
-        let on = |s: &SynologySettings| s.reset_button == ResetButtonAction::NetworkRescue;
-        (on(&cur), (on(&eff) != on(&cur)).then(|| on(&eff)))
-    } else {
-        (false, None)
-    };
+    // read-only reflection of the hardware module's setting
+    let reset_button = n.modules.reset_button(c, owner).map_err(Error::internal)?;
     let inv = n.engine.inventory()?;
     Ok(RescueInfo {
         mdns_name: format!("{}.local", n.engine.hostname()),
         mdns_active: inv.services.avahi,
         link_local: n.engine.link_locals()?,
-        synology,
-        reset_button_configured: rescue_configured,
-        reset_button_pending: rescue_pending,
+        reset_button,
         pending: (eff != cur).then_some(eff),
         settings: cur,
     })
@@ -434,8 +430,8 @@ async fn rescue_put(
         return Err(Error::new(
             StatusCode::BAD_REQUEST,
             error_codes::INVALID_VALUE,
-            "the reset button is a Synology setting: PUT /api/v1/hardware/synology/settings \
-             (reset_button: network_rescue)"
+            "the reset button is not a rescue setting: it belongs to the hardware settings of \
+             this machine"
                 .into(),
         ));
     }

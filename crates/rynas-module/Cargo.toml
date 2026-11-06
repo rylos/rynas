@@ -13,6 +13,7 @@ rynas-btrfs.workspace = true
 rynas-config.workspace = true
 rynas-hw.workspace = true
 rynas-http.workspace = true
+rynas-net.workspace = true
 rynas-tasks.workspace = true
 rynas-notify.workspace = true
 axum.workspace = true

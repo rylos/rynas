@@ -78,7 +78,7 @@ pub fn next_of(h: &Hardware, s: &PowerSchedule) -> PowerNext {
         next_shutdown_ms: down.as_ref().map(|(t, _)| ms(*t)),
         next_shutdown_rule: down.map(|(_, r)| r),
         time_zone: rynas_power::tz_name(&tz),
-        wake: wake::support(&h.hw_root, &state),
+        wake: wake::support(&h.hw_root, h.wake_rtc, &state),
         last_boot: state.boot,
     }
 }

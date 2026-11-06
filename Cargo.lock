@@ -3350,6 +3350,7 @@ dependencies = [
  "rynas-config",
  "rynas-http",
  "rynas-hw",
+ "rynas-net",
  "rynas-notify",
  "rynas-tasks",
  "serde",
