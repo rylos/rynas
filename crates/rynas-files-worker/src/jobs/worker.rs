@@ -847,11 +847,9 @@ impl Engine {
             return Ok(());
         };
         let sources = self.spec.sources.clone();
-        let level = crate::zip::Level::parse(self.spec.level.as_deref().unwrap_or("normal"));
-        let mut name = self.spec.name.clone().unwrap_or_else(|| t!("Archive.zip"));
-        if !name.to_ascii_lowercase().ends_with(".zip") {
-            name.push_str(".zip");
-        }
+        let tar = self.spec.format.as_deref() == Some("tar.zst");
+        let level = self.spec.level.clone().unwrap_or_else(|| "normal".into());
+        let name = archive_name(self.spec.name.as_deref(), tar);
         if !self.can_write(&dest) {
             return Ok(());
         }
@@ -860,7 +858,15 @@ impl Engine {
             return Ok(());
         }
         self.p.phase = "compress".into();
-        self.p.method = if level == crate::zip::Level::Store { "store".into() } else { "deflate".into() };
+        let zip_level = crate::zip::Level::parse(&level);
+        self.p.method = if tar {
+            "zstd"
+        } else if zip_level == crate::zip::Level::Store {
+            "store"
+        } else {
+            "deflate"
+        }
+        .into();
         let mut target = dest.join(&name);
         if fs::symlink_metadata(&target).is_ok() {
             target = unique_name(&dest, OsStr::new(&name), "");
@@ -873,12 +879,8 @@ impl Engine {
                 return Ok(());
             }
         };
-        let mut zip = crate::zip::ZipWriter::new(io::BufWriter::with_capacity(1 << 20, file));
-        let result = self.zip_sources(&mut zip, &sources, level, &target);
-        let result = match result {
-            Ok(()) => zip.finish().and_then(|w| w.into_inner().map_err(|e| e.into_error())).map(drop),
-            Err(e) => Err(e),
-        };
+        let out = io::BufWriter::with_capacity(1 << 20, file);
+        let result = if tar { self.write_tar_zstd(out, &sources, zstd_level(&level), &target) } else { self.write_zip(out, &sources, zip_level, &target) };
         match result {
             Ok(()) => {
                 if let Err(e) = fs::rename(&part, &target) {
@@ -890,13 +892,119 @@ impl Engine {
             }
             Err(e) => {
                 let _ = fs::remove_file(&part);
-                if e.kind() == io::ErrorKind::Interrupted {
+                if e.kind() == io::ErrorKind::Interrupted || self.shared.state.lock().unwrap().cancel {
                     return Err(Cancelled);
                 }
                 self.fail(crate::fsops::io_code(&e), describe(&e));
                 Ok(())
             }
         }
+    }
+
+    fn write_zip(&mut self, out: io::BufWriter<File>, sources: &[PathBuf], level: crate::zip::Level, target: &Path) -> io::Result<()> {
+        let mut zip = crate::zip::ZipWriter::new(out);
+        self.zip_sources(&mut zip, sources, level, target)?;
+        zip.finish()?.into_inner().map_err(|e| e.into_error())?;
+        Ok(())
+    }
+
+    /// A tar stream through zstd, both in this process: the same walk, progress, pause,
+    /// cancel and speed limit as the zip.
+    fn write_tar_zstd(&mut self, out: io::BufWriter<File>, sources: &[PathBuf], level: i32, target: &Path) -> io::Result<()> {
+        let mut enc = zstd::stream::write::Encoder::new(out, level)?;
+        // A libzstd built without threads refuses the workers: it compresses in this thread.
+        if enc.multithread(zstd_workers()).is_ok() {
+            // jobs of 8 MiB: half the memory of the default at level 9 (some 110 MB with
+            // three workers instead of 175), for 0.2% of size
+            let _ = enc.set_parameter(zstd::zstd_safe::CParameter::JobSize(8 << 20));
+        }
+        enc.include_checksum(true)?;
+        let mut tar = tar::Builder::new(enc);
+        self.tar_sources(&mut tar, sources, target)?;
+        tar.into_inner()?.finish()?.into_inner().map_err(|e| e.into_error())?;
+        Ok(())
+    }
+
+    /// Like `zip_sources`: symbolic links are stored as links and never followed (out of
+    /// the share or anywhere else), long names go as GNU long-name entries, every entry
+    /// keeps its permissions, owner ids and modification time.
+    fn tar_sources<W: Write>(&mut self, tar: &mut tar::Builder<W>, sources: &[PathBuf], target: &Path) -> io::Result<()> {
+        let mut stack: Vec<PathBuf> = sources.iter().rev().cloned().collect();
+        while let Some(path) = stack.pop() {
+            if path == target {
+                continue;
+            }
+            let Ok(meta) = fs::symlink_metadata(&path) else { continue };
+            let rel = path.strip_prefix(&self.base).unwrap_or(&path).to_path_buf();
+            self.p.current = self.display(&path);
+            self.p.current_size = if meta.is_file() { meta.len() } else { 0 };
+            self.p.current_done = 0;
+            let mut header = tar::Header::new_gnu();
+            header.set_mode(meta.mode() & 0o7777);
+            header.set_mtime(meta.mtime().max(0) as u64);
+            header.set_uid(u64::from(meta.uid()));
+            header.set_gid(u64::from(meta.gid()));
+            header.set_size(0);
+            if meta.is_dir() {
+                header.set_entry_type(tar::EntryType::Directory);
+                tar.append_data(&mut header, &rel, io::empty())?;
+                let mut children: Vec<PathBuf> = match fs::read_dir(&path) {
+                    Ok(rd) => rd
+                        .flatten()
+                        .filter(|e| !crate::fsops::is_system_name(&e.file_name().to_string_lossy()))
+                        .map(|e| e.path())
+                        .collect(),
+                    Err(e) => {
+                        self.error(&path, &e);
+                        continue;
+                    }
+                };
+                children.sort();
+                stack.extend(children.into_iter().rev());
+            } else if meta.is_file() {
+                let mut file = match File::open(&path) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        self.error(&path, &e);
+                        self.skip(&meta);
+                        continue;
+                    }
+                };
+                // SAFETY: an open descriptor; advice only
+                unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL) };
+                header.set_entry_type(tar::EntryType::Regular);
+                header.set_size(meta.len());
+                let short = {
+                    let progress = |n: u64| -> io::Result<()> {
+                        self.advance(n);
+                        self.checkpoint().map_err(|_| io::Error::other(t!("cancelled")))
+                    };
+                    let mut data = Exact { inner: &mut file, left: meta.len(), short: false, progress };
+                    tar.append_data(&mut header, &rel, &mut data)?;
+                    data.short
+                };
+                if short {
+                    self.error_msg(&path, t!("the file got shorter while it was archived: the rest is zeros"));
+                }
+                self.p.files_done += 1;
+            } else if meta.file_type().is_symlink() {
+                let link = match fs::read_link(&path) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        self.error(&path, &e);
+                        self.p.files_done += 1;
+                        continue;
+                    }
+                };
+                header.set_entry_type(tar::EntryType::Symlink);
+                tar.append_link(&mut header, &rel, &link)?;
+                self.p.files_done += 1;
+            } else {
+                // sockets, pipes, devices: not data, left out as in the zip
+                self.p.files_done += 1;
+            }
+        }
+        Ok(())
     }
 
     fn zip_sources<W: Write>(&mut self, zip: &mut crate::zip::ZipWriter<W>, sources: &[PathBuf], level: crate::zip::Level, target: &Path) -> io::Result<()> {
@@ -967,8 +1075,19 @@ impl Engine {
         self.p.bytes_total = size;
         self.p.files_total = 0;
         let name = archive.file_name().unwrap_or_default().to_string_lossy().into_owned();
-        let tool = Tool::of(crate::archive::format(&name));
-        self.p.method = if tool == Tool::Unrar { "unrar" } else { "7z" }.into();
+        let format = crate::archive::format(&name);
+        // GNU tar would only say that it could not run the decompressor
+        if let Some(program) = crate::archive::missing(format.unwrap_or(crate::archive::Format::SevenZip)) {
+            self.fail(c::TOOL_MISSING, crate::archive::tool_missing(program).message);
+            return Ok(());
+        }
+        let tool = Tool::of(format);
+        self.p.method = match tool {
+            Tool::Unrar => "unrar",
+            Tool::Tar(_) => "tar",
+            Tool::SevenZip => "7z",
+        }
+        .into();
         let work = match Unpack::prepare(&dest, &name, self.spec.into_folder) {
             Ok(work) => work,
             Err(e) => {
@@ -1577,10 +1696,74 @@ pub fn to_recycle(root: &RecycleRoot, rel: &Path, src: &Path) -> Result<(), Stri
     Ok(())
 }
 
+/// The file name of a new archive: the user's, with the format's extension added when
+/// it does not end with one already.
+fn archive_name(name: Option<&str>, tar_zstd: bool) -> String {
+    let mut name = name.map(str::to_string).unwrap_or_else(|| t!("Archive"));
+    let lower = name.to_ascii_lowercase();
+    if tar_zstd {
+        if !crate::archive::TAR_ZSTD.iter().any(|ext| lower.ends_with(ext)) {
+            name.push_str(crate::archive::TAR_ZSTD[0]);
+        }
+    } else if !lower.ends_with(".zip") {
+        name.push_str(".zip");
+    }
+    name
+}
+
+/// The zstd level for the dialog's choice. Measured with three workers: level 3 (zstd's
+/// own default) goes faster than a hard disk writes even on a 4-core Celeron; 9 makes
+/// archives some 9% smaller at a fifth of the speed; above it the gain is a few percent
+/// more for many times the time (19 is some 85 times slower than 3): not offered. The
+/// zip's "store" has no place in a .tar.zst; it gets the normal level.
+fn zstd_level(level: &str) -> i32 {
+    match level {
+        "fast" => 1,
+        "best" => 9,
+        _ => 3,
+    }
+}
+
+/// zstd's worker threads: every core but one, which stays for the file services and
+/// the web interface (three on a 4-core NAS), at most four (some 36 MB each).
+fn zstd_workers() -> u32 {
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    cores.saturating_sub(1).clamp(1, 4) as u32
+}
+
+/// A file's data exactly as long as its tar header says: zeros after the end
+/// when the file got shorter meanwhile (`short`), nothing past it when it
+/// grew, so the archive stays readable. `progress` hears of every chunk and
+/// may stop the archive with an error.
+struct Exact<R, F> {
+    inner: R,
+    left: u64,
+    short: bool,
+    progress: F,
+}
+
+impl<R: Read, F: FnMut(u64) -> io::Result<()>> Read for Exact<R, F> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.left == 0 || buf.is_empty() {
+            return Ok(0);
+        }
+        let want = buf.len().min(usize::try_from(self.left).unwrap_or(usize::MAX));
+        let mut n = if self.short { 0 } else { self.inner.read(&mut buf[..want])? };
+        if n == 0 {
+            self.short = true;
+            buf[..want].fill(0);
+            n = want;
+        }
+        self.left -= n as u64;
+        (self.progress)(n as u64)?;
+        Ok(n)
+    }
+}
+
 /// "Foto.tar.gz" → "Foto", "dati.zip" → "dati"
 pub fn archive_stem(name: &str) -> &str {
     let lower = name.to_ascii_lowercase();
-    for ext in [".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tar.lz", ".tgz", ".tbz2", ".txz"] {
+    for ext in [".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tar.zstd", ".tar.lz", ".tgz", ".tbz2", ".tbz", ".txz", ".tzst", ".tzstd"] {
         if lower.ends_with(ext) && name.len() > ext.len() {
             return &name[..name.len() - ext.len()];
         }
@@ -1629,10 +1812,9 @@ fn merge(from: &Path, to: &Path, policy: Policy) -> io::Result<()> {
 
 pub fn unique_name(dir: &Path, name: &OsStr, tag: &str) -> PathBuf {
     let text = name.to_string_lossy();
-    let (stem, ext) = match text.rfind('.') {
-        Some(i) if i > 0 => (&text[..i], &text[i..]),
-        _ => (&text[..], ""),
-    };
+    // "a.tar.zst" → "a (1).tar.zst": a compressed tar's extension is one
+    let stem = archive_stem(&text);
+    let ext = &text[stem.len()..];
     // the plain name first, when it is free
     let candidate = dir.join(format!("{stem}{tag}{ext}"));
     if fs::symlink_metadata(&candidate).is_err() {
@@ -1702,6 +1884,9 @@ mod tests {
         assert_eq!(unique_name(&dir, OsStr::new(".bashrc"), ""), dir.join(".bashrc"));
         fs::write(dir.join(".bashrc"), "").unwrap();
         assert_eq!(unique_name(&dir, OsStr::new(".bashrc"), ""), dir.join(".bashrc (1)"));
+        fs::write(dir.join("b.tar.zst"), "").unwrap();
+        assert_eq!(unique_name(&dir, OsStr::new("b.tar.zst"), ""), dir.join("b (1).tar.zst"));
+        assert_eq!(unique_name(&dir, OsStr::new("b.tar.zst"), " - Copia"), dir.join("b - Copia.tar.zst"));
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1913,6 +2098,129 @@ mod tests {
         let mounts = "/dev/a / ext4 rw 0 0\n/dev/b /volume1 btrfs rw 0 0\n/dev/c /volume1/x/#snapshot btrfs ro 0 0\n";
         assert_eq!(mount_of(mounts, Path::new("/volume1/Documenti")).unwrap().0, PathBuf::from("/volume1"));
         assert_eq!(mount_of(mounts, Path::new("/volume10")).unwrap().0, PathBuf::from("/"));
+    }
+
+    #[test]
+    fn archive_names() {
+        assert_eq!(archive_name(Some("Foto"), true), "Foto.tar.zst");
+        assert_eq!(archive_name(Some("Foto.TZST"), true), "Foto.TZST");
+        assert_eq!(archive_name(Some("Foto.tar.zstd"), true), "Foto.tar.zstd");
+        assert_eq!(archive_name(Some("Foto.zip"), true), "Foto.zip.tar.zst");
+        assert_eq!(archive_name(Some("Foto"), false), "Foto.zip");
+        assert_eq!(archive_name(None, false), "Archive.zip");
+        assert_eq!(archive_name(None, true), "Archive.tar.zst");
+        for (name, stem) in [("a.tar.zst", "a"), ("a.tar.zstd", "a"), ("a.tzst", "a"), ("a.TZSTD", "a"), ("a.zst", "a")] {
+            assert_eq!(archive_stem(name), stem, "{name}");
+        }
+        assert_eq!((zstd_level("fast"), zstd_level("normal"), zstd_level("best"), zstd_level("store")), (1, 3, 9, 3));
+        assert!((1..=4).contains(&zstd_workers()));
+    }
+
+    #[test]
+    fn exact_length_whatever_the_file_does() {
+        let mut seen = 0;
+        let mut out = Vec::new();
+        let mut short = Exact { inner: &b"abc"[..], left: 5, short: false, progress: |n| { seen += n; Ok(()) } };
+        io::copy(&mut short, &mut out).unwrap();
+        assert!(short.short);
+        assert_eq!(out, b"abc\0\0");
+        assert_eq!(seen, 5);
+        let mut long = Exact { inner: &b"abcdef"[..], left: 4, short: false, progress: |_| Ok(()) };
+        out.clear();
+        io::copy(&mut long, &mut out).unwrap();
+        assert!(!long.short);
+        assert_eq!(out, b"abcd");
+    }
+
+    fn compress_spec(sources: Vec<PathBuf>, dest: &Path, name: &str) -> Spec {
+        serde_json::from_value(serde_json::json!({ "op": "compress", "sources": sources, "dest": dest, "name": name, "format": "tar.zst", "level": "fast" })).unwrap()
+    }
+
+    fn leftovers(dir: &Path) -> Vec<String> {
+        fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.contains(PART_TAG)).collect()
+    }
+
+    #[test]
+    fn tar_zstd_round_trip() {
+        use std::os::unix::fs::PermissionsExt;
+        if crate::archive::missing(crate::archive::Format::Tar(Some("--zstd"))).is_some() {
+            eprintln!("GNU tar or zstd missing: round trip skipped");
+            return;
+        }
+        let dir = scratch("tzst");
+        let src = dir.join("Progetto");
+        let long_dir = "cartella con un nome davvero molto lungo per superare i cento caratteri di ustar";
+        let long_file = format!("{}.txt", "è".repeat(60));
+        fs::create_dir_all(src.join("vuota")).unwrap();
+        fs::create_dir_all(src.join(long_dir)).unwrap();
+        fs::create_dir_all(dir.join("fuori")).unwrap();
+        fs::write(dir.join("fuori/segreto.txt"), "not to be archived").unwrap();
+        fs::write(src.join("a.txt"), "ciao zstd\n".repeat(1000)).unwrap();
+        fs::set_permissions(src.join("a.txt"), fs::Permissions::from_mode(0o640)).unwrap();
+        let when = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        File::options().write(true).open(src.join("a.txt")).unwrap().set_modified(when).unwrap();
+        fs::write(src.join(long_dir).join(&long_file), "lungo").unwrap();
+        std::os::unix::fs::symlink("../fuori/segreto.txt", src.join("fuori")).unwrap();
+        std::os::unix::fs::symlink("a.txt", src.join("collegamento")).unwrap();
+
+        let mut e = engine(compress_spec(vec![src.clone()], &dir, "Progetto"));
+        assert!(e.compress().is_ok());
+        assert!(e.fatal.is_none(), "{:?}", e.fatal);
+        assert_eq!(e.p.errors, 0);
+        let archive = dir.join("Progetto.tar.zst");
+        assert!(archive.is_file());
+        assert!(leftovers(&dir).is_empty());
+
+        // listed as GNU tar reads it
+        let members = crate::archive::members(&archive).unwrap();
+        let find = |p: &str| members.iter().find(|m| m.path == p).unwrap_or_else(|| panic!("{p} not in {members:?}"));
+        assert!(find("Progetto/vuota").dir);
+        assert!(find("Progetto/fuori").link);
+        assert!(find("Progetto/collegamento").link);
+        let a = find("Progetto/a.txt");
+        assert_eq!((a.size, a.mode, a.mtime), (10_000, 0o640, 1_700_000_000));
+        assert_eq!(find(&format!("Progetto/{long_dir}/{long_file}")).size, 5);
+        assert!(!members.iter().any(|m| m.path.contains("segreto")));
+
+        // and extracted by the job
+        let out = dir.join("estratti");
+        fs::create_dir_all(&out).unwrap();
+        let spec: Spec = serde_json::from_value(serde_json::json!({ "op": "extract", "sources": [archive], "dest": out })).unwrap();
+        let mut x = engine(spec);
+        assert!(x.extract().is_ok());
+        assert!(x.fatal.is_none(), "{:?}", x.fatal);
+        let back = out.join("Progetto");
+        assert_eq!(fs::read_to_string(back.join("a.txt")).unwrap(), "ciao zstd\n".repeat(1000));
+        let meta = fs::metadata(back.join("a.txt")).unwrap();
+        assert_eq!((meta.mode() & 0o777, meta.mtime()), (0o640, 1_700_000_000));
+        assert_eq!(fs::read_to_string(back.join(long_dir).join(&long_file)).unwrap(), "lungo");
+        assert!(back.join("vuota").is_dir());
+        assert_eq!(fs::read_link(back.join("fuori")).unwrap(), PathBuf::from("../fuori/segreto.txt"));
+        assert_eq!(fs::read_link(back.join("collegamento")).unwrap(), PathBuf::from("a.txt"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn tar_zstd_cancel_leaves_nothing() {
+        let dir = scratch("tzst-cancel");
+        let src = dir.join("dati");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("grande.bin"), vec![7u8; 4 << 20]).unwrap();
+        // slow enough (1 KB/s) to be cancelled while the file is being written
+        let mut e = engine(compress_spec(vec![src], &dir, "dati"));
+        e.shared.state.lock().unwrap().limit = 1024;
+        let shared = Arc::clone(&e.shared);
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(400));
+            shared.state.lock().unwrap().cancel = true;
+            shared.wake.notify_all();
+        });
+        assert!(e.compress().is_err());
+        canceller.join().unwrap();
+        assert!(e.p.bytes_done > 0 && e.p.bytes_done < 4 << 20, "cancelled mid-file: {}", e.p.bytes_done);
+        assert!(leftovers(&dir).is_empty(), "{:?}", leftovers(&dir));
+        assert!(!dir.join("dati.tar.zst").exists());
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

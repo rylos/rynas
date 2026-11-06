@@ -129,6 +129,9 @@ pub struct NewJob {
     pub name: Option<String>,
     #[serde(default)]
     pub level: Option<String>,
+    /// compress: "zip" (the default) or "tar.zst"
+    #[serde(default)]
+    pub format: Option<String>,
     #[serde(default)]
     pub into_folder: bool,
     #[serde(default)]
@@ -203,6 +206,9 @@ pub fn job_spec(shares: &[Share], conns: &[crate::conns::Conn], body: &NewJob) -
     if let Some(name) = &body.name {
         shares::valid_name(name)?;
     }
+    if body.format.as_deref().is_some_and(|f| !matches!(f, "zip" | "tar.zst")) {
+        return Err(ApiError::invalid("format", t!("unknown archive format")));
+    }
     if body.op == Op::Extract && sources.len() != 1 {
         return Err(ApiError::invalid("sources", t!("one archive at a time")));
     }
@@ -216,6 +222,7 @@ pub fn job_spec(shares: &[Share], conns: &[crate::conns::Conn], body: &NewJob) -
         recycle,
         name: body.name.clone(),
         level: body.level.clone(),
+        format: body.format.clone(),
         into_folder: body.into_folder,
         password: body.password.clone(),
         members: body.members.iter().map(|m| valid_member(m)).collect::<Result<_, _>>()?,

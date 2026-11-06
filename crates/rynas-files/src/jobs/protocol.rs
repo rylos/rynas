@@ -55,9 +55,12 @@ pub struct Spec {
     /// compress: the archive's file name
     #[serde(default)]
     pub name: Option<String>,
-    /// compress: store, fast or normal
+    /// compress: store, fast or normal (zip); fast, normal or best (tar.zst)
     #[serde(default)]
     pub level: Option<String>,
+    /// compress: "zip" (the default) or "tar.zst"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
     /// extract: into a new folder named after the archive
     #[serde(default)]
     pub into_folder: bool,
@@ -209,6 +212,7 @@ mod tests {
             recycle: Vec::new(),
             name: None,
             level: None,
+            format: None,
             into_folder: false,
             password: Some("archive-secret".into()),
             members: Vec::new(),

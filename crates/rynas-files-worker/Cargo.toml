@@ -31,6 +31,10 @@ smb = { version = "0.12.1", default-features = false, features = ["multi_threade
 russh = { version = "0.54.5", default-features = false, features = ["ring", "rsa"] }
 russh-sftp = "2.4"
 tokio = { version = "1", features = ["rt", "net", "time", "io-util"] }
+# Compress to .tar.zst in this process: the system libzstd (as rynasd links it), with its
+# worker threads; tar without xattrs (the archive keeps names, modes, times and links)
+zstd = { version = "0.14.3", default-features = false, features = ["pkg-config", "zstdmt"] }
+tar = { version = "0.4.46", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"
