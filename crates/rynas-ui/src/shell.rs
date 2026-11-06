@@ -3,7 +3,7 @@
 
 use leptos::prelude::*;
 use leptos_router::components::{Route, Router, Routes};
-use leptos_router::hooks::use_location;
+use leptos_router::hooks::{use_location, use_query_map};
 use leptos_router::path;
 
 use crate::auth::{Auth, BootScreen, LoginScreen, Phase, SessionNotice, auth, role_key};
@@ -127,13 +127,20 @@ pub fn App() -> impl IntoView {
 fn Shell() -> impl IntoView {
     let ui = use_ui();
     let location = use_location();
+    let query = use_query_map();
+    pages::files::bridge();
     // close the drawer after navigating
     Effect::new(move || {
         location.pathname.track();
         ui.drawer_open.set(false);
     });
+    // the file manager in a window of its own (`/files…?window`): no bars around it
+    let bare = move || location.pathname.with(|p| p == "/files" || p.starts_with("/files/")) && query.with(|q| q.get("window").is_some());
     let app_class = move || {
         let mut c = String::from("app");
+        if bare() {
+            c.push_str(" bare");
+        }
         if ui.sidebar_collapsed.get() {
             c.push_str(" collapsed");
         }
@@ -169,7 +176,8 @@ fn Shell() -> impl IntoView {
                     <Route path=path!("/notifications") view=pages::notifications::NotificationsPage />
                     <Route path=path!("/snapshots") view=pages::snapshots::Snapshots />
                     <Route path=path!("/security") view=pages::security::Security />
-                    <Route path=path!("/files") view=|| view! { <pages::Soon icon=icons::FOLDER title="nav.files" text="soon.files" /> } />
+                    <Route path=path!("/files") view=pages::files::Files />
+                    <Route path=path!("/files/*path") view=pages::files::Files />
                     <Route path=path!("/shares") view=pages::shares::Shares />
                     <Route path=path!("/users") view=pages::users::Users />
                     <Route path=path!("/services") view=pages::services::FileServices />

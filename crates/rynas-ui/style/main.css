@@ -1315,6 +1315,23 @@ kbd {
   .temp-row { grid-template-columns: 90px 1fr 48px; }
 }
 
+/* ------------------------------------------------------------------ file manager (pages/files.rs) */
+/* the Files page fills the room under the app bar and above the dock: the file manager scrolls
+   inside its own panes, never the page */
+.main:has(> .files-page) { padding: 0; }
+.files-page { display: block; max-width: none; position: relative; height: calc(100dvh - var(--appbar-h) - var(--clear-dock)); min-height: 320px; }
+.files-app { display: block; height: 100%; }
+.files-app.files-hidden { visibility: hidden; }
+.files-wait { position: absolute; inset: var(--s-4); z-index: 1; padding: var(--card-pad); }
+/* the file manager in a window of its own (`/files?window`): nothing around it */
+.app.bare { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+.app.bare .appbar, .app.bare .sidebar, .app.bare .bottombar, .app.bare .dock, .app.bare .scrim { display: none; }
+.app.bare .files-page { height: 100dvh; }
+/* phones: above the bottom bar too */
+@media (max-width: 767px) {
+  .files-page { height: calc(100dvh - var(--appbar-h) - 56px - env(safe-area-inset-bottom) - var(--clear-dock)); }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .log-cursor { animation: none; }
   *, *::before, *::after {

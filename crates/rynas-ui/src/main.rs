@@ -8,6 +8,8 @@ mod chassis;
 mod config;
 #[cfg(feature = "demo")]
 mod demo;
+#[cfg(test)]
+mod files_check;
 mod form;
 mod i18n;
 mod icons;
