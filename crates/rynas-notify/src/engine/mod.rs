@@ -72,8 +72,8 @@ pub struct EngineOptions {
     pub retry_max: Duration,
     /// How often reminders and housekeeping run.
     pub tick: Duration,
-    /// synodeb's `notify.conf`, imported into targets and a rule on first start.
-    pub synodeb_conf: Option<PathBuf>,
+    /// Settings of other tools, each imported into targets and a rule the first time.
+    pub imports: Vec<crate::ImportedSettings>,
     /// Events waiting for ingestion (then [`Notifier::emit`] drops them).
     pub queue: usize,
 }
@@ -91,7 +91,7 @@ impl EngineOptions {
             retry_base: Duration::from_secs(30),
             retry_max: Duration::from_secs(3600),
             tick: Duration::from_secs(60),
-            synodeb_conf: None,
+            imports: Vec::new(),
             queue: 256,
         }
     }
@@ -340,11 +340,11 @@ impl Engine {
             last_purge: Mutex::new(0),
         }));
         e.reload_rules().map_err(std::io::Error::other)?;
-        if let Some(p) = e.0.o.synodeb_conf.clone() {
-            match e.import_synodeb(&p) {
+        for imp in e.0.o.imports.clone() {
+            match e.import_once(&imp) {
                 Ok(0) => {}
-                Ok(n) => tracing::info!("imported {n} notification targets from {}", p.display()),
-                Err(err) => tracing::warn!("{}: {err}", p.display()),
+                Ok(n) => tracing::info!("imported {n} notification targets ({})", imp.rule_name),
+                Err(err) => tracing::warn!("{}: {err}", imp.rule_name),
             }
         }
         Ok(e)
@@ -1670,40 +1670,34 @@ impl Engine {
         self.reload_rules()
     }
 
-    // ------------------------------------------------------------------------- synodeb
+    // ------------------------------------------------------------------------- imports
 
-    /// Imports synodeb's `notify.conf` once (targets + a rule); returns the number of
+    /// Imports another tool's settings once (targets + a rule); returns the number of
     /// targets created (0 when already imported or nothing is configured).
-    pub fn import_synodeb(&self, path: &std::path::Path) -> Result<usize> {
-        if db::meta_get(&self.conn(), "synodeb_import")?.is_some() {
+    pub fn import_once(&self, imp: &crate::ImportedSettings) -> Result<usize> {
+        if imp.key.is_empty() || db::meta_get(&self.conn(), &imp.key)?.is_some() {
             return Ok(0);
         }
-        let text = match std::fs::read_to_string(path) {
-            Ok(t) => t,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-            Err(e) => return Err(NotifyError::Storage(e.to_string())),
-        };
-        let imp = crate::synodeb::import(&text, &|p| std::fs::read_to_string(p).ok());
         let mut ids = Vec::new();
         for t in &imp.targets {
             match self.create_target(t) {
                 Ok(v) => ids.push(v.id),
-                Err(e) => tracing::warn!("synodeb notify.conf: target {:?}: {e}", t.name),
+                Err(e) => tracing::warn!("{}: target {:?}: {e}", imp.rule_name, t.name),
             }
         }
         if !ids.is_empty() {
             let rule = NotifyRule {
-                name: "Imported from synodeb".into(),
+                name: imp.rule_name.clone(),
                 enabled: true,
                 min_severity: imp.min_severity,
                 targets: ids.clone(),
                 ..Default::default()
             };
             if let Err(e) = self.create_rule(&rule) {
-                tracing::warn!("synodeb notify.conf: rule: {e}");
+                tracing::warn!("{}: rule: {e}", imp.rule_name);
             }
         }
-        db::meta_set(&self.conn(), "synodeb_import", &self.now().to_string())?;
+        db::meta_set(&self.conn(), &imp.key, &self.now().to_string())?;
         Ok(ids.len())
     }
 }

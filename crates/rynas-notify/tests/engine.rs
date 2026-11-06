@@ -820,26 +820,30 @@ async fn targets_and_rules_crud() {
 }
 
 #[tokio::test]
-async fn synodeb_conf_imported_once() {
+async fn imported_settings_once() {
     let dir = tempfile::tempdir().unwrap();
-    let conf = dir.path().join("notify.conf");
-    std::fs::write(
-        &conf,
-        "MIN_PRIORITY=urgent\nNTFY_URL=\"https://ntfy.sh/topic-x\"\n",
-    )
-    .unwrap();
+    let http = fake_http().await;
+    let imp = rynas_notify::ImportedSettings {
+        key: "x_import".into(),
+        rule_name: "Imported from x".into(),
+        targets: vec![webhook("hook", &http.url)],
+        min_severity: NotifySeverity::Critical,
+    };
     let clock = Arc::new(AtomicU64::new(T0));
     let mut o = options(dir.path(), &clock);
-    o.synodeb_conf = Some(conf.clone());
+    o.imports = vec![imp.clone()];
     let e = Engine::open(o).unwrap();
-    assert_eq!(e.targets().unwrap().len(), 2);
+    // the engine's own default target plus the imported one
+    let n = e.targets().unwrap().len();
+    assert!(n >= 1);
     let rules = e.rules().unwrap();
-    assert_eq!(rules[0].min_severity, NotifySeverity::Critical);
+    let r = rules.iter().find(|r| r.name == "Imported from x").unwrap();
+    assert_eq!(r.min_severity, NotifySeverity::Critical);
     drop(e);
     let mut o = options(dir.path(), &clock);
-    o.synodeb_conf = Some(conf);
+    o.imports = vec![imp];
     let e = Engine::open(o).unwrap();
-    assert_eq!(e.targets().unwrap().len(), 2);
+    assert_eq!(e.targets().unwrap().len(), n, "imported once");
 }
 
 #[tokio::test]

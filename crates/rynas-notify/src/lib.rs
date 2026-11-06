@@ -8,7 +8,8 @@
 //!   ([`engine::Engine`]): events, targets and rules in SQLite (`<state>/notify/notify.db`),
 //!   state per key, dedup, grouping, quiet hours, reminders, per-target rate limit, a
 //!   persistent outbox with retries, minijinja templates in English and Italian, SMTP
-//!   (lettre), ntfy, Telegram, Gotify and webhook channels, and the synodeb forward.
+//!   (lettre), ntfy, Telegram, Gotify and webhook channels, and the one-time import of
+//!   another tool's settings ([`ImportedSettings`]).
 //!
 //! Other processes (rynas-web, plugins) do not link the engine: they send [`NewEvent`]s to
 //! rynasd (`POST /v1/notifications/events` on the internal socket, or JSON-RPC for plugins)
@@ -17,12 +18,22 @@
 pub mod checks;
 #[cfg(feature = "engine")]
 pub mod engine;
-#[cfg(feature = "engine")]
-pub mod synodeb;
 
 pub use rynas_api_types::notify::{
     BodyFormat, EventAction, EventState, NewEvent, NotifyCategory, NotifySeverity,
 };
+
+/// Notification settings of another tool (a hardware module's system layer,
+/// `rynas_module::Module::notify_import`), imported once into targets and one rule.
+#[derive(Debug, Clone, Default)]
+pub struct ImportedSettings {
+    /// Engine meta key recording that the import ran (never twice).
+    pub key: String,
+    /// Name of the rule created for the imported targets.
+    pub rule_name: String,
+    pub targets: Vec<rynas_api_types::notify::TargetRequest>,
+    pub min_severity: NotifySeverity,
+}
 
 /// Where events go. Implementations queue and return at once: emitting never blocks the
 /// caller and never fails (a full queue drops the event with a log line).

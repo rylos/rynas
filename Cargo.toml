@@ -24,6 +24,7 @@ members = [
     "crates/rynas-nut",
     "crates/rynas-files",
     "crates/rynas-removable",
+    "crates/rynas-module",
 ]
 
 [workspace.package]
@@ -48,7 +49,8 @@ rynas-net = { path = "crates/rynas-net" }
 rynasd = { path = "crates/rynasd" }
 rynas-storage = { path = "crates/rynas-storage" }
 rynas-hw = { path = "crates/rynas-hw" }
-# without the configuration domain (status, commands, provider); rynasd enables `domain`
+# the Synology module; without `domain` only the status, commands and provider (rynas-web);
+# rynasd enables `domain` (its daemon side)
 rynas-hw-synology = { path = "crates/rynas-hw-synology", default-features = false }
 rynas-power = { path = "crates/rynas-power" }
 rynas-http = { path = "crates/rynas-http" }
@@ -56,6 +58,7 @@ rynas-updates = { path = "crates/rynas-updates" }
 rynas-nut = { path = "crates/rynas-nut" }
 rynas-files = { path = "crates/rynas-files" }
 rynas-removable = { path = "crates/rynas-removable" }
+rynas-module = { path = "crates/rynas-module" }
 # local time zone arithmetic of the power schedule (DST-safe); the system tz database
 jiff = { version = "0.2.38", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 serde = { version = "1", features = ["derive"] }

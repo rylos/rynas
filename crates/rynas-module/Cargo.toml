@@ -1,0 +1,13 @@
+[package]
+name = "rynas-module"
+description = "rynas hardware module interface: the extension points of the core (UPS layer, event forward, settings import, system disk hints) that a hardware module fills in"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+rynas-api-types.workspace = true
+rynas-config.workspace = true
+rynas-tasks.workspace = true
+rynas-notify.workspace = true
