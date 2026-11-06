@@ -161,6 +161,20 @@ pub fn routes() -> Router<AppState> {
         .route("/updates/packages/{name}/changelog", post(forward))
         .route("/updates/auto", get(forward).put(forward))
         .route("/updates/kernel", get(forward))
+        // removable drives: state, actions as tasks, settings; changes come on /events
+        // as `removable.state`
+        .route("/removable", get(forward))
+        .route("/removable/refresh", post(forward))
+        .route("/removable/mounts", get(forward))
+        .route("/removable/settings", get(forward).put(forward))
+        .route("/removable/mount-all", post(forward))
+        .route("/removable/remove-all", post(forward))
+        .route("/removable/volumes/{name}/mount", post(forward))
+        .route("/removable/volumes/{name}/unmount", post(forward))
+        .route("/removable/volumes/{name}/unlock", post(forward))
+        .route("/removable/volumes/{name}/lock", post(forward))
+        .route("/removable/volumes/{name}/holders", get(forward))
+        .route("/removable/drives/{name}/remove", post(forward))
         // network (P4): with the local address of the session's connection
         .route("/network/interfaces", get(forward_net))
         .route("/network/interfaces/{name}", put(forward_net))

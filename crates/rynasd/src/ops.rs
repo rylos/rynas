@@ -47,6 +47,8 @@ pub struct Ops {
     /// just changed is read again here (the disk settings), so a client that reloads when
     /// the task ends sees the new values.
     pub after_apply: Option<AfterApply>,
+    /// Removable drives: their state changes ride on the task stream (`?removable=1`).
+    pub removable: std::sync::OnceLock<Arc<crate::removable::RemovableSvc>>,
 }
 
 /// See [`Ops::after_apply`].
@@ -66,6 +68,7 @@ impl Ops {
             admins: AdminPolicy::default(),
             pending,
             after_apply: None,
+            removable: std::sync::OnceLock::new(),
         }
     }
 }
@@ -538,7 +541,34 @@ fn event_name(k: TaskEventKind) -> &'static str {
 struct TaskStreamQuery {
     /// `1` or `true`: also the `config_pending` events.
     config: Option<String>,
+    /// `1` or `true`: also the `removable` events (the latest state first).
+    removable: Option<String>,
 }
+
+/// The removable drives half of the task stream: the latest state, then every change
+/// (`removable`, data `RemovableState`); `removable_resync` after missed changes.
+fn removable_events(ops: &Ops) -> Option<impl Stream<Item = Result<Event, Infallible>> + use<>> {
+    let r = ops.removable.get()?;
+    let rx = r.subscribe();
+    let head = stream::iter(
+        r.latest_json()
+            .map(|j| Ok(Event::default().event(REMOVABLE).data(&*j))),
+    );
+    let tail = stream::unfold(rx, |mut rx| async move {
+        let ev = match rx.recv().await {
+            Ok(j) => Event::default().event(REMOVABLE).data(&*j),
+            Err(RecvError::Lagged(_)) => Event::default().event(REMOVABLE_RESYNC).data("{}"),
+            Err(RecvError::Closed) => return None,
+        };
+        Some((Ok(ev), rx))
+    });
+    Some(head.chain(tail))
+}
+
+/// Event of the task stream (with `?removable=1`): the removable drives changed.
+pub const REMOVABLE: &str = "removable";
+/// The subscriber missed removable drive changes: read `/removable` again.
+pub const REMOVABLE_RESYNC: &str = "removable_resync";
 
 /// SSE: one event per task change (`started`, `updated`, `finished`), data = `TaskEvent`,
 /// serialized once for every subscriber. A subscriber that fell behind gets `resync` (data
@@ -573,7 +603,16 @@ async fn task_stream(
             Some((Ok(ev), rx))
         })
     });
-    let events = stream::select(tasks, stream::iter(config).flatten());
+    let removable = matches!(q.removable.as_deref(), Some("1" | "true"))
+        .then(|| removable_events(&ops))
+        .flatten();
+    let events = stream::select(
+        tasks,
+        stream::select(
+            stream::iter(config).flatten(),
+            stream::iter(removable).flatten(),
+        ),
+    );
     Ok(Sse::new(events).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
 }
 

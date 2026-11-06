@@ -11,13 +11,14 @@ use serde::{Deserialize, Serialize};
 pub mod network;
 pub mod notify;
 pub mod power;
+pub mod removable;
 pub mod scheduler;
 mod services;
 pub mod snapshots;
 pub mod storage;
 pub mod synology;
-pub mod ups;
 pub mod updates;
+pub mod ups;
 pub mod validate;
 pub use services::*;
 

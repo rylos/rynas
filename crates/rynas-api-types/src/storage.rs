@@ -321,11 +321,17 @@ pub struct CheckValue {
 
 impl CheckValue {
     pub fn code(code: &str) -> Self {
-        Self { code: code.into(), n: None }
+        Self {
+            code: code.into(),
+            n: None,
+        }
     }
 
     pub fn with(code: &str, n: f64) -> Self {
-        Self { code: code.into(), n: Some(n) }
+        Self {
+            code: code.into(),
+            n: Some(n),
+        }
     }
 }
 

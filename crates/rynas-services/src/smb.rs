@@ -36,7 +36,14 @@ pub const SMB_CONF_TEMPLATE: &str = "\
 {% endfor %}{% for s in shares %}
 [{{ s.name }}]
 {% for l in s.lines %}   {{ l[0] }} = {{ l[1] }}
-{% endfor %}{% endfor %}";
+{% endfor %}{% endfor %}
+# Shares of mounted removable drives, written by rynasd (setting \"removable\"); last, so
+# the sections it adds start after every share above. A missing file is skipped.
+include = /etc/samba/rynas-removable.conf
+";
+
+/// The include of the removable drive shares (`rynas_removable::smb::INCLUDE`).
+pub const REMOVABLE_INCLUDE: &str = "/etc/samba/rynas-removable.conf";
 
 pub const AVAHI_TEMPLATE: &str = r#"<?xml version="1.0" standalone="no"?>
 <!DOCTYPE service-group SYSTEM "avahi-service.dtd">
@@ -377,7 +384,6 @@ mod tests {
 
     #[test]
     fn netbios_names() {
-
         assert_eq!(netbios_name("nas.lan"), "NAS");
         assert_eq!(netbios_name("a-very-long-hostname-x"), "A-VERY-LONG-HOS");
         assert_eq!(netbios_name(""), "RYNAS");

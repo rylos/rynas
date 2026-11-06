@@ -347,6 +347,7 @@ pub fn Bell() -> impl IntoView {
                 aria-expanded=move || open.get().to_string()
                 on:click=move |_| {
                     ui.user_menu_open.set(false);
+                    ui.usb_open.set(false);
                     open.update(|o| *o = !*o);
                 }
             >

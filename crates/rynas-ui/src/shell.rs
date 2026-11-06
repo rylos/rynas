@@ -64,6 +64,7 @@ pub fn App() -> impl IntoView {
             ui.user_menu_open.set(false);
             ui.palette_open.set(false);
             ui.notif_open.set(false);
+            ui.usb_open.set(false);
         }
         ready
     });
@@ -81,13 +82,14 @@ pub fn App() -> impl IntoView {
             ui.drawer_open.set(false);
             ui.user_menu_open.set(false);
             ui.notif_open.set(false);
+            ui.usb_open.set(false);
         }
     });
 
     // a press outside the bell and the user menu closes them (a fixed scrim cannot do it: the
     // app bar's backdrop-filter makes it the containing block, so the scrim covered only the bar)
     let _ = window_event_listener(leptos::ev::pointerdown, move |e| {
-        if !(ui.user_menu_open.get_untracked() || ui.notif_open.get_untracked()) {
+        if !(ui.user_menu_open.get_untracked() || ui.notif_open.get_untracked() || ui.usb_open.get_untracked()) {
             return;
         }
         let inside = e
@@ -98,6 +100,7 @@ pub fn App() -> impl IntoView {
         if !inside {
             ui.user_menu_open.set(false);
             ui.notif_open.set(false);
+            ui.usb_open.set(false);
         }
     });
 
@@ -252,6 +255,7 @@ fn AppBar() -> impl IntoView {
                 <kbd>"Ctrl K"</kbd>
             </button>
             <div class="bar-actions">
+                <crate::removable::UsbButton />
                 <Bell />
                 <button class="icon-btn" aria-label=theme_label title=theme_label on:click=move |_| ui.theme.update(|th| *th = th.next())>
                     {move || view! { <Icon icon=theme_icon() /> }}
@@ -287,6 +291,7 @@ fn UserMenu() -> impl IntoView {
                 aria-expanded=move || open.get().to_string()
                 on:click=move |_| {
                     ui.notif_open.set(false);
+                    ui.usb_open.set(false);
                     open.update(|o| *o = !*o);
                 }
             >

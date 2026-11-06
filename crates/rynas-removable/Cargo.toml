@@ -1,0 +1,18 @@
+[package]
+name = "rynas-removable"
+description = "rynas removable drives: discovery from sysfs and the udev database, mount, unlock, safe removal"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+rynas-api-types.workspace = true
+rynas-tasks.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

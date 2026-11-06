@@ -78,10 +78,11 @@ SystemCallErrorNumber=EPERM
 # AF_PACKET: arping (duplicate address detection before a network change)
 RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6 AF_PACKET
 # Storage write side: CAP_SYS_ADMIN (partition re-read, md and dm ioctls, btrfs subvolumes),
-# CAP_SYS_RAWIO (ATA power check, hdparm), CAP_MKNOD (mdadm/dm nodes when udev is late),
+# CAP_SYS_RAWIO (ATA power check, hdparm, SCSI stop of a removable drive before power-off), CAP_MKNOD (mdadm/dm nodes when udev is late),
 # CAP_IPC_LOCK (cryptsetup locks its key material in memory). Volumes are mounted by
 # systemd (`systemctl start <unit>.mount` from /etc/fstab), never inside this unit's own
-# mount namespace, where the mount would stay invisible to the rest of the system.
+# mount namespace, where the mount would stay invisible to the rest of the system. Removable
+# drives likewise: transient units through systemd-mount below /media (writable here).
 # CAP_FSETID: restored snapshot files keep their setgid bits
 # File manager: CAP_SETUID/CAP_SETGID switch each rynas-files-worker to the signed-in user
 # between fork and exec; CAP_DAC_READ_SEARCH is the only one an administrator's worker

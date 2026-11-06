@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 rynas-api-types.workspace = true
 rynas-nut.workspace = true
+rynas-removable.workspace = true
 rynas-auth.workspace = true
 rynas-http.workspace = true
 rynas-storage.workspace = true
@@ -43,3 +44,4 @@ tower = { version = "0.5.3", features = ["util"] }
 tokio = { workspace = true, features = ["io-util"] }
 tempfile.workspace = true
 rusqlite.workspace = true
+http-body-util.workspace = true

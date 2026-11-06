@@ -51,6 +51,8 @@ pub struct Live {
     pub hardware_err: RwSignal<Option<String>>,
     /// UPS status (`ups.status` events; `None` until the UPS page or an event asked).
     pub ups: RwSignal<Option<rynas_api_types::ups::UpsStatus>>,
+    /// Removable drives (`removable.state` events; the stream sends the latest on connect).
+    pub removable: RwSignal<Option<rynas_api_types::removable::RemovableState>>,
 }
 
 /// A polled resource (for error states and Retry).
@@ -68,6 +70,7 @@ struct Stream {
     _on_sample: Closure<dyn Fn(MessageEvent)>,
     _on_hardware: Closure<dyn Fn(MessageEvent)>,
     _on_ups: Closure<dyn Fn(MessageEvent)>,
+    _on_removable: Closure<dyn Fn(MessageEvent)>,
     _on_task: Closure<dyn Fn(MessageEvent)>,
     _on_notif: Closure<dyn Fn(MessageEvent)>,
     _on_resync: Closure<dyn Fn(MessageEvent)>,
@@ -122,6 +125,7 @@ impl Live {
             storage_err: RwSignal::new(None),
             hardware_err: RwSignal::new(None),
             ups: RwSignal::new(None),
+            removable: RwSignal::new(None),
         }
     }
 
@@ -355,6 +359,22 @@ impl Live {
         });
     }
 
+    /// Reads the removable drives now (`resync`, Refresh); changes arrive as events.
+    pub fn refresh_removable(self) {
+        spawn_local(async move {
+            if let Ok(r) = api::get::<rynas_api_types::removable::RemovableState>("/api/v1/removable").await {
+                self.set_removable(r);
+            }
+        });
+    }
+
+    /// A new removable drives state (set only when something changed).
+    pub fn set_removable(self, r: rynas_api_types::removable::RemovableState) {
+        if self.removable.with_untracked(|cur| cur.as_ref().map(|c| &c.drives) != Some(&r.drives)) {
+            self.removable.set(Some(r));
+        }
+    }
+
     fn open_stream(self) {
         let Ok(es) = EventSource::new("/api/v1/events") else {
             self.conn.set(Conn::Offline);
@@ -390,6 +410,14 @@ impl Live {
             }
         });
         let _ = es.add_event_listener_with_callback("ups.status", on_ups.as_ref().unchecked_ref());
+        let on_removable = Closure::<dyn Fn(MessageEvent)>::new(move |ev: MessageEvent| {
+            if let Some(txt) = ev.data().as_string()
+                && let Ok(r) = serde_json::from_str::<rynas_api_types::removable::RemovableState>(&txt)
+            {
+                self.set_removable(r);
+            }
+        });
+        let _ = es.add_event_listener_with_callback("removable.state", on_removable.as_ref().unchecked_ref());
         let on_task = Closure::<dyn Fn(MessageEvent)>::new(move |ev: MessageEvent| {
             if let Some(txt) = ev.data().as_string()
                 && let Ok(e) = serde_json::from_str::<TaskEvent>(&txt)
@@ -425,6 +453,8 @@ impl Live {
                 self.refresh_hardware();
             } else if data.contains("\"ups\"") {
                 self.refresh_ups();
+            } else if data.contains("\"removable\"") {
+                self.refresh_removable();
             }
         });
         let _ = es.add_event_listener_with_callback("resync", on_resync.as_ref().unchecked_ref());
@@ -452,7 +482,7 @@ impl Live {
             }
         });
         es.set_onerror(Some(on_err.as_ref().unchecked_ref()));
-        let st = Stream { es, _on_sample: on_sample, _on_hardware: on_hardware, _on_ups: on_ups, _on_task: on_task, _on_notif: on_notif, _on_resync: on_resync, _on_open: on_open, _on_err: on_err };
+        let st = Stream { es, _on_sample: on_sample, _on_hardware: on_hardware, _on_ups: on_ups, _on_removable: on_removable, _on_task: on_task, _on_notif: on_notif, _on_resync: on_resync, _on_open: on_open, _on_err: on_err };
         STREAM.with(|s| *s.borrow_mut() = Some(st));
     }
 
