@@ -141,9 +141,17 @@ fn who(files: &Files, name: &str) -> Res<Who> {
     Ok(Who { user, admin })
 }
 
+/// Whether `user` may see the mounted removable volumes: administrators, and the members of
+/// the removable access group (the rule of the SMB share, `valid users = @group`). A gid of
+/// `None` (no such group) leaves them to administrators.
+fn may_use_removable(user: &User, admin: bool, access_gid: Option<u32>) -> bool {
+    admin || access_gid.is_some_and(|g| user.gid == g || user.groups.contains(&g))
+}
+
 /// The shares of the applied configuration (`shares` key) and the user's home, as the
-/// worker sees them; the display names of their volumes.
-fn shares_for(files: &Files, user: &User) -> Res<(Vec<Share>, BTreeMap<String, String>)> {
+/// worker sees them; the display names of their volumes. Mounted removable volumes only for
+/// [`may_use_removable`].
+fn shares_for(files: &Files, user: &User, admin: bool) -> Res<(Vec<Share>, BTreeMap<String, String>)> {
     let doc: SharesConfig = crate::services::from_value(files.ops.config.applied(SHARES_KEY)?)?;
     let mounts = std::fs::read_to_string("/proc/self/mounts").unwrap_or_default();
     let mut volumes = BTreeMap::new();
@@ -177,7 +185,8 @@ fn shares_for(files: &Files, user: &User) -> Res<(Vec<Share>, BTreeMap<String, S
         })
         .collect();
     // mounted removable volumes no share covers: one entry each, named after the mount point
-    for v in files.drives.mounted() {
+    let removable = if may_use_removable(user, admin, files.drives.access_gid()) { files.drives.mounted() } else { Vec::new() };
+    for v in removable {
         if out.iter().any(|s| v.mount_point.starts_with(&s.path) || s.path.starts_with(&v.mount_point)) {
             continue;
         }
@@ -249,6 +258,11 @@ pub trait RemovableDrives: Send + Sync {
     fn mounted(&self) -> Vec<RemovableVolume> {
         Vec::new()
     }
+    /// The access group of the removable settings (its gid): its members see the mounted
+    /// volumes, as administrators do. `None` when the group does not exist.
+    fn access_gid(&self) -> Option<u32> {
+        None
+    }
     /// Starts the safe removal of the drive (every volume unmounted, the drive powered off)
     /// as the user `who`; refusals (busy, unknown drive) keep their status and code.
     fn safely_remove(&self, who: &str, drive: &str) -> Res<()>;
@@ -282,7 +296,7 @@ impl RemovableDrives for NoDrives {
 
 /// The full context of a worker request.
 fn context(files: &Files, w: &Who, conns: bool) -> Res<Context> {
-    let (shares, volumes) = shares_for(files, &w.user)?;
+    let (shares, volumes) = shares_for(files, &w.user, w.admin)?;
     let conns = if conns {
         rynas_files::conns::load(&w.user.name).into_iter().map(|c| rynas_files::conns::with_user_key(&w.user.name, c)).collect()
     } else {
@@ -616,7 +630,7 @@ fn eject(files: &Files, w: &Who, vpath: &str) -> Res<()> {
     if !w.admin {
         return Err(Error::new(StatusCode::FORBIDDEN, error_codes::FORBIDDEN, "eject: administrators only".into()));
     }
-    let (shares, _) = shares_for(files, &w.user)?;
+    let (shares, _) = shares_for(files, &w.user, w.admin)?;
     let r = rynas_files::shares::resolve(&shares, vpath)?;
     let Some(drive) = r.share.device.clone() else {
         return Err(Error::new(StatusCode::NOT_IMPLEMENTED, error_codes::NOT_AVAILABLE, "eject: not on a removable drive rynas manages".into()));
@@ -780,6 +794,16 @@ mod tests {
         assert_eq!(default_volume_name(Path::new("/srv/vol1")), "vol1");
         assert_eq!(default_volume_name(Path::new("/")), "system");
         assert!(NoDrives.drive_of(Path::new("/media/usb disk")).is_none());
+    }
+
+    #[test]
+    fn removable_volumes_for_admins_and_the_access_group() {
+        let user = |gid, groups: Vec<u32>| User { name: "u".into(), uid: 2001, gid, groups, home: "/home/u".into() };
+        assert!(may_use_removable(&user(100, vec![]), true, None));
+        assert!(!may_use_removable(&user(100, vec![100]), false, None));
+        assert!(!may_use_removable(&user(100, vec![100]), false, Some(990)));
+        assert!(may_use_removable(&user(100, vec![100, 990]), false, Some(990)));
+        assert!(may_use_removable(&user(990, vec![]), false, Some(990)));
     }
 
     #[test]

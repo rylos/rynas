@@ -200,15 +200,17 @@ fn uptime_s(tree: &Tree) -> f64 {
         .unwrap_or(f64::MAX)
 }
 
+/// The numeric gid of `group` from `<root>/etc/group`, if it exists.
+pub fn lookup_gid(root: &std::path::Path, group: &str) -> Option<u32> {
+    std::fs::read_to_string(root.join("etc/group")).unwrap_or_default().lines().find_map(|l| {
+        let f: Vec<&str> = l.split(':').collect();
+        (f.first() == Some(&group)).then(|| f.get(2)?.parse().ok())?
+    })
+}
+
 /// The numeric gid of `group` from `<root>/etc/group`; 0 (root) when it does not exist.
 pub fn group_gid(root: &std::path::Path, group: &str) -> u32 {
-    std::fs::read_to_string(root.join("etc/group"))
-        .unwrap_or_default()
-        .lines()
-        .find_map(|l| {
-            let f: Vec<&str> = l.split(':').collect();
-            (f.first() == Some(&group)).then(|| f.get(2)?.parse().ok())?
-        })
+    lookup_gid(root, group)
         .unwrap_or_else(|| {
             tracing::warn!("removable drives: group {group} not found, files owned by root only");
             0
@@ -1187,6 +1189,11 @@ impl crate::files::RemovableDrives for FilesDrives {
                 drive: crate::files::Drive { id: m.drive, name: m.device_name },
             })
             .collect()
+    }
+
+    fn access_gid(&self) -> Option<u32> {
+        // root's own group is never the access group
+        lookup_gid(self.svc.svc.tree().root(), &self.svc.settings().share.group).filter(|&gid| gid != 0)
     }
 
     fn safely_remove(&self, who: &str, drive: &str) -> Res<()> {

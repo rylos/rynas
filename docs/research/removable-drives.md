@@ -59,7 +59,10 @@ appliances that have one (a hardware plugin feature), APFS (no in-kernel driver)
 
 ## File manager integration
 
-The file manager lists mounted removable volumes next to the shared folders and ejects them:
+The file manager lists mounted removable volumes next to the shared folders and ejects them.
+Only administrators and the members of the access group (R8) see them, the same rule as the SMB
+share: ext4/btrfs keep the owners and modes of the machine the drive comes from, so the kernel
+alone would open their world-readable files to every account.
 
 - Rust: `rynas_removable::mounts(&drives) -> Vec<RemovableMount>` and
   `rynas_removable::Removable::safely_remove(&drives, drive, &ctx)`; in rynasd

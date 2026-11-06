@@ -18,7 +18,7 @@ use rynas_auth::totp::{MemoryStorage, TotpManager};
 use rynas_config::{Config, ConfigOptions, MemorySystem};
 use rynas_services::{MemoryAccounts, MemoryShares, SHARES_KEY, SharesDomain, UsersDomain};
 use rynas_tasks::{TaskConfig, TaskManager};
-use rynasd::files::Files;
+use rynasd::files::{Drive, Files, RemovableDrives, RemovableVolume};
 use rynasd::ops::Ops;
 use rynasd::roles::AdminPolicy;
 use rynasd::server::{DaemonState, router};
@@ -93,6 +93,11 @@ async fn get(app: &axum::Router, uri: &str) -> (StatusCode, Value) {
 /// rynasd with the file manager and `shares` applied (each `[name, path]`), the test user an
 /// administrator.
 fn app_with(dir: &Path, list: &[(&str, &Path)]) -> (axum::Router, Arc<Ops>) {
+    app_full(dir, list, true, None)
+}
+
+/// [`app_with`], the test user an administrator or not, with a removable-drives module.
+fn app_full(dir: &Path, list: &[(&str, &Path)], admin: bool, drives: Option<Arc<dyn RemovableDrives>>) -> (axum::Router, Arc<Ops>) {
     let worker = worker();
     let root = dir.join("root");
     std::fs::create_dir_all(&root).unwrap();
@@ -114,9 +119,17 @@ fn app_with(dir: &Path, list: &[(&str, &Path)]) -> (axum::Router, Arc<Ops>) {
     config.apply_value("test", SHARES_KEY, Some(json!({ "shares": shares })), "shares", &|_| {}).unwrap();
     let tasks = TaskManager::new(dir.join("tasks"), "nas", TaskConfig::default()).unwrap();
     let mut ops = Ops::new(config, tasks);
-    ops.admins = AdminPolicy::new(vec!["rynas-admin".into()], |_| Some(vec!["rynas-admin".into()]));
+    ops.admins = if admin {
+        AdminPolicy::new(vec!["rynas-admin".into()], |_| Some(vec!["rynas-admin".into()]))
+    } else {
+        AdminPolicy::new(vec!["rynas-admin".into()], |_| Some(Vec::new()))
+    };
     let ops = Arc::new(ops);
-    let files = Arc::new(Files::new(ops.clone(), worker, &dir.join("state/files"), &dir.join("cache")));
+    let mut files = Files::new(ops.clone(), worker, &dir.join("state/files"), &dir.join("cache"));
+    if let Some(d) = drives {
+        files = files.with_drives(d);
+    }
+    let files = Arc::new(files);
     let clock = Arc::new(ManualClock::new(1_800_000_000_000));
     let totp = Arc::new(TotpManager::new(MemoryStorage::default(), clock.clone(), "rynas"));
     let mut st = DaemonState::new(Arc::new(NoAuth), totp, clock);
@@ -365,4 +378,46 @@ async fn symbolic_links_stay_inside_their_share() {
     };
     assert_eq!(job["errors"][0]["code"], error_codes::OUTSIDE_SHARE, "{job}");
     assert!(!docs.join("real/shadow").exists());
+}
+
+/// One mounted removable volume; its access group is `gid`.
+struct FakeDrives {
+    mount: PathBuf,
+    gid: Option<u32>,
+}
+
+impl RemovableDrives for FakeDrives {
+    fn drive_of(&self, _: &Path) -> Option<Drive> {
+        None
+    }
+    fn mounted(&self) -> Vec<RemovableVolume> {
+        vec![RemovableVolume { mount_point: self.mount.clone(), label: "STICK".into(), drive: Drive { id: "sdc".into(), name: "SanDisk".into() } }]
+    }
+    fn access_gid(&self) -> Option<u32> {
+        self.gid
+    }
+    fn safely_remove(&self, _: &str, _: &str) -> Result<(), rynasd::ops::Error> {
+        Ok(())
+    }
+}
+
+/// Removable volumes: administrators and the members of the access group, as for SMB.
+#[tokio::test]
+async fn removable_volumes_for_admins_and_the_access_group() {
+    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let docs = dir.path().join("docs");
+    let stick = dir.path().join("media/STICK");
+    std::fs::create_dir_all(&docs).unwrap();
+    std::fs::create_dir_all(&stick).unwrap();
+    let my_gid = rynas_files::identity::current().unwrap().gid;
+    let names = |v: &Value| -> Vec<String> { v["shares"]["shares"].as_array().unwrap().iter().map(|s| s["name"].as_str().unwrap().to_string()).collect() };
+    for (admin, gid, sees) in [(true, None, true), (false, None, false), (false, Some(my_gid.wrapping_add(12345)), false), (false, Some(my_gid), true)] {
+        let drives: Arc<dyn RemovableDrives> = Arc::new(FakeDrives { mount: stick.clone(), gid });
+        let (app, _) = app_full(dir.path(), &[("docs", &docs)], admin, Some(drives));
+        let (s, v) = get(&app, "/v1/files/init").await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        assert_eq!(names(&v).contains(&"STICK".to_string()), sees, "admin {admin}, group {gid:?}: {v}");
+        let (s, _) = get(&app, "/v1/files/list?path=/STICK").await;
+        assert_eq!(s == StatusCode::OK, sees, "admin {admin}, group {gid:?}");
+    }
 }

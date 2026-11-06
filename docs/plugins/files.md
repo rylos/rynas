@@ -57,10 +57,42 @@ browser ──HTTPS── rynas-web (user rynas) ──Unix socket── rynasd 
   the workers.
 - **Paths never leave a share**: a virtual path is `/<share>/<plain components>`; `..`, `.`,
   NUL and absolute parts are refused (400 `invalid_value`, `field: path`), a share name is
-  matched exactly. Symbolic links inside a share are followed by the kernel with the user's
-  permissions, as Samba does by default; the recycle bin refuses an item reached through a link
-  that leaves the share's filesystem (never deleted for good instead). Real paths never go to the
-  interface (`Share::public`).
+  matched exactly. Real paths never go to the interface (`Share::public`).
+- **Symbolic links stay inside their share** (`rynas_files::confine`), as Samba with its default
+  `wide links = no`: a link is followed while its target stays in the same share (relative or
+  absolute, chains included), and refused with 403 `outside_share` when it leads to the system,
+  to another share or to a home. Without this an administrator's worker, which keeps
+  `CAP_DAC_READ_SEARCH`, would read `/etc/shadow` or rynasd's stores through a link any user can
+  plant (an archive with `etc -> /`).
+  - Resolution: from the share's opened directory with `openat2(RESOLVE_BENEATH |
+    RESOLVE_NO_MAGICLINKS)` (Linux 5.6; Debian 13); where the kernel lacks it (ENOSYS), and for
+    absolute links pointing inside the share (which the kernel refuses beneath a root), a walk of
+    one component at a time with `O_NOFOLLOW` from the folder opened before, `..` of link targets
+    never above the share. The result is a real path without links.
+  - Races: the worker holds a jail for its request or job (the share roots its paths name);
+    every file and folder it reads is opened with `O_NOFOLLOW` and refused unless the descriptor
+    is really inside one of them (`/proc/self/fd`), so a folder swapped for a link after the
+    resolution is caught. Files it makes (`create_new` part files, archives, the editor's
+    temporary file) are checked the same way and removed when they landed elsewhere.
+  - Per route: `list` shows a link out of the share as a link (`outside: true`, never stat'ed
+    through: no `link_dir`), `stat` gives its target text with `readable`/`writable` false;
+    `list`, `view`, `download`, `text`, `edit`, `edit/save`, `thumb`, `media`, `space`,
+    `search`, `mkdir`, `upload` refuse it. Zip and tar downloads, `.tar.zst` and zip archives,
+    copies and moves keep links as links (never followed); `usage` and `search` do not go down
+    links. The editor saves the target of a link that stays inside (the link remains a link).
+    ffmpeg (thumbnails, media info) reads the checked descriptor (`file:/proc/self/fd/3`), never a
+    path.
+  - Jobs: `jobs/new` sends the share roots (`Spec::roots`); the worker resolves each source as
+    the item itself (a selected link is copied, moved or deleted as a link) and the destination
+    followed, both inside their share; a source out of it is skipped with `outside_share`, a
+    destination out of it fails the job. The recycle bin's folders are made one by one and must be
+    real folders (a `#recycle` link fails the deletion, nothing is deleted for good). The
+    extraction tools run under Landlock (Linux 5.13) with every write allowed below their own
+    folder only, so an archive's `a -> /etc` followed by `a/passwd` writes nothing out of it;
+    without Landlock the tools' own guards apply (GNU tar delays links that go up or are
+    absolute), and what they made is moved into place without following links.
+  - External programs (7z, unrar, tar, ffmpeg) run without the administrator's capability (exec
+    drops it): the worst a race gets them is what the user may read anyway.
 - **Stores** (`/var/lib/rynas/files/`, root 0700, only rynasd reads them): `<user>/prefs.json`,
   `<user>/conns.json` (passwords and imported keys sealed with AES-256-GCM under `conns.key`, made
   once under a lock and never replaced), `<user>/id_ed25519{,.pub}`, `journal/`. A worker gets
@@ -179,7 +211,7 @@ administrators sign in). Route names, query parameters and JSON bodies are SynoF
 | GET | `init` | — | `{whoami, prefs, shares: <shares answer>, conns: <conns answer>}` | rynasd + worker |
 | GET | `shares` | — | `{shares: [Share + free, total, readable, writable], user, volumes: {mount: name}, hostname}` | worker |
 | GET | `list` | `path` | `{entries: [Entry], writable, space: {free,total}\|null, recycle}`; in an archive `{entries, writable: false, space: null, recycle: false, inner, total}`; remote `{…, remote: {kind, top}}` | worker |
-| GET | `stat` | `path` | `Details` (`name, kind, size, mtime, atime, ctime, mode, owner, group, inode, links, target, readable, writable, device`) | worker |
+| GET | `stat` | `path` | `Details` (`name, kind, size, mtime, atime, ctime, mode, owner, group, inode, links, target, outside, readable, writable, device`) | worker |
 | GET | `media` | `path` | EXIF/track facts, `{}` when none | worker |
 | POST | `usage` | `{paths}` | `{bytes, files, dirs, unreadable, partial}` (25 s budget) | worker |
 | GET | `space` | `path` | rings (40 s budget) | worker |
@@ -209,7 +241,8 @@ administrators sign in). Route names, query parameters and JSON bodies are SynoF
 
 Shapes added to SynoFile's (optional fields, nothing removed): `Share.removable`, `device`
 (disk, `sdc`), `device_name` (vendor + model); `JobView.code`, `JobView.task_id`;
-`ErrorItem.code`; `whoami.admin`.
+`ErrorItem.code`; `whoami.admin`; `Entry.outside`, `Details.outside` (a link out of its share);
+`Spec.roots` (worker side).
 
 ### Deviations from SynoFile's contract
 
@@ -242,6 +275,7 @@ The codes the file manager answers (constants in `rynas_api_types::error_codes`,
 | 400 | `password_required` | archive needs its password (also the job's `code`) |
 | 400 | `remote_auth_failed` | a server refused the login (never 401) |
 | 403 | `permission_denied` | the filesystem refused (user's permissions, ACLs) |
+| 403 | `outside_share` | a symbolic link leads out of its shared folder (listed, never followed); also an item of a job's error list |
 | 403 | `forbidden` | eject by a non-administrator; unknown user |
 | 404 | `not_found` | no such item, share, connection, transfer, thumbnail |
 | 405 | `method_not_allowed` | |
@@ -333,8 +367,11 @@ drives; `rynasd::removable::FilesDrives` implements it on the removable-drives m
   drive's kernel name) and `device_name` (its title);
 - `mounted()`: every mounted removable volume no share covers is listed as a shared folder of
   its own, named after its mount point's last component (`/media/STICK` → `STICK`, `-2`, `-3`
-  on a clash), so the app bar's Open goes to `/files/STICK`; access is the kernel's (the mount
-  options give the access group read-write);
+  on a clash), so the app bar's Open goes to `/files/STICK`. Only administrators and the members
+  of the removable access group (`removable.share.group`, `access_gid()`) see them, the rule of
+  the SMB share (`valid users = @group`): ext4 and btrfs keep the owners and modes of the machine
+  the drive comes from, so the kernel alone would let any account read its world-readable files
+  (and write those of a matching uid). FAT/exFAT/NTFS are mounted for that group anyway;
 - `POST eject {share}` → `safely_remove(user, drive)`: starts the task `removable.remove`
   (unmount everything on the drive, power it off); busy or unknown drives keep their 409/404.
 Without the module (`NoDrives`) nothing is removable and `eject` answers 501 `not_available`.
