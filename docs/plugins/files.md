@@ -18,8 +18,8 @@ SynoFile is MIT and by the same author; its Rust code was moved, not rewritten.
 | Copy / move / delete with `.name.rynas-part` + rename, btrfs reflink in one filesystem, rename for moves, xxHash3 verify, conflicts (ask / overwrite / skip / keep both / newer), pause, cancel, live speed limit, speed series, current file, error list | transfer jobs = rynas tasks (`files.copy`, `files.move`, `files.delete`, `files.compress`, `files.extract`) |
 | Transfers that survive the browser; after a rynasd restart the partial files are cleaned and the job comes back interrupted with Retry | journal in `/var/lib/rynas/files/journal/` (no secrets) |
 | Recycle bin | own `#recycle` per share, Samba `vfs_recycle` layout (see below) |
-| Archives as folders (zip, 7z, iso, cab, jar, rar, tar.gz/bz2/xz/zst/lz): browse, preview, download one item, extract all or selected items, password archives (password on stdin, never on the command line) | 7-Zip, GNU tar, unrar; a missing tool fails only its feature (`tool_missing`) |
-| Compress to `.zip` (own streaming writer, zip64, UTF-8 names), download folders and selections as a zip (or tar) stream | `jobs/new` `op: compress`, `download?paths=` |
+| Archives as folders (zip, 7z, iso, cab, jar, rar, tar, tar.gz/tgz, tar.bz2/tbz2/tbz, tar.xz/txz, tar.zst/tar.zstd/tzst/tzstd): browse, preview, download one item, extract all or selected items, password archives (password on stdin, never on the command line) | 7-Zip, GNU tar (with gzip, bzip2, xz or zstd, which it runs by name), unrar; a missing program fails only its feature with `tool_missing`, naming the program, before anything is read or unpacked |
+| Compress to `.zip` (own streaming writer, zip64, UTF-8 names) or `.tar.zst` (see below), download folders and selections as a zip (or tar) stream | `jobs/new` `op: compress`, `format: zip \| tar.zst`, `download?paths=` |
 | Space analysis (rings), folder usage | `space`, `usage` |
 | Text editor: load/save with an mtime+size stamp guard (409 `conflict`), permissions, owner and group kept, symlinks saved on their target, hard links written in place | `edit`, `edit/save` |
 | Search below a folder (words or a glob) | `search` |
@@ -113,6 +113,33 @@ worker as the user (removes `.name.rynas-part`, `.rynas-x-*` extraction folders 
 `.synofile-*` names, for volumes that come from a NAS that ran it), and Retry runs the same job
 again (the secrets reloaded from the store).
 
+### Archives the file manager writes
+
+The Compress dialog offers two formats; the name's extension follows the choice.
+
+- **zip** (default; opens anywhere): the own streaming writer, levels normal (deflate 6), fast
+  (deflate 1) and store; photos, videos, music and archives are always stored.
+- **tar.zst** (`format: "tar.zst"`): written in the worker, no program spawned — the `tar`
+  crate (GNU headers, long names and long link targets as GNU long-name entries) through the
+  `zstd` crate on the system libzstd, with the zip's walk, progress, pause, cancel, live speed
+  limit and `.name.rynas-part` + rename (a cancel removes the part file). Every entry keeps its
+  mode, owner ids and modification time; symbolic links are stored as links, never followed
+  (in or out of the share); empty folders are kept; sockets, pipes and devices are left out;
+  a file that shrinks while it is read is padded to its announced size and reported, one that
+  grows is cut, so the archive stays readable. A name already taken becomes
+  `name (1).tar.zst` (the compressed tar's extension counts as one, for copies too).
+  Levels: fast = zstd 1, normal = 3 (zstd's default), best = 9; `store` (a zip level) gets 3.
+  Why: measured with three workers on 300 MB of `/usr` files, level 3 makes the archive in a
+  fifth of level 9's time and goes faster than a disk writes even on a 4-core Celeron; 9 is
+  about 9% smaller; above 9 each step costs many times the time for a few percent (19 is some
+  85 times slower than 3), so it is not offered. Incompressible data (media, archives) passes
+  at full speed, so nothing needs storing apart. Threads: zstd workers = cores − 1 (a core stays
+  for Samba and the web interface; 3 on a J4125), at most 4, in jobs of 8 MiB, which halves the
+  memory at level 9 (about 110 MB peak instead of 175) for 0.2% of size; a libzstd built
+  without threads compresses in the worker's own thread. The archive carries zstd's checksum.
+- Remote destinations and sources: refused for both formats (`invalid_value`, "copy the files
+  to the NAS first"), as before.
+
 ### Recycle bin
 
 A share whose SMB recycle bin is on (`smb.enabled && smb.recycle.enabled`, the same shares the
@@ -176,7 +203,7 @@ administrators sign in). Route names, query parameters and JSON bodies are SynoF
 | POST | `conns/order` | `[ids]` | `{ok}` | rynasd |
 | POST | `conns/key` | `{}` | `{key}` (public half, made on first use) | rynasd (+ worker) |
 | GET | `jobs` | `since` (ms) | `{jobs: [JobView], now}` | rynasd |
-| POST | `jobs/new` | `{op, sources, dest, conflict, verify, limit, permanent, name, level, into_folder, password, members}` | `{id}` | rynasd |
+| POST | `jobs/new` | `{op, sources, dest, conflict, verify, limit, permanent, name, level, format, into_folder, password, members}` | `{id}` | rynasd |
 | POST | `jobs/control` | `{id, action: pause\|resume\|cancel\|answer\|limit\|start\|retry\|dismiss, policy, all, bps, conflict, password}` | `{ok}` | rynasd |
 | POST | `eject` | `{share}` (or `?path=/share`) | `{ok}`; administrators only; 409 `busy` while in use or transfers run; 501 `not_available` without the removable-drives module | rynasd |
 
@@ -227,7 +254,7 @@ The codes the file manager answers (constants in `rynas_api_types::error_codes`,
 | 415 | `unsupported_media_type` | editor: binary or not UTF-8 |
 | 502 | `remote_unreachable` | server down or connection broken |
 | 501 | `not_available` | eject without the removable-drives module |
-| 503 | `tool_missing` | 7z/unrar/tar missing |
+| 503 | `tool_missing` | 7z/unrar/tar missing, or the decompressor GNU tar runs (gzip, bzip2, xz, zstd) |
 | 504 | `timeout` | worker did not answer in time |
 | 507 | `insufficient_storage` | volume full or quota used up |
 | 500 | `internal` | anything else (log) |
@@ -259,20 +286,25 @@ answer head, 610 s for `upload` and `edit/save`.
   (thumbnails, `/var/cache/rynas/files/thumbs/<uid>`, each owned by its user, 0700),
   `TasksMax=256`; capabilities unchanged (`CAP_SETUID`, `CAP_SETGID`, `CAP_DAC_READ_SEARCH`
   were already there).
-- Recommends `7zip`, `ffmpeg`; suggests `unrar`.
+- Recommends `7zip`, `zstd` (opening `.tar.zst`: GNU tar runs it; creating one needs no
+  program, the worker links the system libzstd), `ffmpeg`; suggests `unrar`.
 - rynasd options: `--files-worker` (default: next to rynasd), `--files-cache`.
 
 ### Tests
 
-- `rynas-files` unit tests (54): path confinement (`..`, `.`, NUL, unknown share, exact names),
+- `rynas-files` unit tests (55): path confinement (`..`, `.`, NUL, unknown share, exact names),
   names and temporary names (255 bytes, UTF-8 boundaries), error codes of I/O errors, the
   gateway answer, uploads (any order, idempotent, missing chunks, conflicts, symlinks never
   written through, sweeping), the editor (stamps, symlinks, hard links, mode/owner), the zip
-  writer, archives listing, `parse_ffmpeg`, the key store (one key for concurrent first uses, a
+  writer, archives listing and format detection (every tar extension incl. the zstd ones),
+  the programs an archive needs, `parse_ffmpeg`, the key store (one key for concurrent first uses, a
   damaged key never replaced), thumbnails cache and `@eaDir`, job progress.
-- `rynas-files-worker` (16 unit + 3 integration): recycle bin (target, Samba layout and
+- `rynas-files-worker` (20 unit + 3 integration): recycle bin (target, Samba layout and
   versions, never deleting for good when the bin was asked for), clean-up of leftovers incl.
-  SynoFile names, passwords off the command line, tool output parsing; through the real binary:
+  SynoFile names, passwords off the command line, tool output parsing, archive names and
+  zstd levels, a .tar.zst round trip (made by the job, listed and extracted with GNU tar: long
+  names, links kept as links and not followed out, an empty folder, mode and mtime), a
+  cancelled .tar.zst leaving no part file; through the real binary:
   interrupted jobs cleaned and offered again, a copy with a conflict answered, a cancelled copy
   leaving nothing behind.
 - rynasd `tests/files.rs`: the whole API with the real worker (init, list, confinement, mkdir,
@@ -421,6 +453,10 @@ What the UI expects from the backend beyond SynoFile's contract:
   volumes, …); localStorage keys `rynas.files.*`, drag types `application/x-rynas-files*`.
 - Lists, dialogs and panels scroll vertically only (G7); the columns view and the text preview
   are the two listed exceptions, wide by nature.
+- "Comprimi…" opens "Crea un archivio" with a format choice: zip (levels normal, fast, store)
+  or tar.zst (normal, fast, best, see *Archives the file manager writes*); the name's extension
+  and the hint follow the format. `.tar.zstd`, `.tzst` and `.tzstd` open like `.tar.zst`
+  (browsable, the archive icon, "Estrai in «name»" without the extension).
 
 ### Plan: the Leptos rewrite, piece by piece
 
