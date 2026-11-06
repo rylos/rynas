@@ -629,6 +629,9 @@ schema 2 added the `code` and `body_format` columns.
 | `net.adopted` | — | Network migrated to rynas (systemd-networkd) |
 | `net.boot_undone` | `revision`, `tested` | Unconfirmed network change undone at boot |
 | `net.watchdog_restored` / `net.rescue` / `net.reset` | `revision` | Network restored to the last known good revision / rescue configuration / factory network |
+| `removable.unplugged` | `drive`, `device`, `mount_points` | {drive} was unplugged while mounted (warning; not after a safe removal) |
+| `removable.safe_to_remove` | `drive`, `device`, `method` (`power_off`/`eject`/`release`) | {drive} can be removed safely (info; setting `notify_safe_removal`) |
+| `removable.ntfs_read_only` | `volume`, `drive`, `mount_point` | {volume} mounted read-only (warning: Windows left the NTFS volume dirty or hibernated) |
 | `synodeb.<event>` | the forward's parameters | the forward's title; events and parameters in `../synodeb-integration.md` S1 |
 
 Not coded: the target test message (built in the target's language already) and events from
@@ -1135,3 +1138,41 @@ Rules:
 Not done yet: restore point before installing (needs the root rollback work), reboot from the
 page, needrestart's service list, apt-listchanges NEWS, real-machine test (`packaging/` container
 test with a local apt repository).
+
+## API v1: removable drives
+Crates `rynas-removable` (discovery, mount options and names, holders, actions behind a
+`Host` trait, SMB include) and `rynasd::removable` (watcher, tasks, the `removable`
+configuration key, notifications). Design and research: `../research/removable-drives.md`.
+Types in `rynas_api_types::removable`. Actions are immediate (not staged) and run as tasks
+`removable.<verb>`; each request is first checked against a fresh reading (404 `not_found`,
+409 `conflict` for a state that does not fit, 409 `busy` with the holding processes in the
+message, 503 `backend_unavailable`). No new error code.
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/api/v1/removable` | — | `RemovableState` {drives: [`RemovableDrive` {name, dev_path, bus usb\|sd\|optical\|other, title, vendor, model, serial, size_bytes, removable_media, no_media, read_only, usb? {speed_mbps, version}, remove_method power_off\|eject\|release, busy, pending?, volumes: [`RemovableVolume` {name, dev_path, label, fs_type, uuid?, size_bytes, luks, unlocked, clear?, supported, mount_point?, read_only, total_bytes?, used_bytes?, avail_bytes?, share?, pending?}]}], mount_root, read_at_ms} |
+| POST | `/api/v1/removable/refresh` | — | `RemovableState` after a forced reading (filesystem drivers read again) |
+| GET | `/api/v1/removable/mounts` | — | `Vec<RemovableMount>` {removable: true, device, drive, device_name, label, fs_type, mount_point, read_only, remove_method}: the file manager's list |
+| GET/PUT | `/api/v1/removable/settings` | `RemovableSettings` {auto_mount (true), read_only (false), notify_safe_removal (true), share {enabled (false), access read_write\|read_only, group ("rynas-admin")}} | `RemovableSettingsState` {applied, pending?, smb_available} (PUT stages `removable`; 400 `invalid_value` field `share.group`) |
+| POST | `/api/v1/removable/volumes/{name}/mount` | optional `MountRequest` {read_only} | 202 (`removable.mount`); 409 locked LUKS, no driver, already mounted |
+| POST | `/api/v1/removable/volumes/{name}/unmount` | — | 202 (`removable.unmount`); 409 `busy` |
+| POST | `/api/v1/removable/volumes/{name}/unlock` | `UnlockVolumeRequest` {passphrase (1-512, stdin only), mount (true)} | 202 (`removable.unlock`); 409 not LUKS / already unlocked / no cryptsetup; a wrong passphrase fails the task |
+| POST | `/api/v1/removable/volumes/{name}/lock` | — | 202 (`removable.lock`); 409 `busy` |
+| GET | `/api/v1/removable/volumes/{name}/holders` | — | `Vec<VolumeHolder>` {pid, command, user} (empty when not mounted) |
+| POST | `/api/v1/removable/drives/{name}/remove` | — | 202 (`removable.remove`): safe removal (unmount, lock, power off / eject / release); 409 `busy` |
+| POST | `/api/v1/removable/mount-all` | — | 202 (`removable.mount-all`); 409 nothing to mount |
+| POST | `/api/v1/removable/remove-all` | — | 202 (`removable.remove-all`); 409 `busy` before anything is unmounted |
+
+Live updates: rynasd's task stream adds `removable` (data `RemovableState`, the latest on
+connect, then on change) and `removable_resync` with `?removable=1`; rynas-web forwards them on
+`/api/v1/events` as `removable.state` and `resync {"stream":"removable"}` (no browser polling).
+Rules: readings every 2 s by a dedicated scanner thread below `--hw-root` (sysfs, udev
+database, mount table: no command, no disk access); mounts through `systemd-mount` transient
+units in PID 1's namespace (plain `mount` without systemd); never a lazy unmount; mounted
+volumes below `/media/<label>` with names remembered per UUID
+(`/var/lib/rynas/removable/names.json`); SMB shares of mounted volumes in
+`/etc/samba/rynas-removable.conf` (included at the end of `smb.conf`), removed with their
+connections before an unmount; `--dry-system` reads the drives and only logs the actions.
+Tests: `crates/rynas-removable` (fixture sysfs trees, recording host), `crates/rynasd/tests/removable.rs`
+(simulated host whose mount table and USB ports follow the commands). Not yet: per-device
+overrides, filesystem check/repair, NTFS dirty-flag clearing, formatting.

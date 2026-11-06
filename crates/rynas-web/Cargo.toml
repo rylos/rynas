@@ -57,8 +57,9 @@ depends = "$auto, adduser, libpam-runtime"
 # discovery), snapshots (btrbk, btrfs-progs), storage (mdadm, cryptsetup-bin and
 # systemd-cryptsetup for encrypted volumes, gdisk, smartmontools, hdparm), network changes
 # (iputils-arping/iputils-ping: duplicate-address checks and gateway tests), automatic
-# updates (unattended-upgrades)
-recommends = "samba, nfs-kernel-server, acl, avahi-daemon, wsdd2, btrbk, btrfs-progs, mdadm, cryptsetup-bin, systemd-cryptsetup, smartmontools, hdparm, gdisk, iputils-arping, iputils-ping, unattended-upgrades"
+# updates (unattended-upgrades), removable drives (cryptsetup-bin for encrypted sticks,
+# ntfs-3g as the NTFS fallback driver, exfatprogs and dosfstools for checks)
+recommends = "samba, nfs-kernel-server, acl, avahi-daemon, wsdd2, btrbk, btrfs-progs, mdadm, cryptsetup-bin, systemd-cryptsetup, smartmontools, hdparm, gdisk, iputils-arping, iputils-ping, unattended-upgrades, ntfs-3g, exfatprogs, dosfstools"
 # mtr-tiny: traceroute diagnostics as JSON
 suggests = "fail2ban, mtr-tiny"
 # rynas runs Samba as a standalone file server and owns smb.conf; Debian's samba recommends the
