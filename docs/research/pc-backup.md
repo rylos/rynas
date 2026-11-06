@@ -291,6 +291,16 @@ Chosen by default, open to change:
 - one repository per device;
 - image engine as the default proposal on Linux and Windows.
 
+## 9. Note for the next round (2026-11-07)
+
+Marco: "il motore restic vince su tutti in velocità e deduplica". For the next round:
+- **Deduplication:** agreed. Content-defined chunks, dedup across snapshots and across devices in a shared repository, zstd. This is why the image engine already stores into a restic-format repository: dedup is restic's in every case.
+- **Speed:** it depends on what is measured.
+  - Incremental backup of a large tree: restic still has to walk and `stat` every file, using the parent snapshot to skip unchanged files. `btrfs send` and changed-block tracking find the changes from the filesystem metadata without walking anything, so they win on millions of files.
+  - Bare-metal restore: streaming an image is faster than recreating millions of files.
+  - Prune memory on large repositories: the 25 GB RSS seen with rustic needs to be measured against restic.
+- **Option to evaluate:** restic as the single storage and dedup layer for everything (files and images), with btrbk only where the user wants readable btrfs snapshots on the NAS. To measure on pc-casa / pc-work data before deciding.
+
 ## Sources
 
 - Marco's notes: Disaster Recovery PC-Casa (github.com/rylos/restore_btrfs_system), Disaster Recovery pc-work, abb-agent (github.com/rylos/abb-agent; local `~/dev/syno-abb`), btrbk-nas (github.com/rylos/btrbk-nas)
