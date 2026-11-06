@@ -93,8 +93,61 @@ means "use your own channels".
 | `title` | string, required | one line; rynas keeps 200 characters |
 | `message` | string | body; rynas keeps 4000 characters |
 | `priority` | `low` \| `normal` \| `high` \| `urgent` | default `normal`; mapped like synodeb's syslog levels: low → `info`, normal → `notice`, high → `warning`, urgent → `critical` |
-| `source` | string | the caller (`smartd`, `mdadm`, `synohwd`, `synodeb-ups`, `boot-report`, `onfailure`, `synodeb-dom`...); reduced to `[a-z0-9._-]{1,32}` (default `notify`); stored as source `synodeb:<source>` |
+| `source` | string | the caller (`unit`, `smart`, `raid`, `boot`, `emergency`, `hw`, `dom`, `ups`...); reduced to `[a-z0-9._-]{1,32}` (default `notify`); stored as source `synodeb:<source>` |
 | `force` | bool / `1` | `-f`: bypass the duplicate window |
+| `event` | string, optional | `-e`: stable event code, `[a-z0-9_]{1,32}`; stored as code `synodeb.<event>` |
+| `field.<name>` (form) / `fields` (JSON object of strings) | optional | `-v name=value`: event parameters; name `[a-z0-9_]{1,32}`, value one line of at most 200 characters (may be empty), at most 16 |
+| `format` | `text` \| `log`, optional | `-l`: the message is command output or a log; default `text` |
+
+The last three are optional and backwards compatible: a sender without them works as before.
+An invalid code, parameter (bad name, too long, a line break, a non-string JSON value, past the
+16th) or format is dropped (logged by synodeb as "ignored"), never the notification; a repeated
+`field.<name>` keeps its first value. Parameters are stored in the event's `fields` next to
+`priority`, usable by rules (field matches) and channel templates.
+
+**How rynas shows coded events.** The web interface translates the title and body from the code
+and the parameters (dictionary keys `nev.synodeb.<event>.title` / `.body` with `{name}`
+placeholders, variants `…_2`/`…_3` for parameters that may be empty, `nev.synodeb.<event>.<name>.<value>`
+for values of a closed set). When the code is unknown, the key is missing or a placeholder's
+parameter is missing or empty, it shows the English `title`/`message` as sent: an event rynas does
+not know yet still reads fine. A `log` message is never translated: it is shown in monospace with
+its line breaks (two lines in the bell, the whole text in the detail drawer). Channels whose
+target language is Italian get the same translated title and body; English targets get the text
+as sent. synohwd's `fan_failure` / `fans_ok` (source `hw`) are the condition
+`hardware:fan_fail` of rynas' hardware watch (matched by event code, by title for senders without
+codes), so the two sources make one notification.
+
+**Event codes sent by synodeb** (synodeb commit 810cccd; translations in
+`crates/rynas-ui/src/i18n.rs`, `nev.synodeb.*`):
+
+| Event (`synodeb.<event>`) | Source | Parameters | Priority | Message |
+|---|---|---|---|---|
+| `unit_failed` | `unit` | `unit` | high | log (`systemctl status`) |
+| `smart_error` | `smart` | `device`, `failtype` (Health, FailedHealthCheck, CurrentPendingSector, OfflineUncorrectableSector, FailedReadSmartData, EmailTest, ErrorCount, SelfTest, FailedOpenDevice, Usage; translated) | urgent / high / low | log or text (smartd's message) |
+| `raid_event` | `raid` | `array`, `event` (mdadm: Fail, FailSpare, DegradedArray, DeviceDisappeared, SparesMissing, MoveSpare, SpareActive, RebuildFinished, RebuildStarted, TestMessage, NewArray; translated), `device` (may be empty) | urgent / normal | log (`/proc/mdstat`) |
+| `boot_completed` | `boot` | `kernel`, `addresses`, `previous_boot` (empty, or the start of a previous boot that did not end cleanly), `watchdog` (empty, or the watchdog that reset the board), `root` (ok, degraded, resync_started, resync_failed; translated) | normal / high | text |
+| `emergency_mode` | `emergency` | `failed` (units, may be empty), `addresses` (may be empty) | urgent | text |
+| `fan_failure` | `hw` | `source` (microcontroller, hwmon); `fan` (fan, cpu_fan; translated) for the microcontroller, `fans` for hwmon | urgent | text |
+| `fans_ok` | `hw` | — | normal | — |
+| `thermal_shutdown` | `hw` | `reason` | urgent | text |
+| `shutdown` | `hw` | `button` (power_button; translated), `command` | high | text |
+| `dom_update_failed` | `dom` | `error` | high | text (the error) |
+| `dom_default_debian` | `dom` | `kernel` | high | text |
+| `kernel_not_tried` | `dom` | `kernel` | normal | text |
+| `kernel_boot_failed` | `dom` | `running` | high | text |
+| `ups_safe_mode` | `ups` | `reason` (lowbatt, nocomm, waittimeup, fsd; translated), `battery` (%), `runtime` (s) | urgent | text |
+| `ups_power_restored_reboot` | `ups` | — | high | text |
+| `ups_power_restored` | `ups` | `battery` | normal | text |
+| `ups_on_battery` | `ups` | `battery`, `runtime` | high | text |
+| `ups_battery_low` | `ups` | `battery`, `runtime` | urgent | text |
+| `ups_unreachable` | `ups` | `ups`, `minutes` | high | text |
+
+A new synodeb event needs only its keys in `crates/rynas-ui/src/i18n.rs` (section "synodeb"):
+`nev.synodeb.<event>.title` (required for a translation), optionally `.body` (text messages
+only), variants `.title_2`/`.body_2`/`.body_3` and value keys; rynasd picks them up for the
+Italian channels at build time. Until then the English title and message are shown. In the list
+the source of every synodeb event reads "Base system" (the raw `synodeb:<source>` stays in the
+detail drawer).
 
 Category from the source: smart/mdadm/raid/btrfs/disk/storage → `storage`, ups/nut → `ups`,
 synohwd/hw/fan/thermal/temp → `hardware`, dom/trial/kernel/apt/update/upgrade → `update`, else

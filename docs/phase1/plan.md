@@ -523,7 +523,9 @@ Errors: `invalid_value` 400 (validation), `bad_request` 400 (JSON, query, non-nu
 Model (types in `rynas_api_types::notify`):
 - **Event** {source, category storage|hardware|ups|system|security|update|backup|app|task,
   severity info<notice<warning<error<critical, key, state firing|resolved|oneshot, title (200
-  chars), body (4000), fields (32), actions (4, URLs `/…` or http(s) only)}. Stored as a
+  chars), body (4000), fields (32), actions (4, URLs `/…` or http(s) only), code (stable event
+  code, `[a-z0-9_]` words joined by dots, ≤ 64; a malformed one is dropped), body_format
+  text|log}. Stored as a
   `Notification` with `count`/`last_ms` (repeats), `silenced`, `acked_*`, `resolved_ms`.
 - **State per key**: `firing` opens the condition and is delivered; repeats while open only
   count (a higher severity is an escalation and is delivered, a lower one is silent); `resolved`
@@ -567,6 +569,50 @@ Sources wired in phase 1:
 | Hardware (synohwd provider + live temperatures) | rynas-web, every 30 s | `hardware:fan:<n>` (error), `hardware:fan_fail` (critical), `hardware:temp:<sensor>` (CPU 85/95 °C, NVMe 70/80, bays 50/58, 3 °C hysteresis), `hardware:provider:stale` (> 300 s) |
 | Storage | rynasd, every 5 min (`--storage-check-interval`), shared inventory snapshot | `storage:disk:<serial>:health` (warning/critical from the verdict; never reads SMART itself), `storage:md:<md>:health` (degraded/failed critical), `storage:btrfs:<uuid>:<devid>:errors` (error, repeats when counters grow), `…:missing` (critical), `storage:volume:<uuid>:usage` (80/90/95 % → warning/error/critical, 2-point hysteresis) |
 | synodeb `notify` | `/run/rynas/notify.sock` | oneshot `synodeb:<source>:<hash>`; see `../synodeb-integration.md` S1 |
+
+### Event codes
+Every event rynas produces carries a stable `code` and the `fields` needed to rebuild its title
+and body; `title`/`body` stay the English text (rules, English channels, fallback). The web
+interface translates through `nev.<code>.title` / `nev.<code>.body` in
+`crates/rynas-ui/src/i18n.rs` with `{field}` placeholders (variants `…_2`, `…_3` for optional
+fields, most specific first; `nev.<code>.<field>.<value>` for values of closed sets; `{type}`
+shows the task name `task.<type>`; decimals get the language's separator); a missing code, key or
+field (empty counts as missing) shows the server's text. `body_format: log` (command output) is
+never translated and is shown in monospace with its line breaks. Channel templates use the same
+rules (`rynas_api_types::notify::event_text`) for Italian targets, reading the `nev.*`/`task.*`
+lines of the UI dictionary at build time (`crates/rynas-notify/build.rs`). Notification db
+schema 2 added the `code` and `body_format` columns.
+
+| Code | Fields (besides the source's own) | English title |
+|---|---|---|
+| `hw.fan_stopped` / `hw.fan_running` | `fan` | Fan {fan} stopped / is running again |
+| `hw.fan_failure` / `hw.fans_ok` | — | Fan failure / Fans back to normal |
+| `hw.monitor_stale` / `hw.monitor_ok` | `provider`, `age_s` | Hardware monitor not updating / updating again |
+| `hw.temp_high` / `hw.temp_ok` | `sensor`, `label`, `celsius`, `warn_c`, `crit_c` | {label} temperature {celsius} °C / back to normal |
+| `hw.thermal_shutdown` / `hw.thermal_ok` | `sensor`, `label`, `celsius`, `shutdown_c` | Thermal shutdown imminent: {label} {celsius} °C / {label} cooled down |
+| `storage.disk_warning` / `storage.disk_failing` / `storage.disk_ok` | `disk`, `disk_label`, `serial`, `bay` | Disk {disk_label} needs attention / failing / healthy again (body: the health reasons, not translated) |
+| `storage.raid_degraded` / `storage.raid_failed` / `storage.raid_inactive` / `storage.raid_ok` | `array`, `level`, `state`, `degraded`, `raid_disks`, `members` (optional) | RAID {array} degraded / failed / inactive / healthy again |
+| `storage.btrfs_errors` / `storage.btrfs_errors_cleared` | `volume`, `device`, `write_io`, `read_io`, `flush_io`, `corruption`, `generation` | Volume {volume}: device errors on {device} / counters cleared |
+| `storage.btrfs_missing` / `storage.btrfs_back` | `volume`, `devid` | Volume {volume}: device {devid} missing / back |
+| `storage.volume_full` / `storage.volume_ok` | `volume`, `used_pct`, `used_gib`, `free_gib` / `limit_pct` | Volume {volume} {used_pct}% full / back under {limit_pct}% |
+| `task.failed` / `task.succeeded` | `type`, `task_id`, `user` | Task failed / succeeded: {type} (body: the task error, not translated) |
+| `config.apply_failed` / `config.apply_ok` | `type`, `task_id`, `user` | Configuration apply failed / succeeded |
+| `sched.task_failed` / `sched.task_ok` / `sched.task_finished` | `task`, `name`, `result`, `exit_code`, `signal` | Task {name} failed / succeeded / finished (body: output as `log`, or "Result: …") |
+| `snapshot.job_failed` / `snapshot.job_ok` / `snapshot.job_finished` | same, `name` = job | Snapshot job {name} failed / succeeded / finished |
+| `auth.lockout` | `user`, `ip`, `retry_after_s` | Login locked for {user} after failed attempts |
+| `auth.totp_enabled` / `auth.totp_disabled` | `user` | Two-factor authentication enabled / disabled for {user} |
+| `power.shutdown` / `power.shutdown_skipped` | `rule`, `reasons` (skipped) | Scheduled shutdown {rule} (skipped) |
+| `net.confirmed` | `revision`, `interfaces` | Network change confirmed (revision {revision}) |
+| `net.rolled_back` / `net.rollback_unverified` | `reason`, `revision`, `problems` | Network change rolled back / rollback could not be verified |
+| `net.adopted` | — | Network migrated to rynas (systemd-networkd) |
+| `net.boot_undone` | `revision`, `tested` | Unconfirmed network change undone at boot |
+| `net.watchdog_restored` / `net.rescue` / `net.reset` | `revision` | Network restored to the last known good revision / rescue configuration / factory network |
+| `synodeb.<event>` | the forward's parameters | the forward's title; events and parameters in `../synodeb-integration.md` S1 |
+
+Not coded: the target test message (built in the target's language already) and events from
+plugins (they may send their own code; without a dictionary entry the text is shown as sent).
+
+### Emitters and options
 
 The watchers emit only on transitions (first observation after a start included); the engine
 ignores repeats and resolutions of keys that were not firing. Other crates emit through the
