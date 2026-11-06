@@ -18,7 +18,6 @@ use rynas_api_types::storage::{
 };
 use rynas_api_types::{ApiError, error_codes};
 use rynas_web::hardware::NoProvider;
-use rynas_web::hardware::synohwd::Synohwd;
 use serde_json::{Value, json};
 
 /// What the fake rynasd received: (path, x-rynas-user, body).
@@ -129,7 +128,7 @@ fn with_fake(name: &str, hw: Arc<dyn rynas_web::hardware::HardwareProvider>) -> 
 async fn disks_get_bays_from_the_provider() {
     let (a, calls) = with_fake(
         "bays",
-        Arc::new(Synohwd::new(fixture("synohwd-status.json"))),
+        Arc::new(rynas_hw_synology::Synology::status_reader(fixture("synohwd-status.json"))),
     );
     let c = a.login().await;
     let r = a.get("/api/v1/storage/disks", &c).await;

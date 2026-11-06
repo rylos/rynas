@@ -10,7 +10,6 @@ use rynas_auth::session::SessionConfig;
 use rynas_auth::totp::{FileStorage, MemoryStorage, TotpManager};
 use rynas_auth::{AuthConfig, AuthService, Backend, SystemClock};
 use rynas_web::app::{self, AppState};
-use rynas_web::hardware::synohwd::Synohwd;
 use rynas_web::metrics::{Collector, Store};
 use rynas_web::rynasd_client::RynasdClient;
 
@@ -24,9 +23,10 @@ struct Args {
     /// [default: crates/rynas-ui/dist if present, else /usr/share/rynas/ui].
     #[arg(long)]
     ui_dir: Option<PathBuf>,
-    /// synohwd status file (hardware provider on Synology).
-    #[arg(long, default_value = "/run/synohwd/status.json")]
-    synohwd_status: PathBuf,
+    /// Root of `/sys` and `/run` where the hardware provider is looked for (tests: a fake
+    /// tree).
+    #[arg(long, default_value = "/")]
+    hw_root: PathBuf,
     /// NUT upsd (UPS status, plain-text protocol).
     #[arg(long, default_value = rynas_web::ups::UPSD)]
     upsd: String,
@@ -235,7 +235,7 @@ fn main() -> std::io::Result<()> {
     rt.block_on(async move {
         let ui_dir = args.ui_dir.clone().unwrap_or_else(default_ui_dir);
         let store = Store::new();
-        let hw = Arc::new(Synohwd::new(&args.synohwd_status));
+        let hw = rynas_web::hardware::detect(&args.hw_root);
         Collector::new(store.clone(), hw.clone()).spawn()?;
         let rynasd = Arc::new(RynasdClient::new(&args.rynasd_socket));
         let auth = auth_service(&args, rynasd.clone())?;
@@ -257,11 +257,11 @@ fn main() -> std::io::Result<()> {
 
         let listener = tokio::net::TcpListener::bind(args.listen).await?;
         tracing::info!(
-            "rynas-web {} on http://{} (ui: {}, synohwd: {}, rynasd: {})",
+            "rynas-web {} on http://{} (ui: {}, hardware root: {}, rynasd: {})",
             env!("CARGO_PKG_VERSION"),
             listener.local_addr()?,
             ui_dir.display(),
-            args.synohwd_status.display(),
+            args.hw_root.display(),
             args.rynasd_socket.display()
         );
         let server = axum::serve(

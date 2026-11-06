@@ -13,12 +13,33 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use rynas_api_types::HardwareStatus;
 use rynas_api_types::synology::{BeepKind, FanCurves};
+use rynas_api_types::{HardwareStatus, Temperature};
 
 pub trait HardwareProvider: Send + Sync {
     /// Current status. `Ok(None)`: no provider data on this machine (not an error).
     fn status(&self) -> Result<Option<HardwareStatus>, String>;
+
+    /// Temperatures next to the hardware controller's own shutdown thresholds (the controller
+    /// powers the machine off by itself above them), from the provider's status and the
+    /// sensor readings; empty when the hardware has no such controller.
+    fn thermal_limits(
+        &self,
+        _status: &HardwareStatus,
+        _temps: &[Temperature],
+    ) -> Vec<ThermalLimit> {
+        Vec::new()
+    }
+}
+
+/// A temperature and the threshold at which the hardware controller shuts the machine down.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThermalLimit {
+    /// Sensor id (`cpu`, `nvme0`, `bay2`).
+    pub id: String,
+    pub label: String,
+    pub celsius: f32,
+    pub shutdown_c: f32,
 }
 
 /// Machines without platform hardware support.
