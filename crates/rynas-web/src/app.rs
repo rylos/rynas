@@ -55,6 +55,8 @@ pub fn router(state: AppState, ui_dir: PathBuf) -> Router {
         .nest("/api/v1", api)
         .merge(api_rest)
         .merge(crate::static_files::router(ui_dir))
+        // files the file manager shows inside the page: framed by rynas only, inert
+        .layer(axum::middleware::from_fn(crate::static_files::file_view_headers))
         // dynamic compression only for what has no precompressed sibling (API JSON, a dev
         // build of the UI): gzip at level 4 (32 KiB window, no brotli window kept in memory),
         // bodies over 1 KiB; event streams and images are skipped (guidelines S5)
