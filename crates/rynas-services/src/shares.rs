@@ -247,6 +247,23 @@ impl SharesDomain {
         }
         validate::smb_extra(&g.extra)
             .map_err(|e| Invalid::at("extra", format!("SMB extra options: {e}")))?;
+        if g.homes.recycle.retention_days > 3650 {
+            return Err(Invalid::at(
+                "smb.homes.recycle.retention_days",
+                "the recycle bin keeps items at most 3650 days",
+            ));
+        }
+        if g.homes.enabled
+            && let Some(sh) = c.shares.iter().find(|s| s.name.eq_ignore_ascii_case("homes"))
+        {
+            return Err(Invalid::at(
+                "smb.homes",
+                format!(
+                    "share {} would hide the SMB home folders ([homes]): rename the share or keep the home folders off SMB",
+                    sh.name
+                ),
+            ));
+        }
 
         // global NFS
         let n = &c.nfs;
@@ -729,6 +746,10 @@ impl Applier for SharesDomain {
                     name: s.name.clone(),
                     lines: smb::share_lines(s, self.host.probe(&s.path).fs_type == "btrfs"),
                 })
+                .chain(c.smb.homes.enabled.then(|| smb::SmbShareCtx {
+                    name: "homes".into(),
+                    lines: smb::homes_lines(&c.smb.homes),
+                }))
                 .collect(),
         };
         let mut files = vec![ManagedFile::whole(

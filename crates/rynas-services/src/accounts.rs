@@ -130,6 +130,9 @@ pub enum AccountOp {
         group: String,
         full_name: String,
         home: String,
+        /// `useradd -m` (Debian's way, with `/etc/skel`); `false`: `-M`, the home was made by
+        /// rynas (a subvolume in the homes folder).
+        create_home: bool,
         shell: String,
         expire: Expire,
     },
@@ -138,6 +141,8 @@ pub enum AccountOp {
         full_name: Option<String>,
         shell: Option<String>,
         expire: Option<Expire>,
+        /// `usermod -d` without `-m`: the files were moved before (home move).
+        home: Option<String>,
     },
     UserDel {
         name: String,
@@ -210,10 +215,14 @@ impl AccountOp {
                 full_name,
                 shell,
                 expire,
+                home,
             } => {
                 let mut what = Vec::new();
                 if full_name.is_some() {
                     what.push("full name".to_string());
+                }
+                if let Some(h) = home {
+                    what.push(format!("home {h}"));
                 }
                 if let Some(s) = shell {
                     what.push(format!("shell {s}"));
@@ -439,6 +448,7 @@ impl Accounts for HostAccounts {
                 group,
                 full_name,
                 home,
+                create_home,
                 shell,
                 expire,
             } => {
@@ -452,12 +462,13 @@ impl Accounts for HostAccounts {
                     full_name,
                     "-d",
                     home,
-                    "-m",
-                    "-K",
-                    "HOME_MODE=0700",
-                    "-s",
-                    shell,
                 ]);
+                c = if *create_home {
+                    c.args(["-m", "-K", "HOME_MODE=0700"])
+                } else {
+                    c.arg("-M")
+                };
+                c = c.args(["-s", shell]);
                 if *expire != Expire::Never {
                     c = c.args(["-e", &expire.arg()]);
                 }
@@ -468,10 +479,14 @@ impl Accounts for HostAccounts {
                 full_name,
                 shell,
                 expire,
+                home,
             } => {
                 let mut c = Cmd::new("usermod");
                 if let Some(f) = full_name {
                     c = c.args(["-c", f]);
+                }
+                if let Some(h) = home {
+                    c = c.args(["-d", h]);
                 }
                 if let Some(s) = shell {
                     c = c.args(["-s", s]);
@@ -680,6 +695,7 @@ impl Accounts for MemoryAccounts {
                 home,
                 shell,
                 expire,
+                ..
             } => {
                 if s.users.iter().any(|u| u.name == *name || u.uid == *uid) {
                     return Err(format!(
@@ -708,10 +724,14 @@ impl Accounts for MemoryAccounts {
                 full_name,
                 shell,
                 expire,
+                home,
             } => {
                 let u = s.user_mut(name)?;
                 if let Some(f) = full_name {
                     u.full_name = f.clone();
+                }
+                if let Some(h) = home {
+                    u.home = h.clone();
                 }
                 if let Some(sh) = shell {
                     u.shell = sh.clone();

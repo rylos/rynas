@@ -14,6 +14,7 @@
 
 pub mod accounts;
 pub mod folders;
+pub mod homes;
 pub mod host;
 pub mod nfs;
 pub mod perm;
@@ -27,6 +28,7 @@ pub mod validate;
 
 
 pub use accounts::{Accounts, HostAccounts, MemoryAccounts};
+pub use homes::{HomesDomain, HomesHost, HostHomes, MemoryHomes};
 pub use host::{HostShares, MemoryShares, ShareHost, SubvolumeCreator};
 pub use shares::{SHARES_KEY, SharesDomain};
 pub use users::{USERS_KEY, UsersDomain};

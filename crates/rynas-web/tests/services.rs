@@ -77,6 +77,11 @@ async fn rig() -> Rig {
         ops: ops.clone(),
         users,
         shares,
+        homes: Arc::new(rynas_services::HomesDomain::new(
+            Arc::new(rynas_services::MemoryHomes::new()),
+            acc.clone(),
+        )),
+        moves: Arc::new(rynas_services::homes::MoveStore::memory()),
     }));
     st.ops = Some(ops);
     let socket = dir.path().join("rynasd.sock");

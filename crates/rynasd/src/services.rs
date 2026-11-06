@@ -38,12 +38,16 @@ use serde_json::Value;
 use crate::error::created;
 use crate::ops::{Error, Ops, Res, user};
 
+mod homes;
+
 /// What these endpoints work on: the store and tasks of [`Ops`] plus typed access to the
-/// two domains registered in it.
+/// domains registered in it, and the record of the home moves waiting for confirmation.
 pub struct Services {
     pub ops: Arc<Ops>,
     pub users: Arc<UsersDomain>,
     pub shares: Arc<SharesDomain>,
+    pub homes: Arc<rynas_services::HomesDomain>,
+    pub moves: Arc<rynas_services::homes::MoveStore>,
 }
 
 type SvcState = Option<Arc<Services>>;
@@ -109,6 +113,17 @@ pub fn router(st: SvcState) -> Router {
         .route("/v1/services/smb", get(smb_get).put(smb_put))
         .route("/v1/services/smb/recycle-cleanup", post(recycle_cleanup))
         .route("/v1/services/nfs", get(nfs_get).put(nfs_put))
+        .route(
+            "/v1/services/homes",
+            get(homes::homes_get).put(homes::homes_put),
+        )
+        .route("/v1/services/homes/move/plan", post(homes::move_plan))
+        .route("/v1/services/homes/move", post(homes::move_start))
+        .route(
+            "/v1/services/homes/move/{user}/finish",
+            post(homes::move_finish),
+        )
+        .route("/v1/services/homes/move/{user}/undo", post(homes::move_undo))
         .route("/v1/shares", get(shares_list).post(share_create))
         .route(
             "/v1/shares/{share}",
@@ -299,6 +314,7 @@ async fn user_create(
     let loc = u.name.clone();
     let v = blocking(&s, move |s| {
         let name = u.name.clone();
+        homes::default_home(s, &owner, &mut u)?;
         stage_users(s, &owner, |doc| {
             if doc.users.iter().any(|x| x.name == u.name) {
                 return Err(conflict(
@@ -339,9 +355,13 @@ async fn user_put(
                     return Err(Error::invalid("uid", "the uid cannot change"));
                 }
                 u.uid = cur.uid;
-                if u.home.is_empty() {
-                    u.home = cur.home.clone();
+                if !u.home.is_empty() && u.home != cur.home {
+                    return Err(Error::invalid(
+                        "home",
+                        "the home changes only by moving it (User homes)",
+                    ));
                 }
+                u.home = cur.home.clone();
                 *cur = u;
                 Ok(())
             })?;
@@ -378,6 +398,7 @@ async fn user_delete(
         ));
     }
     let staged = blocking(&s, move |s| {
+        homes::check_no_waiting_move(s, &name)?;
         stage_users(s, &owner, |doc| {
             let before = doc.users.len();
             doc.users.retain(|u| u.name != name);
@@ -1276,7 +1297,10 @@ async fn folders_list(
     let (s, owner) = (svc(&st)?, user(&h)?);
     Ok(Json(
         blocking(&s, move |s| {
-            let paths: Vec<String> = all_shares(s, &owner)?.into_iter().map(|x| x.path).collect();
+            // the homes folder counts as used, like a share
+            let mut paths: Vec<String> =
+                all_shares(s, &owner)?.into_iter().map(|x| x.path).collect();
+            paths.extend(homes::homes_folders(s));
             let removed = s.shares.removed().list();
             let (snaps, _, _): (SnapshotsConfig, SnapshotsConfig, _) =
                 docs(&s.ops.config, &owner, SNAPSHOTS_KEY)?;
@@ -1342,6 +1366,15 @@ fn unshared_path(s: &Services, owner: &str, r: &FolderRef) -> Res<String> {
     let info = s.shares.host().probe(&path);
     if !info.exists || !info.is_dir {
         return Err(not_found(format!("folder {path}")));
+    }
+    if homes::homes_folders(s)
+        .iter()
+        .any(|h| folders::is_within(h, &path))
+    {
+        return Err(conflict(
+            error_codes::CONFLICT,
+            format!("{path} holds the users' homes: it is not deleted"),
+        ));
     }
     if let Some(sh) = all_shares(s, owner)?
         .into_iter()

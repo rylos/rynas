@@ -239,6 +239,7 @@ impl Config {
 pub mod keys {
     pub const USERS: &str = "users";
     pub const SHARES: &str = "shares";
+    pub const HOMES: &str = "homes";
     pub const SNAPSHOTS: &str = "snapshots";
     pub const SCHEDULER: &str = "scheduler";
     pub const POWER: &str = "power.schedule";

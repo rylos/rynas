@@ -13,6 +13,13 @@
 //! (yescrypt) and then the Samba password as one transaction, restoring the previous shadow
 //! hash when the Samba step fails. rynas stores no hash of its own.
 //!
+//! Homes: a user whose home is `/srv/rynas/homes/<name>` (the user homes service, see
+//! [`crate::homes`]) gets it created by rynas as a subvolume in the homes folder before
+//! `useradd -M`; with `remove_homes` that subvolume is deleted after `userdel`. Other homes
+//! are created and removed by `useradd -m`/`userdel -r`. A home changes only through the
+//! home move, which copies the files first and then applies a document whose `home` differs
+//! from the previous one: reconcile runs `usermod -d` (never `-m`) when the new folder exists.
+//!
 //! Limits: a deleted home directory (`remove_homes`) cannot come back on rollback.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -26,6 +33,7 @@ use rynas_config::{Applier, ApplyCtx, Invalid, ManagedFile};
 use serde_json::Value;
 
 use crate::accounts::{AccountOp, Accounts, Expire, SambaUser, Secret, SysGroup, SysUser};
+use crate::homes::{self, HomesHost};
 use crate::validate::{self, account_name, one_line};
 
 pub const USERS_KEY: &str = "users";
@@ -101,11 +109,27 @@ pub fn next_free_id(used: &BTreeSet<u32>) -> Option<u32> {
 
 pub struct UsersDomain {
     accounts: Arc<dyn Accounts>,
+    homes: Option<Arc<dyn HomesHost>>,
 }
 
 impl UsersDomain {
     pub fn new(accounts: Arc<dyn Accounts>) -> Self {
-        Self { accounts }
+        Self {
+            accounts,
+            homes: None,
+        }
+    }
+
+    /// Homes in the homes folder are created and removed through `host`.
+    pub fn with_homes(mut self, host: Arc<dyn HomesHost>) -> Self {
+        self.homes = Some(host);
+        self
+    }
+
+    fn homes_host(&self) -> Result<&dyn HomesHost, String> {
+        self.homes
+            .as_deref()
+            .ok_or_else(|| "user homes are not available in this rynasd".to_string())
     }
 
     pub fn accounts(&self) -> &Arc<dyn Accounts> {
@@ -417,6 +441,7 @@ fn user_mod(u: &LocalUser, s: &SysUser) -> Option<AccountOp> {
         full_name,
         shell,
         expire,
+        home: None,
     })
 }
 
@@ -499,20 +524,55 @@ impl Applier for UsersDomain {
         }
 
         // 2. users: create or bring in line
+        let primary_gid = sys_groups
+            .iter()
+            .find(|g| g.name == PRIMARY_GROUP)
+            .map(|g| g.gid)
+            .unwrap_or(100);
         for u in &to.users {
             match sys_users.iter().find(|s| s.name == u.name) {
-                None => self.exec(
-                    AccountOp::UserAdd {
-                        name: u.name.clone(),
-                        uid: u.uid,
-                        group: PRIMARY_GROUP.into(),
-                        full_name: u.full_name.clone(),
-                        home: u.home.clone(),
-                        shell: shell_of(u).into(),
-                        expire: expire_of(u),
-                    },
-                    ctx,
-                )?,
+                None => {
+                    // a home in the homes folder: made by rynas (a subvolume), before useradd
+                    let made = match homes::link_user(&u.home) {
+                        Some(n) if n == u.name => {
+                            let h = self.homes_host()?;
+                            Some(homes::create_home(
+                                h,
+                                &u.name,
+                                u.uid,
+                                primary_gid,
+                                u.shell == ShellAccess::Shell,
+                                ctx.log,
+                            )?)
+                        }
+                        Some(_) => {
+                            return Err(format!(
+                                "user {}: a home in the homes folder must be named after the user",
+                                u.name
+                            ));
+                        }
+                        None => None,
+                    };
+                    let r = self.exec(
+                        AccountOp::UserAdd {
+                            name: u.name.clone(),
+                            uid: u.uid,
+                            group: PRIMARY_GROUP.into(),
+                            full_name: u.full_name.clone(),
+                            home: u.home.clone(),
+                            create_home: made.is_none(),
+                            shell: shell_of(u).into(),
+                            expire: expire_of(u),
+                        },
+                        ctx,
+                    );
+                    if let Err(e) = r {
+                        if made.is_some() {
+                            let _ = homes::remove_home(self.homes_host()?, &u.home, ctx.log);
+                        }
+                        return Err(e);
+                    }
+                }
                 Some(s) if s.uid != u.uid => {
                     return Err(format!(
                         "user {} exists with uid {}, the configuration says {}",
@@ -522,6 +582,33 @@ impl Applier for UsersDomain {
                 Some(s) => {
                     if let Some(op) = user_mod(u, s) {
                         self.exec(op, ctx)?;
+                    }
+                    // a moved home (and the rollback of a move): only an explicit change
+                    // between the two values, never a mismatch with the system
+                    if let Some(prev) = from.users.iter().find(|x| x.name == u.name)
+                        && prev.home != u.home
+                        && s.home == prev.home
+                    {
+                        let ok = match &self.homes {
+                            Some(h) => h.probe(&u.home).is_dir,
+                            None => std::path::Path::new(&u.home).is_dir(),
+                        };
+                        if !ok {
+                            return Err(format!(
+                                "user {}: the new home {} does not exist",
+                                u.name, u.home
+                            ));
+                        }
+                        self.exec(
+                            AccountOp::UserMod {
+                                name: u.name.clone(),
+                                full_name: None,
+                                shell: None,
+                                expire: None,
+                                home: Some(u.home.clone()),
+                            },
+                            ctx,
+                        )?;
                     }
                 }
             }
@@ -625,13 +712,24 @@ impl Applier for UsersDomain {
                     ctx,
                 )?;
             }
+            let remove = to.remove_homes.contains(&u.name);
+            let sys_home = sys_users
+                .iter()
+                .find(|s| s.name == u.name)
+                .map(|s| s.home.clone())
+                .unwrap_or_default();
+            // a home in the homes folder is a subvolume: rynas deletes it after userdel
+            let in_folder = remove && homes::link_user(&sys_home) == Some(u.name.as_str());
             self.exec(
                 AccountOp::UserDel {
                     name: u.name.clone(),
-                    remove_home: to.remove_homes.contains(&u.name),
+                    remove_home: remove && !in_folder,
                 },
                 ctx,
             )?;
+            if in_folder {
+                homes::remove_home(self.homes_host()?, &sys_home, ctx.log)?;
+            }
         }
         let keep: BTreeSet<&str> = to.groups.iter().map(|g| g.name.as_str()).collect();
         for g in from
