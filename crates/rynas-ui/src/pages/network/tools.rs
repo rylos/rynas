@@ -174,16 +174,9 @@ pub fn rescue_panel(net: Net) -> AnyView {
                 ])
             })
             .collect();
-        // the reset button is a platform feature: the section exists only where the hardware has it
-        let reset = r.synology.then(|| {
-            let (tone, key) = if r.reset_button_configured { (Tone::Ok, "net.reset_on") } else { (Tone::Warn, "net.reset_off") };
-            let pending = r.reset_button_pending.map(|p| ui::status(Tone::Info, t(if p { "net.reset_pending_on" } else { "net.reset_pending_off" }).to_string()));
-            view! {
-                <div class="chips">{ui::status(tone, t(key).to_string())}{pending}</div>
-                <p class="muted small">{tr("net.reset_text")}</p>
-                <p class="sec-note"><Icon icon=icons::LOCK size=16 /><span>{tr("net.reset_owner")}" "<a class="link-btn" href="/hardware">{tr("net.reset_owner_link")}</a></span></p>
-            }
-        });
+        // the reset button is a hardware module's feature: the section exists only where the
+        // hardware has it
+        let reset = r.synology.then(|| crate::modules::synology::reset_button(&r));
         view! {
             <div class="net-rescue">
                 <section class="net-rescue-sec">

@@ -168,7 +168,7 @@ pub fn chassis(c: Chassis) -> AnyView {
                             </span>
                         })}
                     </div>
-                    <span class="chassis-led" title=tr("syn.power_led")>
+                    <span class="chassis-led" title=tr("hw.power_led")>
                         <span class="chassis-led-label">{tr("hw.led_power_short")}</span>
                         <span class="led-dot green" aria-hidden="true"></span>
                     </span>
@@ -246,7 +246,7 @@ fn tile(k: u32, slots: Memo<Vec<Slot>>, c: Chassis) -> AnyView {
                     view! {
                         <button type="button" class="btn ghost sm bay-id" disabled=move || blinking.get() || !i.running.get()
                             on:click=move |ev| { ev.stop_propagation(); start_identify(k, blinking) }>
-                            <Icon icon=icons::EYE size=14 />{move || if blinking.get() { t("syn.identifying") } else { t("syn.identify") }}
+                            <Icon icon=icons::EYE size=14 />{move || if blinking.get() { t("hw.identifying") } else { t("hw.identify") }}
                         </button>
                     }
                 })
@@ -263,14 +263,14 @@ fn tile(k: u32, slots: Memo<Vec<Slot>>, c: Chassis) -> AnyView {
                     {move || sleeping.get().then(|| view! { <Icon icon=icons::MOON_STAR size=12 /> })}
                     {move || t(state.get().1)}
                 </span>
-                {c.identify.is_some().then_some(move || no_power.get().then(|| view! { <span class="bay-state">{tr("syn.bay_no_power")}</span> }))}
+                {c.identify.is_some().then_some(move || no_power.get().then(|| view! { <span class="bay-state">{tr("hw.bay_no_power")}</span> }))}
                 {move || verdict.get().map(|h| {
                     let (tone, key) = health(h);
                     view! { <span class=format!("bay-health {}", tone.class())><Icon icon=tone.icon() size=12 />{tr(key)}</span> }
                 })}
                 {move || has_temp.get().then(|| view! {
                     // providers keep the last reading of a sleeping disk (it is not woken up)
-                    <span class=move || temp_cls.get() title=move || sleeping.get().then(|| t("syn.temp_last"))>
+                    <span class=move || temp_cls.get() title=move || sleeping.get().then(|| t("hw.temp_last"))>
                         <Icon icon=icons::THERMOMETER size=12 />{move || temp.get().map(i18n::celsius).unwrap_or_default()}
                     </span>
                 })}
@@ -301,7 +301,7 @@ fn start_identify(n: u32, blinking: RwSignal<bool>) {
         let r = api::post_empty(&format!("/api/v1/hardware/synology/bays/{n}/identify"), Some(&IdentifyRequest { duration_s: None })).await;
         match r {
             Ok(()) => {
-                toast(Tone::Ok, tf("syn.identify_on", &[("n", &n.to_string()), ("s", &IDENTIFY_S.to_string())]));
+                toast(Tone::Ok, tf("hw.identify_on", &[("n", &n.to_string()), ("s", &IDENTIFY_S.to_string())]));
                 set_timeout(
                     move || {
                         let _ = blinking.try_set(false);

@@ -1,4 +1,5 @@
-//! Hardware › Synology: every synohwd feature (D-SYNOPLUG, `docs/plugins/synology.md`).
+//! Hardware › Synology (the Synology module's tab, D-MODULE): every synohwd feature
+//! (D-SYNOPLUG, `docs/plugins/synology.md`).
 //!
 //! - live status (`/hardware/synology/status`, re-read every 10 s while the tab is shown): the
 //!   chassis with bays, LEDs, temperatures and standby, fans, events, boot cause;
@@ -7,7 +8,7 @@
 //!   staged with one Save (pending bar, apply in the configuration page);
 //! - actions: test beep, mute, identify a bay.
 //!
-//! The tab exists only on a Synology (`super::synology_present`); should the API still answer 404
+//! The tab exists only where the module is present (`super::present`); should the API still answer 404
 //! the panel shows the neutral "no hardware provider" state.
 
 use std::time::Duration;
@@ -436,7 +437,7 @@ fn fans_card(d: RwSignal<SynologySettings>, st: Remote<SynologyStatus>, curves: 
     let (period, set_period) = lens(d, |s| s.fan_period_s.to_string(), |s, v| s.fan_period_s = v.trim().parse::<u32>().map_or(0, |n| n.min(9999) as u16));
     let (min_duty, set_min_duty) = lens(d, |s| s.fan_min_duty_pct.to_string(), |s, v| s.fan_min_duty_pct = v.trim().parse::<u32>().map_or(0, |n| n.min(255) as u8));
     let (hyst, set_hyst) = lens(d, |s| s.hysteresis_c.to_string(), |s, v| s.hysteresis_c = v.trim().parse::<u32>().map_or(0, |n| n.min(255) as u8));
-    let range = |min: u32, max: u32| tf("syn.v.range", &[("min", &min.to_string()), ("max", &max.to_string())]);
+    let range = |min: u32, max: u32| tf("hw.v_range", &[("min", &min.to_string()), ("max", &max.to_string())]);
     let e_period = Signal::derive(move || d.with(|s| !(5..=300).contains(&s.fan_period_s)).then(|| range(5, 300)));
     let e_duty = Signal::derive(move || d.with(|s| s.fan_min_duty_pct > 99).then(|| range(0, 99)));
     let e_hyst = Signal::derive(move || d.with(|s| s.hysteresis_c > 20).then(|| range(0, 20)));
@@ -702,7 +703,7 @@ fn power_card(d: RwSignal<SynologySettings>) -> AnyView {
     let (standby, set_standby) =
         lens(d, |s| s.disk_standby_minutes.to_string(), |s, v| s.disk_standby_minutes = v.trim().parse::<u32>().map_or(0, |n| n.min(9999) as u16));
     let e_standby = Signal::derive(move || {
-        d.with(|s| s.disk_standby_minutes > 330).then(|| tf("syn.v.range", &[("min", "0"), ("max", "330")]))
+        d.with(|s| s.disk_standby_minutes > 330).then(|| tf("hw.v_range", &[("min", "0"), ("max", "330")]))
     });
     let (wol, set_wol) = lens_bool(d, |s| s.wol, |s, v| s.wol = v);
     let (ac, set_ac) = lens_bool(d, |s| s.ac_recovery, |s, v| s.ac_recovery = v);

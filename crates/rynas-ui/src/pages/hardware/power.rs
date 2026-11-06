@@ -439,7 +439,7 @@ fn editor(orig: Option<PowerRule>, rules: Signal<Vec<PowerRule>>, wake_ok: Signa
             PowerAction::Shutdown => {
                 let p = r.shutdown.get_or_insert_with(ShutdownPolicy::default);
                 if !(1..=720).contains(&p.max_wait_min) {
-                    return Err(tf("syn.v.range", &[("min", "1"), ("max", "720")]));
+                    return Err(tf("hw.v_range", &[("min", "1"), ("max", "720")]));
                 }
             }
         }

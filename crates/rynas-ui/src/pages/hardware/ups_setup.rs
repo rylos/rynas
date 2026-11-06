@@ -4,8 +4,9 @@
 //! address, extra options), choose, review what changes, apply (`ups.device`), then the live
 //! status. The card offers it when no UPS reports, and "Change UPS" otherwise.
 //!
-//! Driver output and option names are NUT's own (English, monospace); synodeb is named only
-//! on synodeb systems.
+//! Driver output and option names are NUT's own (English, monospace). With a hardware module's
+//! UPS layer the wizard's texts about who applies the setting come from the module
+//! (`crate::modules::ups_key`).
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -14,6 +15,7 @@ use rynas_api_types::ups::*;
 
 use super::ups::state_of;
 use crate::api;
+use crate::modules::{self, UpsSlot};
 use crate::form::{form_error, spinner, switch};
 use crate::i18n::{t, tf, tr};
 use crate::icons::{self, Icon};
@@ -116,8 +118,8 @@ pub fn card() -> AnyView {
         match st.blocked {
             // the status card and the policy card already ask for NUT
             Some(UpsSetupBlock::NutMissing) => return view! { <p class="muted">{t("upsw.need_nut")}</p> }.into_any(),
-            Some(UpsSetupBlock::SynodebTooOld) => {
-                return ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {t("upsw.synodeb_old")} }.into_any());
+            Some(UpsSetupBlock::ModuleTooOld) => {
+                return ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {t(modules::ups_key(UpsSlot::SetupTooOld))} }.into_any());
             }
             None => {}
         }
@@ -188,7 +190,7 @@ struct Manual {
 fn Wizard(state: Remote<UpsDeviceState>, on_close: Callback<()>) -> impl IntoView {
     let live = use_live();
     let st = state.data.get_untracked().unwrap_or_default();
-    let synodeb = st.backend == UpsBackend::Synodeb;
+    let module = st.backend == UpsBackend::Module;
     let step = RwSignal::new(Step::Start);
     let stop_drivers = RwSignal::new(st.drivers_running);
     let report = RwSignal::new(None::<UpsDetectReport>);
@@ -319,7 +321,7 @@ fn Wizard(state: Remote<UpsDeviceState>, on_close: Callback<()>) -> impl IntoVie
 
     let body = move || match step.get() {
         Step::Start => view! {
-            <p>{t(if synodeb { "upsw.find_text_synodeb" } else { "upsw.find_text" })}</p>
+            <p>{t(if module { modules::ups_key(UpsSlot::SetupFind) } else { "upsw.find_text" })}</p>
             {st.drivers_running.then(|| switch("upsw.stop_drivers", Some("upsw.stop_drivers_help"), stop_drivers.into(), Callback::new(move |v| stop_drivers.set(v))))}
             <div class="btn-row">
                 <button type="button" class="btn primary" disabled=move || busy.get() on:click=move |_| detect(None)>{spinner(busy)}<Icon icon=icons::SEARCH size=16 />{tr("upsw.detect")}</button>
@@ -334,7 +336,7 @@ fn Wizard(state: Remote<UpsDeviceState>, on_close: Callback<()>) -> impl IntoVie
         .into_any(),
         Step::Results => results(report, chosen, stop_drivers, Callback::new(move |_| detect(None))).into_any(),
         Step::Manual => manual_form(manual, drivers).into_any(),
-        Step::Review => review(name, take_over, plan, chosen, tested, synodeb, Callback::new(move |_| load_plan())).into_any(),
+        Step::Review => review(name, take_over, plan, chosen, tested, module, Callback::new(move |_| load_plan())).into_any(),
         Step::Done => done().into_any(),
     };
 
@@ -488,7 +490,7 @@ fn review(
     plan: RwSignal<Option<Result<UpsSetupPlan, String>>>,
     chosen: RwSignal<Option<UpsDevice>>,
     tested: RwSignal<bool>,
-    synodeb: bool,
+    module: bool,
     reload: Callback<()>,
 ) -> impl IntoView {
     let id_n = crate::form::fid();
@@ -532,7 +534,7 @@ fn review(
                 })}
                 <span class="pre-text log-text">{f.after}</span>
             }).collect_view()}
-            <p class="muted small">{t(if synodeb { "upsw.commands_synodeb" } else { "upsw.commands" })}</p>
+            <p class="muted small">{t(if module { modules::ups_key(UpsSlot::SetupCommands) } else { "upsw.commands" })}</p>
             <span class="pre-text log-text">{p.commands.join("\n")}</span>
         }
         .into_any()
@@ -542,7 +544,7 @@ fn review(
             <div class="kv"><dt>{tr("ups.device")}</dt><dd class="mono">{move || chosen.get().map(|d| summary(&d)).unwrap_or_default()}</dd></div>
         </dl>
         {move || (!tested.get()).then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {t("upsw.untested")} }.into_any()))}
-        {(!synodeb).then(|| view! {
+        {(!module).then(|| view! {
             <div class="field">
                 <label class="field-label" for=id_n.clone()>{tr("upsw.name")}</label>
                 <input id=id_n class="input mono" type="text" spellcheck="false" autocomplete="off" maxlength="32"
@@ -613,11 +615,12 @@ mod tests {
         assert_eq!(failure_key(&UpsDetectReport::default()), Some("upsw.no_usb"));
     }
 
-    /// Texts a plain Debian user sees name no other system and not synodeb.
+    /// Texts a plain Debian user sees name no other system and no module platform (the
+    /// module's own texts are `syn.*`, in its table).
     #[test]
-    fn neutral_without_synodeb() {
+    fn neutral_without_a_module() {
         for lang in [i18n::Lang::En, i18n::Lang::It] {
-            for (k, en, _) in i18n::entries().into_iter().filter(|e| e.0.starts_with("upsw.") && !e.0.ends_with("_synodeb") && e.0 != "upsw.synodeb_old") {
+            for (k, en, _) in i18n::entries().into_iter().filter(|e| e.0.starts_with("upsw.")) {
                 let s = i18n::text_in(lang, k).unwrap_or(en);
                 assert!(!s.to_ascii_lowercase().contains("synodeb"), "{k}: {s}");
             }

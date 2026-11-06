@@ -37,11 +37,11 @@ fn target_name(tg: &NotifyTarget) -> String {
 }
 
 /// The source of an event as shown, and whether it is the raw identifier: rynas' own
-/// sources (`nt.src.<source>`), every synodeb sender as one neutral label, anything else
-/// (plugins) as sent.
+/// sources (`nt.src.<source>`), a hardware module's senders as the module labels them,
+/// anything else (plugins) as sent.
 fn source_label(source: &str) -> (String, bool) {
-    if source.starts_with("synodeb:") {
-        return (t("nt.src.synodeb").to_string(), false);
+    if let Some(l) = crate::modules::source_label(source) {
+        return (l.to_string(), false);
     }
     if source == "scheduler" {
         return (t("sch.title").to_string(), false);

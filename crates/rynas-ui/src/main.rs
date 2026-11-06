@@ -15,6 +15,7 @@ mod i18n;
 mod icons;
 mod layout;
 mod live;
+mod modules;
 mod notify;
 mod pages;
 mod palette;

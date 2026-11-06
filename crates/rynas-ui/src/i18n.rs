@@ -102,41 +102,56 @@ pub fn lang_pref() -> Option<Lang> {
 /// bare (`cancel`, `save`, `edit_named`, `run_now`) or in a shared group (`col.*` column
 /// headers, `health.*`, `pending.*`, `task.st.*`). One key per text: a test fails on two keys
 /// with the same English and Italian text of more than one word.
+///
+/// The core table is below; a hardware module has its own table in its folder
+/// (`crate::modules::<module>::i18n`, same macro, D-MODULE), read together with this one.
 macro_rules! dict {
-    ($($k:literal => $en:literal, $it:literal;)*) => {
+    ($blob:ident, $lens:ident; $($k:literal => $en:literal, $it:literal;)*) => {
         /// Every text back to back — key, English, Italian of each entry — with their byte
         /// lengths: much smaller in the wasm than a `match` over 1 800 strings or a table of
         /// string pointers.
-        static BLOB: &str = concat!($($k, $en, $it),*);
-        static LENS: &[u16] = &[$($k.len() as u16, $en.len() as u16, $it.len() as u16),*];
+        pub(crate) static $blob: &str = concat!($($k, $en, $it),*);
+        pub(crate) static $lens: &[u16] = &[$($k.len() as u16, $en.len() as u16, $it.len() as u16),*];
     };
 }
+pub(crate) use dict;
 
-/// Start of every text in [`BLOB`] (and the end) and the entries sorted by key, built on
-/// first use.
+/// The tables: the core one first, then the modules'.
+fn tables() -> [(&'static str, &'static [u16]); 2] {
+    [(BLOB, LENS), (crate::modules::synology::i18n::BLOB, crate::modules::synology::i18n::LENS)]
+}
+
+/// Start of every text of every table (and the end) and the entries (table, index) sorted by
+/// key, built on first use.
 struct Index {
-    starts: Vec<u32>,
-    by_key: Vec<u16>,
+    blobs: [&'static str; 2],
+    starts: [Vec<u32>; 2],
+    by_key: Vec<(u8, u16)>,
 }
 
 impl Index {
-    fn text(&self, i: usize) -> &'static str {
-        &BLOB[self.starts[i] as usize..self.starts[i + 1] as usize]
+    fn text(&self, t: usize, i: usize) -> &'static str {
+        &self.blobs[t][self.starts[t][i] as usize..self.starts[t][i + 1] as usize]
     }
 }
 
 thread_local! {
     static INDEX: Index = {
-        let mut starts = Vec::with_capacity(LENS.len() + 1);
-        let mut at = 0u32;
-        starts.push(0);
-        for &l in LENS {
-            at += u32::from(l);
-            starts.push(at);
-        }
-        let mut idx = Index { starts, by_key: (0..(LENS.len() / 3) as u16).collect() };
+        let tables = tables();
+        let starts = tables.map(|(_, lens)| {
+            let mut starts = Vec::with_capacity(lens.len() + 1);
+            let mut at = 0u32;
+            starts.push(0);
+            for &l in lens {
+                at += u32::from(l);
+                starts.push(at);
+            }
+            starts
+        });
+        let by_key = tables.iter().enumerate().flat_map(|(t, (_, lens))| (0..(lens.len() / 3) as u16).map(move |e| (t as u8, e))).collect();
+        let mut idx = Index { blobs: tables.map(|t| t.0), starts, by_key };
         let mut by_key = std::mem::take(&mut idx.by_key);
-        by_key.sort_unstable_by_key(|&e| idx.text(e as usize * 3));
+        by_key.sort_unstable_by_key(|&(t, e)| idx.text(t as usize, e as usize * 3));
         idx.by_key = by_key;
         idx
     };
@@ -144,9 +159,10 @@ thread_local! {
 
 pub(crate) fn lookup(key: &str, lang: Lang) -> Option<&'static str> {
     INDEX.with(|idx| {
-        let at = idx.by_key.binary_search_by(|&e| idx.text(e as usize * 3).cmp(key)).ok()?;
-        let e = idx.by_key[at] as usize * 3;
-        Some(idx.text(if lang == Lang::It { e + 2 } else { e + 1 }))
+        let at = idx.by_key.binary_search_by(|&(t, e)| idx.text(t as usize, e as usize * 3).cmp(key)).ok()?;
+        let (t, e) = idx.by_key[at];
+        let e = e as usize * 3;
+        Some(idx.text(t as usize, if lang == Lang::It { e + 2 } else { e + 1 }))
     })
 }
 
@@ -159,7 +175,12 @@ pub fn text_in(lang: Lang, key: &str) -> Option<&'static str> {
 /// Every entry as (key, English, Italian), for the tests.
 #[cfg(test)]
 pub(crate) fn entries() -> Vec<(&'static str, &'static str, &'static str)> {
-    INDEX.with(|idx| (0..LENS.len() / 3).map(|e| (idx.text(e * 3), idx.text(e * 3 + 1), idx.text(e * 3 + 2))).collect())
+    INDEX.with(|idx| {
+        (0..2usize)
+            .flat_map(|t| (0..(idx.starts[t].len() - 1) / 3).map(move |e| (t, e)))
+            .map(|(t, e)| (idx.text(t, e * 3), idx.text(t, e * 3 + 1), idx.text(t, e * 3 + 2)))
+            .collect()
+    })
 }
 
 /// Translate `key` in the current language (tracked). Unknown keys come back verbatim, so a
@@ -194,7 +215,7 @@ pub fn tf(key: &'static str, args: &[(&str, &str)]) -> String {
     s
 }
 
-dict! {
+dict! { BLOB, LENS;
     // navigation
     "nav.dashboard" => "Dashboard", "Dashboard";
     "nav.storage" => "Storage", "Archiviazione";
@@ -242,8 +263,6 @@ dict! {
     "notif.array_sync_text" => "{name} ({level}): {pct} complete.", "{name} ({level}): {pct} completato.";
     "notif.volume_full" => "Volume almost full", "Volume quasi pieno";
     "notif.volume_full_text" => "{mount} is {pct} full, {free} free.", "{mount} è pieno al {pct}, {free} liberi.";
-    // server notification sources (`nt.src.<source>`; every synodeb sender is one label)
-    "nt.src.synodeb" => "Base system", "Sistema di base";
     "nt.src.storage" => "Storage monitor", "Monitoraggio storage";
     "nt.src.hardware" => "Hardware monitor", "Monitoraggio hardware";
     "nt.src.auth" => "Sign-in", "Accesso";
@@ -339,85 +358,6 @@ dict! {
     "nev.net.rescue.body" => "No port had a routable address after boot. Every port is on DHCP with link-local; the previous settings are revision {revision}.", "Dopo l'avvio nessuna porta aveva un indirizzo instradabile. Tutte le porte sono in DHCP con link-local; le impostazioni precedenti sono la revisione {revision}.";
     "nev.net.reset.title" => "Factory network restored with the reset button", "Rete di fabbrica ripristinata con il pulsante di reset";
     "nev.net.reset.body" => "Every port is on DHCP with link-local; bonds, VLANs and bridges are suspended. The previous settings are revision {revision} (Network → revisions → restore).", "Tutte le porte sono in DHCP con link-local; bond, VLAN e bridge sono sospesi. Le impostazioni precedenti sono la revisione {revision} (Rete → revisioni → ripristina).";
-    // synodeb (`synodeb.<event>`, docs/synodeb-integration.md); log bodies are shown as sent
-    "nev.synodeb.unit_failed.title" => "Service failed: {unit}", "Servizio non riuscito: {unit}";
-    "nev.synodeb.smart_error.title" => "SMART {device}: {failtype}", "SMART {device}: {failtype}";
-    "nev.synodeb.smart_error.title_2" => "SMART warning on {device}", "Avviso SMART su {device}";
-    "nev.synodeb.smart_error.failtype.health" => "health status failing", "stato di salute in avaria";
-    "nev.synodeb.smart_error.failtype.failedhealthcheck" => "health check could not run", "impossibile verificare lo stato di salute";
-    "nev.synodeb.smart_error.failtype.currentpendingsector" => "sectors waiting for reallocation", "settori in attesa di riallocazione";
-    "nev.synodeb.smart_error.failtype.offlineuncorrectablesector" => "uncorrectable sectors", "settori non correggibili";
-    "nev.synodeb.smart_error.failtype.failedreadsmartdata" => "SMART data unreadable", "dati SMART illeggibili";
-    "nev.synodeb.smart_error.failtype.emailtest" => "test message", "messaggio di prova";
-    "nev.synodeb.smart_error.failtype.errorcount" => "new errors in the error log", "nuovi errori nel registro errori";
-    "nev.synodeb.smart_error.failtype.selftest" => "self-test failed", "autotest non superato";
-    "nev.synodeb.smart_error.failtype.failedopendevice" => "device cannot be opened", "impossibile aprire il dispositivo";
-    "nev.synodeb.smart_error.failtype.usage" => "usage attribute failing", "attributo di utilizzo in avaria";
-    "nev.synodeb.raid_event.title" => "RAID {array}: {event} ({device})", "RAID {array}: {event} ({device})";
-    "nev.synodeb.raid_event.title_2" => "RAID {array}: {event}", "RAID {array}: {event}";
-    "nev.synodeb.raid_event.event.fail" => "device failed", "dispositivo guasto";
-    "nev.synodeb.raid_event.event.failspare" => "spare device failed", "dispositivo di riserva guasto";
-    "nev.synodeb.raid_event.event.degradedarray" => "array degraded", "array degradato";
-    "nev.synodeb.raid_event.event.devicedisappeared" => "array disappeared", "array scomparso";
-    "nev.synodeb.raid_event.event.sparesmissing" => "spare devices missing", "dispositivi di riserva mancanti";
-    "nev.synodeb.raid_event.event.movespare" => "spare moved to another array", "riserva spostata in un altro array";
-    "nev.synodeb.raid_event.event.spareactive" => "spare device now active", "dispositivo di riserva ora attivo";
-    "nev.synodeb.raid_event.event.rebuildfinished" => "rebuild finished", "ricostruzione completata";
-    "nev.synodeb.raid_event.event.rebuildstarted" => "rebuild started", "ricostruzione avviata";
-    "nev.synodeb.raid_event.event.testmessage" => "test message", "messaggio di prova";
-    "nev.synodeb.raid_event.event.newarray" => "new array detected", "nuovo array rilevato";
-    "nev.synodeb.boot_completed.title" => "Boot completed after an unclean end of the previous boot ({previous_boot})", "Avvio completato dopo una chiusura anomala dell'avvio precedente ({previous_boot})";
-    "nev.synodeb.boot_completed.title_2" => "Boot completed", "Avvio completato";
-    "nev.synodeb.boot_completed.body" => "Kernel {kernel}. Addresses: {addresses}. System volume: {root}. Reset by the watchdog {watchdog}.", "Kernel {kernel}. Indirizzi: {addresses}. Volume di sistema: {root}. Riavvio forzato dal watchdog {watchdog}.";
-    "nev.synodeb.boot_completed.body_2" => "Kernel {kernel}. Addresses: {addresses}. System volume: {root}.", "Kernel {kernel}. Indirizzi: {addresses}. Volume di sistema: {root}.";
-    "nev.synodeb.boot_completed.body_3" => "Kernel {kernel}. System volume: {root}.", "Kernel {kernel}. Volume di sistema: {root}.";
-    "nev.synodeb.boot_completed.root.ok" => "healthy", "integro";
-    "nev.synodeb.boot_completed.root.degraded" => "degraded", "degradato";
-    "nev.synodeb.boot_completed.root.resync_started" => "resynchronization started", "risincronizzazione avviata";
-    "nev.synodeb.boot_completed.root.resync_failed" => "resynchronization failed", "risincronizzazione non riuscita";
-    "nev.synodeb.emergency_mode.title" => "Emergency mode", "Modalità di emergenza";
-    "nev.synodeb.emergency_mode.body" => "The boot stopped in emergency mode ({failed}). SSH is available on {addresses}: log in, fix the cause (journalctl -xb), then run 'sudo systemctl default' or reboot. With the root account locked, systemd retries the boot every few minutes; otherwise the NAS reboots by itself after 10 minutes without an SSH login.", "L'avvio si è fermato in modalità di emergenza ({failed}). SSH è disponibile su {addresses}: accedi, risolvi la causa (journalctl -xb), poi esegui 'sudo systemctl default' o riavvia. Con l'account root bloccato, systemd riprova l'avvio ogni pochi minuti; altrimenti il NAS si riavvia da solo dopo 10 minuti senza un accesso SSH.";
-    "nev.synodeb.emergency_mode.body_2" => "The boot stopped in emergency mode (cause unknown). SSH is available on {addresses}: log in, fix the cause (journalctl -xb), then run 'sudo systemctl default' or reboot. With the root account locked, systemd retries the boot every few minutes; otherwise the NAS reboots by itself after 10 minutes without an SSH login.", "L'avvio si è fermato in modalità di emergenza (causa sconosciuta). SSH è disponibile su {addresses}: accedi, risolvi la causa (journalctl -xb), poi esegui 'sudo systemctl default' o riavvia. Con l'account root bloccato, systemd riprova l'avvio ogni pochi minuti; altrimenti il NAS si riavvia da solo dopo 10 minuti senza un accesso SSH.";
-    "nev.synodeb.emergency_mode.body_3" => "The boot stopped in emergency mode and no network address is up. Fix the cause from a console (journalctl -xb), then run 'sudo systemctl default' or reboot.", "L'avvio si è fermato in modalità di emergenza e non c'è alcun indirizzo di rete. Risolvi la causa da una console (journalctl -xb), poi esegui 'sudo systemctl default' o riavvia.";
-    "nev.synodeb.fan_failure.title" => "Fan failure", "Guasto alle ventole";
-    "nev.synodeb.fan_failure.body" => "Fan stopped or unreadable: {fans}.", "Ventola ferma o illeggibile: {fans}.";
-    "nev.synodeb.fan_failure.body_2" => "The hardware controller reports a failure of the {fan}.", "Il controller hardware segnala un guasto alla {fan}.";
-    "nev.synodeb.fan_failure.fan.fan" => "system fan", "ventola di sistema";
-    "nev.synodeb.fan_failure.fan.cpu_fan" => "CPU fan", "ventola della CPU";
-    "nev.synodeb.fans_ok.title" => "Fans back to normal", "Ventole tornate alla normalità";
-    "nev.synodeb.thermal_shutdown.title" => "Thermal shutdown", "Spegnimento termico";
-    "nev.synodeb.thermal_shutdown.body" => "The NAS is powering off to protect the hardware: {reason}.", "Il NAS si spegne per proteggere l'hardware: {reason}.";
-    "nev.synodeb.shutdown.title" => "Shutdown: {button}", "Spegnimento: {button}";
-    "nev.synodeb.shutdown.title_2" => "Shutdown", "Spegnimento";
-    "nev.synodeb.shutdown.body" => "Command: {command}", "Comando: {command}";
-    "nev.synodeb.shutdown.button.power_button" => "power button", "pulsante di accensione";
-    "nev.synodeb.dom_update_failed.title" => "Boot module update failed", "Aggiornamento del modulo di avvio non riuscito";
-    "nev.synodeb.dom_default_debian.title" => "DEBIAN is the default boot entry again", "DEBIAN è di nuovo la voce di avvio predefinita";
-    "nev.synodeb.dom_default_debian.body" => "The fallback entry DEBIAN_OLD holds no kernel any more: DEBIAN ({kernel}) boots, without a fallback kernel.", "La voce di riserva DEBIAN_OLD non contiene più un kernel: si avvia DEBIAN ({kernel}), senza un kernel di riserva.";
-    "nev.synodeb.kernel_not_tried.title" => "New kernel not tried", "Nuovo kernel non provato";
-    "nev.synodeb.kernel_not_tried.body" => "DEBIAN ({kernel}) was updated, but the fallback entry DEBIAN_OLD is the default boot entry, so the new kernel is not booted. To try it: synodeb-dom default debian && reboot", "DEBIAN ({kernel}) è stato aggiornato, ma la voce predefinita è quella di riserva DEBIAN_OLD, quindi il nuovo kernel non viene avviato. Per provarlo: synodeb-dom default debian && reboot";
-    "nev.synodeb.kernel_boot_failed.title" => "New kernel failed to boot", "Il nuovo kernel non si è avviato";
-    "nev.synodeb.kernel_boot_failed.body" => "The boot module fell back to DEBIAN_OLD ({running}), which stays the default: newer kernels are installed as DEBIAN but not booted until: synodeb-dom default debian", "Il modulo di avvio è tornato a DEBIAN_OLD ({running}), che resta la voce predefinita: i kernel più recenti vengono installati come DEBIAN ma non avviati fino a: synodeb-dom default debian";
-    "nev.synodeb.ups_safe_mode.title" => "UPS: Safe Mode", "UPS: modalità sicura";
-    "nev.synodeb.ups_safe_mode.body" => "Reason: {reason}, battery {battery}%, runtime {runtime} s. Services stopped, volumes unmounted; the NAS reboots when power returns.", "Motivo: {reason}, batteria {battery}%, autonomia {runtime} s. Servizi fermati, volumi smontati; il NAS si riavvia al ritorno della corrente.";
-    "nev.synodeb.ups_safe_mode.body_2" => "Reason: {reason}. Services stopped, volumes unmounted; the NAS reboots when power returns.", "Motivo: {reason}. Servizi fermati, volumi smontati; il NAS si riavvia al ritorno della corrente.";
-    "nev.synodeb.ups_safe_mode.body_3" => "Services stopped, volumes unmounted; the NAS reboots when power returns.", "Servizi fermati, volumi smontati; il NAS si riavvia al ritorno della corrente.";
-    "nev.synodeb.ups_safe_mode.reason.lowbatt" => "battery low", "batteria scarica";
-    "nev.synodeb.ups_safe_mode.reason.nocomm" => "no communication with the UPS", "nessuna comunicazione con l'UPS";
-    "nev.synodeb.ups_safe_mode.reason.waittimeup" => "maximum time on battery reached", "tempo massimo a batteria raggiunto";
-    "nev.synodeb.ups_safe_mode.reason.fsd" => "forced shutdown requested by the UPS", "spegnimento forzato richiesto dall'UPS";
-    "nev.synodeb.ups_power_restored_reboot.title" => "UPS: power restored", "UPS: corrente ripristinata";
-    "nev.synodeb.ups_power_restored_reboot.body" => "Leaving Safe Mode with a reboot.", "Uscita dalla modalità sicura con un riavvio.";
-    "nev.synodeb.ups_power_restored.title" => "UPS: power restored", "UPS: corrente ripristinata";
-    "nev.synodeb.ups_power_restored.body" => "Battery {battery}%.", "Batteria {battery}%.";
-    "nev.synodeb.ups_on_battery.title" => "UPS on battery", "UPS a batteria";
-    "nev.synodeb.ups_on_battery.body" => "Battery {battery}%, runtime {runtime} s.", "Batteria {battery}%, autonomia {runtime} s.";
-    "nev.synodeb.ups_on_battery.body_2" => "Battery {battery}%.", "Batteria {battery}%.";
-    "nev.synodeb.ups_battery_low.title" => "UPS: battery low", "UPS: batteria scarica";
-    "nev.synodeb.ups_battery_low.body" => "Battery {battery}%, runtime {runtime} s: entering Safe Mode.", "Batteria {battery}%, autonomia {runtime} s: avvio della modalità sicura.";
-    "nev.synodeb.ups_battery_low.body_2" => "Entering Safe Mode.", "Avvio della modalità sicura.";
-    "nev.synodeb.ups_unreachable.title" => "UPS unreachable", "UPS non raggiungibile";
-    "nev.synodeb.ups_unreachable.body" => "No communication with {ups} for at least {minutes} minutes.", "Nessuna comunicazione con {ups} da almeno {minutes} minuti.";
     // theme / density / language
     "theme.auto" => "System", "Sistema";
     "theme.light" => "Light", "Chiaro";
@@ -588,7 +528,6 @@ dict! {
     "cfg.key.homes" => "User homes", "Home utenti";
     "cfg.key.snapshots" => "Snapshots", "Snapshot";
     "cfg.key.scheduler" => "Scheduled tasks", "Attività pianificate";
-    "cfg.key.synology.hw" => "Hardware settings", "Impostazioni hardware";
     "cfg.key.power.schedule" => "Power schedule", "Accensione e spegnimento pianificati";
     "cfg.key.network.rescue" => "Network rescue", "Ripristino di emergenza della rete";
     "cfg.key.storage.volumes" => "Volumes", "Volumi";
@@ -694,88 +633,18 @@ dict! {
     "hw.st_fault" => "Fault", "Guasto";
     "hw.fan_n" => "Fan {n}", "Ventola {n}";
     "hw.tab_overview" => "Overview", "Panoramica";
-    "hw.tab_synology" => "Synology", "Synology";
     "ps.title" => "Power schedule", "Pianificazione alimentazione";
-    "syn.not_running" => "synohwd is not running: the status is not up to date and beeps or identify are unavailable. Settings can still be staged; applying them restarts synohwd.", "synohwd non è in esecuzione: lo stato non è aggiornato e i segnali acustici o l'identificazione non sono disponibili. Le impostazioni si possono comunque preparare; applicarle riavvia synohwd.";
-    "syn.foreign" => "/etc/synohwd.toml has button commands rynas does not manage ({cmds}): applying these settings replaces them.", "/etc/synohwd.toml contiene comandi dei pulsanti non gestiti da rynas ({cmds}): applicare queste impostazioni li sostituisce.";
-    "syn.platform" => "{bays} bays · {fans} fans", "{bays} alloggiamenti · {fans} ventole";
-    "syn.settings" => "Settings", "Impostazioni";
-    "syn.daemon" => "synohwd", "synohwd";
-    "syn.running" => "Running", "In esecuzione";
-    "syn.stopped" => "Not running", "Non in esecuzione";
     "last_boot" => "Last boot", "Ultimo avvio";
-    "syn.power_led" => "Power LED", "LED di alimentazione";
+    "hw.power_led" => "Power LED", "LED di alimentazione";
     "hw.led_status_short" => "Status", "Status";
     "hw.led_power_short" => "Power", "Power";
-    "syn.bay_no_power" => "Disk present, bay without power", "Disco presente, alloggiamento senza alimentazione";
-    "syn.temp_last" => "Last reading before standby (the disk is not woken up)", "Ultima lettura prima dello standby (il disco non viene risvegliato)";
-    "syn.identify" => "Identify", "Identifica";
-    "syn.identifying" => "Blinking…", "Lampeggia…";
-    "syn.identify_on" => "The LED of bay {n} blinks for {s} seconds.", "Il LED dell'alloggiamento {n} lampeggia per {s} secondi.";
-    "syn.fan_mode" => "Fan speed mode", "Modalità velocità ventola";
-    "syn.fan_low" => "Quiet", "Silenziosa";
-    "syn.fan_high" => "Cool", "Raffreddamento";
-    "syn.fan_full" => "Full speed", "Velocità massima";
-    "syn.fan_low_help" => "Default: the fans follow the temperature curves and stay quiet.", "Predefinita: le ventole seguono le curve di temperatura e restano silenziose.";
-    "syn.fan_high_help" => "Lower thresholds: the fans speed up earlier and the drives run cooler.", "Soglie più basse: le ventole accelerano prima e i dischi restano più freschi.";
-    "syn.fan_full_help" => "The fans always run at 99%.", "Le ventole girano sempre al 99%.";
-    "syn.full_note" => "Full speed has no curve: the fans run at 99%. The shutdown thresholds stay those of the quiet mode.", "La velocità massima non ha una curva: le ventole girano al 99%. Le soglie di spegnimento restano quelle della modalità silenziosa.";
-    "syn.fan_ok" => "OK", "OK";
-    "syn.fan_stopped" => "Stopped", "Ferma";
-    "syn.fan_unknown" => "Not measured", "Non misurata";
-    "syn.curve" => "Fan curve", "Curva delle ventole";
-    "syn.curve_duty" => "Current speed", "Velocità attuale";
-    "syn.curve_preview" => "Preview of the selected mode (not applied yet).", "Anteprima della modalità selezionata (non ancora applicata).";
-    "syn.cls_disk" => "Disks", "Dischi";
-    "syn.cls_nvme" => "NVMe", "NVMe";
-    "syn.cls_cpu" => "CPU", "CPU";
-    "syn.cls_nic" => "Network card", "Scheda di rete";
-    "syn.fan_period" => "Adjust every (s)", "Regola ogni (s)";
-    "syn.fan_period_help" => "Seconds between two fan adjustments (5–300).", "Secondi tra due regolazioni delle ventole (5–300).";
-    "syn.fan_min_duty" => "Minimum speed (%)", "Velocità minima (%)";
-    "syn.fan_min_duty_help" => "Floor under the curves (0–99).", "Minimo sotto le curve (0–99).";
-    "syn.hysteresis" => "Hysteresis (°C)", "Isteresi (°C)";
-    "syn.hysteresis_help" => "How far a sensor must cool below a step before the fans slow down (0–20).", "Di quanto un sensore deve scendere sotto un gradino prima che le ventole rallentino (0–20).";
-    "syn.v.range" => "Between {min} and {max}.", "Tra {min} e {max}.";
-    "syn.thermal" => "Thermal shutdown", "Spegnimento termico";
-    "syn.thermal_on" => "Shut down when too hot", "Spegni in caso di surriscaldamento";
-    "syn.thermal_help" => "synohwd powers the NAS off after two readings at or above the shutdown threshold of a sensor.", "synohwd spegne il NAS dopo due letture pari o superiori alla soglia di spegnimento di un sensore.";
-    "syn.thermal_off" => "Thermal shutdown is off: disks, NVMe drives and the CPU can overheat and be damaged if a fan fails.", "Lo spegnimento termico è disattivato: dischi, unità NVMe e CPU possono surriscaldarsi e danneggiarsi se una ventola si guasta.";
-    "syn.sensor" => "Sensor", "Sensore";
-    "syn.now_limit" => "Now / shutdown at", "Ora / spegnimento a";
-    "syn.leds_beeper" => "LEDs and beeper", "LED e cicalino";
-    "syn.disk_leds" => "Disk LEDs", "LED dei dischi";
-    "syn.disk_leds_help" => "Green when a disk is present, blinking on activity.", "Verde con il disco presente, lampeggiante durante l'attività.";
-    "syn.brightness" => "LED brightness", "Luminosità dei LED";
-    "syn.brightness_help" => "Shared by the disk LEDs; applied with the other settings.", "Comune a tutti i LED dei dischi; applicata con le altre impostazioni.";
-    "syn.beep_start" => "Beep when the NAS has started", "Segnale acustico all'avvio del NAS";
-    "syn.beep_error" => "Beep on hardware errors", "Segnale acustico in caso di errori hardware";
-    "syn.beep_error_help" => "Fan failure and thermal shutdown.", "Guasto delle ventole e spegnimento termico.";
-    "syn.test_beep" => "Test beep", "Prova segnale acustico";
-    "syn.beep_sent" => "Beep sent.", "Segnale acustico inviato.";
-    "syn.mute" => "Mute alarm", "Silenzia allarme";
-    "syn.mute_help" => "synohwd's beeps are single; muting acknowledges the open hardware notifications so their reminders stop.", "I segnali di synohwd sono singoli; silenziare conferma le notifiche hardware aperte e ne ferma i promemoria.";
-    "syn.muted" => "Alarm muted: {n} notifications acknowledged.", "Allarme silenziato: {n} notifiche confermate.";
-    "syn.buttons" => "Buttons", "Pulsanti";
-    "syn.power_button" => "Power button", "Pulsante di accensione";
-    "syn.power_button_help" => "A clean shutdown stops tasks and services in order.", "Uno spegnimento pulito ferma attività e servizi in ordine.";
-    "syn.pb_poweroff" => "Shut down cleanly", "Spegni in modo pulito";
-    "syn.btn_log" => "Only record it in the events", "Registra solo negli eventi";
-    "syn.btn_ignore" => "Ignore", "Ignora";
+    "hw.bay_no_power" => "Disk present, bay without power", "Disco presente, alloggiamento senza alimentazione";
+    "hw.temp_last" => "Last reading before standby (the disk is not woken up)", "Ultima lettura prima dello standby (il disco non viene risvegliato)";
+    "hw.identify" => "Identify", "Identifica";
+    "hw.identifying" => "Blinking…", "Lampeggia…";
+    "hw.identify_on" => "The LED of bay {n} blinks for {s} seconds.", "Il LED dell'alloggiamento {n} lampeggia per {s} secondi.";
+    "hw.v_range" => "Between {min} and {max}.", "Tra {min} e {max}.";
     "reset_button" => "Reset button", "Pulsante di reset";
-    "syn.rb_rescue" => "Network rescue (double press)", "Ripristino di rete (doppia pressione)";
-    "syn.rescue_help" => "Press the reset button twice within 10 seconds: the network goes back to DHCP with a safe firewall, so you can reach the NAS again after a wrong network setting. A single press does nothing.", "Premi il pulsante di reset due volte entro 10 secondi: la rete torna in DHCP con un firewall sicuro, così puoi raggiungere di nuovo il NAS dopo un'impostazione di rete sbagliata. Una sola pressione non fa nulla.";
-    "syn.rescue_off" => "Without network rescue, a NAS with a wrong network setting can only be reached with a monitor or a serial console.", "Senza ripristino di rete, un NAS con un'impostazione di rete sbagliata si raggiunge solo con un monitor o una console seriale.";
-    "syn.power" => "Power and disks", "Alimentazione e dischi";
-    "syn.standby" => "Disk standby after (minutes)", "Standby dei dischi dopo (minuti)";
-    "syn.standby_help" => "Idle time before the bay disks spin down; 0 = never (0–330).", "Inattività prima che i dischi degli alloggiamenti si fermino; 0 = mai (0–330).";
-    "syn.ac_recovery" => "Restart after a power failure", "Riavvia dopo un'interruzione di corrente";
-    "syn.ac_recovery_help" => "Power back on automatically when the power supply returns.", "Riaccendi automaticamente quando torna l'alimentazione.";
-    "syn.wol" => "Wake-on-LAN", "Wake-on-LAN";
-    "syn.wol_help" => "Start the NAS with a magic packet on any LAN port.", "Avvia il NAS con un magic packet su qualsiasi porta LAN.";
-    "syn.macs" => "MAC addresses for Wake-on-LAN", "Indirizzi MAC per Wake-on-LAN";
-    "syn.no_macs" => "No Ethernet ports found.", "Nessuna porta Ethernet trovata.";
-    "syn.unsaved" => "Unsaved hardware settings", "Impostazioni hardware non salvate";
     "ps.help" => "Weekly rules that start or shut down the NAS. Startup uses the RTC wake alarm, set before every shutdown; shutdowns check the system first.", "Regole settimanali che accendono o spengono il NAS. L'accensione usa la sveglia RTC, impostata prima di ogni spegnimento; gli spegnimenti controllano prima il sistema.";
     "add_rule" => "Add rule", "Aggiungi regola";
     "ps.edit" => "Edit rule", "Modifica regola";
@@ -807,10 +676,8 @@ dict! {
     "ups.f_over" => "OVER · overloaded", "OVER · sovraccarico";
     "ups.none_title" => "No UPS connected", "Nessun UPS collegato";
     "ups.none_text" => "The UPS service runs but reports no UPS. Connect the UPS and set it up with UPS setup below.", "Il servizio UPS è attivo ma non segnala alcun UPS. Collega l'UPS e configuralo con Configurazione UPS qui sotto.";
-    "ups.none_text_synodeb" => "The UPS service runs but reports no UPS. Connect a UPS over USB and set it up with UPS setup below (synodeb applies it).", "Il servizio UPS è attivo ma non segnala alcun UPS. Collega un UPS via USB e configuralo con Configurazione UPS qui sotto (lo applica synodeb).";
     "ups.down_title" => "UPS service not running", "Servizio UPS non attivo";
     "ups.down_text" => "Nothing answers on the NUT port of this NAS (127.0.0.1:3493). Install NUT (Debian package nut), then set up the UPS with UPS setup below.", "Nessuna risposta sulla porta NUT di questo NAS (127.0.0.1:3493). Installa NUT (pacchetto Debian nut), poi configura l'UPS con Configurazione UPS qui sotto.";
-    "ups.down_text_synodeb" => "Nothing answers on the NUT port of this NAS (127.0.0.1:3493). Set up the UPS with UPS setup below (synodeb applies it).", "Nessuna risposta sulla porta NUT di questo NAS (127.0.0.1:3493). Configura l'UPS con Configurazione UPS qui sotto (lo applica synodeb).";
     "ups.charge" => "Battery charge", "Carica batteria";
     "ups.runtime" => "Runtime left", "Autonomia residua";
     "ups.load" => "Load", "Carico";
@@ -824,17 +691,13 @@ dict! {
     "ups.battery_date" => "Battery date", "Data batteria";
     "ups.driver" => "NUT name and driver", "Nome NUT e driver";
     "ups.safemode" => "Power failure", "Interruzione di corrente";
-    "ups.lb_always" => "Safe Mode always starts when the UPS reports low battery (LB) or is critical (on battery and low battery), whichever comes first. The timer below only adds an earlier trigger.", "La modalità sicura parte sempre quando l'UPS segnala batteria scarica (LB) o è critico (a batteria e batteria scarica), qualunque cosa avvenga prima. Il timer qui sotto aggiunge solo un innesco anticipato.";
     "ups.lb_always_nut" => "NUT's upsmon always shuts the system down when the UPS reports low battery (LB) or is critical, and rynas stops its tasks first. The timer below only adds an earlier shutdown.", "upsmon di NUT spegne sempre il sistema quando l'UPS segnala batteria scarica (LB) o è critico, e rynas prima ferma le sue attività. Il timer qui sotto aggiunge solo uno spegnimento anticipato.";
     "ups.need_nut" => "Install NUT, the UPS service (Debian package nut), and set up the UPS: the shutdown policy and the battery tests use it.", "Installa NUT, il servizio UPS (pacchetto Debian nut), e configura l'UPS: la politica di spegnimento e i test batteria lo usano.";
-    "ups.timer" => "Enter Safe Mode after a time on battery", "Entra in modalità sicura dopo un tempo a batteria";
-    "ups.timer_help" => "Services stop, volumes are unmounted and disks spin down; the NAS restarts when power is back.", "I servizi si fermano, i volumi vengono smontati e i dischi si fermano; il NAS riparte al ritorno della corrente.";
     "ups.timer_nut" => "Shut down after a time on battery", "Spegni dopo un tempo a batteria";
     "ups.timer_help_nut" => "rynas stops its tasks, then asks NUT's upsmon to shut the system down (upsmon -c fsd), with the UPS power-off configured in NUT.", "rynas ferma le sue attività, poi chiede a upsmon di NUT di spegnere il sistema (upsmon -c fsd), con lo spegnimento dell'UPS configurato in NUT.";
     "ups.minutes" => "Minutes on battery", "Minuti a batteria";
     "ups.minutes_help" => "1 to 1440 minutes.", "Da 1 a 1440 minuti.";
     "ups.pre_timeout" => "Time to stop apps and tasks (s)", "Tempo per fermare app e attività (s)";
-    "ups.pre_timeout_help" => "Before Safe Mode, rynas and other hooks stop their work within this time (10 to 900 s).", "Prima della modalità sicura, rynas e gli altri hook fermano il loro lavoro entro questo tempo (da 10 a 900 s).";
     "ups.pre_timeout_help_nut" => "Before the shutdown, rynas stops its running tasks and scheduled jobs within this time (10 to 900 s).", "Prima dello spegnimento, rynas ferma le attività in corso e quelle pianificate entro questo tempo (da 10 a 900 s).";
     "ups.pending_note" => "Saved, not applied yet: the UPS uses the applied settings.", "Salvato, non ancora applicato: l'UPS usa le impostazioni applicate.";
     "ups.v_minutes" => "Enter whole minutes from 1 to 1440.", "Inserisci minuti interi da 1 a 1440.";
@@ -852,13 +715,11 @@ dict! {
     "ups.test_done" => "Battery test finished.", "Test batteria terminato.";
     "ups.test_unsupported" => "This UPS offers no battery test through NUT.", "Questo UPS non offre test della batteria tramite NUT.";
     "ups.test_online" => "A test can start only while the UPS is on mains power.", "Un test può partire solo mentre l'UPS è alimentato dalla rete.";
-    "ups.test_lb" => "During a test, low battery still starts Safe Mode.", "Durante un test, la batteria scarica avvia comunque la modalità sicura.";
     "ups.test_lb_nut" => "During a test, low battery still shuts the system down.", "Durante un test, la batteria scarica spegne comunque il sistema.";
     "ups.quick" => "Quick test", "Test rapido";
     "ups.deep" => "Deep test", "Test approfondito";
     "ups.stop" => "Stop test", "Ferma test";
     "ups.deep_title" => "Start a deep battery test?", "Avviare un test approfondito della batteria?";
-    "ups.deep_text" => "The UPS runs on battery until it is almost empty, which can take an hour. If the battery reaches low battery (LB), the NAS enters Safe Mode: start it only when someone is present to stop the test.", "L'UPS funziona a batteria fino a scaricarla quasi del tutto, anche per un'ora. Se la batteria arriva a batteria scarica (LB), il NAS entra in modalità sicura: avvialo solo con qualcuno presente per fermare il test.";
     "ups.deep_text_nut" => "The UPS runs on battery until it is almost empty, which can take an hour. If the battery reaches low battery (LB), NUT shuts the system down: start it only when someone is present to stop the test.", "L'UPS funziona a batteria fino a scaricarla quasi del tutto, anche per un'ora. Se la batteria arriva a batteria scarica (LB), NUT spegne il sistema: avvialo solo con qualcuno presente per fermare il test.";
     "ups.deep_start" => "Start deep test", "Avvia test approfondito";
     "ups.schedule_hint" => "To test on a schedule, add a scheduled task that runs as root:", "Per un test pianificato, aggiungi un'attività pianificata eseguita come root:";
@@ -868,7 +729,6 @@ dict! {
     "upsw.title" => "UPS setup", "Configurazione UPS";
     "upsw.intro" => "No UPS reports to this NAS. rynas can look for a UPS on USB, test which NUT driver reads it and set it up.", "Nessun UPS comunica con questo NAS. rynas può cercare un UPS su USB, provare quale driver NUT lo legge e configurarlo.";
     "upsw.need_nut" => "Install NUT (Debian package nut) to set up a UPS here.", "Installa NUT (pacchetto Debian nut) per configurare qui un UPS.";
-    "upsw.synodeb_old" => "This synodeb version cannot set up other UPS drivers yet: update synodeb to use the setup wizard.", "Questa versione di synodeb non sa ancora configurare altri driver UPS: aggiorna synodeb per usare la procedura guidata.";
     "upsw.name" => "NUT name", "Nome NUT";
     "upsw.name_help" => "The name of the UPS in NUT (lowercase letters, digits, - and _).", "Il nome dell'UPS in NUT (lettere minuscole, cifre, - e _).";
     "upsw.change" => "Change UPS", "Cambia UPS";
@@ -878,7 +738,6 @@ dict! {
     "upsw.s_review" => "Review", "Riepilogo";
     "upsw.s_done" => "Done", "Fatto";
     "upsw.find_text" => "Connect the UPS to this NAS. The detection lists the UPSes on USB and tries the matching NUT drivers one by one until one reads the UPS status. For a serial or network UPS, enter the driver by hand.", "Collega l'UPS a questo NAS. Il rilevamento elenca gli UPS su USB e prova uno alla volta i driver NUT adatti finché uno legge lo stato dell'UPS. Per un UPS seriale o di rete, inserisci il driver a mano.";
-    "upsw.find_text_synodeb" => "Connect the UPS to this NAS. The detection lists the UPSes on USB and tries the matching NUT drivers one by one until one reads the UPS status; synodeb then sets up NUT with the chosen driver. For a serial or network UPS, enter the driver by hand.", "Collega l'UPS a questo NAS. Il rilevamento elenca gli UPS su USB e prova uno alla volta i driver NUT adatti finché uno legge lo stato dell'UPS; poi synodeb configura NUT con il driver scelto. Per un UPS seriale o di rete, inserisci il driver a mano.";
     "upsw.stop_drivers" => "Stop the running UPS driver during the test", "Ferma il driver UPS in funzione durante la prova";
     "upsw.stop_drivers_help" => "A driver already holds the UPS: it is stopped while the drivers are tested and started again afterwards. The UPS is not monitored meanwhile.", "Un driver occupa già l'UPS: viene fermato mentre si provano i driver e riavviato dopo. Nel frattempo l'UPS non è sorvegliato.";
     "upsw.detect" => "Detect USB UPS", "Rileva UPS USB";
@@ -921,7 +780,6 @@ dict! {
     "upsw.take_over" => "Take over and remove the section [{name}]", "Prendi in carico e rimuovi la sezione [{name}]";
     "upsw.removed" => "Lines removed:", "Righe rimosse:";
     "upsw.commands" => "Then rynas runs:", "Poi rynas esegue:";
-    "upsw.commands_synodeb" => "synodeb sets up NUT with:", "synodeb configura NUT con:";
     "upsw.apply" => "Apply", "Applica";
     "upsw.waiting" => "Waiting for the UPS to report…", "In attesa che l'UPS comunichi…";
     "upsw.applied" => "The UPS is set up: NUT now runs its driver, upsd and upsmon.", "L'UPS è configurato: ora NUT esegue il suo driver, upsd e upsmon.";
@@ -2541,13 +2399,6 @@ dict! {
     "net.ll_none" => "No port has a MAC address.", "Nessuna porta ha un indirizzo MAC.";
     "net.ll_active" => "Active", "Attivo";
     "net.ll_inactive" => "Not on the port now", "Non presente ora";
-    "net.reset_on" => "Restores the network", "Ripristina la rete";
-    "net.reset_off" => "Does not restore the network", "Non ripristina la rete";
-    "net.reset_pending_on" => "Will restore the network after apply", "Ripristinerà la rete dopo l'applicazione";
-    "net.reset_pending_off" => "Will stop restoring the network after apply", "Smetterà di ripristinare la rete dopo l'applicazione";
-    "net.reset_text" => "Press it twice within 10 seconds: DHCP and link-local on every port, the previous settings kept as a revision.", "Premilo due volte entro 10 secondi: DHCP e link-local su ogni porta, le impostazioni precedenti conservate come revisione.";
-    "net.reset_owner" => "Set in Hardware › Synology.", "Si imposta in Hardware › Synology.";
-    "net.reset_owner_link" => "Open Hardware", "Apri Hardware";
     "net.tools_intro" => "Run from the NAS itself. 20 runs per minute.", "Eseguiti dal NAS stesso. 20 esecuzioni al minuto.";
     "net.d_tool" => "Tool", "Strumento";
     "net.d_ping" => "Ping", "Ping";
@@ -3003,8 +2854,9 @@ mod tests {
     }
 
     /// G8c: the UI describes what rynas does and never compares it with another NAS system.
-    /// Platform names (Synology, synohwd, synodeb) are allowed: their texts are rendered only
-    /// where that hardware is present (G8d).
+    /// Platform names (Synology, synohwd, synodeb) are allowed only in a module's table
+    /// (`crate::modules`): those texts are rendered only where that hardware is present (G8d,
+    /// test `core_names_no_module`).
     #[test]
     fn no_other_products() {
         const PRODUCTS: &[&str] = &["dsm", "truenas", "unraid", "openmediavault", "omv", "qnap", "qts"];
@@ -3026,6 +2878,36 @@ mod tests {
             }
         }
         assert!(hits.is_empty(), "texts naming another product: {hits:#?}");
+    }
+
+    /// D-MODULE: the core table names no hardware module's platform (those texts belong to
+    /// the module's table), and the module's keys are not in the core table.
+    #[test]
+    fn core_names_no_module() {
+        let core: Vec<(&str, &str, &str)> = {
+            let mut at = 0usize;
+            let mut v = Vec::new();
+            for e in LENS.chunks(3) {
+                let k = &BLOB[at..at + e[0] as usize];
+                let en = &BLOB[at + e[0] as usize..at + (e[0] + e[1]) as usize];
+                let it = &BLOB[at + (e[0] + e[1]) as usize..at + (e[0] + e[1] + e[2]) as usize];
+                at += (e[0] + e[1] + e[2]) as usize;
+                v.push((k, en, it));
+            }
+            v
+        };
+        assert!(core.len() > 1000);
+        // root rollback is still a core page (docs/quality/module-boundary-2026-11-06.md)
+        const PENDING: &[&str] = &["snap.root_step2"];
+        let hits: Vec<_> = core
+            .iter()
+            .filter(|e| !PENDING.contains(&e.0))
+            .filter(|(k, en, it)| {
+                k.starts_with("syn.") || [en, it].iter().any(|t| { let l = t.to_lowercase(); l.contains("synology") || l.contains("synodeb") || l.contains("synohwd") })
+            })
+            .map(|e| e.0)
+            .collect();
+        assert!(hits.is_empty(), "module texts in the core table: {hits:?}");
     }
 
     /// Every string literal of the sources that looks like a key (`area.thing`, also `#area.thing`

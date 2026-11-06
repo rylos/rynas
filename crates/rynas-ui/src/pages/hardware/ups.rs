@@ -1,13 +1,13 @@
-//! Hardware › UPS (DSM Control Panel › Hardware & Power › UPS): live status from upsd
+//! Hardware › UPS: live status from upsd
 //! (`/api/v1/ups`, then `ups.status` events), the power failure policy
 //! (`/api/v1/ups/settings`, staged like every configuration change), the battery test
 //! (`POST /api/v1/ups/test`, task `ups.test`; only the tests the UPS lists) and the recent UPS
 //! notifications.
 //!
 //! The texts follow the backend of `/api/v1/ups/settings`: plain NUT (shutdown through
-//! upsmon), synodeb (Safe Mode) or none (install NUT). Low battery and a critical UPS (OB+LB)
-//! always trigger it: the form says so next to the timer, which only adds a trigger. synodeb
-//! is named only where it is the backend.
+//! upsmon), a hardware module's UPS layer (its texts come from the module,
+//! `crate::modules::ups_key`) or none (install NUT). Low battery and a critical UPS (OB+LB)
+//! always trigger it: the form says so next to the timer, which only adds a trigger.
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -15,6 +15,7 @@ use rynas_api_types::notify::Notification;
 use rynas_api_types::ups::*;
 
 use crate::api;
+use crate::modules::{self, UpsSlot};
 use crate::form::{number_field, spinner, stale_notice, switch, Draft};
 use crate::i18n::{self, t, tr};
 use crate::icons::{self, Icon};
@@ -139,10 +140,10 @@ fn backend_of(settings: Remote<UpsSettingsState>) -> Signal<UpsBackend> {
 
 /// i18n key of the text under "no UPS" / "UPS service not running".
 pub fn empty_text(link: UpsLink, backend: UpsBackend) -> &'static str {
-    match (link, backend == UpsBackend::Synodeb) {
-        (UpsLink::NotConfigured, true) => "ups.none_text_synodeb",
+    match (link, backend == UpsBackend::Module) {
+        (UpsLink::NotConfigured, true) => modules::ups_key(UpsSlot::NoneText),
         (UpsLink::NotConfigured, false) => "ups.none_text",
-        (_, true) => "ups.down_text_synodeb",
+        (_, true) => modules::ups_key(UpsSlot::DownText),
         (_, false) => "ups.down_text",
     }
 }
@@ -328,10 +329,10 @@ fn safemode_card(settings: Remote<UpsSettingsState>) -> AnyView {
 }
 
 /// i18n keys of the policy form: the low battery statement, the timer switch and its help,
-/// the help of the stop time. synodeb enters Safe Mode, NUT's upsmon shuts down.
+/// the help of the stop time: the module layer's own, or NUT's (upsmon shuts down).
 pub fn policy_keys(b: UpsBackend) -> [&'static str; 4] {
-    if b == UpsBackend::Synodeb {
-        ["ups.lb_always", "ups.timer", "ups.timer_help", "ups.pre_timeout_help"]
+    if b == UpsBackend::Module {
+        [UpsSlot::LbAlways, UpsSlot::Timer, UpsSlot::TimerHelp, UpsSlot::PreTimeoutHelp].map(modules::ups_key)
     } else {
         ["ups.lb_always_nut", "ups.timer_nut", "ups.timer_help_nut", "ups.pre_timeout_help_nut"]
     }
@@ -418,7 +419,7 @@ fn test_card(settings: Remote<UpsSettingsState>) -> AnyView {
     let cmds = Memo::new(move |_| live.ups.with(|u| u.as_ref().map(|u| u.commands.clone()).unwrap_or_default()));
     let supports = move |t: BatteryTest| cmds.with(|c| c.iter().any(|c| c == t.nut_cmd()));
     let any = Memo::new(move |_| available.get() && BatteryTest::ALL.into_iter().any(supports));
-    let synodeb = move || backend.get() == UpsBackend::Synodeb;
+    let module = move || backend.get() == UpsBackend::Module;
     let run = move |test: BatteryTest| {
         busy.set(Some(test));
         spawn_local(async move {
@@ -438,7 +439,7 @@ fn test_card(settings: Remote<UpsSettingsState>) -> AnyView {
             let close = Callback::new(move |_| ask_deep.set(false));
             confirm(Confirm::new(
                 t("ups.deep_title").to_string(),
-                t(if synodeb() { "ups.deep_text" } else { "ups.deep_text_nut" }).to_string(),
+                t(if module() { modules::ups_key(UpsSlot::DeepText) } else { "ups.deep_text_nut" }).to_string(),
                 "ups.deep_start",
                 true,
                 Callback::new(move |_| {
@@ -482,7 +483,7 @@ fn test_card(settings: Remote<UpsSettingsState>) -> AnyView {
             {move || (available.get() && connected.get() && !any.get()).then(|| view! { <p class="sec-note"><Icon icon=icons::INFO size=16 />{t("ups.test_unsupported")}</p> })}
             {move || (any.get() && !online.get()).then(|| view! { <p class="sec-note"><Icon icon=icons::INFO size=16 />{t("ups.test_online")}</p> })}
             {move || any.get().then(|| view! {
-                <p class="sec-note"><Icon icon=icons::TRIANGLE_ALERT size=16 />{t(if synodeb() { "ups.test_lb" } else { "ups.test_lb_nut" })}</p>
+                <p class="sec-note"><Icon icon=icons::TRIANGLE_ALERT size=16 />{t(if module() { modules::ups_key(UpsSlot::TestLb) } else { "ups.test_lb_nut" })}</p>
                 <div class="btn-row">
                     {supports(BatteryTest::Quick).then(|| view! {
                         <button type="button" class="btn primary" disabled=move || !can() on:click=move |_| run(BatteryTest::Quick)>
@@ -604,9 +605,9 @@ mod tests {
         assert_eq!(Form { pre_timeout: "5".into(), ..f }.settings(), Err("ups.v_pre"));
     }
 
-    /// Nothing a plain Debian user sees names synodeb.
+    /// Nothing a plain Debian user sees names a hardware module's platform.
     #[test]
-    fn neutral_without_synodeb() {
+    fn neutral_without_a_module() {
         let keys = |b: UpsBackend| {
             let mut k = policy_keys(b).to_vec();
             k.push(empty_text(UpsLink::NotConfigured, b));
@@ -620,8 +621,8 @@ mod tests {
                 assert!(!s.to_ascii_lowercase().contains("synodeb") && !s.contains("Synology") && !s.contains("DSM"), "{k}: {s}");
             }
         }
-        assert_eq!(empty_text(UpsLink::Unreachable, UpsBackend::Synodeb), "ups.down_text_synodeb");
-        assert_eq!(policy_keys(UpsBackend::Synodeb)[0], "ups.lb_always");
+        assert_eq!(empty_text(UpsLink::Unreachable, UpsBackend::Module), modules::ups_key(UpsSlot::DownText));
+        assert_eq!(policy_keys(UpsBackend::Module)[0], modules::ups_key(UpsSlot::LbAlways));
     }
 
     #[test]

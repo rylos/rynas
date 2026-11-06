@@ -1,53 +1,31 @@
-//! Hardware (DSM Control Panel › Hardware & Power): the provider-neutral overview (fans,
-//! temperatures, status LED and events), every synohwd setting and action on a Synology
-//! ([`synology`]), the weekly power schedule ([`power`]), the UPS ([`ups`]) and the removable drives ([`removable`], also `#removable`). A tab is mounted on its first
-//! visit and kept afterwards (drafts survive a tab switch). The Synology tab exists only on a
-//! Synology (G8d): the live provider says so, or the plugin's settings answer.
+//! Hardware: the provider-neutral overview (fans, temperatures, status LED and events), the
+//! hardware module's tab where a module answers (Synology: `crate::modules::synology`), the
+//! weekly power schedule ([`power`]), the UPS ([`ups`]) and the removable drives
+//! ([`removable`], also `#removable`). A tab is mounted on its first visit and kept afterwards
+//! (drafts survive a tab switch). The module tab exists only where the module is present
+//! (G8d, D-MODULE).
 
 mod power;
 mod removable;
-mod synology;
 mod ups;
 mod ups_setup;
 
 use leptos::prelude::*;
-use leptos::task::spawn_local;
 
 use crate::i18n::{self, t, tr};
 use crate::icons::{self, Icon};
 use crate::live::{Res, use_live};
 use crate::alerts;
+use crate::modules::synology;
 use crate::alerts::fan_label;
 use crate::pages::dashboard::{led_state, temp_label};
 use crate::form::tabs_shown;
 use crate::ui::{self, EmptyState, Meter, PageHeader, Pending, Status, Tone, cpu_offset, temp_limits, temp_tone};
 
-/// Index of the Synology tab.
+/// Index of the hardware module's tab.
 const SYN_TAB: usize = 1;
 /// Index of the removable drives tab.
 const RM_TAB: usize = 4;
-
-/// The Synology plugin is present: the live provider is synohwd's, or (synohwd stopped, no
-/// status yet) the plugin's settings answer. Probed once per visit, only when the provider
-/// does not already tell. A memo: the hardware status changes with every reading, and a
-/// derived signal would build the whole Synology tab again each time.
-fn synology_present() -> Memo<bool> {
-    let hw = use_live().hardware;
-    let probed = RwSignal::new(false);
-    let asked = StoredValue::new(false);
-    Effect::new(move || {
-        let Some(provider) = hw.with(|h| h.as_ref().map(|h| h.provider.clone())) else { return };
-        if provider.as_deref() == Some("synology") || asked.get_value() {
-            return;
-        }
-        asked.set_value(true);
-        spawn_local(async move {
-            let ok = crate::api::get_text("/api/v1/hardware/synology/settings").await.is_ok();
-            probed.set(ok);
-        });
-    });
-    Memo::new(move |_| probed.get() || hw.with(|h| h.as_ref().is_some_and(|h| h.provider.as_deref() == Some("synology"))))
-}
 
 #[component]
 pub fn Hardware() -> impl IntoView {
@@ -59,7 +37,7 @@ pub fn Hardware() -> impl IntoView {
             tab.set(RM_TAB);
         }
     });
-    let syn = synology_present();
+    let syn = synology::present();
     // a selected tab that stops existing falls back to the overview
     Effect::new(move || {
         if !syn.get() && tab.get_untracked() == SYN_TAB {
@@ -86,7 +64,7 @@ pub fn Hardware() -> impl IntoView {
     view! {
         <div class="page">
             <PageHeader icon=icons::CPU title="nav.hardware" subtitle="hw.subtitle" />
-            <div class="card hw-tabs">{tabs_shown("hwt", &["hw.tab_overview", "hw.tab_synology", "ps.title", "ups.tab", "rm.title"], tab, "nav.hardware", move |i| i != SYN_TAB || syn.get())}</div>
+            <div class="card hw-tabs">{tabs_shown("hwt", &["hw.tab_overview", synology::TAB, "ps.title", "ups.tab", "rm.title"], tab, "nav.hardware", move |i| i != SYN_TAB || syn.get())}</div>
             {panel(0, overview)}
             {move || syn.get().then(|| panel(SYN_TAB, synology::panel))}
             {panel(2, power::panel)}
