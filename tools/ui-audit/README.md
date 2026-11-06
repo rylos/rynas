@@ -25,6 +25,8 @@ quality reviews (docs/quality/). Nothing here touches the host system or a runni
   (lost hover, focus, scroll, identify blink). `-v` lists the requests and events of the window,
   to find what rebuilt. The fake tree's fans drift a few rpm per write, so `hardware.status` is
   pushed every 10 s as on a real unit.
+- `discard_refresh.py`: stage a change (a snapshot job, the removal of a user), press the pending
+  bar's Discard: the page must drop the pending state without F5 (exit 1 otherwise).
 - `cdp.py` is a minimal DevTools-protocol driver; `run_all.py` has login and client-side navigation;
   `states.py` checks the loading/error states (second instance with rynasd stopped).
 - `files_reenter.py`: leave the file manager and come back (sidebar, router, `?window`): the Files

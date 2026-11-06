@@ -61,6 +61,9 @@ thread_local! {
     /// Bumped after every successful configuration write (stage, apply, discard) and when a
     /// `config.*` task ends: pages re-read what they show ([`crate::ui::Remote::with_config`]).
     static GENERATION: Cell<Option<RwSignal<u64>>> = const { Cell::new(None) };
+    /// [`changed`] has bumped the generation for the re-read it starts: a different pending
+    /// set in that answer is the change the pages already reload for.
+    static EXPECTED: Cell<bool> = const { Cell::new(false) };
 }
 
 pub fn config() -> Config {
@@ -95,6 +98,7 @@ pub fn generation() -> u64 {
 pub fn changed() {
     generation_sig().update(|n| *n += 1);
     if let Some(c) = CONFIG.with(Cell::get) {
+        EXPECTED.with(|e| e.set(true));
         c.refresh();
     }
 }
@@ -138,8 +142,16 @@ impl Config {
                     if self.failures.get_untracked() != 0 {
                         self.failures.set(0);
                     }
-                    if self.pending.with_untracked(|cur| cur.as_ref() != Some(&p)) {
+                    let expected = EXPECTED.with(|e| e.replace(false));
+                    let (differs, known) = self.pending.with_untracked(|cur| (cur.as_ref() != Some(&p), cur.is_some()));
+                    if differs {
                         self.pending.set(Some(p));
+                        // staged, applied or discarded elsewhere (another tab, another
+                        // device, an apply whose event was lost): the pages' pending marks
+                        // (a struck-through row, "Pending: delete") are out of date too
+                        if known && !expected {
+                            generation_sig().update(|n| *n += 1);
+                        }
                     }
                 }
                 Err(e) if e.status() == 401 => {}
@@ -230,7 +242,9 @@ impl Config {
                 Err(e) if e.status() == 401 => {}
                 Err(e) => self.outcome.set(Some(Outcome::Failed { task: None, text: e.text() })),
             }
-            self.refresh();
+            // a discard is no task (no `config.*` task event): the pages showing the staged
+            // state (rows marked "Pending: …", switches, struck-through names) read again
+            changed();
         });
     }
 }

@@ -48,3 +48,30 @@ fn node_ref_on_load_only_per_mount() {
     }
     assert!(bad.is_empty(), "NodeRef::on_load outside a per-mount node ref: {bad:#?}");
 }
+
+/// A direct write to `/api/v1/config/*` (discard, restore, drift import: no `config.*` task,
+/// so no task event) must call `config::changed()` right after: it bumps the configuration
+/// generation that every `Remote::with_config` list reloads on. The global Discard did not:
+/// after it the snapshot jobs (and users, shares, ...) kept "Pending: removal", the
+/// struck-through name and the switch off until F5. Applies are `config.apply` tasks
+/// (`tasks::upsert` calls `changed()` when one ends).
+#[test]
+fn config_writes_bump_the_generation() {
+    let mut bad = Vec::new();
+    for (file, text) in sources() {
+        if file == "source_check.rs" {
+            continue;
+        }
+        let lines: Vec<&str> = text.lines().collect();
+        for (n, line) in lines.iter().enumerate() {
+            let write = ["api::post", "api::put", "api::delete"].iter().any(|w| line.contains(w));
+            if write && line.contains("/api/v1/config/") && !line.trim_start().starts_with("//") {
+                let after = &lines[n..(n + 15).min(lines.len())];
+                if !after.iter().any(|l| l.contains("changed()")) {
+                    bad.push(format!("{file}:{}: {}", n + 1, line.trim()));
+                }
+            }
+        }
+    }
+    assert!(bad.is_empty(), "configuration writes without config::changed() (pages keep the old pending state): {bad:#?}");
+}

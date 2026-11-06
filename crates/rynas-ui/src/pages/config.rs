@@ -55,8 +55,9 @@ fn staged_text(n: u32) -> String {
 
 #[component]
 pub fn Configuration() -> impl IntoView {
-    let revisions = Remote::<Vec<RevisionSummary>>::new(format!("/api/v1/config/revisions?limit={REVISIONS}"));
-    let drift = Remote::<DriftReport>::new("/api/v1/config/drift");
+    // an apply adds a revision and settles drift: both read again on every configuration change
+    let revisions = Remote::<Vec<RevisionSummary>>::with_config(format!("/api/v1/config/revisions?limit={REVISIONS}"));
+    let drift = Remote::<DriftReport>::with_config("/api/v1/config/drift");
     view! {
         <div class="page">
             <PageHeader icon=icons::HISTORY title="cfg.title" subtitle="cfg.subtitle">
