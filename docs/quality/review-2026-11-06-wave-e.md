@@ -50,7 +50,8 @@ send `Content-Length` with a fetch body); test in `crates/rynasd/tests/files.rs`
 
 ### Medium
 
-**M1 — Symbolic links lead out of the shared folders (and admins read everything through them).**
+**M1 — Symbolic links lead out of the shared folders (and admins read everything through them)
+(fixed, d3cda07, 6b07479).**
 `crates/rynas-files/src/shares.rs:7,76` checks only the components of the virtual path; links inside
 a share are followed "as SMB does". Samba's default is `wide links = no` (rynas sets nothing else),
 so the file manager is wider than SMB. Any user can plant a link (extract a tar with
@@ -62,8 +63,20 @@ connection key (the sealed SMB/SFTP passwords of every user) — beyond "admins 
 RESOLVE_NO_MAGICLINKS)` from the share root's fd (Linux ≥ 5.6), or canonicalize and require the
 result to stay under the canonical share root (any share root, to keep links between shares);
 refuse otherwise with `invalid_value`. Update the doc comment and `docs/plugins/files.md`.
+Fixed as Samba's `wide links = no`: `rynas_files::confine` resolves every path from the share's
+opened directory with `openat2(RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)`, or an `O_NOFOLLOW`
+walk of its own where the kernel lacks it and for absolute links that point inside; a link out
+of its share (system or another share) is listed (`outside: true`), copied and archived as a
+link, and refused with the new code 403 `outside_share` everywhere else. A per-request/per-job
+jail re-checks every descriptor the worker opens (`/proc/self/fd`), closing the swap race; jobs
+carry their share roots (`Spec::roots`); extraction tools run under Landlock (writes only below
+their folder); recycle-bin folders are never links. Tests: `confine` (openat2 and the walk side
+by side: `/etc`, another share, `..` and chains, loops, the race), `rynasd --test files`
+(every route), worker `tests/jobs.rs` (copy, compress, extract through links, `#recycle` link),
+`packaging/test-files.sh` (an administrator's worker and `/etc/shadow`).
 
-**M2 — Workers share rynasd's memory limits: MemoryHigh=96M throttles rynasd during big jobs.**
+**M2 — Workers share rynasd's memory limits: MemoryHigh=96M throttles rynasd during big jobs
+(fixed, b3f533f).**
 `rynasd.service:26-27`. One tar.zst job at the default level (~87 MB measured) already exceeds
 `MemoryHigh` with rynasd's own 19 MB, and page cache from file copies is charged to the same cgroup:
 the kernel then throttles every process of the cgroup, rynasd included (slow API, slow events),
@@ -71,8 +84,16 @@ for the length of the job. Fix: run workers in a cgroup of their own — `Delega
 worker into `rynasd.service/workers/` (memory.high ~192M, memory.max ~384M on a 4 GB box), or start
 them with `systemd-run --scope --slice=rynas-files.slice -p MemoryMax=…`; keep rynasd in a leaf
 `rynasd.service/daemon/` with today's limits. Also cap concurrent tar.zst at "best" to one.
+Fixed with the delegated subtree (`rynasd::cgroup`, `Delegate=memory pids`,
+`ProtectControlGroups=private`): rynasd in `daemon/` (96M/256M), workers in `workers/`
+(192M/384M), each worker moving itself there between fork and exec with one write to
+`cgroup.procs`; the unit bounds the sum (288M/640M), `OOMPolicy=continue` stays. Measured: spawn
+~300 µs, ~460-560 µs with the move, against ~8 ms for a `systemd-run --scope` per worker.
+Without delegation (older systemd, containers, `--dry-system`, tests) everything stays in one
+cgroup as before. The tar.zst cap was not needed once the job's memory is its own.
 
-**M3 — Removable ext4/btrfs volumes are open to every NAS user through the file manager.**
+**M3 — Removable ext4/btrfs volumes are open to every NAS user through the file manager
+(fixed, 2fd8c86).**
 `crates/rynasd/src/files.rs:180` (`shares_for`) offers every mounted removable volume to **every**
 user. FAT/exFAT/NTFS are protected by `gid=<access group>,fmask=0117,dmask=0007`
 (`rynas-removable/src/mount.rs:54`), but ext4/btrfs keep their own owners and modes: world-readable
@@ -82,6 +103,11 @@ files of a stick are readable by any account, and files owned by uid 1000 on ano
 (`settings.share.group`), the same rule as SMB; optionally mount ext4/btrfs below a
 `0750 root:<group>` directory (`/media/.rynas/<name>` with `/media/<name>` as a bind or symlink) so
 the kernel enforces it for every path.
+Fixed: `shares_for` lists the mounted removable volumes only to administrators and the members
+of the access group (`RemovableDrives::access_gid`, from the removable settings; an unknown
+group leaves them to administrators). The mount-below-a-0750-directory option is not done: the
+file manager and SMB both check the group now; another way in (a shell account) still meets the
+kernel's modes of ext4/btrfs.
 
 ### Low
 
@@ -127,3 +153,7 @@ translated.
 
 - `084ccc2` packaging: rynasd keeps running when a file manager worker is OOM-killed (H1)
 - `75d40d1` files: refuse bodies without Content-Length instead of buffering them (H2)
+- `d3cda07` files: symbolic links stay inside their shared folder (M1)
+- `6b07479` files-app: text for outside_share and for links out of the shared folder (M1)
+- `2fd8c86` files: removable volumes only for administrators and the access group (M3)
+- `b3f533f` rynasd: file manager workers in a cgroup of their own (M2)
