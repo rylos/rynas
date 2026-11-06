@@ -719,7 +719,9 @@ dict! {
     "ps.time_zone" => "Time zone", "Fuso orario";
     "ps.wake_alarm" => "RTC wake alarm", "Sveglia RTC";
     "ps.not_armed" => "Not set", "Non impostata";
-    "ps.arm_error" => "The wake alarm could not be set: {e}", "Non è stato possibile impostare la sveglia: {e}";
+    "ps.arm_error" => "The wake alarm could not be set.", "Non è stato possibile impostare la sveglia.";
+    "ps.ww.no_rtc" => "No real-time clock found: the NAS cannot start itself on schedule.", "Nessun orologio di sistema trovato: il NAS non può accendersi da solo in base alla pianificazione.";
+    "ps.ww.no_wake_alarm" => "The clock {rtc} has no wake alarm: the NAS cannot start itself on schedule.", "L'orologio {rtc} non ha una sveglia: il NAS non può accendersi da solo in base alla pianificazione.";
     "ps.wake_unsupported" => "Not supported here", "Non supportata qui";
     "ps.wake_unsupported_help" => "This machine has no RTC wake alarm: startup rules cannot start it. Shutdown rules still work.", "Questa macchina non ha una sveglia RTC: le regole di accensione non possono avviarla. Le regole di spegnimento funzionano comunque.";
     "ps.prev_clean" => "Previous shutdown clean", "Spegnimento precedente pulito";

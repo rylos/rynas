@@ -183,9 +183,41 @@ pub struct WakeSupport {
     /// When rynas last armed (or cleared) it, and for which time.
     #[serde(default)]
     pub last_armed: Option<WakeArmed>,
-    /// Shown next to the startup rules (no RTC, the firmware may ignore the alarm...).
+    /// Shown next to the startup rules (no RTC, the firmware may ignore the alarm...), in
+    /// English for logs and the CLI; the UI translates `warning_code`.
     #[serde(default)]
     pub warning: Option<String>,
+    /// The same warning as a code (`rtc` names the clock, `last_armed.error` the failure).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning_code: Option<WakeWarning>,
+}
+
+/// Why the NAS may not start itself on schedule ([`WakeSupport::warning_code`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WakeWarning {
+    /// No real-time clock found.
+    NoRtc,
+    /// The clock `rtc` has no wake alarm.
+    NoWakeAlarm,
+    /// The last arming failed (`last_armed.error`).
+    LastArmFailed,
+    #[serde(other)]
+    Other,
+}
+
+/// Why arming the wake alarm failed ([`WakeArmed::error_code`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WakeArmError {
+    /// No real-time clock.
+    NoRtc,
+    /// The clock `rtc` has no wake alarm.
+    NoWakeAlarm,
+    /// Setting the alarm failed: `error` holds what the command or the kernel said.
+    Failed,
+    #[serde(other)]
+    Other,
 }
 
 /// Written by `rynasctl power arm-wake` (`/var/lib/rynas/power/wake.json`).
@@ -201,9 +233,12 @@ pub struct WakeArmed {
     pub rtc: Option<String>,
     /// `boot` or `shutdown`.
     pub reason: String,
-    /// The `rtcwake` run failed or the RTC has no alarm.
+    /// The `rtcwake` run failed or the RTC has no alarm (English; the output of the command
+    /// for `failed`); the UI translates `error_code`.
     #[serde(default)]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<WakeArmError>,
 }
 
 /// How a boot started, as far as rynas can tell.

@@ -197,6 +197,40 @@ pub fn panel(_active: Signal<bool>) -> AnyView {
     .into_any()
 }
 
+/// A text and whether it is the server's English text.
+type MaybeEn = (String, bool);
+/// A translated text and the technical detail that goes with it.
+type WithDetail = (String, Option<String>);
+
+/// The wake warning and the arming error of the "Next" card. A failed arming is said once:
+/// by the error note, not again by the warning.
+fn wake_texts(w: &WakeSupport) -> (Option<MaybeEn>, Option<WithDetail>) {
+    let no_alarm = |rtc: &Option<String>| tf("ps.ww.no_wake_alarm", &[("rtc", rtc.as_deref().unwrap_or("?"))]);
+    let warning = match w.warning_code {
+        Some(WakeWarning::NoRtc) => Some((t("ps.ww.no_rtc").to_string(), false)),
+        Some(WakeWarning::NoWakeAlarm) => Some((no_alarm(&w.rtc), false)),
+        Some(WakeWarning::LastArmFailed) => None,
+        Some(WakeWarning::Other) | None => w.warning.clone().map(|s| (s, true)),
+    };
+    let said = matches!(w.warning_code, Some(WakeWarning::NoRtc | WakeWarning::NoWakeAlarm));
+    let error = w.last_armed.as_ref().filter(|_| !said).and_then(|a| {
+        let e = a.error.clone()?;
+        Some(match a.error_code {
+            Some(WakeArmError::NoRtc) => (t("ps.ww.no_rtc").to_string(), None),
+            Some(WakeArmError::NoWakeAlarm) => (no_alarm(&a.rtc), None),
+            Some(WakeArmError::Failed | WakeArmError::Other) | None => (t("ps.arm_error").to_string(), Some(e)),
+        })
+    });
+    (warning, error)
+}
+
+fn wake_notes(w: &WakeSupport) -> (Option<AnyView>, Option<AnyView>) {
+    let (warning, error) = wake_texts(w);
+    let warning = warning.map(|(s, en)| view! { <span lang=en.then_some("en")>{s}</span> }.into_any());
+    let error = error.map(|(s, detail)| view! { <span class="err-text">{s}{detail.map(ui::tech_detail)}</span> }.into_any());
+    (warning, error)
+}
+
 fn kv(label: &'static str, value: AnyView) -> AnyView {
     view! { <div class="kv"><dt>{tr(label)}</dt><dd>{value}</dd></div> }.into_any()
 }
@@ -217,7 +251,7 @@ fn next_card(st: Remote<PowerScheduleState>) -> AnyView {
             (Some(ms), rtc) => text(format!("{}{}", i18n::datetime(ms), rtc.as_ref().map(|r| format!(" ({r})")).unwrap_or_default())),
             (None, _) => text(t("ps.not_armed").to_string()),
         };
-        let arm_error = n.wake.last_armed.as_ref().and_then(|a| a.error.clone());
+        let (warning, arm_error) = wake_notes(&n.wake);
         let boot = n.last_boot.as_ref().map(|b| {
             let key = match b.cause {
                 BootCause::ScheduledStartup => "ps.cause_scheduled",
@@ -240,8 +274,8 @@ fn next_card(st: Remote<PowerScheduleState>) -> AnyView {
                 <div class="ps-next-item"><Icon icon=icons::UNPLUG size=18 /><div><span class="muted small">{tr("ps.next_shutdown")}</span><div>{next(n.next_shutdown_ms, n.next_shutdown_rule.clone())}</div></div></div>
             </div>
             {s.pending.is_some().then(|| view! { <p class="sec-note"><Icon icon=icons::INFO size=16 />{t("ps.pending_note")}</p> })}
-            {n.wake.warning.clone().map(|w| view! { {ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {w} }.into_any())} })}
-            {arm_error.map(|e| view! { {ui::note(Tone::Err, icons::CIRCLE_X, view! { {tf("ps.arm_error", &[("e", &e)])} }.into_any())} })}
+            {warning.map(|w| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, w))}
+            {arm_error.map(|e| ui::note(Tone::Err, icons::CIRCLE_X, e))}
             <dl class="kvs">
                 {kv("ps.time_zone", text(n.time_zone.clone()))}
                 {kv("ps.wake_alarm", armed)}
@@ -508,6 +542,25 @@ fn editor(orig: Option<PowerRule>, rules: Signal<Vec<PowerRule>>, wake_ok: Signa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wake_warnings_are_translated_and_said_once() {
+        let failed = WakeArmed { error: Some("rtcwake: exit code 1".into()), error_code: Some(WakeArmError::Failed), ..Default::default() };
+        let mut w = WakeSupport {
+            supported: true,
+            rtc: Some("rtc0".into()),
+            last_armed: Some(failed),
+            warning: Some("the last arming of the wake alarm failed: rtcwake: exit code 1".into()),
+            warning_code: Some(WakeWarning::LastArmFailed),
+            ..Default::default()
+        };
+        assert_eq!(wake_texts(&w), (None, Some(("The wake alarm could not be set.".into(), Some("rtcwake: exit code 1".into())))));
+        w.warning_code = Some(WakeWarning::NoWakeAlarm);
+        assert_eq!(wake_texts(&w), (Some(("The clock rtc0 has no wake alarm: the NAS cannot start itself on schedule.".into(), false)), None));
+        // an older server: its English warning
+        w.warning_code = None;
+        assert_eq!(wake_texts(&w).0, Some((w.warning.clone().unwrap(), true)));
+    }
 
     fn rule(id: &str, action: PowerAction, days: &[Weekday], hour: u8, minute: u8) -> PowerRule {
         PowerRule { id: id.into(), enabled: true, action, days: days.to_vec(), hour, minute, shutdown: None }
