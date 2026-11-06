@@ -15,8 +15,9 @@
 //! eMMC is the machine's own storage), optical drives, and anything the kernel flags as
 //! removable. A drive is never listed when it holds a system mount point (`/`, `/boot*`,
 //! `/efi*`, `/home`, `/usr`, `/var`), an active swap, a RAID or LVM member, a filesystem of
-//! `/etc/fstab`, or when udev marks it `UDISKS_IGNORE=1` / `UDISKS_SYSTEM=1` / `SYNODEB_BOOT_FLASH=1` (plus the boot
-//! flash of some appliances, identified by its USB ids).
+//! `/etc/fstab`, or when udev marks it `UDISKS_IGNORE=1` / `UDISKS_SYSTEM=1` (the standard
+//! udisks properties), or when a hardware module names its USB ids as the machine's own boot
+//! flash ([`Scanner::with_system_usb_ids`]).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -211,10 +212,6 @@ fn pretty(s: &str) -> String {
         .join(" ")
 }
 
-/// USB vendor:product ids of internal boot flash modules that sit on the USB bus (they hold
-/// the firmware's boot loader and must never be powered off).
-const BOOT_FLASH_IDS: &[(&str, &str)] = &[("f400", "f400")];
-
 /// Filesystem types rynas mounts (when a driver or helper is installed).
 pub const KNOWN_FS: &[&str] = &[
     "vfat", "exfat", "ntfs", "ext2", "ext3", "ext4", "btrfs", "xfs", "f2fs", "hfsplus", "iso9660",
@@ -309,9 +306,18 @@ pub struct Scanner {
     drives: Vec<RemovableDrive>,
     last_written: HashMap<String, u64>,
     support: FsSupport,
+    /// USB vendor:product ids of the machine's own boot flash (from a hardware module).
+    system_usb_ids: Vec<(String, String)>,
 }
 
 impl Scanner {
+    /// USB `(vendor, product)` ids of internal boot flash modules on the USB bus (they hold the
+    /// firmware's boot loader and must never be powered off), given by a hardware module.
+    pub fn with_system_usb_ids(mut self, ids: Vec<(String, String)>) -> Self {
+        self.system_usb_ids = ids;
+        self
+    }
+
     pub fn new(tree: Tree) -> Self {
         let support = FsSupport::read(&tree);
         Self {
@@ -321,6 +327,7 @@ impl Scanner {
             drives: Vec::new(),
             last_written: HashMap::new(),
             support,
+            system_usb_ids: Vec::new(),
         }
     }
 
@@ -531,7 +538,8 @@ impl Scanner {
             return None;
         }
         if let (Some(v), Some(m)) = (props.get("ID_VENDOR_ID"), props.get("ID_MODEL_ID"))
-            && BOOT_FLASH_IDS
+            && self
+                .system_usb_ids
                 .iter()
                 .any(|(bv, bm)| v.eq_ignore_ascii_case(bv) && m.eq_ignore_ascii_case(bm))
         {
@@ -738,7 +746,7 @@ enum Vol {
 }
 
 fn ignored(props: &HashMap<String, String>) -> bool {
-    ["UDISKS_IGNORE", "UDISKS_SYSTEM", "SYNODEB_BOOT_FLASH"]
+    ["UDISKS_IGNORE", "UDISKS_SYSTEM"]
         .iter()
         .any(|k| props.get(*k).map(String::as_str) == Some("1"))
 }

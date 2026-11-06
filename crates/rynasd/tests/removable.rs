@@ -177,6 +177,7 @@ async fn env(auto_mount: bool, smb: bool) -> Env {
         notifier.clone(),
         settings,
         smb,
+        Vec::new(),
     );
     let _ = ops.removable.set(svc.clone());
     // the first reading (what the watcher does at start)

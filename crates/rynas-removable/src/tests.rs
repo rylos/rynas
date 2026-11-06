@@ -8,7 +8,9 @@ use crate::ops::{Ctx, Removable, RemovableError};
 use crate::{Scanner, Tree, mounts};
 
 fn scan(f: &Fixture) -> Vec<rynas_api_types::removable::RemovableDrive> {
-    Scanner::new(Tree::new(f.root())).tick(true)
+    Scanner::new(Tree::new(f.root()))
+        .with_system_usb_ids(vec![("f400".into(), "f400".into())])
+        .tick(true)
 }
 
 fn ctx<'a>(log: &'a dyn Fn(&str), hook: &'a dyn Fn(&str)) -> Ctx<'a> {
@@ -172,7 +174,7 @@ fn system_drives_are_never_listed() {
             uuid: "r1",
         },
     );
-    // the boot flash module of an appliance (USB ids f400:f400)
+    // the boot flash module of an appliance (USB ids f400:f400, named by its hardware module)
     f.usb_disk(
         "sdf",
         80,
@@ -201,10 +203,10 @@ fn system_drives_are_never_listed() {
         false,
     );
     f.put("/run/udev/data/b8:96", "E:ID_BUS=usb\nE:UDISKS_IGNORE=1\n");
-    // synodeb's udev rule marks the boot flash by property, whatever its USB ids
-    f.usb_disk("sdh", 112, "2-6", "Vendor", "Flash", "6", 128_000_000, 480, false);
-    f.put("/run/udev/data/b8:112", "E:ID_BUS=usb\nE:SYNODEB_BOOT_FLASH=1\n");
     assert!(scan(&f).is_empty(), "{:#?}", scan(&f));
+    // without the module's ids the appliance's flash is an ordinary USB disk
+    let plain = Scanner::new(Tree::new(f.root())).tick(true);
+    assert_eq!(plain.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["sdf"]);
 }
 
 #[test]

@@ -226,6 +226,7 @@ impl RemovableSvc {
         notifier: Arc<dyn Notifier>,
         settings: watch::Receiver<RemovableSettings>,
         smb: bool,
+        system_usb_ids: Vec<(String, String)>,
     ) -> Arc<Self> {
         let (scan_tx, scan_rx) = std::sync::mpsc::sync_channel::<ScanReq>(4);
         let root = svc.tree().root().to_path_buf();
@@ -233,7 +234,7 @@ impl RemovableSvc {
             .name("removable-scan".into())
             .stack_size(256 << 10)
             .spawn(move || {
-                let mut scanner = Scanner::new(Tree::new(root));
+                let mut scanner = Scanner::new(Tree::new(root)).with_system_usb_ids(system_usb_ids);
                 while let Ok(r) = scan_rx.recv() {
                     let drives = scanner.tick(r.force);
                     let _ = r.reply.send(drives);
