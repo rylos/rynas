@@ -361,6 +361,15 @@ dict! {
     "cfg.state_mismatch" => "Different", "Diverso";
     "cfg.state_missing_samba" => "No SMB account", "Senza account SMB";
     "cfg.state_missing_passwd" => "SMB account without user", "Account SMB senza utente";
+    "cfg.sd.samba_without_user" => "The SMB account {name} has no system user.", "L'account SMB {name} non ha un utente di sistema.";
+    "cfg.sd.user_unmanaged" => "{name} (UID {id}) was created outside rynas.", "{name} (UID {id}) è stato creato fuori da rynas.";
+    "cfg.sd.user_missing" => "{name} is in the configuration but not on the system.", "{name} è nella configurazione ma non nel sistema.";
+    "cfg.sd.user_mismatch" => "The account settings of {name} differ from the configuration.", "Le impostazioni dell'account {name} sono diverse dalla configurazione.";
+    "cfg.sd.user_without_samba" => "{name} has SMB access but no SMB account: set the password again.", "{name} ha accesso SMB ma nessun account SMB: imposta di nuovo la password.";
+    "cfg.sd.group_missing" => "The group {name} is in the configuration but not on the system.", "Il gruppo {name} è nella configurazione ma non nel sistema.";
+    "cfg.sd.group_unmanaged" => "The group {name} (GID {id}) was created outside rynas.", "Il gruppo {name} (GID {id}) è stato creato fuori da rynas.";
+    "cfg.sd.share_path_missing" => "{path} does not exist any more.", "{path} non esiste più.";
+    "cfg.sd.share_acl_differs" => "The permissions of {path} differ (group membership changed or edited by hand). Missing: {missing}. Unexpected: {extra}.", "I permessi di {path} sono diversi (appartenenza ai gruppi cambiata o modifica a mano). Mancanti: {missing}. Inattesi: {extra}.";
     "cfg.col_what" => "File or object", "File o oggetto";
     "cfg.col_key" => "Setting", "Impostazione";
     "cfg.col_state" => "State", "Stato";

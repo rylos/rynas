@@ -19,8 +19,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use rynas_api_types::{
-    LOCAL_ID_MAX, LOCAL_ID_MIN, LocalGroup, LocalUser, ShellAccess, StateDrift, StateDriftKind,
-    UsersConfig,
+    LOCAL_ID_MAX, LOCAL_ID_MIN, LocalGroup, LocalUser, ShellAccess, StateDrift, StateDriftArgs,
+    StateDriftCode, StateDriftKind, UsersConfig,
 };
 use rynas_config::{Applier, ApplyCtx, Invalid, ManagedFile};
 use serde_json::Value;
@@ -688,13 +688,13 @@ impl Applier for UsersDomain {
         let groups = self.accounts.groups()?;
         let samba = self.accounts.samba_users()?;
         let mut out = Vec::new();
-        let mut push = |object: String, kind: StateDriftKind, detail: String| {
-            out.push(StateDrift {
-                key: USERS_KEY.into(),
-                object,
-                kind,
-                detail,
-            })
+        let mut push = |object: String, kind: StateDriftKind, code, name: &str, id: Option<u32>| {
+            let args = StateDriftArgs {
+                name: Some(name.to_string()),
+                id,
+                ..Default::default()
+            };
+            out.push(crate::drift(USERS_KEY, object, kind, code, args))
         };
         if let Some(samba) = &samba {
             for s in samba {
@@ -702,7 +702,9 @@ impl Applier for UsersDomain {
                     push(
                         format!("user:{}", s.name),
                         StateDriftKind::MissingInPasswd,
-                        format!("Samba account {} has no Linux user", s.name),
+                        StateDriftCode::SambaWithoutUser,
+                        &s.name,
+                        None,
                     );
                 }
             }
@@ -718,7 +720,9 @@ impl Applier for UsersDomain {
                 push(
                     format!("user:{}", s.name),
                     StateDriftKind::Unmanaged,
-                    format!("{} (uid {}) was created outside rynas", s.name, s.uid),
+                    StateDriftCode::UserUnmanaged,
+                    &s.name,
+                    Some(s.uid),
                 );
             }
         }
@@ -727,7 +731,9 @@ impl Applier for UsersDomain {
                 push(
                     format!("user:{}", u.name),
                     StateDriftKind::Missing,
-                    format!("{} is configured but not in /etc/passwd", u.name),
+                    StateDriftCode::UserMissing,
+                    &u.name,
+                    None,
                 );
                 continue;
             };
@@ -735,10 +741,9 @@ impl Applier for UsersDomain {
                 push(
                     format!("user:{}", u.name),
                     StateDriftKind::Mismatch,
-                    format!(
-                        "{}: account attributes differ from the configuration",
-                        u.name
-                    ),
+                    StateDriftCode::UserMismatch,
+                    &u.name,
+                    None,
                 );
             }
             if u.smb
@@ -748,10 +753,9 @@ impl Applier for UsersDomain {
                 push(
                     format!("user:{}", u.name),
                     StateDriftKind::MissingInSamba,
-                    format!(
-                        "{} has SMB access but no Samba account: set the password again",
-                        u.name
-                    ),
+                    StateDriftCode::UserWithoutSamba,
+                    &u.name,
+                    None,
                 );
             }
         }
@@ -761,7 +765,9 @@ impl Applier for UsersDomain {
                 push(
                     format!("group:{}", g.name),
                     StateDriftKind::Missing,
-                    format!("group {} is configured but not in /etc/group", g.name),
+                    StateDriftCode::GroupMissing,
+                    &g.name,
+                    None,
                 );
             }
         }
@@ -770,7 +776,9 @@ impl Applier for UsersDomain {
                 push(
                     format!("group:{}", g.name),
                     StateDriftKind::Unmanaged,
-                    format!("group {} (gid {}) was created outside rynas", g.name, g.gid),
+                    StateDriftCode::GroupUnmanaged,
+                    &g.name,
+                    Some(g.gid),
                 );
             }
         }

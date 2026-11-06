@@ -637,8 +637,66 @@ pub struct StateDrift {
     /// What drifted, e.g. `user:alice`, `group:staff`, `share:photos`.
     pub object: String,
     pub kind: StateDriftKind,
-    /// Human-readable explanation.
+    /// Explanation in English (logs, CLI); the UI translates `detail_code`.
     pub detail: String,
+    /// The same explanation as `detail`, as a code with the values its text names in
+    /// `detail_args`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail_code: Option<StateDriftCode>,
+    #[serde(default, skip_serializing_if = "StateDriftArgs::is_empty")]
+    pub detail_args: StateDriftArgs,
+}
+
+/// Stable code of a [`StateDrift`] explanation; unknown codes of a newer server read as
+/// `other`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StateDriftCode {
+    /// The Samba account `name` has no Linux user.
+    SambaWithoutUser,
+    /// The user `name` (uid `id`) was created outside rynas.
+    UserUnmanaged,
+    /// The user `name` is configured but not on the system.
+    UserMissing,
+    /// The account attributes of `name` differ from the configuration.
+    UserMismatch,
+    /// The user `name` has SMB access but no Samba account.
+    UserWithoutSamba,
+    /// The group `name` is configured but not on the system.
+    GroupMissing,
+    /// The group `name` (gid `id`) was created outside rynas.
+    GroupUnmanaged,
+    /// The folder `path` of a share does not exist any more.
+    SharePathMissing,
+    /// The ACL of `path` differs: entries `missing`, entries `extra`.
+    ShareAclDiffers,
+    #[serde(other)]
+    Other,
+}
+
+/// Values named by a [`StateDriftCode`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct StateDriftArgs {
+    /// User, group or Samba account name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// uid or gid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// ACL entries the configuration wants and the system lacks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing: Vec<String>,
+    /// ACL entries the system has and the configuration does not.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra: Vec<String>,
+}
+
+impl StateDriftArgs {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// Document of the `system.hostname` key, body of `PUT /api/v1/system/hostname`.

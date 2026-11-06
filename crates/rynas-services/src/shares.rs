@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use rynas_api_types::{
     Access, PrincipalKind, Share, ShareWarning, ShareWarningArgs, ShareWarningCode, SharesConfig,
-    SmbPreset, SmbSettings, StateDrift, StateDriftKind,
+    SmbPreset, SmbSettings, StateDrift, StateDriftArgs, StateDriftCode, StateDriftKind,
 };
 use rynas_config::files::HEADER_PREFIX;
 use rynas_config::{Applier, ApplyCtx, Candidate, Invalid, ManagedFile};
@@ -952,12 +952,16 @@ impl Applier for SharesDomain {
         for s in &c.shares {
             let object = format!("share:{}", s.name);
             if !self.host.probe(&s.path).exists {
-                out.push(StateDrift {
-                    key: SHARES_KEY.into(),
+                out.push(crate::drift(
+                    SHARES_KEY,
                     object,
-                    kind: StateDriftKind::Missing,
-                    detail: format!("{} does not exist any more", s.path),
-                });
+                    StateDriftKind::Missing,
+                    StateDriftCode::SharePathMissing,
+                    StateDriftArgs {
+                        path: Some(s.path.clone()),
+                        ..Default::default()
+                    },
+                ));
                 continue;
             }
             if s.permissions.is_empty() {
@@ -967,17 +971,20 @@ impl Applier for SharesDomain {
             if let Some(have) = self.host.get_acl(&s.path)?
                 && have != want
             {
-                let extra: Vec<&String> = have.difference(&want).collect();
-                let missing: Vec<&String> = want.difference(&have).collect();
-                out.push(StateDrift {
-                    key: SHARES_KEY.into(),
+                let extra = have.difference(&want).cloned().collect();
+                let missing = want.difference(&have).cloned().collect();
+                out.push(crate::drift(
+                    SHARES_KEY,
                     object,
-                    kind: StateDriftKind::Mismatch,
-                    detail: format!(
-                        "ACL of {} differs (group membership changed or edited by hand): missing {:?}, unexpected {:?}",
-                        s.path, missing, extra
-                    ),
-                });
+                    StateDriftKind::Mismatch,
+                    StateDriftCode::ShareAclDiffers,
+                    StateDriftArgs {
+                        path: Some(s.path.clone()),
+                        missing,
+                        extra,
+                        ..Default::default()
+                    },
+                ));
             }
         }
         Ok(out)

@@ -3,7 +3,7 @@
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use rynas_api_types::{DriftReport, DriftStatus, RevisionDetail, RevisionSummary, StagedChanges, StateDriftKind, TaskStatus, error_codes};
+use rynas_api_types::{DriftReport, DriftStatus, RevisionDetail, RevisionSummary, StagedChanges, StateDrift, StateDriftCode, StateDriftKind, TaskStatus, error_codes};
 
 use crate::api::{self, ApiErr};
 use crate::config::{changed, diff_table, key_label};
@@ -14,6 +14,35 @@ use crate::ui::{self, Confirm, Notice, PageHeader, Remote, Tone, cell, confirm, 
 
 /// Revisions listed (the server keeps 200 / 365 days).
 const REVISIONS: u32 = 50;
+
+/// Why a system object drifted, translated from its code; the server's English text
+/// (`true`: mark it `lang="en"`) for codes this build does not know and older servers.
+fn drift_detail(s: &StateDrift) -> (String, bool) {
+    let a = &s.detail_args;
+    let key = match s.detail_code {
+        Some(StateDriftCode::SambaWithoutUser) => "cfg.sd.samba_without_user",
+        Some(StateDriftCode::UserUnmanaged) => "cfg.sd.user_unmanaged",
+        Some(StateDriftCode::UserMissing) => "cfg.sd.user_missing",
+        Some(StateDriftCode::UserMismatch) => "cfg.sd.user_mismatch",
+        Some(StateDriftCode::UserWithoutSamba) => "cfg.sd.user_without_samba",
+        Some(StateDriftCode::GroupMissing) => "cfg.sd.group_missing",
+        Some(StateDriftCode::GroupUnmanaged) => "cfg.sd.group_unmanaged",
+        Some(StateDriftCode::SharePathMissing) => "cfg.sd.share_path_missing",
+        Some(StateDriftCode::ShareAclDiffers) => "cfg.sd.share_acl_differs",
+        Some(StateDriftCode::Other) | None => return (s.detail.clone(), true),
+    };
+    let id = a.id.map(|n| n.to_string()).unwrap_or_default();
+    let list = |v: &[String]| if v.is_empty() { "—".to_string() } else { v.join(", ") };
+    let (missing, extra) = (list(&a.missing), list(&a.extra));
+    let args = [
+        ("name", a.name.as_deref().unwrap_or("")),
+        ("id", id.as_str()),
+        ("path", a.path.as_deref().unwrap_or("")),
+        ("missing", missing.as_str()),
+        ("extra", extra.as_str()),
+    ];
+    (tf(key, &args), false)
+}
 
 /// Text for a refused action; a 403 explains that administrators are needed.
 fn refusal(e: &ApiErr, forbidden_key: &'static str) -> String {
@@ -157,9 +186,10 @@ fn DriftCard(drift: Remote<DriftReport>) -> impl IntoView {
                 StateDriftKind::MissingInSamba => "cfg.state_missing_samba",
                 StateDriftKind::MissingInPasswd => "cfg.state_missing_passwd",
             };
+            let (detail, en) = drift_detail(s);
             let what = view! {
                 <span class="mono">{s.object.clone()}</span>
-                <span class="muted small cell-note">{s.detail.clone()}</span>
+                <span class="muted small cell-note" lang=en.then_some("en")>{detail}</span>
             }
             .into_any();
             drift_row(what, s.key.clone(), Tone::Warn, st, Vec::new())
@@ -334,4 +364,33 @@ fn RevisionDiff(id: u64) -> impl IntoView {
         .into_any()
     };
     detail.view(3, content)
+}
+
+#[cfg(test)]
+mod drift_tests {
+    use rynas_api_types::StateDriftArgs;
+
+    use super::*;
+
+    #[test]
+    fn drift_detail_is_translated_from_its_code() {
+        let mut s = StateDrift {
+            detail: "eve (uid 1500) was created outside rynas".into(),
+            detail_code: Some(StateDriftCode::UserUnmanaged),
+            detail_args: StateDriftArgs { name: Some("eve".into()), id: Some(1500), ..Default::default() },
+            ..Default::default()
+        };
+        assert_eq!(drift_detail(&s), ("eve (UID 1500) was created outside rynas.".into(), false));
+        s.detail_code = Some(StateDriftCode::ShareAclDiffers);
+        s.detail_args = StateDriftArgs { path: Some("/v/p".into()), extra: vec!["user:bob:r-x".into()], ..Default::default() };
+        assert_eq!(
+            drift_detail(&s).0,
+            "The permissions of /v/p differ (group membership changed or edited by hand). Missing: —. Unexpected: user:bob:r-x."
+        );
+        // older servers and unknown codes: the English text
+        s.detail_code = None;
+        assert_eq!(drift_detail(&s), (s.detail.clone(), true));
+        s.detail_code = Some(StateDriftCode::Other);
+        assert!(drift_detail(&s).1);
+    }
 }

@@ -574,6 +574,13 @@ fn user_lifecycle_and_password_transaction() {
             .iter()
             .any(|s| s.object == "user:alice" && s.kind == StateDriftKind::MissingInSamba)
     );
+    // each drift carries a code and the values of its English text
+    let eve = d.state.iter().find(|s| s.object == "user:eve").unwrap();
+    assert_eq!(eve.detail_code, Some(rynas_api_types::StateDriftCode::UserUnmanaged));
+    assert_eq!(eve.detail_args.name.as_deref(), Some("eve"));
+    assert_eq!(eve.detail_args.id, Some(1500));
+    assert_eq!(eve.detail, "eve (uid 1500) was created outside rynas");
+    assert!(d.state.iter().all(|s| s.detail_code.is_some() && !s.detail.is_empty()));
 
     // delete bob with his home, and the interns group
     let mut doc2 = doc.clone();
@@ -887,4 +894,35 @@ fn imported_users_keep_their_login_shell() {
         "{:?}",
         st.log
     );
+}
+
+#[test]
+fn drift_codes_keep_their_english_text() {
+    use rynas_api_types::{StateDriftArgs, StateDriftCode};
+    let a = StateDriftArgs {
+        path: Some("/volume1/photos".into()),
+        missing: vec!["group:staff:rwx".into()],
+        ..Default::default()
+    };
+    assert_eq!(
+        crate::drift_text(StateDriftCode::ShareAclDiffers, &a),
+        r#"ACL of /volume1/photos differs (group membership changed or edited by hand): missing ["group:staff:rwx"], unexpected []"#
+    );
+    let d = crate::drift(
+        SHARES_KEY,
+        "share:photos".into(),
+        StateDriftKind::Missing,
+        StateDriftCode::SharePathMissing,
+        a.clone(),
+    );
+    assert_eq!(d.detail, "/volume1/photos does not exist any more");
+    let j = serde_json::to_value(&d).unwrap();
+    assert_eq!(j["detail_code"], "share_path_missing");
+    assert_eq!(j["detail_args"]["path"], "/volume1/photos");
+    assert!(j["detail_args"].get("extra").is_none());
+    let back: rynas_api_types::StateDrift = serde_json::from_str(
+        r#"{"key":"k","object":"o","kind":"missing","detail":"x","detail_code":"new_thing"}"#,
+    )
+    .unwrap();
+    assert_eq!(back.detail_code, Some(StateDriftCode::Other));
 }
