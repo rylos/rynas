@@ -28,6 +28,11 @@ MemoryMax=256M
 # File manager workers (rynas-files-worker, one per request, at most 12 at once, and
 # the transfer jobs, two at a time) run in this cgroup too, with their threads.
 TasksMax=256
+# A worker that hits MemoryMax (a .tar.zst at "best" needs ~110 MB, two jobs run at once)
+# is killed by the kernel; the default OOMPolicy=stop would then stop rynasd and every task
+# with it. Keep the service running: the job fails, rynasd and the other tasks go on (if
+# rynasd itself is killed, its exit restarts the unit as usual).
+OOMPolicy=continue
 
 # /run/rynas (rynasd.sock; notify.sock, 0600 root, synodeb's notify forward) and
 # /var/lib/rynas (0700 root): auth/totp (TOTP secrets), config.db, tasks/ (task logs),
