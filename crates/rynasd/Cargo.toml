@@ -30,7 +30,9 @@ rynas-notify = { workspace = true, features = ["engine"] }
 rynas-btrfs.workspace = true
 rynas-scheduler.workspace = true
 rynas-hw.workspace = true
+# the Synology module (D-MODULE): registered at start only on its hardware or system layer
 rynas-hw-synology = { workspace = true, features = ["domain"] }
+rynas-module.workspace = true
 rynas-power.workspace = true
 jiff.workspace = true
 rynas-net.workspace = true

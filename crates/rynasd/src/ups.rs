@@ -18,15 +18,13 @@
 //!     generated once into `/etc/rynas/nut-upsd.secret` (root, 0600) and never logged. The
 //!     block is written (and upsd reloaded) only when a test runs and it is missing or
 //!     changed; a `[rynas]` user outside the block is an error, not overwritten.
-//! - **synodeb** (`/etc/synodeb/ups.conf` exists): rynas is the interface, synodeb the
-//!   executor (`docs/synodeb-integration.md`, S2–S4).
-//!   - `ups.safemode` owns `SAFEMODE_AFTER` and `PRE_SAFEMODE_TIMEOUT` of
-//!     `/etc/synodeb/ups.conf` (a `# BEGIN rynas ups` block; other assignments of the two
-//!     keys are dropped, the rest of the file stays synodeb's). `synodeb-ups` reads the file
-//!     at every event, so an apply needs no reload.
-//!   - `POST /v1/ups/test` runs `synodeb-ups test quick|deep|stop`.
-//!   - `POST /v1/ups/safe-mode` (root only, `rynasctl ups safe-mode <reason>` from
-//!     `/etc/synodeb/ups-pre-safemode.d/50-rynas`): the same [`stop_work`].
+//! - **a module's UPS layer** (`rynas_module::UpsLayer`, D-MODULE): a hardware module whose
+//!   system layer runs NUT itself. rynas is the interface, the layer the executor:
+//!   - `ups.safemode` writes the layer's policy file (`UpsLayer::render_policy`);
+//!   - `POST /v1/ups/test` runs the layer's test command;
+//!   - `POST /v1/ups/safe-mode` (root only, `rynasctl ups safe-mode <reason>` from the
+//!     layer's pre-shutdown hook): the same [`stop_work`];
+//!   - rynasd does not follow upsd: the layer shuts the system down.
 //!
 //! Either way the test runs as the task `ups.test`, which follows `ups.test.result` until the
 //! UPS reports an outcome. The UPS status itself is read from upsd by rynas-web (no root).
@@ -50,6 +48,7 @@ use rynas_api_types::ups::{
 };
 use rynas_api_types::{TaskStarted, TaskStatus};
 use rynas_config::files::{self, FileKind};
+use rynas_module::UpsLayer;
 use rynas_config::{Applier, ApplyCtx, Invalid, ManagedFile};
 use rynas_notify::Notifier;
 use rynas_notify::event::oneshot;
@@ -60,8 +59,6 @@ use crate::ops::{Error, Ops, Res, user};
 use crate::services::{docs, stage};
 
 pub const UPS_KEY: &str = "ups.safemode";
-/// synodeb's UPS configuration (its presence selects the synodeb backend).
-pub const UPS_CONF: &str = "/etc/synodeb/ups.conf";
 /// The policy file of the NUT backend (rynas-owned, read by [`watch`]).
 pub const NUT_POLICY: &str = "/etc/rynas/ups.conf";
 pub const NUT_CONF: &str = "/etc/nut/nut.conf";
@@ -69,13 +66,10 @@ pub const NUT_USERS: &str = "/etc/nut/upsd.users";
 /// Password of the rynas upsd user (root 0600).
 pub const NUT_SECRET: &str = "/etc/rynas/nut-upsd.secret";
 pub const NUT_USER: &str = "rynas";
-/// synodeb's UPS tool.
-pub const SYNODEB_UPS: &str = "/usr/sbin/synodeb-ups";
-/// Keys of the two settings in synodeb's file and in the rynas file.
-const SYNODEB_KEYS: (&str, &str) = ("SAFEMODE_AFTER", "PRE_SAFEMODE_TIMEOUT");
+/// Keys of the two settings in the rynas policy file.
 const NUT_KEYS: (&str, &str) = ("SHUTDOWN_AFTER", "STOP_TIMEOUT");
-/// Server-side bound of the pre-Safe Mode work of synodeb's hook (the hook's `rynasctl` waits
-/// 30 s, synodeb's `PRE_SAFEMODE_TIMEOUT` is 120 s by default for every hook together).
+/// Server-side bound of the pre-shutdown work asked by a module layer's hook (the hook's
+/// `rynasctl` waits 30 s; the layer's own budget for all its hooks is larger).
 pub const SAFE_MODE_BUDGET: Duration = Duration::from_secs(25);
 /// Longest wait for the outcome of a battery test.
 const QUICK_MAX: Duration = Duration::from_secs(5 * 60);
@@ -91,10 +85,10 @@ const PATH: &str = "/usr/sbin:/usr/bin:/sbin:/bin";
 // the configuration domain
 // ---------------------------------------------------------------------------------------------
 
-/// `ups.safemode`: the rynas block of `/etc/synodeb/ups.conf` (synodeb) or the rynas file
-/// `/etc/rynas/ups.conf` (NUT). Registered on every system: the file is harmless without NUT.
+/// `ups.safemode`: the module layer's policy file, or the rynas file `/etc/rynas/ups.conf`
+/// (NUT). Registered on every system: the file is harmless without NUT.
 pub struct UpsDomain {
-    pub synodeb: bool,
+    pub layer: Option<Arc<dyn UpsLayer>>,
 }
 
 fn settings_of(v: &Value) -> Result<UpsSettings, Invalid> {
@@ -121,18 +115,6 @@ pub fn normalize(s: UpsSettings) -> Result<UpsSettings, Invalid> {
         ));
     }
     Ok(s)
-}
-
-/// The lines of synodeb's block.
-pub fn render_block(s: &UpsSettings) -> String {
-    format!(
-        "# Safe Mode settings of the rynas UPS page (ups.safemode). NUT low battery and a\n\
-         # critical UPS (OB+LB) always start Safe Mode as well, whichever comes first.\n\
-         SAFEMODE_AFTER={}\n\
-         PRE_SAFEMODE_TIMEOUT={}\n",
-        s.safemode_after_s.unwrap_or(0),
-        s.pre_safemode_timeout_s
-    )
 }
 
 /// The rynas policy file of the NUT backend.
@@ -177,11 +159,6 @@ fn parse_keys(text: &str, (after, timeout): (&str, &str)) -> UpsSettings {
     s
 }
 
-/// The settings of synodeb's `ups.conf`.
-pub fn parse_conf(text: &str) -> UpsSettings {
-    parse_keys(text, SYNODEB_KEYS)
-}
-
 /// The settings of the rynas policy file.
 pub fn parse_policy(text: &str) -> UpsSettings {
     parse_keys(text, NUT_KEYS)
@@ -189,7 +166,7 @@ pub fn parse_policy(text: &str) -> UpsSettings {
 
 impl UpsDomain {
     fn path(&self) -> &'static str {
-        if self.synodeb { UPS_CONF } else { NUT_POLICY }
+        self.layer.as_ref().map_or(NUT_POLICY, |l| l.policy_path())
     }
 }
 
@@ -209,26 +186,17 @@ impl Applier for UpsDomain {
 
     fn render(&self, value: &Value, _ctx: &ApplyCtx) -> Result<Vec<ManagedFile>, String> {
         let s = settings_of(value).map_err(|e| e.message)?;
-        if !self.synodeb {
-            return Ok(vec![ManagedFile::whole(
-                NUT_POLICY,
-                render_policy(&s),
-                true,
-            )]);
-        }
-        let mut f = ManagedFile::block(UPS_CONF, "ups", render_block(&s));
-        if let FileKind::Block { drop_outside, .. } = &mut f.kind {
-            *drop_outside = vec!["SAFEMODE_AFTER=".into(), "PRE_SAFEMODE_TIMEOUT=".into()];
-        }
-        Ok(vec![f])
+        Ok(vec![match &self.layer {
+            Some(l) => l.render_policy(&s),
+            None => ManagedFile::whole(NUT_POLICY, render_policy(&s), true),
+        }])
     }
 
-    /// Both readers (synodeb-ups, rynasd's watcher) read the file at the next power event.
+    /// Both readers (the layer, rynasd's watcher) read the file at the next power event.
     fn reload(&self, _value: Option<&Value>, ctx: &ApplyCtx) -> Result<(), String> {
-        (ctx.log)(if self.synodeb {
-            "synodeb-ups reads ups.conf at its next event: no reload needed"
-        } else {
-            "rynasd reads /etc/rynas/ups.conf at the next power event: no reload needed"
+        (ctx.log)(match &self.layer {
+            Some(l) => l.policy_note(),
+            None => "rynasd reads /etc/rynas/ups.conf at the next power event: no reload needed",
         });
         Ok(())
     }
@@ -237,27 +205,21 @@ impl Applier for UpsDomain {
         let Some(text) = ctx.read(Path::new(self.path())) else {
             return Ok(None);
         };
-        let s = if self.synodeb {
-            parse_conf(&text)
-        } else {
-            parse_policy(&text)
+        let s = match &self.layer {
+            Some(l) => l.parse_policy(&text),
+            None => parse_policy(&text),
         };
         serde_json::to_value(s).map(Some).map_err(|e| e.to_string())
     }
 }
 
-/// Whether this machine runs synodeb's UPS layer (below the configuration root). The file,
-/// not the directory: the rynas package itself installs `/etc/synodeb/ups-pre-safemode.d/`.
-pub fn synodeb_present(root: &Path) -> bool {
-    files::under_root(root, Path::new(UPS_CONF)).is_file()
-}
-
-/// The backend of this machine: synodeb (fixed at start), else NUT when its configuration
-/// directory has `nut.conf` or `upsd.users` (checked at every call: NUT may come later).
-pub fn backend_of(root: &Path, synodeb: bool) -> UpsBackend {
+/// The backend of this machine: a module's layer (fixed at start), else NUT when its
+/// configuration directory has `nut.conf` or `upsd.users` (checked at every call: NUT may
+/// come later).
+pub fn backend_of(root: &Path, layer: Option<&dyn UpsLayer>) -> UpsBackend {
     let has = |p: &str| files::under_root(root, Path::new(p)).is_file();
-    if synodeb {
-        UpsBackend::Synodeb
+    if let Some(l) = layer {
+        l.backend()
     } else if has(NUT_CONF) || has(NUT_USERS) {
         UpsBackend::Nut
     } else {
@@ -370,14 +332,12 @@ pub struct Ups {
     /// Task Scheduler (its running units are stopped before the shutdown).
     pub protection: Option<Arc<crate::protection::Protection>>,
     pub notifier: Arc<dyn Notifier>,
-    /// synodeb's UPS layer is here (fixed at start: the domain writes its file).
-    pub synodeb: bool,
+    /// A module's UPS layer (fixed at start: the domain writes its file).
+    pub layer: Option<Arc<dyn UpsLayer>>,
     /// Configuration root: NUT's files, the policy and the upsd secret are below it.
     pub root: PathBuf,
-    /// `--dry-system`: synodeb tests, upsd reloads, unit stops and shutdowns are only logged.
+    /// `--dry-system`: layer tests, upsd reloads, unit stops and shutdowns are only logged.
     pub dry: bool,
-    /// The synodeb UPS tool.
-    pub synodeb_ups: PathBuf,
     /// upsd's address.
     pub upsd: String,
     /// Battery test commands are sent to upsd and the watcher runs (off under
@@ -389,7 +349,7 @@ pub struct Ups {
 
 impl Ups {
     pub fn backend(&self) -> UpsBackend {
-        backend_of(&self.root, self.synodeb)
+        backend_of(&self.root, self.layer.as_deref())
     }
 
     /// The applied settings as the executor reads them (NUT: the rynas policy file).
@@ -483,12 +443,6 @@ async fn settings_put(
     ))
 }
 
-/// The text after `ups: ` of `synodeb-ups test result`.
-pub fn result_text(out: &str) -> String {
-    let l = out.lines().next().unwrap_or("").trim();
-    l.split_once(": ").map_or(l, |(_, r)| r).trim().to_string()
-}
-
 /// Outcome of a battery test result: `None` while it runs.
 pub fn verdict(r: &str) -> Option<Result<(), String>> {
     let l = r.to_ascii_lowercase();
@@ -501,22 +455,15 @@ pub fn verdict(r: &str) -> Option<Result<(), String>> {
     }
 }
 
-fn synodeb_cmd(u: &Ups, arg: &str) -> Cmd {
-    Cmd::new(&u.synodeb_ups)
-        .args(["test", arg])
-        .env_clear()
-        .env("PATH", PATH)
-        .timeout(CMD_TIMEOUT)
-}
-
 /// The current `ups.test.result` (empty when the UPS does not report one).
 async fn current_result(u: &Ups) -> Result<String, String> {
-    if u.synodeb {
-        let o = synodeb_cmd(u, "result")
+    if let Some(l) = &u.layer {
+        let c = l.result_cmd();
+        let o = c
             .run(None, None)
             .await
-            .map_err(|e| format!("synodeb-ups test result: {e}"))?;
-        Ok(result_text(&o.stdout))
+            .map_err(|e| format!("{}: {e}", c.display()))?;
+        Ok(l.parse_result(&o.stdout))
     } else {
         let s = rynas_nut::read(&u.upsd).await;
         if s.link != UpsLink::Connected {
@@ -602,17 +549,18 @@ async fn nut_send(u: &Ups, ctx: &TaskCtx, kind: BatteryTest) -> Result<(), Strin
 }
 
 async fn send_test(u: &Ups, ctx: &TaskCtx, kind: BatteryTest) -> Result<(), String> {
-    if !u.synodeb {
+    let Some(l) = &u.layer else {
         return nut_send(u, ctx, kind).await;
-    }
+    };
+    let c = l.test_cmd(kind);
     let out = ctx
-        .run(&synodeb_cmd(u, kind.arg()))
+        .run(&c)
         .await
-        .map_err(|e| format!("synodeb-ups test {}: {e}", kind.arg()))?;
+        .map_err(|e| format!("{}: {e}", c.display()))?;
     if !out.success() {
         return Err(format!(
-            "synodeb-ups test {}: {}",
-            kind.arg(),
+            "{}: {}",
+            c.display(),
             out.stderr.trim().lines().last().unwrap_or("failed")
         ));
     }
@@ -620,11 +568,10 @@ async fn send_test(u: &Ups, ctx: &TaskCtx, kind: BatteryTest) -> Result<(), Stri
 }
 
 async fn run_test(u: Arc<Ups>, ctx: TaskCtx, kind: BatteryTest) -> Result<(), String> {
-    if u.dry && (u.synodeb || !u.talk_to_upsd) {
-        let how = if u.synodeb {
-            format!("synodeb-ups test {}", kind.arg())
-        } else {
-            format!("INSTCMD {}", kind.nut_cmd())
+    if u.dry && (u.layer.is_some() || !u.talk_to_upsd) {
+        let how = match &u.layer {
+            Some(l) => l.test_cmd(kind).display(),
+            None => format!("INSTCMD {}", kind.nut_cmd()),
         };
         ctx.log(&format!("dry system: would run {how}"));
         return Ok(());
@@ -706,28 +653,24 @@ async fn safe_mode(
     let u = ups(&st)?;
     let Json(req) = body?;
     if !valid_reason(&req.reason) {
-        return Err(Error::invalid("reason", "unknown Safe Mode reason"));
+        return Err(Error::invalid("reason", "unknown shutdown reason"));
     }
     Ok(Json(stop_work(&u, &req.reason, SAFE_MODE_BUDGET).await))
 }
 
-/// Before Safe Mode (synodeb) or the shutdown (NUT): records the reason as a critical
+/// Before the module layer's shutdown or rynasd's own (NUT): records the reason as a critical
 /// notification, cancels running rynas tasks and stops running scheduler units, within
 /// `budget`.
 pub async fn stop_work(u: &Arc<Ups>, reason: &str, budget: Duration) -> SafeModeReport {
     tracing::warn!("UPS {reason}: stopping rynas tasks");
-    let (title, body) = if u.synodeb {
-        (
-            format!("Safe Mode: {reason}"),
-            "The UPS started Safe Mode: rynas stops its running and scheduled tasks; services \
-             stop, volumes are unmounted and the NAS restarts when power is back.",
-        )
-    } else {
-        (
+    let (title, body) = match &u.layer {
+        Some(l) => l.stop_notice(reason),
+        None => (
             format!("UPS shutdown: {reason}"),
             "The system shuts down on UPS power: rynas stops its running and scheduled tasks \
-             first.",
-        )
+             first."
+                .into(),
+        ),
     };
     let mut ev = oneshot(
         NotifyCategory::Ups,
@@ -736,7 +679,7 @@ pub async fn stop_work(u: &Arc<Ups>, reason: &str, budget: Duration) -> SafeMode
         format!("ups:safemode:{reason}"),
         title,
     );
-    ev.body = body.into();
+    ev.body = body;
     u.notifier.emit(ev);
     tokio::time::timeout(budget, stop_everything(u, budget))
         .await
@@ -979,29 +922,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn conf_round_trip() {
-        let synodeb = "# synodeb\n#SAFEMODE_AFTER=0\nDRYRUN=0\nSAFEMODE_AFTER=300 # five\nPRE_SAFEMODE_TIMEOUT=\"90\"\n";
-        let s = parse_conf(synodeb);
-        assert_eq!(s.safemode_after_s, Some(300));
-        assert_eq!(s.pre_safemode_timeout_s, 90);
-        assert_eq!(parse_conf("SAFEMODE_AFTER=0\n"), UpsSettings::default());
-        let want = UpsSettings {
-            safemode_after_s: Some(600),
-            pre_safemode_timeout_s: 120,
-        };
-        let kind = FileKind::Block {
-            id: "ups".into(),
-            drop_outside: vec!["SAFEMODE_AFTER=".into(), "PRE_SAFEMODE_TIMEOUT=".into()],
-        };
-        let (text, _) = files::render_final(&kind, &render_block(&want), Some(synodeb));
-        assert!(text.contains("#SAFEMODE_AFTER=0\n"), "{text}");
-        assert!(text.contains("DRYRUN=0\n"));
-        assert!(!text.contains("=300"));
-        assert!(!text.contains("\"90\""));
-        assert_eq!(parse_conf(&text), want);
-    }
-
-    #[test]
     fn policy_round_trip() {
         let want = UpsSettings {
             safemode_after_s: Some(900),
@@ -1009,8 +929,6 @@ mod tests {
         };
         let text = render_policy(&want);
         assert_eq!(parse_policy(&text), want);
-        // the keys of one file are not read from the other
-        assert_eq!(parse_conf(&text), UpsSettings::default());
         assert_eq!(parse_policy("SHUTDOWN_AFTER=0\n").safemode_after_s, None);
     }
 
@@ -1037,7 +955,6 @@ mod tests {
 
     #[test]
     fn results() {
-        assert_eq!(result_text("ups: Done and passed\n"), "Done and passed");
         assert_eq!(verdict("In progress"), None);
         assert_eq!(verdict("Done and passed"), Some(Ok(())));
         assert!(verdict("Done and error").unwrap().is_err());
@@ -1048,12 +965,10 @@ mod tests {
     #[test]
     fn backends() {
         let d = tempfile::tempdir().unwrap();
-        assert_eq!(backend_of(d.path(), false), UpsBackend::NotInstalled);
-        assert_eq!(backend_of(d.path(), true), UpsBackend::Synodeb);
+        assert_eq!(backend_of(d.path(), None), UpsBackend::NotInstalled);
         std::fs::create_dir_all(d.path().join("etc/nut")).unwrap();
         std::fs::write(d.path().join("etc/nut/nut.conf"), "MODE=standalone\n").unwrap();
-        assert_eq!(backend_of(d.path(), false), UpsBackend::Nut);
-        assert!(!synodeb_present(d.path()));
+        assert_eq!(backend_of(d.path(), None), UpsBackend::Nut);
     }
 
     #[test]

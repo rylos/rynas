@@ -1,4 +1,4 @@
-//! Notification endpoints of the internal API, the synodeb forward socket and the
+//! Notification endpoints of the internal API, the hardware module forward socket and the
 //! background sources (finished tasks, periodic storage check).
 //!
 //! rynasd is the single owner of the engine ([`rynas_notify::engine`]). Public routes mirror
@@ -296,11 +296,13 @@ async fn rule_delete(State(st): State<St>, Path(n): Path<String>) -> Res<StatusC
     Ok(StatusCode::NO_CONTENT)
 }
 
-// ------------------------------------------------------------------- synodeb socket
+// ------------------------------------------------------------------- module forward socket
 
-/// The router of `/run/rynas/notify.sock` (S1): `POST /v1/notify` with synodeb's
-/// `notify` arguments as JSON or a form, `GET /v1/health`.
-pub fn socket_router(engine: Engine) -> Router {
+/// The router of `/run/rynas/notify.sock`, opened only when a hardware module provides an
+/// `EventForward` (D-MODULE): `POST /v1/notify` with a body the module parses, `GET
+/// /v1/health`.
+pub fn socket_router(engine: Engine, parser: Arc<dyn rynas_module::EventForward>) -> Router {
+    let max = parser.max_body();
     Router::new()
         .route("/v1/notify", post(forward))
         .route(
@@ -311,16 +313,17 @@ pub fn socket_router(engine: Engine) -> Router {
                 })
             }),
         )
-        .layer(DefaultBodyLimit::max(rynas_notify::synodeb::MAX_BODY))
+        .layer(DefaultBodyLimit::max(max))
         .fallback(|| async { Error::not_found("no such endpoint") })
         .layer(axum::middleware::from_fn(crate::error::json_errors))
-        .with_state(engine)
+        .with_state((engine, parser))
 }
 
-async fn forward(State(e): State<Engine>, h: HeaderMap, body: Bytes) -> Res<Response> {
+type ForwardState = (Engine, Arc<dyn rynas_module::EventForward>);
+
+async fn forward(State((e, f)): State<ForwardState>, h: HeaderMap, body: Bytes) -> Res<Response> {
     let ct = h.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok());
-    let (ev, force) =
-        rynas_notify::synodeb::parse_forward(ct, &body).map_err(Error::bad_request)?;
+    let (ev, force) = f.parse(ct, &body).map_err(Error::bad_request)?;
     let n = blocking(&e, move |e| e.ingest(ev, force)).await?;
     Ok((
         StatusCode::ACCEPTED,

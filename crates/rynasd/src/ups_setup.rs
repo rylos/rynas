@@ -20,11 +20,10 @@
 //!   then removed (the apply keeps a backup and rolls back on failure). Afterwards the driver
 //!   instances are resynced and `nut-driver`, `nut-server` and `nut-monitor` enabled and
 //!   restarted.
-//! - **synodeb** (`/etc/synodeb/ups.conf`): synodeb owns `/etc/nut`; rynas never writes it.
-//!   The test run is `synodeb-ups probe --driver D --port P --opt k=v … --timeout S`, the apply
-//!   `synodeb-ups setup --keep-password --driver …` (back to the default with
-//!   `--default-driver`). An older synodeb without them blocks the wizard
-//!   ([`UpsSetupBlock::SynodebTooOld`]). Kept in [`SynodebBackend`] only.
+//! - **a module's UPS layer** (`rynas_module::UpsLayer`, D-MODULE): the layer owns `/etc/nut`;
+//!   rynas never writes it. The test run and the apply are the layer's commands
+//!   ([`LayerBackend`]); a layer too old to set up drivers blocks the wizard
+//!   ([`UpsSetupBlock::ModuleTooOld`]).
 //!
 //! A running UPS driver holds the device: the detection reports `busy` unless the admin
 //! allowed stopping it (`stop_drivers`); stopped units are started again at the end.
@@ -44,6 +43,8 @@ use rynas_api_types::error_codes;
 use rynas_api_types::ups::*;
 use rynas_config::files::{self, FileKind};
 use rynas_config::{Applier, ApplyCtx, Invalid, ManagedFile};
+use rynas_module::UpsLayer;
+pub use rynas_module::ups::Runner;
 use rynas_nut::setup as nut;
 use rynas_tasks::{Cmd, CmdOutput};
 use serde_json::Value;
@@ -58,8 +59,6 @@ pub const NUT_USERS: &str = "/etc/nut/upsd.users";
 pub const UPSMON_CONF: &str = "/etc/nut/upsmon.conf";
 pub const MONITOR_USER: &str = "rynas-upsmon";
 pub const MONITOR_SECRET: &str = "/etc/rynas/nut-upsmon.secret";
-/// synodeb's saved driver choice (`UPS_DRIVER`, `UPS_PORT`, `UPS_OPTIONS`).
-pub const SYNODEB_DRIVER_CONF: &str = "/etc/synodeb/ups-driver.conf";
 pub const DRIVER_LIST: &str = "/usr/share/nut/driver.list";
 /// Where NUT installs its drivers: /usr/libexec/nut from NUT 2.8.2 (searched first), /lib/nut
 /// before (Debian bookworm, trixie with 2.8.1), /usr/lib/nut elsewhere.
@@ -77,12 +76,8 @@ const DRIVER_UNITS: &[&str] = &["nut-driver@*.service", "nut-driver.service"];
 // commands
 // ---------------------------------------------------------------------------------------------
 
-/// Runs the wizard's commands; the output comes back whatever the exit code. Tests and
-/// `--dry-system` use [`DryRunner`]; the apply's commands go through the configuration's
-/// `System` instead.
-pub trait Runner: Send + Sync {
-    fn run(&self, cmd: &Cmd) -> Result<CmdOutput, String>;
-}
+// The wizard's commands run through a [`Runner`]; tests and `--dry-system` use [`DryRunner`];
+// the apply's commands go through the configuration's `System` instead ([`SystemRunner`]).
 
 pub struct HostRunner;
 
@@ -94,10 +89,12 @@ impl Runner for HostRunner {
 
 /// `--dry-system`: nothing runs. Answers like a host with NUT 2.8.5 and the USB UPS
 /// `0925:1234` that only `nutdrv_qx` with the `armac` subdriver drives, so the whole wizard
-/// can be walked through on a test instance.
+/// can be walked through on a test instance. A module layer's own tool answers through its
+/// `UpsLayer::dry_output`.
 pub struct DryRunner {
     pub nut_version: &'static str,
     pub calls: Mutex<Vec<String>>,
+    pub layer: Option<Arc<dyn UpsLayer>>,
 }
 
 impl Default for DryRunner {
@@ -105,7 +102,17 @@ impl Default for DryRunner {
         Self {
             nut_version: "2.8.5",
             calls: Mutex::new(Vec::new()),
+            layer: None,
         }
+    }
+}
+
+/// The configuration's `System` as a [`Runner`] (an apply's import).
+pub struct SystemRunner<'a>(pub &'a dyn rynas_config::System);
+
+impl Runner for SystemRunner<'_> {
+    fn run(&self, cmd: &Cmd) -> Result<CmdOutput, String> {
+        self.0.run(cmd)
     }
 }
 
@@ -124,6 +131,9 @@ impl Runner for DryRunner {
         let line = cmd.display();
         tracing::info!("dry system: {line}");
         self.calls.lock().unwrap().push(line.clone());
+        if let Some(o) = self.layer.as_ref().and_then(|l| l.dry_output(cmd)) {
+            return Ok(o);
+        }
         let program = Path::new(cmd.program())
             .file_name()
             .map(|p| p.to_string_lossy().into_owned())
@@ -147,13 +157,6 @@ impl Runner for DryRunner {
                 "",
             ),
             "systemctl" => Self::out(0, "", ""),
-            "synodeb-ups" if line.contains("--help") => Self::out(
-                0,
-                "usage: synodeb-ups setup [--keep-password] [--no-stop] [--driver NAME [--port PORT] [--opt NAME[=VALUE]]...]\n",
-                "",
-            ),
-            "synodeb-ups" if armac => Self::out(0, ok_vars, ""),
-            "synodeb-ups" => Self::out(1, "", "Device not supported!\n"),
             _ if armac => Self::out(0, ok_vars, ""),
             "richcomm_usb" => Self::out(1, "", "driver callback failed: Entity not found\n"),
             _ => Self::out(1, "", "No supported UPS detected\n"),
@@ -169,10 +172,17 @@ fn cmd(program: impl AsRef<std::ffi::OsStr>) -> Cmd {
 // backends
 // ---------------------------------------------------------------------------------------------
 
-/// What differs between plain NUT and synodeb: the test run and the apply.
+/// What differs between plain NUT and a module's layer: the test run and the apply.
 pub trait SetupBackend: Send + Sync {
     /// Why the wizard cannot run (`None`: it can).
     fn blocked(&self) -> Option<UpsSetupBlock>;
+    /// The message of a block.
+    fn block_text(&self, b: UpsSetupBlock) -> &'static str {
+        match b {
+            UpsSetupBlock::NutMissing => "NUT is not installed (Debian package nut)",
+            UpsSetupBlock::ModuleTooOld => "the UPS layer cannot set up other UPS drivers",
+        }
+    }
     /// One test run of `d`.
     fn probe(&self, d: &UpsDevice, timeout: Duration) -> UpsProbe;
 }
@@ -214,7 +224,7 @@ pub fn installed_drivers(root: &Path) -> Vec<String> {
 
 impl SetupBackend for NutBackend<'_> {
     fn blocked(&self) -> Option<UpsSetupBlock> {
-        (backend_of(self.root, false) == UpsBackend::NotInstalled)
+        (backend_of(self.root, None) == UpsBackend::NotInstalled)
             .then_some(UpsSetupBlock::NutMissing)
     }
 
@@ -233,51 +243,27 @@ impl SetupBackend for NutBackend<'_> {
     }
 }
 
-/// synodeb: `synodeb-ups probe` and `synodeb-ups setup` (synodeb's interface, commit
-/// cfe7093). Everything synodeb-specific of the wizard is here.
-pub struct SynodebBackend<'a> {
-    pub tool: &'a Path,
+/// A module's UPS layer: its own test run.
+pub struct LayerBackend<'a> {
+    pub layer: &'a dyn UpsLayer,
     pub runner: &'a dyn Runner,
 }
 
-impl SynodebBackend<'_> {
-    /// `synodeb-ups setup --keep-password --driver D --port P --opt k=v …`, or back to
-    /// synodeb's default driver.
-    pub fn setup_cmd(tool: &Path, to: Option<&UpsDevice>) -> Cmd {
-        let mut c = Cmd::new(tool)
-            .env_clear()
-            .timeout(UNITS)
-            .args(["setup", "--keep-password"]);
-        c = match to {
-            Some(d) => c.args(nut::synodeb_args(d)),
-            None => c.arg("--default-driver"),
-        };
-        c
-    }
-}
-
-impl SetupBackend for SynodebBackend<'_> {
+impl SetupBackend for LayerBackend<'_> {
     fn blocked(&self) -> Option<UpsSetupBlock> {
-        let help = self
-            .runner
-            .run(&cmd(self.tool).args(["setup", "--help"]))
-            .map(|o| format!("{}{}", o.stdout, o.stderr))
-            .unwrap_or_default();
-        (!help.contains("--driver")).then_some(UpsSetupBlock::SynodebTooOld)
+        self.layer.setup_blocked(self.runner)
+    }
+
+    fn block_text(&self, b: UpsSetupBlock) -> &'static str {
+        match b {
+            UpsSetupBlock::ModuleTooOld => self.layer.too_old_message(),
+            UpsSetupBlock::NutMissing => "NUT is not installed (Debian package nut)",
+        }
     }
 
     fn probe(&self, d: &UpsDevice, timeout: Duration) -> UpsProbe {
-        let c = cmd(self.tool)
-            .arg("probe")
-            .args(nut::synodeb_args(d))
-            .args(["--timeout", &timeout.as_secs().to_string()])
-            .timeout(timeout + Duration::from_secs(15));
-        // exit 2: bad usage or unknown driver; 3: an active nut-driver holds the device
-        run_probe(self.runner, &c, timeout, |code| match code {
-            Some(2) => Some(UpsProbeState::NoDriver),
-            Some(3) => Some(UpsProbeState::Busy),
-            _ => None,
-        })
+        let c = self.layer.probe_cmd(d, timeout);
+        run_probe(self.runner, &c, timeout, |code| self.layer.probe_exit_state(code))
     }
 }
 
@@ -347,11 +333,8 @@ impl Setup {
 impl Ups {
     fn setup_backend(&self) -> Box<dyn SetupBackend + '_> {
         let runner = self.setup.runner.as_ref();
-        if self.synodeb {
-            Box::new(SynodebBackend {
-                tool: &self.synodeb_ups,
-                runner,
-            })
+        if let Some(layer) = self.layer.as_deref() {
+            Box::new(LayerBackend { layer, runner })
         } else {
             Box::new(NutBackend {
                 root: &self.root,
@@ -417,12 +400,7 @@ pub fn detect(
     now_ms: u64,
 ) -> Result<UpsDetectReport, String> {
     if let Some(b) = backend.blocked() {
-        return Err(match b {
-            UpsSetupBlock::NutMissing => "NUT is not installed (Debian package nut)".into(),
-            UpsSetupBlock::SynodebTooOld => {
-                "this synodeb cannot set up other UPS drivers yet: update synodeb".into()
-            }
-        });
+        return Err(backend.block_text(b).into());
     }
     let version = read_version(runner);
     let mut report = UpsDetectReport {
@@ -709,72 +687,12 @@ pub fn nut_commands(root: &Path, to: Option<&UpsDeviceConfig>) -> Vec<String> {
 
 /// `ups.device`: the UPS set up with the wizard.
 pub struct DeviceDomain {
-    pub synodeb: bool,
-    pub synodeb_ups: PathBuf,
+    pub layer: Option<Arc<dyn UpsLayer>>,
 }
 
 fn config_of(v: &Value) -> Result<UpsDeviceConfig, Invalid> {
     serde_json::from_value(v.clone())
         .map_err(|e| Invalid::from(format!("invalid ups.device document: {e}")))
-}
-
-/// The driver of `synodeb-ups status --json` (schema 1): `Some(None)` for synodeb's default
-/// driver, `None` when the output is not that document.
-pub fn parse_synodeb_status_json(text: &str) -> Option<Option<UpsDevice>> {
-    let v: Value = serde_json::from_str(text.trim()).ok()?;
-    let d = v.get("driver")?;
-    if d.get("default").and_then(Value::as_bool).unwrap_or(false) {
-        return Some(None);
-    }
-    let name = d.get("name")?.as_str()?.to_string();
-    let port = d.get("port").and_then(Value::as_str).unwrap_or("auto").to_string();
-    let options = d
-        .get("options")
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(Value::as_str)
-                .map(|w| match w.split_once('=') {
-                    Some((k, v)) => UpsOption::new(k, Some(v)),
-                    None => UpsOption::new(w, None),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    Some(Some(UpsDevice { driver: name, port, options }))
-}
-
-/// synodeb's saved choice (`UPS_DRIVER=`, `UPS_PORT=`, `UPS_OPTIONS='k=v flag …'`; values never hold spaces or quotes, commas are allowed).
-pub fn parse_synodeb_driver(text: &str) -> Option<UpsDevice> {
-    let mut driver = None;
-    let mut port = None;
-    let mut options = Vec::new();
-    for l in text.lines().map(str::trim).filter(|l| !l.starts_with('#')) {
-        let Some((k, v)) = l.split_once('=') else {
-            continue;
-        };
-        let v = v.trim().trim_matches(['"', '\'']);
-        match k.trim() {
-            "UPS_DRIVER" => driver = Some(v.to_string()).filter(|v| !v.is_empty()),
-            "UPS_PORT" => port = Some(v.to_string()).filter(|v| !v.is_empty()),
-            "UPS_OPTIONS" => {
-                options = v
-                    .split(' ')
-                    .filter(|w| !w.is_empty())
-                    .map(|w| match w.split_once('=') {
-                        Some((k, v)) => UpsOption::new(k, Some(v)),
-                        None => UpsOption::new(w, None),
-                    })
-                    .collect()
-            }
-            _ => {}
-        }
-    }
-    Some(UpsDevice {
-        driver: driver?,
-        port: port.unwrap_or_else(|| "auto".into()),
-        options,
-    })
 }
 
 /// Runs one of [`nut_commands`] through the configuration's `System`.
@@ -831,7 +749,7 @@ impl Applier for DeviceDomain {
     }
 
     fn render(&self, value: &Value, ctx: &ApplyCtx) -> Result<Vec<ManagedFile>, String> {
-        if self.synodeb {
+        if self.layer.is_some() {
             return Ok(Vec::new());
         }
         let c = config_of(value).map_err(|e| e.message)?;
@@ -849,21 +767,19 @@ impl Applier for DeviceDomain {
             Some(v) => Some(config_of(v).map_err(|e| e.message)?),
             None => None,
         };
-        if self.synodeb {
-            // a driver that failed before (synodeb's old setting) starts clean
+        if let Some(layer) = &self.layer {
+            // a driver that failed before (the layer's old setting) starts clean
             if let Some(c) = &to {
                 run_nut_command(
                     &format!("systemctl reset-failed nut-driver@{}.service", c.name),
                     ctx,
                 )?;
             }
-            let c = SynodebBackend::setup_cmd(&self.synodeb_ups, to.as_ref().map(|c| &c.device));
+            let c = layer.setup_cmd(to.as_ref().map(|c| &c.device));
             (ctx.log)(&format!("$ {}", c.display()));
             return ctx.system.run(&c).map(|_| ()).map_err(|e| {
                 if e.contains("unknown") || e.contains("usage") {
-                    format!(
-                        "{e} (this synodeb cannot set up other UPS drivers yet: update synodeb)"
-                    )
+                    format!("{e} ({})", layer.too_old_message())
                 } else {
                     e
                 }
@@ -876,17 +792,10 @@ impl Applier for DeviceDomain {
     }
 
     fn import(&self, ctx: &ApplyCtx) -> Result<Option<Value>, String> {
-        let c = if self.synodeb {
-            // `synodeb-ups status --json` (synodeb 4.5); the saved file on older versions
-            let json = ctx
-                .system
-                .run(&cmd(&self.synodeb_ups).args(["status", "--json"]))
-                .ok()
-                .and_then(|o| parse_synodeb_status_json(&o.stdout));
-            json.unwrap_or_else(|| {
-                ctx.read(Path::new(SYNODEB_DRIVER_CONF)).and_then(|t| parse_synodeb_driver(&t))
-            })
-            .map(|device| UpsDeviceConfig {
+        let c = if let Some(layer) = &self.layer {
+            layer
+                .current_device(&SystemRunner(ctx.system), &|p| ctx.read(p))
+                .map(|device| UpsDeviceConfig {
                     name: UPS_DEVICE_NAME.into(),
                     device,
                     take_over: Vec::new(),
@@ -942,10 +851,10 @@ fn mask(text: &str, password: &str) -> String {
 }
 
 /// What applying `c` does (no side effects; a missing upsmon password is not generated).
-pub fn plan(root: &Path, synodeb: bool, tool: &Path, c: &UpsDeviceConfig) -> UpsSetupPlan {
-    if synodeb {
+pub fn plan(root: &Path, layer: Option<&dyn UpsLayer>, c: &UpsDeviceConfig) -> UpsSetupPlan {
+    if let Some(l) = layer {
         return UpsSetupPlan {
-            commands: vec![SynodebBackend::setup_cmd(tool, Some(&c.device)).display()],
+            commands: vec![l.setup_cmd(Some(&c.device)).display()],
             ..Default::default()
         };
     }
@@ -1062,7 +971,7 @@ fn device_state(u: &Ups, owner: &str) -> Res<UpsDeviceState> {
         None => None,
     };
     let blocked = u.setup_backend().blocked();
-    let foreign = if u.synodeb || blocked.is_some() {
+    let foreign = if u.layer.is_some() || blocked.is_some() {
         Vec::new()
     } else {
         nut::mark_conflicts(
@@ -1093,18 +1002,15 @@ async fn device_get(State(st): State<UpsState>, hd: HeaderMap) -> Res<Json<UpsDe
 
 fn check_put(u: &Ups, c: &UpsDeviceConfig) -> Res<()> {
     nut::check_config(c).map_err(|(f, m)| Error::invalid(f, m))?;
-    if let Some(b) = u.setup_backend().blocked() {
+    let backend = u.setup_backend();
+    if let Some(b) = backend.blocked() {
         return Err(Error::new(
             StatusCode::CONFLICT,
             error_codes::CONFLICT,
-            match b {
-                UpsSetupBlock::NutMissing => "NUT is not installed (Debian package nut)",
-                UpsSetupBlock::SynodebTooOld => "update synodeb to set up other UPS drivers",
-            }
-            .into(),
+            backend.block_text(b).into(),
         ));
     }
-    if u.synodeb {
+    if u.layer.is_some() {
         return Ok(());
     }
     if !installed_drivers(&u.root).is_empty() && driver_path(&u.root, &c.device.driver).is_none() {
@@ -1154,7 +1060,7 @@ async fn plan_post(
     nut::check_config(&req).map_err(|(f, m)| Error::invalid(f, m))?;
     Ok(Json(
         blocking(&u, move |u| {
-            Ok(plan(&u.root, u.synodeb, &u.synodeb_ups, &req))
+            Ok(plan(&u.root, u.layer.as_deref(), &req))
         })
         .await?,
     ))
@@ -1485,84 +1391,118 @@ mod tests {
         assert_eq!(r.candidates[0].probe.state, UpsProbeState::NoDriver);
     }
 
-    #[test]
-    fn synodeb_status_json_driver() {
-        let custom = r#"{"schema":1,"ups":"ups@localhost","status":"OL","driver":{"name":"nutdrv_qx","port":"auto","options":["vendorid=0925","subdriver=armac","norating"],"default":false,"conf":"/etc/synodeb/ups-driver.conf"}}"#;
-        let dev = parse_synodeb_status_json(custom).unwrap().unwrap();
-        assert_eq!(dev.driver, "nutdrv_qx");
-        assert_eq!(dev.options.len(), 3);
-        let default = r#"{"schema":1,"driver":{"name":"usbhid-ups","port":"auto","options":[],"default":true,"conf":null}}"#;
-        assert!(parse_synodeb_status_json(default).unwrap().is_none());
-        assert!(parse_synodeb_status_json("driver: usbhid-ups").is_none());
+    /// A module layer of the tests: the tool `layer-ups` with `probe`, `setup` and `status`.
+    struct TestLayer {
+        old: bool,
+    }
+
+    const LAYER: &str = "/usr/sbin/layer-ups";
+
+    impl UpsLayer for TestLayer {
+        fn policy_path(&self) -> &'static str {
+            "/etc/layer/ups.conf"
+        }
+        fn render_policy(&self, s: &UpsSettings) -> ManagedFile {
+            ManagedFile::whole(
+                "/etc/layer/ups.conf",
+                format!("AFTER={}\n", s.safemode_after_s.unwrap_or(0)),
+                false,
+            )
+        }
+        fn parse_policy(&self, _text: &str) -> UpsSettings {
+            UpsSettings::default()
+        }
+        fn policy_note(&self) -> &'static str {
+            "read at the next event"
+        }
+        fn stop_notice(&self, reason: &str) -> (String, String) {
+            (format!("Layer stop: {reason}"), String::new())
+        }
+        fn test_cmd(&self, kind: BatteryTest) -> Cmd {
+            Cmd::new(LAYER).args(["test", kind.arg()])
+        }
+        fn result_cmd(&self) -> Cmd {
+            Cmd::new(LAYER).args(["test", "result"])
+        }
+        fn parse_result(&self, stdout: &str) -> String {
+            stdout.trim().into()
+        }
+        fn setup_blocked(&self, _runner: &dyn Runner) -> Option<UpsSetupBlock> {
+            self.old.then_some(UpsSetupBlock::ModuleTooOld)
+        }
+        fn too_old_message(&self) -> &'static str {
+            "update the layer"
+        }
+        fn probe_cmd(&self, d: &UpsDevice, timeout: Duration) -> Cmd {
+            Cmd::new(LAYER).args(["probe", &d.driver]).timeout(timeout)
+        }
+        fn probe_exit_state(&self, code: Option<i32>) -> Option<UpsProbeState> {
+            (code == Some(3)).then_some(UpsProbeState::Busy)
+        }
+        fn setup_cmd(&self, to: Option<&UpsDevice>) -> Cmd {
+            match to {
+                Some(d) => Cmd::new(LAYER).args(["setup", &d.driver]),
+                None => Cmd::new(LAYER).args(["setup", "--default"]),
+            }
+        }
+        fn current_device(
+            &self,
+            runner: &dyn Runner,
+            _read: &dyn Fn(&Path) -> Option<String>,
+        ) -> Option<UpsDevice> {
+            let o = runner.run(&Cmd::new(LAYER).arg("status")).ok()?;
+            o.success().then(|| UpsDevice {
+                driver: o.stdout.trim().into(),
+                port: "auto".into(),
+                options: Vec::new(),
+            })
+        }
     }
 
     #[test]
-    fn synodeb_probe_and_gate() {
-        let tool = Path::new("/usr/sbin/synodeb-ups");
-        let old = Fake {
-            rules: vec![(
-                "synodeb-ups",
-                "--help",
-                0,
-                "usage: synodeb-ups setup [--keep-password]\n",
-                "",
-            )],
-            calls: Mutex::new(Vec::new()),
-        };
-        assert_eq!(
-            SynodebBackend { tool, runner: &old }.blocked(),
-            Some(UpsSetupBlock::SynodebTooOld)
-        );
-        let new = Fake {
+    fn module_layer_probe_gate_and_plan() {
+        let fake = Fake {
             rules: vec![
-                (
-                    "synodeb-ups",
-                    "--help",
-                    0,
-                    "synodeb-ups setup [--keep-password] [--no-stop] [--driver NAME [--port PORT] [--opt NAME[=VALUE]]...]\n",
-                    "",
-                ),
-                (
-                    "synodeb-ups",
-                    "busy",
-                    3,
-                    "",
-                    "nut-driver@ups.service holds the device\n",
-                ),
-                ("synodeb-ups", "subdriver=armac", 0, OK_VARS, ""),
+                ("layer-ups", "probe nutdrv_qx", 0, OK_VARS, ""),
+                ("layer-ups", "probe usbhid-ups", 3, "", "held\n"),
             ],
             calls: Mutex::new(Vec::new()),
         };
-        let b = SynodebBackend { tool, runner: &new };
+        let old = TestLayer { old: true };
+        let b = LayerBackend {
+            layer: &old,
+            runner: &fake,
+        };
+        assert_eq!(b.blocked(), Some(UpsSetupBlock::ModuleTooOld));
+        let e = detect(
+            &b,
+            &fake,
+            &UpsDetectRequest::default(),
+            Duration::from_secs(5),
+            &|_| {},
+            &|_| {},
+            &|| false,
+            1,
+        )
+        .unwrap_err();
+        assert_eq!(e, "update the layer");
+        let layer = TestLayer { old: false };
+        let b = LayerBackend {
+            layer: &layer,
+            runner: &fake,
+        };
         assert_eq!(b.blocked(), None);
-        let d = nut::candidates(&nut::parse_scanner(SCAN)).remove(0).device;
-        let p = b.probe(&d, Duration::from_secs(45));
-        assert_eq!(p.state, UpsProbeState::Ok);
-        let line = new.calls.lock().unwrap().last().unwrap().clone();
-        assert_eq!(
-            line,
-            "/usr/sbin/synodeb-ups probe --driver nutdrv_qx --port auto --opt vendorid=0925 --opt productid=1234 --opt subdriver=armac --opt protocol=megatec --opt norating --opt pollfreq=30 --timeout 45"
-        );
+        let d = device_cfg().device;
+        assert_eq!(b.probe(&d, Duration::from_secs(5)).state, UpsProbeState::Ok);
         let busy = UpsDevice {
             driver: "usbhid-ups".into(),
-            port: "auto".into(),
-            options: vec![UpsOption::new("x", Some("busy"))],
+            ..d.clone()
         };
-        assert_eq!(
-            b.probe(&busy, Duration::from_secs(5)).state,
-            UpsProbeState::Busy
-        );
-        assert_eq!(
-            SynodebBackend::setup_cmd(tool, Some(&d)).display(),
-            "/usr/sbin/synodeb-ups setup --keep-password --driver nutdrv_qx --port auto --opt vendorid=0925 --opt productid=1234 --opt subdriver=armac --opt protocol=megatec --opt norating --opt pollfreq=30"
-        );
-        assert_eq!(
-            SynodebBackend::setup_cmd(tool, None).display(),
-            "/usr/sbin/synodeb-ups setup --keep-password --default-driver"
-        );
-        let saved = "UPS_DRIVER=nutdrv_qx\nUPS_PORT=auto\nUPS_OPTIONS='vendorid=0925 productid=1234 norating'\n";
-        let dev = parse_synodeb_driver(saved).unwrap();
-        assert_eq!(dev.options[2], UpsOption::new("norating", None));
+        assert_eq!(b.probe(&busy, Duration::from_secs(5)).state, UpsProbeState::Busy);
+        let root = tempfile::tempdir().unwrap();
+        let p = plan(root.path(), Some(&layer), &device_cfg());
+        assert_eq!(p.commands, ["/usr/sbin/layer-ups setup nutdrv_qx"]);
+        assert!(p.files.is_empty());
     }
 
     #[test]
@@ -1613,7 +1553,7 @@ mod tests {
 
     fn open(
         root: &Path,
-        synodeb: bool,
+        layer: Option<Arc<dyn UpsLayer>>,
     ) -> (
         tempfile::TempDir,
         rynas_config::Config,
@@ -1621,10 +1561,7 @@ mod tests {
     ) {
         let state = tempfile::tempdir().unwrap();
         let sys = Arc::new(rynas_config::MemorySystem::new("nas"));
-        let domains: Vec<Arc<dyn Applier>> = vec![Arc::new(DeviceDomain {
-            synodeb,
-            synodeb_ups: "/usr/sbin/synodeb-ups".into(),
-        })];
+        let domains: Vec<Arc<dyn Applier>> = vec![Arc::new(DeviceDomain { layer })];
         let cfg = rynas_config::Config::open(
             rynas_config::ConfigOptions::new(state.path(), root),
             sys.clone(),
@@ -1653,7 +1590,7 @@ mod tests {
             "",
         )
         .unwrap();
-        let (_s, cfg, sys) = open(root.path(), false);
+        let (_s, cfg, sys) = open(root.path(), None);
         cfg.stage(
             "admin",
             DEVICE_KEY,
@@ -1728,9 +1665,9 @@ mod tests {
         )
         .unwrap();
         std::fs::write(root.path().join("etc/nut/nut.conf"), "MODE=netserver\n").unwrap();
-        let (_s, cfg, _sys) = open(root.path(), false);
+        let (_s, cfg, _sys) = open(root.path(), None);
         let mut c = device_cfg();
-        let p = plan(root.path(), false, Path::new("x"), &c);
+        let p = plan(root.path(), None, &c);
         assert_eq!(p.conflicts, ["myups"]);
         cfg.stage("admin", DEVICE_KEY, Some(serde_json::to_value(&c).unwrap()))
             .unwrap();
@@ -1742,7 +1679,7 @@ mod tests {
                 .contains("[myups]")
         );
         c.take_over = vec!["myups".into()];
-        let p = plan(root.path(), false, Path::new("x"), &c);
+        let p = plan(root.path(), None, &c);
         assert!(p.conflicts.is_empty());
         let ups_file = p.files.iter().find(|f| f.path == NUT_UPS_CONF).unwrap();
         assert!(
@@ -1769,11 +1706,9 @@ mod tests {
     }
 
     #[test]
-    fn synodeb_apply_runs_its_setup_and_writes_nothing() {
+    fn module_layer_apply_runs_its_setup_and_writes_nothing() {
         let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(root.path().join("etc/synodeb")).unwrap();
-        std::fs::write(root.path().join("etc/synodeb/ups.conf"), "").unwrap();
-        let (_s, cfg, sys) = open(root.path(), true);
+        let (_s, cfg, sys) = open(root.path(), Some(Arc::new(TestLayer { old: false })));
         cfg.stage(
             "admin",
             DEVICE_KEY,
@@ -1783,6 +1718,7 @@ mod tests {
         apply(&cfg).unwrap();
         assert!(!root.path().join("etc/nut").exists());
         let calls = sys.state().calls.clone();
-        assert!(calls.iter().any(|c| c.starts_with("run /usr/sbin/synodeb-ups setup --keep-password --driver nutdrv_qx --port auto --opt vendorid=0925")), "{calls:?}");
+        assert!(calls.iter().any(|c| c == "run /usr/sbin/layer-ups setup nutdrv_qx"), "{calls:?}");
+        assert!(calls.iter().any(|c| c.contains("reset-failed nut-driver@ups.service")), "{calls:?}");
     }
 }

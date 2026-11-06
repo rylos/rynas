@@ -19,10 +19,11 @@
 //!   (`rynas-net-watchdog.timer`), synohwd's reset-button command, a confirmation from the
 //!   console. They work without rynasd (they read and write `/var/lib/rynas/net` under its
 //!   lock) and then ask rynasd to collect the notifications they queued.
-//! - `rynasctl ups safe-mode <reason>`: synodeb's pre-Safe Mode hook
-//!   (`/etc/synodeb/ups-pre-safemode.d/50-rynas`); rynasd cancels its tasks, stops running
-//!   scheduler units and records the reason. Always exits 0: Safe Mode must go on.
-//! - `rynasctl ups test quick|deep|stop`: a UPS battery test through rynasd (NUT or synodeb),
+//! - `rynasctl ups safe-mode <reason>`: the pre-shutdown hook of a hardware module's UPS layer
+//!   (the Synology module links it into synodeb's hooks); rynasd cancels its tasks, stops
+//!   running scheduler units and records the reason. Always exits 0: the shutdown must go on.
+//! - `rynasctl ups test quick|deep|stop`: a UPS battery test through rynasd (NUT or the
+//!   module layer),
 //!   followed to its outcome; the command of a scheduled battery test.
 //!
 //! Talks HTTP/1.1 to rynasd's socket (root is always allowed by `SO_PEERCRED`).
@@ -120,8 +121,8 @@ enum PowerCmd {
 
 #[derive(Subcommand, Debug)]
 enum UpsCmd {
-    /// Before UPS Safe Mode: stop rynas tasks gracefully and record the reason (synodeb's
-    /// lowbatt, waittimeup, nocomm, fsd, shutdowncmd).
+    /// Before a module layer's UPS shutdown: stop rynas tasks gracefully and record the reason
+    /// (lowbatt, waittimeup, nocomm, fsd, shutdowncmd).
     SafeMode { reason: String },
     /// Run a UPS battery test (quick, deep) or stop the running one (stop), and follow it to
     /// its outcome (for Task Scheduler tasks).

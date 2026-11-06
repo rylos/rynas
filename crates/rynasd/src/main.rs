@@ -70,19 +70,15 @@ struct Args {
     /// Screenshots only (with --dry-system): fake removable drives below --hw-root.
     #[arg(long, hide = true)]
     removable_demo: bool,
-    /// Socket on which synodeb's `notify` forwards its notifications (root only); empty
-    /// to disable.
+    /// Socket on which a hardware module's tools forward their notifications (root only),
+    /// opened only when a module provides a forward; empty to disable.
     #[arg(long, default_value = "/run/rynas/notify.sock", value_parser = path_or_empty)]
     notify_socket: PathBuf,
-    /// synodeb's notification settings, imported once into notification targets; empty to
-    /// skip the import.
-    #[arg(long, default_value = "/etc/synodeb/notify.conf", value_parser = path_or_empty)]
-    synodeb_notify_conf: PathBuf,
     /// Seconds between storage health checks (disks, arrays, btrfs errors, volume usage);
     /// 0 disables them.
     #[arg(long, default_value_t = 300)]
     storage_check_interval: u64,
-    /// Root of /sys, /proc and /run/synohwd for the hardware provider and the power
+    /// Root of /sys, /proc and /run for the hardware module and the power
     /// schedule (tests: a fake tree). Also passed to the generated rynas-power-wake.service.
     #[arg(long, default_value = "/")]
     hw_root: PathBuf,
@@ -181,10 +177,10 @@ struct Opened {
     homes: Arc<rynas_services::HomesDomain>,
     scheduler: Arc<SchedulerDomain>,
     snapshots: Arc<SnapshotsDomain>,
-    /// The Synology provider, when this machine is one.
+    /// The hardware modules of this machine (D-MODULE; none on a plain Debian).
+    modules: rynas_module::Modules,
+    /// The Synology hardware provider, when the Synology module found its hardware.
     synology: Option<Arc<rynas_hw_synology::Synology>>,
-    /// synodeb's UPS layer is here: `ups.safemode` writes its file.
-    ups_synodeb: bool,
     /// Applied `removable` settings, handed over by the domain.
     removable_settings: tokio::sync::watch::Receiver<rynas_api_types::removable::RemovableSettings>,
     /// The configuration root.
@@ -267,23 +263,17 @@ fn open_config(
         }),
         Arc::new(rynas_updates::AutoDomain),
     ];
-    // synology.hw only on a Synology (platform driver bound, DMI)
-    let synology = rynas_hw_synology::Synology::detect(&args.hw_root).map(Arc::new);
-    if let Some(s) = &synology {
-        tracing::info!("hardware: Synology {} (synohwd provider)", s.product());
-        domains.push(Arc::new(rynas_hw_synology::domain::SynologyDomain));
-    }
-    // ups.safemode: synodeb's ups.conf where synodeb runs the UPS, else the rynas policy
-    // file read by rynasd's NUT watcher
-    let ups_synodeb = rynasd::ups::synodeb_present(&root);
+    // hardware modules (D-MODULE): registered only where their hardware or system layer is
+    let (modules, synology) = detect_modules(args, &root);
+    domains.extend(modules.domains());
+    // ups.safemode: a module layer's policy file, else the rynas policy file read by rynasd's
+    // NUT watcher
+    let ups_layer = modules.ups();
     domains.push(Arc::new(rynasd::ups::UpsDomain {
-        synodeb: ups_synodeb,
+        layer: ups_layer.clone(),
     }));
-    // ups.device: the UPS set up with the wizard (rynas blocks of /etc/nut, or synodeb-ups)
-    domains.push(Arc::new(rynasd::ups_setup::DeviceDomain {
-        synodeb: ups_synodeb,
-        synodeb_ups: PathBuf::from(rynasd::ups::SYNODEB_UPS),
-    }));
+    // ups.device: the UPS set up with the wizard (rynas blocks of /etc/nut, or the layer's)
+    domains.push(Arc::new(rynasd::ups_setup::DeviceDomain { layer: ups_layer }));
     let (removable_domain, removable_settings) = rynasd::removable::RemovableDomain::new();
     let removable_tx = removable_domain.tx.clone();
     domains.push(Arc::new(removable_domain));
@@ -302,11 +292,32 @@ fn open_config(
         homes,
         scheduler,
         snapshots,
-        ups_synodeb,
+        modules,
         removable_settings,
         root,
         synology,
     })
+}
+
+/// The hardware modules of this machine. The Synology module is the only one today.
+fn detect_modules(
+    args: &Args,
+    root: &Path,
+) -> (
+    rynas_module::Modules,
+    Option<Arc<rynas_hw_synology::Synology>>,
+) {
+    let mut list: Vec<Arc<dyn rynas_module::Module>> = Vec::new();
+    let mut synology = None;
+    if let Some(m) = rynas_hw_synology::module::SynologyModule::detect(&args.hw_root, root) {
+        match &m.hardware {
+            Some(s) => tracing::info!("module synology: {} (synohwd provider)", s.product()),
+            None => tracing::info!("module synology: synodeb without Synology hardware"),
+        }
+        synology = m.hardware.clone();
+        list.push(Arc::new(m));
+    }
+    (rynas_module::Modules::new(list), synology)
 }
 
 fn read_passphrase(path: &Option<PathBuf>) -> std::io::Result<Option<String>> {
@@ -489,13 +500,13 @@ fn bind_socket(path: &Path, group: &str) -> std::io::Result<std::os::unix::net::
     Ok(l)
 }
 
-/// The synodeb forward socket: 0600, owned by rynasd's user (root in production).
 /// A path argument where "" is allowed and means "disabled" (clap's PathBuf parser refuses
 /// empty values).
 fn path_or_empty(s: &str) -> Result<PathBuf, std::convert::Infallible> {
     Ok(PathBuf::from(s))
 }
 
+/// The module forward socket: 0600, owned by rynasd's user (root in production).
 fn bind_notify_socket(path: &Path) -> std::io::Result<tokio::net::UnixListener> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -650,10 +661,9 @@ fn main() -> std::io::Result<()> {
             state.storage_lock.clone(),
             args.dry_system,
         )));
-        // notifications: engine, its loops, rynasd's own sources, the synodeb socket
+        // notifications: engine, its loops, rynasd's own sources, a module's forward socket
         let mut nopts = EngineOptions::new(args.state_dir.join("notify"), &running_hostname());
-        nopts.synodeb_conf = (!args.synodeb_notify_conf.as_os_str().is_empty())
-            .then(|| args.synodeb_notify_conf.clone());
+        nopts.imports = opened.modules.notify_imports();
         let engine = Engine::open(nopts)?;
         tokio::spawn(engine.clone().run());
         let notifier: Arc<dyn Notifier> = Arc::new(engine.clone());
@@ -686,10 +696,9 @@ fn main() -> std::io::Result<()> {
             ops: ops.clone(),
             protection: Some(protection.clone()),
             notifier: notifier.clone(),
-            synodeb: opened.ups_synodeb,
+            layer: opened.modules.ups(),
             root: opened.root.clone(),
             dry: args.dry_system,
-            synodeb_ups: PathBuf::from(rynasd::ups::SYNODEB_UPS),
             upsd: args
                 .upsd
                 .clone()
@@ -698,13 +707,16 @@ fn main() -> std::io::Result<()> {
             talk_to_upsd: !args.dry_system || args.upsd.is_some(),
             // --dry-system: the wizard's scans and test runs are simulated
             setup: rynasd::ups_setup::Setup::new(if args.dry_system {
-                Arc::new(rynasd::ups_setup::DryRunner::default())
+                Arc::new(rynasd::ups_setup::DryRunner {
+                    layer: opened.modules.ups(),
+                    ..Default::default()
+                })
             } else {
                 Arc::new(rynasd::ups_setup::HostRunner)
             }),
         });
-        // NUT backend: rynasd follows the UPS itself (synodeb-ups does it on synodeb)
-        if !ups.synodeb && ups.talk_to_upsd {
+        // NUT backend: rynasd follows the UPS itself (a module layer does it on its own)
+        if ups.layer.is_none() && ups.talk_to_upsd {
             tokio::spawn(rynasd::ups::watch(ups.clone()));
         }
         state.ups = Some(ups);
@@ -750,9 +762,10 @@ fn main() -> std::io::Result<()> {
         rynasd::network::spawn_event_flush(network.clone());
         state.network = Some(network);
         // rescue paths on by default: the Avahi file and, on a Synology, network rescue on
-        // the reset button (synology.hw, the only writer of synohwd.toml)
+        // the reset button (synology.hw, the only writer of synohwd.toml); the modules' hooks
         {
             let cfg = ops.config.clone();
+            let modules = opened.modules.clone();
             tokio::task::spawn_blocking(move || {
                 let key = rynas_net::rescue::RESCUE_KEY;
                 if matches!(cfg.applied(key), Ok(None)) {
@@ -766,6 +779,7 @@ fn main() -> std::io::Result<()> {
                         tracing::warn!("rescue paths: {e}");
                     }
                 }
+                modules.start(&|l| tracing::info!("{l}"));
                 match rynasd::hardware::adopt_synohwd_conf(&cfg) {
                     Ok(Some(rev)) => tracing::info!("synohwd settings adopted (revision {rev})"),
                     Ok(None) => {}
@@ -820,12 +834,14 @@ fn main() -> std::io::Result<()> {
                 host,
                 Some(rynasd::removable::names_file(&args.state_dir)),
             ));
+            let system_usb_ids = opened.modules.system_disk_usb_ids();
             let removable = rynasd::removable::RemovableSvc::new(
                 ops.clone(),
                 svc,
                 notifier.clone(),
                 opened.removable_settings.clone(),
                 samba,
+                system_usb_ids,
             );
             let _ = ops.removable.set(removable.clone());
             rynasd::removable::spawn_watch(removable.clone());
@@ -843,12 +859,13 @@ fn main() -> std::io::Result<()> {
                 std::time::Duration::from_secs(args.storage_check_interval),
             );
         }
-        if !args.notify_socket.as_os_str().is_empty() {
+        let forward = opened.modules.event_forward();
+        if let Some(forward) = forward.filter(|_| !args.notify_socket.as_os_str().is_empty()) {
             match bind_notify_socket(&args.notify_socket) {
                 Ok(l) => {
-                    // synodeb's notify runs as root (smartd, mdadm, synohwd, OnFailure units)
+                    // the module's tools run as root
                     let uids: HashSet<u32> = [0, Uid::effective().as_raw()].into();
-                    let app = rynasd::notifications::socket_router(engine);
+                    let app = rynasd::notifications::socket_router(engine, forward);
                     tokio::spawn(async move {
                         if let Err(e) = axum::serve(PeerCheckedListener::new(l, uids), app).await {
                             tracing::error!("notify socket: {e}");
@@ -856,7 +873,7 @@ fn main() -> std::io::Result<()> {
                     });
                 }
                 Err(e) => tracing::warn!(
-                    "notify socket {}: {e} (synodeb forwards disabled)",
+                    "notify socket {}: {e} (module forwards disabled)",
                     args.notify_socket.display()
                 ),
             }

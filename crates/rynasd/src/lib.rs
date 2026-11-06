@@ -7,7 +7,8 @@
 //! It is also the only writer of the configuration store (`/var/lib/rynas/config.db`,
 //! [`rynas_config`]) and runs the background tasks ([`rynas_tasks`], logs in
 //! `/var/lib/rynas/tasks/`). It owns the notification engine ([`rynas_notify::engine`],
-//! `/var/lib/rynas/notify/`) and listens for synodeb's `notify` forward on
+//! `/var/lib/rynas/notify/`) and, when a hardware module forwards its notifications
+//! (D-MODULE, [`rynas_module`]), listens on
 //! `/run/rynas/notify.sock` (root only). Network changes are transactions with a timed
 //! confirmation ([`network`], [`rynas_net`]).
 

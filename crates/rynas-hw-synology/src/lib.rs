@@ -10,7 +10,14 @@
 //! - [`model`]: DSM fan curves and bay counts per model, platform detection;
 //! - [`provider`]: [`provider::Synology`], implementing `rynas_hw::{HardwareProvider,
 //!   HardwareControl}` (built in today, a plugin process later);
-//! - `domain` (feature `domain`): the `synology.hw` configuration domain.
+//! - feature `domain` (rynasd only), the daemon side of the module: `domain` (the
+//!   `synology.hw` configuration domain), `ups` (synodeb's UPS layer), `notify` (synodeb's
+//!   `notify` forward and `notify.conf` import) and `module` ([`module::SynologyModule`], the
+//!   `rynas_module::Module` registered only on a Synology or where synodeb runs).
+//!
+//! Module boundary (D-MODULE): everything Synology- or synodeb-specific lives here or in the
+//! web interface's `modules/synology` folder; the core only knows the `rynas-hw` and
+//! `rynas-module` traits.
 
 pub mod cmd;
 pub mod conf;
@@ -18,7 +25,13 @@ pub mod conf;
 pub mod domain;
 pub mod leds;
 pub mod model;
+#[cfg(feature = "domain")]
+pub mod module;
+#[cfg(feature = "domain")]
+pub mod notify;
 pub mod provider;
 pub mod status;
+#[cfg(feature = "domain")]
+pub mod ups;
 
 pub use provider::Synology;

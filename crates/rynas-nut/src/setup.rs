@@ -10,7 +10,7 @@
 //!   on its own with `-s <id>` and `-x` options (no `ups.conf`), `-d 1` to print the data tree
 //!   once in upsc format and exit (NUT ≥ 2.8.0). It works when `ups.status` is reported.
 //! - **Values** are limited to characters that need no quoting anywhere (`ups.conf`, argv,
-//!   synodeb's `--opt NAME=VALUE`): [`check_device`].
+//!   a module layer's `--opt NAME=VALUE`): [`check_device`].
 //! - **`ups.conf`** sections of the admin's ([`sections`]) and which of them are in the way
 //!   of the UPS being set up ([`mark_conflicts`]); the rynas section ([`render_section`]).
 
@@ -21,7 +21,7 @@ use rynas_api_types::ups::{
 
 /// Test-run id of a driver started with `-s` (its pid file and socket in NUT's state dir).
 pub const PROBE_ID: &str = "rynasprobe";
-/// At most this many driver options (synodeb's limit too).
+/// At most this many driver options.
 pub const MAX_OPTIONS: usize = 32;
 /// Options set by the wizard's own fields, never as extra options.
 pub const RESERVED_OPTIONS: &[&str] = &["driver", "port", "desc"];
@@ -130,7 +130,8 @@ pub fn check_config(c: &UpsDeviceConfig) -> Result<(), (String, String)> {
 // command lines
 // ---------------------------------------------------------------------------------------------
 
-fn option_arg(o: &UpsOption) -> String {
+/// `name=value`, or `name` for a flag.
+pub fn option_arg(o: &UpsOption) -> String {
     match &o.value {
         Some(v) => format!("{}={v}", o.key),
         None => o.key.clone(),
@@ -150,21 +151,6 @@ pub fn driver_probe_args(d: &UpsDevice) -> Vec<String> {
         a.push(option_arg(o));
     }
     a.extend(["-d".into(), "1".into()]);
-    a
-}
-
-/// synodeb's driver arguments: `--driver D --port P --opt k=v …` (setup and probe).
-pub fn synodeb_args(d: &UpsDevice) -> Vec<String> {
-    let mut a = vec![
-        "--driver".into(),
-        d.driver.clone(),
-        "--port".into(),
-        d.port.clone(),
-    ];
-    for o in &d.options {
-        a.push("--opt".into());
-        a.push(option_arg(o));
-    }
     a
 }
 
@@ -656,11 +642,6 @@ mod tests {
             driver_probe_args(&c[0].device).join(" "),
             "-s rynasprobe -x port=auto -x vendorid=0925 -x productid=1234 -x subdriver=armac \
              -x protocol=megatec -x norating -x pollfreq=30 -d 1"
-        );
-        assert_eq!(
-            synodeb_args(&c[0].device).join(" "),
-            "--driver nutdrv_qx --port auto --opt vendorid=0925 --opt productid=1234 \
-             --opt subdriver=armac --opt protocol=megatec --opt norating --opt pollfreq=30"
         );
         let cfg = UpsDeviceConfig {
             name: "ups".into(),

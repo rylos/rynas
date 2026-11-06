@@ -58,7 +58,8 @@ pub struct DaemonState {
     pub hardware: crate::hardware::HwState,
     /// Networking (needs `ops`); `None` answers 503 on its endpoints.
     pub network: Option<Arc<crate::network::Network>>,
-    /// UPS Safe Mode settings, battery test, pre-Safe Mode hook (needs `ops`); `None`
+    /// UPS shutdown policy, battery test, setup wizard, a module layer's pre-shutdown hook
+    /// (needs `ops`); `None`
     /// answers 503 on its endpoints.
     pub ups: crate::ups::UpsState,
     /// System updates (needs `ops`); `None` answers 503 on its endpoints.

@@ -1,4 +1,5 @@
-//! synodeb integration (S1 in `docs/synodeb-integration.md`).
+//! Notifications of synodeb (S1 in `docs/synodeb-integration.md`), the module's
+//! `rynas_module::EventForward` and `notify_import`.
 //!
 //! - [`parse_forward`]: the body synodeb's `notify` posts to `/run/rynas/notify.sock`
 //!   (`POST /v1/notify`, JSON or `application/x-www-form-urlencoded`), mapped to a
@@ -10,13 +11,48 @@
 //!   invalid ones are dropped, never the notification.
 //! - [`import`]: `/etc/synodeb/notify.conf` (shell `KEY=value` lines, never sourced) turned
 //!   into targets and the minimum severity of an "Imported from synodeb" rule.
+//!
+//! The event codes (`synodeb.<event>`) have their texts in the web interface's Synology module
+//! dictionary (`crates/rynas-ui/src/modules/synology/i18n.rs`).
 
 use std::collections::BTreeMap;
 
 use rynas_api_types::notify::{SmtpSecurity, TargetConfig, TargetRequest};
+use rynas_notify::{
+    BodyFormat, EventState, ImportedSettings, NewEvent, NotifyCategory as Cat,
+    NotifySeverity as Sev,
+};
 use sha2::{Digest, Sha256};
 
-use crate::{BodyFormat, EventState, NewEvent, NotifyCategory as Cat, NotifySeverity as Sev};
+/// synodeb's notification settings.
+pub const NOTIFY_CONF: &str = "/etc/synodeb/notify.conf";
+/// Engine meta key of the one-time import (kept from before the module boundary).
+pub const IMPORT_KEY: &str = "synodeb_import";
+
+/// synodeb's `notify` forward (`rynas_module::EventForward`).
+pub struct Forward;
+
+impl rynas_module::EventForward for Forward {
+    fn max_body(&self) -> usize {
+        MAX_BODY
+    }
+
+    fn parse(&self, content_type: Option<&str>, body: &[u8]) -> Result<(NewEvent, bool), String> {
+        parse_forward(content_type, body)
+    }
+}
+
+/// `notify.conf` below `root` as settings to import once; `None` without the file.
+pub fn imported(root: &std::path::Path) -> Option<ImportedSettings> {
+    let text = std::fs::read_to_string(rynas_hw::under(root, NOTIFY_CONF)).ok()?;
+    let imp = import(&text, &|p| std::fs::read_to_string(rynas_hw::under(root, p)).ok());
+    Some(ImportedSettings {
+        key: IMPORT_KEY.into(),
+        rule_name: "Imported from synodeb".into(),
+        targets: imp.targets,
+        min_severity: imp.min_severity,
+    })
+}
 
 /// Largest body accepted on the socket.
 pub const MAX_BODY: usize = 64 << 10;
@@ -96,7 +132,7 @@ pub fn form_decode(body: &str) -> Vec<(String, String)> {
 }
 
 #[derive(serde::Deserialize, Default)]
-struct Forward {
+struct Body {
     title: String,
     #[serde(default)]
     message: String,
@@ -117,7 +153,7 @@ struct Forward {
     format: serde_json::Value,
 }
 
-impl Forward {
+impl Body {
     fn event(&self) -> &str {
         self.event.as_str().filter(|e| word_ok(e)).unwrap_or("")
     }
@@ -174,7 +210,7 @@ fn valid_fields(raw: impl IntoIterator<Item = (String, String)>) -> BTreeMap<Str
     out
 }
 
-/// synohwd notifications that are conditions of [`crate::checks::HardwareWatch`]: by event
+/// synohwd notifications that are conditions of `rynas_notify::checks::HardwareWatch`: by event
 /// code (`fan_failure`, `fans_ok`), or by title for senders without codes. synohwd sends
 /// with source `hw` (older builds: `synohwd`).
 pub fn synohwd_condition(
@@ -198,11 +234,11 @@ pub fn parse_forward(content_type: Option<&str>, body: &[u8]) -> Result<(NewEven
         return Err(format!("body over {MAX_BODY} bytes"));
     }
     let ct = content_type.unwrap_or("").to_ascii_lowercase();
-    let f: Forward = if ct.starts_with("application/json") {
+    let f: Body = if ct.starts_with("application/json") {
         serde_json::from_slice(body).map_err(|e| format!("JSON: {e}"))?
     } else if ct.starts_with("application/x-www-form-urlencoded") {
         let text = std::str::from_utf8(body).map_err(|_| "body is not UTF-8")?;
-        let mut f = Forward::default();
+        let mut f = Body::default();
         let mut fields = serde_json::Map::new();
         for (k, v) in form_decode(text) {
             match k.as_str() {

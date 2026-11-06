@@ -3324,11 +3324,26 @@ dependencies = [
  "rynas-api-types",
  "rynas-config",
  "rynas-hw",
+ "rynas-module",
+ "rynas-notify",
+ "rynas-nut",
+ "rynas-tasks",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "tempfile",
  "toml 1.2.0+spec-1.1.0",
  "tracing",
+]
+
+[[package]]
+name = "rynas-module"
+version = "0.1.0"
+dependencies = [
+ "rynas-api-types",
+ "rynas-config",
+ "rynas-notify",
+ "rynas-tasks",
 ]
 
 [[package]]
@@ -3546,6 +3561,7 @@ dependencies = [
  "rynas-http",
  "rynas-hw",
  "rynas-hw-synology",
+ "rynas-module",
  "rynas-net",
  "rynas-notify",
  "rynas-nut",

@@ -1,17 +1,21 @@
 [package]
 name = "rynas-hw-synology"
-description = "rynas hardware provider for Synology NAS running synodeb: synohwd status, settings (/etc/synohwd.toml), FIFO commands, bay identify, DSM fan curves"
+description = "rynas Synology module: synohwd hardware provider (status, /etc/synohwd.toml, FIFO commands, bay identify, fan curves) and, in rynasd, synodeb's UPS layer and notification forward"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
 [features]
-# The configuration domain (`synology.hw`, rynas-config) runs in rynasd only. Without it the
+# The daemon side of the module (the `synology.hw` configuration domain, synodeb's UPS layer
+# and notification forward, the `rynas_module::Module`) runs in rynasd only. Without it the
 # crate is the status parser, the model data, the commands and the provider, which rynas-web
 # uses for /api/v1/hardware without linking the configuration store.
 default = ["domain"]
-domain = ["dep:rynas-config", "dep:toml"]
+domain = [
+    "dep:rynas-config", "dep:toml", "dep:rynas-module", "dep:rynas-notify", "dep:rynas-nut",
+    "dep:rynas-tasks", "dep:sha2",
+]
 
 [dependencies]
 rynas-api-types.workspace = true
@@ -22,6 +26,11 @@ libc.workspace = true
 tracing.workspace = true
 rynas-config = { workspace = true, optional = true }
 toml = { workspace = true, optional = true }
+rynas-module = { workspace = true, optional = true }
+rynas-notify = { workspace = true, optional = true }
+rynas-nut = { workspace = true, optional = true }
+rynas-tasks = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true

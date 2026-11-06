@@ -1,4 +1,4 @@
-//! Notification endpoints of the internal API, the synodeb forward socket and rynasd's
+//! Notification endpoints of the internal API, the module forward socket and rynasd's
 //! own sources (TOTP changes, finished tasks).
 
 use std::sync::Arc;
@@ -450,10 +450,14 @@ async fn change_stream() {
 }
 
 #[tokio::test]
-async fn synodeb_socket() {
+/// The Synology module's forward (synodeb's `notify`) through the core socket.
+async fn module_forward_socket() {
     let dir = tempfile::tempdir().unwrap();
     let e = engine(dir.path());
-    let app = rynasd::notifications::socket_router(e.clone());
+    let app = rynasd::notifications::socket_router(
+        e.clone(),
+        std::sync::Arc::new(rynas_hw_synology::notify::Forward),
+    );
     let post = |ct: &'static str, body: &'static str| {
         let app = app.clone();
         async move {
