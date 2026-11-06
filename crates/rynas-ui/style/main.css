@@ -362,6 +362,7 @@ kbd {
 @media (max-width: 767px) {
   .usb-pop { position: fixed; left: var(--s-2); right: var(--s-2); top: calc(var(--appbar-h) + var(--s-2)); width: auto; }
   .usb-drive-head { flex-wrap: wrap; }
+  .usb-drive-text { min-width: 60%; }
   .usb-remove { margin-left: auto; }
 }
 
