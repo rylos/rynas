@@ -324,14 +324,20 @@ still well inside the 150 ms budget of a tool-backed GET, and every list is fres
 invalidate). To repeat on the NAS: a loop of `rynas-files-worker serve` with a request line, or
 `curl -w %{time_total}` against `/api/v1/files/list`.
 
-### Removable drives: a seam
+### Removable drives
 
-`rynasd::files::RemovableDrives` (`drive_of(mount) -> Option<Drive {id, name}>`,
-`safely_remove(id)`) is the only place the file manager learns about USB/eSATA drives: it fills
-`Share.removable`, `device` (= `Drive.id`) and `device_name`, and `POST eject {share}` calls
-`safely_remove`. The file manager detects and unmounts nothing itself; rynas's
-removable-drives module implements the trait and is wired with `Files::with_drives` at merge
-time. Until then (`NoDrives`) no share is removable and `eject` answers 501 `not_available`.
+`rynasd::files::RemovableDrives` is the only place the file manager learns about USB/eSATA
+drives; `rynasd::removable::FilesDrives` implements it on the removable-drives module
+(`../research/removable-drives.md`) and main wires it with `Files::with_drives`:
+- `drive_of(mount)`: a rynas share on a removable drive gets `removable`, `device` (the
+  drive's kernel name) and `device_name` (its title);
+- `mounted()`: every mounted removable volume no share covers is listed as a shared folder of
+  its own, named after its mount point's last component (`/media/STICK` → `STICK`, `-2`, `-3`
+  on a clash), so the app bar's Open goes to `/files/STICK`; access is the kernel's (the mount
+  options give the access group read-write);
+- `POST eject {share}` → `safely_remove(user, drive)`: starts the task `removable.remove`
+  (unmount everything on the drive, power it off); busy or unknown drives keep their 409/404.
+Without the module (`NoDrives`) nothing is removable and `eject` answers 501 `not_available`.
 
 ### Not done yet
 

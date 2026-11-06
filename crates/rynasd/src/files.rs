@@ -176,6 +176,33 @@ fn shares_for(files: &Files, user: &User) -> Res<(Vec<Share>, BTreeMap<String, S
             }
         })
         .collect();
+    // mounted removable volumes no share covers: one entry each, named after the mount point
+    for v in files.drives.mounted() {
+        if out.iter().any(|s| v.mount_point.starts_with(&s.path) || s.path.starts_with(&v.mount_point)) {
+            continue;
+        }
+        let base = v.mount_point.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if base.is_empty() || base.starts_with('.') {
+            continue;
+        }
+        let mut name = base.clone();
+        let mut n = 2;
+        while out.iter().any(|s| s.name.eq_ignore_ascii_case(&name)) {
+            name = format!("{base}-{n}");
+            n += 1;
+        }
+        let volume = v.mount_point.to_string_lossy().into_owned();
+        volumes.entry(volume.clone()).or_insert_with(|| if v.label.is_empty() { base.clone() } else { v.label.clone() });
+        out.push(Share {
+            name,
+            path: v.mount_point,
+            volume,
+            removable: true,
+            device: Some(v.drive.id),
+            device_name: Some(v.drive.name),
+            ..Default::default()
+        });
+    }
     out.sort_by_key(|s| s.name.to_lowercase());
     if user.home.is_dir() && user.home != Path::new("/") && !out.iter().any(|s| s.name == rynas_files::shares::HOME) {
         let mount = mount_of(&mounts, &user.home).unwrap_or_default();
@@ -217,15 +244,28 @@ pub trait RemovableDrives: Send + Sync {
     /// The removable drive holding `mount` (a mount point): its id (shares of one drive
     /// share it; what [`RemovableDrives::safely_remove`] takes) and its display name.
     fn drive_of(&self, mount: &Path) -> Option<Drive>;
-    /// Unmounts every volume of the drive and powers it off, so it can be unplugged. The
-    /// message of an error is shown to the user (English).
-    fn safely_remove(&self, drive: &str) -> Result<(), String>;
+    /// The mounted removable volumes: each is offered as a shared folder of its own (named
+    /// after its mount point's last component) when no rynas share already covers it.
+    fn mounted(&self) -> Vec<RemovableVolume> {
+        Vec::new()
+    }
+    /// Starts the safe removal of the drive (every volume unmounted, the drive powered off)
+    /// as the user `who`; refusals (busy, unknown drive) keep their status and code.
+    fn safely_remove(&self, who: &str, drive: &str) -> Res<()>;
 }
 
 /// A removable drive, as the file manager names it.
 pub struct Drive {
     pub id: String,
     pub name: String,
+}
+
+/// A mounted removable volume.
+pub struct RemovableVolume {
+    pub mount_point: PathBuf,
+    /// Volume label, empty when none.
+    pub label: String,
+    pub drive: Drive,
 }
 
 /// No removable-drives module.
@@ -235,8 +275,8 @@ impl RemovableDrives for NoDrives {
     fn drive_of(&self, _: &Path) -> Option<Drive> {
         None
     }
-    fn safely_remove(&self, _: &str) -> Result<(), String> {
-        Err("removable drives are not managed by this rynasd".into())
+    fn safely_remove(&self, _: &str, _: &str) -> Res<()> {
+        Err(Error::new(StatusCode::NOT_IMPLEMENTED, error_codes::NOT_AVAILABLE, "removable drives are not managed by this rynasd".into()))
     }
 }
 
@@ -586,7 +626,7 @@ fn eject(files: &Files, w: &Who, vpath: &str) -> Res<()> {
     if files.manager.busy(&w.user.name) {
         return Err(Error::new(StatusCode::CONFLICT, error_codes::BUSY, "transfers are still running".into()));
     }
-    files.drives.safely_remove(&drive).map_err(|e| Error::new(StatusCode::CONFLICT, error_codes::BUSY, e))?;
+    files.drives.safely_remove(&w.user.name, &drive)?;
     tracing::info!("{} ejected drive {drive} ({vpath})", w.user.name);
     Ok(())
 }

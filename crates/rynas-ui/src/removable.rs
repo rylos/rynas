@@ -65,10 +65,11 @@ fn pending_key(a: RemovableAction) -> &'static str {
     }
 }
 
-/// The file manager's route for a mount point: `/files/media/STICK`.
+/// The file manager's route for a mount point: the file manager lists a mounted volume as a
+/// shared folder named after the mount point's last component (`/media/STICK` → `/files/STICK`).
 pub fn files_href(mount_point: &str) -> String {
-    let segs: Vec<String> = mount_point.split('/').filter(|s| !s.is_empty()).map(pct).collect();
-    format!("/files/{}", segs.join("/"))
+    let last = mount_point.split('/').rfind(|s| !s.is_empty()).unwrap_or("");
+    format!("/files/{}", pct(last))
 }
 
 /// RFC 3986 percent-encoding of a path segment (everything but the unreserved characters).
@@ -555,7 +556,7 @@ mod tests {
 
     #[test]
     fn file_manager_route() {
-        assert_eq!(files_href("/media/My Stick"), "/files/media/My%20Stick");
-        assert_eq!(files_href("/media/SANDISK"), "/files/media/SANDISK");
+        assert_eq!(files_href("/media/My Stick"), "/files/My%20Stick");
+        assert_eq!(files_href("/media/SANDISK"), "/files/SANDISK");
     }
 }

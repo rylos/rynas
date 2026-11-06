@@ -1153,6 +1153,47 @@ pub fn names_file(state_dir: &std::path::Path) -> PathBuf {
     state_dir.join("removable").join("names.json")
 }
 
+/// The file manager's view of removable drives (`crate::files::RemovableDrives`): mounted
+/// volumes from the last scan, safe removal started as a task.
+pub struct FilesDrives {
+    svc: Arc<RemovableSvc>,
+    rt: tokio::runtime::Handle,
+}
+
+impl FilesDrives {
+    /// Must be called inside the runtime (it keeps a handle for the worker threads).
+    pub fn new(svc: Arc<RemovableSvc>) -> Self {
+        Self { svc, rt: tokio::runtime::Handle::current() }
+    }
+}
+
+impl crate::files::RemovableDrives for FilesDrives {
+    fn drive_of(&self, mount: &std::path::Path) -> Option<crate::files::Drive> {
+        let st = self.svc.state();
+        st.drives.iter().find_map(|d| {
+            d.volumes
+                .iter()
+                .any(|v| v.mount_point.as_deref().map(std::path::Path::new) == Some(mount))
+                .then(|| crate::files::Drive { id: d.name.clone(), name: d.title.clone() })
+        })
+    }
+
+    fn mounted(&self) -> Vec<crate::files::RemovableVolume> {
+        rynas_removable::mounts(&self.svc.state().drives)
+            .into_iter()
+            .map(|m| crate::files::RemovableVolume {
+                mount_point: PathBuf::from(m.mount_point),
+                label: m.label,
+                drive: crate::files::Drive { id: m.drive, name: m.device_name },
+            })
+            .collect()
+    }
+
+    fn safely_remove(&self, who: &str, drive: &str) -> Res<()> {
+        self.rt.block_on(start_remove(&self.svc, who, drive)).map(|_| ())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

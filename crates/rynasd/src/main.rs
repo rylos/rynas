@@ -760,12 +760,7 @@ fn main() -> std::io::Result<()> {
         } else {
             args.files_cache.clone()
         };
-        state.files = Some(Arc::new(rynasd::files::Files::new(
-            ops.clone(),
-            worker,
-            &args.state_dir.join("files"),
-            &cache,
-        )));
+        let files = rynasd::files::Files::new(ops.clone(), worker, &args.state_dir.join("files"), &cache);
         // removable drives: read below --hw-root; --dry-system only logs the actions
         {
             if args.removable_demo && args.dry_system && args.hw_root != Path::new("/") {
@@ -791,6 +786,10 @@ fn main() -> std::io::Result<()> {
             );
             let _ = ops.removable.set(removable.clone());
             rynasd::removable::spawn_watch(removable.clone());
+            // the file manager lists mounted removable volumes and ejects their drives
+            state.files = Some(Arc::new(
+                files.with_drives(Arc::new(rynasd::removable::FilesDrives::new(removable.clone()))),
+            ));
             state.removable = Some(removable);
         }
         state.ops = Some(ops);
