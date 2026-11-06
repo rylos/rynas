@@ -86,6 +86,8 @@ fn plan_view(p: &FolderDeletePlan) -> AnyView {
         {(!info.is_empty()).then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { <span>{tr("shares.del_used")}</span>{list(info)} }.into_any()))}
         {(!blockers.is_empty()).then(|| ui::note(Tone::Err, icons::CIRCLE_X, view! { <span>{tr("shares.del_blocked")}</span>{list(blockers)} }.into_any()))}
         {p.allowed.then(|| ui::note(Tone::Err, icons::TRIANGLE_ALERT, view! { <span>{tr("shares.del_irreversible")}</span> }.into_any()))}
+        // a share's folder goes inside the apply: a rollback restores the settings, not the files
+        {(p.allowed && p.share.is_some()).then(|| view! { <p class="small muted">{tr("shares.del_no_rollback")}</p> })}
     }
     .into_any()
 }

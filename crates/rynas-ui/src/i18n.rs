@@ -1406,6 +1406,7 @@ dict! {
     "shares.del_used" => "Also in use by:", "In uso anche da:";
     "shares.del_blocked" => "It cannot be deleted now:", "Ora non si può eliminare:";
     "shares.del_irreversible" => "This cannot be undone: the files and the snapshots cannot be recovered.", "L'operazione è irreversibile: i file e gli snapshot non si potranno recuperare.";
+    "shares.del_no_rollback" => "The folder is deleted when you apply the pending changes from the bar, at the end of the apply. If a later step of that apply fails and the previous settings are put back, the share comes back but its files and snapshots do not.", "La cartella viene eliminata quando applichi le modifiche in sospeso dalla barra, alla fine dell'applicazione. Se un passo successivo fallisce e le impostazioni precedenti vengono ripristinate, la condivisione torna ma i suoi file e snapshot no.";
     "shares.del_staged" => "Saved: the folder and its snapshots are deleted when you apply the changes", "Salvato: la cartella e i suoi snapshot vengono eliminati quando applichi le modifiche";
     "shares.size_min" => "at least {size}", "almeno {size}";
     "shares.use.nfs_export" => "the NFS export of {name} (removed with the share)", "l'esportazione NFS di {name} (rimossa con la condivisione)";
