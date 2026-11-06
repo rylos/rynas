@@ -8,6 +8,8 @@
 # build artifacts
 *.deb
 *.wasm
+# the HEIC decoder of the file manager is a vendored source file, not a build artifact
+!/crates/rynas-ui/files-app/vendor/libheif/libheif.wasm
 # editor and OS
 .idea/
 .vscode/

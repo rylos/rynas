@@ -1,0 +1,267 @@
+// Small pieces of interface shared by everything: toasts, the context
+// menu, modal dialogs and the folder picker.
+
+import { esc, isDirLike } from "./format.js";
+import { svg, FOLDER_GLYPH, shareGlyph } from "./icons.js";
+import { t } from "./i18n.js";
+import { api } from "./api.js";
+import { host, mount, realTarget, place } from "./host.js";
+
+// lookups start at the app inside the shadow root (document.querySelector cannot see it)
+export const $ = (sel, root = host.box) => root.querySelector(sel);
+export const $$ = (sel, root = host.box) => [...root.querySelectorAll(sel)];
+
+export function h(html) {
+  const tpl = document.createElement("template");
+  tpl.innerHTML = html.trim();
+  return tpl.content.firstElementChild;
+}
+
+// ---- toasts ----
+export function toast(message, { kind = "info", action, onAction, timeout = 4200 } = {}) {
+  const icon = kind === "error" ? "alert" : kind === "ok" ? "check" : "info";
+  const el = h(`<div class="toast ${kind}">${svg(icon)}<span class="msg">${esc(message)}</span>${action ? `<button>${esc(action)}</button>` : ""}</div>`);
+  $("#toasts").append(el);
+  const close = () => el.remove();
+  if (action) el.querySelector("button").onclick = () => {
+    close();
+    onAction?.();
+  };
+  setTimeout(close, timeout);
+  return close;
+}
+
+export function errorToast(e) {
+  toast(e?.message || String(e), { kind: "error", timeout: 6500 });
+}
+
+// ---- context menu ----
+let menuClose = null;
+
+/** items: {label, icon, key, action, danger, disabled} | "-" | {title} */
+export function openMenu(x, y, items) {
+  closeMenu();
+  const menu = $("#menu");
+  menu.innerHTML = "";
+  const buttons = [];
+  for (const item of items) {
+    if (!item) continue;
+    if (item === "-") {
+      menu.append(document.createElement("hr"));
+      continue;
+    }
+    if (item.title) {
+      menu.append(h(`<div class="mlabel">${esc(item.title)}</div>`));
+      continue;
+    }
+    const b = h(
+      `<button class="${item.danger ? "danger" : ""}" ${item.disabled ? "disabled" : ""}>${item.icon ? svg(item.icon) : '<span style="width:16px"></span>'}<span>${esc(item.label)}</span>${item.key ? `<span class="k">${esc(item.key)}</span>` : ""}</button>`,
+    );
+    b.onclick = () => {
+      closeMenu();
+      item.action?.();
+    };
+    menu.append(b);
+    buttons.push(b);
+  }
+  menu.hidden = false;
+  const r = menu.getBoundingClientRect();
+  place(menu, Math.max(4, Math.min(x, innerWidth - r.width - 6)), Math.max(4, Math.min(y, innerHeight - r.height - 6)));
+  let hot = -1;
+  const onKey = (e) => {
+    if (e.key === "Escape") return closeMenu(), e.preventDefault();
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      hot = (hot + (e.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
+      buttons.forEach((b, i) => b.classList.toggle("hot", i === hot));
+    }
+    if (e.key === "Enter" && hot >= 0) {
+      e.preventDefault();
+      buttons[hot].click();
+    }
+    e.stopPropagation();
+  };
+  const onDown = (e) => {
+    if (!menu.contains(realTarget(e))) closeMenu();
+  };
+  setTimeout(() => {
+    document.addEventListener("mousedown", onDown, true);
+    document.addEventListener("keydown", onKey, true);
+  });
+  menuClose = () => {
+    document.removeEventListener("mousedown", onDown, true);
+    document.removeEventListener("keydown", onKey, true);
+    menu.hidden = true;
+  };
+}
+
+export function closeMenu() {
+  menuClose?.();
+  menuClose = null;
+}
+
+// ---- dialogs ----
+export function dialog(html, { wide = false, cls = "" } = {}) {
+  const dlg = h(`<dialog class="dlg ${wide ? "wide" : ""} ${cls}" tabindex="-1">${html}</dialog>`);
+  mount(dlg);
+  dlg.addEventListener("close", () => setTimeout(() => dlg.remove(), 50));
+  dlg.addEventListener("keydown", (e) => e.stopPropagation());
+  dlg.showModal();
+  // no button should look pressed on opening; callers focus their fields
+  dlg.focus();
+  return dlg;
+}
+
+export function confirmBox({ title, message, items = [], ok = t("OK"), danger = false, icon = "alert", extra = "" }) {
+  return new Promise((resolve) => {
+    const list = items.length
+      ? `<div class="item-list">${items.slice(0, 50).map((i) => `<div>${i}</div>`).join("")}${items.length > 50 ? `<div>… ${t("e altri {n}", { n: items.length - 50 })}</div>` : ""}</div>`
+      : "";
+    const dlg = dialog(`
+      <div class="dlg-head"><div class="dlg-icon ${danger ? "danger" : ""}">${svg(icon)}</div><h2>${esc(title)}</h2></div>
+      <div class="dlg-body"><p>${message}</p>${list}${extra}</div>
+      <div class="dlg-foot"><button class="btn" value="no">${t("Annulla")}</button><button class="btn ${danger ? "danger" : "primary"}" value="ok">${esc(ok)}</button></div>`);
+    let result = false;
+    dlg.querySelectorAll(".dlg-foot button").forEach((b) => (b.onclick = () => {
+      result = b.value === "ok";
+      dlg.close();
+    }));
+    dlg.addEventListener("close", () => resolve(result ? dlg : null));
+    dlg.querySelector(".dlg-foot .btn:last-child").focus();
+  });
+}
+
+export function promptBox({ title, label, value = "", ok = t("OK"), select, icon = "rename", validate }) {
+  return new Promise((resolve) => {
+    const dlg = dialog(`
+      <form method="dialog">
+        <div class="dlg-head"><div class="dlg-icon">${svg(icon)}</div><h2>${esc(title)}</h2></div>
+        <div class="dlg-body"><label class="field"><span>${esc(label)}</span><input type="text" value="${esc(value)}" spellcheck="false" autocomplete="off"></label><div class="hint err"></div></div>
+        <div class="dlg-foot"><button type="button" class="btn cancel">${t("Annulla")}</button><button class="btn primary">${esc(ok)}</button></div>
+      </form>`);
+    const input = dlg.querySelector("input");
+    const err = dlg.querySelector(".err");
+    let result = null;
+    input.focus();
+    if (select) input.setSelectionRange(...select(value));
+    else input.select();
+    dlg.querySelector(".cancel").onclick = () => dlg.close();
+    dlg.querySelector("form").onsubmit = (e) => {
+      const v = input.value;
+      const problem = validate?.(v);
+      if (problem) {
+        e.preventDefault();
+        err.textContent = problem;
+        err.style.color = "var(--crit)";
+        return;
+      }
+      result = v;
+    };
+    dlg.addEventListener("close", () => resolve(result));
+  });
+}
+
+/**
+ * Lets the user choose a folder on the NAS: resolves its path or null. A
+ * click picks a folder of the list, a double click opens it; OK takes the
+ * one picked, else the folder shown.
+ */
+export function pickFolder({ title, start, ok }) {
+  return new Promise((resolve) => {
+    const dlg = dialog(`
+      <div class="dlg-head"><div class="dlg-icon">${svg("move")}</div><h2>${esc(title)}</h2></div>
+      <div class="dlg-body">
+        <div class="picker"><div class="picker-path"></div><div class="picker-list"></div></div>
+      </div>
+      <div class="dlg-foot"><div class="left"><button class="btn small mk">${svg("folderPlus")} ${t("Nuova cartella")}</button></div><button class="btn cancel">${t("Annulla")}</button><button class="btn primary ok">${esc(ok)}</button></div>`, { cls: "picker-dlg" });
+    let current = start && start !== "/" ? start : "/";
+    let picked = null;
+    let result = null;
+    let seq = 0;
+    const pathEl = dlg.querySelector(".picker-path");
+    const list = dlg.querySelector(".picker-list");
+    const okBtn = dlg.querySelector(".ok");
+    const showPath = () => {
+      const p = picked || current;
+      okBtn.disabled = p === "/";
+      pathEl.innerHTML = `${svg("drive")} ${esc(p === "/" ? t("Cartelle condivise") : p)}`;
+    };
+    async function go(path) {
+      const mine = ++seq;
+      current = path;
+      picked = null;
+      dlg.querySelector(".mk").disabled = path === "/";
+      showPath();
+      list.innerHTML = `<div class="hint" style="padding:8px">${t("Caricamento…")}</div>`;
+      try {
+        let rows = [];
+        if (path === "/") {
+          const { shares } = await api.shares();
+          if (mine !== seq) return;
+          rows = shares.filter((s) => s.writable).map((s) => ({ name: s.name, path: "/" + s.name, glyph: shareGlyph(s.name) }));
+          // the remote connections after the shared folders
+          const { conns } = await api.conns().catch(() => ({ conns: [] }));
+          if (mine !== seq) return;
+          rows.push(...conns.map((c) => ({ name: c.name, path: "/:" + c.id, glyph: svg("server") })));
+        } else {
+          const { entries } = await api.list(path);
+          if (mine !== seq) return;
+          rows = entries
+            .filter(isDirLike)
+            .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))
+            .map((e) => ({ name: e.name, path: path + "/" + e.name, glyph: FOLDER_GLYPH }));
+          rows.unshift({ name: "..", path: path.split("/").slice(0, -1).join("/") || "/", glyph: "", up: true });
+        }
+        list.innerHTML = "";
+        for (const r of rows) {
+          const b = h(`<button><i class="gi ez-dir">${r.glyph}</i><span>${esc(r.name)}</span></button>`);
+          b.ondblclick = () => go(r.path);
+          b.onclick = () => {
+            // ".." is a way up, not a folder to pick
+            if (r.up) return go(r.path);
+            const again = picked === r.path;
+            list.querySelectorAll("button.sel").forEach((x) => x.classList.remove("sel"));
+            picked = again ? null : r.path;
+            b.classList.toggle("sel", !again);
+            showPath();
+          };
+          list.append(b);
+        }
+        if (!rows.length) list.innerHTML = `<div class="hint" style="padding:8px">${t("Nessuna sottocartella")}</div>`;
+      } catch (e) {
+        if (mine === seq) list.innerHTML = `<div class="hint" style="padding:8px;color:var(--crit)">${esc(e.message)}</div>`;
+      }
+    }
+    dlg.querySelector(".mk").onclick = async () => {
+      const name = await promptBox({ title: t("Nuova cartella"), label: t("Nome"), value: t("Nuova cartella"), icon: "folderPlus" });
+      if (!name) return;
+      try {
+        await api.mkdir(current, name);
+        go(current + "/" + name);
+      } catch (e) {
+        errorToast(e);
+      }
+    };
+    dlg.querySelector(".cancel").onclick = () => dlg.close();
+    okBtn.onclick = () => {
+      result = picked || current;
+      dlg.close();
+    };
+    dlg.addEventListener("close", () => resolve(result));
+    go(current);
+  });
+}
+
+export async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const ta = h(`<textarea style="position:fixed;opacity:0"></textarea>`);
+    ta.value = text;
+    mount(ta);
+    ta.select();
+    document.execCommand("copy");
+    ta.remove();
+  }
+  toast(t("Copiato negli appunti"), { kind: "ok", timeout: 1800 });
+}
