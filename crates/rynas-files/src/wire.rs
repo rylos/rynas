@@ -234,8 +234,9 @@ impl From<io::Error> for ApiError {
         let status = match code {
             error_codes::NOT_FOUND => 404,
             error_codes::PERMISSION_DENIED => 403,
-            error_codes::INVALID_VALUE => 400,
-            error_codes::ALREADY_EXISTS | error_codes::READ_ONLY | error_codes::CONFLICT => 409,
+            error_codes::INVALID_VALUE | error_codes::REMOTE_AUTH_FAILED => 400,
+            error_codes::ALREADY_EXISTS | error_codes::READ_ONLY | error_codes::CONFLICT | error_codes::HOST_KEY_CHANGED | error_codes::BUSY => 409,
+            error_codes::TOOL_MISSING => 503,
             // a full volume or quota: retrying will not help
             error_codes::INSUFFICIENT_STORAGE => 507,
             error_codes::TIMEOUT => 504,

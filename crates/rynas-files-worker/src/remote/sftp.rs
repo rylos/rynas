@@ -55,8 +55,9 @@ impl russh::client::Handler for Check {
 
 /// Why a server's key was refused.
 fn unknown_key(expected: &str) -> io::Error {
-    io::Error::new(
+    rynas_files::fsops::coded(
         io::ErrorKind::PermissionDenied,
+        rynas_api_types::error_codes::HOST_KEY_CHANGED,
         if expected.is_empty() {
             t!("the server's key is not verified yet: open Edit connection and save")
         } else {
@@ -129,7 +130,7 @@ impl Sftp {
                     return Err(io::Error::new(
                         io::ErrorKind::PermissionDenied,
                         if conn.auth == "key" {
-                            t!("there is no SynoFile key yet: create it and add it to authorized_keys on the server")
+                            t!("there is no rynas key yet: create it and add it to authorized_keys on the server")
                         } else {
                             t!("load the private key, or paste it")
                         },
@@ -142,7 +143,7 @@ impl Sftp {
                 session.authenticate_password(&conn.user, &conn.password).await
             };
             if !auth.map_err(other)?.success() {
-                return Err(io::Error::new(io::ErrorKind::PermissionDenied, t!("the server refuses the login: wrong user name, password or key")));
+                return Err(rynas_files::fsops::coded(io::ErrorKind::PermissionDenied, rynas_api_types::error_codes::REMOTE_AUTH_FAILED, t!("the server refuses the login: wrong user name, password or key")));
             }
             let channel = session.channel_open_session().await.map_err(other)?;
             channel.request_subsystem(true, "sftp").await.map_err(other)?;

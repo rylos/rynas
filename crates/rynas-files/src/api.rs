@@ -485,7 +485,7 @@ mod tests {
 
     #[test]
     fn nested_folders_for_uploads() {
-        let dir = Path::new("/volume1/Foto");
+        let dir = Path::new("/srv/vol1/Photos");
         assert_eq!(nested(dir, "2024").unwrap(), dir.join("2024"));
         assert_eq!(nested(dir, "2024/Mare/giorno 1").unwrap(), dir.join("2024/Mare/giorno 1"));
         for bad in ["", "/2024", "2024/", "a//b", "a/../b", "..", "./a", "a/.", "a/ /b", "a/b\0c"] {

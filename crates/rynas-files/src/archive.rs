@@ -1,5 +1,5 @@
 //! Archives opened like folders: zip, 7z, rar and tar (plain or compressed)
-//! are listed with the tools DSM ships (7z, unrar, GNU tar) and single
+//! are listed with 7-Zip, unrar and GNU tar (optional packages) and single
 //! members are streamed out of them. Read-only: nothing is ever written
 //! into an archive.
 
@@ -145,7 +145,7 @@ fn read_members(archive: &Path, fmt: Format) -> Result<Vec<Member>, ApiError> {
             c
         }
     };
-    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| ApiError::new(500, t!("tool not available: {}", e)))?;
+    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| ApiError::new(503, t!("{} is not installed: {}", cmd.get_program().to_string_lossy(), e)).code(rynas_api_types::error_codes::TOOL_MISSING))?;
     let stdout = BufReader::new(child.stdout.take().unwrap());
     let stderr = child.stderr.take().unwrap();
     let errors = std::thread::spawn(move || {

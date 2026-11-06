@@ -40,6 +40,12 @@ pub struct Share {
     /// On a removable device (USB, SD, eSATA): it can be ejected.
     #[serde(default)]
     pub removable: bool,
+    /// The disk a removable share is on (`sdc`): shares of one disk are ejected together.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
+    /// The disk's vendor and model, as the interface names it ("SanDisk Ultra").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_name: Option<String>,
 }
 
 impl Share {

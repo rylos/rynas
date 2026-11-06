@@ -1,7 +1,7 @@
 //! What the info panel shows about a photo, a video or a song: size in
 //! pixels, duration, codecs, and the camera's EXIF (lens, exposure, place).
 //! EXIF and the tracks of MP4/MOV/MKV are read in Rust; codecs and bitrate
-//! come from DSM's own ffmpeg (/usr/bin/ffmpeg, part of DSM 7), asked only
+//! come from ffmpeg (/usr/bin/ffmpeg, optional: a Recommends of the package), asked only
 //! to describe the file. Without it those lines are just left out.
 
 use std::io::Read;

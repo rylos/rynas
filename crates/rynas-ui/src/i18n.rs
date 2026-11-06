@@ -1013,6 +1013,7 @@ dict! {
     "err.tool_missing" => "A program this feature needs is not installed.", "Un programma necessario a questa funzione non è installato.";
     "err.remote_unreachable" => "The remote server can't be reached.", "Il server remoto non è raggiungibile.";
     "err.remote_auth_failed" => "The remote server refused the login.", "Il server remoto ha rifiutato l'accesso.";
+    "err.not_available" => "This is not available on this system.", "Non è disponibile su questo sistema.";
     "err.host_key_changed" => "The server's key has changed since the first connection.", "La chiave del server è cambiata dalla prima connessione.";
     "err.generic" => "Something went wrong. Try again.", "Qualcosa è andato storto. Riprova.";
     "session.expires" => "Your session expires in {n} min", "La sessione scade tra {n} min";

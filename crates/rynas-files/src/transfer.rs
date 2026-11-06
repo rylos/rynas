@@ -406,7 +406,7 @@ pub fn receive(store: &mut impl UploadStore, up: &Upload, body: &mut dyn Read) -
     if up.offset == 0 {
         if let Some(t) = store.target()? {
             if t.dir {
-                return Err(ApiError::conflict(t!("is a folder")));
+                return Err(ApiError::exists(t!("is a folder")));
             }
             // a file of one chunk sent again because the answer was lost:
             // the same size and time is the one that just arrived
@@ -417,7 +417,7 @@ pub fn receive(store: &mut impl UploadStore, up: &Upload, body: &mut dyn Read) -
                 return Ok(UploadState { received: 0, done: true, skipped: true });
             }
             if !up.replaces() {
-                return Err(ApiError::conflict(t!("already exists")));
+                return Err(ApiError::exists(t!("already exists")));
             }
         }
         // only a file of several chunks leaves a hidden file when cut
@@ -446,7 +446,7 @@ pub fn receive(store: &mut impl UploadStore, up: &Upload, body: &mut dyn Read) -
     }
     store.commit(up.replaces()).map_err(|e| {
         store.remove_part();
-        if e.kind() == io::ErrorKind::AlreadyExists { ApiError::conflict(t!("already exists")) } else { ApiError::from(e) }
+        if e.kind() == io::ErrorKind::AlreadyExists { ApiError::exists(t!("already exists")) } else { ApiError::from(e) }
     })?;
     Ok(UploadState { received: up.total, done: true, skipped: false })
 }

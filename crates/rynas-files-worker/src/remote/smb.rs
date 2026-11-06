@@ -126,7 +126,7 @@ fn map(e: smb::Error) -> io::Error {
         0xC000_0034 | 0xC000_003A | 0xC000_00CC | 0xC000_0056 | 0xC000_000F => libc::ENOENT,
         0xC000_0022 | 0xC000_0061 => libc::EACCES,
         0xC000_006D | 0xC000_006E | 0xC000_0070 | 0xC000_0071 | 0xC000_0072 | 0xC000_0234 | 0xC000_0064 => {
-            return io::Error::new(io::ErrorKind::PermissionDenied, t!("the server refuses the login: wrong user name or password"));
+            return rynas_files::fsops::coded(io::ErrorKind::PermissionDenied, rynas_api_types::error_codes::REMOTE_AUTH_FAILED, t!("the server refuses the login: wrong user name or password"));
         }
         0xC000_0035 => libc::EEXIST,
         0xC000_0101 => libc::ENOTEMPTY,

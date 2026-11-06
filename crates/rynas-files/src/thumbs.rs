@@ -131,7 +131,8 @@ fn ffmpeg(file: &Path, width: u32, video: bool) -> Option<Vec<u8>> {
     let mut input = std::ffi::OsString::from("file:");
     input.push(file.as_os_str());
     let mut cmd = Command::new(FFMPEG);
-    cmd.args(["-hide_banner", "-nostdin", "-loglevel", "error"]);
+    // one thread: a grid asks for many thumbnails at once on a 4-core NAS
+    cmd.args(["-hide_banner", "-nostdin", "-loglevel", "error", "-threads", "1"]);
     if video {
         // past a black first frame
         cmd.args(["-ss", "2"]);

@@ -2,7 +2,7 @@
 //! interface draws in rings.
 //!
 //! Folders are read by a pool of threads sharing one queue, so a disk with
-//! many folders has several reads in flight. Synology's own folders (`@…`
+//! many folders has several reads in flight. System folders (`@…`
 //! and `#…` at the top of a shared folder, `@eaDir`, snapshots and the
 //! recycle bin anywhere) are left out, and a file with several hard links
 //! counts once. Nothing mounted below the folder is entered, as `du -x`:
@@ -32,7 +32,7 @@ const SHARE: u64 = 1500;
 const DEPTH: usize = 12;
 
 /// Left out of the analysis: thumbnails and indexes (`@eaDir`…),
-/// snapshots, the recycle bin and, at the top of a shared folder, DSM's own
+/// snapshots, the recycle bin and, at the top of a shared folder, system folders
 /// (`@tmp`, `@sharebin`…). Deeper down a `@` name is the user's (npm's
 /// `@scope` folders).
 pub fn skipped(name: &str, top: bool) -> bool {
@@ -277,7 +277,7 @@ mod tests {
 
     #[test]
     fn unescapes_mountinfo() {
-        assert_eq!(unescape("/volume1/a\\040b"), "/volume1/a b");
+        assert_eq!(unescape("/srv/vol1/a\\040b"), "/srv/vol1/a b");
         assert_eq!(unescape("/x\\"), "/x\\");
     }
 

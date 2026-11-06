@@ -68,7 +68,7 @@ pub fn entry(path: &Path, name: String, meta: &Metadata) -> Entry {
 }
 
 /// Whether a folder is the top of a read-only btrfs subvolume: a snapshot
-/// (btrbk's, DSM's #snapshot). Only subvolume tops (inode 256) are asked.
+/// (btrbk's, a `#snapshot` folder). Only subvolume tops (inode 256) are asked.
 fn readonly_subvolume(path: &Path, meta: &Metadata) -> bool {
     const BTRFS_FIRST_FREE_OBJECTID: u64 = 256;
     // _IOR(0x94, 25, u64)
@@ -169,7 +169,7 @@ pub fn details(path: &Path) -> Result<Details, ApiError> {
 
 pub fn mkdir(path: &Path) -> Result<(), ApiError> {
     fs::create_dir(path).map_err(|e| {
-        if e.kind() == io::ErrorKind::AlreadyExists { ApiError::conflict(t!("an item with this name already exists")) } else { e.into() }
+        if e.kind() == io::ErrorKind::AlreadyExists { ApiError::exists(t!("an item with this name already exists")) } else { e.into() }
     })
 }
 
@@ -207,7 +207,7 @@ fn same_file(a: &Path, b: &Path) -> bool {
 
 pub fn rename(from: &Path, to: &Path) -> Result<(), ApiError> {
     rename_noreplace(from, to).map_err(|e| {
-        if e.kind() == io::ErrorKind::AlreadyExists { ApiError::conflict(t!("an item with this name already exists")) } else { e.into() }
+        if e.kind() == io::ErrorKind::AlreadyExists { ApiError::exists(t!("an item with this name already exists")) } else { e.into() }
     })
 }
 
@@ -356,6 +356,9 @@ pub fn space(path: &Path) -> Option<(u64, u64)> {
 /// list of a job.
 pub fn io_code(e: &io::Error) -> &'static str {
     use rynas_api_types::error_codes as c;
+    if let Some(coded) = e.get_ref().and_then(|r| r.downcast_ref::<Coded>()) {
+        return coded.code;
+    }
     match e.raw_os_error() {
         Some(libc::EACCES) | Some(libc::EPERM) => c::PERMISSION_DENIED,
         Some(libc::ENOENT) => c::NOT_FOUND,
@@ -375,6 +378,27 @@ pub fn io_code(e: &io::Error) -> &'static str {
             _ => c::INTERNAL,
         },
     }
+}
+
+/// An I/O error that knows its rynas error code (a server refusing the login, a changed
+/// host key): [`io_code`] reads it back.
+#[derive(Debug)]
+pub struct Coded {
+    pub code: &'static str,
+    pub message: String,
+}
+
+impl std::fmt::Display for Coded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Coded {}
+
+/// `io::Error` of `kind` with a rynas error `code` and an English message.
+pub fn coded(kind: io::ErrorKind, code: &'static str, message: String) -> io::Error {
+    io::Error::new(kind, Coded { code, message })
 }
 
 /// An I/O error in words (English) for the message next to the code.

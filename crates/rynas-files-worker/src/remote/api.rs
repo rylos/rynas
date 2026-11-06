@@ -149,7 +149,7 @@ fn route(req: &Request, out: &mut impl Write, conns: &[Conn], vpath: &str) -> Re
                 let mut path = parts;
                 path.push(name.to_string());
                 fs.mkdir(&path).map_err(|e| {
-                    if e.raw_os_error() == Some(libc::EEXIST) { ApiError::conflict(t!("an item with this name already exists")) } else { e.into() }
+                    if e.raw_os_error() == Some(libc::EEXIST) { ApiError::exists(t!("an item with this name already exists")) } else { e.into() }
                 })?;
             }
             reply(out, &json!({ "ok": true }))

@@ -338,6 +338,9 @@ pub mod error_codes {
     /// File manager: an SFTP server presented a key other than the one pinned at the first
     /// connection (409).
     pub const HOST_KEY_CHANGED: &str = "host_key_changed";
+    /// The feature is not available on this system (501), e.g. ejecting a drive when no
+    /// removable-drives module is present.
+    pub const NOT_AVAILABLE: &str = "not_available";
 
     /// The code of a status when nothing more precise applies: used to turn framework
     /// rejections (bad query string, 405, 413...) into an `ApiError`.
@@ -401,6 +404,7 @@ pub mod error_codes {
         REMOTE_UNREACHABLE,
         REMOTE_AUTH_FAILED,
         HOST_KEY_CHANGED,
+        NOT_AVAILABLE,
     ];
 }
 
