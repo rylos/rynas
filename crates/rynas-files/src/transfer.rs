@@ -44,11 +44,11 @@ pub fn mime(name: &str) -> &'static str {
 /// One file, whole or a range of it. `inline` shows it in the page (a
 /// preview), otherwise the browser saves it.
 pub fn send_file(out: &mut impl Write, req: &Request, path: &Path, inline: bool) -> Result<(), ApiError> {
-    let meta = fs::metadata(path)?;
+    let mut file = crate::confine::open(path)?;
+    let meta = file.metadata()?;
     if !meta.is_file() {
         return Err(ApiError::bad_request(t!("not a file")));
     }
-    let mut file = File::open(path)?;
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let size = meta.len();
     let content_type = if inline { mime(&name) } else { "application/octet-stream" };
@@ -131,13 +131,13 @@ pub fn send_zip(out: &mut impl Write, roots: &[PathBuf], filename: &str) -> Resu
             let name = path.strip_prefix(&base).unwrap_or(&path).to_string_lossy().into_owned();
             if meta.is_dir() {
                 zip.add_dir(&name, meta.mtime(), meta.mode())?;
-                let Ok(rd) = fs::read_dir(&path) else { continue };
+                let Ok(rd) = crate::confine::read_dir(&path) else { continue };
                 let mut children: Vec<PathBuf> =
                     rd.flatten().filter(|e| !is_system_name(&e.file_name().to_string_lossy())).map(|e| e.path()).collect();
                 children.sort_by(|a, b| b.cmp(a));
                 stack.extend(children);
             } else if meta.is_file() {
-                let Ok(mut file) = File::open(&path) else { continue };
+                let Ok(mut file) = crate::confine::open(&path) else { continue };
                 zip.add_file(&name, meta.mtime(), meta.mode(), &mut file, crate::zip::Level::Store, &mut none)?;
             } else if meta.file_type().is_symlink() {
                 let link = fs::read_link(&path).map(|l| l.to_string_lossy().into_owned()).unwrap_or_default();
@@ -174,7 +174,7 @@ fn write_tree(root: &Path, out: &mut impl Write) -> io::Result<()> {
         if t.is_dir() {
             name.push('/');
             tar_header(out, &name, &meta, b'5', 0, "")?;
-            let Ok(rd) = fs::read_dir(&path) else { continue };
+            let Ok(rd) = crate::confine::read_dir(&path) else { continue };
             let mut children: Vec<_> =
                 rd.flatten().map(|e| e.file_name()).filter(|n| !is_system_name(&n.to_string_lossy())).collect();
             // reverse, so popping visits them in order
@@ -182,7 +182,7 @@ fn write_tree(root: &Path, out: &mut impl Write) -> io::Result<()> {
             let parent = PathBuf::from(name.trim_end_matches('/'));
             stack.extend(children.into_iter().map(|c| (path.join(&c), parent.join(c))));
         } else if t.is_file() {
-            let Ok(mut file) = File::open(&path) else { continue };
+            let Ok(mut file) = crate::confine::open(&path) else { continue };
             tar_header(out, &name, &meta, b'0', meta.len(), "")?;
             // never write more or less than the header promised
             let copied = io::copy(&mut (&mut file).take(meta.len()), out)?;
@@ -469,7 +469,7 @@ impl LocalUpload {
 
     /// Removes the hidden files of uploads abandoned as of `now`.
     fn sweep_at(&self, now: std::time::SystemTime) {
-        let Ok(entries) = fs::read_dir(&self.dir) else { return };
+        let Ok(entries) = crate::confine::read_dir(&self.dir) else { return };
         for e in entries.flatten() {
             if !is_upload_part(e.file_name().as_encoded_bytes()) {
                 continue;
@@ -493,6 +493,8 @@ impl LocalUpload {
         if !file.metadata()?.is_file() {
             return Err(io::Error::from_raw_os_error(libc::EINVAL));
         }
+        // the folder swapped for a link meanwhile: not written to
+        crate::confine::check(std::os::fd::AsFd::as_fd(&file))?;
         Ok(Some(file))
     }
 }

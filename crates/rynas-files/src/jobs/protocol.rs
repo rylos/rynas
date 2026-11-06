@@ -73,6 +73,11 @@ pub struct Spec {
     /// the remote connections the paths name (`/:<id>/…`), secrets included
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remotes: Vec<crate::conns::Conn>,
+    /// the shared folders the local paths lie in: the worker resolves each path inside its
+    /// own share, links included, and refuses one that leads out (`crate::confine`). A local
+    /// path no root holds is refused
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roots: Vec<PathBuf>,
 }
 
 impl Spec {
@@ -217,6 +222,7 @@ mod tests {
             password: Some("archive-secret".into()),
             members: Vec::new(),
             remotes: vec![conn],
+            roots: Vec::new(),
         };
         let clean = spec.without_secrets();
         let text = serde_json::to_string(&clean).unwrap();

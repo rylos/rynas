@@ -4,13 +4,16 @@
 //!
 //! The list itself comes from rynasd (the applied `shares` configuration and the user's home,
 //! see [`crate::Context`]); this module only checks paths against it. A path never leaves
-//! its share through `..` or `.`: every component must be a plain name. Symbolic links
-//! inside a share are followed by the kernel with the user's permissions, as SMB does.
+//! its share through `..` or `.`: every component must be a plain name. Symbolic links are
+//! followed only while they stay inside their share, as Samba does with `wide links = no`
+//! ([`crate::confine`]): [`Resolved::target`] and [`Resolved::entry`] give the real path.
 
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::confine;
 use crate::wire::ApiError;
 
 pub const HOME: &str = "home";
@@ -70,6 +73,23 @@ pub struct Resolved<'a> {
 impl Resolved<'_> {
     pub fn is_root(&self) -> bool {
         self.rel.as_os_str().is_empty()
+    }
+
+    /// The share root, opened and admitted to the worker's [`confine::Jail`].
+    pub fn root(&self) -> Result<Arc<confine::Root>, ApiError> {
+        Ok(confine::admit(Arc::new(confine::Root::open(&self.share.path)?)))
+    }
+
+    /// The real path of what the path names, every link followed: refused with
+    /// `outside_share` when a link leads out of the share.
+    pub fn target(&self) -> Result<PathBuf, ApiError> {
+        Ok(self.root()?.resolve(&self.rel, true)?)
+    }
+
+    /// The real path of the item itself: the folders on the way followed (inside the share),
+    /// the last component not (a link stays the link: renamed, deleted, copied as a link).
+    pub fn entry(&self) -> Result<PathBuf, ApiError> {
+        Ok(self.root()?.resolve(&self.rel, false)?)
     }
 }
 

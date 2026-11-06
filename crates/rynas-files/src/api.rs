@@ -47,7 +47,10 @@ pub fn serve(remote: &dyn Remote) -> io::Result<()> {
     };
     let req = Request::new(&w);
     let mut out = io::BufWriter::with_capacity(256 * 1024, io::stdout().lock());
+    // what this request opens must lie in the shares its paths name (crate::confine)
+    let jail = crate::confine::Jail::enter();
     let result = route(&req, &mut out, &w.ctx, remote);
+    drop(jail);
     cgi::discard_unread(req.length);
     if let Err(err) = result {
         cgi::error(&mut out, &err)?;
@@ -105,6 +108,55 @@ fn nested(dir: &Path, rel: &str) -> Result<PathBuf, ApiError> {
     Ok(path)
 }
 
+/// `mkdir -p` of `rel` below the real folder `dir`: a link met on the way is followed only
+/// while it stays inside the share.
+fn make_dirs(dir: &Path, rel: &str) -> Result<(), ApiError> {
+    nested(dir, rel)?;
+    let mut at = dir.to_path_buf();
+    for part in rel.split('/') {
+        at.push(part);
+        match std::fs::create_dir(&at) {
+            Ok(()) => continue,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e.into()),
+        }
+        let meta = std::fs::symlink_metadata(&at)?;
+        if meta.file_type().is_symlink() {
+            at = match crate::confine::link_target(&at) {
+                Some(target) => target?,
+                None => std::fs::canonicalize(&at)?,
+            };
+        } else if !meta.is_dir() {
+            return Err(ApiError::exists(t!("an item with this name already exists")));
+        }
+    }
+    Ok(())
+}
+
+/// The real path of a request's path ([`shares::Resolved::target`] when `follow`, else
+/// [`shares::Resolved::entry`]). A path inside an archive file ("/docs/a.zip/2024/x.jpg")
+/// comes back as the archive's real path with the rest joined, for [`in_archive`].
+fn place(r: &shares::Resolved, follow: bool) -> Result<PathBuf, ApiError> {
+    let root = r.root()?;
+    match root.resolve(&r.rel, follow) {
+        Ok(p) => Ok(p),
+        Err(e) if matches!(e.raw_os_error(), Some(libc::ENOTDIR) | Some(libc::ENOENT)) => {
+            // the archive is the longest part of the path that exists
+            let parts: Vec<_> = r.rel.components().collect();
+            for k in (1..parts.len()).rev() {
+                if let Ok(file) = root.resolve(&parts[..k].iter().collect::<PathBuf>(), true) {
+                    if archive::locate(&file).is_some_and(|(_, inner)| inner.is_empty()) {
+                        return Ok(file.join(parts[k..].iter().collect::<PathBuf>()));
+                    }
+                    break;
+                }
+            }
+            Err(e.into())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
 fn reply(out: &mut impl Write, value: &impl serde::Serialize) -> Result<(), ApiError> {
     cgi::json(out, 200, value)?;
     Ok(())
@@ -153,6 +205,12 @@ pub fn job_spec(shares: &[Share], conns: &[crate::conns::Conn], body: &NewJob) -
     }
     let mut sources = Vec::new();
     let mut recycle = Vec::new();
+    let mut roots: Vec<PathBuf> = Vec::new();
+    let mut add_root = |share: &Share| {
+        if !roots.contains(&share.path) {
+            roots.push(share.path.clone());
+        }
+    };
     let mut remotes: Vec<crate::conns::Conn> = Vec::new();
     // a remote path stays as it is, the worker connects: (path, whether it
     // is the server or one of its shares)
@@ -189,6 +247,7 @@ pub fn job_spec(shares: &[Share], conns: &[crate::conns::Conn], body: &NewJob) -
                 recycle.push(root);
             }
         }
+        add_root(r.share);
         sources.push(r.real);
     }
     let dest = match (&body.dest, body.op) {
@@ -200,7 +259,11 @@ pub fn job_spec(shares: &[Share], conns: &[crate::conns::Conn], body: &NewJob) -
             }
             Some(path)
         }
-        (Some(d), _) => Some(shares::resolve(shares, d)?.real),
+        (Some(d), _) => {
+            let r = shares::resolve(shares, d)?;
+            add_root(r.share);
+            Some(r.real)
+        }
         (None, _) => return Err(ApiError::invalid("dest", t!("no destination"))),
     };
     if let Some(name) = &body.name {
@@ -227,6 +290,7 @@ pub fn job_spec(shares: &[Share], conns: &[crate::conns::Conn], body: &NewJob) -
         password: body.password.clone(),
         members: body.members.iter().map(|m| valid_member(m)).collect::<Result<_, _>>()?,
         remotes,
+        roots,
     })
 }
 
@@ -269,12 +333,17 @@ struct Paths {
 
 fn as_user(req: &Request, out: &mut impl Write, ctx: &Context, remote: &dyn Remote) -> Result<(), ApiError> {
     let (shares, conns) = (&ctx.shares[..], &ctx.conns[..]);
-    let path_param = |name: &str| -> Result<PathBuf, ApiError> { Ok(shares::resolve(shares, req.require(name)?)?.real) };
+    // the real path of a parameter, every link followed (inside its share)
+    let path_param = |name: &str| -> Result<PathBuf, ApiError> { place(&shares::resolve(shares, req.require(name)?)?, true) };
+    // the item itself: a link stays the link
+    let entry_param = |name: &str| -> Result<PathBuf, ApiError> { place(&shares::resolve(shares, req.require(name)?)?, false) };
+    let entries = |paths: &[String]| paths.iter().map(|p| place(&shares::resolve(shares, p)?, false)).collect::<Result<Vec<_>, ApiError>>();
     match req.route.as_str() {
         "shares" => reply(out, &shares_info(ctx)),
         "list" => {
             let r = shares::resolve(shares, req.require("path")?)?;
-            if let Some((_, inner, members)) = in_archive(&r.real)? {
+            let real = place(&r, true)?;
+            if let Some((_, inner, members)) = in_archive(&real)? {
                 if !archive::is_dir(&members, &inner) {
                     return Err(ApiError::invalid("path", t!("not a folder")));
                 }
@@ -282,15 +351,15 @@ fn as_user(req: &Request, out: &mut impl Write, ctx: &Context, remote: &dyn Remo
                 let total = json!({ "files": files, "dirs": dirs, "bytes": bytes });
                 return reply(out, &json!({ "entries": archive::children(&members, &inner), "writable": false, "space": null, "recycle": false, "inner": inner, "total": total }));
             }
-            let listing = fsops::list(&r.real)?;
-            let space = fsops::space(&r.real).map(|(free, total)| json!({"free": free, "total": total}));
+            let listing = fsops::list(&real)?;
+            let space = fsops::space(&real).map(|(free, total)| json!({"free": free, "total": total}));
             reply(
                 out,
                 &json!({ "entries": listing.entries, "writable": listing.writable, "space": space, "recycle": r.share.recycle }),
             )
         }
         "stat" => {
-            let real = path_param("path")?;
+            let real = entry_param("path")?;
             if let Some((file, inner, members)) = in_archive(&real)?
                 && !inner.is_empty()
             {
@@ -315,7 +384,7 @@ fn as_user(req: &Request, out: &mut impl Write, ctx: &Context, remote: &dyn Remo
             if body.paths.first().is_some_and(|p| crate::conns::split(p).is_some()) {
                 return remote.usage(out, conns, &body.paths);
             }
-            let paths = body.paths.iter().map(|p| Ok(shares::resolve(shares, p)?.real)).collect::<Result<Vec<_>, ApiError>>()?;
+            let paths = entries(&body.paths)?;
             // folders inside an archive are counted from its listing
             if let [one] = paths.as_slice()
                 && let Some((_, inner, members)) = in_archive(one)?
@@ -328,10 +397,11 @@ fn as_user(req: &Request, out: &mut impl Write, ctx: &Context, remote: &dyn Remo
         }
         "space" => {
             let r = shares::resolve(shares, req.require("path")?)?;
-            if in_archive(&r.real)?.is_some() {
+            let real = place(&r, true)?;
+            if in_archive(&real)?.is_some() {
                 return Err(ApiError::read_only(t!("space analysis does not work inside an archive")));
             }
-            reply(out, &space::analyse(&r.real, &r.share.path, Duration::from_secs(40)))
+            reply(out, &space::analyse(&real, r.root()?.path(), Duration::from_secs(40)))
         }
         "mkdir" => {
             method(req, "POST")?;
@@ -339,7 +409,7 @@ fn as_user(req: &Request, out: &mut impl Write, ctx: &Context, remote: &dyn Remo
             let name = req.require("name")?;
             if req.param("parents") == Some("1") {
                 // folder uploads: the whole relative path, created as needed
-                std::fs::create_dir_all(nested(&dir, name)?)?;
+                make_dirs(&dir, name)?;
             } else {
                 shares::valid_name(name)?;
                 fsops::mkdir(&dir.join(name))?;
@@ -354,8 +424,8 @@ fn as_user(req: &Request, out: &mut impl Write, ctx: &Context, remote: &dyn Remo
             }
             let name = req.require("name")?;
             shares::valid_name(name)?;
-            let target = r.real.with_file_name(name);
-            fsops::rename(&r.real, &target)?;
+            let real = place(&r, false)?;
+            fsops::rename(&real, &real.with_file_name(name))?;
             reply(out, &json!({ "ok": true }))
         }
         "search" => {
@@ -371,13 +441,18 @@ fn as_user(req: &Request, out: &mut impl Write, ctx: &Context, remote: &dyn Remo
         "download" => {
             if let Some(list) = req.param("paths") {
                 let paths: Vec<String> = serde_json::from_str(list).map_err(|_| ApiError::bad_request("paths"))?;
-                let real = paths.iter().map(|p| Ok(shares::resolve(shares, p)?.real)).collect::<Result<Vec<_>, ApiError>>()?;
-                if real.len() == 1 && send_member(out, &real[0], false)? {
-                    return Ok(());
+                if let [one] = paths.as_slice() {
+                    // one file: a link to it inside the share is followed
+                    let file = place(&shares::resolve(shares, one)?, true)?;
+                    if send_member(out, &file, false)? {
+                        return Ok(());
+                    }
+                    if std::fs::metadata(&file).is_ok_and(|m| m.is_file()) {
+                        return transfer::send_file(out, req, &file, false);
+                    }
                 }
-                if real.len() == 1 && std::fs::metadata(&real[0]).is_ok_and(|m| m.is_file()) {
-                    return transfer::send_file(out, req, &real[0], false);
-                }
+                // folders and several items: links go into the archive as links
+                let real = entries(&paths)?;
                 let name = match real.as_slice() {
                     [one] => one.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
                     many => many[0]

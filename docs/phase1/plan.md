@@ -102,6 +102,7 @@ only goes to the debug log (A13).
 | 507 | `insufficient_storage` | file manager: volume full or quota used up |
 | 409 | `read_only` | file manager: inside an archive, a read-only snapshot or filesystem |
 | 400 | `share_root` | file manager: a shared folder itself renamed, copied, moved or deleted |
+| 403 | `outside_share` | file manager: a symbolic link leads out of its shared folder (listed, never followed) |
 | 400 | `password_required` | file manager: the archive needs its password |
 | 503 | `tool_missing` | file manager: an optional program (7z, unrar, tar) is not installed |
 | 502 | `remote_unreachable` | file manager: an SMB/SFTP server cannot be reached |

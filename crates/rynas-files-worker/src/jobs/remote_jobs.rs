@@ -66,7 +66,7 @@ impl End {
     /// The items of a folder, sorted by name.
     fn list(&self, p: &Path) -> io::Result<Vec<(String, Meta)>> {
         let mut items: Vec<(String, Meta)> = match self {
-            End::Local => fs::read_dir(p)?
+            End::Local => rynas_files::confine::read_dir(p)?
                 .flatten()
                 .filter_map(|e| Some((e.file_name().into_string().ok()?, local_meta(&e.metadata().ok()?))))
                 .collect(),
@@ -78,14 +78,18 @@ impl End {
 
     fn reader(&self, p: &Path) -> io::Result<Box<dyn Read>> {
         Ok(match self {
-            End::Local => Box::new(File::open(p)?),
+            End::Local => Box::new(rynas_files::confine::open(p)?),
             End::Remote(fs) => Box::new(fs.reader(&parts(p))?),
         })
     }
 
     fn writer(&self, p: &Path) -> io::Result<Box<dyn remote::Writer>> {
         Ok(match self {
-            End::Local => Box::new(LocalWriter(OpenOptions::new().write(true).create_new(true).mode(0o666).open(p)?)),
+            End::Local => {
+                let file = OpenOptions::new().write(true).create_new(true).mode(0o666).open(p)?;
+                rynas_files::confine::check_made(&file, p)?;
+                Box::new(LocalWriter(file))
+            }
             End::Remote(fs) => fs.writer(&parts(p), None)?,
         })
     }

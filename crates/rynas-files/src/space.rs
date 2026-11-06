@@ -101,8 +101,12 @@ pub fn analyse(root: &Path, share: &Path, budget: Duration) -> Analysis {
     let partial = AtomicBool::new(false);
     let mounts = mounts_below(root);
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get() * 2).clamp(4, 16);
+    // the reading threads check what they open against the worker's shares, as this one
+    let jail = crate::confine::current();
 
-    let work = || loop {
+    let work = || {
+        let _jail = crate::confine::Jail::inherit(jail.clone());
+        loop {
         let (path, id) = {
             let mut q = queue.lock().unwrap();
             loop {
@@ -121,7 +125,7 @@ pub fn analyse(root: &Path, share: &Path, budget: Duration) -> Analysis {
         let mut files: Vec<(String, u64)> = Vec::new();
         if Instant::now() > deadline {
             partial.store(true, Ordering::Relaxed);
-        } else if let Ok(rd) = fs::read_dir(&path) {
+        } else if let Ok(rd) = crate::confine::read_dir(&path) {
             let top = path == share;
             for e in rd.flatten() {
                 let name = e.file_name().to_string_lossy().into_owned();
@@ -168,6 +172,7 @@ pub fn analyse(root: &Path, share: &Path, budget: Duration) -> Analysis {
         q.todo.extend(more);
         q.busy -= 1;
         wake.notify_all();
+        }
     };
     std::thread::scope(|s| {
         for _ in 0..threads {
@@ -202,14 +207,14 @@ pub fn analyse(root: &Path, share: &Path, budget: Duration) -> Analysis {
 }
 
 /// A read-only btrfs subvolume: the root of a subvolume has inode 256.
-fn snapshot(e: &fs::DirEntry, path: &Path) -> bool {
+fn snapshot(e: &crate::confine::DirEntry, path: &Path) -> bool {
     const FIRST_FREE_OBJECTID: u64 = 256;
     const SUBVOL_GETFLAGS: libc::c_ulong = 0x8008_9419; // _IOR(0x94, 25, u64)
     const SUBVOL_RDONLY: u64 = 2;
     if !e.metadata().is_ok_and(|m| m.ino() == FIRST_FREE_OBJECTID) {
         return false;
     }
-    let Ok(dir) = fs::File::open(path) else { return false };
+    let Ok(dir) = crate::confine::open(path) else { return false };
     let mut flags: u64 = 0;
     // SAFETY: an open directory and a u64 for the ioctl to fill
     let rc = unsafe { libc::ioctl(std::os::fd::AsRawFd::as_raw_fd(&dir), SUBVOL_GETFLAGS as _, &mut flags) };

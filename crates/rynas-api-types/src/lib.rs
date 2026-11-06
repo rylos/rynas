@@ -331,6 +331,9 @@ pub mod error_codes {
     /// File manager: a shared folder itself cannot be renamed, copied, moved or deleted from
     /// the file manager (400).
     pub const SHARE_ROOT: &str = "share_root";
+    /// File manager: a symbolic link leads out of its shared folder (to the system, or to
+    /// another shared folder): it is listed as a link but never followed (403).
+    pub const OUTSIDE_SHARE: &str = "outside_share";
     /// File manager: the archive is protected by a password and none (or a wrong one) was
     /// given (400); the job message carries the same code.
     pub const PASSWORD_REQUIRED: &str = "password_required";
@@ -407,6 +410,7 @@ pub mod error_codes {
         INSUFFICIENT_STORAGE,
         READ_ONLY,
         SHARE_ROOT,
+        OUTSIDE_SHARE,
         PASSWORD_REQUIRED,
         TOOL_MISSING,
         REMOTE_UNREACHABLE,

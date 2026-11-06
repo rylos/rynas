@@ -22,7 +22,7 @@ pub fn describe(path: &Path) -> Value {
     let name = path.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
     let ext = name.rsplit_once('.').map_or("", |(_, e)| e);
     let av = is_av(ext);
-    if let Ok(ms) = std::fs::File::open(path).map_err(nom_exif::Error::from).and_then(MediaSource::seekable) {
+    if let Ok(ms) = crate::confine::open(path).map_err(nom_exif::Error::from).and_then(MediaSource::seekable) {
         let mut parser = MediaParser::new();
         match ms.kind() {
             MediaKind::Image => {
@@ -154,10 +154,13 @@ fn ffmpeg(path: &Path) -> Option<String> {
     if !Path::new(FFMPEG).exists() {
         return None;
     }
-    // "file:" keeps a name that starts with "-" or holds ":" from being read as anything else
+    // the file opened here (checked to be inside the share) as descriptor 3; "file:" keeps
+    // the name from being read as anything else
+    let opened = crate::confine::open(path).ok()?;
+    let mut cmd = Command::new(FFMPEG);
     let mut input = std::ffi::OsString::from("file:");
-    input.push(path.as_os_str());
-    let mut child = Command::new(FFMPEG)
+    input.push(crate::confine::child_input(&mut cmd, &opened).as_os_str());
+    let mut child = cmd
         .args(["-hide_banner", "-nostdin", "-i"])
         .arg(input)
         .env("PATH", "/usr/bin:/bin")

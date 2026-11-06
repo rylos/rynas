@@ -1373,6 +1373,7 @@ dict! {
     "err.insufficient_storage" => "The volume is full or your quota is used up.", "Il volume è pieno o la tua quota è esaurita.";
     "err.read_only" => "This item is read-only.", "Questo elemento è di sola lettura.";
     "err.share_root" => "A shared folder can't be changed from here.", "Una cartella condivisa non si modifica da qui.";
+    "err.outside_share" => "This link leads out of the shared folder: it isn't followed.", "Questo collegamento porta fuori dalla cartella condivisa: non viene seguito.";
     "err.password_required" => "The archive needs its password.", "L'archivio richiede la sua password.";
     "err.tool_missing" => "A program this feature needs is not installed.", "Un programma necessario a questa funzione non è installato.";
     "err.remote_unreachable" => "The remote server can't be reached.", "Il server remoto non è raggiungibile.";

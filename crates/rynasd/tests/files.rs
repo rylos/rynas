@@ -90,41 +90,49 @@ async fn get(app: &axum::Router, uri: &str) -> (StatusCode, Value) {
     (s, serde_json::from_slice(&b).unwrap_or(Value::Null))
 }
 
-#[tokio::test]
-async fn the_file_manager_end_to_end() {
+/// rynasd with the file manager and `shares` applied (each `[name, path]`), the test user an
+/// administrator.
+fn app_with(dir: &Path, list: &[(&str, &Path)]) -> (axum::Router, Arc<Ops>) {
     let worker = worker();
-    // not below /tmp: shares there are refused
-    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
-    let docs = dir.path().join("docs");
-    std::fs::create_dir_all(docs.join("old")).unwrap();
-    std::fs::write(docs.join("old/notes.txt"), "line one\r\nline two\r\n").unwrap();
-    let root = dir.path().join("root");
+    let root = dir.join("root");
     std::fs::create_dir_all(&root).unwrap();
     let sys = Arc::new(MemorySystem::new("nas"));
     let acc = Arc::new(MemoryAccounts::new());
     let host = Arc::new(MemoryShares::new());
-    host.add_dir(docs.to_str().unwrap(), None);
+    for (_, path) in list {
+        host.add_dir(path.to_str().unwrap(), None);
+    }
     let config = Arc::new(
         Config::open(
-            ConfigOptions::new(dir.path().join("state"), &root),
+            ConfigOptions::new(dir.join("state"), &root),
             sys,
             vec![Arc::new(UsersDomain::new(acc.clone())), Arc::new(SharesDomain::new(host, acc))],
         )
         .unwrap(),
     );
-    let shares = json!({ "shares": [{ "name": "docs", "path": docs, "description": "Documents" }] });
-    config.apply_value("test", SHARES_KEY, Some(shares), "a share", &|_| {}).unwrap();
-    let tasks = TaskManager::new(dir.path().join("tasks"), "nas", TaskConfig::default()).unwrap();
+    let shares: Vec<Value> = list.iter().map(|(name, path)| json!({ "name": name, "path": path, "description": "Documents" })).collect();
+    config.apply_value("test", SHARES_KEY, Some(json!({ "shares": shares })), "shares", &|_| {}).unwrap();
+    let tasks = TaskManager::new(dir.join("tasks"), "nas", TaskConfig::default()).unwrap();
     let mut ops = Ops::new(config, tasks);
     ops.admins = AdminPolicy::new(vec!["rynas-admin".into()], |_| Some(vec!["rynas-admin".into()]));
     let ops = Arc::new(ops);
-    let files = Arc::new(Files::new(ops.clone(), worker, &dir.path().join("state/files"), &dir.path().join("cache")));
+    let files = Arc::new(Files::new(ops.clone(), worker, &dir.join("state/files"), &dir.join("cache")));
     let clock = Arc::new(ManualClock::new(1_800_000_000_000));
     let totp = Arc::new(TotpManager::new(MemoryStorage::default(), clock.clone(), "rynas"));
     let mut st = DaemonState::new(Arc::new(NoAuth), totp, clock);
     st.ops = Some(ops.clone());
     st.files = Some(files);
-    let app = router(st);
+    (router(st), ops)
+}
+
+#[tokio::test]
+async fn the_file_manager_end_to_end() {
+    // not below /tmp: shares there are refused
+    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let docs = dir.path().join("docs");
+    std::fs::create_dir_all(docs.join("old")).unwrap();
+    std::fs::write(docs.join("old/notes.txt"), "line one\r\nline two\r\n").unwrap();
+    let (app, ops) = app_with(dir.path(), &[("docs", &docs)]);
 
     // init: rynasd's part and the shares as the user sees them
     let (s, v) = get(&app, "/v1/files/init").await;
@@ -236,4 +244,125 @@ async fn the_file_manager_end_to_end() {
     // without the user header nothing happens
     let resp = app.clone().oneshot(Request::builder().uri("/v1/files/list?path=/docs").body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+/// Samba's `wide links = no`: links are followed inside their share, never out of it (to the
+/// system, to another share), whatever the route.
+#[tokio::test]
+async fn symbolic_links_stay_inside_their_share() {
+    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let base = std::fs::canonicalize(dir.path()).unwrap();
+    let (docs, other, sys) = (base.join("docs"), base.join("other"), base.join("sys"));
+    for d in [docs.join("real/sub"), other.clone(), sys.join("ssl")] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(sys.join("shadow"), "root:secret").unwrap();
+    std::fs::write(other.join("o.txt"), "other share").unwrap();
+    std::fs::write(docs.join("real/note.txt"), "inside").unwrap();
+    let link = |target: &Path, name: &str| std::os::unix::fs::symlink(target, docs.join(name)).unwrap();
+    link(&sys, "etc");
+    link(Path::new("../sys/shadow"), "up");
+    link(Path::new("real/../../sys"), "dots");
+    link(&other, "to-other");
+    link(Path::new("etc"), "chain");
+    link(Path::new("real"), "inside");
+    link(&docs.join("real/note.txt"), "abs-inside.txt");
+    let (app, _) = app_with(dir.path(), &[("docs", &docs), ("other", &other)]);
+    let refused = |(s, v): (StatusCode, Value)| {
+        assert_eq!((s, v["code"].as_str()), (StatusCode::FORBIDDEN, Some(error_codes::OUTSIDE_SHARE)), "{v}");
+    };
+
+    // listed as links, the ones out of the share marked and never looked into
+    let (s, v) = get(&app, "/v1/files/list?path=/docs").await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let entry = |name: &str| v["entries"].as_array().unwrap().iter().find(|e| e["name"] == name).cloned().unwrap();
+    for name in ["etc", "up", "dots", "to-other", "chain"] {
+        assert_eq!((entry(name)["kind"].as_str(), entry(name)["outside"].as_bool()), (Some("l"), Some(true)), "{name}");
+    }
+    assert_eq!(entry("inside")["link_dir"], true);
+    assert!(entry("inside").get("outside").is_none());
+    let (s, v) = get(&app, "/v1/files/stat?path=/docs/etc").await;
+    assert_eq!((s, v["outside"].as_bool(), v["readable"].as_bool()), (StatusCode::OK, Some(true), Some(false)), "{v}");
+
+    // followed inside the share
+    let (s, v) = get(&app, "/v1/files/list?path=/docs/inside").await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (s, got, _) = call(&app, "GET", "/v1/files/view?path=/docs/abs-inside.txt", Body::empty()).await;
+    assert_eq!((s, got.as_slice()), (StatusCode::OK, b"inside".as_slice()));
+
+    // refused out of it, whatever the route
+    for uri in [
+        "/v1/files/list?path=/docs/etc",
+        "/v1/files/list?path=/docs/etc/ssl",
+        "/v1/files/list?path=/docs/to-other",
+        "/v1/files/list?path=/docs/chain",
+        "/v1/files/stat?path=/docs/etc/shadow",
+        "/v1/files/view?path=/docs/up",
+        "/v1/files/view?path=/docs/dots/shadow",
+        "/v1/files/download?path=/docs/etc/shadow",
+        "/v1/files/download?paths=%5B%22%2Fdocs%2Fup%22%5D",
+        "/v1/files/text?path=/docs/up",
+        "/v1/files/edit?path=/docs/up",
+        "/v1/files/media?path=/docs/up",
+        "/v1/files/space?path=/docs/etc",
+        "/v1/files/search?path=/docs/etc&q=shadow",
+    ] {
+        refused(get(&app, uri).await);
+    }
+    let (s, _, _) = call(&app, "GET", "/v1/files/thumb?path=/docs/etc/shadow", Body::empty()).await;
+    assert_ne!(s, StatusCode::OK);
+    refused(json_call(&app, "POST", "/v1/files/usage", json!({ "paths": ["/docs/etc/ssl"] })).await);
+    refused(json_call(&app, "POST", "/v1/files/mkdir?path=/docs/etc&name=x", json!({})).await);
+    refused(json_call(&app, "POST", "/v1/files/mkdir?path=/docs&name=etc/x&parents=1", json!({})).await);
+    let (s, b, _) = call(&app, "POST", "/v1/files/upload?dir=/docs/etc&name=x.txt", Body::from("x")).await;
+    refused((s, serde_json::from_slice(&b).unwrap_or(Value::Null)));
+    let (s, b, _) = call(&app, "POST", "/v1/files/edit/save?path=/docs/up&stamp=x&force=1", Body::from("pwned")).await;
+    refused((s, serde_json::from_slice(&b).unwrap_or(Value::Null)));
+    assert_eq!(std::fs::read_dir(&sys).unwrap().count(), 2, "nothing made out of the share");
+    assert_eq!(std::fs::read_to_string(sys.join("shadow")).unwrap(), "root:secret");
+
+    // a folder with such a link downloads it as a link, not what it points to
+    let (s, zip, _) = call(&app, "GET", "/v1/files/download?paths=%5B%22%2Fdocs%22%5D", Body::empty()).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(!zip.windows(11).any(|w| w == b"root:secret"));
+    let (s, tar, _) = call(&app, "GET", "/v1/files/download?paths=%5B%22%2Fdocs%22%5D&format=tar", Body::empty()).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(!tar.windows(11).any(|w| w == b"root:secret"));
+    // the search does not go down links, the usage counts them as items
+    let (s, v) = get(&app, "/v1/files/search?path=/docs&q=shadow").await;
+    assert_eq!((s, v["hits"].as_array().map(Vec::len)), (StatusCode::OK, Some(0)), "{v}");
+    let (s, v) = json_call(&app, "POST", "/v1/files/usage", json!({ "paths": ["/docs"] })).await;
+    // docs, real, real/sub; note.txt and the seven links (never what they point to)
+    assert_eq!((s, v["dirs"].as_u64(), v["files"].as_u64()), (StatusCode::OK, Some(3), Some(8)), "{v}");
+    let (s, v) = get(&app, "/v1/files/space?path=/docs").await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+
+    // the editor saves the target of a link inside the share; the link stays
+    let (s, v) = get(&app, "/v1/files/edit?path=/docs/abs-inside.txt").await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let uri = format!("/v1/files/edit/save?path=/docs/abs-inside.txt&stamp={}", v["stamp"].as_str().unwrap());
+    let (s, b, _) = call(&app, "POST", &uri, Body::from("saved")).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    assert_eq!(std::fs::read_to_string(docs.join("real/note.txt")).unwrap(), "saved");
+    assert!(std::fs::symlink_metadata(docs.join("abs-inside.txt")).unwrap().file_type().is_symlink());
+
+    // the link itself can be renamed (it is an item of the share)
+    let (s, v) = json_call(&app, "POST", "/v1/files/rename?path=/docs/etc&name=etc2", json!({})).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(std::fs::read_link(docs.join("etc2")).unwrap(), sys);
+
+    // a job through a link: the source is refused, nothing copied
+    let (s, v) = json_call(&app, "POST", "/v1/files/jobs/new", json!({ "op": "copy", "sources": ["/docs/etc2/shadow"], "dest": "/docs/real" })).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let job = loop {
+        let (_, list) = get(&app, "/v1/files/jobs").await;
+        let job = list["jobs"][0].clone();
+        if job["state"] == "done" || job["state"] == "failed" || Instant::now() > deadline {
+            break job;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(job["errors"][0]["code"], error_codes::OUTSIDE_SHARE, "{job}");
+    assert!(!docs.join("real/shadow").exists());
 }

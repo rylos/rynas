@@ -38,6 +38,9 @@ pub struct Entry {
     /// for a symlink: whether it points to a directory
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub link_dir: bool,
+    /// for a symlink: it leads out of its shared folder, and is never followed
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub outside: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub thumb: bool,
     /// a read-only btrfs snapshot: it cannot be renamed, moved or deleted
@@ -63,8 +66,18 @@ fn kind(meta: &Metadata) -> char {
 
 pub fn entry(path: &Path, name: String, meta: &Metadata) -> Entry {
     let kind = kind(meta);
-    let link_dir = kind == 'l' && fs::metadata(path).is_ok_and(|m| m.is_dir());
-    Entry { name, kind, size: if kind == 'd' { 0 } else { meta.len() }, mtime: meta.mtime(), mode: meta.mode() & 0o7777, link_dir, thumb: false, readonly: kind == 'd' && readonly_subvolume(path, meta), full: None }
+    let (link_dir, outside) = if kind == 'l' { link(path) } else { (false, false) };
+    Entry { name, kind, size: if kind == 'd' { 0 } else { meta.len() }, mtime: meta.mtime(), mode: meta.mode() & 0o7777, link_dir, outside, thumb: false, readonly: kind == 'd' && readonly_subvolume(path, meta), full: None }
+}
+
+/// For a symbolic link: whether it leads to a folder, and whether out of its share (then it
+/// is not followed, not even to tell what it points to).
+fn link(path: &Path) -> (bool, bool) {
+    match crate::confine::link_target(path) {
+        Some(Ok(target)) => (fs::metadata(target).is_ok_and(|m| m.is_dir()), false),
+        Some(Err(e)) => (false, crate::confine::is_outside(&e)),
+        None => (fs::metadata(path).is_ok_and(|m| m.is_dir()), false),
+    }
 }
 
 /// Whether a folder is the top of a read-only btrfs subvolume: a snapshot
@@ -77,7 +90,7 @@ fn readonly_subvolume(path: &Path, meta: &Metadata) -> bool {
     if meta.ino() != BTRFS_FIRST_FREE_OBJECTID {
         return false;
     }
-    let Ok(dir) = fs::File::open(path) else { return false };
+    let Ok(dir) = crate::confine::open(path) else { return false };
     let mut flags: u64 = 0;
     // SAFETY: an open directory and a u64 for the kernel to fill
     let rc = unsafe { libc::ioctl(std::os::fd::AsRawFd::as_raw_fd(&dir), BTRFS_IOC_SUBVOL_GETFLAGS as _, &mut flags) };
@@ -98,7 +111,7 @@ pub fn list(dir: &Path) -> Result<Listing, ApiError> {
     // a set: a folder of photos has thousands of entries in both
     let thumbs = crate::thumbs::has_eadir(dir);
     let mut entries = Vec::new();
-    for item in fs::read_dir(dir)?.flatten() {
+    for item in crate::confine::read_dir(dir)?.flatten() {
         let name = item.file_name().to_string_lossy().into_owned();
         if is_system_name(&name) {
             continue;
@@ -117,7 +130,7 @@ pub fn list(dir: &Path) -> Result<Listing, ApiError> {
 
 /// Whether a recycle bin holds anything: one entry read, not the whole bin.
 fn bin_full(bin: &Path) -> bool {
-    fs::read_dir(bin).is_ok_and(|d| d.flatten().any(|i| !is_system_name(&i.file_name().to_string_lossy())))
+    crate::confine::read_dir(bin).is_ok_and(|d| d.flatten().any(|i| !is_system_name(&i.file_name().to_string_lossy())))
 }
 
 pub fn access(path: &Path, mode: i32) -> bool {
@@ -140,6 +153,9 @@ pub struct Details {
     pub inode: u64,
     pub links: u64,
     pub target: Option<String>,
+    /// a symbolic link out of its shared folder: not followed
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub outside: bool,
     pub readable: bool,
     pub writable: bool,
     pub device: u64,
@@ -148,6 +164,13 @@ pub struct Details {
 pub fn details(path: &Path) -> Result<Details, ApiError> {
     let meta = fs::symlink_metadata(path)?;
     let target = meta.file_type().is_symlink().then(|| fs::read_link(path).map(|t| t.to_string_lossy().into_owned()).unwrap_or_default());
+    // what a link leads to is asked only when it stays inside the share
+    let (outside, followed) = match target.as_ref().and_then(|_| crate::confine::link_target(path)) {
+        Some(Ok(real)) => (false, Some(real)),
+        Some(Err(e)) => (crate::confine::is_outside(&e), None),
+        None => (false, Some(path.to_path_buf())),
+    };
+    let can = |mode| followed.as_deref().is_some_and(|p| access(p, mode));
     Ok(Details {
         name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
         kind: kind(&meta),
@@ -161,8 +184,9 @@ pub fn details(path: &Path) -> Result<Details, ApiError> {
         inode: meta.ino(),
         links: meta.nlink(),
         target,
-        readable: access(path, libc::R_OK),
-        writable: access(path, libc::W_OK),
+        outside,
+        readable: can(libc::R_OK),
+        writable: can(libc::W_OK),
         device: meta.dev(),
     })
 }
@@ -236,7 +260,7 @@ pub fn usage(paths: &[PathBuf], budget: Duration) -> Usage {
         };
         if meta.is_dir() {
             u.dirs += 1;
-            match fs::read_dir(&path) {
+            match crate::confine::read_dir(&path) {
                 Ok(rd) => stack.extend(rd.flatten().filter(|e| !is_system_name(&e.file_name().to_string_lossy())).map(|e| e.path())),
                 Err(_) => u.unreadable += 1,
             }
@@ -318,7 +342,7 @@ pub fn search(root: &Path, pattern: &Pattern, limit: usize, budget: Duration) ->
     let mut scanned = 0u64;
     let mut queue = std::collections::VecDeque::from([PathBuf::new()]);
     while let Some(rel) = queue.pop_front() {
-        let Ok(rd) = fs::read_dir(root.join(&rel)) else { continue };
+        let Ok(rd) = crate::confine::read_dir(&root.join(&rel)) else { continue };
         for item in rd.flatten() {
             if (scanned.is_multiple_of(256) && Instant::now() > deadline) || hits.len() >= limit {
                 return SearchResult { hits, scanned, partial: true };

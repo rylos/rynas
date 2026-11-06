@@ -46,14 +46,17 @@ pub fn body(req: &Request) -> Result<Vec<u8>, ApiError> {
 }
 
 pub fn open(out: &mut impl Write, path: &Path) -> Result<(), ApiError> {
-    let meta = std::fs::metadata(path)?;
+    let mut file = crate::confine::open(path)?;
+    let meta = file.metadata()?;
     if !meta.is_file() {
         return Err(ApiError::bad_request(t!("not a file")));
     }
     if meta.len() > MAX {
         return Err(too_big());
     }
-    let text = as_text(std::fs::read(path)?)?;
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    Read::by_ref(&mut file).take(MAX).read_to_end(&mut bytes)?;
+    let text = as_text(bytes)?;
     let writable = nix_access(path);
     reply(out, &json!({ "text": text, "stamp": stamp(&meta), "writable": writable }))
 }
@@ -73,7 +76,15 @@ pub fn save(out: &mut impl Write, path: &Path, text: &[u8], expected: &str, forc
 /// The saving itself, and the file's new stamp.
 fn write(path: &Path, text: &[u8], expected: &str, force: bool) -> Result<String, ApiError> {
     // a symlink stays one: the file it points to is the one saved
-    let real = if std::fs::symlink_metadata(path)?.file_type().is_symlink() { std::fs::canonicalize(path)? } else { path.to_path_buf() };
+    // a link: its target is saved, and only when it stays inside the share
+    let real = if std::fs::symlink_metadata(path)?.file_type().is_symlink() {
+        match crate::confine::link_target(path) {
+            Some(target) => target?,
+            None => std::fs::canonicalize(path)?,
+        }
+    } else {
+        path.to_path_buf()
+    };
     let path = real.as_path();
     let meta = std::fs::metadata(path)?;
     if !meta.is_file() {
@@ -92,6 +103,7 @@ fn write(path: &Path, text: &[u8], expected: &str, force: bool) -> Result<String
         let _ = std::fs::remove_file(&tmp);
         let result = (|| -> io::Result<()> {
             let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(&tmp)?;
+            crate::confine::check_made(&f, &tmp)?;
             f.write_all(text)?;
             f.set_permissions(std::fs::Permissions::from_mode(meta.mode() & 0o7777))?;
             let _ = std::os::unix::fs::fchown(&f, None, Some(meta.gid()));
@@ -106,7 +118,7 @@ fn write(path: &Path, text: &[u8], expected: &str, force: bool) -> Result<String
         // someone else's file (or hard-linked): written in place, so it
         // keeps its owner, ACL and links. Cut to size only after: a full
         // disk leaves the old text partly overwritten, never an empty file.
-        let mut f = std::fs::OpenOptions::new().write(true).custom_flags(libc::O_CLOEXEC).open(path)?;
+        let mut f = crate::confine::open_write(path)?;
         f.write_all(text)?;
         f.set_len(text.len() as u64)?;
         f.sync_all()?;

@@ -405,6 +405,7 @@ pub fn children(members: &[Member], dir: &str) -> Vec<Entry> {
                     mtime: m.mtime,
                     mode: m.mode,
                     link_dir: false,
+                    outside: false,
                     thumb: false,
                     readonly: false,
                     full: None,
@@ -418,7 +419,7 @@ pub fn children(members: &[Member], dir: &str) -> Vec<Entry> {
 }
 
 fn folder(name: &str, mtime: i64) -> Entry {
-    Entry { name: name.to_string(), kind: 'd', size: 0, mtime, mode: 0o755, link_dir: false, thumb: false, readonly: false, full: None }
+    Entry { name: name.to_string(), kind: 'd', size: 0, mtime, mode: 0o755, link_dir: false, outside: false, thumb: false, readonly: false, full: None }
 }
 
 /// Whether `path` is a folder inside the archive ("" is the root).

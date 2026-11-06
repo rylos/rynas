@@ -54,7 +54,9 @@ pub fn get(file: &Path, big: bool, cache: Option<&Path>) -> Option<Vec<u8>> {
         return Some(data);
     }
     if let Some(p) = eadir(file, big) {
-        return std::fs::read(p).ok();
+        let mut data = Vec::new();
+        crate::confine::open(&p).ok()?.take(MAX_BYTES).read_to_end(&mut data).ok()?;
+        return Some(data);
     }
     let name = file.file_name()?.to_string_lossy().to_lowercase();
     let ext = name.rsplit_once('.').map_or("", |(_, e)| e);
@@ -106,7 +108,7 @@ fn eadir(file: &Path, big: bool) -> Option<PathBuf> {
     } else {
         &["SYNOPHOTO_THUMB_M.jpg", "SYNOPHOTO_THUMB_SM.jpg", "SYNOPHOTO_THUMB_B.jpg", "SYNOPHOTO_THUMB_S.jpg"]
     };
-    names.iter().map(|n| dir.join(n)).find(|p| p.is_file())
+    names.iter().map(|n| dir.join(n)).find(|p| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file()))
 }
 
 /// Whether a thumbnail of a file of this name can be made here (ffmpeg is installed and it
@@ -120,7 +122,7 @@ pub fn can_make(name: &str) -> bool {
 
 /// The files of a folder that have a thumbnail in `@eaDir` already.
 pub fn has_eadir(dir: &Path) -> std::collections::HashSet<std::ffi::OsString> {
-    std::fs::read_dir(dir.join("@eaDir")).map(|d| d.flatten().map(|e| e.file_name()).collect()).unwrap_or_default()
+    crate::confine::read_dir(&dir.join("@eaDir")).map(|d| d.flatten().map(|e| e.file_name()).collect()).unwrap_or_default()
 }
 
 /// One JPEG frame scaled to `width` (never enlarged), on stdout.
@@ -128,9 +130,11 @@ fn ffmpeg(file: &Path, width: u32, video: bool) -> Option<Vec<u8>> {
     if !Path::new(FFMPEG).exists() {
         return None;
     }
-    let mut input = std::ffi::OsString::from("file:");
-    input.push(file.as_os_str());
+    // ffmpeg reads the file opened here (checked to be inside the share), not a path
+    let opened = crate::confine::open(file).ok()?;
     let mut cmd = Command::new(FFMPEG);
+    let mut input = std::ffi::OsString::from("file:");
+    input.push(crate::confine::child_input(&mut cmd, &opened).as_os_str());
     // one thread: a grid asks for many thumbnails at once on a 4-core NAS
     cmd.args(["-hide_banner", "-nostdin", "-loglevel", "error", "-threads", "1"]);
     if video {

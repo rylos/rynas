@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use rynas_files::confine::{self, Jail};
 use rynas_files::jobs::protocol::{Command, ConflictInfo, Event, Op, Policy, Progress, RecycleRoot, Side, Spec, Status};
 use crate::fsops::{describe, rename_noreplace};
 use rynas_api_types::error_codes as c;
@@ -66,6 +67,15 @@ pub fn run() -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     };
+    // every local path inside its own share, links included (rynas_files::confine)
+    let _jail = Jail::enter();
+    let (spec, refused) = match confine_spec(spec) {
+        Ok(confined) => confined,
+        Err(e) => {
+            emit(&Event::Done { status: Status::Failed, msg: describe(&e), code: crate::fsops::io_code(&e).into() });
+            return std::process::ExitCode::SUCCESS;
+        }
+    };
     let shared = Arc::new(Shared { state: Mutex::new(Control { limit: spec.limit, ..Default::default() }), wake: Condvar::new() });
     let reader = Arc::clone(&shared);
     std::thread::spawn(move || {
@@ -92,6 +102,9 @@ pub fn run() -> std::process::ExitCode {
     });
 
     let mut engine = Engine::new(spec, shared);
+    for (path, e) in refused {
+        engine.error(&path, &e);
+    }
     let (status, msg) = match engine.run() {
         Ok(()) => (Status::Ok, engine.summary()),
         Err(Cancelled) => {
@@ -110,6 +123,40 @@ pub fn run() -> std::process::ExitCode {
     engine.emit_progress(true);
     emit(&Event::Done { status, msg, code });
     std::process::ExitCode::SUCCESS
+}
+
+/// The job's local paths as real paths inside their shares ([`Spec::roots`]): a source is
+/// the item itself (a link stays a link: copied, moved, deleted as one), the destination is
+/// followed. Sources a link leads out of the share are left out, each with its error; a
+/// destination out of the share fails the job. Remote paths stay as they are.
+fn confine_spec(mut spec: Spec) -> io::Result<(Spec, Vec<(PathBuf, io::Error)>)> {
+    let roots: Vec<_> = spec.roots.iter().filter_map(|p| Jail::admit(p).ok()).collect();
+    let resolve = |path: &Path, follow: bool| -> io::Result<PathBuf> {
+        let (root, rel) = roots
+            .iter()
+            .filter_map(|r| Some((r, r.rel_of(path)?)))
+            .max_by_key(|(_, rel)| std::cmp::Reverse(rel.as_os_str().len()))
+            .ok_or_else(confine::outside)?;
+        root.resolve(rel, follow)
+    };
+    let mut refused = Vec::new();
+    let mut sources = Vec::new();
+    for src in std::mem::take(&mut spec.sources) {
+        // a clean-up only takes the sources' names, below the destination
+        if crate::remote::is_remote(&src) || spec.op == Op::Cleanup {
+            sources.push(src);
+            continue;
+        }
+        match resolve(&src, false) {
+            Ok(real) => sources.push(real),
+            Err(e) => refused.push((src, e)),
+        }
+    }
+    spec.sources = sources;
+    if let Some(dest) = spec.dest.take() {
+        spec.dest = Some(if crate::remote::is_remote(&dest) { dest } else { resolve(&dest, true)? });
+    }
+    Ok((spec, refused))
 }
 
 fn emit(event: &Event) {
@@ -274,7 +321,7 @@ impl Engine {
     fn cleanup(&mut self) {
         let Some(dest) = self.spec.dest.clone() else { return };
         let clean = |dir: &Path, deep: bool, stack: &mut Vec<PathBuf>, seen: &mut usize| {
-            let Ok(items) = fs::read_dir(dir) else { return };
+            let Ok(items) = confine::read_dir(dir) else { return };
             for item in items.flatten() {
                 *seen += 1;
                 let name = item.file_name();
@@ -592,7 +639,7 @@ impl Engine {
             }
             self.made_dirs.push(target.clone());
         }
-        let mut children: Vec<OsString> = match fs::read_dir(src) {
+        let mut children: Vec<OsString> = match confine::read_dir(src) {
             Ok(rd) => rd.flatten().map(|e| e.file_name()).collect(),
             Err(e) => {
                 self.error(src, &e);
@@ -706,9 +753,10 @@ impl Engine {
     fn file(&mut self, src: &Path, meta: &Metadata, target: &Path) -> io::Result<()> {
         let dir = target.parent().unwrap_or(Path::new("/"));
         let part = dir.join(part_name(target.file_name().unwrap_or_default()));
-        let input = File::open(src)?;
+        let input = confine::open(src)?;
         let _ = fs::remove_file(&part);
         let output = OpenOptions::new().write(true).create_new(true).mode(0o666).open(&part)?;
+        confine::check_made(&output, &part)?;
         let result = self.fill(&input, &output, meta.len(), &part);
         let result = result.and_then(|()| {
             set_file_times(&output, meta);
@@ -872,7 +920,7 @@ impl Engine {
             target = unique_name(&dest, OsStr::new(&name), "");
         }
         let part = dest.join(part_name(target.file_name().unwrap_or_default()));
-        let file = match OpenOptions::new().write(true).create_new(true).mode(0o666).open(&part) {
+        let file = match OpenOptions::new().write(true).create_new(true).mode(0o666).open(&part).and_then(|f| confine::check_made(&f, &part).map(|()| f)) {
             Ok(f) => f,
             Err(e) => {
                 self.fail(crate::fsops::io_code(&e), describe(&e));
@@ -948,7 +996,7 @@ impl Engine {
             if meta.is_dir() {
                 header.set_entry_type(tar::EntryType::Directory);
                 tar.append_data(&mut header, &rel, io::empty())?;
-                let mut children: Vec<PathBuf> = match fs::read_dir(&path) {
+                let mut children: Vec<PathBuf> = match confine::read_dir(&path) {
                     Ok(rd) => rd
                         .flatten()
                         .filter(|e| !crate::fsops::is_system_name(&e.file_name().to_string_lossy()))
@@ -962,7 +1010,7 @@ impl Engine {
                 children.sort();
                 stack.extend(children.into_iter().rev());
             } else if meta.is_file() {
-                let mut file = match File::open(&path) {
+                let mut file = match confine::open(&path) {
                     Ok(f) => f,
                     Err(e) => {
                         self.error(&path, &e);
@@ -1021,7 +1069,7 @@ impl Engine {
             let mode = meta.mode();
             if meta.is_dir() {
                 zip.add_dir(&name, meta.mtime(), mode)?;
-                let mut children: Vec<PathBuf> = match fs::read_dir(&path) {
+                let mut children: Vec<PathBuf> = match confine::read_dir(&path) {
                     Ok(rd) => rd
                         .flatten()
                         .filter(|e| !crate::fsops::is_system_name(&e.file_name().to_string_lossy()))
@@ -1035,7 +1083,7 @@ impl Engine {
                 children.sort();
                 stack.extend(children.into_iter().rev());
             } else if meta.is_file() {
-                let mut file = match File::open(&path) {
+                let mut file = match confine::open(&path) {
                     Ok(f) => f,
                     Err(e) => {
                         self.error(&path, &e);
@@ -1104,7 +1152,12 @@ impl Engine {
             }
         };
         let password = self.spec.password.clone().unwrap_or_default();
-        let cmd = tool_command(tool, &archive, &work.tmp, list.as_deref(), password.is_empty());
+        let mut cmd = tool_command(tool, &archive, &work.tmp, list.as_deref(), password.is_empty());
+        // the tool writes below its folder only, whatever links the archive holds
+        let rules = super::landlock::writes_below(&work.tmp);
+        if let Some(rules) = &rules {
+            rules.apply(&mut cmd);
+        }
         let (code, out) = match self.run_tool(cmd, tool, &archive, size, &password) {
             Ok(Ok(done)) => done,
             Ok(Err(msg)) => {
@@ -1157,7 +1210,16 @@ impl Engine {
         self.p.files_total = wanted.iter().filter(|m| !m.dir).count() as u64;
         let file = work.list_file();
         let text: String = wanted.iter().map(|m| format!("{}\n", m.raw)).collect();
-        fs::write(&file, text).map_err(|e| describe(&e))?;
+        // a name planted beside the folder (a link) is never written through
+        let _ = fs::remove_file(&file);
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&file)
+            .and_then(|mut f| f.write_all(text.as_bytes()))
+            .map_err(|e| describe(&e))?;
         Ok(Some(file))
     }
 
@@ -1288,7 +1350,7 @@ impl Engine {
         let moves: Vec<(PathBuf, PathBuf)> = if picked {
             self.spec.members.iter().map(|m| (work.tmp.join(m), work.target.join(m.rsplit('/').next().unwrap_or(m)))).collect()
         } else {
-            fs::read_dir(&work.tmp).map(|d| d.flatten().map(|e| (e.path(), work.target.join(e.file_name()))).collect()).unwrap_or_default()
+            confine::read_dir(&work.tmp).map(|d| d.flatten().map(|e| (e.path(), work.target.join(e.file_name()))).collect()).unwrap_or_default()
         };
         for (from, to) in moves {
             if fs::symlink_metadata(&from).is_err() {
@@ -1375,7 +1437,7 @@ impl Engine {
             };
             if meta.is_dir() && !expanded {
                 stack.push((path.clone(), true));
-                match fs::read_dir(&path) {
+                match confine::read_dir(&path) {
                     Ok(rd) => stack.extend(rd.flatten().map(|e| (e.path(), false))),
                     Err(e) => self.error(&path, &e),
                 }
@@ -1609,7 +1671,7 @@ fn walk<E>(roots: &[PathBuf], mut visit: impl FnMut(&Path, &Metadata) -> Result<
         let Ok(meta) = fs::symlink_metadata(&path) else { continue };
         visit(&path, &meta)?;
         if meta.is_dir()
-            && let Ok(rd) = fs::read_dir(&path) {
+            && let Ok(rd) = confine::read_dir(&path) {
                 stack.extend(rd.flatten().map(|e| e.path()));
             }
     }
@@ -1661,11 +1723,10 @@ fn locate(root: &RecycleRoot, path: &Path, base: &Path) -> Option<Bin> {
 /// (`smb.recycle-cleanup`) reads. A rename only: an item on another filesystem (a mount
 /// inside the share) is refused, never copied nor deleted for good. Runs as the user.
 pub fn to_recycle(root: &RecycleRoot, rel: &Path, src: &Path) -> Result<(), String> {
-    use std::os::unix::fs::DirBuilderExt;
     let bin = root.path.join(crate::shares::RECYCLE);
     let target = bin.join(rel);
     let parent = target.parent().unwrap_or(&bin).to_path_buf();
-    fs::DirBuilder::new().recursive(true).mode(0o770).create(&parent).map_err(|e| describe(&e))?;
+    make_bin_dirs(&root.path, parent.strip_prefix(&root.path).unwrap_or(Path::new(crate::shares::RECYCLE))).map_err(|e| describe(&e))?;
     let name = target.file_name().unwrap_or_default().to_os_string();
     let mut candidate = target;
     let mut n = 1u32;
@@ -1692,6 +1753,25 @@ pub fn to_recycle(root: &RecycleRoot, rel: &Path, src: &Path) -> Result<(), Stri
         let times = [libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_NOW }, libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_OMIT }];
         // SAFETY: a valid C string and two timespecs
         unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), libc::AT_SYMLINK_NOFOLLOW) };
+    }
+    Ok(())
+}
+
+/// The folders of the recycle bin down to an item's: made one at a time, each a real folder
+/// (a link planted as `#recycle` or below it would carry the deleted items out of the share).
+fn make_bin_dirs(share: &Path, rel: &Path) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    let mut at = share.to_path_buf();
+    for part in rel.components() {
+        at.push(part);
+        match fs::DirBuilder::new().mode(0o770).create(&at) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+        if !fs::symlink_metadata(&at)?.is_dir() {
+            return Err(confine::outside());
+        }
     }
     Ok(())
 }
@@ -1788,7 +1868,7 @@ fn merge(from: &Path, to: &Path, policy: Policy) -> io::Result<()> {
     let Ok(old) = fs::symlink_metadata(to) else { return fs::rename(from, to) };
     let new = fs::symlink_metadata(from)?;
     if old.is_dir() && new.is_dir() {
-        for item in fs::read_dir(from)?.flatten() {
+        for item in confine::read_dir(from)?.flatten() {
             merge(&item.path(), &to.join(item.file_name()), policy)?;
         }
         return Ok(());

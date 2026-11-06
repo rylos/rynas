@@ -22,6 +22,7 @@ macro_rules! t {
 pub mod api;
 pub mod archive;
 pub mod caps;
+pub mod confine;
 pub mod conn_routes;
 pub mod conns;
 pub mod edit;

@@ -233,7 +233,7 @@ impl From<io::Error> for ApiError {
         let code = crate::fsops::io_code(&e);
         let status = match code {
             error_codes::NOT_FOUND => 404,
-            error_codes::PERMISSION_DENIED => 403,
+            error_codes::PERMISSION_DENIED | error_codes::OUTSIDE_SHARE => 403,
             error_codes::INVALID_VALUE | error_codes::REMOTE_AUTH_FAILED => 400,
             error_codes::ALREADY_EXISTS | error_codes::READ_ONLY | error_codes::CONFLICT | error_codes::HOST_KEY_CHANGED | error_codes::BUSY => 409,
             error_codes::TOOL_MISSING => 503,
