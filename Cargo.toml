@@ -1,5 +1,7 @@
 [workspace]
 resolver = "3"
+# own lock file, see its Cargo.toml
+exclude = ["crates/rynas-files-worker"]
 members = [
     "crates/rynas-api-types",
     "crates/rynas-auth",
@@ -18,6 +20,7 @@ members = [
     "crates/rynas-hw-synology",
     "crates/rynas-power",
     "crates/rynas-http",
+    "crates/rynas-files",
 ]
 
 [workspace.package]
@@ -46,6 +49,7 @@ rynas-hw = { path = "crates/rynas-hw" }
 rynas-hw-synology = { path = "crates/rynas-hw-synology", default-features = false }
 rynas-power = { path = "crates/rynas-power" }
 rynas-http = { path = "crates/rynas-http" }
+rynas-files = { path = "crates/rynas-files" }
 # local time zone arithmetic of the power schedule (DST-safe); the system tz database
 jiff = { version = "0.2.38", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 serde = { version = "1", features = ["derive"] }

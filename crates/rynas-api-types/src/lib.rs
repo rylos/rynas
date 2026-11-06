@@ -313,6 +313,31 @@ pub mod error_codes {
     pub const BAD_GATEWAY: &str = "bad_gateway";
     /// `rynasd` (or a provider) did not answer in time (504).
     pub const TIMEOUT: &str = "timeout";
+    /// File manager: the filesystem refused the operation for the user's permissions or ACLs
+    /// (403). Not `forbidden`, which means the user has no role in rynas.
+    pub const PERMISSION_DENIED: &str = "permission_denied";
+    /// File manager: the volume is full or the user's quota is used up (507).
+    pub const INSUFFICIENT_STORAGE: &str = "insufficient_storage";
+    /// File manager: the item cannot change — inside an archive, a read-only snapshot, a
+    /// read-only filesystem (409).
+    pub const READ_ONLY: &str = "read_only";
+    /// File manager: a shared folder itself cannot be renamed, copied, moved or deleted from
+    /// the file manager (400).
+    pub const SHARE_ROOT: &str = "share_root";
+    /// File manager: the archive is protected by a password and none (or a wrong one) was
+    /// given (400); the job message carries the same code.
+    pub const PASSWORD_REQUIRED: &str = "password_required";
+    /// File manager: an optional program the feature needs is not installed (7z, unrar,
+    /// ffmpeg...) (503); the message names it.
+    pub const TOOL_MISSING: &str = "tool_missing";
+    /// File manager: a remote SMB/SFTP server cannot be reached or broke the connection (502).
+    pub const REMOTE_UNREACHABLE: &str = "remote_unreachable";
+    /// File manager: a remote server refused the user name, password or key (400; never 401,
+    /// which would end the rynas session).
+    pub const REMOTE_AUTH_FAILED: &str = "remote_auth_failed";
+    /// File manager: an SFTP server presented a key other than the one pinned at the first
+    /// connection (409).
+    pub const HOST_KEY_CHANGED: &str = "host_key_changed";
 
     /// The code of a status when nothing more precise applies: used to turn framework
     /// rejections (bad query string, 405, 413...) into an `ApiError`.
@@ -367,6 +392,15 @@ pub mod error_codes {
         INTERNAL,
         BAD_GATEWAY,
         TIMEOUT,
+        PERMISSION_DENIED,
+        INSUFFICIENT_STORAGE,
+        READ_ONLY,
+        SHARE_ROOT,
+        PASSWORD_REQUIRED,
+        TOOL_MISSING,
+        REMOTE_UNREACHABLE,
+        REMOTE_AUTH_FAILED,
+        HOST_KEY_CHANGED,
     ];
 }
 

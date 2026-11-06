@@ -60,6 +60,8 @@ fn no_code_literals_outside_the_registry() {
         "rynas-power",
         "rynas-net",
         "rynas-http",
+        "rynas-files",
+        "rynas-files-worker",
     ] {
         rust_files(&crates.join(name).join("src"), &mut files);
     }

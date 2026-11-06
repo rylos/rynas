@@ -1,0 +1,43 @@
+[package]
+name = "rynas-files-worker"
+description = "rynas file manager worker: started by rynasd as the logged-in user for file requests and transfers, with the SMB and SFTP clients"
+version = "0.1.0"
+edition = "2024"
+authors = ["Marco Ziliani"]
+license = "BUSL-1.1"
+repository = "https://github.com/rylos/rynas"
+rust-version = "1.90"
+
+# A workspace of its own, with its own Cargo.lock: the SMB client (smb → sspi) and the SSH
+# client (russh) pin release candidates of RustCrypto crates that cannot share one lock
+# file with the rest of rynas (argon2, sha2 0.11). Nothing of it links into rynasd or
+# rynas-web; it shares the file manager core (`rynas-files`) by path.
+# Build and test it with `--manifest-path crates/rynas-files-worker/Cargo.toml`.
+[workspace]
+
+[[bin]]
+name = "rynas-files-worker"
+path = "src/main.rs"
+
+[dependencies]
+rynas-files = { path = "../rynas-files" }
+rynas-api-types = { path = "../rynas-api-types" }
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+# remote connections: SMB 2/3 and SFTP, pure Rust (the versions SynoFile ships)
+smb = { version = "0.12.1", default-features = false, features = ["multi_threaded", "sign", "encrypt"] }
+russh = { version = "0.54.5", default-features = false, features = ["ring", "rsa"] }
+russh-sftp = "2.4"
+tokio = { version = "1", features = ["rt", "net", "time", "io-util"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = "s"
