@@ -146,6 +146,11 @@ async fn the_file_manager_end_to_end() {
     let (s, v) = get(&app, "/v1/files/list?path=/nope").await;
     assert_eq!((s, v["code"].as_str()), (StatusCode::NOT_FOUND, Some(error_codes::NOT_FOUND)));
 
+    // a body without Content-Length (chunked) is refused, never buffered in rynasd
+    let chunks = futures_util::stream::iter([Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"abc"))]);
+    let (s, b, _) = call(&app, "POST", "/v1/files/upload?path=/docs&name=x.txt", Body::from_stream(chunks)).await;
+    assert_eq!(s, StatusCode::LENGTH_REQUIRED, "{}", String::from_utf8_lossy(&b));
+
     // mkdir, a name taken, a bad name
     let (s, v) = json_call(&app, "POST", "/v1/files/mkdir?path=/docs&name=new", json!({})).await;
     assert_eq!(s, StatusCode::OK, "{v}");

@@ -448,13 +448,11 @@ async fn handle(st: FilesState, req: Request) -> Res<Response> {
             let length = parts.headers.get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok());
             let (body, length) = match length {
                 Some(n) => (body, n),
-                // no length (chunked): read it whole, within the largest upload chunk
                 None if parts.method == Method::GET || parts.method == Method::HEAD => (Body::empty(), 0),
-                None => {
-                    let b = axum::body::to_bytes(body, 80 << 20).await.map_err(|_| ApiError::new(413, "request body too large"))?;
-                    let n = b.len() as u64;
-                    (Body::from(b), n)
-                }
+                // no length (chunked): refused, never buffered — reading it whole here, before
+                // a worker slot, let any signed-in user pile up 80 MiB per request in rynasd
+                // (browsers always send Content-Length with a fetch body)
+                None => return Err(ApiError::new(411, "Content-Length required").code(error_codes::BAD_REQUEST).into()),
             };
             let range = parts.headers.get(header::RANGE).and_then(|v| v.to_str().ok()).map(String::from);
             let deadline = if route == "upload" || route == "edit/save" { UPLOAD_DEADLINE } else { HEAD_DEADLINE };
