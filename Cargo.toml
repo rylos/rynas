@@ -20,6 +20,7 @@ members = [
     "crates/rynas-http",
     "crates/rynas-updates",
     "crates/rynas-nut",
+    "crates/rynas-removable",
 ]
 
 [workspace.package]
@@ -50,6 +51,7 @@ rynas-power = { path = "crates/rynas-power" }
 rynas-http = { path = "crates/rynas-http" }
 rynas-updates = { path = "crates/rynas-updates" }
 rynas-nut = { path = "crates/rynas-nut" }
+rynas-removable = { path = "crates/rynas-removable" }
 # local time zone arithmetic of the power schedule (DST-safe); the system tz database
 jiff = { version = "0.2.38", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 serde = { version = "1", features = ["derive"] }

@@ -3264,6 +3264,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rynas-removable"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "rynas-api-types",
+ "rynas-tasks",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "rynas-scheduler"
 version = "0.1.0"
 dependencies = [
