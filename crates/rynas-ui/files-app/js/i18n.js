@@ -81,6 +81,13 @@ const ERRORS = {
   timeout: "Il servizio dei file non ha risposto in tempo",
   internal: "Errore interno del server",
   network: "Server non raggiungibile",
+  share_root: "Una cartella condivisa non si può spostare, rinominare o eliminare da qui",
+  password_required: "Serve la password dell'archivio",
+  tool_missing: "Manca il programma necessario sul NAS",
+  remote_auth_failed: "Accesso al server remoto rifiutato",
+  host_key_changed: "La chiave del server remoto è cambiata",
+  unsupported_media_type: "Formato non supportato",
+  not_available: "Non disponibile su questo sistema",
 };
 
 export function errText(code) {
