@@ -9,6 +9,10 @@
 //!   (`no-cache`, `Last-Modified` from `ServeDir`).
 //! - `.br`/`.gz` siblings, if the build produced them, are served as is; otherwise the
 //!   compression layer of the app gzips on the fly (level 4, bodies over 1 KiB).
+//! - `files-app/` is the file manager (a Web Component the Files page loads on demand): plain
+//!   ES modules without hashes, revalidated (`no-cache` + `Last-Modified`).
+//! - `/files/<path>` is a route of the interface even when the last segment has a dot (a
+//!   folder `photos.2024`): it gets `index.html`, not a 404.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -29,9 +33,37 @@ const ONE_DAY: &str = "public, max-age=86400";
 const NO_CACHE: &str = "no-cache";
 
 /// CSP of every response; `index.html` replaces `{scripts}` with its inline script hashes.
+/// `blob:` images and media: previews the file manager makes in the browser (HEIC photos
+/// decoded to JPEG in a worker).
 pub const CSP_TEMPLATE: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'{scripts}; \
-style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; \
-object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
+style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; \
+connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
+
+/// A user's file shown inside the file manager (`GET /api/v1/files/view`: a PDF in an
+/// iframe, an image, a video): framed by rynas itself only, and nothing in it can run a script
+/// (an HTML or SVG file opened there is inert). `object-src 'self'` is what the browsers'
+/// PDF viewers need.
+pub const FILE_VIEW_CSP: &str = "default-src 'none'; img-src 'self' data: blob:; media-src 'self'; \
+style-src 'unsafe-inline'; font-src 'self' data:; object-src 'self'; frame-ancestors 'self'; \
+base-uri 'none'; form-action 'none'";
+
+/// Headers of [`FILE_VIEW_CSP`] on the file manager's `view` answers (set before the app-wide
+/// defaults, which are only added when absent).
+pub async fn file_view_headers(req: Request, next: Next) -> Response {
+    let view = req.uri().path() == "/api/v1/files/view";
+    let mut r = next.run(req).await;
+    if view && r.status().is_success() {
+        let h = r.headers_mut();
+        h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(FILE_VIEW_CSP));
+        h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("SAMEORIGIN"));
+    }
+    r
+}
+
+/// Routes of the interface whose last segment may contain a dot (folder names).
+pub fn is_ui_route(path: &str) -> bool {
+    path == "/files" || path.starts_with("/files/")
+}
 
 pub fn default_csp() -> String {
     CSP_TEMPLATE.replace("{scripts}", "")
@@ -119,7 +151,7 @@ impl Shell {
 async fn index(State(shell): State<Arc<Shell>>, uri: Uri) -> Response {
     let path = uri.path();
     let last = path.rsplit('/').next().unwrap_or("");
-    if path != "/index.html" && last.contains('.') {
+    if path != "/index.html" && last.contains('.') && !is_ui_route(path) {
         // a missing asset is a 404, not the SPA shell
         return (StatusCode::NOT_FOUND, "not found").into_response();
     }
@@ -202,6 +234,17 @@ mod tests {
         assert!(!is_hashed("/favicon.svg"));
         assert!(!is_hashed("/index.html"));
         assert!(!is_hashed("/fonts/inter-var.woff2"));
+    }
+
+    #[test]
+    fn files_routes_are_the_shell() {
+        assert!(is_ui_route("/files"));
+        assert!(is_ui_route("/files/photos/2024.summer"));
+        assert!(!is_ui_route("/files-app/rynas-files.js"));
+        assert!(!is_ui_route("/favicon.svg"));
+        assert!(FILE_VIEW_CSP.contains("frame-ancestors 'self'"));
+        assert!(!FILE_VIEW_CSP.contains("script-src"));
+        assert!(default_csp().contains("img-src 'self' data: blob:"));
     }
 
     #[test]

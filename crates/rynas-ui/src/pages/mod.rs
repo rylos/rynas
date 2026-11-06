@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod dashboard;
+pub mod files;
 pub mod hardware;
 pub mod notifications;
 pub mod scheduler;

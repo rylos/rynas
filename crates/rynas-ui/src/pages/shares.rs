@@ -6,6 +6,7 @@
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
+use leptos_router::hooks::use_query_map;
 use rynas_api_types::{
     Access, EffectiveAccess, EffectivePermission, GroupView, NfsRule, NfsSquash, Permission, PrincipalKind, Share, ShareStatus,
     ShareSubvolume, ShareView, SmbPreset, UnsharedFolder, UserView,
@@ -73,6 +74,21 @@ pub fn Shares() -> impl IntoView {
     let fdel = RwSignal::new(None::<UnsharedFolder>);
     let create = move || edit.set(Some(ShareEdit { view: None, tab: 0, prefill: None }));
     let share_again = Callback::new(move |f: UnsharedFolder| edit.set(Some(ShareEdit { view: None, tab: 0, prefill: Some(share_folders::reshare(&f)) })));
+    // `?edit=<share>&tab=<n>`: open that share's editor once the list has arrived (the file
+    // manager's "Description…" and "Permissions…" link here)
+    let query = use_query_map();
+    let asked = StoredValue::new(false);
+    Effect::new(move || {
+        let Some(name) = query.with(|q| q.get("edit")) else { return };
+        let tab = query.with(|q| q.get("tab")).and_then(|t| t.parse::<usize>().ok()).filter(|t| *t <= 3).unwrap_or(0);
+        let found = shares.data.with(|d| d.iter().flatten().find(|v| v.share.name == name).cloned());
+        if let Some(v) = found
+            && !asked.get_value()
+        {
+            asked.set_value(true);
+            edit.set(Some(ShareEdit { view: Some(v), tab, prefill: None }));
+        }
+    });
 
     let table = move || {
         if let Some(v) = shares.gate(5) {

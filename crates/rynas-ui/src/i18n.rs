@@ -1309,7 +1309,6 @@ dict! {
     "loading" => "Loading…", "Caricamento…";
     "error.load" => "Couldn't load data", "Impossibile caricare i dati";
     "soon" => "Coming soon", "In arrivo";
-    "soon.files" => "A dual-pane file manager modelled on SynoFile: tabs, previews, archives you can browse like folders, and a recycle bin.", "File manager a doppio pannello sul modello di SynoFile: schede, anteprime, archivi navigabili come cartelle e cestino.";
     "soon.plugins" => "Plugins that add pages, widgets and commands through a declarative manifest.", "Plugin che aggiungono pagine, widget e comandi tramite un manifest dichiarativo.";
     "soon.system" => "Network, software updates, notifications, system logs and a web terminal are on the way.", "Rete, aggiornamenti software, notifiche, log di sistema e terminale web sono in arrivo.";
     "sys.subtitle" => "System information and interface preferences", "Informazioni di sistema e preferenze dell'interfaccia";
@@ -2832,6 +2831,8 @@ mod tests {
             s.starts_with("rynas.")
                 || s.starts_with("test.battery.")
                 || s.ends_with(".rs")
+                || s.ends_with(".js")
+                || s.ends_with(".css")
                 || s.starts_with("fuse.")
                 || s.contains("example")
                 || matches!(s, "a.b" | "metrics.sample" | "hardware.status" | "task.started" | "task.updated" | "task.finished")
