@@ -220,11 +220,17 @@ pub fn loading(err: Signal<Option<String>>, retry: Callback<()>, lines: usize) -
 }
 
 /// A message built by [`crate::api::ApiErr::text`] (or any plain text): the translated text,
-/// then the server's English detail, if any, smaller and marked `lang="en"`.
+/// then the server's English detail, if any, as [`tech_detail`].
 pub fn err_view(msg: String) -> AnyView {
     let (main, detail) = crate::api::split_detail(&msg);
-    let detail = detail.map(|d| view! { <span class="err-detail" lang="en">{d.to_string()}</span> });
+    let detail = detail.map(|d| tech_detail(d.to_string()));
     view! { <span class="err-text">{main.to_string()}{detail}</span> }.into_any()
+}
+
+/// Text a program or the system wrote (command output, a server's English message): on its
+/// own line, smaller, after "Technical details" and marked `lang="en"`. Never the main text.
+pub fn tech_detail(text: String) -> AnyView {
+    view! { <span class="err-detail">{t("tech_details")}" "<span lang="en">{text}</span></span> }.into_any()
 }
 
 /// A value one page fetches for itself (the shared ones live in [`crate::live::Live`]):

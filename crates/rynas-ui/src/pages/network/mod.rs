@@ -184,13 +184,11 @@ fn rollback_notice(net: Net) -> AnyView {
         if !r.verified {
             text.push(' ');
             text.push_str(t("net.rollback_unverified"));
-            if !r.problems.is_empty() {
-                text.push(' ');
-                text.push_str(&r.problems.join("; "));
-            }
         }
+        // what the check found (interfaces, addresses, routes): diagnostics, in English
+        let problems = (!r.verified && !r.problems.is_empty()).then(|| ui::tech_detail(r.problems.join("; ")));
         let tone = if r.verified { Tone::Warn } else { Tone::Err };
-        Some(ui::note(tone, icons::ROTATE_CCW, text.into_any()))
+        Some(ui::note(tone, icons::ROTATE_CCW, view! { <span class="err-text">{text}{problems}</span> }.into_any()))
     })
     .into_any()
 }

@@ -289,6 +289,7 @@ dict! {
     "tasks.close_log" => "Close log", "Chiudi log";
     "tasks.background" => "You can close this window: the task keeps running.", "Puoi chiudere questa finestra: l'attività continua.";
     "task.failed" => "Failed", "Non riuscita";
+    "tech_details" => "Technical details:", "Dettagli tecnici:";
     "task.st.ok" => "OK", "OK";
     "task.st.error" => "Error", "Errore";
     "task.st.cancelled" => "Stopped", "Interrotta";

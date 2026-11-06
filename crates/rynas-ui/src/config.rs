@@ -274,7 +274,13 @@ pub async fn apply_now(keys: &[&str], error: RwSignal<Option<String>>) -> bool {
     changed();
     let fail = match res {
         Ok(task) if task.status == TaskStatus::Ok => return true,
-        Ok(task) => format!("{} {}", task_error(&task), t("cfg.apply_kept")),
+        Ok(task) => {
+            // the explanation goes with the translated text, before the technical detail
+            let e = task_error(&task);
+            let (main, detail) = crate::api::split_detail(&e);
+            let detail = detail.map(|d| format!("{}{d}", crate::api::DETAIL_SEP)).unwrap_or_default();
+            format!("{main} {}{detail}", t("cfg.apply_kept"))
+        }
         Err(e) => e.text(),
     };
     let _ = error.try_set(Some(fail));
