@@ -678,7 +678,12 @@ dialog.xfer { max-width: min(96vw, 520px); }
   .sidebar { display: none; }
   .banners { left: 0; }
   .info { display: none; }
-  .filter-box { width: 120px; }
+  /* the path on a line of its own, the tools below it: nothing cut off on a phone */
+  .toolbar { flex-wrap: wrap; row-gap: 6px; }
+  .crumbs, .path-input { order: -1; flex-basis: 100%; }
+  .filter-box { width: auto; flex: 1; min-width: 60px; }
+  .filter-box .mode { display: none; }
+  .toolbar .b-fwd, .toolbar .b-split, .toolbar .b-info, .toolbar .sep { display: none; }
   .xf-stats { grid-template-columns: repeat(2, 1fr); }
   .xfer-drawer { width: calc(100% - 20px); }
 }

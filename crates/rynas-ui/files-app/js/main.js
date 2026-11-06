@@ -74,7 +74,7 @@ class App {
     if (!init.conns) this.loadConns();
     if (init.whoami) this.checkHealth(init.whoami);
     this.started = true;
-    for (const m of this.pendingOpen || []) this.openAt(m.path, m.select);
+    for (const m of this.pendingOpen || []) this.openFromShell(m.path, m.select);
     this.pendingOpen = null;
   }
 
