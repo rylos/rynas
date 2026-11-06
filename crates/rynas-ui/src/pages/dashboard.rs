@@ -939,10 +939,12 @@ fn HardwareWidget() -> impl IntoView {
     let live = use_live();
     let hw = live.hardware;
     let h = move || hw.get().unwrap_or_default();
+    // the status changes with every reading: the LED pill is built again only when it changes
+    let led = Memo::new(move |_| hw.with(|h| h.as_ref().and_then(|h| h.status_led.clone())));
     view! {
         <section class="card widget">
             <WidgetHead icon=icons::FAN title="w.hardware">
-                {move || h().status_led.map(|l| {
+                {move || led.get().map(|l| {
                     let (tone, state, colour) = led_state(&l);
                     view! { <span title=colour><Status tone=tone text=state /></span> }
                 })}

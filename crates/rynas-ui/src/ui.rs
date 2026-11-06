@@ -329,7 +329,11 @@ fn fetch_text(src: StoredValue<(String, String)>, err: RwSignal<Option<String>>,
     leptos::task::spawn_local(async move {
         match crate::api::get_text(&url).await {
             Ok(text) => {
-                let _ = err.try_set(None);
+                // a set notifies even when the value stays the same: views that read the error
+                // (gates, `not_found` pages) would be built again on every successful poll
+                if err.try_with_untracked(Option::is_some) == Some(true) {
+                    let _ = err.try_set(None);
+                }
                 if src.try_with_value(|s| s.1 != text) == Some(true) {
                     src.update_value(|s| s.1.clone_from(&text));
                     apply.try_run(text);
@@ -338,7 +342,10 @@ fn fetch_text(src: StoredValue<(String, String)>, err: RwSignal<Option<String>>,
             // 401: the API layer shows the login screen
             Err(e) if e.status() == 401 => {}
             Err(e) => {
-                let _ = err.try_set(Some(e.code().to_string()));
+                let code = e.code().to_string();
+                if err.try_with_untracked(|cur| cur.as_deref() != Some(code.as_str())) == Some(true) {
+                    let _ = err.try_set(Some(code));
+                }
             }
         }
     });

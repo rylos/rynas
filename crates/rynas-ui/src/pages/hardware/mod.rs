@@ -28,8 +28,9 @@ const RM_TAB: usize = 4;
 
 /// The Synology plugin is present: the live provider is synohwd's, or (synohwd stopped, no
 /// status yet) the plugin's settings answer. Probed once per visit, only when the provider
-/// does not already tell.
-fn synology_present() -> Signal<bool> {
+/// does not already tell. A memo: the hardware status changes with every reading, and a
+/// derived signal would build the whole Synology tab again each time.
+fn synology_present() -> Memo<bool> {
     let hw = use_live().hardware;
     let probed = RwSignal::new(false);
     let asked = StoredValue::new(false);
@@ -44,7 +45,7 @@ fn synology_present() -> Signal<bool> {
             probed.set(ok);
         });
     });
-    Signal::derive(move || probed.get() || hw.with(|h| h.as_ref().is_some_and(|h| h.provider.as_deref() == Some("synology"))))
+    Memo::new(move |_| probed.get() || hw.with(|h| h.as_ref().is_some_and(|h| h.provider.as_deref() == Some("synology"))))
 }
 
 #[component]
@@ -72,10 +73,12 @@ pub fn Hardware() -> impl IntoView {
         }
     });
     let panel = move |i: usize, body: fn(Signal<bool>) -> AnyView| {
-        let active = Signal::derive(move || tab.get() == i);
+        let active: Signal<bool> = Memo::new(move |_| tab.get() == i).into();
+        // memo: the first visit of another tab must not build this one again (drafts)
+        let mounted = Memo::new(move |_| seen.with(|s| s[i]));
         view! {
             <div class="hw-panel" role="tabpanel" id=format!("hwt-p{i}") aria-labelledby=format!("hwt-t{i}") hidden=move || !active.get()>
-                {move || seen.with(|s| s[i]).then(|| body(active))}
+                {move || mounted.get().then(|| body(active))}
             </div>
         }
     };
@@ -98,6 +101,8 @@ fn overview(_active: Signal<bool>) -> AnyView {
     let loaded = move || hw.with(Option::is_some);
     let has_provider = move || hw.with(|h| h.as_ref().is_some_and(|h| h.provider.is_some()));
     let h = move || hw.get().unwrap_or_default();
+    // the status changes with every reading: the LED pill is built again only when it changes
+    let led = Memo::new(move |_| hw.with(|h| h.as_ref().and_then(|h| h.status_led.clone())));
 
     view! {
         <div class="hw-panel">
@@ -127,7 +132,7 @@ fn overview(_active: Signal<bool>) -> AnyView {
                         </div>
                         <div class="hw-sum-item">
                             <span class="muted small">{tr("hw.led")}</span>
-                            {move || match h().status_led {
+                            {move || match led.get() {
                                 Some(l) => {
                                     let (tone, state, colour) = led_state(&l);
                                     view! {
