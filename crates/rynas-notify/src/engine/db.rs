@@ -7,7 +7,9 @@ use std::path::Path;
 use std::time::Duration;
 
 use rusqlite::{Connection, Row};
-use rynas_api_types::notify::{EventState, Notification, NotifyCategory, NotifySeverity};
+use rynas_api_types::notify::{
+    BodyFormat, EventState, Notification, NotifyCategory, NotifySeverity,
+};
 
 const MIGRATIONS: &[&str] = &[
     // 1: events, condition state per key, silences, targets, rules, outbox
@@ -81,6 +83,9 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX outbox_due ON outbox (next_ms);
     INSERT INTO targets (name, enabled, language, config) VALUES ('Web interface', 1, 'en', '{\"kind\":\"ui\"}');",
+    // 2: stable event code (translated by clients from `fields`) and body format (text|log)
+    "ALTER TABLE events ADD COLUMN code TEXT NOT NULL DEFAULT '';
+    ALTER TABLE events ADD COLUMN body_format TEXT NOT NULL DEFAULT 'text';",
 ];
 
 pub const SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;
@@ -113,7 +118,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
 }
 
 pub const EVENT_COLS: &str = "id, ts_ms, last_ms, count, source, category, severity, key, state, \
-    title, body, fields, actions, silenced, acked_ms, acked_by, resolved_ms";
+    title, body, fields, actions, silenced, acked_ms, acked_by, resolved_ms, code, body_format";
 
 pub fn event_row(r: &Row) -> rusqlite::Result<Notification> {
     let text = |i: usize| -> rusqlite::Result<String> { r.get(i) };
@@ -135,6 +140,8 @@ pub fn event_row(r: &Row) -> rusqlite::Result<Notification> {
         acked_ms: r.get::<_, Option<i64>>(14)?.map(|v| v as u64),
         acked_by: r.get(15)?,
         resolved_ms: r.get::<_, Option<i64>>(16)?.map(|v| v as u64),
+        code: text(17)?,
+        body_format: BodyFormat::parse(&text(18)?).unwrap_or_default(),
     })
 }
 
@@ -156,4 +163,52 @@ pub fn meta_set(c: &Connection, k: &str, v: &str) -> rusqlite::Result<()> {
         [k, v],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migration_2_keeps_old_events_and_adds_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notify.db");
+        {
+            // a database at schema 1 with one event
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(MIGRATIONS[0]).unwrap();
+            c.pragma_update(None, "user_version", 1).unwrap();
+            c.execute(
+                "INSERT INTO events (ts_ms, last_ms, source, category, severity, key, state,
+                   title, body, fields, actions)
+                 VALUES (1, 1, 'storage', 'storage', 'critical', 'k', 'firing', 'RAID md2 degraded',
+                   '', '{\"array\":\"md2\"}', '[]')",
+                [],
+            )
+            .unwrap();
+        }
+        let c = open(&path).unwrap();
+        let v: u32 = c
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+        let n = get_event(&c, 1).unwrap().unwrap();
+        assert_eq!(n.title, "RAID md2 degraded");
+        assert_eq!(n.code, "");
+        assert_eq!(n.body_format, BodyFormat::Text);
+        assert_eq!(n.fields["array"], "md2");
+        c.execute(
+            "UPDATE events SET code = 'storage.raid_health', body_format = 'log' WHERE id = 1",
+            [],
+        )
+        .unwrap();
+        let n = get_event(&c, 1).unwrap().unwrap();
+        assert_eq!(
+            (n.code.as_str(), n.body_format),
+            ("storage.raid_health", BodyFormat::Log)
+        );
+        drop(c);
+        // reopening is a no-op
+        assert!(open(&path).is_ok());
+    }
 }

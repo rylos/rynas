@@ -128,6 +128,32 @@ impl EventState {
     }
 }
 
+/// How a notification body is meant to be shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BodyFormat {
+    /// Prose: may be reflowed.
+    #[default]
+    Text,
+    /// Command output or a log excerpt: monospace, line breaks kept.
+    Log,
+}
+
+impl BodyFormat {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Log => "log",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        [Self::Text, Self::Log]
+            .into_iter()
+            .find(|c| c.as_str() == s)
+    }
+}
+
 /// A link shown with a notification (UI page, documentation).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct EventAction {
@@ -159,6 +185,14 @@ pub struct NewEvent {
     pub fields: BTreeMap<String, String>,
     #[serde(default)]
     pub actions: Vec<EventAction>,
+    /// Stable event code (`hw.fan_stopped`, `synodeb.unit_failed`; empty = none). Clients
+    /// translate the title and body from the code and `fields` (code table in
+    /// `docs/phase1/plan.md`, "Event codes"); `title` and `body` stay the English fallback
+    /// and are what rules see.
+    #[serde(default)]
+    pub code: String,
+    #[serde(default)]
+    pub body_format: BodyFormat,
 }
 
 /// `GET /api/v1/notifications`: one stored event.
@@ -180,6 +214,11 @@ pub struct Notification {
     pub body: String,
     pub fields: BTreeMap<String, String>,
     pub actions: Vec<EventAction>,
+    /// Stable event code (see [`NewEvent::code`]); empty = none.
+    #[serde(default)]
+    pub code: String,
+    #[serde(default)]
+    pub body_format: BodyFormat,
     /// The key was silenced when it arrived: stored, not sent.
     pub silenced: bool,
     pub acked_ms: Option<u64>,
@@ -460,4 +499,168 @@ pub struct NotifyRule {
 pub struct NotifyAccepted {
     /// The stored notification; `null` when it was a repeat within the dedup window.
     pub id: Option<u64>,
+}
+
+// ------------------------------------------------------------------------- event texts
+
+/// Variants of a text, most specific first: `nev.<code>.title`, `….title_2`, `….title_3`.
+/// The first one whose placeholders all have a non-empty field wins, so an optional field
+/// gets a shorter variant without it.
+const VARIANTS: [&str; 3] = ["", "_2", "_3"];
+
+/// `[a-z0-9_]`, not empty: a value that can be part of a key.
+fn key_word(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// One placeholder value as shown: `nev.<code>.<field>.<value in lowercase>` when the
+/// dictionary has it (closed sets: SMART fail types, mdadm events, UPS reasons…), the task
+/// name `task.<value>` for a field `type`, a decimal number with a comma when `comma`,
+/// otherwise the value itself.
+fn shown_value(
+    code: &str,
+    name: &str,
+    v: &str,
+    lookup: &dyn Fn(&str) -> Option<&'static str>,
+    comma: bool,
+) -> String {
+    let lower = v.to_ascii_lowercase();
+    if key_word(&lower)
+        && let Some(s) = lookup(&format!("nev.{code}.{name}.{lower}"))
+    {
+        return s.to_string();
+    }
+    if name == "type"
+        && let Some(s) = lookup(&format!("task.{v}"))
+    {
+        return s.to_string();
+    }
+    let decimal = v.split_once('.').is_some_and(|(i, d)| {
+        let i = i.strip_prefix('-').unwrap_or(i);
+        !i.is_empty() && !d.is_empty() && i.bytes().chain(d.bytes()).all(|b| b.is_ascii_digit())
+    });
+    if comma && decimal {
+        v.replace('.', ",")
+    } else {
+        v.to_string()
+    }
+}
+
+/// `tpl` with every `{field}` replaced; `None` when a field is missing or empty.
+fn fill(
+    tpl: &str,
+    code: &str,
+    fields: &BTreeMap<String, String>,
+    lookup: &dyn Fn(&str) -> Option<&'static str>,
+    comma: bool,
+) -> Option<String> {
+    let mut out = String::with_capacity(tpl.len() + 32);
+    let mut rest = tpl;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        let close = after.find('}')?;
+        let name = &after[..close];
+        let v = fields.get(name).filter(|v| !v.trim().is_empty())?;
+        out.push_str(&shown_value(code, name, v, lookup, comma));
+        rest = &after[close + 1..];
+    }
+    out.push_str(rest);
+    Some(out)
+}
+
+/// The translated `part` (`"title"` or `"body"`) of an event: the first variant of
+/// `nev.<code>.<part>` that `lookup` knows and whose placeholders all have a non-empty field.
+/// `None` when there is no code, no key or a field is missing: the caller shows the English
+/// `title`/`body` of the event. Shared by the web interface and the channel templates, so
+/// both read the dictionary the same way.
+pub fn event_text(
+    code: &str,
+    part: &str,
+    fields: &BTreeMap<String, String>,
+    lookup: &dyn Fn(&str) -> Option<&'static str>,
+    comma: bool,
+) -> Option<String> {
+    if code.is_empty() {
+        return None;
+    }
+    VARIANTS.iter().find_map(|v| {
+        lookup(&format!("nev.{code}.{part}{v}"))
+            .and_then(|tpl| fill(tpl, code, fields, lookup, comma))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dict(k: &str) -> Option<&'static str> {
+        Some(match k {
+            "nev.x.y.title" => "RAID {array}: {event} ({device})",
+            "nev.x.y.title_2" => "RAID {array}: {event}",
+            "nev.x.y.event.fail" => "device failed",
+            "nev.x.y.body" => "{pct}% of {total}",
+            "nev.t.f.title" => "Failed: {type}",
+            "task.smart.test" => "SMART test",
+            _ => return None,
+        })
+    }
+
+    fn fields(kv: &[(&str, &str)]) -> BTreeMap<String, String> {
+        kv.iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn variants_values_and_fallback() {
+        let f = fields(&[("array", "md2"), ("event", "Fail"), ("device", "sda3")]);
+        assert_eq!(
+            event_text("x.y", "title", &f, &dict, false).as_deref(),
+            Some("RAID md2: device failed (sda3)")
+        );
+        // empty device: the shorter variant; unknown value: as sent
+        let f = fields(&[("array", "md2"), ("event", "Rebuild20"), ("device", "")]);
+        assert_eq!(
+            event_text("x.y", "title", &f, &dict, false).as_deref(),
+            Some("RAID md2: Rebuild20")
+        );
+        // a field every variant needs is missing: the caller falls back
+        assert_eq!(
+            event_text("x.y", "title", &fields(&[("event", "Fail")]), &dict, false),
+            None
+        );
+        // no code, unknown code, no body key
+        assert_eq!(event_text("", "title", &f, &dict, false), None);
+        assert_eq!(event_text("x.z", "title", &f, &dict, false), None);
+        assert_eq!(event_text("t.f", "body", &f, &dict, false), None);
+        // decimals with the language's separator, only for numbers
+        let f = fields(&[("pct", "85.3"), ("total", "192.0.2.1")]);
+        assert_eq!(
+            event_text("x.y", "body", &f, &dict, true).as_deref(),
+            Some("85,3% of 192.0.2.1")
+        );
+        assert_eq!(
+            event_text("x.y", "body", &f, &dict, false).as_deref(),
+            Some("85.3% of 192.0.2.1")
+        );
+        // task types through their names
+        assert_eq!(
+            event_text(
+                "t.f",
+                "title",
+                &fields(&[("type", "smart.test")]),
+                &dict,
+                false
+            )
+            .as_deref(),
+            Some("Failed: SMART test")
+        );
+        assert_eq!(
+            event_text("t.f", "title", &fields(&[("type", "x.y")]), &dict, false).as_deref(),
+            Some("Failed: x.y")
+        );
+    }
 }
