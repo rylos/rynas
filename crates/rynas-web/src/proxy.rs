@@ -159,6 +159,11 @@ pub fn routes() -> Router<AppState> {
         // read from upsd by rynas-web (`/ups`, `ups.status` events)
         .route("/ups/settings", get(forward).put(forward))
         .route("/ups/test", post(forward))
+        // UPS setup wizard: state, USB detection task, drivers, plan of an apply
+        .route("/ups/device", get(forward).put(forward))
+        .route("/ups/detect", post(forward))
+        .route("/ups/drivers", get(forward))
+        .route("/ups/plan/device", post(forward))
         // system updates (P6): apt list and tasks, automatic updates, kernel / DOM
         .route("/updates", get(forward))
         .route("/updates/check", post(forward))

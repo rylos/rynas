@@ -33,3 +33,4 @@ pub mod snapshots;
 pub mod storage_ops;
 pub mod updates;
 pub mod ups;
+pub mod ups_setup;

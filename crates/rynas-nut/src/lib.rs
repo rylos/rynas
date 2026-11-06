@@ -10,6 +10,8 @@
 //! No `upsc`/`upscmd` child process; every conversation is bounded by [`TIMEOUT`] and answers
 //! are capped at [`MAX_ANSWER`]. Talking to upsd never touches a disk.
 
+pub mod setup;
+
 use std::time::Duration;
 
 use rynas_api_types::ups::{UpsLink, UpsStatus};

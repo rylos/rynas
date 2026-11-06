@@ -9,6 +9,9 @@
 //! - [`BatteryTestRequest`]: `POST /api/v1/ups/test` sends the NUT instant command of the test
 //!   (`test.battery.start.quick|deep`, `test.battery.stop`; through `synodeb-ups test <kind>`
 //!   on synodeb) as the rynasd task `ups.test`.
+//! - Setup wizard: [`UpsDeviceConfig`] is the configuration key `ups.device` (the UPS's
+//!   driver, port and options); `POST /api/v1/ups/detect` runs the task `ups.detect`, whose
+//!   [`UpsDetectReport`] (candidates and their test runs) is part of [`UpsDeviceState`].
 
 use serde::{Deserialize, Serialize};
 
@@ -206,6 +209,247 @@ pub struct SafeModeReport {
 
 /// synodeb's Safe Mode reasons (rynasd's own watcher uses `lowbatt`, `fsd`, `waittimeup`).
 pub const SAFE_MODE_REASONS: &[&str] = &["lowbatt", "waittimeup", "nocomm", "fsd", "shutdowncmd"];
+
+// ---------------------------------------------------------------------------------------------
+// UPS setup (driver wizard): `ups.device`
+// ---------------------------------------------------------------------------------------------
+
+/// One driver option of a UPS (`key = value` in `ups.conf`, `-x key=value` for a driver);
+/// `value: null` is a flag such as `norating`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpsOption {
+    pub key: String,
+    #[serde(default)]
+    pub value: Option<String>,
+}
+
+impl UpsOption {
+    pub fn new(key: &str, value: Option<&str>) -> Self {
+        Self {
+            key: key.into(),
+            value: value.map(str::to_string),
+        }
+    }
+}
+
+/// A NUT driver with its port and options: one `ups.conf` section without its name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpsDevice {
+    /// Driver program (`usbhid-ups`, `nutdrv_qx`, `snmp-ups`...).
+    pub driver: String,
+    /// `auto` for USB, a serial device (`/dev/ttyS0`) or a network address (SNMP).
+    pub port: String,
+    #[serde(default)]
+    pub options: Vec<UpsOption>,
+}
+
+impl UpsDevice {
+    pub fn option(&self, key: &str) -> Option<&UpsOption> {
+        self.options.iter().find(|o| o.key == key)
+    }
+}
+
+/// Default NUT name of the UPS rynas sets up.
+pub const UPS_DEVICE_NAME: &str = "ups";
+
+/// The `ups.device` configuration key: the UPS rynas set up with the wizard. On plain NUT a
+/// rynas block in `ups.conf` (plus `nut.conf` MODE, a upsmon user in `upsd.users` and its
+/// `MONITOR` line in `upsmon.conf`); on synodeb the driver choice handed to synodeb.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpsDeviceConfig {
+    /// NUT name (the `ups.conf` section).
+    #[serde(default = "default_device_name")]
+    pub name: String,
+    pub device: UpsDevice,
+    /// `ups.conf` sections of the admin's that this setup removes (an explicit take over of
+    /// a section in the way, see [`UpsSection::conflict`]).
+    #[serde(default)]
+    pub take_over: Vec<String>,
+}
+
+fn default_device_name() -> String {
+    UPS_DEVICE_NAME.into()
+}
+
+/// A `ups.conf` section rynas does not manage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct UpsSection {
+    pub name: String,
+    pub driver: Option<String>,
+    pub port: Option<String>,
+    /// It is in the way of the UPS being set up (same name, or the same USB device): the
+    /// setup refuses unless it is listed in [`UpsDeviceConfig::take_over`].
+    #[serde(default)]
+    pub conflict: bool,
+}
+
+/// Why the wizard cannot run here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpsSetupBlock {
+    /// NUT is not installed (Debian package `nut`).
+    NutMissing,
+    /// The installed synodeb has no `synodeb-ups setup --driver` / `probe` yet.
+    SynodebTooOld,
+}
+
+/// Where a candidate comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpsCandidateSource {
+    /// rynas's table of USB IDs known to need a specific driver or options.
+    Known,
+    /// `nut-scanner`'s suggestion.
+    Scanner,
+    /// A generic driver tried for any USB UPS.
+    Generic,
+    /// Entered by the admin.
+    Manual,
+}
+
+/// Outcome of a test run of a candidate driver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum UpsProbeState {
+    /// Not tried (an earlier candidate answered, or the detection stopped).
+    #[default]
+    NotRun,
+    /// The driver reported the UPS status.
+    Ok,
+    /// The driver started but reported no status, or did not start.
+    Failed,
+    /// Another driver holds the device (stop the running UPS driver to test).
+    Busy,
+    /// Known to need a newer NUT than the installed one ([`UpsCandidate::min_nut`]).
+    NeedsNewerNut,
+    /// The driver program is not installed.
+    NoDriver,
+}
+
+/// What a test run read from the UPS.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct UpsProbe {
+    pub state: UpsProbeState,
+    /// `ups.status` (e.g. `OL CHRG`).
+    pub status: Option<String>,
+    pub battery_charge_pct: Option<u32>,
+    pub manufacturer: Option<String>,
+    pub model: Option<String>,
+    /// Last lines of the driver's output when it failed (English, as NUT prints them).
+    #[serde(default)]
+    pub log_tail: Vec<String>,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpsCandidate {
+    pub device: UpsDevice,
+    pub source: UpsCandidateSource,
+    /// Lowest NUT version this driver setting works with (`2.8.5`), when known.
+    pub min_nut: Option<String>,
+    pub probe: UpsProbe,
+}
+
+/// A UPS found on USB by `nut-scanner`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct UpsUsbDevice {
+    /// Four hex digits, lowercase (`0925`).
+    pub vendor_id: String,
+    pub product_id: String,
+    pub vendor: Option<String>,
+    pub product: Option<String>,
+    /// `nut-scanner`'s suggestion.
+    pub driver: Option<String>,
+}
+
+/// The last detection (task `ups.detect`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct UpsDetectReport {
+    pub at_ms: u64,
+    /// Installed NUT version (`2.8.1`).
+    pub nut_version: Option<String>,
+    #[serde(default)]
+    pub usb: Vec<UpsUsbDevice>,
+    #[serde(default)]
+    pub candidates: Vec<UpsCandidate>,
+    /// Index in `candidates` of the first one that answered.
+    pub found: Option<usize>,
+    /// A UPS driver service was running and the admin did not allow stopping it: nothing
+    /// was tested (ask, then detect again with `stop_drivers`).
+    #[serde(default)]
+    pub busy: bool,
+}
+
+/// `POST /api/v1/ups/detect` → 202 `TaskStarted` (task `ups.detect`); the report is in
+/// `GET /api/v1/ups/device` once the task ends.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct UpsDetectRequest {
+    /// Test only this setting (manual entry: serial, network, another driver); otherwise
+    /// scan USB and try the candidates in order until one answers.
+    #[serde(default)]
+    pub device: Option<UpsDevice>,
+    /// Stop a running UPS driver during the test (it is started again afterwards).
+    #[serde(default)]
+    pub stop_drivers: bool,
+}
+
+/// `GET /api/v1/ups/device`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct UpsDeviceState {
+    pub backend: UpsBackend,
+    /// Why the wizard cannot run (`null`: it can).
+    pub blocked: Option<UpsSetupBlock>,
+    pub nut_version: Option<String>,
+    pub applied: Option<UpsDeviceConfig>,
+    /// The session user's staged value, when it differs.
+    pub pending: Option<UpsDeviceConfig>,
+    /// `ups.conf` sections rynas does not manage (plain NUT only), with `conflict` computed
+    /// against `pending`, else `applied`.
+    #[serde(default)]
+    pub foreign: Vec<UpsSection>,
+    /// A UPS driver service is running now.
+    #[serde(default)]
+    pub drivers_running: bool,
+    pub detect: Option<UpsDetectReport>,
+}
+
+/// One driver of `GET /api/v1/ups/drivers`: installed NUT drivers with the manufacturers
+/// NUT's hardware list names for them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct NutDriver {
+    pub name: String,
+    #[serde(default)]
+    pub manufacturers: Vec<String>,
+}
+
+/// A file the setup changes (`POST /api/v1/ups/plan/device`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct UpsPlanFile {
+    pub path: String,
+    /// rynas's current block (`null`: none yet).
+    pub before: Option<String>,
+    pub after: String,
+    /// Lines outside the block the setup removes (taken-over sections, contradicting lines).
+    #[serde(default)]
+    pub removed: Vec<String>,
+}
+
+/// `POST /api/v1/ups/plan/device` (no side effects): what applying the setting does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct UpsSetupPlan {
+    #[serde(default)]
+    pub files: Vec<UpsPlanFile>,
+    /// Commands run after the files (service restarts, or synodeb's setup).
+    #[serde(default)]
+    pub commands: Vec<String>,
+    /// Sections in the way that are not taken over: the apply would refuse.
+    #[serde(default)]
+    pub conflicts: Vec<String>,
+}
 
 #[cfg(test)]
 mod tests {

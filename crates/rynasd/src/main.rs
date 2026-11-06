@@ -279,6 +279,11 @@ fn open_config(
     domains.push(Arc::new(rynasd::ups::UpsDomain {
         synodeb: ups_synodeb,
     }));
+    // ups.device: the UPS set up with the wizard (rynas blocks of /etc/nut, or synodeb-ups)
+    domains.push(Arc::new(rynasd::ups_setup::DeviceDomain {
+        synodeb: ups_synodeb,
+        synodeb_ups: PathBuf::from(rynasd::ups::SYNODEB_UPS),
+    }));
     let (removable_domain, removable_settings) = rynasd::removable::RemovableDomain::new();
     let removable_tx = removable_domain.tx.clone();
     domains.push(Arc::new(removable_domain));
@@ -679,13 +684,19 @@ fn main() -> std::io::Result<()> {
             synodeb: opened.ups_synodeb,
             root: opened.root.clone(),
             dry: args.dry_system,
-            synodeb_ups: PathBuf::from("/usr/sbin/synodeb-ups"),
+            synodeb_ups: PathBuf::from(rynasd::ups::SYNODEB_UPS),
             upsd: args
                 .upsd
                 .clone()
                 .unwrap_or_else(|| rynas_nut::UPSD.to_string()),
             // --dry-system never talks to the host's own upsd
             talk_to_upsd: !args.dry_system || args.upsd.is_some(),
+            // --dry-system: the wizard's scans and test runs are simulated
+            setup: rynasd::ups_setup::Setup::new(if args.dry_system {
+                Arc::new(rynasd::ups_setup::DryRunner::default())
+            } else {
+                Arc::new(rynasd::ups_setup::HostRunner)
+            }),
         });
         // NUT backend: rynasd follows the UPS itself (synodeb-ups does it on synodeb)
         if !ups.synodeb && ups.talk_to_upsd {
