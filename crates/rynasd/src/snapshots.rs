@@ -635,18 +635,22 @@ async fn list(
                     continue;
                 }
                 let snaps = scan::scan(&l.dir, &l.job).map_err(Error::internal)?;
-                out.extend(snaps.into_iter().map(|s| SnapshotInfo {
-                    reason: l.system.then(|| reasons.get(&s.name).cloned()).flatten(),
-                    id: s.name,
-                    job: l.job.clone(),
-                    share: l.share.clone(),
-                    path: s.path.display().to_string(),
-                    created_ms: s.created_ms.max(0) as u64,
-                    readonly: s.info.as_ref().is_some_and(|i| i.readonly),
-                    uuid: s.info.as_ref().and_then(|i| i.uuid.clone()),
-                    parent_uuid: s.info.as_ref().and_then(|i| i.parent_uuid.clone()),
-                    received_uuid: s.info.as_ref().and_then(|i| i.received_uuid.clone()),
-                    deletion: s.deletion,
+                out.extend(snaps.into_iter().map(|s| {
+                    let reason = l.system.then(|| reasons.get(&s.name).cloned()).flatten();
+                    SnapshotInfo {
+                        reason_code: reason.as_deref().map(system::reason_code),
+                        reason,
+                        id: s.name,
+                        job: l.job.clone(),
+                        share: l.share.clone(),
+                        path: s.path.display().to_string(),
+                        created_ms: s.created_ms.max(0) as u64,
+                        readonly: s.info.as_ref().is_some_and(|i| i.readonly),
+                        uuid: s.info.as_ref().and_then(|i| i.uuid.clone()),
+                        parent_uuid: s.info.as_ref().and_then(|i| i.parent_uuid.clone()),
+                        received_uuid: s.info.as_ref().and_then(|i| i.received_uuid.clone()),
+                        deletion: s.deletion,
+                    }
                 }));
             }
             out.sort_by_key(|s| std::cmp::Reverse(s.created_ms));

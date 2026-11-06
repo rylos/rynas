@@ -184,6 +184,22 @@ pub fn reasons_path(state_dir: &Path) -> PathBuf {
     state_dir.join("snapshots").join("system.jsonl")
 }
 
+/// Reason of the restore points the apt hook takes.
+pub const APT_REASON: &str = "apt";
+/// Reason of a restore point taken by hand (the default of `rynasctl snapshot system`).
+pub const MANUAL_REASON: &str = "manual";
+
+/// The code of a recorded reason; free text is `Other`.
+pub fn reason_code(r: &str) -> rynas_api_types::snapshots::RestorePointReason {
+    use rynas_api_types::snapshots::RestorePointReason as R;
+    match r {
+        APT_REASON => R::Apt,
+        MANUAL_REASON => R::Manual,
+        crate::rootfs::BEFORE_REASON => R::BeforeRollback,
+        _ => R::Other,
+    }
+}
+
 /// A reason given on the command line: short, printable.
 pub fn valid_reason(r: &str) -> bool {
     !r.is_empty()
@@ -195,6 +211,18 @@ pub fn valid_reason(r: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn known_reasons_have_a_code() {
+        use rynas_api_types::snapshots::RestorePointReason as R;
+        assert_eq!(reason_code("apt"), R::Apt);
+        assert_eq!(reason_code("manual"), R::Manual);
+        assert_eq!(reason_code("before rollback"), R::BeforeRollback);
+        assert_eq!(reason_code("before upgrade"), R::Other);
+        let j = serde_json::to_string(&R::BeforeRollback).unwrap();
+        assert_eq!(j, r#""before_rollback""#);
+        assert_eq!(serde_json::from_str::<R>(r#""cron""#).unwrap(), R::Other);
+    }
 
     #[test]
     fn reasons_log_is_capped_and_read_back() {

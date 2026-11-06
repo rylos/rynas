@@ -1910,6 +1910,9 @@ dict! {
     "snap.latest" => "Latest", "Più recente";
     "snap.latest_at" => "Latest {when}", "Ultimo {when}";
     "snap.reason" => "Reason: {r}", "Motivo: {r}";
+    "snap.why.apt" => "Before package changes", "Prima di modifiche ai pacchetti";
+    "snap.why.manual" => "Taken by hand", "Creato a mano";
+    "snap.why.before_rollback" => "System before a rollback", "Sistema prima di un rollback";
     "snap.browse" => "Browse", "Sfoglia";
     "snap.browse_title" => "Browse {id}", "Sfoglia {id}";
     "snap.path" => "Folder", "Cartella";

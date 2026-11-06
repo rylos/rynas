@@ -225,9 +225,28 @@ pub struct SnapshotInfo {
     pub received_uuid: Option<String>,
     /// Whether it may be deleted, and why not.
     pub deletion: SnapshotDeletion,
-    /// Why a system restore point was taken (`apt`, `manual`...).
+    /// Why a system restore point was taken, as given to `rynasctl snapshot system --reason`
+    /// (`apt`, `manual`, `before rollback` or free text); the UI translates `reason_code`.
     #[serde(default)]
     pub reason: Option<String>,
+    /// `reason` as a code; `other` for free text, shown as it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<RestorePointReason>,
+}
+
+/// Why a system restore point was taken ([`SnapshotInfo::reason_code`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RestorePointReason {
+    /// Taken by the apt hook before dpkg changed packages.
+    Apt,
+    /// Taken by hand (`rynasctl snapshot system` without `--reason`).
+    Manual,
+    /// The system replaced by a rollback, kept so the rollback can be undone.
+    BeforeRollback,
+    /// Free text given with `--reason`, or a code this client does not know.
+    #[serde(other)]
+    Other,
 }
 
 /// Whether deleting a snapshot is allowed (chain-safe delete).
