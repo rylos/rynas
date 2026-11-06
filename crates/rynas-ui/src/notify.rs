@@ -14,7 +14,7 @@ use std::cell::Cell;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use rynas_api_types::notify::{AckAllResult, Notification, NotificationChangeKind, NotificationEvent, NotifySeverity};
+use rynas_api_types::notify::{AckAllResult, BodyFormat, Notification, NotificationChangeKind, NotificationEvent, NotifySeverity, event_text};
 
 use crate::alerts::{self, Alert};
 use crate::api;
@@ -46,6 +46,39 @@ pub fn severity_key(s: NotifySeverity) -> &'static str {
         NotifySeverity::Error => "nt.sev.error",
         NotifySeverity::Critical => "nt.sev.critical",
     }
+}
+
+// ------------------------------------------------------------------ event texts
+// `nev.<code>.title|body[_2|_3]` keys with `{field}` placeholders, filled by the shared
+// `rynas_api_types::notify::event_text` (the channel templates of rynasd use the same rules)
+
+fn comma() -> bool {
+    i18n::lang() == i18n::Lang::It
+}
+
+type Lookup<'a> = &'a dyn Fn(&str) -> Option<&'static str>;
+
+fn title_with(n: &Notification, lookup: Lookup, comma: bool) -> String {
+    event_text(&n.code, "title", &n.fields, lookup, comma).unwrap_or_else(|| n.title.clone())
+}
+
+fn body_with(n: &Notification, lookup: Lookup, comma: bool) -> String {
+    if n.body_format == BodyFormat::Log {
+        return n.body.clone();
+    }
+    event_text(&n.code, "body", &n.fields, lookup, comma).unwrap_or_else(|| n.body.clone())
+}
+
+/// Title of a server notification in the current language (tracked): `nev.<code>.title`
+/// filled from its fields, the server's English title when that is not possible.
+pub fn event_title(n: &Notification) -> String {
+    title_with(n, &i18n::try_t, comma())
+}
+
+/// Body of a server notification in the current language (tracked). Log bodies are command
+/// output: shown as sent.
+pub fn event_body(n: &Notification) -> String {
+    body_with(n, &i18n::try_t, comma())
 }
 
 /// Server notifications as the bell shows them.
@@ -257,8 +290,11 @@ fn server_item(n: Notification, server: Server, open: RwSignal<bool>) -> AnyView
     let id = n.id;
     let when = i18n::short_when(n.last_ms);
     let count = (n.count > 1).then(|| format!("×{}", n.count));
-    let title = n.title.clone();
-    let ack_label = format!("{}: {}", t("nt.ack"), n.title);
+    let log = n.body_format == BodyFormat::Log;
+    let (n1, n2, n3) = (n.clone(), n.clone(), n.clone());
+    let title = move || event_title(&n1);
+    let body = move || event_body(&n2);
+    let ack_label = move || format!("{}: {}", t("nt.ack"), event_title(&n3));
     view! {
         <li class="notif-item">
             <a class=format!("notif unread {}", tone.class()) href="/notifications" on:click=move |_| open.set(false)>
@@ -268,7 +304,8 @@ fn server_item(n: Notification, server: Server, open: RwSignal<bool>) -> AnyView
                         <strong>{title}</strong>
                         <span class="notif-time tnum">{count.map(|c| view! { <span class="chip">{c}</span> " " })}{when}</span>
                     </span>
-                    <span class="notif-text clamp-2">{n.body}</span>
+                    // command output keeps its line breaks, still clamped to two lines
+                    <span class=if log { "notif-text clamp-2 pre-line mono" } else { "notif-text clamp-2" }>{body}</span>
                 </span>
                 <span class="notif-dot" aria-hidden="true"></span>
             </a>
@@ -404,5 +441,65 @@ pub fn Bell() -> impl IntoView {
                 </div>
             </Show>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::i18n::{Lang, lookup};
+
+    fn it(k: &str) -> Option<&'static str> {
+        lookup(k, Lang::It)
+    }
+
+    fn en(k: &str) -> Option<&'static str> {
+        lookup(k, Lang::En)
+    }
+
+    fn note(code: &str, fields: &[(&str, &str)], format: BodyFormat) -> Notification {
+        Notification {
+            code: code.into(),
+            title: "server title".into(),
+            body: "line 1\nline 2".into(),
+            fields: fields.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            body_format: format,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn translated_with_fallback() {
+        let unit = ["synodeb", "unit_failed"].join(".");
+        let n = note(&unit, &[("unit", "web-app.service")], BodyFormat::Log);
+        assert_eq!(title_with(&n, &it, true), "Servizio non riuscito: web-app.service");
+        assert_eq!(title_with(&n, &en, false), "Service failed: web-app.service");
+        // log bodies are shown as sent
+        assert_eq!(body_with(&n, &it, true), "line 1\nline 2");
+        // missing or empty field, unknown code, no code: the server's text
+        let n = note(&unit, &[("unit", " ")], BodyFormat::Text);
+        assert_eq!(title_with(&n, &it, true), "server title");
+        let n = note(&["synodeb", "no_such_event"].join("."), &[], BodyFormat::Text);
+        assert_eq!((title_with(&n, &it, true).as_str(), body_with(&n, &it, true).as_str()), ("server title", "line 1\nline 2"));
+        let n = note("", &[], BodyFormat::Text);
+        assert_eq!(title_with(&n, &it, true), "server title");
+        // a code without a body key keeps the server body
+        let n = note(&unit, &[("unit", "x")], BodyFormat::Text);
+        assert_eq!(body_with(&n, &it, true), "line 1\nline 2");
+    }
+
+    #[test]
+    fn variants_and_values() {
+        let raid = ["synodeb", "raid_event"].join(".");
+        let n = note(&raid, &[("array", "md2"), ("event", "Fail"), ("device", "sda3")], BodyFormat::Log);
+        assert_eq!(title_with(&n, &it, true), "RAID md2: dispositivo guasto (sda3)");
+        let n = note(&raid, &[("array", "md2"), ("event", "RebuildFinished"), ("device", "")], BodyFormat::Log);
+        assert_eq!(title_with(&n, &en, false), "RAID md2: rebuild finished");
+        let task = ["task", "failed"].join(".");
+        let n = note(&task, &[("type", ["smart", "test"].join(".").as_str())], BodyFormat::Text);
+        assert_eq!(title_with(&n, &it, true), "Attività non riuscita: Test SMART");
+        let vol = ["storage", "volume_full"].join(".");
+        let n = note(&vol, &[("volume", "data"), ("used_pct", "91.5"), ("used_gib", "10.0"), ("free_gib", "1.0")], BodyFormat::Text);
+        assert_eq!(body_with(&n, &it, true), "data usa 10,0 GiB, circa 1,0 GiB liberi (91,5%).");
     }
 }

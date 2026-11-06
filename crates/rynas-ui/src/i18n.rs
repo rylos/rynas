@@ -142,7 +142,7 @@ thread_local! {
     };
 }
 
-fn lookup(key: &str, lang: Lang) -> Option<&'static str> {
+pub(crate) fn lookup(key: &str, lang: Lang) -> Option<&'static str> {
     INDEX.with(|idx| {
         let at = idx.by_key.binary_search_by(|&e| idx.text(e as usize * 3).cmp(key)).ok()?;
         let e = idx.by_key[at] as usize * 3;
@@ -236,6 +236,182 @@ dict! {
     "notif.array_sync_text" => "{name} ({level}): {pct} complete.", "{name} ({level}): {pct} completato.";
     "notif.volume_full" => "Volume almost full", "Volume quasi pieno";
     "notif.volume_full_text" => "{mount} is {pct} full, {free} free.", "{mount} è pieno al {pct}, {free} liberi.";
+    // server notification sources (`nt.src.<source>`; every synodeb sender is one label)
+    "nt.src.synodeb" => "Base system", "Sistema di base";
+    "nt.src.storage" => "Storage monitor", "Monitoraggio storage";
+    "nt.src.hardware" => "Hardware monitor", "Monitoraggio hardware";
+    "nt.src.auth" => "Sign-in", "Accesso";
+    "nt.src.task" => "Tasks", "Attività";
+    "nt.src.config" => "Configuration", "Configurazione";
+    "nt.src.snapshots" => "Snapshots", "Snapshot";
+    "nt.src.power" => "Power", "Alimentazione";
+    "nt.src.network" => "Network", "Rete";
+    "nt.src.notifications" => "Notifications", "Notifiche";
+    // server notification texts by event code: `nev.<code>.title|body` with `{field}`
+    // placeholders; `…_2`/`…_3` are variants for optional (empty) fields, most specific
+    // first; `nev.<code>.<field>.<value>` translates a field value of a closed set. A missing
+    // key or field shows the server's English text (rynas_api_types::notify::event_text).
+    // Code table: docs/phase1/plan.md, "Event codes". rynasd reads these lines for the
+    // Italian channel messages, so keep one entry per line.
+    // hardware
+    "nev.hw.fan_stopped.title" => "Fan {fan} stopped", "Ventola {fan} ferma";
+    "nev.hw.fan_running.title" => "Fan {fan} is running again", "La ventola {fan} gira di nuovo";
+    "nev.hw.fan_failure.title" => "Fan failure", "Guasto alle ventole";
+    "nev.hw.fan_failure.body" => "The hardware controller reports a fan failure: check the fans before the disks overheat.", "Il controller hardware segnala un guasto alle ventole: controllale prima che i dischi si surriscaldino.";
+    "nev.hw.fans_ok.title" => "Fans back to normal", "Ventole tornate alla normalità";
+    "nev.hw.monitor_stale.title" => "Hardware monitor not updating", "Il monitoraggio hardware non si aggiorna";
+    "nev.hw.monitor_stale.body" => "The hardware provider ({provider}) has not written its status for {age_s} s: fan and temperature alarms are blind.", "Il provider hardware ({provider}) non aggiorna il suo stato da {age_s} s: gli allarmi di ventole e temperature non funzionano.";
+    "nev.hw.monitor_ok.title" => "Hardware monitor updating again", "Il monitoraggio hardware si aggiorna di nuovo";
+    "nev.hw.temp_high.title" => "{label} temperature {celsius} °C", "Temperatura {label} {celsius} °C";
+    "nev.hw.temp_high.body" => "{label} is at {celsius} °C (warning {warn_c} °C, critical {crit_c} °C).", "{label} è a {celsius} °C (attenzione {warn_c} °C, critico {crit_c} °C).";
+    "nev.hw.temp_ok.title" => "{label} temperature back to normal ({celsius} °C)", "Temperatura {label} tornata normale ({celsius} °C)";
+    "nev.hw.thermal_shutdown.title" => "Thermal shutdown imminent: {label} {celsius} °C", "Spegnimento termico imminente: {label} {celsius} °C";
+    "nev.hw.thermal_shutdown.body" => "{label} is at {celsius} °C; the hardware controller powers the NAS off at {shutdown_c} °C (when thermal shutdown is on). Check the fans and the airflow.", "{label} è a {celsius} °C; il controller hardware spegne il NAS a {shutdown_c} °C (se lo spegnimento termico è attivo). Controlla le ventole e il flusso d'aria.";
+    "nev.hw.thermal_ok.title" => "{label} cooled down ({celsius} °C)", "{label} si è raffreddato ({celsius} °C)";
+    // storage
+    "nev.storage.disk_warning.title" => "Disk {disk_label} needs attention", "Il disco {disk_label} richiede attenzione";
+    "nev.storage.disk_failing.title" => "Disk {disk_label} failing", "Disco {disk_label} in avaria";
+    "nev.storage.disk_ok.title" => "Disk {disk_label} healthy again", "Disco {disk_label} di nuovo integro";
+    "nev.storage.raid_degraded.title" => "RAID {array} degraded", "RAID {array} degradato";
+    "nev.storage.raid_degraded.body" => "{array} ({level}) is running without redundancy: {degraded} of {raid_disks} members missing, state \"{state}\". Members: {members}.", "{array} ({level}) è senza ridondanza: mancano {degraded} membri su {raid_disks}, stato \"{state}\". Membri: {members}.";
+    "nev.storage.raid_degraded.body_2" => "{array} ({level}) is running without redundancy: {degraded} of {raid_disks} members missing, state \"{state}\".", "{array} ({level}) è senza ridondanza: mancano {degraded} membri su {raid_disks}, stato \"{state}\".";
+    "nev.storage.raid_failed.title" => "RAID {array} failed", "RAID {array} guasto";
+    "nev.storage.raid_failed.body" => "{array} ({level}) has failed: {degraded} of {raid_disks} members missing, state \"{state}\". Members: {members}.", "{array} ({level}) è guasto: mancano {degraded} membri su {raid_disks}, stato \"{state}\". Membri: {members}.";
+    "nev.storage.raid_failed.body_2" => "{array} ({level}) has failed: {degraded} of {raid_disks} members missing, state \"{state}\".", "{array} ({level}) è guasto: mancano {degraded} membri su {raid_disks}, stato \"{state}\".";
+    "nev.storage.raid_inactive.title" => "RAID {array} inactive", "RAID {array} inattivo";
+    "nev.storage.raid_inactive.body" => "{array} ({level}) is not running, state \"{state}\".", "{array} ({level}) non è in funzione, stato \"{state}\".";
+    "nev.storage.raid_ok.title" => "RAID {array} healthy again", "RAID {array} di nuovo integro";
+    "nev.storage.btrfs_errors.title" => "Volume {volume}: device errors on {device}", "Volume {volume}: errori sul dispositivo {device}";
+    "nev.storage.btrfs_errors.body" => "Device {device} of volume {volume}: write {write_io} read {read_io} flush {flush_io} corruption {corruption} generation {generation} errors.", "Dispositivo {device} del volume {volume}: errori di scrittura {write_io}, lettura {read_io}, flush {flush_io}, corruzione {corruption}, generazione {generation}.";
+    "nev.storage.btrfs_errors_cleared.title" => "Volume {volume}: device error counters cleared", "Volume {volume}: contatori di errore del dispositivo azzerati";
+    "nev.storage.btrfs_missing.title" => "Volume {volume}: device {devid} missing", "Volume {volume}: dispositivo {devid} mancante";
+    "nev.storage.btrfs_back.title" => "Volume {volume}: device {devid} back", "Volume {volume}: dispositivo {devid} di nuovo presente";
+    "nev.storage.volume_full.title" => "Volume {volume} {used_pct}% full", "Volume {volume}: {used_pct}% occupato";
+    "nev.storage.volume_full.body" => "{volume} uses {used_gib} GiB, about {free_gib} GiB free ({used_pct}%).", "{volume} usa {used_gib} GiB, circa {free_gib} GiB liberi ({used_pct}%).";
+    "nev.storage.volume_ok.title" => "Volume {volume} back under {limit_pct}% ({used_pct}%)", "Volume {volume} di nuovo sotto soglia: {used_pct}% (limite {limit_pct}%)";
+    // tasks and configuration (`{type}` shows the task name of `task.<type>`)
+    "nev.task.failed.title" => "Task failed: {type}", "Attività non riuscita: {type}";
+    "nev.task.succeeded.title" => "Task succeeded: {type}", "Attività riuscita: {type}";
+    "nev.config.apply_failed.title" => "Configuration apply failed", "Applicazione della configurazione non riuscita";
+    "nev.config.apply_ok.title" => "Configuration apply succeeded", "Applicazione della configurazione riuscita";
+    "nev.sched.task_failed.title" => "Task {name} failed", "Attività {name} non riuscita";
+    "nev.sched.task_failed.body" => "Result: {result}. See the task history for the output.", "Esito: {result}. L'output è nella cronologia dell'attività.";
+    "nev.sched.task_ok.title" => "Task {name} succeeded", "Attività {name} riuscita";
+    "nev.sched.task_ok.body" => "Result: {result}. See the task history for the output.", "Esito: {result}. L'output è nella cronologia dell'attività.";
+    "nev.sched.task_finished.title" => "Task {name} finished", "Attività {name} completata";
+    "nev.sched.task_finished.body" => "Result: {result}. See the task history for the output.", "Esito: {result}. L'output è nella cronologia dell'attività.";
+    "nev.snapshot.job_failed.title" => "Snapshot job {name} failed", "Job di snapshot {name} non riuscito";
+    "nev.snapshot.job_failed.body" => "Result: {result}. See the task history for the output.", "Esito: {result}. L'output è nella cronologia dell'attività.";
+    "nev.snapshot.job_ok.title" => "Snapshot job {name} succeeded", "Job di snapshot {name} riuscito";
+    "nev.snapshot.job_ok.body" => "Result: {result}. See the task history for the output.", "Esito: {result}. L'output è nella cronologia dell'attività.";
+    "nev.snapshot.job_finished.title" => "Snapshot job {name} finished", "Job di snapshot {name} completato";
+    "nev.snapshot.job_finished.body" => "Result: {result}. See the task history for the output.", "Esito: {result}. L'output è nella cronologia dell'attività.";
+    // security
+    "nev.auth.lockout.title" => "Login locked for {user} after failed attempts", "Accesso bloccato per {user} dopo tentativi falliti";
+    "nev.auth.lockout.body" => "Too many failed logins for {user} from {ip}: further attempts are refused for {retry_after_s} s.", "Troppi accessi falliti per {user} da {ip}: altri tentativi vengono rifiutati per {retry_after_s} s.";
+    "nev.auth.totp_enabled.title" => "Two-factor authentication enabled for {user}", "Autenticazione a due fattori attivata per {user}";
+    "nev.auth.totp_disabled.title" => "Two-factor authentication disabled for {user}", "Autenticazione a due fattori disattivata per {user}";
+    // power
+    "nev.power.shutdown_skipped.title" => "Scheduled shutdown {rule} skipped", "Spegnimento pianificato {rule} saltato";
+    "nev.power.shutdown_skipped.body" => "The NAS stayed on: {reasons}.", "Il NAS è rimasto acceso: {reasons}.";
+    "nev.power.shutdown.title" => "Scheduled shutdown {rule}", "Spegnimento pianificato {rule}";
+    "nev.power.shutdown.body" => "The NAS is shutting down as scheduled.", "Il NAS si sta spegnendo come pianificato.";
+    // network
+    "nev.net.confirmed.title" => "Network change confirmed (revision {revision})", "Modifica di rete confermata (revisione {revision})";
+    "nev.net.confirmed.body" => "Interfaces: {interfaces}", "Interfacce: {interfaces}";
+    "nev.net.rolled_back.title" => "Network change rolled back ({reason}): revision {revision} restored", "Modifica di rete annullata ({reason}): ripristinata la revisione {revision}";
+    "nev.net.rolled_back.body" => "The previous network settings run again and were verified (revision {revision}).", "Le impostazioni di rete precedenti sono di nuovo attive e verificate (revisione {revision}).";
+    "nev.net.rollback_unverified.title" => "Network rollback ({reason}) could not be verified", "Annullamento della modifica di rete ({reason}) non verificato";
+    "nev.net.rollback_unverified.body" => "Still wrong: {problems}. Rescue: the link-local address of the port or the reset button.", "Ancora non funziona: {problems}. Soccorso: l'indirizzo link-local della porta o il pulsante di reset.";
+    "nev.net.adopted.title" => "Network migrated to rynas (systemd-networkd)", "Rete migrata a rynas (systemd-networkd)";
+    "nev.net.adopted.body" => "The migration done at boot came up with a routable address and is kept.", "La migrazione eseguita all'avvio ha ottenuto un indirizzo instradabile e viene mantenuta.";
+    "nev.net.boot_undone.title" => "Unconfirmed network change undone at boot: revision {revision} restored", "Modifica di rete non confermata annullata all'avvio: ripristinata la revisione {revision}";
+    "nev.net.boot_undone.body" => "The system restarted while revision {tested} was being tested.", "Il sistema si è riavviato mentre la revisione {tested} era in prova.";
+    "nev.net.watchdog_restored.title" => "Network restored to the last known good revision {revision}", "Rete riportata all'ultima revisione funzionante ({revision})";
+    "nev.net.watchdog_restored.body" => "After boot no port had a routable address; the last known good settings fixed it.", "Dopo l'avvio nessuna porta aveva un indirizzo instradabile; le ultime impostazioni funzionanti hanno risolto il problema.";
+    "nev.net.rescue.title" => "Network rescue configuration applied", "Configurazione di rete di emergenza applicata";
+    "nev.net.rescue.body" => "No port had a routable address after boot. Every port is on DHCP with link-local; the previous settings are revision {revision}.", "Dopo l'avvio nessuna porta aveva un indirizzo instradabile. Tutte le porte sono in DHCP con link-local; le impostazioni precedenti sono la revisione {revision}.";
+    "nev.net.reset.title" => "Factory network restored with the reset button", "Rete di fabbrica ripristinata con il pulsante di reset";
+    "nev.net.reset.body" => "Every port is on DHCP with link-local; bonds, VLANs and bridges are suspended. The previous settings are revision {revision} (Network → revisions → restore).", "Tutte le porte sono in DHCP con link-local; bond, VLAN e bridge sono sospesi. Le impostazioni precedenti sono la revisione {revision} (Rete → revisioni → ripristina).";
+    // synodeb (`synodeb.<event>`, docs/synodeb-integration.md); log bodies are shown as sent
+    "nev.synodeb.unit_failed.title" => "Service failed: {unit}", "Servizio non riuscito: {unit}";
+    "nev.synodeb.smart_error.title" => "SMART {device}: {failtype}", "SMART {device}: {failtype}";
+    "nev.synodeb.smart_error.title_2" => "SMART warning on {device}", "Avviso SMART su {device}";
+    "nev.synodeb.smart_error.failtype.health" => "health status failing", "stato di salute in avaria";
+    "nev.synodeb.smart_error.failtype.failedhealthcheck" => "health check could not run", "impossibile verificare lo stato di salute";
+    "nev.synodeb.smart_error.failtype.currentpendingsector" => "sectors waiting for reallocation", "settori in attesa di riallocazione";
+    "nev.synodeb.smart_error.failtype.offlineuncorrectablesector" => "uncorrectable sectors", "settori non correggibili";
+    "nev.synodeb.smart_error.failtype.failedreadsmartdata" => "SMART data unreadable", "dati SMART illeggibili";
+    "nev.synodeb.smart_error.failtype.emailtest" => "test message", "messaggio di prova";
+    "nev.synodeb.smart_error.failtype.errorcount" => "new errors in the error log", "nuovi errori nel registro errori";
+    "nev.synodeb.smart_error.failtype.selftest" => "self-test failed", "autotest non superato";
+    "nev.synodeb.smart_error.failtype.failedopendevice" => "device cannot be opened", "impossibile aprire il dispositivo";
+    "nev.synodeb.smart_error.failtype.usage" => "usage attribute failing", "attributo di utilizzo in avaria";
+    "nev.synodeb.raid_event.title" => "RAID {array}: {event} ({device})", "RAID {array}: {event} ({device})";
+    "nev.synodeb.raid_event.title_2" => "RAID {array}: {event}", "RAID {array}: {event}";
+    "nev.synodeb.raid_event.event.fail" => "device failed", "dispositivo guasto";
+    "nev.synodeb.raid_event.event.failspare" => "spare device failed", "dispositivo di riserva guasto";
+    "nev.synodeb.raid_event.event.degradedarray" => "array degraded", "array degradato";
+    "nev.synodeb.raid_event.event.devicedisappeared" => "array disappeared", "array scomparso";
+    "nev.synodeb.raid_event.event.sparesmissing" => "spare devices missing", "dispositivi di riserva mancanti";
+    "nev.synodeb.raid_event.event.movespare" => "spare moved to another array", "riserva spostata in un altro array";
+    "nev.synodeb.raid_event.event.spareactive" => "spare device now active", "dispositivo di riserva ora attivo";
+    "nev.synodeb.raid_event.event.rebuildfinished" => "rebuild finished", "ricostruzione completata";
+    "nev.synodeb.raid_event.event.rebuildstarted" => "rebuild started", "ricostruzione avviata";
+    "nev.synodeb.raid_event.event.testmessage" => "test message", "messaggio di prova";
+    "nev.synodeb.raid_event.event.newarray" => "new array detected", "nuovo array rilevato";
+    "nev.synodeb.boot_completed.title" => "Boot completed after an unclean end of the previous boot ({previous_boot})", "Avvio completato dopo una chiusura anomala dell'avvio precedente ({previous_boot})";
+    "nev.synodeb.boot_completed.title_2" => "Boot completed", "Avvio completato";
+    "nev.synodeb.boot_completed.body" => "Kernel {kernel}. Addresses: {addresses}. System volume: {root}. Reset by the watchdog {watchdog}.", "Kernel {kernel}. Indirizzi: {addresses}. Volume di sistema: {root}. Riavvio forzato dal watchdog {watchdog}.";
+    "nev.synodeb.boot_completed.body_2" => "Kernel {kernel}. Addresses: {addresses}. System volume: {root}.", "Kernel {kernel}. Indirizzi: {addresses}. Volume di sistema: {root}.";
+    "nev.synodeb.boot_completed.body_3" => "Kernel {kernel}. System volume: {root}.", "Kernel {kernel}. Volume di sistema: {root}.";
+    "nev.synodeb.boot_completed.root.ok" => "healthy", "integro";
+    "nev.synodeb.boot_completed.root.degraded" => "degraded", "degradato";
+    "nev.synodeb.boot_completed.root.resync_started" => "resynchronization started", "risincronizzazione avviata";
+    "nev.synodeb.boot_completed.root.resync_failed" => "resynchronization failed", "risincronizzazione non riuscita";
+    "nev.synodeb.emergency_mode.title" => "Emergency mode", "Modalità di emergenza";
+    "nev.synodeb.emergency_mode.body" => "The boot stopped in emergency mode ({failed}). SSH is available on {addresses}: log in, fix the cause (journalctl -xb), then run 'sudo systemctl default' or reboot. With the root account locked, systemd retries the boot every few minutes; otherwise the NAS reboots by itself after 10 minutes without an SSH login.", "L'avvio si è fermato in modalità di emergenza ({failed}). SSH è disponibile su {addresses}: accedi, risolvi la causa (journalctl -xb), poi esegui 'sudo systemctl default' o riavvia. Con l'account root bloccato, systemd riprova l'avvio ogni pochi minuti; altrimenti il NAS si riavvia da solo dopo 10 minuti senza un accesso SSH.";
+    "nev.synodeb.emergency_mode.body_2" => "The boot stopped in emergency mode (cause unknown). SSH is available on {addresses}: log in, fix the cause (journalctl -xb), then run 'sudo systemctl default' or reboot. With the root account locked, systemd retries the boot every few minutes; otherwise the NAS reboots by itself after 10 minutes without an SSH login.", "L'avvio si è fermato in modalità di emergenza (causa sconosciuta). SSH è disponibile su {addresses}: accedi, risolvi la causa (journalctl -xb), poi esegui 'sudo systemctl default' o riavvia. Con l'account root bloccato, systemd riprova l'avvio ogni pochi minuti; altrimenti il NAS si riavvia da solo dopo 10 minuti senza un accesso SSH.";
+    "nev.synodeb.emergency_mode.body_3" => "The boot stopped in emergency mode and no network address is up. Fix the cause from a console (journalctl -xb), then run 'sudo systemctl default' or reboot.", "L'avvio si è fermato in modalità di emergenza e non c'è alcun indirizzo di rete. Risolvi la causa da una console (journalctl -xb), poi esegui 'sudo systemctl default' o riavvia.";
+    "nev.synodeb.fan_failure.title" => "Fan failure", "Guasto alle ventole";
+    "nev.synodeb.fan_failure.body" => "Fan stopped or unreadable: {fans}.", "Ventola ferma o illeggibile: {fans}.";
+    "nev.synodeb.fan_failure.body_2" => "The hardware controller reports a failure of the {fan}.", "Il controller hardware segnala un guasto alla {fan}.";
+    "nev.synodeb.fan_failure.fan.fan" => "system fan", "ventola di sistema";
+    "nev.synodeb.fan_failure.fan.cpu_fan" => "CPU fan", "ventola della CPU";
+    "nev.synodeb.fans_ok.title" => "Fans back to normal", "Ventole tornate alla normalità";
+    "nev.synodeb.thermal_shutdown.title" => "Thermal shutdown", "Spegnimento termico";
+    "nev.synodeb.thermal_shutdown.body" => "The NAS is powering off to protect the hardware: {reason}.", "Il NAS si spegne per proteggere l'hardware: {reason}.";
+    "nev.synodeb.shutdown.title" => "Shutdown: {button}", "Spegnimento: {button}";
+    "nev.synodeb.shutdown.title_2" => "Shutdown", "Spegnimento";
+    "nev.synodeb.shutdown.body" => "Command: {command}", "Comando: {command}";
+    "nev.synodeb.shutdown.button.power_button" => "power button", "pulsante di accensione";
+    "nev.synodeb.dom_update_failed.title" => "Boot module update failed", "Aggiornamento del modulo di avvio non riuscito";
+    "nev.synodeb.dom_default_debian.title" => "DEBIAN is the default boot entry again", "DEBIAN è di nuovo la voce di avvio predefinita";
+    "nev.synodeb.dom_default_debian.body" => "The fallback entry DEBIAN_OLD holds no kernel any more: DEBIAN ({kernel}) boots, without a fallback kernel.", "La voce di riserva DEBIAN_OLD non contiene più un kernel: si avvia DEBIAN ({kernel}), senza un kernel di riserva.";
+    "nev.synodeb.kernel_not_tried.title" => "New kernel not tried", "Nuovo kernel non provato";
+    "nev.synodeb.kernel_not_tried.body" => "DEBIAN ({kernel}) was updated, but the fallback entry DEBIAN_OLD is the default boot entry, so the new kernel is not booted. To try it: synodeb-dom default debian && reboot", "DEBIAN ({kernel}) è stato aggiornato, ma la voce predefinita è quella di riserva DEBIAN_OLD, quindi il nuovo kernel non viene avviato. Per provarlo: synodeb-dom default debian && reboot";
+    "nev.synodeb.kernel_boot_failed.title" => "New kernel failed to boot", "Il nuovo kernel non si è avviato";
+    "nev.synodeb.kernel_boot_failed.body" => "The boot module fell back to DEBIAN_OLD ({running}), which stays the default: newer kernels are installed as DEBIAN but not booted until: synodeb-dom default debian", "Il modulo di avvio è tornato a DEBIAN_OLD ({running}), che resta la voce predefinita: i kernel più recenti vengono installati come DEBIAN ma non avviati fino a: synodeb-dom default debian";
+    "nev.synodeb.ups_safe_mode.title" => "UPS: Safe Mode", "UPS: modalità sicura";
+    "nev.synodeb.ups_safe_mode.body" => "Reason: {reason}, battery {battery}%, runtime {runtime} s. Services stopped, volumes unmounted; the NAS reboots when power returns.", "Motivo: {reason}, batteria {battery}%, autonomia {runtime} s. Servizi fermati, volumi smontati; il NAS si riavvia al ritorno della corrente.";
+    "nev.synodeb.ups_safe_mode.body_2" => "Reason: {reason}. Services stopped, volumes unmounted; the NAS reboots when power returns.", "Motivo: {reason}. Servizi fermati, volumi smontati; il NAS si riavvia al ritorno della corrente.";
+    "nev.synodeb.ups_safe_mode.body_3" => "Services stopped, volumes unmounted; the NAS reboots when power returns.", "Servizi fermati, volumi smontati; il NAS si riavvia al ritorno della corrente.";
+    "nev.synodeb.ups_safe_mode.reason.lowbatt" => "battery low", "batteria scarica";
+    "nev.synodeb.ups_safe_mode.reason.nocomm" => "no communication with the UPS", "nessuna comunicazione con l'UPS";
+    "nev.synodeb.ups_safe_mode.reason.waittimeup" => "maximum time on battery reached", "tempo massimo a batteria raggiunto";
+    "nev.synodeb.ups_safe_mode.reason.fsd" => "forced shutdown requested by the UPS", "spegnimento forzato richiesto dall'UPS";
+    "nev.synodeb.ups_power_restored_reboot.title" => "UPS: power restored", "UPS: corrente ripristinata";
+    "nev.synodeb.ups_power_restored_reboot.body" => "Leaving Safe Mode with a reboot.", "Uscita dalla modalità sicura con un riavvio.";
+    "nev.synodeb.ups_power_restored.title" => "UPS: power restored", "UPS: corrente ripristinata";
+    "nev.synodeb.ups_power_restored.body" => "Battery {battery}%.", "Batteria {battery}%.";
+    "nev.synodeb.ups_on_battery.title" => "UPS on battery", "UPS a batteria";
+    "nev.synodeb.ups_on_battery.body" => "Battery {battery}%, runtime {runtime} s.", "Batteria {battery}%, autonomia {runtime} s.";
+    "nev.synodeb.ups_on_battery.body_2" => "Battery {battery}%.", "Batteria {battery}%.";
+    "nev.synodeb.ups_battery_low.title" => "UPS: battery low", "UPS: batteria scarica";
+    "nev.synodeb.ups_battery_low.body" => "Battery {battery}%, runtime {runtime} s: entering Safe Mode.", "Batteria {battery}%, autonomia {runtime} s: avvio della modalità sicura.";
+    "nev.synodeb.ups_battery_low.body_2" => "Entering Safe Mode.", "Avvio della modalità sicura.";
+    "nev.synodeb.ups_unreachable.title" => "UPS unreachable", "UPS non raggiungibile";
+    "nev.synodeb.ups_unreachable.body" => "No communication with {ups} for at least {minutes} minutes.", "Nessuna comunicazione con {ups} da almeno {minutes} minuti.";
     // theme / density / language
     "theme.auto" => "System", "Sistema";
     "theme.light" => "Light", "Chiaro";
@@ -2162,8 +2338,8 @@ mod tests {
     #[test]
     fn no_duplicate_texts() {
         // keys whose text mirrors a server-side name (task types, configuration keys, plan
-        // summary fields) may repeat a UI text
-        let exempt = |k: &str| k.starts_with("task.") || k.starts_with("cfg.key.") || k.starts_with("plan.k.");
+        // summary fields, server event texts by code) may repeat a UI text
+        let exempt = |k: &str| k.starts_with("task.") || k.starts_with("cfg.key.") || k.starts_with("plan.k.") || k.starts_with("nev.");
         let mut seen = std::collections::HashMap::new();
         let mut dups = Vec::new();
         for (k, en, it) in entries() {
@@ -2239,5 +2415,18 @@ mod tests {
         let n = k.len();
         k.dedup();
         assert_eq!(n, k.len(), "duplicate i18n keys");
+    }
+
+    /// Event texts: the Italian text uses the same placeholders as the English one (a
+    /// placeholder only in one language would hide or invent a field).
+    #[test]
+    fn event_texts_have_the_same_placeholders() {
+        fn names(s: &str) -> Vec<&str> {
+            let mut v: Vec<&str> = s.split('{').skip(1).filter_map(|p| p.split_once('}').map(|x| x.0)).collect();
+            v.sort_unstable();
+            v
+        }
+        let bad: Vec<_> = entries().into_iter().filter(|(k, en, it)| k.starts_with("nev.") && names(en) != names(it)).map(|e| e.0).collect();
+        assert!(bad.is_empty(), "placeholders differ: {bad:?}");
     }
 }
