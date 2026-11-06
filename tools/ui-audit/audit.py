@@ -38,8 +38,12 @@ SHOT_DIALOGS = os.environ.get("SHOT_DIALOGS", "1") == "1"
 # English texts that differ in Italian (to spot English in Italian mode)
 SRC = open(os.path.join(REPO, "crates/rynas-ui/src/i18n.rs")).read()
 STR = r'"((?:[^"\\]|\\.)*)"'
-EN_ONLY = sorted({en for k, en, it in re.findall(STR + r"\s*=>\s*" + STR + r",\s*" + STR + r";", SRC)
-                  if en != it and re.search(r"[A-Za-z]{3}", en) and "{" not in en})
+_PAIRS = re.findall(STR + r"\s*=>\s*" + STR + r",\s*" + STR + r";", SRC)
+_IT = {it for k, en, it in _PAIRS}
+# an English text that is also the Italian text of another key ("Temperature", "Status") is not
+# a sign of English
+EN_ONLY = sorted({en for k, en, it in _PAIRS
+                  if en != it and en not in _IT and re.search(r"[A-Za-z]{3}", en) and "{" not in en})
 
 SKIP = r"apply|applica|run now|esegui ora|^scrub|avvia scrub|test|prova|refresh|aggiorna|reload|ricarica|discard|scarta|^start|^avvia|^stop|^ferma|sign out|^esci|identify|beep|copy|copia|download|scarica|export|esporta|mark all|segna|retry|riprova|wake|shut ?down|spegn|riavv|reboot|restart|clear|svuota|^cancel|^annulla|^back|^indietro|undo|import|confirm|conferma|generate|genera|reveal|mostra chiave|logout|ping|traceroute|lookup|resolve|risolvi|mount$|^monta|unmount|smonta|lock|unlock|blocca|sblocca|^save|^salva|send|invia|rollback|keep|mantieni|disable|disattiva|enable|attiva|resume|riprendi|pause|sospendi|forget|dimentica"
 
