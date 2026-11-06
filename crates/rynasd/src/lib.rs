@@ -19,6 +19,7 @@ pub mod files;
 pub mod groups;
 pub mod hardware;
 pub mod jobs;
+pub mod modules;
 pub mod network;
 pub mod notifications;
 pub mod ops;

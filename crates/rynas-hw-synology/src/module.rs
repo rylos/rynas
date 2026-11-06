@@ -13,7 +13,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use rynas_config::Applier;
+use rynas_config::{Applier, Config};
+use rynas_hw::HardwareControl;
 use rynas_module::{EventForward, Module, UpsLayer};
 
 use crate::Synology;
@@ -89,6 +90,13 @@ impl Module for SynologyModule {
         "synology"
     }
 
+    fn summary(&self) -> String {
+        match &self.hardware {
+            Some(s) => format!("synology: {} (synohwd provider)", s.product()),
+            None => "synology: synodeb without Synology hardware".into(),
+        }
+    }
+
     fn ups(&self) -> Option<Arc<dyn UpsLayer>> {
         crate::ups::present(&self.root)
             .then(|| Arc::new(crate::ups::SynodebUps::default()) as Arc<dyn UpsLayer>)
@@ -115,15 +123,30 @@ impl Module for SynologyModule {
         }
     }
 
-    fn start(&self, log: &dyn Fn(&str)) {
-        if !crate::ups::present(&self.root) {
-            return;
+    fn start(&self, cfg: &Config, log: &dyn Fn(&str)) {
+        if crate::ups::present(&self.root) {
+            match link_ups_hook(&self.root) {
+                Ok(None) => {}
+                Ok(Some(what)) => log(&format!("synodeb UPS hook {UPS_HOOK_LINK}: {what}")),
+                Err(e) => log(&format!("synodeb UPS hook: {e}")),
+            }
         }
-        match link_ups_hook(&self.root) {
+        // `synology.hw` owns /etc/synohwd.toml (network rescue on the reset button by default)
+        match crate::domain::adopt(cfg) {
+            Ok(Some(rev)) => log(&format!("synohwd settings adopted (revision {rev})")),
             Ok(None) => {}
-            Ok(Some(what)) => log(&format!("synodeb UPS hook {UPS_HOOK_LINK}: {what}")),
-            Err(e) => log(&format!("synodeb UPS hook: {e}")),
+            Err(e) => log(&format!("synohwd settings: {e}")),
         }
+    }
+
+    fn router(&self, ctx: &rynas_module::http::Ctx) -> Option<axum::Router> {
+        Some(crate::http::router(ctx.clone(), self.hardware.clone()))
+    }
+
+    fn hardware_control(&self) -> Option<Arc<dyn HardwareControl>> {
+        self.hardware
+            .clone()
+            .map(|s| s as Arc<dyn HardwareControl>)
     }
 }
 

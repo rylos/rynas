@@ -1,4 +1,5 @@
-//! Synology hardware and power schedule endpoints with the in-memory system, a fake systemd
+//! The Synology module's endpoints (`/v1/modules/synology/...`), the provider-neutral bay
+//! identify and the power schedule with the in-memory system, a fake systemd
 //! probe and a fake hardware tree (`sys/`, `proc/`, `run/synohwd/` with a FIFO read like
 //! synohwd reads it): settings staged and applied, FIFO commands, identify, fan curves, the
 //! power schedule with its scheduler tasks, and the scheduled shutdown's checks and policy.
@@ -160,6 +161,14 @@ fn env(synology: bool) -> Env {
         }),
     ];
     let synology_p = synology.then(|| Arc::new(Synology::detect(&hw).unwrap()));
+    let modules = rynas_module::Modules::new(match &synology_p {
+        Some(p) => vec![Arc::new(rynas_hw_synology::module::SynologyModule {
+            hardware: Some(p.clone()),
+            synodeb: false,
+            root: root.clone(),
+        }) as Arc<dyn rynas_module::Module>],
+        None => Vec::new(),
+    });
     if synology {
         domains.push(Arc::new(SynologyDomain));
     }
@@ -189,12 +198,17 @@ fn env(synology: bool) -> Env {
     st.protection = Some(protection.clone());
     let notifier = Arc::new(MemoryNotifier::default());
     let off = dir.path().join("powered-off");
+    st.modules = modules.router(&rynas_module::http::Ctx {
+        config: config.clone(),
+        hw_root: hw.clone(),
+        state_dir: state_dir.clone(),
+        ack_hardware: Arc::new(|_: &str| Ok(0)),
+    });
     st.hardware = Some(Arc::new(Hardware {
         ops: ops.clone(),
-        synology: synology_p,
+        control: modules.hardware_control(),
         hw_root: hw.clone(),
         state_dir,
-        notifications: None,
         notifier: notifier.clone(),
         protection: Some(protection),
         poweroff: vec![
@@ -255,7 +269,7 @@ async fn wait_task(e: &Env, id: &str) -> TaskInfo {
 #[tokio::test]
 async fn settings_are_staged_and_applied() {
     let e = env(true);
-    let (s, b) = call(&e, "GET", "/v1/hardware/synology/settings", None).await;
+    let (s, b) = call(&e, "GET", "/v1/modules/synology/settings", None).await;
     assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
     let st: SynologySettingsState = serde_json::from_slice(&b).unwrap();
     assert_eq!(st.platform.model, "DS920+");
@@ -265,7 +279,7 @@ async fn settings_are_staged_and_applied() {
     let mut v = serde_json::to_value(&st.applied).unwrap();
     // synohwd's range: refused, not clamped
     v["fan_period_s"] = json!(301);
-    let (s, b) = call(&e, "PUT", "/v1/hardware/synology/settings", Some(v.clone())).await;
+    let (s, b) = call(&e, "PUT", "/v1/modules/synology/settings", Some(v.clone())).await;
     assert_eq!(
         (s, code(&b).as_str()),
         (StatusCode::BAD_REQUEST, error_codes::INVALID_VALUE)
@@ -273,7 +287,7 @@ async fn settings_are_staged_and_applied() {
     // command: is reserved for rynas handlers (not a choice of the API)
     v["fan_period_s"] = json!(60);
     v["power_button"] = json!("command:/bin/x");
-    let (s, b) = call(&e, "PUT", "/v1/hardware/synology/settings", Some(v.clone())).await;
+    let (s, b) = call(&e, "PUT", "/v1/modules/synology/settings", Some(v.clone())).await;
     // not one of the accepted values: invalid_value about that field (rynas_http)
     assert_eq!(
         (s, code(&b).as_str()),
@@ -284,7 +298,7 @@ async fn settings_are_staged_and_applied() {
     v["power_button"] = json!("log");
     v["reset_button"] = json!("network_rescue");
     v["fan_mode"] = json!("high");
-    let (s, b) = call(&e, "PUT", "/v1/hardware/synology/settings", Some(v)).await;
+    let (s, b) = call(&e, "PUT", "/v1/modules/synology/settings", Some(v)).await;
     assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
     let st: SynologySettingsState = serde_json::from_slice(&b).unwrap();
     assert_eq!(st.pending.as_ref().unwrap().fan_period_s, 60);
@@ -304,7 +318,7 @@ async fn settings_are_staged_and_applied() {
             .any(|c| c.contains("restart synohwd.service"))
     );
     // the curves call the applied mode active
-    let (s, b) = call(&e, "GET", "/v1/hardware/synology/fan-curves", None).await;
+    let (s, b) = call(&e, "GET", "/v1/modules/synology/fan-curves", None).await;
     assert_eq!(s, StatusCode::OK);
     let c: FanCurves = serde_json::from_slice(&b).unwrap();
     assert_eq!(c.active_mode, rynas_api_types::synology::FanMode::High);
@@ -318,7 +332,7 @@ async fn actions_go_through_the_fifo_and_the_leds() {
         let (s, b) = call(
             &e,
             "POST",
-            "/v1/hardware/synology/beep",
+            "/v1/modules/synology/beep",
             Some(json!({"kind": kind})),
         )
         .await;
@@ -337,7 +351,7 @@ async fn actions_go_through_the_fifo_and_the_leds() {
     let (s, b) = call(
         &e,
         "POST",
-        "/v1/hardware/synology/beep",
+        "/v1/modules/synology/beep",
         Some(json!({"kind": "loud"})),
     )
     .await;
@@ -349,7 +363,7 @@ async fn actions_go_through_the_fifo_and_the_leds() {
     let (s, b) = call(
         &e,
         "POST",
-        "/v1/hardware/synology/bays/3/identify",
+        "/v1/hardware/bays/3/identify",
         Some(json!({"duration_s": 1})),
     )
     .await;
@@ -361,31 +375,31 @@ async fn actions_go_through_the_fifo_and_the_leds() {
     let green = e.hw.join("sys/class/leds/syno:green:disk3/trigger");
     assert_eq!(std::fs::read_to_string(&green).unwrap(), "ata3");
     // an empty body is the default duration
-    let (s, _) = call(&e, "POST", "/v1/hardware/synology/bays/1/identify", None).await;
+    let (s, _) = call(&e, "POST", "/v1/hardware/bays/1/identify", None).await;
     assert_eq!(s, StatusCode::NO_CONTENT);
-    let (s, b) = call(&e, "POST", "/v1/hardware/synology/bays/5/identify", None).await;
+    let (s, b) = call(&e, "POST", "/v1/hardware/bays/5/identify", None).await;
     assert_eq!(
         (s, code(&b).as_str()),
         (StatusCode::NOT_FOUND, error_codes::NOT_FOUND)
     );
-    let (s, b) = call(&e, "POST", "/v1/hardware/synology/bays/x/identify", None).await;
+    let (s, b) = call(&e, "POST", "/v1/hardware/bays/x/identify", None).await;
     assert_eq!(
         (s, code(&b).as_str()),
         (StatusCode::BAD_REQUEST, error_codes::BAD_REQUEST)
     );
-    let (s, b) = call(&e, "POST", "/v1/hardware/synology/mute", None).await;
+    let (s, b) = call(&e, "POST", "/v1/modules/synology/mute", None).await;
     assert_eq!(s, StatusCode::OK);
     let m: MuteResult = serde_json::from_slice(&b).unwrap();
     assert!(!m.stopped_beep);
     // status with API units and the boot record
-    let (s, b) = call(&e, "GET", "/v1/hardware/synology/status", None).await;
+    let (s, b) = call(&e, "GET", "/v1/modules/synology/status", None).await;
     assert_eq!(s, StatusCode::OK);
     let st: SynologyStatus = serde_json::from_slice(&b).unwrap();
     assert_eq!((st.model.as_str(), st.bays.len()), ("DS920+", 4));
     assert_eq!(st.diagnostics.up_current_raw, Some(870));
     // synohwd gone: the FIFO has no reader
     std::fs::remove_file(e.hw.join("run/synohwd/cmd")).unwrap();
-    let (s, b) = call(&e, "POST", "/v1/hardware/synology/beep", Some(json!({}))).await;
+    let (s, b) = call(&e, "POST", "/v1/modules/synology/beep", Some(json!({}))).await;
     assert_eq!(
         (s, code(&b).as_str()),
         (
@@ -398,11 +412,12 @@ async fn actions_go_through_the_fifo_and_the_leds() {
 #[tokio::test]
 async fn not_a_synology() {
     let e = env(false);
-    for uri in [
-        "/v1/hardware/synology/status",
-        "/v1/hardware/synology/settings",
+    for (m, uri) in [
+        ("GET", "/v1/modules/synology/status"),
+        ("GET", "/v1/modules/synology/settings"),
+        ("POST", "/v1/hardware/bays/1/identify"),
     ] {
-        let (s, b) = call(&e, "GET", uri, None).await;
+        let (s, b) = call(&e, m, uri, None).await;
         assert_eq!(
             (s, code(&b).as_str()),
             (StatusCode::NOT_FOUND, error_codes::NOT_FOUND),
@@ -610,20 +625,14 @@ fn synohwd_conf_has_one_writer() {
         "# synodeb defaults\n",
         "network.rescue never writes it"
     );
-    assert!(
-        rynasd::hardware::adopt_synohwd_conf(&cfg)
-            .unwrap()
-            .is_some()
-    );
+    assert!(rynas_hw_synology::domain::adopt(&cfg).unwrap().is_some());
     let adopted = conf();
     assert!(
         adopted
             .contains("reset_button = \"command:/usr/libexec/rynas/rynasctl net reset-button\"\n")
     );
     assert!(
-        rynasd::hardware::adopt_synohwd_conf(&cfg)
-            .unwrap()
-            .is_none(),
+        rynas_hw_synology::domain::adopt(&cfg).unwrap().is_none(),
         "once"
     );
     for round in 0..3 {

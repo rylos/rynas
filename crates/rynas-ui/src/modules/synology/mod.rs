@@ -36,7 +36,7 @@ pub fn present() -> Memo<bool> {
         }
         asked.set_value(true);
         spawn_local(async move {
-            let ok = crate::api::get_text("/api/v1/hardware/synology/settings").await.is_ok();
+            let ok = crate::api::get_text("/api/v1/modules/synology/settings").await.is_ok();
             probed.set(ok);
         });
     });

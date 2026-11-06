@@ -179,8 +179,6 @@ struct Opened {
     snapshots: Arc<SnapshotsDomain>,
     /// The hardware modules of this machine (D-MODULE; none on a plain Debian).
     modules: rynas_module::Modules,
-    /// The Synology hardware provider, when the Synology module found its hardware.
-    synology: Option<Arc<rynas_hw_synology::Synology>>,
     /// Applied `removable` settings, handed over by the domain.
     removable_settings: tokio::sync::watch::Receiver<rynas_api_types::removable::RemovableSettings>,
     /// The configuration root.
@@ -264,7 +262,10 @@ fn open_config(
         Arc::new(rynas_updates::AutoDomain),
     ];
     // hardware modules (D-MODULE): registered only where their hardware or system layer is
-    let (modules, synology) = detect_modules(args, &root);
+    let modules = rynasd::modules::detect(&args.hw_root, &root);
+    for m in modules.iter() {
+        tracing::info!("module {}", m.summary());
+    }
     domains.extend(modules.domains());
     // ups.safemode: a module layer's policy file, else the rynas policy file read by rynasd's
     // NUT watcher
@@ -295,29 +296,7 @@ fn open_config(
         modules,
         removable_settings,
         root,
-        synology,
     })
-}
-
-/// The hardware modules of this machine. The Synology module is the only one today.
-fn detect_modules(
-    args: &Args,
-    root: &Path,
-) -> (
-    rynas_module::Modules,
-    Option<Arc<rynas_hw_synology::Synology>>,
-) {
-    let mut list: Vec<Arc<dyn rynas_module::Module>> = Vec::new();
-    let mut synology = None;
-    if let Some(m) = rynas_hw_synology::module::SynologyModule::detect(&args.hw_root, root) {
-        match &m.hardware {
-            Some(s) => tracing::info!("module synology: {} (synohwd provider)", s.product()),
-            None => tracing::info!("module synology: synodeb without Synology hardware"),
-        }
-        synology = m.hardware.clone();
-        list.push(Arc::new(m));
-    }
-    (rynas_module::Modules::new(list), synology)
 }
 
 fn read_passphrase(path: &Option<PathBuf>) -> std::io::Result<Option<String>> {
@@ -722,10 +701,9 @@ fn main() -> std::io::Result<()> {
         state.ups = Some(ups);
         state.hardware = Some(Arc::new(rynasd::hardware::Hardware {
             ops: ops.clone(),
-            synology: opened.synology,
+            control: opened.modules.hardware_control(),
             hw_root: args.hw_root.clone(),
             state_dir: args.state_dir.clone(),
-            notifications: Some(engine.clone()),
             notifier: notifier.clone(),
             protection: Some(protection),
             poweroff: if args.poweroff_command.is_empty() {
@@ -761,8 +739,17 @@ fn main() -> std::io::Result<()> {
         ));
         rynasd::network::spawn_event_flush(network.clone());
         state.network = Some(network);
-        // rescue paths on by default: the Avahi file and, on a Synology, network rescue on
-        // the reset button (synology.hw, the only writer of synohwd.toml); the modules' hooks
+        // the hardware modules' routes (/v1/modules/<id>/...)
+        state.modules = opened.modules.router(&rynas_module::http::Ctx {
+            config: ops.config.clone(),
+            hw_root: args.hw_root.clone(),
+            state_dir: args.state_dir.clone(),
+            ack_hardware: {
+                let engine = engine.clone();
+                Arc::new(move |who: &str| rynasd::hardware::ack_hardware_alerts(&engine, who))
+            },
+        });
+        // rescue paths on by default (the Avahi file); the modules' hooks and settings
         {
             let cfg = ops.config.clone();
             let modules = opened.modules.clone();
@@ -779,12 +766,7 @@ fn main() -> std::io::Result<()> {
                         tracing::warn!("rescue paths: {e}");
                     }
                 }
-                modules.start(&|l| tracing::info!("{l}"));
-                match rynasd::hardware::adopt_synohwd_conf(&cfg) {
-                    Ok(Some(rev)) => tracing::info!("synohwd settings adopted (revision {rev})"),
-                    Ok(None) => {}
-                    Err(e) => tracing::warn!("synohwd settings: {e}"),
-                }
+                modules.start(&cfg, &|l| tracing::info!("{l}"));
             });
         }
         let updates = Arc::new(rynasd::updates::Updates::new(

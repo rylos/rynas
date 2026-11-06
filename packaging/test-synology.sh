@@ -217,7 +217,7 @@ head -1 /etc/synohwd.toml | grep -q '^# Managed by rynas' || fail "synohwd.toml 
 [ "$(grep -c '^reset_button' /etc/synohwd.toml)" = 1 ] || fail "reset_button lines"
 grep -qx 'reset_button = "command:/usr/libexec/rynas/rynasctl net reset-button"' /etc/synohwd.toml || fail "reset handler lost"
 grep -qx 'wol = true' /etc/synohwd.toml || fail "wol lost"
-api GET /hardware/synology/settings; expect 200 "settings"
+api GET /modules/synology/settings; expect 200 "settings"
 [ "$(echo "$BODY" | jq -r .applied.reset_button)" = network_rescue ] || fail "applied reset_button: $BODY"
 api GET /network/rescue; expect 200 "rescue info"
 echo "$BODY" | jq -c '{synology, reset_button_configured, reset_button_pending, settings}'
@@ -229,16 +229,16 @@ apply
 api GET /config/drift; [ "$(echo "$BODY" | jq '.entries | length')" = 0 ] || fail "drift after network.rescue: $BODY"
 
 step "status and the /api/v1/hardware summary"
-api GET /hardware/synology/status; expect 200 "status"
+api GET /modules/synology/status; expect 200 "status"
 echo "$BODY" | jq -c '{model, running, fan_duty_pct, bays: [.bays[] | {number, device, asleep}], events: (.events | length)}'
 [ "$(echo "$BODY" | jq -r .model)" = DS920+ ] || fail "model"
 
 step "settings: imported defaults, validation, staged, applied"
-api GET /hardware/synology/settings; expect 200 "settings"
+api GET /modules/synology/settings; expect 200 "settings"
 echo "$BODY" | jq -c '{applied, platform}'
-api PUT /hardware/synology/settings '{"fan_period_s": 4}'; expect 400 "fan_period 4"
-api PUT /hardware/synology/settings '{"power_button": "command:/bin/sh"}'; expect 400 "command reserved"
-api PUT /hardware/synology/settings '{"fan_mode":"high","fan_period_s":30,"reset_button":"network_rescue","wol":true,"led_brightness":128}'
+api PUT /modules/synology/settings '{"fan_period_s": 4}'; expect 400 "fan_period 4"
+api PUT /modules/synology/settings '{"power_button": "command:/bin/sh"}'; expect 400 "command reserved"
+api PUT /modules/synology/settings '{"fan_mode":"high","fan_period_s":30,"reset_button":"network_rescue","wol":true,"led_brightness":128}'
 expect 200 "settings put"
 [ "$(echo "$BODY" | jq -r .pending.fan_mode)" = high ] || fail "pending"
 apply
@@ -250,20 +250,20 @@ grep -qx 'reset_button = "command:/usr/libexec/rynas/rynasctl net reset-button"'
 api GET /config/drift; [ "$(echo "$BODY" | jq '.entries | length')" = 0 ] || fail "drift after apply: $BODY"
 
 step "actions: beeps through the FIFO, identify on the LEDs, fan curves, mute"
-api POST /hardware/synology/beep '{"kind":"short"}'; expect 204 "short beep"; fifo_has 2
-api POST /hardware/synology/beep '{"kind":"long"}'; expect 204 "long beep"; fifo_has 3
-api POST /hardware/synology/beep '{"kind":"1"}'; expect 400 "bad beep"
-api POST /hardware/synology/bays/2/identify '{"duration_s":2}'; expect 204 "identify"
+api POST /modules/synology/beep '{"kind":"short"}'; expect 204 "short beep"; fifo_has 2
+api POST /modules/synology/beep '{"kind":"long"}'; expect 204 "long beep"; fifo_has 3
+api POST /modules/synology/beep '{"kind":"1"}'; expect 400 "bad beep"
+api POST /hardware/bays/2/identify '{"duration_s":2}'; expect 204 "identify"
 [ "$(cat $H/sys/class/leds/syno:orange:disk2/trigger)" = timer ] || fail "orange not blinking"
 [ "$(cat $H/sys/class/leds/syno:green:disk2/brightness)" = 0 ] || fail "green not off"
 sleep 3
 [ "$(cat $H/sys/class/leds/syno:orange:disk2/trigger)" = none ] || fail "orange not restored"
 [ "$(cat $H/sys/class/leds/syno:green:disk2/trigger)" = ata2 ] || fail "green trigger not restored"
-api POST /hardware/synology/bays/7/identify; expect 404 "bay 7"
-api GET /hardware/synology/fan-curves; expect 200 "fan curves"
+api POST /hardware/bays/7/identify; expect 404 "bay 7"
+api GET /modules/synology/fan-curves; expect 200 "fan curves"
 echo "$BODY" | jq -c '{model, active_mode, cpu_shutdown: .modes[0].curves[2].shutdown_c, readings: (.readings | length)}'
 [ "$(echo "$BODY" | jq -r .active_mode)" = high ] || fail "active mode"
-api POST /hardware/synology/mute; expect 200 "mute"; echo "$BODY"
+api POST /modules/synology/mute; expect 200 "mute"; echo "$BODY"
 grep -c '^cmd' /var/log/fake-synohwd.log
 
 step "power schedule: rules, conflicts, scheduler task, RTC armed"

@@ -1,5 +1,7 @@
 //! Endpoints passed through to `rynasd` unchanged: configuration, tasks, users and shares,
-//! and the storage views rynas-web has nothing to add to.
+//! the storage views rynas-web has nothing to add to, and the routes of the hardware modules
+//! (`/modules/<id>/…`, forwarded by prefix: rynas-web knows no module; rynasd has the routes
+//! only where the module is detected and answers 404 elsewhere).
 //!
 //! The session and CSRF checks have already run ([`crate::auth::require_session`]); the
 //! request goes on through [`RynasdClient::send`](crate::rynasd_client::RynasdClient::send)
@@ -10,7 +12,7 @@ use axum::body::{Body, to_bytes};
 use axum::extract::{Request, State};
 use axum::http::{HeaderName, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post, put};
+use axum::routing::{any, delete, get, post, put};
 use axum::{Extension, Router};
 use futures_util::StreamExt;
 use http_body_util::BodyExt;
@@ -146,13 +148,10 @@ pub fn routes() -> Router<AppState> {
         .route("/snapshots/{id}/restore", post(forward))
         .route("/snapshots/{id}/rollback", post(forward))
         .route("/snapshots/{id}/preview-rollback", get(forward))
-        // Synology hardware (synohwd provider in rynasd) and the power schedule (P4)
-        .route("/hardware/synology/status", get(forward))
-        .route("/hardware/synology/settings", get(forward).put(forward))
-        .route("/hardware/synology/beep", post(forward))
-        .route("/hardware/synology/mute", post(forward))
-        .route("/hardware/synology/bays/{n}/identify", post(forward))
-        .route("/hardware/synology/fan-curves", get(forward))
+        // hardware modules: every route of a module, by prefix; the provider-neutral bay
+        // identify; the power schedule (P4)
+        .route("/modules/{id}/{*rest}", any(forward))
+        .route("/hardware/bays/{n}/identify", post(forward))
         .route("/power/schedule", get(forward).put(forward))
         .route("/power/next", get(forward))
         // UPS (P6): the shutdown policy and the battery test; the status itself is

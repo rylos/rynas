@@ -185,14 +185,6 @@ pub struct MuteResult {
     pub acknowledged: u64,
 }
 
-/// `POST /api/v1/hardware/synology/bays/{n}/identify`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct IdentifyRequest {
-    /// Blink duration, 1..=300 s (default 30).
-    #[serde(default)]
-    pub duration_s: Option<u32>,
-}
-
 /// Sensor classes of the fan curves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
