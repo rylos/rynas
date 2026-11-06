@@ -90,6 +90,8 @@ fn env() -> Env {
     host.add_dir("/srv/vol1/music", None);
     host.add_dir("/srv/vol1/old", None);
     host.add_dir("/srv/vol1/.snapshots", None);
+    // the homes folder is never listed as a folder without a share
+    host.add_dir("/srv/vol1/homes", None);
     host.state().sizes.insert("/srv/vol1/photos".into(), 123_456);
     host.state().sizes.insert("/srv/vol1/old".into(), 1000);
     host.state().snapshots.insert(
@@ -100,6 +102,16 @@ fn env() -> Env {
     snap_host.add_subvolume("/srv/vol1/photos");
     let snapshots = Arc::new(SnapshotsDomain::new(snap_host));
     let scheduler = Arc::new(SchedulerDomain::new(Paths::default(), Arc::new(|_: &str| None)));
+    let homes_host = Arc::new(rynas_services::MemoryHomes::new());
+    homes_host.add_volume("/srv/vol1", "btrfs", 1 << 40);
+    homes_host.add_dir("/srv/vol1/homes", 0, 0);
+    {
+        use rynas_services::HomesHost as _;
+        homes_host
+            .set_link(rynas_api_types::HOMES_LINK, "/srv/vol1/homes", &|_| {})
+            .unwrap();
+    }
+    let homes = Arc::new(rynas_services::HomesDomain::new(homes_host, acc.clone()));
     let users = Arc::new(UsersDomain::new(acc.clone()));
     let shares = Arc::new(
         SharesDomain::new(host.clone(), acc)
@@ -133,6 +145,8 @@ fn env() -> Env {
         ops: ops.clone(),
         users,
         shares,
+        homes,
+        moves: Arc::new(rynas_services::homes::MoveStore::memory()),
     }));
     st.protection = Some(Arc::new(Protection::new(
         ops.clone(),

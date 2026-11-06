@@ -213,13 +213,19 @@ fn shares_for(files: &Files, user: &User, admin: bool) -> Res<(Vec<Share>, BTree
         });
     }
     out.sort_by_key(|s| s.name.to_lowercase());
-    if user.home.is_dir() && user.home != Path::new("/") && !out.iter().any(|s| s.name == rynas_files::shares::HOME) {
-        let mount = mount_of(&mounts, &user.home).unwrap_or_default();
+    // a home in the homes folder is named through a symbolic link (/srv/rynas/homes/<user> →
+    // <volume>/homes/<user>): the share is its real folder, so that the worker's jail (which
+    // never follows links) can open it and the volume is the right one
+    let home = std::fs::canonicalize(&user.home).unwrap_or_else(|_| user.home.clone());
+    if home.is_dir() && home != Path::new("/") && !out.iter().any(|s| s.name == rynas_files::shares::HOME) {
+        let mount = mount_of(&mounts, &home).unwrap_or_default();
         let volume = mount.to_string_lossy().into_owned();
         if !volume.is_empty() {
             volumes.entry(volume.clone()).or_insert_with(|| default_volume_name(&mount));
         }
-        out.insert(0, Share { name: rynas_files::shares::HOME.into(), path: user.home.clone(), volume, home: true, ..Default::default() });
+        // the bin of the SMB home folders, when it is on (the file manager deletes into it too)
+        let recycle = doc.smb.homes.enabled && doc.smb.homes.recycle.enabled;
+        out.insert(0, Share { name: rynas_files::shares::HOME.into(), path: home, volume, home: true, recycle, ..Default::default() });
     }
     Ok((out, volumes))
 }

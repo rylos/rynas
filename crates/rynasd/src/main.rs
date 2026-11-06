@@ -178,6 +178,7 @@ struct Opened {
     config: Config,
     users: Arc<UsersDomain>,
     shares: Arc<SharesDomain>,
+    homes: Arc<rynas_services::HomesDomain>,
     scheduler: Arc<SchedulerDomain>,
     snapshots: Arc<SnapshotsDomain>,
     /// The Synology provider, when this machine is one.
@@ -209,7 +210,18 @@ fn open_config(
     } else {
         (Arc::new(HostAccounts::new("/")), Arc::new(HostShares))
     };
-    let users = Arc::new(UsersDomain::new(accounts.clone()));
+    // --dry-system: the homes folder, its link and the homes are kept in memory, paths
+    // unknown there are probed on the host (read-only)
+    let homes_host: Arc<dyn rynas_services::HomesHost> = if args.dry_system {
+        Arc::new(rynas_services::MemoryHomes::probing_host())
+    } else {
+        Arc::new(rynas_services::HostHomes)
+    };
+    let homes = Arc::new(rynas_services::HomesDomain::new(
+        homes_host.clone(),
+        accounts.clone(),
+    ));
+    let users = Arc::new(UsersDomain::new(accounts.clone()).with_homes(homes_host));
     let shares = Arc::new(
         SharesDomain::new(host, accounts)
             .with_subvolumes(Arc::new(rynasd::storage_ops::HostSubvolumes {
@@ -237,6 +249,7 @@ fn open_config(
     ));
     let mut domains: Vec<Arc<dyn rynas_config::Applier>> = vec![
         Arc::new(HostnameDomain),
+        homes.clone(),
         users.clone(),
         shares.clone(),
         Arc::new(rynas_storage::domain::VolumesDomain),
@@ -276,6 +289,7 @@ fn open_config(
         config,
         users,
         shares,
+        homes,
         scheduler,
         snapshots,
         ups_synodeb,
@@ -617,6 +631,8 @@ fn main() -> std::io::Result<()> {
             ops: ops.clone(),
             users: opened.users,
             shares: opened.shares,
+            homes: opened.homes,
+            moves: Arc::new(rynas_services::homes::MoveStore::in_dir(&args.state_dir)),
         }));
         state.storage_ops = Some(Arc::new(rynasd::storage_ops::StorageOps::new(
             ops.clone(),
