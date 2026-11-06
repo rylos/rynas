@@ -40,8 +40,10 @@
 
   /* a size container: the layout follows the room the shell leaves (not the window), and
      the fixed overlays (menus, drawer, toasts, editor) stay inside the Files page;
-     dialogs are in the top layer and are not affected */
+     dialogs are in the top layer and are not affected. A container query only gives style and
+     inline-size containment: the layout containment makes the box their containing block. */
   container: sf / inline-size;
+  contain: layout;
   position: relative;
   height: 100%;
   background: var(--bg);

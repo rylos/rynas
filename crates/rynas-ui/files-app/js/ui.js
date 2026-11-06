@@ -5,7 +5,7 @@ import { esc, isDirLike } from "./format.js";
 import { svg, FOLDER_GLYPH, shareGlyph } from "./icons.js";
 import { t } from "./i18n.js";
 import { api } from "./api.js";
-import { host, mount, realTarget, place } from "./host.js";
+import { host, mount, realTarget, place, bounds } from "./host.js";
 
 // lookups start at the app inside the shadow root (document.querySelector cannot see it)
 export const $ = (sel, root = host.box) => root.querySelector(sel);
@@ -65,8 +65,10 @@ export function openMenu(x, y, items) {
     buttons.push(b);
   }
   menu.hidden = false;
+  // at the pointer, down and to the right; pushed back only where it would leave the app
   const r = menu.getBoundingClientRect();
-  place(menu, Math.max(4, Math.min(x, innerWidth - r.width - 6)), Math.max(4, Math.min(y, innerHeight - r.height - 6)));
+  const b = bounds();
+  place(menu, Math.max(b.left + 4, Math.min(x, b.right - r.width - 6)), Math.max(b.top + 4, Math.min(y, b.bottom - r.height - 6)));
   let hot = -1;
   const onKey = (e) => {
     if (e.key === "Escape") return closeMenu(), e.preventDefault();

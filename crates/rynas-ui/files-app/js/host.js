@@ -56,11 +56,20 @@ export function realTarget(e) {
 }
 
 /**
- * Places a fixed overlay (menu, picker) at viewport coordinates: the app root is the
- * containing block of fixed elements (a size container), so they are offset by its corner.
+ * Places a fixed overlay (menu, picker) with its top-left corner at viewport coordinates.
+ * The app root is the containing block of fixed elements (layout containment, app.css), so
+ * `left`/`top` count from wherever it is: the offset is measured on the element itself at 0,0,
+ * right whatever the containing block (the shell's sidebar, appbar, scroll, `?window`).
  */
 export function place(el, x, y) {
-  const o = host.box.getBoundingClientRect();
+  el.style.left = el.style.top = "0px";
+  const o = el.getBoundingClientRect();
   el.style.left = x - o.left + "px";
   el.style.top = y - o.top + "px";
+}
+
+/** The visible part of the app (its box within the window), where overlays must stay. */
+export function bounds() {
+  const r = host.box.getBoundingClientRect();
+  return { left: Math.max(0, r.left), top: Math.max(0, r.top), right: Math.min(innerWidth, r.right), bottom: Math.min(innerHeight, r.bottom) };
 }
