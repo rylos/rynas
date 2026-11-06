@@ -24,8 +24,8 @@ use rynas_api_types::scheduler::{
 use rynas_api_types::snapshots::SnapshotsConfig;
 use rynas_api_types::{StagedChanges, TaskStarted, error_codes};
 use rynas_btrfs::SNAPSHOTS_KEY;
-use rynas_notify::event::{field, firing, oneshot, resolved};
-use rynas_notify::{NewEvent, NotifyCategory, NotifySeverity};
+use rynas_notify::event::{code, field, firing, oneshot, resolved};
+use rynas_notify::{BodyFormat, NewEvent, NotifyCategory, NotifySeverity};
 use rynas_scheduler::calendar::{Converted, cron_to_calendar, plausible_calendar};
 use rynas_scheduler::domain::{normalize_task, valid_task_id};
 use rynas_scheduler::history::{NewRun, OUTPUT_MAX};
@@ -670,18 +670,23 @@ pub fn run_event(
     if task.notify == NotifyPolicy::Never {
         return None;
     }
-    let (cat, source, key, what) = match &task.action {
+    // event codes: `snapshot.job_*` / `sched.task_*` + failed|ok|finished, field `name`
+    let (cat, source, key, what, family, name) = match &task.action {
         TaskAction::Snapshot { job } => (
             NotifyCategory::Backup,
             "snapshots",
             format!("snapshot:job:{job}"),
             format!("Snapshot job {job}"),
+            "snapshot.job",
+            job.clone(),
         ),
         _ => (
             NotifyCategory::Task,
             "scheduler",
             format!("scheduler:task:{}", task.id),
             format!("Task {}", task.name),
+            "sched.task",
+            task.name.clone(),
         ),
     };
     let how = match (run.exit_code, &run.signal) {
@@ -689,30 +694,44 @@ pub fn run_event(
         (None, Some(s)) => format!("killed by SIG{s}"),
         _ => run.result.clone(),
     };
-    let mut ev = if !run.ok() {
+    let (mut ev, outcome) = if !run.ok() {
         let title = format!("{what} failed ({how})");
-        firing(cat, NotifySeverity::Error, source, &key, title)
+        (
+            firing(cat, NotifySeverity::Error, source, &key, title),
+            "failed",
+        )
     } else if failed_before || task.notify == NotifyPolicy::OnFailure {
-        resolved(cat, source, &key, format!("{what} succeeded"))
+        (
+            resolved(cat, source, &key, format!("{what} succeeded")),
+            "ok",
+        )
     } else {
         let title = format!("{what} finished");
-        oneshot(
+        let ev = oneshot(
             cat,
             NotifySeverity::Info,
             source,
             format!("{key}:ok"),
             title,
-        )
+        );
+        (ev, "finished")
     };
-    ev.body = if task.notify_output && !output.is_empty() {
-        tail(output, NOTIFY_OUTPUT_MAX)
+    if task.notify_output && !output.is_empty() {
+        ev.body = tail(output, NOTIFY_OUTPUT_MAX);
+        ev.body_format = BodyFormat::Log;
     } else {
-        format!(
+        ev.body = format!(
             "Result: {} ({how}). See the task history for the output.",
             run.result
-        )
-    };
+        );
+    }
+    let ev = code(ev, &format!("{family}_{outcome}"));
     let ev = field(field(ev, "task", &task.id), "result", &run.result);
+    let ev = field(ev, "name", name);
+    let ev = match &run.signal {
+        Some(s) => field(ev, "signal", s),
+        None => ev,
+    };
     Some(match run.exit_code {
         Some(c) => field(ev, "exit_code", c),
         None => ev,

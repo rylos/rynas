@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use rynas_api_types::storage::{ArrayHealth, BtrfsFilesystem, DiskSummary, HealthVerdict, MdArray};
 use rynas_api_types::{HardwareStatus, TaskInfo, TaskStatus, Temperature};
 
-use crate::event::{field, firing, oneshot, resolved};
+use crate::event::{code, field, firing, oneshot, resolved};
 use crate::{NewEvent, NotifyCategory as Cat, NotifySeverity as Sev};
 
 /// Most conditions a watcher remembers (M1): keys are bounded by the hardware (sensors,
@@ -116,6 +116,13 @@ pub fn temp_level(prev: Option<Sev>, t: f32, lim: TempLimits) -> Option<Sev> {
     }
 }
 
+/// Fields of a temperature event: sensor id, its label and the reading (one decimal).
+fn temp_fields(e: NewEvent, sensor: &str, label: &str, c: f32) -> NewEvent {
+    let e = field(e, "sensor", sensor);
+    let e = field(e, "label", label);
+    field(e, "celsius", format!("{c:.1}"))
+}
+
 /// Provider data older than this means the provider stopped updating.
 pub const HW_STALE_S: u64 = 300;
 
@@ -153,19 +160,17 @@ impl HardwareWatch {
                     &key,
                     f.alarm.then_some(Sev::Error),
                     |s| {
-                        field(
-                            firing(Cat::Hardware, s, HW, &key, format!("Fan {label} stopped")),
-                            "fan",
-                            &label,
-                        )
+                        let e = firing(Cat::Hardware, s, HW, &key, format!("Fan {label} stopped"));
+                        field(code(e, "hw.fan_stopped"), "fan", &label)
                     },
                     || {
-                        resolved(
+                        let e = resolved(
                             Cat::Hardware,
                             HW,
                             &key,
                             format!("Fan {label} is running again"),
-                        )
+                        );
+                        field(code(e, "hw.fan_running"), "fan", &label)
                     },
                 );
             }
@@ -177,9 +182,14 @@ impl HardwareWatch {
                 |s| {
                     let mut e = firing(Cat::Hardware, s, HW, key, "Fan failure");
                     e.body = "The hardware controller reports a fan failure: check the fans before the disks overheat.".into();
-                    e
+                    code(e, "hw.fan_failure")
                 },
-                || resolved(Cat::Hardware, HW, key, "Fans back to normal"),
+                || {
+                    code(
+                        resolved(Cat::Hardware, HW, key, "Fans back to normal"),
+                        "hw.fans_ok",
+                    )
+                },
             );
             let key = "hardware:provider:stale";
             let stale = hw.age_s.is_some_and(|a| a > HW_STALE_S);
@@ -189,11 +199,18 @@ impl HardwareWatch {
                 key,
                 stale.then_some(Sev::Warning),
                 |s| {
+                    let provider = hw.provider.as_deref().unwrap_or("unknown");
                     let mut e = firing(Cat::Hardware, s, HW, key, "Hardware monitor not updating");
-                    e.body = format!("The hardware provider ({}) has not written its status for {age} s: fan and temperature alarms are blind.", hw.provider.as_deref().unwrap_or("unknown"));
-                    e
+                    e.body = format!("The hardware provider ({provider}) has not written its status for {age} s: fan and temperature alarms are blind.");
+                    let e = field(code(e, "hw.monitor_stale"), "provider", provider);
+                    field(e, "age_s", age)
                 },
-                || resolved(Cat::Hardware, HW, key, "Hardware monitor updating again"),
+                || {
+                    code(
+                        resolved(Cat::Hardware, HW, key, "Hardware monitor updating again"),
+                        "hw.monitor_ok",
+                    )
+                },
             );
         }
         for (id, label, c) in seen {
@@ -218,20 +235,18 @@ impl HardwareWatch {
                         "{label} is at {c:.1} °C (warning {:.0} °C, critical {:.0} °C).",
                         lim.warn_c, lim.crit_c
                     );
-                    let e = field(e, "sensor", &id);
-                    field(e, "celsius", format!("{c:.1}"))
+                    let e = temp_fields(code(e, "hw.temp_high"), &id, &label, c);
+                    let e = field(e, "warn_c", format!("{:.0}", lim.warn_c));
+                    field(e, "crit_c", format!("{:.0}", lim.crit_c))
                 },
                 || {
-                    field(
-                        resolved(
-                            Cat::Hardware,
-                            HW,
-                            &key,
-                            format!("{label} temperature back to normal ({c:.0} °C)"),
-                        ),
-                        "sensor",
-                        &id,
-                    )
+                    let e = resolved(
+                        Cat::Hardware,
+                        HW,
+                        &key,
+                        format!("{label} temperature back to normal ({c:.0} °C)"),
+                    );
+                    temp_fields(code(e, "hw.temp_ok"), &id, &label, c)
                 },
             );
         }
@@ -278,16 +293,17 @@ impl HardwareWatch {
                     e.body = format!(
                         "{label} is at {c:.1} °C; the hardware controller powers the NAS off at {limit:.0} °C (when thermal shutdown is on). Check the fans and the airflow."
                     );
-                    let e = field(e, "sensor", &r.id);
-                    field(e, "celsius", format!("{c:.1}"))
+                    let e = temp_fields(code(e, "hw.thermal_shutdown"), &r.id, &label, c);
+                    field(e, "shutdown_c", format!("{limit:.0}"))
                 },
                 || {
-                    resolved(
+                    let e = resolved(
                         Cat::Hardware,
                         HW,
                         &key,
                         format!("{label} cooled down ({c:.0} °C)"),
-                    )
+                    );
+                    temp_fields(code(e, "hw.thermal_ok"), &r.id, &label, c)
                 },
             );
         }
@@ -352,13 +368,14 @@ impl StorageWatch {
                 HealthVerdict::Failing => Some(Sev::Critical),
             };
             let key = format!("storage:disk:{}:health", disk_id(d));
-            let name = format!(
-                "{} ({})",
-                d.name,
-                if d.model.is_empty() { "disk" } else { &d.model }
-            );
+            let name = if d.model.is_empty() {
+                d.name.clone()
+            } else {
+                format!("{} ({})", d.name, d.model)
+            };
             let with_fields = |mut e: NewEvent| {
                 e.fields.insert("disk".into(), d.name.clone());
+                e.fields.insert("disk_label".into(), name.clone());
                 e.fields.insert("serial".into(), d.serial.clone());
                 if let Some(b) = d.bay {
                     e.fields.insert("bay".into(), b.to_string());
@@ -370,10 +387,10 @@ impl StorageWatch {
                 &key,
                 level,
                 |s| {
-                    let word = if s == Sev::Critical {
-                        "failing"
+                    let (word, c) = if s == Sev::Critical {
+                        ("failing", "storage.disk_failing")
                     } else {
-                        "needs attention"
+                        ("needs attention", "storage.disk_warning")
                     };
                     let mut e = firing(Cat::Storage, s, ST, &key, format!("Disk {name} {word}"));
                     e.body = d
@@ -382,15 +399,11 @@ impl StorageWatch {
                         .map(|r| format!("- {}", r.message))
                         .collect::<Vec<_>>()
                         .join("\n");
-                    with_fields(e)
+                    with_fields(code(e, c))
                 },
                 || {
-                    with_fields(resolved(
-                        Cat::Storage,
-                        ST,
-                        &key,
-                        format!("Disk {name} healthy again"),
-                    ))
+                    let e = resolved(Cat::Storage, ST, &key, format!("Disk {name} healthy again"));
+                    with_fields(code(e, "storage.disk_ok"))
                 },
             );
         }
@@ -402,10 +415,10 @@ impl StorageWatch {
                 ArrayHealth::Inactive => Some(Sev::Error),
             };
             let key = format!("storage:md:{}:health", a.name);
-            let word = match a.health {
-                ArrayHealth::Degraded => "degraded",
-                ArrayHealth::Failed => "failed",
-                _ => "inactive",
+            let (word, c) = match a.health {
+                ArrayHealth::Degraded => ("degraded", "storage.raid_degraded"),
+                ArrayHealth::Failed => ("failed", "storage.raid_failed"),
+                _ => ("inactive", "storage.raid_inactive"),
             };
             self.t.emit(
                 &mut out,
@@ -433,19 +446,23 @@ impl StorageWatch {
                             format!(" Members: {}.", faulty.join(", "))
                         }
                     );
-                    field(field(e, "array", &a.name), "level", &a.level)
+                    let mut e = field(field(code(e, c), "array", &a.name), "level", &a.level);
+                    e = field(e, "state", &a.state);
+                    e = field(e, "degraded", a.degraded);
+                    e = field(e, "raid_disks", a.raid_disks);
+                    if !faulty.is_empty() {
+                        e = field(e, "members", faulty.join(", "));
+                    }
+                    e
                 },
                 || {
-                    field(
-                        resolved(
-                            Cat::Storage,
-                            ST,
-                            &key,
-                            format!("RAID {} healthy again", a.name),
-                        ),
-                        "array",
-                        &a.name,
-                    )
+                    let e = resolved(
+                        Cat::Storage,
+                        ST,
+                        &key,
+                        format!("RAID {} healthy again", a.name),
+                    );
+                    field(code(e, "storage.raid_ok"), "array", &a.name)
                 },
             );
         }
@@ -479,7 +496,21 @@ impl StorageWatch {
                         format!("Volume {name}: device errors on {}", dev.path),
                     );
                     ev.body = body.clone();
-                    field(field(ev, "volume", &name), "device", &dev.path)
+                    let mut ev = field(
+                        field(code(ev, "storage.btrfs_errors"), "volume", &name),
+                        "device",
+                        &dev.path,
+                    );
+                    for (k, v) in [
+                        ("write_io", e.write_io),
+                        ("read_io", e.read_io),
+                        ("flush_io", e.flush_io),
+                        ("corruption", e.corruption),
+                        ("generation", e.generation),
+                    ] {
+                        ev = field(ev, k, v);
+                    }
+                    ev
                 };
                 if grew && self.t.level(&key).is_some() {
                     // still firing, more errors: the engine counts the repeat
@@ -487,12 +518,14 @@ impl StorageWatch {
                     continue;
                 }
                 self.t.emit(&mut out, &key, level, make, || {
-                    resolved(
+                    let ev = resolved(
                         Cat::Storage,
                         ST,
                         &key,
                         format!("Volume {name}: device error counters cleared"),
-                    )
+                    );
+                    let ev = field(code(ev, "storage.btrfs_errors_cleared"), "volume", &name);
+                    field(ev, "device", &dev.path)
                 });
                 let key = format!("storage:btrfs:{id}:missing");
                 self.t.emit(
@@ -500,25 +533,25 @@ impl StorageWatch {
                     &key,
                     dev.missing.then_some(Sev::Critical),
                     |s| {
-                        field(
-                            firing(
-                                Cat::Storage,
-                                s,
-                                ST,
-                                &key,
-                                format!("Volume {name}: device {} missing", dev.devid),
-                            ),
-                            "volume",
-                            &name,
-                        )
+                        let ev = firing(
+                            Cat::Storage,
+                            s,
+                            ST,
+                            &key,
+                            format!("Volume {name}: device {} missing", dev.devid),
+                        );
+                        let ev = field(code(ev, "storage.btrfs_missing"), "volume", &name);
+                        field(ev, "devid", dev.devid)
                     },
                     || {
-                        resolved(
+                        let ev = resolved(
                             Cat::Storage,
                             ST,
                             &key,
                             format!("Volume {name}: device {} back", dev.devid),
-                        )
+                        );
+                        let ev = field(code(ev, "storage.btrfs_back"), "volume", &name);
+                        field(ev, "devid", dev.devid)
                     },
                 );
             }
@@ -543,23 +576,26 @@ impl StorageWatch {
                         &key,
                         format!("Volume {name} {pct:.0}% full"),
                     );
-                    e.body = format!(
-                        "{name} uses {:.1} GiB, about {:.1} GiB free ({pct:.1}%).",
-                        fs.used as f64 / 1073741824.0,
-                        fs.free_estimated as f64 / 1073741824.0
+                    let (used, free) = (
+                        format!("{:.1}", fs.used as f64 / 1073741824.0),
+                        format!("{:.1}", fs.free_estimated as f64 / 1073741824.0),
                     );
-                    field(field(e, "volume", &name), "used_pct", format!("{pct:.1}"))
+                    e.body = format!("{name} uses {used} GiB, about {free} GiB free ({pct:.1}%).");
+                    let e = field(code(e, "storage.volume_full"), "volume", &name);
+                    let e = field(field(e, "used_pct", format!("{pct:.1}")), "used_gib", used);
+                    field(e, "free_gib", free)
                 },
                 || {
-                    resolved(
+                    let limit = USAGE_LEVELS[2].0;
+                    let e = resolved(
                         Cat::Storage,
                         ST,
                         &key,
-                        format!(
-                            "Volume {name} back under {:.0}% ({pct:.0}%)",
-                            USAGE_LEVELS[2].0
-                        ),
-                    )
+                        format!("Volume {name} back under {limit:.0}% ({pct:.0}%)"),
+                    );
+                    let e = field(code(e, "storage.volume_ok"), "volume", &name);
+                    let e = field(e, "used_pct", format!("{pct:.1}"));
+                    field(e, "limit_pct", format!("{limit:.0}"))
                 },
             );
         }
@@ -588,13 +624,28 @@ pub fn task_event(t: &TaskInfo) -> Option<NewEvent> {
             format!("Task {}", t.kind),
         )
     };
+    let apply = t.kind == "config.apply";
     let e = match t.status {
         TaskStatus::Error => {
             let mut e = firing(cat, Sev::Error, source, &key, format!("{what} failed"));
             e.body = t.error.clone().unwrap_or_default();
-            e
+            code(
+                e,
+                if apply {
+                    "config.apply_failed"
+                } else {
+                    "task.failed"
+                },
+            )
         }
-        TaskStatus::Ok => resolved(cat, source, &key, format!("{what} succeeded")),
+        TaskStatus::Ok => code(
+            resolved(cat, source, &key, format!("{what} succeeded")),
+            if apply {
+                "config.apply_ok"
+            } else {
+                "task.succeeded"
+            },
+        ),
         _ => return None,
     };
     Some(field(
@@ -621,7 +672,7 @@ pub fn auth_lockout(user: &str, ip: &str, retry_after_s: u64) -> NewEvent {
         "Too many failed logins for {user} from {ip}: further attempts are refused for {retry_after_s} s."
     );
     field(
-        field(field(e, "user", user), "ip", ip),
+        field(field(code(e, "auth.lockout"), "user", user), "ip", ip),
         "retry_after_s",
         retry_after_s,
     )
@@ -648,7 +699,12 @@ pub fn totp_changed(user: &str, enabled: bool) -> NewEvent {
         format!("auth:totp:{user}:{enabled}"),
         title,
     );
-    field(e, "user", user)
+    let c = if enabled {
+        "auth.totp_enabled"
+    } else {
+        "auth.totp_disabled"
+    };
+    field(code(e, c), "user", user)
 }
 
 /// A user name as it may appear in a title: printable, at most 64 characters (names in
