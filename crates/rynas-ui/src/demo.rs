@@ -233,6 +233,19 @@ pub fn ups_settings() -> ups::UpsSettingsState {
     }
 }
 
+pub fn ups_device() -> ups::UpsDeviceState {
+    ups::UpsDeviceState {
+        backend: ups::UpsBackend::Nut,
+        nut_version: Some("2.8.5".into()),
+        applied: Some(ups::UpsDeviceConfig {
+            name: "ups".into(),
+            device: ups::UpsDevice { driver: "usbhid-ups".into(), port: "auto".into(), options: vec![] },
+            take_over: vec![],
+        }),
+        ..Default::default()
+    }
+}
+
 pub fn ups_events() -> Vec<notify::Notification> {
     let now = js_sys::Date::now() as u64;
     let n = |id: u64, ago_min: u64, sev: notify::NotifySeverity, title: &str| notify::Notification {

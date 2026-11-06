@@ -158,7 +158,7 @@ pub fn text_in(lang: Lang, key: &str) -> Option<&'static str> {
 
 /// Every entry as (key, English, Italian), for the tests.
 #[cfg(test)]
-fn entries() -> Vec<(&'static str, &'static str, &'static str)> {
+pub(crate) fn entries() -> Vec<(&'static str, &'static str, &'static str)> {
     INDEX.with(|idx| (0..LENS.len() / 3).map(|e| (idx.text(e * 3), idx.text(e * 3 + 1), idx.text(e * 3 + 2))).collect())
 }
 
@@ -784,6 +784,7 @@ dict! {
     // UPS (Hardware › UPS)
     "ups.tab" => "UPS", "UPS";
     "task.ups.test" => "UPS battery test", "Test batteria UPS";
+    "task.ups.detect" => "UPS detection", "Rilevamento UPS";
     "ups.status" => "UPS status", "Stato UPS";
     "ups.st_unreachable" => "UPS service not reachable", "Servizio UPS non raggiungibile";
     "ups.st_none" => "No UPS", "Nessun UPS";
@@ -805,11 +806,11 @@ dict! {
     "ups.f_cal" => "CAL · calibrating", "CAL · calibrazione";
     "ups.f_over" => "OVER · overloaded", "OVER · sovraccarico";
     "ups.none_title" => "No UPS connected", "Nessun UPS collegato";
-    "ups.none_text" => "The UPS service runs but reports no UPS. Connect the UPS over USB and add it to NUT's ups.conf (nut-scanner finds it).", "Il servizio UPS è attivo ma non segnala alcun UPS. Collega l'UPS via USB e aggiungilo a ups.conf di NUT (nut-scanner lo trova).";
-    "ups.none_text_synodeb" => "The UPS service runs but reports no UPS. Connect a UPS over USB and set it up with synodeb-ups setup.", "Il servizio UPS è attivo ma non segnala alcun UPS. Collega un UPS via USB e configuralo con synodeb-ups setup.";
+    "ups.none_text" => "The UPS service runs but reports no UPS. Connect the UPS and set it up with UPS setup below.", "Il servizio UPS è attivo ma non segnala alcun UPS. Collega l'UPS e configuralo con Configurazione UPS qui sotto.";
+    "ups.none_text_synodeb" => "The UPS service runs but reports no UPS. Connect a UPS over USB and set it up with UPS setup below (synodeb applies it).", "Il servizio UPS è attivo ma non segnala alcun UPS. Collega un UPS via USB e configuralo con Configurazione UPS qui sotto (lo applica synodeb).";
     "ups.down_title" => "UPS service not running", "Servizio UPS non attivo";
-    "ups.down_text" => "Nothing answers on the NUT port of this NAS (127.0.0.1:3493). Install NUT (Debian package nut), set up the UPS and start nut-server.", "Nessuna risposta sulla porta NUT di questo NAS (127.0.0.1:3493). Installa NUT (pacchetto Debian nut), configura l'UPS e avvia nut-server.";
-    "ups.down_text_synodeb" => "Nothing answers on the NUT port of this NAS (127.0.0.1:3493). Set up the UPS with synodeb-ups setup.", "Nessuna risposta sulla porta NUT di questo NAS (127.0.0.1:3493). Configura l'UPS con synodeb-ups setup.";
+    "ups.down_text" => "Nothing answers on the NUT port of this NAS (127.0.0.1:3493). Install NUT (Debian package nut), then set up the UPS with UPS setup below.", "Nessuna risposta sulla porta NUT di questo NAS (127.0.0.1:3493). Installa NUT (pacchetto Debian nut), poi configura l'UPS con Configurazione UPS qui sotto.";
+    "ups.down_text_synodeb" => "Nothing answers on the NUT port of this NAS (127.0.0.1:3493). Set up the UPS with UPS setup below (synodeb applies it).", "Nessuna risposta sulla porta NUT di questo NAS (127.0.0.1:3493). Configura l'UPS con Configurazione UPS qui sotto (lo applica synodeb).";
     "ups.charge" => "Battery charge", "Carica batteria";
     "ups.runtime" => "Runtime left", "Autonomia residua";
     "ups.load" => "Load", "Carico";
@@ -863,6 +864,67 @@ dict! {
     "ups.schedule_hint" => "To test on a schedule, add a scheduled task that runs as root:", "Per un test pianificato, aggiungi un'attività pianificata eseguita come root:";
     "ups.events" => "Recent UPS events", "Eventi UPS recenti";
     "ups.no_events" => "No UPS events yet.", "Ancora nessun evento UPS.";
+    "ups.device" => "Driver and connection", "Driver e collegamento";
+    "upsw.title" => "UPS setup", "Configurazione UPS";
+    "upsw.intro" => "No UPS reports to this NAS. rynas can look for a UPS on USB, test which NUT driver reads it and set it up.", "Nessun UPS comunica con questo NAS. rynas può cercare un UPS su USB, provare quale driver NUT lo legge e configurarlo.";
+    "upsw.need_nut" => "Install NUT (Debian package nut) to set up a UPS here.", "Installa NUT (pacchetto Debian nut) per configurare qui un UPS.";
+    "upsw.synodeb_old" => "This synodeb version cannot set up other UPS drivers yet: update synodeb to use the setup wizard.", "Questa versione di synodeb non sa ancora configurare altri driver UPS: aggiorna synodeb per usare la procedura guidata.";
+    "upsw.name" => "NUT name", "Nome NUT";
+    "upsw.name_help" => "The name of the UPS in NUT (lowercase letters, digits, - and _).", "Il nome dell'UPS in NUT (lettere minuscole, cifre, - e _).";
+    "upsw.change" => "Change UPS", "Cambia UPS";
+    "upsw.start" => "Set up UPS", "Configura UPS";
+    "upsw.s_find" => "Find", "Cerca";
+    "upsw.s_test" => "Test", "Prova";
+    "upsw.s_review" => "Review", "Riepilogo";
+    "upsw.s_done" => "Done", "Fatto";
+    "upsw.find_text" => "Connect the UPS to this NAS. The detection lists the UPSes on USB and tries the matching NUT drivers one by one until one reads the UPS status. For a serial or network UPS, enter the driver by hand.", "Collega l'UPS a questo NAS. Il rilevamento elenca gli UPS su USB e prova uno alla volta i driver NUT adatti finché uno legge lo stato dell'UPS. Per un UPS seriale o di rete, inserisci il driver a mano.";
+    "upsw.find_text_synodeb" => "Connect the UPS to this NAS. The detection lists the UPSes on USB and tries the matching NUT drivers one by one until one reads the UPS status; synodeb then sets up NUT with the chosen driver. For a serial or network UPS, enter the driver by hand.", "Collega l'UPS a questo NAS. Il rilevamento elenca gli UPS su USB e prova uno alla volta i driver NUT adatti finché uno legge lo stato dell'UPS; poi synodeb configura NUT con il driver scelto. Per un UPS seriale o di rete, inserisci il driver a mano.";
+    "upsw.stop_drivers" => "Stop the running UPS driver during the test", "Ferma il driver UPS in funzione durante la prova";
+    "upsw.stop_drivers_help" => "A driver already holds the UPS: it is stopped while the drivers are tested and started again afterwards. The UPS is not monitored meanwhile.", "Un driver occupa già l'UPS: viene fermato mentre si provano i driver e riavviato dopo. Nel frattempo l'UPS non è sorvegliato.";
+    "upsw.detect" => "Detect USB UPS", "Rileva UPS USB";
+    "upsw.manual" => "Enter by hand", "Inserisci a mano";
+    "upsw.testing" => "Each driver gets up to 45 seconds to answer.", "Ogni driver ha fino a 45 secondi per rispondere.";
+    "upsw.no_report" => "No detection result yet.", "Ancora nessun risultato del rilevamento.";
+    "upsw.busy" => "A UPS driver is running and holds the device: nothing was tested. Allow stopping it and detect again.", "Un driver UPS è in funzione e occupa il dispositivo: non è stato provato nulla. Consenti di fermarlo e rileva di nuovo.";
+    "upsw.need_newer" => "No driver read this UPS. Its known setting needs NUT {need} or newer and this NAS has NUT {have}: update NUT (for example from Debian backports), then detect again.", "Nessun driver ha letto questo UPS. La sua impostazione nota richiede NUT {need} o successivo e questo NAS ha NUT {have}: aggiorna NUT (per esempio dai backports di Debian), poi rileva di nuovo.";
+    "upsw.no_usb" => "No UPS found on USB. Check the cable, or enter a serial or network UPS by hand.", "Nessun UPS trovato su USB. Controlla il cavo, oppure inserisci a mano un UPS seriale o di rete.";
+    "upsw.none_answered" => "No driver read the UPS status. The last lines of each driver are below: try another driver or other options by hand.", "Nessun driver ha letto lo stato dell'UPS. Qui sotto le ultime righe di ogni driver: prova a mano un altro driver o altre opzioni.";
+    "upsw.found" => "Found: {model}, status {status}, charge {charge}.", "Trovato: {model}, stato {status}, carica {charge}.";
+    "upsw.detect_again" => "Detect again", "Rileva di nuovo";
+    "upsw.usb" => "On USB", "Su USB";
+    "upsw.nut_version" => "NUT version on this NAS: {v}", "Versione di NUT su questo NAS: {v}";
+    "upsw.candidates" => "Drivers tried", "Driver provati";
+    "upsw.min_nut" => "Needs NUT {v} or newer", "Richiede NUT {v} o successivo";
+    "upsw.p_ok" => "Answers", "Risponde";
+    "upsw.p_failed" => "No answer", "Nessuna risposta";
+    "upsw.p_not_run" => "Not tried", "Non provato";
+    "upsw.p_busy" => "Device in use", "Dispositivo in uso";
+    "upsw.p_newer" => "Needs a newer NUT", "Serve un NUT più recente";
+    "upsw.p_no_driver" => "Driver not installed", "Driver non installato";
+    "upsw.src_known" => "Known setting for this model", "Impostazione nota per questo modello";
+    "upsw.src_scanner" => "Suggested by the USB scan", "Suggerito dalla scansione USB";
+    "upsw.src_generic" => "Generic driver", "Driver generico";
+    "upsw.src_manual" => "Entered by hand", "Inserito a mano";
+    "upsw.manual_text" => "Pick the driver that NUT's hardware list names for the UPS. USB: port auto (add vendorid and productid when several UPSes are connected). Serial: the device, such as /dev/ttyS0. Network (SNMP): the address, with options such as community=public.", "Scegli il driver che l'elenco hardware di NUT indica per l'UPS. USB: porta auto (aggiungi vendorid e productid se sono collegati più UPS). Seriale: il dispositivo, come /dev/ttyS0. Rete (SNMP): l'indirizzo, con opzioni come community=public.";
+    "upsw.driver" => "Driver", "Driver";
+    "upsw.pick_driver" => "Choose a driver", "Scegli un driver";
+    "upsw.driver_help" => "The NUT drivers installed on this NAS.", "I driver NUT installati su questo NAS.";
+    "upsw.driver_for" => "Listed by NUT for: {list}", "Indicato da NUT per: {list}";
+    "upsw.port" => "Port", "Porta";
+    "upsw.port_help" => "auto for USB, a serial device such as /dev/ttyS0, or a network address.", "auto per USB, un dispositivo seriale come /dev/ttyS0, oppure un indirizzo di rete.";
+    "upsw.options" => "Driver options", "Opzioni del driver";
+    "upsw.options_help" => "key=value separated by spaces; a word alone is a flag (norating).", "chiave=valore separate da spazi; una parola da sola è un'opzione senza valore (norating).";
+    "upsw.skip_test" => "Continue without a test", "Continua senza prova";
+    "upsw.test" => "Test this setting", "Prova questa impostazione";
+    "upsw.untested" => "This setting was not tested: if the driver cannot start, the apply fails and the previous setup comes back.", "Questa impostazione non è stata provata: se il driver non parte, l'applicazione fallisce e torna la configurazione precedente.";
+    "upsw.conflict" => "NUT's ups.conf has a UPS section that rynas does not manage and that would use the same device. rynas changes it only if you take it over: the section is then removed (a backup is kept).", "Il file ups.conf di NUT ha una sezione UPS che rynas non gestisce e che userebbe lo stesso dispositivo. rynas la modifica solo se la prendi in carico: la sezione viene allora rimossa (resta una copia di sicurezza).";
+    "upsw.take_over" => "Take over and remove the section [{name}]", "Prendi in carico e rimuovi la sezione [{name}]";
+    "upsw.removed" => "Lines removed:", "Righe rimosse:";
+    "upsw.commands" => "Then rynas runs:", "Poi rynas esegue:";
+    "upsw.commands_synodeb" => "synodeb sets up NUT with:", "synodeb configura NUT con:";
+    "upsw.apply" => "Apply", "Applica";
+    "upsw.waiting" => "Waiting for the UPS to report…", "In attesa che l'UPS comunichi…";
+    "upsw.applied" => "The UPS is set up: NUT now runs its driver, upsd and upsmon.", "L'UPS è configurato: ora NUT esegue il suo driver, upsd e upsmon.";
     "ps.col_on" => "Enabled", "Attiva";
     "ps.col_action" => "Action", "Azione";
     "ps.col_busy" => "If busy", "Se occupato";
@@ -2595,6 +2657,7 @@ dict! {
     "cfg.apply_kept" => "The previous settings are back in place; the change stays in the pending changes.", "Sono tornate le impostazioni precedenti; la modifica resta tra quelle in sospeso.";
     "cfg.apply_log" => "Show the log", "Mostra il registro";
     "cfg.key.ups.safemode" => "UPS shutdown policy", "Criterio di spegnimento con l'UPS";
+    "cfg.key.ups.device" => "UPS driver and connection", "Driver e collegamento dell'UPS";
     "cfg.key.updates.auto" => "Automatic updates", "Aggiornamenti automatici";
     // ---- Disk checks (SettingCheck codes) and SMART health reasons (HealthReason codes)
     "sto.chk_crit" => "Critical", "Critica";
