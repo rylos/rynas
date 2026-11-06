@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """A tiny stand-in for the files API, for screenshots of the file manager before its backend exists.
 
-    files_mock.py <listen-port> <rynas-web-port> [empty|error]
+    files_mock.py <listen-port> <rynas-web-port> [empty|error|xfer]
 
 Listens on 127.0.0.1:<listen-port>: `/api/v1/files/<route>` answers from fake data with SynoFile's
 JSON shapes (init, shares, list, stat, jobs, prefs, conns); everything else is forwarded to
 rynas-web on <rynas-web-port> (login, session, the UI files). Mode `empty`: no shared folders;
-mode `error`: every files route answers 503 `backend_unavailable` (the "unavailable" banner).
+mode `error`: every files route answers 503 `backend_unavailable` (the "unavailable" banner);
+mode `xfer`: one running tar.zst compression with bursty speed samples (a pause included), for
+the transfer dialog's speed chart (open it with `/files?xfer=last`).
 Test only: no file is read or written.
 """
 import http.client
 import http.server
 import json
+import random
 import sys
 import time
 import urllib.parse
@@ -19,6 +22,47 @@ import urllib.parse
 LISTEN, UPSTREAM = int(sys.argv[1]), int(sys.argv[2])
 MODE = sys.argv[3] if len(sys.argv) > 3 else "full"
 NOW = int(time.time())
+STARTED = time.time() - 75  # the compression has been running for 75 s when the mock starts
+MIB = 1 << 20
+XFER_TOTAL = 20 * 1024 * MIB
+
+
+def xfer_samples(upto_ms):
+    """Samples [ms since start, bytes, files, verify bytes] as the files worker writes them: one
+    every 500 ms, plus forced ones at file boundaries a few ms apart; zstd reads in bursts (big
+    blocks, then almost nothing while it compresses), so the instantaneous speed jumps between ~0
+    and ~300 MiB/s around a ~95 MiB/s average; paused from 40 s to 46 s (no samples)."""
+    rnd = random.Random(7)
+    out, t, b, f = [[0, 0, 0, 0]], 0, 0, 0
+    while True:
+        t += 500
+        if 40_000 < t <= 46_000:
+            continue
+        if t > upto_ms:
+            break
+        burst = rnd.random() < 0.45
+        b += int((rnd.uniform(150, 260) if burst else rnd.uniform(0, 12)) * MIB / 2)
+        out.append([t, b, f, 0])
+        if rnd.random() < 0.2:  # a file ends: a forced sample right after
+            f += 1
+            b += int(rnd.uniform(4, 40) * MIB)
+            out.append([t + rnd.randint(5, 40), b, f, 0])
+    return out
+
+
+def xfer_job():
+    # it keeps running for a minute after the mock starts, then holds (still "running")
+    ms = int(min(time.time() - STARTED, 135) * 1000)
+    s = xfer_samples(ms)
+    done = min(s[-1][1], XFER_TOTAL)
+    return {
+        "id": 4242, "op": "compress", "state": "running", "source": "nas", "created": NOW - 75, "verify": False,
+        "info": {"sources": ["/documents/Projects"], "dest": "/documents/Projects.tar.zst"},
+        "progress": {"bytes_done": done, "bytes_total": XFER_TOTAL, "files_done": s[-1][2], "files_total": 4100,
+                     "dirs": 120, "errors": 0, "verify_bytes": 0, "scanning": False, "phase": "compress", "method": "zstd",
+                     "current": "/documents/Projects/render/frames.bin", "current_size": 2 << 30, "current_done": done % (2 << 30)},
+        "samples": s, "active_ms": ms - 6000, "errors": [], "msg": "",
+    }
 
 SHARES = [] if MODE == "empty" else [
     {"name": "documents", "volume": "volume1", "comment": "Office documents", "recycle": True, "hidden": False, "encrypted": False, "home": False,
@@ -74,7 +118,7 @@ def route(name, q):
         base = path.rsplit("/", 1)[-1]
         return {**entry(base, size=1000), "owner": "tester", "group": "users"}
     if name == "jobs":
-        return {"jobs": [], "now": NOW}
+        return {"jobs": [xfer_job()] if MODE == "xfer" else [], "now": NOW}
     if name in ("prefs", "conns"):
         return {} if name == "prefs" else {"conns": [], "key": None}
     if name in ("usage", "media"):
