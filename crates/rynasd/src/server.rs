@@ -58,6 +58,8 @@ pub struct DaemonState {
     pub hardware: crate::hardware::HwState,
     /// Networking (needs `ops`); `None` answers 503 on its endpoints.
     pub network: Option<Arc<crate::network::Network>>,
+    /// The file manager (needs `ops`); `None` answers 503 on its endpoints.
+    pub files: Option<Arc<crate::files::Files>>,
 }
 
 impl DaemonState {
@@ -89,6 +91,7 @@ impl DaemonState {
             protection: None,
             hardware: None,
             network: None,
+            files: None,
         }
     }
 }
@@ -156,6 +159,7 @@ pub fn router(state: DaemonState) -> Router {
         .merge(crate::hardware::router(state.hardware.clone()))
         .merge(crate::power::router(state.hardware))
         .merge(crate::network::router(state.network))
+        .merge(crate::files::router(state.files))
         .fallback(|| async { Error::not_found("no such endpoint") })
         // 405, query string and path rejections: ApiError bodies too
         .layer(axum::middleware::from_fn(crate::error::json_errors))

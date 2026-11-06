@@ -6,6 +6,7 @@ pub mod auth;
 pub mod conn;
 pub mod error;
 pub mod events;
+pub mod files;
 pub mod hardware;
 pub mod metrics;
 pub mod notify;

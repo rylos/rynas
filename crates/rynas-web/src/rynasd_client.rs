@@ -44,6 +44,11 @@ pub const DEFAULT_DEADLINE: Duration = Duration::from_secs(30);
 pub const NOTIFY_TEST_DEADLINE: Duration = Duration::from_secs(60);
 /// A network diagnostic (traceroute runs up to 45 s in rynasd).
 pub const DIAGNOSTICS_DEADLINE: Duration = Duration::from_secs(60);
+/// The file manager: until the worker starts answering (rynasd allows its workers 120 s).
+pub const FILES_DEADLINE: Duration = Duration::from_secs(130);
+/// File manager uploads and saves: the body travels before the answer starts (16 MiB
+/// chunks on a slow link; rynasd allows 600 s).
+pub const FILES_UPLOAD_DEADLINE: Duration = Duration::from_secs(610);
 /// Largest answer read into memory by [`RynasdClient::call`] (pass-through answers stream).
 pub const MAX_ANSWER: usize = 8 << 20;
 
@@ -58,6 +63,10 @@ pub fn deadline(path: &str) -> Duration {
         NOTIFY_TEST_DEADLINE
     } else if path.starts_with("/v1/network/diagnostics/") {
         DIAGNOSTICS_DEADLINE
+    } else if path.starts_with("/v1/files/upload") || path.starts_with("/v1/files/edit/save") {
+        FILES_UPLOAD_DEADLINE
+    } else if path.starts_with("/v1/files/") {
+        FILES_DEADLINE
     } else {
         DEFAULT_DEADLINE
     }
@@ -131,7 +140,12 @@ impl RynasdClient {
     }
 
     /// Opens a connection, refusing a server that is neither root nor our own uid.
-    async fn connect(&self) -> Result<SendRequest<Full<Bytes>>, String> {
+    async fn connect<B>(&self) -> Result<SendRequest<B>, String>
+    where
+        B: hyper::body::Body + Send + 'static,
+        B::Data: Send,
+        B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
         let stream = UnixStream::connect(&self.socket)
             .await
             .map_err(|e| e.to_string())?;
@@ -223,6 +237,39 @@ impl RynasdClient {
             let req = req
                 .body(Full::new(body))
                 .map_err(|e| UpstreamError::BadGateway(e.to_string()))?;
+            sender
+                .send_request(req)
+                .await
+                .map_err(|e| UpstreamError::Unavailable(e.to_string()))
+        };
+        tokio::time::timeout(limit, fut)
+            .await
+            .unwrap_or(Err(UpstreamError::Timeout))
+    }
+
+    /// [`RynasdClient::send`] with a body that streams (the file manager: uploads go on to
+    /// rynasd and its worker as they arrive, never whole in memory) and the given request
+    /// headers. The deadline covers the connection, the body and the response head.
+    pub async fn send_stream(
+        &self,
+        method: Method,
+        path_and_query: &str,
+        user: &str,
+        headers: &[(header::HeaderName, HeaderValue)],
+        body: axum::body::Body,
+    ) -> Result<hyper::Response<Incoming>, UpstreamError> {
+        let limit = self.deadline(path_and_query);
+        let fut = async {
+            let mut sender = self.connect::<axum::body::Body>().await.map_err(UpstreamError::Unavailable)?;
+            let mut req = Request::builder()
+                .method(method)
+                .uri(path_and_query)
+                .header(header::HOST, "rynasd")
+                .header(USER_HEADER, user);
+            for (k, v) in headers {
+                req = req.header(k, v);
+            }
+            let req = req.body(body).map_err(|e| UpstreamError::BadGateway(e.to_string()))?;
             sender
                 .send_request(req)
                 .await

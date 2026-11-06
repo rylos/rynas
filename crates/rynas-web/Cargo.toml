@@ -55,10 +55,12 @@ depends = "$auto, adduser, libpam-runtime"
 # file services (samba, nfs-kernel-server, acl for share ACLs, avahi-daemon and wsdd2 for
 # discovery), snapshots (btrbk, btrfs-progs), storage (mdadm, cryptsetup-bin and
 # systemd-cryptsetup for encrypted volumes, gdisk, smartmontools, hdparm), network changes
-# (iputils-arping/iputils-ping: duplicate-address checks and gateway tests)
-recommends = "samba, nfs-kernel-server, acl, avahi-daemon, wsdd2, btrbk, btrfs-progs, mdadm, cryptsetup-bin, systemd-cryptsetup, smartmontools, hdparm, gdisk, iputils-arping, iputils-ping"
+# (iputils-arping/iputils-ping: duplicate-address checks and gateway tests), file manager
+# (7zip: zip/7z/iso archives; ffmpeg: thumbnails, codecs and durations; unrar, suggested:
+# rar archives)
+recommends = "samba, nfs-kernel-server, acl, avahi-daemon, wsdd2, btrbk, btrfs-progs, mdadm, cryptsetup-bin, systemd-cryptsetup, smartmontools, hdparm, gdisk, iputils-arping, iputils-ping, 7zip, ffmpeg"
 # mtr-tiny: traceroute diagnostics as JSON
-suggests = "fail2ban, mtr-tiny"
+suggests = "fail2ban, mtr-tiny, unrar"
 # rynas runs Samba as a standalone file server and owns smb.conf; Debian's samba recommends the
 # AD domain controller (which pulls winbind and its PAM/NSS modules): keep it out
 conflicts = "samba-ad-dc"
@@ -74,6 +76,7 @@ assets = [
     ["target/release/rynasd", "usr/libexec/rynas/", "755"],
     ["target/release/rynas-web", "usr/libexec/rynas/", "755"],
     ["target/release/rynasctl", "usr/libexec/rynas/", "755"],
+    ["target/release/rynas-files-worker", "usr/libexec/rynas/", "755"],
     ["../../target/deb-stage/ui/**/*", "usr/share/rynas/ui/", "644"],
     ["../../target/deb-stage/copyright", "usr/share/doc/rynas/copyright", "644"],
     ["../../packaging/deb/README.Debian", "usr/share/doc/rynas/", "644"],

@@ -13,6 +13,7 @@
 
 pub mod backup;
 pub mod error;
+pub mod files;
 pub mod groups;
 pub mod hardware;
 pub mod jobs;
