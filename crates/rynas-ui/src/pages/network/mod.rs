@@ -18,7 +18,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use rynas_api_types::network::{
     AdoptMode, Duplex, InterfaceConfig, IpFamily, Ipv4Method, LinkKind, NetAdoptRequest, NetAdoptScheduled, NetApplyRequest,
-    NetApplyStarted, NetBackend, NetInterface, NetRevision, NetworkState, RescueInfo,
+    NetApplyStarted, NetBackend, NetInterface, NetRevision, NetworkState, ReadOnlyCode, ReadOnlyReason, RescueInfo,
 };
 
 use crate::api;
@@ -461,6 +461,27 @@ fn kind_key(k: LinkKind) -> &'static str {
     }
 }
 
+/// Why an interface is read-only, translated from its code; the server's English text
+/// (`true`: mark it `lang="en"`) for codes this build does not know and older servers.
+pub fn read_only_text(i: &NetInterface) -> (String, bool) {
+    match &i.read_only {
+        Some(r) if r.code != ReadOnlyCode::Other => (read_only_code_text(r), false),
+        _ => (i.read_only_reason.clone().unwrap_or_default(), true),
+    }
+}
+
+fn read_only_code_text(r: &ReadOnlyReason) -> String {
+    match r.code {
+        ReadOnlyCode::Loopback => t("net.ro.loopback").to_string(),
+        ReadOnlyCode::Enslaved => tf("net.ro.enslaved", &[("master", r.master.as_deref().unwrap_or("?"))]),
+        ReadOnlyCode::NotEthernet => t("net.ro.not_ethernet").to_string(),
+        ReadOnlyCode::Ifupdown => t("net.ro.ifupdown").to_string(),
+        ReadOnlyCode::NetworkManager => t("net.ro.network_manager").to_string(),
+        ReadOnlyCode::NoNetworkd => t("net.ro.no_networkd").to_string(),
+        ReadOnlyCode::Other => String::new(),
+    }
+}
+
 pub fn backend_key(b: NetBackend) -> &'static str {
     match b {
         NetBackend::Networkd => "net.b.networkd",
@@ -562,10 +583,10 @@ fn iface_row(i: NetInterface, open: RwSignal<Option<NetInterface>>) -> AnyView {
     let label2 = label.clone();
     let i2 = i.clone();
     let i3 = i.clone();
-    // the translated text first, the server's English reason as the detail (G7, err_view)
-    let reason = match i.read_only_reason.as_deref() {
-        Some(r) if !r.is_empty() => format!("{} ({r})", t("net.read_only_text")),
-        _ => t("net.read_only_text").to_string(),
+    // the translated text first, then why (translated from its code)
+    let reason = match read_only_text(&i).0 {
+        r if r.is_empty() => t("net.read_only_text").to_string(),
+        r => format!("{} {r}", t("net.read_only_text")),
     };
     let config = view! {
         <div class="cell-main">
@@ -805,5 +826,25 @@ mod tests {
     fn word_lists() {
         assert_eq!(words("192.0.2.1, 192.0.2.2\n2001:db8::1 "), vec!["192.0.2.1", "192.0.2.2", "2001:db8::1"]);
         assert!(words(" \n").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod read_only_tests {
+    use super::*;
+
+    #[test]
+    fn read_only_reason_is_translated_from_its_code() {
+        let mut i = NetInterface {
+            read_only_reason: Some("enslaved to bond0: bonds and bridges are configured in a later version".into()),
+            read_only: Some(ReadOnlyReason { code: ReadOnlyCode::Enslaved, master: Some("bond0".into()) }),
+            ..Default::default()
+        };
+        assert_eq!(read_only_text(&i), ("It is a port of bond0: bonds and bridges become configurable in a later version.".into(), false));
+        // a code of a newer server, and an older server without codes: the English text
+        i.read_only = Some(ReadOnlyReason { code: ReadOnlyCode::Other, master: None });
+        assert!(read_only_text(&i).1);
+        i.read_only = None;
+        assert_eq!(read_only_text(&i).0, i.read_only_reason.clone().unwrap());
     }
 }

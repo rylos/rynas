@@ -2125,6 +2125,12 @@ dict! {
     "net.none_text" => "The system reports no network interface rynas can show.", "Il sistema non segnala interfacce di rete da mostrare.";
     "net.details_title" => "Details of {name}", "Dettagli di {name}";
     "net.read_only_text" => "This interface is read-only in rynas.", "Questa interfaccia è in sola lettura in rynas.";
+    "net.ro.loopback" => "The loopback interface cannot be configured.", "L'interfaccia di loopback non è configurabile.";
+    "net.ro.enslaved" => "It is a port of {master}: bonds and bridges become configurable in a later version.", "È una porta di {master}: bond e bridge diventano configurabili in una versione successiva.";
+    "net.ro.not_ethernet" => "Only Ethernet ports can be configured in this version.", "In questa versione si possono configurare solo le porte Ethernet.";
+    "net.ro.ifupdown" => "Configured by ifupdown (/etc/network/interfaces): use Let rynas manage first.", "Configurata da ifupdown (/etc/network/interfaces): usa prima Affida a rynas.";
+    "net.ro.network_manager" => "Managed by NetworkManager: rynas does not change it.", "Gestita da NetworkManager: rynas non la modifica.";
+    "net.ro.no_networkd" => "systemd-networkd is not running: rynas configures the interfaces through it.", "systemd-networkd non è in esecuzione: rynas configura le interfacce tramite questo servizio.";
     "net.mgmt_edit" => "You are connected through this interface. The change is tested with a timed confirmation; if its address changes you will reconnect at the new one.", "Sei collegato tramite questa interfaccia. La modifica viene provata con conferma a tempo; se cambia l'indirizzo ti ricollegherai a quello nuovo.";
     "net.has_pending" => "This interface already has a staged change: you are editing it.", "Questa interfaccia ha già una modifica preparata: la stai modificando.";
     "net.sec_ipv4" => "IPv4", "IPv4";

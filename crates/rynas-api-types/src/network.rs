@@ -123,6 +123,35 @@ pub struct NetOption {
     pub value: String,
 }
 
+/// Why an interface cannot be edited ([`NetInterface::read_only`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadOnlyReason {
+    pub code: ReadOnlyCode,
+    /// The bond or bridge the interface is enslaved to (`enslaved`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub master: Option<String>,
+}
+
+/// Stable code of a [`ReadOnlyReason`]; unknown codes of a newer server read as `other`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadOnlyCode {
+    /// The loopback interface.
+    Loopback,
+    /// A port of the bond or bridge `master`.
+    Enslaved,
+    /// Not an Ethernet port (Wi-Fi, VLAN, virtual...).
+    NotEthernet,
+    /// Configured by ifupdown: "let rynas manage" first.
+    Ifupdown,
+    /// Managed by NetworkManager.
+    NetworkManager,
+    /// systemd-networkd is not running.
+    NoNetworkd,
+    #[serde(other)]
+    Other,
+}
+
 /// `GET /api/v1/network/interfaces`: one interface with its live state and its settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct NetInterface {
@@ -150,8 +179,12 @@ pub struct NetInterface {
     pub managed_by_rynas: bool,
     /// Can be changed with `PUT /network/interfaces/{name}`.
     pub editable: bool,
-    /// Why not, when `editable` is false (English, for tooltips).
+    /// Why not, when `editable` is false (English, for logs and the CLI); the UI translates
+    /// `read_only`.
     pub read_only_reason: Option<String>,
+    /// The same reason as `read_only_reason`, as a code with the value its text names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only: Option<ReadOnlyReason>,
     /// The networkd `.network` file that applies to it, if any.
     pub config_file: Option<String>,
     /// What rynas (or the foreign networkd file) configures now.
