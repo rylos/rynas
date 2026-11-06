@@ -86,8 +86,80 @@ both default to `127.0.0.1:3493`. The watcher needs upsmon running as primary fo
 (otherwise the poweroff fallback). NUT plans to require login for `LIST` later; the status
 reader will then need the same upsd user.
 
+## Driver wizard (2026-11-06)
+
+Goal: set up any UPS NUT supports from the UI, on a plain Debian without touching an admin's
+own NUT setup, and on synodeb through synodeb's own tool.
+
+Sources: NUT's `nutupsdrv(8)` (`-s <id>` "configure this driver only with command line
+arguments instead of reading ups.conf", `-x var=val`, `-d <count>` "dump the data tree (in
+upsc format) after the update loop ran count times and exit", NUT ≥ 2.8.0, banner hidden by
+`NUT_QUIET_INIT_BANNER`), `nut-scanner(8)` (`-U` USB, `-S` SNMP, `-M` XML, `-O` old NUT
+servers; output is a ready `ups.conf` section with `driver`, `port`, `vendorid`,
+`productid`), `upsdrvctl(8)`, `upsdrvsvcctl(8)` and `nut-driver-enumerator(8)` (Debian:
+one `nut-driver@<section>.service` per `ups.conf` section, `nut-driver.target`, resynced by
+`upsdrvsvcctl resync` or the enumerator's path unit), `upsdrvquery(8)` (NUT 2.8.1+, talks to
+a running driver's socket; not needed for a one-shot test), NUT's hardware list
+`/usr/share/nut/driver.list` (shipped by Debian's `nut-server`, also
+`62-nut-usbups.rules` for USB permissions), NUT issue 2738 / PR 3323 (USB ID `0925:1234`).
+
+How the others do it: TrueNAS SCALE offers a driver drop-down built from `driver.list`
+(manufacturer · model → driver), a port field, "auxiliary parameters" for `ups.conf` and
+owns `/etc/nut`; no detection. The openmediavault NUT plugin has driver, port and a free text
+of extra directives, also owning the files; no detection. Unraid's NUT plugin lists the USB
+drivers (custom driver allowed); users report nut-scanner suggestions that start but never
+talk to the UPS. Home Assistant's NUT add-on takes a YAML list of devices (driver, port,
+config lines). None of them tests a driver before writing it.
+
+Real case: Marco's VULTECH UPS1050VA-PRO, USB `0925:1234` ("Lakeview Research UPS USB Mon
+V2.0"). `nut-scanner -U` suggests `richcomm_usb`, synodeb's default was `usbhid-ups`; neither
+reads it. NUT's hardware list (Armac, Accurat Flux, issue 2738) and months of use on another
+PC: `nutdrv_qx` with `subdriver=armac`, `protocol=megatec`, `norating`, `pollfreq=30`,
+`vendorid=0925`, `productid=1234`. On Debian trixie (NUT 2.8.1) no driver works
+(`nutdrv_qx` armac: "Device not supported!", `richcomm_usb`: "driver callback failed: Entity
+not found", `blazer_usb`: "No supported UPS detected"); it works from NUT 2.8.5.
+
+Picked:
+
+- **Candidates, then a test run of each** (none of the others does it). For each UPS on
+  USB: rynas's small table of USB IDs known to need a driver setting first
+  (`rynas_nut::setup::KNOWN`, with the lowest NUT version it works with), then the
+  scanner's suggestion, then `usbhid-ups`, `nutdrv_qx`, `blazer_usb`, all with the USB IDs.
+  Each runs as `<driver> -s rynasprobe -x port=… -x k=v … -d 1` under a 45 s timeout; the
+  first one that reports `ups.status` wins and the others are not run. A candidate known to
+  need a newer NUT than the installed one (`upsdrvctl -V`) is skipped and the result says
+  "needs NUT X, this NAS has Y" with each failed driver's last lines.
+- **Manual entry** for everything else: any installed driver (manufacturers from
+  `driver.list` as a hint), port (`auto`, `/dev/ttyS0`, an SNMP address), extra options;
+  tested the same way, or applied untested on request.
+- **A running driver holds the device**: the detection reports it and stops
+  `nut-driver@*` only when the admin allows it, starting them again afterwards.
+- **Apply = configuration key `ups.device`** (pending → apply, revision, rollback):
+  rynas blocks only, never the admin's lines: its section in `ups.conf`, `MODE` in
+  `nut.conf` (`netserver` stays), the upsmon user `rynas-upsmon` in `upsd.users` and its
+  `MONITOR … primary` line in `upsmon.conf`, files root:nut 0640. A section of the admin's in
+  the way (same name, or a USB section without different USB IDs) makes the apply refuse
+  unless the admin takes it over in the wizard (the section and its `MONITOR` line are then
+  removed; the apply keeps a backup). Then `upsdrvsvcctl resync`, `reset-failed` of the
+  driver unit (a failed start with an older setting, e.g. right after the package install),
+  `enable --now` and restart of
+  `nut-driver`, `nut-server`, `nut-monitor`; a driver that does not start rolls the apply back.
+  The review step shows the blocks, the removed lines and the commands (passwords masked).
+- **synodeb** owns `/etc/nut`: test runs are `synodeb-ups probe --driver … --timeout 45`
+  (exit 0 vars, 1 no status, 2 bad usage/unknown driver, 3 device held by a nut-driver), the
+  apply `synodeb-ups setup --keep-password --driver D --port P --opt k=v …` (synodeb keeps it
+  in `/etc/synodeb/ups-driver.conf`; rollback to nothing: `--default-driver`). An older
+  synodeb (no `--driver` in `setup --help`) blocks the wizard with "update synodeb".
+- Drivers are looked up in `/usr/libexec/nut` (NUT ≥ 2.8.2), then `/lib/nut` and `/usr/lib/nut`.
+- Values limited to `[A-Za-z0-9._:/@+,=-]` (option names `[a-z][a-z0-9_.]`, ≤ 32 options):
+  nothing needs quoting in `ups.conf`, argv or synodeb's `--opt`.
+
 ## Left for later
-Network UPS server with connected clients, client mode (another NAS's upsd), driver wizard
-(`nut-scanner`) and a setup that writes `/etc/nut` on a fresh install, UPS power-off at the end
-(synodeb `SAFESHUTDOWN`; on NUT it is the admin's `POWERDOWNFLAG` setup), outage statistics and
-battery trend (RRD), a check that upsmon is running as primary (shown on the page).
+Network UPS server with connected clients, **client mode** (monitor another NAS's upsd: the
+status reader of rynas-web and the watcher read `127.0.0.1:3493` only, so it needs a
+configurable upsd address first), SNMP/XML scans (`nut-scanner -S/-M` need a range or a host:
+manual entry for now), a udev rule for a USB ID missing from NUT's rules (the test run then
+fails with a permission error), removing the wizard's setup from the UI (the `ups.device` key
+can be removed from the configuration), UPS power-off at the end (synodeb `SAFESHUTDOWN`; on
+NUT it is the admin's `POWERDOWNFLAG` setup), outage statistics and battery trend (RRD), a
+check that upsmon is running as primary (shown on the page).
