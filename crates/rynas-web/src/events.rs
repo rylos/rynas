@@ -10,8 +10,10 @@
 //!   (data `NotificationEvent`), `hardware.status` (data `HardwareStatus`: the latest one on
 //!   connect, then on every change and at least every [`crate::metrics::HW_REPEAT`]),
 //!   `ups.status` (data `UpsStatus`, same rule with [`crate::ups::REPEAT`]; upsd is polled
-//!   only while a stream listens), and
-//!   `resync` with data `{"stream":"metrics"|"tasks"|"config"|"notifications"|"hardware"|"ups"}` when the
+//!   only while a stream listens), `removable.state` (data `RemovableState`: the removable
+//!   drives, the latest on connect, then on every change; it rides on rynasd's task stream),
+//!   and
+//!   `resync` with data `{"stream":"metrics"|"tasks"|"config"|"notifications"|"hardware"|"ups"|"removable"}` when the
 //!   client missed events and must re-read that collection. The task and notification halves follow rynasd's streams
 //!   (`/v1/tasks/stream`, `/v1/notifications/stream`) and reconnect every [`TASKS_RETRY`]
 //!   while rynasd is away; the metrics half never stops.
@@ -153,7 +155,7 @@ pub async fn events(
             follow(
                 st.clone(),
                 user.clone(),
-                "/v1/tasks/stream?config=1",
+                "/v1/tasks/stream?config=1&removable=1",
                 task_event,
             ),
             follow(
@@ -213,8 +215,11 @@ fn task_event(f: Frame, out: &mut VecDeque<Event>) {
         "resync" => {
             out.push_back(resync("tasks"));
             out.push_back(resync("config"));
+            out.push_back(resync("removable"));
         }
         "config_pending" => out.push_back(Event::default().event("config.pending").data(f.data)),
+        "removable" => out.push_back(Event::default().event("removable.state").data(f.data)),
+        "removable_resync" => out.push_back(resync("removable")),
         kind => out.push_back(Event::default().event(format!("task.{kind}")).data(f.data)),
     }
 }
@@ -310,6 +315,20 @@ fn follow(st: AppState, user: String, path: &'static str, map: MapFrame) -> Even
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removable_events_are_renamed() {
+        let mut q = VecDeque::new();
+        let f = |e: &str| Frame {
+            event: e.into(),
+            data: "{}".into(),
+        };
+        task_event(f("removable"), &mut q);
+        task_event(f("removable_resync"), &mut q);
+        task_event(f("resync"), &mut q);
+        // three resyncs after rynasd's own: tasks, config, removable
+        assert_eq!(q.len(), 5);
+    }
 
     #[test]
     fn frames() {
