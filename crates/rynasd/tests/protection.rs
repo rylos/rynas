@@ -56,10 +56,10 @@ struct Env {
 }
 
 fn env() -> Env {
-    env_with(RootBackend::None)
+    env_with(RootBackend::None, None)
 }
 
-fn env_with(root_ops: RootBackend) -> Env {
+fn env_with(root_ops: RootBackend, boot: Option<Arc<dyn rynas_btrfs::rootfs::BootSync>>) -> Env {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("root");
     std::fs::create_dir_all(&root).unwrap();
@@ -119,7 +119,8 @@ fn env_with(root_ops: RootBackend) -> Env {
         notifier.clone(),
         dir.path().join("state"),
     )
-    .with_root(root_ops);
+    .with_root(root_ops)
+    .with_boot(boot);
     st.protection = Some(Arc::new(protection));
     Env {
         _dir: dir,
@@ -612,9 +613,9 @@ async fn restore_point(e: &Env) -> String {
 }
 
 #[tokio::test]
-async fn root_rollback_needs_synodeb_and_a_bootable_restore_point() {
+async fn root_rollback_needs_a_boot_layer_and_a_bootable_restore_point() {
     use rynas_api_types::snapshots::{RollbackPreview, RollbackRefusal};
-    // not synodeb: previewed and refused with a clear reason
+    // no boot layer: previewed and refused with a clear reason
     let e = env();
     let id = restore_point(&e).await;
     let (s, b) = call(
@@ -627,7 +628,7 @@ async fn root_rollback_needs_synodeb_and_a_bootable_restore_point() {
     assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
     let pv: RollbackPreview = serde_json::from_slice(&b).unwrap();
     assert!(pv.system && !pv.allowed);
-    assert_eq!(pv.refusal, Some(RollbackRefusal::NotSynodeb));
+    assert_eq!(pv.refusal, Some(RollbackRefusal::NoBootLayer));
     assert_eq!(pv.kernel.as_deref(), Some("7.3.0-1-synodeb"));
     assert!(pv.modules);
     let (s, b) = call(
@@ -641,11 +642,24 @@ async fn root_rollback_needs_synodeb_and_a_bootable_restore_point() {
         (s, code(&b).as_str()),
         (StatusCode::CONFLICT, error_codes::CONFLICT)
     );
-    assert!(String::from_utf8_lossy(&b).contains("needs synodeb"));
-    // synodeb (dry): the plain directory is not a read-only restore point
-    let e = env_with(RootBackend::Custom(Arc::new(
-        rynas_btrfs::rootfs::DryRoot::new(true),
-    )));
+    assert!(String::from_utf8_lossy(&b).contains("console procedure"));
+    // a boot layer (dry): the plain directory is not a read-only restore point
+    struct Boot;
+    impl rynas_btrfs::rootfs::BootSync for Boot {
+        fn tool(&self) -> &str {
+            "boot-tool"
+        }
+        fn sync_root(&self, _: &std::path::Path) -> Result<String, String> {
+            Ok(String::new())
+        }
+        fn undo_hint(&self) -> String {
+            String::new()
+        }
+    }
+    let e = env_with(
+        RootBackend::Custom(Arc::new(rynas_btrfs::rootfs::DryRoot::new())),
+        Some(Arc::new(Boot)),
+    );
     let id = restore_point(&e).await;
     let (_, b) = call(
         &e,

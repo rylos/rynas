@@ -3320,13 +3320,16 @@ dependencies = [
 name = "rynas-hw-synology"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "libc",
  "rynas-api-types",
  "rynas-config",
+ "rynas-http",
  "rynas-hw",
  "rynas-module",
  "rynas-notify",
  "rynas-nut",
+ "rynas-power",
  "rynas-tasks",
  "serde",
  "serde_json",
@@ -3340,10 +3343,20 @@ dependencies = [
 name = "rynas-module"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "rynas-api-types",
+ "rynas-auth",
+ "rynas-btrfs",
  "rynas-config",
+ "rynas-http",
+ "rynas-hw",
+ "rynas-net",
  "rynas-notify",
  "rynas-tasks",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

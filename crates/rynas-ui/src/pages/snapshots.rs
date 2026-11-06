@@ -312,7 +312,7 @@ fn open_root(root: RwSignal<Option<(SnapshotInfo, RollbackPreview)>>, s: Snapsho
 
 fn refusal_key(r: Option<RollbackRefusal>) -> &'static str {
     match r {
-        Some(RollbackRefusal::NotSynodeb) => "snap.refusal.not_synodeb",
+        Some(RollbackRefusal::NoBootLayer) => "snap.refusal.no_boot_layer",
         Some(RollbackRefusal::NoKernel) => "snap.refusal.no_kernel",
         Some(RollbackRefusal::NoModules) => "snap.refusal.no_modules",
         Some(RollbackRefusal::NotReadonly) | None => "snap.refusal.not_readonly",

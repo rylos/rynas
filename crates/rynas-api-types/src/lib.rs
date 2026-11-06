@@ -192,6 +192,15 @@ pub struct HardwareStatus {
     pub age_s: Option<u64>,
 }
 
+/// `POST /api/v1/hardware/bays/{n}/identify`: blinks a bay's LED (the provider of a hardware
+/// module; 404 without one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IdentifyRequest {
+    /// Blink duration, 1..=300 s (default 30).
+    #[serde(default)]
+    pub duration_s: Option<u32>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Fan {
     pub label: String,

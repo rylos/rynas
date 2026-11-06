@@ -14,7 +14,7 @@ license.workspace = true
 default = ["domain"]
 domain = [
     "dep:rynas-config", "dep:toml", "dep:rynas-module", "dep:rynas-notify", "dep:rynas-nut",
-    "dep:rynas-tasks", "dep:sha2",
+    "dep:rynas-tasks", "dep:sha2", "dep:axum", "dep:rynas-http", "dep:rynas-power",
 ]
 
 [dependencies]
@@ -31,6 +31,9 @@ rynas-notify = { workspace = true, optional = true }
 rynas-nut = { workspace = true, optional = true }
 rynas-tasks = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
+axum = { workspace = true, optional = true }
+rynas-http = { workspace = true, optional = true }
+rynas-power = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -70,6 +70,16 @@ async fn rig() -> Rig {
     ));
     let mut st = DaemonState::new(Arc::new(FakeAuth), totp, clock);
     st.ops = Some(Arc::new(Ops::new(Arc::new(config), tasks)));
+    // a hardware module's route, as rynasd nests it (`/v1/modules/<id>/...`)
+    st.modules = axum::Router::new().route(
+        "/v1/modules/demo/hello/{name}",
+        axum::routing::put(
+            |axum::extract::Path(n): axum::extract::Path<String>, h: axum::http::HeaderMap| async move {
+                let user = h.get("x-rynas-user").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                axum::Json(serde_json::json!({ "name": n, "user": user }))
+            },
+        ),
+    );
     let socket = dir.path().join("rynasd.sock");
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
     // SAFETY: getuid cannot fail and has no preconditions.
@@ -482,6 +492,27 @@ async fn forwarded_endpoints_need_a_session_and_a_daemon() {
     let r = down.get("/api/v1/config/pending", &c).await;
     assert_eq!(r.status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(r.code(), error_codes::BACKEND_UNAVAILABLE);
+}
+
+/// A module's routes are forwarded by prefix with the session user; a module that is not
+/// there is rynasd's 404.
+#[tokio::test]
+async fn module_routes_are_forwarded_by_prefix() {
+    let rig = rig().await;
+    let r = rig.app.get("/api/v1/modules/demo/hello/x", &Creds::default()).await;
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED);
+    let c = rig.app.login().await;
+    let r = rig
+        .app
+        .send(Method::PUT, "/api/v1/modules/demo/hello/bay", &c, Some(serde_json::json!({})))
+        .await;
+    assert_eq!(r.status, StatusCode::OK);
+    let v: serde_json::Value = r.json();
+    assert_eq!(v["name"], "bay");
+    assert!(!v["user"].as_str().unwrap().is_empty());
+    let r = rig.app.get("/api/v1/modules/other/status", &c).await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+    assert_eq!(r.code(), error_codes::NOT_FOUND);
 }
 
 #[tokio::test]

@@ -1,10 +1,10 @@
 //! Hardware › Synology (the Synology module's tab, D-MODULE): every synohwd feature
 //! (D-SYNOPLUG, `docs/plugins/synology.md`).
 //!
-//! - live status (`/hardware/synology/status`, re-read every 10 s while the tab is shown): the
+//! - live status (`/modules/synology/status`, re-read every 10 s while the tab is shown): the
 //!   chassis with bays, LEDs, temperatures and standby, fans, events, boot cause;
-//! - DSM's fan curves of the model (`/hardware/synology/fan-curves`) drawn with the readings;
-//! - the `synology.hw` settings (`/hardware/synology/settings`): one draft for every card,
+//! - DSM's fan curves of the model (`/modules/synology/fan-curves`) drawn with the readings;
+//! - the `synology.hw` settings (`/modules/synology/settings`): one draft for every card,
 //!   staged with one Save (pending bar, apply in the configuration page);
 //! - actions: test beep, mute, identify a bay.
 //!
@@ -27,7 +27,7 @@ use crate::pages::security::copy_button;
 use crate::toast::{saved_pending, toast};
 use crate::ui::{self, EmptyState, Meter, Remote, Status, Tone, WidgetHead, status};
 
-const SETTINGS: &str = "/api/v1/hardware/synology/settings";
+const SETTINGS: &str = "/api/v1/modules/synology/settings";
 const POLL: Duration = Duration::from_secs(10);
 
 const FAN_MODES: &[(&str, &str)] = &[("low", "syn.fan_low"), ("high", "syn.fan_high"), ("full", "syn.fan_full")];
@@ -195,8 +195,8 @@ pub fn curve_svg(curves: &[&FanCurve], readings: &[SensorReading], duty: Option<
 
 pub fn panel(active: Signal<bool>) -> AnyView {
     let settings = Remote::<SynologySettingsState>::with_config(SETTINGS);
-    let st = Remote::<SynologyStatus>::new("/api/v1/hardware/synology/status");
-    let curves = Remote::<FanCurves>::new("/api/v1/hardware/synology/fan-curves");
+    let st = Remote::<SynologyStatus>::new("/api/v1/modules/synology/status");
+    let curves = Remote::<FanCurves>::new("/api/v1/modules/synology/fan-curves");
     // the active mode and the boot change with an apply
     Effect::new(move |prev: Option<()>| {
         crate::config::generation();
@@ -627,7 +627,7 @@ fn leds_card(d: RwSignal<SynologySettings>, running: bool) -> AnyView {
     let beep = move |_| {
         beeping.set(true);
         spawn_local(async move {
-            let r = api::post_empty("/api/v1/hardware/synology/beep", Some(&BeepRequest { kind: BeepKind::Short })).await;
+            let r = api::post_empty("/api/v1/modules/synology/beep", Some(&BeepRequest { kind: BeepKind::Short })).await;
             beeping.set(false);
             match r {
                 Ok(()) => toast(Tone::Ok, t("syn.beep_sent").to_string()),
@@ -638,7 +638,7 @@ fn leds_card(d: RwSignal<SynologySettings>, running: bool) -> AnyView {
     let mute = move |_| {
         muting.set(true);
         spawn_local(async move {
-            let r = api::post::<(), MuteResult>("/api/v1/hardware/synology/mute", None).await;
+            let r = api::post::<(), MuteResult>("/api/v1/modules/synology/mute", None).await;
             muting.set(false);
             match r {
                 Ok(m) => toast(Tone::Ok, tf("syn.muted", &[("n", &m.acknowledged.to_string())])),

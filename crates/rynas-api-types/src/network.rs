@@ -350,9 +350,8 @@ pub struct RescueLinkLocal {
 
 /// Rescue-path settings (`PUT /api/v1/network/rescue`, staged like every configuration key).
 ///
-/// The Synology reset button is not here: `/etc/synohwd.toml` has one writer, the
-/// `synology.hw` key (`PUT /api/v1/hardware/synology/settings`, `reset_button:
-/// network_rescue`); [`RescueInfo`] reflects it read-only. A PUT that still sends
+/// A reset button is not here: it is a setting of the machine's hardware module (its own
+/// key and page); [`RescueInfo::reset_button`] reflects it read-only. A PUT that still sends
 /// `reset_button` is refused (400 `invalid_value`); stored values that have it (older
 /// revisions) are read without it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -380,18 +379,24 @@ pub struct RescueInfo {
     /// avahi-daemon is running.
     pub mdns_active: bool,
     pub link_local: Vec<RescueLinkLocal>,
-    /// A Synology (the `synology.hw` key exists: synohwd's settings are managed by rynas).
-    pub synology: bool,
-    /// Read-only reflection of `synology.hw`: its current `reset_button` is `network_rescue`
-    /// (the double press restores the factory network). Changed with
-    /// `PUT /api/v1/hardware/synology/settings`.
-    pub reset_button_configured: bool,
-    /// The session user has staged a different `synology.hw` reset button: the value it will
-    /// have after `/config/apply` (`true` = network rescue).
+    /// The machine's reset button, when a hardware module has one; `None` elsewhere.
     #[serde(default)]
-    pub reset_button_pending: Option<bool>,
+    pub reset_button: Option<ResetButton>,
     pub settings: RescueSettings,
     pub pending: Option<RescueSettings>,
+}
+
+/// A hardware module's reset button, shown read-only on Network › Rescue: the setting is the
+/// module's own (changed on its page).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ResetButton {
+    /// The module (`synology`): its page and texts in the web interface.
+    pub module: String,
+    /// A double press restores the factory network (the current setting).
+    pub configured: bool,
+    /// The session user has staged a different setting: the value after `/config/apply`.
+    #[serde(default)]
+    pub pending: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

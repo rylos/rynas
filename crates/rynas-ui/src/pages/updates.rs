@@ -1,5 +1,5 @@
 //! System › Updates: Debian packages (apt), automatic updates (unattended-upgrades) and the
-//! kernel / Synology DOM card.
+//! kernel card (with the boot device of a hardware module's boot layer, where there is one).
 //!
 //! - The list is `GET /api/v1/updates` (rynasd's cached apt simulation: cheap to load).
 //! - "Check now", "Install…", "Clean up…" and the changelogs are rynasd tasks, followed in a
@@ -9,7 +9,7 @@
 //! - Automatic updates are a configuration key (`updates.auto`): staged, then applied from
 //!   the pending-changes bar.
 //! - The kernel card reads `GET /api/v1/updates/kernel` (cached for hours by rynasd, a manual
-//!   refresh runs `synodeb-dom status` again).
+//!   refresh reads the boot device again).
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -475,17 +475,17 @@ fn auto_form(s: AutoUpdatesState, auto: Remote<AutoUpdatesState>) -> AnyView {
     .into_any()
 }
 
-// ------------------------------------------------------------------ kernel / DOM
+// ------------------------------------------------------------------ kernel / boot device
 
-fn trial_status(t_: DomTrial) -> AnyView {
+fn trial_status(t_: KernelTrial) -> AnyView {
     match t_ {
-        DomTrial::None => status(Tone::Ok, t("upd.trial_none").to_string()),
-        DomTrial::Armed => status(Tone::Info, t("upd.trial_armed").to_string()),
-        DomTrial::Trying => status(Tone::Warn, t("upd.trial_trying").to_string()),
+        KernelTrial::None => status(Tone::Ok, t("upd.trial_none").to_string()),
+        KernelTrial::Armed => status(Tone::Info, t("upd.trial_armed").to_string()),
+        KernelTrial::Trying => status(Tone::Warn, t("upd.trial_trying").to_string()),
     }
 }
 
-fn dom_kernel(k: &Option<DomKernel>) -> String {
+fn boot_kernel(k: &Option<BootKernel>) -> String {
     k.as_ref().and_then(|k| k.release.clone()).unwrap_or_else(|| "—".into())
 }
 
@@ -508,25 +508,25 @@ fn kernel_card(kernel: Remote<KernelStatus>) -> AnyView {
         }
         let k = kernel.data.get().unwrap_or_default();
         let newer = k.installed.first().filter(|n| **n != k.running).cloned();
-        let dom = k.dom.clone();
+        let dom = k.boot.clone();
         let mismatch = dom.as_ref().and_then(|d| d.kernel.as_ref()).and_then(|x| x.release.clone()).filter(|r| *r != k.running);
         view! {
             {newer.map(|n| ui::note(Tone::Warn, icons::ROTATE_CCW, view! { {tf("upd.kernel_newer", &[("k", &n)])} }.into_any()))}
             {mismatch.map(|r| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {tf("upd.kernel_mismatch", &[("k", &r)])} }.into_any()))}
-            {dom.as_ref().and_then(|d| d.outdated.clone()).map(|o| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {t("upd.dom_outdated")}<span class="muted small" lang="en">" "{o}</span> }.into_any()))}
-            {k.error.clone().map(|e| ui::note(Tone::Err, icons::CIRCLE_X, view! { {t("upd.dom_error")}<span class="muted small" lang="en">" "{e}</span> }.into_any()))}
+            {dom.as_ref().and_then(|d| d.outdated.clone()).map(|o| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {t("upd.boot_outdated")}<span class="muted small" lang="en">" "{o}</span> }.into_any()))}
+            {k.error.clone().map(|e| ui::note(Tone::Err, icons::CIRCLE_X, view! { {t("upd.boot_error")}<span class="muted small" lang="en">" "{e}</span> }.into_any()))}
             <dl class="kvs">
                 {kv("upd.running_kernel", view! { <span class="mono">{k.running.clone()}</span> }.into_any())}
                 {kv("upd.installed_kernels", view! { <span class="mono">{if k.installed.is_empty() { "—".to_string() } else { k.installed.join(", ") }}</span> }.into_any())}
                 {dom.map(|d| view! {
-                    {kv("upd.dom_default", view! { <span class="mono">{d.default.clone().unwrap_or_else(|| "—".into())}</span> }.into_any())}
-                    {kv("upd.dom_fallback", view! { <span class="mono">{if d.fallback.is_empty() { "—".to_string() } else { d.fallback.join(" → ") }}</span> }.into_any())}
-                    {kv("upd.dom_entries", view! { <span class="mono">{d.entries.join(", ")}</span> }.into_any())}
-                    {kv("upd.dom_running", view! { <span class="mono">{d.running.clone().unwrap_or_else(|| "—".into())}</span> }.into_any())}
-                    {kv("upd.dom_kernel", view! { <span class="mono">{dom_kernel(&d.kernel)}</span> }.into_any())}
-                    {kv("upd.dom_kernel_old", view! { <span class="mono">{dom_kernel(&d.kernel_old)}</span> }.into_any())}
+                    {kv("upd.boot_default", view! { <span class="mono">{d.default.clone().unwrap_or_else(|| "—".into())}</span> }.into_any())}
+                    {kv("upd.boot_fallback", view! { <span class="mono">{if d.fallback.is_empty() { "—".to_string() } else { d.fallback.join(" → ") }}</span> }.into_any())}
+                    {kv("upd.boot_entries", view! { <span class="mono">{d.entries.join(", ")}</span> }.into_any())}
+                    {kv("upd.boot_running", view! { <span class="mono">{d.running.clone().unwrap_or_else(|| "—".into())}</span> }.into_any())}
+                    {kv("upd.boot_kernel", view! { <span class="mono">{boot_kernel(&d.kernel)}</span> }.into_any())}
+                    {kv("upd.boot_kernel_old", view! { <span class="mono">{boot_kernel(&d.kernel_old)}</span> }.into_any())}
                     {kv("upd.trial", trial_status(d.trial))}
-                    {kv("upd.dom_free", text(d.free_bytes.map(i18n::bytes).unwrap_or_else(|| "—".into())))}
+                    {kv("upd.boot_free", text(d.free_bytes.map(i18n::bytes).unwrap_or_else(|| "—".into())))}
                 })}
                 {kv("upd.read_at", text(ms_text(k.read_at_ms)))}
             </dl>
@@ -591,16 +591,16 @@ mod demo {
             kernel.data.set(Some(KernelStatus {
                 running: "6.12.48-synodeb".into(),
                 installed: vec!["6.12.48-synodeb".into(), "6.12.41-synodeb".into()],
-                synodeb: true,
-                dom: Some(DomStatus {
+                boot_layer: true,
+                boot: Some(BootImage {
                     entries: vec!["DEBIAN".into(), "DEBIAN_OLD".into(), "SYNOLOGY_1".into(), "SYNOLOGY_2".into()],
                     default: Some("DEBIAN".into()),
                     fallback: vec!["DEBIAN_OLD".into(), "SYNOLOGY_1".into()],
-                    trial: DomTrial::None,
+                    trial: KernelTrial::None,
                     running: Some("DEBIAN".into()),
                     outdated: None,
-                    kernel: Some(DomKernel { release: Some("6.12.48-synodeb".into()), version: None }),
-                    kernel_old: Some(DomKernel { release: Some("6.12.41-synodeb".into()), version: None }),
+                    kernel: Some(BootKernel { release: Some("6.12.48-synodeb".into()), version: None }),
+                    kernel_old: Some(BootKernel { release: Some("6.12.41-synodeb".into()), version: None }),
                     free_bytes: Some(48_120 * 1024),
                 }),
                 read_at_ms: Some(now - 600_000),

@@ -1,6 +1,6 @@
 [package]
 name = "rynas-module"
-description = "rynas hardware module interface: the extension points of the core (UPS layer, event forward, settings import, system disk hints) that a hardware module fills in"
+description = "rynas hardware module interface: the extension points of the core (UPS layer, event forward, settings import, system disk hints, HTTP routes, hardware control) that a hardware module fills in"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -8,6 +8,16 @@ license.workspace = true
 
 [dependencies]
 rynas-api-types.workspace = true
+rynas-auth.workspace = true
+rynas-btrfs.workspace = true
 rynas-config.workspace = true
+rynas-hw.workspace = true
+rynas-http.workspace = true
+rynas-net.workspace = true
 rynas-tasks.workspace = true
 rynas-notify.workspace = true
+axum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true

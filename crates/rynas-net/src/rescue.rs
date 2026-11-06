@@ -5,16 +5,14 @@
 //! - mDNS: avahi-daemon publishes `<host>.local` by itself; rynas adds a service file
 //!   (`/etc/avahi/services/rynas.service`: `_rynas._tcp` and `_http._tcp`/`_https._tcp` on the
 //!   web port) through the configuration key `network.rescue` ([`RescueDomain`]).
-//! - Synology reset button: synohwd runs `reset_button = command:…` on every press (the
-//!   microcontroller sends one event per press and never its length), so the gesture is a
-//!   **double press within 10 s** timed here ([`classify`]): the first press beeps and blinks
-//!   the status LED orange, the second restores the factory network (DHCP + link-local on every
-//!   port, the previous configuration kept as a revision). `/etc/synohwd.toml` is **not**
-//!   written here: its only writer is the `synology.hw` key (`rynas_hw_synology`,
-//!   `reset_button = network_rescue`), so two domains never fight over one file.
-
-use std::io::Write;
-use std::path::Path;
+//! - Reset button (where a hardware module wires one to `rynasctl net reset-button`): one
+//!   call per press (the hardware sends one event per press and never its length), so the
+//!   gesture is a **double press within 10 s** timed here ([`classify`]): the first press asks
+//!   for the second ([`Signal::PressAgain`]), the second restores the factory network (DHCP +
+//!   link-local on every port, the previous configuration kept as a revision). The button's
+//!   wiring is the module's own setting, never written here.
+//! - [`Feedback`]: what the machine shows or sounds at those moments (a module's beeps and
+//!   LEDs); [`NoFeedback`] elsewhere.
 
 use rynas_api_types::network::RescueSettings;
 use rynas_config::{Applier, ApplyCtx, ManagedFile};
@@ -23,8 +21,6 @@ use serde_json::Value;
 /// Configuration key of the rescue settings.
 pub const RESCUE_KEY: &str = "network.rescue";
 pub const AVAHI_FILE: &str = "/etc/avahi/services/rynas.service";
-/// synohwd's command FIFO.
-pub const SYNOHWD_FIFO: &str = "/run/synohwd/cmd";
 
 /// Second press within this window after the first: factory network.
 pub const GESTURE_WINDOW_MS: u64 = 10_000;
@@ -50,31 +46,28 @@ pub fn classify(now_ms: u64, previous_ms: Option<u64>) -> Press {
     }
 }
 
-/// synohwd microcontroller commands (see synohwd's header): `2` short beep, `3` long beep,
-/// `;` status LED orange blinking, `8` status LED green.
-pub mod up {
-    pub const SHORT_BEEP: &str = "2";
-    pub const LONG_BEEP: &str = "3";
-    pub const ORANGE_BLINK: &str = ";";
-    pub const GREEN: &str = "8";
+/// A moment of the rescue paths the machine can signal (sound, LED).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Signal {
+    /// First press of the reset button: press again within the window.
+    PressAgain,
+    /// Second press: the factory network is being restored.
+    Restoring,
+    /// The watchdog applied the rescue configuration (no routable address after boot).
+    RescueApplied,
 }
 
-/// Sends commands to synohwd's FIFO; a missing synohwd is not an error (other hardware).
-pub fn synohwd_send(fifo: &Path, cmds: &[&str]) -> bool {
-    use std::os::unix::fs::OpenOptionsExt;
-    let Ok(mut f) = std::fs::OpenOptions::new()
-        .write(true)
-        .custom_flags(libc::O_NONBLOCK)
-        .open(fifo)
-    else {
-        return false;
-    };
-    let mut line = String::new();
-    for c in cmds {
-        line.push_str(c);
-        line.push('\n');
-    }
-    f.write_all(line.as_bytes()).is_ok()
+/// How the machine signals [`Signal`]s (a hardware module's beeps and LEDs). Fire and
+/// forget: a missing executor is not an error.
+pub trait Feedback: Send + Sync {
+    fn signal(&self, s: Signal);
+}
+
+/// Machines without a way to signal.
+pub struct NoFeedback;
+
+impl Feedback for NoFeedback {
+    fn signal(&self, _: Signal) {}
 }
 
 /// The Avahi service file.
@@ -150,23 +143,12 @@ mod tests {
     }
 
     #[test]
-    fn fifo_is_optional() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(!synohwd_send(&dir.path().join("cmd"), &[up::SHORT_BEEP]));
-        // a regular file stands in for the FIFO
-        let f = dir.path().join("fifo");
-        std::fs::write(&f, "").unwrap();
-        assert!(synohwd_send(&f, &[up::SHORT_BEEP, up::ORANGE_BLINK]));
-        assert_eq!(std::fs::read_to_string(&f).unwrap(), "2\n;\n");
-    }
-
-    #[test]
     fn rescue_key_through_the_configuration_store() {
         use std::sync::Arc;
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("root");
         std::fs::create_dir_all(root.join("etc")).unwrap();
-        // a Synology: synohwd's file belongs to synology.hw and is never touched here
+        // a hardware module's own file (synohwd's on a Synology) is never touched here
         let synohwd = "fan_mode = \"low\"\nreset_button = \"ignore\"\n";
         std::fs::write(root.join("etc/synohwd.toml"), synohwd).unwrap();
         let sys = Arc::new(rynas_config::MemorySystem::new("nas"));

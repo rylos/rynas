@@ -17,9 +17,15 @@ che non sono standard"). The module is:
 
 - `crates/rynas-hw-synology`: the `rynas-hw` provider (status, commands, identify, fan curves)
   and, behind its `domain` feature (rynasd only), `module::SynologyModule` (the
-  `rynas_module::Module`), `domain` (`synology.hw`), `ups` (synodeb's `UpsLayer`: `synodeb-ups
-  probe/setup/status --json/test`, the `/etc/synodeb/ups.conf` block, the Safe Mode notice),
-  `notify` (synodeb's `notify` forward, the one-time `notify.conf` import);
+  `rynas_module::Module`), `domain` (`synology.hw`, the adoption of `/etc/synohwd.toml` at
+  start), `http` (the module's routes `/api/v1/modules/synology/{status,settings,beep,mute,
+  fan-curves}`), `boot` (synodeb's boot layer: `synodeb-dom status --json` on the kernel card,
+  `synodeb-dom sync --root` as the boot half of a root rollback), `ups` (synodeb's `UpsLayer`:
+  `synodeb-ups probe/setup/status --json/test`, the `/etc/synodeb/ups.conf` block, the Safe Mode
+  notice), `notify` (synodeb's `notify` forward, the one-time `notify.conf` import); in
+  `module.rs` the rescue beeps through synohwd's FIFO (`Beeps`), the reset button reflection and
+  the wake clock (S-35390A, read by `synohwd.service`); in `provider.rs` the web provider
+  (`Synology::web_provider`) with the model's thermal shutdown thresholds;
 - `crates/rynas-ui/src/modules/synology`: the Hardware › Synology tab and its presence check,
   the module's dictionary table (`syn.*`, `nev.synodeb.*`, `nt.src.synodeb`, the UPS texts of
   synodeb's layer, the reset button), the UPS text slots, the reset button status;
@@ -27,14 +33,17 @@ che non sono standard"). The module is:
   `/usr/lib/rynas/modules/synology/`, linked as `/etc/synodeb/ups-pre-safemode.d/50-rynas` by
   the module at the start of rynasd, only where synodeb runs the UPS.
 
-Detection (`SynologyModule::detect`): Synology hardware (DMI, platform driver) gives the
-`synology.hw` domain and the DOM's USB ids; synodeb's own files below the configuration root
-(`/etc/synodeb/ups.conf`, `/etc/synodeb/notify.conf`) give the UPS layer (with `ups.conf`), the
-forward socket and the import. Without either, nothing of the module is registered: the UPS page
-uses NUT, the notify socket stays closed, the Synology tab, texts and hook do not exist. Parts
-still in the core (module routers in rynasd/rynas-web, the DOM/kernel layer of updates and root
-rollback, rescue beeps, RTC hint, chassis identify endpoint) are listed with their planned
-extension point in `../quality/module-boundary-2026-11-06.md`.
+Detection (`SynologyModule::detect`, called by `rynasd::modules::detect` in rynasd and
+`rynasctl`): Synology hardware (DMI, platform driver) gives the `synology.hw` domain, the DOM's
+USB ids, the module routes' data, bay identify, the rescue beeps and the wake clock; synodeb's own
+files below the configuration root (`/etc/synodeb/ups.conf`, `/etc/synodeb/notify.conf`) give the
+UPS layer (with `ups.conf`), the forward socket and the import; an installed `synodeb-dom` gives
+the boot layer. rynas-web picks the web provider on the same hardware (or where synohwd's
+status file exists). Without any of them, nothing of the module is registered: the UPS page uses
+NUT, the notify socket stays closed, `/api/v1/modules/synology/*` and identify answer 404, the
+kernel card shows `/boot` only, a root rollback is a console procedure, the rescue paths are
+silent, the power schedule arms `rtc0`; the Synology tab, texts and hook do not exist. Audit:
+`../quality/module-boundary-2026-11-06.md` (nothing left to move).
 
 Requirements (2026-11-05). Implements the `rynas-hw` provider for Synology NAS running
 [synodeb](https://github.com/rylos/synodeb). Rule: **the plugin exposes every feature of synohwd and
@@ -79,10 +88,12 @@ bays, 2 fans); others as synodeb adds them. Model data (bays, fan tables) comes 
 
 `synology.hw` is the only configuration key that writes `/etc/synohwd.toml` (whole file,
 managed header). The reset-button network rescue is one of its settings
-(`PUT /api/v1/hardware/synology/settings`, `reset_button: network_rescue`); the network module's
+(`PUT /api/v1/modules/synology/settings`, `reset_button: network_rescue`); the network module's
 `network.rescue` key (Avahi file, link-local) does not touch the file and shows the button
-read-only in `GET /api/v1/network/rescue` (`reset_button_configured`, `reset_button_pending`).
-At the start of rynasd (blocking task after the network defaults):
+read-only in `GET /api/v1/network/rescue` (`reset_button` {module, configured, pending?},
+filled by the module's `reset_button` hook).
+At the start of rynasd (blocking task after the network defaults, `Module::start` →
+`domain::adopt`):
 
 - first start on a Synology where the file exists and `synology.hw` was never applied: the
   file is adopted with what synohwd runs with and `reset_button = network_rescue` (kept as it

@@ -12,7 +12,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use rynas_api_types::M2Slot;
 use rynas_api_types::storage::{DiskSummary, HealthVerdict};
-use rynas_api_types::synology::IdentifyRequest;
+use rynas_api_types::IdentifyRequest;
 
 use crate::api;
 use crate::i18n::{self, t, tf, tr};
@@ -298,7 +298,7 @@ fn tile(k: u32, slots: Memo<Vec<Slot>>, c: Chassis) -> AnyView {
 fn start_identify(n: u32, blinking: RwSignal<bool>) {
     blinking.set(true);
     spawn_local(async move {
-        let r = api::post_empty(&format!("/api/v1/hardware/synology/bays/{n}/identify"), Some(&IdentifyRequest { duration_s: None })).await;
+        let r = api::post_empty(&format!("/api/v1/hardware/bays/{n}/identify"), Some(&IdentifyRequest { duration_s: None })).await;
         match r {
             Ok(()) => {
                 toast(Tone::Ok, tf("hw.identify_on", &[("n", &n.to_string()), ("s", &IDENTIFY_S.to_string())]));

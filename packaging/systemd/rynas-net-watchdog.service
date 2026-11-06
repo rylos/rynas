@@ -1,8 +1,8 @@
 # rynas post-boot network watchdog (D-NET), started by rynas-net-watchdog.timer 5 minutes
 # after boot. When ports have a cable but none has a routable address with a reachable
 # gateway: back to the last known good revision, then the rescue configuration (DHCP and
-# link-local on every port), a notification and, on a Synology, a long beep and the orange
-# status LED. With no cable plugged in it does nothing.
+# link-local on every port), a notification and the hardware module's signal (beep, LED)
+# where there is one. With no cable plugged in it does nothing.
 [Unit]
 Description=rynas post-boot network watchdog
 Documentation=https://github.com/rylos/rynas

@@ -8,7 +8,7 @@ mod page;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use rynas_api_types::network::RescueInfo;
+use rynas_api_types::network::ResetButton;
 
 use super::UpsSlot;
 use crate::i18n::{t, tr};
@@ -36,7 +36,7 @@ pub fn present() -> Memo<bool> {
         }
         asked.set_value(true);
         spawn_local(async move {
-            let ok = crate::api::get_text("/api/v1/hardware/synology/settings").await.is_ok();
+            let ok = crate::api::get_text("/api/v1/modules/synology/settings").await.is_ok();
             probed.set(ok);
         });
     });
@@ -67,9 +67,9 @@ pub fn source_label(source: &str) -> Option<&'static str> {
 
 /// The reset button's network rescue (a `synology.hw` setting, shown read-only on Network ›
 /// Rescue where the hardware has the button).
-pub fn reset_button(r: &RescueInfo) -> AnyView {
-    let (tone, key) = if r.reset_button_configured { (Tone::Ok, "syn.reset_on") } else { (Tone::Warn, "syn.reset_off") };
-    let pending = r.reset_button_pending.map(|p| ui::status(Tone::Info, t(if p { "syn.reset_pending_on" } else { "syn.reset_pending_off" }).to_string()));
+pub fn reset_button(r: &ResetButton) -> AnyView {
+    let (tone, key) = if r.configured { (Tone::Ok, "syn.reset_on") } else { (Tone::Warn, "syn.reset_off") };
+    let pending = r.pending.map(|p| ui::status(Tone::Info, t(if p { "syn.reset_pending_on" } else { "syn.reset_pending_off" }).to_string()));
     view! {
         <div class="chips">{ui::status(tone, t(key).to_string())}{pending}</div>
         <p class="muted small">{tr("syn.reset_text")}</p>

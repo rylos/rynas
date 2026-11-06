@@ -21,18 +21,38 @@
 //! - [`Module::domains`]: the module's configuration domains.
 //! - [`Module::start`]: once at the start of rynasd, the module puts its hooks into its system
 //!   layer (files the package ships below `/usr/lib/rynas/modules/<module>/`, never into the
-//!   layer's `/etc` from the package: nothing of a module exists on other systems).
+//!   layer's `/etc` from the package: nothing of a module exists on other systems) and adopts
+//!   its layer's settings into its configuration keys.
+//! - [`Module::router`]: the module's own HTTP routes, nested by rynasd under
+//!   `/v1/modules/<id>` ([`http`]); rynas-web forwards `/api/v1/modules/<id>/…` by prefix.
+//! - [`Module::hardware_control`]: the actions of the machine's hardware provider behind the
+//!   provider-neutral endpoints of the core (bay identify).
+//! - [`Module::boot`]: a [`boot::BootLayer`] when the machine boots from a device of its own
+//!   (its entries on the updates page, the boot half of a root rollback). Without one the
+//!   updates page shows the kernels in `/boot` and a root rollback is a console procedure.
+//! - [`Module::rescue_feedback`]: how the machine signals the network rescue paths (beeps,
+//!   LEDs; `rynas_net::rescue::Feedback`). Without one they are silent.
+//! - [`Module::reset_button`]: the machine's reset button and whether a double press restores
+//!   the factory network (a setting of the module's own), shown read-only on Network › Rescue.
+//! - [`Module::wake_clock`]: the real-time clock that powers the machine on and the unit that
+//!   reads its alarm at shutdown (the power schedule). Without one `rtc0` (or the first RTC).
 //!
 //! The web interface has the matching rule: a module's pages, tabs and texts live in the UI's
 //! module folder and are shown only where the module answers.
 
 use std::sync::Arc;
 
-use rynas_config::Applier;
+use rynas_api_types::network::ResetButton;
+use rynas_config::{Applier, Config};
+use rynas_hw::HardwareControl;
+pub use rynas_net::rescue::{Feedback, Signal};
 
+pub mod boot;
+pub mod http;
 pub mod notify;
 pub mod ups;
 
+pub use boot::{BootLayer, BootSync};
 pub use notify::EventForward;
 pub use ups::UpsLayer;
 
@@ -41,6 +61,11 @@ pub use ups::UpsLayer;
 pub trait Module: Send + Sync {
     /// Short stable name (`synology`).
     fn id(&self) -> &'static str;
+
+    /// One line for rynasd's start log (what was detected).
+    fn summary(&self) -> String {
+        self.id().to_string()
+    }
 
     /// The UPS layer of this machine, when the module's system layer runs NUT.
     fn ups(&self) -> Option<Arc<dyn UpsLayer>> {
@@ -68,9 +93,52 @@ pub trait Module: Send + Sync {
         Vec::new()
     }
 
-    /// Once at the start of rynasd (blocking, as root): hooks into the module's system layer.
+    /// Once at the start of rynasd (blocking, as root), after the configuration store is open:
+    /// hooks into the module's system layer, its layer's settings adopted into its keys.
     /// Errors are logged, never fatal.
-    fn start(&self, _log: &dyn Fn(&str)) {}
+    fn start(&self, _cfg: &Config, _log: &dyn Fn(&str)) {}
+
+    /// The module's HTTP routes (paths relative to `/v1/modules/<id>`).
+    fn router(&self, _ctx: &http::Ctx) -> Option<axum::Router> {
+        None
+    }
+
+    /// Actions on the machine's hardware (the provider of the module), behind the core's
+    /// provider-neutral endpoints.
+    fn hardware_control(&self) -> Option<Arc<dyn HardwareControl>> {
+        None
+    }
+
+    /// The boot layer, when the machine boots from a device of its own.
+    fn boot(&self) -> Option<Arc<dyn BootLayer>> {
+        None
+    }
+
+    /// How the machine signals the network rescue paths.
+    fn rescue_feedback(&self) -> Option<Arc<dyn Feedback>> {
+        None
+    }
+
+    /// The reset button as `owner` sees it (staged value included); `Ok(None)` without one.
+    fn reset_button(&self, _cfg: &Config, _owner: &str) -> Result<Option<ResetButton>, String> {
+        Ok(None)
+    }
+
+    /// The real-time clock that powers the machine on.
+    fn wake_clock(&self) -> Option<WakeClock> {
+        None
+    }
+}
+
+/// The wake clock of a machine (the power schedule's startups).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WakeClock {
+    /// End of the name of the RTC's `device` (`-0030`: an I²C clock at address 0x30); that
+    /// RTC is armed instead of `rtc0`.
+    pub rtc_device_suffix: &'static str,
+    /// The unit whose stop reads the alarm (`rynas-power-wake.service` is ordered after it,
+    /// so it writes the alarm first at shutdown).
+    pub read_by_unit: &'static str,
 }
 
 /// The modules detected on this machine (none on a plain Debian).
@@ -120,10 +188,53 @@ impl Modules {
         self.0.iter().flat_map(|m| m.domains()).collect()
     }
 
-    pub fn start(&self, log: &dyn Fn(&str)) {
+    pub fn start(&self, cfg: &Config, log: &dyn Fn(&str)) {
         for m in &self.0 {
-            m.start(log);
+            m.start(cfg, log);
         }
+    }
+
+    /// Every module's routes, each nested under `/v1/modules/<id>`.
+    pub fn router(&self, ctx: &http::Ctx) -> axum::Router {
+        self.0.iter().fold(axum::Router::new(), |r, m| match m.router(ctx) {
+            Some(mr) => r.nest(&format!("/v1/modules/{}", m.id()), mr),
+            None => r,
+        })
+    }
+
+    /// The first module's rescue feedback.
+    pub fn rescue_feedback(&self) -> Option<Arc<dyn Feedback>> {
+        self.0.iter().find_map(|m| m.rescue_feedback())
+    }
+
+    /// The first module's reset button.
+    pub fn reset_button(&self, cfg: &Config, owner: &str) -> Result<Option<ResetButton>, String> {
+        for m in &self.0 {
+            if let Some(b) = m.reset_button(cfg, owner)? {
+                return Ok(Some(b));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The first module's wake clock.
+    pub fn wake_clock(&self) -> Option<WakeClock> {
+        self.0.iter().find_map(|m| m.wake_clock())
+    }
+
+    /// The first module's boot layer (one machine boots one way).
+    pub fn boot(&self) -> Option<Arc<dyn BootLayer>> {
+        self.0.iter().find_map(|m| m.boot())
+    }
+
+    /// The first module's hardware control.
+    pub fn hardware_control(&self) -> Option<Arc<dyn HardwareControl>> {
+        self.0.iter().find_map(|m| m.hardware_control())
+    }
+
+    /// The ids of the detected modules.
+    pub fn ids(&self) -> Vec<&'static str> {
+        self.0.iter().map(|m| m.id()).collect()
     }
 }
 
@@ -144,6 +255,8 @@ mod tests {
         assert!(m.ups().is_none() && m.event_forward().is_none());
         assert!(m.notify_imports().is_empty() && m.system_disk_usb_ids().is_empty());
         assert!(m.domains().is_empty() && Modules::none().is_empty());
+        assert!(m.hardware_control().is_none() && m.ids() == ["bare"]);
+        assert!(m.boot().is_none() && m.rescue_feedback().is_none() && m.wake_clock().is_none());
         assert_eq!(m.iter().map(|m| m.id()).collect::<Vec<_>>(), ["bare"]);
     }
 }

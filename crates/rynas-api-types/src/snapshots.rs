@@ -337,8 +337,8 @@ pub struct RollbackPreview {
     pub id: String,
     /// A system restore point (root rollback, reboot needed).
     pub system: bool,
-    /// The rollback can run from rynas (a share snapshot, or a restore point on synodeb whose
-    /// kernel modules are present).
+    /// The rollback can run from rynas (a share snapshot, or a restore point whose kernel
+    /// modules are present on a machine with a boot layer).
     pub allowed: bool,
     /// Why not, when `allowed` is false (English, for the log; the UI shows its own text).
     #[serde(default)]
@@ -361,8 +361,9 @@ pub struct RollbackPreview {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RollbackRefusal {
-    /// Root rollback needs synodeb (`synodeb-dom sync`); elsewhere it is a console procedure.
-    NotSynodeb,
+    /// Root rollback needs a hardware module's boot layer (it points the boot entry at the
+    /// restore point's kernel); elsewhere it is a console procedure.
+    NoBootLayer,
     /// The restore point has no kernel image.
     NoKernel,
     /// The restore point lacks `/lib/modules` of its kernel: it cannot boot.

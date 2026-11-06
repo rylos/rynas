@@ -1,4 +1,4 @@
-//! Synology hardware (`/api/v1/hardware/synology/...`): the `synology` provider over synodeb's
+//! Synology hardware (`/api/v1/modules/synology/...`): the `synology` provider over synodeb's
 //! synohwd (D-SYNOPLUG, `docs/plugins/synology.md`).
 //!
 //! Configuration key `synology.hw` ([`SynologySettings`]) renders `/etc/synohwd.toml`; actions
@@ -135,7 +135,7 @@ impl Default for SynologySettings {
     }
 }
 
-/// `GET/PUT /api/v1/hardware/synology/settings`.
+/// `GET/PUT /api/v1/modules/synology/settings`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SynologySettingsState {
     /// Applied by rynas, or read from `/etc/synohwd.toml` when rynas never applied it.
@@ -161,7 +161,7 @@ pub struct SynologyPlatform {
     pub synohwd_running: bool,
 }
 
-/// `POST /api/v1/hardware/synology/beep`.
+/// `POST /api/v1/modules/synology/beep`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct BeepRequest {
     #[serde(default)]
@@ -176,21 +176,13 @@ pub enum BeepKind {
     Long,
 }
 
-/// `POST /api/v1/hardware/synology/mute`.
+/// `POST /api/v1/modules/synology/mute`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct MuteResult {
     /// An audible alarm was stopped (synohwd's beeps are single, so never today).
     pub stopped_beep: bool,
     /// Open hardware notifications acknowledged (their reminders stop).
     pub acknowledged: u64,
-}
-
-/// `POST /api/v1/hardware/synology/bays/{n}/identify`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct IdentifyRequest {
-    /// Blink duration, 1..=300 s (default 30).
-    #[serde(default)]
-    pub duration_s: Option<u32>,
 }
 
 /// Sensor classes of the fan curves.
@@ -233,7 +225,7 @@ pub struct SensorReading {
     pub temperature_c: Option<f32>,
 }
 
-/// `GET /api/v1/hardware/synology/fan-curves`: DSM's tables of this model (synohwd's
+/// `GET /api/v1/modules/synology/fan-curves`: DSM's tables of this model (synohwd's
 /// `FAN_TABLES` / `MODEL_FAN_TABLES`), the active mode and the current readings, for the chart.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FanCurves {
@@ -314,7 +306,7 @@ pub struct SynologyDiagnostics {
     pub up_current_raw: Option<u64>,
 }
 
-/// `GET /api/v1/hardware/synology/status`: synohwd's status with API units (the
+/// `GET /api/v1/modules/synology/status`: synohwd's status with API units (the
 /// `/api/v1/hardware` summary stays as it was).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct SynologyStatus {

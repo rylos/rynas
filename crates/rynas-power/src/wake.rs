@@ -2,10 +2,10 @@
 //! `rynas-power-wake.service` (`ExecStart=` at boot, `ExecStop=` at every shutdown) and read
 //! by rynasd for the API. Works without rynasd: the rules come from the file the apply wrote.
 //!
-//! On a Synology the RTC is the S-35390A (I²C address 0x30); synohwd's shutdown hook reads
-//! its `wakealarm` and tells the microcontroller to honour it (`s`) or not (`r`), so the
-//! alarm must be written before synohwd stops (the unit is ordered `After=synohwd.service`,
-//! hence stopped before it).
+//! The RTC is `rtc0` (or the first one), unless the machine's hardware module names its own
+//! wake clock ([`WakeRtc::device_suffix`]); a module whose daemon reads the alarm at shutdown
+//! has the unit ordered after that daemon (see `crate::domain`), so the alarm is written
+//! before it stops.
 
 use std::path::{Path, PathBuf};
 
@@ -26,9 +26,9 @@ fn under(root: &Path, p: &str) -> PathBuf {
     root.join(p.trim_start_matches('/'))
 }
 
-/// The RTC to arm: the Synology S-35390A (`device` → `…-0030`) when present, else `rtc0`,
-/// else the first one.
-pub fn find_rtc(root: &Path) -> Option<String> {
+/// The RTC to arm: the one whose `device` ends with `prefer` (a hardware module's wake clock)
+/// when present, else `rtc0`, else the first one.
+pub fn find_rtc(root: &Path, prefer: Option<&str>) -> Option<String> {
     let dir = under(root, RTC_CLASS);
     let mut names: Vec<String> = std::fs::read_dir(&dir)
         .ok()?
@@ -37,16 +37,18 @@ pub fn find_rtc(root: &Path) -> Option<String> {
         .filter(|n| n.starts_with("rtc") && n[3..].bytes().all(|b| b.is_ascii_digit()))
         .collect();
     names.sort();
-    let s35390 = names.iter().find(|n| {
-        let dev = dir.join(n).join("device");
-        let target = std::fs::canonicalize(&dev)
-            .ok()
-            .or_else(|| std::fs::read_link(&dev).ok());
-        target
-            .and_then(|t| t.file_name().map(|f| f.to_string_lossy().into_owned()))
-            .is_some_and(|f| f.ends_with("-0030"))
+    let preferred = prefer.and_then(|suffix| {
+        names.iter().find(|n| {
+            let dev = dir.join(n).join("device");
+            let target = std::fs::canonicalize(&dev)
+                .ok()
+                .or_else(|| std::fs::read_link(&dev).ok());
+            target
+                .and_then(|t| t.file_name().map(|f| f.to_string_lossy().into_owned()))
+                .is_some_and(|f| f.ends_with(suffix))
+        })
     });
-    s35390
+    preferred
         .or_else(|| names.iter().find(|n| *n == "rtc0"))
         .or_else(|| names.first())
         .cloned()
@@ -67,9 +69,10 @@ pub fn has_wakealarm(root: &Path, rtc: &str) -> bool {
     under(root, RTC_CLASS).join(rtc).join("wakealarm").exists()
 }
 
-/// What the API says about waking: RTC, current alarm, last arming, warning.
-pub fn support(root: &Path, state: &PowerState) -> WakeSupport {
-    let rtc = find_rtc(root);
+/// What the API says about waking: RTC (see [`find_rtc`] for `prefer`), current alarm, last
+/// arming, warning.
+pub fn support(root: &Path, prefer: Option<&str>, state: &PowerState) -> WakeSupport {
+    let rtc = find_rtc(root, prefer);
     let supported = rtc.as_deref().is_some_and(|r| has_wakealarm(root, r));
     let (warning_code, warning) = match &rtc {
         None => (
@@ -249,6 +252,8 @@ pub struct ArmInput<'a> {
     pub now: Timestamp,
     pub tz: &'a TimeZone,
     pub reason: ArmReason,
+    /// The hardware module's wake clock (see [`find_rtc`]).
+    pub prefer_rtc: Option<&'a str>,
 }
 
 /// Arms (or clears) the alarm and updates the state; `run(rtc, wake)` sets the alarm of `rtc`
@@ -272,7 +277,7 @@ pub fn arm(i: &ArmInput, run: &SetAlarm<'_>) -> WakeArmed {
         ArmReason::Shutdown => st.clean_shutdown_boot_id = id.clone(),
     }
     let plan = i.schedule.and_then(|s| wake_time(&s.rules, i.now, i.tz));
-    let rtc = find_rtc(i.root);
+    let rtc = find_rtc(i.root, i.prefer_rtc);
     let mut armed = WakeArmed {
         at_ms: now_ms,
         wake_ms: plan.as_ref().map(|(t, _)| (*t as u64) * 1000),
@@ -348,12 +353,13 @@ mod tests {
     #[test]
     fn rtc_choice() {
         let d = tempfile::tempdir().unwrap();
-        assert_eq!(find_rtc(d.path()), None);
+        assert_eq!(find_rtc(d.path(), None), None);
         rtc(d.path(), "rtc0", "pnp0/00:02", true);
-        assert_eq!(find_rtc(d.path()).as_deref(), Some("rtc0"));
-        // the Synology S-35390A wins over the CMOS clock
+        assert_eq!(find_rtc(d.path(), None).as_deref(), Some("rtc0"));
+        // a module's wake clock (an I²C RTC at 0x30) wins over the CMOS clock
         rtc(d.path(), "rtc1", "i2c-0/0-0030", true);
-        assert_eq!(find_rtc(d.path()).as_deref(), Some("rtc1"));
+        assert_eq!(find_rtc(d.path(), Some("-0030")).as_deref(), Some("rtc1"));
+        assert_eq!(find_rtc(d.path(), None).as_deref(), Some("rtc0"));
         std::fs::write(
             d.path().join("sys/class/rtc/rtc1/wakealarm"),
             "1793862000\n",
@@ -393,6 +399,7 @@ mod tests {
             now,
             tz: &tz,
             reason,
+            prefer_rtc: None,
         };
         // first boot: unknown cause, unknown previous shutdown
         let a = arm(&input(now, ArmReason::Boot), &run);
@@ -461,18 +468,19 @@ mod tests {
                 now,
                 tz: &tz,
                 reason: ArmReason::Shutdown,
+                prefer_rtc: None,
             },
             &run,
         );
         assert_eq!(a.error.as_deref(), Some("no real-time clock"));
         assert_eq!(a.error_code, Some(WakeArmError::NoRtc));
         assert!(calls.borrow().is_empty());
-        let w = support(&root, &PowerState::load(&state));
+        let w = support(&root, None, &PowerState::load(&state));
         assert_eq!(w.warning_code, Some(WakeWarning::NoRtc));
         assert!(!w.supported && w.warning.unwrap().contains("no real-time clock"));
         // an RTC without wakealarm
         rtc(&root, "rtc0", "pnp0/00:02", false);
-        let w = support(&root, &PowerState::default());
+        let w = support(&root, None, &PowerState::default());
         assert_eq!(w.warning_code, Some(WakeWarning::NoWakeAlarm));
         assert!(!w.supported && w.warning.unwrap().contains("no wake alarm"));
         // with an alarm and no schedule: cleared
@@ -485,6 +493,7 @@ mod tests {
                 now,
                 tz: &tz,
                 reason: ArmReason::Shutdown,
+                prefer_rtc: None,
             },
             &run,
         );
@@ -499,12 +508,13 @@ mod tests {
                 now,
                 tz: &tz,
                 reason: ArmReason::Shutdown,
+                prefer_rtc: None,
             },
             &|_, _| Err("rtcwake: exit code 1".into()),
         );
         assert_eq!(a.error.as_deref(), Some("rtcwake: exit code 1"));
         assert_eq!(a.error_code, Some(WakeArmError::Failed));
-        let w = support(&root, &PowerState::load(&state));
+        let w = support(&root, None, &PowerState::load(&state));
         assert_eq!(w.warning_code, Some(WakeWarning::LastArmFailed));
         assert!(w.supported && w.warning.unwrap().contains("failed"));
     }

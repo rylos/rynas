@@ -237,8 +237,8 @@ pub struct Engine {
     pub web: WebInfo,
     /// The helper the rollback timer runs.
     pub rynasctl: String,
-    /// synohwd's command FIFO (beeps, LED).
-    pub fifo: PathBuf,
+    /// How the machine signals the rescue paths (a hardware module's beeps and LEDs).
+    pub feedback: Arc<dyn rescue::Feedback>,
     cache: Mutex<Option<(Instant, Arc<Inventory>)>>,
 }
 
@@ -253,13 +253,21 @@ impl Engine {
             paths,
             web: WebInfo::default(),
             rynasctl: RYNASCTL.into(),
-            fifo: PathBuf::from(rescue::SYNOHWD_FIFO),
+            feedback: Arc::new(rescue::NoFeedback),
             cache: Mutex::new(None),
         }
     }
 
     pub fn with_web(mut self, web: WebInfo) -> Self {
         self.web = web;
+        self
+    }
+
+    /// The machine's way to signal the rescue paths (none by default).
+    pub fn with_feedback(mut self, f: Option<Arc<dyn rescue::Feedback>>) -> Self {
+        if let Some(f) = f {
+            self.feedback = f;
+        }
         self
     }
 
@@ -2012,10 +2020,7 @@ impl Engine {
             "rescue configuration: no routable address after boot",
             log,
         )?;
-        rescue::synohwd_send(
-            &self.fifo,
-            &[rescue::up::LONG_BEEP, rescue::up::ORANGE_BLINK],
-        );
+        self.feedback.signal(rescue::Signal::RescueApplied);
         self.emit(event(
             NotifySeverity::Critical,
             "watchdog",
@@ -2030,7 +2035,8 @@ impl Engine {
         ))
     }
 
-    /// `rynasctl net reset-button`: one press of the Synology reset button.
+    /// `rynasctl net reset-button`: one press of the reset button (a hardware module wires
+    /// the button to it).
     pub fn reset_button(&self, log: &dyn Fn(&str)) -> Result<Press> {
         let state = self.paths.run.join("net-reset-press");
         let prev: Option<u64> = std::fs::read_to_string(&state)
@@ -2043,15 +2049,12 @@ impl Engine {
             Press::First => {
                 std::fs::create_dir_all(&self.paths.run)?;
                 write_synced(&state, now.to_string().as_bytes(), 0o600)?;
-                rescue::synohwd_send(
-                    &self.fifo,
-                    &[rescue::up::SHORT_BEEP, rescue::up::ORANGE_BLINK],
-                );
+                self.feedback.signal(rescue::Signal::PressAgain);
                 log("reset button: press again within 10 s to restore the factory network");
             }
             Press::Second => {
                 let _ = std::fs::remove_file(&state);
-                rescue::synohwd_send(&self.fifo, &[rescue::up::LONG_BEEP]);
+                self.feedback.signal(rescue::Signal::Restoring);
                 let _lock = self.store.lock()?;
                 let (before, target) = self.factory_locked(
                     "reset-button",

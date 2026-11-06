@@ -98,60 +98,29 @@ impl Notifier for WebNotifier {
     }
 }
 
-/// Temperatures next to the Synology controller's shutdown thresholds (DSM tables of the
-/// model, the same in both fan modes); empty for other providers.
+/// Temperatures next to the hardware controller's shutdown thresholds, as the provider knows
+/// them (`HardwareProvider::thermal_limits`); empty without provider data.
 pub fn thermal_readings(
+    provider: &dyn crate::hardware::HardwareProvider,
     hw: Option<&rynas_api_types::HardwareStatus>,
     temps: &[rynas_api_types::Temperature],
-    product: &str,
 ) -> Vec<ThermalReading> {
-    use rynas_api_types::synology::SensorClass;
-    use rynas_hw_synology::model::shutdown_c;
-    let Some(hw) = hw.filter(|h| h.provider.as_deref() == Some("synology")) else {
-        return Vec::new();
-    };
-    let mut out: Vec<ThermalReading> = Vec::new();
-    let mut push = |id: &str, label: &str, c: f32, class| {
-        if !out.iter().any(|r| r.id == id) {
-            out.push(ThermalReading {
-                id: id.into(),
-                label: label.into(),
-                celsius: c,
-                shutdown_c: shutdown_c(product, class) as f32,
-            });
-        }
-    };
-    for t in temps {
-        let Some(c) = t.celsius else { continue };
-        let class = if t.id == "cpu" {
-            SensorClass::Cpu
-        } else if t.id.starts_with("nvme") {
-            SensorClass::Nvme
-        } else if t.id.starts_with("bay") {
-            SensorClass::Disk
-        } else {
-            continue;
-        };
-        push(&t.id, &t.label, c, class);
-    }
-    // asleep disks keep their last value in synohwd's status
-    for b in &hw.bays {
-        if let Some(c) = b.celsius {
-            push(
-                &format!("bay{}", b.number),
-                &format!("Bay {}", b.number),
-                c,
-                SensorClass::Disk,
-            );
-        }
-    }
-    out
+    let Some(hw) = hw else { return Vec::new() };
+    provider
+        .thermal_limits(hw, temps)
+        .into_iter()
+        .map(|l| ThermalReading {
+            id: l.id,
+            label: l.label,
+            celsius: l.celsius,
+            shutdown_c: l.shutdown_c,
+        })
+        .collect()
 }
 
 /// Fans, temperatures and provider freshness every [`HW_CHECK`], emitted on transitions.
 pub fn spawn_hardware_watch(st: AppState) {
     tokio::spawn(async move {
-        let product = rynas_hw::dmi(std::path::Path::new("/")).1;
         let mut watch = HardwareWatch::default();
         let mut tick = tokio::time::interval(HW_CHECK);
         loop {
@@ -168,7 +137,7 @@ pub fn spawn_hardware_watch(st: AppState) {
             })
             .await;
             let Ok((status, temps)) = read else { continue };
-            let thermal = thermal_readings(status.as_ref(), &temps, &product);
+            let thermal = thermal_readings(st.hw.as_ref(), status.as_ref(), &temps);
             for ev in watch
                 .check(status.as_ref(), &temps)
                 .into_iter()

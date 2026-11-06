@@ -748,7 +748,7 @@ domain (apply with `POST /api/v1/config/apply`); actions on the system are tasks
 | GET | `/api/v1/snapshots/{id}/browse?path=` | — | `SnapshotListing` {id, path, entries: [{name, kind, size_bytes, mtime_ms, mode, uid, gid, link?}], truncated} (10 000 entries max) |
 | POST | `/api/v1/snapshots/{id}/restore` | `RestoreRequest` {path, mode: copy\|replace} | 202 (task `snapshot.restore`) |
 | POST | `/api/v1/snapshots/{id}/rollback` | `RollbackRequest` {confirm: id} | 202 (task `snapshot.rollback`); 400 `confirmation_required`; 409 for system restore points unless synodeb (root rollback, see `docs/synodeb-integration.md`, S6) |
-| GET | `/api/v1/snapshots/{id}/preview-rollback` | — | `RollbackPreview` {id, system, allowed, refusal?: not_synodeb\|no_kernel\|no_modules\|not_readonly, kernel?, running_kernel?, modules, subvolume?}; no side effect |
+| GET | `/api/v1/snapshots/{id}/preview-rollback` | — | `RollbackPreview` {id, system, allowed, refusal?: no_boot_layer\|no_kernel\|no_modules\|not_readonly, kernel?, running_kernel?, modules, subvolume?}; no side effect. `no_boot_layer`: no hardware module boot layer (`rynas_module::BootLayer`) points the boot entry at a restore point's kernel, a root rollback is a console procedure |
 | DELETE | `/api/v1/snapshots/{id}?confirm={id}` | — | 202 (task `snapshot.delete`); 400 `confirmation_required`; 409 `conflict` when the chain needs it |
 
 Internal only (rynasd, never forwarded by rynas-web, called as root by `rynasctl`; the route
@@ -866,19 +866,24 @@ into a plugin process) and `rynas-power` (the power schedule, any Debian machine
 configuration domains applied by rynasd: `synology.hw` (order 50, registered only on a
 Synology: synology-nas platform driver bound and DMI naming Synology or a known model) and
 `power.schedule` (order 45, after the scheduler whose tasks run the shutdown rules). Types in
-`rynas_api_types::synology` and `rynas_api_types::power`. No new error code. On a machine that
-is not a Synology every `/hardware/synology/*` endpoint answers 404 `not_found`;
-`/api/v1/hardware` (provider-neutral summary) is unchanged. The UI shows the Hardware › Synology
-tab only when the live provider is `synology` or `GET /hardware/synology/settings` answers (G8d).
+`rynas_api_types::synology` and `rynas_api_types::power`. No new error code. The Synology
+endpoints are the module's routes (D-MODULE, `rynas_module::Module::router`): rynasd nests them
+under `/v1/modules/synology` only where the module is detected, rynas-web forwards
+`/api/v1/modules/<id>/…` by prefix without knowing any module; elsewhere they answer 404
+`not_found` like any unknown path, and on synodeb without Synology hardware every route answers
+404 `not_found`. `/api/v1/hardware` (provider-neutral summary, the provider of the module that
+knows the machine, `rynas_web::hardware::detect`) and the bay identify are the core's. The UI
+shows the Hardware › Synology tab only when the live provider is `synology` or
+`GET /modules/synology/settings` answers (G8d).
 
 | Method | Path | Body | Response |
 |---|---|---|---|
-| GET | `/api/v1/hardware/synology/status` | — | `SynologyStatus` {model, running, stale (older than 3 periods + 10 s, synohwd's rule), read_at_ms?, age_s?, period_s?, fan_duty_pct?, fan_fail, fans [{number, rpm?, alarm: ok\|stopped\|unknown}], status_led? off\|green\|green_blink\|orange\|orange_blink, bays [{number, present, powered, device?, temperature_c?, asleep}], cpu_temperature_c?, nvme/nic [{name, temperature_c?}], events [{at_ms?, text}], diagnostics {up_current_raw?}, boot?} |
-| GET/PUT | `/api/v1/hardware/synology/settings` | `SynologySettings` {fan_mode low\|high\|full, fan_period_s 5–300, fan_min_duty_pct 0–99, hysteresis_c 0–20, thermal_shutdown, power_button poweroff\|log\|ignore, reset_button log\|ignore\|network_rescue, beep_on_start, beep_on_error, disk_leds, led_brightness 1–255, disk_standby_minutes 0–330, wol, ac_recovery} | `SynologySettingsState` {applied, pending?, foreign_commands, platform {model, bays, fans, synohwd_running}}; PUT stages; 400 `invalid_value` out of range (synohwd would clamp: rynas refuses), 400 `bad_request` for unknown choices (`command:` values are not accepted: reserved for rynas handlers) |
-| POST | `/api/v1/hardware/synology/beep` | `BeepRequest` {kind: short\|long} | 204: uP `2`/`3` through synohwd's FIFO; 503 `backend_unavailable` when synohwd does not read it, 409 `busy` when the FIFO is full |
-| POST | `/api/v1/hardware/synology/mute` | — | `MuteResult` {stopped_beep, acknowledged}: synohwd's beeps are single (no sequence it accepts stops one), so this acknowledges the open hardware notifications (their reminders stop) |
-| POST | `/api/v1/hardware/synology/bays/{n}/identify` | `IdentifyRequest` {duration_s? 1–300, default 30} or empty | 204: the bay's orange LED blinks (kernel `timer` trigger, else a software blink), green off, then both restored; 404 for a bay the model does not have |
-| GET | `/api/v1/hardware/synology/fan-curves` | — | `FanCurves` {model, active_mode (applied `fan_mode`), modes [{mode low\|high, curves [{class disk\|nvme\|cpu\|nic, points [{threshold_c, duty_pct}], shutdown_c}]}], readings [{class, sensor, temperature_c?}], duty_pct?}: DSM's tables of the model (synohwd's `FAN_TABLES`/`MODEL_FAN_TABLES`) |
+| GET | `/api/v1/modules/synology/status` | — | `SynologyStatus` {model, running, stale (older than 3 periods + 10 s, synohwd's rule), read_at_ms?, age_s?, period_s?, fan_duty_pct?, fan_fail, fans [{number, rpm?, alarm: ok\|stopped\|unknown}], status_led? off\|green\|green_blink\|orange\|orange_blink, bays [{number, present, powered, device?, temperature_c?, asleep}], cpu_temperature_c?, nvme/nic [{name, temperature_c?}], events [{at_ms?, text}], diagnostics {up_current_raw?}, boot?} |
+| GET/PUT | `/api/v1/modules/synology/settings` | `SynologySettings` {fan_mode low\|high\|full, fan_period_s 5–300, fan_min_duty_pct 0–99, hysteresis_c 0–20, thermal_shutdown, power_button poweroff\|log\|ignore, reset_button log\|ignore\|network_rescue, beep_on_start, beep_on_error, disk_leds, led_brightness 1–255, disk_standby_minutes 0–330, wol, ac_recovery} | `SynologySettingsState` {applied, pending?, foreign_commands, platform {model, bays, fans, synohwd_running}}; PUT stages; 400 `invalid_value` out of range (synohwd would clamp: rynas refuses), 400 `bad_request` for unknown choices (`command:` values are not accepted: reserved for rynas handlers) |
+| POST | `/api/v1/modules/synology/beep` | `BeepRequest` {kind: short\|long} | 204: uP `2`/`3` through synohwd's FIFO; 503 `backend_unavailable` when synohwd does not read it, 409 `busy` when the FIFO is full |
+| POST | `/api/v1/modules/synology/mute` | — | `MuteResult` {stopped_beep, acknowledged}: synohwd's beeps are single (no sequence it accepts stops one), so this acknowledges the open hardware notifications (their reminders stop) |
+| POST | `/api/v1/hardware/bays/{n}/identify` | `IdentifyRequest` {duration_s? 1–300, default 30} or empty | provider-neutral (the hardware module's `HardwareControl`; 404 without one). Synology: 204, the bay's orange LED blinks (kernel `timer` trigger, else a software blink), green off, then both restored; 404 for a bay the model does not have |
+| GET | `/api/v1/modules/synology/fan-curves` | — | `FanCurves` {model, active_mode (applied `fan_mode`), modes [{mode low\|high, curves [{class disk\|nvme\|cpu\|nic, points [{threshold_c, duty_pct}], shutdown_c}]}], readings [{class, sensor, temperature_c?}], duty_pct?}: DSM's tables of the model (synohwd's `FAN_TABLES`/`MODEL_FAN_TABLES`) |
 | GET/PUT | `/api/v1/power/schedule` | `PowerSchedule` {rules [{id, enabled, action startup\|shutdown, days [mon…sun], hour, minute, shutdown? {when_busy wait\|skip\|force, max_wait_min 1–720, check_storage, check_tasks, check_smb}}]} | `PowerScheduleState` {applied, pending?, rules [{id, pending?, task_id?}], next: `PowerNext`}; PUT stages the schedule and the scheduler tasks `power-off-<rule>` in one changeset; 400 `invalid_value`: ids, empty days, startup and shutdown at the same minute, a shutdown less than 10 minutes after a startup (across midnight and the week too), more than 50 rules |
 | GET | `/api/v1/power/next` | — | `PowerNext` {next_startup_ms?, next_startup_rule?, next_shutdown_ms?, next_shutdown_rule?, time_zone, wake {supported, rtc?, armed_ms?, last_armed? {at_ms, wake_ms?, rule?, rtc?, reason boot\|shutdown, error?}, warning?}, last_boot? {boot_ms, cause scheduled_startup\|watchdog\|unknown, previous_shutdown_clean?}} of the applied schedule |
 
@@ -1040,7 +1045,7 @@ networkd running); ifupdown and NetworkManager interfaces are read-only until ad
 | POST | `/api/v1/network/apply` | `NetApplyRequest` {timeout_s? (60–600, default 120), skip_test, comment} | 202 `NetApplyStarted` {task_id, token?, deadline_ms, timeout_s, candidate_urls, management_touched}; 400 `invalid_value` (validation, zero management paths, skip_test on the management interface), 409 `nothing_pending` |
 | POST | `/api/v1/network/confirm` | `NetConfirmRequest` {token} | `NetConfirmed` {revision}; 400 `invalid_value` (wrong token); 409 `conflict` (not over the new network, too late), `nothing_pending` |
 | POST | `/api/v1/network/rollback` | — | 202 `TaskStarted` (task `network.rollback`); also cancels an adoption planned for the next boot; 409 `nothing_pending` |
-| GET / PUT | `/api/v1/network/rescue` | `RescueSettings` {mdns_service} | `RescueInfo` {mdns_name, mdns_active, link_local [{interface, mac, address, active}], synology, reset_button_configured, reset_button_pending?, settings, pending?} (PUT stages the key `network.rescue`; apply with `/config/apply`). The reset button is read-only here (a reflection of `synology.hw`); a PUT with `reset_button` answers 400 `invalid_value` |
+| GET / PUT | `/api/v1/network/rescue` | `RescueSettings` {mdns_service} | `RescueInfo` {mdns_name, mdns_active, link_local [{interface, mac, address, active}], reset_button?: `ResetButton` {module, configured, pending?}, settings, pending?} (PUT stages the key `network.rescue`; apply with `/config/apply`). The reset button exists only where a hardware module has one (`Module::reset_button`: on a Synology a reflection of `synology.hw`) and is read-only here; a PUT with `reset_button` answers 400 `invalid_value` |
 | POST | `/api/v1/network/adopt` | `NetAdoptRequest` {mode now\|next_boot, timeout_s?, confirm} | `now`: 202 `NetApplyStarted` (task `network.adopt`); `next_boot`: 200 `NetAdoptScheduled` {revision, interfaces}; 400 `confirmation_required`, `invalid_value` (bonds/bridges/VLANs/static IPv6 are not migrated in phase 1) |
 | GET | `/api/v1/network/revisions` | — | `Vec<NetRevision>` {id, ts_ms, author, comment, kind snapshot\|apply\|adopt\|rescue\|restore, interfaces, backend, good, lkg}, newest first |
 | POST | `/api/v1/network/revisions/{n}/restore` | `NetRestoreRequest` {timeout_s?} | 202 `NetApplyStarted` (task `network.restore`, a timed trial like an apply) |
@@ -1102,12 +1107,14 @@ Safety net (units in `packaging/systemd/`, enabled by the package, not started a
   route at all), the last known good revision is restored if the files differ from it (30 s to
   come up), then the **rescue configuration** (DHCP + link-local on every port, foreign
   `.netdev` suspended, ifupdown put aside); notification `network:watchdog` critical, long
-  beep + orange LED through synohwd's FIFO. No cable: nothing.
+  signal of the hardware module (`rynas_net::rescue::Feedback`, `Module::rescue_feedback`: on a
+  Synology a long beep + orange LED through synohwd's FIFO; silent elsewhere). No cable:
+  nothing.
 - Reset button (Synology): **one owner**. `/etc/synohwd.toml` has a single writer, the
-  `synology.hw` key (`PUT /api/v1/hardware/synology/settings`, `reset_button:
+  `synology.hw` key (`PUT /api/v1/modules/synology/settings`, `reset_button:
   network_rescue` = `reset_button = "command:/usr/libexec/rynas/rynasctl net reset-button"`);
   `network.rescue` keeps the Avahi file and the link-local settings and only reflects the
-  button (`RescueInfo.reset_button_configured`, `reset_button_pending`). Default on a Synology:
+  button (`RescueInfo.reset_button`, the module's `Module::reset_button`). Default on a Synology:
   network rescue on — at the first start of rynasd where `/etc/synohwd.toml` exists and
   `synology.hw` was never applied, rynas adopts the file (what synohwd runs with + network
   rescue; kept off if an older `network.rescue` had `reset_button: false`). Migration: up to
@@ -1116,8 +1123,8 @@ Safety net (units in `packaging/systemd/`, enabled by the package, not started a
   the block is rewritten by `synology.hw` with the button setting the block had, without the
   block (one revision, synohwd restarted once). The microcontroller reports one event per press,
   so the gesture is a **double press within 10 s** timed in `/run/rynas/net-reset-press`
-  (presses closer than 1 s are one press): first press = short beep + orange blink, second =
-  long beep + factory network (as the rescue configuration), the previous settings kept as a
+  (presses closer than 1 s are one press): first press = signal `PressAgain` (Synology: short
+  beep + orange blink), second = signal `Restoring` (long beep) + factory network (as the rescue configuration), the previous settings kept as a
   revision to restore.
 - Avahi: `/etc/avahi/services/rynas.service` (`_rynas._tcp` and `_http._tcp`/`_https._tcp` on
   `--web-port`); avahi-daemon publishes `<host>.local` itself. `network.rescue` is applied with
@@ -1173,7 +1180,7 @@ error codes.
 | POST | `/api/v1/updates/autoremove` | `AutoremoveRequest` {packages} | 202 (task `updates.autoremove`); 400 `confirmation_required` unless `packages` is exactly what autoremove would remove |
 | POST | `/api/v1/updates/packages/{name}/changelog` | — | 202 (task `updates.changelog`: `apt-get changelog`, network; the text is the task log) |
 | GET/PUT | `/api/v1/updates/auto` | `AutoUpdates` {mode off\|security\|all, hour, minute, window_min 10–360, reboot, reboot_hour, reboot_minute} | `AutoUpdatesState` {applied, pending?, unattended_installed} (PUT stages `updates.auto`) |
-| GET | `/api/v1/updates/kernel[?refresh=1]` | — | `KernelStatus` {running, installed, synodeb, dom?: `DomStatus` {entries, default, fallback, trial none\|armed\|trying, running, outdated, kernel, kernel_old, free_bytes}, read_at_ms, error?} |
+| GET | `/api/v1/updates/kernel[?refresh=1]` | — | `KernelStatus` {running, installed, boot_layer, boot?: `BootImage` {entries, default, fallback, trial none\|armed\|trying, running, outdated, kernel, kernel_old, free_bytes}, read_at_ms, error?}: `boot` is the boot device of a hardware module's boot layer (`rynas_module::BootLayer`; Synology: the DOM through `synodeb-dom status --json`), absent on a plain Debian |
 
 Rules:
 - **Cheap reads**: the list is parsed from `apt-get -s -o Debug::NoLocking=true full-upgrade`

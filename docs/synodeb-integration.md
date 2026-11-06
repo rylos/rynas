@@ -88,9 +88,9 @@ socket that cannot be reached falls back to the FIFO; a request sent without an 
 repeated on the FIFO (it may have run) and answers 503 `backend_unavailable`. The periodic
 status still reads `status.json`; `Commander::status()` (socket `status`) exists for places
 where freshness matters, none uses it yet. Tests with a fake socket in `cmd.rs`.
-Left: `rynas-net`'s rescue beeps (`rescue::synohwd_send`, used by `rynasctl` from the reset
-button and the boot guard) still write the FIFO directly, on purpose best effort; they could
-move to `Commander` later.
+Rescue beeps: the Synology module's `rescue_feedback` (`module::Beeps`, used by rynasd and by
+`rynasctl` from the reset button and the watchdog) sends `2`/`3`/`;` with `cmd::send` on the FIFO,
+best effort (a stopped synohwd is not an error).
 
 **S6, root rollback** (done, not yet tried on the DS920+): `POST /api/v1/snapshots/{id}/rollback`
 on a system restore point is no longer a 409 on synodeb (`/usr/sbin/synodeb-dom` present).
@@ -107,12 +107,14 @@ shown, steps, typed restore point name). The task `snapshot.rollback` runs
    restore points (nested subvolumes in `@rootfs/.snapshots/rootfs`) move into it so they stay
    listed after the reboot (skipped when the directory is its own subvolume or mount);
    `@rootfs` → `@rootfs.rynas-rollback-<stamp>`, new → `@rootfs` (`RENAME_NOREPLACE`). Any
-   failure undoes the steps and runs `synodeb-dom sync --root /` to put the DOM entry back;
+   failure undoes the steps and runs `synodeb-dom sync --root /` to put the DOM entry back
+   (the Synology module's boot layer, `rynas_hw_synology::boot`, D-MODULE);
 4. unmount; the task log and a notice ask for the reboot.
-On other systems the preview says `not_synodeb` and the rollback stays a 409 with a note
-(console procedure). `rynasd --dry-system` only logs the steps (synodeb when the hardware root
-has `usr/sbin/synodeb-dom`). Tests: step order, refusal, undo and dry run with a fake
-`RootOps` (`rootfs.rs`), API refusals in `rynasd/tests/protection.rs`.
+On other systems (no boot layer) the preview says `no_boot_layer` and the rollback stays a 409
+with a note (console procedure). `rynasd --dry-system` only logs the steps (with the boot layer
+when the fake hardware is a Synology or has `usr/sbin/synodeb-dom`). Tests: step order,
+refusal, undo and dry run with a fake `RootOps`/`BootSync` (`rootfs.rs`), API refusals in
+`rynasd/tests/protection.rs`.
 Left:
 - run it once on the test DS920+ (and in `packaging/test-snapshots.sh`, which does not cover
   root rollback: it needs a DOM and `synodeb-dom`);
@@ -189,7 +191,8 @@ codes), so the two sources make one notification.
 | `ups_battery_low` | `ups` | `battery`, `runtime` | urgent | text |
 | `ups_unreachable` | `ups` | `ups`, `minutes` | high | text |
 
-A new synodeb event needs only its keys in `crates/rynas-ui/src/i18n.rs` (section "synodeb"):
+A new synodeb event needs only its keys in the Synology module's dictionary
+(`crates/rynas-ui/src/modules/synology/i18n.rs`):
 `nev.synodeb.<event>.title` (required for a translation), optionally `.body` (text messages
 only), variants `.title_2`/`.body_2`/`.body_3` and value keys; rynasd picks them up for the
 Italian channels at build time. Until then the English title and message are shown. In the list

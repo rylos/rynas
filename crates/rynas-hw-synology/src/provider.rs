@@ -6,11 +6,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rynas_api_types::HardwareStatus;
 use rynas_api_types::synology::{
     BeepKind, FanCurves, FanMode, SensorClass, SensorReading, SynologyStatus,
 };
-use rynas_hw::{ControlError, HardwareControl, HardwareProvider};
+use rynas_api_types::{HardwareStatus, Temperature};
+use rynas_hw::{ControlError, HardwareControl, HardwareProvider, ThermalLimit};
 
 use crate::status::{Raw, STATUS};
 use crate::{cmd, leds, model};
@@ -70,6 +70,16 @@ impl Synology {
         let mut s = Self::new(PathBuf::from("/"), rynas_hw::dmi(Path::new("/")).1);
         s.status_path = path.into();
         s
+    }
+
+    /// rynas-web's provider below `root`: on Synology hardware, or wherever synohwd's status
+    /// file exists; `None` elsewhere.
+    pub fn web_provider(root: &Path) -> Option<Self> {
+        Self::detect(root).or_else(|| {
+            rynas_hw::under(root, STATUS)
+                .is_file()
+                .then(|| Self::new(root, rynas_hw::dmi(root).1))
+        })
     }
 
     pub fn root(&self) -> &Path {
@@ -146,6 +156,47 @@ impl Synology {
 impl HardwareProvider for Synology {
     fn status(&self) -> Result<Option<HardwareStatus>, String> {
         Ok(self.raw()?.map(|r| r.hardware(now_s(), self.model.clone())))
+    }
+
+    /// The controller's shutdown thresholds of the model (DSM tables, the same in both fan
+    /// modes) next to the CPU, NVMe and bay temperatures; asleep disks keep their last value in
+    /// synohwd's status.
+    fn thermal_limits(&self, hw: &HardwareStatus, temps: &[Temperature]) -> Vec<ThermalLimit> {
+        let mut out: Vec<ThermalLimit> = Vec::new();
+        let mut push = |id: &str, label: &str, c: f32, class| {
+            if !out.iter().any(|r| r.id == id) {
+                out.push(ThermalLimit {
+                    id: id.into(),
+                    label: label.into(),
+                    celsius: c,
+                    shutdown_c: model::shutdown_c(&self.product, class) as f32,
+                });
+            }
+        };
+        for t in temps {
+            let Some(c) = t.celsius else { continue };
+            let class = if t.id == "cpu" {
+                SensorClass::Cpu
+            } else if t.id.starts_with("nvme") {
+                SensorClass::Nvme
+            } else if t.id.starts_with("bay") {
+                SensorClass::Disk
+            } else {
+                continue;
+            };
+            push(&t.id, &t.label, c, class);
+        }
+        for b in &hw.bays {
+            if let Some(c) = b.celsius {
+                push(
+                    &format!("bay{}", b.number),
+                    &format!("Bay {}", b.number),
+                    c,
+                    SensorClass::Disk,
+                );
+            }
+        }
+        out
     }
 }
 
@@ -280,5 +331,72 @@ mod tests {
             Err(ControlError::Invalid(_))
         ));
         assert_eq!(p.mute(), Ok(false));
+    }
+
+    #[test]
+    fn web_provider_on_synology_or_with_the_status_file() {
+        let plain = tempfile::tempdir().unwrap();
+        assert!(Synology::web_provider(plain.path()).is_none());
+        let d = fake_root();
+        assert!(Synology::web_provider(d.path()).is_some());
+        // synohwd's file alone (fixture of an older status with M.2 slots)
+        let f = plain.path().join("run/synohwd/status.json");
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        let fixture = include_str!("../tests/fixtures/synohwd-status-m2.json");
+        std::fs::write(&f, fixture).unwrap();
+        let p = Synology::web_provider(plain.path()).unwrap();
+        let h = p.status().unwrap().unwrap();
+        assert_eq!(h.provider.as_deref(), Some("synology"));
+        assert_eq!(h.fans.len(), 2);
+        assert!(h.bays[3].asleep && h.bays[3].celsius == Some(29.0) && !h.bays[2].present);
+        // controllers swapped at boot: slot 1 holds nvme1
+        assert_eq!(h.m2[0].number, Some(1));
+        assert_eq!(h.m2[0].device.as_deref(), Some("nvme1n1"));
+        assert_eq!(h.m2[0].celsius, Some(39.9));
+        assert_eq!(h.events.last().unwrap().1, "fans ok");
+        // missing file: no data; garbage: an error
+        std::fs::remove_file(&f).unwrap();
+        assert_eq!(p.status(), Ok(None));
+        std::fs::write(&f, "{not json").unwrap();
+        assert!(p.status().is_err());
+    }
+
+    #[test]
+    fn thermal_limits_of_the_model() {
+        let p = Synology::new("/nonexistent", "DS920+");
+        let hw = HardwareStatus {
+            bays: vec![rynas_api_types::Bay {
+                number: 2,
+                celsius: Some(30.0),
+                asleep: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let t = |id: &str, c: f32| Temperature {
+            id: id.into(),
+            label: id.to_uppercase(),
+            celsius: Some(c),
+        };
+        let l = p.thermal_limits(
+            &hw,
+            &[
+                t("cpu", 60.0),
+                t("nvme0", 50.0),
+                t("nic:eth0", 40.0),
+                t("bay2", 31.0),
+            ],
+        );
+        let ids: Vec<_> = l.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["cpu", "nvme0", "bay2"]);
+        assert_eq!(
+            l[2].celsius, 31.0,
+            "the reading wins over the status' last value"
+        );
+        assert_eq!(
+            l[0].shutdown_c,
+            model::shutdown_c("DS920+", SensorClass::Cpu) as f32
+        );
+        assert!(rynas_hw::NoProvider.thermal_limits(&hw, &[]).is_empty());
     }
 }

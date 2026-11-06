@@ -12,16 +12,16 @@
 //!   are kept), needrestart only lists (`NEEDRESTART_MODE=l`). Removals are confirmed by name,
 //!   checked at once against the cached simulation and again by the task against a fresh one.
 //!   autoremove never runs by itself.
-//! - The kernel card reads `uname -r`, `/boot/vmlinuz-*` and, where it exists,
-//!   `synodeb-dom status --json` (root, mounts the DOM): cached 6 hours, a manual refresh
-//!   at most once a minute.
+//! - The kernel card reads `uname -r`, `/boot/vmlinuz-*` and, where a hardware module has a
+//!   boot layer (`rynas_module::BootLayer`), its boot device (may mount it): cached 6 hours,
+//!   a manual refresh at most once a minute.
 //! - A daily check emits `updates:available` (warning with security updates, notice
 //!   otherwise; resolved when nothing is left). Package lists are refreshed by apt's own
 //!   `apt-daily.timer` (on the root SSD); the check runs `apt-get update` only when they are
 //!   older than 36 hours.
 //!
-//! `--dry-system`: apt and synodeb-dom are never run; the simulations come from fixtures and
-//! the tasks only log what they would run.
+//! `--dry-system`: apt is never run (nor the boot layer's tool); the simulations come from
+//! fixtures and the tasks only log what they would run.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -45,13 +45,12 @@ use rynas_notify::event::{field, firing, resolved};
 use rynas_tasks::{Cmd, TaskCtx};
 use rynas_updates::apt::{parse_reboot_pkgs, parse_simulation, valid_package_name};
 use rynas_updates::domain::unattended_installed;
-use rynas_updates::{AUTO_KEY, dom, fixtures};
+use rynas_updates::{AUTO_KEY, fixtures, kernels};
 
 use crate::ops::{Error, Ops, Res, user};
 use crate::services::{docs, stage};
 
 const APT_GET: &str = "/usr/bin/apt-get";
-const SYNODEB_DOM: [&str; 2] = ["/usr/sbin/synodeb-dom", "/usr/local/sbin/synodeb-dom"];
 const SIM_TIMEOUT: Duration = Duration::from_secs(90);
 const KERNEL_TTL: Duration = Duration::from_secs(6 * 3600);
 const KERNEL_MIN_REFRESH: Duration = Duration::from_secs(60);
@@ -79,6 +78,8 @@ pub struct Updates {
     refresh: tokio::sync::Mutex<()>,
     kernel: std::sync::Mutex<Option<(Instant, KernelStatus)>>,
     kernel_lock: tokio::sync::Mutex<()>,
+    /// A hardware module's boot layer.
+    boot: Option<Arc<dyn rynas_module::BootLayer>>,
 }
 
 pub type UpdState = Option<Arc<Updates>>;
@@ -168,7 +169,14 @@ impl Updates {
             refresh: tokio::sync::Mutex::new(()),
             kernel: std::sync::Mutex::new(None),
             kernel_lock: tokio::sync::Mutex::new(()),
+            boot: None,
         }
+    }
+
+    /// The boot layer of a hardware module (its boot device on the kernel card).
+    pub fn with_boot(mut self, boot: Option<Arc<dyn rynas_module::BootLayer>>) -> Self {
+        self.boot = boot;
+        self
     }
 
     fn apt_present(&self) -> bool {
@@ -377,13 +385,6 @@ impl Updates {
 
     // ------------------------------------------------------------------ kernel
 
-    fn synodeb_dom(&self) -> Option<&'static str> {
-        if self.dry {
-            return Some(SYNODEB_DOM[0]);
-        }
-        SYNODEB_DOM.into_iter().find(|p| Path::new(p).exists())
-    }
-
     pub async fn kernel(&self, refresh: bool) -> KernelStatus {
         let fresh = |max: Duration| {
             self.kernel
@@ -411,8 +412,8 @@ impl Updates {
             ..Default::default()
         };
         if self.dry {
-            k.running = "6.12.48-synodeb".into();
-            k.installed = vec!["6.12.48-synodeb".into(), "6.12.41-synodeb".into()];
+            k.running = "6.12.48-amd64".into();
+            k.installed = vec!["6.12.48-amd64".into(), "6.12.41-amd64".into()];
         } else {
             k.running = tokio::fs::read_to_string("/proc/sys/kernel/osrelease")
                 .await
@@ -424,35 +425,35 @@ impl Updates {
                     names.push(e.file_name().to_string_lossy().into_owned());
                 }
             }
-            k.installed = dom::installed_kernels(names);
+            k.installed = kernels::installed_kernels(names);
         }
-        let Some(bin) = self.synodeb_dom() else {
+        let Some(boot) = self.boot.clone() else {
             return k;
         };
-        k.synodeb = true;
-        let text = if self.dry {
-            Ok(fixtures::SYNODEB_DOM.to_string())
-        } else {
-            match Cmd::new(bin)
-                .args(["status", "--json"])
-                .env_clear()
-                .timeout(Duration::from_secs(30))
-                .run(None, None)
-                .await
-            {
-                Ok(o) if o.success() => Ok(o.stdout),
-                Ok(o) => Err(format!(
-                    "synodeb-dom status: exit code {:?}: {}",
-                    o.code,
-                    o.stderr.trim()
-                )),
-                Err(e) => Err(format!("synodeb-dom status: {e}")),
+        k.boot_layer = true;
+        let read = tokio::task::spawn_blocking(move || boot.status())
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r);
+        match read {
+            Ok(d) => {
+                // the dry system's kernels are the boot device's
+                if self.dry {
+                    let rel = |k: &Option<rynas_api_types::updates::BootKernel>| {
+                        k.as_ref().and_then(|k| k.release.clone())
+                    };
+                    if let Some(r) = rel(&d.kernel) {
+                        k.running = r;
+                        k.installed = [rel(&d.kernel), rel(&d.kernel_old)]
+                            .into_iter()
+                            .flatten()
+                            .collect();
+                    }
+                }
+                k.boot = Some(d)
             }
-        };
-        match text.and_then(|t| dom::parse_status(&t)) {
-            Ok(d) => k.dom = Some(d),
             Err(e) => {
-                tracing::warn!("{e}");
+                tracing::warn!("boot layer: {e}");
                 k.error = Some(e);
             }
         }

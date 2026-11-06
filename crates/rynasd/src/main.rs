@@ -179,8 +179,6 @@ struct Opened {
     snapshots: Arc<SnapshotsDomain>,
     /// The hardware modules of this machine (D-MODULE; none on a plain Debian).
     modules: rynas_module::Modules,
-    /// The Synology hardware provider, when the Synology module found its hardware.
-    synology: Option<Arc<rynas_hw_synology::Synology>>,
     /// Applied `removable` settings, handed over by the domain.
     removable_settings: tokio::sync::watch::Receiver<rynas_api_types::removable::RemovableSettings>,
     /// The configuration root.
@@ -243,6 +241,11 @@ fn open_config(
         },
         Arc::new(rynas_scheduler::domain::system_uid),
     ));
+    // hardware modules (D-MODULE): registered only where their hardware or system layer is
+    let modules = rynasd::modules::detect(&args.hw_root, &root, args.dry_system);
+    for m in modules.iter() {
+        tracing::info!("module {}", m.summary());
+    }
     let mut domains: Vec<Arc<dyn rynas_config::Applier>> = vec![
         Arc::new(HostnameDomain),
         homes.clone(),
@@ -256,6 +259,7 @@ fn open_config(
             rynasctl: PathBuf::from(rynas_btrfs::domain::RYNASCTL),
             state_dir: args.state_dir.clone(),
             hw_root: args.hw_root.clone(),
+            alarm_reader: modules.wake_clock().map(|c| c.read_by_unit.to_string()),
         }),
         Arc::new(rynas_net::rescue::RescueDomain {
             web_port: args.web_port,
@@ -263,8 +267,6 @@ fn open_config(
         }),
         Arc::new(rynas_updates::AutoDomain),
     ];
-    // hardware modules (D-MODULE): registered only where their hardware or system layer is
-    let (modules, synology) = detect_modules(args, &root);
     domains.extend(modules.domains());
     // ups.safemode: a module layer's policy file, else the rynas policy file read by rynasd's
     // NUT watcher
@@ -295,29 +297,7 @@ fn open_config(
         modules,
         removable_settings,
         root,
-        synology,
     })
-}
-
-/// The hardware modules of this machine. The Synology module is the only one today.
-fn detect_modules(
-    args: &Args,
-    root: &Path,
-) -> (
-    rynas_module::Modules,
-    Option<Arc<rynas_hw_synology::Synology>>,
-) {
-    let mut list: Vec<Arc<dyn rynas_module::Module>> = Vec::new();
-    let mut synology = None;
-    if let Some(m) = rynas_hw_synology::module::SynologyModule::detect(&args.hw_root, root) {
-        match &m.hardware {
-            Some(s) => tracing::info!("module synology: {} (synohwd provider)", s.product()),
-            None => tracing::info!("module synology: synodeb without Synology hardware"),
-        }
-        synology = m.hardware.clone();
-        list.push(Arc::new(m));
-    }
-    (rynas_module::Modules::new(list), synology)
 }
 
 fn read_passphrase(path: &Option<PathBuf>) -> std::io::Result<Option<String>> {
@@ -681,15 +661,19 @@ fn main() -> std::io::Result<()> {
             notifier.clone(),
             args.state_dir.clone(),
         )
-        // root rollback: the machine, or (--dry-system) only logged, as synodeb when the
-        // hardware root has synodeb-dom
+        // root rollback: the machine, or (--dry-system) only logged; the boot half is a
+        // module's boot layer (none: refused, a console procedure)
         .with_root(if args.dry_system {
-            rynasd::protection::RootBackend::Custom(Arc::new(rynas_btrfs::rootfs::DryRoot::new(
-                rynas_hw::under(&args.hw_root, rynas_btrfs::rootfs::SYNODEB_DOM).is_file(),
-            )))
+            rynasd::protection::RootBackend::Custom(Arc::new(rynas_btrfs::rootfs::DryRoot::new()))
         } else {
             rynasd::protection::RootBackend::Host
-        });
+        })
+        .with_boot(
+            opened
+                .modules
+                .boot()
+                .map(|b| b as Arc<dyn rynas_btrfs::rootfs::BootSync>),
+        );
         let protection = Arc::new(protection);
         state.protection = Some(protection.clone());
         let ups = Arc::new(rynasd::ups::Ups {
@@ -722,10 +706,10 @@ fn main() -> std::io::Result<()> {
         state.ups = Some(ups);
         state.hardware = Some(Arc::new(rynasd::hardware::Hardware {
             ops: ops.clone(),
-            synology: opened.synology,
+            control: opened.modules.hardware_control(),
+            wake_rtc: opened.modules.wake_clock().map(|c| c.rtc_device_suffix),
             hw_root: args.hw_root.clone(),
             state_dir: args.state_dir.clone(),
-            notifications: Some(engine.clone()),
             notifier: notifier.clone(),
             protection: Some(protection),
             poweroff: if args.poweroff_command.is_empty() {
@@ -751,18 +735,26 @@ fn main() -> std::io::Result<()> {
             .with_web(rynas_net::txn::WebInfo {
                 port: args.web_port,
                 https: args.web_https,
-            }),
+            })
+            .with_feedback(opened.modules.rescue_feedback()),
         );
-        let network = Arc::new(rynasd::network::Network::new(
-            ops.clone(),
-            net_engine,
-            notifier.clone(),
-            args.dry_system,
-        ));
+        let network = Arc::new(
+            rynasd::network::Network::new(ops.clone(), net_engine, notifier.clone(), args.dry_system)
+                .with_modules(opened.modules.clone()),
+        );
         rynasd::network::spawn_event_flush(network.clone());
         state.network = Some(network);
-        // rescue paths on by default: the Avahi file and, on a Synology, network rescue on
-        // the reset button (synology.hw, the only writer of synohwd.toml); the modules' hooks
+        // the hardware modules' routes (/v1/modules/<id>/...)
+        state.modules = opened.modules.router(&rynas_module::http::Ctx {
+            config: ops.config.clone(),
+            hw_root: args.hw_root.clone(),
+            state_dir: args.state_dir.clone(),
+            ack_hardware: {
+                let engine = engine.clone();
+                Arc::new(move |who: &str| rynasd::hardware::ack_hardware_alerts(&engine, who))
+            },
+        });
+        // rescue paths on by default (the Avahi file); the modules' hooks and settings
         {
             let cfg = ops.config.clone();
             let modules = opened.modules.clone();
@@ -779,20 +771,18 @@ fn main() -> std::io::Result<()> {
                         tracing::warn!("rescue paths: {e}");
                     }
                 }
-                modules.start(&|l| tracing::info!("{l}"));
-                match rynasd::hardware::adopt_synohwd_conf(&cfg) {
-                    Ok(Some(rev)) => tracing::info!("synohwd settings adopted (revision {rev})"),
-                    Ok(None) => {}
-                    Err(e) => tracing::warn!("synohwd settings: {e}"),
-                }
+                modules.start(&cfg, &|l| tracing::info!("{l}"));
             });
         }
-        let updates = Arc::new(rynasd::updates::Updates::new(
-            ops.clone(),
-            notifier.clone(),
-            args.dry_system,
-            config_root(&args),
-        ));
+        let updates = Arc::new(
+            rynasd::updates::Updates::new(
+                ops.clone(),
+                notifier.clone(),
+                args.dry_system,
+                config_root(&args),
+            )
+            .with_boot(opened.modules.boot()),
+        );
         rynasd::updates::spawn_daily(updates.clone());
         state.updates = Some(updates);
         // the file manager: workers next to rynasd unless told otherwise

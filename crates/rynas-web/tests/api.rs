@@ -8,7 +8,6 @@ use axum::http::{StatusCode, header};
 use common::{Creds, app, fixture};
 use rynas_api_types::{HardwareStatus, MetricsSample};
 use rynas_web::hardware::NoProvider;
-use rynas_web::hardware::synohwd::Synohwd;
 
 #[tokio::test]
 async fn history_window_and_errors() {
@@ -90,7 +89,7 @@ async fn hardware_with_and_without_provider() {
     assert_eq!(r.status, StatusCode::OK);
     assert_eq!(r.json::<HardwareStatus>(), HardwareStatus::default());
 
-    let a = app(Arc::new(Synohwd::new(fixture("synohwd-status.json"))));
+    let a = app(Arc::new(rynas_hw_synology::Synology::status_reader(fixture("synohwd-status.json"))));
     let r = a.get("/api/v1/hardware", &a.login().await).await;
     assert_eq!(r.status, StatusCode::OK);
     let h: HardwareStatus = r.json();

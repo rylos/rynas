@@ -54,8 +54,12 @@ pub struct DaemonState {
     pub notifications: Option<rynas_notify::engine::Engine>,
     /// Task Scheduler and snapshots (needs `ops`); `None` answers 503 on their endpoints.
     pub protection: Option<Arc<crate::protection::Protection>>,
-    /// Synology hardware and the power schedule; `None` answers 503 on their endpoints.
+    /// Provider-neutral hardware actions and the power schedule; `None` answers 503 on their
+    /// endpoints.
     pub hardware: crate::hardware::HwState,
+    /// The routes of the detected hardware modules (`/v1/modules/<id>/…`,
+    /// `rynas_module::Modules::router`); empty without a module.
+    pub modules: Router,
     /// Networking (needs `ops`); `None` answers 503 on its endpoints.
     pub network: Option<Arc<crate::network::Network>>,
     /// UPS shutdown policy, battery test, setup wizard, a module layer's pre-shutdown hook
@@ -98,6 +102,7 @@ impl DaemonState {
             notifications: None,
             protection: None,
             hardware: None,
+            modules: Router::new(),
             network: None,
             ups: None,
             updates: None,
@@ -169,6 +174,7 @@ pub fn router(state: DaemonState) -> Router {
         .merge(crate::snapshots::router(state.protection))
         .merge(crate::hardware::router(state.hardware.clone()))
         .merge(crate::power::router(state.hardware))
+        .merge(state.modules)
         .merge(crate::network::router(state.network))
         .merge(crate::ups::router(state.ups))
         .merge(crate::updates::router(state.updates))

@@ -122,6 +122,32 @@ pub fn startup_value(
 }
 
 /// `command:` button actions in the current file that rynas does not manage.
+/// The configuration key that held the reset button before `synology.hw` owned it.
+const LEGACY_RESCUE_KEY: &str = "network.rescue";
+
+/// Start of rynasd on a Synology: makes `synology.hw` the owner of `/etc/synohwd.toml` —
+/// network rescue on the reset button the first time, the legacy `# BEGIN rynas network`
+/// block of `network.rescue` folded in (see [`startup_value`]). Returns the revision when
+/// something was applied. Blocking.
+pub fn adopt(cfg: &Config) -> Result<Option<u64>, String> {
+    if !cfg.keys().iter().any(|k| k == SYNOLOGY_KEY) {
+        return Ok(None);
+    }
+    // the old `network.rescue` value had the reset button (later values never do)
+    let legacy = cfg
+        .applied(LEGACY_RESCUE_KEY)
+        .map_err(|e| e.to_string())?
+        .and_then(|v| v.get("reset_button").and_then(Value::as_bool));
+    let Some((v, comment)) = startup_value(cfg, legacy)? else {
+        return Ok(None);
+    };
+    cfg.apply_value("rynas", SYNOLOGY_KEY, Some(v), comment, &|l| {
+        tracing::info!("synology.hw: {l}")
+    })
+    .map(Some)
+    .map_err(|e| e.to_string())
+}
+
 pub fn foreign_commands(root: &Path) -> Vec<String> {
     let text = std::fs::read_to_string(rynas_hw::under(root, CONF_PATH)).ok();
     conf::effective(text.as_deref()).1
