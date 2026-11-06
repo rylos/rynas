@@ -68,13 +68,15 @@ pub fn Users() -> impl IntoView {
     let tab = RwSignal::new(0usize);
     let users = Remote::<Vec<UserView>>::with_config("/api/v1/users");
     let groups = Remote::<Vec<GroupView>>::with_config("/api/v1/groups");
+    let homes = Remote::<rynas_api_types::HomesState>::with_config("/api/v1/services/homes");
     view! {
         <div class="page">
             <PageHeader icon=icons::USERS title="nav.users" subtitle="users.subtitle" />
             <section class="card widget w-12">
-                {tabs("ug", &["users.tab_users", "users.tab_groups"], tab, "nav.users")}
+                {tabs("ug", &["users.tab_users", "users.tab_groups", "users.tab_homes"], tab, "nav.users")}
                 <div role="tabpanel" id="ug-p0" aria-labelledby="ug-t0" hidden=move || tab.get() != 0>{users_panel(users, groups)}</div>
                 <div role="tabpanel" id="ug-p1" aria-labelledby="ug-t1" hidden=move || tab.get() != 1>{groups_panel(users, groups)}</div>
+                <div role="tabpanel" id="ug-p2" aria-labelledby="ug-t2" hidden=move || tab.get() != 2>{super::user_homes::homes_panel(homes)}</div>
             </section>
         </div>
     }
@@ -365,6 +367,10 @@ fn user_editor(e: UserEdit, all_groups: Vec<String>, close: Callback<()>) -> Any
             {text_field("users.email", email, set_email, email_err, In { kind: "email", help: Some("users.email_help"), autocomplete: "email", ..In::default() })}
             {text_field("users.description", descr, set_descr, none, In::default())}
             {group_list}
+            // where the home is (it changes only by moving it, in the User homes tab)
+            {(!is_new && !e.user.home.is_empty()).then(|| view! {
+                <dl class="kvs">{ui::kv_row("users.home", Signal::stored(e.user.home.clone()), "mono")}</dl>
+            })}
             <h3 class="form-section">{tr("users.sec_access")}</h3>
             {switch("users.admin", Some("users.admin_help"), admin, set_admin)}
             {switch("users.smb", Some("users.smb_help"), smb, set_smb)}
