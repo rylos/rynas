@@ -178,7 +178,7 @@ Sources: [DSM 7.4 spec](https://www.synology.com/en-us/dsm/7.4/software_spec/acc
    winbind enum users = no
    winbind enum groups = no          ; the UI searches via LDAP, it does not enumerate
    template shell = /usr/sbin/nologin
-   template homedir = /srv/<vol>/homes/%D/%U
+   template homedir = /srv/rynas/homes/%D/%U  ; the stable homes path (D-HOMES)
    vfs objects = acl_xattr btrfs shadow_copy2
    map acl inherit = yes
    store dos attributes = yes

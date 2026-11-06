@@ -68,7 +68,8 @@ ProtectSystem=yes
 ReadWritePaths=/boot
 # users and shares: useradd/userdel create and remove home directories, and shares (with
 # their ACLs) may live below /home. (ReadWritePaths=/home does not lift ProtectHome=read-only
-# on /home itself.)
+# on /home itself.) Homes on a volume (D-HOMES) live below /srv/rynas/homes and the volume
+# mount points, writable under ProtectSystem=yes.
 ProtectHome=no
 PrivateTmp=yes
 PrivateNetwork=no
