@@ -926,3 +926,119 @@ fn drift_codes_keep_their_english_text() {
     .unwrap();
     assert_eq!(back.detail_code, Some(StateDriftCode::Other));
 }
+
+#[test]
+fn homes_service_users_get_subvolume_homes_and_lose_them_with_remove_home() {
+    use crate::homes::{HomesDomain, MemoryHomes};
+    use crate::homes::HomesHost as _;
+    use rynas_api_types::{HOMES_KEY, HomesConfig};
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("root");
+    std::fs::create_dir_all(root.join("etc/samba")).unwrap();
+    let sys = Arc::new(MemorySystem::new("nas"));
+    let acc = Arc::new(MemoryAccounts::new());
+    let shares_host = Arc::new(MemoryShares::new());
+    let homes = Arc::new(MemoryHomes::new());
+    homes.add_volume("/volume1", "btrfs", 1 << 40);
+    let cfg = Config::open(
+        ConfigOptions::new(dir.path().join("state"), &root),
+        sys,
+        vec![
+            Arc::new(HomesDomain::new(homes.clone(), acc.clone())),
+            Arc::new(UsersDomain::new(acc.clone()).with_homes(homes.clone())),
+            Arc::new(SharesDomain::new(shares_host, acc.clone())),
+        ],
+    )
+    .unwrap();
+    let apply = |cfg: &Config| {
+        let lines = Mutex::new(Vec::<String>::new());
+        let r = cfg.apply("admin", "admin", "t", &|l| lines.lock().unwrap().push(l.into()), &|| false);
+        if r.is_err() {
+            eprintln!("{}", lines.lock().unwrap().join("\n"));
+        }
+        r
+    };
+    // service on, a new user in the homes folder, an old-style user, the [homes] share
+    let mut doc = UsersConfig {
+        users: vec![
+            LocalUser {
+                home: crate::homes::home_of("alice"),
+                shell: ShellAccess::Shell,
+                ..user("alice", &[])
+            },
+            user("bob", &[]),
+        ],
+        ..Default::default()
+    };
+    cfg.stage(
+        "admin",
+        HOMES_KEY,
+        Some(serde_json::to_value(HomesConfig { enabled: true, volume: "/volume1".into() }).unwrap()),
+    )
+    .unwrap();
+    cfg.stage("admin", USERS_KEY, Some(serde_json::to_value(&doc).unwrap())).unwrap();
+    let mut shares = SharesConfig::default();
+    shares.smb.homes.enabled = true;
+    cfg.stage("admin", SHARES_KEY, Some(serde_json::to_value(&shares).unwrap())).unwrap();
+    apply(&cfg).unwrap();
+
+    let log = homes.state().log.clone();
+    assert_eq!(
+        log,
+        [
+            "subvolume /volume1/homes 0:0 711",
+            "mkdir /srv/rynas 0:0 755",
+            "link /srv/rynas/homes -> /volume1/homes",
+            "subvolume /volume1/homes/alice 1000:100 700",
+            "skel /volume1/homes/alice 1000:100",
+        ],
+        "the homes folder first (order 5), then alice's home before useradd -M"
+    );
+    let users = acc.state().users.clone();
+    let home = |n: &str| users.iter().find(|u| u.name == n).unwrap().home.clone();
+    assert_eq!(home("alice"), "/srv/rynas/homes/alice");
+    assert_eq!(home("bob"), "/home/bob");
+    let conf = std::fs::read_to_string(root.join("etc/samba/smb.conf")).unwrap();
+    assert!(conf.contains("[homes]") && conf.contains("path = %H"), "{conf}");
+
+    // a share named "homes" would hide the home folders
+    let mut clash = shares.clone();
+    clash.shares.push(Share {
+        name: "Homes".into(),
+        path: "/srv/vol1/docs".into(),
+        ..Default::default()
+    });
+    assert!(cfg.stage("admin", SHARES_KEY, Some(serde_json::to_value(&clash).unwrap())).is_err());
+
+    // bob's home moved (copied by the move task): the document's home changes, usermod -d
+    homes.add_dir("/volume1/homes/bob", 1001, 0);
+    doc.users[1].home = crate::homes::home_of("bob");
+    let v = serde_json::to_value(&doc).unwrap();
+    acc.state().log.clear();
+    cfg.apply_value("admin", USERS_KEY, Some(v), "home of bob moved", &|_| {}).unwrap();
+    assert_eq!(acc.state().log, ["usermod bob: home /srv/rynas/homes/bob"]);
+    // a home that does not exist is refused (and nothing changes)
+    let mut bad = doc.clone();
+    bad.users[0].home = "/srv/nowhere/alice".into();
+    assert!(
+        cfg.apply_value("admin", USERS_KEY, Some(serde_json::to_value(&bad).unwrap()), "x", &|_| {})
+            .is_err()
+    );
+    assert_eq!(
+        acc.state().users.iter().find(|u| u.name == "alice").unwrap().home,
+        "/srv/rynas/homes/alice"
+    );
+
+    // alice deleted with her home: userdel without -r, then her subvolume
+    let mut del = doc.clone();
+    del.users.retain(|u| u.name != "alice");
+    del.remove_homes = vec!["alice".into()];
+    acc.state().log.clear();
+    homes.state().log.clear();
+    cfg.stage("admin", USERS_KEY, Some(serde_json::to_value(&del).unwrap())).unwrap();
+    apply(&cfg).unwrap();
+    assert!(acc.state().log.iter().any(|l| l == "userdel alice"), "{:?}", acc.state().log);
+    assert_eq!(homes.state().log, ["subvolume-delete /volume1/homes/alice"]);
+    assert!(!homes.probe("/volume1/homes/alice").exists);
+}

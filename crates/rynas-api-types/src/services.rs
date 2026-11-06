@@ -66,7 +66,10 @@ pub struct LocalUser {
     /// Has a Samba account (the password is synchronised by rynas).
     #[serde(default = "default_true")]
     pub smb: bool,
-    /// Home directory; empty in a creation request: `/home/<name>`, created at creation.
+    /// Home directory (the passwd home). Empty in a creation request: `/srv/rynas/homes/<name>`
+    /// ([`HOMES_LINK`]) when the user homes service is on, else `/home/<name>`; created at
+    /// creation. It cannot change through `PUT`: the home move
+    /// (`POST /api/v1/services/homes/move`) copies the files and then changes it.
     #[serde(default)]
     pub home: String,
 }
@@ -497,6 +500,24 @@ pub struct SmbSettings {
     /// Extra `key = value` lines appended to `[global]`, validated by `testparm`.
     #[serde(default)]
     pub extra: String,
+    /// The `[homes]` share: every user sees their own home folder as a share named after
+    /// them. Staged together with the user homes setting (`PUT /api/v1/services/homes`).
+    #[serde(default, skip_serializing_if = "SmbHomes::is_off")]
+    pub homes: SmbHomes,
+}
+
+/// The SMB `[homes]` share ([`SmbSettings::homes`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SmbHomes {
+    pub enabled: bool,
+    #[serde(default)]
+    pub recycle: RecycleSettings,
+}
+
+impl SmbHomes {
+    fn is_off(&self) -> bool {
+        *self == SmbHomes::default()
+    }
 }
 
 impl Default for SmbSettings {
@@ -512,6 +533,7 @@ impl Default for SmbSettings {
             wsdd: true,
             mdns: true,
             extra: String::new(),
+            homes: SmbHomes::default(),
         }
     }
 }
@@ -841,6 +863,201 @@ pub struct EffectivePermission {
     pub sources: Vec<PermissionSource>,
     /// E.g. "RW from group staff (also RO from user alice)".
     pub explanation: String,
+}
+
+// ---------------------------------------------------------------------------------------------
+// User homes (`/api/v1/services/homes`)
+// ---------------------------------------------------------------------------------------------
+
+/// Configuration key of the user homes service ([`HomesConfig`]).
+pub const HOMES_KEY: &str = "homes";
+/// Stable path of the homes folder: a symbolic link to `<volume>/homes`, so that the passwd
+/// entries (`/srv/rynas/homes/<user>`) stay the same when the folder goes to another volume.
+pub const HOMES_LINK: &str = "/srv/rynas/homes";
+/// Name of the homes folder on its volume.
+pub const HOMES_FOLDER: &str = "homes";
+
+/// Document of the `homes` configuration key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct HomesConfig {
+    /// New users get their home in `<volume>/homes/<user>` (a btrfs subvolume when the volume
+    /// is btrfs), reached through [`HOMES_LINK`]. Off: new users get `/home/<user>`; homes
+    /// already on the volume stay where they are and keep working.
+    pub enabled: bool,
+    /// Mount point of the volume that holds the `homes` folder (`/volume1`, `/vol1`...).
+    #[serde(default)]
+    pub volume: String,
+}
+
+/// Body of `PUT /api/v1/services/homes`: the `homes` key plus the `[homes]` SMB share of the
+/// `shares` key, staged together.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct HomesSettings {
+    pub enabled: bool,
+    #[serde(default)]
+    pub volume: String,
+    /// The SMB `[homes]` share (only while the service is on).
+    #[serde(default)]
+    pub smb: SmbHomes,
+}
+
+/// A filesystem that can hold the homes folder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct HomesVolume {
+    /// Mount point.
+    pub path: String,
+    /// Label of a rynas volume, when it is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub fs_type: String,
+    #[serde(default)]
+    pub size_bytes: u64,
+    #[serde(default)]
+    pub avail_bytes: u64,
+}
+
+/// Where a user's home is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HomeLocation {
+    /// In the homes folder, through [`HOMES_LINK`].
+    Volume,
+    /// Below `/home` (the system disk, usually).
+    #[default]
+    System,
+    /// Somewhere else.
+    Other,
+    /// The folder does not exist.
+    Missing,
+}
+
+/// The home of one local user (`HomesState::homes`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct UserHome {
+    pub user: String,
+    pub uid: u32,
+    /// The passwd home.
+    pub home: String,
+    pub location: HomeLocation,
+    /// The home is the root of a btrfs subvolume.
+    #[serde(default)]
+    pub subvolume: bool,
+    /// A finished move whose old folder is kept until it is confirmed or undone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moved: Option<HomeMoveRecord>,
+}
+
+/// `GET/PUT /api/v1/services/homes`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct HomesState {
+    /// Staged value if the current user has one, else the applied one.
+    pub settings: HomesSettings,
+    pub pending: bool,
+    /// [`HOMES_LINK`].
+    pub link: String,
+    /// Where the link points now (`None`: no link yet).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// `<volume>/homes` of the settings (empty without a volume).
+    #[serde(default)]
+    pub folder: String,
+    /// That folder is a btrfs subvolume (homes are created as subvolumes too).
+    #[serde(default)]
+    pub subvolume: bool,
+    /// Filesystems that can hold the homes folder.
+    #[serde(default)]
+    pub volumes: Vec<HomesVolume>,
+    /// Local users (uid 1000–59999) and where their home is.
+    #[serde(default)]
+    pub homes: Vec<UserHome>,
+}
+
+/// A home moved to the homes folder whose old folder is kept (renamed) until the move is
+/// confirmed (`.../finish`: the old folder is deleted) or undone (`.../undo`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct HomeMoveRecord {
+    pub user: String,
+    /// The previous passwd home.
+    pub from: String,
+    /// The new passwd home.
+    pub to: String,
+    /// The old folder, renamed (`<from>.rynas-old`).
+    pub kept: String,
+    pub moved_ms: u64,
+}
+
+/// Body of `POST /api/v1/services/homes/move` and `.../move/plan`; `users` empty: every
+/// local user whose home is not in the homes folder yet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct HomeMoveRequest {
+    #[serde(default)]
+    pub users: Vec<String>,
+}
+
+/// What moving one home does, and what prevents it now (no side effect).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct HomeMovePlan {
+    pub user: String,
+    /// The current passwd home.
+    pub from: String,
+    /// The new passwd home (`/srv/rynas/homes/<user>`).
+    pub to: String,
+    /// Where the files go (`<volume>/homes/<user>`).
+    pub target: String,
+    /// The new home is created as a btrfs subvolume.
+    pub subvolume: bool,
+    /// Space used by the home (bounded in time: `size_partial` means at least this much).
+    pub size_bytes: u64,
+    #[serde(default)]
+    pub size_partial: bool,
+    /// Free space on the volume of the homes folder.
+    pub avail_bytes: u64,
+    /// The home has SSH keys (`.ssh/authorized_keys`): they move with it.
+    #[serde(default)]
+    pub ssh_keys: bool,
+    pub allowed: bool,
+    #[serde(default)]
+    pub blockers: Vec<HomeMoveBlocker>,
+}
+
+/// Why a home cannot move now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HomeMoveBlocker {
+    pub code: HomeMoveBlockerCode,
+    /// Process ids, share name, path... (shown as is).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HomeMoveBlockerCode {
+    /// The user homes service is off (or not applied yet).
+    ServiceOff,
+    /// Not a local user in 1000–59999.
+    NotLocal,
+    /// The home is already in the homes folder.
+    AlreadyMoved,
+    /// The home folder does not exist.
+    SourceMissing,
+    /// The home is a symbolic link or a mount point, or has mounts inside.
+    SourceNotPlain,
+    /// `<volume>/homes/<user>` exists already.
+    TargetExists,
+    /// The user has running processes (`detail`: pids).
+    Processes,
+    /// The user is connected over SMB (`detail`: number of sessions).
+    SmbSessions,
+    /// A share uses the home or a folder inside it (`detail`: share name).
+    ShareInside,
+    /// Not enough free space on the volume.
+    NoSpace,
+    /// rsync is not installed.
+    NoRsync,
+    /// A previous move of this user waits for confirmation.
+    MoveWaiting,
+    #[serde(other)]
+    Other,
 }
 
 #[cfg(test)]

@@ -9,7 +9,7 @@
 
 use std::collections::BTreeSet;
 
-use rynas_api_types::{Share, SmbPreset, SmbSettings};
+use rynas_api_types::{Share, SmbHomes, SmbPreset, SmbSettings};
 use serde::Serialize;
 
 use crate::perm::smb_lists;
@@ -307,6 +307,41 @@ pub fn share_lines(s: &Share, btrfs: bool) -> Vec<Line> {
     v
 }
 
+/// Lines of the `[homes]` section: each user connects to a share named after them that is
+/// their passwd home (`%H`, wherever it is: the homes folder or `/home`), and only they may
+/// (`valid users = %S`); the `homes` entry itself is not listed. Owner-only modes as the home.
+pub fn homes_lines(h: &SmbHomes) -> Vec<Line> {
+    let mut vfs: Vec<&str> = BASE_VFS.to_vec();
+    if h.recycle.enabled {
+        vfs.push("recycle");
+    }
+    let mut v = vec![
+        l("comment", "Home folder"),
+        l("path", "%H"),
+        l("browseable", "no"),
+        l("read only", "no"),
+        l("valid users", "%S"),
+        l("create mask", "0600"),
+        l("directory mask", "0700"),
+        l("vfs objects", vfs.join(" ")),
+    ];
+    if h.recycle.enabled {
+        v.extend([
+            l("recycle:repository", "#recycle"),
+            l("recycle:keeptree", "yes"),
+            l("recycle:versions", "yes"),
+            l("recycle:touch", "yes"),
+            l("recycle:directory_mode", "0700"),
+            l("recycle:exclude", "*.tmp,~$*,.~lock*"),
+        ]);
+    }
+    v.extend([
+        l("veto files", "/@eaDir/#snapshot/.snapshots/lost+found/"),
+        l("hide dot files", "yes"),
+    ]);
+    v
+}
+
 /// Extra options that override a key rynas sets.
 pub fn overridden_keys(managed: &[Line], extra: &str) -> Vec<String> {
     let keys: BTreeSet<&str> = managed.iter().map(|(k, _)| k.as_str()).collect();
@@ -380,6 +415,30 @@ mod tests {
                 .iter()
                 .any(|(k, v)| k == "recycle:exclude_dir" && v == "#snapshot")
         );
+    }
+
+    #[test]
+    fn the_homes_section_is_private_and_follows_the_passwd_home() {
+        let mut h = SmbHomes {
+            enabled: true,
+            ..Default::default()
+        };
+        let lines = homes_lines(&h);
+        let get = |lines: &[Line], k: &str| {
+            lines
+                .iter()
+                .find(|(x, _)| x == k)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(get(&lines, "path"), "%H");
+        assert_eq!(get(&lines, "valid users"), "%S");
+        assert_eq!(get(&lines, "browseable"), "no");
+        assert!(get(&lines, "vfs objects").ends_with("recycle"));
+        h.recycle.enabled = false;
+        let lines = homes_lines(&h);
+        assert!(!get(&lines, "vfs objects").contains("recycle"));
+        assert!(get(&lines, "recycle:repository").is_empty());
     }
 
     #[test]
