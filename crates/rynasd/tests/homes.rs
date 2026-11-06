@@ -514,3 +514,92 @@ async fn homes_setting_new_users_and_moving_an_existing_home() {
     let v: UserView = serde_json::from_slice(&b).unwrap();
     assert_eq!(v.user.home, "/home/bob");
 }
+
+#[tokio::test]
+async fn moving_all_homes_checks_the_space_for_all_of_them() {
+    let e = env();
+    let (s, b) = call(
+        &e,
+        "PUT",
+        "/v1/services/homes",
+        Some(json!({"enabled": true, "volume": "/volume1"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    for n in ["alice", "bob"] {
+        let (s, b) = call(&e, "POST", "/v1/users", Some(json!({"name": n}))).await;
+        assert_eq!(s, StatusCode::CREATED, "{}", String::from_utf8_lossy(&b));
+    }
+    apply(&e);
+    {
+        let mut h = e.homes.state();
+        for n in ["alice", "bob"] {
+            h.entries
+                .get_mut(&format!("/volume1/homes/{n}"))
+                .unwrap()
+                .bytes = 2 << 30;
+        }
+        // 5 GiB free on volume2: each 2 GiB home fits, the three together do not
+        h.mounts
+            .iter_mut()
+            .find(|m| m.path == "/volume2")
+            .unwrap()
+            .avail_bytes = 5 << 30;
+    }
+    let (_, b) = call(
+        &e,
+        "POST",
+        "/v1/services/homes/move/plan",
+        Some(json!({"to": "/volume2"})),
+    )
+    .await;
+    let p: Vec<HomeMovePlan> = serde_json::from_slice(&b).unwrap();
+    assert_eq!(p.len(), 3);
+    assert!(p.iter().all(|p| p.allowed), "{p:?}");
+    let (s, b) = call(
+        &e,
+        "POST",
+        "/v1/services/homes/move",
+        Some(json!({"to": "/volume2"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{}", String::from_utf8_lossy(&b));
+    assert!(String::from_utf8_lossy(&b).contains("together"));
+    assert!(!e.homes.probe("/volume2/homes/alice").exists);
+
+    // a home whose size is still partial after the task's measurement does not move
+    e.homes
+        .state()
+        .partial_sizes
+        .push("/volume1/homes/alice".into());
+    let (s, b) = call(
+        &e,
+        "POST",
+        "/v1/services/homes/move",
+        Some(json!({"users": ["alice"], "to": "/volume2"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{}", String::from_utf8_lossy(&b));
+    let t = task(&e, &b).await;
+    assert_eq!(t.status, TaskStatus::Error, "{t:?}");
+    assert!(!e.homes.probe("/volume2/homes/alice").exists);
+    e.homes.state().partial_sizes.clear();
+
+    // one at a time they fit; the users document keeps the other users
+    let (_, b) = call(
+        &e,
+        "POST",
+        "/v1/services/homes/move",
+        Some(json!({"users": ["alice"], "to": "/volume2"})),
+    )
+    .await;
+    assert_eq!(task(&e, &b).await.status, TaskStatus::Ok);
+    let applied: rynas_api_types::UsersConfig =
+        serde_json::from_value(e.config.applied("users").unwrap().unwrap()).unwrap();
+    let names: Vec<(&str, &str)> = applied
+        .users
+        .iter()
+        .map(|u| (u.name.as_str(), u.home_volume.as_str()))
+        .collect();
+    assert!(names.contains(&("alice", "/volume2")) && names.contains(&("bob", "/volume1")));
+}

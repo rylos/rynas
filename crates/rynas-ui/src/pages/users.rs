@@ -306,15 +306,24 @@ fn user_editor(e: UserEdit, all_groups: Vec<String>, homes: Option<HomesState>, 
             Vec::new()
         };
         o.push((HOME_SYSTEM.to_string(), t("homes.dest_system").to_string()));
-        let here = if hs.settings.enabled && !hs.settings.volume.is_empty() { hs.settings.volume.clone() } else { HOME_SYSTEM.to_string() };
+        let want = if hs.settings.enabled && !hs.settings.volume.is_empty() { hs.settings.volume.clone() } else { HOME_SYSTEM.to_string() };
+        // the default volume not offered (not mounted): the first place, sent as chosen
+        let here = if o.iter().any(|(v, _)| *v == want) {
+            want
+        } else {
+            let first = o[0].0.clone();
+            d.update_untracked(|u| u.home_volume = first.clone());
+            first
+        };
         (here, o)
     } else {
         match mine.as_ref().filter(|m| m.moved.is_none() && on_system) {
             Some(m) => {
                 let here = place_of(m);
                 let mut o = places(&hs);
-                if here.is_empty() {
-                    o.insert(0, (String::new(), tf("homes.dest_here", &[("path", &m.home)])));
+                // where it is now, also when that place is not offered as a destination
+                if !o.iter().any(|(v, _)| *v == here) {
+                    o.insert(0, (here.clone(), tf("homes.dest_here", &[("path", &m.home)])));
                 }
                 (here, o)
             }

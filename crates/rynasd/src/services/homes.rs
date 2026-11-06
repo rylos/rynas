@@ -49,6 +49,8 @@ fn applied(s: &Services) -> HomesConfig {
 /// one): never "unshared", never deleted from there.
 pub(super) fn homes_folders(s: &Services) -> Vec<String> {
     let mut v = homes::used_folders(s.homes.host().as_ref());
+    // the folders holding old homes kept until their move is confirmed (the undo needs them)
+    v.extend(homes::waiting_folders(&s.moves.list()));
     let c = applied(s);
     if !c.volume.is_empty() {
         v.push(homes::folder_of(&c.volume));
@@ -157,12 +159,14 @@ pub(super) async fn homes_put(
 }
 
 /// Plans for `users` (empty: every local user whose home exists, is not at the destination
-/// and waits for no confirmation) to `to`.
+/// and waits for no confirmation) to `to`. The sizes are measured in parallel within `budget`
+/// for all of them ([`homes::PLAN_TOTAL_BUDGET`] for the dialog; a long one in the task).
 fn plans(
     s: &Services,
     owner: &str,
     users: &[String],
     to: &str,
+    budget: std::time::Duration,
 ) -> Res<Vec<(SysUser, HomeMovePlan)>> {
     let applied = applied(s);
     let dest = Dest::parse(to, &applied.volume);
@@ -194,20 +198,46 @@ fn plans(
         .map(|x| (x.name, x.path))
         .collect();
     let volumes = volume_paths(s);
+    let waiting: Vec<bool> = targets
+        .iter()
+        .map(|u| s.moves.get(&u.name).is_some())
+        .collect();
+    // a few homes at a time, one deadline for all: the request stays short with many users
+    // (a home not measured by then shows "at least")
+    let deadline = std::time::Instant::now() + budget;
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let out: Vec<std::sync::Mutex<Option<HomeMovePlan>>> =
+        targets.iter().map(|_| std::sync::Mutex::new(None)).collect();
+    let workers = targets.len().clamp(1, PLAN_WORKERS);
+    std::thread::scope(|sc| {
+        for _ in 0..workers {
+            sc.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(u) = targets.get(i) else { break };
+                    let left = deadline.saturating_duration_since(std::time::Instant::now());
+                    let cx = MoveContext {
+                        service_on: applied.enabled,
+                        volumes: &volumes,
+                        shares: &shares,
+                        waiting: waiting[i],
+                        size_budget: left.max(std::time::Duration::from_millis(50)),
+                    };
+                    let p = homes::plan_move(host.as_ref(), u, &dest, &cx);
+                    *out[i].lock().unwrap() = Some(p);
+                }
+            });
+        }
+    });
     Ok(targets
         .into_iter()
-        .map(|u| {
-            let cx = MoveContext {
-                service_on: applied.enabled,
-                volumes: &volumes,
-                shares: &shares,
-                waiting: s.moves.get(&u.name).is_some(),
-            };
-            let p = homes::plan_move(host.as_ref(), &u, &dest, &cx);
-            (u, p)
-        })
+        .zip(out)
+        .filter_map(|(u, p)| p.into_inner().ok().flatten().map(|p| (u, p)))
         .collect())
 }
+
+/// Homes planned at the same time.
+const PLAN_WORKERS: usize = 4;
 
 pub(super) async fn move_plan(
     State(st): State<SvcState>,
@@ -218,7 +248,7 @@ pub(super) async fn move_plan(
     let req = json_body(body)?;
     Ok(Json(
         blocking(&s, move |s| {
-            Ok(plans(s, &owner, &req.users, &req.to)?
+            Ok(plans(s, &owner, &req.users, &req.to, homes::PLAN_TOTAL_BUDGET)?
                 .into_iter()
                 .map(|(_, p)| p)
                 .collect())
@@ -239,26 +269,32 @@ fn switch_home(
     log: &dyn Fn(&str),
 ) -> Result<(), String> {
     let c = &s.ops.config;
-    let applied: Option<UsersConfig> = c
-        .applied(USERS_KEY)
-        .map_err(|e| e.to_string())?
-        .and_then(|v| serde_json::from_value(v).ok());
-    if let Some(mut doc) = applied
-        && let Some(u) = doc.users.iter_mut().find(|u| u.name == name)
-    {
+    let what = if volume.is_empty() {
+        format!("home of {name}: {home}")
+    } else {
+        format!("home of {name}: {home} on {volume}")
+    };
+    // read, edit and apply the users document inside the apply lock: an apply of others
+    // running meanwhile is neither reverted nor undone by a stale copy
+    let mut managed = false;
+    c.apply_update(author, USERS_KEY, &what, log, |cur| {
+        let Some(mut doc) = cur.and_then(|v| serde_json::from_value::<UsersConfig>(v).ok())
+        else {
+            return Ok(None);
+        };
+        let Some(u) = doc.users.iter_mut().find(|u| u.name == name) else {
+            return Ok(None);
+        };
+        managed = true;
         if u.home == home && u.home_volume == volume {
-            return Ok(());
+            return Ok(None);
         }
         u.home = home.to_string();
         u.home_volume = volume.to_string();
-        let v = serde_json::to_value(&doc).map_err(|e| e.to_string())?;
-        let what = if volume.is_empty() {
-            format!("home of {name}: {home}")
-        } else {
-            format!("home of {name}: {home} on {volume}")
-        };
-        c.apply_value(author, USERS_KEY, Some(v), &what, log)
-            .map_err(|e| e.to_string())?;
+        serde_json::to_value(&doc).map(Some).map_err(|e| e.to_string())
+    })
+    .map_err(|e| e.to_string())?;
+    if managed {
         return Ok(());
     }
     let sys = s.users.accounts().users()?;
@@ -318,10 +354,18 @@ fn move_one(
     progress: &dyn Fn(u8),
     cancelled: &dyn Fn() -> bool,
 ) -> Result<(), String> {
-    let mut found = plans(s, author, &[name.to_string()], to).map_err(|e| e.2.clone())?;
+    // measured again, without the dialog's time limit, against the free space of now
+    let mut found = plans(s, author, &[name.to_string()], to, homes::MOVE_SIZE_BUDGET)
+        .map_err(|e| e.2.clone())?;
     let (u, plan) = found
         .pop()
         .ok_or_else(|| format!("user {name} not found"))?;
+    if plan.allowed && plan.size_partial {
+        return Err(format!(
+            "{name}: the size of the home could not be measured (at least {} bytes): not moved",
+            plan.size_bytes
+        ));
+    }
     let host = s.homes.host();
     homes::copy_home(host.as_ref(), &plan, &u, log, progress, cancelled)?;
     let live = homes::live_blockers(host.as_ref(), &u);
@@ -384,7 +428,7 @@ pub(super) async fn move_start(
     let req = json_body(body)?;
     let o = owner.clone();
     let (users, to) = (req.users.clone(), req.to.clone());
-    let list = blocking(&s, move |s| plans(s, &o, &users, &to)).await?;
+    let list = blocking(&s, move |s| plans(s, &o, &users, &to, homes::PLAN_TOTAL_BUDGET)).await?;
     let allowed: Vec<String> = list
         .iter()
         .filter(|(_, p)| p.allowed)
@@ -405,6 +449,17 @@ pub(super) async fn move_start(
             },
         ));
     }
+    // all of them must fit at the destination together (sizes that are lower bounds and do
+    // not fit already are refused here; the task measures them fully before copying)
+    if let Err((need, avail)) = homes::batch_fits(list.iter().map(|(_, p)| p).filter(|p| p.allowed))
+    {
+        return Err(conflict(
+            error_codes::CONFLICT,
+            format!(
+                "not enough free space for these homes together: {need} bytes needed, {avail} free"
+            ),
+        ));
+    }
     // the destination as planned (an empty `to` is the default volume of now)
     let to = list
         .first()
@@ -420,6 +475,24 @@ pub(super) async fn move_start(
             tokio::task::spawn_blocking(move || -> Result<(), String> {
                 for b in &blocked {
                     c.log(&format!("skipped {b}"));
+                }
+                if allowed.len() > 1 {
+                    c.log("measuring the homes");
+                    let full = plans(&svc, &author, &allowed, &to, homes::MOVE_SIZE_BUDGET)
+                        .map_err(|e| e.2.clone())?;
+                    let ps: Vec<&HomeMovePlan> =
+                        full.iter().map(|(_, p)| p).filter(|p| p.allowed).collect();
+                    if let Some(p) = ps.iter().find(|p| p.size_partial) {
+                        return Err(format!(
+                            "the size of the home of {} could not be measured: nothing moved",
+                            p.user
+                        ));
+                    }
+                    if let Err((need, avail)) = homes::batch_fits(ps) {
+                        return Err(format!(
+                            "not enough free space for these homes together: {need} bytes needed, {avail} free: nothing moved"
+                        ));
+                    }
                 }
                 let n = allowed.len();
                 let mut failed = Vec::new();

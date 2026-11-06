@@ -12,9 +12,11 @@
 # the system disk), opens an SMB home, checks the move plan and its blockers (a running
 # process), moves admin1's home system disk -> volume1 (contents, ACL, xattr, hard link and
 # login checked), undoes it, moves it again and confirms, then volume1 -> volume2 (undo, again),
-# volume2 -> system disk and back to volume1; changes the default volume with homes on the old
-# one, deletes users with their homes, turns the service off (homes keep working), and turns
-# the first layout (/srv/rynas/homes one link to /volume1/homes) into per-user links at start.
+# volume2 -> system disk and back to volume1 (an existing homes folder others can write into is
+# refused; the copy is root's until verified); refuses two homes that each fit but not together;
+# changes the default volume with homes on the old one, deletes users with their homes, turns the
+# service off (homes keep working), and turns the first layout (/srv/rynas/homes one link to
+# /volume1/homes) into per-user links at start.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 IMAGE=rynas-test-systemd:trixie-2
@@ -131,7 +133,7 @@ wait_task() {
         sleep 0.2
     done
     TASK_STATUS=$st
-    curl -s -b /tmp/jar "$B/tasks/$id/log" | sed 's/^/    | /'
+    curl -s -b /tmp/jar "$B/tasks/$id/log" | tee /tmp/task.log | sed 's/^/    | /'
 }
 task() { expect 202 "$1"; wait_task "$(echo "$BODY" | jq -r .task_id)"; }
 apply() { api POST /config/apply '{"comment":"test-homes"}'; task apply; [ "$TASK_STATUS" = ok ] || fail "apply: $TASK_STATUS"; }
@@ -220,6 +222,8 @@ api POST /services/homes/move '{"users":["admin1"]}'; task "move"
 btrfs subvolume show /volume1/homes/admin1 >/dev/null || fail "admin1's new home is not a subvolume"
 [ "$(stat -c '%a %U' /volume1/homes/admin1)" = "700 admin1" ] || fail "new home mode"
 [ -d /home/admin1.rynas-old ] && [ ! -e /home/admin1 ] || fail "old home not kept aside"
+[ ! -e /volume1/homes/.admin1.rynas-copy ] || fail "staging folder of the copy left"
+grep -q "/volume1/homes/.admin1.rynas-copy/admin1 0:0 700\|rsync .* /volume1/homes/.admin1.rynas-copy/admin1/" /tmp/task.log || fail "copy not made in the root-only staging folder"
 compare_home /srv/rynas/homes/admin1
 su -s /bin/sh admin1 -c 'cd && pwd && cat .ssh/authorized_keys >/dev/null' || fail "admin1 cannot use the new home"
 login
@@ -248,6 +252,15 @@ finish() {
     api POST "/services/homes/move/admin1/finish"; task "finish"
     [ "$TASK_STATUS" = ok ] || fail "finish: $TASK_STATUS"
 }
+
+step "an existing homes folder others can write into is not used"
+chmod 777 /volume2/homes
+api POST /services/homes/move '{"users":["admin1"],"to":"/volume2"}'; task "move into a 0777 homes folder"
+[ "$TASK_STATUS" = error ] || fail "a 0777 homes folder was used: $TASK_STATUS"
+[ "$(readlink /srv/rynas/homes/admin1)" = /volume1/homes/admin1 ] || fail "admin1 moved anyway"
+[ ! -e /volume2/homes/admin1 ] && [ ! -e /volume2/homes/.admin1.rynas-copy ] || fail "copy left in the 0777 folder"
+chmod 711 /volume2/homes
+login
 
 step "volume1 -> volume2: the link moves, passwd stays; undo; again"
 api POST /services/homes/move/plan '{"users":["admin1"],"to":"/volume2"}'
@@ -288,6 +301,35 @@ api POST /services/homes/move '{"users":["admin1"]}'; task "back to the default 
 [ "$(readlink /srv/rynas/homes/admin1)" = /volume1/homes/admin1 ] || fail "link not on volume1"
 finish
 compare_home /srv/rynas/homes/admin1
+
+step "two homes that each fit but not together are refused; one at a time they move"
+api POST /users '{"name":"gina"}'; expect 201 "user gina"
+api POST /users '{"name":"hank"}'; expect 201 "user hank"
+apply
+sync
+F0=$(( $(stat -f -c '%a*%S' /volume1) ))
+# h with 1.1 h + 64 MiB < F0 - 2h (alone) and 2.2 h + 64 MiB > F0 - 2h (together)
+MB=$(( (F0 - (64 << 20)) * 10 / 36 / 1048576 ))
+echo "free ${F0} bytes: ${MB} MiB per home"
+for u in gina hank; do
+    head -c "${MB}M" /dev/urandom > "/volume1/homes/$u/data.bin"
+    chown "$u:" "/volume1/homes/$u/data.bin"
+done
+sync; btrfs filesystem sync /volume1
+api POST /services/homes/move/plan '{"users":["gina","hank"],"to":"/volume2"}'; expect 200 "plan gina hank"
+echo "$BODY" | jq -c '.[] | {user, size_bytes, size_partial, avail_bytes, allowed}'
+echo "$BODY" | jq -e 'all(.allowed)' >/dev/null || fail "each home should fit alone: $BODY"
+api POST /services/homes/move '{"users":["gina","hank"],"to":"/volume2"}'; expect 409 "two homes that do not fit together"
+echo "$BODY" | grep -q together || fail "reason: $BODY"
+[ ! -e /volume2/homes/gina ] && [ ! -e /volume2/homes/.gina.rynas-copy ] || fail "something copied"
+api POST /services/homes/move '{"users":["gina"],"to":"/volume2"}'; task "gina alone"
+[ "$TASK_STATUS" = ok ] || fail "gina alone: $TASK_STATUS"
+[ "$(stat -c '%a %U' /volume2/homes/gina)" = "700 gina" ] || fail "gina's new home mode"
+api POST /services/homes/move/gina/finish; task "finish gina"
+api DELETE "/users/gina?remove_home=true&confirm=gina"; expect 200 "delete gina"
+api DELETE "/users/hank?remove_home=true&confirm=hank"; expect 200 "delete hank"
+apply
+[ ! -e /volume2/homes/gina ] && [ ! -e /volume1/homes/hank ] || fail "gina's or hank's home left"
 
 step "the default volume changes with homes on the old one; users deleted with their homes"
 api PUT /services/homes '{"enabled":true,"volume":"/volume2","smb":{"enabled":true}}'; expect 200 "default volume change"

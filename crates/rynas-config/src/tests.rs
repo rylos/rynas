@@ -167,6 +167,54 @@ fn apply_value_without_changeset_makes_staged_changes_conflict() {
 }
 
 #[test]
+fn apply_update_reads_and_applies_inside_the_apply_lock() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let e = env();
+    e.cfg
+        .apply_value("a", HOSTNAME_KEY, Some(hostname("one")), "", &|_| {})
+        .unwrap();
+    let other_done = AtomicBool::new(false);
+    std::thread::scope(|sc| {
+        let rev = e
+            .cfg
+            .apply_update("b", HOSTNAME_KEY, "update", &|_| {}, |cur| {
+                assert_eq!(cur, Some(hostname("one")));
+                // an apply started between the read and the apply waits for this one: it
+                // cannot be reverted by the value computed from the read
+                sc.spawn(|| {
+                    e.cfg
+                        .apply_value("c", HOSTNAME_KEY, Some(hostname("three")), "", &|_| {})
+                        .unwrap();
+                    other_done.store(true, Ordering::SeqCst);
+                });
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                assert!(!other_done.load(Ordering::SeqCst));
+                Ok(Some(hostname("two")))
+            })
+            .unwrap();
+        assert!(rev.is_some());
+    });
+    assert!(other_done.load(Ordering::SeqCst));
+    assert_eq!(e.cfg.applied(HOSTNAME_KEY).unwrap(), Some(hostname("three")));
+    let authors: Vec<String> = e
+        .cfg
+        .revisions(10)
+        .unwrap()
+        .into_iter()
+        .map(|r| r.author)
+        .collect();
+    assert_eq!(authors, ["c", "b", "a"]);
+    // nothing to change: nothing applied
+    assert_eq!(
+        e.cfg
+            .apply_update("b", HOSTNAME_KEY, "", &|_| {}, |_| Ok(None))
+            .unwrap(),
+        None
+    );
+    assert_eq!(e.cfg.revisions(10).unwrap().len(), 3);
+}
+
+#[test]
 fn apply_writes_files_reloads_and_records_a_revision() {
     let e = env();
     e.cfg

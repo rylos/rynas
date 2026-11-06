@@ -52,6 +52,12 @@ pub const HOME_MODE: u32 = 0o700;
 pub const KEPT_SUFFIX: &str = ".rynas-old";
 /// Time spent measuring a home for a plan.
 pub const PLAN_SIZE_BUDGET: Duration = Duration::from_millis(1500);
+/// Time for measuring the sizes of all the homes of one plan request (measured in
+/// parallel); what is not measured by then is a lower bound (`size_partial`).
+pub const PLAN_TOTAL_BUDGET: Duration = Duration::from_secs(3);
+/// Time for measuring a home in the move task, before its copy: a size still partial
+/// after it is unknown and the home does not move.
+pub const MOVE_SIZE_BUDGET: Duration = Duration::from_secs(20 * 60);
 /// A long copy is logged as it goes; it ends at this timeout at the latest.
 const COPY_TIMEOUT: Duration = Duration::from_secs(48 * 3600);
 const CMD_TIMEOUT: Duration = Duration::from_secs(120);
@@ -142,6 +148,13 @@ pub trait HomesHost: Send + Sync {
     fn tree_counts(&self, path: &str) -> Option<TreeCounts>;
     /// Owner uid of a folder and whether it is empty.
     fn owner_empty(&self, path: &str) -> Option<(u32, bool)>;
+    /// Owner uid and permission bits of `path` itself (not followed).
+    fn owner_mode(&self, path: &str) -> Option<(u32, u32)>;
+    /// Bytes referenced by the btrfs subvolume at `path` from its quota group, when quotas
+    /// are on (no walk of the files); `None` otherwise.
+    fn qgroup_size(&self, _path: &str) -> Option<u64> {
+        None
+    }
     /// Processes running with this uid (real, effective, saved or filesystem).
     fn processes(&self, uid: u32) -> Vec<u32>;
     /// Open SMB sessions of a user; `None` when it cannot be known (no Samba).
@@ -403,6 +416,13 @@ pub fn ensure_folder(
         host.make_dir(&folder, vol.fs_type == "btrfs", 0, 0, FOLDER_MODE, log)?;
     } else if !f.is_dir || f.symlink {
         return Err(format!("{folder} exists and is not a folder"));
+    } else if let Some((uid, mode)) = host.owner_mode(&folder)
+        && (uid != 0 || mode & 0o022 != 0)
+    {
+        // users could rename or replace the homes of others in it
+        return Err(format!(
+            "{folder} exists but is not owned by root or can be written by others (owner {uid}, mode {mode:o}): make it root's, mode 0711, or choose another volume"
+        ));
     }
     Ok(folder)
 }
@@ -660,6 +680,20 @@ pub fn used_folders(host: &dyn HomesHost) -> Vec<String> {
     v
 }
 
+/// The homes folders holding the old homes of moves waiting for confirmation: in use (the
+/// undo puts the old home back there) even when no link points into them any more.
+pub fn waiting_folders(records: &[HomeMoveRecord]) -> Vec<String> {
+    let mut v: Vec<String> = records
+        .iter()
+        .flat_map(|r| [r.kept.as_str(), r.from_folder.as_str()])
+        .map(|p| parent_of(p.trim_end_matches('/')).to_string())
+        .filter(|p| p.ends_with(&format!("/{HOMES_FOLDER}")))
+        .collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
 // ---------------------------------------------------------------------------------------------
 // moves
 // ---------------------------------------------------------------------------------------------
@@ -726,6 +760,35 @@ pub struct MoveContext<'a> {
     pub shares: &'a [(String, String)],
     /// A move of this user waits for confirmation.
     pub waiting: bool,
+    /// Time for measuring the size of the home ([`PLAN_SIZE_BUDGET`], less when many homes
+    /// are planned together, [`MOVE_SIZE_BUDGET`] in the task).
+    pub size_budget: Duration,
+}
+
+/// Free space needed at the destination for `bytes` of homes: 10 % and 64 MiB of headroom
+/// (metadata, the volume's own needs).
+pub fn space_needed(bytes: u64) -> u64 {
+    bytes + bytes / 10 + (64 << 20)
+}
+
+/// Space check of several homes going to the same destination (each fitting alone is not
+/// enough): `Err((needed, available))` when they do not fit together, or when the sizes are
+/// lower bounds that already do not fit.
+pub fn batch_fits<'a>(plans: impl IntoIterator<Item = &'a HomeMovePlan>) -> Result<(), (u64, u64)> {
+    let mut total = 0u64;
+    let mut avail = None;
+    for p in plans {
+        total = total.saturating_add(p.size_bytes);
+        avail = Some(avail.map_or(p.avail_bytes, |a: u64| a.min(p.avail_bytes)));
+    }
+    let Some(avail) = avail else {
+        return Ok(());
+    };
+    let need = space_needed(total);
+    if need > avail {
+        return Err((need, avail));
+    }
+    Ok(())
 }
 
 fn blocker(code: B, detail: impl Into<String>) -> HomeMoveBlocker {
@@ -806,13 +869,22 @@ pub fn plan_move(
         {
             b.push(blocker(B::ShareInside, name.clone()));
         }
-        if let Some((bytes, partial)) = host.tree_size(&source, PLAN_SIZE_BUDGET) {
-            p.size_bytes = bytes;
-            p.size_partial = partial;
+        // a subvolume home with quotas on: its quota group, at once; else a bounded walk. A
+        // size that cannot be measured at all is unknown (partial)
+        let quota = if src.subvolume {
+            host.qgroup_size(&source).map(|b| (b, false))
+        } else {
+            None
+        };
+        match quota.or_else(|| host.tree_size(&source, cx.size_budget)) {
+            Some((bytes, partial)) => {
+                p.size_bytes = bytes;
+                p.size_partial = partial;
+            }
+            None => p.size_partial = true,
         }
         p.ssh_keys = host.probe(&format!("{source}/.ssh/authorized_keys")).exists;
-        // 10 % and 64 MiB of headroom (metadata, the volume's own needs)
-        let need = p.size_bytes + p.size_bytes / 10 + (64 << 20);
+        let need = space_needed(p.size_bytes);
         if bi.exists && p.avail_bytes < need {
             b.push(blocker(B::NoSpace, need.to_string()));
         }
@@ -891,10 +963,40 @@ fn prepare_target(
     Ok(())
 }
 
-/// Copies a home to its destination: target created (subvolume on btrfs), rsync pass, live
-/// check, second pass with deletions, verification (a dry run must find nothing left and the
-/// counts must match), owner-only mode. On failure the copy is removed. Neither the link nor
-/// the passwd home is touched.
+/// The root-only folder a home is copied into before it goes to `target`:
+/// `<parent>/.<user>.rynas-copy` (root 0700).
+pub fn staging_of(target: &str, user: &str) -> String {
+    format!("{}/.{user}.rynas-copy", parent_of(target))
+}
+
+/// Removes a staging folder and the copy in it.
+fn remove_staging(
+    host: &dyn HomesHost,
+    staging: &str,
+    copy: &str,
+    log: &dyn Fn(&str),
+) -> Result<(), String> {
+    let s = host.probe(staging);
+    let link = s.symlink || host.read_link(staging).is_some();
+    if !s.exists && !link {
+        return Ok(());
+    }
+    if link || !s.is_dir {
+        return Err(format!("{staging} exists and is not a folder: not removed"));
+    }
+    let c = host.probe(copy);
+    if c.exists && !c.symlink {
+        host.remove(copy, c.subvolume, log)?;
+    }
+    host.remove(staging, false, log)
+}
+
+/// Copies a home to its destination: the copy is made in a root-only staging folder next to
+/// the target (subvolume on btrfs), rsync pass, live check, second pass with deletions,
+/// verification (a dry run must find nothing left and the counts must match); only then is
+/// it given to the user (owner-only mode) and renamed to the target. Until then nobody but
+/// root can reach it: the user cannot plant links in the tree root's rsync writes into. On
+/// failure the copy is removed. Neither the link nor the passwd home is touched.
 pub fn copy_home(
     host: &dyn HomesHost,
     plan: &HomeMovePlan,
@@ -911,20 +1013,21 @@ pub fn copy_home(
         ));
     }
     prepare_target(host, plan, log)?;
-    host.make_dir(
-        &plan.target,
-        plan.subvolume,
-        user.uid,
-        user.gid,
-        HOME_MODE,
-        log,
-    )?;
+    let staging = staging_of(&plan.target, &plan.user);
+    let copy = format!("{staging}/{}", plan.user);
+    // a staging folder left by an interrupted move
+    remove_staging(host, &staging, &copy, log)?;
+    host.make_dir(&staging, false, 0, 0, 0o700, log)?;
+    if let Err(e) = host.make_dir(&copy, plan.subvolume, 0, 0, HOME_MODE, log) {
+        let _ = host.remove(&staging, false, log);
+        return Err(e);
+    }
     let run = || -> Result<(), String> {
         log(&format!(
             "{}: copying {} to {}",
             plan.user, plan.source, plan.target
         ));
-        host.sync(&plan.source, &plan.target, false, log, cancelled)?;
+        host.sync(&plan.source, &copy, false, log, cancelled)?;
         progress(70);
         let live = live_blockers(host, user);
         if !live.is_empty() {
@@ -935,9 +1038,9 @@ pub fn copy_home(
             ));
         }
         log(&format!("{}: second pass", plan.user));
-        host.sync(&plan.source, &plan.target, true, log, cancelled)?;
+        host.sync(&plan.source, &copy, true, log, cancelled)?;
         progress(85);
-        let left = host.differences(&plan.source, &plan.target)?;
+        let left = host.differences(&plan.source, &copy)?;
         if !left.is_empty() {
             return Err(format!(
                 "{}: the copy differs from the home ({} entries, first: {})",
@@ -946,10 +1049,7 @@ pub fn copy_home(
                 left[0]
             ));
         }
-        let (a, b) = (
-            host.tree_counts(&plan.source),
-            host.tree_counts(&plan.target),
-        );
+        let (a, b) = (host.tree_counts(&plan.source), host.tree_counts(&copy));
         if a != b {
             return Err(format!(
                 "{}: the copy has other counts than the home: {a:?} / {b:?}",
@@ -962,14 +1062,21 @@ pub fn copy_home(
                 plan.user, c.files, c.dirs, c.links, c.bytes
             ));
         }
-        host.set_owner_mode(&plan.target, user.uid, user.gid, HOME_MODE, log)
+        if host.probe(&plan.target).exists || host.read_link(&plan.target).is_some() {
+            return Err(format!("{}: {} exists now", plan.user, plan.target));
+        }
+        host.set_owner_mode(&copy, user.uid, user.gid, HOME_MODE, log)?;
+        host.rename(&copy, &plan.target, log)
     };
     if let Err(e) = run() {
         log(&format!("{}: removing the incomplete copy", plan.user));
-        if let Err(e2) = host.remove(&plan.target, plan.subvolume, log) {
-            log(&format!("{}: {e2}", plan.target));
+        if let Err(e2) = remove_staging(host, &staging, &copy, log) {
+            log(&format!("{staging}: {e2}"));
         }
         return Err(e);
+    }
+    if let Err(e) = host.remove(&staging, false, log) {
+        log(&format!("{staging}: {e}"));
     }
     Ok(())
 }
@@ -1081,6 +1188,9 @@ pub const MOVES_FILE: &str = "homes-moves.json";
 pub struct MoveStore {
     file: Option<PathBuf>,
     mem: Mutex<Vec<HomeMoveRecord>>,
+    /// Held across read-modify-write ([`MoveStore::put`], [`MoveStore::remove`]): moves,
+    /// confirmations and undos of different users end in parallel tasks.
+    edit: Mutex<()>,
 }
 
 impl MoveStore {
@@ -1091,7 +1201,7 @@ impl MoveStore {
     pub fn in_dir(state_dir: impl Into<PathBuf>) -> Self {
         Self {
             file: Some(state_dir.into().join(MOVES_FILE)),
-            mem: Mutex::new(Vec::new()),
+            ..Default::default()
         }
     }
 
@@ -1132,6 +1242,7 @@ impl MoveStore {
     }
 
     pub fn put(&self, r: HomeMoveRecord) -> Result<(), String> {
+        let _edit = self.edit.lock().unwrap();
         let mut v = self.list();
         v.retain(|x| x.user != r.user);
         v.push(r);
@@ -1139,6 +1250,7 @@ impl MoveStore {
     }
 
     pub fn remove(&self, user: &str) -> Result<(), String> {
+        let _edit = self.edit.lock().unwrap();
         let mut v = self.list();
         let before = v.len();
         v.retain(|x| x.user != user);
@@ -1336,6 +1448,16 @@ impl HomesHost for HostHomes {
         }
         let empty = std::fs::read_dir(path).ok()?.next().is_none();
         Some((m.uid(), empty))
+    }
+
+    fn owner_mode(&self, path: &str) -> Option<(u32, u32)> {
+        use std::os::unix::fs::MetadataExt;
+        let m = std::fs::symlink_metadata(path).ok()?;
+        Some((m.uid(), m.mode() & 0o7777))
+    }
+
+    fn qgroup_size(&self, path: &str) -> Option<u64> {
+        crate::host::ShareHost::qgroup_size(&crate::host::HostShares, path)
     }
 
     fn processes(&self, uid: u32) -> Vec<u32> {
@@ -1646,6 +1768,8 @@ pub struct MemoryHomesState {
     pub fail: Vec<String>,
     /// What [`HomesHost::differences`] reports.
     pub differences: Vec<String>,
+    /// Folders whose size is measured only partly (the budget runs out).
+    pub partial_sizes: Vec<String>,
 }
 
 /// Folders, links and processes in memory: tests, and `--dry-system` (`probe_host`: paths
@@ -1851,9 +1975,17 @@ impl HomesHost for MemoryHomes {
         }
     }
 
-    fn tree_size(&self, path: &str, _budget: Duration) -> Option<(u64, bool)> {
+    fn tree_size(&self, path: &str, budget: Duration) -> Option<(u64, bool)> {
         let real = self.resolve(path);
-        self.state().entries.get(&real).map(|e| (e.bytes, false))
+        let s = self.state();
+        match s.entries.get(&real) {
+            Some(e) => Some((e.bytes, s.partial_sizes.contains(&real))),
+            None if self.probe_host => {
+                drop(s);
+                HostHomes.tree_size(path, budget)
+            }
+            None => None,
+        }
     }
 
     fn tree_counts(&self, path: &str) -> Option<TreeCounts> {
@@ -1872,6 +2004,19 @@ impl HomesHost for MemoryHomes {
         let e = s.entries.get(&real)?;
         let prefix = format!("{real}/");
         Some((e.uid, !s.entries.keys().any(|k| k.starts_with(&prefix))))
+    }
+
+    fn owner_mode(&self, path: &str) -> Option<(u32, u32)> {
+        let s = self.state();
+        match s.entries.get(path) {
+            Some(e) if e.link.is_some() => Some((0, 0o777)),
+            Some(e) => Some((e.uid, e.mode)),
+            None if self.probe_host => {
+                drop(s);
+                HostHomes.owner_mode(path)
+            }
+            None => None,
+        }
     }
 
     fn processes(&self, uid: u32) -> Vec<u32> {
@@ -2218,6 +2363,20 @@ mod tests {
         // an empty mount point is not a volume
         h.add_dir("/volume9", 0, 0);
         assert!(ensure_folder(h.as_ref(), "/volume9", &quiet).is_err());
+        // an existing homes folder others can write into (or not root's) is not used
+        h.add_volume("/volume3", "ext4", 1 << 40);
+        h.add_dir("/volume3/homes", 0, 0);
+        h.state().entries.get_mut("/volume3/homes").unwrap().mode = 0o777;
+        let e = ensure_folder(h.as_ref(), "/volume3", &quiet).unwrap_err();
+        assert!(e.contains("not owned by root"), "{e}");
+        h.state().entries.get_mut("/volume3/homes").unwrap().mode = 0o755;
+        h.state().entries.get_mut("/volume3/homes").unwrap().uid = 1000;
+        assert!(ensure_folder(h.as_ref(), "/volume3", &quiet).is_err());
+        h.state().entries.get_mut("/volume3/homes").unwrap().uid = 0;
+        assert_eq!(
+            ensure_folder(h.as_ref(), "/volume3", &quiet).unwrap(),
+            "/volume3/homes"
+        );
     }
 
     #[test]
@@ -2399,6 +2558,7 @@ mod tests {
             volumes: v,
             shares: &[],
             waiting: false,
+            size_budget: PLAN_SIZE_BUDGET,
         }
     }
 
@@ -2452,6 +2612,7 @@ mod tests {
                 volumes: VOLS,
                 shares: &shares,
                 waiting: true,
+                size_budget: PLAN_SIZE_BUDGET,
             },
         );
         let codes: Vec<B> = p.blockers.iter().map(|b| b.code).collect();
@@ -2528,12 +2689,19 @@ mod tests {
         assert_eq!(
             h.state().log,
             [
-                "subvolume /volume1/homes/marco 1000:100 700",
-                "rsync /home/marco/ /volume1/homes/marco/",
-                "rsync --delete /home/marco/ /volume1/homes/marco/",
-                "owner /volume1/homes/marco 1000:100 700",
+                // root's until verified: the user cannot reach the tree rsync writes into
+                "mkdir /volume1/homes/.marco.rynas-copy 0:0 700",
+                "subvolume /volume1/homes/.marco.rynas-copy/marco 0:0 700",
+                "rsync /home/marco/ /volume1/homes/.marco.rynas-copy/marco/",
+                "rsync --delete /home/marco/ /volume1/homes/.marco.rynas-copy/marco/",
+                "owner /volume1/homes/.marco.rynas-copy/marco 1000:100 700",
+                "rename /volume1/homes/.marco.rynas-copy/marco -> /volume1/homes/marco",
+                "rm /volume1/homes/.marco.rynas-copy",
             ]
         );
+        let t = h.state().entries["/volume1/homes/marco"].clone();
+        assert!(t.subvolume && (t.uid, t.mode) == (1000, 0o700));
+        assert!(!h.probe("/volume1/homes/.marco.rynas-copy").exists);
         point_link(h.as_ref(), "marco", &p.target, &quiet).unwrap();
         let kept = keep_old(h.as_ref(), "/home/marco", 7, &quiet).unwrap();
         assert_eq!(kept, "/home/marco.rynas-old");
@@ -2643,7 +2811,15 @@ mod tests {
         let e = copy_home(h.as_ref(), &p, &u, &quiet, &|_| {}, &|| false).unwrap_err();
         assert!(e.contains("differs"), "{e}");
         assert!(!h.probe("/volume1/homes/marco").exists);
+        assert!(!h.probe("/volume1/homes/.marco.rynas-copy").exists);
         assert!(h.probe("/home/marco").exists);
+        // a staging folder left by an interrupted move is cleared first
+        h.state().differences.clear();
+        h.add_dir("/volume1/homes/.marco.rynas-copy", 0, 0);
+        h.add_dir("/volume1/homes/.marco.rynas-copy/marco", 1000, 0);
+        copy_home(h.as_ref(), &p, &u, &quiet, &|_| {}, &|| false).unwrap();
+        assert!(h.probe("/volume1/homes/marco").exists);
+        assert!(!h.probe("/volume1/homes/.marco.rynas-copy").exists);
         // the user logs in during the copy: same
         let (h, u) = ready();
         let p = plan_move(h.as_ref(), &u, &v1(), &cx(&v));
@@ -2654,6 +2830,48 @@ mod tests {
         let mut p2 = p.clone();
         p2.allowed = false;
         assert!(copy_home(h.as_ref(), &p2, &u, &quiet, &|_| {}, &|| false).is_err());
+    }
+
+    #[test]
+    fn sizes_partial_or_unknown_and_batches_that_do_not_fit() {
+        let (h, u) = ready();
+        let v = vols();
+        // a walk cut by the budget is a lower bound
+        h.state().partial_sizes.push("/home/marco".into());
+        let p = plan_move(h.as_ref(), &u, &v1(), &cx(&v));
+        assert!(p.size_partial && p.size_bytes == 5 << 30);
+        // a size that cannot be read at all is unknown, not zero
+        h.state().entries.get_mut("/home/marco").unwrap().bytes = 0;
+        let g = MemoryHomes::new();
+        assert_eq!(g.tree_size("/nowhere", PLAN_SIZE_BUDGET), None);
+        // together: each fits alone, not all of them
+        let one = HomeMovePlan {
+            size_bytes: 40 << 30,
+            avail_bytes: 100 << 30,
+            ..Default::default()
+        };
+        assert!(batch_fits([&one]).is_ok());
+        assert!(batch_fits([&one, &one]).is_ok());
+        let (need, avail) = batch_fits([&one, &one, &one]).unwrap_err();
+        assert_eq!((need, avail), (space_needed(120 << 30), 100 << 30));
+        assert!(batch_fits(std::iter::empty::<&HomeMovePlan>()).is_ok());
+    }
+
+    #[test]
+    fn folders_of_waiting_moves_are_in_use() {
+        let r = |kept: &str, from: &str| HomeMoveRecord {
+            kept: kept.into(),
+            from_folder: from.into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            waiting_folders(&[
+                r("/volume1/homes/alice.rynas-old", "/volume1/homes/alice"),
+                r("/home/marco.rynas-old", "/home/marco"),
+                r("/volume2/homes/bob.rynas-old-7", ""),
+            ]),
+            ["/volume1/homes", "/volume2/homes"]
+        );
     }
 
     #[test]

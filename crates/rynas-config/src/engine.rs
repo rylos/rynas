@@ -585,6 +585,39 @@ impl Config {
         log: &dyn Fn(&str),
     ) -> Result<u64> {
         let _apply = self.apply_lock.lock().unwrap();
+        self.apply_value_locked(author, key, value, comment, log)
+    }
+
+    /// [`Config::apply_value`] of a value computed from the applied one inside the apply
+    /// lock: `update` gets the applied value of `key` (`None` if never applied) and returns
+    /// the new value, or `None` to leave it as it is (then nothing is applied and the result
+    /// is `None`). No apply can run between the read and the apply, so changes of others
+    /// are never reverted by a stale copy (read-modify-write of a document). Blocking.
+    pub fn apply_update(
+        &self,
+        author: &str,
+        key: &str,
+        comment: &str,
+        log: &dyn Fn(&str),
+        update: impl FnOnce(Option<Value>) -> std::result::Result<Option<Value>, String>,
+    ) -> Result<Option<u64>> {
+        let _apply = self.apply_lock.lock().unwrap();
+        let applied = self.applied(key)?;
+        let Some(v) = update(applied).map_err(|e| ConfigError::Invalid(e.into()))? else {
+            return Ok(None);
+        };
+        self.apply_value_locked(author, key, Some(v), comment, log)
+            .map(Some)
+    }
+
+    fn apply_value_locked(
+        &self,
+        author: &str,
+        key: &str,
+        value: Option<Value>,
+        comment: &str,
+        log: &dyn Fn(&str),
+    ) -> Result<u64> {
         let applier = self.applier(key)?.clone();
         let new = match value {
             Some(v) => Some(applier.validate(v).map_err(ConfigError::Invalid)?),

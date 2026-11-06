@@ -150,10 +150,10 @@ pub fn place_of(h: &UserHome) -> String {
     }
 }
 
-/// The places a home can go: the volumes while the service is applied, and the system disk.
-/// `(value, text)`.
+/// The places a home can go: the volumes while the service is applied with nothing staged
+/// (as the list's move buttons), and the system disk. `(value, text)`.
 pub fn places(s: &HomesState) -> Vec<(String, String)> {
-    let mut v: Vec<(String, String)> = if s.active {
+    let mut v: Vec<(String, String)> = if s.active && !s.pending {
         s.volumes
             .iter()
             .map(|v| (v.path.clone(), tf("homes.volume_opt", &[("path", &v.path), ("fs", &v.fs_type), ("free", &i18n::bytes(v.avail_bytes))])))
@@ -192,7 +192,7 @@ pub fn place_select(label: &'static str, help: Option<&'static str>, opts: Vec<(
 fn suggested(s: &HomesState, here: &str) -> String {
     let opts = places(s);
     let default = s.settings.volume.clone();
-    if s.active && !default.is_empty() && default != here && opts.iter().any(|(v, _)| *v == default) {
+    if !default.is_empty() && default != here && opts.iter().any(|(v, _)| *v == default) {
         return default;
     }
     if here != HOME_SYSTEM {
@@ -291,7 +291,7 @@ fn homes_list(state: Remote<HomesState>) -> AnyView {
         )
     };
     let done = Callback::new(move |_| state.reload());
-    let all_to = move || state.data.with(|s| s.as_ref().map(|s| s.settings.volume.clone()).unwrap_or_default());
+    let all_to = move || state.data.with(|s| s.as_ref().map(|s| suggested(s, "")).unwrap_or_default());
     view! {
         <div class="subsection">
             <div class="toolbar">
@@ -320,6 +320,7 @@ fn blocker_text(b: &HomeMoveBlocker) -> String {
         B::TargetExists => "homes.b.target_exists",
         B::TargetInvalid => "homes.b.target_invalid",
         B::Processes => "homes.b.processes",
+        B::SmbSessions if b.detail == "1" => "homes.b.smb_session_one",
         B::SmbSessions => "homes.b.smb_sessions",
         B::ShareInside => "homes.b.share_inside",
         B::NoSpace => "homes.b.no_space",
@@ -362,6 +363,35 @@ fn plan_view(p: &HomeMovePlan) -> AnyView {
     .into_any()
 }
 
+/// Free space needed for `bytes` of homes (as the server counts it: 10 % and 64 MiB more).
+fn space_needed(bytes: u64) -> u64 {
+    bytes + bytes / 10 + (64 << 20)
+}
+
+/// The homes that can move, together: their total size against the free space (each fitting
+/// alone is not enough). `None` for a single home. `(note, fits)`.
+fn batch_view(v: &[HomeMovePlan]) -> Option<(AnyView, bool)> {
+    let ok: Vec<&HomeMovePlan> = v.iter().filter(|p| p.allowed).collect();
+    if ok.len() < 2 {
+        return None;
+    }
+    let total: u64 = ok.iter().map(|p| p.size_bytes).sum();
+    let avail = ok.iter().map(|p| p.avail_bytes).min().unwrap_or(0);
+    let partial = ok.iter().any(|p| p.size_partial);
+    let size = size_text(total, partial);
+    let fits = space_needed(total) <= avail;
+    let text = tf(
+        if fits { "homes.batch_total" } else { "homes.batch_no_space" },
+        &[("n", &ok.len().to_string()), ("size", &size), ("free", &i18n::bytes(avail))],
+    );
+    let view = view! {
+        {ui::note(if fits { Tone::Info } else { Tone::Err }, if fits { icons::INFO } else { icons::CIRCLE_X }, view! { <span>{text}</span> }.into_any())}
+        {(fits && partial).then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { <span>{tr("homes.batch_partial")}</span> }.into_any()))}
+    }
+    .into_any();
+    Some((view, fits))
+}
+
 /// Starts a task and follows it to a toast.
 fn run(url: String, body: Option<String>, ok: String, done: Callback<()>) {
     spawn_local(async move {
@@ -380,7 +410,10 @@ fn run(url: String, body: Option<String>, ok: String, done: Callback<()>) {
 /// move) to it, then the task. Also opened from the user editor.
 pub fn move_dialog(ask: MoveAsk, state: Remote<HomesState>, close: Callback<()>, done: Callback<()>) -> AnyView {
     let users = ask.users.clone();
-    let to = RwSignal::new(ask.to.clone());
+    let opts = state.data.with_untracked(|s| s.as_ref().map(places).unwrap_or_default());
+    // a destination not offered (an unmounted volume) would show one value and send another
+    let first = opts.first().map(|(v, _)| v.clone()).unwrap_or_default();
+    let to = RwSignal::new(if opts.iter().any(|(v, _)| *v == ask.to) { ask.to.clone() } else { first });
     let plans = RwSignal::new(None::<Result<Vec<HomeMovePlan>, String>>);
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
@@ -399,7 +432,7 @@ pub fn move_dialog(ask: MoveAsk, state: Remote<HomesState>, close: Callback<()>,
             }
         });
     });
-    let any_allowed = move || plans.with(|p| matches!(p, Some(Ok(v)) if v.iter().any(|x| x.allowed)));
+    let any_allowed = move || plans.with(|p| matches!(p, Some(Ok(v)) if v.iter().any(|x| x.allowed) && batch_view(v).is_none_or(|(_, fits)| fits)));
     let u3 = users.clone();
     let go = move || {
         busy.set(true);
@@ -429,7 +462,6 @@ pub fn move_dialog(ask: MoveAsk, state: Remote<HomesState>, close: Callback<()>,
         [one] => tf("homes.move_title_one", &[("name", one)]),
         _ => t("homes.move_title_all").to_string(),
     };
-    let opts = state.data.with_untracked(|s| s.as_ref().map(places).unwrap_or_default());
     let body = view! {
         <p class="dialog-text">{tr("homes.move_text")}</p>
         {place_select("homes.dest", Some("homes.dest_help"), opts, to.into(), Callback::new(move |v| to.set(v)))}
@@ -438,6 +470,7 @@ pub fn move_dialog(ask: MoveAsk, state: Remote<HomesState>, close: Callback<()>,
             Some(Err(e)) => ui::note(Tone::Err, icons::CIRCLE_X, view! { <span>{e}</span> }.into_any()),
             Some(Ok(v)) if v.is_empty() => view! { <p class="muted">{tr("homes.none")}</p> }.into_any(),
             Some(Ok(v)) => view! {
+                {batch_view(&v).map(|(note, _)| note)}
                 {v.iter().map(plan_view).collect_view()}
                 {ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { <span>{tr("homes.move_steps")}</span> }.into_any())}
             }
