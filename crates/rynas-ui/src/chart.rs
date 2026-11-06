@@ -43,6 +43,8 @@ pub struct Opts {
     pub grid: bool,
     /// Formats the top-of-scale label; no label when None.
     pub label: Option<fn(f32) -> String>,
+    /// Bytes: round the scale top in powers of 1024 (100 MiB/s, not 95,4 MiB/s).
+    pub binary: bool,
 }
 
 fn hex_rgba(hex: &str, a: f32) -> String {
@@ -72,6 +74,15 @@ fn nice(v: f32) -> f32 {
         10.0
     };
     n * e
+}
+
+/// [`nice`] in the 1024-based unit of the value: 100 MiB, 2 GiB.
+fn nice_binary(v: f32) -> f32 {
+    let mut unit = 1f32;
+    while v / unit >= 1024.0 {
+        unit *= 1024.0;
+    }
+    nice(v / unit) * unit
 }
 
 /// Samples always spanned by the x axis: with fewer (right after start) the chart shows the
@@ -198,11 +209,11 @@ fn peak(snap: &Snap) -> f32 {
 /// current top `cur` (0 = none yet). It grows as soon as the peak gets within 10 % of the top,
 /// and shrinks only once the peak fell under 40 % of it, so the axis does not breathe with
 /// every sample nor bounce when a spike scrolls out.
-pub fn next_top(peak: f32, cur: f32, fixed: Option<f32>) -> f32 {
+pub fn next_top(peak: f32, cur: f32, fixed: Option<f32>, binary: bool) -> f32 {
     if let Some(m) = fixed {
         return m;
     }
-    let want = nice(peak * 1.1);
+    let want = if binary { nice_binary(peak * 1.1) } else { nice(peak * 1.1) };
     if cur <= 0.0 || want > cur || peak < cur * 0.4 { want } else { cur }
 }
 
@@ -362,6 +373,8 @@ pub fn LiveChart(
     #[prop(default = 300)] points: usize,
     #[prop(default = true)] grid: bool,
     #[prop(optional)] label: Option<fn(f32) -> String>,
+    /// The values are bytes (see [`Opts::binary`]).
+    #[prop(optional)] binary: bool,
     #[prop(default = "chart")] class: &'static str,
     /// Accessible description of the chart.
     aria: Signal<String>,
@@ -369,7 +382,7 @@ pub fn LiveChart(
     let live = use_live();
     let ui = use_ui();
     let node = NodeRef::<Canvas>::new();
-    let opts = Opts { max, points, grid, label };
+    let opts = Opts { max, points, grid, label, binary };
     let series = StoredValue::new(series);
     let snap = StoredValue::new(Snap::default());
     let running = StoredValue::new(false);
@@ -400,7 +413,7 @@ pub fn LiveChart(
             })
         });
         let now = js_sys::Date::now();
-        let (top, still) = (next_top(peak(&next), scale.get_value().to, opts.max), next.still);
+        let (top, still) = (next_top(peak(&next), scale.get_value().to, opts.max, opts.binary), next.still);
         scale.update_value(|s| s.retarget(top, now, !still));
         snap.set_value(next);
         let sc = scale.get_value();
@@ -508,17 +521,20 @@ mod tests {
     #[test]
     fn scale_hysteresis() {
         // first value: the 1-2-5 rounding above the peak
-        assert_eq!(next_top(7.0, 0.0, None), 10.0);
+        assert_eq!(next_top(7.0, 0.0, None, false), 10.0);
         // a little lower or higher: unchanged
-        assert_eq!(next_top(5.0, 10.0, None), 10.0);
-        assert_eq!(next_top(8.5, 10.0, None), 10.0);
+        assert_eq!(next_top(5.0, 10.0, None, false), 10.0);
+        assert_eq!(next_top(8.5, 10.0, None, false), 10.0);
         // near the top: grows right away
-        assert_eq!(next_top(9.5, 10.0, None), 20.0);
+        assert_eq!(next_top(9.5, 10.0, None, false), 20.0);
         // a spike scrolled out: shrinks only when well below
-        assert_eq!(next_top(4.5, 10.0, None), 10.0);
-        assert_eq!(next_top(3.0, 10.0, None), 5.0);
+        assert_eq!(next_top(4.5, 10.0, None, false), 10.0);
+        assert_eq!(next_top(3.0, 10.0, None, false), 5.0);
         // fixed scales stay fixed
-        assert_eq!(next_top(250.0, 100.0, Some(100.0)), 100.0);
+        assert_eq!(next_top(250.0, 100.0, Some(100.0), false), 100.0);
+        // bytes: round in MiB, not in decimal units
+        assert_eq!(next_top(90.0 * 1048576.0, 0.0, None, true), 100.0 * 1048576.0);
+        assert_eq!(next_top(700.0, 0.0, None, true), 1000.0);
         assert_eq!(clamp_value(-3.0, 100.0), 0.0);
         assert_eq!(clamp_value(f32::NAN, 100.0), 0.0);
         assert_eq!(clamp_value(130.0, 100.0), 100.0);
