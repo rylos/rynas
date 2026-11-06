@@ -91,7 +91,8 @@ pub const LINK: &str = r#"<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7
 pub const CLOCK: &str = r#"<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>"#;
 pub const ARCHIVE_RESTORE: &str = r#"<rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h2"/><path d="M20 8v11a2 2 0 0 1-2 2h-2"/><path d="m9 15 3-3 3 3"/><path d="M12 12v9"/>"#;
 pub const BELL_RING: &str = r#"<path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M22 8c0-2.3-.8-4.3-2-6"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/><path d="M4 2C2.8 3.7 2 5.7 2 8"/>"#;
-pub const USB: &str = r#"<circle cx="10" cy="7" r="1"/><circle cx="4" cy="20" r="1"/><path d="M4.7 19.3 19 5"/><path d="m21 3-3 1 2 2Z"/><path d="M9.26 7.68 5 12l2 5"/><path d="m10 14 5 2 3.5-3.5"/><path d="m18 12 1-1 1 1-1 1Z"/>"#;
+/// Upright USB flash drive (the Lucide `usb` trident reads poorly at toolbar size).
+pub const USB: &str = r#"<path d="M9 7V3h6v4"/><path d="M11 5h.01"/><path d="M13 5h.01"/><rect width="10" height="15" x="7" y="7" rx="2"/><path d="M10 18h4"/>"#;
 pub const LOCK_OPEN: &str = r#"<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/>"#;
 pub const DISC: &str = r#"<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="2"/>"#;
 /// Tabler `device-sd-card` (Lucide has no SD card).

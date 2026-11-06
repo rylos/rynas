@@ -213,7 +213,9 @@ pub fn UsbButton() -> impl IntoView {
                     }
                 >
                     {move || view! { <Icon icon=glyph() /> }}
-                    <span class=move || format!("badge usb-badge {}", tone()) aria-hidden="true">{move || count.get()}</span>
+                    <Show when=move || { count.get() > 1 }>
+                        <span class=move || format!("badge usb-badge {}", tone()) aria-hidden="true">{move || count.get()}</span>
+                    </Show>
                 </button>
                 <Show when=move || open.get()>
                     <UsbPanel />
