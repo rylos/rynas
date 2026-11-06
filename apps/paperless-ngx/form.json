@@ -1,0 +1,40 @@
+{
+  "type": "object",
+  "properties": {
+    "PAPERLESS_ADMIN_USER": {
+      "type": "string",
+      "title": "Admin user name",
+      "default": "admin",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "[A-Za-z0-9_.@+-]+"
+    },
+    "PAPERLESS_ADMIN_PASSWORD": {
+      "type": "string",
+      "title": "Admin password",
+      "description": "Creates the superuser at the first start; change it later from Paperless.",
+      "minLength": 10,
+      "maxLength": 128,
+      "x-ui": { "widget": "password" }
+    },
+    "PAPERLESS_OCR_LANGUAGE": {
+      "type": "string",
+      "title": "OCR languages",
+      "description": "Tesseract language codes joined with +, e.g. eng, deu+eng, ita+eng. The image ships eng, deu, fra, ita and spa.",
+      "default": "eng",
+      "pattern": "[a-z_]{3,8}(\\+[a-z_]{3,8})*"
+    },
+    "PAPERLESS_URL": {
+      "type": "string",
+      "title": "Public URL",
+      "description": "The address users open when it differs from the NAS address, e.g. https://docs.example.lan.",
+      "format": "uri",
+      "x-ui": { "placeholder": "https://docs.example.lan", "advanced": true }
+    }
+  },
+  "required": ["PAPERLESS_ADMIN_USER", "PAPERLESS_ADMIN_PASSWORD", "PAPERLESS_OCR_LANGUAGE"],
+  "x-groups": [
+    { "title": "Administrator", "fields": ["PAPERLESS_ADMIN_USER", "PAPERLESS_ADMIN_PASSWORD"] },
+    { "title": "Documents", "fields": ["PAPERLESS_OCR_LANGUAGE", "PAPERLESS_URL"] }
+  ]
+}

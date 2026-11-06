@@ -1,0 +1,9 @@
+[form]
+ML_DISABLED = true
+HW_TRANSCODING = true
+
+[shares]
+EXTERNAL_LIBRARY = "/volume1/photo"
+
+[folders]
+DB_DATA_LOCATION = "/volume2/ssd/immich-db"

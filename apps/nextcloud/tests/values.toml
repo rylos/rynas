@@ -1,0 +1,6 @@
+[form]
+NEXTCLOUD_ADMIN_PASSWORD = "correct-horse-battery"
+NEXTCLOUD_DOMAIN = "cloud.example.lan"
+
+[ports]
+WEB_PORT = 18080

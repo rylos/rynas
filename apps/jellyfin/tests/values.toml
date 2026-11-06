@@ -1,0 +1,5 @@
+[form]
+HW_TRANSCODING = true
+
+[shares]
+MEDIA = "/volume1/video"

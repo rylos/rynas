@@ -1,0 +1,6 @@
+# Upstream hwaccel.transcoding.yml, services quicksync / vaapi: the render device.
+# Then select Quick Sync or VA-API in Administration > Video transcoding.
+services:
+  immich-server:
+    devices:
+      - /dev/dri:/dev/dri

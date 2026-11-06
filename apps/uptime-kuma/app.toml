@@ -1,0 +1,52 @@
+schema = 1
+id = "uptime-kuma"
+name = "Uptime Kuma"
+version = "1.0.0"
+app_version = "2.5.9"
+description = "Monitoring of websites, services and ports, with status pages and notifications."
+homepage = "https://uptime.kuma.pet"
+source = "https://github.com/louislam/uptime-kuma"
+changelog_url = "https://github.com/louislam/uptime-kuma/releases"
+license = "MIT"
+maintainers = ["rynas"]
+categories = ["monitoring"]
+min_rynas = "0.1.0"
+arch = ["amd64", "arm64"]
+main_service = "uptime-kuma"
+
+[resources]
+ram_min_mb = 256
+ram_recommended_mb = 512
+
+[[ports]]
+name = "web"
+env = "WEB_PORT"
+service = "uptime-kuma"
+container = 3001
+default = 3001
+protocol = "tcp"
+purpose = "Web interface and status pages"
+proxied = true
+
+[web]
+port = "web"
+scheme = "http"
+auth = "app"
+websocket = true
+subpath = false
+timeout = "1h"
+buffering = false
+# public status pages and badges
+bypass = ["/status", "/api/badge", "/api/status-page", "/upload"]
+public = "ok"
+
+[[folders]]
+env = "DATA_FOLDER"
+path = "data"
+intent = "data"
+ssd = "ok"
+description = "Monitor database and uploads"
+
+[[notes]]
+level = "info"
+text = "The first visitor creates the admin account: open Uptime Kuma right after install. Behind the rynas proxy, set Settings > Reverse Proxy > Trusted Proxies to Yes."

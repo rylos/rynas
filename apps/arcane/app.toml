@@ -1,0 +1,58 @@
+schema = 1
+id = "arcane"
+name = "Arcane"
+version = "1.0.0"
+app_version = "v2.17.3"
+description = "Docker manager with compose projects, image updates, OIDC and GitOps."
+homepage = "https://getarcane.app"
+source = "https://github.com/getarcaneapp/arcane"
+changelog_url = "https://github.com/getarcaneapp/arcane/releases"
+license = "BSD-3-Clause"
+maintainers = ["rynas"]
+categories = ["management"]
+min_rynas = "0.1.0"
+arch = ["amd64", "arm64"]
+antifeatures = ["root-access"]
+main_service = "arcane"
+manager = true
+
+[resources]
+ram_min_mb = 256
+ram_recommended_mb = 512
+
+[[ports]]
+name = "web"
+env = "WEB_PORT"
+service = "arcane"
+container = 3552
+default = 3552
+protocol = "tcp"
+purpose = "Web interface"
+proxied = true
+
+[web]
+port = "web"
+scheme = "http"
+auth = "app"
+websocket = true
+subpath = false
+timeout = "10m"
+buffering = false
+public = "never"
+
+[[folders]]
+env = "DATA_FOLDER"
+path = "data"
+intent = "config"
+ssd = "ok"
+description = "Arcane database and settings"
+
+[[secrets]]
+env = "ENCRYPTION_KEY"
+length = 32
+encoding = "base64"
+description = "Encrypts stored registry and Git credentials"
+
+[[notes]]
+level = "warning"
+text = "Arcane receives the Docker socket: it has root privileges on this NAS and its own login. Keep it off the Internet."

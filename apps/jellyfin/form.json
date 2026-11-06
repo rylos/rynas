@@ -1,0 +1,15 @@
+{
+  "type": "object",
+  "properties": {
+    "HW_TRANSCODING": {
+      "type": "boolean",
+      "title": "Hardware transcoding",
+      "description": "Gives Jellyfin the GPU render device (Intel Quick Sync or VA-API). Strongly advised on low-power CPUs.",
+      "default": false,
+      "x-ui": { "widget": "switch" }
+    }
+  },
+  "x-groups": [
+    { "title": "Playback", "fields": ["HW_TRANSCODING"] }
+  ]
+}

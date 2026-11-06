@@ -1,0 +1,56 @@
+schema = 1
+id = "dockge"
+name = "Dockge"
+version = "1.0.0"
+app_version = "1.5.0"
+description = "Small, file-based compose stack manager with a live editor and terminal."
+homepage = "https://dockge.kuma.pet"
+source = "https://github.com/louislam/dockge"
+changelog_url = "https://github.com/louislam/dockge/releases"
+license = "MIT"
+maintainers = ["rynas"]
+categories = ["management"]
+min_rynas = "0.1.0"
+arch = ["amd64", "arm64"]
+antifeatures = ["root-access", "unmaintained"]
+main_service = "dockge"
+manager = true
+
+[resources]
+ram_min_mb = 128
+ram_recommended_mb = 256
+
+[[ports]]
+name = "web"
+env = "WEB_PORT"
+service = "dockge"
+container = 5001
+default = 5001
+protocol = "tcp"
+purpose = "Web interface"
+proxied = true
+
+[web]
+port = "web"
+scheme = "http"
+auth = "app"
+websocket = true
+subpath = false
+timeout = "1h"
+buffering = false
+public = "never"
+
+[[folders]]
+env = "DATA_FOLDER"
+path = "data"
+intent = "config"
+ssd = "ok"
+description = "Dockge settings and accounts"
+
+[[notes]]
+level = "warning"
+text = "Dockge receives the Docker socket: it has root privileges on this NAS. The first visitor creates the admin account: open it right after install."
+
+[[notes]]
+level = "info"
+text = "The last Dockge release is from March 2025; Arcane or Dockhand are maintained alternatives working on the same stacks folder."

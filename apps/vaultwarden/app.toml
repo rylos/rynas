@@ -1,0 +1,58 @@
+schema = 1
+id = "vaultwarden"
+name = "Vaultwarden"
+version = "1.0.0"
+app_version = "1.37.5"
+description = "Lightweight password manager server compatible with the Bitwarden clients."
+homepage = "https://github.com/dani-garcia/vaultwarden"
+source = "https://github.com/dani-garcia/vaultwarden"
+changelog_url = "https://github.com/dani-garcia/vaultwarden/releases"
+license = "AGPL-3.0-only"
+maintainers = ["rynas"]
+categories = ["security"]
+min_rynas = "0.1.0"
+arch = ["amd64", "arm64"]
+antifeatures = ["requires-https"]
+main_service = "vaultwarden"
+
+[resources]
+ram_min_mb = 128
+ram_recommended_mb = 256
+
+[[ports]]
+name = "web"
+env = "WEB_PORT"
+service = "vaultwarden"
+container = 80
+default = 8222
+protocol = "tcp"
+purpose = "Web vault, client API and live sync (WebSocket)"
+proxied = true
+
+[web]
+port = "web"
+scheme = "http"
+auth = "app"
+# live sync (/notifications/hub) is served on the same port since 1.29
+websocket = true
+subpath = true
+# Bitwarden attachments are limited to 500 MB
+body = "525M"
+public = "ok"
+# Bitwarden clients authenticate with their own tokens
+bypass = ["/api", "/identity", "/notifications", "/icons", "/events"]
+
+[[folders]]
+env = "DATA_FOLDER"
+path = "data"
+intent = "data"
+ssd = "ok"
+description = "SQLite database, attachments, sends and keys"
+
+[[notes]]
+level = "warning"
+text = "Bitwarden clients and the web vault only work over HTTPS: publish Vaultwarden through the rynas web access module (or another TLS proxy) before use."
+
+[[notes]]
+level = "warning"
+text = "New-account signups are open by default so you can create your account; turn them off in the stack settings afterwards."

@@ -1,0 +1,77 @@
+schema = 1
+id = "nextcloud"
+name = "Nextcloud"
+version = "1.0.0"
+app_version = "34.0.5"
+description = "Files, calendars, contacts and collaboration, with desktop and mobile sync clients."
+homepage = "https://nextcloud.com"
+source = "https://github.com/nextcloud/docker"
+changelog_url = "https://nextcloud.com/changelog/"
+license = "AGPL-3.0-or-later"
+maintainers = ["rynas"]
+categories = ["files", "productivity"]
+min_rynas = "0.1.0"
+arch = ["amd64", "arm64"]
+main_service = "app"
+
+[resources]
+ram_min_mb = 1024
+ram_recommended_mb = 2048
+
+[[ports]]
+name = "web"
+env = "WEB_PORT"
+service = "app"
+container = 80
+default = 8080
+protocol = "tcp"
+purpose = "Web interface, WebDAV and sync clients"
+proxied = true
+
+[web]
+port = "web"
+scheme = "http"
+auth = "app"
+websocket = false
+subpath = false
+body = "16G"
+timeout = "1h"
+buffering = false
+# sync clients, WebDAV/CalDAV/CardDAV and app passwords skip SSO
+bypass = ["/remote.php", "/ocs", "/status.php", "/index.php/login/v2", "/login/v2", "/.well-known"]
+public = "ok"
+trusted_proxies_env = "TRUSTED_PROXIES"
+
+[[folders]]
+env = "HTML_FOLDER"
+path = "html"
+intent = "config"
+ssd = "ok"
+description = "Nextcloud code, config.php, apps and themes"
+
+[[folders]]
+env = "DATA_FOLDER"
+path = "data"
+intent = "data"
+ssd = "no"
+owner = "33:33"
+description = "User files (owned by www-data, uid 33)"
+
+[[folders]]
+env = "DB_FOLDER"
+path = "db"
+intent = "db"
+ssd = "preferred"
+description = "MariaDB database"
+
+[[secrets]]
+env = "MYSQL_PASSWORD"
+length = 32
+
+[[secrets]]
+env = "MYSQL_ROOT_PASSWORD"
+length = 32
+
+[[notes]]
+level = "info"
+text = "Background jobs run via AJAX by default; switch to Webcron or a cron container for larger installs."

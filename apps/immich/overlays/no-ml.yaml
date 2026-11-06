@@ -1,0 +1,6 @@
+# RFC 7396 merge patch: drop the machine learning service. Immich has no environment
+# variable for this (only machineLearning.enabled in the settings or a config file, which
+# would lock the settings page), so turn off "Machine Learning" in Administration >
+# Settings after the first login.
+services:
+  immich-machine-learning: null

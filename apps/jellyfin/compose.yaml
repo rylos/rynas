@@ -1,0 +1,16 @@
+# Upstream: https://jellyfin.org/docs/general/installation/container (Docker Compose)
+# The image has its own HEALTHCHECK. DLNA would need host networking; not offered.
+services:
+  jellyfin:
+    image: jellyfin/jellyfin:12.4@sha256:fea863d0cd9ec445985d9c75fc6ed64e38a1d2766cf0c250a33d553f4fc1b771
+    restart: unless-stopped
+    user: "${PUID}:${PGID}"
+    ports:
+      - "${RYNAS_BIND}:${WEB_PORT}:8096"
+      - "${DISCOVERY_PORT}:7359/udp"
+    environment:
+      TZ: "${TZ}"
+    volumes:
+      - ${CONFIG_FOLDER}:/config
+      - ${CACHE_FOLDER}:/cache
+      - ${MEDIA}:/media:ro

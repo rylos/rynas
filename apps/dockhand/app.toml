@@ -1,0 +1,56 @@
+schema = 1
+id = "dockhand"
+name = "Dockhand"
+version = "1.0.0"
+app_version = "v1.0.57"
+description = "Docker manager with compose stacks, Git deploys, update checks and restic backups."
+homepage = "https://dockhand.pro"
+source = "https://github.com/Finsys/dockhand"
+changelog_url = "https://github.com/Finsys/dockhand/releases"
+license = "BUSL-1.1"
+maintainers = ["rynas"]
+categories = ["management"]
+min_rynas = "0.1.0"
+arch = ["amd64", "arm64"]
+antifeatures = ["non-free", "root-access"]
+main_service = "dockhand"
+manager = true
+
+[resources]
+ram_min_mb = 512
+ram_recommended_mb = 1024
+
+[[ports]]
+name = "web"
+env = "WEB_PORT"
+service = "dockhand"
+container = 3000
+default = 3000
+protocol = "tcp"
+purpose = "Web interface"
+proxied = true
+
+[web]
+port = "web"
+scheme = "http"
+auth = "app"
+websocket = true
+subpath = false
+timeout = "10m"
+buffering = false
+public = "never"
+
+[[folders]]
+env = "DATA_FOLDER"
+path = "data"
+intent = "config"
+ssd = "ok"
+description = "Dockhand database, settings and encryption key file"
+
+[[notes]]
+level = "warning"
+text = "Dockhand receives the Docker socket: it has root privileges on this NAS and its own login. Keep it off the Internet."
+
+[[notes]]
+level = "info"
+text = "Dockhand is source-available under the Business Source License 1.1, free for personal and internal use."

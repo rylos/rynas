@@ -1,0 +1,24 @@
+{
+  "type": "object",
+  "properties": {
+    "DOMAIN": {
+      "type": "string",
+      "title": "Public URL",
+      "description": "The HTTPS address users open, e.g. https://vault.example.lan. Needed for WebAuthn, attachments and e-mail links.",
+      "format": "uri",
+      "pattern": "https://.*",
+      "x-ui": { "placeholder": "https://vault.example.lan" }
+    },
+    "SIGNUPS_ALLOWED": {
+      "type": "boolean",
+      "title": "Allow new accounts",
+      "description": "Leave on to create your own account, then turn it off.",
+      "default": true,
+      "x-ui": { "widget": "switch" }
+    }
+  },
+  "required": ["DOMAIN"],
+  "x-groups": [
+    { "title": "Access", "fields": ["DOMAIN", "SIGNUPS_ALLOWED"] }
+  ]
+}

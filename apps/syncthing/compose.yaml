@@ -1,0 +1,25 @@
+# Upstream: https://github.com/syncthing/syncthing/blob/v2.1.7/README-Docker.md
+# Upstream advises host networking for LAN discovery; this entry uses the bridged ports so
+# the GUI can sit behind the rynas proxy and ports are checked for conflicts.
+services:
+  syncthing:
+    image: syncthing/syncthing:2.1.7@sha256:2b71da7c0d0a91a6ae5285ad079226fecc0a365d08b27720e1f7037b018f7546
+    restart: unless-stopped
+    hostname: syncthing
+    environment:
+      PUID: "${PUID}"
+      PGID: "${PGID}"
+      TZ: "${TZ}"
+    ports:
+      - "${RYNAS_BIND}:${WEB_PORT}:8384"
+      - "${SYNC_TCP_PORT}:22000/tcp"
+      - "${SYNC_QUIC_PORT}:22000/udp"
+      - "${DISCOVERY_PORT}:21027/udp"
+    volumes:
+      - ${CONFIG_FOLDER}:/var/syncthing
+      - ${SYNC_SHARE}:/data
+    healthcheck:
+      test: curl -fkLsS -m 2 127.0.0.1:8384/rest/noauth/health | grep -o --color=never OK || exit 1
+      interval: 1m
+      timeout: 10s
+      retries: 3

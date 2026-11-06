@@ -1,0 +1,9 @@
+# Jellyfin hardware acceleration (Intel QSV / VA-API) in Docker: the render device and
+# membership of the group that owns it, since the container runs as PUID.
+# https://jellyfin.org/docs/general/post-install/transcoding/hardware-acceleration/intel
+services:
+  jellyfin:
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "${RENDER_GID}"

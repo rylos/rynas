@@ -1,0 +1,100 @@
+schema = 1
+id = "immich"
+name = "Immich"
+version = "1.0.0"
+app_version = "v3.3.6"
+description = "Photo and video library with mobile backup, faces, maps and smart search."
+homepage = "https://immich.app"
+source = "https://github.com/immich-app/immich"
+changelog_url = "https://github.com/immich-app/immich/releases"
+license = "AGPL-3.0-only"
+maintainers = ["rynas"]
+categories = ["photos", "media"]
+min_rynas = "0.1.0"
+arch = ["amd64", "arm64"]
+antifeatures = ["high-resources"]
+main_service = "immich-server"
+
+[resources]
+# 4 GB only with machine learning off (upstream: 6 GB minimum, 8 GB recommended)
+ram_min_mb = 4096
+ram_recommended_mb = 8192
+
+[[ports]]
+name = "web"
+env = "WEB_PORT"
+service = "immich-server"
+container = 2283
+default = 2283
+protocol = "tcp"
+purpose = "Web interface and mobile app API"
+proxied = true
+
+[web]
+port = "web"
+scheme = "http"
+auth = "app"
+websocket = true
+subpath = false
+body = "50G"
+timeout = "10m"
+buffering = false
+# the mobile app authenticates with its own tokens
+bypass = ["/api", "/.well-known/immich"]
+public = "ok"
+trusted_proxies_env = "IMMICH_TRUSTED_PROXIES"
+
+[[folders]]
+env = "UPLOAD_LOCATION"
+path = "library"
+intent = "media"
+ssd = "no"
+description = "Uploaded photos and videos, thumbnails and transcodes"
+
+[[folders]]
+env = "DB_DATA_LOCATION"
+path = "postgres"
+intent = "db"
+ssd = "preferred"
+description = "PostgreSQL database (local SSD advised, never a network share)"
+
+[[shares]]
+env = "EXTERNAL_LIBRARY"
+label = "External library"
+description = "A shared folder with existing photos, mounted read-only at /mnt/external; add it in Immich as an external library"
+access = "ro"
+required = false
+fallback = "external"
+
+[[secrets]]
+env = "DB_PASSWORD"
+length = 32
+encoding = "alnum"
+description = "PostgreSQL password (upstream allows only A-Za-z0-9)"
+
+[[named_volumes]]
+name = "model-cache"
+description = "Downloaded machine learning models (re-downloaded when lost)"
+
+[hardware]
+gpu = "optional"
+gpu_kinds = ["intel-qsv", "vaapi"]
+cpu_features = ["x86-64-v2"]
+
+[[overlays]]
+file = "overlays/no-ml.yaml"
+when = "ML_DISABLED"
+description = "Remove the machine learning container (faces, smart search) to fit in 4 GB of RAM"
+
+[[overlays]]
+file = "overlays/hw-transcoding.yaml"
+when = "HW_TRANSCODING"
+description = "Pass /dev/dri to the server for Quick Sync / VA-API video transcoding"
+
+[[notes]]
+level = "warning"
+text = "Immich wants 6 GB of RAM with machine learning (8 GB recommended). On 4 GB, turn machine learning off."
+
+[[notes]]
+level = "info"
+text = "The first visitor creates the admin account: open Immich right after install."
