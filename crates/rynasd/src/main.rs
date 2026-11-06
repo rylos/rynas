@@ -90,6 +90,12 @@ struct Args {
     /// --admin-group): only they may stage or run user tasks that run as root.
     #[arg(long = "admin-group", default_values = ["rynas-admin", "sudo"])]
     admin_groups: Vec<String>,
+    /// The file manager worker (default: rynas-files-worker next to this binary).
+    #[arg(long)]
+    files_worker: Option<PathBuf>,
+    /// Thumbnail caches of the file manager, one folder per user.
+    #[arg(long, default_value = "/var/cache/rynas/files")]
+    files_cache: PathBuf,
     /// Port of the web interface (Avahi announcement, candidate URLs of network changes).
     #[arg(long, default_value_t = 8080)]
     web_port: u16,
@@ -733,6 +739,23 @@ fn main() -> std::io::Result<()> {
         ));
         rynasd::updates::spawn_daily(updates.clone());
         state.updates = Some(updates);
+        // the file manager: workers next to rynasd unless told otherwise
+        let worker = args.files_worker.clone().unwrap_or_else(|| {
+            std::env::current_exe()
+                .map(|e| e.with_file_name("rynas-files-worker"))
+                .unwrap_or_else(|_| PathBuf::from("/usr/libexec/rynas/rynas-files-worker"))
+        });
+        let cache = if args.dry_system {
+            args.state_dir.join("cache/files")
+        } else {
+            args.files_cache.clone()
+        };
+        state.files = Some(Arc::new(rynasd::files::Files::new(
+            ops.clone(),
+            worker,
+            &args.state_dir.join("files"),
+            &cache,
+        )));
         state.ops = Some(ops);
         if args.storage_check_interval > 0 {
             rynasd::notifications::spawn_storage_watch(

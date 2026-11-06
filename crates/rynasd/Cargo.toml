@@ -15,7 +15,7 @@ rynas-storage.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 axum = { workspace = true, features = ["query"] }
-tokio.workspace = true
+tokio = { workspace = true, features = ["process", "io-util"] }
 clap.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -34,6 +34,8 @@ rynas-power.workspace = true
 jiff.workspace = true
 rynas-net.workspace = true
 rynas-updates.workspace = true
+rynas-files.workspace = true
+tokio-util = { workspace = true, features = ["io"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 
 [dev-dependencies]

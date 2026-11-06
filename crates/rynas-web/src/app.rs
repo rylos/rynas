@@ -64,7 +64,11 @@ pub fn router(state: AppState, ui_dir: PathBuf) -> Router {
                 .no_deflate()
                 .no_zstd()
                 .quality(tower_http::CompressionLevel::Precise(4))
-                .compress_when(DefaultPredicate::new().and(SizeAbove::new(1024))),
+                .compress_when(
+                    DefaultPredicate::new()
+                        .and(SizeAbove::new(1024))
+                        .and(crate::files::NotFileContent),
+                ),
         )
         .layer(SetResponseHeaderLayer::if_not_present(
             header::CONTENT_SECURITY_POLICY,

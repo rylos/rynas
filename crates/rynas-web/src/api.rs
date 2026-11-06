@@ -44,6 +44,8 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/totp/enroll", post(auth::totp_enroll))
         .route("/auth/totp/confirm", post(auth::totp_confirm))
         .route("/auth/totp/disable", post(auth::totp_disable))
+        // the file manager: every signed-in user, as their own Linux user
+        .merge(crate::files::routes())
         .merge(admin)
         .layer(middleware::from_fn_with_state(
             state.clone(),

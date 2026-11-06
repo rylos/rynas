@@ -1370,6 +1370,16 @@ dict! {
     "err.method_not_allowed" => "Operation not supported.", "Operazione non supportata.";
     "err.payload_too_large" => "The data sent is too large.", "I dati inviati sono troppo grandi.";
     "err.unsupported_media_type" => "Unsupported data format.", "Formato dei dati non supportato.";
+    "err.permission_denied" => "You don't have permission for this item.", "Non hai i permessi per questo elemento.";
+    "err.insufficient_storage" => "The volume is full or your quota is used up.", "Il volume è pieno o la tua quota è esaurita.";
+    "err.read_only" => "This item is read-only.", "Questo elemento è di sola lettura.";
+    "err.share_root" => "A shared folder can't be changed from here.", "Una cartella condivisa non si modifica da qui.";
+    "err.password_required" => "The archive needs its password.", "L'archivio richiede la sua password.";
+    "err.tool_missing" => "A program this feature needs is not installed.", "Un programma necessario a questa funzione non è installato.";
+    "err.remote_unreachable" => "The remote server can't be reached.", "Il server remoto non è raggiungibile.";
+    "err.remote_auth_failed" => "The remote server refused the login.", "Il server remoto ha rifiutato l'accesso.";
+    "err.not_available" => "This is not available on this system.", "Non è disponibile su questo sistema.";
+    "err.host_key_changed" => "The server's key has changed since the first connection.", "La chiave del server è cambiata dalla prima connessione.";
     "err.generic" => "Something went wrong. Try again.", "Qualcosa è andato storto. Riprova.";
     "session.expires" => "Your session expires in {n} min", "La sessione scade tra {n} min";
     "session.expires_1" => "Your session expires in 1 min", "La sessione scade tra 1 min";

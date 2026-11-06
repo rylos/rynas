@@ -25,7 +25,9 @@ RestartSec=2s
 Environment=GLIBC_TUNABLES=glibc.malloc.mmap_threshold=262144:glibc.malloc.trim_threshold=1048576:glibc.malloc.arena_max=2
 MemoryHigh=96M
 MemoryMax=256M
-TasksMax=128
+# File manager workers (rynas-files-worker, one per request, at most 12 at once, and
+# the transfer jobs, two at a time) run in this cgroup too, with their threads.
+TasksMax=256
 
 # /run/rynas (rynasd.sock; notify.sock, 0600 root, synodeb's notify forward) and
 # /var/lib/rynas (0700 root): auth/totp (TOTP secrets), config.db, tasks/ (task logs),
@@ -36,8 +38,12 @@ RuntimeDirectory=rynas
 RuntimeDirectoryMode=0755
 # keep /run/rynas across restarts when rynasd.socket owns the socket in it
 RuntimeDirectoryPreserve=yes
-StateDirectory=rynas rynas/auth rynas/notify rynas/net
+StateDirectory=rynas rynas/auth rynas/notify rynas/net rynas/files
 StateDirectoryMode=0700
+# /var/cache/rynas/files/thumbs/<uid>: thumbnail caches, one per user (owned by the user,
+# 0700; the parents must stay traversable for the user's worker)
+CacheDirectory=rynas rynas/files
+CacheDirectoryMode=0755
 UMask=0077
 
 # Hardening. rynasd will grow root tasks (mdadm, smartctl, config apply...): the
@@ -77,6 +83,9 @@ RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6 AF_PACKET
 # systemd (`systemctl start <unit>.mount` from /etc/fstab), never inside this unit's own
 # mount namespace, where the mount would stay invisible to the rest of the system.
 # CAP_FSETID: restored snapshot files keep their setgid bits
+# File manager: CAP_SETUID/CAP_SETGID switch each rynas-files-worker to the signed-in user
+# between fork and exec; CAP_DAC_READ_SEARCH is the only one an administrator's worker
+# keeps (read every folder; writes stay the user's). No file capabilities on any binary.
 # Network (D-NET): CAP_NET_ADMIN (MTU and address repairs after a reload or a rollback,
 # ifupdown hand-back), CAP_NET_RAW (arping, ping of the gateway, diagnostics)
 CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_SETUID CAP_SETGID CAP_AUDIT_WRITE CAP_SYS_ADMIN CAP_SYS_RAWIO CAP_MKNOD CAP_IPC_LOCK CAP_FSETID CAP_NET_ADMIN CAP_NET_RAW

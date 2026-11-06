@@ -50,7 +50,7 @@ HDDs) for everyday use. Order of work, each item ending with tests, a real run a
 | 7 | storage (disks, SMART, mdadm, btrfs, snapshots, scrub) | storage | read side, planner and write side done (plans executed as tasks, LUKS unlock/lock, subvolumes, disk settings; loop-device container test); UI pages missing |
 | 8 | users, shares-smb, shares-nfs | services | done (backend: `rynas-services`, `users` and `shares` domains, API, container test; UI: Users & Groups, Shared Folders with permissions matrix and effective permissions, File Services pages) |
 | 9 | Plugin protocol v1, `SchemaRenderer`, synology plugin | plugins | synology backend done as a built-in provider (`rynas-hw`, `rynas-hw-synology`) + power schedule (`rynas-power`), API below, container test; UI: Hardware › Synology and Hardware › Power schedule; plugin protocol missing |
-| 10 | files (SynoFile port) | file manager | |
+| 10 | files (SynoFile port) | file manager | backend done (`rynas-files` core, `rynas-files-worker` as the user, transfers as rynas tasks, `/api/v1/files/*` streamed through rynas-web, container test `packaging/test-files.sh`); spec and route table: `../plugins/files.md`; UI: Web Component port |
 | 12 | Task Scheduler (systemd units) + snapshots (btrbk engine, browse/restore/rollback, system restore points), P3 | data protection | done (backend: `rynas-scheduler`, `rynas-btrfs`, `rynasctl`, API, container test; UI pages missing; run notifications through `rynas-notify`) |
 | 11 | networking, notifications, apt updates; aptly repo | network / ops | notifications: backend done (`rynas-notify`, API below; UI pages missing); networking (P4, phase 1 scope of D-NET): backend done (`rynas-net`, API below, boot guard, watchdog, reset button, ifupdown adoption, container test; UI: Network page `crates/rynas-ui/src/pages/network/` with the timed-confirmation banner, revisions, rescue, diagnostics) |
 
@@ -97,7 +97,17 @@ only goes to the debug log (A13).
 | 502 | `bad_gateway` | rynasd answered something rynas-web cannot read |
 | 503 | `backend_unavailable` | rynasd or a provider (hardware) unreachable; the message names it |
 | 503 | `auth_unavailable` | no authentication backend reachable (login, TOTP) |
-| 504 | `timeout` | rynasd did not answer within the route's deadline (auth 15 s, storage 90 s, others 30 s) |
+| 504 | `timeout` | rynasd did not answer within the route's deadline (auth 15 s, storage 90 s, file manager 130 s / uploads 610 s to the answer head, others 30 s) |
+| 403 | `permission_denied` | file manager: the filesystem refused (the user's permissions, ACLs) |
+| 507 | `insufficient_storage` | file manager: volume full or quota used up |
+| 409 | `read_only` | file manager: inside an archive, a read-only snapshot or filesystem |
+| 400 | `share_root` | file manager: a shared folder itself renamed, copied, moved or deleted |
+| 400 | `password_required` | file manager: the archive needs its password |
+| 503 | `tool_missing` | file manager: an optional program (7z, unrar, tar) is not installed |
+| 502 | `remote_unreachable` | file manager: an SMB/SFTP server cannot be reached |
+| 400 | `remote_auth_failed` | file manager: a remote server refused the login (never 401) |
+| 409 | `host_key_changed` | file manager: an SFTP server key differs from the pinned one |
+| 501 | `not_available` | the feature is not available on this system (eject without the removable-drives module) |
 
 ## API v1 (steps 2–3)
 | Method | Path | Response |
@@ -937,6 +947,13 @@ upsd protocol client is the crate `rynas-nut` (shared by both daemons).
   quick` (or `deep`); `rynasctl ups test quick|deep|stop` starts `ups.test` through rynasd on
   either backend and follows it to its outcome (exit status = result).
 
+## API v1: file manager (P5)
+`/api/v1/files/<route>` ⇄ `/v1/files/<route>`, every method, SynoFile's route names and JSON
+shapes; every signed-in user (rynasd runs each request in `rynas-files-worker` as the session's
+Linux user, administrators keep `CAP_DAC_READ_SEARCH` only); bodies stream both ways (uploads up
+to 80 MiB per request). Route table, security model, deviations and error codes:
+`../plugins/files.md`. The worker crate has its own lock file:
+`cargo test --manifest-path crates/rynas-files-worker/Cargo.toml`.
 
 ## API v1: network (P4)
 Crate `rynas-net` (D-NET, design in `../research/network.md`), served by `rynasd`
