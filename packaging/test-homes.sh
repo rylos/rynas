@@ -7,11 +7,14 @@
 # Builds debug rynasd/rynas-web against trixie's glibc (builder image of build-deb.sh), then
 # inside the container: a btrfs volume at /volume1, the rynas units (hardening included), an
 # "install account" admin1 (uid 1000) with dotfiles, SSH keys, a hard link, an ACL and an xattr
-# in /home/admin1. Through the API: turns user homes on (with SMB home folders), creates a user
-# (home = a subvolume behind /srv/rynas/homes), opens her SMB home, checks the move plan and
-# its blockers (a running process), moves admin1's home (contents, ACL, xattr, hard link and
-# login checked), undoes it, moves it again and confirms, deletes the user with her home, and
-# turns the service off (homes keep working).
+# in /home/admin1. Through the API: turns user homes on (with SMB home folders), creates users
+# (homes = subvolumes behind per-user links in /srv/rynas/homes, one on another volume, one on
+# the system disk), opens an SMB home, checks the move plan and its blockers (a running
+# process), moves admin1's home system disk -> volume1 (contents, ACL, xattr, hard link and
+# login checked), undoes it, moves it again and confirms, then volume1 -> volume2 (undo, again),
+# volume2 -> system disk and back to volume1; changes the default volume with homes on the old
+# one, deletes users with their homes, turns the service off (homes keep working), and turns
+# the first layout (/srv/rynas/homes one link to /volume1/homes) into per-user links at start.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 IMAGE=rynas-test-systemd:trixie-2
@@ -144,7 +147,8 @@ api PUT /services/homes '{"enabled":true,"volume":"/","smb":{"enabled":true}}'; 
 api PUT /services/homes '{"enabled":true,"volume":"/volume1","smb":{"enabled":true,"recycle":{"enabled":true,"retention_days":30}}}'
 expect 200 "stage homes"
 apply
-[ "$(readlink /srv/rynas/homes)" = /volume1/homes ] || fail "link: $(readlink /srv/rynas/homes)"
+[ -d /srv/rynas/homes ] && [ ! -L /srv/rynas/homes ] || fail "/srv/rynas/homes is not a folder"
+[ "$(stat -c '%a %U' /srv/rynas/homes)" = "711 root" ] || fail "links folder mode: $(stat -c '%a %U' /srv/rynas/homes)"
 btrfs subvolume show /volume1/homes >/dev/null || fail "homes folder is not a subvolume"
 [ "$(stat -c '%a %U' /volume1/homes)" = "711 root" ] || fail "homes folder mode: $(stat -c '%a %U' /volume1/homes)"
 testparm -s 2>/dev/null | sed -n '/^\[homes\]/,/^$/p'
@@ -157,6 +161,7 @@ api POST /users '{"name":"alice","full_name":"Alice Smith"}'; expect 201 "user a
 apply
 getent passwd alice
 [ "$(getent passwd alice | cut -d: -f6)" = /srv/rynas/homes/alice ] || fail "passwd home of alice"
+[ "$(readlink /srv/rynas/homes/alice)" = /volume1/homes/alice ] || fail "alice's link: $(readlink /srv/rynas/homes/alice)"
 btrfs subvolume show /volume1/homes/alice >/dev/null || fail "alice's home is not a subvolume"
 [ "$(stat -c '%a %U' /volume1/homes/alice)" = "700 alice" ] || fail "alice home mode: $(stat -c '%a %U' /volume1/homes/alice)"
 [ -z "$(ls -A /volume1/homes/alice)" ] || fail "an SMB-only user got skeleton files"
@@ -169,6 +174,20 @@ ls '/volume1/homes/alice/#recycle/' | grep -q hello.txt || fail "deleted file no
 out=$(smbclient //localhost/admin1 -U 'alice%Al1ce-smb-pw' -c ls 2>&1 || true)
 echo "alice on admin1's home: $(echo "$out" | grep -o 'NT_STATUS_[A-Z_]*' | head -1)"
 echo "$out" | grep -q NT_STATUS_ || fail "alice opened another user's home"
+
+step "per-user places: carl on volume2, dora on the system disk while the service is on"
+api POST /users '{"name":"carl","home_volume":"/volume2"}'; expect 201 "user carl"
+[ "$(echo "$BODY" | jq -r .user.home_volume)" = /volume2 ] || fail "carl: $BODY"
+api POST /users '{"name":"dora","home_volume":"system"}'; expect 201 "user dora"
+[ "$(echo "$BODY" | jq -r .user.home)" = /home/dora ] || fail "dora: $BODY"
+api POST /users '{"name":"erin","home_volume":"/srv"}'; expect 400 "a system folder as home volume"
+apply
+[ "$(readlink /srv/rynas/homes/carl)" = /volume2/homes/carl ] || fail "carl's link: $(readlink /srv/rynas/homes/carl)"
+btrfs subvolume show /volume2/homes/carl >/dev/null || fail "carl's home is not a subvolume"
+[ "$(stat -c '%a %U' /volume2/homes)" = "711 root" ] || fail "volume2 homes folder mode"
+[ "$(getent passwd dora | cut -d: -f6)" = /home/dora ] && [ -d /home/dora ] || fail "dora's home"
+api GET /services/homes
+echo "$BODY" | jq -c '.homes[] | {user, home, location, volume, folder}'
 
 step "the move plan of admin1, and a running process that blocks it"
 su -s /bin/sh admin1 -c 'exec sleep 600' &
@@ -197,6 +216,7 @@ step "move admin1's home"
 api POST /services/homes/move '{"users":["admin1"]}'; task "move"
 [ "$TASK_STATUS" = ok ] || fail "move: $TASK_STATUS"
 [ "$(getent passwd admin1 | cut -d: -f6)" = /srv/rynas/homes/admin1 ] || fail "passwd not switched"
+[ "$(readlink /srv/rynas/homes/admin1)" = /volume1/homes/admin1 ] || fail "admin1's link"
 btrfs subvolume show /volume1/homes/admin1 >/dev/null || fail "admin1's new home is not a subvolume"
 [ "$(stat -c '%a %U' /volume1/homes/admin1)" = "700 admin1" ] || fail "new home mode"
 [ -d /home/admin1.rynas-old ] && [ ! -e /home/admin1 ] || fail "old home not kept aside"
@@ -211,6 +231,7 @@ step "undo"
 api POST /services/homes/move/admin1/undo; task "undo"
 [ "$TASK_STATUS" = ok ] || fail "undo: $TASK_STATUS"
 [ "$(getent passwd admin1 | cut -d: -f6)" = /home/admin1 ] || fail "passwd not back"
+[ ! -L /srv/rynas/homes/admin1 ] || fail "admin1's link left after the undo"
 compare_home /home/admin1
 ls -A /volume1/homes | grep -q '^\.admin1\.undone-' || fail "copy not kept aside"
 btrfs subvolume delete /volume1/homes/.admin1.undone-* >/dev/null
@@ -223,23 +244,90 @@ api POST /services/homes/move/admin1/finish; task "finish"
 [ ! -e /home/admin1.rynas-old ] || fail "old home not deleted"
 compare_home /srv/rynas/homes/admin1
 
-step "the volume cannot change under homes; delete alice with her home"
-api PUT /services/homes '{"enabled":true,"volume":"/volume2","smb":{"enabled":true}}'; expect 400 "volume change under homes"
-echo "refused: $(echo "$BODY" | jq -r .message)"
-echo "$BODY" | jq -r .message | grep -q 'holds homes' || fail "refused for another reason"
+finish() {
+    api POST "/services/homes/move/admin1/finish"; task "finish"
+    [ "$TASK_STATUS" = ok ] || fail "finish: $TASK_STATUS"
+}
+
+step "volume1 -> volume2: the link moves, passwd stays; undo; again"
+api POST /services/homes/move/plan '{"users":["admin1"],"to":"/volume2"}'
+echo "$BODY" | jq -c '.[0] | {from, source, to, target, location, allowed, blockers}'
+api POST /services/homes/move '{"users":["admin1"],"to":"/volume2"}'; task "move to volume2"
+[ "$TASK_STATUS" = ok ] || fail "move to volume2: $TASK_STATUS"
+[ "$(getent passwd admin1 | cut -d: -f6)" = /srv/rynas/homes/admin1 ] || fail "passwd changed"
+[ "$(readlink /srv/rynas/homes/admin1)" = /volume2/homes/admin1 ] || fail "link not on volume2"
+[ -d /volume1/homes/admin1.rynas-old ] || fail "old home on volume1 not kept"
+btrfs subvolume show /volume2/homes/admin1 >/dev/null || fail "not a subvolume on volume2"
+compare_home /srv/rynas/homes/admin1
+su -s /bin/sh admin1 -c 'cd && cat .ssh/authorized_keys >/dev/null' || fail "admin1 on volume2"
+login
+api POST /services/homes/move/admin1/undo; task "undo volume2"
+[ "$TASK_STATUS" = ok ] || fail "undo volume2: $TASK_STATUS"
+[ "$(readlink /srv/rynas/homes/admin1)" = /volume1/homes/admin1 ] || fail "link not back on volume1"
+compare_home /srv/rynas/homes/admin1
+ls -A /volume2/homes | grep -q '^\.admin1\.undone-' || fail "copy on volume2 not kept aside"
+btrfs subvolume delete /volume2/homes/.admin1.undone-* >/dev/null
+api POST /services/homes/move '{"users":["admin1"],"to":"/volume2"}'; task "move to volume2 again"
+[ "$TASK_STATUS" = ok ] || fail "move to volume2 again: $TASK_STATUS"
+finish
+[ ! -e /volume1/homes/admin1.rynas-old ] || fail "old home on volume1 not deleted"
+
+step "volume2 -> system disk (passwd /home/admin1, no link), then back to volume1"
+api POST /services/homes/move '{"users":["admin1"],"to":"system"}'; task "move to the system disk"
+[ "$TASK_STATUS" = ok ] || fail "move to the system disk: $TASK_STATUS"
+[ "$(getent passwd admin1 | cut -d: -f6)" = /home/admin1 ] || fail "passwd not /home/admin1"
+[ ! -L /srv/rynas/homes/admin1 ] || fail "link still there"
+[ "$(stat -c '%a %U' /home/admin1)" = "700 admin1" ] || fail "system home mode"
+compare_home /home/admin1
+su -s /bin/sh admin1 -c 'cd && [ "$(pwd)" = /home/admin1 ]' || fail "admin1 on the system disk"
+login
+finish
+[ ! -e /volume2/homes/admin1.rynas-old ] || fail "old home on volume2 not deleted"
+api POST /services/homes/move '{"users":["admin1"]}'; task "back to the default volume"
+[ "$TASK_STATUS" = ok ] || fail "back to volume1: $TASK_STATUS"
+[ "$(readlink /srv/rynas/homes/admin1)" = /volume1/homes/admin1 ] || fail "link not on volume1"
+finish
+compare_home /srv/rynas/homes/admin1
+
+step "the default volume changes with homes on the old one; users deleted with their homes"
+api PUT /services/homes '{"enabled":true,"volume":"/volume2","smb":{"enabled":true}}'; expect 200 "default volume change"
+apply
+[ "$(readlink /srv/rynas/homes/alice)" = /volume1/homes/alice ] || fail "alice moved by the default change"
 api DELETE "/users/alice?remove_home=true&confirm=alice"; expect 200 "delete alice"
+api DELETE "/users/carl?remove_home=true&confirm=carl"; expect 200 "delete carl"
 apply
 ! getent passwd alice || fail "alice still exists"
 [ ! -e /volume1/homes/alice ] || fail "alice's subvolume still there"
+[ ! -L /srv/rynas/homes/alice ] || fail "alice's link still there"
+[ ! -e /volume2/homes/carl ] && [ ! -L /srv/rynas/homes/carl ] || fail "carl's home or link still there"
 
 step "service off: the [homes] share goes, the homes keep working"
 api PUT /services/homes '{"enabled":false,"volume":"/volume1","smb":{"enabled":true}}'; expect 200 "service off"
 apply
 testparm -s 2>/dev/null | grep -q '^\[homes\]' && fail "[homes] still there"
-[ "$(readlink /srv/rynas/homes)" = /volume1/homes ] || fail "link removed"
+[ "$(readlink /srv/rynas/homes/admin1)" = /volume1/homes/admin1 ] || fail "link removed"
 su -s /bin/sh admin1 -c 'cd && ls docs >/dev/null' || fail "admin1's home broken"
 api POST /users '{"name":"bob"}'; expect 201 "user bob"
 [ "$(echo "$BODY" | jq -r .user.home)" = /home/bob ] || fail "bob home while off: $BODY"
+
+step "the first layout (one link for the whole folder) becomes per-user links at start"
+systemctl stop rynas-web rynasd rynasd.socket
+mv /srv/rynas/homes /var/tmp/links.bak
+ln -s /volume1/homes /srv/rynas/homes
+su -s /bin/sh admin1 -c 'cd && ls docs >/dev/null' || fail "first layout broken"
+systemctl start rynasd.socket rynas-web
+for _ in $(seq 50); do curl -s -o /dev/null http://127.0.0.1:8080/ && break; sleep 0.1; done
+login
+api GET /services/homes; expect 200 "homes after the migration"
+[ -d /srv/rynas/homes ] && [ ! -L /srv/rynas/homes ] || fail "not migrated: $(ls -ld /srv/rynas/homes)"
+[ "$(stat -c '%a %U' /srv/rynas/homes)" = "711 root" ] || fail "migrated folder mode"
+[ "$(readlink /srv/rynas/homes/admin1)" = /volume1/homes/admin1 ] || fail "admin1 not linked"
+[ ! -e /srv/rynas/homes.rynas-new ] && [ ! -L /srv/rynas/homes.rynas-new ] || fail "leftover of the migration"
+su -s /bin/sh admin1 -c 'cd && cat .ssh/authorized_keys >/dev/null' || fail "admin1 after the migration"
+journalctl -u rynasd --no-pager | grep 'one link per home' || fail "no migration in the log"
+api PUT /services/homes '{"enabled":true,"volume":"/volume1","smb":{"enabled":false}}'; expect 200 "service on again"
+apply
+[ "$(readlink /srv/rynas/homes/admin1)" = /volume1/homes/admin1 ] || fail "apply after the migration"
 
 journalctl -u rynasd --no-pager | grep -iE 'error|denied' | tail -5 || true
 echo
