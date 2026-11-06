@@ -17,19 +17,27 @@ ExecStart=/usr/libexec/rynas/rynasd --socket /run/rynas/rynasd.sock --state-dir 
 Restart=on-failure
 RestartSec=2s
 
-# Memory and tasks (docs/quality/guidelines.md §4.1, M5, M7). The cgroup includes the
-# children: mdadm, smartctl, btrfs, useradd, testparm... Idle ~10 MB, busy < 24 MB + children.
-# Above MemoryHigh the kernel reclaims and throttles; MemoryMax is the hard stop on a 4 GB NAS.
-# TasksMax: 4 blocking threads + one per disk during a SMART read (each command adds its
-# output readers) + 4 concurrent tasks with their children.
+# Memory and tasks (docs/quality/guidelines.md §4.1, M5, M7). rynasd splits its delegated
+# cgroup in two leaves at start (crates/rynasd/src/cgroup.rs): daemon/ holds rynasd and its
+# children (mdadm, smartctl, btrfs, useradd, testparm...; idle ~10 MB, busy < 24 MB +
+# children), workers/ the file manager workers (rynas-files-worker, one per request, at most
+# 12 at once, and the transfer jobs, two at a time: a .tar.zst takes ~90-110 MB, copies fill
+# the page cache). Each leaf has its own memory.high (reclaim and throttle) and memory.max
+# (hard stop), so a big job is throttled in workers/ while rynasd keeps answering:
+# <memory.high>:<memory.max> per leaf, for a 4 GB NAS.
+Environment=RYNAS_CGROUP_DAEMON=96M:256M RYNAS_CGROUP_WORKERS=192M:384M
+Delegate=memory pids
+# The unit's limits bound the sum. Without the split (no delegation: an older systemd, a
+# container) everything shares them, as before but with more room.
+MemoryHigh=288M
+MemoryMax=640M
 Environment=GLIBC_TUNABLES=glibc.malloc.mmap_threshold=262144:glibc.malloc.trim_threshold=1048576:glibc.malloc.arena_max=2
-MemoryHigh=96M
-MemoryMax=256M
-# File manager workers (rynas-files-worker, one per request, at most 12 at once, and
-# the transfer jobs, two at a time) run in this cgroup too, with their threads.
+# TasksMax covers both leaves: 4 blocking threads + one per disk during a SMART read (each
+# command adds its output readers) + 4 concurrent tasks with their children, and the
+# workers with their threads.
 TasksMax=256
-# A worker that hits MemoryMax (a .tar.zst at "best" needs ~110 MB, two jobs run at once)
-# is killed by the kernel; the default OOMPolicy=stop would then stop rynasd and every task
+# A worker that hits the memory.max of workers/ (a .tar.zst at "best" needs ~110 MB, two jobs
+# run at once) is killed by the kernel; the default OOMPolicy=stop would then stop rynasd and every task
 # with it. Keep the service running: the job fails, rynasd and the other tasks go on (if
 # rynasd itself is killed, its exit restarts the unit as usual).
 OOMPolicy=continue
@@ -66,7 +74,10 @@ PrivateTmp=yes
 PrivateNetwork=no
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
-ProtectControlGroups=yes
+# a cgroup namespace with a writable mount of rynasd's own subtree only (systemd 257, Debian
+# 13): the split above. An older systemd does not know the value and ignores the line (the
+# tree stays writable, the split still works).
+ProtectControlGroups=private
 ProtectClock=yes
 # no ProtectHostname: a private UTS namespace would hide the hostname set by an apply
 # from its health check

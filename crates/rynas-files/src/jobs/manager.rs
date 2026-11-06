@@ -699,13 +699,35 @@ fn start_worker(exe: &Path, user: &User, admin: bool, spec: &Spec) -> io::Result
     Ok(child)
 }
 
-/// `rynas-files-worker` as `user`: an empty environment but `PATH`, the user's identity set
-/// between fork and exec ([`crate::identity::become_raw`]). A process that is not root
-/// (development) cannot switch: the worker then runs as that process's own user, never as
-/// root.
+/// `cgroup.procs` of the workers' own cgroup (`rynasd::cgroup`), when rynasd could split its
+/// delegated cgroup at start.
+static WORKER_CGROUP: std::sync::OnceLock<std::os::fd::OwnedFd> = std::sync::OnceLock::new();
+
+/// Every worker started from now on moves itself into the cgroup whose `cgroup.procs` this
+/// is (opened for writing), before it drops its privileges. Set once.
+pub fn set_worker_cgroup(procs: std::os::fd::OwnedFd) {
+    let _ = WORKER_CGROUP.set(procs);
+}
+
+/// `rynas-files-worker` as `user`: an empty environment but `PATH`, moved into the workers'
+/// cgroup ([`set_worker_cgroup`]) and the user's identity set between fork and exec
+/// ([`crate::identity::become_raw`]). A process that is not root (development) cannot switch:
+/// the worker then runs as that process's own user, never as root.
 pub fn worker_command(exe: &Path, user: &User, admin: bool) -> io::Result<std::process::Command> {
     let mut cmd = std::process::Command::new(exe);
     cmd.env_clear().env("PATH", "/usr/bin:/bin").env("LANG", "C.UTF-8").current_dir("/");
+    if let Some(procs) = WORKER_CGROUP.get() {
+        let fd = std::os::fd::AsRawFd::as_raw_fd(procs);
+        // SAFETY: one write(2) between fork and exec, still privileged (registered before the
+        // identity change). "0" moves the writing process; a failure leaves the worker in
+        // rynasd's cgroup, as without the split.
+        unsafe {
+            cmd.pre_exec(move || {
+                libc::write(fd, b"0".as_ptr().cast(), 1);
+                Ok(())
+            });
+        }
+    }
     // SAFETY: plain getter
     if unsafe { libc::geteuid() } == 0 {
         if user.uid == 0 {

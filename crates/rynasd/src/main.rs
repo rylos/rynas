@@ -760,6 +760,17 @@ fn main() -> std::io::Result<()> {
         } else {
             args.files_cache.clone()
         };
+        // the workers in a cgroup of their own (rynasd::cgroup), so that a big job does not
+        // throttle rynasd under its own memory.high
+        if !args.dry_system {
+            match rynasd::cgroup::split_own() {
+                Ok((base, procs)) => {
+                    rynas_files::jobs::manager::set_worker_cgroup(procs);
+                    tracing::info!("file manager workers in {}/{}", base.display(), rynasd::cgroup::WORKERS);
+                }
+                Err(e) => tracing::info!("file manager workers share rynasd's cgroup: {e}"),
+            }
+        }
         let files = rynasd::files::Files::new(ops.clone(), worker, &args.state_dir.join("files"), &cache);
         // removable drives: read below --hw-root; --dry-system only logs the actions
         {

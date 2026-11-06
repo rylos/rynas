@@ -12,6 +12,7 @@
 //! confirmation ([`network`], [`rynas_net`]).
 
 pub mod backup;
+pub mod cgroup;
 pub mod error;
 pub mod files;
 pub mod groups;

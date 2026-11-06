@@ -105,8 +105,20 @@ browser ──HTTPS── rynas-web (user rynas) ──Unix socket── rynasd 
   (`host_key_changed`).
 - Resource bounds: at most 12 request workers at once (the others wait, then 503 `busy`), 2
   transfer jobs at a time (deletions start at once), ffmpeg with one thread; jobs kept 24 h, 200
-  in memory, 2400 samples and 500 errors each (M1). The workers live in rynasd's cgroup
-  (`TasksMax=256`, `MemoryMax=256M`).
+  in memory, 2400 samples and 500 errors each (M1).
+- **Workers in a cgroup of their own** (`rynasd::cgroup`): `rynasd.service` delegates its cgroup
+  (`Delegate=memory pids`, `ProtectControlGroups=private`); at start rynasd moves itself into the
+  leaf `daemon/` (96M high / 256M max) and opens `workers/` (192M / 384M; tunable with
+  `RYNAS_CGROUP_DAEMON` / `RYNAS_CGROUP_WORKERS` in the unit), and every worker moves itself
+  there between fork and exec (one write of "0" to `cgroup.procs`, before the identity
+  change). A `.tar.zst` job or the page cache of a big copy is reclaimed and throttled in
+  `workers/`, never in rynasd's leaf; a worker killed at `workers/`'s `memory.max` fails its
+  request or job and nothing else (`OOMPolicy=continue`). The unit's `MemoryHigh=288M` /
+  `MemoryMax=640M` and `TasksMax=256` bound the sum. Without delegation (an older systemd, a
+  container, `--dry-system`, the tests) everything stays in one cgroup and works the same.
+  Cost, measured: spawn and wait of a process ~300 µs, ~460-560 µs when it moves itself into the
+  leaf; a `systemd-run --scope` per process (the other way to give workers their own limits)
+  ~8 ms.
 
 **Latency: per-request spawn, no warm worker.** A request is a fork + exec of a ~3 MB static-ish
 binary plus one JSON line; see "Measurements" below. Keeping a worker per user warm would save
@@ -378,9 +390,8 @@ Without the module (`NoDrives`) nothing is removable and `eject` answers 501 `no
 
 ### Not done yet
 
-- The worker runs in rynasd's cgroup: a big extraction or ffmpeg on a 4K video counts against
-  `MemoryMax=256M`. Next step: transfer jobs (and maybe thumbnails) in transient units with their
-  own limits and `Nice=`/`IOWeight=`.
+- Workers have their own memory limits (`workers/`) but no `Nice=`/`IOWeight=` of their own
+  yet: `cpu`/`io` could be delegated to `workers/` the same way.
 - `whoami.daemon` is always true; there is no separate transfer service to be down.
 - Remote routes `search` and `space` answer "not available" (as in SynoFile); remote thumbnails
   none.

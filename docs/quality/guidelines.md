@@ -300,7 +300,7 @@ The wasm budget includes the default features of the release build. Track sizes 
 | Process | Idle | Busy (UI open, 3 SSE clients, a task running) | systemd limit |
 |---|---|---|---|
 | rynas-web | < 12 MB | < 20 MB | `MemoryHigh=48M`, `MemoryMax=96M` |
-| rynasd | < 12 MB | < 24 MB (+ children) | `MemoryHigh=96M`, `MemoryMax=256M` (children: mdadm, smartctl, btrfs) |
+| rynasd | < 12 MB | < 24 MB (+ children) | leaf `daemon/` 96M/256M (children: mdadm, smartctl, btrfs), leaf `workers/` 192M/384M (file manager workers), unit `MemoryHigh=288M`, `MemoryMax=640M` (`rynasd::cgroup`) |
 | each plugin process | < 8 MB | < 16 MB | `MemoryMax=64M` unless the plugin documents more |
 | task worker units (backup, dedup, AV) | — | documented per task | `MemoryMax` in the transient unit |
 | UI wasm heap | < 16 MB after 1 h on the dashboard | | — |
