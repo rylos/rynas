@@ -31,7 +31,7 @@ export default {
   "Sulle connessioni remote c'è solo il filtro della cartella": "Remote connections have the folder filter only",
   "Utente": "User",
   "dimentica (è cambiata)": "forget (it changed)",
-  "es. srv03, \\\\srv03\\cartella o sftp://utente@server": "e.g. srv03, \\\\srv03\\folder or sftp://user@server",
+  "es. nas, \\\\nas\\cartella o sftp://utente@server": "e.g. nas, \\\\nas\\folder or sftp://user@server",
   "facoltativo, es. AZIENDA": "optional, e.g. COMPANY",
   "salvata: lasciala vuota per tenerla": "saved: leave it empty to keep it",
   "vuoto: l'elenco delle cartelle condivise": "empty: the list of shared folders",

@@ -13,8 +13,8 @@ export const isRemote = (path) => typeof path === "string" && path.startsWith("/
 export const connId = (path) => (isRemote(path) ? path.slice(2).split("/")[0] : "");
 
 /**
- * A server address as people write it: \\srv03\share\folder, //srv03/share,
- * smb://user@srv03/share, sftp://user@host:2222/path, or a bare host.
+ * A server address as people write it: \\nas\share\folder, //nas/share,
+ * smb://user@nas/share, sftp://user@host:2222/path, or a bare host.
  */
 export function parseAddress(text) {
   let v = (text || "").trim();
@@ -68,7 +68,7 @@ const fieldsHTML = (c) => `
     <button type="button" data-kind="smb" class="${c.kind !== "sftp" ? "on" : ""}">SMB</button>
     <button type="button" data-kind="sftp" class="${c.kind === "sftp" ? "on" : ""}">SFTP</button>
   </div>
-  <label class="field"><span>${t("Indirizzo del server")}</span><input type="text" name="host" value="${esc(c.host || "")}" placeholder="${t("es. srv03, \\\\srv03\\cartella o sftp://utente@server")}" spellcheck="false" autocomplete="off"></label>
+  <label class="field"><span>${t("Indirizzo del server")}</span><input type="text" name="host" value="${esc(c.host || "")}" placeholder="${t("es. nas, \\\\nas\\cartella o sftp://utente@server")}" spellcheck="false" autocomplete="off"></label>
   <div class="conn-row">
     <label class="field"><span>${t("Nome nella barra laterale")}</span><input type="text" name="name" value="${esc(c.name || "")}" spellcheck="false" autocomplete="off"></label>
     <label class="field conn-port"><span>${t("Porta")}</span><input type="number" name="port" min="0" max="65535" value="${c.port || ""}" placeholder="${c.kind === "sftp" ? 22 : 445}"></label>
