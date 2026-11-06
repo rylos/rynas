@@ -850,8 +850,8 @@ fn rollback_preview(
     }
     let ops = p.root.ops(sys, &p.state_dir);
     let k = rootfs::snapshot_kernel(&path);
-    let refusal = if !ops.synodeb() {
-        Some(RollbackRefusal::NotSynodeb)
+    let refusal = if p.boot.is_none() {
+        Some(RollbackRefusal::NoBootLayer)
     } else if !readonly {
         Some(RollbackRefusal::NotReadonly)
     } else if k.release.is_none() {
@@ -905,7 +905,7 @@ fn points_inside_root(sys: &SystemSnapshots) -> bool {
     a.is_some() && a == b
 }
 
-/// Root rollback (synodeb): refused up front when the preview says so, then a task.
+/// Root rollback (with a boot layer): refused up front when the preview says so, then a task.
 async fn root_rollback(
     p: &Arc<Protection>,
     who: &str,
@@ -917,9 +917,7 @@ async fn root_rollback(
     let (pv, l) = blocking(p, move |p| Ok((rollback_preview(p, &i, &l, &s2)?, l))).await?;
     if let Some(r) = pv.refusal {
         let why = match r {
-            RollbackRefusal::NotSynodeb => {
-                "rolling the system back from rynas needs synodeb (synodeb-dom sync); on this system it is a console procedure"
-            }
+            RollbackRefusal::NoBootLayer => rootfs::NO_BOOT_LAYER,
             RollbackRefusal::NoKernel => "the restore point has no kernel image",
             RollbackRefusal::NoModules => {
                 "the restore point lacks /lib/modules of its kernel: it could not boot"
@@ -929,6 +927,7 @@ async fn root_rollback(
         return Err(conflict(error_codes::CONFLICT, why));
     }
     let ops = p.root.ops(&sys, &p.state_dir);
+    let boot = p.boot.clone();
     let task = p.ops.tasks.spawn("snapshot.rollback", who, move |ctx| async move {
         let c = ctx.clone();
         tokio::task::spawn_blocking(move || -> Result<(), String> {
@@ -947,7 +946,7 @@ async fn root_rollback(
                 pv.kernel.as_deref().unwrap_or("?"),
                 pv.running_kernel.as_deref().unwrap_or("?")
             ));
-            let r = rootfs::rollback_root(ops.as_ref(), &plan, &|m| c.log(m))?;
+            let r = rootfs::rollback_root(ops.as_ref(), boot.as_deref(), &plan, &|m| c.log(m))?;
             c.log(&format!(
                 "done: reboot now to start {} with kernel {}. Until then the current system keeps running; it is kept as restore point {} (and as {} at the top of the filesystem, delete it after the reboot).",
                 plan.id, r.kernel, r.before, r.kept_as

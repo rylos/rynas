@@ -166,6 +166,8 @@ fn env(synology: bool) -> Env {
             hardware: Some(p.clone()),
             synodeb: false,
             root: root.clone(),
+            hw_root: hw.clone(),
+            dry: true,
         }) as Arc<dyn rynas_module::Module>],
         None => Vec::new(),
     });

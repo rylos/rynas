@@ -27,6 +27,9 @@
 //!   `/v1/modules/<id>` ([`http`]); rynas-web forwards `/api/v1/modules/<id>/…` by prefix.
 //! - [`Module::hardware_control`]: the actions of the machine's hardware provider behind the
 //!   provider-neutral endpoints of the core (bay identify).
+//! - [`Module::boot`]: a [`boot::BootLayer`] when the machine boots from a device of its own
+//!   (its entries on the updates page, the boot half of a root rollback). Without one the
+//!   updates page shows the kernels in `/boot` and a root rollback is a console procedure.
 //!
 //! The web interface has the matching rule: a module's pages, tabs and texts live in the UI's
 //! module folder and are shown only where the module answers.
@@ -36,10 +39,12 @@ use std::sync::Arc;
 use rynas_config::{Applier, Config};
 use rynas_hw::HardwareControl;
 
+pub mod boot;
 pub mod http;
 pub mod notify;
 pub mod ups;
 
+pub use boot::{BootLayer, BootSync};
 pub use notify::EventForward;
 pub use ups::UpsLayer;
 
@@ -93,6 +98,11 @@ pub trait Module: Send + Sync {
     /// Actions on the machine's hardware (the provider of the module), behind the core's
     /// provider-neutral endpoints.
     fn hardware_control(&self) -> Option<Arc<dyn HardwareControl>> {
+        None
+    }
+
+    /// The boot layer, when the machine boots from a device of its own.
+    fn boot(&self) -> Option<Arc<dyn BootLayer>> {
         None
     }
 }
@@ -158,6 +168,11 @@ impl Modules {
         })
     }
 
+    /// The first module's boot layer (one machine boots one way).
+    pub fn boot(&self) -> Option<Arc<dyn BootLayer>> {
+        self.0.iter().find_map(|m| m.boot())
+    }
+
     /// The first module's hardware control.
     pub fn hardware_control(&self) -> Option<Arc<dyn HardwareControl>> {
         self.0.iter().find_map(|m| m.hardware_control())
@@ -187,6 +202,7 @@ mod tests {
         assert!(m.notify_imports().is_empty() && m.system_disk_usb_ids().is_empty());
         assert!(m.domains().is_empty() && Modules::none().is_empty());
         assert!(m.hardware_control().is_none() && m.ids() == ["bare"]);
+        assert!(m.boot().is_none());
         assert_eq!(m.iter().map(|m| m.id()).collect::<Vec<_>>(), ["bare"]);
     }
 }

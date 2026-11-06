@@ -2129,13 +2129,13 @@ dict! { BLOB, LENS;
     "snap.root_running" => "Kernel running now", "Kernel in esecuzione ora";
     "snap.root_steps" => "What happens", "Cosa succede";
     "snap.root_step1" => "The restore point is mounted read-only and its kernel is checked.", "Il punto di ripristino viene montato in sola lettura e il suo kernel viene controllato.";
-    "snap.root_step2" => "synodeb-dom writes that kernel to the boot flash (DOM). If it refuses, nothing changes.", "synodeb-dom scrive quel kernel sulla flash di avvio (DOM). Se rifiuta, non cambia nulla.";
+    "snap.root_step2" => "The boot entry is pointed at that kernel. If that is refused, nothing changes.", "La voce di avvio viene puntata su quel kernel. Se l'operazione viene rifiutata, non cambia nulla.";
     "snap.root_step3" => "The current system is kept as a new restore point (reason: before rollback), then the restore point becomes the system subvolume (@rootfs).", "Il sistema attuale viene conservato come nuovo punto di ripristino (motivo: before rollback), poi il punto di ripristino diventa il subvolume di sistema (@rootfs).";
     "snap.root_step4" => "You reboot the NAS to start the restored system.", "Riavvii il NAS per avviare il sistema ripristinato.";
     "snap.root_reboot" => "A reboot is needed to finish. Until then the current system keeps running.", "Per finire serve un riavvio. Fino ad allora il sistema attuale continua a funzionare.";
     "snap.root_done" => "At the next reboot the system starts from {id} (kernel {kernel}). Reboot now to finish the rollback.", "Al prossimo riavvio il sistema parte da {id} (kernel {kernel}). Riavvia ora per completare il ripristino.";
     "snap.root_refused_title" => "{id} cannot be restored from here", "{id} non si può ripristinare da qui";
-    "snap.refusal.not_synodeb" => "This system cannot be rolled back from the web interface: the restore point is there, going back to it is a console procedure.", "Questo sistema non si può ripristinare dall'interfaccia web: il punto di ripristino c'è, tornarci è una procedura da console.";
+    "snap.refusal.no_boot_layer" => "This system cannot be rolled back from the web interface: the restore point is there, going back to it is a console procedure.", "Questo sistema non si può ripristinare dall'interfaccia web: il punto di ripristino c'è, tornarci è una procedura da console.";
     "snap.refusal.no_kernel" => "The restore point has no kernel image.", "Il punto di ripristino non contiene un'immagine del kernel.";
     "snap.refusal.no_modules" => "The restore point lacks the modules of its kernel (/lib/modules): it could not boot.", "Al punto di ripristino mancano i moduli del suo kernel (/lib/modules): non potrebbe avviarsi.";
     "snap.refusal.not_readonly" => "Not a read-only snapshot.", "Non è uno snapshot in sola lettura.";
@@ -2498,19 +2498,19 @@ dict! { BLOB, LENS;
     "upd.installed_kernels" => "Installed kernels", "Kernel installati";
     "upd.kernel_newer" => "Kernel {k} is installed but not running: restart to use it.", "Il kernel {k} è installato ma non in uso: riavvia per usarlo.";
     "upd.kernel_mismatch" => "The boot entry has kernel {k}, not the running one.", "La voce di avvio ha il kernel {k}, non quello in uso.";
-    "upd.dom_outdated" => "The boot entries are outdated.", "Le voci di avvio non sono aggiornate.";
-    "upd.dom_error" => "The boot state could not be read.", "Non è stato possibile leggere lo stato dell'avvio.";
-    "upd.dom_default" => "Default entry", "Voce predefinita";
-    "upd.dom_fallback" => "Fallback", "Riserva";
-    "upd.dom_entries" => "Boot entries", "Voci di avvio";
-    "upd.dom_running" => "Booted from", "Avviato da";
-    "upd.dom_kernel" => "Kernel on the DOM", "Kernel sul DOM";
-    "upd.dom_kernel_old" => "Previous kernel", "Kernel precedente";
+    "upd.boot_outdated" => "The boot entries are outdated.", "Le voci di avvio non sono aggiornate.";
+    "upd.boot_error" => "The boot state could not be read.", "Non è stato possibile leggere lo stato dell'avvio.";
+    "upd.boot_default" => "Default entry", "Voce predefinita";
+    "upd.boot_fallback" => "Fallback", "Riserva";
+    "upd.boot_entries" => "Boot entries", "Voci di avvio";
+    "upd.boot_running" => "Booted from", "Avviato da";
+    "upd.boot_kernel" => "Kernel on the boot device", "Kernel sul dispositivo di avvio";
+    "upd.boot_kernel_old" => "Previous kernel", "Kernel precedente";
     "upd.trial" => "Kernel trial", "Prova del kernel";
     "upd.trial_none" => "None", "Nessuna";
     "upd.trial_armed" => "Armed", "Pronta";
     "upd.trial_trying" => "Trying", "In prova";
-    "upd.dom_free" => "Free space on the DOM", "Spazio libero sul DOM";
+    "upd.boot_free" => "Free space on the boot device", "Spazio libero sul dispositivo di avvio";
     // ---- Save in dialogs and editors: stage + apply only that change (config::save_apply)
     "toast.saved_applied" => "Saved and applied", "Salvato e applicato";
     "cfg.applying_now" => "Applying the change…", "Applicazione della modifica…";
@@ -2897,11 +2897,8 @@ mod tests {
             v
         };
         assert!(core.len() > 1000);
-        // root rollback is still a core page (docs/quality/module-boundary-2026-11-06.md)
-        const PENDING: &[&str] = &["snap.root_step2"];
         let hits: Vec<_> = core
             .iter()
-            .filter(|e| !PENDING.contains(&e.0))
             .filter(|(k, en, it)| {
                 k.starts_with("syn.") || [en, it].iter().any(|t| { let l = t.to_lowercase(); l.contains("synology") || l.contains("synodeb") || l.contains("synohwd") })
             })

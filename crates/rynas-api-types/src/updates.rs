@@ -1,5 +1,6 @@
 //! System updates (`/api/v1/updates/...`): Debian packages through apt, automatic updates
-//! with unattended-upgrades, and the kernel / Synology DOM state from `synodeb-dom`.
+//! with unattended-upgrades, and the kernel and boot state (the boot device of a hardware
+//! module's boot layer, where there is one).
 //!
 //! Configuration key `updates.auto` ([`AutoUpdates`]). Checking and installing are rynasd
 //! tasks (`updates.check`, `updates.install`, `updates.autoremove`, `updates.changelog`).
@@ -163,28 +164,29 @@ pub struct AutoUpdatesState {
     pub unattended_installed: bool,
 }
 
-/// Kernel trial of `synodeb-dom` (a new kernel boots once on probation).
+/// Kernel trial of a boot layer (a new kernel boots once on probation).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-pub enum DomTrial {
+pub enum KernelTrial {
     #[default]
     None,
     Armed,
     Trying,
 }
 
-/// A kernel written to the DOM.
+/// A kernel written to the boot device.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct DomKernel {
+pub struct BootKernel {
     #[serde(default)]
     pub release: Option<String>,
     #[serde(default)]
     pub version: Option<String>,
 }
 
-/// `synodeb-dom status --json`, schema 1.
+/// The boot device of a hardware module's boot layer (a boot flash with its own kernel
+/// entries), as the module reads it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct DomStatus {
+pub struct BootImage {
     /// Boot entry titles in GRUB order.
     #[serde(default)]
     pub entries: Vec<String>,
@@ -193,18 +195,18 @@ pub struct DomStatus {
     #[serde(default)]
     pub fallback: Vec<String>,
     #[serde(default)]
-    pub trial: DomTrial,
-    /// Entry of this boot (`DEBIAN`, `DEBIAN_OLD`), when known.
+    pub trial: KernelTrial,
+    /// Entry of this boot, when known.
     #[serde(default)]
     pub running: Option<String>,
     #[serde(default)]
     pub outdated: Option<String>,
-    /// Kernel of the `DEBIAN` entry.
+    /// Kernel of the main entry.
     #[serde(default)]
-    pub kernel: Option<DomKernel>,
-    /// Kernel of the `DEBIAN_OLD` entry.
+    pub kernel: Option<BootKernel>,
+    /// Kernel of the fallback entry (the previous kernel).
     #[serde(default)]
-    pub kernel_old: Option<DomKernel>,
+    pub kernel_old: Option<BootKernel>,
     #[serde(default)]
     pub free_bytes: Option<u64>,
 }
@@ -217,12 +219,13 @@ pub struct KernelStatus {
     /// Kernels installed on the root filesystem (`/boot/vmlinuz-*`), newest first.
     #[serde(default)]
     pub installed: Vec<String>,
-    /// `synodeb-dom` exists on this machine.
+    /// A hardware module's boot layer manages the boot entries of this machine.
     #[serde(default)]
-    pub synodeb: bool,
-    /// Its status (cached for hours: it mounts the DOM); `None` without synodeb or on error.
+    pub boot_layer: bool,
+    /// Its boot device (cached for hours: reading it may mount it); `None` without a boot
+    /// layer or on error.
     #[serde(default)]
-    pub dom: Option<DomStatus>,
+    pub boot: Option<BootImage>,
     #[serde(default)]
     pub read_at_ms: Option<u64>,
     #[serde(default)]

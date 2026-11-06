@@ -8,14 +8,15 @@
 //!   honours on any machine, so the ids only matter without that rule);
 //! - synodeb (its own files `/etc/synodeb/ups.conf` or `/etc/synodeb/notify.conf` below the
 //!   configuration root): the UPS layer ([`crate::ups`], when `ups.conf` exists), the `notify`
-//!   forward and the one-time import of `notify.conf` ([`crate::notify`]).
+//!   forward and the one-time import of `notify.conf` ([`crate::notify`]);
+//! - `synodeb-dom` installed: the boot layer ([`crate::boot`]).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rynas_config::{Applier, Config};
 use rynas_hw::HardwareControl;
-use rynas_module::{EventForward, Module, UpsLayer};
+use rynas_module::{BootLayer, EventForward, Module, UpsLayer};
 
 use crate::Synology;
 
@@ -70,17 +71,23 @@ pub struct SynologyModule {
     pub synodeb: bool,
     /// Configuration root (synodeb's files are below it).
     pub root: PathBuf,
+    /// Root of `/sys`, `/proc`, `/run` (a fake tree under `--dry-system`).
+    pub hw_root: PathBuf,
+    /// `rynasd --dry-system`: the module's tools are never run.
+    pub dry: bool,
 }
 
 impl SynologyModule {
     /// The module when this machine is a Synology or runs synodeb; `None` elsewhere.
-    pub fn detect(hw_root: &Path, root: &Path) -> Option<Self> {
+    pub fn detect(hw_root: &Path, root: &Path, dry: bool) -> Option<Self> {
         let hardware = Synology::detect(hw_root).map(Arc::new);
         let synodeb = synodeb_present(root);
         (hardware.is_some() || synodeb).then(|| Self {
             hardware,
             synodeb,
             root: root.to_path_buf(),
+            hw_root: hw_root.to_path_buf(),
+            dry,
         })
     }
 }
@@ -139,6 +146,11 @@ impl Module for SynologyModule {
         }
     }
 
+    fn boot(&self) -> Option<Arc<dyn BootLayer>> {
+        crate::boot::SynodebDom::find(&self.hw_root, self.dry, self.hardware.is_some())
+            .map(|b| Arc::new(b) as Arc<dyn BootLayer>)
+    }
+
     fn router(&self, ctx: &rynas_module::http::Ctx) -> Option<axum::Router> {
         Some(crate::http::router(ctx.clone(), self.hardware.clone()))
     }
@@ -160,9 +172,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         // a plain Debian, even with the directory an older rynas package created
         std::fs::create_dir_all(root.path().join("etc/synodeb/ups-pre-safemode.d")).unwrap();
-        assert!(SynologyModule::detect(hw.path(), root.path()).is_none());
+        assert!(SynologyModule::detect(hw.path(), root.path(), false).is_none());
         std::fs::write(root.path().join("etc/synodeb/notify.conf"), "MIN_PRIORITY=high\n").unwrap();
-        let m = SynologyModule::detect(hw.path(), root.path()).unwrap();
+        let m = SynologyModule::detect(hw.path(), root.path(), false).unwrap();
         assert!(m.event_forward().is_some() && m.notify_import().is_some());
         // no UPS layer without synodeb's ups.conf, no hardware parts on other hardware
         assert!(m.ups().is_none() && m.domains().is_empty());

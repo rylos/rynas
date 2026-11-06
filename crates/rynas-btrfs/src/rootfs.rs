@@ -1,22 +1,25 @@
-//! Rolling the system back to a restore point on synodeb (D-SNAP, synodeb S6).
+//! Rolling the system back to a restore point (D-SNAP).
 //!
-//! synodeb boots from the DOM (a small flash with its own kernel entries) and mounts the
-//! btrfs subvolume `@rootfs` as `/`. A rollback must change both together, or the DOM boots a
-//! kernel whose `/lib/modules` is not in the root. synodeb 4.3 gives the tool for it:
-//! `synodeb-dom sync --root DIR` rewrites the DOM boot entry from the kernel of the system at
-//! `DIR` and refuses when `DIR` lacks `/lib/modules/<release>`.
+//! The root is the btrfs subvolume `@rootfs`; the kernel that boots it lives where the boot
+//! loader reads it, which may be outside the root (a boot flash with its own kernel entries).
+//! A rollback must change both together, or the machine boots a kernel whose `/lib/modules`
+//! is not in the root. That second half is a [`BootSync`]: the boot layer of a hardware
+//! module, which rewrites the boot entry from the kernel of the system at a directory and
+//! refuses when that directory lacks `/lib/modules/<release>`. Without one the rollback is
+//! refused (a console procedure).
 //!
 //! [`rollback_root`] runs, in order:
 //! 1. the restore point is bind-mounted read-only at `/run/rynas/rollback/<id>`;
-//! 2. its kernel is read (`/vmlinuz` link or newest `/boot/vmlinuz-*`) and `synodeb-dom sync
-//!    --root` runs on it; a refusal stops everything, nothing has changed yet;
+//! 2. its kernel is read (`/vmlinuz` link or newest `/boot/vmlinuz-*`) and the boot entry is
+//!    pointed at it ([`BootSync::sync_root`]); a refusal stops everything, nothing has changed
+//!    yet;
 //! 3. the filesystem's top level (subvolid 5) is mounted at `/run/rynas/rollback/top`; a new
 //!    read-only restore point of the running system is taken (reason "before rollback"); a
 //!    writable snapshot of the chosen restore point is created next to `@rootfs`; the restore
 //!    points (nested subvolumes inside `@rootfs`) move into it, so they stay listed after the
 //!    reboot; then `@rootfs` is renamed `@rootfs.rynas-rollback-<stamp>` and the new one takes
-//!    its name (`RENAME_NOREPLACE`, every step undone if a later one fails, and the DOM entry
-//!    synced back to the running system);
+//!    its name (`RENAME_NOREPLACE`, every step undone if a later one fails, and the boot
+//!    entry synced back to the running system);
 //! 4. both mounts go away and the caller asks for a reboot. The running system keeps working
 //!    until then (it is the renamed subvolume).
 //!
@@ -36,20 +39,16 @@ use crate::ioctl;
 use crate::name::stamp_seconds;
 use crate::system::{self, SystemSnapshot};
 
-/// synodeb's DOM tool (`sync --root` since synodeb 4.3).
-pub const SYNODEB_DOM: &str = "/usr/sbin/synodeb-dom";
 /// Where the rollback mounts what it needs.
 pub const RUN_DIR: &str = "/run/rynas/rollback";
 /// Reason of the restore point kept of the system being replaced.
 pub const BEFORE_REASON: &str = "before rollback";
-/// `synodeb-dom sync` writes a kernel and an initrd to the flash: give it time.
-const DOM_TIMEOUT: Duration = Duration::from_secs(180);
 const MOUNT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The kernel a root tree boots.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Kernel {
-    /// `uname -r` of the kernel image, e.g. `7.3.0-1-synodeb`.
+    /// `uname -r` of the kernel image, e.g. `7.3.0-1-amd64`.
     pub release: Option<String>,
     /// `/lib/modules/<release>` exists in the tree.
     pub modules: bool,
@@ -115,10 +114,20 @@ pub fn snapshot_kernel(root: &Path) -> Kernel {
     Kernel { release, modules }
 }
 
-/// Every effect of a root rollback.
+/// The boot half of a root rollback: points the boot entry at the kernel of a root tree
+/// (a hardware module's boot layer, `rynas_module::BootLayer`).
+pub trait BootSync: Send + Sync {
+    /// The layer's tool, for the task log (`<tool>: …`).
+    fn tool(&self) -> &str;
+    /// Rewrites the boot entry from the kernel of the system at `root`; refuses when `root`
+    /// cannot boot. Its output (a few lines for the task log).
+    fn sync_root(&self, root: &Path) -> Result<String, String>;
+    /// What the admin runs when the boot entry could not be put back to the running system.
+    fn undo_hint(&self) -> String;
+}
+
+/// Every effect of a root rollback on the filesystem.
 pub trait RootOps: Send + Sync {
-    /// synodeb with a DOM tool (root rollback is only offered there).
-    fn synodeb(&self) -> bool;
     /// `uname -r` of the running kernel.
     fn running_kernel(&self) -> Option<String>;
     /// The kernel of the tree mounted at `dir` (see [`snapshot_kernel`]).
@@ -132,8 +141,6 @@ pub trait RootOps: Send + Sync {
     fn mount_top(&self, dir: &Path) -> Result<String, String>;
     /// Unmounts `dir` and removes it.
     fn unmount(&self, dir: &Path) -> Result<(), String>;
-    /// `synodeb-dom sync --root <root>`; its output.
-    fn dom_sync(&self, root: &Path) -> Result<String, String>;
     /// A read-only restore point of the running system, never skipped; its name.
     fn restore_point(&self, reason: &str, now_s: i64) -> Result<String, String>;
     /// Writable snapshot of `src` as `dir/name`.
@@ -182,18 +189,19 @@ pub struct RolledBackRoot {
     pub moved: usize,
 }
 
+/// Why a root rollback is refused without a boot layer.
+pub const NO_BOOT_LAYER: &str = "this system has no boot layer rynas can point at a restore point's kernel: rolling the system back is a console procedure";
+
 /// See the module documentation. Errors are complete sentences for the task log.
 pub fn rollback_root(
     ops: &dyn RootOps,
+    boot: Option<&dyn BootSync>,
     r: &RootRollback,
     log: &dyn Fn(&str),
 ) -> Result<RolledBackRoot, String> {
-    if !ops.synodeb() {
-        return Err(
-            "rolling the system back from rynas needs synodeb (synodeb-dom); use the console procedure"
-                .into(),
-        );
-    }
+    let Some(boot) = boot else {
+        return Err(NO_BOOT_LAYER.into());
+    };
     let mnt = r.run_dir.join(&r.id);
     log(&format!(
         "mounting {} read-only at {}",
@@ -201,7 +209,7 @@ pub fn rollback_root(
         mnt.display()
     ));
     ops.mount_ro(&r.snapshot, &mnt)?;
-    let out = with_snapshot(ops, r, &mnt, log);
+    let out = with_snapshot(ops, boot, r, &mnt, log);
     if let Err(e) = ops.unmount(&mnt) {
         log(&format!("warning: unmounting {}: {e}", mnt.display()));
     }
@@ -210,6 +218,7 @@ pub fn rollback_root(
 
 fn with_snapshot(
     ops: &dyn RootOps,
+    boot: &dyn BootSync,
     r: &RootRollback,
     mnt: &Path,
     log: &dyn Fn(&str),
@@ -228,8 +237,9 @@ fn with_snapshot(
         ));
     }
     log(&format!("the restore point boots kernel {kernel}"));
-    log(&format!("synodeb-dom sync --root {}", mnt.display()));
-    match ops.dom_sync(mnt) {
+    let tool = boot.tool();
+    log(&format!("{tool}: boot entry from {}", mnt.display()));
+    match boot.sync_root(mnt) {
         Ok(o) => {
             for l in o.lines().filter(|l| !l.trim().is_empty()).take(20) {
                 log(&format!("  {l}"));
@@ -237,7 +247,7 @@ fn with_snapshot(
         }
         Err(e) => {
             return Err(format!(
-                "synodeb-dom refused the restore point: {e}. Nothing was changed."
+                "{tool} refused the restore point: {e}. Nothing was changed."
             ));
         }
     }
@@ -247,11 +257,12 @@ fn with_snapshot(
             Ok(done)
         }
         Err(e) => {
-            log("putting the DOM boot entry back to the running system");
-            match ops.dom_sync(Path::new("/")) {
+            log("putting the boot entry back to the running system");
+            match boot.sync_root(Path::new("/")) {
                 Ok(_) => Err(format!("{e}. The system was left as it was.")),
                 Err(e2) => Err(format!(
-                    "{e}. The root was left as it was, but synodeb-dom could not restore the DOM entry ({e2}): run `synodeb-dom sync --root /` before rebooting."
+                    "{e}. The root was left as it was, but {tool} could not restore the boot entry ({e2}): {} before rebooting.",
+                    boot.undo_hint()
                 )),
             }
         }
@@ -404,7 +415,7 @@ fn run(cmd: Cmd) -> Result<String, String> {
     }
 }
 
-/// The real thing (rynasd as root on synodeb).
+/// The real thing (rynasd as root).
 pub struct HostRoot {
     /// The restore point settings (subvolume `/`, directory, prefix, keep, reasons log).
     pub subvolume: PathBuf,
@@ -415,10 +426,6 @@ pub struct HostRoot {
 }
 
 impl RootOps for HostRoot {
-    fn synodeb(&self) -> bool {
-        Path::new(SYNODEB_DOM).is_file()
-    }
-
     fn running_kernel(&self) -> Option<String> {
         std::fs::read_to_string("/proc/sys/kernel/osrelease")
             .ok()
@@ -466,13 +473,6 @@ impl RootOps for HostRoot {
         run(Cmd::new("umount").arg(dir).timeout(MOUNT_TIMEOUT))?;
         let _ = std::fs::remove_dir(dir);
         Ok(())
-    }
-
-    fn dom_sync(&self, root: &Path) -> Result<String, String> {
-        run(Cmd::new(SYNODEB_DOM)
-            .args(["sync", "--root"])
-            .arg(root)
-            .timeout(DOM_TIMEOUT))
     }
 
     fn restore_point(&self, reason: &str, now_s: i64) -> Result<String, String> {
@@ -563,26 +563,18 @@ impl RootOps for HostRoot {
 
 /// `rynasd --dry-system`: every step is logged, nothing is mounted, run or renamed. The
 /// kernel is read from the restore point itself.
+#[derive(Default)]
 pub struct DryRoot {
-    /// Pretend this is synodeb (the hardware root has `usr/sbin/synodeb-dom`).
-    pub synodeb: bool,
     mounts: Mutex<HashMap<PathBuf, PathBuf>>,
 }
 
 impl DryRoot {
-    pub fn new(synodeb: bool) -> Self {
-        Self {
-            synodeb,
-            mounts: Mutex::new(HashMap::new()),
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 
 impl RootOps for DryRoot {
-    fn synodeb(&self) -> bool {
-        self.synodeb
-    }
-
     fn running_kernel(&self) -> Option<String> {
         std::fs::read_to_string("/proc/sys/kernel/osrelease")
             .ok()
@@ -615,11 +607,6 @@ impl RootOps for DryRoot {
         tracing::info!("dry: umount {}", dir.display());
         self.mounts.lock().unwrap().remove(dir);
         Ok(())
-    }
-
-    fn dom_sync(&self, root: &Path) -> Result<String, String> {
-        tracing::info!("dry: {SYNODEB_DOM} sync --root {}", root.display());
-        Ok("dry system: synodeb-dom not run".into())
     }
 
     fn restore_point(&self, reason: &str, now_s: i64) -> Result<String, String> {
@@ -657,13 +644,10 @@ impl RootOps for DryRoot {
     }
 }
 
-/// Not synodeb (and the default of tests): root rollback is refused.
+/// The default of tests: every effect fails.
 pub struct NoRoot;
 
 impl RootOps for NoRoot {
-    fn synodeb(&self) -> bool {
-        false
-    }
     fn running_kernel(&self) -> Option<String> {
         None
     }
@@ -675,9 +659,6 @@ impl RootOps for NoRoot {
     }
     fn unmount(&self, _: &Path) -> Result<(), String> {
         Ok(())
-    }
-    fn dom_sync(&self, _: &Path) -> Result<String, String> {
-        Err("not supported".into())
     }
     fn restore_point(&self, _: &str, _: i64) -> Result<String, String> {
         Err("not supported".into())
@@ -733,10 +714,20 @@ mod tests {
         }
     }
 
-    impl RootOps for Fake {
-        fn synodeb(&self) -> bool {
-            true
+    impl BootSync for Fake {
+        fn tool(&self) -> &str {
+            "boot-tool"
         }
+        fn sync_root(&self, r: &Path) -> Result<String, String> {
+            self.rec(format!("boot_sync {}", r.display()))
+                .map(|_| "DEBIAN: 7.3.0-1-synodeb".into())
+        }
+        fn undo_hint(&self) -> String {
+            "run `boot-tool sync --root /`".into()
+        }
+    }
+
+    impl RootOps for Fake {
         fn running_kernel(&self) -> Option<String> {
             Some("7.4.0-1-synodeb".into())
         }
@@ -752,10 +743,6 @@ mod tests {
         }
         fn unmount(&self, d: &Path) -> Result<(), String> {
             self.rec(format!("unmount {}", d.display()))
-        }
-        fn dom_sync(&self, r: &Path) -> Result<String, String> {
-            self.rec(format!("dom_sync {}", r.display()))
-                .map(|_| "DEBIAN: 7.3.0-1-synodeb".into())
         }
         fn restore_point(&self, reason: &str, _: i64) -> Result<String, String> {
             self.rec(format!("restore_point {reason}"))
@@ -794,7 +781,7 @@ mod tests {
     #[test]
     fn full_rollback_in_order() {
         let f = Fake::new(None);
-        let r = rollback_root(&f, &plan(), &|_| {}).unwrap();
+        let r = rollback_root(&f, Some(&f), &plan(), &|_| {}).unwrap();
         assert_eq!(r.kernel, "7.3.0-1-synodeb");
         assert_eq!(r.before, "rootfs.20261105T1200");
         assert!(
@@ -807,7 +794,7 @@ mod tests {
         let stamp = stamp_seconds(plan().now_s);
         let want = [
             "mount_ro /.snapshots/rootfs/rootfs.20261101T0300 /run/rynas/rollback/rootfs.20261101T0300".to_string(),
-            "dom_sync /run/rynas/rollback/rootfs.20261101T0300".into(),
+            "boot_sync /run/rynas/rollback/rootfs.20261101T0300".into(),
             "mount_top /run/rynas/rollback/top".into(),
             "restore_point before rollback".into(),
             format!("snapshot /run/rynas/rollback/top/@rootfs/.snapshots/rootfs/rootfs.20261101T0300 /run/rynas/rollback/top/@rootfs.rynas-new-{stamp}"),
@@ -823,33 +810,30 @@ mod tests {
     }
 
     #[test]
-    fn a_dom_refusal_changes_nothing() {
-        let f = Fake::new(Some("dom_sync"));
-        let e = rollback_root(&f, &plan(), &|_| {}).unwrap_err();
-        assert!(
-            e.contains("synodeb-dom refused") && e.contains("boom"),
-            "{e}"
-        );
+    fn a_boot_refusal_changes_nothing() {
+        let f = Fake::new(Some("boot_sync"));
+        let e = rollback_root(&f, Some(&f), &plan(), &|_| {}).unwrap_err();
+        assert!(e.contains("boot-tool refused") && e.contains("boom"), "{e}");
         let c = f.calls();
         assert_eq!(c.len(), 3, "{c:?}");
         assert!(c[2].starts_with("unmount /run/rynas/rollback/rootfs."));
     }
 
     #[test]
-    fn missing_modules_stop_before_the_dom() {
+    fn missing_modules_stop_before_the_boot_entry() {
         let mut f = Fake::new(None);
         f.kernel.modules = false;
-        let e = rollback_root(&f, &plan(), &|_| {}).unwrap_err();
+        let e = rollback_root(&f, Some(&f), &plan(), &|_| {}).unwrap_err();
         assert!(e.contains("/lib/modules/7.3.0-1-synodeb"), "{e}");
-        assert!(!f.calls().iter().any(|c| c.starts_with("dom_sync")));
+        assert!(!f.calls().iter().any(|c| c.starts_with("boot_sync")));
     }
 
     #[test]
-    fn a_failed_swap_is_undone_and_the_dom_synced_back() {
+    fn a_failed_swap_is_undone_and_the_boot_entry_synced_back() {
         // the second rename fails: the first is undone, restore points move back, the copy
-        // is deleted, the DOM goes back to the running system
+        // is deleted, the boot entry goes back to the running system
         let f = Fake::new(Some("rename /run/rynas/rollback/top: @rootfs.rynas-new"));
-        let e = rollback_root(&f, &plan(), &|_| {}).unwrap_err();
+        let e = rollback_root(&f, Some(&f), &plan(), &|_| {}).unwrap_err();
         assert!(e.contains("left as it was"), "{e}");
         let c = f.calls();
         let stamp = stamp_seconds(plan().now_s);
@@ -871,14 +855,14 @@ mod tests {
             format!("delete /run/rynas/rollback/top/@rootfs.rynas-new-{stamp}")
         );
         assert_eq!(c[i + 5], "unmount /run/rynas/rollback/top");
-        assert_eq!(c[i + 6], "dom_sync /");
+        assert_eq!(c[i + 6], "boot_sync /");
         assert!(c[i + 7].starts_with("unmount /run/rynas/rollback/rootfs."));
     }
 
     #[test]
-    fn refused_without_synodeb() {
-        let e = rollback_root(&NoRoot, &plan(), &|_| {}).unwrap_err();
-        assert!(e.contains("needs synodeb"), "{e}");
+    fn refused_without_a_boot_layer() {
+        let e = rollback_root(&NoRoot, None, &plan(), &|_| {}).unwrap_err();
+        assert_eq!(e, NO_BOOT_LAYER);
     }
 
     #[test]
@@ -920,7 +904,19 @@ mod tests {
         let mut p = plan();
         p.snapshot = d.path().to_path_buf();
         p.run_dir = d.path().join("run");
-        let r = rollback_root(&DryRoot::new(true), &p, &|_| {}).unwrap();
+        struct Logged;
+        impl BootSync for Logged {
+            fn tool(&self) -> &str {
+                "boot-tool"
+            }
+            fn sync_root(&self, _: &Path) -> Result<String, String> {
+                Ok("dry".into())
+            }
+            fn undo_hint(&self) -> String {
+                String::new()
+            }
+        }
+        let r = rollback_root(&DryRoot::new(), Some(&Logged), &p, &|_| {}).unwrap();
         assert_eq!(r.kernel, "7.3.0-1-synodeb");
         assert!(
             !d.path().join("run").exists(),

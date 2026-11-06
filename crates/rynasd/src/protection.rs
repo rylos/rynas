@@ -30,9 +30,12 @@ pub struct Protection {
     pub notifier: Arc<dyn Notifier>,
     /// rynasd's state directory (reasons log of system restore points, previews).
     pub state_dir: PathBuf,
-    /// Who carries out a root rollback (synodeb only): [`RootBackend::None`] until `main`
-    /// chooses the host or the dry system.
+    /// Who carries out the filesystem half of a root rollback: [`RootBackend::None`] until
+    /// `main` chooses the host or the dry system.
     pub root: RootBackend,
+    /// The boot half: a hardware module's boot layer; `None` refuses root rollbacks (a
+    /// console procedure on this machine).
+    pub boot: Option<Arc<dyn rynas_btrfs::rootfs::BootSync>>,
     /// Timers and running task units, read at most every [`RUNTIME_TTL`] (guidelines S8).
     /// `(read at, read at in ms since the epoch, state)`.
     runtime: Mutex<Option<(Instant, u64, Arc<Runtime>)>>,
@@ -52,9 +55,9 @@ pub const RUNTIME_TTL: Duration = Duration::from_secs(2);
 /// The executor of root rollbacks ([`rynas_btrfs::rootfs`]).
 #[derive(Clone)]
 pub enum RootBackend {
-    /// Refused (tests, machines that are not synodeb are detected by the host backend too).
+    /// Every effect fails (tests).
     None,
-    /// The machine: mounts, `synodeb-dom sync`, renames.
+    /// The machine: mounts, snapshots, renames.
     Host,
     /// `--dry-system` or a test fake.
     Custom(Arc<dyn rynas_btrfs::rootfs::RootOps>),
@@ -102,6 +105,7 @@ impl Protection {
             notifier,
             state_dir,
             root: RootBackend::None,
+            boot: None,
             runtime: Mutex::new(None),
             runtime_flight: tokio::sync::Mutex::new(()),
         }
@@ -158,6 +162,12 @@ impl Protection {
     /// Sets the root rollback executor.
     pub fn with_root(mut self, root: RootBackend) -> Self {
         self.root = root;
+        self
+    }
+
+    /// Sets the boot layer of root rollbacks (a hardware module's).
+    pub fn with_boot(mut self, boot: Option<Arc<dyn rynas_btrfs::rootfs::BootSync>>) -> Self {
+        self.boot = boot;
         self
     }
 

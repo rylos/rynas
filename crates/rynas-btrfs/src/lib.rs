@@ -7,7 +7,8 @@
 //! - [`restore`]: file/folder restore (copy next to it, or replace after saving the current
 //!   version) and rollback of a whole subvolume by rename;
 //! - [`system`]: system restore points before apt (`rynasctl snapshot system`);
-//! - [`rootfs`]: rolling the system back to a restore point on synodeb (DOM kernel + `@rootfs`);
+//! - [`rootfs`]: rolling the system back to a restore point (`@rootfs` and, through a hardware
+//!   module's boot layer, the boot entry of its kernel);
 //! - [`btrbk`]: the configuration rynas generates per job and btrbk's raw output;
 //! - [`domain`]: the `snapshots` configuration domain.
 //!

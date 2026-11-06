@@ -8,10 +8,11 @@ use std::sync::Arc;
 use rynas_module::{Module, Modules};
 
 /// The modules of the machine below `hw_root` (`/sys`, `/proc`, `/run`) whose system layer's
-/// files are below the configuration root `root`.
-pub fn detect(hw_root: &Path, root: &Path) -> Modules {
+/// files are below the configuration root `root`; `dry`: `rynasd --dry-system` (the modules
+/// run none of their tools).
+pub fn detect(hw_root: &Path, root: &Path, dry: bool) -> Modules {
     let mut list: Vec<Arc<dyn Module>> = Vec::new();
-    if let Some(m) = rynas_hw_synology::module::SynologyModule::detect(hw_root, root) {
+    if let Some(m) = rynas_hw_synology::module::SynologyModule::detect(hw_root, root, dry) {
         list.push(Arc::new(m));
     }
     Modules::new(list)

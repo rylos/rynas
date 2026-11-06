@@ -3346,6 +3346,7 @@ dependencies = [
  "axum",
  "rynas-api-types",
  "rynas-auth",
+ "rynas-btrfs",
  "rynas-config",
  "rynas-http",
  "rynas-hw",

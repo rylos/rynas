@@ -262,7 +262,7 @@ fn open_config(
         Arc::new(rynas_updates::AutoDomain),
     ];
     // hardware modules (D-MODULE): registered only where their hardware or system layer is
-    let modules = rynasd::modules::detect(&args.hw_root, &root);
+    let modules = rynasd::modules::detect(&args.hw_root, &root, args.dry_system);
     for m in modules.iter() {
         tracing::info!("module {}", m.summary());
     }
@@ -660,15 +660,19 @@ fn main() -> std::io::Result<()> {
             notifier.clone(),
             args.state_dir.clone(),
         )
-        // root rollback: the machine, or (--dry-system) only logged, as synodeb when the
-        // hardware root has synodeb-dom
+        // root rollback: the machine, or (--dry-system) only logged; the boot half is a
+        // module's boot layer (none: refused, a console procedure)
         .with_root(if args.dry_system {
-            rynasd::protection::RootBackend::Custom(Arc::new(rynas_btrfs::rootfs::DryRoot::new(
-                rynas_hw::under(&args.hw_root, rynas_btrfs::rootfs::SYNODEB_DOM).is_file(),
-            )))
+            rynasd::protection::RootBackend::Custom(Arc::new(rynas_btrfs::rootfs::DryRoot::new()))
         } else {
             rynasd::protection::RootBackend::Host
-        });
+        })
+        .with_boot(
+            opened
+                .modules
+                .boot()
+                .map(|b| b as Arc<dyn rynas_btrfs::rootfs::BootSync>),
+        );
         let protection = Arc::new(protection);
         state.protection = Some(protection.clone());
         let ups = Arc::new(rynasd::ups::Ups {
@@ -769,12 +773,15 @@ fn main() -> std::io::Result<()> {
                 modules.start(&cfg, &|l| tracing::info!("{l}"));
             });
         }
-        let updates = Arc::new(rynasd::updates::Updates::new(
-            ops.clone(),
-            notifier.clone(),
-            args.dry_system,
-            config_root(&args),
-        ));
+        let updates = Arc::new(
+            rynasd::updates::Updates::new(
+                ops.clone(),
+                notifier.clone(),
+                args.dry_system,
+                config_root(&args),
+            )
+            .with_boot(opened.modules.boot()),
+        );
         rynasd::updates::spawn_daily(updates.clone());
         state.updates = Some(updates);
         // the file manager: workers next to rynasd unless told otherwise

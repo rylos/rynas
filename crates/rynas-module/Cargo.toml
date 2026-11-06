@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 rynas-api-types.workspace = true
 rynas-auth.workspace = true
+rynas-btrfs.workspace = true
 rynas-config.workspace = true
 rynas-hw.workspace = true
 rynas-http.workspace = true
