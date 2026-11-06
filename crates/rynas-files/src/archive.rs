@@ -1,7 +1,8 @@
 //! Archives opened like folders: zip, 7z, rar and tar (plain or compressed)
 //! are listed with 7-Zip, unrar and GNU tar (optional packages) and single
 //! members are streamed out of them. Read-only: nothing is ever written
-//! into an archive.
+//! into an archive. GNU tar runs the decompressor by name (gzip, bzip2, xz,
+//! zstd): a missing one is a `tool_missing` error, not a damaged archive.
 
 use crate::wire::ApiError;
 use crate::fsops::Entry;
@@ -22,11 +23,29 @@ pub enum Format {
     Tar(Option<&'static str>),
 }
 
+/// The tar archives by their extension, with GNU tar's flag for the compression.
+pub const TAR: [(&str, Option<&str>); 12] = [
+    (".tar", None),
+    (".tar.gz", Some("-z")),
+    (".tgz", Some("-z")),
+    (".tar.bz2", Some("-j")),
+    (".tbz2", Some("-j")),
+    (".tbz", Some("-j")),
+    (".tar.xz", Some("-J")),
+    (".txz", Some("-J")),
+    (".tar.zst", Some("--zstd")),
+    (".tar.zstd", Some("--zstd")),
+    (".tzst", Some("--zstd")),
+    (".tzstd", Some("--zstd")),
+];
+
+/// The extensions of a zstd-compressed tar; the file manager writes the first.
+pub const TAR_ZSTD: [&str; 4] = [".tar.zst", ".tar.zstd", ".tzst", ".tzstd"];
+
 /// The format of an archive that can be opened as a folder, from its name.
 pub fn format(name: &str) -> Option<Format> {
     let n = name.to_ascii_lowercase();
-    let tar = [(".tar", None), (".tar.gz", Some("-z")), (".tgz", Some("-z")), (".tar.bz2", Some("-j")), (".tbz2", Some("-j")), (".tbz", Some("-j")), (".tar.xz", Some("-J")), (".txz", Some("-J")), (".tar.zst", Some("--zstd"))];
-    if let Some((_, flag)) = tar.iter().find(|(ext, _)| n.ends_with(ext)) {
+    if let Some((_, flag)) = TAR.iter().find(|(ext, _)| n.ends_with(ext)) {
         return Some(Format::Tar(*flag));
     }
     if n.ends_with(".rar") {
@@ -71,10 +90,48 @@ pub fn locate(real: &Path) -> Option<(PathBuf, String)> {
     }
 }
 
+/// The PATH the tools run with, whatever the caller's.
+pub const TOOL_PATH: &str = "/usr/bin:/bin:/usr/local/bin";
+
+/// The programs `fmt` needs: the one that reads it and, for a compressed
+/// tar, the decompressor GNU tar runs by name.
+pub fn programs(fmt: Format) -> Vec<&'static str> {
+    match fmt {
+        Format::SevenZip => vec!["7z"],
+        Format::Rar => vec!["unrar"],
+        Format::Tar(flag) => {
+            let filter = match flag {
+                Some("-z") => Some("gzip"),
+                Some("-j") => Some("bzip2"),
+                Some("-J") => Some("xz"),
+                Some("--zstd") => Some("zstd"),
+                _ => None,
+            };
+            std::iter::once("tar").chain(filter).collect()
+        }
+    }
+}
+
+/// Whether `program` is on [`TOOL_PATH`].
+pub fn installed(program: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    TOOL_PATH.split(':').any(|dir| fs::metadata(Path::new(dir).join(program)).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0))
+}
+
+/// The first program `fmt` needs that is not installed.
+pub fn missing(fmt: Format) -> Option<&'static str> {
+    programs(fmt).into_iter().find(|p| !installed(p))
+}
+
+/// The error for an archive whose program is not installed.
+pub fn tool_missing(program: &str) -> ApiError {
+    ApiError::new(503, t!("{} is not installed", program)).code(rynas_api_types::error_codes::TOOL_MISSING)
+}
+
 fn tool(program: &str) -> Command {
     let mut c = Command::new(program);
     // p7zip reads UTF-8 names right only in a UTF-8 locale
-    c.env("LC_ALL", "en_US.utf8").env("LANG", "en_US.utf8").env("PATH", "/usr/bin:/bin:/usr/local/bin");
+    c.env("LC_ALL", "en_US.utf8").env("LANG", "en_US.utf8").env("PATH", TOOL_PATH);
     c.stdin(Stdio::null());
     c
 }
@@ -124,6 +181,9 @@ fn prune(dir: &Path) {
 }
 
 fn read_members(archive: &Path, fmt: Format) -> Result<Vec<Member>, ApiError> {
+    if let Some(program) = missing(fmt) {
+        return Err(tool_missing(program));
+    }
     let mut cmd = match fmt {
         Format::SevenZip => {
             let mut c = tool("7z");
@@ -429,8 +489,25 @@ mod tests {
         assert_eq!(format("a.tar.gz"), Some(Format::Tar(Some("-z"))));
         assert_eq!(format("a.tar"), Some(Format::Tar(None)));
         assert_eq!(format("a.rar"), Some(Format::Rar));
+        for name in ["a.tar.zst", "a.TAR.ZSTD", "a.tzst", "a.Tzstd"] {
+            assert_eq!(format(name), Some(Format::Tar(Some("--zstd"))), "{name}");
+        }
+        assert_eq!(format("a.tbz"), Some(Format::Tar(Some("-j"))));
+        // a compressed file, not an archive
+        assert_eq!(format("a.zst"), None);
         assert_eq!(format("a.gz"), None);
         assert_eq!(format("a.txt"), None);
+    }
+
+    #[test]
+    fn programs_needed() {
+        assert_eq!(programs(Format::Tar(Some("--zstd"))), ["tar", "zstd"]);
+        assert_eq!(programs(Format::Tar(None)), ["tar"]);
+        assert_eq!(programs(Format::Rar), ["unrar"]);
+        assert!(installed("sh"));
+        assert!(!installed("rynas-no-such-program"));
+        let e = tool_missing("zstd");
+        assert_eq!((e.status, e.code), (503, "tool_missing"));
     }
 
     #[test]
