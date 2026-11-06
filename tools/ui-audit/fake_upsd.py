@@ -5,6 +5,8 @@ USERNAME/PASSWORD, INSTCMD on localhost.
 
 Status: `ol` (default): on mains, charging; `ob`: on battery, discharging (charge and runtime
 fall a little at every reading); `lb`: on battery with low battery; `none`: upsd without any UPS.
+The load (and the mains voltage of `ol`) drifts every 5 s as on a real unit, so rynas-web pushes
+`ups.status` at every poll (the UPS page's idle redraw check).
 Battery test commands offered (`LIST CMD`): `all` (default: quick, deep, stop), `quick` (quick
 and stop), `none`. INSTCMD of an offered test answers OK (any user and password) and moves
 `ups.test.result` to "In progress", then to "Done and passed" after 20 s (`stop`: "Aborted").
@@ -52,10 +54,11 @@ def variables():
         "device.model": "Back-UPS ES 700G",
         "device.serial": "5B1234X56789",
         "driver.name": "usbhid-ups",
-        "input.voltage": "0.0" if MODE != "ol" else "229.0",
+        # mains voltage and load drift like a real unit: a new reading every 5 s poll
+        "input.voltage": "0.0" if MODE != "ol" else f"{228 + int(t / 5) % 4}.0",
         "output.voltage": "230.0",
         "ups.beeper.status": "enabled",
-        "ups.load": "18",
+        "ups.load": str(16 + int(t / 5) % 3),
         "ups.status": status,
         "ups.test.result": test_result(),
     }

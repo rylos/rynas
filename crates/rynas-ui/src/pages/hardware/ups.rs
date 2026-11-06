@@ -146,88 +146,126 @@ pub fn empty_text(link: UpsLink, backend: UpsBackend) -> &'static str {
     }
 }
 
+/// One value of the live reading as a memo: it notifies only when that value changes, not at
+/// every `ups.status` event (`T::default()` while there is no reading).
+fn pick<T: PartialEq + Default + Send + Sync + 'static>(u: RwSignal<Option<UpsStatus>>, f: impl Fn(&UpsStatus) -> T + Send + Sync + 'static) -> Memo<T> {
+    Memo::new(move |_| u.with(|s| s.as_ref().map(&f).unwrap_or_default()))
+}
+
 fn status_card(settings: Remote<UpsSettingsState>) -> AnyView {
     let live = use_live();
     let u = live.ups;
     let backend = backend_of(settings);
-    let body = move || {
-        let Some(s) = u.get() else {
-            return view! { <Skeleton lines=4 /> }.into_any();
-        };
-        if s.link != UpsLink::Connected {
-            let title = if s.link == UpsLink::NotConfigured { "ups.none_title" } else { "ups.down_title" };
-            let link = s.link;
+    // the card's frame changes only with the link; a new reading updates texts and bars
+    let link = pick(u, |s| Some(s.link));
+    let body = move || match link.get() {
+        None => view! { <Skeleton lines=4 /> }.into_any(),
+        Some(link) if link != UpsLink::Connected => {
+            let title = if link == UpsLink::NotConfigured { "ups.none_title" } else { "ups.down_title" };
             let body = move || empty_text(link, backend.get());
-            return view! {
+            view! {
                 <EmptyState icon=icons::BATTERY_CHARGING title=Signal::derive(move || t(title).to_string()) text=Signal::derive(move || t(body()).to_string())>
                     <button class="btn ghost" on:click=move |_| live.refresh_ups()><Icon icon=icons::REFRESH_CW size=16 />{tr("err.retry")}</button>
                 </EmptyState>
             }
-            .into_any();
+            .into_any()
         }
-        let (tone, key) = state_of(&s);
-        let charge = s.battery_charge_pct;
-        let load = s.load_pct;
-        let aria = format!(
-            "{}: {} · {}: {}",
-            t("ups.charge"),
-            charge.map(|c| i18n::pct(c as f64)).unwrap_or_else(|| "—".into()),
-            t("ups.runtime"),
-            s.battery_runtime_s.map(i18n::duration).unwrap_or_else(|| "—".into())
-        );
-        let flags = s.flags.iter().map(|f| {
-            let txt = flag_key(f).map(|k| t(k).to_string()).unwrap_or_else(|| f.clone());
-            status(flag_tone(f), txt)
-        }).collect_view();
-        view! {
-            <div class="ups-head">
-                <Status tone=tone text=t(key).to_string() />
-                <span class="ups-flags">{flags}</span>
-            </div>
-            <div class="hw-summary ups-kpis" role="img" aria-label=aria>
-                <div class="hw-sum-item">
-                    <span class="muted small">{tr("ups.charge")}</span>
-                    <strong class="tnum">{charge.map(|c| i18n::pct(c as f64)).unwrap_or_else(|| "—".into())}</strong>
-                    {charge.map(|c| view! { <Meter pct=c as f64 tone=Signal::stored(charge_tone(c)) /> })}
-                </div>
-                <div class="hw-sum-item">
-                    <span class="muted small">{tr("ups.runtime")}</span>
-                    <strong class="tnum">{s.battery_runtime_s.map(i18n::duration).unwrap_or_else(|| "—".into())}</strong>
-                </div>
-                <div class="hw-sum-item">
-                    <span class="muted small">{tr("ups.load")}</span>
-                    <strong class="tnum">{load.map(|l| i18n::pct(l as f64)).unwrap_or_else(|| "—".into())}</strong>
-                    {load.map(|l| view! { <Meter pct=l as f64 tone=Signal::stored(load_tone(l)) /> })}
-                </div>
-                <div class="hw-sum-item">
-                    <span class="muted small">{tr("ups.input")}</span>
-                    <strong class="tnum">{volts(s.input_voltage_v)}</strong>
-                </div>
-                <div class="hw-sum-item">
-                    <span class="muted small">{tr("ups.output")}</span>
-                    <strong class="tnum">{volts(s.output_voltage_v)}</strong>
-                </div>
-            </div>
-            <dl class="kvs">
-                {kv("ups.manufacturer", text(dash(s.manufacturer.clone())))}
-                {kv("f.model", text(dash(s.model.clone())))}
-                {kv("sto.serial", view! { <span class="mono">{dash(s.serial.clone())}</span> }.into_any())}
-                {s.beeper.clone().map(|b| {
-                    let k = match b.as_str() { "enabled" => "ups.beeper_on", "disabled" => "ups.beeper_off", "muted" => "ups.beeper_muted", _ => "" };
-                    kv("ups.beeper", text(if k.is_empty() { b } else { t(k).to_string() }))
-                })}
-                {s.battery_date.clone().map(|d| kv("ups.battery_date", text(d)))}
-                {kv("ups.driver", text(format!("{} · {}", dash(s.name.clone()), dash(s.driver.clone()))))}
-                {kv("hw.updated", text(i18n::short_when(s.read_at_ms)))}
-            </dl>
-        }
-        .into_any()
+        Some(_) => connected_view(u),
     };
     view! {
         <section class="card widget">
             <WidgetHead icon=icons::BATTERY_CHARGING title="ups.status" />
             {body}
         </section>
+    }
+    .into_any()
+}
+
+/// The status of a connected UPS. Built once per connection: every value is its own memo and
+/// text node, the flags a keyed list, so a reading every few seconds changes texts and bar
+/// widths in place (no blink; hover and selection kept).
+fn connected_view(u: RwSignal<Option<UpsStatus>>) -> AnyView {
+    let state = pick(u, |s| Some(state_of(s)));
+    let flags = pick(u, |s| s.flags.clone());
+    let charge = pick(u, |s| s.battery_charge_pct);
+    let runtime = pick(u, |s| s.battery_runtime_s);
+    let load = pick(u, |s| s.load_pct);
+    let input = pick(u, |s| s.input_voltage_v);
+    let output = pick(u, |s| s.output_voltage_v);
+    let manufacturer = pick(u, |s| s.manufacturer.clone());
+    let model = pick(u, |s| s.model.clone());
+    let serial = pick(u, |s| s.serial.clone());
+    let beeper = pick(u, |s| s.beeper.clone());
+    let battery_date = pick(u, |s| s.battery_date.clone());
+    let driver = pick(u, |s| format!("{} · {}", dash(s.name.clone()), dash(s.driver.clone())));
+    let read_at = pick(u, |s| s.read_at_ms);
+    let has_charge = Memo::new(move |_| charge.get().is_some());
+    let has_load = Memo::new(move |_| load.get().is_some());
+    let has_beeper = Memo::new(move |_| beeper.with(Option::is_some));
+    let has_date = Memo::new(move |_| battery_date.with(Option::is_some));
+    let charge_text = move || charge.get().map(|c| i18n::pct(c as f64)).unwrap_or_else(|| "—".into());
+    let runtime_text = move || runtime.get().map(i18n::duration).unwrap_or_else(|| "—".into());
+    let aria = move || format!("{}: {} · {}: {}", t("ups.charge"), charge_text(), t("ups.runtime"), runtime_text());
+    let beeper_text = move || {
+        beeper
+            .get()
+            .map(|b| {
+                let k = match b.as_str() {
+                    "enabled" => "ups.beeper_on",
+                    "disabled" => "ups.beeper_off",
+                    "muted" => "ups.beeper_muted",
+                    _ => "",
+                };
+                if k.is_empty() { b } else { t(k).to_string() }
+            })
+            .unwrap_or_default()
+    };
+    view! {
+        <div class="ups-head">
+            <Status tone=Signal::derive(move || state.get().map_or(Tone::Unknown, |s| s.0)) text=Signal::derive(move || state.get().map(|s| t(s.1).to_string()).unwrap_or_default()) />
+            <span class="ups-flags">
+                <For each=move || flags.get() key=|f| f.clone() let:f>
+                    {status(flag_tone(&f), flag_key(&f).map(|k| t(k).to_string()).unwrap_or_else(|| f.clone()))}
+                </For>
+            </span>
+        </div>
+        <div class="hw-summary ups-kpis" role="img" aria-label=aria>
+            <div class="hw-sum-item">
+                <span class="muted small">{tr("ups.charge")}</span>
+                <strong class="tnum">{charge_text}</strong>
+                {move || has_charge.get().then(|| view! {
+                    <Meter pct=Signal::derive(move || charge.get().unwrap_or(0.0) as f64) tone=Signal::derive(move || charge_tone(charge.get().unwrap_or(0.0))) />
+                })}
+            </div>
+            <div class="hw-sum-item">
+                <span class="muted small">{tr("ups.runtime")}</span>
+                <strong class="tnum">{runtime_text}</strong>
+            </div>
+            <div class="hw-sum-item">
+                <span class="muted small">{tr("ups.load")}</span>
+                <strong class="tnum">{move || load.get().map(|l| i18n::pct(l as f64)).unwrap_or_else(|| "—".into())}</strong>
+                {move || has_load.get().then(|| view! {
+                    <Meter pct=Signal::derive(move || load.get().unwrap_or(0.0) as f64) tone=Signal::derive(move || load_tone(load.get().unwrap_or(0.0))) />
+                })}
+            </div>
+            <div class="hw-sum-item">
+                <span class="muted small">{tr("ups.input")}</span>
+                <strong class="tnum">{move || volts(input.get())}</strong>
+            </div>
+            <div class="hw-sum-item">
+                <span class="muted small">{tr("ups.output")}</span>
+                <strong class="tnum">{move || volts(output.get())}</strong>
+            </div>
+        </div>
+        <dl class="kvs">
+            {kv("ups.manufacturer", view! { <span>{move || dash(manufacturer.get())}</span> }.into_any())}
+            {kv("f.model", view! { <span>{move || dash(model.get())}</span> }.into_any())}
+            {kv("sto.serial", view! { <span class="mono">{move || dash(serial.get())}</span> }.into_any())}
+            {move || has_beeper.get().then(|| kv("ups.beeper", view! { <span>{beeper_text}</span> }.into_any()))}
+            {move || has_date.get().then(|| kv("ups.battery_date", view! { <span>{move || battery_date.get().unwrap_or_default()}</span> }.into_any()))}
+            {kv("ups.driver", view! { <span>{move || driver.get()}</span> }.into_any())}
+            {kv("hw.updated", view! { <span>{move || i18n::short_when(read_at.get())}</span> }.into_any())}
+        </dl>
     }
     .into_any()
 }
@@ -410,9 +448,10 @@ fn test_card(settings: Remote<UpsSettingsState>) -> AnyView {
             ))
         })
     };
+    // the pill is rebuilt only when the result changes, not at every reading
+    let last = Memo::new(move |_| live.ups.with(|u| u.as_ref().and_then(|u| u.test_result.clone())));
     let result = move || {
-        let r = live.ups.with(|u| u.as_ref().and_then(|u| u.test_result.clone()));
-        match r {
+        match last.get() {
             Some(r) => match test_result(&r) {
                 Some((tone, key)) => status(tone, t(key).to_string()),
                 // a value this build does not know: the UPS's own (English) text
