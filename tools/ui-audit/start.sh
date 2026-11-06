@@ -8,6 +8,8 @@
 # FAKE_UPS_CMDS=all|quick|none: battery tests the fake UPS offers (default all).
 # FAKE_UPS_BACKEND=nut|synodeb: plain NUT (default; /etc/nut in the dry root) or synodeb
 # (/etc/synodeb/ups.conf; a dry root used once with synodeb keeps it: delete $R to switch).
+# FAKE_USB=1: fake removable drives (a mounted USB stick, a USB disk with NTFS and a locked
+# LUKS volume, an SD card) below the fake tree: the USB icon of the app bar and its menu.
 # GENERIC=1: a plain PC instead of the DS920+ (no Synology platform, no synohwd status), to check
 # that no Synology screen, tab or hint shows up on generic hardware (G8d).
 set -e
@@ -38,7 +40,7 @@ if [ -n "${FAKE_UPS:-}" ]; then
   fi
 fi
 target/release/rynasd --socket "$R/rynasd.sock" --state-dir "$R/state" --dry-system --hw-root "$H" \
-  --notify-socket "" --synodeb-notify-conf "" --storage-check-interval 0 "${RYNASD_UPS[@]}" > "$R/rynasd.log" 2>&1 &
+  --notify-socket "" --synodeb-notify-conf "" --storage-check-interval 0 "${RYNASD_UPS[@]}" ${FAKE_USB:+--removable-demo} > "$R/rynasd.log" 2>&1 &
 echo $! >> "$R/pids"; sleep 1.5
 target/release/rynas-web --listen "127.0.0.1:$PORT" --rynasd-socket "$R/rynasd.sock" --users-file "$HERE/users.toml" \
   --auth-state-dir "$R/web" --ui-dir crates/rynas-ui/dist --synohwd-status "$H/run/synohwd/status.json" "${UPSD_ARG[@]}" > "$R/web.log" 2>&1 &

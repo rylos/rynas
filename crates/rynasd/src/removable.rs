@@ -341,7 +341,7 @@ impl RemovableSvc {
     fn process(self: &Arc<Self>, drives: Vec<RemovableDrive>) {
         let settings = self.settings();
         let mut arrivals = Vec::new();
-        {
+        let job = {
             let mut inner = self.inner.lock().unwrap();
             let first = std::mem::replace(&mut inner.first, false);
             let present: HashSet<String> = drives.iter().map(|d| d.name.clone()).collect();
@@ -379,9 +379,11 @@ impl RemovableSvc {
                 }
             }
             inner.drives = drives;
-            self.update_shares(&mut inner, &settings);
+            let job = self.update_shares(&mut inner, &settings);
             self.publish(&mut inner);
-        }
+            job
+        };
+        self.write_include(job);
         if settings.auto_mount {
             for name in arrivals {
                 self.auto_mount(&name);
@@ -416,9 +418,11 @@ impl RemovableSvc {
     }
 
     /// Keeps the SMB include in step with the mounted volumes and the setting.
-    fn update_shares(&self, inner: &mut Inner, s: &RemovableSettings) {
+    /// Computes the SMB include for the mounted volumes; the file to write (and whether smbd
+    /// must read it again) when it changed. Written by [`Self::write_include`] outside the lock.
+    fn update_shares(&self, inner: &mut Inner, s: &RemovableSettings) -> Option<(String, bool)> {
         if !self.smb {
-            return;
+            return None;
         }
         let mut specs = Vec::new();
         let mut shares = HashMap::new();
@@ -447,17 +451,23 @@ impl RemovableSvc {
         let text = smb::render(&specs, &s.share.group, s.share.access);
         inner.shares = shares;
         if inner.smb_written.as_deref() == Some(text.as_str()) {
-            return;
+            return None;
         }
+        // the first write only creates the file: nothing to tell smbd yet
+        let reload = inner.smb_written.is_some();
+        inner.smb_written = Some(text.clone());
+        Some((text, reload))
+    }
+
+    fn write_include(&self, job: Option<(String, bool)>) {
+        let Some((text, reload)) = job else { return };
         match self.svc.host().write_file(smb::INCLUDE, &text) {
-            Ok(()) => {
-                // the first write only creates the file: nothing to tell smbd yet
-                if inner.smb_written.is_some() {
-                    self.smb_reload();
-                }
-                inner.smb_written = Some(text);
+            Ok(()) if reload => self.smb_reload(),
+            Ok(()) => {}
+            Err(e) => {
+                tracing::warn!("removable drives: {e}");
+                self.inner.lock().unwrap().smb_written = None;
             }
-            Err(e) => tracing::warn!("removable drives: {e}"),
         }
     }
 
@@ -480,7 +490,7 @@ impl RemovableSvc {
 
     /// Before a volume is unmounted: its share goes away and its clients are disconnected.
     fn drop_share(&self, mount_point: &str) {
-        let name = {
+        let (name, job) = {
             let mut inner = self.inner.lock().unwrap();
             let Some(name) = inner.shares.get(mount_point).cloned() else {
                 return;
@@ -493,9 +503,10 @@ impl RemovableSvc {
                 })
             });
             let s = self.settings();
-            self.update_shares(&mut inner, &s);
-            name
+            let job = self.update_shares(&mut inner, &s);
+            (name, job)
         };
+        self.write_include(job);
         self.smbcontrol(&["smbd", "close-share", &name]);
     }
 

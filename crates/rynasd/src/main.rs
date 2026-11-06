@@ -67,6 +67,9 @@ struct Args {
     /// Tests only: attached loop devices count as disks (write side on loop files).
     #[arg(long, hide = true)]
     storage_loop_disks: bool,
+    /// Screenshots only (with --dry-system): fake removable drives below --hw-root.
+    #[arg(long, hide = true)]
+    removable_demo: bool,
     /// Socket on which synodeb's `notify` forwards its notifications (root only); empty
     /// to disable.
     #[arg(long, default_value = "/run/rynas/notify.sock", value_parser = path_or_empty)]
@@ -742,6 +745,10 @@ fn main() -> std::io::Result<()> {
         state.updates = Some(updates);
         // removable drives: read below --hw-root; --dry-system only logs the actions
         {
+            if args.removable_demo && args.dry_system && args.hw_root != Path::new("/") {
+                tracing::warn!("fake removable drives below {} (--removable-demo)", args.hw_root.display());
+                rynas_removable::fixture::Fixture::demo(&args.hw_root);
+            }
             let host: Arc<dyn rynas_removable::host::Host> = if args.dry_system {
                 Arc::new(rynas_removable::host::DryHost::new(&args.hw_root))
             } else {
