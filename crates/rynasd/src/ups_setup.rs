@@ -718,6 +718,32 @@ fn config_of(v: &Value) -> Result<UpsDeviceConfig, Invalid> {
         .map_err(|e| Invalid::from(format!("invalid ups.device document: {e}")))
 }
 
+/// The driver of `synodeb-ups status --json` (schema 1): `Some(None)` for synodeb's default
+/// driver, `None` when the output is not that document.
+pub fn parse_synodeb_status_json(text: &str) -> Option<Option<UpsDevice>> {
+    let v: Value = serde_json::from_str(text.trim()).ok()?;
+    let d = v.get("driver")?;
+    if d.get("default").and_then(Value::as_bool).unwrap_or(false) {
+        return Some(None);
+    }
+    let name = d.get("name")?.as_str()?.to_string();
+    let port = d.get("port").and_then(Value::as_str).unwrap_or("auto").to_string();
+    let options = d
+        .get("options")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(|w| match w.split_once('=') {
+                    Some((k, v)) => UpsOption::new(k, Some(v)),
+                    None => UpsOption::new(w, None),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(Some(UpsDevice { driver: name, port, options }))
+}
+
 /// synodeb's saved choice (`UPS_DRIVER=`, `UPS_PORT=`, `UPS_OPTIONS='k=v flag …'`; values never hold spaces or quotes, commas are allowed).
 pub fn parse_synodeb_driver(text: &str) -> Option<UpsDevice> {
     let mut driver = None;
@@ -851,9 +877,16 @@ impl Applier for DeviceDomain {
 
     fn import(&self, ctx: &ApplyCtx) -> Result<Option<Value>, String> {
         let c = if self.synodeb {
-            ctx.read(Path::new(SYNODEB_DRIVER_CONF))
-                .and_then(|t| parse_synodeb_driver(&t))
-                .map(|device| UpsDeviceConfig {
+            // `synodeb-ups status --json` (synodeb 4.5); the saved file on older versions
+            let json = ctx
+                .system
+                .run(&cmd(&self.synodeb_ups).args(["status", "--json"]))
+                .ok()
+                .and_then(|o| parse_synodeb_status_json(&o.stdout));
+            json.unwrap_or_else(|| {
+                ctx.read(Path::new(SYNODEB_DRIVER_CONF)).and_then(|t| parse_synodeb_driver(&t))
+            })
+            .map(|device| UpsDeviceConfig {
                     name: UPS_DEVICE_NAME.into(),
                     device,
                     take_over: Vec::new(),
@@ -1450,6 +1483,17 @@ mod tests {
             },
         );
         assert_eq!(r.candidates[0].probe.state, UpsProbeState::NoDriver);
+    }
+
+    #[test]
+    fn synodeb_status_json_driver() {
+        let custom = r#"{"schema":1,"ups":"ups@localhost","status":"OL","driver":{"name":"nutdrv_qx","port":"auto","options":["vendorid=0925","subdriver=armac","norating"],"default":false,"conf":"/etc/synodeb/ups-driver.conf"}}"#;
+        let dev = parse_synodeb_status_json(custom).unwrap().unwrap();
+        assert_eq!(dev.driver, "nutdrv_qx");
+        assert_eq!(dev.options.len(), 3);
+        let default = r#"{"schema":1,"driver":{"name":"usbhid-ups","port":"auto","options":[],"default":true,"conf":null}}"#;
+        assert!(parse_synodeb_status_json(default).unwrap().is_none());
+        assert!(parse_synodeb_status_json("driver: usbhid-ups").is_none());
     }
 
     #[test]
