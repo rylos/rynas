@@ -632,7 +632,7 @@ class JobDialog {
     const end = st.eta != null ? Date.now() + st.eta : null;
     const methods = {
       clone: t("Reflink btrfs"), copy: t("Copia dati"), rename: t("Rinomina"), recycle: t("Cestino"), delete: t("Eliminazione"),
-      deflate: t("Zip (deflate)"), store: t("Zip senza compressione"), "7z": "7-Zip", unrar: "unrar",
+      deflate: t("Zip (deflate)"), store: t("Zip senza compressione"), zstd: "tar.zst (zstd)", "7z": "7-Zip", unrar: "unrar", tar: "GNU tar",
     };
     const cells = [
       [t("Velocità"), st.byBytes ? speed(st.now) : t("{n}/s", { n: int(Math.round(st.filesRate)) }), true],

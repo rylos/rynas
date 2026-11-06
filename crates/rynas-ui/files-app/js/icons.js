@@ -14,7 +14,7 @@ const TEXT_EXT = new Set([
   "php", "rb", "lua", "pl", "vb", "bat", "ps1", "env", "properties", "service", "desktop", "gitignore", "lock", "diff", "patch",
 ]);
 
-const ARCHIVE = /\.(zip|7z|rar|tar|tgz|tbz2?|txz|gz|bz2|xz|zst|iso|cab|arj|lzh|lha|cpio|rpm|deb|wim|jar|z)$/i;
+const ARCHIVE = /\.(zip|7z|rar|tar|tgz|tbz2?|txz|tzstd?|gz|bz2|xz|zstd?|iso|cab|arj|lzh|lha|cpio|rpm|deb|wim|jar|z)$/i;
 
 export function isArchive(entry) {
   return entry.kind === "f" && ARCHIVE.test(entry.name);
@@ -22,7 +22,7 @@ export function isArchive(entry) {
 
 /** "Foto.tar.gz" → "Foto", the way the NAS names the folder it extracts into. */
 export function archiveStem(name) {
-  const m = name.match(/^(.+?)\.(tar\.(gz|bz2|xz|zst|lz)|tgz|tbz2|txz)$/i);
+  const m = name.match(/^(.+?)\.(tar\.(gz|bz2|xz|zstd?|lz)|tgz|tbz2?|txz|tzstd?)$/i);
   if (m) return m[1];
   const i = name.lastIndexOf(".");
   return i > 0 ? name.slice(0, i) : name;
@@ -75,12 +75,19 @@ const PROTECTED_DIRS = new Set(["#recycle", "#snapshot", "#archive", "@tmp", "@s
 export const isProtectedFolder = (e) => (e.kind === "d" || e.link_dir) && PROTECTED_DIRS.has(e.name);
 export const isSystemFolder = (name) => SYSTEM_DIRS.has(name) || name.startsWith(".Trash-");
 
+// zstd tar extensions eza's tables do not know: drawn like .zst
+const EXT_ALIAS = { tzst: "zst", tzstd: "zst", zstd: "zst" };
+const ezaExt = (name) => {
+  const e = ext(name);
+  return EXT_ALIAS[e] || e;
+};
+
 export function glyph(entry) {
   if (entry.kind === "d" || entry.link_dir) {
     return folderIcon(entry)?.g || (entry.full !== undefined && BIN[entry.full]) || autoFolderGlyph(entry.name);
   }
   if (EZA.names[entry.name]) return EZA.names[entry.name];
-  const e = ext(entry.name);
+  const e = ezaExt(entry.name);
   if (e) return EZA.exts[e] || EZA.icons.file;
   return EZA.icons.file_unknow || EZA.icons.file;
 }
@@ -93,7 +100,7 @@ export function colorClass(entry) {
   if (entry.mode & 0o111) return "ez-exec";
   const name = entry.name;
   if (name.toLowerCase().startsWith("readme")) return "ez-build";
-  const t = EZA.nameTypes[name] || EZA.extTypes[ext(name)];
+  const t = EZA.nameTypes[name] || EZA.extTypes[ezaExt(name)];
   if (t) return "ez-" + t;
   if (name.endsWith("~") || (name.startsWith("#") && name.endsWith("#"))) return "ez-temp";
   return "";
@@ -128,7 +135,7 @@ export function kindLabel(entry) {
   if (entry.kind === "l") return t(entry.link_dir ? "Collegamento a cartella" : "Collegamento simbolico");
   if (entry.kind === "o") return t("File speciale");
   const e = ext(entry.name);
-  const type = EZA.nameTypes[entry.name] || EZA.extTypes[e];
+  const type = EZA.nameTypes[entry.name] || EZA.extTypes[EXT_ALIAS[e] || e];
   const base = t((type && KINDS[type]) || (entry.mode & 0o111 ? "Eseguibile" : "File"));
   return e ? `${base} ${e.toUpperCase()}` : base;
 }

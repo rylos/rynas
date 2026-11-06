@@ -66,19 +66,52 @@ export const actionMethods = {
     const list = pane.targets().filter((e) => !e.share);
     if (!list.length || pane.path === "/") return;
     const base = list.length === 1 ? (isDirLike(list[0]) ? list[0].name : archiveStem(list[0].name)) : baseName(pane.path) || t("Archivio");
+    // zip opens anywhere; tar.zst (zstd levels 1, 3, 9 on the NAS) is faster and smaller
+    // and keeps permissions and links
+    const formats = {
+      zip: {
+        ext: ".zip",
+        levels: [["normal", t("Normale")], ["fast", t("Veloce")], ["store", t("Nessuna (solo archivio, il più veloce)")]],
+        hint: t("Foto, video, musica e archivi vengono solo archiviati: comprimerli di nuovo non fa risparmiare spazio."),
+      },
+      "tar.zst": {
+        ext: ".tar.zst",
+        levels: [["normal", t("Normale")], ["fast", t("Veloce")], ["best", t("Massima (lenta)")]],
+        hint: t("Foto, video, musica e archivi non si riducono, ma zstd li attraversa senza rallentare."),
+      },
+    };
     const dlg = dialog(`<form method="dialog">
-      <div class="dlg-head"><div class="dlg-icon">${svg("archive")}</div><h2>${t("Comprimi in .zip")}</h2></div>
+      <div class="dlg-head"><div class="dlg-icon">${svg("archive")}</div><h2>${t("Crea un archivio")}</h2></div>
       <div class="dlg-body">
-        <p>${t("{n} in un archivio zip, nella stessa cartella.", { n: count(list.length, "elemento", "elementi", int) })}</p>
+        <p>${t("{n} in un archivio, nella stessa cartella.", { n: count(list.length, "elemento", "elementi", int) })}</p>
+        <label class="field"><span>${t("Formato")}</span><select class="fm">
+          <option value="zip">${t("zip (si apre ovunque)")}</option><option value="tar.zst">${t("tar.zst (più veloce e compatto, conserva permessi e collegamenti)")}</option></select></label>
         <label class="field"><span>${t("Nome dell'archivio")}</span><input type="text" class="nm" value="${esc(base)}.zip" spellcheck="false"></label><div class="hint err"></div>
-        <label class="field"><span>${t("Compressione")}</span><select class="lv">
-          <option value="normal">${t("Normale")}</option><option value="fast">${t("Veloce")}</option><option value="store">${t("Nessuna (solo archivio, il più veloce)")}</option></select></label>
-        <p class="hint">${t("Foto, video, musica e archivi vengono solo archiviati: comprimerli di nuovo non fa risparmiare spazio.")}</p>
+        <label class="field"><span>${t("Compressione")}</span><select class="lv"></select></label>
+        <p class="hint lvhint"></p>
       </div>
       <div class="dlg-foot"><button type="button" class="btn cancel">${t("Annulla")}</button><button class="btn primary">${t("Comprimi")}</button></div></form>`);
     const input = dlg.querySelector(".nm");
-    input.focus();
-    input.setSelectionRange(0, input.value.length - 4);
+    const fmt = dlg.querySelector(".fm");
+    const lv = dlg.querySelector(".lv");
+    const stemOf = (name) => name.replace(/\.(zip|tar\.zstd?|tzstd?)$/i, "");
+    const pickStem = () => {
+      input.focus();
+      input.setSelectionRange(0, stemOf(input.value).length);
+    };
+    const showFormat = () => {
+      const f = formats[fmt.value];
+      lv.innerHTML = f.levels.map(([value, label]) => `<option value="${value}">${esc(label)}</option>`).join("");
+      dlg.querySelector(".lvhint").textContent = f.hint;
+    };
+    // the extension follows the format, the name stays
+    fmt.onchange = () => {
+      input.value = stemOf(input.value) + formats[fmt.value].ext;
+      showFormat();
+      pickStem();
+    };
+    showFormat();
+    pickStem();
     dlg.querySelector(".cancel").onclick = () => dlg.close();
     const err = dlg.querySelector(".err");
     input.oninput = () => (err.textContent = "");
@@ -91,7 +124,7 @@ export const actionMethods = {
         input.focus();
         return;
       }
-      transfers.start({ op: "compress", sources: list.map((e) => e.path), dest: pane.path, name, level: dlg.querySelector(".lv").value });
+      transfers.start({ op: "compress", sources: list.map((e) => e.path), dest: pane.path, name, format: fmt.value, level: lv.value });
     };
   },
 

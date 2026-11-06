@@ -63,7 +63,7 @@ export const menuMethods = {
       !many && !ro && !remote && isArchive(entry) && { label: t("Estrai in «{x}»", { x: archiveStem(entry.name) }), icon: "archive", action: () => this.extract(pane, entry, "folder") },
       !many && !ro && !remote && isArchive(entry) && { label: t("Estrai qui"), icon: "archive", action: () => this.extract(pane, entry, "here") },
       !many && !ro && !remote && isArchive(entry) && { label: t("Estrai in…"), icon: "archive", action: () => this.extract(pane, entry, "pick") },
-      !share && !ro && !remote && { label: t("Comprimi in .zip…"), icon: "archive", action: () => this.compress(pane) },
+      !share && !ro && !remote && { label: t("Comprimi…"), icon: "archive", action: () => this.compress(pane) },
       "-",
       !share && { label: t("Copia"), icon: "copy", key: "Ctrl+C", action: () => this.setClipboard("copy", pane) },
       !share && !ro && !fixed && { label: t("Taglia"), icon: "cut", key: "Ctrl+X", action: () => this.setClipboard("cut", pane) },
