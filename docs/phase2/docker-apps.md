@@ -84,6 +84,9 @@ D-APPCAT, adopted after D-DOCKER, moves the catalogue into **phase 2**. That sup
 | A1 | `rynas-apps` format + loader + renderer + CI lint, and the first curated entries in `apps/`: the managers (Arcane, Dockhand, Portainer CE, Dockge), Immich, Jellyfin, Vaultwarden, Nextcloud, Syncthing, Home Assistant, Uptime Kuma, Paperless-ngx | in progress |
 | D2 | UI: Docker page, dashboard widget, notification texts | after D1 |
 | A2 | Apps & Plugins page: install wizard (form from `form.json`), installed apps, updates with snapshot and rollback, convert to custom stack; rynasd catalogue endpoints | after D1 + A1 |
+| W0 | rynas-web on `:8443` with rustls, the emergency door that never goes through the proxy (still owed from phase 1) | before W1 |
+| W1 | Web access (D-PROXY/D-EXPOSE revised on 2026-11-07, `../research/web-access.md`): `rynas-caddy` package, rynasd renderer + `POST /load` + last-good, local names + local CA, app routes, the wizard's Access step, diagnostics | with A2 |
+| W2 | Domains, DNS-01 wildcard, DNS records managed by rynas, certificate dashboard | after W1 |
 | R | Quality review: GUI/API consistency, speed, memory, no inner horizontal scroll; then a deploy on the DS920+ with Docker installed through the module | after D2 + A2 |
 
 ## 5. API
