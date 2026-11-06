@@ -82,6 +82,7 @@ const ERRORS = {
   internal: "Errore interno del server",
   network: "Server non raggiungibile",
   share_root: "Una cartella condivisa non si può spostare, rinominare o eliminare da qui",
+  outside_share: "Questo collegamento porta fuori dalla cartella condivisa: non viene seguito",
   password_required: "Serve la password dell'archivio",
   tool_missing: "Manca il programma necessario sul NAS",
   remote_auth_failed: "Accesso al server remoto rifiutato",

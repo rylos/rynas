@@ -132,6 +132,7 @@ const KINDS = {
 
 export function kindLabel(entry) {
   if (entry.kind === "d") return t("Cartella");
+  if (entry.kind === "l" && entry.outside) return t("Collegamento fuori dalla cartella condivisa");
   if (entry.kind === "l") return t(entry.link_dir ? "Collegamento a cartella" : "Collegamento simbolico");
   if (entry.kind === "o") return t("File speciale");
   const e = ext(entry.name);
