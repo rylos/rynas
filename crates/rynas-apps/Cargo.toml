@@ -1,0 +1,21 @@
+[package]
+name = "rynas-apps"
+description = "rynas curated app catalogue: app.toml + compose.yaml + form.json format, loader, validator, renderer into ordinary stacks, port and RAM checks, migrations and update plans"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+base64.workspace = true
+getrandom.workspace = true
+# maintained fork of serde_yaml by the YAML organisation (serde_yaml is archived)
+yaml_serde = "0.10.7"
+# `pattern` of form.json fields; small, no unicode tables
+regex-lite = "0.1.9"
+
+[dev-dependencies]
+tempfile.workspace = true

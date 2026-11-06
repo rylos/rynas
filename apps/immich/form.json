@@ -1,0 +1,22 @@
+{
+  "type": "object",
+  "properties": {
+    "ML_DISABLED": {
+      "type": "boolean",
+      "title": "Turn off machine learning",
+      "description": "Faces, smart search and duplicate detection need about 2 GB more RAM. Turn them off on NAS units with 4 GB, then also turn off Machine Learning in Administration > Settings.",
+      "default": false,
+      "x-ui": { "widget": "switch" }
+    },
+    "HW_TRANSCODING": {
+      "type": "boolean",
+      "title": "Hardware video transcoding",
+      "description": "Gives Immich the GPU render device (Intel Quick Sync or VA-API).",
+      "default": false,
+      "x-ui": { "widget": "switch", "advanced": true }
+    }
+  },
+  "x-groups": [
+    { "title": "Features", "fields": ["ML_DISABLED", "HW_TRANSCODING"] }
+  ]
+}

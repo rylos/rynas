@@ -1,0 +1,66 @@
+schema = 1
+id = "home-assistant"
+name = "Home Assistant"
+version = "1.0.0"
+app_version = "2026.11.0"
+description = "Home automation hub that runs locally, with thousands of device integrations."
+homepage = "https://www.home-assistant.io"
+source = "https://github.com/home-assistant/core"
+changelog_url = "https://www.home-assistant.io/blog/categories/release-notes/"
+license = "Apache-2.0"
+maintainers = ["rynas"]
+categories = ["home-automation"]
+min_rynas = "0.1.0"
+arch = ["amd64", "arm64"]
+antifeatures = ["root-access"]
+main_service = "homeassistant"
+# device discovery (mDNS, SSDP, Bluetooth) needs the host network
+host_network = true
+
+[resources]
+ram_min_mb = 1024
+ram_recommended_mb = 2048
+
+[[ports]]
+name = "web"
+env = "WEB_PORT"
+service = "homeassistant"
+container = 8123
+default = 8123
+protocol = "tcp"
+purpose = "Web interface and companion app API (host network, always on the LAN)"
+relocatable = false
+
+[web]
+port = "web"
+scheme = "http"
+auth = "app"
+websocket = true
+subpath = false
+timeout = "1h"
+buffering = false
+# the companion apps authenticate with their own tokens
+bypass = ["/api", "/auth"]
+public = "ok"
+
+[[folders]]
+env = "CONFIG_FOLDER"
+path = "config"
+intent = "config"
+ssd = "ok"
+description = "configuration.yaml, integrations and the recorder database"
+
+[security]
+privileged = ["homeassistant"]
+
+[[notes]]
+level = "warning"
+text = "Home Assistant runs privileged on the host network, as upstream documents, so it can reach USB radios, Bluetooth and local devices."
+
+[[notes]]
+level = "info"
+text = "Behind the rynas proxy, add to configuration.yaml: http: use_x_forwarded_for: true, trusted_proxies: [127.0.0.1, ::1]. Home Assistant has no environment variable for this."
+
+[[notes]]
+level = "info"
+text = "The first visitor runs onboarding and creates the owner account: open it right after install."

@@ -1,0 +1,92 @@
+schema = 1
+id = "syncthing"
+name = "Syncthing"
+version = "1.0.0"
+app_version = "2.1.7"
+description = "Continuous peer-to-peer file synchronization between your devices."
+homepage = "https://syncthing.net"
+source = "https://github.com/syncthing/syncthing"
+changelog_url = "https://github.com/syncthing/syncthing/releases"
+license = "MPL-2.0"
+maintainers = ["rynas"]
+categories = ["sync", "files"]
+min_rynas = "0.1.0"
+arch = ["amd64", "arm64"]
+main_service = "syncthing"
+
+[resources]
+ram_min_mb = 128
+ram_recommended_mb = 512
+
+[[ports]]
+name = "web"
+env = "WEB_PORT"
+service = "syncthing"
+container = 8384
+default = 8384
+protocol = "tcp"
+purpose = "Web interface"
+proxied = true
+
+[[ports]]
+name = "sync-tcp"
+env = "SYNC_TCP_PORT"
+service = "syncthing"
+container = 22000
+default = 22000
+protocol = "tcp"
+purpose = "Sync protocol (TCP)"
+relocatable = false
+
+[[ports]]
+name = "sync-quic"
+env = "SYNC_QUIC_PORT"
+service = "syncthing"
+container = 22000
+default = 22000
+protocol = "udp"
+purpose = "Sync protocol (QUIC)"
+relocatable = false
+
+[[ports]]
+name = "discovery"
+env = "DISCOVERY_PORT"
+service = "syncthing"
+container = 21027
+default = 21027
+protocol = "udp"
+purpose = "Local device discovery"
+relocatable = false
+
+[web]
+port = "web"
+scheme = "http"
+auth = "app"
+websocket = false
+subpath = true
+timeout = "10m"
+buffering = false
+public = "warn"
+
+[[folders]]
+env = "CONFIG_FOLDER"
+path = "state"
+intent = "config"
+ssd = "ok"
+description = "Syncthing configuration, keys and index database"
+
+[[shares]]
+env = "SYNC_SHARE"
+label = "Synchronized folder"
+description = "The shared folder Syncthing synchronizes, mounted at /data"
+access = "rw"
+required = false
+fallback = "sync"
+
+[[notes]]
+level = "warning"
+text = "Set a GUI user and password in Syncthing (Actions > Settings > GUI) right after install: the interface starts without one."
+
+[[notes]]
+level = "info"
+text = "Bridged networking: local discovery uses the published UDP port; if devices do not find each other on the LAN, add the NAS address as tcp://<nas>:22000 on the other device."

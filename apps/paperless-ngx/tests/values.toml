@@ -1,0 +1,7 @@
+[form]
+PAPERLESS_ADMIN_PASSWORD = "correct-horse-battery"
+PAPERLESS_OCR_LANGUAGE = "deu+eng"
+PAPERLESS_URL = "https://docs.example.lan"
+
+[shares]
+CONSUME = "/volume1/scans"

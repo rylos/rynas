@@ -1,0 +1,33 @@
+{
+  "type": "object",
+  "properties": {
+    "NEXTCLOUD_ADMIN_USER": {
+      "type": "string",
+      "title": "Admin user name",
+      "default": "admin",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "[A-Za-z0-9_.@-]+"
+    },
+    "NEXTCLOUD_ADMIN_PASSWORD": {
+      "type": "string",
+      "title": "Admin password",
+      "description": "Used only for the first install; change it later from Nextcloud.",
+      "minLength": 10,
+      "maxLength": 128,
+      "x-ui": { "widget": "password" }
+    },
+    "NEXTCLOUD_DOMAIN": {
+      "type": "string",
+      "title": "Public host name",
+      "description": "Extra host name users reach Nextcloud on (the NAS name is always trusted), e.g. cloud.example.lan.",
+      "format": "hostname",
+      "x-ui": { "placeholder": "cloud.example.lan", "advanced": true }
+    }
+  },
+  "required": ["NEXTCLOUD_ADMIN_USER", "NEXTCLOUD_ADMIN_PASSWORD"],
+  "x-groups": [
+    { "title": "Administrator", "fields": ["NEXTCLOUD_ADMIN_USER", "NEXTCLOUD_ADMIN_PASSWORD"] },
+    { "title": "Access", "fields": ["NEXTCLOUD_DOMAIN"] }
+  ]
+}

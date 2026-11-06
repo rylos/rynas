@@ -1,0 +1,56 @@
+# Upstream: https://github.com/nextcloud/docker#base-version---apache (official image with
+# MariaDB and Redis, not All-in-One). Differences: bind folders instead of named volumes,
+# automatic install with an admin account, trusted domains and proxies from rynas.
+services:
+  db:
+    image: mariadb:11.8.9-noble@sha256:c4124d1afa875e47f2892edf26b482fa54f796e2f342d3717a04ca091a22a9bd
+    restart: always
+    command: --transaction-isolation=READ-COMMITTED
+    environment:
+      MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD}"
+      MYSQL_PASSWORD: "${MYSQL_PASSWORD}"
+      MYSQL_DATABASE: nextcloud
+      MYSQL_USER: nextcloud
+    volumes:
+      - ${DB_FOLDER}:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  redis:
+    image: redis:8.8.4-alpine@sha256:c027ae0f677dcf73d74038256f5b88c9ba7b11ccbfae97e96a9f091208d36125
+    restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  app:
+    image: nextcloud:34.0.5-apache@sha256:b89746a4febc93de82141921417f43b0d5ce69c3746feb485372559e9fbeec3f
+    restart: always
+    ports:
+      - "${RYNAS_BIND}:${WEB_PORT}:80"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    environment:
+      MYSQL_PASSWORD: "${MYSQL_PASSWORD}"
+      MYSQL_DATABASE: nextcloud
+      MYSQL_USER: nextcloud
+      MYSQL_HOST: db
+      REDIS_HOST: redis
+      NEXTCLOUD_ADMIN_USER: "${NEXTCLOUD_ADMIN_USER}"
+      NEXTCLOUD_ADMIN_PASSWORD: "${NEXTCLOUD_ADMIN_PASSWORD}"
+      NEXTCLOUD_TRUSTED_DOMAINS: "${RYNAS_HOST} ${NEXTCLOUD_DOMAIN}"
+      TRUSTED_PROXIES: "${RYNAS_TRUSTED_PROXIES}"
+      PHP_UPLOAD_LIMIT: 16G
+      PHP_MEMORY_LIMIT: 512M
+    volumes:
+      - ${HTML_FOLDER}:/var/www/html
+      - ${DATA_FOLDER}:/var/www/html/data

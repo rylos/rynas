@@ -81,7 +81,7 @@ D-APPCAT, adopted after D-DOCKER, moves the catalogue into **phase 2**. That sup
 | Wave | Content | State |
 |---|---|---|
 | D1 | `rynas-docker` + rynasd API: engine status, install and adoption, engine config, listing, actions, logs, stacks CRUD on disk, compose tasks, snapshot and rollback, events into notifications, stats; API section below | in progress |
-| A1 | `rynas-apps` format + loader + renderer + CI lint, and the first curated entries in `apps/`: the managers (Arcane, Dockhand, Portainer CE, Dockge), Immich, Jellyfin, Vaultwarden, Nextcloud, Syncthing, Home Assistant, Uptime Kuma, Paperless-ngx | in progress |
+| A1 | `rynas-apps` format + loader + renderer + CI lint, and the first curated entries in `apps/`: the managers (Arcane, Dockhand, Portainer CE, Dockge), Immich, Jellyfin, Vaultwarden, Nextcloud, Syncthing, Home Assistant, Uptime Kuma, Paperless-ngx; format in § 6 | done (2026-11-07) |
 | D2 | UI: Docker page, dashboard widget, notification texts | after D1 |
 | A2 | Apps & Plugins page: install wizard (form from `form.json`), installed apps, updates with snapshot and rollback, convert to custom stack; rynasd catalogue endpoints | after D1 + A1 |
 | R | Quality review: GUI/API consistency, speed, memory, no inner horizontal scroll; then a deploy on the DS920+ with Docker installed through the module | after D2 + A2 |
@@ -89,3 +89,183 @@ D-APPCAT, adopted after D-DOCKER, moves the catalogue into **phase 2**. That sup
 ## 5. API
 
 Each wave adds its own section here: routes, request and response shapes, error codes, tasks. It follows the conventions of `../phase1/plan.md` (§ Error codes, configuration pending/apply, tasks with UPIDs).
+
+## 6. App catalog format (wave A1)
+
+Normative. Code: `crates/rynas-apps` (pure data in, files out; no Docker access). Entries:
+`apps/`. Research and sources: `../research/app-catalog-format.md`.
+
+### 6.1 Entry layout
+
+```
+apps/<id>/
+  app.toml              metadata (required)
+  compose.yaml          ordinary compose file, ${VAR} references only (required)
+  form.json             install questions (optional; none = no questions)
+  description.md        long English description (required)
+  metadata/icon.svg     card icon, SVG < 64 KiB, no scripts or external links (required)
+  metadata/screenshots/ *.webp | *.png (optional)
+  overlays/<name>.yaml  compose merge patches listed in app.toml (optional)
+  migrations/<ver>.toml value migrations (optional)
+  tests/values.toml     answers CI renders with (required)
+```
+
+Any other file is an error. `<id>` is `[a-z0-9][a-z0-9-]*`, at most 40 characters, equal to
+`app.toml` `id`, and never changes.
+
+### 6.2 `app.toml`
+
+| Key | Meaning |
+|---|---|
+| `schema` | `1` |
+| `id`, `name` | identifier (= folder), display name |
+| `version` | package version `MAJOR.MINOR.PATCH`, bumped on every change of the entry; drives migrations and updates |
+| `app_version` | upstream version; the main service's image tag must equal it or start with `<app_version>-` |
+| `description` | one line (≤ 140 characters) for the card |
+| `homepage`, `source`, `changelog_url` | `https://` URLs (`source` optional) |
+| `license` | SPDX expression of upstream |
+| `maintainers`, `categories`, `arch` | non-empty; categories from a fixed list (`management`, `media`, `photos`, `files`, `documents`, `productivity`, `security`, `home-automation`, `monitoring`, `network`, `sync`, `development`, `backup`, `ai`); arch `amd64` / `arm64` |
+| `min_rynas` | oldest rynas that may install it |
+| `antifeatures` | `non-free`, `high-resources` (exactly when `ram_recommended_mb` > 2048), `needs-gpu` (required with `hardware.gpu = "required"`), `telemetry`, `unmaintained`, `requires-https`, `root-access` (required for managers, privileged services and socket mounts) |
+| `main_service` | the service that is "the app" |
+| `host_network` | all services use `network_mode: host`; ports are then fixed and only informative |
+| `manager` | Docker manager: the main service mounts the Docker socket and `${RYNAS_STACKS_DIR}:${RYNAS_STACKS_DIR}` (same path); `web.public = "never"` |
+| `[resources]` | `ram_min_mb` (install refused below), `ram_recommended_mb` (warning below) |
+| `[[ports]]` | `name`, `env` (host-port variable), `service`, `container`, `default`, `protocol` (`tcp`/`udp`), `purpose`, `relocatable` (default true; false for discovery and protocol ports and with `host_network`), `proxied` (HTTP port fronted by the web access proxy) |
+| `[web]` | see 6.3 |
+| `[[folders]]` | app-owned bind folders: `env`, `path` (relative; default location `./<path>` in the stack folder, so the stack snapshot covers it), `intent` (`config`, `data`, `db`, `media`, `cache`), `ssd` (`no`, `ok`, `preferred`), `owner` (`uid:gid` when the image needs it, default PUID:PGID), `description` |
+| `[[shares]]` | user shared folders: `env`, `label`, `description`, `access` (`ro`/`rw`, must match `:ro` in compose), `required`, `fallback` (stack folder used when an optional share is not chosen) |
+| `[[secrets]]` | `env`, `length` (16-256), `encoding` (`alnum` characters, or `hex` / `base64` of `length` random bytes); generated once, kept on update |
+| `[hardware]` | `gpu` (`none`, `optional`, `required`), `gpu_kinds` (`intel-qsv`, `vaapi`, `nvidia`), `cpu_features` (`x86-64-v2`, `avx`, `avx2`) |
+| `[security]` | `privileged`, `docker_socket` (services allowed), `cap_add` (capabilities allowed) |
+| `[[overlays]]` | `file` (`overlays/<name>.yaml`), `when` (a boolean form field or `RYNAS_CPU_AVX2`, optionally `!`-negated), `description` |
+| `[[named_volumes]]` | `name`, `description`; only for disposable content (caches, models, queues): named volumes live in the data-root, outside snapshots and backups |
+| `[[notes]]` | `level` (`info`/`warning`), `text`: shown in the wizard before confirming |
+
+All `env` names are `[A-Z][A-Z0-9_]*`, unique across ports, folders, shares, secrets and form
+properties, and never one of the provided variables (6.5).
+
+### 6.3 `[web]`: how the proxy fronts the app
+
+Consumed by the web access module (D-PROXY, D-EXPOSE as revised on 2026-11-07).
+
+| Key | Meaning |
+|---|---|
+| `port` | name of a `tcp` port; must be `proxied` unless `host_network` |
+| `path` | entry path, default `/` |
+| `scheme` | `http` / `https` spoken by the container |
+| `auth` | `app` (own login), `none` (the proxy must add rynas SSO; never with `public = "ok"`), `proxy` (trusts the proxy's identity headers) |
+| `websocket` | needs WebSocket upgrades |
+| `subpath` | works under a path prefix; otherwise it needs its own host name |
+| `body` | largest request body, `<digits>[K\|M\|G]` (Immich `50G`, Nextcloud `16G`) |
+| `timeout` | upstream read timeout, `<digits>s\|m\|h` |
+| `buffering` | proxy buffering, default `true`; `false` for uploads and streaming |
+| `bypass` | path prefixes that skip rynas SSO (mobile apps, DAV, API tokens) |
+| `public` | `ok`, `warn` (allowed with a warning), `never` (managers) |
+| `trusted_proxies_env` | the app's variable listing trusted proxies; the main service must set it to `${RYNAS_TRUSTED_PROXIES}` |
+
+### 6.4 `compose.yaml`
+
+Standard compose, used as is. The lint (`cargo test -p rynas-apps`) enforces:
+- top-level keys only `services`, `volumes`, `networks` (rynas adds `name` and `x-rynas`);
+- every service: a literal `image` with a tag that is not moving (`latest`, `stable`, `release`,
+  `main`, `master`, `nightly`, `edge`) **and** an `@sha256:` digest (multi-arch index); a
+  `restart` policy; no `build`, `container_name`, `extends`, `pid`, `ipc`, `userns_mode`,
+  `cgroup_parent`, `volumes_from`; `env_file` only `.env`;
+- variables only as `${VAR}` (no defaults, no bare `$VAR`), each provided by rynas, `app.toml`
+  or `form.json`; every declared variable is used;
+- ports exactly as declared: `"${RYNAS_BIND}:${ENV}:<container>"` for proxied ports,
+  `"${ENV}:<container>[/udp]"` for the others (protocol ports reachable on the LAN), none with
+  `host_network`;
+- volume sources only declared folders, shares, named volumes, `${RYNAS_STACKS_DIR}`
+  (managers), the Docker socket (declared services), `/etc/localtime` and `/run/dbus` read-only;
+- `privileged`, `cap_add`, `devices` and `network_mode: host` only as declared in `app.toml`.
+
+The same lint runs on the base file and on the base with each overlay merged in.
+
+### 6.5 Provided variables
+
+| Variable | Value |
+|---|---|
+| `RYNAS_APPDATA` | absolute stack folder, `/<vol>/docker/stacks/<stack>` |
+| `RYNAS_STACKS_DIR` | `/<vol>/docker/stacks` |
+| `RYNAS_HOST` | host name users reach the NAS on |
+| `PUID`, `PGID` | the `docker-apps` user and group |
+| `TZ` | system time zone |
+| `DOCKER_GID` | group of `/var/run/docker.sock` |
+| `RENDER_GID` | group of `/dev/dri/renderD*` |
+| `RYNAS_CPU_AVX2` | `true` / `false` |
+| `RYNAS_BIND` | host address of proxied ports: `127.0.0.1` by default (only the proxy reaches them), `0.0.0.0` when the user publishes the app on the LAN directly |
+| `RYNAS_TRUSTED_PROXIES` | addresses the apps trust for `X-Forwarded-*` |
+
+### 6.6 `form.json`
+
+A JSON Schema subset, rendered by one generic schema-driven form:
+- top level: `type: "object"`, `properties`, `required`, `x-groups`
+  (`[{ "title", "fields": [...] }]`, every property exactly once: order and sections);
+- property: `type` (`string`, `integer`, `boolean`), `title`, `description`, `default`, `enum`,
+  `minimum`, `maximum`, `minLength`, `maxLength`, `pattern` (anchored), `format` (`hostname`,
+  `uri` = http(s) URL, `email`), and `x-ui`: `widget` (`text`, `password`, `textarea`, `select`,
+  `switch`), `placeholder`, `advanced` (folded), `enum_labels`, `visible_if`
+  (`{ "FIELD": value }`; a hidden field is not required);
+- unknown keywords are errors. Property names are `.env` names; answers are written as strings
+  (`true`/`false` for booleans; an optional unanswered field is empty).
+
+### 6.7 Overlays
+
+An overlay is a compose fragment applied as an RFC 7396 merge patch (mappings merge, `null`
+deletes, anything else replaces) when its `when` condition holds. Used for optional hardware
+(`/dev/dri` + `${RENDER_GID}`) and for dropping a service (Immich without machine learning).
+The rendered `compose.yaml` contains the merged result; nothing conditional is left in it.
+
+### 6.8 Rendering
+
+`render(app, catalog, provided, request)` → `RenderedStack`:
+- `request`: stack name (compose project rules; default the app id), form answers, chosen
+  shares, folder placements (absolute paths, e.g. a database on the SSD volume), port
+  overrides (relocatable ports only), secrets already known (updates);
+- files, ready for "create stack from files": `compose.yaml` (0644) with a header comment,
+  `name: <stack>`, the merged services, volumes and networks with `${VAR}` references kept, and
+  ```yaml
+  x-rynas: { app: <id>, version: <package version>, app_version: <upstream>, catalog: <source> }
+  ```
+  and `.env` (0600) with every value (provided, ports, folders, shares, secrets, answers),
+  single-quoted when not plain; values with a newline or a single quote are refused;
+- `folders`: host folders to create before `up` (owner PUID:PGID or the declared `owner`) and
+  shares to check (never created or chowned);
+- `images`, `env`, the overlays applied.
+
+The stack is ordinary: any manager may edit it. **Convert to custom stack** removes `x-rynas`
+and nothing else.
+
+### 6.9 Checks, migrations, updates
+
+- **Ports**: `port_conflicts(app, chosen, used)` lists collisions with used ports and inside the
+  app, with a free suggestion for relocatable ports. Default host ports of bridged apps are
+  unique across the catalogue.
+- **RAM**: `ram_gate(app, MemTotal)` → `ok`, `below_recommended` (warn), `below_minimum`
+  (refuse), with a 12.5 % allowance for memory reserved by firmware and the iGPU.
+- **Migrations**: `migrations/<version>.toml` with `to = "<version>"`, `description` and
+  `[[ops]]` (`rename {from, to}`, `set {key, value}`, `set_default {key, value}`,
+  `delete {key}`, `map {key, values}`), applied in order to the stored `.env` values for every
+  `to` above the installed version, up to the catalogue version.
+- **Update plan**: `update_plan(app, installed compose, installed .env)` compares the installed
+  `x-rynas` version and images (after migrations and overlay selection) with the catalogue:
+  versions, `up_to_date`, `downgrade`, migrations, image changes (`added`, `removed`, `tag`,
+  `digest`), required answers still missing. `prepare_update` re-renders with the migrated
+  values, keeping secrets, ports, folders and answers; the engine snapshots the stack, writes
+  the files, pulls and runs `up -d`, and rollback restores the snapshot.
+
+### 6.10 CI
+
+`cargo test -p rynas-apps` loads every entry, validates it (6.2-6.7), renders it with
+`tests/values.toml` and with defaults, and checks the rendered stack: it parses, has `name` and
+`x-rynas`, every `${VAR}` is in `.env`, images are pinned, secrets are not in the compose file,
+proxied ports bind to `${RYNAS_BIND}`. `packaging/apps-render-test.sh` also runs
+`docker compose config -q` on every render (CI or a throw-away machine).
+
+### 6.11 First entries
+
+Arcane, Dockhand, Portainer CE, Dockge (managers); Immich, Jellyfin, Vaultwarden, Nextcloud,
+Syncthing, Home Assistant, Uptime Kuma, Paperless-ngx. Images pinned by tag and verified digest
+(2026-11-07); per-entry choices in `../research/app-catalog-format.md` § 2.

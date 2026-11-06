@@ -1,0 +1,56 @@
+schema = 1
+id = "portainer-ce"
+name = "Portainer CE"
+version = "1.0.0"
+app_version = "2.45.3"
+description = "Container management UI for Docker, Swarm and Kubernetes (Community Edition)."
+homepage = "https://www.portainer.io"
+source = "https://github.com/portainer/portainer"
+changelog_url = "https://github.com/portainer/portainer/releases"
+license = "Zlib"
+maintainers = ["rynas"]
+categories = ["management"]
+min_rynas = "0.1.0"
+arch = ["amd64", "arm64"]
+antifeatures = ["root-access", "telemetry"]
+main_service = "portainer"
+manager = true
+
+[resources]
+ram_min_mb = 256
+ram_recommended_mb = 512
+
+[[ports]]
+name = "web"
+env = "WEB_PORT"
+service = "portainer"
+container = 9443
+default = 9443
+protocol = "tcp"
+purpose = "Web interface (HTTPS, self-signed)"
+proxied = true
+
+[web]
+port = "web"
+scheme = "https"
+auth = "app"
+websocket = true
+subpath = false
+timeout = "10m"
+buffering = false
+public = "never"
+
+[[folders]]
+env = "DATA_FOLDER"
+path = "data"
+intent = "config"
+ssd = "ok"
+description = "Portainer database, its own copies of stacks it creates, certificates"
+
+[[notes]]
+level = "warning"
+text = "Portainer receives the Docker socket: it has root privileges on this NAS and its own login. Create the admin account within 5 minutes of the first start, or restart the stack."
+
+[[notes]]
+level = "info"
+text = "Portainer keeps the stacks it creates in its own database; stacks made elsewhere show as external with limited control."

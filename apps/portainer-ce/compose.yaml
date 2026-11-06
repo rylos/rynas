@@ -1,0 +1,14 @@
+# Upstream: https://docs.portainer.io/start/install-ce/server/docker/linux
+# 2.45.3 is the current LTS (the `lts` tag points to the same digest); Docker 29 needs
+# 2.33.5 LTS or later. Port 8000 (Edge agent tunnel) and 9000 (legacy HTTP) are not
+# published.
+services:
+  portainer:
+    image: portainer/portainer-ce:2.45.3@sha256:3609c307943bca8e5c492f69ddd6965df177208b50678a4cff28391c8dd4e96e
+    restart: always
+    ports:
+      - "${RYNAS_BIND}:${WEB_PORT}:9443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${DATA_FOLDER}:/data
+      - ${RYNAS_STACKS_DIR}:${RYNAS_STACKS_DIR}

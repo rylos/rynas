@@ -1,0 +1,84 @@
+schema = 1
+id = "jellyfin"
+name = "Jellyfin"
+version = "1.0.0"
+app_version = "12.4"
+description = "Free media server for movies, shows, music and live TV, with hardware transcoding."
+homepage = "https://jellyfin.org"
+source = "https://github.com/jellyfin/jellyfin"
+changelog_url = "https://github.com/jellyfin/jellyfin/releases"
+license = "GPL-2.0-only"
+maintainers = ["rynas"]
+categories = ["media"]
+min_rynas = "0.1.0"
+arch = ["amd64", "arm64"]
+main_service = "jellyfin"
+
+[resources]
+ram_min_mb = 1024
+ram_recommended_mb = 2048
+
+[[ports]]
+name = "web"
+env = "WEB_PORT"
+service = "jellyfin"
+container = 8096
+default = 8096
+protocol = "tcp"
+purpose = "Web interface and client API"
+proxied = true
+
+[[ports]]
+name = "discovery"
+env = "DISCOVERY_PORT"
+service = "jellyfin"
+container = 7359
+default = 7359
+protocol = "udp"
+purpose = "Client auto-discovery on the LAN"
+relocatable = false
+
+[web]
+port = "web"
+scheme = "http"
+auth = "app"
+websocket = true
+subpath = false
+timeout = "1h"
+buffering = false
+public = "ok"
+
+[[folders]]
+env = "CONFIG_FOLDER"
+path = "config"
+intent = "config"
+ssd = "ok"
+description = "Settings, users and the library database"
+
+[[folders]]
+env = "CACHE_FOLDER"
+path = "cache"
+intent = "cache"
+ssd = "ok"
+description = "Transcodes and image cache"
+
+[[shares]]
+env = "MEDIA"
+label = "Media"
+description = "The shared folder with your movies, shows and music, mounted read-only at /media"
+access = "ro"
+required = false
+fallback = "media"
+
+[hardware]
+gpu = "optional"
+gpu_kinds = ["intel-qsv", "vaapi"]
+
+[[overlays]]
+file = "overlays/hw-transcoding.yaml"
+when = "HW_TRANSCODING"
+description = "Pass /dev/dri and the render group for Intel Quick Sync / VA-API transcoding"
+
+[[notes]]
+level = "info"
+text = "The first visitor runs the setup wizard and creates the admin account: open Jellyfin right after install. With hardware transcoding on, select Intel QuickSync (QSV) or VA-API in Dashboard > Playback > Transcoding."

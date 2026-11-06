@@ -1,0 +1,3 @@
+[form]
+DOMAIN = "https://vault.example.lan"
+SIGNUPS_ALLOWED = false

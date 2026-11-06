@@ -1,0 +1,88 @@
+schema = 1
+id = "paperless-ngx"
+name = "Paperless-ngx"
+version = "1.0.0"
+app_version = "3.4.2"
+description = "Document archive: scans, OCRs, tags and indexes your paperwork for full-text search."
+homepage = "https://docs.paperless-ngx.com"
+source = "https://github.com/paperless-ngx/paperless-ngx"
+changelog_url = "https://docs.paperless-ngx.com/changelog/"
+license = "GPL-3.0-only"
+maintainers = ["rynas"]
+categories = ["documents"]
+min_rynas = "0.1.0"
+arch = ["amd64", "arm64"]
+main_service = "webserver"
+
+[resources]
+ram_min_mb = 1024
+ram_recommended_mb = 2048
+
+[[ports]]
+name = "web"
+env = "WEB_PORT"
+service = "webserver"
+container = 8000
+default = 8000
+protocol = "tcp"
+purpose = "Web interface and REST API"
+proxied = true
+
+[web]
+port = "web"
+scheme = "http"
+auth = "app"
+websocket = true
+subpath = false
+body = "512M"
+timeout = "10m"
+# the mobile apps use API tokens
+bypass = ["/api"]
+public = "ok"
+trusted_proxies_env = "PAPERLESS_TRUSTED_PROXIES"
+
+[[folders]]
+env = "DATA_FOLDER"
+path = "data"
+intent = "data"
+ssd = "ok"
+description = "Search index, classifier and settings"
+
+[[folders]]
+env = "MEDIA_FOLDER"
+path = "media"
+intent = "media"
+description = "Original and archived documents"
+
+[[folders]]
+env = "DB_FOLDER"
+path = "pgdata"
+intent = "db"
+ssd = "preferred"
+description = "PostgreSQL database"
+
+[[folders]]
+env = "EXPORT_FOLDER"
+path = "export"
+intent = "data"
+description = "Target of the document exporter"
+
+[[shares]]
+env = "CONSUME"
+label = "Consume folder"
+description = "Documents dropped here (by a scanner or by hand) are imported and then removed"
+access = "rw"
+required = false
+fallback = "consume"
+
+[[secrets]]
+env = "DB_PASSWORD"
+length = 32
+
+[[secrets]]
+env = "SECRET_KEY"
+length = 50
+
+[[named_volumes]]
+name = "redisdata"
+description = "Task queue of the broker (rebuilt when lost)"

@@ -1,0 +1,63 @@
+# Upstream: https://github.com/paperless-ngx/paperless-ngx/blob/v3.4.2/docker/compose/docker-compose.postgres.yml
+# Differences: images pinned, bind folders instead of named volumes for data, generated
+# database password and secret key, admin account created at first start.
+services:
+  broker:
+    image: docker.io/valkey/valkey:9.0.7-alpine@sha256:2d04268dfa26ab31cfa3fdc538866e76438b2d00e41db41b8cb86d780ac5a416
+    restart: unless-stopped
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  db:
+    image: docker.io/library/postgres:18.6@sha256:e3d24f6906d0760bf4da0dae872415391ededefad23fd471c47dc53b0ddf3c42
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: paperless
+      POSTGRES_USER: paperless
+      POSTGRES_PASSWORD: "${DB_PASSWORD}"
+    volumes:
+      # PostgreSQL 18 images keep the data in a versioned folder below /var/lib/postgresql
+      - ${DB_FOLDER}:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U paperless -d paperless"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  webserver:
+    image: ghcr.io/paperless-ngx/paperless-ngx:3.4.2@sha256:d704e84f88300eb6ab001ab15720a2330ff99169cf9f94d6b8fcc44b63a84c84
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      broker:
+        condition: service_started
+    ports:
+      - "${RYNAS_BIND}:${WEB_PORT}:8000"
+    environment:
+      PAPERLESS_REDIS: redis://broker:6379
+      PAPERLESS_DBHOST: db
+      PAPERLESS_DBENGINE: postgresql
+      PAPERLESS_DBPASS: "${DB_PASSWORD}"
+      PAPERLESS_SECRET_KEY: "${SECRET_KEY}"
+      PAPERLESS_TIME_ZONE: "${TZ}"
+      PAPERLESS_OCR_LANGUAGE: "${PAPERLESS_OCR_LANGUAGE}"
+      PAPERLESS_URL: "${PAPERLESS_URL}"
+      PAPERLESS_ADMIN_USER: "${PAPERLESS_ADMIN_USER}"
+      PAPERLESS_ADMIN_PASSWORD: "${PAPERLESS_ADMIN_PASSWORD}"
+      PAPERLESS_TRUSTED_PROXIES: "${RYNAS_TRUSTED_PROXIES}"
+      USERMAP_UID: "${PUID}"
+      USERMAP_GID: "${PGID}"
+    volumes:
+      - ${DATA_FOLDER}:/usr/src/paperless/data
+      - ${MEDIA_FOLDER}:/usr/src/paperless/media
+      - ${EXPORT_FOLDER}:/usr/src/paperless/export
+      - ${CONSUME}:/usr/src/paperless/consume
+
+volumes:
+  redisdata:
