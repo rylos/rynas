@@ -175,6 +175,8 @@ struct Opened {
     synology: Option<Arc<rynas_hw_synology::Synology>>,
     /// synodeb's UPS layer is here: `ups.safemode` writes its file.
     ups_synodeb: bool,
+    /// Applied `removable` settings, handed over by the domain.
+    removable_settings: tokio::sync::watch::Receiver<rynas_api_types::removable::RemovableSettings>,
     /// The configuration root.
     root: PathBuf,
 }
@@ -255,8 +257,12 @@ fn open_config(
     domains.push(Arc::new(rynasd::ups::UpsDomain {
         synodeb: ups_synodeb,
     }));
+    let (removable_domain, removable_settings) = rynasd::removable::RemovableDomain::new();
+    let removable_tx = removable_domain.tx.clone();
+    domains.push(Arc::new(removable_domain));
     let config = Config::open(ConfigOptions::new(&args.state_dir, &root), system, domains)
         .map_err(std::io::Error::other)?;
+    removable_tx.send_replace(rynasd::removable::initial_settings(&config));
     Ok(Opened {
         config,
         users,
@@ -264,6 +270,7 @@ fn open_config(
         scheduler,
         snapshots,
         ups_synodeb,
+        removable_settings,
         root,
         synology,
     })
@@ -733,6 +740,29 @@ fn main() -> std::io::Result<()> {
         ));
         rynasd::updates::spawn_daily(updates.clone());
         state.updates = Some(updates);
+        // removable drives: read below --hw-root; --dry-system only logs the actions
+        {
+            let host: Arc<dyn rynas_removable::host::Host> = if args.dry_system {
+                Arc::new(rynas_removable::host::DryHost::new(&args.hw_root))
+            } else {
+                Arc::new(rynas_removable::host::SystemHost::new(&args.hw_root))
+            };
+            let samba = rynas_hw::under(&config_root(&args), "/etc/samba").is_dir();
+            let svc = Arc::new(rynas_removable::Removable::new(
+                host,
+                Some(rynasd::removable::names_file(&args.state_dir)),
+            ));
+            let removable = rynasd::removable::RemovableSvc::new(
+                ops.clone(),
+                svc,
+                notifier.clone(),
+                opened.removable_settings.clone(),
+                samba,
+            );
+            let _ = ops.removable.set(removable.clone());
+            rynasd::removable::spawn_watch(removable.clone());
+            state.removable = Some(removable);
+        }
         state.ops = Some(ops);
         if args.storage_check_interval > 0 {
             rynasd::notifications::spawn_storage_watch(

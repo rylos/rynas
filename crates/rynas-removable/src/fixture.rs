@@ -269,6 +269,44 @@ impl Fixture {
         let _ = std::fs::remove_dir_all(self.p(&format!("/sys/block/{disk}")));
     }
 
+    /// `major:minor` of the block device `name` (a disk, a partition or `dm-N`).
+    pub fn majmin(&self, name: &str) -> Option<String> {
+        let direct = self.p(&format!("/sys/block/{name}/dev"));
+        if let Ok(s) = std::fs::read_to_string(direct) {
+            return Some(s.trim().to_string());
+        }
+        for disk in std::fs::read_dir(self.p("/sys/block")).ok()?.flatten() {
+            if let Ok(s) = std::fs::read_to_string(disk.path().join(name).join("dev")) {
+                return Some(s.trim().to_string());
+            }
+        }
+        None
+    }
+
+    /// Drops the mount at `path`.
+    pub fn unmount_path(&mut self, path: &str) {
+        let esc = path.replace(' ', "\\040");
+        self.mountinfo
+            .retain(|l| l.split(' ').nth(4) != Some(esc.as_str()));
+        self.flush_mounts();
+    }
+
+    /// Unplugs every disk below the sysfs directory `dir` (a USB device powered off).
+    pub fn unplug_below(&self, dir: &str) {
+        let below = self.p(dir);
+        for disk in std::fs::read_dir(self.p("/sys/block"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            if let Ok(target) = std::fs::canonicalize(disk.path().join("device"))
+                && target.starts_with(std::fs::canonicalize(&below).unwrap_or(below.clone()))
+            {
+                let _ = std::fs::remove_dir_all(disk.path());
+            }
+        }
+    }
+
     /// Drops every mount except the root.
     pub fn unmount_all(&mut self) {
         self.mountinfo.truncate(1);
