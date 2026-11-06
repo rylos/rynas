@@ -11,6 +11,8 @@ PORT = 9333
 class Page:
     def __init__(self, ws):
         self.ws, self.n, self.pending, self.events = ws, 0, {}, []
+        # server-sent events seen after Network.enable: (time, event name, data)
+        self.sse = []
 
     async def reader(self):
         async for msg in self.ws:
@@ -22,6 +24,9 @@ class Page:
                 self.events.append(f"console.{m['params']['type']}: {args}")
             elif m.get("method") == "Runtime.exceptionThrown":
                 self.events.append("exception: " + json.dumps(m["params"]["exceptionDetails"])[:400])
+            elif m.get("method") == "Network.eventSourceMessageReceived":
+                e = m["params"]
+                self.sse.append((time.time(), e.get("eventName", ""), e.get("data", "")))
             elif m.get("method") == "Log.entryAdded":
                 e = m["params"]["entry"]
                 self.events.append(f"log.{e['level']}: {e['text']} {e.get('url','')}")

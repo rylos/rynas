@@ -48,9 +48,17 @@ base.setdefault("m2", {
     "2": {"present": True, "controller": "nvme0", "device": "nvme0n1",
           "pci": "0000:04:00.0", "port": "0000:00:14.0"},
 })
+rpm0 = [f.get("rpm") for f in base.get("fans", [])]
+tick = 0
 while True:
     now = time.time()
     base["epoch"] = int(now)
+    # the fans drift by a few rpm, as on the unit: every write is a real change that rynas-web
+    # pushes as `hardware.status` (idle_dom.py checks that pages survive it)
+    tick += 1
+    for f, r in zip(base.get("fans", []), rpm0):
+        if r:
+            f["rpm"] = r + (tick % 3) * 5
     base["time"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
     tmp = os.path.join(root, "run/synohwd/status.json.tmp")
     os.makedirs(os.path.dirname(tmp), exist_ok=True)
