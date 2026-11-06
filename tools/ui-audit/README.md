@@ -20,3 +20,5 @@ quality reviews (docs/quality/). Nothing here touches the host system or a runni
 - Run one browser at a time (each Chromium takes 0.5-1 GB).
 - `cdp.py` is a minimal DevTools-protocol driver; `run_all.py` has login and client-side navigation;
   `states.py` checks the loading/error states (second instance with rynasd stopped).
+- `files_reenter.py`: leave the file manager and come back (sidebar, router, `?window`): the Files
+  page shows again with the same app and no panic. Needs `files_mock.py 18601 18600` in front.

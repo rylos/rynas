@@ -39,11 +39,18 @@ thread_local! {
     static LOAD: Cell<Option<RwSignal<Load>>> = const { Cell::new(None) };
 }
 
+/// The script's state, made on first use under the app's root owner. Made under the Files
+/// page's own owner it was disposed when the page was left, and coming back panicked
+/// ("reactive value already disposed"), leaving the previous page on screen.
 fn load_state() -> RwSignal<Load> {
     LOAD.with(|c| match c.get() {
         Some(s) => s,
         None => {
-            let s = RwSignal::new(Load::Idle);
+            let mut owner = Owner::current().expect("the files page needs a reactive owner");
+            while let Some(p) = owner.parent() {
+                owner = p;
+            }
+            let s = owner.with(|| RwSignal::new(Load::Idle));
             c.set(Some(s));
             s
         }
