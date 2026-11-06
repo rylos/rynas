@@ -15,7 +15,7 @@
 //! eMMC is the machine's own storage), optical drives, and anything the kernel flags as
 //! removable. A drive is never listed when it holds a system mount point (`/`, `/boot*`,
 //! `/efi*`, `/home`, `/usr`, `/var`), an active swap, a RAID or LVM member, a filesystem of
-//! `/etc/fstab`, or when udev marks it `UDISKS_IGNORE=1` / `UDISKS_SYSTEM=1` (plus the boot
+//! `/etc/fstab`, or when udev marks it `UDISKS_IGNORE=1` / `UDISKS_SYSTEM=1` / `SYNODEB_BOOT_FLASH=1` (plus the boot
 //! flash of some appliances, identified by its USB ids).
 
 use std::collections::{HashMap, HashSet};
@@ -738,8 +738,9 @@ enum Vol {
 }
 
 fn ignored(props: &HashMap<String, String>) -> bool {
-    props.get("UDISKS_IGNORE").map(String::as_str) == Some("1")
-        || props.get("UDISKS_SYSTEM").map(String::as_str) == Some("1")
+    ["UDISKS_IGNORE", "UDISKS_SYSTEM", "SYNODEB_BOOT_FLASH"]
+        .iter()
+        .any(|k| props.get(*k).map(String::as_str) == Some("1"))
 }
 
 fn label_of(props: &HashMap<String, String>) -> String {

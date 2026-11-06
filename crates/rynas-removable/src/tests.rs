@@ -201,6 +201,9 @@ fn system_drives_are_never_listed() {
         false,
     );
     f.put("/run/udev/data/b8:96", "E:ID_BUS=usb\nE:UDISKS_IGNORE=1\n");
+    // synodeb's udev rule marks the boot flash by property, whatever its USB ids
+    f.usb_disk("sdh", 112, "2-6", "Vendor", "Flash", "6", 128_000_000, 480, false);
+    f.put("/run/udev/data/b8:112", "E:ID_BUS=usb\nE:SYNODEB_BOOT_FLASH=1\n");
     assert!(scan(&f).is_empty(), "{:#?}", scan(&f));
 }
 

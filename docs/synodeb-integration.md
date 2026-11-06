@@ -33,7 +33,7 @@ synodeb; each item needs the maintainer's approval in the synodeb repo.
 | S9 | Kernel | enable `CONFIG_ZRAM_MULTI_COMP` (today not set; default compressor lz4, zstd/writeback/actime already built) so rynas can offer lz4 + zstd recompression of idle pages on 4-8 GB models | D-ZRAM |
 | S10 | Kernel | full **iGPU** support on the DS920+ (i915 DRM, GuC/HuC firmware, `/dev/dri/renderD128`, VAAPI): hardware transcoding (Jellyfin, Immich, Frigate), OpenVINO on GPU, GPU stats. Requested by the maintainer | D-PHOTOS, D-NVR, D-MONITOR |
 | S8 | Hardware | synohwd control socket (JSON/varlink) instead of the FIFO; later the Rust rewrite `synohw` shared by daemon and rynas plugin | D-HW phase 2 |
-| S11 | Hardware | udev rule `ENV{UDISKS_IGNORE}="1"` (and `UDISKS_SYSTEM="1"`) for the internal USB boot flash (DOM, `synoboot*`) | rynas lists USB drives as removable and offers to power them off; it already skips USB ids `f400:f400`, the rule makes it explicit for every tool (D-REMOVABLE) |
+| S11 | Hardware | **done** (synodeb 021aa66, `/etc/udev/rules.d/60-synodeb.rules`): the internal USB boot flash (`ID_BUS=usb`, ids `f400:f400`) and its partitions get `SYNODEB_BOOT_FLASH=1`, `UDISKS_IGNORE=1` and the links `/dev/synoboot`, `/dev/synoboot1`, `/dev/synoboot2` | rynas skips drives with either property; the `f400:f400` check stays as a fallback for older synodeb (D-REMOVABLE) |
 
 ## Status on the synodeb side (2026-11-05)
 S1, S2, S3 and S5 are implemented on synodeb's main (not yet released) and installed on the test
