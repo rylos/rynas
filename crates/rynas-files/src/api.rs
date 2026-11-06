@@ -505,8 +505,10 @@ fn as_user(req: &Request, out: &mut impl Write, ctx: &Context, remote: &dyn Remo
                     m.size
                 }
                 _ => {
-                    std::fs::File::open(&path)?.take(512 * 1024).read_to_end(&mut buf)?;
-                    std::fs::metadata(&path)?.len()
+                    let file = crate::confine::open(&path)?;
+                    let size = file.metadata()?.len();
+                    file.take(512 * 1024).read_to_end(&mut buf)?;
+                    size
                 }
             };
             let binary = buf.iter().take(8192).any(|&b| b == 0);

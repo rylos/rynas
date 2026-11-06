@@ -11,7 +11,8 @@
 # Checks: what a worker creates belongs to the user who asked; a folder of alice's is
 # closed to bob (permission_denied) and readable but not writable for carol (the
 # administrator keeps CAP_DAC_READ_SEARCH only); uploads, copies and the recycle bin run
-# as the user; the worker refuses to run as root and holds no other capability.
+# as the user; the worker refuses to run as root and holds no other capability; symbolic
+# links never lead an administrator's worker out of the share (/etc/shadow).
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 NAME=rynas-test-files-$$
@@ -115,6 +116,29 @@ for _ in $(seq 100); do [ -f "/srv/vol1/docs/#recycle/common/plan.txt" ] && brea
 [ -f "/srv/vol1/docs/#recycle/common/plan.txt" ] || fail "not in the recycle bin"
 api alice GET /v1/tasks | jq -e '[.[] | select(.type=="files.delete" and .user=="alice")] | length > 0' >/dev/null \
     || fail "no files.delete task"
+
+step "links stay inside their share (wide links = no)"
+ln -s /etc /srv/vol1/docs/common/etc
+ln -s ../../../../etc/shadow /srv/vol1/docs/common/up
+mkdir -p /srv/vol1/docs/common/real && echo inside > /srv/vol1/docs/common/real/f.txt
+ln -s real /srv/vol1/docs/common/in
+# carol keeps CAP_DAC_READ_SEARCH: through a link she would read /etc/shadow
+for path in /docs/common/etc/shadow /docs/common/up; do
+    api carol GET "/v1/files/text?path=$path" | jq -e '.code == "outside_share"' >/dev/null || fail "carol reads $path"
+    [ "$(code carol GET "/v1/files/download?path=$path")" = 403 ] || fail "carol downloads $path"
+done
+[ "$(code carol GET '/v1/files/list?path=/docs/common/etc')" = 403 ] || fail "carol lists /etc through a link"
+api carol GET '/v1/files/list?path=/docs/common' | jq -e '.entries[] | select(.name=="etc") | .outside == true' >/dev/null \
+    || fail "the link is not marked outside"
+curl -s --unix-socket "$SOCK" -H 'x-rynas-user: carol' -o /tmp/common.zip \
+    'http://rynasd/v1/files/download?paths=%5B%22%2Fdocs%2Fcommon%22%5D'
+if grep -q 'root:[*!]' /tmp/common.zip; then fail "/etc/shadow inside the zip"; fi
+api carol POST /v1/files/jobs/new '{"op":"copy","sources":["/docs/common/etc/shadow"],"dest":"/docs/common/real"}' >/dev/null
+sleep 2
+[ ! -e /srv/vol1/docs/common/real/shadow ] || fail "a job copied /etc/shadow"
+# a link inside the share works as before
+[ "$(api carol GET '/v1/files/text?path=/docs/common/in/f.txt' | jq -r .text)" = inside ] || fail "a link inside the share"
+rm -rf /srv/vol1/docs/common/etc /srv/vol1/docs/common/up /srv/vol1/docs/common/in /srv/vol1/docs/common/real
 
 step "the worker itself"
 if /opt/rynas/rynas-files-worker serve </dev/null 2>/dev/null; then fail "the worker ran as root"; fi

@@ -1255,11 +1255,12 @@ impl Engine {
             }
         // tar is fed through stdin, so the bytes read give the progress
         let fed = Arc::new(AtomicU64::new(0));
+        // opened here, where the jail is (the feeding thread has none)
+        let opened = confine::open(archive);
         let feeder = child.stdin.take().map(|mut stdin| {
             let fed = Arc::clone(&fed);
-            let archive = archive.to_path_buf();
             std::thread::spawn(move || {
-                let Ok(mut f) = File::open(&archive) else { return };
+                let Ok(mut f) = opened else { return };
                 let mut buf = vec![0u8; 1 << 20];
                 while let Ok(n) = f.read(&mut buf) {
                     if n == 0 || stdin.write_all(&buf[..n]).is_err() {
