@@ -9,6 +9,33 @@ Hardware › Power schedule. Missing: the plugin process (protocol v1), USB copy
 the diagnostics page (phase 2).
 `rynasctl net reset-button` (network module, D-NET) is implemented.
 
+## Module boundary (D-MODULE, 2026-11-06)
+
+Everything Synology or synodeb lives in the module; the core names neither and works without
+it with standard Debian tools ("se non lo si ha deve funzionare tutto e senza rimandi a cose
+che non sono standard"). The module is:
+
+- `crates/rynas-hw-synology`: the `rynas-hw` provider (status, commands, identify, fan curves)
+  and, behind its `domain` feature (rynasd only), `module::SynologyModule` (the
+  `rynas_module::Module`), `domain` (`synology.hw`), `ups` (synodeb's `UpsLayer`: `synodeb-ups
+  probe/setup/status --json/test`, the `/etc/synodeb/ups.conf` block, the Safe Mode notice),
+  `notify` (synodeb's `notify` forward, the one-time `notify.conf` import);
+- `crates/rynas-ui/src/modules/synology`: the Hardware › Synology tab and its presence check,
+  the module's dictionary table (`syn.*`, `nev.synodeb.*`, `nt.src.synodeb`, the UPS texts of
+  synodeb's layer, the reset button), the UPS text slots, the reset button status;
+- `packaging/modules/synology/ups-pre-safemode`: installed under
+  `/usr/lib/rynas/modules/synology/`, linked as `/etc/synodeb/ups-pre-safemode.d/50-rynas` by
+  the module at the start of rynasd, only where synodeb runs the UPS.
+
+Detection (`SynologyModule::detect`): Synology hardware (DMI, platform driver) gives the
+`synology.hw` domain and the DOM's USB ids; synodeb's own files below the configuration root
+(`/etc/synodeb/ups.conf`, `/etc/synodeb/notify.conf`) give the UPS layer (with `ups.conf`), the
+forward socket and the import. Without either, nothing of the module is registered: the UPS page
+uses NUT, the notify socket stays closed, the Synology tab, texts and hook do not exist. Parts
+still in the core (module routers in rynasd/rynas-web, the DOM/kernel layer of updates and root
+rollback, rescue beeps, RTC hint, chassis identify endpoint) are listed with their planned
+extension point in `../quality/module-boundary-2026-11-06.md`.
+
 Requirements (2026-11-05). Implements the `rynas-hw` provider for Synology NAS running
 [synodeb](https://github.com/rylos/synodeb). Rule: **the plugin exposes every feature of synohwd and
 synodeb's hardware tools in the UI; synohwd stays the executor** (it owns fans, LEDs, the
@@ -43,7 +70,7 @@ bays, 2 fans); others as synodeb adds them. Model data (bays, fan tables) comes 
 | Power back after AC loss | `ac_recovery` (uP `q`/`p`) | toggle (DSM "Restart automatically when power supply issue is fixed") |
 | **Scheduled power on/off** | RTC `wakealarm` (`rtcwake -d rtc0 -m no -t <epoch>`), synohwd tells the uP at shutdown (`s`/`r`) | **Power Schedule like DSM**: weekly rules "power on at" / "power off at" per day, multiple rules; see below |
 | Watchdog | synodeb hardware watchdog | status shown; reset count from boot-report |
-| UPS | synodeb-ups (NUT, Safe Mode) | `nut` plugin (D-UPS), not this plugin |
+| UPS | synodeb-ups (NUT, Safe Mode) | the core UPS page over this module's `UpsLayer` (`ups.rs`); NUT without the module (D-UPS, D-MODULE) |
 | Microcontroller current reading | `up_current` (raw ×16.13, unit unknown) | shown in diagnostics only, labelled raw |
 | Events | `events` (last 20) | Hardware → Events, merged into notifications |
 | Raw uP commands | `synohwd send` (validated sequences only) | Diagnostics (admin, behind a confirmation) |

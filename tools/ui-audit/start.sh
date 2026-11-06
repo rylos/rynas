@@ -40,7 +40,7 @@ if [ -n "${FAKE_UPS:-}" ]; then
   fi
 fi
 target/release/rynasd --socket "$R/rynasd.sock" --state-dir "$R/state" --dry-system --hw-root "$H" \
-  --notify-socket "" --synodeb-notify-conf "" --storage-check-interval 0 "${RYNASD_UPS[@]}" ${FAKE_USB:+--removable-demo} > "$R/rynasd.log" 2>&1 &
+  --notify-socket "" --storage-check-interval 0 "${RYNASD_UPS[@]}" ${FAKE_USB:+--removable-demo} > "$R/rynasd.log" 2>&1 &
 echo $! >> "$R/pids"; sleep 1.5
 target/release/rynas-web --listen "127.0.0.1:$PORT" --rynasd-socket "$R/rynasd.sock" --users-file "$HERE/users.toml" \
   --auth-state-dir "$R/web" --ui-dir crates/rynas-ui/dist --synohwd-status "$H/run/synohwd/status.json" "${UPSD_ARG[@]}" > "$R/web.log" 2>&1 &

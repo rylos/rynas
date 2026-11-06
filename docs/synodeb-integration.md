@@ -225,8 +225,9 @@ fi
 ```
 (`-s <source>` sets `source`; `FORWARD=off` in `notify.conf` keeps the old behaviour.)
 
-**notify.conf import**: on its first start rynasd reads `/etc/synodeb/notify.conf` (option
-`--synodeb-notify-conf`; parsed as `KEY=value` lines, never sourced) and creates the targets
+**notify.conf import**: on its first start rynasd's Synology module reads
+`/etc/synodeb/notify.conf` below the configuration root (parsed as `KEY=value` lines, never
+sourced) and creates the targets
 "E-mail (synodeb)" (EMAIL_TO, EMAIL_FROM, SMTP_HOST/PORT/TLS/USER, the first line of
 SMTP_PASSWORD_FILE), "Telegram (synodeb)" (TELEGRAM_TOKEN, TELEGRAM_CHAT_ID) and "ntfy
 (synodeb)" (NTFY_URL split into server and topic, NTFY_TOKEN), plus a rule "Imported from

@@ -42,7 +42,7 @@ TasksMax=256
 # rynasd itself is killed, its exit restarts the unit as usual).
 OOMPolicy=continue
 
-# /run/rynas (rynasd.sock; notify.sock, 0600 root, synodeb's notify forward) and
+# /run/rynas (rynasd.sock; notify.sock, 0600 root, a hardware module's notify forward) and
 # /var/lib/rynas (0700 root): auth/totp (TOTP secrets), config.db, tasks/ (task logs),
 # backup/<rev>/ (files replaced by each configuration apply), notify/ (notify.db and the
 # key of the notification target secrets), net/ (network revisions, trial marker; also used

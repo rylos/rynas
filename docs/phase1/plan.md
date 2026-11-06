@@ -711,9 +711,11 @@ ignores repeats and resolutions of keys that were not firing. Other crates emit 
 `plugin:<id>` set by the core. `.rynasbak` archives carry `notify.db` and, encrypted, its key
 (step 6, backup of the configuration). Not yet: web push, Apprise, event × channel table, UPS events (with the nut plugin).
 
-rynasd options: `--notify-socket` (default `/run/rynas/notify.sock`, empty = off),
-`--synodeb-notify-conf` (default `/etc/synodeb/notify.conf`, imported once into targets and an
-"Imported from synodeb" rule), `--storage-check-interval` (s, default 300, 0 = off). The unit
+rynasd options: `--notify-socket` (default `/run/rynas/notify.sock`, empty = off; opened
+only when a hardware module provides a forward, D-MODULE), `--storage-check-interval` (s,
+default 300, 0 = off). A module's notification settings (synodeb's `/etc/synodeb/notify.conf`
+below the configuration root, Synology module) are imported once into targets and an
+"Imported from synodeb" rule. The unit
 adds `StateDirectory=rynas/notify`; outgoing SMTP/HTTP uses the AF_INET families already allowed.
 
 ## API v1: task scheduler and snapshots (P3)
@@ -1002,7 +1004,8 @@ upsd protocol client is the crate `rynas-nut` (shared by both daemons).
   "Safe Mode: <reason>" (synodeb), running rynas tasks cancelled (not `config.*`), running
   scheduler units stopped, within the budget (synodeb hook 25 s, nut `STOP_TIMEOUT`).
   Internal only (root peer, `rynasctl ups safe-mode <reason>` from
-  `/etc/synodeb/ups-pre-safemode.d/50-rynas`, shipped in the package):
+  `/etc/synodeb/ups-pre-safemode.d/50-rynas`, a link the Synology module makes at the start of
+  rynasd to `/usr/lib/rynas/modules/synology/ups-pre-safemode`, shipped in the package):
   `POST /v1/ups/safe-mode` {reason} → `SafeModeReport` {cancelled_tasks, stopped_units}. The
   hook is bounded to 40 s and exits 0 without doing anything when `rynasd.service` is not active.
 - Scheduled battery test: a Task Scheduler command task as root running `rynasctl ups test
