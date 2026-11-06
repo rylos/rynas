@@ -110,6 +110,16 @@ reload the list only on `shares` applies, not every pending change.
 |---|---|
 | `shares: never delete a folder that is a symbolic link` | H1 |
 
+## Follow-up fixes (2026-11-06)
+
+| Commit | Fix |
+|---|---|
+| `config: keys staged together are applied together` | M1: `Config::stage_group` records apply-together groups; a partial apply that splits one is 409 `apply_group_split`; "delete share with data" is a review group (only the pending bar's full apply commits it); snapshot jobs and the power schedule group their keys |
+| `shares: unshared folder sizes cached, never read from sleeping disks` | M2: `/folders` serves known sizes only, `?sizes=true` measures (qgroup when quotas are on, else the bounded walk) with a 1 h cache cleared by `shares` applies and folder deletions, never on a volume with a disk in standby; the page loads the sizes after the list |
+| `ups: translate the standard NUT battery test results` | L1 |
+| `shares: say that a rollback does not bring a deleted share folder back` | L2 (documented in the delete dialog) |
+| `tools/ui-audit: commit audit.js and cands.js` | L3 (rewritten: they were never committed) |
+
 ## Not verified
 
 - Save-in-dialog in the GUI (apply + close, error keeps the dialog open): the test instance has no
