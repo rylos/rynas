@@ -651,6 +651,13 @@ dict! {
     "ups.test" => "Battery test", "Test batteria";
     "ups.last_result" => "Last result", "Ultimo risultato";
     "ups.no_result" => "Not reported by the UPS", "Non segnalato dall'UPS";
+    "ups.tr.passed" => "Completed: passed", "Completato: superato";
+    "ups.tr.warning" => "Completed with a warning", "Completato con un avviso";
+    "ups.tr.error" => "Completed: failed", "Completato: non superato";
+    "ups.tr.aborted" => "Aborted", "Interrotto";
+    "ups.tr.in_progress" => "Test in progress", "Test in corso";
+    "ups.tr.none" => "No test run yet", "Nessun test eseguito";
+    "ups.tr.scheduled" => "Test scheduled", "Test programmato";
     "ups.test_done" => "Battery test finished.", "Test batteria terminato.";
     "ups.test_unsupported" => "This UPS offers no battery test through NUT.", "Questo UPS non offre test della batteria tramite NUT.";
     "ups.test_online" => "A test can start only while the UPS is on mains power.", "Un test può partire solo mentre l'UPS è alimentato dalla rete.";

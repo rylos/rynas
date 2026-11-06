@@ -413,19 +413,21 @@ fn test_card(settings: Remote<UpsSettingsState>) -> AnyView {
     let result = move || {
         let r = live.ups.with(|u| u.as_ref().and_then(|u| u.test_result.clone()));
         match r {
-            Some(r) => {
-                let l = r.to_ascii_lowercase();
-                let tone = if l.contains("pass") {
-                    Tone::Ok
-                } else if l.contains("error") || l.contains("fail") || l.contains("abort") {
-                    Tone::Err
-                } else if l.contains("progress") {
-                    Tone::Info
-                } else {
-                    Tone::Unknown
-                };
-                status(tone, r)
-            }
+            Some(r) => match test_result(&r) {
+                Some((tone, key)) => status(tone, t(key).to_string()),
+                // a value this build does not know: the UPS's own (English) text
+                None => {
+                    let l = r.to_ascii_lowercase();
+                    let tone = if l.contains("pass") {
+                        Tone::Ok
+                    } else if l.contains("error") || l.contains("fail") || l.contains("abort") {
+                        Tone::Err
+                    } else {
+                        Tone::Unknown
+                    };
+                    view! { <span lang="en">{status(tone, r)}</span> }.into_any()
+                }
+            },
             None => text(t("ups.no_result").to_string()),
         }
     };
@@ -502,9 +504,44 @@ fn events_card(events: Remote<Vec<Notification>>) -> AnyView {
     .into_any()
 }
 
+/// Tone and text key of the standard values of NUT's `ups.test.result` (drivers write them
+/// with or without quotes and in any case: `Done and "passed"`); `None` for another value.
+fn test_result(raw: &str) -> Option<(Tone, &'static str)> {
+    let v: String = raw.chars().filter(|c| *c != '"' && *c != '\'').collect::<String>().trim().to_ascii_lowercase();
+    let v = v.split_whitespace().collect::<Vec<_>>().join(" ");
+    Some(match v.as_str() {
+        "done and passed" | "passed" => (Tone::Ok, "ups.tr.passed"),
+        "done and warning" | "warning" => (Tone::Warn, "ups.tr.warning"),
+        "done and error" | "error" | "failed" => (Tone::Err, "ups.tr.error"),
+        "aborted" => (Tone::Err, "ups.tr.aborted"),
+        "in progress" => (Tone::Info, "ups.tr.in_progress"),
+        "no test initiated" | "no test" => (Tone::Unknown, "ups.tr.none"),
+        "test scheduled" | "scheduled" => (Tone::Info, "ups.tr.scheduled"),
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nut_test_results_are_translated() {
+        assert_eq!(test_result("Done and passed"), Some((Tone::Ok, "ups.tr.passed")));
+        assert_eq!(test_result("Done and \"passed\""), Some((Tone::Ok, "ups.tr.passed")));
+        assert_eq!(test_result(" done  and warning "), Some((Tone::Warn, "ups.tr.warning")));
+        assert_eq!(test_result("Done and error"), Some((Tone::Err, "ups.tr.error")));
+        assert_eq!(test_result("Aborted"), Some((Tone::Err, "ups.tr.aborted")));
+        assert_eq!(test_result("In progress"), Some((Tone::Info, "ups.tr.in_progress")));
+        assert_eq!(test_result("No test initiated"), Some((Tone::Unknown, "ups.tr.none")));
+        assert_eq!(test_result("Battery replaced 2025"), None);
+        for (_, k) in ["Done and passed", "Done and warning", "Done and error", "Aborted", "In progress", "No test initiated", "Test scheduled"]
+            .iter()
+            .filter_map(|r| test_result(r))
+        {
+            assert!(i18n::try_t(k).is_some(), "{k}");
+        }
+    }
 
     #[test]
     fn states() {
