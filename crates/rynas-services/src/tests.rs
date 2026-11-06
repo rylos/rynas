@@ -964,6 +964,7 @@ fn homes_service_users_get_subvolume_homes_and_lose_them_with_remove_home() {
         users: vec![
             LocalUser {
                 home: crate::homes::home_of("alice"),
+                home_volume: "/volume1".into(),
                 shell: ShellAccess::Shell,
                 ..user("alice", &[])
             },
@@ -987,13 +988,14 @@ fn homes_service_users_get_subvolume_homes_and_lose_them_with_remove_home() {
     assert_eq!(
         log,
         [
-            "subvolume /volume1/homes 0:0 711",
             "mkdir /srv/rynas 0:0 755",
-            "link /srv/rynas/homes -> /volume1/homes",
+            "mkdir /srv/rynas/homes 0:0 711",
+            "subvolume /volume1/homes 0:0 711",
             "subvolume /volume1/homes/alice 1000:100 700",
             "skel /volume1/homes/alice 1000:100",
+            "link /srv/rynas/homes/alice -> /volume1/homes/alice",
         ],
-        "the homes folder first (order 5), then alice's home before useradd -M"
+        "the folders first (order 5), then alice's home and link before useradd -M"
     );
     let users = acc.state().users.clone();
     let home = |n: &str| users.iter().find(|u| u.name == n).unwrap().home.clone();
@@ -1013,7 +1015,9 @@ fn homes_service_users_get_subvolume_homes_and_lose_them_with_remove_home() {
 
     // bob's home moved (copied by the move task): the document's home changes, usermod -d
     homes.add_dir("/volume1/homes/bob", 1001, 0);
+    homes.set_link("/srv/rynas/homes/bob", "/volume1/homes/bob", &|_| {}).unwrap();
     doc.users[1].home = crate::homes::home_of("bob");
+    doc.users[1].home_volume = "/volume1".into();
     let v = serde_json::to_value(&doc).unwrap();
     acc.state().log.clear();
     cfg.apply_value("admin", USERS_KEY, Some(v), "home of bob moved", &|_| {}).unwrap();
@@ -1039,6 +1043,9 @@ fn homes_service_users_get_subvolume_homes_and_lose_them_with_remove_home() {
     cfg.stage("admin", USERS_KEY, Some(serde_json::to_value(&del).unwrap())).unwrap();
     apply(&cfg).unwrap();
     assert!(acc.state().log.iter().any(|l| l == "userdel alice"), "{:?}", acc.state().log);
-    assert_eq!(homes.state().log, ["subvolume-delete /volume1/homes/alice"]);
+    assert_eq!(
+        homes.state().log,
+        ["subvolume-delete /volume1/homes/alice", "unlink /srv/rynas/homes/alice"]
+    );
     assert!(!homes.probe("/volume1/homes/alice").exists);
 }

@@ -71,6 +71,8 @@ fn env() -> Env {
     let homes = Arc::new(MemoryHomes::new());
     homes.add_volume("/", "ext4", 50 << 30);
     homes.add_volume("/volume1", "btrfs", 3 << 40);
+    homes.add_volume("/volume2", "ext4", 1 << 40);
+    homes.add_dir("/home", 0, 0);
     homes.add_dir("/home/marco", 1000, 2 << 30);
     homes.add_dir("/home/marco/.ssh/authorized_keys", 1000, 1);
     let shares_host = Arc::new(MemoryShares::new());
@@ -170,13 +172,13 @@ async fn homes_setting_new_users_and_moving_an_existing_home() {
     let e = env();
     // off by default; the volumes offered leave out the system disk
     let st = state(&e).await;
-    assert!(!st.settings.enabled && st.target.is_none());
+    assert!(!st.settings.enabled && !st.active);
     assert_eq!(
         st.volumes
             .iter()
             .map(|v| v.path.as_str())
             .collect::<Vec<_>>(),
-        ["/volume1"]
+        ["/volume1", "/volume2"]
     );
     assert_eq!(st.homes[0].location, HomeLocation::System);
 
@@ -238,7 +240,11 @@ async fn homes_setting_new_users_and_moving_an_existing_home() {
     assert!(e.homes.probe("/volume1/homes/alice").subvolume);
     let st = state(&e).await;
     assert!(!st.pending);
-    assert_eq!(st.target.as_deref(), Some("/volume1/homes"));
+    assert!(st.active);
+    assert_eq!(
+        e.homes.read_link("/srv/rynas/homes/alice").as_deref(),
+        Some("/volume1/homes/alice")
+    );
     let alice = st.homes.iter().find(|h| h.user == "alice").unwrap();
     assert_eq!(
         (alice.location, alice.subvolume),
@@ -328,38 +334,182 @@ async fn homes_setting_new_users_and_moving_an_existing_home() {
     assert!(!e.homes.probe("/home/marco.rynas-old").exists);
     assert_eq!(passwd_home(&e, "marco"), "/srv/rynas/homes/marco");
 
-    // the homes folder cannot change volume while it holds homes
-    e.homes.add_volume("/volume2", "btrfs", 1 << 40);
+    // per-user places: carl on volume2, dora on the system disk while the service is on
+    let (s, b) = call(
+        &e,
+        "POST",
+        "/v1/users",
+        Some(json!({"name": "carl", "home_volume": "/volume2"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{}", String::from_utf8_lossy(&b));
+    let v: UserView = serde_json::from_slice(&b).unwrap();
+    assert_eq!(
+        (v.user.home.as_str(), v.user.home_volume.as_str()),
+        ("/srv/rynas/homes/carl", "/volume2")
+    );
+    let (s, b) = call(
+        &e,
+        "POST",
+        "/v1/users",
+        Some(json!({"name": "dora", "home_volume": "system"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{}", String::from_utf8_lossy(&b));
+    let v: UserView = serde_json::from_slice(&b).unwrap();
+    assert_eq!(
+        (v.user.home.as_str(), v.user.home_volume.as_str()),
+        ("/home/dora", "")
+    );
+    let (s, b) = call(
+        &e,
+        "POST",
+        "/v1/users",
+        Some(json!({"name": "eve", "home_volume": "/nowhere"})),
+    )
+    .await;
+    assert_eq!(
+        (s, code(&b).as_str()),
+        (StatusCode::BAD_REQUEST, error_codes::INVALID_VALUE)
+    );
+    apply(&e);
+    assert_eq!(
+        e.homes.read_link("/srv/rynas/homes/carl").as_deref(),
+        Some("/volume2/homes/carl")
+    );
+    assert!(e.homes.probe("/volume2/homes/carl").is_dir);
+    assert!(
+        !e.homes.probe("/volume2/homes/carl").subvolume,
+        "ext4: a folder"
+    );
+    assert_eq!(passwd_home(&e, "dora"), "/home/dora");
+    let st = state(&e).await;
+    let carl = st.homes.iter().find(|h| h.user == "carl").unwrap();
+    assert_eq!(
+        (carl.location, carl.volume.as_str(), carl.folder.as_str()),
+        (HomeLocation::Volume, "/volume2", "/volume2/homes/carl")
+    );
+    // home_volume cannot change by an edit either
+    let (s, _) = call(
+        &e,
+        "PUT",
+        "/v1/users/carl",
+        Some(json!({"home_volume": "/volume1"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+
+    // marco: volume1 → volume2 (same passwd home, the link moves), then undo
+    let (_, b) = call(
+        &e,
+        "POST",
+        "/v1/services/homes/move/plan",
+        Some(json!({"users": ["marco"], "to": "/volume2"})),
+    )
+    .await;
+    let p: Vec<HomeMovePlan> = serde_json::from_slice(&b).unwrap();
+    assert!(p[0].allowed, "{p:?}");
+    assert_eq!(
+        (p[0].source.as_str(), p[0].target.as_str(), p[0].to.as_str()),
+        (
+            "/volume1/homes/marco",
+            "/volume2/homes/marco",
+            "/srv/rynas/homes/marco"
+        )
+    );
+    let (s, b) = call(
+        &e,
+        "POST",
+        "/v1/services/homes/move",
+        Some(json!({"users": ["marco"], "to": "/volume2"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::ACCEPTED);
+    assert_eq!(task(&e, &b).await.status, TaskStatus::Ok);
+    assert_eq!(passwd_home(&e, "marco"), "/srv/rynas/homes/marco");
+    assert_eq!(
+        e.homes.read_link("/srv/rynas/homes/marco").as_deref(),
+        Some("/volume2/homes/marco")
+    );
+    assert!(e.homes.probe("/volume1/homes/marco.rynas-old").exists);
+    let applied: rynas_api_types::UsersConfig =
+        serde_json::from_value(e.config.applied("users").unwrap().unwrap()).unwrap();
+    assert_eq!(
+        applied
+            .users
+            .iter()
+            .find(|u| u.name == "marco")
+            .unwrap()
+            .home_volume,
+        "/volume2",
+        "the users document follows"
+    );
+    let (_, b) = call(&e, "POST", "/v1/services/homes/move/marco/undo", None).await;
+    assert_eq!(task(&e, &b).await.status, TaskStatus::Ok);
+    assert_eq!(
+        e.homes.read_link("/srv/rynas/homes/marco").as_deref(),
+        Some("/volume1/homes/marco")
+    );
+    assert!(e.homes.probe("/volume1/homes/marco").exists);
+
+    // marco: volume1 → system disk (passwd changes, the link goes), confirmed
+    e.homes
+        .state()
+        .entries
+        .retain(|k, _| !k.contains(".marco.undone") && k != "/home/marco.rynas-old");
+    let (s, b) = call(
+        &e,
+        "POST",
+        "/v1/services/homes/move",
+        Some(json!({"users": ["marco"], "to": "system"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{}", String::from_utf8_lossy(&b));
+    let t = task(&e, &b).await;
+    assert_eq!(t.status, TaskStatus::Ok, "{t:?}");
+    assert_eq!(passwd_home(&e, "marco"), "/home/marco");
+    assert!(e.homes.read_link("/srv/rynas/homes/marco").is_none());
+    let (_, b) = call(&e, "POST", "/v1/services/homes/move/marco/finish", None).await;
+    assert_eq!(task(&e, &b).await.status, TaskStatus::Ok);
+    assert!(!e.homes.probe("/volume1/homes/marco.rynas-old").exists);
+    let st = state(&e).await;
+    let m = st.homes.iter().find(|h| h.user == "marco").unwrap();
+    assert_eq!(
+        (m.location, m.moved.is_none()),
+        (HomeLocation::System, true)
+    );
+
+    // the default volume changes although homes are on volume1 (they stay there)
     let (s, b) = call(
         &e,
         "PUT",
         "/v1/services/homes",
-        Some(json!({"enabled": true, "volume": "/volume2"})),
+        Some(json!({"enabled": true, "volume": "/volume2", "smb": {"enabled": true}})),
     )
     .await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    apply(&e);
     assert_eq!(
-        s,
-        StatusCode::BAD_REQUEST,
-        "{}",
-        String::from_utf8_lossy(&b)
+        e.homes.read_link("/srv/rynas/homes/alice").as_deref(),
+        Some("/volume1/homes/alice")
     );
+    let (_, b) = call(&e, "POST", "/v1/users", Some(json!({"name": "fred"}))).await;
+    let v: UserView = serde_json::from_slice(&b).unwrap();
+    assert_eq!(v.user.home_volume, "/volume2");
 
     // service off: the [homes] share goes with it, the homes stay
     let (s, b) = call(
         &e,
         "PUT",
         "/v1/services/homes",
-        Some(json!({"enabled": false, "volume": "/volume1", "smb": {"enabled": true}})),
+        Some(json!({"enabled": false, "volume": "/volume2", "smb": {"enabled": true}})),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
     let st: HomesState = serde_json::from_slice(&b).unwrap();
     assert!(!st.settings.smb.enabled);
     apply(&e);
-    assert_eq!(
-        e.homes.read_link("/srv/rynas/homes").as_deref(),
-        Some("/volume1/homes")
-    );
+    assert!(e.homes.probe("/srv/rynas/homes/alice").is_dir);
     let (_, b) = call(&e, "POST", "/v1/users", Some(json!({"name": "bob"}))).await;
     let v: UserView = serde_json::from_slice(&b).unwrap();
     assert_eq!(v.user.home, "/home/bob");
