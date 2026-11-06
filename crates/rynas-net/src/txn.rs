@@ -194,7 +194,15 @@ pub fn new_token() -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-fn event(severity: NotifySeverity, key: &str, title: String, body: String) -> NewEvent {
+/// A network notification: `code` and `fields` let clients translate the English title and
+/// body (event codes `net.*` in `docs/phase1/plan.md`).
+fn event(
+    severity: NotifySeverity,
+    key: &str,
+    (code, fields): (&str, &[(&str, String)]),
+    title: String,
+    body: String,
+) -> NewEvent {
     NewEvent {
         source: "network".into(),
         category: NotifyCategory::System,
@@ -203,6 +211,11 @@ fn event(severity: NotifySeverity, key: &str, title: String, body: String) -> Ne
         state: EventState::Oneshot,
         title,
         body,
+        code: code.into(),
+        fields: fields
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect(),
         ..Default::default()
     }
 }
@@ -1576,6 +1589,13 @@ impl Engine {
         self.emit(event(
             NotifySeverity::Info,
             "confirmed",
+            (
+                "net.confirmed",
+                &[
+                    ("revision", m.revision.to_string()),
+                    ("interfaces", m.interfaces.join(", ")),
+                ],
+            ),
             format!("Network change confirmed (revision {})", m.revision),
             format!("Interfaces: {}", m.interfaces.join(", ")),
         ));
@@ -1607,23 +1627,33 @@ impl Engine {
             problems,
         };
         let _ = self.store.set_last_rollback(&report);
-        let (sev, title) = if report.verified {
+        let (sev, title, code) = if report.verified {
             (
                 NotifySeverity::Warning,
                 format!(
                     "Network change rolled back ({reason}): revision {} restored",
                     rev.id
                 ),
+                "net.rolled_back",
             )
         } else {
             (
                 NotifySeverity::Critical,
                 format!("Network rollback ({reason}) could not be verified"),
+                "net.rollback_unverified",
             )
         };
         self.emit(event(
             sev,
             "rollback",
+            (
+                code,
+                &[
+                    ("reason", reason.to_string()),
+                    ("revision", rev.id.to_string()),
+                    ("problems", report.problems.join("; ")),
+                ],
+            ),
             title,
             if report.problems.is_empty() {
                 format!("The previous network settings run again and were verified (revision {}).", rev.id)
@@ -1666,6 +1696,7 @@ impl Engine {
                 self.emit(event(
                     NotifySeverity::Notice,
                     "adopted",
+                    ("net.adopted", &[]),
                     "Network migrated to rynas (systemd-networkd)".into(),
                     "The migration done at boot came up with a routable address and is kept."
                         .into(),
@@ -1712,6 +1743,13 @@ impl Engine {
             self.emit(event(
                 NotifySeverity::Warning,
                 "rollback",
+                (
+                    "net.boot_undone",
+                    &[
+                        ("revision", lkg.id.to_string()),
+                        ("tested", m.revision.to_string()),
+                    ],
+                ),
                 format!(
                     "Unconfirmed network change undone at boot: revision {} restored",
                     lkg.id
@@ -1933,6 +1971,7 @@ impl Engine {
                         self.emit(event(
                             NotifySeverity::Warning,
                             "watchdog",
+                            ("net.watchdog_restored", &[("revision", lkg.id.to_string())]),
                             format!("Network restored to the last known good revision {}", lkg.id),
                             "After boot no port had a routable address; the last known good settings fixed it.".into(),
                         ));
@@ -1956,6 +1995,7 @@ impl Engine {
         self.emit(event(
             NotifySeverity::Critical,
             "watchdog",
+            ("net.rescue", &[("revision", before.to_string())]),
             "Network rescue configuration applied".into(),
             format!(
                 "No port had a routable address after boot. Every port is on DHCP with link-local; the previous settings are revision {before}."
@@ -1997,6 +2037,7 @@ impl Engine {
                 self.emit(event(
                     NotifySeverity::Warning,
                     "reset",
+                    ("net.reset", &[("revision", before.to_string())]),
                     "Factory network restored with the reset button".into(),
                     format!(
                         "Every port is on DHCP with link-local; bonds, VLANs and bridges are suspended. The previous settings are revision {before} (Network → revisions → restore)."

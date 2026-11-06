@@ -21,7 +21,7 @@ pub mod engine;
 pub mod synodeb;
 
 pub use rynas_api_types::notify::{
-    EventAction, EventState, NewEvent, NotifyCategory, NotifySeverity,
+    BodyFormat, EventAction, EventState, NewEvent, NotifyCategory, NotifySeverity,
 };
 
 /// Where events go. Implementations queue and return at once: emitting never blocks the
@@ -134,6 +134,13 @@ pub mod event {
     /// Adds a field.
     pub fn field(mut ev: NewEvent, k: &str, v: impl ToString) -> NewEvent {
         ev.fields.insert(k.into(), v.to_string());
+        ev
+    }
+
+    /// Sets the stable event code: clients translate the title and body from it and the
+    /// fields (code table in `docs/phase1/plan.md`, "Event codes").
+    pub fn code(mut ev: NewEvent, code: &str) -> NewEvent {
+        ev.code = code.into();
         ev
     }
 }

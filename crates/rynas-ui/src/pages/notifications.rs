@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use rynas_api_types::notify::{
-    FieldMatch, MatchMode, Notification, NotifyCategory, NotifyLanguage, NotifyRule, NotifySeverity, NotifyTarget, QuietWindow, Silence,
+    BodyFormat, FieldMatch, MatchMode, Notification, NotifyCategory, NotifyLanguage, NotifyRule, NotifySeverity, NotifyTarget, QuietWindow, Silence,
     SilenceRequest, SmtpSecurity, TargetConfig, TargetRequest, TargetTestResult, WebhookHeader, WebhookMethod,
 };
 
@@ -19,7 +19,7 @@ use crate::api;
 use crate::form::{self, In, lens, lens_bool, save_bar, select_field, switch, tabs, text_field};
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
-use crate::notify::{severity_key, severity_tone, use_notes};
+use crate::notify::{event_body, event_title, severity_key, severity_tone, use_notes};
 use crate::toast::toast;
 use crate::ui::{self, Confirm, EmptyState, ErrorBox, PageHeader, Remote, Skeleton, Tone, confirm, drawer};
 
@@ -33,6 +33,22 @@ fn target_name(tg: &NotifyTarget) -> String {
         t("nt.kind.ui").to_string()
     } else {
         tg.name.clone()
+    }
+}
+
+/// The source of an event as shown, and whether it is the raw identifier: rynas' own
+/// sources (`nt.src.<source>`), every synodeb sender as one neutral label, anything else
+/// (plugins) as sent.
+fn source_label(source: &str) -> (String, bool) {
+    if source.starts_with("synodeb:") {
+        return (t("nt.src.synodeb").to_string(), false);
+    }
+    if source == "scheduler" {
+        return (t("sch.title").to_string(), false);
+    }
+    match i18n::try_t(&format!("nt.src.{source}")) {
+        Some(s) => (s.to_string(), false),
+        None => (source.to_string(), true),
     }
 }
 
@@ -230,23 +246,27 @@ fn center_row(n: Notification, detail: RwSignal<Option<Notification>>, silence: 
     let acked = n.acked_ms.is_some();
     let key = n.key.clone();
     let n2 = n.clone();
-    let open_label = format!("{}: {}", t("nt.details"), n.title);
-    let ack_label = format!("{}: {}", t("nt.ack"), n.title);
-    let sil_label = format!("{}: {}", t("nt.silence"), n.title);
+    let title = event_title(&n);
+    let body = event_body(&n);
+    let log = n.body_format == BodyFormat::Log;
+    let open_label = format!("{}: {}", t("nt.details"), title);
+    let ack_label = format!("{}: {}", t("nt.ack"), title);
+    let sil_label = format!("{}: {}", t("nt.silence"), title);
+    let (source, raw_source) = source_label(&n.source);
     ui::row_class(
         vec![
             ui::cell("nt.col.severity", "", view! { {severity_pill(n.severity)} }.into_any()),
             ui::cell("nt.col.event", "wrap-cell", view! {
                 <div class="cell-main">
-                    <button class="link-strong" aria-label=open_label on:click=move |_| detail.set(Some(n2.clone()))>{n.title.clone()}</button>
-                    <span class="cell-sub clamp-2">{n.body.clone()}</span>
+                    <button class="link-strong" aria-label=open_label on:click=move |_| detail.set(Some(n2.clone()))>{title}</button>
+                    <span class=if log { "cell-sub clamp-2 pre-line mono" } else { "cell-sub clamp-2" }>{body}</span>
                 </div>
             }
             .into_any()),
             ui::cell("nt.col.category", "", view! {
                 <div class="cell-main">
                     <span>{tr(category_key(n.category))}</span>
-                    <span class="cell-sub mono">{n.source.clone()}</span>
+                    <span class=if raw_source { "cell-sub mono" } else { "cell-sub" }>{source}</span>
                 </div>
             }
             .into_any()),
@@ -287,10 +307,15 @@ fn detail_drawer(n: Notification, close: Callback<()>, silence: RwSignal<Option<
     let id = n.id;
     let acked = n.acked_ms.is_some();
     let key = n.key.clone();
+    let body_text = event_body(&n);
+    let log = n.body_format == BodyFormat::Log;
     let mut kvs = vec![
         kv("nt.col.severity", t(severity_key(n.severity)).to_string(), ""),
         kv("nt.col.category", t(category_key(n.category)).to_string(), ""),
-        kv("nt.source", n.source.clone(), "mono"),
+        match source_label(&n.source) {
+            (_, true) => kv("nt.source", n.source.clone(), "mono"),
+            (label, false) => kv("nt.source", format!("{label} · {}", n.source), ""),
+        },
         kv("nt.key", n.key.clone(), "mono"),
         kv("nt.first", i18n::datetime(n.ts_ms), "tnum"),
     ];
@@ -325,7 +350,7 @@ fn detail_drawer(n: Notification, close: Callback<()>, silence: RwSignal<Option<
         .collect();
     let body = view! {
         <div class="chips">{severity_pill(n.severity)}{state_pill(&n)}</div>
-        {(!n.body.is_empty()).then(|| view! { <p class="pre-text">{n.body.clone()}</p> })}
+        {(!body_text.is_empty()).then(|| view! { <p class=if log { "pre-text log-text" } else { "pre-text" }>{body_text}</p> })}
         {(!actions.is_empty()).then(|| view! { <div class="card-actions">{actions}</div> })}
         <dl class="kvs">{kvs}</dl>
         {has_fields.then(|| view! { <h3 class="drawer-h">{tr("nt.fields")}</h3><dl class="kvs">{fields}</dl> })}
@@ -341,7 +366,7 @@ fn detail_drawer(n: Notification, close: Callback<()>, silence: RwSignal<Option<
         </button>
     }
     .into_any();
-    drawer(Signal::stored(n.title.clone()), close, body, foot)
+    drawer(Signal::stored(event_title(&n)), close, body, foot)
 }
 
 const SILENCE_FOR: &[(&str, &str)] = &[

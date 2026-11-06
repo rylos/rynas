@@ -5,6 +5,9 @@
 //!   [`NewEvent`]: priority low/normal/high/urgent → info/notice/warning/critical (synodeb's
 //!   own syslog mapping), category from the source, source `synodeb:<source>`, oneshot with
 //!   key `synodeb:<source>:<hash of title and message>` (synodeb's repeat suppression).
+//!   Optional, backwards compatible: `event` (code `synodeb.<event>`), parameters
+//!   (`field.<name>=` in a form, a `fields` object in JSON) and `format` (`text`|`log`);
+//!   invalid ones are dropped, never the notification.
 //! - [`import`]: `/etc/synodeb/notify.conf` (shell `KEY=value` lines, never sourced) turned
 //!   into targets and the minimum severity of an "Imported from synodeb" rule.
 
@@ -13,7 +16,7 @@ use std::collections::BTreeMap;
 use rynas_api_types::notify::{SmtpSecurity, TargetConfig, TargetRequest};
 use sha2::{Digest, Sha256};
 
-use crate::{EventState, NewEvent, NotifyCategory as Cat, NotifySeverity as Sev};
+use crate::{BodyFormat, EventState, NewEvent, NotifyCategory as Cat, NotifySeverity as Sev};
 
 /// Largest body accepted on the socket.
 pub const MAX_BODY: usize = 64 << 10;
@@ -103,17 +106,88 @@ struct Forward {
     source: String,
     #[serde(default)]
     force: bool,
+    /// Stable event code, `[a-z0-9_]{1,32}` (any other JSON value is ignored).
+    #[serde(default)]
+    event: serde_json::Value,
+    /// Event parameters (JSON: an object of strings; form: `field.<name>=value`).
+    #[serde(default)]
+    fields: serde_json::Value,
+    /// `text` (default) or `log`.
+    #[serde(default)]
+    format: serde_json::Value,
 }
 
-/// synohwd notifications that are conditions of [`crate::checks::HardwareWatch`] (titles of
-/// `notify(...)` calls in synohwd.py).
-pub fn synohwd_condition(source: &str, title: &str) -> Option<(&'static str, EventState)> {
-    if source != "synohwd" {
+impl Forward {
+    fn event(&self) -> &str {
+        self.event.as_str().filter(|e| word_ok(e)).unwrap_or("")
+    }
+
+    fn format(&self) -> BodyFormat {
+        match self.format.as_str() {
+            Some("log") => BodyFormat::Log,
+            _ => BodyFormat::Text,
+        }
+    }
+
+    /// The valid parameters (JSON values that are not strings are dropped).
+    fn params(&self) -> BTreeMap<String, String> {
+        let Some(obj) = self.fields.as_object() else {
+            return BTreeMap::new();
+        };
+        valid_fields(
+            obj.iter()
+                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))),
+        )
+    }
+}
+
+/// Most parameters of a forward.
+pub const MAX_FIELDS: usize = 16;
+/// Longest parameter value (characters).
+pub const MAX_FIELD_VALUE: usize = 200;
+
+/// An event code or a parameter name: `[a-z0-9_]`, 1 to 32 characters.
+pub fn word_ok(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 32
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// A parameter value: one line of at most [`MAX_FIELD_VALUE`] characters (may be empty).
+fn value_ok(v: &str) -> bool {
+    v.chars().count() <= MAX_FIELD_VALUE && !v.chars().any(char::is_control)
+}
+
+/// The valid parameters, at most [`MAX_FIELDS`] (the first ones by name); the others are
+/// dropped.
+fn valid_fields(raw: impl IntoIterator<Item = (String, String)>) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for (k, v) in raw {
+        if out.len() >= MAX_FIELDS {
+            break;
+        }
+        if word_ok(&k) && value_ok(&v) {
+            out.insert(k, v);
+        }
+    }
+    out
+}
+
+/// synohwd notifications that are conditions of [`crate::checks::HardwareWatch`]: by event
+/// code (`fan_failure`, `fans_ok`), or by title for senders without codes. synohwd sends
+/// with source `hw` (older builds: `synohwd`).
+pub fn synohwd_condition(
+    source: &str,
+    event: &str,
+    title: &str,
+) -> Option<(&'static str, EventState)> {
+    if source != "hw" && source != "synohwd" {
         return None;
     }
-    match title.trim() {
-        "fan failure" => Some(("hardware:fan_fail", EventState::Firing)),
-        "fans ok again" => Some(("hardware:fan_fail", EventState::Resolved)),
+    match (event, title.trim()) {
+        ("fan_failure", _) | ("", "fan failure") => Some(("hardware:fan_fail", EventState::Firing)),
+        ("fans_ok", _) | ("", "fans ok again") => Some(("hardware:fan_fail", EventState::Resolved)),
         _ => None,
     }
 }
@@ -129,6 +203,7 @@ pub fn parse_forward(content_type: Option<&str>, body: &[u8]) -> Result<(NewEven
     } else if ct.starts_with("application/x-www-form-urlencoded") {
         let text = std::str::from_utf8(body).map_err(|_| "body is not UTF-8")?;
         let mut f = Forward::default();
+        let mut fields = serde_json::Map::new();
         for (k, v) in form_decode(text) {
             match k.as_str() {
                 "title" => f.title = v,
@@ -136,9 +211,19 @@ pub fn parse_forward(content_type: Option<&str>, body: &[u8]) -> Result<(NewEven
                 "priority" => f.priority = v,
                 "source" => f.source = v,
                 "force" => f.force = matches!(v.as_str(), "1" | "true" | "yes"),
-                _ => {}
+                "event" => f.event = v.into(),
+                "format" => f.format = v.into(),
+                _ => {
+                    // the first value of a repeated parameter counts
+                    if let Some(name) = k.strip_prefix("field.")
+                        && !fields.contains_key(name)
+                    {
+                        fields.insert(name.to_string(), v.into());
+                    }
+                }
             }
         }
+        f.fields = fields.into();
         f
     } else {
         return Err(
@@ -153,7 +238,8 @@ pub fn parse_forward(content_type: Option<&str>, body: &[u8]) -> Result<(NewEven
     let hash: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
     // synohwd's fan alarms are the conditions rynas's hardware watch already tracks: same key,
     // so the engine counts them as one (no duplicate notification)
-    let (key, state, sev) = match synohwd_condition(&src, &f.title) {
+    let event = f.event().to_string();
+    let (key, state, sev) = match synohwd_condition(&src, &event, &f.title) {
         Some((key, state)) => (
             key.to_string(),
             state,
@@ -168,6 +254,12 @@ pub fn parse_forward(content_type: Option<&str>, body: &[u8]) -> Result<(NewEven
             severity(&f.priority),
         ),
     };
+    let mut fields = f.params();
+    let priority = f.priority.trim();
+    if !priority.is_empty() {
+        fields.insert("priority".to_string(), priority.to_string());
+    }
+    let body_format = f.format();
     let ev = NewEvent {
         source: format!("synodeb:{src}"),
         category: category(&src),
@@ -176,11 +268,14 @@ pub fn parse_forward(content_type: Option<&str>, body: &[u8]) -> Result<(NewEven
         state,
         title: f.title,
         body: f.message,
-        fields: [("priority".to_string(), f.priority.trim().to_string())]
-            .into_iter()
-            .filter(|(_, v)| !v.is_empty())
-            .collect(),
+        fields,
         actions: Vec::new(),
+        code: if event.is_empty() {
+            String::new()
+        } else {
+            format!("synodeb.{event}")
+        },
+        body_format,
     };
     Ok((ev, f.force))
 }
@@ -372,7 +467,97 @@ mod tests {
         )
         .unwrap();
         assert_eq!(e.state, EventState::Oneshot);
-        assert_eq!(synohwd_condition("smartd", "fan failure"), None);
+        assert_eq!(synohwd_condition("smartd", "", "fan failure"), None);
+        // current synohwd: source hw, matched by event code whatever the title
+        let (e, _) = parse_forward(
+            Some("application/x-www-form-urlencoded"),
+            b"title=Fan+alarm&priority=urgent&source=hw&event=fan_failure&field.source=hwmon&field.fans=fan1+0+rpm",
+        )
+        .unwrap();
+        assert_eq!(e.key.as_deref(), Some("hardware:fan_fail"));
+        assert_eq!(e.code, "synodeb.fan_failure");
+        assert_eq!(e.fields["fans"], "fan1 0 rpm");
+        let (e, _) = parse_forward(
+            Some("application/x-www-form-urlencoded"),
+            b"title=fans+ok+again&source=hw&event=fans_ok",
+        )
+        .unwrap();
+        assert_eq!(e.state, EventState::Resolved);
+        // title fallback with source hw
+        let (e, _) = parse_forward(
+            Some("application/json"),
+            br#"{"title":"fan failure","source":"hw"}"#,
+        )
+        .unwrap();
+        assert_eq!(e.key.as_deref(), Some("hardware:fan_fail"));
+        assert_eq!(e.code, "");
+    }
+
+    #[test]
+    fn forward_event_fields_and_format() {
+        let (e, _) = parse_forward(
+            Some("application/x-www-form-urlencoded"),
+            b"title=unit+failed%3A+nginx.service&message=x%0Ay&priority=high&source=unit\
+              &event=unit_failed&field.unit=nginx.service&format=log",
+        )
+        .unwrap();
+        assert_eq!(e.code, "synodeb.unit_failed");
+        assert_eq!(e.body_format, BodyFormat::Log);
+        assert_eq!(e.fields["unit"], "nginx.service");
+        assert_eq!(e.fields["priority"], "high");
+        assert_eq!(e.body, "x\ny");
+        let (e, _) = parse_forward(
+            Some("application/json"),
+            br#"{"title":"RAID md2: Fail","source":"raid","event":"raid_event","format":"log",
+                "fields":{"array":"md2","event":"Fail","device":"","n":3}}"#,
+        )
+        .unwrap();
+        assert_eq!(e.code, "synodeb.raid_event");
+        assert_eq!(e.body_format, BodyFormat::Log);
+        assert_eq!(e.fields["device"], "", "empty values are kept");
+        assert!(!e.fields.contains_key("n"), "non-string values are dropped");
+        // invalid parts are dropped, the notification stays
+        let long = "v".repeat(MAX_FIELD_VALUE + 1);
+        let body = format!(
+            "title=t&event=Bad-Code&format=html&field.ok=1&field.Bad=2&field.={}&field.long={long}\
+             &field.nl=a%0Ab&field.ok=again",
+            "x"
+        );
+        let (e, _) =
+            parse_forward(Some("application/x-www-form-urlencoded"), body.as_bytes()).unwrap();
+        assert_eq!(e.code, "");
+        assert_eq!(e.body_format, BodyFormat::Text);
+        assert_eq!(e.fields.len(), 1);
+        assert_eq!(e.fields["ok"], "1");
+        let (e, _) = parse_forward(
+            Some("application/json"),
+            br#"{"title":"t","event":7,"fields":"nope","format":["log"]}"#,
+        )
+        .unwrap();
+        assert_eq!((e.code.as_str(), e.body_format), ("", BodyFormat::Text));
+        assert!(e.fields.is_empty());
+        // at most 16 parameters
+        let many: String = (0..20).map(|i| format!("&field.f{i:02}=v")).collect();
+        let (e, _) = parse_forward(
+            Some("application/x-www-form-urlencoded"),
+            format!("title=t{many}").as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(e.fields.len(), MAX_FIELDS);
+        // a 32-character code is the longest
+        let c32 = "a".repeat(32);
+        let (e, _) = parse_forward(
+            Some("application/x-www-form-urlencoded"),
+            format!("title=t&event={c32}").as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(e.code, format!("synodeb.{c32}"));
+        let (e, _) = parse_forward(
+            Some("application/x-www-form-urlencoded"),
+            format!("title=t&event={c32}a").as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(e.code, "");
     }
 
     #[test]

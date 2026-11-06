@@ -28,7 +28,7 @@ use rynas_api_types::scheduler::{
     NotifyPolicy, ScheduledTask, SchedulerConfig, TaskAction, TaskTrigger,
 };
 use rynas_api_types::{TaskStarted, TaskStatus, error_codes};
-use rynas_notify::event::{field, oneshot};
+use rynas_notify::event::{code, field, oneshot};
 use rynas_power::POWER_KEY;
 use rynas_power::policy::{Decision, RECHECK_S, decide, mdstat_busy, smb_open_files};
 use rynas_power::rules::{self, normalize, on_calendar, task_id, valid_rule_id};
@@ -341,8 +341,10 @@ async fn scheduled_shutdown(
                             format!("power:shutdown:{}:skipped", r.id),
                             format!("Scheduled shutdown {} skipped", r.id),
                         );
-                        let mut ev = field(ev, "rule", &r.id);
-                        ev.body = format!("The NAS stayed on: {}.", busy.join("; "));
+                        let reasons = busy.join("; ");
+                        let ev = field(code(ev, "power.shutdown_skipped"), "rule", &r.id);
+                        let mut ev = field(ev, "reasons", &reasons);
+                        ev.body = format!("The NAS stayed on: {reasons}.");
                         h.notifier.emit(ev);
                         return Ok(());
                     }
@@ -356,7 +358,8 @@ async fn scheduled_shutdown(
                 format!("Scheduled shutdown {}", r.id),
             );
             ev.body = "The NAS is shutting down as scheduled.".into();
-            h.notifier.emit(ev);
+            h.notifier
+                .emit(field(code(ev, "power.shutdown"), "rule", &r.id));
             let Some((prog, args)) = h.poweroff.split_first() else {
                 return Err("no poweroff command".into());
             };

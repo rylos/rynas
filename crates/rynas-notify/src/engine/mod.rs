@@ -269,7 +269,25 @@ pub fn sanitize(ev: NewEvent) -> Result<NewEvent> {
         body: clean_text(&ev.body, 4000),
         fields,
         actions,
+        // a malformed code is dropped (the title/body fallback still works), not refused
+        code: if code_ok(&ev.code) {
+            ev.code
+        } else {
+            String::new()
+        },
+        body_format: ev.body_format,
     })
+}
+
+/// Event codes: dot-separated words of `[a-z0-9_]`, at most 64 characters (`hw.fan_stopped`).
+pub fn code_ok(c: &str) -> bool {
+    !c.is_empty()
+        && c.len() <= 64
+        && c.split('.').all(|w| {
+            !w.is_empty()
+                && w.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        })
 }
 
 fn secret_name_ok(n: &str) -> bool {
@@ -459,13 +477,16 @@ impl Engine {
                     )?;
                     if ev.severity != sev {
                         tx.execute(
-                            "UPDATE events SET severity = ?2, title = ?3, body = ?4, fields = ?5 WHERE id = ?1",
+                            "UPDATE events SET severity = ?2, title = ?3, body = ?4, fields = ?5,
+                               code = ?6, body_format = ?7 WHERE id = ?1",
                             params![
                                 n.id as i64,
                                 ev.severity.as_str(),
                                 ev.title,
                                 ev.body,
-                                serde_json::to_string(&ev.fields).unwrap_or_default()
+                                serde_json::to_string(&ev.fields).unwrap_or_default(),
+                                ev.code,
+                                ev.body_format.as_str(),
                             ],
                         )?;
                         tx.execute(
@@ -1722,8 +1743,8 @@ fn insert_event(
 ) -> rusqlite::Result<u64> {
     tx.execute(
         "INSERT INTO events (ts_ms, last_ms, count, source, category, severity, key, state, title,
-           body, fields, actions, silenced)
-         VALUES (?1, ?1, 1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+           body, fields, actions, silenced, code, body_format)
+         VALUES (?1, ?1, 1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             now as i64,
             ev.source,
@@ -1736,6 +1757,8 @@ fn insert_event(
             serde_json::to_string(&ev.fields).unwrap_or_default(),
             serde_json::to_string(&ev.actions).unwrap_or_default(),
             silenced,
+            ev.code,
+            ev.body_format.as_str(),
         ],
     )?;
     Ok(tx.last_insert_rowid() as u64)
