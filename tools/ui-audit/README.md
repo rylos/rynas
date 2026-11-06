@@ -29,5 +29,12 @@ quality reviews (docs/quality/). Nothing here touches the host system or a runni
   `states.py` checks the loading/error states (second instance with rynasd stopped).
 - `files_reenter.py`: leave the file manager and come back (sidebar, router, `?window`): the Files
   page shows again with the same app and no panic. Needs `files_mock.py 18601 18600` in front.
+- `dash_shift.py [seconds]`: the dashboard's first seconds after sign-in, after a reload and after
+  coming back from another page, sampled every 250 ms: layout-shift score (Layout Instability
+  API), card heights placeholder vs content, device rows, chart paths inside the plot, scale label
+  changes. Exit 1 on any shift. `SLOW=1` emulates a slow link and CPU (VPN, modest laptop), where
+  the placeholders show long enough to matter; frames in `target/ui-audit/dash_shift.json`.
+- `files_mock.py ... xfer`: a running tar.zst compression with bursty speed samples and a pause,
+  for the transfer dialog's speed chart (`/files?xfer=last` opens it).
 - `files_menus.py`: right click at a known point, the menu's top-left corner at the pointer (also
   sidebar collapsed, scrolled, `?window`), icon picker, transfers drawer. Same mock in front.

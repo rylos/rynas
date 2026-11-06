@@ -242,8 +242,10 @@ impl Collector {
         }
     }
 
-    /// Starts the sampling thread. The first sample is published after one interval, so
-    /// that every published sample has real rates.
+    /// Starts the sampling thread. The first sample only sets the counters and the second one
+    /// is dropped too: its interval holds the service's own start-up (and often the boot's),
+    /// a CPU peak that would open every chart for the next minutes. Publishing starts after
+    /// two intervals, with real rates over a quiet interval.
     pub fn spawn(mut self) -> std::io::Result<std::thread::JoinHandle<()>> {
         std::thread::Builder::new()
             .name("metrics".into())
@@ -251,7 +253,9 @@ impl Collector {
             .spawn(move || {
                 let start = Instant::now();
                 self.sample(start);
-                let mut n: u32 = 1;
+                std::thread::sleep(INTERVAL);
+                self.sample(Instant::now());
+                let mut n: u32 = 2;
                 loop {
                     let next = start + INTERVAL * n;
                     let now = Instant::now();

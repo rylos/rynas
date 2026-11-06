@@ -43,6 +43,8 @@ pub struct Opts {
     pub grid: bool,
     /// Formats the top-of-scale label; no label when None.
     pub label: Option<fn(f32) -> String>,
+    /// Bytes: round the scale top in powers of 1024 (100 MiB/s, not 95,4 MiB/s).
+    pub binary: bool,
 }
 
 fn hex_rgba(hex: &str, a: f32) -> String {
@@ -72,6 +74,15 @@ fn nice(v: f32) -> f32 {
         10.0
     };
     n * e
+}
+
+/// [`nice`] in the 1024-based unit of the value: 100 MiB, 2 GiB.
+fn nice_binary(v: f32) -> f32 {
+    let mut unit = 1f32;
+    while v / unit >= 1024.0 {
+        unit *= 1024.0;
+    }
+    nice(v / unit) * unit
 }
 
 /// Samples always spanned by the x axis: with fewer (right after start) the chart shows the
@@ -138,28 +149,72 @@ impl Snap {
     }
 }
 
-/// Smooth path through the points (quadratic curves through the midpoints: no overshoot).
+/// Tangents of the monotone cubic through `pts` (x increasing), Fritsch–Carlson: zero at local
+/// extremes, a weighted harmonic mean of the neighbouring slopes elsewhere, the one-sided slope
+/// at both ends. Each piece then stays between its two points: the curve passes through every
+/// sample and never overshoots above a peak or below the baseline. The tangent at a point
+/// depends on its two neighbours only, so a new sample reshapes the last piece alone.
+pub fn tangents(pts: &[(f64, f64)]) -> Vec<f64> {
+    let n = pts.len();
+    if n < 2 {
+        return vec![0.0; n];
+    }
+    let d: Vec<f64> = pts
+        .windows(2)
+        .map(|w| {
+            let h = w[1].0 - w[0].0;
+            if h > 0.0 { (w[1].1 - w[0].1) / h } else { 0.0 }
+        })
+        .collect();
+    let mut m = vec![0.0; n];
+    m[0] = d[0];
+    m[n - 1] = d[n - 2];
+    for k in 1..n - 1 {
+        let (d0, d1) = (d[k - 1], d[k]);
+        if d0 * d1 <= 0.0 {
+            continue;
+        }
+        let (h0, h1) = (pts[k].0 - pts[k - 1].0, pts[k + 1].0 - pts[k].0);
+        let (w1, w2) = (2.0 * h1 + h0, h1 + 2.0 * h0);
+        m[k] = (w1 + w2) / (w1 / d0 + w2 / d1);
+    }
+    m
+}
+
+/// Bézier control points of piece `k` (from `pts[k]` to `pts[k + 1]`) for tangents `m`.
+pub fn controls(pts: &[(f64, f64)], m: &[f64], k: usize) -> [(f64, f64); 2] {
+    let ((x0, y0), (x1, y1)) = (pts[k], pts[k + 1]);
+    let h = (x1 - x0) / 3.0;
+    [(x0 + h, y0 + m[k] * h), (x1 - h, y1 - m[k + 1] * h)]
+}
+
+/// Smooth path through the points: monotone cubic ([`tangents`]).
 fn trace(ctx: &CanvasRenderingContext2d, pts: &[(f64, f64)]) {
     let Some(&(x0, y0)) = pts.first() else { return };
     ctx.move_to(x0, y0);
-    if let Some(&(x1, y1)) = pts.get(1) {
-        ctx.line_to((x0 + x1) / 2.0, (y0 + y1) / 2.0);
-    }
-    // piece i runs from mid(i-1, i) to mid(i, i+1) around p[i]: it depends on its neighbours
-    // only, so a new last point never reshapes what is before mid(n-2, n-1)
-    for w in pts.windows(2).skip(1) {
-        let ((x1, y1), (x2, y2)) = (w[0], w[1]);
-        ctx.quadratic_curve_to(x1, y1, (x1 + x2) / 2.0, (y1 + y2) / 2.0);
-    }
-    if let Some(&(xn, yn)) = pts.last() {
-        ctx.line_to(xn, yn);
+    let m = tangents(pts);
+    for k in 0..pts.len() - 1 {
+        let [(ax, ay), (bx, by)] = controls(pts, &m, k);
+        let (x, y) = pts[k + 1];
+        ctx.bezier_curve_to(ax, ay, bx, by, x, y);
     }
 }
 
-/// Top of the scale for the snapshot (fixed, or the 1-2-5 rounding above the peak).
-fn target_top(snap: &Snap, o: Opts) -> f32 {
-    let peak = snap.data.iter().flatten().fold(0f32, |a, &b| a.max(b));
-    o.max.unwrap_or_else(|| nice(peak * 1.1))
+/// Peak of the samples drawn (NaN and negative values count as 0).
+fn peak(snap: &Snap) -> f32 {
+    snap.data.iter().flatten().fold(0f32, |a, &b| if b > a { b } else { a })
+}
+
+/// Top of the scale: fixed, or the 1-2-5 rounding above the peak with hysteresis around the
+/// current top `cur` (0 = none yet). It grows as soon as the peak gets within 10 % of the top,
+/// and shrinks only once the peak fell under 40 % of it, so the axis does not breathe with
+/// every sample nor bounce when a spike scrolls out.
+pub fn next_top(peak: f32, cur: f32, fixed: Option<f32>, binary: bool) -> f32 {
+    if let Some(m) = fixed {
+        return m;
+    }
+    let want = if binary { nice_binary(peak * 1.1) } else { nice(peak * 1.1) };
+    if cur <= 0.0 || want > cur || peak < cur * 0.4 { want } else { cur }
 }
 
 /// Animated scale: eases from `from` to `to` over [`SCALE_MS`] starting at `start` (ms).
@@ -193,8 +248,8 @@ impl Scale {
 }
 
 /// Draw the snapshot with the right edge of the chart at server time `t` (ms) and the scale
-/// top at `top`.
-fn draw(canvas: &HtmlCanvasElement, series: &[Series], snap: &Snap, o: Opts, t: f64, top: f32) {
+/// top at `top` (eased); the label shows `label_top`, where the scale is going: a round value.
+fn draw(canvas: &HtmlCanvasElement, series: &[Series], snap: &Snap, o: Opts, t: f64, top: f32, label_top: f32) {
     let (cw, ch) = (canvas.client_width() as f64, canvas.client_height() as f64);
     if cw <= 0.0 || ch <= 0.0 {
         return;
@@ -249,7 +304,8 @@ fn draw(canvas: &HtmlCanvasElement, series: &[Series], snap: &Snap, o: Opts, t: 
         let pts: Vec<(f64, f64)> = ts
             .iter()
             .zip(&vals[vals.len() - n..])
-            .map(|(&x, &v)| (cw - (t - x) / span * cw, pad_top + h - (v.min(top) / top) as f64 * h))
+            // clamped to the plot: never below the baseline, never above the top
+            .map(|(&x, &v)| (cw - (t - x) / span * cw, pad_top + h - (clamp_value(v, top) / top) as f64 * h))
             .collect();
         let (x0, y0) = pts[0];
         let xn = pts[n - 1].0;
@@ -285,21 +341,27 @@ fn draw(canvas: &HtmlCanvasElement, series: &[Series], snap: &Snap, o: Opts, t: 
     if let Some(fmt) = o.label {
         ctx.set_fill_style_str(&snap.label);
         ctx.set_font("500 11px Inter, system-ui, sans-serif");
-        let _ = ctx.fill_text(&fmt(top), 2.0, 10.0);
+        let _ = ctx.fill_text(&fmt(label_top), 2.0, 10.0);
     }
 }
 
-/// Server time shown at the right edge, 1.5 samples behind the clock and never past the midpoint
-/// before the newest sample. With midpoint curves every piece left of that midpoint already has
-/// both neighbours, so a new sample only extends the line off-screen: what is visible never
-/// changes shape, it just scrolls in at constant speed.
+/// A sample as plotted: inside 0..=top (NaN as 0).
+fn clamp_value(v: f32, top: f32) -> f32 {
+    if v.is_nan() { 0.0 } else { v.clamp(0.0, top) }
+}
+
+/// Server time shown at the right edge, 2 samples behind the clock and never past the
+/// second-newest sample. The monotone cubic piece before that sample already has both of its
+/// tangents (they need the neighbours on both sides), so a new sample only reshapes the piece
+/// off-screen: what is visible never changes shape, it just scrolls in at constant speed.
+/// Static (newest sample on the right edge) with reduced motion.
 fn edge_time(snap: &Snap) -> f64 {
     let Some(&last) = snap.ts.last() else { return 0.0 };
     let step = snap.step_ms();
     if snap.still {
         return last;
     }
-    (server_now() - 1.5 * step).clamp(last - 2.5 * step, last - 0.5 * step)
+    (server_now() - 2.0 * step).clamp(last - 3.0 * step, last - step)
 }
 
 /// A live chart bound to the metrics history. It scrolls continuously (requestAnimationFrame at
@@ -311,6 +373,8 @@ pub fn LiveChart(
     #[prop(default = 300)] points: usize,
     #[prop(default = true)] grid: bool,
     #[prop(optional)] label: Option<fn(f32) -> String>,
+    /// The values are bytes (see [`Opts::binary`]).
+    #[prop(optional)] binary: bool,
     #[prop(default = "chart")] class: &'static str,
     /// Accessible description of the chart.
     aria: Signal<String>,
@@ -318,7 +382,7 @@ pub fn LiveChart(
     let live = use_live();
     let ui = use_ui();
     let node = NodeRef::<Canvas>::new();
-    let opts = Opts { max, points, grid, label };
+    let opts = Opts { max, points, grid, label, binary };
     let series = StoredValue::new(series);
     let snap = StoredValue::new(Snap::default());
     let running = StoredValue::new(false);
@@ -335,8 +399,9 @@ pub fn LiveChart(
         let var = |name: &str| style.as_ref().and_then(|s| s.get_property_value(name).ok()).unwrap_or_default();
         let next = series.with_value(|ss| {
             live.history.with_value(|h| {
-                // one extra sample on the left so the line enters from the edge while scrolling
-                let skip = h.len().saturating_sub(points + 1);
+                // two extra samples on the left: the line enters from the edge while scrolling and
+                // the first visible piece already has both of its tangents
+                let skip = h.len().saturating_sub(points + 2);
                 Snap {
                     ts: h.iter().skip(skip).map(|m| m.ts_ms as f64).collect(),
                     data: ss.iter().map(|s| h.iter().skip(skip).map(|m| (s.get)(m)).collect()).collect(),
@@ -348,11 +413,11 @@ pub fn LiveChart(
             })
         });
         let now = js_sys::Date::now();
-        let (top, still) = (target_top(&next, opts), next.still);
+        let (top, still) = (next_top(peak(&next), scale.get_value().to, opts.max, opts.binary), next.still);
         scale.update_value(|s| s.retarget(top, now, !still));
         snap.set_value(next);
-        let top = scale.get_value().at(now);
-        series.with_value(|ss| snap.with_value(|sn| draw(&canvas, ss, sn, opts, edge_time(sn), top)));
+        let sc = scale.get_value();
+        series.with_value(|ss| snap.with_value(|sn| draw(&canvas, ss, sn, opts, edge_time(sn), sc.at(now), sc.to)));
         if !running.get_value() && !still {
             running.set_value(true);
             frame(canvas, series, snap, scale, running, opts, 0.0);
@@ -391,8 +456,7 @@ pub fn LiveChart(
             // a rescale runs at the display frame rate
             let due = if sc.moving(now) { 0.0 } else { due };
             if now - last >= due {
-                let top = sc.at(now);
-                series.with_value(|ss| snap.with_value(|sn| draw(&canvas, ss, sn, o, edge_time(sn), top)));
+                series.with_value(|ss| snap.with_value(|sn| draw(&canvas, ss, sn, o, edge_time(sn), sc.at(now), sc.to)));
                 drawn = now;
             }
         }
@@ -400,4 +464,79 @@ pub fn LiveChart(
     }
 
     view! { <canvas node_ref=node class=class role="img" aria-label=aria></canvas> }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Points along the drawn curve (8 per piece), as the canvas would trace them.
+    fn curve(pts: &[(f64, f64)]) -> Vec<(f64, f64)> {
+        let m = tangents(pts);
+        let mut out = vec![pts[0]];
+        for k in 0..pts.len() - 1 {
+            let [(ax, ay), (bx, by)] = controls(pts, &m, k);
+            let ((x0, y0), (x1, y1)) = (pts[k], pts[k + 1]);
+            for i in 1..=8 {
+                let t = i as f64 / 8.0;
+                let u = 1.0 - t;
+                let b = |p0: f64, a: f64, b: f64, p1: f64| u * u * u * p0 + 3.0 * u * u * t * a + 3.0 * u * t * t * b + t * t * t * p1;
+                out.push((b(x0, ax, bx, x1), b(y0, ay, by, y1)));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn monotone_cubic_never_overshoots() {
+        // a lone spike on a flat zero baseline, uneven spacing, a step and a plateau
+        let ys = [0.0, 0.0, 0.0, 100.0, 0.0, 0.0, 3.0, 50.0, 50.0, 49.0, 0.0, 80.0, 0.0];
+        let xs = [0.0, 1.0, 2.0, 3.0, 4.5, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 10.2, 11.0];
+        let pts: Vec<(f64, f64)> = xs.iter().copied().zip(ys).collect();
+        let c = curve(&pts);
+        for w in pts.windows(2) {
+            let (lo, hi) = (w[0].1.min(w[1].1), w[0].1.max(w[1].1));
+            for &(x, y) in c.iter().filter(|(x, _)| *x >= w[0].0 && *x <= w[1].0) {
+                assert!(y >= lo - 1e-9 && y <= hi + 1e-9, "y {y} at x {x} outside {lo}..{hi}");
+            }
+        }
+        // it goes through every sample
+        for p in &pts {
+            assert!(c.iter().any(|q| (q.0 - p.0).abs() < 1e-9 && (q.1 - p.1).abs() < 1e-9));
+        }
+    }
+
+    #[test]
+    fn new_sample_only_reshapes_the_last_piece() {
+        let a: Vec<(f64, f64)> = [3.0, 7.0, 2.0, 9.0, 4.0].iter().enumerate().map(|(i, &y)| (i as f64, y)).collect();
+        let mut b = a.clone();
+        b.push((5.0, 0.0));
+        let (ma, mb) = (tangents(&a), tangents(&b));
+        // every piece but the one ending at the old last point keeps its control points
+        for k in 0..a.len() - 2 {
+            assert_eq!(controls(&a, &ma, k), controls(&b, &mb, k));
+        }
+    }
+
+    #[test]
+    fn scale_hysteresis() {
+        // first value: the 1-2-5 rounding above the peak
+        assert_eq!(next_top(7.0, 0.0, None, false), 10.0);
+        // a little lower or higher: unchanged
+        assert_eq!(next_top(5.0, 10.0, None, false), 10.0);
+        assert_eq!(next_top(8.5, 10.0, None, false), 10.0);
+        // near the top: grows right away
+        assert_eq!(next_top(9.5, 10.0, None, false), 20.0);
+        // a spike scrolled out: shrinks only when well below
+        assert_eq!(next_top(4.5, 10.0, None, false), 10.0);
+        assert_eq!(next_top(3.0, 10.0, None, false), 5.0);
+        // fixed scales stay fixed
+        assert_eq!(next_top(250.0, 100.0, Some(100.0), false), 100.0);
+        // bytes: round in MiB, not in decimal units
+        assert_eq!(next_top(90.0 * 1048576.0, 0.0, None, true), 100.0 * 1048576.0);
+        assert_eq!(next_top(700.0, 0.0, None, true), 1000.0);
+        assert_eq!(clamp_value(-3.0, 100.0), 0.0);
+        assert_eq!(clamp_value(f32::NAN, 100.0), 0.0);
+        assert_eq!(clamp_value(130.0, 100.0), 100.0);
+    }
 }

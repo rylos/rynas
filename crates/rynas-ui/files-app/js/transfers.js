@@ -4,8 +4,8 @@
 
 import { api, notifyUnauth } from "./api.js";
 import { prefs } from "./prefs.js";
-import { t, count, LANG } from "./i18n.js";
-import { esc, size, speed, duration, clock, int, baseName, parentOf, dateTime } from "./format.js";
+import { t, count, LANG, LOCALE } from "./i18n.js";
+import { esc, size, sizeParts, speed, duration, clock, int, baseName, parentOf, dateTime } from "./format.js";
 import { svg } from "./icons.js";
 import { h, $, toast, errorToast } from "./ui.js";
 import { host, mount, activeElement, connected, emit, realTarget } from "./host.js";
@@ -788,31 +788,43 @@ class JobDialog {
     const pad = { l: 8, r: 64, t: 22, b: 10 };
     const w = W - pad.l - pad.r;
     const hh = H - pad.t - pad.b;
+    const progressAxis = this.axis === "progress";
+    const tEnd = s.length ? s[s.length - 1][0] : 0;
+    const xmax = progressAxis ? Math.max(1, st.totalWork) : Math.max(30000, st.elapsed, tEnd);
 
-    // speed per sample, smoothed over a short window
-    const pts = [];
-    for (let i = 1; i < s.length; i++) {
-      let k = i - 1;
-      while (k > 0 && s[i][0] - s[k][0] < 1500) k--;
-      const dt = (s[i][0] - s[k][0]) / 1000;
-      const v = dt > 0 ? Math.max(0, (work(s[i]) - work(s[k])) / dt) : 0;
-      const verifying = s[i][3] > s[i - 1][3];
-      // a pause leaves a hole in the samples; thinned ones are just farther apart, evenly
-      const dt1 = s[i][0] - s[i - 1][0];
-      const gap = dt1 > 2500 && (i < 2 || dt1 > 3 * (s[i - 1][0] - s[i - 2][0]));
-      pts.push({ t: s[i][0], w: work(s[i]), v, verifying, gap });
+    // the speed: the work done over a sliding window of ~2 s, read on an even time grid from
+    // the cumulative counters, so bursts and samples a few ms apart average out instead of
+    // drawing spikes; the window widens when a pixel covers more than half a second
+    const spanMs = progressAxis ? Math.max(tEnd, 1) : xmax;
+    const win = Math.max(2000, (spanMs / Math.max(w, 1)) * 4);
+    const pts = speedCurve(s, work, win, Math.max(250, win / 4));
+    const xOf = (p) => pad.l + (Math.min(xmax, progressAxis ? p.w : p.t) / xmax) * w;
+    // one point per ~2 px: on the progress axis a slow stretch packs many points together
+    const plot = [];
+    for (const p of pts) {
+      const x = xOf(p);
+      const last = plot[plot.length - 1];
+      if (last && x - last.x < 2) {
+        last.n++;
+        last.v += (p.v - last.v) / last.n;
+        last.verifying ||= p.verifying;
+        last.p = p;
+      } else plot.push({ x, v: p.v, verifying: p.verifying, n: 1, p });
     }
-    const xmax = this.axis === "progress" ? Math.max(1, st.totalWork) : Math.max(30000, st.elapsed, s.length ? s[s.length - 1][0] : 0);
-    const xOf = (p) => pad.l + (Math.min(xmax, this.axis === "progress" ? p.w : p.t) / xmax) * w;
-    // the scale ignores the odd spike (a reflink of a big file is instant)
-    const sorted = pts.map((p) => p.v).sort((a, b) => a - b);
-    const p95 = sorted.length ? sorted[Math.floor(sorted.length * 0.95)] : 0;
-    let ymax = Math.max(p95 * 1.25, st.avg * 1.3, 1);
-    const nice = niceStep(ymax / 3);
-    ymax = nice * Math.ceil(ymax / nice);
-    const yOf = (v) => pad.t + hh - (Math.min(v, ymax) / ymax) * hh;
 
-    if (pts.length < 2) {
+    // the scale: a round top over the smoothed peak and the average, with hysteresis (it grows
+    // at once, shrinks only once everything fits in half of it), so it does not breathe
+    const peakV = plot.reduce((a, p) => Math.max(a, p.v), 0);
+    const want = Math.max(peakV * 1.1, st.avg * 1.3, 1);
+    if (!this.yTop || want > this.yTop.top || want < this.yTop.top * 0.5 || this.yAxis !== this.axis) {
+      this.yTop = roundTop(want);
+      this.yAxis = this.axis;
+    }
+    const ymax = this.yTop.top;
+    const tick = this.yTop.step;
+    const yOf = (v) => pad.t + hh - (Math.min(Math.max(v, 0), ymax) / ymax) * hh;
+
+    if (plot.length < 2) {
       g.fillStyle = col("--faint");
       g.font = "12px " + col("--font");
       g.textAlign = "center";
@@ -820,12 +832,13 @@ class JobDialog {
       g.textAlign = "start";
       return;
     }
-    // grid
+    // grid and round tick labels
+    const gridColor = col("--chart-grid") || col("--border");
     g.font = "10.5px " + col("--font");
     g.textBaseline = "middle";
-    for (let k = 0; k <= ymax / nice; k++) {
-      const y = yOf(k * nice);
-      g.strokeStyle = col("--border");
+    for (let k = 0; k * tick <= ymax * (1 + 1e-9); k++) {
+      const y = yOf(k * tick);
+      g.strokeStyle = k ? gridColor : col("--border");
       g.lineWidth = 1;
       g.setLineDash(k ? [2, 4] : []);
       g.beginPath();
@@ -834,12 +847,12 @@ class JobDialog {
       g.stroke();
       if (k) {
         g.fillStyle = col("--faint");
-        g.fillText(st.byBytes ? speed(k * nice) : t("{n}/s", { n: int(k * nice) }), pad.l + w + 6, y);
+        g.fillText(st.byBytes ? tickSpeed(k * tick) : t("{n}/s", { n: int(k * tick) }), pad.l + w + 6, y);
       }
     }
     g.setLineDash([]);
     // the progress so far, faintly, on the progress axis
-    if (this.axis === "progress") {
+    if (progressAxis) {
       g.fillStyle = col("--accent-soft");
       g.globalAlpha = 0.45;
       g.fillRect(pad.l, pad.t, (st.doneWork / xmax) * w, hh);
@@ -850,45 +863,62 @@ class JobDialog {
       g.fillText(fmtTime(0), pad.l, H - 4);
       const endLabel = fmtTime(xmax);
       g.fillText(endLabel, pad.l + w - g.measureText(endLabel).width, H - 4);
+      // pauses (holes in the samples), shaded
+      g.globalAlpha = 0.12;
+      for (const [a, b] of pauses(s)) g.fillRect(xOf({ t: a }), pad.t, Math.max(1, xOf({ t: b }) - xOf({ t: a })), hh);
+      g.globalAlpha = 1;
     }
-    if (pts.length > 1) {
-      const accent = col("--accent");
-      const grad = g.createLinearGradient(0, pad.t, 0, pad.t + hh);
-      grad.addColorStop(0, hexA(accent, 0.45));
-      grad.addColorStop(1, hexA(accent, 0.02));
-      // area
+    // the curve: monotone cubic through the points, so it never dips below 0 nor overshoots
+    // a peak; filled down to the baseline
+    const xy = plot.map((p) => [p.x, yOf(p.v)]);
+    const m = monotoneTangents(xy);
+    const piece = (k) => {
+      const [x0, y0] = xy[k];
+      const [x1, y1] = xy[k + 1];
+      const d = (x1 - x0) / 3;
+      g.bezierCurveTo(x0 + d, y0 + m[k] * d, x1 - d, y1 - m[k + 1] * d, x1, y1);
+    };
+    const accent = col("--accent");
+    const grad = g.createLinearGradient(0, pad.t, 0, pad.t + hh);
+    grad.addColorStop(0, alpha(accent, 0.38));
+    grad.addColorStop(1, alpha(accent, 0.03));
+    g.beginPath();
+    g.moveTo(xy[0][0], yOf(0));
+    g.lineTo(xy[0][0], xy[0][1]);
+    for (let k = 0; k < xy.length - 1; k++) piece(k);
+    g.lineTo(xy[xy.length - 1][0], yOf(0));
+    g.closePath();
+    g.fillStyle = grad;
+    g.fill();
+    // the line, green where the data is being verified (one path per run of one colour)
+    g.lineWidth = 2;
+    g.lineJoin = "round";
+    g.lineCap = "round";
+    for (let a = 0; a < xy.length - 1; ) {
+      const ver = plot[a + 1].verifying;
+      let b = a;
+      while (b < xy.length - 1 && plot[b + 1].verifying === ver) b++;
+      g.strokeStyle = ver ? col("--ok") : accent;
       g.beginPath();
-      g.moveTo(xOf(pts[0]), yOf(0));
-      for (const p of pts) g.lineTo(xOf(p), yOf(p.gap ? 0 : p.v));
-      g.lineTo(xOf(pts[pts.length - 1]), yOf(0));
-      g.closePath();
-      g.fillStyle = grad;
+      g.moveTo(xy[a][0], xy[a][1]);
+      for (let k = a; k < b; k++) piece(k);
+      g.stroke();
+      a = b;
+    }
+    // the head of the line
+    if (active(job)) {
+      const [x, y] = xy[xy.length - 1];
+      g.fillStyle = accent;
+      g.beginPath();
+      g.arc(x, y, 3.5, 0, Math.PI * 2);
       g.fill();
-      // line, green where the data is being verified
-      g.lineWidth = 2;
-      g.lineJoin = "round";
-      for (let i = 1; i < pts.length; i++) {
-        g.strokeStyle = pts[i].verifying ? col("--ok") : accent;
-        g.beginPath();
-        g.moveTo(xOf(pts[i - 1]), yOf(pts[i - 1].gap ? 0 : pts[i - 1].v));
-        g.lineTo(xOf(pts[i]), yOf(pts[i].gap ? 0 : pts[i].v));
-        g.stroke();
-      }
-      // the head of the line
-      const last = pts[pts.length - 1];
-      if (active(job)) {
-        g.fillStyle = accent;
-        g.beginPath();
-        g.arc(xOf(last), yOf(last.v), 3.5, 0, Math.PI * 2);
-        g.fill();
-        g.strokeStyle = hexA(accent, 0.35);
-        g.lineWidth = 6;
-        g.stroke();
-      }
+      g.strokeStyle = alpha(accent, 0.35);
+      g.lineWidth = 6;
+      g.stroke();
     }
     // average
     if (st.avg > 0) {
-      const y = yOf(st.avg);
+      const y = Math.round(yOf(st.avg)) + 0.5;
       g.strokeStyle = col("--muted");
       g.lineWidth = 1;
       g.setLineDash([5, 4]);
@@ -929,6 +959,105 @@ function fmtTime(ms) {
   return m >= 60 ? `${Math.floor(m / 60)}:${String(m % 60).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}` : `${m}:${String(s % 60).padStart(2, "0")}`;
 }
 
+/**
+ * Holes in the samples: a pause (nothing is sampled while paused), not thinned samples (those
+ * are just farther apart, evenly). [start, end] in ms.
+ */
+function pauses(s) {
+  const out = [];
+  for (let i = 1; i < s.length; i++) {
+    const dt = s[i][0] - s[i - 1][0];
+    const before = i > 1 ? s[i - 1][0] - s[i - 2][0] : 500;
+    if (dt > 2500 && dt > 3 * before) out.push([s[i - 1][0], s[i][0] - Math.min(before, 1000)]);
+  }
+  return out;
+}
+
+/**
+ * The speed on an even time grid: the work done in the `win` ms before each point, divided by
+ * `win`. The cumulative work is read between samples by linear interpolation, flat across a
+ * pause; before the first sample it is the first sample's, so the curve rises from 0 over the
+ * first window instead of starting with the spike of a first short interval.
+ */
+function speedCurve(s, work, win, step) {
+  if (s.length < 2) return [];
+  const holes = pauses(s);
+  const t0 = s[0][0];
+  const tEnd = s[s.length - 1][0];
+  let k = 0;
+  const at = (tm) => {
+    if (tm <= t0) return work(s[0]);
+    if (tm >= tEnd) return work(s[s.length - 1]);
+    while (k > 0 && s[k][0] > tm) k--;
+    while (k < s.length - 2 && s[k + 1][0] < tm) k++;
+    let [a, b] = [s[k][0], s[k + 1][0]];
+    const hole = holes.find(([x]) => x === a);
+    if (hole) {
+      if (tm <= hole[1]) return work(s[k]);
+      a = hole[1];
+    }
+    const f = b > a ? (tm - a) / (b - a) : 1;
+    return work(s[k]) + (work(s[k + 1]) - work(s[k])) * f;
+  };
+  const ver = (tm) => {
+    // verifying: the verify counter grew around this point
+    let i = 1;
+    while (i < s.length - 1 && s[i][0] < tm) i++;
+    return s[i][3] > s[i - 1][3];
+  };
+  const out = [];
+  const n = Math.max(1, Math.ceil((tEnd - t0) / step));
+  for (let i = 0; i <= n; i++) {
+    const tm = Math.min(tEnd, t0 + i * step);
+    const v = Math.max(0, (at(tm) - at(tm - win)) / (win / 1000));
+    out.push({ t: tm, w: at(tm), v, verifying: ver(tm) });
+  }
+  return out;
+}
+
+/** Fritsch–Carlson tangents of the monotone cubic through [x, y] points (x increasing). */
+function monotoneTangents(xy) {
+  const n = xy.length;
+  const m = new Array(n).fill(0);
+  if (n < 2) return m;
+  const d = [];
+  for (let k = 0; k < n - 1; k++) {
+    const hx = xy[k + 1][0] - xy[k][0];
+    d.push(hx > 0 ? (xy[k + 1][1] - xy[k][1]) / hx : 0);
+  }
+  m[0] = d[0];
+  m[n - 1] = d[n - 2];
+  for (let k = 1; k < n - 1; k++) {
+    if (d[k - 1] * d[k] <= 0) continue;
+    const h0 = xy[k][0] - xy[k - 1][0];
+    const h1 = xy[k + 1][0] - xy[k][0];
+    const w1 = 2 * h1 + h0;
+    const w2 = h1 + 2 * h0;
+    m[k] = (w1 + w2) / (w1 / d[k - 1] + w2 / d[k]);
+  }
+  return m;
+}
+
+/** A round scale over `v`: 3–5 ticks of 1, 2, 2.5 or 5 × 10ⁿ in the unit the labels use. */
+function roundTop(v) {
+  const unit = speedUnit(v / 3);
+  const step = niceStep(v / unit / 4) * unit;
+  return { top: step * Math.ceil(v / step - 1e-9), step };
+}
+
+/** The unit a speed is shown in (1024ⁿ or 1000ⁿ B/s, as the sizes). */
+function speedUnit(bps) {
+  const [, , u] = sizeParts(bps);
+  return (sizeParts(1024)[2] === 1 ? 1024 : 1000) ** u;
+}
+
+/** A tick label: "100 MiB/s", "2,5 GiB/s" (no forced decimal). */
+function tickSpeed(bps) {
+  const [, unit] = sizeParts(bps);
+  const v = bps / speedUnit(bps);
+  return `${(Math.round(v * 10) / 10).toLocaleString(LOCALE)} ${unit}/s`;
+}
+
 function niceStep(x) {
   if (x <= 0) return 1;
   const e = Math.pow(10, Math.floor(Math.log10(x)));
@@ -936,9 +1065,10 @@ function niceStep(x) {
   return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * e;
 }
 
-function hexA(color, a) {
+/** `color` at opacity `a` (hex colours directly, anything else through color-mix). */
+function alpha(color, a) {
   const m = color.match(/^#([0-9a-f]{6})$/i);
-  if (!m) return color;
+  if (!m) return `color-mix(in srgb, ${color} ${Math.round(a * 100)}%, transparent)`;
   const n = parseInt(m[1], 16);
   return `rgba(${n >> 16}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
 }

@@ -14,7 +14,7 @@ use crate::chart::{LiveChart, Series, span_minutes};
 use crate::i18n::{self, t, tf, tr, try_t};
 use crate::icons::{self, Icon};
 use crate::layout::{self, Item, Size, W};
-use crate::live::{Res, use_live};
+use crate::live::{Live, Res, use_live};
 use crate::prefs::{storage_get, storage_set, use_ui};
 use crate::ui::{EmptyState, Meter, Pending, Skeleton, Status, Tone, WidgetHead, reduced_motion, temp_tone, usage_tone};
 
@@ -143,11 +143,96 @@ fn widget(w: W) -> AnyView {
     }
 }
 
+const HEIGHTS_KEY: &str = "rynas.dash.h";
+/// Heights remembered (one per widget, size and window width).
+const HEIGHTS_MAX: usize = 48;
+
+/// Whether the data a widget shows has arrived (its placeholder is gone).
+fn loaded(live: Live, w: W) -> bool {
+    match w {
+        W::System => live.system.with(Option::is_some) || live.system_err.with(Option::is_some),
+        W::Cpu | W::Memory | W::Network | W::Disk => live.sample.with(Option::is_some),
+        W::Health | W::Volumes => live.storage.with(Option::is_some) || live.storage_err.with(Option::is_some),
+        W::Hardware => true,
+    }
+}
+
+/// Typical height of a widget once loaded (a DS920+ at 1280 px), for the very first visit.
+fn default_height(w: W) -> u32 {
+    match w {
+        W::System | W::Cpu => 383,
+        W::Memory | W::Network | W::Disk => 458,
+        W::Health | W::Volumes => 313,
+        W::Hardware => 0,
+    }
+}
+
+/// Key of a widget's remembered height: its size and the layout width (window width in 40 px
+/// steps, sidebar state), since both change how tall it gets.
+fn height_key(w: W, span: u8, collapsed: bool) -> String {
+    let vw = window().inner_width().ok().and_then(|v| v.as_f64()).unwrap_or(1280.0) as u32;
+    format!("{}.{span}.{}.{}", w.id(), vw / 40, u8::from(collapsed))
+}
+
+fn heights() -> Vec<(String, u32)> {
+    storage_get(HEIGHTS_KEY)
+        .unwrap_or_default()
+        .split(' ')
+        .filter_map(|kv| kv.split_once('=').and_then(|(k, v)| Some((k.to_string(), v.parse().ok()?))))
+        .collect()
+}
+
+/// Remembers `px` for `key` (most recent last, the oldest dropped past [`HEIGHTS_MAX`]).
+fn remember_height(key: &str, px: u32) {
+    let mut all = heights();
+    if all.iter().any(|(k, v)| k == key && *v == px) {
+        return;
+    }
+    all.retain(|(k, _)| k != key);
+    all.push((key.to_string(), px));
+    let skip = all.len().saturating_sub(HEIGHTS_MAX);
+    let enc: Vec<String> = all.iter().skip(skip).map(|(k, v)| format!("{k}={v}")).collect();
+    storage_set(HEIGHTS_KEY, &enc.join(" "));
+}
+
 #[component]
 fn Cell(w: W, board: Board) -> impl IntoView {
     let ui = use_ui();
     let size = Memo::new(move |_| board.layout.with(|l| l.iter().find(|i| i.w == w).map(|i| i.size).unwrap_or(Size::S)));
     let i = board.visible.with_untracked(|v| v.iter().position(|x| *x == w).unwrap_or(0));
+    // Until its data arrives a widget shows a placeholder at the height it had last time (or a
+    // typical one), so nothing below moves when the content replaces it; once loaded, its height
+    // is remembered for the next visit.
+    let node = NodeRef::<Div>::new();
+    let live = use_live();
+    let ready = Memo::new(move |_| loaded(live, w));
+    let key = Memo::new(move |_| height_key(w, w.span(size.get()), ui.sidebar_collapsed.get()));
+    let reserve = Memo::new(move |_| {
+        if ready.get() {
+            return None;
+        }
+        let k = key.get();
+        let px = heights().into_iter().find(|(x, _)| *x == k).map(|(_, v)| v).unwrap_or_else(|| default_height(w));
+        (px > 0).then_some(px)
+    });
+    // (may run after the page was left: then the reactive values are gone and it does nothing)
+    let measure = move || {
+        if let (Some(Some(el)), Some(true), Some(k)) = (node.try_get_untracked(), ready.try_get_untracked(), key.try_get_untracked())
+            && el.is_connected()
+        {
+            let h = el.get_bounding_client_rect().height().round() as u32;
+            if h > 0 {
+                remember_height(&k, h);
+            }
+        }
+    };
+    Effect::new(move |_| {
+        if ready.get() {
+            // once laid out, and again when the slower resources have arrived too
+            request_animation_frame(move || request_animation_frame(measure));
+            set_timeout(measure, std::time::Duration::from_secs(3));
+        }
+    });
     view! {
         <div
             class=move || {
@@ -155,7 +240,11 @@ fn Cell(w: W, board: Board) -> impl IntoView {
                 format!("cell w-{}{drag}", w.span(size.get()))
             }
             data-w=w.id()
-            style=format!("--i:{i}")
+            node_ref=node
+            style=move || match reserve.get() {
+                Some(px) => format!("--i:{i}; min-height:{px}px"),
+                None => format!("--i:{i}"),
+            }
         >
             {widget(w)}
             <Show when=move || ui.dash_edit.get()>
@@ -595,6 +684,24 @@ fn MemoryWidget() -> impl IntoView {
     }
 }
 
+/// Devices to list: the newest sample's, then any seen in the last minute that it lacks, so a
+/// sample missing a device for a moment does not make its row vanish and come back (the list,
+/// and the card, keep their size).
+fn device_names(live: Live, of: fn(&MetricsSample) -> Vec<String>) -> Vec<String> {
+    live.tick.track();
+    live.history.with_value(|h| {
+        let mut out = h.back().map(of).unwrap_or_default();
+        for m in h.iter().rev().skip(1).take(60) {
+            for n in of(m) {
+                if !out.contains(&n) {
+                    out.push(n);
+                }
+            }
+        }
+        out
+    })
+}
+
 fn net_total(m: &MetricsSample) -> (u64, u64) {
     m.net.iter().filter(|n| n.up).fold((0, 0), |(r, w), n| (r + n.rx_bps, w + n.tx_bps))
 }
@@ -631,7 +738,7 @@ fn NetworkWidget() -> impl IntoView {
                 </div>
                 <ul class="rows">
                     <For
-                        each=move || s.with(|s| s.as_ref().map(|s| s.net.iter().map(|n| n.name.clone()).collect::<Vec<_>>()).unwrap_or_default())
+                        each=move || device_names(live, |m| m.net.iter().map(|n| n.name.clone()).collect())
                         key=|n| n.clone()
                         let:name
                     >
@@ -694,12 +801,13 @@ fn DiskWidget() -> impl IntoView {
                             Series::new("--c4", false, |m: &MetricsSample| disk_total(m).1 as f32),
                         ]
                         label=|v| i18n::rate(v as u64)
+                        binary=true
                         aria=Signal::derive(move || format!("{} {} / {}", t("w.disk_io"), i18n::rate(tot().0), i18n::rate(tot().1)))
                     />
                 </div>
                 <ul class="rows">
                     <For
-                        each=move || s.with(|s| s.as_ref().map(|s| s.disks.iter().map(|d| d.name.clone()).collect::<Vec<_>>()).unwrap_or_default())
+                        each=move || device_names(live, |m| m.disks.iter().map(|d| d.name.clone()).collect())
                         key=|n| n.clone()
                         let:name
                     >

@@ -588,7 +588,7 @@ dialog.xfer { max-width: min(96vw, 520px); }
 .xf-substate { color: var(--muted); font-size: 11px; margin-top: 3px; display: flex; justify-content: space-between; gap: 10px; }
 
 .xf-chart {
-  position: relative; height: 84px; margin: 6px 0; border-radius: 8px; background: var(--bg); border: 1px solid var(--border); overflow: hidden;
+  position: relative; height: 104px; margin: 6px 0; border-radius: 8px; background: var(--bg); border: 1px solid var(--border); overflow: hidden;
 }
 .xf-chart canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
 .xf-chart .tip {
