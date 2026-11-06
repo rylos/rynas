@@ -1,5 +1,7 @@
 #!/bin/sh
-# rynas: run by synodeb-ups before UPS Safe Mode, with the reason as $1 (lowbatt, waittimeup,
+# rynas, Synology module: linked by rynasd as /etc/synodeb/ups-pre-safemode.d/50-rynas where
+# synodeb runs the UPS (rynas_hw_synology::module), never installed into /etc by the package.
+# Run by synodeb-ups before UPS Safe Mode, with the reason as $1 (lowbatt, waittimeup,
 # nocomm, fsd, shutdowncmd). Asks rynasd to cancel its running tasks, stop running scheduler
 # task units and record "Safe Mode: <reason>" as a notification. Bounded to 40 s (rynasd
 # itself stops after 25 s), well within PRE_SAFEMODE_TIMEOUT (120 s by default).

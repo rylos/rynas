@@ -1,0 +1,9 @@
+#!/bin/sh
+set -e
+
+# the Synology module's UPS hook was a conffile in /etc/synodeb up to 0.1.0 (see postinst)
+dpkg-maintscript-helper rm_conffile /etc/synodeb/ups-pre-safemode.d/50-rynas 0.1.0 -- "$@"
+
+#DEBHELPER#
+
+exit 0

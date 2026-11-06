@@ -1,6 +1,10 @@
 #!/bin/sh
 set -e
 
+# the Synology module's UPS hook was a conffile in /etc/synodeb up to 0.1.0; rynasd now links
+# it there only where synodeb runs the UPS
+dpkg-maintscript-helper rm_conffile /etc/synodeb/ups-pre-safemode.d/50-rynas 0.1.0 -- "$@"
+
 if [ "$1" = "configure" ]; then
     mkdir -p /var/lib/rynas/auth
     # system group and user of rynas-web; the group may also connect to rynasd
