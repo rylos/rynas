@@ -847,8 +847,8 @@ dialog.dlg.space { max-width: min(96vw, 940px); }
 .ed-view .cm-gutters { background: var(--ed-gutter); border: 0; border-right: 1px solid var(--ed-indent); color: var(--ed-ln); user-select: none; }
 .ed-view .cm-lineNumbers .cm-gutterElement { padding: 0 10px 0 6px; }
 .ed-view .cm-content { padding-left: 4px; }
-.ed-view .cm-activeLineGutter { background: var(--ed-cur-ln-bg); color: var(--ed-cur-ln); }
-.ed-view .cm-activeLine { background: var(--ed-cur-line); }
+.ed-view .cm-editor .cm-activeLineGutter { background: var(--ed-cur-ln-bg); color: var(--ed-cur-ln); }
+.ed-view .cm-editor .cm-activeLine { background: var(--ed-cur-line); }
 .ed-view .cm-selectionBackground, .ed-view .cm-focused .cm-selectionBackground, .ed-view .cm-content ::selection { background: var(--ed-sel) !important; }
 .ed-view .cm-matchingBracket, .ed-view .cm-focused .cm-matchingBracket { background: var(--ed-brace); font-weight: 700; color: inherit; }
 .ed-view .cm-nonmatchingBracket { color: var(--ed-err); }
