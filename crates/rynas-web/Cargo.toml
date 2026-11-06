@@ -86,6 +86,8 @@ assets = [
     ["../../packaging/deb/lintian-overrides", "usr/share/lintian/overrides/rynas", "644"],
     ["../../packaging/deb/default/rynas-web", "etc/default/rynas-web", "644"],
     ["../../packaging/pam.d/rynas", "etc/pam.d/rynas", "644"],
+    # Debian's nightly btrbk.service: skipped while it has no configuration of its own
+    ["../../packaging/systemd/btrbk.service.d/rynas.conf", "usr/lib/systemd/system/btrbk.service.d/rynas.conf", "644"],
     # synodeb's pre-UPS-Safe-Mode hook (run only by synodeb-ups; a no-op without rynasd)
     ["../../packaging/synodeb/ups-pre-safemode.d/50-rynas", "etc/synodeb/ups-pre-safemode.d/50-rynas", "755"],
     ["../../packaging/fail2ban/filter.d/rynas.conf", "usr/share/doc/rynas/examples/fail2ban/filter.d/", "644"],

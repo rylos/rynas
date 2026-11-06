@@ -69,5 +69,5 @@ Removal
 "apt remove rynas" stops the services and keeps configuration and state.
 "apt purge rynas" also deletes /var/lib/rynas (configuration database, TOTP
 secrets, notification settings, task history), the scheduled task units, the
-btrbk configurations in /etc/rynas, the apt hook, and the user and groups
+btrbk configurations in /etc/rynas (Debian's own nightly btrbk.service is skipped by a drop-in until /etc/btrbk/btrbk.conf exists), the apt hook, and the user and groups
 rynas and rynas-admin. Shares, users and their files are left in place.

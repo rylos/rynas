@@ -23,6 +23,13 @@ if [ "$1" = "configure" ]; then
     chown root:root /var/lib/rynas/auth
     chmod 0700 /var/lib/rynas/auth
 
+    # Debian's btrbk.service failed every night without /etc/btrbk/btrbk.conf (our drop-in
+    # now skips it): clear the stale failed state
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        systemctl reset-failed btrbk.service >/dev/null 2>&1 || true
+    fi
+
     if [ -n "${NEW_ADMIN_GROUP:-}" ]; then
         cat <<'MSG'
 rynas: log in at http://<this-host>:8080/ with a system account that is a
