@@ -718,7 +718,7 @@ fn config_of(v: &Value) -> Result<UpsDeviceConfig, Invalid> {
         .map_err(|e| Invalid::from(format!("invalid ups.device document: {e}")))
 }
 
-/// synodeb's saved choice (`UPS_DRIVER=`, `UPS_PORT=`, `UPS_OPTIONS="k=v flag …"`).
+/// synodeb's saved choice (`UPS_DRIVER=`, `UPS_PORT=`, `UPS_OPTIONS='k=v flag …'`; values never hold spaces or quotes, commas are allowed).
 pub fn parse_synodeb_driver(text: &str) -> Option<UpsDevice> {
     let mut driver = None;
     let mut port = None;
@@ -733,7 +733,7 @@ pub fn parse_synodeb_driver(text: &str) -> Option<UpsDevice> {
             "UPS_PORT" => port = Some(v.to_string()).filter(|v| !v.is_empty()),
             "UPS_OPTIONS" => {
                 options = v
-                    .split([' ', ','])
+                    .split(' ')
                     .filter(|w| !w.is_empty())
                     .map(|w| match w.split_once('=') {
                         Some((k, v)) => UpsOption::new(k, Some(v)),
@@ -1516,7 +1516,7 @@ mod tests {
             SynodebBackend::setup_cmd(tool, None).display(),
             "/usr/sbin/synodeb-ups setup --keep-password --default-driver"
         );
-        let saved = "UPS_DRIVER=nutdrv_qx\nUPS_PORT=auto\nUPS_OPTIONS=\"vendorid=0925 productid=1234 norating\"\n";
+        let saved = "UPS_DRIVER=nutdrv_qx\nUPS_PORT=auto\nUPS_OPTIONS='vendorid=0925 productid=1234 norating'\n";
         let dev = parse_synodeb_driver(saved).unwrap();
         assert_eq!(dev.options[2], UpsOption::new("norating", None));
     }
