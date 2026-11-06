@@ -90,6 +90,7 @@ At every backup the agent writes a **`rynas-layout.json`** (plus raw dumps) next
 
 ### 3.6 What stays out or later
 
+- **Windows and macOS clients (phase 3, restic engine):** restic ships official Windows and macOS binaries and takes a **VSS snapshot on Windows** (`--use-fs-snapshot`); rustic also ships Windows and macOS binaries, but VSS support in rustic is **not verified** (to check before choosing it there). The Windows/macOS agent therefore drives **restic** by default (rustic only once VSS is confirmed). macOS: no snapshot in restic; the agent takes an APFS local snapshot (`tmutil localsnapshot`), mounts it read-only and backs it up; needs Full Disk Access. Files only: no bare metal on these systems.
 - **Windows bare metal:** not in core. restic covers Windows files (VSS) in phase 3; for images, UrBackup as a curated app or Veeam Agent Free to an SMB share, documented.
 - **Block-level images** of non-btrfs Linux systems: not planned; restic + layout manifest gives bare metal at file level.
 - **Encrypted homes (ecryptfs):** backed up as encrypted files (same as ABB today on NB-Marco); restore gives them back as they were.
