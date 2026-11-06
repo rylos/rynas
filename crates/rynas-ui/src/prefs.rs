@@ -61,6 +61,8 @@ pub struct Ui {
     /// Dashboard "Customize" mode (widgets can be moved, resized and hidden).
     pub dash_edit: RwSignal<bool>,
     pub notif_open: RwSignal<bool>,
+    /// The removable drives popover of the app bar.
+    pub usb_open: RwSignal<bool>,
     /// Bumped when the layout width may have changed (resize, sidebar toggle): charts redraw.
     pub layout_tick: RwSignal<u32>,
 }
@@ -96,6 +98,7 @@ impl Ui {
             user_menu_open: RwSignal::new(false),
             dash_edit: RwSignal::new(false),
             notif_open: RwSignal::new(false),
+            usb_open: RwSignal::new(false),
             layout_tick: RwSignal::new(0),
         };
         ui.install();

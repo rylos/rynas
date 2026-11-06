@@ -245,6 +245,7 @@ pub mod keys {
     pub const UPS: &str = "ups.safemode";
     pub const UPDATES: &str = "updates.auto";
     pub const DISKS: &str = "storage.disks";
+    pub const REMOVABLE: &str = "removable";
 }
 
 /// The Save of a dialog or a single-object editor (guidelines A19b). Call it once the form's

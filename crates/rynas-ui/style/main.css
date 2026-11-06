@@ -330,6 +330,41 @@ kbd {
 .notif-pop .empty-title { font-size: var(--fs-16); }
 .notif-pop .empty-text { font-size: var(--fs-13); }
 
+/* removable drives (app bar menu and Hardware tab) */
+.usb-btn { position: relative; }
+.usb-btn.on { color: var(--accent); }
+.usb-btn.warn { color: var(--warning); }
+.usb-badge { --tone: var(--text-subtle); }
+.usb-badge.on { --tone: var(--accent); }
+.usb-pop { width: min(440px, calc(100vw - 16px)); padding: 0; overflow: hidden; }
+.usb-head { display: flex; align-items: center; gap: var(--s-1); padding: var(--s-3) var(--s-2) var(--s-3) var(--s-4); border-bottom: 1px solid var(--border); }
+.usb-head-icon { display: grid; place-items: center; width: 32px; height: 32px; margin-right: var(--s-2); flex: none; border-radius: var(--r-md); color: var(--accent); background: color-mix(in oklch, var(--accent) 12%, var(--surface)); }
+.usb-head-text { display: flex; flex-direction: column; min-width: 0; margin-right: auto; }
+.usb-list { list-style: none; margin: 0; padding: var(--s-2); display: flex; flex-direction: column; gap: var(--s-2); max-height: min(560px, 70vh); overflow-y: auto; }
+.usb-list.page-list { max-height: none; padding: 0; }
+.usb-drive { display: flex; flex-direction: column; gap: var(--s-2); padding: var(--s-3); border-radius: var(--r-md); background: var(--bg); border: 1px solid var(--border); transition: opacity var(--t-fast); }
+.usb-drive.dim { opacity: .7; }
+.usb-drive-head { display: flex; align-items: center; gap: var(--s-3); min-width: 0; }
+.usb-drive-icon { display: grid; place-items: center; width: 34px; height: 34px; flex: none; border-radius: 10px; color: var(--accent); background: color-mix(in oklch, var(--accent) 14%, var(--surface)); }
+.usb-drive-text { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.usb-remove { flex: none; }
+.usb-vol { display: flex; flex-direction: column; gap: var(--s-2); padding: var(--s-2); border-radius: var(--r-md); background: var(--surface); border: 1px solid var(--border); }
+.usb-vol-main { display: flex; align-items: center; gap: var(--s-2); min-width: 0; }
+.usb-dot { width: 8px; height: 8px; flex: none; border-radius: 50%; background: var(--border-strong); }
+.usb-dot.on { background: var(--accent); }
+.usb-dot.locked { background: var(--accent-2); }
+.usb-vol-info { display: flex; flex-direction: column; gap: var(--s-1); min-width: 0; flex: 1; }
+.usb-vol-title { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1); min-width: 0; }
+.usb-vol-title strong { font-size: var(--fs-13); max-width: 100%; }
+.usb-vol-status { overflow-wrap: anywhere; }
+.usb-vol-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--s-1); flex: none; max-width: 120px; }
+.usb-unlock { display: flex; flex-direction: column; gap: var(--s-2); }
+@media (max-width: 767px) {
+  .usb-pop { position: fixed; left: var(--s-2); right: var(--s-2); top: calc(var(--appbar-h) + var(--s-2)); width: auto; }
+  .usb-drive-head { flex-wrap: wrap; }
+  .usb-remove { margin-left: auto; }
+}
+
 /* sidebar */
 .sidebar {
   position: sticky; top: var(--appbar-h);

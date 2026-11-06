@@ -1,10 +1,11 @@
 //! Hardware (DSM Control Panel › Hardware & Power): the provider-neutral overview (fans,
 //! temperatures, status LED and events), every synohwd setting and action on a Synology
-//! ([`synology`]), the weekly power schedule ([`power`]) and the UPS ([`ups`]). A tab is mounted on its first
+//! ([`synology`]), the weekly power schedule ([`power`]), the UPS ([`ups`]) and the removable drives ([`removable`], also `#removable`). A tab is mounted on its first
 //! visit and kept afterwards (drafts survive a tab switch). The Synology tab exists only on a
 //! Synology (G8d): the live provider says so, or the plugin's settings answer.
 
 mod power;
+mod removable;
 mod synology;
 mod ups;
 
@@ -22,6 +23,8 @@ use crate::ui::{self, EmptyState, Meter, PageHeader, Pending, Status, Tone, cpu_
 
 /// Index of the Synology tab.
 const SYN_TAB: usize = 1;
+/// Index of the removable drives tab.
+const RM_TAB: usize = 4;
 
 /// The Synology plugin is present: the live provider is synohwd's, or (synohwd stopped, no
 /// status yet) the plugin's settings answer. Probed once per visit, only when the provider
@@ -47,6 +50,13 @@ fn synology_present() -> Signal<bool> {
 #[component]
 pub fn Hardware() -> impl IntoView {
     let tab = RwSignal::new(0usize);
+    // `/hardware#removable` (the removable drives menu's settings link) opens that tab
+    let location = leptos_router::hooks::use_location();
+    Effect::new(move || {
+        if location.hash.get() == "#removable" {
+            tab.set(RM_TAB);
+        }
+    });
     let syn = synology_present();
     // a selected tab that stops existing falls back to the overview
     Effect::new(move || {
@@ -54,7 +64,7 @@ pub fn Hardware() -> impl IntoView {
             tab.set(0);
         }
     });
-    let seen = RwSignal::new([true, false, false, false]);
+    let seen = RwSignal::new([true, false, false, false, false]);
     Effect::new(move || {
         let i = tab.get();
         if !seen.with_untracked(|s| s[i]) {
@@ -72,11 +82,12 @@ pub fn Hardware() -> impl IntoView {
     view! {
         <div class="page">
             <PageHeader icon=icons::CPU title="nav.hardware" subtitle="hw.subtitle" />
-            <div class="card hw-tabs">{tabs_shown("hwt", &["hw.tab_overview", "hw.tab_synology", "ps.title", "ups.tab"], tab, "nav.hardware", move |i| i != SYN_TAB || syn.get())}</div>
+            <div class="card hw-tabs">{tabs_shown("hwt", &["hw.tab_overview", "hw.tab_synology", "ps.title", "ups.tab", "rm.title"], tab, "nav.hardware", move |i| i != SYN_TAB || syn.get())}</div>
             {panel(0, overview)}
             {move || syn.get().then(|| panel(SYN_TAB, synology::panel))}
             {panel(2, power::panel)}
             {panel(3, ups::panel)}
+            {panel(RM_TAB, removable::panel)}
         </div>
     }
 }

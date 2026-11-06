@@ -2581,6 +2581,82 @@ dict! {
     "sto.reason.wear" => "{n} of the rated endurance left.", "Resta il {n} della resistenza nominale.";
     "sto.reason.self_test_failed" => "Last self-test ({name}): {detail}.", "Ultimo autotest ({name}): {detail}.";
     "sto.reason.error_log" => "{n} errors in the drive's error log.", "{n} errori nel registro errori del disco.";
+    // removable drives (app bar menu, Hardware › Removable drives)
+    "rm.title" => "Removable drives", "Unità rimovibili";
+    "rm.count_one" => "1 drive", "1 unità";
+    "rm.count" => "{n} drives", "{n} unità";
+    "rm.mounted_one" => "1 mounted", "1 montata";
+    "rm.mounted" => "{n} mounted", "{n} montate";
+    "rm.empty" => "No removable drives", "Nessuna unità rimovibile";
+    "rm.empty_text" => "Plug in a USB drive or an SD card.", "Collega un'unità USB o una scheda SD.";
+    "rm.mount_all" => "Mount all", "Monta tutto";
+    "rm.remove_all" => "Remove all safely", "Rimuovi tutto in sicurezza";
+    "rm.refresh" => "Read the drives again", "Rileggi le unità";
+    "rm.settings" => "Removable drive settings", "Impostazioni delle unità rimovibili";
+    "rm.drives_now" => "Plugged in now", "Collegate ora";
+    "rm.remove" => "Remove safely", "Rimuovi in sicurezza";
+    "rm.hint.power_off" => "Unmounts everything, locks encrypted volumes and powers the drive off", "Smonta tutto, blocca i volumi cifrati e spegne l'unità";
+    "rm.hint.eject" => "Unmounts everything, locks encrypted volumes and ejects the medium", "Smonta tutto, blocca i volumi cifrati ed espelle il supporto";
+    "rm.hint.release" => "Unmounts everything and locks encrypted volumes: then the card can be pulled out", "Smonta tutto e blocca i volumi cifrati: poi la scheda si può estrarre";
+    "rm.bus.sd" => "SD card", "Scheda SD";
+    "rm.bus.optical" => "Optical drive", "Unità ottica";
+    "rm.bus.other" => "Removable drive", "Unità rimovibile";
+    "rm.no_media" => "No medium", "Nessun supporto";
+    "rm.read_only" => "read-only", "sola lettura";
+    "rm.writing" => "Writing…", "Scrittura…";
+    "rm.pending.mount" => "Mounting…", "Montaggio…";
+    "rm.pending.unmount" => "Unmounting…", "Smontaggio…";
+    "rm.pending.unlock" => "Unlocking…", "Sblocco…";
+    "rm.pending.lock" => "Locking…", "Blocco…";
+    "rm.pending.remove" => "Preparing for removal…", "Preparazione alla rimozione…";
+    "rm.untitled" => "Untitled", "Senza nome";
+    "rm.locked" => "Locked", "Bloccato";
+    "rm.unlocked" => "Unlocked", "Sbloccato";
+    "rm.encrypted" => "Encrypted: unlock it with its passphrase", "Cifrato: sbloccalo con la sua passphrase";
+    "rm.not_mounted" => "Not mounted", "Non montato";
+    "rm.unsupported" => "No driver for this filesystem is installed", "Nessun driver installato per questo file system";
+    "rm.free" => "{free} free of {total}", "{free} liberi su {total}";
+    "rm.open" => "Open in Files", "Apri in File";
+    "rm.copy" => "Copy the mount path", "Copia il percorso di montaggio";
+    "rm.copied" => "Path copied", "Percorso copiato";
+    "rm.mount" => "Mount", "Monta";
+    "rm.unmount" => "Unmount", "Smonta";
+    "rm.unlock" => "Unlock", "Sblocca";
+    "rm.lock" => "Lock", "Blocca";
+    "rm.shared" => "Shared on the network as {name}", "Condiviso in rete come {name}";
+    "rm.safe" => "{name} can be removed safely", "{name} si può rimuovere in sicurezza";
+    "rm.safe_all" => "Every drive can be removed safely", "Tutte le unità si possono rimuovere in sicurezza";
+    "rm.busy_by" => "In use by: {list}. Close the files and windows that use it, then try again.", "In uso da: {list}. Chiudi i file e le finestre che la usano, poi riprova.";
+    "rm.tip_mounted" => "mounted at {path}", "montato in {path}";
+    "rm.tip_not_mounted" => "not mounted", "non montato";
+    "rm.set.where" => "Volumes are mounted below {root}, in a folder named after their label.", "I volumi vengono montati sotto {root}, in una cartella con il nome della loro etichetta.";
+    "rm.set.auto_mount" => "Mount automatically", "Monta automaticamente";
+    "rm.set.auto_mount_help" => "Mount the volumes of a drive as soon as it is plugged in, and at startup. Encrypted volumes still wait for their passphrase.", "Monta i volumi di un'unità appena viene collegata, e all'avvio. I volumi cifrati attendono comunque la loro passphrase.";
+    "rm.set.read_only" => "Mount read-only", "Monta in sola lettura";
+    "rm.set.read_only_help" => "Nothing on a plugged-in drive can be changed (safe for imports).", "Niente su un'unità collegata può essere modificato (sicuro per le importazioni).";
+    "rm.set.notify" => "Notify when a drive can be removed", "Notifica quando un'unità si può rimuovere";
+    "rm.set.notify_help" => "A drive unplugged while it was still mounted is always notified.", "Un'unità scollegata mentre era ancora montata viene sempre notificata.";
+    "rm.set.group" => "Access group", "Gruppo con accesso";
+    "rm.set.group_help" => "Its members may use the network shares and the files of FAT, exFAT and NTFS drives (rynas-admin: administrators; users: every account).", "I suoi membri possono usare le condivisioni di rete e i file delle unità FAT, exFAT e NTFS (rynas-admin: amministratori; users: tutti gli account).";
+    "rm.set.share" => "Share mounted drives on the network (SMB)", "Condividi in rete le unità montate (SMB)";
+    "rm.set.share_help" => "Each mounted volume becomes a private share named usb-<name>, only for the access group. It is removed, and its clients disconnected, before the volume is unmounted.", "Ogni volume montato diventa una condivisione privata chiamata usb-<nome>, solo per il gruppo con accesso. Viene rimossa, e i suoi client disconnessi, prima di smontare il volume.";
+    "rm.set.access" => "Network access", "Accesso dalla rete";
+    "rm.set.rw" => "Read and write", "Lettura e scrittura";
+    "rm.set.no_smb" => "Samba is not installed: drives cannot be shared on the network.", "Samba non è installato: le unità non si possono condividere in rete.";
+    "task.removable.mount" => "Mount removable volume", "Montaggio volume rimovibile";
+    "task.removable.mount-all" => "Mount removable volumes", "Montaggio volumi rimovibili";
+    "task.removable.unmount" => "Unmount removable volume", "Smontaggio volume rimovibile";
+    "task.removable.unlock" => "Unlock removable volume", "Sblocco volume rimovibile";
+    "task.removable.lock" => "Lock removable volume", "Blocco volume rimovibile";
+    "task.removable.remove" => "Remove drive safely", "Rimozione sicura dell'unità";
+    "task.removable.remove-all" => "Remove all drives safely", "Rimozione sicura di tutte le unità";
+    "cfg.key.removable" => "Removable drives", "Unità rimovibili";
+    "nt.src.removable" => "Removable drive monitor", "Monitoraggio unità rimovibili";
+    "nev.removable.unplugged.title" => "{drive} was unplugged while mounted", "{drive} è stata scollegata mentre era montata";
+    "nev.removable.unplugged.body" => "Files being written to {mount_points} may be lost or damaged. Remove drives safely before unplugging them.", "I file in scrittura su {mount_points} potrebbero essere persi o danneggiati. Rimuovi le unità in sicurezza prima di scollegarle.";
+    "nev.removable.safe_to_remove.title" => "{drive} can be removed safely", "{drive} si può rimuovere in sicurezza";
+    "nev.removable.ntfs_read_only.title" => "{volume} mounted read-only", "{volume} montato in sola lettura";
+    "nev.removable.ntfs_read_only.body" => "Windows did not close this NTFS volume cleanly (Fast Startup, hibernation or an unsafe unplug), so it was mounted read-only. Shut Windows down completely or run chkdsk, then plug it in again to write to it.", "Windows non ha chiuso correttamente questo volume NTFS (avvio rapido, ibernazione o una rimozione non sicura), quindi è stato montato in sola lettura. Spegni Windows completamente o esegui chkdsk, poi ricollegalo per poterci scrivere.";
 }
 
 // ---------------------------------------------------------------- formatting
@@ -2824,7 +2900,7 @@ mod tests {
                 || s.ends_with(".rs")
                 || s.starts_with("fuse.")
                 || s.contains("example")
-                || matches!(s, "a.b" | "metrics.sample" | "hardware.status" | "task.started" | "task.updated" | "task.finished")
+                || matches!(s, "a.b" | "metrics.sample" | "hardware.status" | "task.started" | "task.updated" | "task.finished" | "removable.state")
         };
         fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
             for e in std::fs::read_dir(dir).expect("src dir").flatten() {

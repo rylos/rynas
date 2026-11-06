@@ -18,6 +18,7 @@ mod pages;
 mod palette;
 mod prefs;
 mod qr;
+mod removable;
 mod shell;
 #[cfg(test)]
 mod source_check;
