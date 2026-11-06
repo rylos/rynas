@@ -44,6 +44,12 @@ pub trait ShareHost: Send + Sync {
     /// Space used by the files below `path` on its own filesystem (nested subvolumes and
     /// mounts are skipped), counting for at most `budget`: `(bytes, partial)`.
     fn tree_size(&self, path: &str, budget: Duration) -> Option<(u64, bool)>;
+    /// Bytes referenced by the btrfs subvolume at `path` according to its quota group
+    /// (`btrfs qgroup show -f --raw`), when quotas are enabled on its filesystem: read from
+    /// the quota tree, no walk of the files. `None` otherwise.
+    fn qgroup_size(&self, _path: &str) -> Option<u64> {
+        None
+    }
     /// Snapshot names `<prefix>.<timestamp>[_N]` in `dir`.
     fn snapshot_names(&self, dir: &str, prefix: &str) -> Vec<String>;
     /// `mkdir -p` with mode 0755.
@@ -95,6 +101,25 @@ pub trait SubvolumeCreator: Send + Sync {
     fn volumes(&self) -> Vec<(String, String)> {
         Vec::new()
     }
+    /// A disk under the volume mounted at `mount` is in standby or asleep: nothing may read
+    /// its files now (that would spin it up). Checked without touching the disks.
+    fn asleep(&self, _mount: &str) -> bool {
+        false
+    }
+}
+
+/// Referenced bytes of the subvolume's own quota group (`0/<id>`) in the output of
+/// `btrfs qgroup show -f --raw <path>`.
+pub fn parse_qgroup_referenced(out: &str) -> Option<u64> {
+    out.lines().find_map(|l| {
+        let mut it = l.split_whitespace();
+        let id = it.next()?;
+        let (level, rest) = id.split_once('/')?;
+        if level != "0" || rest.parse::<u64>().is_err() {
+            return None;
+        }
+        it.next()?.parse().ok()
+    })
 }
 
 /// Name of a filesystem magic number (`statfs.f_type`) and whether it is remote/FUSE.
@@ -276,6 +301,17 @@ impl ShareHost for HostShares {
         tree_size(std::path::Path::new(path), budget)
     }
 
+    fn qgroup_size(&self, path: &str) -> Option<u64> {
+        // fails at once ("quotas not enabled") when the filesystem has no quotas
+        let o = Cmd::new("btrfs")
+            .args(["qgroup", "show", "-f", "--raw", path])
+            .env_clear()
+            .timeout(CMD_TIMEOUT)
+            .run_blocking()
+            .ok()?;
+        parse_qgroup_referenced(&o.stdout)
+    }
+
     fn snapshot_names(&self, dir: &str, prefix: &str) -> Vec<String> {
         let mut v: Vec<String> = std::fs::read_dir(dir)
             .map(|rd| {
@@ -361,6 +397,10 @@ pub struct MemorySharesState {
     pub snapshots: BTreeMap<String, Vec<String>>,
     /// Sizes reported by `tree_size`.
     pub sizes: BTreeMap<String, u64>,
+    /// Sizes reported by `qgroup_size` (quotas enabled).
+    pub qgroups: BTreeMap<String, u64>,
+    /// Every `tree_size` and `qgroup_size` call: `walk <path>`, `qgroup <path>`.
+    pub size_log: Vec<String>,
     /// `ensure_dir` and `remove_empty_dir` calls: `mkdir <path>`, `rmdir <path>`.
     pub dir_log: Vec<String>,
 }
@@ -451,6 +491,7 @@ impl ShareHost for MemoryShares {
     }
 
     fn tree_size(&self, path: &str, budget: Duration) -> Option<(u64, bool)> {
+        self.state().size_log.push(format!("walk {path}"));
         let known = self.state().sizes.get(path).copied();
         if let Some(n) = known {
             return Some((n, false));
@@ -460,6 +501,12 @@ impl ShareHost for MemoryShares {
         } else {
             self.state().paths.contains_key(path).then_some((0, false))
         }
+    }
+
+    fn qgroup_size(&self, path: &str) -> Option<u64> {
+        let mut s = self.state();
+        s.size_log.push(format!("qgroup {path}"));
+        s.qgroups.get(path).copied()
     }
 
     fn snapshot_names(&self, dir: &str, prefix: &str) -> Vec<String> {
@@ -501,6 +548,18 @@ mod tests {
             u.as_deref().is_some_and(crate::validate::uuid),
             "{u:?} {i:?}"
         );
+    }
+
+    #[test]
+    fn qgroup_referenced_of_the_subvolume() {
+        let out = "Qgroupid    Referenced    Exclusive   Path \n\
+                   --------    ----------    ---------   ---- \n\
+                   0/257       1234567890        16384   photos\n\
+                   1/100       9999999999         4096   <under 1/100>\n";
+        assert_eq!(parse_qgroup_referenced(out), Some(1_234_567_890));
+        // btrfs-progs without the Path column
+        assert_eq!(parse_qgroup_referenced("qgroupid rfer excl\n-------- ---- ----\n0/5 42 42\n"), Some(42));
+        assert_eq!(parse_qgroup_referenced("ERROR: can't list qgroups: quotas not enabled\n"), None);
     }
 
     #[test]

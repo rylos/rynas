@@ -228,14 +228,57 @@ pub fn reshare(f: &UnsharedFolder) -> Share {
     }
 }
 
-/// "Unshared folders": the folders of the volumes that no share uses.
+/// Sizes of the unshared folders, measured after the list is on screen.
+#[derive(Clone, Copy)]
+struct Sizes {
+    /// The list with measured sizes (`?sizes=true`).
+    data: RwSignal<Option<Vec<UnsharedFolder>>>,
+    measuring: RwSignal<bool>,
+    err: RwSignal<Option<String>>,
+}
+
+/// "Unshared folders": the folders of the volumes that no share uses. The list comes first
+/// with the sizes rynasd already knows; the others are measured afterwards (rynasd skips
+/// volumes whose disks sleep), so the page never waits for a walk of the folders.
 pub fn unshared_section(folders: Remote<Vec<UnsharedFolder>>, share_again: Callback<UnsharedFolder>, del: RwSignal<Option<UnsharedFolder>>) -> AnyView {
+    let sizes = Sizes { data: RwSignal::new(None), measuring: RwSignal::new(false), err: RwSignal::new(None) };
+    Effect::new(move |_| {
+        if !folders.data.with(|d| d.as_ref().is_some_and(|v| !v.is_empty())) {
+            return;
+        }
+        sizes.measuring.set(true);
+        spawn_local(async move {
+            let r = api::get::<Vec<UnsharedFolder>>("/api/v1/folders?sizes=true").await;
+            let _ = sizes.measuring.try_set(false);
+            match r {
+                Ok(v) => {
+                    let _ = sizes.err.try_set(None);
+                    let _ = sizes.data.try_set(Some(v));
+                }
+                Err(e) => {
+                    let _ = sizes.err.try_set(Some(e.text()));
+                }
+            }
+        });
+    });
     let content = move || {
         let rows: Vec<UnsharedFolder> = folders.data.with(|d| d.clone().unwrap_or_default());
         if rows.is_empty() {
             return view! { <p class="muted table-none">{tr("shares.unshared_none")}</p> }.into_any();
         }
-        let rows = rows.into_iter().map(|f| folder_row(f, share_again, del)).collect::<Vec<_>>();
+        let measured = sizes.data.get().unwrap_or_default();
+        let rows = rows
+            .into_iter()
+            .map(|mut f| {
+                if let Some(m) = measured.iter().find(|m| m.path == f.path) {
+                    f.size_bytes = m.size_bytes;
+                    f.size_partial = m.size_partial;
+                    f.size_at_ms = m.size_at_ms;
+                    f.size_standby = m.size_standby;
+                }
+                folder_row(f, sizes, share_again, del)
+            })
+            .collect::<Vec<_>>();
         ui::table("", &["shares.uf_folder", "shares.location", "shares.size", "shares.del_snapshots", "shares.removed_at", ""], rows)
     };
     view! {
@@ -248,10 +291,18 @@ pub fn unshared_section(folders: Remote<Vec<UnsharedFolder>>, share_again: Callb
     .into_any()
 }
 
-fn folder_row(f: UnsharedFolder, share_again: Callback<UnsharedFolder>, del: RwSignal<Option<UnsharedFolder>>) -> AnyView {
+fn folder_row(f: UnsharedFolder, sizes: Sizes, share_again: Callback<UnsharedFolder>, del: RwSignal<Option<UnsharedFolder>>) -> AnyView {
     let size = match f.size_bytes {
         Some(b) => size_text(b, f.size_partial),
         None => "—".to_string(),
+    };
+    // why the size is old or missing: disks asleep, still measuring, failed
+    let size_note = match (f.size_standby, f.size_at_ms) {
+        (true, Some(at)) => Some(tf("shares.size_asleep_as_of", &[("when", &i18n::datetime(at))])),
+        (true, None) => Some(t("shares.size_asleep").to_string()),
+        _ if f.size_bytes.is_none() && sizes.measuring.get() => Some(t("shares.size_measuring").to_string()),
+        _ if f.size_bytes.is_none() => sizes.err.get(),
+        _ => None,
     };
     let removed = f.removed_at_ms.map(i18n::datetime).unwrap_or_else(|| "—".into());
     let was = f.previous.as_ref().map(|s| tf("shares.was_shared_as", &[("name", &s.name)]));
@@ -272,7 +323,13 @@ fn folder_row(f: UnsharedFolder, share_again: Callback<UnsharedFolder>, del: RwS
             </div>
         }
         .into_any()),
-        ui::cell("shares.size", "tnum", view! { {size} }.into_any()),
+        ui::cell("shares.size", "tnum", view! {
+            <div class="cell-main">
+                <span>{size}</span>
+                <span class="cell-sub">{size_note}</span>
+            </div>
+        }
+        .into_any()),
         ui::cell("shares.del_snapshots", "tnum", view! { {i18n::num(f.snapshots as f64, 0)} }.into_any()),
         ui::cell("shares.removed_at", "muted", view! { {removed} }.into_any()),
         ui::actions(view! {

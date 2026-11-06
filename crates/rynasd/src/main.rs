@@ -179,7 +179,11 @@ struct Opened {
     root: PathBuf,
 }
 
-fn open_config(args: &Args, system: Arc<dyn System>) -> std::io::Result<Opened> {
+fn open_config(
+    args: &Args,
+    system: Arc<dyn System>,
+    storage: Option<Arc<rynas_storage::Storage>>,
+) -> std::io::Result<Opened> {
     let root = config_root(args);
     if args.dry_system {
         seed_dry_root(&root)?;
@@ -199,6 +203,7 @@ fn open_config(args: &Args, system: Arc<dyn System>) -> std::io::Result<Opened> 
         SharesDomain::new(host, accounts)
             .with_subvolumes(Arc::new(rynasd::storage_ops::HostSubvolumes {
                 dry: args.dry_system,
+                storage,
             }))
             .with_removed(Arc::new(rynas_services::removed::RemovedShares::in_dir(
                 &args.state_dir,
@@ -280,7 +285,7 @@ fn totp_dir(args: &Args) -> PathBuf {
 
 fn run_command(args: &Args, cmd: &Command) -> std::io::Result<()> {
     // the CLI never applies anything: an in-memory system is enough
-    let cfg = open_config(args, Arc::new(MemorySystem::new(&running_hostname())))?.config;
+    let cfg = open_config(args, Arc::new(MemorySystem::new(&running_hostname())), None)?.config;
     match cmd {
         Command::Export {
             out,
@@ -562,7 +567,14 @@ fn main() -> std::io::Result<()> {
             }
             Arc::new(HostSystem::new(tokio::runtime::Handle::current()))
         };
-        let opened = open_config(&args, system)?;
+        if args.storage_loop_disks {
+            tracing::warn!("loop devices count as disks (--storage-loop-disks): tests only");
+            let mut s = rynas_storage::Storage::new(Arc::new(rynas_storage::host::SystemHost));
+            s.loop_disks = true;
+            state.storage = Arc::new(s);
+        }
+        // the storage's power states keep the folder sizes from spinning up sleeping disks
+        let opened = open_config(&args, system, Some(state.storage.clone()))?;
         let config = Arc::new(opened.config);
         let tasks = TaskManager::new(
             args.state_dir.join("tasks"),
@@ -572,12 +584,6 @@ fn main() -> std::io::Result<()> {
                 ..Default::default()
             },
         )?;
-        if args.storage_loop_disks {
-            tracing::warn!("loop devices count as disks (--storage-loop-disks): tests only");
-            let mut s = rynas_storage::Storage::new(Arc::new(rynas_storage::host::SystemHost));
-            s.loop_disks = true;
-            state.storage = Arc::new(s);
-        }
         let mut ops = Ops::new(config, tasks);
         ops.admins = rynasd::roles::AdminPolicy::new(args.admin_groups.clone(), state.groups);
         // applied disk settings: read APM and write cache again (the SMART cache is 10 min)

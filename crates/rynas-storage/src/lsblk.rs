@@ -212,6 +212,14 @@ impl BlockGraph {
         v
     }
 
+    /// Devices carrying the filesystem `uuid` (the members of a multi-device btrfs).
+    pub fn with_fs_uuid(&self, uuid: &str) -> Vec<&BlockDev> {
+        self.devs
+            .values()
+            .filter(|d| d.uuid.as_deref() == Some(uuid))
+            .collect()
+    }
+
     /// The whole disks under a device (itself if it is a disk).
     pub fn disks_under(&self, kname: &str) -> Vec<String> {
         let mut out = Vec::new();

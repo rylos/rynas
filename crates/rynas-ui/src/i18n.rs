@@ -1416,6 +1416,9 @@ dict! {
     "shares.unshared_none" => "Every folder on the volumes is shared.", "Tutte le cartelle dei volumi sono condivise.";
     "shares.uf_folder" => "Folder", "Cartella";
     "shares.size" => "Size", "Dimensione";
+    "shares.size_measuring" => "Measuring…", "Misurazione in corso…";
+    "shares.size_asleep" => "Not measured: the disks are asleep", "Non misurata: i dischi sono in standby";
+    "shares.size_asleep_as_of" => "As of {when} (the disks are asleep)", "Al {when} (i dischi sono in standby)";
     "shares.removed_at" => "Share removed", "Condivisione rimossa";
     "shares.was_shared_as" => "was shared as {name}", "era condivisa come {name}";
     "shares.share_again" => "Share again", "Condividi di nuovo";

@@ -229,9 +229,21 @@ async fn share_folders_from_snapshot_folder_to_deletion() {
     assert!(runs(&e).iter().any(|c| c.contains("start --no-block srv-vol1-photos-\\x23snapshot.mount")));
 
     // folders without a share: "old" only (system names and shared folders stay out)
+    // the list alone measures nothing; `?sizes=true` measures once, then serves the cache
+    e.host.state().size_log.clear();
     let f = folders(&e).await;
     assert_eq!(f.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(), ["old"]);
-    assert_eq!(f[0].size_bytes, Some(1000));
+    assert_eq!(f[0].size_bytes, None);
+    assert!(e.host.state().size_log.is_empty());
+    let (s, b) = call(&e, "GET", "/v1/folders?sizes=true", None).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    let f: Vec<UnsharedFolder> = serde_json::from_slice(&b).unwrap();
+    assert_eq!((f[0].size_bytes, f[0].size_standby), (Some(1000), false));
+    assert!(f[0].size_at_ms.is_some());
+    assert_eq!(std::mem::take(&mut e.host.state().size_log), ["walk /srv/vol1/old"]);
+    call(&e, "GET", "/v1/folders?sizes=true", None).await;
+    assert_eq!(folders(&e).await[0].size_bytes, Some(1000));
+    assert!(e.host.state().size_log.is_empty());
 
     // the plan of deleting photos with its folder
     let (s, b) = call(&e, "POST", "/v1/shares/plan/delete", Some(json!({"share": "photos"}))).await;
@@ -286,6 +298,7 @@ async fn share_folders_from_snapshot_folder_to_deletion() {
 
     // music is now a folder without a share, with its previous settings
     let f = folders(&e).await;
+    assert!(f.iter().all(|x| x.size_bytes.is_none()), "an apply of shares clears the sizes: {f:?}");
     let music = f.iter().find(|x| x.name == "music").expect("music listed");
     assert_eq!(music.previous.as_ref().unwrap().name, "music");
     assert!(music.removed_at_ms.is_some());

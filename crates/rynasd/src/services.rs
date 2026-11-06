@@ -1260,7 +1260,19 @@ async fn share_delete_plan(
     ))
 }
 
-async fn folders_list(State(st): State<SvcState>, h: HeaderMap) -> Res<Json<Vec<UnsharedFolder>>> {
+#[derive(Deserialize)]
+struct FoldersQuery {
+    /// Measure the sizes that are unknown or older than an hour (never on a volume whose
+    /// disks sleep); without it the list only has the sizes already known.
+    #[serde(default)]
+    sizes: bool,
+}
+
+async fn folders_list(
+    State(st): State<SvcState>,
+    h: HeaderMap,
+    Query(q): Query<FoldersQuery>,
+) -> Res<Json<Vec<UnsharedFolder>>> {
     let (s, owner) = (svc(&st)?, user(&h)?);
     Ok(Json(
         blocking(&s, move |s| {
@@ -1291,12 +1303,19 @@ async fn folders_list(State(st): State<SvcState>, h: HeaderMap) -> Res<Json<Vec<
                 v.dedup();
                 v
             };
+            let asleep = |m: &str| s.shares.asleep(m);
+            let measure = folders::Measure {
+                now_ms: rynas_tasks::now_ms(),
+                asleep: &asleep,
+            };
             Ok(folders::unshared(
                 s.shares.host().as_ref(),
                 &s.shares.volumes(),
                 &paths,
                 &removed,
                 &of,
+                s.shares.sizes(),
+                q.sizes.then_some(&measure),
             ))
         })
         .await?,
@@ -1407,14 +1426,16 @@ async fn folder_delete(
             let c = ctx.clone();
             tokio::task::spawn_blocking(move || -> Result<(), String> {
                 let log = |l: &str| c.log(l);
-                folders::remove_folder(
+                let r = folders::remove_folder(
                     svc.ops.config.system(),
                     svc.shares.host().as_ref(),
                     &svc.shares.volumes(),
                     &p.path,
                     &sources,
                     &log,
-                )?;
+                );
+                svc.shares.sizes().clear();
+                r?;
                 svc.shares.removed().forget(&[&p.path])
             })
             .await

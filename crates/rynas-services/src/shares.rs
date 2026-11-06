@@ -59,6 +59,8 @@ pub struct SharesDomain {
     subvolumes: Option<Arc<dyn SubvolumeCreator>>,
     /// Shares removed while their folder stayed.
     removed: Arc<RemovedShares>,
+    /// Sizes of the folders without a share, cleared by every apply.
+    sizes: Arc<crate::folders::SizeCache>,
 }
 
 /// Snapshot folders of a document: mount unit → (share, share path, snapshot directory).
@@ -139,7 +141,18 @@ impl SharesDomain {
             accounts,
             subvolumes: None,
             removed: Arc::new(RemovedShares::memory()),
+            sizes: Arc::default(),
         }
+    }
+
+    /// Sizes of the folders without a share ([`crate::folders::unshared`]).
+    pub fn sizes(&self) -> &Arc<crate::folders::SizeCache> {
+        &self.sizes
+    }
+
+    /// A disk under the volume mounted at `mount` sleeps ([`SubvolumeCreator::asleep`]).
+    pub fn asleep(&self, mount: &str) -> bool {
+        self.subvolumes.as_ref().is_some_and(|c| c.asleep(mount))
     }
 
     /// Where shares removed without their folder are recorded.
@@ -830,6 +843,8 @@ impl Applier for SharesDomain {
         };
         let from = parse(from)?;
         let to = parse(Some(to))?;
+        // folders get shared, unshared, created or deleted: their sizes are measured again
+        self.sizes.clear();
 
         // 0. subvolumes asked for by new shares (an empty one left by a failed apply is
         // harmless and reused by the next one)

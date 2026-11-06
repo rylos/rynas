@@ -1391,6 +1391,8 @@ async fn subvolume_delete(
 /// Creates the subvolumes that shares ask for, during the apply of `shares`.
 pub struct HostSubvolumes {
     pub dry: bool,
+    /// Power states of the disks ([`rynas_services::SubvolumeCreator::asleep`]).
+    pub storage: Option<Arc<Storage>>,
 }
 
 /// rynas volumes in a mountinfo text: btrfs top levels mounted at `/<label>`.
@@ -1411,6 +1413,10 @@ pub fn volumes_in(mountinfo: &str) -> Vec<(String, String)> {
 impl rynas_services::SubvolumeCreator for HostSubvolumes {
     fn volumes(&self) -> Vec<(String, String)> {
         volumes_in(&std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default())
+    }
+
+    fn asleep(&self, mount: &str) -> bool {
+        self.storage.as_ref().is_some_and(|s| s.mount_asleep(mount))
     }
 
     fn volume_path(&self, volume: &str) -> Result<String, String> {

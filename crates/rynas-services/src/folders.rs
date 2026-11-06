@@ -9,6 +9,8 @@
 //! `shares.folder-delete` for a folder without a share. Commands go through
 //! [`rynas_config::System::run`], so `--dry-system` and the tests only record them.
 
+use std::collections::HashMap;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use rynas_api_types::{
@@ -27,6 +29,11 @@ pub const PLAN_SIZE_BUDGET: Duration = Duration::from_millis(1500);
 /// Time spent measuring one folder of the list, and all of them together.
 pub const LIST_SIZE_BUDGET: Duration = Duration::from_millis(500);
 pub const LIST_TOTAL_BUDGET: Duration = Duration::from_secs(3);
+/// How long a measured size of the list is served without measuring again (the cache is
+/// also cleared by every apply of `shares` and every folder deletion).
+pub const SIZE_TTL_MS: u64 = 3600 * 1000;
+/// Most sizes kept (the oldest goes first): one per top-level folder of the volumes.
+pub const SIZE_CACHE_MAX: usize = 1024;
 /// Deleting a big folder takes long: the task log shows the command meanwhile.
 const DELETE_TIMEOUT: Duration = Duration::from_secs(6 * 3600);
 
@@ -63,18 +70,97 @@ fn count_snapshots(host: &dyn ShareHost, sources: &[SnapshotSource]) -> u32 {
         .sum()
 }
 
+/// A size of the list as measured: bytes, partial (the time budget ran out), when.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CachedSize {
+    pub bytes: u64,
+    pub partial: bool,
+    pub at_ms: u64,
+}
+
+/// Sizes of the unshared folders, so that opening the page does not walk every file of
+/// every folder each time (and never spins up a sleeping disk to do it). Capped at
+/// [`SIZE_CACHE_MAX`] entries, the oldest evicted first.
+#[derive(Debug, Default)]
+pub struct SizeCache {
+    m: Mutex<HashMap<String, CachedSize>>,
+}
+
+impl SizeCache {
+    pub fn get(&self, path: &str) -> Option<CachedSize> {
+        self.m.lock().unwrap().get(path).copied()
+    }
+
+    pub fn put(&self, path: &str, s: CachedSize) {
+        let mut m = self.m.lock().unwrap();
+        if m.len() >= SIZE_CACHE_MAX && !m.contains_key(path) {
+            let oldest = m.iter().min_by_key(|(_, v)| v.at_ms).map(|(k, _)| k.clone());
+            if let Some(k) = oldest {
+                m.remove(&k);
+            }
+        }
+        m.insert(path.to_string(), s);
+    }
+
+    /// Forgets every size (after a change of the shares or a folder deletion).
+    pub fn clear(&self) {
+        self.m.lock().unwrap().clear();
+    }
+
+    pub fn len(&self) -> usize {
+        self.m.lock().unwrap().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// Measure the sizes the cache does not have fresh ([`unshared`]).
+pub struct Measure<'a> {
+    pub now_ms: u64,
+    /// A disk of the volume mounted there sleeps ([`crate::SubvolumeCreator::asleep`]).
+    pub asleep: &'a dyn Fn(&str) -> bool,
+}
+
+/// The size of one folder: the quota group of a subvolume when quotas are enabled, else a
+/// walk of its files within the time budget.
+fn measure_one(host: &dyn ShareHost, path: &str, subvolume: bool, now_ms: u64) -> Option<CachedSize> {
+    if subvolume && let Some(bytes) = host.qgroup_size(path) {
+        return Some(CachedSize {
+            bytes,
+            partial: false,
+            at_ms: now_ms,
+        });
+    }
+    host.tree_size(path, LIST_SIZE_BUDGET)
+        .map(|(bytes, partial)| CachedSize {
+            bytes,
+            partial,
+            at_ms: now_ms,
+        })
+}
+
 /// The top-level folders of the volumes that no share uses. `share_paths`: paths of the
 /// shares (applied and staged); `snapshots_of`: the snapshot directories of a path.
+///
+/// Sizes come from `sizes`. Without `measure` nothing is measured (the list is quick: the
+/// last known sizes, any age). With it, sizes older than [`SIZE_TTL_MS`] or unknown are
+/// measured and cached, within [`LIST_TOTAL_BUDGET`], except on a volume whose disks
+/// sleep: there the last known size stays, marked `size_standby`.
 pub fn unshared(
     host: &dyn ShareHost,
     volumes: &[(String, String)],
     share_paths: &[String],
     removed: &[RemovedShare],
     snapshots_of: &dyn Fn(&str) -> Vec<SnapshotSource>,
+    sizes: &SizeCache,
+    measure: Option<&Measure>,
 ) -> Vec<UnsharedFolder> {
     let start = Instant::now();
     let mut out = Vec::new();
     for (label, mnt) in volumes {
+        let mut asleep: Option<bool> = None;
         for e in host.list_dir(mnt) {
             if !e.is_dir || is_system_name(&e.name) {
                 continue;
@@ -84,16 +170,30 @@ pub fn unshared(
             if share_paths.iter().any(|p| is_within(p, &path)) {
                 continue;
             }
-            let size = (start.elapsed() < LIST_TOTAL_BUDGET)
-                .then(|| host.tree_size(&path, LIST_SIZE_BUDGET))
-                .flatten();
+            let mut size = sizes.get(&path);
+            let mut standby = false;
+            if let Some(m) = measure
+                && size.is_none_or(|s| m.now_ms.saturating_sub(s.at_ms) >= SIZE_TTL_MS)
+            {
+                // the power check only when a size is due, once per volume
+                if *asleep.get_or_insert_with(|| (m.asleep)(mnt)) {
+                    standby = true;
+                } else if start.elapsed() < LIST_TOTAL_BUDGET
+                    && let Some(s) = measure_one(host, &path, e.subvolume, m.now_ms)
+                {
+                    sizes.put(&path, s);
+                    size = Some(s);
+                }
+            }
             let rec = removed.iter().rev().find(|r| r.share.path == path);
             out.push(UnsharedFolder {
                 volume: label.clone(),
                 name: e.name.clone(),
                 subvolume: e.subvolume,
-                size_bytes: size.map(|s| s.0),
-                size_partial: size.is_some_and(|s| s.1),
+                size_bytes: size.map(|s| s.bytes),
+                size_partial: size.is_some_and(|s| s.partial),
+                size_at_ms: size.map(|s| s.at_ms),
+                size_standby: standby,
                 snapshots: count_snapshots(host, &snapshots_of(&path)),
                 removed_at_ms: rec.map(|r| r.removed_at_ms),
                 previous: rec.map(|r| r.share.clone()),
@@ -334,12 +434,20 @@ mod tests {
             },
             removed_at_ms: 42,
         }];
+        let cache = SizeCache::default();
+        let awake = |_: &str| false;
+        let m = Measure {
+            now_ms: 1000,
+            asleep: &awake,
+        };
         let l = unshared(
             &h,
             &vols(),
             &["/vol1/data/inner".into()],
             &removed,
             &|p| if p == "/vol1/photos" { src() } else { Vec::new() },
+            &cache,
+            Some(&m),
         );
         let names: Vec<&str> = l.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, ["old", "photos"], "data holds a share, system names stay out");
@@ -349,6 +457,74 @@ mod tests {
         assert_eq!(p.removed_at_ms, Some(42));
         assert_eq!(p.previous.as_ref().unwrap().name, "Photos");
         assert!(p.subvolume);
+    }
+
+    #[test]
+    fn sizes_are_cached_invalidated_and_never_read_from_sleeping_disks() {
+        let h = host();
+        let cache = SizeCache::default();
+        let none = |_: &str| Vec::new();
+        let list = |m: Option<&Measure>| unshared(&h, &vols(), &[], &[], &none, &cache, m);
+        let walks = || std::mem::take(&mut h.state().size_log);
+        fn awake(_: &str) -> bool {
+            false
+        }
+        fn asleep(m: &str) -> bool {
+            m == "/vol1"
+        }
+        let at = |now_ms, asleep: &'static dyn Fn(&str) -> bool| Measure { now_ms, asleep };
+        let size_of = |l: &[UnsharedFolder], n: &str| {
+            let f = l.iter().find(|f| f.name == n).unwrap();
+            (f.size_bytes, f.size_at_ms, f.size_standby)
+        };
+        // the quick list measures nothing
+        let l = list(None);
+        assert_eq!(size_of(&l, "photos"), (None, None, false));
+        assert!(walks().is_empty());
+        // disks asleep: nothing is read, sizes unknown and marked
+        let l = list(Some(&at(1000, &asleep)));
+        assert_eq!(size_of(&l, "photos"), (None, None, true));
+        assert!(walks().is_empty());
+        // awake: measured once (quota group of a subvolume when quotas are on), then cached
+        h.state().qgroups.insert("/vol1/photos".into(), 7000);
+        let l = list(Some(&at(1000, &awake)));
+        assert_eq!(size_of(&l, "photos"), (Some(7000), Some(1000), false));
+        assert_eq!(size_of(&l, "old").0, Some(0));
+        let w = walks();
+        assert!(w.contains(&"qgroup /vol1/photos".to_string()), "{w:?}");
+        assert!(!w.contains(&"walk /vol1/photos".to_string()), "{w:?}");
+        assert!(w.contains(&"walk /vol1/old".to_string()), "{w:?}");
+        let l = list(Some(&at(1000 + SIZE_TTL_MS - 1, &awake)));
+        assert_eq!(size_of(&l, "photos").0, Some(7000));
+        assert!(walks().is_empty());
+        assert_eq!(size_of(&list(None), "photos"), (Some(7000), Some(1000), false));
+        // expired while the disks sleep: the last size with its age, nothing read
+        let late = 1000 + SIZE_TTL_MS;
+        let l = list(Some(&at(late, &asleep)));
+        assert_eq!(size_of(&l, "photos"), (Some(7000), Some(1000), true));
+        assert!(walks().is_empty());
+        // expired and awake: measured again
+        h.state().qgroups.insert("/vol1/photos".into(), 8000);
+        let l = list(Some(&at(late, &awake)));
+        assert_eq!(size_of(&l, "photos"), (Some(8000), Some(late), false));
+        assert!(!walks().is_empty());
+        // cleared (apply of shares, folder deletion): measured on the next sized list
+        cache.clear();
+        assert!(cache.is_empty());
+        assert_eq!(size_of(&list(None), "photos").0, None);
+        list(Some(&at(late, &awake)));
+        assert!(walks().contains(&"qgroup /vol1/photos".to_string()));
+    }
+
+    #[test]
+    fn the_size_cache_is_capped() {
+        let c = SizeCache::default();
+        for i in 0..SIZE_CACHE_MAX as u64 + 5 {
+            c.put(&format!("/v/{i}"), CachedSize { bytes: i, partial: false, at_ms: i });
+        }
+        assert_eq!(c.len(), SIZE_CACHE_MAX);
+        assert!(c.get("/v/0").is_none(), "the oldest went first");
+        assert!(c.get(&format!("/v/{}", SIZE_CACHE_MAX + 4)).is_some());
     }
 
     #[test]

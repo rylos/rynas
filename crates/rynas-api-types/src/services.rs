@@ -772,6 +772,14 @@ pub struct UnsharedFolder {
     pub size_bytes: Option<u64>,
     #[serde(default)]
     pub size_partial: bool,
+    /// When `size_bytes` was measured: sizes are kept for an hour, and longer while the
+    /// disks of the volume sleep.
+    #[serde(default)]
+    pub size_at_ms: Option<u64>,
+    /// The disks of the volume are in standby: the size was not measured now, so as not to
+    /// wake them (`size_bytes` is the last known one, if any).
+    #[serde(default)]
+    pub size_standby: bool,
     pub snapshots: u32,
     /// When the share of this folder was removed, if rynas knows.
     #[serde(default)]

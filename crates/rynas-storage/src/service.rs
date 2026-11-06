@@ -278,6 +278,31 @@ impl Storage {
         })
     }
 
+    /// A disk under the filesystem mounted at `mountpoint` (every member of a multi-device
+    /// btrfs, through md and LUKS) is in standby or asleep. Reads only lsblk (sysfs),
+    /// mountinfo and the ATA power mode: it never wakes a disk. `false` when the mount or
+    /// the disks are unknown.
+    pub fn mount_asleep(&self, mountpoint: &str) -> bool {
+        let mounts = self.mounts();
+        let Some(m) = mounts.iter().rev().find(|m| m.mountpoint == mountpoint) else {
+            return false;
+        };
+        let Ok(g) = self.graph() else { return false };
+        let Some(src) = g.find(&m.source) else {
+            return false;
+        };
+        let mut devs = vec![src.kname.clone()];
+        if src.fstype.as_deref() == Some("btrfs")
+            && let Some(u) = &src.uuid
+        {
+            devs.extend(g.with_fs_uuid(u).into_iter().map(|d| d.kname.clone()));
+        }
+        devs.iter()
+            .flat_map(|d| g.disks_under(d))
+            .filter_map(|k| g.get(&k))
+            .any(|d| asleep(self.power_of(d)))
+    }
+
     /// `GET /api/v1/storage/disks`
     pub fn disks(&self) -> Result<Vec<DiskSummary>, StorageError> {
         let g = self.graph()?;
@@ -745,6 +770,21 @@ mod tests {
         );
         let sda = disks.iter().find(|d| d.name == "sda").unwrap();
         assert_eq!(sda.health, HealthVerdict::Healthy);
+    }
+
+    #[test]
+    fn a_mount_sleeps_when_a_disk_under_it_does() {
+        // /vol1: btrfs on LUKS on md2 (sda1, sdb1, sdc1)
+        let s = Storage::new(Arc::new(host()));
+        assert!(!s.mount_asleep("/vol1"));
+        assert!(!s.mount_asleep("/"), "NVMe never sleeps");
+        assert!(!s.mount_asleep("/nowhere"));
+        let mut h = host();
+        h.power.insert("/dev/sdb".into(), PowerState::Standby);
+        let h = Arc::new(h);
+        let s = Storage::new(h.clone());
+        assert!(s.mount_asleep("/vol1"));
+        assert!(!h.ran().iter().any(|c| c.contains("/dev/sd")), "{:?}", h.ran());
     }
 
     #[test]
