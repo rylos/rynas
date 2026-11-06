@@ -69,6 +69,8 @@ pub const NUT_USERS: &str = "/etc/nut/upsd.users";
 /// Password of the rynas upsd user (root 0600).
 pub const NUT_SECRET: &str = "/etc/rynas/nut-upsd.secret";
 pub const NUT_USER: &str = "rynas";
+/// synodeb's UPS tool.
+pub const SYNODEB_UPS: &str = "/usr/sbin/synodeb-ups";
 /// Keys of the two settings in synodeb's file and in the rynas file.
 const SYNODEB_KEYS: (&str, &str) = ("SAFEMODE_AFTER", "PRE_SAFEMODE_TIMEOUT");
 const NUT_KEYS: (&str, &str) = ("SHUTDOWN_AFTER", "STOP_TIMEOUT");
@@ -308,7 +310,12 @@ fn new_password() -> std::io::Result<String> {
 
 /// The password of the rynas upsd user, generated on first use (root 0600 below `root`).
 pub fn nut_password(root: &Path) -> Result<String, String> {
-    let path = files::under_root(root, Path::new(NUT_SECRET));
+    secret(root, NUT_SECRET)
+}
+
+/// A password kept in the file `name` (below `root`), generated on first use (root 0600).
+pub fn secret(root: &Path, name: &str) -> Result<String, String> {
+    let path = files::under_root(root, Path::new(name));
     if let Ok(t) = std::fs::read_to_string(&path) {
         let pw = t.lines().next().unwrap_or("").trim().to_string();
         if pw.len() >= 16 && rynas_nut::valid_name(&pw) {
@@ -319,7 +326,7 @@ pub fn nut_password(root: &Path) -> Result<String, String> {
     let cand = files::candidate_path(&path);
     files::write_synced(&cand, format!("{pw}\n").as_bytes(), 0o600)
         .and_then(|_| files::rename_synced(&cand, &path))
-        .map_err(|e| format!("{NUT_SECRET}: {e}"))?;
+        .map_err(|e| format!("{name}: {e}"))?;
     Ok(pw)
 }
 
@@ -376,6 +383,8 @@ pub struct Ups {
     /// Battery test commands are sent to upsd and the watcher runs (off under
     /// `--dry-system` unless `--upsd` names a test upsd).
     pub talk_to_upsd: bool,
+    /// The setup wizard ([`crate::ups_setup`]).
+    pub setup: crate::ups_setup::Setup,
 }
 
 impl Ups {
@@ -423,7 +432,8 @@ pub fn router(st: UpsState) -> Router {
                 .route("/v1/ups/safe-mode", post(safe_mode))
                 .route_layer(axum::middleware::from_fn(crate::server::require_root_peer)),
         )
-        .with_state(st)
+        .with_state(st.clone())
+        .merge(crate::ups_setup::router(st))
 }
 
 fn state_of(u: &Ups, owner: &str) -> Res<UpsSettingsState> {

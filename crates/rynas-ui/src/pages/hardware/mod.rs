@@ -8,6 +8,7 @@ mod power;
 mod removable;
 mod synology;
 mod ups;
+mod ups_setup;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;

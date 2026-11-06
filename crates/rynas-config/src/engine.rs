@@ -739,6 +739,12 @@ impl Config {
                 cleanup(&planned);
                 return Err(fail(&steps[p.step].key, "write", e.to_string()));
             }
+            if let Some(g) = &p.file.group
+                && let Err(e) = set_group(ctx.root, &candidate_path(&p.real), g)
+            {
+                cleanup(&planned);
+                return Err(fail(&steps[p.step].key, "write", e));
+            }
         }
 
         // 3. validate
@@ -1210,4 +1216,33 @@ impl Config {
             .query_row("SELECT rev FROM config WHERE key = ?1", [key], |r| r.get(0))
             .optional()?)
     }
+}
+
+/// The gid of `group` in `<root>/etc/group`.
+pub fn group_id(root: &Path, group: &str) -> Option<u32> {
+    let text = std::fs::read_to_string(under_root(root, Path::new("/etc/group"))).ok()?;
+    text.lines().find_map(|l| {
+        let mut f = l.split(':');
+        (f.next() == Some(group))
+            .then(|| f.nth(1).and_then(|g| g.parse().ok()))
+            .flatten()
+    })
+}
+
+/// Gives `path` to `root:<group>` ([`crate::ManagedFile::group`]). A group missing below the
+/// configuration root is skipped (test roots); so is a refused chown when not running as root.
+fn set_group(root: &Path, path: &Path, group: &str) -> std::result::Result<(), String> {
+    let Some(gid) = group_id(root, group) else {
+        return Ok(());
+    };
+    match std::os::unix::fs::chown(path, Some(0), Some(gid)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && !is_root() => Ok(()),
+        Err(e) => Err(format!("{}: chown to root:{group}: {e}", path.display())),
+    }
+}
+
+fn is_root() -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata("/proc/self").is_ok_and(|m| m.uid() == 0)
 }

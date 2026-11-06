@@ -32,7 +32,10 @@ pub enum FileKind {
         /// Lines outside the block whose first word is one of these are removed (they would
         /// contradict the block, e.g. another `127.0.1.1` line in `/etc/hosts`). An entry
         /// ending in `=` matches a shell assignment (`SAFEMODE_AFTER=` drops
-        /// `SAFEMODE_AFTER=600`).
+        /// `SAFEMODE_AFTER=600`). An entry with a space matches the start of a line
+        /// (`MONITOR ups@` drops `MONITOR ups@localhost 1 …`); an entry `[name]` drops that
+        /// whole ini section, from its header to the next section, block or end of file
+        /// (`[ups]` of NUT's `ups.conf`).
         #[serde(default)]
         drop_outside: Vec<String>,
     },
@@ -50,6 +53,10 @@ pub struct ManagedFile {
     pub content: String,
     pub mode: u32,
     pub kind: FileKind,
+    /// Group owner of the written file (owner root), e.g. `nut` for NUT's files that its
+    /// daemons read after dropping privileges; `None`: the writer's group. Skipped when the
+    /// group does not exist below the configuration root.
+    pub group: Option<String>,
 }
 
 impl ManagedFile {
@@ -59,6 +66,7 @@ impl ManagedFile {
             content,
             mode: 0o644,
             kind: FileKind::Whole { header },
+            group: None,
         }
     }
 
@@ -71,6 +79,7 @@ impl ManagedFile {
                 id: id.into(),
                 drop_outside: Vec::new(),
             },
+            group: None,
         }
     }
 
@@ -81,11 +90,18 @@ impl ManagedFile {
             content: String::new(),
             mode: 0o644,
             kind: FileKind::Absent,
+            group: None,
         }
     }
 
     pub fn mode(mut self, mode: u32) -> Self {
         self.mode = mode;
+        self
+    }
+
+    /// Group owner of the file (see [`ManagedFile::group`]).
+    pub fn group(mut self, group: &str) -> Self {
+        self.group = Some(group.into());
         self
     }
 }
@@ -133,12 +149,18 @@ pub fn render_final(kind: &FileKind, content: &str, existing: Option<&str>) -> (
             let mut out = String::new();
             let mut placed = false;
             let mut inside = false;
+            // inside an ini section listed as `[name]` in `drop_outside`
+            let mut dropping = false;
             for line in existing.unwrap_or("").lines() {
                 if inside {
                     if line.trim_end() == end_marker(id) {
                         inside = false;
                     }
                     continue;
+                }
+                let t = line.trim();
+                if t.starts_with('[') || line.starts_with("# BEGIN rynas ") {
+                    dropping = t.starts_with('[') && drop_outside.iter().any(|d| d == t);
                 }
                 if line.starts_with(&begin_marker(id)) {
                     inside = true;
@@ -148,9 +170,16 @@ pub fn render_final(kind: &FileKind, content: &str, existing: Option<&str>) -> (
                     }
                     continue;
                 }
+                if dropping {
+                    continue;
+                }
                 let first = line.split_whitespace().next().unwrap_or("");
                 let drops = |d: &String| {
-                    d == first || (d.ends_with('=') && first.starts_with(d.as_str()))
+                    if d.contains(' ') {
+                        t.starts_with(d.as_str())
+                    } else {
+                        d == first || (d.ends_with('=') && first.starts_with(d.as_str()))
+                    }
                 };
                 if !first.starts_with('#') && drop_outside.iter().any(drops) {
                     continue;
@@ -290,5 +319,24 @@ mod tests {
         assert_eq!(std::fs::read(&target).unwrap(), b"hi");
         let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o640);
+    }
+
+    #[test]
+    fn block_drops_ini_sections_and_line_prefixes() {
+        let k = FileKind::Block {
+            id: "ups-device".into(),
+            drop_outside: vec!["[ups]".into(), "MONITOR ups@".into()],
+        };
+        let conf = "maxretry = 3\n[ups]\n\tdriver = usbhid-ups\n\tport = auto\n\n[other]\n\tdriver = snmp-ups\n\
+            MONITOR ups@localhost 1 u p primary\nMONITOR other@localhost 1 u p primary\n# MONITOR ups@x kept\n";
+        let (t, _) = render_final(&k, "[ups]\n\tdriver = nutdrv_qx\n", Some(conf));
+        assert!(t.starts_with("maxretry = 3\n[other]\n"), "{t}");
+        assert!(!t.contains("usbhid-ups") && t.contains("snmp-ups"), "{t}");
+        assert!(!t.contains("MONITOR ups@localhost") && t.contains("MONITOR other@"), "{t}");
+        assert!(t.contains("# MONITOR ups@x kept"), "{t}");
+        assert_eq!(t.matches("[ups]").count(), 1, "{t}");
+        // the block itself is not a dropped section, and a second apply keeps it
+        let (t2, _) = render_final(&k, "[ups]\n\tdriver = nutdrv_qx\n", Some(&t));
+        assert_eq!(t2, t);
     }
 }
