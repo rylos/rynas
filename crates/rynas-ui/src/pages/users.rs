@@ -6,7 +6,7 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use wasm_bindgen::JsCast;
-use rynas_api_types::{GroupRequest, GroupView, LocalGroup, LocalUser, PasswordRequest, PendingOp, ShellAccess, UserBadge, UserStatus, UserView};
+use rynas_api_types::{GroupRequest, GroupView, HOME_SYSTEM, HomesState, LocalGroup, LocalUser, PasswordRequest, PendingOp, ShellAccess, UserBadge, UserStatus, UserView};
 
 use crate::api::{self, ApiErr};
 use crate::form::{self, In, lens, lens_bool, save_bar, search_box, select_field, switch, tabs, text_field};
@@ -14,6 +14,7 @@ use crate::i18n::{t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::toast::{saved_applied, saved_pending, toast};
 use crate::ui::{self, Confirm, EmptyState, PageHeader, Remote, Tone, confirm, drawer};
+use super::user_homes::{MoveAsk, move_dialog, place_of, place_select, places};
 
 /// `[a-z_][a-z0-9_-]{0,31}` (user and group names).
 pub fn valid_account_name(n: &str) -> bool {
@@ -68,13 +69,13 @@ pub fn Users() -> impl IntoView {
     let tab = RwSignal::new(0usize);
     let users = Remote::<Vec<UserView>>::with_config("/api/v1/users");
     let groups = Remote::<Vec<GroupView>>::with_config("/api/v1/groups");
-    let homes = Remote::<rynas_api_types::HomesState>::with_config("/api/v1/services/homes");
+    let homes = Remote::<HomesState>::with_config("/api/v1/services/homes");
     view! {
         <div class="page">
             <PageHeader icon=icons::USERS title="nav.users" subtitle="users.subtitle" />
             <section class="card widget w-12">
                 {tabs("ug", &["users.tab_users", "users.tab_groups", "users.tab_homes"], tab, "nav.users")}
-                <div role="tabpanel" id="ug-p0" aria-labelledby="ug-t0" hidden=move || tab.get() != 0>{users_panel(users, groups)}</div>
+                <div role="tabpanel" id="ug-p0" aria-labelledby="ug-t0" hidden=move || tab.get() != 0>{users_panel(users, groups, homes)}</div>
                 <div role="tabpanel" id="ug-p1" aria-labelledby="ug-t1" hidden=move || tab.get() != 1>{groups_panel(users, groups)}</div>
                 <div role="tabpanel" id="ug-p2" aria-labelledby="ug-t2" hidden=move || tab.get() != 2>{super::user_homes::homes_panel(homes)}</div>
             </section>
@@ -117,10 +118,12 @@ fn shell_key(s: ShellAccess) -> &'static str {
     }
 }
 
-fn users_panel(users: Remote<Vec<UserView>>, groups: Remote<Vec<GroupView>>) -> AnyView {
+fn users_panel(users: Remote<Vec<UserView>>, groups: Remote<Vec<GroupView>>, homes: Remote<HomesState>) -> AnyView {
     let q = RwSignal::new(String::new());
     let edit = RwSignal::new(None::<UserEdit>);
     let del = RwSignal::new(None::<String>);
+    // a home move asked from the editor (it runs after the editor closes)
+    let mv = RwSignal::new(None::<MoveAsk>);
     let create = move || edit.set(Some(UserEdit { user: LocalUser::default(), status: None, password: false }));
 
     let table = move || {
@@ -161,7 +164,17 @@ fn users_panel(users: Remote<Vec<UserView>>, groups: Remote<Vec<GroupView>>) -> 
     let editor = move || {
         edit.get().map(|e| {
             let names: Vec<String> = groups.data.with_untracked(|g| g.iter().flatten().map(|g| g.group.name.clone()).collect());
-            user_editor(e, names, Callback::new(move |_| edit.set(None)))
+            let hs = homes.data.get_untracked();
+            user_editor(e, names, hs, Callback::new(move |a| mv.set(Some(a))), Callback::new(move |_| edit.set(None)))
+        })
+    };
+    let mover = move || {
+        mv.get().map(|a| {
+            let done = Callback::new(move |_| {
+                homes.reload();
+                users.reload();
+            });
+            move_dialog(a, homes, Callback::new(move |_| mv.set(None)), done)
         })
     };
 
@@ -177,6 +190,7 @@ fn users_panel(users: Remote<Vec<UserView>>, groups: Remote<Vec<GroupView>>) -> 
         {table}
         {editor}
         {deleter}
+        {mover}
     }
     .into_any()
 }
@@ -240,7 +254,7 @@ fn user_row(v: UserView, edit: RwSignal<Option<UserEdit>>, del: RwSignal<Option<
 
 const SHELL_OPTS: &[(&str, &str)] = &[("none", "users.shell_none"), ("sftp", "users.shell_sftp"), ("shell", "users.shell_shell")];
 
-fn user_editor(e: UserEdit, all_groups: Vec<String>, close: Callback<()>) -> AnyView {
+fn user_editor(e: UserEdit, all_groups: Vec<String>, homes: Option<HomesState>, on_move: Callback<MoveAsk>, close: Callback<()>) -> AnyView {
     let is_new = e.status.is_none();
     let on_system = e.status.as_ref().is_some_and(|s| s.on_system);
     let d = RwSignal::new(e.user.clone());
@@ -279,6 +293,49 @@ fn user_editor(e: UserEdit, all_groups: Vec<String>, close: Callback<()>) -> Any
     let exp_err = field_err(show, server, "expires", expires, valid_date, "v.date");
     let none = Signal::derive(|| None::<String>);
 
+    // where the home is or goes: a volume or the system disk
+    let hs = homes.unwrap_or_default();
+    let mine = hs.homes.iter().find(|h| h.user == e.user.name).cloned();
+    let (here, place_opts) = if is_new {
+        let mut o: Vec<(String, String)> = if hs.settings.enabled {
+            hs.volumes
+                .iter()
+                .map(|v| (v.path.clone(), tf("homes.volume_opt", &[("path", &v.path), ("fs", &v.fs_type), ("free", &crate::i18n::bytes(v.avail_bytes))])))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        o.push((HOME_SYSTEM.to_string(), t("homes.dest_system").to_string()));
+        let here = if hs.settings.enabled && !hs.settings.volume.is_empty() { hs.settings.volume.clone() } else { HOME_SYSTEM.to_string() };
+        (here, o)
+    } else {
+        match mine.as_ref().filter(|m| m.moved.is_none() && on_system) {
+            Some(m) => {
+                let here = place_of(m);
+                let mut o = places(&hs);
+                if here.is_empty() {
+                    o.insert(0, (String::new(), tf("homes.dest_here", &[("path", &m.home)])));
+                }
+                (here, o)
+            }
+            None => (String::new(), Vec::new()),
+        }
+    };
+    let place = RwSignal::new(here.clone());
+    let place_field = (place_opts.len() > 1).then(|| {
+        let set = Callback::new(move |v: String| {
+            if is_new {
+                let hv = v.clone();
+                d.update(|u| u.home_volume = hv);
+            }
+            place.set(v);
+        });
+        place_select("users.home_place", Some(if is_new { "users.home_place_help" } else { "users.home_move_help" }), place_opts, place.into(), set)
+    });
+    let user_name = e.user.name.clone();
+    let move_ask = move || (!is_new && place.get_untracked() != here).then(|| MoveAsk { users: vec![user_name.clone()], to: place.get_untracked() });
+    let original = e.user.clone();
+
     let valid = move || d.with(|u| (!is_new || valid_account_name(&u.name)) && !u.full_name.contains([':', ',']) && valid_email(&u.email));
     let save = Callback::new(move |_| {
         show.set(true);
@@ -287,9 +344,18 @@ fn user_editor(e: UserEdit, all_groups: Vec<String>, close: Callback<()>) -> Any
             error.set(Some(t("form.check").to_string()));
             return;
         }
+        let ask = move_ask();
+        let body = d.get_untracked();
+        // only the place changed: straight to the move
+        if let Some(a) = ask.clone()
+            && body == original
+        {
+            close.run(());
+            on_move.run(a);
+            return;
+        }
         busy.set(true);
         error.set(None);
-        let body = d.get_untracked();
         spawn_local(async move {
             let r = if is_new {
                 api::post::<_, UserView>("/api/v1/users", Some(&body)).await
@@ -301,6 +367,9 @@ fn user_editor(e: UserEdit, all_groups: Vec<String>, close: Callback<()>) -> Any
                     if crate::config::apply_now(&[crate::config::keys::USERS], error).await {
                         saved_applied();
                         close.run(());
+                        if let Some(a) = ask {
+                            on_move.run(a);
+                        }
                     }
                 }
                 Err(e) => fail(&e, server, error),
@@ -367,10 +436,11 @@ fn user_editor(e: UserEdit, all_groups: Vec<String>, close: Callback<()>) -> Any
             {text_field("users.email", email, set_email, email_err, In { kind: "email", help: Some("users.email_help"), autocomplete: "email", ..In::default() })}
             {text_field("users.description", descr, set_descr, none, In::default())}
             {group_list}
-            // where the home is (it changes only by moving it, in the User homes tab)
+            // where the home is; another place starts a home move after saving
             {(!is_new && !e.user.home.is_empty()).then(|| view! {
                 <dl class="kvs">{ui::kv_row("users.home", Signal::stored(e.user.home.clone()), "mono")}</dl>
             })}
+            {place_field}
             <h3 class="form-section">{tr("users.sec_access")}</h3>
             {switch("users.admin", Some("users.admin_help"), admin, set_admin)}
             {switch("users.smb", Some("users.smb_help"), smb, set_smb)}

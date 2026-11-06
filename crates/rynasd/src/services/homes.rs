@@ -1,6 +1,7 @@
 //! User homes endpoints (`/v1/services/homes`): the setting (key `homes` plus the SMB
 //! `[homes]` share of `shares`, staged together), where every local user's home is, and the
-//! home move (plan, task, confirmation, undo). See [`rynas_services::homes`].
+//! home move to any volume or to the system disk (plan, task, confirmation, undo). See
+//! [`rynas_services::homes`].
 
 use axum::Json;
 use axum::extract::rejection::JsonRejection;
@@ -8,12 +9,12 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use rynas_api_types::{
-    HOMES_KEY, HOMES_LINK, HomeMovePlan, HomeMoveRecord, HomeMoveRequest, HomesConfig,
-    HomesSettings, HomesState, LOCAL_ID_MAX, LOCAL_ID_MIN, SharesConfig, SmbHomes, TaskStarted,
-    UserHome, UsersConfig, error_codes,
+    HOME_SYSTEM, HOMES_KEY, HOMES_LINK, HomeMovePlan, HomeMoveRecord, HomeMoveRequest, HomesConfig,
+    HomesSettings, HomesState, LOCAL_ID_MAX, LOCAL_ID_MIN, SYSTEM_HOMES, SharesConfig, SmbHomes,
+    TaskStarted, UserHome, UsersConfig, error_codes,
 };
 use rynas_services::accounts::{AccountOp, SysUser};
-use rynas_services::homes::{self, MoveContext};
+use rynas_services::homes::{self, Dest, MoveContext};
 use rynas_services::{SHARES_KEY, USERS_KEY};
 
 use super::{
@@ -34,18 +35,35 @@ pub(super) fn homes_doc(s: &Services, owner: &str) -> HomesConfig {
         .unwrap_or_default()
 }
 
-/// The folders the homes use (the link's target and the applied one): never "unshared".
+fn applied(s: &Services) -> HomesConfig {
+    s.ops
+        .config
+        .applied(HOMES_KEY)
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default()
+}
+
+/// The folders the homes use (every volume's homes folder a home is in, and the default
+/// one): never "unshared", never deleted from there.
 pub(super) fn homes_folders(s: &Services) -> Vec<String> {
-    let mut v: Vec<String> = s.homes.current_folder().into_iter().collect();
-    if let Ok(Some(a)) = s.ops.config.applied(HOMES_KEY)
-        && let Ok(c) = serde_json::from_value::<HomesConfig>(a)
-        && !c.volume.is_empty()
-    {
+    let mut v = homes::used_folders(s.homes.host().as_ref());
+    let c = applied(s);
+    if !c.volume.is_empty() {
         v.push(homes::folder_of(&c.volume));
     }
     v.sort();
     v.dedup();
     v
+}
+
+/// Mount points that can hold a homes folder.
+fn volume_paths(s: &Services) -> Vec<String> {
+    homes::candidates(&s.homes.host().mounts(), &s.shares.volumes())
+        .into_iter()
+        .map(|v| v.path)
+        .collect()
 }
 
 fn state(s: &Services, owner: &str) -> Res<HomesState> {
@@ -58,20 +76,22 @@ fn state(s: &Services, owner: &str) -> Res<HomesState> {
     } else {
         homes::folder_of(&eff.volume)
     };
-    let subvolume = !folder.is_empty() && host.probe(&folder).subvolume;
+    let subvolume = !eff.volume.is_empty() && host.probe(&eff.volume).fs_type == "btrfs";
     let sys = s.users.accounts().users().map_err(internal)?;
     let moves = s.moves.list();
     let mut list: Vec<UserHome> = sys
         .iter()
         .filter(|u| local(u))
         .map(|u| {
-            let (location, subvolume) = homes::location(host.as_ref(), &u.home);
+            let i = homes::home_info(host.as_ref(), u);
             UserHome {
                 user: u.name.clone(),
                 uid: u.uid,
                 home: u.home.clone(),
-                location,
-                subvolume,
+                location: i.location,
+                folder: i.folder,
+                volume: i.volume,
+                subvolume: i.subvolume,
                 moved: moves.iter().find(|m| m.user == u.name).cloned(),
             }
         })
@@ -79,13 +99,13 @@ fn state(s: &Services, owner: &str) -> Res<HomesState> {
     list.sort_by(|a, b| a.user.cmp(&b.user));
     Ok(HomesState {
         pending: eff != cur || sh_eff.smb.homes != sh_cur.smb.homes,
+        active: applied(s).enabled,
         settings: HomesSettings {
             enabled: eff.enabled,
             volume: eff.volume,
             smb: sh_eff.smb.homes,
         },
         link: HOMES_LINK.into(),
-        target: host.read_link(HOMES_LINK),
         folder,
         subvolume,
         volumes: homes::candidates(&host.mounts(), &s.shares.volumes()),
@@ -136,32 +156,25 @@ pub(super) async fn homes_put(
     ))
 }
 
-/// The service is on in the applied configuration and the link points at its folder.
-fn service_on(s: &Services) -> bool {
-    let applied: Option<HomesConfig> = s
-        .ops
-        .config
-        .applied(HOMES_KEY)
-        .ok()
-        .flatten()
-        .and_then(|v| serde_json::from_value(v).ok());
-    applied.is_some_and(|c| {
-        c.enabled
-            && s.homes.current_folder().as_deref() == Some(homes::folder_of(&c.volume).as_str())
-    })
-}
-
-/// Plans for `users` (empty: every local user whose home is not in the homes folder).
-fn plans(s: &Services, owner: &str, users: &[String]) -> Res<Vec<(SysUser, HomeMovePlan)>> {
+/// Plans for `users` (empty: every local user whose home exists, is not at the destination
+/// and waits for no confirmation) to `to`.
+fn plans(
+    s: &Services,
+    owner: &str,
+    users: &[String],
+    to: &str,
+) -> Res<Vec<(SysUser, HomeMovePlan)>> {
+    let applied = applied(s);
+    let dest = Dest::parse(to, &applied.volume);
     let sys = s.users.accounts().users().map_err(internal)?;
+    let host = s.homes.host();
     let targets: Vec<SysUser> = if users.is_empty() {
-        // "all": the homes that exist outside the homes folder and wait for no confirmation
-        let host = s.homes.host();
         sys.into_iter()
             .filter(|u| {
+                let i = homes::home_info(host.as_ref(), u);
                 local(u)
-                    && homes::link_user(&u.home).is_none()
-                    && host.probe(&u.home).is_dir
+                    && host.probe(&i.folder).is_dir
+                    && i.folder.trim_end_matches('/') != dest.folder(&u.name)
                     && s.moves.get(&u.name).is_none()
             })
             .collect()
@@ -180,17 +193,17 @@ fn plans(s: &Services, owner: &str, users: &[String]) -> Res<Vec<(SysUser, HomeM
         .into_iter()
         .map(|x| (x.name, x.path))
         .collect();
-    let on = service_on(s);
-    let host = s.homes.host();
+    let volumes = volume_paths(s);
     Ok(targets
         .into_iter()
         .map(|u| {
             let cx = MoveContext {
-                service_on: on,
+                service_on: applied.enabled,
+                volumes: &volumes,
                 shares: &shares,
                 waiting: s.moves.get(&u.name).is_some(),
             };
-            let p = homes::plan_move(host.as_ref(), &u, &cx);
+            let p = homes::plan_move(host.as_ref(), &u, &dest, &cx);
             (u, p)
         })
         .collect())
@@ -205,7 +218,7 @@ pub(super) async fn move_plan(
     let req = json_body(body)?;
     Ok(Json(
         blocking(&s, move |s| {
-            Ok(plans(s, &owner, &req.users)?
+            Ok(plans(s, &owner, &req.users, &req.to)?
                 .into_iter()
                 .map(|(_, p)| p)
                 .collect())
@@ -214,13 +227,15 @@ pub(super) async fn move_plan(
     ))
 }
 
-/// Changes the passwd home of `user`: through the `users` key when rynas manages the user (a
-/// revision, `usermod -d` by its reconcile), else `usermod -d` directly.
+/// Changes the passwd home and the home volume of `user`: through the `users` key when rynas
+/// manages the user (a revision; `usermod -d` by its reconcile when the home changes), else
+/// `usermod -d` directly (when it changes).
 fn switch_home(
     s: &Services,
     author: &str,
     name: &str,
     home: &str,
+    volume: &str,
     log: &dyn Fn(&str),
 ) -> Result<(), String> {
     let c = &s.ops.config;
@@ -231,16 +246,23 @@ fn switch_home(
     if let Some(mut doc) = applied
         && let Some(u) = doc.users.iter_mut().find(|u| u.name == name)
     {
+        if u.home == home && u.home_volume == volume {
+            return Ok(());
+        }
         u.home = home.to_string();
+        u.home_volume = volume.to_string();
         let v = serde_json::to_value(&doc).map_err(|e| e.to_string())?;
-        c.apply_value(
-            author,
-            USERS_KEY,
-            Some(v),
-            &format!("home of {name}: {home}"),
-            log,
-        )
-        .map_err(|e| e.to_string())?;
+        let what = if volume.is_empty() {
+            format!("home of {name}: {home}")
+        } else {
+            format!("home of {name}: {home} on {volume}")
+        };
+        c.apply_value(author, USERS_KEY, Some(v), &what, log)
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    let sys = s.users.accounts().users()?;
+    if sys.iter().any(|u| u.name == name && u.home == home) {
         return Ok(());
     }
     let op = AccountOp::UserMod {
@@ -254,16 +276,49 @@ fn switch_home(
     s.users.accounts().exec(&op)
 }
 
+/// Points the account at the copy: the link of a home on a volume first (then the passwd home
+/// if it changes), or the passwd home first for the system disk (then the link goes). On
+/// failure everything is as before.
+fn switch_to(
+    s: &Services,
+    author: &str,
+    plan: &HomeMovePlan,
+    log: &dyn Fn(&str),
+) -> Result<(), String> {
+    let host = s.homes.host();
+    let link = homes::home_of(&plan.user);
+    if homes::link_user(&plan.to).is_some() {
+        let prev = host.read_link(&link);
+        homes::point_link(host.as_ref(), &plan.user, &plan.target, log)?;
+        if let Err(e) = switch_home(s, author, &plan.user, &plan.to, &plan.location, log) {
+            let _ = match prev {
+                Some(p) => host.set_link(&link, &p, log),
+                None => host.unlink(&link, log),
+            };
+            return Err(e);
+        }
+    } else {
+        switch_home(s, author, &plan.user, &plan.to, "", log)?;
+        if host.read_link(&link).is_some()
+            && let Err(e) = host.unlink(&link, log)
+        {
+            log(&format!("{link}: {e}"));
+        }
+    }
+    Ok(())
+}
+
 /// Moves one home (task body, blocking).
 fn move_one(
     s: &Services,
     author: &str,
     name: &str,
+    to: &str,
     log: &dyn Fn(&str),
     progress: &dyn Fn(u8),
     cancelled: &dyn Fn() -> bool,
 ) -> Result<(), String> {
-    let mut found = plans(s, author, &[name.to_string()]).map_err(|e| e.2.clone())?;
+    let mut found = plans(s, author, &[name.to_string()], to).map_err(|e| e.2.clone())?;
     let (u, plan) = found
         .pop()
         .ok_or_else(|| format!("user {name} not found"))?;
@@ -285,20 +340,20 @@ fn move_one(
             "{name}: cancelled; the copy was removed"
         )));
     }
-    if let Err(e) = switch_home(s, author, name, &plan.to, log) {
+    if let Err(e) = switch_to(s, author, &plan, log) {
         return Err(undo_copy(format!(
-            "{name}: the passwd home could not change ({e}); the copy was removed"
+            "{name}: the account could not switch to the new home ({e}); the copy was removed"
         )));
     }
     let now = rynas_tasks::now_ms();
-    let kept = match homes::keep_old(host.as_ref(), &plan.from, now, log) {
+    let kept = match homes::keep_old(host.as_ref(), &plan.source, now, log) {
         Ok(k) => k,
         Err(e) => {
             log(&format!(
                 "{name}: the old home could not be renamed ({e}): it stays at {}",
-                plan.from
+                plan.source
             ));
-            plan.from.clone()
+            plan.source.clone()
         }
     };
     s.moves.put(HomeMoveRecord {
@@ -307,16 +362,19 @@ fn move_one(
         to: plan.to.clone(),
         kept: kept.clone(),
         moved_ms: now,
+        from_folder: plan.source.clone(),
+        to_folder: plan.target.clone(),
     })?;
     log(&format!(
         "{name}: home moved to {} ({}); the old one is kept as {kept} until the move is confirmed",
-        plan.to, plan.target
+        plan.target, plan.to
     ));
     Ok(())
 }
 
-/// Task `homes.move`: the homes of `users` (empty: every one that can move), one after the
-/// other. Blocked homes are reported and skipped; the task fails if any home did not move.
+/// Task `homes.move`: the homes of `users` (empty: every one that can move) to `to`, one
+/// after the other. Blocked homes are reported and skipped; the task fails if any home did
+/// not move.
 pub(super) async fn move_start(
     State(st): State<SvcState>,
     h: HeaderMap,
@@ -325,7 +383,8 @@ pub(super) async fn move_start(
     let (s, owner) = (svc(&st)?, user(&h)?);
     let req = json_body(body)?;
     let o = owner.clone();
-    let list = blocking(&s, move |s| plans(s, &o, &req.users)).await?;
+    let (users, to) = (req.users.clone(), req.to.clone());
+    let list = blocking(&s, move |s| plans(s, &o, &users, &to)).await?;
     let allowed: Vec<String> = list
         .iter()
         .filter(|(_, p)| p.allowed)
@@ -346,6 +405,11 @@ pub(super) async fn move_start(
             },
         ));
     }
+    // the destination as planned (an empty `to` is the default volume of now)
+    let to = list
+        .first()
+        .map(|(_, p)| p.location.clone())
+        .unwrap_or_default();
     let svc = s.clone();
     let author = owner.clone();
     let id = s
@@ -363,9 +427,11 @@ pub(super) async fn move_start(
                     let base = (i * 100 / n) as u8;
                     let span = (100 / n) as u8;
                     let progress = |p: u8| c.progress(base + (p as u32 * span as u32 / 100) as u8);
-                    if let Err(e) = move_one(&svc, &author, name, &|l| c.log(l), &progress, &|| {
-                        c.is_cancelled()
-                    }) {
+                    if let Err(e) =
+                        move_one(&svc, &author, name, &to, &|l| c.log(l), &progress, &|| {
+                            c.is_cancelled()
+                        })
+                    {
                         c.log(&e);
                         failed.push(name.clone());
                         if c.is_cancelled() {
@@ -418,8 +484,8 @@ pub(super) async fn move_finish(
     Ok((StatusCode::ACCEPTED, Json(TaskStarted { task_id: id })).into_response())
 }
 
-/// Task `homes.move-undo`: the old home goes back in place and becomes the passwd home again;
-/// the copy is kept aside in the homes folder (it may hold newer files).
+/// Task `homes.move-undo`: the old home goes back in place and becomes the home again (its
+/// link, its passwd home); the copy is kept aside next to it (it may hold newer files).
 pub(super) async fn move_undo(
     State(st): State<SvcState>,
     h: HeaderMap,
@@ -454,17 +520,32 @@ pub(super) async fn move_undo(
             tokio::task::spawn_blocking(move || -> Result<(), String> {
                 let log = |l: &str| c.log(l);
                 let host = svc.homes.host();
-                let aside = homes::undo_move(host.as_ref(), &r, rynas_tasks::now_ms(), &log)?;
-                if let Err(e) = switch_home(&svc, &author, &r.user, &r.from, &log) {
+                let (from, to) = homes::record_folders(host.as_ref(), &r);
+                homes::undo_move(host.as_ref(), &r, &from, &log)?;
+                let volume = homes::volume_of_folder(&from, &r.user).unwrap_or_default();
+                let volume = if homes::link_user(&r.from).is_some() {
+                    volume
+                } else {
+                    String::new()
+                };
+                if let Err(e) = switch_home(&svc, &author, &r.user, &r.from, &volume, &log) {
                     return Err(format!(
-                        "the old home is back at {} but the passwd home could not change: {e}",
-                        r.from
+                        "the old home is back at {from} but the account could not switch to it: {e}"
                     ));
                 }
-                if let Some(a) = aside {
-                    log(&format!(
+                let link = homes::home_of(&r.user);
+                if homes::link_user(&r.from).is_none()
+                    && host.read_link(&link).is_some()
+                    && let Err(e) = host.unlink(&link, &log)
+                {
+                    log(&format!("{link}: {e}"));
+                }
+                match homes::set_aside(host.as_ref(), &r.user, &to, rynas_tasks::now_ms(), &log) {
+                    Ok(Some(a)) => log(&format!(
                         "the copy is kept as {a}: delete it when it is no longer needed"
-                    ));
+                    )),
+                    Ok(None) => {}
+                    Err(e) => log(&format!("the copy stays at {to}: {e}")),
                 }
                 svc.moves.remove(&r.user)
             })
@@ -474,23 +555,61 @@ pub(super) async fn move_undo(
     Ok((StatusCode::ACCEPTED, Json(TaskStarted { task_id: id })).into_response())
 }
 
-/// Default home of a user created now: in the homes folder when the service is on (staged or
-/// applied for `owner`). An explicit home there is refused while the service is off.
+/// Home of a user created now ([`rynas_api_types::LocalUser::home_volume`]): a volume's homes
+/// folder (the default one while the service is on, staged or applied for `owner`, or the one
+/// asked for), or the system disk.
 pub(super) fn default_home(
     s: &Services,
     owner: &str,
     u: &mut rynas_api_types::LocalUser,
 ) -> Res<()> {
-    let on = homes_doc(s, owner).enabled;
-    if u.home.is_empty() {
-        if on {
-            u.home = homes::home_of(&u.name);
+    let doc = homes_doc(s, owner);
+    let want = homes::trim_volume(&std::mem::take(&mut u.home_volume));
+    let on_volume = |u: &mut rynas_api_types::LocalUser, v: &str| -> Res<()> {
+        if !doc.enabled {
+            return Err(Error::invalid(
+                "home_volume",
+                "homes go on a volume only while the user homes service is on",
+            ));
         }
-    } else if homes::link_user(&u.home).is_some() && !on {
-        return Err(Error::invalid(
-            "home",
-            "the homes folder is used only while the user homes service is on",
-        ));
+        if !u.home.is_empty() && homes::link_user(&u.home) != Some(u.name.as_str()) {
+            return Err(Error::invalid(
+                "home",
+                format!("a home on a volume is {}", homes::home_of(&u.name)),
+            ));
+        }
+        if v != doc.volume
+            && let Some(e) = homes::volume_problem(&s.homes.host().mounts(), v)
+        {
+            return Err(Error::invalid("home_volume", e));
+        }
+        u.home = homes::home_of(&u.name);
+        u.home_volume = v.to_string();
+        Ok(())
+    };
+    match want.as_str() {
+        "" if u.home.is_empty() => {
+            if doc.enabled {
+                let v = doc.volume.clone();
+                on_volume(u, &v)?;
+            }
+        }
+        "" if homes::link_user(&u.home).is_some() => {
+            let v = doc.volume.clone();
+            on_volume(u, &v)?;
+        }
+        "" => {}
+        HOME_SYSTEM => {
+            if u.home.is_empty() {
+                u.home = format!("{SYSTEM_HOMES}/{}", u.name);
+            } else if homes::link_user(&u.home).is_some() {
+                return Err(Error::invalid(
+                    "home",
+                    "a home on the system disk is not in the homes folder",
+                ));
+            }
+        }
+        v => on_volume(u, v)?,
     }
     Ok(())
 }

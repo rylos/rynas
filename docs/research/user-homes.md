@@ -11,7 +11,8 @@ end up on the wrong disk, outside the snapshots and the backups of the data volu
 fill the root filesystem. D-IDENTITY already said "homes as subvolumes" (`homes/<user>`, one
 squota per home in phase 2); the code and `plan.md` did not.
 
-Decision, in short:
+Decision, in short (§6 extends it: each user's home on any volume or on the system disk, one
+link per user instead of one link for the whole folder):
 
 - A **"User homes" setting** (key `homes`, pending/apply): on/off and the volume that holds
   the homes folder: any mounted local filesystem that is not a system path (btrfs, ext4, xfs,
@@ -100,7 +101,7 @@ Source: [OMV docs, Users](https://docs.openmediavault.org/en/latest/administrati
 | Never move data silently | (OMV's footgun is the counter-example) | explicit move task with plan, verify, keep, undo |
 | Disabling keeps data | DSM, OMV | yes |
 | Deleting a user deletes the home | DSM | only when asked (`remove_home`, typed confirmation), as today |
-| Moving the whole homes folder to another volume | DSM | phase 2 (refused while the folder holds homes) |
+| Moving homes to another volume | DSM | yes, per user or all, any direction (§6) |
 
 ## 2. Debian specifics
 
@@ -174,7 +175,7 @@ Source: [OMV docs, Users](https://docs.openmediavault.org/en/latest/administrati
 | Service turned off | nothing on disk changes; the link stays so moved homes keep working; `[homes]` goes off with it. |
 | User deleted, keep home | `userdel`; the folder stays. |
 | User deleted with home | `userdel`, then `btrfs subvolume delete` (or `rm` for a plain folder) of `<volume>/homes/<user>`. |
-| Volume changed | refused while any passwd home is in the homes folder (phase 2: a "move the homes folder" task: per-home copy + link switch). |
+| Default volume changed | only new homes go there; existing homes stay (§6). |
 | Home move | plan → copy → verify → passwd (`usermod -d`, through a `users` revision when rynas manages the user) → old folder `<home>.rynas-old` kept → confirm (deleted) or undo (old folder back, copy kept aside as `<homes>/.<user>.undone-<ms>`). The user cannot be deleted while a move waits. |
 | Volume missing at boot | the link dangles: logins and SMB fail, nothing is written on the system disk. |
 
@@ -185,3 +186,55 @@ Source: [OMV docs, Users](https://docs.openmediavault.org/en/latest/administrati
   then the link switch).
 - Optional admin access to all homes, per-user size report in the homes tab.
 - Homes for domain users (`homes/<DOMAIN>/<user>`).
+
+## 6. Per-user home location (added 2026-11-06)
+
+Request: besides the default volume, choose the volume of each user's home, move it to another
+volume, and allow a home on the system disk (`/home/<user>`) while the service is on.
+
+What the main systems do:
+
+- **DSM**: one location for all homes (the `homes` shared folder of the chosen volume); no
+  per-user volume. Changing the location moves every home together.
+- **TrueNAS SCALE**: the home directory is a per-user path field (any dataset), so users can be
+  on different pools; the admin account's path is read-only in recent versions. Changing a path
+  is reported to fail when the parent does not exist ([NAS-130843](https://ixsystems.atlassian.net/browse/NAS-130843));
+  there is no plan, verification or undo, and no stable path: passwd holds the dataset path
+  ([forum](https://forums.truenas.com/t/why-cant-i-change-home-directory-on-truenas/31579)).
+- **openmediavault**: one shared folder as root of all homes; changing it rewrites every
+  user's passwd home and does not move the content ([docs](https://docs.openmediavault.org/en/latest/administration/users.html)).
+- **Unraid**: no homes for share users.
+
+What we take: the per-user freedom of TrueNAS (any eligible volume, or the system disk), the
+default location of DSM/OMV for new users, and our own explicit move (plan, two rsync passes,
+verification, keep, undo) for every direction.
+
+Stable path, per user. A single link `/srv/rynas/homes → <volume>/homes` cannot serve users on
+different volumes. Options considered:
+
+| Option | Verdict |
+|---|---|
+| passwd names the real folder (`/volume2/homes/alice`), like TrueNAS | no: every volume change rewrites passwd, Samba sessions and SSH known paths; a missing volume path can be recreated on the system disk |
+| one bind mount per home | no: a mount unit per user ordered after its volume, and an empty mount point on the system disk when the volume is missing |
+| **one symbolic link per user** in a real root-owned 0711 folder | yes: passwd stays `/srv/rynas/homes/<user>`; moving between volumes replaces one link (atomic `symlink` + `rename`); a dangling link fails cleanly; users can traverse the folder but not list it; Samba (`path = %H`, the share root may be a link), OpenSSH StrictModes and the file manager resolve the final link exactly as they resolved the folder link |
+
+Homes on the system disk keep `/home/<user>` in passwd (no link): it is the Debian default and
+what an admin expects for "my home on the root disk". A move from a volume to the system disk
+switches passwd first, then removes the link; the opposite sets the link first, then passwd.
+
+Migration of the first layout: built aside (`/srv/rynas/homes.rynas-new` with a link per passwd
+home in the folder), then swapped with `renameat2(RENAME_EXCHANGE)`: there is no instant where
+`/srv/rynas/homes/<user>` does not resolve; the old link is removed afterwards. A half-done
+migration (the folder aside left behind) is redone. It runs at rynasd start and in every apply of
+`homes`, so it is idempotent.
+
+Consequences:
+
+- The volume of the setting is only the default for new users; changing it is no longer refused
+  while homes are on the old volume (they stay there).
+- The later SFTP chroot cannot be `ChrootDirectory /srv/rynas/homes` any more (links to absolute
+  paths do not resolve inside a chroot): it will chroot into the real homes folder of the user's
+  volume (`<volume>/homes`, root 0711, a `Match` block per volume written by rynas) or bind-mount
+  the home into a per-user chroot; to be decided with the file-services plugin.
+- Phase 2 item "move the whole homes folder" becomes "move all homes to a volume" (already the
+  "Move all" action with a destination).

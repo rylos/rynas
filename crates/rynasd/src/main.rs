@@ -285,6 +285,11 @@ fn open_config(
     let config = Config::open(ConfigOptions::new(&args.state_dir, &root), system, domains)
         .map_err(std::io::Error::other)?;
     removable_tx.send_replace(rynasd::removable::initial_settings(&config));
+    // homes of the first layout (/srv/rynas/homes one link to <volume>/homes): one link per
+    // home, so that each home can be on its own volume (the apply of `homes` does it too)
+    if let Err(e) = homes.migrate(&|l| tracing::info!("homes: {l}")) {
+        tracing::warn!("homes: the folder of links could not be set up: {e}");
+    }
     Ok(Opened {
         config,
         users,

@@ -409,7 +409,7 @@ tests only.
 
 ## API v1: users, groups, shares, SMB and NFS (step 8)
 Crate `rynas-services`, three configuration domains of `rynas-config` applied by `rynasd`:
-`homes` (order 5: the homes folder the new users' homes go in), `users` (order 10) and `shares`
+`homes` (order 5: the folder of per-user home links and the default volume's homes folder), `users` (order 10) and `shares`
 (order 20: its ACLs name the users, so a changeset that touches both creates the users first
 and rolls back in reverse). Writes **stage** a pending change of the
 session user (`POST /api/v1/config/apply` applies it, as for every key); reads show the staged value
@@ -419,8 +419,8 @@ applied it), next to the system state. Session, CSRF and error rules are those o
 | Method | Path | Body | Response |
 |---|---|---|---|
 | GET | `/api/v1/users` | — | `Vec<UserView>` {user: `LocalUser`, status: `UserStatus` {managed, on_system, in_samba?, needs_password, pending?, badges}}; users created outside rynas included (`managed: false`, badge `unmanaged`) |
-| POST | `/api/v1/users` | `LocalUser` (uid 0: next free) | 201 `UserView`; 409 `already_exists` |
-| GET/PUT | `/api/v1/users/{name}` | `LocalUser` (name, uid and home cannot change: 400 `invalid_value` on `home`) | `UserView` |
+| POST | `/api/v1/users` | `LocalUser` (uid 0: next free; `home_volume`: empty = the default volume while user homes are on, else `/home`; `system` = `/home/<name>`; a mount point = that volume, service on) | 201 `UserView`; 409 `already_exists`; 400 `invalid_value` on `home_volume` (service off, not a volume that can hold homes) |
+| GET/PUT | `/api/v1/users/{name}` | `LocalUser` (name, uid, home and home_volume cannot change: 400 `invalid_value` on `home`/`home_volume`) | `UserView` |
 | DELETE | `/api/v1/users/{name}?remove_home=true&confirm={name}` | — | `StagedChanges` (the user leaves the share matrices in the same changeset); 400 `confirmation_required` without `confirm`; 409 `conflict` while a home move of the user waits for confirmation |
 | POST | `/api/v1/users/{name}/password` | `PasswordRequest` {password} | 202 `TaskStarted` (task `user.password`); 409 `not_applied` while the user is only staged |
 | GET/POST | `/api/v1/groups` | `GroupRequest` {name, gid?, description, members?} | `Vec<GroupView>` / 201 `GroupView` |
@@ -428,11 +428,11 @@ applied it), next to the system state. Session, CSRF and error rules are those o
 | GET/PUT | `/api/v1/services/smb` | `SmbSettings` | `SmbState` {settings, pending, running} |
 | POST | `/api/v1/services/smb/recycle-cleanup?share=&days=` | — | 202 `TaskStarted` (task `smb.recycle-cleanup`) |
 | GET/PUT | `/api/v1/services/nfs` | `NfsSettings` | `NfsState` {settings, pending, running} |
-| GET/PUT | `/api/v1/services/homes` | `HomesSettings` {enabled, volume, smb: `SmbHomes` {enabled, recycle}} (stages the `homes` key and `shares.smb.homes` together; the `[homes]` share goes off with the service) | `HomesState` {settings, pending, link, target?, folder, subvolume, volumes [`HomesVolume` {path, label?, fs_type, size_bytes, avail_bytes}], homes [`UserHome` {user, uid, home, location volume/system/other/missing, subvolume, moved?}]}; 400 `invalid_value` (`volume`: not mounted, system path, filesystem without POSIX ACLs, another volume while the folder holds homes) |
-| POST | `/api/v1/services/homes/move/plan` | `HomeMoveRequest` {users} (empty: every local user whose home is not in the homes folder) | `Vec<HomeMovePlan>` {user, from, to, target, subvolume, size_bytes, size_partial, avail_bytes, ssh_keys, allowed, blockers [{code, detail}]} (no side effect); codes `service_off`, `not_local`, `already_moved`, `source_missing`, `source_not_plain`, `target_exists`, `processes`, `smb_sessions`, `share_inside`, `no_space`, `no_rsync`, `move_waiting` |
+| GET/PUT | `/api/v1/services/homes` | `HomesSettings` {enabled, volume, smb: `SmbHomes` {enabled, recycle}} (stages the `homes` key and `shares.smb.homes` together; the `[homes]` share goes off with the service) | `HomesState` {settings, pending, active, link, folder, subvolume, volumes [`HomesVolume` {path, label?, fs_type, size_bytes, avail_bytes}], homes [`UserHome` {user, uid, home, location volume/system/other/missing, folder, volume?, subvolume, moved?}]}; 400 `invalid_value` (`volume`: not mounted, system path, filesystem without POSIX ACLs). `volume` is the default for new users: changing it moves no home |
+| POST | `/api/v1/services/homes/move/plan` | `HomeMoveRequest` {users, to} (`to`: a volume's mount point, `system` for `/home/<user>`, empty for the default volume; `users` empty: every local user whose home exists, is not there yet and has no move waiting) | `Vec<HomeMovePlan>` {user, from, source, to, location, target, subvolume, size_bytes, size_partial, avail_bytes, ssh_keys, allowed, blockers [{code, detail}]} (no side effect); codes `service_off` (volume destinations only), `not_local`, `already_moved` (already there), `source_missing`, `source_not_plain`, `target_exists`, `target_invalid`, `processes`, `smb_sessions`, `share_inside`, `no_space`, `no_rsync`, `move_waiting` |
 | POST | `/api/v1/services/homes/move` | `HomeMoveRequest` | 202 `TaskStarted` (task `homes.move`: the homes that can move, one after the other; the others are logged as skipped and fail the task); 409 `conflict` when none can |
 | POST | `/api/v1/services/homes/move/{user}/finish` | — | 202 `TaskStarted` (task `homes.move-finish`: the kept old folder is deleted); 404 without a move waiting |
-| POST | `/api/v1/services/homes/move/{user}/undo` | — | 202 `TaskStarted` (task `homes.move-undo`: old folder back, passwd home back, the copy kept aside as `<homes>/.<user>.undone-<ms>`); 404, 409 `conflict` while the user has processes or SMB sessions |
+| POST | `/api/v1/services/homes/move/{user}/undo` | — | 202 `TaskStarted` (task `homes.move-undo`: old folder back, its link and passwd home back, the copy kept aside next to it as `.<user>.undone-<ms>`); 404, 409 `conflict` while the user has processes or SMB sessions |
 | GET/POST | `/api/v1/shares` | `Share` | `Vec<ShareView>` {share, status: {pending?, path_ok, fs_type, subvolume, warnings, warning_items [{code, args}]}} / 201 `ShareView` |
 | GET/PUT/DELETE | `/api/v1/shares/{name}` | `Share` (name cannot change; a new path gets a new fsid). DELETE `?remove_folder=true&confirm={name}` also stages the deletion of the folder (with its snapshots and recycle bin, at the end of the apply) and of its snapshot jobs and their scheduler tasks | `ShareView` / `StagedChanges`; 400 `confirmation_required`, 409 `conflict` when the plan forbids it |
 | POST | `/api/v1/shares/plan/delete` | `ShareDeletePlanRequest` {share} | `FolderDeletePlan` {path, share?, subvolume, size_bytes, size_partial, snapshots, recycle_bin, usages [{kind, name}], allowed, blockers} (no side effect) |
@@ -444,9 +444,10 @@ applied it), next to the system state. Session, CSRF and error rules are those o
 
 Users and groups (`users` key, `UsersConfig` {users, groups, remove_homes}):
 - Real Linux accounts, uid/gid 1000–59999, primary group `users`; names of system accounts
-  (`root`, `sudo`, `staff`, `rynas-*`...) are refused. Home: `/srv/rynas/homes/<name>` while
-  the user homes service is on (created by rynas before `useradd -M`: a btrfs subvolume, mode
-  0700, `/etc/skel` only for shell users), else `/home/<name>` (`useradd -m`, mode 0700). See
+  (`root`, `sudo`, `staff`, `rynas-*`...) are refused. Home: `/srv/rynas/homes/<name>` for a home
+  on a volume (`home_volume`, the default volume while the user homes service is on; created by
+  rynas with its link before `useradd -M`: a btrfs subvolume, mode 0700, `/etc/skel` only for
+  shell users), else `/home/<name>` (`useradd -m`, mode 0700), also while the service is on. See
   "User homes" below.
   Reconcile compares the wanted accounts with `/etc/passwd`/`/etc/group` and runs `groupadd`,
   `useradd`, `usermod` (full name, shell, expiry), `gpasswd -a/-d`, `pdbedit -x`/`-c [D]`, `userdel
@@ -469,23 +470,31 @@ Users and groups (`users` key, `UsersConfig` {users, groups, remove_homes}):
   (or a home subvolume deleted with the user) cannot come back.
 
 User homes (`homes` key, `HomesConfig` {enabled, volume}; D-HOMES, `docs/research/user-homes.md`):
-- The homes folder is `<volume>/homes` on any mounted local filesystem that is not a system path
-  (btrfs, ext4, xfs, f2fs, zfs; rynas volumes listed first): a btrfs subvolume on btrfs, `root:root
-  0711`. passwd names homes through the stable path **`/srv/rynas/homes/<user>`**, a symbolic link
-  `/srv/rynas/homes → <volume>/homes` set atomically by the apply (a real directory at that path is
-  never replaced). A missing volume leaves the link dangling: logins and SMB fail instead of writing
-  on the system disk. Turning the service off changes nothing on disk (moved homes keep working);
-  the volume cannot change while the folder holds homes (moving the whole folder: phase 2).
+- Each home is either on the system disk (`/home/<user>`) or in the homes folder of a volume,
+  `<volume>/homes/<user>`, on any mounted local filesystem that is not a system path (btrfs, ext4,
+  xfs, f2fs, zfs; rynas volumes listed first); a homes folder is a btrfs subvolume on btrfs,
+  `root:root 0711`. Users can be on different volumes; `volume` of the setting is the default
+  for new users only. passwd names homes on a volume through the stable path
+  **`/srv/rynas/homes/<user>`**, a symbolic link per user inside `/srv/rynas/homes` (a real
+  folder on the system disk, `root:root 0711`). The first layout (`/srv/rynas/homes` one link to
+  `<volume>/homes`) is turned into per-user links at rynasd start and at every apply of `homes`:
+  the folder is built as `/srv/rynas/homes.rynas-new` and swapped in with
+  `renameat2(RENAME_EXCHANGE)`, so homes never stop resolving. A missing volume leaves a link
+  dangling: logins and SMB fail instead of writing on the system disk. Turning the service off
+  changes nothing on disk (homes on volumes keep working, moves to the system disk stay possible).
 - Homes in the folder: `<volume>/homes/<user>`, one btrfs subvolume per user (squota per home in
   phase 2), `<user>:users 0700`; an existing folder of that name is refused at creation. Deleting a
   user with `remove_home` runs `userdel` and then deletes the subvolume. Administrators get no
   file access to other homes by default.
-- **Home move** (never automatic): the plan lists the blockers (above); the task creates the
-  target (subvolume on btrfs), copies with `rsync -aHAXx --numeric-ids`, checks processes and SMB
+- **Home move** (never automatic), from any place to any other (volume to volume, volume to
+  system disk, system disk to volume): the plan lists the blockers (above); the task creates the
+  homes folder if needed and the target (subvolume when the destination is btrfs), copies with `rsync -aHAXx --numeric-ids`, checks processes and SMB
   sessions again, second pass with `--delete`, verifies (an itemized dry run must find nothing,
-  same counts of files, folders, links and bytes), sets 0700, switches the passwd home (through a
-  `users` revision, `Config::apply_value`, when rynas manages the user, else `usermod -d`), then
-  renames the old folder to `<home>.rynas-old` and records the move in
+  same counts of files, folders, links and bytes), sets 0700, switches the account: to a volume the user's link first,
+  then the passwd home if it changes (between two volumes it does not); to the system disk the
+  passwd home first, then the link goes. passwd and `home_volume` change through a `users`
+  revision (`Config::apply_value`) when rynas manages the user, else `usermod -d`. Then it renames
+  the old folder to `<folder>.rynas-old` and records the move (with both real folders) in
   `/var/lib/rynas/homes-moves.json`. Any failure before the switch removes the copy. The `users`
   reconcile runs `usermod -d` (never `-m`) only for an explicit change of `home` between two values
   whose new folder exists, never to fix a mismatch with the system.
@@ -498,7 +507,10 @@ User homes (`homes` key, `HomesConfig` {enabled, volume}; D-HOMES, `docs/researc
   real units): service on with `[homes]`, a new user's subvolume home and SMB home (recycle bin,
   another user refused), the plan and its `processes` blocker, the move of the uid 1000 account's
   home (tree, modes, hard link, symbolic link, ACL, xattr, content and login checked), undo, move
-  and confirm, the volume change refused, deletion with the home, service off.
+  and confirm, homes created on another volume and on the system disk, moves volume1 → volume2
+  (undo, again), volume2 → system disk → volume1, the default volume changed with homes on the
+  old one, deletion with the home and its link, service off, and the first layout migrated to
+  per-user links at start.
 
 Shares (`shares` key, `SharesConfig` {smb, nfs, shares, remove_folders}):
 - **Snapshot folder** (`show_snapshots`, off by default): a read-only bind mount of the share's
@@ -560,7 +572,7 @@ that must not exist, removed with a backup), `ApplyCtx::log` (task log lines fro
 `System::restart_unit` / `System::set_unit_enabled`.
 
 `rynasd.service`: `ProtectHome=no` (homes are created and removed below `/home`; shares may live
-there too); `ProtectSystem=yes` keeps `/srv` (the homes link) and the volumes writable.
+there too); `ProtectSystem=yes` keeps `/srv` (the folder of home links) and the volumes writable.
 Real check: `packaging/test-services.sh` (Debian 13 container with systemd, loop-mounted btrfs,
 the real units): users, groups and shares through the API, apply, passwords, then `testparm`,
 `getfacl`, `pdbedit`, `smbclient` as allowed / read-only / denied / disabled users, NFSv4.2 mount,

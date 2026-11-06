@@ -14,8 +14,9 @@
 //! hash when the Samba step fails. rynas stores no hash of its own.
 //!
 //! Homes: a user whose home is `/srv/rynas/homes/<name>` (the user homes service, see
-//! [`crate::homes`]) gets it created by rynas as a subvolume in the homes folder before
-//! `useradd -M`; with `remove_homes` that subvolume is deleted after `userdel`. Other homes
+//! [`crate::homes`]) gets it created by rynas as a subvolume in the homes folder of their
+//! `home_volume`, with its link, before `useradd -M`; with `remove_homes` that subvolume and
+//! the link are deleted after `userdel`. Other homes
 //! are created and removed by `useradd -m`/`userdel -r`. A home changes only through the
 //! home move, which copies the files first and then applies a document whose `home` differs
 //! from the previous one: reconcile runs `usermod -d` (never `-m`) when the new folder exists.
@@ -283,6 +284,21 @@ impl UsersDomain {
             if u.home.is_empty() {
                 u.home = format!("/home/{n}");
             }
+            u.home_volume = homes::trim_volume(&u.home_volume);
+            if !u.home_volume.is_empty()
+                && (homes::volume_problem(&[], &u.home_volume)
+                    .is_some_and(|e| e.starts_with("invalid"))
+                    || homes::link_user(&u.home) != Some(n.as_str()))
+            {
+                return Err(Invalid::at(
+                    "home_volume",
+                    format!(
+                        "user {n}: a home on volume {:?} must be {}",
+                        u.home_volume,
+                        homes::home_of(&n)
+                    ),
+                ));
+            }
             if !u.home.starts_with('/')
                 || u.home.contains([':', '\n', '"', '\\'])
                 || u.home.chars().any(char::is_control)
@@ -418,6 +434,8 @@ pub fn import_from(
             disabled,
             smb: sm.is_some(),
             home: u.home.clone(),
+            // only read when the user is created
+            home_volume: String::new(),
         });
     }
     c.users.sort_by(|a, b| a.name.cmp(&b.name));
@@ -539,6 +557,7 @@ impl Applier for UsersDomain {
                             Some(homes::create_home(
                                 h,
                                 &u.name,
+                                (!u.home_volume.is_empty()).then_some(u.home_volume.as_str()),
                                 u.uid,
                                 primary_gid,
                                 u.shell == ShellAccess::Shell,

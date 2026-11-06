@@ -1,20 +1,26 @@
 //! User homes: the `homes` configuration key and the home move.
 //!
-//! With the service on, the homes live in `<volume>/homes/<user>` (one btrfs subvolume per
-//! user when the volume is btrfs, a plain folder otherwise) and the passwd entries name them
-//! through a stable path, [`HOMES_LINK`] (`/srv/rynas/homes`), a symbolic link to
-//! `<volume>/homes`. The link is the only thing that changes when the folder goes to another
-//! volume; a dangling link (volume not mounted) makes logins fail instead of writing into the
-//! system disk below an empty mount point. See `docs/research/user-homes.md`.
+//! A home lives either on the system disk (`/home/<user>`, the Debian default) or in the homes
+//! folder of a volume, `<volume>/homes/<user>` (one btrfs subvolume per user when the volume
+//! is btrfs, a plain folder otherwise). Each user can have their home on a different volume.
+//! Homes on a volume are named in passwd through a stable path, `/srv/rynas/homes/<user>`, a
+//! **symbolic link per user** to the real folder inside [`HOMES_LINK`], a root-owned folder
+//! (0711) on the system disk. Moving a home to another volume replaces its link, not passwd; a
+//! dangling link (volume not mounted) makes logins fail instead of writing into the system disk
+//! below an empty mount point. See `docs/research/user-homes.md`.
 //!
-//! - [`HomesDomain`] (`homes`, order 5, before `users`): creates the homes folder (root,
-//!   0711: users can reach their own home but not list the others) and the link. Turning the
+//! - [`HomesDomain`] (`homes`, order 5, before `users`): the folder of links, the homes folder
+//!   of the default volume (root, 0711: users can reach their own home but not list the
+//!   others), and the migration of the first layout (the whole `/srv/rynas/homes` was one link
+//!   to `<volume>/homes`) into per-user links, at start and at every apply. Turning the
 //!   service off changes nothing on disk: homes already there keep working.
-//! - New users get their home created by the `users` domain ([`create_home`]), deleted users
-//!   lose it with `remove_home` ([`remove_home`]).
-//! - Existing homes never move by themselves: [`plan_move`] says what a move does and what
-//!   prevents it, [`copy_home`] copies a home (rsync with hard links, ACLs and xattrs, a
-//!   second pass and a verification), then rynasd switches the passwd home and keeps the old
+//! - New users get their home created by the `users` domain ([`create_home`]) on the volume of
+//!   their [`LocalUser::home_volume`](rynas_api_types::LocalUser), deleted users lose it with
+//!   `remove_home` ([`remove_home`]).
+//! - Existing homes never move by themselves: [`plan_move`] says what moving a home to a
+//!   destination ([`Dest`]: a volume or the system disk) does and what prevents it,
+//!   [`copy_home`] copies it (rsync with hard links, ACLs and xattrs, a second pass and a
+//!   verification), then rynasd switches the link and/or the passwd home and keeps the old
 //!   folder renamed ([`kept_path`]) until the move is confirmed or undone ([`MoveStore`]).
 //!
 //! Filesystem access goes through [`HomesHost`]: [`HostHomes`] on the real system,
@@ -26,8 +32,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rynas_api_types::{
-    HOMES_FOLDER, HOMES_KEY, HOMES_LINK, HomeLocation, HomeMoveBlocker, HomeMoveBlockerCode as B,
-    HomeMovePlan, HomeMoveRecord, HomesConfig, HomesVolume, LOCAL_ID_MAX, LOCAL_ID_MIN,
+    HOME_SYSTEM, HOMES_FOLDER, HOMES_KEY, HOMES_LINK, HomeLocation, HomeMoveBlocker,
+    HomeMoveBlockerCode as B, HomeMovePlan, HomeMoveRecord, HomesConfig, HomesVolume, LOCAL_ID_MAX,
+    LOCAL_ID_MIN, SYSTEM_HOMES,
 };
 use rynas_config::{Applier, ApplyCtx, Invalid, ManagedFile};
 use rynas_tasks::Cmd;
@@ -36,8 +43,8 @@ use serde_json::Value;
 use crate::accounts::{Accounts, SysUser};
 use crate::host::PathInfo;
 
-/// Mode of the homes folder: owner root, others may traverse (to reach their own home) but
-/// not list it.
+/// Mode of a homes folder and of the folder of links: owner root, others may traverse (to
+/// reach their own home) but not list it.
 pub const FOLDER_MODE: u32 = 0o711;
 /// Mode of a home: the owner only.
 pub const HOME_MODE: u32 = 0o700;
@@ -65,13 +72,39 @@ pub fn link_user(home: &str) -> Option<&str> {
     (!rest.is_empty() && !rest.contains('/') && rest != "." && rest != "..").then_some(rest)
 }
 
+/// The volume of `<volume>/homes/<user>`.
+pub fn volume_of_folder(folder: &str, user: &str) -> Option<String> {
+    folder
+        .strip_suffix(&format!("/{HOMES_FOLDER}/{user}"))
+        .filter(|v| !v.is_empty())
+        .map(String::from)
+}
+
 /// Where an old home is kept after a move.
 pub fn kept_path(from: &str) -> String {
     format!("{}{KEPT_SUFFIX}", from.trim_end_matches('/'))
 }
 
+/// A volume path without its trailing `/`.
+pub fn trim_volume(v: &str) -> String {
+    let v = v.trim();
+    if v.len() > 1 {
+        v.trim_end_matches('/').to_string()
+    } else {
+        v.to_string()
+    }
+}
+
 fn in_range(uid: u32) -> bool {
     (LOCAL_ID_MIN..=LOCAL_ID_MAX).contains(&uid)
+}
+
+fn parent_of(path: &str) -> &str {
+    match path.rsplit_once('/') {
+        Some(("", _)) => "/",
+        Some((p, _)) => p,
+        None => "",
+    }
 }
 
 /// A mounted filesystem.
@@ -98,6 +131,8 @@ pub trait HomesHost: Send + Sync {
     fn probe(&self, path: &str) -> PathInfo;
     /// Target of a symbolic link.
     fn read_link(&self, path: &str) -> Option<String>;
+    /// The symbolic links directly in `dir`: `(name, target)`.
+    fn links(&self, dir: &str) -> Vec<(String, String)>;
     /// Local mounted filesystems.
     fn mounts(&self) -> Vec<Mount>;
     /// Free bytes on the filesystem of `path`.
@@ -127,6 +162,10 @@ pub trait HomesHost: Send + Sync {
     fn copy_skel(&self, home: &str, uid: u32, gid: u32, log: &dyn Fn(&str)) -> Result<(), String>;
     /// Points the symbolic link `link` at `target` (atomically replaced).
     fn set_link(&self, link: &str, target: &str, log: &dyn Fn(&str)) -> Result<(), String>;
+    /// Removes the symbolic link `path` (never what it points at).
+    fn unlink(&self, path: &str, log: &dyn Fn(&str)) -> Result<(), String>;
+    /// Swaps two paths in one step (`renameat2(RENAME_EXCHANGE)`).
+    fn exchange(&self, a: &str, b: &str, log: &dyn Fn(&str)) -> Result<(), String>;
     fn rename(&self, from: &str, to: &str, log: &dyn Fn(&str)) -> Result<(), String>;
     fn set_owner_mode(
         &self,
@@ -156,7 +195,7 @@ pub trait HomesHost: Send + Sync {
 // settings
 // ---------------------------------------------------------------------------------------------
 
-/// System paths that cannot hold the homes folder.
+/// System paths that cannot hold a homes folder.
 const SYSTEM_MOUNTS: [&str; 14] = [
     "/",
     "/boot",
@@ -185,7 +224,7 @@ fn system_path(p: &str) -> bool {
         || p.starts_with("/run/")
 }
 
-/// Filesystems that can hold the homes folder, with the rynas volume labels.
+/// Filesystems that can hold a homes folder, with the rynas volume labels.
 pub fn candidates(mounts: &[Mount], rynas: &[(String, String)]) -> Vec<HomesVolume> {
     let mut v: Vec<HomesVolume> = mounts
         .iter()
@@ -206,6 +245,32 @@ pub fn candidates(mounts: &[Mount], rynas: &[(String, String)]) -> Vec<HomesVolu
     v
 }
 
+/// Why `volume` cannot hold a homes folder (`None`: it can).
+pub fn volume_problem(mounts: &[Mount], volume: &str) -> Option<String> {
+    if !volume.starts_with('/')
+        || volume.chars().any(char::is_control)
+        || volume.contains(['\n', ':', '"', '\\'])
+        || volume[1..]
+            .split('/')
+            .any(|x| x.is_empty() || x == "." || x == "..")
+    {
+        return Some(format!("invalid volume path {volume:?}"));
+    }
+    if system_path(volume) {
+        return Some(format!("{volume} is a system folder: choose a data volume"));
+    }
+    let Some(m) = mounts.iter().find(|m| m.path == volume) else {
+        return Some(format!("{volume} is not a mounted volume"));
+    };
+    if !HOME_FS.contains(&m.fs_type.as_str()) {
+        return Some(format!(
+            "{volume} is {}: homes need btrfs, ext4, xfs, f2fs or zfs",
+            m.fs_type
+        ));
+    }
+    None
+}
+
 pub fn parse(v: Option<&Value>) -> Result<HomesConfig, String> {
     match v {
         Some(v) => {
@@ -213,15 +278,6 @@ pub fn parse(v: Option<&Value>) -> Result<HomesConfig, String> {
         }
         None => Ok(HomesConfig::default()),
     }
-}
-
-/// Users whose passwd home is in the homes folder.
-pub fn users_on_link(users: &[SysUser]) -> Vec<String> {
-    users
-        .iter()
-        .filter(|u| link_user(&u.home).is_some())
-        .map(|u| u.name.clone())
-        .collect()
 }
 
 pub struct HomesDomain {
@@ -238,16 +294,8 @@ impl HomesDomain {
         &self.host
     }
 
-    /// The folder the link points at now.
-    pub fn current_folder(&self) -> Option<String> {
-        self.host.read_link(HOMES_LINK)
-    }
-
     pub fn normalize(&self, mut c: HomesConfig) -> Result<HomesConfig, Invalid> {
-        c.volume = c.volume.trim().to_string();
-        if c.volume.len() > 1 {
-            c.volume = c.volume.trim_end_matches('/').to_string();
-        }
+        c.volume = trim_volume(&c.volume);
         if c.volume.is_empty() {
             if c.enabled {
                 return Err(Invalid::at(
@@ -257,97 +305,106 @@ impl HomesDomain {
             }
             return Ok(c);
         }
-        if !c.volume.starts_with('/')
-            || c.volume.chars().any(char::is_control)
-            || c.volume.contains(['\n', ':', '"', '\\'])
-            || c.volume[1..]
-                .split('/')
-                .any(|x| x.is_empty() || x == "." || x == "..")
-        {
-            return Err(Invalid::at(
-                "volume",
-                format!("invalid volume path {:?}", c.volume),
-            ));
-        }
         if !c.enabled {
-            return Ok(c);
+            // off: any path that is one (it is only remembered)
+            return match volume_problem(&[], &c.volume) {
+                Some(e) if e.starts_with("invalid") => Err(Invalid::at("volume", e)),
+                _ => Ok(c),
+            };
         }
-        if system_path(&c.volume) {
-            return Err(Invalid::at(
-                "volume",
-                format!("{} is a system folder: choose a data volume", c.volume),
-            ));
-        }
-        let mounts = self.host.mounts();
-        let Some(m) = mounts.iter().find(|m| m.path == c.volume) else {
-            return Err(Invalid::at(
-                "volume",
-                format!("{} is not a mounted volume", c.volume),
-            ));
-        };
-        if !HOME_FS.contains(&m.fs_type.as_str()) {
-            return Err(Invalid::at(
-                "volume",
-                format!(
-                    "{} is {}: homes need btrfs, ext4, xfs, f2fs or zfs",
-                    c.volume, m.fs_type
-                ),
-            ));
-        }
-        // another folder while homes are in the current one: their files would stay behind
-        let folder = folder_of(&c.volume);
-        if let Some(cur) = self.current_folder()
-            && cur != folder
-        {
-            let users = self.accounts.users()?;
-            let on = users_on_link(&users);
-            if !on.is_empty() {
-                return Err(Invalid::at(
-                    "volume",
-                    format!(
-                        "the homes of {} are in {cur}: the homes folder cannot change volume while it holds homes",
-                        on.join(", ")
-                    ),
-                ));
-            }
+        // homes already on another volume stay there: changing the default moves nothing
+        if let Some(e) = volume_problem(&self.host.mounts(), &c.volume) {
+            return Err(Invalid::at("volume", e));
         }
         Ok(c)
     }
 
-    fn ensure(&self, c: &HomesConfig, log: &dyn Fn(&str)) -> Result<(), String> {
-        let folder = folder_of(&c.volume);
-        let vol = self.host.probe(&c.volume);
-        if !vol.exists || !vol.is_dir {
-            return Err(format!("{} is not mounted", c.volume));
+    /// The first layout (`/srv/rynas/homes` one link to `<volume>/homes`) becomes a folder of
+    /// per-user links: built aside, then swapped in one step, so passwd homes never stop
+    /// resolving. `true` when something changed. Idempotent.
+    pub fn migrate(&self, log: &dyn Fn(&str)) -> Result<bool, String> {
+        let h = self.host.as_ref();
+        let Some(target) = h.read_link(HOMES_LINK) else {
+            return Ok(false);
+        };
+        let target = target.trim_end_matches('/').to_string();
+        let users = self.accounts.users()?;
+        let tmp = format!("{HOMES_LINK}.rynas-new");
+        // a migration stopped half way: its folder holds only links
+        if h.read_link(&tmp).is_some() {
+            h.unlink(&tmp, log)?;
+        } else if h.probe(&tmp).exists {
+            h.remove(&tmp, false, log)?;
         }
-        let f = self.host.probe(&folder);
-        if !f.exists {
-            self.host
-                .make_dir(&folder, vol.fs_type == "btrfs", 0, 0, FOLDER_MODE, log)?;
-        } else if !f.is_dir || f.symlink {
+        log(&format!(
+            "{HOMES_LINK} points at {target}: one link per home instead"
+        ));
+        h.make_dir(&tmp, false, 0, 0, FOLDER_MODE, log)?;
+        for u in users
+            .iter()
+            .filter(|u| link_user(&u.home) == Some(u.name.as_str()))
+        {
+            h.set_link(
+                &format!("{tmp}/{}", u.name),
+                &format!("{target}/{}", u.name),
+                log,
+            )?;
+        }
+        h.exchange(&tmp, HOMES_LINK, log)?;
+        h.unlink(&tmp, log)?;
+        Ok(true)
+    }
+
+    fn ensure(&self, c: &HomesConfig, log: &dyn Fn(&str)) -> Result<(), String> {
+        self.migrate(log)?;
+        ensure_links_dir(self.host.as_ref(), log)?;
+        ensure_folder(self.host.as_ref(), &c.volume, log).map(|_| ())
+    }
+}
+
+/// The folder of links, root 0711 (created when missing).
+pub fn ensure_links_dir(host: &dyn HomesHost, log: &dyn Fn(&str)) -> Result<(), String> {
+    if host.read_link(HOMES_LINK).is_some() {
+        return Err(format!(
+            "{HOMES_LINK} is still a symbolic link (first layout): apply the user homes setting"
+        ));
+    }
+    let p = host.probe(HOMES_LINK);
+    if p.exists {
+        if !p.is_dir {
+            return Err(format!("{HOMES_LINK} exists and is not a folder"));
+        }
+        return Ok(());
+    }
+    let parent = parent_of(HOMES_LINK);
+    if !host.probe(parent).exists {
+        host.make_dir(parent, false, 0, 0, 0o755, log)?;
+    }
+    host.make_dir(HOMES_LINK, false, 0, 0, FOLDER_MODE, log)
+}
+
+/// `<volume>/homes` (root 0711, a subvolume on btrfs), created when missing; the volume must be
+/// mounted (an empty mount point is on the system disk).
+pub fn ensure_folder(
+    host: &dyn HomesHost,
+    volume: &str,
+    log: &dyn Fn(&str),
+) -> Result<String, String> {
+    let folder = folder_of(volume);
+    let vol = host.probe(volume);
+    if !vol.exists || !vol.is_dir || !host.mounts().iter().any(|m| m.path == volume) {
+        return Err(format!("{volume} is not mounted"));
+    }
+    let f = host.probe(&folder);
+    if !f.exists {
+        if host.read_link(&folder).is_some() {
             return Err(format!("{folder} exists and is not a folder"));
         }
-        match self.host.read_link(HOMES_LINK) {
-            Some(t) if t == folder => {}
-            Some(t) => {
-                log(&format!("{HOMES_LINK}: {t} → {folder}"));
-                self.host.set_link(HOMES_LINK, &folder, log)?;
-            }
-            None => {
-                if self.host.probe(HOMES_LINK).exists {
-                    return Err(format!(
-                        "{HOMES_LINK} exists and is not a symbolic link: rynas does not replace it"
-                    ));
-                }
-                let parent = HOMES_LINK.rsplit_once('/').map(|p| p.0).unwrap_or("/srv");
-                if !self.host.probe(parent).exists {
-                    self.host.make_dir(parent, false, 0, 0, 0o755, log)?;
-                }
-                self.host.set_link(HOMES_LINK, &folder, log)?;
-            }
-        }
-        Ok(())
+        host.make_dir(&folder, vol.fs_type == "btrfs", 0, 0, FOLDER_MODE, log)?;
+    } else if !f.is_dir || f.symlink {
+        return Err(format!("{folder} exists and is not a folder"));
     }
+    Ok(folder)
 }
 
 impl Applier for HomesDomain {
@@ -376,6 +433,7 @@ impl Applier for HomesDomain {
     ) -> Result<(), String> {
         let c = parse(to)?;
         if !c.enabled {
+            self.migrate(ctx.log)?;
             (ctx.log)("user homes off: new users get /home/<user>, existing homes stay");
             return Ok(());
         }
@@ -387,19 +445,23 @@ impl Applier for HomesDomain {
         if !c.enabled {
             return Ok(());
         }
-        let folder = folder_of(&c.volume);
-        if self.host.read_link(HOMES_LINK).as_deref() != Some(folder.as_str()) {
-            return Err(format!("{HOMES_LINK} does not point at {folder}"));
+        if self.host.read_link(HOMES_LINK).is_some() || !self.host.probe(HOMES_LINK).is_dir {
+            return Err(format!("{HOMES_LINK} is not a folder"));
         }
-        if !self.host.probe(HOMES_LINK).is_dir {
+        let folder = folder_of(&c.volume);
+        if !self.host.probe(&folder).is_dir {
             return Err(format!("{folder} is not reachable"));
         }
         Ok(())
     }
 
     fn import(&self, _ctx: &ApplyCtx) -> Result<Option<Value>, String> {
+        // the first layout names its volume; per-user links name none: off
         let c = match self.host.read_link(HOMES_LINK) {
-            Some(t) => match t.strip_suffix(&format!("/{HOMES_FOLDER}")) {
+            Some(t) => match t
+                .trim_end_matches('/')
+                .strip_suffix(&format!("/{HOMES_FOLDER}"))
+            {
                 Some(v) if !v.is_empty() => HomesConfig {
                     enabled: true,
                     volume: v.to_string(),
@@ -416,27 +478,82 @@ impl Applier for HomesDomain {
 // homes of users
 // ---------------------------------------------------------------------------------------------
 
-/// The real folder of `/srv/rynas/homes/<user>`.
+/// The real folder behind `/srv/rynas/homes/<user>`: its link, or (first layout) inside the
+/// folder the whole `/srv/rynas/homes` points at.
 pub fn real_home(host: &dyn HomesHost, user: &str) -> Result<String, String> {
-    let folder = host.read_link(HOMES_LINK).ok_or_else(|| {
-        format!("user homes are not set up: {HOMES_LINK} does not exist (turn the service on)")
-    })?;
-    Ok(format!("{folder}/{user}"))
+    if let Some(t) = host.read_link(&home_of(user)) {
+        return Ok(t);
+    }
+    if let Some(f) = host.read_link(HOMES_LINK) {
+        return Ok(format!("{}/{user}", f.trim_end_matches('/')));
+    }
+    Err(format!(
+        "{} does not exist: the home of {user} is not set up",
+        home_of(user)
+    ))
 }
 
-/// Creates the home of a new user in the homes folder: a subvolume on btrfs, owner only,
-/// `/etc/skel` copied for users with a shell (the others never read dotfiles).
+/// The real folder of a user's passwd home.
+pub fn folder_of_home(host: &dyn HomesHost, u: &SysUser) -> String {
+    if link_user(&u.home) == Some(u.name.as_str()) {
+        real_home(host, &u.name).unwrap_or_else(|_| u.home.clone())
+    } else {
+        u.home.clone()
+    }
+}
+
+/// Points `/srv/rynas/homes/<user>` at `folder`.
+pub fn point_link(
+    host: &dyn HomesHost,
+    user: &str,
+    folder: &str,
+    log: &dyn Fn(&str),
+) -> Result<(), String> {
+    ensure_links_dir(host, log)?;
+    host.set_link(&home_of(user), folder, log)
+}
+
+/// Creates the home of a new user in the homes folder of `volume` (`None`: the folder of the
+/// first layout's link) and its link: a subvolume on btrfs, owner only, `/etc/skel` copied for
+/// users with a shell (the others never read dotfiles).
 pub fn create_home(
     host: &dyn HomesHost,
     user: &str,
+    volume: Option<&str>,
     uid: u32,
     gid: u32,
     skel: bool,
     log: &dyn Fn(&str),
 ) -> Result<String, String> {
-    let real = real_home(host, user)?;
-    let folder = real.rsplit_once('/').map(|p| p.0).unwrap_or("");
-    let f = host.probe(folder);
+    let link = home_of(user);
+    let (folder, linked) = match volume {
+        Some(v) => {
+            ensure_links_dir(host, log)?;
+            (ensure_folder(host, v, log)?, true)
+        }
+        None => match host.read_link(HOMES_LINK) {
+            Some(f) => (f.trim_end_matches('/').to_string(), false),
+            None => {
+                return Err(format!("user {user}: the volume of the home is not known"));
+            }
+        },
+    };
+    let real = format!("{folder}/{user}");
+    if linked {
+        match host.read_link(&link) {
+            Some(t) if t != real => {
+                return Err(format!(
+                    "{link} exists already and points at {t} (the home of a deleted user?): remove it first"
+                ));
+            }
+            Some(_) => {}
+            None if host.probe(&link).exists => {
+                return Err(format!("{link} exists and is not a symbolic link"));
+            }
+            None => {}
+        }
+    }
+    let f = host.probe(&folder);
     if !f.is_dir {
         return Err(format!("the homes folder {folder} is not reachable"));
     }
@@ -448,21 +565,29 @@ pub fn create_home(
             if skel && let Err(e) = host.copy_skel(&real, uid, gid, log) {
                 log(&format!("{real}: skeleton files not copied: {e}"));
             }
+            if linked {
+                host.set_link(&link, &real, log)?;
+            }
             return Ok(real);
         }
         return Err(format!(
             "{real} exists already (the home of a deleted user?): remove or rename it first"
         ));
     }
-    host.make_dir(&real, f.fs_type == "btrfs", uid, gid, HOME_MODE, log)?;
+    let subvolume = f.fs_type == "btrfs";
+    host.make_dir(&real, subvolume, uid, gid, HOME_MODE, log)?;
     if skel && let Err(e) = host.copy_skel(&real, uid, gid, log) {
         log(&format!("{real}: skeleton files not copied: {e}"));
+    }
+    if linked && let Err(e) = host.set_link(&link, &real, log) {
+        let _ = host.remove(&real, subvolume, log);
+        return Err(e);
     }
     Ok(real)
 }
 
-/// Deletes the home of a deleted user when it is in the homes folder (its subvolume);
-/// `false` when `home` is not there (userdel -r handles it).
+/// Deletes the home of a deleted user when it is in a homes folder (its subvolume) and its
+/// link; `false` when `home` is not there (userdel -r handles it).
 pub fn remove_home(host: &dyn HomesHost, home: &str, log: &dyn Fn(&str)) -> Result<bool, String> {
     let Some(user) = link_user(home) else {
         return Ok(false);
@@ -471,40 +596,132 @@ pub fn remove_home(host: &dyn HomesHost, home: &str, log: &dyn Fn(&str)) -> Resu
     let i = host.probe(&real);
     if !i.exists {
         log(&format!("{real} does not exist any more"));
-        return Ok(true);
-    }
-    if i.symlink {
+    } else if i.symlink {
         return Err(format!("{real} is a symbolic link: not deleted"));
+    } else {
+        host.remove(&real, i.subvolume, log)?;
+        log(&format!("{real} deleted"));
     }
-    host.remove(&real, i.subvolume, log)?;
-    log(&format!("{real} deleted"));
+    if host.read_link(&home_of(user)).is_some() {
+        host.unlink(&home_of(user), log)?;
+    }
     Ok(true)
 }
 
-/// Where a passwd home is.
-pub fn location(host: &dyn HomesHost, home: &str) -> (HomeLocation, bool) {
-    let i = host.probe(home);
-    if !i.exists || !i.is_dir {
-        return (HomeLocation::Missing, false);
-    }
-    let loc = if link_user(home).is_some() {
+/// Where a user's home is.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HomeInfo {
+    pub location: HomeLocation,
+    /// The real folder.
+    pub folder: String,
+    /// The volume of a home in a homes folder.
+    pub volume: String,
+    pub subvolume: bool,
+}
+
+pub fn home_info(host: &dyn HomesHost, u: &SysUser) -> HomeInfo {
+    let linked = link_user(&u.home) == Some(u.name.as_str());
+    let folder = folder_of_home(host, u);
+    let volume = if linked {
+        volume_of_folder(&folder, &u.name).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let i = host.probe(&folder);
+    let location = if !i.exists || !i.is_dir {
+        HomeLocation::Missing
+    } else if linked {
         HomeLocation::Volume
-    } else if home.starts_with("/home/") {
+    } else if u.home.starts_with(&format!("{SYSTEM_HOMES}/")) {
         HomeLocation::System
     } else {
         HomeLocation::Other
     };
-    (loc, i.subvolume)
+    HomeInfo {
+        location,
+        subvolume: i.exists && i.subvolume,
+        folder,
+        volume,
+    }
+}
+
+/// The folders holding homes: the homes folder of every volume a link points into (and the
+/// first layout's).
+pub fn used_folders(host: &dyn HomesHost) -> Vec<String> {
+    let mut v: Vec<String> = host
+        .links(HOMES_LINK)
+        .into_iter()
+        .map(|(_, t)| parent_of(t.trim_end_matches('/')).to_string())
+        .filter(|p| p.ends_with(&format!("/{HOMES_FOLDER}")))
+        .collect();
+    v.extend(host.read_link(HOMES_LINK));
+    v.sort();
+    v.dedup();
+    v
 }
 
 // ---------------------------------------------------------------------------------------------
 // moves
 // ---------------------------------------------------------------------------------------------
 
+/// Where a home goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Dest {
+    /// The homes folder of this volume (mount point).
+    Volume(String),
+    /// `/home/<user>`.
+    System,
+}
+
+impl Dest {
+    /// The `to` of a request: a mount point, `system`, or empty (the default volume).
+    pub fn parse(to: &str, default_volume: &str) -> Dest {
+        let to = to.trim();
+        if to == HOME_SYSTEM {
+            return Dest::System;
+        }
+        Dest::Volume(trim_volume(if to.is_empty() { default_volume } else { to }))
+    }
+
+    /// The destination as the API names it.
+    pub fn name(&self) -> String {
+        match self {
+            Dest::Volume(v) => v.clone(),
+            Dest::System => HOME_SYSTEM.into(),
+        }
+    }
+
+    /// The passwd home of `user` there.
+    pub fn passwd_home(&self, user: &str) -> String {
+        match self {
+            Dest::Volume(_) => home_of(user),
+            Dest::System => format!("{SYSTEM_HOMES}/{user}"),
+        }
+    }
+
+    /// The real folder of `user`'s home there.
+    pub fn folder(&self, user: &str) -> String {
+        match self {
+            Dest::Volume(v) => format!("{}/{user}", folder_of(v)),
+            Dest::System => format!("{SYSTEM_HOMES}/{user}"),
+        }
+    }
+
+    /// `home_volume` of a user whose home is there.
+    pub fn home_volume(&self) -> String {
+        match self {
+            Dest::Volume(v) => v.clone(),
+            Dest::System => String::new(),
+        }
+    }
+}
+
 /// What [`plan_move`] needs to know about the rest of the configuration.
 pub struct MoveContext<'a> {
-    /// The service is on in the applied configuration and its link works.
+    /// The service is on in the applied configuration (needed to move to a volume).
     pub service_on: bool,
+    /// Mount points that can hold a homes folder.
+    pub volumes: &'a [String],
     /// Paths of the shares (applied and staged).
     pub shares: &'a [(String, String)],
     /// A move of this user waits for confirmation.
@@ -524,13 +741,22 @@ fn within(a: &str, b: &str) -> bool {
     a == b || a.starts_with(&format!("{b}/"))
 }
 
-/// What moving `user`'s home to the homes folder does and what prevents it now.
-pub fn plan_move(host: &dyn HomesHost, user: &SysUser, cx: &MoveContext) -> HomeMovePlan {
-    let to = home_of(&user.name);
+/// What moving `user`'s home to `dest` does and what prevents it now.
+pub fn plan_move(
+    host: &dyn HomesHost,
+    user: &SysUser,
+    dest: &Dest,
+    cx: &MoveContext,
+) -> HomeMovePlan {
+    let source = folder_of_home(host, user);
+    let linked = link_user(&user.home) == Some(user.name.as_str());
     let mut p = HomeMovePlan {
         user: user.name.clone(),
         from: user.home.clone(),
-        to: to.clone(),
+        source: source.clone(),
+        to: dest.passwd_home(&user.name),
+        location: dest.name(),
+        target: dest.folder(&user.name),
         ..Default::default()
     };
     let mut b = Vec::new();
@@ -540,52 +766,55 @@ pub fn plan_move(host: &dyn HomesHost, user: &SysUser, cx: &MoveContext) -> Home
     if cx.waiting {
         b.push(blocker(B::MoveWaiting, ""));
     }
-    if link_user(&user.home).is_some() {
-        b.push(blocker(B::AlreadyMoved, ""));
-    }
-    let folder = host.read_link(HOMES_LINK);
-    if !cx.service_on || folder.is_none() {
-        b.push(blocker(B::ServiceOff, ""));
-    }
-    if let Some(f) = &folder {
-        p.target = format!("{f}/{}", user.name);
-        let fi = host.probe(f);
-        p.subvolume = fi.fs_type == "btrfs";
-        p.avail_bytes = host.avail(f).unwrap_or(0);
-        if host.probe(&p.target).exists {
-            b.push(blocker(B::TargetExists, p.target.clone()));
+    let base = match dest {
+        Dest::Volume(v) => {
+            if !cx.service_on {
+                b.push(blocker(B::ServiceOff, ""));
+            }
+            if !cx.volumes.iter().any(|x| x == v) {
+                b.push(blocker(B::TargetInvalid, v.clone()));
+            }
+            v.clone()
         }
+        Dest::System if host.probe(SYSTEM_HOMES).is_dir => SYSTEM_HOMES.to_string(),
+        Dest::System => "/".to_string(),
+    };
+    let bi = host.probe(&base);
+    p.subvolume = bi.exists && bi.fs_type == "btrfs";
+    p.avail_bytes = host.avail(&base).unwrap_or(0);
+    let here = source.trim_end_matches('/') == p.target;
+    if here {
+        b.push(blocker(B::AlreadyMoved, ""));
+    } else if host.probe(&p.target).exists || host.read_link(&p.target).is_some() {
+        b.push(blocker(B::TargetExists, p.target.clone()));
     }
-    let src = host.probe(&user.home);
+    let src = host.probe(&source);
     if !src.exists || !src.is_dir {
         b.push(blocker(B::SourceMissing, user.home.clone()));
-    } else if link_user(&user.home).is_none() {
-        let mounts = host.mounts();
-        if src.symlink || user.home == "/" {
+    } else if !here {
+        if src.symlink || host.read_link(&source).is_some() || source == "/" {
             b.push(blocker(B::SourceNotPlain, user.home.clone()));
-        } else if let Some(m) = mounts.iter().find(|m| within(&m.path, &user.home)) {
+        } else if let Some(m) = host.mounts().iter().find(|m| within(&m.path, &source)) {
             b.push(blocker(B::SourceNotPlain, m.path.clone()));
         }
+        // a share inside the home; a share holding the home too, unless the home is in a
+        // homes folder (a share of the whole volume)
         if let Some((name, _)) = cx
             .shares
             .iter()
-            .find(|(_, path)| within(path, &user.home) || within(&user.home, path))
+            .find(|(_, path)| within(path, &source) || (!linked && within(&source, path)))
         {
             b.push(blocker(B::ShareInside, name.clone()));
         }
-        if let Some((bytes, partial)) = host.tree_size(&user.home, PLAN_SIZE_BUDGET) {
+        if let Some((bytes, partial)) = host.tree_size(&source, PLAN_SIZE_BUDGET) {
             p.size_bytes = bytes;
             p.size_partial = partial;
         }
-        p.ssh_keys = host
-            .probe(&format!("{}/.ssh/authorized_keys", user.home))
-            .exists;
-        if folder.is_some() {
-            // 10 % and 64 MiB of headroom (metadata, the volume's own needs)
-            let need = p.size_bytes + p.size_bytes / 10 + (64 << 20);
-            if p.avail_bytes < need {
-                b.push(blocker(B::NoSpace, need.to_string()));
-            }
+        p.ssh_keys = host.probe(&format!("{source}/.ssh/authorized_keys")).exists;
+        // 10 % and 64 MiB of headroom (metadata, the volume's own needs)
+        let need = p.size_bytes + p.size_bytes / 10 + (64 << 20);
+        if bi.exists && p.avail_bytes < need {
+            b.push(blocker(B::NoSpace, need.to_string()));
         }
     }
     b.extend(live_blockers(host, user));
@@ -624,10 +853,11 @@ pub fn blockers_text(b: &[HomeMoveBlocker]) -> String {
             let what = match x.code {
                 B::ServiceOff => "the user homes service is off",
                 B::NotLocal => "not a local user",
-                B::AlreadyMoved => "already in the homes folder",
+                B::AlreadyMoved => "already there",
                 B::SourceMissing => "the home does not exist",
                 B::SourceNotPlain => "the home is a link or has mounts",
                 B::TargetExists => "the target exists",
+                B::TargetInvalid => "not a volume that can hold homes",
                 B::Processes => "running processes",
                 B::SmbSessions => "SMB sessions",
                 B::ShareInside => "a share uses the home",
@@ -646,10 +876,25 @@ pub fn blockers_text(b: &[HomeMoveBlocker]) -> String {
         .join(", ")
 }
 
-/// Copies a home to its place in the homes folder: target created (subvolume on btrfs),
-/// rsync pass, live check, second pass with deletions, verification (a dry run must find
-/// nothing left and the counts must match), owner-only mode. On failure the copy is removed.
-/// The passwd home is not touched.
+/// The parent of the target: the folder of links and the volume's homes folder, or `/home`.
+fn prepare_target(
+    host: &dyn HomesHost,
+    plan: &HomeMovePlan,
+    log: &dyn Fn(&str),
+) -> Result<(), String> {
+    if link_user(&plan.to).is_some() {
+        ensure_links_dir(host, log)?;
+        ensure_folder(host, &plan.location, log)?;
+    } else if !host.probe(SYSTEM_HOMES).exists {
+        host.make_dir(SYSTEM_HOMES, false, 0, 0, 0o755, log)?;
+    }
+    Ok(())
+}
+
+/// Copies a home to its destination: target created (subvolume on btrfs), rsync pass, live
+/// check, second pass with deletions, verification (a dry run must find nothing left and the
+/// counts must match), owner-only mode. On failure the copy is removed. Neither the link nor
+/// the passwd home is touched.
 pub fn copy_home(
     host: &dyn HomesHost,
     plan: &HomeMovePlan,
@@ -665,6 +910,7 @@ pub fn copy_home(
             blockers_text(&plan.blockers)
         ));
     }
+    prepare_target(host, plan, log)?;
     host.make_dir(
         &plan.target,
         plan.subvolume,
@@ -676,9 +922,9 @@ pub fn copy_home(
     let run = || -> Result<(), String> {
         log(&format!(
             "{}: copying {} to {}",
-            plan.user, plan.from, plan.target
+            plan.user, plan.source, plan.target
         ));
-        host.sync(&plan.from, &plan.target, false, log, cancelled)?;
+        host.sync(&plan.source, &plan.target, false, log, cancelled)?;
         progress(70);
         let live = live_blockers(host, user);
         if !live.is_empty() {
@@ -689,9 +935,9 @@ pub fn copy_home(
             ));
         }
         log(&format!("{}: second pass", plan.user));
-        host.sync(&plan.from, &plan.target, true, log, cancelled)?;
+        host.sync(&plan.source, &plan.target, true, log, cancelled)?;
         progress(85);
-        let left = host.differences(&plan.from, &plan.target)?;
+        let left = host.differences(&plan.source, &plan.target)?;
         if !left.is_empty() {
             return Err(format!(
                 "{}: the copy differs from the home ({} entries, first: {})",
@@ -700,7 +946,10 @@ pub fn copy_home(
                 left[0]
             ));
         }
-        let (a, b) = (host.tree_counts(&plan.from), host.tree_counts(&plan.target));
+        let (a, b) = (
+            host.tree_counts(&plan.source),
+            host.tree_counts(&plan.target),
+        );
         if a != b {
             return Err(format!(
                 "{}: the copy has other counts than the home: {a:?} / {b:?}",
@@ -762,16 +1011,34 @@ pub fn finish_move(
     Ok(())
 }
 
-/// Puts the old home back in place (the caller then switches the passwd home back) and moves
-/// the copy aside as `<homes>/.<user>.undone-<ms>` (kept: it may hold newer files).
+/// The real folders before and after a move (the first records named only passwd homes, and
+/// moved only from a plain folder to the homes folder).
+pub fn record_folders(host: &dyn HomesHost, r: &HomeMoveRecord) -> (String, String) {
+    let from = if r.from_folder.is_empty() {
+        r.from.clone()
+    } else {
+        r.from_folder.clone()
+    };
+    let to = if !r.to_folder.is_empty() {
+        r.to_folder.clone()
+    } else if link_user(&r.to).is_some() {
+        real_home(host, &r.user).unwrap_or_else(|_| r.to.clone())
+    } else {
+        r.to.clone()
+    };
+    (from, to)
+}
+
+/// Puts the old folder back in place, and its link for a home on a volume; the caller then
+/// switches the passwd home back if it changed and moves the copy aside ([`set_aside`]).
 pub fn undo_move(
     host: &dyn HomesHost,
     r: &HomeMoveRecord,
-    now_ms: u64,
+    from_folder: &str,
     log: &dyn Fn(&str),
-) -> Result<Option<String>, String> {
-    if host.probe(&r.from).exists {
-        return Err(format!("{} exists again: nothing undone", r.from));
+) -> Result<(), String> {
+    if host.probe(from_folder).exists {
+        return Err(format!("{from_folder} exists again: nothing undone"));
     }
     if !host.probe(&r.kept).exists {
         return Err(format!(
@@ -779,21 +1046,28 @@ pub fn undo_move(
             r.kept
         ));
     }
-    host.rename(&r.kept, &r.from, log)?;
-    let aside = match host.read_link(HOMES_LINK) {
-        Some(folder) => {
-            let real = format!("{folder}/{}", r.user);
-            if host.probe(&real).exists {
-                let aside = format!("{folder}/.{}.undone-{now_ms}", r.user);
-                host.rename(&real, &aside, log)?;
-                Some(aside)
-            } else {
-                None
-            }
-        }
-        None => None,
-    };
-    Ok(aside)
+    host.rename(&r.kept, from_folder, log)?;
+    if link_user(&r.from).is_some() {
+        point_link(host, &r.user, from_folder, log)?;
+    }
+    Ok(())
+}
+
+/// Moves the copy of an undone move aside, next to it, as `.<user>.undone-<ms>` (kept: it may
+/// hold newer files).
+pub fn set_aside(
+    host: &dyn HomesHost,
+    user: &str,
+    folder: &str,
+    now_ms: u64,
+    log: &dyn Fn(&str),
+) -> Result<Option<String>, String> {
+    if !host.probe(folder).exists || host.read_link(folder).is_some() {
+        return Ok(None);
+    }
+    let aside = format!("{}/.{user}.undone-{now_ms}", parent_of(folder));
+    host.rename(folder, &aside, log)?;
+    Ok(Some(aside))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -968,6 +1242,27 @@ impl HomesHost for HostHomes {
             .and_then(|p| p.into_os_string().into_string().ok())
     }
 
+    fn links(&self, dir: &str) -> Vec<(String, String)> {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut v: Vec<(String, String)> = rd
+            .flatten()
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_symlink()))
+            .filter_map(|e| {
+                let name = e.file_name().into_string().ok()?;
+                let target = std::fs::read_link(e.path())
+                    .ok()?
+                    .into_os_string()
+                    .into_string()
+                    .ok()?;
+                Some((name, target))
+            })
+            .collect();
+        v.sort();
+        v
+    }
+
     // the statvfs field types depend on the architecture
     #[allow(clippy::unnecessary_cast)]
     fn mounts(&self) -> Vec<Mount> {
@@ -1128,6 +1423,22 @@ impl HomesHost for HostHomes {
             let _ = std::fs::remove_file(&tmp);
             format!("{link}: {e}")
         })
+    }
+
+    fn unlink(&self, path: &str, log: &dyn Fn(&str)) -> Result<(), String> {
+        let m = std::fs::symlink_metadata(path).map_err(|e| format!("{path}: {e}"))?;
+        if !m.file_type().is_symlink() {
+            return Err(format!("{path} is not a symbolic link: not removed"));
+        }
+        log(&format!("remove link {path}"));
+        std::fs::remove_file(path).map_err(|e| format!("{path}: {e}"))
+    }
+
+    fn exchange(&self, a: &str, b: &str, log: &dyn Fn(&str)) -> Result<(), String> {
+        use nix::fcntl::{AT_FDCWD, RenameFlags, renameat2};
+        log(&format!("exchange {a} ⇄ {b}"));
+        renameat2(AT_FDCWD, a, AT_FDCWD, b, RenameFlags::RENAME_EXCHANGE)
+            .map_err(|e| format!("{a} ⇄ {b}: {e}"))
     }
 
     fn rename(&self, from: &str, to: &str, log: &dyn Fn(&str)) -> Result<(), String> {
@@ -1434,6 +1745,31 @@ impl MemoryHomes {
     }
 }
 
+/// Removes `root` and everything below it.
+fn take_tree(entries: &mut BTreeMap<String, MemEntry>, root: &str) -> Vec<(String, MemEntry)> {
+    let prefix = format!("{root}/");
+    let keys: Vec<String> = entries
+        .keys()
+        .filter(|k| *k == root || k.starts_with(&prefix))
+        .cloned()
+        .collect();
+    keys.into_iter()
+        .filter_map(|k| entries.remove(&k).map(|e| (k, e)))
+        .collect()
+}
+
+/// Puts a tree taken from `from` back below `to`.
+fn put_tree(
+    entries: &mut BTreeMap<String, MemEntry>,
+    from: &str,
+    to: &str,
+    tree: Vec<(String, MemEntry)>,
+) {
+    for (k, e) in tree {
+        entries.insert(format!("{to}{}", &k[from.len()..]), e);
+    }
+}
+
 impl HomesHost for MemoryHomes {
     fn probe(&self, path: &str) -> PathInfo {
         let symlink = self
@@ -1470,6 +1806,26 @@ impl HomesHost for MemoryHomes {
             return HostHomes.read_link(path);
         }
         None
+    }
+
+    fn links(&self, dir: &str) -> Vec<(String, String)> {
+        let s = self.state();
+        let v: Vec<(String, String)> = s
+            .entries
+            .iter()
+            .filter_map(|(p, e)| {
+                let name = p.strip_prefix(dir)?.strip_prefix('/')?;
+                if name.contains('/') {
+                    return None;
+                }
+                Some((name.to_string(), e.link.clone()?))
+            })
+            .collect();
+        if v.is_empty() && self.probe_host && !s.entries.contains_key(dir) {
+            drop(s);
+            return HostHomes.links(dir);
+        }
+        v
     }
 
     fn mounts(&self) -> Vec<Mount> {
@@ -1599,11 +1955,40 @@ impl HomesHost for MemoryHomes {
         self.write("rename", line)?;
         let (rf, rt) = (self.resolve(from), self.resolve(to));
         let mut s = self.state();
-        let e = s
-            .entries
-            .remove(&rf)
-            .ok_or_else(|| format!("{from}: no such folder"))?;
-        s.entries.insert(rt, e);
+        if !s.entries.contains_key(&rf) {
+            return Err(format!("{from}: no such folder"));
+        }
+        let moved = take_tree(&mut s.entries, &rf);
+        put_tree(&mut s.entries, &rf, &rt, moved);
+        Ok(())
+    }
+
+    fn unlink(&self, path: &str, log: &dyn Fn(&str)) -> Result<(), String> {
+        let line = format!("unlink {path}");
+        log(&line);
+        self.write("unlink", line)?;
+        let mut s = self.state();
+        match s.entries.get(path) {
+            Some(e) if e.link.is_some() => {
+                s.entries.remove(path);
+                Ok(())
+            }
+            _ => Err(format!("{path} is not a symbolic link: not removed")),
+        }
+    }
+
+    fn exchange(&self, a: &str, b: &str, log: &dyn Fn(&str)) -> Result<(), String> {
+        let line = format!("exchange {a} <-> {b}");
+        log(&line);
+        self.write("exchange", line)?;
+        let mut s = self.state();
+        if !s.entries.contains_key(a) || !s.entries.contains_key(b) {
+            return Err(format!("{a} <-> {b}: both must exist"));
+        }
+        let ta = take_tree(&mut s.entries, a);
+        let tb = take_tree(&mut s.entries, b);
+        put_tree(&mut s.entries, a, b, ta);
+        put_tree(&mut s.entries, b, a, tb);
         Ok(())
     }
 
@@ -1635,7 +2020,7 @@ impl HomesHost for MemoryHomes {
         log(&line);
         self.write("remove", line)?;
         let real = self.resolve(path);
-        self.state().entries.remove(&real);
+        take_tree(&mut self.state().entries, &real);
         Ok(())
     }
 
@@ -1686,14 +2071,23 @@ mod tests {
         }
     }
 
-    fn setup() -> (Arc<MemoryHomes>, HomesDomain) {
+    fn on(v: &str) -> HomesConfig {
+        HomesConfig {
+            enabled: true,
+            volume: v.into(),
+        }
+    }
+
+    fn setup() -> (Arc<MemoryHomes>, Arc<MemoryAccounts>, HomesDomain) {
         let h = Arc::new(MemoryHomes::new());
         h.add_volume("/volume1", "btrfs", 1 << 40);
+        h.add_volume("/volume2", "btrfs", 1 << 40);
         h.add_volume("/data", "ext4", 1 << 30);
         h.add_volume("/", "ext4", 1 << 30);
+        h.add_dir("/home", 0, 0);
         let acc = Arc::new(MemoryAccounts::new());
-        let d = HomesDomain::new(h.clone(), acc);
-        (h, d)
+        let d = HomesDomain::new(h.clone(), acc.clone());
+        (h, acc, d)
     }
 
     #[test]
@@ -1702,45 +2096,42 @@ mod tests {
         assert_eq!(folder_of("/volume1/"), "/volume1/homes");
         assert_eq!(link_user("/srv/rynas/homes/alice"), Some("alice"));
         assert_eq!(link_user("/srv/rynas/homes/alice/x"), None);
-        assert_eq!(link_user("/srv/rynas/homesx/alice"), None);
         assert_eq!(link_user("/srv/rynas/homes/"), None);
+        assert_eq!(link_user("/srv/rynas/homesx/alice"), None);
         assert_eq!(link_user("/home/alice"), None);
         assert_eq!(kept_path("/home/marco/"), "/home/marco.rynas-old");
+        assert_eq!(
+            volume_of_folder("/volume1/homes/alice", "alice").as_deref(),
+            Some("/volume1")
+        );
+        assert_eq!(volume_of_folder("/home/alice", "alice"), None);
+        assert_eq!(
+            Dest::parse("", "/volume1/"),
+            Dest::Volume("/volume1".into())
+        );
+        assert_eq!(Dest::parse("system", "/volume1"), Dest::System);
+        assert_eq!(Dest::System.folder("bob"), "/home/bob");
+        assert_eq!(Dest::Volume("/v2".into()).folder("bob"), "/v2/homes/bob");
+        assert_eq!(
+            Dest::Volume("/v2".into()).passwd_home("bob"),
+            home_of("bob")
+        );
     }
 
     #[test]
     fn volume_choices_leave_out_the_system() {
+        let m = |path: &str, fs: &str| Mount {
+            path: path.into(),
+            fs_type: fs.into(),
+            ..Default::default()
+        };
         let mounts = vec![
-            Mount {
-                path: "/".into(),
-                fs_type: "ext4".into(),
-                ..Default::default()
-            },
-            Mount {
-                path: "/boot/efi".into(),
-                fs_type: "vfat".into(),
-                ..Default::default()
-            },
-            Mount {
-                path: "/var/lib/docker".into(),
-                fs_type: "btrfs".into(),
-                ..Default::default()
-            },
-            Mount {
-                path: "/srv/data".into(),
-                fs_type: "xfs".into(),
-                ..Default::default()
-            },
-            Mount {
-                path: "/volume1".into(),
-                fs_type: "btrfs".into(),
-                ..Default::default()
-            },
-            Mount {
-                path: "/media/usb".into(),
-                fs_type: "ext4".into(),
-                ..Default::default()
-            },
+            m("/", "ext4"),
+            m("/boot/efi", "vfat"),
+            m("/var/lib/docker", "btrfs"),
+            m("/srv/data", "xfs"),
+            m("/volume1", "btrfs"),
+            m("/media/usb", "ext4"),
         ];
         let c = candidates(&mounts, &[("volume1".into(), "/volume1".into())]);
         let paths: Vec<&str> = c.iter().map(|v| v.path.as_str()).collect();
@@ -1750,13 +2141,8 @@ mod tests {
 
     #[test]
     fn settings_are_checked() {
-        let (_, d) = setup();
-        let ok = |v: &str| {
-            d.normalize(HomesConfig {
-                enabled: true,
-                volume: v.into(),
-            })
-        };
+        let (_, _, d) = setup();
+        let ok = |v: &str| d.normalize(on(v));
         assert_eq!(ok("/volume1/").unwrap().volume, "/volume1");
         assert!(ok("").is_err());
         assert!(ok("/").is_err(), "the system disk");
@@ -1765,165 +2151,289 @@ mod tests {
         assert!(ok("relative").is_err());
         assert!(ok("/data").is_ok(), "any mounted local filesystem");
         // off: anything goes except garbage
-        assert!(
+        let off = |v: &str| {
             d.normalize(HomesConfig {
                 enabled: false,
-                volume: "/nowhere".into()
+                volume: v.into(),
             })
-            .is_ok()
-        );
+        };
+        assert!(off("/nowhere").is_ok());
+        assert!(off("bad").is_err());
     }
 
     #[test]
-    fn the_volume_cannot_change_under_homes() {
-        let h = Arc::new(MemoryHomes::new());
-        h.add_volume("/volume1", "btrfs", 1 << 40);
-        h.add_volume("/volume2", "btrfs", 1 << 40);
-        let acc = Arc::new(MemoryAccounts::new());
+    fn the_default_volume_changes_with_homes_on_the_old_one() {
+        let (h, acc, d) = setup();
+        d.ensure(&on("/volume1"), &quiet).unwrap();
         acc.state()
             .users
             .push(user("alice", 1001, "/srv/rynas/homes/alice"));
-        let d = HomesDomain::new(h.clone(), acc.clone());
-        let c = |v: &str| HomesConfig {
-            enabled: true,
-            volume: v.into(),
-        };
-        d.ensure(&c("/volume1"), &quiet).unwrap();
-        assert!(d.normalize(c("/volume1")).is_ok());
-        let e = d.normalize(c("/volume2")).unwrap_err();
-        assert!(e.message.contains("alice"), "{e:?}");
-        acc.state().users.clear();
-        assert!(d.normalize(c("/volume2")).is_ok());
+        create_home(
+            h.as_ref(),
+            "alice",
+            Some("/volume1"),
+            1001,
+            100,
+            false,
+            &quiet,
+        )
+        .unwrap();
+        // alice's home stays on volume1, new homes go to volume2
+        assert!(d.normalize(on("/volume2")).is_ok());
+        d.ensure(&on("/volume2"), &quiet).unwrap();
+        assert!(h.probe("/volume2/homes").is_dir);
+        assert_eq!(
+            h.read_link("/srv/rynas/homes/alice").as_deref(),
+            Some("/volume1/homes/alice")
+        );
+        assert_eq!(
+            used_folders(h.as_ref()),
+            ["/volume1/homes"],
+            "the folders that hold homes"
+        );
     }
 
     #[test]
-    fn enabling_creates_the_folder_and_the_link_once() {
-        let (h, d) = setup();
-        let c = HomesConfig {
-            enabled: true,
-            volume: "/volume1".into(),
-        };
-        d.ensure(&c, &quiet).unwrap();
-        d.ensure(&c, &quiet).unwrap();
-        let s = h.state();
+    fn enabling_creates_the_folder_of_links_and_the_homes_folder_once() {
+        let (h, _, d) = setup();
+        d.ensure(&on("/volume1"), &quiet).unwrap();
+        d.ensure(&on("/volume1"), &quiet).unwrap();
         assert_eq!(
-            s.log,
+            h.state().log,
             [
-                "subvolume /volume1/homes 0:0 711",
                 "mkdir /srv/rynas 0:0 755",
-                "link /srv/rynas/homes -> /volume1/homes",
+                "mkdir /srv/rynas/homes 0:0 711",
+                "subvolume /volume1/homes 0:0 711",
             ]
         );
-        drop(s);
         let p = h.probe(HOMES_LINK);
-        assert!(p.symlink && p.is_dir && p.subvolume);
+        assert!(p.is_dir && !p.symlink);
         // on ext4 a plain folder
-        let c2 = HomesConfig {
-            enabled: true,
-            volume: "/data".into(),
-        };
-        d.ensure(&c2, &quiet).unwrap();
+        d.ensure(&on("/data"), &quiet).unwrap();
         assert!(
             h.state()
                 .log
                 .contains(&"mkdir /data/homes 0:0 711".to_string())
         );
-        assert_eq!(h.read_link(HOMES_LINK).as_deref(), Some("/data/homes"));
+        // an empty mount point is not a volume
+        h.add_dir("/volume9", 0, 0);
+        assert!(ensure_folder(h.as_ref(), "/volume9", &quiet).is_err());
     }
 
     #[test]
-    fn a_real_folder_at_the_link_is_never_replaced() {
-        let (h, d) = setup();
-        h.add_dir("/srv/rynas/homes", 0, 0);
-        let e = d
-            .ensure(
-                &HomesConfig {
-                    enabled: true,
-                    volume: "/volume1".into(),
-                },
-                &quiet,
-            )
-            .unwrap_err();
-        assert!(e.contains("not a symbolic link"), "{e}");
+    fn the_first_layout_becomes_per_user_links() {
+        let (h, acc, d) = setup();
+        // as the first version left it: the whole folder is a link to volume1/homes
+        h.add_dir("/srv/rynas", 0, 0);
+        h.add_dir("/volume1/homes", 0, 0);
+        h.add_dir("/volume1/homes/alice", 1001, 10);
+        h.add_dir("/volume1/homes/marco", 1000, 10);
+        h.add_dir("/volume1/homes/marco/.ssh", 1000, 1);
+        h.set_link(HOMES_LINK, "/volume1/homes", &quiet).unwrap();
+        acc.state().users.extend([
+            user("alice", 1001, "/srv/rynas/homes/alice"),
+            user("marco", 1000, "/srv/rynas/homes/marco"),
+            user("bob", 1002, "/home/bob"),
+        ]);
+        assert_eq!(
+            real_home(h.as_ref(), "alice").unwrap(),
+            "/volume1/homes/alice"
+        );
+        h.state().log.clear();
+        assert!(d.migrate(&quiet).unwrap());
+        assert_eq!(
+            h.state().log,
+            [
+                "mkdir /srv/rynas/homes.rynas-new 0:0 711",
+                "link /srv/rynas/homes.rynas-new/alice -> /volume1/homes/alice",
+                "link /srv/rynas/homes.rynas-new/marco -> /volume1/homes/marco",
+                "exchange /srv/rynas/homes.rynas-new <-> /srv/rynas/homes",
+                "unlink /srv/rynas/homes.rynas-new",
+            ]
+        );
+        assert!(h.read_link(HOMES_LINK).is_none() && h.probe(HOMES_LINK).is_dir);
+        assert!(
+            h.probe("/srv/rynas/homes/marco/.ssh").exists,
+            "homes resolve"
+        );
+        assert!(!h.probe("/srv/rynas/homes/bob").exists);
+        assert!(!h.probe("/srv/rynas/homes.rynas-new").exists);
+        // idempotent
+        h.state().log.clear();
+        assert!(!d.migrate(&quiet).unwrap());
+        d.ensure(&on("/volume1"), &quiet).unwrap();
+        assert!(h.state().log.is_empty(), "{:?}", h.state().log);
+        // a migration stopped half way is redone
+        let (h, acc, d) = setup();
+        h.add_dir("/volume1/homes/alice", 1001, 10);
+        h.set_link(HOMES_LINK, "/volume1/homes", &quiet).unwrap();
+        h.add_dir("/srv/rynas/homes.rynas-new", 0, 0);
+        acc.state()
+            .users
+            .push(user("alice", 1001, "/srv/rynas/homes/alice"));
+        h.state().fail.push("exchange".into());
+        assert!(d.migrate(&quiet).is_err());
+        assert_eq!(h.read_link(HOMES_LINK).as_deref(), Some("/volume1/homes"));
+        h.state().fail.clear();
+        assert!(d.migrate(&quiet).unwrap());
+        assert!(h.probe("/srv/rynas/homes/alice").is_dir);
     }
 
     #[test]
-    fn homes_of_new_users_are_subvolumes_owned_by_them() {
-        let (h, d) = setup();
-        d.ensure(
-            &HomesConfig {
-                enabled: true,
-                volume: "/volume1".into(),
-            },
+    fn homes_of_new_users_are_subvolumes_on_their_volume() {
+        let (h, _, d) = setup();
+        d.ensure(&on("/volume1"), &quiet).unwrap();
+        let real = create_home(
+            h.as_ref(),
+            "alice",
+            Some("/volume2"),
+            1001,
+            100,
+            false,
             &quiet,
         )
         .unwrap();
-        let real = create_home(h.as_ref(), "alice", 1001, 100, false, &quiet).unwrap();
-        assert_eq!(real, "/volume1/homes/alice");
+        assert_eq!(real, "/volume2/homes/alice");
+        assert_eq!(
+            h.read_link("/srv/rynas/homes/alice").as_deref(),
+            Some("/volume2/homes/alice")
+        );
         let p = h.probe("/srv/rynas/homes/alice");
         assert!(p.exists && p.subvolume);
-        assert_eq!(h.state().entries["/volume1/homes/alice"].mode, 0o700);
+        assert_eq!(h.state().entries["/volume2/homes/alice"].mode, 0o700);
+        assert_eq!(h.state().entries["/volume2/homes"].mode, 0o711);
         assert!(
-            create_home(h.as_ref(), "alice", 1002, 100, false, &quiet).is_err(),
+            create_home(
+                h.as_ref(),
+                "alice",
+                Some("/volume2"),
+                1002,
+                100,
+                false,
+                &quiet
+            )
+            .is_err(),
             "another user's folder is not reused"
         );
         assert!(
-            create_home(h.as_ref(), "alice", 1001, 100, false, &quiet).is_ok(),
+            create_home(
+                h.as_ref(),
+                "alice",
+                Some("/volume2"),
+                1001,
+                100,
+                false,
+                &quiet
+            )
+            .is_ok(),
             "an empty folder of the same uid is (a rolled back apply)"
         );
-        h.add_dir("/volume1/homes/alice/notes", 1001, 1);
         assert!(
-            create_home(h.as_ref(), "alice", 1001, 100, false, &quiet).is_err(),
+            create_home(
+                h.as_ref(),
+                "alice",
+                Some("/volume1"),
+                1001,
+                100,
+                false,
+                &quiet
+            )
+            .is_err(),
+            "the link of an existing home elsewhere is not replaced"
+        );
+        h.add_dir("/volume2/homes/alice/notes", 1001, 1);
+        assert!(
+            create_home(
+                h.as_ref(),
+                "alice",
+                Some("/volume2"),
+                1001,
+                100,
+                false,
+                &quiet
+            )
+            .is_err(),
             "a folder with files is not reused"
         );
-        h.state().entries.remove("/volume1/homes/alice/notes");
+        h.state().entries.remove("/volume2/homes/alice/notes");
+        let i = home_info(h.as_ref(), &user("alice", 1001, "/srv/rynas/homes/alice"));
         assert_eq!(
-            location(h.as_ref(), "/srv/rynas/homes/alice"),
-            (HomeLocation::Volume, true)
+            i,
+            HomeInfo {
+                location: HomeLocation::Volume,
+                folder: "/volume2/homes/alice".into(),
+                volume: "/volume2".into(),
+                subvolume: true,
+            }
         );
         assert!(remove_home(h.as_ref(), "/srv/rynas/homes/alice", &quiet).unwrap());
-        assert!(
-            h.state()
-                .log
-                .contains(&"subvolume-delete /volume1/homes/alice".to_string())
-        );
+        let log = h.state().log.clone();
+        assert!(log.contains(&"subvolume-delete /volume2/homes/alice".to_string()));
+        assert!(log.contains(&"unlink /srv/rynas/homes/alice".to_string()));
+        assert!(h.read_link("/srv/rynas/homes/alice").is_none());
         assert!(!remove_home(h.as_ref(), "/home/bob", &quiet).unwrap());
+        // a volume that is not mounted
+        assert!(
+            create_home(
+                h.as_ref(),
+                "carl",
+                Some("/volume7"),
+                1003,
+                100,
+                false,
+                &quiet
+            )
+            .is_err()
+        );
+    }
+
+    const VOLS: &[String] = &[];
+
+    fn vols() -> Vec<String> {
+        vec!["/volume1".into(), "/volume2".into(), "/data".into()]
+    }
+
+    fn cx(v: &[String]) -> MoveContext<'_> {
+        MoveContext {
+            service_on: true,
+            volumes: v,
+            shares: &[],
+            waiting: false,
+        }
     }
 
     fn ready() -> (Arc<MemoryHomes>, SysUser) {
-        let (h, d) = setup();
-        d.ensure(
-            &HomesConfig {
-                enabled: true,
-                volume: "/volume1".into(),
-            },
-            &quiet,
-        )
-        .unwrap();
+        let (h, _, d) = setup();
+        d.ensure(&on("/volume1"), &quiet).unwrap();
         h.add_dir("/home/marco", 1000, 5 << 30);
         h.add_dir("/home/marco/.ssh/authorized_keys", 1000, 1);
         h.state().log.clear();
         (h, user("marco", 1000, "/home/marco"))
     }
 
-    fn cx() -> MoveContext<'static> {
-        MoveContext {
-            service_on: true,
-            shares: &[],
-            waiting: false,
-        }
+    fn v1() -> Dest {
+        Dest::Volume("/volume1".into())
     }
 
     #[test]
     fn a_move_plan_says_what_happens() {
         let (h, u) = ready();
-        let p = plan_move(h.as_ref(), &u, &cx());
+        let v = vols();
+        let p = plan_move(h.as_ref(), &u, &v1(), &cx(&v));
         assert!(p.allowed, "{:?}", p.blockers);
         assert_eq!(p.to, "/srv/rynas/homes/marco");
+        assert_eq!(p.source, "/home/marco");
         assert_eq!(p.target, "/volume1/homes/marco");
+        assert_eq!(p.location, "/volume1");
         assert!(p.subvolume && p.ssh_keys);
         assert_eq!(p.size_bytes, 5 << 30);
         assert!(h.state().log.is_empty(), "a plan changes nothing");
+        // to the system disk where it is: nothing to do
+        let p = plan_move(h.as_ref(), &u, &Dest::System, &cx(&v));
+        assert_eq!(p.blockers[0].code, B::AlreadyMoved);
+        // to ext4: a plain folder
+        let p = plan_move(h.as_ref(), &u, &Dest::Volume("/data".into()), &cx(&v));
+        assert!(!p.subvolume);
     }
 
     #[test]
@@ -1936,8 +2446,10 @@ mod tests {
         let p = plan_move(
             h.as_ref(),
             &u,
+            &Dest::Volume("/volume5".into()),
             &MoveContext {
                 service_on: false,
+                volumes: VOLS,
                 shares: &shares,
                 waiting: true,
             },
@@ -1946,6 +2458,7 @@ mod tests {
         assert!(!p.allowed);
         for c in [
             B::ServiceOff,
+            B::TargetInvalid,
             B::ShareInside,
             B::Processes,
             B::SmbSessions,
@@ -1962,8 +2475,9 @@ mod tests {
                 .detail,
             "4242 4243"
         );
-        // no space, target exists, already moved, missing, mounts inside
+        // no space, target exists, mounts inside
         let (h, u) = ready();
+        let v = vols();
         h.state().mounts[0].avail_bytes = 1 << 30;
         h.add_dir("/volume1/homes/marco", 1000, 0);
         h.state().mounts.push(Mount {
@@ -1971,40 +2485,45 @@ mod tests {
             fs_type: "ext4".into(),
             ..Default::default()
         });
-        let codes: Vec<B> = plan_move(h.as_ref(), &u, &cx())
+        let codes: Vec<B> = plan_move(h.as_ref(), &u, &v1(), &cx(&v))
             .blockers
             .iter()
             .map(|b| b.code)
             .collect();
         assert!(codes.contains(&B::NoSpace) && codes.contains(&B::TargetExists));
         assert!(codes.contains(&B::SourceNotPlain), "{codes:?}");
-        let moved = user("marco", 1000, "/srv/rynas/homes/marco");
-        assert!(
-            plan_move(h.as_ref(), &moved, &cx())
-                .blockers
-                .iter()
-                .any(|b| b.code == B::AlreadyMoved)
-        );
         let gone = user("ghost", 1003, "/home/ghost");
         assert!(
-            plan_move(h.as_ref(), &gone, &cx())
+            plan_move(h.as_ref(), &gone, &v1(), &cx(&v))
                 .blockers
                 .iter()
                 .any(|b| b.code == B::SourceMissing)
         );
         let sys = user("daemon", 1, "/usr/sbin");
         assert!(
-            plan_move(h.as_ref(), &sys, &cx())
+            plan_move(h.as_ref(), &sys, &v1(), &cx(&v))
                 .blockers
                 .iter()
                 .any(|b| b.code == B::NotLocal)
         );
+        // the system disk needs no service
+        let p = plan_move(
+            h.as_ref(),
+            &user("ghost", 1003, "/home/ghost"),
+            &Dest::System,
+            &MoveContext {
+                service_on: false,
+                ..cx(&v)
+            },
+        );
+        assert!(!p.blockers.iter().any(|b| b.code == B::ServiceOff));
     }
 
     #[test]
     fn a_move_copies_verifies_keeps_and_can_be_undone() {
         let (h, u) = ready();
-        let p = plan_move(h.as_ref(), &u, &cx());
+        let v = vols();
+        let p = plan_move(h.as_ref(), &u, &v1(), &cx(&v));
         copy_home(h.as_ref(), &p, &u, &quiet, &|_| {}, &|| false).unwrap();
         assert_eq!(
             h.state().log,
@@ -2015,19 +2534,36 @@ mod tests {
                 "owner /volume1/homes/marco 1000:100 700",
             ]
         );
+        point_link(h.as_ref(), "marco", &p.target, &quiet).unwrap();
         let kept = keep_old(h.as_ref(), "/home/marco", 7, &quiet).unwrap();
         assert_eq!(kept, "/home/marco.rynas-old");
+        assert!(h.probe("/home/marco.rynas-old/.ssh/authorized_keys").exists);
         let r = HomeMoveRecord {
             user: "marco".into(),
             from: "/home/marco".into(),
             to: p.to.clone(),
             kept: kept.clone(),
             moved_ms: 7,
+            from_folder: p.source.clone(),
+            to_folder: p.target.clone(),
         };
-        let aside = undo_move(h.as_ref(), &r, 9, &quiet).unwrap();
+        let (from, to) = record_folders(h.as_ref(), &r);
+        undo_move(h.as_ref(), &r, &from, &quiet).unwrap();
+        let aside = set_aside(h.as_ref(), "marco", &to, 9, &quiet).unwrap();
         assert_eq!(aside.as_deref(), Some("/volume1/homes/.marco.undone-9"));
         assert!(h.probe("/home/marco").exists);
         assert!(!h.probe("/volume1/homes/marco").exists);
+        // a record of the first version (no folders) undoes the same way
+        let first = HomeMoveRecord {
+            from_folder: String::new(),
+            to_folder: String::new(),
+            ..r.clone()
+        };
+        assert_eq!(
+            record_folders(h.as_ref(), &first),
+            ("/home/marco".into(), "/volume1/homes/marco".into()),
+            "the link still names the copy: rynasd removes it after the passwd switch"
+        );
         // a second keep while the first is there gets a unique name
         h.add_dir("/home/marco.rynas-old", 1000, 0);
         assert_eq!(
@@ -2037,9 +2573,72 @@ mod tests {
     }
 
     #[test]
+    fn a_home_moves_between_volumes_and_back_to_the_system_disk() {
+        let (h, _, d) = setup();
+        d.ensure(&on("/volume1"), &quiet).unwrap();
+        create_home(
+            h.as_ref(),
+            "alice",
+            Some("/volume1"),
+            1001,
+            100,
+            false,
+            &quiet,
+        )
+        .unwrap();
+        let u = user("alice", 1001, "/srv/rynas/homes/alice");
+        let v = vols();
+        // volume1 → volume2: the passwd home stays, the link changes
+        let p = plan_move(h.as_ref(), &u, &Dest::Volume("/volume2".into()), &cx(&v));
+        assert!(p.allowed, "{:?}", p.blockers);
+        assert_eq!(
+            (p.from.as_str(), p.to.as_str()),
+            (u.home.as_str(), u.home.as_str())
+        );
+        assert_eq!(p.source, "/volume1/homes/alice");
+        assert_eq!(p.target, "/volume2/homes/alice");
+        copy_home(h.as_ref(), &p, &u, &quiet, &|_| {}, &|| false).unwrap();
+        assert!(h.probe("/volume2/homes").is_dir, "the homes folder is made");
+        point_link(h.as_ref(), "alice", &p.target, &quiet).unwrap();
+        let kept = keep_old(h.as_ref(), &p.source, 5, &quiet).unwrap();
+        assert_eq!(kept, "/volume1/homes/alice.rynas-old");
+        assert_eq!(home_info(h.as_ref(), &u).volume, "/volume2");
+        // already there
+        let p2 = plan_move(h.as_ref(), &u, &Dest::Volume("/volume2".into()), &cx(&v));
+        assert!(p2.blockers.iter().any(|b| b.code == B::AlreadyMoved));
+        // undo: the link goes back to volume1
+        let r = HomeMoveRecord {
+            user: "alice".into(),
+            from: u.home.clone(),
+            to: u.home.clone(),
+            kept,
+            moved_ms: 5,
+            from_folder: p.source.clone(),
+            to_folder: p.target.clone(),
+        };
+        undo_move(h.as_ref(), &r, &p.source, &quiet).unwrap();
+        assert_eq!(
+            h.read_link("/srv/rynas/homes/alice").as_deref(),
+            Some("/volume1/homes/alice")
+        );
+        set_aside(h.as_ref(), "alice", &p.target, 6, &quiet).unwrap();
+        assert!(h.probe("/volume2/homes/.alice.undone-6").exists);
+        // to the system disk: /home/alice, the passwd home changes
+        let p = plan_move(h.as_ref(), &u, &Dest::System, &cx(&v));
+        assert!(p.allowed, "{:?}", p.blockers);
+        assert_eq!(p.to, "/home/alice");
+        assert_eq!(p.target, "/home/alice");
+        assert_eq!(p.location, "system");
+        assert!(!p.subvolume, "the system disk is ext4 here");
+        copy_home(h.as_ref(), &p, &u, &quiet, &|_| {}, &|| false).unwrap();
+        assert!(h.probe("/home/alice").is_dir);
+    }
+
+    #[test]
     fn a_failed_copy_is_removed_and_the_home_untouched() {
         let (h, u) = ready();
-        let p = plan_move(h.as_ref(), &u, &cx());
+        let v = vols();
+        let p = plan_move(h.as_ref(), &u, &v1(), &cx(&v));
         h.state().differences = vec![">f.st...... notes.txt".into()];
         let e = copy_home(h.as_ref(), &p, &u, &quiet, &|_| {}, &|| false).unwrap_err();
         assert!(e.contains("differs"), "{e}");
@@ -2047,7 +2646,7 @@ mod tests {
         assert!(h.probe("/home/marco").exists);
         // the user logs in during the copy: same
         let (h, u) = ready();
-        let p = plan_move(h.as_ref(), &u, &cx());
+        let p = plan_move(h.as_ref(), &u, &v1(), &cx(&v));
         h.state().processes.insert(1000, vec![1]);
         assert!(copy_home(h.as_ref(), &p, &u, &quiet, &|_| {}, &|| false).is_err());
         assert!(!h.probe("/volume1/homes/marco").exists);
@@ -2067,6 +2666,7 @@ mod tests {
             to: home_of("marco"),
             kept: "/home/marco".into(),
             moved_ms: 1,
+            ..Default::default()
         };
         assert!(finish_move(h.as_ref(), &r, &quiet).is_err());
         r.kept = "/home/marco.rynas-old".into();
@@ -2086,6 +2686,12 @@ mod tests {
         assert!(MoveStore::in_dir(d.path()).get("marco").is_some());
         s.remove("marco").unwrap();
         assert!(MoveStore::in_dir(d.path()).list().is_empty());
+        // a record of the first version reads
+        let r: HomeMoveRecord = serde_json::from_str(
+            r#"{"user":"m","from":"/home/m","to":"/srv/rynas/homes/m","kept":"/home/m.rynas-old","moved_ms":1}"#,
+        )
+        .unwrap();
+        assert!(r.from_folder.is_empty() && r.to_folder.is_empty());
     }
 
     #[test]
@@ -2106,6 +2712,39 @@ mod tests {
         assert_eq!(
             parse_itemize(".d..t...... ./\n>f+++++++++ new.txt\n\n"),
             [">f+++++++++ new.txt"]
+        );
+    }
+
+    #[test]
+    fn host_links_and_exchange_on_a_real_folder() {
+        let t = tempfile::tempdir().unwrap();
+        let p = |s: &str| t.path().join(s).to_string_lossy().into_owned();
+        std::fs::create_dir(p("dir")).unwrap();
+        std::fs::create_dir(p("real")).unwrap();
+        std::os::unix::fs::symlink(p("real"), p("link")).unwrap();
+        HostHomes
+            .set_link(&p("dir/alice"), &p("real"), &quiet)
+            .unwrap();
+        assert_eq!(
+            HostHomes.links(&p("dir")),
+            [("alice".to_string(), p("real"))]
+        );
+        HostHomes.exchange(&p("dir"), &p("link"), &quiet).unwrap();
+        assert!(
+            std::fs::symlink_metadata(p("dir"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(std::fs::symlink_metadata(p("link")).unwrap().is_dir());
+        assert!(
+            HostHomes.unlink(&p("link"), &quiet).is_err(),
+            "a folder is not unlinked"
+        );
+        HostHomes.unlink(&p("dir"), &quiet).unwrap();
+        assert!(
+            std::path::Path::new(&p("real")).is_dir(),
+            "the target stays"
         );
     }
 }

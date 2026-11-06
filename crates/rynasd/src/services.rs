@@ -361,7 +361,14 @@ async fn user_put(
                         "the home changes only by moving it (User homes)",
                     ));
                 }
+                if !u.home_volume.is_empty() && u.home_volume != cur.home_volume {
+                    return Err(Error::invalid(
+                        "home_volume",
+                        "the home changes volume only by moving it (User homes)",
+                    ));
+                }
                 u.home = cur.home.clone();
+                u.home_volume = cur.home_volume.clone();
                 *cur = u;
                 Ok(())
             })?;
