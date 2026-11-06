@@ -105,6 +105,8 @@ pub trait HomesHost: Send + Sync {
     /// Space used below `path` (one filesystem), bounded in time: `(bytes, partial)`.
     fn tree_size(&self, path: &str, budget: Duration) -> Option<(u64, bool)>;
     fn tree_counts(&self, path: &str) -> Option<TreeCounts>;
+    /// Owner uid of a folder and whether it is empty.
+    fn owner_empty(&self, path: &str) -> Option<(u32, bool)>;
     /// Processes running with this uid (real, effective, saved or filesystem).
     fn processes(&self, uid: u32) -> Vec<u32>;
     /// Open SMB sessions of a user; `None` when it cannot be known (no Samba).
@@ -439,6 +441,15 @@ pub fn create_home(
         return Err(format!("the homes folder {folder} is not reachable"));
     }
     if host.probe(&real).exists {
+        // an empty folder of this uid: left by a rolled back apply, reused
+        if host.owner_empty(&real) == Some((uid, true)) && !host.probe(&real).symlink {
+            log(&format!("{real}: empty home of uid {uid} reused"));
+            host.set_owner_mode(&real, uid, gid, HOME_MODE, log)?;
+            if skel && let Err(e) = host.copy_skel(&real, uid, gid, log) {
+                log(&format!("{real}: skeleton files not copied: {e}"));
+            }
+            return Ok(real);
+        }
         return Err(format!(
             "{real} exists already (the home of a deleted user?): remove or rename it first"
         ));
@@ -868,8 +879,7 @@ impl MoveStore {
 // the real system
 // ---------------------------------------------------------------------------------------------
 
-/// The host. With `dry`, every write is only logged (`rynasd --dry-system` uses
-/// [`MemoryHomes`] instead; `dry` is for a host whose reads matter).
+/// The real system (`rynasd --dry-system` uses [`MemoryHomes`] instead).
 pub struct HostHomes;
 
 fn run(log: &dyn Fn(&str), cmd: Cmd) -> Result<String, String> {
@@ -883,12 +893,17 @@ fn run(log: &dyn Fn(&str), cmd: Cmd) -> Result<String, String> {
         .map_err(|e| format!("{name}: {e}"))
 }
 
-/// `/proc/self/mountinfo` lines → mount point and filesystem type.
+/// `/proc/self/mountinfo` lines → read-write mount points and their filesystem type
+/// (read-only mounts, such as bind mounts of system files or snapshots, cannot hold homes).
 pub fn parse_mountinfo(text: &str) -> Vec<(String, String)> {
     text.lines()
         .filter_map(|l| {
             let (left, right) = l.split_once(" - ")?;
-            let mp = left.split(' ').nth(4)?;
+            let mut fields = left.split(' ');
+            let mp = fields.nth(4)?;
+            if fields.next()?.split(',').any(|o| o == "ro") {
+                return None;
+            }
             let fs = right.split(' ').next()?;
             // octal escapes (\040 for a space)
             let mut out = String::new();
@@ -959,7 +974,10 @@ impl HomesHost for HostHomes {
         let text = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
         parse_mountinfo(&text)
             .into_iter()
-            .filter(|(_, fs)| HOME_FS.contains(&fs.as_str()))
+            // a bind-mounted file is no volume
+            .filter(|(path, fs)| {
+                HOME_FS.contains(&fs.as_str()) && std::path::Path::new(path).is_dir()
+            })
             .map(|(path, fs_type)| {
                 let (size_bytes, avail_bytes) = nix::sys::statvfs::statvfs(path.as_str())
                     .map(|s| {
@@ -1013,6 +1031,16 @@ impl HomesHost for HostHomes {
             }
         }
         Some(c)
+    }
+
+    fn owner_empty(&self, path: &str) -> Option<(u32, bool)> {
+        use std::os::unix::fs::MetadataExt;
+        let m = std::fs::symlink_metadata(path).ok()?;
+        if !m.is_dir() {
+            return None;
+        }
+        let empty = std::fs::read_dir(path).ok()?.next().is_none();
+        Some((m.uid(), empty))
     }
 
     fn processes(&self, uid: u32) -> Vec<u32> {
@@ -1482,6 +1510,14 @@ impl HomesHost for MemoryHomes {
         })
     }
 
+    fn owner_empty(&self, path: &str) -> Option<(u32, bool)> {
+        let real = self.resolve(path);
+        let s = self.state();
+        let e = s.entries.get(&real)?;
+        let prefix = format!("{real}/");
+        Some((e.uid, !s.entries.keys().any(|k| k.starts_with(&prefix))))
+    }
+
     fn processes(&self, uid: u32) -> Vec<u32> {
         self.state()
             .processes
@@ -1828,9 +1864,19 @@ mod tests {
         assert!(p.exists && p.subvolume);
         assert_eq!(h.state().entries["/volume1/homes/alice"].mode, 0o700);
         assert!(
-            create_home(h.as_ref(), "alice", 1001, 100, false, &quiet).is_err(),
-            "an existing folder is not reused"
+            create_home(h.as_ref(), "alice", 1002, 100, false, &quiet).is_err(),
+            "another user's folder is not reused"
         );
+        assert!(
+            create_home(h.as_ref(), "alice", 1001, 100, false, &quiet).is_ok(),
+            "an empty folder of the same uid is (a rolled back apply)"
+        );
+        h.add_dir("/volume1/homes/alice/notes", 1001, 1);
+        assert!(
+            create_home(h.as_ref(), "alice", 1001, 100, false, &quiet).is_err(),
+            "a folder with files is not reused"
+        );
+        h.state().entries.remove("/volume1/homes/alice/notes");
         assert_eq!(
             location(h.as_ref(), "/srv/rynas/homes/alice"),
             (HomeLocation::Volume, true)
@@ -2049,6 +2095,10 @@ mod tests {
              40 22 0:35 /@ /volume\\0401 rw shared:5 - btrfs /dev/md2 rw\n",
         );
         assert_eq!(m[1], ("/volume 1".into(), "btrfs".into()));
+        assert!(
+            parse_mountinfo("50 22 0:40 /x /opt/bind ro,relatime - ext4 /dev/sda1 rw\n").is_empty(),
+            "read-only mounts are left out"
+        );
         let j = r#"{"sessions":{"1":{"username":"alice","uid":1001},"2":{"username":"bob","uid":1002},"3":{"username":"x","uid":1001}}}"#;
         assert_eq!(parse_smbstatus_sessions(j, "alice", 1001), Some(2));
         assert_eq!(parse_smbstatus_sessions("{}", "alice", 1001), Some(0));

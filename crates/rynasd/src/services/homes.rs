@@ -155,8 +155,15 @@ fn service_on(s: &Services) -> bool {
 fn plans(s: &Services, owner: &str, users: &[String]) -> Res<Vec<(SysUser, HomeMovePlan)>> {
     let sys = s.users.accounts().users().map_err(internal)?;
     let targets: Vec<SysUser> = if users.is_empty() {
+        // "all": the homes that exist outside the homes folder and wait for no confirmation
+        let host = s.homes.host();
         sys.into_iter()
-            .filter(|u| local(u) && homes::link_user(&u.home).is_none())
+            .filter(|u| {
+                local(u)
+                    && homes::link_user(&u.home).is_none()
+                    && host.probe(&u.home).is_dir
+                    && s.moves.get(&u.name).is_none()
+            })
             .collect()
     } else {
         let mut v = Vec::new();

@@ -186,7 +186,7 @@ fn homes_list(state: Remote<HomesState>) -> AnyView {
                         ),
                         ui::cell(
                             "users.home",
-                            "",
+                            "path-cell",
                             view! {
                                 <div class="cell-main">
                                     <span class="mono">{h.home.clone()}</span>

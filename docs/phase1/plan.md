@@ -494,6 +494,11 @@ User homes (`homes` key, `HomesConfig` {enabled, volume}; D-HOMES, `docs/researc
   a share named `homes` is refused while it is on. The file manager's `home` share is the real
   folder behind the passwd home (its jail never follows links), with that recycle bin.
 - The homes folder never appears among the unshared folders and cannot be deleted there.
+- Real check: `packaging/test-homes.sh` (Debian 13 container with systemd, loop-mounted btrfs, the
+  real units): service on with `[homes]`, a new user's subvolume home and SMB home (recycle bin,
+  another user refused), the plan and its `processes` blocker, the move of the uid 1000 account's
+  home (tree, modes, hard link, symbolic link, ACL, xattr, content and login checked), undo, move
+  and confirm, the volume change refused, deletion with the home, service off.
 
 Shares (`shares` key, `SharesConfig` {smb, nfs, shares, remove_folders}):
 - **Snapshot folder** (`show_snapshots`, off by default): a read-only bind mount of the share's
