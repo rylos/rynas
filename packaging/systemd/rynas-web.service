@@ -10,10 +10,14 @@ Wants=network-online.target rynasd.service
 Type=simple
 User=rynas
 Group=rynas
-# listen address and extra options: /etc/default/rynas-web
+# listen addresses and extra options: /etc/default/rynas-web
 Environment=RYNAS_WEB_LISTEN=0.0.0.0:8080
+Environment=RYNAS_WEB_TLS_LISTEN=[::]:8443
 EnvironmentFile=-/etc/default/rynas-web
-ExecStart=/usr/libexec/rynas/rynas-web --listen ${RYNAS_WEB_LISTEN} --ui-dir /usr/share/rynas/ui --rynasd-socket /run/rynas/rynasd.sock $RYNAS_WEB_OPTS
+ExecStart=/usr/libexec/rynas/rynas-web --listen ${RYNAS_WEB_LISTEN} --tls-listen ${RYNAS_WEB_TLS_LISTEN} --ui-dir /usr/share/rynas/ui --rynasd-socket /run/rynas/rynasd.sock $RYNAS_WEB_OPTS
+# HTTPS certificate: rynasd publishes it in /etc/rynas/tls (0750 root:rynas) and rynas-web
+# reloads it by itself within 10 s; a reload makes it re-read the files at once
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=2s
 UMask=0077

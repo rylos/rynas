@@ -8,7 +8,8 @@ Services
   /var/lib/rynas/auth (0700 root). It listens only on /run/rynas/rynasd.sock
   (0660 root:rynas) and accepts the user rynas only.
 - rynas-web.service: the web interface and HTTP API, unprivileged (user
-  rynas). Options in /etc/default/rynas-web.
+  rynas), on HTTPS port 8443 (and plain HTTP 8080 during the transition).
+  Options in /etc/default/rynas-web.
 
 Both are enabled and started on installation. Binaries live in
 /usr/libexec/rynas: they are daemons, not commands for users. rynasctl, also
@@ -39,7 +40,7 @@ in the web interface; --restore-notifications needs rynasd stopped.
 
 First login
 -----------
-Open http://<nas-address>:8080/ and log in with a system account (PAM) that
+Open https://<nas-address>:8443/ and log in with a system account (PAM) that
 is a member of the group rynas-admin or sudo. The package does not add
 anyone to these groups. For example:
 
@@ -47,12 +48,62 @@ anyone to these groups. For example:
 
 Group membership is read at every login, no restart is needed.
 
-No HTTPS yet
-------------
-This release serves plain HTTP on 0.0.0.0:8080: passwords travel in clear
-text on the network. Use it on a trusted LAN only, or put an HTTPS reverse
-proxy in front of it (then listen on 127.0.0.1 and add --secure-cookies in
-/etc/default/rynas-web). Built-in HTTPS comes in a later release.
+HTTPS
+-----
+rynas-web serves HTTPS on port 8443, IPv4 and IPv6 ([::]:8443,
+RYNAS_WEB_TLS_LISTEN in /etc/default/rynas-web). This port never goes through
+a reverse proxy: it is the way in that keeps working when everything else
+is misconfigured (like DSM's 5001 or Proxmox's 8006).
+
+The certificate:
+- On its first start rynasd creates a local CA for this NAS (ECDSA P-256,
+  10 years) and a certificate from it (397 days) for every name the NAS
+  answers to: the host name, <host>.local, localhost, 127.0.0.1, ::1 and the
+  addresses of its interfaces (not container bridges, not fe80:: link-local
+  IPv6, not temporary IPv6 privacy addresses). It is re-issued by itself when
+  the host name or an address changes (checked every 2 minutes) and 30 days
+  before it expires; rynas-web loads the new one within 10 seconds, without a
+  restart and without dropping open pages.
+- Browsers warn about it until you trust the local CA: download it with
+  GET /api/v1/system/tls/ca (a page in the web interface follows) or copy
+  /etc/rynas/tls/ca.crt, and add it to the system or browser trust store.
+  Trusting the CA once keeps working when the certificate is re-issued.
+  Compare its SHA-256 fingerprint (GET /api/v1/system/tls) before trusting
+  it.
+- Your own certificate (from your CA or a public one) is imported with
+  POST /api/v1/system/tls/import (a page in the web interface follows): the
+  full chain (server certificate first) and its unencrypted key. rynas
+  checks that the key belongs to the certificate, that each certificate
+  signs the previous one, and that it is valid now, and warns when it
+  expires within 30 days or does not cover this NAS's names. An imported
+  certificate is never renewed by rynas.
+- Files: rynasd keeps the CA key and every certificate in /var/lib/rynas/tls
+  (0700 root) and publishes the active one for rynas-web in /etc/rynas/tls:
+  ui.crt (chain), ui.key (0640 root:rynas), ca.crt. Do not edit them by hand:
+  rynasd rewrites them. "systemctl reload rynas-web" re-reads them at once.
+- Locked out by an imported certificate your browser refuses? As root:
+      /usr/libexec/rynas/rynasd tls-reset
+  makes rynas's own certificate active again (rynas-web picks it up by
+  itself). From this host, http://127.0.0.1:8080/ also keeps working (an SSH
+  tunnel: ssh -L 8080:127.0.0.1:8080 <nas>).
+- No HSTS is sent on port 8443: with a certificate the browser does not
+  trust yet, HSTS would remove the button that lets you continue.
+
+Transition from plain HTTP (port 8080):
+- Port 8080 still answers. Once the certificate is loaded, requests from
+  other hosts get a temporary redirect (307, not cached by browsers) to
+  https://<same host>:8443/ with the same path. Requests from this host
+  (127.0.0.1, ::1) are never redirected: a reverse proxy on the NAS and SSH
+  tunnels keep working.
+- --no-https-redirect (RYNAS_WEB_OPTS) serves plain HTTP to everyone, as
+  before; RYNAS_WEB_LISTEN=127.0.0.1:8080 closes plain HTTP to the network.
+- The session cookie is marked Secure over HTTPS, so a session started on
+  8443 is never sent over plain HTTP. Log in again after switching ports.
+- A later release moves 8080 to 127.0.0.1 only, as the upstream of the
+  built-in reverse proxy on 80/443.
+- A reverse proxy on another host that talks to 8080 and terminates TLS
+  itself: send X-Forwarded-Proto: https (no redirect, Secure cookie), or
+  point it at 8443.
 
 fail2ban
 --------
@@ -68,6 +119,7 @@ Removal
 -------
 "apt remove rynas" stops the services and keeps configuration and state.
 "apt purge rynas" also deletes /var/lib/rynas (configuration database, TOTP
-secrets, notification settings, task history), the scheduled task units, the
+secrets, notification settings, task history, certificates and the local CA),
+/etc/rynas/tls, the scheduled task units, the
 btrbk configurations in /etc/rynas (Debian's own nightly btrbk.service is skipped by a drop-in until /etc/btrbk/btrbk.conf exists), the apt hook, and the user and groups
 rynas and rynas-admin. Shares, users and their files are left in place.

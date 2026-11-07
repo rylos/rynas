@@ -35,6 +35,7 @@ pub mod server;
 pub mod services;
 pub mod snapshots;
 pub mod storage_ops;
+pub mod tls;
 pub mod updates;
 pub mod ups;
 pub mod ups_setup;

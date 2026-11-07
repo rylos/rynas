@@ -1,0 +1,23 @@
+[package]
+name = "rynas-tls"
+description = "rynas certificates of the web interface: local CA and leaf with complete SANs, import validation, certificate details"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+rynas-api-types.workspace = true
+base64.workspace = true
+getrandom.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+# generation: ECDSA P-256 through ring (no aws-lc C build), PEM output, the CA reloaded from DER
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "pem", "ring", "x509-parser"] }
+# details and chain checks of imported certificates; `verify` checks each link's signature
+x509-parser = { version = "0.18.1", features = ["verify"] }
+sha2.workspace = true
+time = { version = "0.3", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+tempfile.workspace = true

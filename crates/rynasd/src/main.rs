@@ -149,6 +149,21 @@ enum Command {
         #[arg(long)]
         restore_notifications: bool,
     },
+    /// Make rynas's own HTTPS certificate of the web interface active again, with a new
+    /// leaf for the current host name and addresses (after an imported certificate that
+    /// clients refuse). rynas-web picks it up within seconds, without a restart.
+    TlsReset,
+}
+
+/// The certificate service: private store in the state folder, published files for
+/// rynas-web below the configuration root.
+fn tls_service(args: &Args) -> Arc<rynasd::tls::TlsSvc> {
+    rynasd::tls::TlsSvc::new(
+        args.state_dir.join("tls"),
+        config_root(args).join(rynasd::tls::PUBLISH_DIR),
+        (!args.dry_system).then_some("rynas"),
+        rynasd::tls::TlsSvc::system_probe(),
+    )
 }
 
 fn config_root(args: &Args) -> PathBuf {
@@ -329,10 +344,27 @@ fn totp_dir(args: &Args) -> PathBuf {
     args.state_dir.join("auth").join("totp")
 }
 
+fn tls_reset(args: &Args) -> std::io::Result<()> {
+    let tls = tls_service(args);
+    tls.ensure(true, true)?;
+    let st = tls
+        .status()
+        .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
+    println!(
+        "rynas certificate active: {} (SHA-256 {})",
+        st.certificate.subject, st.certificate.fingerprint_sha256
+    );
+    Ok(())
+}
+
 fn run_command(args: &Args, cmd: &Command) -> std::io::Result<()> {
     // the CLI never applies anything: an in-memory system is enough
+    if let Command::TlsReset = cmd {
+        return tls_reset(args);
+    }
     let cfg = open_config(args, Arc::new(MemorySystem::new(&running_hostname())), None)?.config;
     match cmd {
+        Command::TlsReset => unreachable!("handled above"),
         Command::Export {
             out,
             passphrase_file,
@@ -874,6 +906,13 @@ fn main() -> std::io::Result<()> {
             rynasd::docker::spawn_stats(docker.clone());
             state.apps = Some(rynasd::apps::AppsSvc::new(docker.clone(), args.apps_dir.clone()));
             state.docker = Some(docker);
+        }
+        // HTTPS certificate of the web interface: made on the first start, re-issued when the
+        // host name or an address changes, published for rynas-web (wave W0)
+        {
+            let tls = tls_service(&args);
+            rynasd::tls::spawn_watch(tls.clone());
+            state.tls = Some(tls);
         }
         state.ops = Some(ops);
         if args.storage_check_interval > 0 {

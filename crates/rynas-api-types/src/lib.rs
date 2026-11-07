@@ -19,6 +19,7 @@ mod services;
 pub mod snapshots;
 pub mod storage;
 pub mod synology;
+pub mod tls;
 pub mod updates;
 pub mod ups;
 pub mod validate;

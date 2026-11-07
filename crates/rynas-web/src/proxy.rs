@@ -42,6 +42,12 @@ pub fn routes() -> Router<AppState> {
         .route("/config/drift/{key}/import", post(forward))
         .route("/config/drift/{key}/overwrite", post(forward))
         .route("/system/hostname", get(forward).put(forward))
+        // HTTPS certificate of the web interface (W0): details, local CA download, import,
+        // back to the local certificate; the served pair is reloaded right after a change
+        .route("/system/tls", get(forward))
+        .route("/system/tls/ca", get(forward))
+        .route("/system/tls/import", post(forward_tls))
+        .route("/system/tls/local", post(forward_tls))
         .route("/tasks", get(forward))
         .route("/tasks/stream", get(forward))
         .route("/tasks/{id}", get(forward))
@@ -261,6 +267,27 @@ async fn forward(
     req: Request,
 ) -> Response {
     forward_with(st, session, req, Vec::new()).await
+}
+
+/// A certificate change: forwarded, then the published pair is loaded at once instead of at
+/// the next file check.
+async fn forward_tls(
+    State(st): State<AppState>,
+    Extension(CurrentSession(session)): Extension<CurrentSession>,
+    req: Request,
+) -> Response {
+    let tls = st.tls.clone();
+    let r = forward_with(st, session, req, Vec::new()).await;
+    if r.status().is_success()
+        && let Some(t) = tls
+    {
+        match tokio::task::spawn_blocking(move || t.reload_now()).await {
+            Ok(Ok(_)) => tracing::info!("https: certificate reloaded after a change"),
+            Ok(Err(e)) => tracing::warn!("https: certificate not reloaded: {e}"),
+            Err(e) => tracing::warn!("https: {e}"),
+        }
+    }
+    r
 }
 
 /// The network endpoints also get the local address of the connection: rynasd derives the

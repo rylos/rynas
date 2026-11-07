@@ -1,16 +1,26 @@
 # Options of rynas-web, read by rynas-web.service (EnvironmentFile).
 # Apply changes with: systemctl restart rynas-web
 
-# Address and port of the web interface. The default listens on every IPv4
-# interface, since a NAS is usually headless and reached over the LAN.
-# Use [::]:8080 for IPv4 and IPv6 (fails if IPv6 is disabled in the kernel),
-# or 127.0.0.1:8080 behind a reverse proxy on the same host.
-# The connection is plain HTTP for now: do not expose this port to the
-# Internet (HTTPS comes in a later release).
+# HTTPS address of the web interface: the door that always works, never behind
+# a reverse proxy. [::]:8443 listens on IPv4 and IPv6 (IPv4 only when the
+# kernel has no IPv6). The certificate comes from rynas's own local CA
+# (/etc/rynas/tls/ui.crt, made and renewed by rynasd; import your own from the
+# web interface or the API). "off" disables HTTPS.
+RYNAS_WEB_TLS_LISTEN=[::]:8443
+
+# Plain HTTP address. Kept during the transition to HTTPS: once a certificate
+# is loaded, requests from other hosts are redirected (307) to
+# https://<same host>:8443/; requests from this host (127.0.0.1, ::1: a
+# reverse proxy here, an SSH tunnel) are always served as they are.
+# 127.0.0.1:8080 closes the plain port to the network entirely.
 RYNAS_WEB_LISTEN=0.0.0.0:8080
 
 # Extra command line options, for example:
-#   --secure-cookies            behind an HTTPS reverse proxy
+#   --no-https-redirect         serve plain HTTP to other hosts too
+#   --secure-cookies            behind an HTTPS reverse proxy on another host
+#   --tls-cert FILE --tls-key FILE
+#                               serve another certificate (default: the files
+#                               rynasd publishes in /etc/rynas/tls)
 #   --admin-group GROUP         who is an administrator (repeatable; replaces
 #                               the defaults rynas-admin and sudo)
 #   --session-idle-timeout SEC  default 1800

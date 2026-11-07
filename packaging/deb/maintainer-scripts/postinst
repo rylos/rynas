@@ -36,10 +36,10 @@ if [ "$1" = "configure" ]; then
 
     if [ -n "${NEW_ADMIN_GROUP:-}" ]; then
         cat <<'MSG'
-rynas: log in at http://<this-host>:8080/ with a system account that is a
+rynas: log in at https://<this-host>:8443/ with a system account that is a
 member of the group rynas-admin or sudo, e.g.:  adduser <user> rynas-admin
-Plain HTTP only for now: use it on a trusted LAN (see
-/usr/share/doc/rynas/README.Debian).
+The certificate comes from this NAS's own local CA: the browser warns until
+you trust it (see /usr/share/doc/rynas/README.Debian, "HTTPS").
 MSG
     fi
 fi
