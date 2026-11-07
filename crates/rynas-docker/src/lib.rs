@@ -11,6 +11,8 @@
 //! - [`stacks`]: stack folders (`/<vol>/docker/stacks/<name>/compose.yaml` + `.env`, one
 //!   subvolume each), name and path validation, `docker compose` command lines, the output
 //!   of `docker compose config`, bind folders;
+//! - [`adopt`]: compose projects managed where they are (adopted, imported), moved only
+//!   on request;
 //! - [`snapshots`]: read-only snapshots of a stack folder and the rollback;
 //! - [`model`]: the API types from the engine's answers, stack grouping, manager detection;
 //! - [`events`]: Docker events → notification transitions (unhealthy, OOM, crash loop);
@@ -18,6 +20,7 @@
 //! - [`updates`]: image references and the digest comparison of the update check;
 //! - [`client`]: the bollard client over `/var/run/docker.sock` (whitelisted calls only).
 
+pub mod adopt;
 pub mod client;
 pub mod detect;
 pub mod engine;

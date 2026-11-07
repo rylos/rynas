@@ -437,6 +437,140 @@ pub struct StackSummary {
     /// The folder is a btrfs subvolume: snapshots and rollback are possible.
     pub snapshots: bool,
     pub images: Vec<String>,
+    /// A compose project rynas adopted where it is (§5.7): its folder and files.
+    #[serde(default)]
+    pub adopted: Option<AdoptedInfo>,
+}
+
+// ------------------------------------------------------------------ adopted stacks (§5.7)
+
+/// A compose project rynas manages in its own folder (adopted or imported, not moved).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AdoptedInfo {
+    /// The project directory (`--project-directory`), absolute.
+    pub dir: String,
+    /// The compose files (`-f`, in order), absolute.
+    pub files: Vec<String>,
+    /// `--env-file` files, absolute; empty: compose reads `<dir>/.env`.
+    #[serde(default)]
+    pub env_files: Vec<String>,
+    /// `--profile` names passed to compose.
+    #[serde(default)]
+    pub profiles: Vec<String>,
+    /// The manager whose folder this is (Portainer, Dockge, Dockhand...), when recognised.
+    #[serde(default)]
+    pub origin: Option<ManagerKind>,
+    /// Portainer still owns the files: viewed, started, stopped and checked for updates,
+    /// never edited, `up` or `down` here.
+    #[serde(default)]
+    pub read_only: bool,
+    pub adopted_ms: u64,
+    /// A file changed on disk since rynas adopted or last wrote it (another manager, a
+    /// shell).
+    #[serde(default)]
+    pub changed_outside: bool,
+}
+
+/// Why an adoption or import deserves a look (the UI translates the code).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdoptWarning {
+    /// Another manager's folder: it can still edit the files; rynas notices the changes.
+    OtherManager,
+    /// Portainer's compose data: adopted read-only.
+    Portainer,
+    /// The files' `name:` differs from the stack name (rynas runs `-p <name>`).
+    NameDiffers,
+    /// Containers of another folder already use this project name.
+    NameInUse,
+    /// `external: true` networks: they must exist before `up`.
+    ExternalNetworks,
+    /// Services with `profiles:` start only with those profiles.
+    Profiles,
+    /// A top-level `include:`: the stack runs, but its files are not edited here.
+    Include,
+    /// A compose or env file is outside the project folder: not edited here.
+    OutsideDir,
+    /// A listed file does not exist.
+    MissingFile,
+}
+
+/// What adopting or importing would record (`GET /docker/stacks/{name}/adopt`,
+/// `POST /docker/stacks/import/preview`). Nothing is written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AdoptPreview {
+    pub name: String,
+    pub dir: String,
+    pub files: Vec<String>,
+    pub env_files: Vec<String>,
+    /// Profiles the files declare.
+    pub profiles_found: Vec<String>,
+    /// External networks the files use.
+    pub external_networks: Vec<String>,
+    /// The top-level `name:` of the files.
+    pub name_in_file: Option<String>,
+    pub origin: Option<ManagerKind>,
+    pub read_only: bool,
+    /// Containers of this project exist.
+    pub running: bool,
+    pub warnings: Vec<AdoptWarning>,
+}
+
+/// `POST /docker/stacks/{name}/adopt`: every field overrides what the labels say.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct AdoptRequest {
+    #[serde(default)]
+    pub dir: Option<String>,
+    #[serde(default)]
+    pub files: Vec<String>,
+    #[serde(default)]
+    pub env_files: Vec<String>,
+    #[serde(default)]
+    pub profiles: Vec<String>,
+}
+
+/// `POST /docker/stacks/import/preview`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ImportPreviewRequest {
+    pub dir: String,
+}
+
+/// `POST /docker/stacks/import`: a folder with compose files, registered where it is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ImportStackRequest {
+    pub dir: String,
+    /// Default: the files' `name:`, else the folder name made valid.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Default: the folder's compose file and its override.
+    #[serde(default)]
+    pub files: Vec<String>,
+    #[serde(default)]
+    pub env_files: Vec<String>,
+    #[serde(default)]
+    pub profiles: Vec<String>,
+    /// `up -d` once registered.
+    #[serde(default)]
+    pub start: bool,
+}
+
+/// `201` of `POST /docker/stacks/import` and `200` of `POST /docker/stacks/{name}/adopt`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct StackAdopted {
+    pub name: String,
+    pub adopted: AdoptedInfo,
+    pub task_id: Option<String>,
+}
+
+/// `POST /docker/stacks/{name}/move`: into `/<vol>/docker/stacks/<name>`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct MoveStackRequest {
+    /// The stack name again (the stack is stopped while its folder is copied).
+    pub confirm: String,
 }
 
 /// One file of a stack folder.
@@ -494,6 +628,16 @@ pub struct StackFiles {
     /// read-only (ignored by `PUT`).
     #[serde(default)]
     pub compose_file: String,
+    /// Hash of the files as read (`GET`); on `PUT`, when given, the files must still have
+    /// it (else 409 `conflict`: changed on disk meanwhile).
+    #[serde(default)]
+    pub hash: String,
+    /// More `-f` files of an adopted stack (read-only here).
+    #[serde(default)]
+    pub other_files: Vec<String>,
+    /// The files cannot be written here (adopted read-only, outside the folder, `include:`).
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 /// `POST /api/v1/docker/stacks/validate`.

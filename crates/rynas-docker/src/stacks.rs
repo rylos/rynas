@@ -197,17 +197,29 @@ pub fn compose_cmd(
     } else {
         format!("{dir}/{compose_file}")
     };
-    let mut c = Cmd::new("docker").args([
-        "compose",
-        "-p",
-        project,
-        "--project-directory",
-        dir,
-        "-f",
-        &file,
-    ]);
-    if let Some(e) = env_file {
+    let env: Vec<String> = env_file.map(str::to_string).into_iter().collect();
+    compose_cmd_files(project, dir, &[file], &env, &[], action)
+}
+
+/// The same with several `-f` files (absolute), `--env-file` files and `--profile` names
+/// (adopted stacks, §5.7).
+pub fn compose_cmd_files(
+    project: &str,
+    dir: &str,
+    files: &[String],
+    env_files: &[String],
+    profiles: &[String],
+    action: ComposeAction,
+) -> Cmd {
+    let mut c = Cmd::new("docker").args(["compose", "-p", project, "--project-directory", dir]);
+    for f in files {
+        c = c.args(["-f", f]);
+    }
+    for e in env_files {
         c = c.args(["--env-file", e]);
+    }
+    for p in profiles {
+        c = c.args(["--profile", p]);
     }
     c.args(action.args())
         .env_clear()
@@ -600,6 +612,7 @@ impl StackFs<'_> {
             compose: read(file).map_err(|e| StackError::Failed(format!("{file}: {e}")))?,
             env: read(ENV_FILE).unwrap_or_default(),
             compose_file: file.to_string(),
+            ..Default::default()
         })
     }
 

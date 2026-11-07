@@ -284,6 +284,8 @@ pub struct DockerSvc {
     /// Tests: task commands go to [`DockerSvc::runner`] instead of the system (a fake that
     /// answers by command line), with the dry system off.
     pub exec_via_runner: std::sync::atomic::AtomicBool,
+    /// Adopted stacks (§5.7), saved in `<state>/docker/adopted.json`.
+    pub(crate) adopted: Mutex<rynas_docker::adopt::Registry>,
 }
 
 pub type DkState = Option<Arc<DockerSvc>>;
@@ -349,7 +351,7 @@ impl From<StackError> for Error {
     }
 }
 
-fn dsvc(st: &DkState) -> Res<Arc<DockerSvc>> {
+pub(crate) fn dsvc(st: &DkState) -> Res<Arc<DockerSvc>> {
     st.clone().ok_or_else(|| {
         Error::new(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -360,7 +362,7 @@ fn dsvc(st: &DkState) -> Res<Arc<DockerSvc>> {
 }
 
 /// A line of the audit log.
-fn audit(who: &str, action: &str, target: &str) {
+pub(crate) fn audit(who: &str, action: &str, target: &str) {
     tracing::info!(target: "rynas::audit", "docker {action} {target} by {who}");
 }
 
@@ -420,6 +422,10 @@ impl DockerSvc {
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())
             .unwrap_or_default();
+        let adopted = rynas_docker::adopt::Registry::load(&state_dir).unwrap_or_else(|e| {
+            tracing::warn!("docker: adopted stacks not loaded: {e}");
+            Default::default()
+        });
         let mut uw = UpdateWatch::default();
         for i in &report.images {
             if let (true, Some(r)) = (i.update_available, &i.remote_digest) {
@@ -447,6 +453,7 @@ impl DockerSvc {
             last_stats: Mutex::new(None),
             df_cache: tokio::sync::Mutex::new(None),
             exec_via_runner: std::sync::atomic::AtomicBool::new(false),
+            adopted: Mutex::new(adopted),
         })
     }
 
@@ -591,8 +598,14 @@ impl DockerSvc {
     /// The stacks.
     pub async fn stacks(&self) -> Res<Vec<StackSummary>> {
         let cs = self.containers().await?;
+        Ok(self.summaries(&cs))
+    }
+
+    /// The stacks of these containers, rynas folders and adopted stacks included.
+    pub(crate) fn summaries(&self, cs: &[Seen]) -> Vec<StackSummary> {
         let (f, s) = self.folders();
-        Ok(model::group_stacks(&cs, self.layout().as_ref(), &f, &s))
+        let v = model::group_stacks(cs, self.layout().as_ref(), &f, &s);
+        self.with_adopted(v)
     }
 
     /// A rynas stack: its layout and folder; 409 `stack_not_managed` for another one, 404
@@ -606,6 +619,16 @@ impl DockerSvc {
             if rynas_docker::stacks::find_compose(&dir).is_some() {
                 return Ok(l);
             }
+        }
+        if let Some(a) = self.adopted_get(name) {
+            if a.read_only {
+                return Err(Error::new(
+                    StatusCode::CONFLICT,
+                    error_codes::STACK_NOT_MANAGED,
+                    format!("stack {name} is adopted read-only: Portainer manages its files"),
+                ));
+            }
+            return Ok(self.layout_or(&a.dir));
         }
         let known = self
             .containers()
@@ -729,7 +752,7 @@ impl DockerSvc {
         self.account_result()
     }
 
-    fn take_busy(&self, name: &str) -> Res<BusyGuard<'_>> {
+    pub(crate) fn take_busy(&self, name: &str) -> Res<BusyGuard<'_>> {
         let mut b = self.busy.lock().unwrap();
         if !b.insert(name.to_string()) {
             return Err(busy(format!("an action on stack {name} is in progress")));
@@ -739,7 +762,7 @@ impl DockerSvc {
 }
 
 /// Clears the busy mark of a stack when dropped.
-struct BusyGuard<'a>(&'a DockerSvc, String);
+pub(crate) struct BusyGuard<'a>(&'a DockerSvc, String);
 
 impl Drop for BusyGuard<'_> {
     fn drop(&mut self) {
@@ -1755,13 +1778,28 @@ impl DockerSvc {
     /// services' `env_file:` are not read (`--no-env-resolution`: a root file never ends up
     /// in the error text), 30 s timeout, the scratch files are `0600` in rynasd's state and
     /// removed afterwards; `config` writes nothing in the project folder.
-    async fn validate(
+    pub(crate) async fn validate(
         &self,
         project: &str,
         dir: &str,
         compose: &str,
         env: &str,
         volume: &str,
+    ) -> Res<StackValidation> {
+        self.validate_with(project, dir, compose, env, volume, &Extra::default())
+            .await
+    }
+
+    /// [`DockerSvc::validate`] with the other files of an adopted stack: more `-f` files
+    /// and `--env-file` files after the edited ones, and its profiles.
+    pub(crate) async fn validate_with(
+        &self,
+        project: &str,
+        dir: &str,
+        compose: &str,
+        env: &str,
+        volume: &str,
+        extra: &Extra,
     ) -> Res<StackValidation> {
         let f = self.facts(false).await;
         if !f.installed {
@@ -1801,12 +1839,22 @@ impl DockerSvc {
             let _ = std::fs::remove_dir_all(&scratch);
             return Err(Error::internal(e));
         }
+        let real = |v: &[String]| -> Vec<String> {
+            v.iter()
+                .map(|p| rynas_docker::under(&self.root, p).to_string_lossy().into_owned())
+                .collect()
+        };
+        let mut files = vec![cf.to_string_lossy().into_owned()];
+        files.extend(real(&extra.files));
+        let mut envs = vec![ef.to_string_lossy().into_owned()];
+        envs.extend(real(&extra.env_files));
         let cmd = |narrow: bool| {
-            let c = compose_cmd(
+            let c = rynas_docker::stacks::compose_cmd_files(
                 project,
                 &rynas_docker::under(&self.root, dir).to_string_lossy(),
-                &cf.to_string_lossy(),
-                Some(&ef.to_string_lossy()),
+                &files,
+                &envs,
+                &extra.profiles,
                 ComposeAction::Config,
             );
             if narrow { c.arg("--no-env-resolution") } else { c }
@@ -1861,6 +1909,14 @@ impl DockerSvc {
     }
 }
 
+/// The other files of an adopted stack for a validation (system paths).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Extra {
+    pub files: Vec<String>,
+    pub env_files: Vec<String>,
+    pub profiles: Vec<String>,
+}
+
 /// Compose features a validation refuses before running compose: a top-level `include:`
 /// (reads or downloads other compose files as root). A plain line check: the key sits at
 /// column 0 of a YAML mapping, quoted or not.
@@ -1886,6 +1942,13 @@ async fn stack_create(
     let Json(req) = body?;
     rynas_docker::stacks::check_name(&req.name)?;
     let l = s.layout_for(req.volume.as_deref())?;
+    if s.adopted_get(&req.name).is_some() {
+        return Err(Error::new(
+            StatusCode::CONFLICT,
+            error_codes::ALREADY_EXISTS,
+            format!("{} is an adopted stack", req.name),
+        ));
+    }
     let _busy = s.take_busy(&req.name)?;
     let validation = s
         .validate(
@@ -1967,14 +2030,16 @@ async fn stack_get(
         return Err(Error::bad_request("invalid stack name"));
     }
     let cs = s.containers().await?;
-    let (f, sv) = s.folders();
     let l = s.layout();
-    let summary = model::group_stacks(&cs, l.as_ref(), &f, &sv)
+    let summary = s
+        .summaries(&cs)
         .into_iter()
         .find(|x| x.name == name)
         .ok_or_else(|| Error::not_found(format!("no stack {name}")))?;
     let snapshots = match (&l, summary.manager) {
-        (Some(l), StackManager::Rynas) => snapshots::list(&s.root, l, &name),
+        (Some(l), StackManager::Rynas) if summary.adopted.is_none() => {
+            snapshots::list(&s.root, l, &name)
+        }
         _ => Vec::new(),
     };
     let containers = cs
@@ -1997,11 +2062,22 @@ async fn stack_files_get(
     let (s, who) = (dsvc(&st)?, user(&hd)?);
     // .env holds secrets
     s.ops.admins.require_admin(&who, "Docker stack files")?;
+    if valid_stack_name(&name)
+        && let Some(a) = s.adopted_get(&name)
+    {
+        let root = s.root.clone();
+        return Ok(Json(
+            tokio::task::spawn_blocking(move || crate::docker_adopt::read_files(&root, &a))
+                .await
+                .map_err(Error::internal)??,
+        ));
+    }
     let l = s.managed(&name).await?;
     let s2 = s.clone();
-    let f = tokio::task::spawn_blocking(move || s2.fs(None).read_files(&l, &name))
+    let mut f = tokio::task::spawn_blocking(move || s2.fs(None).read_files(&l, &name))
         .await
         .map_err(Error::internal)??;
+    f.hash = rynas_docker::adopt::editor_hash(&f.compose_file, &f.compose, &f.env);
     Ok(Json(f))
 }
 
@@ -2015,7 +2091,22 @@ async fn stack_files_put(
     s.ops.admins.require_admin(&who, "Docker stack files")?;
     let Json(req) = body?;
     let l = s.managed(&name).await?;
+    if let Some(a) = s.adopted_get(&name) {
+        return crate::docker_adopt::write_files(&s, &who, &name, a, l, req)
+            .await
+            .map(Json);
+    }
     let _busy = s.take_busy(&name)?;
+    if !req.hash.is_empty() {
+        let (s2, l2, n2) = (s.clone(), l.clone(), name.clone());
+        let now = tokio::task::spawn_blocking(move || s2.fs(None).read_files(&l2, &n2))
+            .await
+            .map_err(Error::internal)??;
+        if rynas_docker::adopt::editor_hash(&now.compose_file, &now.compose, &now.env) != req.hash
+        {
+            return Err(crate::docker_adopt::changed_on_disk());
+        }
+    }
     let v = s
         .validate(&name, &l.stack(&name), &req.compose, &req.env, &l.volume)
         .await?;
@@ -2043,7 +2134,7 @@ async fn stack_files_put(
 
 /// What a stack task does.
 #[derive(Debug, Clone)]
-enum StackOp {
+pub(crate) enum StackOp {
     Compose(ComposeAction),
     /// Snapshot (optional), pull, up -d; rolled back on failure.
     Update {
@@ -2075,7 +2166,7 @@ impl StackOp {
     }
 }
 
-fn start_compose(s: &Arc<DockerSvc>, who: &str, name: &str, l: Layout, op: StackOp) -> Res<String> {
+pub(crate) fn start_compose(s: &Arc<DockerSvc>, who: &str, name: &str, l: Layout, op: StackOp) -> Res<String> {
     let guard = mark_busy(s, name)?;
     let (s2, n2) = (s.clone(), name.to_string());
     let id = s.ops.tasks.spawn(&op.task(), who, move |ctx| async move {
@@ -2093,14 +2184,28 @@ pub(crate) async fn compose(
     l: &Layout,
     a: ComposeAction,
 ) -> Result<(), String> {
-    let dir = rynas_docker::under(&s.root, &l.stack(name));
-    let file = rynas_docker::stacks::find_compose(&dir)
-        .ok_or_else(|| format!("stack {name} has no compose file"))?;
-    let dir_s = dir.to_string_lossy().into_owned();
+    let native = rynas_docker::under(&s.root, &l.stack(name));
+    let file = rynas_docker::stacks::find_compose(&native);
+    let cmd_of: Box<dyn Fn(ComposeAction) -> Cmd + Send + Sync> =
+        match (file, s.adopted_get(name)) {
+            (Some(file), _) => {
+                let (dir_s, n) = (native.to_string_lossy().into_owned(), name.to_string());
+                Box::new(move |a| compose_cmd(&n, &dir_s, file, None, a))
+            }
+            (None, Some(ad)) => {
+                if ad.read_only {
+                    return Err(format!(
+                        "stack {name} is adopted read-only: Portainer manages its files"
+                    ));
+                }
+                Box::new(crate::docker_adopt::cmd_of(&s.root, name, &ad))
+            }
+            (None, None) => return Err(format!("stack {name} has no compose file")),
+        };
     if a == ComposeAction::Up {
-        prepare_up(s, ctx, name, &dir_s, file, l).await?;
+        prepare_up(s, ctx, cmd_of(ComposeAction::Config), file.is_some().then_some(l)).await?;
     }
-    let out = s.run(ctx, &compose_cmd(name, &dir_s, file, None, a)).await?;
+    let out = s.run(ctx, &cmd_of(a)).await?;
     // a failing pull or up must fail the task (and trigger the update's rollback)
     if !out.success() {
         return Err(format!(
@@ -2114,17 +2219,35 @@ pub(crate) async fn compose(
 
 /// Before `up`: the `docker-apps` account, and the missing bind folders below the volume
 /// created with its owner (Docker would make them as root); binds outside the volume are
-/// warned about.
+/// warned about. `l`: `None` for an adopted stack (its folders are left as they are: a
+/// missing bind folder is only logged).
 async fn prepare_up(
     s: &DockerSvc,
     ctx: &TaskCtx,
-    name: &str,
-    dir: &str,
-    file: &str,
-    l: &Layout,
+    cmd: Cmd,
+    l: Option<&Layout>,
 ) -> Result<(), String> {
+    let Some(l) = l else {
+        let out = s.run(ctx, &cmd).await?;
+        if !out.success() {
+            return Err(format!(
+                "the compose files are not valid: {}",
+                compose_error(&out.stderr)
+            ));
+        }
+        if let Ok(services) = parse_config(&out.stdout) {
+            for b in services.iter().flat_map(|s| s.binds.iter()) {
+                if !rynas_docker::under(&s.root, &b.source).exists() {
+                    ctx.log(&format!(
+                        "note: bind folder {} of {} does not exist (compose creates it as root)",
+                        b.source, b.service
+                    ));
+                }
+            }
+        }
+        return Ok(());
+    };
     let owner = s.ensure_apps_account(ctx).await?;
-    let cmd = compose_cmd(name, dir, file, None, ComposeAction::Config);
     let out = if s.exec_via_runner.load(Ordering::Relaxed) {
         s.run(ctx, &cmd).await?
     } else {
@@ -2317,6 +2440,8 @@ async fn stack_task(
         StackOp::Rollback { snapshot } => do_rollback(s, ctx, name, l, &snapshot).await,
         StackOp::Remove { delete_files } => {
             compose(s, ctx, name, l, ComposeAction::Down).await?;
+            // an adopted stack is released: its files stay where they are
+            crate::docker_adopt::forget(s, ctx, name);
             if delete_files {
                 if s.dry {
                     ctx.log(&format!(
@@ -2434,6 +2559,12 @@ async fn stack_action(
                     "deleting the stack folder needs the stack name as confirm".into(),
                 )
                 .field("confirm"));
+            }
+            if r.delete_files && s.adopted_get(&name).is_some() {
+                return Err(Error::invalid(
+                    "delete_files",
+                    "the files of an adopted stack are never deleted here (release it)",
+                ));
             }
             StackOp::Remove {
                 delete_files: r.delete_files,
@@ -2949,6 +3080,23 @@ fn docker_routes(st: DkState) -> Router {
         )
         .route("/v1/docker/stacks", get(stacks).post(stack_create))
         .route("/v1/docker/stacks/validate", post(stack_validate))
+        .route(
+            "/v1/docker/stacks/import/preview",
+            post(crate::docker_adopt::import_preview),
+        )
+        .route("/v1/docker/stacks/import", post(crate::docker_adopt::import))
+        .route(
+            "/v1/docker/stacks/{name}/adopt",
+            get(crate::docker_adopt::adopt_preview).post(crate::docker_adopt::adopt),
+        )
+        .route(
+            "/v1/docker/stacks/{name}/release",
+            post(crate::docker_adopt::release),
+        )
+        .route(
+            "/v1/docker/stacks/{name}/move",
+            post(crate::docker_adopt::move_route),
+        )
         .route("/v1/docker/stacks/{name}", get(stack_get))
         .route(
             "/v1/docker/stacks/{name}/files",

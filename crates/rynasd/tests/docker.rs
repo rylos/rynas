@@ -796,3 +796,343 @@ async fn apps_account_is_ensured_before_stack_folders() {
     );
     assert_eq!(r.calls.lock().unwrap().len(), 2, "nothing to create");
 }
+
+// ------------------------------------------------------------------ adopted stacks (§5.7)
+
+/// Compose and copies for the adoption tests: `config` answers one bind `<project dir>/data`
+/// (so a moved folder moves its bind), `cp -a --reflink=auto <from>/. <to>/` copies.
+struct Adopting(Mutex<Vec<String>>);
+
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap().flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            copy_tree(&p, &to.join(e.file_name()));
+        } else {
+            std::fs::copy(&p, to.join(e.file_name())).unwrap();
+        }
+    }
+}
+
+impl Runner for Adopting {
+    fn run(&self, cmd: &Cmd) -> Result<CmdOutput, String> {
+        let line = cmd.display();
+        self.0.lock().unwrap().push(line.clone());
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let out = match words.first().copied().unwrap_or("") {
+            "dpkg" => "amd64\n".to_string(),
+            "docker" if line.contains(" config") => {
+                let i = words.iter().position(|w| *w == "--project-directory").unwrap();
+                format!(
+                    r#"{{"services":{{"web":{{"image":"x","volumes":[{{"type":"bind","source":"{}/data","target":"/data"}}]}}}}}}"#,
+                    words[i + 1]
+                )
+            }
+            "cp" => {
+                let n = words.len();
+                copy_tree(
+                    Path::new(words[n - 2].trim_end_matches("/.")),
+                    Path::new(words[n - 1].trim_end_matches('/')),
+                );
+                String::new()
+            }
+            _ => String::new(),
+        };
+        Ok(CmdOutput {
+            code: Some(0),
+            stdout: out,
+            stderr: String::new(),
+        })
+    }
+}
+
+/// A folder restored from another NAS: previewed (name from `name:`, the override found,
+/// profiles and external networks warned), imported where it is (nothing written in it),
+/// edited only with the hash it was read with, started with every `-f` file and profile,
+/// moved into the rynas stacks folder (binds checked, the old folder set aside) and
+/// released without touching the files.
+#[tokio::test]
+async fn import_edit_move_and_release_a_folder() {
+    use rynas_api_types::docker::{AdoptPreview, AdoptWarning, StackAdopted};
+    let r = Arc::new(Adopting(Mutex::default()));
+    let e = env_with(false, r.clone(), Some("vol1"));
+    let root = e.dir.path().join("root");
+    let app = root.join("srv/compose/app");
+    std::fs::create_dir_all(app.join("data")).unwrap();
+    let main = "name: myapp\nservices:\n  web:\n    image: nginx:1.27\n    volumes:\n      - ./data:/data\n  debug:\n    image: busybox\n    profiles: [debug]\nnetworks:\n  proxy:\n    external: true\n";
+    std::fs::write(app.join("docker-compose.yml"), main).unwrap();
+    std::fs::write(
+        app.join("docker-compose.override.yml"),
+        "services:\n  web:\n    restart: always\n",
+    )
+    .unwrap();
+    std::fs::write(app.join(".env"), "TZ=Europe/Rome\n").unwrap();
+    std::fs::write(app.join("data/db"), "data").unwrap();
+
+    // refused folders
+    for dir in ["/etc", "relative", "/srv/none", "/srv"] {
+        let (s, b) = call(
+            &e,
+            "POST",
+            "/v1/docker/stacks/import/preview",
+            Some(json!({ "dir": dir })),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{dir}: {}", String::from_utf8_lossy(&b));
+        assert_eq!(err(&b).field.as_deref(), Some("dir"), "{dir}");
+    }
+    let (s, b) = call(
+        &e,
+        "POST",
+        "/v1/docker/stacks/import/preview",
+        Some(json!({"dir": "/srv/compose/app/"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    let p: AdoptPreview = serde_json::from_slice(&b).unwrap();
+    assert_eq!(p.name, "myapp");
+    assert_eq!(p.dir, "/srv/compose/app");
+    assert_eq!(
+        p.files,
+        [
+            "/srv/compose/app/docker-compose.yml",
+            "/srv/compose/app/docker-compose.override.yml"
+        ]
+    );
+    assert_eq!(p.profiles_found, ["debug"]);
+    assert_eq!(p.external_networks, ["proxy"]);
+    assert_eq!(
+        p.warnings,
+        [AdoptWarning::ExternalNetworks, AdoptWarning::Profiles]
+    );
+
+    // a non-admin cannot import
+    let (s, _) = call_as(
+        &e,
+        "bob",
+        "POST",
+        "/v1/docker/stacks/import",
+        Some(json!({"dir": "/srv/compose/app"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let before = std::fs::read_dir(&app).unwrap().count();
+    let (s, b) = call(
+        &e,
+        "POST",
+        "/v1/docker/stacks/import",
+        Some(json!({"dir": "/srv/compose/app", "profiles": ["debug"]})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{}", String::from_utf8_lossy(&b));
+    let a: StackAdopted = serde_json::from_slice(&b).unwrap();
+    assert_eq!(
+        (a.name.as_str(), a.task_id.is_none(), a.adopted.read_only),
+        ("myapp", true, false)
+    );
+    assert_eq!(
+        std::fs::read_dir(&app).unwrap().count(),
+        before,
+        "nothing written in the folder"
+    );
+    assert!(e.dir.path().join("state/docker/adopted.json").exists());
+    // twice: already adopted; a native stack cannot take the name
+    let (s, b) = call(
+        &e,
+        "POST",
+        "/v1/docker/stacks/import",
+        Some(json!({"dir": "/srv/compose/app"})),
+    )
+    .await;
+    assert_eq!(
+        (s, err(&b).code.as_str()),
+        (StatusCode::CONFLICT, error_codes::ALREADY_EXISTS)
+    );
+    let (s, _) = call(
+        &e,
+        "POST",
+        "/v1/docker/stacks",
+        Some(json!({"name": "myapp", "compose": "services: {}\n"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT);
+
+    // the editor: main file and .env, the override listed, a stale hash refused
+    let (s, b) = call(&e, "GET", "/v1/docker/stacks/myapp/files", None).await;
+    assert_eq!(s, StatusCode::OK);
+    let f: StackFiles = serde_json::from_slice(&b).unwrap();
+    assert_eq!(
+        (f.compose_file.as_str(), f.env.as_str(), f.read_only),
+        ("docker-compose.yml", "TZ=Europe/Rome\n", false)
+    );
+    assert_eq!(
+        f.other_files,
+        ["/srv/compose/app/docker-compose.override.yml"]
+    );
+    std::fs::write(app.join(".env"), "TZ=UTC\n").unwrap();
+    let (s, b) = call(
+        &e,
+        "PUT",
+        "/v1/docker/stacks/myapp/files",
+        Some(json!({"compose": main, "env": "X=1\n", "hash": f.hash})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{}", String::from_utf8_lossy(&b));
+    assert_eq!(err(&b).field.as_deref(), Some("hash"));
+    assert_eq!(std::fs::read_to_string(app.join(".env")).unwrap(), "TZ=UTC\n");
+
+    // up: every -f file, the profile, the folder as project directory
+    let (s, b) = call(&e, "POST", "/v1/docker/stacks/myapp/up", None).await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{}", String::from_utf8_lossy(&b));
+    let id = serde_json::from_slice::<TaskStarted>(&b).unwrap().task_id;
+    assert_eq!(
+        wait_task(&e, &id).await.status,
+        TaskStatus::Ok,
+        "{}",
+        log(&e, &id)
+    );
+    let real = app.to_string_lossy().into_owned();
+    let up = r
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|c| c.contains(" up "))
+        .cloned()
+        .unwrap();
+    assert!(
+        up.contains(&format!(
+            "-p myapp --project-directory {real} -f {real}/docker-compose.yml -f {real}/docker-compose.override.yml --profile debug up"
+        )),
+        "{up}"
+    );
+    // deleting its files is refused (released instead)
+    let (s, b) = call(
+        &e,
+        "POST",
+        "/v1/docker/stacks/myapp/remove",
+        Some(json!({"delete_files": true, "confirm": "myapp"})),
+    )
+    .await;
+    assert_eq!(
+        (s, err(&b).field.as_deref()),
+        (StatusCode::BAD_REQUEST, Some("delete_files"))
+    );
+
+    // move: confirmed, copied with the data, binds checked, old folder set aside
+    let (s, b) = call(
+        &e,
+        "POST",
+        "/v1/docker/stacks/myapp/move",
+        Some(json!({"confirm": "nope"})),
+    )
+    .await;
+    assert_eq!(
+        (s, err(&b).code.as_str()),
+        (StatusCode::BAD_REQUEST, error_codes::CONFIRMATION_REQUIRED)
+    );
+    let (s, b) = call(
+        &e,
+        "POST",
+        "/v1/docker/stacks/myapp/move",
+        Some(json!({"confirm": "myapp"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{}", String::from_utf8_lossy(&b));
+    let id = serde_json::from_slice::<TaskStarted>(&b).unwrap().task_id;
+    let t = wait_task(&e, &id).await;
+    let l = log(&e, &id);
+    assert_eq!(t.status, TaskStatus::Ok, "{l}");
+    let target = root.join("vol1/docker/stacks/myapp");
+    assert_eq!(std::fs::read_to_string(target.join("data/db")).unwrap(), "data");
+    assert!(!app.exists(), "{l}");
+    let aside: Vec<_> = std::fs::read_dir(root.join("srv/compose"))
+        .unwrap()
+        .flatten()
+        .map(|x| x.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        aside.len() == 1 && aside[0].starts_with("app.moved-"),
+        "{aside:?}"
+    );
+    // two -f files: still adopted, in its new folder
+    let (s, b) = call(&e, "GET", "/v1/docker/stacks/myapp/files", None).await;
+    assert_eq!(s, StatusCode::OK);
+    let f: StackFiles = serde_json::from_slice(&b).unwrap();
+    assert_eq!(
+        f.other_files,
+        ["/vol1/docker/stacks/myapp/docker-compose.override.yml"]
+    );
+
+    // release: the record goes, the files stay
+    let (s, _) = call(&e, "POST", "/v1/docker/stacks/myapp/release", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert!(target.join("docker-compose.yml").exists());
+    let (s, _) = call(&e, "POST", "/v1/docker/stacks/myapp/release", None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let reg = std::fs::read_to_string(e.dir.path().join("state/docker/adopted.json")).unwrap();
+    assert!(!reg.contains("myapp"), "{reg}");
+}
+
+/// `config` answers a bind `../shared` relative to the project directory.
+struct Outside;
+
+impl Runner for Outside {
+    fn run(&self, cmd: &Cmd) -> Result<CmdOutput, String> {
+        let line = cmd.display();
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let out = if line.starts_with("docker") && line.contains(" config") {
+            let i = words
+                .iter()
+                .position(|w| *w == "--project-directory")
+                .unwrap();
+            let parent = Path::new(words[i + 1]).parent().unwrap().display().to_string();
+            format!(
+                r#"{{"services":{{"web":{{"image":"x","volumes":[{{"type":"bind","source":"{parent}/shared","target":"/s"}}]}}}}}}"#
+            )
+        } else {
+            String::new()
+        };
+        Ok(CmdOutput {
+            code: Some(0),
+            stdout: out,
+            stderr: String::new(),
+        })
+    }
+}
+
+/// A move whose bind would land elsewhere is undone: the copy removed, the record and the
+/// old folder unchanged.
+#[tokio::test]
+async fn move_with_a_bind_outside_the_folder_is_undone() {
+    let e = env_with(false, Arc::new(Outside), Some("vol1"));
+    let app = e.dir.path().join("root/srv/app");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(app.join("compose.yaml"), "services:\n  web:\n    image: x\n").unwrap();
+    let (s, b) = call(
+        &e,
+        "POST",
+        "/v1/docker/stacks/import",
+        Some(json!({"dir": "/srv/app"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{}", String::from_utf8_lossy(&b));
+    let (s, b) = call(
+        &e,
+        "POST",
+        "/v1/docker/stacks/app/move",
+        Some(json!({"confirm": "app"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{}", String::from_utf8_lossy(&b));
+    let id = serde_json::from_slice::<TaskStarted>(&b).unwrap().task_id;
+    let t = wait_task(&e, &id).await;
+    let l = log(&e, &id);
+    assert_eq!(t.status, TaskStatus::Error, "{l}");
+    assert!(l.contains("bind mounts would point elsewhere"), "{l}");
+    assert!(!e.dir.path().join("root/vol1/docker/stacks/app").exists());
+    assert!(app.join("compose.yaml").exists());
+    let (s, _) = call(&e, "GET", "/v1/docker/stacks/app/files", None).await;
+    assert_eq!(s, StatusCode::OK, "still adopted where it was");
+}
