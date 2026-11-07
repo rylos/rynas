@@ -869,6 +869,9 @@ administrator picks one. "Move behind the proxy" shows the resulting address
 (`<label>-<host>.local`, from `host` of the state). The Docker install card shows
 `install_incomplete` (package, version, dpkg status) and "Finish the Docker install"; the
 same card appears on the Overview tab for an install rynas started that lacks its last steps.
+Since A3 the Featured tab lists the entries marked `featured` (those that fit this NAS
+first), and a `reverse_proxy` entry cannot be installed until web access is in external proxy
+mode (the drawer links to the mode setting; the wizard skips its Access step).
 
 Patterns taken, and complaints avoided:
 - one row per address with an access badge and a status, details in a drawer (Nginx Proxy

@@ -2688,7 +2688,7 @@ apps.tab.installed	Installate
 apps.tab.updates	Aggiornamenti
 apps.updates_waiting	App installate con un aggiornamento: {n}.
 apps.see_updates	Vedi gli aggiornamenti
-apps.feat.fit	Adatte a questo NAS
+apps.feat.fit	App consigliate
 apps.feat.ram	Scelte per {ram} di RAM e l'architettura {arch}.
 apps.feat.arch	Scelte per l'architettura {arch}.
 apps.feat.none	Tutte le app adatte sono già installate.
@@ -2743,6 +2743,8 @@ apps.block.volume	Docker non ha ancora un volume: sceglilo nelle impostazioni di
 apps.block.arch	Non disponibile per questo processore
 apps.block.rynas	Richiede un rynas più recente
 apps.block.ram	RAM insufficiente per l'installazione
+apps.block.reverse_proxy	Questo proxy richiede le porte 80 e 443: prima passa l'accesso web alla modalità proxy esterno.
+apps.block.to_mode	Cambia la modalità
 apps.installed	Installata
 apps.version	Versione {v}
 apps.version_pkg	Versione {v} · pacchetto {pkg}

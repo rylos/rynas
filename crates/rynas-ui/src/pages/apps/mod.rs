@@ -87,6 +87,9 @@ pub(super) struct Apps {
     pub inst: Remote<Vec<InstalledApp>>,
     /// Web access is active (rynas-caddy installed, built-in mode).
     pub proxy: RwSignal<bool>,
+    /// Web access runs in external proxy mode (or rynasd has none): 80/443 are free, so a
+    /// reverse proxy app (`AppCard::reverse_proxy`) may be installed.
+    pub external: RwSignal<bool>,
     /// The host label of web access names (`<label>-<host>.local`).
     pub proxy_host: RwSignal<String>,
     /// Entry id of the open detail drawer.
@@ -134,6 +137,7 @@ pub fn AppsPage() -> impl IntoView {
         inst: remote::<Vec<InstalledApp>>("/api/v1/apps/installed", d.generation),
         proxy: RwSignal::new(false),
         proxy_host: RwSignal::new(String::new()),
+        external: RwSignal::new(false),
         detail: RwSignal::new(None),
         wizard: RwSignal::new(None),
         manage: RwSignal::new(None),
@@ -148,8 +152,12 @@ pub fn AppsPage() -> impl IntoView {
             Ok(w) => {
                 let _ = a.proxy.try_set(w.engine.installed && w.applied.settings.mode == ProxyMode::Builtin);
                 let _ = a.proxy_host.try_set(w.host);
+                let _ = a.external.try_set(w.applied.settings.mode == ProxyMode::External);
             }
-            Err(e) if e.status() == 503 || e.status() == 401 => {}
+            Err(e) if e.status() == 503 => {
+                let _ = a.external.try_set(true);
+            }
+            Err(e) if e.status() == 401 => {}
             Err(e) => {
                 let _ = proxy_err.try_set(Some(e.text()));
             }
@@ -312,6 +320,8 @@ pub(super) fn install_block(c: &AppCard, cat: &AppCatalog) -> Option<&'static st
         Some("apps.block.rynas")
     } else if matches!(c.ram, RamGate::BelowMinimum { .. }) {
         Some("apps.block.ram")
+    } else if c.reverse_proxy && !apps().external.get() {
+        Some("apps.block.reverse_proxy")
     } else {
         None
     }

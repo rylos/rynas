@@ -95,7 +95,7 @@ struct W {
 impl W {
     /// The Access step exists for apps with a web interface on their own ports.
     fn steps(self) -> Vec<Step> {
-        let access = self.detail.data.with(|d| d.as_ref().is_some_and(|d| d.web.is_some() && !d.host_network));
+        let access = self.detail.data.with(|d| d.as_ref().is_some_and(|d| d.web.is_some() && !d.host_network && !d.card.reverse_proxy));
         let mut v = vec![Step::Options, Step::Folders, Step::Network];
         if access {
             v.push(Step::Access);
