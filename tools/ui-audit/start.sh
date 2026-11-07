@@ -10,6 +10,13 @@
 # (/etc/synodeb/ups.conf; a dry root used once with synodeb keeps it: delete $R to switch).
 # FAKE_USB=1: fake removable drives (a mounted USB stick, a USB disk with NTFS and a locked
 # LUKS volume, an SD card) below the fake tree: the USB icon of the app bar and its menu.
+# FAKE_DOCKER=1: a fake Docker Engine (fakedocker.py on $R/docker.sock: a rynas stack, a Portainer
+# stack, an untracked unhealthy one, a manager) for the Docker page and widget; the running
+# containers borrow this machine's docker-*.scope cgroup ids for real stats numbers (read-only;
+# FAKE_DOCKER_CGROUPS=0 turns that off). rynasd checks administrators from the system groups, so a
+# second login named after the current Unix user (same password) is added and its primary group
+# is the admin group: use it for logs, actions and stacks (AUDIT_USER=$(id -un) for the probes).
+# Without FAKE_DOCKER rynasd never contacts a Docker socket (not even the host's).
 # GENERIC=1: a plain PC instead of the DS920+ (no Synology platform, no synohwd status), to check
 # that no Synology screen, tab or hint shows up on generic hardware (G8d).
 set -e
@@ -39,10 +46,47 @@ if [ -n "${FAKE_UPS:-}" ]; then
     [ -f "$D/nut/upsd.users" ] || { printf '[upsmon]\n\tpassword = fake\n\tupsmon primary\n' > "$D/nut/upsd.users"; chmod 640 "$D/nut/upsd.users"; }
   fi
 fi
-target/release/rynasd --socket "$R/rynasd.sock" --state-dir "$R/state" --dry-system --hw-root "$H" \
-  --notify-socket "" --storage-check-interval 0 "${RYNASD_UPS[@]}" ${FAKE_USB:+--removable-demo} > "$R/rynasd.log" 2>&1 &
+DOCKER_ARGS=(--docker-socket "")
+USERS=$HERE/users.toml
+if [ -n "${FAKE_DOCKER:-}" ]; then
+  CG=--cgroups; [ "${FAKE_DOCKER_CGROUPS:-1}" = 0 ] && CG=
+  python3 -I "$HERE/fakedocker.py" "$R/docker.sock" $CG > "$R/fakedocker.log" 2>&1 &
+  echo $! >> "$R/pids"
+  D=$R/state/dry-root
+  mkdir -p "$D/etc/docker" "$D/volume1/docker/stacks/media" "$D/volume1/docker/stacks/paperless"
+  [ -f "$D/etc/docker/daemon.json" ] || printf '{"data-root": "/volume1/docker/engine", "log-driver": "local"}\n' > "$D/etc/docker/daemon.json"
+  [ -f "$D/volume1/docker/stacks/media/compose.yaml" ] || cat > "$D/volume1/docker/stacks/media/compose.yaml" <<'YAML'
+services:
+  jellyfin:
+    image: jellyfin/jellyfin:10.11.2
+    restart: unless-stopped
+    ports:
+      - "8096:8096"
+    volumes:
+      - ./config:/config
+      - /volume1/media:/media:ro
+  syncthing:
+    image: syncthing/syncthing:2.0.10
+    restart: unless-stopped
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+    ports:
+      - "8384:8384"
+      - "22000:22000"
+YAML
+  [ -f "$D/volume1/docker/stacks/media/.env" ] || printf 'PUID=1000\nPGID=1000\n' > "$D/volume1/docker/stacks/media/.env"
+  [ -f "$D/volume1/docker/stacks/paperless/compose.yaml" ] || printf 'services:\n  broker:\n    image: redis:8\n    restart: unless-stopped\n' > "$D/volume1/docker/stacks/paperless/compose.yaml"
+  for _ in $(seq 30); do [ -S "$R/docker.sock" ] && break; sleep 0.1; done
+  DOCKER_ARGS=(--docker-socket "$R/docker.sock" --admin-group "$(id -gn)")
+  USERS=$R/users.toml
+  { cat "$HERE/users.toml"; printf '\n[[user]]\nname = "%s"\n' "$(id -un)"; grep '^hash' "$HERE/users.toml"; grep '^groups' "$HERE/users.toml"; } > "$USERS"
+fi
+# any docker CLI rynasd might run reads the fake engine, never the host's
+DOCKER_HOST=unix://$R/docker.sock target/release/rynasd --socket "$R/rynasd.sock" --state-dir "$R/state" --dry-system --hw-root "$H" \
+  --notify-socket "" --storage-check-interval 0 "${RYNASD_UPS[@]}" "${DOCKER_ARGS[@]}" ${FAKE_USB:+--removable-demo} > "$R/rynasd.log" 2>&1 &
 echo $! >> "$R/pids"; sleep 1.5
-target/release/rynas-web --listen "127.0.0.1:$PORT" --rynasd-socket "$R/rynasd.sock" --users-file "$HERE/users.toml" \
+target/release/rynas-web --listen "127.0.0.1:$PORT" --rynasd-socket "$R/rynasd.sock" --users-file "$USERS" \
   --auth-state-dir "$R/web" --ui-dir crates/rynas-ui/dist --hw-root "$H" "${UPSD_ARG[@]}" > "$R/web.log" 2>&1 &
 echo $! >> "$R/pids"
 for _ in $(seq 50); do curl -s -o /dev/null "http://127.0.0.1:$PORT/" && { echo "up on http://127.0.0.1:$PORT"; exit 0; }; sleep 0.1; done

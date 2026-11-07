@@ -254,6 +254,46 @@ pub fn area_field(label: &'static str, value: Signal<String>, set: Callback<Stri
     .into_any()
 }
 
+/// Labelled code editor (compose files, `.env`): a monospace textarea with line numbers, no
+/// wrapping (indentation matters), an inline error under it. Plain text, no highlighting:
+/// nothing extra in the wasm.
+pub fn code_field(label: &'static str, value: Signal<String>, set: Callback<String>, err: Signal<Option<String>>, rows: u32) -> AnyView {
+    let id = fid();
+    let eid = format!("{id}e");
+    let gutter = NodeRef::<leptos::html::Pre>::new();
+    let lines = Memo::new(move |_| value.with(|v| v.split('\n').count().max(1)));
+    let numbers = move || (1..=lines.get()).map(|n| n.to_string()).collect::<Vec<_>>().join("\n");
+    view! {
+        <div class="field">
+            <label class="field-label" for=id.clone()>{tr(label)}</label>
+            <div class="code-edit" style=format!("--rows:{rows}")>
+                <pre class="code-gutter" node_ref=gutter aria-hidden="true">{numbers}</pre>
+                <textarea
+                    id=id
+                    class="code-area"
+                    wrap="off"
+                    spellcheck="false"
+                    autocapitalize="off"
+                    autocomplete="off"
+                    aria-invalid=move || err.with(Option::is_some).then_some("true")
+                    aria-describedby=eid.clone()
+                    prop:value=move || value.get()
+                    on:input=move |ev| set.run(event_target_value(&ev))
+                    on:scroll=move |ev| {
+                        if let Some(g) = gutter.get_untracked() {
+                            g.set_scroll_top(event_target::<web_sys::HtmlElement>(&ev).scroll_top());
+                        }
+                    }
+                ></textarea>
+            </div>
+            <span class="field-error" id=eid aria-live="polite">
+                {move || err.get().map(|e| view! { <Icon icon=icons::CIRCLE_X size=12 />{crate::ui::err_view(e)} })}
+            </span>
+        </div>
+    }
+    .into_any()
+}
+
 /// Switch with a label and an optional help line.
 pub fn switch(label: &'static str, help: Option<&'static str>, value: Signal<bool>, set: Callback<bool>) -> AnyView {
     view! {

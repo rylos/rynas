@@ -8,6 +8,7 @@ mod chassis;
 mod config;
 #[cfg(feature = "demo")]
 mod demo;
+mod docker;
 #[cfg(test)]
 mod files_check;
 mod form;
@@ -36,6 +37,7 @@ fn main() {
     i18n::init();
     api::init();
     config::init();
+    docker::init();
     toast::init();
     leptos::mount::mount_to_body(shell::App);
     // the static boot screen in index.html stays until the first real paint

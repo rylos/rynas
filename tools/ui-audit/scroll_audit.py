@@ -1,6 +1,7 @@
 """Every element that scrolls sideways (inner scrollbars too), on every route, in the dialogs
 opened by the page's primary buttons and in each of their tabs; widths 1280/1024/390, en+it."""
-# ROUTES=/hardware,/network limits it to some routes; CDP_PORT picks another browser port.
+# ROUTES=/hardware,/network limits it to some routes (`/docker:2` opens the page's third tab);
+# CDP_PORT picks another browser port.
 import asyncio, json, os, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
@@ -27,6 +28,14 @@ async def audit(p, tag):
     for x in r: print(tag, '::', x)
     return len(r)
 
+async def go(p, route):
+    path, _, tab = route.partition(":")
+    await run_all.nav(p, path)
+    if tab:
+        await asyncio.sleep(1.0)
+        await p.js(f"document.querySelectorAll('.page [role=tab]')[{int(tab)}]?.click()")
+
+
 async def main():
     br = cdp.start_browser(); bad = 0; dlg = 0
     try:
@@ -38,7 +47,7 @@ async def main():
                 await p.send("Emulation.setDeviceMetricsOverride", width=w, height=h, deviceScaleFactor=1, mobile=m)
                 await p.goto(run_all.BASE + "/"); await asyncio.sleep(2)
                 for route in (os.environ["ROUTES"].split(",") if os.environ.get("ROUTES") else run_all.ROUTES):
-                    try: await run_all.nav(p, route)
+                    try: await go(p, route)
                     except Exception as e: print("nav fail", route, e); continue
                     await asyncio.sleep(1.2)
                     tag = f"{lang} {w} {route}"
@@ -48,13 +57,13 @@ async def main():
                         await p.js(f"document.querySelectorAll('.page .btn.primary:not(dialog *), .page td.actions .icon-btn:not(dialog *)')[{i}]?.click()")
                         await asyncio.sleep(0.8)
                         if not await p.js("!!document.querySelector('dialog[open]')"): 
-                            await run_all.nav(p, route); await asyncio.sleep(0.8); continue
+                            await go(p, route); await asyncio.sleep(0.8); continue
                         tabs = await p.js("document.querySelectorAll('dialog[open] [role=tab]').length")
                         for t in range(max(tabs, 1)):
                             if tabs: await p.js(f"document.querySelectorAll('dialog[open] [role=tab]')[{t}].click()"); await asyncio.sleep(0.6)
                             bad += await audit(p, f"{tag} dialog{i} tab{t}"); dlg += 1
                         await run_all.esc(p); await asyncio.sleep(0.4)
-                        await run_all.nav(p, route); await asyncio.sleep(0.6)
+                        await go(p, route); await asyncio.sleep(0.6)
         print("TOTAL", bad, "dialog views", dlg)
     finally:
         br.terminate()

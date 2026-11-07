@@ -95,6 +95,8 @@ impl Tasks {
     /// A `task.*` event (or a fresh `GET /tasks/{id}`): insert or replace by id.
     pub fn upsert(self, task: TaskInfo) {
         let finished_config = task.status.is_finished() && task.kind.starts_with("config.");
+        let finished_docker = task.status.is_finished() && task.kind.starts_with("docker.");
+        let known = finished_docker && self.list.with_untracked(|l| l.iter().any(|t| t.id == task.id && t.status.is_finished()));
         self.list.update(|l| match l.iter_mut().find(|t| t.id == task.id) {
             Some(t) => *t = task,
             None => {
@@ -106,6 +108,10 @@ impl Tasks {
         // an apply or overwrite changed the pending set and the revisions
         if finished_config {
             crate::config::changed();
+        }
+        // an install, a migration or a stack action changed what the Docker page shows
+        if finished_docker && !known {
+            crate::docker::docker().resync();
         }
     }
 

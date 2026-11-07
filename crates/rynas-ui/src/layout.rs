@@ -15,6 +15,8 @@ pub enum W {
     Health,
     Volumes,
     Hardware,
+    /// Only while Docker is installed.
+    Docker,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -42,7 +44,7 @@ impl Size {
     }
 }
 
-pub const ALL: [W; 8] = [W::System, W::Cpu, W::Memory, W::Network, W::Disk, W::Health, W::Volumes, W::Hardware];
+pub const ALL: [W; 9] = [W::System, W::Cpu, W::Memory, W::Network, W::Disk, W::Health, W::Volumes, W::Hardware, W::Docker];
 
 impl W {
     pub fn id(self) -> &'static str {
@@ -55,6 +57,7 @@ impl W {
             W::Health => "health",
             W::Volumes => "volumes",
             W::Hardware => "hardware",
+            W::Docker => "docker",
         }
     }
     fn parse(s: &str) -> Option<W> {
@@ -71,6 +74,7 @@ impl W {
             W::Health => "w.health",
             W::Volumes => "w.volumes",
             W::Hardware => "w.hardware",
+            W::Docker => "w.docker",
         }
     }
     /// Sizes the widget supports, with their width in columns of the 12-column grid.
@@ -81,6 +85,7 @@ impl W {
             W::Network | W::Disk => &[(Size::S, 4), (Size::M, 6), (Size::L, 8)],
             W::Volumes => &[(Size::S, 4), (Size::M, 8), (Size::L, 12)],
             W::Hardware => &[(Size::M, 6), (Size::L, 12)],
+            W::Docker => &[(Size::S, 4), (Size::M, 6), (Size::L, 12)],
         }
     }
     pub fn span(self, size: Size) -> u8 {
@@ -90,7 +95,7 @@ impl W {
     fn default_size(self) -> Size {
         match self {
             W::Cpu | W::Volumes => Size::M,
-            W::Hardware => Size::L,
+            W::Hardware | W::Docker => Size::L,
             _ => Size::S,
         }
     }
@@ -103,7 +108,8 @@ pub struct Item {
     pub hidden: bool,
 }
 
-/// Rows of 12: [System 4 | CPU 8] [Memory | Network | Disk I/O] [Health 4 | Volumes 8] [Hardware].
+/// Rows of 12: [System 4 | CPU 8] [Memory | Network | Disk I/O] [Health 4 | Volumes 8] [Hardware]
+/// [Docker].
 pub fn default_layout() -> Vec<Item> {
     ALL.into_iter().map(|w| Item { w, size: w.default_size(), hidden: false }).collect()
 }
@@ -201,7 +207,7 @@ mod tests {
     #[test]
     fn default_rows_fill_twelve_columns() {
         let spans: Vec<u8> = default_layout().iter().map(|i| i.w.span(i.size)).collect();
-        assert_eq!(spans, [4, 8, 4, 4, 4, 4, 8, 12]);
+        assert_eq!(spans, [4, 8, 4, 4, 4, 4, 8, 12, 12]);
     }
 
     #[test]

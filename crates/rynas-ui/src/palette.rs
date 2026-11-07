@@ -108,6 +108,7 @@ pub fn Palette() -> impl IntoView {
         let mut r: Vec<(i32, usize)> = all.with_value(|es| {
             es.iter()
                 .enumerate()
+                .filter(|(_, e)| !matches!(e.action, Action::Go(p) if !crate::shell::nav_shown(p)))
                 .filter_map(|(i, e)| {
                     let label = t(e.key);
                     let extra = if matches!(e.action, Action::Go(_)) { t("pal.go") } else { "" };
