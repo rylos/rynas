@@ -58,9 +58,10 @@ fn client_ip(ci: Option<Extension<ConnectInfo<SocketAddr>>>) -> IpAddr {
         .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
 }
 
-fn is_https(st: &AppState, headers: &HeaderMap) -> bool {
+fn is_https(st: &AppState, headers: &HeaderMap, tls: bool) -> bool {
     // a spoofed header can only make the cookie stricter
     st.secure_cookies
+        || tls
         || headers
             .get("x-forwarded-proto")
             .and_then(|v| v.to_str().ok())
@@ -182,6 +183,7 @@ pub async fn fallback(State(st): State<AppState>, headers: HeaderMap) -> Error {
 pub async fn login(
     State(st): State<AppState>,
     ci: Option<Extension<ConnectInfo<SocketAddr>>>,
+    tls: Option<Extension<crate::tls::Https>>,
     headers: HeaderMap,
     body: Result<Json<LoginRequest>, JsonRejection>,
 ) -> Response {
@@ -202,7 +204,7 @@ pub async fn login(
             let mut r = Json(st.auth.sessions().to_api(&s)).into_response();
             r.headers_mut().insert(
                 header::SET_COOKIE,
-                cookie(&token, max_age, is_https(&st, &headers)),
+                cookie(&token, max_age, is_https(&st, &headers, tls.is_some())),
             );
             r
         }
@@ -258,12 +260,13 @@ pub async fn session(
 pub async fn logout(
     State(st): State<AppState>,
     Extension(CurrentSession(s)): Extension<CurrentSession>,
+    tls: Option<Extension<crate::tls::Https>>,
     headers: HeaderMap,
 ) -> Response {
     st.auth.logout(&s.id);
     let mut r = StatusCode::NO_CONTENT.into_response();
     r.headers_mut()
-        .insert(header::SET_COOKIE, cookie("", 0, is_https(&st, &headers)));
+        .insert(header::SET_COOKIE, cookie("", 0, is_https(&st, &headers, tls.is_some())));
     r
 }
 

@@ -29,7 +29,7 @@ HDDs) for everyday use. Order of work, each item ending with tests, a real run a
 
 | P | Area | Why first | Decisions |
 |---|---|---|---|
-| P0 | Foundation: login, sessions, `.deb`, HTTPS self-signed, config store with pending/apply/revisions, task engine (UPID, logs, cancel) | everything else builds on it | D-PRIV, D-CFG, D-CFGBAK |
+| P0 | Foundation: login, sessions, `.deb`, HTTPS on `:8443` with a local CA (W0, done), config store with pending/apply/revisions, task engine (UPID, logs, cancel) | everything else builds on it | D-PRIV, D-CFG, D-CFGBAK |
 | P1 | Storage: disks + SMART, mdadm and btrfs status and creation wizard, scrub, per-disk-type defaults | the NAS exists to store data | D-STO, D-SYSTUNE |
 | P2 | Users & groups (local) + SMB/NFS shares with POSIX ACL matrix, `#recycle`, previous versions | the main daily use | D-IDENTITY, D-FILESVC |
 | P3 | Snapshots (btrbk engine, GFS, browse/restore) + task scheduler + notifications (SMTP/ntfy/Telegram) | protect the data, know when something breaks | D-SNAP, D-TASKS, D-NOTIFY |
@@ -141,7 +141,7 @@ Since step 4 every endpoint above requires a session (401 `unauthenticated` with
 
 Rules:
 - **Session**: cookie `rynas_session`, `HttpOnly; SameSite=Strict; Path=/` (+ `Secure` over HTTPS:
-  `X-Forwarded-Proto: https` or `--secure-cookies`); 256-bit random token, only its SHA-256 is kept in
+  the HTTPS port (W0), `X-Forwarded-Proto: https` or `--secure-cookies`); 256-bit random token, only its SHA-256 is kept in
   memory. Idle timeout 30 min (`--session-idle-timeout`), absolute 12 h (`--session-max-age`).
   Sessions do not survive a restart of `rynas-web`.
 - **Idle timeout = user inactivity** (DSM model): only user-initiated requests renew it. Event
@@ -190,6 +190,151 @@ cargo run -p rynas-web -- --listen 127.0.0.1:8080 --rynasd-socket /tmp/x/rynasd.
 `users.toml`: `[[user]]` tables with `name`, `hash`, `groups = ["rynas-admin"]` (internal realm
 "rynas", tried before PAM). A non-root `rynasd` can only verify the password of the user it runs as
 (`pam_unix` goes through `unix_chkpwd`); every other PAM login is refused.
+
+## API v1: web TLS (W0)
+Wave W0 of `../research/web-access.md` (phase 1 debt before the web-access module): `rynas-web`
+serves HTTPS with rustls on its **own port `:8443`**, the emergency door that never goes through
+the reverse proxy (D-PROXY revised 2026-11-07: "rynas-web keeps `:8443` with rustls as emergency
+access … it reuses the active certificate"). Like DSM's 5001, Proxmox's 8006 and Cockpit's 9090.
+
+**Listeners** (`rynas-web`, `/etc/default/rynas-web`, unit `rynas-web.service`):
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `--tls-listen` / `RYNAS_WEB_TLS_LISTEN` | `[::]:8443` | HTTPS; `[::]` is bound dual-stack (`IPV6_V6ONLY` off), `0.0.0.0` when the kernel has no IPv6; `off` disables it |
+| `--tls-cert`, `--tls-key` | `/etc/rynas/tls/ui.crt`, `ui.key` | the pair rynasd publishes |
+| `--listen` / `RYNAS_WEB_LISTEN` | `0.0.0.0:8080` (unit) | plain HTTP, kept during the transition |
+| `--no-https-redirect` | off | serve plain HTTP to other hosts instead of redirecting |
+
+- HTTPS and plain HTTP serve the same router. TLS 1.2/1.3 (ring provider, no aws-lc C build),
+  ALPN `http/1.1`, handshake limit 10 s, one task per connection. IPv4-mapped peers
+  (`::ffff:a.b.c.d`) are handed on as IPv4, so the login rate limit (IPv6 grouped per /64) and
+  the network endpoints see real IPv4 addresses.
+- **Redirect**: once a certificate is loaded, plain-HTTP requests from other hosts get `307` to
+  `https://<same Host>:<https port><path and query>` with `Cache-Control: no-store` (never a
+  cached `301/308` that would outlive a later opt-out). Never redirected: loopback peers (a proxy
+  on this host — the future Caddy upstream —, SSH tunnels), `X-Forwarded-Proto: https`, a
+  missing or malformed `Host`, `--no-https-redirect`. Before a certificate exists nothing is
+  redirected and HTTPS handshakes fail.
+- **Cookies**: `Secure` on every answer over the HTTPS port (request extension
+  `rynas_web::tls::Https`), plus the step-4 rules (`X-Forwarded-Proto: https`,
+  `--secure-cookies`). Sessions, CSRF and idle rules are unchanged.
+- **No HSTS** on `:8443`: with a certificate the browser does not trust yet, HSTS removes the
+  "continue" button (RFC 6797 §12.1), which would turn the emergency door into a lockout. HSTS
+  belongs to public routes of the reverse proxy (W2), `max-age` only.
+- **Hot reload** without a restart: the pair sits behind a rustls `ResolvesServerCert` swapped
+  in place; rynas-web re-reads the files when size, mtime or inode change (every 10 s), on
+  `SIGHUP` (`systemctl reload rynas-web`) and right after `import` / `local` succeed. A pair whose
+  key does not match its chain (caught between the two renames of an update) is skipped until
+  the next check; the previous pair keeps serving. Open connections keep their certificate.
+
+**Certificates** (`rynasd`, crate `rynas-tls`, module `rynasd::tls`): rynasd (root) is the only
+writer; rynas-web (user `rynas`) only reads.
+
+| File | Mode | Content |
+|---|---|---|
+| `/var/lib/rynas/tls/ca.crt`, `ca.key` | 0600 root (dir 0700) | local CA: ECDSA P-256, 10 years, `CN=rynas local CA (<host>)`, path length 0 |
+| `/var/lib/rynas/tls/local.crt`, `local.key` | 0600 root | leaf from the local CA + the CA certificate |
+| `/var/lib/rynas/tls/imported.crt`, `imported.key` | 0600 root | the administrator's chain and key |
+| `/var/lib/rynas/tls/active` | 0600 root | `local` or `imported` |
+| `/etc/rynas/tls/ui.crt` | 0644 (dir 0750 root:rynas) | **active** chain, read by rynas-web |
+| `/etc/rynas/tls/ui.key` | 0640 root:rynas | active key (written before `ui.crt`; each file through a temporary file and a rename) |
+| `/etc/rynas/tls/ca.crt` | 0644 | local CA certificate ("Trust this NAS") |
+
+- **Local leaf**: ECDSA P-256 (every browser and TLS stack; Ed25519 certificates are still not
+  accepted by browsers for TLS), 397 days (inside the 398 days browsers allow public CAs and
+  Apple's 825-day rule that applies to every TLS server certificate), `serverAuth`,
+  `digitalSignature`, not a CA, authority key identifier; `notBefore` one day back for client
+  clock skew. SANs: host name, `<first label>.local`, the full name when the host name has dots,
+  `localhost`, `127.0.0.1`, `::1`, and the addresses of the interfaces (`ip -j addr`), except
+  container/VM bridges (`docker*`, `br-*`, `veth*`, `virbr*`…), IPv6 link-local (browsers do not
+  take zone ids in URLs, so such a SAN can never match), temporary and deprecated IPv6 (they
+  rotate daily). IPv4 link-local stays (a NAS without DHCP).
+- **Why a local CA and not a bare self-signed leaf** (Proxmox model: cluster CA + node
+  certificate): trusting the CA once survives every re-issue for a new name or address, and the
+  web-access module (W1) hands the same root and key to Caddy's `pki` app as its local CA, so
+  the user trusts one root for `:8443` and for `<app>-<host>.local` names.
+- **Re-issue**: at start and every 120 s rynasd compares the names with the local leaf and
+  issues a new one when a name or address is **missing** (extra stale names do not count: a
+  flapping address does not re-issue back and forth) or 30 days before it expires (Cockpit's
+  `cockpit-certificate-ensure` does the same). A CA within a year of its end is replaced (the
+  leaf follows). An imported pair is never touched; when it becomes unreadable the local leaf
+  takes over.
+- **Why `/etc/rynas/tls`** and not `/var/lib/rynas/certs` as `../research/web-access.md` §3.2
+  first said: systemd resets `StateDirectory=` to `StateDirectoryMode=0700 root` at every start
+  of rynasd, so rynas-web could never enter `/var/lib/rynas`. `/etc` is where Cockpit
+  (`/etc/cockpit/ws-certs.d`) and Proxmox (`/etc/pve/local/pveproxy-ssl.*`) keep their UI
+  certificates; `apt purge` removes `/etc/rynas`.
+- **Active certificate for W1/W2**: the certificate store of the web-access module (ACME
+  wildcard, Tailscale) adds sources next to `local` / `imported` in the same store and publishes
+  the chosen one through the same `ui.*` files, so `:8443` reuses the wildcard automatically
+  (D-PROXY).
+- **Recovery**: `rynasd tls-reset` (root, also with the daemon running) makes the local
+  certificate active with a new leaf; rynas-web picks it up by itself. `http://127.0.0.1:8080`
+  is never redirected.
+
+**Endpoints** (admin; forwarded by rynas-web to rynasd `/v1/system/tls…`):
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/api/v1/system/tls` | — | `TlsStatus` {source: `local`\|`imported`, certificate, chain, local_ca?, warnings, missing_names} |
+| GET | `/api/v1/system/tls/ca` | — | the local CA certificate, `application/x-pem-file`, `Content-Disposition: attachment; filename="rynas-local-ca.crt"` |
+| POST | `/api/v1/system/tls/import` | `TlsImportRequest` {certificate, private_key} (PEM) | `TlsStatus`; served at once |
+| POST | `/api/v1/system/tls/local` | — | `TlsStatus`; back to the local certificate (re-issued when names are missing) |
+
+`TlsCertificate` (each entry): `subject`, `issuer` (RFC 4514), `dns_names`, `ip_addresses`,
+`not_before_ms`, `not_after_ms`, `serial`, `fingerprint_sha256` (uppercase hex with colons, as
+browsers show it), `key_type` ("ECDSA P-256", "RSA 2048", "Ed25519"), `self_signed`, `is_ca`.
+`warnings` (`TlsWarning`): `expires_soon` (< 30 days), `expired`, `names_not_covered` (see
+`missing_names`), `chain_incomplete` (an imported leaf from a CA without its intermediates).
+
+Import checks (`400 invalid_value`, `field` = `certificate` or `private_key`): PEM only, at most
+64 KiB each and 8 certificates; the first certificate is not a CA; an Extended Key Usage, when
+present, allows `serverAuth`; each certificate is issued **and signed** by the next one (order
+of a full chain); valid now (not expired, not starting more than a day ahead); an unencrypted
+key the ring provider supports (RSA ≥ 2048, ECDSA P-256/P-384, Ed25519) whose public key is the
+leaf's. The chain is stored re-encoded (comments and `Bag Attributes` dropped). Names not
+covered and near expiry are warnings, not errors (a certificate for another name is still a
+valid choice). Errors without a field: `503 backend_unavailable` (rynasd without the
+certificate service), `404 not_found` (no certificate yet).
+
+**UI (rynas-ui, a later wave)**: a "Certificate" card under System. i18n keys it needs:
+`tls.title`, `tls.source.local`, `tls.source.imported`, `tls.subject`, `tls.issuer`, `tls.names`,
+`tls.addresses`, `tls.valid_from`, `tls.valid_until`, `tls.days_left`, `tls.fingerprint`,
+`tls.key_type`, `tls.serial`, `tls.chain`, `tls.local_ca`, `tls.download_ca`, `tls.trust_help`
+(per-OS steps), `tls.import`, `tls.import.certificate`, `tls.import.private_key`,
+`tls.import.hint` (full chain, server certificate first, unencrypted key), `tls.use_local`,
+`tls.use_local.confirm`, `tls.warn.expires_soon`, `tls.warn.expired`,
+`tls.warn.names_not_covered`, `tls.warn.chain_incomplete`, `tls.missing_names`,
+`tls.reload_note` (the page reconnects on the new certificate: a browser that trusted the old
+one asks again), `tls.https_port`.
+
+Development without root:
+```
+cargo run -p rynasd -- --socket /tmp/x/rynasd.sock --state-dir /tmp/x/state --dry-system
+#   publishes /tmp/x/state/dry-root/etc/rynas/tls/ui.{crt,key}
+cargo run -p rynas-web -- --listen 127.0.0.1:8080 --rynasd-socket /tmp/x/rynasd.sock \
+    --tls-listen 127.0.0.1:8443 --tls-cert /tmp/x/state/dry-root/etc/rynas/tls/ui.crt \
+    --tls-key /tmp/x/state/dry-root/etc/rynas/tls/ui.key --users-file users.toml
+curl --cacert /tmp/x/state/dry-root/etc/rynas/tls/ca.crt https://localhost:8443/api/v1/auth/session
+```
+Tests: `rynas-tls` unit tests (SANs, CA chain, re-issue rule, key/cert match, import checks),
+`rynasd::tls` (store, publish modes, re-issue on a new address, import/back to local, `ip -j`
+parsing), `rynas-web` `tests/https.rs` (real rustls client trusting only the generated CA on an
+ephemeral port: names, Secure cookie, no HSTS, hot reload, mismatched pair ignored, redirect
+rules).
+
+Sources (2026-11-07): rustls `ResolvesServerCert` and `CertifiedKey::keys_match`
+(https://docs.rs/rustls/0.23.46/rustls/server/trait.ResolvesServerCert.html), hot-reload pattern
+with an in-place resolver (https://docs.rs/crate/tls-hot-reload/latest), rcgen issuer API
+(https://docs.rs/rcgen/0.14.10/rcgen/), Apple TLS requirements: SAN, `serverAuth`, ≤ 825 days for
+every TLS server certificate (https://support.apple.com/en-us/103769), Chrome's 398-day limit
+only for publicly trusted CAs (https://chromium.googlesource.com/chromium/src/+/HEAD/net/docs/certificate_lifetimes.md),
+Cockpit's self-signed fallback and renewal (https://man.archlinux.org/man/extra/cockpit/cockpit-tls.8.en),
+Proxmox `pveproxy-ssl.pem` over the node certificate from the cluster CA
+(https://forum.proxmox.com/threads/custom-certificates-upload.157568/), systemd chmod of existing
+`StateDirectory=` (https://bugzilla.redhat.com/show_bug.cgi?id=1778384), HSTS and untrusted
+certificates (https://www.rfc-editor.org/rfc/rfc6797#section-12.1).
 
 ## API v1: configuration and tasks (step 6)
 Configuration lives in `rynasd` (`/var/lib/rynas/config.db`, crate `rynas-config`), its only writer;

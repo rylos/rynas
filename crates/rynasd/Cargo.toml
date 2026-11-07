@@ -39,6 +39,8 @@ jiff.workspace = true
 rynas-net.workspace = true
 rynas-updates.workspace = true
 rynas-files.workspace = true
+# certificate of the web interface (local CA, leaf, import checks)
+rynas-tls.workspace = true
 tokio-util = { workspace = true, features = ["io"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 

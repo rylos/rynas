@@ -29,12 +29,19 @@ tracing-subscriber.workspace = true
 libc.workspace = true
 sha2.workspace = true
 base64.workspace = true
-hyper.workspace = true
-hyper-util.workspace = true
+hyper = { workspace = true, features = ["server"] }
+hyper-util = { workspace = true, features = ["server", "service"] }
 http-body-util.workspace = true
+# HTTPS on its own port (the emergency door, D-PROXY): ring provider, PEM files from rynasd
+rustls.workspace = true
+rustls-pki-types.workspace = true
+tokio-rustls.workspace = true
+tower = { version = "0.5.3", default-features = false, features = ["util"] }
 
 [dev-dependencies]
-tower = { version = "0.5.3", features = ["util"] }
+# certificates for the HTTPS tests
+rynas-tls.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
 rynasd.workspace = true
 rynas-config.workspace = true
 rynas-tasks.workspace = true
@@ -73,7 +80,8 @@ rynas manages a Debian NAS from the browser: system status, live metrics, \
 storage (RAID, btrfs, encryption), users and shares (SMB, NFS), snapshots, a task \
 scheduler and notifications, behind a PAM login with optional TOTP. It is made of two \
 processes: rynasd, a small root daemon reachable only over a Unix socket, and \
-rynas-web, the unprivileged web server and API. Plain HTTP on port 8080 for now."""
+rynas-web, the unprivileged web server and API, on HTTPS port 8443 with a certificate \
+from its own local CA (and plain HTTP on 8080, redirected to HTTPS)."""
 changelog = "../../packaging/deb/changelog"
 maintainer-scripts = "../../packaging/deb/maintainer-scripts"
 assets = [

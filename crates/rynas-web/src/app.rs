@@ -32,6 +32,8 @@ pub struct AppState {
     pub streams: Arc<crate::streams::StreamLimits>,
     /// UPS status from upsd (`ups.status` events, `GET /ups`).
     pub ups: Arc<crate::ups::UpsMonitor>,
+    /// The HTTPS certificate (reloaded right after an import); `None` without HTTPS.
+    pub tls: Option<Arc<crate::tls::CertReloader>>,
 }
 
 pub fn router(state: AppState, ui_dir: PathBuf) -> Router {

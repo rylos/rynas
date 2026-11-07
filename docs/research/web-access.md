@@ -173,7 +173,7 @@ Pitfalls handled in the checklist:
 
 **rynas-web emergency port** (`:8443`, see §4):
 - uses its own self-signed certificate (SANs: hostname, `hostname.local`, IPs);
-- automatically switches to the domain wildcard when one exists. rynasd copies the active certificate into `/var/lib/rynas/certs/ui.{crt,key}` (group `rynas`, 0640) and signals rynas-web to reload it;
+- automatically switches to the domain wildcard when one exists. rynasd copies the active certificate into `/etc/rynas/tls/ui.{crt,key}` (group `rynas`, key 0640; W0 moved it from `/var/lib/rynas/certs`, which rynas-web cannot enter) and rynas-web reloads it by itself;
 - never depends on Caddy running.
 
 Sources: https://letsencrypt.org/2024/12/05/ending-ocsp/ · https://letsencrypt.org/2025/05/14/ending-tls-client-authentication/ · https://letsencrypt.org/docs/profiles/ · https://letsencrypt.org/2025/12/02/from-90-to-45/ · https://letsencrypt.org/2025/07/01/issuing-our-first-ip-address-certificate.html · https://www.rfc-editor.org/info/rfc9773 · https://letsencrypt.org/2026/02/18/dns-persist-01.html · https://letsencrypt.org/docs/rate-limits/ · https://www.sectigo.com/root-causes/root-causes-486-47-day-maximum-term-ballot-passes-cabf · https://community.letsencrypt.org/t/follow-up-of-dns-providers-who-easily-integrate-with-let-s-encrypt-dns-validation/195364 · https://forum.openwrt.org/t/nip-io-doesnt-work-for-local-network-behind-lede-solved-dns-rebind-protection/7766 · https://hstspreload.org/removal/ · https://support.apple.com/en-ca/102390 · https://wiki.mozilla.org/CA/AddRootToFirefox · https://github.com/Tugzrida/avahi-aliases · https://en.wikipedia.org/wiki/.internal
@@ -506,7 +506,7 @@ The route model and renderer are engine-neutral (a `Renderer` trait). An Angie/n
 
 | Wave | Content |
 |---|---|
-| **W0** (phase 1 debt, before W1) | rynas-web rustls on `:8443` with self-signed SANs, `127.0.0.1:8080` for the proxy, certificate import |
+| **W0** (phase 1 debt, before W1) | rynas-web rustls on `:8443` with self-signed SANs, `127.0.0.1:8080` for the proxy, certificate import. **Done 2026-11-07** (`../phase1/plan.md` "API v1: web TLS (W0)"): leaf from a per-NAS local CA (the root Caddy will reuse), published in `/etc/rynas/tls/` (not `/var/lib/rynas/certs`: systemd resets the state directory to 0700 root); `:8080` stays on all addresses for the transition and redirects other hosts to `:8443`, `127.0.0.1` only from W1 |
 | **W1** (with A2) | `rynas-caddy` package and unit; `web_access` domain, renderer, `/load`, last-good, anti-drift; UI at `https://<host>.local` via local CA; app routes from the catalog `web` block with loopback binding; local names via `/etc/avahi/hosts`; access `lan`; Routes page + wizard Access step; route diagnostics; Trust this NAS |
 | **W2** | domains + credentials, DNS-01 wildcard, managed DNS records, rebind detection, certificate dashboard + notifications, `:8443` reuses the wildcard; custom routes (other LAN hosts); routes for foreign stacks |
 | **W3** (with the Tailscale plugin) | `lan_vpn` with anti-spoof, split-DNS guide, per-app Tailscale Services; built-in SSO (`/auth/verify`, `rynas_sso`, groups, bypass); public flow with checklist, DDNS, hairpin test, auto-block from access logs, headers presets; external proxy mode |

@@ -151,6 +151,7 @@ pub fn build_with_rynasd(
         streams: Default::default(),
         // nothing listens there: "upsd down"
         ups: rynas_web::ups::UpsMonitor::new("127.0.0.1:9"),
+        tls: None,
     };
     let streams = state.streams.clone();
     TestApp {

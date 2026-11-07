@@ -27,6 +27,7 @@ members = [
     "crates/rynas-module",
     "crates/rynas-apps",
     "crates/rynas-docker",
+    "crates/rynas-tls",
 ]
 
 [workspace.package]
@@ -61,6 +62,11 @@ rynas-nut = { path = "crates/rynas-nut" }
 rynas-files = { path = "crates/rynas-files" }
 rynas-removable = { path = "crates/rynas-removable" }
 rynas-module = { path = "crates/rynas-module" }
+rynas-tls = { path = "crates/rynas-tls" }
+# HTTPS of rynas-web (D-PROXY emergency port): the ring provider only, no aws-lc C build
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pki-types = { version = "1.15.1", features = ["std"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12", "logging"] }
 rynas-apps = { path = "crates/rynas-apps" }
 rynas-docker = { path = "crates/rynas-docker" }
 # local time zone arithmetic of the power schedule (DST-safe); the system tz database

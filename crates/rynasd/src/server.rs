@@ -74,6 +74,8 @@ pub struct DaemonState {
     pub removable: crate::removable::RmState,
     /// Docker (needs `ops`); `None` answers 503 on its endpoints.
     pub docker: crate::docker::DkState,
+    /// HTTPS certificate of the web interface; `None` answers 503 on its endpoints.
+    pub tls: crate::tls::TlsState,
 }
 
 impl DaemonState {
@@ -111,6 +113,7 @@ impl DaemonState {
             files: None,
             removable: None,
             docker: None,
+            tls: None,
         }
     }
 }
@@ -184,6 +187,7 @@ pub fn router(state: DaemonState) -> Router {
         .merge(crate::files::router(state.files))
         .merge(crate::removable::router(state.removable))
         .merge(crate::docker::router(state.docker))
+        .merge(crate::tls::router(state.tls))
         .fallback(|| async { Error::not_found("no such endpoint") })
         // 405, query string and path rejections: ApiError bodies too
         .layer(axum::middleware::from_fn(crate::error::json_errors))

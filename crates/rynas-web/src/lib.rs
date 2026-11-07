@@ -17,4 +17,5 @@ pub mod storage;
 pub mod storage_api;
 pub mod streams;
 pub mod system;
+pub mod tls;
 pub mod ups;
