@@ -32,6 +32,7 @@ pub fn panel() -> AnyView {
                     <TaskRun id=id on_done=Callback::new(move |_| d.resync()) />
                 </section>
             })}
+            {move || d.status.with(|s| s.as_ref().is_some_and(|s| s.installed && s.install_block.is_none() && s.task_id.is_none())).then(install_card)}
             {engine_card()}
             {move || running.get().then(storage_card)}
             {managers_card()}
@@ -248,6 +249,8 @@ pub fn install_card() -> AnyView {
     let task = Memo::new(move |_| started.get().or_else(|| d.status.with(|s| s.as_ref().and_then(|s| s.task_id.clone()))));
     let block = Memo::new(move |_| d.status.with(|s| s.as_ref().and_then(|s| s.install_block)));
     let installed = Memo::new(move |_| d.status.with(|s| s.as_ref().is_some_and(|s| s.installed)));
+    // half-installed engine packages (a failed earlier install): Install repairs them
+    let incomplete = Memo::new(move |_| d.status.with(|s| s.as_ref().map(|s| s.install_incomplete.clone()).unwrap_or_default()));
     let install = move |_| {
         busy.set(true);
         error.set(None);
@@ -268,6 +271,32 @@ pub fn install_card() -> AnyView {
     let body = move || {
         if let Some(id) = task.get() {
             return view! { <TaskRun id=id on_done=Callback::new(move |_| { started.set(None); d.resync(); }) /> }.into_any();
+        }
+        let finish_btn = move || view! {
+            {form_error(error)}
+            <div class="sec-actions">
+                <button class="btn primary" disabled=move || busy.get() on:click=install>{spinner(busy)}<Icon icon=icons::DOWNLOAD size=16 />{tr("docker.install_finish")}</button>
+            </div>
+        };
+        // an install rynas started whose last steps never ran
+        if installed.get() && block.get().is_none() {
+            return view! {
+                {ui::note(Tone::Warn, icons::TRIANGLE_ALERT, ui::text(t("docker.install_unfinished").to_string()))}
+                {finish_btn()}
+            }
+            .into_any();
+        }
+        let half = incomplete.get();
+        if !installed.get() && !half.is_empty() {
+            let rows = half.iter().map(|p| view! { <li class="mono">{format!("{} {} ({})", p.name, p.version, p.status)}</li> }).collect_view();
+            return view! {
+                {ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! {
+                    <span>{tf("docker.install_incomplete", &[("n", &half.len().to_string())])}" "{tr("docker.install_incomplete_hint")}</span>
+                    <ul class="small app-list">{rows}</ul>
+                }.into_any())}
+                {finish_btn()}
+            }
+            .into_any();
         }
         if installed.get() {
             return view! {

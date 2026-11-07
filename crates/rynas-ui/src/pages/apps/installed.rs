@@ -462,7 +462,13 @@ fn ask_dialog(q: Ask, stack: String, ask: RwSignal<Option<Ask>>, close_drawer: C
         Ask::Proxy => {
             let url = inst_url(&stack, "/proxy");
             let go = Callback::new(move |_| launch(url.clone(), None, busy, error, cancel));
-            ui::confirm(Confirm { busy, error, ..Confirm::new(t("apps.proxy").to_string(), t("apps.proxy_text").to_string(), "apps.proxy", false, go, cancel) })
+            let future = super::proxy_url(&stack, &apps().proxy_host.get_untracked());
+            let extra = view! {
+                {future.map(|u| ui::note(Tone::Info, icons::LINK, ui::text(tf("apps.proxy_url", &[("url", &u)]))))}
+                <p class="small muted">{tr("apps.proxy_more")}" "<a href="/network/web-access">{tr("wa.title")}</a></p>
+            }
+            .into_any();
+            ui::confirm(Confirm { extra: Some(extra), busy, error, ..Confirm::new(t("apps.proxy").to_string(), t("apps.proxy_text").to_string(), "apps.proxy", false, go, cancel) })
         }
         Ask::Convert => {
             let url = inst_url(&stack, "/convert");

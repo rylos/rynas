@@ -28,12 +28,14 @@ use crate::ui::{self, EmptyState, PageHeader, Remote, Tone};
 
 const TABS: &[&str] = &["apps.tab.featured", "apps.tab.apps", "apps.tab.plugins", "apps.tab.installed", "apps.tab.updates"];
 
-/// The two fields of `GET /api/v1/web-access` (`WebAccessState`) this page reads: the whole
+/// The fields of `GET /api/v1/web-access` (`WebAccessState`) this page reads: the whole
 /// state's deserializer is not worth its wasm here.
 #[derive(serde::Deserialize)]
 struct WebAccess {
     applied: WebAccessApplied,
     engine: WebAccessEngine,
+    #[serde(default)]
+    host: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -85,6 +87,11 @@ pub(super) struct Apps {
     pub inst: Remote<Vec<InstalledApp>>,
     /// Web access is active (rynas-caddy installed, built-in mode).
     pub proxy: RwSignal<bool>,
+    /// Web access runs in external proxy mode (or rynasd has none): 80/443 are free, so a
+    /// reverse proxy app (`AppCard::reverse_proxy`) may be installed.
+    pub external: RwSignal<bool>,
+    /// The host label of web access names (`<label>-<host>.local`).
+    pub proxy_host: RwSignal<String>,
     /// Entry id of the open detail drawer.
     pub detail: RwSignal<Option<String>>,
     /// Entry id of the open install wizard.
@@ -129,6 +136,8 @@ pub fn AppsPage() -> impl IntoView {
         cat: remote::<AppCatalog>("/api/v1/apps/catalog", d.ended),
         inst: remote::<Vec<InstalledApp>>("/api/v1/apps/installed", d.generation),
         proxy: RwSignal::new(false),
+        proxy_host: RwSignal::new(String::new()),
+        external: RwSignal::new(false),
         detail: RwSignal::new(None),
         wizard: RwSignal::new(None),
         manage: RwSignal::new(None),
@@ -142,8 +151,13 @@ pub fn AppsPage() -> impl IntoView {
         match crate::api::get::<WebAccess>("/api/v1/web-access").await {
             Ok(w) => {
                 let _ = a.proxy.try_set(w.engine.installed && w.applied.settings.mode == ProxyMode::Builtin);
+                let _ = a.proxy_host.try_set(w.host);
+                let _ = a.external.try_set(w.applied.settings.mode == ProxyMode::External);
             }
-            Err(e) if e.status() == 503 || e.status() == 401 => {}
+            Err(e) if e.status() == 503 => {
+                let _ = a.external.try_set(true);
+            }
+            Err(e) if e.status() == 401 => {}
             Err(e) => {
                 let _ = proxy_err.try_set(Some(e.text()));
             }
@@ -306,6 +320,8 @@ pub(super) fn install_block(c: &AppCard, cat: &AppCatalog) -> Option<&'static st
         Some("apps.block.rynas")
     } else if matches!(c.ram, RamGate::BelowMinimum { .. }) {
         Some("apps.block.ram")
+    } else if c.reverse_proxy && !apps().external.get() {
+        Some("apps.block.reverse_proxy")
     } else {
         None
     }
@@ -321,6 +337,17 @@ pub(super) fn host_url(port: u16, path: &str) -> String {
     let loc = window().location();
     let path = if path.starts_with('/') { path.to_string() } else { format!("/{path}") };
     format!("{}//{}:{port}{path}", loc.protocol().unwrap_or_default(), loc.hostname().unwrap_or_default())
+}
+
+/// The address "Move behind the proxy" gives a stack (`https://<label>-<host>.local/`, the
+/// label rule of §5.3; the server adds `-2`… when a label is taken).
+pub(super) fn proxy_url(stack: &str, host: &str) -> Option<String> {
+    if host.is_empty() {
+        return None;
+    }
+    let label: String = stack.to_lowercase().chars().map(|c| if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' { c } else { '-' }).take(40).collect();
+    let name = format!("{}-{host}", label.trim_matches('-'));
+    (name.len() <= 63).then(|| format!("https://{name}.local/"))
 }
 
 /// Where an installed app's web page answers: its web access route, else the published port

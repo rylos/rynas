@@ -27,6 +27,11 @@ quality reviews (docs/quality/). Nothing here touches the host system or a runni
 - Apps & Plugins (`/apps`, tabs `/apps:1` … `/apps:4`): rynasd reads the repository's `apps/`
   catalogue (`--apps-dir`). With `FAKE_DOCKER=1` and `AUDIT_USER=$(id -un)` the wizard installs
   for real under `--dry-system`: the stack files land in the dry root, compose only logs.
+- Web access (`/network/web-access`, tabs `:1` routes, `:2` certificate): `FAKE_CADDY=1` adds
+  `fakecaddy.py`, a fake admin socket of rynas-caddy (`GET /config/`, `POST /load`; no Caddy, no
+  port) passed to rynasd as `--caddy-admin`, so the engine shows installed and running and the
+  defaults are applied; `FAKE_CADDY=refuse` fails every load (the error state). With
+  `FAKE_DOCKER=1` installs through web access add routes. Without it rynasd sees no proxy.
 - Login `tester` / `correct-horse` (`users.toml`, a test-only account of the local instance).
 - `BASE` changes the instance URL; `AUDIT_OUT` the output folder (default `target/ui-audit`:
   results, screenshots, browser profiles). Keep it on disk, not on a RAM tmpfs.

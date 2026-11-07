@@ -83,6 +83,14 @@ pub fn Network() -> impl IntoView {
             {adopt_card(net)}
             {pending_card(net)}
             {overview(net)}
+            <section class="card widget w-12 link-card">
+                <span class="w-icon"><Icon icon=icons::SHIELD_CHECK size=18 /></span>
+                <div class="link-card-text">
+                    <h2 class="w-title">{tr("wa.title")}</h2>
+                    <p class="muted small">{tr("wa.open_text")}</p>
+                </div>
+                <a class="btn ghost" href="/network/web-access">{tr("open")}<Icon icon=icons::CHEVRON_RIGHT size=16 /></a>
+            </section>
             <section class="card widget w-12">
                 {tabs("net", &["net.tab_ifaces", "net.tab_revisions", "net.tab_rescue", "net.tab_tools"], tab, "net.title")}
                 <div role="tabpanel" id="net-p0" aria-labelledby="net-t0" hidden=move || tab.get() != 0>{interfaces_panel(net)}</div>

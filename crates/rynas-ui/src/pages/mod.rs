@@ -19,6 +19,7 @@ pub mod system;
 pub mod updates;
 pub mod user_homes;
 pub mod users;
+pub mod web_access;
 
 use leptos::prelude::*;
 

@@ -90,6 +90,14 @@ pub fn System() -> impl IntoView {
                     </Show>
                 </section>
                 <section class="card widget w-12 link-card" style="--i:2">
+                    <span class="w-icon"><Icon icon=icons::LOCK size=18 /></span>
+                    <div class="link-card-text">
+                        <h2 class="w-title">{tr("tls.title")}</h2>
+                        <p class="muted small">{tr("tls.open_text")}</p>
+                    </div>
+                    <a class="btn ghost" href="/network/web-access?tab=certificate">{tr("open")}<Icon icon=icons::CHEVRON_RIGHT size=16 /></a>
+                </section>
+                <section class="card widget w-12 link-card" style="--i:2">
                     <span class="w-icon"><Icon icon=icons::DOWNLOAD size=18 /></span>
                     <div class="link-card-text">
                         <h2 class="w-title">{tr("upd.title")}</h2>

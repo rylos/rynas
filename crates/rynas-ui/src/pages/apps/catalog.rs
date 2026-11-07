@@ -10,11 +10,12 @@ use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::ui::{self, EmptyState, Remote, Tone};
 
-/// Cards that fit this NAS and are not installed yet, fewest warnings first.
+/// The catalogue's featured picks (`featured`) that are not installed yet, those that fit
+/// this NAS first.
 fn recommended(c: &AppCatalog) -> Vec<AppCard> {
-    let mut v: Vec<AppCard> = c.apps.iter().filter(|a| a.installed.is_empty() && !a.manager && a.arch_ok && a.rynas_ok && matches!(a.ram, RamGate::Ok | RamGate::Unknown)).cloned().collect();
-    v.sort_by(|a, b| a.antifeatures.len().cmp(&b.antifeatures.len()).then_with(|| a.name.cmp(&b.name)));
-    v.truncate(6);
+    let mut v: Vec<AppCard> = c.apps.iter().filter(|a| a.featured && a.installed.is_empty() && !a.manager).cloned().collect();
+    let fits = |a: &AppCard| a.arch_ok && a.rynas_ok && matches!(a.ram, RamGate::Ok | RamGate::Unknown);
+    v.sort_by(|a, b| fits(b).cmp(&fits(a)).then_with(|| a.name.cmp(&b.name)));
     v
 }
 
@@ -450,7 +451,9 @@ pub fn detail_drawer(id: String) -> AnyView {
         _ => Some("loading"),
     })));
     let foot = view! {
-        {move || block.get().filter(|k| *k != "loading").map(|k| view! { <span class="small muted foot-note">{tr(k)}</span> })}
+        {move || block.get().filter(|k| *k != "loading").map(|k| view! {
+            <span class="small muted foot-note">{tr(k)}{(k == "apps.block.reverse_proxy").then(|| view! { " "<a href="/network/web-access">{tr("apps.block.to_mode")}</a> })}</span>
+        })}
         <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("close")}</button>
         <button type="button" class="btn primary" disabled=move || block.get().is_some()
             on:click=move |_| { a.detail.set(None); a.wizard.set(Some(id2.get_value())); }>
