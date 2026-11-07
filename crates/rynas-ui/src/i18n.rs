@@ -3233,6 +3233,7 @@ dict! { BLOB, LENS, IT;
     "dk.im.title" => "Import a folder", "Importa una cartella";
     "dk.im.text" => "Register a folder with compose files (for example restored from a backup) as a stack, where it is.", "Registra come stack una cartella con file compose (per esempio ripristinata da un backup), dove si trova.";
     "dk.im.dir_help" => "Absolute path, such as /volume1/docker/app.", "Percorso assoluto, come /volume1/docker/app.";
+    "dk.im.name_help" => "The compose project name; the folder keeps its name.", "Il nome del progetto compose; la cartella mantiene il suo nome.";
     "dk.im.check" => "Check", "Controlla";
     "dk.im.import" => "Import", "Importa";
     "dk.s.containers" => "Containers", "Container";

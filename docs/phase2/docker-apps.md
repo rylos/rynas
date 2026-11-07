@@ -1884,6 +1884,8 @@ folder.
 | POST | `/docker/stacks/{name}/release` | — | 204; the record is deleted, files and containers untouched. 404 when not adopted |
 | POST | `/docker/stacks/{name}/move` | `MoveStackRequest` {confirm} | 202 (`docker.stack.move`). 400 `confirmation_required`; 400 `invalid_value` `field: volume` without a Docker volume; 409 `already_exists` when the target exists |
 
+rynas-web forwards `/docker/stacks/import`, `/import/preview` and `/{name}/adopt` (GET, POST); release and move ride on `/{name}/{action}`.
+
 `StackFiles` gains `hash` (GET; optional on PUT), `other_files` and `read_only`. Audit
 lines: `stack.adopt`, `stack.import`, `stack.release`, `stack.move`, `stack.edit`.
 

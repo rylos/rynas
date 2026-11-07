@@ -212,7 +212,7 @@ pub(super) fn import_dialog(close: Callback<()>) -> AnyView {
             view! {
                 {preview_view(&p)}
                 <div class="form">
-                    {text_field("dk.ed.name", name.into(), Callback::new(move |v: String| { name.set(v.trim().to_lowercase()); name_err.set(None); }), name_bad, In { mono: true, help: Some("dk.ed.name_help"), maxlength: 63, ..In::default() })}
+                    {text_field("dk.ed.name", name.into(), Callback::new(move |v: String| { name.set(v.trim().to_lowercase()); name_err.set(None); }), name_bad, In { mono: true, help: Some("dk.im.name_help"), maxlength: 63, ..In::default() })}
                     {has_profiles.then(|| text_field("dk.ad.profiles", profiles.into(), Callback::new(move |v: String| profiles.set(v)), Signal::stored(None), In { mono: true, help: Some("dk.ad.profiles_help"), maxlength: 300, ..In::default() }))}
                     {(!p.read_only).then(|| switch("dk.ed.start", None, start.into(), Callback::new(move |v| start.set(v))))}
                 </div>

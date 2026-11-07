@@ -2819,6 +2819,7 @@ dk.im.button	Importa cartella
 dk.im.title	Importa una cartella
 dk.im.text	Registra come stack una cartella con file compose (per esempio ripristinata da un backup), dove si trova.
 dk.im.dir_help	Percorso assoluto, come /volume1/docker/app.
+dk.im.name_help	Il nome del progetto compose; la cartella mantiene il suo nome.
 dk.im.check	Controlla
 dk.im.import	Importa
 dk.s.containers	Container
