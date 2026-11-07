@@ -1,0 +1,3 @@
+[form]
+BASE_URL = "https://recipes.example.lan"
+ALLOW_SIGNUP = false

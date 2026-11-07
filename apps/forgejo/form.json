@@ -1,0 +1,16 @@
+{
+  "type": "object",
+  "properties": {
+    "ROOT_URL": {
+      "type": "string",
+      "title": "Public URL",
+      "description": "The address users open, used in clone URLs, e-mails and OAuth redirects, e.g. https://git.example.lan/.",
+      "format": "uri",
+      "x-ui": { "placeholder": "https://git.example.lan/" }
+    }
+  },
+  "required": ["ROOT_URL"],
+  "x-groups": [
+    { "title": "Access", "fields": ["ROOT_URL"] }
+  ]
+}

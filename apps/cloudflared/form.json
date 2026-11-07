@@ -1,0 +1,18 @@
+{
+  "type": "object",
+  "properties": {
+    "TUNNEL_TOKEN": {
+      "type": "string",
+      "title": "Tunnel token",
+      "description": "The token of a tunnel created in the Cloudflare dashboard (the long value after --token in the install command).",
+      "minLength": 32,
+      "maxLength": 4096,
+      "pattern": "[A-Za-z0-9+/=_-]+",
+      "x-ui": { "widget": "password" }
+    }
+  },
+  "required": ["TUNNEL_TOKEN"],
+  "x-groups": [
+    { "title": "Tunnel", "fields": ["TUNNEL_TOKEN"] }
+  ]
+}

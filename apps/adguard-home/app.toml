@@ -1,0 +1,79 @@
+schema = 1
+id = "adguard-home"
+name = "AdGuard Home"
+version = "1.0.0"
+app_version = "v0.107.80"
+description = "Network-wide DNS server that blocks ads and trackers for every device in the house."
+homepage = "https://adguard.com/adguard-home/overview.html"
+source = "https://github.com/AdguardTeam/AdGuardHome"
+changelog_url = "https://github.com/AdguardTeam/AdGuardHome/releases"
+license = "GPL-3.0-only"
+maintainers = ["rynas"]
+categories = ["network"]
+min_rynas = "0.1.0"
+arch = ["amd64", "arm64"]
+main_service = "adguardhome"
+
+[resources]
+ram_min_mb = 128
+ram_recommended_mb = 256
+
+[[ports]]
+name = "dns"
+env = "DNS_PORT"
+service = "adguardhome"
+container = 53
+default = 53
+protocol = "tcp"
+purpose = "DNS for the LAN (TCP)"
+relocatable = false
+
+[[ports]]
+name = "dns-udp"
+env = "DNS_UDP_PORT"
+service = "adguardhome"
+container = 53
+default = 53
+protocol = "udp"
+purpose = "DNS for the LAN (UDP)"
+relocatable = false
+
+[[ports]]
+name = "web"
+env = "WEB_PORT"
+service = "adguardhome"
+container = 3000
+default = 3080
+protocol = "tcp"
+purpose = "Setup wizard and web interface"
+proxied = true
+
+[web]
+port = "web"
+scheme = "http"
+auth = "app"
+# upstream's FAQ documents sub-path hosting behind nginx and Caddy
+subpath = true
+public = "warn"
+
+[[folders]]
+env = "CONF_FOLDER"
+path = "conf"
+intent = "config"
+ssd = "ok"
+description = "AdGuardHome.yaml: settings, filters and clients"
+
+[[folders]]
+env = "WORK_FOLDER"
+path = "work"
+intent = "data"
+ssd = "ok"
+description = "Filter lists, query log and statistics"
+
+[[notes]]
+level = "warning"
+text = "AdGuard Home needs port 53. If the install reports it in use, the system resolver's stub listener holds it: with systemd-resolved set DNSStubListener=no in a drop-in under /etc/systemd/resolved.conf.d/ and restart it, as the AdGuard Home FAQ explains."
+
+[[notes]]
+level = "info"
+text = "In the setup wizard keep the admin interface on port 3000 (the port inside the container) and DNS on 53. Then point your router's DHCP DNS setting at the NAS address. DHCP serving is not offered: it would need the host network."

@@ -14,6 +14,7 @@ min_rynas = "0.1.0"
 arch = ["amd64", "arm64"]
 antifeatures = ["requires-https"]
 main_service = "vaultwarden"
+featured = true
 
 [resources]
 ram_min_mb = 128

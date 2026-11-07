@@ -1,0 +1,23 @@
+{
+  "type": "object",
+  "properties": {
+    "USB_ADAPTER": {
+      "type": "boolean",
+      "title": "USB adapter",
+      "description": "Turn on for a USB Zigbee stick plugged into the NAS. Leave off for a network (Ethernet or Wi-Fi) coordinator.",
+      "default": true,
+      "x-ui": { "widget": "switch" }
+    },
+    "ADAPTER_DEVICE": {
+      "type": "string",
+      "title": "Adapter device",
+      "description": "The adapter's path under /dev/serial/by-id/, which stays the same across reboots and replugging.",
+      "pattern": "/dev/serial/by-id/[A-Za-z0-9_.+-]+",
+      "x-ui": { "placeholder": "/dev/serial/by-id/usb-ITead_Sonoff_Zigbee_3.0_USB_Dongle_Plus-if00-port0", "visible_if": { "USB_ADAPTER": true } }
+    }
+  },
+  "required": ["ADAPTER_DEVICE"],
+  "x-groups": [
+    { "title": "Coordinator", "fields": ["USB_ADAPTER", "ADAPTER_DEVICE"] }
+  ]
+}

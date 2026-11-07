@@ -14,6 +14,7 @@ min_rynas = "0.1.0"
 arch = ["amd64", "arm64"]
 antifeatures = ["high-resources"]
 main_service = "immich-server"
+featured = true
 
 [resources]
 # 4 GB only with machine learning off (upstream: 6 GB minimum, 8 GB recommended)

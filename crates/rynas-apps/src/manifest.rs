@@ -77,6 +77,15 @@ pub struct AppManifest {
     /// and outside the container (`${RYNAS_STACKS_DIR}:${RYNAS_STACKS_DIR}`).
     #[serde(default)]
     pub manager: bool,
+    /// A reverse proxy (Nginx Proxy Manager, Traefik): publishes host ports 80 and 443
+    /// itself, so it installs only while the rynas web access runs in external proxy mode
+    /// (the built-in proxy owns 80/443 otherwise). Its 80/443 ports are exempt from the
+    /// catalogue-wide unique-default rule: two proxies exclude each other anyway.
+    #[serde(default)]
+    pub reverse_proxy: bool,
+    /// Listed in the catalogue's Featured section (a curated pick of the catalogue).
+    #[serde(default)]
+    pub featured: bool,
     pub resources: Resources,
     #[serde(default)]
     pub ports: Vec<Port>,
@@ -424,6 +433,10 @@ pub struct Security {
     /// Capabilities services may add (`NET_ADMIN`, …).
     #[serde(default)]
     pub cap_add: Vec<String>,
+    /// Services allowed to map host devices that are not a GPU (a USB Zigbee or Z-Wave
+    /// adapter, a Coral). Without it, `devices:` needs `hardware.gpu`.
+    #[serde(default)]
+    pub devices: Vec<String>,
 }
 
 /// A compose fragment merged into `compose.yaml` (RFC 7396 merge patch: maps merge, `null`
@@ -637,6 +650,25 @@ impl AppManifest {
             if w.auth == WebAuth::None && w.public == Public::Ok {
                 err("web.auth = none cannot be public = ok".into());
             }
+        }
+        // the web access proxy owns 80/443: only a reverse proxy app defaults to them, and
+        // then as fixed, LAN-facing ports (it installs in external proxy mode only)
+        let http_port = |p: &&Port| p.protocol == Protocol::Tcp && matches!(p.default, 80 | 443);
+        if self.reverse_proxy {
+            if self.host_network {
+                err("reverse_proxy needs a bridged app (it publishes 80 and 443)".into());
+            }
+            for want in [80, 443] {
+                match self.ports.iter().find(|p| p.protocol == Protocol::Tcp && p.default == want) {
+                    Some(p) if !p.relocatable && !p.proxied => {}
+                    Some(p) => err(format!("port `{}`: a reverse proxy's port {want} must be relocatable = false and not proxied", p.name)),
+                    None => err(format!("reverse_proxy: no tcp port with default {want}")),
+                }
+            }
+        } else if let Some(p) = self.ports.iter().find(http_port)
+            && !self.host_network
+        {
+            err(format!("port `{}`: default host port {} belongs to the web access proxy (only a reverse_proxy app may use it)", p.name, p.default));
         }
         for p in &self.ports {
             if p.proxied && (self.host_network || p.protocol != Protocol::Tcp) {

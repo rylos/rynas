@@ -1,0 +1,22 @@
+# Upstream: https://github.com/pocket-id/pocket-id/blob/main/docker-compose.yml
+# Differences: image pinned, generated ENCRYPTION_KEY (the only required variable), PUID/PGID
+# from rynas (the entrypoint drops to them), proxy trusted explicitly, the daily anonymous
+# heartbeat to upstream switched off, SQLite in WAL mode as the TrueNAS app sets it. The image
+# has its own HEALTHCHECK (`pocket-id healthcheck`).
+services:
+  pocket-id:
+    image: ghcr.io/pocket-id/pocket-id:v2.19.2@sha256:3ee23895d6a3adb5dd5de801a4fd31fc31b960e6dfbea9b5200e33cf477695eb
+    restart: unless-stopped
+    ports:
+      - "${RYNAS_BIND}:${WEB_PORT}:1411"
+    environment:
+      APP_URL: "${APP_URL}"
+      ENCRYPTION_KEY: "${ENCRYPTION_KEY}"
+      TRUST_PROXY: "${RYNAS_TRUSTED_PROXIES}"
+      ANALYTICS_DISABLED: "true"
+      DB_CONNECTION_STRING: "file:/app/data/pocket-id.db?_pragma=journal_mode(WAL)&_pragma=busy_timeout(2500)&_txlock=immediate"
+      PUID: "${PUID}"
+      PGID: "${PGID}"
+      TZ: "${TZ}"
+    volumes:
+      - ${DATA_FOLDER}:/app/data

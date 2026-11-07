@@ -1,0 +1,24 @@
+{
+  "type": "object",
+  "properties": {
+    "HW_ACCEL": {
+      "type": "boolean",
+      "title": "Intel GPU acceleration",
+      "description": "Gives Frigate the iGPU for video decoding (VA-API) and object detection (OpenVINO). Strongly advised: CPU detection only copes with one or two cameras.",
+      "default": true,
+      "x-ui": { "widget": "switch" }
+    },
+    "LIBVA_DRIVER": {
+      "type": "string",
+      "title": "VA-API driver",
+      "description": "iHD for Intel Broadwell (5th generation) and newer; i965 for Gemini Lake Celerons (J4105, J4125) and older.",
+      "default": "iHD",
+      "enum": ["iHD", "i965"],
+      "x-ui": { "widget": "select", "enum_labels": ["iHD (newer Intel)", "i965 (Gemini Lake and older)"], "visible_if": { "HW_ACCEL": true } }
+    }
+  },
+  "required": ["LIBVA_DRIVER"],
+  "x-groups": [
+    { "title": "Hardware", "fields": ["HW_ACCEL", "LIBVA_DRIVER"] }
+  ]
+}

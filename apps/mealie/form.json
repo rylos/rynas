@@ -1,0 +1,23 @@
+{
+  "type": "object",
+  "properties": {
+    "BASE_URL": {
+      "type": "string",
+      "title": "Public URL",
+      "description": "The address users open, used in shared links and e-mails, e.g. https://recipes.example.lan.",
+      "format": "uri",
+      "x-ui": { "placeholder": "https://recipes.example.lan" }
+    },
+    "ALLOW_SIGNUP": {
+      "type": "boolean",
+      "title": "Allow sign-up",
+      "description": "Lets anyone who reaches Mealie create an account. Off: invite people from the admin page.",
+      "default": false,
+      "x-ui": { "widget": "switch" }
+    }
+  },
+  "required": ["BASE_URL"],
+  "x-groups": [
+    { "title": "Access", "fields": ["BASE_URL", "ALLOW_SIGNUP"] }
+  ]
+}

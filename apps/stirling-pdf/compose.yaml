@@ -1,0 +1,23 @@
+# Upstream: https://docs.stirlingpdf.com/Server/Install/Docker/
+# Differences: standard image pinned by digest, PUID/PGID from rynas (the image starts as root
+# and drops to them, so no `user:`), login kept on, analytics off instead of asking at first
+# launch. The tessdata folder is not mounted: an empty bind would hide the languages the image
+# ships. The image has its own HEALTHCHECK.
+services:
+  stirling-pdf:
+    image: stirlingtools/stirling-pdf:3.3.0@sha256:ed7b1775c6706b5e5ea24fa6155f078eff1027bd35a17d21834e4407036025e6
+    restart: unless-stopped
+    ports:
+      - "${RYNAS_BIND}:${WEB_PORT}:8080"
+    environment:
+      PUID: "${PUID}"
+      PGID: "${PGID}"
+      TZ: "${TZ}"
+      SECURITY_ENABLELOGIN: "true"
+      SYSTEM_ENABLEANALYTICS: "false"
+      SYSTEM_ENABLEPOSTHOG: "false"
+      SYSTEM_ENABLESCARF: "false"
+    volumes:
+      - ${CONFIGS_FOLDER}:/configs
+      - ${STORAGE_FOLDER}:/storage
+      - ${LOGS_FOLDER}:/logs

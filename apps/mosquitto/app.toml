@@ -1,0 +1,45 @@
+schema = 1
+id = "mosquitto"
+name = "Mosquitto"
+version = "1.0.0"
+app_version = "2.1.2"
+description = "Lightweight MQTT broker for home automation: sensors, Zigbee2MQTT, Home Assistant, Frigate."
+homepage = "https://mosquitto.org"
+source = "https://github.com/eclipse-mosquitto/mosquitto"
+changelog_url = "https://mosquitto.org/ChangeLog.txt"
+license = "EPL-2.0 OR BSD-3-Clause"
+maintainers = ["rynas"]
+categories = ["home-automation"]
+min_rynas = "0.1.0"
+arch = ["amd64", "arm64"]
+main_service = "mosquitto"
+
+[resources]
+ram_min_mb = 32
+ram_recommended_mb = 64
+
+[[ports]]
+name = "mqtt"
+env = "MQTT_PORT"
+service = "mosquitto"
+container = 1883
+default = 1883
+protocol = "tcp"
+purpose = "MQTT for devices and apps on the LAN (password required)"
+
+[[folders]]
+env = "DATA_FOLDER"
+path = "data"
+intent = "data"
+ssd = "ok"
+description = "Generated mosquitto.conf, the password file and retained messages"
+
+[[secrets]]
+env = "MQTT_PASSWORD"
+length = 24
+description = "Password of the MQTT user"
+show = true
+
+[[notes]]
+level = "info"
+text = "Clients connect to mqtt://<NAS address>:1883 with the user name chosen here and the password shown after install. Anonymous access is off."

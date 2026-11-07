@@ -1,0 +1,26 @@
+# Upstream: https://github.com/advplyr/audiobookshelf/blob/master/docker-compose.yml
+# Differences: image pinned, runs as PUID:PGID (upstream's commented `user:` line, used by
+# Umbrel) and therefore listens on 13378 instead of 80, healthcheck on /healthcheck as the
+# TrueNAS app does. The image has no HEALTHCHECK of its own.
+services:
+  audiobookshelf:
+    image: ghcr.io/advplyr/audiobookshelf:2.37.2@sha256:b897c33f05972fb1bf484f7487bc878fa91ec8691335c1db6e2929c3a7658efa
+    restart: unless-stopped
+    user: "${PUID}:${PGID}"
+    init: true
+    ports:
+      - "${RYNAS_BIND}:${WEB_PORT}:13378"
+    environment:
+      TZ: "${TZ}"
+      PORT: "13378"
+    volumes:
+      - ${CONFIG_FOLDER}:/config
+      - ${METADATA_FOLDER}:/metadata
+      - ${AUDIOBOOKS}:/audiobooks
+      - ${PODCASTS}:/podcasts
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:13378/healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s

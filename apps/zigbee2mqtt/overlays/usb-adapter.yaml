@@ -1,0 +1,9 @@
+# USB coordinator: the stable /dev/serial/by-id path chosen at install appears as /dev/zigbee,
+# and the container user joins dialout, the group that owns serial devices.
+# https://www.zigbee2mqtt.io/guide/installation/02_docker.html#rootless-container
+services:
+  zigbee2mqtt:
+    devices:
+      - "${ADAPTER_DEVICE}:/dev/zigbee"
+    group_add:
+      - dialout
