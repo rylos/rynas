@@ -78,6 +78,15 @@ pub fn event_for(e: &CertEntry) -> Option<NewEvent> {
     let name = e.names.first().cloned().unwrap_or_else(|| e.id.clone());
     let sev = trouble(e.status)?;
     let (title, body) = match e.status {
+        // imported (§5.5): rynas never renews them; an expired one is no longer served
+        CertStatus::Expired if e.kind == CertKind::Imported => (
+            format!("The imported certificate for {name} has expired"),
+            "Its names went back to the own domain's certificate or the local CA. Upload a new one or let the tool that pushes it renew it.",
+        ),
+        CertStatus::ExpiresSoon if e.kind == CertKind::Imported => (
+            format!("The imported certificate for {name} expires soon"),
+            "rynas does not renew imported certificates. Upload a new one or check the tool that pushes it.",
+        ),
         CertStatus::Expired => (
             format!("The certificate for {name} has expired"),
             "Browsers and apps refuse the connection. Look at the certificate dashboard.",

@@ -38,6 +38,7 @@ pub mod caddy;
 pub mod certs;
 pub mod diag;
 pub mod domains;
+pub mod imported;
 pub mod model;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -157,6 +158,8 @@ pub struct RenderInput<'a> {
     /// Decrypted credentials of the domains (only the fields written as values, never as
     /// placeholders, are rendered from it).
     pub creds: &'a CredValues,
+    /// The valid imported certificates (§5.5).
+    pub imports: &'a [imported::Active],
 }
 
 /// A route with the names it gets on this host.
@@ -419,6 +422,8 @@ pub struct WebAccessSvc {
     /// Provider reads shared by plans (review 2026-11-07, M6).
     dns_cache: rynas_dns::cache::Cache,
     cert_mem: Mutex<CertMem>,
+    /// Imported certificates: watched folder state; also serialises changes to the store.
+    imports: Mutex<imported::ImportMem>,
 }
 
 /// What the certificate checks remember.
@@ -495,6 +500,7 @@ impl WebAccessSvc {
             dns_sync: Mutex::new(()),
             dns_cache: rynas_dns::cache::Cache::new(),
             cert_mem: Mutex::new(CertMem::default()),
+            imports: Mutex::new(imported::ImportMem::default()),
         }
     }
 
@@ -635,6 +641,7 @@ impl WebAccessSvc {
         cfg: &'a WebAccessConfig,
         facts: &'a HostFacts,
         creds: &'a CredValues,
+        imports: &'a [imported::Active],
     ) -> RenderInput<'a> {
         RenderInput {
             cfg,
@@ -643,13 +650,15 @@ impl WebAccessSvc {
             ui_port: self.ui_port,
             emergency_port: self.emergency_port,
             creds,
+            imports,
         }
     }
 
     /// The resolved names and the engine configuration of `cfg` on this host.
     pub fn render(&self, cfg: &WebAccessConfig, facts: &HostFacts) -> (Resolved, Value) {
         let creds = self.cred_values(cfg);
-        self.render_with(cfg, facts, &creds)
+        let active = self.active_imports(rynas_tls::now());
+        self.render_with(cfg, facts, &creds, &active)
     }
 
     fn render_with(
@@ -657,9 +666,10 @@ impl WebAccessSvc {
         cfg: &WebAccessConfig,
         facts: &HostFacts,
         creds: &CredValues,
+        active: &[imported::Active],
     ) -> (Resolved, Value) {
         let resolved = resolve(cfg, facts);
-        let json = Caddy.render(&self.input(cfg, facts, creds), &resolved);
+        let json = Caddy.render(&self.input(cfg, facts, creds, active), &resolved);
         (resolved, json)
     }
 
@@ -679,7 +689,8 @@ impl WebAccessSvc {
                 (id, (p, v))
             })
             .collect();
-        self.render_with(cfg, facts, &creds)
+        let active = self.active_imports(rynas_tls::now());
+        self.render_with(cfg, facts, &creds, &active)
     }
 
     /// Makes sure the engine's certificate covers `names` and is issued by the current
@@ -869,7 +880,8 @@ impl WebAccessSvc {
     ) -> Result<bool, String> {
         let _g = self.push_lock.lock().unwrap_or_else(|e| e.into_inner());
         let creds = self.cred_values(cfg);
-        let (resolved, json) = self.render_with(cfg, facts, &creds);
+        let active = self.active_imports(rynas_tls::now());
+        let (resolved, json) = self.render_with(cfg, facts, &creds, &active);
         if json.is_null() {
             self.publish_ui(&[]);
             return Ok(false);
@@ -898,6 +910,14 @@ impl WebAccessSvc {
             .map_err(|e| format!("{DNS_SECRETS}: {e}"))?;
         if secrets_changed {
             log("web access: DNS provider credentials written for the proxy");
+            cert_changed = true;
+        }
+        // imported certificates: the engine's copies of the valid pairs (§5.5)
+        if self
+            .write_import_files(&active)
+            .map_err(|e| format!("the imported certificates for the proxy: {e}"))?
+        {
+            log("web access: imported certificates written for the proxy");
             cert_changed = true;
         }
         if !self.admin.wait_ready(Duration::from_secs(10)) {
@@ -2142,11 +2162,36 @@ impl WebAccessSvc {
                 e
             }
         };
+        // imported certificates (§5.5): the last good pair of each; a watched folder still
+        // waiting for its files is `pending`
+        let active = self.active_imports(now);
+        for m in self.import_index() {
+            let id = format!("imported:{}", m.id);
+            let mut e = match self.stored_leaf(&m.id).and_then(|v| v.into_iter().next()) {
+                Some(c) => certs::entry(&id, CertKind::Imported, c, false, now),
+                None => CertEntry {
+                    id,
+                    kind: CertKind::Imported,
+                    status: CertStatus::Pending,
+                    ..Default::default()
+                },
+            };
+            e.source = Some(
+                match m.source {
+                    ImportSource::Upload => "upload",
+                    ImportSource::Folder => "folder",
+                }
+                .into(),
+            );
+            e.last_error = m.last_error.clone();
+            out.push(e);
+        }
         let mut cm = self.cert_mem.lock().unwrap_or_else(|e| e.into_inner());
         let mut expected = BTreeSet::new();
         if cfg.settings.mode == ProxyMode::Builtin {
             for d in domains::active(&cfg) {
-                for s in domains::cert_subjects(&cfg, d) {
+                // subjects an imported certificate replaces are not ordered
+                for s in imported::acme_subjects(&cfg, d, &active) {
                     expected.insert(s.clone());
                     let id = format!("acme:{s}");
                     let mut e = match self.acme_cert(&cfg, &s) {
@@ -2834,6 +2879,66 @@ async fn domain_records_post(
     .map(Json)
 }
 
+// imported certificates (§5.5): immediate actions, like `/system/tls/import`
+
+async fn imports_get(State(st): State<WaState>, hd: HeaderMap) -> Res<Json<Vec<ImportedCert>>> {
+    let (s, ops) = wsvc(&st)?;
+    admin_user(&ops, &hd, "web access")?;
+    blocking(move || Ok(s.imports())).await.map(Json)
+}
+
+async fn imports_post(
+    State(st): State<WaState>,
+    hd: HeaderMap,
+    body: Result<Json<CertImportRequest>, JsonRejection>,
+) -> Res<Json<ImportedCert>> {
+    let (s, ops) = wsvc(&st)?;
+    let who = admin_user(&ops, &hd, "imported certificates")?;
+    let Json(req) = body?;
+    let v = blocking(move || s.save_import(&req)).await?;
+    // the id and the certificate's identity, never key material
+    let what = match &v.certificate {
+        Some(c) => format!("{} {} ({})", v.id, c.subject, c.fingerprint_sha256),
+        None => format!("{} (watched folder)", v.id),
+    };
+    audit(&who, "import", &what);
+    Ok(Json(v))
+}
+
+async fn imports_inspect(
+    State(st): State<WaState>,
+    hd: HeaderMap,
+    body: Result<Json<CertImportRequest>, JsonRejection>,
+) -> Res<Json<ImportedCert>> {
+    let (s, ops) = wsvc(&st)?;
+    admin_user(&ops, &hd, "imported certificates")?;
+    let Json(req) = body?;
+    blocking(move || s.inspect_import(&req)).await.map(Json)
+}
+
+async fn import_check(
+    State(st): State<WaState>,
+    hd: HeaderMap,
+    UrlPath(id): UrlPath<String>,
+) -> Res<Json<ImportedCert>> {
+    let (s, ops) = wsvc(&st)?;
+    admin_user(&ops, &hd, "imported certificates")?;
+    blocking(move || s.check_import(&id)).await.map(Json)
+}
+
+async fn import_delete(
+    State(st): State<WaState>,
+    hd: HeaderMap,
+    UrlPath(id): UrlPath<String>,
+) -> Res<StatusCode> {
+    let (s, ops) = wsvc(&st)?;
+    let who = admin_user(&ops, &hd, "imported certificates")?;
+    let id2 = id.clone();
+    blocking(move || s.delete_import(&id2)).await?;
+    audit(&who, "import-delete", &id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn certificates_get(
     State(st): State<WaState>,
     hd: HeaderMap,
@@ -2871,5 +2976,15 @@ pub fn router(st: WaState) -> Router {
         )
         .route("/v1/web-access/certificates", get(certificates_get))
         .route("/v1/web-access/providers", get(providers_get))
+        .route(
+            "/v1/web-access/imports",
+            get(imports_get).post(imports_post),
+        )
+        .route("/v1/web-access/imports/inspect", post(imports_inspect))
+        .route("/v1/web-access/imports/{id}/check", post(import_check))
+        .route(
+            "/v1/web-access/imports/{id}",
+            axum::routing::delete(import_delete),
+        )
         .with_state(st)
 }

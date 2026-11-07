@@ -238,6 +238,16 @@ pub fn routes() -> Router<AppState> {
         .route("/web-access/sync", post(forward))
         .route("/web-access/confirm", post(forward_host))
         .route("/web-access/routes/{id}/test", post(forward))
+        // W2: domains, certificate dashboard, providers
+        .route("/web-access/domains/{id}/test", post(forward))
+        .route("/web-access/domains/{id}/records", post(forward))
+        .route("/web-access/certificates", get(forward))
+        .route("/web-access/providers", get(forward))
+        // imported certificates (§5.5)
+        .route("/web-access/imports", get(forward).post(forward))
+        .route("/web-access/imports/inspect", post(forward))
+        .route("/web-access/imports/{id}/check", post(forward))
+        .route("/web-access/imports/{id}", delete(forward))
         // network (P4): with the local address of the session's connection
         .route("/network/interfaces", get(forward_net))
         .route("/network/interfaces/{name}", put(forward_net))

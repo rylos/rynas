@@ -20,6 +20,11 @@ if [ "$1" = "configure" ]; then
         addgroup --system --quiet rynas-admin
         NEW_ADMIN_GROUP=1
     fi
+    # members of rynas-cert-drop may write the watched folders of imported certificates
+    # (/var/lib/rynas-cert-drop/<id>/, made by rynasd; docs/phase2/docker-apps.md §5.5)
+    if ! getent group rynas-cert-drop >/dev/null; then
+        addgroup --system --quiet rynas-cert-drop
+    fi
 
     # /var/lib/rynas: rynas-web may enter it, rynasd keeps its secrets in auth/
     chown root:rynas /var/lib/rynas

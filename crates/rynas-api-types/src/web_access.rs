@@ -16,6 +16,17 @@
 //! - `GET /api/v1/web-access/certificates` → [`CertificateInventory`];
 //! - `GET /api/v1/web-access/providers` → `Vec<`[`DnsProviderInfo`]`>`.
 //!
+//! Imported certificates (`docs/phase2/docker-apps.md` §5.5), immediate actions outside the
+//! staged key (like `/system/tls/import`):
+//! - `GET /api/v1/web-access/imports` → `Vec<`[`ImportedCert`]`>`;
+//! - `POST /api/v1/web-access/imports` ([`CertImportRequest`]) → [`ImportedCert`] (creates or
+//!   replaces by id);
+//! - `POST /api/v1/web-access/imports/inspect` ([`CertImportRequest`]) → [`ImportedCert`]
+//!   (validation and coverage only, nothing stored);
+//! - `POST /api/v1/web-access/imports/{id}/check` → [`ImportedCert`] (reads a watched folder
+//!   now);
+//! - `DELETE /api/v1/web-access/imports/{id}` → 204.
+//!
 //! The model is engine-neutral: nothing here is Caddy-specific. Names (local `.local` name
 //! today; own domain, Tailscale and tunnel names in later waves) are separate from who may
 //! connect ([`AccessLevel`]).
@@ -627,6 +638,9 @@ pub enum CertKind {
     ProxyLocal,
     /// ACME, obtained and renewed by rynas-caddy for an own domain.
     Acme,
+    /// Made elsewhere (a router's ACME client, a company CA, a bought wildcard) and imported
+    /// by upload or through a watched folder (§5.5). Never renewed by rynas.
+    Imported,
 }
 
 /// Health of one certificate.
@@ -650,7 +664,8 @@ pub enum CertStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct CertEntry {
     /// Stable id: `local-ca`, `interface`, `proxy-local`, `acme:<name>` (one ACME
-    /// certificate per name: `acme:*.nas.example.com`, `acme:nas.example.com`).
+    /// certificate per name: `acme:*.nas.example.com`, `acme:nas.example.com`),
+    /// `imported:<id>`.
     pub id: String,
     pub kind: CertKind,
     pub status: CertStatus,
@@ -682,6 +697,90 @@ pub struct CertEntry {
 pub struct CertificateInventory {
     pub certificates: Vec<CertEntry>,
     pub at_ms: i64,
+}
+
+/// How an imported certificate arrives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportSource {
+    /// Pasted or uploaded through the API; replaced by uploading again.
+    #[default]
+    Upload,
+    /// Pushed by another tool into the watched folder
+    /// `/var/lib/rynas-cert-drop/<id>/` as `fullchain.pem` + `privkey.pem` (members of the
+    /// group `rynas-cert-drop` may write there). rynasd picks up a change within seconds,
+    /// validates it and reloads the proxy; bad files never replace the last good pair.
+    Folder,
+}
+
+/// `POST /api/v1/web-access/imports` and `.../imports/inspect`.
+///
+/// Errors (`400 invalid_value`, `field`): `id` (`[a-z0-9-]` 1-32), `label` (over 80
+/// characters), `certificate` / `private_key` (the validation of `/system/tls/import`: PEM,
+/// leaf first then intermediates in order, an unencrypted key matching the leaf, not expired,
+/// serverAuth usage, no CA certificate as the leaf; plus at least one DNS name). With
+/// `source: upload` both texts are required; with `source: folder` they are optional (a
+/// first pair to start with, before the tool pushes its own).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct CertImportRequest {
+    pub id: String,
+    /// Free text shown next to the certificate ("router wildcard", "company CA").
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub source: ImportSource,
+    /// PEM chain: the server certificate first, then its intermediates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificate: Option<String>,
+    /// PEM private key of the server certificate (PKCS#8, SEC1 or PKCS#1, unencrypted).
+    /// Write-only: never part of an answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_key: Option<String>,
+}
+
+/// One imported certificate (`GET /api/v1/web-access/imports`). Never carries key material.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ImportedCert {
+    pub id: String,
+    #[serde(default)]
+    pub label: String,
+    pub source: ImportSource,
+    /// The watched folder (`source: folder`), as an absolute path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
+    /// The leaf of the last good pair; `None` for a watched folder still waiting for files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificate: Option<crate::tls::TlsCertificate>,
+    /// Intermediates of the last good pair (leaf excluded).
+    #[serde(default)]
+    pub chain: Vec<crate::tls::TlsCertificate>,
+    /// `ok`, `expires_soon` (< 14 days), `expired` (no longer served: its names go back to
+    /// ACME or the local CA), `pending` (a watched folder without a good pair yet).
+    pub status: CertStatus,
+    /// Served names (interface, routes) this certificate takes over: every one its DNS names
+    /// cover, exactly or through a one-label wildcard. Empty while expired.
+    #[serde(default)]
+    pub covers: Vec<String>,
+    /// Served names covered by its DNS names that another imported certificate serves
+    /// (an exact name beats a wildcard, then the later expiry, then the id).
+    #[serde(default)]
+    pub shadowed: Vec<String>,
+    /// ACME subjects of the own domains it replaces (not ordered while it is valid).
+    #[serde(default)]
+    pub replaces_acme: Vec<String>,
+    /// Warnings (codes as in `/system/tls`: `expires_soon`, `expired`, `chain_incomplete`).
+    #[serde(default)]
+    pub warnings: Vec<crate::tls::TlsWarning>,
+    /// When the last good pair was taken (ms since the epoch).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported_at_ms: Option<i64>,
+    /// Why the files in the watched folder were refused (English; the last good pair stays
+    /// in use). Cleared by the next good pair.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error_at_ms: Option<i64>,
 }
 
 /// State of the proxy engine (rynas-caddy).

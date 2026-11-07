@@ -32,12 +32,12 @@ fi
 
 if [ "$1" = "purge" ]; then
     # TOTP secrets, recovery codes and any other state
-    rm -rf /var/lib/rynas /run/rynas
+    rm -rf /var/lib/rynas /run/rynas /var/lib/rynas-cert-drop
     if command -v deluser >/dev/null 2>&1; then
         if getent passwd rynas >/dev/null; then
             deluser --system --quiet rynas || true
         fi
-        for g in rynas-admin rynas; do
+        for g in rynas-admin rynas-cert-drop rynas; do
             if getent group "$g" >/dev/null; then
                 delgroup --system --quiet "$g" || true
             fi
