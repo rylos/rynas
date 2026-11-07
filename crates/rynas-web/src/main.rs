@@ -10,15 +10,22 @@ use rynas_auth::session::SessionConfig;
 use rynas_auth::totp::{FileStorage, MemoryStorage, TotpManager};
 use rynas_auth::{AuthConfig, AuthService, Backend, SystemClock};
 use rynas_web::app::{self, AppState};
+use rynas_web::listen::PlainListen;
 use rynas_web::metrics::{Collector, Store};
 use rynas_web::rynasd_client::RynasdClient;
 
 #[derive(Parser, Debug)]
 #[command(version, about)]
 struct Args {
-    /// Address to listen on (plain HTTP).
+    /// Plain HTTP address, or `auto[:PORT]`: 0.0.0.0:PORT (default 8080) until the built-in
+    /// reverse proxy fronts the interface (--proxy-state) and HTTPS is up, then
+    /// 127.0.0.1:PORT only. X-Forwarded-For is trusted only from loopback peers here.
     #[arg(long, default_value = "127.0.0.1:8080")]
-    listen: SocketAddr,
+    listen: PlainListen,
+    /// File in which rynasd publishes the names the reverse proxy fronts the interface on
+    /// (read by `--listen auto`).
+    #[arg(long, default_value = rynas_web::listen::DEFAULT_PROXY_STATE)]
+    proxy_state: PathBuf,
     /// HTTPS address (the emergency door, never behind the reverse proxy); `[::]` listens on
     /// IPv4 and IPv6. "off" (or empty) disables HTTPS.
     #[arg(long, default_value = "[::]:8443", value_parser = parse_tls_listen)]
@@ -270,7 +277,9 @@ fn main() -> std::io::Result<()> {
         let tls = args.tls_listen.0.map(|_| {
             let r = rynas_web::tls::CertReloader::new(args.tls_cert.clone(), args.tls_key.clone());
             if let Err(e) = r.reload() {
-                tracing::warn!("https: no certificate yet ({e}): handshakes fail until rynasd publishes one");
+                tracing::warn!(
+                    "https: no certificate yet ({e}): handshakes fail until rynasd publishes one"
+                );
             }
             r
         });
@@ -292,17 +301,28 @@ fn main() -> std::io::Result<()> {
 
         // HTTPS: same router; a busy port or a missing certificate never stops plain HTTP
         let mut plain = app.clone();
+        let mut https_ready: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(|| false);
         if let (Some(addr), Some(reloader)) = (args.tls_listen.0, tls.clone()) {
             match rynas_web::tls::bind(addr).await {
                 Ok(l) => {
+                    let r = reloader.clone();
+                    https_ready = Arc::new(move || r.ready());
                     let port = l.local_addr()?.port();
                     tracing::info!(
                         "rynas-web on https://{} (certificate {}{})",
                         l.local_addr()?,
                         args.tls_cert.display(),
-                        if reloader.ready() { "" } else { ", not there yet" }
+                        if reloader.ready() {
+                            ""
+                        } else {
+                            ", not there yet"
+                        }
                     );
-                    tokio::spawn(rynas_web::tls::serve(l, app.clone(), reloader.server_config()));
+                    tokio::spawn(rynas_web::tls::serve(
+                        l,
+                        app.clone(),
+                        reloader.server_config(),
+                    ));
                     rynas_web::tls::spawn_watch(reloader.clone(), rynas_web::tls::CHECK_INTERVAL);
                     if !args.no_https_redirect {
                         let cfg = Arc::new(rynas_web::tls::Redirect { port, reloader });
@@ -316,27 +336,29 @@ fn main() -> std::io::Result<()> {
             }
         }
 
-        let listener = tokio::net::TcpListener::bind(args.listen).await?;
+        let server = rynas_web::listen::Plain {
+            mode: args.listen,
+            app: plain,
+            proxy_state: args.proxy_state.clone(),
+            https_ready,
+            check: rynas_web::listen::CHECK_INTERVAL,
+        };
+        let (local, serve) = server
+            .bind(shutdown_signal(), Duration::from_secs(2))
+            .await?;
         tracing::info!(
-            "rynas-web {} on http://{} (ui: {}, hardware root: {}, rynasd: {})",
+            "rynas-web {} on http://{local}{} (ui: {}, hardware root: {}, rynasd: {})",
             env!("CARGO_PKG_VERSION"),
-            listener.local_addr()?,
+            if matches!(args.listen, PlainListen::Auto(_)) {
+                " (auto: loopback only while the reverse proxy fronts the interface)"
+            } else {
+                ""
+            },
             ui_dir.display(),
             args.hw_root.display(),
             args.rynasd_socket.display()
         );
-        let server = axum::serve(
-            listener,
-            plain.into_make_service_with_connect_info::<rynas_web::conn::ConnAddrs>(),
-        )
-        .with_graceful_shutdown(shutdown_signal());
-        // SSE clients never hang up by themselves: do not wait for them more than a moment
-        tokio::select! {
-            r = server.into_future() => r,
-            _ = async { shutdown_signal().await; tokio::time::sleep(Duration::from_secs(2)).await } => {
-                tracing::info!("shutdown: closing open streams");
-                Ok(())
-            }
-        }
+        serve.await;
+        Ok(())
     })
 }

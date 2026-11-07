@@ -11,7 +11,7 @@ Type=simple
 User=rynas
 Group=rynas
 # listen addresses and extra options: /etc/default/rynas-web
-Environment=RYNAS_WEB_LISTEN=0.0.0.0:8080
+Environment=RYNAS_WEB_LISTEN=auto
 Environment=RYNAS_WEB_TLS_LISTEN=[::]:8443
 EnvironmentFile=-/etc/default/rynas-web
 ExecStart=/usr/libexec/rynas/rynas-web --listen ${RYNAS_WEB_LISTEN} --tls-listen ${RYNAS_WEB_TLS_LISTEN} --ui-dir /usr/share/rynas/ui --rynasd-socket /run/rynas/rynasd.sock $RYNAS_WEB_OPTS

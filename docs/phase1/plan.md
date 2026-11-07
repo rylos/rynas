@@ -170,7 +170,9 @@ Rules:
   checked before anything is staged or written) and `POST /config/apply` (the changeset,
   however it was staged: restore, archive, drift import). 403 `forbidden`.
 - **Rate limiting**: per IP (IPv6 per /64) and per user name, 5 free failures per user and 20 per IP,
-  then exponential backoff from 2 s to 15 min; failures logged as
+  then exponential backoff from 2 s to 15 min. The IP is the TCP peer, or the right-most
+  untrusted `X-Forwarded-For` entry from the reverse proxy on loopback ("Behind the built-in
+  reverse proxy (W1b)"); failures logged as
   `authentication failure for USER from IP` for fail2ban (`packaging/fail2ban/`).
 - **TOTP**: RFC 6238 (SHA1, 6 digits, 30 s, ±1 step), each code accepted once, 10 recovery codes
   (80 bits, stored as SHA-256). Enabling it ends the user's other sessions.
@@ -203,7 +205,8 @@ access … it reuses the active certificate"). Like DSM's 5001, Proxmox's 8006 a
 |---|---|---|
 | `--tls-listen` / `RYNAS_WEB_TLS_LISTEN` | `[::]:8443` | HTTPS; `[::]` is bound dual-stack (`IPV6_V6ONLY` off), `0.0.0.0` when the kernel has no IPv6; `off` disables it |
 | `--tls-cert`, `--tls-key` | `/etc/rynas/tls/ui.crt`, `ui.key` | the pair rynasd publishes |
-| `--listen` / `RYNAS_WEB_LISTEN` | `0.0.0.0:8080` (unit) | plain HTTP, kept during the transition |
+| `--listen` / `RYNAS_WEB_LISTEN` | `auto` (unit, since W1b; was `0.0.0.0:8080`) | plain HTTP: the network until rynas-caddy fronts the interface, then loopback only (next section) |
+| `--proxy-state` | `/run/rynas/web-access.ui` | where rynasd says the proxy fronts the interface (W1b) |
 | `--no-https-redirect` | off | serve plain HTTP to other hosts instead of redirecting |
 
 - HTTPS and plain HTTP serve the same router. TLS 1.2/1.3 (ring provider, no aws-lc C build),
@@ -335,6 +338,71 @@ Proxmox `pveproxy-ssl.pem` over the node certificate from the cluster CA
 (https://forum.proxmox.com/threads/custom-certificates-upload.157568/), systemd chmod of existing
 `StateDirectory=` (https://bugzilla.redhat.com/show_bug.cgi?id=1778384), HSTS and untrusted
 certificates (https://www.rfc-editor.org/rfc/rfc6797#section-12.1).
+
+## Behind the built-in reverse proxy (W1b)
+Wave W1 put the interface behind rynas-caddy on 80/443 (`../phase2/docker-apps.md` §5.3,
+D-PROXY revised 2026-11-07); W1b pays the two debts it left in rynas-web.
+
+**Trusted proxy** (`rynas_web::conn`, request extension `conn::Client`):
+- `X-Forwarded-For` is honoured **only** when the connection is plain HTTP (never `:8443`,
+  which no proxy fronts), the TCP peer is loopback **and** the local address is loopback (the
+  plain listener as Caddy dials it, `127.0.0.1:<port>`). From a LAN peer or over HTTPS the
+  header is ignored and the client is the peer.
+- The client is the **right-most untrusted** entry of every `X-Forwarded-For` field taken
+  together: walked from the right, loopback entries (the proxy) skipped, the first other
+  address wins; an entry that is not an address stops the walk and the peer is used (nothing
+  is guessed from the client-controlled left part). Entries may carry a port or brackets;
+  IPv4-mapped addresses become IPv4.
+- That address feeds the login rate limit (per IP, IPv6 per /64), the failure log line
+  `authentication failure for USER from IP` (fail2ban: format unchanged, the jail now covers
+  80, 443, 8080 and 8443) and the lockout notification. Other per-connection logic (the
+  network endpoints' local address, the web access confirmation) keeps using the socket.
+- Caddy side: nothing to render. Caddy's `reverse_proxy` sets `X-Forwarded-For`,
+  `X-Forwarded-Proto` and `X-Forwarded-Host` and passes `Host` through; from clients outside
+  `trusted_proxies` (rynas-caddy has none: it is the edge) it replaces the incoming
+  `X-Forwarded-*` values instead of appending, so the right-most entry is the address Caddy
+  saw. The golden render is unchanged.
+- Residual risk: another local process (a shell user, a host-network container) can reach
+  `127.0.0.1:8080` too and claim any address — to dodge the per-IP limit (the per-user limit
+  still applies) or to get an address banned by fail2ban. Closing it needs an upstream only
+  the proxy can reach (a Unix socket checked with `SO_PEERCRED`), noted for W3 with SSO.
+- **Cookie and CSRF through the proxy**: `Secure` because Caddy sends
+  `X-Forwarded-Proto: https` (honoured from anyone: it can only make the cookie stricter).
+  CSRF is the per-session token plus `SameSite=Strict` and JSON-only login; nothing depends
+  on `Host` or `Origin`, so the interface works on any name the proxy serves, and a forged
+  `Origin` changes nothing. No `Origin` allow-list is added: it would need every name of the
+  NAS and gives nothing the token does not.
+
+**Plain port on loopback** (`rynas_web::listen`, `--listen auto[:PORT]`, package default):
+- `0.0.0.0:PORT` (8080) while the proxy does not front the interface; `127.0.0.1:PORT` only
+  once it does **and** `:8443` listens with a certificate. With HTTPS off, not bound or without
+  a certificate the plain port stays on the network: nobody is locked out.
+- "Fronts": rynasd writes the names the proxy serves the interface on to
+  `/run/rynas/web-access.ui` (0644) after each successful load and periodic check
+  (`rynasd::web_access::UI_STATE`), and removes it in external mode, when rynas-caddy is not
+  installed or the interface has no names. rynas-web reads it every 5 s.
+- A move stops accepting on the old socket (open connections and event streams carry on) and
+  binds the new one, sessions intact (no restart); if the new address cannot be bound the old
+  one comes back and the move is retried. Caddy dials `127.0.0.1:PORT` in both states.
+- An explicit address is used as it is (`127.0.0.1:8080`: closed for good; `0.0.0.0:8080`: a
+  proxy on another host, which then needs `--secure-cookies` or `X-Forwarded-Proto` and gets
+  no per-client rate limit).
+- Upgrade: `/etc/default/rynas-web` is a conffile. Unchanged, it becomes `auto`; edited, dpkg
+  asks and the kept explicit address keeps the old behaviour. An upgraded NAS without
+  rynas-caddy keeps `:8080` on the network.
+
+Tests: `rynas-web` unit tests in `conn.rs` (right-most parsing, trust conditions) and
+`listen.rs`; `tests/forwarded.rs` (rate limit per real client behind the proxy, spoofed
+headers from the LAN and over HTTPS ignored, Secure cookie and CSRF via the proxy with
+`Host` = the interface's name, real-socket end-to-end trust, `auto` moving to loopback and
+back, staying on the network without HTTPS); `rynasd` `tests/web_access.rs` (the state file
+written on apply, removed in external mode and without the engine).
+
+Sources (2026-11-07): MDN, `X-Forwarded-For`, "Selecting an IP address" (right-most, trusted
+proxy list; https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/X-Forwarded-For);
+Caddy `reverse_proxy` "Defaults" and `trusted_proxies`
+(https://caddyserver.com/docs/caddyfile/directives/reverse_proxy#defaults); Adam Pritchard,
+"The perils of the 'real' client IP" (https://adam-p.ca/blog/2022/03/x-forwarded-for/).
 
 ## API v1: configuration and tasks (step 6)
 Configuration lives in `rynasd` (`/var/lib/rynas/config.db`, crate `rynas-config`), its only writer;

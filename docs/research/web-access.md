@@ -207,7 +207,7 @@ Sources: https://letsencrypt.org/2024/12/05/ending-ocsp/ · https://letsencrypt.
   - it listens on all addresses, link-local included;
   - it is covered by the firewall anti-lockout;
   - it is the DSM-5001 equivalent.
-  - The current `0.0.0.0:8080` plain-HTTP listener becomes `127.0.0.1:8080` (Caddy's upstream) once `:8443` with rustls lands. That is still owed from phase 1.
+  - The current `0.0.0.0:8080` plain-HTTP listener becomes `127.0.0.1:8080` (Caddy's upstream) once `:8443` with rustls lands. Done in W1b (2026-11-07, `../phase1/plan.md` "Behind the built-in reverse proxy (W1b)"): `--listen auto` moves it once rynasd says the proxy fronts the interface and `:8443` is up; rynas-web trusts `X-Forwarded-For` only from the loopback proxy on that port (right-most entry).
 - **External proxy mode.** A user who prefers NPM, Traefik or Zoraxy turns on "Use another reverse proxy" (Advanced). rynas-caddy stops and releases 80/443, and the port check stops blocking an app that publishes 443. The UI is then only on `:8443`. rynas still shows each app's loopback port so the user can point their proxy at it.
 
 **Config generation and apply:**
