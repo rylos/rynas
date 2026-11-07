@@ -1272,7 +1272,7 @@ networkd running); ifupdown and NetworkManager interfaces are read-only until ad
 | PUT | `/api/v1/network/interfaces/{name}` | `InterfaceConfig` {ipv4 dhcp\|static\|disabled, addresses, gateway?, dns, mtu?} | `NetInterface` (stages the session user's change; staging the applied value drops it); 400 `invalid_value`, 404, 409 `conflict` (read-only interface) |
 | POST | `/api/v1/network/discard` | — | 204 |
 | POST | `/api/v1/network/apply` | `NetApplyRequest` {timeout_s? (60–600, default 120), skip_test, comment} | 202 `NetApplyStarted` {task_id, token?, deadline_ms, timeout_s, candidate_urls, management_touched}; 400 `invalid_value` (validation, zero management paths, skip_test on the management interface), 409 `nothing_pending` |
-| POST | `/api/v1/network/confirm` | `NetConfirmRequest` {token} | `NetConfirmed` {revision}; 400 `invalid_value` (wrong token); 409 `conflict` (not over the new network, too late), `nothing_pending` |
+| POST | `/api/v1/network/confirm` | `NetConfirmRequest` {token} | `NetConfirmed` {revision}; 400 `invalid_value` (wrong token); 409 `conflict` (not over the new network, too late), `nothing_pending`. A migration done at boot (`adopt_at_boot`) has no token: any administrator keeps it with an empty token, over an address of the NAS |
 | POST | `/api/v1/network/rollback` | — | 202 `TaskStarted` (task `network.rollback`); also cancels an adoption planned for the next boot; 409 `nothing_pending` |
 | GET / PUT | `/api/v1/network/rescue` | `RescueSettings` {mdns_service} | `RescueInfo` {mdns_name, mdns_active, link_local [{interface, mac, address, active}], reset_button?: `ResetButton` {module, configured, pending?}, settings, pending?} (PUT stages the key `network.rescue`; apply with `/config/apply`). The reset button exists only where a hardware module has one (`Module::reset_button`: on a Synology a reflection of `synology.hw`) and is read-only here; a PUT with `reset_button` answers 400 `invalid_value` |
 | POST | `/api/v1/network/adopt` | `NetAdoptRequest` {mode now\|next_boot, timeout_s?, confirm} | `now`: 202 `NetApplyStarted` (task `network.adopt`); `next_boot`: 200 `NetAdoptScheduled` {revision, interfaces}; 400 `confirmation_required`, `invalid_value` (bonds/bridges/VLANs/static IPv6 are not migrated in phase 1) |
@@ -1372,6 +1372,19 @@ flush, networking enabled and restarted, verified against the ifupdown file. `ne
 target is stored and the boot guard switches at the next boot with a 180 s marker; `rynasctl
 net rollback --reason boot_check` then keeps it when a connected port has a routable address,
 else brings ifupdown back.
+
+The planned migration is shared state, not the planning browser's: `GET /network/state`
+reports it as `trial` {kind `adopt_at_boot`, `deadline_ms` 0, author, `started_ms` = when it
+was planned}, so every session shows "Migration planned for the next reboot" (who, when) with
+Cancel until the reboot, even days later. After the boot the same trial has a deadline and
+nobody holds a token (no browser applied it): the page says the network was migrated at this
+boot, counts down, and offers **Keep it now** (`POST /network/confirm` with an empty token,
+any administrator, over an address of the NAS) and **Go back to ifupdown** (`POST
+/network/rollback`). Only the timer (`boot_check`, `timeout`) keeps the migration when a port
+is routable; a manual rollback always restores ifupdown. (Found on the DS920+ on 2026-11-07: a
+migration planned two days earlier ran at a reboot; the plan had never been shown again after
+the page reload, the page showed the generic countdown with "confirm from the browser where the
+change was applied", and its Roll back kept the migration instead of undoing it.)
 
 `rynasctl net rollback|boot-guard|watchdog|reset-button|confirm --token|status` (root; the
 store lock serializes them with rynasd). Diagnostics: argv only, validated host names (never a

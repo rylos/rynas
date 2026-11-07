@@ -15,7 +15,8 @@ use std::time::{Duration, Instant};
 
 use rynas_api_types::network::{
     InterfaceConfig, Ipv4Method, LinkKind, NetBackend, NetInterface, NetRevision,
-    NetRollbackReport, NetworkState, ReadOnlyCode, ReadOnlyReason, RescueLinkLocal, TrialKind,
+    NetRollbackReport, NetTrial, NetworkState, ReadOnlyCode, ReadOnlyReason, RescueLinkLocal,
+    TrialKind,
 };
 use rynas_api_types::notify::{EventState, NewEvent, NotifyCategory, NotifySeverity};
 use rynas_config::FileKind;
@@ -462,7 +463,7 @@ impl Engine {
             services: inv.services.clone(),
             routes: inv.routes.clone(),
             dns: inv.dns.clone(),
-            trial: self.store.marker()?.map(|m| m.view()),
+            trial: self.trial_view(st.lkg)?,
             lkg_revision: st.lkg,
             last_rollback: self.store.last_rollback()?.map(|r| r.report),
             pending: self.staged_for(user)?.into_keys().collect(),
@@ -477,6 +478,33 @@ impl Engine {
             timeout_max_s: TIMEOUT_MAX_S,
             read_at_ms: inv.read_at_ms,
         })
+    }
+
+    /// The change under test, or the migration planned for the next boot (`deadline_ms` 0) so
+    /// that every session sees it and can cancel it, not only the one that planned it.
+    fn trial_view(&self, lkg: Option<u64>) -> Result<Option<NetTrial>> {
+        if let Some(m) = self.store.marker()? {
+            return Ok(Some(m.view()));
+        }
+        let Some(b) = self.store.boot_adopt()? else {
+            return Ok(None);
+        };
+        let interfaces = self
+            .store
+            .revision(b.revision)?
+            .map(|r| r.config.keys().cloned().collect())
+            .unwrap_or_default();
+        Ok(Some(NetTrial {
+            kind: TrialKind::AdoptAtBoot,
+            revision: b.revision,
+            lkg_revision: lkg.unwrap_or_default(),
+            started_ms: b.ts_ms,
+            deadline_ms: 0,
+            timeout_s: BOOT_CHECK_S,
+            interfaces,
+            management_touched: true,
+            author: b.author,
+        }))
     }
 
     pub fn hostname(&self) -> String {
@@ -1569,13 +1597,11 @@ impl Engine {
         let m = self.store.marker()?.ok_or_else(|| {
             NetError::NothingPending("no network change is waiting for a confirmation".into())
         })?;
-        if m.kind == TrialKind::AdoptAtBoot {
-            return Err(NetError::Conflict(
-                "the migration done at boot confirms itself once a port has a routable address"
-                    .into(),
-            ));
-        }
-        if sha256_hex(token.as_bytes()) != m.token_sha256 {
+        // A migration done at boot has no browser that applied it, so no token: any
+        // administrator who reaches the system over one of its addresses may keep it (the
+        // address check below still applies). Otherwise it keeps itself at the deadline when a
+        // port has a routable address.
+        if m.kind != TrialKind::AdoptAtBoot && sha256_hex(token.as_bytes()) != m.token_sha256 {
             return Err(NetError::Invalid("wrong confirmation token".into()));
         }
         if self.os.now_ms() > m.deadline_ms {
@@ -1697,8 +1723,9 @@ impl Engine {
         report
     }
 
-    /// Rolls the trial back (timer, API, watchdog). A migration done at boot is confirmed
-    /// instead when a port has a routable address. `Ok(None)`: nothing to roll back.
+    /// Rolls the trial back (timer, API, watchdog). At its deadline a migration done at boot is
+    /// confirmed instead when a port has a routable address; asked by an administrator
+    /// (`reason::MANUAL`) it is always rolled back. `Ok(None)`: nothing to roll back.
     pub fn rollback(&self, why: &str, log: &dyn Fn(&str)) -> Result<Option<NetRollbackReport>> {
         let _lock = self.store.lock()?;
         let Some(m) = self.store.marker()? else {
@@ -1716,7 +1743,9 @@ impl Engine {
             return Ok(None);
         }
         let target = self.store.revision(m.revision)?.unwrap_or_default();
-        if m.kind == TrialKind::AdoptAtBoot {
+        // only the timer keeps a migration done at boot; an administrator who asks for the
+        // rollback gets ifupdown back
+        if m.kind == TrialKind::AdoptAtBoot && why != reason::MANUAL {
             let inv = self.inventory_fresh()?;
             if inv
                 .ports()

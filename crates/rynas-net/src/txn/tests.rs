@@ -628,10 +628,6 @@ fn ifupdown_migrated_at_next_boot() {
     assert_eq!(t.os.state.lock().unwrap().timer.as_deref(), Some("180s"));
     let m = t.e.trial().unwrap().unwrap();
     assert_eq!((m.kind, m.revision), (TrialKind::AdoptAtBoot, rev));
-    assert!(matches!(
-        t.e.confirm("x", Origin::Cli),
-        Err(NetError::Conflict(_))
-    ));
     t.os.sleep(Duration::from_secs(181));
     // a routable address: kept
     assert!(t.e.rollback(reason::BOOT_CHECK, &log).unwrap().is_none());
@@ -691,4 +687,56 @@ fn read_only_codes_keep_their_english_text() {
     assert_eq!(j, r#"{"code":"network_manager"}"#);
     let unknown: ReadOnlyReason = serde_json::from_str(r#"{"code":"wifi"}"#).unwrap();
     assert_eq!(unknown.code, ReadOnlyCode::Other);
+}
+
+#[test]
+fn planned_migration_is_shown_to_every_session_and_cancelled() {
+    let t = ifupdown_box();
+    let (rev, _) = t.e.adopt_next_boot("admin").unwrap();
+    // another session, after a reload: the plan is visible (deadline 0 = before the reboot)
+    let tr = t.e.state("other", None).unwrap().trial.unwrap();
+    assert_eq!(
+        (tr.kind, tr.revision, tr.deadline_ms, tr.author.as_str()),
+        (TrialKind::AdoptAtBoot, rev, 0, "admin")
+    );
+    assert_eq!(tr.interfaces, vec!["lan1", "lan2"]);
+    assert!(t.e.rollback(reason::MANUAL, &log).unwrap().is_none());
+    assert!(t.e.state("other", None).unwrap().trial.is_none());
+    assert_eq!(t.e.boot_guard(&log).unwrap(), "nothing to do");
+    assert_eq!(t.os.read_config(Path::new(INTERFACES)).unwrap(), IFUPDOWN);
+}
+
+#[test]
+fn migration_at_boot_rolled_back_by_hand_goes_back_to_ifupdown() {
+    let t = ifupdown_box();
+    t.e.adopt_next_boot("admin").unwrap();
+    t.e.boot_guard(&log).unwrap();
+    // networkd came up with an address, yet the administrator asks to go back: ifupdown returns
+    // (it used to keep the migration instead)
+    let r = t.e.rollback(reason::MANUAL, &log).unwrap().unwrap();
+    assert_eq!(r.reason, reason::MANUAL);
+    assert_eq!(t.os.read_config(Path::new(INTERFACES)).unwrap(), IFUPDOWN);
+    assert!(t.e.trial().unwrap().is_none());
+    let s = t.os.state.lock().unwrap();
+    assert!(s.active["networking"] && s.enabled["networking"]);
+    assert!(!s.active["systemd-networkd"]);
+}
+
+#[test]
+fn migration_at_boot_kept_by_any_admin_without_a_token() {
+    let t = ifupdown_box();
+    let (rev, _) = t.e.adopt_next_boot("admin").unwrap();
+    t.e.boot_guard(&log).unwrap();
+    let tr = t.e.state("other", None).unwrap().trial.unwrap();
+    assert_eq!(tr.kind, TrialKind::AdoptAtBoot);
+    assert!(tr.deadline_ms > 0, "running now");
+    // no browser applied it: no token exists, the address check still applies
+    assert!(matches!(
+        t.e.confirm("", Origin::Web(ip("127.0.0.1"))),
+        Err(NetError::Conflict(_))
+    ));
+    assert_eq!(t.e.confirm("", Origin::Web(ip("192.0.2.37"))).unwrap(), rev);
+    assert!(t.e.trial().unwrap().is_none());
+    assert_eq!(t.e.store.state().unwrap().lkg, Some(rev));
+    assert!(t.os.state.lock().unwrap().timer.is_none(), "timer disarmed");
 }
