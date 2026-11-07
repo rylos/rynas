@@ -74,6 +74,7 @@ pub struct DaemonState {
     pub removable: crate::removable::RmState,
     /// Docker (needs `ops`); `None` answers 503 on its endpoints.
     pub docker: crate::docker::DkState,
+    pub apps: crate::apps::AppsState,
 }
 
 impl DaemonState {
@@ -111,6 +112,7 @@ impl DaemonState {
             files: None,
             removable: None,
             docker: None,
+            apps: None,
         }
     }
 }
@@ -184,6 +186,7 @@ pub fn router(state: DaemonState) -> Router {
         .merge(crate::files::router(state.files))
         .merge(crate::removable::router(state.removable))
         .merge(crate::docker::router(state.docker))
+        .merge(crate::apps::router(state.apps))
         .fallback(|| async { Error::not_found("no such endpoint") })
         // 405, query string and path rejections: ApiError bodies too
         .layer(axum::middleware::from_fn(crate::error::json_errors))

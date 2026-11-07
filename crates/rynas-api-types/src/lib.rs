@@ -8,6 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod apps;
 pub mod docker;
 pub mod network;
 pub mod notify;

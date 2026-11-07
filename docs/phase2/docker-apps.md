@@ -83,7 +83,7 @@ D-APPCAT, adopted after D-DOCKER, moves the catalogue into **phase 2**. That sup
 | D1 | `rynas-docker` + rynasd API: engine status, install and adoption, engine config, listing, actions, logs, stacks CRUD on disk, compose tasks, snapshot and rollback, events into notifications, stats; API section below | built (§5.1) |
 | A1 | `rynas-apps` format + loader + renderer + CI lint, and the first curated entries in `apps/`: the managers (Arcane, Dockhand, Portainer CE, Dockge), Immich, Jellyfin, Vaultwarden, Nextcloud, Syncthing, Home Assistant, Uptime Kuma, Paperless-ngx; format in § 6 | done (2026-11-07) |
 | D2 | UI: Docker page, dashboard widget, notification texts | after D1 |
-| A2 | Apps & Plugins page: install wizard (form from `form.json`), installed apps, updates with snapshot and rollback, convert to custom stack; rynasd catalogue endpoints | after D1 + A1 |
+| A2 | Apps & Plugins page: install wizard (form from `form.json`), installed apps, updates with snapshot and rollback, convert to custom stack; rynasd catalogue endpoints | backend built (§5.2); UI in progress |
 | W0 | rynas-web on `:8443` with rustls, the emergency door that never goes through the proxy (still owed from phase 1) | before W1 |
 | W1 | Web access (D-PROXY/D-EXPOSE revised on 2026-11-07, `../research/web-access.md`): `rynas-caddy` package, rynasd renderer + `POST /load` + last-good, local names + local CA, app routes, the wizard's Access step, diagnostics | with A2 |
 | W2 | Domains, DNS-01 wildcard, DNS records managed by rynas, certificate dashboard | after W1 |
@@ -313,6 +313,176 @@ try stacks).
 Not yet: scheduled update checks, image prune, a per-stack backup export, the Docker page
 and the widget (D2).
 
+### 5.2 API — wave A2 (apps, `/api/v1/apps/...`)
+
+Code: `crates/rynasd/src/apps.rs` (catalogue cache, routes, tasks), built on `rynas-apps`
+(render, migrations, update plan) and the D1 stack code (`crates/rynasd/src/docker.rs`).
+Types: `rynas_api_types::apps`; every field is documented there. rynas-web forwards every
+route unchanged. It treats every `/apps/` read as an administrator read, like `/docker/`.
+
+**Access.** Every route needs the administrator role, reads and images included. rynasd checks
+it too (403 `forbidden`). Every change is a task `apps.*` and a line of the audit log
+(`apps <action> <target> by <user>`).
+
+**Catalogue source.** rynasd reads `--apps-dir`:
+- the default is `/usr/share/rynas/apps`, from the `rynas-apps-catalog` package;
+- for development, a checkout's `apps/`, e.g. `rynasd --dry-system --apps-dir ./apps`.
+
+The catalogue stays in memory. At most every 2 s, a request checks the name, size and mtime of
+every file, and any change reloads it. An entry that fails validation goes into `issues` and is
+never offered. A missing folder gives an empty catalogue with one issue.
+
+**Disk is the source of truth.** An installed app is a rynas stack
+(`/<vol>/docker/stacks/<stack>/`) whose `compose.yaml` has an `x-rynas` block. Nothing else
+records installs. Apps always go on the Docker volume (setting `docker.volume`); `folders` can
+place single folders elsewhere.
+
+**Secrets.**
+- They are generated at install and stored only in the stack's `.env` (0600).
+- No GET returns them. Plans mask them as `********`.
+- The install answer lists, once, the secrets the entry marks `show = true` in `[[secrets]]`
+  (e.g. an initial administrator password).
+
+#### Error codes
+
+Only existing codes; this wave adds none.
+- 400:
+  - `invalid_value` with `field`: a form property, share, folder or port env, `stack`,
+    `volume` (Docker has no volume yet) or `snapshot`;
+  - `confirmation_required` (`field: confirm`).
+- 404 `not_found`: unknown entry or image, a stack that is not an app, unknown snapshot.
+- 409:
+  - `already_exists` (`field: stack`): the stack folder exists;
+  - `conflict` with `field`: the port env for a port in use, or `ram`, `arch`, `min_rynas`;
+  - `conflict` without a field: an update when the app is up to date, or a downgrade;
+  - `busy`: an action on that stack is running;
+  - `docker_not_installed`: an install without an engine (plans still work).
+- 503 `backend_unavailable`: the catalogue is not enabled in rynasd.
+
+#### Routes
+
+Paths are relative to `/api/v1`.
+
+| Method | Path | Body | Answer |
+|---|---|---|---|
+| GET | `/apps/catalog` | — | `AppCatalog` {source, apps [`AppCard`] sorted by name, issues [{app, file, message}], installed_ram_mb?, arch, docker_installed, stacks_dir?} |
+| GET | `/apps/catalog/{id}` | — | `AppDetail` {card, description (Markdown), homepage, source?, changelog_url, maintainers, host_network, form `AppForm`, web `AppWeb`?, folders, shares, secrets [{env, description, show}], hardware, overlays, named_volumes, notes, screenshots [URL]} |
+| GET | `/apps/catalog/{id}/icon` | — | the SVG: `image/svg+xml`, at most 64 KiB, `nosniff`, a sandboxing CSP; `ETag`, and 304 on `If-None-Match` |
+| GET | `/apps/catalog/{id}/screenshots/{file}` | — | a PNG or WebP of the entry, at most 1 MiB. Only file names the loader listed are served; nothing from the request reaches the filesystem |
+| POST | `/apps/catalog/{id}/plan` | `AppInstallRequest` (optional) | `AppInstallPlan`. No side effects. Works without Docker (warning `docker_not_installed`) |
+| POST | `/apps/catalog/{id}/install` | `AppInstallRequest` | 202 `AppInstallStarted` {task_id, stack, stack_dir, secrets [`ShownSecret` {env, description, value}]} (task `apps.install`). Refusals, checked in this order: `docker_not_installed`, `invalid_value` on `volume`, the first plan error, a port conflict, the RAM, the architecture, `min_rynas` |
+| GET | `/apps/installed` | — | `Vec<InstalledApp>`, sorted by stack |
+| GET | `/apps/installed/{stack}` | — | `InstalledAppDetail` {app `InstalledApp`, snapshots [`StackSnapshot`]} |
+| GET | `/apps/installed/{stack}/update` | — | `AppUpdatePlan`. 404 when the entry left the catalogue |
+| POST | `/apps/installed/{stack}/update` | optional `AppUpdateRequest` {answers, snapshot?, stop_first?} | 202 `TaskStarted` (`apps.update`). 409 `conflict` when up to date or for a downgrade. 400 `invalid_value` for a `missing_values` field that `answers` lacks |
+| POST | `/apps/installed/{stack}/rollback` | `AppRollbackRequest` {snapshot} | 202 (`apps.rollback`). 404 for an unknown snapshot |
+| POST | `/apps/installed/{stack}/convert` | — | 204. Removes `x-rynas` (and adds a header comment), nothing else. The stack stays as a custom stack and leaves this list |
+| POST | `/apps/installed/{stack}/uninstall` | optional `AppUninstallRequest` {delete_data, confirm?} | 202 (`apps.uninstall`). `delete_data` needs `confirm` equal to the stack name |
+
+#### Shapes worth knowing
+
+- **`AppInstallRequest`** (every field optional):
+  - `stack`: default the app id;
+  - `form`: {PROPERTY: string, integer or boolean};
+  - `shares`: {ENV: "/vol1/media"}, a folder that exists below a mounted volume;
+  - `folders`: {ENV: "/ssd/docker/appdata/<stack>/<path>"}, below a mounted volume; created at
+    install;
+  - `ports`: {ENV: port}, relocatable ports only;
+  - `publish_lan`: false (default) binds proxied ports to `127.0.0.1`, so only the web access
+    proxy reaches them (D-PROXY); true binds them to `0.0.0.0`;
+  - `start`: true (default) runs `up -d` after creating the stack.
+- **`AppCard`**:
+  - id, name, summary, categories, version, app_version, license, antifeatures;
+  - ports [`AppPort`, as in `app.toml`];
+  - ram_min_mb, ram_recommended_mb, and `ram`, a `RamGate`:
+    - `{"state":"ok"}`;
+    - `{"state":"below_recommended","installed_mb","recommended_mb"}`;
+    - `{"state":"below_minimum","installed_mb","minimum_mb"}`;
+    - `{"state":"unknown"}`;
+  - arch_ok, rynas_ok, manager;
+  - icon (relative URL), installed [stack names], update_available.
+- **`AppInstallPlan`**:
+  - app, version, stack, stack_dir;
+  - `ok`: the install would be accepted as it is;
+  - `errors` [`FieldError` {field, kind, message}], every problem at once. `kind` is one of
+    `invalid_value`, `missing_value`, `unknown_value`, `unsafe_value`, `share_missing`,
+    `bad_path`, `bad_port`, `bad_stack`;
+  - `port_conflicts` [{name, env, port, protocol, relocatable, suggestion?}]:
+    - used ports are the published ports of every container, plus the host's listening TCP
+      sockets and bound UDP sockets (`/proc/net/*`);
+    - a suggestion skips used ports, the app's own ports and earlier suggestions;
+  - `ports` [{name, env, port, protocol, proxied, bind?, purpose}];
+  - ram, arch_ok, rynas_ok;
+  - `folders` [{env, path, intent?, ssd, share, exists, owner "uid:gid", suggested?}].
+    `suggested` is `/<apps_ssd_volume>/docker/appdata/<stack>/<path>`, for folders with `ssd`
+    ok or preferred, when that preference is set;
+  - secrets [{env, description, show}], never the values;
+  - images, overlays, notes;
+  - `warnings`, from this set:
+    - `docker_not_installed`;
+    - `no_volume`;
+    - `engine_unreachable`: container ports were not checked;
+    - `ram_below_recommended`;
+    - `published_on_lan`;
+  - `compose`, the `compose.yaml` that will be written, and `env`, the `.env` with secrets
+    masked. Both are empty while there are errors.
+- **`InstalledApp`**:
+  - stack, app, name, version, app_version, catalog;
+  - in_catalog, catalog_version?, update_available;
+  - state? (`running|partial|stopped|down`; null when the engine does not answer), containers,
+    running;
+  - stack_dir, web_port?, web_path?, bind? (`RYNAS_BIND`);
+  - snapshots: the folder is a subvolume.
+
+  The Open button: with `bind = 0.0.0.0` it opens
+  `<location.protocol>//<location.hostname>:<web_port><web_path>`. With loopback it uses the
+  web access route (W1).
+- **`AppUpdatePlan`**:
+  - stack, app, from_version, to_version, from_app_version, to_app_version;
+  - up_to_date, downgrade;
+  - migrations [versions];
+  - image_changes [{service, kind `added|removed|tag|digest`, from?, to?}];
+  - missing_values, changelog_url, snapshot.
+
+#### Configuration
+
+There is one preference, `apps_ssd_volume` (a volume label, or null), in the `docker` key. It is
+staged and applied like the rest of `DockerSettings`. The wizard suggests that volume for
+folders marked `ssd`. Installed state is never stored.
+
+#### Tasks
+
+| Type | What it does |
+|---|---|
+| `apps.install` | Makes sure the `docker-apps` account exists, then renders again with the plan's secrets and the account's real ids. `create_stack`: subvolume, `compose.yaml` 0640, `.env` 0600, owner `docker-apps`. Creates the folders, missing parents included, mode 0750, owner PUID:PGID or the entry's `owner`; shares are only checked. Then `up --detach`. A failure after the stack exists keeps the stack, and the log names the two ways forward: `POST /api/v1/docker/stacks/<stack>/up`, or `.../apps/installed/<stack>/uninstall` with `delete_data` |
+| `apps.update` | Snapshot, by the setting or the body (`stop_first` stops the stack meanwhile). Writes the re-rendered files: values migrated; secrets, ports, folders, answers, `RYNAS_BIND` and PUID/PGID kept. Creates new folders, then `pull` and `up`. On failure: the D1 rollback to that snapshot. Without a snapshot (plain folder), the previous files are written back and `up` runs |
+| `apps.rollback` | The D1 rollback: `down`, a `before-rollback` snapshot, the folder restored from the snapshot, images tagged back, `up` |
+| `apps.uninstall` | `down`, never with `-v`. By default everything stays on disk, and the log says how to start the stack again or delete it. With `delete_data`, it deletes the stack folder, its snapshots and the folders the app placed outside it |
+
+Under `--dry-system`, compose commands and deletions are only logged. Files and folders go below
+the dry root; when the account does not exist they get nobody's ids (65534).
+
+#### UI texts (i18n keys the UI adds, en + it)
+
+Task names: the task list and the channel messages read `task.<type>`.
+
+| Key | en | it |
+|---|---|---|
+| `task.apps.install` | Install app | Installazione dell'app |
+| `task.apps.update` | Update app | Aggiornamento dell'app |
+| `task.apps.rollback` | Roll back app | Ripristino dell'app |
+| `task.apps.uninstall` | Uninstall app | Disinstallazione dell'app |
+
+The UI also needs texts for the plan's closed sets:
+- field error kinds: `invalid_value`, `missing_value`, `unknown_value`, `unsafe_value`,
+  `share_missing`, `bad_path`, `bad_port`, `bad_stack`;
+- warnings: `docker_not_installed`, `no_volume`, `engine_unreachable`,
+  `ram_below_recommended`, `published_on_lan`;
+- RAM gate states, antifeatures, categories, folder intents, image change kinds.
+
+Entry texts (names, summaries, descriptions, port purposes, notes, form titles) come in English
+from the catalogue and are shown as they are.
+
 ## 6. App catalog format (wave A1)
 
 Normative. Code: `crates/rynas-apps` (pure data in, files out; no Docker access). Entries:
@@ -358,7 +528,7 @@ Any other file is an error. `<id>` is `[a-z0-9][a-z0-9-]*`, at most 40 character
 | `[web]` | see 6.3 |
 | `[[folders]]` | app-owned bind folders: `env`, `path` (relative; default location `./<path>` in the stack folder, so the stack snapshot covers it), `intent` (`config`, `data`, `db`, `media`, `cache`), `ssd` (`no`, `ok`, `preferred`), `owner` (`uid:gid` when the image needs it, default PUID:PGID), `description` |
 | `[[shares]]` | user shared folders: `env`, `label`, `description`, `access` (`ro`/`rw`, must match `:ro` in compose), `required`, `fallback` (stack folder used when an optional share is not chosen) |
-| `[[secrets]]` | `env`, `length` (16-256), `encoding` (`alnum` characters, or `hex` / `base64` of `length` random bytes); generated once, kept on update |
+| `[[secrets]]` | `env`, `length` (16-256), `encoding` (`alnum` characters, or `hex` / `base64` of `length` random bytes), `description`, `show` (the install answer shows the value once: an initial administrator password); generated once, kept on update |
 | `[hardware]` | `gpu` (`none`, `optional`, `required`), `gpu_kinds` (`intel-qsv`, `vaapi`, `nvidia`), `cpu_features` (`x86-64-v2`, `avx`, `avx2`) |
 | `[security]` | `privileged`, `docker_socket` (services allowed), `cap_add` (capabilities allowed) |
 | `[[overlays]]` | `file` (`overlays/<name>.yaml`), `when` (a boolean form field or `RYNAS_CPU_AVX2`, optionally `!`-negated), `description` |

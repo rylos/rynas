@@ -211,6 +211,18 @@ pub fn routes() -> Router<AppState> {
         .route("/docker/stats", get(forward))
         .route("/docker/updates", get(forward))
         .route("/docker/updates/check", post(forward))
+        // app catalogue (phase 2, A2): cards, entry detail and images, install plan and
+        // install, installed apps, update plan, update, rollback, convert, uninstall
+        .route("/apps/catalog", get(forward))
+        .route("/apps/catalog/{id}", get(forward))
+        .route("/apps/catalog/{id}/icon", get(forward))
+        .route("/apps/catalog/{id}/screenshots/{file}", get(forward))
+        .route("/apps/catalog/{id}/plan", post(forward))
+        .route("/apps/catalog/{id}/install", post(forward))
+        .route("/apps/installed", get(forward))
+        .route("/apps/installed/{stack}", get(forward))
+        .route("/apps/installed/{stack}/update", get(forward).post(forward))
+        .route("/apps/installed/{stack}/{action}", post(forward))
         // network (P4): with the local address of the session's connection
         .route("/network/interfaces", get(forward_net))
         .route("/network/interfaces/{name}", put(forward_net))

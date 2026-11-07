@@ -112,6 +112,11 @@ pub fn normalize(s: DockerSettings) -> Result<DockerSettings, Invalid> {
     )?;
     range("crash_restarts", s.crash_restarts, 2, 100)?;
     range("crash_window_min", s.crash_window_min, 1, 120)?;
+    if let Some(v) = &s.apps_ssd_volume
+        && !rynas_api_types::validate::volume_label(v)
+    {
+        return Err(Invalid::at("apps_ssd_volume", "not a valid volume label"));
+    }
     Ok(s)
 }
 
@@ -249,9 +254,9 @@ pub struct DockerSvc {
     pub socket: Option<String>,
     /// `<state>/docker`: the update report, validation scratch files.
     pub state_dir: PathBuf,
-    runner: Arc<dyn Runner>,
+    pub(crate) runner: Arc<dyn Runner>,
     /// Where detection reads binaries and os-release (`/`; a fake tree in tests).
-    host_root: PathBuf,
+    pub(crate) host_root: PathBuf,
     settings: watch::Receiver<DockerSettings>,
     engine: tokio::sync::Mutex<Option<Engine>>,
     facts: Mutex<Option<(Instant, InstallFacts)>>,
@@ -273,7 +278,7 @@ pub const EV_STATS: &str = "docker_stats";
 pub const EV_CHANGED: &str = "docker_changed";
 pub const EV_RESYNC: &str = "docker_resync";
 
-fn not_installed() -> Error {
+pub(crate) fn not_installed() -> Error {
     Error::new(
         StatusCode::CONFLICT,
         error_codes::DOCKER_NOT_INSTALLED,
@@ -297,11 +302,11 @@ fn not_managed(name: &str) -> Error {
     )
 }
 
-fn conflict(msg: impl Into<String>) -> Error {
+pub(crate) fn conflict(msg: impl Into<String>) -> Error {
     Error::new(StatusCode::CONFLICT, error_codes::CONFLICT, msg.into())
 }
 
-fn busy(msg: impl Into<String>) -> Error {
+pub(crate) fn busy(msg: impl Into<String>) -> Error {
     Error::new(StatusCode::CONFLICT, error_codes::BUSY, msg.into())
 }
 
@@ -344,7 +349,7 @@ fn audit(who: &str, action: &str, target: &str) {
     tracing::info!(target: "rynas::audit", "docker {action} {target} by {who}");
 }
 
-fn accepted(id: String) -> Response {
+pub(crate) fn accepted(id: String) -> Response {
     (StatusCode::ACCEPTED, Json(TaskStarted { task_id: id })).into_response()
 }
 
@@ -455,7 +460,7 @@ impl DockerSvc {
         let _ = self.live.send((EV_CHANGED, j));
     }
 
-    fn fs(&self, owner: Option<(u32, u32)>) -> StackFs<'_> {
+    pub(crate) fn fs(&self, owner: Option<(u32, u32)>) -> StackFs<'_> {
         StackFs {
             root: &self.root,
             runner: self.runner.as_ref(),
@@ -575,7 +580,7 @@ impl DockerSvc {
 
     /// A rynas stack: its layout and folder; 409 `stack_not_managed` for another one, 404
     /// for none.
-    async fn managed(&self, name: &str) -> Res<Layout> {
+    pub(crate) async fn managed(&self, name: &str) -> Res<Layout> {
         if !valid_stack_name(name) {
             return Err(Error::bad_request("invalid stack name"));
         }
@@ -599,7 +604,7 @@ impl DockerSvc {
 
     /// The `docker-apps` (uid, gid) below the root, `None` under `--dry-system` or when the
     /// account does not exist.
-    fn apps_owner(&self) -> Option<(u32, u32)> {
+    pub(crate) fn apps_owner(&self) -> Option<(u32, u32)> {
         if self.dry {
             return None;
         }
@@ -613,7 +618,7 @@ impl DockerSvc {
     }
 
     /// Runs a command of a task: logged and run, or only logged under `--dry-system`.
-    async fn run(&self, ctx: &TaskCtx, cmd: &Cmd) -> Result<CmdOutput, String> {
+    pub(crate) async fn run(&self, ctx: &TaskCtx, cmd: &Cmd) -> Result<CmdOutput, String> {
         if self.dry {
             ctx.log(&format!("$ {} (dry system: not run)", cmd.display()));
             return Ok(CmdOutput {
@@ -628,7 +633,7 @@ impl DockerSvc {
     }
 
     /// Makes sure the `docker-apps` account exists (before folders get its owner).
-    async fn ensure_apps_account(&self, ctx: &TaskCtx) -> Result<(), String> {
+    pub(crate) async fn ensure_apps_account(&self, ctx: &TaskCtx) -> Result<(), String> {
         let read = |p: &str| {
             std::fs::read_to_string(rynas_docker::under(&self.root, p)).unwrap_or_default()
         };
@@ -658,7 +663,7 @@ impl Drop for BusyGuard<'_> {
 }
 
 /// An owned busy mark that a task carries.
-struct OwnedBusy(Arc<DockerSvc>, String);
+pub(crate) struct OwnedBusy(Arc<DockerSvc>, String);
 
 impl Drop for OwnedBusy {
     fn drop(&mut self) {
@@ -667,7 +672,7 @@ impl Drop for OwnedBusy {
     }
 }
 
-fn mark_busy(s: &Arc<DockerSvc>, name: &str) -> Res<OwnedBusy> {
+pub(crate) fn mark_busy(s: &Arc<DockerSvc>, name: &str) -> Res<OwnedBusy> {
     if !s.busy.lock().unwrap().insert(name.to_string()) {
         return Err(busy(format!("an action on stack {name} is in progress")));
     }
@@ -915,7 +920,9 @@ async fn plan_engine(
 // install and migration
 // ---------------------------------------------------------------------------------------------
 
-fn optional_body<T: serde::de::DeserializeOwned + Default>(body: &axum::body::Bytes) -> Res<T> {
+pub(crate) fn optional_body<T: serde::de::DeserializeOwned + Default>(
+    body: &axum::body::Bytes,
+) -> Res<T> {
     if body.iter().all(u8::is_ascii_whitespace) {
         Ok(T::default())
     } else {
@@ -923,7 +930,7 @@ fn optional_body<T: serde::de::DeserializeOwned + Default>(body: &axum::body::By
     }
 }
 
-fn check_volume(label: &str) -> Res<()> {
+pub(crate) fn check_volume(label: &str) -> Res<()> {
     if !rynas_api_types::validate::volume_label(label) {
         return Err(Error::invalid("volume", "not a valid volume label"));
     }
@@ -1713,7 +1720,7 @@ fn start_compose(s: &Arc<DockerSvc>, who: &str, name: &str, l: Layout, op: Stack
 }
 
 /// Runs one compose action of a rynas stack.
-async fn compose(
+pub(crate) async fn compose(
     s: &DockerSvc,
     ctx: &TaskCtx,
     name: &str,
@@ -1771,7 +1778,7 @@ async fn prepare_up(
 }
 
 /// The images the stack's services run now.
-async fn current_images(s: &DockerSvc, name: &str) -> Vec<ServiceImage> {
+pub(crate) async fn current_images(s: &DockerSvc, name: &str) -> Vec<ServiceImage> {
     let Ok(e) = s.engine().await else {
         return Vec::new();
     };
@@ -1789,7 +1796,7 @@ async fn current_images(s: &DockerSvc, name: &str) -> Vec<ServiceImage> {
 
 /// A pre-update snapshot (stack stopped first when asked); `None` when the folder is not a
 /// subvolume.
-async fn pre_snapshot(
+pub(crate) async fn pre_snapshot(
     s: &DockerSvc,
     ctx: &TaskCtx,
     name: &str,
@@ -1836,7 +1843,7 @@ async fn pre_snapshot(
 }
 
 /// Restores the folder from a snapshot, puts the images back and starts the stack.
-async fn do_rollback(
+pub(crate) async fn do_rollback(
     s: &DockerSvc,
     ctx: &TaskCtx,
     name: &str,

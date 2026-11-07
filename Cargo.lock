@@ -3676,6 +3676,7 @@ dependencies = [
  "pam-client",
  "rusqlite",
  "rynas-api-types",
+ "rynas-apps",
  "rynas-auth",
  "rynas-btrfs",
  "rynas-config",
