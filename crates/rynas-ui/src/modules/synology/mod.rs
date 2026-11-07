@@ -57,7 +57,30 @@ pub fn ups_key(slot: UpsSlot) -> &'static str {
         UpsSlot::SetupTooOld => "syn.upsw_too_old",
         UpsSlot::SetupFind => "syn.upsw_find_text",
         UpsSlot::SetupCommands => "syn.upsw_commands",
+        UpsSlot::NetTooOld => "syn.upsn_too_old",
+        UpsSlot::NetListen => "syn.upsn_listen",
+        UpsSlot::NetAllowHelp => "syn.upsn_allow_help",
+        UpsSlot::NetFilter => "syn.upsn_filter",
+        UpsSlot::NetFilterInactive => "syn.upsn_filter_inactive",
+        UpsSlot::NetUnreadable => "syn.upsn_unreadable",
+        UpsSlot::NetPrimary => "syn.upsn_primary",
+        UpsSlot::NetManual => "syn.upsn_manual",
+        UpsSlot::NetOutside => "syn.upsn_outside",
+        UpsSlot::NetRoleMonitorHelp => "syn.upsn_role_monitor_help",
+        UpsSlot::NetUserHelp => "syn.upsn_user_help",
+        UpsSlot::NetUserBad => "syn.upsn_user_bad",
+        UpsSlot::NetCommands => "syn.upsn_commands",
     }
+}
+
+/// synodeb's user names for its network UPS server: `[a-z][a-z0-9_]{0,31}`, not `monuser` or
+/// `admin` (synodeb checks the same).
+pub fn net_user_ok(u: &str) -> bool {
+    let b = u.as_bytes();
+    (1..=32).contains(&b.len())
+        && b[0].is_ascii_lowercase()
+        && b.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_')
+        && !["monuser", "admin"].contains(&u)
 }
 
 /// Every synodeb sender (`synodeb:<source>`) is one neutral label.
@@ -86,9 +109,14 @@ mod tests {
     #[test]
     fn every_slot_has_a_text() {
         use UpsSlot::*;
-        for s in [NoneText, DownText, LbAlways, Timer, TimerHelp, PreTimeoutHelp, TestLb, DeepText, SetupTooOld, SetupFind, SetupCommands] {
+        for s in [
+            NoneText, DownText, LbAlways, Timer, TimerHelp, PreTimeoutHelp, TestLb, DeepText, SetupTooOld, SetupFind, SetupCommands, NetTooOld, NetListen,
+            NetAllowHelp, NetFilter, NetFilterInactive, NetUnreadable, NetPrimary, NetManual, NetOutside, NetRoleMonitorHelp, NetUserHelp, NetUserBad,
+            NetCommands,
+        ] {
             assert!(i18n::text_in(Lang::En, ups_key(s)).is_some(), "{s:?}");
         }
         assert!(source_label("smartd").is_none());
+        assert!(net_user_ok("pc_1") && !net_user_ok("pc-1") && !net_user_ok("1pc") && !net_user_ok("monuser"));
     }
 }

@@ -1003,6 +1003,8 @@ dict! { BLOB, LENS, IT;
     "upsn.for_upsmon_help_pw" => "Add this line to /etc/nut/upsmon.conf on that machine with the account's password in place of PASSWORD, set MODE=netclient in its nut.conf and restart nut-monitor.", "Aggiungi questa riga a /etc/nut/upsmon.conf su quel computer, con la password dell'account al posto di PASSWORD, imposta MODE=netclient nel suo nut.conf e riavvia nut-monitor.";
     "upsn.monitor_note" => "A read-only account cannot shut a machine down: for upsmon add an account that shuts down with the UPS.", "Un account in sola lettura non può spegnere un computer: per upsmon aggiungi un account che si spegne con l'UPS.";
     "upsn.copy" => "Copy", "Copia";
+    "upsn.allow_none" => "None: only this NAS", "Nessuno: solo questo NAS";
+    "upsn.allow_required" => "Enter at least one allowed host or subnet.", "Inserisci almeno un host o una sottorete ammessi.";
     "cfg.key.ups.netserver" => "Network UPS server", "Server UPS di rete";
     "ps.col_on" => "Enabled", "Attiva";
     "ps.col_action" => "Action", "Azione";

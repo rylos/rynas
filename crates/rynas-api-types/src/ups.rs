@@ -529,8 +529,52 @@ pub struct UpsNetServerConfig {
 pub enum UpsNetBlock {
     /// NUT is not installed.
     NutMissing,
-    /// A hardware module's UPS layer runs NUT and owns its files.
+    /// A hardware module's UPS layer runs NUT and owns its files, and has no network UPS
+    /// server of its own.
     Module,
+    /// The module's UPS layer is too old for its network UPS server (the module's text says
+    /// which version is needed).
+    ModuleTooOld,
+}
+
+/// Where the allowed hosts of a module layer's network UPS server come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum UpsNetSource {
+    /// Nothing set: the server is only on the NAS itself.
+    #[default]
+    None,
+    /// The layer's own file for the server (written by a save here, or by the layer's tool).
+    Own,
+    /// Set by hand in the layer's general UPS file; a save here writes the layer's own file,
+    /// which then wins.
+    Manual,
+    /// A source of a newer layer.
+    #[serde(other)]
+    Other,
+}
+
+/// A module layer's network UPS server (`UpsNetServerState::layer`): the layer runs upsd and
+/// its firewall, rynas sets allowed hosts and accounts through the layer's tool. Listen
+/// addresses are the layer's (every address of the NAS), allowed hosts are required.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct UpsNetLayer {
+    /// The server is on in the layer now.
+    pub enabled: bool,
+    /// The addresses upsd listens on, as the layer reports them.
+    #[serde(default)]
+    pub listen: Vec<String>,
+    /// The allowed hosts and subnets the layer applies now.
+    #[serde(default)]
+    pub allow: Vec<String>,
+    /// The layer's own monitoring account (upsmon primary, for NAS clients that expect it;
+    /// its password is set with the layer's tool), when it exists.
+    pub primary_account: Option<String>,
+    /// Accounts the layer has that the rynas setting does not (set with the layer's tool): a
+    /// save here removes them.
+    #[serde(default)]
+    pub outside: Vec<String>,
+    pub source: UpsNetSource,
 }
 
 /// An address of this NAS (a listen choice).
@@ -568,6 +612,9 @@ pub struct UpsNetServerState {
     /// What is wrong with the applied server now (empty: nothing).
     #[serde(default)]
     pub problems: Vec<UpsNetProblem>,
+    /// A module layer runs the server (`null`: plain NUT, rynas writes `/etc/nut`).
+    #[serde(default)]
+    pub layer: Option<UpsNetLayer>,
 }
 
 /// A problem of the applied network UPS server.
@@ -581,6 +628,9 @@ pub enum UpsNetProblem {
     /// cgroup support): every host that reaches port 3493 can connect; a firewall must
     /// limit it.
     FilterInactive,
+    /// The module layer's state of the server cannot be read (its tool failed or answered
+    /// in a format this rynas does not know).
+    LayerUnreadable,
     /// A code of a newer server.
     #[serde(other)]
     Other,

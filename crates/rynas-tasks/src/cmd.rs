@@ -130,6 +130,12 @@ impl Cmd {
         &self.argv[0]
     }
 
+    /// The bytes given with [`Cmd::stdin`] (simulations read them; never log them: they can
+    /// carry secrets).
+    pub fn stdin_data(&self) -> Option<&[u8]> {
+        self.stdin.as_deref()
+    }
+
     /// The command line for logs (arguments are not quoted: never feed it to a shell).
     pub fn display(&self) -> String {
         self.argv

@@ -13,7 +13,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use rynas_api_types::ups::{
-    BatteryTest, UpsBackend, UpsDevice, UpsProbeState, UpsSettings, UpsSetupBlock,
+    BatteryTest, UpsBackend, UpsClientRole, UpsDevice, UpsNetServerConfig, UpsNetSource,
+    UpsProbeState, UpsSettings, UpsSetupBlock,
 };
 use rynas_config::ManagedFile;
 use rynas_tasks::{Cmd, CmdOutput};
@@ -90,4 +91,67 @@ pub trait UpsLayer: Send + Sync {
     fn dry_output(&self, _cmd: &Cmd) -> Option<CmdOutput> {
         None
     }
+
+    // ------------------------------------------------------------ network UPS server
+
+    /// The layer's own network UPS server (`None`: the layer has none, the server is not
+    /// offered with it).
+    fn netserver(&self) -> Option<&dyn NetServerLayer> {
+        None
+    }
+}
+
+/// A module layer's network UPS server (`ups.netserver` with a layer): the layer runs upsd on
+/// every address and a firewall of its own; rynas hands it the allowed hosts and the accounts.
+/// Its tool answers the generic exit codes: 0 applied, 2 refused values (nothing changed, the
+/// reason on stderr), anything else not applied.
+pub trait NetServerLayer: Send + Sync {
+    /// Reads the server's state (exit 0 when the layer has the server; a layer too old for
+    /// it fails).
+    fn status_cmd(&self) -> Cmd;
+
+    /// The state of [`NetServerLayer::status_cmd`]'s output.
+    fn parse_status(&self, out: &CmdOutput) -> NetLayerRead;
+
+    /// The layer's own limits on a normalized value (field path and message, like
+    /// `rynas_nut::netserver::normalize`).
+    fn check(&self, c: &UpsNetServerConfig) -> Result<(), (String, String)>;
+
+    /// Turns the server on with exactly these allowed hosts and accounts. `passwords` are the
+    /// accounts whose password is new or changed; they never go on the command line (the
+    /// standard input), an account without one keeps the layer's password.
+    fn set_cmd(
+        &self,
+        allow: &[String],
+        users: &[(String, UpsClientRole)],
+        passwords: &[(String, String)],
+    ) -> Cmd;
+
+    /// Turns the server off (upsd only on the NAS itself; the accounts of the server removed).
+    fn off_cmd(&self) -> Cmd;
+}
+
+/// What [`NetServerLayer::parse_status`] read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NetLayerRead {
+    Status(NetLayerStatus),
+    /// The layer has no network UPS server (a version before it).
+    Unsupported,
+    /// The tool failed or its answer has an unknown format.
+    Unreadable(String),
+}
+
+/// The layer's network UPS server now.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NetLayerStatus {
+    pub enabled: bool,
+    pub listen: Vec<String>,
+    pub allow: Vec<String>,
+    /// Accounts of the server, with their role.
+    pub users: Vec<(String, UpsClientRole)>,
+    /// The layer's own monitoring account, when it exists.
+    pub primary_account: Option<String>,
+    pub firewall_active: bool,
+    pub server_active: bool,
+    pub source: UpsNetSource,
 }

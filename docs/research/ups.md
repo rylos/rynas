@@ -290,12 +290,56 @@ Picked:
   section) for Home Assistant (Settings › Devices and services › Network UPS Tools), and
   `MONITOR ups@host 1 user PASSWORD secondary` with `MODE=netclient` for another Linux upsmon
   (with the real password right after it was made), each with a copy button.
-- **A module's UPS layer** owns `/etc/nut`: the card says the server cannot be set up there
-  (`UpsNetBlock::Module`); the layer would need its own hook (no core change for one platform).
+- **A module's UPS layer** owns `/etc/nut`: rynas writes nothing there. A layer with a server
+  of its own (`rynas_module::ups::NetServerLayer`, today synodeb 4.6 in
+  `rynas-hw-synology/src/ups_net.rs`) gets the same key through its tool; a layer without one
+  shows "cannot be set up here" (`UpsNetBlock::Module`), one too old for it the module's update
+  note (`UpsNetBlock::ModuleTooOld`). See "With synodeb" below.
 - **API**: `GET/PUT /api/v1/ups/netserver` (`UpsNetServerState` with the NAS's addresses
   and subnets, `filter_active`, `problems` = `server_inactive` / `filter_inactive`;
   `UpsNetServerSaved`), `POST /api/v1/ups/plan/netserver` (`UpsSetupPlan`, passwords
   masked).
+
+### With synodeb (2026-11-07)
+
+synodeb 4.6 has its own network UPS server (`synodeb-ups netserver`), so the card works on the
+synodeb backend too, through the module (D-MODULE: the core knows only the trait; the
+synodeb code and texts are in `rynas-hw-synology` and the web interface's `modules/synology`).
+- **Availability**: `synodeb-ups netserver status --json` exits 0 → offered; a synodeb before
+  4.6 answers a usage error on the unknown subcommand → "update synodeb to 4.6"
+  (`UpsNetBlock::ModuleTooOld`).
+- **State** from `status --json`, schema 1 only (another schema or a failed run:
+  `problems: layer_unreadable`; the apply then sends every password, harmless):
+  `enabled`, `listen`, `clients`, `users` (`secondary` = rynas's "shuts down with the UPS",
+  `readonly` = "read only": LOGIN refused, reading needs no login in NUT), `monuser`,
+  `firewall_active` (reported as `filter_active`, `filter_inactive` when off), `upsd_active`
+  (`server_inactive`), `source`. It goes to `UpsNetServerState::layer`: listen addresses (not
+  editable: synodeb listens on every address), allowed hosts now, `primary_account`
+  (synodeb's `monuser`, upsmon primary, the account other Synology NAS units expect; shown as
+  information, its password set with `synodeb-ups passwd`), `outside` (synodeb users the rynas
+  setting does not have: the next save removes them) and `source` (`manual`: clients set by
+  hand as `NETWORK_CLIENTS` in `/etc/synodeb/ups.conf`; the card says a save writes
+  `/etc/synodeb/ups-network.conf`, which then wins, and the settings dialog starts from those
+  hosts).
+- **Apply** (same staged key and flow, `reconcile` of `ups.netserver`): on →
+  `synodeb-ups netserver set --client IP|CIDR … --user NAME:secondary|readonly …` (the whole
+  set); off or key removed → `synodeb-ups netserver off` (upsd on localhost only, synodeb
+  deletes the extra users and their passwords). Passwords stay sealed in the key; stdin carries
+  `NAME PASSWORD` only for accounts whose envelope changed since the applied value or that the
+  layer does not have (after an `off`); never argv, never the log, never the plan (which shows
+  the command and "passwords … on its standard input"). Exit 0 applied (with NUT off synodeb
+  saves and applies when it runs), 2 values refused (the layer's reason, file untouched), else
+  not applied: both fail the apply, which rolls back by applying the previous value.
+- **Checks**: allowed hosts required while on (synodeb's nftables table is the only filter);
+  synodeb's user names `[a-z][a-z0-9_]{0,31}`, not `monuser`/`admin` (the core's password rule
+  is a subset of synodeb's: 12–64 of `[A-Za-z0-9._~@%+=:,-]`); at most 16 hosts and 32 accounts
+  (rynas's limits, under synodeb's 64/32).
+- **Drift**: the layer's on/off, clients and users against the applied value
+  (`ups-layer:netserver`).
+- **Test instance**: under `--dry-system` the layer's simulated `synodeb-ups` keeps the server's
+  state in the dry root (`/etc/synodeb/ups-network.conf`, a fake format without passwords);
+  `FAKE_UPS_BACKEND=synodeb` in `tools/ui-audit/start.sh`, `FAKE_SYNODEB_VERSION=4.5` for the
+  update note.
 
 Not done, documented:
 - **TLS**: Debian's build has SSL (`--with-ssl --with-nss`), but upsmon clients must be set

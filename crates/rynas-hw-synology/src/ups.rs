@@ -164,12 +164,16 @@ pub fn parse_driver_conf(text: &str) -> Option<UpsDevice> {
 pub struct SynodebUps {
     /// The tool (`/usr/sbin/synodeb-ups`; tests give another path).
     pub tool: PathBuf,
+    /// `--dry-system`: the dry root, where the simulated network UPS server keeps its state
+    /// (`crate::ups_net::dry_netserver`).
+    pub dry_root: Option<PathBuf>,
 }
 
 impl Default for SynodebUps {
     fn default() -> Self {
         Self {
             tool: PathBuf::from(SYNODEB_UPS),
+            dry_root: None,
         }
     }
 }
@@ -289,6 +293,9 @@ impl UpsLayer for SynodebUps {
             return None;
         }
         let line = cmd.display();
+        if line.split_whitespace().nth(1) == Some("netserver") {
+            return Some(crate::ups_net::dry_netserver(self.dry_root.as_deref(), cmd));
+        }
         let out = |code: i32, stdout: &str, stderr: &str| CmdOutput {
             code: Some(code),
             stdout: stdout.into(),
@@ -310,6 +317,12 @@ impl UpsLayer for SynodebUps {
         } else {
             out(1, "", "Device not supported!\n")
         })
+    }
+
+    /// synodeb 4.6's network UPS server (`crate::ups_net`); an older synodeb answers the
+    /// state with a usage error and the server shows as needing an update.
+    fn netserver(&self) -> Option<&dyn rynas_module::ups::NetServerLayer> {
+        Some(self)
     }
 }
 

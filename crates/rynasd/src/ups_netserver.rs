@@ -27,8 +27,13 @@
 //!   with `ups.device`, whose restart already read the new `upsd.conf`, upsd restarts once
 //!   (again only for a changed drop-in, which needs a daemon-reload first). The health check
 //!   wants upsd answering on the first `LISTEN` address (always on `127.0.0.1`).
-//! - **A module's UPS layer** owns `/etc/nut`: the server is not offered there
-//!   ([`UpsNetBlock::Module`]).
+//! - **A module's UPS layer** owns `/etc/nut`: rynas writes nothing there. A layer with a
+//!   network UPS server of its own (`rynas_module::ups::NetServerLayer`) gets the setting
+//!   through its tool instead ([`layer_apply`]): upsd listens on every address (no listen
+//!   choice), allowed hosts are required (the layer's firewall, reported as `filter_active`),
+//!   only new or changed passwords go to the tool, on its standard input. The state comes from
+//!   the layer's own status (`UpsNetServerState::layer`). A layer without the server, or too
+//!   old for it, is not offered ([`UpsNetBlock::Module`], [`UpsNetBlock::ModuleTooOld`]).
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -46,6 +51,7 @@ use rynas_api_types::{StateDrift, StateDriftKind, error_codes};
 use rynas_config::files::{self, FileKind};
 use rynas_config::{Applier, ApplyCtx, Invalid, ManagedFile};
 use rynas_module::UpsLayer;
+use rynas_module::ups::{NetLayerRead, NetLayerStatus, NetServerLayer, Runner};
 use rynas_notify::engine::secrets::SecretBox;
 use rynas_nut::netserver as net;
 use rynas_tasks::Cmd;
@@ -312,9 +318,15 @@ pub struct NetServerDomain {
     /// Checks that upsd answers after an apply ([`tcp_probe`]; `None` under `--dry-system`:
     /// no check).
     pub probe: Option<Probe>,
+    /// Runs the layer's tool (exit codes kept: 2 means refused values); the host, or the dry
+    /// runner under `--dry-system`.
+    pub runner: Arc<dyn Runner>,
 }
 
 impl NetServerDomain {
+    fn net_layer(&self) -> Option<&dyn NetServerLayer> {
+        self.layer.as_deref().and_then(|l| l.netserver())
+    }
     /// The accounts block `c` puts in `upsd.users`, with the real passwords.
     fn users_for(&self, c: &UpsNetServerConfig) -> Result<Option<String>, String> {
         let sb = if c.enabled && !c.clients.is_empty() {
@@ -347,6 +359,10 @@ impl Applier for NetServerDomain {
     fn validate(&self, value: Value) -> Result<Value, Invalid> {
         let mut c = config_of(&value)?;
         net::normalize(&mut c, &[]).map_err(|(f, m)| Invalid::at(&f, m))?;
+        if let Some(n) = self.net_layer() {
+            c.listen.clear();
+            n.check(&c).map_err(|(f, m)| Invalid::at(&f, m))?;
+        }
         for (i, cl) in c.clients.iter().enumerate() {
             if cl.password.is_some() || cl.generate || cl.sealed.is_none() {
                 return Err(Invalid::at(
@@ -391,10 +407,13 @@ impl Applier for NetServerDomain {
 
     fn reconcile(
         &self,
-        _from: Option<&Value>,
+        from: Option<&Value>,
         to: Option<&Value>,
         ctx: &ApplyCtx,
     ) -> Result<(), String> {
+        if let Some(n) = self.net_layer() {
+            return layer_apply(n, self.runner.as_ref(), &self.secret_dir, from, to, ctx.log);
+        }
         if self.layer.is_some() {
             return Ok(());
         }
@@ -476,6 +495,9 @@ impl Applier for NetServerDomain {
         applied: Option<&Value>,
         ctx: &ApplyCtx,
     ) -> Result<Vec<StateDrift>, String> {
+        if let Some(n) = self.net_layer() {
+            return Ok(layer_drift(n, self.runner.as_ref(), applied));
+        }
         let Some(v) = applied.filter(|_| self.layer.is_none()) else {
             return Ok(Vec::new());
         };
@@ -511,6 +533,152 @@ impl Applier for NetServerDomain {
                 ..Default::default()
             },
         }])
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// a module layer's server
+// ---------------------------------------------------------------------------------------------
+
+/// The layer's state of the server (its tool run through `runner`).
+pub fn layer_read(n: &dyn NetServerLayer, runner: &dyn Runner) -> NetLayerRead {
+    match runner.run(&n.status_cmd()) {
+        Ok(o) => n.parse_status(&o),
+        Err(e) => NetLayerRead::Unreadable(e),
+    }
+}
+
+/// The accounts and roles the layer gets for `c`.
+fn layer_users(c: &UpsNetServerConfig) -> Vec<(String, UpsClientRole)> {
+    c.clients.iter().map(|cl| (cl.name.clone(), cl.role)).collect()
+}
+
+/// The command that applies `to` (`None` or off: the layer's `off`) and whether passwords go
+/// with it. A password goes to the layer when the account is new or its envelope changed
+/// since `from`, or when the layer does not have the account (an `off` removed it, or its
+/// state is unreadable: then every password goes, the same value is harmless).
+pub fn layer_command(
+    n: &dyn NetServerLayer,
+    from: Option<&UpsNetServerConfig>,
+    to: Option<&UpsNetServerConfig>,
+    have: Option<&NetLayerStatus>,
+    password: &dyn Fn(&UpsNetClient) -> Result<String, String>,
+) -> Result<Cmd, String> {
+    let Some(c) = to.filter(|c| c.enabled) else {
+        return Ok(n.off_cmd());
+    };
+    let mut pw = Vec::new();
+    for cl in &c.clients {
+        let same = from
+            .filter(|f| f.enabled)
+            .and_then(|f| f.clients.iter().find(|p| p.name == cl.name))
+            .is_some_and(|p| p.sealed == cl.sealed);
+        let known = have.is_some_and(|h| h.users.iter().any(|(u, _)| *u == cl.name));
+        if !(same && known) {
+            pw.push((cl.name.clone(), password(cl)?));
+        }
+    }
+    Ok(n.set_cmd(&c.allow, &layer_users(c), &pw))
+}
+
+/// Applies `to` through the layer's tool: exit 0 applied, 2 values refused (the layer's
+/// reason), anything else not applied. Passwords never reach the log.
+pub fn layer_apply(
+    n: &dyn NetServerLayer,
+    runner: &dyn Runner,
+    secret_dir: &Path,
+    from: Option<&Value>,
+    to: Option<&Value>,
+    log: &dyn Fn(&str),
+) -> Result<(), String> {
+    let to = to.map(config_of).transpose().map_err(|e| e.message)?;
+    let from = from.and_then(|v| config_of(v).ok());
+    let on = to.as_ref().is_some_and(|c| c.enabled);
+    let have = match on.then(|| layer_read(n, runner)) {
+        Some(NetLayerRead::Status(s)) => Some(s),
+        Some(NetLayerRead::Unsupported) => {
+            return Err("the UPS layer has no network UPS server (update it)".into());
+        }
+        _ => None,
+    };
+    let sb = if on && to.as_ref().is_some_and(|c| !c.clients.is_empty()) {
+        Some(secret_box(secret_dir)?)
+    } else {
+        None
+    };
+    let cmd = layer_command(n, from.as_ref(), to.as_ref(), have.as_ref(), &|cl| match &sb {
+        Some(sb) => unseal(sb, cl),
+        None => Err("no secret store".into()),
+    })?;
+    log(&format!("$ {}", cmd.display()));
+    let out = runner.run(&cmd)?;
+    let last = |t: &str| t.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string();
+    match out.code {
+        Some(0) => {
+            let said = last(&out.stdout);
+            if !said.is_empty() {
+                log(&said);
+            }
+            Ok(())
+        }
+        Some(2) => Err(format!("the UPS layer refused the values: {}", last(&out.stderr))),
+        c => Err(format!(
+            "the UPS layer did not apply the network UPS server (exit code {}): {}",
+            c.map_or("-".into(), |c| c.to_string()),
+            last(&out.stderr)
+        )),
+    }
+}
+
+/// The layer's server against the applied value: on/off, allowed hosts, accounts.
+fn layer_drift(n: &dyn NetServerLayer, runner: &dyn Runner, applied: Option<&Value>) -> Vec<StateDrift> {
+    let Some(c) = applied.and_then(|v| config_of(v).ok()) else {
+        return Vec::new();
+    };
+    let NetLayerRead::Status(s) = layer_read(n, runner) else {
+        return Vec::new();
+    };
+    let sorted = |mut v: Vec<String>| {
+        v.sort();
+        v
+    };
+    let mut users = layer_users(&c);
+    let mut have = s.users.clone();
+    users.sort_by(|a, b| a.0.cmp(&b.0));
+    have.sort_by(|a, b| a.0.cmp(&b.0));
+    let same = if c.enabled {
+        s.enabled && sorted(c.allow.clone()) == sorted(s.allow.clone()) && users == have
+    } else {
+        !s.enabled
+    };
+    if same {
+        return Vec::new();
+    }
+    vec![StateDrift {
+        key: NETSERVER_KEY.into(),
+        object: "ups-layer:netserver".into(),
+        kind: StateDriftKind::Mismatch,
+        detail: "the UPS layer's network UPS server differs from the applied setting (changed \
+                 with its own tool)"
+            .into(),
+        detail_code: None,
+        detail_args: Default::default(),
+    }]
+}
+
+/// What applying `c` runs with a layer (passwords never shown).
+pub fn layer_plan(n: &dyn NetServerLayer, c: &UpsNetServerConfig) -> UpsSetupPlan {
+    let cmd = layer_command(n, None, Some(c), None, &|_| Ok(String::new()))
+        .map(|c| c.display())
+        .unwrap_or_default();
+    let mut commands = vec![cmd];
+    if c.enabled && !c.clients.is_empty() {
+        commands.push("(passwords of new or changed accounts on its standard input)".into());
+    }
+    UpsSetupPlan {
+        files: Vec::new(),
+        commands,
+        conflicts: Vec::new(),
     }
 }
 
@@ -630,9 +798,22 @@ async fn blocking<T: Send + 'static>(
         .map_err(Error::internal)?
 }
 
-fn blocked(u: &Ups) -> Option<UpsNetBlock> {
+fn net_layer(u: &Ups) -> Option<&dyn NetServerLayer> {
+    u.layer.as_deref().and_then(|l| l.netserver())
+}
+
+/// The layer's state of the server (`None`: plain NUT, or a layer without the server).
+fn layer_state(u: &Ups) -> Option<NetLayerRead> {
+    net_layer(u).map(|n| layer_read(n, u.setup.runner.as_ref()))
+}
+
+fn blocked(u: &Ups, layer: Option<&NetLayerRead>) -> Option<UpsNetBlock> {
     if u.layer.is_some() {
-        Some(UpsNetBlock::Module)
+        match layer {
+            None => Some(UpsNetBlock::Module),
+            Some(NetLayerRead::Unsupported) => Some(UpsNetBlock::ModuleTooOld),
+            Some(_) => None,
+        }
     } else if u.backend() == UpsBackend::NotInstalled {
         Some(UpsNetBlock::NutMissing)
     } else {
@@ -697,13 +878,59 @@ fn net_state(u: &Ups, owner: &str) -> Res<UpsNetServerState> {
     let (applied, pending) = docs(u, owner)?;
     let applied = applied.map(for_answer);
     let pending = pending.map(for_answer).filter(|p| Some(p) != applied.as_ref());
-    let blocked = blocked(u);
+    let read = layer_state(u);
+    let blocked = blocked(u, read.as_ref());
     let facts = if blocked.is_none() {
         (crate::web_access::WebAccessSvc::system_facts())()
     } else {
         Default::default()
     };
     let (addresses, host) = addresses(&facts);
+    if let (None, Some(read)) = (blocked, read) {
+        let current = pending.as_ref().or(applied.as_ref());
+        let mut problems = Vec::new();
+        let mut filter_active = None;
+        let layer = match read {
+            NetLayerRead::Status(s) => {
+                if s.enabled {
+                    filter_active = Some(s.firewall_active);
+                    if !s.server_active {
+                        problems.push(UpsNetProblem::ServerInactive);
+                    }
+                    if !s.firewall_active {
+                        problems.push(UpsNetProblem::FilterInactive);
+                    }
+                }
+                let ours: Vec<&str> =
+                    current.map(|c| c.clients.iter().map(|cl| cl.name.as_str()).collect()).unwrap_or_default();
+                UpsNetLayer {
+                    enabled: s.enabled,
+                    outside: s.users.iter().map(|(n, _)| n.clone()).filter(|n| !ours.contains(&n.as_str())).collect(),
+                    listen: s.listen,
+                    allow: s.allow,
+                    primary_account: s.primary_account,
+                    source: s.source,
+                }
+            }
+            _ => {
+                problems.push(UpsNetProblem::LayerUnreadable);
+                UpsNetLayer::default()
+            }
+        };
+        return Ok(UpsNetServerState {
+            filter_active,
+            problems,
+            blocked,
+            applied,
+            pending,
+            addresses,
+            host,
+            hostname: facts.host(),
+            port: NUT_PORT,
+            ups_name: ups_name(u),
+            layer: Some(layer),
+        });
+    }
     let on = blocked.is_none() && applied.as_ref().is_some_and(|a| a.enabled);
     let sys = u.ops.config.system();
     let running = on && sys.unit_active(SERVER_UNIT).unwrap_or(false);
@@ -729,6 +956,7 @@ fn net_state(u: &Ups, owner: &str) -> Res<UpsNetServerState> {
         hostname: facts.host(),
         port: NUT_PORT,
         ups_name: if blocked.is_none() { ups_name(u) } else { None },
+        layer: None,
     })
 }
 
@@ -738,13 +966,16 @@ async fn state_get(State(st): State<UpsState>, hd: HeaderMap) -> Res<Json<UpsNet
 }
 
 fn refuse_blocked(u: &Ups) -> Res<()> {
-    match blocked(u) {
+    match blocked(u, layer_state(u).as_ref()) {
         Some(b) => Err(Error::new(
             StatusCode::CONFLICT,
             error_codes::CONFLICT,
             match b {
                 UpsNetBlock::NutMissing => "NUT is not installed (Debian package nut)",
                 UpsNetBlock::Module => "the hardware module's UPS layer runs NUT here",
+                UpsNetBlock::ModuleTooOld => {
+                    "the hardware module's UPS layer is too old for the network UPS server: update it"
+                }
             }
             .into(),
         )),
@@ -762,8 +993,14 @@ async fn state_put(
     Ok(Json(
         blocking(&u, move |u| {
             refuse_blocked(u)?;
-            net::normalize(&mut req, &foreign_users(&u.root))
-                .map_err(|(f, m)| Error::invalid(f, m))?;
+            let layer = net_layer(u);
+            // a layer's /etc/nut is its own: its users are not rynas's concern
+            let foreign = if layer.is_some() { Vec::new() } else { foreign_users(&u.root) };
+            net::normalize(&mut req, &foreign).map_err(|(f, m)| Error::invalid(f, m))?;
+            if let Some(n) = layer {
+                req.listen.clear();
+                n.check(&req).map_err(|(f, m)| Error::invalid(f, m))?;
+            }
             let (applied, pending) = docs(u, &owner)?;
             let kept: Vec<String> = applied
                 .iter()
@@ -805,6 +1042,11 @@ async fn plan_post(
     Ok(Json(
         blocking(&u, move |u| {
             refuse_blocked(u)?;
+            if let Some(n) = net_layer(u) {
+                req.listen.clear();
+                n.check(&req).map_err(|(f, m)| Error::invalid(f, m))?;
+                return Ok(layer_plan(n, &req));
+            }
             Ok(plan(&u.root, &req))
         })
         .await?,
@@ -880,6 +1122,7 @@ mod tests {
             layer: None,
             secret_dir: secrets.to_path_buf(),
             probe,
+            runner: Arc::new(crate::ups_setup::DryRunner::default()),
         })];
         domains.extend(more);
         let cfg = rynas_config::Config::open(
@@ -1203,5 +1446,129 @@ mod tests {
         );
         assert_eq!(a[0].subnet, "192.168.1.0/24");
         assert_eq!(host.as_deref(), Some("192.168.1.10"));
+    }
+
+    /// A layer's server: `set`/`off`/`status` lines, answered in turn.
+    struct FakeNet;
+
+    impl NetServerLayer for FakeNet {
+        fn status_cmd(&self) -> Cmd {
+            Cmd::new("tool").args(["netserver", "status"])
+        }
+        fn parse_status(&self, out: &rynas_tasks::CmdOutput) -> NetLayerRead {
+            match out.stdout.trim() {
+                "old" => NetLayerRead::Unsupported,
+                "" => NetLayerRead::Unreadable("no answer".into()),
+                users => NetLayerRead::Status(NetLayerStatus {
+                    enabled: true,
+                    users: users
+                        .split(',')
+                        .filter(|u| *u != "-")
+                        .map(|u| (u.to_string(), UpsClientRole::Secondary))
+                        .collect(),
+                    ..Default::default()
+                }),
+            }
+        }
+        fn check(&self, c: &UpsNetServerConfig) -> Result<(), (String, String)> {
+            if c.enabled && c.allow.is_empty() {
+                return Err(("allow".into(), "required".into()));
+            }
+            Ok(())
+        }
+        fn set_cmd(
+            &self,
+            allow: &[String],
+            users: &[(String, UpsClientRole)],
+            passwords: &[(String, String)],
+        ) -> Cmd {
+            let mut c = Cmd::new("tool").args(["netserver", "set"]).args(allow);
+            for (u, _) in users {
+                c = c.args(["--user", u]);
+            }
+            c.stdin(passwords.iter().map(|(n, p)| format!("{n} {p}\n")).collect::<String>())
+        }
+        fn off_cmd(&self) -> Cmd {
+            Cmd::new("tool").args(["netserver", "off"])
+        }
+    }
+
+    struct Script {
+        status: String,
+        set_code: i32,
+        calls: std::sync::Mutex<Vec<(String, String)>>,
+    }
+
+    impl Runner for Script {
+        fn run(&self, cmd: &Cmd) -> Result<rynas_tasks::CmdOutput, String> {
+            let line = cmd.display();
+            let stdin = String::from_utf8_lossy(cmd.stdin_data().unwrap_or_default()).into_owned();
+            self.calls.lock().unwrap().push((line.clone(), stdin));
+            let status = line.contains("status");
+            Ok(rynas_tasks::CmdOutput {
+                code: Some(if status { 0 } else { self.set_code }),
+                stdout: if status { self.status.clone() } else { "applied\n".into() },
+                stderr: if self.set_code == 2 { "invalid client 300.1.1.1\n".into() } else { String::new() },
+            })
+        }
+    }
+
+    #[test]
+    fn a_layer_gets_the_set_with_only_new_or_changed_passwords_on_stdin() {
+        let keys = tempfile::tempdir().unwrap();
+        let mut c = sealed(keys.path(), input());
+        let v = |c: &UpsNetServerConfig| serde_json::to_value(c).unwrap();
+        let run = |status: &str, code: i32, from: Option<&UpsNetServerConfig>, to: Option<&UpsNetServerConfig>| {
+            let r = Script { status: status.into(), set_code: code, calls: Default::default() };
+            let logged = std::sync::Mutex::new(Vec::<String>::new());
+            let res = layer_apply(&FakeNet, &r, keys.path(), from.map(v).as_ref(), to.map(v).as_ref(), &|l| {
+                logged.lock().unwrap().push(l.to_string())
+            });
+            let logs = logged.into_inner().unwrap().join("\n");
+            (res, r.calls.into_inner().unwrap(), logs)
+        };
+        // first apply: both accounts new to the layer, both passwords on stdin, none in argv
+        let (res, calls, logs) = run("-", 0, None, Some(&c));
+        res.unwrap();
+        let (line, stdin) = &calls[1];
+        assert_eq!(line, "tool netserver set 192.168.1.0/24 --user pc-office --user homeassistant");
+        assert!(stdin.starts_with("pc-office ") && stdin.contains("\nhomeassistant Chosen.Password-1\n"), "{stdin}");
+        assert!(!logs.contains("Chosen.Password-1"), "{logs}");
+        // the layer has both and nothing changed: no password goes
+        let (res, calls, _) = run("pc-office,homeassistant", 0, Some(&c), Some(&c));
+        res.unwrap();
+        assert_eq!(calls[1].1, "");
+        // a new password for one account; the other one lost by the layer (an off by hand)
+        let before = c.clone();
+        let sb = secret_box(keys.path()).unwrap();
+        c.clients[0].sealed = Some(seal(&sb, "Another.Password-2").unwrap());
+        let (_, calls, _) = run("pc-office", 0, Some(&before), Some(&c));
+        assert_eq!(calls[1].1, "pc-office Another.Password-2\nhomeassistant Chosen.Password-1\n");
+        // an unreadable state: every password goes
+        let (_, calls, _) = run("", 0, Some(&c), Some(&c));
+        assert_eq!(calls[1].1.lines().count(), 2);
+        // exit 2: refused with the layer's reason; 1: not applied
+        let (res, _, _) = run("-", 2, None, Some(&c));
+        assert!(res.unwrap_err().contains("refused the values: invalid client 300.1.1.1"));
+        let (res, _, _) = run("-", 1, None, Some(&c));
+        assert!(res.unwrap_err().contains("did not apply"));
+        // off, or the key removed: the layer's off, no status read, no stdin
+        let mut off = c.clone();
+        off.enabled = false;
+        for to in [Some(&off), None] {
+            let (res, calls, _) = run("old", 0, Some(&c), to);
+            res.unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0], ("tool netserver off".into(), String::new()));
+        }
+        // a layer without the server refuses the apply
+        let (res, _, _) = run("old", 0, None, Some(&c));
+        assert!(res.unwrap_err().contains("update"));
+        // the plan shows the command, never a password
+        let p = layer_plan(&FakeNet, &c);
+        assert!(p.files.is_empty());
+        assert_eq!(p.commands[0], "tool netserver set 192.168.1.0/24 --user pc-office --user homeassistant");
+        assert!(p.commands[1].contains("standard input"));
+        assert_eq!(layer_plan(&FakeNet, &off).commands, ["tool netserver off"]);
     }
 }

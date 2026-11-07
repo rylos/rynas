@@ -615,6 +615,8 @@ upsn.for_upsmon_help	Aggiungi questa riga a /etc/nut/upsmon.conf su quel compute
 upsn.for_upsmon_help_pw	Aggiungi questa riga a /etc/nut/upsmon.conf su quel computer, con la password dell'account al posto di PASSWORD, imposta MODE=netclient nel suo nut.conf e riavvia nut-monitor.
 upsn.monitor_note	Un account in sola lettura non può spegnere un computer: per upsmon aggiungi un account che si spegne con l'UPS.
 upsn.copy	Copia
+upsn.allow_none	Nessuno: solo questo NAS
+upsn.allow_required	Inserisci almeno un host o una sottorete ammessi.
 cfg.key.ups.netserver	Server UPS di rete
 ps.col_on	Attiva
 ps.col_action	Azione
@@ -3732,6 +3734,19 @@ syn.ups_deep_text	L'UPS funziona a batteria fino a scaricarla quasi del tutto, a
 syn.upsw_too_old	Questa versione di synodeb non sa ancora configurare altri driver UPS: aggiorna synodeb per usare la procedura guidata.
 syn.upsw_find_text	Collega l'UPS a questo NAS. Il rilevamento elenca gli UPS su USB e prova uno alla volta i driver NUT adatti finché uno legge lo stato dell'UPS; poi synodeb configura NUT con il driver scelto. Per un UPS seriale o di rete, inserisci il driver a mano.
 syn.upsw_commands	synodeb configura NUT con:
+syn.upsn_too_old	Questa versione di synodeb non ha ancora il server UPS di rete: aggiorna synodeb alla 4.6 o successiva per configurarlo qui.
+syn.upsn_listen	Tutti gli indirizzi del NAS (scelta di synodeb)
+syn.upsn_allow_help	Un indirizzo IP o una sottorete per riga (192.168.1.20, 192.168.1.0/24, fd00::/64), almeno uno. Il firewall di synodeb (la sua tabella nftables) lascia arrivare alla porta 3493 solo questi host.
+syn.upsn_filter	Firewall di synodeb
+syn.upsn_filter_inactive	Il firewall di synodeb per la porta 3493 non è attivo: gli host ammessi non vengono applicati. Salva di nuovo le impostazioni o guarda il registro di synodeb-ups.
+syn.upsn_unreadable	Lo stato del server UPS di rete di synodeb non si può leggere (synodeb-ups netserver status non è riuscito o ha risposto in un formato sconosciuto): aggiorna rynas o guarda il registro.
+syn.upsn_primary	synodeb ha anche l'account {name} (upsmon primario), quello che gli altri NAS Synology si aspettano come client UPS. La sua password si imposta su questo NAS con: synodeb-ups passwd
+syn.upsn_manual	Gli host ammessi vengono da NETWORK_CLIENTS in /etc/synodeb/ups.conf (impostato a mano). Salvando qui si crea /etc/synodeb/ups-network.conf, che poi ha la precedenza.
+syn.upsn_outside	synodeb ha account impostati fuori da rynas ({names}): il prossimo salvataggio qui li rimuove.
+syn.upsn_role_monitor_help	Per domotica e pannelli: non può accedere né eseguire comandi. Leggere i valori da un host ammesso non richiede password.
+syn.upsn_user_help	Inizia con a-z, poi a-z, 0-9 e _, al massimo 32 caratteri (non monuser o admin).
+syn.upsn_user_bad	Usa da 1 a 32 caratteri: prima una lettera a-z, poi a-z, 0-9 e _ (monuser e admin sono di synodeb).
+syn.upsn_commands	synodeb lo applica con:
 syn.reset_on	Ripristina la rete
 syn.reset_off	Non ripristina la rete
 syn.reset_pending_on	Ripristinerà la rete dopo l'applicazione

@@ -33,12 +33,43 @@ pub enum UpsSlot {
     SetupFind,
     /// Above the commands of the plan.
     SetupCommands,
+    /// Network UPS server: the layer is too old for it.
+    NetTooOld,
+    /// Network UPS server: where upsd listens (the layer's choice).
+    NetListen,
+    /// Network UPS server: the help of the allowed hosts (required, the layer's firewall).
+    NetAllowHelp,
+    /// Network UPS server: the label of the firewall state.
+    NetFilter,
+    /// Network UPS server: the firewall is not active.
+    NetFilterInactive,
+    /// Network UPS server: the layer's state cannot be read.
+    NetUnreadable,
+    /// Network UPS server: the layer's own monitoring account (`{name}`).
+    NetPrimary,
+    /// Network UPS server: allowed hosts set by hand in the layer's file.
+    NetManual,
+    /// Network UPS server: accounts set with the layer's tool (`{names}`).
+    NetOutside,
+    /// Network UPS server: the help of the read-only role.
+    NetRoleMonitorHelp,
+    /// Network UPS server: the help of the user name.
+    NetUserHelp,
+    /// Network UPS server: a user name the layer refuses.
+    NetUserBad,
+    /// Network UPS server: above the commands of the plan.
+    NetCommands,
 }
 
 /// The text key of a UPS slot with a module's UPS layer (one module has one today; the API
 /// will name the module when a second one brings a UPS layer).
 pub fn ups_key(slot: UpsSlot) -> &'static str {
     synology::ups_key(slot)
+}
+
+/// A user name the module layer's network UPS server accepts.
+pub fn net_user_ok(u: &str) -> bool {
+    synology::net_user_ok(u)
 }
 
 /// The reset button section of Network › Rescue, by the module that has the button.

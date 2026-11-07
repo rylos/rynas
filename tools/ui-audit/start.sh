@@ -8,6 +8,9 @@
 # FAKE_UPS_CMDS=all|quick|none: battery tests the fake UPS offers (default all).
 # FAKE_UPS_BACKEND=nut|synodeb: plain NUT (default; /etc/nut in the dry root) or synodeb
 # (/etc/synodeb/ups.conf; a dry root used once with synodeb keeps it: delete $R to switch).
+# With synodeb, rynasd's simulated synodeb-ups answers 'netserver status|set|off' like synodeb 4.6
+# (state in $R/state/dry-root/etc/synodeb/ups-network.conf, no passwords);
+# FAKE_SYNODEB_VERSION=4.5 makes it a synodeb before the network UPS server (the update note).
 # FAKE_USB=1: fake removable drives (a mounted USB stick, a USB disk with NTFS and a locked
 # LUKS volume, an SD card) below the fake tree: the USB icon of the app bar and its menu.
 # FAKE_DOCKER=1: a fake Docker Engine (fakedocker.py on $R/docker.sock: a rynas stack, a Portainer
@@ -52,6 +55,7 @@ if [ -n "${FAKE_UPS:-}" ]; then
   if [ "${FAKE_UPS_BACKEND:-nut}" = synodeb ]; then
     mkdir -p "$D/synodeb"
     [ -f "$D/synodeb/ups.conf" ] || printf '# synodeb (fake)\nDRYRUN=1\nSAFEMODE_AFTER=300\n' > "$D/synodeb/ups.conf"
+    if [ -n "${FAKE_SYNODEB_VERSION:-}" ]; then echo "$FAKE_SYNODEB_VERSION" > "$D/synodeb/fake-version"; else rm -f "$D/synodeb/fake-version"; fi
   else
     mkdir -p "$D/nut"
     [ -f "$D/nut/nut.conf" ] || printf 'MODE=standalone\n' > "$D/nut/nut.conf"

@@ -137,7 +137,12 @@ impl Module for SynologyModule {
 
     fn ups(&self) -> Option<Arc<dyn UpsLayer>> {
         crate::ups::present(&self.root)
-            .then(|| Arc::new(crate::ups::SynodebUps::default()) as Arc<dyn UpsLayer>)
+            .then(|| {
+                Arc::new(crate::ups::SynodebUps {
+                    dry_root: self.dry.then(|| self.root.clone()),
+                    ..Default::default()
+                }) as Arc<dyn UpsLayer>
+            })
     }
 
     fn event_forward(&self) -> Option<Arc<dyn EventForward>> {
