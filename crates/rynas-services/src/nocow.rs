@@ -89,7 +89,8 @@ pub fn not_empty(entries: &[String]) -> Option<String> {
     let n = left.len();
     let shown: Vec<&str> = left.into_iter().take(3).collect();
     Some(format!(
-        "the folder is not empty ({n} entries, e.g. {}): no copy-on-write only applies to files created afterwards, so it is turned on for empty folders only",
+        "the folder is not empty ({n} {}, e.g. {}): no copy-on-write only applies to files created afterwards, so it is turned on for empty folders only",
+        if n == 1 { "entry" } else { "entries" },
         shown.join(", ")
     ))
 }
@@ -183,7 +184,7 @@ mod tests {
         change(&sys, &h, "/vol1/cams", true, &log).unwrap();
         h.add_dir("/vol1/cams/2026-11-07", None);
         let e = change(&sys, &h, "/vol1/cams", true, &log).unwrap_err();
-        assert!(e.contains("not empty (1 entries, e.g. 2026-11-07)"), "{e}");
+        assert!(e.contains("not empty (1 entry, e.g. 2026-11-07)"), "{e}");
         // off is allowed with files inside
         h.set_nocow("/vol1/cams", true);
         change(&sys, &h, "/vol1/cams", false, &log).unwrap();

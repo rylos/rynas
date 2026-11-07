@@ -22,7 +22,7 @@ fn costs(new_only: bool) -> AnyView {
     }
     view! {
         <span>{tr("shares.nocow_cost")}</span>
-        <ul class="plain-list">{keys.into_iter().map(|k| view! { <li>{tr(k)}</li> }).collect_view()}</ul>
+        <ul class="nocow-costs">{keys.into_iter().map(|k| view! { <li>{tr(k)}</li> }).collect_view()}</ul>
     }
     .into_any()
 }
@@ -50,7 +50,7 @@ fn move_steps() -> AnyView {
     view! {
         <details class="advanced">
             <summary>{tr("shares.nocow_move")}</summary>
-            <ol class="nocow-steps small">
+            <ol class="steps-list small">
                 <li>{tr("shares.nocow_move_1")}</li>
                 <li>{tr("shares.nocow_move_2")}</li>
                 <li>{tr("shares.nocow_move_3")}</li>
