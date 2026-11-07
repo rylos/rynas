@@ -156,7 +156,19 @@ port 5000 is not published. The NPM 80/443 install is gated by external proxy mo
 
 ## Memory and size
 
-MEMORY_PLACEHOLDER
+Release build from the shared `target/` (built 20:07; it may already include 359de95, because a fix wave ran meanwhile), `FAKE_DOCKER=1 FAKE_CADDY=1
+tools/ui-audit/start.sh 18677`, idle 40 s, `/proc/<pid>/status`:
+
+| Process | VmRSS | RssAnon | RssFile | Budget |
+|---|---|---|---|---|
+| rynasd | **12.9 MB** | 3.0 MB | 9.9 MB | < 20 MB: ok |
+| rynas-web | **6.3 MB** | 2.7 MB | 3.7 MB | < 20 MB: ok |
+
+The anonymous memory is the same as in the last wave (2.8 MB). The drop from 19.7 MB comes from
+the file-backed side. A freshly linked binary is not yet in large page-cache folios, so this
+number is a lower bound: count about 7 MB of variance in RssFile, and still under budget.
+Binary sizes: `rynasd` 15.8 → **17.05 MB** (+1.25 MB: rynas-dns, zbus for Avahi, W2 code;
+reqwest/native-tls were already linked through rynas-notify). `rynas-web` 4.93 → **4.66 MB**.
 
 ## Five most valuable missing tests
 
