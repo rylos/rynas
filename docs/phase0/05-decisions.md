@@ -4,8 +4,8 @@ Status: **taken** = chosen by the maintainer; **adopted** = recommendation appli
 
 | ID | Topic | Options | Recommendation | Status |
 |---|---|---|---|---|
-| D-LIC | Core license | Orlok-style BSL 1.1 · AGPLv3 + commercial · FSL-1.1-ALv2 | Orlok-style BSL 1.1, communicated as source-available (not "open source") | **taken** 2026-11-04 |
-| D-LIC2 | Community plugin license | Apache-2.0 · BSL like the core | Apache-2.0 (SDK always Apache-2.0) | adopted 2026-11-04 (phase 1) |
+| D-LIC | Core license | Orlok-style BSL 1.1 · AGPLv3 + commercial · FSL-1.1-ALv2 | **Proxmox VE model**: AGPL-3.0-or-later for everything, every feature free, revenue later from an enterprise repo and support (no paid repo yet); BSL 1.1 of 2026-11-04 dropped. See 04-license.md | **taken** 2026-11-04, revised 2026-11-07 (Marco) |
+| D-LIC2 | Community plugin license | Apache-2.0 · BSL like the core | AGPL-3.0-or-later like the core (SDK and `rynas-api-types` Apache-2.0) | adopted 2026-11-04, revised 2026-11-07 |
 | D-BIZ | Business repo | same code, delayed + LTS (Proxmox) · exclusive plugins (open core) · hybrid | hybrid: stable/LTS channel + plugins only for business needs | adopted 2026-11-04 (phase 1) |
 | D-UI | Layout | A sidebar+widgets · B DSM desktop · C Proxmox tree | A + task panel and storage tree from C | **taken** 2026-11-04 |
 | D-FE | Frontend framework | Leptos 0.8 CSR · Yew + pwt · Dioxus | Leptos 0.8 CSR | adopted 2026-11-04 (phase 1) |

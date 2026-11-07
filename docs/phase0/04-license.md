@@ -1,59 +1,54 @@
-# rynas — License and business model (proposal)
+# rynas — License and business model
 
-Source: `research/04-license-business.md` (market models, prices, URLs).
-This is not legal advice: the final text must be reviewed.
+Decided 2026-11-07 (Marco: "the same license model as Proxmox VE"). It replaces the BSL 1.1
+model of 2026-11-04. Background research: `research/04-license-business.md`.
+This is not legal advice.
 
-## The "open source" issue
-Orlok's BSL 1.1 **is not open source** (OSI/DFSG): the license says so itself. With the BSL,
-rynas must be presented as **"source-available, becomes Apache 2.0 after 4 years"** (or "fair source").
-If the words "open source" are a must, it takes AGPLv3 + a commercial license (Proxmox),
-but then companies can use it for free and revenue comes only from repo/support/plugins.
+## The model
 
-## Proposal (consistent with Orlok)
+rynas is **free software**, the way Proxmox VE is: the whole code base is under the
+**GNU AGPL v3 or later**, everyone may use it for free, companies included, and every feature
+is in the free version. Revenue, when it comes, comes from **a stable update repository and
+support**, never from locked features.
 
 | Component | License |
 |---|---|
-| Core (rynasd, rynas-web, UI, CLI, builtin plugins) | **BSL 1.1**, grant: personal + non-commercial use; Change Date 4 years → Apache-2.0 |
-| Plugin SDK, `rynas-api-types` | **Apache-2.0** (third-party plugins, proprietary ones included) |
-| Official community plugins (synology, nut, docker…) | Apache-2.0 *or* BSL like the core (decision D-LIC2) |
-| Business plugins | proprietary EULA |
-| Documentation | CC BY 4.0 |
-| Name and logo | excluded; trademark policy; EUIPO registration to be evaluated |
-| Contributions | DCO + contributions under Apache-2.0 (inbound), stated in CONTRIBUTING |
+| Core (rynasd, rynas-web, UI, CLI, builtin plugins, files worker) | **AGPL-3.0-or-later** |
+| `rynas-api-types` and the plugin SDK | **Apache-2.0**, so third-party plugins can use any license |
+| App catalogue (`apps/`) | AGPL-3.0-or-later like the core; icons from Dashboard Icons under Apache-2.0 (`apps/ICONS.md`) |
+| Documentation | AGPL-3.0-or-later with the code (CC BY 4.0 can be added later) |
+| Name and logo | not covered by the license; a trademark policy will say how they may be used |
+| Contributions | inbound = outbound (AGPL-3.0-or-later), with a DCO sign-off; no CLA |
 
-Note on synodeb: synodeb is GPL-2.0. The synology plugin does **not** include synodeb code: it talks to
-synohwd via files/socket, so there is no conflict. The `synohw` crate (Rust rewrite) would be born
-inside synodeb under GPL-2.0, and the plugin would use it as a separate process.
+Why AGPL and not GPL: rynas is used over the network, and the AGPL makes a modified
+version offered as a service share its source too.
 
-## Repos (Proxmox model, without its flaws)
+synodeb is GPL-2.0. The synology plugin does not include synodeb code: it talks to synohwd
+through files and a socket, so there is no conflict.
+
+## Repositories
 
 | Repo | Access | Content |
 |---|---|---|
 | `test` | public | release candidates |
-| `community` | public | every release, immediately |
-| `business` | authenticated (`/etc/apt/auth.conf.d/rynas.conf`) | the same release after 2–4 weeks without regressions + security backports on a **2-year LTS** + business plugins |
+| `community` (no-subscription) | public, free | every release, immediately |
+| `enterprise` | with a subscription key, **later** | the same release after 2–4 weeks without regressions, plus security backports on an LTS |
 
-- deb822 files with `Signed-By`, `rynas-archive-keyring` package, `Valid-Until`.
-- The business repo is installed **disabled**: `rynasctl license activate <file>` enables it
-  (no 401 errors by default, unlike Proxmox).
-- **No "No valid subscription" popup**: no warning at all for Community; a discreet warning
-  only when a business plugin is active without a license.
+**Today there is only the free repository** (Marco, 2026-11-07: no paid repo for now, it will
+come one day). When it arrives:
 
-## Business license
-- **Ed25519**-signed file (customer, tier, server, expiry), verified **offline** in the binary.
-- Optional machine binding (`machine-id` hash), self-service reset.
-- On expiry only the business repo and updates are lost; nothing stops working
-  (30-day grace period for business plugins), shares and data are **never** touched.
+- deb822 files with `Signed-By`, a `rynas-archive-keyring` package, `Valid-Until`;
+- the enterprise repo is installed **disabled** and is turned on when a key is entered, so a
+  fresh install never fails `apt update` with a 401;
+- **no "no valid subscription" popup**: the free version shows no nag.
 
-## Tiers (indicative, per server/year)
+## Subscriptions (later, indicative, per server per year)
 
-| Tier | Price | For whom | What |
-|---|---|---|---|
-| Community | free | personal use, non-profits, schools | the whole NAS: storage, shares, users, file manager, synology, docker, local backup |
-| Supporter | ~€30 | homelabbers who want to support the project | business repo (stable/LTS), no support |
-| Business | ~€120–150 | freelancers, SMBs, business use | production license, business repo, basic business plugins, e-mail support |
-| Enterprise/MSP | ~€450–600 | companies, MSPs | + SLA, offline key, multi-NAS console, white-label |
+| Tier | For whom | What |
+|---|---|---|
+| Community | everyone | all of rynas, the free repo, community help |
+| Supporter | homelabbers who want to support the project | enterprise repo, no support |
+| Standard | freelancers, small businesses | enterprise repo, e-mail support |
+| Premium | companies, MSPs | enterprise repo, faster support, an SLA |
 
-Golden rule: **everything a homelab needs stays free**. Business = organizational
-needs: advanced AD/LDAP, NAS-to-NAS replication with retention and WORM, multi-NAS console,
-RBAC with delegation, signed audit/SIEM, compliance reports, cloud backup with policies, HA, white-label.
+Golden rule: a subscription buys **tested updates and support**, never a feature.

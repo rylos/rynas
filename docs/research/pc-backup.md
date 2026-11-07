@@ -47,7 +47,7 @@ Sources: Marco's disaster-recovery notes and projects (§1), plus two rounds of 
   - fixup after restore;
   - file restore that does not follow symbolic links (`O_NOFOLLOW`).
 
-Moving this code into rynas (BUSL-1.1) is **Marco's licensing decision**. The copies already published stay GPL.
+Moving this code into rynas (AGPL-3.0-or-later since 2026-11-07) is **Marco's licensing decision**: GPL-3.0-or-later code can be combined with it, GPL-2.0-only code cannot. The copies already published stay GPL.
 
 ## 2. What the others do (checked 2026-11-07)
 
@@ -282,7 +282,7 @@ Until phase 3a, Windows images are documented with UrBackup as a curated app.
 
 ## 8. Marco's decisions
 
-1. **Licence** of the abb-agent crates in rynas: BUSL, dual licence, or kept as a separate GPL component. He is the only author.
+1. **Licence** of the abb-agent crates in rynas: relicensed to AGPL-3.0-or-later like rynas, or kept as a separate GPL component. He is the only author.
 2. **NAS key**: the NAS holds a key and can browse and run maintenance (recommended), or zero-knowledge, where the NAS sees nothing and maintenance and browsing go through the device.
 3. Confirm: no Windows CBT driver.
 

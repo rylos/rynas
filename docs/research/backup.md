@@ -12,7 +12,7 @@
 | `rustic_core` | **0.13.0** (2026-08-16). A new minor version every 2–3 months (0.8 → 0.13 since September 2025). MSRV **1.91**. The README says: *"in an early development stage and its API is subject to change"* |
 | Maintainers | Effectively one: **aawsome** (1228 commits on rustic, 195 on core), then simonsan (188/162). The rest are bots and occasional contributors. Regular commits, last on 2026-10-31 |
 | Production readiness | The README says neither "beta" nor "production ready"; it calls restic *"older and more mature"*. The FAQ admits: *"Error handling is not perfect yet"* |
-| License | Apache-2.0 OR MIT: compatible with rynas' BUSL-1.1 |
+| License | Apache-2.0 OR MIT: compatible with rynas' AGPL-3.0-or-later |
 | Debian | **Not packaged** (missing from trixie, forky and sid). Official signed static musl binaries for x86_64 and aarch64 |
 | Format | *"identical repository format… access every repository with restic as well as with rustic"*. Supports v2 (compression) |
 

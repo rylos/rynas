@@ -3,15 +3,15 @@ Upstream-Name: rynas
 Upstream-Contact: Marco Ziliani <508111+rylos@users.noreply.github.com>
 Source: https://github.com/rylos/rynas
 Comment:
- rynas is source-available, not open source: its core is under the Business
- Source License 1.1 and changes to the Apache License 2.0 four years after
- publication. The binaries also contain statically linked Rust crates from
- crates.io, under permissive licenses (mostly MIT and/or Apache-2.0); their
+ rynas is free software: its core is under the GNU Affero General Public
+ License, version 3 or later, and rynas-api-types (the plugin interface) is
+ under the Apache License 2.0. The binaries also contain statically linked
+ Rust crates from crates.io, under permissive licenses (mostly MIT and/or Apache-2.0); their
  list is in Cargo.lock in the source.
 
 Files: *
 Copyright: 2026 Marco Ziliani
-License: BUSL-1.1
+License: AGPL-3.0+
 
 Files: crates/rynas-api-types/*
 Copyright: 2026 Marco Ziliani

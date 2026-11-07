@@ -35,7 +35,7 @@ members = [
 version = "0.1.0"
 edition = "2024"
 authors = ["Marco Ziliani"]
-license = "BUSL-1.1"
+license = "AGPL-3.0-or-later"
 repository = "https://github.com/rylos/rynas"
 rust-version = "1.90"
 

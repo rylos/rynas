@@ -95,12 +95,12 @@ find "$STAGE/ui" -type f \( -name '*.wasm' -o -name '*.js' -o -name '*.css' -o -
     done
 find "$STAGE/ui" -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} +
 
-# DEP-5 copyright: header and short licenses + full BUSL-1.1 and OFL-1.1 texts
+# DEP-5 copyright: header and short licenses + full AGPL-3.0 and OFL-1.1 texts
 fmt_license() { sed -e 's/[[:space:]]*$//' -e 's/^$/./' -e 's/^/ /' "$1"; }
 {
     cat packaging/deb/copyright.in
     echo
-    echo "License: BUSL-1.1"
+    echo "License: AGPL-3.0+"
     fmt_license LICENSE
     echo
     echo "License: OFL-1.1"

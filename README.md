@@ -1,92 +1,151 @@
-# rynas
+<h1 align="center">rynas</h1>
 
-A modular NAS manager for Debian, written in Rust. A small privileged daemon does the system
-work, an HTTP API serves it, and a WebAssembly web interface (Leptos) loads plugins that add
-features, UI included. It takes the best ideas from Synology DSM, TrueNAS, OpenMediaVault and
-Unraid, and aims to be professional, keyboard friendly and very fast on modest hardware.
+<h3 align="center">
+A fast, modern NAS manager for plain Debian.<br>
+Storage, shares, snapshots, Docker apps and HTTPS from one web interface, written in Rust.
+</h3>
 
-It is built first for [synodeb](https://github.com/rylos/synodeb) (Debian 13 on Synology
-DS923+/DS920+ hardware), where a `synology` plugin shows and controls fans, LEDs, bays and UPS,
-but it targets any Debian 13 server.
+<p align="center">
+  <a href="LICENSE"><img alt="License: AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0-blue"></a>
+  <img alt="Debian 13" src="https://img.shields.io/badge/Debian-13%20trixie-a80030">
+  <img alt="Rust" src="https://img.shields.io/badge/Rust-2024-orange">
+  <img alt="Status: alpha" src="https://img.shields.io/badge/status-alpha-yellow">
+</p>
 
-## Status
+<p align="center">
+  <img src="docs/screenshots/dashboard.png" alt="rynas dashboard" width="100%">
+</p>
 
-**Phase 1 — MVP in progress. Not usable yet.** Interfaces, packaging and on-disk formats will
-change without notice. See [`docs/phase1/plan.md`](docs/phase1/plan.md) for the current steps.
+You install Debian your way, then add one package: **rynas** turns the server into a NAS you
+manage from the browser. Nothing is hidden: everything rynas does is plain Debian underneath
+(mdadm, btrfs, Samba, NFS, systemd, Docker Compose, Caddy), so your data and your system stay
+yours, with or without rynas.
 
-Primary language: English (code, docs, default UI language). Italian is secondary.
+> [!WARNING]
+> rynas is **alpha software**. It works every day on test machines, but interfaces and on-disk
+> formats can still change. Keep backups and try it on a machine you can afford to reinstall.
+
+## Why rynas
+
+- **Fast on modest hardware.** A small privileged daemon, a Rust HTTP server and a WebAssembly
+  interface. At rest the daemons use a few MB of RAM, and pages update live without reloading.
+- **Plain Debian underneath.** No custom distribution, no lock-in: standard tools and config
+  files, standard `apt` updates. Remove rynas and the server keeps working.
+- **Safe changes.** Changes are staged and applied together. Network changes roll back by
+  themselves if you lose the connection. Snapshots and system restore points come before
+  risky operations.
+- **Made for the keyboard.** <kbd>Ctrl</kbd> <kbd>K</kbd> finds any page, setting or action. Light and dark
+  themes, English and Italian.
+- **Free software, every feature included.** AGPL-3.0, free for everyone, companies included.
+
+## Features
+
+| | |
+|---|---|
+| **Dashboard** | live CPU, memory, network, disk I/O and temperatures; customizable widgets |
+| **Storage** | RAID arrays and volumes (mdadm, btrfs, ext4, LUKS2 encryption), a drive view of the chassis, SMART, spin-down |
+| **Files** | a full web file manager: upload, preview, text editor, space analysis |
+| **Shared folders and services** | SMB (with Time Machine), NFS, per-user and per-group permissions, quotas, recycle bin |
+| **Snapshots** | scheduled btrfs snapshots with retention, file restore, rollback, system restore points |
+| **Docker** | engine setup, compose stacks with an editor, containers, logs, image updates; works next to Portainer, Dockge or Dockhand |
+| **Apps** | a curated catalogue (Immich, Jellyfin, Home Assistant, Nextcloud, Paperless-ngx, Vaultwarden, Frigate… 25 and growing) installed in a few clicks |
+| **Web access** | HTTPS for the interface and every app through a built-in Caddy: `.local` names, Let's Encrypt certificates through your DNS provider, LAN or VPN access rules |
+| **Users and security** | users, groups, PAM login, two-factor authentication (TOTP), fail2ban |
+| **System** | network (bonding, VLANs) with safe apply, task scheduler, notifications (e-mail, ntfy, Gotify), updates, configuration restore |
+| **Hardware** | fans, temperatures, status LEDs, UPS (NUT), power schedule, removable drives |
+
+<table>
+  <tr>
+    <td><img src="docs/screenshots/storage.png" alt="Storage with the chassis view"></td>
+    <td><img src="docs/screenshots/apps.png" alt="The app catalogue"></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Storage</b>: volumes and a live view of every bay</td>
+    <td align="center"><b>Apps</b>: a curated catalogue, installed in a few clicks</td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/docker.png" alt="Docker compose stacks"></td>
+    <td><img src="docs/screenshots/hardware.png" alt="Hardware: fans and temperatures"></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Docker</b>: your stacks, including those made by other tools</td>
+    <td align="center"><b>Hardware</b>: fans, temperatures, LEDs and UPS</td>
+  </tr>
+</table>
+
+<sub>The dashboard screenshot uses demo data; the others come from a test instance.</sub>
+
+## Got a Synology? Use it with synodeb
+
+[**synodeb**](https://github.com/rylos/synodeb) installs **Debian 13 on Synology DS920+ and
+DS923+** with all the NAS hardware working: fans, LEDs, buttons, beeper, power schedule, UPS,
+watchdog, every bay and both M.2 slots. DSM can stay on its own disks.
+
+Put rynas on top and you get a modern NAS interface on Synology hardware. rynas detects synodeb
+and adds its hardware screens: the real chassis with its bays, fan modes, LEDs and the power
+schedule. On any other Debian server those screens simply stay hidden.
+
+## Install
+
+rynas targets **Debian 13 (trixie), amd64**. There is no apt repository yet, so for now you
+build the package yourself:
+
+```sh
+packaging/build-deb.sh --build-ui          # builds target/debian/rynas_*.deb in a trixie container
+sudo apt install ./target/debian/rynas_*.deb
+```
+
+Then open `https://<your-server>.local/` (or `http://<your-server>:8080/` before HTTPS is set
+up) and log in with an administrator account of the server. Installed layout and first login:
+[`packaging/deb/README.Debian`](packaging/deb/README.Debian).
+
+## Build from source
+
+Requirements: Rust 1.90+ (edition 2024), the `wasm32-unknown-unknown` target and
+[trunk](https://trunkrs.dev) 0.22 for the interface.
+
+```sh
+rustup target add wasm32-unknown-unknown
+(cd crates/rynas-ui && trunk build --release)   # interface → crates/rynas-ui/dist
+cargo build --release                           # rynasd, rynas-web, …
+```
+
+Development without root (`trunk serve` for the interface, rynasd with a private socket) is
+described in [`docs/phase1/plan.md`](docs/phase1/plan.md).
+
+## How it works
+
+```
+browser ── HTTPS ──> rynas-caddy ──> rynas-web ── Unix socket ──> rynasd (root)
+           (WebAssembly UI)          HTTP API, auth                system work, plugins
+```
+
+- **rynasd**: the only privileged process. It does the system work through standard tools and
+  keeps every change in a staged, auditable list.
+- **rynas-web**: the HTTP API (`/api/v1`), login and sessions; it never runs as root.
+- **rynas-ui**: a Leptos (Rust → WebAssembly) single-page interface, under 1.5 MB compressed.
+- **Plugins** add features, interface included: hardware support (such as Synology through
+  synodeb) lives in its own module, so the core works with standard tools only.
+
+Design documents are in [`docs/`](docs/): architecture, UI, decisions and the research behind
+each feature.
 
 ## License
 
-rynas is **source-available, not open source**:
+rynas is **free software** under the **GNU Affero General Public License v3.0 or later**
+([`LICENSE`](LICENSE)). Everyone may use it for free, companies included, and every feature is
+in the free version. The plugin interface (`rynas-api-types`) is Apache-2.0, so plugins can
+use any license.
 
-- core (rynasd, rynas-web, UI, CLI, builtin plugins): **Business Source License 1.1**, with an
-  Additional Use Grant for personal and non-commercial use; each release converts to
-  **Apache-2.0** four years after publication;
-- `rynas-api-types` and the plugin SDK: **Apache-2.0**, so third-party plugins can use any license.
+Like Proxmox VE, the project may one day offer an optional subscription with a more
+thoroughly tested update repository and support. It will never lock features. Details:
+[`docs/phase0/04-license.md`](docs/phase0/04-license.md).
 
-License text: [`LICENSE`](LICENSE). Details and the business model are in [`docs/phase0/04-license.md`](docs/phase0/04-license.md).
-The licensing model follows [Orlok](https://orlok.xyz).
-
-## Building
-
-Requirements: Rust 1.90+ (edition 2024), the `wasm32-unknown-unknown` target and
-[trunk](https://trunkrs.dev) 0.22 for the UI.
-
-```
-rustup target add wasm32-unknown-unknown
-(cd crates/rynas-ui && trunk build --release)   # UI → crates/rynas-ui/dist, embedded by rynas-web
-cargo build --release                           # rynasd, rynas-web, ...
-```
-
-For development without root (`trunk serve` for the UI, rynasd with a private socket) see
-"Development without root" in [`docs/phase1/plan.md`](docs/phase1/plan.md). systemd units, PAM and
-fail2ban configuration live in [`packaging/`](packaging/).
-
-## Documents
-
-Phase 0 — design ([`docs/phase0/`](docs/phase0/)):
-
-| File | Content |
-|---|---|
-| [00-context.md](docs/phase0/00-context.md) | vision, constraints, starting material (synodeb, SynoFile, Fusion palette, Orlok) |
-| [01-architecture.md](docs/phase0/01-architecture.md) | processes, stack, plugin system, workspace |
-| [02-ui.md](docs/phase0/02-ui.md) | layout, design system, key patterns, file manager |
-| [03-modules-roadmap.md](docs/phase0/03-modules-roadmap.md) | modules, SynoFile port, phases 1–3 |
-| [04-license.md](docs/phase0/04-license.md) | license and business model |
-| [05-decisions.md](docs/phase0/05-decisions.md) | decision log |
-| [research/](docs/phase0/research/) | full phase 0 reports: features, architecture, UI/UX, license |
-
-Phase 1:
-
-| File | Content |
-|---|---|
-| [plan.md](docs/phase1/plan.md) | steps, UI performance budget, API v1, authentication |
-| [synodeb-integration.md](docs/synodeb-integration.md) | what rynas reads from synodeb and proposed synodeb changes |
-
-Research ([`docs/research/`](docs/research/)):
-
-| File | Content |
-|---|---|
-| [docker.md](docs/research/docker.md) | container engine, compose stacks, Docker strategy |
-| [reverse-proxy-app-store.md](docs/research/reverse-proxy-app-store.md) | reverse proxy and the Apps & Plugins catalog |
-| [photos-nvr.md](docs/research/photos-nvr.md) | photos (Immich) and video surveillance |
-| [scheduler-lxc.md](docs/research/scheduler-lxc.md) | task scheduler on systemd units, LXC/VMs |
-| [snapshots-replication.md](docs/research/snapshots-replication.md) | btrfs snapshots, replication and backup (btrbk) |
-| [system-reliability-tweaks.md](docs/research/system-reliability-tweaks.md) | config backup, logs, flash wear, zram, per-disk tweaks |
-| [encryption-compression-dedup.md](docs/research/encryption-compression-dedup.md) | LUKS2 encryption, compression, deduplication |
-| [notifications-ups-updates.md](docs/research/notifications-ups-updates.md) | notification center, UPS, automatic updates |
-| [network.md](docs/research/network.md) | network configuration, bonding, VLANs, safe apply and rollback, remote access |
-| [file-services.md](docs/research/file-services.md) | file services: SMB, NFS and related protocols |
-| [identity-quotas-domain.md](docs/research/identity-quotas-domain.md) | users and groups, quotas, Active Directory / domain join |
+App icons come from [Dashboard Icons](https://github.com/homarr-labs/dashboard-icons)
+(Apache-2.0); the logos belong to their owners ([`apps/ICONS.md`](apps/ICONS.md)).
 
 ## Disclaimer
 
 rynas is an independent project. It is **not affiliated with, endorsed by or supported by
 Synology Inc.** Synology, DSM and related names are trademarks of Synology Inc., used here only
 to describe compatibility.
-
-Debian package (amd64, Debian 13): `packaging/build-deb.sh` builds `target/debian/rynas_*.deb` in a
-trixie container; `packaging/test-deb.sh` and `packaging/test-deb-systemd.sh` install and exercise it
-in throw-away containers. Installed layout and first login: [`packaging/deb/README.Debian`](packaging/deb/README.Debian).
-The web interface is plain HTTP on port 8080 for now: use it on a trusted LAN until HTTPS lands.

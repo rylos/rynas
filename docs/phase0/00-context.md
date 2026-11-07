@@ -77,7 +77,7 @@ Tokyo Night as used in Fusion (a MudBlazor app by the same author). Already used
 | Text disabled | `#6c6e75` | `#565f89` |
 | Divider / lines | — | `#292e42` / input `#414868` |
 
-### Orlok (license)
+### Orlok (license; superseded 2026-11-07 by the Proxmox VE model, see 04-license.md)
 Business Source License 1.1. Additional Use Grant: free production use for personal and
 non-commercial purposes (non-profits, schools); companies, freelancers and MSPs need a commercial license.
 Change Date 4 years → Apache 2.0. Name and logo excluded.
