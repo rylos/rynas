@@ -536,3 +536,59 @@ The route model and renderer are engine-neutral (a `Renderer` trait). An Angie/n
 **D-EXPOSE (replacement text):**
 
 | D-EXPOSE | App exposure model | public by default · LAN only · per-app names + access levels | each route has **names** (local `<app>-<host>.local` via Avahi, `<app>.<domain>` with rynas-managed DNS record, per-app Tailscale Service, tunnel hostname) separate from **access**: `lan` (**default**: the NAS's connected subnets) · `lan_vpn` (+ tailnet ranges accepted only from `tailscale0`, + WireGuard) · `public`. Public requires a domain, an app login or the rynas login, catalog `public` ≠ never, a green live checklist (port/tunnel reachability, DNS, certificate, hairpin-NAT test) and a typed confirmation; auto-block and HSTS (no includeSubDomains/preload) on public routes; unknown hosts aborted. One hostname per app, no path prefixes. Catalog `web` block: `port, path, auth (app/none/proxy), subpath, body, timeout, buffering, bypass, public (ok/warn/never), trusted_proxies_env`. Remote access: Tailscale first (split DNS, Services), cloudflared/Newt tunnels or port forward for public routes. Nothing becomes public as a side effect | adopted 2026-11-05, revised 2026-11-07 |
+
+---
+
+## 13. W2 research: domains, DNS-01, records (2026-11-07)
+
+Checked before wave W2 (own domains, `../phase2/docker-apps.md` §5.4). **(unverified)** marks what comes from a secondary source or memory.
+
+### 13.1 How the others do it
+
+| Product | Credentials | Wildcard / names | LAN records | What rynas takes |
+|---|---|---|---|---|
+| Synology DSM | Synology account only | wildcard only for `*.<x>.synology.me`; own domains get HTTP-01 (port 80 open) | none | nothing: rynas does DNS-01 for any domain |
+| TrueNAS 26 | "ACME DNS authenticators" (Cloudflare, Route 53, OVH, DigitalOcean, shell script), reused by certificates; the docs suggest the Cloudflare **global** key | per certificate | none | the reusable credential object; **not** the global key (scoped tokens only) |
+| Unraid (myunraid.net) | none for the user | `https://<lan-ip-dashed>.<hash>.myunraid.net`, a wildcard of their own | the name *encodes* the LAN address | the rebind warning: Unraid tells users to allow `myunraid.net` in rebind protection; rynas detects it instead of only warning |
+| Nginx Proxy Manager 2.16 | certbot DNS plugins; a credentials snippet pasted in the UI and stored in a file **(unverified)** | per proxy host or wildcard | none | nothing (clear-text credentials file) |
+| Caddy | caddy-dns modules, `{env.*}`/`{file.*}` placeholders | managed (`automate`) or on-demand | none | managed wildcard + `{file.*}` placeholders, ARI by default, `profile` |
+| Traefik | lego environment variables per provider | `certResolvers` with `dnsChallenge` (`resolvers`, propagation options), `acme.profile` | none | the public `resolvers` for the propagation check |
+| Home Assistant | DuckDNS add-on (token), Let's Encrypt add-on with `dns-cloudflare`, `dns-desec`, `dns-hetzner`, `dns-ovh`, `dns-porkbun` and a generic `dns-lego` | yes | DuckDNS sets the public address only | the provider list European home users actually use |
+| acme.sh | `CF_Token`... saved in clear in `account.conf`; DNS alias mode | yes | none | CNAME delegation (alias mode) as the low-privilege option |
+| lego 5.6 | one environment variable set per provider, `_FILE` variants **(unverified)**; follows CNAMEs | yes | none | — |
+
+**Nobody writes the LAN record.** Every product above stops at the certificate; the user still has to make `*.nas.example.com` resolve to the NAS (router DNS override, Pi-hole, a manual record) and hits rebind protection on the way. rynas writes `*.<domain>` + `<domain>` A/AAAA = the LAN address with the same token, keeps it current, and its checklist tells rebind protection from a missing record.
+
+### 13.2 ACME in 2026
+
+- **ARI** (RFC 9773): Let's Encrypt serves it in production and staging; Caddy uses it by default since 2.8 (certmagic 0.21). Nothing to configure; ARI renewals are exempt from rate limits.
+- **Profiles**: `classic` (90 days, the default; 64 days from 2027-02-10, 45 from 2028-02-16), `tlsserver` (45 days, 7-hour authorization reuse, at most 25 names). `shortlived` (6-day) certificates are being withdrawn: kept only for accounts that used them before 2026-05-13 (per a translated copy of https://letsencrypt.org/docs/profiles/ **(unverified)**). Caddy selects one with the ACME issuer's `profile` (2.10, experimental). rynas: optional `acme.profile`, default none (the CA's default).
+- **Lifetimes** (CA/B SC-081v3): 200 days from 2026-03-15, 100 from 2027-03-15, 47 from 2029-03-15. Let's Encrypt runs ahead (45 days by 2028). Silent renewal failures surface within weeks: the dashboard flags a certificate past 2/3 of its lifetime plus a day as `renewal_overdue` and notifies.
+- **Rate limits**: 50 certificates per registered domain per week, 5 duplicates per week, 300 new orders per account per 3 hours, 5 failed authorizations per name per hour. One wildcard per domain (two orders: `*.d` and `d`) stays far below them; staging (`https://acme-staging-v02.api.letsencrypt.org/directory`) is the `acme.staging` switch for tests.
+
+### 13.3 CNAME delegation
+
+`_acme-challenge.<domain>` CNAME → a name in a throw-away zone or an acme-dns account (`/register` gives username, password, subdomain, fulldomain; a leaked account can change only that one TXT record; it keeps the last two values, so apex + wildcard work). Caddy follows it with `challenges.dns.override_domain` (or the `acmedns` module). rynas: `challenge = cname_delegation` + `delegate_to`; the credential cannot write the main zone, so the LAN records and the CNAME are listed for the administrator (`manual` in the plan). It is the recommended mode for providers without scoped tokens (DigitalOcean, Hetzner projects, DuckDNS accounts).
+
+### 13.4 Providers for European home users
+
+| Provider | Record API rynas calls | Wildcard records | Least-privilege token | Min TTL |
+|---|---|---|---|---|
+| **Cloudflare** | v4 `GET/POST/PUT/DELETE /zones/{id}/dns_records`, `Authorization: Bearer` | yes | API token, Zone → DNS → Edit, one zone | 60 (1 = auto) |
+| **deSEC** | v1 `GET /domains/?owns_qname=`, `GET /domains/{d}/rrsets/{sub}/{type}/`, bulk `PATCH /domains/{d}/rrsets/` (atomic, `records: []` deletes), `Authorization: Token` | yes (first label) | token policies per domain/subname/type, subnets | domain's `minimum_ttl` (3600) |
+| **Hetzner** | Cloud API `https://api.hetzner.cloud/v1/zones/{z}/rrsets[...]`, `actions/set_records`; the old `dns.hetzner.com` API was shut down in May 2026 (https://docs.hetzner.com/networking/dns/faq/beta) — request shapes from a published client **(unverified against Hetzner's reference)** | yes | per project only | 60 |
+| **Porkbun** | v3 `POST /dns/{retrieve,edit,delete}ByNameType/...`, `/dns/create/{d}`, keys in the body | yes (`*`) | API access per domain | 600 |
+| **OVHcloud** | `/domain/zone/{z}/record`, signed requests (`$1$` + SHA-1), `/refresh` | yes | consumer key rights per method and path | 60 |
+| **DuckDNS** | `GET /update?domains=&token=&ip=|ipv6=`; one address per name, every name below answers the same | implicit | one token per account | — |
+| Gandi, Route 53, DigitalOcean, RFC 2136, acme-dns | ACME module only (no rynas record client yet: the plan lists the records) | — | Gandi PAT per domain; Route 53 IAM per zone; DigitalOcean none | — |
+| IONOS, Namecheap | not in rynas-caddy: Namecheap's `setHosts` replaces the whole zone and needs an IP allow-list | — | — | — |
+
+### 13.5 Choices for W2
+
+- **Clients in Rust** (`crates/rynas-dns`, behind a `DnsApi` trait): Cloudflare, deSEC, Hetzner, Porkbun, OVH, DuckDNS. Tested against fake HTTP servers only.
+- **Caddy modules pinned** (`packaging/caddy/dns-modules.txt`): cloudflare v0.2.4, desec v1.1.0, hetzner/v2 v2.0.1, porkbun v0.3.1, ovh v1.1.0, duckdns v0.5.0, gandi v1.2.1, route53 v1.6.2, digitalocean (pseudo-version 2025-06-06), rfc2136 v1.0.0, acmedns v0.7.0. Built with Caddy 2.11.9 in the pinned Go image; `rynas-caddy validate` accepts the W2 golden render with real module provisioning.
+- **Secrets never in the engine JSON**: every module above except acmedns (password only) replaces placeholders in its credential fields in `Provision`, and Caddy's replacer reads `{file./path}` since 2.8 (one trailing newline trimmed, unreadable file → empty value + log line; https://github.com/caddyserver/caddy/blob/master/replacer.go).
+- **Credentials sealed** with the notification engine's age key, stored in the configuration key as an envelope: never in clear in `config.db`, its revisions or a `.rynasbak`.
+- **Propagation checked against public resolvers** (`1.1.1.1`, `9.9.9.9`): the LAN resolver may filter (rebind) or hold a split-horizon zone.
+
+Sources: https://synology.com/en-us/knowledgebase/tutorials/611 · https://www.truenas.com/docs/scale/26/credentials/certificates/acmednsauthscreens/ · https://docs.unraid.net/unraid-os/system-administration/secure-your-server/securing-your-connection/ · https://github.com/NginxProxyManager/nginx-proxy-manager · https://caddyserver.com/docs/caddyfile/directives/tls · https://caddyserver.com/docs/json/apps/tls/automation/policies/issuers/acme/ · https://doc.traefik.io/traefik/reference/install-configuration/tls/certificate-resolvers/acme/ · https://github.com/home-assistant/addons/blob/master/letsencrypt/DOCS.md · https://github.com/acmesh-official/acme.sh/wiki/dnsapi · https://go-acme.github.io/lego/dns/ · https://letsencrypt.org/2024/04/25/guide-to-integrating-ari-into-existing-acme-clients.html · https://letsencrypt.org/docs/profiles/ · https://letsencrypt.org/2025/12/02/from-90-to-45.html · https://letsencrypt.org/docs/rate-limits/ · https://github.com/caddyserver/caddy/releases/tag/v2.10.0 · https://github.com/joohoi/acme-dns · https://developers.cloudflare.com/api/resources/dns/subresources/records/methods/create/ · https://desec.readthedocs.io/en/latest/dns/rrsets.html · https://desec.readthedocs.io/en/latest/auth/tokens.html · https://docs.hetzner.com/networking/dns/faq/beta · https://docs.rs/dns-update/0.5.3/src/dns_update/providers/hetzner.rs.html · https://porkbun.com/llms/dns · https://docs.ovhcloud.com/en/guides/manage-and-operate/api/first-steps · https://www.duckdns.org/spec.jsp · https://github.com/caddy-dns

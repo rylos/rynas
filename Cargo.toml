@@ -28,6 +28,7 @@ members = [
     "crates/rynas-apps",
     "crates/rynas-docker",
     "crates/rynas-tls",
+    "crates/rynas-dns",
 ]
 
 [workspace.package]
@@ -63,6 +64,7 @@ rynas-files = { path = "crates/rynas-files" }
 rynas-removable = { path = "crates/rynas-removable" }
 rynas-module = { path = "crates/rynas-module" }
 rynas-tls = { path = "crates/rynas-tls" }
+rynas-dns = { path = "crates/rynas-dns" }
 # HTTPS of rynas-web (D-PROXY emergency port): the ring provider only, no aws-lc C build
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pki-types = { version = "1.15.1", features = ["std"] }

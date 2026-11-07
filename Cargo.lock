@@ -3285,7 +3285,9 @@ checksum = "16a1cfa75cc186dd73d5818e510e042e40927bccc9c236b061cea97e1eb08029"
 dependencies = [
  "base64 0.23.1",
  "bytes",
+ "futures-channel",
  "futures-core",
+ "futures-util",
  "http",
  "http-body",
  "http-body-util",
@@ -3554,6 +3556,19 @@ dependencies = [
  "tracing",
  "zbus",
  "zstd",
+]
+
+[[package]]
+name = "rynas-dns"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.4.3",
+ "hex",
+ "reqwest",
+ "rynas-api-types",
+ "serde",
+ "serde_json",
+ "sha1",
 ]
 
 [[package]]
@@ -3876,6 +3891,7 @@ name = "rynasd"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.23.1",
  "clap",
  "futures-util",
  "http-body-util",
@@ -3889,6 +3905,7 @@ dependencies = [
  "rynas-auth",
  "rynas-btrfs",
  "rynas-config",
+ "rynas-dns",
  "rynas-docker",
  "rynas-files",
  "rynas-http",

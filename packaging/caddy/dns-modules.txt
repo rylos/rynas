@@ -4,18 +4,26 @@
 # rynas local CA).
 #
 # Each line is `<module path>@<version>`: build.sh refuses a line without a pinned version,
-# so a build is reproducible. The versions are pinned when W2 lands (each module's latest
-# tag compatible with the pinned Caddy, checked with `rynas-caddy list-modules` and one
-# DNS-01 issuance per provider against Let's Encrypt staging).
+# so a build is reproducible. Pinned on 2026-11-07 (wave W2): each module's latest tag, all
+# on libdns 1.x (the API Caddy 2.10+ / certmagic 0.24+ use; Caddy 2.11.9 requires libdns
+# v1.1.1, so Go's minimal version selection lifts the older ones to it). Checked with the
+# GitHub tags and each module's go.mod (https://github.com/caddy-dns/<name>/tags), then built
+# with `build.sh --dns --validate` (rynas-caddy list-modules shows dns.providers.*).
 #
-# github.com/caddy-dns/cloudflare@<pin in W2>
-# github.com/caddy-dns/route53@<pin in W2>
-# github.com/caddy-dns/ovh@<pin in W2>
-# github.com/caddy-dns/hetzner@<pin in W2>
-# github.com/caddy-dns/desec@<pin in W2>
-# github.com/caddy-dns/duckdns@<pin in W2>
-# github.com/caddy-dns/gandi@<pin in W2>
-# github.com/caddy-dns/porkbun@<pin in W2>
-# github.com/caddy-dns/digitalocean@<pin in W2>
-# github.com/caddy-dns/rfc2136@<pin in W2>
-# github.com/caddy-dns/acmedns@<pin in W2>
+# - hetzner: the /v2 module talks to the Hetzner Cloud API (the old dns.hetzner.com API was
+#   shut down in May 2026; https://docs.hetzner.com/networking/dns/faq/beta).
+# - duckdns: v0.5.0 still declares libdns v1.0.0-beta.1; it builds against v1.1.1.
+# - digitalocean has no tag: a pseudo-version of its last commit (2025-06-06).
+# - every module but acmedns (password only) replaces `{file.*}`/`{env.*}` placeholders in
+#   its credential fields in Provision, so rynasd never writes a secret into the JSON.
+github.com/caddy-dns/cloudflare@v0.2.4
+github.com/caddy-dns/desec@v1.1.0
+github.com/caddy-dns/hetzner/v2@v2.0.1
+github.com/caddy-dns/porkbun@v0.3.1
+github.com/caddy-dns/ovh@v1.1.0
+github.com/caddy-dns/duckdns@v0.5.0
+github.com/caddy-dns/gandi@v1.2.1
+github.com/caddy-dns/route53@v1.6.2
+github.com/caddy-dns/digitalocean@v0.0.0-20250606074528-04bde2867106
+github.com/caddy-dns/rfc2136@v1.0.0
+github.com/caddy-dns/acmedns@v0.7.0

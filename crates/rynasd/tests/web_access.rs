@@ -5,6 +5,7 @@
 
 mod fake_caddy;
 
+use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -20,6 +21,10 @@ use rynas_auth::ManualClock;
 use rynas_auth::backend::{AuthError, Authenticator, BoxFuture, Identity};
 use rynas_auth::totp::{MemoryStorage, TotpManager};
 use rynas_config::{Applier, Config, ConfigOptions, MemorySystem};
+use rynas_dns::wire::Answer;
+use rynas_dns::{Creds, DnsApi, DnsError, RecordSet, Rtype, Zone};
+use rynas_notify::MemoryNotifier;
+use rynas_notify::engine::secrets::SecretBox;
 use rynas_tasks::{TaskConfig, TaskManager};
 use rynasd::ops::Ops;
 use rynasd::roles::AdminPolicy;
@@ -45,6 +50,7 @@ fn facts() -> HostFacts {
         tailscale: true,
         wireguard: [Cidr::parse("10.8.0.0/24").unwrap()].into(),
         primary_v4: Some("192.0.2.10".parse().unwrap()),
+        primary_v6: None,
         addrs: ["192.0.2.10".parse().unwrap()].into(),
     }
 }
@@ -79,12 +85,16 @@ fn sample() -> WebAccessConfig {
     WebAccessConfig {
         settings: WebAccessSettings::default(),
         routes: vec![portainer, immich],
+        ..Default::default()
     }
 }
 
 struct FakeProbe {
     resolve: Mutex<Result<Vec<IpAddr>, String>>,
     open: Mutex<Vec<SocketAddr>>,
+    /// Direct DNS answers by server (W2 checklist).
+    answers: Mutex<BTreeMap<SocketAddr, Answer>>,
+    lan: Mutex<Vec<SocketAddr>>,
 }
 
 struct ProbeRef(Arc<FakeProbe>);
@@ -99,6 +109,77 @@ impl NetProbe for ProbeRef {
         } else {
             Err("connection refused".into())
         }
+    }
+    fn query(&self, server: SocketAddr, _name: &str, _t: Rtype) -> Result<Answer, String> {
+        self.0
+            .answers
+            .lock()
+            .unwrap()
+            .get(&server)
+            .cloned()
+            .ok_or_else(|| format!("{server}: no answer"))
+    }
+    fn lan_resolvers(&self) -> Vec<SocketAddr> {
+        self.0.lan.lock().unwrap().clone()
+    }
+}
+
+/// A DNS provider in memory (W2 records), shared with the test.
+#[derive(Default)]
+struct MemDns {
+    sets: Mutex<BTreeMap<(String, Rtype), Vec<String>>>,
+    calls: Mutex<Vec<String>>,
+    /// Creds each client was built with.
+    creds: Mutex<Vec<Creds>>,
+    fail: Mutex<bool>,
+}
+
+struct MemDnsRef(Arc<MemDns>);
+
+impl DnsApi for MemDnsRef {
+    fn zone(&self, fqdn: &str) -> Result<Zone, DnsError> {
+        if fqdn.ends_with("example.com") {
+            Ok(Zone {
+                id: "z".into(),
+                name: "example.com".into(),
+                min_ttl: 60,
+            })
+        } else {
+            Err(DnsError::NoZone(fqdn.into()))
+        }
+    }
+    fn get(&self, _z: &Zone, n: &str, t: Rtype) -> Result<Option<RecordSet>, DnsError> {
+        Ok(self
+            .0
+            .sets
+            .lock()
+            .unwrap()
+            .get(&(n.to_string(), t))
+            .map(|v| RecordSet {
+                values: v.clone(),
+                ttl: 300,
+            }))
+    }
+    fn set(&self, _z: &Zone, n: &str, t: Rtype, v: &[String], _ttl: u32) -> Result<(), DnsError> {
+        self.0
+            .calls
+            .lock()
+            .unwrap()
+            .push(format!("set {n} {t} {}", v.join(",")));
+        if *self.0.fail.lock().unwrap() {
+            return Err(DnsError::Api("rate limited".into()));
+        }
+        self.0
+            .sets
+            .lock()
+            .unwrap()
+            .insert((n.into(), t), v.to_vec());
+        Ok(())
+    }
+    fn delete(&self, _z: &Zone, n: &str, t: Rtype) -> Result<(), DnsError> {
+        self.0.calls.lock().unwrap().push(format!("delete {n} {t}"));
+        self.0.sets.lock().unwrap().remove(&(n.to_string(), t));
+        Ok(())
     }
 }
 
@@ -125,6 +206,9 @@ struct Env {
     caddy: FakeCaddy,
     facts: Arc<Mutex<HostFacts>>,
     probe: Arc<FakeProbe>,
+    dns: Arc<MemDns>,
+    notes: Arc<MemoryNotifier>,
+    engine_log: Arc<Mutex<String>>,
 }
 
 impl Env {
@@ -181,6 +265,8 @@ fn env_with(confirm: Duration, installed: bool) -> Env {
     let probe = Arc::new(FakeProbe {
         resolve: Mutex::new(Ok(vec!["192.0.2.10".parse().unwrap()])),
         open: Mutex::new(Vec::new()),
+        answers: Mutex::new(BTreeMap::new()),
+        lan: Mutex::new(Vec::new()),
     });
     let mut svc = WebAccessSvc::new(
         root.clone(),
@@ -193,6 +279,27 @@ fn env_with(confirm: Duration, installed: bool) -> Env {
     );
     svc.confirm_timeout = confirm;
     svc.installed_override = Some(installed);
+    // W2: providers in memory, the age key, notifications, the engine's log
+    svc.state_dir = dir.path().join("state");
+    let dns = Arc::new(MemDns::default());
+    let d2 = dns.clone();
+    svc.dns = Box::new(move |p, c| {
+        d2.creds.lock().unwrap().push(c.clone());
+        Ok(rynas_dns::info(p)
+            .records
+            .then(|| Box::new(MemDnsRef(d2.clone())) as Box<dyn DnsApi>))
+    });
+    std::fs::create_dir_all(dir.path().join("state/notify")).unwrap();
+    let _ = svc.secret_box.set(Arc::new(
+        SecretBox::open(&dir.path().join("state/notify")).unwrap(),
+    ));
+    let notes = Arc::new(MemoryNotifier::default());
+    let _ = svc
+        .notifier
+        .set(notes.clone() as Arc<dyn rynas_notify::Notifier>);
+    let engine_log = Arc::new(Mutex::new(String::new()));
+    let l2 = engine_log.clone();
+    svc.engine_log = Box::new(move || l2.lock().unwrap().clone());
     let svc = Arc::new(svc);
     let system = Arc::new(MemorySystem::new("nas"));
     let domains: Vec<Arc<dyn Applier>> = vec![Arc::new(WebAccessDomain { svc: svc.clone() })];
@@ -221,6 +328,9 @@ fn env_with(confirm: Duration, installed: bool) -> Env {
         caddy,
         facts,
         probe,
+        dns,
+        notes,
+        engine_log,
     }
 }
 
@@ -894,4 +1004,678 @@ async fn routes_state_stage_plan_and_test() {
         (s, err.code.as_str()),
         (StatusCode::CONFLICT, error_codes::NOTHING_PENDING)
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// wave W2: own domains, credentials, records, checklist, certificates
+// ---------------------------------------------------------------------------------------------
+
+const CF_TOKEN: &str = "cf-test-token-0123456789";
+
+fn cred(id: &str, p: DnsProvider, values: &[(&str, &str)]) -> DnsCredential {
+    DnsCredential {
+        id: id.into(),
+        provider: p,
+        label: format!("{id} token"),
+        secrets: values
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+        ..Default::default()
+    }
+}
+
+/// `sample()` with an own domain on Cloudflare (DNS-01, wildcard, LAN records), a delegated
+/// one on acme-dns, staging and an e-mail.
+fn sample_w2() -> WebAccessConfig {
+    let mut c = sample();
+    c.credentials = vec![
+        cred("cf", DnsProvider::Cloudflare, &[("api_token", CF_TOKEN)]),
+        cred(
+            "adns",
+            DnsProvider::Acmedns,
+            &[
+                ("server_url", "https://auth.acme-dns.example.net"),
+                ("username", "user-uuid-1"),
+                ("subdomain", "sub-uuid-1"),
+                ("password", "adns-password-secret"),
+            ],
+        ),
+    ];
+    c.domains = vec![
+        WebDomain {
+            id: "home".into(),
+            name: "NAS.Example.com.".into(),
+            provider: Some(DnsProvider::Cloudflare),
+            credential: Some("cf".into()),
+            ..Default::default()
+        },
+        WebDomain {
+            id: "deleg".into(),
+            name: "files.example.org".into(),
+            provider: Some(DnsProvider::Acmedns),
+            credential: Some("adns".into()),
+            challenge: ChallengeKind::CnameDelegation,
+            delegate_to: Some("sub-uuid-1.auth.acme-dns.example.net".into()),
+            ui: false,
+            ..Default::default()
+        },
+    ];
+    c.acme = AcmeSettings {
+        email: Some("admin@example.com".into()),
+        staging: true,
+        profile: Some("tlsserver".into()),
+    };
+    c
+}
+
+/// `sample_w2()` with only the Cloudflare domain, in production.
+fn one_domain() -> WebAccessConfig {
+    let mut c = sample_w2();
+    c.domains.truncate(1);
+    c.credentials.truncate(1);
+    c.acme.staging = false;
+    c
+}
+
+#[test]
+fn domain_validation() {
+    let ok = |c: WebAccessConfig| model::validate(c, &[8080, 8443]);
+    let field = |c: WebAccessConfig| ok(c).unwrap_err().field.unwrap_or_default();
+    let v = ok(sample_w2()).unwrap();
+    assert_eq!(
+        v.domains[0].name, "nas.example.com",
+        "lowercase, no final dot"
+    );
+    let mut c = sample_w2();
+    c.domains[0].name = "nas.local".into();
+    assert_eq!(field(c), "domains[0].name");
+    let mut c = sample_w2();
+    c.domains[0].name = "*.example.com".into();
+    assert_eq!(field(c), "domains[0].name");
+    let mut c = sample_w2();
+    c.domains[0].credential = Some("adns".into());
+    assert_eq!(
+        field(c),
+        "domains[0].credential",
+        "credential of another provider"
+    );
+    let mut c = sample_w2();
+    c.domains[0].credential = None;
+    assert_eq!(field(c), "domains[0].credential");
+    let mut c = sample_w2();
+    c.domains[1].challenge = ChallengeKind::Dns01;
+    assert_eq!(field(c), "domains[1].provider", "acme-dns only delegated");
+    let mut c = sample_w2();
+    c.domains[1].delegate_to = None;
+    assert_eq!(field(c), "domains[1].delegate_to");
+    let mut c = sample_w2();
+    c.domains[0].provider = Some(DnsProvider::Duckdns);
+    c.credentials[0].provider = DnsProvider::Duckdns;
+    c.credentials[0].secrets.clear();
+    assert_eq!(
+        field(c),
+        "domains[0].name",
+        "DuckDNS names are <x>.duckdns.org"
+    );
+    let mut c = sample_w2();
+    c.domains[1].name = "nas.example.com".into();
+    assert_eq!(field(c), "domains[1].name", "twice");
+    let mut c = sample_w2();
+    c.credentials[0].secrets.insert("zone".into(), "x".into());
+    assert_eq!(field(c), "credentials[0].secrets.zone");
+    let mut c = sample_w2();
+    c.acme.email = Some("not an address".into());
+    assert_eq!(field(c), "acme.email");
+    // HTTP-01: no wildcard
+    let mut c = sample_w2();
+    c.domains[0].challenge = ChallengeKind::Http01;
+    assert!(!ok(c).unwrap().domains[0].wildcard);
+}
+
+#[test]
+fn domain_render_matches_the_golden_file() {
+    let e = env();
+    let mut c = sample_w2();
+    e.svc.seal_input(&mut c, &[]).unwrap();
+    let c = model::validate(c, &[8080, 8443]).unwrap();
+    let (resolved, json) = e.svc.render(&c, &facts());
+    assert_eq!(resolved.ui, vec!["nas.local", "nas", "nas.example.com"]);
+    let immich = resolved
+        .routes
+        .iter()
+        .find(|r| r.route.id == "app-immich")
+        .unwrap();
+    assert_eq!(
+        immich.names,
+        [
+            "immich-nas.local",
+            "immich.nas.example.com",
+            "immich.files.example.org"
+        ]
+    );
+    assert_eq!(
+        resolved.local_names(),
+        [
+            "nas.local",
+            "nas",
+            "immich-nas.local",
+            "portainer-nas.local"
+        ]
+    );
+    assert_golden("web_access_caddy_domains.json", &json);
+    let text = json.to_string();
+    // secrets are placeholders, never values; acme-dns names its account literally
+    assert!(!text.contains(CF_TOKEN) && !text.contains("adns-password-secret"));
+    assert!(text.contains("{file./var/lib/rynas-caddy/rynas/dns/cf/api_token}"));
+    assert!(text.contains("\"username\":\"user-uuid-1\""));
+    // the plan shows the same, with any literal secret masked
+    let plan = e.svc.plan(&c, &WebAccessConfig::default());
+    assert!(!plan.engine_config.to_string().contains(CF_TOKEN));
+    // external mode: no engine, no ACME
+    let mut x = c.clone();
+    x.settings.mode = ProxyMode::External;
+    assert!(e.svc.render(&x, &facts()).1.is_null());
+}
+
+#[tokio::test]
+async fn credentials_are_sealed_and_never_returned() {
+    let e = env();
+    let app = e.app();
+    let (s, b) = call(
+        &app,
+        "admin",
+        "PUT",
+        "/v1/web-access",
+        Some(serde_json::to_value(sample_w2()).unwrap()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    let text = String::from_utf8_lossy(&b).into_owned();
+    assert!(!text.contains(CF_TOKEN), "{text}");
+    assert!(!text.contains("\"sealed\""), "{text}");
+    let st: WebAccessState = serde_json::from_slice(&b).unwrap();
+    let p = st.pending.unwrap();
+    assert_eq!(p.credentials[0].fields, ["api_token"]);
+    assert!(p.credentials[0].secrets.is_empty());
+    // sent back as GET gave it (no values): the stored ones stay
+    let (s, b) = call(
+        &app,
+        "admin",
+        "PUT",
+        "/v1/web-access",
+        Some(serde_json::to_value(&p).unwrap()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    // a forged envelope is ignored, a new credential without values refused
+    let mut forged = p.clone();
+    forged.credentials[0].sealed = Some("Zm9yZ2Vk".into());
+    forged.credentials.push(DnsCredential {
+        id: "new".into(),
+        provider: DnsProvider::Desec,
+        ..Default::default()
+    });
+    let (s, b) = call(
+        &app,
+        "admin",
+        "PUT",
+        "/v1/web-access",
+        Some(serde_json::to_value(&forged).unwrap()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let err: ApiError = serde_json::from_slice(&b).unwrap();
+    assert_eq!(err.field.as_deref(), Some("credentials[2].secrets"));
+
+    // apply: the logs, config.db, the export and the answers never carry the token
+    let logs = Arc::new(Mutex::new(Vec::<String>::new()));
+    let l2 = logs.clone();
+    let cfg = e.ops.config.clone();
+    tokio::task::spawn_blocking(move || {
+        cfg.apply(
+            "admin",
+            "admin",
+            "test",
+            &|l| l2.lock().unwrap().push(l.to_string()),
+            &|| false,
+        )
+        .unwrap();
+    })
+    .await
+    .unwrap();
+    assert!(!logs.lock().unwrap().is_empty());
+    assert!(logs.lock().unwrap().iter().all(|l| !l.contains(CF_TOKEN)));
+    let db = std::fs::read(e.dir.path().join("state/config.db")).unwrap();
+    assert!(
+        !db.windows(CF_TOKEN.len()).any(|w| w == CF_TOKEN.as_bytes()),
+        "config.db holds the token in clear"
+    );
+    let out = e.dir.path().join("x.rynasbak");
+    rynasd::backup::export(e.config(), &e.dir.path().join("state"), &out, "nas", None).unwrap();
+    let a = rynas_config::archive::read_archive(&out, None, e.dir.path()).unwrap();
+    assert!(a.values.contains_key(WEB_ACCESS_KEY));
+    assert!(!serde_json::to_string(&a.values).unwrap().contains(CF_TOKEN));
+    // the engine reads it from its own file, the JSON names the file
+    let f = e.file("/var/lib/rynas-caddy/rynas/dns/cf/api_token");
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), CF_TOKEN);
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        std::fs::metadata(&f).unwrap().permissions().mode() & 0o777,
+        0o640
+    );
+    assert!(!e.caddy.config().to_string().contains(CF_TOKEN));
+    let last_good = std::fs::read_to_string(e.file(rynasd::web_access::LAST_GOOD)).unwrap();
+    assert!(!last_good.contains(CF_TOKEN));
+    let (_, b) = call(&app, "admin", "GET", "/v1/web-access", None).await;
+    assert!(!String::from_utf8_lossy(&b).contains(CF_TOKEN));
+    let (_, b) = call(&app, "admin", "POST", "/v1/web-access/plan", None).await;
+    assert!(!String::from_utf8_lossy(&b).contains(CF_TOKEN));
+    // the provider client got the value
+    assert!(
+        e.dns
+            .creds
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c["api_token"] == CF_TOKEN)
+    );
+
+    let (s, b) = call(&app, "admin", "GET", "/v1/web-access/providers", None).await;
+    assert_eq!(s, StatusCode::OK);
+    let prov: Vec<DnsProviderInfo> = serde_json::from_slice(&b).unwrap();
+    assert_eq!(prov.len(), DnsProvider::ALL.len());
+    assert!(
+        prov.iter()
+            .any(|p| p.provider == DnsProvider::Desec && p.records && p.min_ttl == 3600)
+    );
+
+    // a new value, same JSON: the engine is reloaded anyway; the domain removed: file gone
+    let e = Arc::new(e);
+    let e2 = e.clone();
+    tokio::task::spawn_blocking(move || {
+        let loads = e2.caddy.loads();
+        let mut c = e2.applied();
+        c.credentials[0].secrets =
+            [("api_token".to_string(), "cf-second-token-987".to_string())].into();
+        c.credentials[0].sealed = None;
+        e2.apply(&c).unwrap();
+        assert_eq!(e2.caddy.loads(), loads + 1);
+        let f = e2.file("/var/lib/rynas-caddy/rynas/dns/cf/api_token");
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "cf-second-token-987");
+        let mut c = e2.applied();
+        c.domains.clear();
+        e2.apply(&c).unwrap();
+        assert!(!f.exists());
+    })
+    .await
+    .unwrap();
+}
+
+fn sets(e: &Env) -> Vec<String> {
+    e.dns
+        .sets
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|((n, t), v)| format!("{n} {t} {}", v.join(",")))
+        .collect()
+}
+
+#[test]
+fn records_are_planned_written_followed_and_removed() {
+    let e = env();
+    let mut c = one_domain();
+    // the plan reads, never writes
+    e.svc.seal_input(&mut c, &[]).unwrap();
+    let c = model::validate(c, &[8080, 8443]).unwrap();
+    let plan = e.svc.plan(&c, &WebAccessConfig::default());
+    let acts: Vec<String> = plan
+        .dns_changes
+        .iter()
+        .map(|x| {
+            format!(
+                "{:?} {} {} {}",
+                x.action,
+                x.name,
+                x.rtype,
+                x.wanted.join(",")
+            )
+        })
+        .collect();
+    assert_eq!(
+        acts,
+        [
+            "Create *.nas.example.com A 192.0.2.10",
+            "Create nas.example.com A 192.0.2.10"
+        ]
+    );
+    assert!(e.dns.calls.lock().unwrap().is_empty());
+    // the apply writes them and remembers them
+    e.apply(&c).unwrap();
+    assert_eq!(
+        sets(&e),
+        [
+            "*.nas.example.com A 192.0.2.10",
+            "nas.example.com A 192.0.2.10"
+        ]
+    );
+    let owned =
+        std::fs::read_to_string(e.dir.path().join("state/web-access/dns-records.json")).unwrap();
+    assert!(owned.contains("*.nas.example.com"));
+    let st = e.svc.state("admin").unwrap();
+    let d = &st.domains[0];
+    assert!(d.records.as_ref().unwrap().ok);
+    assert_eq!(
+        d.certificate_names,
+        ["*.nas.example.com", "nas.example.com"]
+    );
+    assert!(d.problems.is_empty(), "{:?}", d.problems);
+    assert_eq!(d.ui_urls, ["https://nas.example.com/"]);
+    assert!(st.ui_names.contains(&"nas.example.com".to_string()));
+    let immich = st.routes.iter().find(|r| r.id == "app-immich").unwrap();
+    assert!(
+        immich
+            .urls
+            .contains(&"https://immich.nas.example.com/".to_string())
+    );
+    // the app's Open button prefers the trusted name
+    assert_eq!(
+        e.svc.stack_url("immich").as_deref(),
+        Some("https://immich.nas.example.com/")
+    );
+
+    // the LAN address changes: the next check writes the new one
+    e.svc.sync(&|_| {}).unwrap();
+    e.dns.calls.lock().unwrap().clear();
+    {
+        let mut f = e.facts.lock().unwrap();
+        f.primary_v4 = Some("192.0.2.20".parse().unwrap());
+        f.addrs = ["192.0.2.20".parse().unwrap()].into();
+    }
+    e.svc.sync(&|_| {}).unwrap();
+    assert_eq!(
+        sets(&e),
+        [
+            "*.nas.example.com A 192.0.2.20",
+            "nas.example.com A 192.0.2.20"
+        ]
+    );
+
+    // IPv6 on: AAAA too
+    e.facts.lock().unwrap().primary_v6 = Some("fd00::20".parse().unwrap());
+    let mut c = e.applied();
+    c.domains[0].lan_ipv6 = true;
+    e.apply(&c).unwrap();
+    assert_eq!(sets(&e).len(), 4);
+
+    // a record set rynas did not write is never deleted
+    e.dns.sets.lock().unwrap().insert(
+        ("mail.example.com".into(), Rtype::A),
+        vec!["198.51.100.1".into()],
+    );
+    // the domain removed: exactly the sets rynas wrote go
+    let mut c = e.applied();
+    c.domains.clear();
+    let plan = e.svc.plan(&c, &e.applied());
+    assert_eq!(plan.dns_changes.len(), 4, "{:?}", plan.dns_changes);
+    assert!(
+        plan.dns_changes
+            .iter()
+            .all(|x| x.action == DnsAction::Delete)
+    );
+    e.apply(&c).unwrap();
+    assert_eq!(sets(&e), ["mail.example.com A 198.51.100.1"]);
+}
+
+#[test]
+fn record_failures_never_fail_the_apply() {
+    let e = env();
+    *e.dns.fail.lock().unwrap() = true;
+    e.apply(&one_domain()).unwrap();
+    let st = e.svc.state("admin").unwrap();
+    assert!(
+        st.domains[0]
+            .problems
+            .contains(&"records_failed".to_string())
+    );
+    let r = st.domains[0].records.as_ref().unwrap();
+    assert!(!r.ok);
+    assert!(
+        r.changes[0].detail.contains("rate limited"),
+        "{:?}",
+        r.changes
+    );
+    // fixed: "Write records" now
+    *e.dns.fail.lock().unwrap() = false;
+    let r = e
+        .svc
+        .sync_records(&e.applied(), &e.applied(), &facts(), Some("home"), &|_| {});
+    assert!(r[0].ok);
+    assert!(e.svc.state("admin").unwrap().domains[0].problems.is_empty());
+    // a delegated domain: the records are listed for the administrator, nothing written
+    let mut c = sample_w2();
+    c.domains.remove(0);
+    e.svc.seal_input(&mut c, &[]).unwrap();
+    let c = model::validate(c, &[8080, 8443]).unwrap();
+    e.dns.calls.lock().unwrap().clear();
+    let plan = e.svc.plan(&c, &e.applied());
+    let manual: Vec<String> = plan
+        .dns_changes
+        .iter()
+        .filter(|x| x.action == DnsAction::Manual)
+        .map(|x| format!("{} {} {}", x.name, x.rtype, x.wanted.join(",")))
+        .collect();
+    assert_eq!(
+        manual,
+        [
+            "*.files.example.org A 192.0.2.10",
+            "files.example.org A 192.0.2.10",
+            "_acme-challenge.files.example.org CNAME sub-uuid-1.auth.acme-dns.example.net"
+        ]
+    );
+    assert!(e.dns.calls.lock().unwrap().is_empty());
+}
+
+#[test]
+fn domain_checklist_tells_rebind_protection_apart() {
+    let e = env();
+    let lan_ip: IpAddr = "192.168.1.10".parse().unwrap();
+    {
+        let mut f = e.facts.lock().unwrap();
+        f.primary_v4 = Some("192.168.1.10".parse().unwrap());
+        f.addrs = [lan_ip].into();
+        f.lan = [Cidr::parse("192.168.1.0/24").unwrap()].into();
+    }
+    *e.probe.resolve.lock().unwrap() = Err("NXDOMAIN".into());
+    let router: SocketAddr = "192.168.1.1:53".parse().unwrap();
+    *e.probe.lan.lock().unwrap() = vec![router];
+    {
+        let mut a = e.probe.answers.lock().unwrap();
+        a.insert("1.1.1.1:53".parse().unwrap(), Answer::Addrs(vec![lan_ip]));
+        a.insert(router, Answer::NxDomain);
+    }
+    e.apply(&one_domain()).unwrap();
+    let get =
+        |d: &RouteDiagnostics, id: &str| d.checks.iter().find(|c| c.id == id).cloned().unwrap();
+    let d = e.svc.diagnose_domain("home").unwrap();
+    let ids: Vec<&str> = d.checks.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [
+            "dns_record",
+            "dns_nas",
+            "dns_public",
+            "rebind",
+            "certificate",
+            "renewal",
+            "hairpin"
+        ]
+    );
+    assert_eq!(get(&d, "dns_record").state, CheckState::Ok);
+    assert_eq!(get(&d, "dns_public").state, CheckState::Ok);
+    assert_eq!(get(&d, "dns_nas").state, CheckState::Fail);
+    let rb = get(&d, "rebind");
+    assert_eq!(rb.state, CheckState::Fail);
+    assert!(
+        rb.detail.contains("rebind") && rb.detail.contains("nas.example.com"),
+        "{}",
+        rb.detail
+    );
+    assert_eq!(
+        get(&d, "certificate").state,
+        CheckState::Warn,
+        "being obtained"
+    );
+    assert_eq!(get(&d, "hairpin").state, CheckState::Ok);
+    // the router allows the domain: green
+    e.probe
+        .answers
+        .lock()
+        .unwrap()
+        .insert(router, Answer::Addrs(vec![lan_ip]));
+    *e.probe.resolve.lock().unwrap() = Ok(vec![lan_ip]);
+    let d = e.svc.diagnose_domain("home").unwrap();
+    assert_eq!(get(&d, "rebind").state, CheckState::Ok);
+    assert_eq!(get(&d, "dns_nas").state, CheckState::Ok);
+    // public DNS does not have it yet
+    e.probe
+        .answers
+        .lock()
+        .unwrap()
+        .insert("1.1.1.1:53".parse().unwrap(), Answer::NxDomain);
+    let d = e.svc.diagnose_domain("home").unwrap();
+    assert_eq!(get(&d, "dns_public").state, CheckState::Fail);
+    assert_eq!(get(&d, "rebind").state, CheckState::Skipped);
+    assert!(e.svc.diagnose_domain("nope").is_err());
+    // the route test adds the domain name's checks
+    let r = e.svc.diagnose("app-immich").unwrap();
+    assert!(
+        r.checks
+            .iter()
+            .any(|c| c.id == "domain_dns" && c.state == CheckState::Ok)
+    );
+    assert!(
+        r.checks
+            .iter()
+            .any(|c| c.id == "domain_certificate" && c.state == CheckState::Warn)
+    );
+}
+
+fn write_acme(e: &Env, subject: &str, now: i64) {
+    let ca = rynas_tls::generate_ca("le", now).unwrap();
+    let leaf = rynas_tls::issue_leaf(
+        &ca,
+        &rynas_tls::Names {
+            dns: [subject.to_string()].into(),
+            ips: Default::default(),
+        },
+        now,
+    )
+    .unwrap();
+    let p = e.file(&rynasd::web_access::domains::cert_path(
+        "/var/lib/rynas-caddy/data",
+        rynasd::web_access::domains::ACME_PRODUCTION,
+        subject,
+    ));
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(p, leaf.chain).unwrap();
+}
+
+#[test]
+fn certificate_inventory_and_notifications() {
+    let e = env();
+    e.apply(&one_domain()).unwrap();
+    // an expired wildcard (issued long ago), the apex not obtained yet with an engine error
+    write_acme(
+        &e,
+        "*.nas.example.com",
+        rynas_tls::now() - 4000 * 86_400_000,
+    );
+    *e.engine_log.lock().unwrap() = r#"{"level":"error","logger":"tls.obtain","msg":"could not get certificate from issuer","identifier":"nas.example.com","error":"cloudflare: invalid token"}"#.into();
+    let inv = e.svc.certificates();
+    let by = |id: &str| {
+        inv.certificates
+            .iter()
+            .find(|x| x.id == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("{id}: {:?}", inv.certificates))
+    };
+    assert_eq!(by("proxy-local").kind, CertKind::ProxyLocal);
+    let w = by("acme:*.nas.example.com");
+    assert_eq!((w.kind, w.status), (CertKind::Acme, CertStatus::Expired));
+    assert_eq!(w.domain.as_deref(), Some("nas.example.com"));
+    assert!(w.renew_after_ms.is_some());
+    let apex = by("acme:nas.example.com");
+    assert_eq!(apex.status, CertStatus::Pending);
+    assert_eq!(
+        apex.last_error.as_deref(),
+        Some("could not get certificate from issuer: cloudflare: invalid token")
+    );
+    // notifications: firing once, nothing on the next check, resolved when renewed
+    let ev = e.svc.check_certificates(true);
+    assert_eq!(ev.len(), 1, "{ev:?}");
+    assert_eq!(ev[0].code, "web_access.cert_expired");
+    assert_eq!(e.notes.take().len(), 1);
+    assert!(e.svc.check_certificates(true).is_empty());
+    assert!(e.svc.check_certificates(false).is_empty(), "rate limited");
+    write_acme(&e, "*.nas.example.com", rynas_tls::now());
+    let ev = e.svc.check_certificates(true);
+    assert_eq!(ev.len(), 1);
+    assert_eq!(ev[0].code, "web_access.cert_ok");
+    assert_eq!(ev[0].state, rynas_api_types::notify::EventState::Resolved);
+    // the HTTP routes
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let app = e.app();
+    let (s, b) = rt.block_on(call(
+        &app,
+        "admin",
+        "GET",
+        "/v1/web-access/certificates",
+        None,
+    ));
+    assert_eq!(s, StatusCode::OK);
+    let inv: CertificateInventory = serde_json::from_slice(&b).unwrap();
+    assert!(
+        inv.certificates
+            .iter()
+            .any(|x| x.id == "acme:*.nas.example.com" && x.status != CertStatus::Expired)
+    );
+    let (s, _) = rt.block_on(call(
+        &app,
+        "bob",
+        "GET",
+        "/v1/web-access/certificates",
+        None,
+    ));
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, b) = rt.block_on(call(
+        &app,
+        "admin",
+        "POST",
+        "/v1/web-access/domains/home/records",
+        None,
+    ));
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    let r: DnsSyncReport = serde_json::from_slice(&b).unwrap();
+    assert!(r.ok && r.changes.iter().all(|x| x.action == DnsAction::Keep));
+    let (s, _) = rt.block_on(call(
+        &app,
+        "admin",
+        "POST",
+        "/v1/web-access/domains/nope/records",
+        None,
+    ));
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, b) = rt.block_on(call(
+        &app,
+        "admin",
+        "POST",
+        "/v1/web-access/domains/home/test",
+        None,
+    ));
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
 }

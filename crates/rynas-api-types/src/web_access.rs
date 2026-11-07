@@ -9,6 +9,13 @@
 //! - `POST /api/v1/web-access/confirm` → 204;
 //! - `POST /api/v1/web-access/routes/{id}/test` → [`RouteDiagnostics`].
 //!
+//! Wave W2 (own domains, `docs/phase2/docker-apps.md` §5.4):
+//! - `POST /api/v1/web-access/domains/{id}/test` → [`RouteDiagnostics`] (the domain checklist);
+//! - `POST /api/v1/web-access/domains/{id}/records` → [`DnsSyncReport`] (write the LAN
+//!   records now);
+//! - `GET /api/v1/web-access/certificates` → [`CertificateInventory`];
+//! - `GET /api/v1/web-access/providers` → `Vec<`[`DnsProviderInfo`]`>`.
+//!
 //! The model is engine-neutral: nothing here is Caddy-specific. Names (local `.local` name
 //! today; own domain, Tailscale and tunnel names in later waves) are separate from who may
 //! connect ([`AccessLevel`]).
@@ -172,17 +179,23 @@ impl Default for WebUpstream {
     }
 }
 
-/// The names of a route. Later waves add the own-domain, Tailscale and tunnel names.
+/// The names of a route. Later waves add the Tailscale and tunnel names.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteNames {
     /// `<label>-<host>.local` (published through Avahi when `settings.local_names`).
     #[serde(default = "yes")]
     pub local: bool,
+    /// `<label>.<domain>` for every enabled own domain (wave W2).
+    #[serde(default = "yes")]
+    pub domain: bool,
 }
 
 impl Default for RouteNames {
     fn default() -> Self {
-        Self { local: true }
+        Self {
+            local: true,
+            domain: true,
+        }
     }
 }
 
@@ -305,6 +318,358 @@ pub struct WebAccessConfig {
     pub settings: WebAccessSettings,
     #[serde(default)]
     pub routes: Vec<WebRoute>,
+    /// Own domains (wave W2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub domains: Vec<WebDomain>,
+    /// DNS provider credentials the domains refer to (wave W2). Secrets are write-only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credentials: Vec<DnsCredential>,
+    /// ACME account settings shared by every domain (wave W2).
+    #[serde(default, skip_serializing_if = "AcmeSettings::is_default")]
+    pub acme: AcmeSettings,
+}
+
+// ---------------------------------------------------------------------------------------------
+// wave W2: own domains, DNS providers, ACME, certificates
+// ---------------------------------------------------------------------------------------------
+
+/// DNS providers rynas knows: the ACME DNS-01 module compiled into rynas-caddy, and for some
+/// rynas's own client that writes the LAN records ([`DnsProviderInfo::records`]).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum DnsProvider {
+    #[default]
+    Cloudflare,
+    Desec,
+    Hetzner,
+    Porkbun,
+    Ovh,
+    Duckdns,
+    Gandi,
+    Route53,
+    Digitalocean,
+    Rfc2136,
+    /// acme-dns: only for `cname_delegation` (it holds nothing but the challenge TXT).
+    Acmedns,
+}
+
+impl DnsProvider {
+    pub const ALL: [DnsProvider; 11] = [
+        Self::Cloudflare,
+        Self::Desec,
+        Self::Hetzner,
+        Self::Porkbun,
+        Self::Ovh,
+        Self::Duckdns,
+        Self::Gandi,
+        Self::Route53,
+        Self::Digitalocean,
+        Self::Rfc2136,
+        Self::Acmedns,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cloudflare => "cloudflare",
+            Self::Desec => "desec",
+            Self::Hetzner => "hetzner",
+            Self::Porkbun => "porkbun",
+            Self::Ovh => "ovh",
+            Self::Duckdns => "duckdns",
+            Self::Gandi => "gandi",
+            Self::Route53 => "route53",
+            Self::Digitalocean => "digitalocean",
+            Self::Rfc2136 => "rfc2136",
+            Self::Acmedns => "acmedns",
+        }
+    }
+}
+
+/// How the certificate of a domain is validated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ChallengeKind {
+    /// ACME DNS-01 through the provider's API (the default: wildcard, no open port).
+    #[default]
+    Dns01,
+    /// ACME HTTP-01: port 80 reachable from the internet, one certificate per name (no
+    /// wildcard; app names appear in Certificate Transparency logs).
+    Http01,
+    /// DNS-01 with `_acme-challenge.<domain>` delegated by a CNAME to `delegate_to` (a
+    /// throw-away zone or acme-dns): the credential cannot touch the main zone, so rynas does
+    /// not write the LAN records either (the plan lists the records to add by hand).
+    CnameDelegation,
+}
+
+/// One own domain (ideally a subzone such as `nas.example.com`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebDomain {
+    /// `[a-z0-9-]`, 1-63 characters, unique; never changes.
+    pub id: String,
+    /// Lowercase DNS name, at least two labels, no wildcard.
+    pub name: String,
+    /// DNS provider of the zone (DNS-01 and records). Optional for `http01` without records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<DnsProvider>,
+    /// Id of a [`DnsCredential`] of the same provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential: Option<String>,
+    #[serde(default)]
+    pub challenge: ChallengeKind,
+    /// `cname_delegation`: the name `_acme-challenge.<name>` points to (the CNAME target;
+    /// with acme-dns, the account's `fulldomain`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegate_to: Option<String>,
+    /// One certificate for `*.<name>` + `<name>` (DNS-01 only).
+    #[serde(default = "yes")]
+    pub wildcard: bool,
+    /// rynas writes `*.<name>` and `<name>` A (and AAAA with `lan_ipv6`) = the NAS's LAN
+    /// address through the provider, and keeps them current.
+    #[serde(default = "yes")]
+    pub lan_record: bool,
+    /// Also AAAA records (a stable IPv6 address of the LAN interface).
+    #[serde(default)]
+    pub lan_ipv6: bool,
+    /// The interface is also served on `<name>` itself.
+    #[serde(default = "yes")]
+    pub ui: bool,
+    #[serde(default = "yes")]
+    pub enabled: bool,
+}
+
+impl Default for WebDomain {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            provider: None,
+            credential: None,
+            challenge: ChallengeKind::Dns01,
+            delegate_to: None,
+            wildcard: true,
+            lan_record: true,
+            lan_ipv6: false,
+            ui: true,
+            enabled: true,
+        }
+    }
+}
+
+/// A DNS provider credential (the TrueNAS "DNS authenticator" idea: reusable by domains).
+///
+/// The values are **write-only**: a PUT that carries `secrets` replaces them; a PUT without
+/// `secrets` keeps the stored ones (the UI sends back what GET gave). Answers never carry
+/// them: `fields` lists the names that are stored. `sealed` is rynasd's encrypted envelope
+/// inside the configuration key: never in an answer, ignored on input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DnsCredential {
+    /// `[a-z0-9-]`, 1-63 characters, unique.
+    pub id: String,
+    pub provider: DnsProvider,
+    /// Free text for the list ("token for example.com").
+    #[serde(default)]
+    pub label: String,
+    /// Write-only values by field name ([`DnsProviderInfo::fields`]).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub secrets: std::collections::BTreeMap<String, String>,
+    /// Names of the stored values (answers only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<String>,
+    /// Internal: the encrypted values (never in answers, ignored on input).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed: Option<String>,
+}
+
+/// ACME account settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AcmeSettings {
+    /// Contact address of the ACME account (optional).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// Let's Encrypt staging (untrusted certificates, high rate limits): for tests.
+    #[serde(default)]
+    pub staging: bool,
+    /// ACME profile (`classic`, `tlsserver`); none = the CA's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+}
+
+impl AcmeSettings {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+/// One value a provider credential needs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DnsProviderField {
+    /// Field name (the key in [`DnsCredential::secrets`]).
+    pub name: String,
+    /// Secret: a password field, never returned.
+    pub secret: bool,
+    /// Optional (a default applies).
+    #[serde(default)]
+    pub optional: bool,
+}
+
+/// `GET /api/v1/web-access/providers`: what each provider supports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DnsProviderInfo {
+    pub provider: DnsProvider,
+    /// Values a credential needs.
+    pub fields: Vec<DnsProviderField>,
+    /// rynas writes the LAN records with this provider.
+    pub records: bool,
+    /// The provider stores wildcard records (`*.<name>`); otherwise one record per name.
+    pub wildcard_records: bool,
+    /// Tokens can be limited to one zone or record set. When false the form recommends
+    /// `cname_delegation`.
+    pub scoped_tokens: bool,
+    /// Lowest TTL the provider accepts (seconds); rynas writes at least this.
+    pub min_ttl: u32,
+    /// English guidance for a minimum-scope token, shown under the form.
+    pub token_hint: String,
+}
+
+/// What a record sync does to one record set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DnsAction {
+    /// Already right.
+    #[default]
+    Keep,
+    Create,
+    Update,
+    Delete,
+    /// The administrator adds it by hand (CNAME delegation, providers without a client).
+    Manual,
+    /// Not known: the provider could not be read (`detail` says why) or was not asked.
+    Unknown,
+}
+
+/// One record set and what happens to it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DnsChange {
+    /// The domain's name.
+    pub domain: String,
+    /// Fully qualified name (`*.nas.example.com`).
+    pub name: String,
+    /// `A`, `AAAA`, `CNAME`.
+    pub rtype: String,
+    pub action: DnsAction,
+    /// Values at the provider now.
+    #[serde(default)]
+    pub current: Vec<String>,
+    /// Values after the change (empty for `delete`).
+    #[serde(default)]
+    pub wanted: Vec<String>,
+    #[serde(default)]
+    pub ttl: u32,
+    /// English detail (the provider's error...).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+}
+
+/// `POST /api/v1/web-access/domains/{id}/records`, and the last sync in [`DomainView`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DnsSyncReport {
+    pub domain: String,
+    pub changes: Vec<DnsChange>,
+    /// Every change went through.
+    pub ok: bool,
+    pub at_ms: i64,
+}
+
+/// One domain as the pages show it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DomainView {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    /// Names the certificate covers (`*.<name>` + `<name>`, or one per name with HTTP-01).
+    pub certificate_names: Vec<String>,
+    /// URLs of the interface on this domain.
+    #[serde(default)]
+    pub ui_urls: Vec<String>,
+    /// The last record sync (none before the first apply, or without `lan_record`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub records: Option<DnsSyncReport>,
+    /// Problem codes: `credential_missing`, `records_failed`, `records_manual`,
+    /// `no_lan_address`, `staging`.
+    #[serde(default)]
+    pub problems: Vec<String>,
+}
+
+/// Where a certificate comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CertKind {
+    /// rynas's local CA (the root "Trust this NAS" installs).
+    #[default]
+    LocalCa,
+    /// The certificate `:8443` serves (local leaf or imported).
+    Interface,
+    /// The proxy's leaf for the `.local` names (local CA).
+    ProxyLocal,
+    /// ACME, obtained and renewed by rynas-caddy for an own domain.
+    Acme,
+}
+
+/// Health of one certificate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CertStatus {
+    #[default]
+    Ok,
+    /// Expires within 14 days.
+    ExpiresSoon,
+    Expired,
+    /// Past its renewal point and not renewed for a day: renewal is failing.
+    RenewalOverdue,
+    /// Expected (an applied domain) but not obtained yet.
+    Pending,
+    /// Expected for more than 15 minutes and still missing: issuance is failing.
+    Failed,
+}
+
+/// One certificate of the inventory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CertEntry {
+    /// Stable id: `local-ca`, `interface`, `proxy-local`, `acme:<name>` (one ACME
+    /// certificate per name: `acme:*.nas.example.com`, `acme:nas.example.com`).
+    pub id: String,
+    pub kind: CertKind,
+    pub status: CertStatus,
+    /// Names it covers (or should cover, while `pending`/`failed`).
+    pub names: Vec<String>,
+    /// The domain's name (ACME).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+    /// Issued by Let's Encrypt staging (browsers do not trust it).
+    #[serde(default)]
+    pub staging: bool,
+    /// `local` or `imported` for the interface certificate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// The certificate itself, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificate: Option<crate::tls::TlsCertificate>,
+    /// From when rynas-caddy renews it (ms since the epoch; 2/3 of the lifetime, earlier
+    /// when the CA's ARI window says so). ACME only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renew_after_ms: Option<i64>,
+    /// Last issuance or renewal error the engine logged (English).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+/// `GET /api/v1/web-access/certificates`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CertificateInventory {
+    pub certificates: Vec<CertEntry>,
+    pub at_ms: i64,
 }
 
 /// State of the proxy engine (rynas-caddy).
@@ -344,7 +709,9 @@ pub struct RouteView {
     pub access: AccessLevel,
     pub enabled: bool,
     /// Problems found while rendering, as codes: `name_too_long` (the local name would
-    /// exceed 63 characters for this host name), `local_names_off`, `disabled`.
+    /// exceed 63 characters for this host name), `local_names_off`, `disabled`,
+    /// `name_collision`, `name_unpublished`, `domain_name_too_long` (`<label>.<domain>`
+    /// over 253 characters).
     #[serde(default)]
     pub problems: Vec<String>,
 }
@@ -383,6 +750,9 @@ pub struct WebAccessState {
     pub emergency_port: u16,
     /// Host ports apps cannot publish (the proxy's, unless external mode).
     pub reserved_ports: Vec<u16>,
+    /// The own domains (wave W2), in the order of the key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub domains: Vec<DomainView>,
 }
 
 /// `POST /api/v1/web-access/plan`: what an apply would load. No side effects.
@@ -396,6 +766,10 @@ pub struct WebAccessPlan {
     pub names: Vec<String>,
     /// The interface's own route changes: the apply waits for a timed confirmation.
     pub ui_route_changes: bool,
+    /// DNS records the apply would write, per domain (wave W2). The provider is read (never
+    /// written) to say what changes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dns_changes: Vec<DnsChange>,
 }
 
 /// State of one diagnostic step.
@@ -413,16 +787,20 @@ pub enum CheckState {
 /// One diagnostic step.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct RouteCheck {
-    /// `dns`, `proxy_running`, `route_loaded`, `https_listening`, `certificate`, `upstream`.
+    /// Route test: `local_name`, `dns`, `proxy_running`, `route_loaded`, `https_listening`,
+    /// `certificate`, `upstream`, then (wave W2, with an own-domain name) `domain_dns`,
+    /// `domain_certificate`. Domain checklist: `dns_record`, `dns_nas`, `dns_public`,
+    /// `rebind`, `certificate`, `renewal`, `hairpin`.
     pub id: String,
     pub state: CheckState,
     /// English detail (addresses, the engine's message...), shown as is.
     pub detail: String,
 }
 
-/// `POST /api/v1/web-access/routes/{id}/test`.
+/// `POST /api/v1/web-access/routes/{id}/test` and `POST /api/v1/web-access/domains/{id}/test`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct RouteDiagnostics {
+    /// The route's (or the domain's) id.
     pub route: String,
     pub checks: Vec<RouteCheck>,
     pub at_ms: i64,

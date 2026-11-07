@@ -5,7 +5,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use rynas_api_types::apps::WebAuth;
-use rynas_api_types::web_access::{AccessLevel, RouteKind, WebAccessConfig, WebRoute};
+use rynas_api_types::web_access::{
+    AccessLevel, ChallengeKind, DnsProvider, RouteKind, WebAccessConfig, WebRoute,
+};
 use rynas_config::Invalid;
 
 /// Longest route label: `<label>-<host>` must fit a 63-character DNS label for hosts names
@@ -130,6 +132,9 @@ pub struct HostFacts {
     /// The IPv4 address local names point to: the one of the interface with the default
     /// route, else the first LAN address.
     pub primary_v4: Option<Ipv4Addr>,
+    /// A stable IPv6 address of the interface with the default route (global or ULA, not
+    /// temporary, not deprecated): the AAAA of own-domain records with `lan_ipv6`.
+    pub primary_v6: Option<Ipv6Addr>,
     /// Every address of the LAN interfaces (diagnostics: does a name point to this NAS?).
     pub addrs: BTreeSet<IpAddr>,
 }
@@ -144,12 +149,13 @@ impl HostFacts {
     /// re-applies the configuration.
     pub fn fingerprint(&self) -> String {
         format!(
-            "{}|{:?}|{}|{:?}|{:?}",
+            "{}|{:?}|{}|{:?}|{:?}|{:?}",
             self.host(),
             self.lan,
             self.tailscale,
             self.wireguard,
-            self.primary_v4
+            self.primary_v4,
+            self.primary_v6
         )
     }
 }
@@ -218,6 +224,16 @@ pub fn parse_facts(hostname: &str, addr_json: &str, route_json: &str) -> HostFac
                 f.lan.insert(net);
             }
             f.addrs.insert(ip);
+            if let IpAddr::V6(v6) = ip
+                && !link_local
+                && f.primary_v6.is_none()
+                && default_dev.as_deref() == Some(name)
+                && a["temporary"] != true
+                && a["deprecated"] != true
+                && a["scope"].as_str().unwrap_or("global") == "global"
+            {
+                f.primary_v6 = Some(v6);
+            }
             if let IpAddr::V4(v4) = ip
                 && !v4.is_link_local()
             {
@@ -494,8 +510,207 @@ pub fn validate(mut c: WebAccessConfig, reserved: &[u16]) -> Result<WebAccessCon
             return Err(Invalid::at(at("path"), "a path starting with /"));
         }
     }
+    validate_w2(&mut c)?;
     // external mode keeps the routes: they come back with the built-in proxy
     Ok(c)
+}
+
+/// Longest own domain: `<label>.<domain>` must stay within 253 characters.
+pub const MAX_DOMAIN: usize = 253 - MAX_LABEL - 1;
+
+/// Suffixes no public CA issues for (they add nothing over `.local` + the local CA).
+const PRIVATE_SUFFIXES: &[&str] = &[
+    "local",
+    "lan",
+    "home",
+    "internal",
+    "home.arpa",
+    "localhost",
+    "test",
+    "invalid",
+    "example",
+    "corp",
+    "intranet",
+    "localdomain",
+];
+
+/// A DNS name of at least two labels (lowercase letters, digits, `-`; IDN as `xn--`), no
+/// wildcard, at most `max` characters; returned lowercase without a final dot.
+pub fn dns_name(s: &str, max: usize) -> Option<String> {
+    let n = s.trim().trim_end_matches('.').to_ascii_lowercase();
+    if n.len() > max || n.split('.').count() < 2 {
+        return None;
+    }
+    n.split('.').all(|l| valid_label(l, 63)).then_some(n)
+}
+
+/// A CNAME target: like [`dns_name`], labels may also hold `_` (`_acme-challenge.x.example.net`).
+fn target_name(s: &str) -> Option<String> {
+    let n = s.trim().trim_end_matches('.').to_ascii_lowercase();
+    let ok = n.len() <= 253
+        && n.split('.').count() >= 2
+        && n.split('.').all(|l| {
+            !l.is_empty()
+                && l.len() <= 63
+                && l.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+        });
+    ok.then_some(n)
+}
+
+/// Domains, credentials and the ACME settings (wave W2).
+fn validate_w2(c: &mut WebAccessConfig) -> Result<(), Invalid> {
+    let mut ids = BTreeSet::new();
+    for (i, cr) in c.credentials.iter_mut().enumerate() {
+        let at = |f: &str| format!("credentials[{i}].{f}");
+        cr.id = cr.id.trim().to_string();
+        if !valid_label(&cr.id, 63) {
+            return Err(Invalid::at(
+                at("id"),
+                "use 1-63 characters a-z, 0-9 and '-'",
+            ));
+        }
+        if !ids.insert(cr.id.clone()) {
+            return Err(Invalid::at(
+                at("id"),
+                format!("the id {} is used twice", cr.id),
+            ));
+        }
+        cr.label = cr.label.trim().to_string();
+        if cr.label.chars().count() > 100 || cr.label.chars().any(char::is_control) {
+            return Err(Invalid::at(
+                at("label"),
+                "at most 100 characters on one line",
+            ));
+        }
+        if !cr.secrets.is_empty() {
+            rynas_dns::check_creds(cr.provider, &cr.secrets)
+                .map_err(|(f, m)| Invalid::at(at(&format!("secrets.{f}")), m))?;
+        }
+    }
+    let mut dids = BTreeSet::new();
+    let mut names = BTreeSet::new();
+    for (i, d) in c.domains.iter_mut().enumerate() {
+        let at = |f: &str| format!("domains[{i}].{f}");
+        d.id = d.id.trim().to_string();
+        if !valid_label(&d.id, 63) {
+            return Err(Invalid::at(
+                at("id"),
+                "use 1-63 characters a-z, 0-9 and '-'",
+            ));
+        }
+        if !dids.insert(d.id.clone()) {
+            return Err(Invalid::at(
+                at("id"),
+                format!("the id {} is used twice", d.id),
+            ));
+        }
+        let name = dns_name(&d.name, MAX_DOMAIN).ok_or_else(|| {
+            Invalid::at(
+                at("name"),
+                format!("a domain name such as nas.example.com, at most {MAX_DOMAIN} characters, no wildcard"),
+            )
+        })?;
+        if PRIVATE_SUFFIXES
+            .iter()
+            .any(|p| name == *p || name.ends_with(&format!(".{p}")))
+        {
+            return Err(Invalid::at(
+                at("name"),
+                "no public CA issues certificates for this name: use a domain you own (local names already cover .local)",
+            ));
+        }
+        if !names.insert(name.clone()) {
+            return Err(Invalid::at(at("name"), format!("{name} is used twice")));
+        }
+        d.name = name;
+        if d.challenge == ChallengeKind::Http01 {
+            // one certificate per name: no wildcard with HTTP-01
+            d.wildcard = false;
+        }
+        let needs_provider = d.challenge != ChallengeKind::Http01 || d.lan_record;
+        match d.provider {
+            None if needs_provider => {
+                return Err(Invalid::at(
+                    at("provider"),
+                    "choose the DNS provider of the domain",
+                ));
+            }
+            None => d.credential = None,
+            Some(p) => {
+                if p == DnsProvider::Acmedns && d.challenge != ChallengeKind::CnameDelegation {
+                    return Err(Invalid::at(
+                        at("provider"),
+                        "acme-dns only answers the delegated challenge: use CNAME delegation",
+                    ));
+                }
+                if p == DnsProvider::Duckdns
+                    && !(d.name.ends_with(".duckdns.org") && d.name.split('.').count() == 3)
+                {
+                    return Err(Invalid::at(
+                        at("name"),
+                        "a DuckDNS domain is <name>.duckdns.org",
+                    ));
+                }
+                let cid = d.credential.as_deref().unwrap_or("").trim().to_string();
+                let cred = c.credentials.iter().find(|x| x.id == cid).ok_or_else(|| {
+                    Invalid::at(at("credential"), "choose a credential of the provider")
+                })?;
+                if cred.provider != p {
+                    return Err(Invalid::at(
+                        at("credential"),
+                        format!(
+                            "the credential {cid} is for {}, not {}",
+                            cred.provider.as_str(),
+                            p.as_str()
+                        ),
+                    ));
+                }
+                d.credential = Some(cid);
+            }
+        }
+        if d.challenge == ChallengeKind::CnameDelegation {
+            let t = d
+                .delegate_to
+                .as_deref()
+                .and_then(target_name)
+                .ok_or_else(|| {
+                    Invalid::at(
+                        at("delegate_to"),
+                        "the name _acme-challenge.<domain> points to (the CNAME target)",
+                    )
+                })?;
+            d.delegate_to = Some(t);
+        } else {
+            d.delegate_to = None;
+        }
+    }
+    let a = &mut c.acme;
+    if let Some(e) = a.email.as_mut() {
+        *e = e.trim().to_string();
+        if e.is_empty() {
+            a.email = None;
+        } else if e.len() > 254
+            || e.matches('@').count() != 1
+            || e.starts_with('@')
+            || e.ends_with('@')
+            || e.chars().any(|ch| ch.is_whitespace() || ch.is_control())
+        {
+            return Err(Invalid::at("acme.email", "an e-mail address"));
+        }
+    }
+    if let Some(p) = a.profile.as_mut() {
+        *p = p.trim().to_ascii_lowercase();
+        if p.is_empty() {
+            a.profile = None;
+        } else if !valid_label(p, 32) {
+            return Err(Invalid::at(
+                "acme.profile",
+                "a profile name such as classic or tlsserver",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn check_access(a: AccessLevel, field: &str) -> Result<(), Invalid> {

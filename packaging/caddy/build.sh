@@ -102,6 +102,16 @@ BIN="$WORK/rynas-caddy"
 )
 "$BIN" version | grep -q "^v$CADDY_VERSION" || { echo "built binary is not v$CADDY_VERSION" >&2; exit 1; }
 "$BIN" build-info > "$WORK/build-info.txt"
+if [ "$DNS" = 1 ]; then
+    # one dns.providers.<name> module per pinned line
+    have=$("$BIN" list-modules | grep -c '^dns\.providers\.' || true)
+    if [ "$have" -lt $(( ${#with[@]} / 2 )) ]; then
+        echo "only $have DNS provider modules in the binary for $(( ${#with[@]} / 2 )) pinned lines" >&2
+        exit 1
+    fi
+    "$BIN" list-modules | grep '^dns\.providers\.' > "$WORK/dns-modules.txt"
+    echo "DNS provider modules: $(tr '\n' ' ' < "$WORK/dns-modules.txt")"
+fi
 
 # the bootstrap configuration and any requested ones must pass Caddy's own validation
 CERTDIR="$WORK/certs"
@@ -111,6 +121,13 @@ validate() {
     sed -e "s#/var/lib/rynas-caddy/rynas/#$CERTDIR/#g" \
         -e "s#/var/lib/rynas-caddy/data#$WORK/data#g" \
         -e "s#unix//run/rynas-caddy/admin.sock#unix/$WORK/admin.sock#g" "$f" > "$tmp"
+    # DNS provider secrets named by {file.*} placeholders: throw-away values in the shape
+    # the modules check (a 40-character token)
+    { grep -o "{file\.$CERTDIR/dns/[^}]*}" "$tmp" || true; } | sed -e 's/^{file\.//' -e 's/}$//' | sort -u |
+        while read -r secret; do
+            mkdir -p "$(dirname "$secret")"
+            [ -f "$secret" ] || printf 'x%.0s' $(seq 40) > "$secret"
+        done
     if grep -q "$CERTDIR/local.crt" "$tmp" && [ ! -f "$CERTDIR/local.crt" ]; then
         openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 2 \
             -subj /CN=nas.local -keyout "$CERTDIR/local.key" -out "$CERTDIR/local.crt" 2>/dev/null

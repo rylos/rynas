@@ -86,7 +86,7 @@ D-APPCAT, adopted after D-DOCKER, moves the catalogue into **phase 2**. That sup
 | A2 | Apps & Plugins page: install wizard (form from `form.json`), installed apps, updates with snapshot and rollback, convert to custom stack; rynasd catalogue endpoints | backend built (§5.2); UI in progress |
 | W0 | rynas-web on `:8443` with rustls, the emergency door that never goes through the proxy (still owed from phase 1) | before W1 |
 | W1 | Web access (D-PROXY/D-EXPOSE revised on 2026-11-07, `../research/web-access.md`): `rynas-caddy` package, rynasd renderer + `POST /load` + last-good, local names + local CA, app routes, the wizard's Access step, diagnostics | backend and package built (§5.3; Caddy 2.11.9); UI (Routes page, Access step, Trust this NAS) in progress |
-| W2 | Domains, DNS-01 wildcard, DNS records managed by rynas, certificate dashboard | after W1 |
+| W2 | Domains, DNS-01 wildcard, DNS records managed by rynas, certificate dashboard | backend built (§5.4; rynas-caddy with 11 DNS modules pinned and validated, record clients for Cloudflare, deSEC, Hetzner, Porkbun, OVH, DuckDNS); UI next |
 | R | Quality review: GUI/API consistency, speed, memory, no inner horizontal scroll; then a deploy on the DS920+ with Docker installed through the module | after D2 + A2 |
 
 ## 5. API
@@ -801,7 +801,9 @@ https://go.dev/dl/?mode=json, https://github.com/caddyserver/xcaddy/releases).
 
 W1 builds without DNS modules. `dns-modules.txt` lists the W2 providers: cloudflare,
 route53, ovh, hetzner, desec, duckdns, gandi, porkbun, digitalocean, rfc2136 and acmedns.
-`--dns` refuses unpinned lines; the versions are pinned when W2 lands.
+`--dns` refuses unpinned lines. Pinned in W2 (§5.4): `build.sh --dns` checks one
+`dns.providers.*` module per line with `list-modules` and gives `--validate` throw-away values
+for the `{file.*}` secrets.
 
 Contents:
 - `/usr/bin/rynas-caddy`;
@@ -922,6 +924,218 @@ certificate (menu names vary by maker; apps may ignore user CAs), Debian
     `127.0.0.1`;
   - the plain listener moving to `127.0.0.1:8080` (`--listen auto`) once rynasd publishes
     `/run/rynas/web-access.ui` and `:8443` is up.
+
+### 5.4 API — wave W2 (own domains, `/api/v1/web-access/...`)
+
+Code: `crates/rynasd/src/web_access/` (`domains.rs` credentials, names, engine secret files,
+records; `certs.rs` the certificate dashboard and its notifications; the W2 part of `mod.rs`
+records sync, domain checklist, inventory; `caddy.rs` the ACME policies), `crates/rynas-dns`
+(provider record clients behind the `DnsApi` trait, planning, a minimal DNS client, rebind
+verdict), the modules in `packaging/caddy/dns-modules.txt`. Types: `rynas_api_types::web_access`
+(every field documented there). Research: `../research/web-access.md` §13. Every route needs
+the administrator role (reads too); rynas-web forwards them unchanged.
+
+**What W2 does:**
+- A domain (ideally a subzone, `nas.example.com`) gets one certificate per name of `*.<domain>`
+  and `<domain>` from Let's Encrypt through ACME DNS-01 with the provider's caddy-dns module
+  (ARI on by default, optional account e-mail and ACME profile, a staging switch). No port is
+  opened.
+- rynas writes the LAN records `*.<domain>` and `<domain>` A (AAAA with `lan_ipv6`) = the NAS's
+  LAN address through the provider's API, with the same token, and keeps them current when
+  the address changes. Every LAN device then resolves `<app>.<domain>` with a trusted
+  certificate, mobile apps included. Records rynas did not write are never touched.
+- Every route gets `<label>.<domain>` next to its local name; the interface gets `<domain>`
+  (per domain, `ui`). The app's Open button prefers the domain name.
+- The domain checklist tells DNS rebind protection (the router drops public answers that
+  point to private addresses) from a missing or wrong record.
+- The certificate dashboard lists every certificate rynas serves; certificate trouble becomes
+  D-NOTIFY events (firing on change, resolved when it clears).
+
+#### Configuration key `web_access` (additions)
+
+```json
+{"domains": [{"id": "home", "name": "nas.example.com", "provider": "cloudflare",
+              "credential": "cf", "challenge": "dns01", "wildcard": true,
+              "lan_record": true, "lan_ipv6": false, "ui": true, "enabled": true}],
+ "credentials": [{"id": "cf", "provider": "cloudflare", "label": "token for example.com",
+                  "secrets": {"api_token": "…"}}],
+ "acme": {"email": "admin@example.com", "staging": false, "profile": "tlsserver"},
+ "routes": [{"…": "…", "names": {"local": true, "domain": true}}]}
+```
+
+- `challenge`: `dns01` (default) · `http01` (port 80 reachable from the internet, one
+  certificate per name: `wildcard` is forced off, app names land in CT logs; not checked
+  against a live CA yet) · `cname_delegation` (`delegate_to` = the CNAME target of
+  `_acme-challenge.<name>`; the credential cannot write the main zone, so the records are
+  listed for the administrator instead of written).
+- `provider`: `cloudflare`, `desec`, `hetzner`, `porkbun`, `ovh`, `duckdns`, `gandi`,
+  `route53`, `digitalocean`, `rfc2136`, `acmedns`. Required except for `http01` without
+  `lan_record`. `acmedns` only with `cname_delegation`. DuckDNS domains are `<x>.duckdns.org`
+  (its one record covers every name below).
+- **Credentials are write-only.** A PUT that carries `secrets` replaces the values; a PUT
+  without `secrets` keeps the stored ones (send back what GET gave). Answers carry `fields`
+  (the names stored), never `secrets` or `sealed`. Values are sealed at once with the
+  notification engine's age key (`<state>/notify/secret.key`): `config.db`, its revisions and
+  a `.rynasbak` without a passphrase hold only the envelope; the key travels only in the
+  passphrase-encrypted secrets of an export. A credential restored without its key shows
+  `credential_missing` until its values are entered again. The fields per provider come
+  from `GET /web-access/providers`.
+- Validation (`400 invalid_value`, `field` in brackets): ids `[a-z0-9-]` 1-63 unique
+  (`domains[i].id`, `credentials[i].id`); `name` a DNS name of ≥ 2 labels, ≤ 212 characters,
+  no wildcard, not `.local`/`.lan`/`.home.arpa`/`.internal`… (no public CA), unique
+  (`domains[i].name`); provider and credential present and matching (`domains[i].provider`,
+  `domains[i].credential`); `delegate_to` for delegation (`domains[i].delegate_to`); the
+  credential's values complete and known (`credentials[i].secrets.<field>`; a new credential
+  without values: `credentials[i].secrets`); `acme.email` an address, `acme.profile`
+  `[a-z0-9-]` ≤ 32. Names are lowercased and lose a final dot.
+- Minimum-scope tokens (shown under the form, `DnsProviderInfo.token_hint`): Cloudflare an API
+  token with Zone → DNS → Edit on the one zone (never the global key); deSEC a token whose
+  policy allows only this domain (optionally only `*.<d>`, `<d>`, `_acme-challenge.<d>`);
+  Porkbun API access turned on for this domain only; OVH a consumer key limited to
+  `/domain/zone/<zone>/*`; Gandi a PAT for the one domain; Route 53 an IAM policy on the
+  one hosted zone; RFC 2136 a TSIG key limited to `_acme-challenge` TXT. Hetzner Cloud tokens
+  cover a project, DigitalOcean tokens every domain, DuckDNS tokens every name of the
+  account: the form recommends CNAME delegation there (`scoped_tokens: false`).
+
+#### Routes
+
+| Method | Path | Body | Answer |
+|---|---|---|---|
+| GET | `/web-access` | — | `WebAccessState`, now with `domains` [`DomainView`]; `applied`/`pending` without secrets |
+| PUT | `/web-access` | `WebAccessConfig` | as in W1; credentials sealed (above). Audit lines name a credential id, never a value |
+| POST | `/web-access/plan` | optional `WebAccessConfig` | `WebAccessPlan` + `dns_changes` [`DnsChange`]: the providers are **read** (never written) to say exactly what an apply changes; `engine_config` with every literal secret as `***` |
+| POST | `/web-access/domains/{id}/test` | — | `RouteDiagnostics` (the checklist below). 404 |
+| POST | `/web-access/domains/{id}/records` | — | `DnsSyncReport`: writes the domain's records now ("Write records"). 404 |
+| GET | `/web-access/certificates` | — | `CertificateInventory` |
+| GET | `/web-access/providers` | — | `[DnsProviderInfo]` {provider, fields [{name, secret, optional}], records, wildcard_records, scoped_tokens, min_ttl, token_hint} |
+
+No new error codes (`invalid_value`, `not_found`, `forbidden`, `backend_unavailable`).
+
+#### Shapes worth knowing
+
+- **`DnsChange`** {domain, name, rtype `A|AAAA|CNAME`, action, current [], wanted [], ttl,
+  detail}; `action` `keep` · `create` · `update` · `delete` · `manual` (the administrator adds
+  it: delegation, a provider without a rynas client) · `unknown` (the provider could not be
+  read; `detail` says why). After a write, a failed change keeps its action and `detail`
+  starts with `failed: `. TTL: 300 or the zone's minimum (deSEC 3600, Porkbun 600).
+- **`DnsSyncReport`** {domain, changes, ok, at_ms}: the last sync per domain, in
+  `DomainView.records`.
+- **`DomainView`** {id, name, enabled, certificate_names, ui_urls, records?, problems};
+  problems: `credential_missing` (no stored values, or they cannot be decrypted),
+  `records_failed`, `records_manual`, `no_lan_address`, `staging`.
+- **`RouteView.problems`** adds `domain_name_too_long`; `names`/`urls` list the domain names
+  after the local one.
+- **Domain checklist** (`RouteDiagnostics.checks`, in order):
+  1. `dns_record`: the last record sync (`ok`; `warn` not written yet or to add by hand, with
+     the records; `fail` with the provider's error);
+  2. `dns_nas`: a name under the domain resolves on the NAS to its LAN address;
+  3. `dns_public`: the same through public resolvers (`1.1.1.1`, `9.9.9.9`) asked directly;
+     `warn` when they cannot be asked (outbound DNS blocked);
+  4. `rebind`: the LAN resolvers (`/etc/resolv.conf`, systemd-resolved's upstreams) compared
+     with the public answer: `fail` when the public answer is the private LAN address and
+     the LAN resolver drops it (NXDOMAIN, no data, REFUSED, 0.0.0.0), with the fix for
+     OpenWrt/dnsmasq, Fritz!Box, pfSense/OPNsense or a local DNS app; `warn` when the LAN
+     resolver answers other addresses (a local override); `skipped` while the public record
+     is not right;
+  5. `certificate`: the ACME certificates of the domain (`warn` being obtained or staging,
+     `fail` not obtained after 15 minutes with the engine's last error, or expired);
+  6. `renewal`: `ok` with the date renewal starts; `warn` expires within 14 days; `fail`
+     renewal overdue;
+  7. `hairpin`: `ok` the name points to the LAN address (no NAT loopback needed); `warn` it
+     points to a public one.
+- **Route test** adds `domain_dns` and `domain_certificate` for a route with a domain name.
+- **`CertEntry`** {id, kind, status, names, domain?, staging, source?, certificate?
+  (`TlsCertificate`), renew_after_ms?, last_error?}; ids `local-ca`, `interface`,
+  `proxy-local`, `acme:<name>` (certmagic keeps one certificate per name: `*.d` and `d`);
+  kind `local_ca` · `interface` · `proxy_local` · `acme`; status `ok` · `expires_soon`
+  (< 14 days) · `expired` · `renewal_overdue` (ACME, a day past 2/3 of its lifetime) ·
+  `pending` (expected, not there yet) · `failed` (expected for more than 15 minutes).
+  `last_error` comes from the engine's JSON log (`tls.obtain`/`tls.renew` errors per
+  identifier, cleared by a later success). Read-only: the files in rynas-caddy's storage
+  (`/var/lib/rynas-caddy/data/certificates/<ca>/<name>/`), never its admin API.
+
+#### Notifications (D-NOTIFY)
+
+The periodic check (every 30 s, the inventory at most every 10 minutes) emits on changes only:
+a certificate entering trouble fires once (again if it gets worse), clearing it resolves.
+
+| Code | State, key, category, severity | Fields |
+|---|---|---|
+| `web_access.cert_expires_soon` / `web_access.cert_renewal_overdue` / `web_access.cert_failed` | firing, `web-access:cert:<id>`, system, warning | `name`, `cert` |
+| `web_access.cert_expired` | firing, same key, system, critical | `name`, `cert` |
+| `web_access.cert_ok` | resolved, same key | `name`, `cert` |
+
+#### What rynasd renders (additions to §5.3)
+
+Pinned by `crates/rynasd/tests/golden/web_access_caddy_domains.json`, validated with the real
+rynas-caddy 2.11.9 + 11 DNS modules (`build.sh --dns --validate`, 2026-11-07):
+- `apps.tls.certificates.automate` lists every ACME subject; `load_files` (the local leaf)
+  only while there are local names; the local leaf covers only local names.
+- One `apps.tls.automation.policies` entry per enabled domain: `subjects`, and one `acme`
+  issuer with `ca` (Let's Encrypt or staging), `email`/`profile` when set, `challenges`:
+  `tls-alpn` off; for DNS-01 `http` off and `dns` {`provider` {`name`, fields},
+  `resolvers` ["1.1.1.1:53", "9.9.9.9:53"], `override_domain` (delegation)}.
+- Provider fields that the module replaces placeholders in are rendered as
+  `{file./var/lib/rynas-caddy/rynas/dns/<credential>/<field>}`; rynasd writes those files
+  (0640 root:rynas-caddy, folders 0750) before each load and removes the ones no longer used.
+  The JSON, `last-good.json` and `GET /config/` hold no secret. Fields the module does not
+  replace (acme-dns username/subdomain/server URL, RFC 2136 server and key name,
+  DigitalOcean's token, not checked in its source) are written as values.
+- A changed secret with an unchanged JSON forces a reload (`Cache-Control: must-revalidate`).
+- External mode renders `null`: no ACME either. The LAN records are written in every mode
+  (they point to the NAS, useful for an external proxy too).
+
+#### Records
+
+- On every apply (after the engine), and when the host facts change (address, host name):
+  per domain, plan (read the provider) then write `create`/`update`/`delete`. Failures are
+  logged, reported in the domain view, never fail the apply, and are tried again after 10
+  minutes or on the next apply; "Write records" runs one domain now.
+- rynasd remembers the record sets it wrote (`<state>/web-access/dns-records.json`) and
+  deletes only those: when the domain is removed or disabled, `lan_record` is turned off, a
+  per-name record is no longer wanted, or the provider changes (deleted through the old
+  credential). A record rynas did not write is overwritten only when it is one of the
+  wanted names (the plan shows `update` with its current value) and never deleted.
+- `--dry-system` never calls a provider (the plan shows `unknown`). Tests use fakes only.
+
+#### Development
+
+`cargo test -p rynas-dns` (provider clients against fake HTTP servers, wire format against a
+fake UDP server), `cargo test -p rynasd --test web_access` (render goldens, sealing and
+redaction in answers, logs, `config.db`, the export and the engine files; records with an
+in-memory provider; checklist; inventory and notification dedup).
+
+#### UI texts (i18n keys the UI adds, en + it)
+
+Closed sets:
+- `DnsProvider` (names as brands: Cloudflare, deSEC, Hetzner, Porkbun, OVHcloud, DuckDNS,
+  Gandi, Amazon Route 53, DigitalOcean, RFC 2136, acme-dns);
+- `ChallengeKind`: `dns01`, `http01`, `cname_delegation`;
+- `DnsAction`: `keep`, `create`, `update`, `delete`, `manual`, `unknown`;
+- `CertKind`: `local_ca`, `interface`, `proxy_local`, `acme`;
+- `CertStatus`: `ok`, `expires_soon`, `expired`, `renewal_overdue`, `pending`, `failed`;
+- domain problems: `credential_missing`, `records_failed`, `records_manual`,
+  `no_lan_address`, `staging`; route problem `domain_name_too_long`;
+- check ids: `dns_record`, `dns_nas`, `dns_public`, `rebind`, `certificate`, `renewal`,
+  `hairpin`, `domain_dns`, `domain_certificate`;
+- notification codes `nev.web_access.cert_*` (table above) with `{name}`;
+- credential field names (`api_token`, `token`, `api_key`, `api_secret_key`, `endpoint`,
+  `application_key`, `application_secret`, `consumer_key`, `bearer_token`, `access_key_id`,
+  `secret_access_key`, `region`, `auth_token`, `server`, `key_name`, `key_alg`, `key`,
+  `server_url`, `username`, `subdomain`, `password`).
+
+`token_hint`, check details, `DnsChange.detail` and `last_error` are English, shown as they
+are.
+
+#### Not in W2
+
+- `:8443` reusing the wildcard (rynas-web still serves the local or imported certificate);
+- custom routes to other LAN hosts and routes for foreign stacks (`kind: custom` still
+  refused);
+- record clients for Gandi, Route 53, DigitalOcean, RFC 2136 (their records are `manual`);
+- the ACME account key in the `.rynasbak` (it stays in rynas-caddy's storage, which survives
+  a reinstall of rynas but not a purge of rynas-caddy);
+- DNS-PERSIST-01; writing the record into an AdGuard Home / Pi-hole app as the rebind fix.
 
 ## 6. App catalog format (wave A1)
 
@@ -1123,5 +1337,8 @@ skips, digests and sources in `../research/app-catalog-format.md` § 4.
   Done in W1 (§5.3): `publish_lan` is optional and follows this rule, and "Move behind the proxy" is `POST /api/v1/apps/installed/{stack}/proxy`.
 - **Install without `docker compose config` first:** the validation only fails at `up`. Add a validation step that is read-only and safe under `--dry-system`.
 - **Per-install volume choice:** apps always go on the Docker volume today. Per-folder placement exists, for example a database on SSD.
-- **Deploy on the test NAS (2026-11-07), still open:** avahi logs `Failed to add service 'synodeb' of type '_device-info._tcp' … (rynas-smb.service): Local name collision`. Samba is still announcing itself as `SYNODEB` with `model=MacSamba`, even though `smb.conf` has `multicast dns register = no`. Mixed-case names count as the same name in mDNS, so rynas's own service file is refused. SMB discovery still works through Samba's announcement. To do: check whether smbd needs a restart after the parameter changes, and make the two announcements agree.
+- **Deploy on the test NAS (2026-11-07): SMB announced twice — fixed in W2.** avahi logged `Failed to add service 'synodeb' of type '_device-info._tcp' … (rynas-smb.service): Local name collision`: Samba still announced itself as `SYNODEB` with `model=MacSamba` although `smb.conf` had `multicast dns register = no`. Cause: smbd reads that parameter only when it starts (`source3/smbd/server.c`, samba-4.22.0: `avahi_start_register()` runs once inside `if (lp_multicast_dns_register() && dns_port != 0)`, and it registers `_smb._tcp` and `_device-info._tcp` with `model=` from `fruit:model`, default `MacSamba`); rynas only reloaded the smbd that was started under the previous configuration. Fix (`crates/rynas-services`):
+  - the shares apply restarts smbd once when the running smbd started before rynas's configuration turned the announcement off (marker `/var/lib/rynas/smbd-mdns-off` with that time, compared with systemd's `ActiveEnterTimestamp`); later applies reload as before, and a boot never restarts it;
+  - `fruit:model` and the `_device-info` record of `rynas-smb.service` carry the same model (`RackMac`), so macOS shows one icon whichever it reads.
+  Single announcement: rynas's service file. Sources: https://github.com/samba-team/samba/blob/samba-4.22.0/source3/smbd/avahi_register.c, https://github.com/samba-team/samba/blob/master/docs-xml/smbdotconf/base/multicastdnsregister.xml.
 - **Client side:** a Linux client whose resolver has no mDNS (systemd-resolved with `MulticastDNS=no`, no nss-mdns) does not resolve `*.local` names, even though avahi answers. The web access diagnostics should say so, and offer the domain path (W2) as the reliable option.
