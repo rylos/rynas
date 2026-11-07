@@ -61,7 +61,7 @@ pub(super) fn homes_folders(s: &Services) -> Vec<String> {
 }
 
 /// Mount points that can hold a homes folder.
-fn volume_paths(s: &Services) -> Vec<String> {
+pub(super) fn volume_paths(s: &Services) -> Vec<String> {
     homes::candidates(&s.homes.host().mounts(), &s.shares.volumes())
         .into_iter()
         .map(|v| v.path)

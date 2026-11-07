@@ -646,6 +646,9 @@ applied it), next to the system state. Session, CSRF and error rules are those o
 | GET/PUT | `/api/v1/users/{name}` | `LocalUser` (name, uid, home and home_volume cannot change: 400 `invalid_value` on `home`/`home_volume`) | `UserView` |
 | DELETE | `/api/v1/users/{name}?remove_home=true&confirm={name}` | — | `StagedChanges` (the user leaves the share matrices in the same changeset); 400 `confirmation_required` without `confirm`; 409 `conflict` while a home move of the user waits for confirmation |
 | POST | `/api/v1/users/{name}/password` | `PasswordRequest` {password} | 202 `TaskStarted` (task `user.password`); 409 `not_applied` while the user is only staged |
+| POST | `/api/v1/users/adopt`, `/api/v1/groups/adopt` | `AdoptRequest` {names; empty = all} | 200 `StagedChanges`: accounts of the system (1000–59999) not in the configuration staged as they are; 400 for a name that is not one. `PUT` of such an account adopts it too |
+| POST | `/api/v1/ids/plan` | `IdRemapRequest` {kind, name, new_id \| from_id, paths, acls} | 200 `IdRemapPlan` {from, to, change, roots, paths, allowed, blockers, scan: `RemapCounts`}: guards and a dry run of at most 5 s (`scan.partial`) |
+| POST | `/api/v1/ids/remap` | `IdRemapRequest` (+ `expected` for progress) | 202 `TaskStarted` (task `ids.remap`: `new_id` changes the account first, then the files follow; `from_id` only files); 409 when blocked |
 | GET/POST | `/api/v1/groups` | `GroupRequest` {name, gid?, description, members?} | `Vec<GroupView>` / 201 `GroupView` |
 | GET/PUT/DELETE | `/api/v1/groups/{name}` | `GroupRequest` (`members` rewrites the users' `groups`) | `GroupView` / `StagedChanges` |
 | GET/PUT | `/api/v1/services/smb` | `SmbSettings` | `SmbState` {settings, pending, running} |

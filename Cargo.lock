@@ -3764,6 +3764,7 @@ name = "rynas-services"
 version = "0.1.0"
 dependencies = [
  "getrandom 0.4.3",
+ "libc",
  "minijinja",
  "nix",
  "rynas-api-types",

@@ -1285,6 +1285,57 @@ homes.b.target_invalid	{detail} non è un volume che può contenere home
 users.home_place	Posizione della home
 users.home_place_help	La cartella homes di un volume, oppure /home sul disco di sistema.
 users.home_move_help	Scegliendo un altro posto la home si sposta dopo il salvataggio: prima vedi il piano, poi i file vengono copiati e verificati.
+users.adopt	Adotta
+users.adopt_all	Adotta tutti
+users.adopt_banner	{n} account di questo sistema sono stati creati fuori da rynas. Adottali per gestirne password, gruppi e accessi: non vengono ricreati e i loro file non cambiano.
+users.adopt_banner_one	Un account di questo sistema è stato creato fuori da rynas. Adottalo per gestirne password, gruppi e accessi: non viene ricreato e i suoi file non cambiano.
+users.adopted	Account adottati
+users.unmanaged_note	Creato fuori da rynas. Salvando, l'account viene adottato così com'è: non viene ricreato e i suoi file non cambiano.
+users.uid	ID utente (UID)
+users.uid_help	Vuoto: il primo libero. Impostalo per farlo coincidere con il proprietario di file copiati da un altro sistema.
+users.uid_range	Usa un numero da 1000 a 59999.
+ids.change_uid	Cambia UID…
+ids.change_gid	Cambia GID…
+ids.reown	Acquisisci file…
+ids.title_uid	Cambia l'UID di {name}
+ids.title_gid	Cambia il GID di {name}
+ids.title_reown	Assegna file a {name}
+ids.text_change	L'account riceve il nuovo ID, poi i file del vecchio ID nelle cartelle scelte lo seguono. Prima verifica: non cambia nulla finché non avvii.
+ids.text_reown	I file di un ID che nessun account possiede, come i dati copiati da un altro sistema con i proprietari numerici, diventano di questo account. Prima verifica: non cambia nulla finché non avvii.
+ids.new_uid	Nuovo UID
+ids.new_gid	Nuovo GID
+ids.from_id	File ora dell'ID
+ids.id_help_change	{min}–{max}, non usato da un altro account. Ora: {id}.
+ids.id_help_reown	1000 o più, non usato da nessun account.
+ids.folders	Cartelle
+ids.folders_help	I volumi dati e la home, se non scegli altro. Snapshot in sola lettura e altri file system al loro interno vengono saltati; i collegamenti non vengono seguiti.
+ids.add_folder	Aggiungi cartella
+ids.acls	Cambia anche le voci ACL
+ids.acls_help	I permessi che gli elenchi di accesso danno a questo ID.
+ids.check	Verifica
+ids.start_change	Cambia ID
+ids.start_reown	Cambia proprietario
+ids.scanned	Elementi controllati
+ids.at_least	almeno {n}
+ids.owners	Proprietari che cambiano
+ids.groups	Gruppi che cambiano
+ids.acl_entries	Voci ACL che cambiano
+ids.errors	Elementi non leggibili
+ids.readonly	Snapshot in sola lettura, saltati (mantengono il vecchio ID):
+ids.other_fs	Altri file system, saltati:
+ids.partial	La verifica si è fermata al limite di tempo: i numeri sono minimi e la modifica passa comunque tutto.
+ids.after	Non vengono cambiati: crontab, unità systemd dell'utente e file fuori da queste cartelle. La modifica gira come attività annullabile; rilanciandola completa il resto.
+ids.done	Proprietà cambiata per {name}
+ids.b_not_local	Non è un account locale (1000–59999): root e gli account di sistema non cambiano mai.
+ids.b_unmanaged	Creato fuori da rynas: prima adottalo.
+ids.b_out_of_range	ID fuori intervallo: {d}.
+ids.b_same_id	È l'ID attuale.
+ids.b_id_in_use	L'ID appartiene a {d}.
+ids.b_processes	L'utente ha processi in esecuzione ({d}): prima disconnettilo.
+ids.b_smb_sessions	L'utente è connesso via SMB ({d} sessioni).
+ids.b_path_invalid	Cartella assente o fuori dalle cartelle dati: {d}
+ids.b_bad_request	Inserisci un ID.
+ids.b_other	Non disponibile su questo sistema.
 homes.b.other	un altro motivo
 groups.search	Cerca gruppi
 groups.create	Crea gruppo

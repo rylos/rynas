@@ -24,10 +24,10 @@
 //! Limits: a deleted home directory (`remove_homes`) cannot come back on rollback.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use rynas_api_types::{
-    LOCAL_ID_MAX, LOCAL_ID_MIN, LocalGroup, LocalUser, ShellAccess, StateDrift, StateDriftArgs,
+    IdKind, LOCAL_ID_MAX, LOCAL_ID_MIN, LocalGroup, LocalUser, ShellAccess, StateDrift, StateDriftArgs,
     StateDriftCode, StateDriftKind, UsersConfig,
 };
 use rynas_config::{Applier, ApplyCtx, Invalid, ManagedFile};
@@ -111,6 +111,86 @@ pub fn next_free_id(used: &BTreeSet<u32>) -> Option<u32> {
 pub struct UsersDomain {
     accounts: Arc<dyn Accounts>,
     homes: Option<Arc<dyn HomesHost>>,
+    remap: Option<Arc<dyn crate::idremap::RemapFs>>,
+    /// Id changes being applied by an id change task: `(kind, name, old, new)`. Only these
+    /// let a document give an existing account another id (a restored old revision cannot).
+    id_changes: Mutex<Vec<(IdKind, String, u32, u32)>>,
+}
+
+/// Lets one id change through [`UsersDomain::normalize`] while it lives.
+pub struct IdChangeGuard<'a> {
+    domain: &'a UsersDomain,
+    entry: (IdKind, String, u32, u32),
+}
+
+impl Drop for IdChangeGuard<'_> {
+    fn drop(&mut self) {
+        let mut v = self.domain.id_changes.lock().unwrap();
+        if let Some(i) = v.iter().position(|e| *e == self.entry) {
+            v.remove(i);
+        }
+    }
+}
+
+/// Adds the system accounts named in `names` (empty: all) that the document does not have, as
+/// [`import_from`] sees them. Returns the users and groups added.
+pub fn adopt(
+    doc: &mut UsersConfig,
+    system: &UsersConfig,
+    kind: IdKind,
+    names: &[String],
+) -> Result<Vec<String>, String> {
+    let wanted = |n: &str| names.is_empty() || names.iter().any(|x| x == n);
+    for n in names {
+        let known = match kind {
+            IdKind::User => system.users.iter().any(|u| &u.name == n),
+            IdKind::Group => system.groups.iter().any(|g| &g.name == n),
+        };
+        if !known {
+            return Err(format!("{n} is not a local account of the system (1000-59999)"));
+        }
+    }
+    let mut added = Vec::new();
+    match kind {
+        IdKind::User => {
+            for u in system.users.iter().filter(|u| wanted(&u.name)) {
+                if doc.users.iter().any(|x| x.name == u.name) {
+                    continue;
+                }
+                let mut u = u.clone();
+                // only the groups rynas manages (or adopts now) stay listed
+                u.groups.retain(|g| {
+                    doc.groups.iter().any(|x| &x.name == g)
+                        || system.groups.iter().any(|x| &x.name == g)
+                });
+                added.push(u.name.clone());
+                doc.users.push(u);
+            }
+            // groups a user is in come along, else the document would name unknown groups
+            let needed: BTreeSet<String> = doc
+                .users
+                .iter()
+                .filter(|u| added.contains(&u.name))
+                .flat_map(|u| u.groups.iter().cloned())
+                .collect();
+            for g in system.groups.iter().filter(|g| needed.contains(&g.name)) {
+                if !doc.groups.iter().any(|x| x.name == g.name) {
+                    doc.groups.push(g.clone());
+                }
+            }
+        }
+        IdKind::Group => {
+            for g in system.groups.iter().filter(|g| wanted(&g.name)) {
+                if !doc.groups.iter().any(|x| x.name == g.name) {
+                    added.push(g.name.clone());
+                    doc.groups.push(g.clone());
+                }
+            }
+        }
+    }
+    doc.users.sort_by(|a, b| a.name.cmp(&b.name));
+    doc.groups.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(added)
 }
 
 impl UsersDomain {
@@ -118,7 +198,37 @@ impl UsersDomain {
         Self {
             accounts,
             homes: None,
+            remap: None,
+            id_changes: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Ownership remaps go through `fs`.
+    pub fn with_remap(mut self, fs: Arc<dyn crate::idremap::RemapFs>) -> Self {
+        self.remap = Some(fs);
+        self
+    }
+
+    pub fn remap_fs(&self) -> Option<&Arc<dyn crate::idremap::RemapFs>> {
+        self.remap.as_ref()
+    }
+
+    /// Lets a document move account `name` from id `old` to `new` while the guard lives.
+    pub fn allow_id_change(&self, kind: IdKind, name: &str, old: u32, new: u32) -> IdChangeGuard<'_> {
+        let entry = (kind, name.to_string(), old, new);
+        self.id_changes.lock().unwrap().push(entry.clone());
+        IdChangeGuard {
+            domain: self,
+            entry,
+        }
+    }
+
+    fn id_change_allowed(&self, kind: IdKind, name: &str, old: u32, new: u32) -> bool {
+        self.id_changes
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| e.0 == kind && e.1 == name && e.2 == old && e.3 == new)
     }
 
     /// Homes in the homes folder are created and removed through `host`.
@@ -199,10 +309,11 @@ impl UsersDomain {
                     ),
                 ));
             }
-            if let Some(s) = sys_groups
-                .iter()
-                .find(|s| s.name == g.name && s.gid != g.gid)
-            {
+            if let Some(s) = sys_groups.iter().find(|s| {
+                s.name == g.name
+                    && s.gid != g.gid
+                    && !self.id_change_allowed(IdKind::Group, &g.name, s.gid, g.gid)
+            }) {
                 return Err(Invalid::at(
                     "name",
                     format!("group {} already exists with gid {}", g.name, s.gid),
@@ -339,7 +450,11 @@ impl UsersDomain {
                     ),
                 ));
             }
-            if let Some(s) = sys_users.iter().find(|s| s.name == n && s.uid != u.uid) {
+            if let Some(s) = sys_users.iter().find(|s| {
+                s.name == n
+                    && s.uid != u.uid
+                    && !self.id_change_allowed(IdKind::User, &n, s.uid, u.uid)
+            }) {
                 return Err(Invalid::at(
                     "name",
                     format!("user {n} already exists with uid {}", s.uid),
@@ -497,6 +612,7 @@ impl Applier for UsersDomain {
         let sys_users = self.accounts.users()?;
         let sys_groups = self.accounts.groups()?;
         let group_exists = |n: &str| sys_groups.iter().any(|g| g.name == n);
+        let mut ids_changed = false;
 
         // 1. groups: the special ones when needed, then the local ones
         let mut special: BTreeSet<&str> = BTreeSet::new();
@@ -531,6 +647,24 @@ impl Applier for UsersDomain {
                     },
                     ctx,
                 )?,
+                // a gid change (id change task) and its rollback: only an explicit change
+                // between the two values
+                Some(s)
+                    if s.gid != g.gid
+                        && from
+                            .groups
+                            .iter()
+                            .any(|p| p.name == g.name && p.gid == s.gid) =>
+                {
+                    self.exec(
+                        AccountOp::GroupGid {
+                            name: g.name.clone(),
+                            gid: g.gid,
+                        },
+                        ctx,
+                    )?;
+                    ids_changed = true;
+                }
                 Some(s) if s.gid != g.gid => {
                     return Err(format!(
                         "group {} exists with gid {}, the configuration says {}",
@@ -590,6 +724,25 @@ impl Applier for UsersDomain {
                             let _ = homes::remove_home(self.homes_host()?, &u.home, ctx.log);
                         }
                         return Err(e);
+                    }
+                }
+                Some(s)
+                    if s.uid != u.uid
+                        && from
+                            .users
+                            .iter()
+                            .any(|p| p.name == u.name && p.uid == s.uid) =>
+                {
+                    self.exec(
+                        AccountOp::UserUid {
+                            name: u.name.clone(),
+                            uid: u.uid,
+                        },
+                        ctx,
+                    )?;
+                    ids_changed = true;
+                    if let Some(op) = user_mod(u, s) {
+                        self.exec(op, ctx)?;
                     }
                 }
                 Some(s) if s.uid != u.uid => {
@@ -681,8 +834,15 @@ impl Applier for UsersDomain {
             }
         }
 
-        // 4. Samba accounts (only without a password change: removal and flags)
+        // 4. Samba accounts (only without a password change: removal and flags). tdbsam
+        // finds the Unix account by name, so an id change only needs the caches flushed.
         let samba = self.accounts.samba_users()?;
+        if ids_changed
+            && samba.is_some()
+            && let Err(e) = self.exec(AccountOp::SambaCacheFlush, ctx)
+        {
+            (ctx.log)(&format!("net cache flush: {e}"));
+        }
         if let Some(samba) = &samba {
             for u in &to.users {
                 match samba.iter().find(|s| s.name == u.name) {

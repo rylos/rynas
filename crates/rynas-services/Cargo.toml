@@ -15,6 +15,7 @@ serde_json.workspace = true
 tracing.workspace = true
 getrandom.workspace = true
 nix = { workspace = true, features = ["fs", "dir", "ioctl", "signal", "process", "user"] }
+libc.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
