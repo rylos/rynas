@@ -464,26 +464,52 @@ impl WebAccessSvc {
             return Ok(false);
         }
         let leaf = rynas_tls::issue_leaf(&ca, &want, now).map_err(io::Error::other)?;
-        let dir = crt.parent().expect("has a parent");
-        std::fs::create_dir_all(dir)?;
         let gid = group_gid(&self.root, ENGINE_GROUP);
+        let dir = self.rynas_dir(gid)?;
+        let owner = gid.map(|g| (0, g));
         // the key first: a reload between the two renames would find the old chain with
         // the old key still in place only if the chain came first
-        crate::tls::write_atomic(&key, leaf.key.as_bytes(), 0o640, gid)?;
-        crate::tls::write_atomic(&crt, leaf.chain.as_bytes(), 0o640, gid)?;
+        let name = |p: &str| p.rsplit('/').next().unwrap_or(p).to_string();
+        rynas_docker::safefs::write_at(&dir, &name(KEY), leaf.key.as_bytes(), 0o640, owner)?;
+        rynas_docker::safefs::write_at(&dir, &name(CERT), leaf.chain.as_bytes(), 0o640, owner)?;
         tracing::info!("web access: new certificate for {}", names.join(", "));
         Ok(true)
     }
 
-    fn write_last_good(&self, json: &Value) -> io::Result<()> {
+    /// The engine's state folder (`/var/lib/rynas-caddy`, writable by the engine's user):
+    /// made when missing (its parents are root's), opened as a descriptor.
+    fn engine_state_dir(&self) -> io::Result<std::fs::File> {
         let p = self.path(LAST_GOOD);
-        std::fs::create_dir_all(p.parent().expect("has a parent"))?;
+        let dir = p.parent().expect("has a parent");
+        std::fs::create_dir_all(dir)?;
+        rynas_docker::safefs::open_start(dir)
+    }
+
+    /// `rynas/` in the engine's state folder: rynasd's own files (certificate and key),
+    /// `0750 root:rynas-caddy` so that the engine can read but never replace them. A symlink
+    /// planted there is refused; an existing folder gets the owner and mode back.
+    fn rynas_dir(&self, gid: Option<u32>) -> io::Result<std::fs::File> {
+        let state = self.engine_state_dir()?;
+        let owner = gid.map(|g| (0, g));
+        let (d, made) = rynas_docker::safefs::ensure_dir_at(&state, "rynas", 0o750, owner)?;
+        if !made && owner.is_some() {
+            rynas_docker::safefs::set_owner_mode(&d, 0o750, owner)?;
+        }
+        Ok(d)
+    }
+
+    fn write_last_good(&self, json: &Value) -> io::Result<()> {
         let mut text = serde_json::to_vec_pretty(json).map_err(io::Error::other)?;
         text.push(b'\n');
-        if std::fs::read(&p).is_ok_and(|old| old == text) {
+        let dir = self.engine_state_dir()?;
+        let name = LAST_GOOD.rsplit('/').next().unwrap_or(LAST_GOOD);
+        if rynas_docker::safefs::read_at(&dir, name, 16 << 20).is_ok_and(|old| old.as_bytes() == text) {
             return Ok(());
         }
-        crate::tls::write_atomic(&p, &text, 0o640, group_gid(&self.root, ENGINE_GROUP))
+        // the engine's folder is writable by its user: descriptor-based write, root-owned
+        // file it can read (group) but not change in place
+        let owner = group_gid(&self.root, ENGINE_GROUP).map(|g| (0, g));
+        rynas_docker::safefs::write_at(&dir, name, &text, 0o640, owner)
     }
 
     /// Publishes whether (and on which names) the proxy fronts the interface: [`UI_STATE`],

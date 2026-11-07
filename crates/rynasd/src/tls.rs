@@ -22,9 +22,9 @@
 //! The future certificate store of the web-access module (W1/W2: ACME wildcard, Caddy) adds
 //! sources here and publishes through the same files.
 
-use std::io::{self, Write};
+use std::io;
 use std::net::IpAddr;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -33,7 +33,7 @@ use axum::Json;
 use axum::Router;
 use axum::extract::State;
 use axum::extract::rejection::JsonRejection;
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use rynas_api_types::error_codes;
@@ -364,28 +364,24 @@ impl TlsSvc {
     }
 }
 
+/// The group of a folder rynasd made in a root-owned parent (`/etc/rynas/tls`).
 fn chown_group(p: &Path, gid: u32) -> io::Result<()> {
     nix::unistd::chown(p, None, Some(nix::unistd::Gid::from_raw(gid))).map_err(io::Error::from)
 }
 
 /// Writes `data` to `path` through a temporary file in the same folder and a rename, with
-/// `mode` (and group `gid`) set before the rename.
+/// `mode` (and group `gid`) set on the descriptor before any byte is written
+/// ([`rynas_docker::safefs::write_at`]: `O_EXCL|O_NOFOLLOW`, `fchown`/`fchmod`, `renameat`).
+/// The folder itself is trusted (root-owned parents); for a folder another user can write,
+/// open it with [`rynas_docker::safefs`] and call `write_at` on it.
 pub fn write_atomic(path: &Path, data: &[u8], mode: u32, gid: Option<u32>) -> io::Result<()> {
-    let tmp = path.with_extension("tmp~");
-    let _ = std::fs::remove_file(&tmp);
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&tmp)?;
-    f.write_all(data)?;
-    f.sync_all()?;
-    if let Some(g) = gid {
-        chown_group(&tmp, g)?;
-    }
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))?;
-    drop(f);
-    std::fs::rename(&tmp, path)
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str()))
+    else {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid path"));
+    };
+    let dir = rynas_docker::safefs::open_start(parent)?;
+    // uid u32::MAX (-1): fchown keeps the owner, only the group changes
+    rynas_docker::safefs::write_at(&dir, name, data, mode, gid.map(|g| (u32::MAX, g)))
 }
 
 /// Addresses of `ip -j addr show` that belong in the certificate: up interfaces except
@@ -453,18 +449,45 @@ async fn get_status(State(st): State<TlsState>) -> Res<Json<TlsStatus>> {
     blocking(move || s.status()).await.map(Json)
 }
 
+/// A line of the audit log.
+fn audit(who: &str, action: &str, target: &str) {
+    tracing::info!(target: "rynas::audit", "tls {action} {target} by {who}");
+}
+
 async fn import(
     State(st): State<TlsState>,
+    hd: HeaderMap,
     body: Result<Json<TlsImportRequest>, JsonRejection>,
 ) -> Res<Json<TlsStatus>> {
     let s = svc(&st)?;
+    // the router's gate checked the role; the user is needed for the audit line
+    let who = crate::ops::user(&hd)?;
     let Json(req) = body?;
-    blocking(move || s.import(&req)).await.map(Json)
+    let st = blocking(move || s.import(&req)).await?;
+    audit(
+        &who,
+        "import",
+        &format!(
+            "{} ({})",
+            st.certificate.subject, st.certificate.fingerprint_sha256
+        ),
+    );
+    Ok(Json(st))
 }
 
-async fn local(State(st): State<TlsState>) -> Res<Json<TlsStatus>> {
+async fn local(State(st): State<TlsState>, hd: HeaderMap) -> Res<Json<TlsStatus>> {
     let s = svc(&st)?;
-    blocking(move || s.use_local(false)).await.map(Json)
+    let who = crate::ops::user(&hd)?;
+    let st = blocking(move || s.use_local(false)).await?;
+    audit(
+        &who,
+        "local",
+        &format!(
+            "{} ({})",
+            st.certificate.subject, st.certificate.fingerprint_sha256
+        ),
+    );
+    Ok(Json(st))
 }
 
 async fn ca(State(st): State<TlsState>) -> Res<Response> {
@@ -487,13 +510,22 @@ async fn ca(State(st): State<TlsState>) -> Res<Response> {
         .into_response())
 }
 
-pub fn router(st: TlsState) -> Router {
+/// The routes; every one needs an administrator (`admins`), reads included: replacing the
+/// interface certificate is a man-in-the-middle primitive.
+pub fn router(st: TlsState, admins: crate::roles::AdminPolicy) -> Router {
     Router::new()
         .route("/v1/system/tls", get(get_status))
         .route("/v1/system/tls/import", post(import))
         .route("/v1/system/tls/local", post(local))
         .route("/v1/system/tls/ca", get(ca))
         .with_state(st)
+        .route_layer(axum::middleware::from_fn_with_state(
+            crate::roles::AdminGate {
+                policy: admins,
+                what: "HTTPS certificate",
+            },
+            crate::roles::admin_only,
+        ))
 }
 
 #[cfg(test)]

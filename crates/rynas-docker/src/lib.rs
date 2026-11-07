@@ -24,6 +24,7 @@ pub mod engine;
 pub mod events;
 pub mod install;
 pub mod model;
+pub mod safefs;
 pub mod snapshots;
 pub mod stacks;
 pub mod stats;

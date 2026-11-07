@@ -87,10 +87,16 @@ impl Layout {
 
 /// `daemon.json` with rynas's values merged in. `existing` is the current file (`None`: no
 /// file). Errors when the file is not a JSON object: it is never overwritten then.
+///
+/// `default-address-pools` is rynas's when it is absent, or when it is exactly the single
+/// pool rynas wrote before (`previous`, the last applied setting, or the default): then a
+/// changed `pool` replaces it. Any other value is the administrator's and stays. The legacy
+/// `graph` key (the data-root before Docker 17.05, refused next to `data-root`) is dropped.
 pub fn merge_daemon_json(
     existing: Option<&str>,
     layout: &Layout,
     pool: &AddressPool,
+    previous: Option<&AddressPool>,
 ) -> Result<String, String> {
     let mut map: Map<String, Value> = match existing.map(str::trim) {
         None | Some("") => Map::new(),
@@ -109,14 +115,18 @@ pub fn merge_daemon_json(
         },
     };
     map.insert("data-root".into(), Value::String(layout.engine()));
+    map.remove("graph");
     map.entry("log-driver")
         .or_insert_with(|| Value::String("local".into()));
     map.entry("live-restore").or_insert(Value::Bool(true));
-    let has_pools = map
+    let pool_json = |p: &AddressPool| serde_json::json!([{ "base": p.base, "size": p.size }]);
+    let ours = |v: &Value| {
+        *v == pool_json(&AddressPool::default()) || previous.is_some_and(|p| *v == pool_json(p))
+    };
+    let keep = map
         .get("default-address-pools")
-        .and_then(Value::as_array)
-        .is_some_and(|a| !a.is_empty());
-    if !has_pools {
+        .is_some_and(|v| v.as_array().is_some_and(|a| !a.is_empty()) && !ours(v));
+    if !keep {
         map.insert(
             "default-address-pools".into(),
             serde_json::json!([{ "base": pool.base, "size": pool.size }]),
@@ -212,6 +222,7 @@ pub fn dropin(paths: &[String]) -> String {
 /// volume is chosen. `read` gives the current content of a system file.
 pub fn engine_files(
     settings: &DockerSettings,
+    previous: Option<&AddressPool>,
     read: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Vec<(&'static str, String)>, String> {
     let Some(label) = settings.volume.as_deref() else {
@@ -221,7 +232,7 @@ pub fn engine_files(
     Ok(vec![
         (
             DAEMON_JSON,
-            merge_daemon_json(read(DAEMON_JSON).as_deref(), &l, &settings.address_pool)?,
+            merge_daemon_json(read(DAEMON_JSON).as_deref(), &l, &settings.address_pool, previous)?,
         ),
         (
             CONTAINERD_TOML,
@@ -292,7 +303,7 @@ mod tests {
 
     #[test]
     fn daemon_json_from_nothing() {
-        let out = merge_daemon_json(None, &Layout::of_label("vol1"), &pool()).unwrap();
+        let out = merge_daemon_json(None, &Layout::of_label("vol1"), &pool(), None).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["data-root"], "/vol1/docker/engine");
         assert_eq!(v["log-driver"], "local");
@@ -307,7 +318,7 @@ mod tests {
         let old = r#"{"log-driver":"json-file","log-opts":{"max-size":"10m"},"live-restore":false,
             "default-address-pools":[{"base":"172.80.0.0/16","size":24}],"registry-mirrors":["https://m.example"],
             "data-root":"/var/lib/docker"}"#;
-        let out = merge_daemon_json(Some(old), &Layout::of_label("vol2"), &pool()).unwrap();
+        let out = merge_daemon_json(Some(old), &Layout::of_label("vol2"), &pool(), None).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["data-root"], "/vol2/docker/engine");
         assert_eq!(v["log-driver"], "json-file");
@@ -320,16 +331,47 @@ mod tests {
             Some(r#"{"default-address-pools":[]}"#),
             &Layout::of_label("v"),
             &pool(),
+            None,
         )
         .unwrap();
         assert!(out.contains("10.200.0.0/16"));
     }
 
     #[test]
+    fn daemon_json_follows_rynas_own_pool_and_drops_graph() {
+        let l = Layout::of_label("v");
+        let mine = AddressPool {
+            base: "10.210.0.0/16".into(),
+            size: 24,
+        };
+        let new = AddressPool {
+            base: "10.220.0.0/16".into(),
+            size: 26,
+        };
+        // the default rynas wrote: replaced by the new setting
+        let first = merge_daemon_json(None, &l, &pool(), None).unwrap();
+        let v: Value =
+            serde_json::from_str(&merge_daemon_json(Some(&first), &l, &new, None).unwrap()).unwrap();
+        assert_eq!(v["default-address-pools"][0]["base"], "10.220.0.0/16");
+        assert_eq!(v["default-address-pools"][0]["size"], 26);
+        // the previous setting rynas wrote: replaced too
+        let second = merge_daemon_json(None, &l, &mine, None).unwrap();
+        let out = merge_daemon_json(Some(&second), &l, &new, Some(&mine)).unwrap();
+        assert!(out.contains("10.220.0.0/16") && !out.contains("10.210.0.0/16"));
+        // the administrator's own pool stays
+        let admin = r#"{"default-address-pools":[{"base":"172.80.0.0/16","size":24}]}"#;
+        let out = merge_daemon_json(Some(admin), &l, &new, Some(&mine)).unwrap();
+        assert!(out.contains("172.80.0.0/16") && !out.contains("10.220.0.0/16"));
+        // `graph` next to `data-root` stops dockerd: dropped
+        let out = merge_daemon_json(Some(r#"{"graph":"/var/lib/docker"}"#), &l, &pool(), None).unwrap();
+        assert!(!out.contains("graph"));
+    }
+
+    #[test]
     fn daemon_json_never_replaces_garbage() {
-        assert!(merge_daemon_json(Some("{oops"), &Layout::of_label("v"), &pool()).is_err());
-        assert!(merge_daemon_json(Some("[1]"), &Layout::of_label("v"), &pool()).is_err());
-        assert!(merge_daemon_json(Some("  \n"), &Layout::of_label("v"), &pool()).is_ok());
+        assert!(merge_daemon_json(Some("{oops"), &Layout::of_label("v"), &pool(), None).is_err());
+        assert!(merge_daemon_json(Some("[1]"), &Layout::of_label("v"), &pool(), None).is_err());
+        assert!(merge_daemon_json(Some("  \n"), &Layout::of_label("v"), &pool(), None).is_ok());
         assert_eq!(
             data_root_of(Some(r#"{"data-root":"/x"}"#)).as_deref(),
             Some("/x")
@@ -369,9 +411,9 @@ mod tests {
     #[test]
     fn files_for_settings() {
         let mut s = DockerSettings::default();
-        assert!(engine_files(&s, &|_| None).unwrap().is_empty());
+        assert!(engine_files(&s, None, &|_| None).unwrap().is_empty());
         s.volume = Some("vol1".into());
-        let f = engine_files(&s, &|_| None).unwrap();
+        let f = engine_files(&s, None, &|_| None).unwrap();
         assert_eq!(f.len(), 4);
         assert_eq!(f[2].0, DOCKER_DROPIN);
         assert!(
@@ -382,7 +424,7 @@ mod tests {
             f[3].1
                 .contains("RequiresMountsFor=/vol1/docker/containerd\n")
         );
-        assert!(engine_files(&s, &|p| (p == DAEMON_JSON).then(|| "nope".to_string())).is_err());
+        assert!(engine_files(&s, None, &|p| (p == DAEMON_JSON).then(|| "nope".to_string())).is_err());
     }
 
     #[test]

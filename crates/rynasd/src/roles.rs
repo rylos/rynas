@@ -58,6 +58,29 @@ impl AdminPolicy {
     }
 }
 
+/// What [`admin_only`] guards: the policy and the name used in the refusal.
+#[derive(Debug, Clone)]
+pub struct AdminGate {
+    pub policy: AdminPolicy,
+    pub what: &'static str,
+}
+
+/// Route layer for whole routers whose reads are as sensitive as their changes (Docker,
+/// the HTTPS certificate): the forwarded user (`x-rynas-user`) must be an administrator,
+/// reads included; 400 without a user, 403 `forbidden` otherwise. Handlers that change
+/// something still check the role themselves and write their audit line.
+pub async fn admin_only(
+    axum::extract::State(g): axum::extract::State<AdminGate>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match crate::ops::user(req.headers()).and_then(|u| g.policy.require_admin(&u, g.what)) {
+        Ok(()) => next.run(req).await,
+        Err(e) => e.into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -276,7 +276,12 @@ writer; rynas-web (user `rynas`) only reads.
   certificate active with a new leaf; rynas-web picks it up by itself. `http://127.0.0.1:8080`
   is never redirected.
 
-**Endpoints** (admin; forwarded by rynas-web to rynasd `/v1/system/tls…`):
+**Endpoints** (admin; forwarded by rynas-web to rynasd `/v1/system/tls…`). rynasd checks the
+administrator role again on every one, reads included (a route layer, 403 `forbidden`), and
+writes an audit line for a change (`rynas::audit`: `tls import|local <subject> (<sha-256>) by
+<user>`). The local CA has no name constraints: the web-access leaves it issues carry the
+administrator's own domain names and global IPv6 addresses, so permitted subtrees could not be
+bounded; `ca.key` stays in rynasd's 0700 store.
 
 | Method | Path | Body | Response |
 |---|---|---|---|

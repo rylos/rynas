@@ -765,3 +765,80 @@ async fn move_behind_the_proxy() {
     let (s, b) = call(&e, "POST", "/v1/apps/installed/vaultwarden/proxy", None).await;
     assert_eq!((s, err(&b).code.as_str()), (StatusCode::CONFLICT, error_codes::CONFLICT));
 }
+
+/// The `(method, path)` pairs of the `.route(…)` calls of a router's source: new routes
+/// are covered without editing this test.
+fn routes_of(src: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut rest = src;
+    while let Some(i) = rest.find(".route(") {
+        rest = rest[i + 7..].trim_start();
+        let Some(r) = rest.strip_prefix('"') else {
+            continue;
+        };
+        rest = r;
+        let Some(e) = rest.find('"') else { break };
+        let path = &rest[..e];
+        // the methods up to the closing parenthesis of `.route(`
+        let mut depth = 1;
+        let mut end = rest.len();
+        for (k, c) in rest.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = k;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let call = &rest[e..end];
+        let p: String = path
+            .split('/')
+            .map(|s| if s.starts_with('{') { "x1" } else { s })
+            .collect::<Vec<_>>()
+            .join("/");
+        for (m, name) in [
+            ("GET", "get("),
+            ("POST", "post("),
+            ("PUT", "put("),
+            ("DELETE", "delete("),
+        ] {
+            if call.contains(name) {
+                out.push((m.to_string(), p.clone()));
+            }
+        }
+    }
+    out
+}
+
+/// Review 2026-11-07, H3/M1: a non-administrator gets 403 on every route of Docker, the
+/// app catalogue, web access and the HTTPS certificate, reads included; the routes come
+/// from the routers' sources.
+#[tokio::test]
+async fn non_admins_get_403_on_every_route() {
+    let e = env_opts(Some(true));
+    let mut n = 0;
+    for src in [
+        include_str!("../src/docker.rs"),
+        include_str!("../src/apps.rs"),
+        include_str!("../src/tls.rs"),
+        include_str!("../src/web_access/mod.rs"),
+    ] {
+        let routes = routes_of(src);
+        assert!(routes.len() >= 4, "routes not found");
+        for (m, p) in routes {
+            let (s, b) = call_as(&e, "bob", &m, &p, Some(json!({}))).await;
+            assert_eq!(
+                (s, err(&b).code.as_str()),
+                (StatusCode::FORBIDDEN, error_codes::FORBIDDEN),
+                "{m} {p}"
+            );
+            n += 1;
+        }
+    }
+    assert!(n > 50, "{n} routes checked");
+}
