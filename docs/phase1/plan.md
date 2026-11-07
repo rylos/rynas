@@ -109,6 +109,10 @@ only goes to the debug log (A13).
 | 400 | `remote_auth_failed` | file manager: a remote server refused the login (never 401) |
 | 409 | `host_key_changed` | file manager: an SFTP server key differs from the pinned one |
 | 501 | `not_available` | the feature is not available on this system (eject without the removable-drives module) |
+| 409 | `docker_not_installed` | Docker: the engine is not installed (`../phase2/docker-apps.md` §5.1) |
+| 503 | `docker_unavailable` | Docker: installed, but the daemon does not answer on its socket |
+| 409 | `containers_running` | Docker: refused while containers run (moving the engine) |
+| 409 | `stack_not_managed` | Docker: a stack outside the rynas stacks folder (Portainer's, untracked): no file edits, no compose actions |
 
 ## API v1 (steps 2–3)
 | Method | Path | Response |
@@ -697,6 +701,11 @@ schema 2 added the `code` and `body_format` columns.
 | `removable.unplugged` | `drive`, `device`, `mount_points` | {drive} was unplugged while mounted (warning; not after a safe removal) |
 | `removable.safe_to_remove` | `drive`, `device`, `method` (`power_off`/`eject`/`release`) | {drive} can be removed safely (info; setting `notify_safe_removal`) |
 | `removable.ntfs_read_only` | `volume`, `drive`, `mount_point` | {volume} mounted read-only (warning: Windows left the NTFS volume dirty or hibernated) |
+| `docker.unhealthy` / `docker.recovered` | `container`, `stack` | Container {container} is unhealthy / healthy again (`../phase2/docker-apps.md` §5.1) |
+| `docker.oom` | `container`, `stack` | Container {container} ran out of memory |
+| `docker.crash_loop` / `docker.crash_loop_over` | `container`, `stack`, `restarts`, `minutes` | Container {container} keeps restarting / stopped restarting |
+| `docker.disk_full` / `docker.disk_ok` | `path`, `used_pct`, `limit_pct` | Docker storage {used_pct}% full / back under {limit_pct}% |
+| `docker.update_available` | `image`, `stacks` | Image update available: {image} |
 | `synodeb.<event>` | the forward's parameters | the forward's title; events and parameters in `../synodeb-integration.md` S1 |
 
 Not coded: the target test message (built in the target's language already) and events from
