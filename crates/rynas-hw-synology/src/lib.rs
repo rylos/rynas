@@ -13,7 +13,7 @@
 //! - feature `domain` (rynasd only), the daemon side of the module: `domain` (the
 //!   `synology.hw` configuration domain), `boot` (synodeb's DOM through `synodeb-dom`: the
 //!   boot entries on the updates page, the boot half of a root rollback), `http` (the module's routes under
-//!   `/v1/modules/synology`), `ups` (synodeb's UPS layer), `notify` (synodeb's `notify`
+//!   `/v1/modules/synology`), `ups` (synodeb's UPS layer), `ups_net` (its network UPS server), `notify` (synodeb's `notify`
 //!   forward and `notify.conf` import) and `module` ([`module::SynologyModule`], the
 //!   `rynas_module::Module` registered only on a Synology or where synodeb runs).
 //!
@@ -39,5 +39,7 @@ pub mod provider;
 pub mod status;
 #[cfg(feature = "domain")]
 pub mod ups;
+#[cfg(feature = "domain")]
+pub mod ups_net;
 
 pub use provider::Synology;

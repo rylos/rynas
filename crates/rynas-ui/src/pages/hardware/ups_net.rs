@@ -14,6 +14,7 @@ use crate::api;
 use crate::form::{area_field, form_error, segmented, spinner, switch, text_field, In};
 use crate::i18n::{t, tf, tr};
 use crate::icons::{self, Icon};
+use crate::modules::{self, UpsSlot};
 use crate::pages::security::copy_button;
 use crate::toast::saved_applied;
 use crate::ui::{self, Confirm, Modal, Remote, Tone, WidgetHead, confirm, status};
@@ -132,11 +133,40 @@ pub fn card() -> AnyView {
         match st.blocked {
             Some(UpsNetBlock::NutMissing) => return view! { <p class="muted">{t("upsn.need_nut")}</p> }.into_any(),
             Some(UpsNetBlock::Module) => return ui::note(Tone::Info, icons::INFO, view! { {t("upsn.module")} }.into_any()),
+            Some(UpsNetBlock::ModuleTooOld) => return ui::note(Tone::Info, icons::INFO, view! { {t(modules::ups_key(UpsSlot::NetTooOld))} }.into_any()),
             None => {}
         }
         let c = current(&st);
-        let listen = if c.listen.is_empty() { t("upsn.listen_all").to_string() } else { c.listen.join(", ") };
-        let allow = if c.allow.is_empty() { t("upsn.allow_any").to_string() } else { c.allow.join(", ") };
+        // a module layer runs upsd and its firewall (st.layer): listen addresses are its own,
+        // allowed hosts are required
+        let layer = st.layer.clone();
+        let module = layer.is_some();
+        let listen = if module {
+            t(modules::ups_key(UpsSlot::NetListen)).to_string()
+        } else if c.listen.is_empty() {
+            t("upsn.listen_all").to_string()
+        } else {
+            c.listen.join(", ")
+        };
+        let allow = match (c.allow.is_empty(), module) {
+            (false, _) => c.allow.join(", "),
+            (true, true) => t("upsn.allow_none").to_string(),
+            (true, false) => t("upsn.allow_any").to_string(),
+        };
+        let filter_label = if module { modules::ups_key(UpsSlot::NetFilter) } else { "upsn.filter" };
+        let layer_notes = layer.map(|l| {
+            let mut v = Vec::new();
+            if let Some(name) = &l.primary_account {
+                v.push(ui::note(Tone::Info, icons::INFO, view! { {tf(modules::ups_key(UpsSlot::NetPrimary), &[("name", name)])} }.into_any()));
+            }
+            if l.source == UpsNetSource::Manual && st.applied.is_none() {
+                v.push(ui::note(Tone::Info, icons::INFO, view! { {t(modules::ups_key(UpsSlot::NetManual))} }.into_any()));
+            }
+            if !l.outside.is_empty() {
+                v.push(ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {tf(modules::ups_key(UpsSlot::NetOutside), &[("names", &l.outside.join(", "))])} }.into_any()));
+            }
+            v.collect_view()
+        });
         let host = st.host.clone().unwrap_or_else(|| st.hostname.clone());
         let ups = st.ups_name.clone().unwrap_or_else(|| "ups".into());
         let rows: Vec<AnyView> = c
@@ -171,7 +201,11 @@ pub fn card() -> AnyView {
             .iter()
             .map(|p| match p {
                 UpsNetProblem::ServerInactive => ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {t("upsn.pb.server_inactive")} }.into_any()),
-                UpsNetProblem::FilterInactive => ui::note(Tone::Err, icons::SHIELD_ALERT, view! { {t("upsn.pb.filter_inactive")} }.into_any()),
+                UpsNetProblem::FilterInactive => {
+                    let k = if module { modules::ups_key(UpsSlot::NetFilterInactive) } else { "upsn.pb.filter_inactive" };
+                    ui::note(Tone::Err, icons::SHIELD_ALERT, view! { {t(k)} }.into_any())
+                }
+                UpsNetProblem::LayerUnreadable => ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {t(modules::ups_key(UpsSlot::NetUnreadable))} }.into_any()),
                 UpsNetProblem::Other => ui::note(Tone::Info, icons::INFO, view! { {t("upsn.pb.other")} }.into_any()),
             })
             .collect_view();
@@ -185,13 +219,14 @@ pub fn card() -> AnyView {
                 <div class="kv"><dt>{tr("smb.interfaces")}</dt><dd class="wrap">{listen}</dd></div>
                 <div class="kv"><dt>{tr("upsn.allow")}</dt><dd class="wrap">{allow}</dd></div>
                 {st.filter_active.map(|on| view! {
-                    <div class="kv"><dt>{tr("upsn.filter")}</dt><dd>{status(if on { Tone::Ok } else { Tone::Err }, t(if on { "upsn.filter_on" } else { "upsn.filter_off" }).to_string())}</dd></div>
+                    <div class="kv"><dt>{tr(filter_label)}</dt><dd>{status(if on { Tone::Ok } else { Tone::Err }, t(if on { "upsn.filter_on" } else { "upsn.filter_off" }).to_string())}</dd></div>
                 })}
                 <div class="kv"><dt>{tr("upsn.address")}</dt><dd class="mono wrap">{format!("{host}:{}", st.port)}</dd></div>
                 <div class="kv"><dt>{tr("upsn.ups_name")}</dt><dd class="mono">{ups}</dd></div>
             </dl>
             {problems}
-            {(c.enabled && c.allow.is_empty()).then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {t("upsn.open_warn")} }.into_any()))}
+            {layer_notes}
+            {(!module && c.enabled && c.allow.is_empty()).then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {t("upsn.open_warn")} }.into_any()))}
             <h3 class="section-title">{tr("upsn.accounts")}</h3>
             {if has_rows {
                 ui::table("upsn-table", &["username", "upsn.role", "upsn.note", ""], rows)
@@ -276,7 +311,13 @@ fn settings_dialog(state: Remote<UpsNetServerState>, on_close: Callback<bool>) -
     let cancel = Callback::new(move |_: ()| on_close.run(false));
     let st = state.data.get_untracked().unwrap_or_default();
     let base = current(&st);
-    let f = RwSignal::new(Settings { enabled: base.enabled, all: base.listen.is_empty(), listen: base.listen.clone(), allow: base.allow.join("\n") });
+    let module = st.layer.is_some();
+    // hosts set by hand in the layer's file: the starting point of a first save here
+    let start_allow = match &st.layer {
+        Some(l) if base.allow.is_empty() && st.applied.is_none() && st.pending.is_none() => l.allow.join("\n"),
+        _ => base.allow.join("\n"),
+    };
+    let f = RwSignal::new(Settings { enabled: base.enabled, all: base.listen.is_empty(), listen: base.listen.clone(), allow: start_allow });
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let plan = RwSignal::new(None::<Result<UpsSetupPlan, String>>);
@@ -304,6 +345,10 @@ fn settings_dialog(state: Remote<UpsNetServerState>, on_close: Callback<bool>) -
     };
     let submit = move || {
         let body = value.with_value(|v| v());
+        if module && body.enabled && body.allow.is_empty() {
+            error.set(Some(t("upsn.allow_required").to_string()));
+            return;
+        }
         busy.set(true);
         spawn_local(async move {
             if save(body, error, Some(listen_err)).await.is_some() {
@@ -319,8 +364,11 @@ fn settings_dialog(state: Remote<UpsNetServerState>, on_close: Callback<bool>) -
     view! {
         <Modal title=Signal::stored(t("upsn.settings_title").to_string()) on_close=cancel wide=true>
             {switch("upsn.enable", Some("upsn.enable_help"), Signal::derive(move || f.with(|s| s.enabled)), Callback::new(move |v| f.update(|s| s.enabled = v)))}
-            {segmented("smb.interfaces", &[("all", "upsn.listen_all"), ("chosen", "upsn.listen_chosen")], mode, Callback::new(move |v: String| f.update(|s| s.all = v == "all")))}
-            <Show when=move || !f.with(|s| s.all)>
+            {module.then(|| view! {
+                <dl class="kvs"><div class="kv"><dt>{tr("smb.interfaces")}</dt><dd class="wrap">{t(modules::ups_key(UpsSlot::NetListen))}</dd></div></dl>
+            })}
+            {(!module).then(|| segmented("smb.interfaces", &[("all", "upsn.listen_all"), ("chosen", "upsn.listen_chosen")], mode, Callback::new(move |v: String| f.update(|s| s.all = v == "all"))))}
+            <Show when=move || !module && !f.with(|s| s.all)>
                 <div class="field">
                     {addresses.iter().map(|a| {
                         let (a1, a2) = (a.clone(), a.clone());
@@ -341,7 +389,7 @@ fn settings_dialog(state: Remote<UpsNetServerState>, on_close: Callback<bool>) -
                     </span>
                 </div>
             </Show>
-            {area_field("upsn.allow", allow_text, Callback::new(move |v| f.update(|s| s.allow = v)), Some("upsn.allow_help"), t("upsn.allow_ph"))}
+            {area_field("upsn.allow", allow_text, Callback::new(move |v| f.update(|s| s.allow = v)), Some(if module { modules::ups_key(UpsSlot::NetAllowHelp) } else { "upsn.allow_help" }), t("upsn.allow_ph"))}
             {(!subnets.is_empty()).then(|| view! {
                 <div class="btn-row">
                     <button type="button" class="btn ghost sm" disabled=move || f.with(|s| nets.with_value(|n| add_hosts(&s.allow, n) == s.allow))
@@ -354,7 +402,7 @@ fn settings_dialog(state: Remote<UpsNetServerState>, on_close: Callback<bool>) -
             <div class="btn-row">
                 <button type="button" class="btn ghost sm" on:click=move |_| show_plan()><Icon icon=icons::FILE_TEXT size=14 />{tr("upsn.show_changes")}</button>
             </div>
-            {move || plan.get().map(plan_view)}
+            {move || plan.get().map(|p| plan_view(p, module))}
             {form_error(error)}
             <div class="dialog-foot">
                 <button type="button" class="btn ghost" disabled=move || busy.get() on:click=move |_| cancel.run(())>{tr("cancel")}</button>
@@ -365,7 +413,7 @@ fn settings_dialog(state: Remote<UpsNetServerState>, on_close: Callback<bool>) -
     .into_any()
 }
 
-fn plan_view(p: Result<UpsSetupPlan, String>) -> AnyView {
+fn plan_view(p: Result<UpsSetupPlan, String>, module: bool) -> AnyView {
     match p {
         Err(e) => view! { <p class="form-error"><Icon icon=icons::CIRCLE_X size=16 />{ui::err_view(e)}</p> }.into_any(),
         Ok(p) => view! {
@@ -381,7 +429,7 @@ fn plan_view(p: Result<UpsSetupPlan, String>) -> AnyView {
                     view! { <span class="pre-text log-text">{f.after}</span> }.into_any()
                 }}
             }).collect_view()}
-            <p class="muted small">{t("upsw.commands")}</p>
+            <p class="muted small">{t(if module { modules::ups_key(UpsSlot::NetCommands) } else { "upsw.commands" })}</p>
             <span class="pre-text log-text">{p.commands.join("\n")}</span>
         }
         .into_any(),
@@ -404,13 +452,15 @@ fn add_dialog(state: Remote<UpsNetServerState>, on_close: Callback<Option<Shown>
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let tried = RwSignal::new(false);
+    let module = state.data.with_untracked(|s| s.as_ref().is_some_and(|s| s.layer.is_some()));
+    let name_ok = move |n: &str| if module { modules::net_user_ok(n) } else { user_ok(n) };
     let name_err = Signal::derive(move || {
         let n = f.with(|a| a.name.trim().to_ascii_lowercase());
         let taken = state.data.with(|s| s.as_ref().is_some_and(|s| current(s).clients.iter().any(|c| c.name == n)));
         if n.is_empty() {
             tried.get().then(|| t("upsn.user_required").to_string())
-        } else if !user_ok(&n) {
-            Some(t("upsn.user_bad").to_string())
+        } else if !name_ok(&n) {
+            Some(t(if module { modules::ups_key(UpsSlot::NetUserBad) } else { "upsn.user_bad" }).to_string())
         } else {
             taken.then(|| t("upsn.user_taken").to_string())
         }
@@ -452,9 +502,13 @@ fn add_dialog(state: Remote<UpsNetServerState>, on_close: Callback<Option<Shown>
     view! {
         <Modal title=Signal::stored(t("upsn.add_title").to_string()) on_close=Callback::new(move |_| on_close.run(None))>
             {text_field("username", Signal::derive(move || f.with(|a| a.name.clone())), Callback::new(move |v| f.update(|a| a.name = v)), name_err,
-                In { mono: true, maxlength: 32, help: Some("upsn.user_help"), placeholder: "homeassistant", ..Default::default() })}
+                In { mono: true, maxlength: 32, help: Some(if module { modules::ups_key(UpsSlot::NetUserHelp) } else { "upsn.user_help" }), placeholder: "homeassistant", ..Default::default() })}
             {segmented("upsn.role", &[("secondary", "upsn.role_secondary"), ("monitor", "upsn.role_monitor")], role, Callback::new(move |v: String| f.update(|a| a.monitor = v == "monitor")))}
-            <p class="field-help">{move || t(if f.with(|a| a.monitor) { "upsn.role_monitor_help" } else { "upsn.role_secondary_help" })}</p>
+            <p class="field-help">{move || t(match (f.with(|a| a.monitor), module) {
+                (true, true) => modules::ups_key(UpsSlot::NetRoleMonitorHelp),
+                (true, false) => "upsn.role_monitor_help",
+                (false, _) => "upsn.role_secondary_help",
+            })}</p>
             {text_field("upsn.note", Signal::derive(move || f.with(|a| a.note.clone())), Callback::new(move |v| f.update(|a| a.note = v)), none,
                 In { maxlength: 64, placeholder: "Home Assistant", ..Default::default() })}
             {switch("upsn.own_password", Some("upsn.own_password_help"), own, Callback::new(move |v| f.update(|a| a.own = v)))}
@@ -573,7 +627,7 @@ mod tests {
             "upsn.remove", "upsn.remove_title", "upsn.remove_text", "upsn.regen_title", "upsn.regen_text", "upsn.enable",
             "upsn.enable_help", "upsn.read_note", "upsn.show_changes", "upsn.file_removed", "upsn.shown_once", "upsn.for_ha", "upsn.for_ha_help",
             "upsn.host", "upsn.port", "upsn.for_upsmon", "upsn.for_upsmon_help", "upsn.for_upsmon_help_pw", "upsn.monitor_note", "upsn.copy",
-            "cfg.key.ups.netserver",
+            "upsn.allow_none", "upsn.allow_required", "cfg.key.ups.netserver",
         ] {
             assert!(crate::i18n::try_t(k).is_some(), "{k}");
         }

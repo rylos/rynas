@@ -322,9 +322,18 @@ fn open_config(
     }));
     // ups.netserver: upsd for other machines (LISTEN, accounts, IP filter; not with a layer)
     domains.push(Arc::new(rynasd::ups_netserver::NetServerDomain {
-        layer: ups_layer,
         secret_dir: args.state_dir.join("notify"),
         probe: (!args.dry_system).then(rynasd::ups_netserver::tcp_probe),
+        // a layer's own tool: simulated under --dry-system (its state in the dry root)
+        runner: if args.dry_system {
+            Arc::new(rynasd::ups_setup::DryRunner {
+                layer: ups_layer.clone(),
+                ..Default::default()
+            })
+        } else {
+            Arc::new(rynasd::ups_setup::HostRunner)
+        },
+        layer: ups_layer,
     }));
     let (removable_domain, removable_settings) = rynasd::removable::RemovableDomain::new();
     let removable_tx = removable_domain.tx.clone();
