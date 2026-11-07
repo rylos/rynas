@@ -371,6 +371,10 @@ pub struct Secret {
     pub encoding: Encoding,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
+    /// A value the user needs (an initial administrator password): the install answer shows
+    /// it once. Other secrets are never shown by rynas (they stay in the stack's `.env`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub show: bool,
 }
 
 fn secret_len() -> u16 {

@@ -168,11 +168,17 @@ impl FormSchema {
     }
 
     /// Validates the answers, applies defaults and returns the `.env` strings for every
-    /// property (an optional field without answer or default becomes empty).
+    /// property (an optional field without answer or default becomes empty). Stops at the
+    /// first problem; [`FormSchema::resolve_all`] lists them all.
     pub fn resolve(&self, answers: &BTreeMap<String, Value>) -> Result<BTreeMap<String, String>, RenderError> {
-        if let Some(k) = answers.keys().find(|k| !self.properties.contains_key(*k)) {
-            return Err(RenderError::UnknownValue(k.clone()));
-        }
+        self.resolve_all(answers).map_err(|mut e| e.remove(0))
+    }
+
+    /// [`FormSchema::resolve`] that collects every problem (one per field, unknown answers
+    /// first), for the install plan's errors by field. The error list is never empty.
+    pub fn resolve_all(&self, answers: &BTreeMap<String, Value>) -> Result<BTreeMap<String, String>, Vec<RenderError>> {
+        let mut errors: Vec<RenderError> =
+            answers.keys().filter(|k| !self.properties.contains_key(*k)).map(|k| RenderError::UnknownValue(k.clone())).collect();
         // effective values first (visible_if refers to them)
         let mut eff: BTreeMap<&str, Option<&Value>> = BTreeMap::new();
         for (name, field) in &self.properties {
@@ -184,22 +190,23 @@ impl FormSchema {
             let visible = field.ui.as_ref().is_none_or(|ui| {
                 ui.visible_if.iter().all(|(k, want)| eff.get(k.as_str()).copied().flatten() == Some(want))
             });
-            let value = eff[name.as_str()];
-            let s = match value {
-                None => {
-                    if visible && self.required.contains(name) {
-                        return Err(RenderError::MissingValue(name.clone()));
+            let s = match eff[name.as_str()] {
+                None => String::new(),
+                Some(v) => match field.validate(name, v) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        errors.push(e);
+                        continue;
                     }
-                    String::new()
-                }
-                Some(v) => field.validate(name, v)?,
+                },
             };
             if visible && s.is_empty() && self.required.contains(name) {
-                return Err(RenderError::MissingValue(name.clone()));
+                errors.push(RenderError::MissingValue(name.clone()));
+                continue;
             }
             out.insert(name.clone(), s);
         }
-        Ok(out)
+        if errors.is_empty() { Ok(out) } else { Err(errors) }
     }
 
     /// Names of boolean properties.

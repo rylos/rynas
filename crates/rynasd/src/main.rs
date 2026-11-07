@@ -109,6 +109,10 @@ struct Args {
     /// --dry-system the engine is only read (lists, status), never changed.
     #[arg(long, default_value = rynas_docker::DOCKER_SOCKET, value_parser = path_or_empty)]
     docker_socket: PathBuf,
+    /// The app catalogue (`apps/<id>/app.toml`...): the `rynas-apps-catalog` package's
+    /// folder; a checkout's `apps/` for development.
+    #[arg(long, default_value = rynasd::apps::DEFAULT_CATALOG_DIR)]
+    apps_dir: PathBuf,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -868,6 +872,7 @@ fn main() -> std::io::Result<()> {
             let _ = ops.docker.set(docker.clone());
             rynasd::docker::spawn_watch(docker.clone());
             rynasd::docker::spawn_stats(docker.clone());
+            state.apps = Some(rynasd::apps::AppsSvc::new(docker.clone(), args.apps_dir.clone()));
             state.docker = Some(docker);
         }
         state.ops = Some(ops);

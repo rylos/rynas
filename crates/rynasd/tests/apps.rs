@@ -1,0 +1,608 @@
+//! The app catalogue through the internal API, with the repository's `apps/` catalogue, a
+//! fake host tree (Docker binaries present, a listening socket, the installed RAM), no
+//! engine socket and `--dry-system` behaviour: the catalogue and its images, plans (errors
+//! by field, a port conflict with a suggestion, masked secrets), an install as a dry run
+//! that writes the real stack files, the installed list, the update plan and update,
+//! convert to custom stack, and uninstall keeping the data.
+
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode, header};
+use rynas_api_types::apps::*;
+use rynas_api_types::docker::DockerSettings;
+use rynas_api_types::{ApiError, TaskInfo, TaskStarted, TaskStatus, error_codes};
+use rynas_auth::ManualClock;
+use rynas_auth::backend::{AuthError, Authenticator, BoxFuture, Identity};
+use rynas_auth::totp::{MemoryStorage, TotpManager};
+use rynas_config::{Applier, Config, ConfigOptions, MemorySystem};
+use rynas_docker::Runner;
+use rynas_notify::MemoryNotifier;
+use rynas_tasks::{Cmd, CmdOutput, TaskConfig, TaskManager};
+use rynasd::apps::AppsSvc;
+use rynasd::docker::{DockerDomain, DockerSvc};
+use rynasd::ops::Ops;
+use rynasd::roles::AdminPolicy;
+use rynasd::server::{DaemonState, router};
+use serde_json::{Value, json};
+use tower::ServiceExt;
+
+struct NoAuth;
+
+impl Authenticator for NoAuth {
+    fn realm(&self) -> &str {
+        "none"
+    }
+    fn authenticate<'a>(
+        &'a self,
+        _: &'a str,
+        _: &'a str,
+    ) -> BoxFuture<'a, Result<Identity, AuthError>> {
+        Box::pin(async { Err(AuthError::InvalidCredentials) })
+    }
+}
+
+/// The detection's commands: an architecture and a compose plugin; nothing else runs.
+struct Host;
+
+impl Runner for Host {
+    fn run(&self, cmd: &Cmd) -> Result<CmdOutput, String> {
+        let ok = |s: &str| {
+            Ok(CmdOutput {
+                code: Some(0),
+                stdout: s.into(),
+                stderr: String::new(),
+            })
+        };
+        match cmd.display().as_str() {
+            "dpkg --print-architecture" => ok("amd64\n"),
+            "docker compose version --short" => ok("2.40.3\n"),
+            _ => Err("cannot start: No such file or directory".into()),
+        }
+    }
+}
+
+struct Env {
+    dir: tempfile::TempDir,
+    app: axum::Router,
+    ops: Arc<Ops>,
+}
+
+impl Env {
+    fn root(&self) -> PathBuf {
+        self.dir.path().join("root")
+    }
+    fn stack(&self, name: &str) -> PathBuf {
+        self.root().join("vol1/docker/stacks").join(name)
+    }
+}
+
+fn catalogue() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps")
+}
+
+fn env() -> Env {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("root");
+    std::fs::create_dir_all(root.join("vol1/media")).unwrap();
+    let host = dir.path().join("host");
+    for d in ["etc", "usr/bin", "proc/net"] {
+        std::fs::create_dir_all(host.join(d)).unwrap();
+    }
+    std::fs::write(
+        host.join("etc/os-release"),
+        "ID=debian\nVERSION_CODENAME=trixie\n",
+    )
+    .unwrap();
+    std::fs::write(host.join("etc/hostname"), "nas\n").unwrap();
+    std::fs::write(host.join("usr/bin/docker"), "").unwrap();
+    // a 4 GB machine (part of the RAM reserved by the firmware)
+    std::fs::write(host.join("proc/meminfo"), "MemTotal:        3900000 kB\n").unwrap();
+    // something listens on 8222/tcp (the default port of Vaultwarden)
+    std::fs::write(
+        host.join("proc/net/tcp"),
+        "  sl  local_address rem_address   st tx_queue rx_queue\n   0: 00000000:201E 00000000:0000 0A 00000000:00000000\n",
+    )
+    .unwrap();
+    let (domain, settings) = DockerDomain::new(true);
+    domain.tx.send_replace(DockerSettings {
+        volume: Some("vol1".into()),
+        apps_ssd_volume: Some("ssd".into()),
+        ..Default::default()
+    });
+    let domains: Vec<Arc<dyn Applier>> = vec![Arc::new(domain)];
+    let config = Arc::new(
+        Config::open(
+            ConfigOptions::new(dir.path().join("state"), &root),
+            Arc::new(MemorySystem::new("nas")),
+            domains,
+        )
+        .unwrap(),
+    );
+    let tasks = TaskManager::new(dir.path().join("tasks"), "nas", TaskConfig::default()).unwrap();
+    let mut ops = Ops::new(config, tasks);
+    ops.admins = AdminPolicy::new(vec!["rynas-admin".into()], |u| match u {
+        "admin" => Some(vec!["rynas-admin".into()]),
+        "bob" => Some(vec!["users".into()]),
+        _ => None,
+    });
+    let ops = Arc::new(ops);
+    let svc = DockerSvc::with_host(
+        ops.clone(),
+        Arc::new(MemoryNotifier::default()),
+        root,
+        true,
+        Some(
+            dir.path()
+                .join("no-docker.sock")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        dir.path().join("state/docker"),
+        settings,
+        host,
+        Arc::new(Host),
+    );
+    let _ = ops.docker.set(svc.clone());
+    let clock = Arc::new(ManualClock::new(1_800_000_000_000));
+    let totp = Arc::new(TotpManager::new(
+        MemoryStorage::default(),
+        clock.clone(),
+        "rynas",
+    ));
+    let mut st = DaemonState::new(Arc::new(NoAuth), totp, clock);
+    st.ops = Some(ops.clone());
+    st.apps = Some(AppsSvc::new(svc.clone(), catalogue()));
+    st.docker = Some(svc);
+    Env {
+        dir,
+        app: router(st),
+        ops,
+    }
+}
+
+async fn call_as(
+    e: &Env,
+    who: &str,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+) -> (StatusCode, Vec<u8>) {
+    let req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-rynas-user", who)
+        .body(body.map(|b| Body::from(b.to_string())).unwrap_or_default())
+        .unwrap();
+    let r = e.app.clone().oneshot(req).await.unwrap();
+    let s = r.status();
+    (s, to_bytes(r.into_body(), 4 << 20).await.unwrap().to_vec())
+}
+
+async fn call(e: &Env, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Vec<u8>) {
+    call_as(e, "admin", method, uri, body).await
+}
+
+fn json_of<T: serde::de::DeserializeOwned>(s: StatusCode, b: &[u8]) -> T {
+    assert!(s.is_success(), "{s}: {}", String::from_utf8_lossy(b));
+    serde_json::from_slice(b).unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(b)))
+}
+
+fn err(b: &[u8]) -> ApiError {
+    serde_json::from_slice(b)
+        .unwrap_or_else(|_| panic!("not an ApiError: {}", String::from_utf8_lossy(b)))
+}
+
+async fn wait_task(e: &Env, id: &str) -> (TaskInfo, String) {
+    for _ in 0..500 {
+        if let Some(t) = e.ops.tasks.get(id)
+            && t.status.is_finished()
+        {
+            return (t, e.ops.tasks.read_log(id, 0, usize::MAX).unwrap().text);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("task {id} still running");
+}
+
+async fn plan(e: &Env, id: &str, body: Value) -> AppInstallPlan {
+    let (s, b) = call(
+        e,
+        "POST",
+        &format!("/v1/apps/catalog/{id}/plan"),
+        Some(body),
+    )
+    .await;
+    json_of(s, &b)
+}
+
+/// Installs an app and waits for the task; returns the answer and the task log.
+async fn install(e: &Env, id: &str, body: Value) -> (AppInstallStarted, String) {
+    let (s, b) = call(
+        e,
+        "POST",
+        &format!("/v1/apps/catalog/{id}/install"),
+        Some(body),
+    )
+    .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{}", String::from_utf8_lossy(&b));
+    let started: AppInstallStarted = serde_json::from_slice(&b).unwrap();
+    let (info, log) = wait_task(e, &started.task_id).await;
+    assert_eq!(info.status, TaskStatus::Ok, "{log}");
+    (started, log)
+}
+
+#[tokio::test]
+async fn catalogue_cards_detail_and_images() {
+    let e = env();
+    let (s, _) = call_as(&e, "bob", "GET", "/v1/apps/catalog", None).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "reads need an administrator too");
+    let (s, b) = call(&e, "GET", "/v1/apps/catalog", None).await;
+    let c: AppCatalog = json_of(s, &b);
+    assert!(c.issues.is_empty(), "{:?}", c.issues);
+    assert_eq!(c.apps.len(), 12);
+    assert_eq!(c.installed_ram_mb, Some(3808));
+    assert!(c.docker_installed);
+    assert_eq!(c.stacks_dir.as_deref(), Some("/vol1/docker/stacks"));
+    let card = |id: &str| c.apps.iter().find(|a| a.id == id).unwrap().clone();
+    let vw = card("vaultwarden");
+    assert_eq!(vw.ram, RamGate::Ok);
+    assert_eq!(vw.categories, vec![AppCategory::Security]);
+    assert_eq!(vw.antifeatures, vec![AppAntifeature::RequiresHttps]);
+    assert_eq!(
+        (vw.ports[0].env.as_str(), vw.ports[0].default),
+        ("WEB_PORT", 8222)
+    );
+    assert!(vw.installed.is_empty() && !vw.update_available);
+    assert_eq!(vw.icon, "/api/v1/apps/catalog/vaultwarden/icon");
+    assert!(matches!(
+        card("immich").ram,
+        RamGate::BelowRecommended {
+            installed_mb: 3808,
+            recommended_mb: 8192
+        }
+    ));
+    assert!(card("arcane").manager);
+
+    let (s, b) = call(&e, "GET", "/v1/apps/catalog/paperless-ngx", None).await;
+    let d: AppDetail = json_of(s, &b);
+    assert!(d.description.len() > 40);
+    assert_eq!(d.form.groups.len(), 2);
+    let pw = &d.form.properties["PAPERLESS_ADMIN_PASSWORD"];
+    assert_eq!(pw.min_length, Some(10));
+    assert_eq!(
+        pw.ui.as_ref().and_then(|u| u.widget),
+        Some(FormWidget::Password)
+    );
+    assert_eq!(d.web.as_ref().map(|w| w.port.as_str()), Some("web"));
+    assert_eq!(d.shares[0].env, "CONSUME");
+    assert_eq!(d.secrets.len(), 2);
+    assert!(!d.folders.is_empty());
+    let (s, _) = call(&e, "GET", "/v1/apps/catalog/nope", None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    // the icon: typed, bounded, cacheable; no path reaches the filesystem
+    let req = Request::builder()
+        .uri("/v1/apps/catalog/vaultwarden/icon")
+        .header("x-rynas-user", "admin")
+        .body(Body::empty())
+        .unwrap();
+    let r = e.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(r.headers()[header::CONTENT_TYPE], "image/svg+xml");
+    assert_eq!(r.headers()[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+    let etag = r.headers()[header::ETAG].clone();
+    assert!(
+        to_bytes(r.into_body(), 1 << 20)
+            .await
+            .unwrap()
+            .starts_with(b"<svg")
+    );
+    let req = Request::builder()
+        .uri("/v1/apps/catalog/vaultwarden/icon")
+        .header("x-rynas-user", "admin")
+        .header(header::IF_NONE_MATCH, etag)
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        e.app.clone().oneshot(req).await.unwrap().status(),
+        StatusCode::NOT_MODIFIED
+    );
+    for uri in [
+        "/v1/apps/catalog/vaultwarden/screenshots/..%2Fapp.toml",
+        "/v1/apps/catalog/vaultwarden/screenshots/app.toml",
+        "/v1/apps/catalog/..%2F..%2Fetc/icon",
+    ] {
+        let (s, _) = call(&e, "GET", uri, None).await;
+        assert_eq!(s, StatusCode::NOT_FOUND, "{uri}");
+    }
+}
+
+#[tokio::test]
+async fn plan_errors_by_field_port_conflict_and_masked_secrets() {
+    let e = env();
+    // the default port is taken by a listening socket: a free one is suggested
+    let p = plan(
+        &e,
+        "vaultwarden",
+        json!({"form": {"DOMAIN": "https://vault.example.lan"}}),
+    )
+    .await;
+    assert!(!p.ok);
+    assert_eq!(p.port_conflicts.len(), 1, "{:?}", p.port_conflicts);
+    let c = &p.port_conflicts[0];
+    assert_eq!(
+        (c.env.as_str(), c.port, c.suggestion),
+        ("WEB_PORT", 8222, Some(8223))
+    );
+    assert!(p.warnings.contains(&PlanWarning::EngineUnreachable));
+    let (s, b) = call(
+        &e,
+        "POST",
+        "/v1/apps/catalog/vaultwarden/install",
+        Some(json!({"form": {"DOMAIN": "https://vault.example.lan"}})),
+    )
+    .await;
+    assert_eq!(
+        (s, err(&b).code.as_str(), err(&b).field.as_deref()),
+        (
+            StatusCode::CONFLICT,
+            error_codes::CONFLICT,
+            Some("WEB_PORT")
+        )
+    );
+    let p = plan(
+        &e,
+        "vaultwarden",
+        json!({"form": {"DOMAIN": "https://vault.example.lan"}, "ports": {"WEB_PORT": 8223}}),
+    )
+    .await;
+    assert!(p.ok, "{p:?}");
+    assert_eq!(p.stack_dir, "/vol1/docker/stacks/vaultwarden");
+    assert_eq!(p.ports[0].bind.as_deref(), Some("127.0.0.1"));
+    assert!(
+        p.compose.contains("x-rynas:") && p.compose.contains("${RYNAS_BIND}:${WEB_PORT}:80"),
+        "{}",
+        p.compose
+    );
+    assert!(p.env.contains("WEB_PORT=8223") && p.env.contains("RYNAS_BIND=127.0.0.1"));
+    assert_eq!(p.folders[0].path, "/vol1/docker/stacks/vaultwarden/data");
+    assert!(!p.folders[0].exists);
+    assert_eq!(
+        p.folders[0].suggested.as_deref(),
+        Some("/ssd/docker/appdata/vaultwarden/data")
+    );
+    // published on the LAN on request
+    let p = plan(&e, "vaultwarden", json!({"form": {"DOMAIN": "https://vault.example.lan"}, "ports": {"WEB_PORT": 8223}, "publish_lan": true})).await;
+    assert!(
+        p.env.contains("RYNAS_BIND=0.0.0.0") && p.warnings.contains(&PlanWarning::PublishedOnLan)
+    );
+
+    // every problem at once, by field
+    let p = plan(
+        &e,
+        "paperless-ngx",
+        json!({"form": {"PAPERLESS_URL": "ftp://x", "NOPE": 1}, "shares": {"CONSUME": "/vol9/scans"}, "ports": {"WEB_PORT": 0}, "stack": "Bad Name"}),
+    )
+    .await;
+    assert!(!p.ok);
+    let has = |f: &str, k: FieldErrorKind| p.errors.iter().any(|x| x.field == f && x.kind == k);
+    assert!(
+        has("PAPERLESS_ADMIN_PASSWORD", FieldErrorKind::MissingValue),
+        "{:?}",
+        p.errors
+    );
+    assert!(
+        has("PAPERLESS_URL", FieldErrorKind::InvalidValue),
+        "{:?}",
+        p.errors
+    );
+    assert!(has("NOPE", FieldErrorKind::UnknownValue), "{:?}", p.errors);
+    assert!(has("CONSUME", FieldErrorKind::BadPath), "{:?}", p.errors);
+    assert!(has("WEB_PORT", FieldErrorKind::BadPort), "{:?}", p.errors);
+    assert!(has("stack", FieldErrorKind::BadStack), "{:?}", p.errors);
+    assert!(p.compose.is_empty());
+    let (s, b) = call(
+        &e,
+        "POST",
+        "/v1/apps/catalog/paperless-ngx/install",
+        Some(json!({"form": {"PAPERLESS_ADMIN_PASSWORD": "short"}})),
+    )
+    .await;
+    assert_eq!(
+        (s, err(&b).field.as_deref()),
+        (StatusCode::BAD_REQUEST, Some("PAPERLESS_ADMIN_PASSWORD"))
+    );
+
+    // a valid plan: generated secrets and the admin password never in clear
+    let p = plan(&e, "paperless-ngx", json!({"form": {"PAPERLESS_ADMIN_PASSWORD": "a-long-password"}, "shares": {"CONSUME": "/vol1/media"}})).await;
+    assert!(p.ok, "{p:?}");
+    assert!(
+        p.env.contains("DB_PASSWORD=********") && p.env.contains("SECRET_KEY=********"),
+        "{}",
+        p.env
+    );
+    assert!(!p.compose.contains("a-long-password"));
+    assert!(
+        p.folders
+            .iter()
+            .any(|f| f.share && f.path == "/vol1/media" && f.exists)
+    );
+    assert!(p.ram == RamGate::Ok || matches!(p.ram, RamGate::BelowRecommended { .. }));
+}
+
+#[tokio::test]
+async fn install_update_convert_and_uninstall_as_dry_runs() {
+    let e = env();
+    let (started, log) = install(
+        &e,
+        "vaultwarden",
+        json!({"form": {"DOMAIN": "https://vault.example.lan"}, "ports": {"WEB_PORT": 8223}}),
+    )
+    .await;
+    assert_eq!(started.stack, "vaultwarden");
+    assert!(started.secrets.is_empty(), "nothing marked to show");
+    assert!(
+        log.contains("up --detach") && log.contains("(dry system: not run)"),
+        "{log}"
+    );
+    let dir = e.stack("vaultwarden");
+    let compose = std::fs::read_to_string(dir.join("compose.yaml")).unwrap();
+    assert!(
+        compose.contains("x-rynas:") && compose.contains("app: vaultwarden"),
+        "{compose}"
+    );
+    let envf = std::fs::read_to_string(dir.join(".env")).unwrap();
+    assert!(
+        envf.contains("WEB_PORT=8223") && envf.contains("RYNAS_BIND=127.0.0.1"),
+        "{envf}"
+    );
+    assert_eq!(
+        std::fs::metadata(dir.join(".env"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    assert!(dir.join("data").is_dir());
+    // the folder exists now: a second install is refused
+    let (s, b) = call(
+        &e,
+        "POST",
+        "/v1/apps/catalog/vaultwarden/install",
+        Some(json!({"form": {"DOMAIN": "https://vault.example.lan"}, "ports": {"WEB_PORT": 8223}})),
+    )
+    .await;
+    assert_eq!(
+        (s, err(&b).code.as_str()),
+        (StatusCode::CONFLICT, error_codes::ALREADY_EXISTS)
+    );
+
+    let (s, b) = call(&e, "GET", "/v1/apps/installed", None).await;
+    let list: Vec<InstalledApp> = json_of(s, &b);
+    assert_eq!(list.len(), 1);
+    let i = &list[0];
+    assert_eq!(
+        (
+            i.app.as_str(),
+            i.version.as_str(),
+            i.web_port,
+            i.bind.as_deref()
+        ),
+        ("vaultwarden", "1.0.0", Some(8223), Some("127.0.0.1"))
+    );
+    assert!(i.in_catalog && !i.update_available && i.state.is_none() && !i.snapshots);
+    let (s, b) = call(&e, "GET", "/v1/apps/catalog", None).await;
+    let c: AppCatalog = json_of(s, &b);
+    assert_eq!(
+        c.apps
+            .iter()
+            .find(|a| a.id == "vaultwarden")
+            .unwrap()
+            .installed,
+        vec!["vaultwarden".to_string()]
+    );
+
+    // up to date: nothing to do
+    let (s, b) = call(&e, "GET", "/v1/apps/installed/vaultwarden/update", None).await;
+    let u: AppUpdatePlan = json_of(s, &b);
+    assert!(u.up_to_date && !u.snapshot);
+    let (s, _) = call(&e, "POST", "/v1/apps/installed/vaultwarden/update", None).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    // an older install with another image digest
+    let at = compose.find("@sha256:").unwrap() + 8;
+    let flip = if &compose[at..at + 1] == "0" {
+        "1"
+    } else {
+        "0"
+    };
+    let old = format!("{}{flip}{}", &compose[..at], &compose[at + 1..])
+        .replace("version: 1.0.0", "version: 0.9.0");
+    std::fs::write(dir.join("compose.yaml"), &old).unwrap();
+    let (s, b) = call(&e, "GET", "/v1/apps/installed/vaultwarden/update", None).await;
+    let u: AppUpdatePlan = json_of(s, &b);
+    assert!(!u.up_to_date && !u.downgrade, "{u:?}");
+    assert_eq!(
+        (u.from_version.as_str(), u.to_version.as_str()),
+        ("0.9.0", "1.0.0")
+    );
+    assert_eq!(u.image_changes.len(), 1);
+    assert_eq!(u.image_changes[0].kind, ImageChangeKind::Digest);
+    let (s, b) = call(&e, "GET", "/v1/apps/installed", None).await;
+    assert!(json_of::<Vec<InstalledApp>>(s, &b)[0].update_available);
+    let (s, b) = call(
+        &e,
+        "POST",
+        "/v1/apps/installed/vaultwarden/update",
+        Some(json!({})),
+    )
+    .await;
+    let t: TaskStarted = json_of(s, &b);
+    let (info, log) = wait_task(&e, &t.task_id).await;
+    assert_eq!(info.status, TaskStatus::Ok, "{log}");
+    assert!(
+        log.contains("no snapshot") && log.contains(" pull --quiet") && log.contains("up --detach"),
+        "{log}"
+    );
+    let now = std::fs::read_to_string(dir.join("compose.yaml")).unwrap();
+    assert!(now.contains("version: 1.0.0"));
+    assert_eq!(
+        std::fs::read_to_string(dir.join(".env"))
+            .unwrap()
+            .lines()
+            .find(|l| l.starts_with("WEB_PORT")),
+        Some("WEB_PORT=8223"),
+        "port kept"
+    );
+
+    // convert: an ordinary stack, no longer an app
+    let (s, _) = call_as(
+        &e,
+        "bob",
+        "POST",
+        "/v1/apps/installed/vaultwarden/convert",
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, b) = call(&e, "POST", "/v1/apps/installed/vaultwarden/convert", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{}", String::from_utf8_lossy(&b));
+    let now = std::fs::read_to_string(dir.join("compose.yaml")).unwrap();
+    assert!(
+        !now.contains("x-rynas") && now.contains("vaultwarden"),
+        "{now}"
+    );
+    let (s, b) = call(&e, "GET", "/v1/apps/installed", None).await;
+    assert!(json_of::<Vec<InstalledApp>>(s, &b).is_empty());
+    let (s, _) = call(&e, "GET", "/v1/apps/installed/vaultwarden", None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    // uninstall keeps the data by default; deleting needs the confirmation
+    install(&e, "uptime-kuma", json!({})).await;
+    let (s, b) = call(
+        &e,
+        "POST",
+        "/v1/apps/installed/uptime-kuma/uninstall",
+        Some(json!({"delete_data": true})),
+    )
+    .await;
+    assert_eq!(
+        (s, err(&b).code.as_str()),
+        (StatusCode::BAD_REQUEST, error_codes::CONFIRMATION_REQUIRED)
+    );
+    let (s, b) = call(&e, "POST", "/v1/apps/installed/uptime-kuma/uninstall", None).await;
+    let t: TaskStarted = json_of(s, &b);
+    let (info, log) = wait_task(&e, &t.task_id).await;
+    assert_eq!(info.status, TaskStatus::Ok, "{log}");
+    assert!(
+        log.contains(" down (dry system: not run)") && log.contains("stays"),
+        "{log}"
+    );
+    assert!(e.stack("uptime-kuma").join("compose.yaml").is_file());
+    assert!(e.stack("uptime-kuma").join(".env").is_file());
+}

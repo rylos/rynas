@@ -241,6 +241,10 @@ pub struct DockerSettings {
     /// The manager the UI links first.
     #[serde(default)]
     pub preferred_manager: Option<ManagerKind>,
+    /// App catalogue: a faster (SSD) volume label where the install wizard suggests placing
+    /// the folders an entry marks `ssd` (databases); `None`: no suggestion.
+    #[serde(default)]
+    pub apps_ssd_volume: Option<String>,
 }
 
 fn default_keep() -> u32 {
@@ -259,6 +263,7 @@ impl Default for DockerSettings {
             crash_restarts: default_restarts(),
             crash_window_min: default_window(),
             preferred_manager: None,
+            apps_ssd_volume: None,
         }
     }
 }

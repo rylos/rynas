@@ -11,6 +11,7 @@ rynas-api-types.workspace = true
 rynas-nut.workspace = true
 rynas-removable.workspace = true
 rynas-docker.workspace = true
+rynas-apps.workspace = true
 rynas-auth.workspace = true
 rynas-http.workspace = true
 rynas-storage.workspace = true
