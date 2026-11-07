@@ -40,6 +40,7 @@ pub enum AppCategory {
     Productivity,
     Security,
     HomeAutomation,
+    Surveillance,
     Monitoring,
     Network,
     Sync,

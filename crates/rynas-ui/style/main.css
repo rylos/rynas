@@ -1752,6 +1752,7 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .app-icon-none { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; color: var(--text-subtle); }
 .app-sum { margin: 0; color: var(--text-muted); font-size: var(--fs-13); flex: 1; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .app-card-foot { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: var(--s-2); margin-top: auto; }
+.app-card .status { height: auto; min-height: 22px; max-width: 100%; white-space: normal; line-height: 1.3; }
 .app-detail { display: flex; flex-direction: column; gap: var(--s-3); min-width: 0; }
 .app-detail h4.mini-title { margin: var(--s-2) 0 0; }
 .md { font-size: var(--fs-14); overflow-wrap: anywhere; }

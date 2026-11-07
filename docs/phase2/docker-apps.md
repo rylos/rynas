@@ -1184,7 +1184,7 @@ Any other file is an error. `<id>` is `[a-z0-9][a-z0-9-]*`, at most 40 character
 | `description` | one line (≤ 140 characters) for the card |
 | `homepage`, `source`, `changelog_url` | `https://` URLs (`source` optional) |
 | `license` | SPDX expression of upstream |
-| `maintainers`, `categories`, `arch` | non-empty; categories from a fixed list (`management`, `media`, `photos`, `files`, `documents`, `productivity`, `security`, `home-automation`, `monitoring`, `network`, `sync`, `development`, `backup`, `ai`); arch `amd64` / `arm64` |
+| `maintainers`, `categories`, `arch` | non-empty; categories from a fixed list (`management`, `media`, `photos`, `files`, `documents`, `productivity`, `security`, `home-automation`, `surveillance`, `monitoring`, `network`, `sync`, `development`, `backup`, `ai`); arch `amd64` / `arm64` |
 | `min_rynas` | oldest rynas that may install it |
 | `antifeatures` | `non-free`, `high-resources` (exactly when `ram_recommended_mb` > 2048), `needs-gpu` (required with `hardware.gpu = "required"`), `telemetry`, `unmaintained`, `requires-https`, `root-access` (required for managers, privileged services and socket mounts) |
 | `main_service` | the service that is "the app" |

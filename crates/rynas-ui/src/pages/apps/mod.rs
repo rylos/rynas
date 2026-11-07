@@ -244,6 +244,7 @@ pub(super) fn category_key(c: AppCategory) -> &'static str {
         C::Productivity => "apps.cat.productivity",
         C::Security => "apps.cat.security",
         C::HomeAutomation => "apps.cat.home_automation",
+        C::Surveillance => "apps.cat.surveillance",
         C::Monitoring => "apps.cat.monitoring",
         C::Network => "apps.cat.network",
         C::Sync => "apps.cat.sync",
@@ -253,7 +254,7 @@ pub(super) fn category_key(c: AppCategory) -> &'static str {
     }
 }
 
-pub(super) const CATEGORIES: [AppCategory; 14] = [
+pub(super) const CATEGORIES: [AppCategory; 15] = [
     AppCategory::Management,
     AppCategory::Media,
     AppCategory::Photos,
@@ -262,6 +263,7 @@ pub(super) const CATEGORIES: [AppCategory; 14] = [
     AppCategory::Productivity,
     AppCategory::Security,
     AppCategory::HomeAutomation,
+    AppCategory::Surveillance,
     AppCategory::Monitoring,
     AppCategory::Network,
     AppCategory::Sync,

@@ -120,6 +120,7 @@ pub enum Category {
     Productivity,
     Security,
     HomeAutomation,
+    Surveillance,
     Monitoring,
     Network,
     Sync,
