@@ -1363,6 +1363,7 @@ kbd {
   .table tr { padding: var(--s-2) var(--card-pad); border-bottom: 1px solid var(--border); }
   .table td { display: flex; justify-content: space-between; align-items: center; gap: var(--s-3); height: auto; min-height: 28px; padding: var(--s-1) 0; border: 0; white-space: normal; text-align: right; }
   .table td::before { content: attr(data-label); color: var(--text-subtle); font-size: var(--fs-12); text-align: left; }
+  .wa-routes td::before { flex: 0 0 auto; max-width: 45%; }
   .usage-cell { width: 60%; }
   .pending-actions { width: 100%; justify-content: flex-end; }
   .pending-keys { display: none; }
@@ -1788,3 +1789,19 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
   .app-steps li.current { flex: 1 1 auto; }
   .app-steps .step-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 }
+
+/* web access and certificate */
+.wa-urls { display: flex; flex-direction: column; gap: var(--s-1); min-width: 0; overflow-wrap: anywhere; }
+.wa-radios { display: flex; flex-direction: column; gap: var(--s-3); }
+.wa-off { cursor: not-allowed; opacity: .75; }
+.wa-help { max-width: 80ch; margin: 0; }
+.wa-confirm { border-color: var(--warning); }
+.wa-checks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--s-2); }
+.wa-check { display: flex; align-items: flex-start; gap: var(--s-3); padding: var(--s-2) var(--s-3); border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface-2); min-width: 0; overflow-wrap: anywhere; }
+.wa-check-icon { flex: none; display: inline-flex; padding-top: var(--s-half); color: var(--tone); }
+.tls-os { display: flex; flex-direction: column; gap: var(--s-1); }
+.tls-step summary { cursor: pointer; font-size: var(--fs-13); font-weight: 500; padding: var(--s-1) 0; }
+.tls-step ol { margin-top: var(--s-1); list-style: decimal; }
+.tls-pem { min-height: 120px; }
+.tls-file { align-self: flex-start; cursor: pointer; }
+.app-url { overflow-wrap: anywhere; color: var(--text-muted); }

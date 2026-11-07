@@ -2812,7 +2812,6 @@ apps.w.s_options	Opzioni
 apps.w.s_folders	Cartelle e condivisioni
 apps.w.s_network	Rete
 apps.w.s_access	Accesso
-apps.w.access_soon	Nomi e livelli di accesso dell'indirizzo web arrivano con le impostazioni dell'accesso web.
 apps.w.stack_help	La cartella e il progetto compose dell'app; non si può cambiare in seguito.
 apps.w.stack_dir	L'app va in {path}.
 apps.w.no_folders	Questa app non ha bisogno di cartelle né di cartelle condivise.
@@ -2832,12 +2831,6 @@ apps.w.port_used	La porta {port} è occupata
 apps.w.port_fixed_used	La porta {port} è occupata e questa app non può spostarla.
 apps.w.use_port	Usa {port}
 apps.w.check_again	Controlla di nuovo
-apps.w.publish	Pubblica sulla LAN
-apps.w.publish_help	L'accesso web non è attivo: la porta web dell'app si apre su ogni indirizzo del NAS.
-apps.w.publish_help_proxy	Spento: solo l'accesso web raggiunge l'app, al suo indirizzo. Acceso: la sua porta si apre anche sulla LAN.
-apps.w.reach_lan	Raggiungibile su {url}
-apps.w.reach_proxy	Raggiungibile solo tramite l'accesso web.
-apps.w.web_url	Indirizzo dell'accesso web: {url}
 apps.w.errors	Correggi prima queste risposte:
 apps.w.folder	Cartella
 apps.w.version	Versione del catalogo
@@ -2884,6 +2877,173 @@ apps.inst.no_snaps	Ancora nessuna istantanea: il primo aggiornamento ne crea una
 apps.in_docker	Mostra in Docker
 apps.proxy	Sposta dietro il proxy
 apps.proxy_text	La porta web dell'app ascolterà solo sul NAS e l'accesso web riceve un percorso verso di essa, con un proprio indirizzo e HTTPS. Lo stack si riavvia.
+apps.w.access_how	Come si raggiunge l'app
+apps.w.access_proxy	Tramite l'accesso web (consigliato)
+apps.w.access_proxy_help	HTTPS all'indirizzo proprio dell'app, solo per i dispositivi ammessi dall'accesso web. La sua porta resta chiusa sulla LAN.
+apps.w.access_lan	Direttamente sulla porta LAN
+apps.w.access_lan_help	La porta {port} si apre su ogni indirizzo del NAS, senza HTTPS e senza le regole di accesso.
+apps.w.access_url_pending	L'indirizzo compare quando il piano è pronto.
+apps.w.access_level	Chi può collegarsi (questa rete, di default) si cambia in seguito nella pagina
+apps.w.access_inactive	L'accesso web non è attivo, quindi l'app si apre direttamente sulla sua porta LAN: {url}. Con l'accesso web attivo le app hanno un proprio indirizzo HTTPS.
+apps.w.access_enable	Attiva l'accesso web
+apps.proxy_url	Nuovo indirizzo: {url}
+apps.proxy_more	Chi può collegarsi e le verifiche dell'indirizzo sono nella pagina
+wa.title	Accesso web
+wa.subtitle	Indirizzi HTTPS per l'interfaccia e le app, e chi può raggiungerli
+wa.open_text	Indirizzi dell'interfaccia e delle app, livelli di accesso, certificato
+wa.tab.overview	Panoramica
+wa.tab.routes	Indirizzi delle app
+wa.eng.title	Motore del proxy
+wa.eng.state	Stato
+wa.eng.not_installed	Non installato
+wa.eng.running	In esecuzione
+wa.eng.out_of_sync	Usa una configurazione vecchia
+wa.eng.in_sync	Aggiornata
+wa.eng.sync	Configurazione
+wa.eng.last_load	Ultimo caricamento
+wa.eng.never	Mai
+wa.eng.sync_now	Controlla e ricarica
+wa.eng.last_error	L'ultimo caricamento non è riuscito:
+wa.eng.missing_text	Il pacchetto rynas-caddy non è installato. Le impostazioni qui sotto vengono conservate e usate appena lo è.
+wa.ui.title	Questa interfaccia
+wa.ui.urls	Indirizzi
+wa.ui.external	Solo l'indirizzo di emergenza (modalità proxy esterno)
+wa.ui.access	Chi può aprire l'interfaccia
+wa.ui.ports	Porte
+wa.ui.ports_val	HTTPS {https}, HTTP {http} (rimanda a HTTPS)
+wa.ui.lan	Intervalli della rete
+wa.ui.vpn	Intervalli VPN
+wa.ui.emergency	Indirizzo di emergenza, servito sempre da rynas e mai tramite il proxy. Tienilo nei preferiti:
+wa.set.title	Impostazioni
+wa.mode	Modalità
+wa.mode.builtin	Proxy integrato
+wa.mode.external	Proxy esterno
+wa.mode.builtin_help	rynas usa il proxy sulle porte 80 e 443: l'interfaccia e le app hanno indirizzi HTTPS con regole di accesso.
+wa.mode.external_help	Le porte 80 e 443 restano libere per un proxy che installi tu come app. Il proxy integrato si ferma, le app tengono solo le porte LAN e l'interfaccia si raggiunge all'indirizzo di emergenza.
+wa.set.local_names	Nomi locali (.local)
+wa.set.local_names_help	Ogni app riceve un nome come app-nas.local, annunciato in rete con mDNS.
+wa.set.h3	HTTP/3
+wa.set.h3_help	Connessioni più rapide sulla porta UDP 443 per i browser che lo supportano.
+wa.access.lan	Questa rete
+wa.access.lan_vpn	Questa rete e VPN
+wa.access.public	Chiunque su internet
+wa.access.lan_help	I dispositivi delle reti a cui è collegato il NAS.
+wa.access.lan_vpn_help	Anche i dispositivi collegati tramite Tailscale o WireGuard.
+wa.access.public_help	Arriva più avanti, con una lista di controlli e una conferma dedicate.
+wa.soon	In arrivo
+wa.change.title	Cambiare come si raggiunge l'interfaccia?
+wa.change.timed	Dopo il salvataggio, apri l'interfaccia al nuovo indirizzo e conferma lì entro 2 minuti. Senza conferma tornano da sole le impostazioni precedenti. L'indirizzo di emergenza {url} continua a funzionare.
+wa.change.external	Il proxy integrato si ferma: gli indirizzi .local dell'interfaccia e gli indirizzi HTTPS delle app smettono di funzionare. Da ora usa l'indirizzo di emergenza {url}.
+wa.confirm.title	Conferma il nuovo indirizzo
+wa.confirm.text	L'indirizzo dell'interfaccia è cambiato. Aprilo e conferma lì: mancano {s} s.
+wa.confirm.rollback	Senza conferma le impostazioni precedenti tornano da sole allo scadere del tempo. La porta {port} (l'indirizzo di emergenza) non cambia mai.
+wa.confirm.open	Apri {name}
+wa.confirm.go	Conferma
+wa.confirm.done	Nuovo indirizzo confermato.
+wa.col.app	App
+wa.col.address	Indirizzo
+wa.col.access	Chi può collegarsi
+wa.kind.app	App
+wa.kind.stack	Stack
+wa.kind.custom	Altro dispositivo
+wa.route.on	Pubblicato
+wa.route.off	Spento
+wa.route.test	Verifica
+wa.route.test_named	Verifica {name}
+wa.route.title	Indirizzo di {name}
+wa.route.gone	Questo indirizzo non esiste più.
+wa.route.names	Nomi
+wa.route.upstream	Inoltrato a
+wa.route.kind	Tipo
+wa.route.login	Accesso
+wa.route.headers	Intestazioni di sicurezza
+wa.route.enabled	Indirizzo attivo
+wa.route.enabled_help	Spento: il proxy chiude le connessioni a questo nome; l'app resta in esecuzione.
+wa.route.auth_none	Questa app non ha un accesso proprio, quindi resta limitata a questa rete.
+wa.auth.app	L'accesso proprio dell'app
+wa.auth.none	Nessuno
+wa.headers.default	Standard (niente incorporamento da altri siti)
+wa.headers.relaxed	Permissive (incorporamento ammesso)
+wa.routes.empty	Ancora nessun indirizzo di app
+wa.routes.empty_text	Le app installate tramite l'accesso web ricevono qui un indirizzo; quelle già installate si spostano dietro il proxy dalla loro scheda.
+wa.routes.external	Modalità proxy esterno: questi indirizzi non sono serviti finché il proxy integrato non torna attivo.
+wa.mdns	Un nome .local richiede mDNS anche sul dispositivo che lo apre. Windows 10 e successivi, macOS, iOS, Android 12 e successivi e la maggior parte dei desktop Linux lo hanno; altrove usa l'indirizzo di emergenza o una voce DNS sul router.
+wa.prob.name_too_long	Il nome supera i 63 caratteri: accorcia il nome dello stack dell'app.
+wa.prob.local_names_off	I nomi locali sono spenti: questo percorso non ha un indirizzo.
+wa.prob.disabled	L'indirizzo è spento.
+wa.prob.name_collision	Un altro dispositivo in rete usa già questo nome.
+wa.prob.name_unpublished	Non è stato possibile annunciare il nome: Avahi non è in esecuzione o lo ha rifiutato.
+wa.test.title	Verifiche
+wa.test.text	Controlla ogni passo dal nome all'app, sul NAS, e dice cosa correggere.
+wa.test.at	Verificato {when}
+wa.cs.ok	OK
+wa.cs.warn	Avviso
+wa.cs.fail	Non riuscita
+wa.cs.skipped	Saltata
+wa.check.local_name	Nome annunciato in rete
+wa.check.dns	Il nome si risolve sul NAS
+wa.check.proxy_running	Il proxy risponde
+wa.check.route_loaded	Indirizzo caricato nel proxy
+wa.check.https_listening	Porta HTTPS aperta
+wa.check.certificate	Il certificato copre il nome
+wa.check.upstream	L'app risponde
+wa.fix.local_name	Un altro dispositivo potrebbe usare questo nome, oppure Avahi non è in esecuzione. Rinomina il dispositivo o lo stack dell'app, poi usa Controlla e ricarica.
+wa.fix.dns	Il NAS non risolve il nome. Controlla che Avahi sia in esecuzione e che i nomi locali siano attivi.
+wa.fix.proxy_running	Il proxy non risponde. Usa Controlla e ricarica; se resta fermo, guarda il registro del servizio rynas-caddy.
+wa.fix.route_loaded	Il proxy in esecuzione non ha ancora questo indirizzo. Usa Controlla e ricarica.
+wa.fix.https_listening	Sulla porta HTTPS non risponde nulla: un altro programma potrebbe occupare la porta 443, o il proxy è fermo.
+wa.fix.certificate	Il certificato non copre questo nome o è scaduto. Usa Controlla e ricarica per emetterne uno nuovo.
+wa.fix.upstream	L'app non risponde sulla sua porta. Controlla nella pagina Docker che i suoi container siano in esecuzione e abbiano finito di avviarsi.
+tls.title	Certificato
+tls.open_text	Il certificato HTTPS dell'interfaccia e come i dispositivi si fidano di questo NAS
+tls.active	Certificato attivo
+tls.source.local	Certificato locale
+tls.source.imported	Certificato importato
+tls.https_port	Usato anche dalla porta di emergenza 8443
+tls.subject	Soggetto
+tls.issuer	Emesso da
+tls.names	Nomi coperti
+tls.addresses	Indirizzi coperti
+tls.valid_from	Valido dal
+tls.valid_until	Valido fino al
+tls.days_left	mancano {n} giorni
+tls.fingerprint	Impronta SHA-256
+tls.key_type	Chiave
+tls.chain	Certificati intermedi
+tls.local_ca	Fidati di questo NAS
+tls.no_ca	Non c'è ancora un'autorità di certificazione locale.
+tls.download_ca	Scarica la CA locale
+tls.trust_help	I browser avvisano su questo NAS finché un dispositivo non si fida della sua autorità di certificazione locale. Installala una volta per dispositivo: copre l'interfaccia e tutti gli indirizzi delle app, anche dopo un rinnovo.
+tls.trust_check	Prima di installarla, confronta l'impronta qui sopra con quella mostrata dal dispositivo.
+tls.os.windows	Windows
+tls.os.macos	macOS
+tls.os.ios	iPhone e iPad
+tls.os.android	Android
+tls.os.linux	Linux
+tls.os.firefox	Firefox
+tls.trust.windows	Apri il file scaricato e scegli Installa certificato | Percorso archivio: Computer locale | Colloca tutti i certificati nel seguente archivio: Autorità di certificazione radice attendibili | Fine, poi riavvia il browser
+tls.trust.macos	Apri il file scaricato: Accesso Portachiavi lo aggiunge | Fai doppio clic sul certificato (rynas local CA) | Fidati: Quando si usa questo certificato, Fidati sempre | Chiudi la finestra e conferma con la password
+tls.trust.ios	Scarica il file con Safari e consenti il profilo | Impostazioni, Generali, VPN e gestione dispositivi: installa il profilo scaricato | Impostazioni, Generali, Info, Impostazioni certificati attendibili: attiva l'attendibilità completa per rynas local CA
+tls.trust.android	Impostazioni, Sicurezza e privacy, Altre impostazioni di sicurezza, Crittografia e credenziali (i nomi variano per produttore) | Installa un certificato, Certificato CA, Installa comunque | Scegli il file scaricato. I browser lo accettano; alcune app usano solo il proprio elenco
+tls.trust.linux	Debian, Ubuntu: sudo cp rynas-local-ca.crt /usr/local/share/ca-certificates/ && sudo update-ca-certificates | Fedora, Arch: sudo trust anchor rynas-local-ca.crt | Chrome su Linux legge un archivio proprio: Impostazioni, Privacy e sicurezza, Sicurezza, Gestisci certificati, Autorità, Importa
+tls.trust.firefox	Impostazioni, Privacy e sicurezza, Certificati, Mostra certificati | Autorità, Importa: scegli il file scaricato | Spunta Considera attendibile questa CA per l'identificazione di siti web
+tls.import	Importa un certificato
+tls.import.certificate	Certificato (PEM)
+tls.import.private_key	Chiave privata (PEM)
+tls.import.hint	Incolla o carica la catena completa, con il certificato del server per primo, e la sua chiave privata senza password.
+tls.import.file	Carica da un file
+tls.use_local	Usa il certificato locale
+tls.use_local.confirm	Il certificato importato viene messo da parte e torna in uso quello locale, dell'autorità di questo NAS.
+tls.warn.expires_soon	Il certificato scade fra meno di 30 giorni.
+tls.warn.expired	Il certificato è scaduto: i browser lo rifiutano.
+tls.warn.names_not_covered	Alcuni nomi e indirizzi di questo NAS non sono nel certificato.
+tls.warn.chain_incomplete	Mancano i certificati intermedi: alcuni dispositivi non si fideranno. Importa la catena completa.
+tls.missing_names	Non coperti:
+tls.reload_note	La pagina si ricollega con il nuovo certificato; un browser che si fidava del precedente potrebbe chiedere di nuovo.
+docker.install_incomplete	Un'installazione precedente di Docker non è terminata: {n} pacchetti sono installati a metà.
+docker.install_incomplete_hint	Il completamento li ripara e termina l'installazione.
+docker.install_unfinished	All'installazione di Docker avviata da rynas mancano gli ultimi passi (il blocco della versione o l'account docker-apps).
+docker.install_finish	Completa l'installazione di Docker
 apps.convert	Converti in stack personalizzato…
 apps.convert_go	Converti
 apps.conv.title	Converti {name} in uno stack personalizzato

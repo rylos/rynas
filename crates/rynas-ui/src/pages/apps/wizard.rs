@@ -17,16 +17,12 @@ use rynas_api_types::ShareView;
 use super::catalog::{intent_text, notes_view, ssd_key};
 use super::{AppDetail, apps, ram_pill};
 use crate::api::{self, DETAIL_SEP};
-use crate::form::{In, form_error, spinner, switch, text_field};
+use crate::form::{In, form_error, spinner, text_field};
 use crate::i18n::{t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::schema_form::{self, Errors, SchemaForm, Values};
 use crate::tasks::TaskRun;
 use crate::ui::{self, DlgKind, Remote, Tone};
-
-/// The Access step (names and access levels of the web access route) arrives with the web
-/// access UI; until then the step is left out.
-const ACCESS_STEP: bool = false;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Step {
@@ -35,15 +31,6 @@ enum Step {
     Network,
     Access,
     Review,
-}
-
-fn steps() -> Vec<Step> {
-    let mut v = vec![Step::Options, Step::Folders, Step::Network];
-    if ACCESS_STEP {
-        v.push(Step::Access);
-    }
-    v.push(Step::Review);
-    v
 }
 
 fn step_key(s: Step) -> &'static str {
@@ -106,8 +93,20 @@ struct W {
 }
 
 impl W {
+    /// The Access step exists for apps with a web interface on their own ports.
+    fn steps(self) -> Vec<Step> {
+        let access = self.detail.data.with(|d| d.as_ref().is_some_and(|d| d.web.is_some() && !d.host_network));
+        let mut v = vec![Step::Options, Step::Folders, Step::Network];
+        if access {
+            v.push(Step::Access);
+        }
+        v.push(Step::Review);
+        v
+    }
+
     fn cur(self) -> Step {
-        steps()[self.step.get().min(steps().len() - 1)]
+        let s = self.steps();
+        s[self.step.get().min(s.len() - 1)]
     }
 
     fn request(self) -> AppInstallRequest {
@@ -184,7 +183,8 @@ impl W {
                 self.reveal.set(true);
             } else {
                 self.reveal.set(false);
-                self.step.update(|i| *i = (*i + 1).min(steps().len() - 1));
+                let n = self.steps().len();
+                self.step.update(|i| *i = (*i + 1).min(n - 1));
             }
         })));
     }
@@ -270,7 +270,7 @@ fn wizard_body(w: W) -> AnyView {
     let cur = w.cur();
     view! {
         <ol class="stepper app-steps" aria-label=tr("wiz.steps")>
-            {steps().into_iter().enumerate().map(|(i, s)| view! {
+            {w.steps().into_iter().enumerate().map(|(i, s)| view! {
                 <li class=move || { let c = w.step.get(); if c == i { "current" } else if c > i { "done" } else { "" } }
                     aria-current=move || (w.step.get() == i).then_some("step")>
                     <span class="step-num">{move || if w.step.get() > i { view! { <Icon icon=icons::CHECK size=12 /> }.into_any() } else { (i + 1).to_string().into_any() }}</span>
@@ -283,7 +283,7 @@ fn wizard_body(w: W) -> AnyView {
                 Step::Options => options(w),
                 Step::Folders => folders(w),
                 Step::Network => network(w),
-                Step::Access => ui::note(Tone::Info, icons::INFO, ui::text(t("apps.w.access_soon").to_string())),
+                Step::Access => access(w),
                 Step::Review => review(w),
             }}
         </div>
@@ -305,7 +305,7 @@ fn wizard_foot(w: W, a: super::Apps, close: Callback<()>) -> AnyView {
         }
         .into_any();
     }
-    let last = w.step.get() + 1 == steps().len();
+    let last = w.step.get() + 1 == w.steps().len();
     let first = w.step.get() == 0;
     let ok = w.plan.with(|p| p.as_ref().is_some_and(|p| p.ok));
     view! {
@@ -534,28 +534,59 @@ fn network(w: W) -> AnyView {
                 ])
             })
             .collect::<Vec<_>>();
-        let proxy_active = p.proxy_active;
-        let lan = Signal::derive(move || w.publish.get().unwrap_or(!proxy_active));
-        let web_port = p.ports.iter().find(|x| x.proxied).map(|x| x.port);
-        let lan_url = web_port.map(|port| super::host_url(port, "/"));
-        let has_proxied = p.ports.iter().any(|x| x.proxied);
         view! {
             {if host_network { Some(ui::note(Tone::Info, icons::INFO, ui::text(t("apps.w.host_network").to_string()))) } else { None }}
             {if rows.is_empty() { view! { <p class="muted small">{tr("apps.w.no_ports")}</p> }.into_any() } else { ui::table("app-ports", &["apps.col.purpose", "apps.col.port", "apps.col.reach"], rows) }}
-            {(has_proxied && !host_network).then(|| view! {
-                {switch("apps.w.publish", Some(if proxy_active { "apps.w.publish_help_proxy" } else { "apps.w.publish_help" }), lan, Callback::new(move |v| { w.publish.set(Some(v)); w.replan(None); }))}
-                {move || if lan.get() {
-                    lan_url.clone().map(|u| ui::note(Tone::Info, icons::NETWORK, ui::text(tf("apps.w.reach_lan", &[("url", &u)]))))
-                } else if proxy_active {
-                    Some(ui::note(Tone::Info, icons::SHIELD_CHECK, ui::text(t("apps.w.reach_proxy").to_string())))
-                } else {
-                    Some(ui::note(Tone::Warn, icons::TRIANGLE_ALERT, ui::text(t("apps.warn.proxy_inactive").to_string())))
-                }}
-                {p.web_url.clone().map(|u| ui::note(Tone::Ok, icons::LINK, ui::text(tf("apps.w.web_url", &[("url", &u)]))))}
-            })}
             <div class="sec-actions">
                 <button type="button" class="btn ghost sm" disabled=move || w.planning.get() on:click=move |_| w.replan(None)>{spinner(w.planning)}<Icon icon=icons::REFRESH_CW size=14 />{tr("apps.w.check_again")}</button>
             </div>
+        }
+        .into_any()
+    };
+    view! { {content} }.into_any()
+}
+
+/// Access: through web access (loopback + a route, HTTPS at its own name) or directly on
+/// the LAN port. Unset follows the server's default (web access when it is active, §7).
+fn access(w: W) -> AnyView {
+    let content = move || {
+        let Some(p) = w.plan.get() else { return ui::loading(Signal::stored(None), Callback::new(move |_| w.replan(None)), 4) };
+        let proxy_active = p.proxy_active;
+        let web_port = p.ports.iter().find(|x| x.proxied).map(|x| x.port);
+        let lan_url = web_port.map(|port| super::host_url(port, "/")).unwrap_or_default();
+        let lan = Signal::derive(move || w.publish.get().unwrap_or(!proxy_active));
+        if !proxy_active {
+            return ui::note(Tone::Info, icons::NETWORK, view! {
+                <span>{tf("apps.w.access_inactive", &[("url", &lan_url)])}" "<a href="/network/web-access">{tr("apps.w.access_enable")}</a></span>
+            }.into_any());
+        }
+        let opt = move |on_lan: bool, label: &'static str, help: String, url: String| {
+            view! {
+                <label class="net-radio">
+                    <input type="radio" name="app-access" prop:checked=move || lan.get() == on_lan on:change=move |_| { w.publish.set(Some(on_lan)); w.replan(None); } />
+                    <span class="switch-text">
+                        <span class="switch-label">{tr(label)}</span>
+                        <span class="field-help">{help}</span>
+                        <span class="mono small app-url">{url}</span>
+                    </span>
+                </label>
+            }
+        };
+        let future = p.web_url.clone().or_else(|| super::proxy_url(&p.stack, &apps().proxy_host.get_untracked())).unwrap_or_else(|| t("apps.w.access_url_pending").to_string());
+        let port = web_port.map(|p| p.to_string()).unwrap_or_default();
+        view! {
+            <fieldset class="fieldset">
+                <legend class="field-label">{tr("apps.w.access_how")}</legend>
+                <div class="wa-radios">
+                    {opt(false, "apps.w.access_proxy", t("apps.w.access_proxy_help").to_string(), future)}
+                    {opt(true, "apps.w.access_lan", tf("apps.w.access_lan_help", &[("port", &port)]), lan_url)}
+                </div>
+            </fieldset>
+            {move || if lan.get() {
+                ui::note(Tone::Warn, icons::TRIANGLE_ALERT, ui::text(t("apps.warn.published_on_lan").to_string()))
+            } else {
+                view! { <p class="small muted">{tr("apps.w.access_level")}" "<a href="/network/web-access">{tr("wa.title")}</a></p> }.into_any()
+            }}
         }
         .into_any()
     };

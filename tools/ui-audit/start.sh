@@ -19,6 +19,11 @@
 # Without FAKE_DOCKER rynasd never contacts a Docker socket (not even the host's).
 # The app catalogue is the repository's apps/ (rynasd --apps-dir), so the Apps & Plugins page
 # shows the curated entries; installs under --dry-system only create files below the dry root.
+# FAKE_CADDY=1: a fake admin socket of the web access proxy (fakecaddy.py on $R/caddy-admin.sock:
+# GET /config/ and POST /load only, no Caddy, no port) so the Web access page shows the engine
+# installed and running and rynasd applies its defaults; FAKE_CADDY=refuse answers every load
+# with an error (the "last load failed" state). Without it rynasd sees no proxy (the socket
+# path below the instance folder does not exist), never the host's.
 # GENERIC=1: a plain PC instead of the DS920+ (no Synology platform, no synohwd status), to check
 # that no Synology screen, tab or hint shows up on generic hardware (G8d).
 set -e
@@ -91,9 +96,17 @@ if [ -n "${ADMIN:-}" ] && [ -z "${FAKE_DOCKER:-}" ]; then
   USERS=$R/users.toml
   { cat "$HERE/users.toml"; printf '\n[[user]]\nname = "%s"\n' "$(id -un)"; grep '^hash' "$HERE/users.toml"; grep '^groups' "$HERE/users.toml"; } > "$USERS"
 fi
+CADDY_SOCK=$R/caddy-admin.sock
+rm -f "$CADDY_SOCK"
+if [ -n "${FAKE_CADDY:-}" ]; then
+  REFUSE=; [ "$FAKE_CADDY" = refuse ] && REFUSE=refuse
+  python3 -I "$HERE/fakecaddy.py" "$CADDY_SOCK" $REFUSE > "$R/fakecaddy.log" 2>&1 &
+  echo $! >> "$R/pids"
+  for _ in $(seq 30); do [ -S "$CADDY_SOCK" ] && break; sleep 0.1; done
+fi
 # any docker CLI rynasd might run reads the fake engine, never the host's
 DOCKER_HOST=unix://$R/docker.sock target/release/rynasd --socket "$R/rynasd.sock" --state-dir "$R/state" --dry-system --hw-root "$H" \
-  --notify-socket "" --storage-check-interval 0 --apps-dir "$REPO/apps" "${RYNASD_UPS[@]}" "${DOCKER_ARGS[@]}" ${FAKE_USB:+--removable-demo} > "$R/rynasd.log" 2>&1 &
+  --notify-socket "" --storage-check-interval 0 --apps-dir "$REPO/apps" --caddy-admin "$CADDY_SOCK" "${RYNASD_UPS[@]}" "${DOCKER_ARGS[@]}" ${FAKE_USB:+--removable-demo} > "$R/rynasd.log" 2>&1 &
 echo $! >> "$R/pids"; sleep 1.5
 target/release/rynas-web --listen "127.0.0.1:$PORT" --rynasd-socket "$R/rynasd.sock" --users-file "$USERS" \
   --auth-state-dir "$R/web" --ui-dir crates/rynas-ui/dist --hw-root "$H" "${UPSD_ARG[@]}" > "$R/web.log" 2>&1 &

@@ -852,6 +852,52 @@ The UI also needs texts for these closed sets:
 
 Check details and engine errors are English, shown as they are.
 
+#### UI notes W1 (rynas-ui, 2026-11-07)
+
+Where it lives: **Network › Web access** (`/network/web-access`, a link card on the Network
+page, a palette entry, and a "Certificate" card on System opening `?tab=certificate`), with
+three tabs: Overview (engine, this interface, settings), App addresses (routes) and
+Certificate (W0). The configuration is edited as JSON (`serde_json::Value`): the page changes
+only `settings.mode|local_names|h3|ui.access` and `routes[i].access|enabled` and sends the
+rest back, so no typed copy of the key's deserializer goes into the wasm. Saves follow A19b
+(PUT, then `/config/apply` with `web_access` only). The apps wizard has an Access step for
+entries with `[web]` (not for host networking): "Through web access (recommended)" with the
+plan's `web_url`, or "Directly on the LAN port"; `publish_lan` stays `null` until the
+administrator picks one. "Move behind the proxy" shows the resulting address
+(`<label>-<host>.local`, from `host` of the state). The Docker install card shows
+`install_incomplete` (package, version, dpkg status) and "Finish the Docker install"; the
+same card appears on the Overview tab for an install rynas started that lacks its last steps.
+
+Patterns taken, and complaints avoided:
+- one row per address with an access badge and a status, details in a drawer (Nginx Proxy
+  Manager's proxy hosts list); not NPM's tabbed host modal, where a hidden SSL tab blocked
+  the save without an error and the files drifted from what the UI showed (NPM issues #150,
+  #1753): one form, server state re-read after every save, drift shown as "running an older
+  configuration" with Check and load again;
+- the certificate as its own panel with subject, names, validity and the services using it
+  (DSM Control Panel › Security › Certificate), plus the local CA download and per-system
+  steps next to it (Proxmox and Cockpit leave this to the docs);
+- a per-route **Test** with a fix next to each failed step (Cloudflare Zero Trust's hostname
+  status; DSM gives no diagnostics at all);
+- access as a choice of who may connect, separate from the name (Unraid's per-container
+  Tailscale toggle, Cosmos' per-URL settings), with `public` visible but disabled until its
+  own flow (research §9) instead of a toggle that opens the app to the internet;
+- an "Open Web UI" link wherever an app is listed (Home Assistant add-ons);
+- the timed confirmation of the interface's own address, the same model as the network
+  trial apply (D-NET), with the emergency `:8443` address always shown; the lockout DSM and
+  ZimaOS users hit after moving the UI ports does not happen silently.
+
+Sources (2026-11-07): https://github.com/NginxProxyManager/nginx-proxy-manager/issues/150,
+https://github.com/NginxProxyManager/nginx-proxy-manager/issues/1753,
+https://github.com/NginxProxyManager/nginx-proxy-manager/issues/372, research §2 and §9.
+"Trust this NAS" steps: Windows certificate import wizard (Local Machine › Trusted Root
+Certification Authorities), macOS Keychain Access "Always Trust", iOS profile install then
+Settings › General › About › Certificate Trust Settings (an iOS 18 report: the toggle shows
+only after the profile is fully installed, https://community.start9.com/t/enable-trusted-certificate-on-iphone-ios-18/2051),
+Android Settings › Security › Encryption & credentials › Install a certificate › CA
+certificate (menu names vary by maker; apps may ignore user CAs), Debian
+`update-ca-certificates`, Fedora/Arch `trust anchor`, Firefox's own Authorities store.
+
 #### Not in W1
 
 - **W2:** domains, credentials, DNS-01 wildcard, DNS records managed by rynas, rebind

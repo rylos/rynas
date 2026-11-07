@@ -28,7 +28,7 @@ features = [
   "Request", "RequestInit", "Response", "Headers", "AbortSignal",
   "ResizeObserver", "ResizeObserverEntry",
   "Blob", "BlobPropertyBag", "Url", "HtmlAnchorElement", "HtmlTextAreaElement", "HtmlDocument", "Clipboard",
-  "NodeList", "History",
+  "NodeList", "History", "File", "FileList",
 ]
 
 [features]
