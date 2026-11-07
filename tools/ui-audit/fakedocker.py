@@ -7,7 +7,9 @@ Serves the read endpoints bollard calls (/_ping, /version, /info, /containers/js
 - `media` (managed by rynas: working dir /volume1/docker/stacks/media), two services;
 - `monitoring` (Portainer's compose folder), one running and one stopped service;
 - `portainer` itself (a detected manager with its port);
-- `homeassist`, untracked and unhealthy; a standalone stopped container.
+- `homeassist`, untracked and unhealthy; a standalone stopped container;
+- `nextcloud`, made by hand in /volume1/docker/nextcloud with two compose files (one listed
+  relative, as compose may record it) and an `--env-file` (adoption, §5.7).
 
 Changes (start, stop, restart) answer 204 and change nothing: rynasd --dry-system never
 sends them anyway. Usage: fakedocker.py <socket> [--cgroups]. With --cgroups the running
@@ -49,6 +51,7 @@ IMAGES = {
     "portainer/portainer-ce:2.33.5": ("sha256:" + "a5" * 32, 280_000_000, "sha256:" + "b5" * 32),
     "ghcr.io/home-assistant/home-assistant:2026.11.1": ("sha256:" + "a6" * 32, 1_800_000_000, "sha256:" + "b6" * 32),
     "traefik/whoami:v1.11": ("sha256:" + "a7" * 32, 7_000_000, "sha256:" + "b7" * 32),
+    "nextcloud:31-apache": ("sha256:" + "a8" * 32, 1_400_000_000, "sha256:" + "b8" * 32),
 }
 # registry digests: jellyfin and grafana have a newer image
 REMOTE = {k: v[2] for k, v in IMAGES.items()}
@@ -70,6 +73,10 @@ C = [
          ports=ports((9443, 9443, "tcp"), (8000, 8000, "tcp")), labels={}),
     dict(n=6, name="homeassistant", image="ghcr.io/home-assistant/home-assistant:2026.11.1", state="running", status="Up 5 hours (unhealthy)",
          health="unhealthy", ports=[], labels=compose("homeassist", "homeassistant", "/srv/compose/homeassist")),
+    dict(n=8, name="nextcloud-app-1", image="nextcloud:31-apache", state="running", status="Up 2 days", health=None,
+         ports=ports((8080, 80, "tcp")), labels={**compose("nextcloud", "app", "/volume1/docker/nextcloud",
+                                                           "/volume1/docker/nextcloud/docker-compose.yml,docker-compose.override.yml"),
+                                                  "com.docker.compose.project.environment_file": "/volume1/docker/nextcloud/nextcloud.env"}),
     dict(n=7, name="whoami", image="traefik/whoami:v1.11", state="exited", status="Exited (2) 6 days ago", health=None, ports=[], labels={}),
 ]
 

@@ -1730,6 +1730,188 @@ port-only name to its port.
   busy-port check; the engine then refuses the load and the apply fails with Caddy's message.
 - Custom request/response headers (beyond `Host`) and prefix stripping are not offered.
 
+### 5.7 Adopting existing compose stacks (`/api/v1/docker/stacks/...`)
+
+Code: `crates/rynas-docker/src/adopt.rs` (records, path checks, folder scan, line scan of
+the compose files, hashes, writes that keep owner and mode, the bind check of a move),
+`crates/rynasd/src/docker_adopt.rs` (routes, the record held by `DockerSvc`, the move task),
+UI `crates/rynas-ui/src/pages/docker/adopt.rs`. Decision D-DOCKER-ADOPT.
+
+People who migrate a NAS bring many compose projects (20+ stacks with bind mounts under
+`/volume1/docker/...`), often still edited by another manager. rynas manages them **where
+they are**: nothing is moved or rewritten by default.
+
+#### Research (2026-11-07)
+
+- **Dockge** manages only folders inside its stacks folder (`/opt/stacks`, `DOCKGE_STACKS_DIR`).
+  To bring in an outside stack you stop it, move its compose file into
+  `/opt/stacks/<name>/compose.yaml` and press "Scan Stacks Folder". Its motto is that it
+  "won't kidnap your compose files" ([README/FAQ](https://github.com/louislam/dockge)).
+- **Dockhand** "adopts untracked stacks": you pick a folder and "Scan this folder" finds its
+  compose files. The files "remain in their original location … not copied". The name is
+  the top-level `name:`, else the folder name. A `dockhand.adopt=false` label opts a
+  stack out ([manual](https://dockhand.pro/manual/#stacks-import)).
+  - Bug fixed in 1.0.13: adopted stacks were deployed from Dockhand's own folder, so `./`
+    binds pointed to the wrong place
+    ([#293](https://github.com/Finsys/dockhand/issues/293)).
+  - `config_files` is a comma-separated list, sometimes relative
+    ([discussion 1612](https://github.com/Finsys/dockhand/discussions/1612)).
+- **Portainer** marks stacks it did not deploy as "Limited": you control their containers,
+  but you cannot edit or delete the stack itself
+  ([discussion 10858](https://github.com/orgs/portainer/discussions/10858)). Its own stacks
+  live at `/data/compose/<id>/docker-compose.yml` (plus `stack.env`) inside its data
+  volume ([discussion 11456](https://github.com/portainer/portainer/discussions/11456)).
+  There is no import; full control means redeploying through Portainer.
+- **Komodo** "files on host" stacks record `run_directory`, `file_paths` (several `-f`) and
+  `project_name`, which matches running projects by name
+  ([docs](https://komo.do/docs/deploy/compose)).
+- **Arcane** scans its projects folder. Projects found only through container labels are
+  "discovered" and unmanaged ([docs](https://getarcane.app/docs/features/projects)).
+- **Unraid Compose Manager** keeps an `indirect` file holding the path of an outside folder
+  ([compose_plugin#36](https://github.com/mstrhakr/compose_plugin/issues/36)).
+- **CasaOS** and **TrueNAS** ("Install via YAML") convert pasted compose files into their own
+  app format; existing projects are not adopted
+  ([TrueNAS docs](https://www.truenas.com/docs/scale/apps/installcustomappscreens)).
+- **Compose itself**:
+  - project name: `-p` > `COMPOSE_PROJECT_NAME` > the last top-level `name:` > folder
+    name ([docs](https://docs.docker.com/compose/how-tos/project-name/));
+  - relative paths resolve from the project directory, which defaults to the folder of the
+    first `-f` file ([CLI](https://docs.docker.com/reference/cli/docker/compose/));
+  - labels `project.working_dir`, `project.config_files` (comma-separated) and
+    `project.environment_file` (`--env-file`)
+    ([labels.go](https://sources.debian.org/src/docker-compose/2.26.1-4/pkg/api/labels.go));
+  - `docker compose ls --format json` gives `Name`, `Status`, `ConfigFiles`;
+  - profiles leave no label, and `external: true` networks must already exist.
+
+Ideas taken:
+- register the outside path without moving it (Dockhand, Komodo, Unraid);
+- candidates from both the labels and a folder scan;
+- the project name fixed with `-p`;
+- always deploy with the original folder as project directory (the Dockhand bug);
+- record the profiles, since labels do not;
+- detect outside edits by hash;
+- move only on an explicit action, the whole folder with its data, after checking the binds.
+
+#### The record
+
+`<state>/docker/adopted.json` (`0600`), one entry per stack name: `dir`, `files` (absolute,
+`-f` order), `env_files`, `profiles`, `origin` (the manager whose folder it looks like),
+`read_only`, `adopted_ms`, `hash` (SHA-256 of every file's path and content when adopted or
+last written by rynas). The stack name is the compose project name and is passed as `-p`,
+so a `name:` that differs is warned about, never silently followed.
+
+Compose runs as
+`docker compose -p <name> --project-directory <dir> -f <f1> -f <f2>… [--env-file <e>…] [--profile <p>…] <action>`
+(`compose_cmd_files`), so relative binds resolve exactly as they did before.
+
+After adoption the stack is listed among rynas's stacks:
+- `StackSummary.adopted: AdoptedInfo {dir, files, env_files, profiles, origin?, read_only,
+  adopted_ms, changed_outside}`;
+- `editable` is true when the main compose file and the env file are below `dir` and the
+  stack is not read-only;
+- the editor, `up`/`down`/`pull`/`update`, logs and the update check work as for native
+  stacks;
+- snapshots and rollback are off: the folder is not a rynas subvolume;
+- `up` creates no bind folder in someone else's tree. A missing one is logged, and compose
+  makes it as root, as before.
+
+#### Rules
+
+- **Nothing destructive by default.** Adopt, import and release never write in the
+  project folder. `remove` of an adopted stack runs `down` and releases it, and
+  `delete_files` is refused (400, `field: delete_files`).
+- **Portainer** (paths `/data/compose/<id>`, which live inside Portainer's container):
+  - the folder is mapped to `<mountpoint of a volume named *portainer*>/compose/<id>` when
+    it exists, else the dialog asks for the folder on this system;
+  - the stack is adopted **read-only**: view the files, start, stop, restart, logs and the
+    update check. Editing, `up` and `down` are refused (409 `stack_not_managed`), because
+    Portainer keeps its variables in its own database;
+  - "Move" copies the files into a rynas stack and leaves Portainer's folder alone.
+- **Two managers on the same files.** Dockge, Dockhand, Komodo and Arcane folders are
+  adopted writable, with a note that the other manager can still edit them:
+  - rynas writes atomically (temporary file and rename, no symlink followed, the old file's
+    owner and mode kept);
+  - every `GET /files` returns a `hash`, and a `PUT` carrying it is refused with 409
+    `conflict` (`field: hash`) when the files changed since: "reload them before saving".
+    The same check now protects native stacks;
+  - `changed_outside` in the listing says when the files differ from the recorded hash.
+- **Several `-f` files**: the editor edits the first one and the env file (the first
+  `--env-file`, else `<dir>/.env`). The others are listed as "also uses" and are part of
+  the validation (`compose config` with every file). A main file with a top-level
+  `include:`, or one outside the folder, makes the editor read-only.
+- **Paths**:
+  - absolute, no `.` or `..`, no control characters, at most 1024 bytes, at most 16
+    entries per list;
+  - folders under `/etc`, `/usr`, `/proc`, `/sys`, `/boot`, `/run` and other system trees
+    are refused, as is the rynas stacks folder itself;
+  - files must be regular files reached without symlinks, at most 512 KiB.
+- **Name conflicts**: a name that is a native stack folder or already adopted gives 409
+  `already_exists`. An import whose project name is used by containers of another folder
+  gives 409 `conflict` with `field: name`.
+
+#### Move to the rynas stacks folder
+
+This is an explicit action, typed-name confirmation, task `docker.stack.move`. It moves
+the **whole folder with its data**. Rewriting relative binds to absolute paths would change
+the user's file and leave the data behind, and relative paths exist precisely to follow the
+folder.
+
+1. `compose config` of the stack where it is: its binds.
+2. `down` when it has containers (named volumes `<project>_<vol>` survive: same `-p`).
+3. `/<vol>/docker/stacks/<name>` created as a subvolume, then
+   `cp -a --reflink=auto <dir>/. <new>/`.
+4. `compose config` in the new folder. Every bind must resolve to the same host path, or to
+   the copied place for sources inside the old folder (`check_moved_binds`). A `../shared`
+   bind fails the move: the copy is removed, the stack restarted where it was, and the
+   message asks for absolute paths.
+5. The record is dropped when the stack is now plain (one standard compose file, the
+   default `.env`, no profiles: a native rynas stack with snapshots). Otherwise it moves
+   to the new folder.
+6. The old folder is renamed `<dir>.moved-<stamp>` (Portainer's is left alone) and kept
+   until the administrator deletes it.
+7. `up` again when it ran.
+
+`--dry-system` logs the plan and changes nothing.
+
+#### Routes
+
+| Method | Path | Body | Answer |
+|---|---|---|---|
+| GET | `/docker/stacks/{name}/adopt` | — | `AdoptPreview` {name, dir, files, env_files, profiles_found, external_networks, name_in_file?, origin?, read_only, running, warnings [`other_manager\|portainer\|name_differs\|name_in_use\|external_networks\|profiles\|include\|outside_dir\|missing_file`]} from the labels. 404 without containers; 409 `already_exists` |
+| POST | `/docker/stacks/{name}/adopt` | optional `AdoptRequest` {dir?, files, env_files, profiles} (overrides) | 200 `StackAdopted` {name, adopted, task_id: null}. 400 `invalid_value` with `field` `dir`, `files`, `env_files` or `profiles` |
+| POST | `/docker/stacks/import/preview` | `ImportPreviewRequest` {dir} | `AdoptPreview` (files: the folder's compose file and its override; name: `name:`, else the folder name made valid). Works without a running engine |
+| POST | `/docker/stacks/import` | `ImportStackRequest` {dir, name?, files, env_files, profiles, start} | 201 `StackAdopted` (`task_id` of `docker.stack.up` with `start`). 409 `already_exists`, 409 `conflict` with `field: name` |
+| POST | `/docker/stacks/{name}/release` | — | 204; the record is deleted, files and containers untouched. 404 when not adopted |
+| POST | `/docker/stacks/{name}/move` | `MoveStackRequest` {confirm} | 202 (`docker.stack.move`). 400 `confirmation_required`; 400 `invalid_value` `field: volume` without a Docker volume; 409 `already_exists` when the target exists |
+
+rynas-web forwards `/docker/stacks/import`, `/import/preview` and `/{name}/adopt` (GET, POST); release and move ride on `/{name}/{action}`.
+
+`StackFiles` gains `hash` (GET; optional on PUT), `other_files` and `read_only`. Audit
+lines: `stack.adopt`, `stack.import`, `stack.release`, `stack.move`, `stack.edit`.
+
+#### UI (Docker › Stacks)
+
+- "Import folder" in the toolbar: a folder field, then Check shows the preview (files, env,
+  warnings), the name (editable), profiles when the files declare some, and "Start after
+  import".
+- In the drawer of a Portainer or untracked stack, **Adopt** opens the preview with the
+  same warnings. When the files are not found on this system (Portainer without its
+  volume), it asks for the folder on this system.
+- An adopted stack shows an "Adopted" chip, notes for files changed outside rynas,
+  read-only Portainer files or another manager, and **Move to stacks folder** and
+  **Release** in its action bar.
+- The editor shows "also uses" for the other `-f` files and becomes read-only when the
+  files cannot be written. It sends the hash it read: a 409 says the files changed
+  meanwhile.
+- i18n block `dk.ad.*`, `dk.im.*` (en + it).
+
+#### Open points
+
+- A `rynas.adopt=false` label to opt a stack out, like Dockhand's.
+- A diff view when the files changed outside rynas; today the editor reloads them.
+- Choosing which `-f` file the editor edits.
+- Adopting several stacks at once from a parent folder (a Dockhand-style "scan").
+
 ## 6. App catalog format (wave A1)
 
 Normative. Code: `crates/rynas-apps` (pure data in, files out; no Docker access). Entries:

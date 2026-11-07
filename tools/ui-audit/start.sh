@@ -89,6 +89,15 @@ services:
 YAML
   [ -f "$D/volume1/docker/stacks/media/.env" ] || printf 'PUID=1000\nPGID=1000\n' > "$D/volume1/docker/stacks/media/.env"
   [ -f "$D/volume1/docker/stacks/paperless/compose.yaml" ] || printf 'services:\n  broker:\n    image: redis:8\n    restart: unless-stopped\n' > "$D/volume1/docker/stacks/paperless/compose.yaml"
+  # projects to adopt (§5.7): hand-made, Portainer's data, untracked, a restored folder
+  NC=$D/volume1/docker/nextcloud; PD=$D/volume1/docker/engine/volumes/portainer_data/_data/compose/3
+  mkdir -p "$NC" "$PD" "$D/srv/compose/homeassist" "$D/volume1/restore/vaultwarden"
+  [ -f "$NC/docker-compose.yml" ] || printf 'services:\n  app:\n    image: nextcloud:31-apache\n    ports:\n      - "8080:80"\n    volumes:\n      - ./html:/var/www/html\n    networks: [proxy]\nnetworks:\n  proxy:\n    external: true\n' > "$NC/docker-compose.yml"
+  [ -f "$NC/docker-compose.override.yml" ] || printf 'services:\n  app:\n    restart: unless-stopped\n' > "$NC/docker-compose.override.yml"
+  [ -f "$NC/nextcloud.env" ] || printf 'TZ=Europe/Rome\n' > "$NC/nextcloud.env"
+  [ -f "$PD/docker-compose.yml" ] || printf 'services:\n  uptime-kuma:\n    image: louislam/uptime-kuma:2.0.2\n  grafana:\n    image: grafana/grafana:12.2.1\n' > "$PD/docker-compose.yml"
+  [ -f "$D/srv/compose/homeassist/compose.yaml" ] || printf 'services:\n  homeassistant:\n    image: ghcr.io/home-assistant/home-assistant:2026.11.1\n    network_mode: host\n' > "$D/srv/compose/homeassist/compose.yaml"
+  [ -f "$D/volume1/restore/vaultwarden/compose.yaml" ] || printf 'name: vaultwarden\nservices:\n  server:\n    image: vaultwarden/server:1.34.3\n    volumes:\n      - ./data:/data\n  backup:\n    image: busybox\n    profiles: [backup]\n' > "$D/volume1/restore/vaultwarden/compose.yaml"
   for _ in $(seq 30); do [ -S "$R/docker.sock" ] && break; sleep 0.1; done
   DOCKER_ARGS=(--docker-socket "$R/docker.sock" --admin-group "$(id -gn)")
   USERS=$R/users.toml

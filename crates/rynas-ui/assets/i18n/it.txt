@@ -2783,6 +2783,45 @@ dk.s.folder	Cartella
 dk.s.files	File compose
 dk.s.readonly	Questo stack è gestito fuori da rynas: qui si può solo avviare, fermare e riavviare.
 dk.s.no_folder	Manca la cartella dello stack: si può solo avviare, fermare e riavviare.
+dk.ad.adopt	Adotta
+dk.ad.title	Adotta {name}
+dk.ad.text	rynas gestirà questo stack nella sua cartella attuale: modifica, avvio, arresto, aggiornamenti. Niente viene spostato o riscritto.
+dk.ad.text_ro	Portainer continua a gestire questi file: rynas li mostra, avvia e ferma lo stack e controlla le sue immagini, ma non li modifica.
+dk.ad.env	File di ambiente
+dk.ad.env_default	.env della cartella
+dk.ad.dir	Cartella su questo sistema
+dk.ad.dir_help	La cartella con i file compose, come la vede questo sistema.
+dk.ad.profiles	Profili da avviare
+dk.ad.profiles_help	Nomi separati da virgole; i servizi con altri profili restano spenti.
+dk.ad.done	{name} ora è gestito da rynas
+dk.ad.w_other	{manager} può ancora modificare questi file: rynas si accorge delle modifiche fatte altrove.
+dk.ad.w_portainer	I file sono nei dati di Portainer: adottato in sola lettura.
+dk.ad.w_name	I file dicono name: {file}; rynas avvia lo stack come {name}.
+dk.ad.w_in_use	Container di un'altra cartella usano già il nome {name}: scegline un altro.
+dk.ad.w_networks	Le reti esterne devono esistere prima dell'avvio: {networks}
+dk.ad.w_profiles	Alcuni servizi partono solo con un profilo: {profiles}
+dk.ad.w_include	I file usano include:: lo stack funziona, ma i suoi file non si modificano qui.
+dk.ad.w_outside	Un file compose o di ambiente è fuori dalla cartella: lo stack funziona, ma i suoi file non si modificano qui.
+dk.ad.w_missing	I file compose non sono stati trovati su questo sistema: indica la cartella dove si trovano.
+dk.ad.changed	I file sono cambiati fuori da rynas dall'ultima lettura o scrittura.
+dk.ad.ro_note	Portainer gestisce questi file: qui lo stack si può avviare, fermare e riavviare, vederne i file e controllarne le immagini.
+dk.ad.chip	Adottato
+dk.ad.move	Sposta nella cartella stack
+dk.ad.move_title	Sposta {name}
+dk.ad.move_text	Lo stack si ferma, l'intera cartella ({from}) viene copiata con i dati in {to}, i bind mount vengono controllati e lo stack riparte. La vecchia cartella resta con un nome .moved finché non la elimini.
+dk.ad.release	Rilascia
+dk.ad.release_title	Rilasciare {name}?
+dk.ad.release_text	rynas smette di gestire questo stack. I suoi file e i container restano come sono.
+dk.ad.released	Stack rilasciato
+dk.ad.ed_ro	Questi file non si modificano qui (sola lettura, fuori dalla cartella o con include:).
+dk.ad.ed_others	Lo stack usa anche: {files}
+dk.im.button	Importa cartella
+dk.im.title	Importa una cartella
+dk.im.text	Registra come stack una cartella con file compose (per esempio ripristinata da un backup), dove si trova.
+dk.im.dir_help	Percorso assoluto, come /volume1/docker/app.
+dk.im.name_help	Il nome del progetto compose; la cartella mantiene il suo nome.
+dk.im.check	Controlla
+dk.im.import	Importa
 dk.s.containers	Container
 dk.s.no_containers	Nessun container: avvia lo stack con Avvia (up).
 dk.snap.title	Snapshot

@@ -207,6 +207,10 @@ pub fn routes() -> Router<AppState> {
         .route("/docker/containers/{id}/{action}", post(forward))
         .route("/docker/stacks", get(forward).post(forward))
         .route("/docker/stacks/validate", post(forward))
+        // adoption (§5.7): preview GET, adopt POST; import and its preview
+        .route("/docker/stacks/import", post(forward))
+        .route("/docker/stacks/import/preview", post(forward))
+        .route("/docker/stacks/{name}/adopt", get(forward).post(forward))
         .route("/docker/stacks/{name}", get(forward))
         .route("/docker/stacks/{name}/files", get(forward).put(forward))
         .route("/docker/stacks/{name}/snapshots", get(forward).post(forward))

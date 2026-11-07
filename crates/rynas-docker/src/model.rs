@@ -17,6 +17,7 @@ pub const LABEL_PROJECT: &str = "com.docker.compose.project";
 pub const LABEL_SERVICE: &str = "com.docker.compose.service";
 pub const LABEL_WORKING_DIR: &str = "com.docker.compose.project.working_dir";
 pub const LABEL_CONFIG_FILES: &str = "com.docker.compose.project.config_files";
+pub const LABEL_ENV_FILE: &str = "com.docker.compose.project.environment_file";
 /// Labels with the "open" link of a container.
 pub const URL_LABELS: &[&str] = &["rynas.url", "homepage.href"];
 
@@ -26,6 +27,8 @@ pub struct Seen {
     pub c: ContainerSummary,
     pub working_dir: Option<String>,
     pub config_files: Vec<String>,
+    /// `com.docker.compose.project.environment_file` (`--env-file`, comma-separated).
+    pub env_files: Vec<String>,
 }
 
 fn state_of(s: Option<bm::ContainerSummaryStateEnum>) -> ContainerState {
@@ -143,16 +146,19 @@ pub fn container_of(c: &bm::ContainerSummary) -> Seen {
     Seen {
         c: summary,
         working_dir: labels.get(LABEL_WORKING_DIR).cloned(),
-        config_files: labels
-            .get(LABEL_CONFIG_FILES)
-            .map(|s| {
-                s.split(',')
-                    .map(str::to_string)
-                    .filter(|x| !x.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default(),
+        config_files: list_label(labels.get(LABEL_CONFIG_FILES)),
+        env_files: list_label(labels.get(LABEL_ENV_FILE)),
     }
+}
+
+fn list_label(v: Option<&String>) -> Vec<String> {
+    v.map(|s| {
+        s.split(',')
+            .map(str::to_string)
+            .filter(|x| !x.is_empty())
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 /// First published TCP port of a container.
@@ -252,6 +258,7 @@ pub fn group_stacks(
             editable: folder,
             snapshots: folder && subvolumes.contains(name),
             images: images.into_iter().collect(),
+            adopted: None,
         });
     }
     if let Some(l) = layout {

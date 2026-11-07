@@ -2,8 +2,9 @@
 //! nobody known). rynas stacks (`/<vol>/docker/stacks/<name>/`) can be created, edited
 //! (compose.yaml + .env, validated with `docker compose config`), started, pulled, updated
 //! with a snapshot first, rolled back to a snapshot and removed; the others only started,
-//! stopped and restarted. Image updates come from the digest check (`/docker/updates`, one
-//! report for the page). Rows are keyed by stack name and follow the list in place.
+//! stopped and restarted, or adopted where they are ([`super::adopt`]). Image updates come
+//! from the digest check (`/docker/updates`, one report for the page). Rows are keyed by
+//! stack name and follow the list in place.
 
 use std::collections::HashSet;
 
@@ -84,6 +85,7 @@ pub fn panel() -> AnyView {
     let detail = RwSignal::new(leptos_router::hooks::use_query_map().with_untracked(|q| q.get("stack")));
     let cx = Ctx { list, upd: updatable(), q: RwSignal::new(String::new()), busy: RwSignal::new(HashSet::new()), detail };
     let edit = RwSignal::new(None::<Option<String>>);
+    let importing = RwSignal::new(false);
     let checking = RwSignal::new(false);
     let checked = move || {
         updates.data.with(|u| u.as_ref().map(|u| if u.checked_at_ms == 0 { t("dk.upd.never").to_string() } else { tf("dk.upd.checked", &[("when", &i18n::short_when(u.checked_at_ms))]) }))
@@ -104,6 +106,9 @@ pub fn panel() -> AnyView {
                     on:click=move |_| if !checking.get_untracked() { act("/api/v1/docker/updates/check".into(), None, checking) }>
                     {spinner(checking)}<Icon icon=icons::REFRESH_CW size=16 /><span class="btn-label">{tr("dk.upd.check")}</span>
                 </button>
+                <button class="btn ghost" on:click=move |_| importing.set(true)>
+                    <Icon icon=icons::FOLDER_OPEN size=16 /><span class="btn-label">{tr("dk.im.button")}</span>
+                </button>
                 <button class="btn primary" on:click=move |_| edit.set(Some(None))>
                     <Icon icon=icons::PLUS size=16 /><span class="btn-label">{tr("dk.s.create")}</span>
                 </button>
@@ -112,6 +117,7 @@ pub fn panel() -> AnyView {
         </section>
         {move || detail.get().map(|n| detail_drawer(n, settings, edit, Callback::new(move |_| detail.set(None))))}
         {move || edit.get().map(|n| editor(n, settings, Callback::new(move |_| edit.set(None))))}
+        {move || importing.get().then(|| super::adopt::import_dialog(Callback::new(move |_| importing.set(false))))}
     }
     .into_any()
 }
@@ -189,6 +195,9 @@ enum Ask {
     Remove,
     Rollback(StackSnapshot),
     DeleteSnapshot(StackSnapshot),
+    Adopt,
+    Release,
+    Move,
 }
 
 pub(crate) fn reason_key(r: &str) -> &'static str {
@@ -254,9 +263,16 @@ fn snapshot_rows(det: &StackDetail, ask: RwSignal<Option<Ask>>) -> AnyView {
 
 /// The drawer's action bar: built once per stack kind, so a refresh of the details keeps the
 /// buttons (and the focus on them).
-fn action_bar(managed: bool, n: StoredValue<String>, busy: RwSignal<bool>, ask: RwSignal<Option<Ask>>, edit: RwSignal<Option<Option<String>>>) -> AnyView {
+fn action_bar(managed: bool, adoption: Adoption, n: StoredValue<String>, busy: RwSignal<bool>, ask: RwSignal<Option<Ask>>, edit: RwSignal<Option<Option<String>>>) -> AnyView {
     let task = move |action: &'static str| Callback::new(move |_| act(action_url("stacks", &n.get_value(), action), None, busy));
     let idle = RwSignal::new(false);
+    let open = move |a: Ask| Callback::new(move |_| ask.set(Some(a.clone())));
+    let adopted = (adoption == Adoption::Adopted).then(|| {
+        view! {
+            {bar_btn(icons::FOLDER_SYNC, "dk.ad.move", idle, open(Ask::Move))}
+            {bar_btn(icons::UNPLUG, "dk.ad.release", idle, open(Ask::Release))}
+        }
+    });
     if managed {
         view! {
             <div class="sec-actions">
@@ -267,6 +283,7 @@ fn action_bar(managed: bool, n: StoredValue<String>, busy: RwSignal<bool>, ask: 
                 {bar_btn(icons::DOWNLOAD, "dk.a.update", idle, Callback::new(move |_| ask.set(Some(Ask::Update))))}
                 {bar_btn(icons::CIRCLE_X, "dk.a.down", busy, task("down"))}
                 {bar_btn(icons::PENCIL, "dk.a.edit", idle, Callback::new(move |_| edit.set(Some(Some(n.get_value())))))}
+                {adopted}
                 <button class="btn ghost sm danger-text" on:click=move |_| ask.set(Some(Ask::Remove))><Icon icon=icons::TRASH_2 size=14 />{tr("dk.a.remove")}</button>
             </div>
         }
@@ -277,9 +294,32 @@ fn action_bar(managed: bool, n: StoredValue<String>, busy: RwSignal<bool>, ask: 
                 {bar_btn(icons::PLAY, "dk.a.start", busy, task("start"))}
                 {bar_btn(icons::SQUARE, "dk.a.stop", busy, task("stop"))}
                 {bar_btn(icons::REFRESH_CW, "dk.a.restart", busy, task("restart"))}
+                {(adoption == Adoption::Candidate).then(|| bar_btn(icons::IMPORT, "dk.ad.adopt", idle, open(Ask::Adopt)))}
+                {adopted}
             </div>
         }
         .into_any()
+    }
+}
+
+/// Where a stack stands with adoption.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Adoption {
+    /// A rynas stack in the stacks folder (or one whose folder is missing).
+    Native,
+    /// Adopted where it is.
+    Adopted,
+    /// Portainer's or another project: can be adopted.
+    Candidate,
+}
+
+fn adoption_of(s: &StackSummary) -> Adoption {
+    if s.adopted.is_some() {
+        Adoption::Adopted
+    } else if s.manager == StackManager::Rynas {
+        Adoption::Native
+    } else {
+        Adoption::Candidate
     }
 }
 
@@ -292,7 +332,7 @@ fn detail_drawer(name: String, settings: Remote<DockerSettingsState>, edit: RwSi
     let snap_err = RwSignal::new(None::<String>);
     let n = StoredValue::new(name.clone());
     // what decides the layout; the rest follows the details in place
-    let kind = Memo::new(move |_| d.data.with(|d| d.as_ref().map(|d| (d.summary.editable, d.summary.snapshots, d.summary.manager))));
+    let kind = Memo::new(move |_| d.data.with(|d| d.as_ref().map(|d| (d.summary.editable, d.summary.snapshots, d.summary.manager, adoption_of(&d.summary)))));
     let take_snapshot = move |_| {
         snap_busy.set(true);
         snap_err.set(None);
@@ -311,7 +351,8 @@ fn detail_drawer(name: String, settings: Remote<DockerSettingsState>, edit: RwSi
         });
     };
     let content = move || {
-        let Some((managed, can_snap, manager)) = kind.get() else { return ().into_any() };
+        let Some((managed, can_snap, manager, adoption)) = kind.get() else { return ().into_any() };
+        let adopted = adoption == Adoption::Adopted;
         let summary = Memo::new(move |_| d.data.with(|d| d.as_ref().map(|d| d.summary.clone())));
         let new_images = move || {
             summary.with(|s| s.as_ref().map(|s| s.images.iter().filter(|i| upd.with(|u| u.contains(i))).cloned().collect::<Vec<_>>()).unwrap_or_default())
@@ -319,20 +360,22 @@ fn detail_drawer(name: String, settings: Remote<DockerSettingsState>, edit: RwSi
         view! {
             <div class="chips">
                 <span class="chip">{t(manager_key(manager))}</span>
+                {adopted.then(|| view! { <span class="chip">{tr("dk.ad.chip")}</span> })}
                 {move || summary.with(|s| s.as_ref().map(|s| state_pill(s.state)))}
             </div>
+            {move || summary.with(|s| s.as_ref().and_then(|s| s.adopted.as_ref().map(super::adopt::adopted_notes)))}
             {move || summary.with(|s| s.as_ref().map(|s| view! {
                 <dl class="kvs">
                     {s.working_dir.clone().map(|w| kv_row("dk.s.folder", Signal::stored(w), "mono"))}
                     {(!s.config_files.is_empty()).then(|| kv_row("dk.s.files", Signal::stored(s.config_files.join(", ")), "mono"))}
                 </dl>
             }))}
-            {(!managed).then(|| ui::note(Tone::Info, icons::INFO, ui::text(t(if manager == StackManager::Rynas { "dk.s.no_folder" } else { "dk.s.readonly" }).to_string())))}
+            {(!managed && !adopted).then(|| ui::note(Tone::Info, icons::INFO, ui::text(t(if manager == StackManager::Rynas { "dk.s.no_folder" } else { "dk.s.readonly" }).to_string())))}
             {move || { let l = new_images(); (!l.is_empty()).then(|| ui::note(Tone::Info, icons::DOWNLOAD, ui::text(tf("dk.upd.stack", &[("images", &l.join(", "))])))) }}
-            {action_bar(managed, n, busy, ask, edit)}
+            {action_bar(managed, adoption, n, busy, ask, edit)}
             <div class="mini-title">{tr("dk.s.containers")}</div>
             {move || d.data.with(|d| d.as_ref().map(stack_containers))}
-            {managed.then(|| view! {
+            {(managed && !adopted).then(|| view! {
                 <div class="dk-snap-head">
                     <div class="mini-title">{tr("dk.snap.title")}</div>
                     {can_snap.then(|| view! {
@@ -356,7 +399,8 @@ fn detail_drawer(name: String, settings: Remote<DockerSettingsState>, edit: RwSi
         // (the dialogs never opened when the drawer was built before its details arrived)
         let a = ask.get()?;
         let can_snap = kind.get_untracked()?.1;
-        Some(ask_dialog(a, n.get_value(), can_snap, settings, ask, close, d))
+        let dir = d.data.with_untracked(|d| d.as_ref().and_then(|d| d.summary.working_dir.clone())).unwrap_or_default();
+        Some(ask_dialog(a, n.get_value(), can_snap, dir, settings, ask, close, d))
     };
     let body = view! {
         {move || d.view(8, content)}
@@ -367,12 +411,19 @@ fn detail_drawer(name: String, settings: Remote<DockerSettingsState>, edit: RwSi
     ui::drawer(Signal::stored(tf("dk.s.title", &[("name", &name)])), close, body, foot)
 }
 
-fn ask_dialog(a: Ask, name: String, can_snap: bool, settings: Remote<DockerSettingsState>, ask: RwSignal<Option<Ask>>, close_drawer: Callback<()>, d: Remote<StackDetail>) -> AnyView {
+#[allow(clippy::too_many_arguments)]
+fn ask_dialog(a: Ask, name: String, can_snap: bool, dir: String, settings: Remote<DockerSettingsState>, ask: RwSignal<Option<Ask>>, close_drawer: Callback<()>, d: Remote<StackDetail>) -> AnyView {
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let cancel = Callback::new(move |_| ask.set(None));
     let defaults = settings.data.with_untracked(|s| s.as_ref().map(|s| (s.applied.snapshot_before_update, s.applied.stop_for_snapshot)).unwrap_or((true, false)));
     match a {
+        Ask::Adopt => super::adopt::adopt_dialog(name, Callback::new(move |_| { ask.set(None); d.reload(); })),
+        Ask::Release => super::adopt::release_dialog(name, cancel, Callback::new(move |_| { ask.set(None); d.reload(); })),
+        Ask::Move => {
+            let target = settings.data.with_untracked(|s| s.as_ref().and_then(|s| s.stacks_dir.clone())).map(|d| format!("{d}/{name}"));
+            super::adopt::move_dialog(name, dir, target, cancel)
+        }
         Ask::Update => {
             let snap = RwSignal::new(defaults.0 && can_snap);
             let stop = RwSignal::new(defaults.1);
@@ -488,6 +539,9 @@ fn editor(name: Option<String>, settings: Remote<DockerSettingsState>, close: Ca
     let compose = RwSignal::new(String::new());
     let env = RwSignal::new(String::new());
     let compose_file = StoredValue::new(String::new());
+    let hash = StoredValue::new(String::new());
+    let other_files = RwSignal::new(Vec::<String>::new());
+    let read_only = RwSignal::new(false);
     let start = RwSignal::new(true);
     let loaded = RwSignal::new(creating);
     let load_err = RwSignal::new(None::<String>);
@@ -504,6 +558,9 @@ fn editor(name: Option<String>, settings: Remote<DockerSettingsState>, close: Ca
                     compose.set(f.compose);
                     env.set(f.env);
                     compose_file.set_value(f.compose_file);
+                    hash.set_value(f.hash);
+                    other_files.set(f.other_files);
+                    read_only.set(f.read_only);
                     loaded.set(true);
                 }
                 Err(e) if e.status() == 401 => {}
@@ -515,7 +572,7 @@ fn editor(name: Option<String>, settings: Remote<DockerSettingsState>, close: Ca
         load();
     }
     let name_err = Signal::derive(move || (creating && !n.with(|v| v.is_empty() || valid_stack_name(v))).then(|| t("dk.ed.name_invalid").to_string()));
-    let can_save = Signal::derive(move || !busy.get() && compose.with(|c| !c.trim().is_empty()) && (!creating || n.with(|v| valid_stack_name(v))));
+    let can_save = Signal::derive(move || !busy.get() && !read_only.get() && compose.with(|c| !c.trim().is_empty()) && (!creating || n.with(|v| valid_stack_name(v))));
     let validate = move |_| {
         checking.set(true);
         error.set(None);
@@ -546,7 +603,7 @@ fn editor(name: Option<String>, settings: Remote<DockerSettingsState>, close: Ca
                 let body = CreateStackRequest { name: name.clone(), compose: c, env: e, files: Vec::new(), volume: (!v.is_empty()).then_some(v), start: start.get_untracked() };
                 api::post::<_, StackCreated>("/api/v1/docker/stacks", Some(&body)).await.map(|r| r.task_id)
             } else {
-                let body = StackFiles { compose: c, env: e, compose_file: compose_file.get_value() };
+                let body = StackFiles { compose: c, env: e, compose_file: compose_file.get_value(), hash: hash.get_value(), ..Default::default() };
                 api::put::<_, StackValidation>(&stack_url(&name, "/files"), &body).await.map(|_| None)
             };
             let _ = busy.try_set(false);
@@ -581,6 +638,8 @@ fn editor(name: Option<String>, settings: Remote<DockerSettingsState>, close: Ca
                         {super::overview::volume_select("dk.ed.volume", None, settings, vol.into(), Callback::new(move |v| vol.set(v)), None)}
                     </div>
                 })}
+                {move || read_only.get().then(|| ui::note(Tone::Info, icons::LOCK, ui::text(t("dk.ad.ed_ro").to_string())))}
+                {move || other_files.with(|o| (!o.is_empty()).then(|| ui::note(Tone::Info, icons::FILE, ui::text(tf("dk.ad.ed_others", &[("files", &o.join(", "))])))))}
                 {code_field("dk.ed.compose", compose.into(), Callback::new(move |v| { compose.set(v); validation.set(None); }), compose_err.into(), 16)}
                 {code_field("dk.ed.env", env.into(), Callback::new(move |v| { env.set(v); validation.set(None); }), Signal::stored(None), 5)}
                 <p class="field-help">{tr("dk.ed.env_help")}</p>

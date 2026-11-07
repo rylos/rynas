@@ -14,6 +14,7 @@
 //!   actions survive); row actions keep their button focusable while they run
 //!   (`aria-disabled`, G10).
 
+mod adopt;
 mod containers;
 mod images;
 mod overview;
