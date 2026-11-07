@@ -14,6 +14,12 @@ pub const REPO_URL: &str = "https://download.docker.com/linux/debian";
 /// The repository's signing key.
 pub const KEY_URL: &str = "https://download.docker.com/linux/debian/gpg";
 pub const KEYRING: &str = "/etc/apt/keyrings/docker.asc";
+/// Where the download lands until its fingerprint is checked.
+pub const KEY_STAGING: &str = "/etc/apt/keyrings/.docker.asc.rynas-new";
+/// The fingerprint Docker publishes for its repository key ("Docker Release (CE deb)",
+/// key id `0EBFCD88`, docs.docker.com install pages): a download with another primary key
+/// is refused and never reaches `/etc/apt/keyrings` (review 2026-11-07, M7).
+pub const KEY_FINGERPRINT: &str = "9DC858229FC7DD38854AE2D88D81803C0EBFCD88";
 pub const SOURCES: &str = "/etc/apt/sources.list.d/docker.sources";
 /// The apt pin to the installed major version.
 pub const PREFERENCES: &str = "/etc/apt/preferences.d/rynas-docker";
@@ -36,6 +42,13 @@ const SHORT: Duration = Duration::from_secs(60);
 #[derive(Debug, Clone)]
 pub enum InstallStep {
     Run(Cmd),
+    /// Check the OpenPGP key downloaded to `staged` against [`KEY_FINGERPRINT`]
+    /// ([`check_key`]), then install it as `dest` (0644) and remove `staged`; a mismatch
+    /// removes `staged` and fails the install.
+    CheckKey {
+        staged: &'static str,
+        dest: &'static str,
+    },
     /// Write a whole file (root-owned).
     Write {
         path: &'static str,
@@ -109,16 +122,14 @@ pub fn repo_steps(codename: &str, arch: &str) -> Vec<InstallStep> {
         ),
         InstallStep::Run(
             Cmd::new("curl")
-                .args(["-fsSL", "--proto", "=https", KEY_URL, "-o", KEYRING])
+                .args(["-fsSL", "--proto", "=https", KEY_URL, "-o", KEY_STAGING])
                 .env_clear()
                 .timeout(Duration::from_secs(120)),
         ),
-        InstallStep::Run(
-            Cmd::new("chmod")
-                .args(["a+r", KEYRING])
-                .env_clear()
-                .timeout(SHORT),
-        ),
+        InstallStep::CheckKey {
+            staged: KEY_STAGING,
+            dest: KEYRING,
+        },
         InstallStep::Write {
             path: SOURCES,
             content: sources_content(codename, arch),
@@ -190,9 +201,138 @@ pub fn apps_ids(passwd: &str, group: &str) -> (Option<u32>, Option<u32>) {
     (field(passwd, 2), field(group, 2))
 }
 
+/// The v4 fingerprint (40 upper-case hex digits) of the first public key of an
+/// ASCII-armored OpenPGP key block: SHA-1 over `0x99`, the 2-byte length and the body of the
+/// public-key packet (RFC 4880 §12.2).
+pub fn key_fingerprint(armored: &str) -> Result<String, String> {
+    use base64::Engine;
+    use sha1::Digest;
+    let mut lines = armored.lines().map(str::trim);
+    lines
+        .by_ref()
+        .find(|l| *l == "-----BEGIN PGP PUBLIC KEY BLOCK-----")
+        .ok_or("not an armored OpenPGP public key")?;
+    // armor headers end at the first empty line (there may be none)
+    let mut b64 = String::new();
+    let mut in_headers = true;
+    for l in lines {
+        if l.starts_with("-----END") {
+            break;
+        }
+        if in_headers {
+            if l.is_empty() {
+                in_headers = false;
+                continue;
+            }
+            if l.contains(": ") {
+                continue;
+            }
+            in_headers = false;
+        }
+        if l.starts_with('=') {
+            continue; // the CRC-24 line
+        }
+        b64.push_str(l);
+    }
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(b64.as_bytes())
+        .map_err(|e| format!("bad base64 in the key: {e}"))?;
+    let (&tag, rest) = data.split_first().ok_or("empty key")?;
+    if tag & 0x80 == 0 {
+        return Err("not an OpenPGP packet".into());
+    }
+    let (kind, len, rest) = if tag & 0x40 != 0 {
+        // new format
+        let (&l0, r) = rest.split_first().ok_or("truncated key")?;
+        match l0 {
+            0..=191 => (tag & 0x3f, usize::from(l0), r),
+            192..=223 => {
+                let (&l1, r) = r.split_first().ok_or("truncated key")?;
+                (tag & 0x3f, ((usize::from(l0) - 192) << 8) + usize::from(l1) + 192, r)
+            }
+            255 if r.len() >= 4 => (
+                tag & 0x3f,
+                u32::from_be_bytes([r[0], r[1], r[2], r[3]]) as usize,
+                &r[4..],
+            ),
+            _ => return Err("unsupported packet length".into()),
+        }
+    } else {
+        let n = match tag & 3 {
+            0 => 1,
+            1 => 2,
+            2 => 4,
+            _ => return Err("unsupported packet length".into()),
+        };
+        if rest.len() < n {
+            return Err("truncated key".into());
+        }
+        let len = rest[..n].iter().fold(0usize, |a, &b| (a << 8) | usize::from(b));
+        ((tag >> 2) & 0x0f, len, &rest[n..])
+    };
+    if kind != 6 {
+        return Err("the block does not start with a public key".into());
+    }
+    let body = rest.get(..len).ok_or("truncated key")?;
+    if body.first() != Some(&4) {
+        return Err("not a version 4 key".into());
+    }
+    let len16 = u16::try_from(len).map_err(|_| "key packet too long")?;
+    let mut h = sha1::Sha1::new();
+    h.update([0x99]);
+    h.update(len16.to_be_bytes());
+    h.update(body);
+    Ok(h.finalize().iter().map(|b| format!("{b:02X}")).collect())
+}
+
+/// Checks a downloaded key against [`KEY_FINGERPRINT`].
+pub fn check_key(armored: &str) -> Result<(), String> {
+    let fp = key_fingerprint(armored)?;
+    if fp == KEY_FINGERPRINT {
+        Ok(())
+    } else {
+        Err(format!(
+            "the downloaded Docker repository key has fingerprint {fp}, expected {KEY_FINGERPRINT}: refused"
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A made-up v4 RSA key (and a user id packet); its fingerprint was computed apart.
+    const TEST_KEY: &str = "-----BEGIN PGP PUBLIC KEY BLOCK-----
+Comment: test only
+
+mQENBFloLwABCACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADA5ABEBAAHNFHRlc3QgPHRAZXhhbXBs
+ZS5vcmc+
+=abcd
+-----END PGP PUBLIC KEY BLOCK-----
+";
+
+    #[test]
+    fn key_fingerprint_and_pin() {
+        assert_eq!(
+            key_fingerprint(TEST_KEY).unwrap(),
+            "ED687B515E83E07037DBA826A1D0CFBAD767D2DE"
+        );
+        // another key than Docker's is refused, garbage too
+        assert!(check_key(TEST_KEY).unwrap_err().contains("refused"));
+        assert!(check_key("<html>not found</html>").is_err());
+        // the download never goes straight to the keyring
+        let steps = repo_steps("trixie", "amd64");
+        assert!(steps.iter().any(|s| matches!(
+            s,
+            InstallStep::CheckKey { staged, dest } if *staged == KEY_STAGING && *dest == KEYRING
+        )));
+        assert!(!steps.iter().any(|s| matches!(s, InstallStep::Run(c) if c.display().contains(&format!("-o {KEYRING}")))));
+    }
 
     #[test]
     fn deb822_and_pin() {

@@ -68,6 +68,8 @@ const PLACEHOLDER_ID: u32 = 65534;
 struct Loaded {
     stamp: u64,
     checked: Instant,
+    /// Last request that read the catalogue ([`AppsSvc::trim_idle`]).
+    used: Instant,
     catalog: Arc<Catalog>,
     issues: Arc<Vec<CatalogIssue>>,
 }
@@ -243,17 +245,128 @@ fn listening_ports(host: &Path) -> Vec<UsedPort> {
     out
 }
 
-/// `/<label>/...` below a mounted (existing) rynas volume.
-fn on_volume(root: &Path, p: &str) -> bool {
+/// `/<label>/...` below a mounted rynas volume (`mounted`: [`DockerSvc::volume_mounted`],
+/// the mount table on the real system).
+fn on_volume(mounted: &dyn Fn(&str) -> bool, p: &str) -> bool {
     let Some(rest) = p.strip_prefix('/') else {
         return false;
     };
     let label = rest.split('/').next().unwrap_or("");
     rest.len() > label.len() + 1
         && rynas_api_types::validate::volume_label(label)
-        && !p.split('/').any(|s| s == ".." || s == ".")
+        && !rest.split('/').any(|s| s.is_empty() || s == ".." || s == ".")
         && !p.contains(['\n', '\0', '\'', ':'])
-        && rynas_docker::under(root, &format!("/{label}")).is_dir()
+        && mounted(label)
+}
+
+/// The folders an install (or an update) made, kept by rynasd in its own state
+/// (`<state>/docker/app-folders/<stack>.json`, root only), never read back from the stack's
+/// files: uninstall with `delete_data` deletes only these (review 2026-11-07, H2).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+struct MadeFolders {
+    /// Folders of the render made by rynas (the whole tree goes with the data).
+    #[serde(default)]
+    folders: Vec<String>,
+    /// Parents made on the way (deleted only when empty).
+    #[serde(default)]
+    parents: Vec<String>,
+}
+
+impl MadeFolders {
+    fn add(&mut self, other: MadeFolders) {
+        for f in other.folders {
+            if !self.folders.contains(&f) {
+                self.folders.push(f);
+            }
+        }
+        for f in other.parents {
+            if !self.parents.contains(&f) {
+                self.parents.push(f);
+            }
+        }
+    }
+}
+
+fn made_path(s: &DockerSvc, stack: &str) -> PathBuf {
+    s.state_dir.join("app-folders").join(format!("{stack}.json"))
+}
+
+fn read_made(s: &DockerSvc, stack: &str) -> MadeFolders {
+    std::fs::read_to_string(made_path(s, stack))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+/// Adds folders to the record of a stack.
+fn record_made(s: &DockerSvc, stack: &str, made: MadeFolders) -> Result<(), String> {
+    if made == MadeFolders::default() {
+        return Ok(());
+    }
+    let mut all = read_made(s, stack);
+    all.add(made);
+    let p = made_path(s, stack);
+    let dir = p.parent().expect("has a parent");
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    let text = serde_json::to_vec_pretty(&all).map_err(|e| e.to_string())?;
+    crate::tls::write_atomic(&p, &text, 0o600, None).map_err(|e| format!("{}: {e}", p.display()))
+}
+
+/// Paths no uninstall ever deletes, whatever a record says.
+const SYSTEM_TOPS: &[&str] = &[
+    "bin", "boot", "dev", "etc", "home", "lib", "lib32", "lib64", "libx32", "media", "mnt", "nix",
+    "opt", "proc", "root", "run", "sbin", "snap", "srv", "sys", "tmp", "usr", "var",
+];
+
+/// What an uninstall with `delete_data` deletes outside the stack folder: the recorded
+/// folders that are below a mounted volume (`mounted`), deeper than its root, not a system
+/// path, not inside the stack folder (it goes as a whole), and with no mount point at or
+/// below them (`mounts`). Returns (trees to delete, empty parents to remove, kept with why).
+fn uninstall_targets(
+    made: &MadeFolders,
+    stack_dir: &str,
+    mounted: &dyn Fn(&str) -> bool,
+    mounts: &[String],
+) -> (Vec<String>, Vec<String>, Vec<(String, &'static str)>) {
+    let check = |p: &str| -> Result<(), &'static str> {
+        let top = p.trim_start_matches('/').split('/').next().unwrap_or("");
+        if SYSTEM_TOPS.contains(&top) {
+            return Err("a system folder");
+        }
+        if !on_volume(mounted, p) {
+            return Err("not below a mounted volume");
+        }
+        if mounts
+            .iter()
+            .any(|m| rynas_docker::stacks::is_below(m, p))
+        {
+            return Err("holds a mount point");
+        }
+        Ok(())
+    };
+    let (mut trees, mut empties, mut kept) = (Vec::new(), Vec::new(), Vec::new());
+    for p in &made.folders {
+        if rynas_docker::stacks::is_below(p, stack_dir) {
+            continue;
+        }
+        match check(p) {
+            Ok(()) => trees.push(p.clone()),
+            Err(why) => kept.push((p.clone(), why)),
+        }
+    }
+    for p in &made.parents {
+        if rynas_docker::stacks::is_below(p, stack_dir) || trees.contains(p) {
+            continue;
+        }
+        match check(p) {
+            Ok(()) => empties.push(p.clone()),
+            Err(why) => kept.push((p.clone(), why)),
+        }
+    }
+    // deepest first, so that parents are empty when their turn comes
+    empties.sort_by_key(|p| std::cmp::Reverse(p.matches('/').count()));
+    (trees, empties, kept)
 }
 
 fn field_error(e: &RenderError) -> FieldError {
@@ -343,6 +456,17 @@ impl AppsSvc {
         })
     }
 
+    /// Drops the parsed catalogue when no request read it for `idle` (it is loaded again,
+    /// lazily, by the next one): an idle daemon keeps no catalogue in memory.
+    pub fn trim_idle(&self, idle: Duration) -> bool {
+        let mut g = self.cache.lock().unwrap();
+        if g.as_ref().is_some_and(|l| l.used.elapsed() >= idle) {
+            *g = None;
+            return true;
+        }
+        false
+    }
+
     /// Web access serves apps (built-in mode, the engine installed).
     pub fn proxy_active(&self) -> bool {
         self.web.get().is_some_and(|w| w.proxy_active())
@@ -350,9 +474,10 @@ impl AppsSvc {
 
     /// The catalogue, reloaded when a file changed.
     pub async fn catalog(&self) -> (Arc<Catalog>, Arc<Vec<CatalogIssue>>) {
-        if let Some(l) = self.cache.lock().unwrap().as_ref()
+        if let Some(l) = self.cache.lock().unwrap().as_mut()
             && l.checked.elapsed() < RECHECK
         {
+            l.used = Instant::now();
             return (l.catalog.clone(), l.issues.clone());
         }
         let dir = self.dir.clone();
@@ -370,6 +495,7 @@ impl AppsSvc {
         match (loaded, g.as_mut()) {
             (None, Some(l)) => {
                 l.checked = Instant::now();
+                l.used = l.checked;
                 (l.catalog.clone(), l.issues.clone())
             }
             (loaded, _) => {
@@ -377,6 +503,7 @@ impl AppsSvc {
                 let l = Loaded {
                     stamp,
                     checked: Instant::now(),
+                    used: Instant::now(),
                     catalog: Arc::new(c),
                     issues: Arc::new(i),
                 };
@@ -722,7 +849,7 @@ impl AppsSvc {
                     FieldErrorKind::UnknownValue,
                     format!("no share {k}"),
                 ));
-            } else if !on_volume(&root, p) {
+            } else if !on_volume(&|l| self.docker.volume_mounted(l), p) {
                 errors.push(err(
                     k,
                     FieldErrorKind::BadPath,
@@ -752,7 +879,7 @@ impl AppsSvc {
                     FieldErrorKind::UnknownValue,
                     format!("no folder {k}"),
                 ));
-            } else if !on_volume(&root, p) {
+            } else if !on_volume(&|l| self.docker.volume_mounted(l), p) {
                 errors.push(err(
                     k,
                     FieldErrorKind::BadPath,
@@ -1102,9 +1229,16 @@ async fn add_route(a: &Arc<AppsSvc>, ctx: &TaskCtx, who: &str, spec: AppRouteSpe
 // tasks
 // ---------------------------------------------------------------------------------------------
 
-/// Creates the folders of a render below the root: missing parents one by one, each with
-/// the folder's owner (not under `--dry-system`). Shares are only checked.
-fn make_folders(s: &DockerSvc, folders: &[FolderPlan], log: &dyn Fn(&str)) -> Result<(), String> {
+/// Creates the folders of a render below their volume: missing parents one by one, each
+/// with the folder's owner on its descriptor (not under `--dry-system`), never through a
+/// symlink ([`rynas_docker::stacks::create_below`]). Shares are only checked. Returns the
+/// folders made, for the record that uninstall reads.
+fn make_folders(
+    s: &DockerSvc,
+    folders: &[FolderPlan],
+    log: &dyn Fn(&str),
+) -> Result<MadeFolders, String> {
+    let mut out = MadeFolders::default();
     for f in folders {
         let p = rynas_docker::under(&s.root, &f.host_path);
         if f.share {
@@ -1119,23 +1253,21 @@ fn make_folders(s: &DockerSvc, folders: &[FolderPlan], log: &dyn Fn(&str)) -> Re
         if p.exists() {
             continue;
         }
-        let mut missing = Vec::new();
-        let mut cur = p.as_path();
-        while !cur.exists() {
-            missing.push(cur.to_path_buf());
-            match cur.parent() {
-                Some(x) => cur = x,
-                None => break,
-            }
+        if !on_volume(&|l| s.volume_mounted(l), &f.host_path) {
+            return Err(format!(
+                "{} is not below a mounted volume",
+                f.host_path
+            ));
         }
-        for d in missing.iter().rev() {
-            std::fs::create_dir(d).map_err(|e| format!("mkdir {}: {e}", d.display()))?;
-            let _ = std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o750));
-            if !s.dry {
-                std::os::unix::fs::chown(d, Some(f.owner.0), Some(f.owner.1))
-                    .map_err(|e| format!("chown {}: {e}", d.display()))?;
-            }
+        let label = f.host_path.trim_start_matches('/').split('/').next().unwrap_or("");
+        let owner = (!s.dry).then_some(f.owner);
+        let mut made =
+            rynas_docker::stacks::create_below(&s.root, &format!("/{label}"), &f.host_path, 0o750, owner)?;
+        if made.last() == Some(&f.host_path) {
+            made.pop();
+            out.folders.push(f.host_path.clone());
         }
+        out.parents.extend(made);
         log(&format!(
             "created folder {} (owner {}:{}{})",
             f.host_path,
@@ -1148,7 +1280,7 @@ fn make_folders(s: &DockerSvc, folders: &[FolderPlan], log: &dyn Fn(&str)) -> Re
             }
         ));
     }
-    Ok(())
+    Ok(out)
 }
 
 async fn blocking<T: Send + 'static>(
@@ -1245,10 +1377,18 @@ async fn install_task(a: &Arc<AppsSvc>, ctx: &TaskCtx, j: InstallJob) -> Result<
             st = j.stack
         )
     };
-    let (s2, folders, log) = (s.clone(), r.folders.clone(), ctx.clone());
-    blocking(move || make_folders(&s2, &folders, &|m| log.log(m)))
-        .await
-        .map_err(keep)?;
+    let (s2, folders, log, n2) = (s.clone(), r.folders.clone(), ctx.clone(), j.stack.clone());
+    blocking(move || {
+        // a stale record of an earlier stack with the same name never applies
+        let _ = std::fs::remove_file(made_path(&s2, &n2));
+        let made = make_folders(&s2, &folders, &|m| log.log(m));
+        // what was made before an error is recorded too
+        let rec = made.clone().unwrap_or_default();
+        record_made(&s2, &n2, rec)?;
+        made.map(|_| ())
+    })
+    .await
+    .map_err(keep)?;
     s.changed();
     if j.start {
         ctx.log("starting the stack (images are downloaded first; this can take a while)");
@@ -1317,8 +1457,12 @@ async fn update_task(s: &Arc<DockerSvc>, ctx: &TaskCtx, j: UpdateJob) -> Result<
     let r = async {
         ctx.log("writing the new compose.yaml and .env (values migrated, secrets kept)");
         write_stack(s, &j.layout, &j.stack, &j.new).await?;
-        let (s2, folders, log) = (s.clone(), j.folders.clone(), ctx.clone());
-        blocking(move || make_folders(&s2, &folders, &|m| log.log(m))).await?;
+        let (s2, folders, log, n2) = (s.clone(), j.folders.clone(), ctx.clone(), j.stack.clone());
+        blocking(move || {
+            let made = make_folders(&s2, &folders, &|m| log.log(m))?;
+            record_made(&s2, &n2, made)
+        })
+        .await?;
         compose_run(s, ctx, &j.stack, &j.layout, ComposeAction::Pull).await?;
         ctx.progress(70);
         compose_run(s, ctx, &j.stack, &j.layout, ComposeAction::Up).await
@@ -1801,25 +1945,15 @@ async fn uninstall_post(
         )
         .field("confirm"));
     }
-    let (cat, _) = a.catalog().await;
-    let (l, d) = a.one_on_disk(&stack)?;
-    // folders placed outside the stack folder (an SSD volume) go with the data
-    let env = rynas_apps::render::parse_env(&d.env);
-    let outside: Vec<String> = cat
-        .get(&d.meta.app)
-        .map(|app| {
-            app.manifest
-                .folders
-                .iter()
-                .filter_map(|f| env.get(&f.env))
-                .filter(|v| {
-                    v.starts_with('/') && !rynas_docker::stacks::is_below(v, &l.stack(&stack))
-                })
-                .filter(|v| on_volume(&a.docker.root, v))
-                .cloned()
-                .collect()
-        })
-        .unwrap_or_default();
+    let (l, _) = a.one_on_disk(&stack)?;
+    // folders the install made outside the stack folder (an SSD volume) go with the data:
+    // only those rynasd recorded itself, never paths read from the stack's .env
+    let (outside, empties, kept) = uninstall_targets(
+        &read_made(&a.docker, &stack),
+        &l.stack(&stack),
+        &|lb| a.docker.volume_mounted(lb),
+        &a.docker.mounts(),
+    );
     let guard = mark_busy(&a.docker, &stack)?;
     audit(
         &who,
@@ -1852,6 +1986,9 @@ async fn uninstall_post(
             ));
             return Ok(());
         }
+        for (p, why) in &kept {
+            ctx.log(&format!("kept {p}: {why}"));
+        }
         if s.dry {
             for p in outside.iter().chain(std::iter::once(&l.stack(&n2))) {
                 ctx.log(&format!("deleting {p} (dry system: not done)"));
@@ -1862,11 +1999,23 @@ async fn uninstall_post(
         blocking(move || {
             for p in &outside {
                 let real = rynas_docker::under(&s3.root, p);
-                if real.exists() {
-                    rynas_docker::stacks::remove_tree(&real, &|m| log.log(m))?;
+                // never through a symlink: a link in its place is removed, not followed
+                match std::fs::symlink_metadata(&real) {
+                    Ok(m) if m.is_dir() => {
+                        log.log(&format!("removing {p}"));
+                        std::fs::remove_dir_all(&real).map_err(|e| format!("rm {p}: {e}"))?;
+                    }
+                    Ok(_) => log.log(&format!("kept {p}: not a folder any more")),
+                    Err(_) => {}
                 }
             }
-            s3.fs(None).remove_stack_dir(&l3, &n3, &|m| log.log(m))
+            for p in &empties {
+                // only when empty (other apps may have put folders there since)
+                let _ = std::fs::remove_dir(rynas_docker::under(&s3.root, p));
+            }
+            s3.fs(None).remove_stack_dir(&l3, &n3, &|m| log.log(m))?;
+            let _ = std::fs::remove_file(made_path(&s3, &n3));
+            Ok(())
         })
         .await?;
         ctx.log(&format!("{n2} and its data deleted"));
@@ -2000,12 +2149,51 @@ mod tests {
             masked_env("# x\nDB_PASSWORD='a b'\nPUID=1\n", &s),
             format!("# x\nDB_PASSWORD={MASK}\nPUID=1\n")
         );
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("vol1")).unwrap();
-        assert!(on_volume(dir.path(), "/vol1/media"));
-        assert!(!on_volume(dir.path(), "/vol1"));
-        assert!(!on_volume(dir.path(), "/vol2/media"));
-        assert!(!on_volume(dir.path(), "/vol1/../etc"));
-        assert!(!on_volume(dir.path(), "relative/x"));
+        let m = |l: &str| l == "vol1";
+        assert!(on_volume(&m, "/vol1/media"));
+        assert!(!on_volume(&m, "/vol1"));
+        assert!(!on_volume(&m, "/vol2/media"));
+        assert!(!on_volume(&m, "/vol1/../etc"));
+        assert!(!on_volume(&m, "relative/x"));
+        // `lib` would pass a plain is_dir test; it is reserved and never mounted
+        assert!(!on_volume(&|_| true, "/lib/x"));
+    }
+
+    /// Review 2026-11-07, H2: uninstall deletes only the folders rynasd recorded as made,
+    /// below a mounted volume, never system paths or mount points; paths in the stack's
+    /// .env play no part (a tampered `.env` with `/lib/x` or a folder that existed before
+    /// the install is never deleted).
+    #[test]
+    fn uninstall_deletes_only_recorded_folders() {
+        let made = MadeFolders {
+            folders: vec![
+                "/ssd/docker/appdata/app/db".into(),
+                "/vol1/docker/stacks/app/config".into(),
+                "/lib/x".into(),
+                "/vol9/data".into(),
+                "/vol1/media".into(),
+            ],
+            parents: vec![
+                "/ssd/docker/appdata".into(),
+                "/ssd/docker/appdata/app".into(),
+            ],
+        };
+        let mounted = |l: &str| l == "ssd" || l == "vol1";
+        let (trees, empties, kept) = uninstall_targets(
+            &made,
+            "/vol1/docker/stacks/app",
+            &mounted,
+            &["/".into(), "/vol1".into(), "/ssd".into(), "/vol1/media/usb".into()],
+        );
+        assert_eq!(trees, ["/ssd/docker/appdata/app/db"]);
+        assert_eq!(empties, ["/ssd/docker/appdata/app", "/ssd/docker/appdata"]);
+        let why: BTreeMap<&str, &str> = kept.iter().map(|(p, w)| (p.as_str(), *w)).collect();
+        assert_eq!(why["/lib/x"], "a system folder");
+        assert_eq!(why["/vol9/data"], "not below a mounted volume");
+        assert_eq!(why["/vol1/media"], "holds a mount point");
+        // nothing recorded (a pre-existing folder, or an install before the record): nothing
+        let (t, e, k) =
+            uninstall_targets(&MadeFolders::default(), "/vol1/docker/stacks/app", &mounted, &[]);
+        assert!(t.is_empty() && e.is_empty() && k.is_empty());
     }
 }

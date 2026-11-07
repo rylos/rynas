@@ -39,7 +39,8 @@ MemoryMax=256M
 TasksMax=512
 LimitNOFILE=1048576
 # /var/lib/rynas-caddy (0750 rynas-caddy): data/ (engine storage), last-good.json and
-# rynas/local.{crt,key} (written by rynasd, root:rynas-caddy 0640)
+# rynas/local.{crt,key} (written by rynasd, root:rynas-caddy 0640, in rynas/ 0750
+# root:rynas-caddy: readable, never replaceable by this unit's user)
 StateDirectory=rynas-caddy
 StateDirectoryMode=0750
 # /run/rynas-caddy: the admin socket

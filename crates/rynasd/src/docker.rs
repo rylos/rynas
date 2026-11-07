@@ -34,7 +34,7 @@ use rynas_api_types::{TaskStarted, error_codes};
 use rynas_config::{Applier, ApplyCtx, Invalid, ManagedFile};
 use rynas_docker::client::{DockerError, Engine, is_unavailable};
 use rynas_docker::detect::{InstallFacts, api_older, install_facts};
-use rynas_docker::events::{Alert, DiskWatch, Tracker, UpdateWatch, parse_event};
+use rynas_docker::events::{Alert, Backoff, DiskWatch, Tracker, UpdateWatch, parse_event};
 use rynas_docker::model::Seen;
 use rynas_docker::stacks::{
     ComposeAction, StackError, StackFs, compose_cmd, compose_error, parse_config,
@@ -59,9 +59,13 @@ pub const STATS_TICK: Duration = Duration::from_secs(5);
 const SWEEP: Duration = Duration::from_secs(60);
 /// Longest wait between reconnections of the event watcher.
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
+/// How long the watcher gathers list-changing events into one `docker_changed`.
+const HINT_DELAY: Duration = Duration::from_secs(1);
 /// Longest data-root copy of a migration.
 const COPY_TIMEOUT: Duration = Duration::from_secs(12 * 3600);
 const SHORT: Duration = Duration::from_secs(60);
+/// How long the `docker system df` answer is reused.
+const DF_TTL: Duration = Duration::from_secs(60);
 
 // ---------------------------------------------------------------------------------------------
 // the configuration domain
@@ -157,7 +161,9 @@ impl Applier for DockerDomain {
     fn render(&self, value: &Value, ctx: &ApplyCtx) -> Result<Vec<ManagedFile>, String> {
         let s = settings_of(value).map_err(|e| e.message)?;
         let read = |p: &str| ctx.read(Path::new(p));
-        Ok(eng::engine_files(&s, &read)?
+        // the pool rynas wrote last may be replaced; any other one is the administrator's
+        let previous = self.tx.borrow().address_pool.clone();
+        Ok(eng::engine_files(&s, Some(&previous), &read)?
             .into_iter()
             .map(|(path, content)| {
                 // merged files keep the rest of their content: no "do not edit" header
@@ -191,7 +197,12 @@ impl Applier for DockerDomain {
                 subvolumes: !self.dry,
                 owner: None,
             };
-            if !fs.real(&l.volume).is_dir() {
+            let mounted = if ctx.root == Path::new("/") {
+                rynas_volumes().iter().any(|(l, _)| l == label)
+            } else {
+                fs.real(&l.volume).is_dir()
+            };
+            if !mounted {
                 return Err(format!("volume {label} is not mounted"));
             }
             for p in l.subvolumes() {
@@ -269,6 +280,10 @@ pub struct DockerSvc {
     generation: AtomicU64,
     live: broadcast::Sender<(&'static str, Arc<str>)>,
     last_stats: Mutex<Option<Arc<str>>>,
+    df_cache: tokio::sync::Mutex<Option<(Instant, Arc<DfCache>)>>,
+    /// Tests: task commands go to [`DockerSvc::runner`] instead of the system (a fake that
+    /// answers by command line), with the dry system off.
+    pub exec_via_runner: std::sync::atomic::AtomicBool,
 }
 
 pub type DkState = Option<Arc<DockerSvc>>;
@@ -430,6 +445,8 @@ impl DockerSvc {
             generation: AtomicU64::new(1),
             live,
             last_stats: Mutex::new(None),
+            df_cache: tokio::sync::Mutex::new(None),
+            exec_via_runner: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -619,6 +636,13 @@ impl DockerSvc {
 
     /// Runs a command of a task: logged and run, or only logged under `--dry-system`.
     pub(crate) async fn run(&self, ctx: &TaskCtx, cmd: &Cmd) -> Result<CmdOutput, String> {
+        if self.exec_via_runner.load(Ordering::Relaxed) {
+            ctx.log(&format!("$ {}", cmd.display()));
+            let (r, c) = (self.runner.clone(), cmd.clone());
+            return tokio::task::spawn_blocking(move || r.run(&c))
+                .await
+                .map_err(|e| e.to_string())?;
+        }
         if self.dry {
             ctx.log(&format!("$ {} (dry system: not run)", cmd.display()));
             return Ok(CmdOutput {
@@ -696,6 +720,42 @@ fn rynas_volumes() -> Vec<(String, String)> {
     crate::storage_ops::volumes_in(
         &std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default(),
     )
+}
+
+/// Mount points of the system (`/proc/self/mountinfo`).
+pub(crate) fn mount_points() -> Vec<String> {
+    rynas_storage::mounts::parse_mountinfo(
+        &std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default(),
+    )
+    .into_iter()
+    .map(|m| m.mountpoint)
+    .collect()
+}
+
+impl DockerSvc {
+    /// Is `/<label>` a mounted rynas volume? On the real system the mount table decides (an
+    /// unmounted volume's empty folder, or `/lib`, never counts); below a dry or test root,
+    /// an existing folder there.
+    pub(crate) fn volume_mounted(&self, label: &str) -> bool {
+        if !rynas_api_types::validate::volume_label(label) {
+            return false;
+        }
+        if self.root == Path::new("/") {
+            rynas_volumes().iter().any(|(l, _)| l == label)
+        } else {
+            rynas_docker::under(&self.root, &format!("/{label}")).is_dir()
+        }
+    }
+
+    /// The mount points at or below which nothing may be deleted recursively (the real
+    /// system only; a dry or test root has none).
+    pub(crate) fn mounts(&self) -> Vec<String> {
+        if self.root == Path::new("/") {
+            mount_points()
+        } else {
+            Vec::new()
+        }
+    }
 }
 
 impl DockerSvc {
@@ -873,7 +933,7 @@ async fn plan_engine(
     let old = s.settings();
     let plan = tokio::task::spawn_blocking(move || -> Result<EnginePlan, String> {
         let read = |p: &str| std::fs::read_to_string(rynas_docker::under(&root, p)).ok();
-        let files = eng::engine_files(&v, &read)?
+        let files = eng::engine_files(&v, Some(&old.address_pool), &read)?
             .into_iter()
             .map(|(p, after)| PlannedFile {
                 path: p.into(),
@@ -1025,6 +1085,24 @@ async fn install_task(
             install::InstallStep::Run(c) => {
                 s.run(ctx, &c).await?;
             }
+            install::InstallStep::CheckKey { staged, dest } => {
+                let p = rynas_docker::under(&s.root, staged);
+                if s.dry && !p.exists() {
+                    ctx.log(&format!(
+                        "checking the key fingerprint {} (dry system: not downloaded)",
+                        install::KEY_FINGERPRINT
+                    ));
+                } else {
+                    let text = std::fs::read_to_string(&p).unwrap_or_default();
+                    let _ = std::fs::remove_file(&p);
+                    install::check_key(&text)?;
+                    ctx.log(&format!(
+                        "key fingerprint {} checked, writing {dest}",
+                        install::KEY_FINGERPRINT
+                    ));
+                    write_root_file(&s.root, dest, &text, 0o644)?;
+                }
+            }
             install::InstallStep::Write {
                 path,
                 content,
@@ -1105,7 +1183,7 @@ async fn migrate_route(
     s.ops.admins.require_admin(&who, "Docker migration")?;
     let Json(req) = body?;
     check_volume(&req.volume)?;
-    if !rynas_docker::under(&s.root, &format!("/{}", req.volume)).is_dir() {
+    if !s.volume_mounted(&req.volume) {
         return Err(Error::invalid(
             "volume",
             format!("volume {} is not mounted", req.volume),
@@ -1161,7 +1239,35 @@ pub fn copy_cmd(from: &str, to: &str) -> Cmd {
         .timeout(COPY_TIMEOUT)
 }
 
-async fn migrate_task(
+/// The engine's units, in start order.
+const ENGINE_UNITS_START: [&str; 3] = ["containerd.service", "docker.socket", "docker.service"];
+
+fn systemctl(verb: &str, units: &[&str]) -> Cmd {
+    Cmd::new("systemctl")
+        .arg(verb)
+        .args(units)
+        .env_clear()
+        .timeout(Duration::from_secs(180))
+}
+
+/// Bytes `du -sx` counts in the folders (`None`: unknown, e.g. a dry run).
+fn du_bytes(out: &CmdOutput) -> Option<u64> {
+    let mut sum = 0u64;
+    let mut any = false;
+    for l in out.stdout.lines() {
+        if let Some(n) = l.split_whitespace().next().and_then(|n| n.parse::<u64>().ok()) {
+            sum += n;
+            any = true;
+        }
+    }
+    any.then_some(sum)
+}
+
+/// `docker.migrate` (review 2026-11-07, M4): the volume must be mounted (mount table), the
+/// copy must fit (`du` of the old folders against the free space of the volume, plus 10 %),
+/// and once the engine is stopped, **any** failure starts it again on its old folders (the
+/// configuration is only switched after a complete copy; its apply rolls back by itself).
+pub async fn migrate_task(
     s: &Arc<DockerSvc>,
     ctx: &TaskCtx,
     who: &str,
@@ -1174,6 +1280,9 @@ async fn migrate_task(
         l.engine(),
         l.containerd()
     ));
+    if !s.volume_mounted(volume) {
+        return Err(format!("volume {volume} is not mounted: nothing was changed"));
+    }
     if let Ok(e) = s.engine_opt().await
         && e.info()
             .await
@@ -1184,17 +1293,91 @@ async fn migrate_task(
     {
         return Err("containers are running: stop them first".into());
     }
+    let copies: Vec<(String, String)> = [
+        (old_data.clone(), l.engine()),
+        (old_ctd.clone(), l.containerd()),
+    ]
+    .into_iter()
+    .filter(|(from, to)| from != to && rynas_docker::under(&s.root, from).is_dir())
+    .collect();
+    // the space check runs before anything stops
+    if !copies.is_empty() {
+        let du = Cmd::new("du")
+            .args(["-sx", "--block-size=1"])
+            .args(copies.iter().map(|(f, _)| rynas_docker::under(&s.root, f)))
+            .env_clear()
+            .timeout(Duration::from_secs(30 * 60));
+        let need = s.run(ctx, &du).await.ok().filter(|o| o.success()).as_ref().and_then(du_bytes);
+        let avail = rynas_storage::overview::statvfs(
+            &rynas_docker::under(&s.root, &l.volume).to_string_lossy(),
+        )
+        .map(|v| v.avail);
+        match (need, avail) {
+            (Some(n), Some(a)) if n.saturating_add(n / 10) > a => {
+                return Err(format!(
+                    "not enough space on {volume}: the engine's folders hold {} MiB, {} MiB are free (10 % margin): nothing was changed",
+                    n >> 20,
+                    a >> 20
+                ));
+            }
+            (Some(n), Some(a)) => ctx.log(&format!(
+                "space: {} MiB to copy, {} MiB free on {volume}",
+                n >> 20,
+                a >> 20
+            )),
+            _ => ctx.log("space: could not be measured, copying anyway"),
+        }
+    }
     s.drop_engine().await;
-    let stop = Cmd::new("systemctl")
-        .args([
-            "stop",
-            "docker.socket",
-            "docker.service",
-            "containerd.service",
-        ])
-        .env_clear()
-        .timeout(Duration::from_secs(180));
-    s.run(ctx, &stop).await?;
+    s.run(
+        ctx,
+        &systemctl("stop", &["docker.socket", "docker.service", "containerd.service"]),
+    )
+    .await?;
+    let moved = migrate_stopped(s, ctx, who, volume, &l, &copies).await;
+    // started in every case: on the new folders after a success, on the old ones otherwise
+    let started = s.run(ctx, &systemctl("start", &ENGINE_UNITS_START)).await;
+    let started = match started {
+        Ok(o) if o.success() => Ok(()),
+        Ok(o) => Err(compose_error(&o.stderr)),
+        Err(e) => Err(e),
+    };
+    match (moved, started) {
+        (Ok(()), Ok(())) => {
+            ctx.progress(100);
+            ctx.log(&format!(
+                "done: the old folders {old_data} and {old_ctd} are kept; delete them once the containers work"
+            ));
+            Ok(())
+        }
+        (Ok(()), Err(e)) => Err(format!(
+            "the engine moved to {volume} but did not start: {e} (see journalctl -u docker)"
+        )),
+        (Err(e), Ok(())) => {
+            ctx.log(&format!(
+                "the move failed; the engine was started again on {old_data}"
+            ));
+            Err(format!(
+                "{e}. The engine runs on its old folders again; the partial copy stays in {} and {} (delete it before trying again)",
+                l.engine(),
+                l.containerd()
+            ))
+        }
+        (Err(e), Err(e2)) => Err(format!(
+            "{e}; starting the engine again failed too: {e2} (systemctl start containerd docker)"
+        )),
+    }
+}
+
+/// The part of the migration that runs with the engine stopped.
+async fn migrate_stopped(
+    s: &Arc<DockerSvc>,
+    ctx: &TaskCtx,
+    who: &str,
+    volume: &str,
+    l: &Layout,
+    copies: &[(String, String)],
+) -> Result<(), String> {
     {
         let fs = s.fs(None);
         for p in l.subvolumes() {
@@ -1202,14 +1385,18 @@ async fn migrate_task(
         }
     }
     ctx.progress(10);
-    for (from, to) in [
-        (old_data.clone(), l.engine()),
-        (old_ctd.clone(), l.containerd()),
-    ] {
-        if from == to || !Path::new(&from).is_dir() {
-            continue;
+    for (from, to) in copies {
+        let c = copy_cmd(
+            &rynas_docker::under(&s.root, from).to_string_lossy(),
+            &rynas_docker::under(&s.root, to).to_string_lossy(),
+        );
+        let o = s.run(ctx, &c).await?;
+        if !o.success() {
+            return Err(format!(
+                "copying {from} to {to} failed: {}",
+                compose_error(&o.stderr)
+            ));
         }
-        s.run(ctx, &copy_cmd(&from, &to)).await?;
     }
     ctx.progress(80);
     let (cfg, who, log_ctx, vol) = (
@@ -1236,20 +1423,6 @@ async fn migrate_task(
     .await
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())?;
-    let start = Cmd::new("systemctl")
-        .args([
-            "start",
-            "containerd.service",
-            "docker.socket",
-            "docker.service",
-        ])
-        .env_clear()
-        .timeout(Duration::from_secs(180));
-    s.run(ctx, &start).await?;
-    ctx.progress(100);
-    ctx.log(&format!(
-        "done: the old folders {old_data} and {old_ctd} are kept; delete them once the containers work"
-    ));
     Ok(())
 }
 
@@ -1277,12 +1450,11 @@ async fn images(State(st): State<DkState>) -> Res<Json<Vec<ImageSummary>>> {
 
 async fn volumes(State(st): State<DkState>) -> Res<Json<Vec<VolumeSummary>>> {
     let s = dsvc(&st)?;
+    // sizes from the cached `df` (a failure only leaves them out)
+    let df = s.df().await.ok();
     Ok(Json(
-        s.call(|e| async move {
-            let df = e.df().await.ok();
-            e.volumes(df.as_ref()).await
-        })
-        .await?,
+        s.call(|e| async move { e.volumes(df.as_ref().map(|d| &d.volumes)).await })
+            .await?,
     ))
 }
 
@@ -1293,8 +1465,35 @@ async fn networks(State(st): State<DkState>) -> Res<Json<Vec<NetworkSummary>>> {
 
 async fn disk_usage(State(st): State<DkState>) -> Res<Json<DockerDiskUsage>> {
     let s = dsvc(&st)?;
-    let df = s.call(|e| async move { e.df().await }).await?;
-    Ok(Json(model::disk_usage_of(&df)))
+    Ok(Json(s.df().await?.usage))
+}
+
+/// What rynas keeps of `docker system df`: the totals and the volume sizes (the full
+/// answer, with every image and container, is dropped at once).
+pub(crate) struct DfCache {
+    usage: DockerDiskUsage,
+    volumes: HashMap<String, (i64, i64)>,
+}
+
+impl DockerSvc {
+    /// `docker system df`, at most once per [`DF_TTL`] (review 2026-11-07, M6): it walks
+    /// every volume's files, takes seconds and spins up sleeping disks. Concurrent callers
+    /// (the volumes list and the disk-usage card of one page load) share one call.
+    pub(crate) async fn df(&self) -> Res<Arc<DfCache>> {
+        let mut g = self.df_cache.lock().await;
+        if let Some((t, d)) = g.as_ref()
+            && t.elapsed() < DF_TTL
+        {
+            return Ok(d.clone());
+        }
+        let df = self.call(|e| async move { e.df().await }).await?;
+        let d = Arc::new(DfCache {
+            usage: model::disk_usage_of(&df),
+            volumes: model::df_volumes(&df),
+        });
+        *g = Some((Instant::now(), d.clone()));
+        Ok(d)
+    }
 }
 
 async fn stats_get(State(st): State<DkState>) -> Res<Response> {
@@ -1439,6 +1638,13 @@ async fn logs_stream(
 impl DockerSvc {
     /// Validates compose files with `docker compose config` (read-only): `compose`/`env`
     /// are written to a scratch folder, relative paths resolve against `dir`.
+    ///
+    /// The text comes from an administrator but compose runs as root, so the run is kept
+    /// narrow (review 2026-11-07, M1): at most [`rynas_docker::stacks::MAX_FILE`] each, a
+    /// top-level `include:` is refused (it reads, or downloads, other compose files),
+    /// services' `env_file:` are not read (`--no-env-resolution`: a root file never ends up
+    /// in the error text), 30 s timeout, the scratch files are `0600` in rynasd's state and
+    /// removed afterwards; `config` writes nothing in the project folder.
     async fn validate(
         &self,
         project: &str,
@@ -1458,25 +1664,52 @@ impl DockerSvc {
                 "the docker compose plugin is not installed".into(),
             ));
         }
+        let max = rynas_docker::stacks::MAX_FILE;
+        if compose.len() > max || env.len() > max {
+            return Err(Error::invalid(
+                if compose.len() > max { "compose" } else { "env" },
+                format!("at most {} KiB", max >> 10),
+            ));
+        }
+        if let Some(e) = refused_compose_keys(compose) {
+            return Ok(StackValidation {
+                ok: false,
+                error: Some(e),
+                ..Default::default()
+            });
+        }
         let scratch = self
             .state_dir
             .join(format!("validate-{}-{}", std::process::id(), now_ms()));
         std::fs::create_dir_all(&scratch).map_err(Error::internal)?;
+        let _ = std::fs::set_permissions(&scratch, std::os::unix::fs::PermissionsExt::from_mode(0o700));
         let cf = scratch.join("compose.yaml");
         let ef = scratch.join(".env");
-        let w = std::fs::write(&cf, compose).and_then(|_| std::fs::write(&ef, env));
+        let w = crate::tls::write_atomic(&cf, compose.as_bytes(), 0o600, None)
+            .and_then(|_| crate::tls::write_atomic(&ef, env.as_bytes(), 0o600, None));
         if let Err(e) = w {
             let _ = std::fs::remove_dir_all(&scratch);
             return Err(Error::internal(e));
         }
-        let cmd = compose_cmd(
-            project,
-            &rynas_docker::under(&self.root, dir).to_string_lossy(),
-            &cf.to_string_lossy(),
-            Some(&ef.to_string_lossy()),
-            ComposeAction::Config,
-        );
-        let out = cmd.run(None, None).await;
+        let cmd = |narrow: bool| {
+            let c = compose_cmd(
+                project,
+                &rynas_docker::under(&self.root, dir).to_string_lossy(),
+                &cf.to_string_lossy(),
+                Some(&ef.to_string_lossy()),
+                ComposeAction::Config,
+            );
+            if narrow { c.arg("--no-env-resolution") } else { c }
+        };
+        let mut out = cmd(true).run(None, None).await;
+        if out
+            .as_ref()
+            .is_ok_and(|o| !o.success() && o.stderr.contains("--no-env-resolution"))
+        {
+            // compose older than 2.24 (2024): no such flag
+            tracing::info!("docker compose has no --no-env-resolution: validating without it");
+            out = cmd(false).run(None, None).await;
+        }
         let _ = std::fs::remove_dir_all(&scratch);
         let out = out.map_err(|e| Error::internal(format!("docker compose config: {e}")))?;
         if !out.success() {
@@ -1516,6 +1749,21 @@ impl DockerSvc {
             }),
         }
     }
+}
+
+/// Compose features a validation refuses before running compose: a top-level `include:`
+/// (reads or downloads other compose files as root). A plain line check: the key sits at
+/// column 0 of a YAML mapping, quoted or not.
+fn refused_compose_keys(compose: &str) -> Option<String> {
+    compose
+        .lines()
+        .any(|l| {
+            let k = l.trim_end();
+            ["include:", "\"include\":", "'include':"]
+                .iter()
+                .any(|p| k.starts_with(p))
+        })
+        .then(|| "include: is not supported in a rynas stack (put the services in this file)".into())
 }
 
 async fn stack_create(
@@ -1734,9 +1982,16 @@ pub(crate) async fn compose(
     if a == ComposeAction::Up {
         prepare_up(s, ctx, name, &dir_s, file, l).await?;
     }
-    s.run(ctx, &compose_cmd(name, &dir_s, file, None, a))
-        .await
-        .map(|_| ())
+    let out = s.run(ctx, &compose_cmd(name, &dir_s, file, None, a)).await?;
+    // a failing pull or up must fail the task (and trigger the update's rollback)
+    if !out.success() {
+        return Err(format!(
+            "docker compose {} failed: {}",
+            a.as_str(),
+            compose_error(&out.stderr)
+        ));
+    }
+    Ok(())
 }
 
 /// Before `up`: the `docker-apps` account, and the missing bind folders below the volume
@@ -1751,10 +2006,14 @@ async fn prepare_up(
     l: &Layout,
 ) -> Result<(), String> {
     s.ensure_apps_account(ctx).await?;
-    let out = compose_cmd(name, dir, file, None, ComposeAction::Config)
-        .run(Some(ctx.token()), None)
-        .await
-        .map_err(|e| e.to_string())?;
+    let cmd = compose_cmd(name, dir, file, None, ComposeAction::Config);
+    let out = if s.exec_via_runner.load(Ordering::Relaxed) {
+        s.run(ctx, &cmd).await?
+    } else {
+        cmd.run(Some(ctx.token()), None)
+            .await
+            .map_err(|e| e.to_string())?
+    };
     if !out.success() {
         return Err(format!(
             "the compose file is not valid: {}",
@@ -2382,24 +2641,30 @@ fn update_event(u: &ImageUpdate) -> NewEvent {
 // ---------------------------------------------------------------------------------------------
 
 /// Follows the engine's events: notifications on transitions, `docker_changed` hints, a
-/// sweep every minute (crash loops over, data-root fill level). Reconnects with backoff;
-/// sleeps while Docker is absent.
+/// sweep every minute (crash loops over, data-root fill level). Reconnects with backoff
+/// ([`Backoff`]: grows on quick failures, resets after a stable stream); sleeps while
+/// Docker is absent.
+///
+/// Hints are coalesced: the first event that changes the lists
+/// ([`rynas_docker::events::changes_lists`]) arms a [`HINT_DELAY`] timer, and one
+/// `docker_changed` covers every event until it fires. Nothing wakes up while the engine is
+/// quiet (no per-second tick).
 pub fn spawn_watch(s: Arc<DockerSvc>) {
     tokio::spawn(async move {
         let set = s.settings();
         let mut tracker = Tracker::new(set.crash_restarts, set.crash_window_min);
         let mut disk = DiskWatch::default();
-        let mut backoff = Duration::from_secs(1);
+        let mut backoff = Backoff::new(MAX_BACKOFF);
         loop {
             let e = match s.engine_opt().await {
                 Ok(e) => e,
                 Err(_) => {
                     s.drop_engine().await;
-                    tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(MAX_BACKOFF);
+                    tokio::time::sleep(backoff.after(Duration::ZERO)).await;
                     continue;
                 }
             };
+            let up = Instant::now();
             // first reading after a (re)connection
             if let Ok(cs) = e.containers().await {
                 let un: Vec<(String, Option<String>)> = cs
@@ -2412,17 +2677,17 @@ pub fn spawn_watch(s: Arc<DockerSvc>) {
                 }
             }
             s.changed();
-            backoff = Duration::from_secs(1);
             let mut events = Box::pin(e.events());
             let mut sweep = tokio::time::interval(SWEEP);
             sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            let mut hint = tokio::time::interval(Duration::from_secs(1));
-            let mut dirty = false;
+            let mut hint: Option<tokio::time::Instant> = None;
             loop {
                 tokio::select! {
                     ev = events.next() => match ev {
                         Some(Ok(m)) => {
-                            dirty = true;
+                            if hint.is_none() && rynas_docker::events::changes_lists(&m) {
+                                hint = Some(tokio::time::Instant::now() + HINT_DELAY);
+                            }
                             if let Some(ev) = parse_event(&m) {
                                 for a in tracker.on_event(&ev) {
                                     s.notifier.emit(alert_event(&a));
@@ -2435,10 +2700,9 @@ pub fn spawn_watch(s: Arc<DockerSvc>) {
                         }
                         None => break,
                     },
-                    _ = hint.tick() => {
-                        if std::mem::take(&mut dirty) {
-                            s.changed();
-                        }
+                    _ = tokio::time::sleep_until(hint.unwrap_or_else(tokio::time::Instant::now)), if hint.is_some() => {
+                        hint = None;
+                        s.changed();
                     }
                     _ = sweep.tick() => {
                         let set = s.settings();
@@ -2464,9 +2728,13 @@ pub fn spawn_watch(s: Arc<DockerSvc>) {
                     }
                 }
             }
+            if hint.is_some() {
+                s.changed();
+            }
             s.drop_engine().await;
-            tokio::time::sleep(backoff).await;
-            backoff = (backoff * 2).min(MAX_BACKOFF);
+            let wait = backoff.after(up.elapsed());
+            tracing::debug!("docker events: reconnecting in {wait:?}");
+            tokio::time::sleep(wait).await;
         }
     });
 }
@@ -2533,6 +2801,22 @@ pub fn spawn_stats(s: Arc<DockerSvc>) {
 // ---------------------------------------------------------------------------------------------
 
 pub fn router(st: DkState) -> Router {
+    // every route, reads included, needs an administrator (§5.1 "rynasd checks it again")
+    let gate = st.as_ref().map(|s| crate::roles::AdminGate {
+        policy: s.ops.admins.clone(),
+        what: "Docker",
+    });
+    let r = docker_routes(st);
+    match gate {
+        Some(g) => r.route_layer(axum::middleware::from_fn_with_state(
+            g,
+            crate::roles::admin_only,
+        )),
+        None => r,
+    }
+}
+
+fn docker_routes(st: DkState) -> Router {
     Router::new()
         .route("/v1/docker/status", get(status))
         .route("/v1/docker/settings", get(settings_get).put(settings_put))

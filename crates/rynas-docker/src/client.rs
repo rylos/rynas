@@ -118,12 +118,13 @@ impl Engine {
         Ok(self.docker.df(None::<qp::DataUsageOptions>).await?)
     }
 
-    /// Volumes, with sizes from `df` when given.
+    /// Volumes, with sizes (`name → (size, refs)`, [`model::df_volumes`]) when given.
     pub async fn volumes(
         &self,
-        df: Option<&bm::SystemDataUsageResponse>,
+        sizes: Option<&HashMap<String, (i64, i64)>>,
     ) -> Result<Vec<VolumeSummary>, DockerError> {
-        let sizes = df.map(model::df_volumes).unwrap_or_default();
+        let empty = HashMap::new();
+        let sizes = sizes.unwrap_or(&empty);
         let r = self
             .docker
             .list_volumes(None::<qp::ListVolumesOptions>)
@@ -132,7 +133,7 @@ impl Engine {
             .volumes
             .unwrap_or_default()
             .iter()
-            .map(|x| model::volume_of(x, &sizes))
+            .map(|x| model::volume_of(x, sizes))
             .collect();
         v.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(v)
@@ -233,6 +234,14 @@ impl Engine {
     ) -> impl Stream<Item = Result<bm::EventMessage, DockerError>> + Send + 'static + use<> {
         let mut filters = HashMap::new();
         filters.insert("type".to_string(), vec!["container".to_string()]);
+        // no healthcheck exec_* or attach/resize noise (crate::events::FOLLOWED_ACTIONS)
+        filters.insert(
+            "event".to_string(),
+            crate::events::FOLLOWED_ACTIONS
+                .iter()
+                .map(|a| a.to_string())
+                .collect(),
+        );
         let o = qp::EventsOptions {
             filters: Some(filters),
             ..Default::default()

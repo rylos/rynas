@@ -3560,6 +3560,7 @@ dependencies = [
 name = "rynas-docker"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "bollard",
  "futures-util",
  "libc",
@@ -3568,6 +3569,7 @@ dependencies = [
  "rynas-tasks",
  "serde",
  "serde_json",
+ "sha1",
  "tempfile",
  "tokio",
  "tracing",
