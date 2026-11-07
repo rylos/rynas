@@ -24,6 +24,11 @@
 # installed and running and rynasd applies its defaults; FAKE_CADDY=refuse answers every load
 # with an error (the "last load failed" state). Without it rynasd sees no proxy (the socket
 # path below the instance folder does not exist), never the host's.
+# FAKE_TAILSCALE=running|login|expiring: a fake tailscaled LocalAPI (faketailscale.py on $R/ts.sock)
+# and the CLI's path in the dry root, so Network > Remote access shows Tailscale installed and
+# connected (a subnet waiting for approval), logged out with a login address, or with a key about
+# to expire. Without it rynasd --dry-system never contacts a tailscaled socket (Install offered).
+# TLS_LISTEN=off: rynas-web without its HTTPS port (8443 is taken when another instance runs).
 # GENERIC=1: a plain PC instead of the DS920+ (no Synology platform, no synohwd status), to check
 # that no Synology screen, tab or hint shows up on generic hardware (G8d).
 set -e
@@ -104,12 +109,22 @@ if [ -n "${FAKE_CADDY:-}" ]; then
   echo $! >> "$R/pids"
   for _ in $(seq 30); do [ -S "$CADDY_SOCK" ] && break; sleep 0.1; done
 fi
+TS_ARGS=()
+if [ -n "${FAKE_TAILSCALE:-}" ]; then
+  python3 -I "$HERE/faketailscale.py" "$R/ts.sock" "$FAKE_TAILSCALE" > "$R/faketailscale.log" 2>&1 &
+  echo $! >> "$R/pids"
+  mkdir -p "$R/state/dry-root/usr/bin"; : > "$R/state/dry-root/usr/bin/tailscale"
+  for _ in $(seq 30); do [ -S "$R/ts.sock" ] && break; sleep 0.1; done
+  TS_ARGS=(--tailscale-socket "$R/ts.sock")
+else
+  rm -f "$R/state/dry-root/usr/bin/tailscale"
+fi
 # any docker CLI rynasd might run reads the fake engine, never the host's
 DOCKER_HOST=unix://$R/docker.sock target/release/rynasd --socket "$R/rynasd.sock" --state-dir "$R/state" --dry-system --hw-root "$H" \
-  --notify-socket "" --storage-check-interval 0 --apps-dir "$REPO/apps" --caddy-admin "$CADDY_SOCK" "${RYNASD_UPS[@]}" "${DOCKER_ARGS[@]}" ${FAKE_USB:+--removable-demo} > "$R/rynasd.log" 2>&1 &
+  --notify-socket "" --storage-check-interval 0 --apps-dir "$REPO/apps" --caddy-admin "$CADDY_SOCK" "${RYNASD_UPS[@]}" "${DOCKER_ARGS[@]}" "${TS_ARGS[@]}" ${FAKE_USB:+--removable-demo} > "$R/rynasd.log" 2>&1 &
 echo $! >> "$R/pids"; sleep 1.5
 target/release/rynas-web --listen "127.0.0.1:$PORT" --rynasd-socket "$R/rynasd.sock" --users-file "$USERS" \
-  --auth-state-dir "$R/web" --ui-dir crates/rynas-ui/dist --hw-root "$H" "${UPSD_ARG[@]}" > "$R/web.log" 2>&1 &
+  --auth-state-dir "$R/web" --ui-dir crates/rynas-ui/dist --hw-root "$H" "${UPSD_ARG[@]}" ${TLS_LISTEN:+--tls-listen "$TLS_LISTEN"} > "$R/web.log" 2>&1 &
 echo $! >> "$R/pids"
 for _ in $(seq 50); do curl -s -o /dev/null "http://127.0.0.1:$PORT/" && { echo "up on http://127.0.0.1:$PORT"; exit 0; }; sleep 0.1; done
 echo down; tail -n 5 "$R/rynasd.log" "$R/web.log"; exit 1

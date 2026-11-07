@@ -122,6 +122,10 @@ struct Args {
     /// proxy redirects plain HTTP for unknown names there.
     #[arg(long, default_value_t = 8443)]
     web_tls_port: u16,
+    /// tailscaled's LocalAPI socket; empty: never contacted. With --dry-system only a socket
+    /// given explicitly (a test double) is read; the default one is never contacted.
+    #[arg(long, value_parser = path_or_empty)]
+    tailscale_socket: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -969,6 +973,23 @@ fn main() -> std::io::Result<()> {
             }
             state.apps = Some(apps);
             state.docker = Some(docker);
+        }
+        // Tailscale (remote access): status from tailscaled's LocalAPI, tasks for the rest
+        {
+            let socket = match (&args.tailscale_socket, args.dry_system) {
+                (Some(p), _) if p.as_os_str().is_empty() => None,
+                (Some(p), _) => Some(p.clone()),
+                (None, true) => None,
+                (None, false) => Some(PathBuf::from(rynas_tailscale::SOCKET)),
+            };
+            state.tailscale = Some(rynasd::tailscale::TailscaleSvc::new(
+                ops.clone(),
+                config_root(&args),
+                args.dry_system,
+                socket,
+                args.state_dir.join("tailscale"),
+                PathBuf::from("/"),
+            ));
         }
         // HTTPS certificate of the web interface: made on the first start, re-issued when the
         // host name or an address changes, published for rynas-web (wave W0)

@@ -32,6 +32,13 @@ quality reviews (docs/quality/). Nothing here touches the host system or a runni
   port) passed to rynasd as `--caddy-admin`, so the engine shows installed and running and the
   defaults are applied; `FAKE_CADDY=refuse` fails every load (the error state). With
   `FAKE_DOCKER=1` installs through web access add routes. Without it rynasd sees no proxy.
+- Remote access (`/network/remote-access`): `FAKE_TAILSCALE=running|login|expiring` adds
+  `faketailscale.py` (a fake tailscaled LocalAPI: `GET /localapi/v0/status` and `/prefs`) passed as
+  `--tailscale-socket`, and the CLI path in the dry root, so the page shows Tailscale connected
+  (a LAN subnet waiting for approval, an update), logged out with a login address and QR code, or
+  with the key expiring. Changes are only logged (`--dry-system`). The routes need an
+  administrator for rynasd: start with `ADMIN=1` (or `FAKE_DOCKER=1`) and use `AUDIT_USER=$(id -un)`.
+  Without it the page offers Install.
 - Login `tester` / `correct-horse` (`users.toml`, a test-only account of the local instance).
 - `BASE` changes the instance URL; `AUDIT_OUT` the output folder (default `target/ui-audit`:
   results, screenshots, browser profiles). Keep it on disk, not on a RAM tmpfs.

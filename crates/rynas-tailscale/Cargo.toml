@@ -1,0 +1,18 @@
+[package]
+name = "rynas-tailscale"
+description = "rynas Tailscale side: install from Tailscale's apt repository, LocalAPI status and preferences, CLI command lines"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+rynas-api-types.workspace = true
+rynas-tasks.workspace = true
+serde_json.workspace = true
+jiff.workspace = true
+# the fingerprint check of Tailscale's apt key (OpenPGP v4: SHA-1 of the key packet)
+sha1 = { version = "0.11.0", default-features = false }
+
+[dev-dependencies]
+tempfile.workspace = true

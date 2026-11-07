@@ -112,6 +112,7 @@ only goes to the debug log (A13).
 | 409 | `docker_not_installed` | Docker: the engine is not installed (`../phase2/docker-apps.md` §5.1) |
 | 503 | `docker_unavailable` | Docker: installed, but the daemon does not answer on its socket |
 | 409 | `containers_running` | Docker: refused while containers run (moving the engine) |
+| 409 | `tailscale_not_installed` | Tailscale: not installed (`../phase2/remote-access.md`) |
 | 409 | `stack_not_managed` | Docker: a stack outside the rynas stacks folder (Portainer's, untracked): no file edits, no compose actions |
 
 ## API v1 (steps 2–3)

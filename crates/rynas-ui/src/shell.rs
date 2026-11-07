@@ -178,6 +178,7 @@ fn Shell() -> impl IntoView {
                     <Route path=path!("/storage/volumes/:name") view=pages::storage::volume::VolumePage />
                     <Route path=path!("/network") view=pages::network::Network />
                     <Route path=path!("/network/web-access") view=pages::web_access::WebAccess />
+                    <Route path=path!("/network/remote-access") view=pages::network::remote::RemoteAccess />
                     <Route path=path!("/hardware") view=pages::hardware::Hardware />
                     <Route path=path!("/system") view=pages::system::System />
                     <Route path=path!("/system/configuration") view=pages::config::Configuration />

@@ -3790,6 +3790,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rynas-tailscale"
+version = "0.1.0"
+dependencies = [
+ "jiff",
+ "rynas-api-types",
+ "rynas-tasks",
+ "serde_json",
+ "sha1",
+ "tempfile",
+]
+
+[[package]]
 name = "rynas-tasks"
 version = "0.1.0"
 dependencies = [
@@ -3920,6 +3932,7 @@ dependencies = [
  "rynas-scheduler",
  "rynas-services",
  "rynas-storage",
+ "rynas-tailscale",
  "rynas-tasks",
  "rynas-tls",
  "rynas-updates",

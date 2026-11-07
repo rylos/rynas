@@ -150,7 +150,7 @@ pub fn is_admin(role: Role) -> bool {
 
 /// Reads that are as sensitive as a change (they hand out key material, or anything of
 /// Docker and the app catalogue: container logs and stack files hold secrets, and the
-/// engine is root).
+/// engine is root; Tailscale's tailnet names and addresses).
 fn admin_read(path: &str) -> bool {
     path.ends_with("/luks-header")
         || [
@@ -160,6 +160,8 @@ fn admin_read(path: &str) -> bool {
             "/apps/",
             "/api/v1/web-access",
             "/web-access",
+            "/api/v1/tailscale",
+            "/tailscale",
         ]
         .iter()
         .any(|p| path.starts_with(p))
