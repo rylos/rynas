@@ -966,6 +966,10 @@ fn main() -> std::io::Result<()> {
         {
             let web = opened.web_access.clone();
             let _ = web.ops.set(ops.clone());
+            // local app names through Avahi's D-Bus API (never under --dry-system)
+            if !args.dry_system {
+                web.names.spawn();
+            }
             rynasd::web_access::spawn_watch(web.clone());
             state.web_access = Some(web);
         }

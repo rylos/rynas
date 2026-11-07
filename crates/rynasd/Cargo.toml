@@ -44,6 +44,8 @@ rynas-files.workspace = true
 rynas-tls.workspace = true
 tokio-util = { workspace = true, features = ["io"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
+# local app names published through Avahi over the system bus (web_access/avahi.rs)
+zbus.workspace = true
 
 [dev-dependencies]
 tower = { version = "0.5.3", features = ["util"] }

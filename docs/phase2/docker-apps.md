@@ -143,7 +143,7 @@ Paths are relative to `/api/v1`.
 | GET | `/docker/settings` | — | `DockerSettingsState` {applied, pending?, volumes [`VolumeChoice` {label, path, avail_bytes?}], stacks_dir?} |
 | PUT | `/docker/settings` | `DockerSettings` | `DockerSettingsState`. Stages the key `docker` (apply with `/config/apply`). 400 `invalid_value` with `field`; 409 `conflict` with `field: volume` when the volume changes while the engine holds containers or images (use the migration) |
 | POST | `/docker/plan/engine` | `DockerSettings` | `EnginePlan` {files [{path, before?, after}] (changed files only), create [folders and subvolumes to make], commands [systemctl lines], restart}. No side effects |
-| POST | `/docker/install` | optional `InstallRequest` {volume?} | 202 `TaskStarted` (`docker.install`). 409 `conflict` when an engine exists (it is adopted, never reinstalled); 501 `not_available` with the `InstallBlock` in the message; 409 `busy` |
+| POST | `/docker/install` | optional `InstallRequest` {volume?} | 202 `TaskStarted` (`docker.install`). Also accepted after a failed install: half-installed packages (`install_incomplete`) are repaired first, and an install rynas started whose last steps never ran is finished. 409 `conflict` when a complete engine exists (it is adopted, never reinstalled); 501 `not_available` with the `InstallBlock` in the message; 409 `busy` |
 | POST | `/docker/engine/migrate` | `MigrateRequest` {volume} | 202 (`docker.migrate`). 409 `containers_running`; 409 `conflict` (already there); 400 `invalid_value` with `field: volume` (not mounted) |
 | GET | `/docker/containers` | — | `Vec<ContainerSummary>`, sorted by stack then name |
 | POST | `/docker/containers/{ref}/start`, `/stop`, `/restart` | — | 202 (`docker.container.start\|stop\|restart`). `{ref}` is the full id, a unique id prefix of 12+ characters, or the name. 404; 400 for an ambiguous prefix |
@@ -174,7 +174,12 @@ Paths are relative to `/api/v1`.
 
 - **`DockerStatus`**:
   - engine: installed, running, source `docker_ce|docker_io|other|none`, packages
-    [{name, version}];
+    [{name, version}] (dpkg status "install ok installed" only);
+  - install_incomplete [`IncompletePackage` {name, version, status}] (additive, default
+    `[]`): engine packages dpkg left half-done, status from `${db:Status-Abbrev}`
+    (`iU` unpacked, `iF` half-configured, `iHR` half-installed with reinstall required,
+    `iW`/`it` triggers). Non-empty: `installed` is false (unpacked binaries are no
+    engine), `install_block` is null and Install repairs;
   - versions: version, api_version, min_api_version, compose_version, buildx_version;
   - storage and runtime: storage_driver, data_root, containerd_snapshotter, cgroup_driver,
     live_restore, logging_driver;
@@ -183,7 +188,9 @@ Paths are relative to `/api/v1`.
   - managers [`DetectedManager` {kind arcane|dockhand|portainer|dockge|komodo, container,
     container_id, image, running, port?, stack?}];
   - install_block `installed|not_debian|unsupported_release|unsupported_arch` (null: the
-    install is possible), task_id (a running install or migration);
+    install is possible; null with `installed: true`: an install rynas started, with its
+    `docker.sources`, still lacks the pin or the `docker-apps` account, and Install
+    finishes it), task_id (a running install or migration);
   - warnings [`daemon_down|compose_missing|data_root_on_system|data_root_almost_full|not_pinned|engine_too_old`],
     read_at_ms.
 
@@ -242,7 +249,7 @@ Ranges (400 `invalid_value` with the field):
 
 | Type | What it does |
 |---|---|
-| `docker.install` | apt update, ca-certificates and curl, the key downloaded to a staging file and checked against Docker's published fingerprint `9DC8 5822 9FC7 DD38 854A E2D8 8D81 803C 0EBF CD88` (OpenPGP v4, computed by rynasd; another key fails the task and never reaches `/etc/apt/keyrings`), then written to `/etc/apt/keyrings/docker.asc` (0644), `/etc/apt/sources.list.d/docker.sources` (deb822, signed-by), apt update, the pin `/etc/apt/preferences.d/rynas-docker` (`Pin: version 5:<major>.*`, priority 1001, major = apt's candidate). With `volume`, the apply of `docker` before the packages, so the engine starts on the volume. Then `apt-get install -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin` and the system user and group `docker-apps` |
+| `docker.install` | Every step can run again, so running the install after any failure finishes the job. First, with `install_incomplete`: `dpkg --configure -a --force-confdef --force-confold`, then `apt-get install -f -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold`, both through the same `systemd-run --wait --pipe` wrapper as every apt call (outside rynasd's sandbox); when only another engine's packages (docker.io…) were half-done, the task stops there and adopts it. Then apt update, ca-certificates and curl, the key downloaded to a staging file and checked against Docker's published fingerprint `9DC8 5822 9FC7 DD38 854A E2D8 8D81 803C 0EBF CD88` (OpenPGP v4, computed by rynasd; another key fails the task and never reaches `/etc/apt/keyrings`), then written to `/etc/apt/keyrings/docker.asc` (0644; a keyring that already holds that key is kept, no download), `/etc/apt/sources.list.d/docker.sources` (deb822, signed-by), apt update, the pin `/etc/apt/preferences.d/rynas-docker` (`Pin: version 5:<major>.*`, priority 1001, major = the one an earlier attempt pinned, else apt's candidate). With `volume`, the apply of `docker` before the packages, so the engine starts on the volume. Then `apt-get install -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin` (apt skips what is installed), the system user and group `docker-apps` (only what is missing; an account still missing afterwards fails the task), and `systemctl enable --now containerd.service docker.service` |
 | `docker.migrate` | refuses while containers run, when the volume is not in the mount table, or when `du -sx` of the old folders (+10 %) exceeds the volume's free space (all before anything stops); stops docker.socket, docker and containerd; creates the subvolumes; `cp -a --reflink=auto` of the old data-root and containerd root; applies `docker` with the new volume; starts the engine. Once stopped, the engine is started again on **any** failure (on its old folders, since the configuration only switches after a complete copy); the log says where the partial copy is. The old folders are kept (the log says where) |
 | `docker.container.start\|stop\|restart` | the engine call (stop and restart give 30 s of grace) |
 | `docker.stack.up` | `docker compose config`; the missing bind folders below the volume are created, owned by `docker-apps` (binds outside the volume are logged as warnings); then `docker compose -p <stack> --project-directory <dir> -f <dir>/<file> up --detach --wait=false` (30 min) |
@@ -266,6 +273,11 @@ Ranges (400 `invalid_value` with the field):
     relative paths (no `..`, no absolute paths, mode 0644 by default).
 - Snapshots live in `/<vol>/docker/.snapshots/<name>/<YYYYMMDDTHHMMSS>` (plus a `.json`),
   outside the folder that managers scan.
+- **The `docker-apps` account comes first.** Stack creation, stack file writes, `up`
+  (bind folders), app installs and app updates make sure it exists (`groupadd`/`useradd`
+  when missing) before a folder or file gets its owner. When it cannot be created the
+  request or task fails with that message: folders are never given `nobody` (65534) or
+  root instead. Only `--dry-system` runs without it.
 - Making a stack from rendered files: `POST /docker/stacks` with `files` and `start: true`,
   or in Rust `rynas_docker::stacks::StackFs::create_stack(layout, name, compose, env, files,
   log)`. It refuses an existing folder and starts nothing. Update with snapshot and
@@ -321,6 +333,13 @@ Notification codes (source `docker`; texts `nev.docker.*` in en + it):
 `/var/run/docker.sock`; empty means never contacted) and only logs changes: compose, engine
 calls, apt, systemctl, copies. Folders go below the dry root (create `<dry-root>/<vol>` to
 try stacks).
+
+UI texts the Docker page needs for the repair (en + it): a notice when
+`install_incomplete` is non-empty ("A previous Docker install did not finish: N packages
+are half-installed. Install repairs them and finishes the install." with the package list
+and statuses as they are), and the Install button shown while `install_block` is null even
+with `installed: true` ("Finish the Docker install"). Suggested keys:
+`docker.install_incomplete`, `docker.install_incomplete_hint`, `docker.install_finish`.
 
 Not yet: scheduled update checks, image prune, a per-stack backup export, the Docker page
 and the widget (D2).
@@ -509,8 +528,8 @@ route unchanged and treats every `/web-access` read as an administrator read.
 - `rynas-caddy` owns 80/443 from install. The interface is at `https://<host>.local` and
   `https://<host>` through it; `:8443` (rynas-web, rustls) never goes through it and stays
   the emergency door.
-- Each app route gets the local name `<label>-<host>.local`, published as a static Avahi
-  host, with a certificate from the rynas local CA, the same root as `:8443` ("Trust this
+- Each app route gets the local name `<label>-<host>.local`, published through Avahi's
+  D-Bus API (below; not `/etc/avahi/hosts`), with a certificate from the rynas local CA, the same root as `:8443` ("Trust this
   NAS"). There is no ACME in W1.
 - Access: `lan` (the default) is the NAS's connected subnets, plus loopback, link-local and
   the route's `allow`. `lan_vpn` adds the tailnet ranges, only while `tailscale0` exists
@@ -543,7 +562,7 @@ Paths are relative to `/api/v1`.
 |---|---|---|---|
 | GET | `/web-access` | — | `WebAccessState` |
 | PUT | `/web-access` | `WebAccessConfig` | `WebAccessState`. Validates, then stages the key `web_access` (apply with `/config/apply`, like every key). 400 `invalid_value` with `field` |
-| POST | `/web-access/plan` | optional `WebAccessConfig` (default: the caller's staged or applied value) | `WebAccessPlan` {engine_config (the full Caddy JSON, `null` in external mode), avahi_hosts, names, ui_route_changes}. No side effects |
+| POST | `/web-access/plan` | optional `WebAccessConfig` (default: the caller's staged or applied value) | `WebAccessPlan` {engine_config (the full Caddy JSON, `null` in external mode), avahi_hosts (the local names published through Avahi, as `<address> <name>` lines; no file is written), names, ui_route_changes}. No side effects |
 | POST | `/web-access/sync` | — | `ProxyEngine`. Runs the anti-drift check now (below) |
 | POST | `/web-access/confirm` | — | 204. Confirms a change of the interface's own route. rynas-web adds the connection's local address and the `Host`. It is accepted only when it arrived through the proxy (local address `127.0.0.1:<rynas-web plain port>`) on one of the new names. 409 `nothing_pending`; 409 `conflict` |
 | POST | `/web-access/routes/{id}/test` | — | `RouteDiagnostics` {route, checks [`RouteCheck` {id, state `ok\|warn\|fail\|skipped`, detail}], at_ms}. 404 |
@@ -588,8 +607,14 @@ Paths are relative to `/api/v1`.
   (`PendingConfirm` {deadline_ms, names}), emergency_port, reserved_ports.
 
   `problems` codes: `name_too_long` (`<label>-<host>` over 63 characters: no name),
-  `local_names_off`, `disabled`.
+  `local_names_off`, `disabled`, `name_collision` (another device, or this host, uses the
+  name: Avahi refused it) and `name_unpublished` (Avahi is not on the system bus, or
+  refused the name for another reason).
 - **Route checks**, in order:
+  0. `local_name`: the name's state in rynasd's Avahi publisher: `ok` published, `warn`
+     being probed (or Avahi re-registering its host name), `fail` collision, refusal or
+     Avahi not on the bus, `skipped` without a name or without a publisher
+     (`--dry-system`);
   1. `dns`: the name through the NAS's resolver. `warn` when only loopback answers, `fail`
      when it does not resolve or points to another device;
   2. `proxy_running`: the admin socket answers;
@@ -613,11 +638,13 @@ installed, the first check applies them (revision "web access on by default"), s
 interface is behind the proxy from install.
 
 The apply:
-1. writes rynas's block of `/etc/avahi/hosts` when Avahi is installed (`# BEGIN rynas
-   web-access` … `# END`; the administrator's own lines are kept). One line
-   `<primary IPv4> <label>-<host>.local` per named route. The primary IPv4 is the address
-   of the interface with the default route.
-2. reloads `avahi-daemon` when it runs.
+1. hands the local names to rynasd's Avahi publisher (`web_access/avahi.rs`): one name
+   `<label>-<host>.local` → the primary IPv4 per named route (the address of the interface
+   with the default route). No file is written, nothing is reloaded.
+2. migration: removes rynas's old `# BEGIN rynas web-access` block from
+   `/etc/avahi/hosts` (written before 2026-11-07; the administrator's own lines are kept)
+   and reloads `avahi-daemon` once when it runs. The periodic check does the same at
+   start, and rewrites the key's drift records so the old block is forgotten.
 3. with rynas-caddy installed:
    - `external`: `systemctl disable --now rynas-caddy`.
    - `builtin`:
@@ -647,13 +674,44 @@ ports, `settings.ui`) and the new value still serves it. `GET /web-access` then 
 
 **Anti-drift and host facts** (at start, every 30 s, and `POST /web-access/sync`):
 - When the host name, the LAN subnets, `tailscale0`, the WireGuard subnets or the primary
-  address change, the applied value is written again: Avahi lines, access ranges and
-  certificate names follow.
+  address change, the applied value is written again: access ranges and certificate names
+  follow. Local names follow on every check (an unchanged set wakes nothing).
 - Otherwise the running configuration is compared with the render and loaded again when it
   differs (Caddy restarted from an older file, a change through the socket).
 
 Container events never reload the proxy. Upstreams are fixed loopback ports, and a reload
 closes WebSockets until Caddy 2.12: `stream_close_delay` (5 min) keeps them open meanwhile.
+
+#### Local names through Avahi (D-Bus)
+
+`/etc/avahi/hosts` cannot carry them: a static entry also publishes the reverse PTR of the
+address, which the NAS's host name already owns, so avahi-daemon refuses every app name
+("Static host name …: avahi_server_add_address failure: Local name collision"; seen on
+Debian trixie, avahi-daemon 0.8-16; https://pi3g.com/?p=9174, https://lists.freedesktop.org/archives/avahi/2009-April/001625.html;
+`../research/web-access.md` §3.2). rynasd publishes them over the system bus with zbus:
+- `org.freedesktop.Avahi.Server.EntryGroupNew` →
+  `EntryGroup.AddAddress(interface -1, protocol -1, flags AVAHI_PUBLISH_NO_REVERSE = 16,
+  name, address)` → `Commit` (values from `avahi-common/defs.h` and `address.h`);
+- one entry group per name, all owned by rynasd's own long-lived bus connection: Avahi
+  reports collisions per group (`EntryGroup.StateChanged` → 3), so one taken name never
+  takes the others down; Avahi frees the groups when rynasd disconnects;
+- names are published once `Server.GetState`/`StateChanged` says `RUNNING` (2); another
+  server state (its own host name re-registering) withdraws them, `RUNNING` again adds them
+  back;
+- `NameOwnerChanged` of `org.freedesktop.Avahi`: Avahi restarted (republish everything) or
+  went away (names unavailable);
+- a collision or a refusal is kept in the report (route problem, `local_name` check) and
+  not retried in a loop: only an address change, an Avahi restart or `POST
+  /web-access/sync` tries again;
+- routes removed or disabled, external mode or local names off: their groups are freed;
+- IPv4 only (A records of the primary address, research §3.2);
+- without Avahi on the bus, or without the system bus, local names are unavailable (the
+  check says so) and nothing else in web access changes. rynasd's unit already allows
+  `AF_UNIX` (`RestrictAddressFamilies`), and Avahi's bus policy lets any client publish;
+- `--dry-system` and tests never start the publisher; the `local_name` check is then
+  `skipped`.
+
+`cargo test -p rynasd -- --ignored real_avahi` publishes a test name against the real bus.
 
 #### What rynasd renders (Caddy JSON)
 
@@ -785,9 +843,10 @@ The UI also needs texts for these closed sets:
 - `RouteKind`: `app`, `stack`, `custom`;
 - `HeaderPreset`: `default`, `relaxed`;
 - `CheckState`: `ok`, `warn`, `fail`, `skipped`;
-- check ids: `dns`, `proxy_running`, `route_loaded`, `https_listening`, `certificate`,
-  `upstream`;
-- route problems: `name_too_long`, `local_names_off`, `disabled`;
+- check ids: `local_name` (new), `dns`, `proxy_running`, `route_loaded`,
+  `https_listening`, `certificate`, `upstream`;
+- route problems: `name_too_long`, `local_names_off`, `disabled`, `name_collision` (new),
+  `name_unpublished` (new);
 - the plan warning `proxy_inactive`;
 - the confirmation banner (deadline and the address to open).
 

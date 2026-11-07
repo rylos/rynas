@@ -1436,7 +1436,8 @@ async fn write_stack(
         files.1.clone(),
     );
     blocking(move || {
-        s2.fs(s2.apps_owner())
+        let owner = s2.ensure_apps_account_blocking(&|m| tracing::info!("apps: {m}"))?;
+        s2.fs(owner)
             .write_files(&l2, &n2, &c, &e)
             .map_err(|e| e.to_string())
     })
@@ -1795,6 +1796,14 @@ async fn update_post(
     let a = asvc(&st)?;
     let who = admin(&a, &hd)?;
     let req: AppUpdateRequest = optional_body(&body)?;
+    // the account before the plan: its ids go into the rendered files (never `nobody`)
+    let d2 = a.docker.clone();
+    blocking(move || {
+        d2.ensure_apps_account_blocking(&|m| tracing::info!("apps: {m}"))
+            .map(|_| ())
+    })
+    .await
+    .map_err(Error::internal)?;
     let (cat, l, d, plan) = a.update_plan(&stack).await?;
     if plan.downgrade {
         return Err(conflict(format!(

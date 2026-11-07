@@ -656,16 +656,63 @@ impl DockerSvc {
             .map_err(|e| format!("{}: {e}", cmd.display()))
     }
 
-    /// Makes sure the `docker-apps` account exists (before folders get its owner).
-    pub(crate) async fn ensure_apps_account(&self, ctx: &TaskCtx) -> Result<(), String> {
+    /// The `groupadd`/`useradd` lines still needed for `docker-apps` (none when it exists).
+    fn missing_account_cmds(&self) -> Vec<Cmd> {
         let read = |p: &str| {
             std::fs::read_to_string(rynas_docker::under(&self.root, p)).unwrap_or_default()
         };
         let (u, g) = install::apps_ids(&read("/etc/passwd"), &read("/etc/group"));
-        for c in install::apps_account_cmds(g.is_some(), u.is_some()) {
-            self.run(ctx, &c).await?;
+        install::apps_account_cmds(g.is_some(), u.is_some())
+    }
+
+    /// After the account commands: its (uid, gid), `None` only under `--dry-system`. A
+    /// missing account is an error: folders never get another owner (no `nobody`
+    /// fallback).
+    fn account_result(&self) -> Result<Option<(u32, u32)>, String> {
+        if self.dry {
+            return Ok(None);
         }
-        Ok(())
+        self.apps_owner().map(Some).ok_or_else(|| {
+            format!(
+                "the {} account does not exist and could not be created: app folders are never given another owner",
+                rynas_docker::APPS_USER
+            )
+        })
+    }
+
+    /// Makes sure the `docker-apps` account exists (before folders get its owner) and
+    /// returns its (uid, gid); `None` only under `--dry-system`.
+    pub(crate) async fn ensure_apps_account(
+        &self,
+        ctx: &TaskCtx,
+    ) -> Result<Option<(u32, u32)>, String> {
+        for c in self.missing_account_cmds() {
+            let o = self.run(ctx, &c).await?;
+            if !o.success() {
+                return Err(format!("{}: {}", c.display(), o.stderr.trim()));
+            }
+        }
+        self.account_result()
+    }
+
+    /// [`DockerSvc::ensure_apps_account`] outside a task (a blocking thread of a route):
+    /// commands through the runner, logged to `log`.
+    pub fn ensure_apps_account_blocking(
+        &self,
+        log: &dyn Fn(&str),
+    ) -> Result<Option<(u32, u32)>, String> {
+        for c in self.missing_account_cmds() {
+            if self.dry && !self.exec_via_runner.load(Ordering::Relaxed) {
+                log(&format!("$ {} (dry system: not run)", c.display()));
+                continue;
+            }
+            log(&format!("$ {}", c.display()));
+            let o = self.runner.run(&c)?;
+            if !o.success() {
+                return Err(format!("{}: {}", c.display(), o.stderr.trim()));
+            }
+        }
+        self.account_result()
     }
 
     fn take_busy(&self, name: &str) -> Res<BusyGuard<'_>> {
@@ -768,6 +815,7 @@ impl DockerSvc {
             compose_version: f.compose_version.clone(),
             buildx_version: f.buildx_version.clone(),
             install_block: f.install_block,
+            install_incomplete: f.incomplete.clone(),
             task_id: self.engine_task.lock().unwrap().clone(),
             read_at_ms: now_ms(),
             ..Default::default()
@@ -1071,11 +1119,52 @@ async fn install_task(
     let (Some(code), Some(arch)) = (f.codename.clone(), f.arch.clone()) else {
         return Err("unknown Debian release or architecture".into());
     };
+    // a previous install died inside dpkg: repair first (apt refuses to install anything
+    // while dpkg is interrupted)
+    if !f.incomplete.is_empty() {
+        ctx.log(&format!(
+            "repairing an interrupted install: {}",
+            f.incomplete
+                .iter()
+                .map(|p| format!("{} {} ({})", p.name, p.version, p.status))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+        for c in install::repair_cmds() {
+            if ctx.is_cancelled() {
+                return Err("cancelled".into());
+            }
+            s.run(ctx, &c).await?;
+        }
+        if !f
+            .incomplete
+            .iter()
+            .any(|p| install::PACKAGES.contains(&p.name.as_str()))
+        {
+            // another engine's packages (docker.io...): repaired, then adopted
+            s.ensure_apps_account(ctx).await?;
+            ctx.log("the engine's packages are complete again; it is adopted, not replaced");
+            return Ok(());
+        }
+    }
+    if f.resumable {
+        ctx.log("finishing an install that did not complete");
+    }
     ctx.log(&format!(
         "installing Docker from {} ({code}, {arch})",
         install::REPO_URL
     ));
-    let steps = install::repo_steps(&code, &arch);
+    // a keyring that already holds Docker's key (a resumed install) is kept
+    let key_ok = std::fs::read_to_string(rynas_docker::under(&s.root, install::KEYRING))
+        .is_ok_and(|k| install::check_key(&k).is_ok());
+    if key_ok {
+        ctx.log(&format!(
+            "{} holds Docker's key ({}): kept",
+            install::KEYRING,
+            install::KEY_FINGERPRINT
+        ));
+    }
+    let steps = install::repo_steps(&code, &arch, key_ok);
     let n = steps.len() + 4;
     for (i, step) in steps.into_iter().enumerate() {
         if ctx.is_cancelled() {
@@ -1126,7 +1215,11 @@ async fn install_task(
             .map(|o| o.stdout)
             .unwrap_or_default()
     };
-    match install::candidate_major(&out) {
+    // a pin written by an earlier attempt keeps its major
+    let pinned = std::fs::read_to_string(rynas_docker::under(&s.root, install::PREFERENCES))
+        .ok()
+        .and_then(|t| install::pinned_major(&t));
+    match pinned.or_else(|| install::candidate_major(&out)) {
         Some(major) => {
             ctx.log(&format!(
                 "pinning docker-ce to major version {major} ({})",
@@ -1167,8 +1260,11 @@ async fn install_task(
         .map_err(|e| e.to_string())?;
     }
     ctx.progress(80);
+    // apt skips what is installed already
     s.run(ctx, &install::install_cmd()).await?;
     s.ensure_apps_account(ctx).await?;
+    ctx.progress(90);
+    s.run(ctx, &install::enable_cmd()).await?;
     ctx.progress(100);
     ctx.log("Docker installed");
     Ok(())
@@ -1795,11 +1891,15 @@ async fn stack_create(
     audit(&who, "stack.create", &req.name);
     let (s2, l2, r2) = (s.clone(), l.clone(), req.clone());
     let path = tokio::task::spawn_blocking(move || {
-        let owner = s2.apps_owner();
+        // the account first: the folder and its files are made with its owner
+        let owner = s2
+            .ensure_apps_account_blocking(&|m| tracing::info!("docker: {m}"))
+            .map_err(Error::internal)?;
         s2.fs(owner)
             .create_stack(&l2, &r2.name, &r2.compose, &r2.env, &r2.files, &|m| {
                 tracing::info!("docker: {m}")
             })
+            .map_err(Error::from)
     })
     .await
     .map_err(Error::internal)??;
@@ -1914,8 +2014,12 @@ async fn stack_files_put(
     audit(&who, "stack.edit", &name);
     let s2 = s.clone();
     tokio::task::spawn_blocking(move || {
-        s2.fs(s2.apps_owner())
+        let owner = s2
+            .ensure_apps_account_blocking(&|m| tracing::info!("docker: {m}"))
+            .map_err(Error::internal)?;
+        s2.fs(owner)
             .write_files(&l, &name, &req.compose, &req.env)
+            .map_err(Error::from)
     })
     .await
     .map_err(Error::internal)??;
@@ -2005,7 +2109,7 @@ async fn prepare_up(
     file: &str,
     l: &Layout,
 ) -> Result<(), String> {
-    s.ensure_apps_account(ctx).await?;
+    let owner = s.ensure_apps_account(ctx).await?;
     let cmd = compose_cmd(name, dir, file, None, ComposeAction::Config);
     let out = if s.exec_via_runner.load(Ordering::Relaxed) {
         s.run(ctx, &cmd).await?
@@ -2030,7 +2134,6 @@ async fn prepare_up(
             ));
         }
     }
-    let owner = s.apps_owner();
     let fs = s.fs(owner);
     fs.create_bind_dirs(&binds, &l.volume, &|m| ctx.log(m))?;
     Ok(())

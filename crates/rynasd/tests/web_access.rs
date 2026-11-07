@@ -522,15 +522,25 @@ fn apply_loads_writes_last_good_certificate_and_avahi() {
         std::fs::read_to_string(e.file(rynasd::web_access::UI_STATE)).unwrap(),
         "nas.local\nnas\n"
     );
+    // local names go to the Avahi publisher; the hosts file is left alone, no reload
+    let names = e.svc.names.desired();
+    assert_eq!(
+        names.keys().collect::<Vec<_>>(),
+        ["immich-nas.local", "portainer-nas.local"]
+    );
+    assert!(
+        names
+            .values()
+            .all(|a| *a == "192.0.2.10".parse::<IpAddr>().unwrap())
+    );
     let hosts = std::fs::read_to_string(e.file("/etc/avahi/hosts")).unwrap();
-    assert!(hosts.contains("192.0.2.99 printer.local"), "{hosts}");
-    assert!(hosts.contains("192.0.2.10 immich-nas.local"), "{hosts}");
-    // the unit was started (reported inactive) and Avahi reloaded
+    assert_eq!(
+        hosts,
+        "# the administrator's line\n192.0.2.99 printer.local\n"
+    );
     let calls = e.system.state().calls.clone();
     assert!(
-        calls
-            .iter()
-            .any(|c| c.contains("reload avahi-daemon.service")),
+        !calls.iter().any(|c| c.contains("avahi-daemon.service")),
         "{calls:?}"
     );
 
@@ -589,15 +599,51 @@ fn drift_and_host_changes_are_followed() {
         f.hostname = "store".into();
     }
     e.svc.sync(&|_| {}).unwrap();
-    let hosts = std::fs::read_to_string(e.file("/etc/avahi/hosts")).unwrap();
-    assert!(
-        hosts.contains("192.0.2.20 immich-store.local") && !hosts.contains("immich-nas"),
-        "{hosts}"
+    let names = e.svc.names.desired();
+    assert_eq!(
+        names.get("immich-store.local"),
+        Some(&"192.0.2.20".parse::<IpAddr>().unwrap())
     );
+    assert!(!names.contains_key("immich-nas.local"), "{names:?}");
     assert!(e.caddy.config().to_string().contains("immich-store.local"));
     assert!(
         e.caddy.state.lock().unwrap().loads.last().unwrap().1,
         "new certificate: forced"
+    );
+}
+
+const OLD_BLOCK: &str = "# BEGIN rynas web-access — managed by rynas, do not edit (sha256:00)\n192.0.2.10 immich-nas.local\n# END rynas web-access\n";
+
+#[test]
+fn old_avahi_hosts_block_is_removed_on_apply_and_at_start() {
+    let e = env();
+    let admin = "# the administrator's line\n192.0.2.99 printer.local\n";
+    let hosts = e.file("/etc/avahi/hosts");
+    // on apply: removed once, Avahi reloaded once
+    std::fs::write(&hosts, format!("{admin}{OLD_BLOCK}")).unwrap();
+    e.apply(&sample()).unwrap();
+    assert_eq!(std::fs::read_to_string(&hosts).unwrap(), admin);
+    let reloads = |e: &Env| {
+        e.system
+            .state()
+            .calls
+            .iter()
+            .filter(|c| c.contains("avahi-daemon.service"))
+            .count()
+    };
+    assert_eq!(reloads(&e), 1);
+    e.apply(&sample()).unwrap();
+    assert_eq!(reloads(&e), 1, "nothing left to migrate");
+    // at start (a block left by an older rynasd, still in the drift records)
+    std::fs::write(&hosts, format!("{admin}{OLD_BLOCK}")).unwrap();
+    e.svc.sync(&|_| {}).unwrap();
+    assert_eq!(std::fs::read_to_string(&hosts).unwrap(), admin);
+    assert_eq!(reloads(&e), 2);
+    let drift = e.config().drift().unwrap();
+    assert!(
+        drift.entries.iter().all(|d| !d.path.contains("avahi")),
+        "{:?}",
+        drift.entries
     );
 }
 
@@ -623,8 +669,7 @@ fn external_mode_releases_the_ports() {
     assert!(!e.svc.proxy_active());
     // rynas-web opens its plain port to the network again
     assert!(!e.file(rynasd::web_access::UI_STATE).exists());
-    let hosts = std::fs::read_to_string(e.file("/etc/avahi/hosts")).unwrap();
-    assert!(!hosts.contains("immich-nas"), "{hosts}");
+    assert!(e.svc.names.desired().is_empty());
     // and back: enabled and started again
     e.system
         .state()
@@ -806,6 +851,9 @@ async fn routes_state_stage_plan_and_test() {
     assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
     let d: RouteDiagnostics = serde_json::from_slice(&b).unwrap();
     let state = |id: &str| d.checks.iter().find(|c| c.id == id).unwrap().state;
+    // no Avahi publisher in tests (as under --dry-system): skipped, first
+    assert_eq!(d.checks[0].id, "local_name");
+    assert_eq!(state("local_name"), CheckState::Skipped);
     assert_eq!(state("dns"), CheckState::Ok);
     assert_eq!(state("proxy_running"), CheckState::Ok);
     assert_eq!(state("route_loaded"), CheckState::Ok);
@@ -823,7 +871,8 @@ async fn routes_state_stage_plan_and_test() {
     )
     .await;
     let d: RouteDiagnostics = serde_json::from_slice(&b).unwrap();
-    assert_eq!(d.checks[0].state, CheckState::Fail);
+    let dns = d.checks.iter().find(|c| c.id == "dns").unwrap();
+    assert_eq!(dns.state, CheckState::Fail);
     let (s, _) = call(
         &app,
         "admin",
