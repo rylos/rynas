@@ -7,6 +7,9 @@
 //!   emergency address that never goes through the proxy.
 //! - Routes: one row per app address (names, access badge, problems); a drawer per route with
 //!   its access level and the checklist of `POST /web-access/routes/{id}/test`.
+//! - Domains ([`domains`], wave W2): own domains with Let's Encrypt through DNS-01, the LAN
+//!   records at the provider, the credentials and the ACME account; the Certificate tab adds the
+//!   inventory of every certificate.
 //! - A change of the interface's own route waits for a confirmation from the new address
 //!   (`confirm` in the state): a banner with the countdown, the addresses to open and, when the
 //!   page is already on one of them through the proxy, the Confirm button. Without it the
@@ -16,12 +19,13 @@
 //! shows and sends the rest back untouched, with no typed copy of the whole key in the wasm.
 
 pub mod cert;
+pub mod domains;
 
 use std::time::Duration;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use rynas_api_types::web_access::{AccessLevel, CheckState, PendingConfirm, ProxyEngine, RouteDiagnostics, RouteView};
+use rynas_api_types::web_access::{AccessLevel, CheckState, DomainView, PendingConfirm, ProxyEngine, RouteDiagnostics, RouteView};
 use serde_json::Value;
 
 use crate::api;
@@ -33,7 +37,7 @@ use crate::toast::saved_applied;
 use crate::ui::{self, Confirm, EmptyState, PageHeader, Remote, Tone, WidgetHead};
 
 const URL: &str = "/api/v1/web-access";
-const TABS: &[&str] = &["wa.tab.overview", "wa.tab.routes", "tls.title"];
+const TABS: &[&str] = &["wa.tab.overview", "wa.tab.routes", "wa.tab.domains", "tls.title"];
 
 /// `GET /api/v1/web-access` (`WebAccessState`) with the configuration kept as JSON.
 #[derive(Clone, PartialEq, serde::Deserialize)]
@@ -51,6 +55,8 @@ pub struct WaState {
     #[serde(default)]
     pub confirm: Option<PendingConfirm>,
     pub emergency_port: u16,
+    #[serde(default)]
+    pub domains: Vec<DomainView>,
 }
 
 impl WaState {
@@ -110,6 +116,7 @@ fn problem_key(p: &str) -> Option<&'static str> {
         "disabled" => "wa.prob.disabled",
         "name_collision" => "wa.prob.name_collision",
         "name_unpublished" => "wa.prob.name_unpublished",
+        "domain_name_too_long" => "wa.prob.domain_name_too_long",
         _ => return None,
     })
 }
@@ -165,10 +172,17 @@ pub fn WebAccess() -> impl IntoView {
         app_names: RwSignal::new(Vec::new()),
     };
     provide_context(w);
-    // `?tab=certificate` (the System page's link) opens the certificate
-    let deep = leptos_router::hooks::use_query_map().with_untracked(|q| q.get("tab").map(|v| v == "certificate").unwrap_or(false));
-    let tab = RwSignal::new(if deep { 2usize } else { 0 });
-    let seen = RwSignal::new([!deep, false, deep]);
+    // `?tab=certificate` (the System page's link) opens the certificate, `?tab=domains` the
+    // own domains
+    let first = leptos_router::hooks::use_query_map().with_untracked(|q| match q.get("tab").as_deref() {
+        Some("certificate") => 3usize,
+        Some("domains") => 2,
+        _ => 0,
+    });
+    let tab = RwSignal::new(first);
+    let mut seen0 = [false; 4];
+    seen0[first] = true;
+    let seen = RwSignal::new(seen0);
     Effect::new(move || {
         let i = tab.get();
         if !seen.with_untracked(|s| s[i]) {
@@ -199,10 +213,16 @@ pub fn WebAccess() -> impl IntoView {
             <div class="card hw-tabs">{tabs("wat", TABS, tab, "wa.title")}</div>
             {panel(0, overview)}
             {panel(1, routes_panel)}
-            {panel(2, cert::panel)}
+            {panel(2, domains::panel)}
+            {panel(3, certificate_tab)}
             {move || w.route.get().map(|(id, run)| route_drawer(id, run))}
         </div>
     }
+}
+
+/// The certificate of the interface and every certificate rynas serves.
+fn certificate_tab() -> AnyView {
+    view! { {cert::panel()}{domains::inventory()} }.into_any()
 }
 
 // ------------------------------------------------------------------ confirmation
@@ -708,6 +728,8 @@ fn check_key(id: &str) -> Option<(&'static str, &'static str)> {
         "https_listening" => ("wa.check.https_listening", "wa.fix.https_listening"),
         "certificate" => ("wa.check.certificate", "wa.fix.certificate"),
         "upstream" => ("wa.check.upstream", "wa.fix.upstream"),
+        "domain_dns" => ("wa.check.domain_dns", "wa.fix.domain_dns"),
+        "domain_certificate" => ("wa.check.domain_certificate", "wa.fix.domain_certificate"),
         _ => return None,
     })
 }
@@ -721,7 +743,7 @@ fn check_state(s: CheckState) -> (Tone, &'static str) {
     }
 }
 
-fn checklist(d: &RouteDiagnostics) -> AnyView {
+fn checklist(d: &RouteDiagnostics, check_key: fn(&str) -> Option<(&'static str, &'static str)>) -> AnyView {
     let items = d
         .checks
         .iter()
@@ -832,7 +854,7 @@ fn route_drawer(id: String, run_now: bool) -> AnyView {
                 <button class="btn ghost sm" disabled=move || testing.get() on:click=move |_| test()>{spinner(testing)}<Icon icon=icons::LIST_CHECKS size=14 />{tr("wa.route.test")}</button>
             </div>
             {form_error(test_err)}
-            {move || diag.with(|d| d.as_ref().map(checklist))}
+            {move || diag.with(|d| d.as_ref().map(|d| checklist(d, check_key)))}
         }
         .into_any()
     };

@@ -1167,6 +1167,30 @@ Closed sets:
 `token_hint`, check details, `DnsChange.detail` and `last_error` are English, shown as they
 are.
 
+#### UI notes W2 (rynas-ui, 2026-11-07)
+
+Where it lives: a fourth tab **Domains** on Network › Web access (`?tab=domains`; the
+Certificate tab moves to the fourth place, `?tab=certificate` still opens it), code in
+`crates/rynas-ui/src/pages/web_access/domains.rs`. The tab has the domain list (records,
+certificate, status, Test and Open per row), the Let's Encrypt account (e-mail, staging, profile)
+and the provider credentials (stored field names, used by, edit, remove when unused). "Add a
+domain" is one guided form in a drawer: 1 provider (what rynas does with it: writes the records
+or not, one record per name, the `token_hint`, delegation recommended without scoped tokens,
+the DuckDNS overwrite), 2 access (an existing credential of the provider or a new one; values
+are password fields, `autocomplete=new-password`, never filled from an answer), 3 domain
+(name, challenge, delegation target, wildcard, LAN records, IPv6, interface, active), 4 "What
+changes" (`POST /plan` with the candidate key, filtered to the domain: every record with its
+action; a `conflict` with `wanted` has a Replace check box that adds its name to `take_over`;
+`manual` rows have Copy and a Copy all of zone-file lines). The drawer of an existing domain
+shows each problem with its fix (`credential_missing` → enter the values again,
+`records_failed` → Write records now, `staging` → use trusted certificates), the last sync
+with "Take over" behind a confirmation that names the current and the new values, the domain's
+certificates, the checklist with a fix per failed step, the settings (folded) and Remove.
+The Certificate tab adds "All certificates" (the inventory). Patterns: reusable credentials
+(DNS authenticator lists), typed fields per provider instead of a free-form credentials file
+(the NPM complaint, issues #1741 and #1020), a preview before anything is written, no silent
+failures (every sync and engine error shown where it belongs).
+
 #### Not in W2
 
 - `:8443` reusing the wildcard (rynas-web still serves the local or imported certificate);

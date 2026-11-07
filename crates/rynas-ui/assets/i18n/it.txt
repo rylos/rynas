@@ -3053,6 +3053,204 @@ tls.warn.names_not_covered	Alcuni nomi e indirizzi di questo NAS non sono nel ce
 tls.warn.chain_incomplete	Mancano i certificati intermedi: alcuni dispositivi non si fideranno. Importa la catena completa.
 tls.missing_names	Non coperti:
 tls.reload_note	La pagina si ricollega con il nuovo certificato; un browser che si fidava del precedente potrebbe chiedere di nuovo.
+wa.tab.domains	Domini
+wa.prob.domain_name_too_long	Il nome sotto il dominio supererebbe i 253 caratteri: accorcia l'etichetta dell'app o il dominio.
+wa.check.domain_dns	Il nome del dominio si risolve
+wa.check.domain_certificate	Certificato del dominio
+wa.fix.domain_dns	Il nome del dominio non punta a questo NAS. Apri il dominio nella scheda Domini ed esegui i suoi controlli.
+wa.fix.domain_certificate	Il certificato del dominio manca o non è valido. Apri il dominio nella scheda Domini per vedere perché.
+dom.title	Domini propri
+dom.intro	Ogni app riceve <app>.<dominio> con un certificato riconosciuto di Let's Encrypt, su ogni dispositivo della rete.
+dom.add	Aggiungi un dominio
+dom.add_go	Aggiungi e applica
+dom.open	Apri
+dom.check_named	Controlla {name}
+dom.empty	Ancora nessun dominio proprio
+dom.empty_text	Con un dominio tuo (meglio un sottodominio come nas.example.com) le app si aprono con un certificato riconosciuto, anche da telefoni e app mobili, senza aprire alcuna porta.
+dom.external	Un altro reverse proxy gestisce le porte 80 e 443: qui non viene richiesto alcun certificato. I record LAN vengono comunque scritti.
+dom.col.domain	Dominio
+dom.col.records	Record DNS
+dom.col.cert	Certificato
+dom.state.ok	Funziona
+dom.gone	Questo dominio non esiste più.
+dom.prob.credential_missing	I valori di accesso del provider mancano o non si possono leggere (per esempio dopo un ripristino senza la sua chiave): inseriscili di nuovo.
+dom.prob.records_failed	Non è stato possibile scrivere i record DNS. rynas riprova ogni 10 minuti.
+dom.prob.records_manual	Alcuni record DNS vanno aggiunti a mano presso il provider: sono elencati qui sotto.
+dom.prob.records_conflict	Un record non scritto da rynas contiene altri valori: prendi in carico il nome qui sotto, o correggilo presso il provider.
+dom.prob.no_lan_address	Questo NAS non ha un indirizzo LAN da mettere nei record.
+dom.prob.staging	I certificati di prova sono attivi: i browser non li riconoscono.
+dom.ps.credential_missing	Token mancante
+dom.ps.records_failed	Record non scritti
+dom.ps.records_manual	Record da aggiungere a mano
+dom.ps.records_conflict	Record da prendere in carico
+dom.ps.no_lan_address	Nessun indirizzo LAN
+dom.ps.staging	Certificati di prova attivi
+dom.fix.enter_values	Inserisci di nuovo i valori
+dom.fix.no_staging	Usa certificati riconosciuti
+dom.rec.not_yet	Non ancora scritti
+dom.rec.off	Non gestiti
+dom.rec.failed	{n} non riusciti
+dom.rec.conflicts	{n} da prendere in carico
+dom.rec.manual	Da aggiungere a mano
+dom.rec.ok	Aggiornati
+dom.rec.text	rynas fa puntare il dominio e ogni nome sotto di esso all'indirizzo LAN di questo NAS, presso il provider, e li tiene aggiornati.
+dom.rec.not_yet_text	I record vengono scritti subito dopo la prima applicazione.
+dom.rec.off_text	rynas non gestisce i record di questo dominio: falli puntare tu a questo NAS.
+dom.rec.none	Nessun record da scrivere.
+dom.rec.manual_text	Aggiungi questi record presso il tuo provider DNS; rynas non può scriverli lì.
+dom.rec.write	Scrivi ora i record
+dom.rec.at	Ultima scrittura {when}
+dom.cert.title	Certificati
+dom.cert.none	Ancora nessun certificato: viene richiesto dopo l'applicazione e di solito arriva entro un minuto.
+dom.test.text	Controlla i record, la risoluzione del nome su questo NAS e su internet, la protezione del router contro il DNS rebinding e il certificato.
+dom.ui_urls	Interfaccia
+dom.cert_names	Nomi del certificato
+dom.provider	Provider DNS
+dom.challenge	Convalida
+dom.settings	Impostazioni
+dom.remove	Rimuovi dominio
+dom.remove_go	Rimuovi
+dom.remove_text	I nomi di questo dominio smettono di funzionare. rynas elimina i record che ha scritto, solo se contengono ancora i suoi valori; la credenziale resta.
+dom.take.title	Prendere in carico {name}?
+dom.take.text	Questo record non è stato scritto da rynas e ora contiene {now}. rynas lo sostituisce con {wanted} e da ora lo tiene aggiornato.
+dom.form.intro	Quattro passi: il provider che gestisce il DNS del dominio, un token di accesso, il dominio, poi un'anteprima di cosa cambia. Nulla viene scritto prima di aggiungerlo.
+dom.step.token	Accesso al provider
+dom.step.domain	Dominio
+dom.step.records	Cosa cambia
+dom.p.records	rynas scrive i record LAN
+dom.p.manual	Record LAN da aggiungere a mano
+dom.p.per_name	Un record per nome
+dom.p.unscoped	I token di questo provider non si possono limitare a un dominio. Preferisci la delega CNAME, così il token non tocca mai la zona principale.
+dom.p.duckdns	DuckDNS tiene un solo indirizzo per nome: rynas lo imposta all'indirizzo LAN di questo NAS a ogni sincronizzazione, sostituendo un indirizzo pubblico tenuto lì da un altro aggiornatore.
+dom.f.optional	{name} (facoltativo)
+dom.f.never_shown	I valori vengono conservati cifrati e non vengono più mostrati.
+dom.name	Dominio
+dom.name_help	Un nome tuo, meglio un sottodominio usato solo per questo NAS. DuckDNS: <nome>.duckdns.org.
+dom.ch.dns01	DNS (consigliata)
+dom.ch.cname_delegation	Delega CNAME
+dom.ch.http01	HTTP
+dom.ch.dns01_help	L'API del provider dimostra che il dominio è tuo. Un solo certificato wildcard, nessuna porta aperta.
+dom.ch.cname_delegation_help	_acme-challenge del dominio punta con un CNAME a un'altra zona che il token può scrivere. La zona principale resta fuori portata; i suoi record vanno aggiunti a mano.
+dom.ch.http01_help	La porta 80 deve essere raggiungibile da internet. Un certificato per nome, e i nomi delle app diventano pubblici nei registri dei certificati.
+dom.delegate_to	Destinazione del CNAME
+dom.delegate_to_help	Il nome a cui punta _acme-challenge.<dominio> (con acme-dns, il dominio completo dell'account).
+dom.wildcard	Certificato wildcard
+dom.wildcard_help	Un certificato per *.<dominio> e <dominio>: i nomi delle app restano fuori dai registri pubblici dei certificati.
+dom.lan_record	Scrivi i record LAN
+dom.lan_record_help	<dominio> e *.<dominio> puntano all'indirizzo LAN di questo NAS, così ogni dispositivo trova le app.
+dom.lan_ipv6	Anche record IPv6
+dom.lan_ipv6_help	Solo con un indirizzo IPv6 stabile sull'interfaccia LAN.
+dom.ui	Interfaccia sul dominio stesso
+dom.ui_help	https://<dominio> apre questa interfaccia.
+dom.enabled	Attivo
+dom.enabled_help	Se disattivato, i nomi smettono di funzionare e rynas elimina i record che ha scritto.
+dom.plan.text	rynas legge il provider (nulla viene scritto) ed elenca i record che il salvataggio creerebbe o cambierebbe.
+dom.plan.go	Anteprima delle modifiche DNS
+dom.plan.conflict	Alcuni nomi hanno già record non scritti da rynas. Restano come sono, a meno che tu non spunti Sostituisci.
+dom.cred.title	Credenziali dei provider
+dom.cred.add	Aggiungi una credenziale
+dom.cred.edit	Modifica credenziale
+dom.cred.empty	Ancora nessuna: la prima viene creata con un dominio.
+dom.cred.stored	Conservati: {fields}
+dom.cred.no_values	Nessun valore conservato
+dom.cred.used	Domini che la usano: {n}
+dom.cred.in_use	È usata da un dominio
+dom.cred.remove	Rimuovi credenziale
+dom.cred.remove_text	I valori conservati vengono eliminati da questo NAS. Il token resta valido presso il provider: revocalo anche lì.
+dom.cred.label	Nome
+dom.cred.label_help	Per riconoscerla nell'elenco, per esempio "token per example.com".
+dom.cred.keep	Lascia vuoti i campi per tenere i valori conservati; per cambiarli, inseriscili di nuovo tutti.
+dom.cred.pick	Credenziale
+dom.cred.new	Nuova credenziale
+dom.cred.replace	Inserisci nuovi valori
+dom.acme.title	Account Let's Encrypt
+dom.acme.text	Comune a tutti i domini. I certificati si rinnovano da soli, molto prima della scadenza.
+dom.acme.email	E-mail di contatto
+dom.acme.email_help	Facoltativa: l'autorità di certificazione può scrivere in caso di problemi con l'account.
+dom.acme.staging	Certificati di prova
+dom.acme.staging_help	Per provare una configurazione senza raggiungere i limiti di richieste. I browser non li riconoscono: disattivalo dopo.
+dom.acme.profile	Profilo del certificato
+dom.acme.profile_default	Predefinito dell'autorità
+dom.acme.profile_tlsserver	Server TLS (più breve, solo web)
+dom.acme.profile_classic	Classico
+dom.check.dns_record	Record DNS scritti
+dom.check.dns_nas	Il nome si risolve su questo NAS
+dom.check.dns_public	Il nome si risolve su internet
+dom.check.rebind	Il router lascia passare la risposta
+dom.check.certificate	Certificato ottenuto
+dom.check.renewal	Rinnovo
+dom.check.hairpin	Il nome punta alla LAN
+dom.fix.dns_record	Guarda i record DNS qui sopra: scrivili di nuovo, prendi in carico un nome o aggiungi a mano quelli elencati.
+dom.fix.dns_nas	Questo NAS non risolve ancora il nome nel suo indirizzo LAN. Le modifiche presso il provider possono richiedere qualche minuto: riprova fra poco.
+dom.fix.dns_public	I resolver pubblici non vedono ancora il record, oppure il DNS in uscita è bloccato su questa rete.
+dom.fix.rebind	Il router scarta le risposte pubbliche che puntano a indirizzi privati (protezione dal DNS rebinding). Consenti lì questo dominio; il dettaglio spiega come per i router più comuni.
+dom.fix.certificate	Il certificato non c'è ancora. Controlla i permessi del token e l'errore del motore nel dettaglio; i certificati di prova non sono riconosciuti.
+dom.fix.renewal	Il rinnovo è in ritardo o fallisce: di solito il token è stato revocato o ha perso i permessi. Inserisci nuovi valori per la credenziale.
+dom.fix.hairpin	Il nome punta a un indirizzo pubblico: i dispositivi della rete dipendono allora dal router che rimanda al NAS. Attiva Scrivi i record LAN.
+dns.col.name	Nome
+dns.col.type	Tipo
+dns.col.action	Modifica
+dns.col.value	Valore
+dns.act.keep	Già corretto
+dns.act.create	Da creare
+dns.act.update	Da aggiornare
+dns.act.delete	Da eliminare
+dns.act.manual	Da aggiungere a mano
+dns.act.unknown	Non noto
+dns.act.conflict	Non scritto da rynas
+dns.act.failed	Non riuscito
+dns.now	Ora: {v}
+dns.copy	Copia
+dns.copy_all	Copia tutti
+dns.take_over	Sostituisci
+dns.take_over_btn	Prendi in carico
+dns.f.api_token	Token API
+dns.f.token	Token
+dns.f.api_key	Chiave API
+dns.f.api_secret_key	Chiave API segreta
+dns.f.endpoint	Endpoint API
+dns.f.application_key	Chiave dell'applicazione
+dns.f.application_secret	Segreto dell'applicazione
+dns.f.consumer_key	Chiave consumer
+dns.f.bearer_token	Token di accesso personale
+dns.f.access_key_id	ID della chiave di accesso
+dns.f.secret_access_key	Chiave di accesso segreta
+dns.f.region	Regione
+dns.f.auth_token	Token di accesso API
+dns.f.server	Server DNS primario
+dns.f.key_name	Nome della chiave TSIG
+dns.f.key_alg	Algoritmo TSIG
+dns.f.key	Chiave TSIG
+dns.f.server_url	URL del server
+dns.f.username	Nome utente dell'account
+dns.f.subdomain	Sottodominio
+dns.f.password	Password
+cert.inv.title	Tutti i certificati
+cert.inv.text	Ogni certificato servito da questo NAS. Un problema con uno di essi diventa una notifica.
+cert.inv.at	Letto {when}
+cert.col.cert	Certificato
+cert.col.renew	Rinnovo dal
+cert.kind.local_ca	Autorità locale
+cert.kind.interface	Interfaccia (porta di emergenza)
+cert.kind.proxy_local	Nomi locali
+cert.kind.acme	Let's Encrypt
+cert.kind.imported	Importato
+cert.staging	Prova
+cert.st.ok	Valido
+cert.st.expires_soon	Scade presto
+cert.st.expired	Scaduto
+cert.st.renewal_overdue	Rinnovo non riuscito
+cert.st.pending	In arrivo
+cert.st.failed	Non ottenuto
+nev.web_access.cert_expires_soon.title	Il certificato per {name} scade presto
+nev.web_access.cert_expires_soon.body	Scade entro 14 giorni. Apri Rete › Accesso web › Certificato per vedere perché non è stato rinnovato.
+nev.web_access.cert_renewal_overdue.title	Il certificato per {name} non si rinnova
+nev.web_access.cert_renewal_overdue.body	Il rinnovo è in ritardo. Controlla il token del dominio in Rete › Accesso web › Domini.
+nev.web_access.cert_failed.title	Non è stato possibile ottenere il certificato per {name}
+nev.web_access.cert_failed.body	Apri il dominio in Rete › Accesso web › Domini ed esegui i suoi controlli.
+nev.web_access.cert_expired.title	Il certificato per {name} è scaduto
+nev.web_access.cert_expired.body	I browser rifiutano i nomi che copre. Apri Rete › Accesso web › Domini per correggerlo.
+nev.web_access.cert_ok.title	Il certificato per {name} è di nuovo a posto
 docker.install_incomplete	Un'installazione precedente di Docker non è terminata: {n} pacchetti sono installati a metà.
 docker.install_incomplete_hint	Il completamento li ripara e termina l'installazione.
 docker.install_unfinished	All'installazione di Docker avviata da rynas mancano gli ultimi passi (il blocco della versione o l'account docker-apps).
