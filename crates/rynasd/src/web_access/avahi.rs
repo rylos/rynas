@@ -452,13 +452,18 @@ async fn session(
             .member("NameOwnerChanged")
             .arg(0, AVAHI),
     )?;
+    // only Avahi's own signals: the bus matches the well-known name's current owner, and
+    // each message's sender is compared with the owner again (review 2026-11-07, M5: any
+    // local process could otherwise fake a COLLISION and take a name down)
     let groups = rule(
         zbus::MatchRule::builder()
+            .sender(AVAHI)
             .interface(ENTRY_GROUP)
             .member("StateChanged"),
     )?;
     let servers = rule(
         zbus::MatchRule::builder()
+            .sender(AVAHI)
             .interface(SERVER)
             .member("StateChanged"),
     )?;
@@ -468,7 +473,8 @@ async fn session(
     let mut p = ZbusPublisher { conn: conn.clone() };
 
     names.set_desired(rx.borrow_and_update().clone());
-    let present = name_has_owner(conn).await?;
+    let mut owner = name_owner(conn).await?;
+    let present = owner.is_some();
     names.on_owner(present);
     if present {
         on_avahi_up(conn, names, &mut p).await;
@@ -488,6 +494,7 @@ async fn session(
                 let m = m.ok_or(zbus::Error::Failure("the bus closed".into()))??;
                 let (_name, _old, new): (String, String, String) = m.body().deserialize()?;
                 let present = !new.is_empty();
+                owner = present.then_some(new);
                 if present {
                     tracing::info!("web access: Avahi appeared on the bus, publishing the local names");
                 } else {
@@ -501,13 +508,18 @@ async fn session(
             m = groups.next() => {
                 let m = m.ok_or(zbus::Error::Failure("the bus closed".into()))??;
                 let path = m.header().path().map(|p| p.to_string()).unwrap_or_default();
-                if let Ok((state, error)) = m.body().deserialize::<(i32, String)>() {
+                let sender = m.header().sender().map(|s| s.to_string());
+                if from_owner(sender.as_deref(), owner.as_deref())
+                    && let Ok((state, error)) = m.body().deserialize::<(i32, String)>()
+                {
                     names.on_group_state(&path, state, &error, &mut p).await;
                 }
             }
             m = servers.next() => {
                 let m = m.ok_or(zbus::Error::Failure("the bus closed".into()))??;
-                if let Ok((state, _)) = m.body().deserialize::<(i32, String)>()
+                let sender = m.header().sender().map(|s| s.to_string());
+                if from_owner(sender.as_deref(), owner.as_deref())
+                    && let Ok((state, _)) = m.body().deserialize::<(i32, String)>()
                     && !matches!(names.avahi, Availability::Down(_))
                 {
                     names.on_server_state(state, &mut p).await;
@@ -518,7 +530,8 @@ async fn session(
     }
 }
 
-async fn name_has_owner(conn: &zbus::Connection) -> zbus::Result<bool> {
+/// The unique bus name owning Avahi's well-known name (`None`: not on the bus).
+async fn name_owner(conn: &zbus::Connection) -> zbus::Result<Option<String>> {
     let p = zbus::Proxy::new(
         conn,
         "org.freedesktop.DBus",
@@ -526,7 +539,20 @@ async fn name_has_owner(conn: &zbus::Connection) -> zbus::Result<bool> {
         "org.freedesktop.DBus",
     )
     .await?;
-    p.call("NameHasOwner", &(AVAHI,)).await
+    match p.call::<_, _, String>("GetNameOwner", &(AVAHI,)).await {
+        Ok(o) => Ok(Some(o)),
+        Err(zbus::Error::MethodError(name, _, _))
+            if name.as_str() == "org.freedesktop.DBus.Error.NameHasNoOwner" =>
+        {
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// A signal counts only when its sender is Avahi's current owner.
+fn from_owner(sender: Option<&str>, owner: Option<&str>) -> bool {
+    matches!((sender, owner), (Some(s), Some(o)) if s == o)
 }
 
 /// Avahi is on the bus: its server state decides when to publish.
@@ -653,6 +679,15 @@ pub fn strip_hosts_block(text: &str) -> Option<String> {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    /// Review 2026-11-07 M5: signals count only from Avahi's current owner.
+    #[test]
+    fn signals_only_from_avahis_owner() {
+        assert!(from_owner(Some(":1.7"), Some(":1.7")));
+        assert!(!from_owner(Some(":1.99"), Some(":1.7")), "another process");
+        assert!(!from_owner(None, Some(":1.7")));
+        assert!(!from_owner(Some(":1.7"), None), "Avahi not on the bus");
+    }
 
     #[derive(Default)]
     struct Fake {

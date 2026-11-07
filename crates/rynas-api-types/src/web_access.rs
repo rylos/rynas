@@ -437,6 +437,11 @@ pub struct WebDomain {
     pub ui: bool,
     #[serde(default = "yes")]
     pub enabled: bool,
+    /// Record names (`nas.example.com`, `*.nas.example.com`) whose existing values rynas may
+    /// replace although it did not write them (a plan shows them as `conflict` until then).
+    /// Each is the domain's name or a name below it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub take_over: Vec<String>,
 }
 
 impl Default for WebDomain {
@@ -453,6 +458,7 @@ impl Default for WebDomain {
             lan_ipv6: false,
             ui: true,
             enabled: true,
+            take_over: Vec::new(),
         }
     }
 }
@@ -547,6 +553,11 @@ pub enum DnsAction {
     Manual,
     /// Not known: the provider could not be read (`detail` says why) or was not asked.
     Unknown,
+    /// A record set rynas did not write (or that changed since rynas wrote it) holds other
+    /// values: left as it is. A wanted set is written only after the administrator takes
+    /// it over ([`WebDomain::take_over`]); a set rynas no longer wants is not deleted and no
+    /// longer managed. `current` holds the provider's values, `detail` says which case.
+    Conflict,
 }
 
 /// One record set and what happens to it.
@@ -597,7 +608,8 @@ pub struct DomainView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub records: Option<DnsSyncReport>,
     /// Problem codes: `credential_missing`, `records_failed`, `records_manual`,
-    /// `no_lan_address`, `staging`.
+    /// `records_conflict` (a record set rynas did not write holds other values: see
+    /// [`WebDomain::take_over`]), `no_lan_address`, `staging`.
     #[serde(default)]
     pub problems: Vec<String>,
 }

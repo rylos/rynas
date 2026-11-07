@@ -2,7 +2,10 @@
 # The default config listens on localhost only and a catalogue entry ships no config file, so
 # the command writes mosquitto.conf and the password file into the data folder at every start
 # (TrueNAS renders the same settings from a template; Umbrel writes them in a pre-start hook).
-# `$$` keeps the variables for the shell. The image has no HEALTHCHECK; `pidof` as in TrueNAS.
+# `$$` keeps the variables for the shell. The password reaches the file through the shell's
+# `printf` builtin and `mosquitto_passwd -U` hashes it in place: it never appears in a
+# command line (`/proc/<pid>/cmdline` is readable by every host user).
+# The image has no HEALTHCHECK; `pidof` as in TrueNAS.
 services:
   mosquitto:
     image: eclipse-mosquitto:2.1.2-alpine@sha256:75d6662dee52c947dc9dd9c29f1d8d7ffef78ddaf38001caa09755681e8bbc98
@@ -20,7 +23,8 @@ services:
       - |
         umask 077
         printf '%s\n' 'listener 1883' 'allow_anonymous false' 'password_file /mosquitto/data/passwd' 'persistence true' 'persistence_location /mosquitto/data/' 'log_dest stdout' > /mosquitto/data/mosquitto.conf
-        mosquitto_passwd -b -c /mosquitto/data/passwd "$$MQTT_USER" "$$MQTT_PASSWORD"
+        printf '%s:%s\n' "$$MQTT_USER" "$$MQTT_PASSWORD" > /mosquitto/data/passwd
+        mosquitto_passwd -U /mosquitto/data/passwd
         exec mosquitto -c /mosquitto/data/mosquitto.conf
     volumes:
       - ${DATA_FOLDER}:/mosquitto/data

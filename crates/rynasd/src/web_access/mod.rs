@@ -305,6 +305,23 @@ fn config_of(v: Option<&Value>) -> WebAccessConfig {
 }
 
 /// The gid of `group` in `<root>/etc/group`, applied only as root.
+/// `text` with every secret credential value masked.
+fn redact_creds(text: &str, creds: &CredValues) -> String {
+    creds.values().fold(text.to_string(), |t, (p, c)| {
+        let secret: Creds = c
+            .iter()
+            .filter(|(k, _)| rynas_dns::fields(*p).iter().any(|f| f.name == *k && f.secret))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        rynas_dns::redact(&t, &secret)
+    })
+}
+
+/// rynasd's own user (root in production; the test user in tests).
+fn euid() -> u32 {
+    nix::unistd::Uid::effective().as_raw()
+}
+
 fn group_gid(root: &Path, group: &str) -> Option<u32> {
     if !nix::unistd::Uid::effective().is_root() {
         return None;
@@ -392,7 +409,15 @@ pub struct WebAccessSvc {
     pub notifier: OnceLock<Arc<dyn Notifier>>,
     /// Recent JSON log lines of the engine (certificate errors); `journalctl` by default.
     pub engine_log: Box<dyn Fn() -> String + Send + Sync>,
+    /// How long the errors read from [`Self::engine_log`] are reused (review 2026-11-07,
+    /// L3: `journalctl` on every inventory and domain test); tests set zero.
+    pub engine_log_ttl: Duration,
     dns_mem: Mutex<domains::DnsMem>,
+    /// One record sync at a time; held across the provider calls, unlike `dns_mem`
+    /// (review 2026-11-07, M1: the pages never wait on a slow provider).
+    dns_sync: Mutex<()>,
+    /// Provider reads shared by plans (review 2026-11-07, M6).
+    dns_cache: rynas_dns::cache::Cache,
     cert_mem: Mutex<CertMem>,
 }
 
@@ -403,6 +428,8 @@ struct CertMem {
     expected_since: BTreeMap<String, i64>,
     notified: certs::Notified,
     last_check: Option<Instant>,
+    /// The engine's certificate errors and when they were read.
+    log_errors: Option<(Instant, BTreeMap<String, String>)>,
 }
 
 /// The engine's recent log lines: `journalctl -u rynas-caddy -o cat` of the last day.
@@ -463,7 +490,10 @@ impl WebAccessSvc {
             tls: OnceLock::new(),
             notifier: OnceLock::new(),
             engine_log: Box::new(journal_lines),
+            engine_log_ttl: Duration::from_secs(60),
             dns_mem: Mutex::new(domains::DnsMem::default()),
+            dns_sync: Mutex::new(()),
+            dns_cache: rynas_dns::cache::Cache::new(),
             cert_mem: Mutex::new(CertMem::default()),
         }
     }
@@ -692,15 +722,41 @@ impl WebAccessSvc {
         Ok(true)
     }
 
-    /// Writes the DNS secret files below `rynas/dns` (root-owned `rynas/`, so plain paths
-    /// are safe there). Returns whether anything changed.
+    /// Writes the DNS secret files below `rynas/dns`, all through descriptors from the
+    /// checked `rynas/` folder ([`domains::write_engine_secrets`]). Returns whether anything
+    /// changed.
     fn write_dns_secrets(&self, values: &CredValues) -> io::Result<bool> {
         let gid = group_gid(&self.root, ENGINE_GROUP);
-        if !values.is_empty() {
-            // makes `rynas/` (0750 root:rynas-caddy) when missing, refusing a planted link
-            self.rynas_dir(gid)?;
+        let dir = if values.is_empty() {
+            // nothing to write: only clean up an existing, trusted `rynas/`
+            match self.existing_rynas_dir()? {
+                Some(d) => d,
+                None => return Ok(false),
+            }
+        } else {
+            self.rynas_dir(gid)?
+        };
+        domains::write_engine_secrets(&dir, gid, values)
+    }
+
+    /// `rynas/` when it exists and is rynasd's own (owned by rynasd's user, a real folder);
+    /// `None` when missing or not trusted (the next [`Self::rynas_dir`] replaces it).
+    fn existing_rynas_dir(&self) -> io::Result<Option<std::fs::File>> {
+        let p = self.path(LAST_GOOD);
+        let parent = p.parent().expect("has a parent");
+        if !parent.exists() {
+            return Ok(None);
         }
-        domains::write_engine_secrets(&self.path(DNS_SECRETS), gid, values)
+        let state = rynas_docker::safefs::open_start(parent)?;
+        match rynas_docker::safefs::open_dir_at(&state, "rynas") {
+            Ok(d) if rynas_docker::safefs::stat_of(&d)?.1 == euid() => Ok(Some(d)),
+            Ok(_) => Ok(None),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) if matches!(e.raw_os_error(), Some(libc::ELOOP) | Some(libc::ENOTDIR)) => {
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// The engine's state folder (`/var/lib/rynas-caddy`, writable by the engine's user):
@@ -713,14 +769,47 @@ impl WebAccessSvc {
     }
 
     /// `rynas/` in the engine's state folder: rynasd's own files (certificate and key),
-    /// `0750 root:rynas-caddy` so that the engine can read but never replace them. A symlink
-    /// planted there is refused; an existing folder gets the owner and mode back.
+    /// `0750 root:rynas-caddy` so that the engine can read but never replace them.
+    ///
+    /// The engine's user can rename `rynas/` inside its own folder and plant one of its own
+    /// (review 2026-11-07, H1): an existing `rynas` that is not a real folder owned by
+    /// rynasd's user is moved aside (`rynas.untrusted-<n>`) and a fresh one is made, so
+    /// nothing planted inside is ever trusted. An existing trusted folder gets the owner and
+    /// mode back.
     fn rynas_dir(&self, gid: Option<u32>) -> io::Result<std::fs::File> {
+        use rynas_docker::safefs;
         let state = self.engine_state_dir()?;
         let owner = gid.map(|g| (0, g));
-        let (d, made) = rynas_docker::safefs::ensure_dir_at(&state, "rynas", 0o750, owner)?;
+        let trusted = match safefs::open_dir_at(&state, "rynas") {
+            Ok(d) => safefs::stat_of(&d)?.1 == euid(),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => true,
+            Err(e) if matches!(e.raw_os_error(), Some(libc::ELOOP) | Some(libc::ENOTDIR)) => {
+                false
+            }
+            Err(e) => return Err(e),
+        };
+        if !trusted {
+            let aside = format!(
+                "rynas.untrusted-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or_default()
+            );
+            tracing::warn!(
+                "web access: {STATE_DIR}/rynas is not rynasd's own folder: moved aside as {aside}"
+            );
+            safefs::rename_at(&state, "rynas", &aside)?;
+        }
+        let (d, made) = safefs::ensure_dir_at(&state, "rynas", 0o750, owner)?;
+        if safefs::stat_of(&d)?.1 != euid() {
+            // raced by another plant between the rename and the mkdir: give up this round
+            return Err(io::Error::other(format!(
+                "{STATE_DIR}/rynas is not rynasd's own folder"
+            )));
+        }
         if !made && owner.is_some() {
-            rynas_docker::safefs::set_owner_mode(&d, 0o750, owner)?;
+            safefs::set_owner_mode(&d, 0o750, owner)?;
         }
         Ok(d)
     }
@@ -798,9 +887,11 @@ impl WebAccessSvc {
         }
         // the DNS secrets the engine reads through placeholders: a changed value with an
         // unchanged configuration still needs a reload
+        let engine_creds = domains::engine_credentials(cfg);
         let needed: CredValues = creds
-            .into_iter()
-            .filter(|(id, _)| domains::engine_credentials(cfg).contains(id))
+            .iter()
+            .filter(|(id, _)| engine_creds.contains(*id))
+            .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         let secrets_changed = self
             .write_dns_secrets(&needed)
@@ -832,6 +923,9 @@ impl WebAccessSvc {
             names.len()
         ));
         if let Err(m) = self.admin.load(&json, cert_changed) {
+            // the engine may echo the configuration, and two providers carry a literal
+            // secret in it (review 2026-11-07, M4): never store or log a value
+            let m = redact_creds(&m, &creds);
             self.note(|e| e.last_error = Some(m.clone()));
             return Err(m);
         }
@@ -1581,17 +1675,26 @@ impl WebAccessSvc {
         m
     }
 
-    /// The record client and zone of a domain, or why there is none.
+    /// The record client of a domain behind the read cache, or why there is none. `write`:
+    /// a sync that writes, whose record reads skip the cache.
     fn dns_client(
         &self,
         cfg: &WebAccessConfig,
         d: &WebDomain,
+        write: bool,
     ) -> Result<Box<dyn rynas_dns::DnsApi>, String> {
+        use std::hash::{Hash, Hasher};
         let p = d.provider.ok_or("the domain has no DNS provider")?;
         let cr = domains::credential_of(cfg, d).ok_or("the domain has no credential")?;
         let creds = domains::open_creds(cr, self.sb())?;
-        match (self.dns)(p, &creds) {
-            Ok(Some(c)) => Ok(c),
+        let client = (self.dns)(p, &creds);
+        domains::wipe(creds);
+        // the envelope changes with the values: a new token never sees the old one's reads
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        cr.sealed.hash(&mut h);
+        let key = format!("{}#{}#{:x}", p.as_str(), cr.id, h.finish());
+        match client {
+            Ok(Some(c)) => Ok(self.dns_cache.wrap(key, c, write)),
             Ok(None) => Err(format!("rynas has no record client for {}", p.as_str())),
             Err(e) => Err(e.to_string()),
         }
@@ -1650,14 +1753,9 @@ impl WebAccessSvc {
         }
         // a provider change: the old provider's sets are removed through the old credential
         let same_provider = mine.is_none_or(|m| m.provider == d.provider);
-        let stale: Vec<(String, rynas_dns::Rtype)> = mine
+        let stale: Vec<rynas_dns::plan::Wanted> = mine
             .filter(|_| same_provider)
-            .map(|m| {
-                m.records
-                    .iter()
-                    .filter_map(|(n, t)| Some((n.clone(), domains::rtype_of(t)?)))
-                    .collect()
-            })
+            .map(|m| m.sets())
             .unwrap_or_default();
         if wanted.is_empty() && stale.is_empty() {
             if domains::record_mode(d) != domains::RecordMode::Off && facts.primary_v4.is_none() {
@@ -1673,7 +1771,7 @@ impl WebAccessSvc {
             }
             return report;
         }
-        let api = match self.dns_client(cfg, d) {
+        let api = match self.dns_client(cfg, d, write) {
             Ok(a) => a,
             Err(e) => {
                 report.ok = false;
@@ -1683,7 +1781,7 @@ impl WebAccessSvc {
                 return report;
             }
         };
-        match rynas_dns::plan::plan(&d.name, api.as_ref(), &wanted, &stale) {
+        match rynas_dns::plan::plan(&d.name, api.as_ref(), &wanted, &stale, &d.take_over) {
             Ok((zone, mut changes)) => {
                 if write {
                     report.ok = rynas_dns::plan::apply(api.as_ref(), &zone, &mut changes);
@@ -1721,11 +1819,7 @@ impl WebAccessSvc {
             ok: true,
             at_ms: now_ms(),
         };
-        let stale: Vec<(String, rynas_dns::Rtype)> = o
-            .records
-            .iter()
-            .filter_map(|(n, t)| Some((n.clone(), domains::rtype_of(t)?)))
-            .collect();
+        let stale = o.sets();
         if stale.is_empty() {
             return report;
         }
@@ -1741,7 +1835,7 @@ impl WebAccessSvc {
             domains::credential_of(c, &src).is_some_and(|cr| Some(cr.provider) == o.provider)
         });
         let api = match with_cred {
-            Some(c) => self.dns_client(c, &src),
+            Some(c) => self.dns_client(c, &src, write),
             None => Err(format!(
                 "the credential {} is gone: delete these records by hand",
                 o.credential.as_deref().unwrap_or("?")
@@ -1755,7 +1849,7 @@ impl WebAccessSvc {
                 return report;
             }
         };
-        match rynas_dns::plan::plan(&o.name, api.as_ref(), &[], &stale) {
+        match rynas_dns::plan::plan(&o.name, api.as_ref(), &[], &stale, &[]) {
             Ok((zone, mut changes)) => {
                 report.ok = if write {
                     rynas_dns::plan::apply(api.as_ref(), &zone, &mut changes)
@@ -1784,44 +1878,45 @@ impl WebAccessSvc {
         only: Option<&str>,
         log: &dyn Fn(&str),
     ) -> Vec<DnsSyncReport> {
-        let mut m = self.dns_lock();
-        let before = m.owned.clone();
+        // one sync at a time; the state lock is taken only to copy and to merge, never
+        // across a provider call (review 2026-11-07, M1). Only syncs change `owned`.
+        let _sync = self.dns_sync.lock().unwrap_or_else(|e| e.into_inner());
+        let mut owned = self.dns_lock().owned.clone();
+        let before = owned.clone();
         let mut reports = Vec::new();
+        let mut kept: Vec<(String, DnsSyncReport)> = Vec::new();
+        let mut forget: Vec<String> = Vec::new();
         for d in to.domains.iter().filter(|d| only.is_none_or(|o| o == d.id)) {
             // a provider change: the old sets go first
-            if let Some(o) = m.owned.get(&d.id).cloned()
+            if let Some(o) = owned.get(&d.id).cloned()
                 && o.provider != d.provider
                 && domains::record_mode(d) != domains::RecordMode::Off
             {
                 let r = self.removal_changes(to, from, &d.id, &o, true);
                 if r.ok {
-                    m.owned.remove(&d.id);
+                    owned.remove(&d.id);
                 }
             }
-            let r = self.domain_changes(to, d, facts, &m.owned, true);
-            m.tried.insert(d.id.clone(), Instant::now());
+            let r = self.domain_changes(to, d, facts, &owned, true);
             for c in &r.changes {
-                if matches!(
-                    c.action,
-                    DnsAction::Create | DnsAction::Update | DnsAction::Delete
-                ) {
-                    let what = if c.detail.starts_with("failed") {
-                        format!(" {}", c.detail)
-                    } else {
-                        String::new()
-                    };
-                    log(&format!(
-                        "web access: DNS {} {} {} {}{what}",
-                        match c.action {
-                            DnsAction::Create => "create",
-                            DnsAction::Update => "update",
-                            _ => "delete",
-                        },
-                        c.name,
-                        c.rtype,
-                        c.wanted.join(" ")
-                    ));
-                }
+                let verb = match c.action {
+                    DnsAction::Create => "create",
+                    DnsAction::Update => "update",
+                    DnsAction::Delete => "delete",
+                    DnsAction::Conflict => "conflict (left as it is)",
+                    _ => continue,
+                };
+                let what = if c.detail.starts_with("failed") {
+                    format!(" {}", c.detail)
+                } else {
+                    String::new()
+                };
+                log(&format!(
+                    "web access: DNS {verb} {} {} {}{what}",
+                    c.name,
+                    c.rtype,
+                    c.wanted.join(" ")
+                ));
             }
             if !r.ok {
                 log(&format!(
@@ -1829,29 +1924,11 @@ impl WebAccessSvc {
                     d.name
                 ));
             }
-            // what rynas owns now: wanted sets that went through, failed deletes kept
-            let mut rec: Vec<(String, String)> = r
-                .changes
-                .iter()
-                .filter(|c| c.rtype != "CNAME")
-                .filter(|c| match c.action {
-                    DnsAction::Create | DnsAction::Update | DnsAction::Keep => {
-                        !c.detail.starts_with("failed")
-                    }
-                    DnsAction::Delete => c.detail.starts_with("failed"),
-                    DnsAction::Unknown => m.owned.get(&d.id).is_some_and(|o| {
-                        o.records.iter().any(|(n, t)| n == &c.name && t == &c.rtype)
-                    }),
-                    DnsAction::Manual => false,
-                })
-                .map(|c| (c.name.clone(), c.rtype.clone()))
-                .collect();
-            rec.sort();
-            rec.dedup();
+            let rec = domains::owned_after(owned.get(&d.id), &r.changes);
             if rec.is_empty() {
-                m.owned.remove(&d.id);
+                owned.remove(&d.id);
             } else {
-                m.owned.insert(
+                owned.insert(
                     d.id.clone(),
                     domains::Owned {
                         name: d.name.clone(),
@@ -1861,25 +1938,41 @@ impl WebAccessSvc {
                     },
                 );
             }
-            m.reports.insert(d.id.clone(), r.clone());
+            kept.push((d.id.clone(), r.clone()));
             reports.push(r);
         }
         if only.is_none() {
-            let gone: Vec<(String, domains::Owned)> = m
-                .owned
+            let gone: Vec<(String, domains::Owned)> = owned
                 .iter()
                 .filter(|(id, _)| !to.domains.iter().any(|d| &d.id == *id))
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
             for (id, o) in gone {
                 let r = self.removal_changes(to, from, &id, &o, true);
-                for c in r.changes.iter().filter(|c| c.action == DnsAction::Delete) {
-                    log(&format!("web access: DNS delete {} {}", c.name, c.rtype));
+                for c in r.changes.iter() {
+                    match c.action {
+                        DnsAction::Delete => {
+                            log(&format!("web access: DNS delete {} {}", c.name, c.rtype))
+                        }
+                        DnsAction::Conflict => log(&format!(
+                            "web access: DNS {} {} left in place: {}",
+                            c.name, c.rtype, c.detail
+                        )),
+                        _ => {}
+                    }
                 }
-                if r.ok {
-                    m.owned.remove(&id);
-                    m.reports.remove(&id);
+                let rest = domains::owned_after(Some(&o), &r.changes);
+                if r.ok || rest.is_empty() {
+                    owned.remove(&id);
+                    forget.push(id);
                 } else {
+                    owned.insert(
+                        id,
+                        domains::Owned {
+                            records: rest,
+                            ..o.clone()
+                        },
+                    );
                     log(&format!(
                         "web access: the old DNS records of {} could not be deleted",
                         o.name
@@ -1888,8 +1981,21 @@ impl WebAccessSvc {
                 reports.push(r);
             }
         }
-        if m.owned != before
-            && let Err(e) = domains::save_owned(&self.state_dir, &m.owned)
+        let save = {
+            let mut m = self.dns_lock();
+            let now = Instant::now();
+            for (id, r) in kept {
+                m.tried.insert(id.clone(), now);
+                m.reports.insert(id, r);
+            }
+            for id in forget {
+                m.reports.remove(&id);
+            }
+            m.owned = owned;
+            (m.owned != before).then(|| m.owned.clone())
+        };
+        if let Some(owned) = save
+            && let Err(e) = domains::save_owned(&self.state_dir, &owned)
         {
             tracing::warn!(
                 "web access: {}: {e}",
@@ -1921,7 +2027,7 @@ impl WebAccessSvc {
 
     /// The domains as the pages show them.
     pub fn domain_views(&self, cfg: &WebAccessConfig, facts: &HostFacts) -> Vec<DomainView> {
-        let m = self.dns_lock();
+        let reports = self.dns_lock().reports.clone();
         let port = cfg.settings.https_port;
         cfg.domains
             .iter()
@@ -1929,17 +2035,24 @@ impl WebAccessSvc {
                 let mut problems = Vec::new();
                 let cred = domains::credential_of(cfg, d);
                 if d.provider.is_some()
-                    && cred.is_none_or(|c| domains::open_creds(c, self.sb()).is_err())
+                    && cred.is_none_or(|c| !domains::creds_open(c, self.sb()))
                 {
                     problems.push("credential_missing".to_string());
                 }
-                let rec = m.reports.get(&d.id).cloned();
+                let rec = reports.get(&d.id).cloned();
                 match domains::record_mode(d) {
                     domains::RecordMode::Manual(_) => problems.push("records_manual".into()),
                     domains::RecordMode::Managed(_) if rec.as_ref().is_some_and(|r| !r.ok) => {
                         problems.push("records_failed".into())
                     }
                     _ => {}
+                }
+                if rec.as_ref().is_some_and(|r| {
+                    r.changes
+                        .iter()
+                        .any(|c| c.action == DnsAction::Conflict && !c.wanted.is_empty())
+                }) {
+                    problems.push("records_conflict".into());
                 }
                 if d.lan_record && facts.primary_v4.is_none() {
                     problems.push("no_lan_address".into());
@@ -2013,7 +2126,22 @@ impl WebAccessSvc {
             ));
         }
         let cfg = self.applied();
-        let errors = certs::engine_errors(&(self.engine_log)());
+        let cached = {
+            let cm = self.cert_mem.lock().unwrap_or_else(|e| e.into_inner());
+            cm.log_errors
+                .as_ref()
+                .filter(|(at, _)| at.elapsed() < self.engine_log_ttl)
+                .map(|(_, e)| e.clone())
+        };
+        let errors = match cached {
+            Some(e) => e,
+            None => {
+                let e = certs::engine_errors(&(self.engine_log)());
+                let mut cm = self.cert_mem.lock().unwrap_or_else(|e| e.into_inner());
+                cm.log_errors = Some((Instant::now(), e.clone()));
+                e
+            }
+        };
         let mut cm = self.cert_mem.lock().unwrap_or_else(|e| e.into_inner());
         let mut expected = BTreeSet::new();
         if cfg.settings.mode == ProxyMode::Builtin {
@@ -2261,7 +2389,7 @@ impl WebAccessSvc {
             Verdict::LanUnreachable => check(
                 "rebind",
                 CheckState::Warn,
-                "the LAN resolver could not be asked",
+                "the LAN resolver could not be asked or failed (SERVFAIL: check its upstream and DNSSEC)",
             ),
         });
         // 5. the certificate, 6. its renewal

@@ -684,6 +684,23 @@ fn validate_w2(c: &mut WebAccessConfig) -> Result<(), Invalid> {
         } else {
             d.delegate_to = None;
         }
+        // record names rynas may take over: the domain or names below it, lowercase
+        let mut take = Vec::new();
+        for t in &d.take_over {
+            let t = t.trim().trim_end_matches('.').to_ascii_lowercase();
+            let base = t.strip_prefix("*.").unwrap_or(&t);
+            let below = base == d.name || base.ends_with(&format!(".{}", d.name));
+            if !below || dns_name(base, MAX_DOMAIN).is_none() {
+                return Err(Invalid::at(
+                    at("take_over"),
+                    format!("{t}: a record name of {} (or *.{})", d.name, d.name),
+                ));
+            }
+            if !take.contains(&t) {
+                take.push(t);
+            }
+        }
+        d.take_over = take;
     }
     let a = &mut c.acme;
     if let Some(e) = a.email.as_mut() {

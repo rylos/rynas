@@ -651,9 +651,23 @@ impl DockerSvc {
                 stderr: String::new(),
             });
         }
-        ctx.run(cmd)
-            .await
-            .map_err(|e| format!("{}: {e}", cmd.display()))
+        match ctx.run(cmd).await {
+            Ok(o) => Ok(o),
+            Err(e) => {
+                // a cancelled or timed out apt step: stop its transient unit too
+                if matches!(
+                    e,
+                    rynas_tasks::CmdError::Cancelled | rynas_tasks::CmdError::Timeout(_)
+                ) && let Some(stop) = install::on_abort(cmd)
+                {
+                    ctx.log(&format!("$ {}", stop.display()));
+                    if let Err(e2) = stop.run_checked(None, None).await {
+                        ctx.log(&format!("stopping the apt unit: {e2}"));
+                    }
+                }
+                Err(format!("{}: {e}", cmd.display()))
+            }
+        }
     }
 
     /// The `groupadd`/`useradd` lines still needed for `docker-apps` (none when it exists).

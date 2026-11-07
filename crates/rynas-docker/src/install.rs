@@ -98,13 +98,19 @@ pub fn pinned_major(text: &str) -> Option<u32> {
         .ok()
 }
 
+/// How long apt waits for another holder of the dpkg lock (a retried install while the
+/// previous one is still stopping, unattended-upgrades) before it fails.
+pub const DPKG_LOCK_TIMEOUT: &str = "DPkg::Lock::Timeout=120";
+
 /// apt-get in a transient unit outside rynasd's sandbox, like the system updates do:
 /// rynasd runs with `ProtectSystem=yes`, so dpkg cannot write `/usr` from inside it (found
 /// on the first real install: every package failed with "Read-only file system").
 /// `systemd-run --wait --pipe` streams the output into the task log and returns apt's
-/// exit status.
+/// exit status. It waits for the dpkg lock ([`DPKG_LOCK_TIMEOUT`]).
 fn apt(args: &[&str]) -> Cmd {
-    outside("apt-get", args)
+    let mut v = vec!["-o", DPKG_LOCK_TIMEOUT];
+    v.extend_from_slice(args);
+    outside("apt-get", &v)
 }
 
 /// `program args` in a transient unit outside rynasd's sandbox (see [`apt`]).
@@ -122,6 +128,8 @@ fn outside(program: &str, args: &[&str]) -> Cmd {
     Cmd::new("systemd-run")
         .args(["--wait", "--pipe", "--collect", "--quiet", "--service-type=exec"])
         .arg(unit)
+        // the unit never outlives the step's own timeout (review 2026-11-07, M3)
+        .arg(format!("--property=RuntimeMaxSec={}", APT_TIMEOUT.as_secs()))
         .args([
             &format!("--description=rynas: {program} (Docker install)"),
             "--setenv=DEBIAN_FRONTEND=noninteractive",
@@ -136,6 +144,32 @@ fn outside(program: &str, args: &[&str]) -> Cmd {
         .timeout(APT_TIMEOUT)
 }
 
+/// The transient unit a command made by [`outside`] runs in (`rynas-apt-docker-…`).
+pub fn transient_unit(cmd: &Cmd) -> Option<String> {
+    if cmd.program() != "systemd-run" {
+        return None;
+    }
+    cmd.display()
+        .split_whitespace()
+        .find_map(|a| a.strip_prefix("--unit="))
+        .filter(|u| u.starts_with("rynas-apt-docker-"))
+        .map(|u| format!("{u}.service"))
+}
+
+/// What to run after a step was cancelled or timed out: stopping the cancelled client
+/// (`systemd-run --wait`) leaves its transient unit running (or dies of SIGPIPE midway,
+/// leaving packages `iU`), and a retried install then hits the dpkg lock. The unit is
+/// stopped instead (review 2026-11-07, M3).
+pub fn on_abort(cmd: &Cmd) -> Option<Cmd> {
+    let unit = transient_unit(cmd)?;
+    Some(
+        Cmd::new("systemctl")
+            .args(["stop", &unit])
+            .env_clear()
+            .timeout(Duration::from_secs(120)),
+    )
+}
+
 /// `apt-cache policy docker-ce` (after the repository is added).
 pub fn policy_cmd() -> Cmd {
     Cmd::new("apt-cache")
@@ -144,20 +178,28 @@ pub fn policy_cmd() -> Cmd {
         .timeout(SHORT)
 }
 
-/// The repair of an interrupted install, before anything else: dpkg finishes configuring
-/// what it unpacked, then apt completes missing dependencies. Both keep configuration files
-/// rynas wrote (`--force-confdef --force-confold`) and run outside the sandbox like every
-/// apt call.
+/// The repair of an interrupted install, before anything else (rynasd runs it only when
+/// Docker's or the engine's own packages are left half-installed): dpkg finishes
+/// configuring what it unpacked, apt shows what fixing the dependencies would do
+/// (`-s`, logged), then completes them with `--no-remove` — apt aborts rather than remove a
+/// package, so a half-broken system never loses unrelated packages (review 2026-11-07,
+/// M2). All keep configuration files rynas wrote (`--force-confdef --force-confold`) and
+/// run outside the sandbox like every apt call.
 pub fn repair_cmds() -> Vec<Cmd> {
     vec![
         outside(
             "dpkg",
             &["--configure", "-a", "--force-confdef", "--force-confold"],
         ),
+        Cmd::new("apt-get")
+            .args(["-s", "install", "-f"])
+            .env_clear()
+            .timeout(SHORT),
         apt(&[
             "install",
             "-f",
             "-y",
+            "--no-remove",
             "-o",
             "Dpkg::Options::=--force-confdef",
             "-o",
@@ -430,7 +472,8 @@ ZS5vcmc+
     fn install_line_keeps_old_conffiles() {
         let c = install_cmd().display();
         assert!(c.starts_with("systemd-run --wait --pipe --collect --quiet"), "{c}");
-        assert!(c.contains(" -- apt-get install -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold docker-ce docker-ce-cli containerd.io"), "{c}");
+        assert!(c.contains(" -- apt-get -o DPkg::Lock::Timeout=120 install -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold docker-ce docker-ce-cli containerd.io"), "{c}");
+        assert!(c.contains("--property=RuntimeMaxSec=1800"), "{c}");
         let steps = repo_steps("bookworm", "arm64", false);
         assert!(matches!(&steps[5], InstallStep::Write { path, .. } if *path == SOURCES));
         assert!(matches!(&steps[3], InstallStep::Run(c) if c.display().contains("--proto =https")));
@@ -446,11 +489,20 @@ ZS5vcmc+
             r[0]
         );
         assert!(r[0].contains("--setenv=DEBIAN_FRONTEND=noninteractive"));
+        assert_eq!(r[1], "apt-get -s install -f", "the dry run is logged first");
         assert!(
-            r[1].ends_with(" -- apt-get install -f -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"),
+            r[2].ends_with(" -- apt-get -o DPkg::Lock::Timeout=120 install -f -y --no-remove -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"),
             "{}",
-            r[1]
+            r[2]
         );
+        // a cancelled or timed out step stops its transient unit
+        let stop = on_abort(&repair_cmds()[2]).unwrap().display();
+        assert!(
+            stop.starts_with("systemctl stop rynas-apt-docker-") && stop.ends_with(".service"),
+            "{stop}"
+        );
+        assert!(on_abort(&enable_cmd()).is_none());
+        assert!(on_abort(&repair_cmds()[1]).is_none());
         // a keyring that checks out is not downloaded again
         let steps = repo_steps("trixie", "amd64", true);
         assert!(

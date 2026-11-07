@@ -316,7 +316,7 @@ Full digests are in each `apps/<id>/compose.yaml`.
 - **Mosquitto.** 2.1 ships only `-alpine` tags (the `2` tag still points at 2.0.x). The default
   config listens on localhost only and an entry ships no config file, so the command writes
   `mosquitto.conf` (one listener, `allow_anonymous false`, persistence, log to stdout) and runs
-  `mosquitto_passwd -b -c` from the environment at every start, under `umask 077` (2.0.16+ warns
+  `printf` (a shell builtin, never in a command line) plus `mosquitto_passwd -U` from the environment at every start, under `umask 077` (2.0.16+ warns
   about world-readable password files; `password_file` is deprecated for 3.0 but works). TrueNAS
   renders the same settings through `configs:`, Umbrel in a pre-start hook. Healthcheck
   `pidof mosquitto` (TrueNAS). Port 1883 only (websockets on 9001 are not needed by the

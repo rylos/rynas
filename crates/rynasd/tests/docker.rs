@@ -439,7 +439,7 @@ async fn install_dry_run_with_a_volume() {
     let l = log(&e, &t.task_id);
     assert_eq!(info.status, TaskStatus::Ok, "{l}");
     assert!(
-        l.contains("apt-get install -y -o Dpkg::Options::=--force-confdef"),
+        l.contains("apt-get -o DPkg::Lock::Timeout=120 install -y -o Dpkg::Options::=--force-confdef"),
         "{l}"
     );
     assert!(l.contains("(dry system: not run)"));
@@ -675,11 +675,13 @@ async fn half_installed_engine_is_repaired_by_the_install() {
     let pos = |p: &str| l.find(p).unwrap_or_else(|| panic!("{p} missing: {l}"));
     let repair = pos("-- dpkg --configure -a --force-confdef --force-confold");
     let fix = pos(
-        "-- apt-get install -f -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold",
+        "-- apt-get -o DPkg::Lock::Timeout=120 install -f -y --no-remove -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold",
     );
-    let update = pos("-- apt-get update");
+    let sim = pos("$ apt-get -s install -f");
+    assert!(repair < sim && sim < fix, "the dry run is logged first: {l}");
+    let update = pos("-- apt-get -o DPkg::Lock::Timeout=120 update");
     let install = pos(
-        "apt-get install -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold docker-ce",
+        "apt-get -o DPkg::Lock::Timeout=120 install -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold docker-ce",
     );
     let account = pos("groupadd --system docker-apps");
     let enable = pos("systemctl enable --now containerd.service docker.service");
