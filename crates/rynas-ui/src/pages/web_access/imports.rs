@@ -15,14 +15,14 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use rynas_api_types::tls::TlsWarning;
-use rynas_api_types::web_access::{CertImportRequest, ImportSource, ImportedCert};
+use rynas_api_types::web_access::{CertImportRequest, ImportProblem, ImportSource, ImportedCert};
 
 use super::cert::{cert_list, pem_field, warning_key};
 use super::domains::cert_status;
 use super::{kv, wa};
 use crate::api;
 use crate::form::{In, form_error, spinner, text_field};
-use crate::i18n::{self, t, tr};
+use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::pages::security::copy_button;
 use crate::toast::toast;
@@ -77,14 +77,20 @@ pub fn card(changed: Callback<()>) -> AnyView {
                 let id = c.id.clone();
                 let title = if c.label.is_empty() { c.id.clone() } else { c.label.clone() };
                 let until = c.certificate.as_ref().map(|x| i18n::datetime(x.not_after_ms.max(0) as u64)).unwrap_or_else(|| "—".into());
-                let covers = if c.covers.is_empty() { view! { <span class="muted small">{tr("wa.import.covers_none")}</span> }.into_any() } else { names(&c.covers) };
-                let err = c.last_error.as_ref().map(|_| view! { <span class="cell-sub small">{tr("wa.import.last_error")}</span> });
+                let covers = if c.certificate.is_none() {
+                    view! { <span class="muted">"—"</span> }.into_any()
+                } else if c.covers.is_empty() {
+                    view! { <span class="muted small">{tr("wa.import.covers_none")}</span> }.into_any()
+                } else {
+                    names(&c.covers)
+                };
+                let err = c.problem.map(|p| view! { <span class="cell-sub small">{problem_text(c, p)}</span> });
                 ui::row(vec![
                     ui::cell("wa.import.label", "wrap", ui::two_lines(view! { <strong class="wa-name">{title}</strong> }.into_any(), Some(t(source_key(c.source)).to_string()), "cell-sub small")),
                     ui::cell("wa.import.covers", "wrap", covers),
                     ui::cell("col.status", "wrap", view! { <div class="cell-main">{status_of(c)}{err}</div> }.into_any()),
                     ui::text_cell("tls.valid_until", "", until),
-                    ui::actions(view! { <button class="btn ghost sm" on:click=move |_| imp.open.set(Some(id.clone()))><Icon icon=icons::PENCIL size=14 />{tr("dom.open")}</button> }.into_any()),
+                    ui::actions(view! { <button class="btn ghost sm" data-opener=format!("imp-{id}") on:click=move |_| imp.open.set(Some(id.clone()))><Icon icon=icons::PENCIL size=14 />{tr("dom.open")}</button> }.into_any()),
                 ])
             })
             .collect::<Vec<_>>();
@@ -94,7 +100,7 @@ pub fn card(changed: Callback<()>) -> AnyView {
         <div class="grid">
             <section class="card widget w-12">
                 <WidgetHead icon=icons::IMPORT title="wa.import.title">
-                    <button class="btn ghost sm" on:click=move |_| imp.form.set(Some(String::new()))><Icon icon=icons::PLUS size=14 />{tr("wa.import.add")}</button>
+                    <button class="btn primary sm" on:click=move |_| imp.form.set(Some(String::new()))><Icon icon=icons::PLUS size=14 />{tr("wa.import.add")}</button>
                 </WidgetHead>
                 <p class="small muted wa-help">{tr("wa.import.intro")}" "{tr("wa.import.not_renewed")}</p>
                 {move || imp.list.view(4, content)}
@@ -106,19 +112,32 @@ pub fn card(changed: Callback<()>) -> AnyView {
     .into_any()
 }
 
-/// The sshd and acme.sh lines for a watched folder, with its id and this NAS's name.
-fn ssh_lines(base: &str, id: &str, host: &str) -> (String, String) {
+/// The push account, the sshd block and the acme.sh command for a watched folder, with its id
+/// and this NAS's name.
+fn ssh_lines(base: &str, id: &str, host: &str) -> (String, String, String) {
+    let account = "adduser --system --ingroup rynas-cert-drop --shell /usr/sbin/nologin certpush".to_string();
     let sshd = format!(
-        "# adduser --system --ingroup rynas-cert-drop --shell /usr/sbin/nologin certpush\nMatch User certpush\n    ChrootDirectory {base}\n    ForceCommand internal-sftp -d /{id} -u 0007\n    AllowTcpForwarding no\n    X11Forwarding no"
+        "Match User certpush\n    ChrootDirectory {base}\n    ForceCommand internal-sftp -d /{id} -u 0077\n    AllowTcpForwarding no\n    X11Forwarding no"
     );
     let acme = format!(
         "DEPLOY_SSH_USER=certpush DEPLOY_SSH_SERVER={host}.local DEPLOY_SSH_USE_SCP=yes DEPLOY_SSH_BACKUP=no DEPLOY_SSH_KEYFILE=/{id}/privkey.pem DEPLOY_SSH_FULLCHAIN=/{id}/fullchain.pem acme.sh --deploy -d <name> --deploy-hook ssh"
     );
-    (sshd, acme)
+    (account, sshd, acme)
 }
 
-fn code_block(text: String) -> AnyView {
+/// Why an import needs attention, in words.
+fn problem_text(c: &ImportedCert, p: ImportProblem) -> String {
+    match p {
+        ImportProblem::Refused => t("wa.import.problem.refused").to_string(),
+        ImportProblem::NamesChanged => t("wa.import.problem.names_changed").to_string(),
+        ImportProblem::NotYetValid => tf("wa.import.problem.not_yet_valid", &[("when", &c.pending_from_ms.map(|ms| i18n::datetime(ms.max(0) as u64)).unwrap_or_default())]),
+        ImportProblem::GroupMissing => t("wa.import.problem.group_missing").to_string(),
+    }
+}
+
+fn code_block(title: &'static str, text: String) -> AnyView {
     view! {
+        <h4 class="small"><strong>{tr(title)}</strong></h4>
         <pre class="app-code">{text.clone()}</pre>
         <div class="sec-actions">{copy_button("dns.copy", text)}</div>
     }
@@ -149,6 +168,28 @@ fn drawer(imp: Imp, id: String) -> AnyView {
             }
         });
     };
+    let ask_accept = RwSignal::new(false);
+    let accept_busy = RwSignal::new(false);
+    let accept_err = RwSignal::new(None::<String>);
+    let accept = Callback::new(move |_| {
+        accept_busy.set(true);
+        accept_err.set(None);
+        let url = format!("{URL}/{}/accept", api::encode(&iid.get_value()));
+        spawn_local(async move {
+            let r = api::post::<(), ImportedCert>(&url, None).await;
+            let _ = accept_busy.try_set(false);
+            match r {
+                Ok(_) => {
+                    imp.list.reload();
+                    imp.changed.run(());
+                    let _ = ask_accept.try_set(false);
+                }
+                Err(e) => {
+                    let _ = accept_err.try_set(Some(e.text()));
+                }
+            }
+        });
+    });
     let ask = RwSignal::new(false);
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
@@ -178,7 +219,22 @@ fn drawer(imp: Imp, id: String) -> AnyView {
             .iter()
             .map(|w| ui::note(if *w == TlsWarning::Expired { Tone::Err } else { Tone::Warn }, icons::TRIANGLE_ALERT, ui::text(t(warning_key(*w)).to_string())))
             .collect_view();
-        let last_error = c.last_error.clone().map(|m| {
+        let folder_src = c.source == ImportSource::Folder;
+        let problem = c.problem.filter(|p| *p != ImportProblem::Refused).map(|p| {
+            let tone = if p == ImportProblem::NotYetValid { Tone::Info } else { Tone::Warn };
+            ui::note(tone, icons::TRIANGLE_ALERT, ui::text(problem_text(&c, p)))
+        });
+        let held = (c.problem == Some(ImportProblem::NamesChanged) && !c.pending_names.is_empty()).then(|| view! {
+            <dl class="kvs">
+                {kv("wa.import.current_names", if c.names.is_empty() { ui::text("—".into()) } else { names(&c.names) })}
+                {kv("wa.import.pending_names", names(&c.pending_names))}
+            </dl>
+            <div class="sec-actions">
+                <button class="btn primary sm" on:click=move |_| { accept_err.set(None); ask_accept.set(true); }><Icon icon=icons::CHECK size=14 />{tr("wa.import.accept")}</button>
+            </div>
+        });
+        // a held or later pair has its own note above; the refused files have this one
+        let last_error = c.last_error.clone().filter(|_| matches!(c.problem, None | Some(ImportProblem::Refused))).map(|m| {
             let when = c.last_error_at_ms.map(|ms| format!(" ({})", i18n::datetime(ms.max(0) as u64))).unwrap_or_default();
             ui::note(Tone::Err, icons::CIRCLE_X, view! {
                 <strong>{tr("wa.import.last_error")}{when}</strong>" "{ui::tech_detail(m)}
@@ -188,7 +244,7 @@ fn drawer(imp: Imp, id: String) -> AnyView {
         let folder = c.folder.clone().filter(|_| c.source == ImportSource::Folder).map(|f| {
             let base = f.trim_end_matches('/').rsplit_once('/').map(|(b, _)| b.to_string()).unwrap_or_else(|| "/var/lib/rynas-cert-drop".into());
             let host = wa().state.data.with_untracked(|s| s.as_ref().map(|s| s.host.clone())).unwrap_or_default();
-            let (sshd, acme) = ssh_lines(&base, &c.id, &host);
+            let (account, sshd, acme) = ssh_lines(&base, &c.id, &host);
             view! {
                 <h3 class="mini-title">{tr("wa.import.folder")}</h3>
                 <div class="chips"><span class="chip mono wa-name">{f.clone()}</span>{copy_button("dns.copy", f.clone())}</div>
@@ -200,13 +256,16 @@ fn drawer(imp: Imp, id: String) -> AnyView {
                 <details class="tls-step">
                     <summary>{tr("wa.import.folder_ssh")}</summary>
                     <p class="small muted">{tr("wa.import.ssh_note")}</p>
-                    {code_block(sshd)}
-                    {code_block(acme)}
+                    {code_block("wa.import.code.account", account)}
+                    {code_block("wa.import.code.sshd", sshd)}
+                    {code_block("wa.import.code.acme", acme)}
                 </details>
             }
         });
         view! {
             {(c.certificate.is_none() && c.source == ImportSource::Folder).then(|| ui::note(Tone::Info, icons::CLOCK, ui::text(t("wa.import.waiting").to_string())))}
+            {problem}
+            {held}
             {warnings}
             {last_error}
             <dl class="kvs">
@@ -214,7 +273,8 @@ fn drawer(imp: Imp, id: String) -> AnyView {
                 {kv("wa.import.label", ui::text(if c.label.is_empty() { "—".to_string() } else { c.label.clone() }))}
                 {kv("wa.import.id", ui::breakable(&c.id, "mono"))}
                 {c.imported_at_ms.map(|ms| kv("wa.import.imported_at", ui::text(i18n::datetime(ms.max(0) as u64))))}
-                {kv("wa.import.covers", if c.covers.is_empty() { ui::text(t("wa.import.covers_none").to_string()) } else { names(&c.covers) })}
+                {(!c.names.is_empty() && c.problem != Some(ImportProblem::NamesChanged)).then(|| kv("wa.import.current_names", names(&c.names)))}
+                {c.certificate.is_some().then(|| kv("wa.import.covers", if c.covers.is_empty() { ui::text(t("wa.import.covers_none").to_string()) } else { names(&c.covers) }))}
                 {(!c.shadowed.is_empty()).then(|| kv("wa.import.shadowed", names(&c.shadowed)))}
                 {(!c.replaces_acme.is_empty()).then(|| kv("wa.import.replaces_acme", names(&c.replaces_acme)))}
             </dl>
@@ -222,7 +282,7 @@ fn drawer(imp: Imp, id: String) -> AnyView {
             {c.certificate.as_ref().map(cert_list)}
             {folder}
             <div class="sec-actions">
-                <button class="btn ghost sm" on:click=move |_| imp.form.set(Some(iid.get_value()))><Icon icon=icons::IMPORT size=14 />{tr("wa.import.replace")}</button>
+                {(!folder_src).then(|| view! { <button class="btn ghost sm" on:click=move |_| imp.form.set(Some(iid.get_value()))><Icon icon=icons::IMPORT size=14 />{tr("wa.import.replace")}</button> })}
                 <button class="btn danger sm" on:click=move |_| { error.set(None); ask.set(true); }><Icon icon=icons::TRASH_2 size=14 />{tr("wa.import.delete")}</button>
             </div>
         }
@@ -233,6 +293,15 @@ fn drawer(imp: Imp, id: String) -> AnyView {
     view! {
         {ui::drawer(title, close, view! { {body} }.into_any(), foot)}
         {move || ask.get().then(|| ui::confirm(Confirm { busy, error, ..Confirm::new(t("wa.import.delete").to_string(), t("wa.import.delete_confirm").to_string(), "wa.import.delete", true, remove, Callback::new(move |_| ask.set(false))) }))}
+        {move || ask_accept.get().then(|| {
+            let pending = item.with_untracked(|c| c.as_ref().map(|c| c.pending_names.join(", "))).unwrap_or_default();
+            ui::confirm(Confirm {
+                busy: accept_busy,
+                error: accept_err,
+                extra: Some(view! { <p class="mono small wa-name">{pending}</p> }.into_any()),
+                ..Confirm::new(t("wa.import.accept").to_string(), t("wa.import.accept_confirm").to_string(), "wa.import.accept", false, accept, Callback::new(move |_| ask_accept.set(false)))
+            })
+        })}
     }
     .into_any()
 }
@@ -245,7 +314,11 @@ fn inspect_view(c: &ImportedCert) -> AnyView {
         .map(|w| ui::note(if *w == TlsWarning::Expired { Tone::Err } else { Tone::Warn }, icons::TRIANGLE_ALERT, ui::text(t(warning_key(*w)).to_string())))
         .collect_view();
     let cert = c.certificate.clone();
+    // a self-signed leaf, or a chain that ends with a root (public chains stop at the
+    // intermediate): devices trust it only with that authority installed
+    let private = cert.as_ref().is_some_and(|x| x.subject == x.issuer) || c.chain.iter().any(|x| x.subject == x.issuer);
     view! {
+        {private.then(|| ui::note(Tone::Warn, icons::SHIELD_ALERT, ui::text(t("wa.import.private_ca").to_string())))}
         {warnings}
         <dl class="kvs">
             {cert.as_ref().map(|x| kv("tls.subject", ui::breakable(&x.subject, "mono")))}
@@ -291,6 +364,9 @@ fn import_dialog(imp: Imp, id: String) -> AnyView {
     let busy = RwSignal::new(false);
     let checking = RwSignal::new(false);
     let found = RwSignal::new(None::<ImportedCert>);
+    let pins = RwSignal::new(existing.as_ref().map(|c| c.names.join(", ")).unwrap_or_default());
+    let pins_err = RwSignal::new(None::<String>);
+    let source_err = RwSignal::new(None::<String>);
     let request = move || {
         let upload = source.get_untracked() == "upload";
         let text = |s: RwSignal<String>| Some(s.get_untracked()).filter(|v| !v.trim().is_empty());
@@ -300,13 +376,17 @@ fn import_dialog(imp: Imp, id: String) -> AnyView {
             source: if upload { ImportSource::Upload } else { ImportSource::Folder },
             certificate: if upload { text(cert) } else { None },
             private_key: if upload { text(key) } else { None },
+            names: if upload { Vec::new() } else { pins.get_untracked().split([',', ' ', '\n']).map(|n| n.trim().to_ascii_lowercase()).filter(|n| !n.is_empty()).collect() },
         }
     };
     let route = move |e: api::ApiErr| match e.field() {
         Some("id") => id_err.set(Some(e.text())),
         Some("label") => label_err.set(Some(e.text())),
-        Some("certificate") => cert_err.set(Some(e.text())),
-        Some("private_key") => key_err.set(Some(e.text())),
+        // the field's own title, the server's reason as its detail
+        Some("certificate") => cert_err.set(Some(format!("{}{}{}", t("wa.import.err.certificate"), api::DETAIL_SEP, e.message()))),
+        Some("private_key") => key_err.set(Some(format!("{}{}{}", t("wa.import.err.private_key"), api::DETAIL_SEP, e.message()))),
+        Some("names") => pins_err.set(Some(e.text())),
+        Some("source") => source_err.set(Some(e.text())),
         _ => error.set(Some(e.text())),
     };
     let inspect = move |_| {
@@ -363,8 +443,13 @@ fn import_dialog(imp: Imp, id: String) -> AnyView {
             }), label_err.into(), In { maxlength: 80, ..In::default() })}
             {text_field("wa.import.id", iid.into(), Callback::new(move |v: String| { id_err.set(None); id_touched.set(true); iid.set(v); }), id_err.into(), In { mono: true, maxlength: 32, help: Some("wa.import.id_help"), ..In::default() })}
         })}
-        {crate::form::segmented("wa.import.source", &[("upload", "wa.import.source.upload"), ("folder", "wa.import.source.folder")], source.into(), Callback::new(move |v| source.set(v)))}
-        <Show when=move || source.get() == "upload" fallback=|| view! { <p class="small muted">{tr("wa.import.folder_help")}</p> }>
+        {crate::form::segmented("wa.import.source", &[("upload", "wa.import.source.upload"), ("folder", "wa.import.source.folder")], source.into(), Callback::new(move |v| { source_err.set(None); source.set(v); }))}
+        {form_error(source_err)}
+        <Show when=move || source.get() == "upload" fallback=move || view! {
+            <p class="small muted">{tr("wa.import.folder_help")}</p>
+            {text_field("wa.import.names", pins.into(), Callback::new(move |v| { pins_err.set(None); pins.set(v); }), pins_err.into(), In { mono: true, placeholder: "*.nas.example.com, nas.example.com", help: Some("wa.import.names_help"), maxlength: 4096, ..In::default() })}
+            <p class="small muted">{tr("wa.import.names_why")}</p>
+        }>
             {pem_field("wa.import.certificate", cert, cert_err, ".crt,.pem,.cer")}
             {pem_field("wa.import.private_key", key, key_err, ".key,.pem")}
             <p class="small muted">{tr("dom.f.never_shown")}</p>
@@ -398,8 +483,9 @@ mod tests {
     fn ids_and_ssh_lines() {
         assert_eq!(id_from("Router wildcard *.home.example"), "router-wildcard-home-example");
         assert_eq!(id_from("--x--"), "x");
-        let (sshd, acme) = ssh_lines("/var/lib/rynas-cert-drop", "router", "nas");
-        assert!(sshd.contains("ForceCommand internal-sftp -d /router -u 0007"));
+        let (account, sshd, acme) = ssh_lines("/var/lib/rynas-cert-drop", "router", "nas");
+        assert!(account.starts_with("adduser ") && !sshd.contains("adduser"));
+        assert!(sshd.contains("ForceCommand internal-sftp -d /router -u 0077"));
         assert!(acme.contains("DEPLOY_SSH_SERVER=nas.local") && acme.contains("/router/fullchain.pem"));
     }
 }

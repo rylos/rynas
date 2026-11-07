@@ -1535,12 +1535,18 @@ The SSH example uses the NAS's host name, never personal data.
 
 UI as built (2026-11-07, `crates/rynas-ui/src/pages/web_access/imports.rs`): the card
 "Imported certificates" sits on the Certificate tab between the interface's certificate and
-"All certificates" (which reads again after every import change). Two keys differ from the table
-above because the UI already had the same English text elsewhere (one key per text):
-`wa.import.add` "Import a certificate for the apps" and `wa.import.check_now` "Check the folder
-now". Extra keys: `wa.import.intro`, `empty`, `id_help`, `source`, `ssh_note`, `replace`,
-`saved`. The acme.sh line adds `DEPLOY_SSH_USER=certpush DEPLOY_SSH_SERVER=<host>.local`, which
-acme.sh's ssh deploy hook needs.
+"All certificates" (which reads again after every import change); its "Import a certificate" is
+the primary button, while the `:8443` card's button now reads "Import for the emergency port"
+(`tls.import`). `wa.import.check_now` reads "Check the folder now" (one key per text: "Check
+now" exists elsewhere). Extra keys: `wa.import.intro`, `empty`, `id_help`, `source`,
+`names_why`, `private_ca` (a self-signed leaf or a chain ending in a root), `err.certificate`,
+`err.private_key` (field titles; the server's reason is the technical detail), `code.account`,
+`code.sshd`, `code.acme` (the three example blocks, each with Copy), `ssh_note`, `replace`
+(uploads only), `saved`. The acme.sh line adds `DEPLOY_SSH_USER=certpush
+DEPLOY_SSH_SERVER=<host>.local`, which acme.sh's ssh deploy hook needs. Folder creation offers
+the optional `names` ("Names it may carry", recommended); a held pair shows "Names in use" next
+to "Names of the new certificate" with Accept (confirm); `problem` shows as a note in the drawer
+and under the status in the list; a missing group (409 `source`) shows under the source choice.
 
 #### Open points
 

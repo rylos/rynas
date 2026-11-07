@@ -547,10 +547,19 @@ pub fn dialog(kind: DlgKind, title: Signal<String>, on_close: Callback<()>, body
         {
             d.close();
         }
-        if let Some(Some(el)) = opener.try_update_value(Option::take)
-            && el.is_connected()
-        {
-            let _ = el.focus();
+        if let Some(Some(el)) = opener.try_update_value(Option::take) {
+            // a list rebuilt meanwhile replaced the opener: the button with the same
+            // `data-opener` takes the focus back (Esc returns to where the user was)
+            let back = if el.is_connected() {
+                Some(el)
+            } else {
+                el.get_attribute("data-opener")
+                    .and_then(|key| document().query_selector(&format!("[data-opener=\"{key}\"]")).ok().flatten())
+                    .and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
+            };
+            if let Some(el) = back {
+                let _ = el.focus();
+            }
         }
     });
     let class = match kind {

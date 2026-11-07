@@ -760,7 +760,7 @@ fn checklist(d: &RouteDiagnostics, check_key: fn(&str) -> Option<(&'static str, 
                     <div class="cell-main">
                         <span><strong>{title}</strong>" · "<span class="muted small">{tr(sk)}</span></span>
                         {fix.map(|f| view! { <span class="small">{f}</span> })}
-                        {(!c.detail.is_empty()).then(|| view! { <span class="cell-sub small" lang="en">{c.detail.clone()}</span> })}
+                        {(!c.detail.is_empty()).then(|| view! { <span class="cell-sub small">{ui::tech_detail(c.detail.clone())}</span> })}
                     </div>
                 </li>
             }

@@ -3040,7 +3040,7 @@ tls.trust.ios	Scarica il file con Safari e consenti il profilo | Impostazioni, G
 tls.trust.android	Impostazioni, Sicurezza e privacy, Altre impostazioni di sicurezza, Crittografia e credenziali (i nomi variano per produttore) | Installa un certificato, Certificato CA, Installa comunque | Scegli il file scaricato. I browser lo accettano; alcune app usano solo il proprio elenco
 tls.trust.linux	Debian, Ubuntu: sudo cp rynas-local-ca.crt /usr/local/share/ca-certificates/ && sudo update-ca-certificates | Fedora, Arch: sudo trust anchor rynas-local-ca.crt | Chrome su Linux (dalla versione 134) ha un elenco proprio: apri chrome://certificate-manager, Certificati locali, Personalizzati, Installati da te, poi Importa accanto a Certificati attendibili
 tls.trust.firefox	Impostazioni, Privacy e sicurezza, Certificati, Mostra certificati | Autorità, Importa: scegli il file scaricato | Spunta Considera attendibile questa CA per l'identificazione di siti web
-tls.import	Importa un certificato
+tls.import	Importa per la porta di emergenza
 tls.import.certificate	Certificato (PEM)
 tls.import.private_key	Chiave privata (PEM)
 tls.import.hint	Incolla o carica la catena completa, con il certificato del server per primo, e la sua chiave privata senza password.
@@ -3115,7 +3115,7 @@ dom.take.title	Prendere in carico {name}?
 dom.take.text	Questo record non è stato scritto da rynas e ora contiene {now}. rynas lo sostituisce con {wanted} e da ora lo tiene aggiornato.
 dom.form.intro	Quattro passi: il provider che gestisce il DNS del dominio, un token di accesso, il dominio, poi un'anteprima di cosa cambia. Nulla viene scritto prima di aggiungerlo.
 dom.step.token	Accesso al provider
-dom.step.domain	Dominio
+dom.step.domain	Il dominio e come viene convalidato
 dom.step.records	Cosa cambia
 dom.p.records	rynas scrive i record LAN
 dom.p.manual	Record LAN da aggiungere a mano
@@ -3125,6 +3125,7 @@ dom.p.duckdns	DuckDNS tiene un solo indirizzo per nome: rynas lo imposta all'ind
 dom.f.optional	{name} (facoltativo)
 dom.f.never_shown	I valori vengono conservati cifrati e non vengono più mostrati.
 dom.name	Dominio
+dom.err.name	Questo dominio non si può usare
 dom.name_help	Un nome tuo, meglio un sottodominio usato solo per questo NAS. DuckDNS: <nome>.duckdns.org.
 dom.ch.dns01	DNS (consigliata)
 dom.ch.cname_delegation	Delega CNAME
@@ -3157,7 +3158,7 @@ dom.cred.used	Domini che la usano: {n}
 dom.cred.in_use	È usata da un dominio
 dom.cred.remove	Rimuovi credenziale
 dom.cred.remove_text	I valori conservati vengono eliminati da questo NAS. Il token resta valido presso il provider: revocalo anche lì.
-dom.cred.label	Nome
+dom.cred.label	Nome (facoltativo)
 dom.cred.label_help	Per riconoscerla nell'elenco, per esempio "token per example.com".
 dom.cred.keep	Lascia vuoti i campi per tenere i valori conservati; per cambiarli, inseriscili di nuovo tutti.
 dom.cred.pick	Credenziale
@@ -3199,7 +3200,6 @@ dns.act.manual	Da aggiungere a mano
 dns.act.unknown	Non noto
 dns.act.conflict	Non scritto da rynas
 dns.act.failed	Non riuscito
-dns.now	Ora: {v}
 dns.copy	Copia
 dns.copy_all	Copia tutti
 dns.take_over	Sostituisci
@@ -3236,7 +3236,7 @@ cert.kind.proxy_local	Nomi locali
 cert.kind.acme	Let's Encrypt
 cert.kind.imported	Importato
 wa.import.title	Certificati importati
-wa.import.add	Importa un certificato per le app
+wa.import.add	Importa un certificato
 wa.import.intro	Un certificato creato altrove (il client ACME di un router, un'autorità aziendale, un wildcard acquistato) serve gli indirizzi dell'interfaccia e delle app che copre.
 wa.import.empty	Nessun certificato importato. Gli indirizzi usano il certificato Let's Encrypt o quello locale.
 wa.import.id	Nome (id breve)
@@ -3248,7 +3248,7 @@ wa.import.source.folder	Un altro programma li deposita in una cartella
 wa.import.certificate	Catena del certificato (PEM: prima il certificato del server, poi gli intermedi)
 wa.import.private_key	Chiave privata (PEM, non cifrata)
 wa.import.inspect	Verifica
-wa.import.covers	Prende questi indirizzi
+wa.import.covers	Usato per questi indirizzi
 wa.import.covers_none	Non copre nessuno degli indirizzi serviti da questo NAS
 wa.import.shadowed	Serviti da un altro certificato importato
 wa.import.replaces_acme	Sostituisce il certificato Let's Encrypt per
@@ -3260,15 +3260,51 @@ wa.import.check_now	Controlla ora la cartella
 wa.import.waiting	In attesa dei file
 wa.import.last_error	Ultimi file rifiutati
 wa.import.kept	Resta in uso il certificato precedente.
-wa.import.imported_at	Preso il
+wa.import.imported_at	Importato il
 wa.import.replace	Sostituisci i file
 wa.import.saved	Certificato salvato; il proxy lo usa entro pochi secondi.
 wa.import.delete	Rimuovi
 wa.import.delete_confirm	I suoi indirizzi tornano al certificato Let's Encrypt o locale.
 wa.import.not_renewed	rynas non rinnova i certificati importati.
-nev.web_access.cert_import_failed.title	File del certificato {name} rifiutati
-nev.web_access.cert_import_failed.body	{error}. Resta in uso il certificato precedente.
-nev.web_access.cert_import_ok.title	Il certificato {name} è di nuovo accettato
+nev.web_access.cert_import_failed.title	I file del certificato per {name} sono stati rifiutati
+nev.web_access.cert_import_failed.body	Resta in uso il certificato precedente. {error}
+dom.step.provider	Chi gestisce il DNS del dominio
+dns.now_label	Ora:
+dns.why.failed	Il provider ha rifiutato la modifica; rynas riprova fra 10 minuti.
+dns.why.conflict	Contiene valori non scritti da rynas: nulla viene scritto finché non prendi in carico il nome.
+dns.why.conflict_unwanted	Non serve più, ma è cambiato da quando rynas lo ha scritto: resta com'è e non è più gestito.
+dns.why.unknown	Non è stato possibile leggere il provider.
+dns.hint.cloudflare	Crea un token API (My Profile → API Tokens) con il permesso Zone → DNS → Edit, limitato a questa sola zona (Zone Resources: Include → Specific zone). Mai la Global API Key.
+dns.hint.desec	Crea un token la cui policy consenta scritture solo su questo dominio (facoltativamente solo su *.<dominio>, <dominio> e _acme-challenge.<dominio>), facoltativamente limitato al tuo indirizzo pubblico.
+dns.hint.hetzner	Usa un token della Hetzner Console (Cloud API) con permesso Read & Write; i token della vecchia console DNS non funzionano più. Un token vale per tutto un progetto: tieni la zona in un progetto a parte.
+dns.hint.porkbun	Crea una chiave API, attiva l'accesso API solo per questo dominio (Domain Management → Details → API Access) e limita la chiave al DNS se possibile.
+dns.hint.ovh	Crea un'applicazione e una consumer key i cui diritti consentano solo GET/POST/PUT/DELETE su /domain/zone/<zona>/* (e GET /domain/zone).
+dns.hint.duckdns	Il token dell'account vale per tutti i tuoi nomi DuckDNS. Il dominio è <nome>.duckdns.org e ogni nome sotto di esso riceve lo stesso indirizzo.
+dns.hint.gandi	Crea un token di accesso personale limitato a questo dominio con il permesso di gestirne la configurazione tecnica.
+dns.hint.route53	Crea un utente IAM la cui policy consenta route53:ChangeResourceRecordSets e ListResourceRecordSets su questa sola hosted zone, più route53:ListHostedZonesByName e GetChange.
+dns.hint.digitalocean	I token non si possono limitare a un dominio: preferisci la delega CNAME di _acme-challenge a una zona usata solo per questo.
+dns.hint.rfc2136	Usa una chiave TSIG la cui update policy consenta solo i record TXT di _acme-challenge.<dominio>.
+dns.hint.acmedns	Registra un account sul server acme-dns e aggiungi una volta il CNAME _acme-challenge.<dominio> → <fulldomain>. L'account può cambiare solo quel record TXT.
+wa.import.names	Nomi ammessi
+wa.import.names_help	Un certificato depositato viene usato solo per esattamente questi nomi; lascia vuoto per prendere i nomi del primo certificato depositato.
+wa.import.names_why	Consigliato: ogni account che può depositare in una cartella può farlo in tutte, quindi sono i nomi a decidere cosa può cambiare un deposito. Un certificato per altri nomi attende la tua approvazione.
+wa.import.problem.refused	Gli ultimi file sono stati rifiutati
+wa.import.problem.names_changed	Un nuovo certificato per altri nomi attende la tua approvazione
+wa.import.problem.not_yet_valid	Un nuovo certificato entra in vigore {when}; fino ad allora resta in uso quello attuale
+wa.import.problem.group_missing	Manca il gruppo rynas-cert-drop: nessun account può scrivere nella cartella. Reinstalla il pacchetto rynas.
+wa.import.pending_names	Nomi del nuovo certificato
+wa.import.current_names	Nomi in uso
+wa.import.accept	Accetta i nuovi nomi
+wa.import.accept_confirm	Il nuovo certificato prende subito questi indirizzi. Accetta solo se ti aspettavi il cambiamento.
+wa.import.private_ca	Autofirmato o di un'autorità privata: i dispositivi lo riconoscono solo dopo averci installato quell'autorità.
+wa.import.code.account	Sul NAS: l'account di invio (una volta, come root)
+wa.import.code.sshd	Sul NAS: aggiungi a /etc/ssh/sshd_config, poi ricarica ssh
+wa.import.code.acme	Sul router o sulla macchina che esegue acme.sh
+wa.import.err.certificate	La catena del certificato è stata rifiutata
+wa.import.err.private_key	La chiave privata è stata rifiutata
+nev.web_access.cert_import_names_changed.title	Il certificato depositato per {name} è per altri nomi
+nev.web_access.cert_import_names_changed.body	È per {names}. Resta in uso il certificato precedente finché non accetti i nuovi nomi in Rete › Accesso web › Certificato.
+nev.web_access.cert_import_ok.title	I file del certificato per {name} sono di nuovo a posto
 cert.staging	Prova
 cert.st.ok	Valido
 cert.st.expires_soon	Scade presto

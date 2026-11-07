@@ -1078,7 +1078,8 @@ kbd {
 .modal.drawer > .dialog-foot { border-radius: 0 0 0 var(--r-lg); }
 .dialog-body .tabs { position: sticky; top: calc(var(--s-4) * -1); z-index: 1; margin-top: calc(var(--s-2) * -1); background: var(--surface); }
 .review-foot { display: flex; align-items: flex-end; flex-wrap: wrap; gap: var(--s-4); width: 100%; }
-.modal .table-wrap { margin: 0; border: 1px solid var(--border); border-radius: var(--r-md); }
+/* flex-shrink: 0 keeps tables in dialogs and drawers at their height (the body is a flex column) */
+.modal .table-wrap { margin: 0; border: 1px solid var(--border); border-radius: var(--r-md); flex-shrink: 0; }
 .review-foot .grow { flex: 1 1 280px; }
 .review-foot .input { height: var(--input-h); }
 @media (max-width: 767px) {
@@ -1806,6 +1807,12 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .wa-checks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--s-2); }
 .wa-check { display: flex; align-items: flex-start; gap: var(--s-3); padding: var(--s-2) var(--s-3); border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface-2); min-width: 0; overflow-wrap: anywhere; }
 .wa-check-icon { flex: none; display: inline-flex; padding-top: var(--s-half); color: var(--tone); }
+/* DNS names and addresses wrap only after a dot or a colon (<wbr>), never inside a label */
+.wa-dotted { overflow-wrap: normal; }
+.wa-stack { gap: var(--s-1); }
+@media (max-width: 1279px) {
+  .wa-domains .actions .btn-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+}
 .tls-os { display: flex; flex-direction: column; gap: var(--s-1); }
 .tls-step summary { cursor: pointer; font-size: var(--fs-13); font-weight: 500; padding: var(--s-1) 0; }
 .tls-step ol { margin-top: var(--s-1); list-style: decimal; }
