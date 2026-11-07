@@ -1,0 +1,22 @@
+#!/bin/sh
+# rynas-caddy postinst: the user, then the unit enabled and (re)started. An upgrade restarts
+# Caddy, which boots from last-good.json (open WebSockets drop once; security rebuilds are
+# the reason for upgrades).
+set -e
+
+if [ "$1" = "configure" ]; then
+    systemd-sysusers /usr/lib/sysusers.d/rynas-caddy.conf
+fi
+
+if [ "$1" = "configure" ] || [ "$1" = "abort-upgrade" ] || [ "$1" = "abort-deconfigure" ] || [ "$1" = "abort-remove" ]; then
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload >/dev/null || true
+        # external proxy mode (rynasd disabled the unit): an upgrade keeps it off
+        if [ -z "$2" ] || systemctl is-enabled --quiet rynas-caddy.service; then
+            systemctl enable rynas-caddy.service >/dev/null || true
+            systemctl restart rynas-caddy.service || true
+        fi
+    fi
+fi
+
+exit 0

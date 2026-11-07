@@ -1,0 +1,505 @@
+{
+  "admin": {
+    "config": {
+      "persist": false
+    },
+    "listen": "unix//run/rynas-caddy/admin.sock|0600"
+  },
+  "apps": {
+    "http": {
+      "grace_period": "10s",
+      "http_port": 80,
+      "https_port": 443,
+      "servers": {
+        "rynas_http": {
+          "automatic_https": {
+            "disable": true
+          },
+          "listen": [
+            ":80"
+          ],
+          "routes": [
+            {
+              "handle": [
+                {
+                  "handler": "static_response",
+                  "headers": {
+                    "Cache-Control": [
+                      "no-store"
+                    ],
+                    "Location": [
+                      "https://{http.request.host}{http.request.uri}"
+                    ]
+                  },
+                  "status_code": 307
+                }
+              ],
+              "match": [
+                {
+                  "host": [
+                    "nas.local",
+                    "nas",
+                    "immich-nas.local",
+                    "portainer-nas.local"
+                  ]
+                }
+              ],
+              "terminal": true
+            },
+            {
+              "handle": [
+                {
+                  "handler": "static_response",
+                  "headers": {
+                    "Cache-Control": [
+                      "no-store"
+                    ],
+                    "Location": [
+                      "https://{http.request.host}:8443{http.request.uri}"
+                    ]
+                  },
+                  "status_code": 307
+                }
+              ]
+            }
+          ]
+        },
+        "rynas_https": {
+          "automatic_https": {
+            "disable": true
+          },
+          "listen": [
+            ":443"
+          ],
+          "logs": {},
+          "protocols": [
+            "h1",
+            "h2",
+            "h3"
+          ],
+          "routes": [
+            {
+              "@id": "rynas-ui",
+              "handle": [
+                {
+                  "handler": "subroute",
+                  "routes": [
+                    {
+                      "handle": [
+                        {
+                          "abort": true,
+                          "handler": "static_response"
+                        }
+                      ],
+                      "match": [
+                        {
+                          "not": [
+                            {
+                              "remote_ip": {
+                                "ranges": [
+                                  "127.0.0.0/8",
+                                  "169.254.0.0/16",
+                                  "192.0.2.0/24",
+                                  "::1/128",
+                                  "2001:db8:1::/64",
+                                  "fe80::/10"
+                                ]
+                              }
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "handle": [
+                        {
+                          "handler": "headers",
+                          "response": {
+                            "deferred": true,
+                            "delete": [
+                              "Server",
+                              "X-Powered-By"
+                            ]
+                          }
+                        },
+                        {
+                          "handler": "headers",
+                          "response": {
+                            "require": {
+                              "headers": {
+                                "X-Content-Type-Options": null
+                              }
+                            },
+                            "set": {
+                              "X-Content-Type-Options": [
+                                "nosniff"
+                              ]
+                            }
+                          }
+                        },
+                        {
+                          "handler": "headers",
+                          "response": {
+                            "require": {
+                              "headers": {
+                                "Referrer-Policy": null
+                              }
+                            },
+                            "set": {
+                              "Referrer-Policy": [
+                                "strict-origin-when-cross-origin"
+                              ]
+                            }
+                          }
+                        },
+                        {
+                          "handler": "headers",
+                          "response": {
+                            "require": {
+                              "headers": {
+                                "X-Frame-Options": null
+                              }
+                            },
+                            "set": {
+                              "X-Frame-Options": [
+                                "SAMEORIGIN"
+                              ]
+                            }
+                          }
+                        },
+                        {
+                          "flush_interval": -1,
+                          "handler": "reverse_proxy",
+                          "headers": {
+                            "request": {
+                              "delete": [
+                                "Remote-User",
+                                "Remote-Groups",
+                                "Remote-Email",
+                                "Remote-Name"
+                              ]
+                            }
+                          },
+                          "stream_close_delay": "5m",
+                          "transport": {
+                            "dial_timeout": "5s",
+                            "protocol": "http"
+                          },
+                          "upstreams": [
+                            {
+                              "dial": "127.0.0.1:8080"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "match": [
+                {
+                  "host": [
+                    "nas.local",
+                    "nas"
+                  ]
+                }
+              ],
+              "terminal": true
+            },
+            {
+              "@id": "rynas-route-app-immich",
+              "handle": [
+                {
+                  "handler": "subroute",
+                  "routes": [
+                    {
+                      "handle": [
+                        {
+                          "abort": true,
+                          "handler": "static_response"
+                        }
+                      ],
+                      "match": [
+                        {
+                          "not": [
+                            {
+                              "remote_ip": {
+                                "ranges": [
+                                  "10.8.0.0/24",
+                                  "100.64.0.0/10",
+                                  "127.0.0.0/8",
+                                  "169.254.0.0/16",
+                                  "192.0.2.0/24",
+                                  "198.51.100.7/32",
+                                  "::1/128",
+                                  "2001:db8:1::/64",
+                                  "fd7a:115c:a1e0::/48",
+                                  "fe80::/10"
+                                ]
+                              }
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "handle": [
+                        {
+                          "handler": "headers",
+                          "response": {
+                            "deferred": true,
+                            "delete": [
+                              "Server",
+                              "X-Powered-By"
+                            ]
+                          }
+                        },
+                        {
+                          "handler": "headers",
+                          "response": {
+                            "require": {
+                              "headers": {
+                                "X-Content-Type-Options": null
+                              }
+                            },
+                            "set": {
+                              "X-Content-Type-Options": [
+                                "nosniff"
+                              ]
+                            }
+                          }
+                        },
+                        {
+                          "handler": "headers",
+                          "response": {
+                            "require": {
+                              "headers": {
+                                "Referrer-Policy": null
+                              }
+                            },
+                            "set": {
+                              "Referrer-Policy": [
+                                "strict-origin-when-cross-origin"
+                              ]
+                            }
+                          }
+                        },
+                        {
+                          "handler": "headers",
+                          "response": {
+                            "require": {
+                              "headers": {
+                                "X-Frame-Options": null
+                              }
+                            },
+                            "set": {
+                              "X-Frame-Options": [
+                                "SAMEORIGIN"
+                              ]
+                            }
+                          }
+                        },
+                        {
+                          "handler": "request_body",
+                          "max_size": 53687091200
+                        },
+                        {
+                          "flush_interval": -1,
+                          "handler": "reverse_proxy",
+                          "headers": {
+                            "request": {
+                              "delete": [
+                                "Remote-User",
+                                "Remote-Groups",
+                                "Remote-Email",
+                                "Remote-Name"
+                              ]
+                            }
+                          },
+                          "stream_close_delay": "5m",
+                          "transport": {
+                            "dial_timeout": "5s",
+                            "protocol": "http",
+                            "read_timeout": "600s"
+                          },
+                          "upstreams": [
+                            {
+                              "dial": "127.0.0.1:2283"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "match": [
+                {
+                  "host": [
+                    "immich-nas.local"
+                  ]
+                }
+              ],
+              "terminal": true
+            },
+            {
+              "@id": "rynas-route-app-portainer",
+              "handle": [
+                {
+                  "handler": "subroute",
+                  "routes": [
+                    {
+                      "handle": [
+                        {
+                          "abort": true,
+                          "handler": "static_response"
+                        }
+                      ],
+                      "match": [
+                        {
+                          "not": [
+                            {
+                              "remote_ip": {
+                                "ranges": [
+                                  "127.0.0.0/8",
+                                  "169.254.0.0/16",
+                                  "192.0.2.0/24",
+                                  "::1/128",
+                                  "2001:db8:1::/64",
+                                  "fe80::/10"
+                                ]
+                              }
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "handle": [
+                        {
+                          "handler": "headers",
+                          "response": {
+                            "deferred": true,
+                            "delete": [
+                              "Server",
+                              "X-Powered-By"
+                            ]
+                          }
+                        },
+                        {
+                          "handler": "headers",
+                          "response": {
+                            "require": {
+                              "headers": {
+                                "X-Content-Type-Options": null
+                              }
+                            },
+                            "set": {
+                              "X-Content-Type-Options": [
+                                "nosniff"
+                              ]
+                            }
+                          }
+                        },
+                        {
+                          "handler": "headers",
+                          "response": {
+                            "require": {
+                              "headers": {
+                                "Referrer-Policy": null
+                              }
+                            },
+                            "set": {
+                              "Referrer-Policy": [
+                                "strict-origin-when-cross-origin"
+                              ]
+                            }
+                          }
+                        },
+                        {
+                          "handler": "reverse_proxy",
+                          "headers": {
+                            "request": {
+                              "delete": [
+                                "Remote-User",
+                                "Remote-Groups",
+                                "Remote-Email",
+                                "Remote-Name"
+                              ]
+                            }
+                          },
+                          "stream_close_delay": "5m",
+                          "transport": {
+                            "dial_timeout": "5s",
+                            "protocol": "http",
+                            "tls": {
+                              "insecure_skip_verify": true
+                            }
+                          },
+                          "upstreams": [
+                            {
+                              "dial": "127.0.0.1:9443"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "match": [
+                {
+                  "host": [
+                    "portainer-nas.local"
+                  ]
+                }
+              ],
+              "terminal": true
+            },
+            {
+              "handle": [
+                {
+                  "abort": true,
+                  "handler": "static_response"
+                }
+              ]
+            }
+          ],
+          "strict_sni_host": true,
+          "tls_connection_policies": [
+            {}
+          ]
+        }
+      }
+    },
+    "tls": {
+      "certificates": {
+        "load_files": [
+          {
+            "certificate": "/var/lib/rynas-caddy/rynas/local.crt",
+            "key": "/var/lib/rynas-caddy/rynas/local.key",
+            "tags": [
+              "rynas-local"
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "logging": {
+    "logs": {
+      "default": {
+        "encoder": {
+          "format": "json"
+        },
+        "writer": {
+          "output": "stderr"
+        }
+      }
+    }
+  },
+  "storage": {
+    "module": "file_system",
+    "root": "/var/lib/rynas-caddy/data"
+  }
+}

@@ -264,6 +264,22 @@ impl TlsSvc {
         self.publish(&pair, &ca)
     }
 
+    /// The local CA (made when missing): the web-access module issues the certificate of
+    /// the proxy's local names from it, so one trusted root covers `:8443` and every
+    /// `<app>-<host>.local` (W1).
+    pub fn local_ca(&self) -> io::Result<PemPair> {
+        let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.dirs()?;
+        let names = self.names();
+        let host = names
+            .dns
+            .iter()
+            .find(|d| *d != "localhost" && !d.ends_with(".local") && !d.contains('.'))
+            .cloned()
+            .unwrap_or_else(|| "nas".into());
+        self.ca(&host, rynas_tls::now()).map(|(p, _)| p)
+    }
+
     /// Writes the published files that differ from `pair` / `ca`.
     fn publish(&self, pair: &PemPair, ca: &PemPair) -> io::Result<bool> {
         // the key first: rynas-web only takes a pair whose key matches the chain

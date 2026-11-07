@@ -113,6 +113,15 @@ struct Args {
     /// folder; a checkout's `apps/` for development.
     #[arg(long, default_value = rynasd::apps::DEFAULT_CATALOG_DIR)]
     apps_dir: PathBuf,
+    /// The admin socket of the web access proxy (rynas-caddy). The proxy counts as installed
+    /// when its unit file exists below the configuration root or this socket exists; with
+    /// --dry-system that means only a test proxy started on purpose.
+    #[arg(long, default_value = rynasd::web_access::ADMIN_SOCKET)]
+    caddy_admin: PathBuf,
+    /// rynas-web's own HTTPS port (W0), the emergency door the proxy never routes; the
+    /// proxy redirects plain HTTP for unknown names there.
+    #[arg(long, default_value_t = 8443)]
+    web_tls_port: u16,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -208,6 +217,10 @@ struct Opened {
     docker_settings: tokio::sync::watch::Receiver<rynas_api_types::docker::DockerSettings>,
     /// The configuration root.
     root: PathBuf,
+    /// The certificate service (the local CA is shared with web access).
+    tls: Arc<rynasd::tls::TlsSvc>,
+    /// Web access (W1): the `web_access` key's service.
+    web_access: Arc<rynasd::web_access::WebAccessSvc>,
 }
 
 fn open_config(
@@ -307,6 +320,23 @@ fn open_config(
     let (docker_domain, docker_settings) = rynasd::docker::DockerDomain::new(args.dry_system);
     let docker_tx = docker_domain.tx.clone();
     domains.push(Arc::new(docker_domain));
+    // web access (W1): the proxy's certificate comes from the same local CA as :8443
+    let tls = tls_service(args);
+    let web_access = {
+        let tls = tls.clone();
+        Arc::new(rynasd::web_access::WebAccessSvc::new(
+            root.clone(),
+            args.caddy_admin.clone(),
+            args.web_port,
+            args.web_tls_port,
+            rynasd::web_access::WebAccessSvc::system_facts(),
+            Box::new(move || tls.local_ca()),
+            Box::new(rynasd::web_access::diag::SystemProbe),
+        ))
+    };
+    domains.push(Arc::new(rynasd::web_access::WebAccessDomain {
+        svc: web_access.clone(),
+    }));
     let config = Config::open(ConfigOptions::new(&args.state_dir, &root), system, domains)
         .map_err(std::io::Error::other)?;
     removable_tx.send_replace(rynasd::removable::initial_settings(&config));
@@ -327,6 +357,8 @@ fn open_config(
         removable_settings,
         docker_settings,
         root,
+        tls,
+        web_access,
     })
 }
 
@@ -904,15 +936,25 @@ fn main() -> std::io::Result<()> {
             let _ = ops.docker.set(docker.clone());
             rynasd::docker::spawn_watch(docker.clone());
             rynasd::docker::spawn_stats(docker.clone());
-            state.apps = Some(rynasd::apps::AppsSvc::new(docker.clone(), args.apps_dir.clone()));
+            let apps = rynasd::apps::AppsSvc::new(docker.clone(), args.apps_dir.clone());
+            let _ = apps.web.set(opened.web_access.clone());
+            state.apps = Some(apps);
             state.docker = Some(docker);
         }
         // HTTPS certificate of the web interface: made on the first start, re-issued when the
         // host name or an address changes, published for rynas-web (wave W0)
         {
-            let tls = tls_service(&args);
+            let tls = opened.tls.clone();
             rynasd::tls::spawn_watch(tls.clone());
             state.tls = Some(tls);
+        }
+        // web access (W1): the proxy's configuration from the `web_access` key, anti-drift,
+        // host facts (names, subnets) followed
+        {
+            let web = opened.web_access.clone();
+            let _ = web.ops.set(ops.clone());
+            rynasd::web_access::spawn_watch(web.clone());
+            state.web_access = Some(web);
         }
         state.ops = Some(ops);
         if args.storage_check_interval > 0 {

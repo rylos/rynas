@@ -146,7 +146,14 @@ pub fn is_admin(role: Role) -> bool {
 /// engine is root).
 fn admin_read(path: &str) -> bool {
     path.ends_with("/luks-header")
-        || ["/api/v1/docker/", "/docker/", "/api/v1/apps/", "/apps/"]
+        || [
+            "/api/v1/docker/",
+            "/docker/",
+            "/api/v1/apps/",
+            "/apps/",
+            "/api/v1/web-access",
+            "/web-access",
+        ]
             .iter()
             .any(|p| path.starts_with(p))
 }

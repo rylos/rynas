@@ -85,7 +85,7 @@ D-APPCAT, adopted after D-DOCKER, moves the catalogue into **phase 2**. That sup
 | D2 | UI: Docker page, dashboard widget, notification texts | after D1 |
 | A2 | Apps & Plugins page: install wizard (form from `form.json`), installed apps, updates with snapshot and rollback, convert to custom stack; rynasd catalogue endpoints | backend built (§5.2); UI in progress |
 | W0 | rynas-web on `:8443` with rustls, the emergency door that never goes through the proxy (still owed from phase 1) | before W1 |
-| W1 | Web access (D-PROXY/D-EXPOSE revised on 2026-11-07, `../research/web-access.md`): `rynas-caddy` package, rynasd renderer + `POST /load` + last-good, local names + local CA, app routes, the wizard's Access step, diagnostics | with A2 |
+| W1 | Web access (D-PROXY/D-EXPOSE revised on 2026-11-07, `../research/web-access.md`): `rynas-caddy` package, rynasd renderer + `POST /load` + last-good, local names + local CA, app routes, the wizard's Access step, diagnostics | backend and package built (§5.3; Caddy 2.11.9); UI (Routes page, Access step, Trust this NAS) in progress |
 | W2 | Domains, DNS-01 wildcard, DNS records managed by rynas, certificate dashboard | after W1 |
 | R | Quality review: GUI/API consistency, speed, memory, no inner horizontal scroll; then a deploy on the DS920+ with Docker installed through the module | after D2 + A2 |
 
@@ -388,8 +388,9 @@ Paths are relative to `/api/v1`.
   - `folders`: {ENV: "/ssd/docker/appdata/<stack>/<path>"}, below a mounted volume; created at
     install;
   - `ports`: {ENV: port}, relocatable ports only;
-  - `publish_lan`: false (default) binds proxied ports to `127.0.0.1`, so only the web access
-    proxy reaches them (D-PROXY); true binds them to `0.0.0.0`;
+  - `publish_lan`: false binds proxied ports to `127.0.0.1`, so only the web access proxy
+    reaches them (D-PROXY); true binds them to `0.0.0.0`. Unset (since W1): false while web
+    access is active, true otherwise (§7, §5.3);
   - `start`: true (default) runs `up -d` after creating the stack.
 - **`AppCard`**:
   - id, name, summary, categories, version, app_version, license, antifeatures;
@@ -435,8 +436,8 @@ Paths are relative to `/api/v1`.
   - snapshots: the folder is a subvolume.
 
   The Open button: with `bind = 0.0.0.0` it opens
-  `<location.protocol>//<location.hostname>:<web_port><web_path>`. With loopback it uses the
-  web access route (W1).
+  `<location.protocol>//<location.hostname>:<web_port><web_path>`. With loopback it opens
+  `web_url`, the web access route (W1, §5.3).
 - **`AppUpdatePlan`**:
   - stack, app, from_version, to_version, from_app_version, to_app_version;
   - up_to_date, downgrade;
@@ -482,6 +483,316 @@ The UI also needs texts for the plan's closed sets:
 
 Entry texts (names, summaries, descriptions, port purposes, notes, form titles) come in English
 from the catalogue and are shown as they are.
+
+### 5.3 API — wave W1 (web access, `/api/v1/web-access/...`)
+
+Code: `crates/rynasd/src/web_access/` (`mod.rs` service, configuration domain, routes and
+the periodic check; `model.rs` validation, local names, access ranges, host facts;
+`caddy.rs` the renderer; `admin.rs` the admin-socket client; `diag.rs` probes), the app
+side in `crates/rynasd/src/apps.rs`, the package in `packaging/caddy/`. Types:
+`rynas_api_types::web_access` (every field documented there). rynas-web forwards every
+route unchanged and treats every `/web-access` read as an administrator read.
+
+**What W1 does** (D-PROXY / D-EXPOSE revised 2026-11-07, `../research/web-access.md`):
+- `rynas-caddy` owns 80/443 from install. The interface is at `https://<host>.local` and
+  `https://<host>` through it; `:8443` (rynas-web, rustls) never goes through it and stays
+  the emergency door.
+- Each app route gets the local name `<label>-<host>.local`, published as a static Avahi
+  host, with a certificate from the rynas local CA, the same root as `:8443` ("Trust this
+  NAS"). There is no ACME in W1.
+- Access: `lan` (the default) is the NAS's connected subnets, plus loopback, link-local and
+  the route's `allow`. `lan_vpn` adds the tailnet ranges, only while `tailscale0` exists
+  (the anti-spoof drop on other interfaces belongs to the firewall plugin, W3), and the
+  WireGuard subnets. Sources outside the ranges and unknown host names get the connection
+  closed (Caddy `abort`), never a page.
+
+**Access.** Every route needs the administrator role, reads included (rynasd checks it too:
+403 `forbidden`). Changes are audit lines (`web-access <action> <target> by <user>`).
+
+#### Error codes
+
+Only existing codes:
+- 400 `invalid_value` with `field`: the JSON path of the value (`settings.https_port`,
+  `routes[2].label`, `routes[0].access`...);
+- 404 `not_found` (unknown route id);
+- 409 `nothing_pending` (confirm with nothing waiting); 409 `conflict` (a confirmation that
+  did not come through the proxy on a new name; "Move behind the proxy" when web access is
+  not active or the app is already behind it);
+- 503 `backend_unavailable` (rynasd without web access).
+
+Refusals of the engine are not HTTP errors: they fail the apply task, whose log carries
+Caddy's message.
+
+#### Routes
+
+Paths are relative to `/api/v1`.
+
+| Method | Path | Body | Answer |
+|---|---|---|---|
+| GET | `/web-access` | — | `WebAccessState` |
+| PUT | `/web-access` | `WebAccessConfig` | `WebAccessState`. Validates, then stages the key `web_access` (apply with `/config/apply`, like every key). 400 `invalid_value` with `field` |
+| POST | `/web-access/plan` | optional `WebAccessConfig` (default: the caller's staged or applied value) | `WebAccessPlan` {engine_config (the full Caddy JSON, `null` in external mode), avahi_hosts, names, ui_route_changes}. No side effects |
+| POST | `/web-access/sync` | — | `ProxyEngine`. Runs the anti-drift check now (below) |
+| POST | `/web-access/confirm` | — | 204. Confirms a change of the interface's own route. rynas-web adds the connection's local address and the `Host`. It is accepted only when it arrived through the proxy (local address `127.0.0.1:<rynas-web plain port>`) on one of the new names. 409 `nothing_pending`; 409 `conflict` |
+| POST | `/web-access/routes/{id}/test` | — | `RouteDiagnostics` {route, checks [`RouteCheck` {id, state `ok\|warn\|fail\|skipped`, detail}], at_ms}. 404 |
+| POST | `/apps/installed/{stack}/proxy` | — | 202 `TaskStarted` (`apps.proxy`), "Move behind the proxy". 409 `conflict` when web access is not active, the app has no web interface, or it is already behind the proxy; 404 |
+
+#### Shapes worth knowing
+
+- **`WebAccessConfig`** (the key), every field with a default:
+  ```json
+  {"settings": {"mode": "builtin", "http_port": 80, "https_port": 443, "h3": true,
+                "local_names": true, "ui": {"enabled": true, "access": "lan", "allow": []}},
+   "routes": [{"id": "app-immich", "kind": "app", "stack": "immich", "app": "immich",
+               "label": "immich", "upstream": {"scheme": "http", "host": "127.0.0.1", "port": 2283},
+               "names": {"local": true}, "access": "lan", "allow": [], "auth": "app",
+               "limits": {"body": "50G", "timeout": "600s", "buffering": false},
+               "websocket": true, "subpath": false, "path": "/", "headers": "default",
+               "enabled": true}]}
+  ```
+  - `mode` is `builtin` or `external`. `external` is external proxy mode: rynas-caddy is
+    disabled and stopped, 80/443 are free for an NPM/Traefik/Zoraxy app, and the interface
+    is only on `:8443`.
+  - `access` is `lan`, `lan_vpn` or `public`. `public` is refused until the public flow
+    (W3).
+  - `kind` is `app`, `stack` or `custom`. `custom` (other LAN hosts) is refused until W2.
+  - `headers` is `default` (nosniff, `Referrer-Policy`, `X-Frame-Options: SAMEORIGIN` when
+    the app sends none; `Server`/`X-Powered-By` removed) or `relaxed` (framing allowed).
+  - `sso` (the rynas login in front of a route) is in the model and refused until W3.
+- **Validation** (field in brackets):
+  - `id`: `[a-z0-9-]` 1-63, unique (`routes[i].id`);
+  - `label`: `[a-z0-9-]` 1-40, unique, lowercased (`routes[i].label`);
+  - `app`/`stack` routes name their stack (`routes[i].stack`);
+  - the upstream is `127.0.0.1` or `::1`, port > 0;
+  - `allow` holds addresses or CIDRs, never `/0`;
+  - `auth = "none"` routes stay `lan` (`routes[i].access`);
+  - `body` is `<digits>[K|M|G]`, `timeout` is `<digits>s|m|h`, `path` starts with `/`;
+  - the ports are non-zero and different, and not rynas-web's plain or emergency port
+    (`settings.https_port`, `settings.http_port`).
+- **`WebAccessState`**: applied, pending?, engine `ProxyEngine` {installed, running, in_sync?,
+  last_load_ms?, last_error?}, host (first label of the host name), ui_names, ui_urls,
+  routes [`RouteView` {id, kind, stack?, app?, names, urls, upstream, access, enabled,
+  problems}], lan (computed `lan` ranges), vpn (what `lan_vpn` adds), confirm?
+  (`PendingConfirm` {deadline_ms, names}), emergency_port, reserved_ports.
+
+  `problems` codes: `name_too_long` (`<label>-<host>` over 63 characters: no name),
+  `local_names_off`, `disabled`.
+- **Route checks**, in order:
+  1. `dns`: the name through the NAS's resolver. `warn` when only loopback answers, `fail`
+     when it does not resolve or points to another device;
+  2. `proxy_running`: the admin socket answers;
+  3. `route_loaded`: the route `@id` `rynas-route-<id>` is in the running configuration;
+  4. `https_listening`: TCP to `127.0.0.1:<https_port>`;
+  5. `certificate`: the engine's certificate covers the name and is valid;
+  6. `upstream`: TCP to the upstream.
+
+  `skipped` means the step does not apply (no name, the proxy not running).
+- **App plan and list** (§5.2, extended):
+  - `AppInstallRequest.publish_lan` is now optional: `null` means loopback plus a route
+    while web access is active, the LAN otherwise (§7);
+  - `AppInstallPlan` gains `proxy_active` and `web_url?` (`https://<label>-<host>.local/`
+    when the install adds a route) and the warning `proxy_inactive`;
+  - `InstalledApp` gains `web_url?`: the Open button uses it with loopback binding.
+
+#### Configuration key `web_access`
+
+A key that was never applied counts as the defaults. On a system with rynas-caddy
+installed, the first check applies them (revision "web access on by default"), so the
+interface is behind the proxy from install.
+
+The apply:
+1. writes rynas's block of `/etc/avahi/hosts` when Avahi is installed (`# BEGIN rynas
+   web-access` … `# END`; the administrator's own lines are kept). One line
+   `<primary IPv4> <label>-<host>.local` per named route. The primary IPv4 is the address
+   of the interface with the default route.
+2. reloads `avahi-daemon` when it runs.
+3. with rynas-caddy installed:
+   - `external`: `systemctl disable --now rynas-caddy`.
+   - `builtin`:
+     - `enable --now` when the unit is inactive;
+     - issues the engine's certificate when a name is missing or it is near expiry
+       (`/var/lib/rynas-caddy/rynas/local.{crt,key}`, 0640 root:rynas-caddy, the key
+       written first; one leaf from the rynas local CA for every served name);
+     - compares `GET /config/` with the render and calls `POST /load` when they differ
+       (`Cache-Control: must-revalidate` when the certificate changed, so the engine
+       re-reads the same paths);
+     - writes `/var/lib/rynas-caddy/last-good.json` (0640 root:rynas-caddy).
+   - A refusal (`400 {"error"}`) fails the apply. The rollback finds the previous
+     configuration still running, since the engine keeps it on error.
+4. without rynas-caddy the value is only stored, and loaded once the package exists.
+
+**Timed confirmation.** It applies when an apply changes the interface's own route (mode,
+ports, `settings.ui`) and the new value still serves it. `GET /web-access` then shows
+`confirm` {deadline_ms, names}.
+- The UI opens `https://<names[0]>/` and calls `POST /web-access/confirm` from there.
+- Without a confirmation within 120 s, rynasd applies the previous value again (revision
+  "…not confirmed…"). Only changes of the UI route wait; app routes never do.
+- `:8443` is never affected.
+
+**Anti-drift and host facts** (at start, every 30 s, and `POST /web-access/sync`):
+- When the host name, the LAN subnets, `tailscale0`, the WireGuard subnets or the primary
+  address change, the applied value is written again: Avahi lines, access ranges and
+  certificate names follow.
+- Otherwise the running configuration is compared with the render and loaded again when it
+  differs (Caddy restarted from an older file, a change through the socket).
+
+Container events never reload the proxy. Upstreams are fixed loopback ports, and a reload
+closes WebSockets until Caddy 2.12: `stream_close_delay` (5 min) keeps them open meanwhile.
+
+#### What rynasd renders (Caddy JSON)
+
+Pinned by the golden file `crates/rynasd/tests/golden/web_access_caddy.json`, which
+`packaging/caddy/build.sh --validate` checks with the real binary.
+- **Admin and globals**:
+  - `admin.listen` `unix//run/rynas-caddy/admin.sock|0600`
+    (https://caddyserver.com/docs/conventions#network-addresses); Caddy skips the Host and
+    Origin checks on Unix sockets (`admin.go`);
+  - `admin.config.persist: false`;
+  - storage `file_system` in `/var/lib/rynas-caddy/data`;
+  - JSON logs on stderr (the journal).
+- **Server `rynas_https`** (`:443`):
+  - protocols h1, h2 and h3, `strict_sni_host`;
+  - `automatic_https.disable` (no ACME in W1), TLS through `tls_connection_policies: [{}]`
+    and `tls.certificates.load_files`
+    (https://caddyserver.com/docs/json/apps/tls/certificates/load_files/);
+  - access logs on;
+  - one route per host set (`@id` `rynas-ui` or `rynas-route-<id>`, `terminal`). Inside a
+    subroute, sources outside the ranges are aborted
+    (`not` + `remote_ip`, https://caddyserver.com/docs/json/apps/http/servers/routes/match/remote_ip/;
+    `static_response.abort`), then:
+    - the header handlers;
+    - `request_body.max_size` in bytes
+      (https://caddyserver.com/docs/json/apps/http/servers/routes/handle/request_body/);
+    - `reverse_proxy` (https://caddyserver.com/docs/json/apps/http/servers/routes/handle/reverse_proxy/):
+      HTTP transport `dial_timeout` 5 s, `read_timeout` = `limits.timeout`,
+      `tls.insecure_skip_verify` for `https` upstreams on loopback;
+      `flush_interval: -1` when `buffering` is false; `stream_close_delay` 5 min;
+      `Remote-User/-Groups/-Email/-Name` always deleted from requests.
+  - the interface's route: upstream `127.0.0.1:<rynas-web plain port>`, unbuffered, no read
+    timeout (server-sent events);
+  - a last route that aborts every other host name.
+- **Server `rynas_http`** (`:80`): served names get `307` to `https://<host><uri>`; any
+  other name or a bare address gets `307` to `https://<host>:8443<uri>`; both carry
+  `Cache-Control: no-store`.
+- **External mode** renders `null`: the engine does not run.
+
+Checked against the built rynas-caddy 2.11.9 in a throw-away container (2026-11-07):
+- the golden render validates and loads over the socket;
+- `GET /config/` returns it unchanged, so the anti-drift compares equal;
+- a refused load (400) leaves the old configuration running and the socket in place;
+- served names proxy, unknown names are aborted, and `:80` redirects as above.
+
+**Invariant:** every load carries the same `admin` block. A refused configuration with a
+*different* admin block (for example none, which means TCP `localhost:2019`) made Caddy
+stop the Unix admin socket in that test. rynasd only ever sends its own render.
+
+#### Apps (§3 rule 8, §7)
+
+- **Install.** While web access is active (built-in mode, rynas-caddy installed),
+  `publish_lan` defaults to false: `RYNAS_BIND=127.0.0.1`, and after the stack is created
+  the task adds a route with `apply_update` on `web_access`. The route has:
+  - id `app-<stack>`;
+  - label = the stack name with `_` and other characters turned into `-`, at most 40
+    characters, `-2`, `-3`… on a collision;
+  - upstream `127.0.0.1:<web port>`, access `lan`;
+  - auth, body, timeout, buffering, websocket, subpath and path from the catalogue `[web]`.
+
+  The task log names the URL. A route that cannot be added is a warning in the log, never
+  a failed install.
+- **While web access is not active**, `publish_lan` defaults to true. Loopback asked for
+  explicitly gives the warning `proxy_inactive`.
+- **Proxy ports.** The proxy's ports (80/tcp, 443/tcp, and 443/udp with h3) count as used
+  in the port check, running or not, unless `mode = "external"`.
+- **`apps.proxy`** ("Move behind the proxy"):
+  - sets `RYNAS_BIND=127.0.0.1` in `.env` and runs `up`. When `up` fails, the previous
+    `.env` comes back and `up` runs again;
+  - adds the route;
+  - host-network apps only get the route.
+- **`apps.uninstall`** removes the stack's route after `down`.
+
+#### Package `rynas-caddy` (`packaging/caddy/`)
+
+`build.sh` runs in `golang:1.27.3-trixie`, pinned by digest, as the calling user:
+- `xcaddy build v2.11.9` with xcaddy 0.4.7, `CGO_ENABLED=0`, `-trimpath`, no VCS stamp,
+  stripped, `GOAMD64=v2`, `SOURCE_DATE_EPOCH` from the last commit of `packaging/caddy`;
+- `rynas-caddy validate` on the bootstrap configuration and on every `--validate` file;
+- `dpkg-deb --root-owner-group` → `target/caddy/rynas-caddy_2.11.9-1_amd64.deb` + `.sha256`.
+
+Versions live in `versions.env`, checked 2026-11-07: Caddy 2.11.9 (2026-11-05), Go
+1.27.3, xcaddy 0.4.7 (https://github.com/caddyserver/caddy/releases,
+https://go.dev/dl/?mode=json, https://github.com/caddyserver/xcaddy/releases).
+`check-upstream.sh` is the daily CI watch: it exits 1 when one of them is newer.
+
+W1 builds without DNS modules. `dns-modules.txt` lists the W2 providers: cloudflare,
+route53, ovh, hetzner, desec, duckdns, gandi, porkbun, digitalocean, rfc2136 and acmedns.
+`--dns` refuses unpinned lines; the versions are pinned when W2 lands.
+
+Contents:
+- `/usr/bin/rynas-caddy`;
+- `rynas-caddy.service`:
+  - user `rynas-caddy` from `sysusers.d`, `Type=notify`;
+  - `ExecStartPre` copies `/usr/share/rynas-caddy/bootstrap.json` to `last-good.json`
+    when it is missing (plain HTTP → `:8443`), then `run --config last-good.json`;
+  - `AmbientCapabilities`/`CapabilityBoundingSet` `CAP_NET_BIND_SERVICE` only,
+    `ProtectSystem=strict` and the usual sandboxing (`systemd-analyze security`: 1.6 OK);
+  - `GOMEMLIMIT=100MiB`, `MemoryHigh=128M`, `MemoryMax=256M`;
+  - `StateDirectory`/`RuntimeDirectory` 0750, logs to the journal;
+- `Conflicts: caddy`.
+
+postinst enables and restarts the unit, unless rynasd had disabled it (external mode).
+Purge removes `/var/lib/rynas-caddy`.
+
+#### Tasks
+
+| Type | What it does |
+|---|---|
+| `apps.proxy` | `RYNAS_BIND=127.0.0.1` in `.env` + `up` (unless host network), then the web access route |
+
+Applies of `web_access` run as the usual configuration apply (`/config/apply`).
+
+#### Development
+
+`rynasd --dry-system` never touches a proxy. rynas-caddy counts as installed only when its
+unit file exists below the dry root, or when `--caddy-admin` (default
+`/run/rynas-caddy/admin.sock`) points at a socket that exists. Files go below the dry root.
+`--web-tls-port` (default 8443) is the port the `:80` catch-all redirects to.
+
+#### UI texts (i18n keys the UI adds, en + it)
+
+| Key | en | it |
+|---|---|---|
+| `task.apps.proxy` | Move app behind the proxy | Spostamento dell'app dietro il proxy |
+
+The UI also needs texts for these closed sets:
+- `ProxyMode`: `builtin`, `external`;
+- `AccessLevel`: `lan`, `lan_vpn`, `public`;
+- `RouteKind`: `app`, `stack`, `custom`;
+- `HeaderPreset`: `default`, `relaxed`;
+- `CheckState`: `ok`, `warn`, `fail`, `skipped`;
+- check ids: `dns`, `proxy_running`, `route_loaded`, `https_listening`, `certificate`,
+  `upstream`;
+- route problems: `name_too_long`, `local_names_off`, `disabled`;
+- the plan warning `proxy_inactive`;
+- the confirmation banner (deadline and the address to open).
+
+Check details and engine errors are English, shown as they are.
+
+#### Not in W1
+
+- **W2:** domains, credentials, DNS-01 wildcard, DNS records managed by rynas, rebind
+  detection, the certificate dashboard, `:8443` reusing the wildcard, custom routes and
+  routes for foreign stacks (the model's `kind`), the DNS modules pinned.
+- **W3:**
+  - `lan_vpn` anti-spoof in the firewall;
+  - the rynas login in front of apps (`sso`: `/api/v1/auth/verify`, the `rynas_sso`
+    cookie, groups, bypass paths, `forward_auth` with `copy_headers`; identity headers
+    are already stripped);
+  - `public` with its checklist, auto-block from the access logs, HSTS;
+  - Tailscale Services.
+- **Owed by rynas-web:**
+  - trusting `X-Forwarded-For` from the loopback proxy, so the login rate limit sees
+    clients instead of `127.0.0.1`;
+  - the plain listener moving to `127.0.0.1:8080`.
 
 ## 6. App catalog format (wave A1)
 
@@ -670,5 +981,7 @@ Syncthing, Home Assistant, Uptime Kuma, Paperless-ngx. Images pinned by tag and 
   - once W1 is active, the default becomes loopback plus a route, and the "Expose" step replaces the port.
 
   Already-installed apps get a one-click "Move behind the proxy", which re-renders with loopback and adds a route.
+
+  Done in W1 (§5.3): `publish_lan` is optional and follows this rule, and "Move behind the proxy" is `POST /api/v1/apps/installed/{stack}/proxy`.
 - **Install without `docker compose config` first:** the validation only fails at `up`. Add a validation step that is read-only and safe under `--dry-system`.
 - **Per-install volume choice:** apps always go on the Docker volume today. Per-folder placement exists, for example a database on SSD.

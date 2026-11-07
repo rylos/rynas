@@ -1,0 +1,21 @@
+# libdns DNS provider modules compiled into rynas-caddy for ACME DNS-01 (wave W2:
+# own-domain wildcard certificates and rynas-managed DNS records, docs/research/web-access.md
+# §3 and §11). Built only with `build.sh --dns`; W1 needs none (no ACME: local names use the
+# rynas local CA).
+#
+# Each line is `<module path>@<version>`: build.sh refuses a line without a pinned version,
+# so a build is reproducible. The versions are pinned when W2 lands (each module's latest
+# tag compatible with the pinned Caddy, checked with `rynas-caddy list-modules` and one
+# DNS-01 issuance per provider against Let's Encrypt staging).
+#
+# github.com/caddy-dns/cloudflare@<pin in W2>
+# github.com/caddy-dns/route53@<pin in W2>
+# github.com/caddy-dns/ovh@<pin in W2>
+# github.com/caddy-dns/hetzner@<pin in W2>
+# github.com/caddy-dns/desec@<pin in W2>
+# github.com/caddy-dns/duckdns@<pin in W2>
+# github.com/caddy-dns/gandi@<pin in W2>
+# github.com/caddy-dns/porkbun@<pin in W2>
+# github.com/caddy-dns/digitalocean@<pin in W2>
+# github.com/caddy-dns/rfc2136@<pin in W2>
+# github.com/caddy-dns/acmedns@<pin in W2>

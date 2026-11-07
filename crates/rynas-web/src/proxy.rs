@@ -22,7 +22,7 @@ use crate::app::AppState;
 use crate::auth::CurrentSession;
 use crate::conn::LocalAddr;
 use crate::error::Error;
-use rynas_auth::ipc::LOCAL_ADDR_HEADER;
+use rynas_auth::ipc::{HOST_HEADER, LOCAL_ADDR_HEADER};
 use rynas_auth::session::SessionData;
 
 /// Largest request body forwarded (guidelines M3).
@@ -229,6 +229,15 @@ pub fn routes() -> Router<AppState> {
         .route("/apps/installed/{stack}", get(forward))
         .route("/apps/installed/{stack}/update", get(forward).post(forward))
         .route("/apps/installed/{stack}/{action}", post(forward))
+        // web access (phase 2, W1): state and staging of the `web_access` key, the engine
+        // configuration an apply would load, anti-drift now, route diagnostics, and the
+        // timed confirmation of the interface's own route (with the Host and the local
+        // address: rynasd accepts it only through the proxy on a new name)
+        .route("/web-access", get(forward).put(forward))
+        .route("/web-access/plan", post(forward))
+        .route("/web-access/sync", post(forward))
+        .route("/web-access/confirm", post(forward_host))
+        .route("/web-access/routes/{id}/test", post(forward))
         // network (P4): with the local address of the session's connection
         .route("/network/interfaces", get(forward_net))
         .route("/network/interfaces/{name}", put(forward_net))
@@ -301,6 +310,23 @@ async fn forward_net(
     let extra = local
         .map(|Extension(LocalAddr(a))| vec![(LOCAL_ADDR_HEADER, a.to_string())])
         .unwrap_or_default();
+    forward_with(st, session, req, extra).await
+}
+
+/// The web access confirmation: the local address of the connection (rynas-web's loopback
+/// port when the request came through the proxy) and the `Host` the browser asked for.
+async fn forward_host(
+    State(st): State<AppState>,
+    Extension(CurrentSession(session)): Extension<CurrentSession>,
+    local: Option<Extension<LocalAddr>>,
+    req: Request,
+) -> Response {
+    let mut extra = local
+        .map(|Extension(LocalAddr(a))| vec![(LOCAL_ADDR_HEADER, a.to_string())])
+        .unwrap_or_default();
+    if let Some(h) = req.headers().get(header::HOST).and_then(|v| v.to_str().ok()) {
+        extra.push((HOST_HEADER, h.to_string()));
+    }
     forward_with(st, session, req, extra).await
 }
 

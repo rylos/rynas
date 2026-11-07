@@ -1,0 +1,35 @@
+{
+  "admin": {
+    "listen": "unix//run/rynas-caddy/admin.sock|0600",
+    "config": {"persist": false}
+  },
+  "storage": {"module": "file_system", "root": "/var/lib/rynas-caddy/data"},
+  "logging": {"logs": {"default": {"writer": {"output": "stderr"}, "encoder": {"format": "json"}}}},
+  "apps": {
+    "http": {
+      "http_port": 80,
+      "https_port": 443,
+      "grace_period": "10s",
+      "servers": {
+        "rynas_http": {
+          "listen": [":80"],
+          "automatic_https": {"disable": true},
+          "routes": [
+            {
+              "handle": [
+                {
+                  "handler": "static_response",
+                  "status_code": 307,
+                  "headers": {
+                    "Location": ["https://{http.request.host}:8443{http.request.uri}"],
+                    "Cache-Control": ["no-store"]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  }
+}
