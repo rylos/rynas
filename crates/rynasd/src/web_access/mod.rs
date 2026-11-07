@@ -636,13 +636,19 @@ impl WebAccessSvc {
         (self.facts)()
     }
 
-    /// Host ports with a listening TCP socket (`/proc/net/tcp{,6}` below the root):
-    /// services, and containers published through docker-proxy.
-    pub fn listening_ports(&self) -> BTreeSet<u16> {
-        let mut v = BTreeSet::new();
+    /// Host ports with a listening TCP socket or a bound UDP socket
+    /// (`/proc/net/{tcp,udp}{,6}` below the root): services, and containers published
+    /// through docker-proxy.
+    pub fn listening_ports(&self) -> model::BusyPorts {
+        let mut v = model::BusyPorts::default();
         for f in ["/proc/net/tcp", "/proc/net/tcp6"] {
             if let Ok(t) = std::fs::read_to_string(self.path(f)) {
-                v.extend(model::listening_tcp(&t));
+                v.tcp.extend(model::listening_tcp(&t));
+            }
+        }
+        for f in ["/proc/net/udp", "/proc/net/udp6"] {
+            if let Ok(t) = std::fs::read_to_string(self.path(f)) {
+                v.udp.extend(model::bound_udp(&t));
             }
         }
         v
@@ -2766,7 +2772,10 @@ impl Applier for WebAccessDomain {
         // own updates, a restore); a credential with neither takes the applied one
         let applied = self.svc.applied();
         domains::seal_credentials(&mut c, &[&applied], self.svc.sb())?;
-        let c = model::validate(c, &[self.svc.ui_port, self.svc.emergency_port])?;
+        let reserved = [self.svc.ui_port, self.svc.emergency_port];
+        let c = model::validate(c, &reserved)?;
+        // a custom upstream on one of the host's own names or addresses (not only loopback)
+        model::check_upstream_loop(&c, &reserved, Some(&self.svc.facts()))?;
         // extra ports another program listens on (the proxy's own ones excepted)
         let held: BTreeSet<u16> = if self.svc.installed() {
             model::extra_ports(&applied)

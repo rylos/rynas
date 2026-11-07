@@ -20,9 +20,9 @@ use rynas_api_types::{TASK_LOG_COMPLETE, TASK_LOG_NEXT_OFFSET, error_codes};
 
 use crate::app::AppState;
 use crate::auth::CurrentSession;
-use crate::conn::LocalAddr;
+use crate::conn::{Client, LocalAddr};
 use crate::error::Error;
-use rynas_auth::ipc::{HOST_HEADER, LOCAL_ADDR_HEADER};
+use rynas_auth::ipc::{CLIENT_ADDR_HEADER, HOST_HEADER, LOCAL_ADDR_HEADER};
 use rynas_auth::session::SessionData;
 
 /// Largest request body forwarded (guidelines M3).
@@ -254,13 +254,13 @@ pub fn routes() -> Router<AppState> {
         // Tailscale (remote access): status, install/uninstall, login/logout, options with
         // their timed confirmation; with the local address of the connection (rynasd tells
         // whether the session itself comes over the tailnet)
-        .route("/tailscale", get(forward_net))
-        .route("/tailscale/install", post(forward_net))
-        .route("/tailscale/uninstall", post(forward_net))
-        .route("/tailscale/login", post(forward_net))
-        .route("/tailscale/logout", post(forward_net))
-        .route("/tailscale/options", put(forward_net))
-        .route("/tailscale/options/confirm", post(forward_net))
+        .route("/tailscale", get(forward_client))
+        .route("/tailscale/install", post(forward_client))
+        .route("/tailscale/uninstall", post(forward_client))
+        .route("/tailscale/login", post(forward_client))
+        .route("/tailscale/logout", post(forward_client))
+        .route("/tailscale/options", put(forward_client))
+        .route("/tailscale/options/confirm", post(forward_client))
         // network (P4): with the local address of the session's connection
         .route("/network/interfaces", get(forward_net))
         .route("/network/interfaces/{name}", put(forward_net))
@@ -338,6 +338,25 @@ async fn forward_net(
     let extra = local
         .map(|Extension(LocalAddr(a))| vec![(LOCAL_ADDR_HEADER, a.to_string())])
         .unwrap_or_default();
+    forward_with(st, session, req, extra).await
+}
+
+/// The Tailscale endpoints: the local address of the connection and the client's address
+/// (behind rynas-caddy the local address is loopback, the client the forwarded one), so
+/// rynasd knows whether the session came over the tailnet.
+async fn forward_client(
+    State(st): State<AppState>,
+    Extension(CurrentSession(session)): Extension<CurrentSession>,
+    local: Option<Extension<LocalAddr>>,
+    client: Option<Extension<Client>>,
+    req: Request,
+) -> Response {
+    let mut extra = local
+        .map(|Extension(LocalAddr(a))| vec![(LOCAL_ADDR_HEADER, a.to_string())])
+        .unwrap_or_default();
+    if let Some(Extension(c)) = client {
+        extra.push((CLIENT_ADDR_HEADER, c.ip.to_string()));
+    }
     forward_with(st, session, req, extra).await
 }
 

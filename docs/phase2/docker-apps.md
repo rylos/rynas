@@ -1654,17 +1654,24 @@ W1/W2 golden renders are unchanged.
   - two enabled routes with `names.nas` on one port need different prefixes (no prefix counts
     as `/`) (`routes[i].prefix`); own names never clash (labels are unique);
   - `custom` upstream host: an IPv4/IPv6 address (not unspecified, multicast or broadcast) or
-    a host name of DNS labels, lowercased (`routes[i].upstream.host`); a loopback upstream on
-    one of the proxy's own ports would loop (`routes[i].upstream.port`); `app`/`stack` routes
-    stay loopback-only;
+    a host name of DNS labels, lowercased (`routes[i].upstream.host`). An upstream on this NAS
+    may not use one of the proxy's own ports (main and extra; the requests would loop) or
+    rynas-web's (`reserved`: plain and emergency port) (`routes[i].upstream.port`). "This NAS"
+    covers loopback (all of `127.0.0.0/8`, so Debian's `127.0.1.1`; `::1`; v4-mapped), the
+    unspecified address, `localhost`, `localhost.localdomain` and `*.localhost`. The store
+    check also counts the host's own names (`nas`, `nas.local`, the full host name) and the
+    addresses of its LAN interfaces. `app`/`stack` routes stay loopback-only;
   - `prefix`: `custom` routes only, a path without `..`, `*`, `?`, `#`, `%`, braces; the
     final `/` is dropped, `/` alone means none (`routes[i].prefix`);
   - `skip_verify` is dropped for `http` and loopback upstreams (nothing to skip);
-  - **busy ports** (at validation, on the running system): an extra port with a listening TCP
-    socket in `/proc/net/tcp{,6}` that the proxy does not hold already (the applied key's
-    extra ports, when rynas-caddy is installed) is refused (`routes[i].ports`). That covers
-    other services, containers published through docker-proxy, and rynas-web's ports. The
-    apps' port check (§5.3 "Proxy ports") counts the extra ports as taken (TCP, and UDP with
+  - **busy ports** (at validation, on the running system): an extra port is refused
+    (`routes[i].ports`) when it has a listening TCP socket in `/proc/net/tcp{,6}` or, with
+    HTTP/3 on, a bound UDP socket in `/proc/net/udp{,6}`, and the proxy does not hold it
+    already (the applied key's extra ports, when rynas-caddy is installed). That covers other
+    services, containers published through docker-proxy, and rynas-web's ports. Only sockets
+    are seen: with Docker's `userland-proxy=false` a published port may be only an iptables/nft
+    DNAT rule with no socket, and then it passes the check.
+    The apps' port check (§5.3 "Proxy ports") counts the extra ports as taken (TCP, and UDP with
     HTTP/3).
 - **Route checks** gain `port_listening` (one per extra port, TCP to `127.0.0.1:<port>`, after
   `https_listening`, which is `skipped` for a route only on extra ports); `route_loaded` looks

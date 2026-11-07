@@ -53,18 +53,22 @@ The goal: from the web interface an administrator installs Tailscale, logs the N
 **Reads.** `GET /localapi/v0/status` and `/prefs` over the socket: one HTTP/1.0 request per connection with a 3 s timeout, cached for 2 s with a single-flight lock (S8). Installed means `/usr/bin/tailscale` exists below the configuration root. A missing package gets an install block when the system has no Debian/Ubuntu codename.
 
 **Writes.** Every change is a task `tailscale.*` with its log and an audit line, through the CLI (its flags are the stable interface):
-- **install**: `ca-certificates curl` → the key downloaded to a staging file → fingerprint check (refused on mismatch, never reaches the keyring) → deb822 `/etc/apt/sources.list.d/tailscale.sources` with the official keyring path (a hand-written source naming the same `Signed-By` does not conflict) → `apt-get update` → `apt-get install tailscale` → `systemctl enable --now tailscaled`.
+- **install**: `ca-certificates curl` → the key downloaded to `<state>/tailscale/archive-keyring.gpg.new` → key check → placed as the keyring with `install -D -m 0644` in a transient unit → deb822 `/etc/apt/sources.list.d/tailscale.sources` with the official keyring path (a hand-written source naming the same `Signed-By` does not conflict) → `apt-get update` → `apt-get install tailscale` → `systemctl enable --now tailscaled`.
   - apt runs in a transient unit outside rynasd's sandbox, like the Docker install, and a cancelled step stops its unit.
+  - rynasd.service has `ProtectSystem=yes`, so `/usr` is read-only inside rynasd. The keyring path is under `/usr/share/keyrings`, so it is placed (and removed at uninstall) by `install`/`rm` in a transient unit, never written by rynasd. rynasd writes only `/etc` files itself (the source, the sysctl file) and refuses a path under `/usr` or `/efi`. A unit test ties this list to the unit file.
+  - Key check: every OpenPGP packet of the download is read. The file must hold exactly one public key (tag 6), first, with fingerprint `2596A99E…7F5868`, plus only signatures, user IDs, subkeys and user attributes (tags 2, 13, 14, 17). A second key or any other packet is refused, because apt trusts every key of a `Signed-By` keyring. A refused file is deleted and never reaches the keyring.
+  - The temporary file of a write in a `.d` folder is staged in its parent (`/etc/apt/.tailscale.sources.rynas-new`), so apt never sees it in `sources.list.d`.
   - A retry keeps a key that checks out.
 - **login**: `tailscale up --reset --timeout=600s` with every option rynas edits spelled out. That keeps the current options, or the server defaults for a node that never logged in. The login server is the request's, else the current non-default one (Headscale). `tailscale login` is not used because it creates a new profile every time.
   - Interactive: the page reads the status every 5 s while the task runs and shows `AuthURL` as a link and a QR code. The CLI prints the same address into the task log.
-  - Auth key: written to `<state>/tailscale/authkey` (0600, `create_new`), passed as `--auth-key=file:`, removed after. Never on a command line, in a log, in the status or in the audit line.
+  - Auth key: written to `<state>/tailscale/authkey` (0600, `create_new`), passed as `--auth-key=file:`, removed after. Never on a command line, in a log, in the status or in the audit line. A file left by a stop during a login is deleted when rynasd starts.
 - **options**: `tailscale set --accept-routes --accept-dns --advertise-exit-node --advertise-routes --ssh`.
-  - Subnets are validated: CIDR, host bits clear, not the default route, not the tailnet, at most 16.
+  - Subnets are validated: CIDR, host bits clear, not the default route, at most 16. A subnet may not overlap the tailnet ranges (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`; so `100.0.0.0/8` is refused too) or link-local (`169.254.0.0/16`, `fe80::/10`).
+  - The current options are read from tailscaled first. If they cannot be read, the change is refused (503) and nothing changes, because a revert would otherwise restore defaults.
   - The forwarding sysctl `/etc/sysctl.d/60-rynas-tailscale.conf` is written and loaded while a subnet router or exit node is offered. It is removed otherwise, and the running value stays until a reboot because Docker needs forwarding too.
   - On systemd-networkd (D-NET) IPv6 forwarding does not stop router advertisements, since networkd handles them in user space.
 - **logout**: `tailscale logout`.
-- **uninstall**: `systemctl disable --now tailscaled` → `apt-get remove tailscale` → removal of the source, keyring and sysctl file. With "forget this device": logout first, `apt-get purge`, and `/var/lib/tailscale` deleted. Without it the identity stays, and a new install comes back as the same device.
+- **uninstall**: `systemctl disable --now tailscaled` → `apt-get remove tailscale` → `rm -f` of the keyring in a transient unit → removal of the source and the sysctl file. With "forget this device": logout first, `apt-get purge`, and `/var/lib/tailscale` deleted. Without it the identity stays, and a new install comes back as the same device.
 
 **Defaults of a server.**
 - Accept routes **off**, the TrueNAS case above.
@@ -73,10 +77,13 @@ The goal: from the web interface an administrator installs Tailscale, logs the N
 - Exit node and subnet routes off, each with its "approve in the admin console" note. The routes still waiting for approval are listed: advertised but not in `AllowedIPs`/`PrimaryRoutes`.
 
 **Never cut the session silently.**
-- `via_tailscale`: rynas-web forwards the connection's local address (`x-rynas-local-addr`, as for network changes), and rynasd flags it when it is a tailnet address. The page also flags it when the browser uses a `*.ts.net` name or one of the NAS's Tailscale addresses.
+- `via_tailscale`: rynas-web forwards the connection's local address (`x-rynas-local-addr`, as for network changes) and the client's address (`x-rynas-client-addr`). The client address is the TCP peer, or behind rynas-caddy the address from `X-Forwarded-For`, which rynas-web trusts only from a loopback peer. rynasd flags the session when either one is a tailnet address (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`). The page also flags it when the browser uses a `*.ts.net` name or one of the NAS's Tailscale addresses.
 - Logout, uninstall and every option change ask first. When the page is open over the tailnet, the dialog says plainly that the session may end and names the other ways in (LAN, emergency port).
 - Uninstall needs the typed word `tailscale`.
-- An option change is a **timed trial**. After the task, rynasd waits 90 s for `POST /tailscale/options/confirm`, then puts the previous options (and forwarding) back in a `tailscale.revert` task. The page confirms as soon as it reaches rynas after the task; that request is the proof the session survived. If the change hid the LAN or the tailnet path, nothing confirms and the old options return. A pending confirmation shows a banner with "Keep the new options".
+- An option change is a **timed trial**. Right after `tailscale set` (before the forwarding file), rynasd waits 90 s for `POST /tailscale/options/confirm`, then puts the previous options (and forwarding) back in a `tailscale.revert` task.
+  - While a confirmation is pending, options, login and logout answer 409 `conflict`. The options restored are always the ones from before the first change. Uninstall is still allowed and drops the pending change.
+  - A revert that finds another Tailscale task running waits for it and retries every 0.5 s; it is never dropped. A confirmation that arrives before the revert starts keeps the change.
+  - The pending change (`{previous, deadline_ms}`) is kept in `<state>/tailscale/confirm.json`. After a rynasd restart, the window carries on, or the revert runs at once if the deadline has passed. The page confirms as soon as it reaches rynas after the task; that request is the proof the session survived. If the change hid the LAN or the tailnet path, nothing confirms and the old options return. A pending confirmation shows a banner with "Keep the new options".
 
 **Web access.**
 - The `lan_vpn` level already adds `100.64.0.0/10` and `fd7a:115c:a1e0::/48` while `tailscale0` exists, and host facts include that flag, so the proxy configuration is re-applied when Tailscale comes up or goes away (`web_access::model`).
@@ -106,12 +113,11 @@ Every route needs an administrator, reads included (tailnet names and addresses)
 | POST | `/api/v1/tailscale/options/confirm` | — → 204; 409 `nothing_pending` |
 | POST | `/api/v1/tailscale/uninstall` | `TailscaleUninstall {purge_state}` → 202 (`tailscale.uninstall`) |
 
-Without Tailscale, the actions other than install answer 409 `tailscale_not_installed`. Login and options answer 503 `backend_unavailable` while tailscaled is down, and 409 `busy` while another Tailscale task runs. rynasd's `--tailscale-socket` defaults to `/run/tailscale/tailscaled.sock`. Under `--dry-system` only a socket given explicitly is read (the test double `tools/ui-audit/faketailscale.py`), and changes are only logged.
+Without Tailscale, the actions other than install answer 409 `tailscale_not_installed`. Login and options answer 503 `backend_unavailable` while tailscaled is down, 409 `busy` while another Tailscale task runs, and (with logout) 409 `conflict` while an option change waits for its confirmation. rynasd's `--tailscale-socket` defaults to `/run/tailscale/tailscaled.sock`. Under `--dry-system` only a socket given explicitly is read (the test double `tools/ui-audit/faketailscale.py`), and changes are only logged.
 
 ## 4. Open points
 
 - The key fingerprint should be checked against an official Tailscale publication once one exists (#13284).
-- `via_tailscale` sees the connection's local address. A session that comes over the tailnet *through the proxy* (rynas-caddy → loopback) is flagged only by the browser's host name; rynas-web could pass the proxy's client address too.
 - The UDP GRO tweak for a subnet router or exit node (persisted through a networkd hook) is not built.
 - No firewall profile yet: the nftables plugin (D-NET phase 2) should drop 100.64.0.0/10 on interfaces other than `tailscale0`.
 - Headscale works through the coordination server field; it is not tested against a real server.

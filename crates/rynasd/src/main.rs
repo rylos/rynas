@@ -990,14 +990,17 @@ fn main() -> std::io::Result<()> {
                 (None, true) => None,
                 (None, false) => Some(PathBuf::from(rynas_tailscale::SOCKET)),
             };
-            state.tailscale = Some(rynasd::tailscale::TailscaleSvc::new(
+            let ts = rynasd::tailscale::TailscaleSvc::new(
                 ops.clone(),
                 config_root(&args),
                 args.dry_system,
                 socket,
                 args.state_dir.join("tailscale"),
                 PathBuf::from("/"),
-            ));
+            );
+            // an option change left waiting by the previous rynasd: its window goes on
+            ts.resume_pending();
+            state.tailscale = Some(ts);
         }
         // HTTPS certificate of the web interface: made on the first start, re-issued when the
         // host name or an address changes, published for rynas-web (wave W0)
