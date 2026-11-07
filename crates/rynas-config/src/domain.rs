@@ -6,6 +6,7 @@
 //! of a system it never managed (import).
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use rynas_api_types::{HostnameConfig, StateDrift};
 use rynas_tasks::Cmd;
@@ -22,9 +23,36 @@ pub struct ApplyCtx<'a> {
     pub templates: &'a minijinja::Environment<'static>,
     /// Progress lines for the task log (a no-op outside an apply).
     pub log: &'a dyn Fn(&str),
+    /// Real paths (below the root) of the files this apply (or rollback) replaced or removed.
+    pub(crate) replaced: Mutex<Vec<PathBuf>>,
+    /// Units restarted through [`ApplyCtx::restart_unit`] during this apply (or rollback).
+    pub(crate) restarted: Mutex<Vec<String>>,
 }
 
 impl ApplyCtx<'_> {
+    /// Whether this apply replaced or removed the system file `abs` (its content changed):
+    /// a domain restarts its service only then. A rollback counts the files it put back.
+    pub fn replaced(&self, abs: &Path) -> bool {
+        let real = self.path(abs);
+        self.replaced.lock().unwrap().contains(&real)
+    }
+
+    /// `systemctl restart <unit>`, remembered for the rest of this apply
+    /// ([`ApplyCtx::restarted`]).
+    pub fn restart_unit(&self, unit: &str) -> Result<(), String> {
+        self.system.restart_unit(unit)?;
+        self.restarted.lock().unwrap().push(unit.to_string());
+        Ok(())
+    }
+
+    /// Whether an earlier domain of this apply restarted `unit` ([`ApplyCtx::restart_unit`]):
+    /// all files are in place before the first domain reloads, so a later domain whose own
+    /// files the restart already read need not restart it again (e.g. `ups.device` and
+    /// `ups.netserver` applied together restart upsd once).
+    pub fn restarted(&self, unit: &str) -> bool {
+        self.restarted.lock().unwrap().iter().any(|u| u == unit)
+    }
+
     /// Renders a registered template (see [`Applier::templates`]).
     pub fn render(&self, template: &str, ctx: &Value) -> Result<String, String> {
         self.templates
@@ -115,6 +143,20 @@ pub trait Applier: Send + Sync {
 
     /// Files for `value`.
     fn render(&self, value: &Value, ctx: &ApplyCtx) -> Result<Vec<ManagedFile>, String>;
+
+    /// Files a removed key leaves behind (the key staged as `None`, e.g. by restoring a
+    /// revision from before the key existed); `old` is the value being removed. Default:
+    /// none, the files stay as they are and are no longer managed. A domain whose files
+    /// would keep a service open or changed (a listening port, a firewall hole) returns what
+    /// its "off" value renders, or [`FileKind::Absent`] files. Written like the files of a
+    /// value (candidates, backup, rollback) but not tracked by the drift check.
+    fn render_removed(
+        &self,
+        _old: Option<&Value>,
+        _ctx: &ApplyCtx,
+    ) -> Result<Vec<ManagedFile>, String> {
+        Ok(Vec::new())
+    }
 
     /// Checks the rendered files before they replace the current ones (e.g. `testparm -s`).
     fn check_files(&self, _files: &[Candidate], _ctx: &ApplyCtx) -> Result<(), String> {

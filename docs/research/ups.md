@@ -215,16 +215,30 @@ Picked:
   `LISTEN 0.0.0.0 3493` + `LISTEN :: 3493` (localhost included); chosen addresses come after
   `127.0.0.1` and `::1`, so the first, fatal one always binds and an address that went away
   (DHCP) only logs. Loopback, any and link-local addresses are refused (the NAS's addresses
-  are offered from `ip -j addr`). The admin's own `LISTEN` lines would clash and are dropped
-  while the server is on (the plan lists them; the apply keeps a backup); when off, the block
-  holds only a comment and upsd keeps the admin's setting.
+  are offered from `ip -j addr`; a `PUT` refuses one the NAS does not have, unless it is
+  already saved, and IPv4-mapped `::ffff:` forms). The admin's own `LISTEN` lines would clash:
+  while the server is on they are set aside as `# saved: LISTEN …` comments inside the block
+  (the plan lists them as removed); turning the server off, or removing the key, writes an
+  "off" block that puts them back as lines upsd reads (they stay in the block, so the next
+  "on" sets them aside again). Off and never on, the block only holds a comment.
+  Chosen addresses may not exist yet at boot, and upsd binds each `LISTEN` once at start:
+  with chosen addresses the drop-in adds `Wants=`/`After=network-online.target` to
+  `nut-server.service` (Debian's unit only waits for `network.target`).
 - **Allowed hosts**: NUT has no ACL any more, so rynas uses what every systemd Debian has: a
   drop-in `/etc/systemd/system/nut-server.service.d/rynas-netserver.conf` with
   `IPAddressDeny=any`, `IPAddressAllow=localhost` and the admin's hosts/subnets; packets from
   other sources never reach upsd. Honest limits (said in the UI and here): it filters the
   whole upsd service only; without eBPF cgroups (old kernels, some containers) systemd
-  ignores it, and a firewall (nftables/ufw of the admin, or the router) is then the way; it is
-  not a firewall and rynas does not grow one. Alternatives considered: `LISTEN` on one
+  ignores it with only a log line, and a firewall (nftables/ufw of the admin, or the router)
+  is then the way; it is not a firewall and rynas does not grow one. To see whether it works,
+  the drop-in also sets `IPAccounting=yes`: `systemctl show -p IPIngressPackets` gives a
+  count when the eBPF programs are attached and `[not set]` (or `UINT64_MAX`) when not; the
+  state reports `filter_active` and the problem `filter_inactive`, and an apply logs a
+  warning. The filter sees source addresses: `localhost` covers clients on the NAS that
+  connect to `127.0.0.1`/`::1`, but one that connects from another address of the NAS (a
+  Docker container on a bridge comes from `172.17.0.0/16` or its network's subnet) is
+  filtered like any host, so its subnet goes in the list (allowing the NAS's own LAN
+  addresses would not help: the container's source is the bridge address). Alternatives considered: `LISTEN` on one
   address (done, but it limits interfaces, not peers); tcp-wrappers (not built in Debian, and
   dropped by most distributions); an nftables table of rynas (out of scope, and would fight an
   admin's firewall). Empty list: any host that reaches the port, with a warning on the card.
@@ -237,22 +251,40 @@ Picked:
   or a user of the admin's own sections; the local primary user of `ups.device` is untouched.
 - **Passwords**: generated (32 letters and digits) or chosen (12–64 of
   `[A-Za-z0-9._~@%+=:,-]`, one word everywhere). Write-only in the API, sealed at once with
-  rynasd's age key (the notification engine's `<state>/notify/secret.key`, carried only by a
-  passphrase-protected export), so `config.db`, revisions and answers never hold them; the
+  rynasd's age key (the notification engine's `<state>/notify/secret.key`, folder 0700,
+  carried only by a passphrase-protected export), so `config.db` and the revisions hold only
+  the sealed envelopes (ciphertext; `/api/v1/config/revisions` shows them as such) and the
+  UPS answers leave even those out; the
   `PUT` answer returns the passwords of that request **once**, the UI shows them with a copy
   button right after the apply. Later only a new password can be made. A restore without the
-  key fails the apply with "generate a new one".
+  key fails the apply with "generate a new one"; so does an opened password that could not
+  go between the double quotes of `upsd.users` (a quote, backslash or line break from an
+  older or tampered envelope), checked again before every write.
 - **One file, several owners**: `upsd.users` also has the blocks of `ups.device` and of the
   battery test user, and the configuration engine keeps one owner per file, so the accounts
-  block is written by the domain's reconcile step (atomic, mode and owner kept, written back
-  on rollback), like the battery test user. `upsd.conf` and the drop-in are ordinary managed
-  files (drift detection, backup).
-- **Apply**: files, `systemctl daemon-reload`, then `systemctl restart nut-server` when it
-  runs (`LISTEN` needs a restart; the NAS's upsmon reconnects by itself). `nut.conf`'s `MODE`
-  stays with `ups.device` (`standalone`, or an admin's `netserver` kept): both modes run upsd,
-  and what other machines reach is decided by `LISTEN` alone (Debian's README names `MODE`
-  for its init scripts; writing it from two keys would give `nut.conf` two owners). To check
-  on the next real install: whether a unit gates on `MODE=netserver`.
+  block is written by the domain's reconcile step (atomic, owner kept, mode capped at 0640,
+  written back on rollback), like the battery test user; the battery test writes its block
+  under the configuration's apply lock (`Config::exclusive`), so the two read-modify-writes
+  never interleave. The drift report compares the block with the applied accounts (state
+  drift of `ups.netserver`; "overwrite" writes it again). `upsd.conf` and the drop-in are
+  ordinary managed files (drift detection, backup); a rollback puts every file back with its
+  mode **and owner** (root:nut, so upsd can still read them).
+- **Removing the key** (restoring a revision from before the server existed stages it as
+  removed): the engine's `render_removed` hook writes the "off" files (no rynas `LISTEN`, the
+  admin's back, no drop-in) and the reconcile removes the accounts; without it the server
+  would stay open with files nobody manages any more.
+- **Apply**: files; `systemctl daemon-reload` when the drop-in changed; `systemctl restart
+  nut-server` when it runs and `upsd.conf` or the drop-in changed (`LISTEN` needs a restart;
+  the NAS's upsmon reconnects by itself), only `systemctl reload` when only the accounts
+  changed. Applied together with `ups.device` (which restarts upsd after every file is in
+  place), upsd restarts once, unless the drop-in changed (it needs the daemon-reload first).
+  Health check: upsd answers on its first `LISTEN` address (`127.0.0.1:3493` in both
+  layouts) within 3 s, else the apply rolls back. `nut.conf`'s `MODE` stays with
+  `ups.device` (`standalone`, or an admin's `netserver` kept): checked on Debian trixie
+  (nut 2.8.1), `MODE=standalone` with these `LISTEN` lines serves the network exactly like
+  `netserver` (the units start upsd in both modes and nothing gates on the value; Debian's
+  README names `MODE` for its init scripts), so rynas keeps `MODE` as it is and `nut.conf`
+  keeps one owner.
 - **Connection details** (card and the dialog after a password): host (the LAN address of
   the default route), port 3493, user, UPS name (the wizard's, else the first `ups.conf`
   section) for Home Assistant (Settings › Devices and services › Network UPS Tools), and
@@ -261,8 +293,9 @@ Picked:
 - **A module's UPS layer** owns `/etc/nut`: the card says the server cannot be set up there
   (`UpsNetBlock::Module`); the layer would need its own hook (no core change for one platform).
 - **API**: `GET/PUT /api/v1/ups/netserver` (`UpsNetServerState` with the NAS's addresses
-  and subnets, `UpsNetServerSaved`), `POST /api/v1/ups/plan/netserver` (`UpsSetupPlan`,
-  passwords masked).
+  and subnets, `filter_active`, `problems` = `server_inactive` / `filter_inactive`;
+  `UpsNetServerSaved`), `POST /api/v1/ups/plan/netserver` (`UpsSetupPlan`, passwords
+  masked).
 
 Not done, documented:
 - **TLS**: Debian's build has SSL (`--with-ssl --with-nss`), but upsmon clients must be set

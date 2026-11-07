@@ -324,6 +324,7 @@ fn open_config(
     domains.push(Arc::new(rynasd::ups_netserver::NetServerDomain {
         layer: ups_layer,
         secret_dir: args.state_dir.join("notify"),
+        probe: (!args.dry_system).then(rynasd::ups_netserver::tcp_probe),
     }));
     let (removable_domain, removable_settings) = rynasd::removable::RemovableDomain::new();
     let removable_tx = removable_domain.tx.clone();

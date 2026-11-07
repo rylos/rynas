@@ -701,7 +701,8 @@ fn run_nut_command(line: &str, ctx: &ApplyCtx) -> Result<(), String> {
     let w: Vec<&str> = line.split_whitespace().collect();
     match w.as_slice() {
         ["systemctl", "enable", "--now", unit] => ctx.system.set_unit_enabled(unit, true),
-        ["systemctl", "restart", unit] => ctx.system.restart_unit(unit),
+        // remembered: ups.netserver of the same apply need not restart upsd again
+        ["systemctl", "restart", unit] => ctx.restart_unit(unit),
         ["systemctl", "reset-failed", unit] => {
             // not loaded or not failed: nothing to clear
             if let Err(e) = ctx.system.run(

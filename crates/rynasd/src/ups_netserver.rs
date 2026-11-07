@@ -4,26 +4,36 @@
 //! its low battery. Design and sources: `docs/research/ups.md` ("Network UPS server").
 //!
 //! - **Files** (plain NUT, rynas blocks only): `LISTEN` lines in `/etc/nut/upsd.conf` (the
-//!   admin's own `LISTEN` lines are dropped while the server is on), the client accounts in
-//!   `upsd.users` (block `ups-netserver`), and, with allowed hosts, a drop-in of
-//!   `nut-server.service` with systemd's per-service IP filter. `upsd.users` already carries
-//!   blocks of `ups.device` and of the battery tests and the engine keeps one owner per file,
-//!   so the accounts block is written by [`NetServerDomain::reconcile`] (atomic, the file's
-//!   mode and owner kept, written back with the old value on rollback), like the battery
-//!   test user.
+//!   admin's own `LISTEN` lines are set aside in the block while the server is on and put
+//!   back when it is off or the key is removed, [`net::admin_listen`]), the client accounts
+//!   in `upsd.users` (block `ups-netserver`), and a drop-in of `nut-server.service`
+//!   (wait for the network with chosen addresses; systemd's per-service IP filter with
+//!   allowed hosts). `upsd.users` already carries blocks of `ups.device` and of the battery
+//!   tests and the engine keeps one owner per file, so the accounts block is written by
+//!   [`NetServerDomain::reconcile`] (atomic, the file's owner kept and its mode capped at
+//!   0640, written back with the old value on rollback, under the apply lock that the
+//!   battery tests also take), like the battery test user. The drift report compares the
+//!   block with the applied accounts ([`Applier::state_drift`]).
+//! - **Removing the key** (restoring a revision from before it existed) writes the "off"
+//!   files ([`Applier::render_removed`]): no `LISTEN` of rynas, no drop-in, no accounts.
 //! - **Passwords** arrive write-only (`password`, or `generate`; a new account without
 //!   either gets a generated one) and are sealed at once with rynasd's age key (the
 //!   notification engine's `<state>/notify/secret.key`, which a passphrase-protected export
 //!   carries): the configuration key, its revisions and answers never hold them in clear.
 //!   The `PUT` answer returns the passwords of that request once.
 //! - **Restart**: upsd reads `LISTEN` only at start, so an apply restarts
-//!   `nut-server.service` when it runs (upsmon on the NAS reconnects by itself).
+//!   `nut-server.service` when it runs and `upsd.conf` or the drop-in changed (upsmon on the
+//!   NAS reconnects by itself), and only reloads it when only the accounts changed. Applied
+//!   with `ups.device`, whose restart already read the new `upsd.conf`, upsd restarts once
+//!   (again only for a changed drop-in, which needs a daemon-reload first). The health check
+//!   wants upsd answering on the first `LISTEN` address (always on `127.0.0.1`).
 //! - **A module's UPS layer** owns `/etc/nut`: the server is not offered there
 //!   ([`UpsNetBlock::Module`]).
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::State;
 use axum::extract::rejection::JsonRejection;
@@ -31,13 +41,14 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine as _;
-use rynas_api_types::error_codes;
 use rynas_api_types::ups::*;
+use rynas_api_types::{StateDrift, StateDriftKind, error_codes};
 use rynas_config::files::{self, FileKind};
 use rynas_config::{Applier, ApplyCtx, Invalid, ManagedFile};
 use rynas_module::UpsLayer;
 use rynas_notify::engine::secrets::SecretBox;
 use rynas_nut::netserver as net;
+use rynas_tasks::Cmd;
 use serde_json::Value;
 
 use crate::ops::{Error, Res, user};
@@ -48,7 +59,7 @@ pub const NETSERVER_KEY: &str = "ups.netserver";
 pub const UPSD_CONF: &str = "/etc/nut/upsd.conf";
 pub const DROPIN: &str = "/etc/systemd/system/nut-server.service.d/rynas-netserver.conf";
 pub const SERVER_UNIT: &str = "nut-server.service";
-const BLOCK: &str = "ups-netserver";
+const BLOCK: &str = net::BLOCK_ID;
 const MASK: &str = "********";
 
 fn b64() -> base64::engine::GeneralPurpose {
@@ -57,13 +68,30 @@ fn b64() -> base64::engine::GeneralPurpose {
 
 /// rynasd's secret key (created on first use, folder 0700).
 pub fn secret_box(dir: &Path) -> Result<SecretBox, String> {
-    std::fs::create_dir_all(dir).map_err(|e| format!("secret store: {e}"))?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(dir)
+        .and_then(|_| std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)))
+        .map_err(|e| format!("secret store: {e}"))?;
     SecretBox::open(dir).map_err(|e| format!("secret store: {e}"))
 }
 
 fn seal(sb: &SecretBox, pw: &str) -> Result<String, String> {
     let m = [("password".to_string(), pw.to_string())].into();
     sb.seal(&m).map(|s| b64().encode(s))
+}
+
+/// A client's password for `upsd.users`: opened, and checked again (it goes between double
+/// quotes; [`net::safe_in_users`]).
+fn open_password(sb: &SecretBox, c: &UpsNetClient) -> Result<String, String> {
+    let pw = unseal(sb, c)?;
+    if !net::safe_in_users(&pw) {
+        return Err(format!(
+            "the stored password of the account {} cannot go into {NUT_USERS} (a quote, \
+             backslash or line break): generate a new one",
+            c.name
+        ));
+    }
+    Ok(pw)
 }
 
 fn unseal(sb: &SecretBox, c: &UpsNetClient) -> Result<String, String> {
@@ -147,9 +175,11 @@ pub fn foreign_users(root: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The files the engine writes for `c` (plain NUT).
-pub fn nut_files(c: &UpsNetServerConfig) -> Vec<ManagedFile> {
-    let mut upsd = ManagedFile::block(UPSD_CONF, BLOCK, net::render_upsd_conf(c))
+/// The files the engine writes for `c` (plain NUT); `upsd_conf` is the current file (the
+/// admin's own `LISTEN` lines in it are kept, [`net::admin_listen`]).
+pub fn nut_files(c: &UpsNetServerConfig, upsd_conf: Option<&str>) -> Vec<ManagedFile> {
+    let saved = upsd_conf.map(net::admin_listen).unwrap_or_default();
+    let mut upsd = ManagedFile::block(UPSD_CONF, BLOCK, net::render_upsd_conf(c, &saved))
         .mode(0o640)
         .group("nut");
     if let FileKind::Block { drop_outside, .. } = &mut upsd.kind {
@@ -207,7 +237,8 @@ pub fn write_users(root: &Path, block: Option<&str>) -> Result<bool, String> {
     use std::os::unix::fs::MetadataExt;
     let meta = std::fs::metadata(&path).map_err(|e| format!("{NUT_USERS}: {e}"))?;
     let cand = files::candidate_path(&path);
-    files::write_synced(&cand, new.as_bytes(), meta.mode() & 0o7777)
+    // passwords: never readable by others, whatever the file had
+    files::write_synced(&cand, new.as_bytes(), meta.mode() & 0o640)
         .and_then(|_| std::os::unix::fs::chown(&cand, Some(meta.uid()), Some(meta.gid())))
         .and_then(|_| files::rename_synced(&cand, &path))
         .map_err(|e| {
@@ -220,9 +251,53 @@ pub fn write_users(root: &Path, block: Option<&str>) -> Result<bool, String> {
 /// Commands an apply runs after the files (also shown in the plan).
 pub fn commands() -> Vec<String> {
     vec![
-        "systemctl daemon-reload".into(),
-        format!("systemctl restart {SERVER_UNIT} (when it runs)"),
+        "systemctl daemon-reload (when the drop-in changes)".into(),
+        format!(
+            "systemctl restart {SERVER_UNIT} (when it runs and upsd.conf or the drop-in \
+             changes; only a reload when only the accounts change)"
+        ),
     ]
+}
+
+/// Tells whether something accepts TCP connections on an address (upsd, after an apply).
+pub type Probe = Arc<dyn Fn(SocketAddr) -> bool + Send + Sync>;
+
+/// The real [`Probe`]: a TCP connect with a 2 s timeout.
+pub fn tcp_probe() -> Probe {
+    Arc::new(|a| std::net::TcpStream::connect_timeout(&a, Duration::from_secs(2)).is_ok())
+}
+
+/// Whether the kernel applies the IP filter of the running `nut-server.service`
+/// ([`net::filter_enforced`]; `None`: unknown).
+pub fn filter_state(sys: &dyn rynas_config::System) -> Option<bool> {
+    let cmd = Cmd::new("systemctl")
+        .args(["show", "--value", "-p", "IPIngressPackets", SERVER_UNIT])
+        .env_clear()
+        .timeout(Duration::from_secs(10));
+    sys.run(&cmd).ok().and_then(|o| net::filter_enforced(&o.stdout))
+}
+
+/// Refuses chosen listen addresses this NAS does not have (`addrs`, empty: unknown, no
+/// check); one already in `kept` (the saved value) stays allowed, so a form can still be
+/// saved while an interface is down.
+pub fn check_listen_owned(
+    listen: &[String],
+    addrs: &[IpAddr],
+    kept: &[String],
+) -> Result<(), (String, String)> {
+    if addrs.is_empty() {
+        return Ok(());
+    }
+    for (i, a) in listen.iter().enumerate() {
+        let ours = a.parse::<IpAddr>().is_ok_and(|ip| addrs.contains(&ip));
+        if !ours && !kept.contains(a) {
+            return Err((
+                format!("listen.{i}"),
+                "not an address of this NAS (see the list of its addresses)".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -234,6 +309,24 @@ pub struct NetServerDomain {
     pub layer: Option<Arc<dyn UpsLayer>>,
     /// Folder of rynasd's secret key (`<state>/notify`).
     pub secret_dir: PathBuf,
+    /// Checks that upsd answers after an apply ([`tcp_probe`]; `None` under `--dry-system`:
+    /// no check).
+    pub probe: Option<Probe>,
+}
+
+impl NetServerDomain {
+    /// The accounts block `c` puts in `upsd.users`, with the real passwords.
+    fn users_for(&self, c: &UpsNetServerConfig) -> Result<Option<String>, String> {
+        let sb = if c.enabled && !c.clients.is_empty() {
+            Some(secret_box(&self.secret_dir)?)
+        } else {
+            None
+        };
+        users_block(c, &|cl| match &sb {
+            Some(sb) => open_password(sb, cl),
+            None => Err("no secret store".into()),
+        })
+    }
 }
 
 fn config_of(v: &Value) -> Result<UpsNetServerConfig, Invalid> {
@@ -277,7 +370,23 @@ impl Applier for NetServerDomain {
                 cl.name
             ));
         }
-        Ok(nut_files(&c))
+        Ok(nut_files(&c, ctx.read(Path::new(UPSD_CONF)).as_deref()))
+    }
+
+    /// The "off" files: no `LISTEN` of rynas (the admin's own put back), no drop-in.
+    fn render_removed(
+        &self,
+        old: Option<&Value>,
+        ctx: &ApplyCtx,
+    ) -> Result<Vec<ManagedFile>, String> {
+        if self.layer.is_some() {
+            return Ok(Vec::new());
+        }
+        let mut off = old
+            .and_then(|v| config_of(v).ok())
+            .unwrap_or_default();
+        off.enabled = false;
+        Ok(nut_files(&off, ctx.read(Path::new(UPSD_CONF)).as_deref()))
     }
 
     fn reconcile(
@@ -289,35 +398,119 @@ impl Applier for NetServerDomain {
         if self.layer.is_some() {
             return Ok(());
         }
+        // a removed key leaves no accounts
         let block = match to {
-            Some(v) => {
-                let c = config_of(v).map_err(|e| e.message)?;
-                let sb = if c.enabled && !c.clients.is_empty() {
-                    Some(secret_box(&self.secret_dir)?)
-                } else {
-                    None
-                };
-                users_block(&c, &|cl| match &sb {
-                    Some(sb) => unseal(sb, cl),
-                    None => Err("no secret store".into()),
-                })?
-            }
+            Some(v) => self.users_for(&config_of(v).map_err(|e| e.message)?)?,
             None => None,
         };
-        if write_users(ctx.root, block.as_deref())? {
+        let users = write_users(ctx.root, block.as_deref())?;
+        if users {
             (ctx.log)(&format!("updated the network UPS server accounts in {NUT_USERS}"));
         }
-        (ctx.log)("$ systemctl daemon-reload");
-        ctx.system.daemon_reload()?;
-        if ctx.system.unit_active(SERVER_UNIT).unwrap_or(false) {
-            (ctx.log)(&format!("$ systemctl restart {SERVER_UNIT}"));
-            ctx.system.restart_unit(SERVER_UNIT)?;
-        } else {
+        let dropin = ctx.replaced(Path::new(DROPIN));
+        let conf = ctx.replaced(Path::new(UPSD_CONF));
+        if dropin {
+            (ctx.log)("$ systemctl daemon-reload");
+            ctx.system.daemon_reload()?;
+        }
+        if !(dropin || conf || users) {
+            return Ok(());
+        }
+        if !ctx.system.unit_active(SERVER_UNIT).unwrap_or(false) {
             (ctx.log)(&format!(
                 "{SERVER_UNIT} is not running: the settings take effect when it starts"
             ));
+            return Ok(());
         }
-        Ok(())
+        // ups.device of the same apply restarted upsd with every file in place, but before
+        // the daemon-reload of a new drop-in
+        if dropin || (conf && !ctx.restarted(SERVER_UNIT)) {
+            (ctx.log)(&format!("$ systemctl restart {SERVER_UNIT}"));
+            ctx.restart_unit(SERVER_UNIT)
+        } else if users {
+            (ctx.log)(&format!("$ systemctl reload {SERVER_UNIT}"));
+            ctx.system.reload_or_restart_unit(SERVER_UNIT)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// upsd answers on the first `LISTEN` address (`127.0.0.1` in both layouts) when it
+    /// runs; a filter the kernel does not apply is logged (the state reports it).
+    fn health(&self, value: Option<&Value>, ctx: &ApplyCtx) -> Result<(), String> {
+        if self.layer.is_some() {
+            return Ok(());
+        }
+        let Some(c) = value.map(config_of).transpose().map_err(|e| e.message)? else {
+            return Ok(());
+        };
+        if !c.enabled || !ctx.system.unit_active(SERVER_UNIT).unwrap_or(false) {
+            return Ok(());
+        }
+        if !c.allow.is_empty() && filter_state(ctx.system) == Some(false) {
+            (ctx.log)(
+                "warning: the kernel does not apply systemd's IP filter here (no eBPF cgroup \
+                 support): any host that reaches port 3493 can connect, limit it with a firewall",
+            );
+        }
+        let Some(probe) = &self.probe else {
+            return Ok(());
+        };
+        let addr = SocketAddr::from(([127, 0, 0, 1], NUT_PORT));
+        for i in 0..12 {
+            if probe(addr) {
+                return Ok(());
+            }
+            if i < 11 {
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        }
+        Err(format!(
+            "upsd does not answer on {addr} (its first LISTEN address): see journalctl -u {SERVER_UNIT}"
+        ))
+    }
+
+    /// The accounts block of `upsd.users` against the applied accounts.
+    fn state_drift(
+        &self,
+        applied: Option<&Value>,
+        ctx: &ApplyCtx,
+    ) -> Result<Vec<StateDrift>, String> {
+        let Some(v) = applied.filter(|_| self.layer.is_none()) else {
+            return Ok(Vec::new());
+        };
+        let want = self.users_for(&config_of(v).map_err(|e| e.message)?)?;
+        let have = ctx
+            .read(Path::new(NUT_USERS))
+            .and_then(|t| rynas_nut::setup::block_of(&t, BLOCK));
+        if want == have {
+            return Ok(Vec::new());
+        }
+        let (kind, detail) = match (&want, &have) {
+            (Some(_), None) => (
+                StateDriftKind::Missing,
+                format!("the network UPS server accounts are missing from {NUT_USERS}"),
+            ),
+            (None, _) => (
+                StateDriftKind::Mismatch,
+                format!("{NUT_USERS} has network UPS server accounts the configuration does not"),
+            ),
+            (Some(_), Some(_)) => (
+                StateDriftKind::Mismatch,
+                format!("the network UPS server accounts in {NUT_USERS} were changed"),
+            ),
+        };
+        Ok(vec![StateDrift {
+            key: NETSERVER_KEY.into(),
+            object: format!("file:{NUT_USERS}#{BLOCK}"),
+            kind,
+            detail,
+            detail_code: None,
+            detail_args: rynas_api_types::StateDriftArgs {
+                path: Some(NUT_USERS.into()),
+                ..Default::default()
+            },
+        }])
     }
 }
 
@@ -327,7 +520,7 @@ impl Applier for NetServerDomain {
 
 /// What applying `c` does (no side effects; passwords masked).
 pub fn plan(root: &Path, c: &UpsNetServerConfig) -> UpsSetupPlan {
-    let mut out: Vec<UpsPlanFile> = nut_files(c)
+    let mut out: Vec<UpsPlanFile> = nut_files(c, read(root, UPSD_CONF).as_deref())
         .into_iter()
         .map(|f| {
             let path = f.path.to_string_lossy().into_owned();
@@ -511,7 +704,23 @@ fn net_state(u: &Ups, owner: &str) -> Res<UpsNetServerState> {
         Default::default()
     };
     let (addresses, host) = addresses(&facts);
+    let on = blocked.is_none() && applied.as_ref().is_some_and(|a| a.enabled);
+    let sys = u.ops.config.system();
+    let running = on && sys.unit_active(SERVER_UNIT).unwrap_or(false);
+    let filter_active = applied
+        .as_ref()
+        .filter(|a| running && !a.allow.is_empty())
+        .and_then(|_| filter_state(sys));
+    let mut problems = Vec::new();
+    if on && !running {
+        problems.push(UpsNetProblem::ServerInactive);
+    }
+    if filter_active == Some(false) {
+        problems.push(UpsNetProblem::FilterInactive);
+    }
     Ok(UpsNetServerState {
+        filter_active,
+        problems,
         blocked,
         applied,
         pending,
@@ -556,6 +765,20 @@ async fn state_put(
             net::normalize(&mut req, &foreign_users(&u.root))
                 .map_err(|(f, m)| Error::invalid(f, m))?;
             let (applied, pending) = docs(u, &owner)?;
+            let kept: Vec<String> = applied
+                .iter()
+                .chain(pending.iter())
+                .flat_map(|c| c.listen.iter().cloned())
+                .collect();
+            if !req.listen.is_empty() {
+                let facts = (crate::web_access::WebAccessSvc::system_facts())();
+                check_listen_owned(
+                    &req.listen,
+                    &facts.addrs.iter().copied().collect::<Vec<_>>(),
+                    &kept,
+                )
+                    .map_err(|(f, m)| Error::invalid(f, m))?;
+            }
             let previous: Vec<&UpsNetServerConfig> =
                 pending.iter().chain(applied.iter()).collect();
             let sb = secret_box(&u.net_secret_dir).map_err(Error::internal)?;
@@ -599,7 +822,7 @@ mod tests {
         std::fs::write(etc.join("nut.conf"), "MODE=standalone\n").unwrap();
         std::fs::write(
             etc.join("upsd.conf"),
-            "# LISTEN 127.0.0.1 3493\nLISTEN 127.0.0.1 3493\nMAXAGE 15\n",
+            "LISTEN 127.0.0.1 3493\nMAXAGE 15\n",
         )
         .unwrap();
         std::fs::write(
@@ -638,12 +861,27 @@ mod tests {
         rynas_config::Config,
         Arc<rynas_config::MemorySystem>,
     ) {
+        open_with(root, secrets, Some(Arc::new(|_| true)), Vec::new())
+    }
+
+    fn open_with(
+        root: &Path,
+        secrets: &Path,
+        probe: Option<Probe>,
+        more: Vec<Arc<dyn Applier>>,
+    ) -> (
+        tempfile::TempDir,
+        rynas_config::Config,
+        Arc<rynas_config::MemorySystem>,
+    ) {
         let state = tempfile::tempdir().unwrap();
         let sys = Arc::new(rynas_config::MemorySystem::new("nas"));
-        let domains: Vec<Arc<dyn Applier>> = vec![Arc::new(NetServerDomain {
+        let mut domains: Vec<Arc<dyn Applier>> = vec![Arc::new(NetServerDomain {
             layer: None,
             secret_dir: secrets.to_path_buf(),
+            probe,
         })];
+        domains.extend(more);
         let cfg = rynas_config::Config::open(
             rynas_config::ConfigOptions::new(state.path(), root),
             sys.clone(),
@@ -708,8 +946,12 @@ mod tests {
         let rd = |p: &str| std::fs::read_to_string(root.path().join(p)).unwrap();
         let upsd = rd("etc/nut/upsd.conf");
         assert!(upsd.contains("LISTEN 0.0.0.0 3493\nLISTEN :: 3493\n"), "{upsd}");
-        assert!(upsd.contains("# LISTEN 127.0.0.1 3493\n") && upsd.contains("MAXAGE 15"));
-        assert!(!upsd.contains("\nLISTEN 127.0.0.1"), "the admin's LISTEN goes: {upsd}");
+        assert!(upsd.contains("MAXAGE 15"));
+        assert!(
+            !upsd.lines().any(|l| l == "LISTEN 127.0.0.1 3493"),
+            "the admin's LISTEN is set aside: {upsd}"
+        );
+        assert!(upsd.contains("\n# saved: LISTEN 127.0.0.1 3493\n"), "{upsd}");
         let users = rd("etc/nut/upsd.users");
         assert!(users.starts_with("[admin]\n"), "{users}");
         assert!(users.contains(&format!(
@@ -719,22 +961,213 @@ mod tests {
         assert!(users.contains("[homeassistant]\n\tpassword = \"Chosen.Password-1\"\n# END"));
         let dropin = rd("etc/systemd/system/nut-server.service.d/rynas-netserver.conf");
         assert!(dropin.contains("IPAddressAllow=192.168.1.0/24"));
-        let calls = sys.state().calls.clone();
+        assert!(dropin.contains("IPAccounting=yes\n"));
+        let calls = std::mem::take(&mut sys.state().calls);
         assert!(calls.iter().any(|c| c.contains("daemon-reload")), "{calls:?}");
         assert!(calls.iter().any(|c| c.contains("restart nut-server.service")), "{calls:?}");
-        // off: LISTEN lines, accounts and the filter go
+        // only the accounts change: a reload, no restart, no daemon-reload
+        let mut fewer = c.clone();
+        fewer.clients.pop();
+        cfg.stage("admin", NETSERVER_KEY, Some(serde_json::to_value(&fewer).unwrap()))
+            .unwrap();
+        cfg.apply("admin", "admin", "ups", &|_| {}, &|| false).unwrap();
+        let calls = std::mem::take(&mut sys.state().calls);
+        assert_eq!(
+            calls.iter().filter(|c| !c.contains("systemctl show")).collect::<Vec<_>>(),
+            ["reload nut-server.service"]
+        );
+        assert!(!rd("etc/nut/upsd.users").contains("homeassistant"));
+        // off: LISTEN lines, accounts and the filter go; the admin's LISTEN comes back
         let mut off = c.clone();
         off.enabled = false;
         cfg.stage("admin", NETSERVER_KEY, Some(serde_json::to_value(&off).unwrap()))
             .unwrap();
         cfg.apply("admin", "admin", "ups", &|_| {}, &|| false).unwrap();
-        assert!(!rd("etc/nut/upsd.conf").contains("LISTEN 0.0.0.0"));
+        let upsd = rd("etc/nut/upsd.conf");
+        assert!(!upsd.contains("LISTEN 0.0.0.0"));
+        assert!(upsd.lines().any(|l| l == "LISTEN 127.0.0.1 3493"), "{upsd}");
+        assert!(!upsd.contains("# saved:"));
+        assert!(sys.state().calls.iter().any(|c| c.contains("restart nut-server.service")));
         let users = rd("etc/nut/upsd.users");
         assert_eq!(users, "[admin]\n\tpassword = mine\n\tactions = SET\n");
         assert!(!root
             .path()
             .join("etc/systemd/system/nut-server.service.d/rynas-netserver.conf")
             .exists());
+    }
+
+    fn sealed(keys: &Path, c: UpsNetServerConfig) -> UpsNetServerConfig {
+        let sb = secret_box(keys).unwrap();
+        let mut c = c;
+        net::normalize(&mut c, &[]).unwrap();
+        seal_input(&mut c, &[], &sb, &|| Ok("GeneratedPassword0123456789abcdef".into())).unwrap();
+        c
+    }
+
+    fn apply_value(cfg: &rynas_config::Config, v: Option<&UpsNetServerConfig>) -> Result<u64, String> {
+        cfg.stage("admin", NETSERVER_KEY, v.map(|v| serde_json::to_value(v).unwrap()))
+            .map_err(|e| e.to_string())?;
+        cfg.apply("admin", "admin", "ups", &|_| {}, &|| false)
+            .map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn removing_the_key_closes_the_server() {
+        let root = nut_root();
+        let keys = tempfile::tempdir().unwrap();
+        let (_s, cfg, sys) = open(root.path(), keys.path());
+        let mut c = sealed(keys.path(), input());
+        c.listen = vec!["192.168.1.10".into()];
+        apply_value(&cfg, Some(&c)).unwrap();
+        let rd = |p: &str| std::fs::read_to_string(root.path().join(p)).unwrap();
+        assert!(rd("etc/nut/upsd.conf").contains("LISTEN 192.168.1.10 3493"));
+        let dropin = rd("etc/systemd/system/nut-server.service.d/rynas-netserver.conf");
+        assert!(dropin.contains("After=network-online.target"), "{dropin}");
+        sys.state().calls.clear();
+        // what restoring a revision from before the key existed stages
+        apply_value(&cfg, None).unwrap();
+        assert_eq!(cfg.applied(NETSERVER_KEY).unwrap(), None);
+        let upsd = rd("etc/nut/upsd.conf");
+        assert!(!upsd.contains("192.168.1.10") && !upsd.contains("::1"), "{upsd}");
+        assert!(upsd.lines().any(|l| l == "LISTEN 127.0.0.1 3493"), "admin's back: {upsd}");
+        assert_eq!(rd("etc/nut/upsd.users"), "[admin]\n\tpassword = mine\n\tactions = SET\n");
+        assert!(!root
+            .path()
+            .join("etc/systemd/system/nut-server.service.d/rynas-netserver.conf")
+            .exists());
+        let calls = sys.state().calls.clone();
+        assert!(calls.iter().any(|c| c.contains("daemon-reload")), "{calls:?}");
+        assert!(calls.iter().any(|c| c.contains("restart nut-server.service")), "{calls:?}");
+        assert!(cfg.drift().unwrap().entries.is_empty());
+    }
+
+    #[test]
+    fn a_stored_password_with_a_quote_is_refused_and_rolled_back() {
+        let root = nut_root();
+        let keys = tempfile::tempdir().unwrap();
+        let (_s, cfg, _sys) = open(root.path(), keys.path());
+        let mut c = sealed(keys.path(), input());
+        let sb = secret_box(keys.path()).unwrap();
+        // an envelope from an older rynas or a tampered revision
+        c.clients[0].sealed = Some(seal(&sb, "evil\"\n[admin2]\n\tactions = SET").unwrap());
+        let before = std::fs::read_to_string(root.path().join("etc/nut/upsd.conf")).unwrap();
+        let e = apply_value(&cfg, Some(&c)).unwrap_err();
+        assert!(e.contains("cannot go into"), "{e}");
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("etc/nut/upsd.users")).unwrap(),
+            "[admin]\n\tpassword = mine\n\tactions = SET\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("etc/nut/upsd.conf")).unwrap(),
+            before,
+            "rolled back"
+        );
+    }
+
+    #[test]
+    fn upsd_not_answering_rolls_back() {
+        let root = nut_root();
+        let keys = tempfile::tempdir().unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let s2 = seen.clone();
+        let probe: Probe = Arc::new(move |a| {
+            s2.lock().unwrap().push(a);
+            false
+        });
+        let (_s, cfg, _sys) = open_with(root.path(), keys.path(), Some(probe), Vec::new());
+        let e = apply_value(&cfg, Some(&sealed(keys.path(), input()))).unwrap_err();
+        assert!(e.contains("does not answer on 127.0.0.1:3493"), "{e}");
+        assert_eq!(seen.lock().unwrap()[0], SocketAddr::from(([127, 0, 0, 1], 3493)));
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("etc/nut/upsd.conf")).unwrap(),
+            "LISTEN 127.0.0.1 3493\nMAXAGE 15\n"
+        );
+        assert!(!std::fs::read_to_string(root.path().join("etc/nut/upsd.users"))
+            .unwrap()
+            .contains("pc-office"));
+    }
+
+    /// Restarts upsd like `ups.device` does (order 45, before `ups.netserver`).
+    struct FakeDevice;
+
+    impl Applier for FakeDevice {
+        fn key(&self) -> &str {
+            "ups.device"
+        }
+        fn order(&self) -> i32 {
+            45
+        }
+        fn validate(&self, value: Value) -> Result<Value, Invalid> {
+            Ok(value)
+        }
+        fn render(&self, _: &Value, _: &ApplyCtx) -> Result<Vec<ManagedFile>, String> {
+            Ok(Vec::new())
+        }
+        fn reconcile(&self, _: Option<&Value>, _: Option<&Value>, ctx: &ApplyCtx) -> Result<(), String> {
+            ctx.restart_unit(SERVER_UNIT)
+        }
+    }
+
+    #[test]
+    fn applied_with_the_device_upsd_restarts_once() {
+        let root = nut_root();
+        let keys = tempfile::tempdir().unwrap();
+        let (_s, cfg, sys) =
+            open_with(root.path(), keys.path(), Some(Arc::new(|_| true)), vec![Arc::new(FakeDevice)]);
+        let mut c = sealed(keys.path(), input());
+        c.listen = vec!["192.168.1.10".into()];
+        apply_value(&cfg, Some(&c)).unwrap();
+        sys.state().calls.clear();
+        // a new address: upsd.conf changes, the drop-in does not
+        c.listen.push("192.168.2.10".into());
+        cfg.stage("admin", "ups.device", Some(serde_json::json!({"n": 1}))).unwrap();
+        apply_value(&cfg, Some(&c)).unwrap();
+        let calls = sys.state().calls.clone();
+        assert_eq!(
+            calls.iter().filter(|c| c.contains("restart nut-server")).count(),
+            1,
+            "{calls:?}"
+        );
+        assert!(!calls.iter().any(|c| c.contains("daemon-reload")), "{calls:?}");
+    }
+
+    #[test]
+    fn drift_of_the_accounts_block_is_reported() {
+        let root = nut_root();
+        let keys = tempfile::tempdir().unwrap();
+        let (_s, cfg, _sys) = open(root.path(), keys.path());
+        apply_value(&cfg, Some(&sealed(keys.path(), input()))).unwrap();
+        assert!(cfg.drift().unwrap().state.is_empty());
+        let users = root.path().join("etc/nut/upsd.users");
+        let text = std::fs::read_to_string(&users).unwrap();
+        std::fs::write(&users, text.replace("\tupsmon secondary\n", "\tupsmon primary\n")).unwrap();
+        let d = cfg.drift().unwrap();
+        assert_eq!(d.state.len(), 1, "{d:?}");
+        assert_eq!(d.state[0].key, NETSERVER_KEY);
+        assert_eq!(d.state[0].kind, StateDriftKind::Mismatch);
+        // overwrite puts the block back
+        cfg.drift_overwrite(NETSERVER_KEY, &|_| {}).unwrap();
+        assert!(cfg.drift().unwrap().state.is_empty());
+        assert!(std::fs::read_to_string(&users).unwrap().contains("upsmon secondary"));
+    }
+
+    #[test]
+    fn listen_addresses_must_be_the_nas_own_and_keys_stay_private() {
+        let addrs: Vec<IpAddr> = vec!["192.168.1.10".parse().unwrap()];
+        assert!(check_listen_owned(&["192.168.1.10".into()], &addrs, &[]).is_ok());
+        assert_eq!(
+            check_listen_owned(&["192.168.1.10".into(), "10.9.9.9".into()], &addrs, &[])
+                .unwrap_err()
+                .0,
+            "listen.1"
+        );
+        assert!(check_listen_owned(&["10.9.9.9".into()], &addrs, &["10.9.9.9".into()]).is_ok());
+        assert!(check_listen_owned(&["10.9.9.9".into()], &[], &[]).is_ok(), "unknown: no check");
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("notify");
+        secret_box(&dir).unwrap();
+        assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
     }
 
     #[test]
