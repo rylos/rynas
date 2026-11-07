@@ -1286,6 +1286,7 @@ users.home_move_help	Scegliendo un altro posto la home si sposta dopo il salvata
 users.adopt	Adotta
 users.adopt_all	Adotta tutti
 users.adopt_banner	{n} account di questo sistema sono stati creati fuori da rynas. Adottali per gestirne password, gruppi e accessi: non vengono ricreati e i loro file non cambiano.
+users.adopt_banner_one	Un account di questo sistema è stato creato fuori da rynas. Adottalo per gestirne password, gruppi e accessi: non viene ricreato e i suoi file non cambiano.
 users.adopted	Account adottati
 users.unmanaged_note	Creato fuori da rynas. Salvando, l'account viene adottato così com'è: non viene ricreato e i suoi file non cambiano.
 users.uid	ID utente (UID)

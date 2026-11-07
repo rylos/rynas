@@ -270,6 +270,11 @@ fn adopt_banner(n: usize, url: &'static str) -> Option<AnyView> {
             busy.set(true);
             spawn_local(async move {
                 match api::post::<_, StagedChanges>(url, Some(&AdoptRequest::default())).await {
+                    // nothing staged: applied at once (rynas had never applied users)
+                    Ok(st) if st.staged == 0 => {
+                        crate::config::changed();
+                        toast(Tone::Ok, t("users.adopted").to_string());
+                    }
                     Ok(_) => {
                         if crate::config::apply_now(&[crate::config::keys::USERS], error).await {
                             toast(Tone::Ok, t("users.adopted").to_string());
@@ -283,7 +288,7 @@ fn adopt_banner(n: usize, url: &'static str) -> Option<AnyView> {
             });
         };
         ui::note(Tone::Info, icons::INFO, view! {
-            <span>{tf("users.adopt_banner", &[("n", &n.to_string())])}</span>
+            <span>{if n == 1 { t("users.adopt_banner_one").to_string() } else { tf("users.adopt_banner", &[("n", &n.to_string())]) }}</span>
             <div class="sec-actions">
                 <button type="button" class="btn ghost" disabled=move || busy.get() on:click=go>{crate::form::spinner(busy)}{tr("users.adopt_all")}</button>
             </div>

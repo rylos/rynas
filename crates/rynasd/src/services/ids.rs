@@ -43,9 +43,19 @@ fn adopt_kind(s: &Services, owner: &str, kind: IdKind, names: &[String]) -> Res<
         acc.samba_users().map_err(internal)?.as_deref(),
     );
     let c = &s.ops.config;
-    let (mut doc, _, _): (UsersConfig, UsersConfig, _) = docs(c, owner, USERS_KEY)?;
+    let (mut doc, cur, _): (UsersConfig, UsersConfig, _) = docs(c, owner, USERS_KEY)?;
     let added =
         users::adopt(&mut doc, &sys, kind, names).map_err(|e| Error::invalid("names", e))?;
+    if c.applied(USERS_KEY)?.is_none() {
+        // never applied: the document is the system itself (every account in it), so there
+        // is nothing to stage; applying it as it is (not the caller's staged edits) makes
+        // rynas manage them (no account changes: they are all there)
+        let author = owner.to_string();
+        c.apply_update(&author, USERS_KEY, "adopt the accounts of the system", &|l| {
+            tracing::info!("{l}")
+        }, |_| serde_json::to_value(&cur).map(Some).map_err(|e| e.to_string()))?;
+        return Ok(0);
+    }
     if added.is_empty() {
         return Ok(0);
     }

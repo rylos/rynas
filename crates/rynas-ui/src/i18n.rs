@@ -1687,6 +1687,7 @@ dict! { BLOB, LENS, IT;
     "users.adopt" => "Adopt", "Adotta";
     "users.adopt_all" => "Adopt all", "Adotta tutti";
     "users.adopt_banner" => "{n} accounts on this system were created outside rynas. Adopt them to manage their password, groups and access: they are not recreated and their files do not change.", "{n} account di questo sistema sono stati creati fuori da rynas. Adottali per gestirne password, gruppi e accessi: non vengono ricreati e i loro file non cambiano.";
+    "users.adopt_banner_one" => "One account on this system was created outside rynas. Adopt it to manage its password, groups and access: it is not recreated and its files do not change.", "Un account di questo sistema è stato creato fuori da rynas. Adottalo per gestirne password, gruppi e accessi: non viene ricreato e i suoi file non cambiano.";
     "users.adopted" => "Accounts adopted", "Account adottati";
     "users.unmanaged_note" => "Created outside rynas. Saving adopts the account as it is: it is not recreated and its files do not change.", "Creato fuori da rynas. Salvando, l'account viene adottato così com'è: non viene ricreato e i suoi file non cambiano.";
     "users.uid" => "User ID (UID)", "ID utente (UID)";
