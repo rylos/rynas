@@ -81,6 +81,8 @@ pub struct DaemonState {
     pub web_access: crate::web_access::WaState,
     /// Tailscale (remote access); `None` answers 503 on its endpoints.
     pub tailscale: crate::tailscale::TsState,
+    /// Manual restart and shut down ([`crate::system_power`]).
+    pub system_power: crate::system_power::SpState,
 }
 
 impl DaemonState {
@@ -122,6 +124,7 @@ impl DaemonState {
             tls: None,
             web_access: None,
             tailscale: None,
+            system_power: None,
         }
     }
 }
@@ -204,6 +207,7 @@ pub fn router(state: DaemonState) -> Router {
         .merge(crate::tls::router(state.tls, admins))
         .merge(crate::web_access::router(state.web_access))
         .merge(crate::tailscale::router(state.tailscale))
+        .merge(crate::system_power::router(state.system_power))
         .fallback(|| async { Error::not_found("no such endpoint") })
         // 405, query string and path rejections: ApiError bodies too
         .layer(axum::middleware::from_fn(crate::error::json_errors))

@@ -124,7 +124,7 @@ fn summary_card(st: Remote<UpdatesStatus>, selected: RwSignal<Vec<String>>, ask:
         let sec_pill = (sec > 0).then(|| status(Tone::Err, tf("upd.security_n", &[("n", &sec.to_string())])));
         let reboot = s.reboot_required.then(|| {
             let pk = if s.reboot_packages.is_empty() { String::new() } else { tf("upd.reboot_pkgs", &[("p", &s.reboot_packages.join(", "))]) };
-            ui::note(Tone::Warn, icons::ROTATE_CCW, view! { <strong>{t("upd.reboot_required")}</strong>" "{pk} }.into_any())
+            ui::note_class(Tone::Warn, icons::ROTATE_CCW, "sysp-note", view! { <strong>{t("upd.reboot_required")}</strong>" "{pk}" "{crate::power::restart_button()} }.into_any())
         });
         let error = s.error.clone().map(|e| ui::note(Tone::Err, icons::CIRCLE_X, view! { {t("upd.sim_error")}<span class="muted small" lang="en">" "{e}</span> }.into_any()));
         let running = s.running_task.clone().map(|id| {

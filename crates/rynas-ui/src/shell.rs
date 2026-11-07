@@ -199,6 +199,7 @@ fn Shell() -> impl IntoView {
                 </Routes>
             </main>
             <div class="dock">
+                <crate::power::PendingPower />
                 <PendingBar />
                 <TaskPanel />
             </div>
@@ -207,6 +208,7 @@ fn Shell() -> impl IntoView {
         <SessionNotice />
         <crate::toast::Toasts />
         <Palette />
+        <crate::power::PowerHost />
     }
 }
 
@@ -331,6 +333,13 @@ fn UserMenu() -> impl IntoView {
                     </a>
                     <button class="menu-item" role="menuitem" on:click=move |_| { open.set(false); ui.palette_open.set(true); }>
                         <Icon icon=icons::COMMAND size=16 />{tr("bar.search")}<kbd>"Ctrl K"</kbd>
+                    </button>
+                    <div class="menu-sep"></div>
+                    <button class="menu-item" role="menuitem" disabled=demo on:click=move |_| { open.set(false); crate::power::ask(rynas_api_types::power::SystemPowerAction::Restart); }>
+                        <Icon icon=icons::ROTATE_CCW size=16 />{tr("sysp.restart")}
+                    </button>
+                    <button class="menu-item" role="menuitem" disabled=demo on:click=move |_| { open.set(false); crate::power::ask(rynas_api_types::power::SystemPowerAction::Shutdown); }>
+                        <Icon icon=icons::POWER size=16 />{tr("sysp.shutdown")}
                     </button>
                     <div class="menu-sep"></div>
                     <button class="menu-item" role="menuitem" disabled=demo on:click=move |_| { open.set(false); a.sign_out(); }>

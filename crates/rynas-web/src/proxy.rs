@@ -160,6 +160,9 @@ pub fn routes() -> Router<AppState> {
         .route("/hardware/bays/{n}/identify", post(forward))
         .route("/power/schedule", get(forward).put(forward))
         .route("/power/next", get(forward))
+        // manual restart and shut down: warnings, the action (a task), cancel of a delayed one
+        .route("/system/power", get(forward).post(forward))
+        .route("/system/power/cancel", post(forward))
         // UPS (P6): the shutdown policy and the battery test; the status itself is
         // read from upsd by rynas-web (`/ups`, `ups.status` events)
         .route("/ups/settings", get(forward).put(forward))

@@ -385,6 +385,15 @@ impl Updates {
 
     // ------------------------------------------------------------------ kernel
 
+    /// The kernel status already read (no boot device access), however old.
+    pub fn kernel_cached(&self) -> Option<KernelStatus> {
+        self.kernel
+            .lock()
+            .expect("kernel lock")
+            .as_ref()
+            .map(|(_, k)| k.clone())
+    }
+
     pub async fn kernel(&self, refresh: bool) -> KernelStatus {
         let fresh = |max: Duration| {
             self.kernel

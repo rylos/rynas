@@ -1829,3 +1829,13 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .tls-pem { min-height: 120px; }
 .tls-file { align-self: flex-start; cursor: pointer; }
 .app-url { overflow-wrap: anywhere; color: var(--text-muted); }
+/* restart / shut down: warnings of the dialog, the full-page overlay, the delayed action */
+.sysp-warnings { display: flex; flex-direction: column; gap: var(--s-2); }
+.sysp-list { margin: 0; padding-left: var(--s-6); list-style: disc; display: flex; flex-direction: column; gap: var(--s-1); overflow-wrap: anywhere; font-size: var(--fs-13); }
+.sysp-note .btn { margin-top: var(--s-1); }
+.sysp-overlay { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: var(--s-4); background: var(--bg); }
+.sysp-card { display: flex; flex-direction: column; align-items: center; gap: var(--s-3); max-width: 420px; text-align: center; overflow-wrap: anywhere; }
+.sysp-card h2 { margin: 0; font-size: var(--fs-20); }
+.sysp-card p { margin: 0; }
+.sysp-icon { display: grid; place-items: center; width: 56px; height: 56px; border-radius: var(--r-pill); color: var(--accent); background: color-mix(in oklch, var(--accent) 14%, var(--surface)); }
+.sysp-pending { background: color-mix(in oklch, var(--info) 14%, var(--surface)); border-top-color: color-mix(in oklch, var(--info) 45%, var(--border)); }

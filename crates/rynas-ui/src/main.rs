@@ -21,6 +21,7 @@ mod modules;
 mod notify;
 mod pages;
 mod palette;
+mod power;
 mod prefs;
 mod qr;
 mod removable;

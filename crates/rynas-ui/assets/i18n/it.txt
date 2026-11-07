@@ -3571,6 +3571,60 @@ sf.err.pattern	Non è nel formato previsto.
 sf.err.hostname	Inserisci un nome host, ad es. nas.example.lan.
 sf.err.uri	Inserisci un indirizzo che inizia con http:// o https://.
 sf.err.email	Inserisci un indirizzo e-mail.
+sysp.restart	Riavvia
+sysp.shutdown	Spegni
+sysp.restart_now	Riavvia ora
+sysp.restart_title	Riavviare il NAS?
+sysp.restart_text	Tutti i servizi si fermano e ripartono: condivisioni, app e questa pagina non sono disponibili per qualche minuto.
+sysp.shutdown_title	Spegnere il NAS?
+sysp.shutdown_text	Il NAS si spegne. Si riaccende con il pulsante di accensione, con Wake-on-LAN o con una regola di accensione della pianificazione.
+sysp.when	Quando
+sysp.now	Ora
+sysp.in_1	Tra 1 minuto
+sysp.in_5	Tra 5 minuti
+sysp.checking	Controllo di ciò che è in corso…
+sysp.check_failed	Impossibile controllare ciò che è in corso.
+sysp.no_warnings	Non c'è niente in corso che verrebbe interrotto.
+sysp.warnings	Verrebbe interrotto:
+sysp.anyway	Puoi procedere comunque: il lavoro interrotto non riprende da solo.
+sysp.w.raid_busy	{subject}: RAID {op}{pct} (prosegue dopo l'avvio, da capo se interrotto)
+sysp.w.scrub_running	{subject} in corso
+sysp.w.task_running	Attività in corso: {subject}
+sysp.w.scheduler_task_running	Attività pianificata in corso: {subject}
+sysp.w.smb_open_files	{n} file aperti via SMB
+sysp.w.apt_running	Gestore dei pacchetti in esecuzione ({subject}): fermarlo può lasciare pacchetti installati a metà
+sysp.w.ups_on_battery	L'UPS è a batteria: il NAS potrebbe non ripartire finché non torna la corrente
+sysp.w.boot_trial	Al prossimo avvio parte in prova un nuovo kernel; se non funziona, torna da solo il kernel precedente
+sysp.op.resync	sincronizzazione
+sysp.op.recovery	ricostruzione
+sysp.op.reshape	rimodellamento
+sysp.op.check	verifica
+sysp.restart_scheduled	Riavvio pianificato.
+sysp.shutdown_scheduled	Spegnimento pianificato.
+sysp.restart_failed	Il riavvio non è partito.
+sysp.shutdown_failed	Lo spegnimento non è partito.
+sysp.pending_restart	Il NAS si riavvia alle {at}.
+sysp.pending_restart_by	Il NAS si riavvia alle {at} (richiesto da {user}).
+sysp.pending_shutdown	Il NAS si spegne alle {at}.
+sysp.pending_shutdown_by	Il NAS si spegne alle {at} (richiesto da {user}).
+sysp.cancel	Annulla riavvio o spegnimento
+sysp.cancelled	Annullato: il NAS resta acceso.
+sysp.restarting	Riavvio in corso…
+sysp.shutting_down	Spegnimento in corso…
+sysp.going_text	In attesa che il NAS si fermi.
+sysp.coming_text	In attesa che il NAS torni disponibile. La pagina di accesso si apre da sola.
+sysp.going_off_text	In attesa che il NAS si spenga.
+sysp.off_title	Il NAS è spento
+sysp.off_text	Puoi chiudere questa pagina. Quando il NAS è di nuovo acceso, ricaricala per accedere.
+sysp.reload	Ricarica la pagina
+task.system.restart	Riavvio del NAS
+task.system.shutdown	Spegnimento del NAS
+nev.power.manual_restart.title	Riavvio del NAS richiesto da {user}
+nev.power.manual_restart.body	{user} riavvia il NAS (ritardo {delay_min} min).
+nev.power.manual_shutdown.title	Spegnimento del NAS richiesto da {user}
+nev.power.manual_shutdown.body	{user} spegne il NAS (ritardo {delay_min} min).
+nev.power.manual_cancelled.title	Riavvio o spegnimento annullato da {user}
+nev.power.manual_cancelled.body	Il NAS resta acceso.
 nt.src.synodeb	Sistema di base
 nev.synodeb.unit_failed.title	Servizio non riuscito: {unit}
 nev.synodeb.smart_error.title	SMART {device}: {failtype}

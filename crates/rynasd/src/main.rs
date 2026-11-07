@@ -85,6 +85,10 @@ struct Args {
     /// Tests only: the command a scheduled shutdown runs instead of `systemctl poweroff`.
     #[arg(long, hide = true, num_args = 1.., value_delimiter = ' ')]
     poweroff_command: Vec<String>,
+    /// Tests only: the command run instead of systemd's `shutdown` for a manual restart or
+    /// shut down (the arguments follow it).
+    #[arg(long, hide = true, num_args = 1.., value_delimiter = ' ')]
+    shutdown_command: Vec<String>,
     /// Members of these groups are administrators (repeatable; same rule as rynas-web's
     /// --admin-group): only they may stage or run user tasks that run as root.
     #[arg(long = "admin-group", default_values = ["rynas-admin", "sudo"])]
@@ -892,7 +896,28 @@ fn main() -> std::io::Result<()> {
             .with_boot(opened.modules.boot()),
         );
         rynasd::updates::spawn_daily(updates.clone());
-        state.updates = Some(updates);
+        state.updates = Some(updates.clone());
+        // manual restart and shut down: systemd's shutdown (never under --dry-system)
+        if let Some(hw) = state.hardware.clone() {
+            state.system_power = Some(Arc::new(rynasd::system_power::SystemPower {
+                hw,
+                updates: Some(updates),
+                upsd: (!args.dry_system || args.upsd.is_some()).then(|| {
+                    args.upsd
+                        .clone()
+                        .unwrap_or_else(|| rynas_nut::UPSD.to_string())
+                }),
+                shutdown: if !args.shutdown_command.is_empty() {
+                    args.shutdown_command.clone()
+                } else if args.dry_system {
+                    Vec::new()
+                } else {
+                    vec!["shutdown".into()]
+                },
+                grace: std::time::Duration::from_secs(3),
+                admins: ops.admins.clone(),
+            }));
+        }
         // the file manager: workers next to rynasd unless told otherwise
         let worker = args.files_worker.clone().unwrap_or_else(|| {
             std::env::current_exe()
