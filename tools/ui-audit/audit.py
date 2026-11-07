@@ -29,7 +29,7 @@ if "--widths" in sys.argv:
     WIDTHS = [w for w in WIDTHS if w[0] in ws]
 ROUTES = ["/", "/storage", "/storage/disks", "/storage/create", "/network", "/hardware", "/system",
           "/system/configuration", "/system/notifications", "/system/scheduler", "/notifications",
-          "/snapshots", "/security", "/shares", "/users", "/services", "/files", "/plugins", "/nope"]
+          "/snapshots", "/security", "/shares", "/users", "/services", "/files", "/apps", "/nope"]
 if "--routes" in sys.argv:
     ROUTES = sys.argv[sys.argv.index("--routes") + 1].split(",")
 AUDIT_JS = open(os.path.join(HERE, "audit.js")).read()

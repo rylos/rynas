@@ -20,7 +20,7 @@ FAILS = []
 
 ROUTES = ["/", "/storage", "/storage/disks", "/storage/create", "/network", "/hardware", "/system",
           "/system/configuration", "/system/notifications", "/system/scheduler", "/notifications",
-          "/snapshots", "/security", "/shares", "/users", "/services", "/plugins", "/docker", "/files"]
+          "/snapshots", "/security", "/shares", "/users", "/services", "/apps", "/docker", "/files"]
 
 
 def check(cond, msg):

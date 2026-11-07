@@ -16,6 +16,7 @@ mod i18n;
 mod icons;
 mod layout;
 mod live;
+mod markdown;
 mod modules;
 mod notify;
 mod pages;
@@ -23,6 +24,7 @@ mod palette;
 mod prefs;
 mod qr;
 mod removable;
+mod schema_form;
 mod shell;
 #[cfg(test)]
 mod source_check;

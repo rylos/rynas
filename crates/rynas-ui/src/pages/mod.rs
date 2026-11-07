@@ -1,5 +1,6 @@
 //! Routed pages.
 
+pub mod apps;
 pub mod config;
 pub mod dashboard;
 pub mod docker;
@@ -8,7 +9,6 @@ pub mod hardware;
 pub mod notifications;
 pub mod scheduler;
 pub mod network;
-pub mod plugins;
 pub mod security;
 pub mod services;
 pub mod share_folders;

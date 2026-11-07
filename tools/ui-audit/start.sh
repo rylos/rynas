@@ -17,6 +17,8 @@
 # second login named after the current Unix user (same password) is added and its primary group
 # is the admin group: use it for logs, actions and stacks (AUDIT_USER=$(id -un) for the probes).
 # Without FAKE_DOCKER rynasd never contacts a Docker socket (not even the host's).
+# The app catalogue is the repository's apps/ (rynasd --apps-dir), so the Apps & Plugins page
+# shows the curated entries; installs under --dry-system only create files below the dry root.
 # GENERIC=1: a plain PC instead of the DS920+ (no Synology platform, no synohwd status), to check
 # that no Synology screen, tab or hint shows up on generic hardware (G8d).
 set -e
@@ -82,9 +84,16 @@ YAML
   USERS=$R/users.toml
   { cat "$HERE/users.toml"; printf '\n[[user]]\nname = "%s"\n' "$(id -un)"; grep '^hash' "$HERE/users.toml"; grep '^groups' "$HERE/users.toml"; } > "$USERS"
 fi
+# ADMIN=1 without FAKE_DOCKER: the same admin login, and no engine at all (the Apps & Plugins page
+# without Docker: the module card first, installs blocked)
+if [ -n "${ADMIN:-}" ] && [ -z "${FAKE_DOCKER:-}" ]; then
+  DOCKER_ARGS=(--docker-socket "" --admin-group "$(id -gn)")
+  USERS=$R/users.toml
+  { cat "$HERE/users.toml"; printf '\n[[user]]\nname = "%s"\n' "$(id -un)"; grep '^hash' "$HERE/users.toml"; grep '^groups' "$HERE/users.toml"; } > "$USERS"
+fi
 # any docker CLI rynasd might run reads the fake engine, never the host's
 DOCKER_HOST=unix://$R/docker.sock target/release/rynasd --socket "$R/rynasd.sock" --state-dir "$R/state" --dry-system --hw-root "$H" \
-  --notify-socket "" --storage-check-interval 0 "${RYNASD_UPS[@]}" "${DOCKER_ARGS[@]}" ${FAKE_USB:+--removable-demo} > "$R/rynasd.log" 2>&1 &
+  --notify-socket "" --storage-check-interval 0 --apps-dir "$REPO/apps" "${RYNASD_UPS[@]}" "${DOCKER_ARGS[@]}" ${FAKE_USB:+--removable-demo} > "$R/rynasd.log" 2>&1 &
 echo $! >> "$R/pids"; sleep 1.5
 target/release/rynas-web --listen "127.0.0.1:$PORT" --rynasd-socket "$R/rynasd.sock" --users-file "$USERS" \
   --auth-state-dir "$R/web" --ui-dir crates/rynas-ui/dist --hw-root "$H" "${UPSD_ARG[@]}" > "$R/web.log" 2>&1 &

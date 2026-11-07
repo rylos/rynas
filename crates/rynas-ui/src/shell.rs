@@ -41,7 +41,7 @@ pub const NAV: [NavItem; 12] = [
     NavItem { path: "/users", key: "nav.users", icon: icons::USERS, group: true },
     NavItem { path: "/services", key: "nav.services", icon: icons::SERVER, group: false },
     NavItem { path: "/docker", key: "nav.docker", icon: icons::CONTAINER, group: false },
-    NavItem { path: "/plugins", key: "nav.plugins", icon: icons::PUZZLE, group: false },
+    NavItem { path: "/apps", key: "nav.apps", icon: icons::PUZZLE, group: false },
     NavItem { path: "/network", key: "nav.network", icon: icons::NETWORK, group: true },
     NavItem { path: "/hardware", key: "nav.hardware", icon: icons::CPU, group: false },
     NavItem { path: "/system", key: "nav.system", icon: icons::SETTINGS, group: false },
@@ -191,7 +191,8 @@ fn Shell() -> impl IntoView {
                     <Route path=path!("/shares") view=pages::shares::Shares />
                     <Route path=path!("/users") view=pages::users::Users />
                     <Route path=path!("/services") view=pages::services::FileServices />
-                    <Route path=path!("/plugins") view=pages::plugins::Plugins />
+                    <Route path=path!("/apps") view=pages::apps::AppsPage />
+                    <Route path=path!("/plugins") view=pages::apps::AppsPage />
                     <Route path=path!("/docker") view=pages::docker::DockerPage />
                 </Routes>
             </main>
