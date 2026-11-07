@@ -5,10 +5,10 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use rynas_api_types::TaskStatus;
-use rynas_api_types::apps::{AppDetail, AppRollbackRequest, AppUninstallRequest, AppUpdatePlan, AppUpdateRequest, ImageChangeKind, InstalledApp, InstalledAppDetail};
+use rynas_api_types::apps::{AppRollbackRequest, AppUninstallRequest, AppUpdatePlan, AppUpdateRequest, ImageChangeKind, InstalledApp, InstalledAppDetail};
 use rynas_api_types::docker::{DockerSettingsState, StackSnapshot};
 
-use super::{app_icon, apps, open_href};
+use super::{AppDetail, app_icon, apps, open_href};
 use crate::api;
 use crate::form::{form_error, spinner, switch};
 use crate::i18n::{self, t, tf, tr};
@@ -375,7 +375,7 @@ enum Ask {
 /// The drawer of one installed app.
 pub fn drawer(stack: String) -> AnyView {
     let a = apps();
-    let d = super::remote::<InstalledAppDetail>(&inst_url(&stack, ""));
+    let d = super::remote::<InstalledAppDetail>(&inst_url(&stack, ""), crate::docker::docker().generation);
     let ask = RwSignal::new(None::<Ask>);
     let close = Callback::new(move |_| a.manage.set(None));
     let n = StoredValue::new(stack.clone());

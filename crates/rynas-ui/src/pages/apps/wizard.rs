@@ -10,12 +10,12 @@ use std::collections::BTreeMap;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use rynas_api_types::TaskStatus;
-use rynas_api_types::apps::{AppDetail, AppInstallPlan, AppInstallRequest, AppInstallStarted, FieldErrorKind, FolderIntent, FolderSsd, PlanWarning, ShareAccess};
+use rynas_api_types::apps::{AppInstallPlan, AppInstallRequest, AppInstallStarted, FieldErrorKind, FolderIntent, FolderSsd, PlanWarning, ShareAccess};
 use rynas_api_types::docker::{DockerSettingsState, valid_stack_name};
 use rynas_api_types::ShareView;
 
 use super::catalog::{intent_text, notes_view, ssd_key};
-use super::{apps, ram_pill};
+use super::{AppDetail, apps, ram_pill};
 use crate::api::{self, DETAIL_SEP};
 use crate::form::{In, form_error, spinner, switch, text_field};
 use crate::i18n::{t, tf, tr};
@@ -134,7 +134,7 @@ impl W {
         self.detail.data.with_untracked(|d| {
             let Some(d) = d else { return false };
             match s {
-                Step::Options => field == "stack" || d.form.properties.contains_key(field),
+                Step::Options => field == "stack" || d.form.has(field),
                 Step::Folders => d.folders.iter().any(|f| f.env == field) || d.shares.iter().any(|f| f.env == field),
                 Step::Network => d.card.ports.iter().any(|p| p.env == field),
                 Step::Access | Step::Review => false,
@@ -253,76 +253,83 @@ pub fn wizard(id: String) -> AnyView {
             a.wizard.set(None);
         }
     });
-    let body = move || {
-        if w.started.with(Option::is_some) {
-            return running(w);
-        }
-        let Some(_) = w.detail.data.with(|d| d.as_ref().map(|_| ())) else {
-            return w.detail.view(8, || ().into_any());
-        };
-        let cur = w.cur();
-        view! {
-            <ol class="stepper app-steps" aria-label=tr("wiz.steps")>
-                {steps().into_iter().enumerate().map(|(i, s)| view! {
-                    <li class=move || { let c = w.step.get(); if c == i { "current" } else if c > i { "done" } else { "" } }
-                        aria-current=move || (w.step.get() == i).then_some("step")>
-                        <span class="step-num">{move || if w.step.get() > i { view! { <Icon icon=icons::CHECK size=12 /> }.into_any() } else { (i + 1).to_string().into_any() }}</span>
-                        <span class="step-label">{tr(step_key(s))}</span>
-                    </li>
-                }).collect_view()}
-            </ol>
-            <div class="wizard app-wizard">
-                {match cur {
-                    Step::Options => options(w),
-                    Step::Folders => folders(w),
-                    Step::Network => network(w),
-                    Step::Access => ui::note(Tone::Info, icons::INFO, ui::text(t("apps.w.access_soon").to_string())),
-                    Step::Review => review(w),
-                }}
-            </div>
-        }
-        .into_any()
-    };
-    let foot = move || {
-        if w.started.with(Option::is_some) {
-            let stack = w.started.with(|s| s.as_ref().map(|s| s.stack.clone())).unwrap_or_default();
-            let finished = w.done.with(Option::is_some);
-            return view! {
-                {move || w.ask_close.get().then(|| view! { <span class="small foot-note warn-text">{tr("apps.w.close_secrets")}</span> })}
-                <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr(if w.ask_close.get() { "apps.w.close_anyway" } else { "close" })}</button>
-                {finished.then(|| view! {
-                    <button type="button" class="btn primary" on:click=move |_| { a.wizard.set(None); a.tab.set(3); a.manage.set(Some(stack.clone())); }>{tr("apps.manage")}</button>
-                })}
-            }
-            .into_any();
-        }
-        let last = w.step.get() + 1 == steps().len();
-        let first = w.step.get() == 0;
-        let ok = w.plan.with(|p| p.as_ref().is_some_and(|p| p.ok));
-        view! {
-            {form_error(w.error)}
-            <button type="button" class="btn ghost" on:click=move |_| if first { a.wizard.set(None) } else { w.reveal.set(false); w.step.update(|i| *i -= 1) }>
-                {tr(if first { "cancel" } else { "back" })}
-            </button>
-            {if last {
-                view! {
-                    <button type="button" class="btn primary" disabled=move || w.planning.get() || !ok || !a.can_install() on:click=move |_| w.install()>
-                        {spinner(w.planning)}<Icon icon=icons::DOWNLOAD size=16 />{tr("apps.install")}
-                    </button>
-                }
-                .into_any()
-            } else {
-                view! {
-                    <button type="button" class="btn primary" disabled=move || w.planning.get() || w.detail.data.with(Option::is_none) on:click=move |_| w.next()>
-                        {spinner(w.planning)}{tr("wiz.next")}
-                    </button>
-                }
-                .into_any()
-            }}
-        }
-        .into_any()
-    };
+    let body = move || wizard_body(w);
+    let foot = move || wizard_foot(w, a, close);
     ui::dialog(DlgKind::Wide, title, close, view! { {body} }.into_any(), Some(view! { {foot} }.into_any()))
+}
+
+/// The wizard's steps and the current one (a function of its own: smaller wasm than a
+/// closure inlined in the dialog).
+fn wizard_body(w: W) -> AnyView {
+    if w.started.with(Option::is_some) {
+        return running(w);
+    }
+    let Some(_) = w.detail.data.with(|d| d.as_ref().map(|_| ())) else {
+        return w.detail.view(8, || ().into_any());
+    };
+    let cur = w.cur();
+    view! {
+        <ol class="stepper app-steps" aria-label=tr("wiz.steps")>
+            {steps().into_iter().enumerate().map(|(i, s)| view! {
+                <li class=move || { let c = w.step.get(); if c == i { "current" } else if c > i { "done" } else { "" } }
+                    aria-current=move || (w.step.get() == i).then_some("step")>
+                    <span class="step-num">{move || if w.step.get() > i { view! { <Icon icon=icons::CHECK size=12 /> }.into_any() } else { (i + 1).to_string().into_any() }}</span>
+                    <span class="step-label">{tr(step_key(s))}</span>
+                </li>
+            }).collect_view()}
+        </ol>
+        <div class="wizard app-wizard">
+            {match cur {
+                Step::Options => options(w),
+                Step::Folders => folders(w),
+                Step::Network => network(w),
+                Step::Access => ui::note(Tone::Info, icons::INFO, ui::text(t("apps.w.access_soon").to_string())),
+                Step::Review => review(w),
+            }}
+        </div>
+    }
+    .into_any()
+}
+
+/// The wizard's buttons: Back/Next/Install, or Close/Manage once the install started.
+fn wizard_foot(w: W, a: super::Apps, close: Callback<()>) -> AnyView {
+    if w.started.with(Option::is_some) {
+        let stack = w.started.with(|s| s.as_ref().map(|s| s.stack.clone())).unwrap_or_default();
+        let finished = w.done.with(Option::is_some);
+        return view! {
+            {move || w.ask_close.get().then(|| view! { <span class="small foot-note warn-text">{tr("apps.w.close_secrets")}</span> })}
+            <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr(if w.ask_close.get() { "apps.w.close_anyway" } else { "close" })}</button>
+            {finished.then(|| view! {
+                <button type="button" class="btn primary" on:click=move |_| { a.wizard.set(None); a.tab.set(3); a.manage.set(Some(stack.clone())); }>{tr("apps.manage")}</button>
+            })}
+        }
+        .into_any();
+    }
+    let last = w.step.get() + 1 == steps().len();
+    let first = w.step.get() == 0;
+    let ok = w.plan.with(|p| p.as_ref().is_some_and(|p| p.ok));
+    view! {
+        {form_error(w.error)}
+        <button type="button" class="btn ghost" on:click=move |_| if first { a.wizard.set(None) } else { w.reveal.set(false); w.step.update(|i| *i -= 1) }>
+            {tr(if first { "cancel" } else { "back" })}
+        </button>
+        {if last {
+            view! {
+                <button type="button" class="btn primary" disabled=move || w.planning.get() || !ok || !a.can_install() on:click=move |_| w.install()>
+                    {spinner(w.planning)}<Icon icon=icons::DOWNLOAD size=16 />{tr("apps.install")}
+                </button>
+            }
+            .into_any()
+        } else {
+            view! {
+                <button type="button" class="btn primary" disabled=move || w.planning.get() || w.detail.data.with(Option::is_none) on:click=move |_| w.next()>
+                    {spinner(w.planning)}{tr("wiz.next")}
+                </button>
+            }
+            .into_any()
+        }}
+    }
+    .into_any()
 }
 
 // ------------------------------------------------------------------ steps

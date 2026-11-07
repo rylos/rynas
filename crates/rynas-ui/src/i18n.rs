@@ -84,6 +84,10 @@ pub fn set_lang(lang: Option<Lang>) {
     storage_set("rynas.lang", lang.map(Lang::code).unwrap_or(""));
     sig().set(l);
     apply_html_lang(l);
+    if l == Lang::It {
+        // English meanwhile; the texts switch when the file is there
+        load_italian(italian_arrived);
+    }
 }
 
 /// Stored preference: `None` means "automatic".
@@ -105,13 +109,20 @@ pub fn lang_pref() -> Option<Lang> {
 ///
 /// The core table is below; a hardware module has its own table in its folder
 /// (`crate::modules::<module>::i18n`, same macro, D-MODULE), read together with this one.
+///
+/// Only English is compiled into the interface: the Italian column (about 30 KiB brotli) is
+/// the file `assets/i18n/it.txt` (served as `/i18n/it.txt`), generated from these tables by
+/// the test `italian_file_is_current` and fetched when the language is Italian. The test
+/// build keeps the Italian column in memory, so every test sees both languages.
 macro_rules! dict {
-    ($blob:ident, $lens:ident; $($k:literal => $en:literal, $it:literal;)*) => {
-        /// Every text back to back — key, English, Italian of each entry — with their byte
-        /// lengths: much smaller in the wasm than a `match` over 1 800 strings or a table of
-        /// string pointers.
-        pub(crate) static $blob: &str = concat!($($k, $en, $it),*);
-        pub(crate) static $lens: &[u16] = &[$($k.len() as u16, $en.len() as u16, $it.len() as u16),*];
+    ($blob:ident, $lens:ident, $it:ident; $($k:literal => $en:literal, $itx:literal;)*) => {
+        /// Every key and English text back to back with their byte lengths: much smaller in
+        /// the wasm than a `match` over 3 000 strings or a table of string pointers.
+        pub(crate) static $blob: &str = concat!($($k, $en),*);
+        pub(crate) static $lens: &[u16] = &[$($k.len() as u16, $en.len() as u16),*];
+        /// The Italian column (test build only; the interface fetches `/i18n/it.txt`).
+        #[cfg(test)]
+        pub(crate) static $it: &[&str] = &[$($itx),*];
     };
 }
 pub(crate) use dict;
@@ -121,17 +132,31 @@ fn tables() -> [(&'static str, &'static [u16]); 2] {
     [(BLOB, LENS), (crate::modules::synology::i18n::BLOB, crate::modules::synology::i18n::LENS)]
 }
 
-/// Start of every text of every table (and the end) and the entries (table, index) sorted by
-/// key, built on first use.
+/// The Italian columns of [`tables`], in the same order (test build).
+#[cfg(test)]
+fn italian_tables() -> [&'static [&'static str]; 2] {
+    [IT, crate::modules::synology::i18n::IT]
+}
+
+/// Start of every text of every table (and the end), the entries (table, index) sorted by
+/// key, built on first use, and the Italian texts once they are there.
 struct Index {
     blobs: [&'static str; 2],
     starts: [Vec<u32>; 2],
     by_key: Vec<(u8, u16)>,
+    italian: std::cell::RefCell<[Vec<&'static str>; 2]>,
 }
 
 impl Index {
     fn text(&self, t: usize, i: usize) -> &'static str {
         &self.blobs[t][self.starts[t][i] as usize..self.starts[t][i + 1] as usize]
+    }
+
+    /// (table, entry) of `key`.
+    fn find(&self, key: &str) -> Option<(usize, usize)> {
+        let at = self.by_key.binary_search_by(|&(t, e)| self.text(t as usize, e as usize * 2).cmp(key)).ok()?;
+        let (t, e) = self.by_key[at];
+        Some((t as usize, e as usize))
     }
 }
 
@@ -148,22 +173,130 @@ thread_local! {
             }
             starts
         });
-        let by_key = tables.iter().enumerate().flat_map(|(t, (_, lens))| (0..(lens.len() / 3) as u16).map(move |e| (t as u8, e))).collect();
-        let mut idx = Index { blobs: tables.map(|t| t.0), starts, by_key };
+        let by_key = tables.iter().enumerate().flat_map(|(t, (_, lens))| (0..(lens.len() / 2) as u16).map(move |e| (t as u8, e))).collect();
+        #[cfg(test)]
+        let italian = italian_tables().map(<[&str]>::to_vec);
+        #[cfg(not(test))]
+        let italian = [Vec::new(), Vec::new()];
+        let mut idx = Index { blobs: tables.map(|t| t.0), starts, by_key, italian: std::cell::RefCell::new(italian) };
         let mut by_key = std::mem::take(&mut idx.by_key);
-        by_key.sort_unstable_by_key(|&(t, e)| idx.text(t as usize, e as usize * 3));
+        by_key.sort_unstable_by_key(|&(t, e)| idx.text(t as usize, e as usize * 2));
         idx.by_key = by_key;
         idx
     };
+    /// 0 not asked, 1 being fetched, 2 there.
+    static ITALIAN: Cell<u8> = const { Cell::new(0) };
 }
 
+/// The text of `key`; Italian falls back to English while (or where) the Italian file has
+/// no text for it.
 pub(crate) fn lookup(key: &str, lang: Lang) -> Option<&'static str> {
     INDEX.with(|idx| {
-        let at = idx.by_key.binary_search_by(|&(t, e)| idx.text(t as usize, e as usize * 3).cmp(key)).ok()?;
-        let (t, e) = idx.by_key[at];
-        let e = e as usize * 3;
-        Some(idx.text(t as usize, if lang == Lang::It { e + 2 } else { e + 1 }))
+        let (t, e) = idx.find(key)?;
+        if lang == Lang::It
+            && let Some(s) = idx.italian.borrow()[t].get(e).copied().filter(|s| !s.is_empty())
+        {
+            return Some(s);
+        }
+        Some(idx.text(t, e * 2 + 1))
     })
+}
+
+/// Reads the Italian file (`key<TAB>text` lines); unknown keys are skipped, missing ones stay
+/// English. Returns the number of texts taken.
+fn install_italian(file: String) -> usize {
+    let file: &'static str = Box::leak(file.into_boxed_str());
+    INDEX.with(|idx| {
+        let mut it = idx.italian.borrow_mut();
+        for (t, v) in it.iter_mut().enumerate() {
+            v.clear();
+            v.resize((idx.starts[t].len() - 1) / 2, "");
+        }
+        let mut n = 0;
+        for line in file.lines() {
+            if let Some((k, text)) = line.split_once('\t')
+                && let Some((t, e)) = idx.find(k)
+            {
+                it[t][e] = text;
+                n += 1;
+            }
+        }
+        n
+    })
+}
+
+/// How long the boot screen waits for the Italian file before the interface shows in English
+/// (it switches to Italian as soon as the file arrives).
+const ITALIAN_WAIT_MS: u64 = 1200;
+
+/// The Italian file: the request `index.html` started while the wasm was loading
+/// (`window.__rynasIt`), or a new one.
+async fn fetch_italian() -> Option<String> {
+    use wasm_bindgen::JsCast;
+    let w = window();
+    let early = js_sys::Reflect::get(&w, &"__rynasIt".into()).ok().and_then(|p| p.dyn_into::<js_sys::Promise>().ok());
+    if early.is_some() {
+        let _ = js_sys::Reflect::delete_property(&w, &"__rynasIt".into());
+    }
+    let text = match early {
+        Some(p) => wasm_bindgen_futures::JsFuture::from(p).await.ok(),
+        None => {
+            let resp = wasm_bindgen_futures::JsFuture::from(w.fetch_with_str("/i18n/it.txt")).await.ok()?;
+            let resp: web_sys::Response = resp.dyn_into().ok()?;
+            if !resp.ok() {
+                return None;
+            }
+            wasm_bindgen_futures::JsFuture::from(resp.text().ok()?).await.ok()
+        }
+    };
+    text?.as_string().filter(|s| !s.is_empty())
+}
+
+/// Fetches the Italian texts once; `done` runs when they are there (or the fetch failed).
+fn load_italian(done: impl FnOnce() + 'static) {
+    if ITALIAN.with(Cell::get) != 0 {
+        return;
+    }
+    ITALIAN.with(|c| c.set(1));
+    leptos::task::spawn_local(async move {
+        let n = fetch_italian().await.map_or(0, install_italian);
+        // none: a later switch to Italian tries again
+        ITALIAN.with(|c| c.set(if n > 0 { 2 } else { 0 }));
+        done();
+    });
+}
+
+/// The Italian texts arrived after the interface rendered: render its texts again.
+fn italian_arrived() {
+    if ITALIAN.with(Cell::get) == 2 && sig().get_untracked() == Lang::It {
+        sig().update(|_| {});
+    }
+}
+
+/// Runs `mount` once the texts of the language are there: at once in English, after the
+/// Italian file (at most [`ITALIAN_WAIT_MS`]) in Italian.
+pub fn when_ready(mount: fn()) {
+    if sig().get_untracked() != Lang::It || ITALIAN.with(Cell::get) == 2 {
+        mount();
+        return;
+    }
+    let mounted = std::rc::Rc::new(Cell::new(false));
+    let m = mounted.clone();
+    load_italian(move || {
+        if m.replace(true) {
+            italian_arrived();
+        } else {
+            mount();
+        }
+    });
+    set_timeout(
+        move || {
+            if !mounted.replace(true) {
+                mount();
+            }
+        },
+        std::time::Duration::from_millis(ITALIAN_WAIT_MS),
+    );
 }
 
 /// The text of `key` in `lang`, for the tests of the pages.
@@ -176,11 +309,25 @@ pub fn text_in(lang: Lang, key: &str) -> Option<&'static str> {
 #[cfg(test)]
 pub(crate) fn entries() -> Vec<(&'static str, &'static str, &'static str)> {
     INDEX.with(|idx| {
+        let it = idx.italian.borrow();
         (0..2usize)
-            .flat_map(|t| (0..(idx.starts[t].len() - 1) / 3).map(move |e| (t, e)))
-            .map(|(t, e)| (idx.text(t, e * 3), idx.text(t, e * 3 + 1), idx.text(t, e * 3 + 2)))
+            .flat_map(|t| (0..(idx.starts[t].len() - 1) / 2).map(move |e| (t, e)))
+            .map(|(t, e)| (idx.text(t, e * 2), idx.text(t, e * 2 + 1), it[t][e]))
             .collect()
     })
+}
+
+/// The Italian file as the interface fetches it: one `key<TAB>text` line per entry.
+#[cfg(test)]
+pub(crate) fn italian_file() -> String {
+    let mut out = String::new();
+    for (k, _, it) in entries() {
+        out.push_str(k);
+        out.push('\t');
+        out.push_str(it);
+        out.push('\n');
+    }
+    out
 }
 
 /// Translate `key` in the current language (tracked). Unknown keys come back verbatim, so a
@@ -215,7 +362,7 @@ pub fn tf(key: &'static str, args: &[(&str, &str)]) -> String {
     s
 }
 
-dict! { BLOB, LENS;
+dict! { BLOB, LENS, IT;
     // navigation
     "nav.dashboard" => "Dashboard", "Dashboard";
     "nav.storage" => "Storage", "Archiviazione";
@@ -2767,7 +2914,8 @@ dict! { BLOB, LENS;
     "dk.set.volume_help" => "Holds the engine data, containerd and the stacks (<volume>/docker).", "Contiene i dati del motore, containerd e gli stack (<volume>/docker).";
     "dk.set.volume_none" => "None (rynas leaves the engine configuration alone)", "Nessuno (rynas non tocca la configurazione del motore)";
     "dk.set.manager" => "Preferred manager", "Gestore preferito";
-    "dk.set.manager_help" => "The manager the Apps page offers first.", "Il gestore che la pagina App propone per primo.";
+    "dk.set.manager_help" => "The manager the Apps & Plugins page offers first.", "Il gestore che la pagina App e plugin propone per primo.";
+    "apps.proxy_err" => "The web access state could not be read ({err}): apps are offered on the network only.", "Non è stato possibile leggere lo stato dell'accesso web ({err}): le app vengono proposte solo sulla rete.";
     "dk.set.mgr_none" => "None", "Nessuno";
     "dk.set.mgr_arcane" => "Arcane", "Arcane";
     "dk.set.mgr_dockhand" => "Dockhand", "Dockhand";
@@ -2931,6 +3079,8 @@ dict! { BLOB, LENS;
     "dk.w.cpu" => "CPU of all containers", "CPU di tutti i container";
     "dk.w.top" => "Busiest containers", "Container più attivi";
     "dk.w.none" => "No container is running.", "Nessun container in esecuzione.";
+    "dk.w.stopped" => "Docker engine stopped", "Motore Docker fermo";
+    "dk.w.stopped_text" => "Docker is installed but its engine does not answer. Open Docker to see why.", "Docker è installato ma il motore non risponde. Apri Docker per vederne il motivo.";
     // ---- Apps & Plugins (D-APPCAT, wave A2)
     "yes" => "Yes", "Sì";
     "no" => "No", "No";
@@ -3167,7 +3317,7 @@ dict! { BLOB, LENS;
     "apps.upd.migrations_text" => "The stored answers are adapted for versions {list}.", "Le risposte salvate vengono adattate per le versioni {list}.";
     "apps.upd.answers" => "New questions", "Nuove domande";
     "apps.upd.answers_text" => "This version asks for values the app did not have before.", "Questa versione chiede valori che l'app prima non aveva.";
-    "apps.upd.snapshot_help" => "Taken before anything changes; a failed update goes back to it by itself, and Roll back restores it later.", "Creata prima di ogni modifica; un aggiornamento fallito ci torna da solo e Ripristina la riporta in seguito.";
+    "apps.upd.snapshot_help" => "Taken before anything changes; a failed update goes back to it by itself, and Roll back restores it later.", "Creato prima di ogni modifica; un aggiornamento fallito ci torna da solo e Ripristina lo riporta in seguito.";
     "apps.upd.no_snapshot" => "The stack folder is not a btrfs subvolume: no snapshot is taken. A failed update puts the previous files back.", "La cartella dello stack non è un sottovolume btrfs: nessuna istantanea. Un aggiornamento fallito rimette i file precedenti.";
     "apps.upd.up_to_date" => "The app is up to date.", "L'app è aggiornata.";
     "apps.upd.downgrade" => "The catalogue has an older version than the installed one: the update is refused.", "Il catalogo ha una versione più vecchia di quella installata: l'aggiornamento viene rifiutato.";
@@ -3187,8 +3337,8 @@ dict! { BLOB, LENS;
     "sf.optional" => "(optional)", "(facoltativo)";
     "sf.none" => "None", "Nessuno";
     "sf.no_questions" => "This app asks no questions.", "Questa app non fa domande.";
-    "sf.when_on" => "On adds:", "Acceso aggiunge:";
-    "sf.when_off" => "Off adds:", "Spento aggiunge:";
+    "sf.when_on" => "When on:", "Se attivo:";
+    "sf.when_off" => "When off:", "Se disattivo:";
     "sf.err.required" => "Required.", "Obbligatorio.";
     "sf.err.enum" => "Choose one of the listed values.", "Scegli uno dei valori elencati.";
     "sf.err.integer" => "Enter a whole number.", "Inserisci un numero intero.";
@@ -3428,12 +3578,11 @@ mod tests {
         let core: Vec<(&str, &str, &str)> = {
             let mut at = 0usize;
             let mut v = Vec::new();
-            for e in LENS.chunks(3) {
+            for (e, it) in LENS.chunks(2).zip(IT) {
                 let k = &BLOB[at..at + e[0] as usize];
                 let en = &BLOB[at + e[0] as usize..at + (e[0] + e[1]) as usize];
-                let it = &BLOB[at + (e[0] + e[1]) as usize..at + (e[0] + e[1] + e[2]) as usize];
-                at += (e[0] + e[1] + e[2]) as usize;
-                v.push((k, en, it));
+                at += (e[0] + e[1]) as usize;
+                v.push((k, en, *it));
             }
             v
         };
@@ -3600,6 +3749,26 @@ mod tests {
             assert!(n > 10, "{enum_name}: variants not found");
         }
         assert!(missing.is_empty(), "plan codes without a text: {missing:#?}");
+    }
+
+    /// The Italian file the interface fetches (`assets/i18n/it.txt`) matches the tables. When
+    /// it does not, the test writes the current one and fails: commit the new file.
+    #[test]
+    fn italian_file_is_current() {
+        for (k, en, it) in entries() {
+            assert!(!k.contains(['\t', '\n']) && !it.contains(['\t', '\n']) && !en.contains('\n'), "tab or newline in {k}");
+        }
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/i18n/it.txt");
+        let want = italian_file();
+        if std::fs::read_to_string(path).ok().as_deref() != Some(want.as_str()) {
+            std::fs::create_dir_all(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/i18n")).unwrap();
+            std::fs::write(path, &want).unwrap();
+            panic!("assets/i18n/it.txt was out of date and has been rewritten: run the tests again and commit it");
+        }
+        // the file read back gives every Italian text
+        let n = install_italian(want);
+        assert_eq!(n, entries().len());
+        assert_eq!(lookup("nav.files", Lang::It), Some("File"));
     }
 
     #[test]

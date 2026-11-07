@@ -14,6 +14,9 @@
 //! - overlays (`AppOverlay::when` = a boolean field, optionally `!`-negated): the switch shows
 //!   what turning it on (or off) adds.
 //!
+//! The form stays JSON ([`Form`], the wire shape of `rynas_api_types::apps::AppForm`) and is
+//! read where it is used: no typed copy of the schema in the wasm (size).
+//!
 //! Titles and descriptions come in English from the entry and are shown as they are
 //! (`lang="en"`); messages of the client checks are translated. Values are JSON values
 //! (string, integer, boolean) keyed by property name: [`defaults`] → edits → [`answers`].
@@ -21,8 +24,8 @@
 use std::collections::BTreeMap;
 
 use leptos::prelude::*;
-use rynas_api_types::apps::{AppForm, AppOverlay, FormField, FormFieldType, FormFormat, FormWidget};
-use serde_json::Value;
+use rynas_api_types::apps::AppOverlay;
+use serde_json::{Map, Value};
 
 use crate::form::fid;
 use crate::i18n::{t, tf, tr};
@@ -33,19 +36,179 @@ pub type Values = BTreeMap<String, Value>;
 /// Error text by property name (translated, maybe with the server's detail).
 pub type Errors = BTreeMap<String, String>;
 
+/// A form (`AppForm` on the wire) as JSON.
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
+#[serde(transparent)]
+pub struct Form(pub Value);
+
+/// `type` of a property.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ty {
+    String,
+    Integer,
+    Boolean,
+}
+
+/// `format` of a string property.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    Hostname,
+    Uri,
+    Email,
+}
+
+/// `x-ui.widget`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Widget {
+    Text,
+    Password,
+    Textarea,
+    Select,
+    Switch,
+}
+
+/// One property of a [`Form`].
+#[derive(Clone, Copy)]
+pub struct Field<'a>(&'a Value);
+
+impl<'a> Field<'a> {
+    fn str_of(self, k: &str) -> Option<&'a str> {
+        self.0.get(k)?.as_str()
+    }
+
+    fn ui(self, k: &str) -> Option<&'a Value> {
+        self.0.get("x-ui")?.get(k)
+    }
+
+    pub fn ty(self) -> Ty {
+        match self.str_of("type") {
+            Some("integer") => Ty::Integer,
+            Some("boolean") => Ty::Boolean,
+            _ => Ty::String,
+        }
+    }
+
+    pub fn title(self) -> &'a str {
+        self.str_of("title").unwrap_or_default()
+    }
+
+    pub fn description(self) -> Option<&'a str> {
+        self.str_of("description")
+    }
+
+    pub fn default(self) -> Option<&'a Value> {
+        self.0.get("default").filter(|v| !v.is_null())
+    }
+
+    pub fn enum_values(self) -> Option<&'a Vec<Value>> {
+        self.0.get("enum")?.as_array()
+    }
+
+    pub fn minimum(self) -> Option<i64> {
+        self.0.get("minimum")?.as_i64()
+    }
+
+    pub fn maximum(self) -> Option<i64> {
+        self.0.get("maximum")?.as_i64()
+    }
+
+    pub fn min_length(self) -> Option<u32> {
+        self.0.get("minLength")?.as_u64().map(|n| n as u32)
+    }
+
+    pub fn max_length(self) -> Option<u32> {
+        self.0.get("maxLength")?.as_u64().map(|n| n as u32)
+    }
+
+    pub fn pattern(self) -> Option<&'a str> {
+        self.str_of("pattern")
+    }
+
+    pub fn format(self) -> Option<Format> {
+        match self.str_of("format")? {
+            "hostname" => Some(Format::Hostname),
+            "uri" => Some(Format::Uri),
+            "email" => Some(Format::Email),
+            _ => None,
+        }
+    }
+
+    pub fn widget(self) -> Option<Widget> {
+        match self.ui("widget")?.as_str()? {
+            "text" => Some(Widget::Text),
+            "password" => Some(Widget::Password),
+            "textarea" => Some(Widget::Textarea),
+            "select" => Some(Widget::Select),
+            "switch" => Some(Widget::Switch),
+            _ => None,
+        }
+    }
+
+    pub fn placeholder(self) -> Option<&'a str> {
+        self.ui("placeholder")?.as_str()
+    }
+
+    pub fn advanced(self) -> bool {
+        self.ui("advanced").and_then(Value::as_bool).unwrap_or(false)
+    }
+
+    pub fn enum_labels(self) -> Vec<String> {
+        self.ui("enum_labels").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default()
+    }
+
+    fn visible_if(self) -> Option<&'a Map<String, Value>> {
+        self.ui("visible_if")?.as_object()
+    }
+}
+
+impl Form {
+    fn props(&self) -> Option<&Map<String, Value>> {
+        self.0.get("properties")?.as_object()
+    }
+
+    /// The properties in name order.
+    pub fn fields(&self) -> impl Iterator<Item = (&String, Field<'_>)> {
+        self.props().into_iter().flat_map(|m| m.iter().map(|(k, v)| (k, Field(v))))
+    }
+
+    pub fn field(&self, name: &str) -> Option<Field<'_>> {
+        self.props()?.get(name).map(Field)
+    }
+
+    pub fn has(&self, name: &str) -> bool {
+        self.field(name).is_some()
+    }
+
+    pub fn required(&self, name: &str) -> bool {
+        self.0.get("required").and_then(Value::as_array).is_some_and(|r| r.iter().any(|v| v.as_str() == Some(name)))
+    }
+
+    /// `x-groups`: (title, fields).
+    fn groups(&self) -> Vec<(String, Vec<String>)> {
+        let Some(g) = self.0.get("x-groups").and_then(Value::as_array) else { return Vec::new() };
+        g.iter()
+            .map(|g| {
+                let title = g.get("title").and_then(Value::as_str).unwrap_or_default().to_string();
+                let fields = g.get("fields").and_then(Value::as_array).map(|f| f.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
+                (title, fields)
+            })
+            .collect()
+    }
+}
+
 /// The initial answers: every `default` of the form.
-pub fn defaults(form: &AppForm) -> Values {
-    form.properties.iter().filter_map(|(k, f)| f.default.clone().map(|d| (k.clone(), d))).collect()
+pub fn defaults(form: &Form) -> Values {
+    form.fields().filter_map(|(k, f)| f.default().map(|d| (k.clone(), d.clone()))).collect()
 }
 
 /// The value of `name` (its default when unanswered).
-fn value_of<'a>(form: &'a AppForm, values: &'a Values, name: &str) -> Option<&'a Value> {
-    values.get(name).or_else(|| form.properties.get(name).and_then(|f| f.default.as_ref()))
+fn value_of<'a>(form: &'a Form, values: &'a Values, name: &str) -> Option<&'a Value> {
+    values.get(name).or_else(|| form.field(name).and_then(Field::default))
 }
 
 /// Every `visible_if` condition holds.
-pub fn visible(form: &AppForm, values: &Values, field: &FormField) -> bool {
-    field.ui.as_ref().is_none_or(|ui| ui.visible_if.iter().all(|(k, want)| value_of(form, values, k) == Some(want)))
+pub fn visible(form: &Form, values: &Values, field: Field) -> bool {
+    field.visible_if().is_none_or(|c| c.iter().all(|(k, want)| value_of(form, values, k) == Some(want)))
 }
 
 /// Empty: not answered (an empty string counts as unanswered).
@@ -59,9 +222,9 @@ fn empty(v: Option<&Value>) -> bool {
 
 /// The answers to send: visible fields only, unanswered optional ones left out, integers typed
 /// as text parsed.
-pub fn answers(form: &AppForm, values: &Values) -> Values {
+pub fn answers(form: &Form, values: &Values) -> Values {
     let mut out = Values::new();
-    for (k, f) in &form.properties {
+    for (k, f) in form.fields() {
         if !visible(form, values, f) {
             continue;
         }
@@ -69,8 +232,8 @@ pub fn answers(form: &AppForm, values: &Values) -> Values {
         if empty(Some(v)) {
             continue;
         }
-        let v = match (f.ty, v) {
-            (FormFieldType::Integer, Value::String(s)) => s.trim().parse::<i64>().map(Value::from).unwrap_or_else(|_| v.clone()),
+        let v = match (f.ty(), v) {
+            (Ty::Integer, Value::String(s)) => s.trim().parse::<i64>().map(Value::from).unwrap_or_else(|_| v.clone()),
             _ => v.clone(),
         };
         out.insert(k.clone(), v);
@@ -119,58 +282,58 @@ fn email_ok(s: &str) -> bool {
 }
 
 /// The first rule `value` breaks (required, type, enum, range, length, pattern, format).
-pub fn check(field: &FormField, required: bool, value: Option<&Value>, pattern: PatternCheck) -> Option<Problem> {
+pub fn check(field: Field, required: bool, value: Option<&Value>, pattern: PatternCheck) -> Option<Problem> {
     if empty(value) {
-        return if required && field.ty != FormFieldType::Boolean { problem("sf.err.required", None) } else { None };
+        return if required && field.ty() != Ty::Boolean { problem("sf.err.required", None) } else { None };
     }
     let v = value?;
-    if let Some(allowed) = &field.enum_values
+    if let Some(allowed) = field.enum_values()
         && !allowed.contains(v)
         && !matches!(v, Value::String(s) if allowed.iter().any(|a| a.as_i64().is_some_and(|n| s.trim().parse::<i64>() == Ok(n))))
     {
         return problem("sf.err.enum", None);
     }
-    match field.ty {
-        FormFieldType::Boolean => None,
-        FormFieldType::Integer => {
+    match field.ty() {
+        Ty::Boolean => None,
+        Ty::Integer => {
             let n = match v {
                 Value::Number(n) => n.as_i64(),
                 Value::String(s) => s.trim().parse::<i64>().ok(),
                 _ => None,
             };
             let Some(n) = n else { return problem("sf.err.integer", None) };
-            if let Some(min) = field.minimum
+            if let Some(min) = field.minimum()
                 && n < min
             {
                 return problem("sf.err.min", Some(min));
             }
-            if let Some(max) = field.maximum
+            if let Some(max) = field.maximum()
                 && n > max
             {
                 return problem("sf.err.max", Some(max));
             }
             None
         }
-        FormFieldType::String => {
+        Ty::String => {
             let s = v.as_str().unwrap_or_default();
             let len = s.chars().count() as i64;
-            if let Some(min) = field.min_length
+            if let Some(min) = field.min_length()
                 && len < i64::from(min)
             {
                 return problem("sf.err.min_len", Some(i64::from(min)));
             }
-            if let Some(max) = field.max_length
+            if let Some(max) = field.max_length()
                 && len > i64::from(max)
             {
                 return problem("sf.err.max_len", Some(i64::from(max)));
             }
-            match field.format {
-                Some(FormFormat::Hostname) if !hostname_ok(s) => return problem("sf.err.hostname", None),
-                Some(FormFormat::Uri) if !uri_ok(s) => return problem("sf.err.uri", None),
-                Some(FormFormat::Email) if !email_ok(s) => return problem("sf.err.email", None),
+            match field.format() {
+                Some(Format::Hostname) if !hostname_ok(s) => return problem("sf.err.hostname", None),
+                Some(Format::Uri) if !uri_ok(s) => return problem("sf.err.uri", None),
+                Some(Format::Email) if !email_ok(s) => return problem("sf.err.email", None),
                 _ => {}
             }
-            if let Some(p) = &field.pattern
+            if let Some(p) = field.pattern()
                 && pattern(p, s) == Some(false)
             {
                 return problem("sf.err.pattern", None);
@@ -181,11 +344,10 @@ pub fn check(field: &FormField, required: bool, value: Option<&Value>, pattern: 
 }
 
 /// Every problem of the visible fields, as translated texts.
-pub fn errors(form: &AppForm, values: &Values, only: Option<&[String]>, pattern: PatternCheck) -> Errors {
-    form.properties
-        .iter()
-        .filter(|(k, f)| only.is_none_or(|o| o.contains(k)) && visible(form, values, f))
-        .filter_map(|(k, f)| check(f, form.required.contains(k), value_of(form, values, k), pattern).map(|p| (k.clone(), problem_text(&p))))
+pub fn errors(form: &Form, values: &Values, only: Option<&[String]>, pattern: PatternCheck) -> Errors {
+    form.fields()
+        .filter(|(k, f)| only.is_none_or(|o| o.contains(k)) && visible(form, values, *f))
+        .filter_map(|(k, f)| check(f, form.required(k), value_of(form, values, k), pattern).map(|p| (k.clone(), problem_text(&p))))
         .collect()
 }
 
@@ -198,10 +360,11 @@ pub fn problem_text(p: &Problem) -> String {
 
 /// The sections to draw: (title, fields) in `x-groups` order, then the properties no group
 /// names. `only` keeps those fields (an update asking for the missing answers).
-pub fn sections(form: &AppForm, only: Option<&[String]>) -> Vec<(String, Vec<String>)> {
-    let keep = |k: &String| form.properties.contains_key(k) && only.is_none_or(|o| o.contains(k));
-    let mut out: Vec<(String, Vec<String>)> = form.groups.iter().map(|g| (g.title.clone(), g.fields.iter().filter(|k| keep(k)).cloned().collect())).collect();
-    let rest: Vec<String> = form.properties.keys().filter(|k| keep(k) && !form.groups.iter().any(|g| g.fields.contains(k))).cloned().collect();
+pub fn sections(form: &Form, only: Option<&[String]>) -> Vec<(String, Vec<String>)> {
+    let keep = |k: &String| form.has(k) && only.is_none_or(|o| o.contains(k));
+    let groups = form.groups();
+    let mut out: Vec<(String, Vec<String>)> = groups.iter().map(|(title, fields)| (title.clone(), fields.iter().filter(|k| keep(k)).cloned().collect())).collect();
+    let rest: Vec<String> = form.fields().map(|(k, _)| k).filter(|k| keep(k) && !groups.iter().any(|g| g.1.contains(k))).cloned().collect();
     if !rest.is_empty() {
         out.push((String::new(), rest));
     }
@@ -219,11 +382,45 @@ fn text_of(v: Option<&Value>) -> String {
     }
 }
 
+/// What one field shows, read once from the schema.
+#[derive(Clone)]
+struct Def {
+    ty: Ty,
+    title: String,
+    description: Option<String>,
+    widget: Option<Widget>,
+    format: Option<Format>,
+    placeholder: String,
+    max_length: Option<u32>,
+    minimum: Option<i64>,
+    maximum: Option<i64>,
+    enum_values: Option<Vec<Value>>,
+    enum_labels: Vec<String>,
+}
+
+impl Def {
+    fn of(f: Field) -> Def {
+        Def {
+            ty: f.ty(),
+            title: f.title().to_string(),
+            description: f.description().map(str::to_string),
+            widget: f.widget(),
+            format: f.format(),
+            placeholder: f.placeholder().unwrap_or_default().to_string(),
+            max_length: f.max_length(),
+            minimum: f.minimum(),
+            maximum: f.maximum(),
+            enum_values: f.enum_values().cloned(),
+            enum_labels: f.enum_labels(),
+        }
+    }
+}
+
 /// What a form draws and reads: the schema, the answers, the overlays (switch hints), the
 /// server's field errors and whether every client error shows (after a Next).
 #[derive(Clone)]
 pub struct SchemaForm {
-    pub form: StoredValue<AppForm>,
+    pub form: StoredValue<Form>,
     pub overlays: StoredValue<Vec<AppOverlay>>,
     pub values: RwSignal<Values>,
     pub server: Signal<Errors>,
@@ -242,7 +439,7 @@ impl SchemaForm {
         }
         secs.into_iter()
             .map(|(title, fields)| {
-                let advanced = |k: &String| self.form.with_value(|f| f.properties.get(k).and_then(|p| p.ui.as_ref()).is_some_and(|u| u.advanced));
+                let advanced = |k: &String| self.form.with_value(|f| f.field(k).is_some_and(Field::advanced));
                 let (adv, main): (Vec<String>, Vec<String>) = fields.into_iter().partition(advanced);
                 let main = main.into_iter().map(|k| self.clone().field(k)).collect_view();
                 let adv = (!adv.is_empty()).then(|| {
@@ -268,14 +465,13 @@ impl SchemaForm {
 
     /// One property: the widget its type and `x-ui` ask for, hidden while `visible_if` fails.
     fn field(self, name: String) -> AnyView {
-        let Some(f) = self.form.with_value(|fm| fm.properties.get(&name).cloned()) else { return ().into_any() };
+        let Some(f) = self.form.with_value(|fm| fm.field(&name).map(Def::of)) else { return ().into_any() };
         let (form, values) = (self.form, self.values);
         let key = StoredValue::new(name.clone());
-        let shown = Memo::new(move |_| form.with_value(|fm| values.with(|v| fm.properties.get(&key.get_value()).is_some_and(|f| visible(fm, v, f)))));
-        let required = form.with_value(|fm| fm.required.contains(&name));
+        let shown = Memo::new(move |_| form.with_value(|fm| values.with(|v| fm.field(&key.get_value()).is_some_and(|f| visible(fm, v, f)))));
+        let required = form.with_value(|fm| fm.required(&name));
         let touched = RwSignal::new(false);
         let (server, reveal) = (self.server, self.reveal);
-        let field_def = StoredValue::new(f.clone());
         let err = Signal::derive(move || {
             let k = key.get_value();
             if let Some(e) = server.with(|s| s.get(&k).cloned()) {
@@ -284,25 +480,23 @@ impl SchemaForm {
             if !(touched.get() || reveal.get()) {
                 return None;
             }
-            let v = values.with(|v| form.with_value(|fm| value_of(fm, v, &k).cloned()));
-            field_def.with_value(|f| check(f, required, v.as_ref(), js_pattern)).map(|p| problem_text(&p))
+            values.with(|v| form.with_value(|fm| fm.field(&k).and_then(|f| check(f, required, value_of(fm, v, &k), js_pattern)))).map(|p| problem_text(&p))
         });
         let get = Signal::derive(move || values.with(|v| form.with_value(|fm| value_of(fm, v, &key.get_value()).cloned())));
         let set = Callback::new(move |v: Value| values.update(|m| {
             m.insert(key.get_value(), v);
         }));
-        let widget = f.ui.as_ref().and_then(|u| u.widget);
-        let body = match (f.ty, widget) {
-            (FormFieldType::Boolean, _) | (_, Some(FormWidget::Switch)) => self.switch(&name, &f, get, set),
-            (_, Some(FormWidget::Select)) => select(&f, required, get, set, err),
+        let body = match (f.ty, f.widget) {
+            (Ty::Boolean, _) | (_, Some(Widget::Switch)) => self.switch(&name, &f, get, set),
+            (_, Some(Widget::Select)) => select(&f, required, get, set, err),
             _ if f.enum_values.is_some() => select(&f, required, get, set, err),
-            _ => input(&f, required, widget, get, set, err, touched),
+            _ => input(&f, required, get, set, err, touched),
         };
         view! { <div class="sf-field" hidden=move || !shown.get()>{body}</div> }.into_any()
     }
 
     /// A boolean: a switch, with what its overlays add.
-    fn switch(&self, name: &str, f: &FormField, get: Signal<Option<Value>>, set: Callback<Value>) -> AnyView {
+    fn switch(&self, name: &str, f: &Def, get: Signal<Option<Value>>, set: Callback<Value>) -> AnyView {
         let on_adds: Vec<String> = self.overlays.with_value(|o| o.iter().filter(|o| o.when == name).map(|o| o.description.clone()).collect());
         let off_adds: Vec<String> = self.overlays.with_value(|o| o.iter().filter(|o| o.when.strip_prefix('!') == Some(name)).map(|o| o.description.clone()).collect());
         let checked = move || get.with(|v| matches!(v, Some(Value::Bool(true))));
@@ -325,7 +519,7 @@ impl SchemaForm {
 }
 
 /// Label with the "optional" marker.
-fn label(f: &FormField, required: bool, id: String) -> AnyView {
+fn label(f: &Def, required: bool, id: String) -> AnyView {
     view! {
         <label class="field-label" for=id>
             <span lang="en">{f.title.clone()}</span>
@@ -335,7 +529,7 @@ fn label(f: &FormField, required: bool, id: String) -> AnyView {
     .into_any()
 }
 
-fn help_err(f: &FormField, hid: &str, eid: String, err: Signal<Option<String>>) -> AnyView {
+fn help_err(f: &Def, hid: &str, eid: String, err: Signal<Option<String>>) -> AnyView {
     view! {
         {f.description.clone().map(|d| view! { <span class="field-help" id=hid.to_string() lang="en">{d}</span> })}
         <span class="field-error" id=eid aria-live="polite">
@@ -346,7 +540,7 @@ fn help_err(f: &FormField, hid: &str, eid: String, err: Signal<Option<String>>) 
 }
 
 /// Text, password, textarea and integer fields.
-fn input(f: &FormField, required: bool, widget: Option<FormWidget>, get: Signal<Option<Value>>, set: Callback<Value>, err: Signal<Option<String>>, touched: RwSignal<bool>) -> AnyView {
+fn input(f: &Def, required: bool, get: Signal<Option<Value>>, set: Callback<Value>, err: Signal<Option<String>>, touched: RwSignal<bool>) -> AnyView {
     let id = fid();
     let (hid, eid) = (format!("{id}h"), format!("{id}e"));
     let desc = {
@@ -363,16 +557,16 @@ fn input(f: &FormField, required: bool, widget: Option<FormWidget>, get: Signal<
             (!v.is_empty()).then(|| v.join(" "))
         }
     };
-    let integer = f.ty == FormFieldType::Integer;
+    let integer = f.ty == Ty::Integer;
     let text = move || get.with(|v| text_of(v.as_ref()));
     let on_input = move |ev: leptos::ev::Event| {
         let s = event_target_value(&ev);
         let v = if integer { s.trim().parse::<i64>().map(Value::from).unwrap_or(Value::String(s)) } else { Value::String(s) };
         set.run(v);
     };
-    let placeholder = f.ui.as_ref().and_then(|u| u.placeholder.clone()).unwrap_or_default();
+    let placeholder = f.placeholder.clone();
     let maxlength = f.max_length.unwrap_or(4096);
-    let control = if widget == Some(FormWidget::Textarea) {
+    let control = if f.widget == Some(Widget::Textarea) {
         view! {
             <textarea id=id.clone() class="input area" rows="4" spellcheck="false" placeholder=placeholder maxlength=maxlength
                 aria-invalid=move || err.with(Option::is_some).then_some("true") aria-describedby=desc
@@ -380,11 +574,11 @@ fn input(f: &FormField, required: bool, widget: Option<FormWidget>, get: Signal<
         }
         .into_any()
     } else {
-        let kind = match (integer, widget, f.format) {
+        let kind = match (integer, f.widget, f.format) {
             (true, _, _) => "number",
-            (_, Some(FormWidget::Password), _) => "password",
-            (_, _, Some(FormFormat::Email)) => "email",
-            (_, _, Some(FormFormat::Uri)) => "url",
+            (_, Some(Widget::Password), _) => "password",
+            (_, _, Some(Format::Email)) => "email",
+            (_, _, Some(Format::Uri)) => "url",
             _ => "text",
         };
         let auto = if kind == "password" { "new-password" } else { "off" };
@@ -407,12 +601,12 @@ fn input(f: &FormField, required: bool, widget: Option<FormWidget>, get: Signal<
 }
 
 /// An `enum`: a select with the `enum_labels` (or the values), an empty choice when optional.
-fn select(f: &FormField, required: bool, get: Signal<Option<Value>>, set: Callback<Value>, err: Signal<Option<String>>) -> AnyView {
+fn select(f: &Def, required: bool, get: Signal<Option<Value>>, set: Callback<Value>, err: Signal<Option<String>>) -> AnyView {
     let id = fid();
     let (hid, eid) = (format!("{id}h"), format!("{id}e"));
     let values: Vec<Value> = f.enum_values.clone().unwrap_or_default();
-    let labels: Vec<String> = f.ui.as_ref().map(|u| u.enum_labels.clone()).unwrap_or_default();
-    let integer = f.ty == FormFieldType::Integer;
+    let labels = &f.enum_labels;
+    let integer = f.ty == Ty::Integer;
     let opts = StoredValue::new(values.clone());
     let cur = move || get.with(|v| v.as_ref().map(|v| text_of(Some(v))).unwrap_or_default());
     let options = values
@@ -456,7 +650,7 @@ mod tests {
         })
     }
 
-    fn form() -> AppForm {
+    fn form() -> Form {
         serde_json::from_str(
             r#"{
             "type": "object",
@@ -474,6 +668,26 @@ mod tests {
           }"#,
         )
         .expect("form")
+    }
+
+    /// The JSON reader follows the wire shape of the API type: the same form typed and
+    /// serialized again reads the same.
+    #[test]
+    fn reads_the_wire_shape_of_app_form() {
+        let raw = form();
+        let typed: rynas_api_types::apps::AppForm = serde_json::from_value(raw.0.clone()).expect("typed");
+        let wire = Form(serde_json::to_value(&typed).expect("wire"));
+        assert_eq!(defaults(&wire), defaults(&raw));
+        assert_eq!(sections(&wire, None), sections(&raw, None));
+        for (k, f) in raw.fields() {
+            let w = wire.field(k).expect("field");
+            assert_eq!((w.ty(), w.title(), w.widget(), w.format(), w.advanced()), (f.ty(), f.title(), f.widget(), f.format(), f.advanced()), "{k}");
+            assert_eq!((w.minimum(), w.maximum(), w.min_length(), w.max_length(), w.pattern()), (f.minimum(), f.maximum(), f.min_length(), f.max_length(), f.pattern()), "{k}");
+            assert_eq!((w.enum_values(), w.enum_labels(), w.visible_if()), (f.enum_values(), f.enum_labels(), f.visible_if()), "{k}");
+            assert_eq!(wire.required(k), typed.required.contains(k), "{k}");
+        }
+        assert_eq!(typed.properties["PASS"].ui.as_ref().and_then(|u| u.widget), Some(rynas_api_types::apps::FormWidget::Password));
+        assert_eq!(wire.field("PASS").and_then(Field::widget), Some(Widget::Password));
     }
 
     #[test]
@@ -507,14 +721,14 @@ mod tests {
         v.insert("ML".into(), Value::Bool(true));
         v.insert("WORKERS".into(), Value::from(9));
         v.insert("MODE".into(), Value::from("c"));
-        let p = |k: &str| check(&f.properties[k], f.required.contains(&k.to_string()), v.get(k), pat).map(|p| p.key);
+        let p = |k: &str| check(f.field(k).unwrap(), f.required(k), v.get(k), pat).map(|p| p.key);
         assert_eq!(p("PASS"), Some("sf.err.min_len"));
         assert_eq!(p("USER"), Some("sf.err.pattern"));
         assert_eq!(p("URL"), Some("sf.err.pattern"));
         assert_eq!(p("WORKERS"), Some("sf.err.max"));
         assert_eq!(p("MODE"), Some("sf.err.enum"));
         v.insert("WORKERS".into(), Value::from("two"));
-        assert_eq!(check(&f.properties["WORKERS"], true, v.get("WORKERS"), pat).map(|p| p.key), Some("sf.err.integer"));
+        assert_eq!(check(f.field("WORKERS").unwrap(), true, v.get("WORKERS"), pat).map(|p| p.key), Some("sf.err.integer"));
         assert!(hostname_ok("cloud.example.lan") && !hostname_ok("-bad.lan") && !hostname_ok("a..b"));
         assert!(uri_ok("https://docs.example.lan/x") && !uri_ok("ftp://x") && !uri_ok("https://"));
         assert!(email_ok("a@b.lan") && !email_ok("a@b") && !email_ok("@b.lan"));

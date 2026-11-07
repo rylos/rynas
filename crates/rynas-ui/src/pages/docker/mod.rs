@@ -6,13 +6,20 @@
 //!   ([`install_card`], also shown here when the page is opened directly).
 //! - Every stack and container is shown, whoever made it; stacks rynas does not manage are
 //!   read-only here (start, stop, restart only).
-//! - Lists are read again on `docker.changed` events and when a `docker.*` task ends; CPU and
-//!   memory come from the aggregated `docker.stats` events and update in place.
+//! - Lists are read again on `docker.changed` events (debounced, and only by the visible tab;
+//!   a hidden tab reads again when it is shown) and when a `docker.*` task ends; the update
+//!   report is one per page and is read again only when a `docker.*` task ends. CPU and memory
+//!   come from the aggregated `docker.stats` events and update in place.
+//! - Tables are keyed by id: a refresh updates the rows in place (hover, focus, running
+//!   actions survive); row actions keep their button focusable while they run
+//!   (`aria-disabled`, G10).
 
 mod containers;
 mod images;
 mod overview;
 mod stacks;
+
+use std::collections::HashSet;
 
 pub use overview::install_card;
 pub(crate) use stacks::{launch, reason_key, state_pill};
@@ -20,16 +27,16 @@ pub(crate) use stacks::{launch, reason_key, state_pill};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use rynas_api_types::TaskStatus;
-use rynas_api_types::docker::{ContainerHealth, ContainerState, DockerStats, ManagerKind, PortMapping, StackManager};
+use rynas_api_types::docker::{ContainerHealth, ContainerState, ManagerKind, PortMapping, StackManager, UpdateReport, DockerSettingsState};
 use serde::de::DeserializeOwned;
 
-use crate::docker::docker;
+use crate::docker::{Stats, docker};
 use crate::form::tabs;
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::tasks;
 use crate::toast::toast;
-use crate::ui::{self, Meter, PageHeader, Remote, Skeleton, Tone, WidgetHead};
+use crate::ui::{self, EmptyState, Meter, PageHeader, Remote, Skeleton, Tone, WidgetHead};
 
 const TABS: &[&str] = &["dk.tab.overview", "dk.tab.containers", "dk.tab.stacks", "dk.tab.images"];
 
@@ -63,6 +70,19 @@ pub fn DockerPage() -> impl IntoView {
     }
 }
 
+/// What the tabs share: the visible tab, the page's one update report and the settings.
+#[derive(Clone, Copy)]
+struct Page {
+    tab: RwSignal<usize>,
+    updates: Remote<UpdateReport>,
+    /// Docker settings (Overview and the stack editor), read again after configuration changes.
+    settings: Remote<DockerSettingsState>,
+}
+
+fn page() -> Page {
+    expect_context::<Page>()
+}
+
 /// The four tabs; a tab is built on its first visit and kept (lists, drafts, filters).
 fn tabbed() -> AnyView {
     // `?stack=<name>` opens the Stacks tab on that stack
@@ -75,6 +95,16 @@ fn tabbed() -> AnyView {
             seen.update(|s| s[i] = true);
         }
     });
+    // digests change only through a task (update check, pull, update, rollback)
+    let updates = Remote::<UpdateReport>::new("/api/v1/docker/updates");
+    let ended = docker().ended;
+    Effect::new(move |prev: Option<()>| {
+        ended.track();
+        if prev.is_some() {
+            updates.reload();
+        }
+    });
+    provide_context(Page { tab, updates, settings: Remote::with_config("/api/v1/docker/settings") });
     let panel = move |i: usize, body: fn() -> AnyView| {
         let mounted = Memo::new(move |_| seen.with(|s| s[i]));
         view! {
@@ -95,18 +125,25 @@ fn tabbed() -> AnyView {
 
 // ------------------------------------------------------------------ shared pieces
 
-/// A list the page shows, read again on every `docker.changed` (only a changed answer
-/// changes the data, see [`Remote`]).
-fn remote<T: DeserializeOwned + Send + Sync + 'static>(url: &str) -> Remote<T> {
+/// A list shown on tab `tab`, read again after `docker.changed` (debounced) while that tab is
+/// visible; a hidden tab reads it again when it is shown (only a changed answer changes the
+/// data, see [`Remote`]).
+fn remote<T: DeserializeOwned + Send + Sync + 'static>(url: &str, tab: usize) -> Remote<T> {
     let r = Remote::<T>::new(url);
-    let g = docker().generation;
-    Effect::new(move |prev: Option<()>| {
-        g.track();
-        if prev.is_some() {
-            r.reload();
-        }
-    });
+    follow_changes(tab, Callback::new(move |_| r.reload()));
     r
+}
+
+/// Body of [`remote`], not generic.
+fn follow_changes(tab: usize, reload: Callback<()>) {
+    let shown = page().tab;
+    crate::docker::follow(docker().generation, Signal::derive(move || shown.get() == tab), reload);
+}
+
+/// Images of the update report with a newer registry digest.
+fn updatable() -> Memo<Vec<String>> {
+    let u = page().updates;
+    Memo::new(move |_| u.data.with(|u| u.as_ref().map(|u| u.images.iter().filter(|i| i.update_available).map(|i| i.image.clone()).collect()).unwrap_or_default()))
 }
 
 /// Starts a `docker.*` action (202) and follows it to its end: the task panel shows it
@@ -118,6 +155,58 @@ fn act(url: String, body: Option<String>, busy: RwSignal<bool>) {
         let _ = busy.try_set(false);
         done_toast(r);
     });
+}
+
+/// Actions running on a panel, by key (`<name>`): rows are kept across refreshes, the set
+/// outlives them anyway (a row rebuilt while its action runs stays busy).
+type Busy = RwSignal<HashSet<String>>;
+
+/// [`act`] for a row: `key` is in `busy` while the task runs.
+fn act_row(url: String, busy: Busy, key: String) {
+    if busy.with_untracked(|b| b.contains(&key)) {
+        return;
+    }
+    busy.update(|b| {
+        b.insert(key.clone());
+    });
+    spawn_local(async move {
+        let r = tasks::run_task(&url, None).await;
+        let _ = busy.try_update(|b| b.remove(&key));
+        done_toast(r);
+    });
+}
+
+/// An icon button of a row action (`<what>/<name>/<action>`): stays focusable while its task
+/// runs (`aria-disabled`, clicks ignored), hidden when `shown` is false.
+fn row_btn(icon: &'static str, key: &'static str, what: &'static str, name: String, action: &'static str, busy: Busy, shown: Signal<bool>) -> AnyView {
+    let label = format!("{}: {}", t(key), name);
+    let running = Memo::new({
+        let name = name.clone();
+        move |_| busy.with(|b| b.contains(&name))
+    });
+    view! {
+        <button class="icon-btn sm" data-act="" title=tr(key) aria-label=label hidden=move || !shown.get()
+            aria-disabled=move || running.get().then_some("true")
+            on:click=move |_| act_row(action_url(what, &name, action), busy, name.clone())>
+            <Icon icon=icon size=16 />
+        </button>
+    }
+    .into_any()
+}
+
+/// The "update available" chip.
+fn update_chip() -> AnyView {
+    view! { <span class="chip accent"><Icon icon=icons::DOWNLOAD size=12 />{tr("dk.upd.available")}</span> }.into_any()
+}
+
+/// An image reference (`registry/repo:tag`) that wraps at its separators.
+fn image_ref(s: &str) -> AnyView {
+    ui::breakable(s, "mono small")
+}
+
+/// The empty state of a Docker list.
+fn empty(icon: &'static str, title: &'static str, text: Option<&'static str>) -> AnyView {
+    view! { <EmptyState icon=icon title=Signal::derive(move || t(title).to_string()) text=Signal::derive(move || text.map(|k| t(k).to_string()).unwrap_or_default()) /> }.into_any()
 }
 
 fn done_toast(r: Result<rynas_api_types::TaskInfo, crate::api::ApiErr>) {
@@ -198,11 +287,6 @@ fn machine_pct(cpu_pct: f32, cpus: u32) -> f64 {
     cpu_pct as f64 / cpus.max(1) as f64
 }
 
-/// CPU and memory of one container from the latest sample (`None`: not in the sample).
-fn container_stat(id: &str) -> Option<(f64, u64)> {
-    docker().stats.with(|s| s.as_ref().and_then(|s| s.top.iter().find(|x| x.id == id).map(|x| (machine_pct(x.cpu_pct, s.cpus), x.mem_bytes))))
-}
-
 // ------------------------------------------------------------------ dashboard widget
 
 /// The dashboard's Docker widget (`docker.summary`), from the `docker.stats` events.
@@ -210,10 +294,36 @@ pub fn widget() -> AnyView {
     view! { <DockerWidget /> }.into_any()
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WState {
+    Waiting,
+    Stopped,
+    Live,
+}
+
 #[component]
 fn DockerWidget() -> impl IntoView {
+    let d = docker();
+    let st = d.stats;
+    // an installed engine that does not answer sends no sample: say so instead of waiting
+    let state = Memo::new(move |_| if d.stopped() { WState::Stopped } else if st.with(Option::is_some) { WState::Live } else { WState::Waiting });
+    view! {
+        <section class="card widget">
+            <WidgetHead icon=icons::CONTAINER title="w.docker">
+                <a class="w-link" href="/docker">{tr("dk.w.open")}<Icon icon=icons::CHEVRON_RIGHT size=14 /></a>
+            </WidgetHead>
+            {move || match state.get() {
+                WState::Waiting => view! { <Skeleton lines=4 /> }.into_any(),
+                WState::Stopped => empty(icons::CONTAINER, "dk.w.stopped", Some("dk.w.stopped_text")),
+                WState::Live => widget_body(),
+            }}
+        </section>
+    }
+}
+
+fn widget_body() -> AnyView {
     let st = docker().stats;
-    let num = move |f: fn(&DockerStats) -> u64| move || st.with(|s| s.as_ref().map(f).unwrap_or(0));
+    let num = move |f: fn(&Stats) -> u64| move || st.with(|s| s.as_ref().map(f).unwrap_or(0));
     let running = num(|s| s.running as u64);
     let total = num(|s| s.total as u64);
     let mem = num(|s| s.mem_bytes);
@@ -226,38 +336,30 @@ fn DockerWidget() -> impl IntoView {
     // the rows follow the ranking (keyed by id: a row moves, it is not built again)
     let ids = Memo::new(move |_| st.with(|s| s.as_ref().map(|s| s.top.iter().map(|x| x.id.clone()).collect::<Vec<_>>()).unwrap_or_default()));
     view! {
-        <section class="card widget">
-            <WidgetHead icon=icons::CONTAINER title="w.docker">
-                <a class="w-link" href="/docker">{tr("dk.w.open")}<Icon icon=icons::CHEVRON_RIGHT size=14 /></a>
-            </WidgetHead>
-            <Show when=move || st.with(Option::is_some) fallback=|| view! { <Skeleton lines=4 /> }>
-                <div class="dk-kpis">
-                    <div class="kpi-col">
-                        <div class="kpi"><span class="kpi-num">{running}</span><span class="kpi-unit">{move || format!("/ {}", total())}</span></div>
-                        <div class="kpi-sub">{tr("dk.w.running")}</div>
-                    </div>
-                    <div class="kpi-col">
-                        <div class="kpi"><span class="kpi-num">{move || i18n::num(cpu(), 1)}</span><span class="kpi-unit">"%"</span></div>
-                        <div class="kpi-sub">{tr("dk.w.cpu")}</div>
-                    </div>
-                    <div class="kpi-col">
-                        <div class="kpi"><span class="kpi-num dk-mem">{move || i18n::bytes(mem())}</span></div>
-                        <div class="kpi-sub">{move || format!("{} {}", t("m.of"), i18n::bytes(mem_total()))}</div>
-                    </div>
-                </div>
-                <Meter pct=mem_pct tone=Signal::derive(move || ui::usage_tone(mem_pct.get())) />
-                <div class="mini-title">{tr("dk.w.top")}</div>
-                <ul class="dk-top">
-                    <For each=move || ids.get() key=|id| id.clone() let:id>
-                        {top_row(id)}
-                    </For>
-                    <Show when=move || ids.with(Vec::is_empty)>
-                        <li class="muted small">{tr("dk.w.none")}</li>
-                    </Show>
-                </ul>
+        <div class="dk-kpis">
+            <div class="kpi-col">
+                <div class="kpi"><span class="kpi-num">{running}</span><span class="kpi-unit">{move || format!("/ {}", total())}</span></div>
+                <div class="kpi-sub">{tr("dk.w.running")}</div>
+            </div>
+            <div class="kpi-col">
+                <div class="kpi"><span class="kpi-num">{move || i18n::num(cpu(), 1)}</span><span class="kpi-unit">"%"</span></div>
+                <div class="kpi-sub">{tr("dk.w.cpu")}</div>
+            </div>
+            <div class="kpi-col">
+                <div class="kpi"><span class="kpi-num dk-mem">{move || i18n::bytes(mem())}</span></div>
+                <div class="kpi-sub">{move || format!("{} {}", t("m.of"), i18n::bytes(mem_total()))}</div>
+            </div>
+        </div>
+        <Meter pct=mem_pct tone=Signal::derive(move || ui::usage_tone(mem_pct.get())) />
+        <div class="mini-title">{tr("dk.w.top")}</div>
+        <ul class="dk-top">
+            {ui::keyed(ids.into(), Callback::new(top_row))}
+            <Show when=move || ids.with(Vec::is_empty)>
+                <li class="muted small">{tr("dk.w.none")}</li>
             </Show>
-        </section>
+        </ul>
     }
+    .into_any()
 }
 
 /// One container of the widget's top list; its numbers change in place.

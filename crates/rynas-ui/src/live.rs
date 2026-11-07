@@ -446,7 +446,7 @@ impl Live {
             if ev.type_() == "docker.changed" {
                 d.on_changed();
             } else if let Some(txt) = ev.data().as_string()
-                && let Ok(s) = serde_json::from_str::<rynas_api_types::docker::DockerStats>(&txt)
+                && let Some(s) = crate::docker::parse_stats(&txt)
             {
                 d.on_stats(s);
             }

@@ -15,12 +15,19 @@
       d.setAttribute("data-density", n === "compact" ? "compact" : "comfortable");
       d.style.background = dark ? "#14171c" : "#e6e7ed";
       d.style.colorScheme = dark ? "dark" : "light";
+      // Italian texts are a separate file (src/i18n.rs): fetched while the wasm loads
+      var l = null;
+      try { l = localStorage.getItem("rynas.lang"); } catch (e) {}
+      if (l === "it" || (l !== "en" && /^it/i.test(navigator.language || ""))) {
+        window.__rynasIt = fetch("/i18n/it.txt").then(function (r) { return r.ok ? r.text() : ""; }, function () { return ""; });
+      }
     })();
   </script>
   <link rel="preload" href="/fonts/inter-latin.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link data-trunk rel="css" href="style/main.css">
   <link data-trunk rel="copy-dir" href="assets/fonts">
+  <link data-trunk rel="copy-dir" href="assets/i18n">
   <link data-trunk rel="copy-file" href="assets/favicon.svg">
   <!-- the file manager (Web Component), loaded only by the Files page: pages/files.rs -->
   <link data-trunk rel="copy-dir" href="files-app">

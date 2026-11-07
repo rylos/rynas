@@ -161,7 +161,7 @@ fn loaded(live: Live, w: W) -> bool {
         W::Cpu | W::Memory | W::Network | W::Disk => live.sample.with(Option::is_some),
         W::Health | W::Volumes => live.storage.with(Option::is_some) || live.storage_err.with(Option::is_some),
         W::Hardware => true,
-        W::Docker => crate::docker::docker().stats.with(Option::is_some),
+        W::Docker => crate::docker::docker().stats.with(Option::is_some) || crate::docker::docker().stopped(),
     }
 }
 

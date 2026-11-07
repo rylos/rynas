@@ -5,7 +5,7 @@
 //! Platform names (Synology, synohwd, synodeb) are allowed here: these texts are shown only
 //! where the module answers (G8d).
 
-crate::i18n::dict! { BLOB, LENS;
+crate::i18n::dict! { BLOB, LENS, IT;
     // notification source: every synodeb sender is one label
     "nt.src.synodeb" => "Base system", "Sistema di base";
     // synodeb event codes (`synodeb.<event>`, docs/synodeb-integration.md); log bodies are shown as sent

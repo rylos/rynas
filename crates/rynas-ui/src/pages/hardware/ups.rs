@@ -226,9 +226,7 @@ fn connected_view(u: RwSignal<Option<UpsStatus>>) -> AnyView {
         <div class="ups-head">
             <Status tone=Signal::derive(move || state.get().map_or(Tone::Unknown, |s| s.0)) text=Signal::derive(move || state.get().map(|s| t(s.1).to_string()).unwrap_or_default()) />
             <span class="ups-flags">
-                <For each=move || flags.get() key=|f| f.clone() let:f>
-                    {status(flag_tone(&f), flag_key(&f).map(|k| t(k).to_string()).unwrap_or_else(|| f.clone()))}
-                </For>
+                {crate::ui::keyed(Signal::derive(move || flags.get()), Callback::new(|f: String| status(flag_tone(&f), flag_key(&f).map(|k| t(k).to_string()).unwrap_or_else(|| f.clone()))))}
             </span>
         </div>
         <div class="hw-summary ups-kpis" role="img" aria-label=aria>
