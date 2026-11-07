@@ -9,6 +9,7 @@
 //! systemd-networkd manages; IPv6, bonds, VLANs and bridges are shown read-only.
 
 pub mod edit;
+pub mod remote;
 pub mod tools;
 pub mod trial;
 
@@ -90,6 +91,14 @@ pub fn Network() -> impl IntoView {
                     <p class="muted small">{tr("wa.open_text")}</p>
                 </div>
                 <a class="btn ghost" href="/network/web-access">{tr("open")}<Icon icon=icons::CHEVRON_RIGHT size=16 /></a>
+            </section>
+            <section class="card widget w-12 link-card">
+                <span class="w-icon"><Icon icon=icons::LINK size=18 /></span>
+                <div class="link-card-text">
+                    <h2 class="w-title">{tr("ts.title")}</h2>
+                    <p class="muted small">{tr("ts.open_text")}</p>
+                </div>
+                <a class="btn ghost" href="/network/remote-access">{tr("open")}<Icon icon=icons::CHEVRON_RIGHT size=16 /></a>
             </section>
             <section class="card widget w-12">
                 {tabs("net", &["net.tab_ifaces", "net.tab_revisions", "net.tab_rescue", "net.tab_tools"], tab, "net.title")}

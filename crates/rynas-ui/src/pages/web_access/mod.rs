@@ -475,6 +475,7 @@ fn overview() -> AnyView {
                     {kv("wa.ui.lan", ranges(&s.lan))}
                     {(!s.vpn.is_empty()).then(|| kv("wa.ui.vpn", ranges(&s.vpn)))}
                 </dl>
+                {crate::pages::network::remote::web_access_note()}
                 {ui::note(Tone::Info, icons::LIFE_BUOY, view! {
                     <span>{tr("wa.ui.emergency")}" "<a class="mono" href=emergency_url(s.emergency_port) target="_blank" rel="noopener">{emergency_url(s.emergency_port)}</a></span>
                 }.into_any())}

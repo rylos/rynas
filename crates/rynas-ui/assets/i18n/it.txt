@@ -2182,6 +2182,85 @@ net.h_loss	Perdita
 net.h_avg	Media ms
 net.h_best	Min ms
 net.h_worst	Max ms
+ts.title	Accesso remoto
+ts.subtitle	Raggiungi questo NAS da ovunque con Tailscale, senza aprire porte
+ts.open_text	Tailscale: installalo, collega il NAS alla tua tailnet e scegli cosa condivide.
+ts.install_title	Tailscale
+ts.install_text	Tailscale mette questo NAS nella tua rete privata (tailnet): i tuoi dispositivi lo raggiungono da ovunque al suo indirizzo, senza inoltro di porte. rynas lo installa dal repository ufficiale dei pacchetti di Tailscale.
+ts.install	Installa Tailscale
+ts.block.unsupported_os	Tailscale non ha un repository di pacchetti per questo sistema operativo.
+ts.block.unknown_release	La versione di questo sistema non ha un nome in codice, quindi non si può scegliere il repository giusto.
+ts.not_running	Tailscale è installato ma il suo servizio non è in esecuzione.
+ts.login_title	Accedi alla tua tailnet
+ts.login_text	Accedi con il browser, oppure incolla una chiave di autenticazione creata nella console di amministrazione. Una chiave con tag mantiene il NAS collegato senza scadenza della chiave.
+ts.auth_key	Chiave di autenticazione (facoltativa)
+ts.auth_key_help	Non viene più mostrata né scritta nei log.
+ts.hostname	Nome del dispositivo
+ts.hostname_help	Vuoto: il nome host del NAS.
+ts.login_server	Server di coordinamento
+ts.login_server_help	Solo per un server di coordinamento ospitato in proprio; altrimenti lascialo vuoto.
+ts.login	Accedi
+ts.login_url_text	Apri questo indirizzo su qualsiasi dispositivo e approva questo NAS:
+ts.open_login	Apri la pagina di accesso
+ts.login_wait	In attesa dell'indirizzo di accesso…
+ts.machine_auth	Accesso fatto: un amministratore della tailnet deve approvare questo dispositivo nella console di amministrazione.
+ts.status_title	Stato
+ts.state	Stato del collegamento
+ts.st.running	Connesso
+ts.st.stopped	Spento
+ts.st.needs_login	Disconnesso
+ts.st.needs_machine_auth	In attesa di approvazione
+ts.st.starting	Avvio in corso
+ts.st.no_state	Non configurato
+ts.st.unavailable	Servizio non in esecuzione
+ts.dns_name	Nome nella tailnet
+ts.addresses	Indirizzi Tailscale
+ts.tailnet	Tailnet
+ts.peers	Altri dispositivi
+ts.peers_val	{online} in linea su {total}
+ts.key_expiry	Scadenza della chiave
+ts.key_never	Mai (scadenza disattivata per questo dispositivo)
+ts.key_soon	La chiave scade il {date}. Rinnovala, oppure disattiva la scadenza per questo dispositivo nella console di amministrazione, altrimenti il NAS esce dalla tailnet.
+ts.version	Versione installata
+ts.update	{v} disponibile con gli aggiornamenti di sistema
+ts.offline	Non connesso al server di coordinamento.
+ts.health	Tailscale segnala:
+ts.options_title	Opzioni
+ts.opt.accept_routes	Usa le rotte degli altri dispositivi
+ts.opt.accept_routes_help	Spento su un server: una rotta verso la rete di questo NAS attraverso la tailnet può rendere irraggiungibile la rete locale.
+ts.opt.accept_dns	Usa le impostazioni DNS della tailnet
+ts.opt.accept_dns_help	Spento di norma: il NAS tiene i suoi server DNS locali. Acceso: i nomi della tailnet si risolvono anche sul NAS e la sua configurazione DNS cambia.
+ts.opt.exit_node	Offri questo NAS come nodo di uscita
+ts.opt.exit_node_help	I dispositivi della tailnet possono far passare tutto il loro traffico internet da questo NAS, dopo l'approvazione nella console di amministrazione.
+ts.opt.routes	Condividi la rete locale
+ts.opt.routes_help	I dispositivi della tailnet raggiungono queste sottoreti attraverso questo NAS, dopo l'approvazione nella console di amministrazione. Tutto ciò che contengono diventa raggiungibile dalla tailnet: limitalo con le regole di accesso della tailnet.
+ts.opt.no_lan	Nessuna sottorete IPv4 trovata sulle interfacce di rete.
+ts.opt.ssh	SSH di Tailscale
+ts.opt.ssh_help	Spento di norma. Acceso: decidono le regole di accesso della tailnet chi può entrare via SSH, non gli account di questo NAS.
+ts.routes_pending	In attesa di approvazione nella console di amministrazione: {routes}
+ts.confirm_title	Cambiare le opzioni di Tailscale?
+ts.confirm_text	La modifica viene provata: se questa pagina non raggiunge di nuovo il NAS entro 90 secondi, tornano da sole le opzioni precedenti.
+ts.via_warning	Questa pagina è aperta tramite Tailscale: questo può chiudere la sessione. Tieni pronto un altro accesso (rete locale, indirizzo di emergenza).
+ts.saved	Opzioni di Tailscale salvate
+ts.confirm_failed	Il NAS non ha potuto confermare la modifica: le opzioni precedenti tornano da sole entro 90 secondi.
+ts.pending_confirm	Una modifica delle opzioni di Tailscale attende conferma.
+ts.keep	Tieni le nuove opzioni
+ts.logout	Esci dalla tailnet
+ts.logout_title	Scollegare questo NAS dalla tailnet?
+ts.logout_text	Il NAS esce dalla tailnet e la sua chiave scade. Per rientrare servono il browser o una nuova chiave di autenticazione.
+ts.uninstall	Disinstalla
+ts.uninstall_title	Disinstallare Tailscale?
+ts.uninstall_text	Vengono rimossi il pacchetto, il suo repository e le impostazioni di inoltro scritte da rynas.
+ts.purge	Dimentica anche questo dispositivo: una nuova installazione entra nella tailnet come nuovo dispositivo
+ts.wa_on	Tailscale è connesso ({name}): «Questa rete e VPN» ammette anche i dispositivi della tailnet.
+ts.wa_off	Tailscale non è connesso: «Questa rete e VPN» non ammette dispositivi della tailnet.
+err.tailscale_not_installed	Tailscale non è installato.
+task.tailscale.install	Installazione di Tailscale
+task.tailscale.uninstall	Rimozione di Tailscale
+task.tailscale.login	Accesso a Tailscale
+task.tailscale.logout	Uscita da Tailscale
+task.tailscale.options	Opzioni Tailscale
+task.tailscale.revert	Ripristino opzioni Tailscale
 task.updates.check	Controllo aggiornamenti
 task.updates.install	Installazione aggiornamenti
 task.updates.autoremove	Rimozione pacchetti inutilizzati

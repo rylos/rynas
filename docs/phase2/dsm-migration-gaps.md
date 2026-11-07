@@ -16,7 +16,7 @@ synodeb hardware screens, the app catalogue, Docker stacks next to other manager
 |---|---|---|
 | A | Own-domain certificates in the UI (DNS-01) | backend done (W2, §5.4); the domains page is missing |
 | A | Import an external certificate | upload, plus a watched folder an external tool (acme.sh on a router, a corporate CA) pushes to; reload without downtime |
-| B | Tailscale | install and guided login; VPN ranges already feed the access rules |
+| B | Tailscale | install and guided login; VPN ranges already feed the access rules (design: `remote-access.md`) |
 | B | NUT server on the LAN | upsd reachable by other hosts (e.g. Home Assistant), with its own users |
 | B | Proxy on host:port | routes like `nas.example.com:8443 → app`, besides one name per app on 443 |
 | C | Adopt existing compose stacks | take over a project made by hand or by another manager without rewriting it |

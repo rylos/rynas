@@ -19,6 +19,7 @@ mod services;
 pub mod snapshots;
 pub mod storage;
 pub mod synology;
+pub mod tailscale;
 pub mod tls;
 pub mod updates;
 pub mod ups;
@@ -375,6 +376,9 @@ pub mod error_codes {
     /// Docker: the stack is not managed by rynas (Portainer's, or a compose project outside
     /// the stacks folder): its files are not edited and compose actions are not run (409).
     pub const STACK_NOT_MANAGED: &str = "stack_not_managed";
+    /// Tailscale: not installed (409); `GET /api/v1/tailscale` tells, and
+    /// `POST /api/v1/tailscale/install` installs it.
+    pub const TAILSCALE_NOT_INSTALLED: &str = "tailscale_not_installed";
 
     /// The code of a status when nothing more precise applies: used to turn framework
     /// rejections (bad query string, 405, 413...) into an `ApiError`.
@@ -445,6 +449,7 @@ pub mod error_codes {
         DOCKER_UNAVAILABLE,
         CONTAINERS_RUNNING,
         STACK_NOT_MANAGED,
+        TAILSCALE_NOT_INSTALLED,
     ];
 }
 

@@ -249,6 +249,16 @@ pub fn routes() -> Router<AppState> {
         .route("/web-access/imports/{id}/check", post(forward))
         .route("/web-access/imports/{id}/accept", post(forward))
         .route("/web-access/imports/{id}", delete(forward))
+        // Tailscale (remote access): status, install/uninstall, login/logout, options with
+        // their timed confirmation; with the local address of the connection (rynasd tells
+        // whether the session itself comes over the tailnet)
+        .route("/tailscale", get(forward_net))
+        .route("/tailscale/install", post(forward_net))
+        .route("/tailscale/uninstall", post(forward_net))
+        .route("/tailscale/login", post(forward_net))
+        .route("/tailscale/logout", post(forward_net))
+        .route("/tailscale/options", put(forward_net))
+        .route("/tailscale/options/confirm", post(forward_net))
         // network (P4): with the local address of the session's connection
         .route("/network/interfaces", get(forward_net))
         .route("/network/interfaces/{name}", put(forward_net))
