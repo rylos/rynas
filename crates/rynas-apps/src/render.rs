@@ -119,6 +119,8 @@ pub struct FolderPlan {
     pub share: bool,
     /// Owner of a folder to create (`uid`, `gid`); PUID:PGID unless app.toml says otherwise.
     pub owner: (u32, u32),
+    /// Created without copy-on-write when it lands on btrfs (`nocow` in app.toml).
+    pub nocow: bool,
 }
 
 /// The `x-rynas` block.
@@ -288,7 +290,7 @@ pub fn render(app: &CatalogApp, catalog: &str, provided: &Provided, req: &Instal
         };
         env.push((f.env.clone(), value));
         let owner = f.owner.as_deref().and_then(crate::manifest::parse_owner).unwrap_or((provided.puid, provided.pgid));
-        folders.push(FolderPlan { env: f.env.clone(), host_path: host, intent: Some(f.intent), ssd: f.ssd, share: false, owner });
+        folders.push(FolderPlan { env: f.env.clone(), host_path: host, intent: Some(f.intent), ssd: f.ssd, share: false, owner, nocow: f.nocow });
     }
     for s in &m.shares {
         match (req.shares.get(&s.env), &s.fallback) {
@@ -297,11 +299,11 @@ pub fn render(app: &CatalogApp, catalog: &str, provided: &Provided, req: &Instal
             }
             (Some(p), _) => {
                 env.push((s.env.clone(), p.clone()));
-                folders.push(FolderPlan { env: s.env.clone(), host_path: p.clone(), intent: None, ssd: Ssd::No, share: true, owner: (provided.puid, provided.pgid) });
+                folders.push(FolderPlan { env: s.env.clone(), host_path: p.clone(), intent: None, ssd: Ssd::No, share: true, owner: (provided.puid, provided.pgid), nocow: false });
             }
             (None, Some(fb)) => {
                 env.push((s.env.clone(), format!("./{fb}")));
-                folders.push(FolderPlan { env: s.env.clone(), host_path: format!("{appdata}/{fb}"), intent: Some(Intent::Data), ssd: Ssd::No, share: false, owner: (provided.puid, provided.pgid) });
+                folders.push(FolderPlan { env: s.env.clone(), host_path: format!("{appdata}/{fb}"), intent: Some(Intent::Data), ssd: Ssd::No, share: false, owner: (provided.puid, provided.pgid), nocow: false });
             }
             (None, None) => return Err(RenderError::MissingValue(s.env.clone())),
         }

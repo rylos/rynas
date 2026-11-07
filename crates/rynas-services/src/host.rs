@@ -29,6 +29,9 @@ pub struct PathInfo {
     pub subvolume_uuid: Option<String>,
     /// `path` itself is a symbolic link (the other fields describe its target).
     pub symlink: bool,
+    /// The folder has the btrfs no copy-on-write attribute ([`crate::nocow`]); `None`
+    /// when not on btrfs or unreadable.
+    pub nocow: Option<bool>,
 }
 
 pub trait ShareHost: Send + Sync {
@@ -124,8 +127,9 @@ pub trait SubvolumeCreator: Send + Sync {
     /// Mount point of a mounted rynas volume (by label).
     fn volume_path(&self, volume: &str) -> Result<String, String>;
     /// Creates `path` (directly below a volume's mount point) as a subvolume; with
-    /// `compression` false its `compression` property is set to "none".
-    fn create(&self, path: &str, compression: bool, log: &dyn Fn(&str)) -> Result<(), String>;
+    /// `compression` false its `compression` property is set to "none"; with `nocow` the
+    /// empty subvolume gets the no copy-on-write attribute (compression then does not apply).
+    fn create(&self, path: &str, compression: bool, nocow: bool, log: &dyn Fn(&str)) -> Result<(), String>;
     /// The mounted rynas volumes: (label, mount point).
     fn volumes(&self) -> Vec<(String, String)> {
         Vec::new()
@@ -262,6 +266,9 @@ impl ShareHost for HostShares {
         if info.fs_type == "btrfs" && md.ino() == 256 {
             info.subvolume = true;
             info.subvolume_uuid = subvolume_uuid(path).filter(|u| crate::validate::uuid(u));
+        }
+        if info.fs_type == "btrfs" && info.is_dir {
+            info.nocow = crate::nocow::get(path);
         }
         info
     }
@@ -491,8 +498,16 @@ impl MemoryShares {
                 subvolume: uuid.is_some(),
                 subvolume_uuid: uuid.map(String::from),
                 symlink: false,
+                nocow: uuid.map(|_| false),
             },
         );
+    }
+
+    /// Sets the no copy-on-write state of a declared btrfs directory.
+    pub fn set_nocow(&self, path: &str, on: bool) {
+        if let Some(i) = self.state().paths.get_mut(path) {
+            i.nocow = Some(on);
+        }
     }
 }
 

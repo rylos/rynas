@@ -93,6 +93,12 @@ pub fn warning_text(w: &ShareWarning) -> String {
         ShareWarningCode::SubvolumeOnApplyNoCompression => format!(
             "{path} will be created as a subvolume of volume {volume}, without compression, when the change is applied"
         ),
+        ShareWarningCode::SubvolumeOnApplyNocow => format!(
+            "{path} will be created as a subvolume of volume {volume}, without copy-on-write, when the change is applied"
+        ),
+        ShareWarningCode::NocowSnapshots => format!(
+            "{path} has no copy-on-write and a snapshot job: snapshots work, but data rewritten after a snapshot takes new space while the snapshot is kept"
+        ),
         ShareWarningCode::NotSubvolume => format!(
             "{path} is not a btrfs subvolume: snapshots, previous versions and quotas need one"
         ),
@@ -573,7 +579,9 @@ impl SharesDomain {
         };
         if let (Some(sv), false) = (&s.subvolume, info.exists) {
             w.push(ShareWarning {
-                code: if sv.compression {
+                code: if sv.nocow {
+                    ShareWarningCode::SubvolumeOnApplyNocow
+                } else if sv.compression {
                     ShareWarningCode::SubvolumeOnApply
                 } else {
                     ShareWarningCode::SubvolumeOnApplyNoCompression
@@ -916,7 +924,7 @@ impl Applier for SharesDomain {
                 "creating subvolume {} on volume {}",
                 s.path, sv.volume
             ));
-            c.create(&s.path, sv.compression, ctx.log)?;
+            c.create(&s.path, sv.compression, sv.nocow, ctx.log)?;
         }
 
         // 1. ACLs first, so a share never appears with the wrong permissions

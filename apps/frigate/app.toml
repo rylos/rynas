@@ -1,7 +1,7 @@
 schema = 1
 id = "frigate"
 name = "Frigate"
-version = "1.0.0"
+version = "1.0.1"
 app_version = "0.18.2"
 description = "Network video recorder with local AI object detection for IP cameras."
 homepage = "https://frigate.video"
@@ -81,6 +81,8 @@ description = "config.yml, the event database (frigate.db) and models"
 env = "RECORDINGS_FOLDER"
 path = "recordings"
 intent = "media"
+# continuous writes and deletes: created without copy-on-write on btrfs (no checksums there)
+nocow = true
 description = "Recordings, clips and snapshots: continuous writes, best on a dedicated volume without snapshots"
 
 [hardware]
@@ -100,7 +102,7 @@ text = "Frigate officially needs a CPU with AVX and AVX2. On CPUs without them (
 
 [[notes]]
 level = "warning"
-text = "Recordings write continuously. Place the recordings folder on a dedicated volume without snapshots or copy-on-write (ext4 or XFS), not in the stack folder, and set a retention period in Frigate."
+text = "Recordings write continuously. On btrfs the install creates the recordings folder without copy-on-write (files written in place, without checksums or compression). Best on a dedicated volume without snapshots, not in the stack folder, and set a retention period in Frigate."
 
 [[notes]]
 level = "info"

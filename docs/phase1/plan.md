@@ -662,6 +662,7 @@ applied it), next to the system state. Session, CSRF and error rules are those o
 | GET | `/api/v1/folders?sizes=` | — | `Vec<UnsharedFolder>` {volume, name, path, subvolume, size_bytes?, size_partial, size_at_ms?, size_standby, snapshots, removed_at_ms?, previous?}: top-level folders of the rynas volumes no share uses. Without `sizes` only the sizes already known (quick, nothing read); `sizes=true` measures the unknown ones and those older than 1 h (btrfs quota group of a subvolume when quotas are on, else a walk of 0.5 s per folder, 3 s in all), never on a volume with a disk in standby (`size_standby`, last known size kept); sizes are cleared by every apply of `shares` and every folder deletion |
 | POST | `/api/v1/folders/plan/delete` | `FolderRef` {volume, name} | `FolderDeletePlan` |
 | DELETE | `/api/v1/folders/{volume}/{name}?confirm={name}` | — | 202 `TaskStarted` (task `shares.folder-delete`: snapshots, folder, recycle bin); 400 `confirmation_required`, 409 `conflict` |
+| POST | `/api/v1/shares/{name}/nocow` | `ShareNocowRequest` {enabled} | 202 `TaskStarted` (task `shares.nocow`: `chattr +C`/`-C` on the folder of the **applied** share); 404 before the apply, 409 `folder_not_empty` (on, folder holds files), 409 `conflict` (not btrfs, symbolic link, missing). See "No copy-on-write folders" below |
 | GET | `/api/v1/shares/{name}/effective?principal=alice` (or `@group`) | — | `EffectivePermission` {access none/ro/rw/deny, sources [{kind, name, access, decisive}], explanation} |
 | GET | `/api/v1/config/drift` | — | `DriftReport` gains `state: Vec<StateDrift>` {key, object, kind, detail}: `unmanaged`, `missing`, `mismatch`, `missing_in_samba`, `missing_in_passwd` |
 
@@ -793,6 +794,68 @@ Additions to `rynas-config` for these domains: `Applier::order` (apply order acr
 `(new, old)` by its rollback), `Applier::state_drift` (non-file drift), `FileKind::Absent` (a file
 that must not exist, removed with a backup), `ApplyCtx::log` (task log lines from appliers),
 `System::restart_unit` / `System::set_unit_enabled`.
+
+### No copy-on-write folders (NOCOW, 2026-11-07, D-NOCOW)
+
+Video recordings, databases, VM images and torrents rewrite or append to big files all the
+time; on btrfs every rewrite goes to a new place (copy-on-write) and such files fragment. The
+usual answer is the per-inode `C` attribute (`FS_NOCOW_FL`, `chattr +C`) on an **empty**
+folder: files created in it afterwards inherit it and are rewritten in place. rynas already
+uses it for `@rynas-cache` (storage plan). What the files give up, said in the UI every time the
+option is offered:
+
+- **no data checksums** (NOCOW implies nodatasum): a scrub cannot detect damage in them, and on
+  RAID1/RAID10 btrfs cannot repair them from the good copy; an interrupted write can leave a
+  partial block;
+- **no compression** (the kernel refuses compression on a NOCOW inode; rynas does not set the
+  `compression` property on such a subvolume);
+- **snapshots and reflinks still work**: the first write to a block shared with a snapshot is
+  copied once, so data rewritten after a snapshot takes new space while the snapshot is kept
+  (snapshot jobs on these folders should keep few snapshots, or none);
+- it applies to files **created afterwards** only: the kernel sets the flag only on empty files,
+  and `chattr +C` on a folder does not touch the files already in it.
+
+The `nodatacow` mount option is not used: it is per filesystem (for btrfs, per mount of the
+filesystem, so every subvolume), which is far too wide for a NAS volume.
+
+Sources: btrfs docs, file attributes (`C`: "can be set/unset only on empty files", inherited
+from the folder) https://btrfs.readthedocs.io/en/latest/ch-file-attributes.html; btrfs docs,
+mount options (`nodatacow` implies `nodatasum`, "if nodatacow or nodatasum are enabled,
+compression is disabled", in-place updates risk partial writes)
+https://btrfs.readthedocs.io/en/latest/Administration.html; kernel patch refusing `+c +C`
+together https://lore.kernel.org/r/20200710100553.13567-1-dsterba@suse.com; libvirt/QEMU set
+NOCOW on VM image folders by default
+https://lists.libvirt.org/archives/list/devel@lists.libvirt.org/thread/5NUPHFAH2BFLAVGZUKYAZTMHHTDDBOQC/;
+the per-share "Enable Copy-on-write: Auto/No" of another NAS system, chosen when the share is
+created, with the same caveats and the same "re-create the share and copy the data back with
+`cp --reflink=never`" answer for existing data
+https://forums.unraid.net/topic/131477-btrfs-copy-on-write-cow-new-share-question/ and
+https://forums.unraid.net/topic/123037-reconsider-btrfs-nocow-default-option-on-domains-share-due-to-irrecoverable-corruption-risks/;
+a shared-folder "data checksum" option that can only be chosen at creation ("create a new shared
+folder with the option enabled and copy the existing data")
+https://mariushosting.com/synology-how-to-create-a-shared-folder-on-dsm-7/. On ZFS the analogue
+is per-dataset tuning (`recordsize`, `sync`, `logbias`) rather than turning off CoW, which ZFS
+does not allow. The best ideas taken: a per-folder choice made at creation (not a volume-wide
+mount option), the trade-offs spelled out next to the switch, and the honest "make a new folder
+and copy" for existing data.
+
+What rynas does:
+
+| Where | What |
+|---|---|
+| New shared folder on a volume (`Share.subvolume.nocow`) | "No copy-on-write" switch under the volume picker (btrfs volumes only, so never on ext4/XFS paths); while it is on the compression switch is hidden. The apply creates the subvolume, then `chattr +C` on it while empty (`subvol::create_commands`; the `SubvolumeCreator::create` hook got a `nocow` flag). Remark `subvolume_on_apply_nocow` until the apply |
+| New subvolume in Storage (`SubvolumeCreateRequest.nocow`) | the same checkbox in the create dialog (not in edit) |
+| Existing share folder | `ShareStatus.nocow` (`Option<bool>`, read with one unprivileged `FS_IOC_GETFLAGS` ioctl on the open folder, only for btrfs folders: no fork per share, no disk write). The editor shows the state with an action: **on** only when the folder is empty (its `#recycle` and `#snapshot` do not count; refused with 409 `folder_not_empty`), **off** always (only new files change; the confirmation says files already there keep NOCOW). Task `shares.nocow`, `chattr` through `System` so `--dry-system` only logs it. Location column: "· No copy-on-write" |
+| Snapshots | remark `nocow_snapshots` (computed by rynasd, which knows the snapshot jobs) on a NOCOW folder that has a snapshot job, plus a hint in the editor: snapshots work, rewritten data costs space; keep few, short retention, or none |
+| Docker apps | `[[folders]] nocow = true` in `app.toml` (6.2): the install sets the flag on the folder it has just made (empty), through the descriptor it walked with `O_NOFOLLOW` (`FS_IOC_SETFLAGS`), only when that folder is on btrfs; an existing folder is left alone; a failure is a log warning, not an error. The wizard and the catalogue drawer show a "No copy-on-write" chip and a hint. Frigate's recordings folder is marked (entry 1.0.1); its SQLite config folder is not (small, and the stack snapshot should stay cheap) |
+
+Not done, on purpose: moving the files of a non-empty folder into a new NOCOW folder as a task.
+It needs the apps and clients that write there stopped, twice the space until the old folder
+goes, a real copy (`rsync -aHAX` or `cp -a --reflink=never`: btrfs refuses to clone extents between
+files with and without checksums, so a copy must not depend on reflinks), and a swap of every place that
+names the folder (shares, app stacks, snapshot jobs). That is a rename across features that
+rynas cannot do safely on its own; the editor explains the manual steps (new folder with the
+option on, stop writers, copy, point the apps at it, delete the old one).
 
 `rynasd.service`: `ProtectHome=no` (homes are created and removed below `/home`; shares may live
 there too); `ProtectSystem=yes` keeps `/srv` (the folder of home links) and the volumes writable.

@@ -1237,6 +1237,10 @@ pub struct SubvolumeSettings {
     pub compression: bool,
     #[serde(default)]
     pub readonly: bool,
+    /// Only on creation: no copy-on-write (`chattr +C` on the empty subvolume), see
+    /// [`crate::ShareSubvolume::nocow`]. Ignored by `PUT`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub nocow: bool,
 }
 
 impl Default for SubvolumeSettings {
@@ -1244,6 +1248,7 @@ impl Default for SubvolumeSettings {
         Self {
             compression: true,
             readonly: false,
+            nocow: false,
         }
     }
 }

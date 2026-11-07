@@ -9,7 +9,7 @@ use std::time::Duration;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use rynas_api_types::{
-    ApiError, FolderDeletePlan, FolderUsageKind, PendingChanges, ShareView, StagedChanges,
+    ApiError, FolderDeletePlan, FolderUsageKind, PendingChanges, ShareView, ShareWarningCode, StagedChanges,
     TaskInfo, TaskStarted, UnsharedFolder, error_codes,
 };
 use rynas_auth::ManualClock;
@@ -57,7 +57,7 @@ impl SubvolumeCreator for Volumes {
             .then(|| "/srv/vol1".to_string())
             .ok_or_else(|| format!("volume {volume} is not mounted"))
     }
-    fn create(&self, _: &str, _: bool, _: &dyn Fn(&str)) -> Result<(), String> {
+    fn create(&self, _: &str, _: bool, _: bool, _: &dyn Fn(&str)) -> Result<(), String> {
         Ok(())
     }
     fn volumes(&self) -> Vec<(String, String)> {
@@ -354,4 +354,61 @@ fn volumes_are_btrfs_top_levels_at_a_label() {
         rynasd::storage_ops::volumes_in(mi),
         [("vol1".to_string(), "/vol1".to_string())]
     );
+}
+
+/// No copy-on-write for an applied share: refused while the folder holds files (409
+/// `folder_not_empty`) or before the share is applied, then a task that runs `chattr`; the
+/// state and the snapshot remark show in the share view.
+#[tokio::test]
+async fn nocow_is_turned_on_for_an_empty_folder_only() {
+    let e = env();
+    e.host.add_dir("/srv/vol1/cams", Some("22222222-2222-4333-8444-555555555555"));
+    e.host.add_dir("/srv/vol1/cams/#recycle", None);
+    for (name, path) in [("cams", "/srv/vol1/cams"), ("music", "/srv/vol1/music")] {
+        let (s, b) = call(&e, "POST", "/v1/shares", Some(json!({"name": name, "path": path}))).await;
+        assert_eq!(s, StatusCode::CREATED, "{}", String::from_utf8_lossy(&b));
+    }
+    // not applied yet
+    let (s, _) = call(&e, "POST", "/v1/shares/cams/nocow", Some(json!({"enabled": true}))).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    apply(&e);
+    let (_, b) = call(&e, "GET", "/v1/shares/cams", None).await;
+    let v: ShareView = serde_json::from_slice(&b).unwrap();
+    assert_eq!(v.status.nocow, Some(false));
+    // an ext4 folder: refused, and no state shown
+    let (s, b) = call(&e, "POST", "/v1/shares/music/nocow", Some(json!({"enabled": true}))).await;
+    assert_eq!((s, code(&b).as_str()), (StatusCode::CONFLICT, error_codes::CONFLICT));
+    let (_, b) = call(&e, "GET", "/v1/shares/music", None).await;
+    assert_eq!(serde_json::from_slice::<ShareView>(&b).unwrap().status.nocow, None);
+
+    // a file inside: refused with the reason
+    e.host.add_dir("/srv/vol1/cams/front", None);
+    let (s, b) = call(&e, "POST", "/v1/shares/cams/nocow", Some(json!({"enabled": true}))).await;
+    assert_eq!((s, code(&b).as_str()), (StatusCode::CONFLICT, error_codes::FOLDER_NOT_EMPTY));
+    e.host.state().paths.remove("/srv/vol1/cams/front");
+
+    // empty (the recycle bin does not count): a task runs chattr +C
+    runs(&e);
+    let (s, b) = call(&e, "POST", "/v1/shares/cams/nocow", Some(json!({"enabled": true}))).await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{}", String::from_utf8_lossy(&b));
+    let t = wait_task(&e, &serde_json::from_slice::<TaskStarted>(&b).unwrap().task_id).await;
+    assert!(t.error.is_none(), "{t:?}");
+    assert!(runs(&e).iter().any(|c| c == "run chattr +C /srv/vol1/cams"));
+
+    // with the attribute and a snapshot job: the remark about rewritten data
+    e.host.set_nocow("/srv/vol1/cams", true);
+    let (s, b) = call(&e, "POST", "/v1/snapshots/jobs", Some(json!({"name": "cams", "share": "cams"}))).await;
+    assert_eq!(s, StatusCode::CREATED, "{}", String::from_utf8_lossy(&b));
+    let (_, b) = call(&e, "GET", "/v1/shares/cams", None).await;
+    let v: ShareView = serde_json::from_slice(&b).unwrap();
+    assert_eq!(v.status.nocow, Some(true));
+    assert!(v.status.warning_items.iter().any(|w| w.code == ShareWarningCode::NocowSnapshots), "{:?}", v.status);
+    assert_eq!(v.status.warnings.len(), v.status.warning_items.len());
+
+    // off is allowed with files inside
+    e.host.add_dir("/srv/vol1/cams/front", None);
+    let (s, b) = call(&e, "POST", "/v1/shares/cams/nocow", Some(json!({"enabled": false}))).await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{}", String::from_utf8_lossy(&b));
+    wait_task(&e, &serde_json::from_slice::<TaskStarted>(&b).unwrap().task_id).await;
+    assert!(runs(&e).iter().any(|c| c == "run chattr -C /srv/vol1/cams"));
 }

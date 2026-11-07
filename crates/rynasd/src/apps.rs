@@ -1053,6 +1053,7 @@ impl AppsSvc {
             exists: rynas_docker::under(&self.docker.root, &f.host_path).exists(),
             owner: format!("{}:{}", f.owner.0, f.owner.1),
             suggested,
+            nocow: f.nocow,
         }
     }
 
@@ -1268,6 +1269,9 @@ fn make_folders(
         if made.last() == Some(&f.host_path) {
             made.pop();
             out.folders.push(f.host_path.clone());
+            if f.nocow {
+                nocow_folder(s, &f.host_path, log);
+            }
         }
         out.parents.extend(made);
         log(&format!(
@@ -1283,6 +1287,26 @@ fn make_folders(
         ));
     }
     Ok(out)
+}
+
+/// No copy-on-write for an app folder the install just made (empty): set on its descriptor,
+/// on btrfs only. A failure is logged, not fatal: the app works, only less well.
+fn nocow_folder(s: &DockerSvc, host_path: &str, log: &dyn Fn(&str)) {
+    if s.dry {
+        log(&format!("no copy-on-write for {host_path} (dry system: not changed)"));
+        return;
+    }
+    let r = rynas_docker::safefs::open_dir(&s.root, host_path).and_then(|d| {
+        if !rynas_services::nocow::on_btrfs(&d) {
+            return Ok(false);
+        }
+        rynas_services::nocow::set_fd(&d).map(|()| true)
+    });
+    match r {
+        Ok(true) => log(&format!("{host_path}: no copy-on-write (new files are written in place, without checksums)")),
+        Ok(false) => {}
+        Err(e) => log(&format!("warning: {host_path}: no copy-on-write not set: {e}")),
+    }
 }
 
 async fn blocking<T: Send + 'static>(

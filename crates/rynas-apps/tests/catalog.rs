@@ -74,6 +74,9 @@ fn device_overlays_render() {
     let r = render::render(frigate, "rynas", &p, &req).unwrap();
     let text = String::from_utf8(r.file("compose.yaml").unwrap().contents.clone()).unwrap();
     assert!(!text.contains("openvino") && !text.contains("/dev/dri"));
+    // the recordings folder asks for no copy-on-write; the config folder (SQLite, small) not
+    let nocow: Vec<(&str, bool)> = r.folders.iter().map(|f| (f.env.as_str(), f.nocow)).collect();
+    assert!(nocow.contains(&("RECORDINGS_FOLDER", true)) && nocow.contains(&("CONFIG_FOLDER", false)), "{nocow:?}");
 }
 
 /// `reverse_proxy` owns 80/443; `security.devices` gates non-GPU devices.

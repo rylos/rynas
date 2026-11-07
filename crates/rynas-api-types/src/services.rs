@@ -425,6 +425,20 @@ pub struct ShareSubvolume {
     /// false: `compression` property "none" (share profiles for video, photos, backups).
     #[serde(default = "share_yes")]
     pub compression: bool,
+    /// No copy-on-write: `chattr +C` on the new, empty subvolume, so every file created in
+    /// it is written in place (recordings, databases, VM images). Those files have no
+    /// checksums and no compression (`compression` is ignored). Only used when the
+    /// subvolume is created.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub nocow: bool,
+}
+
+/// `POST /api/v1/shares/{name}/nocow`: turns no copy-on-write on or off for the share's
+/// folder (task `shares.nocow`). On is refused unless the folder is empty; off is always
+/// allowed and only changes the files created afterwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ShareNocowRequest {
+    pub enabled: bool,
 }
 
 fn share_yes() -> bool {
@@ -639,6 +653,11 @@ pub struct ShareStatus {
     pub fs_type: String,
     /// The path is the root of a btrfs subvolume.
     pub subvolume: bool,
+    /// The folder has the no copy-on-write attribute (`FS_NOCOW_FL`, `lsattr -d` shows
+    /// `C`): files created in it are written in place, without checksums. `None` when the
+    /// folder is not on btrfs or the attribute cannot be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nocow: Option<bool>,
     /// Non-fatal remarks (extra options overriding managed keys, NFS clients need the
     /// same uids...) in English, for logs and the CLI; the UI translates `warning_items`.
     #[serde(default)]
@@ -683,6 +702,11 @@ pub enum ShareWarningCode {
     SubvolumeOnApply,
     /// The same, without compression.
     SubvolumeOnApplyNoCompression,
+    /// The same, without copy-on-write.
+    SubvolumeOnApplyNocow,
+    /// The folder has no copy-on-write and a snapshot job: snapshots work, but every block
+    /// rewritten after a snapshot takes new space while the snapshot is kept.
+    NocowSnapshots,
     /// `path` is not a btrfs subvolume.
     NotSubvolume,
     /// The SMB extra option `key` overrides a setting of rynas.

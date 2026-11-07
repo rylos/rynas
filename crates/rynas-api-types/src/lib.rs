@@ -379,6 +379,9 @@ pub mod error_codes {
     /// Tailscale: not installed (409); `GET /api/v1/tailscale` tells, and
     /// `POST /api/v1/tailscale/install` installs it.
     pub const TAILSCALE_NOT_INSTALLED: &str = "tailscale_not_installed";
+    /// Shares: the action needs an empty folder (turning on no copy-on-write) (409); the
+    /// message names a few entries.
+    pub const FOLDER_NOT_EMPTY: &str = "folder_not_empty";
 
     /// The code of a status when nothing more precise applies: used to turn framework
     /// rejections (bad query string, 405, 413...) into an `ApiError`.
@@ -450,6 +453,7 @@ pub mod error_codes {
         CONTAINERS_RUNNING,
         STACK_NOT_MANAGED,
         TAILSCALE_NOT_INSTALLED,
+        FOLDER_NOT_EMPTY,
     ];
 }
 
