@@ -170,3 +170,72 @@ close (`on_cleanup`, `Drop`).
    not monomorphizing nested `view!` tuples).
    Together ≈ 60-70 KiB, back near 1 110 KiB. If none of this is wanted before W1, raise the budget
    explicitly in `guidelines.md` §3.1 with the reason, as on 2026-11-05.
+
+## Resolution (2026-11-07, UI fixes)
+
+Branch `worktree-agent-aded93643058c000d`, main merged at `e33cd36` (backend fixes, `DockerStats.usage`).
+
+### Wasm
+
+| Build | wasm brotli -q 11 | Left of 1 200 KiB |
+|---|---|---|
+| Before (`fba32cb`, this review) | 1 208 764 B = 1 180.4 KiB | 19.6 KiB |
+| After (this branch, main merged) | 1 171 686 B = 1 144.2 KiB | **55.8 KiB** |
+
+−37.1 kB with the new code of this round included (keyed rows, logs buffer, dashboard state).
+The 60 KiB headroom target is missed by 4 KiB: the rest of the review's list would need the
+lean `AppCard` from the server (an API change) or a change of `RamGate` (internally tagged: the
+most expensive serde shape), both outside the UI.
+
+What was cut:
+- **Italian dictionary as a fetched file** (−31.9 kB): only English is compiled in;
+  `assets/i18n/it.txt` (`key<TAB>text`, 44 KiB brotli, served as `/i18n/it.txt`) is written by
+  the test `italian_file_is_current`. `index.html` starts the download while the wasm loads when
+  the language is Italian; the boot screen waits for it (at most 1.2 s, then English, switching
+  when it arrives); a switch to Italian later fetches it on demand. Tests keep both columns in
+  memory: every key still needs both texts (the macro), and the file is checked against them.
+- **Install form as JSON** (−3.6 kB): `schema_form::Form` reads the `AppForm` wire shape from a
+  `serde_json::Value` (a UI-local `AppDetail` with the same fields), a test checks it reads the
+  same as the typed form serialized again.
+- `/web-access` read through a two-field struct instead of the whole `WebAccessState`.
+- One `DockerStatus` reader (`#[inline(never)]`, 9.4 KB instead of 14.7 KB inlined).
+- Shared row helpers (`ui::text_cell`, `two_lines`, `breakable`, `keyed`, `row_hidden`,
+  `table_body`; `row_btn`, `update_chip`, `image_ref`, `empty` in the Docker page); one non-generic
+  keyed list (`ui::keyed`) also for the USB drives, volumes and UPS flags.
+- `detail_body` and the wizard's body/foot split into functions.
+
+### Findings
+
+| # | State | What |
+|---|---|---|
+| H1 | fixed | The table reads `DockerStats.usage` (every running container, main `e33cd36`), `top` for older servers (`docker::usage_of`, unit test). With the fake engine only containers that borrow a host cgroup have numbers (this host: one), the rest show "—" as before: a property of the fake set |
+| H2 | partly | 1 144.2 KiB, 55.8 KiB left (target 60): see above |
+| M1 | fixed | Containers and stacks tables are keyed (`ui::keyed`), every cell follows a per-row `Memo`, the filter hides rows (`hidden`) instead of rebuilding; running actions are a panel-level `HashSet` (a rebuilt row stays busy). The stack drawer builds its action bar once per stack kind, so a refresh keeps its buttons |
+| M2 | fixed | Row actions and the drawer's buttons use `aria-disabled` + ignored clicks (CSS `.icon-btn[aria-disabled]`), focus stays on the button |
+| M3 | fixed | One update report per page (context), read again only when a `docker.*` task ends (`Docker::ended`); Docker settings once per page; lists follow `docker.changed` debounced (300 ms, `docker::follow`) and only while their tab is visible (a hidden tab reads once when shown). Apps: the catalogue follows task ends only, the installed list `docker.changed` (debounced) |
+| M4 | fixed | Installed but not answering: "Docker engine stopped" empty state with the link (checked by stopping the fake engine); the dashboard counts it as loaded |
+| M5 | fixed | Log lines are buffered and appended once per frame as one text node; the oldest nodes go over 256 KiB or 5 000 lines; Download reads the `<pre>` |
+| M6 | fixed | `ui::breakable`: `<wbr>` after `/` and before `:`/`@` (`jellyfin/` `jellyfin:10.11.2`), still `anywhere` for a part wider than the cell |
+| L1 | fixed | "Creato … lo riporta" |
+| L2 | fixed | "When on:" / "Se attivo:", "When off:" / "Se disattivo:"; the overlay text stays `lang="en"` (catalogue texts are English) |
+| L3 | fixed | "the Apps & Plugins page" / "la pagina App e plugin" |
+| L4 | fixed | `/plugins` opens the Plugins section |
+| L5 | fixed | Only 503 (and 401) mean "inactive"; another failure shows a warning note |
+| L6 | fixed | `scroll_audit.py` prints one line per route and width (flush), has `ROUTE_TIMEOUT` per route, `LANGS`/`WIDTHS`, opens only the first visible row of each table and skips task buttons (`data-act`); it did not hang, it clicked every row action of every row (tasks, ~15 min per route). Exit 1 on findings or timeouts |
+| L7 | fixed | Only `/api/...` screenshot URLs are shown (the API serves the catalogue's files); CSP `img-src 'self'` already blocked others |
+
+Also found and fixed while checking: the stack drawer's Update / Remove / Rollback / delete
+snapshot dialogs never opened when the drawer was built before its details arrived (the
+dialogs closure returned before subscribing to `ask`).
+
+### Checks of what the review could not cover
+
+Instance `FAKE_DOCKER=1 tools/ui-audit/start.sh 18620`, `AUDIT_USER=$(id -un)`; screenshots
+`target/ui-audit/shots/x-*.png`.
+- Italian at 1280/768/390: containers, stacks, stack drawer, update and remove dialogs, stack
+  editor, logs drawer, Apps, install wizard, dashboard: no element scrolls sideways, no raw key.
+  The rollback dialog needs a stack folder that is a btrfs subvolume (the fake set has none).
+- `dash_shift.py 4` with the Docker widget: shift score 0 (login, reload, navigation).
+- `scroll_audit.py` on `/docker`, `/docker:1-3`, `/apps`, `/apps:1-4`, it+en, 1280/1024/390:
+  0 findings, 162 dialog views, no timeout, about 10 minutes (it printed every route as it went).
+- `states.py` (`ROUTES=/docker,/apps`, new `PARTS`/`ERR_BASE`/`ROUTES` options): focus visible on all 116 stops (light, dark); skeletons under 3 s latency (it, en, 390, 1280); with rynasd stopped both pages show the error state with Retry, no endless skeleton.

@@ -112,7 +112,7 @@ fn row(id: String, cx: Ctx) -> AnyView {
     });
     let Some(first) = c.get_untracked() else { return ().into_any() };
     let name = first.name.clone();
-    let stat = Memo::new(move |_| docker().stats.with(|s| s.as_ref().and_then(|s| s.of(&id))));
+    let stat = Memo::new(move |_| docker().stats.with(|s| s.as_ref().and_then(|s| crate::docker::usage_of(s, &id))));
     let running = Memo::new(move |_| c.with(|c| c.as_ref().is_some_and(|c| c.state == ContainerState::Running)));
     let hidden = Signal::derive(move || !cx.q.with(|q| cx.state.with(|s| c.with(|c| c.as_ref().is_some_and(|c| matches(c, q, s))))));
     let ports = Memo::new(move |_| c.with(|c| c.as_ref().map(|c| (c.state == ContainerState::Running, c.url.clone(), c.ports.clone()))));

@@ -1,5 +1,7 @@
 """Focus visibility (Tab through every route, light and dark), loading states (3 s latency) and
-error states (rynas-web without rynasd on 18601), en and it. Screenshots in shots/st-*."""
+error states (ERR_BASE: rynas-web without rynasd, default BASE), en and it. Screenshots in
+shots/st-*, results in $AUDIT_OUT/states.json. ROUTES=/docker,/apps limits the routes; PARTS=
+focus,loading,error picks the parts (all by default)."""
 import asyncio, json, os, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -17,6 +19,11 @@ cdp.PORT = 9440
 ROUTES = ["/", "/storage", "/storage/disks", "/storage/create", "/network", "/hardware", "/system",
           "/system/configuration", "/system/notifications", "/system/scheduler", "/notifications",
           "/snapshots", "/security", "/shares", "/users", "/services"]
+if os.environ.get("ROUTES"):
+    ROUTES = os.environ["ROUTES"].split(",")
+LOAD_ROUTES = ROUTES if os.environ.get("ROUTES") else ROUTES[:6] + ["/users", "/shares", "/snapshots", "/system/scheduler"]
+PARTS = os.environ.get("PARTS", "focus,loading,error").split(",")
+ERR_BASE = os.environ.get("ERR_BASE", BASE_URL)
 FOCUS = r"""(() => { const e = document.activeElement; if (!e || e === document.body) return null;
   const cs = getComputedStyle(e); const vis = cs.outlineStyle !== 'none' && parseFloat(cs.outlineWidth) > 0 || (cs.boxShadow && cs.boxShadow !== 'none');
   const r = e.getBoundingClientRect();
@@ -38,7 +45,7 @@ async def main():
         await p.goto(run_all.BASE + "/")
         await run_all.login(p)
         # focus
-        for theme in ["light", "dark"]:
+        for theme in (["light", "dark"] if "focus" in PARTS else []):
             await p.js(f"localStorage.setItem('rynas.theme','{theme}')")
             await p.goto(run_all.BASE + "/")
             await asyncio.sleep(1.5)
@@ -62,7 +69,7 @@ async def main():
         await p.js("localStorage.setItem('rynas.theme','light')")
         # loading: 3 s latency, screenshot after 1 s
         await p.send("Network.enable")
-        for lang in ["it", "en"]:
+        for lang in (["it", "en"] if "loading" in PARTS else []):
             await p.js(f"localStorage.setItem('rynas.lang','{lang}')")
             for w in [390, 1280]:
                 await p.send("Emulation.setDeviceMetricsOverride", width=w, height=860, deviceScaleFactor=1, mobile=w < 800)
@@ -70,7 +77,7 @@ async def main():
                 await p.goto(run_all.BASE + "/")
                 await asyncio.sleep(1.5)
                 await p.send("Network.emulateNetworkConditions", offline=False, latency=3000, downloadThroughput=-1, uploadThroughput=-1)
-                for r in ROUTES[:6] + ["/users", "/shares", "/snapshots", "/system/scheduler"]:
+                for r in LOAD_ROUTES:
                     await run_all.nav(p, r)
                     await asyncio.sleep(1.0)
                     n = await p.js("document.querySelectorAll('.skeleton').length")
@@ -79,10 +86,11 @@ async def main():
                     await p.shot(f"st-load-{lang}-{w}{r.replace('/', '_')}")
                 await p.send("Network.emulateNetworkConditions", offline=False, latency=0, downloadThroughput=-1, uploadThroughput=-1)
         # errors: rynas-web without rynasd
-        run_all.BASE = BASE_URL
-        await p.goto(run_all.BASE + "/")
-        await run_all.login(p)
-        for lang in ["it", "en"]:
+        run_all.BASE = ERR_BASE
+        if "error" in PARTS:
+            await p.goto(run_all.BASE + "/")
+            await run_all.login(p)
+        for lang in (["it", "en"] if "error" in PARTS else []):
             await p.js(f"localStorage.setItem('rynas.lang','{lang}')")
             for w in [390, 1280]:
                 await p.send("Emulation.setDeviceMetricsOverride", width=w, height=860, deviceScaleFactor=1, mobile=w < 800)
@@ -97,7 +105,7 @@ async def main():
                     await p.shot(f"st-err-{lang}-{w}{r.replace('/', '_')}")
     finally:
         br.terminate()
-    json.dump(out, open(os.path.join(HERE, "states.json"), "w"), indent=1, ensure_ascii=False)
+    json.dump(out, open(os.path.join(OUT_DIR, "states.json"), "w"), indent=1, ensure_ascii=False)
     print("focus checked", out["focus_n"], "bad", len(out["focus_bad"]))
     for x in out["focus_bad"]:
         print(" ", x)

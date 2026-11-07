@@ -110,7 +110,7 @@ pub fn lang_pref() -> Option<Lang> {
 /// The core table is below; a hardware module has its own table in its folder
 /// (`crate::modules::<module>::i18n`, same macro, D-MODULE), read together with this one.
 ///
-/// Only English is compiled into the interface: the Italian column (about 30 KiB brotli) is
+/// Only English is compiled into the interface: the Italian column (30 KiB brotli of wasm) is
 /// the file `assets/i18n/it.txt` (served as `/i18n/it.txt`), generated from these tables by
 /// the test `italian_file_is_current` and fetched when the language is Italian. The test
 /// build keeps the Italian column in memory, so every test sees both languages.
@@ -258,7 +258,8 @@ fn load_italian(done: impl FnOnce() + 'static) {
         return;
     }
     ITALIAN.with(|c| c.set(1));
-    leptos::task::spawn_local(async move {
+    // before the mount: the reactive executor is not set up yet
+    wasm_bindgen_futures::spawn_local(async move {
         let n = fetch_italian().await.map_or(0, install_italian);
         // none: a later switch to Italian tries again
         ITALIAN.with(|c| c.set(if n > 0 { 2 } else { 0 }));

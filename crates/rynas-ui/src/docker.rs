@@ -15,44 +15,20 @@ use std::cell::Cell;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use rynas_api_types::docker::{ContainerStat, DockerStatus};
-use serde::Deserialize;
+use rynas_api_types::docker::{DockerStats, DockerStatus};
 
 use crate::api;
 
-/// One running container in [`Stats::usage`]: id, % of one CPU, bytes.
-#[derive(Debug, Clone, PartialEq, Deserialize, Default)]
-pub struct Usage {
-    pub id: String,
-    pub cpu: f32,
-    pub mem: u64,
-}
+/// The `docker.stats` event (`usage`: every running container, from servers of 2026-11-07 on).
+pub type Stats = DockerStats;
 
-/// The `docker.stats` event (`rynas_api_types::docker::DockerStats`). `usage`, every running
-/// container of the sample, is read when the server sends it; older servers send only `top`.
-#[derive(Debug, Clone, PartialEq, Deserialize, Default)]
-pub struct Stats {
-    pub running: u32,
-    pub total: u32,
-    /// Sum over running containers, % of one CPU.
-    pub cpu_pct: f32,
-    pub cpus: u32,
-    pub mem_bytes: u64,
-    pub mem_total_bytes: u64,
-    /// Top 5 by CPU then memory.
-    pub top: Vec<ContainerStat>,
-    #[serde(default)]
-    pub usage: Vec<Usage>,
-}
-
-impl Stats {
-    /// CPU (% of the whole machine) and memory of one container: `usage`, else `top`.
-    pub fn of(&self, id: &str) -> Option<(f64, u64)> {
-        let cpus = self.cpus.max(1) as f64;
-        match self.usage.iter().find(|u| u.id == id) {
-            Some(u) => Some((u.cpu as f64 / cpus, u.mem)),
-            None => self.top.iter().find(|x| x.id == id).map(|x| (x.cpu_pct as f64 / cpus, x.mem_bytes)),
-        }
+/// CPU (% of the whole machine) and memory of one container: `usage`, else `top` (older
+/// servers send only the top 5).
+pub fn usage_of(s: &Stats, id: &str) -> Option<(f64, u64)> {
+    let cpus = s.cpus.max(1) as f64;
+    match s.usage.iter().find(|u| u.id == id) {
+        Some(u) => Some((u.cpu as f64 / cpus, u.mem)),
+        None => s.top.iter().find(|x| x.id == id).map(|x| (x.cpu_pct as f64 / cpus, x.mem_bytes)),
     }
 }
 
@@ -184,7 +160,8 @@ impl Docker {
 
     /// `docker.stats` event.
     pub fn on_stats(self, s: Stats) {
-        if self.stats.with_untracked(|cur| cur.as_ref() != Some(&s)) {
+        // a sample that differs only in its time changes nothing on screen
+        if self.stats.with_untracked(|cur| cur.as_ref().is_none_or(|c| *c != Stats { at_ms: c.at_ms, ..s.clone() })) {
             self.stats.set(Some(s));
         }
     }
@@ -206,5 +183,25 @@ impl Docker {
         self.status.set(None);
         self.status_err.set(None);
         self.stats.set(None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rynas_api_types::docker::{ContainerStat, ContainerUsage};
+
+    #[test]
+    fn usage_first_then_top() {
+        let s = Stats {
+            cpus: 4,
+            top: vec![ContainerStat { id: "a".into(), name: "a".into(), stack: None, cpu_pct: 40.0, mem_bytes: 1 }],
+            usage: vec![ContainerUsage { id: "b".into(), cpu: 8.0, mem: 2 }],
+            ..Stats::default()
+        };
+        assert_eq!(usage_of(&s, "b"), Some((2.0, 2)));
+        // an older server: only the top 5
+        assert_eq!(usage_of(&s, "a"), Some((10.0, 1)));
+        assert_eq!(usage_of(&s, "c"), None);
     }
 }

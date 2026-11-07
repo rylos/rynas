@@ -352,8 +352,11 @@ fn detail_drawer(name: String, settings: Remote<DockerSettingsState>, edit: RwSi
         .into_any()
     };
     let dialogs = move || {
+        // `ask` first: an early return before it would leave the closure subscribed to nothing
+        // (the dialogs never opened when the drawer was built before its details arrived)
+        let a = ask.get()?;
         let can_snap = kind.get_untracked()?.1;
-        ask.get().map(|a| ask_dialog(a, n.get_value(), can_snap, settings, ask, close, d))
+        Some(ask_dialog(a, n.get_value(), can_snap, settings, ask, close, d))
     };
     let body = view! {
         {move || d.view(8, content)}

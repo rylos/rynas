@@ -318,6 +318,13 @@ outline on hover 4.4 on the case. A new dark token needs its row here.
 The wasm budget includes the default features of the release build. Track sizes in every UI PR
 (before/after line in the description).
 
+Only the English texts are compiled into the wasm (2026-11-07): the Italian column of the
+dictionaries is `crates/rynas-ui/assets/i18n/it.txt` (served as `/i18n/it.txt`, `key<TAB>text` lines,
+about 44 KiB brotli; a key the file lacks stays English), written by the test `i18n::tests::italian_file_is_current` (after a text change it fails
+once and rewrites the file: commit it). When the language is Italian, `index.html` starts the
+download while the wasm loads; the boot screen waits for it at most 1.2 s, then the interface
+shows in English and switches to Italian when the file arrives.
+
 ### 3.2 Rules
 - S1 MUST: live data through SSE; polling only for data without an event source, ≥ 5 s, paused when
   `document.hidden`, and stopped when no visible component needs it. Hardware status comes from
