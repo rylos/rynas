@@ -162,6 +162,10 @@ impl Catalog {
                 continue;
             }
             for p in &app.manifest.ports {
+                // reverse proxies all want 80/443 and exclude each other
+                if app.manifest.reverse_proxy && matches!(p.default, 80 | 443) {
+                    continue;
+                }
                 if let Some(other) = owners.insert((p.default, p.protocol.as_str()), &app.manifest.id) {
                     issues.push(&app.manifest.id, "app.toml", format!("default port {}/{} is also the default of `{other}`", p.default, p.protocol.as_str()));
                 }

@@ -13,6 +13,7 @@ categories = ["files", "productivity"]
 min_rynas = "0.1.0"
 arch = ["amd64", "arm64"]
 main_service = "app"
+featured = true
 
 [resources]
 ram_min_mb = 1024

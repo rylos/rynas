@@ -34,6 +34,77 @@ fn catalogue_validates_and_has_the_wave_a1_entries() {
     }
 }
 
+#[test]
+fn catalogue_has_the_wave_a3_entries_and_a_featured_pick() {
+    let c = catalog();
+    for id in [
+        "nginx-proxy-manager", "pocket-id", "cloudflared", "adguard-home", "navidrome", "audiobookshelf", "stirling-pdf", "actual-budget",
+        "mosquitto", "zigbee2mqtt", "frigate", "forgejo", "mealie",
+    ] {
+        assert!(c.get(id).is_some(), "missing entry {id}");
+    }
+    assert_eq!(c.apps.len(), 25);
+    let featured: Vec<&str> = c.apps.values().filter(|a| a.manifest.featured).map(|a| a.manifest.id.as_str()).collect();
+    assert!((5..=10).contains(&featured.len()), "featured is a small pick: {featured:?}");
+    assert!(featured.contains(&"immich"));
+    // only the reverse proxies default to 80/443
+    let proxies: Vec<&str> = c.apps.values().filter(|a| a.manifest.reverse_proxy).map(|a| a.manifest.id.as_str()).collect();
+    assert_eq!(proxies, ["nginx-proxy-manager"]);
+}
+
+#[test]
+fn device_overlays_render() {
+    let c = catalog();
+    let p = Provided::example("x");
+    let z2m = c.get("zigbee2mqtt").unwrap();
+    let r = render::render(z2m, "rynas", &p, &z2m.test_request()).unwrap();
+    assert_eq!(r.overlays, ["overlays/usb-adapter.yaml"]);
+    let text = String::from_utf8(r.file("compose.yaml").unwrap().contents.clone()).unwrap();
+    assert!(text.contains("${ADAPTER_DEVICE}:/dev/zigbee"), "{text}");
+    assert_eq!(r.env["ADAPTER_DEVICE"], "/dev/serial/by-id/usb-Example_Zigbee_Adapter-if00-port0");
+
+    let frigate = c.get("frigate").unwrap();
+    let r = render::render(frigate, "rynas", &p, &frigate.test_request()).unwrap();
+    let text = String::from_utf8(r.file("compose.yaml").unwrap().contents.clone()).unwrap();
+    assert!(text.contains("type: openvino") && text.contains("/dev/dri:/dev/dri"));
+    assert_eq!(r.env["LIBVA_DRIVER"], "i965");
+    // without the GPU the seeded config keeps the default CPU detector
+    let mut req = frigate.test_request();
+    req.form.insert("HW_ACCEL".into(), serde_json::Value::Bool(false));
+    let r = render::render(frigate, "rynas", &p, &req).unwrap();
+    let text = String::from_utf8(r.file("compose.yaml").unwrap().contents.clone()).unwrap();
+    assert!(!text.contains("openvino") && !text.contains("/dev/dri"));
+}
+
+/// `reverse_proxy` owns 80/443; `security.devices` gates non-GPU devices.
+#[test]
+fn lint_checks_reverse_proxies_and_devices() {
+    let tmp = tempfile::tempdir().unwrap();
+    // an ordinary app may not default to 80
+    let dst = tmp.path().join("navidrome");
+    copy_dir(&apps_dir().join("navidrome"), &dst);
+    let t = fs::read_to_string(dst.join("app.toml")).unwrap().replace("default = 4533", "default = 80");
+    fs::write(dst.join("app.toml"), t).unwrap();
+    let text = CatalogApp::load(&dst).unwrap_err().to_string();
+    assert!(text.contains("belongs to the web access proxy"), "{text}");
+
+    // a reverse proxy's 80/443 are fixed
+    let dst = tmp.path().join("nginx-proxy-manager");
+    copy_dir(&apps_dir().join("nginx-proxy-manager"), &dst);
+    let t = fs::read_to_string(dst.join("app.toml")).unwrap().replacen("relocatable = false\n", "", 1);
+    fs::write(dst.join("app.toml"), t).unwrap();
+    let text = CatalogApp::load(&dst).unwrap_err().to_string();
+    assert!(text.contains("a reverse proxy's port 80 must be relocatable = false"), "{text}");
+
+    // without security.devices the USB overlay is refused
+    let dst = tmp.path().join("zigbee2mqtt");
+    copy_dir(&apps_dir().join("zigbee2mqtt"), &dst);
+    let t = fs::read_to_string(dst.join("app.toml")).unwrap().replace("devices = [\"zigbee2mqtt\"]", "");
+    fs::write(dst.join("app.toml"), t).unwrap();
+    let text = CatalogApp::load(&dst).unwrap_err().to_string();
+    assert!(text.contains("devices need hardware.gpu or security.devices"), "{text}");
+}
+
 fn check_rendered(app: &CatalogApp, rendered: &render::RenderedStack) {
     let id = &app.manifest.id;
     let compose_file = rendered.file("compose.yaml").expect("compose.yaml");

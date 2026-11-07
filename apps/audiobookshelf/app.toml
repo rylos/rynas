@@ -1,0 +1,78 @@
+schema = 1
+id = "audiobookshelf"
+name = "Audiobookshelf"
+version = "1.0.0"
+app_version = "2.37.2"
+description = "Audiobook and podcast server with progress sync across the web and mobile apps."
+homepage = "https://www.audiobookshelf.org"
+source = "https://github.com/advplyr/audiobookshelf"
+changelog_url = "https://github.com/advplyr/audiobookshelf/releases"
+license = "GPL-3.0-only"
+maintainers = ["rynas"]
+categories = ["media"]
+min_rynas = "0.1.0"
+arch = ["amd64", "arm64"]
+main_service = "audiobookshelf"
+
+[resources]
+ram_min_mb = 256
+ram_recommended_mb = 1024
+
+[[ports]]
+name = "web"
+env = "WEB_PORT"
+service = "audiobookshelf"
+container = 13378
+default = 13378
+protocol = "tcp"
+purpose = "Web interface, API and mobile app sync"
+proxied = true
+
+[web]
+port = "web"
+scheme = "http"
+auth = "app"
+# required by the web and mobile apps (socket.io)
+websocket = true
+# a sub-path works only as /audiobookshelf; the entry uses its own host name
+subpath = false
+body = "10G"
+timeout = "1h"
+buffering = false
+# the mobile apps, OIDC login, public shares and podcast feeds
+bypass = ["/api", "/socket.io", "/auth", "/login", "/public", "/feed", "/hls"]
+public = "ok"
+
+[[folders]]
+env = "CONFIG_FOLDER"
+path = "config"
+intent = "config"
+ssd = "ok"
+description = "Database and settings"
+
+[[folders]]
+env = "METADATA_FOLDER"
+path = "metadata"
+intent = "data"
+ssd = "ok"
+description = "Covers, author images, backups and the stream cache"
+
+[[shares]]
+env = "AUDIOBOOKS"
+label = "Audiobooks"
+description = "The shared folder with your audiobooks, mounted at /audiobooks (write access lets Audiobookshelf save covers and uploads)"
+access = "rw"
+required = false
+fallback = "audiobooks"
+
+[[shares]]
+env = "PODCASTS"
+label = "Podcasts"
+description = "Where downloaded podcast episodes are stored, mounted at /podcasts"
+access = "rw"
+required = false
+fallback = "podcasts"
+
+[[notes]]
+level = "info"
+text = "The first visitor creates the root account: open Audiobookshelf right after install, then add libraries pointing at /audiobooks and /podcasts."

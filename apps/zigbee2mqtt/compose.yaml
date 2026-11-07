@@ -1,0 +1,25 @@
+# Upstream: https://www.zigbee2mqtt.io/guide/installation/02_docker.html (rootless variant:
+# `user:` plus the dialout group). Differences: image pinned, frontend protected by a generated
+# auth token, healthcheck on the web port as the TrueNAS app does (the image has none). Without
+# configuration.yaml the image starts its onboarding page on 8080, where the broker and the
+# adapter are chosen. The USB device comes from an overlay (network coordinators need none).
+services:
+  zigbee2mqtt:
+    image: ghcr.io/koenkk/zigbee2mqtt:2.14.3@sha256:fb4a6b0f6868ad1cd6a9996479802b2420e599c3463b62bbff8c8cd9a908f43a
+    restart: unless-stopped
+    user: "${PUID}:${PGID}"
+    ports:
+      - "${RYNAS_BIND}:${WEB_PORT}:8080"
+    environment:
+      TZ: "${TZ}"
+      ZIGBEE2MQTT_CONFIG_FRONTEND_ENABLED: "true"
+      ZIGBEE2MQTT_CONFIG_FRONTEND_PORT: "8080"
+      ZIGBEE2MQTT_CONFIG_FRONTEND_AUTH_TOKEN: "${FRONTEND_TOKEN}"
+    volumes:
+      - ${DATA_FOLDER}:/app/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s

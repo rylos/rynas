@@ -1,0 +1,78 @@
+schema = 1
+id = "forgejo"
+name = "Forgejo"
+version = "1.0.0"
+app_version = "15.0.11"
+description = "Lightweight self-hosted Git forge: repositories, issues, pull requests, packages and CI."
+homepage = "https://forgejo.org"
+source = "https://codeberg.org/forgejo/forgejo"
+changelog_url = "https://codeberg.org/forgejo/forgejo/releases"
+license = "GPL-3.0-or-later"
+maintainers = ["rynas"]
+categories = ["development"]
+min_rynas = "0.1.0"
+arch = ["amd64", "arm64"]
+main_service = "forgejo"
+
+[resources]
+ram_min_mb = 256
+ram_recommended_mb = 1024
+
+[[ports]]
+name = "web"
+env = "WEB_PORT"
+service = "forgejo"
+container = 3000
+default = 3300
+protocol = "tcp"
+purpose = "Web interface, API and Git over HTTP"
+proxied = true
+
+[[ports]]
+name = "ssh"
+env = "SSH_PORT"
+service = "forgejo"
+container = 2222
+default = 2222
+protocol = "tcp"
+purpose = "Git over SSH (built-in SSH server)"
+
+[web]
+port = "web"
+scheme = "http"
+auth = "app"
+subpath = false
+# git pushes and LFS objects (upstream's nginx example uses 512M)
+body = "1G"
+timeout = "10m"
+buffering = false
+# Git over HTTP lives below /<owner>/<repo>.git and cannot be listed as a prefix: keep
+# rynas SSO off for Forgejo unless only the browser is used
+bypass = ["/api", "/v2", "/login/oauth", "/.well-known"]
+public = "ok"
+
+[[folders]]
+env = "DATA_FOLDER"
+path = "data"
+intent = "data"
+ssd = "ok"
+description = "Repositories, LFS objects, the SQLite database and app.ini (custom/conf)"
+
+[[secrets]]
+env = "SECRET_KEY"
+length = 64
+description = "Forgejo security.SECRET_KEY (encrypts stored credentials)"
+
+[[secrets]]
+env = "INTERNAL_TOKEN"
+length = 64
+description = "Token of Forgejo's internal API"
+# the OAuth2 and LFS JWT secrets are base64url keys Forgejo generates into app.ini itself
+
+[[notes]]
+level = "warning"
+text = "The installation page is skipped: the first account registered becomes the administrator. Register right after install, then turn off open registration in Site administration if you do not want other accounts."
+
+[[notes]]
+level = "info"
+text = "Major Forgejo versions need a manual upgrade check; the entry follows the long-term support branch (15.x)."

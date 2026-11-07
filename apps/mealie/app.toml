@@ -1,0 +1,55 @@
+schema = 1
+id = "mealie"
+name = "Mealie"
+version = "1.0.0"
+app_version = "v3.30.0"
+description = "Recipe manager and meal planner: import recipes from any website, plan the week, build shopping lists."
+homepage = "https://mealie.io"
+source = "https://github.com/mealie-recipes/mealie"
+changelog_url = "https://github.com/mealie-recipes/mealie/releases"
+license = "AGPL-3.0-only"
+maintainers = ["rynas"]
+categories = ["productivity"]
+min_rynas = "0.1.0"
+arch = ["amd64", "arm64"]
+main_service = "mealie"
+
+[resources]
+ram_min_mb = 512
+ram_recommended_mb = 1024
+
+[[ports]]
+name = "web"
+env = "WEB_PORT"
+service = "mealie"
+container = 9000
+default = 9925
+protocol = "tcp"
+purpose = "Web interface and API"
+proxied = true
+
+[web]
+port = "web"
+scheme = "http"
+auth = "app"
+# no sub-path support (upstream FAQ)
+subpath = false
+body = "100M"
+# the mobile apps and API tokens
+bypass = ["/api"]
+public = "ok"
+
+[[folders]]
+env = "DATA_FOLDER"
+path = "data"
+intent = "data"
+ssd = "ok"
+description = "SQLite database, recipe images, backups and the generated app secret"
+
+[[notes]]
+level = "warning"
+text = "Mealie starts with the default administrator changeme@example.com / MyPassword. Log in right after install: the setup wizard asks for your own account and password."
+
+[[notes]]
+level = "info"
+text = "AI recipe import (OpenAI or any compatible service, such as a local Ollama) is set up per group in the Mealie settings, not at install."

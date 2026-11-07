@@ -1,0 +1,41 @@
+# Upstream: https://docs.frigate.video/frigate/installation (Docker Compose)
+# Differences: image pinned; not privileged (upstream: "may not be necessary"); only the
+# authenticated UI (8971), the RTSP restream (8554) and WebRTC (8555) are published, never the
+# unauthenticated internal port 5000. The entrypoint seeds /config/config.yml once, when it is
+# missing, with TLS off on 8971 (the web access proxy terminates HTTPS; upstream turns on a
+# self-signed certificate by default) and MQTT off; cameras are then added in the UI (0.18
+# creates the same default file itself, with TLS on). The image has its own HEALTHCHECK.
+services:
+  frigate:
+    image: ghcr.io/blakeblackshear/frigate:0.18.2@sha256:fd60f99ffd4eb6c42360ed4e14953e270586f239309ab3983e55b2e97ffac09a
+    restart: unless-stopped
+    stop_grace_period: 30s
+    # about (w x h x 1.5 + 270480) / 1048576 x 25 MB per camera at the detect resolution
+    shm_size: 512mb
+    tmpfs:
+      - /tmp/cache:size=1000000000
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        if [ ! -f /config/config.yml ] && [ ! -f /config/config.yaml ]; then
+          cat > /config/config.yml <<'EOF'
+        mqtt:
+          enabled: false
+        tls:
+          enabled: false
+        cameras: {}
+        EOF
+        fi
+        exec /init
+    ports:
+      - "${RYNAS_BIND}:${WEB_PORT}:8971"
+      - "${RTSP_PORT}:8554"
+      - "${WEBRTC_PORT}:8555"
+      - "${WEBRTC_UDP_PORT}:8555/udp"
+    environment:
+      TZ: "${TZ}"
+    volumes:
+      - ${CONFIG_FOLDER}:/config
+      - ${RECORDINGS_FOLDER}:/media/frigate
+      - /etc/localtime:/etc/localtime:ro

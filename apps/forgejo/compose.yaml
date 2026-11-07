@@ -1,0 +1,35 @@
+# Upstream: https://forgejo.org/docs/latest/admin/installation/docker/ (rootless image)
+# Differences: long-term support branch pinned, SQLite, install page locked with generated
+# secrets, settings through FORGEJO__section__KEY variables, healthcheck on /api/healthz
+# (as the TrueNAS app does). Since v15 the rootless image keeps app.ini below
+# /var/lib/gitea/custom/conf, so one data folder holds everything.
+services:
+  forgejo:
+    image: codeberg.org/forgejo/forgejo:15.0.11-rootless@sha256:3cd6bc2b74c87cbde0a0fd527c9665cb416f5a0540dee54fe5afb3fa2df9f40c
+    restart: unless-stopped
+    user: "${PUID}:${PGID}"
+    ports:
+      - "${RYNAS_BIND}:${WEB_PORT}:3000"
+      - "${SSH_PORT}:2222"
+    environment:
+      FORGEJO__server__ROOT_URL: "${ROOT_URL}"
+      FORGEJO__server__SSH_DOMAIN: "${RYNAS_HOST}"
+      FORGEJO__server__START_SSH_SERVER: "true"
+      FORGEJO__server__SSH_LISTEN_PORT: "2222"
+      # the port shown in clone URLs is the host port
+      FORGEJO__server__SSH_PORT: "${SSH_PORT}"
+      FORGEJO__database__DB_TYPE: sqlite3
+      FORGEJO__security__INSTALL_LOCK: "true"
+      FORGEJO__security__SECRET_KEY: "${SECRET_KEY}"
+      FORGEJO__security__INTERNAL_TOKEN: "${INTERNAL_TOKEN}"
+      FORGEJO__security__REVERSE_PROXY_TRUSTED_PROXIES: "${RYNAS_TRUSTED_PROXIES}"
+      FORGEJO__security__REVERSE_PROXY_LIMIT: "1"
+    volumes:
+      - ${DATA_FOLDER}:/var/lib/gitea
+      - /etc/localtime:/etc/localtime:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/api/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s

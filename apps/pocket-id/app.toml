@@ -1,0 +1,58 @@
+schema = 1
+id = "pocket-id"
+name = "Pocket ID"
+version = "1.0.0"
+app_version = "v2.19.2"
+description = "Simple OpenID Connect provider that signs users in with passkeys instead of passwords."
+homepage = "https://pocket-id.org"
+source = "https://github.com/pocket-id/pocket-id"
+changelog_url = "https://github.com/pocket-id/pocket-id/releases"
+license = "BSD-2-Clause"
+maintainers = ["rynas"]
+categories = ["security"]
+min_rynas = "0.1.0"
+arch = ["amd64", "arm64"]
+# passkeys (WebAuthn) need a secure context
+antifeatures = ["requires-https"]
+main_service = "pocket-id"
+
+[resources]
+ram_min_mb = 128
+ram_recommended_mb = 256
+
+[[ports]]
+name = "web"
+env = "WEB_PORT"
+service = "pocket-id"
+container = 1411
+default = 1411
+protocol = "tcp"
+purpose = "Sign-in pages, OIDC endpoints and admin interface"
+proxied = true
+
+[web]
+port = "web"
+scheme = "http"
+# it is the identity provider: never put a login in front of it
+auth = "app"
+# APP_URL cannot contain a path
+subpath = false
+public = "ok"
+trusted_proxies_env = "TRUST_PROXY"
+
+[[folders]]
+env = "DATA_FOLDER"
+path = "data"
+intent = "data"
+ssd = "ok"
+description = "SQLite database, signing keys and uploaded logos"
+
+[[secrets]]
+env = "ENCRYPTION_KEY"
+length = 32
+encoding = "base64"
+description = "Encrypts the signing keys and secrets stored in the database"
+
+[[notes]]
+level = "info"
+text = "After install open <your Pocket ID address>/setup to create the administrator and register its passkey. Passkeys are bound to the public URL: choose it carefully, changing it later invalidates them."

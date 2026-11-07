@@ -217,7 +217,7 @@ pub(crate) fn lint(app: &AppManifest, doc: &Value, label: &str, known: &BTreeSet
     if !names.contains(app.main_service.as_str()) {
         err(format!("main_service `{}` is not a service", app.main_service));
     }
-    for s in app.security.privileged.iter().chain(&app.security.docker_socket).chain(app.ports.iter().map(|p| &p.service)) {
+    for s in app.security.privileged.iter().chain(&app.security.docker_socket).chain(&app.security.devices).chain(app.ports.iter().map(|p| &p.service)) {
         if !names.contains(s.as_str()) {
             err(format!("app.toml names service `{s}`, which is not in the compose file"));
         }
@@ -316,8 +316,8 @@ pub(crate) fn lint(app: &AppManifest, doc: &Value, label: &str, known: &BTreeSet
                 }
             }
         }
-        if get("devices").is_some() && app.hardware.gpu == GpuNeed::None {
-            err(format!("service `{name}`: devices need hardware.gpu in app.toml"));
+        if get("devices").is_some() && app.hardware.gpu == GpuNeed::None && !app.security.devices.contains(name) {
+            err(format!("service `{name}`: devices need hardware.gpu or security.devices in app.toml"));
         }
         if let Some(ef) = get("env_file") {
             let ok = match ef {

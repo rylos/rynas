@@ -1,0 +1,39 @@
+# Intel iGPU: the render device for VA-API video decoding and the OpenVINO detector on the GPU
+# (https://docs.frigate.video/configuration/object_detectors#openvino-detector,
+# https://docs.frigate.video/configuration/hardware_acceleration_video). The seeded config
+# selects both; LIBVA_DRIVER_NAME must be set in the container environment (it is ignored in
+# the Frigate config): iHD for Broadwell and newer, i965 for Gemini Lake (J4105/J4125) and
+# older, as reported upstream (discussion 22198).
+services:
+  frigate:
+    devices:
+      - /dev/dri:/dev/dri
+    environment:
+      LIBVA_DRIVER_NAME: "${LIBVA_DRIVER}"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        if [ ! -f /config/config.yml ] && [ ! -f /config/config.yaml ]; then
+          cat > /config/config.yml <<'EOF'
+        mqtt:
+          enabled: false
+        tls:
+          enabled: false
+        ffmpeg:
+          hwaccel_args: preset-vaapi
+        detectors:
+          ov:
+            type: openvino
+            device: GPU
+        model:
+          width: 300
+          height: 300
+          input_tensor: nhwc
+          input_pixel_format: bgr
+          path: /openvino-model/ssdlite_mobilenet_v2.xml
+          labelmap_path: /openvino-model/coco_91cl_bkgr.txt
+        cameras: {}
+        EOF
+        fi
+        exec /init

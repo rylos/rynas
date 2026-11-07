@@ -1,0 +1,74 @@
+schema = 1
+id = "stirling-pdf"
+name = "Stirling-PDF"
+version = "1.0.0"
+app_version = "3.3.0"
+description = "PDF toolbox in the browser: merge, split, convert, compress, OCR, sign and redact."
+homepage = "https://www.stirlingpdf.com"
+source = "https://github.com/Stirling-Tools/Stirling-PDF"
+changelog_url = "https://github.com/Stirling-Tools/Stirling-PDF/releases"
+# the core is MIT; app/proprietary, engine/ and parts of the frontend are under the
+# Stirling PDF User License (production use beyond its free tier needs a paid licence)
+license = "MIT AND LicenseRef-Stirling-PDF-User-License"
+maintainers = ["rynas"]
+categories = ["documents"]
+min_rynas = "0.1.0"
+arch = ["amd64", "arm64"]
+antifeatures = ["non-free", "high-resources"]
+main_service = "stirling-pdf"
+
+[resources]
+ram_min_mb = 1024
+# upstream suggests 4 GB for the standard image (2 GB ultra-lite, 6 GB fat)
+ram_recommended_mb = 4096
+
+[[ports]]
+name = "web"
+env = "WEB_PORT"
+service = "stirling-pdf"
+container = 8080
+default = 8282
+protocol = "tcp"
+purpose = "Web interface and REST API"
+proxied = true
+
+[web]
+port = "web"
+scheme = "http"
+auth = "app"
+# works under SYSTEM_ROOTURIPATH; the entry keeps its own host name
+subpath = false
+# upstream's multipart limit is 2000 MB and the request timeout 20 minutes
+body = "2G"
+timeout = "20m"
+buffering = false
+# API keys of scripts and pipelines
+bypass = ["/api"]
+public = "warn"
+
+[[folders]]
+env = "CONFIGS_FOLDER"
+path = "configs"
+intent = "config"
+ssd = "ok"
+description = "settings.yml, the user database and keys"
+
+[[folders]]
+env = "STORAGE_FOLDER"
+path = "storage"
+intent = "data"
+description = "Files kept between sessions"
+
+[[folders]]
+env = "LOGS_FOLDER"
+path = "logs"
+intent = "cache"
+description = "Application logs"
+
+[[notes]]
+level = "warning"
+text = "Log in with admin / stirling and set a new password right away. Login stays on so the tool is not open to everyone on the network."
+
+[[notes]]
+level = "info"
+text = "Parts of Stirling-PDF are not free software: enterprise features (SSO, auditing) need a paid licence key. Anonymous analytics are switched off by this entry."

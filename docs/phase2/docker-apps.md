@@ -432,6 +432,8 @@ Paths are relative to `/api/v1`.
     - `{"state":"below_minimum","installed_mb","minimum_mb"}`;
     - `{"state":"unknown"}`;
   - arch_ok, rynas_ok, manager;
+  - `reverse_proxy` (publishes 80/443 itself: needs external proxy mode) and `featured`
+    (the curated Featured pick), both from `app.toml`;
   - icon (relative URL), installed [stack names], update_available.
 - **`AppInstallPlan`**:
   - app, version, stack, stack_dir;
@@ -958,6 +960,8 @@ Any other file is an error. `<id>` is `[a-z0-9][a-z0-9-]*`, at most 40 character
 | `main_service` | the service that is "the app" |
 | `host_network` | all services use `network_mode: host`; ports are then fixed and only informative |
 | `manager` | Docker manager: the main service mounts the Docker socket and `${RYNAS_STACKS_DIR}:${RYNAS_STACKS_DIR}` (same path); `web.public = "never"` |
+| `reverse_proxy` | a reverse proxy app (Nginx Proxy Manager, Traefik) that publishes host ports 80 and 443 itself: it must declare tcp ports with defaults 80 and 443, `relocatable = false`, not `proxied`, on a bridged network. The web access proxy owns 80/443, so the app installs only in external proxy mode (or without web access): the port check refuses it otherwise, and the card shows `reverse_proxy` so the UI can say so first. No other bridged entry may default to 80/443 tcp; reverse proxies are exempt from the unique-default rule for those two ports |
+| `featured` | listed in the catalogue's Featured section (a small curated pick; the UI shows it, it does not compute it). Catalogue presentation only: changing it alone does not bump `version`, since nothing installed changes |
 | `[resources]` | `ram_min_mb` (install refused below), `ram_recommended_mb` (warning below) |
 | `[[ports]]` | `name`, `env` (host-port variable), `service`, `container`, `default`, `protocol` (`tcp`/`udp`), `purpose`, `relocatable` (default true; false for discovery and protocol ports and with `host_network`), `proxied` (HTTP port fronted by the web access proxy) |
 | `[web]` | see 6.3 |
@@ -965,7 +969,7 @@ Any other file is an error. `<id>` is `[a-z0-9][a-z0-9-]*`, at most 40 character
 | `[[shares]]` | user shared folders: `env`, `label`, `description`, `access` (`ro`/`rw`, must match `:ro` in compose), `required`, `fallback` (stack folder used when an optional share is not chosen) |
 | `[[secrets]]` | `env`, `length` (16-256), `encoding` (`alnum` characters, or `hex` / `base64` of `length` random bytes), `description`, `show` (the install answer shows the value once: an initial administrator password); generated once, kept on update |
 | `[hardware]` | `gpu` (`none`, `optional`, `required`), `gpu_kinds` (`intel-qsv`, `vaapi`, `nvidia`), `cpu_features` (`x86-64-v2`, `avx`, `avx2`) |
-| `[security]` | `privileged`, `docker_socket` (services allowed), `cap_add` (capabilities allowed) |
+| `[security]` | `privileged`, `docker_socket` (services allowed), `cap_add` (capabilities allowed), `devices` (services allowed to map host devices that are not a GPU, such as a USB Zigbee adapter; GPU devices only need `hardware.gpu`) |
 | `[[overlays]]` | `file` (`overlays/<name>.yaml`), `when` (a boolean form field or `RYNAS_CPU_AVX2`, optionally `!`-negated), `description` |
 | `[[named_volumes]]` | `name`, `description`; only for disposable content (caches, models, queues): named volumes live in the data-root, outside snapshots and backups |
 | `[[notes]]` | `level` (`info`/`warning`), `text`: shown in the wizard before confirming |
@@ -1007,7 +1011,8 @@ Standard compose, used as is. The lint (`cargo test -p rynas-apps`) enforces:
   `host_network`;
 - volume sources only declared folders, shares, named volumes, `${RYNAS_STACKS_DIR}`
   (managers), the Docker socket (declared services), `/etc/localtime` and `/run/dbus` read-only;
-- `privileged`, `cap_add`, `devices` and `network_mode: host` only as declared in `app.toml`.
+- `privileged`, `cap_add`, `devices` (`hardware.gpu` or `security.devices`) and
+  `network_mode: host` only as declared in `app.toml`.
 
 The same lint runs on the base file and on the base with each overlay merged in.
 
@@ -1097,6 +1102,12 @@ proxied ports bind to `${RYNAS_BIND}`. `packaging/apps-render-test.sh` also runs
 Arcane, Dockhand, Portainer CE, Dockge (managers); Immich, Jellyfin, Vaultwarden, Nextcloud,
 Syncthing, Home Assistant, Uptime Kuma, Paperless-ngx. Images pinned by tag and verified digest
 (2026-11-07); per-entry choices in `../research/app-catalog-format.md` § 2.
+
+Wave A3 (2026-11-07), 25 entries in all: Nginx Proxy Manager (`reverse_proxy`), Pocket ID,
+cloudflared, AdGuard Home, Navidrome, Audiobookshelf, Stirling-PDF, Actual Budget, Mosquitto,
+Zigbee2MQTT (USB adapter through `security.devices`), Frigate, Forgejo, Mealie; `featured` on
+Immich, Jellyfin, Nextcloud, Vaultwarden, Home Assistant, Paperless-ngx and Dockhand. Picks,
+skips, digests and sources in `../research/app-catalog-format.md` § 4.
 
 ## 7. Open points between waves
 

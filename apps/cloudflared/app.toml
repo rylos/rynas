@@ -1,0 +1,30 @@
+schema = 1
+id = "cloudflared"
+name = "Cloudflare Tunnel"
+version = "1.0.0"
+app_version = "2026.10.7"
+description = "Connector for a Cloudflare Tunnel: reach apps from the Internet without opening router ports."
+homepage = "https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/"
+source = "https://github.com/cloudflare/cloudflared"
+changelog_url = "https://github.com/cloudflare/cloudflared/releases"
+license = "Apache-2.0"
+maintainers = ["rynas"]
+categories = ["network"]
+min_rynas = "0.1.0"
+arch = ["amd64", "arm64"]
+main_service = "cloudflared"
+# outbound only; the host network lets the tunnel reach the web access proxy and apps bound
+# to 127.0.0.1
+host_network = true
+
+[resources]
+ram_min_mb = 64
+ram_recommended_mb = 256
+
+[[notes]]
+level = "warning"
+text = "Traffic of published hostnames passes through Cloudflare, which terminates TLS: Cloudflare can see it. The tunnel needs a Cloudflare account and a domain managed there."
+
+[[notes]]
+level = "info"
+text = "Create the tunnel in the Cloudflare dashboard (Zero Trust > Networks > Tunnels), copy its token here, then add public hostnames pointing at https://localhost (the rynas web access, with No TLS Verify) or at an app's local port such as http://localhost:2283."
