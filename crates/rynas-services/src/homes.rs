@@ -157,6 +157,11 @@ pub trait HomesHost: Send + Sync {
     }
     /// Processes running with this uid (real, effective, saved or filesystem).
     fn processes(&self, uid: u32) -> Vec<u32>;
+    /// Processes running with this gid (real, effective, saved, file system or
+    /// supplementary).
+    fn group_processes(&self, _gid: u32) -> Vec<u32> {
+        Vec::new()
+    }
     /// Open SMB sessions of a user; `None` when it cannot be known (no Samba).
     fn smb_sessions(&self, user: &str, uid: u32) -> Option<usize>;
     fn has_program(&self, name: &str) -> bool;
@@ -1343,6 +1348,38 @@ pub fn parse_itemize(out: &str) -> Vec<String> {
 
 const RSYNC_BASE: [&str; 3] = ["-aHAXx", "--numeric-ids", "--no-inc-recursive"];
 
+/// Processes (not rynasd) whose `/proc/<pid>/status` lists `id` on one of the `fields` lines.
+fn proc_status_with(fields: &[&str], id: u32) -> Vec<u32> {
+    let me = std::process::id();
+    let id = id.to_string();
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir("/proc") else {
+        return out;
+    };
+    for e in rd.flatten() {
+        let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else {
+            continue;
+        };
+        if pid == me {
+            continue;
+        }
+        let Ok(st) = std::fs::read_to_string(e.path().join("status")) else {
+            continue;
+        };
+        let hit = st.lines().any(|l| {
+            fields.iter().any(|f| {
+                l.strip_prefix(f)
+                    .is_some_and(|ids| ids.split_whitespace().any(|x| x == id))
+            })
+        });
+        if hit {
+            out.push(pid);
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
 impl HomesHost for HostHomes {
     fn probe(&self, path: &str) -> PathInfo {
         crate::host::ShareHost::probe(&crate::host::HostShares, path)
@@ -1461,31 +1498,11 @@ impl HomesHost for HostHomes {
     }
 
     fn processes(&self, uid: u32) -> Vec<u32> {
-        let me = std::process::id();
-        let mut out = Vec::new();
-        let Ok(rd) = std::fs::read_dir("/proc") else {
-            return out;
-        };
-        for e in rd.flatten() {
-            let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else {
-                continue;
-            };
-            if pid == me {
-                continue;
-            }
-            let Ok(st) = std::fs::read_to_string(e.path().join("status")) else {
-                continue;
-            };
-            let hit = st
-                .lines()
-                .find_map(|l| l.strip_prefix("Uid:"))
-                .is_some_and(|ids| ids.split_whitespace().any(|x| x == uid.to_string()));
-            if hit {
-                out.push(pid);
-            }
-        }
-        out.sort_unstable();
-        out
+        proc_status_with(&["Uid:"], uid)
+    }
+
+    fn group_processes(&self, gid: u32) -> Vec<u32> {
+        proc_status_with(&["Gid:", "Groups:"], gid)
     }
 
     fn smb_sessions(&self, user: &str, uid: u32) -> Option<usize> {
@@ -1757,6 +1774,8 @@ pub struct MemoryHomesState {
     pub entries: BTreeMap<String, MemEntry>,
     pub mounts: Vec<Mount>,
     pub processes: BTreeMap<u32, Vec<u32>>,
+    /// Processes by gid (`group_processes`).
+    pub group_processes: BTreeMap<u32, Vec<u32>>,
     /// SMB sessions by user; a user missing here has none.
     pub smb: BTreeMap<String, usize>,
     /// `smbstatus` is not available.
@@ -2024,6 +2043,14 @@ impl HomesHost for MemoryHomes {
         self.state()
             .processes
             .get(&uid)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn group_processes(&self, gid: u32) -> Vec<u32> {
+        self.state()
+            .group_processes
+            .get(&gid)
             .cloned()
             .unwrap_or_default()
     }

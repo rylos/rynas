@@ -103,7 +103,8 @@ fn wanted_groups(u: &LocalUser) -> BTreeSet<String> {
     g
 }
 
-/// Lowest free id in the local range.
+/// Lowest free id in the local range (`used` includes the retired ids, see
+/// [`UsersConfig::retired_ids`]).
 pub fn next_free_id(used: &BTreeSet<u32>) -> Option<u32> {
     (LOCAL_ID_MIN..=LOCAL_ID_MAX).find(|i| !used.contains(i))
 }
@@ -259,8 +260,20 @@ impl UsersDomain {
         let sys_groups = self.accounts.groups()?;
 
         // groups
+        // retired ids (an account's id before an id change) are never handed out again
+        c.retired_ids.sort_by_key(|r| (r.kind == IdKind::Group, r.id));
+        c.retired_ids.dedup_by_key(|r| (r.kind, r.id));
+        let retired = |k: IdKind| {
+            c.retired_ids
+                .iter()
+                .filter(move |r| r.kind == k)
+                .map(|r| r.id)
+                .collect::<Vec<_>>()
+        };
+        let (retired_uids, retired_gids) = (retired(IdKind::User), retired(IdKind::Group));
         let mut gids: BTreeSet<u32> = sys_groups.iter().map(|g| g.gid).collect();
         gids.extend(c.groups.iter().map(|g| g.gid));
+        gids.extend(retired_gids);
         let mut seen = BTreeSet::new();
         for g in &mut c.groups {
             g.name = g.name.trim().to_string();
@@ -340,6 +353,7 @@ impl UsersDomain {
         // users
         let mut uids: BTreeSet<u32> = sys_users.iter().map(|u| u.uid).collect();
         uids.extend(c.users.iter().map(|u| u.uid));
+        uids.extend(retired_uids);
         let mut seen = BTreeSet::new();
         for u in &mut c.users {
             u.name = u.name.trim().to_string();

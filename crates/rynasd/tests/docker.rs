@@ -1136,3 +1136,105 @@ async fn move_with_a_bind_outside_the_folder_is_undone() {
     let (s, _) = call(&e, "GET", "/v1/docker/stacks/app/files", None).await;
     assert_eq!(s, StatusCode::OK, "still adopted where it was");
 }
+
+/// [`Adopting`], and after the copy the records cannot be saved any more (the state folder
+/// of Docker, known once the test env exists, becomes a file).
+struct RecordFails(Adopting, Arc<Mutex<std::path::PathBuf>>);
+
+impl Runner for RecordFails {
+    fn run(&self, cmd: &Cmd) -> Result<CmdOutput, String> {
+        let out = self.0.run(cmd)?;
+        if cmd.display().starts_with("cp ") {
+            let state = self.1.lock().unwrap().clone();
+            std::fs::rename(&state, state.with_extension("away")).unwrap();
+            std::fs::write(&state, "not a folder").unwrap();
+        }
+        Ok(out)
+    }
+}
+
+/// A move whose record cannot be saved is undone: the copy removed, the old folder where
+/// it was (not set aside), the stack still adopted there.
+#[tokio::test]
+async fn move_with_a_record_that_cannot_be_saved_is_undone() {
+    let state = Arc::new(Mutex::new(std::path::PathBuf::new()));
+    let r = Arc::new(RecordFails(Adopting(Mutex::default()), state.clone()));
+    let e = env_with(false, r, Some("vol1"));
+    *state.lock().unwrap() = e.dir.path().join("state/docker");
+    let app = e.dir.path().join("root/srv/app");
+    std::fs::create_dir_all(app.join("data")).unwrap();
+    std::fs::write(app.join("compose.yaml"), "services:\n  web:\n    image: x\n").unwrap();
+    // env files in system folders are refused
+    let (s, b) = call(
+        &e,
+        "POST",
+        "/v1/docker/stacks/import",
+        Some(json!({"dir": "/srv/app", "env_files": ["/etc/shadow"]})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{}", String::from_utf8_lossy(&b));
+    let (s, b) = call(
+        &e,
+        "POST",
+        "/v1/docker/stacks/import",
+        Some(json!({"dir": "/srv/app"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{}", String::from_utf8_lossy(&b));
+    let (s, b) = call(
+        &e,
+        "POST",
+        "/v1/docker/stacks/app/move",
+        Some(json!({"confirm": "app"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{}", String::from_utf8_lossy(&b));
+    let id = serde_json::from_slice::<TaskStarted>(&b).unwrap().task_id;
+    let t = wait_task(&e, &id).await;
+    let l = log(&e, &id);
+    assert_eq!(t.status, TaskStatus::Error, "{l}");
+    assert!(l.contains("the record could not be saved"), "{l}");
+    assert!(!e.dir.path().join("root/vol1/docker/stacks/app").exists(), "{l}");
+    assert!(app.join("compose.yaml").exists() && app.join("data").is_dir());
+    let (s, _) = call(&e, "GET", "/v1/docker/stacks/app/files", None).await;
+    assert_eq!(s, StatusCode::OK, "still adopted where it was");
+}
+
+/// A stack folder swapped for a link before the move starts is not copied.
+#[tokio::test]
+async fn move_of_a_folder_made_a_link_is_refused() {
+    let r = Arc::new(Adopting(Mutex::default()));
+    let e = env_with(false, r.clone(), Some("vol1"));
+    let app = e.dir.path().join("root/srv/app");
+    std::fs::create_dir_all(app.join("data")).unwrap();
+    std::fs::write(app.join("compose.yaml"), "services:\n  web:\n    image: x\n").unwrap();
+    let (s, _) = call(
+        &e,
+        "POST",
+        "/v1/docker/stacks/import",
+        Some(json!({"dir": "/srv/app"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED);
+    let elsewhere = e.dir.path().join("root/srv/real");
+    std::fs::rename(&app, &elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &app).unwrap();
+    let (s, b) = call(
+        &e,
+        "POST",
+        "/v1/docker/stacks/app/move",
+        Some(json!({"confirm": "app"})),
+    )
+    .await;
+    if s == StatusCode::ACCEPTED {
+        let id = serde_json::from_slice::<TaskStarted>(&b).unwrap().task_id;
+        let t = wait_task(&e, &id).await;
+        let l = log(&e, &id);
+        assert_eq!(t.status, TaskStatus::Error, "{l}");
+        assert!(l.contains("not a plain folder"), "{l}");
+    } else {
+        assert!(s.is_client_error(), "{s}");
+    }
+    assert!(!r.0.lock().unwrap().iter().any(|c| c.starts_with("cp ")));
+    assert!(!e.dir.path().join("root/vol1/docker/stacks/app").exists());
+}

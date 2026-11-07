@@ -286,7 +286,17 @@ pub struct DockerSvc {
     pub exec_via_runner: std::sync::atomic::AtomicBool,
     /// Adopted stacks (§5.7), saved in `<state>/docker/adopted.json`.
     pub(crate) adopted: Mutex<rynas_docker::adopt::Registry>,
+    /// The files' hash of each adopted stack and the file facts it was computed from
+    /// (listings hash again only what changed).
+    pub(crate) adopted_hashes: Mutex<HashMap<String, HashedFiles>>,
 }
+
+/// What [`DockerSvc::adopted_hashes`] compares: modification and change time, size and
+/// inode of a file (`None`: missing).
+pub(crate) type FileKey = Option<(i64, i64, i64, i64, u64, u64)>;
+
+/// The files' facts by path and the hash computed from them.
+pub(crate) type HashedFiles = (Vec<(String, FileKey)>, String);
 
 pub type DkState = Option<Arc<DockerSvc>>;
 
@@ -454,6 +464,7 @@ impl DockerSvc {
             df_cache: tokio::sync::Mutex::new(None),
             exec_via_runner: std::sync::atomic::AtomicBool::new(false),
             adopted: Mutex::new(adopted),
+            adopted_hashes: Mutex::new(HashMap::new()),
         })
     }
 
@@ -596,9 +607,24 @@ impl DockerSvc {
     }
 
     /// The stacks.
-    pub async fn stacks(&self) -> Res<Vec<StackSummary>> {
+    pub async fn stacks(self: &Arc<Self>) -> Res<Vec<StackSummary>> {
         let cs = self.containers().await?;
-        Ok(self.summaries(&cs))
+        Ok(self.summaries_blocking(cs).await?.0)
+    }
+
+    /// [`DockerSvc::summaries`] off the async threads (folders and files are read); the
+    /// containers are handed back.
+    pub(crate) async fn summaries_blocking(
+        self: &Arc<Self>,
+        cs: Vec<Seen>,
+    ) -> Res<(Vec<StackSummary>, Vec<Seen>)> {
+        let me = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let v = me.summaries(&cs);
+            (v, cs)
+        })
+        .await
+        .map_err(Error::internal)
     }
 
     /// The stacks of these containers, rynas folders and adopted stacks included.
@@ -1384,7 +1410,7 @@ fn systemctl(verb: &str, units: &[&str]) -> Cmd {
 }
 
 /// Bytes `du -sx` counts in the folders (`None`: unknown, e.g. a dry run).
-fn du_bytes(out: &CmdOutput) -> Option<u64> {
+pub(crate) fn du_bytes(out: &CmdOutput) -> Option<u64> {
     let mut sum = 0u64;
     let mut any = false;
     for l in out.stdout.lines() {
@@ -2031,8 +2057,8 @@ async fn stack_get(
     }
     let cs = s.containers().await?;
     let l = s.layout();
-    let summary = s
-        .summaries(&cs)
+    let (summaries, cs) = s.summaries_blocking(cs).await?;
+    let summary = summaries
         .into_iter()
         .find(|x| x.name == name)
         .ok_or_else(|| Error::not_found(format!("no stack {name}")))?;

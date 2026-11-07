@@ -26,13 +26,40 @@ const CAPTURE_CAP: usize = 1 << 20;
 const CHILD_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 /// A command line to run.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Cmd {
     argv: Vec<OsString>,
     env: Vec<(OsString, OsString)>,
     clear_env: bool,
     stdin: Option<Vec<u8>>,
     timeout: Duration,
+}
+
+/// Standard input carries secrets (passwords for `chpasswd`, `smbpasswd`...) and environment
+/// values may too: `Debug` shows only their size and the variable names.
+impl std::fmt::Debug for Cmd {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Cmd")
+            .field("argv", &self.argv)
+            .field(
+                "env",
+                &self
+                    .env
+                    .iter()
+                    .map(|(k, _)| format!("{}=<redacted>", k.to_string_lossy()))
+                    .collect::<Vec<_>>(),
+            )
+            .field("clear_env", &self.clear_env)
+            .field(
+                "stdin",
+                &self
+                    .stdin
+                    .as_ref()
+                    .map(|b| format!("<{} bytes redacted>", b.len())),
+            )
+            .field("timeout", &self.timeout)
+            .finish()
+    }
 }
 
 /// What a command printed and how it ended.
@@ -346,6 +373,18 @@ async fn read_lines(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn debug_hides_stdin_and_env_values() {
+        let c = Cmd::new("chpasswd")
+            .arg("-c")
+            .env("SECRET_TOKEN", "hunter2-env")
+            .stdin(b"anna:hunter2-stdin\n".to_vec());
+        let d = format!("{c:?}");
+        assert!(!d.contains("hunter2"), "{d}");
+        assert!(d.contains("chpasswd") && d.contains("SECRET_TOKEN=<redacted>"), "{d}");
+        assert!(d.contains("<19 bytes redacted>"), "{d}");
+    }
+
     use super::*;
     use std::sync::Mutex;
 

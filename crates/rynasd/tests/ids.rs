@@ -3,7 +3,7 @@
 //! instead of making them.
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -19,7 +19,7 @@ use rynas_auth::totp::{MemoryStorage, TotpManager};
 use rynas_config::{Config, ConfigOptions, MemorySystem};
 use rynas_services::accounts::{SysGroup, SysUser};
 use rynas_services::homes::MoveStore;
-use rynas_services::idremap::RemapFs;
+use rynas_services::idremap::{Entry, RemapFs};
 use rynas_services::{
     HomesDomain, MemoryAccounts, MemoryHomes, MemoryShares, SharesDomain, UsersDomain,
 };
@@ -47,27 +47,29 @@ impl Authenticator for NoAuth {
 
 type Chown = (PathBuf, Option<u32>, Option<u32>);
 
-/// Records `lchown` calls; reads (ACLs, snapshots, mounts) find nothing special.
+/// Records `chown` and `chmod` calls; reads (ACLs, snapshots, mounts) find nothing special.
 #[derive(Default)]
 struct Recorder {
     chowns: Mutex<Vec<Chown>>,
+    chmods: Mutex<Vec<PathBuf>>,
 }
 
 impl RemapFs for Recorder {
-    fn lchown(&self, p: &Path, u: Option<u32>, g: Option<u32>) -> std::io::Result<()> {
-        self.chowns.lock().unwrap().push((p.into(), u, g));
+    fn chown(&self, e: &Entry, u: Option<u32>, g: Option<u32>) -> std::io::Result<()> {
+        self.chowns.lock().unwrap().push((e.path.into(), u, g));
         Ok(())
     }
-    fn chmod(&self, _: &Path, _: u32) -> std::io::Result<()> {
+    fn chmod(&self, e: &Entry, _: u32) -> std::io::Result<()> {
+        self.chmods.lock().unwrap().push(e.path.into());
         Ok(())
     }
-    fn get_acl(&self, _: &Path, _: bool) -> std::io::Result<Option<Vec<u8>>> {
+    fn get_acl(&self, _: &Entry, _: bool) -> std::io::Result<Option<Vec<u8>>> {
         Ok(None)
     }
-    fn set_acl(&self, _: &Path, _: bool, _: &[u8]) -> std::io::Result<()> {
+    fn set_acl(&self, _: &Entry, _: bool, _: &[u8]) -> std::io::Result<()> {
         Ok(())
     }
-    fn readonly_subvolume(&self, _: &Path, _: &std::fs::Metadata) -> bool {
+    fn readonly_subvolume(&self, _: &Entry) -> bool {
         false
     }
     fn mount_points(&self) -> BTreeSet<PathBuf> {
@@ -82,6 +84,7 @@ struct Env {
     config: Arc<Config>,
     ops: Arc<Ops>,
     rec: Arc<Recorder>,
+    homes: Arc<MemoryHomes>,
 }
 
 fn env() -> Env {
@@ -159,6 +162,7 @@ fn env() -> Env {
         config,
         ops,
         rec,
+        homes,
     }
 }
 
@@ -325,4 +329,103 @@ async fn adopt_change_uid_and_take_over_files() {
     )
     .await;
     assert_eq!(s, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn folders_resolved_retired_ids_resume_and_group_processes() {
+    let e = env();
+    let vol = e.dir.path().join("volume1");
+    let (s, _) = call(&e, "POST", "/v1/users/adopt", Some(json!({}))).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = call(&e, "POST", "/v1/groups/adopt", Some(json!({}))).await;
+    assert_eq!(s, StatusCode::OK);
+    apply(&e);
+
+    // a folder is checked and walked as resolved: a link out of the volume is refused, a
+    // missing folder too; a link inside the volume is walked as its target
+    std::os::unix::fs::symlink("/etc", vol.join("etc-link")).unwrap();
+    std::os::unix::fs::symlink(vol.join("photos"), vol.join("pics")).unwrap();
+    let bad = |p: &IdRemapPlan, path: &str| {
+        p.blockers
+            .iter()
+            .any(|b| b.code == IdBlockerCode::PathInvalid && b.detail == path)
+    };
+    let link = vol.join("etc-link").display().to_string();
+    let missing = vol.join("nope").display().to_string();
+    let p = plan(
+        &e,
+        json!({"kind": "user", "name": "anna", "new_id": 1026, "paths": [link, missing]}),
+    )
+    .await;
+    assert!(bad(&p, &link) && bad(&p, &missing), "{:?}", p.blockers);
+    let pics = vol.join("pics").display().to_string();
+    let p = plan(
+        &e,
+        json!({"kind": "user", "name": "anna", "new_id": 1026, "paths": [pics]}),
+    )
+    .await;
+    assert!(p.allowed, "{:?}", p.blockers);
+    let real = std::fs::canonicalize(vol.join("photos")).unwrap();
+    assert_eq!(p.paths, vec![real.display().to_string()]);
+
+    // the change retires the old id
+    let (s, b) = call(
+        &e,
+        "POST",
+        "/v1/ids/remap",
+        Some(json!({"kind": "user", "name": "anna", "new_id": 1026})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{}", String::from_utf8_lossy(&b));
+    let t = task(&e, &b).await;
+    assert_eq!(t.status, TaskStatus::Ok, "{:?}", t.error);
+    let applied: rynas_api_types::UsersConfig =
+        serde_json::from_value(e.config.applied("users").unwrap().unwrap()).unwrap();
+    assert_eq!(applied.retired_ids.len(), 1);
+    let r = &applied.retired_ids[0];
+    assert_eq!((r.id, r.name.as_str(), r.new_id), (1005, "anna", 1026));
+    assert_eq!(r.date.len(), 10);
+
+    // shown by the plan: luca moving to 1005 is warned about, anna taking over the files of
+    // 1005 finishes her change
+    let p = plan(&e, json!({"kind": "user", "name": "luca", "new_id": 1005})).await;
+    assert_eq!(p.retired.len(), 1);
+    assert_eq!(p.target_retired.as_ref().map(|r| r.id), Some(1005));
+    let p = plan(&e, json!({"kind": "user", "name": "anna", "from_id": 1005})).await;
+    assert!(p.allowed && p.resumes, "{:?}", p.blockers);
+    let p = plan(&e, json!({"kind": "user", "name": "luca", "from_id": 1005})).await;
+    assert!(!p.resumes);
+
+    // a new account never gets a retired id: with 1000-1004 taken, the next one is 1007
+    {
+        let mut s = e.acc.state();
+        for (i, uid) in (1000..1005).enumerate() {
+            s.users.push(SysUser {
+                name: format!("sys{i}"),
+                uid,
+                gid: 100,
+                home: format!("/home/sys{i}"),
+                shell: "/bin/bash".into(),
+                ..Default::default()
+            });
+        }
+    }
+    let (s, b) = call(&e, "POST", "/v1/users", Some(json!({"name": "neo"}))).await;
+    assert!(s.is_success(), "{s} {}", String::from_utf8_lossy(&b));
+    apply(&e);
+    assert_eq!(uid_of(&e, "neo"), 1007);
+
+    // a GID change waits for the processes running with that gid
+    e.homes.state().group_processes.insert(1001, vec![4321]);
+    let p = plan(&e, json!({"kind": "group", "name": "family", "new_id": 1500})).await;
+    assert!(
+        p.blockers
+            .iter()
+            .any(|b| b.code == IdBlockerCode::Processes && b.detail == "4321"),
+        "{:?}",
+        p.blockers
+    );
+    e.homes.state().group_processes.clear();
+    let p = plan(&e, json!({"kind": "group", "name": "family", "new_id": 1500})).await;
+    assert!(p.allowed, "{:?}", p.blockers);
 }

@@ -1835,6 +1835,8 @@ After adoption the stack is listed among rynas's stacks:
     `conflict` (`field: hash`) when the files changed since: "reload them before saving".
     The same check now protects native stacks;
   - `changed_outside` in the listing says when the files differ from the recorded hash.
+    The listing hashes off the async threads and only again when a file's times, size or
+    inode changed since the last listing (cache in `DockerSvc::adopted_hashes`).
 - **Several `-f` files**: the editor edits the first one and the env file (the first
   `--env-file`, else `<dir>/.env`). The others are listed as "also uses" and are part of
   the validation (`compose config` with every file). A main file with a top-level
@@ -1843,7 +1845,8 @@ After adoption the stack is listed among rynas's stacks:
   - absolute, no `.` or `..`, no control characters, at most 1024 bytes, at most 16
     entries per list;
   - folders under `/etc`, `/usr`, `/proc`, `/sys`, `/boot`, `/run` and other system trees
-    are refused, as is the rynas stacks folder itself;
+    are refused, as is the rynas stacks folder itself; so are compose and env files there
+    (`env_files: ["/etc/shadow"]` is a 400 on `env_files`);
   - files must be regular files reached without symlinks, at most 512 KiB.
 - **Name conflicts**: a name that is a native stack folder or already adopted gives 409
   `already_exists`. An import whose project name is used by containers of another folder
@@ -1856,7 +1859,12 @@ the **whole folder with its data**. Rewriting relative binds to absolute paths w
 the user's file and leave the data behind, and relative paths exist precisely to follow the
 folder.
 
-1. `compose config` of the stack where it is: its binds.
+0. The folder must still be a plain folder, opened from `/` without following links
+   (checked at the start and again right before the copy): `cp -a <dir>/.` would copy a
+   link's target.
+1. `compose config` of the stack where it is: its binds. Then, unless the folder and the
+   target volume are the same btrfs file system (the copy shares blocks), `du -s` of the
+   folder plus 10 % must fit in the volume's free space; nothing has stopped yet.
 2. `down` when it has containers (named volumes `<project>_<vol>` survive: same `-p`).
 3. `/<vol>/docker/stacks/<name>` created as a subvolume, then
    `cp -a --reflink=auto <dir>/. <new>/`.
@@ -1866,7 +1874,8 @@ folder.
    message asks for absolute paths.
 5. The record is dropped when the stack is now plain (one standard compose file, the
    default `.env`, no profiles: a native rynas stack with snapshots). Otherwise it moves
-   to the new folder.
+   to the new folder. When the record cannot be saved, the copy is removed and the stack
+   restarted where it was (the record still names the old folder).
 6. The old folder is renamed `<dir>.moved-<stamp>` (Portainer's is left alone) and kept
    until the administrator deletes it.
 7. `up` again when it ran.
