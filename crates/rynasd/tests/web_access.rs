@@ -749,6 +749,93 @@ fn extra_ports_and_custom_routes_render() {
     d.routes[1].enabled = false;
     let (_, j) = e.svc.render(&d, &facts());
     assert!(j["apps"]["http"]["servers"]["rynas_port_8445"].is_null());
+    assert_golden("web_access_caddy_ports_disabled.json", &j);
+}
+
+/// Nested prefixes on one shared port: both answer, the longer prefix is matched first.
+#[test]
+fn nested_prefixes_on_a_shared_port() {
+    let e = env();
+    let mut c = sample_ports();
+    let mut sub = custom("grafana-api", "grafana-api", "192.0.2.30", 3001);
+    sub.ports = vec![8444];
+    sub.names.nas = true;
+    sub.prefix = Some("/grafana/api".into());
+    c.routes.push(sub);
+    let cfg = model::validate(c, &[8080, 8443]).unwrap();
+    let (_, j) = e.svc.render(&cfg, &facts());
+    let ids: Vec<String> = j["apps"]["http"]["servers"]["rynas_port_8444"]["routes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|r| r["@id"].as_str().map(String::from))
+        .collect();
+    assert_eq!(
+        ids,
+        vec![
+            "rynas-route-grafana-api:8444",
+            "rynas-route-grafana:8444",
+            "rynas-route-router:8444"
+        ]
+    );
+}
+
+/// A custom upstream on this NAS: the proxy's ports and the web interface's are refused,
+/// on loopback, `localhost` names, and (with the host's facts) its own names and addresses.
+#[test]
+fn upstream_loops_through_own_names() {
+    let field = |c: WebAccessConfig| model::validate(c, &[8080, 8443]).unwrap_err().field.unwrap();
+    for (host, port) in [
+        ("127.0.1.1", 8445),
+        ("localhost.localdomain", 443),
+        ("app.localhost", 80),
+        ("::ffff:127.0.0.1", 8444),
+        ("127.0.0.1", 8080),
+        ("localhost", 8443),
+    ] {
+        let mut c = sample_ports();
+        c.routes[2].upstream.host = host.into();
+        c.routes[2].upstream.port = port;
+        c.routes[2].upstream.scheme = UpstreamScheme::Http;
+        assert_eq!(field(c), "routes[2].upstream.port", "{host}:{port}");
+    }
+    let f = facts();
+    for host in ["nas", "nas.local", "nas.example.lan", "192.0.2.10"] {
+        let mut c = sample_ports();
+        c.routes[2].upstream.host = host.into();
+        c.routes[2].upstream.port = 8445;
+        let c = model::validate(c, &[8080, 8443]).unwrap();
+        let e = model::check_upstream_loop(&c, &[8080, 8443], Some(&f)).unwrap_err();
+        assert_eq!(e.field.as_deref(), Some("routes[2].upstream.port"), "{host}");
+        // another port of the NAS (an app) is fine
+        let mut other = c.clone();
+        other.routes[2].upstream.port = 9000;
+        assert!(model::check_upstream_loop(&other, &[8080, 8443], Some(&f)).is_ok());
+    }
+    // another device on the same port is no loop
+    let c = model::validate(sample_ports(), &[8080, 8443]).unwrap();
+    assert!(model::check_upstream_loop(&c, &[8080, 8443], Some(&f)).is_ok());
+}
+
+/// With HTTP/3 on, the extra ports are UDP ports of the proxy too.
+#[test]
+fn busy_udp_ports_with_http3() {
+    let c = model::validate(sample_ports(), &[8080, 8443]).unwrap();
+    let udp = "  sl  local_address rem_address   st\n   0: 00000000:20FD 00000000:0000 07 0\n";
+    let busy = model::BusyPorts {
+        tcp: Default::default(),
+        udp: model::bound_udp(udp),
+    };
+    assert_eq!(busy.udp, [8445].into());
+    let none = Default::default();
+    let e = model::check_busy_ports(&c, &busy, &none).unwrap_err();
+    assert_eq!(e.field.as_deref(), Some("routes[1].ports"));
+    assert!(e.message.contains("UDP"), "{}", e.message);
+    let mut no_h3 = c.clone();
+    no_h3.settings.h3 = false;
+    assert!(model::check_busy_ports(&no_h3, &busy, &none).is_ok());
+    // held by the proxy itself: no conflict
+    assert!(model::check_busy_ports(&c, &busy, &[8445].into()).is_ok());
 }
 
 #[test]

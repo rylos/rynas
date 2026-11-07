@@ -8,10 +8,15 @@
 //!   none of it is a configuration key of the store.
 //! - An option change waits for a confirmation ([`CONFIRM_WINDOW`]): the page confirms as
 //!   soon as it can reach rynas again after the task; if the change cut that path (routes
-//!   accepted from the tailnet hiding the LAN), rynasd puts the previous options back.
-//! - The status says whether the request itself came over the tailnet (`via_tailscale`,
-//!   from the local address of the connection), so the page warns before an action that
-//!   may end the session.
+//!   accepted from the tailnet hiding the LAN), rynasd puts the previous options back. The
+//!   window starts right after `tailscale set`; while it is open, options, login and logout
+//!   are refused (409), so the previous options stay the ones before the first change. The
+//!   pending revert is kept in `<state>/tailscale/confirm.json`: after a restart of rynasd
+//!   the window goes on, or the revert runs at once when it has passed. A revert that finds
+//!   another Tailscale task running waits for it.
+//! - The status says whether the request itself came over the tailnet (`via_tailscale`:
+//!   the client's address, as rynas-web resolved it behind rynas-caddy, or the local address
+//!   of the connection), so the page warns before an action that may end the session.
 //! - `--dry-system`: status reads go to the socket given with `--tailscale-socket` (a test
 //!   double), changes are only logged.
 
@@ -44,6 +49,17 @@ struct Pending {
     generation: u64,
 }
 
+/// [`Pending`] on disk (`<state>/tailscale/confirm.json`).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PendingFile {
+    deadline_ms: u64,
+    previous: TailscaleOptions,
+}
+
+const PENDING_FILE: &str = "confirm.json";
+/// How often a revert that found another task running tries again.
+const REVERT_RETRY: Duration = Duration::from_millis(500);
+
 /// What the Tailscale endpoints work on.
 pub struct TailscaleSvc {
     pub ops: Arc<Ops>,
@@ -59,6 +75,8 @@ pub struct TailscaleSvc {
     task: Mutex<Option<String>>,
     confirm: Mutex<Option<Pending>>,
     generation: std::sync::atomic::AtomicU64,
+    /// [`CONFIRM_WINDOW`] in ms (shorter in tests: [`TailscaleSvc::set_confirm_window`]).
+    confirm_window_ms: std::sync::atomic::AtomicU64,
     cache: tokio::sync::Mutex<Option<(Instant, TailscaleStatus)>>,
 }
 
@@ -102,17 +120,29 @@ fn svc(st: &TsState) -> Res<Arc<TailscaleSvc>> {
     })
 }
 
-/// The local address of the session's connection (from rynas-web) is a tailnet address.
+/// The session came over the tailnet: the client's address (from rynas-web: the peer, or the
+/// address rynas-caddy forwarded) or the local address of its connection is a tailnet one.
 fn via_tailscale(h: &HeaderMap) -> bool {
-    h.get(rynas_auth::ipc::LOCAL_ADDR_HEADER)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| {
+    let addr = |name: &str| {
+        h.get(name).and_then(|v| v.to_str().ok()).and_then(|v| {
             v.parse::<SocketAddr>()
                 .map(|s| s.ip())
                 .or_else(|_| v.parse::<IpAddr>())
                 .ok()
         })
-        .is_some_and(rynas_tailscale::is_tailnet)
+    };
+    [rynas_auth::ipc::CLIENT_ADDR_HEADER, rynas_auth::ipc::LOCAL_ADDR_HEADER]
+        .iter()
+        .filter_map(|n| addr(n))
+        .any(rynas_tailscale::is_tailnet)
+}
+
+fn confirm_pending() -> Error {
+    Error::new(
+        StatusCode::CONFLICT,
+        error_codes::CONFLICT,
+        "an option change waits for its confirmation: confirm it or wait for the previous options to come back".into(),
+    )
 }
 
 /// IPv4 subnets of the LAN interfaces (`ip -j addr show`), what "advertise this LAN" offers.
@@ -141,6 +171,10 @@ impl TailscaleSvc {
         state_dir: PathBuf,
         host_root: PathBuf,
     ) -> Arc<Self> {
+        // an auth key or a key download left by a stop in the middle of a task
+        for f in ["authkey", install::KEY_STAGING_NAME] {
+            let _ = std::fs::remove_file(state_dir.join(f));
+        }
         Arc::new(Self {
             ops,
             root,
@@ -151,8 +185,67 @@ impl TailscaleSvc {
             task: Mutex::new(None),
             confirm: Mutex::new(None),
             generation: Default::default(),
+            confirm_window_ms: (CONFIRM_WINDOW.as_millis() as u64).into(),
             cache: tokio::sync::Mutex::new(None),
         })
+    }
+
+    /// Test hook: another confirmation window than [`CONFIRM_WINDOW`].
+    #[doc(hidden)]
+    pub fn set_confirm_window(&self, d: Duration) {
+        self.confirm_window_ms
+            .store(d.as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Test hook: marks the task slot taken (`Some`) or free, as a running task would.
+    #[doc(hidden)]
+    pub fn hold_task_slot(&self, id: Option<&str>) {
+        *self.task.lock().unwrap() = id.map(str::to_string);
+    }
+
+    /// Picks up an option change left waiting by a previous rynasd
+    /// (`<state>/tailscale/confirm.json`): the window goes on, or the previous options come
+    /// back at once when it has passed. Call once, inside the runtime.
+    pub fn resume_pending(self: &Arc<Self>) {
+        let p = self.state_dir.join(PENDING_FILE);
+        let Ok(text) = std::fs::read(&p) else { return };
+        match serde_json::from_slice::<PendingFile>(&text) {
+            Ok(f) => {
+                tracing::info!(
+                    "tailscale: an option change waits for its confirmation since before the restart"
+                );
+                self.arm_until(f.previous, f.deadline_ms);
+            }
+            Err(e) => {
+                tracing::warn!("tailscale: {}: {e}", p.display());
+                let _ = std::fs::remove_file(&p);
+            }
+        }
+    }
+
+    fn save_pending(&self, p: Option<&PendingFile>) {
+        let path = self.state_dir.join(PENDING_FILE);
+        let r = match p {
+            Some(f) => std::fs::create_dir_all(&self.state_dir).and_then(|_| {
+                let tmp = path.with_extension("json.new");
+                std::fs::write(&tmp, serde_json::to_vec(f).unwrap_or_default())?;
+                std::fs::rename(&tmp, &path)
+            }),
+            None => match std::fs::remove_file(&path) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                r => r,
+            },
+        };
+        if let Err(e) = r {
+            tracing::warn!("tailscale: {}: {e}", path.display());
+        }
+    }
+
+    /// Drops the pending confirmation (confirmed, uninstalled); `true` when there was one.
+    fn clear_pending(&self) -> bool {
+        let had = self.confirm.lock().unwrap().take().is_some();
+        self.save_pending(None);
+        had
     }
 
     fn distro(&self) -> Option<install::Distro> {
@@ -245,14 +338,28 @@ impl TailscaleSvc {
         }
     }
 
+    /// Writes a whole file through a temporary one. Only paths rynasd can write inside its
+    /// sandbox (`ProtectSystem=yes`: not /usr); the rest goes through
+    /// [`install::outside`]. In a `.d` directory (`sources.list.d`, `sysctl.d`) the temporary
+    /// file is staged in the parent, where nothing reads it.
     fn write_file(&self, ctx: &TaskCtx, path: &str, content: &[u8], mode: u32) -> Result<(), String> {
         use std::os::unix::fs::PermissionsExt;
+        if !install::writable_in_sandbox(path) {
+            return Err(format!("{path}: read-only inside rynasd's sandbox"));
+        }
         ctx.log(&format!("writing {path}"));
         let p = under(&self.root, path);
-        if let Some(d) = p.parent() {
-            std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
-        }
-        let tmp = p.with_extension("rynas-new");
+        let dir = p.parent().ok_or_else(|| format!("{path}: no folder"))?;
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let stage_dir = match dir.parent() {
+            Some(up) if dir.extension().is_some_and(|e| e == "d") => up,
+            _ => dir,
+        };
+        let tmp = stage_dir.join(format!(".{name}.rynas-new"));
         std::fs::write(&tmp, content).map_err(|e| format!("{}: {e}", tmp.display()))?;
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))
             .map_err(|e| e.to_string())?;
@@ -260,6 +367,7 @@ impl TailscaleSvc {
     }
 
     fn remove_file(&self, ctx: &TaskCtx, path: &str) {
+        debug_assert!(install::writable_in_sandbox(path), "{path}");
         let p = under(&self.root, path);
         if p.exists() {
             ctx.log(&format!("removing {path}"));
@@ -303,9 +411,19 @@ impl TailscaleSvc {
         Ok(())
     }
 
+    /// Opens the confirmation window of an option change: `previous` comes back unless it is
+    /// confirmed in time.
     fn arm_confirm(self: &Arc<Self>, previous: TailscaleOptions) -> u64 {
+        let window = self.confirm_window_ms.load(std::sync::atomic::Ordering::Relaxed);
+        self.arm_until(previous, now_ms() + window)
+    }
+
+    fn arm_until(self: &Arc<Self>, previous: TailscaleOptions, deadline_ms: u64) -> u64 {
         let generation = self.generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        let deadline_ms = now_ms() + CONFIRM_WINDOW.as_millis() as u64;
+        self.save_pending(Some(&PendingFile {
+            deadline_ms,
+            previous: previous.clone(),
+        }));
         *self.confirm.lock().unwrap() = Some(Pending {
             deadline_ms,
             previous,
@@ -313,27 +431,49 @@ impl TailscaleSvc {
         });
         let me = self.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(CONFIRM_WINDOW).await;
-            let prev = {
-                let mut c = me.confirm.lock().unwrap();
-                match c.as_ref() {
-                    Some(p) if p.generation == generation => c.take().map(|p| p.previous),
-                    _ => None,
-                }
-            };
-            if let Some(prev) = prev {
-                tracing::warn!("tailscale: option change not confirmed, putting the previous options back");
-                let r = me.spawn("revert", "rynas", move |s, ctx| async move {
+            tokio::time::sleep(Duration::from_millis(deadline_ms.saturating_sub(now_ms()))).await;
+            me.expire(generation).await;
+        });
+        generation
+    }
+
+    /// The window of `generation` has passed: the previous options come back, as soon as no
+    /// other Tailscale task runs. The pending change stays until the revert starts (options,
+    /// login and logout stay refused meanwhile); a confirmation that still arrives first
+    /// keeps the change.
+    async fn expire(self: Arc<Self>, generation: u64) {
+        let mut warned = false;
+        loop {
+            {
+                let mut c = self.confirm.lock().unwrap();
+                let Some(p) = c.as_ref().filter(|p| p.generation == generation) else {
+                    return;
+                };
+                let prev = p.previous.clone();
+                let r = self.spawn("revert", "rynas", move |s, ctx| async move {
                     ctx.log("the option change was not confirmed in time: previous options back");
                     s.run(&ctx, &cli::set(&prev)).await?;
                     s.forwarding(&ctx, &prev).await
                 });
-                if let Err(e) = r {
-                    tracing::warn!("tailscale: revert not started: {}", e.2);
+                match r {
+                    Ok(_) => {
+                        c.take();
+                        drop(c);
+                        tracing::warn!(
+                            "tailscale: option change not confirmed, putting the previous options back"
+                        );
+                        self.save_pending(None);
+                        return;
+                    }
+                    Err(e) if !warned => {
+                        warned = true;
+                        tracing::warn!("tailscale: revert waits: {}", e.2);
+                    }
+                    Err(_) => {}
                 }
             }
-        });
-        generation
+            tokio::time::sleep(REVERT_RETRY).await;
+        }
     }
 }
 
@@ -386,7 +526,12 @@ async fn install_route(State(st): State<TsState>, hd: HeaderMap) -> Res<Response
         ctx.log(&format!("installing Tailscale from {} ({code})", install::repo_url(&d)));
         let key_ok = std::fs::read(under(&s.root, install::KEYRING))
             .is_ok_and(|k| install::check_key(&k).is_ok());
-        let steps = install::install_steps(&d, &code, key_ok);
+        let staged = s.state_dir.join(install::KEY_STAGING_NAME);
+        if !s.dry {
+            std::fs::create_dir_all(&s.state_dir)
+                .map_err(|e| format!("{}: {e}", s.state_dir.display()))?;
+        }
+        let steps = install::install_steps(&d, &code, key_ok, &staged.to_string_lossy());
         let n = steps.len();
         for (i, step) in steps.into_iter().enumerate() {
             if ctx.is_cancelled() {
@@ -396,8 +541,8 @@ async fn install_route(State(st): State<TsState>, hd: HeaderMap) -> Res<Response
                 install::Step::Run(c) => {
                     s.run(&ctx, &c).await?;
                 }
-                install::Step::CheckKey => {
-                    let p = under(&s.root, install::KEY_STAGING);
+                install::Step::CheckKey { staged } => {
+                    let p = PathBuf::from(&staged);
                     if s.dry && !p.exists() {
                         ctx.log(&format!(
                             "checking the key fingerprint {} (dry system: not downloaded)",
@@ -405,11 +550,16 @@ async fn install_route(State(st): State<TsState>, hd: HeaderMap) -> Res<Response
                         ));
                     } else {
                         let k = std::fs::read(&p).unwrap_or_default();
-                        let _ = std::fs::remove_file(&p);
-                        install::check_key(&k)?;
+                        if let Err(e) = install::check_key(&k) {
+                            let _ = std::fs::remove_file(&p);
+                            return Err(e);
+                        }
                         ctx.log(&format!("key fingerprint {} checked", install::KEY_FINGERPRINT));
-                        s.write_file(&ctx, install::KEYRING, &k, 0o644)?;
                     }
+                    // /usr is read-only inside rynasd: placed by `install` outside the sandbox
+                    let r = s.run(&ctx, &install::place_key(&staged)).await;
+                    let _ = std::fs::remove_file(&p);
+                    r?;
                 }
                 install::Step::Write { path, content, mode } => {
                     s.write_file(&ctx, path, content.as_bytes(), mode)?;
@@ -436,7 +586,7 @@ async fn uninstall_route(
     }
     audit(&who, if req.purge_state { "uninstall (purge)" } else { "uninstall" });
     let id = s.spawn("uninstall", &who, move |s, ctx| async move {
-        *s.confirm.lock().unwrap() = None;
+        s.clear_pending();
         for c in install::uninstall_cmds(req.purge_state) {
             if ctx.is_cancelled() {
                 return Err("cancelled".into());
@@ -469,6 +619,9 @@ async fn login_route(
     s.ops.admins.require_admin(&who, "Tailscale login")?;
     let req: TailscaleLogin = body(&b)?;
     cli::check_login(&req).map_err(|(f, m)| Error::invalid(f, m))?;
+    if s.confirm.lock().unwrap().is_some() {
+        return Err(confirm_pending());
+    }
     let st_now = s.status(true).await;
     if !st_now.installed {
         return Err(not_installed());
@@ -535,12 +688,14 @@ fn write_secret(path: &Path, key: &str) -> Result<(), String> {
 async fn logout_route(State(st): State<TsState>, hd: HeaderMap) -> Res<Response> {
     let (s, who) = (svc(&st)?, user(&hd)?);
     s.ops.admins.require_admin(&who, "Tailscale logout")?;
+    if s.confirm.lock().unwrap().is_some() {
+        return Err(confirm_pending());
+    }
     if !s.status(true).await.installed {
         return Err(not_installed());
     }
     audit(&who, "logout");
     let id = s.spawn("logout", &who, move |s, ctx| async move {
-        *s.confirm.lock().unwrap() = None;
         s.run(&ctx, &cli::logout()).await.map(|_| ())
     })?;
     Ok(accepted(id))
@@ -556,6 +711,9 @@ async fn options_route(
     let mut o: TailscaleOptions = rynas_http::from_slice(&b).map_err(Error::from)?;
     o.advertise_routes =
         cli::normalize_routes(&o.advertise_routes).map_err(|m| Error::invalid("advertise_routes", m))?;
+    if s.confirm.lock().unwrap().is_some() {
+        return Err(confirm_pending());
+    }
     let now = s.status(true).await;
     if !now.installed {
         return Err(not_installed());
@@ -567,19 +725,33 @@ async fn options_route(
             "tailscaled is not running".into(),
         ));
     }
+    // the previous options must be known, or a revert would put defaults back
+    let me = s.clone();
+    let Some(prefs) = tokio::task::spawn_blocking(move || me.prefs_blocking())
+        .await
+        .ok()
+        .flatten()
+    else {
+        return Err(Error::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            error_codes::BACKEND_UNAVAILABLE,
+            "the current options cannot be read from tailscaled: nothing changed".into(),
+        ));
+    };
     audit(&who, "options");
-    let previous = now.options.clone();
+    let previous = prefs.options;
     let id = s.spawn("options", &who, move |s, ctx| async move {
         s.run(&ctx, &cli::set(&o)).await?;
+        // the window opens as soon as the change is made (the forwarding below may fail)
+        s.arm_confirm(previous);
+        let window = s.confirm_window_ms.load(std::sync::atomic::Ordering::Relaxed) / 1000;
+        ctx.log(&format!(
+            "waiting {window} s for the confirmation, then the previous options come back"
+        ));
         s.forwarding(&ctx, &o).await?;
         if !o.advertise_routes.is_empty() || o.exit_node {
             ctx.log("advertised routes and exit nodes must be approved in the tailnet's admin console (unless auto-approved)");
         }
-        s.arm_confirm(previous);
-        ctx.log(&format!(
-            "waiting {} s for the confirmation, then the previous options come back",
-            CONFIRM_WINDOW.as_secs()
-        ));
         Ok(())
     })?;
     Ok(accepted(id))
@@ -588,12 +760,12 @@ async fn options_route(
 async fn confirm_route(State(st): State<TsState>, hd: HeaderMap) -> Res<StatusCode> {
     let (s, who) = (svc(&st)?, user(&hd)?);
     s.ops.admins.require_admin(&who, "Tailscale options")?;
-    match s.confirm.lock().unwrap().take() {
-        Some(_) => {
+    match s.clear_pending() {
+        true => {
             audit(&who, "options confirmed");
             Ok(StatusCode::NO_CONTENT)
         }
-        None => Err(Error::new(
+        false => Err(Error::new(
             StatusCode::CONFLICT,
             error_codes::NOTHING_PENDING,
             "no option change waits for a confirmation".into(),

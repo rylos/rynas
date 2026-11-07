@@ -104,8 +104,35 @@ pub fn valid_hostname(h: &str) -> bool {
         && h.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
+/// Ranges an advertised route may not overlap: the tailnet's own (100.64.0.0/10,
+/// fd7a:115c:a1e0::/48) and link-local (169.254.0.0/16, fe80::/10).
+const RESERVED: &[(&str, u8)] = &[
+    ("100.64.0.0", 10),
+    ("fd7a:115c:a1e0::", 48),
+    ("169.254.0.0", 16),
+    ("fe80::", 10),
+];
+
+/// `a/pa` and `net/pn` share addresses (one contains the other).
+fn overlaps(a: IpAddr, pa: u8, net: &str, pn: u8) -> bool {
+    let Ok(b) = net.parse::<IpAddr>() else { return false };
+    let p = pa.min(pn);
+    match (a, b) {
+        (IpAddr::V4(a), IpAddr::V4(b)) => {
+            let m = if p == 0 { 0 } else { u32::MAX << (32 - p as u32) };
+            u32::from(a) & m == u32::from(b) & m
+        }
+        (IpAddr::V6(a), IpAddr::V6(b)) => {
+            let m = if p == 0 { 0 } else { u128::MAX << (128 - p as u32) };
+            u128::from(a) & m == u128::from(b) & m
+        }
+        _ => false,
+    }
+}
+
 /// Normalizes the advertised routes (`192.168.1.0/24`): CIDR with host bits clear, no default
-/// route (that is the exit node), nothing inside the tailnet, no duplicates, at most 16.
+/// route (that is the exit node), nothing overlapping the tailnet or link-local ranges
+/// (`100.0.0.0/8` included), no duplicates, at most 16.
 pub fn normalize_routes(routes: &[String]) -> Result<Vec<String>, String> {
     let mut out: Vec<String> = Vec::new();
     for r in routes.iter().map(|r| r.trim()).filter(|r| !r.is_empty()) {
@@ -129,7 +156,7 @@ pub fn normalize_routes(routes: &[String]) -> Result<Vec<String>, String> {
         if clean != ip {
             return Err(format!("{r}: host bits set"));
         }
-        if crate::is_tailnet(ip) || ip.is_loopback() || ip.is_multicast() {
+        if ip.is_loopback() || ip.is_multicast() || RESERVED.iter().any(|(net, len)| overlaps(ip, p, net, *len)) {
             return Err(format!("{r}: not a LAN subnet"));
         }
         let s = format!("{ip}/{p}");
@@ -205,7 +232,7 @@ mod tests {
     fn routes_are_lan_subnets() {
         let ok = normalize_routes(&[" 192.168.1.0/24".into(), "192.168.1.0/24".into(), "fd00:1::/64".into(), String::new()]).unwrap();
         assert_eq!(ok, ["192.168.1.0/24", "fd00:1::/64"]);
-        for bad in ["192.168.1.5/24", "0.0.0.0/0", "100.64.0.0/10", "10.0.0.0", "10.0.0.0/33", "x/8", "127.0.0.0/8"] {
+        for bad in ["192.168.1.5/24", "0.0.0.0/0", "100.64.0.0/10", "10.0.0.0", "10.0.0.0/33", "x/8", "127.0.0.0/8", "100.0.0.0/8", "100.96.0.0/12", "64.0.0.0/2", "169.254.0.0/16", "169.254.10.0/24", "fe80::/64", "fd7a::/16", "fd7a:115c:a1e0:1::/64"] {
             assert!(normalize_routes(&[bad.into()]).is_err(), "{bad}");
         }
     }

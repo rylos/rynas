@@ -41,6 +41,12 @@ pub const USER_HEADER: &str = "x-rynas-user";
 /// and checks that a network confirmation came over the new path.
 pub const LOCAL_ADDR_HEADER: &str = "x-rynas-local-addr";
 
+/// Header with the address of the session's client, added by `rynas-web` to the Tailscale
+/// endpoints: the TCP peer, or the address the local reverse proxy (rynas-caddy) forwarded
+/// in `X-Forwarded-For` (honoured only from a loopback peer). rynasd tells from it whether
+/// the request came over the tailnet when it arrived through the proxy.
+pub const CLIENT_ADDR_HEADER: &str = "x-rynas-client-addr";
+
 /// Header with the `Host` the browser asked for, added by `rynas-web` to the web access
 /// confirmation: rynasd checks that it arrived through the proxy on one of the new names.
 pub const HOST_HEADER: &str = "x-rynas-host";

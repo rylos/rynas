@@ -847,36 +847,73 @@ fn validate_ports(c: &mut WebAccessConfig, reserved: &[u16]) -> Result<(), Inval
             }
         }
     }
-    // a custom upstream on loopback may not be one of the proxy's own listeners
-    let mut proxy_ports: BTreeSet<u16> = [http, https].into();
+    check_upstream_loop(c, reserved, None)
+}
+
+/// The upstream host is this NAS: loopback (`127.0.0.0/8` with Debian's `127.0.1.1`, `::1`),
+/// the unspecified address, `localhost` names, and with `facts` the host's own names
+/// (`nas`, `nas.local`, the full host name) and the addresses of its LAN interfaces.
+pub fn upstream_is_self(host: &str, facts: Option<&HostFacts>) -> bool {
+    let h = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    let h = h.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = h.parse::<IpAddr>() {
+        let ip = match ip {
+            IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(ip),
+            v4 => v4,
+        };
+        return ip.is_loopback()
+            || ip.is_unspecified()
+            || facts.is_some_and(|f| f.addrs.contains(&ip));
+    }
+    if h == "localhost" || h == "localhost.localdomain" || h.ends_with(".localhost") {
+        return true;
+    }
+    facts.is_some_and(|f| {
+        let label = f.host();
+        let full = f.hostname.trim_end_matches('.').to_ascii_lowercase();
+        !label.is_empty() && (h == label || h == format!("{label}.local") || h == full)
+    })
+}
+
+/// A custom upstream on this NAS ([`upstream_is_self`]) may not be one of the proxy's own
+/// listeners (main, extra ports) nor the web interface's (`reserved`): the requests would
+/// loop, or reach rynas-web under another address. `facts`: the host's own names and
+/// addresses too (the store check has them; without, loopback and `localhost` only).
+pub fn check_upstream_loop(
+    c: &WebAccessConfig,
+    reserved: &[u16],
+    facts: Option<&HostFacts>,
+) -> Result<(), Invalid> {
+    let mut proxy_ports: BTreeSet<u16> = [c.settings.http_port, c.settings.https_port].into();
     proxy_ports.extend(c.routes.iter().flat_map(|r| r.ports.iter().copied()));
     for (i, r) in c.routes.iter().enumerate() {
-        let lo = r
-            .upstream
-            .host
-            .parse::<IpAddr>()
-            .map(|ip| ip.is_loopback())
-            .unwrap_or(r.upstream.host == "localhost");
-        if r.kind == RouteKind::Custom && lo && proxy_ports.contains(&r.upstream.port) {
-            return Err(Invalid::at(
-                format!("routes[{i}].upstream.port"),
-                format!(
-                    "port {} on this NAS is the proxy itself: the requests would loop",
-                    r.upstream.port
-                ),
-            ));
+        if r.kind != RouteKind::Custom || !upstream_is_self(&r.upstream.host, facts) {
+            continue;
         }
+        let p = r.upstream.port;
+        let why = if proxy_ports.contains(&p) {
+            "is the proxy itself: the requests would loop"
+        } else if reserved.contains(&p) {
+            "is the web interface: use the NAS's own address instead"
+        } else {
+            continue;
+        };
+        return Err(Invalid::at(
+            format!("routes[{i}].upstream.port"),
+            format!("port {p} on this NAS {why}"),
+        ));
     }
     Ok(())
 }
 
-/// Ports with a listening TCP socket in `/proc/net/tcp` or `tcp6` text.
-pub fn listening_tcp(text: &str) -> BTreeSet<u16> {
+/// Ports in `/proc/net/{tcp,tcp6,udp,udp6}` text whose socket state is `state` (`0A`: a
+/// listening TCP socket, `07`: a bound UDP socket).
+fn ports_in_state(text: &str, state: &str) -> BTreeSet<u16> {
     text.lines()
         .skip(1)
         .filter_map(|l| {
             let f: Vec<&str> = l.split_whitespace().collect();
-            if f.len() < 4 || f[3] != "0A" {
+            if f.len() < 4 || f[3] != state {
                 return None;
             }
             f[1].rsplit_once(':')
@@ -885,25 +922,52 @@ pub fn listening_tcp(text: &str) -> BTreeSet<u16> {
         .collect()
 }
 
-/// The extra ports of `c` another program already listens on: `busy` are the host's
-/// listening ports, `held` the ones the proxy itself holds now (the applied key).
+/// Ports with a listening TCP socket in `/proc/net/tcp` or `tcp6` text.
+pub fn listening_tcp(text: &str) -> BTreeSet<u16> {
+    ports_in_state(text, "0A")
+}
+
+/// Ports with a bound UDP socket in `/proc/net/udp` or `udp6` text.
+pub fn bound_udp(text: &str) -> BTreeSet<u16> {
+    ports_in_state(text, "07")
+}
+
+/// The host's ports in use: TCP listeners and bound UDP sockets.
+#[derive(Debug, Clone, Default)]
+pub struct BusyPorts {
+    pub tcp: BTreeSet<u16>,
+    pub udp: BTreeSet<u16>,
+}
+
+/// The extra ports of `c` another program already uses: TCP, and UDP too with HTTP/3 on
+/// (the proxy then listens on UDP on the same ports). `held` are the ones the proxy itself
+/// holds now (the applied key). Only sockets in the host's namespace are seen: a container
+/// published with Docker's `userland-proxy=false` holds its port with iptables rules only
+/// (§5.6).
 pub fn check_busy_ports(
     c: &WebAccessConfig,
-    busy: &BTreeSet<u16>,
+    busy: &BusyPorts,
     held: &BTreeSet<u16>,
 ) -> Result<(), Invalid> {
     if c.settings.mode != ProxyMode::Builtin {
         return Ok(());
     }
+    let h3 = c.settings.h3;
     for (i, r) in c.routes.iter().enumerate() {
-        if let Some(p) = r
-            .ports
-            .iter()
-            .find(|p| r.enabled && busy.contains(p) && !held.contains(p))
-        {
+        if !r.enabled {
+            continue;
+        }
+        for p in r.ports.iter().filter(|p| !held.contains(p)) {
+            let proto = if busy.tcp.contains(p) {
+                "TCP"
+            } else if h3 && busy.udp.contains(p) {
+                "UDP (HTTP/3)"
+            } else {
+                continue;
+            };
             return Err(Invalid::at(
                 format!("routes[{i}].ports"),
-                format!("port {p} is already used on this NAS by another service or container"),
+                format!("port {p} ({proto}) is already used on this NAS by another service or container"),
             ));
         }
     }
