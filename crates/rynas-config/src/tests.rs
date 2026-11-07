@@ -796,3 +796,122 @@ fn pending_generation_follows_stage_discard_and_apply() {
     assert_eq!(e.cfg.discard("alice").unwrap(), 1);
     assert_eq!(*seen.lock().unwrap(), [1, 2, 3, 4]);
 }
+
+#[test]
+fn rollback_puts_files_back_with_their_owner_and_mode() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let e = env();
+    let path = e.root.join("etc/app/app.conf");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "port = 0\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+    // a supplementary group of the test user (a non-root user may give its file to one):
+    // root:nut in production
+    let egid = std::fs::metadata(&path).unwrap().gid();
+    let status = std::fs::read_to_string("/proc/self/status").unwrap();
+    let group = status
+        .lines()
+        .find_map(|l| l.strip_prefix("Groups:"))
+        .and_then(|g| {
+            g.split_whitespace()
+                .filter_map(|g| g.parse::<u32>().ok())
+                .find(|g| *g != egid)
+        });
+    if let Some(g) = group {
+        std::os::unix::fs::chown(&path, None, Some(g)).unwrap();
+    }
+    let want_gid = std::fs::metadata(&path).unwrap().gid();
+    e.sys.state().fail_reload.push("app.service".into());
+    e.cfg
+        .stage("alice", "test.app", Some(json!({"port": 2, "name": "two"})))
+        .unwrap();
+    assert!(apply(&e, "alice", "").is_err());
+    let m = std::fs::metadata(&path).unwrap();
+    assert_eq!(read(&e.root, "/etc/app/app.conf"), "port = 0\n");
+    assert_eq!(m.mode() & 0o7777, 0o640);
+    assert_eq!(m.gid(), want_gid, "group kept (test group {group:?})");
+    assert!(!e.root.join("etc/app/app.conf.rynas-new").exists());
+}
+
+/// A domain whose removal puts an "off" block back and removes a file.
+struct LeavesBehind;
+
+impl Applier for LeavesBehind {
+    fn key(&self) -> &str {
+        "test.leaves"
+    }
+
+    fn validate(
+        &self,
+        value: serde_json::Value,
+    ) -> std::result::Result<serde_json::Value, Invalid> {
+        Ok(value)
+    }
+
+    fn render(
+        &self,
+        value: &serde_json::Value,
+        _ctx: &ApplyCtx,
+    ) -> std::result::Result<Vec<ManagedFile>, String> {
+        Ok(vec![
+            ManagedFile::block("/etc/hosts", "leaves", format!("# on {value}")),
+            ManagedFile::whole("/etc/leaves/open.conf", "open\n".into(), true),
+        ])
+    }
+
+    fn render_removed(
+        &self,
+        old: Option<&serde_json::Value>,
+        ctx: &ApplyCtx,
+    ) -> std::result::Result<Vec<ManagedFile>, String> {
+        assert!(old.is_some(), "the removed value is passed");
+        assert!(ctx.read(Path::new("/etc/leaves/open.conf")).is_some());
+        Ok(vec![
+            ManagedFile::block("/etc/hosts", "leaves", "# off".into()),
+            ManagedFile::absent("/etc/leaves/open.conf"),
+        ])
+    }
+
+    fn reconcile(
+        &self,
+        _from: Option<&serde_json::Value>,
+        to: Option<&serde_json::Value>,
+        ctx: &ApplyCtx,
+    ) -> std::result::Result<(), String> {
+        if to.is_none() {
+            assert!(ctx.replaced(Path::new("/etc/hosts")));
+            assert!(ctx.replaced(Path::new("/etc/leaves/open.conf")));
+            assert!(!ctx.replaced(Path::new("/etc/hostname")));
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn removing_a_key_writes_what_it_leaves_behind() {
+    let e = env();
+    let mut domains = appliers();
+    domains.push(Arc::new(LeavesBehind));
+    let cfg = Config::open(
+        ConfigOptions::new(e.state.join("2"), &e.root),
+        e.sys.clone(),
+        domains,
+    )
+    .unwrap();
+    cfg.stage("alice", "test.leaves", Some(json!(1))).unwrap();
+    cfg.apply("alice", "alice", "", &|_| {}, &|| false).unwrap();
+    assert!(read(&e.root, "/etc/hosts").contains("# on 1\n"));
+    assert_eq!(cfg.drift().unwrap().checked, 2);
+    // e.g. restoring a revision from before the key existed
+    cfg.stage("alice", "test.leaves", None).unwrap();
+    cfg.apply("alice", "alice", "", &|_| {}, &|| false).unwrap();
+    let hosts = read(&e.root, "/etc/hosts");
+    assert!(
+        hosts.contains("# off\n") && !hosts.contains("# on"),
+        "{hosts}"
+    );
+    assert!(hosts.starts_with("127.0.0.1\tlocalhost\n"));
+    assert!(!e.root.join("etc/leaves/open.conf").exists());
+    assert_eq!(cfg.applied("test.leaves").unwrap(), None);
+    assert_eq!(cfg.drift().unwrap().checked, 0, "no longer tracked");
+}

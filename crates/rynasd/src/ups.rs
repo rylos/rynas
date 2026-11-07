@@ -313,7 +313,7 @@ pub fn ensure_nut_user(root: &Path, password: &str) -> Result<bool, String> {
     }
     let meta = std::fs::metadata(&path).map_err(|e| format!("{NUT_USERS}: {e}"))?;
     let cand = files::candidate_path(&path);
-    files::write_synced(&cand, new.as_bytes(), meta.mode() & 0o7777)
+    files::write_synced(&cand, new.as_bytes(), meta.mode() & 0o640)
         .and_then(|_| std::os::unix::fs::chown(&cand, Some(meta.uid()), Some(meta.gid())))
         .and_then(|_| files::rename_synced(&cand, &path))
         .map_err(|e| {
@@ -537,9 +537,11 @@ async fn nut_send(u: &Ups, ctx: &TaskCtx, kind: BatteryTest) -> Result<(), Strin
     if !s.supports(kind) {
         return Err(format!("the UPS does not offer {}", kind.nut_cmd()));
     }
-    let root = u.root.clone();
+    let (root, ops) = (u.root.clone(), u.ops.clone());
+    // under the apply lock: an apply rewrites upsd.users too (ups.device, ups.netserver)
     let changed = tokio::task::spawn_blocking(move || {
-        nut_password(&root).and_then(|pw| ensure_nut_user(&root, &pw))
+        ops.config
+            .exclusive(|| nut_password(&root).and_then(|pw| ensure_nut_user(&root, &pw)))
     })
     .await
     .map_err(|e| e.to_string())??;

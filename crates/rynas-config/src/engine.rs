@@ -135,6 +135,9 @@ struct Restore {
     target: PathBuf,
     /// Copy of the previous file; `None`: there was none, delete the target.
     backup: Option<PathBuf>,
+    /// `(mode, uid, gid)` of the previous file: put back with it (a file of group `nut`
+    /// read by a daemon that dropped privileges must not come back as `root:root`).
+    owner: Option<(u32, u32, u32)>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -254,6 +257,8 @@ impl Config {
             system: self.system.as_ref(),
             templates: &self.templates,
             log,
+            replaced: Mutex::new(Vec::new()),
+            restarted: Mutex::new(Vec::new()),
         }
     }
 
@@ -572,6 +577,14 @@ impl Config {
         self.apply_steps(steps, owner, author, comment, restored_from, log, cancelled)
     }
 
+    /// Runs `f` while no apply runs (the apply lock): for code outside the engine that
+    /// rewrites a file an apply may also write (read-modify-write of a shared file, e.g. the
+    /// battery tests' block of `upsd.users`). `f` must not apply. Blocking.
+    pub fn exclusive<T>(&self, f: impl FnOnce() -> T) -> T {
+        let _apply = self.apply_lock.lock().unwrap();
+        f()
+    }
+
     /// Applies one value of `key` at once, without a changeset: for state that an operation
     /// of rynas itself has just created on the system (a new storage volume, its fstab and
     /// crypttab entries). Same pipeline, rollback and revision as [`Config::apply`]; staged
@@ -710,17 +723,17 @@ impl Config {
         }
         let mut planned: Vec<Planned> = Vec::new();
         for (i, s) in steps.iter().enumerate() {
-            let Some(v) = &s.new else {
-                log(&format!(
-                    "{}: removed, its files are no longer managed",
-                    s.key
-                ));
-                continue;
-            };
-            let files = s
-                .applier
-                .render(v, &ctx)
-                .map_err(|e| fail(&s.key, "render", e))?;
+            let files = match &s.new {
+                Some(v) => s.applier.render(v, &ctx),
+                None => s.applier.render_removed(s.old.as_ref(), &ctx).inspect(|f| {
+                    log(&if f.is_empty() {
+                        format!("{}: removed, its files are no longer managed", s.key)
+                    } else {
+                        format!("{}: removed, putting back what it leaves behind", s.key)
+                    })
+                }),
+            }
+            .map_err(|e| fail(&s.key, "render", e))?;
             for f in files {
                 if !f.path.is_absolute() {
                     return Err(fail(
@@ -808,6 +821,10 @@ impl Config {
         let mut restore: Vec<Restore> = Vec::new();
         for (n, p) in planned.iter().enumerate().filter(|(_, p)| !p.unchanged) {
             let r = (|| -> std::io::Result<Restore> {
+                let owner = std::fs::metadata(&p.real).ok().map(|m| {
+                    use std::os::unix::fs::MetadataExt;
+                    (m.mode() & 0o7777, m.uid(), m.gid())
+                });
                 let backup = if p.real.exists() {
                     let b = under_root(&backup_dir.join("files"), &p.file.path);
                     if let Some(d) = b.parent() {
@@ -824,9 +841,11 @@ impl Config {
                 } else {
                     rename_synced(&candidate_path(&p.real), &p.real)?;
                 }
+                ctx.replaced.lock().unwrap().push(p.real.clone());
                 Ok(Restore {
                     target: p.real.clone(),
                     backup,
+                    owner,
                 })
             })();
             match r {
@@ -862,8 +881,9 @@ impl Config {
 
         let written = planned
             .into_iter()
-            // a file that must not exist is not tracked by the drift check
-            .filter(|p| p.file.kind != FileKind::Absent)
+            // a file that must not exist, or left behind by a removed key, is not tracked by
+            // the drift check
+            .filter(|p| p.file.kind != FileKind::Absent && steps[p.step].new.is_some())
             .map(|p| Written {
                 path: p.file.path,
                 key: steps[p.step].key.clone(),
@@ -878,11 +898,21 @@ impl Config {
     /// values. Best effort: failures are logged.
     fn rollback(&self, steps: &[Step], restore: &[Restore], reloaded: usize, log: &dyn Fn(&str)) {
         log("rolling back");
+        let ctx = self.ctx_logging(log);
         for r in restore.iter().rev() {
+            ctx.replaced.lock().unwrap().push(r.target.clone());
             let res = match &r.backup {
                 Some(b) => {
                     let cand = candidate_path(&r.target);
-                    std::fs::copy(b, &cand).and_then(|_| rename_synced(&cand, &r.target))
+                    std::fs::copy(b, &cand)
+                        .and_then(|_| match r.owner {
+                            Some(o) => restore_owner(&cand, o),
+                            None => Ok(()),
+                        })
+                        .and_then(|_| rename_synced(&cand, &r.target))
+                        .inspect_err(|_| {
+                            let _ = std::fs::remove_file(&cand);
+                        })
                 }
                 None => match std::fs::remove_file(&r.target) {
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -894,7 +924,6 @@ impl Config {
                 Err(e) => log(&format!("cannot restore {}: {e}", r.target.display())),
             }
         }
-        let ctx = self.ctx_logging(log);
         for s in steps[..reloaded].iter().rev() {
             if let Err(e) = s.applier.reconcile(s.new.as_ref(), s.old.as_ref(), &ctx) {
                 log(&format!(
@@ -1273,6 +1302,18 @@ fn set_group(root: &Path, path: &Path, group: &str) -> std::result::Result<(), S
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && !is_root() => Ok(()),
         Err(e) => Err(format!("{}: chown to root:{group}: {e}", path.display())),
     }
+}
+
+/// Puts back the mode and owner of a restored file. A refused chown is skipped when not
+/// running as root (tests).
+fn restore_owner(path: &Path, (mode, uid, gid): (u32, u32, u32)) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    match std::os::unix::fs::chown(path, Some(uid), Some(gid)) {
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && !is_root() => {}
+        r => r?,
+    }
+    // after the chown, which may clear set-id bits
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
 }
 
 fn is_root() -> bool {

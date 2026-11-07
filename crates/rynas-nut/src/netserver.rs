@@ -4,21 +4,37 @@
 //!   `LISTEN 0.0.0.0` + `LISTEN ::` (upsd sets `IPV6_V6ONLY`, so both bind; they cover
 //!   localhost too); chosen addresses come after `127.0.0.1` and `::1`, so the first `LISTEN`
 //!   (the only one whose failure stops upsd) always binds and an address that went away
-//!   only logs. The admin's own `LISTEN` lines are dropped while the server is on (they would
-//!   clash), kept when it is off.
+//!   only logs. The admin's own `LISTEN` lines would clash with the block: while the server
+//!   is on they are set aside as `# saved:` comments in the block ([`admin_listen`]), and an
+//!   "off" block (server off, or the key removed) puts them back as they were.
 //! - **`upsd.users`** ([`render_users`]): one section per client, `upsmon secondary` or no
 //!   rights at all (a monitor account).
-//! - **Allowed hosts** ([`render_dropin`]): NUT dropped its own ACLs in 2.4; rynas uses
-//!   systemd's per-service IP filter (`IPAddressDeny=any` + `IPAddressAllow=` on
-//!   `nut-server.service`, cgroup eBPF), which drops other sources' packets before upsd sees
-//!   them. Without eBPF cgroup support systemd ignores it: a firewall is then the way.
+//! - **Drop-in of `nut-server.service`** ([`render_dropin`]): chosen addresses wait for
+//!   `network-online.target` (upsd binds each `LISTEN` once, at start, and never retries).
+//!   Allowed hosts: NUT dropped its own ACLs in 2.4; rynas uses systemd's per-service IP
+//!   filter (`IPAddressDeny=any` + `IPAddressAllow=`, cgroup eBPF), which drops other
+//!   sources' packets before upsd sees them. Without eBPF cgroup support systemd ignores it
+//!   (with a log line only): `IPAccounting=yes` makes that visible ([`filter_enforced`]),
+//!   and a firewall is then the way. The filter sees the source address: a client on the
+//!   NAS itself that connects from a non-loopback address (a Docker container on a bridge,
+//!   `172.17.0.0/16`) needs its subnet in the list like any other host.
 //! - **Client lines** ([`monitor_line`]): what another Linux `upsmon.conf` needs.
 
+use std::collections::HashSet;
 use std::net::IpAddr;
 
 use rynas_api_types::ups::{
     MAX_NET_ADDRS, MAX_NET_CLIENTS, NET_PASSWORD_LEN, NUT_PORT, UpsClientRole, UpsNetServerConfig,
 };
+
+/// Id of rynas's block in `upsd.conf` and `upsd.users`.
+pub const BLOCK_ID: &str = "ups-netserver";
+
+/// Prefix of an admin's `LISTEN` line set aside in the block while the server is on.
+const SAVED: &str = "# saved: ";
+
+/// First line of the block when the server is off.
+const OFF_HEAD: &str = "# Network UPS server of rynas (ups.netserver): off.";
 
 /// User names rynas itself uses in `upsd.users` (battery tests, its own upsmon).
 pub const RESERVED_USERS: &[&str] = &["rynas", "rynas-upsmon"];
@@ -41,10 +57,19 @@ pub fn valid_password(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"._~@%+=:,-".contains(&b))
 }
 
-/// A listen address: an IP of this machine's LAN, not loopback, any, multicast or
-/// link-local (upsd binds it by number).
+/// Whether a password opened from its envelope can go into `upsd.users` between double
+/// quotes: what [`valid_password`] and the generator give; an older or tampered value with a
+/// quote, a backslash or a line break would break the file (or add lines to it).
+pub fn safe_in_users(s: &str) -> bool {
+    !s.is_empty() && !s.chars().any(|c| c == '"' || c == '\\' || c.is_control())
+}
+
+/// A listen address: an IP of this machine's LAN, not loopback, any, multicast,
+/// link-local or IPv4-mapped (upsd binds it by number; whether the NAS has it is checked by
+/// the caller).
 pub fn valid_listen(s: &str) -> bool {
     match s.parse::<IpAddr>() {
+        Ok(IpAddr::V6(a)) if a.to_ipv4_mapped().is_some() => false,
         Ok(IpAddr::V4(a)) => {
             !(a.is_loopback() || a.is_unspecified() || a.is_multicast() || a.is_link_local())
         }
@@ -87,6 +112,12 @@ pub fn canonical_allow(s: &str) -> Option<String> {
     })
 }
 
+/// Drops repeated entries, keeping the first of each.
+fn dedup(v: &mut Vec<String>) {
+    let mut seen = HashSet::new();
+    v.retain(|a| seen.insert(a.clone()));
+}
+
 /// Checks a value and puts it in its stored form (trimmed, canonical addresses); `foreign`
 /// are the user names of the admin's own `upsd.users` sections. The error is
 /// `(field, message)` with the field as in the JSON body.
@@ -108,7 +139,7 @@ pub fn normalize(
         }
         *a = a.parse::<IpAddr>().map(|ip| ip.to_string()).unwrap_or_default();
     }
-    c.listen.dedup();
+    dedup(&mut c.listen);
     if c.allow.len() > MAX_NET_ADDRS {
         return bad("allow".into(), "at most 16 hosts or subnets");
     }
@@ -123,7 +154,7 @@ pub fn normalize(
             }
         }
     }
-    c.allow.dedup();
+    dedup(&mut c.allow);
     if c.clients.len() > MAX_NET_CLIENTS {
         return bad("clients".into(), "at most 32 accounts");
     }
@@ -162,12 +193,41 @@ pub fn normalize(
     Ok(())
 }
 
-/// The rynas block of `upsd.conf`.
-pub fn render_upsd_conf(c: &UpsNetServerConfig) -> String {
+/// The admin's own `LISTEN` lines of `upsd.conf` (`text`): those outside rynas's block,
+/// and those the block holds (set aside while on, put back while off), without repeats.
+pub fn admin_listen(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let is_listen = |l: &str| l.split_whitespace().next() == Some("LISTEN");
+    if let Some(body) = crate::setup::block_of(text, BLOCK_ID) {
+        let off = body.lines().next().is_some_and(|l| l.starts_with(OFF_HEAD));
+        for l in body.lines().map(str::trim) {
+            match l.strip_prefix(SAVED) {
+                Some(x) if is_listen(x) => out.push(x.trim().to_string()),
+                None if off && is_listen(l) => out.push(l.to_string()),
+                _ => {}
+            }
+        }
+    }
+    let outside = without_block(text, BLOCK_ID).unwrap_or_else(|| text.to_string());
+    out.extend(outside.lines().map(str::trim).filter(|l| is_listen(l)).map(str::to_string));
+    dedup(&mut out);
+    out
+}
+
+/// The rynas block of `upsd.conf`; `saved` are the admin's own `LISTEN` lines
+/// ([`admin_listen`]).
+pub fn render_upsd_conf(c: &UpsNetServerConfig, saved: &[String]) -> String {
     if !c.enabled {
-        return "# Network UPS server of rynas (ups.netserver): off, upsd keeps its own setting\n\
-                # (localhost only by default).\n"
-            .into();
+        let mut s = format!("{OFF_HEAD}\n");
+        if saved.is_empty() {
+            s.push_str("# upsd keeps its own setting (localhost only by default).\n");
+        } else {
+            s.push_str("# The admin's own LISTEN lines, put back (set aside while the server was on):\n");
+            for l in saved {
+                s.push_str(&format!("{l}\n"));
+            }
+        }
+        return s;
     }
     let mut s = String::from(
         "# Network UPS server of rynas (ups.netserver): other machines connect on this port.\n",
@@ -178,6 +238,12 @@ pub fn render_upsd_conf(c: &UpsNetServerConfig) -> String {
         s.push_str(&format!("LISTEN 127.0.0.1 {NUT_PORT}\nLISTEN ::1 {NUT_PORT}\n"));
         for a in &c.listen {
             s.push_str(&format!("LISTEN {a} {NUT_PORT}\n"));
+        }
+    }
+    if !saved.is_empty() {
+        s.push_str("# The admin's own LISTEN lines, set aside while the server is on (put back when it is off):\n");
+        for l in saved {
+            s.push_str(&format!("{SAVED}{l}\n"));
         }
     }
     s
@@ -204,19 +270,41 @@ pub fn render_users(clients: &[(String, UpsClientRole, String)]) -> String {
     s
 }
 
-/// The systemd drop-in of `nut-server.service` that limits who reaches upsd (`None`: no
-/// limit, the file must not exist).
+/// The systemd drop-in of `nut-server.service` (`None`: nothing to add, the file must not
+/// exist): with chosen addresses, upsd starts once the network is up; with allowed hosts,
+/// only the NAS itself and those reach it.
 pub fn render_dropin(c: &UpsNetServerConfig) -> Option<String> {
-    if !c.enabled || c.allow.is_empty() {
+    if !c.enabled || (c.allow.is_empty() && c.listen.is_empty()) {
         return None;
     }
-    let mut s = String::from(
-        "# Network UPS server of rynas (ups.netserver): only the NAS itself and these hosts\n\
-         # reach upsd (systemd's per-service IP filter, systemd.resource-control(5)).\n\
-         [Service]\nIPAddressDeny=any\nIPAddressAllow=localhost\n",
-    );
-    s.push_str(&format!("IPAddressAllow={}\n", c.allow.join(" ")));
+    let mut s = String::from("# Network UPS server of rynas (ups.netserver).\n");
+    if !c.listen.is_empty() {
+        s.push_str(
+            "# upsd binds the chosen addresses once, at start: start it when the network is up.\n\
+             [Unit]\nWants=network-online.target\nAfter=network-online.target\n",
+        );
+    }
+    if !c.allow.is_empty() {
+        s.push_str(
+            "# Only the NAS itself and these hosts reach upsd (systemd's per-service IP filter,\n\
+             # systemd.resource-control(5)); the accounting shows whether the kernel applies it.\n\
+             [Service]\nIPAccounting=yes\nIPAddressDeny=any\nIPAddressAllow=localhost\n",
+        );
+        s.push_str(&format!("IPAddressAllow={}\n", c.allow.join(" ")));
+    }
     Some(s)
+}
+
+/// Whether the kernel applies the IP filter, from `systemctl show --value -p
+/// IPIngressPackets nut-server.service` of a running unit with `IPAccounting=yes`: a count
+/// means the cgroup eBPF programs are attached; `[not set]` or `UINT64_MAX` means systemd
+/// could not attach them (no eBPF cgroup support) and the filter is off. `None`: unknown.
+pub fn filter_enforced(ip_ingress_packets: &str) -> Option<bool> {
+    match ip_ingress_packets.trim() {
+        "" => None,
+        "[not set]" => Some(false),
+        v => v.parse::<u64>().ok().map(|n| n != u64::MAX),
+    }
 }
 
 /// The `upsmon.conf` line of another Linux machine for a secondary account (`PASSWORD`
@@ -343,15 +431,77 @@ mod tests {
     }
 
     #[test]
+    fn duplicates_go_even_when_not_next_to_each_other() {
+        let mut c = cfg();
+        c.listen = vec!["192.168.1.10".into(), "fd00::10".into(), " 192.168.1.10".into()];
+        c.allow = vec![
+            "10.0.0.0/8".into(),
+            "192.168.1.5".into(),
+            "10.0.0.0/8".into(),
+            "192.168.1.5/32".into(),
+        ];
+        normalize(&mut c, &[]).unwrap();
+        assert_eq!(c.listen, ["192.168.1.10", "fd00::10"]);
+        assert_eq!(c.allow, ["10.0.0.0/8", "192.168.1.5"]);
+        let mut bad = cfg();
+        bad.listen = vec!["::ffff:192.168.1.10".into()];
+        assert_eq!(normalize(&mut bad, &[]).unwrap_err().0, "listen.0");
+    }
+
+    #[test]
+    fn passwords_safe_between_quotes() {
+        assert!(safe_in_users("Good.Password-2026"));
+        assert!(!safe_in_users("bad\"quote"));
+        assert!(!safe_in_users("back\\slash"));
+        assert!(!safe_in_users("two\nlines"));
+        assert!(!safe_in_users(""));
+    }
+
+    #[test]
+    fn admin_listen_lines_are_set_aside_and_put_back() {
+        let admin = vec!["LISTEN 127.0.0.1 3493".to_string(), "LISTEN 10.0.0.2".to_string()];
+        let mut c = cfg();
+        // outside the block, never written by rynas
+        let text = "# LISTEN 1.2.3.4\nLISTEN 127.0.0.1 3493\nMAXAGE 15\n  LISTEN 10.0.0.2\n";
+        assert_eq!(admin_listen(text), admin);
+        // on: saved in the block, read back from it
+        let on = crate::setup::block_of(
+            &format!("# BEGIN rynas {BLOCK_ID} x\n{}# END rynas {BLOCK_ID}\n", render_upsd_conf(&c, &admin)),
+            BLOCK_ID,
+        )
+        .unwrap();
+        assert!(on.contains("# saved: LISTEN 127.0.0.1 3493\n"), "{on}");
+        assert!(on.contains("LISTEN 0.0.0.0 3493\n"));
+        let in_file = format!("MAXAGE 15\n# BEGIN rynas {BLOCK_ID} x\n{on}# END rynas {BLOCK_ID}\n");
+        assert_eq!(admin_listen(&in_file), admin, "rynas's own LISTEN lines are not the admin's");
+        // off: put back as lines upsd reads, still the admin's for the next "on"
+        c.enabled = false;
+        let off = render_upsd_conf(&c, &admin);
+        assert!(off.contains("\nLISTEN 127.0.0.1 3493\nLISTEN 10.0.0.2\n"), "{off}");
+        let in_file = format!("# BEGIN rynas {BLOCK_ID} x\n{off}# END rynas {BLOCK_ID}\nLISTEN ::1\n");
+        assert_eq!(admin_listen(&in_file), [admin[0].as_str(), admin[1].as_str(), "LISTEN ::1"]);
+        assert!(!render_upsd_conf(&c, &[]).contains("LISTEN"));
+    }
+
+    #[test]
+    fn filter_state_from_ip_accounting() {
+        assert_eq!(filter_enforced("1234\n"), Some(true));
+        assert_eq!(filter_enforced("0"), Some(true));
+        assert_eq!(filter_enforced("[not set]"), Some(false));
+        assert_eq!(filter_enforced("18446744073709551615"), Some(false));
+        assert_eq!(filter_enforced(""), None);
+    }
+
+    #[test]
     fn upsd_conf_lines() {
         let mut c = cfg();
         assert_eq!(
-            render_upsd_conf(&c).lines().skip(1).collect::<Vec<_>>(),
+            render_upsd_conf(&c, &[]).lines().skip(1).collect::<Vec<_>>(),
             ["LISTEN 0.0.0.0 3493", "LISTEN :: 3493"]
         );
         c.listen = vec!["192.168.1.10".into(), "fd00::10".into()];
         assert_eq!(
-            render_upsd_conf(&c).lines().skip(1).collect::<Vec<_>>(),
+            render_upsd_conf(&c, &[]).lines().skip(1).collect::<Vec<_>>(),
             [
                 "LISTEN 127.0.0.1 3493",
                 "LISTEN ::1 3493",
@@ -360,8 +510,12 @@ mod tests {
             ]
         );
         assert_eq!(upsd_conf_drops(&c), ["LISTEN"]);
+        let d = render_dropin(&c).unwrap();
+        assert!(d.contains("[Unit]\nWants=network-online.target\nAfter=network-online.target\n"));
+        c.allow.clear();
+        assert!(!render_dropin(&c).unwrap().contains("[Service]"));
         c.enabled = false;
-        assert!(!render_upsd_conf(&c).contains("LISTEN "));
+        assert!(!render_upsd_conf(&c, &[]).contains("LISTEN "));
         assert!(upsd_conf_drops(&c).is_empty());
         assert_eq!(render_dropin(&c), None);
     }
@@ -377,7 +531,10 @@ mod tests {
         let mut c = cfg();
         normalize(&mut c, &[]).unwrap();
         let d = render_dropin(&c).unwrap();
-        assert!(d.contains("[Service]\nIPAddressDeny=any\nIPAddressAllow=localhost\n"));
+        assert!(d.contains(
+            "[Service]\nIPAccounting=yes\nIPAddressDeny=any\nIPAddressAllow=localhost\n"
+        ));
+        assert!(!d.contains("[Unit]"), "all addresses: no wait for the network");
         assert!(d.contains("IPAddressAllow=192.168.1.0/24 fd00::5\n"));
         assert_eq!(
             monitor_line("ups", "192.168.1.10", "pc-office"),
