@@ -11,11 +11,11 @@
 //!   requests marked [`BACKGROUND_HEADER`]`: 1` — the UI's timers, polling and reconnects —
 //!   are checked but do not renew it; streams end when their session does.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{ConnectInfo, Request, State};
+use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -31,6 +31,7 @@ use rynas_auth::{AuthService, LoginError};
 
 use crate::api::Error;
 use crate::app::AppState;
+use crate::conn::Client;
 
 /// Shortest interval between two lockout notifications for the same account.
 const LOCKOUT_NOTICE: std::time::Duration = std::time::Duration::from_secs(600);
@@ -52,14 +53,20 @@ pub fn session_token(headers: &HeaderMap) -> Option<&str> {
         .filter(|v| !v.is_empty())
 }
 
-fn client_ip(ci: Option<Extension<ConnectInfo<SocketAddr>>>) -> IpAddr {
-    // X-Forwarded-For is not trusted: behind a reverse proxy every client shares its IP
-    ci.map(|Extension(ConnectInfo(a))| a.ip())
+/// The client's address for the rate limit, the failure log (fail2ban) and notifications:
+/// the TCP peer, or the right-most untrusted `X-Forwarded-For` entry when the request came
+/// from the reverse proxy on this host ([`crate::conn`]). Never a header from anyone else.
+fn client_ip(client: Option<Extension<Client>>) -> IpAddr {
+    client
+        .map(|Extension(c)| c.ip)
         .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
 }
 
+/// Whether the session cookie gets `Secure`: over the HTTPS port, with `--secure-cookies`, or
+/// with `X-Forwarded-Proto: https` (rynas-caddy sets it; a proxy on another host may too).
+/// The header is honoured from anyone: a spoofed one can only make the cookie stricter (a
+/// browser drops a `Secure` cookie set over plain HTTP, so the spoofer only logs itself out).
 fn is_https(st: &AppState, headers: &HeaderMap, tls: bool) -> bool {
-    // a spoofed header can only make the cookie stricter
     st.secure_cookies
         || tls
         || headers
@@ -154,8 +161,8 @@ fn admin_read(path: &str) -> bool {
             "/api/v1/web-access",
             "/web-access",
         ]
-            .iter()
-            .any(|p| path.starts_with(p))
+        .iter()
+        .any(|p| path.starts_with(p))
 }
 
 /// Route layer after [`require_session`] on every route except the user's own session
@@ -193,7 +200,7 @@ pub async fn fallback(State(st): State<AppState>, headers: HeaderMap) -> Error {
 
 pub async fn login(
     State(st): State<AppState>,
-    ci: Option<Extension<ConnectInfo<SocketAddr>>>,
+    client: Option<Extension<Client>>,
     tls: Option<Extension<crate::tls::Https>>,
     headers: HeaderMap,
     body: Result<Json<LoginRequest>, JsonRejection>,
@@ -202,7 +209,7 @@ pub async fn login(
         Ok(b) => b,
         Err(e) => return bad_json(e).into_response(),
     };
-    let ip = client_ip(ci);
+    let ip = client_ip(client);
     match st.auth.login(ip, &req).await {
         Ok((token, s)) => {
             // a session cookie from before is replaced: drop that session too
@@ -276,8 +283,10 @@ pub async fn logout(
 ) -> Response {
     st.auth.logout(&s.id);
     let mut r = StatusCode::NO_CONTENT.into_response();
-    r.headers_mut()
-        .insert(header::SET_COOKIE, cookie("", 0, is_https(&st, &headers, tls.is_some())));
+    r.headers_mut().insert(
+        header::SET_COOKIE,
+        cookie("", 0, is_https(&st, &headers, tls.is_some())),
+    );
     r
 }
 
@@ -326,7 +335,7 @@ pub async fn totp_enroll(
 
 pub async fn totp_confirm(
     State(st): State<AppState>,
-    ci: Option<Extension<ConnectInfo<SocketAddr>>>,
+    client: Option<Extension<Client>>,
     Extension(CurrentSession(s)): Extension<CurrentSession>,
     body: Result<Json<TotpCode>, JsonRejection>,
 ) -> Response {
@@ -334,7 +343,7 @@ pub async fn totp_confirm(
         Ok(b) => b,
         Err(e) => return bad_json(e).into_response(),
     };
-    match st.auth.totp_confirm(client_ip(ci), &s, &req.code).await {
+    match st.auth.totp_confirm(client_ip(client), &s, &req.code).await {
         Ok(recovery_codes) => Json(TotpConfirmed { recovery_codes }).into_response(),
         Err(e) => totp_error(e),
     }
@@ -342,7 +351,7 @@ pub async fn totp_confirm(
 
 pub async fn totp_disable(
     State(st): State<AppState>,
-    ci: Option<Extension<ConnectInfo<SocketAddr>>>,
+    client: Option<Extension<Client>>,
     Extension(CurrentSession(s)): Extension<CurrentSession>,
     body: Result<Json<TotpCode>, JsonRejection>,
 ) -> Response {
@@ -350,7 +359,7 @@ pub async fn totp_disable(
         Ok(b) => b,
         Err(e) => return bad_json(e).into_response(),
     };
-    match st.auth.totp_disable(client_ip(ci), &s, &req.code).await {
+    match st.auth.totp_disable(client_ip(client), &s, &req.code).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => totp_error(e),
     }

@@ -60,7 +60,10 @@ stat -c '%A %U:%G %n' /run/rynas/rynasd.sock
 setpriv --reuid=rynas --regid=rynas --init-groups --no-new-privs \
     /usr/libexec/rynas/rynas-web --listen "$RYNAS_WEB_LISTEN" --ui-dir /usr/share/rynas/ui \
     --rynasd-socket /run/rynas/rynasd.sock $RYNAS_WEB_OPTS >/tmp/rynas-web.log 2>&1 &
-PORT=${RYNAS_WEB_LISTEN##*:}
+case $RYNAS_WEB_LISTEN in
+    auto) PORT=8080 ;;
+    *) PORT=${RYNAS_WEB_LISTEN##*:} ;;
+esac
 B="http://127.0.0.1:$PORT"
 for _ in $(seq 50); do curl -s -o /dev/null "$B/" && break; sleep 0.1; done
 ps -o user,pid,rss,args -C rynasd,rynas-web

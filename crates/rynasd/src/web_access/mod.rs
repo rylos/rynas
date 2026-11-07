@@ -23,6 +23,12 @@
 //!   access) waits [`CONFIRM_TIMEOUT`] for `POST /web-access/confirm` arriving *through the
 //!   proxy* on one of the new names; otherwise the previous value is applied again. The
 //!   emergency port `:8443` never goes through the proxy, so nobody is locked out.
+//! - **rynas-web's plain port follows.** After every load (and on each periodic check)
+//!   rynasd writes the names the proxy serves the interface on to [`UI_STATE`]; the file is
+//!   removed when the proxy does not front the interface (external mode, engine not
+//!   installed, no interface names). rynas-web started with `--listen auto` reads it and
+//!   moves its plain HTTP port from the network to `127.0.0.1` while it is there
+//!   (D-PROXY; `docs/phase1/plan.md`, "Behind the built-in reverse proxy").
 
 pub mod admin;
 pub mod caddy;
@@ -72,6 +78,9 @@ pub const KEY: &str = "/var/lib/rynas-caddy/rynas/local.key";
 pub const ENGINE_GROUP: &str = "rynas-caddy";
 pub const AVAHI_HOSTS: &str = "/etc/avahi/hosts";
 pub const AVAHI_UNIT: &str = "avahi-daemon.service";
+/// The names the proxy serves the interface on, one per line (0644; absent when the proxy
+/// does not front the interface). rynas-web reads it (`--proxy-state`).
+pub const UI_STATE: &str = "/run/rynas/web-access.ui";
 /// How long a change of the interface's route waits for its confirmation.
 pub const CONFIRM_TIMEOUT: Duration = Duration::from_secs(120);
 /// How often the host facts and the running configuration are checked.
@@ -477,6 +486,30 @@ impl WebAccessSvc {
         crate::tls::write_atomic(&p, &text, 0o640, group_gid(&self.root, ENGINE_GROUP))
     }
 
+    /// Publishes whether (and on which names) the proxy fronts the interface: [`UI_STATE`],
+    /// rewritten only when it changes. Best effort: a failure is logged, never an apply
+    /// error (rynas-web then keeps its plain port as it is).
+    pub fn publish_ui(&self, names: &[String]) {
+        let p = self.path(UI_STATE);
+        let r = if names.is_empty() {
+            match std::fs::remove_file(&p) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+                _ => Ok(()),
+            }
+        } else {
+            let mut text = names.join("\n");
+            text.push('\n');
+            if std::fs::read(&p).is_ok_and(|old| old == text.as_bytes()) {
+                return;
+            }
+            std::fs::create_dir_all(p.parent().expect("has a parent"))
+                .and_then(|()| crate::tls::write_atomic(&p, text.as_bytes(), 0o644, None))
+        };
+        if let Err(e) = r {
+            tracing::warn!("web access: {}: {e}", p.display());
+        }
+    }
+
     fn note(&self, f: impl FnOnce(&mut EngineMem)) {
         f(&mut self.engine.lock().unwrap_or_else(|e| e.into_inner()));
     }
@@ -493,6 +526,7 @@ impl WebAccessSvc {
         let _g = self.push_lock.lock().unwrap_or_else(|e| e.into_inner());
         let (resolved, json) = self.render(cfg, facts);
         if json.is_null() {
+            self.publish_ui(&[]);
             return Ok(false);
         }
         let names = resolved.all_names();
@@ -520,6 +554,7 @@ impl WebAccessSvc {
             self.note(|e| e.in_sync = Some(true));
             self.write_last_good(&json)
                 .map_err(|e| format!("{LAST_GOOD}: {e}"))?;
+            self.publish_ui(&resolved.ui);
             return Ok(false);
         }
         log(&format!(
@@ -532,6 +567,7 @@ impl WebAccessSvc {
         }
         self.write_last_good(&json)
             .map_err(|e| format!("{LAST_GOOD}: {e}"))?;
+        self.publish_ui(&resolved.ui);
         self.note(|e| {
             e.in_sync = Some(true);
             e.last_error = None;
@@ -555,12 +591,14 @@ impl WebAccessSvc {
             log(
                 "web access: rynas-caddy is not installed; the settings are kept and loaded once it is",
             );
+            self.publish_ui(&[]);
             return Ok(());
         }
         if new.settings.mode == ProxyMode::External {
             log(
                 "web access: external proxy mode, stopping rynas-caddy (ports 80 and 443 are free)",
             );
+            self.publish_ui(&[]);
             system.set_unit_enabled(UNIT, false)?;
             self.note(|e| e.in_sync = None);
             *self.confirm.lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -739,6 +777,7 @@ impl WebAccessSvc {
             return Ok(());
         };
         if !self.installed() {
+            self.publish_ui(&[]);
             return Ok(());
         }
         let applied = ops
@@ -760,6 +799,7 @@ impl WebAccessSvc {
         };
         let cfg = config_of(Some(&v));
         if cfg.settings.mode == ProxyMode::External {
+            self.publish_ui(&[]);
             return Ok(());
         }
         let facts = self.facts();

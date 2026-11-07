@@ -517,6 +517,11 @@ fn apply_loads_writes_last_good_certificate_and_avahi() {
         );
     }
     assert!(e.file(rynasd::web_access::KEY).exists());
+    // rynas-web learns that the proxy fronts the interface (its plain port follows)
+    assert_eq!(
+        std::fs::read_to_string(e.file(rynasd::web_access::UI_STATE)).unwrap(),
+        "nas.local\nnas\n"
+    );
     let hosts = std::fs::read_to_string(e.file("/etc/avahi/hosts")).unwrap();
     assert!(hosts.contains("192.0.2.99 printer.local"), "{hosts}");
     assert!(hosts.contains("192.0.2.10 immich-nas.local"), "{hosts}");
@@ -616,6 +621,8 @@ fn external_mode_releases_the_ports() {
     );
     assert!(e.svc.reserved_ports().is_empty());
     assert!(!e.svc.proxy_active());
+    // rynas-web opens its plain port to the network again
+    assert!(!e.file(rynasd::web_access::UI_STATE).exists());
     let hosts = std::fs::read_to_string(e.file("/etc/avahi/hosts")).unwrap();
     assert!(!hosts.contains("immich-nas"), "{hosts}");
     // and back: enabled and started again
@@ -639,6 +646,7 @@ fn not_installed_keeps_the_settings_only() {
     e.apply(&sample()).unwrap();
     assert_eq!(e.caddy.loads(), 0);
     assert!(!e.svc.proxy_active());
+    assert!(!e.file(rynasd::web_access::UI_STATE).exists());
     // the ports are reserved anyway: the proxy owns them from install
     assert!(!e.svc.reserved_ports().is_empty());
 }
