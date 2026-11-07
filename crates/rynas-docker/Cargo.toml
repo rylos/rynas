@@ -1,0 +1,25 @@
+[package]
+name = "rynas-docker"
+description = "rynas Docker engine side: detection, install and adoption, engine configuration, stacks on disk, compose tasks, client, events and stats"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+rynas-api-types.workspace = true
+rynas-tasks.workspace = true
+rynas-btrfs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["time"] }
+tracing.workspace = true
+libc.workspace = true
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
+# the Docker Engine API over /var/run/docker.sock only: no TLS, no SSH (`pipe` brings
+# hyperlocal for the Unix socket; its named-pipe half is Windows-only)
+bollard = { version = "=0.21.1", default-features = false, features = ["pipe"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "time"] }
