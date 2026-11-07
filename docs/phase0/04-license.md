@@ -18,7 +18,7 @@ support**, never from locked features.
 | App catalogue (`apps/`) | AGPL-3.0-or-later like the core; icons from Dashboard Icons under Apache-2.0 (`apps/ICONS.md`) |
 | Documentation | AGPL-3.0-or-later with the code (CC BY 4.0 can be added later) |
 | Name and logo | not covered by the license; a trademark policy will say how they may be used |
-| Contributions | inbound = outbound (AGPL-3.0-or-later), with a DCO sign-off; no CLA |
+| Contributions | AGPL-3.0-or-later plus a relicensing grant to Marco Ziliani (`CONTRIBUTING.md`), so another licence stays possible; no CLA for now, a signed one (Proxmox-style) when larger outside contributions arrive |
 
 Why AGPL and not GPL: rynas is used over the network, and the AGPL makes a modified
 version offered as a service share its source too.

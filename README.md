@@ -135,7 +135,7 @@ each feature.
 rynas is **free software** under the **GNU Affero General Public License v3.0 or later**
 ([`LICENSE`](LICENSE)). Everyone may use it for free, companies included, and every feature is
 in the free version. The plugin interface (`rynas-api-types`) is Apache-2.0, so plugins can
-use any license.
+use any license. Contributions: see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 Like Proxmox VE, the project may one day offer an optional subscription with a more
 thoroughly tested update repository and support. It will never lock features. Details:
