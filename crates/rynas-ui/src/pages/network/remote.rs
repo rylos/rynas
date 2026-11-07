@@ -34,6 +34,8 @@ struct Ts {
     task: RwSignal<Option<String>>,
     /// An option change whose task is running: confirmed when it ends.
     confirm_after: RwSignal<bool>,
+    /// The login form with an auth key, although tailscaled already gave a login address.
+    use_key: RwSignal<bool>,
 }
 
 /// This page is open over the tailnet: rynasd saw a tailnet local address, or the browser
@@ -66,7 +68,7 @@ fn mono(s: String) -> AnyView {
 
 #[component]
 pub fn RemoteAccess() -> impl IntoView {
-    let ts = Ts { st: Remote::new(URL), task: RwSignal::new(None), confirm_after: RwSignal::new(false) };
+    let ts = Ts { st: Remote::new(URL), task: RwSignal::new(None), confirm_after: RwSignal::new(false), use_key: RwSignal::new(false) };
     // read again every 5 s while a login waits for its address or approval (no event
     // source for tailscaled's state), never in a hidden tab
     let poll = set_interval_with_handle(
@@ -121,8 +123,8 @@ fn body(ts: Ts) -> AnyView {
             <section class="card widget w-12">
                 <WidgetHead icon=icons::LINK title="ts.status_title" />
                 {ui::note(Tone::Warn, icons::TRIANGLE_ALERT, ui::text(t("ts.not_running").to_string()))}
-                {actions(ts, &s)}
             </section>
+            {remove_card(ts, &s)}
         }
         .into_any()
     } else {
@@ -208,8 +210,18 @@ fn login_card(ts: Ts, s: &TailscaleStatus) -> AnyView {
             }
         });
     };
-    let url = s.auth_url.clone();
-    let waiting = s.task_id.is_some() && url.is_none();
+    let url = s.auth_url.clone().filter(|_| !ts.use_key.get());
+    let has_url = s.auth_url.is_some();
+    let waiting = s.task_id.is_some() && url.is_none() && !ts.use_key.get();
+    let running = s.task_id.clone();
+    let cancelling = RwSignal::new(false);
+    // the browser login holds the task slot: it stops before a key can be used
+    let use_key = move |_| {
+        ts.use_key.set(true);
+        if let Some(id) = ts.task.get_untracked().or_else(|| running.clone()) {
+            crate::tasks::cancel_task(id, cancelling, error);
+        }
+    };
     view! {
         <section class="card widget w-12">
             <WidgetHead icon=icons::KEY title="ts.login_title" />
@@ -220,13 +232,21 @@ fn login_card(ts: Ts, s: &TailscaleStatus) -> AnyView {
                         <div>
                             <p>{tr("ts.login_url_text")}</p>
                             <p><a class="mono ts-url" href=u.clone() target="_blank" rel="noopener">{u.clone()}</a></p>
-                            <a class="btn primary" href=u target="_blank" rel="noopener"><Icon icon=icons::EXTERNAL_LINK size=16 />{tr("ts.open_login")}</a>
+                            <div class="btn-row">
+                                <a class="btn primary" href=u target="_blank" rel="noopener"><Icon icon=icons::EXTERNAL_LINK size=16 />{tr("ts.open_login")}</a>
+                                <button type="button" class="btn ghost" on:click=use_key><Icon icon=icons::KEY size=16 />{tr("ts.use_key")}</button>
+                            </div>
                         </div>
                     </div>
                 }.into_any(),
                 None if waiting => view! { <p class="muted">{spinner(RwSignal::new(true))}{tr("ts.login_wait")}</p> }.into_any(),
                 None => view! {
                     <p class="muted">{tr("ts.login_text")}</p>
+                    {has_url.then(|| view! {
+                        <div class="btn-row">
+                            <button type="button" class="btn ghost sm" on:click=move |_| ts.use_key.set(false)><Icon icon=icons::ARROW_LEFT size=14 />{tr("ts.use_url")}</button>
+                        </div>
+                    })}
                     <div class="fieldset">
                         {text_field("ts.auth_key", key.into(), Callback::new(move |v| key.set(v)), err_of("auth_key"),
                             form::In { kind: "password", autocomplete: "new-password", help: Some("ts.auth_key_help"), mono: true, ..Default::default() })}
@@ -237,14 +257,14 @@ fn login_card(ts: Ts, s: &TailscaleStatus) -> AnyView {
                     </div>
                     {form_error(error)}
                     <div class="sec-actions">
-                        <button class="btn primary" disabled=move || busy.get() || ts.task.with(Option::is_some) on:click=login>
+                        <button class="btn primary" disabled=move || busy.get() || cancelling.get() || ts.task.with(Option::is_some) on:click=login>
                             {spinner(busy)}<Icon icon=icons::KEY size=16 />{tr("ts.login")}
                         </button>
                     </div>
                 }.into_any(),
             }}
         </section>
-        <section class="card widget w-12">{actions(ts, s)}</section>
+        {remove_card(ts, s)}
     }
     .into_any()
 }
@@ -275,18 +295,19 @@ fn connected(ts: Ts, s: &TailscaleStatus) -> AnyView {
             <dl class="kvs">
                 {kv("ts.state", ui::status(tone, t(key).to_string()))}
                 {s.dns_name.clone().map(|n| kv("ts.dns_name", mono(n)))}
-                {(!s.addresses.is_empty()).then(|| kv("ts.addresses", view! { <span class="wa-ranges mono small">{s.addresses.iter().map(|a| view! { <span>{a.clone()}</span> }).collect_view()}</span> }.into_any()))}
+                {(!s.addresses.is_empty()).then(|| kv("ts.addresses", view! { <span class="wa-ranges mono small">{s.addresses.iter().map(|a| view! { <span>{ui::breakable(a, "")}</span> }).collect_view()}</span> }.into_any()))}
                 {s.tailnet.clone().map(|n| kv("ts.tailnet", ui::text(n)))}
                 {kv("ts.peers", ui::text(peers))}
                 {kv("ts.key_expiry", ui::text(expiry))}
                 {kv("ts.version", ui::text(version))}
             </dl>
+            {actions(ts, s, Part::Logout)}
         </section>
         <section class="card widget w-6">
             <WidgetHead icon=icons::SETTINGS title="ts.options_title" />
             {options_form(ts, s)}
         </section>
-        <section class="card widget w-12">{actions(ts, s)}</section>
+        {remove_card(ts, s)}
     }
     .into_any()
 }
@@ -303,6 +324,7 @@ fn options_form(ts: Ts, s: &TailscaleStatus) -> AnyView {
     let routes = RwSignal::new(o.advertise_routes.clone());
     let pending = s.routes_pending_approval.clone();
     let via = via_tailnet(s);
+    let waiting = s.confirm.is_some();
     let asking = RwSignal::new(false);
     let current = move || TailscaleOptions {
         accept_routes: accept_routes.get(),
@@ -335,9 +357,14 @@ fn options_form(ts: Ts, s: &TailscaleStatus) -> AnyView {
             }
         });
     });
+    let before = StoredValue::new(o.clone());
     let dialog = move || {
         let mut c = Confirm::new(t("ts.confirm_title").to_string(), t("ts.confirm_text").to_string(), "save", false, go, Callback::new(move |_| asking.set(false)));
-        c.extra = via.then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, ui::text(t("ts.via_warning").to_string())));
+        let items = before.with_value(|b| changes(b, &untrack(current)));
+        c.extra = Some(view! {
+            <ul class="ts-changes">{items.into_iter().map(|i| view! { <li>{i}</li> }).collect_view()}</ul>
+            {via.then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, ui::text(t("ts.via_warning").to_string())))}
+        }.into_any());
         c.busy = busy;
         c.error = error;
         confirm(c)
@@ -371,14 +398,40 @@ fn options_form(ts: Ts, s: &TailscaleStatus) -> AnyView {
                 }}
             </fieldset>
             {sw("ts.opt.ssh", "ts.opt.ssh_help", ssh)}
+            {waiting.then(|| view! { <p class="field-help">{tr("ts.save_after_confirm")}</p> })}
             {(!pending.is_empty()).then(|| ui::note(Tone::Info, icons::CLOCK, ui::text(tf("ts.routes_pending", &[("routes", &pending.join(", "))]))))}
             <div class="sec-actions">
-                <button class="btn primary" disabled=move || !changed() || ts.task.with(Option::is_some) on:click=move |_| asking.set(true)>{tr("save")}</button>
+                <button class="btn primary" disabled=move || waiting || !changed() || ts.task.with(Option::is_some) on:click=move |_| asking.set(true)>{tr("save")}</button>
             </div>
             {move || asking.get().then(dialog)}
         </div>
     }
     .into_any()
+}
+
+/// What a change of options does, one line each (the confirmation lists them).
+fn changes(from: &TailscaleOptions, to: &TailscaleOptions) -> Vec<String> {
+    let onoff = |v: bool| t(if v { "on" } else { "off" });
+    let mut v = Vec::new();
+    for (k, a, b) in [
+        ("ts.opt.accept_routes", from.accept_routes, to.accept_routes),
+        ("ts.opt.accept_dns", from.accept_dns, to.accept_dns),
+        ("ts.opt.exit_node", from.exit_node, to.exit_node),
+        ("ts.opt.ssh", from.ssh, to.ssh),
+    ] {
+        if a != b {
+            v.push(format!("{}: {} → {}", t(k), onoff(a), onoff(b)));
+        }
+    }
+    let added: Vec<&str> = to.advertise_routes.iter().filter(|r| !from.advertise_routes.contains(r)).map(String::as_str).collect();
+    let removed: Vec<&str> = from.advertise_routes.iter().filter(|r| !to.advertise_routes.contains(r)).map(String::as_str).collect();
+    if !added.is_empty() {
+        v.push(tf("ts.ch.routes_added", &[("routes", &added.join(", "))]));
+    }
+    if !removed.is_empty() {
+        v.push(tf("ts.ch.routes_removed", &[("routes", &removed.join(", "))]));
+    }
+    v
 }
 
 /// The page reached rynas after the option task: the new options keep (this request is
@@ -403,7 +456,25 @@ fn pending_confirm(ts: Ts) -> AnyView {
 
 // ------------------------------------------------------------------ log out, uninstall
 
-fn actions(ts: Ts, s: &TailscaleStatus) -> AnyView {
+#[derive(Clone, Copy, PartialEq)]
+enum Part {
+    Logout,
+    Uninstall,
+}
+
+/// "Remove Tailscale": what Uninstall does and its button, away from the everyday actions.
+fn remove_card(ts: Ts, s: &TailscaleStatus) -> AnyView {
+    view! {
+        <section class="card widget w-12">
+            <WidgetHead icon=icons::TRASH_2 title="ts.remove_title" />
+            <p class="muted">{tr("ts.uninstall_text")}</p>
+            {actions(ts, s, Part::Uninstall)}
+        </section>
+    }
+    .into_any()
+}
+
+fn actions(ts: Ts, s: &TailscaleStatus, part: Part) -> AnyView {
     let via = via_tailnet(s);
     let logged_in = s.running && !matches!(s.state, TailscaleState::NeedsLogin | TailscaleState::NoState);
     let which = RwSignal::new(None::<&'static str>);
@@ -452,10 +523,12 @@ fn actions(ts: Ts, s: &TailscaleStatus) -> AnyView {
     let idle = move || ts.task.with(Option::is_none);
     view! {
         <div class="sec-actions">
-            {logged_in.then(|| view! {
+            {(part == Part::Logout && logged_in).then(|| view! {
                 <button class="btn ghost" disabled=move || !idle() on:click=move |_| which.set(Some("logout"))><Icon icon=icons::LOG_OUT size=16 />{tr("ts.logout")}</button>
             })}
-            <button class="btn ghost danger-text" disabled=move || !idle() on:click=move |_| which.set(Some("uninstall"))>{tr("ts.uninstall")}</button>
+            {(part == Part::Uninstall).then(|| view! {
+                <button class="btn danger" disabled=move || !idle() on:click=move |_| which.set(Some("uninstall"))><Icon icon=icons::TRASH_2 size=16 />{tr("ts.uninstall")}</button>
+            })}
         </div>
         {dialog}
     }

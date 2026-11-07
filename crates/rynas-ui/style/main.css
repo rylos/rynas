@@ -1364,8 +1364,9 @@ kbd {
   .table, .table tbody, .table tr, .table td { display: block; width: 100%; }
   .table tr { padding: var(--s-2) var(--card-pad); border-bottom: 1px solid var(--border); }
   .table td { display: flex; justify-content: space-between; align-items: center; gap: var(--s-3); height: auto; min-height: 28px; padding: var(--s-1) 0; border: 0; white-space: normal; text-align: right; }
-  .table td::before { content: attr(data-label); color: var(--text-subtle); font-size: var(--fs-12); text-align: left; }
-  .wa-routes td::before { flex: 0 0 auto; max-width: 45%; }
+  .table td:first-child, .table td:last-child { padding-inline: 0; } /* every line of a card starts at the same edge */
+  /* the label keeps its words whole (a .wrap cell's overflow-wrap broke "Nota" into "Not/a") */
+  .table td::before { content: attr(data-label); flex: 0 0 auto; max-width: 45%; overflow-wrap: normal; word-break: normal; color: var(--text-subtle); font-size: var(--fs-12); text-align: left; }
   .usage-cell { width: 60%; }
   .pending-actions { width: 100%; justify-content: flex-end; }
   .pending-keys { display: none; }
@@ -1416,6 +1417,8 @@ kbd {
 .btn.danger { background: var(--danger); color: var(--on-accent); }
 .btn.danger:hover:not(:disabled) { background: color-mix(in oklch, var(--danger) 88%, var(--text)); }
 .danger-text { color: var(--danger); }
+.btn.ghost.danger-text { border-color: color-mix(in oklch, var(--danger) 45%, var(--border-strong)); }
+.btn.ghost.danger-text:hover:not(:disabled) { background: color-mix(in oklch, var(--danger) 10%, var(--surface)); }
 .chip.danger-chip { color: var(--danger); background: color-mix(in oklch, var(--danger) 10%, var(--surface)); border-color: color-mix(in oklch, var(--danger) 30%, var(--border)); }
 .chip.warn-chip { color: var(--warning); background: color-mix(in oklch, var(--warning-fill) 12%, var(--surface)); border-color: color-mix(in oklch, var(--warning-fill) 35%, var(--border)); }
 .free-note { display: flex; align-items: center; gap: var(--s-2); margin-top: var(--s-3); }
@@ -1812,9 +1815,10 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 /* remote access (Tailscale): login address with its QR code, options */
 .ts-login { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--s-4); }
 .ts-login > div:last-child { flex: 1 1 220px; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: var(--s-2); }
-.ts-qr { flex: none; width: 160px; }
+.ts-qr { flex: none; line-height: 0; } /* as wide as its code (.qr, border included) */
 .ts-url { overflow-wrap: anywhere; }
 .ts-options { display: flex; flex-direction: column; gap: var(--s-3); }
+.ts-changes { margin: 0; padding-left: var(--s-6); list-style: disc; display: flex; flex-direction: column; gap: var(--s-1); overflow-wrap: anywhere; }
 .wa-stack { gap: var(--s-1); }
 @media (max-width: 1279px) {
   .wa-domains .actions .btn-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }

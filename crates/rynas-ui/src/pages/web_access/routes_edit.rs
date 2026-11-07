@@ -15,7 +15,8 @@ use crate::i18n::{t, tr};
 use crate::icons;
 use crate::ui::{self, Tone};
 
-/// `http(s)://host:port` → (scheme, host, port); a trailing `/` is allowed, a path is not.
+/// `http(s)://host[:port]` → (scheme, host, port); without a port the scheme's own (80, 443);
+/// a trailing `/` is allowed, a path is not.
 pub fn parse_upstream(s: &str) -> Option<(&'static str, String, u16)> {
     let s = s.trim();
     let lower = s.to_ascii_lowercase();
@@ -25,11 +26,14 @@ pub fn parse_upstream(s: &str) -> Option<(&'static str, String, u16)> {
         ("http", lower.strip_prefix("http://")?)
     };
     let rest = rest.strip_suffix('/').unwrap_or(rest);
+    let default = if scheme == "https" { "443" } else { "80" };
     let (host, port) = if let Some(r) = rest.strip_prefix('[') {
-        let (h, p) = r.split_once("]:")?;
-        (h, p)
+        match r.split_once("]:") {
+            Some((h, p)) => (h, p),
+            None => (r.strip_suffix(']')?, default),
+        }
     } else {
-        rest.rsplit_once(':')?
+        rest.rsplit_once(':').unwrap_or((rest, default))
     };
     let port: u16 = port.parse().ok().filter(|p| *p > 0)?;
     let ok = !host.is_empty() && host.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':'));
@@ -80,6 +84,8 @@ pub struct RouteForm {
     pub ports: RwSignal<String>,
     pub main_port: RwSignal<bool>,
     pub nas: RwSignal<bool>,
+    /// A submit was tried: empty required fields say so.
+    pub tried: RwSignal<bool>,
 }
 
 impl RouteForm {
@@ -94,7 +100,51 @@ impl RouteForm {
             ports: RwSignal::new(ports),
             main_port: RwSignal::new(b_at(r, "/main_port", true)),
             nas: RwSignal::new(b_at(r, "/names/nas", false)),
+            tried: RwSignal::new(false),
         }
+    }
+
+    /// What is wrong with the label (translated), next to the field.
+    pub fn label_err(&self) -> Signal<Option<String>> {
+        let (v, tried) = (self.label, self.tried);
+        Signal::derive(move || {
+            let l = v.with(|s| s.trim().to_ascii_lowercase());
+            if l.is_empty() {
+                tried.get().then(|| t("wa.f.label_required").to_string())
+            } else {
+                (!label_ok(&l)).then(|| t("wa.f.label_bad").to_string())
+            }
+        })
+    }
+
+    /// What is wrong with the forwarding address.
+    pub fn upstream_err(&self) -> Signal<Option<String>> {
+        let (v, tried) = (self.upstream, self.tried);
+        Signal::derive(move || {
+            let u = v.get();
+            if u.trim().is_empty() {
+                tried.get().then(|| t("wa.f.upstream_required").to_string())
+            } else {
+                parse_upstream(&u).is_none().then(|| t("wa.f.upstream_bad").to_string())
+            }
+        })
+    }
+
+    /// What is wrong with the extra ports.
+    pub fn ports_err(&self) -> Signal<Option<String>> {
+        let v = self.ports;
+        Signal::derive(move || parse_ports(&v.get()).is_none().then(|| t("wa.f.ports_bad").to_string()))
+    }
+
+    /// Marks the submit as tried; `false` (and the focus on the first bad field) when a field
+    /// is wrong. `custom` checks the forwarding fields too.
+    pub fn check(&self, custom: bool) -> bool {
+        self.tried.set(true);
+        let bad = untrack(|| self.ports_err().get().is_some() || (custom && (self.label_err().get().is_some() || self.upstream_err().get().is_some())));
+        if bad {
+            ui::focus_invalid();
+        }
+        !bad
     }
 
     /// Everything the form holds (dirty check).
@@ -157,7 +207,7 @@ pub fn where_fields(f: RouteForm) -> AnyView {
     let has_ports = Memo::new(move |_| parse_ports(&f.ports.get()).is_some_and(|p| !p.is_empty()));
     view! {
         <h3 class="mini-title">{tr("wa.sec.where")}</h3>
-        {text_field("wa.f.ports", f.ports.into(), Callback::new(move |v| f.ports.set(v)), Signal::stored(None), In { placeholder: "8444", help: Some("wa.f.ports_help"), mono: true, maxlength: 64, ..In::default() })}
+        {text_field("wa.f.ports", f.ports.into(), Callback::new(move |v| f.ports.set(v)), f.ports_err(), In { placeholder: "8444", help: Some("wa.f.ports_help"), mono: true, maxlength: 64, ..In::default() })}
         <Show when=move || has_ports.get()>
             {switch("wa.f.main_port", Some("wa.f.main_port_help"), f.main_port.into(), Callback::new(move |v| f.main_port.set(v)))}
             {switch("wa.f.nas", Some("wa.f.nas_help"), f.nas.into(), Callback::new(move |v| f.nas.set(v)))}
@@ -171,8 +221,8 @@ pub fn forward_fields(f: RouteForm, new: bool) -> AnyView {
     let https = Memo::new(move |_| f.https_elsewhere());
     view! {
         <h3 class="mini-title">{tr("wa.sec.forward")}</h3>
-        {new.then(|| text_field("wa.f.label", f.label.into(), Callback::new(move |v: String| f.label.set(v.to_ascii_lowercase())), Signal::stored(None), In { placeholder: "router", help: Some("wa.f.label_help"), mono: true, maxlength: 40, ..In::default() }))}
-        {text_field("wa.f.upstream", f.upstream.into(), Callback::new(move |v| f.upstream.set(v)), Signal::stored(None), In { placeholder: "http://192.168.1.20:8080", help: Some("wa.f.upstream_help"), mono: true, maxlength: 300, ..In::default() })}
+        {new.then(|| text_field("wa.f.label", f.label.into(), Callback::new(move |v: String| f.label.set(v.to_ascii_lowercase())), f.label_err(), In { placeholder: "router", help: Some("wa.f.label_help"), mono: true, maxlength: 40, ..In::default() }))}
+        {text_field("wa.f.upstream", f.upstream.into(), Callback::new(move |v| f.upstream.set(v)), f.upstream_err(), In { placeholder: "http://192.168.1.20:8080", help: Some("wa.f.upstream_help"), mono: true, maxlength: 300, ..In::default() })}
         <Show when=move || https.get()>
             {switch("wa.f.skip_verify", Some("wa.f.skip_verify_help"), f.skip_verify.into(), Callback::new(move |v| f.skip_verify.set(v)))}
             {move || f.skip_verify.get().then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, ui::text(t("wa.f.skip_warn").to_string())))}
@@ -206,6 +256,9 @@ pub fn add_drawer(open: RwSignal<bool>) -> AnyView {
     let error = RwSignal::new(None::<String>);
     let submit = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
+        if !f.check(true) {
+            return;
+        }
         let Some(mut cfg) = w.state.data.with_untracked(|s| s.as_ref().map(WaState::current)) else { return };
         let taken: Vec<String> = cfg.get("routes").and_then(Value::as_array).map(|a| a.iter().map(|r| s_at(r, "/id", "")).collect()).unwrap_or_default();
         let mut r = json!({"kind": "custom", "access": access.get_untracked(), "websocket": true, "names": {"local": true, "domain": true}});
@@ -231,7 +284,6 @@ pub fn add_drawer(open: RwSignal<bool>) -> AnyView {
             }
         });
     };
-    let ready = Memo::new(move |_| label_ok(f.label.get().trim()) && parse_upstream(&f.upstream.get()).is_some());
     let body = view! {
         <form id=ADD_FORM class="form" on:submit=submit>
             <p class="small muted">{tr("wa.add.intro")}</p>
@@ -244,8 +296,8 @@ pub fn add_drawer(open: RwSignal<bool>) -> AnyView {
     }
     .into_any();
     let foot = view! {
-        <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("cancel")}</button>
-        <button type="submit" form=ADD_FORM class="btn primary" disabled=move || busy.get() || !ready.get()>{spinner(busy)}{tr("wa.add.button")}</button>
+        <button type="button" class="btn ghost" disabled=move || busy.get() on:click=move |_| close.run(())>{tr("cancel")}</button>
+        <button type="submit" form=ADD_FORM class="btn primary" disabled=move || busy.get()>{spinner(busy)}{tr("wa.add.button")}</button>
     }
     .into_any();
     ui::drawer(Signal::derive(|| t("wa.add.title").to_string()), close, body, foot)
@@ -260,7 +312,9 @@ mod tests {
         assert_eq!(parse_upstream("http://192.168.1.20:8080"), Some(("http", "192.168.1.20".into(), 8080)));
         assert_eq!(parse_upstream(" HTTPS://Router-1:8443/ "), Some(("https", "router-1".into(), 8443)));
         assert_eq!(parse_upstream("https://[fd00::1]:443"), Some(("https", "fd00::1".into(), 443)));
-        for bad in ["192.168.1.20:80", "http://host", "http://host:0", "http://host:80/admin", "ftp://h:21", "http://:80", "http://a b:80"] {
+        assert_eq!(parse_upstream("http://host"), Some(("http", "host".into(), 80)));
+        assert_eq!(parse_upstream("https://[fd00::1]/"), Some(("https", "fd00::1".into(), 443)));
+        for bad in ["192.168.1.20:80", "http://host:0", "http://[fd00::1", "http://host:x", "http://host:80/admin", "ftp://h:21", "http://:80", "http://a b:80"] {
             assert_eq!(parse_upstream(bad), None, "{bad}");
         }
         assert_eq!(upstream_text(&json!({"upstream": {"scheme": "https", "host": "::1", "port": 9443}})), "https://[::1]:9443");

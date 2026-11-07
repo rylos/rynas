@@ -29,6 +29,11 @@ fn drift_detail(s: &StateDrift) -> (String, bool) {
         Some(StateDriftCode::GroupUnmanaged) => "cfg.sd.group_unmanaged",
         Some(StateDriftCode::SharePathMissing) => "cfg.sd.share_path_missing",
         Some(StateDriftCode::ShareAclDiffers) => "cfg.sd.share_acl_differs",
+        // keys whose servers send no code: the kind says enough
+        None if s.key == crate::config::keys::UPS_NETSERVER => match s.kind {
+            StateDriftKind::Missing => "cfg.sd.upsn_missing",
+            _ => "cfg.sd.upsn_changed",
+        },
         Some(StateDriftCode::Other) | None => return (s.detail.clone(), true),
     };
     let id = a.id.map(|n| n.to_string()).unwrap_or_default();
@@ -393,5 +398,7 @@ mod drift_tests {
         assert_eq!(drift_detail(&s), (s.detail.clone(), true));
         s.detail_code = Some(StateDriftCode::Other);
         assert!(drift_detail(&s).1);
+        let n = StateDrift { key: "ups.netserver".into(), kind: StateDriftKind::Mismatch, detail_args: StateDriftArgs { path: Some("/etc/nut/upsd.users".into()), ..Default::default() }, ..Default::default() };
+        assert_eq!(drift_detail(&n), ("The network UPS server accounts in /etc/nut/upsd.users differ from the configuration (edited by hand or by another tool).".into(), false));
     }
 }

@@ -254,6 +254,8 @@ cfg.sd.group_missing	Il gruppo {name} è nella configurazione ma non nel sistema
 cfg.sd.group_unmanaged	Il gruppo {name} (GID {id}) è stato creato fuori da rynas.
 cfg.sd.share_path_missing	{path} non esiste più.
 cfg.sd.share_acl_differs	I permessi di {path} sono diversi (appartenenza ai gruppi cambiata o modifica a mano). Mancanti: {missing}. Inattesi: {extra}.
+cfg.sd.upsn_missing	Gli account del server UPS di rete mancano da {path}.
+cfg.sd.upsn_changed	Gli account del server UPS di rete in {path} sono diversi dalla configurazione (modifica a mano o da un altro strumento).
 cfg.col_what	File o oggetto
 cfg.col_key	Impostazione
 cfg.col_state	Stato
@@ -554,9 +556,17 @@ upsn.module	Su questo hardware NUT è gestito dal livello di sistema con i suoi 
 upsn.listen_all	Tutti gli indirizzi del NAS
 upsn.listen_chosen	Indirizzi scelti
 upsn.listen_help	Il NAS stesso (localhost) è sempre incluso.
+upsn.listen_bad	{addr} non è un indirizzo di questo NAS: toglilo o scegli uno degli indirizzi qui sopra.
 upsn.allow	Host ammessi
 upsn.allow_any	Qualsiasi host che raggiunge il NAS
-upsn.allow_help	Un indirizzo IP o una sottorete per riga (192.168.1.20, 192.168.1.0/24, fd00::/64). Vuoto: nessun limite. Gli altri host vengono scartati dal sistema prima di arrivare a NUT.
+upsn.filter	Filtro degli host
+upsn.filter_on	Attivo
+upsn.filter_off	Non funzionante
+upsn.pb.server_inactive	Il server è attivo ma upsd (nut-server) non è in esecuzione: nessun client può collegarsi. Configura prima l'UPS o guarda il log del servizio.
+upsn.pb.filter_inactive	Il filtro degli host ammessi non funziona su questo sistema (il kernel non applica il filtro IP di systemd): ogni host che raggiunge la porta 3493 può collegarsi. Limita la porta 3493 con un firewall.
+upsn.pb.other	Il server segnala un problema che questa interfaccia non conosce: aggiorna rynas.
+upsn.allow_help	Un indirizzo IP o una sottorete per riga (192.168.1.20, 192.168.1.0/24, fd00::/64). Vuoto: nessun limite. Gli altri host vengono scartati dal sistema prima di arrivare a NUT. I container di questo NAS (per esempio Home Assistant in una rete bridge) si collegano dalla sottorete del loro bridge Docker: ammetti anche quella.
+upsn.allow_ph	es. 192.168.1.0/24
 upsn.allow_lan	Ammetti la rete locale ({nets})
 upsn.address	Indirizzo
 upsn.ups_name	Nome dell'UPS
@@ -568,6 +578,9 @@ upsn.settings_title	Impostazioni del server UPS di rete
 upsn.add	Aggiungi account
 upsn.add_title	Nuovo account client
 upsn.user_help	a-z, 0-9, _ e -, al massimo 32 caratteri.
+upsn.user_required	Inserisci un nome utente.
+upsn.user_bad	Usa da 1 a 32 caratteri a-z, 0-9, _ e - (rynas e rynas-upsmon sono usati da rynas).
+upsn.user_taken	Esiste già un account con questo nome.
 upsn.role	Ruolo
 upsn.role_secondary	Si spegne con l'UPS
 upsn.role_monitor	Solo lettura
@@ -577,6 +590,8 @@ upsn.note	Nota
 upsn.own_password	Scegli la password
 upsn.own_password_help	Disattivato: rynas ne genera una robusta e la mostra una volta.
 upsn.password	Password
+upsn.password_help	Da 12 a 64 caratteri: lettere, cifre e . _ ~ @ % + = : , - (niente spazi, virgolette o #).
+upsn.password_bad	La password richiede da 12 a 64 caratteri tra lettere, cifre e . _ ~ @ % + = : , -
 upsn.create	Crea
 upsn.connect	Collega
 upsn.connect_title	Collegamento con l'account {name}
@@ -2258,6 +2273,8 @@ ts.login_server	Server di coordinamento
 ts.login_server_help	Solo per un server di coordinamento ospitato in proprio; altrimenti lascialo vuoto.
 ts.login	Accedi
 ts.login_url_text	Apri questo indirizzo su qualsiasi dispositivo e approva questo NAS:
+ts.use_key	Usa invece una chiave di autenticazione
+ts.use_url	Torna all'indirizzo di accesso
 ts.open_login	Apri la pagina di accesso
 ts.login_wait	In attesa dell'indirizzo di accesso…
 ts.machine_auth	Accesso fatto: un amministratore della tailnet deve approvare questo dispositivo nella console di amministrazione.
@@ -2300,7 +2317,10 @@ ts.confirm_text	La modifica viene provata: se questa pagina non raggiunge di nuo
 ts.via_warning	Questa pagina è aperta tramite Tailscale: questo può chiudere la sessione. Tieni pronto un altro accesso (rete locale, indirizzo di emergenza).
 ts.saved	Opzioni di Tailscale salvate
 ts.confirm_failed	Il NAS non ha potuto confermare la modifica: le opzioni precedenti tornano da sole entro 90 secondi.
-ts.pending_confirm	Una modifica delle opzioni di Tailscale attende conferma.
+ts.pending_confirm	Una modifica delle opzioni di Tailscale attende conferma: se non viene confermata, le opzioni precedenti tornano entro 90 secondi.
+ts.save_after_confirm	Si possono salvare nuove modifiche quando quella in attesa è confermata o annullata.
+ts.ch.routes_added	Condividi: {routes}
+ts.ch.routes_removed	Smetti di condividere: {routes}
 ts.keep	Tieni le nuove opzioni
 ts.logout	Esci dalla tailnet
 ts.logout_title	Scollegare questo NAS dalla tailnet?
@@ -2309,6 +2329,7 @@ ts.uninstall	Disinstalla
 ts.uninstall_title	Disinstallare Tailscale?
 ts.uninstall_text	Vengono rimossi il pacchetto, il suo repository e le impostazioni di inoltro scritte da rynas.
 ts.purge	Dimentica anche questo dispositivo: una nuova installazione entra nella tailnet come nuovo dispositivo
+ts.remove_title	Rimuovi Tailscale
 ts.wa_on	Tailscale è connesso ({name}): «Questa rete e VPN» ammette anche i dispositivi della tailnet.
 ts.wa_off	Tailscale non è connesso: «Questa rete e VPN» non ammette dispositivi della tailnet.
 err.tailscale_not_installed	Tailscale non è installato.
@@ -3117,9 +3138,11 @@ wa.sec.forward	Inoltro
 wa.f.label	Nome
 wa.f.label_help	Lettere, cifre e '-'. È l'inizio dell'indirizzo, per esempio router-nas.local.
 wa.f.label_bad	Usa da 1 a 40 caratteri a-z, 0-9 e '-', non all'inizio o alla fine.
+wa.f.label_required	Inserisci un nome per l'indirizzo.
 wa.f.upstream	Inoltra a
-wa.f.upstream_help	http:// o https://, poi l'indirizzo o il nome del dispositivo e la sua porta.
-wa.f.upstream_bad	Scrivilo come http://indirizzo:porta o https://indirizzo:porta, senza percorso.
+wa.f.upstream_help	http:// o https://, poi l'indirizzo o il nome del dispositivo, e la sua porta se non è quella standard (80, 443).
+wa.f.upstream_bad	Scrivilo come http://indirizzo:porta o https://indirizzo:porta (la porta si può omettere per 80 e 443), senza percorso.
+wa.f.upstream_required	Inserisci l'indirizzo del dispositivo o servizio.
 wa.f.skip_verify	Accetta il certificato del dispositivo
 wa.f.skip_verify_help	Per i dispositivi con un certificato autofirmato. La connessione resta cifrata, ma il dispositivo non viene verificato.
 wa.f.skip_warn	Attivalo solo per un dispositivo che conosci: chi prende il suo indirizzo in rete potrebbe leggere il traffico.
@@ -3137,6 +3160,8 @@ wa.f.nas	Anche sui nomi di questo NAS
 wa.f.nas_help	Sulle porte aggiuntive l'indirizzo risponde anche ai nomi del NAS, per esempio https://nas.example.com:8444/.
 wa.route.remove	Rimuovi indirizzo
 wa.route.remove_q	Rimuovere questo indirizzo? Il dispositivo o servizio non viene toccato.
+wa.route.remove_title	Rimuovi questo indirizzo
+wa.route.remove_text	Il NAS smette di rispondere a questo indirizzo. Il dispositivo o servizio non viene toccato.
 wa.check.port_listening	Porta aggiuntiva in ascolto
 wa.fix.port_listening	Il proxy non risponde su questa porta. Controlla che nessun altro programma la usi, poi salva di nuovo.
 wa.auth.app	Il login proprio dell'app

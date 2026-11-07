@@ -339,7 +339,7 @@ fn fetch_text(src: StoredValue<(String, String)>, err: RwSignal<Option<String>>,
                 // `apply` with its effect run, and the second answer, equal to the first, must
                 // still reach the data
                 if src.try_with_value(|s| s.1 != text) == Some(true) && apply.try_run(text.clone()).is_some() {
-                    src.update_value(|s| s.1 = text);
+                    let _ = src.try_update_value(|s| s.1 = text);
                 }
             }
             // 401: the API layer shows the login screen
@@ -531,6 +531,15 @@ pub fn dialog(kind: DlgKind, title: Signal<String>, on_close: Callback<()>, body
     let opener = document().active_element().and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok());
     let opener = StoredValue::new_local(opener);
     let press_on_backdrop = StoredValue::new(false);
+    // a change in flight (its primary or danger button shows the spinner; a test or a preview
+    // does not count) keeps the dialog open: Esc, × and the
+    // backdrop would drop the callbacks its answer still needs (a password shown once, a reload)
+    let busy = move || node.get_untracked().and_then(|d| d.query_selector(":is(.btn.primary, .btn.danger) .btn-spinner").ok().flatten()).is_some();
+    let close = move || {
+        if !busy() {
+            on_close.run(());
+        }
+    };
     node.on_load(move |d| {
         if !d.open() {
             let _ = d.show_modal();
@@ -580,20 +589,20 @@ pub fn dialog(kind: DlgKind, title: Signal<String>, on_close: Callback<()>, body
             aria-labelledby=label_id
             on:cancel=move |e: web_sys::Event| {
                 e.prevent_default();
-                on_close.run(());
+                close();
             }
             on:pointerdown=move |e: web_sys::PointerEvent| press_on_backdrop.set_value(e.target() == e.current_target())
             on:click=move |e: web_sys::MouseEvent| {
                 // the dialog element itself only receives clicks on its backdrop
                 if e.target() == e.current_target() && press_on_backdrop.get_value() {
-                    on_close.run(());
+                    close();
                 }
             }
         >
             <header class="dialog-head">
                 {(kind == DlgKind::Alert).then(|| view! { <span class="dialog-icon"><Icon icon=icons::TRIANGLE_ALERT size=18 /></span> })}
                 <h2 id=id>{move || title.get()}</h2>
-                <button class="icon-btn sm" type="button" aria-label=tr("close") on:click=move |_| on_close.run(())>
+                <button class="icon-btn sm" type="button" aria-label=tr("close") on:click=move |_| close()>
                     <Icon icon=icons::X size=16 />
                 </button>
             </header>
@@ -602,6 +611,28 @@ pub fn dialog(kind: DlgKind, title: Signal<String>, on_close: Callback<()>, body
         </dialog>
     }
     .into_any()
+}
+
+/// After a refused submit: the first field marked invalid (in the open dialog, else the page)
+/// takes the focus and scrolls into view, so its error is seen next to it. Runs on the next
+/// frame, once the errors are rendered.
+pub fn focus_invalid() {
+    use wasm_bindgen::JsCast;
+    request_animation_frame(|| {
+        let doc = document();
+        let sel = "[aria-invalid=\"true\"]";
+        let el = doc
+            .query_selector_all("dialog[open]")
+            .ok()
+            .and_then(|l| l.item(l.length().checked_sub(1)?))
+            .and_then(|d| d.dyn_into::<web_sys::Element>().ok())
+            .and_then(|d| d.query_selector(sel).ok().flatten())
+            .or_else(|| doc.query_selector(sel).ok().flatten());
+        // focusing scrolls the field into view
+        if let Some(el) = el.and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok()) {
+            let _ = el.focus();
+        }
+    });
 }
 
 /// [`dialog`] as a component (`<Modal title=… on_close=…>…</Modal>`), centered or, with
@@ -685,7 +716,7 @@ pub fn confirm(c: Confirm) -> AnyView {
     }
     .into_any();
     let foot = view! {
-        <button type="button" class="btn ghost" data-autofocus="" on:click=move |_| cancel.run(())>{tr("cancel")}</button>
+        <button type="button" class="btn ghost" data-autofocus="" disabled=move || busy.get() on:click=move |_| cancel.run(())>{tr("cancel")}</button>
         <button
             type="button"
             class=if c.danger { "btn danger" } else { "btn primary" }

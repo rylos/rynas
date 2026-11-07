@@ -34,6 +34,9 @@ const NOT_LAN: &[&str] = &[
     "wg",
     "tun",
     "tap",
+    "vmnet",
+    "vboxnet",
+    "zt",
 ];
 
 /// Tailnet ranges (Tailscale's CGNAT range and its ULA prefix). Trusted only while

@@ -46,13 +46,58 @@ pub fn parse_list(s: &str) -> Vec<String> {
     s.split(|c: char| c.is_whitespace() || c == ',').filter(|w| !w.is_empty()).map(str::to_string).collect()
 }
 
-/// Saves `cfg` and applies `ups.netserver`; the passwords of this request on success.
-async fn save(cfg: UpsNetServerConfig, error: RwSignal<Option<String>>) -> Option<Vec<UpsNetPassword>> {
+/// `nets` added to the allowed hosts typed in `allow` (one per line, those already there
+/// are not repeated; the text stays as typed when nothing is missing).
+pub fn add_hosts(allow: &str, nets: &[String]) -> String {
+    let have = parse_list(allow);
+    let missing: Vec<&String> = nets.iter().filter(|n| !have.contains(n)).collect();
+    if missing.is_empty() {
+        return allow.to_string();
+    }
+    let mut out = allow.trim_end().to_string();
+    for n in missing {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(n);
+    }
+    out
+}
+
+/// A password upsd accepts (rynasd checks the same): 12 to 64 characters from
+/// `A-Z a-z 0-9 . _ ~ @ % + = : , -`.
+pub fn password_ok(p: &str) -> bool {
+    let (lo, hi) = NET_PASSWORD_LEN;
+    (lo..=hi).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_alphanumeric() || b"._~@%+=:,-".contains(&b))
+}
+
+/// A user name rynasd accepts: `a-z 0-9 _ -`, 1 to 32 characters, not one of rynas's own.
+pub fn user_ok(u: &str) -> bool {
+    (1..=32).contains(&u.len())
+        && u.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+        && !["rynas", "rynas-upsmon"].contains(&u)
+}
+
+/// Saves `cfg` and applies `ups.netserver`; the passwords of this request on success. A
+/// refused listen address (`listen.N`) goes to `listen_err`, next to the addresses.
+async fn save(cfg: UpsNetServerConfig, error: RwSignal<Option<String>>, listen_err: Option<RwSignal<Option<String>>>) -> Option<Vec<UpsNetPassword>> {
     error.set(None);
+    if let Some(l) = listen_err {
+        l.set(None);
+    }
+    let listen = cfg.listen.clone();
     match api::put::<_, UpsNetServerSaved>(URL, &cfg).await {
         Ok(saved) => crate::config::apply_now(&[KEY], error).await.then_some(saved.passwords),
         Err(e) => {
-            let _ = error.try_set(Some(e.text()));
+            let bad = e.field().and_then(|f| f.strip_prefix("listen.")).and_then(|i| i.parse::<usize>().ok()).and_then(|i| listen.get(i));
+            match (bad, listen_err) {
+                (Some(a), Some(l)) => {
+                    let _ = l.try_set(Some(tf("upsn.listen_bad", &[("addr", a)])));
+                }
+                _ => {
+                    let _ = error.try_set(Some(e.text()));
+                }
+            }
             None
         }
     }
@@ -121,6 +166,15 @@ pub fn card() -> AnyView {
             })
             .collect();
         let has_rows = !rows.is_empty();
+        let problems = st
+            .problems
+            .iter()
+            .map(|p| match p {
+                UpsNetProblem::ServerInactive => ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {t("upsn.pb.server_inactive")} }.into_any()),
+                UpsNetProblem::FilterInactive => ui::note(Tone::Err, icons::SHIELD_ALERT, view! { {t("upsn.pb.filter_inactive")} }.into_any()),
+                UpsNetProblem::Other => ui::note(Tone::Info, icons::INFO, view! { {t("upsn.pb.other")} }.into_any()),
+            })
+            .collect_view();
         view! {
             <div class="btn-row">
                 {status(if c.enabled { Tone::Ok } else { Tone::Unknown }, t(if c.enabled { "upsn.on" } else { "upsn.off" }).to_string())}
@@ -130,9 +184,13 @@ pub fn card() -> AnyView {
             <dl class="kvs">
                 <div class="kv"><dt>{tr("smb.interfaces")}</dt><dd class="wrap">{listen}</dd></div>
                 <div class="kv"><dt>{tr("upsn.allow")}</dt><dd class="wrap">{allow}</dd></div>
+                {st.filter_active.map(|on| view! {
+                    <div class="kv"><dt>{tr("upsn.filter")}</dt><dd>{status(if on { Tone::Ok } else { Tone::Err }, t(if on { "upsn.filter_on" } else { "upsn.filter_off" }).to_string())}</dd></div>
+                })}
                 <div class="kv"><dt>{tr("upsn.address")}</dt><dd class="mono wrap">{format!("{host}:{}", st.port)}</dd></div>
                 <div class="kv"><dt>{tr("upsn.ups_name")}</dt><dd class="mono">{ups}</dd></div>
             </dl>
+            {problems}
             {(c.enabled && c.allow.is_empty()).then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {t("upsn.open_warn")} }.into_any()))}
             <h3 class="section-title">{tr("upsn.accounts")}</h3>
             {if has_rows {
@@ -147,8 +205,9 @@ pub fn card() -> AnyView {
         }
         .into_any()
     };
-    // the dialogs end inside their own (then disposed) reactive owner: the reload runs here,
-    // in the card's, or its answer would be dropped with the dialog
+    // the callbacks live in the card's owner, not in the closures that show each dialog: a
+    // dialog's owner is disposed with it, and the answer of its change (a reload, a password
+    // shown once) must still arrive; a dialog does not close while its change applies
     let refresh = RwSignal::new(0u32);
     Effect::new(move |prev: Option<u32>| {
         let n = refresh.get();
@@ -163,15 +222,40 @@ pub fn card() -> AnyView {
             shown.set(s);
         }
     };
+    let close_settings = Callback::new(move |changed: bool| {
+        settings_open.set(false);
+        if changed {
+            refresh.update(|n| *n += 1);
+        }
+    });
+    let close_add = Callback::new(move |s: Option<Shown>| {
+        add_open.set(false);
+        if s.is_some() {
+            done(s);
+        }
+    });
+    let close_shown = Callback::new(move |_: ()| shown.set(None));
+    let close_remove = Callback::new(move |s: Option<Option<Shown>>| {
+        remove.set(None);
+        if let Some(s) = s {
+            done(s);
+        }
+    });
+    let close_regen = Callback::new(move |s: Option<Option<Shown>>| {
+        regen.set(None);
+        if let Some(s) = s {
+            done(s);
+        }
+    });
     view! {
         <section class="card widget">
             <WidgetHead icon=icons::NETWORK title="upsn.title" />
             {body}
-            {move || settings_open.get().then(|| settings_dialog(state, Callback::new(move |_| { settings_open.set(false); refresh.update(|n| *n += 1); })))}
-            {move || add_open.get().then(|| add_dialog(state, Callback::new(move |s: Option<Shown>| { add_open.set(false); done(s); })))}
-            {move || shown.get().map(|s| connect_dialog(state, s, Callback::new(move |_| shown.set(None))))}
-            {move || remove.get().map(|name| change_confirm(state, name, false, Callback::new(move |s: Option<Shown>| { remove.set(None); done(s); })))}
-            {move || regen.get().map(|name| change_confirm(state, name, true, Callback::new(move |s: Option<Shown>| { regen.set(None); done(s); })))}
+            {move || settings_open.get().then(|| settings_dialog(state, close_settings))}
+            {move || add_open.get().then(|| add_dialog(state, close_add))}
+            {move || shown.get().map(|s| connect_dialog(state, s, close_shown))}
+            {move || remove.get().map(|name| change_confirm(state, name, false, close_remove))}
+            {move || regen.get().map(|name| change_confirm(state, name, true, close_regen))}
         </section>
     }
     .into_any()
@@ -187,14 +271,19 @@ struct Settings {
     allow: String,
 }
 
-fn settings_dialog(state: Remote<UpsNetServerState>, on_close: Callback<()>) -> AnyView {
+/// `on_close(true)` after a change was applied.
+fn settings_dialog(state: Remote<UpsNetServerState>, on_close: Callback<bool>) -> AnyView {
+    let cancel = Callback::new(move |_: ()| on_close.run(false));
     let st = state.data.get_untracked().unwrap_or_default();
     let base = current(&st);
     let f = RwSignal::new(Settings { enabled: base.enabled, all: base.listen.is_empty(), listen: base.listen.clone(), allow: base.allow.join("\n") });
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let plan = RwSignal::new(None::<Result<UpsSetupPlan, String>>);
-    let addresses = st.addresses.clone();
+    let listen_err = RwSignal::new(None::<String>);
+    // the NAS's addresses, plus a chosen one it no longer has (shown so it can be unticked)
+    let mut addresses: Vec<String> = st.addresses.iter().map(|a| a.address.clone()).collect();
+    addresses.extend(base.listen.iter().filter(|a| !addresses.contains(a)).cloned().collect::<Vec<_>>());
     let subnets: Vec<String> = {
         let mut v: Vec<String> = st.addresses.iter().map(|a| a.subnet.clone()).filter(|s| !s.is_empty()).collect();
         v.dedup();
@@ -217,24 +306,24 @@ fn settings_dialog(state: Remote<UpsNetServerState>, on_close: Callback<()>) -> 
         let body = value.with_value(|v| v());
         busy.set(true);
         spawn_local(async move {
-            if save(body, error).await.is_some() {
+            if save(body, error, Some(listen_err)).await.is_some() {
                 saved_applied();
-                on_close.run(());
+                let _ = on_close.try_run(true);
             }
             let _ = busy.try_set(false);
         });
     };
     let mode = Signal::derive(move || if f.with(|s| s.all) { "all".to_string() } else { "chosen".to_string() });
     let allow_text = Signal::derive(move || f.with(|s| s.allow.clone()));
-    let subnets_text = subnets.join("\n");
+    let nets = StoredValue::new(subnets.clone());
     view! {
-        <Modal title=Signal::stored(t("upsn.settings_title").to_string()) on_close=on_close wide=true>
+        <Modal title=Signal::stored(t("upsn.settings_title").to_string()) on_close=cancel wide=true>
             {switch("upsn.enable", Some("upsn.enable_help"), Signal::derive(move || f.with(|s| s.enabled)), Callback::new(move |v| f.update(|s| s.enabled = v)))}
             {segmented("smb.interfaces", &[("all", "upsn.listen_all"), ("chosen", "upsn.listen_chosen")], mode, Callback::new(move |v: String| f.update(|s| s.all = v == "all")))}
             <Show when=move || !f.with(|s| s.all)>
                 <div class="field">
                     {addresses.iter().map(|a| {
-                        let (a1, a2) = (a.address.clone(), a.address.clone());
+                        let (a1, a2) = (a.clone(), a.clone());
                         view! {
                             <label class="check">
                                 <input type="checkbox" prop:checked=move || f.with(|s| s.listen.contains(&a1)) on:change=move |ev| {
@@ -242,17 +331,21 @@ fn settings_dialog(state: Remote<UpsNetServerState>, on_close: Callback<()>) -> 
                                     let a = a2.clone();
                                     f.update(|s| { s.listen.retain(|x| x != &a); if on { s.listen.push(a); } });
                                 } />
-                                <span class="mono">{a.address.clone()}</span>
+                                <span class="mono">{a.clone()}</span>
                             </label>
                         }
                     }).collect_view()}
                     <span class="field-help">{tr("upsn.listen_help")}</span>
+                    <span class="field-error" aria-live="polite">
+                        {move || listen_err.get().map(|e| view! { <Icon icon=icons::CIRCLE_X size=12 />{e} })}
+                    </span>
                 </div>
             </Show>
-            {area_field("upsn.allow", allow_text, Callback::new(move |v| f.update(|s| s.allow = v)), Some("upsn.allow_help"), "192.168.1.0/24")}
+            {area_field("upsn.allow", allow_text, Callback::new(move |v| f.update(|s| s.allow = v)), Some("upsn.allow_help"), t("upsn.allow_ph"))}
             {(!subnets.is_empty()).then(|| view! {
                 <div class="btn-row">
-                    <button type="button" class="btn ghost sm" on:click=move |_| { let t = subnets_text.clone(); f.update(|s| s.allow = t); }>
+                    <button type="button" class="btn ghost sm" disabled=move || f.with(|s| nets.with_value(|n| add_hosts(&s.allow, n) == s.allow))
+                        on:click=move |_| f.update(|s| s.allow = nets.with_value(|n| add_hosts(&s.allow, n)))>
                         <Icon icon=icons::PLUS size=14 />{tf("upsn.allow_lan", &[("nets", &subnets.join(", "))])}
                     </button>
                 </div>
@@ -264,7 +357,7 @@ fn settings_dialog(state: Remote<UpsNetServerState>, on_close: Callback<()>) -> 
             {move || plan.get().map(plan_view)}
             {form_error(error)}
             <div class="dialog-foot">
-                <button type="button" class="btn ghost" on:click=move |_| on_close.run(())>{tr("cancel")}</button>
+                <button type="button" class="btn ghost" disabled=move || busy.get() on:click=move |_| cancel.run(())>{tr("cancel")}</button>
                 <button type="button" class="btn primary" disabled=move || busy.get() on:click=move |_| submit()>{spinner(busy)}{tr("save")}</button>
             </div>
         </Modal>
@@ -310,7 +403,28 @@ fn add_dialog(state: Remote<UpsNetServerState>, on_close: Callback<Option<Shown>
     let f = RwSignal::new(NewAccount::default());
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
+    let tried = RwSignal::new(false);
+    let name_err = Signal::derive(move || {
+        let n = f.with(|a| a.name.trim().to_ascii_lowercase());
+        let taken = state.data.with(|s| s.as_ref().is_some_and(|s| current(s).clients.iter().any(|c| c.name == n)));
+        if n.is_empty() {
+            tried.get().then(|| t("upsn.user_required").to_string())
+        } else if !user_ok(&n) {
+            Some(t("upsn.user_bad").to_string())
+        } else {
+            taken.then(|| t("upsn.user_taken").to_string())
+        }
+    });
+    let pw_err = Signal::derive(move || {
+        let (own, p) = f.with(|a| (a.own, a.password.trim().to_string()));
+        (own && (tried.get() || !p.is_empty()) && !password_ok(&p)).then(|| t("upsn.password_bad").to_string())
+    });
     let submit = move || {
+        tried.set(true);
+        if name_err.with_untracked(Option::is_some) || pw_err.with_untracked(Option::is_some) {
+            ui::focus_invalid();
+            return;
+        }
         let a = f.get_untracked();
         let mut cfg = state.data.get_untracked().map(|s| current(&s)).unwrap_or_default();
         let role = if a.monitor { UpsClientRole::Monitor } else { UpsClientRole::Secondary };
@@ -325,9 +439,9 @@ fn add_dialog(state: Remote<UpsNetServerState>, on_close: Callback<Option<Shown>
         });
         busy.set(true);
         spawn_local(async move {
-            if let Some(pws) = save(cfg, error).await {
+            if let Some(pws) = save(cfg, error, None).await {
                 let password = pws.into_iter().find(|p| p.name == name).map(|p| p.password);
-                on_close.run(Some(Shown { name, role, password }));
+                let _ = on_close.try_run(Some(Shown { name, role, password }));
             }
             let _ = busy.try_set(false);
         });
@@ -337,7 +451,7 @@ fn add_dialog(state: Remote<UpsNetServerState>, on_close: Callback<Option<Shown>
     let none = Signal::stored(None::<String>);
     view! {
         <Modal title=Signal::stored(t("upsn.add_title").to_string()) on_close=Callback::new(move |_| on_close.run(None))>
-            {text_field("username", Signal::derive(move || f.with(|a| a.name.clone())), Callback::new(move |v| f.update(|a| a.name = v)), none,
+            {text_field("username", Signal::derive(move || f.with(|a| a.name.clone())), Callback::new(move |v| f.update(|a| a.name = v)), name_err,
                 In { mono: true, maxlength: 32, help: Some("upsn.user_help"), placeholder: "homeassistant", ..Default::default() })}
             {segmented("upsn.role", &[("secondary", "upsn.role_secondary"), ("monitor", "upsn.role_monitor")], role, Callback::new(move |v: String| f.update(|a| a.monitor = v == "monitor")))}
             <p class="field-help">{move || t(if f.with(|a| a.monitor) { "upsn.role_monitor_help" } else { "upsn.role_secondary_help" })}</p>
@@ -345,13 +459,13 @@ fn add_dialog(state: Remote<UpsNetServerState>, on_close: Callback<Option<Shown>
                 In { maxlength: 64, placeholder: "Home Assistant", ..Default::default() })}
             {switch("upsn.own_password", Some("upsn.own_password_help"), own, Callback::new(move |v| f.update(|a| a.own = v)))}
             <Show when=move || own.get()>
-                {text_field("upsn.password", Signal::derive(move || f.with(|a| a.password.clone())), Callback::new(move |v| f.update(|a| a.password = v)), none,
-                    In { kind: "password", mono: true, maxlength: 64, autocomplete: "new-password", ..Default::default() })}
+                {text_field("upsn.password", Signal::derive(move || f.with(|a| a.password.clone())), Callback::new(move |v| f.update(|a| a.password = v)), pw_err,
+                    In { kind: "password", mono: true, maxlength: 64, autocomplete: "new-password", help: Some("upsn.password_help"), ..Default::default() })}
             </Show>
             {form_error(error)}
             <div class="dialog-foot">
-                <button type="button" class="btn ghost" on:click=move |_| on_close.run(None)>{tr("cancel")}</button>
-                <button type="button" class="btn primary" disabled=move || busy.get() || f.with(|a| a.name.trim().is_empty()) on:click=move |_| submit()>{spinner(busy)}{tr("upsn.create")}</button>
+                <button type="button" class="btn ghost" disabled=move || busy.get() on:click=move |_| on_close.run(None)>{tr("cancel")}</button>
+                <button type="button" class="btn primary" disabled=move || busy.get() on:click=move |_| submit()>{spinner(busy)}{tr("upsn.create")}</button>
             </div>
         </Modal>
     }
@@ -359,7 +473,8 @@ fn add_dialog(state: Remote<UpsNetServerState>, on_close: Callback<Option<Shown>
 }
 
 /// Remove an account, or give it a new password (`regen`).
-fn change_confirm(state: Remote<UpsNetServerState>, name: String, regen: bool, on_close: Callback<Option<Shown>>) -> AnyView {
+/// `on_close(None)`: cancelled; `Some(shown)`: done, with the new password of `regen`.
+fn change_confirm(state: Remote<UpsNetServerState>, name: String, regen: bool, on_close: Callback<Option<Option<Shown>>>) -> AnyView {
     let c = Confirm::new(
         tf(if regen { "upsn.regen_title" } else { "upsn.remove_title" }, &[("name", &name)]),
         t(if regen { "upsn.regen_text" } else { "upsn.remove_text" }).to_string(),
@@ -380,10 +495,10 @@ fn change_confirm(state: Remote<UpsNetServerState>, name: String, regen: bool, o
         let name = name.clone();
         busy.set(true);
         spawn_local(async move {
-            if let Some(pws) = save(cfg, error).await {
+            if let Some(pws) = save(cfg, error, None).await {
                 saved_applied();
                 let password = pws.into_iter().find(|p| p.name == name).map(|p| p.password);
-                on_close.run(regen.then_some(Shown { name, role, password }));
+                let _ = on_close.try_run(Some(regen.then_some(Shown { name, role, password })));
             }
             let _ = busy.try_set(false);
         });

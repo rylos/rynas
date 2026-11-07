@@ -219,7 +219,13 @@ pub fn text_field(label: &'static str, value: Signal<String>, set: Callback<Stri
                 aria-describedby=desc
                 prop:value=move || value.get()
                 on:input=move |ev| set.run(event_target_value(&ev))
-                on:focus=move |_| focused.set(true)
+                on:focus=move |_| {
+                    // an error already on screen (a submit that went to this field) stays
+                    if err.with_untracked(Option::is_some) {
+                        touched.set(true);
+                    }
+                    focused.set(true);
+                }
                 on:blur=move |_| {
                     focused.set(false);
                     touched.set(true);

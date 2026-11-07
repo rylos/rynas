@@ -833,6 +833,9 @@ fn route_drawer(id: String, run_now: bool) -> AnyView {
         test();
     }
     let save = move |_| {
+        if !form.check(custom) {
+            return;
+        }
         let Some(mut cfg) = w.state.data.with_untracked(|s| s.as_ref().map(WaState::current)) else { return };
         if let Some(r) = cfg.get_mut("routes").and_then(Value::as_array_mut).and_then(|a| a.iter_mut().find(|r| r.get("id").and_then(Value::as_str) == Some(rid.get_value().as_str()))) {
             put(r, "access", Value::String(access.get_untracked()));
@@ -875,10 +878,6 @@ fn route_drawer(id: String, run_now: bool) -> AnyView {
             {custom.then(|| routes_edit::forward_fields(form, false))}
             {routes_edit::where_fields(form)}
             {form_error(error)}
-            <div class="sec-actions">
-                <button class="btn primary sm" disabled=move || busy.get() || !dirty.get() on:click=save>{spinner(busy)}{tr("save")}</button>
-                {custom.then(|| view! { <button class="btn danger sm" on:click=move |_| removing.set(true)><Icon icon=icons::TRASH_2 size=14 />{tr("wa.route.remove")}</button> })}
-            </div>
             <h3 class="mini-title">{tr("wa.test.title")}</h3>
             <p class="small muted">{tr("wa.test.text")}</p>
             {mdns_note()}
@@ -887,11 +886,22 @@ fn route_drawer(id: String, run_now: bool) -> AnyView {
             </div>
             {form_error(test_err)}
             {move || diag.with(|d| d.as_ref().map(|d| checklist(d, check_key)))}
+            {custom.then(|| view! {
+                <h3 class="mini-title">{tr("wa.route.remove_title")}</h3>
+                <p class="small muted">{tr("wa.route.remove_text")}</p>
+                <div class="sec-actions">
+                    <button type="button" class="btn danger sm" on:click=move |_| removing.set(true)><Icon icon=icons::TRASH_2 size=14 />{tr("wa.route.remove")}</button>
+                </div>
+            })}
         }
         .into_any()
     };
     let title = Signal::derive(move || view_of.with(|r| r.as_ref().map(|r| route_name(w, r))).map(|n| tf("wa.route.title", &[("name", &n)])).unwrap_or_default());
-    let foot = view! { <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("close")}</button> }.into_any();
+    let foot = view! {
+        <button type="button" class="btn ghost" disabled=move || busy.get() on:click=move |_| close.run(())>{tr("close")}</button>
+        <button type="button" class="btn primary" disabled=move || busy.get() || !dirty.get() || view_of.with(Option::is_none) on:click=save>{spinner(busy)}{tr("save")}</button>
+    }
+    .into_any();
     let rm_busy = RwSignal::new(false);
     let rm_error = RwSignal::new(None::<String>);
     let remove = Callback::new(move |_: ()| {
