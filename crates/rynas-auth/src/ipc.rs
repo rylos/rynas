@@ -41,6 +41,10 @@ pub const USER_HEADER: &str = "x-rynas-user";
 /// and checks that a network confirmation came over the new path.
 pub const LOCAL_ADDR_HEADER: &str = "x-rynas-local-addr";
 
+/// Header with the `Host` the browser asked for, added by `rynas-web` to the web access
+/// confirmation: rynasd checks that it arrived through the proxy on one of the new names.
+pub const HOST_HEADER: &str = "x-rynas-host";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthenticateRequest {
     pub username: String,

@@ -3,7 +3,11 @@
 //! engine socket and `--dry-system` behaviour: the catalogue and its images, plans (errors
 //! by field, a port conflict with a suggestion, masked secrets), an install as a dry run
 //! that writes the real stack files, the installed list, the update plan and update,
-//! convert to custom stack, and uninstall keeping the data.
+//! convert to custom stack, and uninstall keeping the data. With web access (W1, a fake
+//! proxy admin socket): the default binding by proxy state, the route an install adds, the
+//! proxy's ports counted as used, "Move behind the proxy", the route removed at uninstall.
+
+mod fake_caddy;
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -69,6 +73,8 @@ struct Env {
     dir: tempfile::TempDir,
     app: axum::Router,
     ops: Arc<Ops>,
+    /// Web access and its fake proxy, when the test asked for it.
+    web: Option<(Arc<rynasd::web_access::WebAccessSvc>, fake_caddy::FakeCaddy)>,
 }
 
 impl Env {
@@ -85,6 +91,11 @@ fn catalogue() -> PathBuf {
 }
 
 fn env() -> Env {
+    env_opts(None)
+}
+
+/// `web`: `Some(installed)` adds web access with a fake proxy (installed or not).
+fn env_opts(web: Option<bool>) -> Env {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("root");
     std::fs::create_dir_all(root.join("vol1/media")).unwrap();
@@ -113,7 +124,29 @@ fn env() -> Env {
         apps_ssd_volume: Some("ssd".into()),
         ..Default::default()
     });
-    let domains: Vec<Arc<dyn Applier>> = vec![Arc::new(domain)];
+    let mut domains: Vec<Arc<dyn Applier>> = vec![Arc::new(domain)];
+    let web = web.map(|installed| {
+        let caddy = fake_caddy::FakeCaddy::start(dir.path());
+        let ca = rynas_tls::generate_ca("nas", rynas_tls::now()).unwrap();
+        let mut w = rynasd::web_access::WebAccessSvc::new(
+            root.clone(),
+            caddy.socket.clone(),
+            8080,
+            8443,
+            Box::new(|| rynasd::web_access::model::HostFacts {
+                hostname: "nas".into(),
+                lan: [rynasd::web_access::model::Cidr::parse("192.0.2.0/24").unwrap()].into(),
+                primary_v4: Some("192.0.2.10".parse().unwrap()),
+                ..Default::default()
+            }),
+            Box::new(move || Ok(ca.clone())),
+            Box::new(rynasd::web_access::diag::SystemProbe),
+        );
+        w.installed_override = Some(installed);
+        let w = Arc::new(w);
+        domains.push(Arc::new(rynasd::web_access::WebAccessDomain { svc: w.clone() }));
+        (w, caddy)
+    });
     let config = Arc::new(
         Config::open(
             ConfigOptions::new(dir.path().join("state"), &root),
@@ -155,12 +188,19 @@ fn env() -> Env {
     ));
     let mut st = DaemonState::new(Arc::new(NoAuth), totp, clock);
     st.ops = Some(ops.clone());
-    st.apps = Some(AppsSvc::new(svc.clone(), catalogue()));
+    let apps = AppsSvc::new(svc.clone(), catalogue());
+    if let Some((w, _)) = &web {
+        let _ = w.ops.set(ops.clone());
+        let _ = apps.web.set(w.clone());
+        st.web_access = Some(w.clone());
+    }
+    st.apps = Some(apps);
     st.docker = Some(svc);
     Env {
         dir,
         app: router(st),
         ops,
+        web,
     }
 }
 
@@ -358,7 +398,7 @@ async fn plan_errors_by_field_port_conflict_and_masked_secrets() {
     let p = plan(
         &e,
         "vaultwarden",
-        json!({"form": {"DOMAIN": "https://vault.example.lan"}, "ports": {"WEB_PORT": 8223}}),
+        json!({"form": {"DOMAIN": "https://vault.example.lan"}, "ports": {"WEB_PORT": 8223}, "publish_lan": false}),
     )
     .await;
     assert!(p.ok, "{p:?}");
@@ -441,7 +481,7 @@ async fn install_update_convert_and_uninstall_as_dry_runs() {
     let (started, log) = install(
         &e,
         "vaultwarden",
-        json!({"form": {"DOMAIN": "https://vault.example.lan"}, "ports": {"WEB_PORT": 8223}}),
+        json!({"form": {"DOMAIN": "https://vault.example.lan"}, "ports": {"WEB_PORT": 8223}, "publish_lan": false}),
     )
     .await;
     assert_eq!(started.stack, "vaultwarden");
@@ -605,4 +645,123 @@ async fn install_update_convert_and_uninstall_as_dry_runs() {
     );
     assert!(e.stack("uptime-kuma").join("compose.yaml").is_file());
     assert!(e.stack("uptime-kuma").join(".env").is_file());
+}
+
+// ---------------------------------------------------------------------------------------------
+// web access (W1)
+// ---------------------------------------------------------------------------------------------
+
+fn web_routes(e: &Env) -> Vec<rynas_api_types::web_access::WebRoute> {
+    e.ops
+        .config
+        .applied(rynasd::web_access::WEB_ACCESS_KEY)
+        .unwrap()
+        .map(|v| serde_json::from_value::<rynas_api_types::web_access::WebAccessConfig>(v).unwrap().routes)
+        .unwrap_or_default()
+}
+
+const VW: &str = r#"{"form": {"DOMAIN": "https://vault.example.lan"}, "ports": {"WEB_PORT": 8223}}"#;
+
+fn vw() -> Value {
+    serde_json::from_str(VW).unwrap()
+}
+
+#[tokio::test]
+async fn default_binding_follows_the_proxy_state() {
+    // web access present, the proxy not installed: the LAN, as before W1
+    let e = env_opts(Some(false));
+    let p = plan(&e, "vaultwarden", vw()).await;
+    assert!(!p.proxy_active && p.web_url.is_none());
+    let web = p.ports.iter().find(|x| x.proxied).unwrap();
+    assert_eq!(web.bind.as_deref(), Some("0.0.0.0"));
+    assert!(p.warnings.contains(&PlanWarning::PublishedOnLan));
+    // loopback asked for explicitly while the proxy is not active: warned
+    let mut body = vw();
+    body["publish_lan"] = json!(false);
+    let p = plan(&e, "vaultwarden", body).await;
+    assert!(p.warnings.contains(&PlanWarning::ProxyInactive));
+    assert_eq!(p.ports.iter().find(|x| x.proxied).unwrap().bind.as_deref(), Some("127.0.0.1"));
+
+    // the proxy active: loopback plus a route
+    let e = env_opts(Some(true));
+    let p = plan(&e, "vaultwarden", vw()).await;
+    assert!(p.proxy_active);
+    assert_eq!(p.web_url.as_deref(), Some("https://vaultwarden-nas.local/"));
+    assert_eq!(p.ports.iter().find(|x| x.proxied).unwrap().bind.as_deref(), Some("127.0.0.1"));
+    assert!(!p.warnings.contains(&PlanWarning::PublishedOnLan));
+    let (_, log) = install(&e, "vaultwarden", vw()).await;
+    assert!(log.contains("https://vaultwarden-nas.local/"), "{log}");
+    let envf = std::fs::read_to_string(e.stack("vaultwarden").join(".env")).unwrap();
+    assert!(envf.contains("RYNAS_BIND=127.0.0.1"), "{envf}");
+    let routes = web_routes(&e);
+    assert_eq!(routes.len(), 1);
+    let r = &routes[0];
+    assert_eq!((r.id.as_str(), r.label.as_str(), r.upstream.port), ("app-vaultwarden", "vaultwarden", 8223));
+    assert_eq!(r.limits.body.as_deref(), Some("525M"));
+    assert!(r.websocket);
+    // the proxy got the route
+    let (_, caddy) = e.web.as_ref().unwrap();
+    assert!(caddy.config().to_string().contains("vaultwarden-nas.local"));
+    let (s, b) = call(&e, "GET", "/v1/apps/installed", None).await;
+    let list: Vec<InstalledApp> = json_of(s, &b);
+    assert_eq!(list[0].web_url.as_deref(), Some("https://vaultwarden-nas.local/"));
+
+    // uninstall removes the route
+    let (s, b) = call(&e, "POST", "/v1/apps/installed/vaultwarden/uninstall", None).await;
+    let t: TaskStarted = json_of(s, &b);
+    let (info, log) = wait_task(&e, &t.task_id).await;
+    assert_eq!(info.status, TaskStatus::Ok, "{log}");
+    assert!(web_routes(&e).is_empty(), "{log}");
+    assert!(!caddy.config().to_string().contains("vaultwarden-nas.local"));
+}
+
+#[tokio::test]
+async fn proxy_ports_count_as_used_unless_external_mode() {
+    let e = env_opts(Some(false));
+    let mut body = vw();
+    body["ports"]["WEB_PORT"] = json!(443);
+    let p = plan(&e, "vaultwarden", body.clone()).await;
+    assert!(
+        p.port_conflicts.iter().any(|c| c.port == 443),
+        "{:?}",
+        p.port_conflicts
+    );
+    assert!(!p.ok);
+    // external proxy mode releases 80/443
+    let mut c = rynas_api_types::web_access::WebAccessConfig::default();
+    c.settings.mode = rynas_api_types::web_access::ProxyMode::External;
+    e.ops
+        .config
+        .apply_value("admin", rynasd::web_access::WEB_ACCESS_KEY, Some(serde_json::to_value(c).unwrap()), "t", &|_| {})
+        .unwrap();
+    let p = plan(&e, "vaultwarden", body).await;
+    assert!(p.port_conflicts.is_empty(), "{:?}", p.port_conflicts);
+}
+
+#[tokio::test]
+async fn move_behind_the_proxy() {
+    let e = env_opts(Some(true));
+    let mut body = vw();
+    body["publish_lan"] = json!(true);
+    install(&e, "vaultwarden", body).await;
+    assert!(web_routes(&e).is_empty());
+    let (s, b) = call(&e, "POST", "/v1/apps/installed/vaultwarden/proxy", None).await;
+    let t: TaskStarted = json_of(s, &b);
+    let (info, log) = wait_task(&e, &t.task_id).await;
+    assert_eq!(info.status, TaskStatus::Ok, "{log}");
+    assert!(log.contains("up --detach"), "{log}");
+    let envf = std::fs::read_to_string(e.stack("vaultwarden").join(".env")).unwrap();
+    assert!(envf.contains("RYNAS_BIND=127.0.0.1") && !envf.contains("0.0.0.0"), "{envf}");
+    assert_eq!(web_routes(&e).len(), 1);
+    // already behind it
+    let (s, b) = call(&e, "POST", "/v1/apps/installed/vaultwarden/proxy", None).await;
+    assert_eq!((s, err(&b).code.as_str()), (StatusCode::CONFLICT, error_codes::CONFLICT));
+
+    // without an active proxy the action is refused
+    let e = env_opts(Some(false));
+    let mut body = vw();
+    body["publish_lan"] = json!(true);
+    install(&e, "vaultwarden", body).await;
+    let (s, b) = call(&e, "POST", "/v1/apps/installed/vaultwarden/proxy", None).await;
+    assert_eq!((s, err(&b).code.as_str()), (StatusCode::CONFLICT, error_codes::CONFLICT));
 }

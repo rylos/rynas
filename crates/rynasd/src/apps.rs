@@ -13,6 +13,11 @@
 //! - Every change is a task `apps.*` and a line of the audit log (`rynas::audit`).
 //! - Secrets are generated at install and live only in the stack's `.env` (0600). No answer
 //!   carries them, except the install answer for secrets the entry marks `show`.
+//! - Web access (W1, [`crate::web_access`]): while it is active an install binds proxied
+//!   ports to loopback and adds a route; otherwise it publishes them on the LAN
+//!   (`docs/phase2/docker-apps.md` §7). The proxy's ports (80/443) count as used unless
+//!   external proxy mode is on. "Move behind the proxy" (`POST .../proxy`) re-binds an
+//!   installed app to loopback and adds its route.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
@@ -44,6 +49,7 @@ use crate::docker::{
     pre_snapshot,
 };
 use crate::ops::{Error, Res, user};
+use crate::web_access::{AppRouteSpec, WebAccessSvc};
 
 /// Where the `rynas-apps-catalog` package installs the catalogue.
 pub const DEFAULT_CATALOG_DIR: &str = "/usr/share/rynas/apps";
@@ -72,6 +78,8 @@ pub struct AppsSvc {
     /// The catalogue folder (`apps/<id>/...`).
     pub dir: PathBuf,
     cache: Mutex<Option<Loaded>>,
+    /// Web access, when this rynasd runs it (routes for apps, the proxy's ports).
+    pub web: std::sync::OnceLock<Arc<WebAccessSvc>>,
 }
 
 pub type AppsState = Option<Arc<AppsSvc>>;
@@ -321,6 +329,8 @@ struct Prepared {
     rendered: Option<RenderedStack>,
     bind: String,
     docker_installed: bool,
+    /// The web access route the install adds (loopback binding, built-in proxy mode).
+    route: Option<AppRouteSpec>,
 }
 
 impl AppsSvc {
@@ -329,7 +339,13 @@ impl AppsSvc {
             docker,
             dir,
             cache: Mutex::new(None),
+            web: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Web access serves apps (built-in mode, the engine installed).
+    pub fn proxy_active(&self) -> bool {
+        self.web.get().is_some_and(|w| w.proxy_active())
     }
 
     /// The catalogue, reloaded when a file changed.
@@ -633,6 +649,19 @@ impl AppsSvc {
             }
             Err(_) => false,
         };
+        // the proxy owns its ports from install, running or not (unless external mode)
+        if let Some(w) = self.web.get() {
+            for (port, udp) in w.reserved_ports() {
+                used.push(UsedPort {
+                    port,
+                    protocol: if udp {
+                        rynas_apps::manifest::Protocol::Udp
+                    } else {
+                        rynas_apps::manifest::Protocol::Tcp
+                    },
+                });
+            }
+        }
         used.sort();
         used.dedup();
         (used, ok)
@@ -649,12 +678,10 @@ impl AppsSvc {
         let docker_installed = self.docker.facts(false).await.installed;
         let layout = self.docker.layout();
         let stack = req.stack.clone().unwrap_or_else(|| m.id.clone());
-        let bind = if req.publish_lan {
-            "0.0.0.0"
-        } else {
-            "127.0.0.1"
-        }
-        .to_string();
+        // §7: loopback plus a route while web access is active, the LAN otherwise
+        let proxy_active = self.proxy_active();
+        let publish_lan = req.publish_lan.unwrap_or(!proxy_active);
+        let bind = if publish_lan { "0.0.0.0" } else { "127.0.0.1" }.to_string();
         let mut warnings = Vec::new();
         if !docker_installed {
             warnings.push(PlanWarning::DockerNotInstalled);
@@ -755,9 +782,21 @@ impl AppsSvc {
         if matches!(ram, RamGate::BelowRecommended { .. }) {
             warnings.push(PlanWarning::RamBelowRecommended);
         }
-        if req.publish_lan && m.ports.iter().any(|p| p.proxied) {
+        if publish_lan && m.ports.iter().any(|p| p.proxied) {
             warnings.push(PlanWarning::PublishedOnLan);
         }
+        if !publish_lan && !proxy_active && m.ports.iter().any(|p| p.proxied) {
+            warnings.push(PlanWarning::ProxyInactive);
+        }
+        let route = (!publish_lan)
+            .then(|| route_spec(m, &stack, &req.ports))
+            .flatten()
+            .filter(|_| self.web.get().is_some_and(|w| !w.reserved_ports().is_empty()));
+        let web_url = route.as_ref().and_then(|r| {
+            self.web
+                .get()
+                .and_then(|w| w.preview_url(&r.stack, &r.path))
+        });
         let ports = m
             .ports
             .iter()
@@ -801,6 +840,8 @@ impl AppsSvc {
             secrets: conv(&m.secrets),
             notes: conv(&m.notes),
             warnings,
+            proxy_active,
+            web_url,
             ..Default::default()
         };
         let mut rendered = None;
@@ -846,6 +887,7 @@ impl AppsSvc {
             rendered,
             bind,
             docker_installed,
+            route,
         })
     }
 
@@ -947,6 +989,7 @@ impl AppsSvc {
             web_port: web.as_ref().map(|w| w.0),
             web_path: web.map(|w| w.1),
             bind: env.get("RYNAS_BIND").cloned(),
+            web_url: self.web.get().and_then(|w| w.stack_url(&d.stack)),
             snapshots: l.is_some_and(|l| snapshots::supported(&self.docker.root, l, &d.stack)),
         }
     }
@@ -988,6 +1031,71 @@ impl AppsSvc {
         };
         Ok((cat, l, d, plan))
     }
+}
+
+/// The web access route of an app from its `[web]` block and the chosen host ports.
+fn route_spec(
+    m: &rynas_apps::manifest::AppManifest,
+    stack: &str,
+    ports: &BTreeMap<String, u16>,
+) -> Option<AppRouteSpec> {
+    let w = m.web.as_ref()?;
+    let p = m.port(&w.port)?;
+    Some(AppRouteSpec {
+        stack: stack.into(),
+        app: m.id.clone(),
+        port: ports.get(&p.env).copied().unwrap_or(p.default),
+        scheme: conv(&w.scheme),
+        auth: conv(&w.auth),
+        path: w.path.clone(),
+        websocket: w.websocket,
+        subpath: w.subpath,
+        body: w.body.clone(),
+        timeout: w.timeout.clone(),
+        buffering: w.buffering,
+    })
+}
+
+/// `.env` text with `key` set to `value` (the line replaced, or added at the end).
+fn set_env_line(text: &str, key: &str, value: &str) -> String {
+    let mut found = false;
+    let mut out: Vec<String> = text
+        .lines()
+        .map(|l| {
+            if l.trim_start().starts_with(&format!("{key}=")) {
+                found = true;
+                format!("{key}={value}")
+            } else {
+                l.to_string()
+            }
+        })
+        .collect();
+    if !found {
+        out.push(format!("{key}={value}"));
+    }
+    let mut s = out.join("\n");
+    s.push('\n');
+    s
+}
+
+/// Adds the route of an installed app (a task's last step): a failure is only a warning,
+/// "Move behind the proxy" adds it later.
+async fn add_route(a: &Arc<AppsSvc>, ctx: &TaskCtx, who: &str, spec: AppRouteSpec) -> Result<(), String> {
+    let Some(w) = a.web.get().cloned() else {
+        return Ok(());
+    };
+    let (who, log) = (who.to_string(), ctx.clone());
+    match blocking(move || w.add_app_route(&who, &spec, &|m| log.log(m))).await {
+        Ok(Some(url)) => ctx.log(&format!("web access: the app is at {url}")),
+        Ok(None) => ctx.log("web access: route added (local names are off: no address yet)"),
+        Err(e) => {
+            ctx.log(&format!(
+                "warning: the web access route could not be added ({e}); retry with POST /api/v1/apps/installed/<stack>/proxy"
+            ));
+            return Err(e);
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1084,6 +1192,8 @@ struct InstallJob {
     request: rynas_apps::InstallRequest,
     bind: String,
     start: bool,
+    route: Option<AppRouteSpec>,
+    who: String,
 }
 
 async fn install_task(a: &Arc<AppsSvc>, ctx: &TaskCtx, j: InstallJob) -> Result<(), String> {
@@ -1150,6 +1260,10 @@ async fn install_task(a: &Arc<AppsSvc>, ctx: &TaskCtx, j: InstallJob) -> Result<
             "not started: start it with POST /api/v1/docker/stacks/{}/up",
             j.stack
         ));
+    }
+    if let Some(spec) = j.route {
+        // the install itself succeeded: a missing route is only a warning in the log
+        let _ = add_route(a, ctx, &j.who, spec).await;
     }
     ctx.progress(100);
     ctx.log(&format!("{} installed", j.name));
@@ -1471,6 +1585,8 @@ async fn install_post(
         request,
         bind: p.bind,
         start: req.start,
+        route: p.route,
+        who: who.clone(),
     };
     let a2 = a.clone();
     let task_id = a
@@ -1715,11 +1831,20 @@ async fn uninstall_post(
         &stack,
     );
     let (s2, n2) = (a.docker.clone(), stack.clone());
+    let (web, who2) = (a.web.get().cloned(), who.clone());
     let id = a.docker.ops.tasks.spawn("apps.uninstall", &who, move |ctx| async move {
         let _guard = guard;
         let s = &s2;
         ctx.log(&format!("stopping and removing the containers of {n2}"));
         compose_run(s, &ctx, &n2, &l, ComposeAction::Down).await?;
+        if let Some(w) = web {
+            let (n3, log) = (n2.clone(), ctx.clone());
+            match blocking(move || w.remove_stack_routes(&who2, &n3, &|m| log.log(m))).await {
+                Ok(true) => ctx.log("web access: the route of the app was removed"),
+                Ok(false) => {}
+                Err(e) => ctx.log(&format!("warning: the web access route was not removed: {e}")),
+            }
+        }
         if !req.delete_data {
             ctx.log(&format!(
                 "the stack folder {} stays (compose.yaml, .env, data): start it again with POST /api/v1/docker/stacks/{n2}/up, or delete it with POST /api/v1/apps/installed/{n2}/uninstall {{\"delete_data\": true, \"confirm\": \"{n2}\"}}",
@@ -1750,6 +1875,66 @@ async fn uninstall_post(
     Ok(accepted(id))
 }
 
+/// "Move behind the proxy": loopback binding (`RYNAS_BIND=127.0.0.1`, then `up`) and the
+/// app's web access route. Host-network apps only get the route.
+async fn proxy_post(
+    State(st): State<AppsState>,
+    hd: HeaderMap,
+    UrlPath(stack): UrlPath<String>,
+) -> Res<Response> {
+    let a = asvc(&st)?;
+    let who = admin(&a, &hd)?;
+    let Some(web) = a.web.get().cloned().filter(|w| w.proxy_active()) else {
+        return Err(conflict(
+            "web access is not active (rynas-caddy not installed, or external proxy mode)",
+        ));
+    };
+    let (cat, _) = a.catalog().await;
+    let (l, d) = a.one_on_disk(&stack)?;
+    let app = cat.get(&d.meta.app).ok_or_else(|| {
+        Error::not_found(format!(
+            "the app {} of stack {stack} is no longer in the catalogue",
+            d.meta.app
+        ))
+    })?;
+    let m = &app.manifest;
+    let env = rynas_apps::render::parse_env(&d.env);
+    let ports: BTreeMap<String, u16> = m
+        .ports
+        .iter()
+        .filter_map(|p| Some((p.env.clone(), env.get(&p.env)?.parse().ok()?)))
+        .collect();
+    let Some(spec) = route_spec(m, &stack, &ports) else {
+        return Err(conflict(format!("{} has no web interface", m.name)));
+    };
+    let rebind = !m.host_network && env.get("RYNAS_BIND").map(String::as_str) != Some("127.0.0.1");
+    if !rebind && web.stack_url(&stack).is_some() {
+        return Err(conflict(format!("{stack} is already behind the proxy")));
+    }
+    let guard = mark_busy(&a.docker, &stack)?;
+    audit(&who, "proxy", &stack);
+    let (a2, n2) = (a.clone(), stack.clone());
+    let old = (d.compose.clone(), d.env.clone());
+    let new = (d.compose, set_env_line(&d.env, "RYNAS_BIND", "127.0.0.1"));
+    let id = a.docker.ops.tasks.spawn("apps.proxy", &who.clone(), move |ctx| async move {
+        let _guard = guard;
+        let s = &a2.docker;
+        if rebind {
+            ctx.log("binding the web port to 127.0.0.1 (only the proxy reaches it)");
+            write_stack(s, &l, &n2, &new).await?;
+            if let Err(e) = compose_run(s, &ctx, &n2, &l, ComposeAction::Up).await {
+                ctx.log(&format!("{e}: putting the previous .env back"));
+                write_stack(s, &l, &n2, &old).await?;
+                compose_run(s, &ctx, &n2, &l, ComposeAction::Up).await?;
+                return Err(e);
+            }
+            s.changed();
+        }
+        add_route(&a2, &ctx, &who, spec).await
+    })?;
+    Ok(accepted(id))
+}
+
 pub fn router(st: AppsState) -> Router {
     Router::new()
         .route("/v1/apps/catalog", get(catalog_get))
@@ -1770,6 +1955,7 @@ pub fn router(st: AppsState) -> Router {
         .route("/v1/apps/installed/{stack}/rollback", post(rollback_post))
         .route("/v1/apps/installed/{stack}/convert", post(convert_post))
         .route("/v1/apps/installed/{stack}/uninstall", post(uninstall_post))
+        .route("/v1/apps/installed/{stack}/proxy", post(proxy_post))
         .with_state(st)
 }
 

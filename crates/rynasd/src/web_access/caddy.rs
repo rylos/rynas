@@ -1,0 +1,272 @@
+//! The Caddy renderer: the whole engine configuration as one JSON document, loaded with
+//! `POST /load` on the admin socket (the engine validates it and keeps the running one on
+//! error). Field names follow Caddy 2.11's JSON structure:
+//!
+//! - admin on a Unix socket with a permission mode: `unix//path|0600`
+//!   (https://caddyserver.com/docs/conventions#network-addresses), no autosave
+//!   (`admin.config.persist: false`, https://caddyserver.com/docs/json/admin/config/);
+//! - access rules with the `remote_ip` matcher (the peer address: Caddy is the edge, so no
+//!   trusted proxies; https://caddyserver.com/docs/json/apps/http/servers/routes/match/remote_ip/)
+//!   inside a `not` matcher, and `static_response` with `abort` (the connection is closed,
+//!   no 403 page; https://caddyserver.com/docs/json/apps/http/servers/routes/handle/static_response/);
+//! - `request_body.max_size` in bytes
+//!   (https://caddyserver.com/docs/json/apps/http/servers/routes/handle/request_body/);
+//! - `reverse_proxy` with `flush_interval: -1` for unbuffered routes, `stream_close_delay` so
+//!   WebSockets survive a reload for a while, and the HTTP transport's `dial_timeout`,
+//!   `read_timeout` and `tls.insecure_skip_verify`
+//!   (https://caddyserver.com/docs/json/apps/http/servers/routes/handle/reverse_proxy/);
+//! - certificates from files (`tls.certificates.load_files`,
+//!   https://caddyserver.com/docs/json/apps/tls/certificates/load_files/) with automatic HTTPS
+//!   off on both servers (`automatic_https.disable`), so the engine never orders a
+//!   certificate in W1, and TLS on the HTTPS server through `tls_connection_policies`.
+//!
+//! The source of the field names is Caddy v2.11.9's code (`modules/caddyhttp/...`,
+//! `admin.go`); the golden tests pin the output.
+
+use serde_json::{Value, json};
+
+use rynas_api_types::web_access::{HeaderPreset, ProxyMode, UpstreamScheme, WebRoute};
+
+use super::model::{access_ranges, parse_size};
+use super::{RenderInput, Resolved};
+
+/// Tag of the certificate rynasd issues for the local names.
+pub const LOCAL_CERT_TAG: &str = "rynas-local";
+/// How long upgraded connections (WebSockets) stay open after a reload.
+pub const STREAM_CLOSE_DELAY: &str = "5m";
+
+/// The engine-neutral render step: the same route model could feed another engine (an
+/// Angie/nginx renderer is the documented contingency, D-PROXY).
+pub trait Renderer {
+    /// The engine configuration; `Value::Null` when the engine must not run (external mode).
+    fn render(&self, input: &RenderInput, resolved: &Resolved) -> Value;
+}
+
+pub struct Caddy;
+
+/// Identity headers no client may send to an upstream (rynas SSO sets them in W3).
+const IDENTITY_HEADERS: &[&str] = &[
+    "Remote-User",
+    "Remote-Groups",
+    "Remote-Email",
+    "Remote-Name",
+];
+
+fn baseline_headers(preset: HeaderPreset) -> Vec<Value> {
+    let mut v = vec![json!({
+        "handler": "headers",
+        "response": {"delete": ["Server", "X-Powered-By"], "deferred": true}
+    })];
+    let mut set = vec![
+        ("X-Content-Type-Options", "nosniff"),
+        ("Referrer-Policy", "strict-origin-when-cross-origin"),
+    ];
+    if preset == HeaderPreset::Default {
+        set.push(("X-Frame-Options", "SAMEORIGIN"));
+    }
+    // each one only when the upstream did not send its own (a `null` list matches an
+    // absent header)
+    for (name, value) in set {
+        v.push(json!({
+            "handler": "headers",
+            "response": {
+                "set": {name: [value]},
+                "require": {"headers": {name: null}}
+            }
+        }));
+    }
+    v
+}
+
+fn dial(host: &str, port: u16) -> String {
+    if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+fn proxy(dial_to: String, https: bool, timeout: Option<&str>, buffering: bool) -> Value {
+    let mut transport = json!({"protocol": "http", "dial_timeout": "5s"});
+    if let Some(t) = timeout {
+        transport["read_timeout"] = json!(t);
+    }
+    if https {
+        // the container's own certificate, on loopback
+        transport["tls"] = json!({"insecure_skip_verify": true});
+    }
+    let mut p = json!({
+        "handler": "reverse_proxy",
+        "upstreams": [{"dial": dial_to}],
+        "transport": transport,
+        "stream_close_delay": STREAM_CLOSE_DELAY,
+        "headers": {"request": {"delete": IDENTITY_HEADERS}}
+    });
+    if !buffering {
+        p["flush_interval"] = json!(-1);
+    }
+    p
+}
+
+/// One host-matched route: sources outside `ranges` are aborted, the rest handled.
+fn site(id: &str, names: &[String], ranges: &[String], handle: Vec<Value>) -> Value {
+    let mut inner = Vec::new();
+    if !ranges.is_empty() {
+        inner.push(json!({
+            "match": [{"not": [{"remote_ip": {"ranges": ranges}}]}],
+            "handle": [{"handler": "static_response", "abort": true}]
+        }));
+    }
+    inner.push(json!({"handle": handle}));
+    json!({
+        "@id": format!("rynas-{id}"),
+        "match": [{"host": names}],
+        "handle": [{"handler": "subroute", "routes": inner}],
+        "terminal": true
+    })
+}
+
+fn route_handlers(r: &WebRoute) -> Vec<Value> {
+    let mut h = baseline_headers(r.headers);
+    if let Some(max) = r.limits.body.as_deref().and_then(parse_size) {
+        h.push(json!({"handler": "request_body", "max_size": max}));
+    }
+    h.push(proxy(
+        dial(&r.upstream.host, r.upstream.port),
+        r.upstream.scheme == UpstreamScheme::Https,
+        r.limits.timeout.as_deref(),
+        r.limits.buffering,
+    ));
+    h
+}
+
+fn redirect(location: String) -> Value {
+    json!({
+        "handler": "static_response",
+        "status_code": 307,
+        "headers": {"Location": [location], "Cache-Control": ["no-store"]}
+    })
+}
+
+impl Renderer for Caddy {
+    fn render(&self, input: &RenderInput, resolved: &Resolved) -> Value {
+        let s = &input.cfg.settings;
+        if s.mode == ProxyMode::External {
+            return Value::Null;
+        }
+        let p = input.paths;
+        let facts = input.facts;
+        let mut https_routes = Vec::new();
+        let mut names_all: Vec<String> = Vec::new();
+        if !resolved.ui.is_empty() {
+            let mut h = baseline_headers(HeaderPreset::Default);
+            // the interface streams events (SSE): never buffered, no read timeout
+            h.push(proxy(dial("127.0.0.1", input.ui_port), false, None, false));
+            https_routes.push(site(
+                "ui",
+                &resolved.ui,
+                &access_ranges(s.ui.access, facts, &s.ui.allow),
+                h,
+            ));
+            names_all.extend(resolved.ui.iter().cloned());
+        }
+        for r in &resolved.routes {
+            if r.names.is_empty() {
+                continue;
+            }
+            https_routes.push(site(
+                &format!("route-{}", r.route.id),
+                &r.names,
+                &access_ranges(r.route.access, facts, &r.route.allow),
+                route_handlers(&r.route),
+            ));
+            names_all.extend(r.names.iter().cloned());
+        }
+        // unknown host names: closed without an answer (no default site)
+        https_routes.push(json!({"handle": [{"handler": "static_response", "abort": true}]}));
+
+        let https_suffix = if s.https_port == 443 {
+            String::new()
+        } else {
+            format!(":{}", s.https_port)
+        };
+        let mut http_routes = Vec::new();
+        if !names_all.is_empty() {
+            http_routes.push(json!({
+                "match": [{"host": names_all}],
+                "handle": [redirect(format!(
+                    "https://{{http.request.host}}{https_suffix}{{http.request.uri}}"
+                ))],
+                "terminal": true
+            }));
+        }
+        // any other name or a bare address: the interface's own HTTPS port
+        http_routes.push(json!({
+            "handle": [redirect(format!(
+                "https://{{http.request.host}}:{}{{http.request.uri}}",
+                input.emergency_port
+            ))]
+        }));
+
+        let mut servers = serde_json::Map::new();
+        servers.insert(
+            "rynas_http".into(),
+            json!({
+                "listen": [format!(":{}", s.http_port)],
+                "automatic_https": {"disable": true},
+                "routes": http_routes
+            }),
+        );
+        let mut apps = serde_json::Map::new();
+        if !names_all.is_empty() {
+            let protocols: Vec<&str> = if s.h3 {
+                vec!["h1", "h2", "h3"]
+            } else {
+                vec!["h1", "h2"]
+            };
+            servers.insert(
+                "rynas_https".into(),
+                json!({
+                    "listen": [format!(":{}", s.https_port)],
+                    "protocols": protocols,
+                    "strict_sni_host": true,
+                    "automatic_https": {"disable": true},
+                    "tls_connection_policies": [{}],
+                    "logs": {},
+                    "routes": https_routes
+                }),
+            );
+            apps.insert(
+                "tls".into(),
+                json!({
+                    "certificates": {"load_files": [{
+                        "certificate": p.cert,
+                        "key": p.key,
+                        "tags": [LOCAL_CERT_TAG]
+                    }]}
+                }),
+            );
+        }
+        apps.insert(
+            "http".into(),
+            json!({
+                "http_port": s.http_port,
+                "https_port": s.https_port,
+                "grace_period": "10s",
+                "servers": servers
+            }),
+        );
+        json!({
+            "admin": {
+                "listen": format!("unix/{}|0600", p.admin_socket),
+                "config": {"persist": false}
+            },
+            "storage": {"module": "file_system", "root": p.storage},
+            "logging": {"logs": {"default": {
+                "writer": {"output": "stderr"},
+                "encoder": {"format": "json"}
+            }}},
+            "apps": apps
+        })
+    }
+}

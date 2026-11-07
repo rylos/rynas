@@ -34,6 +34,11 @@ impl Error {
         .field(field)
     }
 
+    /// The error code (one of [`error_codes`]).
+    pub fn code(&self) -> &'static str {
+        self.1
+    }
+
     /// Names the request field the error is about.
     pub fn field(mut self, field: impl Into<String>) -> Self {
         self.3 = Some(field.into());

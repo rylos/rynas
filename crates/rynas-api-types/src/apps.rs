@@ -511,8 +511,11 @@ pub struct AppInstallRequest {
     /// Port env → host port, for relocatable ports that are not at their default.
     pub ports: BTreeMap<String, u16>,
     /// Bind the proxied ports on every address (`RYNAS_BIND=0.0.0.0`) instead of loopback, so
-    /// the app is reachable on the LAN without the web access proxy.
-    pub publish_lan: bool,
+    /// the app is reachable on the LAN without the web access proxy. `None` (the default):
+    /// loopback plus a web access route while web access is active, the LAN otherwise
+    /// (`docs/phase2/docker-apps.md` §7).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub publish_lan: Option<bool>,
     /// Bring the stack up after creating it (default true).
     pub start: bool,
 }
@@ -525,7 +528,7 @@ impl Default for AppInstallRequest {
             shares: BTreeMap::new(),
             folders: BTreeMap::new(),
             ports: BTreeMap::new(),
-            publish_lan: false,
+            publish_lan: None,
             start: true,
         }
     }
@@ -621,6 +624,9 @@ pub enum PlanWarning {
     RamBelowRecommended,
     /// Proxied ports are published on the LAN (`publish_lan`).
     PublishedOnLan,
+    /// Proxied ports bind to loopback while web access is not active: the app is
+    /// unreachable until web access runs.
+    ProxyInactive,
 }
 
 /// `POST /api/v1/apps/catalog/{id}/plan`: what the install would do. No side effects.
@@ -650,6 +656,14 @@ pub struct AppInstallPlan {
     pub compose: String,
     /// The `.env` that will be written, every secret replaced by `********`.
     pub env: String,
+    /// Web access is active (rynas-caddy installed, built-in mode): the default binds
+    /// proxied ports to loopback and adds a route.
+    #[serde(default)]
+    pub proxy_active: bool,
+    /// The address the app gets through web access (`https://<label>-<host>.local/`), when
+    /// the install adds a route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_url: Option<String>,
 }
 
 /// A generated secret the entry marks `show`: in the install answer only, once.
@@ -698,6 +712,10 @@ pub struct InstalledApp {
     pub web_path: Option<String>,
     /// `RYNAS_BIND` of the stack: `127.0.0.1` (behind the proxy) or `0.0.0.0` (LAN).
     pub bind: Option<String>,
+    /// The web access route of the stack (`https://<label>-<host>.local/`), when it has one;
+    /// the Open button uses it with loopback binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_url: Option<String>,
     /// The stack folder is a btrfs subvolume: updates take a snapshot first.
     pub snapshots: bool,
 }

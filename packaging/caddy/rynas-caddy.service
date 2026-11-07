@@ -1,0 +1,83 @@
+# rynas-caddy: the reverse proxy of rynas web access (D-PROXY, docs/research/web-access.md
+# §4). Caddy built from a pinned upstream release (packaging/caddy/build.sh), owning ports
+# 80 and 443 from install.
+#
+# - The configuration comes only from rynasd: it renders the whole JSON from the
+#   `web_access` key and loads it through the admin API, which listens ONLY on the Unix
+#   socket /run/rynas-caddy/admin.sock (mode 0600, this unit's user; rynasd connects as
+#   root). No TCP admin port, no remote admin, no autosave (`admin.config.persist: false`).
+# - Boot without rynasd: after every successful load rynasd writes
+#   /var/lib/rynas-caddy/last-good.json, and the unit always starts from it. On the first
+#   start (no file yet) the package's bootstrap configuration is copied there: plain HTTP
+#   redirected to the interface's own HTTPS port (:8443) until rynasd loads the real one.
+# - Reloads only through the admin API (no ExecReload: a signal could not carry the
+#   configuration, and rynasd owns it).
+# - External proxy mode: rynasd runs `systemctl disable --now rynas-caddy` and ports 80/443
+#   are free for another proxy.
+[Unit]
+Description=rynas web access (Caddy reverse proxy)
+Documentation=https://github.com/rylos/rynas https://caddyserver.com/docs/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=rynas-caddy
+Group=rynas-caddy
+ExecStartPre=/bin/sh -c 'test -s /var/lib/rynas-caddy/last-good.json || cp /usr/share/rynas-caddy/bootstrap.json /var/lib/rynas-caddy/last-good.json'
+ExecStart=/usr/bin/rynas-caddy run --config /var/lib/rynas-caddy/last-good.json
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=15s
+# Caddy's data (locks, its own storage) and the configuration rynasd writes
+Environment=HOME=/var/lib/rynas-caddy XDG_DATA_HOME=/var/lib/rynas-caddy XDG_CONFIG_HOME=/var/lib/rynas-caddy/config
+# Memory (docs/research/web-access.md §4, risk 8: < 60 MB RSS idle with ~30 routes, to be
+# measured on the DS920+): the Go runtime collects before MemoryHigh is reached
+Environment=GOMEMLIMIT=100MiB
+MemoryHigh=128M
+MemoryMax=256M
+TasksMax=512
+LimitNOFILE=1048576
+# /var/lib/rynas-caddy (0750 rynas-caddy): data/ (engine storage), last-good.json and
+# rynas/local.{crt,key} (written by rynasd, root:rynas-caddy 0640)
+StateDirectory=rynas-caddy
+StateDirectoryMode=0750
+# /run/rynas-caddy: the admin socket
+RuntimeDirectory=rynas-caddy
+RuntimeDirectoryMode=0750
+UMask=0027
+
+# Hardening: the only privilege is binding ports below 1024
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RemoveIPC=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+# AF_NETLINK: Go's interface listing (HTTP/3 and listener setup)
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+# logs (JSON, access log included) go to the journal: stderr is captured by journald
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

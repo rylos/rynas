@@ -1,0 +1,22 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: caddy
+Upstream-Contact: https://github.com/caddyserver/caddy
+Source: https://github.com/caddyserver/caddy
+Comment:
+ rynas-caddy is Caddy built unmodified from a pinned upstream release with xcaddy,
+ packaged for rynas (https://github.com/rylos/rynas, packaging/caddy). The binary
+ statically links Go modules under permissive licenses (Apache-2.0, BSD, MIT, MPL-2.0);
+ their exact list and versions are in the go.mod/go.sum of the Caddy release and
+ printed by `rynas-caddy build-info`.
+
+Files: *
+Copyright: 2015 Matthew Holt and The Caddy Authors
+License: Apache-2.0
+
+Files: debian/* rynas-caddy.service bootstrap.json
+Copyright: 2026 Marco Ziliani
+License: Apache-2.0
+
+License: Apache-2.0
+ On Debian systems, the full text of the Apache License, Version 2.0 can be
+ found in /usr/share/common-licenses/Apache-2.0.

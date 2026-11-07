@@ -1,0 +1,2 @@
+# the user of rynas-caddy (web access reverse proxy)
+u rynas-caddy - "rynas web access (Caddy)" /var/lib/rynas-caddy /usr/sbin/nologin

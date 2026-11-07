@@ -1,0 +1,14 @@
+#!/bin/sh
+# rynas-caddy postrm: purge removes the state (configuration, engine storage, the
+# certificate rynasd issued for it). The system user stays (Debian policy: user ids are not
+# recycled).
+set -e
+
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+if [ "$1" = "purge" ]; then
+    rm -rf /var/lib/rynas-caddy
+fi
+
+exit 0
