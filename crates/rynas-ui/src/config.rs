@@ -262,6 +262,7 @@ pub mod keys {
     pub const UPDATES: &str = "updates.auto";
     pub const DISKS: &str = "storage.disks";
     pub const REMOVABLE: &str = "removable";
+    pub const DOCKER: &str = "docker";
 }
 
 /// The Save of a dialog or a single-object editor (guidelines A19b). Call it once the form's

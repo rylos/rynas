@@ -173,6 +173,7 @@ fn horizontal_scroll_containers_are_listed() {
         (".log", "log viewer, wide by nature (and pre-wrap)"),
         (".subnav", "strip of two short tab links, scrollbar hidden"),
         (".stepper", "wizard steps, the inactive ones shrink to their number"),
+        (".code-area", "code editor (compose files): indentation matters, lines are not wrapped"),
     ];
     let mut bad = Vec::new();
     for (_, sel, body, line) in all_rules() {

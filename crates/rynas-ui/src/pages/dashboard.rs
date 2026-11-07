@@ -24,7 +24,8 @@ const LAYOUT_KEY: &str = "rynas.dashboard";
 #[derive(Clone, Copy)]
 struct Board {
     layout: RwSignal<Vec<Item>>,
-    /// Widgets on screen, in order (hidden ones and Hardware without a provider left out).
+    /// Widgets on screen, in order (hidden ones, Hardware without a provider and Docker without
+    /// Docker left out).
     visible: Memo<Vec<W>>,
     grid: NodeRef<Div>,
     /// Text for the aria-live region (keyboard moves).
@@ -38,9 +39,14 @@ pub fn Dashboard() -> impl IntoView {
     let live = use_live();
     let layout = RwSignal::new(layout::decode(&storage_get(LAYOUT_KEY).unwrap_or_default()));
     let has_hw = Memo::new(move |_| live.hardware.with(|h| h.as_ref().is_some_and(|h| h.provider.is_some())));
-    let visible = Memo::new(move |_| {
-        layout.with(|l| l.iter().filter(|i| !i.hidden && (i.w != W::Hardware || has_hw.get())).map(|i| i.w).collect::<Vec<_>>())
-    });
+    let has_docker = Memo::new(move |_| crate::docker::docker().status.with(|s| s.as_ref().is_some_and(|s| s.installed)));
+    // widgets whose source is missing here (no hardware provider, no Docker) do not exist
+    let available = move |w: W| match w {
+        W::Hardware => has_hw.get(),
+        W::Docker => has_docker.get(),
+        _ => true,
+    };
+    let visible = Memo::new(move |_| layout.with(|l| l.iter().filter(|i| !i.hidden && available(i.w)).map(|i| i.w).collect::<Vec<_>>()));
     let board = Board { layout, visible, grid: NodeRef::new(), announce: RwSignal::new(String::new()), dragging: RwSignal::new(None) };
     let edit = ui.dash_edit;
 
@@ -57,7 +63,7 @@ pub fn Dashboard() -> impl IntoView {
     set_timeout(move || { ready.try_set(true); }, std::time::Duration::from_millis(700));
     on_cleanup(move || edit.set(false));
 
-    let hidden = Memo::new(move |_| layout.with(|l| l.iter().filter(|i| i.hidden && (i.w != W::Hardware || has_hw.get())).map(|i| i.w).collect::<Vec<_>>()));
+    let hidden = Memo::new(move |_| layout.with(|l| l.iter().filter(|i| i.hidden && available(i.w)).map(|i| i.w).collect::<Vec<_>>()));
 
     view! {
         <div class="page">
@@ -140,6 +146,7 @@ fn widget(w: W) -> AnyView {
         W::Health => view! { <HealthWidget /> }.into_any(),
         W::Volumes => view! { <VolumesWidget /> }.into_any(),
         W::Hardware => view! { <HardwareWidget /> }.into_any(),
+        W::Docker => crate::pages::docker::widget(),
     }
 }
 
@@ -154,6 +161,7 @@ fn loaded(live: Live, w: W) -> bool {
         W::Cpu | W::Memory | W::Network | W::Disk => live.sample.with(Option::is_some),
         W::Health | W::Volumes => live.storage.with(Option::is_some) || live.storage_err.with(Option::is_some),
         W::Hardware => true,
+        W::Docker => crate::docker::docker().stats.with(Option::is_some),
     }
 }
 
@@ -163,7 +171,7 @@ fn default_height(w: W) -> u32 {
         W::System | W::Cpu => 383,
         W::Memory | W::Network | W::Disk => 458,
         W::Health | W::Volumes => 313,
-        W::Hardware => 0,
+        W::Hardware | W::Docker => 0,
     }
 }
 

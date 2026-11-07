@@ -15,6 +15,15 @@ quality reviews (docs/quality/). Nothing here touches the host system or a runni
   files in the dry root; `FAKE_UPS_CMDS=all|quick|none` picks the offered battery tests,
   `FAKE_UPS_BACKEND=synodeb` the synodeb backend (see `start.sh`). The UPS page is the 4th tab of
   `/hardware` (`#hwt-t3`): the route audits only see the first tab.
+- Docker page and widget: `FAKE_DOCKER=1` adds `fakedocker.py` (a fake Engine API on
+  `rt-<port>/docker.sock`: a rynas stack `media` with its folder in the dry root, a Portainer
+  stack, an untracked unhealthy one, Portainer itself, images with an update available) and
+  points rynasd's `--docker-socket` at it; without it rynasd never contacts a Docker socket.
+  The running fake containers borrow this machine's `docker-*.scope` cgroup ids (read only) so
+  the stats sampler shows real CPU/memory (`FAKE_DOCKER_CGROUPS=0` turns it off). rynasd checks
+  administrators from the system groups: the instance adds a login named after the current Unix
+  user (same password) whose primary group is the admin group; probes use it with
+  `AUDIT_USER=$(id -un)`. Routes like `/docker:2` (scroll_audit) open the page's third tab.
 - Login `tester` / `correct-horse` (`users.toml`, a test-only account of the local instance).
 - `BASE` changes the instance URL; `AUDIT_OUT` the output folder (default `target/ui-audit`:
   results, screenshots, browser profiles). Keep it on disk, not on a RAM tmpfs.

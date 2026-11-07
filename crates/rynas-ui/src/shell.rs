@@ -26,7 +26,13 @@ pub struct NavItem {
     pub group: bool,
 }
 
-pub const NAV: [NavItem; 11] = [
+/// Whether a navigation entry exists now: Docker only while it is installed or being
+/// installed (nothing of it on systems without Docker).
+pub fn nav_shown(path: &str) -> bool {
+    path != "/docker" || crate::docker::docker().present()
+}
+
+pub const NAV: [NavItem; 12] = [
     NavItem { path: "/", key: "nav.dashboard", icon: icons::LAYOUT_DASHBOARD, group: false },
     NavItem { path: "/storage", key: "nav.storage", icon: icons::HARD_DRIVE, group: true },
     NavItem { path: "/files", key: "nav.files", icon: icons::FOLDER, group: false },
@@ -34,6 +40,7 @@ pub const NAV: [NavItem; 11] = [
     NavItem { path: "/snapshots", key: "nav.snapshots", icon: icons::CAMERA, group: false },
     NavItem { path: "/users", key: "nav.users", icon: icons::USERS, group: true },
     NavItem { path: "/services", key: "nav.services", icon: icons::SERVER, group: false },
+    NavItem { path: "/docker", key: "nav.docker", icon: icons::CONTAINER, group: false },
     NavItem { path: "/plugins", key: "nav.plugins", icon: icons::PUZZLE, group: false },
     NavItem { path: "/network", key: "nav.network", icon: icons::NETWORK, group: true },
     NavItem { path: "/hardware", key: "nav.hardware", icon: icons::CPU, group: false },
@@ -184,7 +191,8 @@ fn Shell() -> impl IntoView {
                     <Route path=path!("/shares") view=pages::shares::Shares />
                     <Route path=path!("/users") view=pages::users::Users />
                     <Route path=path!("/services") view=pages::services::FileServices />
-                    <Route path=path!("/plugins") view=|| view! { <pages::Soon icon=icons::PUZZLE title="nav.plugins" text="soon.plugins" /> } />
+                    <Route path=path!("/plugins") view=pages::plugins::Plugins />
+                    <Route path=path!("/docker") view=pages::docker::DockerPage />
                 </Routes>
             </main>
             <div class="dock">
@@ -350,7 +358,7 @@ fn Sidebar() -> impl IntoView {
                         };
                         let key = item.key;
                         view! {
-                            <li class:group=item.group>
+                            <li class:group=item.group hidden=move || !nav_shown(path)>
                                 <a class="nav-item" href=path aria-current=current title=move || t(key)>
                                     <Icon icon=item.icon />
                                     <span class="nav-label">{move || t(key)}</span>

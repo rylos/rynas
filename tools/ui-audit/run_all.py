@@ -20,7 +20,7 @@ FAILS = []
 
 ROUTES = ["/", "/storage", "/storage/disks", "/storage/create", "/network", "/hardware", "/system",
           "/system/configuration", "/system/notifications", "/system/scheduler", "/notifications",
-          "/snapshots", "/security", "/shares", "/users", "/services", "/files"]
+          "/snapshots", "/security", "/shares", "/users", "/services", "/plugins", "/docker", "/files"]
 
 
 def check(cond, msg):
@@ -64,7 +64,7 @@ async def login(p):
     await p.goto(BASE + "/")
     await p.wait("document.querySelector('.login-card input[name=password]') || document.querySelector('.appbar')", what="login or shell")
     if await p.js("!!document.querySelector('.login-card')"):
-        await p.type_into("input[name=username]", "tester")
+        await p.type_into("input[name=username]", os.environ.get("AUDIT_USER", "tester"))
         await p.type_into("input[name=password]", "correct-horse")
         await p.enter()
     await p.wait("document.querySelector('.appbar') && !document.querySelector('.login')", what="shell")

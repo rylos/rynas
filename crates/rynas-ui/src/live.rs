@@ -73,6 +73,7 @@ struct Stream {
     _on_removable: Closure<dyn Fn(MessageEvent)>,
     _on_task: Closure<dyn Fn(MessageEvent)>,
     _on_notif: Closure<dyn Fn(MessageEvent)>,
+    _on_docker: Closure<dyn Fn(MessageEvent)>,
     _on_resync: Closure<dyn Fn(MessageEvent)>,
     _on_open: Closure<dyn Fn()>,
     _on_err: Closure<dyn Fn()>,
@@ -294,6 +295,7 @@ impl Live {
         crate::config::changed();
         self.refresh_storage();
         self.refresh_hardware();
+        crate::docker::docker().refresh();
         if POLLING.with(|p| p.replace(true)) {
             return;
         }
@@ -328,6 +330,7 @@ impl Live {
         if let Some(n) = crate::notify::server() {
             n.clear();
         }
+        crate::docker::docker().clear();
         self.conn.set(Conn::Offline);
     }
 
@@ -437,6 +440,20 @@ impl Live {
             }
         });
         let _ = es.add_event_listener_with_callback("notification", on_notif.as_ref().unchecked_ref());
+        // Docker: the widget's sample and change hints (only sent where Docker answers)
+        let on_docker = Closure::<dyn Fn(MessageEvent)>::new(move |ev: MessageEvent| {
+            let d = crate::docker::docker();
+            if ev.type_() == "docker.changed" {
+                d.on_changed();
+            } else if let Some(txt) = ev.data().as_string()
+                && let Ok(s) = serde_json::from_str::<rynas_api_types::docker::DockerStats>(&txt)
+            {
+                d.on_stats(s);
+            }
+        });
+        for name in ["docker.stats", "docker.changed"] {
+            let _ = es.add_event_listener_with_callback(name, on_docker.as_ref().unchecked_ref());
+        }
         // missed events: re-read that collection
         let on_resync = Closure::<dyn Fn(MessageEvent)>::new(move |ev: MessageEvent| {
             let data = ev.data().as_string().unwrap_or_default();
@@ -455,6 +472,8 @@ impl Live {
                 self.refresh_ups();
             } else if data.contains("\"removable\"") {
                 self.refresh_removable();
+            } else if data.contains("\"docker\"") {
+                crate::docker::docker().resync();
             }
         });
         let _ = es.add_event_listener_with_callback("resync", on_resync.as_ref().unchecked_ref());
@@ -482,7 +501,7 @@ impl Live {
             }
         });
         es.set_onerror(Some(on_err.as_ref().unchecked_ref()));
-        let st = Stream { es, _on_sample: on_sample, _on_hardware: on_hardware, _on_ups: on_ups, _on_removable: on_removable, _on_task: on_task, _on_notif: on_notif, _on_resync: on_resync, _on_open: on_open, _on_err: on_err };
+        let st = Stream { es, _on_sample: on_sample, _on_hardware: on_hardware, _on_ups: on_ups, _on_removable: on_removable, _on_task: on_task, _on_notif: on_notif, _on_docker: on_docker, _on_resync: on_resync, _on_open: on_open, _on_err: on_err };
         STREAM.with(|s| *s.borrow_mut() = Some(st));
     }
 
