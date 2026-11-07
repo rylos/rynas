@@ -20,6 +20,7 @@
 
 pub mod cert;
 pub mod domains;
+pub mod imports;
 
 use std::time::Duration;
 
@@ -222,7 +223,8 @@ pub fn WebAccess() -> impl IntoView {
 
 /// The certificate of the interface and every certificate rynas serves.
 fn certificate_tab() -> AnyView {
-    view! { {cert::panel()}{domains::inventory()} }.into_any()
+    let inv = Remote::<rynas_api_types::web_access::CertificateInventory>::with_config("/api/v1/web-access/certificates");
+    view! { {cert::panel()}{imports::card(Callback::new(move |_| inv.reload()))}{domains::inventory(inv)} }.into_any()
 }
 
 // ------------------------------------------------------------------ confirmation

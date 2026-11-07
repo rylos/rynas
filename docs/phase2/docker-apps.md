@@ -1457,6 +1457,15 @@ addresses it takes over → Save); Folder (save with `source: folder` → the dr
 path, the group, the sshd/acme.sh lines with the id filled in, Check now); Remove (confirm).
 The SSH example uses the NAS's host name, never personal data.
 
+UI as built (2026-11-07, `crates/rynas-ui/src/pages/web_access/imports.rs`): the card
+"Imported certificates" sits on the Certificate tab between the interface's certificate and
+"All certificates" (which reads again after every import change). Two keys differ from the table
+above because the UI already had the same English text elsewhere (one key per text):
+`wa.import.add` "Import a certificate for the apps" and `wa.import.check_now` "Check the folder
+now". Extra keys: `wa.import.intro`, `empty`, `id_help`, `source`, `ssh_note`, `replace`,
+`saved`. The acme.sh line adds `DEPLOY_SSH_USER=certpush DEPLOY_SSH_SERVER=<host>.local`, which
+acme.sh's ssh deploy hook needs.
+
 #### Open points
 
 - Backups: imports are not in `.rynasbak` exports yet. Proposal: include them in the

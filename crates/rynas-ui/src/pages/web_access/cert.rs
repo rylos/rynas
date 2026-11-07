@@ -17,7 +17,7 @@ use crate::ui::{self, Confirm, DlgKind, Remote, Tone, WidgetHead};
 const URL: &str = "/api/v1/system/tls";
 const DAY_MS: i64 = 86_400_000;
 
-fn warning_key(w: TlsWarning) -> &'static str {
+pub(super) fn warning_key(w: TlsWarning) -> &'static str {
     match w {
         TlsWarning::ExpiresSoon => "tls.warn.expires_soon",
         TlsWarning::Expired => "tls.warn.expired",
@@ -34,7 +34,7 @@ fn mono(s: &str) -> AnyView {
     ui::breakable(s, "mono")
 }
 
-fn cert_list(c: &TlsCertificate) -> AnyView {
+pub(super) fn cert_list(c: &TlsCertificate) -> AnyView {
     let days = (c.not_after_ms - js_sys::Date::now() as i64) / DAY_MS;
     let tone = if days < 0 { Tone::Err } else if days < 30 { Tone::Warn } else { Tone::Ok };
     view! {
@@ -158,7 +158,7 @@ fn os_steps(title: &'static str, steps: &'static str) -> AnyView {
 }
 
 /// A PEM text area with "Load from a file".
-fn pem_field(label: &'static str, value: RwSignal<String>, err: RwSignal<Option<String>>, accept: &'static str) -> AnyView {
+pub(super) fn pem_field(label: &'static str, value: RwSignal<String>, err: RwSignal<Option<String>>, accept: &'static str) -> AnyView {
     let id = crate::form::fid();
     let fid = format!("{id}f");
     let load = move |ev: leptos::ev::Event| {

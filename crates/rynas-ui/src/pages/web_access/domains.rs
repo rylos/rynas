@@ -724,8 +724,7 @@ fn cert_rows(list: &[CertEntry]) -> Vec<AnyView> {
 const CERT_HEADS: &[&str] = &["cert.col.cert", "col.status", "tls.valid_until", "cert.col.renew"];
 
 /// Every certificate rynas serves (`GET /web-access/certificates`), for the Certificate tab.
-pub fn inventory() -> AnyView {
-    let inv = Remote::<CertificateInventory>::with_config(CERTS);
+pub fn inventory(inv: Remote<CertificateInventory>) -> AnyView {
     let content = move || {
         let Some(i) = inv.data.get() else { return ().into_any() };
         view! {

@@ -3235,6 +3235,40 @@ cert.kind.interface	Interfaccia (porta di emergenza)
 cert.kind.proxy_local	Nomi locali
 cert.kind.acme	Let's Encrypt
 cert.kind.imported	Importato
+wa.import.title	Certificati importati
+wa.import.add	Importa un certificato per le app
+wa.import.intro	Un certificato creato altrove (il client ACME di un router, un'autorità aziendale, un wildcard acquistato) serve gli indirizzi dell'interfaccia e delle app che copre.
+wa.import.empty	Nessun certificato importato. Gli indirizzi usano il certificato Let's Encrypt o quello locale.
+wa.import.id	Nome (id breve)
+wa.import.id_help	Lettere minuscole, cifre e trattini, al massimo 32. Dà il nome anche alla cartella controllata.
+wa.import.label	Descrizione
+wa.import.source	Come arrivano i file
+wa.import.source.upload	Carica i file
+wa.import.source.folder	Un altro programma li deposita in una cartella
+wa.import.certificate	Catena del certificato (PEM: prima il certificato del server, poi gli intermedi)
+wa.import.private_key	Chiave privata (PEM, non cifrata)
+wa.import.inspect	Verifica
+wa.import.covers	Prende questi indirizzi
+wa.import.covers_none	Non copre nessuno degli indirizzi serviti da questo NAS
+wa.import.shadowed	Serviti da un altro certificato importato
+wa.import.replaces_acme	Sostituisce il certificato Let's Encrypt per
+wa.import.folder	Cartella controllata
+wa.import.folder_help	Scrivi qui fullchain.pem e privkey.pem: rynas li controlla e ricarica in pochi secondi. Possono scrivere qui i membri del gruppo rynas-cert-drop.
+wa.import.folder_ssh	Esempio: un account di invio via SSH (acme.sh)
+wa.import.ssh_note	Queste righe non vengono applicate da rynas: la configurazione del server SSH resta tua. Sostituisci <name> con il nome del certificato.
+wa.import.check_now	Controlla ora la cartella
+wa.import.waiting	In attesa dei file
+wa.import.last_error	Ultimi file rifiutati
+wa.import.kept	Resta in uso il certificato precedente.
+wa.import.imported_at	Preso il
+wa.import.replace	Sostituisci i file
+wa.import.saved	Certificato salvato; il proxy lo usa entro pochi secondi.
+wa.import.delete	Rimuovi
+wa.import.delete_confirm	I suoi indirizzi tornano al certificato Let's Encrypt o locale.
+wa.import.not_renewed	rynas non rinnova i certificati importati.
+nev.web_access.cert_import_failed.title	File del certificato {name} rifiutati
+nev.web_access.cert_import_failed.body	{error}. Resta in uso il certificato precedente.
+nev.web_access.cert_import_ok.title	Il certificato {name} è di nuovo accettato
 cert.staging	Prova
 cert.st.ok	Valido
 cert.st.expires_soon	Scade presto
