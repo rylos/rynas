@@ -3603,10 +3603,10 @@ sysp.restart_scheduled	Riavvio pianificato.
 sysp.shutdown_scheduled	Spegnimento pianificato.
 sysp.restart_failed	Il riavvio non è partito.
 sysp.shutdown_failed	Lo spegnimento non è partito.
-sysp.pending_restart	Il NAS si riavvia alle {at}.
-sysp.pending_restart_by	Il NAS si riavvia alle {at} (richiesto da {user}).
-sysp.pending_shutdown	Il NAS si spegne alle {at}.
-sysp.pending_shutdown_by	Il NAS si spegne alle {at} (richiesto da {user}).
+sysp.pending_restart	Riavvio pianificato: {at}.
+sysp.pending_restart_by	Riavvio pianificato: {at} (richiesto da {user}).
+sysp.pending_shutdown	Spegnimento pianificato: {at}.
+sysp.pending_shutdown_by	Spegnimento pianificato: {at} (richiesto da {user}).
 sysp.cancel	Annulla riavvio o spegnimento
 sysp.cancelled	Annullato: il NAS resta acceso.
 sysp.restarting	Riavvio in corso…

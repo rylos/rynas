@@ -294,8 +294,9 @@ fn overlay(action: SystemPowerAction, phase: Phase) -> AnyView {
     view! {
         <div class="sysp-overlay" role="alertdialog" aria-modal="true" aria-labelledby="sysp-ov-title" aria-describedby="sysp-ov-text">
             <div class="sysp-card">
-                <span class=if busy { "sysp-icon spin" } else { "sysp-icon" }><Icon icon=icon size=22 /></span>
+                <span class="sysp-icon"><Icon icon=icon size=22 /></span>
                 <h2 id="sysp-ov-title">{tr(title)}</h2>
+                {busy.then(|| view! { <span class="btn-spinner sysp-spinner" aria-hidden="true"></span> })}
                 <p id="sysp-ov-text" class="muted" role="status" aria-live="polite">{tr(text)}</p>
                 <button type="button" class="btn ghost sm" on:click=reload>{tr("sysp.reload")}</button>
             </div>
