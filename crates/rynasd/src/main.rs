@@ -313,7 +313,14 @@ fn open_config(
         layer: ups_layer.clone(),
     }));
     // ups.device: the UPS set up with the wizard (rynas blocks of /etc/nut, or the layer's)
-    domains.push(Arc::new(rynasd::ups_setup::DeviceDomain { layer: ups_layer }));
+    domains.push(Arc::new(rynasd::ups_setup::DeviceDomain {
+        layer: ups_layer.clone(),
+    }));
+    // ups.netserver: upsd for other machines (LISTEN, accounts, IP filter; not with a layer)
+    domains.push(Arc::new(rynasd::ups_netserver::NetServerDomain {
+        layer: ups_layer,
+        secret_dir: args.state_dir.join("notify"),
+    }));
     let (removable_domain, removable_settings) = rynasd::removable::RemovableDomain::new();
     let removable_tx = removable_domain.tx.clone();
     domains.push(Arc::new(removable_domain));
@@ -793,6 +800,7 @@ fn main() -> std::io::Result<()> {
             } else {
                 Arc::new(rynasd::ups_setup::HostRunner)
             }),
+            net_secret_dir: args.state_dir.join("notify"),
         });
         // NUT backend: rynasd follows the UPS itself (a module layer does it on its own)
         if ups.layer.is_none() && ups.talk_to_upsd {

@@ -246,6 +246,24 @@ pub fn ups_device() -> ups::UpsDeviceState {
     }
 }
 
+pub fn ups_netserver() -> ups::UpsNetServerState {
+    let client = |name: &str, role, note: &str| ups::UpsNetClient { name: name.into(), role, note: note.into(), ..Default::default() };
+    ups::UpsNetServerState {
+        applied: Some(ups::UpsNetServerConfig {
+            enabled: true,
+            listen: vec![],
+            allow: vec!["192.168.1.0/24".into()],
+            clients: vec![client("backup-server", ups::UpsClientRole::Secondary, "Backup server"), client("homeassistant", ups::UpsClientRole::Monitor, "Home Assistant")],
+        }),
+        addresses: vec![ups::UpsNetAddress { address: "192.168.1.10".into(), subnet: "192.168.1.0/24".into() }],
+        host: Some("192.168.1.10".into()),
+        hostname: "nas".into(),
+        port: ups::NUT_PORT,
+        ups_name: Some("ups".into()),
+        ..Default::default()
+    }
+}
+
 pub fn ups_events() -> Vec<notify::Notification> {
     let now = js_sys::Date::now() as u64;
     let n = |id: u64, ago_min: u64, sev: notify::NotifySeverity, title: &str| notify::Notification {

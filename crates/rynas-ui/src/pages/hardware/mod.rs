@@ -8,6 +8,7 @@
 mod power;
 mod removable;
 mod ups;
+mod ups_net;
 mod ups_setup;
 
 use leptos::prelude::*;

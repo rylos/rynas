@@ -544,6 +544,63 @@ upsw.commands	Poi rynas esegue:
 upsw.apply	Applica
 upsw.waiting	In attesa che l'UPS comunichi…
 upsw.applied	L'UPS è configurato: ora NUT esegue il suo driver, upsd e upsmon.
+upsn.title	Server UPS di rete
+upsn.intro	Gli altri computer in rete leggono questo UPS sulla porta 3493 e si spengono quando la sua batteria si esaurisce: server e PC con upsmon di NUT, domotica, pannelli di controllo.
+upsn.on	Attivo
+upsn.off	Spento
+upsn.pending	Modifiche non ancora applicate
+upsn.need_nut	Il server UPS di rete richiede NUT (pacchetto Debian nut).
+upsn.module	Su questo hardware NUT è gestito dal livello di sistema con i suoi file: qui il server UPS di rete non si può configurare.
+upsn.listen_all	Tutti gli indirizzi del NAS
+upsn.listen_chosen	Indirizzi scelti
+upsn.listen_help	Il NAS stesso (localhost) è sempre incluso.
+upsn.allow	Host ammessi
+upsn.allow_any	Qualsiasi host che raggiunge il NAS
+upsn.allow_help	Un indirizzo IP o una sottorete per riga (192.168.1.20, 192.168.1.0/24, fd00::/64). Vuoto: nessun limite. Gli altri host vengono scartati dal sistema prima di arrivare a NUT.
+upsn.allow_lan	Ammetti la rete locale ({nets})
+upsn.address	Indirizzo
+upsn.ups_name	Nome dell'UPS
+upsn.open_warn	Nessun host ammesso impostato: ogni dispositivo che raggiunge la porta 3493 può leggere lo stato dell'UPS. Limitalo alla tua rete nelle impostazioni.
+upsn.accounts	Account dei client
+upsn.no_accounts	Ancora nessun account. Aggiungine uno per ogni computer che deve spegnersi con questo UPS e uno per la domotica.
+upsn.settings	Impostazioni
+upsn.settings_title	Impostazioni del server UPS di rete
+upsn.add	Aggiungi account
+upsn.add_title	Nuovo account client
+upsn.user_help	a-z, 0-9, _ e -, al massimo 32 caratteri.
+upsn.role	Ruolo
+upsn.role_secondary	Si spegne con l'UPS
+upsn.role_monitor	Solo lettura
+upsn.role_secondary_help	Per upsmon di un altro computer (secondario): spegne quel computer quando questo UPS arriva a batteria scarica, prima del NAS.
+upsn.role_monitor_help	Per domotica e pannelli: accede e legge i valori, non può eseguire comandi.
+upsn.note	Nota
+upsn.own_password	Scegli la password
+upsn.own_password_help	Disattivato: rynas ne genera una robusta e la mostra una volta.
+upsn.password	Password
+upsn.create	Crea
+upsn.connect	Collega
+upsn.connect_title	Collegamento con l'account {name}
+upsn.remove	Rimuovi
+upsn.remove_title	Rimuovere l'account {name}?
+upsn.remove_text	Il computer che lo usa non potrà più accedere e non si spegnerà con questo UPS.
+upsn.regen_title	Nuova password per {name}?
+upsn.regen_text	La password attuale smette di funzionare: inserisci quella nuova sul computer che usa questo account.
+upsn.enable	Accetta connessioni da altri computer
+upsn.enable_help	upsd accetta connessioni da altri computer sulla porta 3493.
+upsn.read_note	NUT permette a chiunque si colleghi di leggere i valori dell'UPS senza password; gli account decidono chi accede per seguirlo e spegnersi. Gli host ammessi limitano chi può collegarsi.
+upsn.show_changes	Mostra le modifiche
+upsn.file_removed	Il file viene rimosso.
+upsn.shown_once	Questa password viene mostrata solo ora: copiala nel client. In seguito potrai solo crearne una nuova.
+upsn.for_ha	Domotica e pannelli
+upsn.for_ha_help	Inserisci questi valori nell'integrazione NUT della tua domotica (Home Assistant: Impostazioni, Dispositivi e servizi, Network UPS Tools).
+upsn.host	Host
+upsn.port	Porta
+upsn.for_upsmon	Un altro computer Linux (upsmon)
+upsn.for_upsmon_help	Aggiungi questa riga a /etc/nut/upsmon.conf su quel computer, imposta MODE=netclient nel suo nut.conf e riavvia nut-monitor.
+upsn.for_upsmon_help_pw	Aggiungi questa riga a /etc/nut/upsmon.conf su quel computer, con la password dell'account al posto di PASSWORD, imposta MODE=netclient nel suo nut.conf e riavvia nut-monitor.
+upsn.monitor_note	Un account in sola lettura non può spegnere un computer: per upsmon aggiungi un account che si spegne con l'UPS.
+upsn.copy	Copia
+cfg.key.ups.netserver	Server UPS di rete
 ps.col_on	Attiva
 ps.col_action	Azione
 ps.col_busy	Se occupato

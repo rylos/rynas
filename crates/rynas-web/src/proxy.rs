@@ -169,6 +169,8 @@ pub fn routes() -> Router<AppState> {
         .route("/ups/detect", post(forward))
         .route("/ups/drivers", get(forward))
         .route("/ups/plan/device", post(forward))
+        .route("/ups/netserver", get(forward).put(forward))
+        .route("/ups/plan/netserver", post(forward))
         // system updates (P6): apt list and tasks, automatic updates, kernel / DOM
         .route("/updates", get(forward))
         .route("/updates/check", post(forward))

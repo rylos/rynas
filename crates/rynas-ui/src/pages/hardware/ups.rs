@@ -124,6 +124,7 @@ pub fn panel(_active: Signal<bool>) -> AnyView {
     view! {
         {status_card(settings)}
         {super::ups_setup::card()}
+        {super::ups_net::card()}
         <div class="grid">
             {safemode_card(settings)}
             {test_card(settings)}
