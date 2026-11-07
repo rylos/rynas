@@ -15,6 +15,7 @@ mod overview;
 mod stacks;
 
 pub use overview::install_card;
+pub(crate) use stacks::{launch, reason_key, state_pill};
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -64,8 +65,10 @@ pub fn DockerPage() -> impl IntoView {
 
 /// The four tabs; a tab is built on its first visit and kept (lists, drafts, filters).
 fn tabbed() -> AnyView {
-    let tab = RwSignal::new(0usize);
-    let seen = RwSignal::new([true, false, false, false]);
+    // `?stack=<name>` opens the Stacks tab on that stack
+    let deep = leptos_router::hooks::use_query_map().with_untracked(|q| q.get("stack").is_some());
+    let tab = RwSignal::new(if deep { 2usize } else { 0 });
+    let seen = RwSignal::new([!deep, false, deep, false]);
     Effect::new(move || {
         let i = tab.get();
         if !seen.with_untracked(|s| s[i]) {

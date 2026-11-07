@@ -24,6 +24,9 @@ quality reviews (docs/quality/). Nothing here touches the host system or a runni
   administrators from the system groups: the instance adds a login named after the current Unix
   user (same password) whose primary group is the admin group; probes use it with
   `AUDIT_USER=$(id -un)`. Routes like `/docker:2` (scroll_audit) open the page's third tab.
+- Apps & Plugins (`/apps`, tabs `/apps:1` … `/apps:4`): rynasd reads the repository's `apps/`
+  catalogue (`--apps-dir`). With `FAKE_DOCKER=1` and `AUDIT_USER=$(id -un)` the wizard installs
+  for real under `--dry-system`: the stack files land in the dry root, compose only logs.
 - Login `tester` / `correct-horse` (`users.toml`, a test-only account of the local instance).
 - `BASE` changes the instance URL; `AUDIT_OUT` the output folder (default `target/ui-audit`:
   results, screenshots, browser profiles). Keep it on disk, not on a RAM tmpfs.

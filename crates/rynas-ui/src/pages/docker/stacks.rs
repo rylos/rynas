@@ -23,7 +23,7 @@ use crate::ui::{self, Confirm, EmptyState, Remote, Tone, kv_row};
 const SETTINGS: &str = "/api/v1/docker/settings";
 const GROUPS: [(StackManager, &str); 3] = [(StackManager::Rynas, "dk.g.rynas"), (StackManager::Portainer, "dk.g.portainer"), (StackManager::Untracked, "dk.g.untracked")];
 
-fn state_pill(s: StackState) -> AnyView {
+pub(crate) fn state_pill(s: StackState) -> AnyView {
     let (tone, key) = match s {
         StackState::Running => (Tone::Ok, "dk.ss.running"),
         StackState::Partial => (Tone::Warn, "dk.ss.partial"),
@@ -44,7 +44,7 @@ fn updatable(u: Remote<UpdateReport>) -> Vec<String> {
 
 /// Starts an action from a dialog: a refusal stays in the dialog (`error`); once started the
 /// dialog closes (`started`), the task panel shows the log and a toast the end.
-fn launch(url: String, body: Option<String>, busy: RwSignal<bool>, error: RwSignal<Option<String>>, started: Callback<()>) {
+pub(crate) fn launch(url: String, body: Option<String>, busy: RwSignal<bool>, error: RwSignal<Option<String>>, started: Callback<()>) {
     busy.set(true);
     error.set(None);
     spawn_local(async move {
@@ -68,7 +68,8 @@ pub fn panel() -> AnyView {
     let updates = remote::<UpdateReport>("/api/v1/docker/updates");
     let settings = Remote::<DockerSettingsState>::with_config(SETTINGS);
     let q = RwSignal::new(String::new());
-    let detail = RwSignal::new(None::<String>);
+    // `/docker?stack=<name>` opens that stack's details (links from Apps & Plugins)
+    let detail = RwSignal::new(leptos_router::hooks::use_query_map().with_untracked(|q| q.get("stack")));
     let edit = RwSignal::new(None::<Option<String>>);
     let checking = RwSignal::new(false);
     let checked = move || {
@@ -174,7 +175,7 @@ enum Ask {
     DeleteSnapshot(StackSnapshot),
 }
 
-fn reason_key(r: &str) -> &'static str {
+pub(crate) fn reason_key(r: &str) -> &'static str {
     match r {
         "update" => "dk.snap.r_update",
         "pull" => "dk.snap.r_pull",
