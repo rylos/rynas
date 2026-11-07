@@ -238,4 +238,3 @@ function arc(r1, r2, a0, a1) {
 function pct(x) {
   return (x * 100).toLocaleString(undefined, { maximumFractionDigits: x < 0.1 ? 1 : 0 }) + "%";
 }
-
