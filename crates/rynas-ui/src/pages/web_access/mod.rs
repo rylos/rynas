@@ -8,8 +8,9 @@
 //! - Routes: one row per app address (names, access badge, problems); a drawer per route with
 //!   its access level and the checklist of `POST /web-access/routes/{id}/test`.
 //! - A change of the interface's own route waits for a confirmation from the new address
-//!   (`confirm` in the state): a banner with the countdown, the address to open and, when the
-//!   page is already on it, the Confirm button. Without it the previous value comes back.
+//!   (`confirm` in the state): a banner with the countdown, the addresses to open and, when the
+//!   page is already on one of them through the proxy, the Confirm button. Without it the
+//!   previous value comes back, and the page says so (a toast and a note in the banner's place).
 //!
 //! The configuration travels as JSON (`serde_json::Value`): the page edits the few fields it
 //! shows and sends the rest back untouched, with no typed copy of the whole key in the wasm.
@@ -134,6 +135,18 @@ struct Wa {
     /// Server time minus local time (the confirmation countdown).
     skew: RwSignal<f64>,
     now: RwSignal<f64>,
+    /// The last timed change was not confirmed and rynasd restored the previous settings.
+    rolled_back: RwSignal<bool>,
+    /// Catalogue names of the installed apps by stack (`GET /api/v1/apps/installed`), for
+    /// the routes' labels; empty when Docker is absent.
+    app_names: RwSignal<Vec<(String, String)>>,
+}
+
+/// The fields of `InstalledApp` the route labels use.
+#[derive(serde::Deserialize)]
+struct AppName {
+    stack: String,
+    name: String,
 }
 
 fn wa() -> Wa {
@@ -143,7 +156,14 @@ fn wa() -> Wa {
 #[component]
 pub fn WebAccess() -> impl IntoView {
     let state = Remote::<WaState>::with_config(URL);
-    let w = Wa { state, route: RwSignal::new(None), skew: RwSignal::new(0.0), now: RwSignal::new(js_sys::Date::now()) };
+    let w = Wa {
+        state,
+        route: RwSignal::new(None),
+        skew: RwSignal::new(0.0),
+        now: RwSignal::new(js_sys::Date::now()),
+        rolled_back: RwSignal::new(false),
+        app_names: RwSignal::new(Vec::new()),
+    };
     provide_context(w);
     // `?tab=certificate` (the System page's link) opens the certificate
     let deep = leptos_router::hooks::use_query_map().with_untracked(|q| q.get("tab").map(|v| v == "certificate").unwrap_or(false));
@@ -162,17 +182,6 @@ pub fn WebAccess() -> impl IntoView {
             w.skew.set(d - js_sys::Date::now());
         }
     });
-    // the countdown ticks only while a confirmation waits
-    if let Ok(h) = set_interval_with_handle(
-        move || {
-            if state.data.with_untracked(|s| s.as_ref().is_some_and(|s| s.confirm.is_some())) {
-                w.now.set(js_sys::Date::now());
-            }
-        },
-        Duration::from_secs(1),
-    ) {
-        on_cleanup(move || h.clear());
-    }
     let panel = move |i: usize, body: fn() -> AnyView| {
         let mounted = Memo::new(move |_| seen.with(|s| s[i]));
         view! {
@@ -198,56 +207,147 @@ pub fn WebAccess() -> impl IntoView {
 
 // ------------------------------------------------------------------ confirmation
 
-/// The timed confirmation of a change of the interface's own route.
+/// The settings a timed change touches (`settings` of the applied value): when they change
+/// while the confirmation disappears, rynasd restored the previous ones.
+fn applied_settings(w: Wa) -> Option<Value> {
+    w.state.data.with_untracked(|s| s.as_ref().and_then(|s| s.applied.get("settings").cloned()))
+}
+
+/// Reads the state again until the expired confirmation is gone (the rollback is a proxy
+/// load and may take a while), with a growing pause, a few times at most.
+fn poll_rollback(w: Wa, deadline: i64, n: usize) {
+    const PAUSES: [u64; 6] = [2, 3, 5, 8, 13, 20];
+    let Some(&pause) = PAUSES.get(n) else { return };
+    set_timeout(
+        move || {
+            let waiting = w.state.data.try_with_untracked(|s| s.as_ref().and_then(|s| s.confirm.as_ref()).is_some_and(|c| c.deadline_ms == deadline));
+            if waiting == Some(true) {
+                w.state.reload();
+                poll_rollback(w, deadline, n + 1);
+            }
+        },
+        Duration::from_secs(pause),
+    );
+}
+
+/// Whether the page is open through the proxy on one of `names` (the HTTPS port of web
+/// access, not the emergency port): only there does rynasd accept the confirmation.
+fn through_proxy_on(names: &[String], https_port: u64) -> bool {
+    let loc = window().location();
+    let here = loc.hostname().unwrap_or_default();
+    let port = loc.port().unwrap_or_default();
+    let port_ok = if port.is_empty() { https_port == 443 } else { port == https_port.to_string() };
+    port_ok && names.iter().any(|n| n.eq_ignore_ascii_case(&here))
+}
+
+/// The timed confirmation of a change of the interface's own route, and the note after a
+/// rollback.
 fn confirm_banner() -> AnyView {
     let w = wa();
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
+    let confirmed = StoredValue::new(false);
     let pending = Memo::new(move |_| w.state.data.with(|s| s.as_ref().and_then(|s| s.confirm.clone())));
+    // a confirmation that disappears without this page's Confirm: confirmed from the new
+    // address (the settings stay), or restored by rynasd (they change back)
+    Effect::new(move |prev: Option<Option<Value>>| {
+        if pending.with(Option::is_some) {
+            w.rolled_back.set(false);
+            confirmed.set_value(false);
+            return applied_settings(w);
+        }
+        if let Some(Some(before)) = prev
+            && !confirmed.get_value()
+            && applied_settings(w).is_some_and(|now| now != before)
+        {
+            w.rolled_back.set(true);
+            crate::toast::toast(Tone::Warn, t("wa.confirm.rolled_back").to_string());
+        }
+        None
+    });
+    let rolled = move || {
+        w.rolled_back.get().then(|| {
+            view! {
+                <section class="card widget w-12 wa-confirm" role="status">
+                    <WidgetHead icon=icons::ROTATE_CCW title="wa.rolled.title" />
+                    <p>{tr("wa.confirm.rolled_back")}</p>
+                    <div class="sec-actions">
+                        <button type="button" class="btn ghost sm" on:click=move |_| w.rolled_back.set(false)>{tr("close")}</button>
+                    </div>
+                </section>
+            }
+        })
+    };
     view! {
+        {rolled}
         {move || pending.get().map(|c| {
+            // the countdown ticks only while a confirmation waits
+            w.now.set(js_sys::Date::now());
+            if let Ok(h) = set_interval_with_handle(move || w.now.set(js_sys::Date::now()), Duration::from_secs(1)) {
+                on_cleanup(move || h.clear());
+            }
             let deadline = c.deadline_ms as f64;
             let left = Signal::derive(move || ((deadline - w.now.get() - w.skew.get()) / 1000.0).ceil().max(0.0) as u64);
-            let first = c.names.first().cloned().unwrap_or_default();
-            let href = format!("https://{first}/network/web-access");
-            let here = window().location().hostname().unwrap_or_default();
-            let on_new = c.names.iter().any(|n| n.eq_ignore_ascii_case(&here));
+            let https_port = w.state.data.with_untracked(|s| s.as_ref().and_then(|s| s.applied.pointer("/settings/https_port").and_then(Value::as_u64))).unwrap_or(443);
+            let on_new = through_proxy_on(&c.names, https_port);
+            let port_part = if https_port == 443 { String::new() } else { format!(":{https_port}") };
             let go = move |_| {
                 busy.set(true);
                 error.set(None);
                 spawn_local(async move {
                     let r = api::post_empty::<()>("/api/v1/web-access/confirm", None).await;
-                    busy.set(false);
+                    let _ = busy.try_set(false);
                     match r {
                         Ok(()) => {
+                            confirmed.set_value(true);
                             crate::toast::toast(Tone::Ok, t("wa.confirm.done").to_string());
                             w.state.reload();
                         }
-                        Err(e) => error.set(Some(e.text())),
+                        Err(e) => {
+                            let _ = error.try_set(Some(e.text()));
+                        }
                     }
                 });
             };
-            // the deadline passed: rynasd restores the previous value, read it again
+            // the deadline passed: rynasd restores the previous value, read it again until
+            // the confirmation is gone
+            let deadline_ms = c.deadline_ms;
             Effect::new(move |done: Option<bool>| {
                 if left.get() == 0 && done != Some(true) {
-                    set_timeout(move || w.state.reload(), Duration::from_secs(3));
+                    poll_rollback(w, deadline_ms, 0);
                     return true;
                 }
                 done.unwrap_or(false)
             });
+            let links = c
+                .names
+                .iter()
+                .enumerate()
+                .map(|(i, n)| {
+                    let href = format!("https://{n}{port_part}/network/web-access");
+                    let class = if i == 0 { "btn primary" } else { "btn ghost" };
+                    view! { <a class=class href=href target="_blank" rel="noopener"><Icon icon=icons::EXTERNAL_LINK size=16 /><span class="wa-name">{tf("wa.confirm.open", &[("name", n)])}</span></a> }
+                })
+                .collect_view();
+            let port = w.state.data.with_untracked(|s| s.as_ref().map(|s| s.emergency_port).unwrap_or(8443)).to_string();
+            let several = !on_new && c.names.len() > 1;
             view! {
                 <section class="card widget w-12 wa-confirm" role="alert">
                     <WidgetHead icon=icons::TIMER title="wa.confirm.title" />
-                    <p>{move || tf("wa.confirm.text", &[("s", &left.get().to_string())])}</p>
-                    <p class="small muted">{move || tf("wa.confirm.rollback", &[("port", &w.state.data.with(|s| s.as_ref().map(|s| s.emergency_port).unwrap_or(8443)).to_string())])}</p>
+                    <p>{move || match left.get() {
+                        0 => t("wa.confirm.expired").to_string(),
+                        s => tf(if on_new { "wa.confirm.text_here" } else { "wa.confirm.text" }, &[("s", &s.to_string())]),
+                    }}</p>
+                    <p class="small muted">{tf("wa.confirm.rollback", &[("port", &port)])}</p>
                     {form_error(error)}
                     <div class="sec-actions">
                         {if on_new {
                             view! { <button class="btn primary" disabled=move || busy.get() || left.get() == 0 on:click=go>{spinner(busy)}<Icon icon=icons::CHECK size=16 />{tr("wa.confirm.go")}</button> }.into_any()
                         } else {
-                            view! { <a class="btn primary" href=href target="_blank" rel="noopener"><Icon icon=icons::EXTERNAL_LINK size=16 />{tf("wa.confirm.open", &[("name", &first)])}</a> }.into_any()
+                            links.into_any()
                         }}
                     </div>
+                    {several.then(|| view! { <p class="small muted">{tr("wa.confirm.names_help")}</p> })}
                 </section>
             }
         })}
@@ -284,6 +384,11 @@ fn url_links(urls: &[String]) -> AnyView {
 
 fn kv(label: &'static str, value: AnyView) -> AnyView {
     view! { <div class="kv"><dt>{tr(label)}</dt><dd>{value}</dd></div> }.into_any()
+}
+
+/// The port of the emergency address (rynas-web's own HTTPS port), from the state.
+pub(super) fn emergency_port() -> u16 {
+    wa().state.data.with(|s| s.as_ref().map(|s| s.emergency_port)).unwrap_or(8443)
 }
 
 /// The emergency address on the name the browser uses now.
@@ -345,8 +450,8 @@ fn overview() -> AnyView {
                     {kv("wa.ui.urls", if external { ui::text(t("wa.ui.external").to_string()) } else { url_links(&s.ui_urls) })}
                     {(!external).then(|| kv("wa.ui.access", view! { <span class="chip">{tr(access_key(access))}</span> }.into_any()))}
                     {(!external).then(|| kv("wa.ui.ports", ui::text(tf("wa.ui.ports_val", &[("https", &https.to_string()), ("http", &cur.pointer("/settings/http_port").and_then(Value::as_u64).unwrap_or(80).to_string())]))))}
-                    {kv("wa.ui.lan", ui::breakable(&s.lan.join(", "), "mono small"))}
-                    {(!s.vpn.is_empty()).then(|| kv("wa.ui.vpn", ui::breakable(&s.vpn.join(", "), "mono small")))}
+                    {kv("wa.ui.lan", ranges(&s.lan))}
+                    {(!s.vpn.is_empty()).then(|| kv("wa.ui.vpn", ranges(&s.vpn)))}
                 </dl>
                 {ui::note(Tone::Info, icons::LIFE_BUOY, view! {
                     <span>{tr("wa.ui.emergency")}" "<a class="mono" href=emergency_url(s.emergency_port) target="_blank" rel="noopener">{emergency_url(s.emergency_port)}</a></span>
@@ -355,6 +460,7 @@ fn overview() -> AnyView {
             .into_any()
         })
     };
+    let settings_key = Memo::new(move |_| w.state.data.with(|s| s.as_ref().map(|s| settings_of(&s.current()))));
     view! {
         <div class="grid">
             <section class="card widget w-6">
@@ -367,21 +473,37 @@ fn overview() -> AnyView {
             </section>
             <section class="card widget w-12">
                 <WidgetHead icon=icons::SETTINGS_2 title="wa.set.title" />
-                {move || w.state.gate(6).unwrap_or_else(settings_form)}
+                {move || {
+                    // built again when the settings change on the server (a save, a timed
+                    // rollback, another administrator), never while only other fields do
+                    settings_key.track();
+                    w.state.gate(6).unwrap_or_else(settings_form)
+                }}
             </section>
         </div>
     }
     .into_any()
 }
 
+/// Address ranges, each one kept whole on its line (`fe80::/10` never splits).
+fn ranges(list: &[String]) -> AnyView {
+    view! { <span class="wa-ranges mono small">{list.iter().map(|r| view! { <span>{r.clone()}</span> }).collect_view()}</span> }.into_any()
+}
+
+/// The settings fields the form edits (mode, local names, UI access, HTTP/3).
+fn settings_of(cur: &Value) -> (String, bool, String, bool) {
+    (s_at(cur, "/settings/mode", "builtin"), b_at(cur, "/settings/local_names", true), s_at(cur, "/settings/ui/access", "lan"), b_at(cur, "/settings/h3", true))
+}
+
 /// Radio choices of an access level (`public` is offered disabled until its own flow).
-fn access_radios(name: &'static str, value: RwSignal<String>) -> AnyView {
-    let opt = move |a: AccessLevel, help: &'static str| {
+/// `lan_only`: an app without a login of its own, which rynasd keeps on this network.
+fn access_radios(name: &'static str, value: RwSignal<String>, lan_only: bool) -> AnyView {
+    let opt = move |a: AccessLevel, help: &'static str, off: bool| {
         let v = access_str(a);
         let soon = a == AccessLevel::Public;
         view! {
-            <label class="net-radio" class:wa-off=soon>
-                <input type="radio" name=name disabled=soon prop:checked=move || value.with(|x| x == v) on:change=move |_| value.set(v.to_string()) />
+            <label class="net-radio" class:wa-off=off>
+                <input type="radio" name=name disabled=off prop:checked=move || value.with(|x| x == v) on:change=move |_| value.set(v.to_string()) />
                 <span class="switch-text">
                     <span class="switch-label">{tr(access_key(a))}{soon.then(|| view! { " "<span class="chip">{tr("wa.soon")}</span> })}</span>
                     <span class="field-help">{tr(help)}</span>
@@ -391,9 +513,9 @@ fn access_radios(name: &'static str, value: RwSignal<String>) -> AnyView {
     };
     view! {
         <div class="wa-radios">
-            {opt(AccessLevel::Lan, "wa.access.lan_help")}
-            {opt(AccessLevel::LanVpn, "wa.access.lan_vpn_help")}
-            {opt(AccessLevel::Public, "wa.access.public_help")}
+            {opt(AccessLevel::Lan, "wa.access.lan_help", false)}
+            {opt(AccessLevel::LanVpn, if lan_only { "wa.route.auth_none" } else { "wa.access.lan_vpn_help" }, lan_only)}
+            {opt(AccessLevel::Public, "wa.access.public_help", true)}
         </div>
     }
     .into_any()
@@ -419,12 +541,12 @@ async fn save_config(cfg: Value, error: RwSignal<Option<String>>) -> bool {
 fn settings_form() -> AnyView {
     let w = wa();
     let Some(s) = w.state.data.get_untracked() else { return ().into_any() };
-    let cur = s.current();
-    let mode = RwSignal::new(s_at(&cur, "/settings/mode", "builtin"));
-    let local = RwSignal::new(b_at(&cur, "/settings/local_names", true));
-    let access = RwSignal::new(s_at(&cur, "/settings/ui/access", "lan"));
-    let h3 = RwSignal::new(b_at(&cur, "/settings/h3", true));
-    let init = StoredValue::new((mode.get_untracked(), local.get_untracked(), access.get_untracked(), h3.get_untracked()));
+    let first = settings_of(&s.current());
+    let mode = RwSignal::new(first.0.clone());
+    let local = RwSignal::new(first.1);
+    let access = RwSignal::new(first.2.clone());
+    let h3 = RwSignal::new(first.3);
+    let init = StoredValue::new(first);
     let dirty = Memo::new(move |_| init.get_value() != (mode.get(), local.get(), access.get(), h3.get()));
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
@@ -449,12 +571,15 @@ fn settings_form() -> AnyView {
         put(&mut cfg, "settings", settings);
         busy.set(true);
         error.set(None);
+        w.rolled_back.set(false);
+        let next = (mode.get_untracked(), local.get_untracked(), access.get_untracked(), h3.get_untracked());
         spawn_local(async move {
             if save_config(cfg, error).await {
-                init.set_value((mode.get_untracked(), local.get_untracked(), access.get_untracked(), h3.get_untracked()));
+                init.set_value(next);
                 ask.set(false);
             }
             busy.set(false);
+            // the form is built again when the reloaded settings differ
             w.state.reload();
         });
     });
@@ -476,7 +601,7 @@ fn settings_form() -> AnyView {
             <Show when=move || mode.get() != "external">
                 <fieldset class="fieldset">
                     <legend class="field-label">{tr("wa.ui.access")}</legend>
-                    {access_radios("wa-ui-access", access)}
+                    {access_radios("wa-ui-access", access, false)}
                 </fieldset>
                 {switch("wa.set.local_names", Some("wa.set.local_names_help"), local.into(), Callback::new(move |v| local.set(v)))}
                 {switch("wa.set.h3", Some("wa.set.h3_help"), h3.into(), Callback::new(move |v| h3.set(v)))}
@@ -499,8 +624,10 @@ fn settings_form() -> AnyView {
 
 // ------------------------------------------------------------------ routes
 
-fn route_name(r: &RouteView) -> String {
-    r.app.clone().or_else(|| r.stack.clone()).unwrap_or_else(|| r.id.clone())
+/// The app's catalogue name when it is installed from the catalogue, else its stack or id.
+fn route_name(w: Wa, r: &RouteView) -> String {
+    let catalog = w.app_names.with(|l| l.iter().find(|(st, _)| Some(st) == r.stack.as_ref() || Some(st) == r.app.as_ref()).map(|(_, n)| n.clone()));
+    catalog.or_else(|| r.stack.clone()).or_else(|| r.app.clone()).unwrap_or_else(|| r.id.clone())
 }
 
 fn route_state(r: &RouteView) -> AnyView {
@@ -515,6 +642,12 @@ fn route_state(r: &RouteView) -> AnyView {
 
 fn routes_panel() -> AnyView {
     let w = wa();
+    // names only: without Docker (or on an error) the labels stay the stack names
+    spawn_local(async move {
+        if let Ok(list) = api::get::<Vec<AppName>>("/api/v1/apps/installed").await {
+            let _ = w.app_names.try_set(list.into_iter().map(|a| (a.stack, a.name)).collect());
+        }
+    });
     let content = move || {
         let Some(s) = w.state.data.get() else { return ().into_any() };
         let external = s_at(&s.applied, "/settings/mode", "builtin") == "external";
@@ -524,7 +657,7 @@ fn routes_panel() -> AnyView {
             .map(|r| {
                 let id = r.id.clone();
                 let id2 = r.id.clone();
-                let name = route_name(r);
+                let name = route_name(w, r);
                 let label = tf("wa.route.test_named", &[("name", &name)]);
                 ui::row(vec![
                     ui::cell("wa.col.app", "wrap", ui::two_lines(view! { <strong>{name.clone()}</strong> }.into_any(), Some(t(kind_key(match r.kind {
@@ -686,8 +819,7 @@ fn route_drawer(id: String, run_now: bool) -> AnyView {
                 {kv("wa.route.headers", ui::text(t(if headers == "relaxed" { "wa.headers.relaxed" } else { "wa.headers.default" }).to_string()))}
             </dl>
             <h3 class="mini-title">{tr("wa.col.access")}</h3>
-            {access_radios("wa-route-access", access)}
-            {(auth == "none").then(|| ui::note(Tone::Info, icons::LOCK, ui::text(t("wa.route.auth_none").to_string())))}
+            {access_radios("wa-route-access", access, auth == "none")}
             {switch("wa.route.enabled", Some("wa.route.enabled_help"), enabled.into(), Callback::new(move |v| enabled.set(v)))}
             {form_error(error)}
             <div class="sec-actions">
@@ -704,7 +836,7 @@ fn route_drawer(id: String, run_now: bool) -> AnyView {
         }
         .into_any()
     };
-    let title = Signal::derive(move || view_of.with(|r| r.as_ref().map(route_name)).map(|n| tf("wa.route.title", &[("name", &n)])).unwrap_or_default());
+    let title = Signal::derive(move || view_of.with(|r| r.as_ref().map(|r| route_name(w, r))).map(|n| tf("wa.route.title", &[("name", &n)])).unwrap_or_default());
     let foot = view! { <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("close")}</button> }.into_any();
     ui::drawer(title, close, view! { {body} }.into_any(), foot)
 }

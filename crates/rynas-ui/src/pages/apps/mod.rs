@@ -87,6 +87,9 @@ pub(super) struct Apps {
     pub inst: Remote<Vec<InstalledApp>>,
     /// Web access is active (rynas-caddy installed, built-in mode).
     pub proxy: RwSignal<bool>,
+    /// The web access state has been read (or found absent): `proxy` is final, the wizard
+    /// can count its steps.
+    pub proxy_known: RwSignal<bool>,
     /// Web access runs in external proxy mode (or rynasd has none): 80/443 are free, so a
     /// reverse proxy app (`AppCard::reverse_proxy`) may be installed.
     pub external: RwSignal<bool>,
@@ -136,6 +139,7 @@ pub fn AppsPage() -> impl IntoView {
         cat: remote::<AppCatalog>("/api/v1/apps/catalog", d.ended),
         inst: remote::<Vec<InstalledApp>>("/api/v1/apps/installed", d.generation),
         proxy: RwSignal::new(false),
+        proxy_known: RwSignal::new(false),
         proxy_host: RwSignal::new(String::new()),
         external: RwSignal::new(false),
         detail: RwSignal::new(None),
@@ -148,7 +152,8 @@ pub fn AppsPage() -> impl IntoView {
     // access answers 503 (inactive); any other failure is shown
     let proxy_err = RwSignal::new(None::<String>);
     leptos::task::spawn_local(async move {
-        match crate::api::get::<WebAccess>("/api/v1/web-access").await {
+        let r = crate::api::get::<WebAccess>("/api/v1/web-access").await;
+        match r {
             Ok(w) => {
                 let _ = a.proxy.try_set(w.engine.installed && w.applied.settings.mode == ProxyMode::Builtin);
                 let _ = a.proxy_host.try_set(w.host);
@@ -162,6 +167,7 @@ pub fn AppsPage() -> impl IntoView {
                 let _ = proxy_err.try_set(Some(e.text()));
             }
         }
+        let _ = a.proxy_known.try_set(true);
     });
     let no_docker = Memo::new(move |_| d.status.with(|s| s.as_ref().is_some_and(|s| !s.installed && s.task_id.is_none())));
     let tab = a.tab;

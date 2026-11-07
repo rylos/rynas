@@ -90,14 +90,23 @@ struct W {
     started: RwSignal<Option<AppInstallStarted>>,
     done: RwSignal<Option<TaskStatus>>,
     ask_close: RwSignal<bool>,
+    /// Web access is active / its state has been read ([`super::Apps`]).
+    proxy: RwSignal<bool>,
+    proxy_known: RwSignal<bool>,
 }
 
 impl W {
-    /// The Access step exists for apps with a web interface on their own ports.
+    /// The entry has a web interface on its own ports (the case web access is for).
+    fn has_web(self) -> bool {
+        self.detail.data.with(|d| d.as_ref().is_some_and(|d| d.web.is_some() && !d.host_network && !d.card.reverse_proxy))
+    }
+
+    /// The Access step exists for apps with a web interface on their own ports while web
+    /// access is active; without it the Network step says how the app opens. Counted once
+    /// both the entry and the web access state are in, so the stepper never grows.
     fn steps(self) -> Vec<Step> {
-        let access = self.detail.data.with(|d| d.as_ref().is_some_and(|d| d.web.is_some() && !d.host_network && !d.card.reverse_proxy));
         let mut v = vec![Step::Options, Step::Folders, Step::Network];
-        if access {
+        if self.has_web() && self.proxy.get() {
             v.push(Step::Access);
         }
         v.push(Step::Review);
@@ -233,6 +242,8 @@ pub fn wizard(id: String) -> AnyView {
         started: RwSignal::new(None),
         done: RwSignal::new(None),
         ask_close: RwSignal::new(false),
+        proxy: a.proxy,
+        proxy_known: a.proxy_known,
     };
     // the form's defaults once the entry arrived
     Effect::new(move |init: Option<bool>| {
@@ -267,6 +278,9 @@ fn wizard_body(w: W) -> AnyView {
     let Some(_) = w.detail.data.with(|d| d.as_ref().map(|_| ())) else {
         return w.detail.view(8, || ().into_any());
     };
+    if !w.proxy_known.get() {
+        return ui::loading(Signal::stored(None), Callback::new(|_| ()), 8);
+    }
     let cur = w.cur();
     view! {
         <ol class="stepper app-steps" aria-label=tr("wiz.steps")>
@@ -534,8 +548,11 @@ fn network(w: W) -> AnyView {
                 ])
             })
             .collect::<Vec<_>>();
+        // no Access step without web access: how the app opens is said here
+        let inactive = (w.has_web() && !w.proxy.get_untracked() && !p.proxy_active).then(|| inactive_note(&p));
         view! {
             {if host_network { Some(ui::note(Tone::Info, icons::INFO, ui::text(t("apps.w.host_network").to_string()))) } else { None }}
+            {inactive}
             {if rows.is_empty() { view! { <p class="muted small">{tr("apps.w.no_ports")}</p> }.into_any() } else { ui::table("app-ports", &["apps.col.purpose", "apps.col.port", "apps.col.reach"], rows) }}
             <div class="sec-actions">
                 <button type="button" class="btn ghost sm" disabled=move || w.planning.get() on:click=move |_| w.replan(None)>{spinner(w.planning)}<Icon icon=icons::REFRESH_CW size=14 />{tr("apps.w.check_again")}</button>
@@ -544,6 +561,14 @@ fn network(w: W) -> AnyView {
         .into_any()
     };
     view! { {content} }.into_any()
+}
+
+/// Web access is off: the app opens on its LAN port.
+fn inactive_note(p: &AppInstallPlan) -> AnyView {
+    let lan_url = p.ports.iter().find(|x| x.proxied).map(|x| super::host_url(x.port, "/")).unwrap_or_default();
+    ui::note(Tone::Info, icons::NETWORK, view! {
+        <span>{tf("apps.w.access_inactive", &[("url", &lan_url)])}" "<a href="/network/web-access">{tr("apps.w.access_enable")}</a></span>
+    }.into_any())
 }
 
 /// Access: through web access (loopback + a route, HTTPS at its own name) or directly on
@@ -556,9 +581,7 @@ fn access(w: W) -> AnyView {
         let lan_url = web_port.map(|port| super::host_url(port, "/")).unwrap_or_default();
         let lan = Signal::derive(move || w.publish.get().unwrap_or(!proxy_active));
         if !proxy_active {
-            return ui::note(Tone::Info, icons::NETWORK, view! {
-                <span>{tf("apps.w.access_inactive", &[("url", &lan_url)])}" "<a href="/network/web-access">{tr("apps.w.access_enable")}</a></span>
-            }.into_any());
+            return inactive_note(&p);
         }
         let opt = move |on_lan: bool, label: &'static str, help: String, url: String| {
             view! {
@@ -585,7 +608,7 @@ fn access(w: W) -> AnyView {
             {move || if lan.get() {
                 ui::note(Tone::Warn, icons::TRIANGLE_ALERT, ui::text(t("apps.warn.published_on_lan").to_string()))
             } else {
-                view! { <p class="small muted">{tr("apps.w.access_level")}" "<a href="/network/web-access">{tr("wa.title")}</a></p> }.into_any()
+                view! { <p class="small muted">{tr("apps.w.access_level")}" "<a href="/network/web-access">{tr("wa.title")}</a>"."</p> }.into_any()
             }}
         }
         .into_any()
