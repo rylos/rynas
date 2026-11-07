@@ -125,6 +125,16 @@ fn env_with(dry: bool, runner: Arc<dyn Runner>, volume: Option<&str>) -> Env {
     if !dry {
         svc.exec_via_runner
             .store(true, std::sync::atomic::Ordering::Relaxed);
+        // the docker-apps account with the caller's ids (folders can be given to it)
+        let (u, g) = my_ids();
+        let etc = dir.path().join("root/etc");
+        std::fs::create_dir_all(&etc).unwrap();
+        std::fs::write(
+            etc.join("passwd"),
+            format!("docker-apps:x:{u}:{g}::/nonexistent:/usr/sbin/nologin\n"),
+        )
+        .unwrap();
+        std::fs::write(etc.join("group"), format!("docker-apps:x:{g}:\n")).unwrap();
     }
     let _ = ops.docker.set(svc.clone());
     let clock = Arc::new(ManualClock::new(1_800_000_000_000));
@@ -571,4 +581,216 @@ async fn failed_update_pull_fails_the_task() {
     let calls = r.calls.lock().unwrap().clone();
     assert!(calls.iter().any(|c| c.contains(" pull")), "{calls:?}");
     assert!(!calls.iter().any(|c| c.contains(" up ")), "{calls:?}");
+}
+
+/// Detection answers: `dpkg-query` prints `dpkg`, the architecture is amd64, every other
+/// program succeeds silently; with `accounts` set (a root), `groupadd`/`useradd` write the
+/// account there with the caller's ids.
+struct Dpkg {
+    dpkg: &'static str,
+    accounts: Mutex<Option<std::path::PathBuf>>,
+    calls: Mutex<Vec<String>>,
+}
+
+impl Dpkg {
+    fn new(dpkg: &'static str) -> Self {
+        Self {
+            dpkg,
+            accounts: Mutex::default(),
+            calls: Mutex::default(),
+        }
+    }
+}
+
+fn my_ids() -> (u32, u32) {
+    // SAFETY: getuid/getgid cannot fail
+    unsafe { (libc::getuid(), libc::getgid()) }
+}
+
+impl Runner for Dpkg {
+    fn run(&self, cmd: &Cmd) -> Result<CmdOutput, String> {
+        let line = cmd.display();
+        self.calls.lock().unwrap().push(line.clone());
+        let out = match line.split_whitespace().next().unwrap_or("") {
+            "dpkg-query" => self.dpkg,
+            "dpkg" if line.contains("--print-architecture") => "amd64\n",
+            "docker" if line.contains(" config") => r#"{"services":{"web":{"image":"x"}}}"#,
+            p @ ("groupadd" | "useradd") => {
+                if let Some(root) = self.accounts.lock().unwrap().as_ref() {
+                    let (u, g) = my_ids();
+                    let (file, text) = if p == "groupadd" {
+                        ("etc/group", format!("docker-apps:x:{g}:\n"))
+                    } else {
+                        (
+                            "etc/passwd",
+                            format!("docker-apps:x:{u}:{g}::/nonexistent:/usr/sbin/nologin\n"),
+                        )
+                    };
+                    std::fs::create_dir_all(root.join("etc")).unwrap();
+                    let mut old = std::fs::read_to_string(root.join(file)).unwrap_or_default();
+                    old.push_str(&text);
+                    std::fs::write(root.join(file), old).unwrap();
+                }
+                ""
+            }
+            _ => "",
+        };
+        Ok(CmdOutput {
+            code: Some(0),
+            stdout: out.into(),
+            stderr: String::new(),
+        })
+    }
+}
+
+/// `dpkg-query` after the first real install died inside dpkg.
+const HALF_DONE: &str = "docker-ce\t5:29.0.1-1~debian.13~trixie\tiHR\ndocker-ce-cli\t5:29.0.1-1~debian.13~trixie\tii \ncontainerd.io\t2.1.5-1~debian.13~trixie\tiU \n";
+
+/// A failed install left packages half-done: no engine (no "already installed: adopted"),
+/// the packages listed, and the install repairs dpkg before anything else and finishes.
+#[tokio::test]
+async fn half_installed_engine_is_repaired_by_the_install() {
+    let e = env_with(true, Arc::new(Dpkg::new(HALF_DONE)), None);
+    // its unpacked binaries are there
+    let host = e.dir.path().join("host");
+    std::fs::create_dir_all(host.join("usr/bin")).unwrap();
+    std::fs::write(host.join("usr/bin/docker"), "").unwrap();
+    let (_, b) = call(&e, "GET", "/v1/docker/status", None).await;
+    let st: DockerStatus = serde_json::from_slice(&b).unwrap();
+    assert!(!st.installed, "{st:?}");
+    assert_eq!(st.install_block, None);
+    assert_eq!(
+        st.install_incomplete
+            .iter()
+            .map(|p| (p.name.as_str(), p.status.as_str()))
+            .collect::<Vec<_>>(),
+        [("docker-ce", "iHR"), ("containerd.io", "iU")]
+    );
+    let (s, b) = call(&e, "POST", "/v1/docker/install", None).await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{}", String::from_utf8_lossy(&b));
+    let t: TaskStarted = serde_json::from_slice(&b).unwrap();
+    let info = wait_task(&e, &t.task_id).await;
+    let l = log(&e, &t.task_id);
+    assert_eq!(info.status, TaskStatus::Ok, "{l}");
+    let pos = |p: &str| l.find(p).unwrap_or_else(|| panic!("{p} missing: {l}"));
+    let repair = pos("-- dpkg --configure -a --force-confdef --force-confold");
+    let fix = pos(
+        "-- apt-get install -f -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold",
+    );
+    let update = pos("-- apt-get update");
+    let install = pos(
+        "apt-get install -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold docker-ce",
+    );
+    let account = pos("groupadd --system docker-apps");
+    let enable = pos("systemctl enable --now containerd.service docker.service");
+    assert!(
+        repair < fix && fix < update && update < install && install < account && account < enable,
+        "{l}"
+    );
+    assert!(
+        l.contains("repairing an interrupted install: docker-ce 5:29.0.1-1~debian.13~trixie (iHR)"),
+        "{l}"
+    );
+    // the repair runs through systemd-run, outside the sandbox, like apt
+    assert!(l.contains("systemd-run --wait --pipe"), "{l}");
+
+    // run again (a resume after any failure): accepted and finished again
+    let (s, b) = call(&e, "POST", "/v1/docker/install", None).await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{}", String::from_utf8_lossy(&b));
+    let t: TaskStarted = serde_json::from_slice(&b).unwrap();
+    let info = wait_task(&e, &t.task_id).await;
+    assert_eq!(info.status, TaskStatus::Ok, "{}", log(&e, &t.task_id));
+}
+
+/// An install rynas started whose engine is complete but whose last steps never ran (no pin,
+/// no docker-apps account) is offered again and finished; a finished one is adopted.
+#[tokio::test]
+async fn unfinished_install_is_resumed() {
+    let e = env_with(
+        true,
+        Arc::new(Dpkg::new(
+            "docker-ce\t5:29.0.1-1~debian.13~trixie\tii \ndocker-ce-cli\t5:29.0.1-1~debian.13~trixie\tii \n",
+        )),
+        None,
+    );
+    let host = e.dir.path().join("host");
+    std::fs::create_dir_all(host.join("etc/apt/sources.list.d")).unwrap();
+    std::fs::write(host.join("etc/apt/sources.list.d/docker.sources"), "x").unwrap();
+    let (_, b) = call(&e, "GET", "/v1/docker/status", None).await;
+    let st: DockerStatus = serde_json::from_slice(&b).unwrap();
+    assert!(st.installed && st.install_block.is_none(), "{st:?}");
+    let (s, b) = call(&e, "POST", "/v1/docker/install", None).await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{}", String::from_utf8_lossy(&b));
+    let t: TaskStarted = serde_json::from_slice(&b).unwrap();
+    let info = wait_task(&e, &t.task_id).await;
+    let l = log(&e, &t.task_id);
+    assert_eq!(info.status, TaskStatus::Ok, "{l}");
+    assert!(
+        l.contains("finishing an install that did not complete"),
+        "{l}"
+    );
+    assert!(!l.contains("dpkg --configure"), "nothing to repair: {l}");
+
+    // pin and account there: adopted, the install is refused
+    std::fs::create_dir_all(host.join("etc/apt/preferences.d")).unwrap();
+    std::fs::write(
+        host.join("etc/apt/preferences.d/rynas-docker"),
+        rynas_docker::install::preferences_content(29),
+    )
+    .unwrap();
+    std::fs::write(host.join("etc/passwd"), "docker-apps:x:996:995::/:/x\n").unwrap();
+    std::fs::write(host.join("etc/group"), "docker-apps:x:995:\n").unwrap();
+    let (s, b) = call(&e, "POST", "/v1/docker/install", None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{}", String::from_utf8_lossy(&b));
+}
+
+/// The `docker-apps` account exists before any stack folder gets an owner: created when
+/// missing, an error (never `nobody`) when it cannot be.
+#[tokio::test]
+async fn apps_account_is_ensured_before_stack_folders() {
+    let r = Arc::new(Dpkg::new(""));
+    let e = env_with(false, r.clone(), Some("vol1"));
+    let root = e.dir.path().join("root");
+    std::fs::remove_file(root.join("etc/passwd")).unwrap();
+    std::fs::remove_file(root.join("etc/group")).unwrap();
+    // groupadd/useradd "succeed" but no account appears: a clear error
+    let err = e.svc.ensure_apps_account_blocking(&|_| {}).unwrap_err();
+    assert!(err.contains("could not be created"), "{err}");
+    // a stack's `up` fails before compose runs or any bind folder is made
+    let dir = root.join("vol1/docker/stacks/web");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("compose.yaml"),
+        "services:\n  web:\n    image: x\n",
+    )
+    .unwrap();
+    let (s, b) = call(&e, "POST", "/v1/docker/stacks/web/up", None).await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{}", String::from_utf8_lossy(&b));
+    let id = serde_json::from_slice::<TaskStarted>(&b).unwrap().task_id;
+    let t = wait_task(&e, &id).await;
+    let l = log(&e, &id);
+    assert_eq!(t.status, TaskStatus::Error, "{l}");
+    assert!(l.contains("could not be created"), "{l}");
+    assert!(!r.calls.lock().unwrap().iter().any(|c| c.contains(" up ")));
+
+    // created when missing (with the ids it got), and only once
+    *r.accounts.lock().unwrap() = Some(root.clone());
+    r.calls.lock().unwrap().clear();
+    let me = my_ids();
+    assert_eq!(
+        e.svc.ensure_apps_account_blocking(&|_| {}).unwrap(),
+        Some(me)
+    );
+    let calls = r.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert!(
+        calls[0].starts_with("groupadd --system docker-apps"),
+        "{calls:?}"
+    );
+    assert!(calls[1].starts_with("useradd --system"), "{calls:?}");
+    assert_eq!(
+        e.svc.ensure_apps_account_blocking(&|_| {}).unwrap(),
+        Some(me)
+    );
+    assert_eq!(r.calls.lock().unwrap().len(), 2, "nothing to create");
 }

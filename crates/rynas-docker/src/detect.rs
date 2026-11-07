@@ -5,7 +5,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use rynas_api_types::docker::{DockerPackage, EngineSource, InstallBlock};
+use rynas_api_types::docker::{DockerPackage, EngineSource, IncompletePackage, InstallBlock};
 use rynas_tasks::Cmd;
 
 use crate::{Runner, under};
@@ -42,10 +42,18 @@ const QUICK: Duration = Duration::from_secs(10);
 /// What the system says without the daemon.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct InstallFacts {
-    /// A docker CLI or daemon binary exists.
+    /// A docker CLI or daemon binary exists, or an engine package is installed; false while
+    /// engine packages are half-installed.
     pub installed: bool,
     pub source: EngineSource,
     pub packages: Vec<DockerPackage>,
+    /// Engine packages dpkg left half-done (an interrupted install): the install repairs
+    /// them.
+    pub incomplete: Vec<IncompletePackage>,
+    /// An install rynas started (its Docker source file exists) did not finish: the engine
+    /// is complete but the pin or the `docker-apps` account is missing. The install action
+    /// is offered again to finish it.
+    pub resumable: bool,
     pub compose_version: Option<String>,
     pub buildx_version: Option<String>,
     pub install_block: Option<InstallBlock>,
@@ -76,16 +84,46 @@ pub fn os_release(text: &str) -> (Option<String>, Option<String>) {
 /// Installed packages from `dpkg-query -W -f '${Package}\t${Version}\t${db:Status-Abbrev}\n'`
 /// (`ii ` = installed; packages dpkg does not know are on stderr and ignored).
 pub fn parse_dpkg(out: &str) -> Vec<DockerPackage> {
-    out.lines()
-        .filter_map(|l| {
-            let mut f = l.split('\t');
-            let (name, version, status) = (f.next()?, f.next()?, f.next()?);
-            (status.starts_with("ii") && !version.is_empty()).then(|| DockerPackage {
+    parse_dpkg_status(out).0
+}
+
+/// The same output split in complete packages (status "install ok installed": `ii `, `hi `)
+/// and half-done ones: status half-installed `H`, unpacked `U`, half-configured `F`,
+/// triggers awaiting `W` or pending `t`, or the reinstall-required flag `R`. Packages that
+/// are not installed (`un`, `rc`, `pn`) are in neither.
+pub fn parse_dpkg_status(out: &str) -> (Vec<DockerPackage>, Vec<IncompletePackage>) {
+    let mut done = Vec::new();
+    let mut half = Vec::new();
+    for l in out.lines() {
+        let mut f = l.split('\t');
+        let (Some(name), Some(version), Some(abbrev)) = (f.next(), f.next(), f.next()) else {
+            continue;
+        };
+        let b = abbrev.as_bytes();
+        let reinst = b.get(2) == Some(&b'R');
+        match b.get(1) {
+            Some(b'i') if !reinst => {
+                if !version.is_empty() {
+                    done.push(DockerPackage {
+                        name: name.to_string(),
+                        version: version.to_string(),
+                    });
+                }
+            }
+            Some(b'H' | b'U' | b'F' | b'W' | b't' | b'i') => half.push(IncompletePackage {
                 name: name.to_string(),
                 version: version.to_string(),
-            })
-        })
-        .collect()
+                status: abbrev.trim_end().to_string(),
+            }),
+            _ if reinst => half.push(IncompletePackage {
+                name: name.to_string(),
+                version: version.to_string(),
+                status: abbrev.trim_end().to_string(),
+            }),
+            _ => {}
+        }
+    }
+    (done, half)
 }
 
 /// Where the engine comes from, from the installed packages and the binaries found.
@@ -117,7 +155,7 @@ pub fn parse_buildx(out: &str) -> Option<String> {
 /// Reads the facts: binaries and os-release below `root`, commands through `runner`.
 pub fn install_facts(root: &Path, runner: &dyn Runner) -> InstallFacts {
     let binary = BINARIES.iter().any(|b| under(root, b).exists());
-    let packages = runner
+    let (packages, incomplete) = runner
         .run(
             &Cmd::new("dpkg-query")
                 .arg("-W")
@@ -127,10 +165,15 @@ pub fn install_facts(root: &Path, runner: &dyn Runner) -> InstallFacts {
                 .env_clear()
                 .timeout(QUICK),
         )
-        .map(|o| parse_dpkg(&o.stdout))
+        .map(|o| parse_dpkg_status(&o.stdout))
         .unwrap_or_default();
     let source = source_of(&packages, binary);
-    let installed = binary || source != EngineSource::None;
+    // half-installed packages are no engine, even when their files (binaries) are unpacked
+    let installed = incomplete.is_empty() && (binary || source != EngineSource::None);
+    let resumable = installed
+        && source == EngineSource::DockerCe
+        && under(root, crate::install::SOURCES).exists()
+        && (!under(root, crate::install::PREFERENCES).exists() || !apps_account_exists(root));
     let (compose_version, buildx_version) = if installed {
         let compose = runner
             .run(
@@ -170,7 +213,7 @@ pub fn install_facts(root: &Path, runner: &dyn Runner) -> InstallFacts {
         .filter(|o| o.success())
         .map(|o| o.stdout.trim().to_string())
         .filter(|a| !a.is_empty());
-    let install_block = if installed {
+    let install_block = if installed && !resumable {
         Some(InstallBlock::Installed)
     } else if !debian || id.as_deref().is_some_and(|i| i != "debian") {
         Some(InstallBlock::NotDebian)
@@ -191,12 +234,23 @@ pub fn install_facts(root: &Path, runner: &dyn Runner) -> InstallFacts {
         installed,
         source,
         packages,
+        incomplete,
+        resumable,
         compose_version,
         buildx_version,
         install_block,
         codename,
         arch,
     }
+}
+
+/// The `docker-apps` user and group exist in `<root>/etc/passwd` and `<root>/etc/group`.
+pub fn apps_account_exists(root: &Path) -> bool {
+    let read = |p: &str| std::fs::read_to_string(under(root, p)).unwrap_or_default();
+    matches!(
+        crate::install::apps_ids(&read("/etc/passwd"), &read("/etc/group")),
+        (Some(_), Some(_))
+    )
 }
 
 /// `Some(major)` of an engine version (`29.0.1` → 29).
@@ -352,6 +406,86 @@ pub(crate) mod tests {
             install_facts(r.path(), &fake).install_block,
             Some(InstallBlock::UnsupportedArch)
         );
+    }
+
+    /// What `dpkg-query` printed after the first real install died inside dpkg.
+    const HALF_DONE: &str = "docker-ce\t5:29.0.1-1~debian.13~trixie\tiHR\ndocker-ce-cli\t5:29.0.1-1~debian.13~trixie\tii \ncontainerd.io\t2.1.5-1~debian.13~trixie\tiU \ndocker-buildx-plugin\t0.29.1-1~debian.13~trixie\tiF \ndocker.io\t\tun \ncontainerd\t\trc \n";
+
+    #[test]
+    fn half_installed_packages_are_no_engine() {
+        let (done, half) = parse_dpkg_status(HALF_DONE);
+        assert_eq!(
+            done.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            ["docker-ce-cli"]
+        );
+        assert_eq!(
+            half.iter()
+                .map(|p| (p.name.as_str(), p.status.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("docker-ce", "iHR"),
+                ("containerd.io", "iU"),
+                ("docker-buildx-plugin", "iF")
+            ]
+        );
+        // unpacked binaries do not make it an engine either; the install is offered (repair)
+        let r = root(TRIXIE, &["/usr/bin/docker", "/usr/bin/dockerd"]);
+        let fake = Fake {
+            rules: vec![
+                ("dpkg-query", 0, HALF_DONE),
+                ("--print-architecture", 0, "amd64\n"),
+            ],
+            calls: Mutex::new(vec![]),
+        };
+        let f = install_facts(r.path(), &fake);
+        assert!(!f.installed, "{f:?}");
+        assert_eq!(f.incomplete.len(), 3);
+        assert_eq!(f.install_block, None);
+        assert!(!f.resumable);
+    }
+
+    #[test]
+    fn an_unfinished_rynas_install_is_resumable() {
+        let r = root(TRIXIE, &["/usr/bin/docker", "/usr/bin/dockerd"]);
+        let fake = Fake {
+            rules: vec![
+                (
+                    "dpkg-query",
+                    0,
+                    "docker-ce\t5:29.0.1-1~debian.13~trixie\tii \ndocker-ce-cli\t5:29.0.1-1~debian.13~trixie\tii \n",
+                ),
+                ("--print-architecture", 0, "amd64\n"),
+            ],
+            calls: Mutex::new(vec![]),
+        };
+        // adopted: not installed by rynas
+        assert_eq!(
+            install_facts(r.path(), &fake).install_block,
+            Some(InstallBlock::Installed)
+        );
+        // rynas's source file, no pin, no account: the install finishes the job
+        let src = under(r.path(), crate::install::SOURCES);
+        std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+        std::fs::write(&src, "x").unwrap();
+        let f = install_facts(r.path(), &fake);
+        assert!(
+            f.installed && f.resumable && f.install_block.is_none(),
+            "{f:?}"
+        );
+        // pin and account there: done, adopted
+        let pin = under(r.path(), crate::install::PREFERENCES);
+        std::fs::create_dir_all(pin.parent().unwrap()).unwrap();
+        std::fs::write(&pin, crate::install::preferences_content(29)).unwrap();
+        std::fs::write(
+            r.path().join("etc/passwd"),
+            "docker-apps:x:996:995::/nonexistent:/usr/sbin/nologin\n",
+        )
+        .unwrap();
+        assert!(install_facts(r.path(), &fake).resumable, "group missing");
+        std::fs::write(r.path().join("etc/group"), "docker-apps:x:995:\n").unwrap();
+        let f = install_facts(r.path(), &fake);
+        assert!(!f.resumable);
+        assert_eq!(f.install_block, Some(InstallBlock::Installed));
     }
 
     #[test]

@@ -36,6 +36,19 @@ pub struct DockerPackage {
     pub version: String,
 }
 
+/// An engine package dpkg left half-done (an interrupted install or upgrade): its status is
+/// not "install ok installed".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IncompletePackage {
+    pub name: String,
+    /// The version dpkg recorded (may be empty).
+    pub version: String,
+    /// dpkg's abbreviated status (`${db:Status-Abbrev}` without the trailing blank): `iU`
+    /// unpacked, `iF` half-configured, `iHR` half-installed and reinstall required, `iW`/`it`
+    /// triggers awaiting/pending.
+    pub status: String,
+}
+
 /// Why rynas cannot install Docker on this system.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -116,7 +129,8 @@ pub struct DetectedManager {
 /// `GET /api/v1/docker/status`. Answers also without Docker (`installed: false`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct DockerStatus {
-    /// A `docker` CLI or a `dockerd` binary exists.
+    /// A `docker` CLI or a `dockerd` binary exists, or an engine package is installed;
+    /// false while engine packages are half-installed (`install_incomplete`).
     pub installed: bool,
     /// The daemon answered on its socket.
     pub running: bool,
@@ -145,8 +159,15 @@ pub struct DockerStatus {
     /// statvfs of the data-root.
     pub data_root_usage: Option<FsUsage>,
     pub managers: Vec<DetectedManager>,
-    /// `Some`: the install action is refused, and why.
+    /// `Some`: the install action is refused, and why. `None` with `installed: true`: an
+    /// install rynas started did not finish (the pin or the `docker-apps` account is
+    /// missing); `POST /docker/install` finishes it.
     pub install_block: Option<InstallBlock>,
+    /// Engine packages dpkg left half-done (a failed install). Non-empty: `installed` is
+    /// false, and `POST /docker/install` repairs them (`dpkg --configure -a`,
+    /// `apt-get install -f`) and finishes the install.
+    #[serde(default)]
+    pub install_incomplete: Vec<IncompletePackage>,
     /// A running `docker.install` or `docker.migrate` task.
     pub task_id: Option<String>,
     pub warnings: Vec<DockerWarning>,

@@ -2,10 +2,12 @@
 //! the configuration key `web_access`, its render into the engine's configuration (Caddy
 //! JSON, [`caddy`]), the load over the engine's admin socket ([`admin`]), `last-good.json`
 //! for a boot without rynasd, anti-drift, the timed confirmation of changes to the
-//! interface's own route, local names through Avahi, and route diagnostics ([`diag`]).
+//! interface's own route, local names through Avahi's D-Bus API ([`avahi`]), and route
+//! diagnostics ([`diag`]).
 //!
-//! - **The key is the only source.** An apply validates it ([`model::validate`]), writes
-//!   rynas's block of `/etc/avahi/hosts` (a managed file, when Avahi is installed) and, in
+//! - **The key is the only source.** An apply validates it ([`model::validate`]), hands the
+//!   routes' local names to the Avahi publisher ([`avahi::LocalNames`]; no file is written:
+//!   static `/etc/avahi/hosts` entries collide with the host's own reverse record) and, in
 //!   [`Applier::reconcile`], renders the engine configuration from the key and the host
 //!   facts (host name, connected subnets) and loads it with `POST /load`. The engine
 //!   validates it and keeps the running configuration on error: the error fails the apply,
@@ -31,6 +33,7 @@
 //!   (D-PROXY; `docs/phase1/plan.md`, "Behind the built-in reverse proxy").
 
 pub mod admin;
+pub mod avahi;
 pub mod caddy;
 pub mod diag;
 pub mod model;
@@ -205,23 +208,11 @@ pub fn resolve(cfg: &WebAccessConfig, facts: &HostFacts) -> Resolved {
     Resolved { host, ui, routes }
 }
 
-/// rynas's lines of `/etc/avahi/hosts`: `<address> <name>` for every route's local name
-/// (the interface's own `<host>.local` is Avahi's host name already). Empty in external
-/// mode, with local names off, or without an IPv4 address.
+/// The local names published through Avahi, as `<address> <name>` lines (the interface's
+/// own `<host>.local` is Avahi's host name already). Empty in external mode, with local
+/// names off, or without an IPv4 address.
 pub fn avahi_block(cfg: &WebAccessConfig, facts: &HostFacts) -> String {
-    if cfg.settings.mode == ProxyMode::External || !cfg.settings.local_names {
-        return String::new();
-    }
-    let Some(addr) = facts.primary_v4 else {
-        return String::new();
-    };
-    let mut out = String::new();
-    for r in resolve(cfg, facts).routes {
-        for n in r.names {
-            out.push_str(&format!("{addr} {n}\n"));
-        }
-    }
-    out
+    avahi::lines(&avahi::records(cfg, facts))
 }
 
 /// `https://<name>[:port]<path>`.
@@ -320,6 +311,8 @@ pub struct WebAccessSvc {
     confirm_gen: AtomicU64,
     /// One engine push at a time (apply, watch, sync).
     push_lock: Mutex<()>,
+    /// The routes' local names, published through Avahi's D-Bus API.
+    pub names: avahi::LocalNames,
 }
 
 pub type WaState = Option<Arc<WebAccessSvc>>;
@@ -350,7 +343,42 @@ impl WebAccessSvc {
             confirm: Mutex::new(None),
             confirm_gen: AtomicU64::new(0),
             push_lock: Mutex::new(()),
+            names: avahi::LocalNames::new(),
         }
+    }
+
+    /// Hands the local names of `cfg` on this host to the Avahi publisher.
+    pub fn publish_names(&self, cfg: &WebAccessConfig, facts: &HostFacts) {
+        self.names.set(avahi::records(cfg, facts));
+    }
+
+    /// Migration: removes rynas's old block from `/etc/avahi/hosts` (written before the names
+    /// moved to Avahi's D-Bus API) and reloads Avahi once when it runs. Returns whether a
+    /// block was removed.
+    pub fn migrate_avahi_hosts(&self, system: &dyn System, log: &dyn Fn(&str)) -> bool {
+        let p = self.path(AVAHI_HOSTS);
+        let Ok(text) = std::fs::read_to_string(&p) else {
+            return false;
+        };
+        let Some(clean) = avahi::strip_hosts_block(&text) else {
+            return false;
+        };
+        let mode = std::fs::metadata(&p)
+            .map(|m| std::os::unix::fs::PermissionsExt::mode(&m.permissions()) & 0o7777)
+            .unwrap_or(0o644);
+        if let Err(e) = crate::tls::write_atomic(&p, clean.as_bytes(), mode, None) {
+            log(&format!("web access: {}: {e}", p.display()));
+            return false;
+        }
+        log(&format!(
+            "web access: removed rynas's old block from {AVAHI_HOSTS} (local names are published through Avahi's D-Bus API)"
+        ));
+        if system.unit_active(AVAHI_UNIT).unwrap_or(false)
+            && let Err(e) = system.reload_or_restart_unit(AVAHI_UNIT)
+        {
+            log(&format!("web access: reloading Avahi: {e}"));
+        }
+        true
     }
 
     /// The running system's facts: kernel host name, `ip -j addr show`,
@@ -794,7 +822,7 @@ impl WebAccessSvc {
     /// - never applied and the engine installed: the default value is applied (the proxy
     ///   serves the interface from install);
     /// - the host facts changed since the last load: the applied value is written again
-    ///   (Avahi lines, access ranges, certificate names);
+    ///   (local names, access ranges, certificate names);
     /// - otherwise the running configuration is compared with the render and loaded again
     ///   when it differs (the engine restarted from an older `last-good.json`, or someone
     ///   changed it through the socket).
@@ -802,6 +830,20 @@ impl WebAccessSvc {
         let Some(ops) = self.ops.get() else {
             return Ok(());
         };
+        // local names follow the applied value and the host facts (address, host name)
+        self.publish_names(&self.applied(), &self.facts());
+        if self.migrate_avahi_hosts(ops.config.system(), log)
+            && ops
+                .config
+                .applied(WEB_ACCESS_KEY)
+                .map_err(|e| e.to_string())?
+                .is_some()
+        {
+            // forget the old block in the drift records
+            ops.config
+                .drift_overwrite(WEB_ACCESS_KEY, log)
+                .map_err(|e| e.to_string())?;
+        }
         if !self.installed() {
             self.publish_ui(&[]);
             return Ok(());
@@ -860,6 +902,7 @@ impl WebAccessSvc {
         let facts = self.facts();
         let r = resolve(&cur, &facts);
         let port = cur.settings.https_port;
+        let names = self.names.report();
         let routes = r
             .routes
             .iter()
@@ -884,7 +927,17 @@ impl WebAccessSvc {
                 ),
                 access: x.route.access,
                 enabled: x.route.enabled,
-                problems: x.problems.clone(),
+                problems: {
+                    let mut p = x.problems.clone();
+                    p.extend(
+                        x.names
+                            .iter()
+                            .filter_map(|n| names.problem(n))
+                            .map(String::from),
+                    );
+                    p.dedup();
+                    p
+                },
             })
             .collect();
         let reserved = {
@@ -937,6 +990,15 @@ impl WebAccessSvc {
             .ok_or_else(|| Error::not_found(format!("no route {id}")))?;
         let mut checks = Vec::new();
         let name = r.names.first().cloned();
+        // 0. the name is published through Avahi
+        checks.push(match &name {
+            None => check(
+                "local_name",
+                CheckState::Skipped,
+                format!("the route has no name ({})", r.problems.join(", ")),
+            ),
+            Some(n) => local_name_check(n, &self.names.report()),
+        });
         // 1. the name resolves to this NAS
         checks.push(match &name {
             None => check(
@@ -1227,6 +1289,59 @@ impl WebAccessSvc {
     }
 }
 
+/// The `local_name` check of `name` from the publisher's report.
+fn local_name_check(name: &str, report: &avahi::NamesReport) -> RouteCheck {
+    use avahi::{Availability, NameState};
+    match (&report.avahi, report.names.get(name)) {
+        (Availability::Unknown, _) => check(
+            "local_name",
+            CheckState::Skipped,
+            "this rynasd does not publish local names (development mode)",
+        ),
+        (Availability::Down(why), _) => check(
+            "local_name",
+            CheckState::Fail,
+            format!(
+                "Avahi is not reachable on the system bus ({why}): local names are not published; install and start avahi-daemon"
+            ),
+        ),
+        (Availability::Starting, _) => check(
+            "local_name",
+            CheckState::Warn,
+            "Avahi is registering its own host name; the name follows",
+        ),
+        (Availability::Up, None) => check(
+            "local_name",
+            CheckState::Warn,
+            format!("{name} is being handed to Avahi"),
+        ),
+        (Availability::Up, Some((addr, st))) => match st {
+            NameState::Established => check(
+                "local_name",
+                CheckState::Ok,
+                format!("{name} → {addr}, published through Avahi"),
+            ),
+            NameState::Registering => check(
+                "local_name",
+                CheckState::Warn,
+                format!("{name} → {addr}: Avahi is probing the name"),
+            ),
+            NameState::Collision(why) => check(
+                "local_name",
+                CheckState::Fail,
+                format!(
+                    "{name} is already used on the network ({why}); change the route's label, or Sync to try again"
+                ),
+            ),
+            NameState::Failed(why) => check(
+                "local_name",
+                CheckState::Fail,
+                format!("Avahi refused {name}: {why}"),
+            ),
+        },
+    }
+}
+
 fn caddy_dial(host: &str, port: u16) -> String {
     if host.contains(':') {
         format!("[{host}]:{port}")
@@ -1271,14 +1386,9 @@ impl Applier for WebAccessDomain {
         serde_json::to_value(c).map_err(|e| Invalid::from(e.to_string()))
     }
 
-    fn render(&self, value: &Value, ctx: &ApplyCtx) -> Result<Vec<ManagedFile>, String> {
-        // rynas's lines of the static Avahi hosts, only where Avahi is installed
-        if !ctx.path(Path::new("/etc/avahi")).is_dir() {
-            return Ok(Vec::new());
-        }
-        let cfg = config_of(Some(value));
-        let block = avahi_block(&cfg, &self.svc.facts());
-        Ok(vec![ManagedFile::block(AVAHI_HOSTS, "web-access", block)])
+    /// No files: local names go through Avahi's D-Bus API, the engine through its socket.
+    fn render(&self, _value: &Value, _ctx: &ApplyCtx) -> Result<Vec<ManagedFile>, String> {
+        Ok(Vec::new())
     }
 
     fn reconcile(
@@ -1287,11 +1397,8 @@ impl Applier for WebAccessDomain {
         to: Option<&Value>,
         ctx: &ApplyCtx,
     ) -> Result<(), String> {
-        if ctx.path(Path::new("/etc/avahi")).is_dir()
-            && ctx.system.unit_active(AVAHI_UNIT).unwrap_or(false)
-        {
-            ctx.system.reload_or_restart_unit(AVAHI_UNIT)?;
-        }
+        self.svc.migrate_avahi_hosts(ctx.system, ctx.log);
+        self.svc.publish_names(&config_of(to), &self.svc.facts());
         self.svc.engine_apply(from, to, ctx.system, ctx.log)
     }
 }
@@ -1404,6 +1511,8 @@ async fn sync_post(State(st): State<WaState>, hd: HeaderMap) -> Res<Json<ProxyEn
     let (s, ops) = wsvc(&st)?;
     let who = admin_user(&ops, &hd, "web access")?;
     audit(&who, "sync", "engine");
+    // collided or refused local names are tried again
+    s.names.retry();
     blocking(move || {
         if let Err(e) = s.sync(&|l| tracing::info!("{l}")) {
             tracing::warn!("web access: {e}");

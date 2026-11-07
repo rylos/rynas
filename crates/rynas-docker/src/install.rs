@@ -2,6 +2,12 @@
 //! `/etc/apt/keyrings`), pinned to the major version it installs. Only on request and only
 //! when no engine exists: an existing one is adopted, never reinstalled.
 //!
+//! Every step can run again: a failed install (dpkg interrupted, packages left `iU`/`iHR`)
+//! is finished by running the install once more. It first repairs dpkg ([`repair_cmds`]),
+//! keeps a key that already checks out, rewrites the source and the pin, lets apt skip what
+//! is installed, creates the `docker-apps` account only when missing, and enables the
+//! engine ([`enable_cmd`]).
+//!
 //! The steps are data ([`InstallStep`]) so that rynasd runs them in a task (logging every
 //! command, `--dry-system` only logs them) and tests read them.
 
@@ -98,6 +104,11 @@ pub fn pinned_major(text: &str) -> Option<u32> {
 /// `systemd-run --wait --pipe` streams the output into the task log and returns apt's
 /// exit status.
 fn apt(args: &[&str]) -> Cmd {
+    outside("apt-get", args)
+}
+
+/// `program args` in a transient unit outside rynasd's sandbox (see [`apt`]).
+fn outside(program: &str, args: &[&str]) -> Cmd {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let secs = std::time::SystemTime::now()
@@ -112,13 +123,13 @@ fn apt(args: &[&str]) -> Cmd {
         .args(["--wait", "--pipe", "--collect", "--quiet", "--service-type=exec"])
         .arg(unit)
         .args([
-            "--description=rynas: apt-get (Docker install)",
+            &format!("--description=rynas: {program} (Docker install)"),
             "--setenv=DEBIAN_FRONTEND=noninteractive",
             "--setenv=NEEDRESTART_MODE=l",
             "--setenv=APT_LISTCHANGES_FRONTEND=none",
             "--setenv=LC_ALL=C",
             "--",
-            "apt-get",
+            program,
         ])
         .args(args)
         .env_clear()
@@ -133,10 +144,41 @@ pub fn policy_cmd() -> Cmd {
         .timeout(SHORT)
 }
 
-/// Steps until the repository is known to apt (then rynasd reads [`policy_cmd`], writes the
-/// pin, applies the engine settings and runs [`install_cmd`]).
-pub fn repo_steps(codename: &str, arch: &str) -> Vec<InstallStep> {
+/// The repair of an interrupted install, before anything else: dpkg finishes configuring
+/// what it unpacked, then apt completes missing dependencies. Both keep configuration files
+/// rynas wrote (`--force-confdef --force-confold`) and run outside the sandbox like every
+/// apt call.
+pub fn repair_cmds() -> Vec<Cmd> {
     vec![
+        outside(
+            "dpkg",
+            &["--configure", "-a", "--force-confdef", "--force-confold"],
+        ),
+        apt(&[
+            "install",
+            "-f",
+            "-y",
+            "-o",
+            "Dpkg::Options::=--force-confdef",
+            "-o",
+            "Dpkg::Options::=--force-confold",
+        ]),
+    ]
+}
+
+/// The engine enabled and started (the packages' scripts do it, unless they failed).
+pub fn enable_cmd() -> Cmd {
+    Cmd::new("systemctl")
+        .args(["enable", "--now", "containerd.service", "docker.service"])
+        .env_clear()
+        .timeout(Duration::from_secs(5 * 60))
+}
+
+/// Steps until the repository is known to apt (then rynasd reads [`policy_cmd`], writes the
+/// pin, applies the engine settings and runs [`install_cmd`]). `key_ok`: the keyring holds
+/// Docker's key already (a resumed install): no download.
+pub fn repo_steps(codename: &str, arch: &str, key_ok: bool) -> Vec<InstallStep> {
+    let mut v = vec![
         InstallStep::Run(apt(&["update"])),
         InstallStep::Run(apt(&["install", "-y", "ca-certificates", "curl"])),
         InstallStep::Run(
@@ -145,23 +187,28 @@ pub fn repo_steps(codename: &str, arch: &str) -> Vec<InstallStep> {
                 .env_clear()
                 .timeout(SHORT),
         ),
-        InstallStep::Run(
+    ];
+    if !key_ok {
+        v.push(InstallStep::Run(
             Cmd::new("curl")
                 .args(["-fsSL", "--proto", "=https", KEY_URL, "-o", KEY_STAGING])
                 .env_clear()
                 .timeout(Duration::from_secs(120)),
-        ),
-        InstallStep::CheckKey {
+        ));
+        v.push(InstallStep::CheckKey {
             staged: KEY_STAGING,
             dest: KEYRING,
-        },
+        });
+    }
+    v.extend([
         InstallStep::Write {
             path: SOURCES,
             content: sources_content(codename, arch),
             mode: 0o644,
         },
         InstallStep::Run(apt(&["update"])),
-    ]
+    ]);
+    v
 }
 
 /// The package install. `--force-confold` keeps configuration files rynas wrote before
@@ -351,7 +398,7 @@ ZS5vcmc+
         assert!(check_key(TEST_KEY).unwrap_err().contains("refused"));
         assert!(check_key("<html>not found</html>").is_err());
         // the download never goes straight to the keyring
-        let steps = repo_steps("trixie", "amd64");
+        let steps = repo_steps("trixie", "amd64", false);
         assert!(steps.iter().any(|s| matches!(
             s,
             InstallStep::CheckKey { staged, dest } if *staged == KEY_STAGING && *dest == KEYRING
@@ -384,9 +431,47 @@ ZS5vcmc+
         let c = install_cmd().display();
         assert!(c.starts_with("systemd-run --wait --pipe --collect --quiet"), "{c}");
         assert!(c.contains(" -- apt-get install -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold docker-ce docker-ce-cli containerd.io"), "{c}");
-        let steps = repo_steps("bookworm", "arm64");
+        let steps = repo_steps("bookworm", "arm64", false);
         assert!(matches!(&steps[5], InstallStep::Write { path, .. } if *path == SOURCES));
         assert!(matches!(&steps[3], InstallStep::Run(c) if c.display().contains("--proto =https")));
+    }
+
+    #[test]
+    fn repair_and_resume() {
+        let r: Vec<String> = repair_cmds().iter().map(Cmd::display).collect();
+        assert!(r[0].starts_with("systemd-run --wait --pipe"), "{}", r[0]);
+        assert!(
+            r[0].ends_with(" -- dpkg --configure -a --force-confdef --force-confold"),
+            "{}",
+            r[0]
+        );
+        assert!(r[0].contains("--setenv=DEBIAN_FRONTEND=noninteractive"));
+        assert!(
+            r[1].ends_with(" -- apt-get install -f -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold"),
+            "{}",
+            r[1]
+        );
+        // a keyring that checks out is not downloaded again
+        let steps = repo_steps("trixie", "amd64", true);
+        assert!(
+            !steps
+                .iter()
+                .any(|s| matches!(s, InstallStep::CheckKey { .. }))
+        );
+        assert!(
+            !steps
+                .iter()
+                .any(|s| matches!(s, InstallStep::Run(c) if c.display().starts_with("curl")))
+        );
+        assert!(
+            steps
+                .iter()
+                .any(|s| matches!(s, InstallStep::Write { path, .. } if *path == SOURCES))
+        );
+        assert_eq!(
+            enable_cmd().display(),
+            "systemctl enable --now containerd.service docker.service"
+        );
     }
 
     #[test]
