@@ -99,11 +99,44 @@ Transition from plain HTTP (port 8080):
   before; RYNAS_WEB_LISTEN=127.0.0.1:8080 closes plain HTTP to the network.
 - The session cookie is marked Secure over HTTPS, so a session started on
   8443 is never sent over plain HTTP. Log in again after switching ports.
-- A later release moves 8080 to 127.0.0.1 only, as the upstream of the
-  built-in reverse proxy on 80/443.
 - A reverse proxy on another host that talks to 8080 and terminates TLS
-  itself: send X-Forwarded-Proto: https (no redirect, Secure cookie), or
-  point it at 8443.
+  itself: set RYNAS_WEB_LISTEN=0.0.0.0:8080 and send X-Forwarded-Proto:
+  https (no redirect, Secure cookie), or point it at 8443. Its
+  X-Forwarded-For is not trusted: every client counts as the proxy's address
+  for the login rate limit.
+
+Behind the built-in reverse proxy (rynas-caddy)
+-----------------------------------------------
+Port 8080 is the upstream of rynas-caddy (80/443). With the default
+RYNAS_WEB_LISTEN=auto it moves by itself, without a restart and without
+ending sessions:
+1. Before rynas-caddy fronts the interface (not installed, external proxy
+   mode, not applied yet), 8080 listens on 0.0.0.0 as before.
+2. Once rynasd has loaded the interface's route into rynas-caddy it writes
+   the names to /run/rynas/web-access.ui. When that file is there and HTTPS
+   on 8443 works (listening, certificate loaded), rynas-web moves 8080 to
+   127.0.0.1 within 5 seconds. Open the interface at https://<host>.local/
+   (rynas-caddy) or https://<nas-address>:8443/ (always).
+3. Back to external mode, or rynas-caddy removed: the file goes away and
+   8080 listens on 0.0.0.0 again.
+With HTTPS off (RYNAS_WEB_TLS_LISTEN=off) or 8443 not working, 8080 never
+leaves the network, so there is always a way in.
+
+Upgrading from a release with RYNAS_WEB_LISTEN=0.0.0.0:8080: an unchanged
+/etc/default/rynas-web is replaced by the new one (auto); an edited one is
+offered by dpkg, and keeping yours keeps 8080 where you put it. Check with
+    grep RYNAS_WEB_LISTEN /etc/default/rynas-web
+    ss -ltn 'sport = :8080'
+Locked out of 80/443? 8443 does not go through rynas-caddy; from the NAS
+itself http://127.0.0.1:8080/ always works (ssh -L 8080:127.0.0.1:8080
+<nas>).
+
+Client addresses: requests relayed by rynas-caddy reach rynas-web from
+127.0.0.1. rynas-web then takes the client's address from the
+X-Forwarded-For header Caddy sets (its right-most entry), but only for
+connections from loopback to the plain port: never on 8443 and never from
+other hosts, where the header is ignored. The login rate limit, the log
+line for fail2ban and the lockout notification see the real client.
 
 fail2ban
 --------

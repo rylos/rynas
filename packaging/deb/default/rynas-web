@@ -8,12 +8,19 @@
 # web interface or the API). "off" disables HTTPS.
 RYNAS_WEB_TLS_LISTEN=[::]:8443
 
-# Plain HTTP address. Kept during the transition to HTTPS: once a certificate
-# is loaded, requests from other hosts are redirected (307) to
-# https://<same host>:8443/; requests from this host (127.0.0.1, ::1: a
-# reverse proxy here, an SSH tunnel) are always served as they are.
-# 127.0.0.1:8080 closes the plain port to the network entirely.
-RYNAS_WEB_LISTEN=0.0.0.0:8080
+# Plain HTTP address: the upstream of the built-in reverse proxy (rynas-caddy,
+# ports 80/443). "auto" (or auto:PORT) listens on 0.0.0.0:8080 until
+# rynas-caddy fronts the interface and HTTPS on 8443 works, then on
+# 127.0.0.1:8080 only; without rynas-caddy, in external proxy mode or with
+# HTTPS off it stays on the network. While it is there, requests from other
+# hosts are redirected (307) to https://<same host>:8443/ once a certificate
+# is loaded; requests from this host (127.0.0.1, ::1: the reverse proxy, an
+# SSH tunnel) are always served as they are.
+# An address is used as it is: 127.0.0.1:8080 closes the plain port to the
+# network for good, 0.0.0.0:8080 keeps it open (a proxy on another host).
+# X-Forwarded-For is trusted only from loopback peers on this port, never on
+# 8443 and never from other hosts.
+RYNAS_WEB_LISTEN=auto
 
 # Extra command line options, for example:
 #   --no-https-redirect         serve plain HTTP to other hosts too

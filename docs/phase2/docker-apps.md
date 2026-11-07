@@ -789,10 +789,13 @@ Check details and engine errors are English, shown as they are.
     are already stripped);
   - `public` with its checklist, auto-block from the access logs, HSTS;
   - Tailscale Services.
-- **Owed by rynas-web:**
-  - trusting `X-Forwarded-For` from the loopback proxy, so the login rate limit sees
-    clients instead of `127.0.0.1`;
-  - the plain listener moving to `127.0.0.1:8080`.
+- **Owed by rynas-web** — done in W1b (`../phase1/plan.md`, "Behind the built-in reverse
+  proxy (W1b)"):
+  - `X-Forwarded-For` trusted from the loopback proxy on the plain port only (right-most
+    untrusted entry), so the login rate limit and fail2ban see clients instead of
+    `127.0.0.1`;
+  - the plain listener moving to `127.0.0.1:8080` (`--listen auto`) once rynasd publishes
+    `/run/rynas/web-access.ui` and `:8443` is up.
 
 ## 6. App catalog format (wave A1)
 
