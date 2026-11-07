@@ -662,3 +662,13 @@ proxied ports bind to `${RYNAS_BIND}`. `packaging/apps-render-test.sh` also runs
 Arcane, Dockhand, Portainer CE, Dockge (managers); Immich, Jellyfin, Vaultwarden, Nextcloud,
 Syncthing, Home Assistant, Uptime Kuma, Paperless-ngx. Images pinned by tag and verified digest
 (2026-11-07); per-entry choices in `../research/app-catalog-format.md` § 2.
+
+## 7. Open points between waves
+
+- **Loopback binding before the web access exists (A2 → W1).** With `RYNAS_BIND=127.0.0.1` an app is unreachable until the proxy (W1) runs. Rule:
+  - while web access is not active, the install wizard defaults to `publish_lan` and says the app is reachable on `http://<nas>:<port>`;
+  - once W1 is active, the default becomes loopback plus a route, and the "Expose" step replaces the port.
+
+  Already-installed apps get a one-click "Move behind the proxy", which re-renders with loopback and adds a route.
+- **Install without `docker compose config` first:** the validation only fails at `up`. Add a validation step that is read-only and safe under `--dry-system`.
+- **Per-install volume choice:** apps always go on the Docker volume today. Per-folder placement exists, for example a database on SSD.
