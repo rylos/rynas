@@ -18,6 +18,11 @@ use crate::validate::smb_extra;
 pub const SMB_CONF: &str = "/etc/samba/smb.conf";
 pub const AVAHI_SERVICE: &str = "/etc/avahi/services/rynas-smb.service";
 
+/// The device model macOS shows for the NAS: the same value in `fruit:model` (sent to Mac
+/// clients in the AAPL reply) and in the `_device-info._tcp` record of rynas's Avahi file, so
+/// Finder shows one icon whichever it reads first.
+pub const DEVICE_MODEL: &str = "RackMac";
+
 /// Modules every share loads, in this order (fruit before streams_xattr).
 pub const BASE_VFS: [&str; 3] = ["catia", "fruit", "streams_xattr"];
 
@@ -145,7 +150,9 @@ pub fn global_lines(g: &SmbSettings, hostname: &str) -> Vec<Line> {
         v.push(l("bind interfaces only", "yes"));
     }
     v.extend([
-        // rynas writes the Avahi service file itself
+        // rynas writes the Avahi service file itself (one announcement: smbd's own would
+        // collide with it, Avahi names are case-insensitive). smbd reads this only when it
+        // starts: the shares domain restarts it once when a running smbd predates it.
         l("multicast dns register", "no"),
         l("access based share enum", "yes"),
         l("vfs objects", BASE_VFS.join(" ")),
@@ -153,7 +160,7 @@ pub fn global_lines(g: &SmbSettings, hostname: &str) -> Vec<Line> {
         l("fruit:nfs_aces", "no"),
         l("fruit:wipe_intentionally_left_blank_rfork", "yes"),
         l("fruit:delete_empty_adfiles", "yes"),
-        l("fruit:model", "MacSamba"),
+        l("fruit:model", DEVICE_MODEL),
         l("inherit acls", "yes"),
         l("map acl inherit", "yes"),
         l("store dos attributes", "yes"),

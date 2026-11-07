@@ -35,10 +35,12 @@
 pub mod admin;
 pub mod avahi;
 pub mod caddy;
+pub mod certs;
 pub mod diag;
+pub mod domains;
 pub mod model;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -56,6 +58,9 @@ use rynas_api_types::error_codes;
 use rynas_api_types::web_access::*;
 use rynas_config::files::under_root;
 use rynas_config::{Applier, ApplyCtx, Invalid, ManagedFile, System};
+use rynas_dns::Creds;
+use rynas_notify::Notifier;
+use rynas_notify::engine::secrets::SecretBox;
 use rynas_tls::{Names, PemPair};
 use serde_json::Value;
 
@@ -77,6 +82,10 @@ pub const STATE_DIR: &str = "/var/lib/rynas-caddy";
 pub const LAST_GOOD: &str = "/var/lib/rynas-caddy/last-good.json";
 pub const CERT: &str = "/var/lib/rynas-caddy/rynas/local.crt";
 pub const KEY: &str = "/var/lib/rynas-caddy/rynas/local.key";
+/// DNS provider secrets the engine reads through `{file.*}` placeholders (wave W2).
+pub const DNS_SECRETS: &str = "/var/lib/rynas-caddy/rynas/dns";
+/// How often the certificate inventory is checked for notifications.
+pub const CERT_CHECK_INTERVAL: Duration = Duration::from_secs(600);
 /// Group of the engine's user: reads the configuration and the key rynasd writes.
 pub const ENGINE_GROUP: &str = "rynas-caddy";
 pub const AVAHI_HOSTS: &str = "/etc/avahi/hosts";
@@ -117,6 +126,8 @@ pub struct EnginePaths {
     pub storage: String,
     pub cert: String,
     pub key: String,
+    /// Folder of the DNS secret files (`<dir>/<credential>/<field>`).
+    pub dns_secrets: String,
 }
 
 impl Default for EnginePaths {
@@ -126,9 +137,13 @@ impl Default for EnginePaths {
             storage: format!("{STATE_DIR}/data"),
             cert: CERT.into(),
             key: KEY.into(),
+            dns_secrets: DNS_SECRETS.into(),
         }
     }
 }
+
+/// Decrypted credentials by id: provider and values.
+pub type CredValues = BTreeMap<String, (DnsProvider, Creds)>;
 
 /// Everything a render depends on.
 pub struct RenderInput<'a> {
@@ -139,13 +154,21 @@ pub struct RenderInput<'a> {
     pub ui_port: u16,
     /// rynas-web's own HTTPS port.
     pub emergency_port: u16,
+    /// Decrypted credentials of the domains (only the fields written as values, never as
+    /// placeholders, are rendered from it).
+    pub creds: &'a CredValues,
 }
 
 /// A route with the names it gets on this host.
 #[derive(Debug, Clone)]
 pub struct ResolvedRoute {
     pub route: WebRoute,
+    /// Every served name: the local one first, then the own-domain ones.
     pub names: Vec<String>,
+    /// `<label>-<host>.local`, when it has one.
+    pub local: Option<String>,
+    /// `<label>.<domain>` for each enabled domain.
+    pub domain_names: Vec<String>,
     pub problems: Vec<String>,
 }
 
@@ -153,12 +176,15 @@ pub struct ResolvedRoute {
 #[derive(Debug, Clone)]
 pub struct Resolved {
     pub host: String,
+    /// The interface's names: local ones, then the domains'.
     pub ui: Vec<String>,
+    /// The interface's local names (`<host>.local`, `<host>`).
+    pub ui_local: Vec<String>,
     pub routes: Vec<ResolvedRoute>,
 }
 
 impl Resolved {
-    /// Every served name (for the certificate).
+    /// Every served name.
     pub fn all_names(&self) -> Vec<String> {
         let mut v = self.ui.clone();
         for r in &self.routes {
@@ -166,46 +192,86 @@ impl Resolved {
         }
         v
     }
+
+    /// The names the local leaf covers (no own-domain names: those get ACME certificates).
+    pub fn local_names(&self) -> Vec<String> {
+        let mut v = self.ui_local.clone();
+        v.extend(self.routes.iter().filter_map(|r| r.local.clone()));
+        v
+    }
 }
 
 /// The names each route gets: `<label>-<host>.local` when it is enabled, local names are
-/// on and the name fits; routes sorted by id.
+/// on and the name fits; `<label>.<domain>` for each enabled own domain; routes sorted by
+/// id.
 pub fn resolve(cfg: &WebAccessConfig, facts: &HostFacts) -> Resolved {
     let host = facts.host();
     let builtin = cfg.settings.mode == ProxyMode::Builtin;
-    let ui = if builtin && cfg.settings.ui.enabled {
-        model::ui_names(&host)
+    let (ui_local, mut ui) = if builtin && cfg.settings.ui.enabled {
+        let l = model::ui_names(&host);
+        (l.clone(), l)
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
+    if builtin && cfg.settings.ui.enabled {
+        ui.extend(
+            domains::active(cfg)
+                .filter(|d| d.ui)
+                .map(|d| d.name.clone()),
+        );
+    }
     let mut routes: Vec<ResolvedRoute> = cfg
         .routes
         .iter()
         .map(|r| {
             let mut problems = Vec::new();
-            let mut names = Vec::new();
+            let mut local = None;
+            let mut domain_names = Vec::new();
             if !r.enabled {
                 problems.push("disabled".to_string());
-            } else if !cfg.settings.local_names || !r.names.local {
-                problems.push("local_names_off".to_string());
             } else {
-                match model::local_name(&r.label, &host) {
-                    Some(n) => names.push(n),
-                    None => problems.push("name_too_long".to_string()),
+                if !cfg.settings.local_names || !r.names.local {
+                    problems.push("local_names_off".to_string());
+                } else {
+                    match model::local_name(&r.label, &host) {
+                        Some(n) => local = Some(n),
+                        None => problems.push("name_too_long".to_string()),
+                    }
+                }
+                if r.names.domain {
+                    for d in domains::active(cfg) {
+                        match domains::route_name(&r.label, &d.name) {
+                            Some(n) => domain_names.push(n),
+                            None => problems.push("domain_name_too_long".to_string()),
+                        }
+                    }
                 }
             }
             if !builtin {
-                names.clear();
+                local = None;
+                domain_names.clear();
             }
+            let names = local
+                .iter()
+                .cloned()
+                .chain(domain_names.iter().cloned())
+                .collect();
             ResolvedRoute {
                 route: r.clone(),
                 names,
+                local,
+                domain_names,
                 problems,
             }
         })
         .collect();
     routes.sort_by(|a, b| a.route.id.cmp(&b.route.id));
-    Resolved { host, ui, routes }
+    Resolved {
+        host,
+        ui,
+        ui_local,
+        routes,
+    }
 }
 
 /// The local names published through Avahi, as `<address> <name>` lines (the interface's
@@ -313,6 +379,53 @@ pub struct WebAccessSvc {
     push_lock: Mutex<()>,
     /// The routes' local names, published through Avahi's D-Bus API.
     pub names: avahi::LocalNames,
+    /// rynasd's state folder (`/var/lib/rynas`): the record sets written for the domains.
+    pub state_dir: PathBuf,
+    /// The record clients of the DNS providers ([`domains::real_factory`]; tests inject
+    /// fakes, `--dry-system` [`domains::offline_factory`]).
+    pub dns: domains::DnsFactory,
+    /// The age key that seals the DNS credentials (the notification engine's).
+    pub secret_box: OnceLock<Arc<SecretBox>>,
+    /// The interface's certificate service (certificate dashboard).
+    pub tls: OnceLock<Arc<crate::tls::TlsSvc>>,
+    /// Certificate notifications.
+    pub notifier: OnceLock<Arc<dyn Notifier>>,
+    /// Recent JSON log lines of the engine (certificate errors); `journalctl` by default.
+    pub engine_log: Box<dyn Fn() -> String + Send + Sync>,
+    dns_mem: Mutex<domains::DnsMem>,
+    cert_mem: Mutex<CertMem>,
+}
+
+/// What the certificate checks remember.
+#[derive(Default)]
+struct CertMem {
+    /// When each expected ACME subject was first seen missing (ms).
+    expected_since: BTreeMap<String, i64>,
+    notified: certs::Notified,
+    last_check: Option<Instant>,
+}
+
+/// The engine's recent log lines: `journalctl -u rynas-caddy -o cat` of the last day.
+fn journal_lines() -> String {
+    std::process::Command::new("journalctl")
+        .args([
+            "-u",
+            UNIT,
+            "-o",
+            "cat",
+            "--no-pager",
+            "-n",
+            "2000",
+            "--since",
+            "-24h",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
 }
 
 pub type WaState = Option<Arc<WebAccessSvc>>;
@@ -328,7 +441,6 @@ impl WebAccessSvc {
         probe: Box<dyn NetProbe>,
     ) -> Self {
         Self {
-            root,
             admin: AdminClient::new(admin_socket),
             ui_port,
             emergency_port,
@@ -344,7 +456,48 @@ impl WebAccessSvc {
             confirm_gen: AtomicU64::new(0),
             push_lock: Mutex::new(()),
             names: avahi::LocalNames::new(),
+            state_dir: under_root(&root, Path::new("/var/lib/rynas")),
+            root,
+            dns: domains::real_factory(),
+            secret_box: OnceLock::new(),
+            tls: OnceLock::new(),
+            notifier: OnceLock::new(),
+            engine_log: Box::new(journal_lines),
+            dns_mem: Mutex::new(domains::DnsMem::default()),
+            cert_mem: Mutex::new(CertMem::default()),
         }
+    }
+
+    fn sb(&self) -> Option<&SecretBox> {
+        self.secret_box.get().map(|b| b.as_ref())
+    }
+
+    /// The decrypted credentials the domains of `cfg` use; unreadable ones are left out.
+    pub fn cred_values(&self, cfg: &WebAccessConfig) -> CredValues {
+        let used: BTreeSet<&str> = domains::active(cfg)
+            .filter_map(|d| d.credential.as_deref())
+            .collect();
+        cfg.credentials
+            .iter()
+            .filter(|c| used.contains(c.id.as_str()))
+            .filter_map(|c| {
+                domains::open_creds(c, self.sb())
+                    .map_err(|e| tracing::warn!("web access: {e}"))
+                    .ok()
+                    .map(|v| (c.id.clone(), (c.provider, v)))
+            })
+            .collect()
+    }
+
+    /// Seals given credential values and carries the stored ones of `previous` forward
+    /// (input from the API: a client-sent envelope is dropped first).
+    pub fn seal_input(
+        &self,
+        c: &mut WebAccessConfig,
+        previous: &[&WebAccessConfig],
+    ) -> Result<(), Invalid> {
+        domains::strip_input(c);
+        domains::seal_credentials(c, previous, self.sb())
     }
 
     /// Hands the local names of `cfg` on this host to the Avahi publisher.
@@ -447,21 +600,56 @@ impl WebAccessSvc {
         v
     }
 
-    fn input<'a>(&'a self, cfg: &'a WebAccessConfig, facts: &'a HostFacts) -> RenderInput<'a> {
+    fn input<'a>(
+        &'a self,
+        cfg: &'a WebAccessConfig,
+        facts: &'a HostFacts,
+        creds: &'a CredValues,
+    ) -> RenderInput<'a> {
         RenderInput {
             cfg,
             facts,
             paths: &self.paths,
             ui_port: self.ui_port,
             emergency_port: self.emergency_port,
+            creds,
         }
     }
 
     /// The resolved names and the engine configuration of `cfg` on this host.
     pub fn render(&self, cfg: &WebAccessConfig, facts: &HostFacts) -> (Resolved, Value) {
+        let creds = self.cred_values(cfg);
+        self.render_with(cfg, facts, &creds)
+    }
+
+    fn render_with(
+        &self,
+        cfg: &WebAccessConfig,
+        facts: &HostFacts,
+        creds: &CredValues,
+    ) -> (Resolved, Value) {
         let resolved = resolve(cfg, facts);
-        let json = Caddy.render(&self.input(cfg, facts), &resolved);
+        let json = Caddy.render(&self.input(cfg, facts, creds), &resolved);
         (resolved, json)
+    }
+
+    /// The render with every credential value replaced by `***` (what a plan shows).
+    pub fn render_redacted(&self, cfg: &WebAccessConfig, facts: &HostFacts) -> (Resolved, Value) {
+        let creds: CredValues = self
+            .cred_values(cfg)
+            .into_iter()
+            .map(|(id, (p, v))| {
+                let v = v
+                    .into_iter()
+                    .map(|(k, val)| {
+                        let secret = rynas_dns::fields(p).iter().any(|f| f.name == k && f.secret);
+                        (k, if secret { "***".to_string() } else { val })
+                    })
+                    .collect();
+                (id, (p, v))
+            })
+            .collect();
+        self.render_with(cfg, facts, &creds)
     }
 
     /// Makes sure the engine's certificate covers `names` and is issued by the current
@@ -504,6 +692,17 @@ impl WebAccessSvc {
         Ok(true)
     }
 
+    /// Writes the DNS secret files below `rynas/dns` (root-owned `rynas/`, so plain paths
+    /// are safe there). Returns whether anything changed.
+    fn write_dns_secrets(&self, values: &CredValues) -> io::Result<bool> {
+        let gid = group_gid(&self.root, ENGINE_GROUP);
+        if !values.is_empty() {
+            // makes `rynas/` (0750 root:rynas-caddy) when missing, refusing a planted link
+            self.rynas_dir(gid)?;
+        }
+        domains::write_engine_secrets(&self.path(DNS_SECRETS), gid, values)
+    }
+
     /// The engine's state folder (`/var/lib/rynas-caddy`, writable by the engine's user):
     /// made when missing (its parents are root's), opened as a descriptor.
     fn engine_state_dir(&self) -> io::Result<std::fs::File> {
@@ -531,7 +730,9 @@ impl WebAccessSvc {
         text.push(b'\n');
         let dir = self.engine_state_dir()?;
         let name = LAST_GOOD.rsplit('/').next().unwrap_or(LAST_GOOD);
-        if rynas_docker::safefs::read_at(&dir, name, 16 << 20).is_ok_and(|old| old.as_bytes() == text) {
+        if rynas_docker::safefs::read_at(&dir, name, 16 << 20)
+            .is_ok_and(|old| old.as_bytes() == text)
+        {
             return Ok(());
         }
         // the engine's folder is writable by its user: descriptor-based write, root-owned
@@ -578,20 +779,35 @@ impl WebAccessSvc {
         log: &dyn Fn(&str),
     ) -> Result<bool, String> {
         let _g = self.push_lock.lock().unwrap_or_else(|e| e.into_inner());
-        let (resolved, json) = self.render(cfg, facts);
+        let creds = self.cred_values(cfg);
+        let (resolved, json) = self.render_with(cfg, facts, &creds);
         if json.is_null() {
             self.publish_ui(&[]);
             return Ok(false);
         }
         let names = resolved.all_names();
-        let cert_changed = if names.is_empty() {
+        let local = resolved.local_names();
+        let mut cert_changed = if local.is_empty() {
             false
         } else {
-            self.ensure_cert(&names)
+            self.ensure_cert(&local)
                 .map_err(|e| format!("the certificate for the local names: {e}"))?
         };
         if cert_changed {
             log("web access: new certificate for the local names");
+        }
+        // the DNS secrets the engine reads through placeholders: a changed value with an
+        // unchanged configuration still needs a reload
+        let needed: CredValues = creds
+            .into_iter()
+            .filter(|(id, _)| domains::engine_credentials(cfg).contains(id))
+            .collect();
+        let secrets_changed = self
+            .write_dns_secrets(&needed)
+            .map_err(|e| format!("{DNS_SECRETS}: {e}"))?;
+        if secrets_changed {
+            log("web access: DNS provider credentials written for the proxy");
+            cert_changed = true;
         }
         if !self.admin.wait_ready(Duration::from_secs(10)) {
             let m = format!(
@@ -891,6 +1107,8 @@ impl WebAccessSvc {
             log("web access: the running proxy configuration differed and was loaded again");
         }
         self.note(|e| e.facts = Some(fp));
+        self.retry_records(&cfg, &facts);
+        self.check_certificates(false);
         Ok(())
     }
 
@@ -903,6 +1121,7 @@ impl WebAccessSvc {
         let r = resolve(&cur, &facts);
         let port = cur.settings.https_port;
         let names = self.names.report();
+        let domains_view = self.domain_views(&cur, &facts);
         let routes = r
             .routes
             .iter()
@@ -950,7 +1169,8 @@ impl WebAccessSvc {
             v
         };
         Ok(WebAccessState {
-            pending: (eff != cur).then_some(eff),
+            pending: (eff != cur).then(|| domains::for_answer(eff)),
+            domains: domains_view,
             engine: self.engine_state(),
             host: r.host.clone(),
             ui_urls: r.ui.iter().map(|n| url_of(n, port, "/")).collect(),
@@ -961,20 +1181,21 @@ impl WebAccessSvc {
             confirm: self.pending_confirm(),
             emergency_port: self.emergency_port,
             reserved_ports: reserved,
-            applied: cur,
+            applied: domains::for_answer(cur),
         })
     }
 
     /// `POST /web-access/plan`.
     pub fn plan(&self, cfg: &WebAccessConfig, previous: &WebAccessConfig) -> WebAccessPlan {
         let facts = self.facts();
-        let (resolved, json) = self.render(cfg, &facts);
+        let (resolved, json) = self.render_redacted(cfg, &facts);
         WebAccessPlan {
             engine_config: json,
             avahi_hosts: avahi_block(cfg, &facts),
             names: resolved.all_names(),
             ui_route_changes: ui_fingerprint(cfg) != ui_fingerprint(previous)
                 && !resolved.ui.is_empty(),
+            dns_changes: self.plan_records(cfg, previous, &facts),
         }
     }
 
@@ -989,7 +1210,7 @@ impl WebAccessSvc {
             .find(|r| r.route.id == id)
             .ok_or_else(|| Error::not_found(format!("no route {id}")))?;
         let mut checks = Vec::new();
-        let name = r.names.first().cloned();
+        let name = r.local.clone();
         // 0. the name is published through Avahi
         checks.push(match &name {
             None => check(
@@ -999,6 +1220,7 @@ impl WebAccessSvc {
             ),
             Some(n) => local_name_check(n, &self.names.report()),
         });
+        let name = name.or_else(|| r.names.first().cloned());
         // 1. the name resolves to this NAS
         checks.push(match &name {
             None => check(
@@ -1148,6 +1370,60 @@ impl WebAccessSvc {
                 ),
             },
         });
+        // 7. own-domain names: they resolve to this NAS, and their ACME certificate
+        if let Some(n) = r.domain_names.first() {
+            checks.push(match self.probe.resolve(n) {
+                Ok(a) if a.iter().any(|x| facts.addrs.contains(x)) => {
+                    check("domain_dns", CheckState::Ok, format!("{n} → {}", join(&a)))
+                }
+                Ok(a) => check(
+                    "domain_dns",
+                    CheckState::Fail,
+                    format!(
+                        "{n} → {}, not an address of this NAS (run the domain's checklist)",
+                        join(&a)
+                    ),
+                ),
+                Err(e) => check(
+                    "domain_dns",
+                    CheckState::Fail,
+                    format!("{n} does not resolve from the NAS: {e} (run the domain's checklist)"),
+                ),
+            });
+            let inv = self.certificates();
+            let want = Names {
+                dns: [n.clone()].into(),
+                ips: BTreeSet::new(),
+            };
+            let covering = inv.certificates.iter().find(|e| {
+                e.kind == CertKind::Acme
+                    && e.certificate
+                        .as_ref()
+                        .is_some_and(|c| rynas_tls::missing_names(c, &want).is_empty())
+            });
+            checks.push(match covering {
+                Some(e) if e.status == CertStatus::Expired => check(
+                    "domain_certificate",
+                    CheckState::Fail,
+                    "the certificate has expired",
+                ),
+                Some(e) if e.staging => check(
+                    "domain_certificate",
+                    CheckState::Warn,
+                    format!("{n}: Let's Encrypt staging certificate (not trusted)"),
+                ),
+                Some(_) => check(
+                    "domain_certificate",
+                    CheckState::Ok,
+                    format!("{n}: a publicly trusted certificate"),
+                ),
+                None => check(
+                    "domain_certificate",
+                    CheckState::Warn,
+                    format!("no certificate covers {n} yet (see the certificate dashboard)"),
+                ),
+            });
+        }
         Ok(RouteDiagnostics {
             route: id.into(),
             checks,
@@ -1164,8 +1440,10 @@ impl WebAccessSvc {
             .iter()
             .find(|x| x.route.stack.as_deref() == Some(stack))
             .and_then(|x| {
-                x.names
+                // a trusted own-domain name before the local one
+                x.domain_names
                     .first()
+                    .or(x.names.first())
                     .map(|n| url_of(n, cfg.settings.https_port, &x.route.path))
             })
     }
@@ -1289,6 +1567,824 @@ impl WebAccessSvc {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// wave W2: records, domain checklist, certificate dashboard
+// ---------------------------------------------------------------------------------------------
+
+impl WebAccessSvc {
+    fn dns_lock(&self) -> std::sync::MutexGuard<'_, domains::DnsMem> {
+        let mut m = self.dns_mem.lock().unwrap_or_else(|e| e.into_inner());
+        if !m.loaded {
+            m.owned = domains::load_owned(&self.state_dir);
+            m.loaded = true;
+        }
+        m
+    }
+
+    /// The record client and zone of a domain, or why there is none.
+    fn dns_client(
+        &self,
+        cfg: &WebAccessConfig,
+        d: &WebDomain,
+    ) -> Result<Box<dyn rynas_dns::DnsApi>, String> {
+        let p = d.provider.ok_or("the domain has no DNS provider")?;
+        let cr = domains::credential_of(cfg, d).ok_or("the domain has no credential")?;
+        let creds = domains::open_creds(cr, self.sb())?;
+        match (self.dns)(p, &creds) {
+            Ok(Some(c)) => Ok(c),
+            Ok(None) => Err(format!("rynas has no record client for {}", p.as_str())),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// What a record sync of `cfg` would change (reads the providers, never writes):
+    /// the LAN records of each domain, the manual ones, and the deletes of record sets rynas
+    /// wrote for domains that no longer want them (`previous` holds their credentials).
+    pub fn plan_records(
+        &self,
+        cfg: &WebAccessConfig,
+        previous: &WebAccessConfig,
+        facts: &HostFacts,
+    ) -> Vec<DnsChange> {
+        let owned = self.dns_lock().owned.clone();
+        let mut out = Vec::new();
+        for d in &cfg.domains {
+            out.extend(self.domain_changes(cfg, d, facts, &owned, false).changes);
+        }
+        for (id, o) in &owned {
+            if cfg.domains.iter().any(|d| &d.id == id) {
+                continue;
+            }
+            out.extend(self.removal_changes(cfg, previous, id, o, false).changes);
+        }
+        out
+    }
+
+    /// One domain: plan (and with `write`, apply) its records.
+    fn domain_changes(
+        &self,
+        cfg: &WebAccessConfig,
+        d: &WebDomain,
+        facts: &HostFacts,
+        owned: &BTreeMap<String, domains::Owned>,
+        write: bool,
+    ) -> DnsSyncReport {
+        let mut report = DnsSyncReport {
+            domain: d.name.clone(),
+            changes: Vec::new(),
+            ok: true,
+            at_ms: now_ms(),
+        };
+        let mine = owned.get(&d.id);
+        let wanted = match domains::record_mode(d) {
+            domains::RecordMode::Off => Vec::new(),
+            _ => domains::wanted_records(cfg, d, facts),
+        };
+        if let domains::RecordMode::Manual(why) = domains::record_mode(d) {
+            report.changes = rynas_dns::plan::manual(&d.name, &wanted, &why);
+            report.changes.extend(domains::delegation_record(d));
+            return report;
+        }
+        if d.challenge == ChallengeKind::CnameDelegation {
+            report.changes.extend(domains::delegation_record(d));
+        }
+        // a provider change: the old provider's sets are removed through the old credential
+        let same_provider = mine.is_none_or(|m| m.provider == d.provider);
+        let stale: Vec<(String, rynas_dns::Rtype)> = mine
+            .filter(|_| same_provider)
+            .map(|m| {
+                m.records
+                    .iter()
+                    .filter_map(|(n, t)| Some((n.clone(), domains::rtype_of(t)?)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if wanted.is_empty() && stale.is_empty() {
+            if domains::record_mode(d) != domains::RecordMode::Off && facts.primary_v4.is_none() {
+                report.ok = false;
+                report.changes.push(DnsChange {
+                    domain: d.name.clone(),
+                    name: format!("*.{}", d.name),
+                    rtype: "A".into(),
+                    action: DnsAction::Unknown,
+                    detail: "this NAS has no IPv4 address on the LAN".into(),
+                    ..Default::default()
+                });
+            }
+            return report;
+        }
+        let api = match self.dns_client(cfg, d) {
+            Ok(a) => a,
+            Err(e) => {
+                report.ok = false;
+                report
+                    .changes
+                    .extend(rynas_dns::plan::unknown(&d.name, &wanted, &stale, &e));
+                return report;
+            }
+        };
+        match rynas_dns::plan::plan(&d.name, api.as_ref(), &wanted, &stale) {
+            Ok((zone, mut changes)) => {
+                if write {
+                    report.ok = rynas_dns::plan::apply(api.as_ref(), &zone, &mut changes);
+                } else {
+                    report.ok = !changes.iter().any(|c| c.action == DnsAction::Unknown);
+                }
+                report.changes.extend(changes);
+            }
+            Err(e) => {
+                report.ok = false;
+                report.changes.extend(rynas_dns::plan::unknown(
+                    &d.name,
+                    &wanted,
+                    &stale,
+                    &e.to_string(),
+                ));
+            }
+        }
+        report
+    }
+
+    /// Deletes (or plans the deletes of) every record set rynas wrote for a domain id that is
+    /// gone or changed provider, through the credential it was written with.
+    fn removal_changes(
+        &self,
+        cfg: &WebAccessConfig,
+        previous: &WebAccessConfig,
+        id: &str,
+        o: &domains::Owned,
+        write: bool,
+    ) -> DnsSyncReport {
+        let mut report = DnsSyncReport {
+            domain: o.name.clone(),
+            changes: Vec::new(),
+            ok: true,
+            at_ms: now_ms(),
+        };
+        let stale: Vec<(String, rynas_dns::Rtype)> = o
+            .records
+            .iter()
+            .filter_map(|(n, t)| Some((n.clone(), domains::rtype_of(t)?)))
+            .collect();
+        if stale.is_empty() {
+            return report;
+        }
+        // the domain as it was written: provider and credential (from either value)
+        let src = WebDomain {
+            id: id.into(),
+            name: o.name.clone(),
+            provider: o.provider,
+            credential: o.credential.clone(),
+            ..Default::default()
+        };
+        let with_cred = [cfg, previous].into_iter().find(|c| {
+            domains::credential_of(c, &src).is_some_and(|cr| Some(cr.provider) == o.provider)
+        });
+        let api = match with_cred {
+            Some(c) => self.dns_client(c, &src),
+            None => Err(format!(
+                "the credential {} is gone: delete these records by hand",
+                o.credential.as_deref().unwrap_or("?")
+            )),
+        };
+        let api = match api {
+            Ok(a) => a,
+            Err(e) => {
+                report.ok = false;
+                report.changes = rynas_dns::plan::unknown(&o.name, &[], &stale, &e);
+                return report;
+            }
+        };
+        match rynas_dns::plan::plan(&o.name, api.as_ref(), &[], &stale) {
+            Ok((zone, mut changes)) => {
+                report.ok = if write {
+                    rynas_dns::plan::apply(api.as_ref(), &zone, &mut changes)
+                } else {
+                    true
+                };
+                report.changes = changes;
+            }
+            Err(e) => {
+                report.ok = false;
+                report.changes = rynas_dns::plan::unknown(&o.name, &[], &stale, &e.to_string());
+            }
+        }
+        report
+    }
+
+    /// Writes the LAN records of `to` (only the domain `only`, when given), deletes the sets
+    /// no longer wanted (credentials of removed domains come from `from`), remembers what
+    /// was written. Best effort: failures are logged and reported in the domain's view, and
+    /// tried again after [`domains::RECORDS_RETRY`] or on the next apply.
+    pub fn sync_records(
+        &self,
+        from: &WebAccessConfig,
+        to: &WebAccessConfig,
+        facts: &HostFacts,
+        only: Option<&str>,
+        log: &dyn Fn(&str),
+    ) -> Vec<DnsSyncReport> {
+        let mut m = self.dns_lock();
+        let before = m.owned.clone();
+        let mut reports = Vec::new();
+        for d in to.domains.iter().filter(|d| only.is_none_or(|o| o == d.id)) {
+            // a provider change: the old sets go first
+            if let Some(o) = m.owned.get(&d.id).cloned()
+                && o.provider != d.provider
+                && domains::record_mode(d) != domains::RecordMode::Off
+            {
+                let r = self.removal_changes(to, from, &d.id, &o, true);
+                if r.ok {
+                    m.owned.remove(&d.id);
+                }
+            }
+            let r = self.domain_changes(to, d, facts, &m.owned, true);
+            m.tried.insert(d.id.clone(), Instant::now());
+            for c in &r.changes {
+                if matches!(
+                    c.action,
+                    DnsAction::Create | DnsAction::Update | DnsAction::Delete
+                ) {
+                    let what = if c.detail.starts_with("failed") {
+                        format!(" {}", c.detail)
+                    } else {
+                        String::new()
+                    };
+                    log(&format!(
+                        "web access: DNS {} {} {} {}{what}",
+                        match c.action {
+                            DnsAction::Create => "create",
+                            DnsAction::Update => "update",
+                            _ => "delete",
+                        },
+                        c.name,
+                        c.rtype,
+                        c.wanted.join(" ")
+                    ));
+                }
+            }
+            if !r.ok {
+                log(&format!(
+                    "web access: the DNS records of {} could not all be written (tried again later)",
+                    d.name
+                ));
+            }
+            // what rynas owns now: wanted sets that went through, failed deletes kept
+            let mut rec: Vec<(String, String)> = r
+                .changes
+                .iter()
+                .filter(|c| c.rtype != "CNAME")
+                .filter(|c| match c.action {
+                    DnsAction::Create | DnsAction::Update | DnsAction::Keep => {
+                        !c.detail.starts_with("failed")
+                    }
+                    DnsAction::Delete => c.detail.starts_with("failed"),
+                    DnsAction::Unknown => m.owned.get(&d.id).is_some_and(|o| {
+                        o.records.iter().any(|(n, t)| n == &c.name && t == &c.rtype)
+                    }),
+                    DnsAction::Manual => false,
+                })
+                .map(|c| (c.name.clone(), c.rtype.clone()))
+                .collect();
+            rec.sort();
+            rec.dedup();
+            if rec.is_empty() {
+                m.owned.remove(&d.id);
+            } else {
+                m.owned.insert(
+                    d.id.clone(),
+                    domains::Owned {
+                        name: d.name.clone(),
+                        provider: d.provider,
+                        credential: d.credential.clone(),
+                        records: rec,
+                    },
+                );
+            }
+            m.reports.insert(d.id.clone(), r.clone());
+            reports.push(r);
+        }
+        if only.is_none() {
+            let gone: Vec<(String, domains::Owned)> = m
+                .owned
+                .iter()
+                .filter(|(id, _)| !to.domains.iter().any(|d| &d.id == *id))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            for (id, o) in gone {
+                let r = self.removal_changes(to, from, &id, &o, true);
+                for c in r.changes.iter().filter(|c| c.action == DnsAction::Delete) {
+                    log(&format!("web access: DNS delete {} {}", c.name, c.rtype));
+                }
+                if r.ok {
+                    m.owned.remove(&id);
+                    m.reports.remove(&id);
+                } else {
+                    log(&format!(
+                        "web access: the old DNS records of {} could not be deleted",
+                        o.name
+                    ));
+                }
+                reports.push(r);
+            }
+        }
+        if m.owned != before
+            && let Err(e) = domains::save_owned(&self.state_dir, &m.owned)
+        {
+            tracing::warn!(
+                "web access: {}: {e}",
+                domains::owned_file(&self.state_dir).display()
+            );
+        }
+        reports
+    }
+
+    /// Domains whose last record sync failed, tried again after [`domains::RECORDS_RETRY`].
+    fn retry_records(&self, cfg: &WebAccessConfig, facts: &HostFacts) {
+        let due: Vec<String> = {
+            let m = self.dns_lock();
+            m.reports
+                .iter()
+                .filter(|(id, r)| {
+                    !r.ok
+                        && m.tried
+                            .get(*id)
+                            .is_none_or(|t| t.elapsed() >= domains::RECORDS_RETRY)
+                })
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        for id in due {
+            self.sync_records(cfg, cfg, facts, Some(&id), &|l| tracing::info!("{l}"));
+        }
+    }
+
+    /// The domains as the pages show them.
+    pub fn domain_views(&self, cfg: &WebAccessConfig, facts: &HostFacts) -> Vec<DomainView> {
+        let m = self.dns_lock();
+        let port = cfg.settings.https_port;
+        cfg.domains
+            .iter()
+            .map(|d| {
+                let mut problems = Vec::new();
+                let cred = domains::credential_of(cfg, d);
+                if d.provider.is_some()
+                    && cred.is_none_or(|c| domains::open_creds(c, self.sb()).is_err())
+                {
+                    problems.push("credential_missing".to_string());
+                }
+                let rec = m.reports.get(&d.id).cloned();
+                match domains::record_mode(d) {
+                    domains::RecordMode::Manual(_) => problems.push("records_manual".into()),
+                    domains::RecordMode::Managed(_) if rec.as_ref().is_some_and(|r| !r.ok) => {
+                        problems.push("records_failed".into())
+                    }
+                    _ => {}
+                }
+                if d.lan_record && facts.primary_v4.is_none() {
+                    problems.push("no_lan_address".into());
+                }
+                if cfg.acme.staging {
+                    problems.push("staging".into());
+                }
+                let ui_on = d.enabled
+                    && d.ui
+                    && cfg.settings.ui.enabled
+                    && cfg.settings.mode == ProxyMode::Builtin;
+                DomainView {
+                    id: d.id.clone(),
+                    name: d.name.clone(),
+                    enabled: d.enabled,
+                    certificate_names: domains::cert_subjects(cfg, d),
+                    ui_urls: if ui_on {
+                        vec![url_of(&d.name, port, "/")]
+                    } else {
+                        Vec::new()
+                    },
+                    records: rec,
+                    problems,
+                }
+            })
+            .collect()
+    }
+
+    /// The certificate of `subject` in the engine's storage, if any.
+    fn acme_cert(
+        &self,
+        cfg: &WebAccessConfig,
+        subject: &str,
+    ) -> Option<rynas_api_types::tls::TlsCertificate> {
+        let p = domains::cert_path(&self.paths.storage, domains::acme_ca(cfg), subject);
+        let pem = std::fs::read_to_string(self.path(&p)).ok()?;
+        rynas_tls::inspect(&pem).ok()?.into_iter().next()
+    }
+
+    /// `GET /web-access/certificates`.
+    pub fn certificates(&self) -> CertificateInventory {
+        let now = rynas_tls::now();
+        let mut out = Vec::new();
+        if let Some(tls) = self.tls.get()
+            && let Ok(st) = tls.status()
+        {
+            if let Some(ca) = st.local_ca.clone() {
+                out.push(certs::entry("local-ca", CertKind::LocalCa, ca, false, now));
+            }
+            let mut e = certs::entry("interface", CertKind::Interface, st.certificate, false, now);
+            e.source = Some(
+                match st.source {
+                    rynas_api_types::tls::TlsSource::Local => "local",
+                    rynas_api_types::tls::TlsSource::Imported => "imported",
+                }
+                .into(),
+            );
+            out.push(e);
+        }
+        if let Some(c) = std::fs::read_to_string(self.path(CERT))
+            .ok()
+            .and_then(|p| rynas_tls::inspect(&p).ok())
+            .and_then(|v| v.into_iter().next())
+        {
+            out.push(certs::entry(
+                "proxy-local",
+                CertKind::ProxyLocal,
+                c,
+                false,
+                now,
+            ));
+        }
+        let cfg = self.applied();
+        let errors = certs::engine_errors(&(self.engine_log)());
+        let mut cm = self.cert_mem.lock().unwrap_or_else(|e| e.into_inner());
+        let mut expected = BTreeSet::new();
+        if cfg.settings.mode == ProxyMode::Builtin {
+            for d in domains::active(&cfg) {
+                for s in domains::cert_subjects(&cfg, d) {
+                    expected.insert(s.clone());
+                    let id = format!("acme:{s}");
+                    let mut e = match self.acme_cert(&cfg, &s) {
+                        Some(c) => {
+                            cm.expected_since.remove(&s);
+                            certs::entry(&id, CertKind::Acme, c, true, now)
+                        }
+                        None => {
+                            let since = *cm.expected_since.entry(s.clone()).or_insert(now);
+                            CertEntry {
+                                id,
+                                kind: CertKind::Acme,
+                                status: certs::missing_status(since, now),
+                                names: vec![s.clone()],
+                                ..Default::default()
+                            }
+                        }
+                    };
+                    e.domain = Some(d.name.clone());
+                    e.staging = e.staging || cfg.acme.staging;
+                    e.last_error = errors.get(&s).cloned();
+                    out.push(e);
+                }
+            }
+        }
+        cm.expected_since.retain(|k, _| expected.contains(k));
+        CertificateInventory {
+            certificates: out,
+            at_ms: now,
+        }
+    }
+
+    /// The certificate check of the periodic loop: notifications on changes (at most every
+    /// [`CERT_CHECK_INTERVAL`] unless `force`).
+    pub fn check_certificates(&self, force: bool) -> Vec<rynas_api_types::notify::NewEvent> {
+        {
+            let mut cm = self.cert_mem.lock().unwrap_or_else(|e| e.into_inner());
+            if !force
+                && cm
+                    .last_check
+                    .is_some_and(|t| t.elapsed() < CERT_CHECK_INTERVAL)
+            {
+                return Vec::new();
+            }
+            cm.last_check = Some(Instant::now());
+        }
+        let inv = self.certificates();
+        let events = self
+            .cert_mem
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .notified
+            .events(&inv.certificates);
+        if let Some(n) = self.notifier.get() {
+            for e in &events {
+                n.emit(e.clone());
+            }
+        }
+        events
+    }
+
+    /// `POST /web-access/domains/{id}/test`: the domain's checklist.
+    pub fn diagnose_domain(&self, id: &str) -> Res<RouteDiagnostics> {
+        let cfg = self.applied();
+        let facts = self.facts();
+        let d = cfg
+            .domains
+            .iter()
+            .find(|d| d.id == id)
+            .cloned()
+            .ok_or_else(|| Error::not_found(format!("no domain {id}")))?;
+        let expected = domains::expected_addrs(&d, &facts);
+        let exp_text = join(&expected);
+        // the name a client would ask: a route's, or a probe under the wildcard
+        let probe_name = resolve(&cfg, &facts)
+            .routes
+            .iter()
+            .find_map(|r| {
+                r.domain_names
+                    .iter()
+                    .find(|n| n.ends_with(&d.name))
+                    .cloned()
+            })
+            .unwrap_or_else(|| {
+                if d.wildcard && d.provider != Some(DnsProvider::Duckdns) {
+                    format!("rynas-check.{}", d.name)
+                } else {
+                    d.name.clone()
+                }
+            });
+        let mut checks = Vec::new();
+        // 1. the records at the provider
+        let rec = self.dns_lock().reports.get(&d.id).cloned();
+        checks.push(match (domains::record_mode(&d), rec) {
+            (domains::RecordMode::Off, _) => check(
+                "dns_record",
+                CheckState::Skipped,
+                "rynas does not write the records of this domain (LAN record off)",
+            ),
+            (domains::RecordMode::Manual(why), _) => {
+                let mut list: Vec<String> = domains::wanted_records(&cfg, &d, &facts)
+                    .iter()
+                    .map(|w| format!("{} {} {}", w.name, w.rtype, w.values.join(" ")))
+                    .collect();
+                if let Some(c) = domains::delegation_record(&d) {
+                    list.push(format!("{} CNAME {}", c.name, c.wanted.join(" ")));
+                }
+                check(
+                    "dns_record",
+                    CheckState::Warn,
+                    format!("{why}: {}", list.join("; ")),
+                )
+            }
+            (_, None) => check(
+                "dns_record",
+                CheckState::Warn,
+                "the records have not been written yet (apply the settings, or Write records)",
+            ),
+            (_, Some(r)) if r.ok => check(
+                "dns_record",
+                CheckState::Ok,
+                format!(
+                    "{} at the provider",
+                    r.changes
+                        .iter()
+                        .filter(|c| c.action != DnsAction::Delete && c.rtype != "CNAME")
+                        .map(|c| format!("{} {} {}", c.name, c.rtype, c.wanted.join(" ")))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ),
+            ),
+            (_, Some(r)) => check(
+                "dns_record",
+                CheckState::Fail,
+                r.changes
+                    .iter()
+                    .filter(|c| !c.detail.is_empty())
+                    .map(|c| format!("{} {}: {}", c.name, c.rtype, c.detail))
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            ),
+        });
+        // 2. the NAS's own resolver
+        checks.push(match self.probe.resolve(&probe_name) {
+            Ok(a) if a.iter().any(|x| expected.contains(x)) => check(
+                "dns_nas",
+                CheckState::Ok,
+                format!("{probe_name} → {} from the NAS", join(&a)),
+            ),
+            Ok(a) => check(
+                "dns_nas",
+                CheckState::Fail,
+                format!(
+                    "{probe_name} → {} from the NAS, expected {exp_text}",
+                    join(&a)
+                ),
+            ),
+            Err(e) => check(
+                "dns_nas",
+                CheckState::Fail,
+                format!("{probe_name} does not resolve from the NAS: {e}"),
+            ),
+        });
+        // 3. a public resolver
+        let mut public: Result<rynas_dns::wire::Answer, String> = Err("no public resolver".into());
+        for r in domains::PUBLIC_RESOLVERS {
+            let Ok(addr) = r.parse::<SocketAddr>() else {
+                continue;
+            };
+            public = self.probe.query(addr, &probe_name, rynas_dns::Rtype::A);
+            if public.is_ok() {
+                break;
+            }
+        }
+        checks.push(match &public {
+            Ok(a) if a.addrs().iter().any(|x| expected.contains(x)) => check(
+                "dns_public",
+                CheckState::Ok,
+                format!("{probe_name} → {} from public DNS", a.describe()),
+            ),
+            Ok(a) => check(
+                "dns_public",
+                CheckState::Fail,
+                format!(
+                    "{probe_name} → {} from public DNS, expected {exp_text} (the record is missing or not propagated yet)",
+                    a.describe()
+                ),
+            ),
+            Err(e) => check(
+                "dns_public",
+                CheckState::Warn,
+                format!("public DNS could not be asked: {e} (outbound DNS blocked?)"),
+            ),
+        });
+        // 4. rebind protection: the LAN resolver against the public one
+        let lan_servers = self.probe.lan_resolvers();
+        let lan = lan_servers
+            .iter()
+            .map(|s| self.probe.query(*s, &probe_name, rynas_dns::Rtype::A))
+            .find(|r| r.is_ok())
+            .unwrap_or_else(|| Err("no LAN resolver answered".into()));
+        use rynas_dns::rebind::Verdict;
+        checks.push(match rynas_dns::rebind::verdict(&expected, &public, &lan) {
+            Verdict::Ok => check(
+                "rebind",
+                CheckState::Ok,
+                format!("the LAN resolver answers {exp_text} too"),
+            ),
+            Verdict::RebindBlocked => check(
+                "rebind",
+                CheckState::Fail,
+                format!(
+                    "public DNS answers {exp_text}, the LAN resolver ({}) drops it: {}",
+                    lan.as_ref().map(|a| a.describe()).unwrap_or_default(),
+                    rynas_dns::rebind::REBIND_FIX.replace("the domain", &d.name)
+                ),
+            ),
+            Verdict::LanOverride(a) => check(
+                "rebind",
+                CheckState::Warn,
+                format!(
+                    "the LAN resolver answers {} instead of {exp_text}: a local DNS entry overrides the domain",
+                    join(&a)
+                ),
+            ),
+            Verdict::NotPublished | Verdict::Wrong(_) => check(
+                "rebind",
+                CheckState::Skipped,
+                "the public record is not right yet",
+            ),
+            Verdict::PublicUnreachable(lan_ok) => check(
+                "rebind",
+                if lan_ok { CheckState::Ok } else { CheckState::Warn },
+                if lan_ok {
+                    format!("the LAN resolver answers {exp_text}")
+                } else {
+                    "public DNS could not be asked; the LAN resolver does not answer the LAN address".into()
+                },
+            ),
+            Verdict::LanUnreachable => check(
+                "rebind",
+                CheckState::Warn,
+                "the LAN resolver could not be asked",
+            ),
+        });
+        // 5. the certificate, 6. its renewal
+        let inv = self.certificates();
+        let mine: Vec<&CertEntry> = inv
+            .certificates
+            .iter()
+            .filter(|e| e.kind == CertKind::Acme && e.domain.as_deref() == Some(&d.name))
+            .collect();
+        let worst = mine.iter().map(|e| e.status).max_by_key(|s| match s {
+            CertStatus::Ok => 0,
+            CertStatus::Pending => 1,
+            CertStatus::ExpiresSoon => 2,
+            CertStatus::RenewalOverdue => 3,
+            CertStatus::Failed => 4,
+            CertStatus::Expired => 5,
+        });
+        let errs: Vec<String> = mine.iter().filter_map(|e| e.last_error.clone()).collect();
+        checks.push(if !d.enabled || cfg.settings.mode != ProxyMode::Builtin {
+            check(
+                "certificate",
+                CheckState::Skipped,
+                "the domain is not served",
+            )
+        } else {
+            match worst {
+                None => check("certificate", CheckState::Skipped, "no certificate names"),
+                Some(CertStatus::Pending) => check(
+                    "certificate",
+                    CheckState::Warn,
+                    "being obtained (DNS-01 takes a minute or two)",
+                ),
+                Some(CertStatus::Failed) => check(
+                    "certificate",
+                    CheckState::Fail,
+                    format!("not obtained: {}", errs.join("; ")),
+                ),
+                Some(CertStatus::Expired) => check("certificate", CheckState::Fail, "expired"),
+                Some(_) if cfg.acme.staging => check(
+                    "certificate",
+                    CheckState::Warn,
+                    "issued by Let's Encrypt staging: browsers do not trust it",
+                ),
+                Some(_) => check(
+                    "certificate",
+                    CheckState::Ok,
+                    format!(
+                        "valid for {}",
+                        mine.iter()
+                            .flat_map(|e| e.names.iter().cloned())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                ),
+            }
+        });
+        checks.push(match worst {
+            None | Some(CertStatus::Pending) | Some(CertStatus::Failed) => {
+                check("renewal", CheckState::Skipped, "")
+            }
+            Some(CertStatus::RenewalOverdue) | Some(CertStatus::Expired) => check(
+                "renewal",
+                CheckState::Fail,
+                format!("renewal is failing: {}", errs.join("; ")),
+            ),
+            Some(CertStatus::ExpiresSoon) => check(
+                "renewal",
+                CheckState::Warn,
+                "expires within 14 days and has not been renewed yet",
+            ),
+            Some(CertStatus::Ok) => check(
+                "renewal",
+                CheckState::Ok,
+                format!(
+                    "renewed automatically from {}",
+                    mine.iter()
+                        .filter_map(|e| e.renew_after_ms)
+                        .min()
+                        .map(fmt_day)
+                        .unwrap_or_default()
+                ),
+            ),
+        });
+        // 7. hairpin: a LAN address needs no NAT loopback
+        checks.push(if expected.is_empty() {
+            check("hairpin", CheckState::Skipped, "")
+        } else if expected.iter().all(rynas_dns::rebind::is_private) {
+            check(
+                "hairpin",
+                CheckState::Ok,
+                "the name points to the LAN address: devices at home reach the NAS directly, no NAT loopback needed (away from home use Tailscale)",
+            )
+        } else {
+            check(
+                "hairpin",
+                CheckState::Warn,
+                "the name points to a public address: devices at home need NAT loopback (hairpin) on the router",
+            )
+        });
+        Ok(RouteDiagnostics {
+            route: id.into(),
+            checks,
+            at_ms: now_ms(),
+        })
+    }
+}
+
+/// `YYYY-MM-DD` (UTC) of a time in milliseconds.
+fn fmt_day(ms: i64) -> String {
+    let days = ms.div_euclid(86_400_000);
+    // civil from days (Howard Hinnant's algorithm)
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    format!("{:04}-{:02}-{:02}", if m <= 2 { y + 1 } else { y }, m, d)
+}
+
 /// The `local_name` check of `name` from the publisher's report.
 fn local_name_check(name: &str, report: &avahi::NamesReport) -> RouteCheck {
     use avahi::{Availability, NameState};
@@ -1380,8 +2476,12 @@ impl Applier for WebAccessDomain {
     }
 
     fn validate(&self, value: Value) -> Result<Value, Invalid> {
-        let c: WebAccessConfig = serde_json::from_value(value)
+        let mut c: WebAccessConfig = serde_json::from_value(value)
             .map_err(|e| Invalid::from(format!("invalid web_access document: {e}")))?;
+        // values given here are sealed; an envelope already in the document is kept (rynasd's
+        // own updates, a restore); a credential with neither takes the applied one
+        let applied = self.svc.applied();
+        domains::seal_credentials(&mut c, &[&applied], self.svc.sb())?;
         let c = model::validate(c, &[self.svc.ui_port, self.svc.emergency_port])?;
         serde_json::to_value(c).map_err(|e| Invalid::from(e.to_string()))
     }
@@ -1398,8 +2498,15 @@ impl Applier for WebAccessDomain {
         ctx: &ApplyCtx,
     ) -> Result<(), String> {
         self.svc.migrate_avahi_hosts(ctx.system, ctx.log);
-        self.svc.publish_names(&config_of(to), &self.svc.facts());
-        self.svc.engine_apply(from, to, ctx.system, ctx.log)
+        let facts = self.svc.facts();
+        self.svc.publish_names(&config_of(to), &facts);
+        self.svc.engine_apply(from, to, ctx.system, ctx.log)?;
+        // the LAN records (best effort: a provider error never rolls the proxy back)
+        let (old, new) = (config_of(from), config_of(to));
+        if !new.domains.is_empty() || !old.domains.is_empty() {
+            self.svc.sync_records(&old, &new, &facts, None, ctx.log);
+        }
+        Ok(())
     }
 }
 
@@ -1473,10 +2580,23 @@ async fn state_put(
 ) -> Res<Json<WebAccessState>> {
     let (s, ops) = wsvc(&st)?;
     let who = admin_user(&ops, &hd, "web access settings")?;
-    let Json(c) = body?;
-    let c = model::validate(c, &[s.ui_port, s.emergency_port]).map_err(invalid)?;
+    let Json(mut c) = body?;
+    let changed_creds: Vec<String> = c
+        .credentials
+        .iter()
+        .filter(|x| !x.secrets.is_empty())
+        .map(|x| x.id.clone())
+        .collect();
     audit(&who, "settings", "stage");
+    for id in &changed_creds {
+        // the id only, never a value
+        audit(&who, "credential", id);
+    }
     blocking(move || {
+        let (eff, cur, _): (WebAccessConfig, WebAccessConfig, Option<WebAccessConfig>) =
+            crate::services::docs(&ops.config, &who, WEB_ACCESS_KEY)?;
+        s.seal_input(&mut c, &[&eff, &cur]).map_err(invalid)?;
+        let c = model::validate(c, &[s.ui_port, s.emergency_port]).map_err(invalid)?;
         crate::services::stage(&ops.config, &who, WEB_ACCESS_KEY, &c)?;
         s.state(&who)
     })
@@ -1499,8 +2619,14 @@ async fn plan_post(
     blocking(move || {
         let (eff, cur, _): (WebAccessConfig, WebAccessConfig, Option<WebAccessConfig>) =
             crate::services::docs(&ops.config, &who, WEB_ACCESS_KEY)?;
-        let c = model::validate(given.unwrap_or(eff), &[s.ui_port, s.emergency_port])
-            .map_err(invalid)?;
+        let mut c = match given {
+            Some(mut g) => {
+                s.seal_input(&mut g, &[&eff, &cur]).map_err(invalid)?;
+                g
+            }
+            None => eff,
+        };
+        c = model::validate(c, &[s.ui_port, s.emergency_port]).map_err(invalid)?;
         Ok(s.plan(&c, &cur))
     })
     .await
@@ -1549,6 +2675,60 @@ async fn test_post(
     blocking(move || s.diagnose(&id)).await.map(Json)
 }
 
+async fn domain_test_post(
+    State(st): State<WaState>,
+    hd: HeaderMap,
+    UrlPath(id): UrlPath<String>,
+) -> Res<Json<RouteDiagnostics>> {
+    let (s, ops) = wsvc(&st)?;
+    admin_user(&ops, &hd, "web access")?;
+    blocking(move || s.diagnose_domain(&id)).await.map(Json)
+}
+
+async fn domain_records_post(
+    State(st): State<WaState>,
+    hd: HeaderMap,
+    UrlPath(id): UrlPath<String>,
+) -> Res<Json<DnsSyncReport>> {
+    let (s, ops) = wsvc(&st)?;
+    let who = admin_user(&ops, &hd, "web access")?;
+    audit(&who, "records", &id);
+    blocking(move || {
+        let cfg = s.applied();
+        if !cfg.domains.iter().any(|d| d.id == id) {
+            return Err(Error::not_found(format!("no domain {id}")));
+        }
+        let facts = s.facts();
+        let mut r = s.sync_records(&cfg, &cfg, &facts, Some(&id), &|l| tracing::info!("{l}"));
+        Ok(r.pop().unwrap_or_default())
+    })
+    .await
+    .map(Json)
+}
+
+async fn certificates_get(
+    State(st): State<WaState>,
+    hd: HeaderMap,
+) -> Res<Json<CertificateInventory>> {
+    let (s, ops) = wsvc(&st)?;
+    admin_user(&ops, &hd, "web access")?;
+    blocking(move || Ok(s.certificates())).await.map(Json)
+}
+
+async fn providers_get(
+    State(st): State<WaState>,
+    hd: HeaderMap,
+) -> Res<Json<Vec<DnsProviderInfo>>> {
+    let (_, ops) = wsvc(&st)?;
+    admin_user(&ops, &hd, "web access")?;
+    Ok(Json(
+        DnsProvider::ALL
+            .iter()
+            .map(|p| rynas_dns::info(*p))
+            .collect(),
+    ))
+}
+
 pub fn router(st: WaState) -> Router {
     Router::new()
         .route("/v1/web-access", get(state_get).put(state_put))
@@ -1556,5 +2736,12 @@ pub fn router(st: WaState) -> Router {
         .route("/v1/web-access/sync", post(sync_post))
         .route("/v1/web-access/confirm", post(confirm_post))
         .route("/v1/web-access/routes/{id}/test", post(test_post))
+        .route("/v1/web-access/domains/{id}/test", post(domain_test_post))
+        .route(
+            "/v1/web-access/domains/{id}/records",
+            post(domain_records_post),
+        )
+        .route("/v1/web-access/certificates", get(certificates_get))
+        .route("/v1/web-access/providers", get(providers_get))
         .with_state(st)
 }

@@ -121,6 +121,13 @@ pub fn warning_text(w: &ShareWarning) -> String {
     }
 }
 
+/// Since when (ms, whole seconds) rynas's `smb.conf` carries `multicast dns register = no`:
+/// an smbd started before that still announces itself through Avahi (`_smb._tcp` and
+/// `_device-info._tcp` under its NetBIOS name, `model=MacSamba`), which collides with
+/// rynas's own service file, and only a restart stops it (Samba reads the parameter once, at
+/// start: `source3/smbd/server.c`).
+pub const SMBD_MDNS_MARKER: &str = "/var/lib/rynas/smbd-mdns-off";
+
 /// Does smbd need a restart (not just a reload) to go from `a` to `b`?
 fn smb_needs_restart(a: &SmbSettings, b: &SmbSettings) -> bool {
     a.interfaces != b.interfaces || a.netbios != b.netbios || a.min_protocol != b.min_protocol
@@ -135,6 +142,33 @@ fn nfs_running(c: &SharesConfig) -> bool {
 }
 
 impl SharesDomain {
+    /// The running smbd was started before rynas's `multicast dns register = no` (marker
+    /// [`SMBD_MDNS_MARKER`], written now when missing): it still announces itself.
+    fn smbd_announces_itself(&self, ctx: &ApplyCtx) -> bool {
+        let p = ctx.path(Path::new(SMBD_MDNS_MARKER));
+        let since = match std::fs::read_to_string(&p)
+            .ok()
+            .and_then(|t| t.trim().parse::<i64>().ok())
+        {
+            Some(t) => t,
+            None => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64 * 1000)
+                    .unwrap_or(0);
+                let _ = p
+                    .parent()
+                    .map(std::fs::create_dir_all)
+                    .transpose()
+                    .and_then(|_| std::fs::write(&p, format!("{now}\n")));
+                now
+            }
+        };
+        self.host
+            .unit_started_ms(SMBD)
+            .is_some_and(|started| started < since)
+    }
+
     pub fn new(host: Arc<dyn ShareHost>, accounts: Arc<dyn Accounts>) -> Self {
         Self {
             host,
@@ -759,7 +793,7 @@ impl Applier for SharesDomain {
         )];
         if c.smb.enabled && c.smb.mdns && !smb_shares.is_empty() {
             let avahi = smb::AvahiCtx {
-                model: "RackMac".into(),
+                model: smb::DEVICE_MODEL.into(),
                 timemachine: smb_shares
                     .iter()
                     .filter(|s| s.smb.preset == SmbPreset::Timemachine)
@@ -900,6 +934,11 @@ impl Applier for SharesDomain {
             if self.manage_unit(ctx, SMBD, true)? {
                 if smb_needs_restart(&from.smb, &to.smb) {
                     (ctx.log)("restarting smbd (listening setup changed)");
+                    ctx.system.restart_unit(SMBD)?;
+                } else if self.smbd_announces_itself(ctx) {
+                    (ctx.log)(
+                        "restarting smbd once: it was started before rynas turned off its own mDNS announcement",
+                    );
                     ctx.system.restart_unit(SMBD)?;
                 } else {
                     ctx.system.reload_or_restart_unit(SMBD)?;

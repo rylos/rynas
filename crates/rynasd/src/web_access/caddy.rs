@@ -20,13 +20,25 @@
 //!   off on both servers (`automatic_https.disable`), so the engine never orders a
 //!   certificate in W1, and TLS on the HTTPS server through `tls_connection_policies`.
 //!
+//! - own domains (wave W2): `tls.certificates.automate` lists the ACME subjects and one
+//!   `tls.automation.policies` entry per domain carries its ACME issuer
+//!   (https://caddyserver.com/docs/json/apps/tls/automation/policies/issuers/acme/): the CA
+//!   (Let's Encrypt or its staging), the optional `email` and `profile`, the DNS challenge
+//!   with the caddy-dns provider module (`challenges.dns.provider`, secrets as `{file./path}`
+//!   placeholders, Caddy ≥ 2.8), public `resolvers` for the propagation check and
+//!   `override_domain` for a delegated `_acme-challenge`; HTTP-01 and TLS-ALPN off unless the
+//!   domain asks for HTTP-01. ARI is on by default since Caddy 2.8 (certmagic 0.21).
+//!
 //! The source of the field names is Caddy v2.11.9's code (`modules/caddyhttp/...`,
-//! `admin.go`); the golden tests pin the output.
+//! `admin.go`, `modules/caddytls/acmeissuer.go`); the golden tests pin the output.
 
 use serde_json::{Value, json};
 
-use rynas_api_types::web_access::{HeaderPreset, ProxyMode, UpstreamScheme, WebRoute};
+use rynas_api_types::web_access::{
+    ChallengeKind, HeaderPreset, ProxyMode, UpstreamScheme, WebDomain, WebRoute,
+};
 
+use super::domains::{self, PROPAGATION_RESOLVERS};
 use super::model::{access_ranges, parse_size};
 use super::{RenderInput, Resolved};
 
@@ -148,6 +160,108 @@ fn redirect(location: String) -> Value {
     })
 }
 
+/// The caddy-dns provider object of a domain: `name` and each stored field, secrets as
+/// `{file.<dir>/<credential>/<field>}` where the module replaces placeholders, the value
+/// itself otherwise.
+fn provider_json(input: &RenderInput, d: &WebDomain) -> Value {
+    let Some(p) = d.provider else {
+        return Value::Null;
+    };
+    let mut o = serde_json::Map::new();
+    o.insert("name".into(), json!(p.as_str()));
+    let cred = domains::credential_of(input.cfg, d);
+    let stored: Vec<String> = cred.map(|c| c.fields.clone()).unwrap_or_default();
+    let values = d.credential.as_ref().and_then(|id| input.creds.get(id));
+    for spec in rynas_dns::fields(p) {
+        if spec.placeholder {
+            if stored.iter().any(|f| f == spec.name) {
+                o.insert(
+                    spec.name.into(),
+                    json!(format!(
+                        "{{file.{}/{}/{}}}",
+                        input.paths.dns_secrets,
+                        d.credential.as_deref().unwrap_or(""),
+                        spec.name
+                    )),
+                );
+            }
+        } else if let Some(v) = values.and_then(|(_, c)| c.get(spec.name)) {
+            o.insert(spec.name.into(), json!(v));
+        }
+    }
+    Value::Object(o)
+}
+
+/// The ACME issuer of a domain.
+fn issuer(input: &RenderInput, d: &WebDomain) -> Value {
+    let mut challenges = json!({"tls-alpn": {"disabled": true}});
+    if d.challenge != ChallengeKind::Http01 {
+        challenges["http"] = json!({"disabled": true});
+        let mut dns = json!({
+            "provider": provider_json(input, d),
+            "resolvers": PROPAGATION_RESOLVERS,
+        });
+        if d.challenge == ChallengeKind::CnameDelegation
+            && let Some(t) = &d.delegate_to
+        {
+            dns["override_domain"] = json!(t);
+        }
+        challenges["dns"] = dns;
+    }
+    let a = &input.cfg.acme;
+    let mut i = json!({
+        "module": "acme",
+        "ca": domains::acme_ca(input.cfg),
+        "challenges": challenges,
+    });
+    if let Some(e) = &a.email {
+        i["email"] = json!(e);
+    }
+    if let Some(p) = &a.profile {
+        i["profile"] = json!(p);
+    }
+    i
+}
+
+/// The `tls` app: local leaf from files, ACME for the own domains. `Null` when neither.
+fn tls_app(input: &RenderInput, resolved: &Resolved) -> Value {
+    let mut tls = serde_json::Map::new();
+    let mut certs = serde_json::Map::new();
+    if !resolved.local_names().is_empty() {
+        certs.insert(
+            "load_files".into(),
+            json!([{
+                "certificate": input.paths.cert,
+                "key": input.paths.key,
+                "tags": [LOCAL_CERT_TAG]
+            }]),
+        );
+    }
+    let mut automate: Vec<String> = Vec::new();
+    let mut policies = Vec::new();
+    if input.cfg.settings.mode == ProxyMode::Builtin {
+        for d in domains::active(input.cfg) {
+            let subjects = domains::cert_subjects(input.cfg, d);
+            if subjects.is_empty() {
+                continue;
+            }
+            automate.extend(subjects.iter().cloned());
+            policies.push(json!({"subjects": subjects, "issuers": [issuer(input, d)]}));
+        }
+    }
+    if !automate.is_empty() {
+        certs.insert("automate".into(), json!(automate));
+    }
+    if certs.is_empty() {
+        return Value::Null;
+    }
+    tls.insert("certificates".into(), Value::Object(certs));
+    if !policies.is_empty() {
+        tls.insert("automation".into(), json!({"policies": policies}));
+    }
+    Value::Object(tls)
+}
+
 impl Renderer for Caddy {
     fn render(&self, input: &RenderInput, resolved: &Resolved) -> Value {
         let s = &input.cfg.settings;
@@ -236,16 +350,10 @@ impl Renderer for Caddy {
                     "routes": https_routes
                 }),
             );
-            apps.insert(
-                "tls".into(),
-                json!({
-                    "certificates": {"load_files": [{
-                        "certificate": p.cert,
-                        "key": p.key,
-                        "tags": [LOCAL_CERT_TAG]
-                    }]}
-                }),
-            );
+            let tls = tls_app(input, resolved);
+            if !tls.is_null() {
+                apps.insert("tls".into(), tls);
+            }
         }
         apps.insert(
             "http".into(),

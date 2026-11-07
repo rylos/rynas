@@ -1049,3 +1049,63 @@ fn homes_service_users_get_subvolume_homes_and_lose_them_with_remove_home() {
     );
     assert!(!homes.probe("/volume1/homes/alice").exists);
 }
+
+#[test]
+fn smbd_started_before_its_mdns_was_turned_off_is_restarted_once() {
+    const SMBD: &str = "smbd.service";
+    let e = env();
+    // smbd running since long before rynas wrote `multicast dns register = no` (it still
+    // announces SYNODEB _device-info._tcp model=MacSamba through Avahi)
+    e.host
+        .state()
+        .unit_started
+        .insert(SMBD.into(), 1_600_000_000_000);
+    stage(&e, SHARES_KEY, &shares_doc()).unwrap();
+    apply(&e).unwrap();
+    let calls = e.sys.state().calls.clone();
+    assert!(
+        calls.iter().any(|c| c == "run systemctl restart smbd.service"),
+        "{calls:#?}"
+    );
+    assert!(!calls.iter().any(|c| c == "reload smbd.service"));
+    let marker = e.root.join("var/lib/rynas/smbd-mdns-off");
+    let since: i64 = std::fs::read_to_string(&marker)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert_eq!(since % 1000, 0, "whole seconds, like systemd's timestamp");
+    // one announcement: Samba's own is off, rynas's file carries the same model as fruit
+    let conf = read(&e.root, "/etc/samba/smb.conf");
+    assert!(conf.contains("multicast dns register = no"));
+    assert!(conf.contains(&format!("fruit:model = {}", crate::smb::DEVICE_MODEL)));
+    let avahi = read(&e.root, "/etc/avahi/services/rynas-smb.service");
+    assert!(avahi.contains(&format!("model={}", crate::smb::DEVICE_MODEL)));
+
+    // restarted since: the next change only reloads
+    e.host.state().unit_started.insert(SMBD.into(), since);
+    e.sys.state().calls.clear();
+    let mut d = shares_doc();
+    d.smb.workgroup = "OFFICE".into();
+    stage(&e, SHARES_KEY, &d).unwrap();
+    apply(&e).unwrap();
+    let calls = e.sys.state().calls.clone();
+    assert!(calls.iter().any(|c| c == "reload smbd.service"), "{calls:#?}");
+    assert!(!calls.iter().any(|c| c.contains("restart smbd")));
+}
+
+#[test]
+fn active_enter_timestamp() {
+    assert_eq!(
+        crate::host::parse_active_enter("ActiveEnterTimestamp=@1762500000\n"),
+        Some(1_762_500_000_000)
+    );
+    assert_eq!(
+        crate::host::parse_active_enter("ActiveEnterTimestamp=\n"),
+        None
+    );
+    assert_eq!(
+        crate::host::parse_active_enter("ActiveEnterTimestamp=@0\n"),
+        None
+    );
+}

@@ -323,16 +323,23 @@ fn open_config(
     // web access (W1): the proxy's certificate comes from the same local CA as :8443
     let tls = tls_service(args);
     let web_access = {
-        let tls = tls.clone();
-        Arc::new(rynasd::web_access::WebAccessSvc::new(
+        let tls2 = tls.clone();
+        let mut svc = rynasd::web_access::WebAccessSvc::new(
             root.clone(),
             args.caddy_admin.clone(),
             args.web_port,
             args.web_tls_port,
             rynasd::web_access::WebAccessSvc::system_facts(),
-            Box::new(move || tls.local_ca()),
+            Box::new(move || tls2.local_ca()),
             Box::new(rynasd::web_access::diag::SystemProbe),
-        ))
+        );
+        svc.state_dir = args.state_dir.clone();
+        if args.dry_system {
+            // DNS providers are never called in development
+            svc.dns = rynasd::web_access::domains::offline_factory();
+        }
+        let _ = svc.tls.set(tls.clone());
+        Arc::new(svc)
     };
     domains.push(Arc::new(rynasd::web_access::WebAccessDomain {
         svc: web_access.clone(),
@@ -728,6 +735,15 @@ fn main() -> std::io::Result<()> {
         let notifier: Arc<dyn Notifier> = Arc::new(engine.clone());
         rynasd::notifications::spawn_task_watch(&ops.tasks, notifier.clone());
         state.notifier = notifier.clone();
+        // web access (W2): DNS credentials are sealed with the engine's key, certificate
+        // trouble goes to the engine
+        let _ = opened.web_access.notifier.set(notifier.clone());
+        match rynas_notify::engine::secrets::SecretBox::open(&args.state_dir.join("notify")) {
+            Ok(b) => {
+                let _ = opened.web_access.secret_box.set(Arc::new(b));
+            }
+            Err(e) => tracing::warn!("web access: no secret store for DNS credentials: {e}"),
+        }
         state.notifications = Some(engine.clone());
         let history = History::open(&args.state_dir.join("scheduler.db"))
             .map_err(std::io::Error::other)?;

@@ -56,6 +56,21 @@ pub trait ShareHost: Send + Sync {
     fn ensure_dir(&self, path: &str) -> Result<(), String>;
     /// Removes `path` if it is an empty directory (nothing happens otherwise).
     fn remove_empty_dir(&self, path: &str);
+    /// When the running unit entered the active state (ms since the epoch, whole seconds);
+    /// `None` when it is not running or that is unknown.
+    fn unit_started_ms(&self, _unit: &str) -> Option<i64> {
+        None
+    }
+}
+
+/// `ActiveEnterTimestamp=@<seconds>` of `systemctl show --timestamp=unix` in milliseconds
+/// (`@0` or empty: not active).
+pub fn parse_active_enter(stdout: &str) -> Option<i64> {
+    let v = stdout
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("ActiveEnterTimestamp="))?;
+    let secs: i64 = v.trim().trim_start_matches('@').parse().ok()?;
+    (secs > 0).then_some(secs * 1000)
 }
 
 /// An entry of [`ShareHost::list_dir`].
@@ -261,6 +276,21 @@ impl ShareHost for HostShares {
         }
     }
 
+    fn unit_started_ms(&self, unit: &str) -> Option<i64> {
+        let o = Cmd::new("systemctl")
+            .args([
+                "show",
+                "-p",
+                "ActiveEnterTimestamp",
+                "--timestamp=unix",
+                unit,
+            ])
+            .timeout(CMD_TIMEOUT)
+            .run_blocking()
+            .ok()?;
+        parse_active_enter(&o.stdout)
+    }
+
     fn unit_installed(&self, unit: &str) -> bool {
         [
             "/usr/lib/systemd/system",
@@ -393,6 +423,8 @@ pub struct MemorySharesState {
     pub fail_acl: Vec<String>,
     /// Units reported as not installed (every other one is).
     pub missing_units: Vec<String>,
+    /// `unit_started_ms` answers (ms).
+    pub unit_started: BTreeMap<String, i64>,
     /// Snapshot names per directory.
     pub snapshots: BTreeMap<String, Vec<String>>,
     /// Sizes reported by `tree_size`.
@@ -467,6 +499,10 @@ impl ShareHost for MemoryShares {
 
     fn unit_installed(&self, unit: &str) -> bool {
         !self.state().missing_units.iter().any(|u| u == unit)
+    }
+
+    fn unit_started_ms(&self, unit: &str) -> Option<i64> {
+        self.state().unit_started.get(unit).copied()
     }
 
     fn list_dir(&self, path: &str) -> Vec<DirEntryInfo> {
