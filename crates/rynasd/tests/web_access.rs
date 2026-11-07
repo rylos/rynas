@@ -570,8 +570,8 @@ fn validation_refusals() {
     c.routes[0].sso = Some(SsoRule::default());
     assert_eq!(field(c), "routes[0].sso");
     let mut c = sample();
-    c.routes[0].kind = RouteKind::Custom;
-    assert_eq!(field(c), "routes[0].kind");
+    c.routes[0].prefix = Some("/x".into());
+    assert_eq!(field(c), "routes[0].prefix");
     let mut c = sample();
     c.routes[0].upstream.host = "192.0.2.50".into();
     assert_eq!(field(c), "routes[0].upstream.host");
@@ -598,6 +598,318 @@ fn validation_refusals() {
     assert_eq!(n.routes[0].label, "portainer");
     assert_eq!(n.routes[1].allow, vec!["198.51.100.7/32"]);
     assert_eq!(n.routes[1].upstream.host, "::1");
+}
+
+// ---------------------------------------------------------------------------------------------
+// extra ports and custom routes (§5.6)
+// ---------------------------------------------------------------------------------------------
+
+fn custom(id: &str, label: &str, host: &str, port: u16) -> WebRoute {
+    WebRoute {
+        id: id.into(),
+        kind: RouteKind::Custom,
+        label: label.into(),
+        upstream: WebUpstream {
+            host: host.into(),
+            port,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// `sample()` + immich also on :8445, a router (HTTPS, self-signed, its own Host) only on
+/// `https://nas.local:8444/`, and Grafana on another device below `/grafana` on the same
+/// port.
+fn sample_ports() -> WebAccessConfig {
+    let mut c = sample();
+    c.routes[1].ports = vec![8445];
+    let mut router = custom("router", "router", "192.0.2.1", 8443);
+    router.upstream.scheme = UpstreamScheme::Https;
+    router.upstream.skip_verify = true;
+    router.upstream.host_header = HostHeader::Upstream;
+    router.ports = vec![8444];
+    router.main_port = false;
+    router.names = RouteNames {
+        local: true,
+        domain: false,
+        nas: true,
+    };
+    let mut grafana = custom("grafana", "grafana", "Grafana.LAN", 3000);
+    grafana.ports = vec![8444];
+    grafana.names.nas = true;
+    grafana.prefix = Some("/grafana/".into());
+    grafana.access = AccessLevel::LanVpn;
+    c.routes.push(router);
+    c.routes.push(grafana);
+    c
+}
+
+#[test]
+fn extra_ports_and_custom_routes_render() {
+    let e = env();
+    let cfg = model::validate(sample_ports(), &[8080, 8443]).unwrap();
+    // normalised: host lowercased, prefix without the final slash
+    let g = cfg.routes.iter().find(|r| r.id == "grafana").unwrap();
+    assert_eq!(g.upstream.host, "grafana.lan");
+    assert_eq!(g.prefix.as_deref(), Some("/grafana"));
+    let (resolved, json) = e.svc.render(&cfg, &facts());
+    assert_golden("web_access_caddy_ports.json", &json);
+    let servers = &json["apps"]["http"]["servers"];
+    // one server per extra port, same TLS policies as the main one
+    assert_eq!(servers["rynas_port_8444"]["listen"], json!([":8444"]));
+    assert_eq!(servers["rynas_port_8445"]["listen"], json!([":8445"]));
+    assert_eq!(
+        servers["rynas_port_8444"]["tls_connection_policies"],
+        servers["rynas_https"]["tls_connection_policies"]
+    );
+    let ids = |srv: &Value| -> Vec<String> {
+        srv["routes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["@id"].as_str().map(String::from))
+            .collect()
+    };
+    // the longest prefix first; the router is not on the main port
+    assert_eq!(
+        ids(&servers["rynas_port_8444"]),
+        vec!["rynas-route-grafana:8444", "rynas-route-router:8444"]
+    );
+    assert!(!ids(&servers["rynas_https"]).contains(&"rynas-route-router".to_string()));
+    assert!(ids(&servers["rynas_https"]).contains(&"rynas-route-grafana".to_string()));
+    assert_eq!(ids(&servers["rynas_port_8445"]), vec!["rynas-route-app-immich:8445"]);
+    // access rules on the extra port as on 443
+    let site = &servers["rynas_port_8445"]["routes"][0];
+    let main = servers["rynas_https"]["routes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["@id"] == "rynas-route-app-immich")
+        .unwrap();
+    assert_eq!(site["handle"], main["handle"]);
+    assert_eq!(
+        site["handle"][0]["routes"][0]["match"][0]["not"][0]["remote_ip"]["ranges"]
+            .as_array()
+            .unwrap()
+            .len(),
+        model::access_ranges(AccessLevel::LanVpn, &facts(), &["198.51.100.7".into()]).len()
+    );
+    let gsite = &servers["rynas_port_8444"]["routes"][0];
+    assert_eq!(
+        gsite["match"][0]["path"],
+        json!(["/grafana", "/grafana/*"])
+    );
+    assert_eq!(
+        gsite["match"][0]["host"],
+        json!(["grafana-nas.local", "nas.local", "nas"])
+    );
+    // the router: insecure TLS, its own Host; Grafana plain HTTP by name
+    let proxy_of = |site: &Value| {
+        site["handle"][0]["routes"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()["handle"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()
+            .clone()
+    };
+    let rp = proxy_of(&servers["rynas_port_8444"]["routes"][1]);
+    assert_eq!(rp["upstreams"][0]["dial"], "192.0.2.1:8443");
+    assert_eq!(rp["transport"]["tls"]["insecure_skip_verify"], true);
+    assert_eq!(
+        rp["headers"]["request"]["set"]["Host"][0],
+        "{http.reverse_proxy.upstream.hostport}"
+    );
+    assert_eq!(proxy_of(gsite)["upstreams"][0]["dial"], "grafana.lan:3000");
+    // `:80`: the router's own name goes to its port
+    let http = servers["rynas_http"]["routes"].as_array().unwrap();
+    assert_eq!(http[0]["match"][0]["host"], json!(["router-nas.local"]));
+    assert_eq!(
+        http[0]["handle"][0]["headers"]["Location"][0],
+        "https://{http.request.host}:8444{http.request.uri}"
+    );
+    // the local leaf covers the NAS's names on the port even with the interface off
+    let mut off = cfg.clone();
+    off.settings.ui.enabled = false;
+    let r2 = resolve(&off, &facts());
+    assert!(r2.local_names().contains(&"nas.local".to_string()));
+    assert!(resolved.all_names().contains(&"router-nas.local".to_string()));
+    // verified TLS towards a device with a real certificate
+    let mut v = cfg.clone();
+    v.routes.iter_mut().find(|r| r.id == "router").unwrap().upstream.skip_verify = false;
+    let (_, j) = e.svc.render(&v, &facts());
+    let rp = proxy_of(&j["apps"]["http"]["servers"]["rynas_port_8444"]["routes"][1]);
+    assert_eq!(rp["transport"]["tls"], json!({}));
+    // a disabled route leaves its port
+    let mut d = cfg;
+    d.routes[1].enabled = false;
+    let (_, j) = e.svc.render(&d, &facts());
+    assert!(j["apps"]["http"]["servers"]["rynas_port_8445"].is_null());
+}
+
+#[test]
+fn extra_port_and_custom_validation() {
+    let ok = |c: WebAccessConfig| model::validate(c, &[8080, 8443]);
+    let field = |c: WebAccessConfig| ok(c).unwrap_err().field.unwrap();
+    let base = sample_ports;
+    for (port, why) in [(443, "main"), (80, "http"), (8443, "emergency"), (22, "system")] {
+        let mut c = base();
+        c.routes[1].ports = vec![port];
+        assert_eq!(field(c), "routes[1].ports", "{why}");
+    }
+    let mut c = base();
+    c.routes[1].ports = (2000..2009).collect();
+    assert_eq!(field(c), "routes[1].ports");
+    let mut c = base();
+    c.routes[1].ports.clear();
+    c.routes[1].main_port = false;
+    assert_eq!(field(c), "routes[1].main_port");
+    let mut c = base();
+    c.routes[1].ports.clear();
+    c.routes[1].names.nas = true;
+    assert_eq!(field(c), "routes[1].names.nas");
+    // two routes on the NAS's names on one port need different prefixes
+    let mut c = base();
+    c.routes[3].prefix = None;
+    assert_eq!(field(c), "routes[3].prefix");
+    // the proxy itself as upstream
+    let mut c = base();
+    c.routes[2].upstream.host = "127.0.0.1".into();
+    c.routes[2].upstream.port = 8445;
+    assert_eq!(field(c), "routes[2].upstream.port");
+    for bad in ["0.0.0.0", "224.0.0.1", "bad_host", "-x.lan", ""] {
+        let mut c = base();
+        c.routes[2].upstream.host = bad.into();
+        assert_eq!(field(c), "routes[2].upstream.host", "{bad}");
+    }
+    let mut c = base();
+    c.routes[3].prefix = Some("/a*".into());
+    assert_eq!(field(c), "routes[3].prefix");
+    // HTTP-01 needs port 80 on the name: not for an address only on another port
+    let mut c = base();
+    c.domains = vec![WebDomain {
+        id: "home".into(),
+        name: "nas.example.com".into(),
+        challenge: ChallengeKind::Http01,
+        lan_record: false,
+        ..Default::default()
+    }];
+    assert_eq!(field(c.clone()), "routes[2].main_port");
+    c.routes[2].main_port = true;
+    let n = ok(c).unwrap();
+    // the domain's own name joins its certificate once a route answers on it
+    let d = &n.domains[0];
+    assert!(
+        rynasd::web_access::domains::cert_subjects(&n, d).contains(&"nas.example.com".to_string())
+    );
+    // skip_verify is dropped where it means nothing (plain HTTP, loopback)
+    let mut c = base();
+    c.routes[3].upstream.skip_verify = true;
+    let n = ok(c).unwrap();
+    assert!(!n.routes[3].upstream.skip_verify);
+    // the unchanged sample serialises without the new fields
+    let v = serde_json::to_value(model::validate(sample(), &[8080, 8443]).unwrap()).unwrap();
+    let text = v.to_string();
+    for k in ["ports", "main_port", "prefix", "skip_verify", "host_header", "\"nas\""] {
+        assert!(!text.contains(k), "{k} in {text}");
+    }
+}
+
+#[tokio::test]
+async fn extra_ports_busy_state_and_checks() {
+    let e = env();
+    let app = e.app();
+    // another program listens on 8444 (0x20FC)
+    std::fs::create_dir_all(e.root().join("proc/net")).unwrap();
+    std::fs::write(
+        e.root().join("proc/net/tcp"),
+        "  sl  local_address rem_address   st\n   0: 00000000:20FC 00000000:0000 0A 0\n   1: 00000000:20FD 00000000:0000 01 0\n",
+    )
+    .unwrap();
+    let (s, b) = call(
+        &app,
+        "admin",
+        "PUT",
+        "/v1/web-access",
+        Some(serde_json::to_value(sample_ports()).unwrap()),
+    )
+    .await;
+    let err: ApiError = serde_json::from_slice(&b).unwrap();
+    assert_eq!(
+        (s, err.field.as_deref()),
+        (StatusCode::BAD_REQUEST, Some("routes[2].ports"))
+    );
+    std::fs::remove_file(e.root().join("proc/net/tcp")).unwrap();
+    e.apply(&sample_ports()).unwrap();
+    // the proxy holds the port now: keeping it is no conflict
+    std::fs::write(
+        e.root().join("proc/net/tcp"),
+        "  sl  local_address rem_address   st\n   0: 00000000:20FC 00000000:0000 0A 0\n",
+    )
+    .unwrap();
+    e.apply(&sample_ports()).unwrap();
+    let (s, b) = call(&app, "admin", "GET", "/v1/web-access", None).await;
+    assert_eq!(s, StatusCode::OK);
+    let st: WebAccessState = serde_json::from_slice(&b).unwrap();
+    assert_eq!(st.reserved_ports, vec![80, 443, 8444, 8445]);
+    assert!(e.svc.reserved_ports().contains(&(8444, true)));
+    let router = st.routes.iter().find(|r| r.id == "router").unwrap();
+    assert_eq!(router.kind, RouteKind::Custom);
+    assert!(!router.main_port);
+    assert_eq!(
+        router.urls,
+        vec![
+            "https://router-nas.local:8444/",
+            "https://nas.local:8444/",
+            "https://nas:8444/"
+        ]
+    );
+    assert_eq!(router.upstream, "https://192.0.2.1:8443");
+    let grafana = st.routes.iter().find(|r| r.id == "grafana").unwrap();
+    assert_eq!(grafana.urls[0], "https://grafana-nas.local/");
+    assert!(grafana.urls.contains(&"https://nas.local:8444/grafana/".to_string()));
+    // checks: the port listens, the upstream (a host name) answers
+    e.probe
+        .open
+        .lock()
+        .unwrap()
+        .push("127.0.0.1:8444".parse().unwrap());
+    *e.probe.resolve.lock().unwrap() = Ok(vec!["192.0.2.10".parse().unwrap()]);
+    e.probe
+        .open
+        .lock()
+        .unwrap()
+        .push("192.0.2.10:3000".parse().unwrap());
+    let test = |id: &'static str| {
+        let app = app.clone();
+        async move {
+            let (s, b) = call(
+                &app,
+                "admin",
+                "POST",
+                &format!("/v1/web-access/routes/{id}/test"),
+                None,
+            )
+            .await;
+            assert_eq!(s, StatusCode::OK);
+            serde_json::from_slice::<RouteDiagnostics>(&b).unwrap()
+        }
+    };
+    let d = test("grafana").await;
+    let st = |d: &RouteDiagnostics, id: &str| d.checks.iter().find(|c| c.id == id).unwrap().state;
+    assert_eq!(st(&d, "port_listening"), CheckState::Ok);
+    assert_eq!(st(&d, "route_loaded"), CheckState::Ok, "{d:?}");
+    assert_eq!(st(&d, "upstream"), CheckState::Ok, "{d:?}");
+    let d = test("router").await;
+    assert_eq!(st(&d, "https_listening"), CheckState::Skipped);
+    assert_eq!(st(&d, "route_loaded"), CheckState::Ok, "{d:?}");
+    assert_eq!(st(&d, "upstream"), CheckState::Fail);
+    let d = test("app-immich").await;
+    assert_eq!(st(&d, "port_listening"), CheckState::Fail);
 }
 
 // ---------------------------------------------------------------------------------------------

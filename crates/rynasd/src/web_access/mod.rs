@@ -172,7 +172,19 @@ pub struct ResolvedRoute {
     pub local: Option<String>,
     /// `<label>.<domain>` for each enabled domain.
     pub domain_names: Vec<String>,
+    /// The NAS's own names the route answers on its extra ports (`names.nas`, §5.6):
+    /// `<host>.local`, `<host>`, each enabled domain's name.
+    pub nas: Vec<String>,
     pub problems: Vec<String>,
+}
+
+impl ResolvedRoute {
+    /// The names served on the route's extra ports: its own, then the NAS's.
+    pub fn port_names(&self) -> Vec<String> {
+        let mut v = self.names.clone();
+        v.extend(self.nas.iter().filter(|n| !self.names.contains(n)).cloned());
+        v
+    }
 }
 
 /// Served names: the interface's own and each route's.
@@ -193,6 +205,13 @@ impl Resolved {
         for r in &self.routes {
             v.extend(r.names.iter().cloned());
         }
+        for r in &self.routes {
+            for n in &r.nas {
+                if !v.contains(n) {
+                    v.push(n.clone());
+                }
+            }
+        }
         v
     }
 
@@ -200,6 +219,14 @@ impl Resolved {
     pub fn local_names(&self) -> Vec<String> {
         let mut v = self.ui_local.clone();
         v.extend(self.routes.iter().filter_map(|r| r.local.clone()));
+        // the NAS's local names on extra ports, when the interface itself is off
+        for r in &self.routes {
+            for n in r.nas.iter().filter(|n| n.ends_with(".local") || !n.contains('.')) {
+                if !v.contains(n) {
+                    v.push(n.clone());
+                }
+            }
+        }
         v
     }
 }
@@ -259,11 +286,17 @@ pub fn resolve(cfg: &WebAccessConfig, facts: &HostFacts) -> Resolved {
                 .cloned()
                 .chain(domain_names.iter().cloned())
                 .collect();
+            let mut nas = Vec::new();
+            if builtin && r.enabled && r.names.nas && !r.ports.is_empty() {
+                nas.extend(model::ui_names(&host));
+                nas.extend(domains::active(cfg).map(|d| d.name.clone()));
+            }
             ResolvedRoute {
                 route: r.clone(),
                 names,
                 local,
                 domain_names,
+                nas,
                 problems,
             }
         })
@@ -603,6 +636,18 @@ impl WebAccessSvc {
         (self.facts)()
     }
 
+    /// Host ports with a listening TCP socket (`/proc/net/tcp{,6}` below the root):
+    /// services, and containers published through docker-proxy.
+    pub fn listening_ports(&self) -> BTreeSet<u16> {
+        let mut v = BTreeSet::new();
+        for f in ["/proc/net/tcp", "/proc/net/tcp6"] {
+            if let Ok(t) = std::fs::read_to_string(self.path(f)) {
+                v.extend(model::listening_tcp(&t));
+            }
+        }
+        v
+    }
+
     fn path(&self, abs: &str) -> PathBuf {
         under_root(&self.root, Path::new(abs))
     }
@@ -637,6 +682,13 @@ impl WebAccessSvc {
         let mut v = vec![(s.http_port, false), (s.https_port, false)];
         if s.h3 {
             v.push((s.https_port, true));
+        }
+        // the routes' extra ports (§5.6)
+        for p in model::extra_ports(&self.applied()) {
+            v.push((p, false));
+            if s.h3 {
+                v.push((p, true));
+            }
         }
         v
     }
@@ -1249,11 +1301,28 @@ impl WebAccessSvc {
                 kind: x.route.kind,
                 stack: x.route.stack.clone(),
                 app: x.route.app.clone(),
-                urls: x
-                    .names
-                    .iter()
-                    .map(|n| url_of(n, port, &x.route.path))
-                    .collect(),
+                urls: {
+                    let mut u: Vec<String> = if x.route.main_port {
+                        x.names
+                            .iter()
+                            .map(|n| url_of(n, port, &x.route.path))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    let path = x.route.prefix.as_deref().map_or_else(
+                        || x.route.path.clone(),
+                        |p| format!("{p}/"),
+                    );
+                    if x.route.enabled {
+                        for p in &x.route.ports {
+                            u.extend(x.port_names().iter().map(|n| url_of(n, *p, &path)));
+                        }
+                    }
+                    u
+                },
+                ports: x.route.ports.clone(),
+                main_port: x.route.main_port,
                 names: x.names.clone(),
                 upstream: format!(
                     "{}://{}",
@@ -1284,6 +1353,7 @@ impl WebAccessSvc {
             } else {
                 vec![cur.settings.http_port, cur.settings.https_port]
             };
+            v.extend(model::extra_ports(&cur));
             v.dedup();
             v
         };
@@ -1339,7 +1409,9 @@ impl WebAccessSvc {
             ),
             Some(n) => local_name_check(n, &self.names.report()),
         });
-        let name = name.or_else(|| r.names.first().cloned());
+        let name = name
+            .or_else(|| r.names.first().cloned())
+            .or_else(|| r.nas.first().cloned());
         // 1. the name resolves to this NAS
         checks.push(match &name {
             None => check(
@@ -1401,14 +1473,22 @@ impl WebAccessSvc {
                 }
             }
         };
-        // 3. the route is loaded
-        let want_id = format!("rynas-route-{id}");
+        // 3. the route is loaded (on the main port, and on each extra port)
+        let mut want: Vec<(String, String)> = Vec::new();
+        if r.route.main_port {
+            want.push(("rynas_https".into(), format!("rynas-route-{id}")));
+        }
+        for p in &r.route.ports {
+            want.push((format!("rynas_port_{p}"), format!("rynas-route-{id}:{p}")));
+        }
         checks.push(match &running {
             None => check("route_loaded", CheckState::Skipped, ""),
             Some(v) => {
-                let found = v["apps"]["http"]["servers"]["rynas_https"]["routes"]
-                    .as_array()
-                    .is_some_and(|rs| rs.iter().any(|x| x["@id"] == want_id.as_str()));
+                let found = want.iter().all(|(server, want_id)| {
+                    v["apps"]["http"]["servers"][server]["routes"]
+                        .as_array()
+                        .is_some_and(|rs| rs.iter().any(|x| x["@id"] == want_id.as_str()))
+                });
                 if found {
                     check(
                         "route_loaded",
@@ -1428,6 +1508,12 @@ impl WebAccessSvc {
         let https = SocketAddr::from(([127, 0, 0, 1], cfg.settings.https_port));
         checks.push(if running.is_none() {
             check("https_listening", CheckState::Skipped, "")
+        } else if !r.route.main_port {
+            check(
+                "https_listening",
+                CheckState::Skipped,
+                "the address is only on its extra ports",
+            )
         } else {
             match self.probe.connect(https) {
                 Ok(()) => check(
@@ -1442,6 +1528,22 @@ impl WebAccessSvc {
                 ),
             }
         });
+        // 4b. each extra port listens
+        for p in &r.route.ports {
+            let a = SocketAddr::from(([127, 0, 0, 1], *p));
+            checks.push(if running.is_none() {
+                check("port_listening", CheckState::Skipped, format!("port {p}"))
+            } else {
+                match self.probe.connect(a) {
+                    Ok(()) => check(
+                        "port_listening",
+                        CheckState::Ok,
+                        format!("port {p} answers (the router may forward it to this NAS)"),
+                    ),
+                    Err(e) => check("port_listening", CheckState::Fail, format!("port {p}: {e}")),
+                }
+            });
+        }
         // 5. the certificate covers the name
         checks.push(match &name {
             None => check("certificate", CheckState::Skipped, ""),
@@ -1470,23 +1572,26 @@ impl WebAccessSvc {
                 }
             },
         });
-        // 6. the upstream answers
-        let up: Option<SocketAddr> = r
-            .route
-            .upstream
-            .host
-            .parse::<IpAddr>()
-            .ok()
-            .map(|ip| SocketAddr::new(ip, r.route.upstream.port));
+        // 6. the upstream answers (a host name of a custom route is resolved first)
+        let uh = &r.route.upstream.host;
+        let up: Result<SocketAddr, String> = match uh.parse::<IpAddr>() {
+            Ok(ip) => Ok(SocketAddr::new(ip, r.route.upstream.port)),
+            Err(_) => match self.probe.resolve(uh) {
+                Ok(a) if !a.is_empty() => Ok(SocketAddr::new(a[0], r.route.upstream.port)),
+                Ok(_) => Err(format!("{uh} has no address")),
+                Err(e) => Err(format!("{uh} does not resolve on the NAS: {e}")),
+            },
+        };
+        let hint = if r.route.kind == RouteKind::Custom {
+            "is the device on, and is the port right?"
+        } else {
+            "is the app running?"
+        };
         checks.push(match up {
-            None => check("upstream", CheckState::Fail, "bad upstream address"),
-            Some(a) => match self.probe.connect(a) {
+            Err(e) => check("upstream", CheckState::Fail, e),
+            Ok(a) => match self.probe.connect(a) {
                 Ok(()) => check("upstream", CheckState::Ok, format!("{a} answers")),
-                Err(e) => check(
-                    "upstream",
-                    CheckState::Fail,
-                    format!("{a}: {e} (is the app running?)"),
-                ),
+                Err(e) => check("upstream", CheckState::Fail, format!("{a}: {e} ({hint})")),
             },
         });
         // 7. own-domain names: they resolve to this NAS, and their ACME certificate
@@ -1626,6 +1731,7 @@ impl WebAccessSvc {
                                 scheme: spec.scheme,
                                 host: "127.0.0.1".into(),
                                 port: spec.port,
+                                ..Default::default()
                             },
                             auth: spec.auth,
                             limits: RouteLimits {
@@ -2661,6 +2767,13 @@ impl Applier for WebAccessDomain {
         let applied = self.svc.applied();
         domains::seal_credentials(&mut c, &[&applied], self.svc.sb())?;
         let c = model::validate(c, &[self.svc.ui_port, self.svc.emergency_port])?;
+        // extra ports another program listens on (the proxy's own ones excepted)
+        let held: BTreeSet<u16> = if self.svc.installed() {
+            model::extra_ports(&applied)
+        } else {
+            BTreeSet::new()
+        };
+        model::check_busy_ports(&c, &self.svc.listening_ports(), &held)?;
         serde_json::to_value(c).map_err(|e| Invalid::from(e.to_string()))
     }
 

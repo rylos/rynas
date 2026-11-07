@@ -72,7 +72,8 @@ pub enum RouteKind {
     App,
     /// Any other Docker stack (`stack` + optional `service`).
     Stack,
-    /// Another address (a host on the LAN). Wave W2: refused for now.
+    /// Any other `http(s)://host:port`: another device on the LAN, or a container or stack
+    /// rynas did not install (§5.6). `stack` may name a foreign stack (informational).
     Custom,
 }
 
@@ -82,9 +83,34 @@ pub enum RouteKind {
 pub enum UpstreamScheme {
     #[default]
     Http,
-    /// HTTPS with the container's own (usually self-signed) certificate: not verified, the
-    /// upstream is on loopback.
+    /// HTTPS. On loopback the container's own (usually self-signed) certificate is never
+    /// verified; on another host it is, unless [`WebUpstream::skip_verify`].
     Https,
+}
+
+/// The `Host` header the upstream gets (§5.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HostHeader {
+    /// The name the browser asked for (the default; apps that build links from it need it).
+    #[default]
+    Client,
+    /// The upstream's own `host:port` (devices that refuse unknown names, virtual hosts).
+    Upstream,
+}
+
+impl HostHeader {
+    pub fn is_client(&self) -> bool {
+        *self == HostHeader::Client
+    }
+}
+
+fn is_true(b: &bool) -> bool {
+    *b
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Security headers added to answers that lack them.
@@ -172,7 +198,8 @@ impl Default for WebAccessSettings {
     }
 }
 
-/// Where a route sends requests. Wave W1: loopback only (`127.0.0.1` or `::1`).
+/// Where a route sends requests: loopback for `app`/`stack` routes; any address or host
+/// name for `custom` routes (§5.6).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebUpstream {
     #[serde(default)]
@@ -180,6 +207,12 @@ pub struct WebUpstream {
     #[serde(default = "loopback")]
     pub host: String,
     pub port: u16,
+    /// `https` upstream on another host: accept any certificate (self-signed devices). Off
+    /// by default; the UI warns. Loopback upstreams are never verified.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub skip_verify: bool,
+    #[serde(default, skip_serializing_if = "HostHeader::is_client")]
+    pub host_header: HostHeader,
 }
 
 impl Default for WebUpstream {
@@ -188,6 +221,8 @@ impl Default for WebUpstream {
             scheme: UpstreamScheme::Http,
             host: loopback(),
             port: 0,
+            skip_verify: false,
+            host_header: HostHeader::Client,
         }
     }
 }
@@ -201,6 +236,10 @@ pub struct RouteNames {
     /// `<label>.<domain>` for every enabled own domain (wave W2).
     #[serde(default = "yes")]
     pub domain: bool,
+    /// The NAS's own names (`<host>.local`, `<host>` and each enabled domain's name), only
+    /// on the route's extra [`WebRoute::ports`] (§5.6): `https://nas.example.com:8444/`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub nas: bool,
 }
 
 impl Default for RouteNames {
@@ -208,6 +247,7 @@ impl Default for RouteNames {
         Self {
             local: true,
             domain: true,
+            nas: false,
         }
     }
 }
@@ -297,6 +337,19 @@ pub struct WebRoute {
     pub headers: HeaderPreset,
     #[serde(default = "yes")]
     pub enabled: bool,
+    /// Extra HTTPS ports the route listens on, with the same names and access rules
+    /// (§5.6): 1024-65535, not the proxy's or rynas-web's ports, not busy on the host; a
+    /// route may share a port with others only by name or path prefix. At most 8.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<u16>,
+    /// Also on the main HTTPS port (the default). `false`: only on [`Self::ports`].
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub main_port: bool,
+    /// Only requests below this path are proxied (`/grafana` matches `/grafana` and
+    /// `/grafana/...`; kept, not stripped). Lets several routes share the NAS's names on one
+    /// port. `custom` routes only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
 }
 
 impl Default for WebRoute {
@@ -320,6 +373,9 @@ impl Default for WebRoute {
             path: slash(),
             headers: HeaderPreset::Default,
             enabled: true,
+            ports: Vec::new(),
+            main_port: true,
+            prefix: None,
         }
     }
 }
@@ -876,8 +932,15 @@ pub struct RouteView {
     pub app: Option<String>,
     /// Host names served (today the local name, when on).
     pub names: Vec<String>,
-    /// `https://<name><path>` for each name (with `:<port>` when the HTTPS port is not 443).
+    /// `https://<name><path>` for each name (with `:<port>` when the HTTPS port is not 443),
+    /// then `https://<name>:<port><path>` for each extra port and each name served there.
     pub urls: Vec<String>,
+    /// Extra HTTPS ports (§5.6).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<u16>,
+    /// Served on the main HTTPS port.
+    #[serde(default = "yes")]
+    pub main_port: bool,
     /// `scheme://host:port` of the upstream.
     pub upstream: String,
     pub access: AccessLevel,

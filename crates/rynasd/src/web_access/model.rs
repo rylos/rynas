@@ -6,7 +6,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use rynas_api_types::apps::WebAuth;
 use rynas_api_types::web_access::{
-    AccessLevel, ChallengeKind, DnsProvider, RouteKind, WebAccessConfig, WebRoute,
+    AccessLevel, ChallengeKind, DnsProvider, ProxyMode, RouteKind, UpstreamScheme,
+    WebAccessConfig, WebRoute,
 };
 use rynas_config::Invalid;
 
@@ -452,30 +453,66 @@ pub fn validate(mut c: WebAccessConfig, reserved: &[u16]) -> Result<WebAccessCon
                     ));
                 }
             }
-            RouteKind::Custom => {
-                return Err(Invalid::at(
-                    at("kind"),
-                    "routes to other addresses are not available yet",
-                ));
-            }
+            RouteKind::Custom => {}
         }
         let host = r
             .upstream
             .host
             .trim()
             .trim_start_matches('[')
-            .trim_end_matches(']');
+            .trim_end_matches(']')
+            .to_ascii_lowercase();
         let ip: Option<IpAddr> = host.parse().ok();
-        if !ip.is_some_and(|i| i.is_loopback()) {
+        if r.kind == RouteKind::Custom {
+            let ok = match ip {
+                Some(IpAddr::V4(v4)) => {
+                    !v4.is_unspecified() && !v4.is_multicast() && !v4.is_broadcast()
+                }
+                Some(IpAddr::V6(v6)) => !v6.is_unspecified() && !v6.is_multicast(),
+                None => {
+                    host.len() <= 253
+                        && !host.is_empty()
+                        && host.split('.').all(|l| valid_label(l, 63))
+                }
+            };
+            if !ok {
+                return Err(Invalid::at(
+                    at("upstream.host"),
+                    "an address or a host name such as 192.168.1.20 or printer.lan",
+                ));
+            }
+        } else if !ip.is_some_and(|i| i.is_loopback()) {
             return Err(Invalid::at(
                 at("upstream.host"),
                 "the upstream must be on this NAS (127.0.0.1 or ::1)",
             ));
         }
-        r.upstream.host = host.to_string();
+        r.upstream.host = host;
         if r.upstream.port == 0 {
             return Err(Invalid::at(at("upstream.port"), "port 0"));
         }
+        // nothing to skip: plain HTTP, or loopback (never verified)
+        if r.upstream.scheme == UpstreamScheme::Http || ip.is_some_and(|i| i.is_loopback()) {
+            r.upstream.skip_verify = false;
+        }
+        r.prefix = match r.prefix.as_deref().map(|p| p.trim().trim_end_matches('/')) {
+            None | Some("") => None,
+            Some(_) if r.kind != RouteKind::Custom => {
+                return Err(Invalid::at(
+                    at("prefix"),
+                    "a path prefix is for routes to other addresses",
+                ));
+            }
+            Some(p) if path_ok(p) && !p.contains(['*', '?', '#', '%', '{', '}']) => {
+                Some(p.to_string())
+            }
+            Some(_) => {
+                return Err(Invalid::at(
+                    at("prefix"),
+                    "a path such as /grafana (letters, digits, - _ . /)",
+                ));
+            }
+        };
         check_access(r.access, &at("access"))?;
         check_allow(&mut r.allow, &at("allow"))?;
         if r.sso.is_some() {
@@ -511,6 +548,7 @@ pub fn validate(mut c: WebAccessConfig, reserved: &[u16]) -> Result<WebAccessCon
         }
     }
     validate_w2(&mut c)?;
+    validate_ports(&mut c, reserved)?;
     // external mode keeps the routes: they come back with the built-in proxy
     Ok(c)
 }
@@ -728,6 +766,160 @@ fn validate_w2(c: &mut WebAccessConfig) -> Result<(), Invalid> {
         }
     }
     Ok(())
+}
+
+/// Most extra ports one route may have.
+pub const MAX_ROUTE_PORTS: usize = 8;
+
+/// Extra HTTPS ports, path prefixes on shared ports, and the upstream loop (§5.6).
+fn validate_ports(c: &mut WebAccessConfig, reserved: &[u16]) -> Result<(), Invalid> {
+    let (http, https) = (c.settings.http_port, c.settings.https_port);
+    let http01 = c
+        .domains
+        .iter()
+        .any(|d| d.enabled && d.challenge == ChallengeKind::Http01);
+    // (port, prefix) of the routes that answer on the NAS's names there
+    let mut shared: BTreeMap<(u16, String), String> = BTreeMap::new();
+    for (i, r) in c.routes.iter_mut().enumerate() {
+        let at = |f: &str| format!("routes[{i}].{f}");
+        r.ports.sort_unstable();
+        r.ports.dedup();
+        if r.ports.len() > MAX_ROUTE_PORTS {
+            return Err(Invalid::at(
+                at("ports"),
+                format!("at most {MAX_ROUTE_PORTS} extra ports per address"),
+            ));
+        }
+        for &p in &r.ports {
+            if p == http || p == https {
+                return Err(Invalid::at(
+                    at("ports"),
+                    format!("port {p} is the proxy's own port: every address is already on it"),
+                ));
+            }
+            if reserved.contains(&p) {
+                return Err(Invalid::at(
+                    at("ports"),
+                    format!("port {p} belongs to the web interface"),
+                ));
+            }
+            if p < 1024 {
+                return Err(Invalid::at(
+                    at("ports"),
+                    format!(
+                        "port {p}: ports below 1024 belong to system services, use 1024-65535"
+                    ),
+                ));
+            }
+        }
+        if !r.main_port && r.ports.is_empty() {
+            return Err(Invalid::at(
+                at("main_port"),
+                "an address only on extra ports needs at least one port",
+            ));
+        }
+        if r.names.nas && r.ports.is_empty() {
+            return Err(Invalid::at(
+                at("names.nas"),
+                "the NAS's own names are only served on extra ports: add a port",
+            ));
+        }
+        // HTTP-01 answers on port 80 only: an address that lives on another port cannot
+        // count on it (the router forwards that port, not 80)
+        if !r.main_port && http01 && (r.names.domain || r.names.nas) {
+            return Err(Invalid::at(
+                at("main_port"),
+                "a domain with the HTTP-01 challenge needs port 80 reachable on that name: use DNS-01 for addresses only on extra ports, or keep the address on the main port",
+            ));
+        }
+        if r.enabled && r.names.nas {
+            for &p in &r.ports {
+                let key = (p, r.prefix.clone().unwrap_or_else(|| "/".into()));
+                if let Some(other) = shared.insert(key, r.id.clone()) {
+                    return Err(Invalid::at(
+                        at("prefix"),
+                        format!(
+                            "the route {other} already answers on the NAS's names on port {p}{}: give one of them another path prefix or port",
+                            r.prefix.as_deref().unwrap_or("")
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    // a custom upstream on loopback may not be one of the proxy's own listeners
+    let mut proxy_ports: BTreeSet<u16> = [http, https].into();
+    proxy_ports.extend(c.routes.iter().flat_map(|r| r.ports.iter().copied()));
+    for (i, r) in c.routes.iter().enumerate() {
+        let lo = r
+            .upstream
+            .host
+            .parse::<IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(r.upstream.host == "localhost");
+        if r.kind == RouteKind::Custom && lo && proxy_ports.contains(&r.upstream.port) {
+            return Err(Invalid::at(
+                format!("routes[{i}].upstream.port"),
+                format!(
+                    "port {} on this NAS is the proxy itself: the requests would loop",
+                    r.upstream.port
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Ports with a listening TCP socket in `/proc/net/tcp` or `tcp6` text.
+pub fn listening_tcp(text: &str) -> BTreeSet<u16> {
+    text.lines()
+        .skip(1)
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            if f.len() < 4 || f[3] != "0A" {
+                return None;
+            }
+            f[1].rsplit_once(':')
+                .and_then(|(_, p)| u16::from_str_radix(p, 16).ok())
+        })
+        .collect()
+}
+
+/// The extra ports of `c` another program already listens on: `busy` are the host's
+/// listening ports, `held` the ones the proxy itself holds now (the applied key).
+pub fn check_busy_ports(
+    c: &WebAccessConfig,
+    busy: &BTreeSet<u16>,
+    held: &BTreeSet<u16>,
+) -> Result<(), Invalid> {
+    if c.settings.mode != ProxyMode::Builtin {
+        return Ok(());
+    }
+    for (i, r) in c.routes.iter().enumerate() {
+        if let Some(p) = r
+            .ports
+            .iter()
+            .find(|p| r.enabled && busy.contains(p) && !held.contains(p))
+        {
+            return Err(Invalid::at(
+                format!("routes[{i}].ports"),
+                format!("port {p} is already used on this NAS by another service or container"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The extra ports the proxy listens on with `c` (enabled routes, built-in mode).
+pub fn extra_ports(c: &WebAccessConfig) -> BTreeSet<u16> {
+    if c.settings.mode != ProxyMode::Builtin {
+        return BTreeSet::new();
+    }
+    c.routes
+        .iter()
+        .filter(|r| r.enabled)
+        .flat_map(|r| r.ports.iter().copied())
+        .collect()
 }
 
 fn check_access(a: AccessLevel, field: &str) -> Result<(), Invalid> {

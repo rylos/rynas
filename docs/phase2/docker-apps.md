@@ -588,7 +588,8 @@ Paths are relative to `/api/v1`.
     is only on `:8443`.
   - `access` is `lan`, `lan_vpn` or `public`. `public` is refused until the public flow
     (W3).
-  - `kind` is `app`, `stack` or `custom`. `custom` (other LAN hosts) is refused until W2.
+  - `kind` is `app`, `stack` or `custom`. `custom` (other LAN hosts, foreign stacks) is
+    accepted since §5.6.
   - `headers` is `default` (nosniff, `Referrer-Policy`, `X-Frame-Options: SAMEORIGIN` when
     the app sends none; `Server`/`X-Powered-By` removed) or `relaxed` (framing allowed).
   - `sso` (the rynas login in front of a route) is in the model and refused until W3.
@@ -596,7 +597,7 @@ Paths are relative to `/api/v1`.
   - `id`: `[a-z0-9-]` 1-63, unique (`routes[i].id`);
   - `label`: `[a-z0-9-]` 1-40, unique, lowercased (`routes[i].label`);
   - `app`/`stack` routes name their stack (`routes[i].stack`);
-  - the upstream is `127.0.0.1` or `::1`, port > 0;
+  - the upstream is `127.0.0.1` or `::1`, port > 0 (`app`/`stack`; `custom` in §5.6);
   - `allow` holds addresses or CIDRs, never `/0`;
   - `auth = "none"` routes stay `lan` (`routes[i].access`);
   - `body` is `<digits>[K|M|G]`, `timeout` is `<digits>s|m|h`, `path` starts with `/`;
@@ -1194,8 +1195,8 @@ failures (every sync and engine error shown where it belongs).
 #### Not in W2
 
 - `:8443` reusing the wildcard (rynas-web still serves the local or imported certificate);
-- custom routes to other LAN hosts and routes for foreign stacks (`kind: custom` still
-  refused);
+- ~~custom routes to other LAN hosts and routes for foreign stacks~~ — done in §5.6 (with
+  extra HTTPS ports);
 - record clients for Gandi, Route 53, DigitalOcean, RFC 2136 (their records are `manual`);
 - the ACME account key in the `.rynasbak` (it stays in rynas-caddy's storage, which survives
   a reinstall of rynas but not a purge of rynas-caddy);
@@ -1560,6 +1561,167 @@ and under the status in the list; a missing group (409 `source`) shows under the
 - PKCS#12 (`.pfx`) uploads and passphrase-protected keys are refused (convert with openssl).
 - `:8443` could follow an import that covers the host name (W2's "Not in W2" item); for now
   it keeps `/system/tls`.
+
+### 5.6 API — extra ports and custom routes (`/api/v1/web-access/...`)
+
+Code: `crates/rynasd/src/web_access/model.rs` (validation of ports, prefixes and custom
+upstreams, the busy-port check), `mod.rs` (names on ports, views, the checks), `caddy.rs` (one
+server per extra port), `domains.rs` (the domain's own name in its certificate). UI:
+`crates/rynas-ui/src/pages/web_access/routes_edit.rs`. Types: `rynas_api_types::web_access`
+(`WebRoute::ports|main_port|prefix`, `RouteNames::nas`, `WebUpstream::skip_verify|host_header`,
+`HostHeader`, `RouteView::ports|main_port`). Decision D-PORTROUTE. No new route: everything is
+in the staged key `web_access` (PUT + `/config/apply`), the existing view and the route test.
+
+**What it does.** Two things many users bring from another NAS's reverse proxy:
+1. **An address on an extra HTTPS port** — `https://nas.example.com:8444/ → app`, because the
+   router forwards one specific port, or there is a single DNS name. A route may listen on up
+   to 8 extra ports, besides the standard HTTPS port (`main_port: true`, default) or instead
+   of it. On an extra port it answers on its own names (`<label>-<host>.local`,
+   `<label>.<domain>`) and, with `names.nas`, on **the NAS's own names**: `<host>.local`,
+   `<host>` and each enabled domain's name. Those belong to the interface on the main port,
+   so `names.nas` only applies on extra ports.
+2. **Custom routes** (`kind: custom`) — any `http(s)://host:port`: another device on the LAN
+   (router, printer, camera, a Home Assistant box) or a container or stack rynas did not
+   install. Options: upstream TLS with "accept the device's own certificate" (`skip_verify`,
+   off by default, the UI warns), the `Host` the upstream gets (`client` — the browser's name,
+   default — or `upstream` — its own `host:port`), access level (`lan`, `lan_vpn`; `public`
+   stays refused until W3), and an optional path prefix (`/grafana`: only requests below it
+   are proxied, unchanged). WebSockets need no setting.
+
+Patterns taken, and complaints avoided (sources below):
+- **Source → destination** in one form (DSM's reverse proxy rule: source protocol, host name,
+  port → destination protocol, host name, port); in rynas the source is the route's names
+  plus optional ports, the destination one `http(s)://host:port` text field.
+- **No WebSocket checkbox** (DSM's custom header "WebSocket", NPM's "Websockets support"):
+  missing it is the most common forum complaint; Caddy's `reverse_proxy` passes upgrades
+  (Zoraxy also sniffs `Upgrade`), so the UI only says it works.
+- **Insecure upstream TLS as an explicit, warned option** (Cosmos' "Allow insecure HTTPS
+  target") instead of silently trusting everything; on loopback it stays implicit (the
+  container's own certificate, as in W1).
+- **The `Host` header as a switch** (Cosmos' `OverwriteHostHeader`; NPM users add
+  `proxy_set_header Host` by hand for devices on non-standard ports).
+- **Path prefix instead of NPM's custom locations**: the location editor is a source of
+  "host offline"/404 reports; a prefix that is matched but not rewritten covers the cases
+  that work (an app already below `/grafana`, several devices on one port and name).
+- Port conflicts are caught on save (TrueNAS users meet "port is already in use" only when
+  the app starts).
+
+Sources (2026-11-07): Caddy `modules/caddyhttp/server.go` v2.11.9 (`Listen`: "Listener
+addresses must be unique; they cannot be repeated across all defined servers";
+`TLSConnPolicies`: "At least one policy is required to enable HTTPS on this server if
+automatic HTTPS is disabled", https://raw.githubusercontent.com/caddyserver/caddy/v2.11.9/modules/caddyhttp/server.go),
+https://caddyserver.com/docs/json/apps/http/servers/,
+https://caddyserver.com/docs/caddyfile/directives/reverse_proxy#https;
+DSM: https://helpdesk.onlyoffice.com/hc/en-us/articles/27155526537500-ONLYOFFICE-DocSpace-Not-Accessible-Behind-Synology-NAS-Reverse-Proxy,
+https://community.home-assistant.io/t/synology-dsm-reverse-proxy/199502,
+https://vaultwarden.discourse.group/t/solved-websocket-setup-on-synology/116;
+NPM: https://docs.audiobookshelf.org/docs/documentation/install/reverse-proxy/nginx-proxy-manager,
+https://forum.jellyfin.org/t-nginx-proxy-manager-custom-locations-don-t-work?page=1;
+Zoraxy: https://github.com/tobychui/zoraxy/wiki/Getting-Started; Cosmos:
+https://cosmos-cloud.io/docs/urls,
+https://deepwiki.com/azukaar/Cosmos-Server/4.3-proxy-and-route-configuration; TrueNAS:
+https://forums.truenas.com/t/using-npm-for-reverse-proxying-should-i-move-truenas-webui-to-different-ports/47725.
+
+#### Shapes worth knowing
+
+```json
+{"id": "custom-router", "kind": "custom", "label": "router",
+ "upstream": {"scheme": "https", "host": "192.168.1.1", "port": 8443,
+              "skip_verify": true, "host_header": "upstream"},
+ "names": {"local": true, "domain": false, "nas": true},
+ "ports": [8444], "main_port": false, "access": "lan"}
+{"id": "custom-grafana", "kind": "custom", "label": "grafana",
+ "upstream": {"scheme": "http", "host": "grafana.lan", "port": 3000},
+ "names": {"local": true, "domain": true, "nas": true},
+ "ports": [8444], "prefix": "/grafana", "access": "lan_vpn"}
+```
+
+Every new field has a default and is left out when at its default, so existing keys and the
+W1/W2 golden renders are unchanged.
+
+- `RouteView.urls`: the main-port URLs (when `main_port`), then `https://<name>:<port><path>`
+  for each extra port and each name served there (`<prefix>/` with a prefix). `ports` and
+  `main_port` are copied. `WebAccessState.reserved_ports` adds the extra ports.
+- **Validation** (field in brackets; 400 `invalid_value`):
+  - ports: sorted, deduplicated, at most 8; not the proxy's HTTP/HTTPS ports, not rynas-web's
+    plain or emergency port, not below 1024 (system services) (`routes[i].ports`);
+  - `main_port: false` needs a port (`routes[i].main_port`); `names.nas` needs a port
+    (`routes[i].names.nas`);
+  - **HTTP-01**: with an enabled HTTP-01 domain, a route only on extra ports that uses domain
+    or NAS names is refused (`routes[i].main_port`): HTTP-01 answers on port 80 of the name,
+    which a router that forwards one port does not reach. DNS-01 (W2) and imports (§5.5)
+    work on any port; TLS-ALPN is never used;
+  - two enabled routes with `names.nas` on one port need different prefixes (no prefix counts
+    as `/`) (`routes[i].prefix`); own names never clash (labels are unique);
+  - `custom` upstream host: an IPv4/IPv6 address (not unspecified, multicast or broadcast) or
+    a host name of DNS labels, lowercased (`routes[i].upstream.host`); a loopback upstream on
+    one of the proxy's own ports would loop (`routes[i].upstream.port`); `app`/`stack` routes
+    stay loopback-only;
+  - `prefix`: `custom` routes only, a path without `..`, `*`, `?`, `#`, `%`, braces; the
+    final `/` is dropped, `/` alone means none (`routes[i].prefix`);
+  - `skip_verify` is dropped for `http` and loopback upstreams (nothing to skip);
+  - **busy ports** (at validation, on the running system): an extra port with a listening TCP
+    socket in `/proc/net/tcp{,6}` that the proxy does not hold already (the applied key's
+    extra ports, when rynas-caddy is installed) is refused (`routes[i].ports`). That covers
+    other services, containers published through docker-proxy, and rynas-web's ports. The
+    apps' port check (§5.3 "Proxy ports") counts the extra ports as taken (TCP, and UDP with
+    HTTP/3).
+- **Route checks** gain `port_listening` (one per extra port, TCP to `127.0.0.1:<port>`, after
+  `https_listening`, which is `skipped` for a route only on extra ports); `route_loaded` looks
+  for `rynas-route-<id>` in `rynas_https` (when `main_port`) and `rynas-route-<id>:<port>` in
+  each `rynas_port_<port>`; `upstream` resolves a custom host name first. The `dns` and
+  `certificate` checks use the route's first own name, else the first NAS name.
+
+#### What rynasd renders (additions to §5.3–§5.5)
+
+Pinned by `crates/rynasd/tests/golden/web_access_caddy_ports.json`, validated with the built
+rynas-caddy 2.11.9 (`rynas-caddy validate`, 2026-11-07) and run on loopback ports: the shared
+port served the prefixed route, the catch-all route and closed unknown names; `:80` sent a
+port-only name to its port.
+- One more server per extra port, `rynas_port_<port>`: `listen [":<port>"]` (listener
+  addresses are unique across servers, so one server per port, not one shared listen list),
+  the same `protocols` (h3 adds UDP on the port), `strict_sni_host` (Caddy compares the host
+  without the port), `automatic_https.disable`, the same `tls_connection_policies` (imports'
+  SNI policies and the catch-all) and `logs`. A certificate covers its name on any port; the
+  local leaf now also covers the NAS's local names used on ports, and a non-wildcard domain
+  certificate adds the domain's own name once a route answers on it.
+- Its routes: each route's site (`@id` `rynas-route-<id>:<port>`, `match` host = its own names,
+  then the NAS's names with `names.nas`; `path: [<p>, <p>/*]` with a prefix), the **same**
+  subroute as on the main port — `remote_ip` abort first, so access levels are enforced
+  exactly as on 443 — sorted by prefix length (longest first) then id, and a last abort.
+- Routes with `main_port: false` are not in `rynas_https`; on `rynas_http` their own names get
+  `307` to `https://<host>:<first port><uri>`, before the main-port names.
+- Custom upstreams: `dial` `host:port` (a name is resolved by Caddy at connect time);
+  `https` → `transport.tls: {}` (verified against the system roots, server name = the dial
+  host) or `{"insecure_skip_verify": true}` on loopback or with `skip_verify`;
+  `host_header: upstream` → `headers.request.set.Host:
+  ["{http.reverse_proxy.upstream.hostport}"]`. Identity headers are deleted as for apps.
+- `http.https_port` stays the main port (it only drives automatic HTTPS, which is off).
+
+#### UI (Network › Web access › App addresses)
+
+- **Add an address** (above the table, and in the empty state): a drawer with Forwarding
+  (Name → `<name>-<host>.local`; Forward to `http(s)://address:port`; for `https` elsewhere
+  than loopback "Accept the device's own certificate" with a warning; "Send the device's own
+  host name"; Path prefix; a line that WebSockets pass), Where it answers (Extra ports, and
+  once a port is set "Also on the standard HTTPS port" and "Also on this NAS's names") and
+  the access radios. Id `custom-<name>` (`-2`… on a collision); submit in the footer.
+- The route drawer of every route gets **Where it answers**; custom routes also Forwarding
+  and **Remove address** (confirm). Saves follow A19b; server refusals show with their field.
+- The table's address column lists every URL with its port; the checklist adds "Extra port
+  listening".
+- i18n: one block `// Web access routes on ports / custom` after `wa.route.auth_none`
+  (`wa.add.*`, `wa.sec.*`, `wa.f.*`, `wa.route.remove*`, `wa.check|fix.port_listening`);
+  `wa.kind.custom` now reads "Other device or service".
+
+#### Open points
+
+- Several routes on one port share it by name or prefix only; a per-port default site (an
+  address for "any name on :8444") is not offered.
+- `public` access on extra ports comes with the public flow (W3), with the same checklist.
+- Docker published ports without docker-proxy (`userland-proxy: false`) are not seen by the
+  busy-port check; the engine then refuses the load and the apply fails with Caddy's message.
+- Custom request/response headers (beyond `Host`) and prefix stripping are not offered.
 
 ## 6. App catalog format (wave A1)
 

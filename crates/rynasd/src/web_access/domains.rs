@@ -209,6 +209,14 @@ pub fn cert_subjects(c: &WebAccessConfig, d: &WebDomain) -> Vec<String> {
             v.push(n);
         }
     }
+    // the domain's own name on a route's extra port (§5.6)
+    let on_port = c
+        .routes
+        .iter()
+        .any(|r| r.enabled && r.names.nas && !r.ports.is_empty());
+    if on_port && !v.contains(&d.name) {
+        v.insert(0, d.name.clone());
+    }
     v
 }
 

@@ -2958,7 +2958,7 @@ wa.col.address	Indirizzo
 wa.col.access	Chi può collegarsi
 wa.kind.app	App
 wa.kind.stack	Stack
-wa.kind.custom	Altro dispositivo
+wa.kind.custom	Altro dispositivo o servizio
 wa.route.on	Pubblicato
 wa.route.off	Spento
 wa.route.test	Verifica
@@ -2973,6 +2973,36 @@ wa.route.headers	Intestazioni di sicurezza
 wa.route.enabled	Indirizzo attivo
 wa.route.enabled_help	Spento: il proxy chiude le connessioni a questo nome; l'app resta in esecuzione.
 wa.route.auth_none	Questa app non ha un login proprio, quindi resta limitata a questa rete.
+wa.add.button	Aggiungi un indirizzo
+wa.add.title	Nuovo indirizzo
+wa.add.intro	Inoltra un nome, una porta o entrambi a un altro dispositivo di questa rete o a un servizio non installato da rynas.
+wa.sec.where	Dove risponde
+wa.sec.forward	Inoltro
+wa.f.label	Nome
+wa.f.label_help	Lettere, cifre e '-'. È l'inizio dell'indirizzo, per esempio router-nas.local.
+wa.f.label_bad	Usa da 1 a 40 caratteri a-z, 0-9 e '-', non all'inizio o alla fine.
+wa.f.upstream	Inoltra a
+wa.f.upstream_help	http:// o https://, poi l'indirizzo o il nome del dispositivo e la sua porta.
+wa.f.upstream_bad	Scrivilo come http://indirizzo:porta o https://indirizzo:porta, senza percorso.
+wa.f.skip_verify	Accetta il certificato del dispositivo
+wa.f.skip_verify_help	Per i dispositivi con un certificato autofirmato. La connessione resta cifrata, ma il dispositivo non viene verificato.
+wa.f.skip_warn	Attivalo solo per un dispositivo che conosci: chi prende il suo indirizzo in rete potrebbe leggere il traffico.
+wa.f.upstream_host	Invia il nome host del dispositivo
+wa.f.upstream_host_help	Per i dispositivi che rispondono solo al proprio nome o indirizzo. Spento: il dispositivo vede il nome usato dal browser.
+wa.f.prefix	Prefisso del percorso (facoltativo)
+wa.f.prefix_help	Vengono inoltrate solo le richieste sotto questo percorso, invariate, per esempio /grafana. Così più servizi possono condividere una porta.
+wa.f.websocket	WebSocket e streaming passano senza impostazioni aggiuntive.
+wa.f.ports	Porte aggiuntive (facoltative)
+wa.f.ports_help	Porte HTTPS su cui l'indirizzo ascolta anche, separate da virgole, per esempio 8444. Utile quando il router inoltra una porta precisa.
+wa.f.ports_bad	Usa numeri di porta da 1024 a 65535, separati da virgole.
+wa.f.main_port	Anche sulla porta HTTPS standard
+wa.f.main_port_help	Spento: l'indirizzo risponde solo sulle sue porte aggiuntive.
+wa.f.nas	Anche sui nomi di questo NAS
+wa.f.nas_help	Sulle porte aggiuntive l'indirizzo risponde anche ai nomi del NAS, per esempio https://nas.example.com:8444/.
+wa.route.remove	Rimuovi indirizzo
+wa.route.remove_q	Rimuovere questo indirizzo? Il dispositivo o servizio non viene toccato.
+wa.check.port_listening	Porta aggiuntiva in ascolto
+wa.fix.port_listening	Il proxy non risponde su questa porta. Controlla che nessun altro programma la usi, poi salva di nuovo.
 wa.auth.app	Il login proprio dell'app
 wa.auth.none	Nessuno
 wa.headers.default	Standard (niente incorporamento da altri siti)

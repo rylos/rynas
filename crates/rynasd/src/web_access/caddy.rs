@@ -41,13 +41,29 @@
 //!   this shape (tagged `load_files`, `match.sni` + `any_tag`) was accepted by rynas-caddy
 //!   2.11.9's `caddy validate` (2026-11-07).
 //!
+//! - extra HTTPS ports (§5.6): one more server `rynas_port_<port>` per port, `listen
+//!   [":<port>"]` (listener addresses are unique across servers, `modules/caddyhttp/server.go`
+//!   `Listen`), with the same protocols, `strict_sni_host` (it compares the host without the
+//!   port), TLS connection policies and abort catch-all as `rynas_https`: a certificate
+//!   covers a name on any port. Each route's site carries the same `remote_ip` rule as on the
+//!   main port; routes sharing the NAS's names on a port are ordered by path prefix, longest
+//!   first (`path` matcher `[<p>, <p>/*]`). `@id` `rynas-route-<id>:<port>`.
+//! - custom upstreams (§5.6): any `host:port`; an `https` upstream elsewhere than loopback is
+//!   verified (`transport.tls: {}`) unless `skip_verify`; `host_header: upstream` sets
+//!   `Host: {http.reverse_proxy.upstream.hostport}`
+//!   (https://caddyserver.com/docs/caddyfile/directives/reverse_proxy#https). WebSockets
+//!   need nothing: `reverse_proxy` passes upgrades.
+//!
 //! The source of the field names is Caddy v2.11.9's code (`modules/caddyhttp/...`,
 //! `admin.go`, `modules/caddytls/acmeissuer.go`); the golden tests pin the output.
 
 use serde_json::{Value, json};
 
+use std::collections::BTreeSet;
+use std::net::IpAddr;
+
 use rynas_api_types::web_access::{
-    ChallengeKind, HeaderPreset, ProxyMode, UpstreamScheme, WebDomain, WebRoute,
+    ChallengeKind, HeaderPreset, HostHeader, ProxyMode, UpstreamScheme, WebDomain, WebRoute,
 };
 
 use super::domains::{self, PROPAGATION_RESOLVERS};
@@ -111,21 +127,43 @@ fn dial(host: &str, port: u16) -> String {
     }
 }
 
-fn proxy(dial_to: String, https: bool, timeout: Option<&str>, buffering: bool) -> Value {
+/// TLS towards the upstream.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UpTls {
+    Off,
+    /// Any certificate (loopback containers, `skip_verify`).
+    Insecure,
+    /// Verified against the system roots.
+    Verify,
+}
+
+fn proxy(
+    dial_to: String,
+    tls: UpTls,
+    timeout: Option<&str>,
+    buffering: bool,
+    upstream_host: bool,
+) -> Value {
     let mut transport = json!({"protocol": "http", "dial_timeout": "5s"});
     if let Some(t) = timeout {
         transport["read_timeout"] = json!(t);
     }
-    if https {
+    match tls {
+        UpTls::Off => {}
         // the container's own certificate, on loopback
-        transport["tls"] = json!({"insecure_skip_verify": true});
+        UpTls::Insecure => transport["tls"] = json!({"insecure_skip_verify": true}),
+        UpTls::Verify => transport["tls"] = json!({}),
+    }
+    let mut request = json!({"delete": IDENTITY_HEADERS});
+    if upstream_host {
+        request["set"] = json!({"Host": ["{http.reverse_proxy.upstream.hostport}"]});
     }
     let mut p = json!({
         "handler": "reverse_proxy",
         "upstreams": [{"dial": dial_to}],
         "transport": transport,
         "stream_close_delay": STREAM_CLOSE_DELAY,
-        "headers": {"request": {"delete": IDENTITY_HEADERS}}
+        "headers": {"request": request}
     });
     if !buffering {
         p["flush_interval"] = json!(-1);
@@ -135,6 +173,17 @@ fn proxy(dial_to: String, https: bool, timeout: Option<&str>, buffering: bool) -
 
 /// One host-matched route: sources outside `ranges` are aborted, the rest handled.
 fn site(id: &str, names: &[String], ranges: &[String], handle: Vec<Value>) -> Value {
+    site_at(id, names, None, ranges, handle)
+}
+
+/// [`site`] limited to a path prefix (`/p` and `/p/...`).
+fn site_at(
+    id: &str,
+    names: &[String],
+    prefix: Option<&str>,
+    ranges: &[String],
+    handle: Vec<Value>,
+) -> Value {
     let mut inner = Vec::new();
     if !ranges.is_empty() {
         inner.push(json!({
@@ -143,9 +192,13 @@ fn site(id: &str, names: &[String], ranges: &[String], handle: Vec<Value>) -> Va
         }));
     }
     inner.push(json!({"handle": handle}));
+    let mut m = json!({"host": names});
+    if let Some(p) = prefix {
+        m["path"] = json!([p, format!("{p}/*")]);
+    }
     json!({
         "@id": format!("rynas-{id}"),
-        "match": [{"host": names}],
+        "match": [m],
         "handle": [{"handler": "subroute", "routes": inner}],
         "terminal": true
     })
@@ -156,13 +209,35 @@ fn route_handlers(r: &WebRoute) -> Vec<Value> {
     if let Some(max) = r.limits.body.as_deref().and_then(parse_size) {
         h.push(json!({"handler": "request_body", "max_size": max}));
     }
+    let loopback = r
+        .upstream
+        .host
+        .parse::<IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback());
+    let tls = match r.upstream.scheme {
+        UpstreamScheme::Http => UpTls::Off,
+        UpstreamScheme::Https if loopback || r.upstream.skip_verify => UpTls::Insecure,
+        UpstreamScheme::Https => UpTls::Verify,
+    };
     h.push(proxy(
         dial(&r.upstream.host, r.upstream.port),
-        r.upstream.scheme == UpstreamScheme::Https,
+        tls,
         r.limits.timeout.as_deref(),
         r.limits.buffering,
+        r.upstream.host_header == HostHeader::Upstream,
     ));
     h
+}
+
+/// The route's site on its extra `port`: its names and, with `names.nas`, the NAS's.
+fn port_site(r: &super::ResolvedRoute, port: u16, input: &RenderInput) -> Value {
+    site_at(
+        &format!("route-{}:{port}", r.route.id),
+        &r.port_names(),
+        r.route.prefix.as_deref(),
+        &access_ranges(r.route.access, input.facts, &r.route.allow),
+        route_handlers(&r.route),
+    )
 }
 
 fn redirect(location: String) -> Value {
@@ -292,7 +367,13 @@ impl Renderer for Caddy {
         if !resolved.ui.is_empty() {
             let mut h = baseline_headers(HeaderPreset::Default);
             // the interface streams events (SSE): never buffered, no read timeout
-            h.push(proxy(dial("127.0.0.1", input.ui_port), false, None, false));
+            h.push(proxy(
+                dial("127.0.0.1", input.ui_port),
+                UpTls::Off,
+                None,
+                false,
+                false,
+            ));
             https_routes.push(site(
                 "ui",
                 &resolved.ui,
@@ -301,17 +382,60 @@ impl Renderer for Caddy {
             ));
             names_all.extend(resolved.ui.iter().cloned());
         }
+        // names of routes only on extra ports: `:80` sends them to their first port
+        let mut port_only: Vec<(Vec<String>, u16)> = Vec::new();
         for r in &resolved.routes {
             if r.names.is_empty() {
                 continue;
             }
-            https_routes.push(site(
+            if !r.route.main_port {
+                if let Some(p) = r.route.ports.first() {
+                    port_only.push((r.names.clone(), *p));
+                }
+                continue;
+            }
+            https_routes.push(site_at(
                 &format!("route-{}", r.route.id),
                 &r.names,
+                r.route.prefix.as_deref(),
                 &access_ranges(r.route.access, facts, &r.route.allow),
                 route_handlers(&r.route),
             ));
             names_all.extend(r.names.iter().cloned());
+        }
+        // extra ports: the routes on each one, longest path prefix first
+        let ports: BTreeSet<u16> = resolved
+            .routes
+            .iter()
+            .filter(|r| r.route.enabled)
+            .flat_map(|r| r.route.ports.iter().copied())
+            .collect();
+        let mut port_servers: Vec<(u16, Vec<Value>)> = Vec::new();
+        for &port in &ports {
+            let mut on: Vec<&super::ResolvedRoute> = resolved
+                .routes
+                .iter()
+                .filter(|r| r.route.ports.contains(&port) && !r.port_names().is_empty())
+                .collect();
+            on.sort_by_key(|r| {
+                (
+                    std::cmp::Reverse(r.route.prefix.as_deref().map_or(0, str::len)),
+                    r.route.id.clone(),
+                )
+            });
+            let mut routes: Vec<Value> = on.iter().map(|r| port_site(r, port, input)).collect();
+            if routes.is_empty() {
+                continue;
+            }
+            for r in &on {
+                for n in r.port_names() {
+                    if !names_all.contains(&n) {
+                        names_all.push(n);
+                    }
+                }
+            }
+            routes.push(json!({"handle": [{"handler": "static_response", "abort": true}]}));
+            port_servers.push((port, routes));
         }
         // unknown host names: closed without an answer (no default site)
         https_routes.push(json!({"handle": [{"handler": "static_response", "abort": true}]}));
@@ -322,9 +446,30 @@ impl Renderer for Caddy {
             format!(":{}", s.https_port)
         };
         let mut http_routes = Vec::new();
-        if !names_all.is_empty() {
+        for (names, port) in &port_only {
             http_routes.push(json!({
-                "match": [{"host": names_all}],
+                "match": [{"host": names}],
+                "handle": [redirect(format!(
+                    "https://{{http.request.host}}:{port}{{http.request.uri}}"
+                ))],
+                "terminal": true
+            }));
+        }
+        let main_names: Vec<String> = resolved
+            .ui
+            .iter()
+            .chain(
+                resolved
+                    .routes
+                    .iter()
+                    .filter(|r| r.route.main_port)
+                    .flat_map(|r| r.names.iter()),
+            )
+            .cloned()
+            .collect();
+        if !main_names.is_empty() {
+            http_routes.push(json!({
+                "match": [{"host": main_names}],
                 "handle": [redirect(format!(
                     "https://{{http.request.host}}{https_suffix}{{http.request.uri}}"
                 ))],
@@ -380,18 +525,21 @@ impl Renderer for Caddy {
             } else {
                 vec!["h1", "h2"]
             };
-            servers.insert(
-                "rynas_https".into(),
+            let server = |port: u16, routes: Vec<Value>| {
                 json!({
-                    "listen": [format!(":{}", s.https_port)],
+                    "listen": [format!(":{port}")],
                     "protocols": protocols,
                     "strict_sni_host": true,
                     "automatic_https": {"disable": true},
                     "tls_connection_policies": policies,
                     "logs": {},
-                    "routes": https_routes
-                }),
-            );
+                    "routes": routes
+                })
+            };
+            servers.insert("rynas_https".into(), server(s.https_port, https_routes));
+            for (port, routes) in port_servers {
+                servers.insert(format!("rynas_port_{port}"), server(port, routes));
+            }
             let tls = tls_app(input, resolved, &used);
             if !tls.is_null() {
                 apps.insert("tls".into(), tls);

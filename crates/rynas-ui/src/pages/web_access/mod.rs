@@ -6,7 +6,8 @@
 //!   consequences, the interface's own names and who may reach them, local names, and the
 //!   emergency address that never goes through the proxy.
 //! - Routes: one row per app address (names, access badge, problems); a drawer per route with
-//!   its access level and the checklist of `POST /web-access/routes/{id}/test`.
+//!   its access level, extra ports ([`routes_edit`], §5.6) and the checklist of
+//!   `POST /web-access/routes/{id}/test`; "Add an address" for another device or service.
 //! - Domains ([`domains`], wave W2): own domains with Let's Encrypt through DNS-01, the LAN
 //!   records at the provider, the credentials and the ACME account; the Certificate tab adds the
 //!   inventory of every certificate.
@@ -21,6 +22,7 @@
 pub mod cert;
 pub mod domains;
 pub mod imports;
+pub mod routes_edit;
 
 use std::time::Duration;
 
@@ -148,6 +150,8 @@ struct Wa {
     /// Catalogue names of the installed apps by stack (`GET /api/v1/apps/installed`), for
     /// the routes' labels; empty when Docker is absent.
     app_names: RwSignal<Vec<(String, String)>>,
+    /// The "Add an address" drawer is open.
+    adding: RwSignal<bool>,
 }
 
 /// The fields of `InstalledApp` the route labels use.
@@ -171,6 +175,7 @@ pub fn WebAccess() -> impl IntoView {
         now: RwSignal::new(js_sys::Date::now()),
         rolled_back: RwSignal::new(false),
         app_names: RwSignal::new(Vec::new()),
+        adding: RwSignal::new(false),
     };
     provide_context(w);
     // `?tab=certificate` (the System page's link) opens the certificate, `?tab=domains` the
@@ -217,6 +222,7 @@ pub fn WebAccess() -> impl IntoView {
             {panel(2, domains::panel)}
             {panel(3, certificate_tab)}
             {move || w.route.get().map(|(id, run)| route_drawer(id, run))}
+            {move || w.adding.get().then(|| routes_edit::add_drawer(w.adding))}
         </div>
     }
 }
@@ -649,7 +655,14 @@ fn settings_form() -> AnyView {
 /// The app's catalogue name when it is installed from the catalogue, else its stack or id.
 fn route_name(w: Wa, r: &RouteView) -> String {
     let catalog = w.app_names.with(|l| l.iter().find(|(st, _)| Some(st) == r.stack.as_ref() || Some(st) == r.app.as_ref()).map(|(_, n)| n.clone()));
-    catalog.or_else(|| r.stack.clone()).or_else(|| r.app.clone()).unwrap_or_else(|| r.id.clone())
+    // another device or service: its label
+    let label = || {
+        w.state.data.with(|s| {
+            s.as_ref().and_then(|s| s.current().get("routes").and_then(Value::as_array).and_then(|a| a.iter().find(|x| x.get("id").and_then(Value::as_str) == Some(r.id.as_str())).map(|x| s_at(x, "/label", ""))))
+        })
+    };
+    let custom = r.kind == rynas_api_types::web_access::RouteKind::Custom;
+    catalog.or_else(|| r.stack.clone()).or_else(|| r.app.clone()).or_else(|| custom.then(label).flatten().filter(|l| !l.is_empty())).unwrap_or_else(|| r.id.clone())
 }
 
 fn route_state(r: &RouteView) -> AnyView {
@@ -697,13 +710,18 @@ fn routes_panel() -> AnyView {
                 ])
             })
             .collect::<Vec<_>>();
+        let add = move |_| w.adding.set(true);
         view! {
             {external.then(|| ui::note(Tone::Info, icons::INFO, ui::text(t("wa.routes.external").to_string())))}
             {mdns_note()}
+            {(!rows.is_empty()).then(|| view! {
+                <div class="sec-actions"><button class="btn sm" on:click=add><Icon icon=icons::PLUS size=14 />{tr("wa.add.button")}</button></div>
+            })}
             {if rows.is_empty() {
                 view! {
                     <EmptyState icon=icons::LINK title=Signal::derive(|| t("wa.routes.empty").to_string()) text=Signal::derive(|| t("wa.routes.empty_text").to_string())>
                         <a class="btn primary" href="/apps">{tr("nav.apps")}</a>
+                        <button class="btn" on:click=add><Icon icon=icons::PLUS size=14 />{tr("wa.add.button")}</button>
                     </EmptyState>
                 }
                 .into_any()
@@ -730,6 +748,7 @@ fn check_key(id: &str) -> Option<(&'static str, &'static str)> {
         "https_listening" => ("wa.check.https_listening", "wa.fix.https_listening"),
         "certificate" => ("wa.check.certificate", "wa.fix.certificate"),
         "upstream" => ("wa.check.upstream", "wa.fix.upstream"),
+        "port_listening" => ("wa.check.port_listening", "wa.fix.port_listening"),
         "domain_dns" => ("wa.check.domain_dns", "wa.fix.domain_dns"),
         "domain_certificate" => ("wa.check.domain_certificate", "wa.fix.domain_certificate"),
         _ => return None,
@@ -780,10 +799,13 @@ fn route_drawer(id: String, run_now: bool) -> AnyView {
     let view_of = Memo::new(move |_| w.state.data.with(|s| s.as_ref().and_then(|s| s.routes.iter().find(|r| r.id == rid.get_value()).cloned())));
     let cfg_of = move || w.state.data.with_untracked(|s| s.as_ref().map(WaState::current)).and_then(|c| c.get("routes").and_then(Value::as_array).and_then(|a| a.iter().find(|r| r.get("id").and_then(Value::as_str) == Some(rid.get_value().as_str())).cloned()));
     let start = cfg_of().unwrap_or(Value::Null);
+    let custom = s_at(&start, "/kind", "app") == "custom";
     let access = RwSignal::new(s_at(&start, "/access", "lan"));
     let enabled = RwSignal::new(b_at(&start, "/enabled", true));
-    let init = StoredValue::new((access.get_untracked(), enabled.get_untracked()));
-    let dirty = Memo::new(move |_| init.get_value() != (access.get(), enabled.get()));
+    let form = routes_edit::RouteForm::of(&start);
+    let init = StoredValue::new((access.get_untracked(), enabled.get_untracked(), form.snapshot()));
+    let dirty = Memo::new(move |_| init.get_value() != (access.get(), enabled.get(), form.snapshot()));
+    let removing = RwSignal::new(false);
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let diag = RwSignal::new(None::<RouteDiagnostics>);
@@ -814,12 +836,16 @@ fn route_drawer(id: String, run_now: bool) -> AnyView {
         if let Some(r) = cfg.get_mut("routes").and_then(Value::as_array_mut).and_then(|a| a.iter_mut().find(|r| r.get("id").and_then(Value::as_str) == Some(rid.get_value().as_str()))) {
             put(r, "access", Value::String(access.get_untracked()));
             put(r, "enabled", Value::Bool(enabled.get_untracked()));
+            if let Err(k) = form.write(r, custom) {
+                error.set(Some(t(k).to_string()));
+                return;
+            }
         }
         busy.set(true);
         error.set(None);
         spawn_local(async move {
             if save_config(cfg, error).await {
-                init.set_value((access.get_untracked(), enabled.get_untracked()));
+                init.set_value((access.get_untracked(), enabled.get_untracked(), form.snapshot_untracked()));
             }
             busy.set(false);
             w.state.reload();
@@ -845,9 +871,12 @@ fn route_drawer(id: String, run_now: bool) -> AnyView {
             <h3 class="mini-title">{tr("wa.col.access")}</h3>
             {access_radios("wa-route-access", access, auth == "none")}
             {switch("wa.route.enabled", Some("wa.route.enabled_help"), enabled.into(), Callback::new(move |v| enabled.set(v)))}
+            {custom.then(|| routes_edit::forward_fields(form, false))}
+            {routes_edit::where_fields(form)}
             {form_error(error)}
             <div class="sec-actions">
                 <button class="btn primary sm" disabled=move || busy.get() || !dirty.get() on:click=save>{spinner(busy)}{tr("save")}</button>
+                {custom.then(|| view! { <button class="btn danger sm" on:click=move |_| removing.set(true)><Icon icon=icons::TRASH_2 size=14 />{tr("wa.route.remove")}</button> })}
             </div>
             <h3 class="mini-title">{tr("wa.test.title")}</h3>
             <p class="small muted">{tr("wa.test.text")}</p>
@@ -862,5 +891,26 @@ fn route_drawer(id: String, run_now: bool) -> AnyView {
     };
     let title = Signal::derive(move || view_of.with(|r| r.as_ref().map(|r| route_name(w, r))).map(|n| tf("wa.route.title", &[("name", &n)])).unwrap_or_default());
     let foot = view! { <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("close")}</button> }.into_any();
-    ui::drawer(title, close, view! { {body} }.into_any(), foot)
+    let rm_busy = RwSignal::new(false);
+    let rm_error = RwSignal::new(None::<String>);
+    let remove = Callback::new(move |_: ()| {
+        let Some(mut cfg) = w.state.data.with_untracked(|s| s.as_ref().map(WaState::current)) else { return };
+        if let Some(a) = cfg.get_mut("routes").and_then(Value::as_array_mut) {
+            a.retain(|r| r.get("id").and_then(Value::as_str) != Some(rid.get_value().as_str()));
+        }
+        rm_busy.set(true);
+        spawn_local(async move {
+            let ok = save_config(cfg, rm_error).await;
+            let _ = rm_busy.try_set(false);
+            w.state.reload();
+            if ok {
+                let _ = w.route.try_set(None);
+            }
+        });
+    });
+    view! {
+        {ui::drawer(title, close, view! { {body} }.into_any(), foot)}
+        {move || removing.get().then(|| ui::confirm(Confirm { busy: rm_busy, error: rm_error, ..Confirm::new(t("wa.route.remove").to_string(), t("wa.route.remove_q").to_string(), "wa.route.remove", true, remove, Callback::new(move |_| removing.set(false))) }))}
+    }
+    .into_any()
 }
