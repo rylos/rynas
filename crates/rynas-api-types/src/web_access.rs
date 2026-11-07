@@ -25,6 +25,8 @@
 //!   (validation and coverage only, nothing stored);
 //! - `POST /api/v1/web-access/imports/{id}/check` → [`ImportedCert`] (reads a watched folder
 //!   now);
+//! - `POST /api/v1/web-access/imports/{id}/accept` → [`ImportedCert`] (accepts the new DNS
+//!   names of a pair a watched folder holds, [`ImportedCert::pending_names`]);
 //! - `DELETE /api/v1/web-access/imports/{id}` → 204.
 //!
 //! The model is engine-neutral: nothing here is Caddy-specific. Names (local `.local` name
@@ -718,10 +720,13 @@ pub enum ImportSource {
 /// Errors (`400 invalid_value`, `field`): `id` (`[a-z0-9-]` 1-32), `label` (over 80
 /// characters), `certificate` / `private_key` (the validation of `/system/tls/import`: PEM,
 /// leaf first then intermediates in order, an unencrypted key matching the leaf, not expired,
-/// serverAuth usage, no CA certificate as the leaf; plus at least one DNS name). With
-/// `source: upload` both texts are required; with `source: folder` they are optional (a
-/// first pair to start with, before the tool pushes its own).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+/// serverAuth usage, no CA certificate as the leaf; plus at least one DNS name; a pair that
+/// starts later is refused while the stored one is still valid), `names` (not DNS names, or
+/// not the names of the given certificate). With `source: upload` both texts are required;
+/// with `source: folder` they are optional (a first pair to start with, before the tool
+/// pushes its own). `409 conflict` (`field: source`) when the group `rynas-cert-drop` of the
+/// watched folders is missing on the system.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct CertImportRequest {
     pub id: String,
@@ -734,9 +739,51 @@ pub struct CertImportRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub certificate: Option<String>,
     /// PEM private key of the server certificate (PKCS#8, SEC1 or PKCS#1, unencrypted).
-    /// Write-only: never part of an answer.
+    /// Write-only: never part of an answer, redacted in `Debug`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub private_key: Option<String>,
+    /// `source: folder`: the DNS names pushed certificates must carry (the exact set, `*.`
+    /// wildcards as written in the certificate). Empty: the names of the first good pair are
+    /// pinned (and kept on a later save without names). A pushed pair with other names is
+    /// held until an administrator accepts it (`.../imports/{id}/accept`). Given with a
+    /// pair, it must equal the pair's names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub names: Vec<String>,
+}
+
+impl std::fmt::Debug for CertImportRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CertImportRequest")
+            .field("id", &self.id)
+            .field("label", &self.label)
+            .field("source", &self.source)
+            .field("certificate", &self.certificate)
+            .field(
+                "private_key",
+                &self.private_key.as_ref().map(|_| "<redacted>"),
+            )
+            .field("names", &self.names)
+            .finish()
+    }
+}
+
+/// Why an imported certificate needs attention ([`ImportedCert::problem`]). The last good
+/// pair stays in use in every case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportProblem {
+    /// The files in the watched folder were refused (`last_error` says why).
+    Refused,
+    /// The watched folder holds a valid pair for other DNS names than the pinned ones
+    /// ([`ImportedCert::pending_names`]): not served until an administrator accepts it.
+    NamesChanged,
+    /// The watched folder holds a valid pair that starts later
+    /// ([`ImportedCert::pending_from_ms`]): taken by itself once it starts.
+    NotYetValid,
+    /// The group `rynas-cert-drop` is missing on the system: the watched folder cannot be
+    /// handed to the pushing account (reinstall the package or `addgroup --system
+    /// rynas-cert-drop`).
+    GroupMissing,
 }
 
 /// One imported certificate (`GET /api/v1/web-access/imports`). Never carries key material.
@@ -766,7 +813,8 @@ pub struct ImportedCert {
     /// (an exact name beats a wildcard, then the later expiry, then the id).
     #[serde(default)]
     pub shadowed: Vec<String>,
-    /// ACME subjects of the own domains it replaces (not ordered while it is valid).
+    /// ACME subjects of the own domains it replaces (not ordered while it is valid; ordered
+    /// again once it `expires_soon`, while it keeps serving its names until it expires).
     #[serde(default)]
     pub replaces_acme: Vec<String>,
     /// Warnings (codes as in `/system/tls`: `expires_soon`, `expired`, `chain_incomplete`).
@@ -775,12 +823,27 @@ pub struct ImportedCert {
     /// When the last good pair was taken (ms since the epoch).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imported_at_ms: Option<i64>,
-    /// Why the files in the watched folder were refused (English; the last good pair stays
-    /// in use). Cleared by the next good pair.
+    /// Why the files in the watched folder were refused or held (English; the last good
+    /// pair stays in use). Cleared by the next good pair.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error_at_ms: Option<i64>,
+    /// What needs attention; `None` when all is well.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem: Option<ImportProblem>,
+    /// The pinned DNS names (lowercase, sorted): a watched folder's pair is applied only when
+    /// it carries exactly these. Set by the administrator (`names`), by an upload, or by the
+    /// first good pair of a folder; changed only through `.../accept`, `names` or an upload.
+    #[serde(default)]
+    pub names: Vec<String>,
+    /// `problem: names_changed`: the DNS names of the held pair, accepted with
+    /// `POST .../imports/{id}/accept`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_names: Vec<String>,
+    /// `problem: not_yet_valid`: when the held pair starts (ms since the epoch).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_from_ms: Option<i64>,
 }
 
 /// State of the proxy engine (rynas-caddy).

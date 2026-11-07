@@ -1289,7 +1289,8 @@ Immediate actions (not part of the staged key `web_access`, like `/system/tls/im
 | POST | `/web-access/imports` | `CertImportRequest` | `ImportedCert`. Creates or replaces by `id`, then loads the proxy. 400 `invalid_value` with `field` |
 | POST | `/web-access/imports/inspect` | `CertImportRequest` | `ImportedCert`: validation and the names it would take over against the applied configuration; nothing stored |
 | POST | `/web-access/imports/{id}/check` | — | `ImportedCert`: reads the watched folder now ("Check now"), without waiting for the files to settle. 404; 409 `conflict` without a watched folder |
-| DELETE | `/web-access/imports/{id}` | — | 204. Its names go back to ACME or the local CA; a watched folder is removed. 404 |
+| POST | `/web-access/imports/{id}/accept` | — | `ImportedCert`: pins the `pending_names` of a held pair and reads the folder again (M1). 404; 409 `conflict` without a watched folder or without a held pair |
+| DELETE | `/web-access/imports/{id}` | — | 204. Its names go back to ACME or the local CA; a watched folder is removed; a firing import notification is resolved. 404 |
 
 `GET /web-access/certificates` lists each import as `imported:<id>` (`CertKind::Imported`,
 `source` `upload|folder`, `last_error`). Audit lines name the id, the subject and the
@@ -1297,7 +1298,8 @@ fingerprint, never key material. No new error codes.
 
 #### Shapes worth knowing
 
-- **`CertImportRequest`** {id, label, source `upload|folder`, certificate?, private_key?}:
+- **`CertImportRequest`** {id, label, source `upload|folder`, certificate?, private_key?,
+  names?}:
   - `id` `[a-z0-9-]` 1-32, not starting with `-` (`id`): it names the folder, the files and
     the engine tag; `label` ≤ 80 characters (`label`);
   - `upload` needs both texts; `folder` may carry a first pair or none (`pending` until the
@@ -1306,16 +1308,31 @@ fingerprint, never key material. No new error codes.
     intermediates each signed by the next, no CA certificate as the leaf, serverAuth when an
     EKU is present, RSA ≥ 2048 / ECDSA P-256/P-384 / Ed25519 key matching the leaf, unencrypted
     PKCS#8/SEC1/PKCS#1, not expired, not starting more than a day ahead) plus at least one DNS
-    name (`certificate`, `private_key`);
-  - switching a `folder` import to `upload` removes its folder.
+    name (`certificate`, `private_key`); a pair that starts later (beyond 5 minutes of clock
+    skew) is refused while the stored pair still serves (`certificate`);
+  - `names` (≤ 100 DNS names, `*.` allowed in front; `names`): for a folder, the DNS-name set
+    pushed pairs must carry (pinned at once, before any push); empty keeps the pinned set
+    (or pins the first good pair's). With a pair it must equal the pair's names;
+  - `409 conflict` (`field: source`) when the group `rynas-cert-drop` is missing: nothing is
+    stored and no root-only folder is made;
+  - switching a `folder` import to `upload` removes its folder;
+  - the type's `Debug` redacts `private_key`.
 - **`ImportedCert`** {id, label, source, folder?, certificate?, chain, status, covers,
-  shadowed, replaces_acme, warnings, imported_at_ms?, last_error?, last_error_at_ms?}:
+  shadowed, replaces_acme, warnings, imported_at_ms?, last_error?, last_error_at_ms?,
+  problem?, names, pending_names, pending_from_ms?}:
   - `status` `ok` · `expires_soon` (< 14 days) · `expired` (no longer served) · `pending`
     (a folder without a good pair yet);
   - `covers`: the served names (interface and routes, local and own-domain) it takes over;
     `shadowed`: names it covers that another import serves; `replaces_acme`: ACME subjects of
-    the own domains it replaces (not ordered while it is valid);
+    the own domains it replaces (not ordered while it is valid; ordered again once it
+    `expires_soon`, see the render);
   - `warnings` as in `/system/tls` (`expires_soon`, `expired`, `chain_incomplete`);
+  - `names`: the pinned DNS-name set (lowercase, sorted);
+  - `problem` (`ImportProblem`, the last good pair stays in use in every case):
+    `refused` (bad files, `last_error`) · `names_changed` (a valid pair for `pending_names`
+    instead of `names`, held until accepted) · `not_yet_valid` (a valid pair that starts at
+    `pending_from_ms`, taken by itself then) · `group_missing` (the group `rynas-cert-drop`
+    is gone: nobody but root can write the folder);
   - never `private_key`.
 - **Which names an import takes over** (`imported::covers`, `assign`):
   - a DNS name covers a served name when equal (case-insensitive) or when it is `*.<rest>`
@@ -1325,9 +1342,10 @@ fingerprint, never key material. No new error codes.
     an exact name beats a wildcard, then the later expiry, then the smaller id;
   - an ACME subject is replaced when an import covers it: `*.<d>` only by the same wildcard,
     `<d>` by any covering name;
-  - an expired import (or one not valid yet) is left out: its names fall back at the next
-    check (≤ 30 s), so a lapsed import never serves an expired certificate while ACME or the
-    local CA could serve a valid one.
+  - an expired import (or one not valid yet: `not_before` more than 5 minutes ahead) is left
+    out: its names fall back at the next periodic sync (≤ 30 s), so a lapsed import never
+    serves an expired certificate while ACME or the local CA could serve a valid one; an
+    import that starts later joins the same way once it starts.
 
 #### Watched folder
 
@@ -1342,10 +1360,14 @@ fingerprint, never key material. No new error codes.
   # adduser --system --ingroup rynas-cert-drop --shell /usr/sbin/nologin certpush
   Match User certpush
       ChrootDirectory /var/lib/rynas-cert-drop
-      ForceCommand internal-sftp -d /<id> -u 0007
+      ForceCommand internal-sftp -d /<id> -u 0077
       AllowTcpForwarding no
       X11Forwarding no
   ```
+  `-u 0077`: the pushed files are the pushing account's alone (rynasd reads them as root), so
+  other members of the group cannot read a key pushed into another folder. Every member can
+  still write into every folder of the base: one push account per trusted tool, and the
+  pinned names below decide what a push may change.
   with acme.sh: `DEPLOY_SSH_USE_SCP=yes DEPLOY_SSH_BACKUP=no DEPLOY_SSH_KEYFILE=/<id>/privkey.pem
   DEPLOY_SSH_FULLCHAIN=/<id>/fullchain.pem acme.sh --deploy -d <name> --deploy-hook ssh`.
   A tool with a shell account works too (acme.sh's default `echo >`, `scp`, `rsync`,
@@ -1360,27 +1382,51 @@ fingerprint, never key material. No new error codes.
   on any filesystem and after the folder is replaced. Cost: four `fstat`s per folder per poll.
   "Check now" reads at once.
 - **Reading**: regular files only (`O_NOFOLLOW|O_NONBLOCK`, a FIFO or a symlink is refused),
-  ≤ 64 KiB each. Refusals never quote the file contents.
+  with a single link (a hard link to a file elsewhere is refused), ≤ 64 KiB each (checked on
+  the size before reading, and on the bytes read). The signature is taken again after the
+  read: files that changed since they settled are not judged, the settle window starts over.
+  Refusals never quote the file contents (the PEM parser's messages are fixed texts too).
+- **Pinned names** (review 2026-11-07, M1): every group member can write every folder, so a
+  push may only renew the names the administrator agreed to. The DNS-name set (lowercase,
+  sorted, unique) is pinned by `names` at creation, else by the first good pair, and replaced
+  by an upload. A valid pair with the same set applies by itself (renewals, another order or
+  case); one with another set is **held**: the last good pair keeps serving, `problem:
+  names_changed`, `pending_names`, `web_access.cert_import_names_changed` once per distinct
+  set. `POST .../{id}/accept` pins `pending_names` and reads the folder again (a pair pushed
+  since for yet other names is held again).
+- **Not valid yet** (L1): a valid pair whose `not_before` is more than 5 minutes ahead does
+  not replace a stored pair that still serves: `problem: not_yet_valid`, `pending_from_ms`,
+  no notification; the folder is read again when it starts. With nothing serving it is
+  stored and joins the render when it starts.
 - **A good pair** that differs from the stored one is written to the store, `imported_at_ms`
-  set, any error cleared (resolving the notification), and the proxy loaded again. The same
+  set, any problem cleared (resolving the notification), and the proxy loaded again. The same
   pair again changes nothing.
 - **A bad pair** (missing file, key of another certificate, expired, wrong order, not PEM)
   leaves the stored pair, the engine copies and the running configuration untouched; it sets
-  `last_error` ("privkey.pem: …") and fires `web_access.cert_import_failed` once per distinct
-  error.
+  `problem: refused`, `last_error` ("privkey.pem: …") and fires
+  `web_access.cert_import_failed` once per distinct error. A key that does not match the
+  chain, or a missing file, is refused only when it is still so one settle window later
+  (the writer may be between the two files); "Check now" judges at once.
+- **Store errors** (the private store cannot be written) are logged and the same files are
+  read again after another settle window; they are not refusals.
+- The store is read and written only under one lock; a render reads each valid pair once
+  into memory and writes the engine copies from that snapshot (M3), so a load never pairs a
+  new key with an old chain, and an import deleted meanwhile is removed by the reload the
+  delete triggers.
 
 #### Notifications (D-NOTIFY)
 
 | Code | State, key, category, severity | Fields |
 |---|---|---|
 | `web_access.cert_import_failed` | firing, `web-access:import:<id>`, system, warning | `name` (label or id), `cert` (`imported:<id>`), `error` |
-| `web_access.cert_import_ok` | resolved, same key | `name`, `cert` |
+| `web_access.cert_import_names_changed` | firing, same key, system, warning | `name`, `cert`, `names` (the held pair's, comma-separated) |
+| `web_access.cert_import_ok` | resolved, same key: a good pair after refused or held files, the import accepted, replaced by an upload or removed | `name`, `cert` |
 | `web_access.cert_expires_soon` / `web_access.cert_expired` / `web_access.cert_ok` | as in §5.4, key `web-access:cert:imported:<id>`; the texts say that rynas does not renew imported certificates and that an expired one is no longer served | `name`, `cert` |
 
 #### Storage
 
 - rynasd's private store `<state>/web-access/imported/` (0700 root): `index.json` (id, label,
-  source, `imported_at_ms`, last error) and `<id>.crt`, `<id>.key` (0600), written atomically,
+  source, `imported_at_ms`, last error, pinned and pending names, problem) and `<id>.crt`, `<id>.key` (0600), written atomically,
   the key first. Not in the configuration key: the private key is in neither `config.db`, its
   revisions nor an export (see open points).
 - Engine copies `/var/lib/rynas-caddy/rynas/import-<id>.{crt,key}` (0640 root:rynas-caddy, in
@@ -1398,12 +1444,17 @@ fingerprint, never key material. No new error codes.
   `{"match": {"sni": [<names it serves>]}, "certificate_selection": {"any_tag": ["rynas-import-<id>"]}}`.
 - `automate` and the domain's automation policy leave out the subjects an import replaces;
   a domain whose subjects are all replaced gets no ACME policy. The domain's records (§5.4)
-  are unchanged.
+  are unchanged. Once the import `expires_soon` (< 14 days) its subjects are ordered again
+  while its connection policy keeps serving it (L2): at expiry the import drops out and the
+  ACME certificate is already in the cache, no gap at the cutover.
 - The local leaf is still issued for every local name (unchanged fallback); a local name an
   import covers (a company CA issuing `.local` names) is pinned to the import by its policy.
 - External mode: nothing is rendered; imports stay stored.
-- Not yet validated against the real rynas-caddy binary (`build.sh --validate` with an
-  import golden): the field names come from the v2.11.9 source above.
+- Validated against the real binary (2026-11-07): a hand-made configuration with tagged
+  `load_files`, `tls_connection_policies` with `match.sni` and
+  `certificate_selection.any_tag`, and the catch-all `{}` was accepted by rynas-caddy
+  2.11.9's `caddy validate`. A golden with an import for `build.sh --validate` is still to
+  add.
 
 #### Development
 
@@ -1411,8 +1462,10 @@ fingerprint, never key material. No new error codes.
 `cargo test -p rynasd --test web_access import` (render and engine copies, precedence between
 imports, expired fallback and notification, routes with validation and no key material in
 answers, the watched folder: settle, refusal keeps the last good pair, planted symlink, Check
-now, removal). Tests use temporary folders and the fake admin socket; `--dry-system` puts the
-store and the folders below the dry root.
+now, removal; review 2026-11-07: FIFO, oversize file, hard link, retry after a store error,
+a pair not valid yet, names held and accepted, removal resolving the notification, ACME
+ordered ahead of the expiry and back after it, missing group). Tests use temporary folders
+and the fake admin socket; `--dry-system` puts the store and the folders below the dry root.
 
 #### UI texts (i18n keys the UI adds, en + it)
 
@@ -1446,15 +1499,38 @@ details).
 | `wa.import.delete` | Remove | Rimuovi |
 | `wa.import.delete_confirm` | Its addresses go back to the Let's Encrypt or local certificate. | I suoi indirizzi tornano al certificato Let's Encrypt o locale. |
 | `wa.import.not_renewed` | rynas does not renew imported certificates. | rynas non rinnova i certificati importati. |
+| `wa.import.names` | Names it may carry | Nomi ammessi |
+| `wa.import.names_help` | A pushed certificate is used only for exactly these names; leave empty to take the names of the first certificate pushed. | Un certificato depositato viene usato solo per esattamente questi nomi; lascia vuoto per prendere i nomi del primo certificato depositato. |
+| `wa.import.problem.refused` | The last files were refused | Gli ultimi file sono stati rifiutati |
+| `wa.import.problem.names_changed` | A new certificate for other names is waiting for your approval | Un nuovo certificato per altri nomi attende la tua approvazione |
+| `wa.import.problem.not_yet_valid` | A new certificate starts {when}; the current one stays in use until then | Un nuovo certificato entra in vigore {when}; fino ad allora resta in uso quello attuale |
+| `wa.import.problem.group_missing` | The group rynas-cert-drop is missing: no account can write into the folder. Reinstall the rynas package. | Manca il gruppo rynas-cert-drop: nessun account può scrivere nella cartella. Reinstalla il pacchetto rynas. |
+| `wa.import.pending_names` | Names of the new certificate | Nomi del nuovo certificato |
+| `wa.import.current_names` | Names in use | Nomi in uso |
+| `wa.import.accept` | Accept the new names | Accetta i nuovi nomi |
+| `wa.import.accept_confirm` | The new certificate takes over these addresses at once. Accept only if you expected the change. | Il nuovo certificato prende subito questi indirizzi. Accetta solo se ti aspettavi il cambiamento. |
 
-Closed sets: `ImportSource` (`upload`, `folder`); `CertKind` adds `imported`; notification
-codes `nev.web_access.cert_import_failed` and `nev.web_access.cert_import_ok` with `{name}`
-(and `{error}`, English, shown as is). `last_error` and validation messages are English,
-shown as they are.
+Closed sets: `ImportSource` (`upload`, `folder`); `ImportProblem` (`refused`,
+`names_changed`, `not_yet_valid`, `group_missing`: `wa.import.problem.<value>`); `CertKind`
+adds `imported`; notification codes `nev.web_access.cert_import_failed`,
+`nev.web_access.cert_import_names_changed` and `nev.web_access.cert_import_ok` with `{name}`
+(and `{error}` / `{names}`, English, shown as is). `last_error` and validation messages are
+English, shown as they are. The `409 conflict` of a missing group carries `field: source`
+(show it on the source choice).
+
+| Key | en | it |
+|---|---|---|
+| `nev.web_access.cert_import_failed.title` | Certificate files for {name} were refused | I file del certificato per {name} sono stati rifiutati |
+| `nev.web_access.cert_import_failed.body` | The previous certificate stays in use. {error} | Resta in uso il certificato precedente. {error} |
+| `nev.web_access.cert_import_names_changed.title` | The certificate pushed for {name} is for other names | Il certificato depositato per {name} è per altri nomi |
+| `nev.web_access.cert_import_names_changed.body` | It is for {names}. The previous certificate stays in use until you accept the new names on Network › Web access › Certificate. | È per {names}. Resta in uso il certificato precedente finché non accetti i nuovi nomi in Rete › Accesso web › Certificato. |
+| `nev.web_access.cert_import_ok.title` | Certificate files for {name} are fine again | I file del certificato per {name} sono di nuovo a posto |
 
 Flows: Import (form → Check calls `inspect` and shows subject, issuer, expiry and the
 addresses it takes over → Save); Folder (save with `source: folder` → the drawer shows the
-path, the group, the sshd/acme.sh lines with the id filled in, Check now); Remove (confirm).
+path, the group, the sshd/acme.sh lines with the id filled in, Check now); Accept (with
+`problem: names_changed` the drawer shows `names` next to `pending_names` and the Accept
+button, confirm, then `POST .../accept`); Remove (confirm).
 The SSH example uses the NAS's host name, never personal data.
 
 UI as built (2026-11-07, `crates/rynas-ui/src/pages/web_access/imports.rs`): the card
@@ -1470,9 +1546,11 @@ acme.sh's ssh deploy hook needs.
 
 - Backups: imports are not in `.rynasbak` exports yet. Proposal: include them in the
   passphrase-encrypted secrets part of an export, like the sealed DNS credentials.
-- An import near expiry while an own domain could obtain the same names: today the import
-  keeps them until it expires (then ACME starts, which takes a minute or two). A per-import
-  "prefer ACME" switch could be added if users ask.
+- An import near expiry while an own domain could obtain the same names: ACME is ordered 14
+  days ahead and takes over at expiry (done, L2). A per-import "prefer ACME" switch could be
+  added if users ask.
+- A group per import (so that one push account can write only its own folder) is not done:
+  the pinned names limit what a push can take over, and `-u 0077` keeps keys private.
 - PKCS#12 (`.pfx`) uploads and passphrase-protected keys are refused (convert with openssl).
 - `:8443` could follow an import that covers the host name (W2's "Not in W2" item); for now
   it keeps `/system/tls`.
