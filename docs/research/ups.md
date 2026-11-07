@@ -154,12 +154,136 @@ Picked:
 - Values limited to `[A-Za-z0-9._:/@+,=-]` (option names `[a-z][a-z0-9_.]`, ≤ 32 options):
   nothing needs quoting in `ups.conf`, argv or synodeb's `--opt`.
 
+## Network UPS server (2026-11-07)
+
+Goal: the NAS serves its UPS to the other machines of the LAN (servers and PCs that run
+NUT's upsmon and must shut down first, Home Assistant, dashboards), on any Debian with NUT,
+the NUT way and without a firewall of rynas's own.
+
+Sources:
+- `upsd.conf(5)` <https://networkupstools.org/docs/man/upsd.conf.html>: `LISTEN <address>
+  [port]`, several lines allowed, default `127.0.0.1` and `::1`; `0.0.0.0` / `::` bind all
+  addresses; read only at start (restart, not reload). The ACL/ACCEPT/REJECT mechanism was
+  removed in NUT 2.4; the page says to use `LISTEN` on multihomed systems and "if this is not
+  fine grained enough, use a firewall", and not to rely on `LISTEN` alone. SSL: `CERTFILE`
+  (OpenSSL builds), `CERTPATH`/`CERTIDENT` (NSS), `CERTREQUEST`, `DISABLE_WEAK_SSL`; from
+  2.8.6 incomplete SSL settings stop upsd.
+- upsd source (v2.8.1, `server/upsd.c`, `setuptcp()`): `IPV6_V6ONLY` on IPv6 sockets (so
+  `0.0.0.0` and `::` bind side by side), `SO_REUSEADDR`; a `LISTEN` that does not bind is
+  logged and skipped, only a failure of the **first** one is fatal ("no listening interface
+  available").
+- `upsd.users(5)` <https://networkupstools.org/docs/man/upsd.users.html>: sections with
+  `password`, `actions` (`SET`, `FSD`), `instcmds`, `upsmon primary|secondary` ("do not
+  assign actions to upsmon by hand"); file root:nut 0640. NUT 2.8.0 renamed master/slave to
+  primary/secondary (the old words are still accepted).
+- `upsmon.conf(5)` <https://networkupstools.org/docs/man/upsmon.conf.html>:
+  `MONITOR <ups>@<host>[:<port>] <power value> <user> <password> primary|secondary`;
+  client TLS with `CERTVERIFY` / `FORCESSL`.
+- NUT network protocol: `LIST UPS`, `LIST VAR` work **without logging in** (rynas-web's own
+  status reader relies on it); a login is only needed for `LOGIN` (upsmon's attach),
+  `INSTCMD`, `SET`, `FSD`.
+- Debian trixie: `nut 2.8.1-5`, `debian/rules` configures `--with-ssl --with-nss`
+  (<https://sources.debian.org/src/nut/trixie/debian/rules/>; Jim Klimov on nut-upsuser,
+  2025-07: <https://alioth-lists.debian.net/pipermail/nut-upsuser/2025-July/014052.html>), no
+  libwrap flag. Debian's README: "in netserver MODE you will have to modify the LISTEN
+  option" (<https://metadata-backend.ftp-master.debian.org/changelogs/main/n/nut/stable_nut.README.Debian>).
+- systemd `IPAddressAllow=`/`IPAddressDeny=`
+  (<https://www.freedesktop.org/software/systemd/man/latest/systemd.resource-control.html>):
+  per-unit eBPF cgroup filter on AF_INET/AF_INET6 sockets, ingress by source address,
+  `localhost`/`link-local`/CIDR, allow wins over deny; without eBPF cgroup support (some
+  containers) it has no effect and should not be the only protection.
+- Home Assistant NUT integration (<https://www.home-assistant.io/integrations/nut/>): host,
+  port 3493, user and password **optional**; without credentials no buttons/switches; those
+  need `instcmds` on the server; the integration only reads variables otherwise.
+- Others: DSM "Enable network UPS server" with a list of "Permitted Synology NAS Devices"
+  (IPs), clients log in with the fixed `monuser`/`secret` as slave
+  (<https://kb.synology.com/en-id/DSM/help/DSM/AdminCenter/system_hardware_ups?version=7>,
+  <https://www.wundertech.net/use-a-synology-nas-as-a-nut-server/>); TrueNAS SCALE UPS
+  service: "Remote Monitor" listens on all interfaces with the known `upsmon`/`fixmepass`
+  unless changed, "Monitor User/Password", free-text "Extra Users" in upsd.users format, no
+  host list (<https://www.truenas.com/docs/scale/scaleuireference/systemsettings/services/upsservicesscreenscale/>);
+  openmediavault's nut plugin and Unraid's NUT plugin offer a netserver mode with a monitor
+  user and free-text extra lines (community guides). None of them shows the client line to
+  paste, and DSM's host list is its own filter in front of a fixed password.
+
+Picked:
+
+- **Configuration key `ups.netserver`** (`UpsNetServerConfig`: `enabled`, `listen`,
+  `allow`, `clients`), staged and applied like the rest of the UPS setup; the dialogs of the
+  UPS tab save and apply only this key (A19b). Order 46, after `ups.device`.
+- **Listen** (`upsd.conf`, block `ups-netserver`, root:nut 0640): "all addresses" is
+  `LISTEN 0.0.0.0 3493` + `LISTEN :: 3493` (localhost included); chosen addresses come after
+  `127.0.0.1` and `::1`, so the first, fatal one always binds and an address that went away
+  (DHCP) only logs. Loopback, any and link-local addresses are refused (the NAS's addresses
+  are offered from `ip -j addr`). The admin's own `LISTEN` lines would clash and are dropped
+  while the server is on (the plan lists them; the apply keeps a backup); when off, the block
+  holds only a comment and upsd keeps the admin's setting.
+- **Allowed hosts**: NUT has no ACL any more, so rynas uses what every systemd Debian has: a
+  drop-in `/etc/systemd/system/nut-server.service.d/rynas-netserver.conf` with
+  `IPAddressDeny=any`, `IPAddressAllow=localhost` and the admin's hosts/subnets; packets from
+  other sources never reach upsd. Honest limits (said in the UI and here): it filters the
+  whole upsd service only; without eBPF cgroups (old kernels, some containers) systemd
+  ignores it, and a firewall (nftables/ufw of the admin, or the router) is then the way; it is
+  not a firewall and rynas does not grow one. Alternatives considered: `LISTEN` on one
+  address (done, but it limits interfaces, not peers); tcp-wrappers (not built in Debian, and
+  dropped by most distributions); an nftables table of rynas (out of scope, and would fight an
+  admin's firewall). Empty list: any host that reaches the port, with a warning on the card.
+- **Accounts** in `upsd.users` (block `ups-netserver`): role *secondary* (`upsmon secondary`,
+  for upsmon on another machine) or *monitor* (no `actions`, no `instcmds`: logs in, reads;
+  for Home Assistant and dashboards: reading needs no login in NUT, but an account names the
+  client and is what the integration's form asks for). No account can set variables, run
+  instant commands or force a shutdown; buttons in Home Assistant stay off (a "control" role
+  with chosen `instcmds` is left for later). Names `[a-z0-9_-]`, never `rynas`/`rynas-upsmon`
+  or a user of the admin's own sections; the local primary user of `ups.device` is untouched.
+- **Passwords**: generated (32 letters and digits) or chosen (12–64 of
+  `[A-Za-z0-9._~@%+=:,-]`, one word everywhere). Write-only in the API, sealed at once with
+  rynasd's age key (the notification engine's `<state>/notify/secret.key`, carried only by a
+  passphrase-protected export), so `config.db`, revisions and answers never hold them; the
+  `PUT` answer returns the passwords of that request **once**, the UI shows them with a copy
+  button right after the apply. Later only a new password can be made. A restore without the
+  key fails the apply with "generate a new one".
+- **One file, several owners**: `upsd.users` also has the blocks of `ups.device` and of the
+  battery test user, and the configuration engine keeps one owner per file, so the accounts
+  block is written by the domain's reconcile step (atomic, mode and owner kept, written back
+  on rollback), like the battery test user. `upsd.conf` and the drop-in are ordinary managed
+  files (drift detection, backup).
+- **Apply**: files, `systemctl daemon-reload`, then `systemctl restart nut-server` when it
+  runs (`LISTEN` needs a restart; the NAS's upsmon reconnects by itself). `nut.conf`'s `MODE`
+  stays with `ups.device` (`standalone`, or an admin's `netserver` kept): both modes run upsd,
+  and what other machines reach is decided by `LISTEN` alone (Debian's README names `MODE`
+  for its init scripts; writing it from two keys would give `nut.conf` two owners). To check
+  on the next real install: whether a unit gates on `MODE=netserver`.
+- **Connection details** (card and the dialog after a password): host (the LAN address of
+  the default route), port 3493, user, UPS name (the wizard's, else the first `ups.conf`
+  section) for Home Assistant (Settings › Devices and services › Network UPS Tools), and
+  `MONITOR ups@host 1 user PASSWORD secondary` with `MODE=netclient` for another Linux upsmon
+  (with the real password right after it was made), each with a copy button.
+- **A module's UPS layer** owns `/etc/nut`: the card says the server cannot be set up there
+  (`UpsNetBlock::Module`); the layer would need its own hook (no core change for one platform).
+- **API**: `GET/PUT /api/v1/ups/netserver` (`UpsNetServerState` with the NAS's addresses
+  and subnets, `UpsNetServerSaved`), `POST /api/v1/ups/plan/netserver` (`UpsSetupPlan`,
+  passwords masked).
+
+Not done, documented:
+- **TLS**: Debian's build has SSL (`--with-ssl --with-nss`), but upsmon clients must be set
+  up with `CERTVERIFY`/`FORCESSL` and a trusted certificate, Home Assistant's integration has
+  no TLS option, and NUT 2.8.6 refuses to start on incomplete SSL settings. Later: `CERTFILE`
+  from rynas's certificate store (OpenSSL builds) with `DISABLE_WEAK_SSL`, optional.
+- **Client mode** (this NAS shuts down on another NAS's UPS): not supported yet and not small:
+  rynas-web's status reader, rynasd's watcher and the battery tests all talk to
+  `127.0.0.1:3493`, the wizard writes a local `MONITOR … primary` line, and `ups.device`
+  owns `nut.conf`. It needs an `ups.remote` key (host, port, UPS, user, sealed password)
+  that replaces `ups.device`'s driver part with `MODE=netclient` and a `MONITOR … secondary`
+  line, and a configurable upsd address for the reader and the watcher. Until then an admin
+  can write `MONITOR ups@other 1 user pass secondary` in `upsmon.conf` by hand (outside
+  rynas's blocks); the UPS page then stays "not configured".
+- A list of connected clients (`LIST CLIENT <ups>`, NUT ≥ 2.8) on the card.
+
 ## Left for later
-Network UPS server with connected clients, **client mode** (monitor another NAS's upsd: the
-status reader of rynas-web and the watcher read `127.0.0.1:3493` only, so it needs a
-configurable upsd address first), SNMP/XML scans (`nut-scanner -S/-M` need a range or a host:
+SNMP/XML scans (`nut-scanner -S/-M` need a range or a host:
 manual entry for now), a udev rule for a USB ID missing from NUT's rules (the test run then
 fails with a permission error), removing the wizard's setup from the UI (the `ups.device` key
 can be removed from the configuration), UPS power-off at the end (synodeb `SAFESHUTDOWN`; on
 NUT it is the admin's `POWERDOWNFLAG` setup), outage statistics and battery trend (RRD), a
-check that upsmon is running as primary (shown on the page).
+check that upsmon is running as primary (shown on the page); for the network UPS server see
+its own section (TLS, client mode, connected clients, a control role).

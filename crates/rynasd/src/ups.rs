@@ -252,7 +252,7 @@ fn users_kind() -> FileKind {
 }
 
 /// 32 random letters and digits (a word upsd takes without quoting).
-fn new_password() -> std::io::Result<String> {
+pub(crate) fn new_password() -> std::io::Result<String> {
     use std::io::Read;
     const ABC: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     let mut raw = [0u8; 64];
@@ -345,6 +345,9 @@ pub struct Ups {
     pub talk_to_upsd: bool,
     /// The setup wizard ([`crate::ups_setup`]).
     pub setup: crate::ups_setup::Setup,
+    /// Folder of the key that seals the network UPS server's passwords (`<state>/notify`,
+    /// [`crate::ups_netserver`]).
+    pub net_secret_dir: PathBuf,
 }
 
 impl Ups {
@@ -393,7 +396,8 @@ pub fn router(st: UpsState) -> Router {
                 .route_layer(axum::middleware::from_fn(crate::server::require_root_peer)),
         )
         .with_state(st.clone())
-        .merge(crate::ups_setup::router(st))
+        .merge(crate::ups_setup::router(st.clone()))
+        .merge(crate::ups_netserver::router(st))
 }
 
 fn state_of(u: &Ups, owner: &str) -> Res<UpsSettingsState> {

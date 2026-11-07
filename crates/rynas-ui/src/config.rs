@@ -259,6 +259,7 @@ pub mod keys {
     pub const POWER: &str = "power.schedule";
     pub const UPS: &str = "ups.safemode";
     pub const UPS_DEVICE: &str = "ups.device";
+    pub const UPS_NETSERVER: &str = "ups.netserver";
     pub const UPDATES: &str = "updates.auto";
     pub const DISKS: &str = "storage.disks";
     pub const REMOVABLE: &str = "removable";

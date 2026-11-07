@@ -39,5 +39,6 @@ pub mod tailscale;
 pub mod tls;
 pub mod updates;
 pub mod ups;
+pub mod ups_netserver;
 pub mod ups_setup;
 pub mod web_access;
