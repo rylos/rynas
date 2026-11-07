@@ -1705,7 +1705,12 @@ sch.col.next	Prossima esecuzione
 sch.col.source	File
 sch.next	Prossima: {when}
 sch.running	In esecuzione
-sch.started	{name} avviata
+sch.started	{name}: in esecuzione…
+sch.finished_ok	{name}: completata
+sch.finished_err	{name}: non riuscita ({why})
+snap.run.started	Snapshot di {name} in corso…
+snap.run.ok	Snapshot di {name} creato
+snap.run.failed	Snapshot di {name} non riuscito: {why}
 sch.not_applied	Applica prima le modifiche in sospeso: l'attività non esiste ancora sul sistema.
 sch.history	Cronologia esecuzioni
 sch.history_title	Cronologia di {name}

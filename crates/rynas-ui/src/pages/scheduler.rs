@@ -539,6 +539,27 @@ pub fn action_text(a: &TaskAction) -> (String, String) {
     }
 }
 
+/// Follows a run started with "Run now": polls the task until it is no longer running and a run newer
+/// than `before` is recorded. `None` when the run cannot be followed (gone, or still running after ~30 min).
+pub async fn follow_run(id: &str, before: Option<u64>) -> Option<TaskRun> {
+    let url = format!("/api/v1/scheduler/tasks/{}", api::encode(id));
+    for i in 0..1000u32 {
+        // fast at first (most runs take seconds), then every 2 s
+        api::sleep(if i < 20 { 500 } else { 2000 }).await;
+        match api::get::<TaskView>(&url).await {
+            Ok(v) if !v.status.running => {
+                if let Some(r) = v.status.last_run.filter(|r| Some(r.id) != before) {
+                    return Some(r);
+                }
+            }
+            Ok(_) => {}
+            Err(e) if e.code() == rynas_api_types::error_codes::NOT_FOUND => return None,
+            Err(_) => {}
+        }
+    }
+    None
+}
+
 /// Outcome of a run: tone and text ("Succeeded", "Failed (exit 2)", "Timed out").
 pub fn run_status(r: &TaskRun) -> (Tone, String) {
     if r.ok {
@@ -725,19 +746,33 @@ fn task_row(
         });
     };
     let (id_r, name_r) = (id.clone(), name.clone());
+    let before = st.last_run.as_ref().map(|r| r.id);
     let run = move |_| {
         running.set(true);
         let (id, name) = (id_r.clone(), name_r.clone());
         spawn_local(async move {
             let r = api::post_empty::<()>(&format!("/api/v1/scheduler/tasks/{}/run", api::encode(&id)), None).await;
-            running.set(false);
             match r {
                 Ok(()) => {
-                    toast(Tone::Ok, tf("sch.started", &[("name", &name)]));
-                    set_timeout(move || tasks.reload(), Duration::from_millis(1200));
+                    toast(Tone::Info, tf("sch.started", &[("name", &name)]));
+                    set_timeout(move || tasks.reload(), Duration::from_millis(800));
+                    let done = follow_run(&id, before).await;
+                    running.try_set(false);
+                    match done {
+                        Some(r) if r.ok => toast(Tone::Ok, tf("sch.finished_ok", &[("name", &name)])),
+                        Some(r) => toast(Tone::Err, tf("sch.finished_err", &[("name", &name), ("why", &run_status(&r).1)])),
+                        None => {}
+                    }
+                    tasks.reload();
                 }
-                Err(e) if e.code() == rynas_api_types::error_codes::NOT_APPLIED => toast(Tone::Err, t("sch.not_applied").to_string()),
-                Err(e) => toast(Tone::Err, e.text()),
+                Err(e) => {
+                    running.set(false);
+                    if e.code() == rynas_api_types::error_codes::NOT_APPLIED {
+                        toast(Tone::Err, t("sch.not_applied").to_string())
+                    } else {
+                        toast(Tone::Err, e.text())
+                    }
+                }
             }
         });
     };

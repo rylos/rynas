@@ -654,16 +654,32 @@ fn job_row(
         });
     };
     let (tid2, n2) = (task_id.clone(), name.clone());
+    let before = v.last_run.as_ref().map(|r| r.id);
     let run = move |_| {
         running.set(true);
         let (tid, n) = (tid2.clone(), n2.clone());
         spawn_local(async move {
             let r = api::post_empty::<()>(&format!("/api/v1/scheduler/tasks/{}/run", api::encode(&tid)), None).await;
-            running.set(false);
             match r {
-                Ok(()) => toast(Tone::Ok, tf("sch.started", &[("name", &n)])),
-                Err(e) if e.code() == rynas_api_types::error_codes::NOT_APPLIED => toast(Tone::Err, t("sch.not_applied").to_string()),
-                Err(e) => toast(Tone::Err, e.text()),
+                Ok(()) => {
+                    toast(Tone::Info, tf("snap.run.started", &[("name", &n)]));
+                    let done = crate::pages::scheduler::follow_run(&tid, before).await;
+                    running.try_set(false);
+                    match done {
+                        Some(r) if r.ok => toast(Tone::Ok, tf("snap.run.ok", &[("name", &n)])),
+                        Some(r) => toast(Tone::Err, tf("snap.run.failed", &[("name", &n), ("why", &crate::pages::scheduler::run_status(&r).1)])),
+                        None => {}
+                    }
+                    jobs.reload();
+                }
+                Err(e) => {
+                    running.set(false);
+                    if e.code() == rynas_api_types::error_codes::NOT_APPLIED {
+                        toast(Tone::Err, t("sch.not_applied").to_string())
+                    } else {
+                        toast(Tone::Err, e.text())
+                    }
+                }
             }
         });
     };
