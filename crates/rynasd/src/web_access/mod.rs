@@ -422,8 +422,12 @@ pub struct WebAccessSvc {
     /// Provider reads shared by plans (review 2026-11-07, M6).
     dns_cache: rynas_dns::cache::Cache,
     cert_mem: Mutex<CertMem>,
-    /// Imported certificates: watched folder state; also serialises changes to the store.
+    /// Imported certificates: watched folder state; also serialises changes to and reads of
+    /// the store (review 2026-11-07, M3).
     imports: Mutex<imported::ImportMem>,
+    /// Whether the group of the watched folders must exist (default: when running as root,
+    /// where the folders get it; tests set `true` to see the missing-group path).
+    pub drop_group_check: OnceLock<bool>,
 }
 
 /// What the certificate checks remember.
@@ -501,6 +505,7 @@ impl WebAccessSvc {
             dns_cache: rynas_dns::cache::Cache::new(),
             cert_mem: Mutex::new(CertMem::default()),
             imports: Mutex::new(imported::ImportMem::default()),
+            drop_group_check: OnceLock::new(),
         }
     }
 
@@ -2926,6 +2931,23 @@ async fn import_check(
     blocking(move || s.check_import(&id)).await.map(Json)
 }
 
+/// The administrator's consent to the new DNS names a watched folder pushed (M1).
+async fn import_accept(
+    State(st): State<WaState>,
+    hd: HeaderMap,
+    UrlPath(id): UrlPath<String>,
+) -> Res<Json<ImportedCert>> {
+    let (s, ops) = wsvc(&st)?;
+    let who = admin_user(&ops, &hd, "imported certificates")?;
+    let (v, accepted) = blocking(move || s.accept_import(&id)).await?;
+    audit(
+        &who,
+        "import-accept",
+        &format!("{} names {}", v.id, accepted.join(",")),
+    );
+    Ok(Json(v))
+}
+
 async fn import_delete(
     State(st): State<WaState>,
     hd: HeaderMap,
@@ -2982,6 +3004,7 @@ pub fn router(st: WaState) -> Router {
         )
         .route("/v1/web-access/imports/inspect", post(imports_inspect))
         .route("/v1/web-access/imports/{id}/check", post(import_check))
+        .route("/v1/web-access/imports/{id}/accept", post(import_accept))
         .route(
             "/v1/web-access/imports/{id}",
             axum::routing::delete(import_delete),

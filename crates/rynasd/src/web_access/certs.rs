@@ -85,7 +85,7 @@ pub fn event_for(e: &CertEntry) -> Option<NewEvent> {
         ),
         CertStatus::ExpiresSoon if e.kind == CertKind::Imported => (
             format!("The imported certificate for {name} expires soon"),
-            "rynas does not renew imported certificates. Upload a new one or check the tool that pushes it.",
+            "rynas does not renew imported certificates. Upload a new one or check the tool that pushes it. Names an own domain covers already get a Let's Encrypt certificate, used once this one expires.",
         ),
         CertStatus::Expired => (
             format!("The certificate for {name} has expired"),

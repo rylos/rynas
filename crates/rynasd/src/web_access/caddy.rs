@@ -35,7 +35,11 @@
 //!   `certificate_selection.any_tag` (`modules/caddytls/connpolicy.go`,
 //!   `certselection.go`), so certmagic picks it whatever else its cache holds for the name
 //!   (its default selector takes the first valid match, in cache order). ACME subjects an
-//!   import replaces are left out of `automate` and of the domain's policy.
+//!   import replaces are left out of `automate` and of the domain's policy until the import
+//!   expires soon (< 14 days): then they are ordered while the policy keeps serving the
+//!   import, so its expiry finds the ACME certificate in the cache. A hand-made config of
+//!   this shape (tagged `load_files`, `match.sni` + `any_tag`) was accepted by rynas-caddy
+//!   2.11.9's `caddy validate` (2026-11-07).
 //!
 //! The source of the field names is Caddy v2.11.9's code (`modules/caddyhttp/...`,
 //! `admin.go`, `modules/caddytls/acmeissuer.go`); the golden tests pin the output.

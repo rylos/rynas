@@ -273,7 +273,8 @@ pub fn chain_der(pem: &str) -> Result<Vec<CertificateDer<'static>>, TlsError> {
     }
     let certs = CertificateDer::pem_slice_iter(pem.as_bytes())
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| TlsError::cert(format!("not a PEM certificate: {e:?}")))?;
+        // a fixed message: the parser's error carries lines of the input
+        .map_err(|_| TlsError::cert("not a PEM certificate (a damaged or unfinished block)"))?;
     if certs.is_empty() {
         return Err(TlsError::cert("no \"BEGIN CERTIFICATE\" block"));
     }
@@ -295,7 +296,10 @@ pub fn key_der(pem: &str) -> Result<PrivateKeyDer<'static>, TlsError> {
         ));
     }
     PrivateKeyDer::from_pem_slice(pem.as_bytes())
-        .map_err(|e| TlsError::key(format!("not a PEM private key: {e:?}")))
+        // a fixed message: the parser's error carries lines of the input (key material)
+        .map_err(|_| {
+            TlsError::key("not a PEM private key (no key block, or a damaged or unfinished one)")
+        })
 }
 
 /// The pair as rustls serves it: the key loaded by the ring provider and checked against the

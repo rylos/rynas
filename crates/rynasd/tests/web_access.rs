@@ -1876,6 +1876,7 @@ fn upload(id: &str, p: &rynas_tls::PemPair) -> CertImportRequest {
         source: ImportSource::Upload,
         certificate: Some(p.chain.clone()),
         private_key: Some(p.key.clone()),
+        names: Vec::new(),
     }
 }
 
@@ -2211,7 +2212,11 @@ fn watched_folder_settles_validates_and_keeps_the_last_good_pair() {
     std::fs::write(dir.join(PRIVKEY), &other.key).unwrap();
     let t2 = t1 + SETTLE * 10;
     e.svc.scan_drops_at(t2);
+    // a key of another chain may be a writer between the two files: confirmed a window later
     assert!(e.svc.scan_drops_at(t2 + SETTLE).is_empty());
+    assert!(e.notes.take().is_empty(), "not refused on first sight");
+    assert!(e.svc.imports().pop().unwrap().last_error.is_none());
+    assert!(e.svc.scan_drops_at(t2 + SETTLE * 2).is_empty());
     assert_eq!(e.caddy.loads(), loads + 1);
     let v = e.svc.imports().pop().unwrap();
     assert!(
@@ -2260,4 +2265,325 @@ fn watched_folder_settles_validates_and_keeps_the_last_good_pair() {
     // removing the import removes its folder
     e.svc.delete_import("router").unwrap();
     assert!(!dir.exists() && base.exists());
+}
+
+// review 2026-11-07 of the imports (M1-M3, L1-L7)
+
+fn folder_import(id: &str, names: &[&str]) -> CertImportRequest {
+    CertImportRequest {
+        id: id.into(),
+        label: "router acme.sh".into(),
+        source: ImportSource::Folder,
+        names: names.iter().map(|s| s.to_string()).collect(),
+        ..Default::default()
+    }
+}
+
+/// Writes a pair into a watched folder (the key first, like acme.sh).
+fn push_pair(dir: &Path, p: &rynas_tls::PemPair) {
+    use rynasd::web_access::imported::{FULLCHAIN, PRIVKEY};
+    for (n, data) in [(PRIVKEY, &p.key), (FULLCHAIN, &p.chain)] {
+        let _ = std::fs::remove_file(dir.join(n));
+        std::fs::write(dir.join(n), data).unwrap();
+    }
+}
+
+fn wildcard_pair(now: i64) -> rynas_tls::PemPair {
+    foreign_pair(&["*.nas.example.com", "nas.example.com"], now)
+}
+
+#[test]
+fn watched_folder_refuses_fifos_oversize_files_and_hard_links() {
+    use rynasd::web_access::imported::{DROP_DIR, FULLCHAIN, PRIVKEY};
+    let e = env();
+    e.apply(&one_domain()).unwrap();
+    e.svc.save_import(&folder_import("router", &[])).unwrap();
+    let dir = e.file(DROP_DIR).join("router");
+    let good = wildcard_pair(rynas_tls::now());
+    std::fs::write(dir.join(PRIVKEY), &good.key).unwrap();
+    // a FIFO: refused at once (opened non-blocking, never read)
+    let st = std::process::Command::new("mkfifo")
+        .arg(dir.join(FULLCHAIN))
+        .status()
+        .unwrap();
+    assert!(st.success());
+    let v = e.svc.check_import("router").unwrap();
+    assert_eq!(v.problem, Some(ImportProblem::Refused));
+    assert_eq!(
+        v.last_error.as_deref(),
+        Some("fullchain.pem is not a regular file")
+    );
+    // over 64 KiB
+    std::fs::remove_file(dir.join(FULLCHAIN)).unwrap();
+    std::fs::write(dir.join(FULLCHAIN), "x".repeat(70 * 1024)).unwrap();
+    let v = e.svc.check_import("router").unwrap();
+    assert!(
+        v.last_error
+            .as_deref()
+            .unwrap()
+            .contains("larger than 64 KiB"),
+        "{:?}",
+        v.last_error
+    );
+    // a hard link (a group member handing over a file it may not read)
+    std::fs::remove_file(dir.join(FULLCHAIN)).unwrap();
+    let elsewhere = e.dir.path().join("chain-elsewhere.pem");
+    std::fs::write(&elsewhere, &good.chain).unwrap();
+    std::fs::hard_link(&elsewhere, dir.join(FULLCHAIN)).unwrap();
+    let v = e.svc.check_import("router").unwrap();
+    assert!(
+        v.last_error.as_deref().unwrap().contains("hard links"),
+        "{:?}",
+        v.last_error
+    );
+    assert_eq!(v.status, CertStatus::Pending, "nothing stored");
+    let ev = e.notes.take();
+    assert_eq!(ev.len(), 3, "one per distinct refusal: {ev:?}");
+    // a file of its own: taken, the trouble resolves
+    std::fs::remove_file(dir.join(FULLCHAIN)).unwrap();
+    std::fs::write(dir.join(FULLCHAIN), &good.chain).unwrap();
+    let v = e.svc.check_import("router").unwrap();
+    assert_eq!((v.status, v.problem), (CertStatus::Ok, None));
+    let ev = e.notes.take();
+    assert_eq!(ev.len(), 1);
+    assert_eq!(ev[0].code, "web_access.cert_import_ok");
+}
+
+#[test]
+fn watched_folder_retries_after_a_store_error() {
+    use rynasd::web_access::imported::{DROP_DIR, SETTLE};
+    use std::time::Instant;
+    let e = env();
+    e.apply(&one_domain()).unwrap();
+    e.svc.save_import(&folder_import("router", &[])).unwrap();
+    let loads = e.caddy.loads();
+    let dir = e.file(DROP_DIR).join("router");
+    // the store cannot take the key (a folder in its place)
+    let blocker = e.dir.path().join("state/web-access/imported/router.key");
+    std::fs::create_dir_all(blocker.join("x")).unwrap();
+    push_pair(&dir, &wildcard_pair(rynas_tls::now()));
+    let t0 = Instant::now();
+    assert!(e.svc.scan_drops_at(t0).is_empty());
+    assert!(e.svc.scan_drops_at(t0 + SETTLE).is_empty(), "store error");
+    assert_eq!(e.caddy.loads(), loads);
+    assert!(e.notes.take().is_empty(), "an I/O error is not a refusal");
+    // fixed: the same files are read again after another window (not marked done)
+    std::fs::remove_dir_all(&blocker).unwrap();
+    assert!(e.svc.scan_drops_at(t0 + SETTLE + SETTLE / 2).is_empty());
+    assert_eq!(e.svc.scan_drops_at(t0 + SETTLE * 2), ["router"]);
+    assert_eq!(e.caddy.loads(), loads + 1);
+}
+
+#[test]
+fn a_pair_not_valid_yet_waits_and_never_replaces_a_serving_one() {
+    use rynasd::web_access::imported::DROP_DIR;
+    const DAY: i64 = 86_400_000;
+    let e = env();
+    e.apply(&one_domain()).unwrap();
+    let now = rynas_tls::now();
+    // issued "tomorrow": starts in an hour (validation allows up to a day ahead)
+    let later = foreign_pair(
+        &["*.nas.example.com", "nas.example.com"],
+        now + DAY + 3_600_000,
+    );
+    // a watched folder with nothing stored yet takes it, but it is not served before it starts
+    e.svc.save_import(&folder_import("router", &[])).unwrap();
+    let dir = e.file(DROP_DIR).join("router");
+    push_pair(&dir, &later);
+    let v = e.svc.check_import("router").unwrap();
+    assert!(v.certificate.is_some() && v.covers.is_empty(), "{v:?}");
+    let (policies, tls) = https_tls(&e.caddy.config());
+    assert_eq!(policies, json!([{}]));
+    assert!(!tls.to_string().contains("import-router"));
+    // a serving pair is kept while the next one waits in the folder
+    let current = wildcard_pair(now);
+    push_pair(&dir, &current);
+    e.svc.check_import("router").unwrap();
+    let loads = e.caddy.loads();
+    push_pair(&dir, &later);
+    let v = e.svc.check_import("router").unwrap();
+    assert_eq!(v.problem, Some(ImportProblem::NotYetValid));
+    let from = v.pending_from_ms.unwrap();
+    assert!(from > now + 3_000_000 && from <= now + 3_700_000, "{from}");
+    assert_eq!(v.covers.len(), 3, "the current pair still serves");
+    assert_eq!(
+        v.certificate.as_ref().unwrap().fingerprint_sha256,
+        rynas_tls::inspect(&current.chain).unwrap()[0].fingerprint_sha256
+    );
+    assert_eq!(e.caddy.loads(), loads);
+    assert!(e.notes.take().is_empty(), "waiting is not trouble");
+    // an upload that starts later is refused while the stored pair serves
+    let mut up = upload("router", &later);
+    up.source = ImportSource::Folder;
+    let err = e.svc.save_import(&up).unwrap_err();
+    assert_eq!(err.code(), error_codes::INVALID_VALUE);
+}
+
+#[tokio::test]
+async fn pushed_pair_for_other_names_is_held_until_accepted() {
+    use rynasd::web_access::imported::DROP_DIR;
+    let e = env();
+    e.apply(&one_domain()).unwrap();
+    let app = e.app();
+    let now = rynas_tls::now();
+    e.svc.save_import(&folder_import("router", &[])).unwrap();
+    let dir = e.file(DROP_DIR).join("router");
+    // the first good pair pins its names
+    push_pair(&dir, &wildcard_pair(now));
+    let v = e.svc.check_import("router").unwrap();
+    assert_eq!(v.names, ["*.nas.example.com", "nas.example.com"]);
+    let loads = e.caddy.loads();
+    // a renewal with the same names (another order, another case) applies by itself
+    push_pair(
+        &dir,
+        &foreign_pair(&["NAS.example.com", "*.nas.example.com"], now),
+    );
+    let v = e.svc.check_import("router").unwrap();
+    assert_eq!(v.problem, None);
+    assert_eq!(e.caddy.loads(), loads + 1);
+    // a push that takes over other names is held: the last good pair stays
+    push_pair(
+        &dir,
+        &foreign_pair(
+            &["*.nas.example.com", "nas.example.com", "files.example.org"],
+            now,
+        ),
+    );
+    let v = e.svc.check_import("router").unwrap();
+    assert_eq!(v.problem, Some(ImportProblem::NamesChanged));
+    assert_eq!(
+        v.pending_names,
+        ["*.nas.example.com", "files.example.org", "nas.example.com"]
+    );
+    assert_eq!(v.names, ["*.nas.example.com", "nas.example.com"]);
+    assert_eq!(v.certificate.unwrap().dns_names.len(), 2);
+    assert_eq!(e.caddy.loads(), loads + 1);
+    let ev = e.notes.take();
+    assert_eq!(ev.len(), 1, "{ev:?}");
+    assert_eq!(ev[0].code, "web_access.cert_import_names_changed");
+    // seen again: no second notification
+    e.svc.check_import("router").unwrap();
+    assert!(e.notes.take().is_empty());
+    // accept: administrators only
+    let accept = "/v1/web-access/imports/router/accept";
+    let (s, _) = call(&app, "bob", "POST", accept, None).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, b) = call(&app, "admin", "POST", accept, None).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    let v: ImportedCert = serde_json::from_slice(&b).unwrap();
+    assert_eq!(v.problem, None);
+    assert!(v.pending_names.is_empty());
+    assert_eq!(
+        v.names,
+        ["*.nas.example.com", "files.example.org", "nas.example.com"]
+    );
+    assert_eq!(e.caddy.loads(), loads + 2);
+    let ev = e.notes.take();
+    assert_eq!(ev.len(), 1);
+    assert_eq!(ev[0].code, "web_access.cert_import_ok");
+    // nothing held any more: 409; unknown: 404
+    let (s, _) = call(&app, "admin", "POST", accept, None).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    let (s, _) = call(
+        &app,
+        "admin",
+        "POST",
+        "/v1/web-access/imports/nope/accept",
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    // held again, then removed: the notification is resolved (L3)
+    push_pair(&dir, &foreign_pair(&["nas.example.com"], now));
+    e.svc.check_import("router").unwrap();
+    assert_eq!(e.notes.take().len(), 1);
+    e.svc.delete_import("router").unwrap();
+    let ev = e.notes.take();
+    assert_eq!(ev.len(), 1);
+    assert_eq!(ev[0].code, "web_access.cert_import_ok");
+
+    // names given at creation: even the first push must carry them
+    e.svc
+        .save_import(&folder_import("photos", &["Photos.nas.example.com"]))
+        .unwrap();
+    let dir = e.file(DROP_DIR).join("photos");
+    push_pair(&dir, &wildcard_pair(now));
+    let v = e.svc.check_import("photos").unwrap();
+    assert_eq!(v.names, ["photos.nas.example.com"]);
+    assert_eq!(v.problem, Some(ImportProblem::NamesChanged));
+    assert_eq!(v.status, CertStatus::Pending, "nothing served");
+    // bad names; names that are not the uploaded pair's
+    let err = e
+        .svc
+        .save_import(&folder_import("x", &["not a name"]))
+        .unwrap_err();
+    assert_eq!(err.code(), error_codes::INVALID_VALUE);
+    let mut up = upload("y", &wildcard_pair(now));
+    up.names = vec!["nas.example.com".into()];
+    assert!(e.svc.save_import(&up).is_err());
+    // the request's Debug never shows the key
+    assert!(!format!("{up:?}").contains("PRIVATE KEY"));
+}
+
+#[test]
+fn acme_comes_back_after_expiry_and_starts_before_it() {
+    const DAY: i64 = 86_400_000;
+    let e = env();
+    e.apply(&one_domain()).unwrap();
+    let now = rynas_tls::now();
+    // expires in 10 days: still served (pinned), but ACME is ordered ahead of the expiry (L2)
+    let soon = foreign_pair(
+        &["*.nas.example.com", "nas.example.com"],
+        now - (rynas_tls::LEAF_DAYS - 10) * DAY,
+    );
+    let v = e.svc.save_import(&upload("wild", &soon)).unwrap();
+    assert_eq!(v.status, CertStatus::ExpiresSoon);
+    assert_eq!(v.covers.len(), 3);
+    assert!(v.replaces_acme.is_empty());
+    let (policies, tls) = https_tls(&e.caddy.config());
+    assert_eq!(
+        policies[0]["certificate_selection"],
+        json!({"any_tag": ["rynas-import-wild"]})
+    );
+    assert_eq!(
+        tls["certificates"]["automate"],
+        json!(["*.nas.example.com", "nas.example.com"])
+    );
+    // a valid import replaces ACME; once it has expired, the periodic sync renders ACME again
+    e.svc
+        .save_import(&upload("wild", &wildcard_pair(now)))
+        .unwrap();
+    let (_, tls) = https_tls(&e.caddy.config());
+    assert!(tls["certificates"].get("automate").is_none(), "{tls}");
+    let old = foreign_pair(&["*.nas.example.com", "nas.example.com"], now - 4000 * DAY);
+    let store = e.dir.path().join("state/web-access/imported");
+    std::fs::write(store.join("wild.crt"), &old.chain).unwrap();
+    std::fs::write(store.join("wild.key"), &old.key).unwrap();
+    e.svc.sync(&|_| {}).unwrap();
+    let (policies, tls) = https_tls(&e.caddy.config());
+    assert_eq!(policies, json!([{}]));
+    assert_eq!(
+        tls["certificates"]["automate"],
+        json!(["*.nas.example.com", "nas.example.com"])
+    );
+    assert!(!e.file("/var/lib/rynas-caddy/rynas/import-wild.crt").exists());
+}
+
+#[test]
+fn watched_folder_needs_its_group() {
+    use rynasd::web_access::imported::DROP_DIR;
+    let e = env();
+    e.apply(&one_domain()).unwrap();
+    e.svc.drop_group_check.set(true).unwrap();
+    let err = e
+        .svc
+        .save_import(&folder_import("router", &[]))
+        .unwrap_err();
+    assert_eq!(err.code(), error_codes::CONFLICT);
+    assert!(e.svc.imports().is_empty(), "nothing stored");
+    assert!(!e.file(DROP_DIR).join("router").exists());
+    // uploads do not need it
+    e.svc
+        .save_import(&upload("wild", &wildcard_pair(rynas_tls::now())))
+        .unwrap();
 }

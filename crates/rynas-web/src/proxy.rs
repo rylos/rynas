@@ -247,6 +247,7 @@ pub fn routes() -> Router<AppState> {
         .route("/web-access/imports", get(forward).post(forward))
         .route("/web-access/imports/inspect", post(forward))
         .route("/web-access/imports/{id}/check", post(forward))
+        .route("/web-access/imports/{id}/accept", post(forward))
         .route("/web-access/imports/{id}", delete(forward))
         // network (P4): with the local address of the session's connection
         .route("/network/interfaces", get(forward_net))
