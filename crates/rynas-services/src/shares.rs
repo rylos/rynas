@@ -936,10 +936,23 @@ impl Applier for SharesDomain {
                     (ctx.log)("restarting smbd (listening setup changed)");
                     ctx.system.restart_unit(SMBD)?;
                 } else if self.smbd_announces_itself(ctx) {
-                    (ctx.log)(
-                        "restarting smbd once: it was started before rynas turned off its own mDNS announcement",
-                    );
-                    ctx.system.restart_unit(SMBD)?;
+                    // a restart cuts every open copy and Time Machine backup: only when no
+                    // client is connected, else deferred to a later apply (review
+                    // 2026-11-07, M7)
+                    match self.host.smb_sessions() {
+                        Some(n) if n > 0 => {
+                            (ctx.log)(&format!(
+                                "smbd restart deferred: {n} clients connected (it still announces itself through Avahi until a later apply restarts it)"
+                            ));
+                            ctx.system.reload_or_restart_unit(SMBD)?;
+                        }
+                        _ => {
+                            (ctx.log)(
+                                "restarting smbd once: it was started before rynas turned off its own mDNS announcement",
+                            );
+                            ctx.system.restart_unit(SMBD)?;
+                        }
+                    }
                 } else {
                     ctx.system.reload_or_restart_unit(SMBD)?;
                 }

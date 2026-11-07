@@ -151,6 +151,19 @@ pub fn open_creds(cr: &DnsCredential, sb: Option<&SecretBox>) -> Result<Creds, S
     })
 }
 
+/// Overwrites opened credential values before they are freed (review 2026-11-07, L6).
+pub fn wipe(mut c: Creds) {
+    use zeroize::Zeroize;
+    for v in c.values_mut() {
+        v.zeroize();
+    }
+}
+
+/// Whether the credential's envelope opens, without keeping the values.
+pub fn creds_open(cr: &DnsCredential, sb: Option<&SecretBox>) -> bool {
+    open_creds(cr, sb).map(wipe).is_ok()
+}
+
 /// A copy for answers: no `secrets`, no `sealed`.
 pub fn for_answer(mut c: WebAccessConfig) -> WebAccessConfig {
     for cr in &mut c.credentials {
@@ -248,32 +261,39 @@ pub fn engine_credentials(c: &WebAccessConfig) -> BTreeSet<String> {
         .collect()
 }
 
-/// Writes the placeholder fields of the needed credentials below `dir`
-/// (`<dir>/<credential>/<field>`, 0640 group `gid`, folders 0750) and removes the folders of
-/// credentials no longer needed. Returns whether anything changed.
+/// Writes the placeholder fields of the needed credentials below `parent/dns`
+/// (`dns/<credential>/<field>`, 0640 root:`gid`, folders 0750) and removes what is no longer
+/// needed. `parent` is rynasd's own `rynas/` folder, already opened and checked (owned by
+/// root): everything below it is reached through descriptors (`openat` with `O_NOFOLLOW`,
+/// `fchown`/`fchmod`, `renameat`, `unlinkat`), so a symlink planted anywhere is never
+/// followed, chmodded, chowned or crossed by a delete (review 2026-11-07, H1). Returns
+/// whether anything changed.
 pub fn write_engine_secrets(
-    dir: &Path,
+    parent: &std::fs::File,
     gid: Option<u32>,
     values: &BTreeMap<String, (DnsProvider, Creds)>,
 ) -> io::Result<bool> {
-    use std::os::unix::fs::PermissionsExt;
+    use rynas_docker::safefs;
+    let owner = gid.map(|g| (0, g));
     let mut changed = false;
-    let mkdir = |p: &Path| -> io::Result<()> {
-        if !p.exists() {
-            std::fs::create_dir_all(p)?;
+    let dns = if values.is_empty() {
+        match safefs::open_dir_at(parent, "dns") {
+            Ok(d) => d,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e),
         }
-        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o750))?;
-        if let Some(g) = gid {
-            std::os::unix::fs::chown(p, Some(0), Some(g))?;
+    } else {
+        let (d, made) = safefs::ensure_dir_at(parent, "dns", 0o750, owner)?;
+        if !made {
+            safefs::set_owner_mode(&d, 0o750, owner)?;
         }
-        Ok(())
+        d
     };
-    if !values.is_empty() {
-        mkdir(dir)?;
-    }
     for (id, (provider, creds)) in values {
-        let d = dir.join(id);
-        mkdir(&d)?;
+        let (d, made) = safefs::ensure_dir_at(&dns, id, 0o750, owner)?;
+        if !made {
+            safefs::set_owner_mode(&d, 0o750, owner)?;
+        }
         let mut keep = BTreeSet::new();
         for spec in rynas_dns::fields(*provider)
             .iter()
@@ -283,28 +303,23 @@ pub fn write_engine_secrets(
                 continue;
             };
             keep.insert(spec.name.to_string());
-            let p = d.join(spec.name);
-            if std::fs::read(&p).is_ok_and(|old| old == v.as_bytes()) {
+            if safefs::read_at(&d, spec.name, 64 << 10).is_ok_and(|old| old == *v) {
                 continue;
             }
-            crate::tls::write_atomic(&p, v.as_bytes(), 0o640, gid)?;
+            safefs::write_at(&d, spec.name, v.as_bytes(), 0o640, owner)?;
             changed = true;
         }
-        for e in std::fs::read_dir(&d)?.flatten() {
-            let n = e.file_name().to_string_lossy().into_owned();
+        for n in safefs::list_at(&d)? {
             if !keep.contains(&n) {
-                std::fs::remove_file(e.path())?;
+                safefs::remove_tree_at(&d, &n)?;
                 changed = true;
             }
         }
     }
-    if let Ok(rd) = std::fs::read_dir(dir) {
-        for e in rd.flatten() {
-            let n = e.file_name().to_string_lossy().into_owned();
-            if !values.contains_key(&n) {
-                std::fs::remove_dir_all(e.path())?;
-                changed = true;
-            }
+    for n in safefs::list_at(&dns)? {
+        if !values.contains_key(&n) {
+            safefs::remove_tree_at(&dns, &n)?;
+            changed = true;
         }
     }
     Ok(changed)
@@ -320,8 +335,110 @@ pub struct Owned {
     pub name: String,
     pub provider: Option<DnsProvider>,
     pub credential: Option<String>,
-    /// `(name, type)`.
-    pub records: Vec<(String, String)>,
+    pub records: Vec<OwnedSet>,
+}
+
+/// One record set rynas wrote and the values it wrote: a set is deleted (or updated
+/// without consent) only while the provider still holds exactly these values.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "OwnedSetRepr")]
+pub struct OwnedSet {
+    pub name: String,
+    pub rtype: String,
+    /// Empty: not known (state written before the values were kept).
+    #[serde(default)]
+    pub values: Vec<String>,
+}
+
+/// The stored forms: `[name, type]` (first W2 files, values unknown) or the full set.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum OwnedSetRepr {
+    Full {
+        name: String,
+        rtype: String,
+        #[serde(default)]
+        values: Vec<String>,
+    },
+    Pair(String, String),
+}
+
+impl From<OwnedSetRepr> for OwnedSet {
+    fn from(r: OwnedSetRepr) -> Self {
+        match r {
+            OwnedSetRepr::Full {
+                name,
+                rtype,
+                values,
+            } => Self {
+                name,
+                rtype,
+                values,
+            },
+            OwnedSetRepr::Pair(name, rtype) => Self {
+                name,
+                rtype,
+                values: Vec::new(),
+            },
+        }
+    }
+}
+
+impl Owned {
+    /// The sets as the planner takes them.
+    pub fn sets(&self) -> Vec<Wanted> {
+        self.records
+            .iter()
+            .filter_map(|s| {
+                Some(Wanted {
+                    name: s.name.clone(),
+                    rtype: Rtype::parse(&s.rtype)?,
+                    values: s.values.clone(),
+                })
+            })
+            .collect()
+    }
+
+    pub fn find(&self, name: &str, rtype: &str) -> Option<&OwnedSet> {
+        self.records
+            .iter()
+            .find(|s| s.name == name && s.rtype == rtype)
+    }
+}
+
+/// What rynas owns after a sync of one domain: the wanted sets written now (with the values
+/// written), sets it owned that are still right (`keep`) or not known (`unknown`, failed
+/// deletes). A set that was there already with the wanted values is not adopted; a
+/// `conflict` drops ownership.
+pub fn owned_after(prev: Option<&Owned>, changes: &[DnsChange]) -> Vec<OwnedSet> {
+    let failed = |c: &DnsChange| c.detail.starts_with("failed");
+    let mut out: Vec<OwnedSet> = Vec::new();
+    for c in changes.iter().filter(|c| c.rtype != "CNAME") {
+        let was = prev.and_then(|p| p.find(&c.name, &c.rtype));
+        let set = match c.action {
+            DnsAction::Create | DnsAction::Update if !failed(c) => Some(OwnedSet {
+                name: c.name.clone(),
+                rtype: c.rtype.clone(),
+                values: c.wanted.clone(),
+            }),
+            DnsAction::Create | DnsAction::Update => was.cloned(),
+            DnsAction::Keep => was.map(|_| OwnedSet {
+                name: c.name.clone(),
+                rtype: c.rtype.clone(),
+                values: c.wanted.clone(),
+            }),
+            DnsAction::Delete if failed(c) => was.cloned(),
+            DnsAction::Unknown => was.cloned(),
+            DnsAction::Delete | DnsAction::Manual | DnsAction::Conflict => None,
+        };
+        if let Some(s) = set
+            && !out.iter().any(|o| o.name == s.name && o.rtype == s.rtype)
+        {
+            out.push(s);
+        }
+    }
+    out.sort_by(|a, b| (&a.name, &a.rtype).cmp(&(&b.name, &b.rtype)));
+    out
 }
 
 /// What rynasd remembers about records: written sets (persisted), last reports and tries.
@@ -486,6 +603,7 @@ mod tests {
     #[test]
     fn engine_secret_files() {
         let dir = tempfile::tempdir().unwrap();
+        let parent = rynas_docker::safefs::open_start(dir.path()).unwrap();
         let d = dir.path().join("dns");
         let mut v = BTreeMap::new();
         v.insert(
@@ -498,15 +616,60 @@ mod tests {
                 ]),
             ),
         );
-        assert!(write_engine_secrets(&d, None, &v).unwrap());
+        assert!(write_engine_secrets(&parent, None, &v).unwrap());
         assert_eq!(
             std::fs::read_to_string(d.join("ac/password")).unwrap(),
             "pw-1"
         );
         assert!(!d.join("ac/username").exists(), "only placeholder fields");
-        assert!(!write_engine_secrets(&d, None, &v).unwrap(), "unchanged");
+        assert!(!write_engine_secrets(&parent, None, &v).unwrap(), "unchanged");
         v.clear();
-        assert!(write_engine_secrets(&d, None, &v).unwrap());
+        assert!(write_engine_secrets(&parent, None, &v).unwrap());
         assert!(!d.join("ac").exists());
+    }
+
+    /// Review 2026-11-07 H1: a `dns` symlink (or links below it) planted by the engine's
+    /// user is never followed: nothing outside is chmodded, written or deleted.
+    #[test]
+    fn engine_secrets_never_follow_planted_links() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let t = tempfile::tempdir().unwrap();
+        let victim = t.path().join("victim");
+        std::fs::create_dir_all(victim.join("etc")).unwrap();
+        std::fs::write(victim.join("etc/passwd"), "root").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let rynas = t.path().join("rynas");
+        std::fs::create_dir(&rynas).unwrap();
+        symlink(&victim, rynas.join("dns")).unwrap();
+        let parent = rynas_docker::safefs::open_start(&rynas).unwrap();
+        // the delete pass (no credentials) and the write pass both refuse the link
+        assert!(write_engine_secrets(&parent, None, &BTreeMap::new()).is_err());
+        let mut v = BTreeMap::new();
+        v.insert(
+            "ac".to_string(),
+            (
+                DnsProvider::Acmedns,
+                Creds::from([("password".to_string(), "pw".to_string())]),
+            ),
+        );
+        assert!(write_engine_secrets(&parent, None, &v).is_err());
+        assert_eq!(std::fs::read_to_string(victim.join("etc/passwd")).unwrap(), "root");
+        assert_eq!(
+            std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert!(!victim.join("ac").exists());
+        // a real `dns` folder with links inside: the links go, their targets stay
+        std::fs::remove_file(rynas.join("dns")).unwrap();
+        std::fs::create_dir(rynas.join("dns")).unwrap();
+        symlink(&victim, rynas.join("dns/old")).unwrap();
+        std::fs::create_dir(rynas.join("dns/ac")).unwrap();
+        symlink(victim.join("etc"), rynas.join("dns/ac/password")).unwrap();
+        symlink(&victim, rynas.join("dns/ac/stray")).unwrap();
+        assert!(write_engine_secrets(&parent, None, &v).unwrap());
+        assert_eq!(std::fs::read_to_string(rynas.join("dns/ac/password")).unwrap(), "pw");
+        assert!(!rynas.join("dns/old").exists());
+        assert!(!rynas.join("dns/ac/stray").exists());
+        assert_eq!(std::fs::read_to_string(victim.join("etc/passwd")).unwrap(), "root");
     }
 }

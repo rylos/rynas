@@ -132,6 +132,8 @@ struct MemDns {
     /// Creds each client was built with.
     creds: Mutex<Vec<Creds>>,
     fail: Mutex<bool>,
+    /// Each read waits this long (a slow provider).
+    slow: Mutex<Option<Duration>>,
 }
 
 struct MemDnsRef(Arc<MemDns>);
@@ -149,6 +151,10 @@ impl DnsApi for MemDnsRef {
         }
     }
     fn get(&self, _z: &Zone, n: &str, t: Rtype) -> Result<Option<RecordSet>, DnsError> {
+        let slow = *self.0.slow.lock().unwrap();
+        if let Some(d) = slow {
+            std::thread::sleep(d);
+        }
         Ok(self
             .0
             .sets
@@ -300,6 +306,7 @@ fn env_with(confirm: Duration, installed: bool) -> Env {
     let engine_log = Arc::new(Mutex::new(String::new()));
     let l2 = engine_log.clone();
     svc.engine_log = Box::new(move || l2.lock().unwrap().clone());
+    svc.engine_log_ttl = Duration::ZERO;
     let svc = Arc::new(svc);
     let system = Arc::new(MemorySystem::new("nas"));
     let domains: Vec<Arc<dyn Applier>> = vec![Arc::new(WebAccessDomain { svc: svc.clone() })];
@@ -1271,6 +1278,29 @@ async fn credentials_are_sealed_and_never_returned() {
     assert!(!String::from_utf8_lossy(&b).contains(CF_TOKEN));
     let (_, b) = call(&app, "admin", "POST", "/v1/web-access/plan", None).await;
     assert!(!String::from_utf8_lossy(&b).contains(CF_TOKEN));
+    // revisions never carry the envelope either (review 2026-11-07, L8)
+    let sealed = serde_json::from_value::<WebAccessConfig>(
+        e.config().applied(WEB_ACCESS_KEY).unwrap().unwrap(),
+    )
+    .unwrap()
+    .credentials[0]
+        .sealed
+        .clone()
+        .unwrap();
+    let (_, b) = call(&app, "admin", "GET", "/v1/config/revisions", None).await;
+    let revs: Vec<rynas_api_types::RevisionSummary> = serde_json::from_slice(&b).unwrap();
+    let (s, b) = call(
+        &app,
+        "admin",
+        "GET",
+        &format!("/v1/config/revisions/{}", revs[0].id),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let text = String::from_utf8_lossy(&b);
+    assert!(text.contains("credentials"), "{text}");
+    assert!(!text.contains(&sealed), "{text}");
     // the provider client got the value
     assert!(
         e.dns
@@ -1426,6 +1456,147 @@ fn records_are_planned_written_followed_and_removed() {
     );
     e.apply(&c).unwrap();
     assert_eq!(sets(&e), ["mail.example.com A 198.51.100.1"]);
+}
+
+/// Review 2026-11-07 H2: a record set rynas did not write is a `conflict` (never
+/// overwritten, adopted or deleted) until it is taken over; one edited after rynas wrote it
+/// is not deleted either.
+#[test]
+fn foreign_records_are_never_overwritten_or_deleted() {
+    let e = env();
+    // the administrator's DDNS record on the name the domain wants
+    e.dns.sets.lock().unwrap().insert(
+        ("nas.example.com".into(), Rtype::A),
+        vec!["203.0.113.5".into()],
+    );
+    let mut c = one_domain();
+    e.svc.seal_input(&mut c, &[]).unwrap();
+    let c = model::validate(c, &[8080, 8443]).unwrap();
+    let plan = e.svc.plan(&c, &WebAccessConfig::default());
+    let conflict = plan
+        .dns_changes
+        .iter()
+        .find(|x| x.name == "nas.example.com")
+        .unwrap();
+    assert_eq!(conflict.action, DnsAction::Conflict);
+    assert_eq!(conflict.current, ["203.0.113.5"]);
+    e.apply(&c).unwrap();
+    assert_eq!(
+        sets(&e),
+        [
+            "*.nas.example.com A 192.0.2.10",
+            "nas.example.com A 203.0.113.5"
+        ],
+        "the conflict is left alone"
+    );
+    let st = e.svc.state("admin").unwrap();
+    assert!(
+        st.domains[0]
+            .problems
+            .contains(&"records_conflict".to_string()),
+        "{:?}",
+        st.domains[0].problems
+    );
+    // the wildcard rynas wrote is then edited by hand
+    e.dns.sets.lock().unwrap().insert(
+        ("*.nas.example.com".into(), Rtype::A),
+        vec!["198.51.100.9".into()],
+    );
+    // the domain removed: nothing rynas did not write (or that changed since) is deleted
+    let mut gone = e.applied();
+    gone.domains.clear();
+    e.apply(&gone).unwrap();
+    assert!(e.dns.calls.lock().unwrap().iter().all(|c| !c.starts_with("delete")));
+    assert_eq!(
+        sets(&e),
+        [
+            "*.nas.example.com A 198.51.100.9",
+            "nas.example.com A 203.0.113.5"
+        ]
+    );
+    let owned =
+        std::fs::read_to_string(e.dir.path().join("state/web-access/dns-records.json")).unwrap();
+    assert!(!owned.contains("nas.example.com"), "ownership dropped: {owned}");
+
+    // consent: the name taken over is replaced, then owned (and deleted with the domain)
+    let mut c = one_domain();
+    c.domains[0].take_over = vec!["NAS.example.com".into()];
+    e.apply(&c).unwrap();
+    assert!(sets(&e).contains(&"nas.example.com A 192.0.2.10".to_string()));
+    let mut gone = e.applied();
+    assert_eq!(gone.domains[0].take_over, ["nas.example.com"]);
+    gone.domains.clear();
+    e.apply(&gone).unwrap();
+    assert!(!sets(&e).iter().any(|s| s.starts_with("nas.example.com")));
+    // a take-over outside the domain is refused
+    let mut bad = one_domain();
+    bad.domains[0].take_over = vec!["mail.example.com".into()];
+    assert_eq!(
+        model::validate(bad, &[8080, 8443])
+            .unwrap_err()
+            .field
+            .as_deref(),
+        Some("domains[0].take_over")
+    );
+}
+
+/// Review 2026-11-07 H1: a `rynas/` planted by the engine's user (here a symlink out of its
+/// folder) is moved aside and replaced; nothing is written through it.
+#[test]
+fn planted_rynas_folder_is_moved_aside() {
+    let e = env();
+    let victim = e.dir.path().join("victim");
+    std::fs::create_dir_all(&victim).unwrap();
+    std::fs::write(victim.join("keep"), "x").unwrap();
+    let state = e.file("/var/lib/rynas-caddy");
+    std::fs::create_dir_all(&state).unwrap();
+    std::os::unix::fs::symlink(&victim, state.join("rynas")).unwrap();
+    e.apply(&one_domain()).unwrap();
+    let meta = std::fs::symlink_metadata(state.join("rynas")).unwrap();
+    assert!(meta.is_dir() && !meta.is_symlink());
+    assert_eq!(
+        std::fs::read_to_string(state.join("rynas/dns/cf/api_token")).unwrap(),
+        CF_TOKEN
+    );
+    let names: Vec<String> = std::fs::read_dir(&victim)
+        .unwrap()
+        .map(|d| d.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["keep"], "nothing written through the link");
+    assert!(
+        std::fs::read_dir(&state)
+            .unwrap()
+            .any(|d| d.unwrap().file_name().to_string_lossy().starts_with("rynas.untrusted-"))
+    );
+}
+
+/// Review 2026-11-07 M1: the pages answer while a record sync waits on a slow provider.
+#[tokio::test]
+async fn pages_answer_during_a_slow_record_sync() {
+    let e = Arc::new(env());
+    let app = e.app();
+    let e2 = e.clone();
+    tokio::task::spawn_blocking(move || e2.apply(&one_domain()).unwrap())
+        .await
+        .unwrap();
+    *e.dns.slow.lock().unwrap() = Some(Duration::from_secs(3));
+    let e3 = e.clone();
+    let sync = tokio::task::spawn_blocking(move || {
+        let c = e3.applied();
+        e3.svc
+            .sync_records(&c, &c, &facts(), Some("home"), &|_| {})
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let t = std::time::Instant::now();
+    let (s, _) = call(&app, "admin", "GET", "/v1/web-access", None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(
+        t.elapsed() < Duration::from_secs(1),
+        "GET waited {:?}",
+        t.elapsed()
+    );
+    *e.dns.slow.lock().unwrap() = None;
+    assert!(sync.await.unwrap()[0].ok);
 }
 
 #[test]

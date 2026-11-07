@@ -61,6 +61,20 @@ pub trait ShareHost: Send + Sync {
     fn unit_started_ms(&self, _unit: &str) -> Option<i64> {
         None
     }
+    /// SMB sessions connected now (`smbstatus -b -j`); `None` when unknown.
+    fn smb_sessions(&self) -> Option<usize> {
+        None
+    }
+}
+
+/// The number of sessions in `smbstatus -b -j` output (`None`: unreadable).
+pub fn parse_smb_session_count(json: &str) -> Option<usize> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    Some(
+        v.get("sessions")
+            .and_then(serde_json::Value::as_object)
+            .map_or(0, |s| s.len()),
+    )
 }
 
 /// `ActiveEnterTimestamp=@<seconds>` of `systemctl show --timestamp=unix` in milliseconds
@@ -291,6 +305,16 @@ impl ShareHost for HostShares {
         parse_active_enter(&o.stdout)
     }
 
+    fn smb_sessions(&self) -> Option<usize> {
+        let o = Cmd::new("smbstatus")
+            .args(["-b", "-j"])
+            .env_clear()
+            .timeout(CMD_TIMEOUT)
+            .run_blocking()
+            .ok()?;
+        parse_smb_session_count(&o.stdout)
+    }
+
     fn unit_installed(&self, unit: &str) -> bool {
         [
             "/usr/lib/systemd/system",
@@ -425,6 +449,8 @@ pub struct MemorySharesState {
     pub missing_units: Vec<String>,
     /// `unit_started_ms` answers (ms).
     pub unit_started: BTreeMap<String, i64>,
+    /// `smb_sessions` answer.
+    pub smb_sessions: Option<usize>,
     /// Snapshot names per directory.
     pub snapshots: BTreeMap<String, Vec<String>>,
     /// Sizes reported by `tree_size`.
@@ -503,6 +529,10 @@ impl ShareHost for MemoryShares {
 
     fn unit_started_ms(&self, unit: &str) -> Option<i64> {
         self.state().unit_started.get(unit).copied()
+    }
+
+    fn smb_sessions(&self) -> Option<usize> {
+        self.state().smb_sessions
     }
 
     fn list_dir(&self, path: &str) -> Vec<DirEntryInfo> {

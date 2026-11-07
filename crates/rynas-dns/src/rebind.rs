@@ -77,6 +77,9 @@ pub fn verdict(
         // some routers answer 0.0.0.0 / :: instead of dropping
         Answer::Addrs(a) if a.iter().all(|x| x.is_unspecified()) => Verdict::RebindBlocked,
         Answer::Addrs(a) => Verdict::LanOverride(a.clone()),
+        // SERVFAIL and other codes are a broken resolver (DNSSEC, upstream), not rebind
+        // protection (review 2026-11-07, L1)
+        Answer::ServFail | Answer::Other(_) => Verdict::LanUnreachable,
         _ if expected.iter().any(is_private) => Verdict::RebindBlocked,
         _ => Verdict::LanOverride(Vec::new()),
     }
@@ -130,6 +133,12 @@ mod tests {
             verdict(&lan_ip, &good, &Err("x".into())),
             Verdict::LanUnreachable
         );
+        for broken in [Answer::ServFail, Answer::Other(4)] {
+            assert_eq!(
+                verdict(&lan_ip, &good, &Ok(broken)),
+                Verdict::LanUnreachable
+            );
+        }
         // a public address missing on the LAN is not rebind protection
         let pub_ip = vec![ip("203.0.113.5")];
         assert_eq!(

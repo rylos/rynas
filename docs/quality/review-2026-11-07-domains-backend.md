@@ -171,3 +171,72 @@ MEMORY_PLACEHOLDER
    Avahi's owner (M5), using a private dbus-daemon in the test.
 5. The Docker install task cancelled during `apt`: `systemctl stop rynas-apt-docker-*` is run,
    and `repair_cmds` include `--no-remove` (M2, M3), using the command recorder.
+
+## Fix notes (2026-11-07)
+
+- **H1 fixed.** `safefs` gained `list_at` (entries through `openat(dir, ".")`),
+  `remove_tree_at` (`unlinkat`, folders opened `O_DIRECTORY|O_NOFOLLOW` one at a time, never
+  crosses a symlink, depth-capped) and `rename_at`. `write_engine_secrets` now takes the open
+  `rynas/` descriptor and does everything below it with `ensure_dir_at`/`set_owner_mode`/
+  `read_at`/`write_at`/`remove_tree_at`. `rynas_dir` moves an existing `rynas` aside
+  (`rynas.untrusted-<ns>`) when it is a symlink, not a folder, or not owned by rynasd's uid,
+  then makes a fresh one; the cleanup pass with no credentials only opens an existing,
+  trusted `rynas/`. Tests: `domains::engine_secrets_never_follow_planted_links` (planted
+  `dns -> <tmp>` and links inside), `safefs::tree_removal_never_crosses_symlinks`,
+  `web_access::planted_rynas_folder_is_moved_aside`. A uid-mismatch case needs root and is
+  not tested (the symlink case goes through the same branch).
+- **H2 fixed.** New `DnsAction::Conflict` and `WebDomain::take_over` (API change, §5.4).
+  `Owned` stores the values written (`OwnedSet {name, rtype, values}`; the older `[name, type]`
+  form still loads, with values unknown → never deleted). `plan()` takes the owned sets and
+  `take_over`: a foreign set with other values is `conflict`; an owned one is updated only
+  while it still holds what rynas wrote; a pre-existing `keep` is not adopted; an owned set
+  no longer wanted is deleted only when the provider still holds exactly the written values,
+  otherwise `conflict` (left in place, ownership dropped). DuckDNS: plan `detail` and the
+  provider's `token_hint` say plainly that its one record is overwritten with the LAN
+  address; a stale DuckDNS record is left as is (cannot be read, so it is not deleted).
+  `DomainView.problems` gains `records_conflict`. Tests:
+  `plan::foreign_records_are_conflicts`, `web_access::foreign_records_are_never_overwritten_or_deleted`.
+- **M1 fixed.** `sync_records` holds a separate `dns_sync` guard for its whole run and takes
+  `dns_mem` only to copy `owned` and to merge (only syncs change it). `domain_views` copies
+  the reports and opens credentials outside the lock. Test:
+  `web_access::pages_answer_during_a_slow_record_sync` (3 s per read, GET < 1 s).
+- **M2 fixed.** `--no-remove`, and `apt-get -s install -f` logged before the fix. The repair
+  already ran only for Docker's or the engine's packages (`install_facts` queries only those),
+  so that part needed no change.
+- **M3 fixed.** `install::on_abort` gives `systemctl stop <unit>.service` for a transient
+  `rynas-apt-docker-*` unit; `DockerSvc::run` runs it on `Cancelled`/`Timeout`. Every apt call
+  passes `-o DPkg::Lock::Timeout=120`; units carry `RuntimeMaxSec=1800`. The cancel path itself
+  is not driven end to end (the command recorder returns at once); `on_abort` and the
+  `--no-remove` line are tested in `install::repair_and_resume` and `tests/docker.rs`.
+- **M4 fixed (redaction) / documented.** Engine load errors are stored and logged with every
+  secret credential value replaced by `***`. Placeholder support upstream was not re-checked
+  (no network in this pass): DigitalOcean and RFC 2136 are documented in §5.4 as "secret in
+  the engine configuration".
+- **M5 fixed.** `.sender(AVAHI)` on both rules (the bus resolves the owner; zbus skips
+  well-known senders client-side), and every message's sender is compared with the owner
+  from `GetNameOwner`/`NameOwnerChanged` (`from_owner`, unit-tested). The private
+  dbus-daemon test was not added (no dbus-daemon is assumed on CI hosts).
+- **M6 fixed.** `rynas_dns::cache`: zone lookups 10 min, record reads 30 s for plans only (a
+  sync that writes reads fresh, so conflict checks never use an old value), every write drops
+  the credential's reads; keyed by provider, credential id and a hash of the envelope.
+  `Http::send` waits once for a `Retry-After` ≤ 10 s, else `DnsError::RateLimited` (the
+  10-minute record retry backs off). Tests: `cache::plans_share_reads_syncs_read_fresh`,
+  `http::throttling_waits_once_then_gives_rate_limited`.
+- **M7 fixed.** `ShareHost::smb_sessions` (`smbstatus -b -j`); with sessions the one-time
+  restart is deferred (reload, log line) to a later apply. Any session counts, not only those
+  with open files: a connected Time Machine client holds a session between writes too.
+- **L1 fixed.** `ServFail`/`Other` → `LanUnreachable`, with a detail naming SERVFAIL.
+- **L2 not changed.** The notify engine keeps per-key state in SQLite: a `firing` with the same
+  key and severity while open only bumps the count, and `resolved` is ignored when nothing
+  fires, so a restart does not deliver ongoing problems again. The 15-minute "failed" timer
+  restarting after a rynasd restart only delays that status; not worth a state file.
+- **L3 fixed.** Parsed engine errors cached 60 s (`engine_log_ttl`; the raw log is not kept).
+- **L4 fixed.** `printf` builtin + `mosquitto_passwd -U`.
+- **L5 fixed.** The 80/443 rule applies to host-network apps too (catalogue test added).
+- **L6 fixed (partly).** `zeroize` wipes opened values after a record client is built and in
+  the new `creds_open` check used by `domain_views`. `Creds` stays a plain map (the render
+  path and `SecretBox::open_sealed` still hold plain copies briefly).
+- **L7 fixed (note).** The AdGuard Home description warns about an open resolver; no
+  `DNS_BIND` default (the LAN address is not known when the catalogue renders).
+- **L8 fixed.** `GET /config/revisions/{n}` and `GET /config/pending?detail=1` replace every
+  `sealed` value with `***` (test in `credentials_are_sealed_and_never_returned`).

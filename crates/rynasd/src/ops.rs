@@ -220,8 +220,12 @@ async fn pending(
     let (ops, user) = (ops(&st)?, user(&h)?);
     let detail = matches!(q.detail.as_deref(), Some("1" | "true"));
     let mut p = blocking(&ops, move |c| c.pending(&user)).await?;
-    if !detail {
-        for c in &mut p.changes {
+    for c in &mut p.changes {
+        if detail {
+            c.base.as_mut().map(scrub_sealed);
+            c.value.as_mut().map(scrub_sealed);
+            scrub_diff(&mut c.diff);
+        } else {
             c.base = None;
             c.value = None;
             c.diff = Vec::new();
@@ -374,7 +378,43 @@ fn rev_id(s: &str) -> Res<u64> {
 
 async fn revision(State(st): State<OpsState>, Path(n): Path<String>) -> Res<Json<RevisionDetail>> {
     let (ops, n) = (ops(&st)?, rev_id(&n)?);
-    Ok(Json(blocking(&ops, move |c| c.revision(n)).await?))
+    let mut r = blocking(&ops, move |c| c.revision(n)).await?;
+    scrub_diff(&mut r.diff);
+    Ok(Json(r))
+}
+
+/// Sealed credential envelopes (`sealed`, web access W2) never leave rynasd, not even in a
+/// diff (review 2026-11-07, L8): every `sealed` field below `v` becomes `"***"`.
+pub fn scrub_sealed(v: &mut Value) {
+    match v {
+        Value::Object(m) => {
+            for (k, x) in m.iter_mut() {
+                if k == "sealed" {
+                    if !x.is_null() {
+                        *x = Value::String("***".into());
+                    }
+                } else {
+                    scrub_sealed(x);
+                }
+            }
+        }
+        Value::Array(a) => a.iter_mut().for_each(scrub_sealed),
+        _ => {}
+    }
+}
+
+/// [`scrub_sealed`] over diff entries, and the values of a diff entry naming `sealed`.
+pub fn scrub_diff(diff: &mut [rynas_api_types::DiffEntry]) {
+    for d in diff {
+        let own = d.path.ends_with(".sealed");
+        for v in [d.old.as_mut(), d.new.as_mut()].into_iter().flatten() {
+            if own {
+                *v = Value::String("***".into());
+            } else {
+                scrub_sealed(v);
+            }
+        }
+    }
 }
 
 async fn restore(

@@ -87,6 +87,15 @@ fn lint_checks_reverse_proxies_and_devices() {
     fs::write(dst.join("app.toml"), t).unwrap();
     let text = CatalogApp::load(&dst).unwrap_err().to_string();
     assert!(text.contains("belongs to the web access proxy"), "{text}");
+    // nor a host-network app (review 2026-11-07, L5)
+    let dst = tmp.path().join("home-assistant");
+    copy_dir(&apps_dir().join("home-assistant"), &dst);
+    let t = fs::read_to_string(dst.join("app.toml"))
+        .unwrap()
+        .replace("container = 8123\ndefault = 8123", "container = 80\ndefault = 80");
+    fs::write(dst.join("app.toml"), t).unwrap();
+    let text = CatalogApp::load(&dst).unwrap_err().to_string();
+    assert!(text.contains("belongs to the web access proxy"), "{text}");
 
     // a reverse proxy's 80/443 are fixed
     let dst = tmp.path().join("nginx-proxy-manager");

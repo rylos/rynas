@@ -249,7 +249,7 @@ Ranges (400 `invalid_value` with the field):
 
 | Type | What it does |
 |---|---|
-| `docker.install` | Every step can run again, so running the install after any failure finishes the job. First, with `install_incomplete`: `dpkg --configure -a --force-confdef --force-confold`, then `apt-get install -f -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold`, both through the same `systemd-run --wait --pipe` wrapper as every apt call (outside rynasd's sandbox); when only another engine's packages (docker.io…) were half-done, the task stops there and adopts it. Then apt update, ca-certificates and curl, the key downloaded to a staging file and checked against Docker's published fingerprint `9DC8 5822 9FC7 DD38 854A E2D8 8D81 803C 0EBF CD88` (OpenPGP v4, computed by rynasd; another key fails the task and never reaches `/etc/apt/keyrings`), then written to `/etc/apt/keyrings/docker.asc` (0644; a keyring that already holds that key is kept, no download), `/etc/apt/sources.list.d/docker.sources` (deb822, signed-by), apt update, the pin `/etc/apt/preferences.d/rynas-docker` (`Pin: version 5:<major>.*`, priority 1001, major = the one an earlier attempt pinned, else apt's candidate). With `volume`, the apply of `docker` before the packages, so the engine starts on the volume. Then `apt-get install -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin` (apt skips what is installed), the system user and group `docker-apps` (only what is missing; an account still missing afterwards fails the task), and `systemctl enable --now containerd.service docker.service` |
+| `docker.install` | Every step can run again, so running the install after any failure finishes the job. First, with `install_incomplete` (only Docker's or the engine's own packages count): `dpkg --configure -a --force-confdef --force-confold`, then `apt-get -s install -f` (logged, what the fix would do), then `apt-get install -f -y --no-remove -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold` (apt aborts rather than remove any package), all but the dry run through the same `systemd-run --wait --pipe` wrapper as every apt call (outside rynasd's sandbox). Every apt call waits up to 120 s for the dpkg lock (`-o DPkg::Lock::Timeout=120`), its transient unit carries `RuntimeMaxSec=1800` (the step's timeout), and a cancelled or timed out step also runs `systemctl stop <unit>` so apt never keeps running behind the task; when only another engine's packages (docker.io…) were half-done, the task stops there and adopts it. Then apt update, ca-certificates and curl, the key downloaded to a staging file and checked against Docker's published fingerprint `9DC8 5822 9FC7 DD38 854A E2D8 8D81 803C 0EBF CD88` (OpenPGP v4, computed by rynasd; another key fails the task and never reaches `/etc/apt/keyrings`), then written to `/etc/apt/keyrings/docker.asc` (0644; a keyring that already holds that key is kept, no download), `/etc/apt/sources.list.d/docker.sources` (deb822, signed-by), apt update, the pin `/etc/apt/preferences.d/rynas-docker` (`Pin: version 5:<major>.*`, priority 1001, major = the one an earlier attempt pinned, else apt's candidate). With `volume`, the apply of `docker` before the packages, so the engine starts on the volume. Then `apt-get install -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin` (apt skips what is installed), the system user and group `docker-apps` (only what is missing; an account still missing afterwards fails the task), and `systemctl enable --now containerd.service docker.service` |
 | `docker.migrate` | refuses while containers run, when the volume is not in the mount table, or when `du -sx` of the old folders (+10 %) exceeds the volume's free space (all before anything stops); stops docker.socket, docker and containerd; creates the subvolumes; `cp -a --reflink=auto` of the old data-root and containerd root; applies `docker` with the new volume; starts the engine. Once stopped, the engine is started again on **any** failure (on its old folders, since the configuration only switches after a complete copy); the log says where the partial copy is. The old folders are kept (the log says where) |
 | `docker.container.start\|stop\|restart` | the engine call (stop and restart give 30 s of grace) |
 | `docker.stack.up` | `docker compose config`; the missing bind folders below the volume are created, owned by `docker-apps` (binds outside the volume are logged as warnings); then `docker compose -p <stack> --project-directory <dir> -f <dir>/<file> up --detach --wait=false` (30 min) |
@@ -956,7 +956,9 @@ the administrator role (reads too); rynas-web forwards them unchanged.
 - rynas writes the LAN records `*.<domain>` and `<domain>` A (AAAA with `lan_ipv6`) = the NAS's
   LAN address through the provider's API, with the same token, and keeps them current when
   the address changes. Every LAN device then resolves `<app>.<domain>` with a trusted
-  certificate, mobile apps included. Records rynas did not write are never touched.
+  certificate, mobile apps included. Records rynas did not write are never changed or
+  deleted without consent: they show as `conflict` until the administrator takes the name
+  over (`take_over`).
 - Every route gets `<label>.<domain>` next to its local name; the interface gets `<domain>`
   (per domain, `ui`). The app's Open button prefers the domain name.
 - The domain checklist tells DNS rebind protection (the router drops public answers that
@@ -969,7 +971,8 @@ the administrator role (reads too); rynas-web forwards them unchanged.
 ```json
 {"domains": [{"id": "home", "name": "nas.example.com", "provider": "cloudflare",
               "credential": "cf", "challenge": "dns01", "wildcard": true,
-              "lan_record": true, "lan_ipv6": false, "ui": true, "enabled": true}],
+              "lan_record": true, "lan_ipv6": false, "ui": true, "enabled": true,
+              "take_over": []}],
  "credentials": [{"id": "cf", "provider": "cloudflare", "label": "token for example.com",
                   "secrets": {"api_token": "…"}}],
  "acme": {"email": "admin@example.com", "staging": false, "profile": "tlsserver"},
@@ -984,7 +987,13 @@ the administrator role (reads too); rynas-web forwards them unchanged.
 - `provider`: `cloudflare`, `desec`, `hetzner`, `porkbun`, `ovh`, `duckdns`, `gandi`,
   `route53`, `digitalocean`, `rfc2136`, `acmedns`. Required except for `http01` without
   `lan_record`. `acmedns` only with `cname_delegation`. DuckDNS domains are `<x>.duckdns.org`
-  (its one record covers every name below).
+  (its one record covers every name below). **DuckDNS has no read API:** rynas sets its one
+  record to the NAS's LAN address on every sync, replacing whatever it held (a public
+  address kept by a DDNS updater too); the form and every plan say so (`update` with that
+  `detail`), and with the domain removed the record is left as it is (`conflict`).
+- `take_over`: record names (`<domain>` or below, `*.<domain>` allowed) whose existing values
+  rynas may replace although it did not write them. Without it such a set is a `conflict`
+  and stays as it is. Names are lowercased; duplicates dropped.
 - **Credentials are write-only.** A PUT that carries `secrets` replaces the values; a PUT
   without `secrets` keeps the stored ones (send back what GET gave). Answers carry `fields`
   (the names stored), never `secrets` or `sealed`. Values are sealed at once with the
@@ -999,7 +1008,8 @@ the administrator role (reads too); rynas-web forwards them unchanged.
   (`domains[i].name`); provider and credential present and matching (`domains[i].provider`,
   `domains[i].credential`); `delegate_to` for delegation (`domains[i].delegate_to`); the
   credential's values complete and known (`credentials[i].secrets.<field>`; a new credential
-  without values: `credentials[i].secrets`); `acme.email` an address, `acme.profile`
+  without values: `credentials[i].secrets`); `take_over` names of the domain
+  (`domains[i].take_over`); `acme.email` an address, `acme.profile`
   `[a-z0-9-]` ≤ 32. Names are lowercased and lose a final dot.
 - Minimum-scope tokens (shown under the form, `DnsProviderInfo.token_hint`): Cloudflare an API
   token with Zone → DNS → Edit on the one zone (never the global key); deSEC a token whose
@@ -1029,13 +1039,17 @@ No new error codes (`invalid_value`, `not_found`, `forbidden`, `backend_unavaila
 - **`DnsChange`** {domain, name, rtype `A|AAAA|CNAME`, action, current [], wanted [], ttl,
   detail}; `action` `keep` · `create` · `update` · `delete` · `manual` (the administrator adds
   it: delegation, a provider without a rynas client) · `unknown` (the provider could not be
-  read; `detail` says why). After a write, a failed change keeps its action and `detail`
-  starts with `failed: `. TTL: 300 or the zone's minimum (deSEC 3600, Porkbun 600).
+  read; `detail` says why) · `conflict` (a set rynas did not write, or one changed since rynas
+  wrote it, holds other values: nothing is written; with `wanted` it is written once its name
+  is in `take_over`, without `wanted` it is a set rynas no longer wants, left in place and no
+  longer managed). After a write, a failed change keeps its action and `detail` starts with
+  `failed: `. TTL: 300 or the zone's minimum (deSEC 3600, Porkbun 600).
 - **`DnsSyncReport`** {domain, changes, ok, at_ms}: the last sync per domain, in
   `DomainView.records`.
 - **`DomainView`** {id, name, enabled, certificate_names, ui_urls, records?, problems};
   problems: `credential_missing` (no stored values, or they cannot be decrypted),
-  `records_failed`, `records_manual`, `no_lan_address`, `staging`.
+  `records_failed`, `records_manual`, `records_conflict` (a wanted set rynas did not write
+  holds other values: take it over or fix it at the provider), `no_lan_address`, `staging`.
 - **`RouteView.problems`** adds `domain_name_too_long`; `names`/`urls` list the domain names
   after the local one.
 - **Domain checklist** (`RouteDiagnostics.checks`, in order):
@@ -1093,7 +1107,11 @@ rynas-caddy 2.11.9 + 11 DNS modules (`build.sh --dns --validate`, 2026-11-07):
   (0640 root:rynas-caddy, folders 0750) before each load and removes the ones no longer used.
   The JSON, `last-good.json` and `GET /config/` hold no secret. Fields the module does not
   replace (acme-dns username/subdomain/server URL, RFC 2136 server and key name,
-  DigitalOcean's token, not checked in its source) are written as values.
+  DigitalOcean's token, not checked in its source) are written as values. **DigitalOcean
+  and RFC 2136 therefore keep their secret (`auth_token`, the TSIG `key`) in the engine
+  configuration**: in each load body and in `last-good.json` (0640 root:rynas-caddy, readable
+  by the engine, which holds the value anyway). An engine error that echoes the
+  configuration is stored and logged with every secret value replaced by `***`.
 - A changed secret with an unchanged JSON forces a reload (`Cache-Control: must-revalidate`).
 - External mode renders `null`: no ACME either. The LAN records are written in every mode
   (they point to the NAS, useful for an external proxy too).
@@ -1104,11 +1122,20 @@ rynas-caddy 2.11.9 + 11 DNS modules (`build.sh --dns --validate`, 2026-11-07):
   per domain, plan (read the provider) then write `create`/`update`/`delete`. Failures are
   logged, reported in the domain view, never fail the apply, and are tried again after 10
   minutes or on the next apply; "Write records" runs one domain now.
-- rynasd remembers the record sets it wrote (`<state>/web-access/dns-records.json`) and
-  deletes only those: when the domain is removed or disabled, `lan_record` is turned off, a
-  per-name record is no longer wanted, or the provider changes (deleted through the old
-  credential). A record rynas did not write is overwritten only when it is one of the
-  wanted names (the plan shows `update` with its current value) and never deleted.
+- rynasd remembers the record sets it wrote **with the values it wrote**
+  (`<state>/web-access/dns-records.json`, 0600). A wanted set is created when missing, kept
+  when it already holds the wanted values (not adopted: rynas does not own it), updated when
+  rynas wrote it and it still holds what rynas wrote, and otherwise a `conflict` until its
+  name is in `take_over`. A set rynas owns is deleted when the domain is removed or disabled,
+  `lan_record` is turned off, a per-name record is no longer wanted, or the provider changes
+  (through the old credential) — **only while the provider still holds exactly the values
+  rynas wrote**; a set edited since is left in place, reported as `conflict` and no longer
+  owned. A record rynas did not write is never deleted.
+- The record state lock is never held across a provider call: syncs run one at a time
+  under their own guard, so `GET /web-access` and the checklist never wait on a slow
+  provider. Provider reads are cached (zone lookups 10 minutes, record sets 30 s, cleared by
+  every write) and an HTTP 429 is retried once after `Retry-After` (≤ 10 s), else reported as
+  rate limited and tried again with the 10-minute retry.
 - `--dry-system` never calls a provider (the plan shows `unknown`). Tests use fakes only.
 
 #### Development
@@ -1124,11 +1151,11 @@ Closed sets:
 - `DnsProvider` (names as brands: Cloudflare, deSEC, Hetzner, Porkbun, OVHcloud, DuckDNS,
   Gandi, Amazon Route 53, DigitalOcean, RFC 2136, acme-dns);
 - `ChallengeKind`: `dns01`, `http01`, `cname_delegation`;
-- `DnsAction`: `keep`, `create`, `update`, `delete`, `manual`, `unknown`;
+- `DnsAction`: `keep`, `create`, `update`, `delete`, `manual`, `unknown`, `conflict`;
 - `CertKind`: `local_ca`, `interface`, `proxy_local`, `acme`;
 - `CertStatus`: `ok`, `expires_soon`, `expired`, `renewal_overdue`, `pending`, `failed`;
 - domain problems: `credential_missing`, `records_failed`, `records_manual`,
-  `no_lan_address`, `staging`; route problem `domain_name_too_long`;
+  `records_conflict`, `no_lan_address`, `staging`; route problem `domain_name_too_long`;
 - check ids: `dns_record`, `dns_nas`, `dns_public`, `rebind`, `certificate`, `renewal`,
   `hairpin`, `domain_dns`, `domain_certificate`;
 - notification codes `nev.web_access.cert_*` (table above) with `{name}`;
@@ -1351,7 +1378,7 @@ skips, digests and sources in `../research/app-catalog-format.md` § 4.
 - **Install without `docker compose config` first:** the validation only fails at `up`. Add a validation step that is read-only and safe under `--dry-system`.
 - **Per-install volume choice:** apps always go on the Docker volume today. Per-folder placement exists, for example a database on SSD.
 - **Deploy on the test NAS (2026-11-07): SMB announced twice — fixed in W2.** avahi logged `Failed to add service 'synodeb' of type '_device-info._tcp' … (rynas-smb.service): Local name collision`: Samba still announced itself as `SYNODEB` with `model=MacSamba` although `smb.conf` had `multicast dns register = no`. Cause: smbd reads that parameter only when it starts (`source3/smbd/server.c`, samba-4.22.0: `avahi_start_register()` runs once inside `if (lp_multicast_dns_register() && dns_port != 0)`, and it registers `_smb._tcp` and `_device-info._tcp` with `model=` from `fruit:model`, default `MacSamba`); rynas only reloaded the smbd that was started under the previous configuration. Fix (`crates/rynas-services`):
-  - the shares apply restarts smbd once when the running smbd started before rynas's configuration turned the announcement off (marker `/var/lib/rynas/smbd-mdns-off` with that time, compared with systemd's `ActiveEnterTimestamp`); later applies reload as before, and a boot never restarts it;
+  - the shares apply restarts smbd once when the running smbd started before rynas's configuration turned the announcement off (marker `/var/lib/rynas/smbd-mdns-off` with that time, compared with systemd's `ActiveEnterTimestamp`), but only while no SMB client is connected (`smbstatus -b -j`): with sessions it reloads, logs "smbd restart deferred: N clients connected" and a later apply restarts it; later applies reload as before, and a boot never restarts it;
   - `fruit:model` and the `_device-info` record of `rynas-smb.service` carry the same model (`RackMac`), so macOS shows one icon whichever it reads.
   Single announcement: rynas's service file. Sources: https://github.com/samba-team/samba/blob/samba-4.22.0/source3/smbd/avahi_register.c, https://github.com/samba-team/samba/blob/master/docs-xml/smbdotconf/base/multicastdnsregister.xml.
 - **Client side:** a Linux client whose resolver has no mDNS (systemd-resolved with `MulticastDNS=no`, no nss-mdns) does not resolve `*.local` names, even though avahi answers. The web access diagnostics should say so, and offer the domain path (W2) as the reliable option.

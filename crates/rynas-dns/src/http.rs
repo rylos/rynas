@@ -61,7 +61,9 @@ impl Http {
         t
     }
 
-    /// One request. `body` is sent as JSON when given.
+    /// One request. `body` is sent as JSON when given. A `429` is retried once after its
+    /// `Retry-After` when that is at most [`MAX_RETRY_AFTER`]; otherwise (or when the retry is
+    /// throttled too) it is [`DnsError::RateLimited`].
     pub fn send(
         &self,
         method: &str,
@@ -69,6 +71,31 @@ impl Http {
         headers: &[(&str, String)],
         body: Option<&serde_json::Value>,
     ) -> Result<Resp, DnsError> {
+        match self.send_once(method, url, headers, body)? {
+            Sent::Done(r) => Ok(r),
+            Sent::Throttled(Some(wait)) if wait <= MAX_RETRY_AFTER => {
+                std::thread::sleep(wait);
+                match self.send_once(method, url, headers, body)? {
+                    Sent::Done(r) => Ok(r),
+                    Sent::Throttled(_) => Err(DnsError::RateLimited(
+                        "HTTP 429 again after waiting".into(),
+                    )),
+                }
+            }
+            Sent::Throttled(w) => Err(DnsError::RateLimited(match w {
+                Some(w) => format!("HTTP 429, retry after {} s", w.as_secs()),
+                None => "HTTP 429".into(),
+            })),
+        }
+    }
+
+    fn send_once(
+        &self,
+        method: &str,
+        url: &str,
+        headers: &[(&str, String)],
+        body: Option<&serde_json::Value>,
+    ) -> Result<Sent, DnsError> {
         let m = reqwest::Method::from_bytes(method.as_bytes())
             .map_err(|e| DnsError::Network(e.to_string()))?;
         let mut req = self.client.request(m, url);
@@ -84,12 +111,33 @@ impl Http {
             .send()
             .map_err(|e| DnsError::Network(self.clean(&strip_url(&e))))?;
         let status = resp.status().as_u16();
+        if status == 429 {
+            let wait = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(retry_after);
+            return Ok(Sent::Throttled(wait));
+        }
         let bytes = resp
             .bytes()
             .map_err(|e| DnsError::Network(self.clean(&strip_url(&e))))?;
         let body = String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_BODY)]).into_owned();
-        Ok(Resp { status, body })
+        Ok(Sent::Done(Resp { status, body }))
     }
+}
+
+/// Longest `Retry-After` waited for once (a longer one becomes [`DnsError::RateLimited`]).
+pub const MAX_RETRY_AFTER: Duration = Duration::from_secs(10);
+
+enum Sent {
+    Done(Resp),
+    Throttled(Option<Duration>),
+}
+
+/// `Retry-After` in seconds (the HTTP-date form is not waited for).
+fn retry_after(v: &str) -> Option<Duration> {
+    v.trim().parse::<u64>().ok().map(Duration::from_secs)
 }
 
 /// reqwest errors print the URL, which may carry a token in its query (DuckDNS): drop it.
@@ -112,4 +160,58 @@ pub fn enc(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    /// A server answering each connection with the next of `answers` (status, Retry-After).
+    fn serve(answers: Vec<(u16, Option<&'static str>)>) -> String {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for (status, retry) in answers {
+                let Ok((mut s, _)) = l.accept() else { return };
+                let mut rd = BufReader::new(s.try_clone().unwrap());
+                loop {
+                    let mut line = String::new();
+                    if rd.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
+                        break;
+                    }
+                }
+                let extra = retry
+                    .map(|r| format!("Retry-After: {r}\r\n"))
+                    .unwrap_or_default();
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 {status} X\r\n{extra}Content-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+                );
+            }
+        });
+        base
+    }
+
+    #[test]
+    fn throttling_waits_once_then_gives_rate_limited() {
+        let h = Http::new(Creds::new()).unwrap();
+        let base = serve(vec![(429, Some("1")), (200, None)]);
+        let t = std::time::Instant::now();
+        assert_eq!(h.send("GET", &base, &[], None).unwrap().status, 200);
+        assert!(t.elapsed() >= Duration::from_secs(1));
+        let base = serve(vec![(429, Some("0")), (429, Some("0"))]);
+        assert!(matches!(
+            h.send("GET", &base, &[], None),
+            Err(DnsError::RateLimited(_))
+        ));
+        let base = serve(vec![(429, Some("60"))]);
+        let t = std::time::Instant::now();
+        assert!(matches!(
+            h.send("GET", &base, &[], None),
+            Err(DnsError::RateLimited(m)) if m.contains("60")
+        ));
+        assert!(t.elapsed() < Duration::from_secs(5), "a long wait is not waited for");
+    }
 }

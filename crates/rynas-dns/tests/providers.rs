@@ -115,13 +115,13 @@ fn v4() -> Option<std::net::Ipv4Addr> {
 /// Runs plan + apply + plan again (all `keep`) for `domain`.
 fn round_trip(api: &dyn DnsApi, domain: &str) {
     let w = wanted(domain, true, false, &[], v4(), None);
-    let (zone, mut changes) = plan(domain, api, &w, &[]).unwrap();
+    let (zone, mut changes) = plan(domain, api, &w, &[], &[]).unwrap();
     assert!(
         changes.iter().all(|c| c.action == DnsAction::Create),
         "{changes:?}"
     );
     assert!(apply(api, &zone, &mut changes), "{changes:?}");
-    let (_, again) = plan(domain, api, &w, &[]).unwrap();
+    let (_, again) = plan(domain, api, &w, &[], &[]).unwrap();
     assert!(
         again.iter().all(|c| c.action == DnsAction::Keep),
         "{again:?}"
@@ -653,7 +653,7 @@ fn duckdns_records() {
         v4(),
         Some("fd00::10".parse().unwrap()),
     );
-    let (zone, mut changes) = plan("mynas.duckdns.org", api.as_ref(), &w, &[]).unwrap();
+    let (zone, mut changes) = plan("mynas.duckdns.org", api.as_ref(), &w, &[], &[]).unwrap();
     assert!(changes.iter().all(|c| c.action == DnsAction::Update));
     assert!(apply(api.as_ref(), &zone, &mut changes));
     let paths: Vec<String> = fake.reqs().iter().map(|r| r.path.clone()).collect();

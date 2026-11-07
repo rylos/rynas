@@ -21,6 +21,7 @@ use std::fmt;
 
 use rynas_api_types::web_access::{DnsProvider, DnsProviderField, DnsProviderInfo};
 
+pub mod cache;
 pub mod http;
 pub mod plan;
 pub mod providers;
@@ -89,6 +90,8 @@ pub enum DnsError {
     Network(String),
     /// The provider cannot do this.
     Unsupported(String),
+    /// The provider throttles (HTTP 429 after one wait): tried again with the record retry.
+    RateLimited(String),
 }
 
 impl fmt::Display for DnsError {
@@ -99,6 +102,7 @@ impl fmt::Display for DnsError {
             DnsError::Api(m) => write!(f, "provider error: {m}"),
             DnsError::Network(m) => write!(f, "provider unreachable: {m}"),
             DnsError::Unsupported(m) => write!(f, "not supported: {m}"),
+            DnsError::RateLimited(m) => write!(f, "the provider is rate limiting: {m}"),
         }
     }
 }
@@ -273,7 +277,7 @@ pub fn info(p: DnsProvider) -> DnsProviderInfo {
             false,
             false,
             60,
-            "The account token covers all your DuckDNS names. The domain is <name>.duckdns.org; DuckDNS answers every name below it with the same address.",
+            "The account token covers all your DuckDNS names. The domain is <name>.duckdns.org; DuckDNS answers every name below it with the same address. DuckDNS cannot be read: rynas sets its one record to the NAS's LAN address on every sync, replacing any other address it holds (a public one kept by a DDNS updater too).",
         ),
         DnsProvider::Gandi => (
             false,

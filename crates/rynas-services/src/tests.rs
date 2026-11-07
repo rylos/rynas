@@ -1060,7 +1060,19 @@ fn smbd_started_before_its_mdns_was_turned_off_is_restarted_once() {
         .state()
         .unit_started
         .insert(SMBD.into(), 1_600_000_000_000);
+    // clients connected: the restart waits (review 2026-11-07, M7)
+    e.host.state().smb_sessions = Some(2);
     stage(&e, SHARES_KEY, &shares_doc()).unwrap();
+    apply(&e).unwrap();
+    let calls = e.sys.state().calls.clone();
+    assert!(!calls.iter().any(|c| c.contains("restart smbd")), "{calls:#?}");
+    assert!(calls.iter().any(|c| c == "reload smbd.service"), "{calls:#?}");
+    // idle at the next apply: restarted once
+    e.host.state().smb_sessions = Some(0);
+    e.sys.state().calls.clear();
+    let mut d0 = shares_doc();
+    d0.smb.workgroup = "LATER".into();
+    stage(&e, SHARES_KEY, &d0).unwrap();
     apply(&e).unwrap();
     let calls = e.sys.state().calls.clone();
     assert!(
@@ -1092,6 +1104,14 @@ fn smbd_started_before_its_mdns_was_turned_off_is_restarted_once() {
     let calls = e.sys.state().calls.clone();
     assert!(calls.iter().any(|c| c == "reload smbd.service"), "{calls:#?}");
     assert!(!calls.iter().any(|c| c.contains("restart smbd")));
+}
+
+#[test]
+fn smb_session_count() {
+    use crate::host::parse_smb_session_count as n;
+    assert_eq!(n(r#"{"sessions":{"1":{"username":"a"},"2":{"username":"b"}}}"#), Some(2));
+    assert_eq!(n(r#"{"timestamp":"x"}"#), Some(0));
+    assert_eq!(n("not json"), None);
 }
 
 #[test]

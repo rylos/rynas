@@ -665,9 +665,9 @@ impl AppManifest {
                     None => err(format!("reverse_proxy: no tcp port with default {want}")),
                 }
             }
-        } else if let Some(p) = self.ports.iter().find(http_port)
-            && !self.host_network
-        {
+        } else if let Some(p) = self.ports.iter().find(http_port) {
+            // host-network apps too: they would bind the proxy's ports with no external-mode
+            // gate (review 2026-11-07, L5)
             err(format!("port `{}`: default host port {} belongs to the web access proxy (only a reverse_proxy app may use it)", p.name, p.default));
         }
         for p in &self.ports {

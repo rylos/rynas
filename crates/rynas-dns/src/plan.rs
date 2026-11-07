@@ -92,14 +92,9 @@ pub fn manual(domain: &str, wanted: &[Wanted], detail: &str) -> Vec<DnsChange> {
         .collect()
 }
 
-/// Every wanted and stale record as `unknown` with `detail` (the zone could not be read, or
-/// the provider is not asked).
-pub fn unknown(
-    domain: &str,
-    wanted: &[Wanted],
-    stale: &[(String, Rtype)],
-    detail: &str,
-) -> Vec<DnsChange> {
+/// Every wanted and owned (not wanted) record as `unknown` with `detail` (the zone could
+/// not be read, or the provider is not asked).
+pub fn unknown(domain: &str, wanted: &[Wanted], owned: &[Wanted], detail: &str) -> Vec<DnsChange> {
     let mut v: Vec<DnsChange> = wanted
         .iter()
         .map(|w| DnsChange {
@@ -108,28 +103,52 @@ pub fn unknown(
             ..change(domain, &w.name, w.rtype, DnsAction::Unknown)
         })
         .collect();
-    v.extend(stale.iter().map(|(n, t)| DnsChange {
-        detail: detail.into(),
-        ..change(domain, n, *t, DnsAction::Unknown)
-    }));
+    v.extend(
+        owned
+            .iter()
+            .filter(|o| !wanted.iter().any(|w| w.name == o.name && w.rtype == o.rtype))
+            .map(|o| DnsChange {
+                detail: detail.into(),
+                ..change(domain, &o.name, o.rtype, DnsAction::Unknown)
+            }),
+    );
     v
 }
 
-/// What a sync changes: each wanted set compared with the provider's, and the `stale` sets
-/// (written by rynas before, no longer wanted) to delete. Reads only.
+/// What a provider that cannot be read (DuckDNS) does to its one record, said plainly.
+pub const UNREADABLE_WRITE: &str = "the provider cannot be read: its one record is set to the \
+     NAS's LAN address on every sync, replacing any other address it held (a public one too)";
+
+/// What a sync changes. Reads only.
+///
+/// `owned` are the sets rynas wrote before, with the values it wrote (empty: not known).
+/// Records rynas did not write are never changed without consent:
+/// - a wanted set that is missing is created; one with the wanted values is kept (and not
+///   adopted: the caller only keeps owning what it owned);
+/// - a wanted set with other values is updated when rynas wrote it and it still holds what
+///   rynas wrote, or when its name is in `take_over`; otherwise it is a `conflict`;
+/// - an owned set no longer wanted is deleted only when it still holds what rynas wrote;
+///   otherwise it is a `conflict` (left in place, no longer managed).
 pub fn plan(
     domain: &str,
     api: &dyn DnsApi,
     wanted: &[Wanted],
-    stale: &[(String, Rtype)],
+    owned: &[Wanted],
+    take_over: &[String],
 ) -> Result<(Zone, Vec<DnsChange>), DnsError> {
     let probe = wanted
         .first()
         .map(|w| w.name.clone())
-        .or_else(|| stale.first().map(|s| s.0.clone()))
+        .or_else(|| owned.first().map(|s| s.name.clone()))
         .unwrap_or_else(|| domain.to_string());
     let zone = api.zone(&probe)?;
     let ttl = ttl_for(&zone);
+    let mine = |name: &str, rtype: Rtype| {
+        owned
+            .iter()
+            .find(|o| o.name == name && o.rtype == rtype)
+            .filter(|o| !o.values.is_empty())
+    };
     let mut out = Vec::new();
     for w in wanted {
         let mut c = DnsChange {
@@ -139,16 +158,32 @@ pub fn plan(
         };
         if !api.readable() {
             c.action = DnsAction::Update;
-            c.detail = "the provider cannot be read: the address is written on every sync".into();
+            c.detail = UNREADABLE_WRITE.into();
         } else {
             match api.get(&zone, &w.name, w.rtype) {
                 Ok(None) => {}
                 Ok(Some(cur)) => {
-                    c.action = if sorted(&cur.values) == sorted(&w.values) {
-                        DnsAction::Keep
+                    let cur_s = sorted(&cur.values);
+                    if cur_s == sorted(&w.values) {
+                        c.action = DnsAction::Keep;
+                    } else if mine(&w.name, w.rtype).is_some_and(|o| sorted(&o.values) == cur_s)
+                    {
+                        c.action = DnsAction::Update;
+                    } else if take_over.iter().any(|t| t == &w.name) {
+                        c.action = DnsAction::Update;
+                        c.detail = "taken over: the existing values are replaced".into();
                     } else {
-                        DnsAction::Update
-                    };
+                        c.action = DnsAction::Conflict;
+                        c.detail = if owned.iter().any(|o| o.name == w.name && o.rtype == w.rtype)
+                        {
+                            "changed outside rynas since rynas wrote it: left as it is until \
+                             the name is taken over"
+                        } else {
+                            "exists with other values and was not written by rynas: left as \
+                             it is until the name is taken over"
+                        }
+                        .into();
+                    }
                     c.current = cur.values;
                 }
                 Err(e) => {
@@ -159,15 +194,28 @@ pub fn plan(
         }
         out.push(c);
     }
-    for (name, rtype) in stale {
-        if wanted.iter().any(|w| &w.name == name && w.rtype == *rtype) {
+    for o in owned {
+        if wanted.iter().any(|w| w.name == o.name && w.rtype == o.rtype) {
             continue;
         }
-        let mut c = change(domain, name, *rtype, DnsAction::Delete);
-        if api.readable() {
-            match api.get(&zone, name, *rtype) {
+        let mut c = change(domain, &o.name, o.rtype, DnsAction::Delete);
+        if !api.readable() {
+            c.action = DnsAction::Conflict;
+            c.detail = "the provider cannot be read: left as it is and no longer managed \
+                        (clear it by hand if needed)"
+                .into();
+        } else {
+            match api.get(&zone, &o.name, o.rtype) {
                 Ok(None) => continue,
-                Ok(Some(cur)) => c.current = cur.values,
+                Ok(Some(cur)) => {
+                    if o.values.is_empty() || sorted(&cur.values) != sorted(&o.values) {
+                        c.action = DnsAction::Conflict;
+                        c.detail = "changed outside rynas since rynas wrote it: left in place \
+                                    and no longer managed"
+                            .into();
+                    }
+                    c.current = cur.values;
+                }
                 Err(e) => {
                     c.action = DnsAction::Unknown;
                     c.detail = e.to_string();
@@ -196,7 +244,7 @@ pub fn apply(api: &dyn DnsApi, zone: &Zone, changes: &mut [DnsChange]) -> bool {
                 ok = false;
                 continue;
             }
-            DnsAction::Keep | DnsAction::Manual => continue,
+            DnsAction::Keep | DnsAction::Manual | DnsAction::Conflict => continue,
         };
         if let Err(e) = r {
             ok = false;
@@ -315,11 +363,18 @@ mod tests {
             vec!["192.0.2.10".into()],
         );
         let w = wanted("nas.example.com", true, false, &[], v4(), None);
-        let stale = vec![
-            ("old.nas.example.com".to_string(), Rtype::A),
-            ("gone.nas.example.com".to_string(), Rtype::A),
+        let set = |n: &str, v: &str| Wanted {
+            name: n.into(),
+            rtype: Rtype::A,
+            values: vec![v.into()],
+        };
+        // rynas wrote nas.example.com = 198.51.100.1 earlier (the address changed since)
+        let owned = vec![
+            set("nas.example.com", "198.51.100.1"),
+            set("old.nas.example.com", "192.0.2.10"),
+            set("gone.nas.example.com", "192.0.2.10"),
         ];
-        let (zone, mut changes) = plan("nas.example.com", &api, &w, &stale).unwrap();
+        let (zone, mut changes) = plan("nas.example.com", &api, &w, &owned, &[]).unwrap();
         let acts: Vec<_> = changes
             .iter()
             .map(|c| (c.name.as_str(), c.action))
@@ -339,8 +394,54 @@ mod tests {
         assert!(apply(&api, &zone, &mut changes));
         assert_eq!(api.calls.lock().unwrap().len(), 3);
         // a second plan keeps everything
-        let (_, again) = plan("nas.example.com", &api, &w, &[]).unwrap();
+        let (_, again) = plan("nas.example.com", &api, &w, &[], &[]).unwrap();
         assert!(again.iter().all(|c| c.action == DnsAction::Keep));
+    }
+
+    /// Review 2026-11-07 H2: records rynas did not write are never changed or deleted
+    /// without consent, and a set edited after rynas wrote it is not deleted.
+    #[test]
+    fn foreign_records_are_conflicts() {
+        let api = Mem::default();
+        let put = |n: &str, v: &str| {
+            api.sets
+                .lock()
+                .unwrap()
+                .insert((n.into(), Rtype::A), vec![v.into()]);
+        };
+        put("nas.example.com", "203.0.113.5");
+        let w = wanted("nas.example.com", true, false, &[], v4(), None);
+        let (zone, mut changes) = plan("nas.example.com", &api, &w, &[], &[]).unwrap();
+        assert_eq!(changes[1].action, DnsAction::Conflict);
+        assert_eq!(changes[1].current, ["203.0.113.5"]);
+        assert!(apply(&api, &zone, &mut changes));
+        assert_eq!(
+            api.calls.lock().unwrap().as_slice(),
+            ["set *.nas.example.com A [\"192.0.2.10\"] 3600"],
+            "the conflict is left alone"
+        );
+        // taken over: replaced
+        let take = vec!["nas.example.com".to_string()];
+        let (_, c2) = plan("nas.example.com", &api, &w, &[], &take).unwrap();
+        assert_eq!(c2[1].action, DnsAction::Update);
+        // a set rynas wrote, edited by hand since: neither updated nor deleted
+        put("old.nas.example.com", "198.51.100.7");
+        let owned = vec![Wanted {
+            name: "old.nas.example.com".into(),
+            rtype: Rtype::A,
+            values: vec!["192.0.2.10".into()],
+        }];
+        let (_, c3) = plan("nas.example.com", &api, &[], &owned, &[]).unwrap();
+        assert_eq!(c3[0].action, DnsAction::Conflict);
+        let (_, c4) = plan("nas.example.com", &api, &w[..1], &owned, &[]).unwrap();
+        assert_eq!(c4[1].action, DnsAction::Conflict, "{c4:?}");
+        // owned without known values (older state file): never deleted
+        let legacy = vec![Wanted {
+            values: Vec::new(),
+            ..owned[0].clone()
+        }];
+        let (_, c5) = plan("nas.example.com", &api, &[], &legacy, &[]).unwrap();
+        assert_eq!(c5[0].action, DnsAction::Conflict);
     }
 
     #[test]
@@ -350,7 +451,7 @@ mod tests {
             ..Default::default()
         };
         let w = wanted("nas.example.com", true, false, &[], v4(), None);
-        let (zone, mut changes) = plan("nas.example.com", &api, &w, &[]).unwrap();
+        let (zone, mut changes) = plan("nas.example.com", &api, &w, &[], &[]).unwrap();
         assert!(!apply(&api, &zone, &mut changes));
         assert!(
             changes[0]
@@ -362,6 +463,7 @@ mod tests {
                 "nas.other.org",
                 &api,
                 &wanted("nas.other.org", true, false, &[], v4(), None),
+                &[],
                 &[]
             ),
             Err(DnsError::NoZone(_))
