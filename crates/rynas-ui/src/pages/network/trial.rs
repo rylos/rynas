@@ -12,7 +12,10 @@
 //!   requests to other origins, and a guess would be worse than no answer;
 //! - the tab is reloaded: the answer of Apply is kept in `sessionStorage` (this tab only);
 //! - another tab or user started the test: the countdown and Roll back are shown, Confirm only
-//!   where the token is known.
+//!   where the token is known;
+//! - an ifupdown migration planned for the next boot: shown to every session (who, when,
+//!   Cancel); once the boot carried it out nobody has a token, so any administrator may keep
+//!   it or go back to ifupdown.
 //!
 //! Polling: `GET /network/state` every 2 s while a test runs (an exception to the 5 s rule of
 //! the guidelines: the user is racing a deadline) and not at all otherwise.
@@ -232,7 +235,10 @@ impl Trial {
             return;
         }
         let rolled = net.state.data.with_untracked(|s| s.as_ref().and_then(|s| s.last_rollback.as_ref()).is_some_and(|r| r.ts_ms >= p.started_ms));
-        let msg = if rolled { (Tone::Warn, t("net.not_kept").to_string()) } else { (Tone::Ok, t("net.kept").to_string()) };
+        // a migration planned for the next boot only disappears when it is cancelled
+        let msg = if p.kind == TrialKind::AdoptAtBoot && p.deadline_ms == 0 {
+            (Tone::Info, t("net.boot_cancelled").to_string())
+        } else if rolled { (Tone::Warn, t("net.not_kept").to_string()) } else { (Tone::Ok, t("net.kept").to_string()) };
         self.clear();
         self.outcome.set(Some(msg));
     }
@@ -270,6 +276,24 @@ impl Trial {
         });
     }
 
+    /// Keeps a migration done at boot now: no browser applied it, so there is no token and any
+    /// administrator may confirm it (over an address of the NAS, like every confirmation).
+    fn keep_boot(self, net: Net) {
+        self.busy.set(true);
+        self.error.set(None);
+        spawn_local(async move {
+            let r = api::post::<_, NetConfirmed>("/api/v1/network/confirm", Some(&NetConfirmRequest { token: String::new() })).await;
+            self.busy.set(false);
+            match r {
+                Ok(_) => net.reload(),
+                Err(e) if e.status() == 409 && e.code() == rynas_api_types::error_codes::CONFLICT => {
+                    self.error.set(Some(t("net.confirm_conflict").to_string()))
+                }
+                Err(e) => self.error.set(Some(e.text())),
+            }
+        });
+    }
+
     fn rollback(self, net: Net) {
         self.busy.set(true);
         self.error.set(None);
@@ -296,6 +320,8 @@ pub fn banner(net: Net) -> AnyView {
     let trial = Memo::new(move |_| net.state.data.with(|s| s.as_ref().and_then(|s| s.trial.clone())));
     let shown = move || tl.started.with(Option::is_some) || trial.with(Option::is_some);
     let at_boot = move || trial.with(|t| t.as_ref().is_some_and(|t| t.kind == TrialKind::AdoptAtBoot && t.deadline_ms == 0));
+    // the planned migration ran at this boot and waits for its check
+    let booted = move || trial.with(|t| t.as_ref().is_some_and(|t| t.kind == TrialKind::AdoptAtBoot && t.deadline_ms > 0));
     // deadline and length: the server's marker once it exists, Apply's answer before
     let deadline = move || trial.with(|t| t.as_ref().map(|t| t.deadline_ms)).filter(|d| *d > 0).or_else(|| tl.started.with(|s| s.as_ref().map(|s| s.s.deadline_ms))).unwrap_or(0);
     let timeout = move || trial.with(|t| t.as_ref().map(|t| t.timeout_s)).filter(|d| *d > 0).or_else(|| tl.started.with(|s| s.as_ref().map(|s| s.s.timeout_s))).unwrap_or(120);
@@ -374,6 +400,38 @@ pub fn banner(net: Net) -> AnyView {
         })
     };
 
+    // who planned the migration, and when (it may be days before the reboot)
+    let planned_by = move || {
+        trial.with(|t| t.as_ref().map(|t| (t.author.clone(), t.started_ms))).map(|(a, ms)| tf("net.boot_who", &[("user", &a), ("when", &crate::i18n::datetime(ms))]))
+    };
+
+    let booted_banner = move || {
+        let ifaces = trial.with(|t| t.as_ref().map(|t| t.interfaces.join(", "))).unwrap_or_default();
+        view! {
+            <section class="card net-trial calm" aria-labelledby="net-trial-h">
+                <div class="net-trial-head">
+                    <span class="net-trial-icon"><Icon icon=icons::TIMER size=22 /></span>
+                    <div class="net-trial-text">
+                        <h2 id="net-trial-h">{tr("net.booted_title")}</h2>
+                        <p>{move || tf("net.booted_text", &[("ifaces", &ifaces), ("n", &left.get().to_string())])}</p>
+                        <p class="muted small">{move || trial.with(|t| t.as_ref().map(|t| tf("net.booted_planned", &[("user", &t.author)])))}</p>
+                    </div>
+                    <div class="net-trial-count tnum" aria-hidden="true">{move || clock(left.get())}</div>
+                    <span class="sr-only" aria-live="polite">{move || tf("net.left_sr", &[("n", &spoken.get().to_string())])}</span>
+                </div>
+                {crate::form::form_error(tl.error)}
+                <div class="net-trial-actions">
+                    <button class="btn primary lg" disabled=move || tl.busy.get() on:click=move |_| tl.keep_boot(net)>
+                        {crate::form::spinner(tl.busy)}<Icon icon=icons::CHECK size=18 />{tr("net.booted_keep")}
+                    </button>
+                    <button class="btn ghost lg" disabled=move || tl.busy.get() on:click=move |_| tl.rollback(net)>
+                        <Icon icon=icons::ROTATE_CCW size=18 />{tr("net.booted_back")}
+                    </button>
+                </div>
+            </section>
+        }
+    };
+
     let boot_banner = move || {
         let ifaces = trial.with(|t| t.as_ref().map(|t| t.interfaces.join(", "))).unwrap_or_default();
         view! {
@@ -383,6 +441,7 @@ pub fn banner(net: Net) -> AnyView {
                     <div class="net-trial-text">
                         <h2 id="net-trial-h">{tr("net.boot_title")}</h2>
                         <p>{tf("net.boot_text", &[("ifaces", &ifaces)])}</p>
+                        <p class="muted small">{planned_by}</p>
                     </div>
                 </div>
                 {crate::form::form_error(tl.error)}
@@ -435,7 +494,13 @@ pub fn banner(net: Net) -> AnyView {
         if !shown() {
             return ().into_any();
         }
-        if at_boot() { boot_banner().into_any() } else { main_banner().into_any() }
+        if at_boot() {
+            boot_banner().into_any()
+        } else if booted() {
+            booted_banner().into_any()
+        } else {
+            main_banner().into_any()
+        }
     })
     .into_any()
 }

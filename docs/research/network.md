@@ -139,7 +139,7 @@ NetworkManager has better rollback, but it is designed for desktops and would dr
    - `systemctl disable networking`, move `interfaces` to `interfaces.rynas-bak`, `systemctl enable --now systemd-networkd systemd-resolved`;
    - same timed confirmation;
    - rollback: put `interfaces` back, stop networkd and `systemctl restart networking`.
-   - Safer alternative, recommended when remote: "migrate on next reboot", with the boot guard restoring ifupdown if there is no routable address after 3 minutes.
+   - Safer alternative, recommended when remote: "migrate on next reboot", with the boot guard restoring ifupdown if there is no routable address after 3 minutes. The plan is shown to every session until the reboot (who planned it, when, Cancel), because a reboot can come days later. After the boot no browser holds a token, so any administrator may keep it at once (confirmation over an address of the NAS) or go back to ifupdown; "go back" always restores ifupdown, only the timer keeps the migration by itself.
 4. **Stable names:** the synology plugin proposes `.link` files by PCI path, so names match the ports printed on the back (`lan1`, `lan2`, `lan10g`); by MAC on other hardware. Hardware migration maps interfaces by role (already covered in D-CFGBAK).
 
 ## 5. Features

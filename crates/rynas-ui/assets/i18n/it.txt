@@ -2112,6 +2112,13 @@ net.cands_text	Ogni link apre la pagina di conferma (accedi di nuovo se richiest
 net.boot_title	Migrazione programmata al prossimo riavvio
 net.boot_text	Al prossimo avvio systemd-networkd prende in carico {ifaces}. Se dopo 3 minuti nessuna porta ha un indirizzo instradabile, torna da solo ifupdown.
 net.boot_cancel	Annulla la migrazione
+net.boot_who	Programmata da {user} il {when}.
+net.boot_cancelled	La migrazione programmata al prossimo riavvio è annullata.
+net.booted_title	Rete migrata a questo avvio
+net.booted_text	Ora {ifaces} è gestita da systemd-networkd. Tra {n} s viene tenuta da sola se una porta ha un indirizzo instradabile; altrimenti torna ifupdown.
+net.booted_planned	{user} l'aveva programmata al prossimo riavvio dalla pagina Rete.
+net.booted_keep	Tienila subito
+net.booted_back	Torna a ifupdown
 net.col_iface	Interfaccia
 net.col_speed	Velocità
 net.col_mac	Indirizzo MAC
