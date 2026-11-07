@@ -8,6 +8,10 @@
 //!   `/lib/modules/<release>`.
 //!
 //! `rynasd --dry-system`: nothing is run; the status is a fixture and a sync is only logged.
+//!
+//! `synodeb-dom` mounts the DOM partitions; rynasd's seccomp filter (`@system-service`)
+//! refuses `mount(2)`, so the tool runs in a transient unit outside rynasd's sandbox
+//! ([`outside`]), like apt in the Docker and Tailscale installs.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -48,6 +52,26 @@ impl SynodebDom {
             .map(|bin| Self { bin, dry })
     }
 
+    /// `synodeb-dom args` in a transient unit outside rynasd's sandbox; `--pipe` returns its
+    /// stdout, stderr and exit status.
+    fn outside(&self, args: &[&std::ffi::OsStr], timeout: Duration) -> Cmd {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let unit = format!(
+            "--unit=rynas-synodeb-dom-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        );
+        Cmd::new("systemd-run")
+            .args(["--wait", "--pipe", "--collect", "--quiet", "--service-type=exec"])
+            .arg(unit)
+            .arg(format!("--property=RuntimeMaxSec={}", timeout.as_secs()))
+            .arg("--description=rynas: synodeb-dom")
+            .arg(&self.bin)
+            .args(args)
+            .timeout(timeout + Duration::from_secs(10))
+    }
+
     fn run(&self, cmd: Cmd) -> Result<String, String> {
         let shown = cmd.display();
         match cmd.env_clear().run_blocking() {
@@ -72,12 +96,10 @@ impl BootSync for SynodebDom {
             tracing::info!("dry: {} sync --root {}", self.bin.display(), root.display());
             return Ok("dry system: synodeb-dom not run".into());
         }
-        self.run(
-            Cmd::new(&self.bin)
-                .args(["sync", "--root"])
-                .arg(root)
-                .timeout(SYNC_TIMEOUT),
-        )
+        self.run(self.outside(
+            &["sync".as_ref(), "--root".as_ref(), root.as_os_str()],
+            SYNC_TIMEOUT,
+        ))
     }
 
     fn undo_hint(&self) -> String {
@@ -90,11 +112,7 @@ impl BootLayer for SynodebDom {
         let text = if self.dry {
             FIXTURE.to_string()
         } else {
-            self.run(
-                Cmd::new(&self.bin)
-                    .args(["status", "--json"])
-                    .timeout(STATUS_TIMEOUT),
-            )?
+            self.run(self.outside(&["status".as_ref(), "--json".as_ref()], STATUS_TIMEOUT))?
         };
         parse_status(&text)
     }
