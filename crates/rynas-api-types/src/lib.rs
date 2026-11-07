@@ -8,6 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod docker;
 pub mod network;
 pub mod notify;
 pub mod power;
@@ -360,6 +361,17 @@ pub mod error_codes {
     /// The feature is not available on this system (501), e.g. ejecting a drive when no
     /// removable-drives module is present.
     pub const NOT_AVAILABLE: &str = "not_available";
+    /// Docker: the engine is not installed (409); `GET /api/v1/docker/status` tells, and
+    /// `POST /api/v1/docker/install` installs it.
+    pub const DOCKER_NOT_INSTALLED: &str = "docker_not_installed";
+    /// Docker: installed, but the daemon does not answer on its socket (503).
+    pub const DOCKER_UNAVAILABLE: &str = "docker_unavailable";
+    /// Docker: refused while containers run (moving the data-root) (409); the message names
+    /// how many.
+    pub const CONTAINERS_RUNNING: &str = "containers_running";
+    /// Docker: the stack is not managed by rynas (Portainer's, or a compose project outside
+    /// the stacks folder): its files are not edited and compose actions are not run (409).
+    pub const STACK_NOT_MANAGED: &str = "stack_not_managed";
 
     /// The code of a status when nothing more precise applies: used to turn framework
     /// rejections (bad query string, 405, 413...) into an `ApiError`.
@@ -426,6 +438,10 @@ pub mod error_codes {
         REMOTE_AUTH_FAILED,
         HOST_KEY_CHANGED,
         NOT_AVAILABLE,
+        DOCKER_NOT_INSTALLED,
+        DOCKER_UNAVAILABLE,
+        CONTAINERS_RUNNING,
+        STACK_NOT_MANAGED,
     ];
 }
 

@@ -49,6 +49,8 @@ pub struct Ops {
     pub after_apply: Option<AfterApply>,
     /// Removable drives: their state changes ride on the task stream (`?removable=1`).
     pub removable: std::sync::OnceLock<Arc<crate::removable::RemovableSvc>>,
+    /// Docker: its stats samples and change hints ride on the task stream (`?docker=1`).
+    pub docker: std::sync::OnceLock<Arc<crate::docker::DockerSvc>>,
 }
 
 /// See [`Ops::after_apply`].
@@ -69,6 +71,7 @@ impl Ops {
             pending,
             after_apply: None,
             removable: std::sync::OnceLock::new(),
+            docker: std::sync::OnceLock::new(),
         }
     }
 }
@@ -543,6 +546,29 @@ struct TaskStreamQuery {
     config: Option<String>,
     /// `1` or `true`: also the `removable` events (the latest state first).
     removable: Option<String>,
+    /// `1` or `true`: also the Docker events (`docker_stats`, the latest sample first, and
+    /// `docker_changed`). The stats sampler runs only while such a stream listens.
+    docker: Option<String>,
+}
+
+/// The Docker half of the task stream: `docker_stats` (data `DockerStats`, the latest first),
+/// `docker_changed` (data `DockerChanged`); `docker_resync` after missed events.
+fn docker_events(ops: &Ops) -> Option<impl Stream<Item = Result<Event, Infallible>> + use<>> {
+    let d = ops.docker.get()?;
+    let rx = d.subscribe();
+    let head = stream::iter(
+        d.latest_stats()
+            .map(|j| Ok(Event::default().event(crate::docker::EV_STATS).data(&*j))),
+    );
+    let tail = stream::unfold(rx, |mut rx| async move {
+        let ev = match rx.recv().await {
+            Ok((name, j)) => Event::default().event(name).data(&*j),
+            Err(RecvError::Lagged(_)) => Event::default().event(crate::docker::EV_RESYNC).data("{}"),
+            Err(RecvError::Closed) => return None,
+        };
+        Some((Ok(ev), rx))
+    });
+    Some(head.chain(tail))
 }
 
 /// The removable drives half of the task stream: the latest state, then every change
@@ -606,11 +632,17 @@ async fn task_stream(
     let removable = matches!(q.removable.as_deref(), Some("1" | "true"))
         .then(|| removable_events(&ops))
         .flatten();
+    let docker = matches!(q.docker.as_deref(), Some("1" | "true"))
+        .then(|| docker_events(&ops))
+        .flatten();
     let events = stream::select(
         tasks,
         stream::select(
-            stream::iter(config).flatten(),
-            stream::iter(removable).flatten(),
+            stream::select(
+                stream::iter(config).flatten(),
+                stream::iter(removable).flatten(),
+            ),
+            stream::iter(docker).flatten(),
         ),
     );
     Ok(Sse::new(events).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))

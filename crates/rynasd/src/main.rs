@@ -105,6 +105,10 @@ struct Args {
     /// --dry-system rynasd talks to upsd only when this is given (a test upsd).
     #[arg(long)]
     upsd: Option<String>,
+    /// The Docker engine's socket; empty: rynasd never contacts the engine. With
+    /// --dry-system the engine is only read (lists, status), never changed.
+    #[arg(long, default_value = rynas_docker::DOCKER_SOCKET, value_parser = path_or_empty)]
+    docker_socket: PathBuf,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -181,6 +185,8 @@ struct Opened {
     modules: rynas_module::Modules,
     /// Applied `removable` settings, handed over by the domain.
     removable_settings: tokio::sync::watch::Receiver<rynas_api_types::removable::RemovableSettings>,
+    /// Applied `docker` settings, handed over by the domain.
+    docker_settings: tokio::sync::watch::Receiver<rynas_api_types::docker::DockerSettings>,
     /// The configuration root.
     root: PathBuf,
 }
@@ -279,9 +285,13 @@ fn open_config(
     let (removable_domain, removable_settings) = rynasd::removable::RemovableDomain::new();
     let removable_tx = removable_domain.tx.clone();
     domains.push(Arc::new(removable_domain));
+    let (docker_domain, docker_settings) = rynasd::docker::DockerDomain::new(args.dry_system);
+    let docker_tx = docker_domain.tx.clone();
+    domains.push(Arc::new(docker_domain));
     let config = Config::open(ConfigOptions::new(&args.state_dir, &root), system, domains)
         .map_err(std::io::Error::other)?;
     removable_tx.send_replace(rynasd::removable::initial_settings(&config));
+    docker_tx.send_replace(rynasd::docker::initial_settings(&config));
     // homes of the first layout (/srv/rynas/homes one link to <volume>/homes): one link per
     // home, so that each home can be on its own volume (the apply of `homes` does it too)
     if let Err(e) = homes.migrate(&|l| tracing::info!("homes: {l}")) {
@@ -296,6 +306,7 @@ fn open_config(
         snapshots,
         modules,
         removable_settings,
+        docker_settings,
         root,
     })
 }
@@ -840,6 +851,24 @@ fn main() -> std::io::Result<()> {
                 files.with_drives(Arc::new(rynasd::removable::FilesDrives::new(removable.clone()))),
             ));
             state.removable = Some(removable);
+        }
+        // Docker: status, stacks, tasks; the event watcher and the stats sampler
+        {
+            let socket = (!args.docker_socket.as_os_str().is_empty())
+                .then(|| args.docker_socket.to_string_lossy().into_owned());
+            let docker = rynasd::docker::DockerSvc::new(
+                ops.clone(),
+                notifier.clone(),
+                config_root(&args),
+                args.dry_system,
+                socket,
+                args.state_dir.join("docker"),
+                opened.docker_settings.clone(),
+            );
+            let _ = ops.docker.set(docker.clone());
+            rynasd::docker::spawn_watch(docker.clone());
+            rynasd::docker::spawn_stats(docker.clone());
+            state.docker = Some(docker);
         }
         state.ops = Some(ops);
         if args.storage_check_interval > 0 {

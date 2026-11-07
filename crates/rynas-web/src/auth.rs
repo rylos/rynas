@@ -140,9 +140,10 @@ pub fn is_admin(role: Role) -> bool {
     }
 }
 
-/// Reads that are as sensitive as a change (they hand out key material).
+/// Reads that are as sensitive as a change (they hand out key material, or anything of
+/// Docker: container logs and stack files hold secrets, and the engine is root).
 fn admin_read(path: &str) -> bool {
-    path.ends_with("/luks-header")
+    path.ends_with("/luks-header") || path.starts_with("/api/v1/docker/") || path.starts_with("/docker/")
 }
 
 /// Route layer after [`require_session`] on every route except the user's own session
