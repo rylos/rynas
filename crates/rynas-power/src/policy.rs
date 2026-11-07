@@ -27,9 +27,36 @@ pub fn decide(p: &ShutdownPolicy, busy: &[String], waited_s: u64) -> Decision {
     }
 }
 
+/// One RAID operation of `/proc/mdstat`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MdOp {
+    pub array: String,
+    /// `resync`, `recovery`, `reshape` or `check`.
+    pub op: &'static str,
+    /// Progress as written (`8.5%`); empty when queued.
+    pub progress: String,
+}
+
+impl MdOp {
+    pub fn pct(&self) -> Option<f32> {
+        self.progress.strip_suffix('%')?.parse().ok()
+    }
+}
+
 /// RAID arrays resyncing, recovering, reshaping or checking (`/proc/mdstat`), also when the
 /// operation is only queued (`resync=DELAYED`, `PENDING`).
 pub fn mdstat_busy(text: &str) -> Vec<String> {
+    mdstat_ops(text)
+        .into_iter()
+        .map(|m| {
+            let sep = if m.progress.is_empty() { "" } else { " " };
+            format!("{}: RAID {}{sep}{}", m.array, m.op, m.progress)
+        })
+        .collect()
+}
+
+/// [`mdstat_busy`] with the parts.
+pub fn mdstat_ops(text: &str) -> Vec<MdOp> {
     let mut out = Vec::new();
     let mut array = String::new();
     for line in text.lines() {
@@ -44,12 +71,16 @@ pub fn mdstat_busy(text: &str) -> Vec<String> {
         for op in ["resync", "recovery", "reshape", "check"] {
             let hit = l.contains(&format!("{op} =")) || l.contains(&format!("{op}="));
             if hit && !array.is_empty() {
-                let pct = l
+                let progress = l
                     .split_whitespace()
                     .find(|w| w.ends_with('%'))
-                    .map(|p| format!(" {p}"))
-                    .unwrap_or_default();
-                out.push(format!("{array}: RAID {op}{pct}"));
+                    .unwrap_or_default()
+                    .to_string();
+                out.push(MdOp {
+                    array: array.clone(),
+                    op,
+                    progress,
+                });
                 break;
             }
         }

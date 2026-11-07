@@ -4,12 +4,15 @@
 //! - [`rules`]: validation, conflicts, next occurrences in local time (DST-safe, jiff);
 //! - [`policy`]: shutdown pre-checks (RAID, SMB open files) and the policy decision;
 //! - [`wake`]: the RTC wake alarm (`rtcwake -m no`), the boot record;
-//! - [`domain`]: the `power.schedule` configuration domain.
+//! - [`domain`]: the `power.schedule` configuration domain;
+//! - [`manual`]: manual restart and shut down (logind's schedule, `shutdown` arguments, apt
+//!   processes).
 //!
 //! Startup needs an RTC with a `wakealarm` (any Debian machine whose firmware honours it;
 //! on Synology synohwd also tells the microcontroller); shutdown works everywhere.
 
 pub mod domain;
+pub mod manual;
 pub mod policy;
 pub mod rules;
 pub mod wake;

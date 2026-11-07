@@ -262,3 +262,86 @@ pub enum BootCause {
     #[default]
     Unknown,
 }
+
+// ---------------------------------------------------------------------------------------------
+// manual restart and shut down (`/api/v1/system/power`)
+// ---------------------------------------------------------------------------------------------
+
+/// What an administrator asks the NAS to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemPowerAction {
+    Restart,
+    Shutdown,
+}
+
+/// Delays offered by the dialog, in minutes (`0`: now).
+pub const SYSTEM_POWER_DELAYS_MIN: [u32; 3] = [0, 1, 5];
+
+/// `POST /system/power`: starts the task `system.restart` or `system.shutdown`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemPowerRequest {
+    pub action: SystemPowerAction,
+    /// One of [`SYSTEM_POWER_DELAYS_MIN`].
+    #[serde(default)]
+    pub delay_min: u32,
+}
+
+/// A restart or shut down scheduled for later (systemd-logind's schedule, whoever set it).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingSystemPower {
+    pub action: SystemPowerAction,
+    pub at_ms: u64,
+    /// The rynas user who asked; `None` when it was set outside rynas (`shutdown +N`).
+    #[serde(default)]
+    pub by: Option<String>,
+}
+
+/// What a restart or shut down would interrupt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PowerWarningCode {
+    /// A RAID array resyncs, rebuilds, reshapes or checks (`subject`: the array, `op`, `pct`).
+    RaidBusy,
+    /// A scrub task runs (`subject`: its task kind).
+    ScrubRunning,
+    /// Another rynas task runs (`subject`: its task kind).
+    TaskRunning,
+    /// A Task Scheduler task runs (`subject`: its unit).
+    SchedulerTaskRunning,
+    /// SMB clients hold files open (`n`).
+    SmbOpenFiles,
+    /// apt or dpkg runs (`subject`: the process).
+    AptRunning,
+    /// The UPS runs on battery.
+    UpsOnBattery,
+    /// The boot layer boots a new kernel on trial: if it fails, the previous one comes back.
+    BootTrial,
+}
+
+/// One warning of [`SystemPowerState::warnings`]; the UI translates `code` and fills in the
+/// values, `text` is the English fallback.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PowerWarning {
+    pub code: PowerWarningCode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    /// RAID operation (`resync`, `recovery`, `reshape`, `check`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pct: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub n: Option<u64>,
+    pub text: String,
+}
+
+/// `GET /system/power`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SystemPowerState {
+    #[serde(default)]
+    pub pending: Option<PendingSystemPower>,
+    /// What a restart or shut down now would interrupt; the administrator may go on anyway.
+    #[serde(default)]
+    pub warnings: Vec<PowerWarning>,
+}
