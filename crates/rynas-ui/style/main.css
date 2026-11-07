@@ -1256,6 +1256,9 @@ kbd {
 .rule > .switch-row, .rule-remove { grid-column: 1 / -1; }
 .rule-remove { justify-self: start; }
 .plain-list { margin: 0; padding: 0; list-style: none; font-weight: 500; }
+/* Users adopt / UID change */
+.id-paths { min-width: 0; overflow-wrap: anywhere; }
+.id-folders { display: flex; flex-direction: column; gap: var(--s-1); }
 .steps-list { margin: 0; padding-left: var(--s-6); list-style: decimal; display: flex; flex-direction: column; gap: var(--s-1); }
 .pw-meter { display: flex; align-items: center; gap: var(--s-3); margin-top: calc(var(--s-2) * -1); }
 .pw-bars { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--s-1); flex: 1; max-width: 240px; }

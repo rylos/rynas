@@ -250,6 +250,88 @@ This also preserves the per-user denies (e.g. for bob and carol). rynas can offe
 
 ---
 
+## 3b. Existing accounts and UID/GID changes
+
+Two real situations: a Debian install that already has accounts (the installer's first user,
+uid 1000, and users made by hand), and data migrated from another NAS with numeric owners
+(e.g. 1026, 1027…, the ids DSM gives its first users) that no local account has.
+
+### What the tools do (research)
+
+| Topic | Behaviour | Consequence for rynas |
+|---|---|---|
+| `usermod -u` | Rewrites passwd and chowns the files *inside the home directory* owned by the old uid (and the mail spool); "the ownership of files outside of the user's home directory must be fixed manually" ([man7 usermod(8)](https://man7.org/linux/man-pages/man8/usermod.8.html), [Debian](https://manpages.debian.org/usermod)). Exit 12 (`E_HOMEDIR`) when the home chown fails, *after* passwd is written | rynas runs `usermod -u` and treats exit 12 as done (its own walk reports what could not change, e.g. a read-only snapshot in the home) |
+| `groupmod -g` | Rewrites group and the primary gid of users in passwd; changes no file | the walk is the only file change |
+| `find -uid` / `chown --from` | the classic manual fix: `find /data -xdev -uid 1026 -exec chown -h 1000 {} +`, or `chown -R --from=1026 1000` (changes only files whose current owner matches) ([chown(1)](https://manpages.ubuntu.com/manpages/stonking/man1/chown.1.html)) | rynas does the same walk in-process: one file system, `lchown`, no `-exec` per file, progress, cancel |
+| POSIX ACLs | entries name numeric ids; `chown` does not touch them; `setfacl`/`getfacl -n` work on numbers. The xattr `system.posix_acl_access`/`_default` is a header (version 2) plus 8-byte entries (tag, perm, id) | the walk rewrites `ACL_USER`/`ACL_GROUP` entries naming the old id, as raw xattrs (no `setfacl` per file) |
+| set-id bits | Linux clears `S_ISUID`/`S_ISGID` on `chown`, also for root | the walk puts the mode back after `lchown` |
+| btrfs snapshots | read-only subvolumes answer `EROFS` | skipped and listed: a snapshot keeps the old ids, which is what a snapshot is for (a restore copies files back, then remap again) |
+| Samba tdbsam | the passdb entry is found by name; the RID was allocated at `pdbedit -a` and does not follow the uid ([pdbedit(8)](https://www.mankier.com/8/pdbedit), [samba list](https://lists.samba.org/archive/samba/2004-March/082696.html)) | nothing to rewrite; `net cache flush` after an id change so no cached SID↔uid mapping survives |
+| Quotas | rynas' quotas are squota/qgroups **per subvolume** (shared folder, home), not per uid (§ 2) | nothing to change; the per-owner usage report counts by the new uid from the next scan |
+
+Other systems: TrueNAS treats UID/GID as fixed after creation; the feature request asks for
+"search for files with the old ID and reassign them" as an optional step
+([NAS-112318](https://ixsystems.atlassian.net/browse/NAS-112318)); its forums answer with
+recreating the account. OMV and Rockstor have no id change in the GUI (shell only,
+[Rockstor forum](https://forum.rockstor.com/t/change-uid-of-admin-user/8732)). DSM picks the
+uid (1024+) and never lets it change. Migration guides DSM → Linux say: either give the Linux
+user uid 1026, or chown everything to the new uid by number
+([akitaonrails](https://akitaonrails.com/en/2025/04/17/configuring-my-synology-nas-with-nfs-on-linux/),
+[mariushosting](https://mariushosting.com/synology-how-to-find-uid-userid-and-gid-groupid/)).
+Best ideas taken: both of those, as guided operations with a dry run first.
+
+### What rynas does
+
+- **Listing.** Every account of the system in 1000–59999 is listed (users and, now, groups);
+  those not in the configuration carry "Not managed". System accounts (< 1000, `nobody`
+  65534, reserved names) are never listed: they are hidden by the range, not by a list.
+- **Adoption.** `POST /api/v1/users/adopt` / `POST /api/v1/groups/adopt` (`{names: []}` = all)
+  stage the accounts as they are (`users::import_from` → `users::adopt`): uid, home, shell,
+  memberships of local groups (the groups come along), Samba presence. Applying runs no
+  `useradd`: the accounts exist. Saving an unmanaged user or group in its editor adopts it the
+  same way (`PUT` adopts when the name is on the system). Afterwards the usual tools work:
+  password (also creates the Samba account), groups, share permissions, home move, quotas.
+  Memberships outside rynas' groups (`sudo`, `docker`) stay untouched as before.
+- **Chosen id at creation.** The create forms take an optional UID/GID (1000–59999, empty =
+  next free): a user made with uid 1026 owns data copied with owner 1026 at once.
+- **Change UID/GID** (`POST /api/v1/ids/plan`, then task `ids.remap` via
+  `POST /api/v1/ids/remap`, body `IdRemapRequest {kind, name, new_id, paths, acls,
+  expected}`): guards first (`IdBlocker`): local managed account only (adopt first), never
+  root or < 1000, the new id in range and free, no running processes and no SMB sessions of
+  the user (the same check as the home move), folders absolute and inside a data volume,
+  `/home` or `/srv`. The plan walks the folders for at most 5 s as a dry run and returns
+  `RemapCounts` (entries, owners, ACL entries, read-only snapshots and other file systems
+  skipped, errors, `partial`). The task applies the id change as a revision of `users`
+  (reconcile runs `usermod -u`/`groupmod -g`, then `net cache flush`), then walks. Only an id
+  change task can make the document disagree with passwd on an id (`allow_id_change` guard
+  around its apply); a restored old revision with another id is refused by validation.
+- **Take over files** (same endpoints with `from_id`): files owned by an id no account has
+  become the account's; the account does not change. The DSM case "data copied with owner
+  1026, the user is uid 1000" is exactly this: *Take over files… → 1026*.
+- **Order and failure.** Account first, then files. A cancelled or failed walk leaves the
+  account on its new id and some files on the old one; running *Take over files* from the old
+  id (or the change again) finishes it — the walk is idempotent. The walk never follows
+  symbolic links (`lchown`, roots that are links refused), never enters another mount point
+  (from `/proc/self/mountinfo`; btrfs subvolumes are walked), skips read-only subvolumes
+  (inode 256 + `BTRFS_IOC_SUBVOL_GETFLAGS`) and anything answering `EROFS`.
+
+### Out of scope (documented)
+
+- Crontabs (`/var/spool/cron/crontabs/<name>` is by name, but its owner is the uid), systemd
+  user units and lingering, running containers' bind mounts, files outside the chosen
+  folders, mail spools elsewhere, NFS clients' caches: listed in the dialog as "not changed".
+- A user-mapping step during import (old id → account for many ids at once): the take-over
+  operation run once per id covers it; a batch form can come with the CSV import.
+- Group membership by gid in other systems' data (e.g. ACLs written by Windows over SMB with
+  SIDs): the SID of a tdbsam user does not change, so they keep working.
+- Domain accounts (§ 3): ids come from idmap and are never changed here.
+
+The code: `crates/rynas-services/src/idremap.rs` (walk, `RemapFs`, ACL xattr rewrite),
+`users.rs` (`adopt`, `allow_id_change`, reconcile), `crates/rynasd/src/services/ids.rs`
+(routes), `crates/rynas-ui/src/pages/user_ids.rs` (dialog).
+
+---
+
 ## 4. Proposal for rynas
 
 ### Phases

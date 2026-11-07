@@ -257,7 +257,17 @@ fn open_config(
         homes_host.clone(),
         accounts.clone(),
     ));
-    let users = Arc::new(UsersDomain::new(accounts.clone()).with_homes(homes_host));
+    // --dry-system: the ownership remap reads the host and changes nothing
+    let remap: Arc<dyn rynas_services::idremap::RemapFs> = if args.dry_system {
+        Arc::new(rynas_services::idremap::DryRemap)
+    } else {
+        Arc::new(rynas_services::idremap::HostRemap)
+    };
+    let users = Arc::new(
+        UsersDomain::new(accounts.clone())
+            .with_homes(homes_host)
+            .with_remap(remap),
+    );
     let shares = Arc::new(
         SharesDomain::new(host, accounts)
             .with_subvolumes(Arc::new(rynasd::storage_ops::HostSubvolumes {

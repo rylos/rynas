@@ -39,6 +39,7 @@ use crate::error::created;
 use crate::ops::{Error, Ops, Res, user};
 
 mod homes;
+mod ids;
 
 /// What these endpoints work on: the store and tasks of [`Ops`] plus typed access to the
 /// domains registered in it, and the record of the home moves waiting for confirmation.
@@ -105,7 +106,11 @@ pub fn router(st: SvcState) -> Router {
             get(user_get).put(user_put).delete(user_delete),
         )
         .route("/v1/users/{user}/password", post(user_password))
+        .route("/v1/users/adopt", post(ids::users_adopt))
         .route("/v1/groups", get(groups_list).post(group_create))
+        .route("/v1/groups/adopt", post(ids::groups_adopt))
+        .route("/v1/ids/plan", post(ids::ids_plan))
+        .route("/v1/ids/remap", post(ids::ids_remap))
         .route(
             "/v1/groups/{group}",
             get(group_get).put(group_put).delete(group_delete),
@@ -345,7 +350,18 @@ async fn user_put(
     u.name = name.clone();
     Ok(Json(
         blocking(&s, move |s| {
+            // a user of the system that rynas does not manage yet is adopted by saving it
+            let acc = s.users.accounts();
+            let sys = users::import_from(
+                &acc.users().map_err(internal)?,
+                &acc.groups().map_err(internal)?,
+                acc.samba_users().map_err(internal)?.as_deref(),
+            );
             stage_users(s, &owner, |doc| {
+                if !doc.users.iter().any(|x| x.name == name) {
+                    users::adopt(doc, &sys, rynas_api_types::IdKind::User, std::slice::from_ref(&name))
+                        .map_err(|_| not_found(format!("user {name}")))?;
+                }
                 let cur = doc
                     .users
                     .iter_mut()
@@ -528,6 +544,21 @@ fn group_views(s: &Services, owner: &str) -> Res<Vec<GroupView>> {
     {
         out.push(view(g, Some(PendingOp::Delete)));
     }
+    // groups of the system that the configuration does not know (created outside rynas)
+    let doc = users::import_from(&[], &sys, None);
+    for g in doc.groups {
+        if !out.iter().any(|x| x.group.name == g.name) {
+            let members = sys
+                .iter()
+                .find(|x| x.name == g.name)
+                .map(|x| x.members.clone())
+                .unwrap_or_default();
+            out.push(GroupView {
+                members,
+                ..view(&g, None)
+            });
+        }
+    }
     out.sort_by(|a, b| a.group.name.cmp(&b.group.name));
     Ok(out)
 }
@@ -617,7 +648,13 @@ async fn group_put(
     req.group.name = name.clone();
     Ok(Json(
         blocking(&s, move |s| {
+            // a group of the system that rynas does not manage yet is adopted by saving it
+            let sys = users::import_from(&[], &s.users.accounts().groups().map_err(internal)?, None);
             stage_users(s, &owner, |doc| {
+                if !doc.groups.iter().any(|g| g.name == name) {
+                    users::adopt(doc, &sys, rynas_api_types::IdKind::Group, std::slice::from_ref(&name))
+                        .map_err(|_| not_found(format!("group {name}")))?;
+                }
                 let cur = doc
                     .groups
                     .iter_mut()

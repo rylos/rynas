@@ -15,6 +15,7 @@
 pub mod accounts;
 pub mod folders;
 pub mod homes;
+pub mod idremap;
 pub mod host;
 pub mod nfs;
 pub mod perm;

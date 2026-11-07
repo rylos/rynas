@@ -18,6 +18,7 @@ pub mod storage;
 pub mod system;
 pub mod updates;
 pub mod user_homes;
+pub mod user_ids;
 pub mod users;
 pub mod web_access;
 

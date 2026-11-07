@@ -148,6 +148,19 @@ pub enum AccountOp {
         name: String,
         remove_home: bool,
     },
+    /// `usermod -u <uid> <name>` (UID change; usermod also gives the home directory's files
+    /// to the new uid, the rest goes through the ownership remap).
+    UserUid {
+        name: String,
+        uid: u32,
+    },
+    /// `groupmod -g <gid> <name>` (users with it as primary group follow; files do not).
+    GroupGid {
+        name: String,
+        gid: u32,
+    },
+    /// `net cache flush`: Samba forgets cached SID/uid mappings after an id change.
+    SambaCacheFlush,
     /// `chpasswd -c YESCRYPT` with `name:password` on stdin.
     SetShadowPassword {
         name: String,
@@ -190,6 +203,9 @@ impl AccountOp {
             AccountOp::UserAdd { .. } => "useradd",
             AccountOp::UserMod { .. } => "usermod",
             AccountOp::UserDel { .. } => "userdel",
+            AccountOp::UserUid { .. } => "usermod-uid",
+            AccountOp::GroupGid { .. } => "groupmod-gid",
+            AccountOp::SambaCacheFlush => "net-cache-flush",
             AccountOp::SetShadowPassword { .. } => "chpasswd",
             AccountOp::RestoreShadowHash { .. } => "chpasswd-restore",
             AccountOp::SambaAdd { .. } => "pdbedit-add",
@@ -242,6 +258,9 @@ impl AccountOp {
                     if *remove_home { " (home removed)" } else { "" }
                 )
             }
+            AccountOp::UserUid { name, uid } => format!("usermod {name}: uid {uid}"),
+            AccountOp::GroupGid { name, gid } => format!("groupmod {name}: gid {gid}"),
+            AccountOp::SambaCacheFlush => "net cache flush".into(),
             AccountOp::SetShadowPassword { name, .. } => {
                 format!("chpasswd: new password for {name}")
             }
@@ -503,6 +522,24 @@ impl Accounts for HostAccounts {
                 }
                 run(c.arg(name))
             }
+            AccountOp::UserUid { name, uid } => {
+                let c = Cmd::new("usermod").args(["-u", &uid.to_string(), name]);
+                match c.timeout(CMD_TIMEOUT).run_blocking() {
+                    Ok(_) => Ok(()),
+                    // 12 = E_HOMEDIR: passwd is written already, only some home files could
+                    // not change owner (read-only snapshot inside...): the remap that follows
+                    // reports them
+                    Err(CmdError::Failed(o)) if o.code == Some(12) => {
+                        tracing::warn!("usermod -u {name}: {}", o.stderr.trim());
+                        Ok(())
+                    }
+                    Err(e) => Err(format!("usermod: {e}")),
+                }
+            }
+            AccountOp::GroupGid { name, gid } => {
+                run(Cmd::new("groupmod").args(["-g", &gid.to_string(), name]))
+            }
+            AccountOp::SambaCacheFlush => run(Cmd::new("net").args(["cache", "flush"])),
             AccountOp::SetShadowPassword { name, password } => run(Cmd::new("chpasswd")
                 .args(["-c", "YESCRYPT"])
                 .stdin(format!("{name}:{}\n", password.expose()))),
@@ -750,6 +787,25 @@ impl Accounts for MemoryAccounts {
                     g.members.retain(|m| m != name);
                 }
                 s.shadow.remove(name);
+            }
+            AccountOp::UserUid { name, uid } => {
+                if s.users.iter().any(|u| u.uid == *uid && u.name != *name) {
+                    return Err(format!("usermod: UID '{uid}' already exists"));
+                }
+                s.user_mut(name)?.uid = *uid;
+            }
+            AccountOp::GroupGid { name, gid } => {
+                if s.groups.iter().any(|g| g.gid == *gid && g.name != *name) {
+                    return Err(format!("groupmod: GID '{gid}' already exists"));
+                }
+                let old = s.group_mut(name)?.gid;
+                s.group_mut(name)?.gid = *gid;
+                for u in s.users.iter_mut().filter(|u| u.gid == old) {
+                    u.gid = *gid;
+                }
+            }
+            AccountOp::SambaCacheFlush => {
+                s.samba_mut()?;
             }
             AccountOp::SetShadowPassword { name, password } => {
                 s.user_mut(name)?;

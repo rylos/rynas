@@ -6,7 +6,7 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use wasm_bindgen::JsCast;
-use rynas_api_types::{GroupRequest, GroupView, HOME_SYSTEM, HomesState, LocalGroup, LocalUser, PasswordRequest, PendingOp, ShellAccess, UserBadge, UserStatus, UserView};
+use rynas_api_types::{AdoptRequest, GroupRequest, GroupView, HOME_SYSTEM, IdKind, StagedChanges, HomesState, LocalGroup, LocalUser, PasswordRequest, PendingOp, ShellAccess, UserBadge, UserStatus, UserView};
 
 use crate::api::{self, ApiErr};
 use crate::form::{self, In, lens, lens_bool, save_bar, search_box, select_field, switch, tabs, text_field};
@@ -15,6 +15,7 @@ use crate::icons::{self, Icon};
 use crate::toast::{saved_applied, saved_pending, toast};
 use crate::ui::{self, Confirm, EmptyState, PageHeader, Remote, Tone, confirm, drawer};
 use super::user_homes::{MoveAsk, move_dialog, place_of, place_select, places};
+use super::user_ids::{IdAsk, id_dialog};
 
 /// `[a-z_][a-z0-9_-]{0,31}` (user and group names).
 pub fn valid_account_name(n: &str) -> bool {
@@ -124,6 +125,8 @@ fn users_panel(users: Remote<Vec<UserView>>, groups: Remote<Vec<GroupView>>, hom
     let del = RwSignal::new(None::<String>);
     // a home move asked from the editor (it runs after the editor closes)
     let mv = RwSignal::new(None::<MoveAsk>);
+    // a UID change or file takeover asked from the editor (it opens after the editor closes)
+    let ids = RwSignal::new(None::<IdAsk>);
     let create = move || edit.set(Some(UserEdit { user: LocalUser::default(), status: None, password: false }));
 
     let table = move || {
@@ -165,7 +168,7 @@ fn users_panel(users: Remote<Vec<UserView>>, groups: Remote<Vec<GroupView>>, hom
         edit.get().map(|e| {
             let names: Vec<String> = groups.data.with_untracked(|g| g.iter().flatten().map(|g| g.group.name.clone()).collect());
             let hs = homes.data.get_untracked();
-            user_editor(e, names, hs, Callback::new(move |a| mv.set(Some(a))), Callback::new(move |_| edit.set(None)))
+            user_editor(e, names, hs, Callback::new(move |a| mv.set(Some(a))), Callback::new(move |a| ids.set(Some(a))), Callback::new(move |_| edit.set(None)))
         })
     };
     let mover = move || {
@@ -179,6 +182,7 @@ fn users_panel(users: Remote<Vec<UserView>>, groups: Remote<Vec<GroupView>>, hom
     };
 
     let deleter = move || del.get().map(|name| user_delete_dialog(name, Callback::new(move |_| del.set(None))));
+    let id_changer = move || ids.get().map(|a| id_dialog(a, Callback::new(move |_| ids.set(None)), Callback::new(move |_| users.reload())));
 
     view! {
         <div class="toolbar">
@@ -187,10 +191,12 @@ fn users_panel(users: Remote<Vec<UserView>>, groups: Remote<Vec<GroupView>>, hom
                 <Icon icon=icons::USER_PLUS size=16 /><span class="btn-label">{tr("users.create")}</span>
             </button>
         </div>
+        {move || adopt_banner(users.data.with(|d| d.iter().flatten().filter(|u| !u.status.managed && u.status.pending.is_none() && u.status.on_system).count()), "/api/v1/users/adopt")}
         {table}
         {editor}
         {deleter}
         {mover}
+        {id_changer}
     }
     .into_any()
 }
@@ -254,9 +260,75 @@ fn user_row(v: UserView, edit: RwSignal<Option<UserEdit>>, del: RwSignal<Option<
 
 const SHELL_OPTS: &[(&str, &str)] = &[("none", "users.shell_none"), ("sftp", "users.shell_sftp"), ("shell", "users.shell_shell")];
 
-fn user_editor(e: UserEdit, all_groups: Vec<String>, homes: Option<HomesState>, on_move: Callback<MoveAsk>, close: Callback<()>) -> AnyView {
+/// Accounts of the system that rynas does not manage yet: one click stages them all, as they
+/// are (`POST .../adopt`), then the change is applied.
+fn adopt_banner(n: usize, url: &'static str) -> Option<AnyView> {
+    (n > 0).then(|| {
+        let busy = RwSignal::new(false);
+        let error = RwSignal::new(None::<String>);
+        let go = move |_| {
+            busy.set(true);
+            spawn_local(async move {
+                match api::post::<_, StagedChanges>(url, Some(&AdoptRequest::default())).await {
+                    Ok(_) => {
+                        if crate::config::apply_now(&[crate::config::keys::USERS], error).await {
+                            toast(Tone::Ok, t("users.adopted").to_string());
+                        }
+                    }
+                    Err(e) => {
+                        let _ = error.try_set(Some(e.text()));
+                    }
+                }
+                let _ = busy.try_set(false);
+            });
+        };
+        ui::note(Tone::Info, icons::INFO, view! {
+            <span>{tf("users.adopt_banner", &[("n", &n.to_string())])}</span>
+            <div class="sec-actions">
+                <button type="button" class="btn ghost" disabled=move || busy.get() on:click=go>{crate::form::spinner(busy)}{tr("users.adopt_all")}</button>
+            </div>
+            {crate::form::form_error(error)}
+        }
+        .into_any())
+    })
+}
+
+/// Current id with the buttons of the id dialog (a managed account on the system).
+fn id_row(label: &'static str, ask: IdAsk, change_key: &'static str, on_ids: Callback<IdAsk>, close: Callback<()>) -> AnyView {
+    let a2 = IdAsk { change: false, ..ask.clone() };
+    view! {
+        <dl class="kvs">{ui::kv_row(label, Signal::stored(ask.current.to_string()), "mono tnum")}</dl>
+        <div class="sec-actions">
+            <button type="button" class="btn ghost" on:click=move |_| { close.run(()); on_ids.run(ask.clone()); }>{tr(change_key)}</button>
+            <button type="button" class="btn ghost" on:click=move |_| { close.run(()); on_ids.run(a2.clone()); }>{tr("ids.reown")}</button>
+        </div>
+    }
+    .into_any()
+}
+
+fn id_ok(n: u32) -> bool {
+    n == 0 || (rynas_api_types::LOCAL_ID_MIN..=rynas_api_types::LOCAL_ID_MAX).contains(&n)
+}
+
+/// Optional id of a new account: empty = the next free one.
+fn id_field(label: &'static str, help: &'static str, value: Signal<String>, set: Callback<String>) -> AnyView {
+    let err = Signal::derive(move || {
+        let v = value.get();
+        let ok = v.is_empty() || v.parse::<u32>().is_ok_and(|n| n != 0 && id_ok(n));
+        (!ok).then(|| t("users.uid_range").to_string())
+    });
+    text_field(label, value, set, err, In { kind: "number", help: Some(help), mono: true, maxlength: 5, ..In::default() })
+}
+
+fn id_text(id: u32) -> String {
+    if id == 0 { String::new() } else { id.to_string() }
+}
+
+fn user_editor(e: UserEdit, all_groups: Vec<String>, homes: Option<HomesState>, on_move: Callback<MoveAsk>, on_ids: Callback<IdAsk>, close: Callback<()>) -> AnyView {
     let is_new = e.status.is_none();
     let on_system = e.status.as_ref().is_some_and(|s| s.on_system);
+    let unmanaged = e.status.as_ref().is_some_and(|s| !s.managed && s.pending.is_none());
+    let managed = e.status.as_ref().is_some_and(|s| s.managed);
     let d = RwSignal::new(e.user.clone());
     let show = RwSignal::new(false);
     let server = RwSignal::new(None::<(String, String)>);
@@ -286,6 +358,8 @@ fn user_editor(e: UserEdit, all_groups: Vec<String>, homes: Option<HomesState>, 
     let (admin, set_admin) = lens_bool(d, |u| u.admin, |u, v| u.admin = v);
     let (smb, set_smb) = lens_bool(d, |u| u.smb, |u, v| u.smb = v);
     let (disabled, set_disabled) = lens_bool(d, |u| u.disabled, |u, v| u.disabled = v);
+    // a typed value that is not a number keeps the field invalid (u32::MAX is out of range)
+    let (uid, set_uid) = lens(d, |u| id_text(u.uid), |u, v| u.uid = if v.trim().is_empty() { 0 } else { v.trim().parse().unwrap_or(u32::MAX) });
 
     let name_err = field_err(show, server, "name", name, valid_account_name, "v.account_name");
     let full_err = field_err(show, server, "full_name", full, |s| !s.contains([':', ',']), "v.full_name");
@@ -345,7 +419,7 @@ fn user_editor(e: UserEdit, all_groups: Vec<String>, homes: Option<HomesState>, 
     let move_ask = move || (!is_new && place.get_untracked() != here).then(|| MoveAsk { users: vec![user_name.clone()], to: place.get_untracked() });
     let original = e.user.clone();
 
-    let valid = move || d.with(|u| (!is_new || valid_account_name(&u.name)) && !u.full_name.contains([':', ',']) && valid_email(&u.email));
+    let valid = move || d.with(|u| (!is_new || valid_account_name(&u.name)) && !u.full_name.contains([':', ',']) && valid_email(&u.email) && (!is_new || id_ok(u.uid)));
     let save = Callback::new(move |_| {
         show.set(true);
         server.set(None);
@@ -440,7 +514,10 @@ fn user_editor(e: UserEdit, all_groups: Vec<String>, homes: Option<HomesState>, 
     let body = view! {
         <form class="form" on:submit=move |ev| { ev.prevent_default(); save.run(()); }>
             <h3 class="form-section">{tr("users.sec_info")}</h3>
+            {unmanaged.then(|| ui::note(Tone::Info, icons::INFO, view! { <span>{tr("users.unmanaged_note")}</span> }.into_any()))}
             {is_new.then(|| text_field("users.name", name, set_name, name_err, In { help: Some("users.name_help"), mono: true, maxlength: 32, ..In::default() }))}
+            {is_new.then(|| id_field("users.uid", "users.uid_help", uid, set_uid))}
+            {(managed && on_system).then(|| id_row("users.uid", IdAsk { kind: IdKind::User, name: e.user.name.clone(), current: e.user.uid, change: true }, "ids.change_uid", on_ids, close))}
             {text_field("users.full_name", full, set_full, full_err, In { autocomplete: "name", ..In::default() })}
             {text_field("users.email", email, set_email, email_err, In { kind: "email", help: Some("users.email_help"), autocomplete: "email", ..In::default() })}
             {text_field("users.description", descr, set_descr, none, In::default())}
@@ -462,7 +539,7 @@ fn user_editor(e: UserEdit, all_groups: Vec<String>, homes: Option<HomesState>, 
         {password}
     }
     .into_any();
-    let foot = save_bar(busy, Signal::derive(|| true), if is_new { "create" } else { "save" }, close, save, error);
+    let foot = save_bar(busy, Signal::derive(|| true), if is_new { "create" } else if unmanaged { "users.adopt" } else { "save" }, close, save, error);
     drawer(title, close, body, foot)
 }
 
@@ -608,6 +685,7 @@ fn groups_panel(users: Remote<Vec<UserView>>, groups: Remote<Vec<GroupView>>) ->
     let q = RwSignal::new(String::new());
     let edit = RwSignal::new(None::<GroupView>);
     let del = RwSignal::new(None::<String>);
+    let ids = RwSignal::new(None::<IdAsk>);
     let create = move || edit.set(Some(GroupView::default()));
 
     let table = move || {
@@ -677,7 +755,7 @@ fn groups_panel(users: Remote<Vec<UserView>>, groups: Remote<Vec<GroupView>>) ->
     let editor = move || {
         edit.get().map(|g| {
             let names: Vec<String> = users.data.with_untracked(|u| u.iter().flatten().map(|u| u.user.name.clone()).collect());
-            group_editor(g, names, Callback::new(move |_| edit.set(None)))
+            group_editor(g, names, Callback::new(move |a| ids.set(Some(a))), Callback::new(move |_| edit.set(None)))
         })
     };
     let deleter = move || {
@@ -723,15 +801,19 @@ fn groups_panel(users: Remote<Vec<UserView>>, groups: Remote<Vec<GroupView>>) ->
                 <Icon icon=icons::PLUS size=16 /><span class="btn-label">{tr("groups.create")}</span>
             </button>
         </div>
+        {move || adopt_banner(groups.data.with(|d| d.iter().flatten().filter(|g| !g.managed && g.pending.is_none() && g.on_system).count()), "/api/v1/groups/adopt")}
         {table}
         {editor}
         {deleter}
+        {move || ids.get().map(|a| id_dialog(a, Callback::new(move |_| ids.set(None)), Callback::new(move |_| { groups.reload(); users.reload(); })))}
     }
     .into_any()
 }
 
-fn group_editor(g: GroupView, all_users: Vec<String>, close: Callback<()>) -> AnyView {
+fn group_editor(g: GroupView, all_users: Vec<String>, on_ids: Callback<IdAsk>, close: Callback<()>) -> AnyView {
     let is_new = g.group.name.is_empty();
+    let unmanaged = !is_new && !g.managed && g.pending.is_none();
+    let managed = g.managed && g.on_system;
     let d = RwSignal::new(g.group.clone());
     let members = RwSignal::new(g.members.clone());
     let show = RwSignal::new(false);
@@ -741,13 +823,14 @@ fn group_editor(g: GroupView, all_users: Vec<String>, close: Callback<()>) -> An
     let q = RwSignal::new(String::new());
     let (name, set_name) = lens(d, |g: &LocalGroup| g.name.clone(), |g, v| g.name = v.trim().to_ascii_lowercase());
     let (descr, set_descr) = lens(d, |g: &LocalGroup| g.description.clone(), |g, v| g.description = v);
+    let (gid, set_gid) = lens(d, |g: &LocalGroup| id_text(g.gid), |g, v| g.gid = if v.trim().is_empty() { 0 } else { v.trim().parse().unwrap_or(u32::MAX) });
     let name_err = field_err(show, server, "name", name, valid_account_name, "v.account_name");
     let none = Signal::derive(|| None::<String>);
 
     let save = Callback::new(move |_| {
         show.set(true);
         server.set(None);
-        if is_new && !d.with_untracked(|g| valid_account_name(&g.name)) {
+        if is_new && !d.with_untracked(|g| valid_account_name(&g.name) && id_ok(g.gid)) {
             error.set(Some(t("form.check").to_string()));
             return;
         }
@@ -805,7 +888,10 @@ fn group_editor(g: GroupView, all_users: Vec<String>, close: Callback<()>) -> An
 
     let body = view! {
         <form class="form" on:submit=move |ev| { ev.prevent_default(); save.run(()); }>
+            {unmanaged.then(|| ui::note(Tone::Info, icons::INFO, view! { <span>{tr("users.unmanaged_note")}</span> }.into_any()))}
             {is_new.then(|| text_field("groups.name", name, set_name, name_err, In { help: Some("groups.name_help"), mono: true, maxlength: 32, ..In::default() }))}
+            {is_new.then(|| id_field("groups.gid", "users.uid_help", gid, set_gid))}
+            {managed.then(|| id_row("groups.gid", IdAsk { kind: IdKind::Group, name: g.group.name.clone(), current: g.group.gid, change: true }, "ids.change_gid", on_ids, close))}
             {text_field("users.description", descr, set_descr, none, In::default())}
             <fieldset class="fieldset">
                 <legend class="field-label">
@@ -824,7 +910,7 @@ fn group_editor(g: GroupView, all_users: Vec<String>, close: Callback<()>) -> An
         </form>
     }
     .into_any();
-    let foot = save_bar(busy, Signal::derive(|| true), if is_new { "create" } else { "save" }, close, save, error);
+    let foot = save_bar(busy, Signal::derive(|| true), if is_new { "create" } else if unmanaged { "users.adopt" } else { "save" }, close, save, error);
     drawer(title, close, body, foot)
 }
 

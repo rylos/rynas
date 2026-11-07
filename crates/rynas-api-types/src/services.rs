@@ -221,6 +221,139 @@ impl std::fmt::Debug for PasswordRequest {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Adoption of existing accounts, UID/GID changes and ownership remap
+// ---------------------------------------------------------------------------------------------
+
+/// Body of `POST /api/v1/users/adopt` and `POST /api/v1/groups/adopt`: accounts of the system
+/// (1000–59999, created outside rynas) taken into rynas' configuration as they are (staged).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AdoptRequest {
+    /// Names to adopt; empty = every account not managed yet.
+    #[serde(default)]
+    pub names: Vec<String>,
+}
+
+/// A user (uid) or a group (gid).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum IdKind {
+    #[default]
+    User,
+    Group,
+}
+
+/// Body of `POST /api/v1/ids/plan` (dry run) and `POST /api/v1/ids/remap` (task). Exactly one
+/// of `new_id` and `from_id`:
+/// - `new_id`: change the account's uid/gid (`usermod -u` / `groupmod -g`), then give the
+///   files owned by the old id to the new one;
+/// - `from_id`: the account keeps its id; files owned by `from_id` (an id no account has,
+///   e.g. data copied from another system with numeric owners) become the account's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IdRemapRequest {
+    #[serde(default)]
+    pub kind: IdKind,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_id: Option<u32>,
+    /// Folders to walk (absolute, inside a data volume, `/home` or `/srv`). Empty: the
+    /// suggested ones ([`IdRemapPlan::roots`]).
+    #[serde(default)]
+    pub paths: Vec<String>,
+    /// Rewrite POSIX ACL entries naming the old id too.
+    #[serde(default = "default_true")]
+    pub acls: bool,
+    /// Entries counted by the plan (progress of the task only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected: Option<u64>,
+}
+
+/// What a walk found or changed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RemapCounts {
+    /// Entries looked at.
+    pub scanned: u64,
+    /// Entries whose owner changes (or changed).
+    pub owners: u64,
+    /// Entries whose group changes.
+    pub groups: u64,
+    /// POSIX ACL entries naming the old id.
+    pub acl_entries: u64,
+    /// Read-only subvolumes (snapshots) skipped: they keep the old id.
+    #[serde(default)]
+    pub readonly: Vec<String>,
+    /// Mount points of other file systems inside the folders, not entered.
+    #[serde(default)]
+    pub other_fs: Vec<String>,
+    pub errors: u64,
+    #[serde(default)]
+    pub error_samples: Vec<String>,
+    /// The dry run stopped at its time limit: the numbers are lower bounds.
+    #[serde(default)]
+    pub partial: bool,
+    #[serde(default)]
+    pub cancelled: bool,
+}
+
+/// Answer of `POST /api/v1/ids/plan`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IdRemapPlan {
+    pub kind: IdKind,
+    pub name: String,
+    /// Files owned by this id...
+    pub from: u32,
+    /// ...become this id's.
+    pub to: u32,
+    /// The account's id changes (`new_id`), not only files.
+    pub change: bool,
+    /// Suggested folders: the data volumes and the user's home.
+    pub roots: Vec<String>,
+    /// The folders walked by the dry run (the request's or the suggested ones).
+    pub paths: Vec<String>,
+    pub allowed: bool,
+    #[serde(default)]
+    pub blockers: Vec<IdBlocker>,
+    /// Dry-run counts; `None` when blocked before the walk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan: Option<RemapCounts>,
+}
+
+/// Why an id change or remap cannot run now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdBlocker {
+    pub code: IdBlockerCode,
+    /// Account name, id, pids, path... (shown as is).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdBlockerCode {
+    /// Not a local account in 1000–59999 (root and system accounts are never changed).
+    NotLocal,
+    /// Created outside rynas: adopt it first (id changes only).
+    Unmanaged,
+    /// The id outside 1000–59999 (`new_id`), or below 1000 / reserved (`from_id`).
+    OutOfRange,
+    /// The new id is the current one.
+    SameId,
+    /// Another account has that id (`detail`: its name).
+    IdInUse,
+    /// The user has running processes (`detail`: pids).
+    Processes,
+    /// The user is connected over SMB (`detail`: number of sessions).
+    SmbSessions,
+    /// A folder is not absolute, does not exist or is outside the data folders.
+    PathInvalid,
+    /// Neither or both of `new_id` and `from_id`.
+    BadRequest,
+    #[serde(other)]
+    Other,
+}
+
+// ---------------------------------------------------------------------------------------------
 // Shares, SMB and NFS
 // ---------------------------------------------------------------------------------------------
 

@@ -1129,3 +1129,136 @@ fn active_enter_timestamp() {
         None
     );
 }
+
+/// Users of the Debian installer (uid 1000) and made by hand are adopted as they are; a UID
+/// and a GID change go through `usermod -u`/`groupmod -g` only with the task's permission.
+#[test]
+fn adoption_and_id_changes() {
+    use crate::users::{adopt, import_from};
+    use crate::Accounts;
+    use rynas_api_types::IdKind;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("root");
+    std::fs::create_dir_all(&root).unwrap();
+    let acc = Arc::new(MemoryAccounts::new());
+    {
+        let mut s = acc.state();
+        s.samba = Some(Default::default());
+        for (n, g) in [("users", 100), ("family", 1001), ("sudo", 27)] {
+            s.groups.push(crate::accounts::SysGroup {
+                name: n.into(),
+                gid: g,
+                members: if n == "family" || n == "sudo" {
+                    vec!["marco".into()]
+                } else {
+                    vec![]
+                },
+            });
+        }
+        for (n, u) in [("marco", 1000), ("anna", 1005), ("backup", 34)] {
+            s.users.push(SysUser {
+                name: n.into(),
+                uid: u,
+                gid: 100,
+                home: format!("/home/{n}"),
+                shell: "/bin/bash".into(),
+                ..Default::default()
+            });
+        }
+    }
+    let users = Arc::new(UsersDomain::new(acc.clone()));
+    let cfg = Config::open(
+        ConfigOptions::new(dir.path().join("state"), &root),
+        Arc::new(MemorySystem::new("nas")),
+        vec![users.clone()],
+    )
+    .unwrap();
+    let log = |_: &str| {};
+
+    // 1. adoption: system users in range only, with their groups; sudo is not taken
+    let sys = import_from(&acc.users().unwrap(), &acc.groups().unwrap(), None);
+    let mut doc = UsersConfig::default();
+    let added = adopt(&mut doc, &sys, IdKind::User, &["marco".into()]).unwrap();
+    assert_eq!(added, vec!["marco"]);
+    assert_eq!(doc.users[0].uid, 1000);
+    assert_eq!(doc.users[0].groups, vec!["family"]);
+    assert_eq!(doc.groups.len(), 1);
+    assert!(adopt(&mut doc, &sys, IdKind::User, &["backup".into()]).is_err());
+    let added = adopt(&mut doc, &sys, IdKind::User, &[]).unwrap();
+    assert_eq!(added, vec!["anna"]);
+    cfg.apply_value(
+        "admin",
+        USERS_KEY,
+        Some(serde_json::to_value(&doc).unwrap()),
+        "adopt",
+        &log,
+    )
+    .unwrap();
+    // nothing was created or changed: the accounts were already there
+    let l = acc.state().log.clone();
+    assert!(
+        l.iter().all(|l| !l.starts_with("useradd") && !l.contains("uid")),
+        "{l:?}"
+    );
+
+    // 2. a uid change without the task's permission is refused (restored revision...)
+    let mut changed = doc.clone();
+    changed.users.iter_mut().find(|u| u.name == "anna").unwrap().uid = 1026;
+    let v = serde_json::to_value(&changed).unwrap();
+    assert!(
+        cfg.apply_value("admin", USERS_KEY, Some(v.clone()), "x", &log)
+            .is_err()
+    );
+    // to an id in use: refused even with it
+    {
+        let mut bad = doc.clone();
+        bad.users.iter_mut().find(|u| u.name == "anna").unwrap().uid = 1000;
+        let _g = users.allow_id_change(IdKind::User, "anna", 1005, 1000);
+        let v = serde_json::to_value(&bad).unwrap();
+        assert!(cfg.apply_value("admin", USERS_KEY, Some(v), "x", &log).is_err());
+    }
+    {
+        let _g = users.allow_id_change(IdKind::User, "anna", 1005, 1026);
+        cfg.apply_value("admin", USERS_KEY, Some(v), "uid", &log)
+            .unwrap();
+    }
+    let anna = acc
+        .users()
+        .unwrap()
+        .into_iter()
+        .find(|u| u.name == "anna")
+        .unwrap();
+    assert_eq!(anna.uid, 1026);
+    let l = acc.state().log.clone();
+    assert!(l.contains(&"usermod anna: uid 1026".to_string()), "{l:?}");
+    assert!(l.contains(&"net cache flush".to_string()), "{l:?}");
+
+    // 3. a gid change; the primary group of users follows (groupmod)
+    let mut changed2 = changed.clone();
+    changed2
+        .groups
+        .iter_mut()
+        .find(|g| g.name == "family")
+        .unwrap()
+        .gid = 2001;
+    {
+        let _g = users.allow_id_change(IdKind::Group, "family", 1001, 2001);
+        cfg.apply_value(
+            "admin",
+            USERS_KEY,
+            Some(serde_json::to_value(&changed2).unwrap()),
+            "gid",
+            &log,
+        )
+        .unwrap();
+    }
+    assert!(
+        acc.groups()
+            .unwrap()
+            .iter()
+            .any(|g| g.name == "family" && g.gid == 2001)
+    );
+    // the guard is gone: the old value of anna no longer passes for the new system state
+    assert!(users.normalize(doc.clone()).is_err());
+}
