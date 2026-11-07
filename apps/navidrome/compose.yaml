@@ -1,0 +1,24 @@
+# Upstream: https://www.navidrome.org/docs/installation/docker/
+# Differences: image pinned, runs as PUID:PGID (the image ignores PUID/PGID variables),
+# anonymous usage statistics off (ND_ENABLEINSIGHTSCOLLECTOR defaults to true), hourly scan,
+# healthcheck on /ping as the TrueNAS app does. The image has no HEALTHCHECK of its own.
+services:
+  navidrome:
+    image: deluan/navidrome:0.64.2@sha256:38dc2727bfcfd5ede290f8ada114fc90368146f265ae4701ddddbcbe2a44ee52
+    restart: unless-stopped
+    user: "${PUID}:${PGID}"
+    ports:
+      - "${RYNAS_BIND}:${WEB_PORT}:4533"
+    environment:
+      TZ: "${TZ}"
+      ND_ENABLEINSIGHTSCOLLECTOR: "false"
+      ND_SCANNER_SCHEDULE: "1h"
+      ND_LOGLEVEL: info
+    volumes:
+      - ${DATA_FOLDER}:/data
+      - ${MUSIC}:/music:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:4533/ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

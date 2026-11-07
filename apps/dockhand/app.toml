@@ -1,7 +1,7 @@
 schema = 1
 id = "dockhand"
 name = "Dockhand"
-version = "1.0.0"
+version = "1.0.1"
 app_version = "v1.0.57"
 description = "Docker manager with compose stacks, Git deploys, update checks and restic backups."
 homepage = "https://dockhand.pro"
@@ -14,11 +14,18 @@ min_rynas = "0.1.0"
 arch = ["amd64", "arm64"]
 antifeatures = ["non-free", "root-access"]
 main_service = "dockhand"
+featured = true
 manager = true
 
 [resources]
 ram_min_mb = 512
 ram_recommended_mb = 1024
+
+[hardware]
+# the amd64 image is Wolfi-based, built for x86-64-v2 (SSE4.2, POPCNT); upstream's amd64-only
+# `-baseline` tags (Alpine/musl) exist for older CPUs. Not AVX2, so no RYNAS_CPU_AVX2 overlay:
+# see docs/research/app-catalog-format.md § 3
+cpu_features = ["x86-64-v2"]
 
 [[ports]]
 name = "web"

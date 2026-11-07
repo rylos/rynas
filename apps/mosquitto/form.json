@@ -1,0 +1,18 @@
+{
+  "type": "object",
+  "properties": {
+    "MQTT_USER": {
+      "type": "string",
+      "title": "MQTT user name",
+      "description": "Devices and apps (Zigbee2MQTT, Home Assistant, Frigate) log in with this name.",
+      "default": "mqtt",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "[A-Za-z0-9_.-]+"
+    }
+  },
+  "required": ["MQTT_USER"],
+  "x-groups": [
+    { "title": "Access", "fields": ["MQTT_USER"] }
+  ]
+}

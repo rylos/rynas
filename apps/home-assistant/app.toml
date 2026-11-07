@@ -14,6 +14,7 @@ min_rynas = "0.1.0"
 arch = ["amd64", "arm64"]
 antifeatures = ["root-access"]
 main_service = "homeassistant"
+featured = true
 # device discovery (mDNS, SSDP, Bluetooth) needs the host network
 host_network = true
 

@@ -1,0 +1,17 @@
+{
+  "type": "object",
+  "properties": {
+    "APP_URL": {
+      "type": "string",
+      "title": "Public URL",
+      "description": "The HTTPS address of Pocket ID, without a path, e.g. https://id.example.lan. Passkeys are bound to this name.",
+      "format": "uri",
+      "pattern": "https://[^/]+",
+      "x-ui": { "placeholder": "https://id.example.lan" }
+    }
+  },
+  "required": ["APP_URL"],
+  "x-groups": [
+    { "title": "Access", "fields": ["APP_URL"] }
+  ]
+}

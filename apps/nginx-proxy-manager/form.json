@@ -1,0 +1,16 @@
+{
+  "type": "object",
+  "properties": {
+    "INITIAL_ADMIN_EMAIL": {
+      "type": "string",
+      "title": "Administrator e-mail",
+      "description": "The login of the first administrator; also used for Let's Encrypt notices.",
+      "format": "email",
+      "x-ui": { "placeholder": "admin@example.com" }
+    }
+  },
+  "required": ["INITIAL_ADMIN_EMAIL"],
+  "x-groups": [
+    { "title": "Administrator", "fields": ["INITIAL_ADMIN_EMAIL"] }
+  ]
+}

@@ -1,0 +1,6 @@
+[form]
+HW_ACCEL = true
+LIBVA_DRIVER = "i965"
+
+[folders]
+RECORDINGS_FOLDER = "/volume3/frigate"

@@ -139,10 +139,27 @@ Full digests are in each `apps/<id>/compose.yaml`.
 
 ## 3. Open points
 
-- **Dockhand `-baseline` tags** (`fnsys/dockhand:v1.0.57-baseline`, amd64 only) exist next to
-  the normal tags, but neither the manual nor the Dockerfile explains them (the image moved
-  from Bun to Node.js). If they turn out to be builds for CPUs without AVX/AVX2 (low-power
-  Celeron and Atom CPUs such as the J4125 have neither), add an overlay on `!RYNAS_CPU_AVX2`; the provided variable exists for that.
+- **Dockhand `-baseline` tags: resolved in wave A3 (2026-11-07), no overlay.** They are
+  Alpine/musl builds, amd64 only, for CPUs **without x86-64-v2** (no SSE4.2/POPCNT), not for
+  CPUs without AVX2. Evidence:
+  - `Dockerfile.baseline`: *"For older x86_64 hardware without AVX2/SSE4.2 (TrueNAS, older
+    Intel Atom/Celeron) … The Wolfi/glibc build crashes with SIGILL on CPUs that don't support
+    the microarchitecture level Wolfi packages are compiled for."*
+    (https://github.com/Finsys/dockhand/blob/main/Dockerfile.baseline);
+  - `src/lib/server/backups/restic.ts`: *"The baseline Dockhand image (old x86_64 CPUs without
+    x86-64-v2) sets DOCKHAND_VARIANT=baseline"*, and `updater-image-core.ts`: *"The default
+    updater is Wolfi-based (compiled for x86-64-v2)"* (https://github.com/Finsys/dockhand);
+  - history: issue #47 (Celeron J4105, exit 132, when the image ran on Bun built for AVX2),
+    changelog 1.0.6 "Legacy CPU support (Celeron, Atom)" and 1.0.7 "Baseline Docker images for
+    CPUs without AVX support"; since the move to Node.js (copied from `node:24-slim`, "conservative
+    CPU baseline") only the Wolfi base sets the floor, at x86-64-v2. Later reports needing
+    baseline are pre-v2 CPUs (AMD C-70, Phenom II, Turion N54L in #47, Atom D2700 in #129).
+
+  The J4125 (Goldmont Plus) has x86-64-v2, so it runs the normal image. `RYNAS_CPU_AVX2` is the
+  wrong signal, and on arm64 (no AVX2) a `!RYNAS_CPU_AVX2` overlay would even select an
+  amd64-only image. The entry now declares `hardware.cpu_features = ["x86-64-v2"]` (package
+  1.0.1). If pre-v2 machines ever matter, the clean way is a provided `RYNAS_CPU_X86_64_V2`
+  (true on arm64) and an overlay on its negation.
 - **Immich on HDD**: whether to set `DB_STORAGE_TYPE=HDD` automatically when the database folder
   is not on an SSD (needs the engine to know the volume's rotational flag).
 - **Syncthing host networking** as an option (would need host-network variants of the port
@@ -153,3 +170,229 @@ Full digests are in each `apps/<id>/compose.yaml`.
 - **CI pipeline beyond `cargo test`**: `packaging/apps-render-test.sh` runs
   `docker compose config` on every render; the real `up` + healthcheck test and Renovate PRs
   for digests belong to the catalogue repository's CI.
+
+## 4. Wave A3: thirteen more entries (2026-11-07)
+
+Goal: the ~25-app catalogue of `reverse-proxy-app-store.md` ("Initial curated catalog", sized
+for 4 GB of RAM), one or more apps per area. For every entry: the official upstream compose
+and docs of today, the registry manifest, and how TrueNAS (`truenas/apps`, `ix-dev/community`),
+Umbrel (`umbrel-apps`) and Runtipi (`runtipi-appstore`) package it.
+
+### Picks and skips
+
+| Area | Added | Skipped, and why |
+|---|---|---|
+| Access | Nginx Proxy Manager, Pocket ID, cloudflared | **Traefik**: configured by files and Docker labels, needs the Docker socket and has no GUI; the external-proxy case is covered by NPM, and rynas does no label discovery (D-PROXY). **Authelia**: needs a hand-written `configuration.yml` and users file, which an entry cannot ship; rynas SSO already covers forward auth, Pocket ID covers OIDC |
+| Media | Navidrome, Audiobookshelf | **Plex**: non-free, needs a claim token and an account; Jellyfin covers the area |
+| Documents | Stirling-PDF | **Collabora Online**: only useful wired into Nextcloud (WOPI, domain allow-list), ~2 GB; better as a Nextcloud option later |
+| Home | Mosquitto, Zigbee2MQTT, Frigate | — |
+| Network | AdGuard Home | — |
+| Utilities | Forgejo, Mealie, Actual Budget | **qBittorrent**: fine technically, left for the next wave to stay at 25 |
+| AI | — | **Open WebUI + Ollama**: CPU-only inference on a 4 GB NAS is not usable (models of 2-8 GB; a GPU in practice) |
+
+### Images pinned
+
+All digests were read on 2026-11-07 from the registries' anonymous manifest API
+(`GET /v2/<repo>/manifests/<tag>`, `Docker-Content-Digest` of the image index; Docker Hub,
+ghcr.io and codeberg.org), read-only. **All verified; none left for CI to fill.** Every index
+lists `linux/amd64` and `linux/arm64`.
+
+| Entry | Image | Upstream reference |
+|---|---|---|
+| Nginx Proxy Manager | `jc21/nginx-proxy-manager:2.16.0@sha256:4393e642…7f9594` | https://nginxproxymanager.com/setup/ · release v2.16.0 (2026-09-24) |
+| Pocket ID | `ghcr.io/pocket-id/pocket-id:v2.19.2@sha256:3ee23895…7695eb` | https://github.com/pocket-id/pocket-id/blob/main/docker-compose.yml · v2.19.2 (2026-11-02) |
+| cloudflared | `cloudflare/cloudflared:2026.10.7@sha256:4955524a…b9c5ba` | https://github.com/cloudflare/cloudflared/blob/master/Dockerfile |
+| AdGuard Home | `adguard/adguardhome:v0.107.80@sha256:e2e1b48c…93027c` | https://github.com/AdguardTeam/AdGuardHome/wiki/Docker · v0.107.80 (2026-11-03) |
+| Navidrome | `deluan/navidrome:0.64.2@sha256:38dc2727…a44ee52` | https://www.navidrome.org/docs/installation/docker/ · v0.64.2 (2026-09-24) |
+| Audiobookshelf | `ghcr.io/advplyr/audiobookshelf:2.37.2@sha256:b897c33f…a7658efa` | https://github.com/advplyr/audiobookshelf/blob/master/docker-compose.yml · v2.37.2 (2026-10-23) |
+| Stirling-PDF | `stirlingtools/stirling-pdf:3.3.0@sha256:ed7b1775…036025e6` | https://docs.stirlingpdf.com/Server/Install/Docker/ · v3.3.0 (2026-11-05) |
+| Actual Budget | `actualbudget/actual-server:26.11.0@sha256:06cf1865…1d398da6` | https://github.com/actualbudget/actual/blob/master/packages/sync-server/docker-compose.yml · v26.11.0 (2026-11-02) |
+| Mosquitto | `eclipse-mosquitto:2.1.2-alpine@sha256:75d6662d…8bbc98` | https://hub.docker.com/_/eclipse-mosquitto · https://github.com/eclipse-mosquitto/mosquitto/blob/master/ChangeLog.txt |
+| Zigbee2MQTT | `ghcr.io/koenkk/zigbee2mqtt:2.14.3@sha256:fb4a6b0f…908f43a` | https://www.zigbee2mqtt.io/guide/installation/02_docker.html · 2.14.3 (2026-11-01) |
+| Frigate | `ghcr.io/blakeblackshear/frigate:0.18.2@sha256:fd60f99f…ffac09a` | https://docs.frigate.video/frigate/installation · 0.18.2 (2026-10-15) |
+| Forgejo | `codeberg.org/forgejo/forgejo:15.0.11-rootless@sha256:3cd6bc2b…2df9f40c` | https://forgejo.org/docs/latest/admin/installation/docker/ · LTS 15.0 (EOL 2027-07-15) |
+| Mealie | `ghcr.io/mealie-recipes/mealie:v3.30.0@sha256:90f83da6…63d784` | https://docs.mealie.io/documentation/getting-started/installation/sqlite/ · v3.30.0 (2026-10-31) |
+
+Full digests are in each `apps/<id>/compose.yaml`.
+
+### Format changes (backward compatible: optional, `false`/empty by default)
+
+- **`reverse_proxy`**: the clean way to say "needs ports 80/443, works only with web access in
+  external proxy mode". The validator requires tcp ports with defaults 80 and 443,
+  `relocatable = false`, not proxied, on a bridged network, and refuses defaults 80/443 tcp in
+  every other bridged entry (they belong to the built-in proxy). Reverse proxies are exempt
+  from the catalogue-wide unique-default rule for those two ports. Enforcement at install
+  needs no new code: rynasd already counts the proxy's ports as used unless external mode, so
+  the port check refuses the fixed 80/443. `AppCard.reverse_proxy` lets the UI say so upfront.
+- **`featured`**: the curated Featured pick (Immich, Jellyfin, Nextcloud, Vaultwarden, Home
+  Assistant, Paperless-ngx, Dockhand), exposed as `AppCard.featured`. Presentation only: setting
+  it does not bump the package version.
+- **`security.devices`**: services allowed to map host devices that are not a GPU (a USB
+  Zigbee coordinator). Before, any `devices:` needed `hardware.gpu`, which would have forced a
+  false GPU claim on Zigbee2MQTT.
+
+### Per-entry notes
+
+- **Nginx Proxy Manager.** Ports 80/443 (LAN, fixed) and admin 81 (proxied: with web access in
+  external mode the install publishes it on the LAN). Since 2.13 there is no default
+  `admin@example.com/changeme` account; `INITIAL_ADMIN_EMAIL/PASSWORD` create the first user
+  (form e-mail + generated password shown once; TrueNAS's notes still advertise the old login).
+  Runs as root like upstream: with `PUID/PGID` binding port 80 "may" fail (docs). The healthcheck
+  is opt-in upstream (`/usr/bin/check-health`), switched on as TrueNAS does;
+  `host.docker.internal` points at the host gateway (TrueNAS) so proxy hosts reach apps on the
+  NAS. Umbrel maps 40080/40443 instead, which defeats Let's Encrypt HTTP-01 without router
+  changes. Sources:
+  https://github.com/NginxProxyManager/nginx-proxy-manager/blob/develop/docs/src/setup/index.md ·
+  https://github.com/NginxProxyManager/nginx-proxy-manager/releases/tag/v2.13.0 ·
+  https://github.com/truenas/apps/tree/master/ix-dev/community/nginx-proxy-manager ·
+  https://github.com/getumbrel/umbrel-apps/blob/master/nginx-proxy-manager/docker-compose.yml
+- **Pocket ID.** `ENCRYPTION_KEY` is the only required variable (≥ 16 bytes; generated as 32
+  bytes base64, like `openssl rand -base64 32`); `APP_URL` without a path (no sub-path; passkeys
+  are bound to the domain and need HTTPS → `requires-https`); `TRUST_PROXY` takes a list of
+  CIDRs (`trusted_proxies_env`); PUID/PGID handled by the entrypoint; image healthcheck.
+  **Telemetry on by default** (daily heartbeat) → `ANALYTICS_DISABLED=true`. SQLite WAL
+  connection string from TrueNAS. Never put SSO in front: it is the identity provider. Sources:
+  https://github.com/pocket-id/pocket-id/blob/main/.env.example ·
+  https://github.com/pocket-id/website/blob/main/src/content/docs/docs/configuration/environment-variables.md ·
+  https://github.com/pocket-id/website/blob/main/src/content/docs/docs/configuration/analytics.md ·
+  https://github.com/pocket-id/website/blob/main/src/content/docs/docs/setup/reverse-proxy.mdx ·
+  https://github.com/truenas/apps/tree/master/ix-dev/community/pocket-id
+- **cloudflared.** Remotely managed tunnel: `tunnel --no-autoupdate run` with `TUNNEL_TOKEN`
+  (TrueNAS). Distroless image (no shell, uid 65532): metrics pinned to `127.0.0.1:20241`, and
+  the healthcheck is `cloudflared tunnel --metrics … ready` (since 2024.11.1). Host network so
+  the tunnel reaches the web access proxy and loopback-bound apps; no ports, no web block.
+  Umbrel and Runtipi wrap it in third-party web UIs; not taken. Traffic is decrypted at
+  Cloudflare (wizard warning). Sources: https://github.com/cloudflare/cloudflared/blob/master/Dockerfile ·
+  https://github.com/cloudflare/cloudflared/blob/master/cmd/cloudflared/tunnel/subcommands.go ·
+  https://github.com/cloudflare/cloudflared/blob/master/metrics/metrics.go ·
+  https://github.com/truenas/apps/tree/master/ix-dev/community/cloudflared
+- **AdGuard Home.** 53 tcp/udp fixed on the LAN (bridged; DHCP would need host networking and
+  is not offered); `--web-addr 0.0.0.0:3000` keeps the interface on 3000 after the wizard
+  (TrueNAS and Umbrel do the same; Runtipi seeds a config file). Port 53 against the
+  systemd-resolved stub: the port check refuses the install and the wizard note gives upstream's
+  FAQ fix (`DNSStubListener=no`). Runs as root; upstream removed the image healthcheck in
+  v0.107.34 "because it caused many issues". Sub-path documented for nginx and Caddy. Sources:
+  https://github.com/AdguardTeam/AdGuardHome/wiki/Docker · https://adguard-dns.io/kb/adguard-home/faq/ ·
+  https://adguard-dns.io/kb/adguard-home/configuration/ ·
+  https://github.com/AdguardTeam/AdGuardHome/blob/master/docker/build.Dockerfile
+- **Navidrome.** `user:` (the image ignores PUID/PGID, which Umbrel sets to no effect); `/data`,
+  `/music:ro`; **`ND_ENABLEINSIGHTSCOLLECTOR` defaults to true** → off; hourly scan (Runtipi
+  still uses the old `ND_SCANSCHEDULE` name); healthcheck `/ping` (TrueNAS). Subsonic clients
+  (`/rest`) and shares (`/share`) bypass SSO; external auth (`ND_EXTAUTH_TRUSTEDSOURCES`, the
+  new name of `ReverseProxyWhitelist`) left off. Sources:
+  https://www.navidrome.org/docs/installation/docker/ · https://www.navidrome.org/docs/usage/configuration/options/ ·
+  https://www.navidrome.org/docs/usage/integration/authentication/ ·
+  https://github.com/truenas/apps/tree/master/ix-dev/community/navidrome
+- **Audiobookshelf.** Upstream's commented `user:` line (Umbrel uses it), with `PORT=13378`
+  so the non-root process does not bind 80; `init: true` (Umbrel); healthcheck `/healthcheck`
+  (TrueNAS). WebSocket required (socket.io); sub-path only as `/audiobookshelf`, so its own
+  host name; large uploads (10G, community nginx examples). The SSO bypass list (`/api`,
+  `/socket.io`, `/auth`, `/login`, `/public`, `/feed`, `/hls`) is inferred from the app's
+  routes, not documented upstream. Sources:
+  https://github.com/advplyr/audiobookshelf/blob/master/docker-compose.yml ·
+  https://github.com/advplyr/audiobookshelf#reverse-proxy-set-up ·
+  https://github.com/advplyr/audiobookshelf/blob/master/index.js ·
+  https://github.com/getumbrel/umbrel-apps/blob/master/audiobookshelf/docker-compose.yml
+- **Stirling-PDF.** Standard image (ultra-lite drops OCR and LibreOffice; fat suggests 6 GB).
+  Upstream suggests 4 GB for standard → `high-resources`. **`non-free`**: `app/proprietary/`,
+  `engine/` and parts of the frontend are under the "Stirling PDF User License". PUID/PGID are
+  handled by the image (no `user:`; Umbrel: "does not work with a custom user"). Login on by
+  default since v2 (`admin`/`stirling`, wizard warning); `DOCKER_ENABLE_SECURITY` is a legacy v1
+  switch. Analytics are asked at first launch → `SYSTEM_ENABLEANALYTICS=false` (plus PostHog
+  and Scarf). The tessdata folder is not mounted (Runtipi mounts the old path and breaks extra
+  languages; an empty bind would hide the shipped ones). Limits 2000 MB / 20 min. Sources:
+  https://docs.stirlingpdf.com/Server/Install/Docker/ ·
+  https://github.com/Stirling-Tools/Stirling-PDF/blob/main/LICENSE ·
+  https://github.com/Stirling-Tools/Stirling-PDF/blob/main/app/core/src/main/resources/settings.yml.template ·
+  https://github.com/Stirling-Tools/Stirling-PDF/blob/main/app/core/src/main/resources/application.properties
+- **Actual Budget.** HTTPS required (SharedArrayBuffer needs a secure context) →
+  `requires-https`; the server sends COOP/COEP itself (the proxy must not duplicate them).
+  `user:` works (Umbrel); `ACTUAL_TRUSTED_PROXIES`; upload limits raised from 20/20/50 MB to
+  100; healthcheck from upstream's compose (`node scripts/health-check.js`). No documented
+  sub-path; a login in front breaks sync, so no SSO bypass list (TrueNAS's forum lists
+  SharedArrayBuffer errors as the common failure). Sources: https://actualbudget.org/docs/config/ ·
+  https://actualbudget.org/docs/config/https · https://actualbudget.org/docs/config/reverse-proxies/ ·
+  https://actualbudget.org/docs/troubleshooting/shared-array-buffer
+- **Mosquitto.** 2.1 ships only `-alpine` tags (the `2` tag still points at 2.0.x). The default
+  config listens on localhost only and an entry ships no config file, so the command writes
+  `mosquitto.conf` (one listener, `allow_anonymous false`, persistence, log to stdout) and runs
+  `mosquitto_passwd -b -c` from the environment at every start, under `umask 077` (2.0.16+ warns
+  about world-readable password files; `password_file` is deprecated for 3.0 but works). TrueNAS
+  renders the same settings through `configs:`, Umbrel in a pre-start hook. Healthcheck
+  `pidof mosquitto` (TrueNAS). Port 1883 only (websockets on 9001 are not needed by the
+  catalogue's clients). Sources: https://github.com/eclipse-mosquitto/mosquitto/blob/master/ChangeLog.txt ·
+  https://github.com/eclipse-mosquitto/mosquitto/tree/master/docker/2.1-alpine ·
+  https://github.com/truenas/apps/tree/master/ix-dev/community/eclipse-mosquitto
+- **Zigbee2MQTT.** Rootless variant (`user:` + `group_add: dialout`). Without
+  `configuration.yaml` the image serves its onboarding page on 8080, where the broker and the
+  adapter are chosen (`ZIGBEE2MQTT_CONFIG_*` variables do not skip it). USB coordinator through
+  an overlay (stable `/dev/serial/by-id/…` path → `/dev/zigbee`; TrueNAS also requires by-id or
+  `tcp://`); network coordinators need none. Frontend protected by a generated `auth_token`
+  (basic auth breaks the WebSocket on WebKit). Umbrel runs it `privileged`: not taken.
+  Healthcheck on the web port (TrueNAS). Sources:
+  https://www.zigbee2mqtt.io/guide/installation/02_docker.html ·
+  https://www.zigbee2mqtt.io/guide/getting-started/ ·
+  https://www.zigbee2mqtt.io/guide/configuration/frontend.html ·
+  https://github.com/Koenkk/zigbee2mqtt/blob/master/lib/util/onboarding.ts ·
+  https://github.com/truenas/apps/tree/master/ix-dev/community/zigbee2mqtt
+- **Frigate** (D-NVR). **The AVX question, answered:** the docs now say *"Frigate requires a
+  CPU with AVX + AVX2 instructions… Intel Celeron and Pentium models prior to the 2020 Tiger
+  Lake generation typically lack AVX"*. On a J4125 (no AVX) the container starts and detection
+  and recording work. TensorFlow-based features crash with SIGILL (object/state classification,
+  semantic search through the embeddings maintainer); face recognition and LPR use runtimes
+  that fall back but are unsupported. OpenVINO on the J4125 iGPU works (a DS920+ user reports
+  ~21 ms for YOLOv9-t 320), and VA-API there needs `LIBVA_DRIVER_NAME=i965` in the container
+  environment. → `cpu_features = ["avx", "avx2"]` with a wizard warning, not a refusal.
+  Compose: not privileged (upstream: "may not be necessary"), `shm_size` 512 MB, tmpfs
+  `/tmp/cache` 1 GB, runs as root (no PUID support upstream), only 8971 (authenticated), 8554
+  and 8555 tcp+udp published, never 5000. 0.18 writes a default config itself, but with TLS on
+  8971 (self-signed); the entrypoint seeds `config.yml` once with TLS and MQTT off (and, with
+  the GPU overlay, VA-API decoding and the OpenVINO GPU detector from upstream's documented
+  example), then runs `exec /init`. The generated admin password is in the container log. The
+  recordings folder is separate, with the D-NVR advice (dedicated volume, no CoW or snapshots)
+  as a wizard warning. RAM: 4 GB basic, 8 GB with enrichments. Sources:
+  https://docs.frigate.video/frigate/planning_setup · https://docs.frigate.video/frigate/installation ·
+  https://docs.frigate.video/configuration/authentication · https://docs.frigate.video/configuration/tls ·
+  https://docs.frigate.video/configuration/object_detectors · https://docs.frigate.video/guides/reverse_proxy ·
+  https://github.com/blakeblackshear/frigate/discussions/22381 ·
+  https://github.com/blakeblackshear/frigate/discussions/22173 ·
+  https://github.com/blakeblackshear/frigate/discussions/22708 ·
+  https://github.com/blakeblackshear/frigate/discussions/24518 ·
+  https://github.com/blakeblackshear/frigate/discussions/24497 ·
+  https://github.com/blakeblackshear/frigate/discussions/22198 ·
+  https://github.com/truenas/apps/tree/master/ix-dev/community/frigate
+- **Forgejo.** LTS 15.0 rather than 17 (supported until 2027-07-15; 11 LTS ended 2026-07-16;
+  major upgrades need a manual check). Rootless image (TrueNAS and Umbrel), `user:`, one folder
+  (`/var/lib/gitea`; since v15 there is no `/etc/gitea`, which Umbrel still mounts), SQLite (all
+  three catalogues add Postgres; not needed for a household). `FORGEJO__section__KEY`
+  overrides; `INSTALL_LOCK=true` with generated `SECRET_KEY` and `INTERNAL_TOKEN` (Forgejo
+  generates the base64url JWT secrets itself). With the install page locked the first
+  registered user becomes administrator (wizard warning). `REVERSE_PROXY_TRUSTED_PROXIES` comes
+  from rynas (not through `trusted_proxies_env`: the name is not env-shaped). Built-in SSH on
+  2222, with the host port in clone URLs. Healthcheck `/api/healthz` (TrueNAS). Sources:
+  https://forgejo.org/docs/next/admin/release-schedule/ · https://forgejo.org/docs/latest/admin/installation/docker/ ·
+  https://forgejo.org/docs/latest/admin/setup/reverse-proxy/ ·
+  https://codeberg.org/forgejo/forgejo/raw/tag/v17.0.1/Dockerfile.rootless ·
+  https://github.com/truenas/apps/tree/master/ix-dev/community/forgejo ·
+  https://github.com/getumbrel/umbrel-apps/blob/master/forgejo/docker-compose.yml
+- **Mealie.** SQLite (1-20 users on local disk), PUID/PGID through the entrypoint (with `user:`,
+  `/nltk_data` must be writable, issue #5242), one uvicorn worker, sign-up off by default, image
+  healthcheck. No sub-path (FAQ). **Default administrator `changeme@example.com` /
+  `MyPassword`** until the first login runs the setup wizard → wizard warning. AI providers are
+  configured in the UI now (no environment variables). Sources:
+  https://github.com/mealie-recipes/mealie/blob/mealie-next/docs/docs/documentation/getting-started/installation/sqlite.md ·
+  https://github.com/mealie-recipes/mealie/blob/mealie-next/docs/docs/documentation/getting-started/installation/backend-config.md ·
+  https://github.com/mealie-recipes/mealie/blob/mealie-next/docs/docs/documentation/getting-started/faq.md ·
+  https://github.com/truenas/apps/tree/master/ix-dev/community/mealie ·
+  https://github.com/runtipi/runtipi-appstore/tree/master/apps/mealie-1
+
+### Open points
+
+- **Frigate proxy-header SSO** (D-NVR: `proxy.header_map`, `X-Proxy-Secret`) needs the web
+  access module to send identity headers on one route; until then Frigate uses its own login.
+- **Frigate recordings volume**: the installer should offer (or require) a dedicated non-CoW
+  volume for `RECORDINGS_FOLDER` instead of a warning.
+- **Not verified at run time**: the entries were validated by `cargo test` and
+  `docker compose config` only. The healthchecks assume the tools named by upstream or TrueNAS
+  (`curl` in the Forgejo rootless image, busybox `wget` in Navidrome, Audiobookshelf and
+  Zigbee2MQTT). The first `up` on a test machine should confirm them.

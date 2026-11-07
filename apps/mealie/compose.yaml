@@ -1,0 +1,19 @@
+# Upstream: https://docs.mealie.io/documentation/getting-started/installation/sqlite/
+# Differences: image pinned, bind folder, PUID/PGID from rynas (the entrypoint drops to them),
+# one worker and sign-up off as in upstream's example. The image has its own HEALTHCHECK.
+services:
+  mealie:
+    image: ghcr.io/mealie-recipes/mealie:v3.30.0@sha256:90f83da6f3ab0a421efc827118a556168573930105f13fa3321768f42163d784
+    restart: unless-stopped
+    ports:
+      - "${RYNAS_BIND}:${WEB_PORT}:9000"
+    environment:
+      PUID: "${PUID}"
+      PGID: "${PGID}"
+      TZ: "${TZ}"
+      BASE_URL: "${BASE_URL}"
+      ALLOW_SIGNUP: "${ALLOW_SIGNUP}"
+      DB_ENGINE: sqlite
+      UVICORN_WORKERS: "1"
+    volumes:
+      - ${DATA_FOLDER}:/app/data

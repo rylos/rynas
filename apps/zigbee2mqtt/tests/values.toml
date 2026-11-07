@@ -1,0 +1,3 @@
+[form]
+USB_ADAPTER = true
+ADAPTER_DEVICE = "/dev/serial/by-id/usb-Example_Zigbee_Adapter-if00-port0"

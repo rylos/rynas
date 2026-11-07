@@ -1,0 +1,70 @@
+schema = 1
+id = "zigbee2mqtt"
+name = "Zigbee2MQTT"
+version = "1.0.0"
+app_version = "2.14.3"
+description = "Bridge between Zigbee devices and MQTT: use thousands of sensors and lights without vendor hubs."
+homepage = "https://www.zigbee2mqtt.io"
+source = "https://github.com/Koenkk/zigbee2mqtt"
+changelog_url = "https://github.com/Koenkk/zigbee2mqtt/releases"
+license = "GPL-3.0-only"
+maintainers = ["rynas"]
+categories = ["home-automation"]
+min_rynas = "0.1.0"
+arch = ["amd64", "arm64"]
+main_service = "zigbee2mqtt"
+
+[resources]
+ram_min_mb = 128
+ram_recommended_mb = 256
+
+[[ports]]
+name = "web"
+env = "WEB_PORT"
+service = "zigbee2mqtt"
+container = 8080
+default = 8088
+protocol = "tcp"
+purpose = "Onboarding page, then the web frontend"
+proxied = true
+
+[web]
+port = "web"
+scheme = "http"
+# the frontend asks for the generated auth token
+auth = "app"
+# the frontend's live updates use a WebSocket at /api
+websocket = true
+subpath = false
+timeout = "1h"
+public = "warn"
+
+[[folders]]
+env = "DATA_FOLDER"
+path = "data"
+intent = "data"
+ssd = "ok"
+description = "configuration.yaml, the device database and the network backup (coordinator_backup.json)"
+
+[[secrets]]
+env = "FRONTEND_TOKEN"
+length = 24
+description = "Token the web frontend asks for"
+show = true
+
+[security]
+# the USB coordinator (only with the USB adapter overlay)
+devices = ["zigbee2mqtt"]
+
+[[overlays]]
+file = "overlays/usb-adapter.yaml"
+when = "USB_ADAPTER"
+description = "Pass the USB Zigbee coordinator into the container as /dev/zigbee, with the dialout group"
+
+[[notes]]
+level = "info"
+text = "Install an MQTT broker first (the Mosquitto app). At the first start Zigbee2MQTT shows an onboarding page: enter the broker address (mqtt://<NAS address>:1883 with its user and password) and the adapter: /dev/zigbee for a USB stick, or tcp://<address>:6638 for a network coordinator."
+
+[[notes]]
+level = "info"
+text = "Keep a copy of the data folder: it holds the Zigbee network key and the coordinator backup needed to move to a new adapter without re-pairing every device."

@@ -1,0 +1,107 @@
+schema = 1
+id = "frigate"
+name = "Frigate"
+version = "1.0.0"
+app_version = "0.18.2"
+description = "Network video recorder with local AI object detection for IP cameras."
+homepage = "https://frigate.video"
+source = "https://github.com/blakeblackshear/frigate"
+changelog_url = "https://github.com/blakeblackshear/frigate/releases"
+license = "MIT"
+maintainers = ["rynas"]
+categories = ["home-automation", "monitoring"]
+min_rynas = "0.1.0"
+arch = ["amd64", "arm64"]
+antifeatures = ["high-resources"]
+main_service = "frigate"
+
+[resources]
+# upstream: 4 GB for basic use, 8 GB with enrichments (semantic search, faces, plates)
+ram_min_mb = 2048
+ram_recommended_mb = 4096
+
+[[ports]]
+name = "web"
+env = "WEB_PORT"
+service = "frigate"
+container = 8971
+default = 8971
+protocol = "tcp"
+purpose = "Web interface and API (authenticated)"
+proxied = true
+
+[[ports]]
+name = "rtsp"
+env = "RTSP_PORT"
+service = "frigate"
+container = 8554
+default = 8554
+protocol = "tcp"
+purpose = "RTSP restream of the cameras (go2rtc)"
+
+[[ports]]
+name = "webrtc"
+env = "WEBRTC_PORT"
+service = "frigate"
+container = 8555
+default = 8555
+protocol = "tcp"
+purpose = "WebRTC live view (TCP)"
+relocatable = false
+
+[[ports]]
+name = "webrtc-udp"
+env = "WEBRTC_UDP_PORT"
+service = "frigate"
+container = 8555
+default = 8555
+protocol = "udp"
+purpose = "WebRTC live view (UDP)"
+relocatable = false
+
+[web]
+port = "web"
+scheme = "http"
+auth = "app"
+# live view (/ws, /live) needs WebSocket upgrades; no sub-path support
+websocket = true
+subpath = false
+timeout = "1h"
+buffering = false
+public = "warn"
+
+[[folders]]
+env = "CONFIG_FOLDER"
+path = "config"
+intent = "config"
+ssd = "preferred"
+description = "config.yml, the event database (frigate.db) and models"
+
+[[folders]]
+env = "RECORDINGS_FOLDER"
+path = "recordings"
+intent = "media"
+description = "Recordings, clips and snapshots: continuous writes, best on a dedicated volume without snapshots"
+
+[hardware]
+gpu = "optional"
+gpu_kinds = ["intel-qsv", "vaapi"]
+# upstream: "Frigate requires a CPU with AVX + AVX2 instructions"
+cpu_features = ["avx", "avx2"]
+
+[[overlays]]
+file = "overlays/hw-accel.yaml"
+when = "HW_ACCEL"
+description = "Pass /dev/dri and seed the config with VA-API decoding and the OpenVINO detector on the GPU"
+
+[[notes]]
+level = "warning"
+text = "Frigate officially needs a CPU with AVX and AVX2. On CPUs without them (Intel Celeron J4105/J4125, N5105 and similar) detection on the Intel GPU and recording work, but classification and semantic search crash, and face and plate recognition are unsupported: leave those enrichments off."
+
+[[notes]]
+level = "warning"
+text = "Recordings write continuously. Place the recordings folder on a dedicated volume without snapshots or copy-on-write (ext4 or XFS), not in the stack folder, and set a retention period in Frigate."
+
+[[notes]]
+level = "info"
+text = "An administrator password is generated at the first start and printed in the container log (Docker > Containers > frigate > Logs). Add cameras in Settings > Cameras."

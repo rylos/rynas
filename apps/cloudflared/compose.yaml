@@ -1,0 +1,18 @@
+# Upstream: https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/
+# (remotely managed tunnel: `cloudflared tunnel run` with TUNNEL_TOKEN, as the TrueNAS app does)
+# Differences: image pinned, metrics pinned to loopback so the shell-less (distroless) image
+# can check itself with `cloudflared tunnel ready`. The image runs as nonroot (65532).
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:2026.10.7@sha256:4955524aeaa379e154023d5a027c250f7b35041a2e7e950cf13f144bc9b9c5ba
+    restart: unless-stopped
+    network_mode: host
+    command: ["tunnel", "--no-autoupdate", "--metrics", "127.0.0.1:20241", "run"]
+    environment:
+      TUNNEL_TOKEN: "${TUNNEL_TOKEN}"
+    healthcheck:
+      test: ["CMD", "cloudflared", "tunnel", "--metrics", "127.0.0.1:20241", "ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

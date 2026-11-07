@@ -1,0 +1,26 @@
+# Upstream: https://github.com/AdguardTeam/AdGuardHome/wiki/Docker
+# Differences: image pinned, bind folders, only DNS (53 tcp/udp) and the web interface
+# published; --web-addr keeps the interface on 3000 after the wizard (TrueNAS and Umbrel pass
+# it too), so the published port never moves. Upstream removed the image HEALTHCHECK in
+# v0.107.34; DoT/DoQ/DNSCrypt need certificates and are not published.
+services:
+  adguardhome:
+    image: adguard/adguardhome:v0.107.80@sha256:e2e1b48c832f7705be915873f95de0d5114de573736441d7f2923a8a6293027c
+    restart: unless-stopped
+    command:
+      - --no-check-update
+      - -c
+      - /opt/adguardhome/conf/AdGuardHome.yaml
+      - -w
+      - /opt/adguardhome/work
+      - --web-addr
+      - 0.0.0.0:3000
+    ports:
+      - "${DNS_PORT}:53"
+      - "${DNS_UDP_PORT}:53/udp"
+      - "${RYNAS_BIND}:${WEB_PORT}:3000"
+    environment:
+      TZ: "${TZ}"
+    volumes:
+      - ${CONF_FOLDER}:/opt/adguardhome/conf
+      - ${WORK_FOLDER}:/opt/adguardhome/work

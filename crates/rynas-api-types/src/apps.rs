@@ -147,6 +147,13 @@ pub struct AppCard {
     pub rynas_ok: bool,
     /// A Docker manager (mounts the Docker socket; never public).
     pub manager: bool,
+    /// A reverse proxy that publishes 80/443 itself: installable only while the web access
+    /// runs in external proxy mode (`app.toml` `reverse_proxy`).
+    #[serde(default)]
+    pub reverse_proxy: bool,
+    /// Curated pick for the Featured section (`app.toml` `featured`).
+    #[serde(default)]
+    pub featured: bool,
     /// Relative URL of the icon (`/api/v1/apps/catalog/<id>/icon`, SVG).
     pub icon: String,
     /// Stacks where this entry is installed (usually zero or one, named after the id).

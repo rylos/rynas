@@ -1,0 +1,86 @@
+schema = 1
+id = "nginx-proxy-manager"
+name = "Nginx Proxy Manager"
+version = "1.0.0"
+app_version = "2.16.0"
+description = "Reverse proxy with a web interface and Let's Encrypt certificates, instead of the built-in web access."
+homepage = "https://nginxproxymanager.com"
+source = "https://github.com/NginxProxyManager/nginx-proxy-manager"
+changelog_url = "https://github.com/NginxProxyManager/nginx-proxy-manager/releases"
+license = "MIT"
+maintainers = ["rynas"]
+categories = ["network"]
+min_rynas = "0.1.0"
+arch = ["amd64", "arm64"]
+main_service = "app"
+# publishes 80/443 itself: installs only with web access in external proxy mode
+reverse_proxy = true
+
+[resources]
+ram_min_mb = 256
+ram_recommended_mb = 512
+
+[[ports]]
+name = "http"
+env = "HTTP_PORT"
+service = "app"
+container = 80
+default = 80
+protocol = "tcp"
+purpose = "HTTP for proxied sites and Let's Encrypt HTTP-01 checks"
+relocatable = false
+
+[[ports]]
+name = "https"
+env = "HTTPS_PORT"
+service = "app"
+container = 443
+default = 443
+protocol = "tcp"
+purpose = "HTTPS for proxied sites"
+relocatable = false
+
+[[ports]]
+name = "admin"
+env = "ADMIN_PORT"
+service = "app"
+container = 81
+default = 81
+protocol = "tcp"
+purpose = "Administration interface"
+proxied = true
+
+[web]
+port = "admin"
+scheme = "http"
+auth = "app"
+subpath = false
+# the administration of the proxy itself
+public = "never"
+
+[[folders]]
+env = "DATA_FOLDER"
+path = "data"
+intent = "config"
+ssd = "ok"
+description = "SQLite database, proxy host configuration and logs"
+
+[[folders]]
+env = "LETSENCRYPT_FOLDER"
+path = "letsencrypt"
+intent = "config"
+description = "Certificates and the ACME account"
+
+[[secrets]]
+env = "ADMIN_PASSWORD"
+length = 20
+description = "Password of the first administrator"
+show = true
+
+[[notes]]
+level = "warning"
+text = "Nginx Proxy Manager needs ports 80 and 443. Switch Web access to external proxy mode first: the built-in proxy (and its local names and certificates) stops, and installed apps must then be published on the LAN to be reachable from Nginx Proxy Manager."
+
+[[notes]]
+level = "info"
+text = "Forward proxy hosts to host.docker.internal and the app's port (or the NAS address). Sign in with the e-mail chosen here and the password shown after install."

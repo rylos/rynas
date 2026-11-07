@@ -1,0 +1,60 @@
+schema = 1
+id = "navidrome"
+name = "Navidrome"
+version = "1.0.0"
+app_version = "0.64.2"
+description = "Music server and streamer for your own collection, compatible with Subsonic apps."
+homepage = "https://www.navidrome.org"
+source = "https://github.com/navidrome/navidrome"
+changelog_url = "https://github.com/navidrome/navidrome/releases"
+license = "GPL-3.0-only"
+maintainers = ["rynas"]
+categories = ["media"]
+min_rynas = "0.1.0"
+arch = ["amd64", "arm64"]
+main_service = "navidrome"
+
+[resources]
+ram_min_mb = 256
+ram_recommended_mb = 512
+
+[[ports]]
+name = "web"
+env = "WEB_PORT"
+service = "navidrome"
+container = 4533
+default = 4533
+protocol = "tcp"
+purpose = "Web player and Subsonic API"
+proxied = true
+
+[web]
+port = "web"
+scheme = "http"
+auth = "app"
+# works under ND_BASEURL; the entry keeps its own host name
+subpath = false
+timeout = "1h"
+buffering = false
+# Subsonic clients (/rest) and public shares (/share) authenticate on their own
+bypass = ["/rest", "/share"]
+public = "ok"
+
+[[folders]]
+env = "DATA_FOLDER"
+path = "data"
+intent = "data"
+ssd = "ok"
+description = "Library database, cache and settings"
+
+[[shares]]
+env = "MUSIC"
+label = "Music"
+description = "The shared folder with your music, mounted read-only at /music"
+access = "ro"
+required = false
+fallback = "music"
+
+[[notes]]
+level = "info"
+text = "The first visitor creates the administrator account: open Navidrome right after install. Usage statistics to upstream are switched off by this entry."

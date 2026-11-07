@@ -1,0 +1,54 @@
+schema = 1
+id = "actual-budget"
+name = "Actual Budget"
+version = "1.0.0"
+app_version = "26.11.0"
+description = "Private envelope budgeting app with sync across devices and optional end-to-end encryption."
+homepage = "https://actualbudget.org"
+source = "https://github.com/actualbudget/actual"
+changelog_url = "https://actualbudget.org/docs/releases"
+license = "MIT"
+maintainers = ["rynas"]
+categories = ["productivity"]
+min_rynas = "0.1.0"
+arch = ["amd64", "arm64"]
+# the web app needs a secure context (SharedArrayBuffer) everywhere except localhost
+antifeatures = ["requires-https"]
+main_service = "actual"
+
+[resources]
+ram_min_mb = 256
+ram_recommended_mb = 512
+
+[[ports]]
+name = "web"
+env = "WEB_PORT"
+service = "actual"
+container = 5006
+default = 5006
+protocol = "tcp"
+purpose = "Web app and sync server"
+proxied = true
+
+[web]
+port = "web"
+scheme = "http"
+auth = "app"
+# no documented sub-path support; upstream's examples use their own host name
+subpath = false
+body = "100M"
+# no bypass list: a login in front of Actual breaks the sync of the web app and the PWA
+# (upstream's way is its own password, header or OpenID login), so keep rynas SSO off
+public = "ok"
+trusted_proxies_env = "ACTUAL_TRUSTED_PROXIES"
+
+[[folders]]
+env = "DATA_FOLDER"
+path = "data"
+intent = "data"
+ssd = "ok"
+description = "Server files (accounts) and the budget files"
+
+[[notes]]
+level = "info"
+text = "Open Actual through its HTTPS address (web access): browsers refuse to run it over plain HTTP. The first visitor sets the server password."

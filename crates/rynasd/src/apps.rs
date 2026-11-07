@@ -606,6 +606,8 @@ impl AppsSvc {
             arch_ok: m.arch.iter().any(|a| conv::<String>(a) == host_arch()),
             rynas_ok: rynas.is_none_or(|v| v >= m.min_rynas),
             manager: m.manager,
+            reverse_proxy: m.reverse_proxy,
+            featured: m.featured,
             icon: format!("/api/v1/apps/catalog/{}/icon", m.id),
             installed: installed.iter().map(|d| d.stack.clone()).collect(),
             update_available: installed.iter().any(|d| Self::update_available(cat, d)),
