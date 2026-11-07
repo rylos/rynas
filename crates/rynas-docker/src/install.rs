@@ -92,11 +92,36 @@ pub fn pinned_major(text: &str) -> Option<u32> {
         .ok()
 }
 
+/// apt-get in a transient unit outside rynasd's sandbox, like the system updates do:
+/// rynasd runs with `ProtectSystem=yes`, so dpkg cannot write `/usr` from inside it (found
+/// on the first real install: every package failed with "Read-only file system").
+/// `systemd-run --wait --pipe` streams the output into the task log and returns apt's
+/// exit status.
 fn apt(args: &[&str]) -> Cmd {
-    Cmd::new("apt-get")
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let unit = format!(
+        "--unit=rynas-apt-docker-{secs}-{}",
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    );
+    Cmd::new("systemd-run")
+        .args(["--wait", "--pipe", "--collect", "--quiet", "--service-type=exec"])
+        .arg(unit)
+        .args([
+            "--description=rynas: apt-get (Docker install)",
+            "--setenv=DEBIAN_FRONTEND=noninteractive",
+            "--setenv=NEEDRESTART_MODE=l",
+            "--setenv=APT_LISTCHANGES_FRONTEND=none",
+            "--setenv=LC_ALL=C",
+            "--",
+            "apt-get",
+        ])
         .args(args)
         .env_clear()
-        .env("DEBIAN_FRONTEND", "noninteractive")
         .timeout(APT_TIMEOUT)
 }
 
@@ -357,7 +382,8 @@ ZS5vcmc+
     #[test]
     fn install_line_keeps_old_conffiles() {
         let c = install_cmd().display();
-        assert!(c.starts_with("apt-get install -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold docker-ce docker-ce-cli containerd.io"), "{c}");
+        assert!(c.starts_with("systemd-run --wait --pipe --collect --quiet"), "{c}");
+        assert!(c.contains(" -- apt-get install -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold docker-ce docker-ce-cli containerd.io"), "{c}");
         let steps = repo_steps("bookworm", "arm64");
         assert!(matches!(&steps[5], InstallStep::Write { path, .. } if *path == SOURCES));
         assert!(matches!(&steps[3], InstallStep::Run(c) if c.display().contains("--proto =https")));
