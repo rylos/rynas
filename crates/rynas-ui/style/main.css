@@ -1409,7 +1409,7 @@ kbd {
 .subnav-item { display: inline-flex; align-items: center; gap: var(--s-2); height: 40px; padding: 0 var(--s-3); color: var(--text-muted); font-weight: 500; font-size: var(--fs-13); border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap; }
 .subnav-item:hover { color: var(--text); }
 .subnav-item[aria-current="page"] { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
-.btn[aria-disabled="true"] { opacity: .55; pointer-events: none; }
+.btn[aria-disabled="true"], .icon-btn[aria-disabled="true"] { opacity: .55; pointer-events: none; }
 .btn.danger { background: var(--danger); color: var(--on-accent); }
 .btn.danger:hover:not(:disabled) { background: color-mix(in oklch, var(--danger) 88%, var(--text)); }
 .danger-text { color: var(--danger); }

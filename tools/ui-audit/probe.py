@@ -36,6 +36,12 @@ async def main():
                 await p.send("Emulation.setDeviceMetricsOverride", width=int(step[2:]), height=800, deviceScaleFactor=1, mobile=False)
                 await asyncio.sleep(0.5)
                 continue
+            if step.startswith("lang:"):
+                # `lang:it`: switch the language and reload (Italian texts are fetched at start)
+                await p.js(f"localStorage.setItem('rynas.lang', '{step[5:]}')")
+                await run_all.reload_shell(p)
+                await asyncio.sleep(1.0)
+                continue
             if step == "esc":
                 await run_all.esc(p)
                 continue

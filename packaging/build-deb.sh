@@ -85,7 +85,7 @@ for ref in $(grep -oE '/[A-Za-z0-9_./-]+\.(wasm|js|css|svg|woff2)' "$STAGE/ui/in
     [ -f "$STAGE/ui$ref" ] || { echo "UI incomplete: index.html refers to missing $ref" >&2; exit 1; }
 done
 # precompressed siblings, served as is by rynas-web (index.html is rendered per request)
-find "$STAGE/ui" -type f \( -name '*.wasm' -o -name '*.js' -o -name '*.css' -o -name '*.svg' -o -name '*.json' \) \
+find "$STAGE/ui" -type f \( -name '*.wasm' -o -name '*.js' -o -name '*.css' -o -name '*.svg' -o -name '*.json' -o -name '*.txt' \) \
     -print0 | while IFS= read -r -d '' f; do
         brotli -q 11 -k -f "$f"
         gzip -9 -n -k -f "$f"

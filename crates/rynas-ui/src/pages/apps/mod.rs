@@ -17,7 +17,7 @@ mod wizard;
 
 use leptos::prelude::*;
 use rynas_api_types::apps::{AppAntifeature, AppCard, AppCatalog, AppCategory, InstalledApp, RamGate};
-use rynas_api_types::web_access::{ProxyMode, WebAccessState};
+use rynas_api_types::web_access::ProxyMode;
 use serde::de::DeserializeOwned;
 
 use crate::docker::docker;
@@ -27,6 +27,55 @@ use crate::icons::{self, Icon};
 use crate::ui::{self, EmptyState, PageHeader, Remote, Tone};
 
 const TABS: &[&str] = &["apps.tab.featured", "apps.tab.apps", "apps.tab.plugins", "apps.tab.installed", "apps.tab.updates"];
+
+/// The two fields of `GET /api/v1/web-access` (`WebAccessState`) this page reads: the whole
+/// state's deserializer is not worth its wasm here.
+#[derive(serde::Deserialize)]
+struct WebAccess {
+    applied: WebAccessApplied,
+    engine: WebAccessEngine,
+}
+
+#[derive(serde::Deserialize)]
+struct WebAccessApplied {
+    #[serde(default)]
+    settings: WebAccessMode,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct WebAccessMode {
+    #[serde(default)]
+    mode: ProxyMode,
+}
+
+#[derive(serde::Deserialize)]
+struct WebAccessEngine {
+    installed: bool,
+}
+
+/// `GET /api/v1/apps/catalog/{id}` (`rynas_api_types::apps::AppDetail`, same fields) with the
+/// install form kept as JSON for [`crate::schema_form`]: no typed copy of the schema's
+/// deserializer in the wasm.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub(super) struct AppDetail {
+    pub card: AppCard,
+    pub description: String,
+    pub homepage: String,
+    pub source: Option<String>,
+    pub changelog_url: String,
+    pub maintainers: Vec<String>,
+    pub host_network: bool,
+    pub form: crate::schema_form::Form,
+    pub web: Option<rynas_api_types::apps::AppWeb>,
+    pub folders: Vec<rynas_api_types::apps::AppFolder>,
+    pub shares: Vec<rynas_api_types::apps::AppShare>,
+    pub secrets: Vec<rynas_api_types::apps::AppSecret>,
+    pub hardware: rynas_api_types::apps::AppHardware,
+    pub overlays: Vec<rynas_api_types::apps::AppOverlay>,
+    pub named_volumes: Vec<rynas_api_types::apps::AppNamedVolume>,
+    pub notes: Vec<rynas_api_types::apps::AppNote>,
+    pub screenshots: Vec<String>,
+}
 
 /// What the sections share: the catalogue, the installed apps, web access, and which drawer
 /// or wizard is open.
@@ -61,16 +110,11 @@ fn apps() -> Apps {
     expect_context::<Apps>()
 }
 
-/// A list read again on every `docker.changed` (and the end of `apps.*`/`docker.*` tasks).
-fn remote<T: DeserializeOwned + Send + Sync + 'static>(url: &str) -> Remote<T> {
+/// A list read again (debounced) after `trigger`: [`crate::docker::Docker::generation`] for
+/// what containers change, [`crate::docker::Docker::ended`] for what only tasks change.
+fn remote<T: DeserializeOwned + Send + Sync + 'static>(url: &str, trigger: RwSignal<u64>) -> Remote<T> {
     let r = Remote::<T>::new(url);
-    let g = docker().generation;
-    Effect::new(move |prev: Option<()>| {
-        g.track();
-        if prev.is_some() {
-            r.reload();
-        }
-    });
+    crate::docker::follow(trigger, Signal::stored(true), Callback::new(move |_| r.reload()));
     r
 }
 
@@ -78,26 +122,36 @@ fn remote<T: DeserializeOwned + Send + Sync + 'static>(url: &str) -> Remote<T> {
 pub fn AppsPage() -> impl IntoView {
     let d = docker();
     d.refresh();
+    // `/plugins` (older links) opens the Plugins section
+    let plugins_route = leptos_router::hooks::use_location().pathname.with_untracked(|p| p.starts_with("/plugins"));
     let a = Apps {
-        cat: remote::<AppCatalog>("/api/v1/apps/catalog"),
-        inst: remote::<Vec<InstalledApp>>("/api/v1/apps/installed"),
+        // the catalogue's installed/update marks change only through a task
+        cat: remote::<AppCatalog>("/api/v1/apps/catalog", d.ended),
+        inst: remote::<Vec<InstalledApp>>("/api/v1/apps/installed", d.generation),
         proxy: RwSignal::new(false),
         detail: RwSignal::new(None),
         wizard: RwSignal::new(None),
         manage: RwSignal::new(None),
-        tab: RwSignal::new(0),
+        tab: RwSignal::new(if plugins_route { 2 } else { 0 }),
     };
     provide_context(a);
-    // web access state only decides defaults and "Move behind the proxy": a failure means
-    // inactive (rynasd without web access answers 503)
+    // web access state only decides defaults and "Move behind the proxy": rynasd without web
+    // access answers 503 (inactive); any other failure is shown
+    let proxy_err = RwSignal::new(None::<String>);
     leptos::task::spawn_local(async move {
-        if let Ok(w) = crate::api::get::<WebAccessState>("/api/v1/web-access").await {
-            let _ = a.proxy.try_set(w.engine.installed && w.applied.settings.mode == ProxyMode::Builtin);
+        match crate::api::get::<WebAccess>("/api/v1/web-access").await {
+            Ok(w) => {
+                let _ = a.proxy.try_set(w.engine.installed && w.applied.settings.mode == ProxyMode::Builtin);
+            }
+            Err(e) if e.status() == 503 || e.status() == 401 => {}
+            Err(e) => {
+                let _ = proxy_err.try_set(Some(e.text()));
+            }
         }
     });
     let no_docker = Memo::new(move |_| d.status.with(|s| s.as_ref().is_some_and(|s| !s.installed && s.task_id.is_none())));
     let tab = a.tab;
-    let seen = RwSignal::new([true, false, false, false, false]);
+    let seen = RwSignal::new([!plugins_route, false, plugins_route, false, false]);
     Effect::new(move || {
         let i = tab.get();
         if !seen.with_untracked(|s| s[i]) {
@@ -115,6 +169,7 @@ pub fn AppsPage() -> impl IntoView {
     view! {
         <div class="page">
             <PageHeader icon=icons::PUZZLE title="nav.apps" subtitle="apps.subtitle" />
+            {move || proxy_err.get().map(|e| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, ui::text(tf("apps.proxy_err", &[("err", &e)]))))}
             <Show when=move || no_docker.get()>
                 {ui::note_class(Tone::Info, icons::INFO, "apps-first-note", ui::text(t("apps.docker_first").to_string()))}
                 <div class="grid apps-first">

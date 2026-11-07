@@ -21,7 +21,7 @@ const SETTINGS: &str = "/api/v1/docker/settings";
 
 pub fn panel() -> AnyView {
     let d = docker();
-    let settings = Remote::<DockerSettingsState>::with_config(SETTINGS);
+    let settings = super::page().settings;
     let running = Memo::new(move |_| d.running());
     let task = Memo::new(move |_| d.status.with(|s| s.as_ref().and_then(|s| s.task_id.clone())));
     view! {
@@ -115,7 +115,7 @@ fn engine_card() -> AnyView {
 
 fn storage_card() -> AnyView {
     let st = docker().status;
-    let df = remote::<DockerDiskUsage>("/api/v1/docker/df");
+    let df = remote::<DockerDiskUsage>("/api/v1/docker/df", 0);
     let usage = Memo::new(move |_| st.with(|s| s.as_ref().and_then(|s| s.data_root_usage)));
     let pct = Signal::derive(move || usage.get().filter(|u| u.total_bytes > 0).map(|u| u.used_bytes as f64 * 100.0 / u.total_bytes as f64).unwrap_or(0.0));
     let b = move |f: fn(&DockerDiskUsage) -> u64| Signal::derive(move || df.data.with(|d| d.as_ref().map(|d| i18n::bytes(f(d))).unwrap_or_default()));

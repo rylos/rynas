@@ -25,7 +25,7 @@ use crate::icons::{self, Icon};
 use crate::live::use_live;
 use crate::prefs::use_ui;
 use crate::toast::toast;
-use crate::ui::{EmptyState, Meter, Tone, usage_tone};
+use crate::ui::{self, EmptyState, Meter, Tone, usage_tone};
 
 const BASE: &str = "/api/v1/removable";
 
@@ -298,9 +298,7 @@ fn UsbPanel() -> impl IntoView {
                 }
             >
                 <ul class="usb-list">
-                    <For each=move || drives.with(|d| d.iter().map(|d| d.name.clone()).collect::<Vec<_>>()) key=|n| n.clone() let:name>
-                        {drive_card(drives, name, p)}
-                    </For>
+                    {ui::keyed(Signal::derive(move || drives.with(|d| d.iter().map(|d| d.name.clone()).collect())), Callback::new(move |name| drive_card(drives, name, p)))}
                 </ul>
             </Show>
         </div>
@@ -326,9 +324,7 @@ pub fn drives_view() -> AnyView {
             }
         >
             <ul class="usb-list page-list">
-                <For each=move || drives.with(|d| d.iter().map(|d| d.name.clone()).collect::<Vec<_>>()) key=|n| n.clone() let:name>
-                    {drive_card(drives, name, p)}
-                </For>
+                {ui::keyed(Signal::derive(move || drives.with(|d| d.iter().map(|d| d.name.clone()).collect())), Callback::new(move |name| drive_card(drives, name, p)))}
             </ul>
         </Show>
     }
@@ -387,9 +383,7 @@ fn drive_card(drives: Memo<Vec<RemovableDrive>>, name: String, p: Panel) -> AnyV
                     {tr("rm.remove")}
                 </button>
             </div>
-            <For each=vol_names key=|n| n.clone() let:vname>
-                {volume_row(d, vname, p)}
-            </For>
+            {ui::keyed(Signal::derive(vol_names), Callback::new(move |vname| volume_row(d, vname, p)))}
         </li>
     }
     .into_any()

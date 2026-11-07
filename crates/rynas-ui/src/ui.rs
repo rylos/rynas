@@ -388,9 +388,26 @@ pub fn row_flag(cells: Vec<AnyView>, class: &'static str, on: Signal<bool>) -> A
     view! { <tr class=(class, move || on.get())>{cells}</tr> }.into_any()
 }
 
+/// Rows keyed by id (`<For>`): a row stays while its id is listed and moves with it. Not
+/// generic: one compiled copy for every keyed list.
+pub fn keyed(ids: Signal<Vec<String>>, row: Callback<String, AnyView>) -> AnyView {
+    view! { <For each=move || ids.get() key=|id| id.clone() children=move |id| row.run(id) /> }.into_any()
+}
+
+/// Row hidden while `hidden` (a filter of a keyed table: rows are kept, not rebuilt).
+pub fn row_hidden(cells: Vec<AnyView>, hidden: Signal<bool>) -> AnyView {
+    view! { <tr hidden=move || hidden.get()>{cells}</tr> }.into_any()
+}
+
 /// A table in its scroll wrapper. `heads`: header keys; a key starting with `#` is a numeric
 /// column (right-aligned), an empty key the actions column (named for screen readers only).
 pub fn table(class: &'static str, heads: &[&'static str], rows: Vec<AnyView>) -> AnyView {
+    table_body(class, heads, rows.into_any())
+}
+
+/// [`table`] around any body: a keyed `<For>` of rows that are kept while the list changes
+/// (hover, focus and per-row state survive a refresh).
+pub fn table_body(class: &'static str, heads: &[&'static str], body: AnyView) -> AnyView {
     let heads = heads
         .iter()
         .map(|&h| {
@@ -409,7 +426,7 @@ pub fn table(class: &'static str, heads: &[&'static str], rows: Vec<AnyView>) ->
         <div class="table-wrap">
             <table class=format!("table {class}")>
                 <thead><tr>{heads}</tr></thead>
-                <tbody>{rows}</tbody>
+                <tbody>{body}</tbody>
             </table>
         </div>
     }
@@ -419,6 +436,39 @@ pub fn table(class: &'static str, heads: &[&'static str], rows: Vec<AnyView>) ->
 /// Plain text as a view.
 pub fn text(s: String) -> AnyView {
     s.into_any()
+}
+
+/// A plain text cell (one compiled copy for every such cell).
+pub fn text_cell(label: &'static str, class: &'static str, s: String) -> AnyView {
+    cell(label, class, text(s))
+}
+
+/// A main line and an optional smaller line under it (`cell-main` / `cell-sub`).
+pub fn two_lines(main: AnyView, sub: Option<String>, sub_class: &'static str) -> AnyView {
+    view! { <div class="cell-main">{main}{sub.map(|s| view! { <span class=sub_class>{s}</span> })}</div> }.into_any()
+}
+
+/// A long reference (image `registry/repo:tag`, path) that wraps after a `/` or before a `:`
+/// or `@` (`<wbr>`), not inside `home-assistant` or `10.11.2`; a part wider than the cell
+/// still breaks (`overflow-wrap: anywhere` of table cells), so nothing scrolls sideways (G7).
+pub fn breakable(s: &str, class: &'static str) -> AnyView {
+    let mut parts: Vec<AnyView> = Vec::new();
+    let mut cur = String::new();
+    for c in s.chars() {
+        if matches!(c, ':' | '@') && !cur.is_empty() {
+            parts.push(std::mem::take(&mut cur).into_any());
+            parts.push(view! { <wbr /> }.into_any());
+        }
+        cur.push(c);
+        if c == '/' {
+            parts.push(std::mem::take(&mut cur).into_any());
+            parts.push(view! { <wbr /> }.into_any());
+        }
+    }
+    if !cur.is_empty() {
+        parts.push(cur.into_any());
+    }
+    view! { <span class=class>{parts}</span> }.into_any()
 }
 
 /// [`Status`] pill as a view (tone + translated text).

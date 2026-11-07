@@ -2,9 +2,9 @@
 //! drawer of one entry (description, screenshots, ports, folders, shares, web, resources).
 
 use leptos::prelude::*;
-use rynas_api_types::apps::{AppCard, AppCatalog, AppDetail, FolderIntent, FolderSsd, GpuNeed, NoteLevel, RamGate, ShareAccess, WebAuth, WebPublic};
+use rynas_api_types::apps::{AppCard, AppCatalog, FolderIntent, FolderSsd, GpuNeed, NoteLevel, RamGate, ShareAccess, WebAuth, WebPublic};
 
-use super::{CATEGORIES, antifeature_chips, antifeature_keys, app_icon, apps, category_key, install_block, ram_pill};
+use super::{AppDetail, CATEGORIES, antifeature_chips, antifeature_keys, app_icon, apps, category_key, install_block, ram_pill};
 use crate::form::search_box;
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
@@ -244,14 +244,17 @@ fn kv(label: &'static str, value: String, class: &'static str) -> AnyView {
     ui::kv_row(label, Signal::stored(value), class)
 }
 
-fn detail_body(d: AppDetail) -> AnyView {
-    let c = d.card.clone();
-    let ports = c
+fn ports_table(c: &AppCard) -> Option<AnyView> {
+    let rows = c
         .ports
         .iter()
         .map(|p| {
             ui::row(vec![
-                ui::cell("apps.col.port", "", view! { <div class="cell-main"><span class="tnum">{format!("{}/{}", p.default, if p.protocol == rynas_api_types::apps::PortProtocol::Udp { "udp" } else { "tcp" })}</span><span class="cell-sub mono">{p.env.clone()}</span></div> }.into_any()),
+                ui::cell("apps.col.port", "", ui::two_lines(
+                    view! { <span class="tnum">{format!("{}/{}", p.default, if p.protocol == rynas_api_types::apps::PortProtocol::Udp { "udp" } else { "tcp" })}</span> }.into_any(),
+                    Some(p.env.clone()),
+                    "cell-sub mono",
+                )),
                 ui::cell("apps.col.purpose", "wrap", view! { <span lang="en">{p.purpose.clone()}</span> }.into_any()),
                 ui::cell("apps.col.reach", "", view! {
                     <div class="chips">
@@ -262,7 +265,11 @@ fn detail_body(d: AppDetail) -> AnyView {
             ])
         })
         .collect::<Vec<_>>();
-    let folders = d
+    (!rows.is_empty()).then(|| view! { <h4 class="mini-title">{tr("apps.d.ports")}</h4>{ui::table("", &["apps.col.port", "apps.col.purpose", "apps.col.reach"], rows)} }.into_any())
+}
+
+fn folders_table(d: &AppDetail) -> Option<AnyView> {
+    let rows = d
         .folders
         .iter()
         .map(|f| {
@@ -277,7 +284,18 @@ fn detail_body(d: AppDetail) -> AnyView {
             ])
         })
         .collect::<Vec<_>>();
-    let shares = d
+    (!rows.is_empty()).then(|| {
+        view! {
+            <h4 class="mini-title">{tr("apps.d.folders")}</h4>
+            <p class="small muted">{tr("apps.d.folders_text")}</p>
+            {ui::table("", &["apps.col.folder", "apps.col.kind"], rows)}
+        }
+        .into_any()
+    })
+}
+
+fn shares_table(d: &AppDetail) -> Option<AnyView> {
+    let rows = d
         .shares
         .iter()
         .map(|s| {
@@ -292,18 +310,23 @@ fn detail_body(d: AppDetail) -> AnyView {
             ])
         })
         .collect::<Vec<_>>();
-    let web = d.web.clone().map(|w| {
-        let port = c.ports.iter().find(|p| p.name == w.port).map(|p| p.default.to_string()).unwrap_or_else(|| w.port.clone());
-        let mut feats: Vec<&'static str> = Vec::new();
-        if w.websocket {
-            feats.push("apps.web.websocket");
-        }
-        if w.subpath {
-            feats.push("apps.web.subpath");
-        }
-        if !w.buffering {
-            feats.push("apps.web.streaming");
-        }
+    (!rows.is_empty()).then(|| view! { <h4 class="mini-title">{tr("apps.d.shares")}</h4>{ui::table("", &["shares.folder", "apps.col.access"], rows)} }.into_any())
+}
+
+fn web_view(d: &AppDetail) -> Option<AnyView> {
+    let w = d.web.as_ref()?;
+    let port = d.card.ports.iter().find(|p| p.name == w.port).map(|p| p.default.to_string()).unwrap_or_else(|| w.port.clone());
+    let mut feats: Vec<&'static str> = Vec::new();
+    if w.websocket {
+        feats.push("apps.web.websocket");
+    }
+    if w.subpath {
+        feats.push("apps.web.subpath");
+    }
+    if !w.buffering {
+        feats.push("apps.web.streaming");
+    }
+    Some(
         view! {
             <h4 class="mini-title">{tr("nt.kind.ui")}</h4>
             <dl class="kvs">
@@ -315,7 +338,70 @@ fn detail_body(d: AppDetail) -> AnyView {
             </dl>
             {(!feats.is_empty()).then(|| view! { <div class="chips">{feats.into_iter().map(|k| view! { <span class="chip">{tr(k)}</span> }).collect_view()}</div> })}
         }
-    });
+        .into_any(),
+    )
+}
+
+/// A titled list of `name — description` lines (`lang="en"` descriptions from the entry).
+fn name_list(title: &'static str, items: Vec<(String, String, bool)>) -> Option<AnyView> {
+    (!items.is_empty()).then(|| {
+        view! {
+            <h4 class="mini-title">{tr(title)}</h4>
+            <ul class="small app-list">{items.into_iter().map(|(n, d, shown)| view! { <li><span class="mono">{n}</span>" — "<span lang="en">{d}</span>{shown.then(|| view! { " "<span class="chip">{tr("apps.secret.shown")}</span> })}</li> }).collect_view()}</ul>
+        }
+        .into_any()
+    })
+}
+
+fn resources(d: &AppDetail) -> AnyView {
+    let c = &d.card;
+    let gpu = match d.hardware.gpu {
+        GpuNeed::None => None,
+        GpuNeed::Optional => Some("apps.gpu.optional"),
+        GpuNeed::Required => Some("apps.gpu.required"),
+    };
+    view! {
+        <h4 class="mini-title">{tr("apps.d.resources")}</h4>
+        <dl class="kvs">
+            {kv("apps.ram.min", i18n::bytes(u64::from(c.ram_min_mb) * 1024 * 1024), "tnum")}
+            {kv("apps.ram.recommended", i18n::bytes(u64::from(c.ram_recommended_mb) * 1024 * 1024), "tnum")}
+            {gpu.map(|k| kv("apps.gpu", t(k).to_string(), ""))}
+            {(!d.hardware.cpu_features.is_empty()).then(|| kv("apps.cpu", d.hardware.cpu_features.join(", "), "mono"))}
+            {d.host_network.then(|| kv("apps.network", t("apps.host_network").to_string(), ""))}
+        </dl>
+    }
+    .into_any()
+}
+
+fn detail_head(d: &AppDetail) -> AnyView {
+    let c = &d.card;
+    let link = |href: String, key: &'static str| view! { <a class="chip" href=href target="_blank" rel="noopener noreferrer"><Icon icon=icons::EXTERNAL_LINK size=12 />{tr(key)}</a> }.into_any();
+    view! {
+        <header class="app-card-head">
+            {app_icon(c.icon.clone(), 56)}
+            <div class="app-card-title">
+                <h3 lang="en">{c.name.clone()}</h3>
+                <span class="cell-sub">{tf("apps.version_pkg", &[("v", &c.app_version), ("pkg", &c.version)])}</span>
+            </div>
+        </header>
+        <div class="chips">
+            <span class="chip mono" title=tr("apps.license")>{c.license.clone()}</span>
+            {c.categories.iter().map(|k| view! { <span class="chip">{tr(category_key(*k))}</span> }).collect_view()}
+            {ram_pill(c.ram)}
+            {(!c.installed.is_empty()).then(|| ui::status(Tone::Ok, t("apps.installed").to_string()))}
+            {antifeature_chips(&c.antifeatures)}
+        </div>
+        <div class="chips">
+            {link(d.homepage.clone(), "apps.homepage")}
+            {d.source.clone().map(|s| link(s, "apps.source"))}
+            {link(d.changelog_url.clone(), "apps.changelog")}
+        </div>
+    }
+    .into_any()
+}
+
+fn detail_body(d: AppDetail) -> AnyView {
+    let c = &d.card;
     let afs = c
         .antifeatures
         .iter()
@@ -325,64 +411,26 @@ fn detail_body(d: AppDetail) -> AnyView {
         })
         .collect_view();
     let has_af = !c.antifeatures.is_empty();
-    let shots = d.screenshots.clone();
-    let gpu = match d.hardware.gpu {
-        GpuNeed::None => None,
-        GpuNeed::Optional => Some("apps.gpu.optional"),
-        GpuNeed::Required => Some("apps.gpu.required"),
-    };
-    let link = |href: String, key: &'static str| view! { <a class="chip" href=href target="_blank" rel="noopener noreferrer"><Icon icon=icons::EXTERNAL_LINK size=12 />{tr(key)}</a> };
+    // only the catalogue's own files (served by the API): nothing loads from another site
+    let shots: Vec<String> = d.screenshots.iter().filter(|s| s.starts_with("/api/")).cloned().collect();
+    let secrets = d.secrets.iter().map(|s| (s.env.clone(), s.description.clone(), s.show)).collect();
+    let volumes = d.named_volumes.iter().map(|v| (v.name.clone(), v.description.clone(), false)).collect();
     view! {
         <div class="app-detail">
-            <header class="app-card-head">
-                {app_icon(c.icon.clone(), 56)}
-                <div class="app-card-title">
-                    <h3 lang="en">{c.name.clone()}</h3>
-                    <span class="cell-sub">{tf("apps.version_pkg", &[("v", &c.app_version), ("pkg", &c.version)])}</span>
-                </div>
-            </header>
-            <div class="chips">
-                <span class="chip mono" title=tr("apps.license")>{c.license.clone()}</span>
-                {c.categories.iter().map(|k| view! { <span class="chip">{tr(category_key(*k))}</span> }).collect_view()}
-                {ram_pill(c.ram)}
-                {(!c.installed.is_empty()).then(|| ui::status(Tone::Ok, t("apps.installed").to_string()))}
-                {antifeature_chips(&c.antifeatures)}
-            </div>
-            <div class="chips">
-                {link(d.homepage.clone(), "apps.homepage")}
-                {d.source.clone().map(|s| link(s, "apps.source"))}
-                {link(d.changelog_url.clone(), "apps.changelog")}
-            </div>
+            {detail_head(&d)}
             {crate::markdown::render(&d.description, "en")}
             {(!shots.is_empty()).then(|| view! {
                 <div class="app-shots">{shots.into_iter().map(|s| view! { <a href=s.clone() target="_blank" rel="noopener"><img src=s.clone() alt=tr("apps.screenshot") loading="lazy" /></a> }).collect_view()}</div>
             })}
             {notes_view(&d.notes)}
             {has_af.then(|| view! { <h4 class="mini-title">{tr("apps.d.antifeatures")}</h4><ul class="small app-list">{afs}</ul> })}
-            <h4 class="mini-title">{tr("apps.d.resources")}</h4>
-            <dl class="kvs">
-                {kv("apps.ram.min", i18n::bytes(u64::from(c.ram_min_mb) * 1024 * 1024), "tnum")}
-                {kv("apps.ram.recommended", i18n::bytes(u64::from(c.ram_recommended_mb) * 1024 * 1024), "tnum")}
-                {gpu.map(|k| kv("apps.gpu", t(k).to_string(), ""))}
-                {(!d.hardware.cpu_features.is_empty()).then(|| kv("apps.cpu", d.hardware.cpu_features.join(", "), "mono"))}
-                {d.host_network.then(|| kv("apps.network", t("apps.host_network").to_string(), ""))}
-            </dl>
-            {(!ports.is_empty()).then(|| view! { <h4 class="mini-title">{tr("apps.d.ports")}</h4>{ui::table("", &["apps.col.port", "apps.col.purpose", "apps.col.reach"], ports)} })}
-            {web}
-            {(!folders.is_empty()).then(|| view! {
-                <h4 class="mini-title">{tr("apps.d.folders")}</h4>
-                <p class="small muted">{tr("apps.d.folders_text")}</p>
-                {ui::table("", &["apps.col.folder", "apps.col.kind"], folders)}
-            })}
-            {(!shares.is_empty()).then(|| view! { <h4 class="mini-title">{tr("apps.d.shares")}</h4>{ui::table("", &["shares.folder", "apps.col.access"], shares)} })}
-            {(!d.secrets.is_empty()).then(|| view! {
-                <h4 class="mini-title">{tr("apps.d.secrets")}</h4>
-                <ul class="small app-list">{d.secrets.iter().map(|s| view! { <li><span class="mono">{s.env.clone()}</span>" — "<span lang="en">{s.description.clone()}</span>{s.show.then(|| view! { " "<span class="chip">{tr("apps.secret.shown")}</span> })}</li> }).collect_view()}</ul>
-            })}
-            {(!d.named_volumes.is_empty()).then(|| view! {
-                <h4 class="mini-title">{tr("apps.d.volumes")}</h4>
-                <ul class="small app-list">{d.named_volumes.iter().map(|v| view! { <li><span class="mono">{v.name.clone()}</span>" — "<span lang="en">{v.description.clone()}</span></li> }).collect_view()}</ul>
-            })}
+            {resources(&d)}
+            {ports_table(c)}
+            {web_view(&d)}
+            {folders_table(&d)}
+            {shares_table(&d)}
+            {name_list("apps.d.secrets", secrets)}
+            {name_list("apps.d.volumes", volumes)}
             {(!d.maintainers.is_empty()).then(|| view! { <dl class="kvs">{kv("apps.maintainers", d.maintainers.join(", "), "")}{kv("apps.d.manager", yes_no(c.manager), "")}</dl> })}
         </div>
     }

@@ -2,26 +2,29 @@
 //! nobody known). rynas stacks (`/<vol>/docker/stacks/<name>/`) can be created, edited
 //! (compose.yaml + .env, validated with `docker compose config`), started, pulled, updated
 //! with a snapshot first, rolled back to a snapshot and removed; the others only started,
-//! stopped and restarted. Image updates come from the digest check (`/docker/updates`).
+//! stopped and restarted. Image updates come from the digest check (`/docker/updates`, one
+//! report for the page). Rows are keyed by stack name and follow the list in place.
+
+use std::collections::HashSet;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use rynas_api_types::docker::{
     CreateStackRequest, DockerSettingsState, RemoveStackRequest, RollbackRequest, StackCreated, StackDetail, StackFiles, StackManager, StackSnapshot, StackState, StackSummary,
-    StackValidation, UpdateReport, UpdateStackRequest, ValidateStackRequest, valid_stack_name,
+    StackValidation, UpdateStackRequest, ValidateStackRequest, valid_stack_name,
 };
 
-use super::{act, action_url, container_pill, done_toast, manager_key, remote};
+use super::{Busy, act, action_url, container_pill, done_toast, empty, image_ref, manager_key, page, remote, row_btn, update_chip, updatable};
 use crate::api;
 use crate::form::{In, code_field, form_error, search_box, spinner, switch, text_field};
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::tasks::{self, tasks};
 use crate::toast::toast;
-use crate::ui::{self, Confirm, EmptyState, Remote, Tone, kv_row};
+use crate::ui::{self, Confirm, Remote, Tone, kv_row};
 
-const SETTINGS: &str = "/api/v1/docker/settings";
 const GROUPS: [(StackManager, &str); 3] = [(StackManager::Rynas, "dk.g.rynas"), (StackManager::Portainer, "dk.g.portainer"), (StackManager::Untracked, "dk.g.untracked")];
+const HEADS: &[&str] = &["dk.col.stack", "col.status", "#dk.col.running", "dk.col.images", ""];
 
 pub(crate) fn state_pill(s: StackState) -> AnyView {
     let (tone, key) = match s {
@@ -35,11 +38,6 @@ pub(crate) fn state_pill(s: StackState) -> AnyView {
 
 fn stack_url(name: &str, rest: &str) -> String {
     format!("/api/v1/docker/stacks/{}{rest}", api::encode(name))
-}
-
-/// Images of the update report with a newer registry digest.
-fn updatable(u: Remote<UpdateReport>) -> Vec<String> {
-    u.data.with(|u| u.as_ref().map(|u| u.images.iter().filter(|i| i.update_available).map(|i| i.image.clone()).collect()).unwrap_or_default())
 }
 
 /// Starts an action from a dialog: a refusal stays in the dialog (`error`); once started the
@@ -63,48 +61,48 @@ pub(crate) fn launch(url: String, body: Option<String>, busy: RwSignal<bool>, er
     });
 }
 
+fn shown(s: &StackSummary, q: &str) -> bool {
+    let q = q.trim().to_lowercase();
+    q.is_empty() || s.name.contains(&q)
+}
+
+/// What every row reads.
+#[derive(Clone, Copy)]
+struct Ctx {
+    list: Remote<Vec<StackSummary>>,
+    upd: Memo<Vec<String>>,
+    q: RwSignal<String>,
+    busy: Busy,
+    detail: RwSignal<Option<String>>,
+}
+
 pub fn panel() -> AnyView {
-    let list = remote::<Vec<StackSummary>>("/api/v1/docker/stacks");
-    let updates = remote::<UpdateReport>("/api/v1/docker/updates");
-    let settings = Remote::<DockerSettingsState>::with_config(SETTINGS);
-    let q = RwSignal::new(String::new());
+    let list = remote::<Vec<StackSummary>>("/api/v1/docker/stacks", 2);
+    let updates = page().updates;
+    let settings = page().settings;
     // `/docker?stack=<name>` opens that stack's details (links from Apps & Plugins)
     let detail = RwSignal::new(leptos_router::hooks::use_query_map().with_untracked(|q| q.get("stack")));
+    let cx = Ctx { list, upd: updatable(), q: RwSignal::new(String::new()), busy: RwSignal::new(HashSet::new()), detail };
     let edit = RwSignal::new(None::<Option<String>>);
     let checking = RwSignal::new(false);
     let checked = move || {
         updates.data.with(|u| u.as_ref().map(|u| if u.checked_at_ms == 0 { t("dk.upd.never").to_string() } else { tf("dk.upd.checked", &[("when", &i18n::short_when(u.checked_at_ms))]) }))
     };
+    let none = Memo::new(move |_| list.data.with(|l| l.as_ref().is_none_or(Vec::is_empty)));
     let groups = move || {
-        let all = list.data.get().unwrap_or_default();
-        if all.is_empty() {
-            return view! { <EmptyState icon=icons::LAYERS title=Signal::derive(|| t("dk.s.none").to_string()) text=Signal::derive(|| t("dk.s.none_text").to_string()) /> }.into_any();
+        if none.get() {
+            return empty(icons::LAYERS, "dk.s.none", Some("dk.s.none_text"));
         }
-        let qv = q.get().trim().to_lowercase();
-        let upd = updatable(updates);
-        GROUPS
-            .iter()
-            .filter_map(|(m, key)| {
-                let rows: Vec<AnyView> =
-                    all.iter().filter(|s| s.manager == *m && (qv.is_empty() || s.name.contains(&qv))).map(|s| { let u = s.images.iter().any(|i| upd.contains(i)); row(s.clone(), u, detail) }).collect();
-                (!rows.is_empty()).then(|| {
-                    view! {
-                        <h3 class="mini-title dk-group">{tr(key)}</h3>
-                        {ui::table("dk-table", &["dk.col.stack", "col.status", "#dk.col.running", "dk.col.images", ""], rows)}
-                    }
-                    .into_any()
-                })
-            })
-            .collect_view()
-            .into_any()
+        GROUPS.iter().map(|(m, key)| group(*m, key, cx)).collect_view().into_any()
     };
     view! {
         <section class="card widget w-12">
             <div class="toolbar">
-                {search_box("dk.s.search", q)}
+                {search_box("dk.s.search", cx.q)}
                 <span class="small muted">{checked}</span>
-                <button class="btn ghost" disabled=move || checking.get() on:click=move |_| act("/api/v1/docker/updates/check".into(), None, checking)>
-                    {crate::form::spinner(checking)}<Icon icon=icons::REFRESH_CW size=16 /><span class="btn-label">{tr("dk.upd.check")}</span>
+                <button class="btn ghost" aria-disabled=move || checking.get().then_some("true")
+                    on:click=move |_| if !checking.get_untracked() { act("/api/v1/docker/updates/check".into(), None, checking) }>
+                    {spinner(checking)}<Icon icon=icons::REFRESH_CW size=16 /><span class="btn-label">{tr("dk.upd.check")}</span>
                 </button>
                 <button class="btn primary" on:click=move |_| edit.set(Some(None))>
                     <Icon icon=icons::PLUS size=16 /><span class="btn-label">{tr("dk.s.create")}</span>
@@ -112,56 +110,74 @@ pub fn panel() -> AnyView {
             </div>
             {move || list.view(6, groups)}
         </section>
-        {move || detail.get().map(|n| detail_drawer(n, settings, updates, edit, Callback::new(move |_| detail.set(None))))}
+        {move || detail.get().map(|n| detail_drawer(n, settings, edit, Callback::new(move |_| detail.set(None))))}
         {move || edit.get().map(|n| editor(n, settings, Callback::new(move |_| edit.set(None))))}
     }
     .into_any()
 }
 
-fn row(s: StackSummary, update: bool, detail: RwSignal<Option<String>>) -> AnyView {
-    let busy = RwSignal::new(false);
-    let managed = s.editable;
-    let name = s.name.clone();
-    let btn = move |icon: &'static str, key: &'static str, action: &'static str| {
-        let (n, label) = (name.clone(), format!("{}: {}", t(key), name));
-        view! {
-            <button class="icon-btn sm" title=tr(key) aria-label=label disabled=move || busy.get()
-                on:click=move |_| act(action_url("stacks", &n, action), None, busy)>
-                <Icon icon=icon size=16 />
-            </button>
-        }
-    };
-    let start = if managed { "up" } else { "start" };
-    let open = s.name.clone();
-    let open_label = format!("{}: {}", t("dk.a.details"), s.name);
-    ui::row(vec![
-        ui::cell("dk.col.stack", "", view! {
-            <div class="cell-main">
-                <button class="link-strong" on:click={ let n = open.clone(); move |_| detail.set(Some(n.clone())) }>{s.name.clone()}</button>
-                {s.working_dir.clone().map(|w| view! { <span class="cell-sub mono">{w}</span> })}
-            </div>
-        }.into_any()),
-        ui::cell("col.status", "", view! {
-            <div class="chips">
-                {state_pill(s.state)}
-                {(s.unhealthy > 0).then(|| ui::status(Tone::Err, tf("dk.s.unhealthy_n", &[("n", &s.unhealthy.to_string())])))}
-            </div>
-        }.into_any()),
-        ui::cell("dk.col.running", "num", ui::text(format!("{} / {}", s.running, s.containers))),
-        ui::cell("dk.col.images", "wrap", view! {
-            <div class="cell-main">
-                {s.images.iter().map(|i| view! { <span class="mono small">{i.clone()}</span> }).collect_view()}
-                {update.then(|| view! { <span class="chip accent"><Icon icon=icons::DOWNLOAD size=12 />{tr("dk.upd.available")}</span> })}
-            </div>
-        }.into_any()),
-        ui::actions(view! {
-            {(s.state != StackState::Running).then(|| btn(icons::PLAY, "dk.a.start", start))}
-            {(s.running > 0).then(|| view! { {btn(icons::SQUARE, "dk.a.stop", "stop")}{btn(icons::REFRESH_CW, "dk.a.restart", "restart")} })}
-            <button class="icon-btn sm" title=tr("dk.a.details") aria-label=open_label on:click=move |_| detail.set(Some(open.clone()))>
-                <Icon icon=icons::CHEVRON_RIGHT size=16 />
-            </button>
-        }.into_any()),
-    ])
+/// The stacks of one manager: a keyed table, hidden while none of them matches the search.
+fn group(m: StackManager, key: &'static str, cx: Ctx) -> AnyView {
+    let names = Memo::new(move |_| cx.list.data.with(|l| l.as_ref().map(|l| l.iter().filter(|s| s.manager == m).map(|s| s.name.clone()).collect::<Vec<_>>()).unwrap_or_default()));
+    let hidden = Memo::new(move |_| cx.q.with(|q| cx.list.data.with(|l| !l.as_ref().is_some_and(|l| l.iter().any(|s| s.manager == m && shown(s, q))))));
+    let body = ui::keyed(names.into(), Callback::new(move |n| row(n, cx)));
+    view! {
+        <div hidden=move || hidden.get()>
+            <h3 class="mini-title dk-group">{tr(key)}</h3>
+            {ui::table_body("dk-table", HEADS, body)}
+        </div>
+    }
+    .into_any()
+}
+
+/// One stack, kept while its name is listed; cells follow the latest summary.
+fn row(name: String, cx: Ctx) -> AnyView {
+    let s = Memo::new({
+        let name = name.clone();
+        move |_| cx.list.data.with(|l| l.as_ref().and_then(|l| l.iter().find(|s| s.name == name).cloned()))
+    });
+    let Some(first) = s.get_untracked() else { return ().into_any() };
+    let hidden = Signal::derive(move || !cx.q.with(|q| s.with(|s| s.as_ref().is_some_and(|s| shown(s, q)))));
+    let state = Memo::new(move |_| s.with(|s| s.as_ref().map(|s| (s.state, s.unhealthy, s.running, s.containers))));
+    let images = Memo::new(move |_| s.with(|s| s.as_ref().map(|s| s.images.clone()).unwrap_or_default()));
+    let has_update = Memo::new(move |_| images.with(|i| cx.upd.with(|u| i.iter().any(|x| u.contains(x)))));
+    let can_start = Signal::derive(move || state.with(|s| s.is_some_and(|s| s.0 != StackState::Running)));
+    let can_stop = Signal::derive(move || state.with(|s| s.is_some_and(|s| s.2 > 0)));
+    let start = if first.editable { "up" } else { "start" };
+    let open_label = format!("{}: {}", t("dk.a.details"), name);
+    let detail = cx.detail;
+    let (n1, n2) = (name.clone(), name.clone());
+    ui::row_hidden(
+        vec![
+            ui::cell("dk.col.stack", "", ui::two_lines(
+                view! { <button class="link-strong" on:click=move |_| detail.set(Some(n1.clone()))>{name.clone()}</button> }.into_any(),
+                first.working_dir.clone(),
+                "cell-sub mono",
+            )),
+            ui::cell("col.status", "", (move || state.get().map(|(st, unhealthy, ..)| view! {
+                <div class="chips">
+                    {state_pill(st)}
+                    {(unhealthy > 0).then(|| ui::status(Tone::Err, tf("dk.s.unhealthy_n", &[("n", &unhealthy.to_string())])))}
+                </div>
+            }.into_any())).into_any()),
+            ui::cell("dk.col.running", "num", (move || state.get().map(|s| format!("{} / {}", s.2, s.3))).into_any()),
+            ui::cell("dk.col.images", "wrap", view! {
+                <div class="cell-main">
+                    {move || images.with(|l| l.iter().map(|i| image_ref(i)).collect_view())}
+                    {move || has_update.get().then(update_chip)}
+                </div>
+            }.into_any()),
+            ui::actions(view! {
+                {row_btn(icons::PLAY, "dk.a.start", "stacks", name.clone(), start, cx.busy, can_start)}
+                {row_btn(icons::SQUARE, "dk.a.stop", "stacks", name.clone(), "stop", cx.busy, can_stop)}
+                {row_btn(icons::REFRESH_CW, "dk.a.restart", "stacks", name.clone(), "restart", cx.busy, can_stop)}
+                <button class="icon-btn sm" title=tr("dk.a.details") aria-label=open_label on:click=move |_| detail.set(Some(n2.clone()))>
+                    <Icon icon=icons::CHEVRON_RIGHT size=16 />
+                </button>
+            }.into_any()),
+        ],
+        hidden,
+    )
 }
 
 // ------------------------------------------------------------------ detail
@@ -184,127 +200,163 @@ pub(crate) fn reason_key(r: &str) -> &'static str {
     }
 }
 
-fn detail_drawer(name: String, settings: Remote<DockerSettingsState>, updates: Remote<UpdateReport>, edit: RwSignal<Option<Option<String>>>, close: Callback<()>) -> AnyView {
-    let d = remote::<StackDetail>(&stack_url(&name, ""));
+/// A button of the drawer's action bar: focusable while its task runs (`aria-disabled`).
+fn bar_btn(icon: &'static str, key: &'static str, busy: RwSignal<bool>, run: Callback<()>) -> AnyView {
+    view! {
+        <button class="btn ghost sm" aria-disabled=move || busy.get().then_some("true") on:click=move |_| if !busy.get_untracked() { run.run(()) }>
+            <Icon icon=icon size=14 />{tr(key)}
+        </button>
+    }
+    .into_any()
+}
+
+/// The containers of a stack.
+fn stack_containers(det: &StackDetail) -> AnyView {
+    if det.containers.is_empty() {
+        return view! { <p class="muted small">{tr("dk.s.no_containers")}</p> }.into_any();
+    }
+    let rows = det
+        .containers
+        .iter()
+        .map(|c| {
+            ui::row(vec![
+                ui::cell("dk.col.name", "", ui::two_lines(view! { <strong>{c.name.clone()}</strong> }.into_any(), Some(c.image.clone()), "cell-sub mono")),
+                ui::cell("col.status", "", container_pill(c.state, c.health)),
+            ])
+        })
+        .collect::<Vec<_>>();
+    ui::table("", &["dk.col.name", "col.status"], rows)
+}
+
+/// The snapshots of a rynas stack (rollback, delete).
+fn snapshot_rows(det: &StackDetail, ask: RwSignal<Option<Ask>>) -> AnyView {
+    if det.snapshots.is_empty() {
+        return view! { <p class="muted small">{tr("dk.snap.none")}</p> }.into_any();
+    }
+    let rows = det
+        .snapshots
+        .iter()
+        .map(|sn| {
+            let (a, b) = (sn.clone(), sn.clone());
+            let imgs = sn.images.iter().map(|i| format!("{}: {}", i.service, i.image)).collect::<Vec<_>>();
+            ui::row(vec![
+                ui::cell("dk.col.created", "", ui::two_lines(ui::text(i18n::datetime(sn.created_s.max(0) as u64 * 1000)), Some(t(reason_key(&sn.reason)).to_string()), "cell-sub")),
+                ui::cell("dk.col.images", "wrap", view! { <div class="cell-main">{imgs.iter().map(|i| image_ref(i)).collect_view()}</div> }.into_any()),
+                ui::actions(view! {
+                    <button class="btn ghost sm" on:click=move |_| ask.set(Some(Ask::Rollback(a.clone())))><Icon icon=icons::ROTATE_CCW size=14 />{tr("dk.snap.rollback")}</button>
+                    <button class="icon-btn sm" title=tr("delete") aria-label=format!("{}: {}", t("delete"), sn.id) on:click=move |_| ask.set(Some(Ask::DeleteSnapshot(b.clone())))><Icon icon=icons::TRASH_2 size=16 /></button>
+                }.into_any()),
+            ])
+        })
+        .collect::<Vec<_>>();
+    ui::table("", &["dk.col.created", "dk.col.images", ""], rows)
+}
+
+/// The drawer's action bar: built once per stack kind, so a refresh of the details keeps the
+/// buttons (and the focus on them).
+fn action_bar(managed: bool, n: StoredValue<String>, busy: RwSignal<bool>, ask: RwSignal<Option<Ask>>, edit: RwSignal<Option<Option<String>>>) -> AnyView {
+    let task = move |action: &'static str| Callback::new(move |_| act(action_url("stacks", &n.get_value(), action), None, busy));
+    let idle = RwSignal::new(false);
+    if managed {
+        view! {
+            <div class="sec-actions">
+                {bar_btn(icons::PLAY, "dk.a.up", busy, task("up"))}
+                {bar_btn(icons::REFRESH_CW, "dk.a.restart", busy, task("restart"))}
+                {bar_btn(icons::SQUARE, "dk.a.stop", busy, task("stop"))}
+                {bar_btn(icons::DOWNLOAD, "dk.a.pull", busy, task("pull"))}
+                {bar_btn(icons::DOWNLOAD, "dk.a.update", idle, Callback::new(move |_| ask.set(Some(Ask::Update))))}
+                {bar_btn(icons::CIRCLE_X, "dk.a.down", busy, task("down"))}
+                {bar_btn(icons::PENCIL, "dk.a.edit", idle, Callback::new(move |_| edit.set(Some(Some(n.get_value())))))}
+                <button class="btn ghost sm danger-text" on:click=move |_| ask.set(Some(Ask::Remove))><Icon icon=icons::TRASH_2 size=14 />{tr("dk.a.remove")}</button>
+            </div>
+        }
+        .into_any()
+    } else {
+        view! {
+            <div class="sec-actions">
+                {bar_btn(icons::PLAY, "dk.a.start", busy, task("start"))}
+                {bar_btn(icons::SQUARE, "dk.a.stop", busy, task("stop"))}
+                {bar_btn(icons::REFRESH_CW, "dk.a.restart", busy, task("restart"))}
+            </div>
+        }
+        .into_any()
+    }
+}
+
+fn detail_drawer(name: String, settings: Remote<DockerSettingsState>, edit: RwSignal<Option<Option<String>>>, close: Callback<()>) -> AnyView {
+    let d = remote::<StackDetail>(&stack_url(&name, ""), 2);
+    let upd = updatable();
     let busy = RwSignal::new(false);
     let ask = RwSignal::new(None::<Ask>);
     let snap_busy = RwSignal::new(false);
     let snap_err = RwSignal::new(None::<String>);
     let n = StoredValue::new(name.clone());
-    let content = move || {
-        let Some(det) = d.data.get() else { return ().into_any() };
-        let s = det.summary.clone();
-        let managed = s.editable;
-        let upd = updatable(updates);
-        let new_images: Vec<String> = s.images.iter().filter(|i| upd.contains(i)).cloned().collect();
-        let btn = move |icon: &'static str, key: &'static str, action: &'static str| {
-            view! {
-                <button class="btn ghost sm" disabled=move || busy.get() on:click=move |_| act(action_url("stacks", &n.get_value(), action), None, busy)>
-                    <Icon icon=icon size=14 />{tr(key)}
-                </button>
-            }
-        };
-        let containers = det
-            .containers
-            .iter()
-            .map(|c| {
-                ui::row(vec![
-                    ui::cell("dk.col.name", "", view! { <div class="cell-main"><strong>{c.name.clone()}</strong><span class="cell-sub mono">{c.image.clone()}</span></div> }.into_any()),
-                    ui::cell("col.status", "", container_pill(c.state, c.health)),
-                ])
-            })
-            .collect::<Vec<_>>();
-        let snaps = det
-            .snapshots
-            .iter()
-            .map(|sn| {
-                let (a, b) = (sn.clone(), sn.clone());
-                let imgs = sn.images.iter().map(|i| format!("{}: {}", i.service, i.image)).collect::<Vec<_>>();
-                ui::row(vec![
-                    ui::cell("dk.col.created", "", view! { <div class="cell-main"><span>{i18n::datetime(sn.created_s.max(0) as u64 * 1000)}</span><span class="cell-sub">{t(reason_key(&sn.reason))}</span></div> }.into_any()),
-                    ui::cell("dk.col.images", "wrap", view! { <div class="cell-main">{imgs.into_iter().map(|i| view! { <span class="mono small">{i}</span> }).collect_view()}</div> }.into_any()),
-                    ui::actions(view! {
-                        <button class="btn ghost sm" on:click=move |_| ask.set(Some(Ask::Rollback(a.clone())))><Icon icon=icons::ROTATE_CCW size=14 />{tr("dk.snap.rollback")}</button>
-                        <button class="icon-btn sm" title=tr("delete") aria-label=format!("{}: {}", t("delete"), sn.id) on:click=move |_| ask.set(Some(Ask::DeleteSnapshot(b.clone())))><Icon icon=icons::TRASH_2 size=16 /></button>
-                    }.into_any()),
-                ])
-            })
-            .collect::<Vec<_>>();
-        let has_snap_rows = !snaps.is_empty();
-        let take_snapshot = move |_| {
-            snap_busy.set(true);
-            snap_err.set(None);
-            spawn_local(async move {
-                let r = api::post::<(), StackSnapshot>(&stack_url(&n.get_value(), "/snapshots"), None).await;
-                let _ = snap_busy.try_set(false);
-                match r {
-                    Ok(_) => {
-                        toast(Tone::Ok, t("dk.snap.taken").to_string());
-                        d.reload();
-                    }
-                    Err(e) => {
-                        let _ = snap_err.try_set(Some(e.text()));
-                    }
+    // what decides the layout; the rest follows the details in place
+    let kind = Memo::new(move |_| d.data.with(|d| d.as_ref().map(|d| (d.summary.editable, d.summary.snapshots, d.summary.manager))));
+    let take_snapshot = move |_| {
+        snap_busy.set(true);
+        snap_err.set(None);
+        spawn_local(async move {
+            let r = api::post::<(), StackSnapshot>(&stack_url(&n.get_value(), "/snapshots"), None).await;
+            let _ = snap_busy.try_set(false);
+            match r {
+                Ok(_) => {
+                    toast(Tone::Ok, t("dk.snap.taken").to_string());
+                    d.reload();
                 }
-            });
+                Err(e) => {
+                    let _ = snap_err.try_set(Some(e.text()));
+                }
+            }
+        });
+    };
+    let content = move || {
+        let Some((managed, can_snap, manager)) = kind.get() else { return ().into_any() };
+        let summary = Memo::new(move |_| d.data.with(|d| d.as_ref().map(|d| d.summary.clone())));
+        let new_images = move || {
+            summary.with(|s| s.as_ref().map(|s| s.images.iter().filter(|i| upd.with(|u| u.contains(i))).cloned().collect::<Vec<_>>()).unwrap_or_default())
         };
         view! {
             <div class="chips">
-                <span class="chip">{t(manager_key(s.manager))}</span>
-                {state_pill(s.state)}
+                <span class="chip">{t(manager_key(manager))}</span>
+                {move || summary.with(|s| s.as_ref().map(|s| state_pill(s.state)))}
             </div>
-            <dl class="kvs">
-                {s.working_dir.clone().map(|w| kv_row("dk.s.folder", Signal::stored(w), "mono"))}
-                {(!s.config_files.is_empty()).then(|| kv_row("dk.s.files", Signal::stored(s.config_files.join(", ")), "mono"))}
-            </dl>
-            {(!managed).then(|| ui::note(Tone::Info, icons::INFO, ui::text(t(if s.manager == StackManager::Rynas { "dk.s.no_folder" } else { "dk.s.readonly" }).to_string())))}
-            {(!new_images.is_empty()).then(|| ui::note(Tone::Info, icons::DOWNLOAD, ui::text(tf("dk.upd.stack", &[("images", &new_images.join(", "))]))))}
-            <div class="sec-actions">
-                {if managed {
-                    view! {
-                        {btn(icons::PLAY, "dk.a.up", "up")}
-                        {btn(icons::REFRESH_CW, "dk.a.restart", "restart")}
-                        {btn(icons::SQUARE, "dk.a.stop", "stop")}
-                        {btn(icons::DOWNLOAD, "dk.a.pull", "pull")}
-                        <button class="btn ghost sm" on:click=move |_| ask.set(Some(Ask::Update))><Icon icon=icons::DOWNLOAD size=14 />{tr("dk.a.update")}</button>
-                        {btn(icons::CIRCLE_X, "dk.a.down", "down")}
-                        <button class="btn ghost sm" on:click=move |_| edit.set(Some(Some(n.get_value())))><Icon icon=icons::PENCIL size=14 />{tr("dk.a.edit")}</button>
-                        <button class="btn ghost sm danger-text" on:click=move |_| ask.set(Some(Ask::Remove))><Icon icon=icons::TRASH_2 size=14 />{tr("dk.a.remove")}</button>
-                    }
-                    .into_any()
-                } else {
-                    view! {
-                        {btn(icons::PLAY, "dk.a.start", "start")}
-                        {btn(icons::SQUARE, "dk.a.stop", "stop")}
-                        {btn(icons::REFRESH_CW, "dk.a.restart", "restart")}
-                    }
-                    .into_any()
-                }}
-            </div>
+            {move || summary.with(|s| s.as_ref().map(|s| view! {
+                <dl class="kvs">
+                    {s.working_dir.clone().map(|w| kv_row("dk.s.folder", Signal::stored(w), "mono"))}
+                    {(!s.config_files.is_empty()).then(|| kv_row("dk.s.files", Signal::stored(s.config_files.join(", ")), "mono"))}
+                </dl>
+            }))}
+            {(!managed).then(|| ui::note(Tone::Info, icons::INFO, ui::text(t(if manager == StackManager::Rynas { "dk.s.no_folder" } else { "dk.s.readonly" }).to_string())))}
+            {move || { let l = new_images(); (!l.is_empty()).then(|| ui::note(Tone::Info, icons::DOWNLOAD, ui::text(tf("dk.upd.stack", &[("images", &l.join(", "))])))) }}
+            {action_bar(managed, n, busy, ask, edit)}
             <div class="mini-title">{tr("dk.s.containers")}</div>
-            {if containers.is_empty() { view! { <p class="muted small">{tr("dk.s.no_containers")}</p> }.into_any() } else { ui::table("", &["dk.col.name", "col.status"], containers) }}
+            {move || d.data.with(|d| d.as_ref().map(stack_containers))}
             {managed.then(|| view! {
                 <div class="dk-snap-head">
                     <div class="mini-title">{tr("dk.snap.title")}</div>
-                    {s.snapshots.then(|| view! {
-                        <button class="btn ghost sm" disabled=move || snap_busy.get() on:click=take_snapshot>{spinner(snap_busy)}<Icon icon=icons::CAMERA size=14 />{tr("dk.snap.take")}</button>
+                    {can_snap.then(|| view! {
+                        <button class="btn ghost sm" aria-disabled=move || snap_busy.get().then_some("true") on:click=move |ev| if !snap_busy.get_untracked() { take_snapshot(ev) }>
+                            {spinner(snap_busy)}<Icon icon=icons::CAMERA size=14 />{tr("dk.snap.take")}
+                        </button>
                     })}
                 </div>
                 {form_error(snap_err)}
-                {if !s.snapshots {
-                    ui::note(Tone::Info, icons::INFO, ui::text(t("dk.snap.not_subvolume").to_string()))
-                } else if has_snap_rows {
-                    ui::table("", &["dk.col.created", "dk.col.images", ""], snaps)
+                {if can_snap {
+                    (move || d.data.with(|d| d.as_ref().map(|d| snapshot_rows(d, ask)))).into_any()
                 } else {
-                    view! { <p class="muted small">{tr("dk.snap.none")}</p> }.into_any()
+                    ui::note(Tone::Info, icons::INFO, ui::text(t("dk.snap.not_subvolume").to_string()))
                 }}
             })}
         }
         .into_any()
     };
     let dialogs = move || {
-        let det = d.data.get_untracked()?;
-        ask.get().map(|a| ask_dialog(a, n.get_value(), det.summary.snapshots, settings, ask, close, d))
+        // `ask` first: an early return before it would leave the closure subscribed to nothing
+        // (the dialogs never opened when the drawer was built before its details arrived)
+        let a = ask.get()?;
+        let can_snap = kind.get_untracked()?.1;
+        Some(ask_dialog(a, n.get_value(), can_snap, settings, ask, close, d))
     };
     let body = view! {
         {move || d.view(8, content)}

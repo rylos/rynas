@@ -41,6 +41,11 @@ fn main() {
     config::init();
     docker::init();
     toast::init();
+    // in Italian the boot screen waits for the Italian texts (briefly, see `i18n::when_ready`)
+    i18n::when_ready(mount);
+}
+
+fn mount() {
     leptos::mount::mount_to_body(shell::App);
     // the static boot screen in index.html stays until the first real paint
     if let Some(boot) = leptos::prelude::document().get_element_by_id("boot") {
