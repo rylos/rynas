@@ -87,7 +87,7 @@ pub fn panel() -> AnyView {
             view! {
                 <div class="chips">
                     <span class="chip accent"><Icon icon=icons::LOCK size=12 />{tr(if imported { "tls.source.imported" } else { "tls.source.local" })}</span>
-                    <span class="chip">{tr("tls.https_port")}</span>
+                    <span class="chip">{move || tf("tls.https_port", &[("port", &super::emergency_port().to_string())])}</span>
                 </div>
                 {warnings}
                 {(!s.missing_names.is_empty()).then(|| ui::note(Tone::Warn, icons::INFO, view! { {tr("tls.missing_names")}" "{mono(&s.missing_names.join(", "))} }.into_any()))}

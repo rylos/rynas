@@ -874,6 +874,16 @@ same card appears on the Overview tab for an install rynas started that lacks it
 Since A3 the Featured tab lists the entries marked `featured` (those that fit this NAS
 first), and a `reverse_proxy` entry cannot be installed until web access is in external proxy
 mode (the drawer links to the mode setting; the wizard skips its Access step).
+The wizard counts its steps once the entry and the web access state are both in (the stepper
+never grows); without web access there is no Access step and the Network step says where the
+app opens. The timed confirmation (review 2026-11-07, `docs/quality/review-2026-11-07-web-access-gui.md`):
+Confirm only when the page is on one of `confirm.names` *and* on the HTTPS port of web access
+(never on the emergency port, where rynasd refuses it), otherwise one Open link per name;
+after the deadline the state is read again with a growing pause until `confirm` is gone; a
+confirmation that disappears while `applied.settings` changes back is a rollback, said with a
+toast and a note in the banner's place; the Settings form is built again whenever the
+server's settings change. A route whose app has no login (`auth: none`) offers `lan_vpn`
+disabled, with the reason as its help.
 
 Patterns taken, and complaints avoided:
 - one row per address with an access badge and a status, details in a drawer (Nginx Proxy
@@ -903,7 +913,10 @@ Settings › General › About › Certificate Trust Settings (an iOS 18 report:
 only after the profile is fully installed, https://community.start9.com/t/enable-trusted-certificate-on-iphone-ios-18/2051),
 Android Settings › Security › Encryption & credentials › Install a certificate › CA
 certificate (menu names vary by maker; apps may ignore user CAs), Debian
-`update-ca-certificates`, Fedora/Arch `trust anchor`, Firefox's own Authorities store.
+`update-ca-certificates`, Fedora/Arch `trust anchor`, Firefox's own Authorities store,
+Chrome on Linux 134+ `chrome://certificate-manager` › Local certificates › Custom › Installed
+by you › Trusted certificates › Import
+(https://chromium.googlesource.com/chromium/src/+/main/net/data/ssl/chrome_root_store/faq.md).
 
 #### Not in W1
 
