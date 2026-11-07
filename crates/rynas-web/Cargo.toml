@@ -90,6 +90,8 @@ assets = [
     ["target/release/rynasctl", "usr/libexec/rynas/", "755"],
     ["target/release/rynas-files-worker", "usr/libexec/rynas/", "755"],
     ["../../target/deb-stage/ui/**/*", "usr/share/rynas/ui/", "644"],
+    # the curated app catalogue (D-APPCAT; a separate rynas-apps-catalog package later)
+    ["../../apps/**/*", "usr/share/rynas/apps/", "644"],
     ["../../target/deb-stage/copyright", "usr/share/doc/rynas/copyright", "644"],
     ["../../packaging/deb/README.Debian", "usr/share/doc/rynas/", "644"],
     ["../../packaging/deb/lintian-overrides", "usr/share/lintian/overrides/rynas", "644"],
