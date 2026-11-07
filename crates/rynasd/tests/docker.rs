@@ -62,9 +62,16 @@ struct Env {
     dir: tempfile::TempDir,
     app: axum::Router,
     ops: Arc<Ops>,
+    svc: Arc<DockerSvc>,
 }
 
 fn env() -> Env {
+    env_with(true, Arc::new(Host(Mutex::default())), None)
+}
+
+/// `dry`: `--dry-system`; `runner`: detection (and, with `dry` off, every task command);
+/// `volume`: the applied Docker volume.
+fn env_with(dry: bool, runner: Arc<dyn Runner>, volume: Option<&str>) -> Env {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("root");
     std::fs::create_dir_all(root.join("vol1")).unwrap();
@@ -76,6 +83,12 @@ fn env() -> Env {
     )
     .unwrap();
     let (domain, settings) = DockerDomain::new(true);
+    if let Some(v) = volume {
+        domain.tx.send_replace(rynas_api_types::docker::DockerSettings {
+            volume: Some(v.into()),
+            ..Default::default()
+        });
+    }
     let domains: Vec<Arc<dyn Applier>> = vec![Arc::new(domain)];
     let config = Arc::new(
         Config::open(
@@ -97,7 +110,7 @@ fn env() -> Env {
         ops.clone(),
         Arc::new(MemoryNotifier::default()),
         root,
-        true,
+        dry,
         Some(
             dir.path()
                 .join("no-docker.sock")
@@ -107,8 +120,12 @@ fn env() -> Env {
         dir.path().join("state/docker"),
         settings,
         host,
-        Arc::new(Host(Mutex::default())),
+        runner,
     );
+    if !dry {
+        svc.exec_via_runner
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     let _ = ops.docker.set(svc.clone());
     let clock = Arc::new(ManualClock::new(1_800_000_000_000));
     let totp = Arc::new(TotpManager::new(
@@ -118,11 +135,12 @@ fn env() -> Env {
     ));
     let mut st = DaemonState::new(Arc::new(NoAuth), totp, clock);
     st.ops = Some(ops.clone());
-    st.docker = Some(svc);
+    st.docker = Some(svc.clone());
     Env {
         dir,
         app: router(st),
         ops,
+        svc,
     }
 }
 
@@ -424,4 +442,133 @@ async fn install_dry_run_with_a_volume() {
     let (_, b) = call(&e, "GET", "/v1/docker/settings", None).await;
     let st: DockerSettingsState = serde_json::from_slice(&b).unwrap();
     assert_eq!(st.applied.volume.as_deref(), Some("vol1"));
+}
+
+/// Answers task commands by program: `du` reports `du_bytes`, `cp` and `docker compose
+/// pull` fail, everything else succeeds; every line is recorded.
+struct Scripted {
+    calls: Mutex<Vec<String>>,
+    du_bytes: u64,
+}
+
+impl Runner for Scripted {
+    fn run(&self, cmd: &Cmd) -> Result<CmdOutput, String> {
+        let line = cmd.display();
+        self.calls.lock().unwrap().push(line.clone());
+        let ok = |out: &str| CmdOutput {
+            code: Some(0),
+            stdout: out.into(),
+            stderr: String::new(),
+        };
+        let fail = |err: &str| CmdOutput {
+            code: Some(1),
+            stdout: String::new(),
+            stderr: err.into(),
+        };
+        Ok(match line.split_whitespace().next().unwrap_or("") {
+            "dpkg" => ok("amd64\n"),
+            "du" => ok(&format!("{}\t/var/lib/docker\n", self.du_bytes)),
+            "cp" => fail("cp: error writing: No space left on device\n"),
+            "docker" if line.contains(" pull") => {
+                fail("Error response from daemon: manifest unknown\n")
+            }
+            "docker" if line.contains(" config") => ok(r#"{"services":{"web":{"image":"x"}}}"#),
+            _ => ok(""),
+        })
+    }
+}
+
+async fn run_migration(e: &Env) -> (TaskInfo, String) {
+    let s = e.svc.clone();
+    let id = e
+        .ops
+        .tasks
+        .spawn("docker.migrate", "admin", move |ctx| async move {
+            rynasd::docker::migrate_task(&s, &ctx, "admin", "vol1").await
+        })
+        .unwrap();
+    let t = wait_task(e, &id).await;
+    (t, log(e, &id))
+}
+
+/// Review 2026-11-07, M4: a migration whose copy fails starts the engine again on its old
+/// folders and leaves the configuration alone; one that does not fit never stops it.
+#[tokio::test]
+async fn failed_migration_restarts_the_engine() {
+    let r = Arc::new(Scripted {
+        calls: Mutex::default(),
+        du_bytes: 4096,
+    });
+    let e = env_with(false, r.clone(), None);
+    std::fs::create_dir_all(e.dir.path().join("root/var/lib/docker/image")).unwrap();
+    let (t, log) = run_migration(&e).await;
+    assert_eq!(t.status, TaskStatus::Error, "{log}");
+    assert!(log.contains("No space left on device"), "{log}");
+    assert!(log.contains("started again"), "{log}");
+    let calls = r.calls.lock().unwrap().clone();
+    let pos = |p: &str| calls.iter().position(|c| c.starts_with(p));
+    let (stop, cp, start) = (
+        pos("systemctl stop").expect("stopped"),
+        pos("cp -a").expect("copied"),
+        pos("systemctl start containerd.service docker.socket docker.service").expect("started"),
+    );
+    assert!(stop < cp && cp < start, "{calls:?}");
+    assert_eq!(e.svc.settings().volume, None, "the configuration did not move");
+
+    // too large for the volume: refused before anything stops
+    let r = Arc::new(Scripted {
+        calls: Mutex::default(),
+        du_bytes: u64::MAX / 4,
+    });
+    let e = env_with(false, r.clone(), None);
+    std::fs::create_dir_all(e.dir.path().join("root/var/lib/docker")).unwrap();
+    let (t, log) = run_migration(&e).await;
+    assert_eq!(t.status, TaskStatus::Error);
+    assert!(log.contains("not enough space"), "{log}");
+    assert!(
+        !r.calls.lock().unwrap().iter().any(|c| c.starts_with("systemctl")),
+        "nothing stopped"
+    );
+
+    // an unmounted volume: nothing at all
+    let r = Arc::new(Scripted {
+        calls: Mutex::default(),
+        du_bytes: 1,
+    });
+    let e = env_with(false, r.clone(), None);
+    std::fs::remove_dir(e.dir.path().join("root/vol1")).unwrap();
+    let (t, log) = run_migration(&e).await;
+    assert_eq!(t.status, TaskStatus::Error);
+    assert!(log.contains("not mounted"), "{log}");
+    assert!(r.calls.lock().unwrap().iter().all(|c| !c.starts_with("systemctl")));
+}
+
+/// A failing `docker compose pull` fails `docker.stack.update` (it used to be ignored, so
+/// a broken update never rolled back) and `up` never runs after it.
+#[tokio::test]
+async fn failed_update_pull_fails_the_task() {
+    let r = Arc::new(Scripted {
+        calls: Mutex::default(),
+        du_bytes: 1,
+    });
+    let e = env_with(false, r.clone(), Some("vol1"));
+    let dir = e.dir.path().join("root/vol1/docker/stacks/web");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("compose.yaml"), "services:\n  web:\n    image: x\n").unwrap();
+    let (s, b) = call(
+        &e,
+        "POST",
+        "/v1/docker/stacks/web/update",
+        Some(json!({"snapshot": false})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{}", String::from_utf8_lossy(&b));
+    let id = serde_json::from_slice::<TaskStarted>(&b).unwrap().task_id;
+    let t = wait_task(&e, &id).await;
+    let log = log(&e, &id);
+    assert_eq!(t.status, TaskStatus::Error, "{log}");
+    assert!(log.contains("manifest unknown"), "{log}");
+    let calls = r.calls.lock().unwrap().clone();
+    assert!(calls.iter().any(|c| c.contains(" pull")), "{calls:?}");
+    assert!(!calls.iter().any(|c| c.contains(" up ")), "{calls:?}");
 }

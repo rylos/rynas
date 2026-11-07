@@ -118,6 +118,15 @@ pub fn aggregate(
 ) -> DockerStats {
     let cpu_pct = stats.iter().map(|s| s.cpu_pct).sum::<f32>();
     let mem_bytes = stats.iter().map(|s| s.mem_bytes).sum();
+    // the same reading for every container: no extra cgroup reads
+    let usage = stats
+        .iter()
+        .map(|s| rynas_api_types::docker::ContainerUsage {
+            id: s.id.clone(),
+            cpu: (s.cpu_pct * 10.0).round() / 10.0,
+            mem: s.mem_bytes,
+        })
+        .collect();
     stats.sort_by(|a, b| {
         b.cpu_pct
             .partial_cmp(&a.cpu_pct)
@@ -138,6 +147,7 @@ pub fn aggregate(
         mem_total_bytes,
         top: stats,
         at_ms,
+        usage,
     }
 }
 
@@ -202,6 +212,15 @@ mod tests {
         assert!((agg.cpu_pct - 250.0).abs() < 0.01);
         assert_eq!(agg.mem_bytes, 250 << 20);
         assert_eq!(agg.top[0].name, "db");
+        // every running container, not only the top: the containers table
+        assert_eq!(agg.usage.len(), 2);
+        let total: u64 = agg.usage.iter().map(|u| u.mem).sum();
+        assert_eq!(total, agg.mem_bytes);
+        assert!(agg.usage.iter().any(|u| u.id == second_ids(&t)[1] && (u.cpu - 200.0).abs() < 0.01));
+    }
+
+    fn second_ids(t: &[Target]) -> Vec<String> {
+        t.iter().map(|x| x.0.clone()).collect()
     }
 
     #[test]

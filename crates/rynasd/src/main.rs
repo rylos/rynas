@@ -938,6 +938,19 @@ fn main() -> std::io::Result<()> {
             rynasd::docker::spawn_stats(docker.clone());
             let apps = rynasd::apps::AppsSvc::new(docker.clone(), args.apps_dir.clone());
             let _ = apps.web.set(opened.web_access.clone());
+            // the catalogue is parsed on the first apps request and dropped when idle
+            {
+                let apps = apps.clone();
+                tokio::spawn(async move {
+                    let mut t = tokio::time::interval(std::time::Duration::from_secs(300));
+                    loop {
+                        t.tick().await;
+                        if apps.trim_idle(std::time::Duration::from_secs(600)) {
+                            tracing::debug!("apps: idle catalogue dropped");
+                        }
+                    }
+                });
+            }
             state.apps = Some(apps);
             state.docker = Some(docker);
         }

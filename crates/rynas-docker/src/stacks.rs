@@ -10,7 +10,6 @@
 //! ([`compose_cmd`]); `down` never removes volumes.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -21,7 +20,7 @@ use rynas_api_types::docker::{
 use rynas_tasks::Cmd;
 use serde_json::Value;
 
-use crate::{Layout, Runner, under};
+use crate::{Layout, Runner, safefs, under};
 
 /// Compose file names, in compose's own order of preference.
 pub const COMPOSE_FILES: &[&str] = &[
@@ -90,12 +89,12 @@ pub fn check_rel_path(p: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The compose file of a stack folder.
+/// The compose file of a stack folder (a regular file: a symlink does not count).
 pub fn find_compose(dir: &Path) -> Option<&'static str> {
     COMPOSE_FILES
         .iter()
         .copied()
-        .find(|f| dir.join(f).is_file())
+        .find(|f| std::fs::symlink_metadata(dir.join(f)).is_ok_and(|m| m.is_file()))
 }
 
 /// Is `path` on btrfs?
@@ -387,13 +386,26 @@ pub fn compose_error(stderr: &str) -> String {
 
 // ------------------------------------------------------------------ the folders
 
+/// Mode and owner of the stack folder and its two files (review 2026-11-07, H1): root owns
+/// them, so that no container uid can plant a symlink where rynasd writes as root. Compose
+/// runs as root and reads them; containers never need to.
+/// - the folder: `0750 root:docker-apps`;
+/// - `compose.yaml`: `0640 root:docker-apps`;
+/// - `.env` (generated secrets): `0600 root:root`.
+///
+/// Extra files of a new stack and bind folders belong to `docker-apps` (the apps' data).
+pub const STACK_DIR_MODE: u32 = 0o750;
+pub const COMPOSE_MODE: u32 = 0o640;
+pub const ENV_MODE: u32 = 0o600;
+
 /// Stack folders below `root` (`/` in production, the dry root under `--dry-system`).
 pub struct StackFs<'a> {
     pub root: &'a Path,
     pub runner: &'a dyn Runner,
     /// Make btrfs subvolumes where the filesystem is btrfs (off under `--dry-system`).
     pub subvolumes: bool,
-    /// `docker-apps` (uid, gid): owner of stack and bind folders; `None`: leave the owner.
+    /// `docker-apps` (uid, gid): owner of bind folders and extra files, group of the stack
+    /// folder and its compose file; `None`: leave every owner as made (tests, dry system).
     pub owner: Option<(u32, u32)>,
 }
 
@@ -403,12 +415,26 @@ impl StackFs<'_> {
         under(self.root, abs)
     }
 
-    fn chown(&self, p: &Path) -> Result<(), String> {
-        if let Some((u, g)) = self.owner {
-            std::os::unix::fs::chown(p, Some(u), Some(g))
-                .map_err(|e| format!("chown {}: {e}", p.display()))?;
+    /// `root:docker-apps` (folder, compose file).
+    fn root_group(&self) -> safefs::Owner {
+        self.owner.map(|(_, g)| (0, g))
+    }
+
+    /// `root:root` (`.env`).
+    fn root_only(&self) -> safefs::Owner {
+        self.owner.map(|_| (0, 0))
+    }
+
+    /// Opens a stack folder as a descriptor (no symlink anywhere below the root) and gives
+    /// it the root owner and mode (stacks made before 2026-11-07 belonged to docker-apps).
+    fn open_stack(&self, layout: &Layout, name: &str) -> Result<std::fs::File, String> {
+        let abs = layout.stack(name);
+        let d = safefs::open_dir(self.root, &abs).map_err(|e| format!("{abs}: {e}"))?;
+        if self.owner.is_some() {
+            safefs::set_owner_mode(&d, STACK_DIR_MODE, self.root_group())
+                .map_err(|e| format!("{abs}: {e}"))?;
         }
-        Ok(())
+        Ok(d)
     }
 
     /// Creates `abs` as a subvolume (on btrfs, when allowed) or a folder, unless it exists.
@@ -461,41 +487,24 @@ impl StackFs<'_> {
         Ok(())
     }
 
-    /// Writes `content` to `dir/rel` through a temporary file and a rename.
-    fn write_file(&self, dir: &Path, rel: &str, content: &str, mode: u32) -> Result<(), String> {
-        let target = dir.join(rel);
-        let parent = target.parent().ok_or("invalid path")?;
-        if !parent.exists() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
-            // the new folders (below the stack folder) belong to docker-apps
-            let mut p = parent;
-            while p != dir {
-                self.chown(p)?;
-                p = p.parent().ok_or("invalid path")?;
-            }
-        }
-        let name = target.file_name().ok_or("invalid path")?.to_string_lossy();
-        let tmp = parent.join(format!(".{name}.rynas-tmp"));
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&tmp)
-            .map_err(|e| format!("{}: {e}", tmp.display()))?;
-        f.set_permissions(std::fs::Permissions::from_mode(mode))
-            .map_err(|e| e.to_string())?;
-        f.write_all(content.as_bytes())
-            .and_then(|_| f.sync_all())
-            .map_err(|e| format!("{}: {e}", tmp.display()))?;
-        drop(f);
-        self.chown(&tmp)?;
-        std::fs::rename(&tmp, &target).map_err(|e| format!("{}: {e}", target.display()))
+    /// Writes `content` to `rel` below the open stack folder: descriptor-based, no symlink
+    /// followed, owner and mode set before the rename ([`safefs::write_rel`]). New folders
+    /// on the way belong to `docker-apps` (`0755`).
+    fn write_file(
+        &self,
+        dir: &std::fs::File,
+        rel: &str,
+        content: &str,
+        mode: u32,
+        owner: safefs::Owner,
+    ) -> Result<(), String> {
+        safefs::write_rel(dir, rel, content.as_bytes(), mode, 0o755, owner)
+            .map_err(|e| format!("{rel}: {e}"))
     }
 
     /// Creates a new stack from files: the subvolume (or folder) `/<vol>/docker/stacks/<name>`
-    /// with `compose.yaml`, `.env` (mode 0600) and `files`, owned by `docker-apps`. Refused
-    /// when the folder exists (`AlreadyExists`). Nothing is started.
+    /// with `compose.yaml`, `.env` and `files` (modes and owners: [`STACK_DIR_MODE`]).
+    /// Refused when the folder exists (`AlreadyExists`). Nothing is started.
     pub fn create_stack(
         &self,
         layout: &Layout,
@@ -537,15 +546,14 @@ impl StackFs<'_> {
         self.ensure_stacks_dir(layout, log)
             .map_err(StackError::Failed)?;
         self.make_subvolume(&abs, log).map_err(StackError::Failed)?;
-        let dir = self.real(&abs);
         let write = || -> Result<(), String> {
-            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o750))
-                .map_err(|e| e.to_string())?;
-            self.chown(&dir)?;
-            self.write_file(&dir, COMPOSE_FILE, compose, 0o640)?;
-            self.write_file(&dir, ENV_FILE, env, 0o600)?;
+            let dir = safefs::open_dir(self.root, &abs).map_err(|e| format!("{abs}: {e}"))?;
+            safefs::set_owner_mode(&dir, STACK_DIR_MODE, self.root_group())
+                .map_err(|e| format!("{abs}: {e}"))?;
+            self.write_file(&dir, COMPOSE_FILE, compose, COMPOSE_MODE, self.root_group())?;
+            self.write_file(&dir, ENV_FILE, env, ENV_MODE, self.root_only())?;
             for f in files {
-                self.write_file(&dir, &f.path, &f.content, f.mode.unwrap_or(0o644))?;
+                self.write_file(&dir, &f.path, &f.content, f.mode.unwrap_or(0o644), self.owner)?;
             }
             Ok(())
         };
@@ -567,25 +575,27 @@ impl StackFs<'_> {
         env: &str,
     ) -> Result<(), StackError> {
         check_sizes(compose, env)?;
-        let dir = self.real(&layout.stack(name));
-        let file = find_compose(&dir)
+        let file = find_compose(&self.real(&layout.stack(name)))
             .ok_or_else(|| StackError::NotFound(format!("stack {name} has no compose file")))?;
-        let mode = |f: &str, d: u32| {
-            std::fs::metadata(dir.join(f))
-                .map(|m| m.permissions().mode() & 0o777)
-                .unwrap_or(d)
-        };
-        self.write_file(&dir, file, compose, mode(file, 0o640))
-            .and_then(|_| self.write_file(&dir, ENV_FILE, env, mode(ENV_FILE, 0o600)))
+        let dir = self.open_stack(layout, name).map_err(StackError::Failed)?;
+        // modes no looser than rynas's (a stricter one the administrator chose stays)
+        let mode = |f: &str, max: u32| safefs::mode_at(&dir, f).map_or(max, |m| m & max);
+        self.write_file(&dir, file, compose, mode(file, COMPOSE_MODE), self.root_group())
+            .and_then(|_| {
+                self.write_file(&dir, ENV_FILE, env, mode(ENV_FILE, ENV_MODE), self.root_only())
+            })
             .map_err(StackError::Failed)
     }
 
     /// The compose file and `.env` of a stack.
     pub fn read_files(&self, layout: &Layout, name: &str) -> Result<StackFiles, StackError> {
-        let dir = self.real(&layout.stack(name));
-        let file = find_compose(&dir)
+        let path = self.real(&layout.stack(name));
+        let file = find_compose(&path)
             .ok_or_else(|| StackError::NotFound(format!("stack {name} has no compose file")))?;
-        let read = |f: &str| std::fs::read_to_string(dir.join(f));
+        // no symlink followed: a planted `.env -> /etc/shadow` is never read as root
+        let dir = safefs::open_dir(self.root, &layout.stack(name))
+            .map_err(|e| StackError::Failed(format!("{}: {e}", layout.stack(name))))?;
+        let read = |f: &str| safefs::read_at(&dir, f, MAX_FILE as u64);
         Ok(StackFiles {
             compose: read(file).map_err(|e| StackError::Failed(format!("{file}: {e}")))?,
             env: read(ENV_FILE).unwrap_or_default(),
@@ -625,8 +635,9 @@ impl StackFs<'_> {
     }
 
     /// Creates the missing bind folders below `volume` (owned by `docker-apps`), so that
-    /// Docker does not make them as root. Folders outside the volume are never created.
-    /// Returns the folders created.
+    /// Docker does not make them as root. Folders outside the volume are never created, and
+    /// a symlink on the way refuses the folder ([`create_below`]). Returns the folders
+    /// created.
     pub fn create_bind_dirs(
         &self,
         binds: &[Bind],
@@ -639,24 +650,8 @@ impl StackFs<'_> {
             if !b.create || !is_below(&b.source, volume) || !seen.insert(b.source.clone()) {
                 continue;
             }
-            let p = self.real(&b.source);
-            if p.exists() {
+            if create_below(self.root, volume, &b.source, 0o755, self.owner)?.is_empty() {
                 continue;
-            }
-            // create the missing parents one by one: each gets the owner
-            let mut missing = Vec::new();
-            let mut cur = p.as_path();
-            while !cur.exists() {
-                missing.push(cur.to_path_buf());
-                cur = match cur.parent() {
-                    Some(x) => x,
-                    None => break,
-                };
-            }
-            for d in missing.iter().rev() {
-                std::fs::create_dir(d).map_err(|e| format!("mkdir {}: {e}", d.display()))?;
-                let _ = std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o755));
-                self.chown(d)?;
             }
             log(&format!(
                 "created bind folder {} (owner {})",
@@ -667,6 +662,40 @@ impl StackFs<'_> {
         }
         Ok(made)
     }
+}
+
+/// Creates the folder `abs` (and its missing parents) below the existing folder `base`, both
+/// absolute paths below `root`: every component is opened with `O_NOFOLLOW` (a symlink on
+/// the way is an error, never followed), each new folder gets `mode` and `owner` on its
+/// descriptor. A folder that already exists (even through a symlink the administrator made)
+/// is left alone. Returns the folders made, outermost first.
+pub fn create_below(
+    root: &Path,
+    base: &str,
+    abs: &str,
+    mode: u32,
+    owner: safefs::Owner,
+) -> Result<Vec<String>, String> {
+    if !is_below(abs, base) {
+        return Err(format!("{abs} is not below {base}"));
+    }
+    if under(root, abs).is_dir() {
+        return Ok(Vec::new());
+    }
+    let rest = abs[base.trim_end_matches('/').len()..].trim_start_matches('/');
+    let mut cur = safefs::open_dir(root, base).map_err(|e| format!("{base}: {e}"))?;
+    let mut path = base.trim_end_matches('/').to_string();
+    let mut made = Vec::new();
+    for c in safefs::components(rest).map_err(|e| e.to_string())? {
+        path = format!("{path}/{c}");
+        let (d, new) = safefs::ensure_dir_at(&cur, c, mode, owner)
+            .map_err(|e| format!("mkdir {path}: {e}"))?;
+        if new {
+            made.push(path.clone());
+        }
+        cur = d;
+    }
+    Ok(made)
 }
 
 /// Deletes a subvolume with the ioctl, or a plain folder tree.
@@ -967,6 +996,61 @@ mod tests {
         assert_eq!(made, ["/vol1/docker/stacks/a/data/db"]);
         assert!(d.path().join("vol1/docker/stacks/a/data/db").is_dir());
         assert!(!d.path().join("etc/x").exists() && !d.path().join("vol1/nocreate").exists());
+    }
+
+    /// Review 2026-11-07, H1: a container uid plants symlinks in a stack folder; rynasd's
+    /// root writes and bind folders must refuse them and never touch the targets.
+    #[test]
+    fn planted_symlinks_are_never_followed() {
+        use std::os::unix::fs::symlink;
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join("vol1")).unwrap();
+        let victim = d.path().join("shadow");
+        std::fs::write(&victim, "root:secret\n").unwrap();
+        let elsewhere = d.path().join("etc");
+        std::fs::create_dir(&elsewhere).unwrap();
+        let fake = Fake {
+            rules: vec![],
+            calls: Mutex::new(vec![]),
+        };
+        let s = fs(d.path(), &fake);
+        let l = Layout::of_label("vol1");
+        s.create_stack(&l, "app", "services: {}\n", "A=1\n", &[], &|_| {})
+            .unwrap();
+        let dir = d.path().join("vol1/docker/stacks/app");
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), STACK_DIR_MODE);
+        assert_eq!(mode(&dir.join("compose.yaml")), COMPOSE_MODE);
+        assert_eq!(mode(&dir.join(".env")), ENV_MODE);
+        // the temporary names point at the victim
+        symlink(&victim, dir.join("..env.rynas-tmp")).unwrap();
+        symlink(&victim, dir.join(".compose.yaml.rynas-tmp")).unwrap();
+        s.write_files(&l, "app", "services: {x: {}}\n", "A=2\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "root:secret\n");
+        assert_eq!(std::fs::read_to_string(dir.join(".env")).unwrap(), "A=2\n");
+        // `.env` itself replaced by a link: never read as root, replaced on the next write
+        std::fs::remove_file(dir.join(".env")).unwrap();
+        symlink(&victim, dir.join(".env")).unwrap();
+        assert_eq!(s.read_files(&l, "app").unwrap().env, "");
+        s.write_files(&l, "app", "services: {}\n", "A=3\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "root:secret\n");
+        assert!(!std::fs::symlink_metadata(dir.join(".env")).unwrap().is_symlink());
+        // a bind subfolder that is a link: refused, nothing made at the target
+        symlink(&elsewhere, dir.join("config")).unwrap();
+        let b = Bind {
+            service: "a".into(),
+            source: "/vol1/docker/stacks/app/config/sub".into(),
+            target: "/config".into(),
+            create: true,
+        };
+        assert!(s.create_bind_dirs(&[b], "/vol1", &|_| {}).is_err());
+        assert!(!elsewhere.join("sub").exists());
+        // a whole stack folder replaced by a link: writes refused
+        std::fs::create_dir(d.path().join("vol1/docker/stacks/evil-target")).unwrap();
+        symlink(&elsewhere, d.path().join("vol1/docker/stacks/evil")).unwrap();
+        std::fs::write(elsewhere.join("compose.yaml"), "services: {}\n").unwrap();
+        assert!(s.write_files(&l, "evil", "services: {}\n", "X=1\n").is_err());
+        assert!(!elsewhere.join(".env").exists());
     }
 
     #[test]

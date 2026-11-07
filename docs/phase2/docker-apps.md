@@ -56,7 +56,7 @@ D-APPCAT, adopted after D-DOCKER, moves the catalogue into **phase 2**. That sup
 4. **Before pull or update**, take a read-only snapshot of the stack subvolume, with an option to stop the stack first for databases. Rollback restores that snapshot, puts back the previous image digests, and runs `up -d`.
 5. **The engine.**
    - Adopt an existing Docker; never reinstall it.
-   - `daemon.json` is merged, never overwritten: `data-root` on the volume, `log-driver: local`, `live-restore: true`, `default-address-pools` 10.200.0.0/16 size 24 when no pool is already set.
+   - `daemon.json` is merged, never overwritten: `data-root` on the volume, `log-driver: local`, `live-restore: true`, `default-address-pools` 10.200.0.0/16 size 24 when no pool is already set (a pool rynas wrote itself, the default or the last applied one, follows the setting; any other stays); a legacy `graph` key is dropped.
    - The containerd root goes on the volume.
    - `RequiresMountsFor=` on `docker.service` and `containerd.service`.
    - Moving the data-root is a task that refuses to run while containers are running.
@@ -64,7 +64,7 @@ D-APPCAT, adopted after D-DOCKER, moves the catalogue into **phase 2**. That sup
    - Only whitelisted operations, admin role only, recorded in the audit log.
    - Never a generic Docker API proxy, and never the socket handed to the browser.
    - A manager that receives the socket comes with the warning "has root privileges and its own login".
-7. **Folders.** Bind folders are created before `up`, owned by the `docker-apps` user and group (PUID/PGID), never root. A bind outside `/<vol>/` gets a warning.
+7. **Folders.** Bind folders are created before `up`, owned by the `docker-apps` user and group (PUID/PGID), never root. A bind outside `/<vol>/` gets a warning. The stack folder and its two files belong to **root** (folder `0750 root:docker-apps`, `compose.yaml` `0640 root:docker-apps`, `.env` `0600 root:root`): compose runs as root and reads them, containers never need to, and no container uid can plant a symlink where rynasd writes as root. Every root write below a volume is descriptor-based: paths are walked with `O_NOFOLLOW` (a symlink anywhere refuses the operation), new folders and files get owner and mode through `fchown`/`fchmod` on the open descriptor, and files are written to a fresh `O_EXCL|O_NOFOLLOW` temporary name, then renamed (`rynas_docker::safefs`). Reads of a stack's files never follow a symlink either.
 8. **Catalogue.**
    - Images are pinned by tag + digest. The compose file has no templating logic.
    - Secrets are generated automatically.
@@ -103,8 +103,9 @@ the answer head).
 
 **Access.** Every route, reads included, needs the administrator role: rynas-web checks it
 (`admin_read` covers `/docker/`), and rynasd checks it again from the system groups
-(`--admin-group`, 403 `forbidden`). Only the operations below exist. Nothing is passed
-through to the engine, and the socket never leaves rynasd. Every change is a task `docker.*`
+(`--admin-group`, 403 `forbidden`) with one route layer over the whole `/v1/docker`
+router. Only the operations below exist. Nothing is passed through to the engine, and the
+socket never leaves rynasd. Every change is a task `docker.*`
 (user, start, end and log in the task history) and a line of the audit log (log target
 `rynas::audit`: `docker <action> <target> by <user>`).
 
@@ -150,7 +151,7 @@ Paths are relative to `/api/v1`.
 | GET | `/docker/containers/{ref}/logs/stream?tail=N&timestamps=1` | — | SSE: `log` (data `LogLine`) for the last N lines (default 100), then every new line; `error` (data {message}); `end` (data `{}`) when the container stops logging. Counted like the session's other streams |
 | GET | `/docker/stacks` | — | `Vec<StackSummary>`, sorted by name |
 | POST | `/docker/stacks` | `CreateStackRequest` {name, compose, env, files [`StackFile` {path, content, mode?}], volume?, start} | 201 `StackCreated` {name, path, task_id?, validation} with `Location: /api/v1/docker/stacks/<name>`. Validated with `docker compose config` first (400 `invalid_value`, `field: compose`, compose's message). 409 `already_exists`; 400 with `field` `name`, `files`, `env` or `volume` |
-| POST | `/docker/stacks/validate` | `ValidateStackRequest` {name?, compose, env} | `StackValidation` (a bad compose file is `ok: false` + `error`, never a 400) |
+| POST | `/docker/stacks/validate` | `ValidateStackRequest` {name?, compose, env} | `StackValidation` (a bad compose file is `ok: false` + `error`, never a 400). Compose runs as root, so the run is narrow: 512 KiB per file (400 `invalid_value`), a top-level `include:` is refused (`ok: false`), services' `env_file:` are not read (`--no-env-resolution`, compose ≥ 2.24; older compose runs without it), 30 s timeout, scratch files `0600` in rynasd's state, nothing written in the project folder |
 | GET | `/docker/stacks/{name}` | — | `StackDetail` {summary, containers, snapshots} |
 | GET | `/docker/stacks/{name}/files` | — | `StackFiles` {compose, env, compose_file}; 409 `stack_not_managed` |
 | PUT | `/docker/stacks/{name}/files` | `StackFiles` {compose, env} | `StackValidation`, after writing. Validated first (400 with `field: compose`). Does not restart the stack: run `up` |
@@ -162,11 +163,11 @@ Paths are relative to `/api/v1`.
 | POST | `/docker/stacks/{name}/snapshots` | — | 201 `StackSnapshot` (reason `manual`); 409 `conflict` when the folder is not a btrfs subvolume |
 | DELETE | `/docker/stacks/{name}/snapshots/{id}` | — | 204; 404 |
 | GET | `/docker/images` | — | `Vec<ImageSummary>` {id, tags, digests, size_bytes, created_s, containers, dangling} |
-| GET | `/docker/volumes` | — | `Vec<VolumeSummary>` {name, driver, mountpoint, stack?, size_bytes?, in_use?} |
+| GET | `/docker/volumes` | — | `Vec<VolumeSummary>` {name, driver, mountpoint, stack?, size_bytes?, in_use?}. Sizes come from the cached `docker system df` (below) |
 | GET | `/docker/networks` | — | `Vec<NetworkSummary>` {id, name, driver, scope, subnets, internal, stack?} |
-| GET | `/docker/df` | — | `DockerDiskUsage` {images_bytes, images_reclaimable_bytes, containers_bytes, volumes_bytes, build_cache_bytes} |
+| GET | `/docker/df` | — | `DockerDiskUsage` {images_bytes, images_reclaimable_bytes, containers_bytes, volumes_bytes, build_cache_bytes}. `docker system df` walks every volume (seconds, wakes sleeping disks): rynasd runs it at most once per 60 s, shared by concurrent requests, and keeps only the totals and volume sizes |
 | GET | `/docker/stats` | — | `DockerStats`: the sampler's last sample, or one sample on demand when nobody listens (CPU reads 0 until the next one) |
-| GET | `/docker/updates` | — | `UpdateReport` {checked_at_ms (0 = never), images [`ImageUpdate` {image, local_digest?, remote_digest?, update_available, error?, stacks, containers}]} |
+| GET | `/docker/updates` | — | `UpdateReport` {checked_at_ms (0 = never), images [`ImageUpdate` {image, local_digest?, remote_digest?, update_available, error?, stacks, containers}]}. Cheap: the report of the last check, held in memory (loaded from `<state>/docker/updates.json` at start); no registry or engine call. Only `POST /docker/updates/check` refreshes it |
 | POST | `/docker/updates/check` | — | 202 (`docker.update-check`): registry digests compared without pulling; the report lands in `GET /docker/updates` |
 
 #### Shapes worth knowing
@@ -241,13 +242,13 @@ Ranges (400 `invalid_value` with the field):
 
 | Type | What it does |
 |---|---|
-| `docker.install` | apt update, ca-certificates and curl, the key to `/etc/apt/keyrings/docker.asc`, `/etc/apt/sources.list.d/docker.sources` (deb822, signed-by), apt update, the pin `/etc/apt/preferences.d/rynas-docker` (`Pin: version 5:<major>.*`, priority 1001, major = apt's candidate). With `volume`, the apply of `docker` before the packages, so the engine starts on the volume. Then `apt-get install -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin` and the system user and group `docker-apps` |
-| `docker.migrate` | refuses while containers run; stops docker.socket, docker and containerd; creates the subvolumes; `cp -a --reflink=auto` of the old data-root and containerd root; applies `docker` with the new volume; starts the engine. The old folders are kept (the log says where) |
+| `docker.install` | apt update, ca-certificates and curl, the key downloaded to a staging file and checked against Docker's published fingerprint `9DC8 5822 9FC7 DD38 854A E2D8 8D81 803C 0EBF CD88` (OpenPGP v4, computed by rynasd; another key fails the task and never reaches `/etc/apt/keyrings`), then written to `/etc/apt/keyrings/docker.asc` (0644), `/etc/apt/sources.list.d/docker.sources` (deb822, signed-by), apt update, the pin `/etc/apt/preferences.d/rynas-docker` (`Pin: version 5:<major>.*`, priority 1001, major = apt's candidate). With `volume`, the apply of `docker` before the packages, so the engine starts on the volume. Then `apt-get install -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin` and the system user and group `docker-apps` |
+| `docker.migrate` | refuses while containers run, when the volume is not in the mount table, or when `du -sx` of the old folders (+10 %) exceeds the volume's free space (all before anything stops); stops docker.socket, docker and containerd; creates the subvolumes; `cp -a --reflink=auto` of the old data-root and containerd root; applies `docker` with the new volume; starts the engine. Once stopped, the engine is started again on **any** failure (on its old folders, since the configuration only switches after a complete copy); the log says where the partial copy is. The old folders are kept (the log says where) |
 | `docker.container.start\|stop\|restart` | the engine call (stop and restart give 30 s of grace) |
 | `docker.stack.up` | `docker compose config`; the missing bind folders below the volume are created, owned by `docker-apps` (binds outside the volume are logged as warnings); then `docker compose -p <stack> --project-directory <dir> -f <dir>/<file> up --detach --wait=false` (30 min) |
 | `docker.stack.down\|restart\|stop\|start` | the compose command (`down` never removes volumes; 10 min) |
 | `docker.stack.pull` | snapshot (setting or body), then `pull` |
-| `docker.stack.update` | snapshot (the services' images are recorded with their registry digests; `stop_first` stops the stack during the snapshot), `pull`, `up`. On failure, an automatic rollback to that snapshot |
+| `docker.stack.update` | snapshot (the services' images are recorded with their registry digests; `stop_first` stops the stack during the snapshot), `pull`, `up`. A non-zero exit of `pull` or `up` is a failure (compose's last error line in the message); on failure, an automatic rollback to that snapshot |
 | `docker.stack.rollback` | `down`; a `before-rollback` snapshot of the current folder; the folder swapped with a writable copy of the snapshot; each service's image tagged back (`docker image tag <image_id> <ref>`, or `docker pull <repo>@<digest>` first when the image is gone); `up` |
 | `docker.stack.remove` | `down`; with `delete_files`, the folder (subvolume) and its snapshots are deleted |
 | `docker.update-check` | the registry digest of every tagged image in use (distribution endpoint, no pull) against the local repo digest. New updates are notified once per registry digest; the report is saved in `<state>/docker/updates.json` |
@@ -258,7 +259,10 @@ Ranges (400 `invalid_value` with the field):
   - `name`: 1-63 characters of `a-z 0-9 - _`, starting with a letter or a digit;
   - a btrfs subvolume where the volume is btrfs, a plain folder elsewhere (no snapshots
     then);
-  - mode 0750, owned by `docker-apps`; `compose.yaml` 0640, `.env` 0600; extra files at
+  - folder `0750 root:docker-apps`, `compose.yaml` `0640 root:docker-apps`, `.env`
+    `0600 root:root` (§3 rule 7; a write repairs the owner of folders made before
+    2026-11-07, and a stricter mode the administrator chose stays); extra files, owned by
+    `docker-apps`, at
     relative paths (no `..`, no absolute paths, mode 0644 by default).
 - Snapshots live in `/<vol>/docker/.snapshots/<name>/<YYYYMMDDTHHMMSS>` (plus a `.json`),
   outside the folder that managers scan.
@@ -277,10 +281,17 @@ Ranges (400 `invalid_value` with the field):
 
 `/api/v1/events` adds three events. They ride on rynasd's task stream (`?docker=1`).
 - `docker.stats` (data `DockerStats`): running, total, cpu_pct (the sum, in % of one CPU),
-  cpus, mem_bytes, mem_total_bytes, top 5 [{id, name, stack?, cpu_pct, mem_bytes}], at_ms.
+  cpus, mem_bytes, mem_total_bytes, top 5 [{id, name, stack?, cpu_pct, mem_bytes}], at_ms,
+  and `usage` [`ContainerUsage` {id, cpu, mem}]: every running container of the sample
+  (full id, % of one CPU with one decimal, bytes), for the containers table. Same cgroup
+  reading as the totals (one read per container per tick); `top` stays for the widget.
   Sent every 5 s while a stream listens; the latest one on connect.
 - `docker.changed` (data `DockerChanged` {generation}): re-read the lists the page shows.
-  At most one per second.
+  The engine stream is filtered to the lifecycle actions (create, start, restart, die,
+  stop, kill, destroy, rename, pause, unpause, update, oom, health_status): healthcheck
+  `exec_*`, `attach`, `resize`… never reach rynasd. The first list-changing event arms a
+  1 s timer and one hint covers everything until it fires; nothing ticks while the engine
+  is quiet.
 - `resync {"stream":"docker"}`.
 
 The sampler reads cgroup v2 files (`cpu.stat`, `memory.current` minus `inactive_file`) and
@@ -299,8 +310,9 @@ Notification codes (source `docker`; texts `nev.docker.*` in en + it):
 - **Crash loop.** It counts restarts made by the engine: a `die` followed by a `start`
   without a `stop` or `kill` in between. `crash_restarts` of them within
   `crash_window_min` open the loop; a whole window without restarts closes it.
-- **Watcher.** It reconnects with backoff (1 s up to 60 s) and reports the containers that
-  are unhealthy at each (re)connection. It checks the data-root fill level every minute,
+- **Watcher.** It reconnects with backoff (1 s doubling up to 60 s; back to 1 s only after
+  a stream that stayed up 30 s, so a stream that fails at once slows down) and reports the
+  containers that are unhealthy at each (re)connection. It checks the data-root fill level every minute,
   with 2 points of hysteresis.
 
 #### Development
@@ -455,10 +467,10 @@ folders marked `ssd`. Installed state is never stored.
 
 | Type | What it does |
 |---|---|
-| `apps.install` | Makes sure the `docker-apps` account exists, then renders again with the plan's secrets and the account's real ids. `create_stack`: subvolume, `compose.yaml` 0640, `.env` 0600, owner `docker-apps`. Creates the folders, missing parents included, mode 0750, owner PUID:PGID or the entry's `owner`; shares are only checked. Then `up --detach`. A failure after the stack exists keeps the stack, and the log names the two ways forward: `POST /api/v1/docker/stacks/<stack>/up`, or `.../apps/installed/<stack>/uninstall` with `delete_data` |
+| `apps.install` | Makes sure the `docker-apps` account exists, then renders again with the plan's secrets and the account's real ids. `create_stack`: subvolume, owners and modes of §3 rule 7. Creates the folders below a mounted volume, missing parents included (descriptor-based, no symlink followed), mode 0750, owner PUID:PGID or the entry's `owner`, and records the folders it made for uninstall; shares are only checked. Then `up --detach`. A failure after the stack exists keeps the stack, and the log names the two ways forward: `POST /api/v1/docker/stacks/<stack>/up`, or `.../apps/installed/<stack>/uninstall` with `delete_data` |
 | `apps.update` | Snapshot, by the setting or the body (`stop_first` stops the stack meanwhile). Writes the re-rendered files: values migrated; secrets, ports, folders, answers, `RYNAS_BIND` and PUID/PGID kept. Creates new folders, then `pull` and `up`. On failure: the D1 rollback to that snapshot. Without a snapshot (plain folder), the previous files are written back and `up` runs |
 | `apps.rollback` | The D1 rollback: `down`, a `before-rollback` snapshot, the folder restored from the snapshot, images tagged back, `up` |
-| `apps.uninstall` | `down`, never with `-v`. By default everything stays on disk, and the log says how to start the stack again or delete it. With `delete_data`, it deletes the stack folder, its snapshots and the folders the app placed outside it |
+| `apps.uninstall` | `down`, never with `-v`. By default everything stays on disk, and the log says how to start the stack again or delete it. With `delete_data`, it deletes the stack folder, its snapshots and the folders **the install made** outside it. rynasd records them itself (`<state>/docker/app-folders/<stack>.json`, root only; install and update add to it) and never reads paths back from the stack's `.env`. A recorded folder is deleted only when it is below a volume in the mount table (deeper than its root), not under a system top folder (`/bin`, `/lib`, `/usr`, …), and holds no mount point; the deletion never follows a symlink, and parents the install made go only when empty. A folder that existed before the install is never recorded, so never deleted |
 
 Under `--dry-system`, compose commands and deletions are only logged. Files and folders go below
 the dry root; when the account does not exist they get nobody's ids (65534).
@@ -611,12 +623,16 @@ The apply:
    - `builtin`:
      - `enable --now` when the unit is inactive;
      - issues the engine's certificate when a name is missing or it is near expiry
-       (`/var/lib/rynas-caddy/rynas/local.{crt,key}`, 0640 root:rynas-caddy, the key
+       (`/var/lib/rynas-caddy/rynas/local.{crt,key}`, 0640 root:rynas-caddy, in a folder
+       `0750 root:rynas-caddy` the engine can read but not replace; written by descriptor,
+       no symlink followed; the key
        written first; one leaf from the rynas local CA for every served name);
      - compares `GET /config/` with the render and calls `POST /load` when they differ
        (`Cache-Control: must-revalidate` when the certificate changed, so the engine
        re-reads the same paths);
-     - writes `/var/lib/rynas-caddy/last-good.json` (0640 root:rynas-caddy).
+     - writes `/var/lib/rynas-caddy/last-good.json` (0640 root:rynas-caddy; the state
+       folder is the engine's, so the write is descriptor-based: `O_EXCL|O_NOFOLLOW`
+       temporary file, `fchown`/`fchmod`, `renameat`).
    - A refusal (`400 {"error"}`) fails the apply. The rollback finds the previous
      configuration still running, since the engine keeps it on error.
 4. without rynas-caddy the value is only stored, and loaded once the package exists.

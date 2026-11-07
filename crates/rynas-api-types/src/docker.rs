@@ -662,6 +662,22 @@ pub struct DockerStats {
     /// Top 5 by CPU then memory.
     pub top: Vec<ContainerStat>,
     pub at_ms: u64,
+    /// Every running container of the sample (the containers table), compact: id, CPU in
+    /// percent of one CPU (one decimal), memory in bytes. Added 2026-11-07; absent from
+    /// older servers.
+    #[serde(default)]
+    pub usage: Vec<ContainerUsage>,
+}
+
+/// One running container's numbers in [`DockerStats::usage`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ContainerUsage {
+    /// Full container id (as in `ContainerSummary::id`).
+    pub id: String,
+    /// Percent of one CPU.
+    pub cpu: f32,
+    /// Memory in bytes (cgroup `memory.current` minus `inactive_file`).
+    pub mem: u64,
 }
 
 /// One image reference checked for updates.

@@ -33,6 +33,72 @@ pub struct Ev {
     pub time_s: i64,
 }
 
+/// The container actions rynas asks the engine for (`event` filter of the stream): the
+/// lifecycle, OOM and health transitions. Healthchecks (`exec_create`, `exec_start`,
+/// `exec_die`), `attach`, `resize`, `top`, `commit`, `copy`… never reach rynasd (review
+/// 2026-11-07, M2). The engine matches `health_status` on the part before `: `.
+pub const FOLLOWED_ACTIONS: &[&str] = &[
+    "create",
+    "start",
+    "restart",
+    "die",
+    "stop",
+    "kill",
+    "destroy",
+    "rename",
+    "pause",
+    "unpause",
+    "update",
+    "oom",
+    "health_status",
+];
+
+/// Does the event change what the lists show (state, health, name, existence)? `kill` and
+/// `oom` are followed by a `die`; everything outside [`FOLLOWED_ACTIONS`] (an engine
+/// without the filter, a fake) is noise.
+pub fn changes_lists(e: &bm::EventMessage) -> bool {
+    if e.typ != Some(bm::EventMessageTypeEnum::CONTAINER) {
+        return false;
+    }
+    let Some(action) = e.action.as_deref() else {
+        return false;
+    };
+    let verb = action.split(':').next().unwrap_or("").trim();
+    verb != "kill" && verb != "oom" && FOLLOWED_ACTIONS.contains(&verb)
+}
+
+/// Reconnection delays of the event watcher (review 2026-11-07, M3): doubles from 1 s up to
+/// `max` on every failure, and goes back to 1 s only after a connection that stayed up for
+/// [`Backoff::STABLE`]. A stream that fails at once (API mismatch, a proxy socket) therefore
+/// slows down instead of reconnecting every second forever.
+#[derive(Debug, Clone)]
+pub struct Backoff {
+    cur: std::time::Duration,
+    max: std::time::Duration,
+}
+
+impl Backoff {
+    pub const START: std::time::Duration = std::time::Duration::from_secs(1);
+    pub const STABLE: std::time::Duration = std::time::Duration::from_secs(30);
+
+    pub fn new(max: std::time::Duration) -> Self {
+        Self {
+            cur: Self::START,
+            max,
+        }
+    }
+
+    /// The connection ended (or never came up) after `lived`: the delay before the next try.
+    pub fn after(&mut self, lived: std::time::Duration) -> std::time::Duration {
+        if lived >= Self::STABLE {
+            self.cur = Self::START;
+        }
+        let d = self.cur;
+        self.cur = (self.cur * 2).min(self.max);
+        d
+    }
+}
+
 /// The container event of an engine event message, when rynas follows it.
 pub fn parse_event(e: &bm::EventMessage) -> Option<Ev> {
     if e.typ != Some(bm::EventMessageTypeEnum::CONTAINER) {
@@ -315,6 +381,47 @@ impl UpdateWatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn msg(action: &str) -> bm::EventMessage {
+        bm::EventMessage {
+            typ: Some(bm::EventMessageTypeEnum::CONTAINER),
+            action: Some(action.into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn healthcheck_noise_changes_nothing() {
+        for a in [
+            "exec_create: /bin/sh -c curl -f localhost",
+            "exec_start: /bin/sh -c curl -f localhost",
+            "exec_die",
+            "attach",
+            "resize",
+            "top",
+            "kill",
+            "oom",
+        ] {
+            assert!(!changes_lists(&msg(a)), "{a}");
+        }
+        for a in ["start", "die", "destroy", "health_status: unhealthy", "rename", "create"] {
+            assert!(changes_lists(&msg(a)), "{a}");
+        }
+        let mut img = msg("pull");
+        img.typ = Some(bm::EventMessageTypeEnum::IMAGE);
+        assert!(!changes_lists(&img));
+    }
+
+    #[test]
+    fn backoff_grows_on_quick_failures_and_resets_after_a_stable_stream() {
+        use std::time::Duration as D;
+        let mut b = Backoff::new(D::from_secs(60));
+        let quick: Vec<u64> = (0..8).map(|_| b.after(D::from_millis(5)).as_secs()).collect();
+        assert_eq!(quick, [1, 2, 4, 8, 16, 32, 60, 60]);
+        // a stream that lived long enough: back to the start
+        assert_eq!(b.after(D::from_secs(45)), D::from_secs(1));
+        assert_eq!(b.after(D::ZERO), D::from_secs(2));
+    }
 
     fn ev(kind: Kind, name: &str, t: i64) -> Ev {
         Ev {

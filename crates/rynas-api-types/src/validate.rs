@@ -80,7 +80,7 @@ pub fn workgroup(w: &str) -> bool {
 /// Mount names a volume label may not take.
 pub const RESERVED_LABELS: &[&str] = &[
     "root", "boot", "home", "srv", "var", "run", "tmp", "usr", "etc", "proc", "sys", "dev", "mnt",
-    "opt", "media",
+    "opt", "media", "bin", "sbin", "lib", "lib32", "lib64", "libx32", "snap", "nix", "efi",
 ];
 
 /// Volume label, also its mount name `/<label>`: `[a-z][a-z0-9-]{0,15}`, not a system

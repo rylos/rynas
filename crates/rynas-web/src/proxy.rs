@@ -254,7 +254,7 @@ pub fn routes() -> Router<AppState> {
 }
 
 /// Headers of rynasd's answer that reach the client.
-fn passed_headers() -> [HeaderName; 7] {
+fn passed_headers() -> [HeaderName; 9] {
     debug_assert!(TASK_LOG_NEXT_OFFSET.eq_ignore_ascii_case("x-rynas-next-offset"));
     debug_assert!(TASK_LOG_COMPLETE.eq_ignore_ascii_case("x-rynas-log-complete"));
     [
@@ -265,6 +265,11 @@ fn passed_headers() -> [HeaderName; 7] {
         header::LOCATION,
         // conditional reads (`/config/pending`)
         header::ETAG,
+        // rynasd's own policy wins over the app-wide defaults (those layers are
+        // `if_not_present`): the sandboxing CSP and cache lifetime of app icons and
+        // screenshots (docs/phase2/docker-apps.md §5.2)
+        header::CONTENT_SECURITY_POLICY,
+        header::CACHE_CONTROL,
         HeaderName::from_static("x-rynas-next-offset"),
         HeaderName::from_static("x-rynas-log-complete"),
     ]
@@ -405,4 +410,16 @@ async fn forward_with(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rynasd_csp_and_cache_control_reach_the_client() {
+        let h = passed_headers();
+        assert!(h.contains(&header::CONTENT_SECURITY_POLICY));
+        assert!(h.contains(&header::CACHE_CONTROL));
+    }
 }

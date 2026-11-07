@@ -158,6 +158,11 @@ fn check_user(user: &str) -> Res<()> {
 }
 
 pub fn router(state: DaemonState) -> Router {
+    let admins = state
+        .ops
+        .as_ref()
+        .map(|o| o.admins.clone())
+        .unwrap_or_default();
     Router::new()
         .route("/v1/health", get(health))
         .route("/v1/authenticate", post(authenticate))
@@ -193,7 +198,7 @@ pub fn router(state: DaemonState) -> Router {
         .merge(crate::removable::router(state.removable))
         .merge(crate::docker::router(state.docker))
         .merge(crate::apps::router(state.apps))
-        .merge(crate::tls::router(state.tls))
+        .merge(crate::tls::router(state.tls, admins))
         .merge(crate::web_access::router(state.web_access))
         .fallback(|| async { Error::not_found("no such endpoint") })
         // 405, query string and path rejections: ApiError bodies too

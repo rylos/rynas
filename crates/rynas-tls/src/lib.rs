@@ -303,10 +303,9 @@ pub fn key_der(pem: &str) -> Result<PrivateKeyDer<'static>, TlsError> {
 pub fn certified_key(pair: &PemPair) -> Result<Arc<CertifiedKey>, TlsError> {
     let chain = chain_der(&pair.chain)?;
     let key = key_der(&pair.key)?;
-    let provider = rustls::crypto::ring::default_provider();
-    let signer = provider
-        .key_provider
-        .load_private_key(key)
+    // only the signing half of the ring provider: rynasd checks keys but never serves TLS,
+    // and the whole provider (cipher suites, key exchange) would be linked into it
+    let signer = rustls::crypto::ring::sign::any_supported_type(&key)
         .map_err(|e| TlsError::key(format!("unsupported key: {e}")))?;
     let ck = CertifiedKey::new(chain, signer);
     ck.keys_match()
