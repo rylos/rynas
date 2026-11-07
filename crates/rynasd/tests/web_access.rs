@@ -1850,3 +1850,414 @@ fn certificate_inventory_and_notifications() {
     ));
     assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
 }
+
+// ---------------------------------------------------------------------------------------------
+// imported certificates (§5.5)
+// ---------------------------------------------------------------------------------------------
+
+/// A leaf for `names` from a throw-away CA ("made elsewhere"), PEM chain and key.
+fn foreign_pair(names: &[&str], now: i64) -> rynas_tls::PemPair {
+    let ca = rynas_tls::generate_ca("corp", now).unwrap();
+    rynas_tls::issue_leaf(
+        &ca,
+        &rynas_tls::Names {
+            dns: names.iter().map(|s| s.to_string()).collect(),
+            ips: Default::default(),
+        },
+        now,
+    )
+    .unwrap()
+}
+
+fn upload(id: &str, p: &rynas_tls::PemPair) -> CertImportRequest {
+    CertImportRequest {
+        id: id.into(),
+        label: "router wildcard".into(),
+        source: ImportSource::Upload,
+        certificate: Some(p.chain.clone()),
+        private_key: Some(p.key.clone()),
+    }
+}
+
+fn https_tls(json: &Value) -> (Value, Value) {
+    (
+        json["apps"]["http"]["servers"]["rynas_https"]["tls_connection_policies"].clone(),
+        json["apps"]["tls"].clone(),
+    )
+}
+
+fn mode_of(p: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(p).unwrap().permissions().mode() & 0o7777
+}
+
+#[test]
+fn imported_certificate_takes_over_the_names_it_covers() {
+    let e = env();
+    e.apply(&one_domain()).unwrap();
+    let loads = e.caddy.loads();
+    let now = rynas_tls::now();
+    let pair = foreign_pair(&["*.nas.example.com", "nas.example.com"], now);
+    let v = e.svc.save_import(&upload("wild", &pair)).unwrap();
+    assert_eq!(v.status, CertStatus::Ok);
+    let mut covers = v.covers.clone();
+    covers.sort();
+    assert_eq!(
+        covers,
+        [
+            "immich.nas.example.com",
+            "nas.example.com",
+            "portainer.nas.example.com"
+        ]
+    );
+    assert_eq!(v.replaces_acme, ["*.nas.example.com", "nas.example.com"]);
+    assert!(v.shadowed.is_empty());
+    // loaded again, re-reading the files
+    assert_eq!(e.caddy.loads(), loads + 1);
+    assert!(e.caddy.state.lock().unwrap().loads.last().unwrap().1);
+    let running = e.caddy.config();
+    let (policies, tls) = https_tls(&running);
+    assert_eq!(policies.as_array().unwrap().len(), 2, "{policies}");
+    let mut sni: Vec<String> =
+        serde_json::from_value(policies[0]["match"]["sni"].clone()).unwrap();
+    sni.sort();
+    assert_eq!(sni, covers);
+    assert_eq!(
+        policies[0]["certificate_selection"],
+        json!({"any_tag": ["rynas-import-wild"]})
+    );
+    assert_eq!(policies[1], json!({}));
+    let files = tls["certificates"]["load_files"].as_array().unwrap();
+    assert_eq!(files.len(), 2, "{files:?}");
+    assert_eq!(
+        files[1],
+        json!({"certificate": "/var/lib/rynas-caddy/rynas/import-wild.crt",
+               "key": "/var/lib/rynas-caddy/rynas/import-wild.key",
+               "tags": ["rynas-import-wild"]})
+    );
+    // the ACME subjects it replaces are not ordered
+    assert!(tls["certificates"].get("automate").is_none(), "{tls}");
+    assert!(tls.get("automation").is_none(), "{tls}");
+    // the engine's copies: 0640, the key as uploaded; the private store 0600
+    let crt = e.file("/var/lib/rynas-caddy/rynas/import-wild.crt");
+    let key = e.file("/var/lib/rynas-caddy/rynas/import-wild.key");
+    assert_eq!(
+        std::fs::read_to_string(&key).unwrap().trim(),
+        pair.key.trim()
+    );
+    assert_eq!((mode_of(&crt), mode_of(&key)), (0o640, 0o640));
+    let store = e.dir.path().join("state/web-access/imported");
+    assert_eq!(mode_of(&store), 0o700);
+    assert_eq!(mode_of(&store.join("wild.key")), 0o600);
+    // the dashboard: the import, no ACME entries for the replaced subjects
+    let inv = e.svc.certificates();
+    let imp = inv
+        .certificates
+        .iter()
+        .find(|c| c.id == "imported:wild")
+        .unwrap();
+    assert_eq!((imp.kind, imp.status), (CertKind::Imported, CertStatus::Ok));
+    assert_eq!(imp.source.as_deref(), Some("upload"));
+    assert!(
+        !inv.certificates.iter().any(|c| c.kind == CertKind::Acme),
+        "{:?}",
+        inv.certificates
+    );
+    // the same pair again: nothing changes, nothing reloads
+    e.svc.save_import(&upload("wild", &pair)).unwrap();
+    assert_eq!(e.caddy.loads(), loads + 1);
+    // removed: ACME again, copies gone
+    e.svc.delete_import("wild").unwrap();
+    let (policies, tls) = https_tls(&e.caddy.config());
+    assert_eq!(policies, json!([{}]));
+    assert_eq!(
+        tls["certificates"]["automate"],
+        json!(["*.nas.example.com", "nas.example.com"])
+    );
+    assert!(!crt.exists() && !key.exists());
+    assert!(!store.join("wild.key").exists());
+    assert!(e.svc.imports().is_empty());
+}
+
+#[test]
+fn exact_import_beats_a_wildcard_and_local_names_stay_local() {
+    let e = env();
+    e.apply(&one_domain()).unwrap();
+    let now = rynas_tls::now();
+    e.svc
+        .save_import(&upload(
+            "wild",
+            &foreign_pair(&["*.nas.example.com", "nas.example.com"], now),
+        ))
+        .unwrap();
+    e.svc
+        .save_import(&upload(
+            "immich",
+            &foreign_pair(&["immich.nas.example.com"], now),
+        ))
+        .unwrap();
+    let all = e.svc.imports();
+    let wild = all.iter().find(|v| v.id == "wild").unwrap();
+    assert_eq!(wild.shadowed, ["immich.nas.example.com"]);
+    let (policies, tls) = https_tls(&e.caddy.config());
+    assert_eq!(
+        policies[0],
+        json!({"match": {"sni": ["immich.nas.example.com"]},
+               "certificate_selection": {"any_tag": ["rynas-import-immich"]}})
+    );
+    assert!(
+        !policies[1]["match"]["sni"]
+            .to_string()
+            .contains("immich.nas.example.com")
+    );
+    // the local names keep the local leaf (no policy, served by the catch-all)
+    assert_eq!(
+        tls["certificates"]["load_files"][0]["tags"],
+        json!(["rynas-local"])
+    );
+    assert!(!policies.to_string().contains(".local"));
+    // a certificate that covers no served name is stored but not loaded
+    e.svc
+        .save_import(&upload("other", &foreign_pair(&["files.example.org"], now)))
+        .unwrap();
+    let (_, tls) = https_tls(&e.caddy.config());
+    assert!(!tls.to_string().contains("import-other"));
+    let other = e
+        .svc
+        .imports()
+        .into_iter()
+        .find(|v| v.id == "other")
+        .unwrap();
+    assert!(other.covers.is_empty() && other.status == CertStatus::Ok);
+}
+
+#[test]
+fn expired_import_is_not_served_and_notifies() {
+    let e = env();
+    e.apply(&one_domain()).unwrap();
+    // an import that expired since (written to the store as it would have been)
+    let old = foreign_pair(
+        &["*.nas.example.com", "nas.example.com"],
+        rynas_tls::now() - 4000 * 86_400_000,
+    );
+    let store = e.dir.path().join("state/web-access/imported");
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::write(store.join("old.crt"), &old.chain).unwrap();
+    std::fs::write(store.join("old.key"), &old.key).unwrap();
+    std::fs::write(
+        store.join("index.json"),
+        r#"[{"id":"old","label":"bought wildcard","source":"upload"}]"#,
+    )
+    .unwrap();
+    let (_, json) = e.svc.render(&e.applied(), &facts());
+    let (policies, tls) = https_tls(&json);
+    assert_eq!(policies, json!([{}]));
+    assert_eq!(
+        tls["certificates"]["automate"],
+        json!(["*.nas.example.com", "nas.example.com"])
+    );
+    let v = e.svc.imports().pop().unwrap();
+    assert_eq!(v.status, CertStatus::Expired);
+    assert!(v.covers.is_empty());
+    let ev = e.svc.check_certificates(true);
+    let mine: Vec<_> = ev
+        .iter()
+        .filter(|x| x.code == "web_access.cert_expired" && x.title.contains("imported"))
+        .collect();
+    assert_eq!(mine.len(), 1, "{ev:?}");
+}
+
+#[tokio::test]
+async fn import_routes_validate_and_never_return_the_key() {
+    let e = env();
+    e.apply(&one_domain()).unwrap();
+    let app = e.app();
+    let now = rynas_tls::now();
+    let pair = foreign_pair(&["nas.example.com"], now);
+    let other = foreign_pair(&["nas.example.com"], now);
+    let post = |b: &CertImportRequest| Some(serde_json::to_value(b).unwrap());
+    // a key that does not match the certificate
+    let mut bad = upload("apex", &pair);
+    bad.private_key = Some(other.key.clone());
+    let (s, b) = call(&app, "admin", "POST", "/v1/web-access/imports", post(&bad)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let err: ApiError = serde_json::from_slice(&b).unwrap();
+    assert_eq!(err.field.as_deref(), Some("private_key"), "{err:?}");
+    // a bad id; a missing key for an upload
+    let mut bad = upload("Bad_Id", &pair);
+    let (s, b) = call(&app, "admin", "POST", "/v1/web-access/imports", post(&bad)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        serde_json::from_slice::<ApiError>(&b)
+            .unwrap()
+            .field
+            .as_deref(),
+        Some("id")
+    );
+    bad.id = "apex".into();
+    bad.private_key = None;
+    let (s, _) = call(&app, "admin", "POST", "/v1/web-access/imports", post(&bad)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    // inspect: coverage, nothing stored
+    let good = upload("apex", &pair);
+    let (s, b) = call(
+        &app,
+        "admin",
+        "POST",
+        "/v1/web-access/imports/inspect",
+        post(&good),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let v: ImportedCert = serde_json::from_slice(&b).unwrap();
+    assert_eq!(v.covers, ["nas.example.com"]);
+    assert_eq!(v.replaces_acme, ["nas.example.com"]);
+    assert!(e.svc.imports().is_empty());
+    // the real import; answers never carry key material
+    let (s, b) = call(&app, "admin", "POST", "/v1/web-access/imports", post(&good)).await;
+    assert_eq!(s, StatusCode::OK);
+    let key_line = pair
+        .key
+        .lines()
+        .find(|l| !l.starts_with("-----"))
+        .unwrap()
+        .to_string();
+    let text = String::from_utf8_lossy(&b).into_owned();
+    assert!(!text.contains(&key_line) && !text.contains("PRIVATE KEY"));
+    let (s, b) = call(&app, "admin", "GET", "/v1/web-access/imports", None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(!String::from_utf8_lossy(&b).contains("PRIVATE KEY"));
+    let list: Vec<ImportedCert> = serde_json::from_slice(&b).unwrap();
+    assert_eq!(list.len(), 1);
+    // the wildcard ACME subject stays, the apex is replaced
+    let (_, tls) = https_tls(&e.caddy.config());
+    assert_eq!(
+        tls["certificates"]["automate"],
+        json!(["*.nas.example.com"])
+    );
+    // administrators only, reads included
+    let (s, _) = call(&app, "bob", "GET", "/v1/web-access/imports", None).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    // check needs a watched folder; unknown ids are 404
+    let (s, _) = call(
+        &app,
+        "admin",
+        "POST",
+        "/v1/web-access/imports/apex/check",
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    let (s, _) = call(&app, "admin", "DELETE", "/v1/web-access/imports/nope", None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, _) = call(&app, "admin", "DELETE", "/v1/web-access/imports/apex", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+}
+
+#[test]
+fn watched_folder_settles_validates_and_keeps_the_last_good_pair() {
+    use rynasd::web_access::imported::{DROP_DIR, FULLCHAIN, PRIVKEY, SETTLE};
+    use std::time::Instant;
+    let e = env();
+    e.apply(&one_domain()).unwrap();
+    let v = e
+        .svc
+        .save_import(&CertImportRequest {
+            id: "router".into(),
+            label: "router acme.sh".into(),
+            source: ImportSource::Folder,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(v.status, CertStatus::Pending);
+    assert_eq!(v.folder.as_deref(), Some("/var/lib/rynas-cert-drop/router"));
+    let base = e.file(DROP_DIR);
+    let dir = base.join("router");
+    assert_eq!((mode_of(&base), mode_of(&dir)), (0o750, 0o2770));
+    let inv = e.svc.certificates();
+    let entry = inv
+        .certificates
+        .iter()
+        .find(|c| c.id == "imported:router")
+        .unwrap();
+    assert_eq!(
+        (entry.status, entry.source.as_deref()),
+        (CertStatus::Pending, Some("folder"))
+    );
+
+    let loads = e.caddy.loads();
+    let now = rynas_tls::now();
+    let good = foreign_pair(&["*.nas.example.com", "nas.example.com"], now);
+    // the tool writes the key, then the chain (acme.sh's ssh deploy: in place, one by one)
+    std::fs::write(dir.join(PRIVKEY), &good.key).unwrap();
+    let t0 = Instant::now();
+    assert!(e.svc.scan_drops_at(t0).is_empty(), "first sight");
+    std::fs::write(dir.join(FULLCHAIN), &good.chain).unwrap();
+    assert!(e.svc.scan_drops_at(t0 + SETTLE).is_empty(), "changed again");
+    let t1 = t0 + SETTLE + SETTLE / 2;
+    assert!(e.svc.scan_drops_at(t1).is_empty(), "not settled yet");
+    assert_eq!(e.svc.scan_drops_at(t1 + SETTLE), ["router"]);
+    assert_eq!(e.caddy.loads(), loads + 1);
+    let (policies, _) = https_tls(&e.caddy.config());
+    assert_eq!(
+        policies[0]["certificate_selection"]["any_tag"],
+        json!(["rynas-import-router"])
+    );
+    assert!(e.svc.scan_drops_at(t1 + SETTLE * 2).is_empty(), "done once");
+    assert!(e.notes.take().is_empty());
+
+    // a key of another certificate: refused, the last good pair stays, one notification
+    let other = foreign_pair(&["nas.example.com"], now);
+    std::fs::write(dir.join(PRIVKEY), &other.key).unwrap();
+    let t2 = t1 + SETTLE * 10;
+    e.svc.scan_drops_at(t2);
+    assert!(e.svc.scan_drops_at(t2 + SETTLE).is_empty());
+    assert_eq!(e.caddy.loads(), loads + 1);
+    let v = e.svc.imports().pop().unwrap();
+    assert!(
+        v.last_error.as_deref().unwrap().starts_with("privkey.pem: "),
+        "{:?}",
+        v.last_error
+    );
+    assert_eq!(v.status, CertStatus::Ok);
+    assert_eq!(
+        v.certificate.unwrap().dns_names,
+        ["*.nas.example.com", "nas.example.com"]
+    );
+    let ev = e.notes.take();
+    assert_eq!(ev.len(), 1, "{ev:?}");
+    assert_eq!(ev[0].code, "web_access.cert_import_failed");
+    assert!(!format!("{ev:?}").contains("PRIVATE KEY"));
+    // a symlink planted instead of the chain is never followed
+    std::fs::remove_file(dir.join(FULLCHAIN)).unwrap();
+    std::os::unix::fs::symlink("/etc/hostname", dir.join(FULLCHAIN)).unwrap();
+    std::fs::write(dir.join(PRIVKEY), &good.key).unwrap();
+    let t3 = t2 + SETTLE * 10;
+    e.svc.scan_drops_at(t3);
+    assert!(e.svc.scan_drops_at(t3 + SETTLE).is_empty());
+    let v = e.svc.imports().pop().unwrap();
+    assert!(
+        v.last_error.as_deref().unwrap().starts_with("fullchain.pem"),
+        "{:?}",
+        v.last_error
+    );
+    assert_eq!(e.notes.take().len(), 1);
+    // good files again: taken (same pair as stored: no reload), the trouble resolves
+    std::fs::remove_file(dir.join(FULLCHAIN)).unwrap();
+    std::fs::write(dir.join(FULLCHAIN), &good.chain).unwrap();
+    let v = e.svc.check_import("router").unwrap();
+    assert!(v.last_error.is_none());
+    let ev = e.notes.take();
+    assert_eq!(ev.len(), 1);
+    assert_eq!(ev[0].code, "web_access.cert_import_ok");
+    assert_eq!(e.caddy.loads(), loads + 1);
+    // a renewed pair through "Check now"
+    let renewed = foreign_pair(&["*.nas.example.com", "nas.example.com"], now);
+    std::fs::write(dir.join(PRIVKEY), &renewed.key).unwrap();
+    std::fs::write(dir.join(FULLCHAIN), &renewed.chain).unwrap();
+    e.svc.check_import("router").unwrap();
+    assert_eq!(e.caddy.loads(), loads + 2);
+    // removing the import removes its folder
+    e.svc.delete_import("router").unwrap();
+    assert!(!dir.exists() && base.exists());
+}

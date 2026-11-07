@@ -1177,6 +1177,273 @@ are.
   a reinstall of rynas but not a purge of rynas-caddy);
 - DNS-PERSIST-01; writing the record into an AdGuard Home / Pi-hole app as the rebind fix.
 
+### 5.5 API — imported certificates (`/api/v1/web-access/imports...`)
+
+Code: `crates/rynasd/src/web_access/imported.rs` (store, watched folders, coverage rules,
+engine copies, notifications), the render in `caddy.rs`, the dashboard entries in `mod.rs`
+(`certificates()`). Types: `rynas_api_types::web_access` (`CertImportRequest`,
+`ImportedCert`, `ImportSource`, `CertKind::Imported`; every field documented there). Decision
+D-CERTIMPORT. Every route needs the administrator role (reads too); rynas-web forwards them
+unchanged.
+
+**What it does.** A certificate made elsewhere — a router's ACME client (acme.sh, OpenWrt's
+acme, OPNsense), a company CA, a wildcard bought from a CA — is served by rynas-caddy for the
+interface and app names it covers. It arrives in one of two ways:
+1. **Upload** through the API (PEM chain + private key), validated before anything is stored.
+2. **Watched folder**: another tool pushes `fullchain.pem` + `privkey.pem` into
+   `/var/lib/rynas-cert-drop/<id>/` (for example over SSH as a restricted user). rynasd notices
+   the change, validates the pair and reloads the proxy without downtime. Bad files never
+   replace the last good pair: they raise a notification.
+
+`:8443` (rynas-web) keeps its own certificate and its own import (`/system/tls`, W0): the
+emergency door does not depend on a file another machine pushes.
+
+#### Research (2026-11-07)
+
+- **DSM** (Control Panel › Security › Certificate): a library of certificates, each imported
+  as key + certificate + intermediate; one is the default, and a Settings dialog assigns a
+  certificate per service (DSM, reverse proxy names, WebDAV, VPN…); deleting one hands its
+  services back to the default. Assignment is by hand
+  (https://www.synology.com/knowledgebase/DSM/help/DSM/AdminCenter/connection_certificate).
+  Users automate renewals from acme.sh with a DSM-specific deploy hook that logs into the DSM
+  API.
+- **TrueNAS** (Credentials › Certificates › Import): certificate + private key (+ optional
+  passphrase), CAs imported separately; the UI certificate is chosen in General settings
+  (https://www.truenas.com/docs/scale/25.10/scaleuireference/credentials/certificatesscreensscale/).
+- **OpenMediaVault** (System › Certificates › SSL › Import): pasted PEM, stored as
+  `/etc/ssl/certs/openmediavault-<uuid>.crt` + `/etc/ssl/private/...key`, chosen in Workbench
+  settings; renewal only through the Let's Encrypt plugin
+  (https://docs.openmediavault.org/en/7.x/administration/general/certificates.html).
+- **Proxmox VE**: one custom certificate per node (`pveproxy-ssl.pem` / `.key`), uploaded
+  through the GUI or `POST /nodes/{node}/certificates/custom` with `restart`, which runs
+  `systemctl reload-or-restart pveproxy`; a bad key leaves pveproxy unable to load it until
+  fixed by hand (https://lists.proxmox.com/pipermail/pve-devel/2018-April/031651.html,
+  https://pve.proxmox.com/wiki/HTTPS_Certificate_Configuration_(Version_4.x_and_newer),
+  https://forum.proxmox.com/threads/regenerating-default-gui-certificates.157739).
+- **Nginx Proxy Manager** (SSL Certificates › Add › Custom): upload of key + certificate +
+  intermediate, then picked in each proxy host's SSL tab; passphrase keys refused; files
+  dropped into its folder are ignored, so renewals are uploaded again by hand
+  (https://community.home-assistant.io/t/nginx-proxy-custom-ssl-cert-how-to-automate-updating-custom-ssl-cert/474852,
+  https://github.com/NginxProxyManager/nginx-proxy-manager/issues/874).
+- **Caddy** loads certificates with `tls.certificates.load_files` (pairs of files with tags)
+  or `load_folders` (every `.pem` bundle in a folder)
+  (https://caddyserver.com/docs/json/apps/tls/certificates/load_files/,
+  https://caddyserver.com/docs/json/apps/tls/certificates/load_folders/). On a handshake
+  certmagic looks for an exact name first, then wildcards; among several certificates for
+  the same name its default selector returns the first valid one in cache order, so overlap
+  is not deterministic. A TLS connection policy can pin the choice: `match.sni` and
+  `certificate_selection.any_tag`, which filters the candidates before the default selector
+  (`modules/caddytls/connpolicy.go`, `certselection.go` in v2.11.9,
+  https://github.com/caddyserver/caddy/blob/v2.11.9/modules/caddytls/connpolicy.go,
+  https://github.com/caddyserver/certmagic/blob/master/handshake.go). A config load is
+  graceful, and a refused load keeps the running configuration (§5.3); the same paths are
+  read again with `Cache-Control: must-revalidate`.
+- **acme.sh `deploy/ssh.sh`** (https://github.com/acmesh-official/acme.sh/blob/master/deploy/ssh.sh):
+  `DEPLOY_SSH_USER`, `DEPLOY_SSH_SERVER`, `DEPLOY_SSH_KEYFILE`, `DEPLOY_SSH_FULLCHAIN`,
+  optional `DEPLOY_SSH_REMOTE_CMD`. By default it writes each file **in place** through the
+  remote shell (`echo … > file`, the key first with `chmod 600`), one after the other, and
+  copies the old files into `~/.acme_ssh_deploy/` first (`DEPLOY_SSH_BACKUP=yes`);
+  `DEPLOY_SSH_USE_SCP=yes` copies them with scp instead (SFTP with OpenSSH ≥ 9), which works
+  with `ForceCommand internal-sftp` and a chroot.
+
+**What rynas takes:** the library with automatic, visible assignment (DSM's per-service
+dialog becomes "takes over these names", computed from the certificate's own names, so it
+cannot drift from what is served); validation before anything is stored (Proxmox's lock-out
+and NPM's silent failures avoided); a watched folder that any pushing tool can use without a
+rynas-specific hook or API credentials (what NPM users ask for); Caddy's tag-based selection
+for a deterministic choice. Not `load_folders` on the writers' folder: the engine would read
+unvalidated files at the next load, a bad file would make the whole load fail, and the engine
+user would need access to a folder other accounts write.
+
+#### Routes
+
+Immediate actions (not part of the staged key `web_access`, like `/system/tls/import`):
+
+| Method | Path | Body | Answer |
+|---|---|---|---|
+| GET | `/web-access/imports` | — | `[ImportedCert]` |
+| POST | `/web-access/imports` | `CertImportRequest` | `ImportedCert`. Creates or replaces by `id`, then loads the proxy. 400 `invalid_value` with `field` |
+| POST | `/web-access/imports/inspect` | `CertImportRequest` | `ImportedCert`: validation and the names it would take over against the applied configuration; nothing stored |
+| POST | `/web-access/imports/{id}/check` | — | `ImportedCert`: reads the watched folder now ("Check now"), without waiting for the files to settle. 404; 409 `conflict` without a watched folder |
+| DELETE | `/web-access/imports/{id}` | — | 204. Its names go back to ACME or the local CA; a watched folder is removed. 404 |
+
+`GET /web-access/certificates` lists each import as `imported:<id>` (`CertKind::Imported`,
+`source` `upload|folder`, `last_error`). Audit lines name the id, the subject and the
+fingerprint, never key material. No new error codes.
+
+#### Shapes worth knowing
+
+- **`CertImportRequest`** {id, label, source `upload|folder`, certificate?, private_key?}:
+  - `id` `[a-z0-9-]` 1-32, not starting with `-` (`id`): it names the folder, the files and
+    the engine tag; `label` ≤ 80 characters (`label`);
+  - `upload` needs both texts; `folder` may carry a first pair or none (`pending` until the
+    tool pushes one);
+  - validation = `/system/tls/import` (`rynas_tls::validate_import`: PEM, leaf first then the
+    intermediates each signed by the next, no CA certificate as the leaf, serverAuth when an
+    EKU is present, RSA ≥ 2048 / ECDSA P-256/P-384 / Ed25519 key matching the leaf, unencrypted
+    PKCS#8/SEC1/PKCS#1, not expired, not starting more than a day ahead) plus at least one DNS
+    name (`certificate`, `private_key`);
+  - switching a `folder` import to `upload` removes its folder.
+- **`ImportedCert`** {id, label, source, folder?, certificate?, chain, status, covers,
+  shadowed, replaces_acme, warnings, imported_at_ms?, last_error?, last_error_at_ms?}:
+  - `status` `ok` · `expires_soon` (< 14 days) · `expired` (no longer served) · `pending`
+    (a folder without a good pair yet);
+  - `covers`: the served names (interface and routes, local and own-domain) it takes over;
+    `shadowed`: names it covers that another import serves; `replaces_acme`: ACME subjects of
+    the own domains it replaces (not ordered while it is valid);
+  - `warnings` as in `/system/tls` (`expires_soon`, `expired`, `chain_incomplete`);
+  - never `private_key`.
+- **Which names an import takes over** (`imported::covers`, `assign`):
+  - a DNS name covers a served name when equal (case-insensitive) or when it is `*.<rest>`
+    and the name is one label + `.<rest>` (RFC 6125 §6.4.3: the whole left-most label, one
+    label deep, never `*.<tld>`, no partial wildcards); IP addresses never;
+  - precedence for a name: **valid import > ACME (own domain) > local CA**; between imports
+    an exact name beats a wildcard, then the later expiry, then the smaller id;
+  - an ACME subject is replaced when an import covers it: `*.<d>` only by the same wildcard,
+    `<d>` by any covering name;
+  - an expired import (or one not valid yet) is left out: its names fall back at the next
+    check (≤ 30 s), so a lapsed import never serves an expired certificate while ACME or the
+    local CA could serve a valid one.
+
+#### Watched folder
+
+- `/var/lib/rynas-cert-drop/` `0750 root:rynas-cert-drop`, one folder per import
+  `<id>/` `2770 root:rynas-cert-drop` (setgid: files stay in the group), made by rynasd on
+  `POST` with `source: folder`; owner and mode put back on every save. The group comes from
+  the `rynas` package (postinst `addgroup --system rynas-cert-drop`); purge removes the folder
+  and the group.
+- The base is root-owned and not group-writable, so it can be an sshd `ChrootDirectory` for
+  the pushing account:
+  ```
+  # adduser --system --ingroup rynas-cert-drop --shell /usr/sbin/nologin certpush
+  Match User certpush
+      ChrootDirectory /var/lib/rynas-cert-drop
+      ForceCommand internal-sftp -d /<id> -u 0007
+      AllowTcpForwarding no
+      X11Forwarding no
+  ```
+  with acme.sh: `DEPLOY_SSH_USE_SCP=yes DEPLOY_SSH_BACKUP=no DEPLOY_SSH_KEYFILE=/<id>/privkey.pem
+  DEPLOY_SSH_FULLCHAIN=/<id>/fullchain.pem acme.sh --deploy -d <name> --deploy-hook ssh`.
+  A tool with a shell account works too (acme.sh's default `echo >`, `scp`, `rsync`,
+  `install -m 0600`); a `reloadcmd` is not needed. The UI shows these lines filled in (not
+  written by rynas: sshd is the administrator's).
+- **Detection: polling, not inotify or a path unit.** Every 2 s rynasd `fstat`s the two files
+  (opened below the base without following symlinks); a change starts a settle timer, and the
+  pair is read once both files stayed unchanged (inode, size, mtime, ctime) for 3 s. Why:
+  writers rewrite the files in place one after the other (acme.sh), so an inotify or
+  `PathChanged=` trigger fires on half a pair and still needs the same settle logic; a path
+  unit would need a template per folder and a client into rynasd's socket; polling also works
+  on any filesystem and after the folder is replaced. Cost: four `fstat`s per folder per poll.
+  "Check now" reads at once.
+- **Reading**: regular files only (`O_NOFOLLOW|O_NONBLOCK`, a FIFO or a symlink is refused),
+  ≤ 64 KiB each. Refusals never quote the file contents.
+- **A good pair** that differs from the stored one is written to the store, `imported_at_ms`
+  set, any error cleared (resolving the notification), and the proxy loaded again. The same
+  pair again changes nothing.
+- **A bad pair** (missing file, key of another certificate, expired, wrong order, not PEM)
+  leaves the stored pair, the engine copies and the running configuration untouched; it sets
+  `last_error` ("privkey.pem: …") and fires `web_access.cert_import_failed` once per distinct
+  error.
+
+#### Notifications (D-NOTIFY)
+
+| Code | State, key, category, severity | Fields |
+|---|---|---|
+| `web_access.cert_import_failed` | firing, `web-access:import:<id>`, system, warning | `name` (label or id), `cert` (`imported:<id>`), `error` |
+| `web_access.cert_import_ok` | resolved, same key | `name`, `cert` |
+| `web_access.cert_expires_soon` / `web_access.cert_expired` / `web_access.cert_ok` | as in §5.4, key `web-access:cert:imported:<id>`; the texts say that rynas does not renew imported certificates and that an expired one is no longer served | `name`, `cert` |
+
+#### Storage
+
+- rynasd's private store `<state>/web-access/imported/` (0700 root): `index.json` (id, label,
+  source, `imported_at_ms`, last error) and `<id>.crt`, `<id>.key` (0600), written atomically,
+  the key first. Not in the configuration key: the private key is in neither `config.db`, its
+  revisions nor an export (see open points).
+- Engine copies `/var/lib/rynas-caddy/rynas/import-<id>.{crt,key}` (0640 root:rynas-caddy, in
+  the trusted `rynas/` folder of §5.3, descriptor writes, key first), written before each load
+  for every valid import; copies no longer needed are removed. A changed copy forces
+  `Cache-Control: must-revalidate`.
+
+#### What rynasd renders (additions to §5.3/§5.4)
+
+- `apps.tls.certificates.load_files` gains one entry per valid import that serves a name:
+  `{"certificate": ".../import-<id>.crt", "key": ".../import-<id>.key", "tags":
+  ["rynas-import-<id>"]}` (after the local leaf). Imports that serve nothing are not loaded.
+- `rynas_https.tls_connection_policies`: one policy per such import, in id order, before the
+  catch-all `{}`:
+  `{"match": {"sni": [<names it serves>]}, "certificate_selection": {"any_tag": ["rynas-import-<id>"]}}`.
+- `automate` and the domain's automation policy leave out the subjects an import replaces;
+  a domain whose subjects are all replaced gets no ACME policy. The domain's records (§5.4)
+  are unchanged.
+- The local leaf is still issued for every local name (unchanged fallback); a local name an
+  import covers (a company CA issuing `.local` names) is pinned to the import by its policy.
+- External mode: nothing is rendered; imports stay stored.
+- Not yet validated against the real rynas-caddy binary (`build.sh --validate` with an
+  import golden): the field names come from the v2.11.9 source above.
+
+#### Development
+
+`cargo test -p rynasd imported` (wildcard rules, precedence, ids, ACME replacement) and
+`cargo test -p rynasd --test web_access import` (render and engine copies, precedence between
+imports, expired fallback and notification, routes with validation and no key material in
+answers, the watched folder: settle, refusal keeps the last good pair, planted symlink, Check
+now, removal). Tests use temporary folders and the fake admin socket; `--dry-system` puts the
+store and the folders below the dry root.
+
+#### UI texts (i18n keys the UI adds, en + it)
+
+Where: Network › Web access › Certificate tab, a section "Imported certificates" next to the
+dashboard (list with status, label, the names it takes over, source, last error; drawer with
+details).
+
+| Key | en | it |
+|---|---|---|
+| `wa.import.title` | Imported certificates | Certificati importati |
+| `wa.import.add` | Import a certificate | Importa un certificato |
+| `wa.import.id` | Name (short id) | Nome (id breve) |
+| `wa.import.label` | Description | Descrizione |
+| `wa.import.source.upload` | Upload the files | Carica i file |
+| `wa.import.source.folder` | Another tool pushes them into a folder | Un altro programma li deposita in una cartella |
+| `wa.import.certificate` | Certificate chain (PEM: server certificate first, then intermediates) | Catena del certificato (PEM: prima il certificato del server, poi gli intermedi) |
+| `wa.import.private_key` | Private key (PEM, unencrypted) | Chiave privata (PEM, non cifrata) |
+| `wa.import.inspect` | Check | Verifica |
+| `wa.import.covers` | Takes over these addresses | Prende questi indirizzi |
+| `wa.import.covers_none` | It covers none of the addresses this NAS serves | Non copre nessuno degli indirizzi serviti da questo NAS |
+| `wa.import.shadowed` | Served by another imported certificate | Serviti da un altro certificato importato |
+| `wa.import.replaces_acme` | Replaces the Let's Encrypt certificate for | Sostituisce il certificato Let's Encrypt per |
+| `wa.import.folder` | Watched folder | Cartella controllata |
+| `wa.import.folder_help` | Write fullchain.pem and privkey.pem here; rynas checks them and reloads within seconds. Members of the group rynas-cert-drop can write here. | Scrivi qui fullchain.pem e privkey.pem: rynas li controlla e ricarica in pochi secondi. Possono scrivere qui i membri del gruppo rynas-cert-drop. |
+| `wa.import.folder_ssh` | Example: a push account over SSH (acme.sh) | Esempio: un account di invio via SSH (acme.sh) |
+| `wa.import.check_now` | Check now | Controlla ora |
+| `wa.import.waiting` | Waiting for the files | In attesa dei file |
+| `wa.import.last_error` | Last files refused | Ultimi file rifiutati |
+| `wa.import.kept` | The previous certificate stays in use. | Resta in uso il certificato precedente. |
+| `wa.import.imported_at` | Taken on | Preso il |
+| `wa.import.delete` | Remove | Rimuovi |
+| `wa.import.delete_confirm` | Its addresses go back to the Let's Encrypt or local certificate. | I suoi indirizzi tornano al certificato Let's Encrypt o locale. |
+| `wa.import.not_renewed` | rynas does not renew imported certificates. | rynas non rinnova i certificati importati. |
+
+Closed sets: `ImportSource` (`upload`, `folder`); `CertKind` adds `imported`; notification
+codes `nev.web_access.cert_import_failed` and `nev.web_access.cert_import_ok` with `{name}`
+(and `{error}`, English, shown as is). `last_error` and validation messages are English,
+shown as they are.
+
+Flows: Import (form → Check calls `inspect` and shows subject, issuer, expiry and the
+addresses it takes over → Save); Folder (save with `source: folder` → the drawer shows the
+path, the group, the sshd/acme.sh lines with the id filled in, Check now); Remove (confirm).
+The SSH example uses the NAS's host name, never personal data.
+
+#### Open points
+
+- Backups: imports are not in `.rynasbak` exports yet. Proposal: include them in the
+  passphrase-encrypted secrets part of an export, like the sealed DNS credentials.
+- An import near expiry while an own domain could obtain the same names: today the import
+  keeps them until it expires (then ACME starts, which takes a minute or two). A per-import
+  "prefer ACME" switch could be added if users ask.
+- PKCS#12 (`.pfx`) uploads and passphrase-protected keys are refused (convert with openssl).
+- `:8443` could follow an import that covers the host name (W2's "Not in W2" item); for now
+  it keeps `/system/tls`.
+
 ## 6. App catalog format (wave A1)
 
 Normative. Code: `crates/rynas-apps` (pure data in, files out; no Docker access). Entries:

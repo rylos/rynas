@@ -987,6 +987,8 @@ fn main() -> std::io::Result<()> {
                 web.names.spawn();
             }
             rynasd::web_access::spawn_watch(web.clone());
+            // watched folders of imported certificates (§5.5)
+            rynasd::web_access::imported::spawn_watch(web.clone());
             state.web_access = Some(web);
         }
         state.ops = Some(ops);

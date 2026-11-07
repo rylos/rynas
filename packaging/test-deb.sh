@@ -28,7 +28,7 @@ dpkg -s rynas | grep -E '^(Status|Version|Depends)'
 
 step "users, groups, permissions"
 getent passwd rynas
-getent group rynas rynas-admin
+getent group rynas rynas-admin rynas-cert-drop
 stat -c '%A %U:%G %n' /var/lib/rynas /var/lib/rynas/auth /etc/pam.d/rynas /etc/default/rynas-web \
     /usr/libexec/rynas/rynasd /usr/libexec/rynas/rynas-web /usr/share/rynas/ui
 [ "$(stat -c '%a %U:%G' /var/lib/rynas)" = "750 root:rynas" ] || fail "/var/lib/rynas"

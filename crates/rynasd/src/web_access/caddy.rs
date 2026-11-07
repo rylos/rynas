@@ -29,6 +29,14 @@
 //!   `override_domain` for a delegated `_acme-challenge`; HTTP-01 and TLS-ALPN off unless the
 //!   domain asks for HTTP-01. ARI is on by default since Caddy 2.8 (certmagic 0.21).
 //!
+//! - imported certificates (§5.5): each valid pair that serves a name joins `load_files`
+//!   with the tag `rynas-import-<id>`, and the HTTPS server gets one TLS connection policy per
+//!   such pair before the catch-all `{}`: `match.sni` (the names it serves) and
+//!   `certificate_selection.any_tag` (`modules/caddytls/connpolicy.go`,
+//!   `certselection.go`), so certmagic picks it whatever else its cache holds for the name
+//!   (its default selector takes the first valid match, in cache order). ACME subjects an
+//!   import replaces are left out of `automate` and of the domain's policy.
+//!
 //! The source of the field names is Caddy v2.11.9's code (`modules/caddyhttp/...`,
 //! `admin.go`, `modules/caddytls/acmeissuer.go`); the golden tests pin the output.
 
@@ -39,6 +47,7 @@ use rynas_api_types::web_access::{
 };
 
 use super::domains::{self, PROPAGATION_RESOLVERS};
+use super::imported::{self, Active};
 use super::model::{access_ranges, parse_size};
 use super::{RenderInput, Resolved};
 
@@ -224,24 +233,28 @@ fn issuer(input: &RenderInput, d: &WebDomain) -> Value {
 }
 
 /// The `tls` app: local leaf from files, ACME for the own domains. `Null` when neither.
-fn tls_app(input: &RenderInput, resolved: &Resolved) -> Value {
+fn tls_app(input: &RenderInput, resolved: &Resolved, used: &[(&Active, Vec<String>)]) -> Value {
     let mut tls = serde_json::Map::new();
     let mut certs = serde_json::Map::new();
+    let mut files = Vec::new();
     if !resolved.local_names().is_empty() {
-        certs.insert(
-            "load_files".into(),
-            json!([{
-                "certificate": input.paths.cert,
-                "key": input.paths.key,
-                "tags": [LOCAL_CERT_TAG]
-            }]),
-        );
+        files.push(json!({
+            "certificate": input.paths.cert,
+            "key": input.paths.key,
+            "tags": [LOCAL_CERT_TAG]
+        }));
+    }
+    for (a, _) in used {
+        files.push(json!({"certificate": a.cert, "key": a.key, "tags": [a.tag()]}));
+    }
+    if !files.is_empty() {
+        certs.insert("load_files".into(), Value::Array(files));
     }
     let mut automate: Vec<String> = Vec::new();
     let mut policies = Vec::new();
     if input.cfg.settings.mode == ProxyMode::Builtin {
         for d in domains::active(input.cfg) {
-            let subjects = domains::cert_subjects(input.cfg, d);
+            let subjects = imported::acme_subjects(input.cfg, d, input.imports);
             if subjects.is_empty() {
                 continue;
             }
@@ -331,6 +344,31 @@ impl Renderer for Caddy {
                 "routes": http_routes
             }),
         );
+        // imported certificates: the names each one serves, in id order
+        let owner = imported::assign(input.imports, &names_all);
+        let used: Vec<(&Active, Vec<String>)> = input
+            .imports
+            .iter()
+            .map(|a| {
+                let mine: Vec<String> = names_all
+                    .iter()
+                    .filter(|n| owner.get(*n) == Some(&a.id))
+                    .cloned()
+                    .collect();
+                (a, mine)
+            })
+            .filter(|(_, mine)| !mine.is_empty())
+            .collect();
+        let mut policies: Vec<Value> = used
+            .iter()
+            .map(|(a, mine)| {
+                json!({
+                    "match": {"sni": mine},
+                    "certificate_selection": {"any_tag": [a.tag()]}
+                })
+            })
+            .collect();
+        policies.push(json!({}));
         let mut apps = serde_json::Map::new();
         if !names_all.is_empty() {
             let protocols: Vec<&str> = if s.h3 {
@@ -345,12 +383,12 @@ impl Renderer for Caddy {
                     "protocols": protocols,
                     "strict_sni_host": true,
                     "automatic_https": {"disable": true},
-                    "tls_connection_policies": [{}],
+                    "tls_connection_policies": policies,
                     "logs": {},
                     "routes": https_routes
                 }),
             );
-            let tls = tls_app(input, resolved);
+            let tls = tls_app(input, resolved, &used);
             if !tls.is_null() {
                 apps.insert("tls".into(), tls);
             }
