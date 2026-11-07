@@ -334,9 +334,12 @@ fn fetch_text(src: StoredValue<(String, String)>, err: RwSignal<Option<String>>,
                 if err.try_with_untracked(Option::is_some) == Some(true) {
                     let _ = err.try_set(None);
                 }
-                if src.try_with_value(|s| s.1 != text) == Some(true) {
-                    src.update_value(|s| s.1.clone_from(&text));
-                    apply.try_run(text);
+                // the body counts as seen only once applied: two reloads in flight (a config
+                // generation bump right after a dialog's own reload) dispose the first one's
+                // `apply` with its effect run, and the second answer, equal to the first, must
+                // still reach the data
+                if src.try_with_value(|s| s.1 != text) == Some(true) && apply.try_run(text.clone()).is_some() {
+                    src.update_value(|s| s.1 = text);
                 }
             }
             // 401: the API layer shows the login screen

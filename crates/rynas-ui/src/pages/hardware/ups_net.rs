@@ -100,19 +100,21 @@ pub fn card() -> AnyView {
             .map(|cl| {
                 let (n1, n2, n3) = (cl.name.clone(), cl.name.clone(), cl.name.clone());
                 let role = cl.role;
+                let aria = |k: &'static str| format!("{}: {}", t(k), cl.name);
                 ui::row(vec![
-                    ui::cell("username", "mono", view! { {cl.name.clone()} }.into_any()),
+                    ui::cell("username", "", view! { <span class="mono">{cl.name.clone()}</span> }.into_any()),
                     ui::cell("upsn.role", "", view! { {tr(role_key(cl.role))} }.into_any()),
                     ui::cell("upsn.note", "wrap", view! { {cl.note.clone()} }.into_any()),
                     ui::actions(view! {
-                        <button type="button" class="btn ghost sm" on:click=move |_| shown.set(Some(Shown { name: n1.clone(), role, password: None }))>
-                            <Icon icon=icons::LINK size=14 />{tr("upsn.connect")}
+                        <button type="button" class="icon-btn sm" title=tr("upsn.connect") aria-label=aria("upsn.connect")
+                            on:click=move |_| shown.set(Some(Shown { name: n1.clone(), role, password: None }))>
+                            <Icon icon=icons::LINK size=16 />
                         </button>
-                        <button type="button" class="btn ghost sm" on:click=move |_| regen.set(Some(n2.clone()))>
-                            <Icon icon=icons::REFRESH_CW size=14 />{tr("pw.new")}
+                        <button type="button" class="icon-btn sm" title=tr("pw.new") aria-label=aria("pw.new") on:click=move |_| regen.set(Some(n2.clone()))>
+                            <Icon icon=icons::KEY size=16 />
                         </button>
-                        <button type="button" class="btn ghost sm danger-text" on:click=move |_| remove.set(Some(n3.clone()))>
-                            <Icon icon=icons::TRASH_2 size=14 />{tr("upsn.remove")}
+                        <button type="button" class="icon-btn sm danger" title=tr("upsn.remove") aria-label=aria("upsn.remove") on:click=move |_| remove.set(Some(n3.clone()))>
+                            <Icon icon=icons::TRASH_2 size=16 />
                         </button>
                     }.into_any()),
                 ])
@@ -145,8 +147,18 @@ pub fn card() -> AnyView {
         }
         .into_any()
     };
+    // the dialogs end inside their own (then disposed) reactive owner: the reload runs here,
+    // in the card's, or its answer would be dropped with the dialog
+    let refresh = RwSignal::new(0u32);
+    Effect::new(move |prev: Option<u32>| {
+        let n = refresh.get();
+        if prev.is_some() {
+            state.reload();
+        }
+        n
+    });
     let done = move |s: Option<Shown>| {
-        state.reload();
+        refresh.update(|n| *n += 1);
         if s.is_some() {
             shown.set(s);
         }
@@ -155,7 +167,7 @@ pub fn card() -> AnyView {
         <section class="card widget">
             <WidgetHead icon=icons::NETWORK title="upsn.title" />
             {body}
-            {move || settings_open.get().then(|| settings_dialog(state, Callback::new(move |_| { settings_open.set(false); state.reload(); })))}
+            {move || settings_open.get().then(|| settings_dialog(state, Callback::new(move |_| { settings_open.set(false); refresh.update(|n| *n += 1); })))}
             {move || add_open.get().then(|| add_dialog(state, Callback::new(move |s: Option<Shown>| { add_open.set(false); done(s); })))}
             {move || shown.get().map(|s| connect_dialog(state, s, Callback::new(move |_| shown.set(None))))}
             {move || remove.get().map(|name| change_confirm(state, name, false, Callback::new(move |s: Option<Shown>| { remove.set(None); done(s); })))}
