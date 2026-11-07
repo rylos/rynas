@@ -1438,10 +1438,11 @@ impl rynas_services::SubvolumeCreator for HostSubvolumes {
         }
     }
 
-    fn create(&self, path: &str, compression: bool, log: &dyn Fn(&str)) -> Result<(), String> {
+    fn create(&self, path: &str, compression: bool, nocow: bool, log: &dyn Fn(&str)) -> Result<(), String> {
         let settings = SubvolumeSettings {
             compression,
             readonly: false,
+            nocow,
         };
         for argv in subvol::create_commands(path, &settings) {
             let cmd = Cmd::new(&argv[0])

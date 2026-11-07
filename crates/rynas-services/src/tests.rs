@@ -45,13 +45,15 @@ impl crate::SubvolumeCreator for TestCreator {
         }
     }
 
-    fn create(&self, path: &str, compression: bool, _log: &dyn Fn(&str)) -> Result<(), String> {
-        self.calls
-            .lock()
-            .unwrap()
-            .push(format!("{path} compression={compression}"));
+    fn create(&self, path: &str, compression: bool, nocow: bool, _log: &dyn Fn(&str)) -> Result<(), String> {
+        self.calls.lock().unwrap().push(if nocow {
+            format!("{path} compression={compression} nocow")
+        } else {
+            format!("{path} compression={compression}")
+        });
         self.host
             .add_dir(path, Some("99999999-2222-4333-8444-555555555555"));
+        self.host.set_nocow(path, nocow);
         Ok(())
     }
 
@@ -615,6 +617,7 @@ fn a_share_can_ask_for_its_subvolume() {
         subvolume: Some(rynas_api_types::ShareSubvolume {
             volume: "vol1".into(),
             compression: false,
+            nocow: false,
         }),
         ..Default::default()
     });
@@ -656,6 +659,7 @@ fn a_share_can_ask_for_its_subvolume() {
         subvolume: Some(rynas_api_types::ShareSubvolume {
             volume: "vol9".into(),
             compression: true,
+            nocow: false,
         }),
         ..Default::default()
     });
@@ -669,6 +673,38 @@ fn a_share_can_ask_for_its_subvolume() {
         .volume = "vol1".into();
     d.shares.last_mut().unwrap().path = "/srv/other/x".into();
     assert!(bad(d).contains("is created at /srv/vol1/x"));
+}
+
+#[test]
+fn a_share_can_ask_for_a_subvolume_without_copy_on_write() {
+    let e = env();
+    stage(&e, USERS_KEY, &users_doc()).unwrap();
+    let mut d = shares_doc();
+    d.shares.push(Share {
+        name: "cams".into(),
+        subvolume: Some(rynas_api_types::ShareSubvolume {
+            volume: "vol1".into(),
+            compression: true,
+            nocow: true,
+        }),
+        ..Default::default()
+    });
+    stage(&e, SHARES_KEY, &d).unwrap();
+    let staged: SharesConfig = serde_json::from_value(
+        e.cfg.pending_value("admin", SHARES_KEY).unwrap().unwrap().unwrap(),
+    )
+    .unwrap();
+    let cams = staged.shares.iter().find(|s| s.name == "cams").unwrap();
+    // the remark before the apply names the missing copy-on-write
+    let domain = crate::SharesDomain::new(e.host.clone(), e.acc.clone());
+    let codes: Vec<_> = domain.warning_items(&staged, cams).into_iter().map(|w| w.code).collect();
+    assert!(codes.contains(&rynas_api_types::ShareWarningCode::SubvolumeOnApplyNocow), "{codes:?}");
+    apply(&e).unwrap();
+    assert_eq!(
+        e.creator.calls.lock().unwrap().as_slice(),
+        ["/srv/vol1/cams compression=true nocow"]
+    );
+    assert_eq!(crate::ShareHost::probe(e.host.as_ref(), "/srv/vol1/cams").nocow, Some(true));
 }
 
 fn calls(e: &Env) -> Vec<String> {

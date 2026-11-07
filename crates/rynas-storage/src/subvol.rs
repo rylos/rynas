@@ -18,10 +18,15 @@ fn argv(v: &[&str]) -> Vec<String> {
     v.iter().map(|s| s.to_string()).collect()
 }
 
-/// Commands that create `<mountpoint>/<name>` with its settings.
+/// Commands that create `<mountpoint>/<name>` with its settings. With `nocow` the new,
+/// empty subvolume gets `chattr +C` (files created in it inherit it); compression does not
+/// apply to such files, so its property is left alone (the kernel refuses compression on a
+/// NOCOW inode).
 pub fn create_commands(path: &str, s: &SubvolumeSettings) -> Vec<Vec<String>> {
     let mut v = vec![argv(&["btrfs", "subvolume", "create", path])];
-    if !s.compression {
+    if s.nocow {
+        v.push(argv(&["chattr", "+C", path]));
+    } else if !s.compression {
         v.push(argv(&[
             "btrfs",
             "property",
@@ -126,7 +131,8 @@ mod tests {
                 "/vol1/video",
                 &SubvolumeSettings {
                     compression: false,
-                    readonly: true
+                    readonly: true,
+                    nocow: false,
                 }
             )),
             [
@@ -134,6 +140,18 @@ mod tests {
                 "btrfs property set /vol1/video compression none",
                 "btrfs property set -ts /vol1/video ro true",
             ]
+        );
+        // no copy-on-write: chattr on the empty subvolume, compression property untouched
+        assert_eq!(
+            lines(create_commands(
+                "/vol1/cams",
+                &SubvolumeSettings {
+                    compression: false,
+                    readonly: false,
+                    nocow: true,
+                }
+            )),
+            ["btrfs subvolume create /vol1/cams", "chattr +C /vol1/cams"]
         );
         assert_eq!(
             lines(create_commands("/vol1/docs", &SubvolumeSettings::default())),

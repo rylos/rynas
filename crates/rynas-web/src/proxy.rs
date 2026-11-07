@@ -104,6 +104,7 @@ pub fn routes() -> Router<AppState> {
         .route("/shares", get(forward).post(forward))
         .route("/shares/{name}", get(forward).put(forward).delete(forward))
         .route("/shares/{name}/effective", get(forward))
+        .route("/shares/{name}/nocow", post(forward))
         .route("/shares/plan/delete", post(forward))
         .route("/folders", get(forward))
         .route("/folders/plan/delete", post(forward))

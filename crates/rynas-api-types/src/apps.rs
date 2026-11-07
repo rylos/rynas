@@ -381,6 +381,10 @@ pub struct AppFolder {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
     pub description: String,
+    /// Created without copy-on-write on btrfs (`nocow = true` in app.toml: recordings,
+    /// databases written in place).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub nocow: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -615,6 +619,10 @@ pub struct PlannedFolder {
     pub owner: String,
     /// Suggested placement on the SSD volume of the preferences (`ssd` ok or preferred).
     pub suggested: Option<String>,
+    /// The install creates it without copy-on-write when it lands on btrfs
+    /// ([`AppFolder::nocow`]); an existing folder is left as it is.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub nocow: bool,
 }
 
 /// Something the administrator should know before installing.

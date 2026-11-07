@@ -1102,7 +1102,7 @@ kbd {
 }
 .notice.ok { --tone: var(--success); } .notice.warn { --tone: var(--warning); } .notice.err { --tone: var(--danger); }
 .notice > .icon { color: var(--tone); margin-top: 1px; flex: none; }
-.notice-text { flex: 1; min-width: 0; padding-top: 1px; }
+.notice-text { flex: 1; min-width: 0; padding-top: 1px; overflow-wrap: anywhere; }
 .notice .icon-btn { margin: calc(var(--s-1) * -1) 0; }
 
 /* pending bar */
@@ -1201,6 +1201,9 @@ kbd {
 .table td.path-cell { white-space: normal; min-width: 200px; max-width: 360px; overflow-wrap: anywhere; }
 /* the shared folders table has seven columns: a narrower path keeps it inside its card at 1024 px */
 .shares-table td.path-cell { min-width: 120px; }
+/* NOCOW folders: state and action on one line; what the files give up, as bullets */
+.nocow-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
+.nocow-costs { margin: var(--s-1) 0 0; padding-left: var(--s-4); list-style: disc; }
 .table td.actions { text-align: right; width: 1%; white-space: nowrap; }
 .table td.actions .icon-btn { display: inline-grid; }
 .actions-col { width: 1%; }

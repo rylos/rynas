@@ -334,6 +334,12 @@ pub struct Folder {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
     pub description: String,
+    /// Create the folder without copy-on-write on btrfs (`chattr +C` on the new, empty
+    /// folder): files written in place, as recordings and databases want, at the price of
+    /// no checksums and no compression. No effect on other filesystems or on a folder that
+    /// already exists.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub nocow: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

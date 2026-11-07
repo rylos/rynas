@@ -1468,6 +1468,36 @@ shares.w.no_permissions	Nessuna autorizzazione impostata: la cartella mantiene i
 shares.w.all_denied	Ogni voce nega l'accesso: nessuno può aprire questa cartella.
 shares.w.snapfolder_no_job	La cartella degli snapshot compare quando questa cartella condivisa ha un job di snapshot.
 shares.w.snapfolder_nfs	I client NFS vedono la cartella degli snapshot solo con Includi i mount annidati attivo (scheda NFS).
+shares.nocow	Senza copy-on-write
+shares.nocow_help	Per registrazioni video, database e immagini di macchine virtuali: i file vengono riscritti sul posto invece di essere copiati, così non si frammentano.
+shares.nocow_help_existing	I file vengono copiati a ogni modifica e protetti da checksum. La scrittura senza copy-on-write si può attivare finché la cartella è vuota.
+shares.nocow_is_on	I nuovi file di questa cartella vengono riscritti sul posto, senza checksum né compressione.
+shares.nocow_cost	Cosa perdono i file di questa cartella:
+shares.nocow_t_sum	i checksum: i dati danneggiati non vengono rilevati dalla verifica (scrub) e un mirror non può ripararli dall'altra copia
+shares.nocow_t_comp	la compressione
+shares.nocow_t_snap	niente per gli snapshot, che funzionano ancora, ma ogni blocco riscritto dopo uno snapshot occupa nuovo spazio finché lo snapshot resta
+shares.nocow_t_new	vale per i file creati da adesso in poi, non per quelli già presenti
+shares.nocow_snap_hint	I job di snapshot su questa cartella funzionano, ma i dati riscritti occupano spazio: tieni pochi snapshot con una conservazione breve, oppure nessuno.
+shares.nocow_turn_on	Scrivi senza copy-on-write
+shares.nocow_turn_off	Torna al copy-on-write
+shares.nocow_on_title	Senza copy-on-write per {name}?
+shares.nocow_off_title	Di nuovo copy-on-write per {name}?
+shares.nocow_on_text	I nuovi file di questa cartella verranno riscritti sul posto. Possibile solo finché la cartella è vuota.
+shares.nocow_off_text	I file creati da adesso in poi riavranno copy-on-write, checksum e compressione. I file già presenti restano senza copy-on-write finché non vengono copiati.
+shares.nocow_done_on	{name}: i nuovi file vengono scritti senza copy-on-write.
+shares.nocow_done_off	{name}: i nuovi file riavranno il copy-on-write.
+shares.nocow_move	La cartella non è vuota? Sposta i file in una cartella nuova
+shares.nocow_move_1	Crea una nuova cartella condivisa con Senza copy-on-write attivo.
+shares.nocow_move_2	Ferma le app e i client che scrivono nella vecchia cartella.
+shares.nocow_move_3	Copia i file con una copia completa, non un clone, da una shell: rsync -aHAX /vecchia/ /nuova/ (oppure cp -a --reflink=never).
+shares.nocow_move_4	Controlla la copia, fai puntare le app alla nuova cartella, poi elimina la vecchia.
+shares.nocow_move_space	Finché la vecchia cartella non viene eliminata, i file occupano il doppio dello spazio.
+shares.nocow_sto_hint	I file non hanno checksum né compressione.
+shares.w.subvolume_on_apply_nocow	{path} verrà creata come sottovolume del volume {volume}, senza copy-on-write, quando applichi le modifiche.
+shares.w.nocow_snapshots	{path} è senza copy-on-write e ha un job di snapshot: gli snapshot funzionano, ma i dati riscritti dopo uno snapshot occupano nuovo spazio finché lo snapshot resta.
+task.shares.nocow	Modifica del copy-on-write
+err.folder_not_empty	La cartella non è vuota.
+apps.w.nocow_hint	Su btrfs questa cartella viene creata senza copy-on-write: i file vengono riscritti sul posto, senza checksum né compressione.
 task.shares.folder-delete	Eliminazione cartella
 svc.title	Servizi file
 svc.subtitle	Impostazioni SMB e NFS per tutte le cartelle condivise

@@ -967,6 +967,7 @@ fn SubvolDialog(base: String, edit: Option<SubvolumeInfo>, on_close: Callback<()
     let name = RwSignal::new(edit.as_ref().map(|e| e.name.clone()).unwrap_or_default());
     let comp = RwSignal::new(edit.as_ref().is_none_or(|e| e.compression.as_deref() != Some("none")));
     let ro = RwSignal::new(edit.as_ref().is_some_and(|e| e.readonly));
+    let nocow = RwSignal::new(false);
     let base = StoredValue::new(base);
     let submit = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
@@ -975,7 +976,7 @@ fn SubvolDialog(base: String, edit: Option<SubvolumeInfo>, on_close: Callback<()
             error.set(Some(t("sto.sub_invalid").to_string()));
             return;
         }
-        let body = json!({"name": n, "compression": comp.get_untracked(), "readonly": ro.get_untracked()});
+        let body = json!({"name": n, "compression": comp.get_untracked(), "readonly": ro.get_untracked(), "nocow": creating && nocow.get_untracked()});
         if creating {
             start_task(base.get_value(), Some(body), false, stage, busy, error);
         } else {
@@ -1009,8 +1010,14 @@ fn SubvolDialog(base: String, edit: Option<SubvolumeInfo>, on_close: Callback<()
                                 prop:value=move || name.get() on:input=move |ev| name.set(event_target_value(&ev)) />
                             <span class="muted small">{tr("sto.sub_name_hint")}</span>
                         </label>
-                        <label class="check"><input type="checkbox" prop:checked=move || comp.get() on:change=move |ev| comp.set(event_target_checked(&ev)) />{tr("sto.sub_compress")}</label>
-                        <p class="muted small">{tr("sto.sub_compress_hint")}</p>
+                        {creating.then(|| view! {
+                            <label class="check"><input type="checkbox" prop:checked=move || nocow.get() on:change=move |ev| nocow.set(event_target_checked(&ev)) />{tr("shares.nocow")}</label>
+                            <p class="muted small">{tr("shares.nocow_help")}" "{tr("shares.nocow_sto_hint")}</p>
+                        })}
+                        <div class="form" hidden=move || nocow.get()>
+                            <label class="check"><input type="checkbox" prop:checked=move || comp.get() on:change=move |ev| comp.set(event_target_checked(&ev)) />{tr("sto.sub_compress")}</label>
+                            <p class="muted small">{tr("sto.sub_compress_hint")}</p>
+                        </div>
                         <label class="check"><input type="checkbox" prop:checked=move || ro.get() on:change=move |ev| ro.set(event_target_checked(&ev)) />{tr("sto.readonly")}</label>
                         {form_error(error)}
                         <div class="dialog-foot">

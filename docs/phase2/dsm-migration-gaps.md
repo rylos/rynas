@@ -20,7 +20,7 @@ synodeb hardware screens, the app catalogue, Docker stacks next to other manager
 | B | NUT server on the LAN | upsd reachable by other hosts (e.g. Home Assistant), with its own users |
 | B | Proxy on host:port | routes like `nas.example.com:8443 → app`, besides one name per app on 443 |
 | C | Adopt existing compose stacks | take over a project made by hand or by another manager without rewriting it |
-| C | No-CoW subvolume | `chattr +C` folders for video recordings and databases |
+| C | No-CoW subvolume | done 2026-11-07 (D-NOCOW): per-folder switch at creation, state and on/off for empty folders, `nocow` app folders (Frigate) |
 | C | Existing users and UID changes | adopt Linux users with their UIDs; change a UID with a file ownership remap |
 | D | Backup to another NAS and to the cloud | restic/rustic repositories; rest-server, SFTP, rclone remotes |
 | D | Receive btrbk from PCs | keep existing incremental chains (btrfs receive) |

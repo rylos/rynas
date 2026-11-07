@@ -202,6 +202,7 @@ fn share_row(v: ShareView, fss: &[rynas_api_types::Filesystem], edit: RwSignal<O
                 <span class="cell-sub">
                     {(v.status.subvolume || s.subvolume.is_some()).then(|| t("shares.subvolume"))}
                     {(!v.status.fs_type.is_empty()).then(|| format!(" · {}", v.status.fs_type))}
+                    {(v.status.nocow == Some(true)).then(|| format!(" · {}", t("shares.nocow")))}
                 </span>
             </div>
         }
@@ -271,8 +272,9 @@ fn share_editor(e: ShareEdit, users: Remote<Vec<UserView>>, groups: Remote<Vec<G
     let is_new = e.view.is_none();
     let saved = e.view.as_ref().map(|v| v.share.clone());
     let warnings = e.view.as_ref().map(|v| share_folders::warnings(&v.status)).unwrap_or_default();
+    let nocow = e.view.as_ref().and_then(|v| super::share_nocow::existing(v.share.name.clone(), &v.status));
     let d = RwSignal::new(saved.clone().or(e.prefill).unwrap_or_else(|| Share {
-        subvolume: Some(ShareSubvolume { volume: String::new(), compression: true }),
+        subvolume: Some(ShareSubvolume { volume: String::new(), compression: true, nocow: false }),
         ..Share::default()
     }));
     let tab = RwSignal::new(e.tab);
@@ -336,6 +338,7 @@ fn share_editor(e: ShareEdit, users: Remote<Vec<UserView>>, groups: Remote<Vec<G
         {let (v, s) = lens(d, |s| s.description.clone(), |s, v| s.description = v);
          text_field("users.description", v, s, Signal::derive(|| None), In::default())}
         {location_fields(d, is_new, show)}
+        {nocow}
         {let (v, s) = lens_bool(d, |s| s.show_snapshots, |s, v| s.show_snapshots = v);
          switch("shares.show_snapshots", Some("shares.show_snapshots_help"), v, s)}
         {(!warnings.is_empty()).then(|| view! {
@@ -391,7 +394,7 @@ fn location_fields(d: RwSignal<Share>, is_new: bool, show: RwSignal<bool>) -> An
     let use_sub = Signal::derive(move || d.with(|s| s.subvolume.is_some()));
     let set_mode = move |sub: bool| {
         d.update(|s| {
-            s.subvolume = sub.then(|| ShareSubvolume { volume: String::new(), compression: true });
+            s.subvolume = sub.then(|| ShareSubvolume { volume: String::new(), compression: true, nocow: false });
             if sub {
                 s.path.clear();
             }
@@ -462,7 +465,10 @@ fn location_fields(d: RwSignal<Share>, is_new: bool, show: RwSignal<bool>) -> An
                         </select>
                         <span class="field-help">{move || tf("shares.subvolume_help", &[("path", &share_path(&d.get()))])}</span>
                     </div>
-                    {switch("shares.compression", Some("shares.compression_help"), comp, set_comp)}
+                    {super::share_nocow::create_switch(d)}
+                    <div hidden=move || d.with(|s| s.subvolume.as_ref().is_some_and(|v| v.nocow))>
+                        {switch("shares.compression", Some("shares.compression_help"), comp, set_comp)}
+                    </div>
                 }.into_any()
             } else {
                 text_field("shares.path", path, set_path, path_err, In { help: Some("shares.path_help"), mono: true, placeholder: "/srv/data", maxlength: 4096, ..In::default() })
@@ -827,7 +833,7 @@ mod tests {
         assert_eq!(fs_for("/vol1/photos", &list).map(|f| f.0), Some("/vol1".into()));
         assert_eq!(fs_for("/vol10", &list).map(|f| f.0), Some("/vol10".into()));
         assert_eq!(fs_for("/srv/x", &list).map(|f| f.0), Some("/".into()));
-        let sub = Share { name: "photos".into(), subvolume: Some(ShareSubvolume { volume: "vol1".into(), compression: true }), ..Share::default() };
+        let sub = Share { name: "photos".into(), subvolume: Some(ShareSubvolume { volume: "vol1".into(), compression: true, nocow: false }), ..Share::default() };
         assert_eq!(share_path(&sub), "/vol1/photos");
     }
 }

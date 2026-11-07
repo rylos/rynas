@@ -23,6 +23,8 @@ fn warning_text(w: &ShareWarning, english: Option<&String>) -> String {
     let key = match w.code {
         ShareWarningCode::SubvolumeOnApply => "shares.w.subvolume_on_apply",
         ShareWarningCode::SubvolumeOnApplyNoCompression => "shares.w.subvolume_on_apply_nc",
+        ShareWarningCode::SubvolumeOnApplyNocow => "shares.w.subvolume_on_apply_nocow",
+        ShareWarningCode::NocowSnapshots => "shares.w.nocow_snapshots",
         ShareWarningCode::NotSubvolume => "shares.w.not_subvolume",
         ShareWarningCode::ExtraOverrides => "shares.w.extra_overrides",
         ShareWarningCode::NfsUids => "shares.w.nfs_uids",

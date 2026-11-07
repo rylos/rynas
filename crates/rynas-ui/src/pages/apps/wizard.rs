@@ -415,10 +415,12 @@ fn folders(w: W) -> AnyView {
                         <span class="mono">{format!("./{}", f.path)}</span>" "
                         <span class="chip">{intent_text(f.intent)}</span>
                         {ssd_key(f.ssd).map(|k| view! { " "<span class="chip accent">{tr(k)}</span> })}
+                        {f.nocow.then(|| view! { " "<span class="chip">{tr("shares.nocow")}</span> })}
                     </label>
                     <select id=fid class="input" on:change=move |ev| { let v = event_target_value(&ev); w.folders.update(|m| { m.insert(env.get_value(), v); }); }>{options}</select>
                     <span class="field-help" lang="en">{f.description.clone()}</span>
                     {hint.map(|k| view! { <span class="field-help app-hint"><Icon icon=icons::INFO size=12 />{tr(k)}</span> })}
+                    {f.nocow.then(|| view! { <span class="field-help app-hint"><Icon icon=icons::INFO size=12 />{tr("apps.w.nocow_hint")}</span> })}
                     <span class="field-error" aria-live="polite">{move || err.get().map(|e| view! { <Icon icon=icons::CIRCLE_X size=12 />{ui::err_view(e)} })}</span>
                 </div>
             }

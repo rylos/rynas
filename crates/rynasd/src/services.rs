@@ -20,7 +20,7 @@ use rynas_api_types::snapshots::SnapshotsConfig;
 use rynas_api_types::{
     EffectivePermission, FolderDeletePlan, FolderRef, FolderRemoval, GroupRequest, GroupView,
     LocalGroup, LocalUser, NfsSettings, NfsState, PasswordRequest, PendingOp, PrincipalKind, Share,
-    ShareDeletePlanRequest, ShareStatus, ShareView, SharesConfig, SmbSettings, SmbState,
+    ShareDeletePlanRequest, ShareNocowRequest, ShareStatus, ShareWarning, ShareWarningArgs, ShareWarningCode, ShareView, SharesConfig, SmbSettings, SmbState,
     SnapshotSource, StagedChanges, TaskStarted, UnsharedFolder, UserBadge, UserStatus, UserView,
     UsersConfig, error_codes,
 };
@@ -130,6 +130,7 @@ pub fn router(st: SvcState) -> Router {
             get(share_get).put(share_put).delete(share_delete),
         )
         .route("/v1/shares/{share}/effective", get(share_effective))
+        .route("/v1/shares/{share}/nocow", post(share_nocow))
         .route("/v1/shares/plan/delete", post(share_delete_plan))
         .route("/v1/folders", get(folders_list))
         .route("/v1/folders/plan/delete", post(folder_delete_plan))
@@ -870,8 +871,19 @@ fn check_principals(s: &Services, owner: &str, doc: &SharesConfig) -> Res<()> {
 fn share_views(s: &Services, owner: &str) -> Res<Vec<ShareView>> {
     let (eff, cur, _): (SharesConfig, SharesConfig, _) = docs(&s.ops.config, owner, SHARES_KEY)?;
     let host = s.shares.host();
+    // without the snapshots module (no key) there are no jobs
+    let snaps: SnapshotsConfig = docs::<SnapshotsConfig>(&s.ops.config, owner, SNAPSHOTS_KEY).map(|d| d.0).unwrap_or_default();
     let view = |sh: &Share, pending| {
         let info = host.probe(&sh.path);
+        let mut items = s.shares.warning_items(&eff, sh);
+        // snapshots of a folder without copy-on-write: they work, rewrites cost space
+        let path = sh.path.trim_end_matches('/');
+        if info.nocow == Some(true) && snaps.jobs.iter().any(|j| j.subvolume.trim_end_matches('/') == path) {
+            items.push(ShareWarning {
+                code: ShareWarningCode::NocowSnapshots,
+                args: ShareWarningArgs { path: Some(sh.path.clone()), ..Default::default() },
+            });
+        }
         ShareView {
             share: sh.clone(),
             status: ShareStatus {
@@ -879,8 +891,9 @@ fn share_views(s: &Services, owner: &str) -> Res<Vec<ShareView>> {
                 path_ok: info.exists && info.is_dir,
                 fs_type: info.fs_type,
                 subvolume: info.subvolume,
-                warnings: s.shares.warnings(&eff, sh),
-                warning_items: s.shares.warning_items(&eff, sh),
+                nocow: info.nocow,
+                warnings: items.iter().map(rynas_services::shares::warning_text).collect(),
+                warning_items: items,
             },
         }
     };
@@ -1484,6 +1497,45 @@ async fn folder_delete(
     Ok((StatusCode::ACCEPTED, Json(TaskStarted { task_id: id })).into_response())
 }
 
+/// Task `shares.nocow`: turns no copy-on-write on (empty folder only) or off for the folder
+/// of an applied share. The folder is checked before the task starts and again inside it.
+async fn share_nocow(
+    State(st): State<SvcState>,
+    h: HeaderMap,
+    Path(name): Path<String>,
+    body: Result<Json<ShareNocowRequest>, JsonRejection>,
+) -> Res<Response> {
+    let (s, owner) = (svc(&st)?, user(&h)?);
+    let req = json_body(body)?;
+    let o = owner.clone();
+    let path = blocking(&s, move |s| {
+        let (_, cur, _): (SharesConfig, SharesConfig, _) = docs(&s.ops.config, &o, SHARES_KEY)?;
+        let sh = cur
+            .shares
+            .iter()
+            .find(|x| x.name.eq_ignore_ascii_case(&name))
+            .ok_or_else(|| not_found(format!("applied share {name}")))?;
+        // the checks first, so the request answers 409 with the reason
+        rynas_services::nocow::check(s.shares.host().as_ref(), &sh.path, req.enabled).map_err(|e| match e {
+            rynas_services::nocow::Refusal::NotEmpty(m) => conflict(error_codes::FOLDER_NOT_EMPTY, m),
+            rynas_services::nocow::Refusal::Invalid(m) => conflict(error_codes::CONFLICT, m),
+        })?;
+        Ok(sh.path.clone())
+    })
+    .await?;
+    let svc = s.clone();
+    let on = req.enabled;
+    let id = s.ops.tasks.spawn("shares.nocow", &owner, move |ctx| async move {
+        let c = ctx.clone();
+        tokio::task::spawn_blocking(move || -> Result<(), String> {
+            let log = |l: &str| c.log(l);
+            rynas_services::nocow::change(svc.ops.config.system(), svc.shares.host().as_ref(), &path, on, &log)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    })?;
+    Ok((StatusCode::ACCEPTED, Json(TaskStarted { task_id: id })).into_response())
+}
 
 #[derive(Deserialize)]
 struct EffectiveQuery {

@@ -280,6 +280,7 @@ fn folders_table(d: &AppDetail) -> Option<AnyView> {
                     <div class="chips">
                         <span class="chip">{intent_text(f.intent)}</span>
                         {ssd_key(f.ssd).map(|k| view! { <span class="chip accent">{tr(k)}</span> })}
+                        {f.nocow.then(|| view! { <span class="chip">{tr("shares.nocow")}</span> })}
                     </div>
                 }.into_any()),
             ])
