@@ -52,6 +52,41 @@ impl DockerSvc {
         Ok(())
     }
 
+    /// [`adopt::files_hash`] of an adopted stack, computed again only when one of its files
+    /// changed (time, size or inode) since the last listing. Blocking.
+    pub(crate) fn files_hash_cached(&self, name: &str, a: &Adopted) -> String {
+        use std::os::unix::fs::MetadataExt;
+        let keys: Vec<(String, crate::docker::FileKey)> = a
+            .files
+            .iter()
+            .chain(&a.env_files)
+            .map(|f| {
+                let k = std::fs::symlink_metadata(under(&self.root, f)).ok().map(|m| {
+                    (
+                        m.mtime(),
+                        m.mtime_nsec(),
+                        m.ctime(),
+                        m.ctime_nsec(),
+                        m.size(),
+                        m.ino(),
+                    )
+                });
+                (f.clone(), k)
+            })
+            .collect();
+        if let Some((k, h)) = self.adopted_hashes.lock().unwrap().get(name)
+            && *k == keys
+        {
+            return h.clone();
+        }
+        let h = adopt::files_hash(&self.root, &a.files, &a.env_files);
+        self.adopted_hashes
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), (keys, h.clone()));
+        h
+    }
+
     /// The applied layout, or one rooted at the stack's own folder (no volume chosen: its
     /// rynas paths never exist, so no snapshots).
     pub(crate) fn layout_or(&self, dir: &str) -> Layout {
@@ -62,8 +97,12 @@ impl DockerSvc {
     /// containers.
     pub(crate) fn with_adopted(&self, mut v: Vec<StackSummary>) -> Vec<StackSummary> {
         let reg = self.adopted.lock().unwrap().stacks.clone();
+        self.adopted_hashes
+            .lock()
+            .unwrap()
+            .retain(|n, _| reg.contains_key(n));
         for (name, a) in reg {
-            let now = adopt::files_hash(&self.root, &a.files, &a.env_files);
+            let now = self.files_hash_cached(&name, &a);
             let info = a.info(Some(&now));
             let editable = a.writable();
             match v.iter_mut().find(|x| x.name == name) {
@@ -643,6 +682,84 @@ async fn binds_of(
         .collect())
 }
 
+/// The stack folder opened from `/` without following any symbolic link.
+fn plain_folder(s: &DockerSvc, dir: &str) -> Result<(), String> {
+    if adopt::dir_exists(&s.root, dir) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{dir} is not a plain folder any more (a symbolic link on the way?): nothing was moved"
+        ))
+    }
+}
+
+/// `(device, file system type)` of the mount holding `path` (`/proc/self/mountinfo`:
+/// field 3 is the file system's device, the same for every subvolume of one btrfs).
+fn mount_dev(mountinfo: &str, path: &Path) -> Option<(String, String)> {
+    let mut best: Option<(usize, String, String)> = None;
+    for l in mountinfo.lines() {
+        let f: Vec<&str> = l.split(' ').collect();
+        let Some(sep) = f.iter().position(|x| *x == "-") else {
+            continue;
+        };
+        let (Some(dev), Some(mp), Some(fstype)) = (f.get(2), f.get(4), f.get(sep + 1)) else {
+            continue;
+        };
+        let mp = mp.replace("\\040", " ");
+        if path.starts_with(&mp) && best.as_ref().is_none_or(|b| mp.len() >= b.0) {
+            best = Some((mp.len(), dev.to_string(), fstype.to_string()));
+        }
+    }
+    best.map(|(_, d, t)| (d, t))
+}
+
+/// Before anything stops: a copy that cannot share blocks (`--reflink` needs the same btrfs)
+/// must fit in the free space of the target volume (`du` plus 10 %).
+async fn space_for_copy(
+    s: &DockerSvc,
+    ctx: &TaskCtx,
+    dir: &str,
+    l: &Layout,
+) -> Result<(), String> {
+    let from = under(&s.root, dir);
+    let vol = under(&s.root, &l.volume);
+    let info = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
+    let (a, b) = (mount_dev(&info, &from), mount_dev(&info, &vol));
+    if a.is_some() && a == b && a.as_ref().is_some_and(|x| x.1 == "btrfs") {
+        ctx.log("space: same btrfs file system, the copy shares its blocks (reflink)");
+        return Ok(());
+    }
+    let du = Cmd::new("du")
+        .args(["-s", "--block-size=1"])
+        .arg(&from)
+        .env_clear()
+        .timeout(std::time::Duration::from_secs(30 * 60));
+    let need = s
+        .run(ctx, &du)
+        .await
+        .ok()
+        .filter(|o| o.success())
+        .as_ref()
+        .and_then(crate::docker::du_bytes);
+    let avail = rynas_storage::overview::statvfs(&vol.to_string_lossy()).map(|v| v.avail);
+    match (need, avail) {
+        (Some(n), Some(a)) if n.saturating_add(n / 10) > a => Err(format!(
+            "not enough space on {}: the stack folder holds {} MiB, {} MiB are free (10 % margin): nothing was moved",
+            l.volume,
+            n >> 20,
+            a >> 20
+        )),
+        (Some(n), Some(a)) => {
+            ctx.log(&format!("space: {} MiB to copy, {} MiB free", n >> 20, a >> 20));
+            Ok(())
+        }
+        _ => {
+            ctx.log("space: could not be measured, copying anyway");
+            Ok(())
+        }
+    }
+}
+
 /// `docker.stack.move`: `down` (when it has containers), the whole folder copied into a
 /// new rynas stack folder (subvolume), the binds compared, the record moved (or dropped
 /// for a plain stack), the old folder renamed `<dir>.moved-<stamp>` (Portainer's left
@@ -662,8 +779,12 @@ async fn move_task(
         ctx.log("dry system: the folder is not copied, the record is not changed");
         return Ok(());
     }
+    // the folder must still be a plain folder (not swapped for a link since the request):
+    // `cp -a <dir>/.` would copy the link's target
+    plain_folder(s, &a.dir)?;
     let old_cmd = cmd_of(&s.root, name, &a);
     let old_binds = binds_of(s, ctx, old_cmd(ComposeAction::Config)).await?;
+    space_for_copy(s, ctx, &a.dir, &l).await?;
     if running {
         let out = s.run(ctx, &old_cmd(ComposeAction::Down)).await?;
         if !out.success() {
@@ -685,6 +806,10 @@ async fn move_task(
     }
     let from = under(&s.root, &a.dir).to_string_lossy().into_owned();
     let to = under(&s.root, &target).to_string_lossy().into_owned();
+    if let Err(e) = plain_folder(s, &a.dir) {
+        let _ = rynas_docker::stacks::remove_tree(&under(&s.root, &target), &|m| ctx.log(m));
+        return restart_old(e).await;
+    }
     let copied = s.run(ctx, &crate::docker::copy_cmd(&from, &to)).await;
     let checked = match copied {
         Ok(o) if o.success() => {
@@ -715,13 +840,20 @@ async fn move_task(
     let plain = adopt::is_plain(&new);
     let mut rec = new.clone();
     rec.hash = adopt::files_hash(&s.root, &rec.files, &rec.env_files);
-    s.adopted_change(|r| {
+    let saved = s.adopted_change(|r| {
         if plain {
             r.stacks.remove(name);
         } else {
             r.stacks.insert(name.to_string(), rec);
         }
-    })?;
+    });
+    if let Err(e) = saved {
+        // the record still names the old folder: the copy goes, the old stack starts again
+        let e = format!("the record could not be saved ({e}): the stack stays in {}", a.dir);
+        ctx.log(&format!("{e}; removing the copy {target}"));
+        let _ = rynas_docker::stacks::remove_tree(&under(&s.root, &target), &|m| ctx.log(m));
+        return restart_old(e).await;
+    }
     ctx.log(if plain {
         "the stack is now a plain rynas stack"
     } else {

@@ -193,6 +193,7 @@ fn users_doc() -> UsersConfig {
         ],
         groups: vec![group("office"), group("interns")],
         remove_homes: vec![],
+        retired_ids: vec![],
     }
 }
 

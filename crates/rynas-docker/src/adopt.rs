@@ -445,13 +445,18 @@ pub fn warnings(w: &WarnInput) -> Vec<AdoptWarning> {
     out
 }
 
-/// Checks a request's list of paths: at most [`MAX_ENTRIES`], each [`check_abs`].
+/// Checks a request's list of compose or env files: at most [`MAX_ENTRIES`], each
+/// [`check_abs`] and not in a system tree (like [`check_dir`]: `/etc/shadow` is never read
+/// as an env file).
 pub fn check_paths(field: &'static str, v: &[String]) -> Result<(), (&'static str, String)> {
     if v.len() > MAX_ENTRIES {
         return Err((field, format!("at most {MAX_ENTRIES} entries")));
     }
     for p in v {
         check_abs(p).map_err(|m| (field, m))?;
+        if SYSTEM_DIRS.iter().any(|s| is_below(p, s)) {
+            return Err((field, format!("{p} is in a system folder")));
+        }
     }
     Ok(())
 }
@@ -541,6 +546,10 @@ mod tests {
             assert!(check_abs(bad).is_err(), "{bad}");
         }
         assert!(check_dir("/etc/compose").is_err() && check_dir("/srv/compose/x").is_ok());
+        assert!(check_paths("env_files", &["/srv/app/.env".into()]).is_ok());
+        for bad in ["/etc/shadow", "/var/lib/rynas/secret", "/proc/self/environ"] {
+            assert_eq!(check_paths("env_files", &[bad.into()]).unwrap_err().0, "env_files", "{bad}");
+        }
         assert_eq!(name_from_dir("/volume1/docker/Home Assistant/"), Some("homeassistant".into()));
         assert_eq!(name_from_dir("/x/_web-1"), Some("web-1".into()));
         assert_eq!(name_from_dir("/x/___"), None);

@@ -126,6 +126,24 @@ pub struct UsersConfig {
     /// `DELETE /api/v1/users/{name}?remove_home=true&confirm={name}`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remove_homes: Vec<String>,
+    /// Ids accounts had before an id change (`POST /api/v1/ids/remap` with `new_id`). They
+    /// are never given to a new account: files the walk did not reach (snapshots, backups,
+    /// folders left out) still carry them. Kept by rynas; a document may drop entries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retired_ids: Vec<RetiredId>,
+}
+
+/// An id an account had before an id change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RetiredId {
+    pub kind: IdKind,
+    pub id: u32,
+    /// The account that had it (why it is retired: `name` moved to `new_id`).
+    pub name: String,
+    pub new_id: u32,
+    /// Day of the change, `YYYY-MM-DD`.
+    #[serde(default)]
+    pub date: String,
 }
 
 /// What the current user's pending changeset does to an object.
@@ -280,6 +298,13 @@ pub struct RemapCounts {
     pub groups: u64,
     /// POSIX ACL entries naming the old id.
     pub acl_entries: u64,
+    /// Of those, entries dropped because the new id had its own entry on the same file (the
+    /// new id's entry is kept as it is): the old id's permissions there are lost.
+    #[serde(default)]
+    pub acl_conflicts: u64,
+    /// Files with such a conflict (at most 50).
+    #[serde(default)]
+    pub acl_conflict_paths: Vec<String>,
     /// Read-only subvolumes (snapshots) skipped: they keep the old id.
     #[serde(default)]
     pub readonly: Vec<String>,
@@ -314,6 +339,18 @@ pub struct IdRemapPlan {
     pub allowed: bool,
     #[serde(default)]
     pub blockers: Vec<IdBlocker>,
+    /// Ids of this kind retired by earlier id changes (never given to new accounts).
+    #[serde(default)]
+    pub retired: Vec<RetiredId>,
+    /// The chosen `new_id` was retired by an earlier change of another account: files under
+    /// it (snapshots, folders not walked then) may belong to that account (warn).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_retired: Option<RetiredId>,
+    /// `from_id` is this account's own retired id: the run finishes an earlier id change
+    /// (cancelled or with folders left out), with the set-id bits of its files kept as in
+    /// the change itself.
+    #[serde(default)]
+    pub resumes: bool,
     /// Dry-run counts; `None` when blocked before the walk.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scan: Option<RemapCounts>,

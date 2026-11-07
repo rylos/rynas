@@ -264,7 +264,8 @@ uid 1000, and users made by hand), and data migrated from another NAS with numer
 | `groupmod -g` | Rewrites group and the primary gid of users in passwd; changes no file | the walk is the only file change |
 | `find -uid` / `chown --from` | the classic manual fix: `find /data -xdev -uid 1026 -exec chown -h 1000 {} +`, or `chown -R --from=1026 1000` (changes only files whose current owner matches) ([chown(1)](https://manpages.ubuntu.com/manpages/stonking/man1/chown.1.html)) | rynas does the same walk in-process: one file system, `lchown`, no `-exec` per file, progress, cancel |
 | POSIX ACLs | entries name numeric ids; `chown` does not touch them; `setfacl`/`getfacl -n` work on numbers. The xattr `system.posix_acl_access`/`_default` is a header (version 2) plus 8-byte entries (tag, perm, id) | the walk rewrites `ACL_USER`/`ACL_GROUP` entries naming the old id, as raw xattrs (no `setfacl` per file) |
-| set-id bits | Linux clears `S_ISUID`/`S_ISGID` on `chown`, also for root | the walk puts the mode back after `lchown` |
+| set-id bits | Linux clears `S_ISUID` (and `S_ISGID` with group execute) on `chown` of a non-directory, also for root; directories keep theirs ([chown(2)](https://man7.org/linux/man-pages/man2/chown.2.html)) | an id change puts the bits back on regular files with `fchmod` on the descriptor it checked; directories are never chmod-ed; *Take over files* does not put them back (data from another system must not become set-user-ID to a real account) |
+| `chown -R` and races | a path-based walk (`lchown`, then `chmod` by path) follows a directory swapped for a link between two calls: a share member could make root chmod `/etc/shadow` ([CVE-2017-18078 class](https://nvd.nist.gov/vuln/detail/CVE-2017-18078)) | the walk works on descriptors: `openat(O_NOFOLLOW)` from `/` down, `statx`/`fchownat(AT_EMPTY_PATH)`/`fgetxattr` on the opened entry, inode compared between check and open |
 | btrfs snapshots | read-only subvolumes answer `EROFS` | skipped and listed: a snapshot keeps the old ids, which is what a snapshot is for (a restore copies files back, then remap again) |
 | Samba tdbsam | the passdb entry is found by name; the RID was allocated at `pdbedit -a` and does not follow the uid ([pdbedit(8)](https://www.mankier.com/8/pdbedit), [samba list](https://lists.samba.org/archive/samba/2004-March/082696.html)) | nothing to rewrite; `net cache flush` after an id change so no cached SID↔uid mapping survives |
 | Quotas | rynas' quotas are squota/qgroups **per subvolume** (shared folder, home), not per uid (§ 2) | nothing to change; the per-owner usage report counts by the new uid from the next scan |
@@ -298,22 +299,41 @@ Best ideas taken: both of those, as guided operations with a dry run first.
   `POST /api/v1/ids/remap`, body `IdRemapRequest {kind, name, new_id, paths, acls,
   expected}`): guards first (`IdBlocker`): local managed account only (adopt first), never
   root or < 1000, the new id in range and free, no running processes and no SMB sessions of
-  the user (the same check as the home move), folders absolute and inside a data volume,
-  `/home` or `/srv`. The plan walks the folders for at most 5 s as a dry run and returns
+  the user (the same check as the home move; for a group: processes with the gid as real,
+  effective, saved, file system or supplementary group, and SMB sessions of its members —
+  members logged in elsewhere without a running process are not seen), folders absolute,
+  resolved (`canonicalize`, refused when it fails) and inside a data volume, `/home` or
+  `/srv` *as resolved*; the walk runs on the resolved paths (`IdRemapPlan.paths`). The plan walks the folders for at most 5 s as a dry run and returns
   `RemapCounts` (entries, owners, ACL entries, read-only snapshots and other file systems
-  skipped, errors, `partial`). The task applies the id change as a revision of `users`
+  skipped, ACL conflicts, errors, `partial`). The task checks everything again, then applies the id change as a revision of `users`
   (reconcile runs `usermod -u`/`groupmod -g`, then `net cache flush`), then walks. Only an id
   change task can make the document disagree with passwd on an id (`allow_id_change` guard
   around its apply); a restored old revision with another id is refused by validation.
+- **Retired ids.** The change records the old id in `UsersConfig.retired_ids`
+  (`RetiredId {kind, id, name, new_id, date}`): it is never picked for a new account (files
+  in snapshots, backups and folders left out still carry it). The plan lists them
+  (`IdRemapPlan.retired`) and sets `target_retired` when the chosen `new_id` is one of them,
+  so the dialog can warn. Choosing it explicitly stays possible.
 - **Take over files** (same endpoints with `from_id`): files owned by an id no account has
   become the account's; the account does not change. The DSM case "data copied with owner
   1026, the user is uid 1000" is exactly this: *Take over files… → 1026*.
 - **Order and failure.** Account first, then files. A cancelled or failed walk leaves the
   account on its new id and some files on the old one; running *Take over files* from the old
-  id (or the change again) finishes it — the walk is idempotent. The walk never follows
-  symbolic links (`lchown`, roots that are links refused), never enters another mount point
-  (from `/proc/self/mountinfo`; btrfs subvolumes are walked), skips read-only subvolumes
-  (inode 256 + `BTRFS_IOC_SUBVOL_GETFLAGS`) and anything answering `EROFS`.
+  id finishes it — the walk is idempotent (the change itself cannot run again: the account
+  has the new id already, `same_id`). Taking over the account's *own* retired id is marked
+  `IdRemapPlan.resumes` and keeps the set-id bits as the change did; the task's error after a
+  cancel names that id.
+- **The walk** never follows symbolic links: each root is opened component by component
+  from `/` with `O_NOFOLLOW` (a link anywhere in it is refused), every entry relative to its
+  parent's descriptor, changed through its own descriptor (an entry replaced between the
+  check and the open is skipped and counted as an error). It stays on the mount of its root
+  (`STATX_MNT_ID`; without it, the mount points of `/proc/self/mountinfo`): btrfs subvolumes
+  of that mount are walked, another mount (bind mounts included) is skipped and listed. It
+  skips read-only subvolumes (inode 256 + `BTRFS_IOC_SUBVOL_GETFLAGS`) and anything
+  answering `EROFS`. ACL entries are rewritten on directories and regular files (not on
+  devices, FIFOs or sockets); when the new id has its own entry on a file already, that entry
+  stays, the old one goes and the file is listed as an ACL conflict
+  (`RemapCounts.acl_conflicts`, `acl_conflict_paths`): no permissions are merged.
 
 ### Out of scope (documented)
 
