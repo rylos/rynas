@@ -6,6 +6,7 @@ view: overflow, clipped text, raw keys, English in it) and response overrides fo
 dry instance does not have:
 
     await d.fake_btrfs()           # a btrfs volume /volume1 in /api/v1/storage, shares on btrfs
+    await d.fake_places()          # /volume1 in the volume lists, before the system volume
     await d.fake_trial("booted")   # network trial adopt_at_boot: "boot" (planned) or "booted"
 
     await d.answer("/api/v1/ids/plan", {...})   # a fixed JSON answer (POST by default)
@@ -46,6 +47,10 @@ window.fetch=async(input,init)=>{const url=typeof input==='string'?input:input.u
 """
 BTRFS = """window.__rules.push([/\\/api\\/v1\\/storage$/,j=>{j.filesystems.push({mountpoint:'/volume1',source:'/dev/md2',fstype:'btrfs',size:7.8e12,used:2.1e12,avail:5.7e12});return j}]);
 window.__rules.push([/\\/api\\/v1\\/shares$/,j=>{j.forEach((v,i)=>{v.status.fs_type='btrfs';v.status.path_ok=true;v.status.nocow=(i%2===1)});return j}]);"""
+# the volume lists (places, Docker settings) with a btrfs /volume1 before the system volume
+PLACES = """(()=>{const v={label:'volume1',path:'/volume1',avail_bytes:5.7e12,size_bytes:7.8e12,fs_type:'btrfs',system:false,low_space:false};
+window.__rules.push([/\\/api\\/v1\\/storage\\/places$/,j=>{j.unshift(v);return j}]);
+window.__rules.push([/\\/api\\/v1\\/docker\\/settings$/,j=>{j.volumes.unshift(v);return j}]);})();"""
 TRIAL = """window.__rules.push([/\\/api\\/v1\\/network\\/state/,j=>{const now=j.read_at_ms||Date.now();
  j.trial={kind:'adopt_at_boot',revision:7,lkg_revision:6,started_ms:now-2*86400000,deadline_ms:%s,timeout_s:180,interfaces:%s,management_touched:true,author:'marco'};return j}]);"""
 
@@ -69,6 +74,10 @@ class D:
 
     async def fake_btrfs(self):
         await self._add(BTRFS)
+
+    async def fake_places(self):
+        """A btrfs /volume1 in the volume lists, before the system volume (D-ROOTVOL)."""
+        await self._add(PLACES)
 
     async def answer(self, url_re, value, method="POST"):
         """Answer requests whose URL matches the JS regex source `url_re` with `value` (JSON)."""

@@ -9,7 +9,7 @@ use leptos::task::spawn_local;
 use leptos_router::hooks::use_query_map;
 use rynas_api_types::{
     Access, EffectiveAccess, EffectivePermission, GroupView, NfsRule, NfsSquash, Permission, PrincipalKind, Share, ShareStatus,
-    ShareSubvolume, ShareView, SmbPreset, UnsharedFolder, UserView,
+    ShareSubvolume, ShareView, SmbPreset, UnsharedFolder, UserView, storage::VolumePlace,
 };
 
 use crate::api;
@@ -40,7 +40,7 @@ fn valid_client(c: &str) -> bool {
 /// Where the share lives: its path, or `/<volume>/<name>` for a subvolume still to create.
 pub fn share_path(s: &Share) -> String {
     match (&s.subvolume, s.path.is_empty()) {
-        (Some(sv), true) => format!("/{}/{}", sv.volume, s.name),
+        (Some(sv), true) => format!("{}/{}", rynas_api_types::storage::volume_dir(&sv.volume), s.name),
         _ => s.path.clone(),
     }
 }
@@ -381,28 +381,18 @@ fn location_fields(d: RwSignal<Share>, is_new: bool, show: RwSignal<bool>) -> An
             Some(sv) => view! {
                 <dl class="kvs">
                     {crate::ui::kv_row("shares.location", Signal::derive(move || share_path(&d.get())), "mono")}
-                    {crate::ui::kv_row("shares.volume", Signal::stored(sv.volume.clone()), "mono")}
+                    {crate::ui::kv_row("shares.volume", Signal::stored(crate::places::name(&sv.volume)), "mono")}
                 </dl>
             }
             .into_any(),
             None => text_field("shares.path", path, set_path, path_err, In { help: Some("shares.path_edit_help"), mono: true, maxlength: 4096, ..In::default() }),
         };
     }
-    // rynas volumes are btrfs filesystems mounted at `/<label>` (from the storage overview the
-    // app already polls)
-    let live = use_live();
+    // the rynas volumes and the system volume (D-ROOTVOL)
+    let places = crate::ui::Remote::<Vec<VolumePlace>>::new(crate::places::PATH);
     let use_sub = Signal::derive(move || d.with(|s| s.subvolume.is_some()));
-    let volumes = move || {
-        live.storage.with(|s| {
-            s.iter()
-                .flat_map(|s| s.filesystems.iter())
-                .filter_map(|f| {
-                    let label = f.mountpoint.strip_prefix('/')?;
-                    (f.fstype == "btrfs" && valid_share_name(label)).then(|| (label.to_string(), f.avail))
-                })
-                .collect::<Vec<_>>()
-        })
-    };
+    let volumes = move || places.data.with(|p| p.as_ref().map(|p| p.iter().map(|v| (v.label.clone(), v.avail_bytes.unwrap_or(0))).collect::<Vec<_>>()).unwrap_or_default());
+    let chosen = move || d.with(|s| s.subvolume.as_ref().map(|sv| sv.volume.clone())).and_then(|l| places.data.with(|p| p.as_ref().and_then(|p| p.iter().find(|v| v.label == l).cloned())));
     // back to "New subvolume": start again on the first volume (the Effect below only runs
     // when the volume list changes, so it would leave the volume empty here)
     let set_mode = move |sub: bool| {
@@ -444,11 +434,11 @@ fn location_fields(d: RwSignal<Share>, is_new: bool, show: RwSignal<bool>) -> An
                 <button type="button" role="radio" aria-checked=move || (!use_sub.get()).to_string() class:on=move || !use_sub.get() on:click=move |_| set_mode(false)>{tr("shares.loc_folder")}</button>
             </div>
             {move || if use_sub.get() {
-                let ready = live.storage.with(Option::is_some);
+                let ready = places.data.with(Option::is_some);
                 if !ready {
-                    return crate::ui::loading(live.storage_err.into(), Callback::new(move |_| live.refresh(crate::live::Res::Storage)), 1);
+                    return crate::ui::loading(places.err.into(), Callback::new(move |_| places.reload()), 1);
                 }
-                let vols = volumes();
+                let vols = places.data.get().unwrap_or_default();
                 if vols.is_empty() {
                     return view! { <p class="sec-note"><Icon icon=icons::INFO size=16 />{tr("shares.no_volumes")}</p> }.into_any();
                 }
@@ -460,20 +450,24 @@ fn location_fields(d: RwSignal<Share>, is_new: bool, show: RwSignal<bool>) -> An
                             let v = event_target_value(&ev);
                             d.update(|s| if let Some(sv) = s.subvolume.as_mut() { sv.volume = v });
                         }>
-                            {vols.into_iter().map(|(label, free)| {
-                                let l2 = label.clone();
+                            {vols.into_iter().map(|p| {
+                                let l2 = p.label.clone();
                                 view! {
-                                    <option value=label.clone() selected=move || d.with(|s| s.subvolume.as_ref().is_some_and(|sv| sv.volume == l2))>
-                                        {format!("{label} — {} {}", i18n::bytes(free), t("shares.free"))}
+                                    <option value=p.label.clone() selected=move || d.with(|s| s.subvolume.as_ref().is_some_and(|sv| sv.volume == l2))>
+                                        {crate::places::option_text(&p)}
                                     </option>
                                 }
                             }).collect_view()}
                         </select>
                         <span class="field-help">{move || tf("shares.subvolume_help", &[("path", &share_path(&d.get()))])}</span>
+                        {move || crate::places::note(chosen().as_ref(), true)}
                     </div>
-                    {super::share_nocow::create_switch(d)}
-                    <div hidden=move || d.with(|s| s.subvolume.as_ref().is_some_and(|v| v.nocow))>
-                        {switch("shares.compression", Some("shares.compression_help"), comp, set_comp)}
+                    // NOCOW and compression are btrfs properties: not on a plain system disk
+                    <div hidden=move || chosen().is_some_and(|p| !p.btrfs())>
+                        {super::share_nocow::create_switch(d)}
+                        <div hidden=move || d.with(|s| s.subvolume.as_ref().is_some_and(|v| v.nocow))>
+                            {switch("shares.compression", Some("shares.compression_help"), comp, set_comp)}
+                        </div>
                     </div>
                 }.into_any()
             } else {

@@ -491,6 +491,28 @@ fn field(label: &'static str, sig: RwSignal<String>, o: In) -> AnyView {
     text_field(label, sig.into(), Callback::new(move |v| sig.set(v)), Signal::derive(|| None::<String>), o)
 }
 
+/// Shortcuts below a local folder: one button per volume (the system volume included,
+/// D-ROOTVOL) filling `<volume folder>/backup`, and the same-disk note when the folder is
+/// in the system volume.
+fn place_picks(path: RwSignal<String>) -> AnyView {
+    use rynas_api_types::storage::{SYSTEM_VOLUME_DIR, VolumePlace};
+    let places = Remote::<Vec<VolumePlace>>::new(crate::places::PATH);
+    let in_system = move || path.with(|p| p.strip_prefix(SYSTEM_VOLUME_DIR).is_some_and(|r| r.starts_with('/')));
+    view! {
+        {move || places.data.with(|p| p.as_ref().filter(|p| !p.is_empty()).map(|p| view! {
+            <div class="chips">
+                <span class="muted small">{tr("bk.f.path_on")}</span>
+                {p.iter().map(|v| {
+                    let target = format!("{}/backup", v.path);
+                    view! { <button type="button" class="btn sm" on:click=move |_| path.set(target.clone())>{crate::places::name(&v.label)}</button> }
+                }).collect_view()}
+            </div>
+        }))}
+        {move || in_system().then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, ui::text(t("bk.f.same_disk").to_string())))}
+    }
+    .into_any()
+}
+
 fn job_editor(init: Option<BackupJobView>, shown_password: RwSignal<Option<String>>, close: Callback<()>) -> AnyView {
     let is_new = init.is_none();
     let f = Form::from(init.as_ref());
@@ -643,6 +665,7 @@ fn job_editor(init: Option<BackupJobView>, shown_password: RwSignal<Option<Strin
         .into_any(),
         _ => view! {
             {field("bk.f.path", f.path, In { mono: true, placeholder: "/media/usb1/backup", help: Some("bk.f.path_help"), ..In::default() })}
+            {place_picks(f.path)}
         }
         .into_any(),
     };

@@ -2318,6 +2318,8 @@ bk.f.folders_help	Un percorso assoluto per riga, ad esempio la cartella delle ap
 bk.f.dest	Tipo di destinazione
 bk.f.path	Cartella
 bk.f.path_help	Una cartella su un disco USB o un altro volume; viene creata se manca.
+bk.f.path_on	Su un volume:
+bk.f.same_disk	Questa cartella è sul disco di sistema: il backup protegge da file cancellati o cifrati, non da un guasto di quel disco. Tieni un'altra copia altrove.
 bk.f.url	Indirizzo del server
 bk.f.url_help	Un server REST di restic (rest-server), anche su un altro NAS. Avvialo con --append-only perché questo NAS possa aggiungere versioni ma mai cancellarle.
 bk.f.user	Utente
@@ -3024,7 +3026,7 @@ dk.module_text	Esegue app in container. rynas installa Docker Engine dal reposit
 dk.installed	Installato
 dk.inst.volume	Volume per Docker
 dk.inst.volume_help	Immagini, container e stack vanno in <volume>/docker. Puoi spostarli in seguito.
-dk.inst.system_disk	Disco di sistema (scegli un volume più tardi)
+dk.inst.system_disk	Cartella predefinita di Docker (scegli un volume più tardi)
 dk.inst.step_repo	Aggiunge il repository apt di Docker, fissato alla versione principale attuale
 dk.inst.step_engine	Installa Docker Engine e i plugin compose e buildx
 dk.inst.step_user	Crea l'utente docker-apps proprietario delle cartelle delle app
@@ -3057,7 +3059,7 @@ dk.eng.counts	Contenuto
 dk.eng.counts_v	{n} container ({run} in esecuzione, {stop} fermi) · {img} immagini
 dk.warn.daemon_down	Docker è installato ma il suo servizio non risponde. Avvia docker.service o guarda il suo journal.
 dk.warn.compose_missing	Manca il plugin docker compose: gli stack non si possono avviare né controllare.
-dk.warn.data_root_on_system	Docker tiene i suoi dati sul disco di sistema. Scegli un volume nelle impostazioni qui sotto o sposta i dati.
+dk.warn.data_root_on_system	Docker tiene i suoi dati nella sua cartella predefinita, fuori dai volumi. Scegli un volume nelle impostazioni qui sotto (anche quello di sistema) o sposta i dati.
 dk.warn.data_root_almost_full	Il filesystem dei dati di Docker è quasi pieno.
 dk.warn.not_pinned	I pacchetti di Docker non sono fissati alla loro versione principale: un aggiornamento di sistema potrebbe portare una nuova versione principale.
 dk.warn.engine_too_old	Questo Docker Engine è troppo vecchio per le app e i gestori attuali (API precedente alla 1.44). Aggiornalo.
@@ -3115,6 +3117,10 @@ dk.mig.running	{n} container sono in esecuzione: fermali prima, lo spostamento r
 dk.mig.go	Sposta i dati
 dk.mig.confirm	Docker si ferma durante la copia e riparte su {vol}.
 dk.vol_free	{free} liberi
+place.system	Sistema
+place.system_note	Il volume di sistema è la cartella {path} sul disco del sistema operativo. Ne condivide lo spazio: se si riempie, il sistema può smettere di funzionare, e un guasto di quel disco si porta via anche questi dati.
+place.not_btrfs	Il disco di sistema non è btrfs: viene creata una cartella normale, senza sottovolume, snapshot o NOCOW.
+place.low_space	Poco spazio libero su {name}: restano {free}.
 dk.col.name	Nome
 dk.col.image	Immagine
 dk.col.images	Immagini

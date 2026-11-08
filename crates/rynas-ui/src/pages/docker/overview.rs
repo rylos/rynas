@@ -204,10 +204,7 @@ pub(super) fn volume_select(label: &'static str, help: Option<&'static str>, set
         }
         let known = vols.iter().any(|x| x.label == cur);
         for x in vols {
-            let text = match x.avail_bytes {
-                Some(a) => format!("{} ({})", x.label, tf("dk.vol_free", &[("free", &i18n::bytes(a))])),
-                None => x.label.clone(),
-            };
+            let text = crate::places::option_text(&x);
             let sel = x.label == cur;
             v.push(view! { <option value=x.label selected=sel>{text}</option> }.into_any());
         }
@@ -223,6 +220,10 @@ pub(super) fn volume_select(label: &'static str, help: Option<&'static str>, set
             <label class="field-label" for=id.clone()>{tr(label)}</label>
             <select id=id class="input" aria-describedby=hid.clone() on:change=move |ev| set.run(event_target_value(&ev))>{options}</select>
             {help.zip(hid).map(|(h, id)| view! { <span class="field-help" id=id>{tr(h)}</span> })}
+            {move || {
+                let cur = value.get();
+                settings.data.with(|s| crate::places::note(s.as_ref().and_then(|s| s.volumes.iter().find(|x| x.label == cur)), false))
+            }}
         </div>
     }
     .into_any()
@@ -525,7 +526,7 @@ fn migrate_card(settings: Remote<DockerSettingsState>) -> AnyView {
             }}
             {move || ask.get().then(|| ui::confirm(Confirm {
                     title: t("dk.mig.title").to_string(),
-                    text: tf("dk.mig.confirm", &[("vol", &vol.get_untracked())]),
+                    text: tf("dk.mig.confirm", &[("vol", &crate::places::name(&vol.get_untracked()))]),
                     action: "dk.mig.go",
                     danger: false,
                     extra: None,

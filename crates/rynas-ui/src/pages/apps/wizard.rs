@@ -401,7 +401,8 @@ fn folders(w: W) -> AnyView {
                 let mut v = vec![view! { <option value="" selected=cur.is_empty()>{tf("apps.w.in_stack", &[("path", &format!("{}/{}", stack_dir.get(), path.get_value()))])}</option> }.into_any()];
                 for vol in vols {
                     let p = placement(&vol.path, &stack, &path.get_value());
-                    let label = if sug.as_deref() == Some(p.as_str()) { tf("apps.w.on_volume_suggested", &[("vol", &vol.label), ("path", &p)]) } else { tf("apps.w.on_volume", &[("vol", &vol.label), ("path", &p)]) };
+                    let vn = crate::places::name(&vol.label);
+                    let label = if sug.as_deref() == Some(p.as_str()) { tf("apps.w.on_volume_suggested", &[("vol", &vn), ("path", &p)]) } else { tf("apps.w.on_volume", &[("vol", &vn), ("path", &p)]) };
                     let sel = cur == p;
                     v.push(view! { <option value=p selected=sel>{label}</option> }.into_any());
                 }
