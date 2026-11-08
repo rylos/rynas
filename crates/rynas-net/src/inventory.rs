@@ -41,6 +41,8 @@ pub struct Link {
     /// networkd: the `.network` file applied.
     pub nd_file: Option<String>,
     pub nd_dns: Vec<String>,
+    /// networkd: the search domains of the link (`DOMAINS`).
+    pub nd_domains: Vec<String>,
 }
 
 impl Link {
@@ -385,6 +387,9 @@ pub fn read(os: &dyn NetOs) -> Result<Inventory, String> {
                     "ADMIN_STATE" => l.nd_admin = Some(v),
                     "NETWORK_FILE" => l.nd_file = Some(v).filter(|v| !v.is_empty()),
                     "DNS" => l.nd_dns = v.split_whitespace().map(str::to_string).collect(),
+                    "DOMAINS" => {
+                        l.nd_domains = v.split_whitespace().map(str::to_string).collect()
+                    }
                     _ => {}
                 }
             }
@@ -420,6 +425,7 @@ pub fn read(os: &dyn NetOs) -> Result<Inventory, String> {
             l.nd_admin = None;
             l.nd_file = None;
             l.nd_dns.clear();
+            l.nd_domains.clear();
         }
     }
     Ok(Inventory {

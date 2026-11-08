@@ -116,7 +116,11 @@ nev.net.rolled_back.body	Le impostazioni di rete precedenti sono di nuovo attive
 nev.net.rollback_unverified.title	Annullamento della modifica di rete ({reason}) non verificato
 nev.net.rollback_unverified.body	Ancora non funziona: {problems}. Soccorso: l'indirizzo link-local della porta o il pulsante di reset.
 nev.net.adopted.title	Rete migrata a rynas (systemd-networkd)
-nev.net.adopted.body	La migrazione eseguita all'avvio ha ottenuto un indirizzo instradabile e viene mantenuta.
+nev.net.adopted.body	La migrazione eseguita all'avvio ha ottenuto un indirizzo instradabile e una risoluzione dei nomi funzionante, e viene mantenuta.
+nev.net.boot_dns_failed.title	Migrazione di rete all'avvio annullata: i nomi non si risolvevano
+nev.net.boot_dns_failed.body	systemd-networkd ha ottenuto un indirizzo instradabile, ma nessun server DNS di /etc/resolv.conf ha risposto; è stato ripristinato ifupdown (revisione {revision}).
+nev.net.dns_repaired.title	Risoluzione dei nomi riparata
+nev.net.dns_repaired.body	Nessun server DNS era configurato mentre systemd-networkd gestiva la rete; {detail}.
 nev.net.boot_undone.title	Modifica di rete non confermata annullata all'avvio: ripristinata la revisione {revision}
 nev.net.boot_undone.body	Il sistema si è riavviato mentre la revisione {tested} era in prova.
 nev.net.watchdog_restored.title	Rete riportata all'ultima revisione funzionante ({revision})

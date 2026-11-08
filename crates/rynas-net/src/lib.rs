@@ -13,7 +13,10 @@
 //!    the touched links;
 //! 5. verify the actual state against the expected one, repairing what networkd leaves
 //!    behind (an MTU it does not reset, stale addresses: the lesson of netplan LP#1768802);
-//! 6. wait for the confirmation, which must come over the new path; without it the timer
+//! 6. check name resolution when networkd runs the network ([`resolv`]): `/etc/resolv.conf`
+//!    follows networkd's DNS servers, and a change that stops every DNS server from answering
+//!    (when one answered before) is rolled back like a failed verification;
+//! 7. wait for the confirmation, which must come over the new path; without it the timer
 //!    restores the last known good revision and verifies it again.
 //!
 //! Around it: the boot guard (`rynas-net-guard.service`, before networkd) restores the last
@@ -34,6 +37,7 @@ pub mod inventory;
 pub mod networkd;
 pub mod os;
 pub mod rescue;
+pub mod resolv;
 pub mod store;
 pub mod txn;
 pub mod validate;

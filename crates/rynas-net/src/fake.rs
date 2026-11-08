@@ -28,6 +28,8 @@ pub struct FakeLink {
     pub addrs: Vec<(String, u8, bool)>,
     /// `.network` file networkd applied.
     pub nd_file: Option<String>,
+    /// DNS servers networkd learned for the link (shown while it manages the link).
+    pub nd_dns: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -45,6 +47,10 @@ pub struct FakeState {
     pub taken: Vec<String>,
     /// Hosts that answer pings.
     pub reachable: Vec<String>,
+    /// DNS servers that answer queries.
+    pub dns_up: Vec<String>,
+    /// DNS servers of the DHCP leases: iface → servers.
+    pub lease_dns: BTreeMap<String, Vec<String>>,
     /// DHCP leases networkd gets: iface → (address/prefix, gateway).
     pub leases: BTreeMap<String, (String, String)>,
     /// networkd ignores reconfigure requests (a broken daemon).
@@ -216,6 +222,12 @@ impl FakeOs {
             link.addrs.push((ip.into(), p.parse().unwrap(), false));
         }
         let mut gw = c.gateway.clone();
+        // static servers first, then those of the lease (networkd's order)
+        link.nd_dns = c.dns.clone();
+        if c.ipv4 == rynas_api_types::network::Ipv4Method::Dhcp {
+            link.nd_dns
+                .extend(s.lease_dns.get(iface).cloned().unwrap_or_default());
+        }
         if c.ipv4 == rynas_api_types::network::Ipv4Method::Dhcp
             && let Some((a, g)) = s.leases.get(iface)
         {
@@ -447,7 +459,10 @@ impl NetOs for FakeOs {
         if let Some(idx) = abs.strip_prefix("/run/systemd/netif/links/") {
             let (_, l) = s.links.iter().find(|(_, l)| l.index.to_string() == idx)?;
             return Some(match &l.nd_file {
-                Some(f) => format!("ADMIN_STATE=configured\nNETWORK_FILE={f}\n"),
+                Some(f) => format!(
+                    "ADMIN_STATE=configured\nNETWORK_FILE={f}\nDNS={}\n",
+                    l.nd_dns.join(" ")
+                ),
                 None => "ADMIN_STATE=unmanaged\n".into(),
             });
         }
@@ -484,6 +499,11 @@ impl NetOs for FakeOs {
 
     fn now_ms(&self) -> u64 {
         self.state.lock().unwrap().now_ms
+    }
+
+    fn dns_answers(&self, server: &str) -> bool {
+        let s = self.state.lock().unwrap();
+        s.dns_up.iter().any(|d| d == server)
     }
 }
 

@@ -33,6 +33,10 @@ pub trait NetOs: Send + Sync {
     fn now_ms(&self) -> u64 {
         crate::now_ms()
     }
+    /// Whether a DNS server (as in resolv.conf) answers a query (read-only, also when dry).
+    fn dns_answers(&self, server: &str) -> bool {
+        crate::resolv::probe(server, Duration::from_secs(2))
+    }
 
     /// Real location of a configuration path.
     fn path(&self, abs: &Path) -> PathBuf {

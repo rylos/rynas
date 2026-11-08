@@ -983,6 +983,8 @@ schema 2 added the `code` and `body_format` columns.
 | `net.rolled_back` / `net.rollback_unverified` | `reason`, `revision`, `problems` | Network change rolled back / rollback could not be verified |
 | `net.adopted` | — | Network migrated to rynas (systemd-networkd) |
 | `net.boot_undone` | `revision`, `tested` | Unconfirmed network change undone at boot |
+| `net.boot_dns_failed` | `revision` (ifupdown's, restored) | Network migration at boot undone: names did not resolve (`../research/network.md` §4.1) |
+| `net.dns_repaired` | `detail` (English, not translated) | Name resolution repaired: `/etc/resolv.conf` had no server while networkd ran the network |
 | `net.watchdog_restored` / `net.rescue` / `net.reset` | `revision` | Network restored to the last known good revision / rescue configuration / factory network |
 | `removable.unplugged` | `drive`, `device`, `mount_points` | {drive} was unplugged while mounted (warning; not after a safe removal) |
 | `removable.safe_to_remove` | `drive`, `device`, `method` (`power_off`/`eject`/`release`) | {drive} can be removed safely (info; setting `notify_safe_removal`) |

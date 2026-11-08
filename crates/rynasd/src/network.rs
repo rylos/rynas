@@ -569,13 +569,19 @@ async fn flush(State(st): State<NetState>) -> Res<StatusCode> {
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Collects events `rynasctl` queued while rynasd was not running (boot guard, watchdog),
-/// at start and then every minute.
+/// At start and then every minute: keeps `/etc/resolv.conf` in step with networkd's DNS
+/// servers while rynas runs the network (repairing a file left without servers, e.g. by an
+/// older rynas that migrated from ifupdown), then collects the events `rynasctl` queued while
+/// rynasd was not running (boot guard, watchdog).
 pub fn spawn_event_flush(n: Arc<Network>) {
     tokio::spawn(async move {
         loop {
             let n2 = n.clone();
-            let _ = tokio::task::spawn_blocking(move || n2.flush_events()).await;
+            let _ = tokio::task::spawn_blocking(move || {
+                n2.engine.sync_resolv(&|l| tracing::info!("network: {l}"));
+                n2.flush_events()
+            })
+            .await;
             tokio::time::sleep(Duration::from_secs(60)).await;
         }
     });

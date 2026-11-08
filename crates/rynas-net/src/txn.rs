@@ -27,6 +27,7 @@ use crate::inventory::{self, Inventory, Link};
 use crate::networkd::{self, NetworkFile};
 use crate::os::{NetOs, QUICK, SLOW};
 use crate::rescue::{self, Press};
+use crate::resolv;
 use crate::store::{BootAdopt, FileState, Marker, Observed, RevKind, Revision, Services, Store};
 use crate::validate::{self, OtherPort};
 use crate::{
@@ -1372,7 +1373,7 @@ impl Engine {
                 self.systemctl(&["enable", "--now", "systemd-resolved.service"], log);
             } else {
                 log(
-                    "systemd-resolved is not installed: the DNS servers of the settings are not used (resolv.conf stays)",
+                    "systemd-resolved is not installed: rynas writes /etc/resolv.conf from networkd's DNS servers",
                 );
             }
         } else if networkd_to_ifupdown {
@@ -1491,6 +1492,8 @@ impl Engine {
             ));
         }
         self.check_duplicates(plan, log)?;
+        // whether names resolve now: a change must not take that away
+        let dns_before = !self.os.dry() && self.dns_answers_now() == Some(true);
         let inv = self.inventory_fresh()?;
         let lkg =
             self.store
@@ -1534,6 +1537,10 @@ impl Engine {
                 log(&format!("verification: {p}"));
             }
             return Err(self.fail_back(&lkg, &target, &problems.join("; "), token.is_some(), log));
+        }
+        if let Err(why) = self.verify_dns(&target, dns_before, log) {
+            log(&format!("verification: {why}"));
+            return Err(self.fail_back(&lkg, &target, &why, token.is_some(), log));
         }
         log("verified: the interfaces run the new settings");
         if token.is_none() {
@@ -1724,7 +1731,8 @@ impl Engine {
     }
 
     /// Rolls the trial back (timer, API, watchdog). At its deadline a migration done at boot is
-    /// confirmed instead when a port has a routable address; asked by an administrator
+    /// confirmed instead when a port has a routable address and names resolve (a DNS server
+    /// answers, when networkd learned any); asked by an administrator
     /// (`reason::MANUAL`) it is always rolled back. `Ok(None)`: nothing to roll back.
     pub fn rollback(&self, why: &str, log: &dyn Fn(&str)) -> Result<Option<NetRollbackReport>> {
         let _lock = self.store.lock()?;
@@ -1747,11 +1755,47 @@ impl Engine {
         // rollback gets ifupdown back
         if m.kind == TrialKind::AdoptAtBoot && why != reason::MANUAL {
             let inv = self.inventory_fresh()?;
-            if inv
+            let routable = inv
                 .ports()
                 .iter()
-                .any(|p| p.carrier == Some(true) && !p.routable_v4().is_empty())
-            {
+                .any(|p| p.carrier == Some(true) && !p.routable_v4().is_empty());
+            // names must resolve too when networkd learned DNS servers (or the file has some)
+            let dns_ok = !routable || self.os.dry() || {
+                let expected = inv.links.iter().any(|l| !l.nd_dns.is_empty());
+                let mut ok = false;
+                for _ in 0..10 {
+                    self.invalidate();
+                    self.sync_resolv(log);
+                    match self.dns_answers_now() {
+                        Some(true) => ok = true,
+                        None if !expected => ok = true,
+                        _ => {}
+                    }
+                    if ok {
+                        break;
+                    }
+                    self.os.sleep(Duration::from_secs(1));
+                }
+                ok
+            };
+            if routable && !dns_ok {
+                log("migration at boot: a port has a routable address but no DNS server answers");
+                self.emit(event(
+                    NotifySeverity::Warning,
+                    "dns",
+                    (
+                        "net.boot_dns_failed",
+                        &[("revision", m.lkg.to_string())],
+                    ),
+                    "Network migration at boot undone: names did not resolve".into(),
+                    format!(
+                        "systemd-networkd brought a routable address up, but no DNS server of {} answered; ifupdown (revision {}) is restored.",
+                        resolv::RESOLV_CONF,
+                        m.lkg
+                    ),
+                ));
+            }
+            if routable && dns_ok {
                 self.commit(&target)?;
                 self.store.clear_marker()?;
                 self.emit(event(
@@ -1759,10 +1803,10 @@ impl Engine {
                     "adopted",
                     ("net.adopted", &[]),
                     "Network migrated to rynas (systemd-networkd)".into(),
-                    "The migration done at boot came up with a routable address and is kept."
+                    "The migration done at boot came up with a routable address and working name resolution, and is kept."
                         .into(),
                 ));
-                log("migration at boot confirmed: a port has a routable address");
+                log("migration at boot confirmed: a port has a routable address, names resolve");
                 return Ok(None);
             }
         }
@@ -1856,7 +1900,7 @@ impl Engine {
                 log(&format!("warning: {e}"));
             }
             return Ok(format!(
-                "ifupdown migrated to networkd (revision {}); ifupdown comes back if no port has a routable address in {BOOT_CHECK_S} s",
+                "ifupdown migrated to networkd (revision {}); ifupdown comes back if in {BOOT_CHECK_S} s no port has a routable address or no DNS server answers",
                 target.id
             ));
         }
@@ -1880,6 +1924,181 @@ impl Engine {
             ts_ms: self.os.now_ms(),
         })?;
         Ok((t.id, touched))
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // name resolution (`resolv`)
+    // -----------------------------------------------------------------------------------------
+
+    /// `/etc/resolv.conf`: its content (following a link) and the link target.
+    fn read_resolv(&self) -> (Option<String>, Option<String>) {
+        let real = self.os.path(Path::new(resolv::RESOLV_CONF));
+        let link = std::fs::symlink_metadata(&real)
+            .ok()
+            .filter(|m| m.file_type().is_symlink())
+            .and_then(|_| std::fs::read_link(&real).ok())
+            .map(|t| t.to_string_lossy().into_owned());
+        let content = match &link {
+            // the target lives in /run (resolved), outside a test root
+            Some(t) if t.starts_with('/') => self
+                .os
+                .read_runtime(t)
+                .or_else(|| std::fs::read_to_string(&real).ok()),
+            _ => std::fs::read_to_string(&real).ok(),
+        };
+        (content, link)
+    }
+
+    /// The servers glibc asks: those of `/etc/resolv.conf`, or resolved's upstream servers
+    /// when the file points at its stub.
+    fn effective_servers(&self) -> Vec<String> {
+        let (content, _) = self.read_resolv();
+        let servers = inventory::parse_resolv(content.as_deref().unwrap_or(""), "").servers;
+        if servers.iter().all(|s| s == "127.0.0.53")
+            && let Some(up) = self.os.read_runtime(resolv::RESOLVED_UPSTREAM)
+        {
+            let up = inventory::parse_resolv(&up, "").servers;
+            if !up.is_empty() {
+                return up;
+            }
+        }
+        servers
+    }
+
+    /// `None`: no DNS server is configured; otherwise whether one of them answers.
+    pub fn dns_answers_now(&self) -> Option<bool> {
+        let servers = self.effective_servers();
+        if servers.is_empty() {
+            return None;
+        }
+        Some(
+            servers
+                .iter()
+                .take(resolv::MAXNS)
+                .any(|s| self.os.dns_answers(s)),
+        )
+    }
+
+    /// Keeps `/etc/resolv.conf` working while rynas runs the network with networkd: the link
+    /// to systemd-resolved's stub when resolved is active, otherwise a file with networkd's DNS
+    /// servers. Leaves alone a file somebody else manages, and does nothing while ifupdown or
+    /// NetworkManager runs. Returns what changed (rynasd calls it at start and every minute).
+    pub fn sync_resolv(&self, log: &dyn Fn(&str)) -> Option<String> {
+        let inv = self.inventory_fresh().ok()?;
+        let s = &inv.services;
+        if !s.networkd || s.ifupdown || s.network_manager || self.rynas_files().is_empty() {
+            return None;
+        }
+        let (content, link) = self.read_resolv();
+        let owner = resolv::classify(content.as_deref(), link.as_deref());
+        if !owner.replaceable() {
+            return None;
+        }
+        let had_servers = !inventory::parse_resolv(content.as_deref().unwrap_or(""), "")
+            .servers
+            .is_empty();
+        let real = self.os.path(Path::new(resolv::RESOLV_CONF));
+        let what = if s.resolved {
+            if !self.os.runtime_exists(resolv::RESOLVED_STUB) {
+                return None;
+            }
+            let tmp = rynas_config::files::candidate_path(&real);
+            let _ = std::fs::remove_file(&tmp);
+            if let Err(e) = std::os::unix::fs::symlink(resolv::RESOLVED_STUB, &tmp)
+                .and_then(|()| rename_synced(&tmp, &real))
+            {
+                log(&format!("warning: {}: {e}", resolv::RESOLV_CONF));
+                return None;
+            }
+            format!(
+                "{} now links to systemd-resolved ({})",
+                resolv::RESOLV_CONF,
+                resolv::RESOLVED_STUB
+            )
+        } else {
+            let mut servers: Vec<String> = Vec::new();
+            let mut search: Vec<String> = Vec::new();
+            let mut links: Vec<&Link> = inv.links.iter().collect();
+            links.sort_by_key(|l| l.index);
+            for l in links {
+                for a in l.nd_dns.iter().filter_map(|e| resolv::server_addr(e)) {
+                    if !servers.contains(&a) {
+                        servers.push(a);
+                    }
+                }
+                for d in l.nd_domains.iter().map(|d| d.trim_start_matches('~')) {
+                    if !d.is_empty() && d != "." && !search.iter().any(|x| x == d) {
+                        search.push(d.to_string());
+                    }
+                }
+            }
+            if servers.is_empty() {
+                // nothing better to offer: keep what is there
+                return None;
+            }
+            let text = resolv::render(&servers, &search);
+            if content.as_deref() == Some(text.as_str()) {
+                return None;
+            }
+            if let Err(e) = self.write_file(&FileState::present(resolv::RESOLV_CONF, text)) {
+                log(&format!("warning: {}: {e}", resolv::RESOLV_CONF));
+                return None;
+            }
+            format!(
+                "{} written with networkd's DNS servers: {}",
+                resolv::RESOLV_CONF,
+                servers
+                    .iter()
+                    .take(resolv::MAXNS)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        log(&what);
+        if !had_servers {
+            self.emit(event(
+                NotifySeverity::Warning,
+                "dns",
+                ("net.dns_repaired", &[("detail", what.clone())]),
+                "Name resolution repaired".into(),
+                format!(
+                    "No DNS server was configured while systemd-networkd ran the network; {what}."
+                ),
+            ));
+        }
+        Some(what)
+    }
+
+    /// After a change that leaves networkd running: `/etc/resolv.conf` in step, and a DNS
+    /// server that answers (polling up to 15 s). Fails only when one answered before the
+    /// change (a network without a reachable DNS server stays a valid choice).
+    fn verify_dns(
+        &self,
+        target: &Revision,
+        worked_before: bool,
+        log: &dyn Fn(&str),
+    ) -> std::result::Result<(), String> {
+        if self.os.dry() || !target.services.networkd {
+            return Ok(());
+        }
+        for _ in 0..15 {
+            self.invalidate();
+            self.sync_resolv(log);
+            if self.dns_answers_now() == Some(true) {
+                log("name resolution works: a DNS server answers");
+                return Ok(());
+            }
+            self.os.sleep(Duration::from_secs(1));
+        }
+        if worked_before {
+            return Err(format!(
+                "name resolution stopped working: no DNS server of {} answers",
+                resolv::RESOLV_CONF
+            ));
+        }
+        log("warning: no DNS server answers (none did before the change either)");
+        Ok(())
     }
 
     // -----------------------------------------------------------------------------------------

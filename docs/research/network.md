@@ -53,7 +53,9 @@ rynasd:
             (survives a rynasd crash or restart)
  5 write    files in /etc/systemd/network/ atomically (tmp + rename) → networkctl reload
             (+ reconfigure of touched links; .link → udevadm trigger; immutable netdevs → §3.6)
- 6 check    expected vs actual state (Describe via D-Bus), carrier, gateway (ping/ARP), DNS
+ 6 check    expected vs actual state (Describe via D-Bus), carrier, gateway (ping/ARP), DNS:
+            /etc/resolv.conf in step with networkd (§4.1) and a DNS server that answers;
+            when one answered before the change and none does after 15 s → roll back
  7 wait     POST /api/v1/net/confirm {token} arriving **over the new path**
             → cancel timer and marker, revision N+1 becomes the last known good
  deadline → restore last known good, verify actual state (lesson from LP#1768802),
@@ -136,13 +138,42 @@ NetworkManager has better rollback, but it is designed for desktops and would dr
 2. **Read-only** until "Let rynas manage this" is pressed (like Cockpit with unmanaged interfaces).
 3. **Migration from ifupdown** as a trial transaction:
    - generate equivalent networkd files, **same IP**;
-   - `systemctl disable networking`, move `interfaces` to `interfaces.rynas-bak`, `systemctl enable --now systemd-networkd systemd-resolved`;
+   - `systemctl disable networking`, move `interfaces` to `interfaces.rynas-bak`, `systemctl enable --now systemd-networkd` (and `systemd-resolved` when installed; otherwise rynas writes `/etc/resolv.conf`, §4.1);
    - same timed confirmation;
    - rollback: put `interfaces` back, stop networkd and `systemctl restart networking`.
    - Safer alternative, recommended when remote: "migrate on next reboot", with the boot guard restoring ifupdown if there is no routable address after 3 minutes. The plan is shown to every session until the reboot (who planned it, when, Cancel), because a reboot can come days later. After the boot no browser holds a token, so any administrator may keep it at once (confirmation over an address of the NAS) or go back to ifupdown; "go back" always restores ifupdown, only the timer keeps the migration by itself.
 4. **Stable names:** the synology plugin proposes `.link` files by PCI path, so names match the ports printed on the back (`lan1`, `lan2`, `lan10g`); by MAC on other hardware. Hardware migration maps interfaces by role (already covered in D-CFGBAK).
 
-## 5. Features
+### 4.1 Name resolution (DNS) when networkd runs the network
+
+**Incident (2026-11-07, test DS920+ on Debian 13 + synodeb).** The migration at boot moved the network from ifupdown (+ dhcpcd) to networkd. networkd got its DHCP lease with two DNS servers (`networkctl status` showed them), but `systemd-resolved` was not installed and nobody wrote `/etc/resolv.conf`: it still held what dhcpcd wrote when it released the lease at shutdown, a header without any `nameserver`. apt, Tailscale and ACME stopped working, and the boot check confirmed the migration because it only looked for a routable address.
+
+**How DNS works with networkd.** networkd never writes `/etc/resolv.conf`: the servers it learns (DHCP and RA with `UseDNS=yes`, the default, plus `DNS=` of the `.network` file) go to systemd-resolved over D-Bus and nowhere else ([systemd.network](https://www.freedesktop.org/software/systemd/man/latest/systemd.network.html), [systemd-resolved](https://www.freedesktop.org/software/systemd/man/latest/systemd-resolved.service.html)). Since Debian 12 resolved is a **separate package** (`systemd-resolved`, 257 in trixie); installing it turns `/etc/resolv.conf` into a link to its stub file, but only at install time ([DebOps](https://docs.debops.org/en/master/ansible/roles/resolved/getting-started.html), [Armbian trixie](https://forum.armbian.com/topic/39088-armbian-build-pr-remove-debootstrapped-static-resolvconf/)). A Debian server installed by d-i has ifupdown, its DHCP client writes the file, and resolved is not installed: exactly the DS920+ case. The synodeb *image* ships networkd **with** resolved, which is why the problem did not show there.
+
+**What the others do.**
+
+| System | DNS with its network backend |
+|---|---|
+| OpenMediaVault 6/7 | netplan → networkd **+ systemd-resolved**, `/etc/resolv.conf` links to the stub file; custom servers go to `resolved.conf` ([OMV #1710](https://www.github.com/openmediavault/openmediavault/issues/1710), [DietPi forum](https://dietpi.com/forum/t/no-internet-after-power-outage/23283?page=2)) |
+| Cockpit / NetworkManager | `rc-manager=auto`: hands the servers to resolved when it runs, otherwise **writes `/etc/resolv.conf` itself** (a regular file; a link it leaves alone) ([NetworkManager.conf](https://manpages.debian.org/NetworkManager.conf)) |
+| TrueNAS SCALE | the middleware **generates `/etc/resolv.conf`** from its global settings or the DHCP lease (with a known race when the lease arrives late: [forum](https://www.truenas.com/community/threads/truenas-scale-not-setting-dns-server-from-dhcp.99309/latest)) |
+| Proxmox VE | ifupdown2, `/etc/resolv.conf` written by the DNS panel |
+
+**Effects on the rest of the NAS.**
+- **Docker** cannot reach 127.0.0.53 from a container; with the stub file it uses resolved's upstream list (`/run/systemd/resolve/resolv.conf`) for the containers ([gist](https://gist.github.com/IslamAlam/0c9e9dc42126d60cfed66f4779fd8047)). A plain file with real servers works as it is.
+- **Tailscale** (accept DNS is off by default in rynas, D-TAILSCALE) talks to resolved over D-Bus when `/etc/resolv.conf` links to the *stub* file; without resolved it falls back to "direct" mode and rewrites the file itself, keeping a backup ([Linux DNS](https://tailscale.com/docs/reference/linux-dns), [blog](https://tailscale.com/blog/sisyphean-dns-client-linux), [#7655](https://github.com/tailscale/tailscale/issues/7655)). rynas never touches a file Tailscale wrote.
+- **Avahi** answers `.local` through `nss-mdns` (`mdns4_minimal` before `dns` in `nsswitch.conf`), independent of both choices; networkd's links have `MulticastDNS=no` by default, so resolved would not compete for port 5353.
+
+**Choice (NetworkManager's `rc-manager=auto`, adapted).** rynas never makes name resolution depend on a download:
+1. **systemd-resolved active** (installed by the administrator or the image): `/etc/resolv.conf` becomes the link to `/run/systemd/resolve/stub-resolv.conf` (what Tailscale expects; Docker handles it). The migration from ifupdown enables resolved when it is installed.
+2. **Otherwise rynas writes `/etc/resolv.conf`** from networkd's per-link DNS servers and search domains (networkd's link state, ordered by interface index, at most 3 servers as glibc reads), with a `# Generated by rynas` header. rynasd refreshes it at start and every minute, so lease changes are followed; writing is atomic (temporary file + rename).
+3. **Only a file nobody else manages is touched**: missing, empty, left over by dhcpcd (`# Generated by dhcpcd`, also with lines added by hand), or rynas's own. A file written by hand, by Tailscale or by resolvconf, and any other link, stay as they are; nothing happens while ifupdown or NetworkManager runs. With no server learned, the file is left as it is.
+
+Installing resolved during the migration was rejected as the default: it needs the network (and apt) at the moment the network changes, adds a daemon on a 4 GB box, and its package script replaces the file on its own; it stays the better option for split DNS (Tailscale MagicDNS) and can be offered later as an explicit, planned step.
+
+**Guard.** A trial (apply, adoption, restore) that leaves networkd running checks name resolution after the address checks: `/etc/resolv.conf` brought in step, then a DNS query (the root's NS record over UDP; any answer, even SERVFAIL, proves the server is reachable) to the configured servers, for up to 15 s. If a server answered **before** the change and none answers after it, the change is rolled back like a failed verification ("name resolution stopped working"); a network that had no reachable DNS server before stays a valid choice. The migration at boot is kept at its deadline only when a port has a routable address **and** (when networkd learned DNS servers) one of them answers; otherwise ifupdown is restored with the `net.boot_dns_failed` notification.
+
+**Upgrade.** A system migrated by an older rynas keeps the broken file until rynasd starts: the first refresh replaces dhcpcd's leftover with networkd's servers and sends `net.dns_repaired` (only when the file had no server before).
 
 | Feature | Details | Idea from |
 |---|---|---|
@@ -203,6 +234,7 @@ Network ▸ Interfaces                   [⟲ 2 pending changes] [Diff] [Apply w
 8. Cold migration from ifupdown done remotely with no way back.
 9. Renaming interfaces live.
 10. Touching synodeb's drop-ins or the image's `99-fallback.network` (they must be imported, not deleted).
+11. Judging a migration by addresses alone: networkd without systemd-resolved leaves the NAS without DNS (§4.1).
 
 ## 9. Phases
 
@@ -226,6 +258,7 @@ Network ▸ Interfaces                   [⟲ 2 pending changes] [Diff] [Apply w
 - Bonding: https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/7/html/networking_guide/overview-of-bonding-modes-and-the-required-settings-on-the-switch
 - Tailscale: https://tailscale.com/docs/reference/tailscale-cli/up · https://tailscale.com/docs/reference/tailscale-cli/serve · https://tailscale.com/kb/1131/synology · https://docs.unraid.net/unraid-os/system-administration/secure-your-server/tailscale
 - WireGuard and mesh: https://mintlify.com/wg-easy/wg-easy/features/qr-codes · https://www.bitdoze.com/netbird-vs-headscale-vs-tailscale/
+- DNS with networkd (§4.1): https://www.freedesktop.org/software/systemd/man/latest/systemd-resolved.service.html · https://www.freedesktop.org/software/systemd/man/latest/systemd.network.html (`UseDNS=`, `DNS=`) · https://docs.debops.org/en/master/ansible/roles/resolved/getting-started.html (resolved a separate package since Debian 12, symlink on install) · https://forum.armbian.com/topic/39088-armbian-build-pr-remove-debootstrapped-static-resolvconf/ · https://www.github.com/openmediavault/openmediavault/issues/1710 · https://dietpi.com/forum/t/no-internet-after-power-outage/23283?page=2 (OMV: netplan + resolved, stub link) · https://manpages.debian.org/NetworkManager.conf (`rc-manager`) · https://tailscale.com/docs/reference/linux-dns · https://tailscale.com/blog/sisyphean-dns-client-linux · https://github.com/tailscale/tailscale/issues/7655 · https://gist.github.com/IslamAlam/0c9e9dc42126d60cfed66f4779fd8047 (Docker and 127.0.0.53) · https://www.truenas.com/community/threads/truenas-scale-not-setting-dns-server-from-dhcp.99309/latest (TrueNAS writes resolv.conf itself, DHCP race)
 
 **To verify on the NAS before implementing:**
 - whether `tailscale up --json` returns the AuthURL in the installed version;
