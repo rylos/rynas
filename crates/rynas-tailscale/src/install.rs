@@ -118,48 +118,27 @@ fn apt(args: &[&str]) -> Cmd {
     outside("apt-get", &v)
 }
 
-/// `program args` in a transient unit outside rynasd's sandbox (see [`apt`]).
+/// Prefix of the transient units of the install (`rynas-apt-tailscale-…`).
+const UNIT_PREFIX: &str = "rynas-apt-tailscale";
+
+/// `program args` in a transient unit outside rynasd's sandbox (see [`apt`],
+/// [`rynas_tasks::Outside`]).
 pub fn outside(program: &str, args: &[&str]) -> Cmd {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let unit = format!(
-        "--unit=rynas-apt-tailscale-{secs}-{}",
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    );
-    Cmd::new("systemd-run")
-        .args(["--wait", "--pipe", "--collect", "--quiet", "--service-type=exec"])
-        .arg(unit)
-        .arg(format!("--property=RuntimeMaxSec={}", APT_TIMEOUT.as_secs()))
-        .args([
-            &format!("--description=rynas: {program} (Tailscale)"),
-            "--setenv=DEBIAN_FRONTEND=noninteractive",
-            "--setenv=NEEDRESTART_MODE=l",
-            "--setenv=APT_LISTCHANGES_FRONTEND=none",
-            "--setenv=LC_ALL=C",
-            "--",
-            program,
+    let description = format!("rynas: {program} (Tailscale)");
+    rynas_tasks::Outside::new(UNIT_PREFIX, &description, APT_TIMEOUT)
+        .setenv(&[
+            "DEBIAN_FRONTEND=noninteractive",
+            "NEEDRESTART_MODE=l",
+            "APT_LISTCHANGES_FRONTEND=none",
+            "LC_ALL=C",
         ])
-        .args(args)
-        .env_clear()
-        .timeout(APT_TIMEOUT)
+        .cmd(std::iter::once(program).chain(args.iter().copied()))
 }
 
 /// What to run after a step was cancelled or timed out: the transient unit is stopped, so a
 /// retry does not hit the dpkg lock.
 pub fn on_abort(cmd: &Cmd) -> Option<Cmd> {
-    if cmd.program() != "systemd-run" {
-        return None;
-    }
-    let unit = cmd
-        .display()
-        .split_whitespace()
-        .find_map(|a| a.strip_prefix("--unit="))
-        .filter(|u| u.starts_with("rynas-apt-tailscale-"))
-        .map(|u| format!("{u}.service"))?;
+    let unit = rynas_tasks::transient_unit(cmd, UNIT_PREFIX)?;
     Some(
         Cmd::new("systemctl")
             .args(["stop", &unit])

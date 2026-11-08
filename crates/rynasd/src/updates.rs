@@ -118,34 +118,28 @@ async fn mtime(p: &str) -> Option<SystemTime> {
 /// (read-only). Cancelling the task stops following the unit, not dpkg: an interrupted dpkg
 /// is worse than a finished upgrade, and apt's own lock keeps a second run out meanwhile.
 fn apt(args: &[&str], timeout: Duration) -> Cmd {
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let unit = format!(
-        "--unit=rynas-apt-{}-{}",
-        now_ms() / 1000,
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    );
-    Cmd::new("systemd-run")
-        .args(["--wait", "--pipe", "--collect", "--quiet", "--service-type=exec"])
-        .arg(unit)
-        .args([
-            "--description=rynas: apt-get (System > Updates)",
-            "--setenv=DEBIAN_FRONTEND=noninteractive",
-            "--setenv=NEEDRESTART_MODE=l",
-            "--setenv=APT_LISTCHANGES_FRONTEND=none",
-            "--setenv=LC_ALL=C",
-            "--property=Nice=5",
-            "--",
-            APT_GET,
-            "-q",
-            "-y",
-            "-o",
-            "Dpkg::Options::=--force-confdef",
-            "-o",
-            "Dpkg::Options::=--force-confold",
+    rynas_tasks::Outside::new("rynas-apt", "rynas: apt-get (System > Updates)", timeout)
+        .keep_running()
+        .setenv(&[
+            "DEBIAN_FRONTEND=noninteractive",
+            "NEEDRESTART_MODE=l",
+            "APT_LISTCHANGES_FRONTEND=none",
+            "LC_ALL=C",
         ])
-        .args(args)
-        .env_clear()
-        .timeout(timeout)
+        .properties(&["Nice=5"])
+        .cmd(
+            [
+                APT_GET,
+                "-q",
+                "-y",
+                "-o",
+                "Dpkg::Options::=--force-confdef",
+                "-o",
+                "Dpkg::Options::=--force-confold",
+            ]
+            .into_iter()
+            .chain(args.iter().copied()),
+        )
 }
 
 /// A simulation (no lock, so it also works while dpkg runs).
@@ -727,6 +721,9 @@ mod tests {
         let c = apt(&["full-upgrade"], Duration::from_secs(1)).display();
         assert!(c.starts_with("systemd-run --wait --pipe --collect --quiet"), "{c}");
         assert!(c.contains("--setenv=DEBIAN_FRONTEND=noninteractive"), "{c}");
+        // an upgrade is never cut short by systemd: dpkg runs to its end
+        assert!(!c.contains("RuntimeMaxSec"), "{c}");
+        assert!(c.contains("--property=Nice=5"), "{c}");
         assert!(
             c.contains("-- /usr/bin/apt-get -q -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold full-upgrade"),
             "{c}"

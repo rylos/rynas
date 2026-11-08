@@ -331,6 +331,111 @@ impl Cmd {
     }
 }
 
+/// Grace the `systemd-run` client gets past a unit's `RuntimeMaxSec` to report its end.
+const OUTSIDE_GRACE: Duration = Duration::from_secs(10);
+
+/// A command run in a transient systemd service, outside the caller's sandbox.
+///
+/// rynasd runs with `ProtectSystem=yes` (`/usr` read-only), a seccomp filter without the mount
+/// calls (`SystemCallFilter=@system-service`: `mount`, `umount2` fail with `EPERM`) and a mount
+/// namespace of its own. What writes `/usr` (apt, dpkg) or mounts and unmounts goes through
+/// `systemd-run --wait --pipe --collect`: the unit runs with the default service environment
+/// in the host's mount namespace, `--pipe` streams its output back and returns its exit status.
+/// A mount made there propagates into rynasd's namespace (systemd sets it up as a slave of the
+/// host's), so rynasd works in it afterwards; an unmount propagates the same way.
+///
+/// The unit is `<unit>-<seconds>-<pid>-<n>.service` (see [`transient_unit`]).
+#[derive(Debug, Clone, Copy)]
+pub struct Outside<'a> {
+    unit: &'a str,
+    description: &'a str,
+    timeout: Duration,
+    runtime_max: bool,
+    setenv: &'a [&'a str],
+    properties: &'a [&'a str],
+}
+
+impl<'a> Outside<'a> {
+    /// `unit`: prefix of the unit name (`rynas-rollback`); `description`: what `systemctl`
+    /// shows (`rynas: …`); `timeout`: the unit is stopped by systemd after it
+    /// (`RuntimeMaxSec`), the client waits [`OUTSIDE_GRACE`] longer.
+    pub fn new(unit: &'a str, description: &'a str, timeout: Duration) -> Self {
+        Self {
+            unit,
+            description,
+            timeout,
+            runtime_max: true,
+            setenv: &[],
+            properties: &[],
+        }
+    }
+
+    /// No `RuntimeMaxSec`: the unit runs to its end even when the client gives up after the
+    /// timeout (an interrupted dpkg is worse than a finished upgrade).
+    pub fn keep_running(mut self) -> Self {
+        self.runtime_max = false;
+        self
+    }
+
+    /// Environment of the unit, `NAME=value` each (`--setenv`).
+    pub fn setenv(mut self, vars: &'a [&'a str]) -> Self {
+        self.setenv = vars;
+        self
+    }
+
+    /// Extra unit properties, `Name=value` each (`--property`).
+    pub fn properties(mut self, props: &'a [&'a str]) -> Self {
+        self.properties = props;
+        self
+    }
+
+    /// `argv` (program first) in a new transient unit.
+    pub fn cmd<I: IntoIterator<Item = S>, S: AsRef<OsStr>>(&self, argv: I) -> Cmd {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let mut c = Cmd::new("systemd-run")
+            .args(["--wait", "--pipe", "--collect", "--quiet", "--service-type=exec"])
+            .arg(format!(
+                "--unit={}-{secs}-{}-{}",
+                self.unit,
+                std::process::id(),
+                SEQ.fetch_add(1, Ordering::Relaxed)
+            ))
+            .arg(format!("--description={}", self.description));
+        let mut timeout = self.timeout;
+        if self.runtime_max {
+            c = c.arg(format!("--property=RuntimeMaxSec={}", self.timeout.as_secs().max(1)));
+            timeout += OUTSIDE_GRACE;
+        }
+        for p in self.properties {
+            c = c.arg(format!("--property={p}"));
+        }
+        for v in self.setenv {
+            c = c.arg(format!("--setenv={v}"));
+        }
+        c.arg("--").args(argv).env_clear().timeout(timeout)
+    }
+}
+
+/// The transient unit (`<name>.service`) a command made by [`Outside::cmd`] with the unit
+/// prefix `unit` runs in; `None` for any other command.
+pub fn transient_unit(cmd: &Cmd, unit: &str) -> Option<String> {
+    if cmd.program() != "systemd-run" {
+        return None;
+    }
+    let want = format!("--unit={unit}-");
+    cmd.argv
+        .iter()
+        .take_while(|a| a.as_os_str() != "--")
+        .filter_map(|a| a.to_str())
+        .find(|a| a.starts_with(&want))
+        .map(|a| format!("{}.service", &a["--unit=".len()..]))
+}
+
 /// A pipe reader: tiny stack, it only copies bytes.
 fn small_thread<T: Send + 'static>(
     f: impl FnOnce() -> T + Send + 'static,
@@ -373,6 +478,50 @@ async fn read_lines(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn outside_builds_the_systemd_run_line() {
+        let c = super::Outside::new("rynas-rollback", "rynas: rollback", super::Duration::from_secs(30))
+            .cmd(["mount", "-o", "bind,ro", "/a b", "/run/x"]);
+        let argv: Vec<String> = c.argv.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(argv[..6], ["systemd-run", "--wait", "--pipe", "--collect", "--quiet", "--service-type=exec"]);
+        let unit = argv[6].strip_prefix("--unit=rynas-rollback-").expect("unit");
+        let parts: Vec<&str> = unit.split('-').collect();
+        assert_eq!(parts.len(), 3, "{unit}");
+        assert!(parts.iter().all(|p| p.parse::<u64>().is_ok()), "{unit}");
+        assert_eq!(
+            argv[7..],
+            ["--description=rynas: rollback", "--property=RuntimeMaxSec=30", "--", "mount", "-o", "bind,ro", "/a b", "/run/x"]
+        );
+        // the client outlives the unit's own limit, with no inherited environment
+        assert_eq!(c.timeout, super::Duration::from_secs(40));
+        assert!(c.clear_env);
+        // a second command gets a unit of its own
+        let d = super::Outside::new("rynas-rollback", "r", super::Duration::from_secs(1)).cmd(["true"]);
+        assert_ne!(super::transient_unit(&c, "rynas-rollback"), super::transient_unit(&d, "rynas-rollback"));
+        assert_eq!(
+            super::transient_unit(&c, "rynas-rollback"),
+            Some(format!("{}.service", &argv[6]["--unit=".len()..]))
+        );
+        assert_eq!(super::transient_unit(&c, "rynas-apt"), None);
+        assert_eq!(super::transient_unit(&super::Cmd::new("mount"), "rynas-rollback"), None);
+    }
+
+    #[test]
+    fn outside_options() {
+        let c = super::Outside::new("rynas-apt", "rynas: apt-get", super::Duration::from_secs(600))
+            .keep_running()
+            .properties(&["Nice=5"])
+            .setenv(&["LC_ALL=C"])
+            .cmd(["apt-get", "-y", "upgrade"]);
+        let s = c.display();
+        assert!(!s.contains("RuntimeMaxSec"), "{s}");
+        assert!(s.ends_with("--property=Nice=5 --setenv=LC_ALL=C -- apt-get -y upgrade"), "{s}");
+        assert_eq!(c.timeout, super::Duration::from_secs(600));
+        // a program argument that looks like a unit is not taken for one
+        let d = super::Outside::new("x", "x", super::Duration::from_secs(1)).cmd(["echo", "--unit=rynas-apt-1"]);
+        assert_eq!(super::transient_unit(&d, "rynas-apt"), None);
+    }
+
     #[test]
     fn debug_hides_stdin_and_env_values() {
         let c = Cmd::new("chpasswd")

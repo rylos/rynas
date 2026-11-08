@@ -113,47 +113,30 @@ fn apt(args: &[&str]) -> Cmd {
     outside("apt-get", &v)
 }
 
-/// `program args` in a transient unit outside rynasd's sandbox (see [`apt`]).
+/// Prefix of the transient units of the install (`rynas-apt-docker-…`).
+const UNIT_PREFIX: &str = "rynas-apt-docker";
+
+/// Environment of every apt/dpkg run: non-interactive, needrestart only lists.
+const APT_ENV: &[&str] = &[
+    "DEBIAN_FRONTEND=noninteractive",
+    "NEEDRESTART_MODE=l",
+    "APT_LISTCHANGES_FRONTEND=none",
+    "LC_ALL=C",
+];
+
+/// `program args` in a transient unit outside rynasd's sandbox (see [`apt`],
+/// [`rynas_tasks::Outside`]).
 fn outside(program: &str, args: &[&str]) -> Cmd {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let unit = format!(
-        "--unit=rynas-apt-docker-{secs}-{}",
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    );
-    Cmd::new("systemd-run")
-        .args(["--wait", "--pipe", "--collect", "--quiet", "--service-type=exec"])
-        .arg(unit)
-        // the unit never outlives the step's own timeout (review 2026-11-07, M3)
-        .arg(format!("--property=RuntimeMaxSec={}", APT_TIMEOUT.as_secs()))
-        .args([
-            &format!("--description=rynas: {program} (Docker install)"),
-            "--setenv=DEBIAN_FRONTEND=noninteractive",
-            "--setenv=NEEDRESTART_MODE=l",
-            "--setenv=APT_LISTCHANGES_FRONTEND=none",
-            "--setenv=LC_ALL=C",
-            "--",
-            program,
-        ])
-        .args(args)
-        .env_clear()
-        .timeout(APT_TIMEOUT)
+    // the unit never outlives the step's own timeout (review 2026-11-07, M3)
+    let description = format!("rynas: {program} (Docker install)");
+    rynas_tasks::Outside::new(UNIT_PREFIX, &description, APT_TIMEOUT)
+        .setenv(APT_ENV)
+        .cmd(std::iter::once(program).chain(args.iter().copied()))
 }
 
 /// The transient unit a command made by [`outside`] runs in (`rynas-apt-docker-…`).
 pub fn transient_unit(cmd: &Cmd) -> Option<String> {
-    if cmd.program() != "systemd-run" {
-        return None;
-    }
-    cmd.display()
-        .split_whitespace()
-        .find_map(|a| a.strip_prefix("--unit="))
-        .filter(|u| u.starts_with("rynas-apt-docker-"))
-        .map(|u| format!("{u}.service"))
+    rynas_tasks::transient_unit(cmd, UNIT_PREFIX)
 }
 
 /// What to run after a step was cancelled or timed out: stopping the cancelled client

@@ -110,6 +110,11 @@ shown, steps, typed restore point name). The task `snapshot.rollback` runs
    failure undoes the steps and runs `synodeb-dom sync --root /` to put the DOM entry back
    (the Synology module's boot layer, `rynas_hw_synology::boot`, D-MODULE);
 4. unmount; the task log and a notice ask for the reboot.
+Every `mount`/`umount` of steps 1, 3 and 4 runs in a transient unit outside rynasd's sandbox
+(`systemd-run --wait --pipe`, units `rynas-rollback-*`, shared builder
+`rynas_tasks::Outside`): rynasd's seccomp filter (`@system-service`) has no mount calls, and
+`synodeb-dom`, which runs outside too, must see the restore point's mount. The mounts
+propagate into rynasd's mount namespace, where the btrfs steps (ioctls, renames) run.
 On other systems (no boot layer) the preview says `no_boot_layer` and the rollback stays a 409
 with a note (console procedure). `rynasd --dry-system` only logs the steps (with the boot layer
 when the fake hardware is a Synology or has `usr/sbin/synodeb-dom`). Tests: step order,

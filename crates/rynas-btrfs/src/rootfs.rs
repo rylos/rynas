@@ -23,17 +23,23 @@
 //! 4. both mounts go away and the caller asks for a reboot. The running system keeps working
 //!    until then (it is the renamed subvolume).
 //!
+//! The mounts and unmounts of steps 1, 3 and 4 run in transient units outside rynasd's sandbox
+//! ([`rynas_tasks::Outside`], units `rynas-rollback-*`): rynasd's seccomp filter has no mount
+//! calls, and the boot layer's tool (outside too) must see the restore point's mount. They
+//! propagate into rynasd's mount namespace, where the btrfs steps run (ioctls and renames).
+//!
 //! Every effect goes through [`RootOps`]: [`HostRoot`] on the machine, [`DryRoot`] for
 //! `rynasd --dry-system` (logs only), a recording fake in the tests.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fs::File;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use rynas_tasks::Cmd;
+use rynas_tasks::{Cmd, Outside};
 
 use crate::ioctl;
 use crate::name::stamp_seconds;
@@ -417,6 +423,39 @@ fn run(cmd: Cmd) -> Result<String, String> {
     }
 }
 
+/// Prefix of the transient units the rollback mounts and unmounts in.
+pub const UNIT_PREFIX: &str = "rynas-rollback";
+
+/// `argv` in a transient unit outside rynasd's sandbox ([`rynas_tasks::Outside`]): its
+/// seccomp filter has no `mount`/`umount2`, and a mount made in its own namespace would stay
+/// invisible to the boot layer's tool, which runs outside too.
+fn outside(argv: Vec<OsString>) -> Cmd {
+    Outside::new(UNIT_PREFIX, "rynas: system rollback", MOUNT_TIMEOUT).cmd(argv)
+}
+
+/// Read-only bind mount of the restore point `src` at `dir`.
+pub fn mount_ro_argv(src: &Path, dir: &Path) -> Vec<OsString> {
+    vec!["mount".into(), "-o".into(), "bind,ro".into(), src.into(), dir.into()]
+}
+
+/// The top level (subvolid 5) of the root filesystem on `source` at `dir`.
+pub fn mount_top_argv(source: &str, dir: &Path) -> Vec<OsString> {
+    vec![
+        "mount".into(),
+        "-t".into(),
+        "btrfs".into(),
+        "-o".into(),
+        "subvolid=5,noatime".into(),
+        source.into(),
+        dir.into(),
+    ]
+}
+
+/// Unmount of `dir` (never lazy).
+pub fn umount_argv(dir: &Path) -> Vec<OsString> {
+    vec!["umount".into(), dir.into()]
+}
+
 /// The real thing (rynasd as root).
 pub struct HostRoot {
     /// The restore point settings (subvolume `/`, directory, prefix, keep, reasons log).
@@ -436,12 +475,7 @@ impl RootOps for HostRoot {
 
     fn mount_ro(&self, src: &Path, dir: &Path) -> Result<(), String> {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        run(Cmd::new("mount")
-            .args(["-o", "bind,ro"])
-            .arg(src)
-            .arg(dir)
-            .timeout(MOUNT_TIMEOUT))
-        .map(drop)
+        run(outside(mount_ro_argv(src, dir))).map(drop)
     }
 
     fn mount_top(&self, dir: &Path) -> Result<String, String> {
@@ -463,16 +497,12 @@ impl RootOps for HostRoot {
             ));
         }
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        run(Cmd::new("mount")
-            .args(["-t", "btrfs", "-o", "subvolid=5,noatime"])
-            .arg(&source)
-            .arg(dir)
-            .timeout(MOUNT_TIMEOUT))?;
+        run(outside(mount_top_argv(&source, dir)))?;
         Ok(name)
     }
 
     fn unmount(&self, dir: &Path) -> Result<(), String> {
-        run(Cmd::new("umount").arg(dir).timeout(MOUNT_TIMEOUT))?;
+        run(outside(umount_argv(dir)))?;
         let _ = std::fs::remove_dir(dir);
         Ok(())
     }
@@ -859,6 +889,33 @@ mod tests {
         assert_eq!(c[i + 5], "unmount /run/rynas/rollback/top");
         assert_eq!(c[i + 6], "boot_sync /");
         assert!(c[i + 7].starts_with("unmount /run/rynas/rollback/rootfs."));
+    }
+
+    #[test]
+    fn mounts_run_outside_the_sandbox() {
+        let at = |c: &Cmd| {
+            let s = c.display();
+            let (head, tail) = s.split_once(" -- ").expect("systemd-run ... -- argv");
+            assert!(head.starts_with("systemd-run --wait --pipe --collect"), "{s}");
+            assert!(head.contains(&format!("--unit={UNIT_PREFIX}-")), "{s}");
+            assert!(head.contains("--property=RuntimeMaxSec=30"), "{s}");
+            tail.to_string()
+        };
+        let snap = Path::new("/.snapshots/rootfs/rootfs.20261101T0300");
+        let mnt = Path::new("/run/rynas/rollback/rootfs.20261101T0300");
+        assert_eq!(
+            at(&outside(mount_ro_argv(snap, mnt))),
+            "mount -o bind,ro /.snapshots/rootfs/rootfs.20261101T0300 /run/rynas/rollback/rootfs.20261101T0300"
+        );
+        let top = Path::new("/run/rynas/rollback/top");
+        assert_eq!(
+            at(&outside(mount_top_argv("/dev/nvme0n1p2", top))),
+            "mount -t btrfs -o subvolid=5,noatime /dev/nvme0n1p2 /run/rynas/rollback/top"
+        );
+        assert_eq!(at(&outside(umount_argv(top))), "umount /run/rynas/rollback/top");
+        // a path that looks like an option stays a separate argument after `--`
+        let odd = mount_ro_argv(Path::new("/s/-o x"), mnt);
+        assert_eq!(odd[3], OsString::from("/s/-o x"));
     }
 
     #[test]

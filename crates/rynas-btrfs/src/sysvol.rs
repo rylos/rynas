@@ -396,24 +396,11 @@ pub fn unavailable(root: &Path, real: bool) -> Option<String> {
 /// rynasd as root on the machine.
 pub struct HostSysvol;
 
-/// `argv` in a transient unit outside rynasd's sandbox (its seccomp filter has no `mount`,
-/// and its mount namespace is its own): `--pipe` returns the output and the exit status.
+/// `argv` in a transient unit outside rynasd's sandbox ([`rynas_tasks::Outside`]: its seccomp
+/// filter has no `mount`, and its mount namespace is its own).
 fn outside(argv: &[&str]) -> Cmd {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    Cmd::new("systemd-run")
-        .args(["--wait", "--pipe", "--collect", "--quiet", "--service-type=exec"])
-        .arg(format!(
-            "--unit=rynas-system-volume-{}-{}",
-            std::process::id(),
-            SEQ.fetch_add(1, Ordering::Relaxed)
-        ))
-        .arg(format!("--property=RuntimeMaxSec={}", CMD_TIMEOUT.as_secs()))
-        .arg("--description=rynas: system volume")
-        .arg("--")
-        .args(argv.iter().copied())
-        .env_clear()
-        .timeout(CMD_TIMEOUT + Duration::from_secs(10))
+    rynas_tasks::Outside::new("rynas-system-volume", "rynas: system volume", CMD_TIMEOUT)
+        .cmd(argv.iter().copied())
 }
 
 /// The `mount` of the top level of `fs_uuid` at [`TOP_DIR`].
@@ -544,6 +531,19 @@ mod tests {
     const ROOT: &str = "22 1 0:21 /@rootfs / rw - btrfs /dev/md0 rw\n";
     const MOUNTED: &str = "40 22 0:21 /@rynas-system /srv/rynas/system rw - btrfs /dev/md0 rw\n";
     const UUID: &str = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
+
+    #[test]
+    fn the_top_level_is_mounted_outside_the_sandbox() {
+        let argv = mount_top_argv("0123-abcd");
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let s = outside(&argv).display();
+        assert!(s.starts_with("systemd-run --wait --pipe --collect"), "{s}");
+        assert!(s.contains("--unit=rynas-system-volume-"), "{s}");
+        assert!(s.ends_with(&format!(
+            " -- mount -t btrfs -o subvolid=5,noatime /dev/disk/by-uuid/0123-abcd {TOP_DIR}"
+        )), "{s}");
+        assert!(outside(&["umount", TOP_DIR]).display().ends_with(&format!(" -- umount {TOP_DIR}")));
+    }
 
     #[test]
     fn the_unit_mounts_the_subvolume_at_boot() {

@@ -52,24 +52,10 @@ impl SynodebDom {
             .map(|bin| Self { bin, dry })
     }
 
-    /// `synodeb-dom args` in a transient unit outside rynasd's sandbox; `--pipe` returns its
-    /// stdout, stderr and exit status.
     fn outside(&self, args: &[&std::ffi::OsStr], timeout: Duration) -> Cmd {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let unit = format!(
-            "--unit=rynas-synodeb-dom-{}-{}",
-            std::process::id(),
-            SEQ.fetch_add(1, Ordering::Relaxed)
-        );
-        Cmd::new("systemd-run")
-            .args(["--wait", "--pipe", "--collect", "--quiet", "--service-type=exec"])
-            .arg(unit)
-            .arg(format!("--property=RuntimeMaxSec={}", timeout.as_secs()))
-            .arg("--description=rynas: synodeb-dom")
-            .arg(&self.bin)
-            .args(args)
-            .timeout(timeout + Duration::from_secs(10))
+        let mut argv: Vec<&std::ffi::OsStr> = vec![self.bin.as_os_str()];
+        argv.extend_from_slice(args);
+        rynas_tasks::Outside::new("rynas-synodeb-dom", "rynas: synodeb-dom", timeout).cmd(argv)
     }
 
     fn run(&self, cmd: Cmd) -> Result<String, String> {
@@ -175,6 +161,21 @@ pub fn parse_status(text: &str) -> Result<BootImage, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_tool_runs_outside_the_sandbox() {
+        let d = SynodebDom {
+            bin: PathBuf::from(SYNODEB_DOM[0]),
+            dry: false,
+        };
+        let s = d
+            .outside(&["sync".as_ref(), "--root".as_ref(), "/run/rynas/rollback/x".as_ref()], SYNC_TIMEOUT)
+            .display();
+        assert!(s.starts_with("systemd-run --wait --pipe --collect"), "{s}");
+        assert!(s.contains("--unit=rynas-synodeb-dom-"), "{s}");
+        assert!(s.contains("--property=RuntimeMaxSec=180"), "{s}");
+        assert!(s.ends_with(" -- /usr/sbin/synodeb-dom sync --root /run/rynas/rollback/x"), "{s}");
+    }
 
     #[test]
     fn fixture() {

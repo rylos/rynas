@@ -24,7 +24,7 @@ pub use rynas_api_types::{TaskEvent, TaskEventKind, TaskInfo, TaskStatus};
 use tokio::sync::{Semaphore, broadcast};
 pub use tokio_util::sync::CancellationToken;
 
-pub use cmd::{Cmd, CmdError, CmdOutput};
+pub use cmd::{Cmd, CmdError, CmdOutput, Outside, transient_unit};
 
 /// Limits and retention.
 #[derive(Debug, Clone)]
