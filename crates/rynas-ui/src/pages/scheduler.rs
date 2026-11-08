@@ -472,6 +472,7 @@ impl ActionDraft {
             TaskAction::Snapshot { .. } => d.kind = "snapshot".into(),
             TaskAction::Replicate { .. } => d.kind = "replicate".into(),
             TaskAction::PowerShutdown { .. } => d.kind = "power_shutdown".into(),
+            TaskAction::Backup { .. } => d.kind = "backup".into(),
         }
         d
     }
@@ -538,6 +539,7 @@ pub fn action_text(a: &TaskAction) -> (String, String) {
         }
         TaskAction::RecycleCleanup { share, .. } => (t("sch.act.recycle_cleanup").to_string(), share.clone().unwrap_or_else(|| t("sch.all_shares").to_string())),
         TaskAction::PowerShutdown { rule } => (t("sch.act.power_shutdown").to_string(), rule.clone()),
+        TaskAction::Backup { job } => (t("sch.act.backup").to_string(), job.clone()),
     }
 }
 

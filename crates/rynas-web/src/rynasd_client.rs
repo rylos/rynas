@@ -52,6 +52,9 @@ pub const FILES_DEADLINE: Duration = Duration::from_secs(130);
 /// File manager uploads and saves: the body travels before the answer starts (16 MiB
 /// chunks on a slow link; rynasd allows 600 s).
 pub const FILES_UPLOAD_DEADLINE: Duration = Duration::from_secs(610);
+/// Backup reads (snapshot lists and folders of a cloud repository, connection tests;
+/// rynasd gives the worker 110 s).
+pub const BACKUP_DEADLINE: Duration = Duration::from_secs(120);
 /// Largest answer read into memory by [`RynasdClient::call`] (pass-through answers stream).
 pub const MAX_ANSWER: usize = 8 << 20;
 
@@ -68,6 +71,8 @@ pub fn deadline(path: &str) -> Duration {
         DIAGNOSTICS_DEADLINE
     } else if path.starts_with("/v1/updates") {
         UPDATES_DEADLINE
+    } else if path.starts_with("/v1/backup/") {
+        BACKUP_DEADLINE
     } else if path.starts_with("/v1/files/upload") || path.starts_with("/v1/files/edit/save") {
         FILES_UPLOAD_DEADLINE
     } else if path.starts_with("/v1/files/") {

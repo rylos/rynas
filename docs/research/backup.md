@@ -209,6 +209,88 @@ Backup                                    [+ Plan] [+ Destination]
 7. Clear-text repository password (Backrest does it, as do common `/etc/.restic.env` setups).
 8. Write and delete credentials on the same machine that could be compromised.
 
+## 7. Implemented design (first wave, 2026-11-08)
+
+What is in the code now, and where it deviates from §5 (with the reason).
+
+### Pieces
+
+| Piece | Where | What |
+|---|---|---|
+| Worker | `crates/rynas-backup-worker` (own workspace and `Cargo.lock`, MSRV 1.91) | `rustic_core` 0.13.0 + `rustic_backend` 0.7.0, pinned exactly. One operation per process: a `WorkerRequest` (JSON) on stdin, `WorkerEvent` lines on stdout. Ops: `test`, `init`, `backup`, `forget`, `prune`, `check`, `snapshots`, `ls`, `restore`, `dump`, `stats` |
+| Protocol and config types | `rynas-api-types::backup` | jobs, destinations, retention, maintenance, views, requests, worker wire types |
+| Domain, runner, status | `crates/rynas-backup` (no rustic) | `backup` key (validate only, renders no file), destination → rustic backend string, worker launcher with streaming and cancel, `<state>/backup/<job>.json` |
+| Daemon | `crates/rynasd/src/restic_backup.rs` | routes, secrets, run sequence, tasks `backup.run`, `backup.check`, `backup.restore`; scheduler action `TaskAction::Backup` (`rynasctl job run backup-<job>`) |
+| UI | `crates/rynas-ui/src/pages/backup/{mod,restic}.rs` | page **Backup** (`/backup`) with tabs; this work is the tab *Another NAS or cloud* |
+
+rustic is never linked into rynasd, rynas-web or the UI: they only speak the JSON protocol.
+
+### Destinations (verified in `rustic_backend` 0.7.0)
+
+`rustic_backend` offers four backend types: `local`, `rest`, `rclone` and `opendal:<service>`. Its default features already turn on OpenDAL with b2, s3, sftp, gdrive, onedrive, dropbox, webdav, azure, gcs and more ([choose.rs](https://github.com/rustic-rs/rustic_core/blob/main/crates/backend/src/choose.rs), [services](https://rustic.cli.rs/docs/commands/init/services.html)).
+
+| rynas destination | rustic | Notes |
+|---|---|---|
+| USB or local disk | `local` | a folder |
+| REST server (another NAS) | `rest:https://user:pw@host/path` | `rest-server --append-only` on the other side refuses deletes and overwrites: the "vault" model. `--private-repos` limits each user to `/user/…` ([rest-server](https://github.com/restic/rest-server)) |
+| SFTP | `opendal:sftp` | key only (OpenDAL's SFTP has no password login). rynas generates an ed25519 pair (`ssh-keygen`), the public key goes into the server's `authorized_keys`; host key trusted on first use (`known_hosts_strategy=add`) |
+| S3 compatible | `opendal:s3` | `disable_config_load=true`: never reads `~/.aws` |
+| Backblaze B2 | `opendal:b2` | native API |
+| rclone (Google Drive, OneDrive…) | `rclone:remote:path` | rustic starts `rclone serve restic --addr localhost:0` with a random user and password and talks REST to it (not `--stdio` as restic does); needs rclone ≥ 1.52.2 ([rclone.rs](https://github.com/rustic-rs/rustic_core/blob/main/crates/backend/src/rclone.rs)). The remote's `rclone.conf` section (with its OAuth token, made with `rclone config` on a PC with a browser) is a sealed secret, written to a 0600 file as `RCLONE_CONFIG` |
+
+Bandwidth limit: OpenDAL `throttle` (S3, B2, SFTP) or `rclone serve --bwlimit`; none for local and REST.
+
+### Secrets
+
+- Repository password: generated (32 characters, ~190 bits, `getrandom`) or given. Shown **once** in the create answer; the UI keeps the dialog open until "I have saved the password", with copy and download.
+- Every secret of a job (repository password, REST/S3/B2 secret, rclone configuration, SFTP private key) is sealed with rynasd's age key (`<state>/notify/secret.key`, as the UPS network passwords) into `BackupJob::sealed` (base64). Views never include it; a `.rynasbak` export carries the sealed blob, the key only with a passphrase.
+- The worker gets secrets on stdin only; files a backend needs are 0600 in a private folder removed at exit; every line it prints has secret values (including a password inside a REST URL) replaced by `***`. Tested.
+
+### Run sequence (`backup.run`)
+
+1. `init` (creates the repository when missing; with an existing one the password must open it).
+2. Stop the chosen Docker stacks (`docker ps --filter label=com.docker.compose.project=<stack>`, then `docker stop` / `docker start` of exactly those containers).
+3. For each source that is a btrfs subvolume, a read-only snapshot `<parent>/.rynas-backup/<job>-<n>` (ioctl, no CLI); the stacks start again as soon as all snapshots exist.
+4. One restic snapshot per source with `as_path` = the source's real path. **Deviation from §5**: no bind mount on `/run/rynas/backup/…`: `as_path` gives the same stable path (the parent is found, restores go back to the real place) without a mount namespace. Tags `rynas`, `rynas-job:<job>`.
+5. `forget` with the job's retention, per path and only for snapshots tagged with this job.
+6. `prune` when due (default every 7 days; never `--instant-delete`, packs removed after 23 h).
+7. `check` when due (default every 7 days, reading `check_read_percent` % of the data, default 2 %). **Deviation**: a random subset per check instead of the n/12 rotation; the worker supports both (`ReadSubsetOption::IdSubSet`), the rotation needs the state of which slice is next and is left for the next wave.
+8. `stats` → repository size in the job status. Temporary snapshots deleted, stacks restarted even when the backup fails.
+
+Configuration source: the `.rynasbak` export, encrypted with the repository password, backed up as `/rynas-config`.
+
+### Worker process (D-BACKUP)
+
+- Production: `systemd-run --wait --pipe --collect --service-type=exec --unit=rynas-backup-<job>-<ts>-<n>` with `MemoryHigh=1536M`, `MemoryMax=2G` (`RYNAS_BACKUP_MEMORY=<high>:<max>`), `Nice=19`, `IOSchedulingClass=idle`, `CPUSchedulingPolicy=batch`, `KillSignal=SIGINT`, `TimeoutStopSec=60`, `PrivateTmp=yes`. Outside rynasd's 640 MB unit and its sandbox (restores write anywhere).
+- Cancel: the task's cancel stops the unit (`systemctl stop`, SIGINT); `--dry-system`/tests: SIGINT to the child.
+- **Resumable**: rustic saves the index of uploaded packs every 5 minutes (`MAX_AGE` in its indexer), so an interrupted backup does not upload that data again.
+- **One worker operation per job at a time** (backup, check, restore): the per-repository maintenance lock of D-BACKUP inside one NAS. Reads (snapshots, browse, download, preview) run alongside, as the restic format allows.
+- Progress: rustic's `ProgressBars` → `Step` and throttled `Progress` events → the task's log and percentage. rustic_core has no cancel API ([progress.rs](https://raw.githubusercontent.com/rustic-rs/rustic_core/main/crates/core/src/progress.rs)): ending the process is the cancel.
+
+### API (`/api/v1/backup/restic/…`, every route administrator-only, reads too)
+
+| Method | Path | |
+|---|---|---|
+| GET, POST | `/jobs` | list (`BackupJobView`), create (`BackupJobRequest` → `BackupJobCreated` with the generated password once); stages `backup` + `scheduler` |
+| GET, PUT, DELETE | `/jobs/{name}` | the repository stays on delete |
+| POST | `/test` | `TestResult`: `empty`, `opens` (n versions), `locked`, `failed` |
+| POST | `/ssh-key` | a new pair for SFTP; the private key waits 1 h in memory for its job |
+| POST | `/jobs/{name}/run`, `/check`, `/restore` | tasks (202) |
+| GET | `/jobs/{name}/snapshots`, `/browse?snapshot=&path=`, `/download?snapshot=&path=`, `/preview-retention` | reads (110 s); downloads up to 64 MiB, larger files are restored to a folder |
+
+Notifications: the job's scheduler task notifies on failure by default (category Backup, event family `backup.job`).
+
+### UI
+
+Ideas taken: the wizard order of Duplicati (what, where with "Test now", when, versions, encryption — [docs](https://docs.duplicati.com/getting-started/set-up-a-backup-in-the-ui)), Backrest's snapshot browser with restore and download ([backrest](https://github.com/garethgeorge/backrest)), TrueNAS TrueCloud's "use snapshot" option ([TrueCloud tasks](https://www.truenas.com/docs/scale/25.10/scaletutorials/dataprotection/truecloudtasks/)) — with full GFS retention where TrueCloud has only "keep last" ([request not accepted](https://forums.truenas.com/t/not-accepted-truecloud-backup-allow-to-keep-more-snapshots-per-week-per-month-per-year/26678)) — and the scheduled integrity check with data read-back of Hyper Backup ([spec](https://www.synology.com/dsm/7.3/software_spec/hyper_backup)). Kopia's per-path policies ([getting started](https://kopia.io/docs/getting-started/)) were left out: one job, one policy.
+
+### Open for the next waves
+
+- n/12 rotating read-data check, "data not yet pruned", 3-2-1 indicator counting btrbk replicas, recovery kit PDF, `key add` per administrator.
+- Multi-destination `copy`, lease-based lock across NASes, restic CI interop test (rustic ↔ restic 0.18), monthly `restic check` safety net and "Repair index (restic)".
+- Destination space check before the run (#1731), warning when the destination share has a recycle bin or snapshots.
+- Browse in the file manager; snapshot diff; download of folders as an archive.
+
 ## Sources
 
 - https://github.com/rustic-rs/rustic · /releases · issues [#1946](https://github.com/rustic-rs/rustic/issues/1946), [#1731](https://github.com/rustic-rs/rustic/issues/1731), [#1905](https://github.com/rustic-rs/rustic/issues/1905), [#1953](https://github.com/rustic-rs/rustic/issues/1953)

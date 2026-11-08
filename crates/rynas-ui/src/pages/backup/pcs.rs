@@ -135,7 +135,7 @@ pub fn panel() -> AnyView {
         let Some(list) = pcs.list.data.get() else { return ().into_any() };
         if list.is_empty() {
             return view! {
-                <EmptyState icon=icons::MONITOR title=Signal::derive(move || t("bk.empty").to_string()) text=Signal::derive(move || t("bk.empty_text").to_string())>
+                <EmptyState icon=icons::MONITOR title=Signal::derive(move || t("bkpc.empty").to_string()) text=Signal::derive(move || t("bkpc.empty_text").to_string())>
                     <div class="sec-actions">
                         <button class="btn primary" on:click=move |_| pcs.add.set(Some(false))><Icon icon=icons::PLUS size=16 />{tr("bk.add")}</button>
                         <button class="btn ghost" on:click=move |_| pcs.add.set(Some(true))><Icon icon=icons::FOLDER_OPEN size=16 />{tr("bk.adopt")}</button>
@@ -228,7 +228,7 @@ impl Fields {
             {switch("bk.f.allowed", Some("bk.f.allowed_help"), self.allowed.into(), Callback::new(move |v| self.allowed.set(v)))}
             <Show when=move || self.allowed.get()>
                 <div class="form-row">
-                    {number_field("bk.f.keep", Some("bk.f.keep_help"), self.keep.into(), Callback::new(move |v| self.keep.set(v)), 0, 1000)}
+                    {number_field("bk.f.keep", Some("bkpc.f.keep_help"), self.keep.into(), Callback::new(move |v| self.keep.set(v)), 0, 1000)}
                     {number_field("bk.f.min_age", Some("bk.f.min_age_help"), self.min_age.into(), Callback::new(move |v| self.min_age.set(v)), 0, 3650)}
                 </div>
             </Show>
@@ -360,7 +360,7 @@ fn add_dialog(pcs: Pcs, adopt_first: bool) -> AnyView {
             device.set(v);
         }), dev_err.into(), In { mono: true, maxlength: 32, help: Some("bk.f.device_help"), placeholder: "laptop", ..In::default() })}
         {text_field("bk.f.description", f.description.into(), Callback::new(move |v| { f.desc_err.set(None); f.description.set(v); }), f.desc_err.into(), In { maxlength: 120, ..In::default() })}
-        {text_field("bk.f.path", path.into(), Callback::new(move |v| { path_err.set(None); path_touched.set(true); preview.set(None); path.set(v); }), path_err.into(), In { mono: true, maxlength: 512, help: Some("bk.f.path_help"), placeholder: "/volume1/backup/laptop", ..In::default() })}
+        {text_field("bkpc.f.path", path.into(), Callback::new(move |v| { path_err.set(None); path_touched.set(true); preview.set(None); path.set(v); }), path_err.into(), In { mono: true, maxlength: 512, help: Some("bkpc.f.path_help"), placeholder: "/volume1/backup/laptop", ..In::default() })}
         <Show when=move || mode.get() == "adopt">
             <div class="sec-actions">
                 <button type="button" class="btn ghost sm" disabled=move || checking.get() || path.with(|p| p.trim().is_empty()) on:click=check>{spinner(checking)}<Icon icon=icons::SEARCH size=14 />{tr("bk.adopt.check")}</button>
@@ -374,7 +374,7 @@ fn add_dialog(pcs: Pcs, adopt_first: bool) -> AnyView {
     let ready = move || !device.with(|d| d.trim().is_empty()) && !path.with(|p| p.trim().is_empty()) && (mode.get() == "new" || preview.with(Option::is_some));
     let foot = view! {
         <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("cancel")}</button>
-        <button type="button" class="btn primary" disabled=move || busy.get() || !ready() on:click=save>{spinner(busy)}<Icon icon=icons::PLUS size=16 />{move || if mode.get() == "adopt" { t("bk.adopt") } else { t("bk.create") }}</button>
+        <button type="button" class="btn primary" disabled=move || busy.get() || !ready() on:click=save>{spinner(busy)}<Icon icon=icons::PLUS size=16 />{move || if mode.get() == "adopt" { t("bk.adopt") } else { t("bkpc.create") }}</button>
     }
     .into_any();
     ui::dialog(DlgKind::Normal, Signal::derive(move || t("bk.add_title").to_string()), close, body, Some(foot))
@@ -606,7 +606,7 @@ fn entry_row(e: SnapshotEntry, dir: &str, path: RwSignal<String>, copy: RwSignal
     let rel_open = rel.clone();
     let name = e.name.clone();
     let copyable = matches!(e.kind, EntryKind::Dir | EntryKind::File | EntryKind::Symlink);
-    let label = format!("{}: {}", t("bk.copy"), e.name);
+    let label = format!("{}: {}", t("bkpc.copy"), e.name);
     ui::row(vec![
         ui::cell("snap.col.name", "", view! {
             <span class="entry-name">
@@ -624,7 +624,7 @@ fn entry_row(e: SnapshotEntry, dir: &str, path: RwSignal<String>, copy: RwSignal
         ui::cell("snap.col.modified", "tnum", view! { {i18n::datetime(e.mtime_ms)} }.into_any()),
         ui::cell("snap.col.mode", "mono small", view! { {format!("{} {}:{}", mode_text(e.mode, e.kind), e.uid, e.gid)} }.into_any()),
         ui::actions(view! {
-            <button class="icon-btn sm" title=tr("bk.copy") aria-label=label disabled=!copyable on:click=move |_| copy.set(Some(rel.clone()))>
+            <button class="icon-btn sm" title=tr("bkpc.copy") aria-label=label disabled=!copyable on:click=move |_| copy.set(Some(rel.clone()))>
                 <Icon icon=icons::COPY size=16 />
             </button>
         }
@@ -642,7 +642,7 @@ fn copy_dialog(pcs: Pcs, base: (String, String), rel: String, close: Callback<()
     let go = move |_| {
         let body = CopyOutRequest { snapshot: base.1.clone(), path: rel2.clone(), destination: dest.get_untracked().trim().to_string() };
         let url = format!("{}/copy-out", base.0);
-        let ok = tf("bk.copied", &[("path", &rel2)]);
+        let ok = tf("bkpc.copied", &[("path", &rel2)]);
         busy.set(true);
         error.set(None);
         spawn_local(async move {
@@ -682,8 +682,8 @@ fn copy_dialog(pcs: Pcs, base: (String, String), rel: String, close: Callback<()
     .into_any();
     let foot = view! {
         <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("cancel")}</button>
-        <button type="button" class="btn primary" disabled=move || busy.get() || dest.with(|d| d.trim().is_empty()) on:click=go>{spinner(busy)}<Icon icon=icons::COPY size=16 />{tr("bk.copy")}</button>
+        <button type="button" class="btn primary" disabled=move || busy.get() || dest.with(|d| d.trim().is_empty()) on:click=go>{spinner(busy)}<Icon icon=icons::COPY size=16 />{tr("bkpc.copy")}</button>
     }
     .into_any();
-    ui::dialog(DlgKind::Normal, Signal::stored(t("bk.copy").to_string()), close, body, Some(foot))
+    ui::dialog(DlgKind::Normal, Signal::stored(t("bkpc.copy").to_string()), close, body, Some(foot))
 }

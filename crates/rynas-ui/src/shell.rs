@@ -188,7 +188,7 @@ fn Shell() -> impl IntoView {
                     <Route path=path!("/system/updates") view=pages::updates::Updates />
                     <Route path=path!("/notifications") view=pages::notifications::NotificationsPage />
                     <Route path=path!("/snapshots") view=pages::snapshots::Snapshots />
-                    <Route path=path!("/backup") view=pages::backup::Backup />
+                    <Route path=path!("/backup") view=pages::backup::BackupPage />
                     <Route path=path!("/security") view=pages::security::Security />
                     <Route path=path!("/files") view=pages::files::Files />
                     <Route path=path!("/files/*path") view=pages::files::Files />

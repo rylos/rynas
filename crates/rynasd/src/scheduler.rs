@@ -280,6 +280,11 @@ async fn create(
                 "scheduled shutdowns are created with the power schedule (/power/schedule)",
             ));
         }
+        if matches!(t.action, TaskAction::Backup { .. }) {
+            return Err(invalid(
+                "backup tasks are created with their job (/backup/restic/jobs)",
+            ));
+        }
         stage_tasks(p, &o, |doc| {
             if doc.tasks.iter().any(|x| x.id == t.id) {
                 return Err(conflict(
@@ -364,6 +369,12 @@ async fn delete(
                 return Err(conflict(
                     error_codes::CONFLICT,
                     format!("task {id} runs replica {target} of {job}: delete the target instead"),
+                ));
+            }
+            if let TaskAction::Backup { job } = &t.action {
+                return Err(conflict(
+                    error_codes::CONFLICT,
+                    format!("task {id} runs backup job {job}: delete the job instead"),
                 ));
             }
             if let TaskAction::PowerShutdown { rule } = &t.action {
@@ -690,6 +701,14 @@ pub fn run_event(
             format!("snapshot:job:{job}"),
             format!("Snapshot job {job}"),
             "snapshot.job",
+            job.clone(),
+        ),
+        TaskAction::Backup { job } => (
+            NotifyCategory::Backup,
+            "backup",
+            format!("backup:job:{job}"),
+            format!("Backup job {job}"),
+            "backup.job",
             job.clone(),
         ),
         _ => (

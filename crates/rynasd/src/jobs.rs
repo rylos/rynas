@@ -51,6 +51,7 @@ pub async fn spawn(p: &Arc<Protection>, t: &ScheduledTask, user: &str) -> Res<St
         TaskAction::PowerShutdown { .. } => Err(invalid(
             "scheduled shutdowns are started by rynasctl power scheduled-shutdown",
         )),
+        TaskAction::Backup { job } => crate::restic_backup::spawn_run(user, job),
         TaskAction::Command { .. } | TaskAction::Script { .. } => {
             Err(invalid("not an internal action"))
         }

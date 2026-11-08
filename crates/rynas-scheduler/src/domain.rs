@@ -166,6 +166,11 @@ pub fn normalize_task(mut t: ScheduledTask) -> Result<ScheduledTask, String> {
                 return Err(format!("task {id}: invalid user {user:?}"));
             }
         }
+        TaskAction::Backup { job } => {
+            if !valid_ref(job) {
+                return Err(format!("task {id}: invalid backup job {job:?}"));
+            }
+        }
         TaskAction::Snapshot { job } => {
             if !valid_ref(job) {
                 return Err(format!("task {id}: invalid snapshot job {job:?}"));

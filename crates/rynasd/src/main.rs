@@ -310,6 +310,7 @@ fn open_config(
         Arc::new(rynas_storage::domain::VolumesDomain),
         Arc::new(rynas_storage::domain::TuningDomain),
         snapshots.clone(),
+        Arc::new(rynas_backup::BackupDomain),
         scheduler.clone(),
         Arc::new(rynas_power::PowerDomain {
             rynasctl: PathBuf::from(rynas_btrfs::domain::RYNASCTL),
@@ -811,6 +812,25 @@ fn main() -> std::io::Result<()> {
         );
         let protection = Arc::new(protection);
         state.protection = Some(protection.clone());
+        // backups (D-BACKUP): the worker in a transient unit of its own; --dry-system or
+        // RYNAS_BACKUP_WORKER (development, the UI audit) start it as a plain child
+        {
+            let launch = match std::env::var_os("RYNAS_BACKUP_WORKER") {
+                Some(exe) => rynas_backup::Launch::Direct { exe: PathBuf::from(exe) },
+                None if args.dry_system => rynas_backup::Launch::Direct {
+                    exe: PathBuf::from(rynas_backup::WORKER),
+                },
+                None => rynas_backup::Launch::unit(PathBuf::from(rynas_backup::WORKER)),
+            };
+            let svc = rynasd::restic_backup::ResticSvc::new(
+                protection.clone(),
+                launch,
+                args.dry_system,
+                args.state_dir.join("notify"),
+            );
+            let _ = rynasd::restic_backup::SVC.set(svc.clone());
+            state.restic = Some(svc);
+        }
         let ups = Arc::new(rynasd::ups::Ups {
             ops: ops.clone(),
             protection: Some(protection.clone()),

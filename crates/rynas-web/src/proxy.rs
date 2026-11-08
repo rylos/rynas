@@ -275,6 +275,21 @@ pub fn routes() -> Router<AppState> {
         // Tailscale (remote access): status, install/uninstall, login/logout, options with
         // their timed confirmation; with the local address of the connection (rynasd tells
         // whether the session itself comes over the tailnet)
+        // backups to another NAS, a disk or the cloud (D-BACKUP)
+        .route("/backup/restic/jobs", get(forward).post(forward))
+        .route(
+            "/backup/restic/jobs/{name}",
+            get(forward).put(forward).delete(forward),
+        )
+        .route("/backup/restic/test", post(forward))
+        .route("/backup/restic/ssh-key", post(forward))
+        .route("/backup/restic/jobs/{name}/run", post(forward))
+        .route("/backup/restic/jobs/{name}/check", post(forward))
+        .route("/backup/restic/jobs/{name}/snapshots", get(forward))
+        .route("/backup/restic/jobs/{name}/browse", get(forward))
+        .route("/backup/restic/jobs/{name}/restore", post(forward))
+        .route("/backup/restic/jobs/{name}/download", get(forward))
+        .route("/backup/restic/jobs/{name}/preview-retention", get(forward))
         .route("/tailscale", get(forward_client))
         .route("/tailscale/install", post(forward_client))
         .route("/tailscale/uninstall", post(forward_client))

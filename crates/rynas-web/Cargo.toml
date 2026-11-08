@@ -68,10 +68,13 @@ depends = "$auto, adduser, libpam-runtime"
 # (7zip: zip/7z/iso archives; zstd: opening .tar.zst archives, GNU tar runs it; ffmpeg:
 # thumbnails, codecs and durations; unrar, suggested: rar archives), automatic updates
 # (unattended-upgrades), removable drives (cryptsetup-bin for encrypted sticks, ntfs-3g as
-# the NTFS fallback driver, exfatprogs and dosfstools for checks)
-recommends = "rsync, samba, nfs-kernel-server, acl, avahi-daemon, wsdd2, btrbk, btrfs-progs, mdadm, cryptsetup-bin, systemd-cryptsetup, smartmontools, hdparm, gdisk, iputils-arping, iputils-ping, 7zip, zstd, ffmpeg, unattended-upgrades, ntfs-3g, exfatprogs, dosfstools"
-# mtr-tiny: traceroute diagnostics as JSON
-suggests = "fail2ban, mtr-tiny, unrar"
+# the NTFS fallback driver, exfatprogs and dosfstools for checks), backups (restic: the
+# safety net that opens and repairs the same repositories; openssh-client: SFTP destinations
+# and their keys)
+recommends = "rsync, samba, nfs-kernel-server, acl, avahi-daemon, wsdd2, btrbk, btrfs-progs, mdadm, cryptsetup-bin, systemd-cryptsetup, smartmontools, hdparm, gdisk, iputils-arping, iputils-ping, 7zip, zstd, ffmpeg, unattended-upgrades, ntfs-3g, exfatprogs, dosfstools, restic, openssh-client"
+# mtr-tiny: traceroute diagnostics as JSON; rclone: backup destinations such as Google Drive
+# or OneDrive; restic-rest-server: receiving backups of another NAS
+suggests = "fail2ban, mtr-tiny, unrar, rclone, restic-rest-server"
 # rynas runs Samba as a standalone file server and owns smb.conf; Debian's samba recommends the
 # AD domain controller (which pulls winbind and its PAM/NSS modules): keep it out
 conflicts = "samba-ad-dc"
@@ -90,6 +93,7 @@ assets = [
     ["target/release/rynasctl", "usr/libexec/rynas/", "755"],
     ["target/release/rynas-btrbk-filter", "usr/libexec/rynas/", "755"],
     ["target/release/rynas-files-worker", "usr/libexec/rynas/", "755"],
+    ["target/release/rynas-backup-worker", "usr/libexec/rynas/", "755"],
     ["../../target/deb-stage/ui/**/*", "usr/share/rynas/ui/", "644"],
     # the curated app catalogue (D-APPCAT; a separate rynas-apps-catalog package later)
     ["../../apps/**/*", "usr/share/rynas/apps/", "644"],

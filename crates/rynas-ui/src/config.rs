@@ -255,6 +255,7 @@ pub mod keys {
     pub const SHARES: &str = "shares";
     pub const HOMES: &str = "homes";
     pub const SNAPSHOTS: &str = "snapshots";
+    pub const BACKUP: &str = "backup";
     pub const SCHEDULER: &str = "scheduler";
     pub const POWER: &str = "power.schedule";
     pub const UPS: &str = "ups.safemode";

@@ -4,7 +4,7 @@
 #   packaging/build-deb.sh [--build-ui] [--no-docker]
 #
 # Steps: (optionally) build the web UI with trunk on the host, then inside a Debian 13
-# container: cargo build --release of rynasd, rynas-web and rynas-files-worker for x86-64-v2, stage the UI with
+# container: cargo build --release of rynasd, rynas-web, rynas-files-worker and rynas-backup-worker for x86-64-v2, stage the UI with
 # precompressed .br/.gz siblings, generate the DEP-5 copyright file, run cargo deb.
 # Output: target/debian/rynas_<version>-1_amd64.deb
 #
@@ -65,8 +65,11 @@ export RUSTFLAGS="-C target-cpu=x86-64-v2 --remap-path-prefix=$ROOT=/build/rynas
 cargo build --release --locked -p rynasd -p rynas-web
 # the file manager worker: a crate with its own lock file (crates/rynas-files-worker)
 cargo build --release --locked --manifest-path crates/rynas-files-worker/Cargo.toml
+# the backup worker: rustic_core and its backends, a crate with its own lock file
+# (crates/rynas-backup-worker, D-BACKUP; needs Rust 1.91)
+cargo build --release --locked --manifest-path crates/rynas-backup-worker/Cargo.toml
 # the release profile strips symbols; drop the compiler version notes too (lintian)
-for b in rynasd rynasctl rynas-btrbk-filter rynas-web rynas-files-worker; do
+for b in rynasd rynasctl rynas-btrbk-filter rynas-web rynas-files-worker rynas-backup-worker; do
     objcopy --remove-section=.comment "$CARGO_TARGET_DIR/release/$b"
 done
 

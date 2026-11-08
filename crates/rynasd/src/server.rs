@@ -85,6 +85,8 @@ pub struct DaemonState {
     pub system_power: crate::system_power::SpState,
     /// PC backup, receive side ([`crate::pc_backup`]).
     pub pc_backup: crate::pc_backup::PbState,
+    /// Backups to another NAS, a disk or the cloud; `None` answers 503 on its endpoints.
+    pub restic: crate::restic_backup::RsState,
 }
 
 impl DaemonState {
@@ -128,6 +130,7 @@ impl DaemonState {
             tailscale: None,
             system_power: None,
             pc_backup: None,
+            restic: None,
         }
     }
 }
@@ -213,6 +216,7 @@ pub fn router(state: DaemonState) -> Router {
         .merge(crate::tailscale::router(state.tailscale))
         .merge(crate::system_power::router(state.system_power))
         .merge(crate::pc_backup::router(state.pc_backup))
+        .merge(crate::restic_backup::router(state.restic))
         .fallback(|| async { Error::not_found("no such endpoint") })
         // 405, query string and path rejections: ApiError bodies too
         .layer(axum::middleware::from_fn(crate::error::json_errors))

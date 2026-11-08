@@ -1,0 +1,23 @@
+[package]
+name = "rynas-backup"
+description = "rynas backups to another NAS, a disk or the cloud (D-BACKUP): the backup jobs domain, repository settings for the worker, the worker runner and job status"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+# No rustic here: the engine lives in rynas-backup-worker (its own workspace); this crate
+# only speaks its JSON protocol.
+[dependencies]
+rynas-api-types.workspace = true
+rynas-config.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+libc.workspace = true
+tokio = { workspace = true, features = ["process", "io-util"] }
+tokio-util.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "process", "io-util", "time"] }
