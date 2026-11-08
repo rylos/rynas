@@ -195,6 +195,7 @@ pub fn normalize_job(mut j: SnapshotJob) -> Result<SnapshotJob, String> {
             r.min
         ));
     }
+    j.replicas = crate::replication::normalize_targets(&j)?;
     Ok(j)
 }
 
@@ -301,6 +302,7 @@ impl Applier for SnapshotsDomain {
                 }
             }
         }
+        files.extend(crate::replication::managed_files(&c));
         files.push(if c.system.enabled {
             // apt.conf has no `#` comments: no header, the hash alone detects drift
             ManagedFile::whole(APT_HOOK, apt_hook(&c), false)

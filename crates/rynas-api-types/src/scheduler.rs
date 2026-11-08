@@ -73,6 +73,9 @@ pub enum TaskAction {
     },
     /// Snapshot job (`/api/v1/snapshots/jobs`): `btrbk run` with the job's configuration.
     Snapshot { job: String },
+    /// Replica target with its own schedule (`/api/v1/snapshots/replication`): btrbk sends
+    /// the job's missing snapshots to the target and applies the target's retention.
+    Replicate { job: String, target: String },
     /// `btrfs scrub` of the filesystem mounted at `filesystem`.
     Scrub { filesystem: String },
     /// SMART self-test of a disk (`sda`, `nvme0n1`).

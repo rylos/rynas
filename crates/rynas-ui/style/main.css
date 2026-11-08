@@ -1609,6 +1609,12 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .entry-name { display: inline-flex; align-items: center; gap: var(--s-2); }
 .entry-name > .icon { color: var(--text-subtle); flex: none; }
 .ret-preview { display: flex; flex-direction: column; gap: var(--s-2); padding: var(--s-3); border-radius: var(--r-md); border: 1px solid var(--border); background: var(--surface-2); max-height: 240px; overflow-y: auto; }
+/* Snapshot replication */
+.repl-intro { flex: 1 1 260px; min-width: 0; margin: 0; }
+.repl-copy { display: flex; align-items: flex-start; gap: var(--s-2); min-width: 0; }
+.repl-copy .secret { flex: 1; min-width: 0; }
+.repl-keys li, .repl-browse .ellipsis-cell { overflow-wrap: anywhere; }
+.repl-browse { display: flex; flex-direction: column; gap: var(--s-2); margin-top: var(--s-3); padding-top: var(--s-3); border-top: 1px solid var(--border); }
 .narrow-form { max-width: 640px; }
 @media (max-width: 767px) {
   .secret-row { flex-wrap: wrap; }

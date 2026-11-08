@@ -8,7 +8,7 @@ use std::time::Duration;
 use rynas_api_types::scheduler::{ScheduledTask, SmartTestKind, TaskAction};
 use rynas_api_types::snapshots::SnapshotsConfig;
 use rynas_btrfs::SNAPSHOTS_KEY;
-use rynas_btrfs::btrbk::{conf_path, parse_report};
+use rynas_btrfs::btrbk::parse_report;
 use rynas_tasks::Cmd;
 
 use crate::ops::{Error, Res};
@@ -22,6 +22,9 @@ const SMART_TIMEOUT: Duration = Duration::from_secs(120);
 pub async fn spawn(p: &Arc<Protection>, t: &ScheduledTask, user: &str) -> Res<String> {
     match &t.action {
         TaskAction::Snapshot { job } => spawn_snapshot(p, job, user).await,
+        TaskAction::Replicate { job, target } => {
+            crate::replication::spawn_transfer(p, job, target, user).await
+        }
         TaskAction::Scrub { filesystem } => {
             let cmd = Cmd::new("btrfs")
                 .args(["scrub", "start", "-B", "-d"])
@@ -84,13 +87,8 @@ pub async fn spawn_snapshot(p: &Arc<Protection>, job: &str, user: &str) -> Res<S
             tokio::task::spawn_blocking(move || host.host().ensure_dir(&dir))
                 .await
                 .map_err(|e| e.to_string())??;
-            let conf = conf_path(&j.name);
-            let cmd = Cmd::new("btrbk")
-                .arg("-c")
-                .arg(&conf)
-                .args(["run", "--format=raw"])
-                .env_clear()
-                .timeout(SNAPSHOT_TIMEOUT);
+            // `run`, or `snapshot` when the job has replica targets (they transfer after)
+            let cmd = rynas_btrfs::replication::snapshot_cmd(&j, SNAPSHOT_TIMEOUT);
             ctx.log(&format!("$ {}", cmd.display()));
             let out = cmd
                 .run(Some(ctx.token()), None)
@@ -118,6 +116,9 @@ pub async fn spawn_snapshot(p: &Arc<Protection>, job: &str, user: &str) -> Res<S
                 r.created.len(),
                 r.deleted.len()
             ));
+            // targets that follow the snapshots: their failures notify on their own and
+            // never fail the snapshot run
+            crate::replication::after_snapshots(&ctx, &p, &j).await;
             Ok(())
         })?)
 }

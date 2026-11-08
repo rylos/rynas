@@ -238,6 +238,96 @@ Added 2026-11-05 for three requests of the maintainer.
   create form with the previous name, permissions and settings. "Delete permanently" is a task
   with the same plan and typed confirmation.
 
+## 6. Snapshot replication: design (phase 2)
+
+Added 2026-11-08. A second copy of a snapshot job's snapshots on another btrfs volume of the
+NAS (typical: system/apps on an NVMe RAID1 volume, copy on an HDD volume) or on another Linux
+host over SSH, with its own retention. Decision D-REPL.
+
+**What others do.**
+- *DSM Snapshot Replication*: replication tasks per shared folder, schedule down to 5 minutes,
+  Smart Retention (GFS), the latest replicated snapshot cannot be deleted, recovery as
+  switchover, failover, re-protect and *test failover* (a writable copy on the destination).
+- *TrueNAS replication tasks*: transport SSH, SSH+netcat or local; bound to periodic snapshot
+  tasks, "Run Automatically" right after the snapshot task or its own schedule; destination
+  retention "same as source", custom or none; "replicate from scratch" (destroys the
+  destination, off by default); bandwidth limit, stream compression, "save pending snapshots"
+  (snapshots not yet replicated are not pruned), retries; read-only policy of the destination.
+- *btrbk*: `target send-receive <dir|ssh://host:port/dir>` per subvolume, `target_preserve` /
+  `target_preserve_min` independent of `snapshot_preserve`, incremental from the latest common
+  parent (full send otherwise), `stream_compress`, `rate_limit` (mbuffer), `ssh_identity`,
+  `ssh_user`, `backend_remote btrfs-progs-sudo`; `snapshot` creates and prunes snapshots only,
+  `resume` sends the missing backups only, `clean` deletes interrupted receives (no
+  `received_uuid`); the latest snapshot and the latest snapshot/backup pair are always kept, and
+  every snapshot is kept while a target is unreachable. On the remote side
+  `ssh_filter_btrbk.sh --target --delete --restrict-path` pins the key; **before 0.32.7 the
+  filter's allow-list had no end anchor (CVE-2026-62943)**, Debian trixie still ships 0.32.6.
+- *btrfs send/receive*: a received subvolume carries `received_uuid` and must stay read-only;
+  flipping it writable keeps (or, on newer kernels, clears with `-f`) the received data and
+  breaks later incremental receives, so a writable copy is a new snapshot of it, never the
+  replica itself.
+- *OpenMediaVault* has per-folder btrfs snapshots without replication (scripts or btrsync
+  around it); no Unraid equivalent was found.
+
+**Choices for rynas.**
+- **A target belongs to its snapshot job** (`SnapshotJob.replicas`, key `snapshots`), not a
+  separate task kind: btrbk then sees the snapshots and the targets in one configuration
+  (`/etc/rynas/btrbk/<job>.conf`), picks the parent itself, never prunes the pair the next
+  incremental needs and keeps everything while a target is down (TrueNAS' "save pending
+  snapshots" for free), and the names stay btrbk's on both sides (no naming-schema mismatch).
+  Each target is a `target send-receive` section with `group replica-<id>`.
+- **When**: after each snapshot run of the job (default, DSM/TrueNAS "run automatically"), or on
+  its own schedule: scheduler task `replica-<job>-<id>`, action `replicate`, staged with the
+  target. A job with targets runs `btrbk snapshot` (create + prune the source), then the targets
+  that follow it; a transfer is `btrbk clean replica-<id>` (interrupted receives, btrbk-named
+  only) then `btrbk resume --preserve-snapshots replica-<id>` (missing replicas, target
+  retention). An interrupted transfer starts that snapshot again at the next run (btrfs send
+  has no byte-level resume); everything already received stays. btrbk's lock is shared with
+  the job: a transfer waits (20 s steps, 15 min) while the job runs.
+- **Retention on the target**: GFS counts and minimum like the snapshots, default 14 daily,
+  8 weekly, 12 monthly, 2 yearly, everything of the last day. btrbk only deletes, in the target
+  directory, subvolumes matching its own `<job>.YYYYMMDDTHHMM` names: never what rynas did not
+  create. There is no "replicate from scratch".
+- **Local target**: a folder on another btrfs volume, suggested `/<volume>/.replicas/<job>`
+  (mode 0700, created at the first run). Refused when on the filesystem of the source (same
+  btrfs UUID: not a second copy) or not on btrfs (non-btrfs destinations are restic's, D2);
+  the first run refuses to create it when no volume is mounted there (it would land on the
+  system disk).
+- **Remote target**: `ssh://user@host:port/path`, key-based with a dedicated ed25519 pair
+  (`/etc/rynas/ssh/replication_ed25519`, created on request). rynas shows the public key and
+  the exact `authorized_keys` line
+  (`command="…/ssh_filter_btrbk.sh --target --delete --restrict-path <path> [--sudo] --log",restrict <key>`)
+  and warns that the server needs btrbk ≥ 0.32.7. Host keys are read with `ssh-keyscan`, shown
+  with their SHA256 fingerprints and stored only once confirmed; they go to rynas's own
+  `/etc/rynas/ssh/known_hosts`, used through `/etc/ssh/ssh_config.d/60-rynas-replication.conf`
+  (`Match originalhost <host> user <user> localuser root`: strict host key checking, batch
+  mode, keepalives), so nothing else of root's ssh changes. Non-root users run btrfs through
+  `sudo -n` (`backend_remote btrfs-progs-sudo`). Compression (`zstd`, `lz4`, `gzip`) only for
+  remote targets; bandwidth limit for both (`rate_limit`, needs mbuffer).
+- **Status per target** (`<state>/replication/<job>/<id>.json`): last success, last attempt,
+  duration, replicas sent, newest replica, replicas pruned, last error with a hint (key refused,
+  host key, unreachable, filter, missing folder, not btrfs, no space, busy, btrbk missing) that
+  the UI turns into the fix; next run from the job's or the target's timer. Notifications on
+  state changes only: `replication.failed` (firing) / `replication.ok` (resolved), key
+  `replication:<job>:<id>`, category backup, fields `job`, `target`, `name`, `hint`. A failed
+  transfer never fails the snapshot run it follows. Transferred bytes are not reported: btrbk's
+  raw output has no size (open point).
+- **Restore** (local targets): list the replicas (read-only, interrupted receives flagged),
+  browse them (descriptor walk of `rynas-btrfs::browse`), copy a file or folder back next to
+  the original in the job's live subvolume, and **promote**: a writable snapshot of a complete
+  replica as a new folder at the top of the target's volume (typed confirmation), ready to be
+  shared; the replica stays read-only so later transfers continue. Replicas on another host are
+  browsed there (the filter allows no reads); switchover/failover with reverse replication stay
+  phase 3.
+- Reusable pieces (`rynas_btrfs::btrbk_ssh`): key pair, filter command, `authorized_keys` line,
+  key scan, fingerprints, known_hosts lines, for the "NAS as a btrbk target" side too.
+
+API: `GET/POST /api/v1/snapshots/replication`, `GET/PUT/DELETE …/{job}/{id}`,
+`POST …/{job}/{id}/run` (task `replication.run`), `GET/POST …/ssh-key`, `POST …/host-keys`,
+`GET …/{job}/{id}/snapshots`, `GET …/snapshots/{name}/browse?path=`,
+`POST …/snapshots/{name}/restore` (task `replication.restore`),
+`POST …/snapshots/{name}/promote` (task `replication.promote`). UI: Snapshots → Replication.
+
 ## Sources
 - btrbk: [btrbk.conf(5)](https://digint.ch/btrbk/doc/btrbk.conf.5.html), [tags and release 0.32.7](https://github.com/digint/btrbk/tags)
 - Synology: [Snapshot Replication spec](https://www.synology.com/dsm/software_spec/snapshot_replication), [Data Protection White Paper](https://cndl.synology.cn/download/Document/Software/WhitePaper/Firmware/DSM/All/enu/Synology_Data_Protection_White_Paper.pdf)
@@ -249,6 +339,7 @@ Added 2026-11-05 for three requests of the maintainer.
 - Rust: [libbtrfsutil](https://docs.rs/crate/libbtrfsutil/0.1.0), [libbtrfsutil-sys](https://lib.rs/crates/libbtrfsutil-sys)
 - rustic: [AltLinux](https://packages.altlinux.org/en/sisyphus/srpms/rustic/3360151391433197853), [OpenBSD](https://www.openbsdhandbook.com/packages/release/sysutils/rustic/)
 - Snapshot folders and deletion: [btrfs "prevent deletion of mounted subvolumes" (LKML, 2015)](https://lore.kernel.org/lkml/20150401112242.GG6821@suse.cz/T/), [ZFS `snapdir` property](https://openzfs.github.io/openzfs-docs/man/master/7/zfsprops.7.html), [NetApp: snapshots hidden in ~snapshot](https://kb.netapp.com/on-prem/ontap/da/NAS/NAS-KBs/Snapshots_are_not_visible_inside_the_~snapshot_folder_because_they_are_marked_as_hidden), [QNAP @Recently-Snapshot](https://www.qnap.com/en/how-to/faq/con_show.php?cid=2343), [forum: DSM snapshot folder over SMB](https://www.synoforum.com/threads/hide-snapshot-folder.10074/)
+- Replication: [btrbk(1)](https://digint.ch/btrbk/doc/btrbk.1.html), [ssh_filter_btrbk(1)](https://digint.ch/btrbk/doc/ssh_filter_btrbk.1.html), [CVE-2026-62943 (Debian tracker)](https://security-tracker.debian.org/tracker/CVE-2026-62943), [Red Hat bug 2538186](https://bugzilla.redhat.com/show_bug.cgi?id=2538186), [TrueNAS 25.10 replication screens](https://www.truenas.com/docs/scale/25.10/scaleuireference/dataprotection/replicationscreensscale/), [Synology Snapshot Replication 7.0 spec](https://www.synology.com/en-us/dsm/7.0/software_spec/snapshot_replication), [btrfs: received info on ro→rw switch (lore)](https://lore.kernel.org/all/20210908183312.GU3379@twin.jikos.cz/T/), [OMV 6.3 btrfs snapshots](https://www.openmediavault.org/?p=3404)
 - Maintainer's projects: [btrbk-nas](https://github.com/rylos/btrbk-nas) (README, `src/btrfs.rs`), [synodeb](https://github.com/rylos/synodeb) (`pkg/synodeb/usr/sbin/synodeb-dom`)
 
 **To be verified:**

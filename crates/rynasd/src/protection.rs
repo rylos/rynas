@@ -36,6 +36,9 @@ pub struct Protection {
     /// The boot half: a hardware module's boot layer; `None` refuses root rollbacks (a
     /// console procedure on this machine).
     pub boot: Option<Arc<dyn rynas_btrfs::rootfs::BootSync>>,
+    /// Filesystems, key pair and host keys of snapshot replication ([`crate::replication`]):
+    /// in memory until `main` chooses the host.
+    pub replicas: Arc<dyn rynas_btrfs::replication::ReplicaHost>,
     /// Timers and running task units, read at most every [`RUNTIME_TTL`] (guidelines S8).
     /// `(read at, read at in ms since the epoch, state)`.
     runtime: Mutex<Option<(Instant, u64, Arc<Runtime>)>>,
@@ -106,6 +109,7 @@ impl Protection {
             state_dir,
             root: RootBackend::None,
             boot: None,
+            replicas: Arc::new(rynas_btrfs::replication::MemoryReplicas::new()),
             runtime: Mutex::new(None),
             runtime_flight: tokio::sync::Mutex::new(()),
         }
@@ -160,6 +164,12 @@ impl Protection {
     }
 
     /// Sets the root rollback executor.
+    /// Sets the machine side of snapshot replication.
+    pub fn with_replicas(mut self, r: Arc<dyn rynas_btrfs::replication::ReplicaHost>) -> Self {
+        self.replicas = r;
+        self
+    }
+
     pub fn with_root(mut self, root: RootBackend) -> Self {
         self.root = root;
         self

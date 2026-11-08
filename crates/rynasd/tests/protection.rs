@@ -120,7 +120,14 @@ fn env_with(root_ops: RootBackend, boot: Option<Arc<dyn rynas_btrfs::rootfs::Boo
         dir.path().join("state"),
     )
     .with_root(root_ops)
-    .with_boot(boot);
+    .with_boot(boot)
+    .with_replicas({
+        let r = Arc::new(rynas_btrfs::replication::MemoryReplicas::new());
+        r.add_btrfs("/srv/vol1", "uuid-1");
+        r.add_btrfs("/srv/vol2", "uuid-2");
+        r.state.lock().unwrap().host_keys = vec!["backup.lan ssh-ed25519 AAAAC3NzaC1lZDI1NTE5".into()];
+        r
+    });
     st.protection = Some(Arc::new(protection));
     Env {
         _dir: dir,
@@ -690,4 +697,96 @@ async fn root_rollback_needs_a_boot_layer_and_a_bootable_restore_point() {
     )
     .await;
     assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn replica_targets_stage_with_their_job() {
+    use rynas_api_types::replication::{HostKey, ReplicaView, ReplicaWarning, ReplicationKey};
+    let e = env();
+    let (s, b) = call(&e, "POST", "/v1/snapshots/jobs", Some(json!({"name": "docs", "subvolume": "/srv/vol1/docs"}))).await;
+    assert_eq!(s, StatusCode::CREATED, "{}", String::from_utf8_lossy(&b));
+    apply(&e);
+    let local = |path: &str| json!({"job": "docs", "target": {"id": "hdd", "destination": {"kind": "local", "path": path}}});
+    // not a second copy, not btrfs, no such job
+    for (body, why) in [
+        (local("/srv/vol1/replica"), "not a second copy"),
+        (local("/mnt/usb/replica"), "not on btrfs"),
+        (json!({"job": "nope", "target": {"id": "x", "destination": {"kind": "local", "path": "/srv/vol2/x"}}}), "no snapshot job"),
+    ] {
+        let (s, b) = call(&e, "POST", "/v1/snapshots/replication", Some(body)).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{}", String::from_utf8_lossy(&b));
+        assert!(String::from_utf8_lossy(&b).contains(why), "{}", String::from_utf8_lossy(&b));
+    }
+    let (s, b) = call(&e, "POST", "/v1/snapshots/replication", Some(local("/srv/vol2/.replicas/docs"))).await;
+    assert_eq!(s, StatusCode::CREATED, "{}", String::from_utf8_lossy(&b));
+    let v: ReplicaView = serde_json::from_slice(&b).unwrap();
+    assert!(v.target.after_snapshots && v.task_id.is_none() && v.warnings.is_empty());
+    assert_eq!(v.target.retention.daily, 14, "default target retention");
+    let (s, _) = call(&e, "POST", "/v1/snapshots/replication", Some(local("/srv/vol2/other"))).await;
+    assert_eq!(s, StatusCode::CONFLICT, "same id twice");
+    // a remote target with its own schedule
+    let remote = json!({"job": "docs", "schedule": {"kind": "calendar", "on_calendar": "02:00"},
+        "target": {"id": "offsite", "after_snapshots": false, "compress": "zstd", "rate_limit_kib": 2048,
+            "destination": {"kind": "ssh", "host": "backup.lan", "user": "btrbk", "sudo": true, "path": "/srv/backup/docs"}}});
+    let (s, b) = call(&e, "POST", "/v1/snapshots/replication", Some(remote.clone())).await;
+    assert_eq!(s, StatusCode::CREATED, "{}", String::from_utf8_lossy(&b));
+    let v: ReplicaView = serde_json::from_slice(&b).unwrap();
+    assert_eq!(v.task_id.as_deref(), Some("replica-docs-offsite"));
+    assert_eq!(v.url, "ssh://backup.lan:22/srv/backup/docs");
+    assert_eq!(v.warnings, [ReplicaWarning::NoHostKey]);
+    assert_eq!(v.authorized_keys_line, "", "no key yet");
+    // key pair, authorized_keys line, host keys
+    let (s, b) = call(&e, "POST", "/v1/snapshots/replication/ssh-key", None).await;
+    assert_eq!(s, StatusCode::OK);
+    let k: ReplicationKey = serde_json::from_slice(&b).unwrap();
+    assert!(k.public_key.starts_with("ssh-ed25519 ") && k.fingerprint.starts_with("SHA256:"));
+    let (_, b) = call(&e, "GET", "/v1/snapshots/replication/docs/offsite", None).await;
+    let v: ReplicaView = serde_json::from_slice(&b).unwrap();
+    assert!(v.authorized_keys_line.starts_with("command=\"/usr/share/btrbk/scripts/ssh_filter_btrbk.sh --target --delete --restrict-path /srv/backup/docs --sudo --log\",restrict ssh-ed25519 "), "{}", v.authorized_keys_line);
+    let (s, b) = call(&e, "POST", "/v1/snapshots/replication/host-keys", Some(json!({"host": "backup.lan"}))).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    let keys: Vec<HostKey> = serde_json::from_slice(&b).unwrap();
+    assert_eq!(keys[0].line, "backup.lan ssh-ed25519 AAAAC3NzaC1lZDI1NTE5");
+    let (s, _) = call(&e, "POST", "/v1/snapshots/replication/host-keys", Some(json!({"host": "-oProxyCommand=x"}))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let mut confirmed = remote.clone();
+    confirmed["target"]["destination"]["host_keys"] = json!([keys[0].line]);
+    let (s, b) = call(&e, "PUT", "/v1/snapshots/replication/docs/offsite", Some(confirmed)).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    assert!(serde_json::from_slice::<ReplicaView>(&b).unwrap().warnings.is_empty());
+    apply(&e);
+    let conf = std::fs::read_to_string(e._dir.path().join("root/etc/rynas/btrbk/docs.conf")).unwrap();
+    assert!(conf.contains("    target send-receive /srv/vol2/.replicas/docs\n      group replica-hdd\n"), "{conf}");
+    assert!(conf.contains("      rate_limit 2048k\n      ssh_user btrbk\n      ssh_identity /etc/rynas/ssh/replication_ed25519\n      stream_compress zstd\n      backend_remote btrfs-progs-sudo\n"), "{conf}");
+    let kh = std::fs::read_to_string(e._dir.path().join("root/etc/rynas/ssh/known_hosts")).unwrap();
+    assert!(kh.contains("backup.lan ssh-ed25519 AAAAC3NzaC1lZDI1NTE5"));
+    // the task of a target goes with the target; editing the job keeps its targets
+    let (s, _) = call(&e, "DELETE", "/v1/scheduler/tasks/replica-docs-offsite", None).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    let (s, _) = call(&e, "POST", "/v1/scheduler/tasks", Some(json!({"id": "r", "action": {"kind": "replicate", "job": "docs", "target": "hdd"}, "trigger": {"kind": "manual"}}))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, b) = call(&e, "PUT", "/v1/snapshots/jobs/docs", Some(json!({"subvolume": "/srv/vol1/docs"}))).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    assert_eq!(serde_json::from_slice::<SnapshotJobView>(&b).unwrap().job.replicas.len(), 2);
+    // replicas: local only; a missing directory has none; promote needs the name typed
+    let (s, _) = call(&e, "GET", "/v1/snapshots/replication/docs/offsite/snapshots", None).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, b) = call(&e, "GET", "/v1/snapshots/replication/docs/hdd/snapshots", None).await;
+    assert_eq!((s, b.as_slice()), (StatusCode::OK, b"[]".as_slice()));
+    let (s, b) = call(&e, "POST", "/v1/snapshots/replication/docs/hdd/snapshots/docs.20261108T0100/promote", Some(json!({"folder": "docs-restored", "confirm": "x"}))).await;
+    assert_eq!((s, code(&b).as_str()), (StatusCode::BAD_REQUEST, error_codes::CONFIRMATION_REQUIRED));
+    let (s, _) = call(&e, "GET", "/v1/snapshots/replication/docs/hdd/snapshots/other.20261108T0100/browse", None).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "another job's names");
+    // removing a target removes its task, removing the job removes the rest
+    let (s, _) = call(&e, "DELETE", "/v1/snapshots/replication/docs/offsite", None).await;
+    assert_eq!(s, StatusCode::OK);
+    apply(&e);
+    let (_, b) = call(&e, "GET", "/v1/scheduler/tasks", None).await;
+    assert!(!String::from_utf8_lossy(&b).contains("replica-docs-offsite"));
+    assert!(!e._dir.path().join("root/etc/rynas/ssh/known_hosts").exists(), "no remote target: no known_hosts");
+    let (s, _) = call(&e, "DELETE", "/v1/snapshots/jobs/docs", None).await;
+    assert_eq!(s, StatusCode::OK);
+    apply(&e);
+    let (_, b) = call(&e, "GET", "/v1/snapshots/replication", None).await;
+    assert_eq!(b, b"[]");
 }

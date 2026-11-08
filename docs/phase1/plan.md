@@ -975,6 +975,7 @@ schema 2 added the `code` and `body_format` columns.
 | `config.apply_failed` / `config.apply_ok` | `type`, `task_id`, `user` | Configuration apply failed / succeeded |
 | `sched.task_failed` / `sched.task_ok` / `sched.task_finished` | `task`, `name`, `result`, `exit_code`, `signal` | Task {name} failed / succeeded / finished (body: output as `log`, or "Result: …") |
 | `snapshot.job_failed` / `snapshot.job_ok` / `snapshot.job_finished` | same, `name` = job | Snapshot job {name} failed / succeeded / finished |
+| `replication.failed` / `replication.ok` | `job`, `target`, `name`, `hint` (failed) | Replication {name} failed / works again (body: btrbk's or ssh's error, not translated) |
 | `auth.lockout` | `user`, `ip`, `retry_after_s` | Login locked for {user} after failed attempts |
 | `auth.totp_enabled` / `auth.totp_disabled` | `user` | Two-factor authentication enabled / disabled for {user} |
 | `power.shutdown` / `power.shutdown_skipped` | `rule`, `reasons` (skipped) | Scheduled shutdown {rule} (skipped) |

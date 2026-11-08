@@ -97,10 +97,11 @@ pub fn Snapshots() -> impl IntoView {
                 </button>
             </PageHeader>
             <section class="card widget w-12">
-                {tabs("snp", &["snap.tab.snapshots", "snap.tab.jobs", "snap.tab.system"], tab, "snap.title")}
+                {tabs("snp", &["snap.tab.snapshots", "snap.tab.jobs", "snap.tab.replication", "snap.tab.system"], tab, "snap.title")}
                 <div role="tabpanel" id="snp-p0" aria-labelledby="snp-t0" hidden=move || tab.get() != 0>{snapshots_panel(jobs, system, filter)}</div>
                 <div role="tabpanel" id="snp-p1" aria-labelledby="snp-t1" hidden=move || tab.get() != 1>{jobs_panel(jobs, edit, filter, tab)}</div>
-                <div role="tabpanel" id="snp-p2" aria-labelledby="snp-t2" hidden=move || tab.get() != 2>{system_panel(system)}</div>
+                <div role="tabpanel" id="snp-p2" aria-labelledby="snp-t2" hidden=move || tab.get() != 2>{crate::pages::replication::panel(jobs)}</div>
+                <div role="tabpanel" id="snp-p3" aria-labelledby="snp-t3" hidden=move || tab.get() != 3>{system_panel(system)}</div>
             </section>
             {move || edit.get().map(|v| job_editor(v, Callback::new(move |_| edit.set(None))))}
         </div>
@@ -753,7 +754,7 @@ fn job_editor(init: Option<SnapshotJobView>, close: Callback<()>) -> AnyView {
     let (job, schedule, enabled) = match &init {
         Some(v) => (v.job.clone(), v.schedule.clone(), v.enabled),
         None => (
-            SnapshotJob { name: String::new(), share: None, subvolume: String::new(), snapshot_dir: String::new(), retention: Retention::default() },
+            SnapshotJob { name: String::new(), share: None, subvolume: String::new(), snapshot_dir: String::new(), retention: Retention::default(), replicas: Vec::new() },
             None,
             true,
         ),

@@ -270,6 +270,11 @@ async fn create(
                 "snapshot tasks are created with their job (/snapshots/jobs)",
             ));
         }
+        if matches!(t.action, TaskAction::Replicate { .. }) {
+            return Err(invalid(
+                "replication tasks are created with their target (/snapshots/replication)",
+            ));
+        }
         if matches!(t.action, TaskAction::PowerShutdown { .. }) {
             return Err(invalid(
                 "scheduled shutdowns are created with the power schedule (/power/schedule)",
@@ -353,6 +358,12 @@ async fn delete(
                 return Err(conflict(
                     error_codes::CONFLICT,
                     format!("task {id} runs snapshot job {job}: delete the job instead"),
+                ));
+            }
+            if let TaskAction::Replicate { job, target } = &t.action {
+                return Err(conflict(
+                    error_codes::CONFLICT,
+                    format!("task {id} runs replica {target} of {job}: delete the target instead"),
                 ));
             }
             if let TaskAction::PowerShutdown { rule } = &t.action {
@@ -667,7 +678,8 @@ pub fn run_event(
     output: &str,
     failed_before: bool,
 ) -> Option<NewEvent> {
-    if task.notify == NotifyPolicy::Never {
+    // a transfer notifies by itself (`replication.*`, also after a snapshot run)
+    if task.notify == NotifyPolicy::Never || matches!(task.action, TaskAction::Replicate { .. }) {
         return None;
     }
     // event codes: `snapshot.job_*` / `sched.task_*` + failed|ok|finished, field `name`

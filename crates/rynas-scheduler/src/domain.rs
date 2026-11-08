@@ -171,6 +171,11 @@ pub fn normalize_task(mut t: ScheduledTask) -> Result<ScheduledTask, String> {
                 return Err(format!("task {id}: invalid snapshot job {job:?}"));
             }
         }
+        TaskAction::Replicate { job, target } => {
+            if !valid_ref(job) || !valid_ref(target) {
+                return Err(format!("task {id}: invalid replica {job:?}/{target:?}"));
+            }
+        }
         TaskAction::Scrub { filesystem } => {
             let ok = filesystem.starts_with('/')
                 && filesystem.len() <= 1024

@@ -10,6 +10,8 @@
 //! - [`rootfs`]: rolling the system back to a restore point (`@rootfs` and, through a hardware
 //!   module's boot layer, the boot entry of its kernel);
 //! - [`btrbk`]: the configuration rynas generates per job and btrbk's raw output;
+//! - [`replication`]: replica targets of a job (btrbk `target` sections), transfers, status,
+//!   replicas browse and promote; [`btrbk_ssh`]: reusable SSH key and filter helpers;
 //! - [`domain`]: the `snapshots` configuration domain.
 //!
 //! Ported in part from btrbk-nas (MIT, same author): `snapshot.rs`, `btrfs.rs`, `browse.rs`.
@@ -17,9 +19,11 @@
 
 pub mod browse;
 pub mod btrbk;
+pub mod btrbk_ssh;
 pub mod domain;
 pub mod ioctl;
 pub mod name;
+pub mod replication;
 pub mod restore;
 pub mod rootfs;
 pub mod scan;

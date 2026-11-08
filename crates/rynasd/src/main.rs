@@ -798,6 +798,11 @@ fn main() -> std::io::Result<()> {
         } else {
             rynasd::protection::RootBackend::Host
         })
+        .with_replicas(if args.dry_system {
+            Arc::new(rynas_btrfs::replication::MemoryReplicas::new())
+        } else {
+            Arc::new(rynas_btrfs::replication::HostReplicas)
+        })
         .with_boot(
             opened
                 .modules

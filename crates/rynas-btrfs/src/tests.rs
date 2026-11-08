@@ -77,6 +77,7 @@ fn job(name: &str, sv: &str) -> SnapshotJob {
         subvolume: sv.into(),
         snapshot_dir: String::new(),
         retention: RetentionPreset::Standard.retention(),
+        replicas: Vec::new(),
     }
 }
 
