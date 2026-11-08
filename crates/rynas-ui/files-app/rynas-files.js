@@ -74,21 +74,43 @@ function start() {
   const el = document.createElement("div");
   el.className = "rynas-files-host";
   const root = el.attachShadow({ mode: "open" });
-  const css = document.createElement("link");
-  css.rel = "stylesheet";
-  css.href = new URL("app.css", BASE).href;
+  const href = new URL("app.css", BASE).href;
   const box = document.createElement("div");
   box.className = "sf";
   box.dataset.theme = shellTheme();
   box.innerHTML = CHROME;
   // nothing shows before the styles: no flash of unstyled chrome
   box.hidden = true;
-  root.append(css, box);
+  root.append(box);
   Object.assign(host, { el, root, box });
-  started = new Promise((resolve) => (css.onload = css.onerror = resolve)).then(() => {
-    box.hidden = false;
-    return import("./js/main.js");
-  });
+  // A constructed stylesheet stays applied when the page is left and opened again (the host
+  // element is moved out of and back into the document). A <link> in the shadow root is
+  // loaded again on every reconnection and the chrome showed unstyled meanwhile.
+  // app.css has no relative url(), so the sheet's base URL does not matter.
+  const styles =
+    "adoptedStyleSheets" in Document.prototype && "replace" in CSSStyleSheet.prototype
+      ? fetch(href)
+          .then((r) => (r.ok ? r.text() : Promise.reject(new Error(r.status))))
+          .then((text) => new CSSStyleSheet().replace(text))
+          .then((sheet) => {
+            root.adoptedStyleSheets = [sheet];
+          })
+      : Promise.reject(new Error("no constructable stylesheets"));
+  started = styles
+    .catch(
+      () =>
+        new Promise((resolve) => {
+          const css = document.createElement("link");
+          css.rel = "stylesheet";
+          css.href = href;
+          css.onload = css.onerror = resolve;
+          root.prepend(css);
+        }),
+    )
+    .then(() => {
+      box.hidden = false;
+      return import("./js/main.js");
+    });
   return started;
 }
 
