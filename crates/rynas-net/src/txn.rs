@@ -1986,7 +1986,10 @@ impl Engine {
     pub fn sync_resolv(&self, log: &dyn Fn(&str)) -> Option<String> {
         let inv = self.inventory_fresh().ok()?;
         let s = &inv.services;
-        if !s.networkd || s.ifupdown || s.network_manager || self.rynas_files().is_empty() {
+        // `networking.service` stays "active" (exited) for the rest of the boot in which rynas
+        // took over: ifupdown only counts while its file still configures an interface.
+        let ifupdown = s.ifupdown && inv.ifupdown.as_ref().is_some_and(|i| !i.is_empty());
+        if !s.networkd || ifupdown || s.network_manager || self.rynas_files().is_empty() {
             return None;
         }
         let (content, link) = self.read_resolv();

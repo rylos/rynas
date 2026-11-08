@@ -791,6 +791,20 @@ fn migration_at_boot_writes_resolv_conf_and_is_kept() {
     assert!(event_codes(&t.e).is_empty());
 }
 
+/// As seen on a DS920+: `networking.service` was already queued when the guard disabled it,
+/// so it stays "active (exited)" for that boot with a loopback-only file. It must not block
+/// the repair of `/etc/resolv.conf`.
+#[test]
+fn exited_ifupdown_with_loopback_only_does_not_block_the_repair() {
+    let t = migrated_at_boot(true);
+    t.os.set_active("networking", true);
+    t.os.write_config("/etc/resolv.conf", DHCPCD_LEFTOVER);
+    let what = t.e.sync_resolv(&log).expect("repaired");
+    assert!(what.contains("198.51.100.53"), "{what}");
+    let r = t.os.read_config(Path::new("/etc/resolv.conf")).unwrap();
+    assert!(r.starts_with(resolv::HEADER), "{r}");
+}
+
 #[test]
 fn migration_at_boot_without_dns_goes_back_to_ifupdown() {
     let t = migrated_at_boot(false);
@@ -828,8 +842,12 @@ fn an_older_migration_left_without_dns_is_repaired_once() {
         t.os.read_config(Path::new("/etc/resolv.conf")).unwrap(),
         "nameserver 192.0.2.99\n"
     );
-    // ifupdown running too: not ours to write
+    // ifupdown running too, with a port in its file: not ours to write
     t.os.write_config("/etc/resolv.conf", DHCPCD_LEFTOVER);
+    t.os.write_config(
+        "/etc/network/interfaces",
+        "auto lo\niface lo inet loopback\n\nallow-hotplug lan2\niface lan2 inet dhcp\n",
+    );
     t.os.set_active("networking", true);
     assert!(t.e.sync_resolv(&log).is_none());
 }
