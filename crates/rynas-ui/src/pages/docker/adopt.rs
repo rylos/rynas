@@ -214,7 +214,7 @@ pub(super) fn import_dialog(close: Callback<()>) -> AnyView {
                 <div class="form">
                     {text_field("dk.ed.name", name.into(), Callback::new(move |v: String| { name.set(v.trim().to_lowercase()); name_err.set(None); }), name_bad, In { mono: true, help: Some("dk.im.name_help"), maxlength: 63, ..In::default() })}
                     {has_profiles.then(|| text_field("dk.ad.profiles", profiles.into(), Callback::new(move |v: String| profiles.set(v)), Signal::stored(None), In { mono: true, help: Some("dk.ad.profiles_help"), maxlength: 300, ..In::default() }))}
-                    {(!p.read_only).then(|| switch("dk.ed.start", None, start.into(), Callback::new(move |v| start.set(v))))}
+                    {(!p.read_only).then(|| switch("dk.ad.start_import", None, start.into(), Callback::new(move |v| start.set(v))))}
                 </div>
             }
         })
@@ -291,5 +291,27 @@ pub(super) fn move_dialog(name: String, dir: String, target: Option<String>, can
     let target = target.unwrap_or_else(|| "—".into());
     let text = tf("dk.ad.move_text", &[("from", &dir), ("to", &target)]);
     let typed = name.clone();
-    ui::confirm(Confirm { typed: Signal::stored(Some(typed)), busy, error, ..Confirm::new(tf("dk.ad.move_title", &[("name", &name)]), text, "dk.ad.move", false, go, cancel) })
+    // what the copy costs, from the mounted file systems: the target's free space and
+    // whether both folders are on one btrfs file system (cp --reflink=auto shares the data
+    // blocks there; anywhere else every byte is copied while the stack is stopped). The
+    // folder's size is not known to the interface.
+    let live = crate::live::use_live();
+    let summary = move || {
+        live.storage.with(|s| {
+            let fss: Vec<&rynas_api_types::Filesystem> = s.iter().flat_map(|s| s.filesystems.iter()).collect();
+            let fs_of = |p: &str| fss.iter().filter(|f| p == f.mountpoint || p.starts_with(&format!("{}/", f.mountpoint.trim_end_matches('/')))).max_by_key(|f| f.mountpoint.len()).copied();
+            let (src, dst) = (fs_of(&dir), fs_of(&target));
+            let reflink = matches!((src, dst), (Some(a), Some(b)) if a.mountpoint == b.mountpoint && a.fstype == "btrfs");
+            let free = dst.map(|f| crate::i18n::bytes(f.avail)).unwrap_or_else(|| "—".into());
+            view! {
+                <dl class="kvs">
+                    {kv_row("dk.ad.move_free", Signal::stored(free), "tnum")}
+                    {kv_row("dk.ad.move_copy", Signal::stored(t(if reflink { "dk.ad.move_reflink" } else { "dk.ad.move_full" }).to_string()), "")}
+                    {kv_row("dk.ad.move_down", Signal::stored(t(if reflink { "dk.ad.move_down_short" } else { "dk.ad.move_down_long" }).to_string()), "")}
+                </dl>
+            }
+        })
+    };
+    let extra = view! { {summary} }.into_any();
+    ui::confirm(Confirm { extra: Some(extra), typed: Signal::stored(Some(typed)), busy, error, ..Confirm::new(tf("dk.ad.move_title", &[("name", &name)]), text, "dk.ad.move", false, go, cancel) })
 }

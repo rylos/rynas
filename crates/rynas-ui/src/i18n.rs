@@ -1711,6 +1711,7 @@ dict! { BLOB, LENS, IT;
     "ids.folders" => "Folders", "Cartelle";
     "ids.folders_help" => "The data volumes and the home, unless you choose. Read-only snapshots and other file systems inside are skipped; links are not followed.", "I volumi dati e la home, se non scegli altro. Snapshot in sola lettura e altri file system al loro interno vengono saltati; i collegamenti non vengono seguiti.";
     "ids.add_folder" => "Add folder", "Aggiungi cartella";
+    "ids.other_folder" => "Another folder", "Altra cartella";
     "ids.acls" => "Also change ACL entries", "Cambia anche le voci ACL";
     "ids.acls_help" => "Permissions that access lists give to this ID.", "I permessi che gli elenchi di accesso danno a questo ID.";
     "ids.check" => "Check", "Verifica";
@@ -1721,11 +1722,20 @@ dict! { BLOB, LENS, IT;
     "ids.owners" => "Owners that change", "Proprietari che cambiano";
     "ids.groups" => "Groups that change", "Gruppi che cambiano";
     "ids.acl_entries" => "ACL entries that change", "Voci ACL che cambiano";
+    "ids.acl_conflicts" => "ACL entries lost", "Voci ACL perse";
+    "ids.acl_conflicts_text" => "On these files the new ID already has its own ACL entry: it is kept as it is and the old ID's entry is dropped, so the permissions it gave are lost. Check them after the change.", "Su questi file il nuovo ID ha già una sua voce ACL: resta com'è e la voce del vecchio ID viene tolta, quindi i permessi che dava si perdono. Controllali dopo la modifica.";
     "ids.errors" => "Unreadable entries", "Elementi non leggibili";
     "ids.readonly" => "Read-only snapshots, skipped (they keep the old ID):", "Snapshot in sola lettura, saltati (mantengono il vecchio ID):";
     "ids.other_fs" => "Other file systems, skipped:", "Altri file system, saltati:";
+    "ids.walked" => "Folders checked:", "Cartelle controllate:";
+    "ids.retired" => "IDs retired by earlier changes (never given to new accounts):", "ID ritirati da modifiche precedenti (mai dati a nuovi account):";
+    "ids.retired_item" => "{id}: {name}, now {new}", "{id}: {name}, ora {new}";
+    "ids.target_retired" => "ID {id} was retired when {name} changed ID: files still under it (snapshots, folders left out then) may belong to {name}.", "L'ID {id} è stato ritirato quando {name} ha cambiato ID: i file che lo hanno ancora (snapshot, cartelle escluse allora) potrebbero essere di {name}.";
+    "ids.resumes" => "This completes the previous ID change of this account: files of ID {from} become {to}'s, with their setuid and setgid bits kept.", "Questo completa la modifica di ID precedente di questo account: i file dell'ID {from} passano a {to}, mantenendo i bit setuid e setgid.";
+    "ids.complete_text" => "This account had ID {id} before an earlier change: files that still have it can follow.", "Questo account aveva l'ID {id} prima di una modifica precedente: i file che lo hanno ancora possono seguirlo.";
+    "ids.complete" => "Complete: take the files from ID {id}", "Completa: prendi i file dall'ID {id}";
     "ids.partial" => "The check stopped at its time limit: the numbers are lower bounds and the change goes through everything.", "La verifica si è fermata al limite di tempo: i numeri sono minimi e la modifica passa comunque tutto.";
-    "ids.after" => "Not changed: crontabs, systemd user units and files outside these folders. The change runs as a task you can cancel; running it again finishes the rest.", "Non vengono cambiati: crontab, unità systemd dell'utente e file fuori da queste cartelle. La modifica gira come attività annullabile; rilanciandola completa il resto.";
+    "ids.after" => "Not changed: crontabs, systemd user units and files outside these folders. The change runs as a task you can cancel; after a cancel the rest can be completed from here.", "Non vengono cambiati: crontab, unità systemd dell'utente e file fuori da queste cartelle. La modifica gira come attività annullabile; dopo un annullamento il resto si completa da qui.";
     "ids.done" => "Ownership changed for {name}", "Proprietà cambiata per {name}";
     "ids.b_not_local" => "Not a local account (1000–59999): root and system accounts never change.", "Non è un account locale (1000–59999): root e gli account di sistema non cambiano mai.";
     "ids.b_unmanaged" => "Created outside rynas: adopt it first.", "Creato fuori da rynas: prima adottalo.";
@@ -1733,7 +1743,9 @@ dict! { BLOB, LENS, IT;
     "ids.b_same_id" => "That is the current ID.", "È l'ID attuale.";
     "ids.b_id_in_use" => "The ID belongs to {d}.", "L'ID appartiene a {d}.";
     "ids.b_processes" => "The user has running processes ({d}): sign them out first.", "L'utente ha processi in esecuzione ({d}): prima disconnettilo.";
-    "ids.b_smb_sessions" => "The user is connected over SMB ({d} sessions).", "L'utente è connesso via SMB ({d} sessioni).";
+    "ids.b_processes_group" => "Processes are running with this group ({d}): stop them first.", "Ci sono processi in esecuzione con questo gruppo ({d}): prima fermali.";
+    "ids.b_smb_sessions" => "The user is connected over SMB ({d} sessions): disconnect them first.", "L'utente è connesso via SMB ({d} sessioni): prima disconnettilo.";
+    "ids.b_smb_sessions_group" => "Members of the group are connected over SMB ({d} sessions): disconnect them first.", "Alcuni membri del gruppo sono connessi via SMB ({d} sessioni): prima disconnettili.";
     "ids.b_path_invalid" => "Folder missing or outside the data folders: {d}", "Cartella assente o fuori dalle cartelle dati: {d}";
     "ids.b_bad_request" => "Enter an ID.", "Inserisci un ID.";
     "ids.b_other" => "Not available on this system.", "Non disponibile su questo sistema.";
@@ -1933,8 +1945,7 @@ dict! { BLOB, LENS, IT;
     "shares.nocow_cost" => "What the files of this folder give up:", "Cosa perdono i file di questa cartella:";
     "shares.nocow_t_sum" => "checksums: damaged data is not detected by a scrub, and a mirror cannot repair it from the other copy", "i checksum: i dati danneggiati non vengono rilevati dalla verifica (scrub) e un mirror non può ripararli dall'altra copia";
     "shares.nocow_t_comp" => "compression", "la compressione";
-    "shares.nocow_t_snap" => "nothing for snapshots, which still work, but every block rewritten after a snapshot takes new space while the snapshot is kept", "niente per gli snapshot, che funzionano ancora, ma ogni blocco riscritto dopo uno snapshot occupa nuovo spazio finché lo snapshot resta";
-    "shares.nocow_t_new" => "it applies to files created from now on, not to files already there", "vale per i file creati da adesso in poi, non per quelli già presenti";
+    "shares.nocow_t_snap" => "space with snapshots: they still work, but every block rewritten after a snapshot takes new space as long as the snapshot is kept", "spazio con gli snapshot: funzionano ancora, ma ogni blocco riscritto dopo uno snapshot occupa nuovo spazio finché lo snapshot resta";
     "shares.nocow_snap_hint" => "Snapshot jobs on this folder work, but rewritten data costs space: keep few snapshots with a short retention, or none.", "I job di snapshot su questa cartella funzionano, ma i dati riscritti occupano spazio: tieni pochi snapshot con una conservazione breve, oppure nessuno.";
     "shares.nocow_turn_on" => "Write without copy-on-write", "Scrivi senza copy-on-write";
     "shares.nocow_turn_off" => "Back to copy-on-write", "Torna al copy-on-write";
@@ -1947,10 +1958,9 @@ dict! { BLOB, LENS, IT;
     "shares.nocow_move" => "Folder not empty? Move the files into a new folder", "La cartella non è vuota? Sposta i file in una cartella nuova";
     "shares.nocow_move_1" => "Create a new shared folder with No copy-on-write on.", "Crea una nuova cartella condivisa con Senza copy-on-write attivo.";
     "shares.nocow_move_2" => "Stop the apps and clients that write to the old folder.", "Ferma le app e i client che scrivono nella vecchia cartella.";
-    "shares.nocow_move_3" => "Copy the files with a full copy, not a clone, from a shell: rsync -aHAX /old/ /new/ (or cp -a --reflink=never).", "Copia i file con una copia completa, non un clone, da una shell: rsync -aHAX /vecchia/ /nuova/ (oppure cp -a --reflink=never).";
+    "shares.nocow_move_3" => "Copy the files with a full copy, not a clone, from a shell: `rsync -aHAX /old/ /new/` (or `cp -a --reflink=never`).", "Copia i file con una copia completa, non un clone, da una shell: `rsync -aHAX /vecchia/ /nuova/` (oppure `cp -a --reflink=never`).";
     "shares.nocow_move_4" => "Check the copy, point the apps at the new folder, then delete the old one.", "Controlla la copia, fai puntare le app alla nuova cartella, poi elimina la vecchia.";
     "shares.nocow_move_space" => "Until the old folder is deleted the files take twice the space.", "Finché la vecchia cartella non viene eliminata, i file occupano il doppio dello spazio.";
-    "shares.nocow_sto_hint" => "Files get no checksums and no compression.", "I file non hanno checksum né compressione.";
     "shares.w.subvolume_on_apply_nocow" => "{path} will be created as a subvolume of volume {volume}, without copy-on-write, when you apply the changes.", "{path} verrà creata come sottovolume del volume {volume}, senza copy-on-write, quando applichi le modifiche.";
     "shares.w.nocow_snapshots" => "{path} has no copy-on-write and a snapshot job: snapshots work, but data rewritten after a snapshot takes new space while the snapshot is kept.", "{path} è senza copy-on-write e ha un job di snapshot: gli snapshot funzionano, ma i dati riscritti dopo uno snapshot occupano nuovo spazio finché lo snapshot resta.";
     "task.shares.nocow" => "Change copy-on-write", "Modifica del copy-on-write";
@@ -2607,7 +2617,9 @@ dict! { BLOB, LENS, IT;
     "net.boot_who" => "Planned by {user} on {when}.", "Programmata da {user} il {when}.";
     "net.boot_cancelled" => "The migration planned for the next reboot is cancelled.", "La migrazione programmata al prossimo riavvio è annullata.";
     "net.booted_title" => "Network migrated at this boot", "Rete migrata a questo avvio";
-    "net.booted_text" => "systemd-networkd now manages {ifaces}. In {n} s it is kept by itself if a port has a routable address; otherwise ifupdown comes back.", "Ora {ifaces} è gestita da systemd-networkd. Tra {n} s viene tenuta da sola se una porta ha un indirizzo instradabile; altrimenti torna ifupdown.";
+    "net.booted_text" => "systemd-networkd now manages {ifaces}. When the countdown ends the migration stays if a port has a routable address; otherwise ifupdown comes back.", "Ora {ifaces} è gestita da systemd-networkd. Allo scadere del tempo la migrazione resta se una porta ha un indirizzo instradabile; altrimenti torna ifupdown.";
+    "net.booted_text_n" => "systemd-networkd now manages {ifaces}. When the countdown ends the migration stays if a port has a routable address; otherwise ifupdown comes back.", "Ora {ifaces} sono gestite da systemd-networkd. Allo scadere del tempo la migrazione resta se una porta ha un indirizzo instradabile; altrimenti torna ifupdown.";
+    "net.booted_left_sr" => "About {n} seconds before the migration stays or ifupdown comes back.", "Circa {n} secondi prima che la migrazione resti o torni ifupdown.";
     "net.booted_planned" => "{user} planned it for the next reboot from the Network page.", "{user} l'aveva programmata al prossimo riavvio dalla pagina Rete.";
     "net.booted_keep" => "Keep it now", "Tienila subito";
     "net.booted_back" => "Go back to ifupdown", "Torna a ifupdown";
@@ -3250,6 +3262,7 @@ dict! { BLOB, LENS, IT;
     "dk.a.down" => "Down", "Rimuovi i container (down)";
     "dk.a.edit" => "Edit files", "Modifica i file";
     "dk.a.remove" => "Remove…", "Rimuovi…";
+    "dk.rm.go" => "Remove", "Rimuovi";
     "dk.log.title" => "Logs", "Log";
     "dk.log.follow" => "Follow", "Segui";
     "dk.log.stamps" => "Timestamps", "Orari";
@@ -3287,6 +3300,7 @@ dict! { BLOB, LENS, IT;
     "dk.s.folder" => "Folder", "Cartella";
     "dk.s.files" => "Compose files", "File compose";
     "dk.s.readonly" => "This stack is managed outside rynas: here it can only be started, stopped and restarted.", "Questo stack è gestito fuori da rynas: qui si può solo avviare, fermare e riavviare.";
+    "dk.s.readonly_adopt" => "This stack is managed outside rynas: here it can be started, stopped and restarted, or adopted to be managed fully.", "Questo stack è gestito fuori da rynas: qui si può avviare, fermare e riavviare, oppure adottare per gestirlo del tutto.";
     "dk.s.no_folder" => "The stack's folder is missing: it can only be started, stopped and restarted.", "Manca la cartella dello stack: si può solo avviare, fermare e riavviare.";
     // Docker adopt
     "dk.ad.adopt" => "Adopt", "Adotta";
@@ -3306,7 +3320,7 @@ dict! { BLOB, LENS, IT;
     "dk.ad.w_in_use" => "Containers of another folder already use the name {name}: choose another name.", "Container di un'altra cartella usano già il nome {name}: scegline un altro.";
     "dk.ad.w_networks" => "External networks must exist before starting: {networks}", "Le reti esterne devono esistere prima dell'avvio: {networks}";
     "dk.ad.w_profiles" => "Some services start only with a profile: {profiles}", "Alcuni servizi partono solo con un profilo: {profiles}";
-    "dk.ad.w_include" => "The files use include:: the stack runs, but its files are not edited here.", "I file usano include:: lo stack funziona, ma i suoi file non si modificano qui.";
+    "dk.ad.w_include" => "The files use include: the stack runs, but its files are not edited here.", "I file usano include: lo stack funziona, ma i suoi file non si modificano qui.";
     "dk.ad.w_outside" => "A compose or environment file is outside the folder: the stack runs, but its files are not edited here.", "Un file compose o di ambiente è fuori dalla cartella: lo stack funziona, ma i suoi file non si modificano qui.";
     "dk.ad.w_missing" => "The compose files were not found on this system: give the folder where they are.", "I file compose non sono stati trovati su questo sistema: indica la cartella dove si trovano.";
     "dk.ad.changed" => "The files changed outside rynas since it last read or wrote them.", "I file sono cambiati fuori da rynas dall'ultima lettura o scrittura.";
@@ -3315,6 +3329,13 @@ dict! { BLOB, LENS, IT;
     "dk.ad.move" => "Move to stacks folder", "Sposta nella cartella stack";
     "dk.ad.move_title" => "Move {name}", "Sposta {name}";
     "dk.ad.move_text" => "The stack stops, its whole folder ({from}) is copied with its data to {to}, the bind mounts are checked, and it starts again. The old folder is kept with a .moved name until you delete it.", "Lo stack si ferma, l'intera cartella ({from}) viene copiata con i dati in {to}, i bind mount vengono controllati e lo stack riparte. La vecchia cartella resta con un nome .moved finché non la elimini.";
+    "dk.ad.move_free" => "Free space on the target", "Spazio libero nella destinazione";
+    "dk.ad.move_copy" => "Copy", "Copia";
+    "dk.ad.move_reflink" => "Clone on the same btrfs volume (reflink): quick, no extra space", "Clone sullo stesso volume btrfs (reflink): rapido, senza spazio in più";
+    "dk.ad.move_full" => "Full copy of every file: needs as much free space as the folder", "Copia completa di ogni file: serve tanto spazio libero quanto la cartella";
+    "dk.ad.move_down" => "Stack stopped", "Stack fermo";
+    "dk.ad.move_down_short" => "Seconds: the copy only clones the files", "Pochi secondi: la copia clona soltanto i file";
+    "dk.ad.move_down_long" => "For the whole copy: minutes or more with large app data", "Per tutta la copia: minuti o più con dati dell'app grandi";
     "dk.ad.release" => "Release", "Rilascia";
     "dk.ad.release_title" => "Release {name}?", "Rilasciare {name}?";
     "dk.ad.release_text" => "rynas stops managing this stack. Its files and containers stay as they are.", "rynas smette di gestire questo stack. I suoi file e i container restano come sono.";
@@ -3346,6 +3367,7 @@ dict! { BLOB, LENS, IT;
     "dk.rm.title" => "Remove {name}", "Rimuovi {name}";
     "dk.rm.text" => "Stops the stack and removes its containers. Named volumes are kept.", "Ferma lo stack e rimuove i suoi container. I volumi con nome restano.";
     "dk.rm.files" => "Also delete the stack folder (compose file, .env, app data) and its snapshots", "Elimina anche la cartella dello stack (file compose, .env, dati dell'app) e i suoi snapshot";
+    "dk.rm.adopted" => "The stack folder, its files and app data stay where they are. To stop managing the stack without removing its containers, use Release.", "La cartella dello stack, i suoi file e i dati dell'app restano dove sono. Per smettere di gestire lo stack senza rimuoverne i container, usa Rilascia.";
     "dk.ed.name" => "Stack name", "Nome dello stack";
     "dk.ed.name_help" => "Lowercase letters, digits, - and _: also the folder name.", "Lettere minuscole, cifre, - e _: è anche il nome della cartella.";
     "dk.ed.name_invalid" => "Use 1-63 lowercase letters, digits, - or _, starting with a letter or digit.", "Usa da 1 a 63 lettere minuscole, cifre, - o _, iniziando con una lettera o una cifra.";
@@ -3354,6 +3376,7 @@ dict! { BLOB, LENS, IT;
     "dk.ed.env" => ".env", ".env";
     "dk.ed.env_help" => "Variables for the compose file (NAME=value per line). Kept readable by root only.", "Variabili per il file compose (NOME=valore per riga). Leggibile solo da root.";
     "dk.ed.start" => "Start the stack after creating it", "Avvia lo stack dopo averlo creato";
+    "dk.ad.start_import" => "Start the stack after importing it", "Avvia lo stack dopo averlo importato";
     "dk.ed.validate" => "Check", "Controlla";
     "dk.ed.created" => "Stack created", "Stack creato";
     "dk.ed.saved" => "Files saved: use Up to apply them", "File salvati: usa Avvia (up) per applicarli";
@@ -4187,6 +4210,23 @@ pub fn num(v: f64, decimals: usize) -> String {
     if sep() == ',' { s.replace('.', ",") } else { s }
 }
 
+/// A whole count with the locale's thousands separator: 1,234,567 / 1.234.567.
+pub fn count(n: u64) -> String {
+    group(n, if sep() == ',' { '.' } else { ',' })
+}
+
+fn group(n: u64, mark: char) -> String {
+    let d = n.to_string();
+    let mut out = String::with_capacity(d.len() + d.len() / 3);
+    for (i, c) in d.chars().enumerate() {
+        if i > 0 && (d.len() - i).is_multiple_of(3) {
+            out.push(mark);
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// Up to 3 significant digits: 1.23, 12.3, 123.
 fn sig3(v: f64) -> String {
     let d = if v >= 100.0 {
@@ -4338,6 +4378,14 @@ mod tests {
         assert_eq!(lang_for_tag("en-US"), Lang::En);
         assert_eq!(lang_for_tag("de"), Lang::En);
         assert_eq!(lang_for_tag(""), Lang::En);
+    }
+
+    #[test]
+    fn counts_are_grouped() {
+        assert_eq!(group(0, ','), "0");
+        assert_eq!(group(999, ','), "999");
+        assert_eq!(group(1000, ','), "1,000");
+        assert_eq!(group(1_234_567, '.'), "1.234.567");
     }
 
     #[test]

@@ -13,13 +13,15 @@ use crate::icons;
 use crate::toast::toast;
 use crate::ui::{self, Confirm, Tone};
 
-/// What a folder without copy-on-write gives up, as a list (`new_only`: the line about
-/// files already in the folder).
-fn costs(new_only: bool) -> AnyView {
-    let mut keys = vec!["shares.nocow_t_sum", "shares.nocow_t_comp", "shares.nocow_t_snap"];
-    if new_only {
-        keys.push("shares.nocow_t_new");
-    }
+/// The warning with what a folder without copy-on-write gives up (also for a subvolume
+/// created on the storage page).
+pub fn costs_note() -> AnyView {
+    ui::note(Tone::Warn, icons::TRIANGLE_ALERT, costs())
+}
+
+/// What a folder without copy-on-write gives up, as a list.
+fn costs() -> AnyView {
+    let keys = ["shares.nocow_t_sum", "shares.nocow_t_comp", "shares.nocow_t_snap"];
     view! {
         <span>{tr("shares.nocow_cost")}</span>
         <ul class="nocow-costs">{keys.into_iter().map(|k| view! { <li>{tr(k)}</li> }).collect_view()}</ul>
@@ -39,7 +41,7 @@ pub fn create_switch(d: RwSignal<Share>) -> AnyView {
     });
     view! {
         {switch("shares.nocow", Some("shares.nocow_help"), on, set)}
-        {move || on.get().then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, costs(false)))}
+        {move || on.get().then(costs_note)}
     }
     .into_any()
 }
@@ -53,7 +55,7 @@ fn move_steps() -> AnyView {
             <ol class="steps-list small">
                 <li>{tr("shares.nocow_move_1")}</li>
                 <li>{tr("shares.nocow_move_2")}</li>
-                <li>{tr("shares.nocow_move_3")}</li>
+                <li>{move || ui::text_code(t("shares.nocow_move_3"))}</li>
                 <li>{tr("shares.nocow_move_4")}</li>
             </ol>
             <p class="small muted">{tr("shares.nocow_move_space")}</p>
@@ -112,7 +114,8 @@ pub fn existing(name: String, st: &ShareStatus) -> Option<AnyView> {
             );
             c.busy = busy;
             c.error = error;
-            c.extra = want.then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, costs(true)));
+            // turning it on needs an empty folder: no line about files already there
+            c.extra = want.then(costs_note);
             ui::confirm(c)
         })
     };

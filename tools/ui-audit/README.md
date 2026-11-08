@@ -53,6 +53,11 @@ quality reviews (docs/quality/). Nothing here touches the host system or a runni
   pushed every 10 s as on a real unit.
 - `discard_refresh.py`: stage a change (a snapshot job, the removal of a user), press the pending
   bar's Discard: the page must drop the pending state without F5 (exit 1 otherwise).
+- `drive.py <script.py>`: scripted review of a few views. The script defines `async def run(d)`
+  (signed in already) and uses `d.width/lang/nav/btn/type/esc/js/audit/shot/dialog_text`;
+  `d.fake_btrfs()` (a btrfs `/volume1`, shares on btrfs), `d.fake_trial("boot"|"booted")` (the
+  network migration planned for, or done at, this boot) and `d.answer(url_re, json)` rewrite
+  answers in the page for states the dry instance cannot reach (see its docstring).
 - `cdp.py` is a minimal DevTools-protocol driver; `run_all.py` has login and client-side navigation;
   `states.py` checks the loading/error states (second instance with rynasd stopped).
 - `files_reenter.py`: leave the file manager and come back (sidebar, router, `?window`): the Files

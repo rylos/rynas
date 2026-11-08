@@ -441,6 +441,15 @@ pub fn text(s: String) -> AnyView {
     s.into_any()
 }
 
+/// Text whose `backquoted` parts are commands, shown in the monospace font.
+pub fn text_code(s: &str) -> AnyView {
+    s.split('`')
+        .enumerate()
+        .map(|(i, p)| if i % 2 == 1 { view! { <code class="mono">{p.to_string()}</code> }.into_any() } else { p.to_string().into_any() })
+        .collect_view()
+        .into_any()
+}
+
 /// A plain text cell (one compiled copy for every such cell).
 pub fn text_cell(label: &'static str, class: &'static str, s: String) -> AnyView {
     cell(label, class, text(s))

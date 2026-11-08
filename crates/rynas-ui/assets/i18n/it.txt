@@ -1310,6 +1310,7 @@ ids.id_help_reown	1000 o più, non usato da nessun account.
 ids.folders	Cartelle
 ids.folders_help	I volumi dati e la home, se non scegli altro. Snapshot in sola lettura e altri file system al loro interno vengono saltati; i collegamenti non vengono seguiti.
 ids.add_folder	Aggiungi cartella
+ids.other_folder	Altra cartella
 ids.acls	Cambia anche le voci ACL
 ids.acls_help	I permessi che gli elenchi di accesso danno a questo ID.
 ids.check	Verifica
@@ -1320,11 +1321,20 @@ ids.at_least	almeno {n}
 ids.owners	Proprietari che cambiano
 ids.groups	Gruppi che cambiano
 ids.acl_entries	Voci ACL che cambiano
+ids.acl_conflicts	Voci ACL perse
+ids.acl_conflicts_text	Su questi file il nuovo ID ha già una sua voce ACL: resta com'è e la voce del vecchio ID viene tolta, quindi i permessi che dava si perdono. Controllali dopo la modifica.
 ids.errors	Elementi non leggibili
 ids.readonly	Snapshot in sola lettura, saltati (mantengono il vecchio ID):
 ids.other_fs	Altri file system, saltati:
+ids.walked	Cartelle controllate:
+ids.retired	ID ritirati da modifiche precedenti (mai dati a nuovi account):
+ids.retired_item	{id}: {name}, ora {new}
+ids.target_retired	L'ID {id} è stato ritirato quando {name} ha cambiato ID: i file che lo hanno ancora (snapshot, cartelle escluse allora) potrebbero essere di {name}.
+ids.resumes	Questo completa la modifica di ID precedente di questo account: i file dell'ID {from} passano a {to}, mantenendo i bit setuid e setgid.
+ids.complete_text	Questo account aveva l'ID {id} prima di una modifica precedente: i file che lo hanno ancora possono seguirlo.
+ids.complete	Completa: prendi i file dall'ID {id}
 ids.partial	La verifica si è fermata al limite di tempo: i numeri sono minimi e la modifica passa comunque tutto.
-ids.after	Non vengono cambiati: crontab, unità systemd dell'utente e file fuori da queste cartelle. La modifica gira come attività annullabile; rilanciandola completa il resto.
+ids.after	Non vengono cambiati: crontab, unità systemd dell'utente e file fuori da queste cartelle. La modifica gira come attività annullabile; dopo un annullamento il resto si completa da qui.
 ids.done	Proprietà cambiata per {name}
 ids.b_not_local	Non è un account locale (1000–59999): root e gli account di sistema non cambiano mai.
 ids.b_unmanaged	Creato fuori da rynas: prima adottalo.
@@ -1332,7 +1342,9 @@ ids.b_out_of_range	ID fuori intervallo: {d}.
 ids.b_same_id	È l'ID attuale.
 ids.b_id_in_use	L'ID appartiene a {d}.
 ids.b_processes	L'utente ha processi in esecuzione ({d}): prima disconnettilo.
-ids.b_smb_sessions	L'utente è connesso via SMB ({d} sessioni).
+ids.b_processes_group	Ci sono processi in esecuzione con questo gruppo ({d}): prima fermali.
+ids.b_smb_sessions	L'utente è connesso via SMB ({d} sessioni): prima disconnettilo.
+ids.b_smb_sessions_group	Alcuni membri del gruppo sono connessi via SMB ({d} sessioni): prima disconnettili.
 ids.b_path_invalid	Cartella assente o fuori dalle cartelle dati: {d}
 ids.b_bad_request	Inserisci un ID.
 ids.b_other	Non disponibile su questo sistema.
@@ -1528,8 +1540,7 @@ shares.nocow_is_on	I nuovi file di questa cartella vengono riscritti sul posto, 
 shares.nocow_cost	Cosa perdono i file di questa cartella:
 shares.nocow_t_sum	i checksum: i dati danneggiati non vengono rilevati dalla verifica (scrub) e un mirror non può ripararli dall'altra copia
 shares.nocow_t_comp	la compressione
-shares.nocow_t_snap	niente per gli snapshot, che funzionano ancora, ma ogni blocco riscritto dopo uno snapshot occupa nuovo spazio finché lo snapshot resta
-shares.nocow_t_new	vale per i file creati da adesso in poi, non per quelli già presenti
+shares.nocow_t_snap	spazio con gli snapshot: funzionano ancora, ma ogni blocco riscritto dopo uno snapshot occupa nuovo spazio finché lo snapshot resta
 shares.nocow_snap_hint	I job di snapshot su questa cartella funzionano, ma i dati riscritti occupano spazio: tieni pochi snapshot con una conservazione breve, oppure nessuno.
 shares.nocow_turn_on	Scrivi senza copy-on-write
 shares.nocow_turn_off	Torna al copy-on-write
@@ -1542,10 +1553,9 @@ shares.nocow_done_off	{name}: i nuovi file riavranno il copy-on-write.
 shares.nocow_move	La cartella non è vuota? Sposta i file in una cartella nuova
 shares.nocow_move_1	Crea una nuova cartella condivisa con Senza copy-on-write attivo.
 shares.nocow_move_2	Ferma le app e i client che scrivono nella vecchia cartella.
-shares.nocow_move_3	Copia i file con una copia completa, non un clone, da una shell: rsync -aHAX /vecchia/ /nuova/ (oppure cp -a --reflink=never).
+shares.nocow_move_3	Copia i file con una copia completa, non un clone, da una shell: `rsync -aHAX /vecchia/ /nuova/` (oppure `cp -a --reflink=never`).
 shares.nocow_move_4	Controlla la copia, fai puntare le app alla nuova cartella, poi elimina la vecchia.
 shares.nocow_move_space	Finché la vecchia cartella non viene eliminata, i file occupano il doppio dello spazio.
-shares.nocow_sto_hint	I file non hanno checksum né compressione.
 shares.w.subvolume_on_apply_nocow	{path} verrà creata come sottovolume del volume {volume}, senza copy-on-write, quando applichi le modifiche.
 shares.w.nocow_snapshots	{path} è senza copy-on-write e ha un job di snapshot: gli snapshot funzionano, ma i dati riscritti dopo uno snapshot occupano nuovo spazio finché lo snapshot resta.
 task.shares.nocow	Modifica del copy-on-write
@@ -2198,7 +2208,9 @@ net.boot_cancel	Annulla la migrazione
 net.boot_who	Programmata da {user} il {when}.
 net.boot_cancelled	La migrazione programmata al prossimo riavvio è annullata.
 net.booted_title	Rete migrata a questo avvio
-net.booted_text	Ora {ifaces} è gestita da systemd-networkd. Tra {n} s viene tenuta da sola se una porta ha un indirizzo instradabile; altrimenti torna ifupdown.
+net.booted_text	Ora {ifaces} è gestita da systemd-networkd. Allo scadere del tempo la migrazione resta se una porta ha un indirizzo instradabile; altrimenti torna ifupdown.
+net.booted_text_n	Ora {ifaces} sono gestite da systemd-networkd. Allo scadere del tempo la migrazione resta se una porta ha un indirizzo instradabile; altrimenti torna ifupdown.
+net.booted_left_sr	Circa {n} secondi prima che la migrazione resti o torni ifupdown.
 net.booted_planned	{user} l'aveva programmata al prossimo riavvio dalla pagina Rete.
 net.booted_keep	Tienila subito
 net.booted_back	Torna a ifupdown
@@ -2835,6 +2847,7 @@ dk.a.update	Aggiorna…
 dk.a.down	Rimuovi i container (down)
 dk.a.edit	Modifica i file
 dk.a.remove	Rimuovi…
+dk.rm.go	Rimuovi
 dk.log.title	Log
 dk.log.follow	Segui
 dk.log.stamps	Orari
@@ -2872,6 +2885,7 @@ dk.s.title	Stack {name}
 dk.s.folder	Cartella
 dk.s.files	File compose
 dk.s.readonly	Questo stack è gestito fuori da rynas: qui si può solo avviare, fermare e riavviare.
+dk.s.readonly_adopt	Questo stack è gestito fuori da rynas: qui si può avviare, fermare e riavviare, oppure adottare per gestirlo del tutto.
 dk.s.no_folder	Manca la cartella dello stack: si può solo avviare, fermare e riavviare.
 dk.ad.adopt	Adotta
 dk.ad.title	Adotta {name}
@@ -2890,7 +2904,7 @@ dk.ad.w_name	I file dicono name: {file}; rynas avvia lo stack come {name}.
 dk.ad.w_in_use	Container di un'altra cartella usano già il nome {name}: scegline un altro.
 dk.ad.w_networks	Le reti esterne devono esistere prima dell'avvio: {networks}
 dk.ad.w_profiles	Alcuni servizi partono solo con un profilo: {profiles}
-dk.ad.w_include	I file usano include:: lo stack funziona, ma i suoi file non si modificano qui.
+dk.ad.w_include	I file usano include: lo stack funziona, ma i suoi file non si modificano qui.
 dk.ad.w_outside	Un file compose o di ambiente è fuori dalla cartella: lo stack funziona, ma i suoi file non si modificano qui.
 dk.ad.w_missing	I file compose non sono stati trovati su questo sistema: indica la cartella dove si trovano.
 dk.ad.changed	I file sono cambiati fuori da rynas dall'ultima lettura o scrittura.
@@ -2899,6 +2913,13 @@ dk.ad.chip	Adottato
 dk.ad.move	Sposta nella cartella stack
 dk.ad.move_title	Sposta {name}
 dk.ad.move_text	Lo stack si ferma, l'intera cartella ({from}) viene copiata con i dati in {to}, i bind mount vengono controllati e lo stack riparte. La vecchia cartella resta con un nome .moved finché non la elimini.
+dk.ad.move_free	Spazio libero nella destinazione
+dk.ad.move_copy	Copia
+dk.ad.move_reflink	Clone sullo stesso volume btrfs (reflink): rapido, senza spazio in più
+dk.ad.move_full	Copia completa di ogni file: serve tanto spazio libero quanto la cartella
+dk.ad.move_down	Stack fermo
+dk.ad.move_down_short	Pochi secondi: la copia clona soltanto i file
+dk.ad.move_down_long	Per tutta la copia: minuti o più con dati dell'app grandi
 dk.ad.release	Rilascia
 dk.ad.release_title	Rilasciare {name}?
 dk.ad.release_text	rynas smette di gestire questo stack. I suoi file e i container restano come sono.
@@ -2930,6 +2951,7 @@ dk.snap.delete_text	Lo snapshot del {when} viene eliminato: non sarà più possi
 dk.rm.title	Rimuovi {name}
 dk.rm.text	Ferma lo stack e rimuove i suoi container. I volumi con nome restano.
 dk.rm.files	Elimina anche la cartella dello stack (file compose, .env, dati dell'app) e i suoi snapshot
+dk.rm.adopted	La cartella dello stack, i suoi file e i dati dell'app restano dove sono. Per smettere di gestire lo stack senza rimuoverne i container, usa Rilascia.
 dk.ed.name	Nome dello stack
 dk.ed.name_help	Lettere minuscole, cifre, - e _: è anche il nome della cartella.
 dk.ed.name_invalid	Usa da 1 a 63 lettere minuscole, cifre, - o _, iniziando con una lettera o una cifra.
@@ -2938,6 +2960,7 @@ dk.ed.compose	compose.yaml
 dk.ed.env	.env
 dk.ed.env_help	Variabili per il file compose (NOME=valore per riga). Leggibile solo da root.
 dk.ed.start	Avvia lo stack dopo averlo creato
+dk.ad.start_import	Avvia lo stack dopo averlo importato
 dk.ed.validate	Controlla
 dk.ed.created	Stack creato
 dk.ed.saved	File salvati: usa Avvia (up) per applicarli
@@ -3921,7 +3944,7 @@ syn.upsn_allow_help	Un indirizzo IP o una sottorete per riga (192.168.1.20, 192.
 syn.upsn_filter	Firewall di synodeb
 syn.upsn_filter_inactive	Il firewall di synodeb per la porta 3493 non è attivo: gli host ammessi non vengono applicati. Salva di nuovo le impostazioni o guarda il registro di synodeb-ups.
 syn.upsn_unreadable	Lo stato del server UPS di rete di synodeb non si può leggere (synodeb-ups netserver status non è riuscito o ha risposto in un formato sconosciuto): aggiorna rynas o guarda il registro.
-syn.upsn_primary	synodeb ha anche l'account {name} (upsmon primario), quello che gli altri NAS Synology si aspettano come client UPS. La sua password si imposta su questo NAS con: synodeb-ups passwd
+syn.upsn_primary	synodeb ha anche l'account {name} (upsmon primario), quello che gli altri NAS Synology si aspettano come client UPS. La sua password si imposta su questo NAS con `synodeb-ups passwd`.
 syn.upsn_manual	Gli host ammessi vengono da NETWORK_CLIENTS in /etc/synodeb/ups.conf (impostato a mano). Salvando qui si crea /etc/synodeb/ups-network.conf, che poi ha la precedenza.
 syn.upsn_outside	synodeb ha account impostati fuori da rynas ({names}): il prossimo salvataggio qui li rimuove.
 syn.upsn_role_monitor_help	Per domotica e pannelli: non può accedere né eseguire comandi. Leggere i valori da un host ammesso non richiede password.

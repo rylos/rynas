@@ -370,7 +370,7 @@ fn detail_drawer(name: String, settings: Remote<DockerSettingsState>, edit: RwSi
                     {(!s.config_files.is_empty()).then(|| kv_row("dk.s.files", Signal::stored(s.config_files.join(", ")), "mono"))}
                 </dl>
             }))}
-            {(!managed && !adopted).then(|| ui::note(Tone::Info, icons::INFO, ui::text(t(if manager == StackManager::Rynas { "dk.s.no_folder" } else { "dk.s.readonly" }).to_string())))}
+            {(!managed && !adopted).then(|| ui::note(Tone::Info, icons::INFO, ui::text(t(if manager == StackManager::Rynas { "dk.s.no_folder" } else if adoption == Adoption::Candidate { "dk.s.readonly_adopt" } else { "dk.s.readonly" }).to_string())))}
             {move || { let l = new_images(); (!l.is_empty()).then(|| ui::note(Tone::Info, icons::DOWNLOAD, ui::text(tf("dk.upd.stack", &[("images", &l.join(", "))])))) }}
             {action_bar(managed, adoption, n, busy, ask, edit)}
             <div class="mini-title">{tr("dk.s.containers")}</div>
@@ -398,9 +398,10 @@ fn detail_drawer(name: String, settings: Remote<DockerSettingsState>, edit: RwSi
         // `ask` first: an early return before it would leave the closure subscribed to nothing
         // (the dialogs never opened when the drawer was built before its details arrived)
         let a = ask.get()?;
-        let can_snap = kind.get_untracked()?.1;
+        let k = kind.get_untracked()?;
+        let (can_snap, adopted) = (k.1, k.3 == Adoption::Adopted);
         let dir = d.data.with_untracked(|d| d.as_ref().and_then(|d| d.summary.working_dir.clone())).unwrap_or_default();
-        Some(ask_dialog(a, n.get_value(), can_snap, dir, settings, ask, close, d))
+        Some(ask_dialog(a, n.get_value(), can_snap, adopted, dir, settings, ask, close, d))
     };
     let body = view! {
         {move || d.view(8, content)}
@@ -412,7 +413,7 @@ fn detail_drawer(name: String, settings: Remote<DockerSettingsState>, edit: RwSi
 }
 
 #[allow(clippy::too_many_arguments)]
-fn ask_dialog(a: Ask, name: String, can_snap: bool, dir: String, settings: Remote<DockerSettingsState>, ask: RwSignal<Option<Ask>>, close_drawer: Callback<()>, d: Remote<StackDetail>) -> AnyView {
+fn ask_dialog(a: Ask, name: String, can_snap: bool, adopted: bool, dir: String, settings: Remote<DockerSettingsState>, ask: RwSignal<Option<Ask>>, close_drawer: Callback<()>, d: Remote<StackDetail>) -> AnyView {
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let cancel = Callback::new(move |_| ask.set(None));
@@ -458,19 +459,24 @@ fn ask_dialog(a: Ask, name: String, can_snap: bool, dir: String, settings: Remot
                 launch(url.clone(), serde_json::to_string(&body).ok(), busy, error, Callback::new(move |_| { ask.set(None); close_drawer.run(()); }));
             });
             let typed_name = name.clone();
-            let extra = view! {
-                <label class="check">
-                    <input type="checkbox" prop:checked=move || files.get() on:change=move |ev| files.set(event_target_checked(&ev)) />
-                    <span>{tr("dk.rm.files")}</span>
-                </label>
-            }
-            .into_any();
+            // an adopted stack's folder is the user's own: the backend never deletes it
+            let extra = if adopted {
+                ui::note(Tone::Info, icons::INFO, ui::text(t("dk.rm.adopted").to_string()))
+            } else {
+                view! {
+                    <label class="check">
+                        <input type="checkbox" prop:checked=move || files.get() on:change=move |ev| files.set(event_target_checked(&ev)) />
+                        <span>{tr("dk.rm.files")}</span>
+                    </label>
+                }
+                .into_any()
+            };
             ui::confirm(Confirm {
                 extra: Some(extra),
                 typed: Signal::derive(move || files.get().then(|| typed_name.clone())),
                 busy,
                 error,
-                ..Confirm::new(tf("dk.rm.title", &[("name", &name)]), t("dk.rm.text").to_string(), "dk.a.remove", true, go, cancel)
+                ..Confirm::new(tf("dk.rm.title", &[("name", &name)]), t("dk.rm.text").to_string(), "dk.rm.go", true, go, cancel)
             })
         }
         Ask::Rollback(sn) => {

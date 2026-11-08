@@ -406,18 +406,20 @@ pub fn banner(net: Net) -> AnyView {
     };
 
     let booted_banner = move || {
-        let ifaces = trial.with(|t| t.as_ref().map(|t| t.interfaces.join(", "))).unwrap_or_default();
+        let (ifaces, many) = trial.with(|t| t.as_ref().map(|t| (t.interfaces.join(", "), t.interfaces.len() > 1))).unwrap_or_default();
+        // the seconds are in the clock next to the text (Italian: plural agreement)
+        let text = tf(if many { "net.booted_text_n" } else { "net.booted_text" }, &[("ifaces", &ifaces)]);
         view! {
             <section class="card net-trial calm" aria-labelledby="net-trial-h">
                 <div class="net-trial-head">
                     <span class="net-trial-icon"><Icon icon=icons::TIMER size=22 /></span>
                     <div class="net-trial-text">
                         <h2 id="net-trial-h">{tr("net.booted_title")}</h2>
-                        <p>{move || tf("net.booted_text", &[("ifaces", &ifaces), ("n", &left.get().to_string())])}</p>
+                        <p>{text}</p>
                         <p class="muted small">{move || trial.with(|t| t.as_ref().map(|t| tf("net.booted_planned", &[("user", &t.author)])))}</p>
                     </div>
                     <div class="net-trial-count tnum" aria-hidden="true">{move || clock(left.get())}</div>
-                    <span class="sr-only" aria-live="polite">{move || tf("net.left_sr", &[("n", &spoken.get().to_string())])}</span>
+                    <span class="sr-only" aria-live="polite">{move || tf("net.booted_left_sr", &[("n", &spoken.get().to_string())])}</span>
                 </div>
                 {crate::form::form_error(tl.error)}
                 <div class="net-trial-actions">

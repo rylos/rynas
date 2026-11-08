@@ -4,7 +4,7 @@
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use rynas_api_types::{IdBlocker, IdBlockerCode, IdKind, IdRemapPlan, IdRemapRequest, LOCAL_ID_MAX, LOCAL_ID_MIN, TaskStarted, TaskStatus};
+use rynas_api_types::{IdBlocker, IdBlockerCode, IdKind, IdRemapPlan, IdRemapRequest, LOCAL_ID_MAX, LOCAL_ID_MIN, RetiredId, TaskStarted, TaskStatus};
 
 use crate::api;
 use crate::form::{In, form_error, spinner, switch, text_field};
@@ -15,24 +15,30 @@ use crate::ui::{self, DlgKind, Skeleton, Tone, dialog};
 
 /// What the dialog is for: the account, its id now, and whether its id changes (`false`:
 /// files of another id are given to it).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct IdAsk {
     pub kind: IdKind,
     pub name: String,
     pub current: u32,
     pub change: bool,
+    /// Filled in: the id and folders of a take-over that completes an earlier change.
+    pub preset: Option<(u32, Vec<String>)>,
 }
 
-fn blocker_text(b: &IdBlocker) -> String {
+fn blocker_text(b: &IdBlocker, kind: IdKind) -> String {
     let d = b.detail.as_str();
+    let group = kind == IdKind::Group;
     match b.code {
         IdBlockerCode::NotLocal => t("ids.b_not_local").to_string(),
         IdBlockerCode::Unmanaged => t("ids.b_unmanaged").to_string(),
         IdBlockerCode::OutOfRange => tf("ids.b_out_of_range", &[("d", d)]),
         IdBlockerCode::SameId => t("ids.b_same_id").to_string(),
         IdBlockerCode::IdInUse => tf("ids.b_id_in_use", &[("d", d)]),
-        IdBlockerCode::Processes => tf("ids.b_processes", &[("d", d)]),
-        IdBlockerCode::SmbSessions => tf("ids.b_smb_sessions", &[("d", d)]),
+        IdBlockerCode::Processes => tf(if group { "ids.b_processes_group" } else { "ids.b_processes" }, &[("d", d)]),
+        IdBlockerCode::SmbSessions => {
+            let n = d.parse::<u64>().map(crate::i18n::count).unwrap_or_else(|_| d.to_string());
+            tf(if group { "ids.b_smb_sessions_group" } else { "ids.b_smb_sessions" }, &[("d", &n)])
+        }
         IdBlockerCode::PathInvalid => tf("ids.b_path_invalid", &[("d", d)]),
         IdBlockerCode::BadRequest => t("ids.b_bad_request").to_string(),
         IdBlockerCode::Other => t("ids.b_other").to_string(),
@@ -40,20 +46,54 @@ fn blocker_text(b: &IdBlocker) -> String {
 }
 
 fn count(n: u64, partial: bool) -> String {
-    let s = crate::i18n::num(n as f64, 0);
+    let s = crate::i18n::count(n);
     if partial { tf("ids.at_least", &[("n", &s)]) } else { s }
 }
 
-fn plan_view(p: &IdRemapPlan) -> AnyView {
+fn retired_text(r: &RetiredId) -> String {
+    let mut s = tf("ids.retired_item", &[("id", &r.id.to_string()), ("name", &r.name), ("new", &r.new_id.to_string())]);
+    if !r.date.is_empty() {
+        s.push_str(&format!(" ({})", r.date));
+    }
+    s
+}
+
+/// The account's own id retired by an earlier change whose files may not all have followed
+/// (a cancelled or partial run): the take-over that completes it.
+fn own_retired(p: &IdRemapPlan, ask: &IdAsk) -> Option<u32> {
+    p.retired.iter().find(|r| r.kind == ask.kind && r.name == ask.name && r.new_id == ask.current).map(|r| r.id)
+}
+
+fn plan_view(p: &IdRemapPlan, ask: &IdAsk, reopen: Callback<IdAsk>, folders: Vec<String>) -> AnyView {
+    let complete = ask.change.then(|| own_retired(p, ask)).flatten().map(|old| {
+        let a = IdAsk { change: false, preset: Some((old, folders.clone())), ..ask.clone() };
+        let label = tf("ids.complete", &[("id", &old.to_string())]);
+        ui::note(Tone::Info, icons::INFO, view! {
+            <span>{tf("ids.complete_text", &[("id", &old.to_string())])}" "</span>
+            <button type="button" class="btn ghost sm" on:click=move |_| reopen.run(a.clone())>{label}</button>
+        }
+        .into_any())
+    });
+    let retired = (ask.change && !p.retired.is_empty()).then(|| {
+        let list: Vec<String> = p.retired.iter().map(retired_text).collect();
+        ui::note(Tone::Info, icons::INFO, view! {
+            <span>{tr("ids.retired")}</span>
+            <ul class="plain-list id-paths">{list.into_iter().map(|x| view! { <li>{x}</li> }).collect_view()}</ul>
+        }
+        .into_any())
+    });
+    let target = p.target_retired.as_ref().map(|r| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, ui::text(tf("ids.target_retired", &[("id", &r.id.to_string()), ("name", &r.name)]))));
+    let resumes = p.resumes.then(|| ui::note(Tone::Info, icons::INFO, ui::text(tf("ids.resumes", &[("from", &p.from.to_string()), ("to", &p.to.to_string())]))));
     if !p.allowed {
-        let list: Vec<String> = p.blockers.iter().map(blocker_text).collect();
+        let kind = p.kind;
+        let list: Vec<String> = p.blockers.iter().map(|b| blocker_text(b, kind)).collect();
         return ui::note(Tone::Err, icons::CIRCLE_X, view! {
             <ul class="plain-list id-paths">{list.into_iter().map(|x| view! { <li>{x}</li> }).collect_view()}</ul>
         }
         .into_any());
     }
     let Some(c) = p.scan.clone() else {
-        return ().into_any();
+        return view! { {target}{resumes}{complete}{retired} }.into_any();
     };
     let part = c.partial;
     let changed_key = if p.kind == IdKind::User { "ids.owners" } else { "ids.groups" };
@@ -67,26 +107,49 @@ fn plan_view(p: &IdRemapPlan) -> AnyView {
             .into_any())
         })
     };
+    let walked = paths(p.paths.clone(), "ids.walked");
+    let conflicts = (c.acl_conflicts > 0).then(|| {
+        let more = c.acl_conflicts > c.acl_conflict_paths.len() as u64;
+        ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! {
+            <span>{tr("ids.acl_conflicts_text")}</span>
+            <ul class="plain-list id-paths mono">
+                {c.acl_conflict_paths.iter().cloned().map(|x| view! { <li>{x}</li> }).collect_view()}
+                {more.then(|| view! { <li>"…"</li> })}
+            </ul>
+        }
+        .into_any())
+    });
     view! {
+        {target}
+        {resumes}
         <dl class="kvs">
             {ui::kv_row("ids.scanned", Signal::stored(count(c.scanned, part)), "tnum")}
             {ui::kv_row(changed_key, Signal::stored(count(changed, part)), "tnum")}
-            {ui::kv_row("ids.acl_entries", Signal::stored(count(c.acl_entries, part)), "tnum")}
+            // "at least 0" says nothing: a partial check with no ACL entry seen hides the line
+            {(!part || c.acl_entries > 0).then(|| ui::kv_row("ids.acl_entries", Signal::stored(count(c.acl_entries, part)), "tnum"))}
+            {(c.acl_conflicts > 0).then(|| ui::kv_row("ids.acl_conflicts", Signal::stored(count(c.acl_conflicts, part)), "tnum"))}
             {(c.errors > 0).then(|| ui::kv_row("ids.errors", Signal::stored(count(c.errors, part)), "tnum"))}
         </dl>
         {part.then(|| ui::note(Tone::Info, icons::TIMER, view! { <span>{tr("ids.partial")}</span> }.into_any()))}
+        {conflicts}
+        {walked}
         {paths(c.readonly, "ids.readonly")}
         {paths(c.other_fs, "ids.other_fs")}
+        {complete}
+        {retired}
     }
     .into_any()
 }
 
 /// The dialog. `done` runs after the task (reload the lists).
-pub fn id_dialog(ask: IdAsk, close: Callback<()>, done: Callback<()>) -> AnyView {
-    let id = RwSignal::new(String::new());
+/// `reopen` replaces the dialog with another ask (the take-over that completes a cancelled
+/// change).
+pub fn id_dialog(ask: IdAsk, close: Callback<()>, done: Callback<()>, reopen: Callback<IdAsk>) -> AnyView {
+    let (preset_id, preset_paths) = ask.preset.clone().map(|(i, p)| (i.to_string(), p)).unwrap_or_default();
+    let id = RwSignal::new(preset_id);
     let acls = RwSignal::new(true);
     // folders: the suggested ones (from the first check) with a tick each, plus added ones
-    let folders = RwSignal::new(Vec::<(String, bool)>::new());
+    let folders = RwSignal::new(preset_paths.into_iter().map(|p| (p, true)).collect::<Vec<_>>());
     let extra = RwSignal::new(String::new());
     let plan = RwSignal::new(None::<Result<IdRemapPlan, String>>);
     let checking = RwSignal::new(false);
@@ -145,6 +208,7 @@ pub fn id_dialog(ask: IdAsk, close: Callback<()>, done: Callback<()>) -> AnyView
     let ready = move || plan.with(|p| matches!(p, Some(Ok(p)) if p.allowed && p.scan.is_some()));
     let req3 = request.clone();
     let name = ask.name.clone();
+    let ask_done = ask.clone();
     let start = move || {
         let Some(mut r) = req3() else { return };
         r.expected = plan.with_untracked(|p| match p {
@@ -154,18 +218,31 @@ pub fn id_dialog(ask: IdAsk, close: Callback<()>, done: Callback<()>) -> AnyView
         busy.set(true);
         error.set(None);
         let name = name.clone();
+        let ask_done = ask_done.clone();
         spawn_local(async move {
             match api::post::<_, TaskStarted>("/api/v1/ids/remap", Some(&r)).await {
                 Ok(st) => {
                     // a long walk: the dialog closes, the task panel shows the progress
                     close.run(());
+                    let mut resume = None;
                     match crate::tasks::follow(&st.task_id).await {
                         Ok(task) if task.status == TaskStatus::Ok => toast(Tone::Ok, tf("ids.done", &[("name", &name)])),
-                        Ok(task) => toast(Tone::Err, crate::tasks::task_error(&task)),
+                        Ok(task) => {
+                            toast(Tone::Err, crate::tasks::task_error(&task));
+                            // the account has its new id, part of the files still the old one:
+                            // offer the take-over that completes it, with the same folders
+                            if ask_done.change && task.status == TaskStatus::Cancelled {
+                                let current = r.new_id.unwrap_or(ask_done.current);
+                                resume = Some(IdAsk { change: false, current, preset: Some((ask_done.current, r.paths.clone())), ..ask_done.clone() });
+                            }
+                        }
                         Err(e) => toast(Tone::Err, e.text()),
                     }
                     crate::config::changed();
                     done.run(());
+                    if let Some(a) = resume {
+                        reopen.run(a);
+                    }
                 }
                 Err(e) => {
                     let _ = busy.try_set(false);
@@ -211,6 +288,7 @@ pub fn id_dialog(ask: IdAsk, close: Callback<()>, done: Callback<()>) -> AnyView
         }
     };
     let check2 = check.clone();
+    let ask_view = ask.clone();
     let body = view! {
         <p class="dialog-text">{tr(if ask.change { "ids.text_change" } else { "ids.text_reown" })}</p>
         <form class="form" on:submit=move |ev| { ev.prevent_default(); check2(); }>
@@ -220,8 +298,9 @@ pub fn id_dialog(ask: IdAsk, close: Callback<()>, done: Callback<()>) -> AnyView
                 <legend class="field-label">{tr("ids.folders")}</legend>
                 <p class="field-help">{tr("ids.folders_help")}</p>
                 <div class="id-folders">{folder_list}</div>
-                <div class="toolbar">
-                    {text_field("ids.add_folder", Signal::derive(move || extra.get()), Callback::new(move |v| extra.set(v)), none, In { mono: true, maxlength: 4096, ..In::default() })}
+                // Enter adds the folder (not the form's submit, which runs the check)
+                <div class="id-add" on:keydown=move |ev| if ev.key() == "Enter" { ev.prevent_default(); add(); }>
+                    {text_field("ids.other_folder", Signal::derive(move || extra.get()), Callback::new(move |v| extra.set(v)), none, In { mono: true, maxlength: 4096, ..In::default() })}
                     <button type="button" class="btn ghost" on:click=move |_| add()>{tr("ids.add_folder")}</button>
                 </div>
             </fieldset>
@@ -235,7 +314,7 @@ pub fn id_dialog(ask: IdAsk, close: Callback<()>, done: Callback<()>) -> AnyView
             match plan.get() {
                 None => ().into_any(),
                 Some(Err(e)) => ui::note(Tone::Err, icons::CIRCLE_X, view! { <span>{e}</span> }.into_any()),
-                Some(Ok(p)) => plan_view(&p),
+                Some(Ok(p)) => plan_view(&p, &ask_view, reopen, folders.with_untracked(|f| f.iter().filter(|x| x.1).map(|x| x.0.clone()).collect())),
             }
         }}
         {ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { <span>{tr("ids.after")}</span> }.into_any())}

@@ -1010,9 +1010,10 @@ fn SubvolDialog(base: String, edit: Option<SubvolumeInfo>, on_close: Callback<()
                                 prop:value=move || name.get() on:input=move |ev| name.set(event_target_value(&ev)) />
                             <span class="muted small">{tr("sto.sub_name_hint")}</span>
                         </label>
+                        // the same switch and trade-offs as a new shared folder
                         {creating.then(|| view! {
-                            <label class="check"><input type="checkbox" prop:checked=move || nocow.get() on:change=move |ev| nocow.set(event_target_checked(&ev)) />{tr("shares.nocow")}</label>
-                            <p class="muted small">{tr("shares.nocow_help")}" "{tr("shares.nocow_sto_hint")}</p>
+                            {crate::form::switch("shares.nocow", Some("shares.nocow_help"), nocow.into(), Callback::new(move |v| nocow.set(v)))}
+                            {move || nocow.get().then(crate::pages::share_nocow::costs_note)}
                         })}
                         <div class="form" hidden=move || nocow.get()>
                             <label class="check"><input type="checkbox" prop:checked=move || comp.get() on:change=move |ev| comp.set(event_target_checked(&ev)) />{tr("sto.sub_compress")}</label>

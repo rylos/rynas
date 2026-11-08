@@ -392,14 +392,6 @@ fn location_fields(d: RwSignal<Share>, is_new: bool, show: RwSignal<bool>) -> An
     // app already polls)
     let live = use_live();
     let use_sub = Signal::derive(move || d.with(|s| s.subvolume.is_some()));
-    let set_mode = move |sub: bool| {
-        d.update(|s| {
-            s.subvolume = sub.then(|| ShareSubvolume { volume: String::new(), compression: true, nocow: false });
-            if sub {
-                s.path.clear();
-            }
-        })
-    };
     let volumes = move || {
         live.storage.with(|s| {
             s.iter()
@@ -409,6 +401,20 @@ fn location_fields(d: RwSignal<Share>, is_new: bool, show: RwSignal<bool>) -> An
                     (f.fstype == "btrfs" && valid_share_name(label)).then(|| (label.to_string(), f.avail))
                 })
                 .collect::<Vec<_>>()
+        })
+    };
+    // back to "New subvolume": start again on the first volume (the Effect below only runs
+    // when the volume list changes, so it would leave the volume empty here)
+    let set_mode = move |sub: bool| {
+        if sub == d.with_untracked(|s| s.subvolume.is_some()) {
+            return;
+        }
+        let first = sub.then(|| volumes().into_iter().next().map(|v| v.0)).flatten().unwrap_or_default();
+        d.update(|s| {
+            s.subvolume = sub.then_some(ShareSubvolume { volume: first, compression: true, nocow: false });
+            if sub {
+                s.path.clear();
+            }
         })
     };
     // pick the first volume once the list arrives

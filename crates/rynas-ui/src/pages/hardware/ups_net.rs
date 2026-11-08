@@ -157,7 +157,7 @@ pub fn card() -> AnyView {
         let layer_notes = layer.map(|l| {
             let mut v = Vec::new();
             if let Some(name) = &l.primary_account {
-                v.push(ui::note(Tone::Info, icons::INFO, view! { {tf(modules::ups_key(UpsSlot::NetPrimary), &[("name", name)])} }.into_any()));
+                v.push(ui::note(Tone::Info, icons::INFO, ui::text_code(&tf(modules::ups_key(UpsSlot::NetPrimary), &[("name", name)]))));
             }
             if l.source == UpsNetSource::Manual && st.applied.is_none() {
                 v.push(ui::note(Tone::Info, icons::INFO, view! { {t(modules::ups_key(UpsSlot::NetManual))} }.into_any()));

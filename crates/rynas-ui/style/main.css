@@ -1262,6 +1262,8 @@ kbd {
 /* Users adopt / UID change */
 .id-paths { min-width: 0; overflow-wrap: anywhere; }
 .id-folders { display: flex; flex-direction: column; gap: var(--s-1); }
+.id-add { display: flex; align-items: flex-end; gap: var(--s-3); flex-wrap: wrap; }
+.id-add > .field { flex: 1 1 22rem; min-width: 0; }
 .steps-list { margin: 0; padding-left: var(--s-6); list-style: decimal; display: flex; flex-direction: column; gap: var(--s-1); }
 .pw-meter { display: flex; align-items: center; gap: var(--s-3); margin-top: calc(var(--s-2) * -1); }
 .pw-bars { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--s-1); flex: 1; max-width: 240px; }

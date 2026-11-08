@@ -182,7 +182,7 @@ fn users_panel(users: Remote<Vec<UserView>>, groups: Remote<Vec<GroupView>>, hom
     };
 
     let deleter = move || del.get().map(|name| user_delete_dialog(name, Callback::new(move |_| del.set(None))));
-    let id_changer = move || ids.get().map(|a| id_dialog(a, Callback::new(move |_| ids.set(None)), Callback::new(move |_| users.reload())));
+    let id_changer = move || ids.get().map(|a| id_dialog(a, Callback::new(move |_| ids.set(None)), Callback::new(move |_| users.reload()), Callback::new(move |a| ids.set(Some(a)))));
 
     view! {
         <div class="toolbar">
@@ -522,7 +522,7 @@ fn user_editor(e: UserEdit, all_groups: Vec<String>, homes: Option<HomesState>, 
             {unmanaged.then(|| ui::note(Tone::Info, icons::INFO, view! { <span>{tr("users.unmanaged_note")}</span> }.into_any()))}
             {is_new.then(|| text_field("users.name", name, set_name, name_err, In { help: Some("users.name_help"), mono: true, maxlength: 32, ..In::default() }))}
             {is_new.then(|| id_field("users.uid", "users.uid_help", uid, set_uid))}
-            {(managed && on_system).then(|| id_row("users.uid", IdAsk { kind: IdKind::User, name: e.user.name.clone(), current: e.user.uid, change: true }, "ids.change_uid", on_ids, close))}
+            {(managed && on_system).then(|| id_row("users.uid", IdAsk { kind: IdKind::User, name: e.user.name.clone(), current: e.user.uid, change: true, preset: None }, "ids.change_uid", on_ids, close))}
             {text_field("users.full_name", full, set_full, full_err, In { autocomplete: "name", ..In::default() })}
             {text_field("users.email", email, set_email, email_err, In { kind: "email", help: Some("users.email_help"), autocomplete: "email", ..In::default() })}
             {text_field("users.description", descr, set_descr, none, In::default())}
@@ -810,7 +810,7 @@ fn groups_panel(users: Remote<Vec<UserView>>, groups: Remote<Vec<GroupView>>) ->
         {table}
         {editor}
         {deleter}
-        {move || ids.get().map(|a| id_dialog(a, Callback::new(move |_| ids.set(None)), Callback::new(move |_| { groups.reload(); users.reload(); })))}
+        {move || ids.get().map(|a| id_dialog(a, Callback::new(move |_| ids.set(None)), Callback::new(move |_| { groups.reload(); users.reload(); }), Callback::new(move |a| ids.set(Some(a)))))}
     }
     .into_any()
 }
@@ -896,7 +896,7 @@ fn group_editor(g: GroupView, all_users: Vec<String>, on_ids: Callback<IdAsk>, c
             {unmanaged.then(|| ui::note(Tone::Info, icons::INFO, view! { <span>{tr("users.unmanaged_note")}</span> }.into_any()))}
             {is_new.then(|| text_field("groups.name", name, set_name, name_err, In { help: Some("groups.name_help"), mono: true, maxlength: 32, ..In::default() }))}
             {is_new.then(|| id_field("groups.gid", "users.uid_help", gid, set_gid))}
-            {managed.then(|| id_row("groups.gid", IdAsk { kind: IdKind::Group, name: g.group.name.clone(), current: g.group.gid, change: true }, "ids.change_gid", on_ids, close))}
+            {managed.then(|| id_row("groups.gid", IdAsk { kind: IdKind::Group, name: g.group.name.clone(), current: g.group.gid, change: true, preset: None }, "ids.change_gid", on_ids, close))}
             {text_field("users.description", descr, set_descr, none, In::default())}
             <fieldset class="fieldset">
                 <legend class="field-label">
