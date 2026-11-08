@@ -35,6 +35,7 @@ mod style_check;
 mod tasks;
 mod toast;
 mod ui;
+mod week_grid;
 
 fn main() {
     console_error_panic_hook::set_once();

@@ -1665,6 +1665,35 @@ day.4	Gio
 day.5	Ven
 day.6	Sab
 day.7	Dom
+day.long.1	Lunedì
+day.long.2	Martedì
+day.long.3	Mercoledì
+day.long.4	Giovedì
+day.long.5	Venerdì
+day.long.6	Sabato
+day.long.7	Domenica
+wg.level	Livello da applicare
+wg.hours	Ore
+wg.cell	{day} {from}–{to}: {level}
+wg.fill_day	{day}: tutte le ore a {level}
+wg.fill_hour	{from}–{to} di ogni giorno a {level}
+wg.all_week	Tutta la settimana: {level}
+wg.invalid	La pianificazione salvata non era leggibile: appare come {level} finché non la salvi.
+wg.help	Scegli un livello, poi fai clic o trascina sulle ore; l'intestazione di un giorno o di un'ora riempie la sua riga. Da tastiera: le frecce spostano, Spazio applica il livello, Maiusc+Spazio riempie il giorno, 1–{n} scelgono il livello.
+wgd.title	Griglia settimanale
+wgd.subtitle	Anteprima del componente, solo nella build demo
+wgd.led	Luminosità dei LED per ora
+wgd.window	Finestra di backup
+wgd.bandwidth	Banda per ora
+wgd.preview	Anteprime compatte
+wgd.normal	Normale
+wgd.reduced	Ridotta
+wgd.off	Spenti
+wgd.allowed	Esegui
+wgd.paused	In pausa
+wgd.unlimited	Illimitata
+wgd.limited	Limitata
+wgd.slow	Lenta
 nav.snapshots	Snapshot
 nt.center	Centro notifiche
 nt.subtitle	Eventi di storage, hardware, attività e servizi, con presa visione e silenziamenti

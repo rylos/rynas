@@ -198,6 +198,8 @@ fn Shell() -> impl IntoView {
                     <Route path=path!("/apps") view=pages::apps::AppsPage />
                     <Route path=path!("/plugins") view=pages::apps::AppsPage />
                     <Route path=path!("/docker") view=pages::docker::DockerPage />
+                    // dev-only component showcase (demo build; "not found" otherwise)
+                    <Route path=path!("/dev/week-grid") view=crate::week_grid::Showcase />
                 </Routes>
             </main>
             <div class="dock">
