@@ -165,6 +165,9 @@ fn admin_read(path: &str) -> bool {
             // file names inside the backups, repository locations
             "/api/v1/backup/",
             "/backup/",
+            // replication: the NAS' public key, remote hosts and replica contents
+            "/api/v1/snapshots/replication",
+            "/snapshots/replication",
         ]
         .iter()
         .any(|p| path.starts_with(p))
@@ -432,6 +435,11 @@ mod tests {
             StatusCode::FORBIDDEN
         );
         assert_eq!(status(true, Method::GET, header).await, StatusCode::OK);
+        // replication reads hand out the NAS' key and remote hosts
+        for p in ["/snapshots/replication", "/api/v1/snapshots/replication/ssh-key"] {
+            assert_eq!(status(false, Method::GET, p).await, StatusCode::FORBIDDEN);
+            assert_eq!(status(true, Method::GET, p).await, StatusCode::OK);
+        }
         assert!(is_admin(Role::Admin));
     }
 }

@@ -2134,7 +2134,9 @@ repl.col.when	Quando
 repl.col.last	Ultimo trasferimento
 repl.col.replica	Replica
 repl.after_snapshots	Dopo ogni snapshot
-repl.next	prossima {time}
+repl.held_one	{n} snapshot tenuto sull'origine finché la destinazione non torna raggiungibile
+repl.held_many	{n} snapshot tenuti sull'origine finché la destinazione non torna raggiungibile
+repl.key.line_needs_path	Compila sopra la cartella sulla destinazione: la riga di authorized_keys limita la chiave a quella cartella.
 repl.never	Mai
 repl.sent_one	{n} snapshot inviato
 repl.sent_many	{n} snapshot inviati
@@ -2181,7 +2183,7 @@ repl.f.sudo_help	Per un utente diverso da root.
 repl.f.host_keys	Identità del server
 repl.f.host_keys_none	Non ancora confermata: i trasferimenti sono rifiutati finché la chiave del server non è confermata.
 repl.f.scan	Leggi la chiave del server
-repl.f.scan_check	Confronta queste impronte con l'output di ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub sul server prima di fidarti.
+repl.f.scan_check	Confronta queste impronte con l'output di `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` sul server prima di fidarti.
 repl.f.scan_none	Il server non ha restituito alcuna chiave.
 repl.f.trust	Fidati di queste chiavi
 repl.f.enabled	Replica attiva
@@ -2320,7 +2322,18 @@ bk.f.pw_mode	Password del repository
 bk.pw.generate	Generane una robusta
 bk.pw.own	Usa la mia
 bk.pw.generate_help	rynas crea una password casuale e la mostra una sola volta dopo il salvataggio.
-bk.pw.kept	La password del repository è conservata cifrata su questo NAS e non cambia.
+bk.pw.kept	Conservata cifrata su questo NAS. Non si può cambiare: è la chiave delle versioni già nel repository (per un'altra password crea un nuovo job).
+bk.f.dest_change	Cambiare destinazione richiede di nuovo i suoi segreti (password, chiavi, configurazione rclone): quelli salvati appartengono alla destinazione precedente.
+bk.f.ssh_replace	Esiste già una coppia di chiavi. Una nuova la sostituisce: in authorized_keys del server va poi messa la nuova chiave pubblica.
+bk.f.ssh_replace_go	Sostituisci la chiave
+bk.delete_password	Senza la password del repository le versioni rimaste nella destinazione non si possono leggere. Tienine una copia se potrebbero servirti.
+bk.interrupted	Interrotto
+bk.interrupted_text	{when} · il servizio si è fermato durante l'esecuzione; il sistema è stato rimesso com'era
+bk.warnings_n	Avvisi dell'ultima esecuzione: {n}
+bk.all_hosts	Mostra altri NAS
+bk.all_hosts_help	Anche le versioni salvate da altri sistemi nello stesso repository.
+bk.restore.original_confirm	Ho capito che i file nella posizione originale vengono sostituiti
+bk.restore.overwrite	Sovrascrivi e ripristina
 bk.f.repo_password	Password del repository cifrato
 bk.f.repo_password_help	Almeno 8 caratteri; la password di un repository esistente per aggiungervi versioni.
 bk.pw.title	Salva la password del repository
@@ -3988,7 +4001,6 @@ sf.err.hostname	Inserisci un nome host, ad es. nas.example.lan.
 sf.err.uri	Inserisci un indirizzo che inizia con http:// o https://.
 sf.err.email	Inserisci un indirizzo e-mail.
 bk.tab.pcs	PC
-bk.pcs.title	Destinazioni di backup per PC
 bk.intro	I PC Linux con btrfs mandano qui i loro snapshot con btrbk via SSH. Ogni PC ha la sua cartella e la sua chiave, e la sua chiave può solo ricevere in quella cartella.
 bkpc.empty	Ancora nessun PC
 bkpc.empty_text	Aggiungi un PC per avere una cartella e le righe per la sua configurazione di btrbk, oppure adotta una cartella che contiene già snapshot ricevuti.
@@ -4034,12 +4046,14 @@ bk.f.min_age	Non eliminare prima di (giorni)
 bk.f.min_age_help	Uno snapshot più giovane di così resta anche se il PC chiede di eliminarlo.
 bk.f.rules_note	Queste regole proteggono i backup da un PC guasto o in mani sbagliate: un'eliminazione rifiutata compare come errore nel log di btrbk sul PC. Tienile sotto il target_preserve_min del PC per evitare quegli errori.
 bk.f.destination	Copia in
-bk.f.destination_help	Una cartella esistente sul NAS. La copia mantiene proprietario e permessi del PC e non sovrascrive mai niente.
+bk.f.destination_help	Una cartella esistente sul NAS. I file copiati prendono il proprietario di quella cartella; i bit set-user/group-ID e gli attributi di sicurezza vengono tolti. Niente viene sovrascritto.
 bk.adopt.check	Controlla la cartella
 bk.adopt.found	Trovati {n} snapshot ricevuti.
 bk.adopt.none	Nessuno snapshot di btrbk in questa cartella. Si può adottare lo stesso e il PC parte con un invio completo.
 bk.adopt.incomplete	Ricezioni interrotte: {n}. btrbk le elimina prima di inviare di nuovo quegli snapshot.
 bk.adopt.other	Altri elementi lasciati come sono: {n}.
+bk.adopt.perm_change	Adottarla cambia proprietario, gruppo e permessi della cartella stessa (non del contenuto):
+bk.adopt.perm_confirm	Cambia proprietario e permessi della cartella
 bk.adopt.not_subvolume	La cartella non è un sottovolume a sé: funziona, ma il suo spazio non si misura separatamente dal volume.
 bk.added	{device} è pronto
 bk.saved	Impostazioni del PC salvate
@@ -4055,7 +4069,9 @@ bk.usage_text	{excl} solo in questi snapshot, {total} in tutto (misurato il {whe
 bk.usage_none	Non ancora misurato
 bk.rules.off	Elimina solo il NAS
 bk.rules.on	Elimina il PC; restano i {keep} più recenti, nessuno più giovane di {days} giorni
+bk.rules.on_one	Elimina il PC; resta il più recente, nessuno più giovane di {days} giorni
 bk.rules.on_keep	Elimina il PC; i {keep} più recenti restano sempre
+bk.rules.on_keep_one	Elimina il PC; il più recente resta sempre
 bk.rules.on_days	Elimina il PC; nessuno più giovane di {days} giorni
 bk.rules.on_free	Elimina il PC secondo il suo btrbk
 bk.alert_off	Disattivato
@@ -4068,7 +4084,7 @@ bk.adopted_yes	Cartella adottata
 bk.no_key	Ancora nessuna chiave: il PC non può collegarsi. Aggiungi la sua chiave pubblica in Impostazioni.
 bk.late_note	Niente ricevuto da più di {days} giorni.
 bk.steps	Configura il PC
-bk.steps_intro	Sul PC, come root: crea una chiave per btrbk, aggiungi le righe a /etc/btrbk/btrbk.conf (cambia volume e sottovolumi secondo il PC), poi collegati una volta per accettare la chiave del NAS e prova una simulazione.
+bk.steps_intro	Sul PC, con sudo (i comandi qui sotto lo usano): crea una chiave per btrbk, aggiungi le righe a /etc/btrbk/btrbk.conf (cambia volume e sottovolumi secondo il PC), poi collegati una volta per accettare la chiave del NAS e prova una simulazione.
 bk.step.key	1. Chiave del PC
 bk.step.config	2. btrbk.conf
 bk.step.test	3. Prima connessione e prova

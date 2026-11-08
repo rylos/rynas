@@ -57,7 +57,7 @@ fn retention_text(r: &Retention) -> String {
     let parts: Vec<String> = [(r.last, "bk.u.last"), (r.hourly, "bk.u.h"), (r.daily, "bk.u.d"), (r.weekly, "bk.u.w"), (r.monthly, "bk.u.m"), (r.yearly, "bk.u.y")]
         .into_iter()
         .filter(|(n, _)| *n > 0)
-        .map(|(n, k)| format!("{n} {}", t(k)))
+        .map(|(n, k)| format!("{n}\u{a0}{}", t(k)))
         .collect();
     parts.join(" · ")
 }
@@ -117,7 +117,9 @@ pub fn panel(edit: RwSignal<Option<Option<BackupJobView>>>) -> AnyView {
                 text: t("bk.delete_text").to_string(),
                 action: "delete",
                 danger: true,
-                extra: None,
+                // the repository password goes with the job: without a copy the versions left
+                // at the destination cannot be read
+                extra: Some(ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { <span>{tr("bk.delete_password")}</span> }.into_any())),
                 typed: Signal::stored(None),
                 busy,
                 error,
@@ -191,7 +193,13 @@ fn job_row(
         });
     };
     let st = v.status.clone();
+    let warnings = st.last_warnings.clone();
     let last = match (&v.last_run, &st.last_error) {
+        // rynasd stopped in the middle of a run and put the system back at its next start
+        (_, Some(err)) if err.starts_with("interrupted") => {
+            let when = st.last_end_ms.map(i18n::short_when).unwrap_or_default();
+            view! { <div class="cell-main">{ui::status(Tone::Warn, t("bk.interrupted").to_string())}<span class="cell-sub bk-wrap" title=err.clone()>{tf("bk.interrupted_text", &[("when", &when)])}</span></div> }.into_any()
+        }
         (_, Some(err)) if st.last_end_ms.is_some_and(|e| Some(e) != st.last_ok_ms) => {
             let when = st.last_end_ms.map(i18n::short_when).unwrap_or_default();
             view! { <div class="cell-main">{ui::status(Tone::Err, t("bk.failed").to_string())}<span class="cell-sub bk-err" title=err.clone()>{format!("{when} · {err}")}</span></div> }.into_any()
@@ -232,11 +240,20 @@ fn job_row(
             ui::cell("sch.col.schedule", "", view! {
                 <div class="cell-main">
                     <span>{if v.enabled { v.schedule.as_ref().map(trigger_text).unwrap_or_else(|| "—".into()) } else { t("bk.paused").to_string() }}</span>
-                    <span class="cell-sub tnum">{v.next_run_ms.map(|m| tf("sch.next", &[("when", &i18n::short_when(m))]))}</span>
+                    <span class="cell-sub tnum">{v.next_run_ms.filter(|_| v.enabled).map(|m| tf("sch.next", &[("when", &i18n::short_when(m))]))}</span>
                 </div>
             }
             .into_any()),
-            ui::cell("sch.col.last", "", view! { <div class="chips">{last}{ui::pending_status(v.pending)}</div> }.into_any()),
+            ui::cell("sch.col.last", "", view! {
+                <div class="cell-main">
+                    <div class="chips">{last}{ui::pending_status(v.pending)}</div>
+                    {(!warnings.is_empty()).then(|| view! {
+                        <span class="cell-sub warn-text bk-wrap">{tf("bk.warnings_n", &[("n", &warnings.len().to_string())])}</span>
+                        <span class="cell-sub bk-wrap">{ui::tech_detail(warnings.join("; "))}</span>
+                    })}
+                </div>
+            }
+            .into_any()),
             ui::cell("bk.col.size", "", view! {
                 <div class="cell-main">
                     <span class="tnum">{size}</span>
@@ -520,7 +537,14 @@ fn job_editor(init: Option<BackupJobView>, shown_password: RwSignal<Option<Strin
         .into_any()
     };
 
+    // a new pair replaces the key already on the server's authorized_keys: asked first
+    let regen_ask = RwSignal::new(false);
     let gen_key = move |_| {
+        if !f.public_key.with_untracked(String::is_empty) && !regen_ask.get_untracked() {
+            regen_ask.set(true);
+            return;
+        }
+        regen_ask.set(false);
         keygen.set(true);
         spawn_local(async move {
             let r = api::post::<(), SshKeyCreated>("/api/v1/backup/restic/ssh-key", None).await;
@@ -573,6 +597,17 @@ fn job_editor(init: Option<BackupJobView>, shown_password: RwSignal<Option<Strin
                         <Icon icon=icons::COPY size=14 />{tr("bk.copy")}
                     </button>
                 </div>
+                <Show when=move || regen_ask.get()>
+                    {ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! {
+                        <div class="cell-main">
+                            <span>{tr("bk.f.ssh_replace")}</span>
+                            <div class="btn-row">
+                                <button type="button" class="btn danger sm" on:click=gen_key>{tr("bk.f.ssh_replace_go")}</button>
+                                <button type="button" class="btn ghost sm" on:click=move |_| regen_ask.set(false)>{tr("cancel")}</button>
+                            </div>
+                        </div>
+                    }.into_any())}
+                </Show>
             </div>
         }
         .into_any(),
@@ -644,10 +679,14 @@ fn job_editor(init: Option<BackupJobView>, shown_password: RwSignal<Option<Strin
                 TestOutcome::Locked => (Tone::Warn, t("bk.test.locked").to_string()),
                 TestOutcome::Failed => (Tone::Err, t("bk.test.failed").to_string()),
             };
+            // a working test's message is for the user (the SFTP host key fingerprint, pinned
+            // when the job is saved); a failure's is the tool's words
+            let failed = r.outcome == TestOutcome::Failed;
             view! {
                 <div class="bk-test" aria-live="polite">
                     {ui::status(tone, text)}
-                    {(!r.message.is_empty()).then(|| ui::tech_detail(r.message.clone()))}
+                    {(!r.message.is_empty() && failed).then(|| ui::tech_detail(r.message.clone()))}
+                    {(!r.message.is_empty() && !failed).then(|| view! { <p class="small bk-wrap">{r.message.clone()}</p> })}
                 </div>
             }
         })
@@ -731,6 +770,7 @@ fn job_editor(init: Option<BackupJobView>, shown_password: RwSignal<Option<Strin
 
             <h3 class="form-section">{tr("bk.sec.where")}</h3>
             {select_field("bk.f.dest", None, DESTS, f.kind.into(), Callback::new(move |v| { f.kind.set(v); tested.set(None); }))}
+            {(!is_new).then(|| view! { <p class="field-help">{tr("bk.f.dest_change")}</p> })}
             {dest_fields}
             <div class="btn-row">
                 <button type="button" class="btn ghost sm" disabled=move || testing.get() on:click=run_test>
@@ -751,7 +791,8 @@ fn job_editor(init: Option<BackupJobView>, shown_password: RwSignal<Option<Strin
                 }
                 .into_any()
             } else {
-                view! { <p class="field-help">{tr("bk.pw.kept")}</p> }.into_any()
+                // the key of the repository's versions: it cannot change (400)
+                field("bk.f.repo_password", RwSignal::new("••••••••".to_string()), In { kind: "password", disabled: true, help: Some("bk.pw.kept"), ..In::default() })
             }}
 
             <h3 class="form-section">{tr("sch.sec.schedule")}</h3>
@@ -874,57 +915,91 @@ fn check_dialog(name: String, jobs: Remote<Vec<BackupJobView>>, close: Callback<
 // ------------------------------------------------------------------ versions and restore
 
 fn versions_drawer(name: String, close: Callback<()>) -> AnyView {
-    let snaps = Remote::<Vec<SnapshotEntry>>::new(job_url(&name, "/snapshots"));
+    // only this NAS' versions unless asked (?all_hosts=true: a repository shared with
+    // another NAS)
+    let all_hosts = RwSignal::new(false);
     let open = RwSignal::new(None::<SnapshotEntry>);
+    let picked = RwSignal::new(Vec::<String>::new());
+    let restore = RwSignal::new(false);
+    let n0 = name.clone();
     let list = move || {
-        if let Some(v) = snaps.gate(5) {
-            return v;
-        }
-        let rows = snaps.data.get().unwrap_or_default();
-        if rows.is_empty() {
-            return view! { <EmptyState icon=icons::HISTORY title=Signal::derive(|| t("bk.no_versions").to_string()) text=Signal::derive(|| t("bk.no_versions_text").to_string()) /> }.into_any();
-        }
+        let all = all_hosts.get();
+        let url = format!("{}{}", job_url(&n0, "/snapshots"), if all { "?all_hosts=true" } else { "" });
+        let snaps = Remote::<Vec<SnapshotEntry>>::new(url);
+        let rows = move || {
+            if let Some(v) = snaps.gate(5) {
+                return v;
+            }
+            let rows = snaps.data.get().unwrap_or_default();
+            if rows.is_empty() {
+                return view! { <EmptyState icon=icons::HISTORY title=Signal::derive(|| t("bk.no_versions").to_string()) text=Signal::derive(|| t("bk.no_versions_text").to_string()) /> }.into_any();
+            }
+            view! {
+                <ul class="bk-list">
+                    {rows.into_iter().map(|s| {
+                        let s2 = s.clone();
+                        let mut sub = s.paths.join(", ");
+                        if let Some(b) = s.bytes {
+                            sub = format!("{sub} · {}", i18n::bytes(b));
+                        }
+                        if all {
+                            sub = format!("{} · {sub}", s.hostname);
+                        }
+                        view! {
+                            <li>
+                                <button class="bk-item" on:click=move |_| { picked.set(Vec::new()); open.set(Some(s2.clone())); }>
+                                    <Icon icon=icons::HISTORY size=16 />
+                                    <span class="cell-main">
+                                        <span class="tnum">{i18n::short_when(s.time_ms)}<span class="muted mono small">{format!(" · {}", s.id.get(..8).unwrap_or(&s.id))}</span></span>
+                                        <span class="cell-sub bk-wrap">{sub}</span>
+                                    </span>
+                                    <Icon icon=icons::CHEVRON_RIGHT size=16 />
+                                </button>
+                            </li>
+                        }
+                    }).collect_view()}
+                </ul>
+            }
+            .into_any()
+        };
         view! {
-            <ul class="bk-list">
-                {rows.into_iter().map(|s| {
-                    let s2 = s.clone();
-                    let sub = format!("{} · {}", s.paths.join(", "), s.bytes.map(i18n::bytes).unwrap_or_default());
-                    view! {
-                        <li>
-                            <button class="bk-item" on:click=move |_| open.set(Some(s2.clone()))>
-                                <Icon icon=icons::HISTORY size=16 />
-                                <span class="cell-main">
-                                    <span class="tnum">{i18n::short_when(s.time_ms)}<span class="muted mono small">{format!(" · {}", s.id.get(..8).unwrap_or(&s.id))}</span></span>
-                                    <span class="cell-sub bk-wrap">{sub}</span>
-                                </span>
-                                <Icon icon=icons::CHEVRON_RIGHT size=16 />
-                            </button>
-                        </li>
-                    }
-                }).collect_view()}
-            </ul>
+            {switch("bk.all_hosts", Some("bk.all_hosts_help"), all_hosts.into(), Callback::new(move |v| all_hosts.set(v)))}
+            {rows}
         }
         .into_any()
     };
     let n = name.clone();
     let body = view! {
         {move || match open.get() {
-            None => list().into_any(),
-            Some(s) => browser(n.clone(), s, Callback::new(move |_| open.set(None))),
+            None => list(),
+            Some(s) => browser(n.clone(), s, picked, Callback::new(move |_| open.set(None))),
         }}
     }
     .into_any();
-    let foot = view! { <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("close")}</button> }.into_any();
+    let n2 = name.clone();
+    let foot = view! {
+        <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("close")}</button>
+        {move || open.get().is_some().then(|| view! {
+            <button type="button" class="btn primary" on:click=move |_| restore.set(true)>
+                <Icon icon=icons::ARCHIVE_RESTORE size=16 />
+                {move || if picked.with(Vec::is_empty) { t("bk.restore_all").to_string() } else { tf("bk.restore_n", &[("n", &picked.with(Vec::len).to_string())]) }}
+            </button>
+        })}
+        {move || restore.get().then(|| {
+            let id = open.with_untracked(|s| s.as_ref().map(|s| s.id.clone()).unwrap_or_default());
+            restore_dialog(n2.clone(), id, picked.get_untracked(), Callback::new(move |_| restore.set(false)))
+        })}
+    }
+    .into_any();
     drawer(Signal::derive(move || tf("bk.versions_of", &[("name", &name)])), close, body, foot)
 }
 
-/// One snapshot: its folders, a selection, restore and download.
-fn browser(name: String, snap: SnapshotEntry, back: Callback<()>) -> AnyView {
+/// One snapshot: its folders, a selection (`picked`, restored from the drawer's footer) and
+/// downloads.
+fn browser(name: String, snap: SnapshotEntry, picked: RwSignal<Vec<String>>, back: Callback<()>) -> AnyView {
     let root = if snap.paths.len() == 1 { snap.paths[0].clone() } else { "/".to_string() };
     let path = RwSignal::new(root.clone());
     let entries = RwSignal::new(None::<Result<Vec<NodeEntry>, String>>);
-    let picked = RwSignal::new(Vec::<String>::new());
-    let restore = RwSignal::new(false);
     let (n, id) = (name.clone(), snap.id.clone());
     Effect::new(move |_| {
         let p = path.get();
@@ -989,7 +1064,6 @@ fn browser(name: String, snap: SnapshotEntry, back: Callback<()>) -> AnyView {
         }
     };
     let r3 = root.clone();
-    let snap_id = snap.id.clone();
     view! {
         <div class="bk-browser">
             <div class="btn-row">
@@ -999,13 +1073,6 @@ fn browser(name: String, snap: SnapshotEntry, back: Callback<()>) -> AnyView {
             <p class="strong">{i18n::short_when(snap.time_ms)}</p>
             <p class="mono small bk-wrap">{move || path.get()}</p>
             {rows}
-            <div class="btn-row">
-                <button type="button" class="btn primary sm" on:click=move |_| restore.set(true)>
-                    <Icon icon=icons::ARCHIVE_RESTORE size=14 />
-                    {move || if picked.with(Vec::is_empty) { t("bk.restore_all").to_string() } else { tf("bk.restore_n", &[("n", &picked.with(Vec::len).to_string())]) }}
-                </button>
-            </div>
-            {move || restore.get().then(|| restore_dialog(name.clone(), snap_id.clone(), picked.get_untracked(), Callback::new(move |_| restore.set(false))))}
         </div>
     }
     .into_any()
@@ -1018,9 +1085,13 @@ fn restore_dialog(name: String, snapshot: String, paths: Vec<String>, close: Cal
     let folder = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
+    // the original place is overwritten: an explicit confirmation (?confirm=true)
+    let overwrite_ok = RwSignal::new(false);
+    let original = move || target.get() == "original";
     let count = paths.len();
     let go = move |_| {
-        let t2 = if target.get_untracked() == "original" {
+        let to_original = target.get_untracked() == "original";
+        let t2 = if to_original {
             RestoreTarget::Original
         } else {
             let f = folder.get_untracked().trim().to_string();
@@ -1031,11 +1102,11 @@ fn restore_dialog(name: String, snapshot: String, paths: Vec<String>, close: Cal
             RestoreTarget::Folder { path: f }
         };
         let req = RestoreRequest { snapshot: snapshot.clone(), paths: paths.clone(), target: t2 };
-        let n = name.clone();
+        let url = format!("{}{}", job_url(&name, "/restore"), if to_original { "?confirm=true" } else { "" });
         busy.set(true);
         error.set(None);
         spawn_local(async move {
-            match api::start_task(&job_url(&n, "/restore"), serde_json::to_string(&req).ok()).await {
+            match api::start_task(&url, serde_json::to_string(&req).ok()).await {
                 Ok(id) => {
                     toast(Tone::Info, t("bk.restore.started").to_string());
                     close.run(());
@@ -1054,18 +1125,27 @@ fn restore_dialog(name: String, snapshot: String, paths: Vec<String>, close: Cal
     };
     let body = view! {
         <p class="dialog-text">{if count == 0 { t("bk.restore.all_text").to_string() } else { tf("bk.restore.n_text", &[("n", &count.to_string())]) }}</p>
-        {segmented("bk.restore.to", TARGETS, target.into(), Callback::new(move |v| target.set(v)))}
-        {move || if target.get() == "folder" {
-            field("bk.restore.folder_path", folder, In { mono: true, placeholder: "/volume1/restore", help: Some("bk.restore.folder_help"), ..In::default() })
+        {segmented("bk.restore.to", TARGETS, target.into(), Callback::new(move |v| { overwrite_ok.set(false); target.set(v); }))}
+        {move || if original() {
+            view! {
+                {ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { <span>{tr("bk.restore.original_warn")}</span> }.into_any())}
+                <label class="check">
+                    <input type="checkbox" prop:checked=move || overwrite_ok.get() on:change=move |ev| overwrite_ok.set(event_target_checked(&ev)) />
+                    <span>{tr("bk.restore.original_confirm")}</span>
+                </label>
+            }
+            .into_any()
         } else {
-            ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { <span>{tr("bk.restore.original_warn")}</span> }.into_any())
+            field("bk.restore.folder_path", folder, In { mono: true, placeholder: "/volume1/restore", help: Some("bk.restore.folder_help"), ..In::default() })
         }}
         {crate::form::form_error(error)}
     }
     .into_any();
     let foot = view! {
         <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("cancel")}</button>
-        <button type="button" class="btn primary" disabled=move || busy.get() on:click=go>{crate::form::spinner(busy)}{tr("bk.restore")}</button>
+        <button type="button" class=move || if original() { "btn danger" } else { "btn primary" } disabled=move || busy.get() || (original() && !overwrite_ok.get()) on:click=go>
+            {crate::form::spinner(busy)}{move || if original() { t("bk.restore.overwrite") } else { t("bk.restore") }}
+        </button>
     }
     .into_any();
     dialog(DlgKind::Normal, Signal::derive(|| t("bk.restore").to_string()), close, body, Some(foot))

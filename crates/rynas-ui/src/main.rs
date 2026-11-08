@@ -27,6 +27,7 @@ mod qr;
 mod removable;
 mod schema_form;
 mod shell;
+mod sshfp;
 #[cfg(test)]
 mod source_check;
 #[cfg(test)]

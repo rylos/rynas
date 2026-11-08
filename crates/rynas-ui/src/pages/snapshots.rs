@@ -89,18 +89,27 @@ pub fn Snapshots() -> impl IntoView {
     let system = Remote::<SystemSnapshots>::with_config("/api/v1/snapshots/system");
     let filter = RwSignal::new(String::new());
     let edit = RwSignal::new(None::<Option<SnapshotJobView>>);
+    let edit_replica = RwSignal::new(None::<Option<rynas_api_types::replication::ReplicaView>>);
     view! {
         <div class="page">
             <PageHeader icon=icons::CAMERA title="snap.title" subtitle="snap.subtitle">
-                <button class="btn primary" on:click=move |_| edit.set(Some(None))>
-                    <Icon icon=icons::PLUS size=16 /><span class="btn-label">{tr("snap.create_job")}</span>
-                </button>
+                // the action of the open tab: replica targets on Replication, jobs elsewhere
+                {move || if tab.get() == 2 {
+                    crate::pages::replication::add_button(jobs, edit_replica)
+                } else {
+                    view! {
+                        <button class="btn primary" on:click=move |_| edit.set(Some(None))>
+                            <Icon icon=icons::PLUS size=16 /><span class="btn-label">{tr("snap.create_job")}</span>
+                        </button>
+                    }
+                    .into_any()
+                }}
             </PageHeader>
             <section class="card widget w-12">
                 {tabs("snp", &["snap.tab.snapshots", "snap.tab.jobs", "snap.tab.replication", "snap.tab.system"], tab, "snap.title")}
                 <div role="tabpanel" id="snp-p0" aria-labelledby="snp-t0" hidden=move || tab.get() != 0>{snapshots_panel(jobs, system, filter)}</div>
                 <div role="tabpanel" id="snp-p1" aria-labelledby="snp-t1" hidden=move || tab.get() != 1>{jobs_panel(jobs, edit, filter, tab)}</div>
-                <div role="tabpanel" id="snp-p2" aria-labelledby="snp-t2" hidden=move || tab.get() != 2>{crate::pages::replication::panel(jobs)}</div>
+                <div role="tabpanel" id="snp-p2" aria-labelledby="snp-t2" hidden=move || tab.get() != 2>{crate::pages::replication::panel(jobs, edit_replica)}</div>
                 <div role="tabpanel" id="snp-p3" aria-labelledby="snp-t3" hidden=move || tab.get() != 3>{system_panel(system)}</div>
             </section>
             {move || edit.get().map(|v| job_editor(v, Callback::new(move |_| edit.set(None))))}

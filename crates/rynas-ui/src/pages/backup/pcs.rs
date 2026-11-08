@@ -24,7 +24,7 @@ use crate::pages::security::copy_button;
 use crate::pages::snapshots::mode_text;
 use crate::tasks;
 use crate::toast::toast;
-use crate::ui::{self, Confirm, DlgKind, EmptyState, ErrorBox, Remote, Skeleton, Tone, WidgetHead};
+use crate::ui::{self, Confirm, DlgKind, EmptyState, ErrorBox, Remote, Skeleton, Tone};
 
 const URL: &str = "/api/v1/pc-backups/targets";
 
@@ -82,7 +82,8 @@ fn problem_text(p: &SetupProblem) -> String {
 }
 
 /// Runs a task, toasts the outcome, reloads the list.
-fn run(pcs: Pcs, (method, url, body): (&'static str, String, Option<String>), ok: String, (busy, error): (RwSignal<bool>, RwSignal<Option<String>>), done: Callback<()>) {
+/// A refused field of the settings dialog is shown under that field (`fields`).
+fn run(pcs: Pcs, (method, url, body): (&'static str, String, Option<String>), ok: String, (busy, error, fields): (RwSignal<bool>, RwSignal<Option<String>>, Option<Fields>), done: Callback<()>) {
     busy.set(true);
     error.set(None);
     spawn_local(async move {
@@ -105,20 +106,38 @@ fn run(pcs: Pcs, (method, url, body): (&'static str, String, Option<String>), ok
             Ok(task) => {
                 let _ = error.try_set(Some(tasks::task_error(&task)));
             }
-            Err(e) => {
-                let _ = error.try_set(Some(e.text()));
-            }
+            Err(e) => match (fields, e.field()) {
+                (Some(f), Some("description")) => {
+                    let _ = f.desc_err.try_set(Some(e.text()));
+                }
+                (Some(f), Some("public_key")) => {
+                    let _ = f.key_err.try_set(Some(e.text()));
+                }
+                _ => {
+                    let _ = error.try_set(Some(e.text()));
+                }
+            },
         }
     });
 }
 
+/// The tab's actions in the page header: add a PC, adopt a folder (`add` holds whether the
+/// dialog opens on adopting).
+pub fn header_buttons(add: RwSignal<Option<bool>>) -> AnyView {
+    view! {
+        <button class="btn primary" on:click=move |_| add.set(Some(false))><Icon icon=icons::PLUS size=16 /><span class="btn-label">{tr("bk.add")}</span></button>
+        <button class="btn ghost" on:click=move |_| add.set(Some(true))><Icon icon=icons::FOLDER_OPEN size=16 /><span class="btn-label">{tr("bk.adopt")}</span></button>
+    }
+    .into_any()
+}
+
 /// The PCs tab.
-pub fn panel() -> AnyView {
+pub fn panel(add: RwSignal<Option<bool>>) -> AnyView {
     let pcs = Pcs {
         list: Remote::new(URL),
         setup: Remote::new("/api/v1/pc-backups/setup"),
         open: RwSignal::new(None),
-        add: RwSignal::new(None),
+        add,
         edit: RwSignal::new(None),
     };
     let problems = move || {
@@ -158,19 +177,14 @@ pub fn panel() -> AnyView {
                     ui::cell("col.status", "wrap", view! { <div class="cell-main">{state_status(p.state)}<span class="cell-sub small">{when(p.last_received_ms)}</span></div> }.into_any()),
                     ui::cell("bk.col.snapshots", "wrap", ui::two_lines(view! { <span class="tnum">{i18n::count(u64::from(p.snapshots))}</span> }.into_any(), (!groups.is_empty()).then_some(groups), "cell-sub small mono")),
                     ui::text_cell("bk.col.space", "num tnum", space),
-                    ui::actions(view! { <button class="btn ghost sm" aria-label=label on:click=move |_| pcs.open.set(Some(dev.clone()))><Icon icon=icons::PENCIL size=14 />{tr("bk.open")}</button> }.into_any()),
+                    ui::actions(view! { <button class="btn ghost sm" aria-label=label on:click=move |_| pcs.open.set(Some(dev.clone()))><Icon icon=icons::EYE size=14 />{tr("bk.open")}</button> }.into_any()),
                 ])
             })
             .collect::<Vec<_>>();
         ui::table("bk-table", &["bk.col.pc", "bk.col.folder", "col.status", "bk.col.snapshots", "#bk.col.space", ""], rows)
     };
     view! {
-        <WidgetHead icon=icons::MONITOR title="bk.pcs.title" />
-        <p class="small muted bk-help">{tr("bk.intro")}</p>
-        <div class="sec-actions">
-            <button class="btn primary sm" on:click=move |_| pcs.add.set(Some(false))><Icon icon=icons::PLUS size=14 />{tr("bk.add")}</button>
-            <button class="btn ghost sm" on:click=move |_| pcs.add.set(Some(true))><Icon icon=icons::FOLDER_OPEN size=14 />{tr("bk.adopt")}</button>
-        </div>
+        <p class="sec-note"><Icon icon=icons::INFO size=16 />{tr("bk.intro")}</p>
         {problems}
         {move || pcs.list.view(4, content)}
         {move || pcs.open.get().map(|d| drawer(pcs, d))}
@@ -238,6 +252,25 @@ impl Fields {
     }
 }
 
+/// What adopting changes on the folder itself: owner, group and mode before → after.
+fn perm_view(c: &PermissionChange) -> AnyView {
+    let owner = c.owner.clone().unwrap_or_else(|| c.uid.to_string());
+    let group = c.group.clone().unwrap_or_else(|| c.gid.to_string());
+    let before = format!("{owner}:{group} {:04o}", c.mode & 0o7777);
+    let after = format!("{}:{} {:04o}", c.new_owner, c.new_group, c.new_mode & 0o7777);
+    ui::note(
+        Tone::Warn,
+        icons::TRIANGLE_ALERT,
+        view! {
+            <div class="cell-main">
+                <span>{tr("bk.adopt.perm_change")}</span>
+                <span class="mono small bk-wrap">{before}" → "{after}</span>
+            </div>
+        }
+        .into_any(),
+    )
+}
+
 fn add_dialog(pcs: Pcs, adopt_first: bool) -> AnyView {
     let close = Callback::new(move |_| pcs.add.set(None));
     let mode = RwSignal::new(if adopt_first { "adopt" } else { "new" }.to_string());
@@ -251,6 +284,9 @@ fn add_dialog(pcs: Pcs, adopt_first: bool) -> AnyView {
     let busy = RwSignal::new(false);
     let checking = RwSignal::new(false);
     let preview = RwSignal::new(None::<AdoptPreview>);
+    // adopting changes the folder's owner, group or mode: confirmed explicitly
+    let perm_ok = RwSignal::new(false);
+    let needs_perm = move || preview.with(|p| p.as_ref().is_some_and(|p| p.permission_change.is_some()));
     let base = move || pcs.setup.data.with(|s| s.as_ref().and_then(|s| s.volumes.first().cloned())).unwrap_or_else(|| "/volume1".into());
     let suggest = move |d: &str| if d.is_empty() { String::new() } else { format!("{}/backup/{d}", base()) };
     let route = move |e: api::ApiErr| match e.field() {
@@ -263,7 +299,9 @@ fn add_dialog(pcs: Pcs, adopt_first: bool) -> AnyView {
     let check = move |_| {
         checking.set(true);
         path_err.set(None);
+        error.set(None);
         preview.set(None);
+        perm_ok.set(false);
         let body = AdoptRequest { path: path.get_untracked().trim().to_string() };
         spawn_local(async move {
             let r = api::post::<_, AdoptPreview>("/api/v1/pc-backups/plan/adopt", Some(&body)).await;
@@ -294,10 +332,11 @@ fn add_dialog(pcs: Pcs, adopt_first: bool) -> AnyView {
             delete: f.policy(),
         };
         let ok = tf("bk.added", &[("device", &dev)]);
+        let url = if adopt && preview.with_untracked(|p| p.as_ref().is_some_and(|p| p.permission_change.is_some())) { format!("{URL}?confirm_permission_change=true") } else { URL.to_string() };
         busy.set(true);
         error.set(None);
         spawn_local(async move {
-            let started = api::start_task(URL, serde_json::to_string(&body).ok()).await;
+            let started = api::start_task(&url, serde_json::to_string(&body).ok()).await;
             let r = match started {
                 Ok(id) => tasks::follow(&id).await.map(Some),
                 Err(e) => {
@@ -330,7 +369,7 @@ fn add_dialog(pcs: Pcs, adopt_first: bool) -> AnyView {
                 let groups = p
                     .groups
                     .iter()
-                    .map(|g| ui::row(vec![ui::text_cell("bk.col.subvolume", "mono", g.name.clone()), ui::text_cell("#bk.col.snapshots", "num tnum", i18n::count(u64::from(g.snapshots))), ui::text_cell("bk.col.newest", "tnum", when(g.newest_ms))]))
+                    .map(|g| ui::row(vec![ui::text_cell("bk.col.subvolume", "mono", g.name.clone()), ui::text_cell("bk.col.snapshots", "num tnum", i18n::count(u64::from(g.snapshots))), ui::text_cell("bk.col.newest", "tnum", when(g.newest_ms))]))
                     .collect::<Vec<_>>();
                 let incomplete = p.list.iter().filter(|s| s.incomplete).count() as u64;
                 view! {
@@ -343,6 +382,7 @@ fn add_dialog(pcs: Pcs, adopt_first: bool) -> AnyView {
                     {(incomplete > 0).then(|| view! { <p class="small muted">{tf("bk.adopt.incomplete", &[("n", &i18n::count(incomplete))])}</p> })}
                     {(p.other_entries > 0).then(|| view! { <p class="small muted">{tf("bk.adopt.other", &[("n", &i18n::count(u64::from(p.other_entries)))])}</p> })}
                     {(!p.subvolume).then(|| view! { <p class="small muted">{tr("bk.adopt.not_subvolume")}</p> })}
+                    {p.permission_change.as_ref().map(perm_view)}
                 }
                 .into_any()
             })
@@ -366,12 +406,18 @@ fn add_dialog(pcs: Pcs, adopt_first: bool) -> AnyView {
                 <button type="button" class="btn ghost sm" disabled=move || checking.get() || path.with(|p| p.trim().is_empty()) on:click=check>{spinner(checking)}<Icon icon=icons::SEARCH size=14 />{tr("bk.adopt.check")}</button>
             </div>
             {preview_view}
+            <Show when=needs_perm>
+                <label class="check">
+                    <input type="checkbox" prop:checked=move || perm_ok.get() on:change=move |ev| perm_ok.set(event_target_checked(&ev)) />
+                    <span>{tr("bk.adopt.perm_confirm")}</span>
+                </label>
+            </Show>
         </Show>
         {f.view()}
         {form_error(error)}
     }
     .into_any();
-    let ready = move || !device.with(|d| d.trim().is_empty()) && !path.with(|p| p.trim().is_empty()) && (mode.get() == "new" || preview.with(Option::is_some));
+    let ready = move || !device.with(|d| d.trim().is_empty()) && !path.with(|p| p.trim().is_empty()) && (mode.get() == "new" || (preview.with(Option::is_some) && (!needs_perm() || perm_ok.get())));
     let foot = view! {
         <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("cancel")}</button>
         <button type="button" class="btn primary" disabled=move || busy.get() || !ready() on:click=save>{spinner(busy)}<Icon icon=icons::PLUS size=16 />{move || if mode.get() == "adopt" { t("bk.adopt") } else { t("bkpc.create") }}</button>
@@ -393,10 +439,10 @@ fn settings_dialog(pcs: Pcs, p: PcTarget) -> AnyView {
             alert_days: f.alert_days(),
             delete: f.policy(),
         };
-        run(pcs, ("PUT", target_url(&device.get_value()), serde_json::to_string(&body).ok()), t("bk.saved").to_string(), (busy, error), Callback::new(move |_| pcs.edit.set(None)));
+        run(pcs, ("PUT", target_url(&device.get_value()), serde_json::to_string(&body).ok()), t("bk.saved").to_string(), (busy, error, Some(f)), Callback::new(move |_| pcs.edit.set(None)));
     };
     let body = view! {
-        {text_field("bk.f.description", f.description.into(), Callback::new(move |v| f.description.set(v)), f.desc_err.into(), In { maxlength: 120, ..In::default() })}
+        {text_field("bk.f.description", f.description.into(), Callback::new(move |v| { f.desc_err.set(None); f.description.set(v); }), f.desc_err.into(), In { maxlength: 120, ..In::default() })}
         {f.view()}
         {form_error(error)}
     }
@@ -423,10 +469,10 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
     let measuring = RwSignal::new(false);
     let measure_err = RwSignal::new(None::<String>);
     let measure = move |_| {
-        run(pcs, ("POST", format!("{}/usage", target_url(&dev.get_value())), None), t("bk.measured").to_string(), (measuring, measure_err), Callback::new(move |_| detail.reload()));
+        run(pcs, ("POST", format!("{}/usage", target_url(&dev.get_value())), None), t("bk.measured").to_string(), (measuring, measure_err, None), Callback::new(move |_| detail.reload()));
     };
     let remove = Callback::new(move |_| {
-        run(pcs, ("DELETE", target_url(&dev.get_value()), None), tf("bk.removed", &[("device", &dev.get_value())]), (busy, error), Callback::new(move |_| {
+        run(pcs, ("DELETE", target_url(&dev.get_value()), None), tf("bk.removed", &[("device", &dev.get_value())]), (busy, error, None), Callback::new(move |_| {
             ask.set(false);
             pcs.open.set(None);
         }));
@@ -439,8 +485,11 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
         let rules = if !p.delete.allowed {
             t("bk.rules.off").to_string()
         } else {
+            let one = p.delete.keep_last == 1;
             let k = match (p.delete.keep_last > 0, p.delete.min_age_days > 0) {
+                (true, true) if one => "bk.rules.on_one",
                 (true, true) => "bk.rules.on",
+                (true, false) if one => "bk.rules.on_keep_one",
                 (true, false) => "bk.rules.on_keep",
                 (false, true) => "bk.rules.on_days",
                 (false, false) => "bk.rules.on_free",

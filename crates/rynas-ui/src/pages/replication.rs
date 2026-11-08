@@ -90,6 +90,27 @@ fn copy_box(label: &'static str, value: String) -> AnyView {
     .into_any()
 }
 
+/// A host key as key type over its `SHA256:` fingerprint (two lines: the fingerprint never
+/// pushes the drawer sideways on a phone).
+fn key_item(kind: String, fingerprint: String) -> AnyView {
+    view! {
+        <li class="repl-key">
+            <span class="muted">{kind}</span>
+            <span class="mono repl-fp">{fingerprint}</span>
+        </li>
+    }
+    .into_any()
+}
+
+/// A confirmed `known_hosts` line shown by its fingerprint (the raw line when it holds no
+/// readable key).
+fn fp_item(line: &str) -> AnyView {
+    match crate::sshfp::of_line(line) {
+        Some((kind, fp)) => key_item(kind, fp),
+        None => view! { <li class="mono repl-fp">{line.to_string()}</li> }.into_any(),
+    }
+}
+
 /// Run a task and toast its end.
 fn run_task(url: String, body: Option<String>, ok: String, busy: RwSignal<bool>, error: RwSignal<Option<String>>, done: Callback<()>) {
     busy.set(true);
@@ -119,9 +140,19 @@ fn run_task(url: String, body: Option<String>, ok: String, busy: RwSignal<bool>,
 
 // ------------------------------------------------------------------ panel
 
-pub fn panel(jobs: Remote<Vec<SnapshotJobView>>) -> AnyView {
+/// The tab's action in the page header: "Add replica target" (needs a snapshot job).
+pub fn add_button(jobs: Remote<Vec<SnapshotJobView>>, edit: RwSignal<Option<Option<ReplicaView>>>) -> AnyView {
+    let no_jobs = move || jobs.data.with(|l| l.as_ref().is_some_and(Vec::is_empty));
+    view! {
+        <button class="btn primary" disabled=no_jobs on:click=move |_| edit.set(Some(None))>
+            <Icon icon=icons::PLUS size=16 /><span class="btn-label">{tr("repl.add")}</span>
+        </button>
+    }
+    .into_any()
+}
+
+pub fn panel(jobs: Remote<Vec<SnapshotJobView>>, edit: RwSignal<Option<Option<ReplicaView>>>) -> AnyView {
     let list = Remote::<Vec<ReplicaView>>::with_config("/api/v1/snapshots/replication");
-    let edit = RwSignal::new(None::<Option<ReplicaView>>);
     let replicas = RwSignal::new(None::<ReplicaView>);
     let del = RwSignal::new(None::<ReplicaView>);
     let running = RwSignal::new(None::<String>);
@@ -177,9 +208,6 @@ pub fn panel(jobs: Remote<Vec<SnapshotJobView>>) -> AnyView {
     view! {
         <div class="toolbar">
             <p class="muted small repl-intro">{tr("repl.intro")}</p>
-            <button class="btn primary" disabled=no_jobs on:click=move |_| edit.set(Some(None))>
-                <Icon icon=icons::PLUS size=16 /><span class="btn-label">{tr("repl.add")}</span>
-            </button>
             <button class="btn ghost" on:click=move |_| list.reload()><Icon icon=icons::REFRESH_CW size=16 /><span class="btn-label">{tr("snap.refresh")}</span></button>
         </div>
         {table}
@@ -202,13 +230,17 @@ fn target_row(
     let local = v.target.destination.is_local();
     let s = v.status.clone();
     let when = if v.target.after_snapshots { t("repl.after_snapshots").to_string() } else { v.schedule.as_ref().map(trigger_text).unwrap_or_default() };
-    let next = v.next_run_ms.map(|n| tf("repl.next", &[("time", &i18n::datetime(n))]));
+    // same wording and format as the Backup page; none for a paused target
+    let next = v.next_run_ms.filter(|_| v.target.enabled).map(|n| tf("sch.next", &[("when", &i18n::short_when(n))]));
     let last = match s.last_ok_ms {
         Some(ms) => {
-            let dur = s.duration_s.map(i18n::duration).unwrap_or_default();
             let n = s.transferred.len();
             let sent = tf(if n == 1 { "repl.sent_one" } else { "repl.sent_many" }, &[("n", &i18n::count(n as u64))]);
-            ui::two_lines(i18n::datetime(ms).into_any(), Some(format!("{sent} · {dur}")), "cell-sub")
+            let sub = match s.duration_s {
+                Some(d) => format!("{sent} · {}", i18n::duration(d)),
+                None => sent,
+            };
+            ui::two_lines(i18n::short_when(ms).into_any(), Some(sub), "cell-sub")
         }
         None => view! { <span class="muted">{tr("repl.never")}</span> }.into_any(),
     };
@@ -226,14 +258,20 @@ fn target_row(
         if let Some(p) = ui::pending_status(v.pending) {
             chips.push(p);
         }
+        // one explanation: the fix when it is known, else btrbk's or ssh's words; the
+        // configuration warnings only while nothing is failing
         let hint = s.failing.then(|| s.hint.unwrap_or(ReplicaHint::Other));
-        let err = s.error.clone();
+        let known = hint.filter(|h| *h != ReplicaHint::Other || s.error.is_none());
+        let err = s.error.clone().filter(|_| s.failing && known.is_none());
+        let held = s.held_snapshots;
+        let warnings = if s.failing { Vec::new() } else { v.warnings.clone() };
         view! {
-            <div class="cell-main">
+            <div class="cell-main" title=s.error.clone().unwrap_or_default()>
                 <div class="chips">{chips}</div>
-                {hint.map(|h| view! { <span class="cell-sub">{ui::text_code(t(hint_key(h)))}</span> })}
-                {err.map(|e| view! { <span class="cell-sub mono small danger-text">{e}</span> })}
-                {v.warnings.iter().map(|w| view! { <span class="cell-sub warn-text">{tr(warning_key(*w))}</span> }).collect_view()}
+                {known.map(|h| view! { <span class="cell-sub">{ui::text_code(t(hint_key(h)))}</span> })}
+                {err.map(|e| view! { <span class="cell-sub mono small danger-text bk-wrap">{e}</span> })}
+                {(held > 0).then(|| view! { <span class="cell-sub warn-text">{tf(if held == 1 { "repl.held_one" } else { "repl.held_many" }, &[("n", &i18n::count(u64::from(held)))])}</span> })}
+                {warnings.into_iter().map(|w| view! { <span class="cell-sub warn-text">{tr(warning_key(w))}</span> }).collect_view()}
             </div>
         }
         .into_any()
@@ -497,7 +535,7 @@ fn editor(init: Option<ReplicaView>, jobs: Remote<Vec<SnapshotJobView>>, close: 
                 {if trusted.is_empty() {
                     view! { <p class="field-help warn-text">{tr("repl.f.host_keys_none")}</p> }.into_any()
                 } else {
-                    view! { <ul class="plain-list mono small repl-keys">{trusted.into_iter().map(|k| view! { <li>{k}</li> }).collect_view()}</ul> }.into_any()
+                    view! { <ul class="plain-list small repl-keys">{trusted.iter().map(|k| fp_item(k)).collect_view()}</ul> }.into_any()
                 }}
                 <div>
                     <button type="button" class="btn ghost sm" disabled=move || scanning.get() on:click=scan>
@@ -509,8 +547,8 @@ fn editor(init: Option<ReplicaView>, jobs: Remote<Vec<SnapshotJobView>>, close: 
                         let lines: Vec<String> = keys.iter().map(|k| k.line.clone()).collect();
                         view! {
                             <div class="ret-preview" aria-live="polite">
-                                <p class="small">{tr("repl.f.scan_check")}</p>
-                                <ul class="plain-list mono small">{keys.into_iter().map(|k| view! { <li>{format!("{}  {}", k.line.split_whitespace().nth(1).unwrap_or(""), k.fingerprint)}</li> }).collect_view()}</ul>
+                                <p class="small">{ui::text_code(t("repl.f.scan_check"))}</p>
+                                <ul class="plain-list small repl-keys">{keys.into_iter().map(|k| key_item(k.line.split_whitespace().nth(1).unwrap_or("").to_string(), k.fingerprint)).collect_view()}</ul>
                                 <div><button type="button" class="btn sm" on:click=move |_| { let l = lines.clone(); d.update(|f| f.host_keys = l); scanned.set(None); }>
                                     <Icon icon=icons::CHECK size=14 />{tr("repl.f.trust")}
                                 </button></div>
@@ -548,13 +586,18 @@ fn editor(init: Option<ReplicaView>, jobs: Remote<Vec<SnapshotJobView>>, close: 
             .into_any();
         }
         let (p, sudo, user) = d.with(|f| (f.path.clone(), f.sudo, f.user.clone()));
-        let line = authorized_keys_line(&k.public_key, if p.is_empty() { "/path" } else { &p }, sudo);
         let home = if user == "root" || user.is_empty() { "/root".to_string() } else { format!("/home/{user}") };
+        // the line restricts the key to the target folder: without it there is nothing to copy
+        let line_view = if p.is_empty() {
+            view! { <p class="field-help warn-text">{tr("repl.key.line_needs_path")}</p> }.into_any()
+        } else {
+            copy_box("repl.key.line", authorized_keys_line(&k.public_key, &p, sudo))
+        };
         view! {
             {copy_box("repl.key.public", k.public_key.clone())}
-            {(!k.fingerprint.is_empty()).then(|| view! { <p class="field-help mono">{k.fingerprint.clone()}</p> })}
-            {copy_box("repl.key.line", line)}
-            <p class="field-help">{ui::text_code(&tf("repl.key.line_help", &[("file", &format!("{home}/.ssh/authorized_keys"))]))}</p>
+            {(!k.fingerprint.is_empty()).then(|| view! { <p class="field-help mono repl-fp">{k.fingerprint.clone()}</p> })}
+            {line_view}
+            {(!p.is_empty()).then(|| view! { <p class="field-help">{ui::text_code(&tf("repl.key.line_help", &[("file", &format!("{home}/.ssh/authorized_keys"))]))}</p> })}
             {ui::note(Tone::Warn, icons::SHIELD_ALERT, view! { {ui::text_code(t("repl.key.filter_version"))} }.into_any())}
             {sudo.then(|| view! { <p class="field-help">{ui::text_code(&tf("repl.key.sudo_help", &[("user", &user)]))}</p> })}
         }
@@ -712,7 +755,8 @@ fn replicas_drawer(v: ReplicaView, close: Callback<()>) -> AnyView {
                 action: "repl.promote",
                 danger: false,
                 extra: Some(extra),
-                typed: Signal::stored(Some(name.clone())),
+                // not destructive (a new folder, the replica stays): a plain confirmation
+                typed: Signal::stored(None),
                 busy,
                 error,
                 on_confirm: Callback::new(move |_| {

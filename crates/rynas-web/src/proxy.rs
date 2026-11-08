@@ -155,6 +155,29 @@ pub fn routes() -> Router<AppState> {
             "/snapshots/jobs/{name}",
             get(forward).put(forward).delete(forward),
         )
+        // snapshot replication to other NAS (btrbk targets): administrators only, reads
+        // included (key material, remote addresses: auth::admin_read)
+        .route("/snapshots/replication", get(forward).post(forward))
+        .route("/snapshots/replication/ssh-key", get(forward).post(forward))
+        .route("/snapshots/replication/host-keys", post(forward))
+        .route(
+            "/snapshots/replication/{job}/{id}",
+            get(forward).put(forward).delete(forward),
+        )
+        .route("/snapshots/replication/{job}/{id}/run", post(forward))
+        .route("/snapshots/replication/{job}/{id}/snapshots", get(forward))
+        .route(
+            "/snapshots/replication/{job}/{id}/snapshots/{name}/browse",
+            get(forward),
+        )
+        .route(
+            "/snapshots/replication/{job}/{id}/snapshots/{name}/restore",
+            post(forward),
+        )
+        .route(
+            "/snapshots/replication/{job}/{id}/snapshots/{name}/promote",
+            post(forward),
+        )
         .route("/snapshots/{id}", delete(forward))
         .route("/snapshots/{id}/browse", get(forward))
         .route("/snapshots/{id}/restore", post(forward))

@@ -1614,6 +1614,12 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .repl-copy { display: flex; align-items: flex-start; gap: var(--s-2); min-width: 0; }
 .repl-copy .secret { flex: 1; min-width: 0; }
 .repl-keys li, .repl-browse .ellipsis-cell { overflow-wrap: anywhere; }
+/* a host key: type over its fingerprint, which breaks anywhere instead of widening the drawer */
+.repl-key { display: flex; flex-direction: column; gap: var(--s-1); min-width: 0; }
+.repl-keys { display: flex; flex-direction: column; gap: var(--s-2); }
+.repl-fp { overflow-wrap: anywhere; min-width: 0; }
+/* drawers with tables (replicas, a PC's snapshots) */
+.wide-drawer .modal.drawer { width: min(880px, 100%); }
 .repl-browse { display: flex; flex-direction: column; gap: var(--s-2); margin-top: var(--s-3); padding-top: var(--s-3); border-top: 1px solid var(--border); }
 .narrow-form { max-width: 640px; }
 @media (max-width: 767px) {
@@ -1761,6 +1767,8 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .bk-checks { display: flex; flex-direction: column; gap: var(--s-2); margin: 0; padding: 0; border: 0; min-width: 0; }
 .bk-checks .check { align-items: baseline; flex-wrap: wrap; }
 .bk-test { display: flex; flex-direction: column; gap: var(--s-2); }
+/* the test's verdict is a sentence: it wraps instead of widening the drawer on a phone */
+.bk-test > .status { height: auto; min-height: 22px; white-space: normal; align-self: flex-start; max-width: 100%; padding-block: var(--s-1); border-radius: var(--r-md); }
 .bk-list { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
 .bk-list > li { border-top: 1px solid var(--border); }
 .bk-list > li:first-child { border-top: 0; }
@@ -1769,7 +1777,7 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .bk-item > .cell-main { flex: 1; min-width: 0; }
 .bk-entry { display: flex; align-items: center; gap: var(--s-2); padding: var(--s-1) 0; min-width: 0; }
 .bk-entry > .bk-wrap { flex: 1; }
-.bk-entry > .link-btn { margin-left: 0; flex: 1; justify-content: flex-start; height: auto; text-align: left; }
+.bk-entry > .link-btn { margin-left: 0; flex: 1; justify-content: flex-start; height: auto; text-align: left; font-size: inherit; font-weight: inherit; }
 .bk-size { flex: none; }
 .bk-browser { display: flex; flex-direction: column; gap: var(--s-3); }
 /* ---- Apps & Plugins (D-APPCAT) */
