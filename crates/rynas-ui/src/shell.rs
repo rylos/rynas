@@ -163,6 +163,8 @@ fn Shell() -> impl IntoView {
         }
         c
     };
+    let dock = NodeRef::<leptos::html::Div>::new();
+    track_dock_height(dock);
 
     view! {
         <a class="skip" href="#main">{tr("skip")}</a>
@@ -202,7 +204,7 @@ fn Shell() -> impl IntoView {
                     <Route path=path!("/dev/week-grid") view=crate::week_grid::Showcase />
                 </Routes>
             </main>
-            <div class="dock">
+            <div class="dock" node_ref=dock>
                 <crate::power::PendingPower />
                 <PendingBar />
                 <TaskPanel />
@@ -214,6 +216,40 @@ fn Shell() -> impl IntoView {
         <Palette />
         <crate::power::PowerHost />
     }
+}
+
+/// Keeps `--dock-h` on the root element equal to the dock's height (pending changes bar,
+/// tasks bar, pending power action), so the toasts always sit just above it whatever it holds.
+fn track_dock_height(dock: NodeRef<leptos::html::Div>) {
+    use wasm_bindgen::{closure::Closure, JsCast};
+    Effect::new(move |done: Option<bool>| {
+        if done == Some(true) {
+            return true;
+        }
+        let Some(el) = dock.get() else { return false };
+        let set = |h: f64| {
+            if let Some(root) = web_sys::window()
+                .and_then(|w| w.document())
+                .and_then(|d| d.document_element())
+                .and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
+            {
+                let _ = root.style().set_property("--dock-h", &format!("{}px", h.ceil()));
+            }
+        };
+        set(el.get_bounding_client_rect().height());
+        let cb = Closure::<dyn Fn(js_sys::Array)>::new(move |entries: js_sys::Array| {
+            if let Some(e) = entries.get(0).dyn_ref::<web_sys::ResizeObserverEntry>() {
+                set(e.target().get_bounding_client_rect().height());
+            }
+        });
+        if let Ok(ro) = web_sys::ResizeObserver::new(cb.as_ref().unchecked_ref()) {
+            ro.observe(&el);
+            // one observer for the app's whole life
+            std::mem::forget(ro);
+        }
+        cb.forget();
+        true
+    });
 }
 
 #[component]

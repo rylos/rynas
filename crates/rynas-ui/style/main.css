@@ -1207,6 +1207,7 @@ kbd {
 /* NOCOW folders: state and action on one line; what the files give up, as bullets */
 .nocow-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
 .nocow-costs { margin: var(--s-1) 0 0; padding-left: var(--s-4); list-style: disc; }
+.crypt-dir { overflow-wrap: anywhere; }
 .table td.actions { text-align: right; width: 1%; white-space: nowrap; }
 .table td.actions .icon-btn { display: inline-grid; }
 .actions-col { width: 1%; }
@@ -1281,7 +1282,8 @@ kbd {
 .eff-sources li { display: flex; align-items: center; gap: var(--s-3); color: var(--text-muted); }
 .eff-sources li.decisive { color: var(--text); font-weight: 600; }
 
-.toast-stack { position: fixed; z-index: 70; right: var(--s-4); bottom: calc(var(--s-12) + var(--s-4)); display: flex; flex-direction: column; gap: var(--s-2); pointer-events: none; }
+/* always just above the dock (pending changes, tasks): --dock-h is kept by the shell */
+.toast-stack { position: fixed; z-index: 70; right: var(--s-4); bottom: calc(var(--dock-h, 36px) + var(--s-3)); display: flex; flex-direction: column; gap: var(--s-2); pointer-events: none; }
 .toasts { display: flex; flex-direction: column; gap: var(--s-2); }
 .toast {
   display: flex; align-items: center; gap: var(--s-2); min-width: 240px; max-width: min(420px, calc(100vw - 32px));
@@ -1333,7 +1335,7 @@ kbd {
   /* the permission matrix as cards: one full-width line per level (the 16 % column width of the
      table layout squeezed "Lettura e scrittura" onto three lines) */
   .matrix td.center { width: 100%; padding-inline: 0; }
-  .toast-stack { left: var(--s-2); right: var(--s-2); bottom: calc(120px + env(safe-area-inset-bottom)); }
+  .toast-stack { left: var(--s-2); right: var(--s-2); bottom: calc(56px + env(safe-area-inset-bottom) + var(--dock-h, 36px) + var(--s-2)); }
   .toast { max-width: none; }
   .w-3, .w-4, .w-6, .w-8, .w-12 { grid-column: span 12; }
   /* the connection state keeps its text unless it is live (G6: not colour alone) */
