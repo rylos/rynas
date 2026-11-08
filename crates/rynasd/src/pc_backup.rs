@@ -36,7 +36,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use rynas_api_types::notify::{NotifyCategory, NotifySeverity};
 use rynas_api_types::pcbackup::*;
-use rynas_api_types::snapshots::{RestoreMode, SnapshotEntry, SnapshotListing};
+use rynas_api_types::snapshots::{SnapshotEntry, SnapshotListing};
 use rynas_api_types::{TaskStarted, error_codes};
 use rynas_btrfs::receive::{self, Entry};
 use rynas_notify::Notifier;
@@ -73,8 +73,22 @@ pub type Scan = Option<(bool, Vec<Entry>, u32)>;
 
 pub trait ReceiveHost: Send + Sync {
     fn facts(&self) -> HostFacts;
-    /// The account, its home and the sudoers file; idempotent. Returns log lines.
-    fn ensure_account(&self, btrfs: &str) -> Result<Vec<String>, String>;
+    /// The account, its home and the sudoers file with the lines of these device folders;
+    /// idempotent. Returns log lines.
+    fn ensure_account(&self, btrfs: &str, roots: &[String]) -> Result<Vec<String>, String>;
+    /// The last device went: the sudoers file, the keys, the home and the account go too.
+    fn remove_account(&self) -> Result<Vec<String>, String>;
+    /// A removed device's folder: back to `root:root` when its group is the account's (the
+    /// snapshots stay; no stale gid a later group could inherit).
+    fn release_folder(&self, path: &Path) -> Result<(), String>;
+    /// (uid, gid, mode) of the folder itself, not following a symlink.
+    fn folder_meta(&self, path: &Path) -> Option<(u32, u32, u32)>;
+    /// The account group's gid, when it exists.
+    fn account_gid(&self) -> Option<u32>;
+    /// User and group names of ids, when known.
+    fn names(&self, uid: u32, gid: u32) -> (Option<String>, Option<String>);
+    /// The home folders of the users of this machine.
+    fn home_dirs(&self) -> Vec<String>;
     fn write_keys(&self, content: &str) -> Result<(), String>;
     /// A new subvolume folder `0750 root:<account>` (parents made as needed).
     fn create_folder(&self, path: &Path) -> Result<(), String>;
@@ -150,7 +164,7 @@ impl ReceiveHost for HostReceive {
         }
     }
 
-    fn ensure_account(&self, btrfs: &str) -> Result<Vec<String>, String> {
+    fn ensure_account(&self, btrfs: &str, roots: &[String]) -> Result<Vec<String>, String> {
         let mut log = Vec::new();
         let exists = Cmd::new("getent")
             .args(["passwd", ACCOUNT])
@@ -172,7 +186,8 @@ impl ReceiveHost for HostReceive {
             set_mode(d, 0o755)?;
             std::os::unix::fs::chown(d, Some(0), Some(0)).map_err(|e| format!("{}: {e}", d.display()))?;
         }
-        let text = receive::sudoers(btrfs);
+        let roots: Vec<&str> = roots.iter().map(String::as_str).collect();
+        let text = receive::sudoers(btrfs, &roots);
         let tmp = format!("{SUDOERS}.rynas-new");
         write_file(Path::new(&tmp), &text, 0o440)?;
         if let Err(e) = cmd_ok(Cmd::new("visudo").args(["-c", "-q", "-f", &tmp])) {
@@ -180,8 +195,83 @@ impl ReceiveHost for HostReceive {
             return Err(format!("sudoers check failed: {e}"));
         }
         std::fs::rename(&tmp, SUDOERS).map_err(|e| format!("{SUDOERS}: {e}"))?;
-        log.push(format!("{SUDOERS} written (btrfs at {btrfs})"));
+        log.push(format!("{SUDOERS} written (btrfs at {btrfs}, {} folders)", roots.len()));
         Ok(log)
+    }
+
+    fn remove_account(&self) -> Result<Vec<String>, String> {
+        let mut log = Vec::new();
+        for f in [SUDOERS.to_string(), format!("{SUDOERS}.rynas-new")] {
+            match std::fs::remove_file(&f) {
+                Ok(()) => log.push(format!("{f} removed")),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("{f}: {e}")),
+            }
+        }
+        if Path::new(HOME).exists() {
+            std::fs::remove_dir_all(HOME).map_err(|e| format!("{HOME}: {e}"))?;
+            log.push(format!("{HOME} removed (keys)"));
+        }
+        let exists = Cmd::new("getent")
+            .args(["passwd", ACCOUNT])
+            .run_blocking()
+            .is_ok_and(|o| o.success());
+        if exists {
+            cmd_ok(Cmd::new("userdel").arg(ACCOUNT))?;
+            log.push(format!("account {ACCOUNT} removed"));
+        }
+        if Cmd::new("getent").args(["group", ACCOUNT]).run_blocking().is_ok_and(|o| o.success()) {
+            let _ = cmd_ok(Cmd::new("groupdel").arg(ACCOUNT));
+        }
+        Ok(log)
+    }
+
+    fn release_folder(&self, path: &Path) -> Result<(), String> {
+        let (Some(gid), Some((_, fgid, _))) = (self.account_gid(), self.folder_meta(path)) else {
+            return Ok(());
+        };
+        if fgid != gid {
+            return Ok(());
+        }
+        let dir = rynas_btrfs::ioctl::open_dir(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        std::os::unix::fs::fchown(&dir, Some(0), Some(0)).map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    fn folder_meta(&self, path: &Path) -> Option<(u32, u32, u32)> {
+        use std::os::unix::fs::MetadataExt;
+        let m = std::fs::symlink_metadata(path).ok().filter(|m| m.is_dir())?;
+        Some((m.uid(), m.gid(), m.mode() & 0o7777))
+    }
+
+    fn account_gid(&self) -> Option<u32> {
+        Cmd::new("getent")
+            .args(["group", ACCOUNT])
+            .run_blocking()
+            .ok()
+            .filter(|o| o.success())
+            .and_then(|o| o.stdout.split(':').nth(2).and_then(|g| g.trim().parse::<u32>().ok()))
+    }
+
+    fn names(&self, uid: u32, gid: u32) -> (Option<String>, Option<String>) {
+        let name = |db: &str, id: u32| {
+            Cmd::new("getent")
+                .args([db, &id.to_string()])
+                .run_blocking()
+                .ok()
+                .filter(|o| o.success())
+                .and_then(|o| o.stdout.split(':').next().map(|n| n.trim().to_string()))
+                .filter(|n| !n.is_empty())
+        };
+        (name("passwd", uid), name("group", gid))
+    }
+
+    fn home_dirs(&self) -> Vec<String> {
+        std::fs::read_to_string("/etc/passwd")
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| l.split(':').nth(5).map(str::to_string))
+            .filter(|h| h.len() > 1)
+            .collect()
     }
 
     fn write_keys(&self, content: &str) -> Result<(), String> {
@@ -197,14 +287,13 @@ impl ReceiveHost for HostReceive {
     }
 
     fn prepare_adopted(&self, path: &Path) -> Result<(), String> {
-        let gid = Cmd::new("getent")
-            .args(["group", ACCOUNT])
-            .run_blocking()
-            .ok()
-            .and_then(|o| o.stdout.split(':').nth(2).and_then(|g| g.trim().parse::<u32>().ok()))
-            .ok_or_else(|| format!("group {ACCOUNT} not found"))?;
-        std::os::unix::fs::chown(path, Some(0), Some(gid)).map_err(|e| format!("{}: {e}", path.display()))?;
-        set_mode(path, 0o750)
+        use std::os::unix::fs::PermissionsExt;
+        let gid = self.account_gid().ok_or_else(|| format!("group {ACCOUNT} not found"))?;
+        // on the descriptor: a symlink swapped in for the folder is not followed
+        let dir = rynas_btrfs::ioctl::open_dir(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        std::os::unix::fs::fchown(&dir, Some(0), Some(gid)).map_err(|e| format!("{}: {e}", path.display()))?;
+        dir.set_permissions(std::fs::Permissions::from_mode(0o750))
+            .map_err(|e| format!("{}: {e}", path.display()))
     }
 
     fn scan(&self, path: &Path) -> Result<Scan, String> {
@@ -244,7 +333,7 @@ impl ReceiveHost for HostReceive {
         cancelled: &dyn Fn() -> bool,
     ) -> Result<String, String> {
         let now = (rynas_tasks::now_ms() / 1000) as i64;
-        let r = rynas_btrfs::restore::restore(snapshot, dest, rel, RestoreMode::Copy, now, cancelled)
+        let r = rynas_btrfs::restore::restore_foreign(snapshot, dest, rel, now, cancelled)
             .map_err(|e| e.to_string())?;
         Ok(format!(
             "copied to {}/{}: {} files, {} folders, {} bytes",
@@ -290,7 +379,16 @@ pub struct MemoryReceive {
     pub account: Mutex<bool>,
     pub facts: Mutex<HostFacts>,
     pub copies: Mutex<Vec<String>>,
+    /// The folders of the last sudoers file written (`None`: no account).
+    pub sudo_roots: Mutex<Option<Vec<String>>>,
+    /// (uid, gid, mode) of folders; missing: already `root:<account> 0750`.
+    pub meta: Mutex<BTreeMap<PathBuf, (u32, u32, u32)>>,
+    pub homes: Mutex<Vec<String>>,
+    pub released: Mutex<Vec<PathBuf>>,
 }
+
+/// The account group's gid in memory.
+const MEMORY_GID: u32 = 990;
 
 impl MemoryReceive {
     pub fn new() -> Self {
@@ -338,11 +436,43 @@ impl ReceiveHost for MemoryReceive {
     fn facts(&self) -> HostFacts {
         self.facts.lock().unwrap().clone()
     }
-    fn ensure_account(&self, _: &str) -> Result<Vec<String>, String> {
+    fn ensure_account(&self, _: &str, roots: &[String]) -> Result<Vec<String>, String> {
         let mut a = self.account.lock().unwrap();
         let first = !*a;
         *a = true;
+        *self.sudo_roots.lock().unwrap() = Some(roots.to_vec());
         Ok(if first { vec![format!("account {ACCOUNT} created (memory)")] } else { Vec::new() })
+    }
+    fn remove_account(&self) -> Result<Vec<String>, String> {
+        *self.account.lock().unwrap() = false;
+        *self.sudo_roots.lock().unwrap() = None;
+        self.keys.lock().unwrap().clear();
+        Ok(vec![format!("account {ACCOUNT} removed (memory)")])
+    }
+    fn release_folder(&self, path: &Path) -> Result<(), String> {
+        self.released.lock().unwrap().push(path.to_path_buf());
+        Ok(())
+    }
+    fn folder_meta(&self, path: &Path) -> Option<(u32, u32, u32)> {
+        if !self.folders.lock().unwrap().contains_key(path) {
+            return None;
+        }
+        Some(self.meta.lock().unwrap().get(path).copied().unwrap_or((0, MEMORY_GID, 0o750)))
+    }
+    fn account_gid(&self) -> Option<u32> {
+        Some(MEMORY_GID)
+    }
+    fn names(&self, uid: u32, gid: u32) -> (Option<String>, Option<String>) {
+        let n = |id: u32| match id {
+            0 => Some("root".to_string()),
+            1000 => Some("marco".to_string()),
+            MEMORY_GID => Some(ACCOUNT.to_string()),
+            _ => None,
+        };
+        (n(uid), n(gid))
+    }
+    fn home_dirs(&self) -> Vec<String> {
+        self.homes.lock().unwrap().clone()
     }
     fn write_keys(&self, content: &str) -> Result<(), String> {
         *self.keys.lock().unwrap() = content.to_string();
@@ -355,7 +485,8 @@ impl ReceiveHost for MemoryReceive {
             .insert(path.to_path_buf(), (true, Vec::new()));
         Ok(())
     }
-    fn prepare_adopted(&self, _: &Path) -> Result<(), String> {
+    fn prepare_adopted(&self, path: &Path) -> Result<(), String> {
+        self.meta.lock().unwrap().remove(path);
         Ok(())
     }
     fn scan(&self, path: &Path) -> Result<Scan, String> {
@@ -636,6 +767,98 @@ impl PcBackup {
     }
 }
 
+impl PcBackup {
+    /// The folders of the shares in the applied configuration (none when unreadable).
+    fn share_paths(&self) -> Vec<String> {
+        self.ops
+            .config
+            .applied(rynas_services::SHARES_KEY)
+            .ok()
+            .and_then(|v| crate::services::from_value::<rynas_api_types::SharesConfig>(v).ok())
+            .map(|d| d.shares.into_iter().map(|s| s.path).filter(|p| !p.is_empty()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Why `path` cannot be adopted (its owner and mode would change): see [`adopt_refusal`].
+    fn adopt_refused(&self, path: &str) -> Option<String> {
+        adopt_refusal(path, &self.share_paths(), &self.host.home_dirs())
+    }
+
+    /// What adopting changes on the folder itself; `None` when nothing.
+    fn permission_change(&self, path: &Path) -> Option<PermissionChange> {
+        let (uid, gid, mode) = self.host.folder_meta(path)?;
+        let account = self.host.account_gid();
+        if uid == 0 && account == Some(gid) && mode == 0o750 {
+            return None;
+        }
+        let (owner, group) = self.host.names(uid, gid);
+        Some(PermissionChange {
+            uid,
+            gid,
+            mode,
+            owner,
+            group,
+            new_owner: "root".into(),
+            new_group: ACCOUNT.into(),
+            new_mode: 0o750,
+        })
+    }
+
+    /// The device and folder checks of a new target, against the current records.
+    fn clash(&self, device: &str, path: &str) -> Res<()> {
+        let reg = self.reg.lock().unwrap();
+        if reg.targets.contains_key(device) {
+            return Err(Error::new(
+                StatusCode::CONFLICT,
+                error_codes::ALREADY_EXISTS,
+                format!("{device} already exists"),
+            )
+            .field("device"));
+        }
+        let clash = reg.targets.iter().find(|(_, t)| {
+            t.path == path
+                || path.starts_with(&format!("{}/", t.path))
+                || t.path.starts_with(&format!("{path}/"))
+        });
+        if let Some((d, _)) = clash {
+            return Err(Error::invalid("path", format!("overlaps the folder of {d}")));
+        }
+        Ok(())
+    }
+
+    /// The folders of every device (the sudoers lines).
+    fn roots(&self) -> Vec<String> {
+        self.reg.lock().unwrap().targets.values().map(|t| t.path.clone()).collect()
+    }
+}
+
+/// `p` is `base` or inside it.
+fn within(p: &str, base: &str) -> bool {
+    let base = base.trim_end_matches('/');
+    p == base || p.starts_with(&format!("{base}/"))
+}
+
+/// Why an existing folder cannot be adopted: adopting makes the folder itself
+/// `root:rynas-pcbackup 0750`, so a share's folder (or one holding shares), a user's home (or
+/// one holding homes) and system folders are refused.
+pub fn adopt_refusal(path: &str, shares: &[String], homes: &[String]) -> Option<String> {
+    if let Err(m) = receive::valid_path(path) {
+        return Some(m);
+    }
+    for sys in ["/var", "/home", "/opt", "/tmp", "/srv/.snapshots", "/mnt/.snapshots"] {
+        if within(path, sys) {
+            return Some(format!("{sys} is a system folder"));
+        }
+    }
+    if let Some(sh) = shares.iter().find(|s| within(s, path)) {
+        return Some(format!("{sh} is a shared folder: choose a folder inside it"));
+    }
+    if let Some(h) = homes.iter().find(|h| within(h, path)) {
+        return Some(format!("{h} is a user's home"));
+    }
+    None
+}
+
 /// The freshness check every hour (first after two minutes).
 pub fn spawn_watch(svc: Arc<PcBackup>) {
     tokio::spawn(async move {
@@ -779,7 +1002,14 @@ async fn adopt_plan(
     let Json(req) = body?;
     receive::valid_path(&req.path).map_err(|m| Error::invalid("path", m))?;
     let path = req.path.clone();
-    let scan = blocking(move || s.host.scan(Path::new(&path))).await?;
+    let (refused, scan, change) = blocking(move || {
+        let p = Path::new(&path);
+        (s.adopt_refused(&path), s.host.scan(p), s.permission_change(p))
+    })
+    .await?;
+    if let Some(m) = refused {
+        return Err(Error::invalid("path", m));
+    }
     let Some((sub, entries, other)) = scan.map_err(|m| Error::invalid("path", m))? else {
         return Err(Error::invalid("path", "no such folder").field("path"));
     };
@@ -791,15 +1021,25 @@ async fn adopt_plan(
         list: sum.list,
         groups: sum.groups,
         other_entries: other,
+        permission_change: change,
     }))
+}
+
+#[derive(Deserialize, Default)]
+struct CreateQuery {
+    /// The adopt plan's `permission_change` was shown and accepted.
+    #[serde(default)]
+    confirm_permission_change: bool,
 }
 
 async fn create_post(
     State(st): State<PbState>,
     hd: HeaderMap,
+    q: Result<Query<CreateQuery>, axum::extract::rejection::QueryRejection>,
     body: Result<Json<PcTargetCreate>, JsonRejection>,
 ) -> Res<Response> {
     let (s, who) = (pb(&st)?, user(&hd)?);
+    let Query(q) = q.map_err(|e| Error::bad_request(e.body_text()))?;
     let Json(req) = body?;
     if !valid_device(&req.device) {
         return Err(Error::invalid("device", "lowercase letters, digits and -, at most 32"));
@@ -810,23 +1050,22 @@ async fn create_post(
     receive::valid_path(&req.path).map_err(|m| Error::invalid("path", m))?;
     check_key(&req.public_key)?;
     check_policy(req.alert_days, &req.delete)?;
-    {
-        let reg = s.reg.lock().unwrap();
-        if reg.targets.contains_key(&req.device) {
-            return Err(Error::new(
-                StatusCode::CONFLICT,
-                error_codes::ALREADY_EXISTS,
-                format!("{} already exists", req.device),
-            )
-            .field("device"));
+    // early answers; checked again under the change lock in the task
+    s.clash(&req.device, &req.path)?;
+    if req.adopt {
+        let (s2, path) = (s.clone(), req.path.clone());
+        let (refused, change) = blocking(move || {
+            (s2.adopt_refused(&path), s2.permission_change(Path::new(&path)))
+        })
+        .await?;
+        if let Some(m) = refused {
+            return Err(Error::invalid("path", m));
         }
-        let clash = reg.targets.iter().find(|(_, t)| {
-            t.path == req.path
-                || req.path.starts_with(&format!("{}/", t.path))
-                || t.path.starts_with(&format!("{}/", req.path))
-        });
-        if let Some((d, _)) = clash {
-            return Err(Error::invalid("path", format!("overlaps the folder of {d}")));
+        if change.is_some() && !q.confirm_permission_change {
+            return Err(Error::invalid(
+                "path",
+                "adopting changes the folder's owner and mode: confirm the change shown by the plan",
+            ));
         }
     }
     let s2 = s.clone();
@@ -838,12 +1077,24 @@ async fn create_post(
         let req2 = req.clone();
         let log = tokio::task::spawn_blocking(move || -> Result<Vec<String>, String> {
             let (s, req) = (s3, req2);
+            s.clash(&req.device, &req.path).map_err(|e| e.2)?;
             let f = s.host.facts();
             let btrfs = f.btrfs.ok_or("btrfs-progs is not installed")?;
-            let mut log = s.host.ensure_account(&btrfs)?;
+            let mut roots = s.roots();
+            roots.push(req.path.clone());
+            let mut log = s.host.ensure_account(&btrfs, &roots)?;
             let path = Path::new(&req.path);
             match (s.host.scan(path)?, req.adopt) {
                 (Some((_, entries, _)), true) => {
+                    if let Some(m) = s.adopt_refused(&req.path) {
+                        return Err(format!("{}: {m}", req.path));
+                    }
+                    if let Some(c) = s.permission_change(path) {
+                        log.push(format!(
+                            "{}: owner {}:{} mode {:o} -> root:{ACCOUNT} 750",
+                            req.path, c.uid, c.gid, c.mode
+                        ));
+                    }
                     s.host.prepare_adopted(path)?;
                     log.push(format!("{} adopted as it is: {} snapshots", req.path, entries.len()));
                 }
@@ -942,14 +1193,32 @@ async fn remove_delete(
         let _g = s.change.lock().await;
         let s3 = s.clone();
         let dev = device.clone();
-        tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let path = t.path.clone();
+        let log = tokio::task::spawn_blocking(move || -> Result<Vec<String>, String> {
             s3.edit(|r| {
                 r.targets.remove(&dev);
             })?;
-            s3.host.write_keys(&s3.keys_text())
+            let roots = s3.roots();
+            let mut log = Vec::new();
+            if roots.is_empty() {
+                // the last device: no account, sudoers or keys left behind
+                log.extend(s3.host.remove_account()?);
+            } else {
+                s3.host.write_keys(&s3.keys_text())?;
+                if let Some(btrfs) = s3.host.facts().btrfs {
+                    log.extend(s3.host.ensure_account(&btrfs, &roots)?);
+                }
+            }
+            if let Err(e) = s3.host.release_folder(Path::new(&path)) {
+                log.push(format!("{path}: group not changed back: {e}"));
+            }
+            Ok(log)
         })
         .await
         .map_err(|e| e.to_string())??;
+        for l in log {
+            ctx.log(&l);
+        }
         ctx.log(&format!(
             "{device}: key removed; the folder {} and its snapshots stay",
             t.path

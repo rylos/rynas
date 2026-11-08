@@ -11,7 +11,11 @@
 //!   target directory: nothing rynas did not create;
 //! - remote targets use one dedicated key ([`KEY_PATH`]), rynas's own known_hosts filled with
 //!   host keys the administrator confirmed, and on the remote side `ssh_filter_btrbk.sh`
-//!   ([`crate::btrbk_ssh`]).
+//!   ([`crate::btrbk_ssh`]). btrbk runs with [`SSH_WRAPPER_DIR`] first in its `PATH`: its
+//!   `ssh` is a wrapper ([`ssh_wrapper`]) that starts `/usr/bin/ssh -F none` with every option
+//!   on the command line, so no `ssh_config` file (root's `~/.ssh/config`, another
+//!   `ssh_config.d` file matching first) can change the key, the host key checks or add a
+//!   proxy.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -34,8 +38,12 @@ use crate::scan::{self, SnapError};
 pub const KEY_PATH: &str = "/etc/rynas/ssh/replication_ed25519";
 /// Host keys of the remote targets, confirmed in rynas.
 pub const KNOWN_HOSTS: &str = "/etc/rynas/ssh/known_hosts";
-/// ssh client settings for the remote targets (root's connections to those hosts only).
+/// The ssh client settings file of earlier versions (removed: see [`ssh_wrapper`]).
 pub const SSH_CONFIG: &str = "/etc/ssh/ssh_config.d/60-rynas-replication.conf";
+/// The folder of the `ssh` wrapper btrbk finds first in its `PATH`.
+pub const SSH_WRAPPER_DIR: &str = "/etc/rynas/ssh/bin";
+/// btrbk's `PATH`.
+pub const BTRBK_PATH: &str = "/etc/rynas/ssh/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 /// Longest transfer.
 pub const TRANSFER_TIMEOUT: Duration = Duration::from_secs(24 * 3600);
 /// Targets per job.
@@ -83,6 +91,19 @@ fn valid_user(u: &str) -> bool {
         && b
             .iter()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_' || *c == b'-')
+}
+
+/// A remote target folder: `[A-Za-z0-9_@+.-]` parts only (it goes into the remote
+/// `authorized_keys` command and into the regular expression of `--restrict-path`).
+fn valid_remote_path(p: &str) -> bool {
+    p.len() > 1
+        && p.starts_with('/')
+        && p[1..].split('/').all(|s| {
+            !s.is_empty()
+                && s != "."
+                && s != ".."
+                && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"_@+.-".contains(&b))
+        })
 }
 
 fn inside(path: &str, dir: &str) -> bool {
@@ -134,8 +155,14 @@ pub fn normalize_targets(job: &SnapshotJob) -> Result<Vec<ReplicaTarget>, String
                 port,
                 user,
                 host_keys,
+                path,
                 ..
             } => {
+                if !valid_remote_path(path) {
+                    return Err(format!(
+                        "job {n}, replica {id}: the remote folder takes letters, digits and _ @ + . - only (got {path:?})"
+                    ));
+                }
                 *host = host.trim().trim_start_matches('[').trim_end_matches(']').to_string();
                 if !valid_host(host) {
                     return Err(format!("job {n}, replica {id}: invalid host {host:?}"));
@@ -255,38 +282,42 @@ pub fn known_hosts(c: &SnapshotsConfig) -> String {
     s
 }
 
-/// ssh client settings applied to root's connections to the remote targets: rynas's
-/// known_hosts, strict host key checking, no prompts, keepalives.
-pub fn ssh_config(c: &SnapshotsConfig) -> String {
-    let mut hosts: Vec<(&str, &str)> = remotes(c).into_iter().map(|(h, _, u, _)| (h, u)).collect();
-    hosts.sort_unstable();
-    hosts.dedup();
-    let mut s = String::from(
-        "# ssh settings of the rynas snapshot replication (root's connections to its targets).\n",
-    );
-    for (h, u) in hosts {
-        s.push_str(&format!(
-            "Match originalhost {h} user {u} localuser root\n\
-             \x20   UserKnownHostsFile {KNOWN_HOSTS}\n\
-             \x20   StrictHostKeyChecking yes\n\
-             \x20   BatchMode yes\n\
-             \x20   IdentitiesOnly yes\n\
-             \x20   ConnectTimeout 20\n\
-             \x20   ServerAliveInterval 30\n\
-             \x20   ServerAliveCountMax 4\n"
-        ));
-    }
-    s
+/// The `ssh` btrbk runs ([`SSH_WRAPPER_DIR`] is first in its `PATH`): `/usr/bin/ssh` with no
+/// configuration file at all (`-F none`) and every setting on the command line: rynas's
+/// known_hosts only, strict host key checking, the replication key only, no prompts, no
+/// agent, proxy or connection sharing, keepalives. btrbk adds `-i`, `-p`, `user@host` and the
+/// command.
+pub fn ssh_wrapper() -> String {
+    format!(
+        "#!/bin/sh\n\
+         # Written by rynas: the ssh of the snapshot replication (btrbk). No ssh_config file\n\
+         # is read; every option is here.\n\
+         exec /usr/bin/ssh -F none \\\n\
+         \x20   -o StrictHostKeyChecking=yes -o UserKnownHostsFile={KNOWN_HOSTS} \\\n\
+         \x20   -o GlobalKnownHostsFile=none -o CheckHostIP=no -o UpdateHostKeys=no \\\n\
+         \x20   -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityAgent=none -i {KEY_PATH} \\\n\
+         \x20   -o ProxyCommand=none -o ProxyJump=none -o ControlMaster=no -o ControlPath=none \\\n\
+         \x20   -o ForwardAgent=no -o ForwardX11=no -o ClearAllForwardings=yes -o PermitLocalCommand=no \\\n\
+         \x20   -o ConnectTimeout=20 -o ServerAliveInterval=30 -o ServerAliveCountMax=4 \\\n\
+         \x20   \"$@\"\n"
+    )
 }
 
-/// The managed files of the remote targets (absent without any).
+/// The managed files of the remote targets (absent without any). The `ssh_config.d` file
+/// of earlier versions always goes.
 pub fn managed_files(c: &SnapshotsConfig) -> Vec<ManagedFile> {
+    let wrapper = format!("{SSH_WRAPPER_DIR}/ssh");
     if remotes(c).is_empty() {
-        return vec![ManagedFile::absent(KNOWN_HOSTS), ManagedFile::absent(SSH_CONFIG)];
+        return vec![
+            ManagedFile::absent(KNOWN_HOSTS),
+            ManagedFile::absent(SSH_CONFIG),
+            ManagedFile::absent(&wrapper),
+        ];
     }
     vec![
         ManagedFile::whole(KNOWN_HOSTS, known_hosts(c), true).mode(0o644),
-        ManagedFile::whole(SSH_CONFIG, ssh_config(c), true).mode(0o644),
+        ManagedFile::absent(SSH_CONFIG),
+        ManagedFile::whole(&wrapper, ssh_wrapper(), false).mode(0o755),
     ]
 }
 
@@ -317,6 +348,7 @@ pub fn snapshot_cmd(job: &SnapshotJob, timeout: Duration) -> Cmd {
         .arg(conf_path(&job.name))
         .args([action, "--format=raw"])
         .env_clear()
+        .env("PATH", BTRBK_PATH)
         .timeout(timeout)
 }
 
@@ -329,6 +361,7 @@ pub fn clean_cmd(job: &str, id: &str) -> Cmd {
         .args(["clean", "--format=raw"])
         .arg(group(id))
         .env_clear()
+        .env("PATH", BTRBK_PATH)
         .timeout(Duration::from_secs(3600))
 }
 
@@ -342,6 +375,7 @@ pub fn resume_cmd(job: &str, id: &str) -> Cmd {
         .args(["resume", "--preserve-snapshots", "--format=raw"])
         .arg(group(id))
         .env_clear()
+        .env("PATH", BTRBK_PATH)
         .timeout(TRANSFER_TIMEOUT)
 }
 
@@ -496,6 +530,26 @@ pub trait ReplicaHost: Send + Sync {
     fn fingerprints(&self, lines: &str) -> Vec<String>;
     /// The host keys a host presents (`ssh-keyscan`).
     fn scan_host(&self, host: &str, port: u16) -> Result<Vec<String>, String>;
+    /// Names of the entries of a job's snapshot directory (none when unreadable).
+    fn snapshot_names(&self, dir: &str) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .map(|rd| {
+                rd.flatten()
+                    .filter_map(|e| e.file_name().into_string().ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// How many snapshots of `job` among `names` are newer than the target's latest replica
+/// (all of them before the first one): what btrbk keeps on the source for this target.
+pub fn held_snapshots(names: &[String], job: &str, latest: Option<&str>) -> u32 {
+    names
+        .iter()
+        .filter(|n| crate::name::split_snapshot_name(n).is_some_and(|(g, _)| g == job))
+        .filter(|n| latest.is_none_or(|l| crate::name::compare_names(n, l) == std::cmp::Ordering::Greater))
+        .count() as u32
 }
 
 /// The real machine.
@@ -840,7 +894,10 @@ mod tests {
         assert_eq!(resume_cmd("docs", "hdd").display(), "btrbk -c /etc/rynas/btrbk/docs.conf resume --preserve-snapshots --format=raw replica-hdd");
         assert_eq!(clean_cmd("docs", "hdd").display(), "btrbk -c /etc/rynas/btrbk/docs.conf clean --format=raw replica-hdd");
         let c = SnapshotsConfig { jobs: vec![j.clone()], ..Default::default() };
-        crate::tests::golden("replication-ssh.conf", &ssh_config(&c));
+        crate::tests::golden("replication-ssh-wrapper.sh", &ssh_wrapper());
+        let files = managed_files(&c);
+        assert!(files.iter().any(|f| f.path == std::path::Path::new("/etc/rynas/ssh/bin/ssh")));
+        assert!(files.iter().any(|f| f.path == std::path::Path::new(SSH_CONFIG) && f.kind == rynas_config::files::FileKind::Absent));
         assert_eq!(
             known_hosts(&c),
             "# Host keys of the rynas replica targets, confirmed in rynas.\n[backup.lan]:2222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5\n"
@@ -851,6 +908,25 @@ mod tests {
         assert_eq!(task_id("My_Docs", "hdd"), "replica-my-docs-hdd");
         let none = SnapshotsConfig::default();
         assert!(managed_files(&none).iter().all(|f| f.kind == rynas_config::files::FileKind::Absent));
+    }
+
+    #[test]
+    fn held_snapshots_count_what_the_target_lacks() {
+        let names: Vec<String> = ["docs.20261108T0100", "docs.20261107T0100", "docs.20261106T0100", "other.20261108T0100", "docs.junk"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(held_snapshots(&names, "docs", Some("docs.20261106T0100")), 2);
+        assert_eq!(held_snapshots(&names, "docs", Some("docs.20261108T0100")), 0);
+        assert_eq!(held_snapshots(&names, "docs", None), 3);
+    }
+
+    #[test]
+    fn remote_paths_take_the_safe_characters_only() {
+        assert!(valid_remote_path("/vol1/replica/docs") && valid_remote_path("/srv/a_b@c+d.e-f"));
+        for bad in ["/", "/a;b", "/a|b", "/a&b", "/a(b)", "/a*", "/a?", "/a[b]", "/a b", "/a/../b", "/a//b", "/a/", "rel"] {
+            assert!(!valid_remote_path(bad), "{bad}");
+        }
     }
 
     #[test]

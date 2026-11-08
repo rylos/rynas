@@ -9,12 +9,20 @@
 //! a clean environment.
 //!
 //! What a key may do (the shapes btrbk 0.32 sends, with or without `sudo -n`/`doas -n`):
-//! - `btrfs receive [--max-errors=0] '<root>[/…]'`, behind optional `<zstd|…> -d -c` and
-//!   `mbuffer -v 1 -q …` stages; run as `btrfs receive --chroot` (confined to the folder);
+//! - `btrfs receive [--max-errors=0] '<root>/'`, behind optional `<zstd|…> -d -c` and
+//!   `mbuffer -v 1 -q …` stages (mbuffer's `-m`/`-s` clamped to [`MBUFFER_MAX_MEM`] and
+//!   [`MBUFFER_MAX_BLOCK`]); run as `btrfs receive --chroot` into the folder itself (btrbk
+//!   always receives into the target folder: a destination below it is refused, because
+//!   `btrfs receive` resolves the path before it chroots and a symlink inside an earlier
+//!   received snapshot would redirect it). At run time the binary also walks the folder from
+//!   `/` without following symlinks and refuses a folder inside a received or read-only
+//!   subvolume ([`verify_root`]), and takes a per-device lock (one receive at a time);
 //! - with `--delete`: `btrfs subvolume delete [--commit-each|--commit-after] '<root>/<name>'…`
 //!   for btrbk snapshot names directly inside the folder, subject to the NAS rules
-//!   ([`crate::receive::delete_refusal`], checked by the binary on a fresh listing);
-//! - read only: `btrfs subvolume show|list …`, `btrfs filesystem usage …`,
+//!   ([`crate::receive::delete_refusal`], checked by the binary on a fresh listing); always
+//!   run as `btrfs subvolume delete --commit-each` (the one form the sudoers line allows);
+//! - read only: `btrfs subvolume show|list …` and `btrfs filesystem usage …` on the folder
+//!   or below it,
 //!   `readlink [-v] -e|-f '<root>…'`, `test -d '<root>…'`, `cat /proc/self/mountinfo|mounts`.
 //!
 //! Everything else (other programs, `;`, `&`, `$`, backquotes, redirections, double quotes,
@@ -81,9 +89,18 @@ pub struct Plan {
     pub stages: Vec<Stage>,
     /// Snapshot names a delete asks for (the binary checks the NAS rules on them).
     pub deletes: Vec<String>,
-    /// One line for the log.
+    /// One line for the log (control characters escaped).
     pub summary: String,
+    /// A `btrfs receive`: the binary checks the folder ([`verify_root`]) and takes the
+    /// device's lock first.
+    pub receive: bool,
 }
+
+/// Largest mbuffer memory (`-m`): bytes, or a share of the RAM.
+pub const MBUFFER_MAX_MEM: u64 = 1 << 30;
+pub const MBUFFER_MAX_MEM_PCT: u64 = 25;
+/// Largest mbuffer block (`-s`).
+pub const MBUFFER_MAX_BLOCK: u64 = 16 << 20;
 
 const DECOMPRESS: &[&str] = &["gzip", "pigz", "bzip2", "pbzip2", "bzip3", "xz", "lzop", "lz4", "zstd"];
 const MAX_LEN: usize = 16 * 1024;
@@ -165,6 +182,42 @@ fn is_size(s: &str) -> bool {
     is_num(t) && s.len() - t.len() <= 1
 }
 
+/// An mbuffer size in bytes (`None` for a percentage); saturating.
+fn size_bytes(s: &str) -> Option<u64> {
+    let (num, unit) = match s.char_indices().last()? {
+        (i, c) if !c.is_ascii_digit() => (&s[..i], c),
+        _ => (s, 'b'),
+    };
+    let n: u64 = num.parse().ok()?;
+    let mul: u64 = match unit.to_ascii_lowercase() {
+        'b' => 1,
+        'k' => 1 << 10,
+        'm' => 1 << 20,
+        'g' => 1 << 30,
+        't' => 1 << 40,
+        _ => return None,
+    };
+    Some(n.saturating_mul(mul))
+}
+
+/// `-m`/`-s` values clamped to the NAS limits (the other flags as they are).
+fn clamp_mbuffer(flag: &str, v: &str) -> String {
+    match flag {
+        "-m" => match v.strip_suffix('%') {
+            Some(p) => match p.parse::<u64>() {
+                Ok(p) if p <= MBUFFER_MAX_MEM_PCT => v.to_string(),
+                _ => format!("{MBUFFER_MAX_MEM_PCT}%"),
+            },
+            None if size_bytes(v).is_some_and(|b| b <= MBUFFER_MAX_MEM) => v.to_string(),
+            None => format!("{}M", MBUFFER_MAX_MEM >> 20),
+        },
+        "-s" if !size_bytes(v).is_some_and(|b| b <= MBUFFER_MAX_BLOCK) => {
+            format!("{}M", MBUFFER_MAX_BLOCK >> 20)
+        }
+        _ => v.to_string(),
+    }
+}
+
 /// Checks one command against the device's arguments.
 pub fn check(cmd: &str, a: &FilterArgs) -> Result<Plan, String> {
     let stages = tokenize(cmd)?;
@@ -188,7 +241,7 @@ pub fn check(cmd: &str, a: &FilterArgs) -> Result<Plan, String> {
         };
         plan.stages.push(stage);
     }
-    plan.summary = cmd.chars().take(300).collect();
+    plan.summary = cmd.chars().take(300).flat_map(char::escape_debug).collect();
     Ok(plan)
 }
 
@@ -211,10 +264,15 @@ fn stream_stage(prog: &str, rest: &[&str]) -> Result<Stage, String> {
     }
     if prog == "mbuffer" {
         let mut ok = rest.len() >= 3 && rest[..3] == ["-v", "1", "-q"];
+        let mut args: Vec<String> = rest.iter().take(3).map(|s| s.to_string()).collect();
         let mut i = 3;
         while ok && i < rest.len() {
             ok = matches!(rest[i], "-s" | "-m" | "-r" | "-R")
                 && rest.get(i + 1).is_some_and(|v| is_size(v));
+            if ok {
+                args.push(rest[i].to_string());
+                args.push(clamp_mbuffer(rest[i], rest[i + 1]));
+            }
             i += 2;
         }
         return if ok {
@@ -239,15 +297,26 @@ fn final_stage(
         ("btrfs", ["receive", more @ ..]) => {
             let (opts, path) = more.split_at(more.len().saturating_sub(1));
             let path = path.first().ok_or("btrfs receive: no folder")?;
-            let dest = under(path, root).ok_or("btrfs receive: outside this device's folder")?;
+            // only the folder itself: a path below it could cross a symlink inside an
+            // earlier received snapshot (btrfs receive resolves it before the chroot)
+            if normal(path).as_deref() != Some(root) {
+                return Err("btrfs receive: only into this device's folder itself".into());
+            }
             let mut args = vec!["receive".to_string()];
             for o in opts {
                 match *o {
-                    "--max-errors=0" | "-v" | "-q" => args.push(o.to_string()),
+                    "--max-errors=0" => {
+                        if !args.iter().any(|a| a == o) {
+                            args.push(o.to_string());
+                        }
+                    }
+                    // output only: dropped, so the command matches the sudoers line
+                    "-v" | "-q" => {}
                     _ => return Err(format!("btrfs receive: option {o} not allowed")),
                 }
             }
-            args.extend(["--chroot".to_string(), format!("{dest}/")]);
+            args.extend(["--chroot".to_string(), format!("{root}/")]);
+            plan.receive = true;
             s(Prog::Btrfs, args)
         }
         _ if piped => Err("only btrfs receive takes a stream".into()),
@@ -255,13 +324,13 @@ fn final_stage(
             if !a.delete {
                 return Err("deleting is turned off on the NAS for this device".into());
             }
-            let mut args = vec!["subvolume".to_string(), "delete".to_string()];
+            // always --commit-each: the one form the sudoers line allows
+            let mut args =
+                vec!["subvolume".to_string(), "delete".to_string(), "--commit-each".to_string()];
             let mut any = false;
             for o in more {
                 match *o {
-                    "--commit-each" | "--commit-after" | "-c" | "-C" if !any => {
-                        args.push(o.to_string())
-                    }
+                    "--commit-each" | "--commit-after" | "-c" | "-C" if !any => {}
                     p => {
                         let n = normal(p).ok_or("btrfs subvolume delete: bad path")?;
                         let (parent, name) = n.rsplit_once('/').ok_or("bad path")?;
@@ -286,7 +355,7 @@ fn final_stage(
         ("btrfs", ["subvolume", sub @ ("show" | "list"), more @ ..]) => {
             let (opts, path) = more.split_at(more.len().saturating_sub(1));
             let path = path.first().ok_or("btrfs subvolume: no path")?;
-            let p = normal(path).ok_or("btrfs subvolume: bad path")?;
+            let p = under(path, root).ok_or("btrfs subvolume: outside this device's folder")?;
             if opts
                 .iter()
                 .any(|o| !(o.len() >= 2 && o.starts_with('-') && o[1..].bytes().all(|b| b.is_ascii_alphabetic())))
@@ -301,7 +370,7 @@ fn final_stage(
         ("btrfs", ["filesystem", "usage", more @ ..]) => {
             let (opts, path) = more.split_at(more.len().saturating_sub(1));
             let path = path.first().ok_or("btrfs filesystem usage: no path")?;
-            let p = normal(path).ok_or("btrfs filesystem usage: bad path")?;
+            let p = under(path, root).ok_or("btrfs filesystem usage: outside this device's folder")?;
             if opts.iter().any(|o| !matches!(*o, "-b" | "--raw" | "-T")) {
                 return Err("btrfs filesystem usage: option not allowed".into());
             }
@@ -329,6 +398,39 @@ fn final_stage(
         }
         _ => Err(format!("{prog}: not allowed for this key")),
     }
+}
+
+/// Run-time check of a device folder before btrfs touches it: walked from `/` one part at a
+/// time with `O_DIRECTORY|O_NOFOLLOW` (a symlink anywhere on the way is refused, unlike the
+/// `realpath()` btrfs receive does), on btrfs, and neither the folder nor any folder on the
+/// way is inside a received or read-only subvolume (a received snapshot is content a PC
+/// wrote). Returns the folder's descriptor (the binary takes its lock on it).
+pub fn verify_root(root: &str) -> Result<std::fs::File, String> {
+    use crate::ioctl;
+    let n = normal(root).filter(|n| n != "/").ok_or("bad folder")?;
+    let mut cur = ioctl::open_dir(Path::new("/")).map_err(|e| format!("/: {e}"))?;
+    let mut walked = String::new();
+    for part in n[1..].split('/') {
+        walked.push('/');
+        walked.push_str(part);
+        cur = ioctl::open_dir_at(&cur, part).map_err(|e| {
+            if e.raw_os_error() == Some(libc::ELOOP) || e.raw_os_error() == Some(libc::ENOTDIR) {
+                format!("{walked} is a symlink or not a folder")
+            } else {
+                format!("{walked}: {e}")
+            }
+        })?;
+        if ioctl::is_btrfs(&cur) {
+            let info = ioctl::subvol_info(&cur).map_err(|e| format!("{walked}: {e}"))?;
+            if info.received_uuid.is_some() || info.readonly {
+                return Err(format!("{walked} is inside a received or read-only snapshot"));
+            }
+        }
+    }
+    if !ioctl::is_btrfs(&cur) {
+        return Err(format!("{n} is not on btrfs"));
+    }
+    Ok(cur)
 }
 
 /// Where a program is: the first of the usual places that exists.
@@ -366,21 +468,30 @@ mod tests {
         let ok = |c: &str| check(c, &a).unwrap_or_else(|e| panic!("{c}: {e}"));
         let p = ok("sudo -n btrfs receive '/volume1/backup/pc/'");
         assert_eq!(p.stages[0].args, ["receive", "--chroot", "/volume1/backup/pc/"]);
-        let p = ok("zstd -d -c | mbuffer -v 1 -q -s 128k -m 2G | sudo -n btrfs receive --max-errors=0 '/volume1/backup/pc/'");
+        assert!(p.receive);
+        let p = ok("zstd -d -c | mbuffer -v 1 -q -s 128k -m 2G | sudo -n btrfs receive -v --max-errors=0 '/volume1/backup/pc/'");
         assert_eq!(p.stages.len(), 3);
         assert_eq!(p.stages[0].prog, Prog::Decompress("zstd"));
+        // mbuffer memory clamped to 1 GiB
+        assert_eq!(p.stages[1].args, ["-v", "1", "-q", "-s", "128k", "-m", "1024M"]);
         assert_eq!(p.stages[2].args, ["receive", "--max-errors=0", "--chroot", "/volume1/backup/pc/"]);
-        let p = ok("sudo -n btrfs subvolume delete --commit-each '/volume1/backup/pc/home.20261108T0130'");
-        assert_eq!(p.deletes, ["home.20261108T0130"]);
-        assert_eq!(p.stages[0].args, ["subvolume", "delete", "--commit-each", "/volume1/backup/pc/home.20261108T0130"]);
-        ok("sudo -n btrfs subvolume list -a -c -u -q -R '/volume1'");
+        let p = ok("mbuffer -v 1 -q -m 90% -s 1G | btrfs receive /volume1/backup/pc");
+        assert_eq!(p.stages[0].args, ["-v", "1", "-q", "-m", "25%", "-s", "16M"]);
+        let p = ok("mbuffer -v 1 -q -m 10% | btrfs receive /volume1/backup/pc");
+        assert_eq!(p.stages[0].args, ["-v", "1", "-q", "-m", "10%"]);
+        let p = ok("sudo -n btrfs subvolume delete --commit-after '/volume1/backup/pc/home.20261108T0130' /volume1/backup/pc/home.20261107T0130");
+        assert_eq!(p.deletes, ["home.20261108T0130", "home.20261107T0130"]);
+        assert!(!p.receive);
+        assert_eq!(p.stages[0].args, ["subvolume", "delete", "--commit-each", "/volume1/backup/pc/home.20261108T0130", "/volume1/backup/pc/home.20261107T0130"]);
+        ok("sudo -n btrfs subvolume list -a -c -u -q -R '/volume1/backup/pc'");
+        ok("btrfs subvolume show '/volume1/backup/pc/home.20261108T0130'");
         ok("btrfs subvolume show '/volume1/backup/pc'");
         ok("sudo -n readlink -v -e '/volume1/backup/pc'");
         ok("readlink -f /volume1/backup/pc");
         ok("test -d '/volume1/backup/pc'");
         ok("cat /proc/self/mountinfo");
         ok("btrfs filesystem usage -b '/volume1/backup/pc'");
-        ok("doas -n btrfs receive /volume1/backup/pc/sub");
+        ok("doas -n btrfs receive /volume1/backup/pc");
     }
 
     #[test]
@@ -416,6 +527,14 @@ mod tests {
             "mkdir -p '/volume1/backup/pc/x'",
             "btrfs subvolume list --sort=x /",
             "btrfs receive",
+            // below the folder: could cross a symlink inside a received snapshot
+            "btrfs receive '/volume1/backup/pc/home.20261108T0130/link'",
+            "btrfs receive /volume1/backup/pc/sub/",
+            // read-only commands stay inside the folder too
+            "btrfs subvolume list -a /volume1",
+            "btrfs subvolume show /",
+            "btrfs filesystem usage /volume1",
+            "mbuffer -v 1 -q -m 2X | btrfs receive /volume1/backup/pc",
         ] {
             assert!(check(c, &a).is_err(), "accepted: {c:?}");
         }
@@ -430,6 +549,32 @@ mod tests {
         ] {
             assert!(check(c, &a).is_err(), "accepted: {c:?}");
         }
+    }
+
+    #[test]
+    fn summary_escapes_control_characters() {
+        let p = check("test -d '/volume1/backup/pc/a\tb'", &args(false)).unwrap();
+        assert!(p.summary.contains("\\t") && !p.summary.contains('\t'), "{}", p.summary);
+    }
+
+    #[test]
+    fn verify_root_refuses_symlinks() {
+        let t = tempfile::tempdir().unwrap();
+        let base = t.path().canonicalize().unwrap();
+        std::fs::create_dir_all(base.join("real/x")).unwrap();
+        std::os::unix::fs::symlink(base.join("real"), base.join("link")).unwrap();
+        let e = verify_root(&format!("{}/link/x", base.display())).unwrap_err();
+        assert!(e.contains("symlink"), "{e}");
+        // the final part a symlink as well
+        std::os::unix::fs::symlink(base.join("real/x"), base.join("real/y")).unwrap();
+        let e = verify_root(&format!("{}/real/y", base.display())).unwrap_err();
+        assert!(e.contains("symlink"), "{e}");
+        // a real folder: fine on btrfs, refused elsewhere (tmpfs)
+        match verify_root(&format!("{}/real/x", base.display())) {
+            Ok(_) => {}
+            Err(e) => assert!(e.contains("btrfs"), "{e}"),
+        }
+        assert!(verify_root("/").is_err() && verify_root("rel/x").is_err());
     }
 
     #[test]

@@ -299,9 +299,17 @@ host over SSH, with its own retention. Decision D-REPL.
   (`command="…/ssh_filter_btrbk.sh --target --delete --restrict-path <path> [--sudo] --log",restrict <key>`)
   and warns that the server needs btrbk ≥ 0.32.7. Host keys are read with `ssh-keyscan`, shown
   with their SHA256 fingerprints and stored only once confirmed; they go to rynas's own
-  `/etc/rynas/ssh/known_hosts`, used through `/etc/ssh/ssh_config.d/60-rynas-replication.conf`
-  (`Match originalhost <host> user <user> localuser root`: strict host key checking, batch
-  mode, keepalives), so nothing else of root's ssh changes. Non-root users run btrfs through
+  `/etc/rynas/ssh/known_hosts`. btrbk runs with `PATH=/etc/rynas/ssh/bin:…`, where `ssh` is a
+  wrapper written by rynas: `/usr/bin/ssh -F none` with every option on the command line
+  (`StrictHostKeyChecking=yes`, `UserKnownHostsFile=/etc/rynas/ssh/known_hosts`,
+  `GlobalKnownHostsFile=none`, `IdentitiesOnly=yes`, `-i <key>`, `BatchMode`, no agent, proxy,
+  forwarding or connection sharing, keepalives). The earlier
+  `ssh_config.d/60-rynas-replication.conf` was dropped (security review 2026-11-08): ssh takes
+  the first value it finds, so root's `~/.ssh/config` or an earlier `ssh_config.d` file could
+  override it; with `-F none` no file is read and nothing else of root's ssh changes. The key
+  folder is forced to 0700 and the key to 0600 at every use (a symlink is refused). The remote
+  folder takes `[A-Za-z0-9_@+.-]` parts only: it goes into the remote `authorized_keys` command
+  and into the regular expression of `--restrict-path`. Non-root users run btrfs through
   `sudo -n` (`backend_remote btrfs-progs-sudo`). Compression (`zstd`, `lz4`, `gzip`) only for
   remote targets; bandwidth limit for both (`rate_limit`, needs mbuffer).
 - **Status per target** (`<state>/replication/<job>/<id>.json`): last success, last attempt,
@@ -309,7 +317,11 @@ host over SSH, with its own retention. Decision D-REPL.
   host key, unreachable, filter, missing folder, not btrfs, no space, busy, btrbk missing) that
   the UI turns into the fix; next run from the job's or the target's timer. Notifications on
   state changes only: `replication.failed` (firing) / `replication.ok` (resolved), key
-  `replication:<job>:<id>`, category backup, fields `job`, `target`, `name`, `hint`. A failed
+  `replication:<job>:<id>`, category backup, fields `job`, `target`, `name`, `hint`,
+  `held_snapshots`. Because btrbk keeps every source snapshot a target lacks, a target that
+  stays down makes snapshots pile up on the source: the listing reports `held_snapshots` (job
+  snapshots newer than the newest replica) and the failure notification says how many are
+  kept and that they use more and more space. A failed
   transfer never fails the snapshot run it follows. Transferred bytes are not reported: btrbk's
   raw output has no size (open point).
 - **Restore** (local targets): list the replicas (read-only, interrupted receives flagged),

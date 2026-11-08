@@ -68,7 +68,24 @@ fn name_ms(name: &str) -> Option<u64> {
     (ms >= 0).then_some(ms as u64)
 }
 
+/// When the NAS made the snapshot (its `otime`), in ms.
+fn otime_ms(e: &Entry) -> Option<u64> {
+    e.info
+        .as_ref()
+        .and_then(|i| (i.otime > 0).then_some(i.otime as u64 * 1000))
+}
+
+/// The name says a time more than a day after `now_ms` (the PC chose it: not trusted).
+pub fn future_dated(name: &str, now_ms: u64) -> bool {
+    name_ms(name).is_some_and(|ms| ms > now_ms.saturating_add(DAY_MS))
+}
+
 /// Why the NAS refuses to delete `name` now (`None`: allowed). `all` is the folder's content.
+///
+/// Ages and order come from the NAS side (the subvolume's `otime`, the name only when that
+/// cannot be read): the names are chosen by the PC, so a PC that sends snapshots named in the
+/// future cannot push its real snapshots out of the newest N. Snapshots whose name is more
+/// than a day in the future never count among the newest N.
 pub fn delete_refusal(
     name: &str,
     all: &[Entry],
@@ -87,7 +104,7 @@ pub fn delete_refusal(
         return Some(format!("{name}: deleting is turned off on the NAS"));
     }
     if policy.min_age_days > 0
-        && let Some(ms) = name_ms(name)
+        && let Some(ms) = entry.and_then(otime_ms).or_else(|| name_ms(name))
         && now_ms < ms.saturating_add(u64::from(policy.min_age_days) * DAY_MS)
     {
         return Some(format!(
@@ -96,17 +113,20 @@ pub fn delete_refusal(
         ));
     }
     if policy.keep_last > 0 {
-        let mut newest: Vec<&str> = all
+        let mut newest: Vec<&Entry> = all
             .iter()
-            .filter(|e| !e.incomplete())
+            .filter(|e| e.info.is_some() && !e.incomplete() && !future_dated(&e.name, now_ms))
             .filter(|e| split_snapshot_name(&e.name).is_some_and(|(g, _)| g == group))
-            .map(|e| e.name.as_str())
             .collect();
-        newest.sort_by(|a, b| compare_names(b, a));
+        newest.sort_by(|a, b| {
+            otime_ms(b)
+                .cmp(&otime_ms(a))
+                .then_with(|| compare_names(&b.name, &a.name))
+        });
         if newest
             .iter()
             .take(policy.keep_last as usize)
-            .any(|n| *n == name)
+            .any(|e| e.name == name)
         {
             return Some(format!(
                 "{name}: one of the newest {} of {group}, kept by the NAS",
@@ -298,25 +318,39 @@ pub fn authorized_keys(lines: &[String]) -> String {
     s
 }
 
-/// `/etc/sudoers.d/rynas-pcbackup`: btrfs only, only the subcommands btrbk needs on a target.
-/// Which folder each key may touch is the filter's job.
-pub fn sudoers(btrfs: &str) -> String {
-    let cmds = [
-        "receive",
-        "subvolume delete",
-        "subvolume show",
-        "subvolume list",
-        "filesystem usage",
-    ]
-    .map(|c| format!("{btrfs} {c} *"))
-    .join(", ");
-    format!(
-        "# Written by rynas (Backup › PCs): the account PCs push btrbk snapshots as.\n\
-         # Only btrfs and only these subcommands; the folder of each PC is checked by\n\
-         # {FILTER}, the forced command of every key.\n\
-         Defaults:{ACCOUNT} !requiretty, !use_pty, !lecture, env_reset\n\
-         {ACCOUNT} ALL=(root) NOPASSWD: {cmds}\n"
-    )
+/// `/etc/sudoers.d/rynas-pcbackup`: btrfs only, with the fixed leading arguments the filter
+/// produces, one set of lines per device folder (`roots`, each a [`valid_path`]): receive
+/// only `--chroot` into the folder itself, delete only `--commit-each` below it, show, list
+/// and usage only on it or below it. A `*` still matches `..` or a second path, so the filter
+/// stays required (it normalizes every path and names only snapshots of that device); these
+/// lines keep a filter bug from being a root shell. Without folders: no rights at all.
+pub fn sudoers(btrfs: &str, roots: &[&str]) -> String {
+    let mut s = format!(
+        "# Written by rynas (Backup \u{203a} PCs): the account PCs push btrbk snapshots as.\n\
+         # Only btrfs, only these forms and only the folders of the PCs; each command is\n\
+         # checked first by {FILTER}, the forced command of every key.\n\
+         Defaults:{ACCOUNT} !requiretty, !use_pty, !lecture, env_reset\n"
+    );
+    for r in roots {
+        if valid_path(r).is_err() {
+            continue;
+        }
+        let cmds = [
+            format!("{btrfs} receive --chroot {r}/"),
+            format!("{btrfs} receive --max-errors\\=0 --chroot {r}/"),
+            format!("{btrfs} subvolume delete --commit-each {r}/*"),
+            format!("{btrfs} subvolume show {r}"),
+            format!("{btrfs} subvolume show {r}/*"),
+            format!("{btrfs} subvolume list {r}"),
+            format!("{btrfs} subvolume list * {r}"),
+            format!("{btrfs} subvolume list * {r}/*"),
+            format!("{btrfs} filesystem usage {r}"),
+            format!("{btrfs} filesystem usage * {r}"),
+        ]
+        .join(", ");
+        s.push_str(&format!("{ACCOUNT} ALL=(root) NOPASSWD: {cmds}\n"));
+    }
+    s
 }
 
 /// The lines for the PC's `/etc/btrbk/btrbk.conf`.
@@ -471,13 +505,60 @@ mod tests {
         name_ms(name).unwrap()
     }
 
+    /// A complete received snapshot made by the NAS at the time its name says (plus `late_s`).
+    fn at(name: &str, late_s: i64) -> Entry {
+        let mut e = snap(name, true, true);
+        e.info.as_mut().unwrap().otime = (ms(name) / 1000) as i64 + late_s;
+        e
+    }
+
+    #[test]
+    fn future_names_do_not_push_real_snapshots_out() {
+        let now = ms("home.20261108T0300");
+        let p = DeletePolicy { allowed: true, keep_last: 2, min_age_days: 0 };
+        let mut all = vec![
+            at("home.20261108T0100", 0),
+            at("home.20261107T0100", 0),
+            at("home.20261101T0100", 0),
+        ];
+        // two junk snapshots named in 2099, received just now
+        for n in ["home.20991231T0000", "home.20991230T0000"] {
+            let mut e = snap(n, true, true);
+            e.info.as_mut().unwrap().otime = (now / 1000) as i64;
+            all.push(e);
+        }
+        assert!(future_dated("home.20991231T0000", now) && !future_dated("home.20261108T0100", now));
+        assert!(delete_refusal("home.20261108T0100", &all, &p, now).is_some());
+        assert!(delete_refusal("home.20261107T0100", &all, &p, now).is_some());
+        assert_eq!(delete_refusal("home.20261101T0100", &all, &p, now), None);
+        // the junk itself can go
+        assert_eq!(delete_refusal("home.20991231T0000", &all, &p, now), None);
+    }
+
+    #[test]
+    fn newest_and_age_follow_the_nas_clock() {
+        let now = ms("home.20261108T0300");
+        // named old but received an hour ago: newest by otime, and young
+        let all = vec![
+            at("home.20261108T0100", 0),
+            at("home.20261001T0100", (now / 1000) as i64 - (ms("home.20261001T0100") / 1000) as i64 - 3600),
+            at("home.20261101T0100", 0),
+        ];
+        let p = DeletePolicy { allowed: true, keep_last: 2, min_age_days: 0 };
+        assert!(delete_refusal("home.20261001T0100", &all, &p, now).is_some());
+        assert_eq!(delete_refusal("home.20261101T0100", &all, &p, now), None);
+        let p = DeletePolicy { allowed: true, keep_last: 0, min_age_days: 3 };
+        assert!(delete_refusal("home.20261001T0100", &all, &p, now).unwrap().contains("3 days"));
+        assert_eq!(delete_refusal("home.20261101T0100", &all, &p, now), None);
+    }
+
     #[test]
     fn delete_rules() {
         let all = vec![
-            snap("home.20261108T0100", true, true),
-            snap("home.20261107T0100", true, true),
-            snap("home.20261101T0100", true, true),
-            snap("root.20261101T0100", true, true),
+            at("home.20261108T0100", 0),
+            at("home.20261107T0100", 0),
+            at("home.20261101T0100", 0),
+            at("root.20261101T0100", 0),
             snap("home.20261108T0200", false, false),
         ];
         let now = ms("home.20261108T0300");
@@ -559,9 +640,14 @@ mod tests {
 
     #[test]
     fn texts() {
-        let s = sudoers("/usr/bin/btrfs");
-        assert!(s.contains("rynas-pcbackup ALL=(root) NOPASSWD: /usr/bin/btrfs receive *, /usr/bin/btrfs subvolume delete *"));
+        let s = sudoers("/usr/bin/btrfs", &["/volume1/backup/pc", "/v/b/x;id", "/volume2/l"]);
+        assert!(s.contains("rynas-pcbackup ALL=(root) NOPASSWD: /usr/bin/btrfs receive --chroot /volume1/backup/pc/, /usr/bin/btrfs receive --max-errors\\=0 --chroot /volume1/backup/pc/, /usr/bin/btrfs subvolume delete --commit-each /volume1/backup/pc/*,"));
+        assert!(s.contains("--chroot /volume2/l/"));
+        // an invalid folder never reaches the file; no bare `btrfs receive *`
+        assert!(!s.contains("x;id") && !s.contains("receive *") && !s.contains("delete *"));
         assert!(!s.contains("readlink") && s.contains("!use_pty"));
+        assert_eq!(s.matches("NOPASSWD").count(), 2);
+        assert!(!sudoers("/usr/bin/btrfs", &[]).contains("NOPASSWD"));
         let c = client_config("laptop", "nas.local", Some(2222), "/volume1/backup/laptop");
         assert!(c.contains("target ssh://nas.local:2222/volume1/backup/laptop"));
         assert!(c.contains("ssh_user          rynas-pcbackup"));

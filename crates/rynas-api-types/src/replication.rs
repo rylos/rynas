@@ -218,6 +218,11 @@ pub struct ReplicaStatus {
     pub hint: Option<ReplicaHint>,
     #[serde(default)]
     pub last_run: Option<TaskRun>,
+    /// Snapshots of the job newer than the latest replica: btrbk keeps them on the source
+    /// until this target has them, so they pile up while it cannot be reached (filled in by
+    /// the listing, not stored).
+    #[serde(default)]
+    pub held_snapshots: u32,
 }
 
 /// What a failure most likely needs (the UI shows the fix).

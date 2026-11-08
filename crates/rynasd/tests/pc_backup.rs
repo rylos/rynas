@@ -320,3 +320,60 @@ async fn browse_copy_out_usage_and_setup() {
     let codes: Vec<SetupProblemCode> = s.problems.iter().map(|p| p.code).collect();
     assert_eq!(codes, [SetupProblemCode::SshdAllowList, SetupProblemCode::SudoMissing]);
 }
+
+#[tokio::test]
+async fn adopt_refuses_homes_and_asks_before_changing_permissions() {
+    let e = env();
+    e.host.homes.lock().unwrap().push("/volume1/homes/marco".into());
+    for p in ["/volume1/homes/marco", "/volume1/homes", "/volume1/backup/pc"] {
+        e.host.folders.lock().unwrap().insert(p.into(), (true, vec![snap("home", 1)]));
+    }
+    // a user's home, or a folder holding homes: never adopted
+    for p in ["/volume1/homes/marco", "/volume1/homes"] {
+        let (s, b) = call(&e, "POST", "/v1/pc-backups/plan/adopt", Some(json!({"path": p}))).await;
+        assert_eq!((s, err(&b).field.as_deref()), (StatusCode::BAD_REQUEST, Some("path")), "{p}");
+        let (s, _) = call(&e, "POST", "/v1/pc-backups/targets", Some(json!({"device": "x", "path": p, "adopt": true}))).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{p}");
+    }
+    let (s, b) = call(&e, "POST", "/v1/pc-backups/plan/adopt", Some(json!({"path": "/var/backups/pc"}))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{}", String::from_utf8_lossy(&b));
+    // owned by marco 0755: the plan shows the change, the create needs the confirmation
+    e.host.meta.lock().unwrap().insert("/volume1/backup/pc".into(), (1000, 1000, 0o755));
+    let (s, b) = call(&e, "POST", "/v1/pc-backups/plan/adopt", Some(json!({"path": "/volume1/backup/pc"}))).await;
+    assert_eq!(s, StatusCode::OK);
+    let p: AdoptPreview = serde_json::from_slice(&b).unwrap();
+    let c = p.permission_change.expect("a change");
+    assert_eq!((c.uid, c.gid, c.mode, c.owner.as_deref()), (1000, 1000, 0o755, Some("marco")));
+    assert_eq!((c.new_owner.as_str(), c.new_group.as_str(), c.new_mode), ("root", "rynas-pcbackup", 0o750));
+    let body = json!({"device": "pc", "path": "/volume1/backup/pc", "adopt": true, "public_key": KEY});
+    let (s, b) = call(&e, "POST", "/v1/pc-backups/targets", Some(body.clone())).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert!(err(&b).message.contains("confirm"));
+    let t = task(&e, "POST", "/v1/pc-backups/targets?confirm_permission_change=true", Some(body)).await;
+    assert_eq!(t.status, TaskStatus::Ok, "{:?}", t.error);
+    // done: nothing left to change
+    let (_, b) = call(&e, "POST", "/v1/pc-backups/plan/adopt", Some(json!({"path": "/volume1/backup/pc"}))).await;
+    assert!(serde_json::from_slice::<AdoptPreview>(&b).unwrap().permission_change.is_none());
+}
+
+#[tokio::test]
+async fn sudoers_follow_the_devices_and_the_last_removal_cleans_up() {
+    let e = env();
+    task(&e, "POST", "/v1/pc-backups/targets", Some(json!({"device": "a", "path": "/volume1/backup/a", "public_key": KEY}))).await;
+    task(&e, "POST", "/v1/pc-backups/targets", Some(json!({"device": "b", "path": "/volume1/backup/b", "public_key": KEY}))).await;
+    let mut roots = e.host.sudo_roots.lock().unwrap().clone().unwrap();
+    roots.sort();
+    assert_eq!(roots, ["/volume1/backup/a", "/volume1/backup/b"]);
+    // an overlapping folder is refused before the task starts
+    let (s, _) = call(&e, "POST", "/v1/pc-backups/targets", Some(json!({"device": "c", "path": "/volume1/backup/a/sub"}))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    task(&e, "DELETE", "/v1/pc-backups/targets/a", None).await;
+    assert_eq!(e.host.sudo_roots.lock().unwrap().clone().unwrap(), ["/volume1/backup/b"]);
+    assert!(*e.host.account.lock().unwrap());
+    task(&e, "DELETE", "/v1/pc-backups/targets/b", None).await;
+    // the last one: account, sudoers and keys go; the folders go back to root
+    assert!(!*e.host.account.lock().unwrap());
+    assert!(e.host.sudo_roots.lock().unwrap().is_none());
+    assert!(keys(&e).is_empty());
+    assert_eq!(e.host.released.lock().unwrap().len(), 2);
+}

@@ -349,19 +349,24 @@ The first slice of phase 2: Linux PCs push btrbk snapshots to the NAS (`target s
 - **Our own filter in Rust**, chosen over shipping `ssh_filter_btrbk.sh`:
   - a tokenizer that takes only plain words, `'quoted'` words and `|`;
   - each stage is matched word by word and run **without a shell**, with absolute paths and a clean environment;
-  - `btrfs receive` always gets `--chroot`;
-  - paths are normalized (no `..`, no empty parts). Receive, `readlink` and `test` stay inside the device folder; `show` and `list` take any absolute path, as upstream;
+  - `btrfs receive` always gets `--chroot` and is accepted **only into the device folder itself** (btrbk always receives into the target folder). A destination below it is refused: `btrfs receive` resolves the path (`realpath()`) before it chroots, so `<root>/home.X/link`, where `link` is a symlink inside an earlier received snapshot, would write a root-owned subvolume anywhere on the volume (security review 2026-11-08);
+  - at run time, before any btrfs command, the binary walks the folder from `/` with `O_DIRECTORY|O_NOFOLLOW` (a symlink anywhere on the way is refused) and refuses a folder on or inside a received or read-only subvolume (`verify_root`);
+  - one receive at a time per device (`flock` on the folder); mbuffer's `-m` is clamped to 1 GiB or 25 %, `-s` to 16 MiB;
+  - paths are normalized (no `..`, no empty parts). Receive, `readlink`, `test`, `subvolume show|list` and `filesystem usage` stay inside the device folder;
+  - a delete always runs as `btrfs subvolume delete --commit-each` (the one form sudoers allows);
+  - a non-UTF-8 `SSH_ORIGINAL_COMMAND` is refused; logged commands have control characters escaped;
   - deletes only for btrbk snapshot names directly in the folder;
   - every ACCEPT/REJECT goes to syslog (`auth`);
   - logging in without a command prints "the key of D works". That is the connection test of the setup steps.
 
   Tests cover the btrbk command shapes and the injection cases: `|`, `;`, `&&`, `$()`, backquotes, `>`, double quotes, newline, `..`, sibling folders, `-o` options, `sudo` without `-n`.
-- **Root or non-root.** The filter runs as `rynas-pcbackup` and calls `sudo -n /usr/bin/btrfs` only for `receive`, `subvolume delete|show|list` and `filesystem usage`. Those five are in `/etc/sudoers.d/rynas-pcbackup`, checked with `visudo -c` before the rename (`!requiretty, !use_pty, env_reset`). `readlink`, `test` and `cat` run unprivileged.
-  - Why not root: a hole in the filter then gives five btrfs subcommands, not a root shell, and root logins stay as the administrator set them.
-  - Accepted limit: sudoers cannot restrict paths, so the folder check is the filter's job.
+- **Root or non-root.** The filter runs as `rynas-pcbackup` and calls `sudo -n /usr/bin/btrfs`. `/etc/sudoers.d/rynas-pcbackup` (checked with `visudo -c` before the rename; `!requiretty, !use_pty, env_reset`) has **one line per device folder with fixed leading arguments**, exactly the forms the filter produces: `btrfs receive [--max-errors=0] --chroot <root>/`, `btrfs subvolume delete --commit-each <root>/*`, `btrfs subvolume show <root>[/*]`, `btrfs subvolume list [*] <root>[/*]`, `btrfs filesystem usage [*] <root>`. It is rewritten on every create and remove; with no device left the account, its home (keys) and the sudoers file are removed, and a removed device's folder goes back to `root:root` (no stale gid a later group could inherit). `postrm` removes the sudoers file on remove and the account on purge. `readlink`, `test` and `cat` run unprivileged.
+  - Why not root: a hole in the filter then gives these btrfs forms on the PCs' folders, not a root shell, and root logins stay as the administrator set them.
+  - Accepted limit: a sudoers `*` still matches `..` or a second path, so the filter's normalization and snapshot-name checks remain required; the per-folder lines only keep a filter bug from being root-equivalent. A root-owned wrapper as the only sudo entry was considered: it would need the same parsing again, as root, for no narrower result.
 - **Folders.**
   - **New**: `btrfs subvolume create <path>`, `0750 root:rynas-pcbackup`. NAS users cannot read the PC's files, and the account can list names for the delete rules.
   - **Adopt**: an existing folder of received snapshots (for example copied from another NAS with `btrfs send/receive`, which keeps `received_uuid`). Only the folder's own owner and mode change; nothing inside is touched, so btrbk on the PC finds its parents and goes on incrementally.
+  - Adopting is refused for a shared folder (or one holding shares), a user's home (or one holding homes) and system folders (`/etc`, `/usr`, `/var`, `/home`, `/opt`, `/tmp`, …). When the folder is not already `root:rynas-pcbackup 0750`, the plan returns `permission_change` (current uid/gid/mode and names, the new ones) and the create call needs `?confirm_permission_change=true`. The change is made on a descriptor (`fchown`/`fchmod`, no symlink followed).
   - "Check the folder" first lists subvolumes, groups, interrupted receives and other entries, and suggests a device name.
   - "New" refuses a folder that exists. Folders of two devices cannot overlap.
 - **Status**, from ioctls on descriptors (`received_uuid`, `readonly`, `otime`), grouped by btrbk name:
@@ -375,15 +380,15 @@ The first slice of phase 2: Linux PCs push btrbk snapshots to the NAS (`target s
 - **Retention.**
   - btrbk's `target_preserve` on the PC deletes through the filter (`--delete`, on by default).
   - The NAS adds safety rules, enforced in the filter on a fresh listing:
-    - **keep the newest N** complete snapshots of each subvolume (default 1, so the parent of the next incremental always stays);
-    - **never delete before M days**;
+    - **keep the newest N** complete snapshots of each subvolume (default 1, so the parent of the next incremental always stays), newest by the NAS-side creation time (`otime`), not by the name the PC chose; snapshots named more than a day in the future never count among the N, so junk named `home.20991231T0000` cannot push the real ones out;
+    - **never delete before M days**, counted from the NAS-side `otime` (the name only when it cannot be read);
     - or **no deletes at all**.
   - Interrupted receives can always be deleted (btrbk deletes them before sending again).
   - A refused delete is an error in btrbk's log on the PC, so the rules should sit below the PC's `target_preserve_min`.
-  - This is basic ransomware protection: a stolen PC key cannot delete what the rules keep. It can still add snapshots and fill the volume, so quotas or a dedicated volume are the answer to that.
+  - This is basic ransomware protection: a stolen PC key cannot delete what the rules keep. It can still add snapshots and fill the volume (one receive at a time, but no size limit), so a dedicated volume, or a btrfs qgroup limit on the device folder when qgroups are on (`btrfs qgroup limit <size> <root>`, set by the administrator; rynas does not enable qgroups), is the answer to that.
 - **Browse and copy out**:
   - read-only listing inside a received snapshot, as root (descriptor walk, symlinks shown never followed);
-  - **Copy to the NAS** copies a file or folder into an existing NAS folder: reflink when possible, owner/mode/xattrs kept, never overwrites (the snapshot restore code);
+  - **Copy to the NAS** copies a file or folder into an existing NAS folder: reflink when possible, never overwrites (the snapshot restore code, `restore_foreign`). The PC's uids mean nothing on the NAS (and a setuid-root file or a file capability would mean too much), so the copy belongs to the destination folder's owner and group, loses the set-uid/set-gid bits and the `security.*`, `trusted.*` and POSIX ACL attributes; mode bits, `user.*` attributes and times are kept;
   - the file manager is not used because the folders are `0750` and the worker runs as the signed-in user.
 - **Remove**: the key line goes; the folder and its snapshots stay (the dialog says so). Adopting the folder again later picks the chain back up.
 - **Dry system and tests**: `MemoryReceive` (memory folders, keys, account) with `/volume1/backup/old-laptop` to adopt. No test touches a disk, sshd or the system's accounts.
@@ -391,7 +396,8 @@ The first slice of phase 2: Linux PCs push btrbk snapshots to the NAS (`target s
 ### 10.3 Trade-offs and limits
 
 - **Same-filesystem clones** (btrfs-receive BUGS): a malicious stream from a PC could reference extents of other files on the volume. The filter never lets a PC read anything back (no `send`, no `cat` of files), which limits this to the snapshot's own content seen by NAS administrators. A dedicated volume for PC backups removes it.
-- The account is shared, so a hole in the filter would reach every device folder through sudo. Per-device accounts would need one sudoers line per account; the folder check would stay the same.
+- The account is shared, so a hole in the filter would reach every device folder through sudo (but only those folders, with the fixed forms above). Per-device accounts would make the sudoers lines per account; the folder check would stay the same.
+- **Real-btrbk test** (manual until automated): in a throwaway privileged container (`container=docker`, getty masked) with a loop-mounted btrfs image, install the .deb, add a device through the API, and from a second container with btrbk 0.32 push `btrbk run` to `ssh://nas/<root>`; check the ACCEPT lines in the auth log, then try by hand `ssh rynas-pcbackup@nas "btrfs receive '<root>/home.X/link'"` (REJECT), a future-named snapshot (`btrfs subvolume snapshot -r` named 2099, delete of a real one refused) and `sudo -l -U rynas-pcbackup` (only the per-folder lines). Outline: `packaging/test-pcbackup.sh`.
 - Pull mode (btrbk on the NAS, `--source` on the PC through `rynas-agent`) and the console of §3.7 (next incremental parent, chain-safe NAS-side deletion with the PC's UUID list as in btrbk-nas) are the next steps.
 - Space per device through qgroups is not done: `du` on demand only.
 

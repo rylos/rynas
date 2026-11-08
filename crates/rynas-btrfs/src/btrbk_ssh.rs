@@ -68,6 +68,16 @@ pub fn ensure_keypair(private: &Path, comment: &str) -> Result<String, String> {
             .mode(0o700)
             .create(dir)
             .map_err(|e| format!("{}: {e}", dir.display()))?;
+        // an existing folder too: 0700, and a real folder (not a symlink)
+        let m = std::fs::symlink_metadata(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        if !m.is_dir() {
+            return Err(format!("{} is not a folder", dir.display()));
+        }
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    if std::fs::symlink_metadata(private).is_ok_and(|m| !m.is_file()) {
+        return Err(format!("{} is not a plain file", private.display()));
     }
     if !private.exists() {
         keygen_cmd(private, comment)
@@ -173,6 +183,26 @@ fn valid_base64(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keypair_permissions_are_enforced() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path().join("ssh");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let key = dir.join("id");
+        std::fs::write(&key, "private").unwrap();
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::write(dir.join("id.pub"), "ssh-ed25519 AAAA c\n").unwrap();
+        assert_eq!(ensure_keypair(&key, "c").unwrap(), "ssh-ed25519 AAAA c");
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!((mode(&dir), mode(&key)), (0o700, 0o600));
+        // a symlink in place of the key is refused
+        std::fs::remove_file(&key).unwrap();
+        std::os::unix::fs::symlink("/etc/hostname", &key).unwrap();
+        assert!(ensure_keypair(&key, "c").is_err());
+    }
 
     #[test]
     fn filter_and_authorized_keys() {

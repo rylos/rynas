@@ -131,6 +131,11 @@ fn view_of(
         })
         .flatten();
     let mut status = read_status(&p.state_dir, &job.name, &t.id);
+    status.held_snapshots = rep::held_snapshots(
+        &p.replicas.snapshot_names(&job.snapshot_dir),
+        &job.name,
+        status.latest.as_deref(),
+    );
     if let Some(task) = task {
         status.last_run = p.history.latest().ok().and_then(|l| l.get(&task.id).cloned());
     }
@@ -646,8 +651,21 @@ pub async fn transfer(
                 &key,
                 format!("Replication {label} failed"),
             );
-            ev.body = e.clone();
+            let held = rep::held_snapshots(
+                &p.replicas.snapshot_names(&job.snapshot_dir),
+                &job.name,
+                next.latest.as_deref(),
+            );
+            ev.body = if held > 1 {
+                format!(
+                    "{e}\n{held} snapshots of {} are kept on the source until this target has them: they use more and more space while it cannot be reached.",
+                    job.name
+                )
+            } else {
+                e.clone()
+            };
             let ev = event::field(event::field(event::field(ev, "job", &job.name), "target", &t.id), "name", &label);
+            let ev = event::field(ev, "held_snapshots", held);
             p.notifier.emit(event::code(event::field(ev, "hint", hint), "replication.failed"));
         }
     }

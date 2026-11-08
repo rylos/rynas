@@ -9,6 +9,8 @@ if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
     if [ -L "$hook" ] && [ "$(readlink "$hook")" = /usr/lib/rynas/modules/synology/ups-pre-safemode ]; then
         rm -f "$hook"
     fi
+    # PC backup: without the filter the account must not keep its sudo rights
+    rm -f /etc/sudoers.d/rynas-pcbackup /etc/sudoers.d/rynas-pcbackup.rynas-new
 fi
 
 if [ "$1" = "purge" ]; then
@@ -33,6 +35,19 @@ fi
 if [ "$1" = "purge" ]; then
     # TOTP secrets, recovery codes and any other state
     rm -rf /var/lib/rynas /run/rynas /var/lib/rynas-cert-drop
+    # PC backup account (its home holds only the keys file rynas wrote; the received
+    # snapshots stay where they are)
+    rm -rf /var/lib/rynas-pcbackup
+    if getent passwd rynas-pcbackup >/dev/null; then
+        if command -v deluser >/dev/null 2>&1; then
+            deluser --system --quiet rynas-pcbackup || true
+        else
+            userdel rynas-pcbackup || true
+        fi
+    fi
+    if getent group rynas-pcbackup >/dev/null && command -v delgroup >/dev/null 2>&1; then
+        delgroup --system --quiet rynas-pcbackup || true
+    fi
     if command -v deluser >/dev/null 2>&1; then
         if getent passwd rynas >/dev/null; then
             deluser --system --quiet rynas || true
