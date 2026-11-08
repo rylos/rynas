@@ -282,14 +282,15 @@ async fn apply(
     let Json(req) = body?;
     // refuse at once what the task would refuse, so the UI gets a plain error
     let (u, k) = (user.clone(), req.keys.clone());
-    let mut p = blocking(&ops, move |c| {
-        c.check_groups(&u, &k)?;
-        c.pending(&u)
+    let (keys, mut p) = blocking(&ops, move |c| {
+        let keys = c.group_keys(&u, &k)?;
+        Ok((keys, c.pending(&u)?))
     })
     .await?;
-    // a dialog's Save applies only the keys it staged (guidelines A19b)
-    if !req.keys.is_empty() {
-        p.changes.retain(|c| req.keys.contains(&c.key));
+    // a dialog's Save applies only the keys it staged (guidelines A19b), with the keys
+    // staged together with them
+    if !keys.is_empty() {
+        p.changes.retain(|c| keys.contains(&c.key));
     }
     if p.changes.is_empty() {
         return Err(ConfigError::NothingPending.into());

@@ -293,7 +293,7 @@ fn apply_keys_applies_only_the_selected_keys() {
 }
 
 #[test]
-fn keys_staged_together_are_never_split_by_a_partial_apply() {
+fn keys_staged_together_are_applied_together() {
     let e = env();
     let keys = |k: &[&str]| k.iter().map(|s| s.to_string()).collect::<Vec<_>>();
     let run = |k: &[String]| e.cfg.apply_keys("alice", "alice", "", k, &|_| {}, &|| false);
@@ -305,15 +305,34 @@ fn keys_staged_together_are_never_split_by_a_partial_apply() {
             .stage("alice", "test.app", Some(json!({"port": 8080, "name": "demo"})))
             .unwrap();
     };
-    // a plain group: only some of its keys is refused, all of them works
+    // a plain group: selecting one of its keys applies all of them
     both();
     e.cfg
         .stage_group("alice", &[HOSTNAME_KEY, "test.app"], false)
         .unwrap();
-    let split = || ConfigError::GroupSplit(keys(&[HOSTNAME_KEY, "test.app"]));
-    assert_eq!(run(&keys(&["test.app"])), Err(split()));
-    assert_eq!(e.cfg.pending("alice").unwrap().changes.len(), 2);
-    assert_eq!(e.cfg.check_groups("alice", &keys(&[HOSTNAME_KEY])), Err(split()));
+    assert_eq!(
+        e.cfg.group_keys("alice", &keys(&[HOSTNAME_KEY])).unwrap(),
+        keys(&[HOSTNAME_KEY, "test.app"])
+    );
+    assert_eq!(e.cfg.group_keys("alice", &[]).unwrap(), Vec::<String>::new());
+    assert_eq!(
+        e.cfg.group_keys("alice", &keys(&["other"])).unwrap(),
+        keys(&["other"]),
+        "a selection outside the group stays as it is"
+    );
+    run(&keys(&["test.app"])).unwrap();
+    assert!(e.cfg.pending("alice").unwrap().changes.is_empty());
+    assert_eq!(read(&e.root, "/etc/hostname"), "nas\n");
+    // the same with every key listed
+    e.cfg
+        .stage("alice", HOSTNAME_KEY, Some(hostname("nas2")))
+        .unwrap();
+    e.cfg
+        .stage("alice", "test.app", Some(json!({"port": 8081, "name": "demo"})))
+        .unwrap();
+    e.cfg
+        .stage_group("alice", &[HOSTNAME_KEY, "test.app"], false)
+        .unwrap();
     run(&keys(&[HOSTNAME_KEY, "test.app"])).unwrap();
     assert!(e.cfg.pending("alice").unwrap().changes.is_empty());
     // a review group (destructive): no partial apply at all, the full apply commits it
@@ -356,6 +375,24 @@ fn keys_staged_together_are_never_split_by_a_partial_apply() {
         .stage("alice", "test.app", Some(json!({"port": 1, "name": "x"})))
         .unwrap();
     assert!(run(&keys(&["test.app"])).is_ok());
+    // a key that joins through a plain group brings its review group's refusal with it
+    e.cfg
+        .stage("alice", HOSTNAME_KEY, Some(hostname("delta")))
+        .unwrap();
+    e.cfg
+        .stage("alice", "test.app", Some(json!({"port": 2, "name": "x"})))
+        .unwrap();
+    e.cfg.stage_group("alice", &[HOSTNAME_KEY], true).unwrap();
+    e.cfg
+        .stage_group("alice", &["test.app", HOSTNAME_KEY], false)
+        .unwrap();
+    assert_eq!(
+        run(&keys(&["test.app"])),
+        Err(ConfigError::GroupSplit(keys(&[HOSTNAME_KEY])))
+    );
+    assert_eq!(e.cfg.pending("alice").unwrap().changes.len(), 2);
+    apply(&e, "alice", "").unwrap();
+    assert_eq!(read(&e.root, "/etc/hostname"), "delta\n");
 }
 
 #[test]

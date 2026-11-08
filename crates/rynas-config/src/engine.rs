@@ -58,8 +58,9 @@ pub enum ConfigError {
     NothingPending,
     /// Keys whose applied value changed after they were staged.
     Conflict(Vec<String>),
-    /// A partial apply would split keys staged together ([`Config::stage_group`]): the
-    /// pending keys of the group.
+    /// A partial apply selects a key of a review group ([`Config::stage_group`] with
+    /// `review`: a destructive change such as a folder deletion), which only a full apply
+    /// commits: the pending keys of the group.
     GroupSplit(Vec<String>),
     NotFound(String),
     /// The apply failed and was rolled back.
@@ -81,7 +82,7 @@ impl std::fmt::Display for ConfigError {
             ),
             ConfigError::GroupSplit(keys) => write!(
                 f,
-                "{} were staged together and must be applied together: apply them from the pending changes",
+                "the pending change of {} includes a destructive step (such as deleting a folder) that is applied only with the whole changeset: review and apply it from the pending changes (apply without keys)",
                 keys.join(", ")
             ),
             ConfigError::NotFound(what) => write!(f, "{what} not found"),
@@ -437,10 +438,10 @@ impl Config {
 
     /// Records that `keys` of `owner`'s changeset were staged together by one operation and
     /// must be applied together: a partial apply ([`Config::apply_keys`] with keys) that
-    /// selects some of the group's pending keys but not all of them is refused with
-    /// [`ConfigError::GroupSplit`]. With `review` (a destructive change, e.g. a folder
-    /// deletion), only a full apply commits the group: any partial apply that selects one
-    /// of its keys is refused. Keys that are not pending now are left out (staging their
+    /// selects some of the group's pending keys applies all of them ([`Config::group_keys`]).
+    /// With `review` (a destructive change, e.g. a folder deletion), only a full apply
+    /// commits the group: any partial apply that selects one of its keys is refused with
+    /// [`ConfigError::GroupSplit`], so a dialog's Save never commits it on the side. Keys that are not pending now are left out (staging their
     /// base value dropped the change); the group is forgotten as its keys are applied,
     /// unstaged or discarded.
     pub fn stage_group(&self, owner: &str, keys: &[&str], review: bool) -> Result<()> {
@@ -470,11 +471,15 @@ impl Config {
         Ok(())
     }
 
-    /// Refuses a partial apply of `keys` (empty: the full changeset, always allowed) that
-    /// would split a group of [`Config::stage_group`].
-    pub fn check_groups(&self, owner: &str, keys: &[String]) -> Result<()> {
+    /// The keys a partial apply of `keys` really applies: every pending key of a plain group
+    /// of [`Config::stage_group`] that `keys` selects a key of is added (keys staged together
+    /// by one operation go together), until nothing more joins. A review group (a
+    /// destructive change) is never applied by a partial apply: selecting any of its keys is
+    /// [`ConfigError::GroupSplit`]. Empty `keys` (the full changeset, always allowed) stays
+    /// empty.
+    pub fn group_keys(&self, owner: &str, keys: &[String]) -> Result<Vec<String>> {
         if keys.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let db = self.db();
         let mut st = db.prepare(
@@ -493,13 +498,26 @@ impl Config {
             e.0.push(k);
             e.1 |= review;
         }
-        for (members, review) in groups.into_values() {
-            let selected = members.iter().filter(|k| keys.contains(k)).count();
-            if selected > 0 && (review || selected < members.len()) {
-                return Err(ConfigError::GroupSplit(members));
+        let mut out: Vec<String> = keys.to_vec();
+        loop {
+            let before = out.len();
+            for (members, review) in groups.values() {
+                if !members.iter().any(|k| out.contains(k)) {
+                    continue;
+                }
+                if *review {
+                    return Err(ConfigError::GroupSplit(members.clone()));
+                }
+                for k in members {
+                    if !out.contains(k) {
+                        out.push(k.clone());
+                    }
+                }
+            }
+            if out.len() == before {
+                return Ok(out);
             }
         }
-        Ok(())
     }
 
     /// Applies `owner`'s changeset: render → candidates → validate → backup + atomic
@@ -521,8 +539,10 @@ impl Config {
 
     /// [`Config::apply`] limited to `keys` of `owner`'s changeset (empty: all of it): the
     /// other staged keys stay pending, untouched. Keys that are not staged are ignored;
-    /// [`ConfigError::NothingPending`] when none of them is. Conflicts count only among the
-    /// selected keys. Same pipeline, rollback and revision as a full apply.
+    /// [`ConfigError::NothingPending`] when none of them is. The keys staged together with a
+    /// selected one join it, a destructive change is refused ([`Config::group_keys`]).
+    /// Conflicts count only among the selected keys. Same pipeline, rollback and revision as
+    /// a full apply.
     pub fn apply_keys(
         &self,
         owner: &str,
@@ -533,7 +553,7 @@ impl Config {
         cancelled: &dyn Fn() -> bool,
     ) -> Result<u64> {
         let _apply = self.apply_lock.lock().unwrap();
-        self.check_groups(owner, keys)?;
+        let keys = &self.group_keys(owner, keys)?;
         let mut pending = self.pending(owner)?;
         let selected = |k: &str| keys.is_empty() || keys.iter().any(|x| x == k);
         pending.changes.retain(|c| selected(&c.key));

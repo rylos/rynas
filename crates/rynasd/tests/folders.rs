@@ -286,6 +286,9 @@ async fn share_folders_from_snapshot_folder_to_deletion() {
     for k in [json!(["shares"]), json!(["snapshots", "scheduler"]), json!(["shares", "snapshots", "scheduler"])] {
         let (s, b) = call(&e, "POST", "/v1/config/apply", Some(json!({"comment": "", "keys": k}))).await;
         assert_eq!((s, code(&b).as_str()), (StatusCode::CONFLICT, error_codes::APPLY_GROUP_SPLIT));
+        // the message says what to do, even when the group has one pending key
+        let m = serde_json::from_slice::<serde_json::Value>(&b).unwrap()["message"].as_str().unwrap_or_default().to_string();
+        assert!(m.contains("destructive") && m.contains("apply without keys"), "{m}");
     }
     // a Save that does not touch it still works
     let (s, b) = call(&e, "POST", "/v1/groups", Some(json!({"name": "family"}))).await;

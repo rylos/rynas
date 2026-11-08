@@ -616,7 +616,9 @@ pub struct ApplyRequest {
     /// Apply only these keys of the changeset (the Save of a dialog applies what it has just
     /// staged, guidelines A19b); the other staged keys stay pending. Empty: the whole
     /// changeset. Keys that are not staged are ignored; none of them staged is
-    /// `409 nothing_pending`.
+    /// `409 nothing_pending`. Keys staged together with a listed one by one operation are
+    /// applied with it; a key of a destructive staging (a share deleted with its folder) is
+    /// `409 apply_group_split`: only the full apply commits it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keys: Vec<String>,
 }
