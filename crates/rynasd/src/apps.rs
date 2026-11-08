@@ -248,15 +248,18 @@ fn listening_ports(host: &Path) -> Vec<UsedPort> {
 /// `/<label>/...` below a mounted rynas volume (`mounted`: [`DockerSvc::volume_mounted`],
 /// the mount table on the real system).
 fn on_volume(mounted: &dyn Fn(&str) -> bool, p: &str) -> bool {
-    let Some(rest) = p.strip_prefix('/') else {
-        return false;
-    };
-    let label = rest.split('/').next().unwrap_or("");
-    rest.len() > label.len() + 1
-        && rynas_api_types::validate::volume_label(label)
+    volume_of(mounted, p).is_some()
+}
+
+/// The label of the mounted volume `p` is below ([`on_volume`]); the system volume's
+/// folder counts (D-ROOTVOL).
+fn volume_of(mounted: &dyn Fn(&str) -> bool, p: &str) -> Option<String> {
+    let (label, rest) = rynas_api_types::storage::split_volume_path(p)?;
+    (!rest.is_empty()
         && !rest.split('/').any(|s| s.is_empty() || s == ".." || s == ".")
         && !p.contains(['\n', '\0', '\'', ':'])
-        && mounted(label)
+        && mounted(&label))
+    .then_some(label)
 }
 
 /// The folders an install (or an update) made, kept by rynasd in its own state
@@ -331,7 +334,8 @@ fn uninstall_targets(
 ) -> (Vec<String>, Vec<String>, Vec<(String, &'static str)>) {
     let check = |p: &str| -> Result<(), &'static str> {
         let top = p.trim_start_matches('/').split('/').next().unwrap_or("");
-        if SYSTEM_TOPS.contains(&top) {
+        // the system volume's folder is below /srv but is a volume (D-ROOTVOL)
+        if SYSTEM_TOPS.contains(&top) && !crate::places::in_system_dir(p) {
             return Err("a system folder");
         }
         if !on_volume(mounted, p) {
@@ -985,7 +989,7 @@ impl AppsSvc {
                         .docker
                         .settings()
                         .apps_ssd_volume
-                        .filter(|v| *v != l.volume.trim_start_matches('/'));
+                        .filter(|v| rynas_api_types::storage::volume_dir(v) != l.volume);
                     plan.folders = r
                         .folders
                         .iter()
@@ -1040,7 +1044,10 @@ impl AppsSvc {
                     && f.ssd != rynas_apps::manifest::Ssd::No
                     && !req.folders.contains_key(&f.env) =>
             {
-                Some(format!("/{v}/docker/appdata/{stack}/{rel}"))
+                Some(format!(
+                    "{}/docker/appdata/{stack}/{rel}",
+                    rynas_api_types::storage::volume_dir(v)
+                ))
             }
             _ => None,
         };
@@ -1256,16 +1263,16 @@ fn make_folders(
         if p.exists() {
             continue;
         }
-        if !on_volume(&|l| s.volume_mounted(l), &f.host_path) {
+        let Some(label) = volume_of(&|l| s.volume_mounted(l), &f.host_path) else {
             return Err(format!(
                 "{} is not below a mounted volume",
                 f.host_path
             ));
-        }
-        let label = f.host_path.trim_start_matches('/').split('/').next().unwrap_or("");
+        };
+        let base = s.ready_volume(&label, log)?;
         let owner = (!s.dry).then_some(f.owner);
         let mut made =
-            rynas_docker::stacks::create_below(&s.root, &format!("/{label}"), &f.host_path, 0o750, owner)?;
+            rynas_docker::stacks::create_below(&s.root, &base, &f.host_path, 0o750, owner)?;
         if made.last() == Some(&f.host_path) {
             made.pop();
             out.folders.push(f.host_path.clone());
@@ -2192,6 +2199,12 @@ mod tests {
         assert!(!on_volume(&m, "relative/x"));
         // `lib` would pass a plain is_dir test; it is reserved and never mounted
         assert!(!on_volume(&|_| true, "/lib/x"));
+        // the system volume's folder is a volume (D-ROOTVOL); /srv itself is not
+        let sys = |l: &str| l == "system";
+        assert!(on_volume(&sys, "/srv/rynas/system/media"));
+        assert!(!on_volume(&sys, "/srv/rynas/system"));
+        assert!(!on_volume(&|_| true, "/srv/x"));
+        assert!(!on_volume(&sys, "/srv/rynas/systemx/a"));
     }
 
     /// Review 2026-11-07, H2: uninstall deletes only the folders rynasd recorded as made,

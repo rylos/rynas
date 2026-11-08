@@ -57,6 +57,7 @@ pub fn routes() -> Router<AppState> {
         .route("/storage/arrays", get(forward))
         .route("/storage/filesystems", get(forward))
         .route("/storage/tree", get(forward))
+        .route("/storage/places", get(forward))
         .route("/storage/plan/volume", post(forward))
         .route("/storage/plan/grow", post(forward))
         .route("/storage/plan/replace", post(forward))

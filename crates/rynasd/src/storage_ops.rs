@@ -1411,8 +1411,9 @@ pub fn volumes_in(mountinfo: &str) -> Vec<(String, String)> {
 }
 
 impl rynas_services::SubvolumeCreator for HostSubvolumes {
+    /// The places: the rynas volumes and the system volume (D-ROOTVOL).
     fn volumes(&self) -> Vec<(String, String)> {
-        volumes_in(&std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default())
+        crate::places::host_places()
     }
 
     fn asleep(&self, mount: &str) -> bool {
@@ -1420,7 +1421,14 @@ impl rynas_services::SubvolumeCreator for HostSubvolumes {
     }
 
     fn volume_path(&self, volume: &str) -> Result<String, String> {
-
+        // the system volume: its folder, made by `create` (D-ROOTVOL)
+        if volume == rynas_api_types::storage::SYSTEM_VOLUME {
+            return if crate::places::root_is_disk(&crate::places::mountinfo()) {
+                Ok(rynas_api_types::storage::SYSTEM_VOLUME_DIR.into())
+            } else {
+                Err("the root filesystem is not a disk: it cannot hold the system volume".into())
+            };
+        }
         if !plan::valid_label(volume) {
             return Err(format!("invalid volume name {volume:?}"));
         }
@@ -1439,6 +1447,20 @@ impl rynas_services::SubvolumeCreator for HostSubvolumes {
     }
 
     fn create(&self, path: &str, compression: bool, nocow: bool, log: &dyn Fn(&str)) -> Result<(), String> {
+        // in the system volume: its folder first; a plain folder when the root is no btrfs
+        if crate::places::in_system_dir(path) && !self.dry {
+            let dir = crate::places::ensure_system_dir(Path::new("/"), true, log)?;
+            let btrfs = rynas_btrfs::ioctl::open_dir(&dir)
+                .is_ok_and(|f| rynas_btrfs::ioctl::is_btrfs(&f));
+            if !btrfs {
+                use std::os::unix::fs::DirBuilderExt;
+                log(&format!("mkdir {path}"));
+                return std::fs::DirBuilder::new()
+                    .mode(0o755)
+                    .create(path)
+                    .map_err(|e| format!("mkdir {path}: {e}"));
+            }
+        }
         let settings = SubvolumeSettings {
             compression,
             readonly: false,

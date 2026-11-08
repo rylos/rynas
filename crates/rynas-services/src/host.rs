@@ -124,13 +124,14 @@ pub fn is_snapshot_name(name: &str, prefix: &str) -> bool {
 /// Creates the btrfs subvolume of a share that asks for one, during the apply of `shares`
 /// (a task). Implemented by rynasd with the storage write side.
 pub trait SubvolumeCreator: Send + Sync {
-    /// Mount point of a mounted rynas volume (by label).
+    /// Mount point of a mounted rynas volume (by label), or the folder of the system volume
+    /// (D-ROOTVOL).
     fn volume_path(&self, volume: &str) -> Result<String, String>;
     /// Creates `path` (directly below a volume's mount point) as a subvolume; with
     /// `compression` false its `compression` property is set to "none"; with `nocow` the
     /// empty subvolume gets the no copy-on-write attribute (compression then does not apply).
     fn create(&self, path: &str, compression: bool, nocow: bool, log: &dyn Fn(&str)) -> Result<(), String>;
-    /// The mounted rynas volumes: (label, mount point).
+    /// The mounted rynas volumes and the system volume: (label, folder).
     fn volumes(&self) -> Vec<(String, String)> {
         Vec::new()
     }

@@ -72,7 +72,8 @@ pub enum DockerWarning {
     DaemonDown,
     /// No `docker compose` plugin: stacks cannot be started.
     ComposeMissing,
-    /// The data-root is on the system disk, not on a rynas volume.
+    /// The data-root is outside every volume (Docker's default folder in the operating
+    /// system's tree), not on a rynas volume nor in the system volume's folder.
     DataRootOnSystem,
     /// The data-root filesystem is almost full (the threshold of the settings).
     DataRootAlmostFull,
@@ -289,13 +290,8 @@ impl Default for DockerSettings {
     }
 }
 
-/// A rynas volume the engine and the stacks can go on.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct VolumeChoice {
-    pub label: String,
-    pub path: String,
-    pub avail_bytes: Option<u64>,
-}
+/// A volume the engine and the stacks can go on (a rynas volume or the system volume).
+pub type VolumeChoice = crate::storage::VolumePlace;
 
 /// `GET/PUT /api/v1/docker/settings`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

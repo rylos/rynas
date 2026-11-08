@@ -95,7 +95,7 @@ fn settings_of(v: &Value) -> Result<DockerSettings, Invalid> {
 /// Checks a settings document.
 pub fn normalize(s: DockerSettings) -> Result<DockerSettings, Invalid> {
     if let Some(v) = &s.volume
-        && !rynas_api_types::validate::volume_label(v)
+        && !rynas_api_types::validate::place_label(v)
     {
         return Err(Invalid::at("volume", "not a valid volume label"));
     }
@@ -117,17 +117,18 @@ pub fn normalize(s: DockerSettings) -> Result<DockerSettings, Invalid> {
     range("crash_restarts", s.crash_restarts, 2, 100)?;
     range("crash_window_min", s.crash_window_min, 1, 120)?;
     if let Some(v) = &s.apps_ssd_volume
-        && !rynas_api_types::validate::volume_label(v)
+        && !rynas_api_types::validate::place_label(v)
     {
         return Err(Invalid::at("apps_ssd_volume", "not a valid volume label"));
     }
     Ok(s)
 }
 
-/// The volume label of an engine folder `/<label>/docker/engine`.
+/// The volume label of an engine folder `/<label>/docker/engine` (or the system volume's,
+/// `<system folder>/docker/engine`).
 fn label_of_data_root(p: &str) -> Option<String> {
-    let rest = p.strip_prefix('/')?.strip_suffix("/docker/engine")?;
-    rynas_api_types::validate::volume_label(rest).then(|| rest.to_string())
+    let (label, rest) = rynas_api_types::storage::split_volume_path(p)?;
+    (rest == "docker/engine").then_some(label)
 }
 
 /// Running containers according to `docker ps -q` (0 when the engine does not answer).
@@ -197,14 +198,8 @@ impl Applier for DockerDomain {
                 subvolumes: !self.dry,
                 owner: None,
             };
-            let mounted = if ctx.root == Path::new("/") {
-                rynas_volumes().iter().any(|(l, _)| l == label)
-            } else {
-                fs.real(&l.volume).is_dir()
-            };
-            if !mounted {
-                return Err(format!("volume {label} is not mounted"));
-            }
+            // a rynas volume must be mounted; the system volume's folder is made (D-ROOTVOL)
+            crate::places::ready_dir(label, ctx.root, !self.dry, ctx.log)?;
             for p in l.subvolumes() {
                 fs.make_subvolume(&p, ctx.log)?;
             }
@@ -826,10 +821,10 @@ fn fs_usage(path: &str) -> Option<FsUsage> {
     })
 }
 
+/// The places of the running system: the mounted rynas volumes and the system volume
+/// (D-ROOTVOL).
 fn rynas_volumes() -> Vec<(String, String)> {
-    crate::storage_ops::volumes_in(
-        &std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default(),
-    )
+    crate::places::host_places()
 }
 
 /// Mount points of the system (`/proc/self/mountinfo`).
@@ -847,14 +842,22 @@ impl DockerSvc {
     /// unmounted volume's empty folder, or `/lib`, never counts); below a dry or test root,
     /// an existing folder there.
     pub(crate) fn volume_mounted(&self, label: &str) -> bool {
-        if !rynas_api_types::validate::volume_label(label) {
+        if !rynas_api_types::validate::place_label(label) {
             return false;
         }
         if self.root == Path::new("/") {
             rynas_volumes().iter().any(|(l, _)| l == label)
         } else {
-            rynas_docker::under(&self.root, &format!("/{label}")).is_dir()
+            // the system volume is always there (its folder is made on first use)
+            label == rynas_api_types::storage::SYSTEM_VOLUME
+                || rynas_docker::under(&self.root, &format!("/{label}")).is_dir()
         }
+    }
+
+    /// The folder of a place, made when it is the system volume (D-ROOTVOL); an error when
+    /// `label` is no mounted volume.
+    pub(crate) fn ready_volume(&self, label: &str, log: &dyn Fn(&str)) -> Result<String, String> {
+        crate::places::ready_dir(label, &self.root, !self.dry, log)
     }
 
     /// The mount points at or below which nothing may be deleted recursively (the real
@@ -970,14 +973,7 @@ impl DockerSvc {
     fn settings_state(&self, owner: &str) -> Res<DockerSettingsState> {
         let (eff, cur, _): (DockerSettings, DockerSettings, Option<DockerSettings>) =
             docs(&self.ops.config, owner, DOCKER_KEY)?;
-        let volumes = rynas_volumes()
-            .into_iter()
-            .map(|(label, path)| VolumeChoice {
-                avail_bytes: rynas_storage::overview::statvfs(&path).map(|s| s.avail),
-                label,
-                path,
-            })
-            .collect();
+        let volumes: Vec<VolumeChoice> = crate::places::host_described();
         Ok(DockerSettingsState {
             stacks_dir: cur.volume.as_deref().map(|v| Layout::of_label(v).stacks()),
             pending: (eff != cur).then_some(eff),
@@ -1102,7 +1098,7 @@ pub(crate) fn optional_body<T: serde::de::DeserializeOwned + Default>(
 }
 
 pub(crate) fn check_volume(label: &str) -> Res<()> {
-    if !rynas_api_types::validate::volume_label(label) {
+    if !rynas_api_types::validate::place_label(label) {
         return Err(Error::invalid("volume", "not a valid volume label"));
     }
     Ok(())
@@ -1439,8 +1435,8 @@ pub async fn migrate_task(
         l.engine(),
         l.containerd()
     ));
-    if !s.volume_mounted(volume) {
-        return Err(format!("volume {volume} is not mounted: nothing was changed"));
+    if let Err(e) = s.ready_volume(volume, &|m| ctx.log(m)) {
+        return Err(format!("{e}: nothing was changed"));
     }
     if let Ok(e) = s.engine_opt().await
         && e.info()
@@ -1926,6 +1922,10 @@ impl DockerSvc {
         match volume {
             Some(v) => {
                 check_volume(v)?;
+                if v == rynas_api_types::storage::SYSTEM_VOLUME {
+                    self.ready_volume(v, &|m| tracing::info!("{m}"))
+                        .map_err(|e| Error::invalid("volume", e))?;
+                }
                 Ok(Layout::of_label(v))
             }
             None => self.layout().ok_or_else(|| {

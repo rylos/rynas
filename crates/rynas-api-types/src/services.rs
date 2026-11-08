@@ -590,7 +590,8 @@ pub struct ShareNfs {
 /// Where a share's subvolume is created ([`Share::subvolume`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShareSubvolume {
-    /// Label of a rynas volume, e.g. "vol1" (mounted at `/vol1`).
+    /// Label of a rynas volume, e.g. "vol1" (mounted at `/vol1`), or the system volume
+    /// (`system`, its folder `/srv/rynas/system`: D-ROOTVOL).
     pub volume: String,
     /// false: `compression` property "none" (share profiles for video, photos, backups).
     #[serde(default = "share_yes")]

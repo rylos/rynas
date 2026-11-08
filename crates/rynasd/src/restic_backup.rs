@@ -925,9 +925,16 @@ fn mount_point_of(path: &str, mountinfo: &str) -> String {
         .unwrap_or_else(|| "/".into())
 }
 
-/// A local destination must be on a mounted disk or volume, never on the system disk
-/// (an unplugged USB disk leaves an empty folder there): review M6.
+/// Logged by each run of a job whose local destination is in the system volume.
+const SAME_DISK_WARNING: &str = "the destination is on the system disk: the snapshots protect against deleted or encrypted files, not against a failure of that disk; keep another copy elsewhere";
+
+/// A local destination must be on a mounted disk or volume, never elsewhere on the system
+/// disk (an unplugged USB disk leaves an empty folder there): review M6. The system volume's
+/// folder is a volume chosen on purpose (D-ROOTVOL): allowed, with [`SAME_DISK_WARNING`].
 fn check_local_destination(path: &str, mountinfo: &str) -> Result<(), String> {
+    if crate::places::in_system_dir(path) && crate::places::root_is_disk(mountinfo) {
+        return Ok(());
+    }
     if mount_point_of(path, mountinfo) == "/" {
         return Err(format!(
             "{path} is on the system disk: is the backup disk mounted? (a local destination must be on a mounted disk or volume)"
@@ -1337,6 +1344,12 @@ async fn run_job(
         // never onto the system disk when the USB disk is not plugged in (review M6); the
         // folder must exist for the worker's sandbox to make it writable
         check_local_destination(path, &mountinfo())?;
+        if crate::places::in_system_dir(path) {
+            crate::places::ensure_system_dir(FsPath::new("/"), true, &|m| ctx.log(m))?;
+            let w = SAME_DISK_WARNING.to_string();
+            ctx.log(&format!("warning: {w}"));
+            warnings.push(w);
+        }
         std::fs::create_dir_all(path).map_err(|e| format!("{path}: {e}"))?;
     }
     if let Destination::Sftp { .. } = &job.destination
@@ -1956,11 +1969,11 @@ struct RestoreQuery {
     confirm: bool,
 }
 
-/// The folders a restore may write below: the rynas volumes (`/<label>`, btrfs top levels)
-/// and the disks mounted below `/media` (as the file manager and the other copy-out
-/// features); never the system disk.
+/// The folders a restore may write below: the rynas volumes (`/<label>`, btrfs top levels),
+/// the system volume's folder (D-ROOTVOL) and the disks mounted below `/media` (as the file
+/// manager and the other copy-out features); never the rest of the system disk.
 fn restore_roots(mountinfo: &str) -> Vec<String> {
-    let mut v: Vec<String> = crate::storage_ops::volumes_in(mountinfo)
+    let mut v: Vec<String> = crate::places::places_in(mountinfo)
         .into_iter()
         .map(|(_, mp)| mp)
         .collect();
@@ -2586,7 +2599,15 @@ mod tests {
         assert_eq!(mount_point_of("/media/usb2/backup", mi), "/");
         assert!(check_local_destination("/media/usb1/b", mi).is_ok());
         assert!(check_local_destination("/media/usb2/b", mi).unwrap_err().contains("system disk"));
-        assert_eq!(restore_roots(mi), vec!["/media/usb1".to_string(), "/volume1".to_string()]);
+        // the system volume's folder is a destination chosen on purpose (D-ROOTVOL); the
+        // folder itself and the rest of the system disk are not
+        assert!(check_local_destination("/srv/rynas/system/backup", mi).is_ok());
+        assert!(check_local_destination("/srv/rynas/system", mi).is_err());
+        assert!(check_local_destination("/srv/backup", mi).is_err());
+        assert_eq!(
+            restore_roots(mi),
+            vec!["/media/usb1".to_string(), "/srv/rynas/system".into(), "/volume1".into()]
+        );
         // anchored excludes follow the snapshot path
         let ex = vec!["*.tmp".to_string(), "/volume1/docs/cache".into(), "/volume1/docsx/a".into()];
         assert_eq!(

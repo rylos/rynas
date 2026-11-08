@@ -138,6 +138,10 @@ fn btrfs_mounts(mountinfo: &str) -> Vec<String> {
         .collect();
     v.sort();
     v.dedup();
+    // a btrfs root: the system volume's folder too, last (D-ROOTVOL)
+    if crate::places::root_fstype(mountinfo).as_deref() == Some("btrfs") {
+        v.push(rynas_api_types::storage::SYSTEM_VOLUME_DIR.into());
+    }
     v
 }
 
@@ -279,6 +283,10 @@ impl ReceiveHost for HostReceive {
     }
 
     fn create_folder(&self, path: &Path) -> Result<(), String> {
+        // in the system volume: its own subvolume first (D-ROOTVOL)
+        if crate::places::in_system_dir(&path.to_string_lossy()) {
+            crate::places::ensure_system_dir(Path::new("/"), true, &|_| {})?;
+        }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
@@ -1371,7 +1379,9 @@ mod tests {
 32 29 0:26 /@home /home rw - btrfs /dev/sda2 rw\n\
 33 29 0:29 / /srv/data rw - btrfs /dev/md3 rw\n\
 34 29 0:30 / /mnt/usb\\040disk rw - btrfs /dev/sdc1 rw\n";
-        assert_eq!(btrfs_mounts(mi), ["/srv/data", "/volume1"]);
+        // the btrfs root offers the system volume's folder (D-ROOTVOL)
+        assert_eq!(btrfs_mounts(mi), ["/srv/data", "/volume1", "/srv/rynas/system"]);
+        assert_eq!(btrfs_mounts("1 0 0:1 / / rw - ext4 /dev/sda2 rw\n"), Vec::<String>::new());
     }
 
     #[test]

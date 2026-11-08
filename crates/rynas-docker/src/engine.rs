@@ -47,9 +47,10 @@ impl Layout {
         Self { volume }
     }
 
-    /// The layout of a volume label (`vol1` → `/vol1`), the rynas convention.
+    /// The layout of a volume label (`vol1` → `/vol1`, the rynas convention; the system
+    /// volume → its folder, D-ROOTVOL).
     pub fn of_label(label: &str) -> Self {
-        Self::new(format!("/{label}"))
+        Self::new(rynas_api_types::storage::volume_dir(label))
     }
 
     pub fn docker(&self) -> String {

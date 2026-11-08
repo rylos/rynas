@@ -10,6 +10,7 @@
 //! | GET | `/api/v1/storage/arrays` | | `Vec<MdArray>` |
 //! | GET | `/api/v1/storage/filesystems` | | `Vec<BtrfsFilesystem>` |
 //! | GET | `/api/v1/storage/tree` | | [`StorageTree`] |
+//! | GET | `/api/v1/storage/places` | | `Vec<VolumePlace>` (rynas volumes + the system volume) |
 //! | POST | `/api/v1/storage/plan/volume` | [`VolumePlanRequest`] | [`StoragePlan`] |
 //! | POST | `/api/v1/storage/plan/grow` | [`GrowPlanRequest`] | [`StoragePlan`] |
 //! | POST | `/api/v1/storage/plan/replace` | [`ReplacePlanRequest`] | [`StoragePlan`] |
@@ -615,6 +616,79 @@ pub struct StorageTree {
     pub locked: Vec<TreeNode>,
     /// Whole disks with nothing on them.
     pub unused_disks: Vec<String>,
+}
+
+// ------------------------------------------------------------------ places (D-ROOTVOL)
+
+/// Label of the system volume: the root filesystem offered as a volume wherever a volume can
+/// be chosen (D-ROOTVOL). A reserved label ([`crate::validate::RESERVED_LABELS`]), so no
+/// rynas volume can take it.
+pub const SYSTEM_VOLUME: &str = "system";
+/// The folder of the system volume: what rynas puts on it (shares, Docker, apps, backups)
+/// lives here, never in `/` itself. On a btrfs root it is a subvolume of its own, so the
+/// system restore points neither copy nor roll back the data in it.
+pub const SYSTEM_VOLUME_DIR: &str = "/srv/rynas/system";
+/// A place with less free space than this, or than [`LOW_SPACE_PCT`] of its size, is
+/// [`VolumePlace::low_space`].
+pub const LOW_SPACE_BYTES: u64 = 10 << 30;
+/// See [`LOW_SPACE_BYTES`].
+pub const LOW_SPACE_PCT: u64 = 10;
+
+/// The folder of a volume label: `/<label>` for a rynas volume (its mount point),
+/// [`SYSTEM_VOLUME_DIR`] for the system volume.
+pub fn volume_dir(label: &str) -> String {
+    if label == SYSTEM_VOLUME {
+        SYSTEM_VOLUME_DIR.to_string()
+    } else {
+        format!("/{label}")
+    }
+}
+
+/// The volume label of a path inside a volume folder, and the rest (no leading `/`, may be
+/// empty): `/vol1/a/b` → `("vol1", "a/b")`, `/srv/rynas/system/a` → `("system", "a")`. The
+/// label is only well formed ([`crate::validate::place_label`]), not checked as mounted.
+pub fn split_volume_path(p: &str) -> Option<(String, &str)> {
+    if let Some(rest) = p.strip_prefix(SYSTEM_VOLUME_DIR)
+        && (rest.is_empty() || rest.starts_with('/'))
+    {
+        return Some((SYSTEM_VOLUME.into(), rest.trim_start_matches('/')));
+    }
+    let rest = p.strip_prefix('/')?;
+    let (label, tail) = rest.split_once('/').unwrap_or((rest, ""));
+    crate::validate::volume_label(label).then(|| (label.to_string(), tail))
+}
+
+/// Little free space left: below [`LOW_SPACE_BYTES`] or [`LOW_SPACE_PCT`] % of the size.
+pub fn low_space(size: u64, avail: u64) -> bool {
+    size > 0 && (avail < LOW_SPACE_BYTES || avail.saturating_mul(100) < size.saturating_mul(LOW_SPACE_PCT))
+}
+
+/// A volume something can be put on (`GET /api/v1/storage/places`, and the volume lists of
+/// the Docker settings): every mounted rynas volume, then the system volume.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct VolumePlace {
+    /// Volume label ([`SYSTEM_VOLUME`] for the root filesystem).
+    pub label: String,
+    /// Its folder ([`volume_dir`]).
+    pub path: String,
+    pub avail_bytes: Option<u64>,
+    /// The root filesystem, the disk of the operating system.
+    #[serde(default)]
+    pub system: bool,
+    /// `btrfs`, `ext4`, `xfs`...: subvolumes, snapshots, replication and NOCOW need btrfs.
+    #[serde(default)]
+    pub fs_type: String,
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
+    /// See [`low_space`].
+    #[serde(default)]
+    pub low_space: bool,
+}
+
+impl VolumePlace {
+    pub fn btrfs(&self) -> bool {
+        self.fs_type == "btrfs"
+    }
 }
 
 // ------------------------------------------------------------------ planning

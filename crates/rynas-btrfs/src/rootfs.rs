@@ -171,6 +171,9 @@ pub struct RootRollback {
     /// Move the restore points into the new root (the directory is inside the root
     /// subvolume, not a separate subvolume or mount).
     pub move_points: bool,
+    /// Subvolumes inside the root subvolume that hold data, not system (relative to
+    /// `root`, e.g. `srv/rynas/system`): moved into the new root after the restore points.
+    pub carry: Vec<PathBuf>,
     /// Mount directory (`/run/rynas/rollback`).
     pub run_dir: PathBuf,
     pub now_s: i64,
@@ -344,7 +347,30 @@ fn in_top(
             moved.len()
         ));
     }
+    // the data subvolumes inside the root (the system volume's folder, D-ROOTVOL): a
+    // snapshot shows them as empty folders, so they move into the new root as they are
+    let mut carried: Vec<&PathBuf> = Vec::new();
+    for c in &r.carry {
+        let (from, to) = (old_root.join(c), top.join(&fresh).join(c));
+        if let Err(e) = ops.move_subvolume(&from, &to) {
+            for d in carried.iter().rev() {
+                let _ = ops.move_subvolume(&top.join(&fresh).join(d), &old_root.join(d));
+            }
+            for m in moved.iter().rev() {
+                let _ = ops.move_subvolume(
+                    &top.join(&fresh).join(rel).join(m),
+                    &old_root.join(rel).join(m),
+                );
+            }
+            return Err(undo_fresh(format!("moving /{}: {e}", c.display())));
+        }
+        log(&format!("/{} moved into the new root", c.display()));
+        carried.push(c);
+    }
     let move_back = || {
+        for d in carried.iter().rev() {
+            let _ = ops.move_subvolume(&top.join(&fresh).join(d), &old_root.join(d));
+        }
         for m in moved.iter().rev() {
             let _ = ops.move_subvolume(
                 &top.join(&fresh).join(rel).join(m),
@@ -773,9 +799,33 @@ mod tests {
             snapshot_dir: "/.snapshots/rootfs".into(),
             root: "/".into(),
             move_points: true,
+            carry: Vec::new(),
             run_dir: "/run/rynas/rollback".into(),
             now_s: 1_793_880_000,
         }
+    }
+
+    #[test]
+    fn the_system_volume_moves_into_the_new_root_and_back_on_failure() {
+        let mut p = plan();
+        p.carry = vec!["srv/rynas/system".into()];
+        let f = Fake::new(None);
+        rollback_root(&f, Some(&f), &p, &|_| {}).unwrap();
+        let stamp = stamp_seconds(p.now_s);
+        let mv = format!(
+            "move /run/rynas/rollback/top/@rootfs/srv/rynas/system /run/rynas/rollback/top/@rootfs.rynas-new-{stamp}/srv/rynas/system"
+        );
+        let c = f.calls();
+        let i = c.iter().position(|x| *x == mv).expect("carried");
+        // after the restore points, before the renames
+        assert!(c[i - 1].contains("rootfs.20261101T0300") && c[i + 1].starts_with("rename "));
+        // a failed swap moves it back
+        let f = Fake::new(Some("rename /run/rynas/rollback/top: @rootfs.rynas-new"));
+        rollback_root(&f, Some(&f), &p, &|_| {}).unwrap_err();
+        let back = format!(
+            "move /run/rynas/rollback/top/@rootfs.rynas-new-{stamp}/srv/rynas/system /run/rynas/rollback/top/@rootfs/srv/rynas/system"
+        );
+        assert!(f.calls().contains(&back));
     }
 
     #[test]

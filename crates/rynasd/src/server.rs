@@ -197,6 +197,7 @@ pub fn router(state: DaemonState) -> Router {
         .merge(crate::ops::router(state.ops))
         .merge(crate::services::router(state.services))
         .merge(crate::storage_ops::router(state.storage_ops))
+        .merge(crate::places::router())
         .merge(crate::notifications::router(state.notifications))
         .merge(crate::scheduler::router(state.protection.clone()))
         .merge(crate::replication::router(state.protection.clone()))

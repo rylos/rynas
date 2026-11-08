@@ -581,6 +581,24 @@ impl ReplicaHost for HostReplicas {
 
     fn ensure_dir(&self, path: &str) -> Result<(), String> {
         use std::os::unix::fs::DirBuilderExt;
+        // in the system volume (D-ROOTVOL): its folder is a subvolume of its own, made first
+        let sys = rynas_api_types::storage::SYSTEM_VOLUME_DIR;
+        if path.starts_with(&format!("{sys}/")) && !Path::new(sys).exists() {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o755)
+                .create(Path::new(sys).parent().unwrap_or(Path::new("/")))
+                .map_err(|e| format!("{sys}: {e}"))?;
+            let o = Cmd::new("btrfs")
+                .args(["subvolume", "create", sys])
+                .env_clear()
+                .timeout(Duration::from_secs(60))
+                .run_blocking()
+                .map_err(|e| format!("btrfs subvolume create {sys}: {e}"))?;
+            if !o.success() {
+                return Err(format!("btrfs subvolume create {sys}: {}", o.stderr.trim()));
+            }
+        }
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
@@ -725,7 +743,14 @@ pub fn warnings(host: &dyn ReplicaHost, job: &SnapshotJob, t: &ReplicaTarget) ->
             {
                 w.push(ReplicaWarning::SameFilesystem);
             }
-            if target.as_ref().is_some_and(|f| f.mount == "/") && !Path::new(path).exists() {
+            // the system volume's folder is a target chosen on purpose (D-ROOTVOL)
+            let in_system_volume = path
+                .strip_prefix(rynas_api_types::storage::SYSTEM_VOLUME_DIR)
+                .is_some_and(|r| r.len() > 1 && r.starts_with('/'));
+            if target.as_ref().is_some_and(|f| f.mount == "/")
+                && !Path::new(path).exists()
+                && !in_system_volume
+            {
                 w.push(ReplicaWarning::NotMounted);
             }
         }

@@ -28,6 +28,7 @@ pub mod notifications;
 pub mod ops;
 pub mod pam;
 pub mod pc_backup;
+pub mod places;
 pub mod power;
 pub mod protection;
 pub mod removable;

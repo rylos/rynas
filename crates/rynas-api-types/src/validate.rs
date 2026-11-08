@@ -81,6 +81,8 @@ pub fn workgroup(w: &str) -> bool {
 pub const RESERVED_LABELS: &[&str] = &[
     "root", "boot", "home", "srv", "var", "run", "tmp", "usr", "etc", "proc", "sys", "dev", "mnt",
     "opt", "media", "bin", "sbin", "lib", "lib32", "lib64", "libx32", "snap", "nix", "efi",
+    // the system volume (D-ROOTVOL)
+    "system",
 ];
 
 /// Volume label, also its mount name `/<label>`: `[a-z][a-z0-9-]{0,15}`, not a system
@@ -93,6 +95,12 @@ pub fn volume_label(l: &str) -> bool {
         && b.iter()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
         && !RESERVED_LABELS.contains(&l)
+}
+
+/// A volume something can be put on: a rynas volume label or the system volume
+/// ([`crate::storage::SYSTEM_VOLUME`], D-ROOTVOL).
+pub fn place_label(l: &str) -> bool {
+    l == crate::storage::SYSTEM_VOLUME || volume_label(l)
 }
 
 /// Subvolume name: `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`, so it also fits a path segment, a
@@ -119,6 +127,21 @@ mod tests {
         assert!(workgroup(" workgroup ") && !workgroup("WORK GROUP") && !workgroup(""));
         assert!(!workgroup("ABCDEFGHIJKLMNOP"));
         assert!(volume_label("media-01") && !volume_label("home") && !volume_label("2vol"));
+        // the system volume (D-ROOTVOL): a place, never a rynas volume label
+        assert!(place_label("system") && !volume_label("system") && place_label("vol1"));
+        use crate::storage::{low_space, split_volume_path, volume_dir};
+        assert_eq!(volume_dir("system"), "/srv/rynas/system");
+        assert_eq!(volume_dir("vol1"), "/vol1");
+        assert_eq!(split_volume_path("/vol1/a/b"), Some(("vol1".into(), "a/b")));
+        assert_eq!(split_volume_path("/srv/rynas/system/a"), Some(("system".into(), "a")));
+        assert_eq!(split_volume_path("/srv/rynas/system"), Some(("system".into(), "")));
+        assert_eq!(split_volume_path("/srv/rynas/systemx/a"), None);
+        assert_eq!(split_volume_path("/lib/x"), None);
+        const G: u64 = 1 << 30;
+        assert!(low_space(100 * G, 5 * G) && !low_space(100 * G, 50 * G));
+        assert!(low_space(1000 * G, 20 * G) && !low_space(0, 0));
+        // a small system disk is always short of room for data
+        assert!(low_space(8 * G, 7 * G) && !low_space(64 * G, 12 * G));
         assert!(subvolume_name("Video_2026.raw") && !subvolume_name(".snapshots"));
         assert!(!subvolume_name("a/b"));
     }
