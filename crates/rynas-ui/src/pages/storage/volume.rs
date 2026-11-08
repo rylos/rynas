@@ -573,8 +573,6 @@ pub fn RevealDialog(id: String, on_close: Callback<()>) -> impl IntoView {
     let key = RwSignal::new(None::<String>);
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
-    let stored = RwSignal::new(false);
-    let copied = RwSignal::new(false);
     let idv = StoredValue::new(id.clone());
     let reveal = move |_| {
         busy.set(true);
@@ -614,30 +612,36 @@ pub fn RevealDialog(id: String, on_close: Callback<()>) -> impl IntoView {
                     </div>
                 }
                 .into_any(),
-                Some(k) => {
-                    let k2 = k.clone();
-                    let k3 = k.clone();
-                    view! {
-                        {ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {tr("sto.rk_once")} }.into_any())}
-                        <code class="secret mono rk">{k}</code>
-                        <div class="card-actions">
-                            <button class="btn ghost sm" type="button" on:click=move |_| { if copy_text(&k2) { copied.set(true); } }>
-                                <Icon icon=if copied.get() { icons::CHECK } else { icons::COPY } size=14 />{move || if copied.get() { t("copied") } else { t("sto.copy") }}
-                            </button>
-                            <button class="btn ghost sm" type="button" on:click=move |_| api::save_text(&format!("recovery-key-{}.txt", idv.get_value()), &k3)>
-                                <Icon icon=icons::DOWNLOAD size=14 />{tr("sto.download")}
-                            </button>
-                        </div>
-                        <label class="check"><input type="checkbox" prop:checked=move || stored.get() on:change=move |ev| stored.set(event_target_checked(&ev)) />{tr("sto.rk_stored")}</label>
-                        <div class="dialog-foot">
-                            <button class="btn primary" type="button" disabled=move || !stored.get() on:click=move |_| on_close.run(())>{tr("sto.done")}</button>
-                        </div>
-                    }
-                    .into_any()
-                }
+                Some(k) => key_once(k, format!("recovery-key-{}.txt", idv.get_value()), on_close),
             }}
         </Modal>
     }
+}
+
+/// A recovery key shown once: copy, download as `file`, and the "I stored it" check that
+/// must be ticked before `on_done` (also for an encrypted shared folder).
+pub fn key_once(key: String, file: String, on_done: Callback<()>) -> AnyView {
+    let stored = RwSignal::new(false);
+    let copied = RwSignal::new(false);
+    let k2 = key.clone();
+    let k3 = key.clone();
+    view! {
+        {ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {tr("sto.rk_once")} }.into_any())}
+        <code class="secret mono rk">{key}</code>
+        <div class="card-actions">
+            <button class="btn ghost sm" type="button" on:click=move |_| { if copy_text(&k2) { copied.set(true); } }>
+                <Icon icon=if copied.get() { icons::CHECK } else { icons::COPY } size=14 />{move || if copied.get() { t("copied") } else { t("sto.copy") }}
+            </button>
+            <button class="btn ghost sm" type="button" on:click=move |_| api::save_text(&file, &k3)>
+                <Icon icon=icons::DOWNLOAD size=14 />{tr("sto.download")}
+            </button>
+        </div>
+        <label class="check"><input type="checkbox" prop:checked=move || stored.get() on:change=move |ev| stored.set(event_target_checked(&ev)) />{tr("sto.rk_stored")}</label>
+        <div class="dialog-foot">
+            <button class="btn primary" type="button" disabled=move || !stored.get() on:click=move |_| on_done.run(())>{tr("sto.done")}</button>
+        </div>
+    }
+    .into_any()
 }
 
 #[component]

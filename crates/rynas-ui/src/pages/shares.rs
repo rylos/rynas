@@ -17,6 +17,7 @@ use crate::form::{In, area_field, lens, lens_bool, save_bar, search_box, select_
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::live::use_live;
+use crate::pages::share_crypt;
 use crate::pages::share_folders::{self, Target};
 use crate::toast::saved_applied;
 use crate::ui::{self, EmptyState, Meter, PageHeader, Remote, Tone, drawer, usage_tone};
@@ -72,6 +73,7 @@ pub fn Shares() -> impl IntoView {
     let edit = RwSignal::new(None::<ShareEdit>);
     let del = RwSignal::new(None::<String>);
     let fdel = RwSignal::new(None::<UnsharedFolder>);
+    let cact = RwSignal::new(None::<share_crypt::Action>);
     let create = move || edit.set(Some(ShareEdit { view: None, tab: 0, prefill: None }));
     let share_again = Callback::new(move |f: UnsharedFolder| edit.set(Some(ShareEdit { view: None, tab: 0, prefill: Some(share_folders::reshare(&f)) })));
     // `?edit=<share>&tab=<n>`: open that share's editor once the list has arrived (the file
@@ -116,7 +118,7 @@ pub fn Shares() -> impl IntoView {
         }
         let fss = live.storage.with(|s| s.as_ref().map(|s| s.filesystems.clone()).unwrap_or_default());
         view! {
-            {ui::table("shares-table", &["shares.name", "shares.location", "shares.volume_usage", "shares.protocols", "shares.recycle", "col.status", ""], rows.into_iter().map(|v| share_row(v, &fss, edit, del)).collect::<Vec<_>>())}
+            {ui::table("shares-table", &["shares.name", "shares.location", "shares.volume_usage", "shares.protocols", "shares.recycle", "col.status", ""], rows.into_iter().map(|v| share_row(v, &fss, edit, del, cact)).collect::<Vec<_>>())}
         }
         .into_any()
     };
@@ -155,6 +157,7 @@ pub fn Shares() -> impl IntoView {
             {editor}
             {deleter}
             {folder_deleter}
+            {move || cact.get().map(|a| share_crypt::action_dialog(a, Callback::new(move |_| cact.set(None)), Callback::new(move |_| shares.reload())))}
         </div>
     }
 }
@@ -169,7 +172,7 @@ fn share_status(st: &ShareStatus) -> (Tone, &'static str) {
     }
 }
 
-fn share_row(v: ShareView, fss: &[rynas_api_types::Filesystem], edit: RwSignal<Option<ShareEdit>>, del: RwSignal<Option<String>>) -> AnyView {
+fn share_row(v: ShareView, fss: &[rynas_api_types::Filesystem], edit: RwSignal<Option<ShareEdit>>, del: RwSignal<Option<String>>, cact: RwSignal<Option<share_crypt::Action>>) -> AnyView {
     let s = &v.share;
     let path = share_path(s);
     let usage = fs_for(&path, fss);
@@ -182,6 +185,22 @@ fn share_row(v: ShareView, fss: &[rynas_api_types::Filesystem], edit: RwSignal<O
     };
     let (o1, o2, o3) = (open.clone(), open.clone(), open);
     let warnings = share_folders::warnings(&v.status).join("\n");
+    let st_ok = tone == Tone::Ok;
+    let crypt_btn = v.status.crypt.as_ref().filter(|_| !deleting).and_then(|c| {
+        let n = s.name.clone();
+        let (unlock, icon, label) = match c.state {
+            rynas_api_types::CryptState::Locked => (true, icons::LOCK_OPEN, "crypt.unlock"),
+            rynas_api_types::CryptState::Unlocked => (false, icons::KEY, "crypt.lock"),
+            rynas_api_types::CryptState::Missing => return None,
+        };
+        let aria = format!("{} {}", t(label), s.name);
+        Some(view! {
+            <button class="icon-btn sm" title=tr(label) aria-label=aria
+                on:click=move |_| cact.set(Some(if unlock { share_crypt::Action::Unlock(n.clone()) } else { share_crypt::Action::Lock(n.clone()) }))>
+                <Icon icon=icon size=16 />
+            </button>
+        })
+    });
     let recycle = if s.smb.enabled && s.smb.recycle.enabled {
         let d = s.smb.recycle.retention_days;
         if d == 0 { t("shares.recycle_keep").to_string() } else { tf("shares.recycle_days", &[("n", &d.to_string())]) }
@@ -201,7 +220,8 @@ fn share_row(v: ShareView, fss: &[rynas_api_types::Filesystem], edit: RwSignal<O
                 <span class="mono">{path}</span>
                 <span class="cell-sub">
                     {(v.status.subvolume || s.subvolume.is_some()).then(|| t("shares.subvolume"))}
-                    {(!v.status.fs_type.is_empty()).then(|| format!(" · {}", v.status.fs_type))}
+                    {s.encrypted.then(|| t("crypt.encrypted"))}
+                    {(!v.status.fs_type.is_empty() && !s.encrypted).then(|| format!(" · {}", v.status.fs_type))}
                     {(v.status.nocow == Some(true)).then(|| format!(" · {}", t("shares.nocow")))}
                 </span>
             </div>
@@ -233,8 +253,18 @@ fn share_row(v: ShareView, fss: &[rynas_api_types::Filesystem], edit: RwSignal<O
         }
         .into_any()),
         ui::cell("shares.recycle", "muted", view! { {recycle} }.into_any()),
-        ui::cell("col.status", "", view! { <div class="chips" title=warnings>{ui::status(tone, t(key).to_string())}{ui::pending_status(v.status.pending)}</div> }.into_any()),
+        ui::cell("col.status", "", view! {
+            <div class="chips" title=warnings>
+                {match &v.status.crypt {
+                    // an encrypted folder: its lock state says more than the remarks
+                    Some(c) if c.state != rynas_api_types::CryptState::Unlocked || st_ok => share_crypt::state_chip(c),
+                    _ => ui::status(tone, t(key).to_string()),
+                }}
+                {ui::pending_status(v.status.pending)}
+            </div>
+        }.into_any()),
         ui::actions(view! {
+            {crypt_btn}
             <button class="icon-btn sm" title=tr("edit") aria-label=format!("{} {}", t("edit"), s.name) disabled=deleting on:click=move |_| o2(0)>
                 <Icon icon=icons::PENCIL size=16 />
             </button>
@@ -273,6 +303,7 @@ fn share_editor(e: ShareEdit, users: Remote<Vec<UserView>>, groups: Remote<Vec<G
     let saved = e.view.as_ref().map(|v| v.share.clone());
     let warnings = e.view.as_ref().map(|v| share_folders::warnings(&v.status)).unwrap_or_default();
     let nocow = e.view.as_ref().and_then(|v| super::share_nocow::existing(v.share.name.clone(), &v.status));
+    let crypt_existing = e.view.as_ref().and_then(share_crypt::existing);
     let d = RwSignal::new(saved.clone().or(e.prefill).unwrap_or_else(|| Share {
         subvolume: Some(ShareSubvolume { volume: String::new(), compression: true, nocow: false }),
         ..Share::default()
@@ -281,6 +312,13 @@ fn share_editor(e: ShareEdit, users: Remote<Vec<UserView>>, groups: Remote<Vec<G
     let show = RwSignal::new(false);
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
+    // a new encrypted folder: its form, and its recovery key once it exists
+    let cf = share_crypt::CryptForm::new();
+    let key = RwSignal::new(None::<(String, String)>);
+    on_cleanup(move || {
+        let _ = key.try_set(None);
+    });
+    let encrypted = Signal::derive(move || d.with(|s| s.encrypted) || (is_new && cf.on.get() && d.with(|s| s.subvolume.is_some())));
 
     let (name, set_name) = lens(d, |s| s.name.clone(), |s, v| s.name = v.trim().to_string());
     let name_err = Signal::derive(move || {
@@ -289,10 +327,12 @@ fn share_editor(e: ShareEdit, users: Remote<Vec<UserView>>, groups: Remote<Vec<G
     });
     let save = Callback::new(move |_| {
         show.set(true);
+        let crypt_new = is_new && encrypted.get_untracked();
         let problem = d.with_untracked(|s| {
             let general_bad = (is_new && !valid_share_name(&s.name))
                 || (s.subvolume.as_ref().is_some_and(|v| v.volume.is_empty()) && s.path.is_empty())
-                || (s.subvolume.is_none() && !valid_path(&s.path));
+                || (s.subvolume.is_none() && !valid_path(&s.path))
+                || (crypt_new && cf.problem().is_some());
             if general_bad {
                 Some(0)
             } else if s.nfs.enabled && s.nfs.rules.iter().any(|r| !valid_client(&r.client)) {
@@ -308,23 +348,50 @@ fn share_editor(e: ShareEdit, users: Remote<Vec<UserView>>, groups: Remote<Vec<G
         }
         busy.set(true);
         error.set(None);
-        let body = d.get_untracked();
+        let mut body = d.get_untracked();
         spawn_local(async move {
+            // the encrypted folder first (task), its recovery key fetched at once and shown
+            // at the end whatever happens next; then the share on its mount point
+            let mut new_key = None;
+            if crypt_new {
+                let volume = body.subvolume.as_ref().map(|v| v.volume.clone()).unwrap_or_default();
+                match share_crypt::create_folder(&volume, &body.name, cf).await {
+                    Ok(k) => new_key = Some((body.name.clone(), k)),
+                    Err(e) => {
+                        let _ = error.try_set(Some(e));
+                        let _ = busy.try_set(false);
+                        return;
+                    }
+                }
+                body.path = share_path(&body);
+                body.subvolume = None;
+                body.encrypted = true;
+                body.show_snapshots = false;
+            }
             let r = if is_new {
                 api::post::<_, ShareView>("/api/v1/shares", Some(&body)).await
             } else {
                 api::put::<_, ShareView>(&format!("/api/v1/shares/{}", api::encode(&body.name)), &body).await
             };
+            let mut done = false;
             match r {
                 Ok(_) => {
                     if crate::config::apply_now(&[crate::config::keys::SHARES], error).await {
                         saved_applied();
-                        close.run(());
+                        done = true;
                     }
                 }
-                Err(e) => error.set(Some(e.text())),
+                Err(e) => {
+                    let _ = error.try_set(Some(e.text()));
+                }
             }
             let _ = busy.try_set(false);
+            if new_key.is_some() {
+                // the recovery key dialog closes the editor when everything went well
+                let _ = key.try_set(new_key);
+            } else if done {
+                close.run(());
+            }
         });
     });
 
@@ -337,10 +404,11 @@ fn share_editor(e: ShareEdit, users: Remote<Vec<UserView>>, groups: Remote<Vec<G
         {is_new.then(|| text_field("shares.name", name, set_name, name_err, In { help: Some("shares.name_help"), maxlength: 64, ..In::default() }))}
         {let (v, s) = lens(d, |s| s.description.clone(), |s, v| s.description = v);
          text_field("users.description", v, s, Signal::derive(|| None), In::default())}
-        {location_fields(d, is_new, show)}
+        {location_fields(d, is_new, show, cf)}
+        {crypt_existing}
         {nocow}
         {let (v, s) = lens_bool(d, |s| s.show_snapshots, |s, v| s.show_snapshots = v);
-         switch("shares.show_snapshots", Some("shares.show_snapshots_help"), v, s)}
+         view! { <div hidden=move || encrypted.get()>{switch("shares.show_snapshots", Some("shares.show_snapshots_help"), v, s)}</div> }}
         {(!warnings.is_empty()).then(|| view! {
 
             {ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { <ul class="plain-list">{warnings.into_iter().map(|w| view! { <li>{w}</li> }).collect_view()}</ul> }.into_any())}
@@ -365,16 +433,34 @@ fn share_editor(e: ShareEdit, users: Remote<Vec<UserView>>, groups: Remote<Vec<G
     }
     .into_any();
     let foot = save_bar(busy, Signal::derive(|| true), if is_new { "create" } else { "save" }, close, save, error);
-    view! { <div class="wide-drawer">{drawer(title, close, body, foot)}</div> }.into_any()
+    let reveal = move || {
+        key.get().map(|(n, k)| view! { <share_crypt::RecoveryDialog name=n key=k on_done=Callback::new(move |_| {
+            key.set(None);
+            // a failed share or apply stays on screen with its error
+            if error.with_untracked(Option::is_none) {
+                close.run(());
+            }
+        }) /> })
+    };
+    view! { <div class="wide-drawer">{drawer(title, close, body, foot)}</div>{reveal} }.into_any()
 }
 
 /// New subvolume on a rynas volume, or an existing folder.
-fn location_fields(d: RwSignal<Share>, is_new: bool, show: RwSignal<bool>) -> AnyView {
+fn location_fields(d: RwSignal<Share>, is_new: bool, show: RwSignal<bool>, cf: share_crypt::CryptForm) -> AnyView {
     let (path, set_path) = lens(d, |s| s.path.clone(), |s, v| s.path = v.trim().to_string());
     let path_err = Signal::derive(move || {
         let (sub, p) = d.with(|s| (s.subvolume.is_some(), s.path.clone()));
         (!sub && (show.get() || !p.is_empty()) && !valid_path(&p)).then(|| t("v.path").to_string())
     });
+    // an encrypted folder stays where it was made
+    if !is_new && d.with_untracked(|s| s.encrypted) {
+        return view! {
+            <dl class="kvs">
+                {crate::ui::kv_row("shares.location", Signal::derive(move || d.with(|s| s.path.clone())), "mono")}
+            </dl>
+        }
+        .into_any();
+    }
     if !is_new {
         let sv = d.with_untracked(|s| s.subvolume.clone());
         return match sv {
@@ -460,12 +546,14 @@ fn location_fields(d: RwSignal<Share>, is_new: bool, show: RwSignal<bool>) -> An
                                 }
                             }).collect_view()}
                         </select>
-                        <span class="field-help">{move || tf("shares.subvolume_help", &[("path", &share_path(&d.get()))])}</span>
+                        <span class="field-help">{move || tf(if cf.on.get() { "crypt.created_help" } else { "shares.subvolume_help" }, &[("path", &share_path(&d.get()))])}</span>
                         {move || crate::places::note(chosen().as_ref(), true)}
                         {crate::places::unavailable_notes(&vols)}
                     </div>
-                    // NOCOW and compression are btrfs properties: not on a plain system disk
-                    <div hidden=move || chosen().is_some_and(|p| !p.btrfs())>
+                    {share_crypt::create_fields(cf, show)}
+                    // NOCOW and compression are btrfs properties: not on a plain system disk,
+                    // and nothing to gain on ciphertext
+                    <div hidden=move || cf.on.get() || chosen().is_some_and(|p| !p.btrfs())>
                         {super::share_nocow::create_switch(d)}
                         <div hidden=move || d.with(|s| s.subvolume.as_ref().is_some_and(|v| v.nocow))>
                             {switch("shares.compression", Some("shares.compression_help"), comp, set_comp)}

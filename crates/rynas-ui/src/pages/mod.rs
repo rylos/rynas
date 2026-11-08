@@ -13,6 +13,7 @@ pub mod network;
 pub mod replication;
 pub mod security;
 pub mod services;
+pub mod share_crypt;
 pub mod share_folders;
 pub mod share_nocow;
 pub mod shares;
