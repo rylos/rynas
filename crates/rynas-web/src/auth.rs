@@ -162,6 +162,9 @@ fn admin_read(path: &str) -> bool {
             "/web-access",
             "/api/v1/tailscale",
             "/tailscale",
+            // file names inside the backups, repository locations
+            "/api/v1/backup/",
+            "/backup/",
         ]
         .iter()
         .any(|p| path.starts_with(p))

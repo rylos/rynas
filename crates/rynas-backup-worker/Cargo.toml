@@ -1,0 +1,43 @@
+[package]
+name = "rynas-backup-worker"
+description = "rynas backup worker: backups, retention, checks and restores of restic-format repositories with rustic_core, started by rynasd as a task"
+version = "0.1.0"
+edition = "2024"
+authors = ["Marco Ziliani"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/rylos/rynas"
+rust-version = "1.91"
+
+# A workspace of its own, with its own Cargo.lock (D-BACKUP): rustic_core and its backends
+# (OpenDAL, reqwest, rayon…) are a large dependency tree that must never link into rynasd,
+# rynas-web or the UI. It shares only the wire types (`rynas-api-types`) by path.
+# Build and test it with `--manifest-path crates/rynas-backup-worker/Cargo.toml`.
+[workspace]
+
+[[bin]]
+name = "rynas-backup-worker"
+path = "src/main.rs"
+
+[dependencies]
+rynas-api-types = { path = "../rynas-api-types" }
+# exact versions, updated by hand after the test suite (D-BACKUP)
+rustic_core = "=0.13.0"
+rustic_backend = "=0.7.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = "s"
+
+# the key derivation (scrypt) and the crypto are very slow unoptimized: the tests run the
+# dependencies optimized
+[profile.dev.package."*"]
+opt-level = 2

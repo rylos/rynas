@@ -3524,6 +3524,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rynas-backup"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "rynas-api-types",
+ "rynas-config",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "rynas-btrfs"
 version = "0.1.0"
 dependencies = [
@@ -3917,6 +3932,7 @@ dependencies = [
  "rynas-api-types",
  "rynas-apps",
  "rynas-auth",
+ "rynas-backup",
  "rynas-btrfs",
  "rynas-config",
  "rynas-dns",

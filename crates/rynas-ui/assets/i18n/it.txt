@@ -1974,6 +1974,7 @@ sch.act.scrub	Scrub del volume
 sch.act.smart_test	Test SMART
 sch.act.recycle_cleanup	Pulizia del cestino
 sch.act.power_shutdown	Spegnimento pianificato
+sch.act.backup	Job di backup
 sch.smart.short	Breve
 sch.smart.long	Esteso
 sch.all_shares	Tutte le cartelle condivise
@@ -2116,6 +2117,162 @@ snap.system_enabled_help	Richiede un filesystem di root btrfs.
 snap.system_keep	Punti di ripristino conservati
 snap.system_keep_help	I più vecchi oltre questo numero vengono eliminati dopo uno nuovo.
 snap.system_prefix	Prefisso del nome
+nav.backup	Backup
+bk.title	Backup
+bk.subtitle	Copie cifrate e con versioni dei tuoi dati su un altro NAS, un disco USB o nel cloud.
+bk.tab.restic	Altro NAS o cloud
+bk.help	Ogni job copia le cartelle scelte in un repository cifrato. Viene inviato solo ciò che è cambiato e ogni esecuzione è una versione ripristinabile. Il repository si apre con restic o rustic su qualsiasi computer, con la sua password.
+bk.create	Nuovo job di backup
+bk.empty	Ancora nessun job di backup
+bk.empty_text	Crea un job per copiare cartelle condivise, dati delle app Docker o la configurazione di rynas su un altro NAS, un disco USB o uno spazio cloud.
+bk.no_offsite	Nessun job copia i dati fuori da questo NAS: un incendio o un furto si porterebbero via anche i backup. Aggiungi un job verso un altro NAS o il cloud.
+bk.col.job	Job e origini
+bk.col.where	Destinazione
+bk.col.size	Repository
+bk.dest.local	Disco USB o locale
+bk.dest.rest	Server REST
+bk.dest.sftp	SFTP
+bk.dest.s3	Compatibile S3
+bk.dest.b2	Backblaze B2
+bk.dest.rclone	rclone (Google Drive, OneDrive…)
+bk.u.last	ultime
+bk.u.h	h
+bk.u.d	g
+bk.u.w	s
+bk.u.m	m
+bk.u.y	a
+bk.src.config	Configurazione di rynas
+bk.src.config_help	Impostazioni, utenti, cartelle condivise e job, cifrati con la password del repository.
+bk.failed	Non riuscito
+bk.never	Mai eseguito
+bk.paused	In pausa
+bk.versions_n	{n} versioni
+bk.check.bad_at	Verifica non riuscita {when}
+bk.run	Esegui backup ora
+bk.run.started	Backup {name} avviato
+bk.run.ok	Backup {name} completato
+bk.run.failed	Backup {name} non riuscito: {why}
+bk.versions	Versioni e ripristino
+bk.versions_of	Versioni di {name}
+bk.check	Verifica integrità
+bk.check.title	Verifica di {name}
+bk.check.text	La verifica legge l'indice e la struttura del repository; rileggere anche i dati trova i file danneggiati nella destinazione, ma richiede più tempo e traffico.
+bk.check.read	Dati riletti
+bk.check.structure	Solo struttura
+bk.check.five	Il 5 % dei dati
+bk.check.all	Tutti i dati
+bk.check.started	Verifica di {name} avviata
+bk.check.done	Verifica di {name}: nessun errore
+bk.delete	Eliminare il job {name}?
+bk.delete_text	Il job e la sua pianificazione vengono rimossi. Il repository e le sue versioni restano nella destinazione.
+bk.sec.what	Cosa salvare
+bk.sec.where	Dove
+bk.sec.encryption	Cifratura
+bk.sec.versions	Versioni da conservare
+bk.f.name_help	Lettere minuscole, cifre e -, fino a 32.
+bk.f.description	Descrizione
+bk.f.folders	Altre cartelle
+bk.f.folders_help	Un percorso assoluto per riga, ad esempio la cartella delle app Docker.
+bk.f.dest	Tipo di destinazione
+bk.f.path	Cartella
+bk.f.path_help	Una cartella su un disco USB o un altro volume; viene creata se manca.
+bk.f.url	Indirizzo del server
+bk.f.url_help	Un server REST di restic (rest-server), anche su un altro NAS. Avvialo con --append-only perché questo NAS possa aggiungere versioni ma mai cancellarle.
+bk.f.user	Utente
+bk.f.password	Password
+bk.f.secret_help	Conservata cifrata su questo NAS, non viene più mostrata.
+bk.f.secret_kept	C'è un segreto salvato: lascia vuoto per mantenerlo.
+bk.f.host	Server
+bk.f.port	Porta
+bk.f.folder	Cartella sul server
+bk.f.ssh_key	Chiave di questo NAS
+bk.f.ssh_key_help	rynas accede con una coppia di chiavi: generala, poi aggiungi la chiave pubblica a ~/.ssh/authorized_keys del server.
+bk.f.ssh_key_paste	Aggiungi questa riga a ~/.ssh/authorized_keys dell'utente sul server. Alla prima connessione la chiave del server viene memorizzata.
+bk.f.ssh_generate	Genera coppia di chiavi
+bk.f.endpoint	Endpoint
+bk.f.endpoint_help	Vuoto per AWS; altrimenti l'indirizzo S3 del servizio (MinIO, Wasabi, Backblaze S3…).
+bk.f.bucket	Bucket
+bk.f.bucket_id	ID del bucket
+bk.f.region	Regione
+bk.f.prefix	Cartella nel bucket
+bk.f.access_key	Chiave di accesso
+bk.f.secret_key	Chiave segreta
+bk.f.key_id	ID della chiave applicazione
+bk.f.app_key	Chiave applicazione
+bk.f.remote	Remote di rclone
+bk.f.remote_help	nome:cartella di un remote della configurazione qui sotto (rclone deve essere installato).
+bk.f.rclone_config	Configurazione di rclone
+bk.f.rclone_help	La sezione del remote di rclone.conf, con il suo token: creala con rclone config su un computer con un browser. Conservata cifrata.
+bk.f.rclone_kept	C'è una configurazione salvata: lascia vuoto per mantenerla.
+bk.test	Prova connessione
+bk.test.empty	Raggiungibile: il repository verrà creato alla prima esecuzione.
+bk.test.opens	Raggiungibile: un repository esistente si apre con questa password ({n} versioni).
+bk.test.locked	C'è già un repository: indica la sua password per usarlo.
+bk.test.failed	Non raggiungibile
+bk.f.pw_mode	Password del repository
+bk.pw.generate	Generane una robusta
+bk.pw.own	Usa la mia
+bk.pw.generate_help	rynas crea una password casuale e la mostra una sola volta dopo il salvataggio.
+bk.pw.kept	La password del repository è conservata cifrata su questo NAS e non cambia.
+bk.f.repo_password	Password del repository cifrato
+bk.f.repo_password_help	Almeno 8 caratteri; la password di un repository esistente per aggiungervi versioni.
+bk.pw.title	Salva la password del repository
+bk.pw.warning	Senza questa password il backup non si può ripristinare, nemmeno da te: se questo NAS va perso, è l'unica chiave dei tuoi dati. Conservala fuori da questo NAS (gestore di password, copia stampata).
+bk.pw.download	Scarica come file
+bk.pw.file_note	Password del repository di backup di rynas (formato restic). Conservala al sicuro.
+bk.pw.saved	Ho salvato la password
+bk.pw.done	Fatto
+bk.copy	Copia
+bk.copied	Copiato negli appunti
+bk.f.enabled	Esegui secondo la pianificazione
+bk.f.enabled_help	Disattivato: parte solo con Esegui backup ora.
+bk.f.keep_help	Dopo ogni esecuzione le versioni più vecchie oltre questi numeri vengono dimenticate; il loro spazio viene liberato dalla pulizia successiva.
+bk.f.keep_last	Ultime
+bk.f.keep_hourly	Orarie
+bk.f.keep_daily	Giornaliere
+bk.f.keep_weekly	Settimanali
+bk.f.keep_monthly	Mensili
+bk.f.keep_yearly	Annuali
+bk.f.smart	Usa i valori consigliati
+bk.f.use_snapshot	Leggi da uno snapshot
+bk.f.use_snapshot_help	Ogni cartella che è un subvolume btrfs viene letta da uno snapshot temporaneo in sola lettura: i file che cambiano durante il backup (database) restano coerenti.
+bk.f.stop_stacks	Stack Docker da fermare
+bk.f.stop_stacks_help	Separati da virgole; fermati mentre viene creato lo snapshot (o per tutto il backup senza snapshot), poi riavviati.
+bk.f.excludes	Escludi
+bk.f.excludes_help	Un modello per riga. Cestini, cartelle degli snapshot e cartelle con un file CACHEDIR.TAG o .nobackup sono sempre esclusi.
+bk.f.bandwidth	Limite di invio (KiB/s, 0 nessuno)
+bk.f.prune_days	Pulizia ogni (giorni)
+bk.f.check_days	Verifica ogni (giorni, 0 mai)
+bk.f.read_pct	Dati letti da ogni verifica (%)
+bk.f.maintenance_help	Il limite di invio vale per S3, B2, SFTP e rclone. Pulizie e verifiche partono dopo un backup, una alla volta per repository.
+bk.v.name	Dai un nome al job: lettere minuscole, cifre e -.
+bk.v.folder	Le altre cartelle devono essere percorsi assoluti.
+bk.v.sources	Scegli almeno una cosa da salvare.
+bk.v.retention	Conserva almeno un tipo di versione.
+bk.v.password	La password del repository richiede almeno 8 caratteri.
+bk.v.restore_folder	Inserisci il percorso assoluto di una cartella.
+bk.no_versions	Ancora nessuna versione
+bk.no_versions_text	La prima esecuzione del job crea la prima versione.
+bk.all_versions	Tutte le versioni
+bk.up	Su
+bk.pick	Seleziona
+bk.download	Scarica
+bk.restore	Ripristina
+bk.restore_all	Ripristina questa versione
+bk.restore_n	Ripristina {n} selezionati
+bk.restore.to	Ripristina in
+bk.restore.original	Posizione originale
+bk.restore.folder	Un'altra cartella
+bk.restore.folder_path	Cartella di destinazione
+bk.restore.folder_help	I file vanno al suo interno con il percorso completo, ad esempio /volume1/restore/volume1/docs.
+bk.restore.original_warn	I file cambiati dopo questa versione vengono sovrascritti; i file più nuovi restano.
+bk.restore.all_text	Viene ripristinato tutto il contenuto di questa versione.
+bk.restore.n_text	Vengono ripristinati {n} elementi selezionati con le loro cartelle.
+bk.restore.started	Ripristino avviato
+bk.restore.done	Ripristino completato
+task.backup.run	Backup
+task.backup.check	Verifica integrità del backup
+task.backup.restore	Ripristino da backup
 nav.network	Rete
 net.title	Rete
 net.subtitle	Interfacce, indirizzi e accessi di emergenza. Ogni modifica viene provata e annullata se non la confermi.

@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 # own lock file, see its Cargo.toml
-exclude = ["crates/rynas-files-worker"]
+exclude = ["crates/rynas-files-worker", "crates/rynas-backup-worker"]
 members = [
     "crates/rynas-api-types",
     "crates/rynas-auth",
@@ -30,6 +30,7 @@ members = [
     "crates/rynas-tls",
     "crates/rynas-dns",
     "crates/rynas-tailscale",
+    "crates/rynas-backup",
 ]
 
 [workspace.package]
@@ -73,6 +74,7 @@ tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring
 rynas-apps = { path = "crates/rynas-apps" }
 rynas-docker = { path = "crates/rynas-docker" }
 rynas-tailscale = { path = "crates/rynas-tailscale" }
+rynas-backup = { path = "crates/rynas-backup" }
 # local time zone arithmetic of the power schedule (DST-safe); the system tz database
 jiff = { version = "0.2.38", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 serde = { version = "1", features = ["derive"] }

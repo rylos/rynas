@@ -93,6 +93,9 @@ pub enum TaskAction {
     /// a clean poweroff. Runs `rynasctl power scheduled-shutdown <rule>`; created, changed
     /// and removed with its rule.
     PowerShutdown { rule: String },
+    /// Backup job (`/api/v1/backup/restic/jobs`): backup, retention and maintenance of its
+    /// repository by `rynas-backup-worker`; created, changed and removed with its job.
+    Backup { job: String },
 }
 
 fn default_root() -> String {

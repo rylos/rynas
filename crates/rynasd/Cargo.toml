@@ -46,6 +46,8 @@ rynas-tls.workspace = true
 # own domains (W2): DNS provider record clients, resolver queries, rebind detection
 rynas-dns.workspace = true
 base64.workspace = true
+rynas-backup.workspace = true
+tempfile.workspace = true
 tokio-util = { workspace = true, features = ["io"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 # local app names published through Avahi over the system bus (web_access/avahi.rs)

@@ -30,6 +30,7 @@ pub mod pam;
 pub mod power;
 pub mod protection;
 pub mod removable;
+pub mod restic_backup;
 pub mod roles;
 pub mod scheduler;
 pub mod server;
