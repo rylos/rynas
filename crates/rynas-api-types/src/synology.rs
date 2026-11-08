@@ -69,6 +69,9 @@ fn default_hysteresis() -> u8 {
 fn default_brightness() -> u8 {
     255
 }
+fn default_reduced_level() -> u8 {
+    1
+}
 
 /// The `synology.hw` configuration key: every setting of synohwd. Ranges are synohwd's
 /// (`RANGES`/`CHOICES` in synohwd.py); rynas refuses what synohwd would clamp or replace.
@@ -111,6 +114,38 @@ pub struct SynologySettings {
     /// Power back on after an AC loss (DSM default: on).
     #[serde(default = "default_true")]
     pub ac_recovery: bool,
+    /// Front LED brightness schedule (synodeb ≥ 4.8, when the status says
+    /// `led_schedule_supported`): "" = always the normal level, or [`LED_SCHEDULE_LEN`]
+    /// characters `0` (normal), `1` (reduced, [`Self::led_reduced_level`]) or `2` (front LEDs
+    /// off), index = 24 × weekday + hour, local time, Sunday = 0 (the DSM format). Independent
+    /// of `led_brightness` (bay LED PWM).
+    #[serde(default)]
+    pub led_schedule: String,
+    /// Front LED level of the `1` hours, 0..=7 (clamped by synohwd to the model's
+    /// `led_level_min..=led_level_max`).
+    #[serde(default = "default_reduced_level")]
+    pub led_reduced_level: u8,
+}
+
+/// Length of a non-empty `led_schedule`: one character per hour of the week.
+pub const LED_SCHEDULE_LEN: usize = 168;
+
+/// The characters of `led_schedule`: normal, reduced, off.
+pub const LED_SCHEDULE_CODES: [char; 3] = ['0', '1', '2'];
+
+/// `led_schedule` is "" or 168 characters of [`LED_SCHEDULE_CODES`] (synohwd discards
+/// anything else).
+pub fn led_schedule_valid(s: &str) -> bool {
+    s.is_empty() || (s.len() == LED_SCHEDULE_LEN && s.chars().all(|c| LED_SCHEDULE_CODES.contains(&c)))
+}
+
+/// What the front LEDs do now (`led_mode_now` of synohwd's status).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LedMode {
+    Normal,
+    Reduced,
+    Off,
 }
 
 impl Default for SynologySettings {
@@ -131,6 +166,8 @@ impl Default for SynologySettings {
             disk_standby_minutes: 0,
             wol: false,
             ac_recovery: true,
+            led_schedule: String::new(),
+            led_reduced_level: default_reduced_level(),
         }
     }
 }
@@ -337,4 +374,20 @@ pub struct SynologyStatus {
     /// How this boot started, when rynas can tell (see `/api/v1/power/next`).
     #[serde(default)]
     pub boot: Option<crate::power::BootInfo>,
+    /// synohwd drives the front LED level chip and takes `led_schedule` (synodeb ≥ 4.8 on a
+    /// model with that chip). False on an older synohwd.
+    #[serde(default)]
+    pub led_schedule_supported: bool,
+    /// Front LED level scale of the model (dimmest, brightest, the normal level).
+    #[serde(default)]
+    pub led_level_min: Option<u8>,
+    #[serde(default)]
+    pub led_level_max: Option<u8>,
+    #[serde(default)]
+    pub led_level_default: Option<u8>,
+    /// The level the front LEDs have now, and why.
+    #[serde(default)]
+    pub led_level_now: Option<u8>,
+    #[serde(default)]
+    pub led_mode_now: Option<LedMode>,
 }

@@ -48,6 +48,12 @@ base.setdefault("m2", {
     "2": {"present": True, "controller": "nvme0", "device": "nvme0n1",
           "pci": "0000:04:00.0", "port": "0000:00:14.0"},
 })
+# FAKE_LEDS=1: a synohwd with the front LED level chip (synodeb >= 4.8, scale 0..3 like a
+# DS923+), so Hardware > Synology shows the front LED schedule; without it the fields are absent
+# (an older synohwd) and the card stays hidden
+if os.environ.get("FAKE_LEDS"):
+    base.update({"led_schedule_supported": True, "led_level_min": 0, "led_level_max": 3,
+                 "led_level_default": 3, "led_level_now": 1, "led_mode_now": "reduced"})
 rpm0 = [f.get("rpm") for f in base.get("fans", [])]
 tick = 0
 while True:

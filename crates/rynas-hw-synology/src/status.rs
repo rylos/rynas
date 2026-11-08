@@ -22,7 +22,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use rynas_api_types::synology::{
-    FanAlarm, HardwareEvent, NamedTemperature, StatusLed, SynologyBay, SynologyDiagnostics,
+    FanAlarm, HardwareEvent, LedMode, NamedTemperature, StatusLed, SynologyBay, SynologyDiagnostics,
     SynologyFan, SynologyStatus,
 };
 use rynas_api_types::{Bay, Fan, HardwareStatus, M2Slot};
@@ -54,6 +54,35 @@ pub struct Raw {
     pub status_led: Option<String>,
     #[serde(default)]
     pub events: Vec<(String, String)>,
+    /// Front LED level chip (synohwd ≥ synodeb 4.8); absent on older ones.
+    #[serde(default)]
+    pub led_schedule_supported: bool,
+    #[serde(default)]
+    pub led_level_min: Option<i64>,
+    #[serde(default)]
+    pub led_level_max: Option<i64>,
+    #[serde(default)]
+    pub led_level_default: Option<i64>,
+    #[serde(default)]
+    pub led_level_now: Option<i64>,
+    /// "normal" | "reduced" | "off".
+    #[serde(default)]
+    pub led_mode_now: Option<String>,
+}
+
+/// A level of synohwd's status as the API's `u8` (anything else: unknown).
+fn level(v: Option<i64>) -> Option<u8> {
+    v.and_then(|v| u8::try_from(v).ok())
+}
+
+/// `led_mode_now` as the API's [`LedMode`] (unknown words: none).
+pub fn led_mode(s: Option<&str>) -> Option<LedMode> {
+    Some(match s? {
+        "normal" => LedMode::Normal,
+        "reduced" => LedMode::Reduced,
+        "off" => LedMode::Off,
+        _ => return None,
+    })
 }
 
 #[derive(Deserialize, Debug, Clone, Default)]
@@ -352,6 +381,13 @@ impl Raw {
                 up_current_raw: self.up_current,
             },
             boot: None,
+            // the scale only means something where the chip is driven
+            led_schedule_supported: self.led_schedule_supported,
+            led_level_min: level(self.led_level_min).filter(|_| self.led_schedule_supported),
+            led_level_max: level(self.led_level_max).filter(|_| self.led_schedule_supported),
+            led_level_default: level(self.led_level_default).filter(|_| self.led_schedule_supported),
+            led_level_now: level(self.led_level_now).filter(|_| self.led_schedule_supported),
+            led_mode_now: led_mode(self.led_mode_now.as_deref()).filter(|_| self.led_schedule_supported),
         }
     }
 }
@@ -453,6 +489,37 @@ mod tests {
         assert_eq!(s.status_led, None);
         assert_eq!(s.events[0].at_ms, None);
         assert!(Raw::parse("{not json").is_err());
+    }
+
+    #[test]
+    fn front_led_fields() {
+        // older synohwd: no fields, nothing reported
+        let s = Raw::parse(FIXTURE).unwrap().synology(0, String::new());
+        assert!(!s.led_schedule_supported);
+        assert_eq!((s.led_level_max, s.led_mode_now), (None, None));
+        let raw = Raw::parse(
+            r#"{"epoch": 10, "led_schedule_supported": true, "led_level_min": 0,
+               "led_level_max": 3, "led_level_default": 3, "led_level_now": 1,
+               "led_mode_now": "reduced"}"#,
+        )
+        .unwrap();
+        let s = raw.synology(11, String::new());
+        assert!(s.led_schedule_supported);
+        assert_eq!(
+            (s.led_level_min, s.led_level_max, s.led_level_default, s.led_level_now),
+            (Some(0), Some(3), Some(3), Some(1))
+        );
+        assert_eq!(s.led_mode_now, Some(LedMode::Reduced));
+        // unsupported (DS920+ today): nulls, garbage words and levels ignored
+        let raw = Raw::parse(
+            r#"{"led_schedule_supported": false, "led_level_min": null, "led_level_now": -1,
+               "led_mode_now": null}"#,
+        )
+        .unwrap();
+        let s = raw.synology(0, String::new());
+        assert_eq!((s.led_level_min, s.led_level_now, s.led_mode_now), (None, None, None));
+        assert_eq!(led_mode(Some("dim")), None);
+        assert_eq!(led_mode(Some("off")), Some(LedMode::Off));
     }
 
     #[test]

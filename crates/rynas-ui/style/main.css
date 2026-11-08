@@ -1708,6 +1708,9 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .syn-macs li:first-child { border-top: 0; }
 .syn-macs li > .btn { margin-left: auto; }
 .syn-boot { margin-bottom: var(--s-3); }
+.input.syn-level { width: auto; min-width: 6rem; max-width: 100%; align-self: flex-start; }
+.syn-found { display: flex; flex-direction: column; gap: var(--s-1); overflow-wrap: anywhere; }
+.syn-import { overflow-wrap: anywhere; word-break: break-all; }
 .stage-bar {
   position: sticky; bottom: var(--s-4); z-index: 5;
   display: flex; align-items: center; flex-wrap: wrap; gap: var(--s-3);

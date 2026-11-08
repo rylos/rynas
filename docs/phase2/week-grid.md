@@ -1,9 +1,15 @@
 # Weekly schedule grid (7 days × 24 hours)
 
 A reusable UI component (`crates/rynas-ui/src/week_grid.rs`) for anything that takes a level
-per hour of the week: LED brightness (normal / reduced / off, first user, backend from synohwd
-later), backup and replication run windows, bandwidth limits by hour, notification quiet hours,
-fan quiet hours. No feature uses it yet; the demo build shows it at `/dev/week-grid`.
+per hour of the week: LED brightness (normal / reduced / off), backup and replication run
+windows, bandwidth limits by hour, notification quiet hours, fan quiet hours. The demo build
+shows samples at `/dev/week-grid`.
+
+Users:
+
+- Hardware › Synology, **front LED brightness schedule** (`modules/synology/led.rs`, synohwd's
+  `led_schedule`, synodeb ≥ 4.8; see `docs/plugins/synology.md`): levels `0` Normal (Full),
+  `1` Reduced (Half), `2` Off (Off); `from_dsm` validates a pasted DSM schedule.
 
 ## 1. Research
 

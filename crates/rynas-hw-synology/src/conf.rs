@@ -3,7 +3,10 @@
 //! synohwd's own lenient `validate_conf` (to read a file rynas did not write the way synohwd
 //! reads it).
 
-use rynas_api_types::synology::{FanMode, PowerButtonAction, ResetButtonAction, SynologySettings};
+use rynas_api_types::synology::{
+    FanMode, LED_SCHEDULE_LEN, PowerButtonAction, ResetButtonAction, SynologySettings,
+    SynologyStatus, led_schedule_valid,
+};
 
 pub const CONF_PATH: &str = "/etc/synohwd.toml";
 
@@ -12,12 +15,13 @@ pub const CONF_PATH: &str = "/etc/synohwd.toml";
 pub const RESET_HANDLER: &str = "/usr/libexec/rynas/rynasctl net reset-button";
 
 /// Integer keys with synohwd's ranges (`RANGES`).
-pub const RANGES: [(&str, i64, i64); 5] = [
+pub const RANGES: [(&str, i64, i64); 6] = [
     ("fan_period", 5, 300),
     ("fan_min_duty", 0, 99),
     ("hysteresis", 0, 20),
     ("led_brightness", 1, 255),
     ("disk_standby_minutes", 0, 330),
+    ("led_reduced_level", 0, 7),
 ];
 
 /// String keys with their choices (`CHOICES`); the buttons also take `command:<shell>`.
@@ -30,7 +34,7 @@ pub const CHOICES: [(&str, &[&str]); 3] = [
 pub const COMMAND_KEYS: [&str; 2] = ["power_button", "reset_button"];
 
 /// Every key of synohwd, in `DEFAULTS` order.
-pub const KEYS: [&str; 14] = [
+pub const KEYS: [&str; 16] = [
     "fan_mode",
     "fan_period",
     "fan_min_duty",
@@ -45,6 +49,8 @@ pub const KEYS: [&str; 14] = [
     "disk_standby_minutes",
     "wol",
     "ac_recovery",
+    "led_schedule",
+    "led_reduced_level",
 ];
 
 fn range(key: &str) -> (i64, i64) {
@@ -78,6 +84,49 @@ pub fn validate(s: &SynologySettings) -> Result<(), String> {
         "disk_standby_minutes",
         s.disk_standby_minutes as i64,
     )?;
+    check(
+        "led_reduced_level",
+        "led_reduced_level",
+        s.led_reduced_level as i64,
+    )?;
+    if !led_schedule_valid(&s.led_schedule) {
+        return Err(format!(
+            "led_schedule must be empty or {LED_SCHEDULE_LEN} characters 0, 1 or 2 (got {} characters)",
+            s.led_schedule.chars().count()
+        ));
+    }
+    Ok(())
+}
+
+/// The front LED settings against what the running synohwd reports (`status`): the reduced
+/// level within the model's scale, and no new schedule for a synohwd without the LED chip.
+/// Nothing to check while synohwd is not running (the scale is unknown; synohwd clamps).
+/// `applied` is the current value: a schedule already in the file is not refused again.
+pub fn validate_led(
+    s: &SynologySettings,
+    applied: &SynologySettings,
+    status: &SynologyStatus,
+) -> Result<(), String> {
+    if !status.running {
+        return Ok(());
+    }
+    if !status.led_schedule_supported {
+        if !s.led_schedule.is_empty() && s.led_schedule != applied.led_schedule {
+            return Err(
+                "this synohwd has no front LED brightness schedule (synodeb 4.8 or later on a model with the LED level chip)"
+                    .into(),
+            );
+        }
+        return Ok(());
+    }
+    if let (Some(lo), Some(hi)) = (status.led_level_min, status.led_level_max)
+        && !(lo..=hi).contains(&s.led_reduced_level)
+    {
+        return Err(format!(
+            "led_reduced_level must be {lo} to {hi} on this model (got {})",
+            s.led_reduced_level
+        ));
+    }
     Ok(())
 }
 
@@ -135,6 +184,8 @@ pub fn render(s: &SynologySettings) -> String {
     kv("disk_standby_minutes", s.disk_standby_minutes.to_string());
     kv("wol", s.wol.to_string());
     kv("ac_recovery", s.ac_recovery.to_string());
+    kv("led_schedule", quote(&s.led_schedule));
+    kv("led_reduced_level", s.led_reduced_level.to_string());
     o
 }
 
@@ -198,6 +249,17 @@ pub fn lenient(raw: &[(String, Raw)]) -> (SynologySettings, Vec<String>) {
             "disk_leds" => s.disk_leds = boolean(v).unwrap_or(s.disk_leds),
             "wol" => s.wol = boolean(v).unwrap_or(s.wol),
             "ac_recovery" => s.ac_recovery = boolean(v).unwrap_or(s.ac_recovery),
+            "led_reduced_level" => {
+                s.led_reduced_level = int(v).map_or(s.led_reduced_level, |i| i as u8)
+            }
+            // any other string is discarded by synohwd (always normal)
+            "led_schedule" => {
+                if let Raw::Str(t) = v
+                    && led_schedule_valid(t)
+                {
+                    s.led_schedule = t.clone();
+                }
+            }
             "power_button" => match choice(v).as_deref() {
                 Some("poweroff") => s.power_button = PowerButtonAction::Poweroff,
                 Some("log") => s.power_button = PowerButtonAction::Log,
@@ -339,6 +401,9 @@ mod tests {
                     "disk_standby_minutes" => {
                         u16::try_from(v).map(|x| t.disk_standby_minutes = x).is_ok()
                     }
+                    "led_reduced_level" => {
+                        u8::try_from(v).map(|x| t.led_reduced_level = x).is_ok()
+                    }
                     _ => unreachable!(),
                 };
                 if !fits {
@@ -382,7 +447,9 @@ mod tests {
              led_brightness = 255\n\
              disk_standby_minutes = 0\n\
              wol = false\n\
-             ac_recovery = true\n"
+             ac_recovery = true\n\
+             led_schedule = \"\"\n\
+             led_reduced_level = 1\n"
         );
         // every key of synohwd, nothing else, and synohwd reads back exactly the settings
         let raw = parse_toml(&text).unwrap();
@@ -421,7 +488,9 @@ mod tests {
              led_brightness = 255\n\
              disk_standby_minutes = 0\n\
              wol = false\n\
-             ac_recovery = true\n"
+             ac_recovery = true\n\
+             led_schedule = \"\"\n\
+             led_reduced_level = 1\n"
         );
         assert!(!text.contains("rynas network"));
         assert_eq!(lenient(&parse_toml(&text).unwrap()), (s, vec![]));
@@ -444,6 +513,8 @@ mod tests {
             disk_standby_minutes: 20,
             wol: true,
             ac_recovery: false,
+            led_schedule: "0".repeat(100) + &"1".repeat(60) + &"2".repeat(8),
+            led_reduced_level: 2,
         };
         let text = render(&s);
         assert!(
@@ -469,5 +540,79 @@ mod tests {
         assert_eq!(effective(Some(synodeb)).0, SynologySettings::default());
         let (c, _) = effective(Some("fan_mode = \"full\"\nled_brightness = 0\n"));
         assert_eq!((c.fan_mode, c.led_brightness), (FanMode::Full, 1));
+    }
+
+    /// `led_schedule`: "" or 168 × [012]; synohwd discards anything else, rynas refuses it.
+    #[test]
+    fn led_schedule_validation_and_file() {
+        let week = "0".repeat(24) + &"1".repeat(120) + &"2".repeat(24);
+        let ok = SynologySettings {
+            led_schedule: week.clone(),
+            led_reduced_level: 2,
+            ..Default::default()
+        };
+        assert!(validate(&ok).is_ok());
+        let text = render(&ok);
+        assert!(text.contains(&format!("\nled_schedule = \"{week}\"\nled_reduced_level = 2\n")));
+        assert_eq!(lenient(&parse_toml(&text).unwrap()).0, ok);
+        for bad in [
+            "0".repeat(167),
+            "0".repeat(169),
+            "3".repeat(168),
+            format!("{}x", "0".repeat(167)),
+            format!("é{}", "0".repeat(166)),
+            " ".repeat(168),
+        ] {
+            let t = SynologySettings {
+                led_schedule: bad.clone(),
+                ..Default::default()
+            };
+            assert!(validate(&t).is_err(), "{bad:?}");
+            // what synohwd does with it: always normal
+            let (c, _) = effective(Some(&format!("led_schedule = {}\n", quote(&bad))));
+            assert_eq!(c.led_schedule, "", "{bad:?}");
+        }
+        // wrong type, out of range: like synohwd
+        let (c, _) = effective(Some("led_schedule = 1\nled_reduced_level = 12\n"));
+        assert_eq!((c.led_schedule.as_str(), c.led_reduced_level), ("", 7));
+        let (c, _) = effective(Some("led_reduced_level = -3\n"));
+        assert_eq!(c.led_reduced_level, 0);
+        // a file of an older synohwd (no LED keys) reads as the defaults
+        assert_eq!(effective(Some("wol = true\n")).0.led_reduced_level, 1);
+    }
+
+    fn led_status(supported: bool) -> SynologyStatus {
+        SynologyStatus {
+            running: true,
+            led_schedule_supported: supported,
+            led_level_min: supported.then_some(0),
+            led_level_max: supported.then_some(3),
+            led_level_default: supported.then_some(3),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn led_settings_against_the_model() {
+        let applied = SynologySettings::default();
+        let week = "1".repeat(168);
+        let mut s = SynologySettings {
+            led_schedule: week.clone(),
+            led_reduced_level: 3,
+            ..Default::default()
+        };
+        assert!(validate_led(&s, &applied, &led_status(true)).is_ok());
+        s.led_reduced_level = 4;
+        let e = validate_led(&s, &applied, &led_status(true)).unwrap_err();
+        assert!(e.contains("0 to 3"), "{e}");
+        // no chip: a new schedule is refused, the defaults and an existing one pass
+        s.led_reduced_level = 1;
+        assert!(validate_led(&s, &applied, &led_status(false)).is_err());
+        assert!(validate_led(&applied, &applied, &led_status(false)).is_ok());
+        assert!(validate_led(&s, &s.clone(), &led_status(false)).is_ok());
+        // synohwd stopped: the scale is unknown, nothing refused
+        let stopped = SynologyStatus::default();
+        s.led_reduced_level = 7;
+        assert!(validate_led(&s, &applied, &stopped).is_ok());
     }
 }

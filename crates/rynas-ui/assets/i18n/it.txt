@@ -4321,6 +4321,27 @@ syn.disk_leds	LED dei dischi
 syn.disk_leds_help	Verde con il disco presente, lampeggiante durante l'attività.
 syn.brightness	Luminosità dei LED
 syn.brightness_help	Comune a tutti i LED dei dischi; applicata con le altre impostazioni.
+syn.ledsch	Pianificazione della luminosità dei LED frontali
+syn.ledsch_on	Cambia la luminosità in base all'ora
+syn.ledsch_on_help	Se disattivata, i LED frontali restano sempre al livello normale.
+syn.ledsch_normal	Normale
+syn.ledsch_reduced	Ridotta
+syn.ledsch_off	Spenti
+syn.ledsch_grid	Livello dei LED frontali per ora
+syn.ledsch_level	Livello ridotto
+syn.ledsch_level_help	{lo} è il più tenue, {normal} è il livello normale. Spenti nella griglia spegne tutti i LED frontali.
+syn.ledsch_now	LED frontali ora
+syn.ledsch_now_value	{mode}, livello {level}
+syn.ledsch_scope	LED di alimentazione, stato, rete e dischi sul frontale. Questo chip è separato dalla luminosità dei LED dei dischi: le due impostazioni si sommano.
+syn.ledsch_import	Importa da DSM
+syn.ledsch_import_text	Pianificazione o righe di synoinfo.conf
+syn.ledsch_import_help	Incolla la pianificazione di 168 caratteri, oppure le righe di un synoinfo.conf esportato da DSM con led_brightness_schedule e, se c'è, led_brightness_adjusted_level.
+syn.ledsch_found_schedule	Pianificazione: {summary}
+syn.ledsch_found_level	Livello ridotto: {level}
+syn.ledsch_level_outside	Il livello ridotto {level} è fuori da {lo}–{hi} su questo modello: non applicato.
+syn.ledsch_err_len	La pianificazione ha {n} caratteri: ne servono 168, ognuno 0, 1 o 2.
+syn.ledsch_err_none	Niente di riconosciuto: incolla la pianificazione di 168 caratteri o la riga led_brightness_schedule.
+syn.ledsch_apply	Applica al modulo
 syn.beep_start	Segnale acustico all'avvio del NAS
 syn.beep_error	Segnale acustico in caso di errori hardware
 syn.beep_error_help	Guasto delle ventole e spegnimento termico.

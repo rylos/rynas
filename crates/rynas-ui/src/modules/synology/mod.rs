@@ -4,6 +4,7 @@
 //! ([`reset_button`]). Nothing here is shown on other hardware.
 
 pub mod i18n;
+mod led;
 mod page;
 
 use leptos::prelude::*;

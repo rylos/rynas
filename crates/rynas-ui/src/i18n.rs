@@ -4851,8 +4851,11 @@ mod tests {
         const APPS: &[&str] = &["storage manager", "task scheduler", "file station", "package center", "hyper backup", "control panel", "utilità di pianificazione"];
         // being reworded by the UPS work in progress: drop from here once it is
         const PENDING: &[&str] = &[];
+        // the file format a schedule is imported from, named on the import button and its help
+        // only (approved by the maintainer, 2026-11-08); never a comparison
+        const FORMAT_SOURCE: &[&str] = &["syn.ledsch_import", "syn.ledsch_import_help"];
         let mut hits = Vec::new();
-        for (k, en, it) in entries().into_iter().filter(|e| !PENDING.contains(&e.0)) {
+        for (k, en, it) in entries().into_iter().filter(|e| !PENDING.contains(&e.0) && !FORMAT_SOURCE.contains(&e.0)) {
             for text in [en, it] {
                 let words = text.split(|c: char| !c.is_alphanumeric()).map(str::to_ascii_lowercase);
                 if let Some(w) = words.into_iter().find(|w| PRODUCTS.contains(&w.as_str())) {

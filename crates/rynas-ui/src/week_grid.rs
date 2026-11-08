@@ -83,7 +83,6 @@ pub fn validate(value: &str, codes: &[char]) -> Result<(), GridError> {
 
 /// A schedule string of the Synology UI (Sunday first, one character per hour) as a grid
 /// value: the same string, validated.
-#[allow(dead_code, reason = "API for the features that store a schedule (LED, backup windows), tested here")]
 pub fn from_dsm(s: &str, codes: &[char]) -> Result<String, GridError> {
     validate(s, codes)?;
     Ok(s.to_string())

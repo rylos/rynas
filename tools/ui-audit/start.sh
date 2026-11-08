@@ -32,6 +32,8 @@
 # connected (a subnet waiting for approval), logged out with a login address, or with a key about
 # to expire. Without it rynasd --dry-system never contacts a tailscaled socket (Install offered).
 # TLS_LISTEN=off: rynas-web without its HTTPS port (8443 is taken when another instance runs).
+# FAKE_LEDS=1: synohwd's status says the front LED level chip is driven (synodeb 4.8, scale 0..3):
+# Hardware > Synology shows the front LED brightness schedule card.
 # GENERIC=1: a plain PC instead of the DS920+ (no Synology platform, no synohwd status), to check
 # that no Synology screen, tab or hint shows up on generic hardware (G8d).
 set -e

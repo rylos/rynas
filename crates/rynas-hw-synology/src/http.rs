@@ -100,7 +100,19 @@ async fn settings_put(
     let Json(s) = body?;
     Ok(Json(
         blocking(move || {
-            st.synology()?;
+            let p = st.synology()?;
+            // the front LED scale is the running synohwd's (the domain only knows static ranges)
+            if let Ok(status) = p.synology_status() {
+                let (_, cur, _): (SynologySettings, SynologySettings, Option<SynologySettings>) =
+                    docs(&st.ctx.config, &owner, SYNOLOGY_KEY)?;
+                crate::conf::validate_led(&s, &cur, &status).map_err(|m| {
+                    Error::new(
+                        StatusCode::BAD_REQUEST,
+                        rynas_api_types::error_codes::INVALID_VALUE,
+                        m,
+                    )
+                })?;
+            }
             stage(&st.ctx.config, &owner, SYNOLOGY_KEY, &s)?;
             settings_state(&st, &owner)
         })

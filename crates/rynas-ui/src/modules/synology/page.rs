@@ -110,6 +110,10 @@ pub fn range_error(s: &SynologySettings) -> Option<&'static str> {
         Some("led_brightness")
     } else if s.disk_standby_minutes > 330 {
         Some("disk_standby_minutes")
+    } else if s.led_reduced_level > 7 {
+        Some("led_reduced_level")
+    } else if !led_schedule_valid(&s.led_schedule) {
+        Some("led_schedule")
     } else {
         None
     }
@@ -245,6 +249,8 @@ fn body(s: SynologySettingsState, settings: Remote<SynologySettingsState>, st: R
     let dirty = draft.dirty();
     let pending = Signal::derive(move || settings.data.with(|s| s.as_ref().is_some_and(|s| s.pending.is_some())));
     let running = s.platform.synohwd_running;
+    // synodeb ≥ 4.8 with the front LED chip: the schedule card (hidden otherwise)
+    let led_supported = Memo::new(move |_| st.data.with(|v| v.as_ref().is_some_and(|v| v.led_schedule_supported)));
     let save = move || {
         if d.with_untracked(range_error).is_some() {
             error.set(Some(t("form.check").to_string()));
@@ -286,6 +292,7 @@ fn body(s: SynologySettingsState, settings: Remote<SynologySettingsState>, st: R
             {thermal_card(d, curves)}
             {leds_card(d, running)}
             {buttons_card(d)}
+            {move || led_supported.get().then(|| super::led::card(d, st))}
             {power_card(d)}
             {events_card(st)}
         </div>
@@ -847,5 +854,13 @@ mod tests {
         s.disk_standby_minutes = 330;
         s.led_brightness = 0;
         assert_eq!(range_error(&s), Some("led_brightness"));
+        s.led_brightness = 1;
+        s.led_reduced_level = 8;
+        assert_eq!(range_error(&s), Some("led_reduced_level"));
+        s.led_reduced_level = 7;
+        s.led_schedule = "0".repeat(167);
+        assert_eq!(range_error(&s), Some("led_schedule"));
+        s.led_schedule = "2".repeat(168);
+        assert_eq!(range_error(&s), None);
     }
 }

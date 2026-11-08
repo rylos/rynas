@@ -329,6 +329,94 @@ async fn settings_are_staged_and_applied() {
     assert_eq!(c.modes[0].curves[2].shutdown_c, 90, "DS920+ CPU");
 }
 
+/// A fresh synohwd status with the front LED chip (synodeb ≥ 4.8, scale 0..3).
+fn fresh_status_with_leds(hw: &Path, supported: bool) {
+    let mut v: Value = serde_json::from_str(include_str!(
+        "../../rynas-hw-synology/tests/fixtures/synohwd-status.json"
+    ))
+    .unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    v["epoch"] = json!(now);
+    v["led_schedule_supported"] = json!(supported);
+    if supported {
+        v["led_level_min"] = json!(0);
+        v["led_level_max"] = json!(3);
+        v["led_level_default"] = json!(3);
+        v["led_level_now"] = json!(1);
+        v["led_mode_now"] = json!("reduced");
+    }
+    std::fs::write(hw.join("run/synohwd/status.json"), v.to_string()).unwrap();
+}
+
+#[tokio::test]
+async fn led_schedule_is_checked_against_the_model_and_written() {
+    let e = env(true);
+    let hw = e.dir.path().join("hw");
+    fresh_status_with_leds(&hw, true);
+    let (s, b) = call(&e, "GET", "/v1/modules/synology/status", None).await;
+    assert_eq!(s, StatusCode::OK);
+    let st: SynologyStatus = serde_json::from_slice(&b).unwrap();
+    assert!(st.led_schedule_supported && st.running);
+    assert_eq!(
+        (st.led_level_max, st.led_level_now, st.led_mode_now),
+        (
+            Some(3),
+            Some(1),
+            Some(rynas_api_types::synology::LedMode::Reduced)
+        )
+    );
+    let (_, b) = call(&e, "GET", "/v1/modules/synology/settings", None).await;
+    let cur: SynologySettingsState = serde_json::from_slice(&b).unwrap();
+    let mut v = serde_json::to_value(&cur.applied).unwrap();
+    let week = "0".repeat(24) + &"1".repeat(120) + &"2".repeat(24);
+    // not 168 characters of 0/1/2
+    v["led_schedule"] = json!("012");
+    let (s, b) = call(&e, "PUT", "/v1/modules/synology/settings", Some(v.clone())).await;
+    assert_eq!(
+        (s, code(&b).as_str()),
+        (StatusCode::BAD_REQUEST, error_codes::INVALID_VALUE)
+    );
+    // above the model's scale (synohwd's static range is 0..7)
+    v["led_schedule"] = json!(week);
+    v["led_reduced_level"] = json!(5);
+    let (s, b) = call(&e, "PUT", "/v1/modules/synology/settings", Some(v.clone())).await;
+    assert_eq!(
+        (s, code(&b).as_str()),
+        (StatusCode::BAD_REQUEST, error_codes::INVALID_VALUE),
+        "{}",
+        String::from_utf8_lossy(&b)
+    );
+    v["led_reduced_level"] = json!(2);
+    let (s, b) = call(&e, "PUT", "/v1/modules/synology/settings", Some(v.clone())).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    apply(&e);
+    let text = std::fs::read_to_string(e.dir.path().join("root/etc/synohwd.toml")).unwrap();
+    assert!(
+        text.contains(&format!("\nled_schedule = \"{week}\"\nled_reduced_level = 2\n")),
+        "{text}"
+    );
+    assert!(
+        e.sys
+            .state()
+            .calls
+            .iter()
+            .any(|c| c.contains("restart synohwd.service"))
+    );
+    // a synohwd without the chip refuses a new schedule
+    fresh_status_with_leds(&hw, false);
+    v["led_schedule"] = json!("2".repeat(168));
+    let (s, b) = call(&e, "PUT", "/v1/modules/synology/settings", Some(v)).await;
+    assert_eq!(
+        (s, code(&b).as_str()),
+        (StatusCode::BAD_REQUEST, error_codes::INVALID_VALUE),
+        "{}",
+        String::from_utf8_lossy(&b)
+    );
+}
+
 #[tokio::test]
 async fn actions_go_through_the_fifo_and_the_leds() {
     let e = env(true);
