@@ -62,7 +62,7 @@ pub fn router(st: ProtState) -> Router {
         .with_state(st)
 }
 
-fn json_body<T>(b: Result<Json<T>, JsonRejection>) -> Res<T> {
+pub(crate) fn json_body<T>(b: Result<Json<T>, JsonRejection>) -> Res<T> {
     b.map(|Json(v)| v).map_err(Error::from)
 }
 
@@ -187,13 +187,13 @@ async fn job_get(
 
 /// The three documents a job touches, as the user sees them.
 #[derive(Clone)]
-struct Docs {
-    snaps: SnapshotsConfig,
-    sched: SchedulerConfig,
+pub(crate) struct Docs {
+    pub(crate) snaps: SnapshotsConfig,
+    pub(crate) sched: SchedulerConfig,
     shares: SharesConfig,
 }
 
-fn load(p: &Protection, owner: &str) -> Res<Docs> {
+pub(crate) fn load(p: &Protection, owner: &str) -> Res<Docs> {
     let c = &p.ops.config;
     let (snaps, _, _) = docs(c, owner, SNAPSHOTS_KEY)?;
     let (sched, _, _) = docs(c, owner, SCHEDULER_KEY)?;
@@ -207,7 +207,7 @@ fn load(p: &Protection, owner: &str) -> Res<Docs> {
 
 /// Stages the documents that changed since [`load`] (an untouched key is never staged: a
 /// default document would otherwise replace a configuration never applied by rynas).
-fn save(p: &Protection, owner: &str, d: &Docs, orig: &Docs) -> Res<u32> {
+pub(crate) fn save(p: &Protection, owner: &str, d: &Docs, orig: &Docs) -> Res<u32> {
     let c = &p.ops.config;
     let mut n = 0;
     if d.snaps != orig.snaps {
@@ -309,7 +309,10 @@ async fn job_create(
     let name = blocking(&p, move |p| {
         let mut d = load(p, &o)?;
         let orig = d.clone();
-        let job = resolve_job(&d, req.job)?;
+        let mut job = req.job;
+        // replica targets are added through /snapshots/replication (with their tasks)
+        job.replicas.clear();
+        let job = resolve_job(&d, job)?;
         if d.snaps
             .jobs
             .iter()
@@ -372,7 +375,10 @@ async fn job_put(
             .find(|j| j.name == n)
             .cloned()
             .ok_or_else(|| not_found(format!("snapshot job {n}")))?;
-        let job = resolve_job(&d, req.job)?;
+        // replica targets change through /snapshots/replication (with their tasks)
+        let mut job = req.job;
+        job.replicas = old.replicas.clone();
+        let job = resolve_job(&d, job)?;
         let tid = task_id_of(&n);
         let cur_task = d.sched.tasks.iter().find(|t| t.id == tid).cloned();
         let schedule = req
@@ -420,6 +426,10 @@ async fn job_delete(
         d.snaps.jobs.retain(|j| j.name != name);
         let tid = task_id_of(&name);
         d.sched.tasks.retain(|t| t.id != tid);
+        // the replica targets go with the job (their replicas stay on the targets)
+        d.sched
+            .tasks
+            .retain(|t| !matches!(&t.action, TaskAction::Replicate { job, .. } if *job == name));
         unwire_shadow_copy(&mut d, &job);
         save(p, &owner, &d, &orig)
     })

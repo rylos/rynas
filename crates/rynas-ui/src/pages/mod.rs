@@ -10,6 +10,7 @@ pub mod hardware;
 pub mod notifications;
 pub mod scheduler;
 pub mod network;
+pub mod replication;
 pub mod security;
 pub mod services;
 pub mod share_folders;

@@ -10,20 +10,24 @@
 //! - [`rootfs`]: rolling the system back to a restore point (`@rootfs` and, through a hardware
 //!   module's boot layer, the boot entry of its kernel);
 //! - [`btrbk`]: the configuration rynas generates per job and btrbk's raw output;
-//! - [`domain`]: the `snapshots` configuration domain;
+//! - [`replication`]: replica targets of a job (btrbk `target` sections), transfers, status,
+//!   replicas browse and promote; [`btrbk_ssh`]: reusable SSH key and filter helpers;
 //! - [`receive`], [`receive_filter`]: PC backup, receive side (btrbk pushes from PCs): folder
-//!   summary, NAS-side delete rules, account texts, and the forced command's allowlist.
+//!   summary, NAS-side delete rules, account texts, and the forced command's allowlist;
+//! - [`domain`]: the `snapshots` configuration domain.
 //!
 //! Ported in part from btrbk-nas (MIT, same author): `snapshot.rs`, `btrfs.rs`, `browse.rs`.
 //! No qgroups: nothing here enables or reads quotas.
 
 pub mod browse;
 pub mod btrbk;
+pub mod btrbk_ssh;
 pub mod domain;
 pub mod ioctl;
 pub mod name;
 pub mod receive;
 pub mod receive_filter;
+pub mod replication;
 pub mod restore;
 pub mod rootfs;
 pub mod scan;

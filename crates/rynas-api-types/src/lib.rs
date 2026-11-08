@@ -15,6 +15,7 @@ pub mod notify;
 pub mod pcbackup;
 pub mod power;
 pub mod removable;
+pub mod replication;
 pub mod scheduler;
 mod services;
 pub mod snapshots;

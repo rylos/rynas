@@ -40,6 +40,10 @@ pub struct SnapshotJob {
     pub snapshot_dir: String,
     #[serde(default)]
     pub retention: Retention,
+    /// Second copies of the snapshots on other volumes or hosts
+    /// ([`crate::replication`]); changed through `/api/v1/snapshots/replication`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replicas: Vec<crate::replication::ReplicaTarget>,
 }
 
 /// GFS retention, as btrbk's `snapshot_preserve` / `snapshot_preserve_min`. With a

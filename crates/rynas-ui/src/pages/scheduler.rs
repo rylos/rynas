@@ -470,6 +470,7 @@ impl ActionDraft {
                 d.days = days.map(|d| d.to_string()).unwrap_or_default();
             }
             TaskAction::Snapshot { .. } => d.kind = "snapshot".into(),
+            TaskAction::Replicate { .. } => d.kind = "replicate".into(),
             TaskAction::PowerShutdown { .. } => d.kind = "power_shutdown".into(),
         }
         d
@@ -530,6 +531,7 @@ pub fn action_text(a: &TaskAction) -> (String, String) {
             (t("sch.act.script").to_string(), format!("{user}: {first}"))
         }
         TaskAction::Snapshot { job } => (t("sch.act.snapshot").to_string(), job.clone()),
+        TaskAction::Replicate { job, target } => (t("sch.act.replicate").to_string(), format!("{job} → {target}")),
         TaskAction::Scrub { filesystem } => (t("sch.act.scrub").to_string(), filesystem.clone()),
         TaskAction::SmartTest { disk, test } => {
             (t("sch.act.smart_test").to_string(), format!("{disk} · {}", t(if *test == SmartTestKind::Long { "sch.smart.long" } else { "sch.smart.short" })))
@@ -721,7 +723,7 @@ fn task_row(
     let id = task.id.clone();
     let name = if task.name.is_empty() { task.id.clone() } else { task.name.clone() };
     let deleting = st.pending == Some(PendingOp::Delete);
-    let fixed = matches!(task.action, TaskAction::Snapshot { .. } | TaskAction::PowerShutdown { .. });
+    let fixed = matches!(task.action, TaskAction::Snapshot { .. } | TaskAction::Replicate { .. } | TaskAction::PowerShutdown { .. });
     let (akind, adetail) = action_text(&task.action);
     let enabled = task.enabled;
     let toggling = RwSignal::new(false);

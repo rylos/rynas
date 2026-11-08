@@ -1120,8 +1120,11 @@ async fn share_delete(
             stage(c, &owner, SNAPSHOTS_KEY, &snaps)?;
             let (mut sched, _, _): (SchedulerConfig, SchedulerConfig, _) =
                 docs(c, &owner, SCHEDULER_KEY)?;
-            sched.tasks.retain(|t| {
-                !matches!(&t.action, TaskAction::Snapshot { job } if jobs.contains(job))
+            sched.tasks.retain(|t| match &t.action {
+                TaskAction::Snapshot { job } | TaskAction::Replicate { job, .. } => {
+                    !jobs.contains(job)
+                }
+                _ => true,
             });
             stage(c, &owner, SCHEDULER_KEY, &sched)?;
             n += 2;

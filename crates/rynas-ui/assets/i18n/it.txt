@@ -2116,6 +2116,114 @@ snap.system_enabled_help	Richiede un filesystem di root btrfs.
 snap.system_keep	Punti di ripristino conservati
 snap.system_keep_help	I più vecchi oltre questo numero vengono eliminati dopo uno nuovo.
 snap.system_prefix	Prefisso del nome
+snap.tab.replication	Replica
+sch.act.replicate	Replica degli snapshot
+task.replication.run	Replica degli snapshot
+task.replication.restore	Ripristino da una replica
+task.replication.promote	Promozione di una replica
+nev.replication.failed.title	Replica {name} non riuscita
+nev.replication.ok.title	La replica {name} funziona di nuovo
+repl.intro	Una seconda copia degli snapshot di un job su un altro volume btrfs o su un altro server, con una conservazione propria. Gli snapshot sugli stessi dischi non sono un backup.
+repl.add	Aggiungi destinazione di replica
+repl.none	Nessuna destinazione di replica
+repl.none_text	Aggiungi una destinazione per tenere una copia degli snapshot su un altro volume o server.
+repl.none_no_jobs	Crea prima un job di snapshot: la replica ne copia gli snapshot.
+repl.col.target	Destinazione
+repl.col.when	Quando
+repl.col.last	Ultimo trasferimento
+repl.col.replica	Replica
+repl.after_snapshots	Dopo ogni snapshot
+repl.next	prossima {time}
+repl.never	Mai
+repl.sent_one	{n} snapshot inviato
+repl.sent_many	{n} snapshot inviati
+repl.off	Disattivata
+repl.failing	Non riuscita
+repl.ok	Replicata
+repl.waiting	Non ancora eseguita
+repl.run	Replica ora
+repl.run_done	Replica completata
+repl.replicas	Repliche
+repl.replicas_remote	Le repliche su un altro server si consultano su quel server
+repl.replicas_title	Repliche di {job} su {id}
+repl.replicas_text	Copie in sola lettura in {path}. Ripristina copia un file o una cartella accanto all'originale; Promuovi crea una copia scrivibile come nuova cartella su quel volume.
+repl.no_replicas	Ancora nessuna replica: compaiono dopo il primo trasferimento.
+repl.incomplete	Trasferimento interrotto
+repl.back	Torna alle repliche
+repl.restore_title	Ripristinare {path} dalla replica?
+repl.restore_text	Una copia viene messa accanto all'originale nella cartella condivisa, con la data del ripristino nel nome. Nulla viene sovrascritto.
+repl.promote	Promuovi
+repl.promote_title	Promuovere {name}?
+repl.promote_text	Crea una copia scrivibile di questa replica come nuova cartella nella radice del volume di destinazione, pronta da condividere. La replica resta in sola lettura, quindi i trasferimenti successivi continuano.
+repl.promoted	Cartella {folder} creata
+repl.delete_title	Rimuovere la destinazione {id} di {job}?
+repl.delete_text	La replica verso questa destinazione si ferma. Le repliche già presenti restano: eliminale sulla destinazione se non servono più.
+repl.sec.target	Destinazione
+repl.sec.key	Accesso al server
+repl.sec.retention	Conservazione sulla destinazione
+repl.sec.transfer	Trasferimento
+repl.f.job_help	Vengono copiati gli snapshot di questo job.
+repl.f.id	Nome della destinazione
+repl.f.id_help	Lettere minuscole, cifre e '-', per esempio hdd o offsite.
+repl.f.kind	Dove
+repl.kind.local	Un altro volume
+repl.kind.ssh	Un altro server (SSH)
+repl.f.host	Server
+repl.f.port	Porta
+repl.f.user	Utente
+repl.f.user_help	Sul server; root, o un utente che può eseguire btrfs con sudo.
+repl.f.path	Cartella
+repl.f.path_local_help	Su un altro volume btrfs di questo NAS; viene creata al primo trasferimento. Non sul volume dell'origine.
+repl.f.path_remote_help	Su un filesystem btrfs del server. Deve esistere: creala lì (per esempio btrfs subvolume create).
+repl.f.sudo	Esegui btrfs con sudo
+repl.f.sudo_help	Per un utente diverso da root.
+repl.f.host_keys	Identità del server
+repl.f.host_keys_none	Non ancora confermata: i trasferimenti sono rifiutati finché la chiave del server non è confermata.
+repl.f.scan	Leggi la chiave del server
+repl.f.scan_check	Confronta queste impronte con l'output di ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub sul server prima di fidarti.
+repl.f.scan_none	Il server non ha restituito alcuna chiave.
+repl.f.trust	Fidati di queste chiavi
+repl.f.enabled	Replica attiva
+repl.f.after	Esegui dopo ogni snapshot
+repl.f.after_help	Disattivato: la destinazione ha una pianificazione propria (per esempio ogni notte).
+repl.f.retention_help	Indipendente dagli snapshot sull'origine. Sulla destinazione vengono eliminate solo le repliche create da rynas.
+repl.f.compress	Compressione in rete
+repl.compress.no	Nessuna
+repl.compress.zstd	zstd
+repl.compress.lz4	lz4
+repl.compress.gzip	gzip
+repl.f.rate	Limite di banda (KiB/s)
+repl.f.rate_help	Vuoto o 0: nessun limite.
+repl.f.folder	Nuova cartella
+repl.f.folder_help	Nella radice del volume di destinazione; non deve esistere.
+repl.key.none	rynas si collega con una propria coppia di chiavi, usata solo per la replica.
+repl.key.create	Crea la chiave
+repl.key.public	Chiave pubblica di questo NAS
+repl.key.line	Riga per il server
+repl.key.line_help	Aggiungila a `{file}` sul server: la chiave potrà solo ricevere e sfoltire repliche in questa cartella.
+repl.key.filter_version	Il server deve avere btrbk 0.32.7 o successivo: le versioni precedenti di `ssh_filter_btrbk.sh` permettono a una chiave limitata di eseguire qualsiasi comando.
+repl.key.sudo_help	Sul server, consenti a {user} di eseguire btrfs senza password, per esempio `{user} ALL=(root) NOPASSWD: /usr/bin/btrfs` in un file di `/etc/sudoers.d`.
+repl.copy	Copia
+repl.copied	Copiato
+repl.hint.ssh_key	Il server rifiuta la chiave: aggiungi la riga per il server al suo `authorized_keys`.
+repl.hint.host_key	L'identità del server non è confermata o è cambiata: leggi e conferma di nuovo la sua chiave.
+repl.hint.unreachable	Il server non è raggiungibile: controlla nome, porta e che sia acceso.
+repl.hint.filter	Il filtro dei comandi del server ha rifiutato un comando: controlla la cartella nella riga e che il suo btrbk sia 0.32.7 o successivo.
+repl.hint.target_missing	La cartella di destinazione non esiste: creala sulla destinazione (`btrfs subvolume create`).
+repl.hint.not_btrfs	La destinazione non è su btrfs: la replica richiede btrfs da entrambe le parti.
+repl.hint.no_space	La destinazione è piena: libera spazio o conserva meno repliche.
+repl.hint.busy	Un'altra esecuzione di questo job era ancora in corso: la prossima esecuzione riprova.
+repl.hint.btrbk	btrbk manca o è troppo vecchio su questo NAS o sul server.
+repl.hint.other	L'output completo è nella cronologia delle attività.
+repl.warn.not_btrfs	Non su btrfs: la replica richiede una destinazione btrfs.
+repl.warn.same_fs	Sul volume dell'origine: non è una seconda copia.
+repl.warn.not_mounted	Lì non è montato alcun volume: montalo prima del prossimo trasferimento.
+repl.warn.no_host_key	Identità del server non confermata.
+repl.v.id	Usa da 1 a 24 lettere minuscole, cifre e '-'.
+repl.v.path	Inserisci il percorso assoluto di una cartella.
+repl.v.host	Inserisci il nome o l'indirizzo del server.
+repl.v.port	Inserisci una porta da 1 a 65535.
+repl.v.rate	Inserisci un numero di KiB/s.
 nav.network	Rete
 net.title	Rete
 net.subtitle	Interfacce, indirizzi e accessi di emergenza. Ogni modifica viene provata e annullata se non la confermi.

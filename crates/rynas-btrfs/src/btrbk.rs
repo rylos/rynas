@@ -125,12 +125,14 @@ pub fn render_conf(job: &SnapshotJob) -> Result<String, String> {
          volume {vol}\n\
          \x20 snapshot_dir {sd}\n\
          \x20 subvolume {sv}\n\
-         \x20   snapshot_name {name}\n",
+         \x20   snapshot_name {name}\n\
+         {targets}",
         name = job.name,
         conf = conf_path(&job.name).display(),
         min = r.min,
         pre = preserve(r),
         lock = lock_path(&job.name).display(),
+        targets = crate::replication::render_targets(job),
     ))
 }
 
@@ -240,6 +242,7 @@ mod tests {
             subvolume: sv.into(),
             snapshot_dir: sd.into(),
             retention: RetentionPreset::Standard.retention(),
+            replicas: Vec::new(),
         }
     }
 

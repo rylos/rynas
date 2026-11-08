@@ -31,6 +31,7 @@ pub mod pc_backup;
 pub mod power;
 pub mod protection;
 pub mod removable;
+pub mod replication;
 pub mod roles;
 pub mod scheduler;
 pub mod server;
