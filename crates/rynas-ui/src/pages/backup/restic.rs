@@ -21,7 +21,7 @@ use rynas_api_types::scheduler::TaskTrigger;
 use rynas_api_types::{ShareView, TaskStatus};
 
 use crate::api;
-use crate::form::{In, area_field, number_field, save_bar, segmented, switch, text_field};
+use crate::form::{In, area_field, number_field, save_bar, segmented, select_field, switch, text_field};
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::pages::scheduler::{TriggerEdit, run_status, trigger_text};
@@ -730,7 +730,7 @@ fn job_editor(init: Option<BackupJobView>, shown_password: RwSignal<Option<Strin
             {area_field("bk.f.folders", f.folders.into(), Callback::new(move |v| f.folders.set(v)), Some("bk.f.folders_help"), "/volume1/docker")}
 
             <h3 class="form-section">{tr("bk.sec.where")}</h3>
-            {segmented("bk.f.dest", DESTS, f.kind.into(), Callback::new(move |v| { f.kind.set(v); tested.set(None); }))}
+            {select_field("bk.f.dest", None, DESTS, f.kind.into(), Callback::new(move |v| { f.kind.set(v); tested.set(None); }))}
             {dest_fields}
             <div class="btn-row">
                 <button type="button" class="btn ghost sm" disabled=move || testing.get() on:click=run_test>
