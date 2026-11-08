@@ -1809,6 +1809,9 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .wa-radios { display: flex; flex-direction: column; gap: var(--s-3); }
 .wa-off { cursor: not-allowed; opacity: .75; }
 .wa-help { max-width: 80ch; margin: 0; }
+/* PC backup receive (Backup › PCs) */
+.bk-help { max-width: 80ch; margin: 0 0 var(--s-3); }
+.bk-where { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .wa-confirm { border-color: var(--warning); }
 .wa-confirm a.btn { max-width: 100%; height: auto; min-height: var(--input-h); padding-block: var(--s-1); }
 .wa-name { min-width: 0; overflow-wrap: anywhere; }

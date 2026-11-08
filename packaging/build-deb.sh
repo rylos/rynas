@@ -66,7 +66,7 @@ cargo build --release --locked -p rynasd -p rynas-web
 # the file manager worker: a crate with its own lock file (crates/rynas-files-worker)
 cargo build --release --locked --manifest-path crates/rynas-files-worker/Cargo.toml
 # the release profile strips symbols; drop the compiler version notes too (lintian)
-for b in rynasd rynasctl rynas-web rynas-files-worker; do
+for b in rynasd rynasctl rynas-btrbk-filter rynas-web rynas-files-worker; do
     objcopy --remove-section=.comment "$CARGO_TARGET_DIR/release/$b"
 done
 

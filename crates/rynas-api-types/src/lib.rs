@@ -12,6 +12,7 @@ pub mod apps;
 pub mod docker;
 pub mod network;
 pub mod notify;
+pub mod pcbackup;
 pub mod power;
 pub mod removable;
 pub mod scheduler;

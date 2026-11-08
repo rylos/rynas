@@ -248,7 +248,7 @@ All three run Arch on btrfs:
 
 | Phase | Content |
 |---|---|
-| 2 | receiving btrbk backups + console (btrbk-nas port); repositories per device served by rynas, append-only, maintenance on the NAS; manual pairing |
+| 2 | receiving btrbk backups (**done 2026-11-08, §10**) + console (btrbk-nas port); repositories per device served by rynas, append-only, maintenance on the NAS; manual pairing |
 | 2b | `rynas-agent` for Linux (pairing, plans, image engine from abb-agent, btrbk pull, manifest); `rynas-recovery` and bare metal for Linux; restore tested in a VM |
 | 3a | Windows: VSS, used-block bitmap, hashing then `$MFT` comparison; restore on the same hardware, then on different hardware |
 | 3b | macOS: files with restic |
@@ -300,6 +300,102 @@ Marco: "il motore restic vince su tutti in velocità e deduplica". For the next 
   - Bare-metal restore: streaming an image is faster than recreating millions of files.
   - Prune memory on large repositories: the 25 GB RSS seen with rustic needs to be measured against restic.
 - **Option to evaluate:** restic as the single storage and dedup layer for everything (files and images), with btrbk only where the user wants readable btrfs snapshots on the NAS. To measure on pc-casa / pc-work data before deciding.
+
+## 10. Implemented: receiving btrbk backups (phase 2, 2026-11-08)
+
+The first slice of phase 2: Linux PCs push btrbk snapshots to the NAS (`target ssh://nas/<path>`). UI: **Backup › PCs** ("Backup targets for PCs"); the Backup page has one tab per kind of backup, so the files engine can add its own.
+
+### 10.1 What was checked first (2026-11-08)
+
+- **btrbk 0.32.7 `ssh_filter_btrbk.sh`**:
+  - what `--target` allows: `btrfs receive`, `mkdir`;
+  - `--delete`: `btrfs subvolume delete`;
+  - `--info`: `find-new`, `filesystem usage`;
+  - always allowed: `btrfs subvolume show|list` (any path), `readlink`, `test -d`, `cat /proc/self/mountinfo|mounts`;
+  - `--sudo` puts `sudo -n` in front of everything but `cat`;
+  - `|` only for the decompressors (`zstd -d -c` …) and `mbuffer -v 1 -q …`.
+- **The commands btrbk sends to a target**:
+  - `sudo -n readlink -v -e '/p'`;
+  - `cat /proc/self/mountinfo`;
+  - `sudo -n btrfs subvolume show '/p'`;
+  - `sudo -n btrfs subvolume list -a -c -u -q -R '/mnt'` (on the mount point, outside the target folder);
+  - `[zstd -d -c |][mbuffer … |] sudo -n btrfs receive [--max-errors=0] '/p/'`;
+  - `sudo -n btrfs subvolume delete [--commit-each] '/p/name.TS'`.
+- **CVE-2026-62943**: 0.29.0–0.32.6 had no end anchor, so `<valid command> | anything` passed. Debian bookworm (0.32.5) and trixie/sid (0.32.6-2) are listed as vulnerable and unfixed.
+- **Upstream setup**: root login with `PermitRootLogin prohibit-password` plus the filter is "the most straightforward". The alternative is a dedicated user with `backend_remote btrfs-progs-sudo` and NOPASSWD for btrfs.
+- **`btrfs receive` and untrusted streams** (btrfs-receive(8), BUGS):
+  - a crafted incremental stream can clone extents of any file **on the same filesystem**;
+  - anyone with write access to the receive folder can change files while a receive runs;
+  - `-C/--chroot` confines the receive process to the folder.
+- **Enrollment UX**:
+  - UrBackup "Add client" gives one ready-made command with the client's key built in;
+  - Synology ABB shows the server's fingerprint on the client;
+  - TrueNAS has a "semi-automatic" SSH connection that swaps keys for you, and a manual mode for other systems.
+
+  Taken here: one panel per PC with every command filled in (key, `btrbk.conf`, first connection, dry run) and the NAS-side line shown.
+
+### 10.2 Design
+
+- **Account.** One locked system account, `rynas-pcbackup`:
+  - shell `/bin/sh`, because sshd runs the forced command through it;
+  - home `/var/lib/rynas-pcbackup`, owned by root with `.ssh/authorized_keys` 0644 root, so the account cannot change its own keys;
+  - one line per PC, with the comment `rynas:<device>`.
+
+  sshd_config is never edited. The setup card warns when `AllowUsers`/`AllowGroups` leave the account out, or when sshd, sudo, btrfs-progs or the filter is missing. It reads the port from `sshd -T` and puts it in the PC's URL.
+- **Key line**: `restrict,command="/usr/libexec/rynas/rynas-btrbk-filter --device D --root /vol/backup/D [--delete [--keep-last N] [--min-age-days M]]" <key>`.
+  - Each PC has its own key, so it can only touch its own folder.
+  - The pasted comment is dropped, and options or a second line are refused.
+  - The key type must match its blob. RSA keys need at least 2048 bits.
+- **Our own filter in Rust**, chosen over shipping `ssh_filter_btrbk.sh`:
+  - a tokenizer that takes only plain words, `'quoted'` words and `|`;
+  - each stage is matched word by word and run **without a shell**, with absolute paths and a clean environment;
+  - `btrfs receive` always gets `--chroot`;
+  - paths are normalized (no `..`, no empty parts). Receive, `readlink` and `test` stay inside the device folder; `show` and `list` take any absolute path, as upstream;
+  - deletes only for btrbk snapshot names directly in the folder;
+  - every ACCEPT/REJECT goes to syslog (`auth`);
+  - logging in without a command prints "the key of D works". That is the connection test of the setup steps.
+
+  Tests cover the btrbk command shapes and the injection cases: `|`, `;`, `&&`, `$()`, backquotes, `>`, double quotes, newline, `..`, sibling folders, `-o` options, `sudo` without `-n`.
+- **Root or non-root.** The filter runs as `rynas-pcbackup` and calls `sudo -n /usr/bin/btrfs` only for `receive`, `subvolume delete|show|list` and `filesystem usage`. Those five are in `/etc/sudoers.d/rynas-pcbackup`, checked with `visudo -c` before the rename (`!requiretty, !use_pty, env_reset`). `readlink`, `test` and `cat` run unprivileged.
+  - Why not root: a hole in the filter then gives five btrfs subcommands, not a root shell, and root logins stay as the administrator set them.
+  - Accepted limit: sudoers cannot restrict paths, so the folder check is the filter's job.
+- **Folders.**
+  - **New**: `btrfs subvolume create <path>`, `0750 root:rynas-pcbackup`. NAS users cannot read the PC's files, and the account can list names for the delete rules.
+  - **Adopt**: an existing folder of received snapshots (for example copied from another NAS with `btrfs send/receive`, which keeps `received_uuid`). Only the folder's own owner and mode change; nothing inside is touched, so btrbk on the PC finds its parents and goes on incrementally.
+  - "Check the folder" first lists subvolumes, groups, interrupted receives and other entries, and suggests a device name.
+  - "New" refuses a folder that exists. Folders of two devices cannot overlap.
+- **Status**, from ioctls on descriptors (`received_uuid`, `readonly`, `otime`), grouped by btrbk name:
+  - snapshot count;
+  - last receive (the NAS-side creation time of the newest complete snapshot);
+  - interrupted receives: writable without a received UUID, as btrbk's "garbled";
+  - folders with a snapshot name that are not subvolumes;
+  - state: ok, late, waiting, or missing.
+- **Space** on demand (task, `btrfs filesystem du -s --raw`): exclusive, total and shared bytes, kept with the record. Qgroups are not used, as everywhere in rynas.
+- **Late alert**: per PC, `alert_days` (default 3, 0 = off). An hourly check opens `pcbackup.late` (firing, warning) once and closes it with `pcbackup.resumed` when a new snapshot arrives.
+- **Retention.**
+  - btrbk's `target_preserve` on the PC deletes through the filter (`--delete`, on by default).
+  - The NAS adds safety rules, enforced in the filter on a fresh listing:
+    - **keep the newest N** complete snapshots of each subvolume (default 1, so the parent of the next incremental always stays);
+    - **never delete before M days**;
+    - or **no deletes at all**.
+  - Interrupted receives can always be deleted (btrbk deletes them before sending again).
+  - A refused delete is an error in btrbk's log on the PC, so the rules should sit below the PC's `target_preserve_min`.
+  - This is basic ransomware protection: a stolen PC key cannot delete what the rules keep. It can still add snapshots and fill the volume, so quotas or a dedicated volume are the answer to that.
+- **Browse and copy out**:
+  - read-only listing inside a received snapshot, as root (descriptor walk, symlinks shown never followed);
+  - **Copy to the NAS** copies a file or folder into an existing NAS folder: reflink when possible, owner/mode/xattrs kept, never overwrites (the snapshot restore code);
+  - the file manager is not used because the folders are `0750` and the worker runs as the signed-in user.
+- **Remove**: the key line goes; the folder and its snapshots stay (the dialog says so). Adopting the folder again later picks the chain back up.
+- **Dry system and tests**: `MemoryReceive` (memory folders, keys, account) with `/volume1/backup/old-laptop` to adopt. No test touches a disk, sshd or the system's accounts.
+
+### 10.3 Trade-offs and limits
+
+- **Same-filesystem clones** (btrfs-receive BUGS): a malicious stream from a PC could reference extents of other files on the volume. The filter never lets a PC read anything back (no `send`, no `cat` of files), which limits this to the snapshot's own content seen by NAS administrators. A dedicated volume for PC backups removes it.
+- The account is shared, so a hole in the filter would reach every device folder through sudo. Per-device accounts would need one sudoers line per account; the folder check would stay the same.
+- Pull mode (btrbk on the NAS, `--source` on the PC through `rynas-agent`) and the console of §3.7 (next incremental parent, chain-safe NAS-side deletion with the PC's UUID list as in btrbk-nas) are the next steps.
+- Space per device through qgroups is not done: `du` on demand only.
+
+Sources (2026-11-08): https://github.com/digint/btrbk/blob/v0.32.7/ssh_filter_btrbk.sh · https://github.com/digint/btrbk/blob/master/doc/ssh_filter_btrbk.1.asciidoc · https://github.com/digint/btrbk#setting-up-ssh · https://github.com/digint/btrbk/blob/master/doc/btrbk.conf.5.asciidoc · https://security-tracker.debian.org/tracker/CVE-2026-62943 · https://btrfs.readthedocs.io/en/latest/btrfs-receive.html · https://forums.urbackup.org/t/ho-do-you-add-clients/12848/6 · https://kb.synology.com/en-ca/DSM/tutorial/How_back_up_PC_physical_server_with_ABB · https://truenas.com/docs/core/coretutorials/systemconfiguration/configuringsshconnections/
 
 ## Sources
 

@@ -88,6 +88,7 @@ assets = [
     ["target/release/rynasd", "usr/libexec/rynas/", "755"],
     ["target/release/rynas-web", "usr/libexec/rynas/", "755"],
     ["target/release/rynasctl", "usr/libexec/rynas/", "755"],
+    ["target/release/rynas-btrbk-filter", "usr/libexec/rynas/", "755"],
     ["target/release/rynas-files-worker", "usr/libexec/rynas/", "755"],
     ["../../target/deb-stage/ui/**/*", "usr/share/rynas/ui/", "644"],
     # the curated app catalogue (D-APPCAT; a separate rynas-apps-catalog package later)

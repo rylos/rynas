@@ -32,12 +32,13 @@ pub fn nav_shown(path: &str) -> bool {
     path != "/docker" || crate::docker::docker().present()
 }
 
-pub const NAV: [NavItem; 12] = [
+pub const NAV: [NavItem; 13] = [
     NavItem { path: "/", key: "nav.dashboard", icon: icons::LAYOUT_DASHBOARD, group: false },
     NavItem { path: "/storage", key: "nav.storage", icon: icons::HARD_DRIVE, group: true },
     NavItem { path: "/files", key: "nav.files", icon: icons::FOLDER, group: false },
     NavItem { path: "/shares", key: "nav.shares", icon: icons::SHARE_2, group: false },
     NavItem { path: "/snapshots", key: "nav.snapshots", icon: icons::CAMERA, group: false },
+    NavItem { path: "/backup", key: "nav.backup", icon: icons::ARCHIVE_RESTORE, group: false },
     NavItem { path: "/users", key: "nav.users", icon: icons::USERS, group: true },
     NavItem { path: "/services", key: "nav.services", icon: icons::SERVER, group: false },
     NavItem { path: "/docker", key: "nav.docker", icon: icons::CONTAINER, group: false },
@@ -187,6 +188,7 @@ fn Shell() -> impl IntoView {
                     <Route path=path!("/system/updates") view=pages::updates::Updates />
                     <Route path=path!("/notifications") view=pages::notifications::NotificationsPage />
                     <Route path=path!("/snapshots") view=pages::snapshots::Snapshots />
+                    <Route path=path!("/backup") view=pages::backup::Backup />
                     <Route path=path!("/security") view=pages::security::Security />
                     <Route path=path!("/files") view=pages::files::Files />
                     <Route path=path!("/files/*path") view=pages::files::Files />

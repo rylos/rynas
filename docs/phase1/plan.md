@@ -992,6 +992,7 @@ schema 2 added the `code` and `body_format` columns.
 | `docker.disk_full` / `docker.disk_ok` | `path`, `used_pct`, `limit_pct` | Docker storage {used_pct}% full / back under {limit_pct}% |
 | `docker.update_available` | `image`, `stacks` | Image update available: {image} |
 | `web_access.cert_expires_soon` / `web_access.cert_renewal_overdue` / `web_access.cert_failed` / `web_access.cert_expired` / `web_access.cert_ok` | `name`, `cert` | The certificate for {name} expires soon / is not being renewed / could not be obtained / has expired / is fine again (`../phase2/docker-apps.md` §5.4) |
+| `pcbackup.late` / `pcbackup.resumed` | `device`, `days`, `alert_days` (late) | No backup from {device} for {days} days / Backups from {device} arrive again (`../research/pc-backup.md` §10) |
 | `synodeb.<event>` | the forward's parameters | the forward's title; events and parameters in `../synodeb-integration.md` S1 |
 
 Not coded: the target test message (built in the target's language already) and events from
@@ -1184,6 +1185,14 @@ shows the Hardware › Synology tab only when the live provider is `synology` or
 | GET | `/api/v1/system/power` | — | `SystemPowerState` {pending? {action restart\|shutdown, at_ms, by?}, warnings [{code raid_busy\|scrub_running\|task_running\|scheduler_task_running\|smb_open_files\|apt_running\|ups_on_battery\|boot_trial, subject?, op?, pct?, n?, text}]}; administrators only (rynasd checks too). See `../phase2/restart-shutdown.md` |
 | POST | `/api/v1/system/power` | `SystemPowerRequest` {action restart\|shutdown, delay_min 0\|1\|5} | 202 `TaskStarted` (`system.restart` / `system.shutdown`: warnings logged, audit line, notification `power.manual_*`, `shutdown -r\|-P now\|+N`); 400 `invalid_value` (`delay_min`) |
 | POST | `/api/v1/system/power/cancel` | — | 204 (`shutdown -c`); 409 `nothing_pending` |
+| GET | `/api/v1/pc-backups/setup` | — | `ReceiveSetup` {account, filter, host, ssh_port?, volumes, problems [{code sshd_missing\|sshd_allow_list\|sudo_missing\|btrfs_missing\|filter_missing, subject?}]}; administrators only (all `/pc-backups` routes). See `../research/pc-backup.md` §10 |
+| POST | `/api/v1/pc-backups/plan/adopt` | `AdoptRequest` {path} | `AdoptPreview` {path, subvolume, list, groups, other_entries, suggested_device?}; read only; 400 `invalid_value` (`path`) |
+| GET | `/api/v1/pc-backups/targets` | — | `[PcTarget]` {device, description, path, public_key, key_fingerprint?, alert_days, delete {allowed, keep_last, min_age_days}, adopted, created_at_ms, state ok\|late\|waiting\|missing, snapshots, incomplete, last_received_ms?, groups, usage?} |
+| POST | `/api/v1/pc-backups/targets` | `PcTargetCreate` {device, description, path, adopt, public_key, alert_days, delete} | 202 `TaskStarted` (`pcbackup.create`: account + sudoers, new subvolume or adopted folder, `authorized_keys`); 400 `invalid_value` (`device`, `path`, `public_key`, `alert_days`, `delete.*`); 409 `already_exists` |
+| GET / PUT / DELETE | `/api/v1/pc-backups/targets/{device}` | — / `PcTargetUpdate` {description, public_key, alert_days, delete} / — | `PcTargetDetail` {target, list, key_line?, key_commands, client_config, test_commands} (`?host=` for the PC's snippets) / 202 (`pcbackup.update`) / 202 (`pcbackup.remove`: key gone, folder kept); 404 `not_found` |
+| POST | `/api/v1/pc-backups/targets/{device}/usage` | — | 202 (`pcbackup.usage`, `btrfs filesystem du -s`) |
+| GET | `/api/v1/pc-backups/targets/{device}/browse?snapshot=&path=` | — | `SnapshotListing`; 400 `invalid_value` (`snapshot`, `path`) |
+| POST | `/api/v1/pc-backups/targets/{device}/copy-out` | `CopyOutRequest` {snapshot, path, destination} | 202 (`pcbackup.copy_out`, reflink or copy, never overwrites); 400 `invalid_value` (`destination`, `path`) |
 
 Internal only (rynasd, never forwarded, called as root by `rynasctl power scheduled-shutdown
 <rule>`): `POST /v1/power/schedule/rules/{rule}/shutdown` (202 `TaskStarted`, task

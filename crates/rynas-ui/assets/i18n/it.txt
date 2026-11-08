@@ -3723,6 +3723,115 @@ sf.err.pattern	Non è nel formato previsto.
 sf.err.hostname	Inserisci un nome host, ad es. nas.example.lan.
 sf.err.uri	Inserisci un indirizzo che inizia con http:// o https://.
 sf.err.email	Inserisci un indirizzo e-mail.
+nav.backup	Backup
+bk.title	Backup
+bk.subtitle	Backup che altri dispositivi tengono su questo NAS
+bk.tab.pcs	PC
+bk.pcs.title	Destinazioni di backup per PC
+bk.intro	I PC Linux con btrfs mandano qui i loro snapshot con btrbk via SSH. Ogni PC ha la sua cartella e la sua chiave, e la sua chiave può solo ricevere in quella cartella.
+bk.empty	Ancora nessun PC
+bk.empty_text	Aggiungi un PC per avere una cartella e le righe per la sua configurazione di btrbk, oppure adotta una cartella che contiene già snapshot ricevuti.
+bk.add	Aggiungi un PC
+bk.add_title	Nuova destinazione di backup
+bk.adopt	Adotta una cartella
+bk.create	Crea
+bk.open	Apri
+bk.col.pc	PC
+bk.col.folder	Cartella
+bk.col.snapshots	Snapshot
+bk.col.space	Spazio
+bk.col.subvolume	Sottovolume
+bk.col.newest	Più recente
+bk.col.snapshot	Nome dello snapshot
+bk.col.received	Ricevuto
+bk.st.late	In ritardo
+bk.st.waiting	In attesa del primo backup
+bk.st.missing	Cartella mancante
+bk.problem.sshd_missing	Nessun server SSH installato o attivo: i PC non possono inviare. Installa openssh-server.
+bk.problem.sshd_allow_list	Il server SSH accetta solo gli utenti di AllowUsers/AllowGroups: aggiungi {subject}, altrimenti i PC vengono rifiutati.
+bk.problem.sudo_missing	sudo non è installato: l'account di backup esegue btrfs tramite sudo. Installa sudo.
+bk.problem.btrfs_missing	btrfs-progs non è installato.
+bk.problem.filter_missing	Il filtro dei comandi {subject} manca: reinstalla rynas.
+bk.mode	Dove vanno gli snapshot
+bk.mode.new	Nuova cartella
+bk.mode.new_help	Un nuovo sottovolume btrfs, leggibile solo dagli amministratori.
+bk.mode.adopt_help	Una cartella con snapshot che un PC ha già inviato (per esempio copiata da un altro NAS). Dentro non cambia niente, così il PC continua con gli invii incrementali.
+bk.f.device	Nome del PC
+bk.f.device_help	Lettere minuscole, cifre e -, al massimo 32.
+bk.f.description	Descrizione
+bk.f.path	Cartella sul NAS
+bk.f.path_help	Su un volume btrfs. Solo lettere, cifre e _ @ + . -.
+bk.f.key	Chiave pubblica del PC
+bk.f.key_help	Il file .pub creato sul PC (i passaggi sono nel pannello del PC). Puoi aggiungerla dopo.
+bk.f.alert	Avviso dopo giorni senza backup
+bk.f.alert_help	Una notifica quando non arriva niente per questi giorni; 0 la disattiva.
+bk.f.rules	Eliminazione dei vecchi snapshot
+bk.f.allowed	Il PC può eliminare qui i vecchi snapshot
+bk.f.allowed_help	btrbk elimina quello che il suo target_preserve non tiene più. Spento: il PC può solo aggiungere, e i vecchi snapshot restano finché non li elimini tu.
+bk.f.keep	Tieni sempre i più recenti
+bk.f.keep_help	Per sottovolume, qualunque cosa chieda il PC.
+bk.f.min_age	Non eliminare prima di (giorni)
+bk.f.min_age_help	Uno snapshot più giovane di così resta anche se il PC chiede di eliminarlo.
+bk.f.rules_note	Queste regole proteggono i backup da un PC guasto o in mani sbagliate: un'eliminazione rifiutata compare come errore nel log di btrbk sul PC. Tienile sotto il target_preserve_min del PC per evitare quegli errori.
+bk.f.destination	Copia in
+bk.f.destination_help	Una cartella esistente sul NAS. La copia mantiene proprietario e permessi del PC e non sovrascrive mai niente.
+bk.adopt.check	Controlla la cartella
+bk.adopt.found	Trovati {n} snapshot ricevuti.
+bk.adopt.none	Nessuno snapshot di btrbk in questa cartella. Si può adottare lo stesso e il PC parte con un invio completo.
+bk.adopt.incomplete	Ricezioni interrotte: {n}. btrbk le elimina prima di inviare di nuovo quegli snapshot.
+bk.adopt.other	Altri elementi lasciati come sono: {n}.
+bk.adopt.not_subvolume	La cartella non è un sottovolume a sé: funziona, ma il suo spazio non si misura separatamente dal volume.
+bk.added	{device} è pronto
+bk.saved	Impostazioni del PC salvate
+bk.settings	Impostazioni
+bk.settings_title	Impostazioni di {device}
+bk.remove	Rimuovi
+bk.remove_title	Rimuovere {device}?
+bk.remove_text	La chiave del PC smette di funzionare. La cartella e i suoi snapshot restano: eliminali in File quando non servono più, oppure adotta di nuovo la cartella più avanti.
+bk.removed	{device} rimosso, i suoi snapshot restano
+bk.measure	Misura lo spazio
+bk.measured	Spazio misurato
+bk.usage_text	{excl} solo in questi snapshot, {total} in tutto (misurato il {when})
+bk.usage_none	Non ancora misurato
+bk.rules.off	Elimina solo il NAS
+bk.rules.on	Elimina il PC; restano i {keep} più recenti, nessuno più giovane di {days} giorni
+bk.alert_off	Disattivato
+bk.alert_days	Dopo {n} giorni
+bk.last	Ultimo ricevuto
+bk.incomplete	Ricezioni interrotte
+bk.key	Chiave
+bk.adopted	Origine
+bk.adopted_yes	Cartella adottata
+bk.no_key	Ancora nessuna chiave: il PC non può collegarsi. Aggiungi la sua chiave pubblica in Impostazioni.
+bk.late_note	Niente ricevuto da più di {days} giorni.
+bk.steps	Configura il PC
+bk.steps_intro	Sul PC, come root: crea una chiave per btrbk, aggiungi le righe a /etc/btrbk/btrbk.conf (cambia volume e sottovolumi secondo il PC), poi collegati una volta per accettare la chiave del NAS e prova una simulazione.
+bk.step.key	1. Chiave del PC
+bk.step.config	2. btrbk.conf
+bk.step.test	3. Prima connessione e prova
+bk.step.line	Riga scritta sul NAS (authorized_keys)
+bk.steps_note	La chiave esegue solo il filtro di rynas: btrfs receive in questa cartella, eliminazione degli snapshot di questo PC secondo le regole sopra e i comandi di sola lettura che servono a btrbk. Niente shell, nessun'altra cartella.
+bk.snapshots	Snapshot ricevuti
+bk.no_snapshots	Ancora niente ricevuto.
+bk.snap.received	Completo
+bk.snap.protected	Tenuto dal NAS
+bk.snap.incomplete	Interrotto
+bk.snap.not_subvolume	Non è un sottovolume
+bk.browse	Sfoglia
+bk.browse_note	Sola lettura: quello che il PC ha inviato, com'era in quel momento.
+bk.copy	Copia sul NAS
+bk.copy_this	Copia questa cartella
+bk.copy_text	{path} viene copiato con le sue cartelle nella cartella che scegli.
+bk.copied	{path} copiato
+task.pcbackup.create	Aggiunta di una destinazione di backup per PC
+task.pcbackup.update	Impostazioni del backup di un PC
+task.pcbackup.remove	Rimozione di una destinazione di backup per PC
+task.pcbackup.usage	Misura dei backup di un PC
+task.pcbackup.copy_out	Copia da un backup di PC
+nev.pcbackup.late.title	Nessun backup da {device} da {days} giorni
+nev.pcbackup.late.body	Niente ricevuto da {days} giorni (avviso dopo {alert_days}).
+nev.pcbackup.resumed.title	I backup da {device} arrivano di nuovo
+nev.pcbackup.resumed.body	{device} ha inviato un nuovo snapshot.
 sysp.restart	Riavvia
 sysp.shutdown	Spegni
 sysp.restart_now	Riavvia ora

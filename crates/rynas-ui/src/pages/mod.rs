@@ -1,6 +1,7 @@
 //! Routed pages.
 
 pub mod apps;
+pub mod backup;
 pub mod config;
 pub mod dashboard;
 pub mod docker;

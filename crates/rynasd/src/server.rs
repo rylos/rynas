@@ -83,6 +83,8 @@ pub struct DaemonState {
     pub tailscale: crate::tailscale::TsState,
     /// Manual restart and shut down ([`crate::system_power`]).
     pub system_power: crate::system_power::SpState,
+    /// PC backup, receive side ([`crate::pc_backup`]).
+    pub pc_backup: crate::pc_backup::PbState,
 }
 
 impl DaemonState {
@@ -125,6 +127,7 @@ impl DaemonState {
             web_access: None,
             tailscale: None,
             system_power: None,
+            pc_backup: None,
         }
     }
 }
@@ -208,6 +211,7 @@ pub fn router(state: DaemonState) -> Router {
         .merge(crate::web_access::router(state.web_access))
         .merge(crate::tailscale::router(state.tailscale))
         .merge(crate::system_power::router(state.system_power))
+        .merge(crate::pc_backup::router(state.pc_backup))
         .fallback(|| async { Error::not_found("no such endpoint") })
         // 405, query string and path rejections: ApiError bodies too
         .layer(axum::middleware::from_fn(crate::error::json_errors))

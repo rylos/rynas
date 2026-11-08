@@ -937,6 +937,23 @@ fn main() -> std::io::Result<()> {
                 admins: ops.admins.clone(),
             }));
         }
+        // PC backup, receive side: the machine, or (--dry-system) memory with one folder of
+        // received snapshots to adopt (/volume1/backup/old-laptop)
+        let pc_host: Arc<dyn rynasd::pc_backup::ReceiveHost> = if args.dry_system {
+            Arc::new(rynasd::pc_backup::MemoryReceive::demo())
+        } else {
+            Arc::new(rynasd::pc_backup::HostReceive)
+        };
+        let pc_backup = rynasd::pc_backup::PcBackup::new(
+            ops.clone(),
+            pc_host,
+            notifier.clone(),
+            args.state_dir.clone(),
+            ops.admins.clone(),
+            running_hostname(),
+        );
+        rynasd::pc_backup::spawn_watch(pc_backup.clone());
+        state.pc_backup = Some(pc_backup);
         // the file manager: workers next to rynasd unless told otherwise
         let worker = args.files_worker.clone().unwrap_or_else(|| {
             std::env::current_exe()

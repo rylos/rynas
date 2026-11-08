@@ -169,6 +169,14 @@ pub fn routes() -> Router<AppState> {
         // manual restart and shut down: warnings, the action (a task), cancel of a delayed one
         .route("/system/power", get(forward).post(forward))
         .route("/system/power/cancel", post(forward))
+        // PC backup, receive side: btrbk targets of the PCs (D-PCBACKUP phase 2)
+        .route("/pc-backups/setup", get(forward))
+        .route("/pc-backups/plan/adopt", post(forward))
+        .route("/pc-backups/targets", get(forward).post(forward))
+        .route("/pc-backups/targets/{device}", get(forward).put(forward).delete(forward))
+        .route("/pc-backups/targets/{device}/usage", post(forward))
+        .route("/pc-backups/targets/{device}/browse", get(forward))
+        .route("/pc-backups/targets/{device}/copy-out", post(forward))
         // UPS (P6): the shutdown policy and the battery test; the status itself is
         // read from upsd by rynas-web (`/ups`, `ups.status` events)
         .route("/ups/settings", get(forward).put(forward))
