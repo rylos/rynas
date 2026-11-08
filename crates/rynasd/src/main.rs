@@ -829,6 +829,9 @@ fn main() -> std::io::Result<()> {
                 args.state_dir.join("notify"),
             );
             let _ = rynasd::restic_backup::SVC.set(svc.clone());
+            // runs a stop cut short: leftover worker units, stopped stacks, temporary
+            // snapshots, downloads in flight; then the files of removed jobs
+            tokio::spawn(rynasd::restic_backup::recover(svc.clone()));
             state.restic = Some(svc);
         }
         let ups = Arc::new(rynasd::ups::Ups {

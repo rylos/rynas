@@ -25,6 +25,9 @@ pub struct JobSecrets {
     pub rclone_config: String,
     /// OpenSSH private key of an SFTP destination.
     pub ssh_private_key: String,
+    /// The SFTP server's pinned host key (`known_hosts` lines): from the destination test,
+    /// or first use. Not a secret, sealed with the rest so that it changes only with them.
+    pub ssh_known_hosts: String,
 }
 
 impl std::fmt::Debug for JobSecrets {
@@ -40,6 +43,7 @@ impl JobSecrets {
             ("password", &self.password),
             ("rclone_config", &self.rclone_config),
             ("ssh_private_key", &self.ssh_private_key),
+            ("ssh_known_hosts", &self.ssh_known_hosts),
         ]
         .into_iter()
         .filter(|(_, v)| !v.is_empty())
@@ -54,12 +58,36 @@ impl JobSecrets {
             password: g("password"),
             rclone_config: g("rclone_config"),
             ssh_private_key: g("ssh_private_key"),
+            ssh_known_hosts: g("ssh_known_hosts"),
         }
     }
 
-    /// Every secret value (to hide from logs).
+    /// Every secret value (to hide from logs), longest first; the host key is not one.
     pub fn values(&self) -> Vec<String> {
-        self.to_map().into_values().collect()
+        let mut v: Vec<String> = [
+            &self.repository_password,
+            &self.password,
+            &self.rclone_config,
+            &self.ssh_private_key,
+        ]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .collect();
+        v.sort_by_key(|s| std::cmp::Reverse(s.len()));
+        v
+    }
+
+    /// A secret file the worker reports changed ([`WorkerEvent::SecretChanged`]): the
+    /// field it updates, if any.
+    ///
+    /// [`WorkerEvent::SecretChanged`]: rynas_api_types::backup::WorkerEvent::SecretChanged
+    pub fn field_of_file(name: &str) -> Option<&'static str> {
+        match name {
+            "RCLONE_CONFIG" => Some("rclone_config"),
+            "known_hosts" => Some("ssh_known_hosts"),
+            _ => None,
+        }
     }
 }
 
@@ -98,6 +126,37 @@ pub fn generate_password() -> std::io::Result<String> {
     Ok(out)
 }
 
+/// The repository a destination names, normalized: two jobs with the same key share one
+/// repository and never run a worker operation at the same time (the maintenance lock).
+pub fn repo_key(d: &Destination) -> String {
+    let low = |s: &str| s.to_ascii_lowercase();
+    match d {
+        Destination::Local { path } => format!("local:{}", path.trim_end_matches('/')),
+        Destination::Rest { url, .. } => {
+            let (scheme, rest) = url.split_once("://").unwrap_or(("https", url));
+            let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+            format!("rest:{}://{}/{}", low(scheme), low(host), path.trim_matches('/'))
+        }
+        Destination::Sftp { host, port, path, .. } => {
+            format!("sftp:{}:{port}/{}", low(host), path.trim_end_matches('/'))
+        }
+        Destination::S3 {
+            endpoint,
+            bucket,
+            prefix,
+            ..
+        } => format!(
+            "s3:{}/{bucket}/{}",
+            low(endpoint.trim_end_matches('/')),
+            prefix.trim_matches('/')
+        ),
+        Destination::B2 { bucket, prefix, .. } => {
+            format!("b2:{bucket}/{}", prefix.trim_matches('/'))
+        }
+        Destination::Rclone { remote } => format!("rclone:{}", remote.trim_end_matches('/')),
+    }
+}
+
 /// The worker's view of a destination.
 pub fn repo_spec(d: &Destination, s: &JobSecrets, bandwidth_kib: u32) -> RepoSpec {
     let mut options = BTreeMap::new();
@@ -134,7 +193,14 @@ pub fn repo_spec(d: &Destination, s: &JobSecrets, bandwidth_kib: u32) -> RepoSpe
             options.insert("endpoint".into(), format!("ssh://{host}:{port}"));
             options.insert("user".into(), user.clone());
             options.insert("root".into(), path.clone());
-            options.insert("known_hosts_strategy".into(), "add".into());
+            // the worker's ssh reads only this file (`-F none`, see the worker): pinned
+            // keys are checked strictly, an empty one is filled on first use
+            let pinned = !s.ssh_known_hosts.trim().is_empty();
+            options.insert(
+                "known_hosts_strategy".into(),
+                if pinned { "strict" } else { "add" }.into(),
+            );
+            files.insert("known_hosts".into(), s.ssh_known_hosts.clone());
             files.insert("key".into(), s.ssh_private_key.clone());
             throttle(&mut options);
             "opendal:sftp".into()
@@ -205,6 +271,7 @@ mod tests {
             password: "p@ss:w/rd".into(),
             rclone_config: "[gdrive]\ntype = drive\n".into(),
             ssh_private_key: "-----BEGIN OPENSSH PRIVATE KEY-----".into(),
+            ssh_known_hosts: String::new(),
         }
     }
 
@@ -264,6 +331,72 @@ mod tests {
         assert!(r.options["rclone-command"].ends_with("--bwlimit 256k"));
         let r = repo_spec(&Destination::Local { path: "/media/usb/b".into() }, &s, 0);
         assert_eq!(r.repository, "/media/usb/b");
+        // SFTP host key: pinned → strict, none → added on first use
+        let sftp = Destination::Sftp {
+            host: "nas2".into(),
+            port: 22,
+            user: "bk".into(),
+            path: "/b".into(),
+        };
+        let mut pinned = s.clone();
+        pinned.ssh_known_hosts = "nas2 ssh-ed25519 AAAA".into();
+        let r = repo_spec(&sftp, &pinned, 0);
+        assert_eq!(r.options["known_hosts_strategy"], "strict");
+        assert_eq!(r.files["known_hosts"], "nas2 ssh-ed25519 AAAA");
+        assert!(!r.secret_values().iter().any(|v| v.contains("AAAA")));
+        let mut unpinned = s.clone();
+        unpinned.ssh_known_hosts = " ".into();
+        assert_eq!(repo_spec(&sftp, &unpinned, 0).options["known_hosts_strategy"], "add");
+    }
+
+    #[test]
+    fn repository_keys() {
+        let rest = |url: &str, user: &str| Destination::Rest {
+            url: url.into(),
+            user: user.into(),
+        };
+        // the same repository through another user or spelling: one key
+        assert_eq!(
+            repo_key(&rest("https://NAS2:8000/docs/", "a")),
+            repo_key(&rest("https://nas2:8000/docs", "b"))
+        );
+        assert_ne!(
+            repo_key(&rest("https://nas2:8000/docs", "")),
+            repo_key(&rest("https://nas2:8000/photos", ""))
+        );
+        let s3 = |bucket: &str, prefix: &str, ak: &str| Destination::S3 {
+            endpoint: String::new(),
+            region: String::new(),
+            bucket: bucket.into(),
+            prefix: prefix.into(),
+            access_key_id: ak.into(),
+        };
+        assert_eq!(repo_key(&s3("b", "nas1", "AK1")), repo_key(&s3("b", "/nas1/", "AK2")));
+        assert_ne!(repo_key(&s3("b", "nas1", "AK")), repo_key(&s3("b", "nas2", "AK")));
+        assert_eq!(
+            repo_key(&Destination::Local { path: "/media/usb/b".into() }),
+            "local:/media/usb/b"
+        );
+    }
+
+    #[test]
+    fn secret_values_and_redaction() {
+        use rynas_api_types::backup::redact_secrets;
+        let s = sec();
+        let r = repo_spec(
+            &Destination::Rest {
+                url: "https://nas2/r".into(),
+                user: "u".into(),
+            },
+            &s,
+            0,
+        );
+        let v = r.secret_values();
+        assert!(v.contains(&"repo-pw".to_string()));
+        assert!(v.contains(&"p%40ss%3Aw%2Frd".to_string()));
+        // short secrets too (no length floor), empty ones never
+        let short = vec!["ab".to_string(), String::new()];
+        assert_eq!(redact_secrets("xaby", &short), "x***y");
     }
 
     #[test]

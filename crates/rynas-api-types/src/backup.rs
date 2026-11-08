@@ -315,6 +315,29 @@ pub struct BackupStatus {
     /// Next slice of the rotating read-data check (1..=12).
     #[serde(default)]
     pub check_slice: u32,
+    /// Warnings of the last run (nested subvolumes, an unpinned host key…).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub last_warnings: Vec<String>,
+    /// What a run in progress changed on the system, written before each change: what
+    /// rynasd puts back at its next start when it stopped in the middle of a run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<RunState>,
+}
+
+/// The system changes of a run in progress ([`BackupStatus::run`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RunState {
+    #[serde(default)]
+    pub started_ms: u64,
+    /// The worker unit of the backup step (`rynas-backup-<job>-…`).
+    #[serde(default)]
+    pub unit: Option<String>,
+    /// Docker containers stopped by this run, in the order to start them again.
+    #[serde(default)]
+    pub stopped_containers: Vec<String>,
+    /// Temporary read-only snapshots (`<parent>/.rynas-backup/<job>-<n>`).
+    #[serde(default)]
+    pub temp_snapshots: Vec<String>,
 }
 
 /// A job as the session user sees it.
@@ -476,6 +499,56 @@ pub struct RepoSpec {
     pub env: BTreeMap<String, String>,
 }
 
+impl RepoSpec {
+    /// Every secret value in the spec (password, files but `known_hosts`, environment,
+    /// secret options, a password inside a REST URL), to hide from any text shown.
+    pub fn secret_values(&self) -> Vec<String> {
+        let mut v = vec![self.password.clone()];
+        v.extend(
+            self.files
+                .iter()
+                .filter(|(k, _)| k.as_str() != "known_hosts")
+                .map(|(_, c)| c.clone()),
+        );
+        v.extend(self.env.values().cloned());
+        v.extend(
+            self.options
+                .iter()
+                .filter(|(k, _)| {
+                    matches!(
+                        k.as_str(),
+                        "secret_access_key" | "application_key" | "password" | "session_token"
+                    )
+                })
+                .map(|(_, c)| c.clone()),
+        );
+        // rest:https://user:pw@host/… (percent-encoded in the URL, so both forms)
+        if let Some((_, rest)) = self.repository.split_once("://")
+            && let Some((auth, _)) = rest.split_once('@')
+            && let Some((_, pw)) = auth.split_once(':')
+            && !pw.is_empty()
+        {
+            v.push(pw.to_string());
+        }
+        v.retain(|s| !s.is_empty());
+        // longest first: a secret that contains another is hidden whole
+        v.sort_by_key(|s| std::cmp::Reverse(s.len()));
+        v.dedup();
+        v
+    }
+}
+
+/// `text` with every one of `secrets` replaced by `***` (empty values ignored).
+pub fn redact_secrets(text: &str, secrets: &[String]) -> String {
+    let mut s = text.to_string();
+    for v in secrets.iter().filter(|v| !v.is_empty()) {
+        if s.contains(v.as_str()) {
+            s = s.replace(v.as_str(), "***");
+        }
+    }
+    s
+}
+
 /// A source as the worker reads it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerSource {
@@ -484,6 +557,19 @@ pub struct WorkerSource {
     /// The path recorded in the snapshot (the folder's real path), so that the parent is
     /// found and restores go back to it.
     pub as_path: String,
+    /// Exclude globs of this source only (anchored ones rewritten to `read`).
+    #[serde(default)]
+    pub excludes: Vec<String>,
+}
+
+/// Which snapshots an operation may see: the job's tag, and (for `latest`, lists and
+/// retention) this NAS' host name. An explicit snapshot id must carry the tag.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SnapshotScope {
+    pub tag: String,
+    /// Empty: any host.
+    #[serde(default)]
+    pub host: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -498,11 +584,12 @@ pub enum WorkerOp {
         sources: Vec<WorkerSource>,
         tags: Vec<String>,
         host: String,
+        /// Excludes of every source (each source adds its own).
         excludes: Vec<String>,
     },
-    /// Removes the snapshots with `tag` that the retention does not keep (per path).
+    /// Removes the snapshots in `scope` that the retention does not keep (per host and path).
     Forget {
-        tag: String,
+        scope: SnapshotScope,
         retention: Retention,
         dry_run: bool,
     },
@@ -515,23 +602,33 @@ pub enum WorkerOp {
     },
     Snapshots {
         #[serde(default)]
-        tag: Option<String>,
+        scope: Option<SnapshotScope>,
     },
     Ls {
         snapshot: String,
         path: String,
+        #[serde(default)]
+        scope: Option<SnapshotScope>,
     },
     Restore {
         snapshot: String,
         paths: Vec<String>,
-        /// `None`: back to the original place.
+        /// The folder the snapshot paths are restored below (rynasd never sends `None`:
+        /// a restore to the original place goes through a staging folder).
         target: Option<String>,
+        #[serde(default)]
+        scope: Option<SnapshotScope>,
     },
-    /// Writes one file of a snapshot to `out`.
+    /// Writes one file of a snapshot to `out` (refused before writing when it is larger
+    /// than `max_bytes`, 0: no limit).
     Dump {
         snapshot: String,
         path: String,
         out: String,
+        #[serde(default)]
+        max_bytes: u64,
+        #[serde(default)]
+        scope: Option<SnapshotScope>,
     },
     /// Size of the repository.
     Stats,
@@ -542,6 +639,9 @@ pub enum WorkerOp {
 pub struct WorkerRequest {
     pub repo: RepoSpec,
     pub op: WorkerOp,
+    /// The job's persistent rustic cache folder; `None`: no cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_dir: Option<String>,
 }
 
 /// One line of the worker's standard output.
@@ -559,10 +659,16 @@ pub enum WorkerEvent {
     },
     /// A line for the task log.
     Log { text: String },
+    /// A secret file the backend changed (`RCLONE_CONFIG` with a refreshed OAuth token):
+    /// rynasd seals the new content into the job. Never the result.
+    SecretChanged { name: String, content: String },
     Test {
         outcome: TestOutcome,
         #[serde(default)]
         snapshots: Option<u32>,
+        /// SFTP: the host key lines the connection saw.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host_key: Option<String>,
     },
     Initialized { created: bool },
     BackedUp {

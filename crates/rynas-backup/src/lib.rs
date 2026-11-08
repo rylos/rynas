@@ -16,8 +16,8 @@ pub mod runner;
 pub mod status;
 
 pub use domain::{BackupDomain, normalize_job, valid_job_name};
-pub use repo::{JobSecrets, repo_spec};
-pub use runner::{Launch, run_worker};
+pub use repo::{JobSecrets, repo_key, repo_spec};
+pub use runner::{Launch, Limits, run_worker};
 
 /// The snapshot tag of a job's snapshots.
 pub fn job_tag(job: &str) -> String {

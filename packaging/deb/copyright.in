@@ -7,7 +7,8 @@ Comment:
  License, version 3 or later, and rynas-api-types (the plugin interface) is
  under the Apache License 2.0. The binaries also contain statically linked
  Rust crates from crates.io, under permissive licenses (mostly MIT and/or Apache-2.0); their
- list is in Cargo.lock in the source.
+ list is in Cargo.lock in the source, and for the separately built workers in
+ crates/rynas-files-worker/Cargo.lock and crates/rynas-backup-worker/Cargo.lock.
 
 Files: *
 Copyright: 2026 Marco Ziliani

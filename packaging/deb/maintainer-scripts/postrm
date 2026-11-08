@@ -33,8 +33,9 @@ fi
 #DEBHELPER#
 
 if [ "$1" = "purge" ]; then
-    # TOTP secrets, recovery codes and any other state
-    rm -rf /var/lib/rynas /run/rynas /var/lib/rynas-cert-drop
+    # TOTP secrets, recovery codes and any other state; caches (thumbnails, the backup
+    # jobs' rustic caches)
+    rm -rf /var/lib/rynas /run/rynas /var/lib/rynas-cert-drop /var/cache/rynas
     # PC backup account (its home holds only the keys file rynas wrote; the received
     # snapshots stay where they are)
     rm -rf /var/lib/rynas-pcbackup
