@@ -165,11 +165,12 @@ pub fn panel() -> AnyView {
         ui::table("bk-table", &["bk.col.pc", "bk.col.folder", "col.status", "bk.col.snapshots", "#bk.col.space", ""], rows)
     };
     view! {
-        <WidgetHead icon=icons::MONITOR title="bk.pcs.title">
-            <button class="btn ghost sm" on:click=move |_| pcs.add.set(Some(true))><Icon icon=icons::FOLDER_OPEN size=14 />{tr("bk.adopt")}</button>
-            <button class="btn primary sm" on:click=move |_| pcs.add.set(Some(false))><Icon icon=icons::PLUS size=14 />{tr("bk.add")}</button>
-        </WidgetHead>
+        <WidgetHead icon=icons::MONITOR title="bk.pcs.title" />
         <p class="small muted bk-help">{tr("bk.intro")}</p>
+        <div class="sec-actions">
+            <button class="btn primary sm" on:click=move |_| pcs.add.set(Some(false))><Icon icon=icons::PLUS size=14 />{tr("bk.add")}</button>
+            <button class="btn ghost sm" on:click=move |_| pcs.add.set(Some(true))><Icon icon=icons::FOLDER_OPEN size=14 />{tr("bk.adopt")}</button>
+        </div>
         {problems}
         {move || pcs.list.view(4, content)}
         {move || pcs.open.get().map(|d| drawer(pcs, d))}
@@ -438,7 +439,13 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
         let rules = if !p.delete.allowed {
             t("bk.rules.off").to_string()
         } else {
-            tf("bk.rules.on", &[("keep", &p.delete.keep_last.to_string()), ("days", &p.delete.min_age_days.to_string())])
+            let k = match (p.delete.keep_last > 0, p.delete.min_age_days > 0) {
+                (true, true) => "bk.rules.on",
+                (true, false) => "bk.rules.on_keep",
+                (false, true) => "bk.rules.on_days",
+                (false, false) => "bk.rules.on_free",
+            };
+            tf(k, &[("keep", &p.delete.keep_last.to_string()), ("days", &p.delete.min_age_days.to_string())])
         };
         let rows = d
             .list

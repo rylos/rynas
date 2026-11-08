@@ -3795,6 +3795,9 @@ bk.usage_text	{excl} solo in questi snapshot, {total} in tutto (misurato il {whe
 bk.usage_none	Non ancora misurato
 bk.rules.off	Elimina solo il NAS
 bk.rules.on	Elimina il PC; restano i {keep} più recenti, nessuno più giovane di {days} giorni
+bk.rules.on_keep	Elimina il PC; i {keep} più recenti restano sempre
+bk.rules.on_days	Elimina il PC; nessuno più giovane di {days} giorni
+bk.rules.on_free	Elimina il PC secondo il suo btrbk
 bk.alert_off	Disattivato
 bk.alert_days	Dopo {n} giorni
 bk.last	Ultimo ricevuto
