@@ -16,6 +16,22 @@ use crate::{
 
 use super::backend_trait::MultiWorkerBackend;
 
+/// rynas patch: milliseconds on a monotonic clock of this process (for the progress
+/// watchdog: [`ParallelWorker::activity`]).
+pub fn clock_ms() -> u64 {
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    EPOCH.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
+}
+
+/// rynas patch: how long a wait that began at `started` may still go on: `None` once
+/// nothing came from the server for `limit`, counted from the later of `started` and the
+/// last message.
+pub fn idle_left(started: u64, activity: &AtomicU64, limit: Duration) -> Option<Duration> {
+    let since = started.max(activity.load(Ordering::Relaxed));
+    let idle = Duration::from_millis(clock_ms().saturating_sub(since));
+    limit.checked_sub(idle).filter(|d| !d.is_zero())
+}
+
 /// SMB2 base parallel transport worker (multi-threaded or async).
 ///
 /// This struct is responsible for handling the transport to the server,
@@ -47,6 +63,8 @@ where
 
     /// A flag that indicates whether the worker is stopped.
     stopped: AtomicBool,
+    /// rynas patch: when the last message came from the server ([`clock_ms`])
+    activity: AtomicU64,
     /// The current timeout configured for the worker.
     timeout: AtomicU64,
 }
@@ -85,6 +103,16 @@ where
     T: MultiWorkerBackend + std::fmt::Debug,
     T::AwaitingNotifier: std::fmt::Debug,
 {
+    /// rynas patch: when the last message came from the server ([`clock_ms`]).
+    pub fn activity(&self) -> &AtomicU64 {
+        &self.activity
+    }
+
+    /// rynas patch: the configured timeout (the progress watchdog's limit).
+    pub fn timeout(&self) -> Duration {
+        Duration::from_millis(self.timeout.load(Ordering::Relaxed))
+    }
+
     /// Returns whether the worker is stopped.
     pub fn stopped(&self) -> bool {
         self.stopped.load(std::sync::atomic::Ordering::SeqCst)
@@ -99,6 +127,7 @@ where
     ) -> crate::Result<()> {
         log::trace!("Received message from server.");
         let message = message?;
+        self.activity.store(clock_ms(), Ordering::Relaxed);
 
         // Tranform the message and verify it.
         let msg = self.transformer.transform_incoming(message).await;
@@ -222,6 +251,7 @@ where
             notify_messages_channel: Default::default(),
             sender: tx,
             stopped: AtomicBool::new(false),
+            activity: AtomicU64::new(clock_ms()),
             timeout: AtomicU64::new(u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX)),
         });
 
@@ -305,7 +335,7 @@ where
         let timeout = options
             .timeout
             .unwrap_or_else(|| Duration::from_millis(self.timeout.load(Ordering::Relaxed)));
-        let result = T::wait_on_waiter(wait_for_receive, timeout).await?;
+        let result = T::wait_on_waiter(wait_for_receive, timeout, &self.activity).await?;
 
         log::trace!("Received message {result:?}");
 

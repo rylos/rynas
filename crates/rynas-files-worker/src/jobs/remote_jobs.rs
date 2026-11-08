@@ -38,22 +38,55 @@ enum End {
     Remote(RemoteEnd),
 }
 
-/// A server side: its connection, made again when it breaks (see [`Engine::r_reconnect`]).
+/// Makes a new connection to a job's server: the engine's, and the cancel watchdog's for
+/// the clean-up when the engine is stuck (`super::watch_cancel`).
+pub(super) type Connector = std::sync::Arc<dyn Fn() -> io::Result<Box<dyn Fs>> + Send + Sync>;
+
+/// A server side: its connection, made again when it breaks (see [`End::call`]).
 struct RemoteEnd {
-    connect: Box<dyn Fn() -> io::Result<Box<dyn Fs>>>,
+    connect: Connector,
     fs: RefCell<Box<dyn Fs>>,
 }
 
 impl RemoteEnd {
-    fn new(connect: Box<dyn Fn() -> io::Result<Box<dyn Fs>>>) -> io::Result<Self> {
+    fn new(connect: Connector) -> io::Result<Self> {
         let fs = RefCell::new(connect()?);
         Ok(Self { connect, fs })
     }
 }
 
 /// What a copy reads from: a local file or a remote one, both able to go on from an offset.
-trait Source: Read + Seek {}
-impl<T: Read + Seek + ?Sized> Source for T {}
+trait Source: Read + Seek {
+    /// the file as it was opened (remote files): compared before going on after a reconnect
+    fn ident(&self) -> Option<remote::Ident> {
+        None
+    }
+    /// The next bytes into `buf[..n]` (a remote reader swaps in its own buffer: no copy).
+    fn next_block(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
+        if buf.len() < CHUNK {
+            buf.resize(CHUNK, 0);
+        }
+        self.read(buf)
+    }
+}
+
+impl Source for File {}
+
+impl Source for Box<dyn remote::Reader> {
+    fn ident(&self) -> Option<remote::Ident> {
+        Some((**self).ident())
+    }
+    fn next_block(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
+        (**self).next_block(buf)
+    }
+}
+
+/// The error of a file that changed on the server while it was copied, found when the copy
+/// went on over a new connection: that file fails (seeking into another file would mix two
+/// versions), copying it again starts from its first byte.
+fn changed() -> io::Error {
+    rynas_files::fsops::coded(io::ErrorKind::Other, c::CONFLICT, t!("the file changed on the server during the copy (size or time differ): copy it again"))
+}
 
 /// Tries of a file's copy on a new connection, after the one before broke or stopped
 /// answering; a try that moves data starts the count again.
@@ -76,17 +109,46 @@ impl End {
         let Some((id, _)) = remote::split_path(path) else { return Ok(End::Local) };
         let conn = conns.iter().find(|c| c.id == id).ok_or_else(|| io::Error::other(t!("no such connection: was it deleted?")))?;
         let conn = conn.clone();
-        Ok(End::Remote(RemoteEnd::new(Box::new(move || conn.connect()))?))
+        Ok(End::Remote(RemoteEnd::new(std::sync::Arc::new(move || conn.connect()))?))
     }
 
     /// A new connection in place of the one that broke. The old one goes on a thread of
-    /// its own: whatever it still waits on cannot hold up the job.
+    /// its own: closing it may wait (bounded by its watchdog), the job does not.
     fn reconnect(&self) -> io::Result<()> {
         let End::Remote(r) = self else { return Err(io::Error::other("local")) };
         let fresh = (r.connect)()?;
         let old = r.fs.replace(fresh);
         let _ = std::thread::Builder::new().name("remote-drop".into()).spawn(move || drop(old));
         Ok(())
+    }
+
+    fn connector(&self) -> Option<Connector> {
+        match self {
+            End::Remote(r) => Some(std::sync::Arc::clone(&r.connect)),
+            End::Local => None,
+        }
+    }
+
+    /// Runs `f` on the server, again on a new connection when the connection broke or
+    /// stopped answering ([`RECONNECTS`] times). `f` is told whether it runs again: a
+    /// request that may have been carried out before the break (a folder made, a file
+    /// removed) takes its "already done" answer as done.
+    fn call<T>(&self, f: impl Fn(&dyn Fs, bool) -> io::Result<T>) -> io::Result<T> {
+        let End::Remote(r) = self else { return Err(io::Error::other("local")) };
+        let mut tries = 0;
+        loop {
+            let result = f(&**r.fs.borrow(), tries > 0);
+            match result {
+                Err(e) if remote::retryable(&e) && tries < RECONNECTS => {
+                    tries += 1;
+                    eprintln!("rynas-files-worker: {}: connecting again ({tries} of {RECONNECTS})", describe(&e));
+                    if self.reconnect().is_err() {
+                        return Err(e);
+                    }
+                }
+                other => return other,
+            }
+        }
     }
 
     fn is_remote(&self) -> bool {
@@ -96,7 +158,7 @@ impl End {
     fn stat(&self, p: &Path) -> io::Result<Meta> {
         match self {
             End::Local => fs::symlink_metadata(p).map(|m| local_meta(&m)),
-            End::Remote(r) => r.fs.borrow().stat(&parts(p)).map(|e| remote_meta(&e)),
+            End::Remote(_) => self.call(|fs, _| fs.stat(&parts(p))).map(|e| remote_meta(&e)),
         }
     }
 
@@ -107,7 +169,7 @@ impl End {
                 .flatten()
                 .filter_map(|e| Some((e.file_name().into_string().ok()?, local_meta(&e.metadata().ok()?))))
                 .collect(),
-            End::Remote(r) => r.fs.borrow().list(&parts(p))?.iter().map(|e| (e.name.clone(), remote_meta(e))).collect(),
+            End::Remote(_) => self.call(|fs, _| fs.list(&parts(p)))?.iter().map(|e| (e.name.clone(), remote_meta(e))).collect(),
         };
         items.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(items)
@@ -116,7 +178,7 @@ impl End {
     fn reader(&self, p: &Path) -> io::Result<Box<dyn Source>> {
         Ok(match self {
             End::Local => Box::new(rynas_files::confine::open(p)?),
-            End::Remote(r) => Box::new(r.fs.borrow().reader(&parts(p))?),
+            End::Remote(_) => Box::new(self.call(|fs, _| fs.reader(&parts(p)))?),
         })
     }
 
@@ -124,7 +186,7 @@ impl End {
     /// `None`.
     fn writer_at(&self, p: &Path, at: Option<u64>) -> io::Result<Box<dyn remote::Writer>> {
         match (self, at) {
-            (End::Remote(r), Some(_)) => r.fs.borrow().writer(&parts(p), at),
+            (End::Remote(_), Some(_)) => self.call(|fs, _| fs.writer(&parts(p), at)),
             _ => self.writer(p),
         }
     }
@@ -136,14 +198,17 @@ impl End {
                 rynas_files::confine::check_made(&file, p)?;
                 Box::new(LocalWriter(file))
             }
-            End::Remote(r) => r.fs.borrow().writer(&parts(p), None)?,
+            End::Remote(_) => self.call(|fs, _| fs.writer(&parts(p), None))?,
         })
     }
 
     fn mkdir(&self, p: &Path) -> io::Result<()> {
         match self {
             End::Local => fs::create_dir(p),
-            End::Remote(r) => r.fs.borrow().mkdir(&parts(p)),
+            End::Remote(_) => self.call(|fs, again| match fs.mkdir(&parts(p)) {
+                Err(e) if again && e.raw_os_error() == Some(libc::EEXIST) => Ok(()),
+                other => other,
+            }),
         }
     }
 
@@ -151,7 +216,10 @@ impl End {
         match self {
             End::Local if dir => fs::remove_dir(p),
             End::Local => fs::remove_file(p),
-            End::Remote(r) => r.fs.borrow().remove(&parts(p), dir),
+            End::Remote(_) => self.call(|fs, again| match fs.remove(&parts(p), dir) {
+                Err(e) if again && e.raw_os_error() == Some(libc::ENOENT) => Ok(()),
+                other => other,
+            }),
         }
     }
 
@@ -159,7 +227,11 @@ impl End {
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         match self {
             End::Local => crate::fsops::rename_noreplace(from, to),
-            End::Remote(r) => r.fs.borrow().rename(&parts(from), &parts(to)),
+            End::Remote(_) => self.call(|fs, again| match fs.rename(&parts(from), &parts(to)) {
+                // done before the connection broke: the source is gone, the target there
+                Err(e) if again && e.raw_os_error() == Some(libc::ENOENT) && fs.stat(&parts(to)).is_ok() => Ok(()),
+                other => other,
+            }),
         }
     }
 
@@ -219,13 +291,66 @@ struct Ends {
     dst: End,
 }
 
+/// What a copy to a server has left there so far: the temporary file being written and the
+/// folders it made. A cancel the engine cannot honour in time (stuck in a request) removes
+/// them on a connection of its own (`super::watch_cancel`).
+#[derive(Default)]
+pub(super) struct RemoteLeft {
+    pub(super) connect: Option<Connector>,
+    pub(super) part: Option<Vec<String>>,
+    pub(super) dirs: Vec<Vec<String>>,
+}
+
+impl RemoteLeft {
+    /// Removes the temporary file and the folders made (those still empty: a folder with
+    /// something in it stays), deepest first; waits at most `limit`, logs what it did.
+    pub(super) fn clean(self, limit: std::time::Duration) {
+        let Some(connect) = self.connect else { return };
+        if self.part.is_none() && self.dirs.is_empty() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let (part, dirs) = (self.part, self.dirs);
+        let spawned = std::thread::Builder::new().name("remote-clean".into()).spawn(move || {
+            let report = (|| -> io::Result<String> {
+                let fs = connect()?;
+                let mut done = Vec::new();
+                if let Some(part) = &part {
+                    match fs.remove(part, false) {
+                        Ok(()) => done.push(format!("removed {}", part.join("/"))),
+                        Err(e) => done.push(format!("cannot remove {}: {}", part.join("/"), describe(&e))),
+                    }
+                }
+                let empty = dirs.iter().rev().filter(|d| fs.remove(d, true).is_ok()).count();
+                if empty > 0 {
+                    done.push(format!("removed {empty} empty folders it made"));
+                }
+                Ok(done.join(", "))
+            })();
+            let _ = tx.send(report);
+        });
+        if spawned.is_err() {
+            return;
+        }
+        match rx.recv_timeout(limit) {
+            Ok(Ok(report)) if !report.is_empty() => eprintln!("rynas-files-worker: cancelled copy, on the server: {report}"),
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => eprintln!("rynas-files-worker: cancelled copy: cannot connect to clean up on the server: {}", describe(&e)),
+            Err(_) => eprintln!("rynas-files-worker: cancelled copy: the clean-up on the server did not finish in {} s", limit.as_secs()),
+        }
+    }
+}
+
 impl Engine {
     pub(super) fn remote_run(&mut self) -> Step<()> {
         match self.spec.op {
             Op::Copy | Op::Move => self.r_transfer(),
             Op::Delete => self.r_delete(),
-            // nothing of an interrupted copy is cleaned on a server
-            Op::Cleanup => Ok(()),
+            // the temporary files of a copy to a server that was stopped hard
+            Op::Cleanup => {
+                self.r_cleanup();
+                Ok(())
+            }
             Op::Compress | Op::Extract => {
                 self.fail(c::INVALID_VALUE, t!("archives: copy the files to the NAS first"));
                 Ok(())
@@ -253,6 +378,8 @@ impl Engine {
         let Some(src) = self.connect(&sources[0]) else { return Ok(()) };
         let Some(dst) = self.connect(&dest) else { return Ok(()) };
         let ends = Ends { src, dst };
+        // what a cancel removes from the server when the engine cannot (`watch_cancel`)
+        self.shared.remote.lock().unwrap().connect = ends.dst.connector();
 
         match ends.dst.stat(&dest) {
             Ok(m) if m.dir => {}
@@ -465,6 +592,9 @@ impl Engine {
                 return Ok(());
             }
             self.made_dirs.push(target.clone());
+            if ends.dst.is_remote() {
+                self.shared.remote.lock().unwrap().dirs.push(parts(&target));
+            }
         }
         let children = match ends.src.list(src) {
             Ok(c) => c,
@@ -523,8 +653,19 @@ impl Engine {
         let part = dir.join(part_name(target.file_name().unwrap_or_default()));
         let mut input = ends.src.reader(src)?;
         let _ = ends.dst.remove(&part, false);
-        let mut output = ends.dst.writer(&part)?;
-        // a cancel that cannot wait for the copy to notice removes it (`run`)
+        // a cancel that cannot wait for the copy to notice removes it (`watch_cancel`): a
+        // local file directly, a remote one over a connection of the watchdog's own (known
+        // before it is made: the request that makes it may be the one that hangs)
+        if ends.dst.is_remote() {
+            self.shared.remote.lock().unwrap().part = Some(parts(&part));
+        }
+        let mut output = match ends.dst.writer(&part) {
+            Ok(w) => w,
+            Err(e) => {
+                self.shared.remote.lock().unwrap().part = None;
+                return Err(e);
+            }
+        };
         if !ends.dst.is_remote() {
             *self.shared.part.lock().unwrap() = Some(part.clone());
         }
@@ -545,49 +686,84 @@ impl Engine {
             let _ = ends.dst.remove(&part, false);
         }
         *self.shared.part.lock().unwrap() = None;
+        self.shared.remote.lock().unwrap().part = None;
+        result
+    }
+
+    fn r_fill(&mut self, ends: &Ends, src: &Path, part: &Path, input: &mut Box<dyn Source>, output: &mut Box<dyn remote::Writer>) -> io::Result<Option<u128>> {
+        let mut buf = std::mem::take(&mut self.buf);
+        let result = self.r_stream(ends, src, part, input, output, &mut buf);
+        self.buf = buf;
         result
     }
 
     /// Streams the bytes; with verification on, returns their hash. When a server side
     /// breaks or stops answering, the copy goes on from where it was over a new connection
-    /// ([`RECONNECTS`] tries in a row).
-    fn r_fill(&mut self, ends: &Ends, src: &Path, part: &Path, input: &mut Box<dyn Source>, output: &mut Box<dyn remote::Writer>) -> io::Result<Option<u128>> {
-        if self.buf.len() != CHUNK {
-            self.buf = vec![0; CHUNK];
-        }
+    /// ([`RECONNECTS`] tries in a row): a source only when it is still the same file
+    /// ([`remote::Ident`]), a destination with the blocks it had not confirmed sent again.
+    /// Blocks pass from the reader to the writer without a copy where the reader can.
+    fn r_stream(&mut self, ends: &Ends, src: &Path, part: &Path, input: &mut Box<dyn Source>, output: &mut Box<dyn remote::Writer>, buf: &mut Vec<u8>) -> io::Result<Option<u128>> {
         let mut hash = self.spec.verify.then(xxhash_rust::xxh3::Xxh3::new);
-        // bytes of this file read and written so far
+        let ident = input.ident();
+        // bytes of this file read and handed to the writer so far
         let mut offset = 0u64;
         let mut tries = 0u32;
         loop {
-            let n = match input.read(&mut self.buf) {
+            let n = match input.next_block(buf) {
                 Ok(n) => n,
                 Err(e) if self.r_reconnect(&ends.src, &e, &mut tries)? => {
-                    *input = ends.src.reader(src)?;
+                    let fresh = ends.src.reader(src)?;
+                    if fresh.ident() != ident {
+                        return Err(changed());
+                    }
+                    *input = fresh;
                     input.seek(SeekFrom::Start(offset))?;
                     continue;
                 }
                 Err(e) => return Err(e),
             };
             if n == 0 {
+                // everything confirmed by the server before the file counts as copied
+                while let Err(e) = output.flush() {
+                    self.r_recover(ends, part, output, offset, e, &mut tries)?;
+                }
                 return Ok(hash.map(|h| h.digest128()));
             }
-            loop {
-                match output.write_all(&self.buf[..n]) {
-                    Ok(()) => break,
-                    // writes go to explicit offsets: the whole chunk again, from its start
-                    Err(e) if self.r_reconnect(&ends.dst, &e, &mut tries)? => *output = ends.dst.writer_at(part, Some(offset))?,
-                    Err(e) => return Err(e),
+            let mut done = 0;
+            while done < n {
+                match output.write(&buf[done..n]) {
+                    Ok(0) => return Err(io::Error::from(io::ErrorKind::WriteZero)),
+                    Ok(k) => done += k,
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    // writes go to explicit offsets: on from what the writer took
+                    Err(e) => self.r_recover(ends, part, output, offset + done as u64, e, &mut tries)?,
                 }
             }
             tries = 0;
             offset += n as u64;
             if let Some(h) = hash.as_mut() {
-                h.update(&self.buf[..n]);
+                h.update(&buf[..n]);
             }
             self.advance(n as u64);
             if self.checkpoint().is_err() {
                 return Err(io::Error::from(io::ErrorKind::Interrupted));
+            }
+        }
+    }
+
+    /// After a write to the destination failed with `e`: a new connection, a writer that
+    /// goes on at `at`, and the blocks the old one had not got confirmed sent again. `e`
+    /// back when that is not worth it or not possible.
+    fn r_recover(&mut self, ends: &Ends, part: &Path, output: &mut Box<dyn remote::Writer>, at: u64, mut e: io::Error, tries: &mut u32) -> io::Result<()> {
+        loop {
+            if !self.r_reconnect(&ends.dst, &e, tries)? {
+                return Err(e);
+            }
+            let pending = output.unconfirmed();
+            *output = ends.dst.writer_at(part, Some(at))?;
+            match output.resend(pending) {
+                Ok(()) => return Ok(()),
+                Err(again) => e = again,
             }
         }
     }
@@ -613,25 +789,44 @@ impl Engine {
         Cancelled
     }
 
-    /// Reads the copy back from where it landed and compares.
     fn r_verify(&mut self, ends: &Ends, part: &Path, size: u64, want: u128) -> io::Result<()> {
         let phase = std::mem::replace(&mut self.p.phase, "verify".into());
         self.p.current_done = 0;
         self.p.current_size = size;
         let mut back = ends.dst.reader(part)?;
         let mut check = xxhash_rust::xxh3::Xxh3::new();
-        loop {
-            let n = back.read(&mut self.buf)?;
+        let mut buf = std::mem::take(&mut self.buf);
+        let mut read = 0u64;
+        let mut tries = 0u32;
+        let result = loop {
+            let n = match back.next_block(&mut buf) {
+                Ok(n) => n,
+                Err(e) => match self.r_reconnect(&ends.dst, &e, &mut tries) {
+                    Ok(true) => match ends.dst.reader(part).and_then(|mut b| b.seek(SeekFrom::Start(read)).map(|_| b)) {
+                        Ok(b) => {
+                            back = b;
+                            continue;
+                        }
+                        Err(e) => break Err(e),
+                    },
+                    Ok(false) => break Err(e),
+                    Err(cancelled) => break Err(cancelled),
+                },
+            };
             if n == 0 {
-                break;
+                break Ok(());
             }
-            check.update(&self.buf[..n]);
+            tries = 0;
+            read += n as u64;
+            check.update(&buf[..n]);
             self.p.verify_bytes += n as u64;
             self.p.current_done += n as u64;
             if self.checkpoint().is_err() {
-                return Err(io::Error::from(io::ErrorKind::Interrupted));
+                break Err(io::Error::from(io::ErrorKind::Interrupted));
             }
-        }
+        };
+        self.buf = buf;
+        result?;
         self.p.phase = phase;
         if check.digest128() != want {
             return Err(io::Error::other(t!("verification failed: the copy differs from the original")));
@@ -679,26 +874,82 @@ impl Engine {
         }
         Ok(())
     }
+
+    /// The leftovers of a copy to a server that was stopped hard (rynasd signalled the
+    /// worker after a cancel, or restarted): ".name.rynas-part" files at the top of the
+    /// destination and in the trees of the job's items. The folders the job made are not
+    /// known any more and stay. Nothing else is touched.
+    fn r_cleanup(&mut self) {
+        let Some(dest) = self.spec.dest.clone() else { return };
+        let end = match End::open(&dest, &self.spec.remotes) {
+            Ok(end) if end.is_remote() => end,
+            Ok(_) => return,
+            Err(e) => {
+                eprintln!("rynas-files-worker: clean-up of {}: cannot connect: {}", self.display(&dest), describe(&e));
+                return;
+            }
+        };
+        let mut stack = vec![(dest.clone(), false)];
+        for src in &self.spec.sources {
+            if let Some(name) = src.file_name() {
+                stack.push((dest.join(name), true));
+            }
+        }
+        let (mut seen, mut removed) = (0usize, 0usize);
+        while let Some((dir, deep)) = stack.pop() {
+            if seen > 100_000 {
+                break;
+            }
+            let Ok(items) = end.list(&dir) else { continue };
+            for (name, m) in items {
+                seen += 1;
+                if !m.dir && super::part_leftover(name.as_bytes()) {
+                    match end.remove(&dir.join(&name), false) {
+                        Ok(()) => removed += 1,
+                        Err(e) => eprintln!("rynas-files-worker: clean-up: cannot remove {} on the server: {}", self.display(&dir.join(&name)), describe(&e)),
+                    }
+                } else if deep && m.dir {
+                    stack.push((dir.join(&name), true));
+                }
+            }
+        }
+        if removed > 0 {
+            eprintln!("rynas-files-worker: clean-up: removed {removed} temporary files of a stopped copy on the server");
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::Shared;
     use super::*;
-    use std::sync::Arc;
+    use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{Arc, Mutex};
 
-    /// A remote file whose connection breaks once the reading reaches `fail_at`.
+    /// What a reader of the fake server does once the reading reaches `at`.
+    #[derive(Clone, Copy)]
+    enum Fault {
+        /// the connection breaks
+        Breaks(u64),
+        /// the server refuses the file (a lock, a disk error): that file's error only
+        Refuses(u64),
+    }
+
+    /// A remote file; `ident` is what the open reported.
     struct FlakyReader {
         data: Arc<Vec<u8>>,
         pos: u64,
-        fail_at: Option<u64>,
+        fault: Option<Fault>,
+        ident: remote::Ident,
     }
 
     impl Read for FlakyReader {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            if self.fail_at.is_some_and(|at| self.pos >= at) {
-                return Err(remote::stalled(std::time::Duration::from_secs(60)));
+            match self.fault {
+                Some(Fault::Breaks(at)) if self.pos >= at => return Err(remote::stalled(std::time::Duration::from_secs(60))),
+                Some(Fault::Refuses(at)) if self.pos >= at => return Err(remote::errno(libc::EBUSY)),
+                _ => {}
             }
             let from = (self.pos as usize).min(self.data.len());
             let n = buf.len().min(self.data.len() - from).min(1 << 20);
@@ -720,35 +971,126 @@ mod tests {
         fn len(&self) -> u64 {
             self.data.len() as u64
         }
+        fn ident(&self) -> remote::Ident {
+            self.ident
+        }
     }
 
-    /// A server: each connection gets `fail_at(n)` for its readers (n counts from 1).
-    struct FlakyFs {
+    /// The files written on the fake server, shared by its connections.
+    type Disk = Arc<Mutex<BTreeMap<Vec<String>, Vec<u8>>>>;
+
+    /// A writer that takes blocks without the server confirming them yet (like the SMB
+    /// writer's blocks in flight); `confirm` of them are confirmed, then the connection
+    /// breaks when `break_after` bytes were handed over.
+    struct LaggyWriter {
+        disk: Disk,
+        path: Vec<String>,
+        pos: u64,
+        pending: Vec<(u64, Arc<[u8]>)>,
+        break_after: Option<u64>,
+    }
+
+    impl LaggyWriter {
+        fn put(&self, at: u64, data: &[u8]) {
+            let mut disk = self.disk.lock().unwrap();
+            let file = disk.entry(self.path.clone()).or_default();
+            let end = at as usize + data.len();
+            if file.len() < end {
+                file.resize(end, 0);
+            }
+            file[at as usize..end].copy_from_slice(data);
+        }
+    }
+
+    impl Write for LaggyWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if self.break_after.is_some_and(|b| self.pos >= b) {
+                return Err(remote::lost(io::ErrorKind::ConnectionReset, "reset"));
+            }
+            let n = buf.len().min(256 * 1024);
+            // the block before this one is confirmed when the next comes: one in flight
+            for (at, data) in std::mem::take(&mut self.pending) {
+                self.put(at, &data);
+            }
+            self.pending.push((self.pos, buf[..n].into()));
+            self.pos += n as u64;
+            Ok(n)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            if self.break_after.is_some() {
+                return Err(remote::lost(io::ErrorKind::ConnectionReset, "reset"));
+            }
+            for (at, data) in std::mem::take(&mut self.pending) {
+                self.put(at, &data);
+            }
+            Ok(())
+        }
+    }
+
+    impl remote::Writer for LaggyWriter {
+        fn finish(mut self: Box<Self>) -> io::Result<()> {
+            self.flush()
+        }
+        fn unconfirmed(&mut self) -> Vec<(u64, Arc<[u8]>)> {
+            std::mem::take(&mut self.pending)
+        }
+        fn resend(&mut self, blocks: Vec<(u64, Arc<[u8]>)>) -> io::Result<()> {
+            for (at, data) in blocks {
+                self.put(at, &data);
+            }
+            Ok(())
+        }
+    }
+
+    /// A fake server; the `nth` connection (from 1) gets the reader faults, idents and
+    /// writer breaks of `faults(nth)`.
+    struct FakeFs {
         data: Arc<Vec<u8>>,
-        fail_at: Option<u64>,
+        fault: Option<Fault>,
+        ident: remote::Ident,
+        break_after: Option<u64>,
+        disk: Disk,
+        removed: Arc<Mutex<Vec<Vec<String>>>>,
+        /// the writer blocks forever (a server that stopped answering)
+        hang: bool,
     }
 
-    impl Fs for FlakyFs {
+    impl Fs for FakeFs {
         fn list(&self, _: &[String]) -> io::Result<Vec<remote::Entry>> {
             Ok(Vec::new())
         }
         fn stat(&self, path: &[String]) -> io::Result<remote::Entry> {
-            Ok(remote::Entry { name: path.last().cloned().unwrap_or_default(), kind: 'f', size: self.data.len() as u64, mtime: 0, mode: 0o644 })
+            let name = path.last().cloned().unwrap_or_default();
+            if self.disk.lock().unwrap().contains_key(path) || name == "big.iso" {
+                return Ok(remote::Entry { name, kind: 'f', size: self.data.len() as u64, mtime: 0, mode: 0o644 });
+            }
+            if name.contains('.') { Err(remote::errno(libc::ENOENT)) } else { Ok(remote::Entry { name, kind: 'd', size: 0, mtime: 0, mode: 0o755 }) }
         }
         fn reader(&self, _: &[String]) -> io::Result<Box<dyn remote::Reader>> {
-            Ok(Box::new(FlakyReader { data: Arc::clone(&self.data), pos: 0, fail_at: self.fail_at }))
+            Ok(Box::new(FlakyReader { data: Arc::clone(&self.data), pos: 0, fault: self.fault, ident: self.ident }))
         }
-        fn writer(&self, _: &[String], _: Option<u64>) -> io::Result<Box<dyn remote::Writer>> {
-            Err(remote::errno(libc::EROFS))
+        fn writer(&self, path: &[String], at: Option<u64>) -> io::Result<Box<dyn remote::Writer>> {
+            if self.hang {
+                std::thread::sleep(std::time::Duration::from_secs(3600));
+            }
+            if at.is_none() {
+                self.disk.lock().unwrap().insert(path.to_vec(), Vec::new());
+            }
+            Ok(Box::new(LaggyWriter { disk: Arc::clone(&self.disk), path: path.to_vec(), pos: at.unwrap_or(0), pending: Vec::new(), break_after: self.break_after }))
         }
         fn mkdir(&self, _: &[String]) -> io::Result<()> {
-            Err(remote::errno(libc::EROFS))
+            Ok(())
         }
-        fn rename(&self, _: &[String], _: &[String]) -> io::Result<()> {
-            Err(remote::errno(libc::EROFS))
+        fn rename(&self, from: &[String], to: &[String]) -> io::Result<()> {
+            let mut disk = self.disk.lock().unwrap();
+            let data = disk.remove(from).ok_or_else(|| remote::errno(libc::ENOENT))?;
+            disk.insert(to.to_vec(), data);
+            Ok(())
         }
-        fn remove(&self, _: &[String], _: bool) -> io::Result<()> {
-            Err(remote::errno(libc::EROFS))
+        fn remove(&self, path: &[String], _: bool) -> io::Result<()> {
+            self.removed.lock().unwrap().push(path.to_vec());
+            self.disk.lock().unwrap().remove(path);
+            Ok(())
         }
         fn space(&self, _: &[String]) -> Option<(u64, u64)> {
             None
@@ -756,15 +1098,41 @@ mod tests {
         fn set_mtime(&self, _: &[String], _: i64) {}
     }
 
-    fn setup(fail_at: fn(u32) -> Option<u64>) -> (Ends, Arc<AtomicU32>, Arc<Vec<u8>>) {
+    #[derive(Clone, Copy, Default)]
+    struct Faults {
+        read: Option<Fault>,
+        ident: remote::Ident,
+        break_after: Option<u64>,
+        hang: bool,
+    }
+
+    struct Server {
+        connect: Connector,
+        connects: Arc<AtomicU32>,
+        data: Arc<Vec<u8>>,
+        disk: Disk,
+        removed: Arc<Mutex<Vec<Vec<String>>>>,
+    }
+
+    fn server(faults: fn(u32) -> Faults) -> Server {
         let data: Arc<Vec<u8>> = Arc::new((0..10u32 << 20).map(|i| (i % 251) as u8).collect());
         let connects = Arc::new(AtomicU32::new(0));
-        let (d, n) = (Arc::clone(&data), Arc::clone(&connects));
-        let connect = Box::new(move || -> io::Result<Box<dyn Fs>> {
-            let nth = n.fetch_add(1, Ordering::SeqCst) + 1;
-            Ok(Box::new(FlakyFs { data: Arc::clone(&d), fail_at: fail_at(nth) }))
+        let disk: Disk = Arc::default();
+        let removed: Arc<Mutex<Vec<Vec<String>>>> = Arc::default();
+        let (d, n, k, r) = (Arc::clone(&data), Arc::clone(&connects), Arc::clone(&disk), Arc::clone(&removed));
+        let connect: Connector = Arc::new(move || -> io::Result<Box<dyn Fs>> {
+            let f = faults(n.fetch_add(1, Ordering::SeqCst) + 1);
+            Ok(Box::new(FakeFs { data: Arc::clone(&d), fault: f.read, ident: f.ident, break_after: f.break_after, disk: Arc::clone(&k), removed: Arc::clone(&r), hang: f.hang }))
         });
-        (Ends { src: End::Remote(RemoteEnd::new(connect).unwrap()), dst: End::Local }, connects, data)
+        Server { connect, connects, data, disk, removed }
+    }
+
+    fn from_server(s: &Server) -> Ends {
+        Ends { src: End::Remote(RemoteEnd::new(Arc::clone(&s.connect)).unwrap()), dst: End::Local }
+    }
+
+    fn to_server(s: &Server) -> Ends {
+        Ends { src: End::Local, dst: End::Remote(RemoteEnd::new(Arc::clone(&s.connect)).unwrap()) }
     }
 
     fn engine(dest: &Path) -> Engine {
@@ -772,35 +1140,178 @@ mod tests {
         Engine::new(spec, Arc::new(Shared::new(0)))
     }
 
+    fn meta(size: usize) -> Meta {
+        Meta { dir: false, file: true, size: size as u64, mtime: 0 }
+    }
+
     #[test]
     fn a_broken_connection_goes_on_from_where_it_stopped() {
         let dir = tempfile::tempdir().unwrap();
         // the first connection breaks after 5 MiB, the second one works
-        let (ends, connects, data) = setup(|nth| (nth == 1).then_some(5 << 20));
+        let s = server(|nth| Faults { read: (nth == 1).then_some(Fault::Breaks(5 << 20)), ..Default::default() });
+        let ends = from_server(&s);
         let mut e = engine(dir.path());
         let target = dir.path().join("big.iso");
-        let meta = Meta { dir: false, file: true, size: data.len() as u64, mtime: 0 };
-        e.r_file(&ends, Path::new("/:c/share/big.iso"), meta, &target, false).unwrap();
-        assert_eq!(connects.load(Ordering::SeqCst), 2);
-        assert!(fs::read(&target).unwrap() == *data, "the copy differs");
-        assert_eq!(e.p.bytes_done, data.len() as u64);
+        e.r_file(&ends, Path::new("/:c/share/big.iso"), meta(s.data.len()), &target, false).unwrap();
+        assert_eq!(s.connects.load(Ordering::SeqCst), 2);
+        assert!(fs::read(&target).unwrap() == *s.data, "the copy differs");
+        assert_eq!(e.p.bytes_done, s.data.len() as u64);
         assert!(!dir.path().join(".big.iso.rynas-part").exists());
     }
 
     #[test]
     fn a_server_gone_for_good_fails_the_job_and_leaves_no_part() {
         let dir = tempfile::tempdir().unwrap();
-        let (ends, connects, data) = setup(|_| Some(2 << 20));
+        let s = server(|_| Faults { read: Some(Fault::Breaks(2 << 20)), ..Default::default() });
+        let ends = from_server(&s);
         let mut e = engine(dir.path());
-        let meta = Meta { dir: false, file: true, size: data.len() as u64, mtime: 0 };
-        let r = e.r_item(&ends, Path::new("/:c/share/big.iso"), Some(meta), dir.path(), "big.iso", false, false);
+        let r = e.r_item(&ends, Path::new("/:c/share/big.iso"), Some(meta(s.data.len())), dir.path(), "big.iso", false, false);
         assert!(r.is_err(), "the job stops");
-        assert_eq!(connects.load(Ordering::SeqCst), 1 + RECONNECTS);
+        assert_eq!(s.connects.load(Ordering::SeqCst), 1 + RECONNECTS);
         let (code, msg) = e.fatal.clone().expect("a fatal error");
         assert_eq!(code, c::REMOTE_UNREACHABLE);
         assert!(msg.contains("stopped answering"), "{msg}");
         assert!(!dir.path().join(".big.iso.rynas-part").exists());
         assert!(!dir.path().join("big.iso").exists());
         assert!(e.shared.part.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_file_the_server_refuses_fails_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        // a lock conflict half way: no new connection, no lost job, just that file
+        let s = server(|_| Faults { read: Some(Fault::Refuses(3 << 20)), ..Default::default() });
+        let ends = from_server(&s);
+        let mut e = engine(dir.path());
+        let r = e.r_item(&ends, Path::new("/:c/share/big.iso"), Some(meta(s.data.len())), dir.path(), "big.iso", false, false);
+        assert!(r.is_ok(), "the job goes on with the next item");
+        assert!(e.fatal.is_none());
+        assert_eq!(e.p.errors, 1);
+        assert_eq!(s.connects.load(Ordering::SeqCst), 1);
+        assert!(!dir.path().join(".big.iso.rynas-part").exists());
+    }
+
+    #[test]
+    fn a_source_that_changed_is_not_resumed() {
+        let dir = tempfile::tempdir().unwrap();
+        // the connection breaks; on the new one the file has another change time
+        let s = server(|nth| Faults {
+            read: (nth == 1).then_some(Fault::Breaks(4 << 20)),
+            ident: remote::Ident { size: 10 << 20, mtime: 7, change: if nth == 1 { 100 } else { 200 } },
+            ..Default::default()
+        });
+        let ends = from_server(&s);
+        let mut e = engine(dir.path());
+        let r = e.r_item(&ends, Path::new("/:c/share/big.iso"), Some(meta(s.data.len())), dir.path(), "big.iso", false, false);
+        assert!(r.is_ok(), "only that file fails");
+        assert!(e.fatal.is_none());
+        assert_eq!(e.p.errors, 1);
+        assert!(!dir.path().join("big.iso").exists(), "no copy mixing two versions");
+        assert!(!dir.path().join(".big.iso.rynas-part").exists());
+    }
+
+    #[test]
+    fn an_upload_sends_again_what_the_server_had_not_confirmed() {
+        let src_dir = tempfile::tempdir().unwrap();
+        let s = server(|nth| Faults { break_after: (nth == 1).then_some(3 << 20), ..Default::default() });
+        let local = src_dir.path().join("big.iso");
+        fs::write(&local, &*s.data).unwrap();
+        let ends = to_server(&s);
+        let mut e = engine(Path::new("/:c/share"));
+        let target = Path::new("/:c/share/big.iso");
+        e.r_file(&ends, &local, meta(s.data.len()), target, false).unwrap();
+        assert_eq!(s.connects.load(Ordering::SeqCst), 2);
+        let disk = s.disk.lock().unwrap();
+        let copy = disk.get(&vec!["share".to_string(), "big.iso".to_string()]).expect("the file is there");
+        assert!(*copy == *s.data, "the upload differs ({} of {} bytes)", copy.len(), s.data.len());
+        assert!(!disk.keys().any(|k| k.last().unwrap().ends_with(".rynas-part")));
+    }
+
+    #[test]
+    fn a_cancel_that_cannot_wait_cleans_the_server() {
+        // the writer of the temporary file hangs (a server that stopped answering): what
+        // the watchdog knows lets it remove the part and the folders on a new connection
+        let s = server(|nth| Faults { hang: nth == 1, ..Default::default() });
+        let src_dir = tempfile::tempdir().unwrap();
+        let local = src_dir.path().join("big.iso");
+        fs::write(&local, b"data").unwrap();
+        let shared = Arc::new(Shared::new(0));
+        let spec = serde_json::from_value(serde_json::json!({ "op": "copy", "sources": [local], "dest": "/:c/share/new" })).unwrap();
+        let mut e = Engine::new(spec, Arc::clone(&shared));
+        let connect = Arc::clone(&s.connect);
+        std::thread::spawn(move || {
+            let ends = Ends { src: End::Local, dst: End::Remote(RemoteEnd::new(connect).unwrap()) };
+            shared_setup(&mut e, &ends);
+            let _ = e.r_file(&ends, &local, meta(4), Path::new("/:c/share/new/big.iso"), false);
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while shared.remote.lock().unwrap().part.is_none() {
+            assert!(std::time::Instant::now() < deadline, "the part was never recorded");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let left = std::mem::take(&mut *shared.remote.lock().unwrap());
+        assert_eq!(left.dirs, vec![vec!["share".to_string(), "new".to_string()]]);
+        left.clean(std::time::Duration::from_secs(5));
+        let removed = s.removed.lock().unwrap().clone();
+        assert!(removed.contains(&vec!["share".to_string(), "new".to_string(), ".big.iso.rynas-part".to_string()]), "{removed:?}");
+        assert_eq!(removed.last().unwrap(), &vec!["share".to_string(), "new".to_string()]);
+    }
+
+    /// What `r_transfer` and `r_dir` record before a file of a new folder is copied.
+    fn shared_setup(e: &mut Engine, ends: &Ends) {
+        e.shared.remote.lock().unwrap().connect = ends.dst.connector();
+        e.shared.remote.lock().unwrap().dirs.push(parts(Path::new("/:c/share/new")));
+    }
+
+    #[test]
+    fn retried_requests_take_already_done_as_done() {
+        // a remove whose answer was lost: on the new connection the file is gone
+        struct Gone(Arc<AtomicU32>);
+        impl Fs for Gone {
+            fn list(&self, _: &[String]) -> io::Result<Vec<remote::Entry>> {
+                Ok(Vec::new())
+            }
+            fn stat(&self, _: &[String]) -> io::Result<remote::Entry> {
+                Err(remote::errno(libc::ENOENT))
+            }
+            fn reader(&self, _: &[String]) -> io::Result<Box<dyn remote::Reader>> {
+                Err(remote::errno(libc::ENOENT))
+            }
+            fn writer(&self, _: &[String], _: Option<u64>) -> io::Result<Box<dyn remote::Writer>> {
+                Err(remote::errno(libc::ENOENT))
+            }
+            fn mkdir(&self, _: &[String]) -> io::Result<()> {
+                if self.0.load(Ordering::SeqCst) == 1 { Err(remote::stalled(std::time::Duration::from_secs(1))) } else { Err(remote::errno(libc::EEXIST)) }
+            }
+            fn rename(&self, _: &[String], _: &[String]) -> io::Result<()> {
+                Err(remote::errno(libc::ENOENT))
+            }
+            fn remove(&self, _: &[String], _: bool) -> io::Result<()> {
+                if self.0.load(Ordering::SeqCst) == 1 { Err(remote::lost(io::ErrorKind::ConnectionReset, "reset")) } else { Err(remote::errno(libc::ENOENT)) }
+            }
+            fn space(&self, _: &[String]) -> Option<(u64, u64)> {
+                None
+            }
+            fn set_mtime(&self, _: &[String], _: i64) {}
+        }
+        let n = Arc::new(AtomicU32::new(0));
+        let k = Arc::clone(&n);
+        let end = End::Remote(RemoteEnd::new(Arc::new(move || -> io::Result<Box<dyn Fs>> {
+            k.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(Gone(Arc::clone(&k))))
+        }))
+        .unwrap());
+        end.remove(Path::new("/:c/share/a.txt"), false).unwrap();
+        assert_eq!(n.load(Ordering::SeqCst), 2);
+        // a first answer of "not there" is an error, as always
+        assert_eq!(end.remove(Path::new("/:c/share/a.txt"), false).unwrap_err().raw_os_error(), Some(libc::ENOENT));
+        // a stat that fails for the connection gets the new connection too
+        n.store(0, Ordering::SeqCst);
+        let end2 = End::Remote(RemoteEnd::new(Arc::new(|| -> io::Result<Box<dyn Fs>> { Err(remote::errno(libc::ECONNREFUSED)) })).unwrap_or_else(|_| {
+            // a server that refuses: the job's own connect fails
+            RemoteEnd { connect: Arc::new(|| Err(remote::errno(libc::ECONNREFUSED))), fs: RefCell::new(Box::new(Gone(Arc::new(AtomicU32::new(1))))) }
+        }));
+        let e = end2.mkdir(Path::new("/:c/share/d")).unwrap_err();
+        assert!(remote::retryable(&e), "the connection's error is kept when no new connection can be made");
     }
 }

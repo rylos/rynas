@@ -138,36 +138,82 @@ little and would keep processes with the reading capability alive between reques
   Build, test and lint it with `--manifest-path crates/rynas-files-worker/Cargo.toml`;
   `cargo test --workspace` does not reach it, but rynasd's `tests/files.rs` builds it and drives
   it end to end. When `smb` releases on final crypto crates, the worker can rejoin the workspace.
-- `smb` is patched (`[patch.crates-io]` to `crates/rynas-files-worker/vendor/smb`, 0.12.1 with
-  one change marked "rynas patch" in `connection/worker/worker_trait.rs`): the crate drops the
-  credits granted in an interim `STATUS_PENDING` response (MS-SMB2 3.3.4.2: an asynchronous
-  request's credits come there, the final response grants none — Samba answers a read
-  asynchronously once it takes over 0.5 s). Each such read lost its 16 credits; after a few the
-  client waited forever on its credit semaphore with nothing in flight: a copy from a server
-  behind a VPN stopped after a few MiB, the connection idle, every thread asleep. Drop the copy
-  once a release counts the interim grants.
+- `smb` and `smb-transport` are patched (`[patch.crates-io]` to
+  `crates/rynas-files-worker/vendor/smb` and `vendor/smb-transport`, both 0.12.1; every change
+  is marked "rynas patch"):
+  - `connection/worker/worker_trait.rs`: the credits granted in an interim `STATUS_PENDING`
+    response are counted (MS-SMB2 3.3.4.2: an asynchronous request's credits come there, the
+    final response grants none — Samba answers a read asynchronously once it takes over
+    0.5 s). Without it each such read lost its 16 credits and the client soon waited forever on
+    its credit semaphore with nothing in flight.
+  - progress watchdog (`connection/worker/parallel/{base,threading_backend}.rs`,
+    `connection.rs`): the connection's timeout no longer bounds one answer but counts from the
+    last message the server sent (`ParallelWorker::activity`); waits for an answer and for
+    credits (`Semaphore::acquire_many_timeout`) fail once nothing came for that long. The
+    credit pool saturates instead of wrapping (`AtomicU16`).
+  - `resource/file.rs`: read/write/flush errors keep the crate's `smb::Error` inside the
+    `io::Error` (they were flattened to text, so a lock conflict looked like a broken
+    connection); `File::read_owned` returns the response's buffer (no copy) and treats
+    `STATUS_END_OF_FILE` as the end; `File::times` (last write and change time of the open,
+    `ResourceHandle::raw_times`).
+  - `crypto/signing.rs`: AES-GMAC offered first (a 3.1.1 server takes the client's order;
+    CMAC's AES chain is serial and every message is signed).
+  - `Connection::credits_granted`, `mod parallel` `pub(crate)` (for the credit wait).
+  - `smb-transport` `tcp/transport.rs`: `TCP_NODELAY` (each request is two writes; with Nagle
+    every round trip waited for a delayed ACK, up to 40 ms: the old reads crawled at ~85 MB/s
+    even on the loopback); the sync `receive` no longer drops the bytes already read of a
+    message when the receive loop's 100 ms poll hits halfway (the stream lost its framing and
+    the connection was dead for good: a server pausing inside a large response); a message
+    that stops halfway for longer than the timeout ends the connection; the first answer
+    (multi-protocol negotiation, read before the worker exists) has a read timeout.
+  Drop the copies once releases carry these fixes.
 
 ### Remote servers that stop answering
 
-- Every blocking call of the SMB client runs bounded (`remote::timed`, 60 s,
-  `REMOTE_TIMEOUT`): a call still blocked is left behind on its thread and the error is
-  `remote_unreachable` "the remote server stopped answering (no reply in 60 s)". The crate's
-  own timeout (connect and each answer) is 30 s. Reads: blocks of at most the negotiated
-  MaxReadSize (1 MiB cap), 4 in flight (64 credits); writes at most MaxWriteSize.
-- SFTP: each request has the session's 20 s timeout (russh-sftp), a read batch is bounded by
-  60 s, SSH keepalives every 15 s (3 missed end the session); closing handles is bounded.
-- TCP keepalive (20 s idle, 10 s interval, 3 probes) and `TCP_USER_TIMEOUT` 60 s on the
-  worker's TCP sockets (`remote::tune_sockets`: neither library sets them).
-- A copy whose server side breaks or times out reconnects and goes on from the current offset
-  (reads are re-issued from the offset, writes rewrite the chunk at its offset through
-  `Fs::writer(path, Some(offset))`), up to 2 tries in a row; then the job fails with
+- Progress watchdog, no call on a thread of its own: an SMB request fails when requests wait
+  and nothing at all came from the server for 60 s (`REMOTE_TIMEOUT`, the crate's connection
+  timeout with the patch above): `remote_unreachable` "the remote server stopped answering
+  (no reply in 60 s)". A slow server that keeps answering is never cut off: a huge listing
+  (each page is a request) or 8 reads in flight on a slow link take as long as they need.
+- SFTP: each request has the session's 60 s timeout (russh-sftp, per request: each read in
+  flight and each page of a listing on its own), no batch or whole-operation bound; SSH
+  keepalives every 15 s (3 missed end the session).
+- TCP keepalive (20 s idle, 10 s interval, 3 probes), `TCP_USER_TIMEOUT` 60 s and
+  `TCP_NODELAY` on the worker's TCP sockets (`remote::tune_sockets`).
+- Errors by side: only the clients make connection errors (`remote::stalled`, `remote::lost`,
+  code `remote_unreachable`), and only those are retried (`remote::retryable`). The server's
+  answer about one file (SMB `FILE_LOCK_CONFLICT`, `SHARING_VIOLATION`, `ACCESS_DENIED`, an
+  unknown status; SFTP a status) fails that file only, as do the NAS's own errors (a local
+  `ETIMEDOUT` or `EPIPE` is not the server's). SMB session/handle loss
+  (`USER_SESSION_DELETED`, `NETWORK_NAME_DELETED`, `FILE_CLOSED`, `INVALID_HANDLE`…) counts as
+  the connection's. SFTP hands file errors over as text: the worker asks the session
+  (`canonicalize(".")`) whether it still answers before blaming the connection.
+- Reconnects (2 tries in a row, `RECONNECTS`): every server request of a job (`End::call`:
+  stat, list, open, mkdir, remove, rename) goes on over a new connection; a retried request
+  that may have been carried out before the break takes "already exists"/"not found" as done.
+  A copy goes on from the current offset: the source only if it is still the same file
+  (`remote::Ident`: size and last write time, for SMB also the change time, from the open),
+  otherwise that file fails with `conflict` "the file changed on the server during the copy";
+  the destination writer is reopened at the offset and the blocks the old one had not got
+  confirmed are sent again (`Writer::unconfirmed`/`resend`). Then the job fails with
   `remote_unreachable` (Retry), without going through the next items one timeout each.
+- Throughput (SMB): a file of more than one block is read by 8 threads (`smb-read`) keeping
+  8 reads of up to 1 MiB (the negotiated MaxReadSize, 1 MiB cap) in flight, at most 16 blocks
+  ahead of the copy, delivered in order straight into the copy loop (`Reader::next_block`, no
+  copy); local writes overlap the network. Uploads keep up to 8 writes in flight
+  (`smb-write`, `write_block_zc`); a one-block file uses no threads. Credits backlog 512.
+  Each job's connection logs once (journal): dialect, signing algorithm, encryption cipher,
+  MaxRead/MaxWrite, credits granted. Encryption only where the server or the share asks.
+  `packaging/bench-smb.sh` measures smbclient and the worker against a real server.
 - Cancel: the worker stops between two chunks; if it has not within 3 s (a call blocked on the
-  server) it removes the local `.rynas-part` it was writing, reports the job cancelled and
+  server) it removes the local `.rynas-part` it was writing — or, for a copy to a server, the
+  remote `.rynas-part` and the folders the job made that are still empty, over a new
+  connection, at most 10 s, logged (`RemoteLeft::clean`) — reports the job cancelled and
   exits. rynasd also enforces it: SIGTERM 5 s after the cancel, SIGKILL 5 s later (through a
-  pidfd), then the job is `cancelled` and a `cleanup` run removes the temporary files.
-  `JobView.cancelling` is true meanwhile. Pause answers at once and takes effect at the next
-  chunk (at most one request timeout later).
+  pidfd), then the job is `cancelled` and a `cleanup` run removes the temporary files, on a
+  remote destination too (`.name.rynas-part` at its top and in the job's trees; the folders
+  made are not known any more there). `JobView.cancelling` is true meanwhile. Pause answers at
+  once and takes effect at the next chunk.
 - `JobView.stalled_s`: a running job whose progress has not moved for 5 s or more; the
   transfer dialog shows "no data for N s" instead of waiting for the first data.
 

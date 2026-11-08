@@ -104,7 +104,10 @@ impl File {
             .handle
             .sendo_recvo(request, ReceiveOptions::new().with_allow_async(true))
             .await
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
+            // rynas patch: the crate's error itself, not its text: a caller tells the
+            // server's answer about the file (a lock, access denied) from a broken
+            // connection by downcasting it
+            .map_err(std::io::Error::other)?;
         let content = response
             .message
             .content
@@ -120,6 +123,44 @@ impl File {
         buf[..actual_read_length].copy_from_slice(&content.buffer);
 
         Ok(actual_read_length)
+    }
+
+    /// rynas patch: reads up to `len` bytes at `pos` and returns the response's own buffer
+    /// (no copy into a caller's buffer), with the crate's error. An empty buffer is the end
+    /// of the file (STATUS_END_OF_FILE).
+    pub async fn read_owned(&self, len: u32, pos: u64) -> crate::Result<Vec<u8>> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        let request = OutgoingMessage::new(
+            ReadRequest {
+                flags: ReadFlags::new(),
+                length: len,
+                offset: pos,
+                file_id: self.handle.file_id()?,
+                minimum_count: 1,
+            }
+            .into(),
+        );
+        let response = match self
+            .handle
+            .sendo_recvo(request, ReceiveOptions::new().with_allow_async(true))
+            .await
+        {
+            Err(Error::ReceivedErrorMessage(status, _) | Error::UnexpectedMessageStatus(status))
+                if status == Status::EndOfFile as u32 =>
+            {
+                return Ok(Vec::new());
+            }
+            other => other?,
+        };
+        Ok(response.message.content.to_read()?.buffer)
+    }
+
+    /// rynas patch: the file's last write and change times (FILETIME, 100 ns units) as the
+    /// open returned them: with the size, what tells that a file changed between two opens.
+    pub fn times(&self) -> (u64, u64) {
+        self.handle.raw_times()
     }
 
     /// Write a block of data to an opened file.
@@ -191,7 +232,10 @@ impl File {
             .handle
             .sendo_recvo(outgoing, ReceiveOptions::new().with_allow_async(true))
             .await
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
+            // rynas patch: the crate's error itself, not its text: a caller tells the
+            // server's answer about the file (a lock, access denied) from a broken
+            // connection by downcasting it
+            .map_err(std::io::Error::other)?;
 
         let content = response
             .message
@@ -219,7 +263,10 @@ impl File {
                 ReceiveOptions::new().with_allow_async(true),
             )
             .await
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
+            // rynas patch: the crate's error itself, not its text: a caller tells the
+            // server's answer about the file (a lock, access denied) from a broken
+            // connection by downcasting it
+            .map_err(std::io::Error::other)?;
 
         log::debug!("Flushed {}.", self.handle.name());
         Ok(())
@@ -331,7 +378,10 @@ impl Seek for File {
 impl Read for File {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let read_length = File::read_block(self, buf, self.pos, None, false)
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
+            // rynas patch: the crate's error itself, not its text: a caller tells the
+            // server's answer about the file (a lock, access denied) from a broken
+            // connection by downcasting it
+            .map_err(std::io::Error::other)?;
         self.pos += read_length as u64;
         Ok(read_length)
     }

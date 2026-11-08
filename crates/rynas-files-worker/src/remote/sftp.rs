@@ -13,13 +13,14 @@ use russh_sftp::protocol::{FileAttributes, OpenFlags, StatusCode};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::runtime::Runtime;
 
-use super::{Conn, Entry, Fs, Reader, Writer, errno};
+use super::{Conn, Entry, Fs, Ident, Reader, Writer, errno};
 
+/// How long connecting and logging in may take.
 const TIMEOUT: Duration = Duration::from_secs(20);
 
 pub struct Sftp {
     rt: Arc<Runtime>,
-    sftp: SftpSession,
+    sftp: Arc<SftpSession>,
     _session: russh::client::Handle<Check>,
     /// the server's key as seen on this connection
     pub host_key: String,
@@ -93,6 +94,8 @@ fn other(e: impl std::fmt::Display) -> io::Error {
     io::Error::other(e.to_string())
 }
 
+/// The library's errors: the server's status about a file is that file's error; no answer
+/// in time or a session that broke is the connection's ([`super::retryable`]).
 fn map(e: russh_sftp::client::error::Error) -> io::Error {
     use russh_sftp::client::error::Error;
     match e {
@@ -104,8 +107,30 @@ fn map(e: russh_sftp::client::error::Error) -> io::Error {
             _ if s.error_message.is_empty() => other(s.status_code),
             _ => other(s.error_message),
         },
-        Error::Timeout => super::stalled(TIMEOUT),
+        // each request waits at most this long for its answer (`SftpSession::set_timeout`)
+        Error::Timeout => super::stalled(super::REMOTE_TIMEOUT),
+        Error::IO(_) | Error::UnexpectedPacket | Error::UnexpectedBehavior(_) => super::lost(io::ErrorKind::ConnectionAborted, e),
         e => other(e),
+    }
+}
+
+/// An error of a read or write on an open file. The library hands those over as text only
+/// (`io::Error::other(e.to_string())`), so whether the server refused this file (a disk
+/// error, a quota) or the session broke is asked of the session itself: a request that
+/// still gets its answer means the connection is fine and the error is the file's.
+fn file_error(rt: &Runtime, session: &SftpSession, e: io::Error) -> io::Error {
+    if super::retryable(&e) {
+        return e;
+    }
+    if e.to_string() == "Timeout" {
+        return super::stalled(super::REMOTE_TIMEOUT);
+    }
+    match rt.block_on(session.canonicalize(".")) {
+        Ok(_) => other(e),
+        Err(probe) => {
+            let probe = map(probe);
+            if super::retryable(&probe) { probe } else { super::lost(io::ErrorKind::ConnectionAborted, e) }
+        }
     }
 }
 
@@ -155,14 +180,16 @@ impl Sftp {
             let channel = session.channel_open_session().await.map_err(other)?;
             channel.request_subsystem(true, "sftp").await.map_err(other)?;
             let sftp = SftpSession::new(channel.into_stream()).await.map_err(map)?;
-            sftp.set_timeout(TIMEOUT.as_secs());
+            // per request: the reads of a file in flight each get their own wait, a listing
+            // each of its pages
+            sftp.set_timeout(super::REMOTE_TIMEOUT.as_secs());
             let home = sftp.canonicalize(".").await.unwrap_or_else(|_| "/".into());
             Ok((session, sftp, home))
         });
         let (session, sftp, home) = result?;
         super::tune_sockets();
         let host_key = seen.lock().unwrap().clone();
-        Ok(Self { rt, sftp, _session: session, host_key, home })
+        Ok(Self { rt, sftp: Arc::new(sftp), _session: session, host_key, home })
     }
 
     fn path(parts: &[String]) -> String {
@@ -221,7 +248,8 @@ impl Fs for Sftp {
         }
         let len = meta.size.unwrap_or(0);
         let file = self.rt.block_on(self.sftp.open(p.clone())).map_err(map)?;
-        let mut r = SftpFile::new(&self.rt, file, len);
+        let mut r = SftpFile::new(self, file, len);
+        r.ident = Ident { size: len, mtime: meta.mtime.unwrap_or(0) as i64, change: 0 };
         // more handles only for a file worth reading ahead
         if len > BLOCK as u64 {
             for _ in 1..AHEAD {
@@ -244,7 +272,7 @@ impl Fs for Sftp {
                 f
             }
         };
-        let mut w = SftpFile::new(&self.rt, file, 0);
+        let mut w = SftpFile::new(self, file, 0);
         w.pos = at.unwrap_or(0);
         Ok(Box::new(w))
     }
@@ -299,6 +327,8 @@ const AHEAD: usize = 6;
 
 struct SftpFile {
     rt: Arc<Runtime>,
+    session: Arc<SftpSession>,
+    ident: Ident,
     file: Option<RFile>,
     len: u64,
     /// reading: more handles on the same file, each fetching its block
@@ -309,8 +339,22 @@ struct SftpFile {
 }
 
 impl SftpFile {
-    fn new(rt: &Arc<Runtime>, file: RFile, len: u64) -> Self {
-        Self { rt: Arc::clone(rt), file: Some(file), len, spare: Vec::new(), pos: 0, ahead: Vec::new(), ahead_at: 0 }
+    fn new(sftp: &Sftp, file: RFile, len: u64) -> Self {
+        Self {
+            rt: Arc::clone(&sftp.rt),
+            session: Arc::clone(&sftp.sftp),
+            ident: Ident::default(),
+            file: Some(file),
+            len,
+            spare: Vec::new(),
+            pos: 0,
+            ahead: Vec::new(),
+            ahead_at: 0,
+        }
+    }
+
+    fn file_error(&self, e: io::Error) -> io::Error {
+        file_error(&self.rt, &self.session, e)
     }
 
     fn file(&mut self) -> io::Result<&mut RFile> {
@@ -325,8 +369,9 @@ impl SftpFile {
         let blocks = (left.div_ceil(BLOCK as u64) as usize).clamp(1, handles.len());
         let start = self.pos;
         let len = self.len;
-        // each request has the session's own timeout; this bounds the batch as a whole
-        let results = self.rt.block_on(tokio::time::timeout(super::REMOTE_TIMEOUT, async {
+        // each request has the session's own timeout (no answer in time: the connection is
+        // dead), never the batch as a whole: a slow server that answers is waited for
+        let results = self.rt.block_on(async {
             let mut tasks = Vec::new();
             for (i, mut f) in handles.into_iter().enumerate() {
                 let at = start + (i * BLOCK) as u64;
@@ -357,8 +402,7 @@ impl SftpFile {
                 out.push(t.await.map_err(other));
             }
             out
-        }));
-        let results = results.map_err(|_| super::stalled(super::REMOTE_TIMEOUT))?;
+        });
         self.ahead.clear();
         self.ahead_at = start;
         let mut failed = None;
@@ -384,8 +428,7 @@ impl SftpFile {
             }
         }
         if let Some(e) = failed {
-            // a read on an open file fails for the connection, not for the file
-            return Err(if e.kind() == io::ErrorKind::Other { io::Error::new(io::ErrorKind::ConnectionAborted, e.to_string()) } else { e });
+            return Err(self.file_error(e));
         }
         if self.ahead.is_empty() {
             self.len = self.pos;
@@ -433,20 +476,25 @@ impl Write for SftpFile {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let rt = Arc::clone(&self.rt);
         let f = self.file()?;
-        let done = rt.block_on(tokio::time::timeout(super::REMOTE_TIMEOUT, f.write(buf))).map_err(|_| super::stalled(super::REMOTE_TIMEOUT))??;
+        // the request's own timeout bounds it
+        let done = rt.block_on(f.write(buf)).map_err(|e| self.file_error(e))?;
         self.pos += done as u64;
         Ok(done)
     }
     fn flush(&mut self) -> io::Result<()> {
         let rt = Arc::clone(&self.rt);
         let f = self.file()?;
-        rt.block_on(f.flush())
+        rt.block_on(f.flush()).map_err(|e| self.file_error(e))
     }
 }
 
 impl Reader for SftpFile {
     fn len(&self) -> u64 {
         self.len
+    }
+
+    fn ident(&self) -> Ident {
+        self.ident
     }
 }
 
@@ -458,6 +506,7 @@ impl Writer for SftpFile {
             f.flush().await?;
             f.shutdown().await
         })
+        .map_err(|e| file_error(&rt, &self.session, e))
     }
 }
 

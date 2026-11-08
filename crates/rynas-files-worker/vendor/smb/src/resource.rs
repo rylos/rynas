@@ -172,6 +172,7 @@ impl Resource {
             _file_id: response.file_id,
             created: response.creation_time.date_time(),
             modified: response.last_write_time.date_time(),
+            raw_times: (*response.last_write_time, *response.change_time),
             access,
             share_type,
             conn_info: conn_info.clone(),
@@ -265,6 +266,8 @@ pub struct ResourceHandle {
     _file_id: FileId,
     created: PrimitiveDateTime,
     modified: PrimitiveDateTime,
+    /// rynas patch: last write and change time as received (FILETIME)
+    raw_times: (u64, u64),
     share_type: ShareType,
 
     access: FileAccessMask,
@@ -287,6 +290,11 @@ impl ResourceHandle {
     /// Returns the last modified time of the resource.
     pub fn modified(&self) -> PrimitiveDateTime {
         self.modified
+    }
+
+    /// rynas patch: last write and change time as the open returned them (FILETIME).
+    pub fn raw_times(&self) -> (u64, u64) {
+        self.raw_times
     }
 
     /// Returns the current share type of the resource. See [ShareType] for more details.

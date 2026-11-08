@@ -176,6 +176,7 @@ impl MultiWorkerBackend for ThreadingBackend {
     fn wait_on_waiter(
         waiter: Self::AwaitingWaiter,
         timeout: Duration,
+        activity: &std::sync::atomic::AtomicU64,
     ) -> crate::Result<IncomingMessage> {
         if timeout == Duration::ZERO {
             return waiter.recv().map_err(|_| {
@@ -183,12 +184,22 @@ impl MultiWorkerBackend for ThreadingBackend {
             })?;
         }
 
-        waiter.recv_timeout(timeout).map_err(|e| match e {
-            std::sync::mpsc::RecvTimeoutError::Timeout => {
-                Error::OperationTimeout(TimedOutTask::ReceiveNextMessage, timeout)
+        // rynas patch: a progress watchdog (see the trait), checked every second at most
+        let started = super::base::clock_ms();
+        loop {
+            let Some(left) = super::base::idle_left(started, activity, timeout) else {
+                return Err(Error::OperationTimeout(TimedOutTask::ReceiveNextMessage, timeout));
+            };
+            match waiter.recv_timeout(left.min(Duration::from_secs(1))) {
+                Ok(msg) => return msg,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(_) => {
+                    return Err(Error::MessageProcessingError(
+                        "Failed to receive message.".to_string(),
+                    ));
+                }
             }
-            _ => Error::MessageProcessingError("Failed to receive message.".to_string()),
-        })?
+        }
     }
 
     fn send_notify(

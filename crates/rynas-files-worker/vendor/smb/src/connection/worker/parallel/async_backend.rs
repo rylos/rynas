@@ -187,6 +187,7 @@ impl MultiWorkerBackend for AsyncBackend {
     async fn wait_on_waiter(
         waiter: Self::AwaitingWaiter,
         timeout: Duration,
+        _activity: &std::sync::atomic::AtomicU64,
     ) -> crate::Result<IncomingMessage> {
         if timeout == Duration::ZERO {
             waiter.await.map_err(|_| {

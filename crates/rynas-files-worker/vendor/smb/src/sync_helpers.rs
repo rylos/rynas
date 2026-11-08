@@ -120,6 +120,24 @@ impl Semaphore {
         Ok(SemaphorePermit { sem: self, count })
     }
 
+    /// rynas patch: [`Semaphore::acquire_many`] that gives up after `timeout`.
+    pub fn acquire_many_timeout(
+        &self,
+        count: u32,
+        timeout: std::time::Duration,
+    ) -> Option<SemaphorePermit<'_>> {
+        let guard = self.inner.lock().unwrap();
+        let (mut guard, _) = self
+            .condvar
+            .wait_timeout_while(guard, timeout, |c| *c < count)
+            .unwrap();
+        if *guard < count {
+            return None;
+        }
+        *guard -= count;
+        Some(SemaphorePermit { sem: self, count })
+    }
+
     pub fn add_permits(&self, count: usize) {
         let mut guard = self.inner.lock().unwrap();
         *guard += count as u32;

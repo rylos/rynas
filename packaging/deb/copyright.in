@@ -34,7 +34,13 @@ License: ISC
 Files: crates/rynas-files-worker/vendor/smb/*
 Copyright: Aviv N (smb crate, https://github.com/afiffon/smb-rs)
 License: MIT
-Comment: smb 0.12.1 from crates.io with one fix by Marco Ziliani (2026),
+Comment: smb 0.12.1 from crates.io with fixes by Marco Ziliani (2026),
+ marked "rynas patch".
+
+Files: crates/rynas-files-worker/vendor/smb-transport/*
+Copyright: Aviv N (smb-transport crate, https://github.com/afiffon/smb-rs)
+License: MIT
+Comment: smb-transport 0.12.1 from crates.io with fixes by Marco Ziliani (2026),
  marked "rynas patch".
 
 License: Apache-2.0

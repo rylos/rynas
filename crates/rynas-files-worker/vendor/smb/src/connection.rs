@@ -533,6 +533,11 @@ impl Connection {
     pub fn conn_info(&self) -> Option<&Arc<ConnectionInfo>> {
         self.handler.conn_info.get()
     }
+
+    /// rynas patch: credits the server granted on this connection (large MTU).
+    pub fn credits_granted(&self) -> u16 {
+        self.handler.credits_granted()
+    }
 }
 
 /// This struct is the internal message handler for the SMB client.
@@ -597,6 +602,59 @@ impl ConnectionMessageHandler {
     const CREDIT_CALC_RATIO: u32 = 65536;
     const CREDITS_PER_MSG_NO_LARGE_MTU: u32 = 1;
 
+    /// rynas patch: takes `count` credits. Credits come back only with answers: when the
+    /// server stopped answering, waiting for them was forever (the plain semaphore). This
+    /// wait has the connection's progress watchdog: it fails once nothing came from the
+    /// server for the timeout, or the connection stopped.
+    #[cfg(feature = "multi_threaded")]
+    fn acquire_credits(&self, count: u32) -> crate::Result<()> {
+        let Some(worker) = self.worker.get() else {
+            self.curr_credits.acquire_many(count)?.forget();
+            return Ok(());
+        };
+        let timeout = worker.timeout();
+        if timeout.is_zero() {
+            self.curr_credits.acquire_many(count)?.forget();
+            return Ok(());
+        }
+        let started = crate::connection::worker::parallel::base::clock_ms();
+        loop {
+            if worker.stopped() {
+                return Err(Error::ConnectionStopped);
+            }
+            let Some(left) = crate::connection::worker::parallel::base::idle_left(
+                started,
+                worker.activity(),
+                timeout,
+            ) else {
+                return Err(Error::OperationTimeout(
+                    crate::error::TimedOutTask::ReceiveNextMessage,
+                    timeout,
+                ));
+            };
+            if let Some(mut permit) = self
+                .curr_credits
+                .acquire_many_timeout(count, left.min(std::time::Duration::from_secs(1)))
+            {
+                permit.forget();
+                return Ok(());
+            }
+        }
+    }
+
+    #[cfg(not(feature = "multi_threaded"))]
+    #[maybe_async]
+    async fn acquire_credits(&self, count: u32) -> crate::Result<()> {
+        self.curr_credits.acquire_many(count).await?.forget();
+        Ok(())
+    }
+
+    /// rynas patch: credits the server granted on this connection, those in use included
+    /// (large MTU only).
+    pub fn credits_granted(&self) -> u16 {
+        self.credit_pool.load(Ordering::SeqCst)
+    }
+
     #[maybe_async]
     async fn process_sequence_outgoing(&self, msg: &mut OutgoingMessage) -> crate::Result<()> {
         if let Some(neg) = self.conn_info.get() {
@@ -615,7 +673,7 @@ impl ConnectionMessageHandler {
 
                 // First, acquire credits from the semaphore, and forget them.
                 // They may be returned via the response message, at `process_sequence_incoming` below.
-                self.curr_credits.acquire_many(cost as u32).await?.forget();
+                self.acquire_credits(cost as u32).await?;
 
                 let mut request = cost;
                 // Request additional credits if required: if balance < extra, add to request the diff:
@@ -638,10 +696,8 @@ impl ConnectionMessageHandler {
 
         // Default case: logically waiting for single credit per message,
         // which will make the client wait for next response before allowing next request.
-        self.curr_credits
-            .acquire_many(Self::CREDITS_PER_MSG_NO_LARGE_MTU)
-            .await?
-            .forget();
+        self.acquire_credits(Self::CREDITS_PER_MSG_NO_LARGE_MTU)
+            .await?;
         debug_assert!(
             self.curr_credits.available_permits() == 0,
             "Expected 0 credits available with no large mtu, got {}",
@@ -664,12 +720,24 @@ impl ConnectionMessageHandler {
             let charged_credits = msg.message.header.credit_charge;
             // Update the pool size - return how many EXTRA credits were granted.
             // also, handle the case where the server granted less credits than charged.
-            if charged_credits > granted_credits {
-                self.credit_pool
-                    .fetch_sub(charged_credits - granted_credits, Ordering::SeqCst);
-            } else {
-                self.credit_pool
-                    .fetch_add(granted_credits - charged_credits, Ordering::SeqCst);
+            // rynas patch: saturating, never wrapping (a pool that wrapped to 65535 never
+            // asked for credits again)
+            let mut pool = self.credit_pool.load(Ordering::SeqCst);
+            loop {
+                let next = if charged_credits > granted_credits {
+                    pool.saturating_sub(charged_credits - granted_credits)
+                } else {
+                    pool.saturating_add(granted_credits - charged_credits)
+                };
+                match self.credit_pool.compare_exchange_weak(
+                    pool,
+                    next,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(_) => break,
+                    Err(now) => pool = now,
+                }
             }
 
             // Return the credits to the pool.

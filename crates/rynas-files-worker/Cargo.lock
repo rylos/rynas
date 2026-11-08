@@ -2953,6 +2953,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smb",
+ "smb-transport",
  "tar",
  "tempfile",
  "tokio",
@@ -3347,8 +3348,6 @@ dependencies = [
 [[package]]
 name = "smb-transport"
 version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8613e6249599435bf3459e2ae17fda8de8d1bfd303d45d92021d5249e95c920c"
 dependencies = [
  "binrw",
  "log",

@@ -30,13 +30,16 @@ pub fn make_signing_algo(
     }
 }
 
+// rynas patch: AES-GMAC first. A 3.1.1 server picks the first of the client's list it
+// supports; GMAC (carry-less multiply) signs several times faster than CMAC, whose AES
+// chain is serial, and every message of a session is signed and checked.
 pub const SIGNING_ALGOS: &[SigningAlgorithmId] = &[
-    #[cfg(feature = "sign_hmac")]
-    SigningAlgorithmId::HmacSha256,
-    #[cfg(feature = "sign_cmac")]
-    SigningAlgorithmId::AesCmac,
     #[cfg(feature = "sign_gmac")]
     SigningAlgorithmId::AesGmac,
+    #[cfg(feature = "sign_cmac")]
+    SigningAlgorithmId::AesCmac,
+    #[cfg(feature = "sign_hmac")]
+    SigningAlgorithmId::HmacSha256,
 ];
 
 /// A trait for SMB signing algorithms.

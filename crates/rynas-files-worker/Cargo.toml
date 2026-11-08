@@ -21,8 +21,14 @@ exclude = ["vendor"]
 # granted in an interim STATUS_PENDING response are counted. Without it a server that
 # answers reads asynchronously (Samba does after 0.5 s) drains the client's credits and the
 # transfer stops for good. Drop the copy once a release counts them.
+#
+# smb-transport 0.12.1 (MIT, same repository), in vendor/smb-transport/src/tcp/transport.rs
+# ("rynas patch"): TCP_NODELAY on the socket (each request is two writes; with Nagle every
+# round trip waited up to 40 ms for a delayed ACK), and a read timeout of the receive loop's
+# poll no longer drops a message it hit halfway (which broke the connection for good).
 [patch.crates-io]
 smb = { path = "vendor/smb" }
+smb-transport = { path = "vendor/smb-transport" }
 
 [[bin]]
 name = "rynas-files-worker"
@@ -47,6 +53,8 @@ tar = { version = "0.4.46", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"
+# the transport itself, for the test of a message that arrives with a pause inside
+smb-transport = { version = "0.12.1", default-features = false, features = ["is_sync"] }
 
 [profile.release]
 lto = "fat"

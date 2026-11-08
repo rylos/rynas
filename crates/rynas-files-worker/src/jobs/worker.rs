@@ -49,13 +49,21 @@ struct Shared {
     wake: Condvar,
     /// the local temporary file being written now, for a cancel that cannot wait
     part: Mutex<Option<PathBuf>>,
+    /// the same on a server, and the folders the job made there
+    remote: Mutex<remote_jobs::RemoteLeft>,
     /// set by whoever reports the end first: the engine, or the cancel watchdog
     ended: Mutex<bool>,
 }
 
 impl Shared {
     fn new(limit: u64) -> Self {
-        Self { state: Mutex::new(Control { limit, ..Default::default() }), wake: Condvar::new(), part: Mutex::new(None), ended: Mutex::new(false) }
+        Self {
+            state: Mutex::new(Control { limit, ..Default::default() }),
+            wake: Condvar::new(),
+            part: Mutex::new(None),
+            remote: Mutex::new(remote_jobs::RemoteLeft::default()),
+            ended: Mutex::new(false),
+        }
     }
 
     /// Whether the caller is the one to report the end of the job.
@@ -67,6 +75,9 @@ impl Shared {
 /// How long a cancel waits for the engine to stop by itself (it does between two chunks)
 /// before the process ends anyway: a call blocked on a server must not keep the job alive.
 const CANCEL_GRACE: Duration = Duration::from_secs(3);
+/// How long the cancel watchdog spends removing a copy's leftovers on a server (connecting
+/// included) before the process ends anyway; rynasd's clean-up run catches what is left.
+const REMOTE_CLEANUP: Duration = Duration::from_secs(10);
 
 /// After a cancel (or the daemon gone): gives the engine [`CANCEL_GRACE`] to stop, then
 /// removes the temporary file it was writing, reports the job cancelled and ends the
@@ -85,6 +96,9 @@ fn watch_cancel(shared: Arc<Shared>) {
     if let Some(part) = shared.part.lock().unwrap().take() {
         let _ = fs::remove_file(part);
     }
+    // a copy to a server: its temporary file and empty folders, over a new connection
+    // (the engine's may be the one that hangs); bounded, logged
+    std::mem::take(&mut *shared.remote.lock().unwrap()).clean(REMOTE_CLEANUP);
     emit(&Event::Done { status: Status::Cancelled, msg: t!("cancelled").to_string(), code: String::new() });
     std::process::exit(0);
 }
@@ -107,6 +121,8 @@ pub fn run() -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     };
+    // a job's SMB connections say once what they negotiated (rynasd's journal)
+    crate::remote::smb::log_connections();
     // every local path inside its own share, links included (rynas_files::confine)
     let _jail = Jail::enter();
     let (spec, refused) = match confine_spec(spec) {
@@ -1710,6 +1726,15 @@ impl Unpack {
 }
 
 
+/// Whether a name is a copy's temporary file (".name.rynas-part"), SynoFile's names too: a
+/// volume may come from a NAS that ran it.
+fn part_leftover(b: &[u8]) -> bool {
+    b.starts_with(b".")
+        && [PART_TAG, LEGACY_PART_TAG]
+            .iter()
+            .any(|tag| b.strip_suffix(tag.as_bytes()).is_some_and(|rest| rest.len() > 1 && rest.ends_with(b".")))
+}
+
 /// Whether a cleanup removes this item: a job's temporary file or
 /// extraction folder, or an upload's temporary file nobody wrote to for a
 /// day. `meta` is asked for only when the age matters.
@@ -1718,11 +1743,7 @@ fn leftover(name: &OsStr, kind: &fs::FileType, meta: impl FnOnce() -> Option<Met
     if !b.starts_with(b".") {
         return false;
     }
-    // SynoFile's names too: a volume may come from a NAS that ran it
-    let job_part = [PART_TAG, LEGACY_PART_TAG]
-        .iter()
-        .any(|tag| b.strip_suffix(tag.as_bytes()).is_some_and(|rest| rest.len() > 1 && rest.ends_with(b".")));
-    if job_part || b.starts_with(b".rynas-x-") || b.starts_with(b".synofile-x-") {
+    if part_leftover(b) || b.starts_with(b".rynas-x-") || b.starts_with(b".synofile-x-") {
         return true;
     }
     kind.is_file()

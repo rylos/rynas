@@ -45,14 +45,49 @@ impl Entry {
     }
 }
 
+/// What tells a file apart from the same name after a change: compared when a copy goes
+/// on over a new connection, before it seeks to where it stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Ident {
+    pub size: u64,
+    /// last write time, in the server's own unit (SMB: FILETIME; SFTP: seconds)
+    pub mtime: i64,
+    /// SMB: the change time (FILETIME, metadata changes too); 0 where the server has none
+    pub change: i64,
+}
+
 #[allow(clippy::len_without_is_empty)]
 pub trait Reader: Read + Seek + Send {
     fn len(&self) -> u64;
+    /// the file as it was opened
+    fn ident(&self) -> Ident;
+    /// The next bytes from the position, in a buffer of the reader's own: swapped into
+    /// `buf` (whose old buffer the reader may keep), no copy. 0 at the end.
+    fn next_block(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
+        if buf.len() < 1 << 20 {
+            buf.resize(1 << 20, 0);
+        }
+        let n = self.read(buf)?;
+        buf.truncate(n);
+        Ok(n)
+    }
 }
 
 pub trait Writer: Write + Send {
-    /// Flushes and closes; an error here means the data may not be there.
+    /// Waits for the writes still in flight, flushes and closes; an error here means the
+    /// data may not be there.
     fn finish(self: Box<Self>) -> io::Result<()>;
+    /// After a failed write (the connection broke): the blocks handed over that the server
+    /// has not confirmed, by offset, for a new writer to send again. A writer that writes
+    /// before `write` returns has none.
+    fn unconfirmed(&mut self) -> Vec<(u64, std::sync::Arc<[u8]>)> {
+        Vec::new()
+    }
+    /// Sends again blocks another writer of the same file did not get confirmed, each at its
+    /// own offset (the position of `write` stays where it is).
+    fn resend(&mut self, blocks: Vec<(u64, std::sync::Arc<[u8]>)>) -> io::Result<()> {
+        if blocks.is_empty() { Ok(()) } else { Err(io::Error::from(io::ErrorKind::Unsupported)) }
+    }
 }
 
 /// A server, as the API and the worker use it. Paths are the parts below
@@ -78,8 +113,10 @@ pub trait Fs: Send {
     }
 }
 
-/// How long a server may leave one request without an answer before the transfer gives up
-/// on the connection (and reconnects, see `jobs::remote_jobs`).
+/// The progress watchdog of a connection: when requests wait and nothing at all came from
+/// the server for this long, the connection is taken for dead (the transfer reconnects, see
+/// `jobs::remote_jobs`). A slow server that keeps answering is never cut off, however long
+/// a listing or a batch of reads takes.
 pub const REMOTE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The error of a server that stopped answering: the job shows it, with Retry.
@@ -91,30 +128,19 @@ pub fn stalled(limit: Duration) -> io::Error {
     )
 }
 
-/// Runs a blocking call of a client on a thread of its own and waits at most `limit` for
-/// it. A call still blocked then is left behind (it holds only its own clones of the
-/// connection, which the caller drops) and [`stalled`] is returned: a client library that
-/// waits forever (the smb crate on credits, a read whose answer never comes) can no longer
-/// hang the job, its cancel or its pause.
-pub fn timed<T: Send + 'static>(limit: Duration, f: impl FnOnce() -> io::Result<T> + Send + 'static) -> io::Result<T> {
-    let (tx, rx) = std::sync::mpsc::sync_channel(1);
-    std::thread::Builder::new().name("remote-call".into()).spawn(move || {
-        let _ = tx.send(f());
-    })?;
-    match rx.recv_timeout(limit) {
-        Ok(result) => result,
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(stalled(limit)),
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::other(t!("the remote call failed"))),
-    }
+/// The connection to the server broke (closed, reset, out of sync, refused while
+/// reconnecting): the job shows it, with Retry. Only the clients make these, so an error of
+/// the NAS's own disks or sockets is never taken for one ([`retryable`]).
+pub fn lost(kind: io::ErrorKind, detail: impl std::fmt::Display) -> io::Error {
+    rynas_files::fsops::coded(kind, rynas_api_types::error_codes::REMOTE_UNREACHABLE, t!("the connection to the remote server broke: {}", detail))
 }
 
-/// Whether an error is the connection's (timed out, reset, closed) rather than the
-/// server's answer about a file: worth a new connection and another try from where the
-/// copy stopped.
+/// Whether an error is the remote connection's (it stopped answering or broke) rather than
+/// the server's answer about a file or an error on the NAS's side: worth a new connection
+/// and another try from where the copy stopped. Only the clients' own errors count
+/// ([`stalled`], [`lost`]): a local ETIMEDOUT or EPIPE (a disk, a pipe) does not.
 pub fn retryable(e: &io::Error) -> bool {
-    use io::ErrorKind as K;
-    matches!(e.kind(), K::TimedOut | K::ConnectionReset | K::ConnectionAborted | K::BrokenPipe | K::NotConnected | K::UnexpectedEof)
-        || matches!(e.raw_os_error(), Some(libc::ETIMEDOUT | libc::ECONNRESET | libc::ECONNABORTED | libc::EPIPE | libc::ENOTCONN | libc::EHOSTUNREACH | libc::ENETUNREACH))
+    rynas_files::fsops::io_code(e) == rynas_api_types::error_codes::REMOTE_UNREACHABLE
 }
 
 /// TCP keepalive and a user timeout on every TCP socket of this process: the SMB and SSH
@@ -141,6 +167,8 @@ pub fn tune_sockets() {
         if get(fd, libc::SO_KEEPALIVE) == Some(1) {
             continue;
         }
+        // requests are small writes waiting for an answer: never held back for an ACK
+        set(fd, libc::IPPROTO_TCP, libc::TCP_NODELAY, 1);
         set(fd, libc::SOL_SOCKET, libc::SO_KEEPALIVE, 1);
         set(fd, libc::IPPROTO_TCP, libc::TCP_KEEPIDLE, 20);
         set(fd, libc::IPPROTO_TCP, libc::TCP_KEEPINTVL, 10);
@@ -155,23 +183,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_call_that_never_returns_is_given_up() {
-        let start = std::time::Instant::now();
-        let e = timed(Duration::from_millis(200), || -> io::Result<()> {
-            std::thread::sleep(Duration::from_secs(3600));
-            Ok(())
-        })
-        .unwrap_err();
-        assert!(start.elapsed() < Duration::from_secs(2));
-        assert!(retryable(&e));
-        assert_eq!(timed(Duration::from_secs(5), || Ok(7)).unwrap(), 7);
-        assert_eq!(timed(Duration::from_secs(5), || -> io::Result<()> { Err(errno(libc::ENOENT)) }).unwrap_err().raw_os_error(), Some(libc::ENOENT));
-    }
-
-    #[test]
-    fn only_connection_errors_are_worth_a_new_connection() {
-        assert!(retryable(&io::Error::from(io::ErrorKind::ConnectionReset)));
-        assert!(retryable(&errno(libc::ETIMEDOUT)));
+    fn only_the_connections_errors_are_worth_a_new_connection() {
+        assert!(retryable(&stalled(Duration::from_secs(60))));
+        assert!(retryable(&lost(io::ErrorKind::ConnectionReset, "reset")));
+        // the NAS's own side: a local disk or pipe timing out is not the server's fault
+        assert!(!retryable(&io::Error::from(io::ErrorKind::ConnectionReset)));
+        assert!(!retryable(&errno(libc::ETIMEDOUT)));
+        assert!(!retryable(&errno(libc::EPIPE)));
         assert!(!retryable(&errno(libc::ENOENT)));
         assert!(!retryable(&errno(libc::EACCES)));
         assert!(!retryable(&io::Error::other("verification failed")));

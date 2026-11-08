@@ -32,9 +32,14 @@ pub trait MultiWorkerBackend {
         mpsc::Receiver<Self::SendMessage>,
     );
 
+    /// rynas patch: `timeout` is a progress watchdog: the wait fails when no message
+    /// at all came on the connection for that long (`activity`, see
+    /// [`ParallelWorker::activity_ms`]) since it began, not when this one answer took longer
+    /// (with many requests in flight on a slow link a single answer may wait its turn).
     async fn wait_on_waiter(
         waiter: Self::AwaitingWaiter,
         timeout: Duration,
+        activity: &std::sync::atomic::AtomicU64,
     ) -> crate::Result<IncomingMessage>;
     fn send_notify(
         tx: Self::AwaitingNotifier,
