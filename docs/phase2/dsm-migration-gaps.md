@@ -25,7 +25,7 @@ synodeb hardware screens, the app catalogue, Docker stacks next to other manager
 | D | Backup to another NAS and to the cloud | restic/rustic repositories; rest-server, SFTP, rclone remotes |
 | D | Receive btrbk from PCs | keep existing incremental chains (btrfs receive) |
 | D | Local snapshot replication | send/receive between volumes (NVMe → HDD) with retention |
-| E | Encrypted folder | per-folder encryption (gocryptfs) with unlock and mount; volume LUKS exists |
+| E | Encrypted folder | done 2026-11-08 (D-CRYPT E1, `encrypted-folders.md`): gocryptfs folder per share, recovery key, lock/unlock, password change, optional automatic unlock; volume LUKS exists |
 | E | Synology Photos album import into Immich | one-time import from the `synofoto` database dump |
 | — | Firewall (nftables) | lower priority when the router filters |
 | — | Degraded btrfs boot | document booting with a dead mirror member (`-o degraded`) |
