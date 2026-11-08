@@ -284,6 +284,12 @@ pub fn share_lines(s: &Share, btrfs: bool) -> Vec<Line> {
         v.push(l("veto files", format!("/{}/", veto.join("/"))));
     }
     v.push(l("hide dot files", yes(smb.hide_dot_files)));
+    if s.encrypted {
+        // a locked encrypted folder is an empty mount point: connections are refused until
+        // it is unlocked (D-CRYPT E1), without an apply in between
+        v.push(l("root preexec", format!("/usr/bin/mountpoint -q \"{}\"", s.path)));
+        v.push(l("root preexec close", "yes"));
+    }
     if smb.encryption_required {
         v.push(l("server smb encrypt", "required"));
     }
@@ -453,6 +459,17 @@ mod tests {
         assert_eq!(netbios_name("nas.lan"), "NAS");
         assert_eq!(netbios_name("a-very-long-hostname-x"), "A-VERY-LONG-HOS");
         assert_eq!(netbios_name(""), "RYNAS");
+    }
+
+    #[test]
+    fn an_encrypted_share_refuses_connections_while_locked() {
+        let s = Share { name: "secret".into(), path: "/vol1/secret".into(), encrypted: true, ..Default::default() };
+        let lines = share_lines(&s, false);
+        let get = |k: &str| lines.iter().find(|(a, _)| a == k).map(|(_, v)| v.clone());
+        assert_eq!(get("root preexec").as_deref(), Some("/usr/bin/mountpoint -q \"/vol1/secret\""));
+        assert_eq!(get("root preexec close").as_deref(), Some("yes"));
+        let plain = share_lines(&Share { encrypted: false, ..s }, false);
+        assert!(!plain.iter().any(|(k, _)| k.starts_with("root preexec")));
     }
 
     #[test]

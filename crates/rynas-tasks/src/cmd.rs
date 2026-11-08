@@ -419,6 +419,28 @@ impl<'a> Outside<'a> {
         }
         c.arg("--").args(argv).env_clear().timeout(timeout)
     }
+
+    /// `argv` as a long-lived service named exactly `<unit>.service` (`unit` is the full
+    /// name, not a prefix), `Type=forking`: `systemd-run` returns once the program's first
+    /// process has exited, i.e. when a self-daemonizing program (gocryptfs without `-fg`)
+    /// has finished its start-up; a failed start makes it exit non-zero and leaves the
+    /// failed unit for `systemctl show -p ExecMainStatus`. No `--wait`, no `--pipe`, no
+    /// `--collect`, no `RuntimeMaxSec` (the service runs until it is stopped); `timeout`
+    /// bounds the client. `${VAR}` in `argv` is expanded by systemd (`--expand-environment`,
+    /// the default since systemd 254), e.g. `${CREDENTIALS_DIRECTORY}`.
+    pub fn daemon<I: IntoIterator<Item = S>, S: AsRef<OsStr>>(&self, argv: I) -> Cmd {
+        let mut c = Cmd::new("systemd-run")
+            .args(["--quiet", "--service-type=forking"])
+            .arg(format!("--unit={}", self.unit))
+            .arg(format!("--description={}", self.description));
+        for p in self.properties {
+            c = c.arg(format!("--property={p}"));
+        }
+        for v in self.setenv {
+            c = c.arg(format!("--setenv={v}"));
+        }
+        c.arg("--").args(argv).env_clear().timeout(self.timeout + OUTSIDE_GRACE)
+    }
 }
 
 /// The transient unit (`<name>.service`) a command made by [`Outside::cmd`] with the unit
@@ -520,6 +542,18 @@ mod tests {
         // a program argument that looks like a unit is not taken for one
         let d = super::Outside::new("x", "x", super::Duration::from_secs(1)).cmd(["echo", "--unit=rynas-apt-1"]);
         assert_eq!(super::transient_unit(&d, "rynas-apt"), None);
+    }
+
+    #[test]
+    fn outside_daemon_is_a_named_forking_service() {
+        let c = super::Outside::new("rynas-crypt-vol1-docs", "rynas: encrypted folder", super::Duration::from_secs(60))
+            .properties(&["LoadCredential=pass:/run/rynas/crypt/x.pass"])
+            .daemon(["/usr/bin/gocryptfs", "-passfile", "${CREDENTIALS_DIRECTORY}/pass", "--", "/c", "/m"]);
+        let s = c.display();
+        assert!(s.starts_with("systemd-run --quiet --service-type=forking --unit=rynas-crypt-vol1-docs "), "{s}");
+        assert!(!s.contains("--wait") && !s.contains("--pipe") && !s.contains("--collect") && !s.contains("RuntimeMaxSec"), "{s}");
+        assert!(s.ends_with("--property=LoadCredential=pass:/run/rynas/crypt/x.pass -- /usr/bin/gocryptfs -passfile ${CREDENTIALS_DIRECTORY}/pass -- /c /m"), "{s}");
+        assert!(c.timeout > super::Duration::from_secs(60));
     }
 
     #[test]

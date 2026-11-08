@@ -13,6 +13,7 @@
 //! in-memory implementations for tests and `rynasd --dry-system`.
 
 pub mod accounts;
+pub mod crypt;
 pub mod folders;
 pub mod homes;
 pub mod idremap;

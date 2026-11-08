@@ -301,6 +301,7 @@ fn run(system: &dyn System, log: &dyn Fn(&str), cmd: Cmd) -> Result<(), String> 
 pub fn remove_folder(
     system: &dyn System,
     host: &dyn ShareHost,
+    crypt: &dyn crate::crypt::CryptHost,
     volumes: &[(String, String)],
     path: &str,
     snapshots: &[SnapshotSource],
@@ -310,6 +311,14 @@ pub fn remove_folder(
         return Err(format!(
             "{path} is not a folder directly on a rynas volume: not deleted"
         ));
+    }
+    // an encrypted folder: locked (refused while busy), then its mount point, ciphertext
+    // and keys
+    if crypt.state(path) != rynas_api_types::CryptState::Missing {
+        log(&format!("{path} is an encrypted folder: locking it and deleting its ciphertext"));
+        crypt.remove(path, log).map_err(|e| format!("{path}: {e}"))?;
+        log(&format!("{path} deleted"));
+        return Ok(());
     }
     let info = host.probe(path);
     if info.symlink {
@@ -581,7 +590,7 @@ mod tests {
         let p = plan(&h, &vols(), "/vol1/link", &[], Usages::default());
         assert!(!p.allowed, "{p:?}");
         let sys = MemorySystem::new("nas");
-        let err = remove_folder(&sys, &h, &vols(), "/vol1/link", &[], &|_| {}).unwrap_err();
+        let err = remove_folder(&sys, &h, &crate::crypt::MemoryCrypt::default(), &vols(), "/vol1/link", &[], &|_| {}).unwrap_err();
         assert!(err.contains("symbolic link"), "{err}");
         assert!(!sys.state().calls.iter().any(|c| c.starts_with("run ")));
         // the real probe reports the link
@@ -599,7 +608,7 @@ mod tests {
         let sys = MemorySystem::new("nas");
         let log = std::sync::Mutex::new(Vec::<String>::new());
         let lg = |l: &str| log.lock().unwrap().push(l.into());
-        remove_folder(&sys, &h, &vols(), "/vol1/photos", &src(), &lg).unwrap();
+        remove_folder(&sys, &h, &crate::crypt::MemoryCrypt::default(), &vols(), "/vol1/photos", &src(), &lg).unwrap();
         let calls = sys.state().calls.clone();
         let runs: Vec<&String> = calls
             .iter()
@@ -617,7 +626,7 @@ mod tests {
 
         // a plain directory goes with rm, never across filesystems
         let sys = MemorySystem::new("nas");
-        remove_folder(&sys, &h, &vols(), "/vol1/old", &[], &lg).unwrap();
+        remove_folder(&sys, &h, &crate::crypt::MemoryCrypt::default(), &vols(), "/vol1/old", &[], &lg).unwrap();
         let calls = sys.state().calls.clone();
         assert!(
             calls.iter().any(|c| c.contains("rm -rf --one-file-system --preserve-root=all -- /vol1/old")),
@@ -626,17 +635,37 @@ mod tests {
 
         // never outside a volume
         let sys = MemorySystem::new("nas");
-        assert!(remove_folder(&sys, &h, &vols(), "/srv/x", &[], &lg).is_err());
-        assert!(remove_folder(&sys, &h, &vols(), "/vol1/.snapshots", &[], &lg).is_err());
+        assert!(remove_folder(&sys, &h, &crate::crypt::MemoryCrypt::default(), &vols(), "/srv/x", &[], &lg).is_err());
+        assert!(remove_folder(&sys, &h, &crate::crypt::MemoryCrypt::default(), &vols(), "/vol1/.snapshots", &[], &lg).is_err());
         assert!(sys.state().calls.iter().all(|c| !c.starts_with("run ")));
 
         // a failing command stops the removal
         let sys = MemorySystem::new("nas");
         sys.state().fail_programs.push("btrfs".into());
-        assert!(remove_folder(&sys, &h, &vols(), "/vol1/photos", &src(), &lg).is_err());
+        assert!(remove_folder(&sys, &h, &crate::crypt::MemoryCrypt::default(), &vols(), "/vol1/photos", &src(), &lg).is_err());
         assert_eq!(
             sys.state().calls.iter().filter(|c| c.starts_with("run btrfs")).count(),
             1
         );
+    }
+
+    #[test]
+    fn an_encrypted_folder_goes_through_its_backend() {
+        use crate::crypt::CryptHost;
+        let sys = MemorySystem::new("nas");
+        let h = std::sync::Arc::new(host());
+        let c = crate::crypt::MemoryCrypt::new(true).with_shares(h.clone());
+        let pw = crate::accounts::Secret::new("correct horse");
+        c.create("/vol1/secret", &pw, &|_| {}).unwrap();
+        c.set_busy("/vol1/secret", true);
+        let err = remove_folder(&sys, h.as_ref(), &c, &vols(), "/vol1/secret", &[], &|_| {}).unwrap_err();
+        assert!(err.contains("in use"), "{err}");
+        assert_eq!(c.state("/vol1/secret"), rynas_api_types::CryptState::Unlocked);
+        c.set_busy("/vol1/secret", false);
+        remove_folder(&sys, h.as_ref(), &c, &vols(), "/vol1/secret", &[], &|_| {}).unwrap();
+        assert_eq!(c.state("/vol1/secret"), rynas_api_types::CryptState::Missing);
+        assert!(!h.probe("/vol1/secret").exists);
+        // no plain delete ran on the mount point
+        assert!(!sys.state().calls.iter().any(|c| c.contains("/vol1/secret")), "{:?}", sys.state().calls);
     }
 }

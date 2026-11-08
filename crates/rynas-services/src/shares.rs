@@ -21,7 +21,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use rynas_api_types::{
-    Access, PrincipalKind, Share, ShareWarning, ShareWarningArgs, ShareWarningCode, SharesConfig,
+    Access, CryptState, PrincipalKind, Share, ShareWarning, ShareWarningArgs, ShareWarningCode, SharesConfig,
     SmbPreset, SmbSettings, StateDrift, StateDriftArgs, StateDriftCode, StateDriftKind,
 };
 use rynas_config::files::HEADER_PREFIX;
@@ -30,6 +30,7 @@ use rynas_tasks::Cmd;
 use serde_json::Value;
 
 use crate::accounts::Accounts;
+use crate::crypt::CryptHost;
 use crate::host::{ShareHost, SubvolumeCreator};
 use crate::perm::{AclPlan, acl_plan};
 use crate::removed::RemovedShares;
@@ -61,6 +62,8 @@ pub struct SharesDomain {
     removed: Arc<RemovedShares>,
     /// Sizes of the folders without a share, cleared by every apply.
     sizes: Arc<crate::folders::SizeCache>,
+    /// Encrypted folders (D-CRYPT E1); in memory and empty unless set.
+    crypt: Arc<dyn CryptHost>,
 }
 
 /// Snapshot folders of a document: mount unit → (share, share path, snapshot directory).
@@ -123,6 +126,9 @@ pub fn warning_text(w: &ShareWarning) -> String {
         }
         ShareWarningCode::SnapshotFolderNoJob => "the snapshot folder needs a snapshot job for this share: it appears once the share has one".into(),
         ShareWarningCode::SnapshotFolderNfs => "NFS clients see the snapshot folder only when the export includes the mounts below it (crossmnt)".into(),
+        ShareWarningCode::CryptLocked => format!(
+            "{path} is encrypted and locked: SMB and NFS clients cannot connect and apps using it see an empty folder until it is unlocked"
+        ),
         ShareWarningCode::Other => String::new(),
     }
 }
@@ -182,7 +188,33 @@ impl SharesDomain {
             subvolumes: None,
             removed: Arc::new(RemovedShares::memory()),
             sizes: Arc::default(),
+            crypt: Arc::new(crate::crypt::MemoryCrypt::default()),
         }
+    }
+
+    /// The encrypted folders backend ([`crate::crypt::HostCrypt`] on the machine).
+    pub fn with_crypt(mut self, c: Arc<dyn CryptHost>) -> Self {
+        self.crypt = c;
+        self
+    }
+
+    pub fn crypt(&self) -> &Arc<dyn CryptHost> {
+        &self.crypt
+    }
+
+    /// An encrypted share whose folder is not unlocked now: its ACL cannot be read or written.
+    pub fn crypt_closed(&self, s: &Share) -> bool {
+        s.encrypted && self.crypt.state(&s.path) != CryptState::Unlocked
+    }
+
+    /// Writes the ACL of a share now (an encrypted folder right after its unlock: the apply
+    /// skipped it while locked). Nothing for a share without permissions.
+    pub fn write_acl(&self, s: &Share) -> Result<(), String> {
+        if s.permissions.is_empty() {
+            return Ok(());
+        }
+        let plan = self.acl_for(s)?;
+        self.host.set_acl(&s.path, &plan)
     }
 
     /// Sizes of the folders without a share ([`crate::folders::unshared`]).
@@ -370,6 +402,32 @@ impl SharesDomain {
                 }
             }
             share_path(&s.path).map_err(|e| Invalid::at("path", format!("share {name}: {e}")))?;
+            // encrypted folders (D-CRYPT E1): the mount point of a folder made by
+            // `POST /crypt/folders`; a share on one is always marked encrypted
+            let crypt = self.crypt.state(&s.path);
+            if crypt != CryptState::Missing {
+                s.encrypted = true;
+            }
+            if s.encrypted {
+                if crypt == CryptState::Missing {
+                    return Err(Invalid::at(
+                        "path",
+                        format!("share {name}: {} is not an encrypted folder: create it first", s.path),
+                    ));
+                }
+                if s.subvolume.is_some() {
+                    return Err(Invalid::at(
+                        "subvolume",
+                        format!("share {name}: an encrypted folder has its own ciphertext subvolume"),
+                    ));
+                }
+                if s.show_snapshots {
+                    return Err(Invalid::at(
+                        "show_snapshots",
+                        format!("share {name}: the snapshot folder is not available on an encrypted folder (its snapshots hold ciphertext)"),
+                    ));
+                }
+            }
             let info = self.host.probe(&s.path);
             if !info.exists && s.subvolume.is_some() {
                 // created on apply: nothing more to check now
@@ -384,7 +442,8 @@ impl SharesDomain {
                     format!("share {name}: {} is not a directory", s.path),
                 ));
             }
-            if info.remote {
+            // an unlocked encrypted folder is a FUSE mount
+            if info.remote && !s.encrypted {
                 return Err(Invalid::at(
                     "path",
                     format!(
@@ -593,7 +652,12 @@ impl SharesDomain {
                 },
             });
         }
-        if info.exists && !info.subvolume {
+        // an encrypted folder is a mount point; its ciphertext is the subvolume
+        if s.encrypted {
+            if self.crypt.state(&s.path) == CryptState::Locked {
+                w.push(at_path(ShareWarningCode::CryptLocked));
+            }
+        } else if info.exists && !info.subvolume {
             w.push(at_path(ShareWarningCode::NotSubvolume));
         }
         let managed: Vec<smb::Line> = smb::share_lines(
@@ -716,6 +780,7 @@ impl SharesDomain {
                     folders::remove_folder(
                         ctx.system,
                         self.host.as_ref(),
+                        self.crypt.as_ref(),
                         &volumes,
                         &r.path,
                         &r.snapshots,
@@ -929,6 +994,13 @@ impl Applier for SharesDomain {
 
         // 1. ACLs first, so a share never appears with the wrong permissions
         for s in to.shares.iter().filter(|s| !s.permissions.is_empty()) {
+            if self.crypt_closed(s) {
+                (ctx.log)(&format!(
+                    "ACL of {}: the encrypted folder is locked, set at its next unlock",
+                    s.path
+                ));
+                continue;
+            }
             let plan = self.acl_for(s)?;
             (ctx.log)(&format!("ACL of {}: {}", s.path, plan.spec()));
             self.host.set_acl(&s.path, &plan)?;
@@ -1045,7 +1117,7 @@ impl Applier for SharesDomain {
                 ));
                 continue;
             }
-            if s.permissions.is_empty() {
+            if s.permissions.is_empty() || self.crypt_closed(s) {
                 continue;
             }
             let want = self.acl_for(s)?.canonical();

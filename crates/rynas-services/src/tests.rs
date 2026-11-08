@@ -28,6 +28,7 @@ struct Env {
     host: Arc<MemoryShares>,
     creator: Arc<TestCreator>,
     removed: Arc<crate::removed::RemovedShares>,
+    crypt: Arc<crate::crypt::MemoryCrypt>,
     cfg: Config,
 }
 
@@ -93,6 +94,7 @@ fn env() -> Env {
         calls: Mutex::new(Vec::new()),
     });
     let removed = Arc::new(crate::removed::RemovedShares::memory());
+    let crypt = Arc::new(crate::crypt::MemoryCrypt::new(true).with_shares(host.clone()));
     let cfg = Config::open(
         ConfigOptions::new(dir.path().join("state"), &root),
         sys.clone(),
@@ -101,7 +103,8 @@ fn env() -> Env {
             Arc::new(
                 SharesDomain::new(host.clone(), acc.clone())
                     .with_subvolumes(creator.clone())
-                    .with_removed(removed.clone()),
+                    .with_removed(removed.clone())
+                    .with_crypt(crypt.clone()),
             ),
         ],
     )
@@ -114,6 +117,7 @@ fn env() -> Env {
         host,
         creator,
         removed,
+        crypt,
         cfg,
     }
 
@@ -240,6 +244,7 @@ fn shares_doc() -> SharesConfig {
                 ],
                 subvolume: None,
                 show_snapshots: false,
+                encrypted: false,
             },
             Share {
                 name: "media".into(),
@@ -674,6 +679,58 @@ fn a_share_can_ask_for_its_subvolume() {
         .volume = "vol1".into();
     d.shares.last_mut().unwrap().path = "/srv/other/x".into();
     assert!(bad(d).contains("is created at /srv/vol1/x"));
+}
+
+#[test]
+fn an_encrypted_folder_share_follows_its_lock_state() {
+    use crate::crypt::CryptHost;
+    let e = env();
+    stage(&e, USERS_KEY, &users_doc()).unwrap();
+    let pw = Secret::new("correct horse");
+    e.crypt.create("/srv/vol1/secret", &pw, &|_| {}).unwrap();
+    let mut d = shares_doc();
+    // not marked: validation marks it
+    d.shares.push(Share {
+        name: "secret".into(),
+        path: "/srv/vol1/secret".into(),
+        permissions: vec![perm(PrincipalKind::User, "alice", Access::Rw)],
+        nfs: ShareNfs {
+            enabled: true,
+            rules: vec![NfsRule { client: "192.0.2.0/24".into(), ..Default::default() }],
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    stage(&e, SHARES_KEY, &d).unwrap();
+    let staged: SharesConfig =
+        serde_json::from_value(e.cfg.pending_value("admin", SHARES_KEY).unwrap().unwrap().unwrap()).unwrap();
+    assert!(staged.shares.iter().find(|s| s.name == "secret").unwrap().encrypted);
+    apply(&e).unwrap();
+    let conf = read(&e.root, "/etc/samba/smb.conf");
+    assert!(conf.contains("root preexec = /usr/bin/mountpoint -q \"/srv/vol1/secret\""), "{conf}");
+    assert!(read(&e.root, "/etc/exports.d/rynas.exports").contains(",mp)"));
+    assert!(e.host.state().log.iter().any(|l| l.starts_with("/srv/vol1/secret ")), "unlocked: ACL written");
+
+    // locked: the apply leaves the ACL alone and drift ignores it
+    e.crypt.lock("/srv/vol1/secret", &|_| {}).unwrap();
+    let before = e.host.state().log.len();
+    let mut d2 = staged.clone();
+    d2.shares.iter_mut().find(|s| s.name == "secret").unwrap().description = "private".into();
+    stage(&e, SHARES_KEY, &d2).unwrap();
+    apply(&e).unwrap();
+    assert!(!e.host.state().log[before..].iter().any(|l| l.starts_with("/srv/vol1/secret ")));
+    let drift = e.cfg.drift().unwrap();
+    assert!(!drift.state.iter().any(|x| x.object == "share:secret"), "{:?}", drift.state);
+
+    // refusals: snapshot folder, a subvolume request, a path that is no encrypted folder
+    let bad = |doc: SharesConfig| stage(&e, SHARES_KEY, &doc).unwrap_err().to_string();
+    let mut d3 = d2.clone();
+    d3.shares.iter_mut().find(|s| s.name == "secret").unwrap().show_snapshots = true;
+    assert!(bad(d3).contains("not available on an encrypted folder"));
+    let mut d4 = d2.clone();
+    let s = d4.shares.iter_mut().find(|s| s.name == "docs").unwrap();
+    s.encrypted = true;
+    assert!(bad(d4).contains("not an encrypted folder"));
 }
 
 #[test]

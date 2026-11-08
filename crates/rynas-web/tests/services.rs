@@ -19,6 +19,7 @@ use rynas_api_types::{
 use rynas_auth::ManualClock;
 use rynas_auth::totp::{MemoryStorage, TotpManager};
 use rynas_config::{Config, ConfigOptions, HostnameDomain, MemorySystem};
+use rynas_services::crypt::MemoryCrypt;
 use rynas_services::{MemoryAccounts, MemoryShares, SharesDomain, UsersDomain};
 use rynas_tasks::{TaskConfig, TaskManager};
 use rynas_web::hardware::NoProvider;
@@ -38,6 +39,7 @@ struct Rig {
     sys: Arc<MemorySystem>,
     acc: Arc<MemoryAccounts>,
     host: Arc<MemoryShares>,
+    crypt: Arc<MemoryCrypt>,
     root: PathBuf,
     _dir: TempDir,
 }
@@ -55,7 +57,8 @@ async fn rig() -> Rig {
         Some("11111111-2222-4333-8444-555555555555"),
     );
     let users = Arc::new(UsersDomain::new(acc.clone()));
-    let shares = Arc::new(SharesDomain::new(host.clone(), acc.clone()));
+    let crypt = Arc::new(MemoryCrypt::new(true).with_shares(host.clone()));
+    let shares = Arc::new(SharesDomain::new(host.clone(), acc.clone()).with_crypt(crypt.clone()));
     let state_dir = dir.path().join("state");
     let config = Config::open(
         ConfigOptions::new(&state_dir, &root),
@@ -100,6 +103,7 @@ async fn rig() -> Rig {
         sys,
         acc,
         host,
+        crypt,
         root,
         _dir: dir,
     }
@@ -137,6 +141,114 @@ async fn apply(app: &TestApp, c: &Creds) -> TaskInfo {
         )
         .await;
     started(app, c, r).await
+}
+
+#[tokio::test]
+async fn encrypted_folder_lifecycle() {
+    use rynas_api_types::{CryptInfo, CryptState, ShareWarningCode, storage::RecoveryKey};
+    let rig = rig().await;
+    let app = &rig.app;
+    let c = app.login().await;
+    let pw = "correct horse battery";
+
+    let i: CryptInfo = app.get("/api/v1/crypt", &c).await.json();
+    assert!(i.installed);
+    // a weak password is refused before anything happens
+    let r = app
+        .send(Method::POST, "/api/v1/crypt/folders", &c, Some(json!({ "volume": "vol1", "name": "secret", "password": "short" })))
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", String::from_utf8_lossy(&r.body));
+    assert_eq!(field(&r).as_deref(), Some("password"));
+    let r = app
+        .send(Method::POST, "/api/v1/crypt/folders", &c, Some(json!({ "volume": "vol1", "name": "secret", "password": pw })))
+        .await;
+    let t = started(app, &c, r).await;
+    assert_eq!(t.status, TaskStatus::Ok, "{t:?}");
+    // the task log never carries the password
+    let log = app.get(&format!("/api/v1/tasks/{}/log", t.id), &c).await;
+    assert!(!String::from_utf8_lossy(&log.body).contains(pw));
+    // again: it exists
+    let r = app
+        .send(Method::POST, "/api/v1/crypt/folders", &c, Some(json!({ "volume": "vol1", "name": "secret", "password": pw })))
+        .await;
+    assert_eq!((r.status, r.code()), (StatusCode::CONFLICT, error_codes::ALREADY_EXISTS.into()));
+
+    // the recovery key, once
+    let url = "/api/v1/crypt/folders/vol1/secret/reveal-recovery-key";
+    let r = app.send(Method::POST, url, &c, None).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", String::from_utf8_lossy(&r.body));
+    let key: RecoveryKey = r.json();
+    assert_eq!(key.key.len(), 64 + 7);
+    assert_eq!(app.send(Method::POST, url, &c, None).await.status, StatusCode::NOT_FOUND);
+
+    // the share on it, marked encrypted by the validation
+    let r = app
+        .send(Method::POST, "/api/v1/shares", &c, Some(json!({ "name": "secret", "path": "/vol1/secret" })))
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", String::from_utf8_lossy(&r.body));
+    let v: ShareView = r.json();
+    assert!(v.share.encrypted);
+    // actions need the applied share
+    let r = app.send(Method::POST, "/api/v1/shares/secret/lock", &c, None).await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+    assert_eq!(apply(app, &c).await.status, TaskStatus::Ok);
+    let v: ShareView = app.get("/api/v1/shares/secret", &c).await.json();
+    let st = v.status.crypt.clone().unwrap();
+    assert_eq!((st.state, st.auto_unlock), (CryptState::Unlocked, false));
+    assert_eq!(st.cipher_dir, "/vol1/.rynas-crypt/secret");
+
+    // lock: refused while busy, then locked with its warning
+    rig.crypt.set_busy("/vol1/secret", true);
+    let r = app.send(Method::POST, "/api/v1/shares/secret/lock", &c, None).await;
+    assert_eq!((r.status, r.code()), (StatusCode::CONFLICT, error_codes::CRYPT_BUSY.into()));
+    rig.crypt.set_busy("/vol1/secret", false);
+    let r = app.send(Method::POST, "/api/v1/shares/secret/lock", &c, None).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", String::from_utf8_lossy(&r.body));
+    let v: ShareView = r.json();
+    assert_eq!(v.status.crypt.unwrap().state, CryptState::Locked);
+    assert!(v.status.warning_items.iter().any(|w| w.code == ShareWarningCode::CryptLocked));
+
+    // unlock: a wrong password, then the right one
+    let r = app.send(Method::POST, "/api/v1/shares/secret/unlock", &c, Some(json!({ "password": "not the password" }))).await;
+    assert_eq!((r.status, r.code()), (StatusCode::BAD_REQUEST, error_codes::CRYPT_WRONG_PASSWORD.into()));
+    let r = app.send(Method::POST, "/api/v1/shares/secret/unlock", &c, Some(json!({ "password": pw }))).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", String::from_utf8_lossy(&r.body));
+    assert_eq!(r.json::<ShareView>().status.crypt.unwrap().state, CryptState::Unlocked);
+
+    // a new password from the recovery key (typed with spaces), the old one stops working
+    let new = "a much better passphrase";
+    let r = app
+        .send(
+            Method::POST,
+            "/api/v1/shares/secret/crypt/password",
+            &c,
+            Some(json!({ "current": key.key.replace('-', " "), "recovery": true, "new_password": new })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::NO_CONTENT, "{}", String::from_utf8_lossy(&r.body));
+    let r = app
+        .send(Method::POST, "/api/v1/shares/secret/crypt/password", &c, Some(json!({ "current": pw, "new_password": "whatever else" })))
+        .await;
+    assert_eq!(r.code(), error_codes::CRYPT_WRONG_PASSWORD);
+
+    // automatic unlock: needs the right password
+    let r = app
+        .send(Method::PUT, "/api/v1/shares/secret/crypt/auto-unlock", &c, Some(json!({ "enabled": true, "password": pw })))
+        .await;
+    assert_eq!(r.code(), error_codes::CRYPT_WRONG_PASSWORD);
+    let r = app
+        .send(Method::PUT, "/api/v1/shares/secret/crypt/auto-unlock", &c, Some(json!({ "enabled": true, "password": new })))
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", String::from_utf8_lossy(&r.body));
+    assert!(r.json::<ShareView>().status.crypt.unwrap().auto_unlock);
+    let r = app
+        .send(Method::PUT, "/api/v1/shares/secret/crypt/auto-unlock", &c, Some(json!({ "enabled": false })))
+        .await;
+    assert!(!r.json::<ShareView>().status.crypt.unwrap().auto_unlock);
+    // a plain share has no lock
+    let r = app.send(Method::POST, "/api/v1/shares/docs/lock", &c, None).await;
+    assert_ne!(r.status, StatusCode::OK);
+    assert!(rig.crypt.log.lock().unwrap().iter().all(|l| !l.contains(pw) && !l.contains(new)));
 }
 
 #[tokio::test]

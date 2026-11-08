@@ -92,6 +92,10 @@ pub fn export_line(s: &Share) -> Option<String> {
             }
             o.push("sec=sys".into());
             o.push(format!("fsid={}", s.nfs.fsid));
+            if s.encrypted {
+                // exported only while the encrypted folder is mounted (exports(5) `mp`)
+                o.push("mp".into());
+            }
             if s.nfs.crossmnt {
                 o.push("crossmnt".into());
             }
@@ -142,5 +146,25 @@ mod tests {
         let mut off = s.clone();
         off.nfs.enabled = false;
         assert!(export_line(&off).is_none());
+    }
+
+    #[test]
+    fn an_encrypted_folder_is_exported_only_while_mounted() {
+        let s = Share {
+            name: "secret".into(),
+            path: "/vol1/secret".into(),
+            encrypted: true,
+            nfs: ShareNfs {
+                enabled: true,
+                fsid: "0f6c2b1e-1111-4222-8333-444455556666".into(),
+                crossmnt: false,
+                rules: vec![NfsRule { client: "192.0.2.0/24".into(), ..Default::default() }],
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            export_line(&s).unwrap(),
+            "\"/vol1/secret\" 192.0.2.0/24(rw,sync,no_subtree_check,root_squash,sec=sys,fsid=0f6c2b1e-1111-4222-8333-444455556666,mp)"
+        );
     }
 }

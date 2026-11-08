@@ -38,6 +38,7 @@ use serde_json::Value;
 use crate::error::created;
 use crate::ops::{Error, Ops, Res, user};
 
+pub mod crypt;
 mod homes;
 mod ids;
 
@@ -136,6 +137,17 @@ pub fn router(st: SvcState) -> Router {
         )
         .route("/v1/shares/{share}/effective", get(share_effective))
         .route("/v1/shares/{share}/nocow", post(share_nocow))
+        .route("/v1/shares/{share}/unlock", post(crypt::unlock))
+        .route("/v1/shares/{share}/lock", post(crypt::lock))
+        .route("/v1/shares/{share}/crypt/password", post(crypt::change_password))
+        .route("/v1/shares/{share}/crypt/auto-unlock", axum::routing::put(crypt::auto_unlock))
+        .route("/v1/crypt", get(crypt::info))
+        .route("/v1/crypt/install", post(crypt::install))
+        .route("/v1/crypt/folders", post(crypt::create))
+        .route(
+            "/v1/crypt/folders/{volume}/{name}/reveal-recovery-key",
+            post(crypt::reveal),
+        )
         .route("/v1/shares/plan/delete", post(share_delete_plan))
         .route("/v1/folders", get(folders_list))
         .route("/v1/folders/plan/delete", post(folder_delete_plan))
@@ -931,6 +943,7 @@ fn share_views(s: &Services, owner: &str) -> Res<Vec<ShareView>> {
                 nocow: info.nocow,
                 warnings: items.iter().map(rynas_services::shares::warning_text).collect(),
                 warning_items: items,
+                crypt: sh.encrypted.then(|| s.shares.crypt().status(&sh.path)),
             },
         }
     };
@@ -1522,6 +1535,7 @@ async fn folder_delete(
                 let r = folders::remove_folder(
                     svc.ops.config.system(),
                     svc.shares.host().as_ref(),
+                    svc.shares.crypt().as_ref(),
                     &svc.shares.volumes(),
                     &p.path,
                     &sources,

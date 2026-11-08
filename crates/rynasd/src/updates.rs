@@ -117,7 +117,7 @@ async fn mtime(p: &str) -> Option<SystemTime> {
 /// environment); its output streams into the task log as usual. Simulations stay in rynasd
 /// (read-only). Cancelling the task stops following the unit, not dpkg: an interrupted dpkg
 /// is worse than a finished upgrade, and apt's own lock keeps a second run out meanwhile.
-fn apt(args: &[&str], timeout: Duration) -> Cmd {
+pub(crate) fn apt(args: &[&str], timeout: Duration) -> Cmd {
     rynas_tasks::Outside::new("rynas-apt", "rynas: apt-get (System > Updates)", timeout)
         .keep_running()
         .setenv(&[

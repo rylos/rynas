@@ -647,6 +647,12 @@ pub struct Share {
     /// its snapshot job). Off by default.
     #[serde(default, skip_serializing_if = "is_false")]
     pub show_snapshots: bool,
+    /// An encrypted folder (D-CRYPT E1, `docs/phase2/encrypted-folders.md`): `path` is the
+    /// mount point `<place>/<name>` of the gocryptfs folder whose ciphertext is
+    /// `<place>/.rynas-crypt/<name>`, made by `POST /api/v1/crypt/folders`. Needs no
+    /// `subvolume` and no `show_snapshots`. Set by validation when `path` is one.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub encrypted: bool,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -837,7 +843,103 @@ pub struct ShareStatus {
     /// their text names.
     #[serde(default)]
     pub warning_items: Vec<ShareWarning>,
+    /// Encrypted folder state (only for `Share::encrypted`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crypt: Option<CryptStatus>,
 }
+
+/// State of an encrypted folder, read from the system (never stored).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CryptState {
+    /// No ciphertext (`gocryptfs.conf`) for the path.
+    #[default]
+    Missing,
+    /// Ciphertext there, nothing mounted: the path is an empty, immutable folder.
+    Locked,
+    /// Mounted (`fuse.gocryptfs` at the path).
+    Unlocked,
+}
+
+/// [`ShareStatus::crypt`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CryptStatus {
+    pub state: CryptState,
+    /// The password is sealed on this machine and the folder is unlocked when rynasd starts.
+    #[serde(default)]
+    pub auto_unlock: bool,
+    /// The ciphertext directory (`<place>/.rynas-crypt/<name>`): what snapshots, replication
+    /// and backups of the folder hold.
+    #[serde(default)]
+    pub cipher_dir: String,
+}
+
+/// `GET /api/v1/crypt`: can encrypted folders be made here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CryptInfo {
+    /// `gocryptfs` is installed (`POST /api/v1/crypt/install` installs it).
+    pub installed: bool,
+    /// `gocryptfs -version`, first word after the name (`2.5.1`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// A TPM2 is present: an automatic-unlock key is bound to it.
+    #[serde(default)]
+    pub tpm2: bool,
+}
+
+/// `POST /api/v1/crypt/folders`: a new encrypted folder `<place>/<name>` (task
+/// `crypt.create`); its recovery key is revealed once afterwards.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CryptCreateRequest {
+    /// A place label: a rynas volume or `system`.
+    pub volume: String,
+    /// Folder name, the share name rules.
+    pub name: String,
+    pub password: String,
+    /// Seal the password on this machine and unlock after every start of rynasd.
+    #[serde(default)]
+    pub auto_unlock: bool,
+}
+
+/// `POST /api/v1/shares/{share}/unlock`.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CryptUnlockRequest {
+    pub password: String,
+}
+
+/// `POST /api/v1/shares/{share}/crypt/password`: the current password, or the recovery key
+/// with `recovery`, and the new password.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CryptPasswordRequest {
+    pub current: String,
+    #[serde(default)]
+    pub recovery: bool,
+    pub new_password: String,
+}
+
+/// `PUT /api/v1/shares/{share}/crypt/auto-unlock`: turning it on needs the password (checked).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CryptAutoUnlockRequest {
+    pub enabled: bool,
+    #[serde(default)]
+    pub password: String,
+}
+
+macro_rules! crypt_redacted_debug {
+    ($t:ident $(, $f:ident)*) => {
+        impl std::fmt::Debug for $t {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                let mut d = f.debug_struct(stringify!($t));
+                $( d.field(stringify!($f), &self.$f); )*
+                d.field("secret", &"<redacted>").finish()
+            }
+        }
+    };
+}
+crypt_redacted_debug!(CryptCreateRequest, volume, name, auto_unlock);
+crypt_redacted_debug!(CryptUnlockRequest);
+crypt_redacted_debug!(CryptPasswordRequest, recovery);
+crypt_redacted_debug!(CryptAutoUnlockRequest, enabled);
 
 /// A remark of [`ShareStatus::warning_items`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -901,6 +1003,9 @@ pub enum ShareWarningCode {
     /// The snapshot folder is visible to NFS clients only when the export includes the
     /// mounts below it (`crossmnt`).
     SnapshotFolderNfs,
+    /// The encrypted folder is locked: SMB and NFS clients cannot connect and apps using
+    /// `path` see an empty, read-only folder until it is unlocked.
+    CryptLocked,
     #[serde(other)]
     Other,
 }

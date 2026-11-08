@@ -385,6 +385,14 @@ pub mod error_codes {
     /// Shares: the action needs an empty folder (turning on no copy-on-write) (409); the
     /// message names a few entries.
     pub const FOLDER_NOT_EMPTY: &str = "folder_not_empty";
+    /// Encrypted folder: wrong password or recovery key (400; never 401, which would end
+    /// the rynas session).
+    pub const CRYPT_WRONG_PASSWORD: &str = "crypt_wrong_password";
+    /// Encrypted folder: still in use (open files, a container, a shell in it): not locked
+    /// (409); the message names the containers using it when known.
+    pub const CRYPT_BUSY: &str = "crypt_busy";
+    /// Encrypted folders: gocryptfs is not installed (409); `POST /api/v1/crypt/install`.
+    pub const CRYPT_NOT_INSTALLED: &str = "crypt_not_installed";
 
     /// The code of a status when nothing more precise applies: used to turn framework
     /// rejections (bad query string, 405, 413...) into an `ApiError`.
@@ -457,6 +465,9 @@ pub mod error_codes {
         STACK_NOT_MANAGED,
         TAILSCALE_NOT_INSTALLED,
         FOLDER_NOT_EMPTY,
+        CRYPT_WRONG_PASSWORD,
+        CRYPT_BUSY,
+        CRYPT_NOT_INSTALLED,
     ];
 }
 

@@ -242,13 +242,10 @@ fn open_config(
     }
     // --dry-system: accounts start as a copy of the host's and change in memory only; paths
     // are probed on the host but ACLs are only logged
-    let (accounts, host): (Arc<dyn Accounts>, Arc<dyn ShareHost>) = if args.dry_system {
-        (
-            Arc::new(MemoryAccounts::from_host()),
-            Arc::new(MemoryShares::probing_host()),
-        )
-    } else {
-        (Arc::new(HostAccounts::new("/")), Arc::new(HostShares))
+    let dry_shares = args.dry_system.then(|| Arc::new(MemoryShares::probing_host()));
+    let (accounts, host): (Arc<dyn Accounts>, Arc<dyn ShareHost>) = match &dry_shares {
+        Some(m) => (Arc::new(MemoryAccounts::from_host()), m.clone()),
+        None => (Arc::new(HostAccounts::new("/")), Arc::new(HostShares)),
     };
     // --dry-system: the homes folder, its link and the homes are kept in memory, paths
     // unknown there are probed on the host (read-only)
@@ -272,15 +269,23 @@ fn open_config(
             .with_homes(homes_host)
             .with_remap(remap),
     );
+    let subvolumes: Arc<dyn rynas_services::SubvolumeCreator> = Arc::new(rynasd::storage_ops::HostSubvolumes {
+        dry: args.dry_system,
+        storage,
+    });
+    // encrypted folders (D-CRYPT E1): in memory on a dry system (gocryptfs "installed",
+    // folders appear in the in-memory share host)
+    let crypt: Arc<dyn rynas_services::crypt::CryptHost> = match &dry_shares {
+        Some(m) => Arc::new(rynas_services::crypt::MemoryCrypt::new(true).with_shares(m.clone())),
+        None => Arc::new(rynas_services::crypt::HostCrypt::new(Some(subvolumes.clone()), &args.state_dir)),
+    };
     let shares = Arc::new(
         SharesDomain::new(host, accounts)
-            .with_subvolumes(Arc::new(rynasd::storage_ops::HostSubvolumes {
-                dry: args.dry_system,
-                storage,
-            }))
+            .with_subvolumes(subvolumes)
             .with_removed(Arc::new(rynas_services::removed::RemovedShares::in_dir(
                 &args.state_dir,
-            ))),
+            )))
+            .with_crypt(crypt),
     );
 
     // --dry-system: subvolumes probed on the host (read-only), snapshot directories logged
@@ -757,6 +762,10 @@ fn main() -> std::io::Result<()> {
             homes: opened.homes,
             moves: Arc::new(rynas_services::homes::MoveStore::in_dir(&args.state_dir)),
         }));
+        // encrypted folders whose password is sealed on this machine (D-CRYPT E1)
+        if let Some(s) = &state.services {
+            rynasd::services::crypt::auto_unlock_at_start(s);
+        }
         state.storage_ops = Some(Arc::new(rynasd::storage_ops::StorageOps::new(
             ops.clone(),
             state.storage.clone(),
