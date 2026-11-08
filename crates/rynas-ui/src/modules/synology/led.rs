@@ -9,9 +9,10 @@ use rynas_api_types::synology::{LED_SCHEDULE_CODES, LedMode, SynologySettings, S
 use crate::i18n::{t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::ui::{self, DlgKind, Remote, Tone, WidgetHead};
-use crate::week_grid::{GridLevel, GridTone, from_dsm, normalize, summary_text, week_grid};
+use crate::week_grid::{CELLS, GridLevel, GridTone, normalize, summary_text, week_grid};
 
-/// Normal, reduced, off: the characters of `led_schedule`.
+/// Normal, reduced, off: the characters of `led_schedule` (the Synology system's
+/// `led_brightness_schedule` format: 168 characters, Sunday first, one per hour).
 pub const LEVELS: &[GridLevel] = &[
     GridLevel { code: '0', label_key: "syn.ledsch_normal", tone: GridTone::Full },
     GridLevel { code: '1', label_key: "syn.ledsch_reduced", tone: GridTone::Half },
@@ -23,14 +24,18 @@ pub const LEVELS: &[GridLevel] = &[
 pub struct DsmImport {
     pub schedule: Option<String>,
     pub level: Option<u8>,
+    /// A `led_brightness_adjusted_level` that is no number 0–255 (its text): not applied.
+    pub bad_level: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportErr {
     /// Neither a schedule nor a level.
     Nothing,
-    /// A schedule of the wrong length or with other characters (its length).
-    BadSchedule(usize),
+    /// A schedule of only valid characters but the wrong length (its length).
+    Length(usize),
+    /// A schedule with a character other than 0, 1, 2 (1-based position, character).
+    BadChar { pos: usize, ch: char },
 }
 
 fn unquote(v: &str) -> &str {
@@ -43,31 +48,80 @@ fn unquote(v: &str) -> &str {
     v
 }
 
+/// The schedule without white space (a value wrapped over lines when pasted), checked: a wrong
+/// character first (where it is), then the length.
 fn schedule_of(v: &str) -> Result<String, ImportErr> {
-    from_dsm(v, &LED_SCHEDULE_CODES).map_err(|_| ImportErr::BadSchedule(v.chars().count()))
+    let s: String = v.chars().filter(|c| !c.is_whitespace()).collect();
+    if let Some((i, ch)) = s.chars().enumerate().find(|(_, c)| !LED_SCHEDULE_CODES.contains(c)) {
+        return Err(ImportErr::BadChar { pos: i + 1, ch });
+    }
+    let n = s.chars().count();
+    if n != CELLS {
+        return Err(ImportErr::Length(n));
+    }
+    Ok(s)
+}
+
+/// A bare pasted text that is meant as a schedule: digits only, or mostly 0/1/2 (so a stray
+/// letter is reported where it is), not ordinary words.
+fn looks_like_schedule(s: &str) -> bool {
+    let n = s.chars().count();
+    let valid = s.chars().filter(|c| LED_SCHEDULE_CODES.contains(c)).count();
+    n > 0 && (s.chars().all(|c| c.is_ascii_digit()) || valid * 2 > n)
 }
 
 /// The pasted text: the bare schedule (quotes and white space allowed), or `synoinfo.conf`
-/// lines with `led_brightness_schedule="…"` and optionally `led_brightness_adjusted_level="N"`
-/// (other lines and `#` comments are skipped).
+/// lines with `led_brightness_schedule="…"` (its value may run over the next lines) and
+/// optionally `led_brightness_adjusted_level="N"` (other lines and `#` comments are skipped).
 pub fn parse_dsm_import(text: &str) -> Result<DsmImport, ImportErr> {
     if !text.contains('=') {
         let compact: String = unquote(text).chars().filter(|c| !c.is_whitespace()).collect();
-        if compact.is_empty() || !compact.chars().all(|c| LED_SCHEDULE_CODES.contains(&c)) {
+        if !looks_like_schedule(&compact) {
             return Err(ImportErr::Nothing);
         }
-        return Ok(DsmImport { schedule: Some(schedule_of(&compact)?), level: None });
+        return Ok(DsmImport { schedule: Some(schedule_of(&compact)?), ..Default::default() });
     }
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
     let mut out = DsmImport::default();
-    for line in text.lines().map(str::trim).filter(|l| !l.starts_with('#')) {
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        i += 1;
+        if line.starts_with('#') {
+            continue;
+        }
         let Some((k, v)) = line.split_once('=') else { continue };
         match k.trim() {
-            "led_brightness_schedule" => out.schedule = Some(schedule_of(unquote(v))?),
-            "led_brightness_adjusted_level" => out.level = unquote(v).parse().ok(),
+            "led_brightness_schedule" => {
+                let mut v = v.trim().to_string();
+                // a value wrapped over lines: an open quote goes on until it is closed, a bare
+                // value over the next lines of digits
+                loop {
+                    let open = match v.chars().next() {
+                        Some(q @ ('"' | '\'')) => v.len() < 2 || !v.ends_with(q),
+                        _ => lines.get(i).is_some_and(|l| !l.is_empty() && l.chars().all(|c| c.is_ascii_digit() || c == '"' || c == '\'')),
+                    };
+                    match lines.get(i) {
+                        Some(next) if open && !next.contains('=') && !next.starts_with('#') => {
+                            v.push_str(next);
+                            i += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                out.schedule = Some(schedule_of(unquote(&v))?);
+            }
+            "led_brightness_adjusted_level" => {
+                let raw = unquote(v);
+                match raw.parse() {
+                    Ok(l) => (out.level, out.bad_level) = (Some(l), None),
+                    Err(_) => (out.level, out.bad_level) = (None, Some(raw.to_string())),
+                }
+            }
             _ => {}
         }
     }
-    if out == DsmImport::default() { Err(ImportErr::Nothing) } else { Ok(out) }
+    if out.schedule.is_none() && out.level.is_none() { Err(ImportErr::Nothing) } else { Ok(out) }
 }
 
 /// The front LED scale of the model: (dimmest, brightest, normal).
@@ -100,19 +154,32 @@ fn mode_key(m: LedMode) -> &'static str {
 
 /// The card; built once while the status says the chip is driven (see [`super::page`]).
 pub fn card(d: RwSignal<SynologySettings>, st: Remote<SynologyStatus>) -> AnyView {
-    let sc = Memo::new(move |_| st.data.with(|v| v.as_ref().and_then(scale)));
-    let now = Memo::new(move |_| st.data.with(|v| v.as_ref().and_then(|v| Some((v.led_mode_now?, v.led_level_now?)))));
+    // while synohwd restarts (after a save) its status is empty: keep the last scale and level
+    let sc = Memo::new(move |prev: Option<&Option<(u8, u8, u8)>>| {
+        st.data.with(|v| {
+            let fresh = v.as_ref().and_then(scale);
+            if v.as_ref().is_some_and(|v| v.running) { fresh } else { fresh.or(prev.copied().flatten()) }
+        })
+    });
+    let now = Memo::new(move |prev: Option<&Option<(LedMode, u8)>>| {
+        st.data.with(|v| {
+            let fresh = v.as_ref().and_then(|v| Some((v.led_mode_now?, v.led_level_now?)));
+            if v.as_ref().is_some_and(|v| v.running) { fresh } else { fresh.or(prev.copied().flatten()) }
+        })
+    });
     let enabled = Memo::new(move |_| d.with(|s| !s.led_schedule.is_empty()));
-    // the grid edits its own signal; it follows the draft (reset, server change) and writes back
+    let level = Memo::new(move |_| d.with(|s| s.led_reduced_level));
+    // the grid edits its own signal: it follows the draft (reset, server change, import) and
+    // goes back into the draft once a change is done (not at every cell of a drag)
     let grid = RwSignal::new(d.with_untracked(|s| normalize(&s.led_schedule, &LED_SCHEDULE_CODES, '0')));
     Effect::new(move || {
-        let s = d.with(|s| s.led_schedule.clone());
-        if !s.is_empty() && grid.with_untracked(|g| *g != s) {
-            grid.set(normalize(&s, &LED_SCHEDULE_CODES, '0'));
-        }
+        d.with(|s| {
+            if !s.led_schedule.is_empty() && grid.with_untracked(|g| *g != s.led_schedule) {
+                grid.set(normalize(&s.led_schedule, &LED_SCHEDULE_CODES, '0'));
+            }
+        });
     });
-    Effect::new(move || {
-        let g = grid.get();
+    let commit = Callback::new(move |g: String| {
         if enabled.get_untracked() && d.with_untracked(|s| s.led_schedule != g) {
             d.update(|s| s.led_schedule = g);
         }
@@ -123,10 +190,10 @@ pub fn card(d: RwSignal<SynologySettings>, st: Remote<SynologyStatus>) -> AnyVie
     });
     let level_id = crate::form::fid();
     let help_id = format!("{level_id}h");
-    let choices = move || {
-        let cur = d.with(|s| s.led_reduced_level);
+    let choices = Memo::new(move |_| {
+        let cur = level.get();
         sc.get().map(|(lo, hi, normal)| reduced_choices(lo, hi, normal, cur)).unwrap_or_else(|| vec![cur])
-    };
+    });
     let level_help = move || {
         sc.get()
             .map(|(lo, hi, normal)| {
@@ -149,13 +216,13 @@ pub fn card(d: RwSignal<SynologySettings>, st: Remote<SynologyStatus>) -> AnyVie
                 })}
                 {crate::form::switch("syn.ledsch_on", Some("syn.ledsch_on_help"), on, set_on)}
                 <Show when=move || enabled.get()>
-                    {week_grid(LEVELS, grid, "syn.ledsch_grid")}
+                    {week_grid(LEVELS, grid, "syn.ledsch_grid", Some(commit))}
                     <div class="field">
                         <label class="field-label" for=level_id.clone()>{tr("syn.ledsch_level")}</label>
                         <select id=level_id.clone() class="input syn-level" aria-describedby=help_id.clone()
                             on:change=move |ev| { if let Ok(v) = event_target_value(&ev).parse::<u8>() { d.update(|s| s.led_reduced_level = v) } }>
-                            {move || choices().into_iter().map(|l| view! {
-                                <option value=l.to_string() selected=move || d.with(|s| s.led_reduced_level == l)>{l.to_string()}</option>
+                            {move || choices.get().into_iter().map(|l| view! {
+                                <option value=l.to_string() selected=move || level.get() == l>{l.to_string()}</option>
                             }).collect_view()}
                         </select>
                         <span class="field-help" id=help_id.clone()>{level_help}</span>
@@ -171,12 +238,20 @@ pub fn card(d: RwSignal<SynologySettings>, st: Remote<SynologyStatus>) -> AnyVie
     .into_any()
 }
 
+/// An imported reduced level the model takes: within its scale, or 0–7 (the range of the
+/// setting) while the scale is unknown.
+fn level_fits(sc: Option<(u8, u8, u8)>, l: u8) -> bool {
+    match sc {
+        Some((lo, hi, _)) => (lo..=hi).contains(&l),
+        None => l <= 7,
+    }
+}
+
 /// "Import from the Synology system": paste, see what was recognised, apply to the draft.
 fn import_dialog(d: RwSignal<SynologySettings>, sc: Memo<Option<(u8, u8, u8)>>, close: Callback<()>) -> AnyView {
     let text = RwSignal::new(String::new());
     let parsed = Memo::new(move |_| text.with(|s| (!s.trim().is_empty()).then(|| parse_dsm_import(s))));
-    // the level, when the model's scale takes it
-    let level_ok = move |l: u8| sc.get_untracked().is_none_or(|(lo, hi, _)| (lo..=hi).contains(&l));
+    let level_ok = move |l: u8| level_fits(sc.get_untracked(), l);
     let usable = move || parsed.with(|p| matches!(p, Some(Ok(i)) if i.schedule.is_some() || i.level.is_some_and(level_ok)));
     let apply = move |_| {
         let Some(Ok(i)) = parsed.get_untracked() else { return };
@@ -195,23 +270,41 @@ fn import_dialog(d: RwSignal<SynologySettings>, sc: Memo<Option<(u8, u8, u8)>>, 
     let result = move || {
         parsed.get().map(|p| match p {
             Ok(i) => {
-                let mut lines = Vec::new();
+                let mut found = Vec::new();
+                let mut warn = Vec::new();
                 if let Some(s) = &i.schedule {
-                    lines.push(tf("syn.ledsch_found_schedule", &[("summary", &summary_text(s, LEVELS))]));
+                    found.push(tf("syn.ledsch_found_schedule", &[("summary", &summary_text(s, LEVELS))]));
                 }
                 if let Some(l) = i.level {
                     match sc.get() {
-                        Some((lo, hi, _)) if !(lo..=hi).contains(&l) => lines.push(tf(
+                        Some((lo, hi, _)) if !(lo..=hi).contains(&l) => warn.push(tf(
                             "syn.ledsch_level_outside",
                             &[("level", &l.to_string()), ("lo", &lo.to_string()), ("hi", &hi.to_string())],
                         )),
-                        _ => lines.push(tf("syn.ledsch_found_level", &[("level", &l.to_string())])),
+                        None if !level_fits(None, l) => {
+                            warn.push(tf("syn.ledsch_level_outside", &[("level", &l.to_string()), ("lo", "0"), ("hi", "7")]))
+                        }
+                        _ => found.push(tf("syn.ledsch_found_level", &[("level", &l.to_string())])),
                     }
                 }
-                ui::note(Tone::Ok, icons::CIRCLE_CHECK, view! { <ul class="syn-found">{lines.into_iter().map(|l| view! { <li>{l}</li> }).collect_view()}</ul> }.into_any())
+                if let Some(raw) = &i.bad_level {
+                    warn.push(tf("syn.ledsch_level_unreadable", &[("value", raw)]));
+                }
+                let list = |lines: Vec<String>| view! { <ul class="syn-found">{lines.into_iter().map(|l| view! { <li>{l}</li> }).collect_view()}</ul> }.into_any();
+                view! {
+                    {(!found.is_empty()).then(|| ui::note(Tone::Ok, icons::CIRCLE_CHECK, list(found)))}
+                    {(!warn.is_empty()).then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, list(warn)))}
+                }
+                .into_any()
             }
-            Err(ImportErr::BadSchedule(n)) => ui::note(Tone::Err, icons::CIRCLE_X, ui::text(tf("syn.ledsch_err_len", &[("n", &n.to_string())]))),
-            Err(ImportErr::Nothing) => ui::note(Tone::Err, icons::CIRCLE_X, ui::text(t("syn.ledsch_err_none").to_string())),
+            Err(ImportErr::Length(n)) => ui::note(Tone::Err, icons::CIRCLE_X, ui::text(tf("syn.ledsch_err_len", &[("n", &n.to_string())]))).into_any(),
+            Err(ImportErr::BadChar { pos, ch }) => ui::note(
+                Tone::Err,
+                icons::CIRCLE_X,
+                ui::text(tf("syn.ledsch_err_char", &[("pos", &pos.to_string()), ("ch", &ch.to_string())])),
+            )
+            .into_any(),
+            Err(ImportErr::Nothing) => ui::note(Tone::Err, icons::CIRCLE_X, ui::text(t("syn.ledsch_err_none").to_string())).into_any(),
         })
     };
     let body = view! {
@@ -268,17 +361,28 @@ mod tests {
         assert_eq!(&s[6 * 24..6 * 24 + 3], "112");
     }
 
+    fn sched(s: &str) -> DsmImport {
+        DsmImport { schedule: Some(s.to_string()), ..Default::default() }
+    }
+
     #[test]
     fn import_raw_string() {
         let s = example_schedule();
-        let want = Ok(DsmImport { schedule: Some(s.clone()), level: None });
+        let want = Ok(sched(&s));
         assert_eq!(parse_dsm_import(&s), want);
         assert_eq!(parse_dsm_import(&format!("  \"{s}\"\n")), want);
         assert_eq!(parse_dsm_import(&format!("'{s}'")), want);
         // wrapped over lines when pasted
         assert_eq!(parse_dsm_import(&format!("{}\n{}", &s[..84], &s[84..])), want);
-        assert_eq!(parse_dsm_import(&s[..100]), Err(ImportErr::BadSchedule(100)));
-        assert_eq!(parse_dsm_import(&format!("{s}0")), Err(ImportErr::BadSchedule(169)));
+        assert_eq!(parse_dsm_import(&s[..100]), Err(ImportErr::Length(100)));
+        assert_eq!(parse_dsm_import(&format!("{s}0")), Err(ImportErr::Length(169)));
+        // a wrong character is named with its place, whatever the length
+        let mut bad = s.clone();
+        bad.replace_range(40..41, "3");
+        assert_eq!(parse_dsm_import(&bad), Err(ImportErr::BadChar { pos: 41, ch: '3' }));
+        assert_eq!(parse_dsm_import("0120x"), Err(ImportErr::BadChar { pos: 5, ch: 'x' }));
+        bad.replace_range(40..41, "x");
+        assert_eq!(parse_dsm_import(&bad), Err(ImportErr::BadChar { pos: 41, ch: 'x' }));
     }
 
     #[test]
@@ -287,16 +391,24 @@ mod tests {
         let conf = format!(
             "# exported\nled_brightness=\"3\"\nled_brightness_schedule=\"{s}\"\nled_brightness_adjusted_level=\"1\"\nsupport_led_brightness_adjustment=\"yes\"\n"
         );
-        assert_eq!(parse_dsm_import(&conf), Ok(DsmImport { schedule: Some(s.clone()), level: Some(1) }));
+        assert_eq!(parse_dsm_import(&conf), Ok(DsmImport { level: Some(1), ..sched(&s) }));
         // spaces around '=', no quotes, schedule only
-        assert_eq!(
-            parse_dsm_import(&format!("led_brightness_schedule = {s}")),
-            Ok(DsmImport { schedule: Some(s.clone()), level: None })
-        );
+        assert_eq!(parse_dsm_import(&format!("led_brightness_schedule = {s}")), Ok(sched(&s)));
+        // the value wrapped over lines, quoted or not
+        let wrapped = format!("led_brightness_schedule=\"{}\n{}\"\nled_brightness_adjusted_level=\"2\"", &s[..84], &s[84..]);
+        assert_eq!(parse_dsm_import(&wrapped), Ok(DsmImport { level: Some(2), ..sched(&s) }));
+        let wrapped = format!("led_brightness_schedule={}\n{}\n{}\nwol=\"yes\"", &s[..60], &s[60..120], &s[120..]);
+        assert_eq!(parse_dsm_import(&wrapped), Ok(sched(&s)));
         // level only
-        assert_eq!(parse_dsm_import("led_brightness_adjusted_level=\"2\""), Ok(DsmImport { schedule: None, level: Some(2) }));
+        assert_eq!(parse_dsm_import("led_brightness_adjusted_level=\"2\""), Ok(DsmImport { level: Some(2), ..Default::default() }));
         // a broken schedule line is an error, not skipped
-        assert_eq!(parse_dsm_import("led_brightness_schedule=\"0123\""), Err(ImportErr::BadSchedule(4)));
+        assert_eq!(parse_dsm_import("led_brightness_schedule=\"0123\""), Err(ImportErr::BadChar { pos: 4, ch: '3' }));
+        assert_eq!(parse_dsm_import("led_brightness_schedule=\"0120\""), Err(ImportErr::Length(4)));
+        // an unreadable level beside a good schedule: kept as a warning
+        assert_eq!(
+            parse_dsm_import(&format!("led_brightness_schedule=\"{s}\"\nled_brightness_adjusted_level=\"lots\"")),
+            Ok(DsmImport { bad_level: Some("lots".into()), ..sched(&s) })
+        );
         // commented out: not taken
         assert_eq!(parse_dsm_import(&format!("#led_brightness_schedule=\"{s}\"")), Err(ImportErr::Nothing));
     }
@@ -309,6 +421,13 @@ mod tests {
         assert_eq!(parse_dsm_import("a=b\nc=d"), Err(ImportErr::Nothing));
         assert_eq!(parse_dsm_import("led_brightness_adjusted_level=\"lots\""), Err(ImportErr::Nothing));
         assert_eq!(parse_dsm_import("led_brightness_adjusted_level=\"-1\""), Err(ImportErr::Nothing));
+    }
+
+    #[test]
+    fn imported_level_without_a_scale() {
+        assert!(level_fits(None, 0) && level_fits(None, 7));
+        assert!(!level_fits(None, 8) && !level_fits(None, 200));
+        assert!(level_fits(Some((1, 3, 3)), 3) && !level_fits(Some((1, 3, 3)), 0));
     }
 
     #[test]

@@ -101,7 +101,7 @@ pub fn validate(s: &SynologySettings) -> Result<(), String> {
 /// The front LED settings against what the running synohwd reports (`status`): the reduced
 /// level within the model's scale, and no new schedule for a synohwd without the LED chip.
 /// Nothing to check while synohwd is not running (the scale is unknown; synohwd clamps).
-/// `applied` is the current value: a schedule already in the file is not refused again.
+/// `applied` is the current value: a schedule or level already in the file is not refused again.
 pub fn validate_led(
     s: &SynologySettings,
     applied: &SynologySettings,
@@ -119,7 +119,10 @@ pub fn validate_led(
         }
         return Ok(());
     }
+    // like the schedule: only a changed level is checked, so a value already in the file
+    // (synohwd clamps it) does not block saving other settings
     if let (Some(lo), Some(hi)) = (status.led_level_min, status.led_level_max)
+        && s.led_reduced_level != applied.led_reduced_level
         && !(lo..=hi).contains(&s.led_reduced_level)
     {
         return Err(format!(
@@ -614,5 +617,23 @@ mod tests {
         let stopped = SynologyStatus::default();
         s.led_reduced_level = 7;
         assert!(validate_led(&s, &applied, &stopped).is_ok());
+        // an out-of-scale level already applied does not block saving unrelated fields
+        let old = SynologySettings {
+            led_reduced_level: 7,
+            ..Default::default()
+        };
+        let other = SynologySettings {
+            led_reduced_level: 7,
+            led_brightness: old.led_brightness.saturating_sub(1).max(1),
+            wol: !old.wol,
+            ..Default::default()
+        };
+        assert!(validate_led(&other, &old, &led_status(true)).is_ok());
+        // changing it to another out-of-scale value is still refused
+        let other = SynologySettings {
+            led_reduced_level: 6,
+            ..other
+        };
+        assert!(validate_led(&other, &old, &led_status(true)).is_err());
     }
 }

@@ -1679,7 +1679,7 @@ wg.fill_day	{day}: tutte le ore a {level}
 wg.fill_hour	{from}–{to} di ogni giorno a {level}
 wg.all_week	Tutta la settimana: {level}
 wg.invalid	La pianificazione salvata non era leggibile: appare come {level} finché non la salvi.
-wg.help	Scegli un livello, poi fai clic o trascina sulle ore; l'intestazione di un giorno o di un'ora riempie la sua riga. Da tastiera: le frecce spostano, Spazio applica il livello, Maiusc+Spazio riempie il giorno, 1–{n} scelgono il livello.
+wg.help	Scegli un livello, poi fai clic o trascina sulle ore; l'intestazione di un giorno o di un'ora riempie la sua riga o colonna. Al tocco: tocca un'ora per applicare il livello, tienila premuta un attimo e poi trascina per riempire un rettangolo, scorri per spostare la pagina. Da tastiera: le frecce spostano, Spazio applica il livello, Maiusc+Spazio riempie il giorno, Maiusc+Invio riempie l'ora in tutti i giorni, 1–{n} scelgono il livello, Esc annulla un trascinamento.
 wgd.title	Griglia settimanale
 wgd.subtitle	Anteprima del componente, solo nella build demo
 wgd.led	Luminosità dei LED per ora
@@ -1687,8 +1687,8 @@ wgd.window	Finestra di backup
 wgd.bandwidth	Banda per ora
 wgd.preview	Anteprime compatte
 wgd.normal	Normale
-wgd.reduced	Ridotta
-wgd.off	Spenti
+wgd.reduced	Ridotto
+wgd.off	Spento
 wgd.allowed	Esegui
 wgd.paused	In pausa
 wgd.unlimited	Illimitata
@@ -4325,21 +4325,23 @@ syn.ledsch	Pianificazione della luminosità dei LED frontali
 syn.ledsch_on	Cambia la luminosità in base all'ora
 syn.ledsch_on_help	Se disattivata, i LED frontali restano sempre al livello normale.
 syn.ledsch_normal	Normale
-syn.ledsch_reduced	Ridotta
-syn.ledsch_off	Spenti
+syn.ledsch_reduced	Ridotto
+syn.ledsch_off	Spento
 syn.ledsch_grid	Livello dei LED frontali per ora
 syn.ledsch_level	Livello ridotto
-syn.ledsch_level_help	{lo} è il più tenue, {normal} è il livello normale. Spenti nella griglia spegne tutti i LED frontali.
+syn.ledsch_level_help	{lo} è il più tenue, {normal} è il livello normale. Spento nella griglia spegne tutti i LED frontali.
 syn.ledsch_now	LED frontali ora
 syn.ledsch_now_value	{mode}, livello {level}
-syn.ledsch_scope	LED di alimentazione, stato, rete e dischi sul frontale. Questo chip è separato dalla luminosità dei LED dei dischi: le due impostazioni si sommano.
+syn.ledsch_scope	Questo chip regola tutti i LED frontali; la luminosità dei LED dei dischi (sopra) si applica in più: se entrambe sono basse, i LED dei dischi risultano ancora più tenui.
 syn.ledsch_import	Importa da DSM
 syn.ledsch_import_text	Pianificazione o righe di synoinfo.conf
 syn.ledsch_import_help	Incolla la pianificazione di 168 caratteri, oppure le righe di un synoinfo.conf esportato da DSM con led_brightness_schedule e, se c'è, led_brightness_adjusted_level.
 syn.ledsch_found_schedule	Pianificazione: {summary}
 syn.ledsch_found_level	Livello ridotto: {level}
 syn.ledsch_level_outside	Il livello ridotto {level} è fuori da {lo}–{hi} su questo modello: non applicato.
-syn.ledsch_err_len	La pianificazione ha {n} caratteri: ne servono 168, ognuno 0, 1 o 2.
+syn.ledsch_err_len	La pianificazione ha {n} caratteri: devono essere esattamente 168.
+syn.ledsch_err_char	La pianificazione non è valida: il carattere {pos} è “{ch}”, sono ammessi solo 0, 1 e 2.
+syn.ledsch_level_unreadable	Il livello ridotto “{value}” non è un numero: non applicato.
 syn.ledsch_err_none	Niente di riconosciuto: incolla la pianificazione di 168 caratteri o la riga led_brightness_schedule.
 syn.ledsch_apply	Applica al modulo
 syn.beep_start	Segnale acustico all'avvio del NAS

@@ -249,8 +249,15 @@ fn body(s: SynologySettingsState, settings: Remote<SynologySettingsState>, st: R
     let dirty = draft.dirty();
     let pending = Signal::derive(move || settings.data.with(|s| s.as_ref().is_some_and(|s| s.pending.is_some())));
     let running = s.platform.synohwd_running;
-    // synodeb ≥ 4.8 with the front LED chip: the schedule card (hidden otherwise)
-    let led_supported = Memo::new(move |_| st.data.with(|v| v.as_ref().is_some_and(|v| v.led_schedule_supported)));
+    // synodeb ≥ 4.8 with the front LED chip: the schedule card (hidden otherwise). The last
+    // answer stays while synohwd is not running (restarted by a save: its status is empty for a
+    // moment), so the card does not vanish with its dialog; only a running synohwd hides it.
+    let led_supported = Memo::new(move |prev: Option<&bool>| {
+        st.data.with(|v| match v {
+            Some(v) if v.running || v.led_schedule_supported => v.led_schedule_supported,
+            _ => prev.copied().unwrap_or(false),
+        })
+    });
     let save = move || {
         if d.with_untracked(range_error).is_some() {
             error.set(Some(t("form.check").to_string()));

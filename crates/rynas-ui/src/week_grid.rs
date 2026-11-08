@@ -1,14 +1,14 @@
 //! Weekly schedule grid: 7 days × 24 hours, one level per hour (docs/phase2/week-grid.md).
 //!
 //! The value is a 168-character string, **Sunday first**, one character per hour
-//! (`value[day * 24 + hour]`, day 0 = Sunday): the format of the LED brightness, backup and
-//! sync schedules of the Synology NAS UI, so a schedule read from synohwd or a migrated
-//! configuration is stored as is ([`from_dsm`] / [`to_dsm`] only validate). The grid shows the
-//! week Monday first (the app has no locale setting for the first day; en and it both start on
-//! Monday here): [`index`] maps a display cell to the stored one.
+//! (`value[day * 24 + hour]`, day 0 = Sunday), the way the features that use the grid store
+//! their schedules: the grid edits it as is ([`validate`] / [`normalize`] check or repair it).
+//! The grid shows the week Monday first (the app has no locale setting for the first day; en
+//! and it both start on Monday here): [`index`] maps a display cell to the stored one.
 //!
 //! - [`week_grid`]: the editor (pick a level, click or drag to paint, day/hour headers fill a
-//!   row/column, keyboard with a roving focus, ARIA grid).
+//!   row/column, keyboard with a roving focus, ARIA grid). On a touch screen the page scrolls
+//!   over the grid: a tap paints one cell, a hold ([`HOLD_MS`]) starts a rectangle.
 //! - [`week_grid_preview`]: read-only, compact (lists and cards), its summary as the label.
 //! - [`week_grid_legend`]: the levels with their swatches.
 //!
@@ -51,6 +51,47 @@ impl GridTone {
             GridTone::Off => "wg-off",
         }
     }
+
+    /// The class of a grid cell at this tone (static, no string built per cell).
+    fn cell_class(self) -> &'static str {
+        match self {
+            GridTone::Full => "wg-cell wg-full",
+            GridTone::Half => "wg-cell wg-half",
+            GridTone::Low => "wg-cell wg-low",
+            GridTone::Off => "wg-cell wg-off",
+        }
+    }
+}
+
+/// How long a finger rests on a cell before it paints a rectangle (ms); a shorter touch is a
+/// tap, a touch that moves first is a scroll.
+pub const HOLD_MS: u64 = 350;
+
+/// How far (px) a held finger may move before the hold counts as a scroll.
+const SLOP_PX: i32 = 8;
+
+/// "00:00" … "24:00", the hour bounds of the cell labels.
+const HOUR_TEXT: [&str; 25] = [
+    "00:00", "01:00", "02:00", "03:00", "04:00", "05:00", "06:00", "07:00", "08:00", "09:00", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00",
+    "16:00", "17:00", "18:00", "19:00", "20:00", "21:00", "22:00", "23:00", "24:00",
+];
+
+/// A rectangle being painted: the pointer that paints, the anchor and last display cells, the
+/// value before the drag (restored by Esc or a cancelled pointer).
+struct Drag {
+    id: i32,
+    anchor: usize,
+    last: usize,
+    from: String,
+}
+
+/// A finger resting on a cell, before it is a tap, a hold or a scroll.
+struct Press {
+    id: i32,
+    cell: usize,
+    x: i32,
+    y: i32,
+    timer: Option<TimeoutHandle>,
 }
 
 /// One level of a grid: its character in the value, its name, its look.
@@ -79,19 +120,6 @@ pub fn validate(value: &str, codes: &[char]) -> Result<(), GridError> {
         Some((at, ch)) => Err(GridError::Code { at, ch }),
         None => Ok(()),
     }
-}
-
-/// A schedule string of the Synology UI (Sunday first, one character per hour) as a grid
-/// value: the same string, validated.
-pub fn from_dsm(s: &str, codes: &[char]) -> Result<String, GridError> {
-    validate(s, codes)?;
-    Ok(s.to_string())
-}
-
-/// A grid value as a schedule string of the Synology UI: the same string, validated.
-#[allow(dead_code, reason = "API for the features that store a schedule (LED, backup windows), tested here")]
-pub fn to_dsm(value: &str, codes: &[char]) -> Result<String, GridError> {
-    from_dsm(value, codes)
 }
 
 /// The whole week at one level.
@@ -321,36 +349,85 @@ pub fn week_grid_preview(levels: &'static [GridLevel], value: Signal<String>, la
 }
 
 /// The editor. `value` holds the 168-character schedule (Sunday first); `label_key` names the
-/// grid for assistive technology. Painting writes `value` at once (a drag updates it live).
-pub fn week_grid(levels: &'static [GridLevel], value: RwSignal<String>, label_key: &'static str) -> AnyView {
+/// grid for assistive technology. Painting writes `value` at once (a drag updates it live);
+/// `on_commit` gets the value when a change is done (a click, tap, key or heading, the end of a
+/// drag; not a drag cancelled with Esc), so a form can take it once instead of at every cell.
+pub fn week_grid(levels: &'static [GridLevel], value: RwSignal<String>, label_key: &'static str, on_commit: Option<Callback<String>>) -> AnyView {
     debug_assert!((2..=4).contains(&levels.len()) && levels.iter().all(|l| l.code.is_ascii()));
     let base = levels[0].code;
     let active = RwSignal::new(0usize);
     // the cell with tabindex 0 (roving focus), display index
     let focus = RwSignal::new(0usize);
-    // anchor, last cell, value before the drag
-    let drag = StoredValue::new(None::<(usize, usize, String)>);
+    let drag = StoredValue::new(None::<Drag>);
+    let press = StoredValue::new(None::<Press>);
+    // a rectangle is being painted: the summary waits, a touch no longer scrolls
+    let dragging = RwSignal::new(false);
     let wrap = NodeRef::<leptos::html::Div>::new();
     let grid = NodeRef::<leptos::html::Div>::new();
     let help_id = crate::form::fid();
 
     let current = move || value.with_untracked(|v| normalize(v, &codes_of(levels), base));
-    let invalid = move || value.with(|v| validate(v, &codes_of(levels)).is_err());
+    let invalid = Memo::new(move |_| value.with(|v| validate(v, &codes_of(levels)).is_err()));
     let paint = move |from: &str, a: usize, b: usize| value.set(set_rect(from, a, b, levels[active.get_untracked()].code));
+    let commit = move || {
+        if let Some(cb) = on_commit {
+            cb.run(value.get_untracked());
+        }
+    };
     let vertical = move || wrap.get_untracked().is_some_and(|w| w.client_width() < NARROW_PX);
+    let cell_el = move |di: usize| grid.get_untracked().and_then(|g| g.query_selector(&format!("[data-i=\"{di}\"]")).ok().flatten());
     let focus_cell = move |di: usize| {
         focus.set(di);
-        if let Some(g) = grid.get_untracked()
-            && let Ok(Some(el)) = g.query_selector(&format!("[data-i=\"{di}\"]"))
-        {
+        if let Some(el) = cell_el(di) {
             let _ = el.unchecked_into::<web_sys::HtmlElement>().focus();
         }
     };
     let level_name = move || t(levels[active.get()].label_key);
 
+    let start = move |id: i32, di: usize| {
+        let from = current();
+        paint(&from, di, di);
+        drag.set_value(Some(Drag { id, anchor: di, last: di, from }));
+        dragging.set(true);
+        focus_cell(di);
+    };
+    // the keyboard goes on from where the drag ended
+    let end = move |id: i32| {
+        if drag.with_value(|d| d.as_ref().is_some_and(|d| d.id == id))
+            && let Some(d) = drag.try_update_value(Option::take).flatten()
+        {
+            dragging.set(false);
+            focus_cell(d.last);
+            commit();
+        }
+    };
+    // back to the value before the drag (Esc, a cancelled pointer)
+    let cancel_drag = move || {
+        if let Some(d) = drag.try_update_value(Option::take).flatten() {
+            value.set(d.from);
+            dragging.set(false);
+        }
+    };
+    let clear_press = move || {
+        if let Some(p) = press.try_update_value(Option::take).flatten() {
+            if let Some(h) = p.timer {
+                h.clear();
+            }
+            if let Some(el) = cell_el(p.cell) {
+                let _ = el.remove_attribute("data-press");
+            }
+        }
+    };
+
     let on_keydown = move |ev: web_sys::KeyboardEvent| {
         let key = ev.key();
+        if key == "Escape" && drag.with_value(Option::is_some) {
+            ev.prevent_default();
+            cancel_drag();
+            return;
+        }
         if key.len() == 1
+            && !(ev.ctrl_key() || ev.alt_key() || ev.meta_key())
             && let Some(d) = key.chars().next().and_then(|c| c.to_digit(10))
         {
             if (1..=levels.len()).contains(&(d as usize)) {
@@ -380,7 +457,13 @@ pub fn week_grid(levels: &'static [GridLevel], value: RwSignal<String>, label_ke
             " " | "Enter" => {
                 ev.prevent_default();
                 let from = current();
-                if ev.shift_key() { paint(&from, r * 24, r * 24 + 23) } else { paint(&from, di, di) }
+                match (key.as_str(), ev.shift_key()) {
+                    // Shift+Space: the whole day; Shift+Enter: this hour on every day
+                    (" ", true) => paint(&from, r * 24, r * 24 + 23),
+                    (_, true) => paint(&from, h, 6 * 24 + h),
+                    _ => paint(&from, di, di),
+                }
+                commit();
                 return;
             }
             _ => return,
@@ -392,63 +475,105 @@ pub fn week_grid(levels: &'static [GridLevel], value: RwSignal<String>, label_ke
     };
     let on_down = move |ev: web_sys::PointerEvent| {
         let Some(g) = grid.get_untracked() else { return };
-        if ev.button() != 0 {
+        // one pointer paints: a second finger or button is ignored
+        if ev.button() != 0 || !ev.is_primary() || drag.with_value(Option::is_some) || press.with_value(Option::is_some) {
             return;
         }
         let Some(di) = cell_at(&g, ev.client_x(), ev.client_y()) else { return };
+        let id = ev.pointer_id();
+        if ev.pointer_type() == "touch" {
+            // the page keeps scrolling under a finger: a tap paints one cell, a hold starts a
+            // rectangle (and only then the grid keeps the finger)
+            if let Some(el) = cell_el(di) {
+                let _ = el.set_attribute("data-press", "");
+            }
+            let timer = set_timeout_with_handle(
+                move || {
+                    if press.with_value(|p| p.as_ref().is_some_and(|p| p.id == id))
+                        && let Some(p) = press.try_update_value(Option::take).flatten()
+                    {
+                        if let Some(el) = cell_el(p.cell) {
+                            let _ = el.remove_attribute("data-press");
+                        }
+                        if let Some(g) = grid.get_untracked() {
+                            let _ = g.set_pointer_capture(id);
+                        }
+                        start(id, p.cell);
+                    }
+                },
+                std::time::Duration::from_millis(HOLD_MS),
+            )
+            .ok();
+            press.set_value(Some(Press { id, cell: di, x: ev.client_x(), y: ev.client_y(), timer }));
+            return;
+        }
         ev.prevent_default();
-        let _ = g.set_pointer_capture(ev.pointer_id());
-        let from = current();
-        paint(&from, di, di);
-        drag.set_value(Some((di, di, from)));
-        focus_cell(di);
+        let _ = g.set_pointer_capture(id);
+        start(id, di);
     };
     let on_move = move |ev: web_sys::PointerEvent| {
-        if drag.with_value(Option::is_none) {
+        let id = ev.pointer_id();
+        let (x, y) = (ev.client_x(), ev.client_y());
+        // a held finger that moves is scrolling the page
+        if press.with_value(|p| p.as_ref().is_some_and(|p| p.id == id && ((p.x - x).abs() > SLOP_PX || (p.y - y).abs() > SLOP_PX))) {
+            clear_press();
+            return;
+        }
+        if !drag.with_value(|d| d.as_ref().is_some_and(|d| d.id == id)) {
             return;
         }
         let Some(g) = grid.get_untracked() else { return };
-        let Some(di) = cell_at(&g, ev.client_x(), ev.client_y()) else { return };
+        let Some(di) = cell_at(&g, x, y) else { return };
         let code = levels[active.get_untracked()].code;
         let mut next = None;
         drag.update_value(|d| {
-            if let Some((a, last, from)) = d
-                && *last != di
+            if let Some(d) = d
+                && d.last != di
             {
-                *last = di;
-                next = Some(set_rect(from, *a, di, code));
+                d.last = di;
+                next = Some(set_rect(&d.from, d.anchor, di, code));
             }
         });
         if let Some(v) = next {
             value.set(v);
-            focus.set(di);
         }
     };
-    let end = move || {
-        // the keyboard goes on from where the drag ended
-        if let Some((_, last, _)) = drag.get_value() {
-            drag.set_value(None);
-            focus_cell(last);
+    let on_up = move |ev: web_sys::PointerEvent| {
+        let id = ev.pointer_id();
+        if let Some(cell) = press.with_value(|p| p.as_ref().filter(|p| p.id == id).map(|p| p.cell)) {
+            // a tap: that one cell
+            clear_press();
+            let from = current();
+            paint(&from, cell, cell);
+            focus_cell(cell);
+            commit();
+            return;
         }
+        end(id);
     };
-    let cancel = move |_| {
-        if let Some((_, _, from)) = drag.get_value() {
-            value.set(from);
+    let on_cancel = move |ev: web_sys::PointerEvent| {
+        let id = ev.pointer_id();
+        if press.with_value(|p| p.as_ref().is_some_and(|p| p.id == id)) {
+            clear_press();
         }
-        drag.set_value(None);
+        if drag.with_value(|d| d.as_ref().is_some_and(|d| d.id == id)) {
+            cancel_drag();
+        }
     };
 
-    let hour_text = |h: usize| format!("{h:02}:00");
     let header = view! {
         <div role="row">
             <div class="wg-corner" role="columnheader"><span class="sr-only">{tr("wg.hours")}</span></div>
             {(0..24)
                 .map(|h| {
-                    let label = move || tf("wg.fill_hour", &[("from", &hour_text(h)), ("to", &hour_text(h + 1)), ("level", level_name())]);
-                    let fill = move |_| paint(&current(), h, 6 * 24 + h);
+                    let label = move || tf("wg.fill_hour", &[("from", HOUR_TEXT[h]), ("to", HOUR_TEXT[h + 1]), ("level", level_name())]);
+                    let fill = move |_| {
+                        paint(&current(), h, 6 * 24 + h);
+                        commit();
+                    };
                     view! {
                         <div class="wg-hour" role="columnheader" style=format!("--h:{h}")>
-                            <button type="button" tabindex="-1" aria-label=label title=label on:click=fill>{format!("{h:02}")}</button>
+                            <button type="button" tabindex="-1" aria-label=label title=label on:click=fill>{&HOUR_TEXT[h][..2]}</button>
                         </div>
                     }
                 })
@@ -458,7 +583,10 @@ pub fn week_grid(levels: &'static [GridLevel], value: RwSignal<String>, label_ke
     let rows = (0..7)
         .map(|r| {
             let day_label = move || tf("wg.fill_day", &[("day", t(DAY_LONG[r])), ("level", level_name())]);
-            let fill = move |_| paint(&current(), r * 24, r * 24 + 23);
+            let fill = move |_| {
+                paint(&current(), r * 24, r * 24 + 23);
+                commit();
+            };
             view! {
                 <div role="row">
                     <div class="wg-day" role="rowheader" style=format!("--r:{r}")>
@@ -468,16 +596,21 @@ pub fn week_grid(levels: &'static [GridLevel], value: RwSignal<String>, label_ke
                         .map(|h| {
                             let di = r * 24 + h;
                             let si = index(r, h);
-                            let code = move || value.with(|v| v.as_bytes().get(si).copied());
+                            // the level of this cell: class and label re-run only when it changes
+                            let li = Memo::new(move |_| {
+                                value.with(|v| {
+                                    let c = v.as_bytes().get(si).copied();
+                                    levels.iter().position(|l| Some(l.code as u8) == c).unwrap_or(0) as u8
+                                })
+                            });
                             let label = move || {
-                                let c = code().map_or(base, char::from);
-                                let c = if levels.iter().any(|l| l.code == c) { c } else { base };
-                                tf("wg.cell", &[("day", t(DAY_LONG[r])), ("from", &hour_text(h)), ("to", &hour_text(h + 1)), ("level", level_label(levels, c))])
+                                let l = &levels[li.get() as usize];
+                                tf("wg.cell", &[("day", t(DAY_LONG[r])), ("from", HOUR_TEXT[h]), ("to", HOUR_TEXT[h + 1]), ("level", t(l.label_key))])
                             };
                             view! {
                                 <div
                                     role="gridcell"
-                                    class=move || format!("wg-cell {}", tone_of(levels, code()))
+                                    class=move || levels[li.get() as usize].tone.cell_class()
                                     style=format!("--r:{r};--h:{h}")
                                     data-i=di.to_string()
                                     tabindex=move || if focus.get() == di { "0" } else { "-1" }
@@ -490,12 +623,22 @@ pub fn week_grid(levels: &'static [GridLevel], value: RwSignal<String>, label_ke
             }
         })
         .collect_view();
+    // read out when a change is done, not at every cell of a drag
+    let summary = Memo::new(move |prev: Option<&String>| {
+        if dragging.get()
+            && let Some(p) = prev
+        {
+            return p.clone();
+        }
+        value.with(|v| summary_text(v, levels))
+    });
 
     view! {
         <div class="wg" node_ref=wrap>
             {level_picker(levels, active)}
             <div
                 class="wg-grid"
+                class:wg-painting=move || dragging.get()
                 role="grid"
                 node_ref=grid
                 aria-label=tr(label_key)
@@ -509,17 +652,29 @@ pub fn week_grid(levels: &'static [GridLevel], value: RwSignal<String>, label_ke
                 }
                 on:pointerdown=on_down
                 on:pointermove=on_move
-                on:pointerup=move |_| end()
-                on:lostpointercapture=move |_| end()
-                on:pointercancel=cancel
+                on:pointerup=on_up
+                on:lostpointercapture=move |ev: web_sys::PointerEvent| end(ev.pointer_id())
+                on:pointercancel=on_cancel
+                // the build has no event delegation: this listener sits on the grid itself, so it
+                // is not passive and can keep the page still while painting
+                on:touchmove=move |ev| {
+                    if dragging.get_untracked() && ev.cancelable() {
+                        ev.prevent_default();
+                    }
+                }
+                on:contextmenu=move |ev| {
+                    if dragging.get_untracked() || press.with_value(Option::is_some) {
+                        ev.prevent_default();
+                    }
+                }
             >
                 {header}
                 {rows}
             </div>
-            <Show when=invalid>
+            <Show when=move || invalid.get()>
                 <p class="wg-help">{move || tf("wg.invalid", &[("level", t(levels[0].label_key))])}</p>
             </Show>
-            <p class="wg-summary" aria-live="polite">{move || value.with(|v| summary_text(v, levels))}</p>
+            <p class="wg-summary" aria-live="polite">{move || summary.get()}</p>
             <p class="wg-help" id=help_id>{move || tf("wg.help", &[("n", &levels.len().to_string())])}</p>
         </div>
     }
@@ -558,7 +713,7 @@ pub fn Showcase() -> impl IntoView {
         view! {
             <section class="card widget w-12">
                 <WidgetHead icon=icons::CALENDAR_CLOCK title=title />
-                {week_grid(levels, v, title)}
+                {week_grid(levels, v, title, None)}
             </section>
         }
     };
@@ -622,14 +777,6 @@ mod tests {
         assert_eq!(validate(&s, CODES), Err(GridError::Code { at: 0, ch: 'é' }));
         assert_eq!(normalize(&s, CODES, '1').chars().next(), Some('1'));
         assert_eq!(normalize("00", CODES, '2'), filled('2'));
-    }
-
-    #[test]
-    fn dsm_strings_are_kept_as_they_are() {
-        let s: String = (0..CELLS).map(|i| CODES[i % 3]).collect();
-        assert_eq!(from_dsm(&s, CODES).as_deref(), Ok(s.as_str()));
-        assert_eq!(to_dsm(&s, CODES).as_deref(), Ok(s.as_str()));
-        assert!(from_dsm(&s[1..], CODES).is_err());
     }
 
     #[test]
