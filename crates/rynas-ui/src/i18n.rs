@@ -2603,7 +2603,6 @@ dict! { BLOB, LENS, IT;
     "repl.compress.gzip" => "gzip", "gzip";
     "repl.f.rate" => "Bandwidth limit (KiB/s)", "Limite di banda (KiB/s)";
     "repl.f.rate_help" => "Empty or 0: no limit.", "Vuoto o 0: nessun limite.";
-    "repl.f.folder" => "New folder", "Nuova cartella";
     "repl.f.folder_help" => "At the top of the target volume; it must not exist.", "Nella radice del volume di destinazione; non deve esistere.";
     "repl.key.none" => "rynas connects with its own key pair, used only for replication.", "rynas si collega con una propria coppia di chiavi, usata solo per la replica.";
     "repl.key.create" => "Create the key", "Crea la chiave";

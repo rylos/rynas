@@ -2194,7 +2194,6 @@ repl.compress.lz4	lz4
 repl.compress.gzip	gzip
 repl.f.rate	Limite di banda (KiB/s)
 repl.f.rate_help	Vuoto o 0: nessun limite.
-repl.f.folder	Nuova cartella
 repl.f.folder_help	Nella radice del volume di destinazione; non deve esistere.
 repl.key.none	rynas si collega con una propria coppia di chiavi, usata solo per la replica.
 repl.key.create	Crea la chiave

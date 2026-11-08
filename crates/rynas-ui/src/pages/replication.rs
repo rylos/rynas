@@ -703,7 +703,7 @@ fn replicas_drawer(v: ReplicaView, close: Callback<()>) -> AnyView {
             let folder = RwSignal::new(format!("{}-restored", job.get_value()));
             let n2 = name.clone();
             let extra = view! {
-                {text_field("repl.f.folder", folder.into(), Callback::new(move |v: String| folder.set(v.trim().to_string())), Signal::derive(|| None::<String>), In { mono: true, help: Some("repl.f.folder_help"), maxlength: 64, ..In::default() })}
+                {text_field("bk.mode.new", folder.into(), Callback::new(move |v: String| folder.set(v.trim().to_string())), Signal::derive(|| None::<String>), In { mono: true, help: Some("repl.f.folder_help"), maxlength: 64, ..In::default() })}
             }
             .into_any();
             confirm(Confirm {
