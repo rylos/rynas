@@ -7,6 +7,11 @@
 //! (`FICLONE`: instant, no extra space) and fall back to a copy; owner, permissions, extended
 //! attributes (POSIX ACLs) and times are kept. Nothing existing is overwritten: a "replace"
 //! first renames the current version, a "copy" picks a new name.
+//!
+//! [`restore_foreign`] copies out of a snapshot another machine wrote (a PC's received
+//! snapshot): its owners, set-id bits and `security.*`/`trusted.*`/ACL attributes mean
+//! nothing here (or too much: a setuid root file, a file capability), so the copy belongs to
+//! the destination folder's owner, loses the set-uid/set-gid bits and those attributes.
 
 use std::ffi::{CString, OsStr};
 use std::fs::File;
@@ -76,6 +81,16 @@ fn restored_name(dir: &File, name: &str, is_file: bool, now_s: i64) -> String {
     }
 }
 
+/// How the copy's owner and attributes are set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Owner {
+    /// As in the snapshot (the NAS's own snapshots).
+    Keep,
+    /// A snapshot from another machine: this uid/gid, no set-id bits, no `security.*`,
+    /// `trusted.*` or POSIX ACL attributes.
+    Foreign(u32, u32),
+}
+
 /// Opens (creating when missing, with the snapshot's metadata) the live folders of
 /// `parents`, starting at the live root.
 fn live_parent(
@@ -83,6 +98,7 @@ fn live_parent(
     snap_root: &Item,
     parents: &[&str],
     created: &mut Restored,
+    own: Owner,
 ) -> Result<File, SnapError> {
     let dev = live.metadata()?.dev();
     let mut cur = live;
@@ -109,7 +125,7 @@ fn live_parent(
                 let next = ioctl::open_dir_at(&cur, p)?;
                 let meta = snap_next.metadata()?;
                 let src = File::open(fd_path(&snap_next))?;
-                copy_meta(&src, &next, &meta);
+                copy_meta(&src, &next, &meta, own);
                 created.dirs += 1;
                 cur = next;
             }
@@ -124,16 +140,37 @@ fn live_parent(
     Ok(cur)
 }
 
-/// Owner, permissions, extended attributes and times of `meta`/`src` onto `dst`.
-fn copy_meta(src: &File, dst: &File, meta: &std::fs::Metadata) {
-    let fd = dst.as_raw_fd();
-    // SAFETY: plain syscalls on valid descriptors; failures are ignored (best effort, e.g.
-    // a filesystem without xattrs) except for what the caller checks
-    unsafe {
-        libc::fchown(fd, meta.uid(), meta.gid());
-        libc::fchmod(fd, (meta.mode() & 0o7777) as libc::mode_t);
+/// The permission bits a copy gets.
+fn copy_mode(mode: u32, own: Owner) -> u32 {
+    match own {
+        Owner::Keep => mode & 0o7777,
+        // no set-uid/set-gid from another machine (the sticky bit is harmless)
+        Owner::Foreign(..) => mode & 0o1777,
     }
-    copy_xattrs(src, dst);
+}
+
+/// Extended attributes a foreign copy leaves out.
+fn foreign_xattr_dropped(name: &[u8]) -> bool {
+    name.starts_with(b"security.")
+        || name.starts_with(b"trusted.")
+        || name.starts_with(b"system.posix_acl_")
+}
+
+/// Owner, permissions, extended attributes and times of `meta`/`src` onto `dst`.
+fn copy_meta(src: &File, dst: &File, meta: &std::fs::Metadata, own: Owner) {
+    let fd = dst.as_raw_fd();
+    let (uid, gid) = match own {
+        Owner::Keep => (meta.uid(), meta.gid()),
+        Owner::Foreign(u, g) => (u, g),
+    };
+    copy_xattrs(src, dst, own);
+    // SAFETY: plain syscalls on valid descriptors; failures are ignored (best effort, e.g.
+    // a filesystem without xattrs) except for what the caller checks. The mode goes after
+    // the owner: chown clears set-id bits
+    unsafe {
+        libc::fchown(fd, uid, gid);
+        libc::fchmod(fd, copy_mode(meta.mode(), own) as libc::mode_t);
+    }
     let times = [
         libc::timespec {
             tv_sec: meta.atime() as libc::time_t,
@@ -150,7 +187,7 @@ fn copy_meta(src: &File, dst: &File, meta: &std::fs::Metadata) {
     }
 }
 
-fn copy_xattrs(src: &File, dst: &File) {
+fn copy_xattrs(src: &File, dst: &File, own: Owner) {
     let mut names = vec![0u8; 64 << 10];
     // SAFETY: the kernel writes at most names.len() bytes
     let n = unsafe { libc::flistxattr(src.as_raw_fd(), names.as_mut_ptr().cast(), names.len()) };
@@ -162,6 +199,9 @@ fn copy_xattrs(src: &File, dst: &File) {
         .split(|&b| b == 0)
         .filter(|n| !n.is_empty())
     {
+        if matches!(own, Owner::Foreign(..)) && foreign_xattr_dropped(name) {
+            continue;
+        }
         let Ok(c) = CString::new(name) else { continue };
         // SAFETY: valid descriptor, C string and buffer
         let len = unsafe {
@@ -190,6 +230,7 @@ fn copy_xattrs(src: &File, dst: &File) {
 
 struct Copier<'a> {
     dev: u64,
+    own: Owner,
     cancelled: &'a dyn Fn() -> bool,
     out: Restored,
 }
@@ -242,7 +283,7 @@ impl Copier<'_> {
                     self.copy(&h, &m, &dst, &child_name, depth + 1)?;
                 }
             }
-            copy_meta(&src, &dst, meta);
+            copy_meta(&src, &dst, meta, self.own);
             self.out.dirs += 1;
         } else if t.is_file() {
             let mut src = File::open(fd_path(handle))?;
@@ -263,7 +304,7 @@ impl Copier<'_> {
             if ioctl::clone_file(&src, &dst).is_err() {
                 io::copy(&mut src, &mut dst)?;
             }
-            copy_meta(&src, &dst, meta);
+            copy_meta(&src, &dst, meta, self.own);
             self.out.files += 1;
             self.out.bytes += meta.len();
         } else if t.is_symlink() {
@@ -274,13 +315,17 @@ impl Copier<'_> {
                 unsafe { libc::symlinkat(tc.as_ptr(), dst_dir.as_raw_fd(), c.as_ptr()) },
                 (),
             )?;
+            let (uid, gid) = match self.own {
+                Owner::Keep => (meta.uid(), meta.gid()),
+                Owner::Foreign(u, g) => (u, g),
+            };
             // SAFETY: as above; best effort
             unsafe {
                 libc::fchownat(
                     dst_dir.as_raw_fd(),
                     c.as_ptr(),
-                    meta.uid(),
-                    meta.gid(),
+                    uid,
+                    gid,
                     libc::AT_SYMLINK_NOFOLLOW,
                 );
             }
@@ -354,6 +399,32 @@ pub fn restore(
     now_s: i64,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Restored, SnapError> {
+    restore_as(snapshot, live_root, rel, mode, now_s, cancelled, false)
+}
+
+/// A copy (never a replace) of `rel` out of a snapshot another machine wrote (a PC's
+/// received snapshot) into the folder `dest`: everything copied belongs to `dest`'s owner and
+/// group, without set-uid/set-gid bits and without `security.*` (file capabilities, SELinux
+/// labels), `trusted.*` or POSIX ACL attributes.
+pub fn restore_foreign(
+    snapshot: &Path,
+    dest: &Path,
+    rel: &str,
+    now_s: i64,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Restored, SnapError> {
+    restore_as(snapshot, dest, rel, RestoreMode::Copy, now_s, cancelled, true)
+}
+
+fn restore_as(
+    snapshot: &Path,
+    live_root: &Path,
+    rel: &str,
+    mode: RestoreMode,
+    now_s: i64,
+    cancelled: &dyn Fn() -> bool,
+    foreign: bool,
+) -> Result<Restored, SnapError> {
     let parts = browse::components(rel)?;
     let Some((name, parents)) = parts.split_last() else {
         return Err(SnapError::Invalid(
@@ -364,8 +435,14 @@ pub fn restore(
     let item = browse::resolve(snapshot, rel)?;
     let live = ioctl::open_dir(live_root)
         .map_err(|e| SnapError::Failed(format!("{}: {e}", live_root.display())))?;
+    let own = if foreign {
+        let m = live.metadata()?;
+        Owner::Foreign(m.uid(), m.gid())
+    } else {
+        Owner::Keep
+    };
     let mut out = Restored::default();
-    let parent = live_parent(live, &snap_root, parents, &mut out)?;
+    let parent = live_parent(live, &snap_root, parents, &mut out, own)?;
     let prefix = parents.join("/");
     let rel_of = |n: &str| {
         if prefix.is_empty() {
@@ -391,6 +468,7 @@ pub fn restore(
     };
     let mut c = Copier {
         dev: snap_root.meta.dev(),
+        own,
         cancelled,
         out,
     };
@@ -489,6 +567,7 @@ mod tests {
         let item = browse::resolve_in(root, "src", "a").unwrap();
         let mut c = Copier {
             dev: item.meta.dev(),
+            own: Owner::Keep,
             cancelled: &never,
             out: Restored::default(),
         };
@@ -519,6 +598,36 @@ mod tests {
         // never overwrites
         let item = browse::resolve_in(File::open(&src).unwrap(), "src", "a").unwrap();
         assert!(c.copy(&item.handle, &item.meta, &dst, "a-copy", 0).is_err());
+    }
+
+    #[test]
+    fn foreign_copies_lose_set_id_bits_and_take_the_folder_owner() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let src = d.path().join("src");
+        std::fs::create_dir_all(src.join("a")).unwrap();
+        std::fs::write(src.join("a/tool"), "#!/bin/sh").unwrap();
+        std::fs::set_permissions(src.join("a/tool"), std::fs::Permissions::from_mode(0o6755)).unwrap();
+        std::fs::set_permissions(src.join("a"), std::fs::Permissions::from_mode(0o3775)).unwrap();
+        let dst = ioctl::open_dir(d.path()).unwrap();
+        let me = std::fs::metadata(d.path()).unwrap();
+        let item = browse::resolve_in(File::open(&src).unwrap(), "src", "a").unwrap();
+        let mut c = Copier {
+            dev: item.meta.dev(),
+            own: Owner::Foreign(me.uid(), me.gid()),
+            cancelled: &never,
+            out: Restored::default(),
+        };
+        c.copy(&item.handle, &item.meta, &dst, "a-copy", 0).unwrap();
+        let mode = |p: &str| std::fs::metadata(d.path().join(p)).unwrap().mode() & 0o7777;
+        assert_eq!(mode("a-copy/tool"), 0o755);
+        // the sticky bit stays, set-gid goes
+        assert_eq!(mode("a-copy"), 0o1775);
+        assert_eq!(std::fs::metadata(d.path().join("a-copy/tool")).unwrap().uid(), me.uid());
+        assert_eq!(copy_mode(0o4755, Owner::Keep), 0o4755);
+        assert!(foreign_xattr_dropped(b"security.capability"));
+        assert!(foreign_xattr_dropped(b"system.posix_acl_access"));
+        assert!(!foreign_xattr_dropped(b"user.comment"));
     }
 
     #[test]

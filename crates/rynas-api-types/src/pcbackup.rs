@@ -232,6 +232,30 @@ pub struct AdoptPreview {
     pub other_entries: u32,
     /// A device name taken from the folder's name, when it fits.
     pub suggested_device: Option<String>,
+    /// What adopting changes on the folder itself (owner, group, mode), when it is not
+    /// already `root:rynas-pcbackup 0750`. The create call then needs
+    /// `?confirm_permission_change=true`.
+    #[serde(default)]
+    pub permission_change: Option<PermissionChange>,
+}
+
+/// The folder's owner, group and mode now and after adopting (only the folder itself; its
+/// content is never touched).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PermissionChange {
+    pub uid: u32,
+    pub gid: u32,
+    /// Permission bits (`0o7777`).
+    pub mode: u32,
+    /// User and group names when known.
+    #[serde(default)]
+    pub owner: Option<String>,
+    #[serde(default)]
+    pub group: Option<String>,
+    /// After: always `root`, [`ACCOUNT`], `0o750`.
+    pub new_owner: String,
+    pub new_group: String,
+    pub new_mode: u32,
 }
 
 /// `POST /api/v1/pc-backups/targets/{device}/copy-out` (202, task `pcbackup.copy_out`): a

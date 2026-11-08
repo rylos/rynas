@@ -8,7 +8,7 @@ use std::process::{Command, ExitCode, Stdio};
 
 use rynas_api_types::pcbackup::DeletePolicy;
 use rynas_btrfs::receive::{delete_refusal, scan_dir};
-use rynas_btrfs::receive_filter::{FilterArgs, Plan, Prog, check, locate, parse_args};
+use rynas_btrfs::receive_filter::{FilterArgs, Plan, Prog, check, locate, parse_args, verify_root};
 
 fn log(prio: libc::c_int, msg: &str) {
     let ident = c"rynas-btrbk-filter";
@@ -102,7 +102,7 @@ fn main() -> ExitCode {
         Ok(a) => a,
         Err(e) => return refuse(None, &format!("bad key line: {e}"), ""),
     };
-    let Ok(cmd) = std::env::var("SSH_ORIGINAL_COMMAND") else {
+    let Some(raw) = std::env::var_os("SSH_ORIGINAL_COMMAND") else {
         // `ssh rynas-pcbackup@nas` by hand: the connection test of the setup steps
         log(libc::LOG_INFO, &format!("TEST device={}: login without command", a.device));
         println!(
@@ -111,10 +111,31 @@ fn main() -> ExitCode {
         );
         return ExitCode::SUCCESS;
     };
+    let Ok(cmd) = raw.into_string() else {
+        return refuse(Some(&a), "command is not UTF-8", "");
+    };
     let plan = match check(&cmd, &a) {
         Ok(p) => p,
         Err(e) => return refuse(Some(&a), &e, &cmd),
     };
+    // the folder itself, checked now (no symlink on the way, not inside a received
+    // snapshot), before btrfs runs as root on it
+    let mut _lock = None;
+    if plan.stages.iter().any(|s| s.prog == Prog::Btrfs) {
+        let dir = match verify_root(&a.root) {
+            Ok(d) => d,
+            Err(e) => return refuse(Some(&a), &e, &cmd),
+        };
+        if plan.receive {
+            // one receive at a time per device (the lock goes with the process)
+            use std::os::fd::AsRawFd;
+            // SAFETY: valid descriptor
+            if unsafe { libc::flock(dir.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+                return refuse(Some(&a), "another receive of this device is running", &cmd);
+            }
+        }
+        _lock = Some(dir);
+    }
     if let Err(e) = deletes_allowed(&a, &plan) {
         return refuse(Some(&a), &e, &cmd);
     }
