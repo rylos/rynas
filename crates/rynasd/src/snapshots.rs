@@ -915,30 +915,6 @@ fn points_inside_root(sys: &SystemSnapshots) -> bool {
     a.is_some() && a == b
 }
 
-/// The data subvolumes a root rollback carries into the new root, relative to the root
-/// subvolume: the system volume's folder when it is a subvolume nested in the root
-/// (D-ROOTVOL), not a mount of its own.
-fn carried_subvolumes(sys: &SystemSnapshots) -> Vec<PathBuf> {
-    let dir = FsPath::new(rynas_api_types::storage::SYSTEM_VOLUME_DIR);
-    let root = FsPath::new(&sys.subvolume);
-    let nested = !ioctl::is_mount_point(dir)
-        && ioctl::open_dir(dir).is_ok_and(|f| ioctl::is_subvolume(&f))
-        && dir.parent().is_some_and(|p| {
-            let uuid = |p: &FsPath| {
-                ioctl::open_dir(p)
-                    .and_then(|f| ioctl::subvol_info(&f))
-                    .ok()
-                    .and_then(|i| i.uuid)
-            };
-            let (a, b) = (uuid(p), uuid(root));
-            a.is_some() && a == b
-        });
-    match dir.strip_prefix(root) {
-        Ok(rel) if nested && !rel.as_os_str().is_empty() => vec![rel.to_path_buf()],
-        _ => Vec::new(),
-    }
-}
-
 /// Root rollback (with a boot layer): refused up front when the preview says so, then a task.
 async fn root_rollback(
     p: &Arc<Protection>,
@@ -970,7 +946,6 @@ async fn root_rollback(
                 snapshot_dir: l.dir.clone(),
                 root: PathBuf::from(&sys.subvolume),
                 move_points: points_inside_root(&sys),
-                carry: carried_subvolumes(&sys),
                 run_dir: PathBuf::from(rootfs::RUN_DIR),
                 now_s: now_s(),
                 id,

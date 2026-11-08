@@ -1345,7 +1345,12 @@ async fn run_job(
         // folder must exist for the worker's sandbox to make it writable
         check_local_destination(path, &mountinfo())?;
         if crate::places::in_system_dir(path) {
-            crate::places::ensure_system_dir(FsPath::new("/"), true, &|m| ctx.log(m))?;
+            let c = ctx.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::places::ensure_system_dir(FsPath::new("/"), true, &|m| c.log(m))
+            })
+            .await
+            .map_err(|e| e.to_string())??;
             let w = SAME_DISK_WARNING.to_string();
             ctx.log(&format!("warning: {w}"));
             warnings.push(w);
@@ -1884,6 +1889,17 @@ async fn restore(
         let spec = repo_spec(&job.destination, &sec, job.bandwidth_kib);
         let scope = scope_of(&job.name);
         if let Some(t) = target {
+            // into the system volume: its folder made ready and checked first (D-ROOTVOL),
+            // never a plain folder made in its place
+            let sys = rynas_api_types::storage::SYSTEM_VOLUME_DIR;
+            if (t == sys || crate::places::in_system_dir(&t)) && !s2.dry {
+                let c = ctx.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::places::ensure_system_dir(FsPath::new("/"), true, &|m| c.log(m))
+                })
+                .await
+                .map_err(|e| e.to_string())??;
+            }
             std::fs::create_dir_all(&t).map_err(|e| format!("{t}: {e}"))?;
             let r = op(
                 &s2,

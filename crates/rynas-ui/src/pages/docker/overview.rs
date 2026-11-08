@@ -206,7 +206,8 @@ pub(super) fn volume_select(label: &'static str, help: Option<&'static str>, set
         for x in vols {
             let text = crate::places::option_text(&x);
             let sel = x.label == cur;
-            v.push(view! { <option value=x.label selected=sel>{text}</option> }.into_any());
+            let off = x.unavailable.is_some() && !sel;
+            v.push(view! { <option value=x.label selected=sel disabled=off>{text}</option> }.into_any());
         }
         // a configured volume that is not mounted now stays selectable
         if !cur.is_empty() && !known {

@@ -283,9 +283,11 @@ impl ReceiveHost for HostReceive {
     }
 
     fn create_folder(&self, path: &Path) -> Result<(), String> {
-        // in the system volume: its own subvolume first (D-ROOTVOL)
+        // in the system volume: its folder made ready and checked first (D-ROOTVOL)
         if crate::places::in_system_dir(&path.to_string_lossy()) {
-            crate::places::ensure_system_dir(Path::new("/"), true, &|_| {})?;
+            crate::places::ensure_system_dir(Path::new("/"), true, &|m| {
+                tracing::info!("system volume: {m}")
+            })?;
         }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;

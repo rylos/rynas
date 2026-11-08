@@ -138,8 +138,23 @@ pub fn share_path(p: &str) -> Result<(), String> {
     {
         return Err(format!("{p} is inside {f}, which cannot be shared"));
     }
+    // rynas's own folder: only through the system volume, strictly inside its folder
+    // (D-ROOTVOL); /srv/rynas itself would let a client replace `system` or `homes` by a link
+    let sys = rynas_api_types::storage::SYSTEM_VOLUME_DIR;
+    if (p == RYNAS_DIR || p.starts_with(&format!("{RYNAS_DIR}/")))
+        && !p.strip_prefix(sys).is_some_and(|r| r.len() > 1 && r.starts_with('/'))
+    {
+        return Err(if p == sys {
+            format!("{p} cannot be shared: share a folder inside it")
+        } else {
+            format!("{p} is inside {RYNAS_DIR}, which cannot be shared (use a folder in the system volume, {sys})")
+        });
+    }
     Ok(())
 }
+
+/// rynas's folder on the system disk: the system volume's folder and the homes links.
+const RYNAS_DIR: &str = "/srv/rynas";
 
 fn ipv4(s: &str) -> bool {
     s.parse::<std::net::Ipv4Addr>().is_ok()
@@ -299,9 +314,18 @@ mod tests {
             "/srv/a\nb",
             "/usr/share",
             "/var/lib/rynas/x",
+            // rynas's own folder, the system volume's folder itself, the homes links
+            "/srv/rynas",
+            "/srv/rynas/system",
+            "/srv/rynas/homes",
+            "/srv/rynas/homes/alice",
+            "/srv/rynas/systemx/a",
         ] {
             assert!(share_path(bad).is_err(), "{bad:?}");
         }
+        // a folder in the system volume (D-ROOTVOL)
+        assert!(share_path("/srv/rynas/system/media").is_ok());
+        assert!(share_path("/srv/rynasx/a").is_ok());
     }
 
     #[test]

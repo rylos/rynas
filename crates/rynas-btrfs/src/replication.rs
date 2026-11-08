@@ -581,23 +581,10 @@ impl ReplicaHost for HostReplicas {
 
     fn ensure_dir(&self, path: &str) -> Result<(), String> {
         use std::os::unix::fs::DirBuilderExt;
-        // in the system volume (D-ROOTVOL): its folder is a subvolume of its own, made first
+        // in the system volume (D-ROOTVOL): its folder made ready (and checked) first
         let sys = rynas_api_types::storage::SYSTEM_VOLUME_DIR;
-        if path.starts_with(&format!("{sys}/")) && !Path::new(sys).exists() {
-            std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o755)
-                .create(Path::new(sys).parent().unwrap_or(Path::new("/")))
-                .map_err(|e| format!("{sys}: {e}"))?;
-            let o = Cmd::new("btrfs")
-                .args(["subvolume", "create", sys])
-                .env_clear()
-                .timeout(Duration::from_secs(60))
-                .run_blocking()
-                .map_err(|e| format!("btrfs subvolume create {sys}: {e}"))?;
-            if !o.success() {
-                return Err(format!("btrfs subvolume create {sys}: {}", o.stderr.trim()));
-            }
+        if path.starts_with(&format!("{sys}/")) {
+            crate::sysvol::ensure_system_dir(Path::new("/"), true, &|m| tracing::info!("{m}"))?;
         }
         std::fs::DirBuilder::new()
             .recursive(true)

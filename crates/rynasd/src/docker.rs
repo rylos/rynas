@@ -1435,7 +1435,11 @@ pub async fn migrate_task(
         l.engine(),
         l.containerd()
     ));
-    if let Err(e) = s.ready_volume(volume, &|m| ctx.log(m)) {
+    let (s2, c2, v2) = (s.clone(), ctx.clone(), volume.to_string());
+    let ready = tokio::task::spawn_blocking(move || s2.ready_volume(&v2, &|m| c2.log(m)))
+        .await
+        .map_err(|e| e.to_string())?;
+    if let Err(e) = ready {
         return Err(format!("{e}: nothing was changed"));
     }
     if let Ok(e) = s.engine_opt().await
@@ -1918,13 +1922,26 @@ impl DockerSvc {
     }
 
     /// The layout for a new stack: the request's volume or the applied one.
-    fn layout_for(&self, volume: Option<&str>) -> Res<Layout> {
+    /// The system volume's folder is made ready first (D-ROOTVOL: a subvolume and a mount
+    /// the first time), off the async threads; its failure is the answer.
+    async fn layout_for(self: &Arc<Self>, volume: Option<&str>) -> Res<Layout> {
         match volume {
             Some(v) => {
                 check_volume(v)?;
                 if v == rynas_api_types::storage::SYSTEM_VOLUME {
-                    self.ready_volume(v, &|m| tracing::info!("{m}"))
-                        .map_err(|e| Error::invalid("volume", e))?;
+                    let (s, label) = (self.clone(), v.to_string());
+                    tokio::task::spawn_blocking(move || {
+                        s.ready_volume(&label, &|m| tracing::info!("system volume: {m}"))
+                    })
+                    .await
+                    .map_err(Error::internal)?
+                    .map_err(|e| {
+                        Error::new(
+                            StatusCode::CONFLICT,
+                            error_codes::CONFLICT,
+                            format!("the system volume is not ready: {e}"),
+                        )
+                    })?;
                 }
                 Ok(Layout::of_label(v))
             }
@@ -1967,7 +1984,7 @@ async fn stack_create(
     s.ops.admins.require_admin(&who, "Docker stacks")?;
     let Json(req) = body?;
     rynas_docker::stacks::check_name(&req.name)?;
-    let l = s.layout_for(req.volume.as_deref())?;
+    let l = s.layout_for(req.volume.as_deref()).await?;
     if s.adopted_get(&req.name).is_some() {
         return Err(Error::new(
             StatusCode::CONFLICT,
@@ -2040,7 +2057,7 @@ async fn stack_validate(
     let Json(req) = body?;
     let name = req.name.clone().unwrap_or_else(|| "new-stack".into());
     rynas_docker::stacks::check_name(&name)?;
-    let l = s.layout_for(None)?;
+    let l = s.layout_for(None).await?;
     Ok(Json(
         s.validate(&name, &l.stack(&name), &req.compose, &req.env, &l.volume)
             .await?,

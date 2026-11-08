@@ -391,7 +391,8 @@ fn location_fields(d: RwSignal<Share>, is_new: bool, show: RwSignal<bool>) -> An
     // the rynas volumes and the system volume (D-ROOTVOL)
     let places = crate::ui::Remote::<Vec<VolumePlace>>::new(crate::places::PATH);
     let use_sub = Signal::derive(move || d.with(|s| s.subvolume.is_some()));
-    let volumes = move || places.data.with(|p| p.as_ref().map(|p| p.iter().map(|v| (v.label.clone(), v.avail_bytes.unwrap_or(0))).collect::<Vec<_>>()).unwrap_or_default());
+    // the usable ones (the first is the default choice)
+    let volumes = move || places.data.with(|p| p.as_ref().map(|p| p.iter().filter(|v| v.unavailable.is_none()).map(|v| (v.label.clone(), v.avail_bytes.unwrap_or(0))).collect::<Vec<_>>()).unwrap_or_default());
     let chosen = move || d.with(|s| s.subvolume.as_ref().map(|sv| sv.volume.clone())).and_then(|l| places.data.with(|p| p.as_ref().and_then(|p| p.iter().find(|v| v.label == l).cloned())));
     // back to "New subvolume": start again on the first volume (the Effect below only runs
     // when the volume list changes, so it would leave the volume empty here)
@@ -450,17 +451,18 @@ fn location_fields(d: RwSignal<Share>, is_new: bool, show: RwSignal<bool>) -> An
                             let v = event_target_value(&ev);
                             d.update(|s| if let Some(sv) = s.subvolume.as_mut() { sv.volume = v });
                         }>
-                            {vols.into_iter().map(|p| {
+                            {vols.iter().map(|p| {
                                 let l2 = p.label.clone();
                                 view! {
-                                    <option value=p.label.clone() selected=move || d.with(|s| s.subvolume.as_ref().is_some_and(|sv| sv.volume == l2))>
-                                        {crate::places::option_text(&p)}
+                                    <option value=p.label.clone() disabled=p.unavailable.is_some() selected=move || d.with(|s| s.subvolume.as_ref().is_some_and(|sv| sv.volume == l2))>
+                                        {crate::places::option_text(p)}
                                     </option>
                                 }
                             }).collect_view()}
                         </select>
                         <span class="field-help">{move || tf("shares.subvolume_help", &[("path", &share_path(&d.get()))])}</span>
                         {move || crate::places::note(chosen().as_ref(), true)}
+                        {crate::places::unavailable_notes(&vols)}
                     </div>
                     // NOCOW and compression are btrfs properties: not on a plain system disk
                     <div hidden=move || chosen().is_some_and(|p| !p.btrfs())>

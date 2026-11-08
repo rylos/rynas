@@ -110,6 +110,7 @@ fn fake_rynasd(name: &str) -> (PathBuf, Calls) {
         .route("/v1/storage/disks/{name}", get(one_disk))
         .route("/v1/storage/arrays", get(list))
         .route("/v1/storage/filesystems", get(list))
+        .route("/v1/storage/places", get(list))
         .route("/v1/storage/plan/volume", post(plan_volume))
         .with_state(calls.clone());
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
@@ -171,7 +172,7 @@ async fn validation_and_errors() {
     let r = a.get("/api/v1/storage/disks/garbage", &c).await;
     assert_eq!(r.status, StatusCode::BAD_GATEWAY);
     assert_eq!(r.code(), error_codes::BAD_GATEWAY);
-    for p in ["arrays", "filesystems"] {
+    for p in ["arrays", "filesystems", "places"] {
         let r = a.get(&format!("/api/v1/storage/{p}"), &c).await;
         assert_eq!(r.status, StatusCode::OK, "{p}");
     }

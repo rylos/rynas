@@ -625,8 +625,9 @@ pub struct StorageTree {
 /// rynas volume can take it.
 pub const SYSTEM_VOLUME: &str = "system";
 /// The folder of the system volume: what rynas puts on it (shares, Docker, apps, backups)
-/// lives here, never in `/` itself. On a btrfs root it is a subvolume of its own, so the
-/// system restore points neither copy nor roll back the data in it.
+/// lives here. On a btrfs root it is the mount of the top-level subvolume `@rynas-system`
+/// (a sibling of the root subvolume), so system restore points and rollbacks neither copy
+/// nor replace the data in it.
 pub const SYSTEM_VOLUME_DIR: &str = "/srv/rynas/system";
 /// A place with less free space than this, or than [`LOW_SPACE_PCT`] of its size, is
 /// [`VolumePlace::low_space`].
@@ -683,6 +684,11 @@ pub struct VolumePlace {
     /// See [`low_space`].
     #[serde(default)]
     pub low_space: bool,
+    /// Why nothing can be put here now (the system volume's folder is not what rynas
+    /// expects: a plain folder with files, a symbolic link, a foreign mount...). Shown,
+    /// not offered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<String>,
 }
 
 impl VolumePlace {

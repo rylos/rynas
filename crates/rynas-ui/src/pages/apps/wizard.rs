@@ -399,7 +399,7 @@ fn folders(w: W) -> AnyView {
                 let sug = suggested.get();
                 let vols = w.settings.data.with(|s| s.as_ref().map(|s| s.volumes.clone()).unwrap_or_default());
                 let mut v = vec![view! { <option value="" selected=cur.is_empty()>{tf("apps.w.in_stack", &[("path", &format!("{}/{}", stack_dir.get(), path.get_value()))])}</option> }.into_any()];
-                for vol in vols {
+                for vol in vols.into_iter().filter(|v| v.unavailable.is_none()) {
                     let p = placement(&vol.path, &stack, &path.get_value());
                     let vn = crate::places::name(&vol.label);
                     let label = if sug.as_deref() == Some(p.as_str()) { tf("apps.w.on_volume_suggested", &[("vol", &vn), ("path", &p)]) } else { tf("apps.w.on_volume", &[("vol", &vn), ("path", &p)]) };

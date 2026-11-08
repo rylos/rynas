@@ -1,21 +1,22 @@
 //! The volumes something can be put on, the system volume included (D-ROOTVOL).
 //!
 //! Every mounted rynas volume (`/<label>`, a btrfs top level) and the root filesystem as the
-//! volume [`SYSTEM_VOLUME`]: what rynas puts there lives in [`SYSTEM_VOLUME_DIR`], never in
-//! `/` itself. The folder is made on first use ([`ensure_system_dir`]): `/srv/rynas` (0755,
-//! root), then the folder, a btrfs subvolume of its own on a btrfs root so the system restore
-//! points neither copy nor roll back its data (a root rollback carries it into the new root).
+//! volume [`SYSTEM_VOLUME`]: what rynas puts there lives in [`SYSTEM_VOLUME_DIR`]. The folder
+//! is made ready on first use by [`ensure_system_dir`] (`rynas_btrfs::sysvol`, the one
+//! function every user calls): on a btrfs root the mount of the top-level subvolume
+//! `@rynas-system` (unit `srv-rynas-system.mount`), so restore points and rollbacks leave
+//! its data alone; on another root a plain folder. Anything else there (a plain folder with
+//! files, a symbolic link, a foreign mount) is refused and the place is listed as
+//! unavailable with the reason.
 //!
 //! `GET /v1/storage/places` lists them with their free space ([`VolumePlace`]).
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use axum::{Json, Router, routing::get};
 use rynas_api_types::storage::{
     SYSTEM_VOLUME, SYSTEM_VOLUME_DIR, VolumePlace, low_space, volume_dir,
 };
-use rynas_tasks::Cmd;
 
 /// Root filesystems that are no disk: the system volume is not offered on them (a live
 /// system, a container, a network root).
@@ -29,12 +30,8 @@ pub fn mountinfo() -> String {
     std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default()
 }
 
-/// Type of the filesystem mounted at `/` (the last mount there wins).
 pub fn root_fstype(mountinfo: &str) -> Option<String> {
-    rynas_storage::mounts::parse_mountinfo(mountinfo)
-        .into_iter()
-        .rfind(|m| m.mountpoint == "/")
-        .map(|m| m.fstype)
+    rynas_btrfs::sysvol::root_fstype(mountinfo)
 }
 
 /// The root filesystem is a disk the system volume can be offered on.
@@ -94,6 +91,11 @@ pub fn describe(places: &[(String, String)], mountinfo: &str, root: &Path) -> Ve
                 fs_type,
                 size_bytes: st.as_ref().map(|s| s.size),
                 low_space: st.as_ref().is_some_and(|s| low_space(s.size, s.avail)),
+                unavailable: if system {
+                    rynas_btrfs::sysvol::unavailable(root, root == Path::new("/"))
+                } else {
+                    None
+                },
             }
         })
         .collect()
@@ -105,56 +107,19 @@ pub fn host_described() -> Vec<VolumePlace> {
     describe(&places_in(&mi), &mi, Path::new("/"))
 }
 
-/// Makes the system volume folder below `root` unless it exists: `/srv/rynas` (0755), then
-/// [`SYSTEM_VOLUME_DIR`], a btrfs subvolume when `subvolumes` and the parent is btrfs
-/// (dry runs and tests make plain folders). Its path below `root`.
-pub fn ensure_system_dir(root: &Path, subvolumes: bool, log: &dyn Fn(&str)) -> Result<PathBuf, String> {
-    use std::os::unix::fs::PermissionsExt;
-    let dir = rynas_docker::under(root, SYSTEM_VOLUME_DIR);
-    if dir.is_dir() {
-        return Ok(dir);
-    }
-    if std::fs::symlink_metadata(&dir).is_ok() {
-        return Err(format!("{SYSTEM_VOLUME_DIR} exists and is not a folder"));
-    }
-    let parent = dir.parent().ok_or("invalid path")?.to_path_buf();
-    if !parent.is_dir() {
-        std::fs::create_dir_all(&parent).map_err(|e| format!("{}: {e}", parent.display()))?;
-        let _ = std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755));
-    }
-    let btrfs = subvolumes
-        && rynas_btrfs::ioctl::open_dir(&parent).is_ok_and(|f| rynas_btrfs::ioctl::is_btrfs(&f));
-    if btrfs {
-        let c = Cmd::new("btrfs")
-            .args(["subvolume", "create"])
-            .arg(&dir)
-            .env_clear()
-            .timeout(Duration::from_secs(60));
-        log(&format!("$ {}", c.display()));
-        let o = c.run_blocking().map_err(|e| format!("btrfs subvolume create: {e}"))?;
-        if !o.success() {
-            return Err(format!(
-                "btrfs subvolume create {SYSTEM_VOLUME_DIR}: {}",
-                o.stderr.trim()
-            ));
-        }
-    } else {
-        log(&format!("mkdir {SYSTEM_VOLUME_DIR}"));
-        std::fs::create_dir(&dir).map_err(|e| format!("mkdir {SYSTEM_VOLUME_DIR}: {e}"))?;
-    }
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))
-        .map_err(|e| format!("{SYSTEM_VOLUME_DIR}: {e}"))?;
-    Ok(dir)
-}
+/// Makes the system volume's folder ready below `root` and returns its path there:
+/// `rynas_btrfs::sysvol::ensure_system_dir` (`real`: the machine, not a dry run), the one
+/// function every user of the system volume calls.
+pub use rynas_btrfs::sysvol::ensure_system_dir;
 
-/// The folder of a place label below `root`, made when it is the system volume. Refuses a
-/// label that is no place now.
-pub fn ready_dir(label: &str, root: &Path, subvolumes: bool, log: &dyn Fn(&str)) -> Result<String, String> {
+/// The folder of a place label below `root`, made ready when it is the system volume.
+/// Refuses a label that is no place now. `real`: the machine, not a dry run.
+pub fn ready_dir(label: &str, root: &Path, real: bool, log: &dyn Fn(&str)) -> Result<String, String> {
     if label == SYSTEM_VOLUME {
         if root == Path::new("/") && !root_is_disk(&mountinfo()) {
             return Err("the root filesystem is not a disk: it cannot hold the system volume".into());
         }
-        ensure_system_dir(root, subvolumes, log)?;
+        ensure_system_dir(root, real, log)?;
         return Ok(SYSTEM_VOLUME_DIR.into());
     }
     let want = volume_dir(label);
@@ -226,5 +191,12 @@ mod tests {
         assert!(ds[0].system && ds[0].fs_type == "btrfs" && ds[0].size_bytes.is_some());
         assert!(in_system_dir("/srv/rynas/system/backup") && !in_system_dir("/srv/rynas/system"));
         assert!(!in_system_dir("/srv/rynas/systemx/a"));
+        assert_eq!(ds[0].unavailable, None);
+        // a symbolic link in its place: listed as unavailable with the reason, refused
+        std::fs::remove_dir(&d).unwrap();
+        std::os::unix::fs::symlink("/", &d).unwrap();
+        let ds = describe(&[("system".into(), SYSTEM_VOLUME_DIR.into())], MI, t.path());
+        assert!(ds[0].unavailable.as_deref().is_some_and(|w| w.contains("symbolic link")));
+        assert!(ready_dir("system", t.path(), false, &|_| {}).is_err());
     }
 }

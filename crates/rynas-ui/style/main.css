@@ -888,6 +888,9 @@ kbd {
 .segmented button { min-height: calc(var(--input-h) - 8px); padding: var(--s-1) var(--s-3); line-height: 1.2; border-radius: 6px; font-size: var(--fs-13); font-weight: 500; color: var(--text-muted); transition: background var(--t-fast), color var(--t-fast); }
 .segmented button:hover { color: var(--text); }
 .segmented button.on { background: var(--surface); color: var(--accent); box-shadow: var(--shadow-1); font-weight: 600; }
+.segmented.wrap { flex-wrap: wrap; max-width: 100%; }
+.place-picker { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); margin-top: var(--s-2); }
+.place-picker .field-label { margin: 0; }
 :root[data-theme="dark"] .segmented button.on { background: var(--surface-hover); }
 
 /* ------------------------------------------------------------------ command palette */
