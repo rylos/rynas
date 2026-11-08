@@ -138,6 +138,38 @@ little and would keep processes with the reading capability alive between reques
   Build, test and lint it with `--manifest-path crates/rynas-files-worker/Cargo.toml`;
   `cargo test --workspace` does not reach it, but rynasd's `tests/files.rs` builds it and drives
   it end to end. When `smb` releases on final crypto crates, the worker can rejoin the workspace.
+- `smb` is patched (`[patch.crates-io]` to `crates/rynas-files-worker/vendor/smb`, 0.12.1 with
+  one change marked "rynas patch" in `connection/worker/worker_trait.rs`): the crate drops the
+  credits granted in an interim `STATUS_PENDING` response (MS-SMB2 3.3.4.2: an asynchronous
+  request's credits come there, the final response grants none — Samba answers a read
+  asynchronously once it takes over 0.5 s). Each such read lost its 16 credits; after a few the
+  client waited forever on its credit semaphore with nothing in flight: a copy from a server
+  behind a VPN stopped after a few MiB, the connection idle, every thread asleep. Drop the copy
+  once a release counts the interim grants.
+
+### Remote servers that stop answering
+
+- Every blocking call of the SMB client runs bounded (`remote::timed`, 60 s,
+  `REMOTE_TIMEOUT`): a call still blocked is left behind on its thread and the error is
+  `remote_unreachable` "the remote server stopped answering (no reply in 60 s)". The crate's
+  own timeout (connect and each answer) is 30 s. Reads: blocks of at most the negotiated
+  MaxReadSize (1 MiB cap), 4 in flight (64 credits); writes at most MaxWriteSize.
+- SFTP: each request has the session's 20 s timeout (russh-sftp), a read batch is bounded by
+  60 s, SSH keepalives every 15 s (3 missed end the session); closing handles is bounded.
+- TCP keepalive (20 s idle, 10 s interval, 3 probes) and `TCP_USER_TIMEOUT` 60 s on the
+  worker's TCP sockets (`remote::tune_sockets`: neither library sets them).
+- A copy whose server side breaks or times out reconnects and goes on from the current offset
+  (reads are re-issued from the offset, writes rewrite the chunk at its offset through
+  `Fs::writer(path, Some(offset))`), up to 2 tries in a row; then the job fails with
+  `remote_unreachable` (Retry), without going through the next items one timeout each.
+- Cancel: the worker stops between two chunks; if it has not within 3 s (a call blocked on the
+  server) it removes the local `.rynas-part` it was writing, reports the job cancelled and
+  exits. rynasd also enforces it: SIGTERM 5 s after the cancel, SIGKILL 5 s later (through a
+  pidfd), then the job is `cancelled` and a `cleanup` run removes the temporary files.
+  `JobView.cancelling` is true meanwhile. Pause answers at once and takes effect at the next
+  chunk (at most one request timeout later).
+- `JobView.stalled_s`: a running job whose progress has not moved for 5 s or more; the
+  transfer dialog shows "no data for N s" instead of waiting for the first data.
 
 ### Transfers as rynas tasks
 
@@ -252,7 +284,7 @@ administrators sign in). Route names, query parameters and JSON bodies are SynoF
 | POST | `eject` | `{share}` (or `?path=/share`) | `{ok}`; administrators only; 409 `busy` while in use or transfers run; 501 `not_available` without the removable-drives module | rynasd |
 
 Shapes added to SynoFile's (optional fields, nothing removed): `Share.removable`, `device`
-(disk, `sdc`), `device_name` (vendor + model); `JobView.code`, `JobView.task_id`;
+(disk, `sdc`), `device_name` (vendor + model); `JobView.code`, `JobView.task_id`, `JobView.stalled_s`, `JobView.cancelling`;
 `ErrorItem.code`; `whoami.admin`; `Entry.outside`, `Details.outside` (a link out of its share);
 `Spec.roots` (worker side).
 

@@ -14,6 +14,15 @@ rust-version = "1.90"
 # rynas-web; it shares the file manager core (`rynas-files`) by path.
 # Build and test it with `--manifest-path crates/rynas-files-worker/Cargo.toml`.
 [workspace]
+exclude = ["vendor"]
+
+# smb 0.12.1 (MIT, https://github.com/afiffon/smb-rs) with one fix, in
+# vendor/smb/src/connection/worker/worker_trait.rs (look for "rynas patch"): the credits
+# granted in an interim STATUS_PENDING response are counted. Without it a server that
+# answers reads asynchronously (Samba does after 0.5 s) drains the client's credits and the
+# transfer stops for good. Drop the copy once a release counts them.
+[patch.crates-io]
+smb = { path = "vendor/smb" }
 
 [[bin]]
 name = "rynas-files-worker"

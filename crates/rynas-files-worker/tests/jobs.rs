@@ -131,6 +131,61 @@ fn cancelling_leaves_nothing_behind() {
     assert_eq!(std::fs::read_dir(&dest).unwrap().count(), 0, "a cancelled copy leaves no .part file");
 }
 
+/// An SMB server on the loopback that takes the connection and what is sent, and never
+/// answers (a server behind a VPN that stopped passing its replies).
+fn silent_server() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for mut s in listener.incoming().flatten() {
+            std::thread::spawn(move || {
+                let _ = std::io::copy(&mut s, &mut std::io::sink());
+            });
+        }
+    });
+    port
+}
+
+#[test]
+fn a_copy_stuck_on_a_silent_server_shows_it_and_cancels_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("dest");
+    std::fs::create_dir_all(&dest).unwrap();
+    let user = me();
+    let m = Manager::new(Config { worker: worker(), journal: dir.path().join("journal"), hooks: Arc::new(NoHooks) });
+    let info = Info { sources: vec!["/:fake/iso/big.iso".into()], dest: Some("/d".into()), permanent: false };
+    let s: Spec = serde_json::from_value(json!({
+        "op": "copy",
+        "sources": ["/:fake/iso/big.iso"],
+        "dest": dest,
+        "roots": [dir.path()],
+        "remotes": [{ "id": "fake", "name": "fake", "kind": "smb", "host": "127.0.0.1", "port": silent_server(), "user": "u", "password": "p" }],
+    }))
+    .unwrap();
+    let id = m.submit(user.clone(), false, s, info).unwrap()["id"].as_u64().unwrap();
+    // the worker waits on the server: the job says so instead of waiting in silence
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let job = loop {
+        let job = m.list(&user.name, 0)["jobs"][0].clone();
+        if job["stalled_s"].as_u64().unwrap_or(0) >= 5 || Instant::now() > deadline {
+            break job;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(job["state"], "running", "{job}");
+    assert!(job["stalled_s"].as_u64().unwrap_or(0) >= 5, "{job}");
+    // cancel works while the worker is blocked on the network
+    let asked = Instant::now();
+    m.control(&user.name, control(id, "cancel")).unwrap();
+    assert_eq!(m.list(&user.name, 0)["jobs"][0]["cancelling"], true);
+    let job = wait(&m, &user.name, "cancelled");
+    assert_eq!(job["state"], "cancelled", "{job}");
+    assert_eq!(job["code"], "cancelled");
+    assert!(asked.elapsed() < Duration::from_secs(8), "cancel took {:?}", asked.elapsed());
+    assert!(job.get("cancelling").is_none() && job.get("stalled_s").is_none(), "{job}");
+    assert_eq!(std::fs::read_dir(&dest).unwrap().count(), 0);
+}
+
 /// Runs a job to its end and returns its view.
 fn run(m: &Manager, user: &User, spec: serde_json::Value) -> serde_json::Value {
     let spec: Spec = serde_json::from_value(spec).unwrap();

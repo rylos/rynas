@@ -435,7 +435,7 @@ function renderDrawer() {
     const op = OP[job.op] || OP.copy;
     const meta = active(job)
       ? job.state === "running"
-        ? `<span>${st.byBytes ? `${size(job.progress.bytes_done)} / ${size(job.progress.bytes_total)}` : `${int(job.progress.files_done)} / ${int(job.progress.files_total)}`}</span><span>${st.byBytes ? speed(st.now) : ""}${st.eta != null ? " · " + duration(st.eta) : ""}</span>`
+        ? `<span>${st.byBytes ? `${size(job.progress.bytes_done)} / ${size(job.progress.bytes_total)}` : `${int(job.progress.files_done)} / ${int(job.progress.files_total)}`}</span><span>${job.cancelling ? t("Annullamento in corso…") : job.stalled_s ? t("Nessun dato da {n} s", { n: int(job.stalled_s) }) : `${st.byBytes ? speed(st.now) : ""}${st.eta != null ? " · " + duration(st.eta) : ""}`}</span>`
         : `<span>${t(STATE[job.state])}</span><span>${pctText(st.pct, finished(job))}%</span>`
       : `<span>${job.finished ? clock(job.finished) : ""} · ${duration(job.active_ms)}</span><span>${job.progress.errors ? count(job.progress.errors, "errore", "errori", int) : esc(job.msg || "")}</span>`;
     const card = h(`<div class="jcard">
@@ -620,7 +620,7 @@ class JobDialog {
     $(".verify", bar).style.width = st.verify && st.byBytes ? ((p.verify_bytes / st.totalWork) * 100).toFixed(2) + "%" : "0";
     $(".verify", bar).style.left = st.verify && st.byBytes ? ((p.bytes_done / st.totalWork) * 100).toFixed(2) + "%" : "0";
 
-    const subL = job.state === "queued" ? t("In attesa che finisca un altro trasferimento") : job.state === "paused" ? t("In pausa") : job.state === "conflict" ? t("In attesa di una tua scelta") : p.scanning ? t("Conteggio di file e cartelle…") : "";
+    const subL = job.cancelling ? t("Annullamento in corso…") : job.state === "queued" ? t("In attesa che finisca un altro trasferimento") : job.state === "paused" ? t("In pausa") : job.state === "conflict" ? t("In attesa di una tua scelta") : job.stalled_s ? t("Nessun dato da {n} s", { n: int(job.stalled_s) }) : p.scanning ? t("Conteggio di file e cartelle…") : "";
     $(".sub-l", d).textContent = subL;
     const notes = [];
     if (st.verify && st.byBytes) notes.push(t("verificati {a} di {b}", { a: size(p.verify_bytes), b: size(p.bytes_total) }));
@@ -828,7 +828,7 @@ class JobDialog {
       g.fillStyle = col("--faint");
       g.font = "12px " + col("--font");
       g.textAlign = "center";
-      g.fillText(active(job) ? t("in attesa dei primi dati…") : t("nessun dato"), W / 2, H / 2 + 6);
+      g.fillText(!active(job) ? t("nessun dato") : job.stalled_s ? t("nessun dato da {n} s", { n: int(job.stalled_s) }) : t("in attesa dei primi dati…"), W / 2, H / 2 + 6);
       g.textAlign = "start";
       return;
     }

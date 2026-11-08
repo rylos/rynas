@@ -47,6 +47,46 @@ struct Control {
 struct Shared {
     state: Mutex<Control>,
     wake: Condvar,
+    /// the local temporary file being written now, for a cancel that cannot wait
+    part: Mutex<Option<PathBuf>>,
+    /// set by whoever reports the end first: the engine, or the cancel watchdog
+    ended: Mutex<bool>,
+}
+
+impl Shared {
+    fn new(limit: u64) -> Self {
+        Self { state: Mutex::new(Control { limit, ..Default::default() }), wake: Condvar::new(), part: Mutex::new(None), ended: Mutex::new(false) }
+    }
+
+    /// Whether the caller is the one to report the end of the job.
+    fn claim_end(&self) -> bool {
+        !std::mem::replace(&mut *self.ended.lock().unwrap(), true)
+    }
+}
+
+/// How long a cancel waits for the engine to stop by itself (it does between two chunks)
+/// before the process ends anyway: a call blocked on a server must not keep the job alive.
+const CANCEL_GRACE: Duration = Duration::from_secs(3);
+
+/// After a cancel (or the daemon gone): gives the engine [`CANCEL_GRACE`] to stop, then
+/// removes the temporary file it was writing, reports the job cancelled and ends the
+/// process. rynasd also signals a worker that outlives a cancel (`rynas_files::jobs`).
+fn watch_cancel(shared: Arc<Shared>) {
+    let deadline = Instant::now() + CANCEL_GRACE;
+    while Instant::now() < deadline {
+        if *shared.ended.lock().unwrap() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    if !shared.claim_end() {
+        return;
+    }
+    if let Some(part) = shared.part.lock().unwrap().take() {
+        let _ = fs::remove_file(part);
+    }
+    emit(&Event::Done { status: Status::Cancelled, msg: t!("cancelled").to_string(), code: String::new() });
+    std::process::exit(0);
 }
 
 /// Stops the whole job; per-item failures are recorded and skipped.
@@ -76,9 +116,13 @@ pub fn run() -> std::process::ExitCode {
             return std::process::ExitCode::SUCCESS;
         }
     };
-    let shared = Arc::new(Shared { state: Mutex::new(Control { limit: spec.limit, ..Default::default() }), wake: Condvar::new() });
+    let shared = Arc::new(Shared::new(spec.limit));
     let reader = Arc::clone(&shared);
     std::thread::spawn(move || {
+        let watch = |shared: &Arc<Shared>| {
+            let shared = Arc::clone(shared);
+            std::thread::spawn(move || watch_cancel(shared));
+        };
         for line in io::stdin().lock().lines() {
             let Ok(line) = line else { break };
             let Ok(cmd) = serde_json::from_str::<Command>(&line) else { continue };
@@ -86,7 +130,12 @@ pub fn run() -> std::process::ExitCode {
             match cmd {
                 Command::Pause => s.paused = true,
                 Command::Resume => s.paused = false,
-                Command::Cancel => s.cancel = true,
+                Command::Cancel => {
+                    if !s.cancel {
+                        watch(&reader);
+                    }
+                    s.cancel = true;
+                }
                 Command::Limit { bps } => {
                     s.limit = bps;
                     s.limit_changed = true;
@@ -97,16 +146,27 @@ pub fn run() -> std::process::ExitCode {
         }
         // the daemon went away: nobody can answer or watch, stop cleanly
         let mut s = reader.state.lock().unwrap();
+        if !s.cancel {
+            watch(&reader);
+        }
         s.cancel = true;
         reader.wake.notify_all();
     });
 
-    let mut engine = Engine::new(spec, shared);
+    let mut engine = Engine::new(spec, Arc::clone(&shared));
     for (path, e) in refused {
         engine.error(&path, &e);
     }
-    let (status, msg) = match engine.run() {
+    let outcome = engine.run();
+    // a cancel watchdog that already reported the end is ending the process
+    if !shared.claim_end() {
+        return std::process::ExitCode::SUCCESS;
+    }
+    let cancelled = shared.state.lock().unwrap().cancel;
+    let (status, msg) = match outcome {
         Ok(()) => (Status::Ok, engine.summary()),
+        // stopped by an error (a server out of reach), not by the user
+        Err(Cancelled) if engine.fatal.is_some() && !cancelled => (Status::Failed, String::new()),
         Err(Cancelled) => {
             // deepest first; remove_dir leaves any folder that holds something
             for dir in engine.made_dirs.iter().rev() {
@@ -299,6 +359,12 @@ impl Engine {
     }
 
     fn run(&mut self) -> Step<()> {
+        // a local destination is cleaned whatever the sources were (a copy from a server
+        // cancelled mid-file leaves its temporary file here)
+        if self.spec.op == Op::Cleanup && self.spec.dest.as_deref().is_some_and(|d| !crate::remote::is_remote(d)) {
+            self.cleanup();
+            return Ok(());
+        }
         if self.spec.sources.iter().chain(&self.spec.dest).any(|p| crate::remote::is_remote(p)) {
             return self.remote_run();
         }
@@ -1992,7 +2058,7 @@ mod tests {
     }
 
     fn engine(spec: Spec) -> Engine {
-        Engine::new(spec, Arc::new(Shared { state: Mutex::new(Control::default()), wake: Condvar::new() }))
+        Engine::new(spec, Arc::new(Shared::new(0)))
     }
 
     #[test]

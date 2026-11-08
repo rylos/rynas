@@ -104,7 +104,7 @@ fn map(e: russh_sftp::client::error::Error) -> io::Error {
             _ if s.error_message.is_empty() => other(s.status_code),
             _ => other(s.error_message),
         },
-        Error::Timeout => errno(libc::ETIMEDOUT),
+        Error::Timeout => super::stalled(TIMEOUT),
         e => other(e),
     }
 }
@@ -118,7 +118,14 @@ impl Sftp {
         let port = if conn.port == 0 { 22 } else { conn.port };
         let host = conn.host.trim().to_string();
         let result = rt.block_on(async {
-            let config = Arc::new(russh::client::Config { inactivity_timeout: Some(Duration::from_secs(600)), ..Default::default() });
+            // keepalives: a server that vanished behind a router or VPN ends the session in
+            // under a minute, and every request then fails instead of waiting
+            let config = Arc::new(russh::client::Config {
+                inactivity_timeout: Some(Duration::from_secs(600)),
+                keepalive_interval: Some(Duration::from_secs(15)),
+                keepalive_max: 3,
+                ..Default::default()
+            });
             let mut session = match tokio::time::timeout(TIMEOUT, russh::client::connect(config, (host.as_str(), port), check)).await {
                 Err(_) => return Err(errno(libc::ETIMEDOUT)),
                 Ok(Err(russh::Error::UnknownKey)) => return Err(unknown_key(&conn.host_key)),
@@ -153,6 +160,7 @@ impl Sftp {
             Ok((session, sftp, home))
         });
         let (session, sftp, home) = result?;
+        super::tune_sockets();
         let host_key = seen.lock().unwrap().clone();
         Ok(Self { rt, sftp, _session: session, host_key, home })
     }
@@ -317,7 +325,8 @@ impl SftpFile {
         let blocks = (left.div_ceil(BLOCK as u64) as usize).clamp(1, handles.len());
         let start = self.pos;
         let len = self.len;
-        let results = self.rt.block_on(async {
+        // each request has the session's own timeout; this bounds the batch as a whole
+        let results = self.rt.block_on(tokio::time::timeout(super::REMOTE_TIMEOUT, async {
             let mut tasks = Vec::new();
             for (i, mut f) in handles.into_iter().enumerate() {
                 let at = start + (i * BLOCK) as u64;
@@ -348,7 +357,8 @@ impl SftpFile {
                 out.push(t.await.map_err(other));
             }
             out
-        });
+        }));
+        let results = results.map_err(|_| super::stalled(super::REMOTE_TIMEOUT))?;
         self.ahead.clear();
         self.ahead_at = start;
         let mut failed = None;
@@ -374,7 +384,8 @@ impl SftpFile {
             }
         }
         if let Some(e) = failed {
-            return Err(e);
+            // a read on an open file fails for the connection, not for the file
+            return Err(if e.kind() == io::ErrorKind::Other { io::Error::new(io::ErrorKind::ConnectionAborted, e.to_string()) } else { e });
         }
         if self.ahead.is_empty() {
             self.len = self.pos;
@@ -422,7 +433,9 @@ impl Write for SftpFile {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let rt = Arc::clone(&self.rt);
         let f = self.file()?;
-        rt.block_on(f.write(buf))
+        let done = rt.block_on(tokio::time::timeout(super::REMOTE_TIMEOUT, f.write(buf))).map_err(|_| super::stalled(super::REMOTE_TIMEOUT))??;
+        self.pos += done as u64;
+        Ok(done)
     }
     fn flush(&mut self) -> io::Result<()> {
         let rt = Arc::clone(&self.rt);
@@ -450,9 +463,14 @@ impl Writer for SftpFile {
 
 impl Drop for SftpFile {
     fn drop(&mut self) {
-        for mut f in self.file.take().into_iter().chain(std::mem::take(&mut self.spare)) {
-            let _ = self.rt.block_on(f.shutdown());
-        }
+        // all the handles at once, and not for long: a connection that is gone must not
+        // hold up the job here
+        let files: Vec<RFile> = self.file.take().into_iter().chain(std::mem::take(&mut self.spare)).collect();
+        let _ = self.rt.block_on(tokio::time::timeout(Duration::from_secs(5), async move {
+            for mut f in files {
+                let _ = f.shutdown().await;
+            }
+        }));
     }
 }
 

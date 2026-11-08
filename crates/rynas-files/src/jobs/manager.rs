@@ -101,6 +101,59 @@ pub struct JobView {
     /// the rynas task (UPID) while and after it runs
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
+    /// running, and no progress for this many seconds (from [`STALL_AFTER`] on): the
+    /// worker waits on a server, a disk, a lock
+    #[serde(skip_serializing_if = "is_zero")]
+    pub stalled_s: u64,
+    /// cancel asked, the worker not stopped yet (it is made to within seconds)
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub cancelling: bool,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
+/// Running without progress this long shows as stalled ([`JobView::stalled_s`]).
+pub const STALL_AFTER: Duration = Duration::from_secs(5);
+/// How long a worker may take to honour a cancel before it is sent SIGTERM, and then
+/// SIGKILL as long again: a call blocked on a server cannot keep a cancelled job running.
+pub const CANCEL_GRACE: Duration = if cfg!(test) { Duration::from_millis(300) } else { Duration::from_secs(5) };
+
+/// The worker process of a running job, as rynasd watches it.
+#[derive(Default)]
+struct Proc {
+    /// pidfd of the worker: signals reach it and never a process that reused its pid
+    pidfd: Option<std::os::fd::OwnedFd>,
+    /// when the user cancelled it
+    cancel_at: Option<Instant>,
+    /// when its progress last moved, and what it was
+    moved_at: Option<Instant>,
+    seen: [u64; 5],
+}
+
+impl Proc {
+    /// Notes the progress, and when it last moved.
+    fn moved(&mut self, p: &Progress) {
+        let now = [p.bytes_done, p.files_done, p.verify_bytes, p.files_total, p.dirs];
+        if now != self.seen || self.moved_at.is_none() {
+            self.seen = now;
+            self.moved_at = Some(Instant::now());
+        }
+    }
+
+    fn signal(&self, sig: i32) {
+        let Some(fd) = &self.pidfd else { return };
+        // SAFETY: pidfd_send_signal(2) on a pidfd this struct owns; no siginfo, no flags
+        unsafe { libc::syscall(libc::SYS_pidfd_send_signal, std::os::fd::AsRawFd::as_raw_fd(fd), sig, std::ptr::null::<libc::siginfo_t>(), 0) };
+    }
+}
+
+/// A pidfd for a child not reaped yet (so its pid is still its own).
+fn pidfd_of(child: &std::process::Child) -> Option<std::os::fd::OwnedFd> {
+    // SAFETY: pidfd_open(2) of our own child; a valid descriptor is ours to own
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, child.id() as libc::pid_t, 0) };
+    (fd >= 0).then(|| unsafe { std::os::fd::FromRawFd::from_raw_fd(fd as i32) })
 }
 
 /// Job message codes that are not `error_codes`.
@@ -150,6 +203,7 @@ struct Job {
     cleaning: bool,
     task: Option<Box<dyn JobTask>>,
     last_pct: Option<u8>,
+    proc: Proc,
 }
 
 impl Job {
@@ -178,6 +232,12 @@ impl Job {
 
     fn active_ms(&self) -> u64 {
         (self.active + self.run_since.map(|s| s.elapsed()).unwrap_or_default()).as_millis() as u64
+    }
+
+    /// How long a running job has gone without progress, from [`STALL_AFTER`] on.
+    fn stalled(&self) -> Option<Duration> {
+        let quiet = self.proc.moved_at?.elapsed();
+        (self.view.state == State::Running && quiet >= STALL_AFTER).then_some(quiet)
     }
 
     fn sample(&mut self, force: bool) {
@@ -334,6 +394,8 @@ impl Manager {
             samples: Vec::new(),
             interrupted: false,
             task_id: None,
+            stalled_s: 0,
+            cancelling: false,
         };
         journal(self.journal(), &JournalEntry { id, user: user.clone(), admin, spec: spec.without_secrets(), info: view.info.clone(), created: view.created });
         // deletions are quick and should not wait behind a big copy
@@ -354,6 +416,7 @@ impl Manager {
             cleaning: false,
             task: None,
             last_pct: None,
+            proc: Proc::default(),
         };
         {
             let mut list = self.inner.jobs.lock().unwrap();
@@ -373,6 +436,7 @@ impl Manager {
             .map(|j| {
                 let mut v = j.view.clone();
                 v.active_ms = j.active_ms();
+                v.stalled_s = j.stalled().map_or(0, |d| d.as_secs());
                 let started = v.started.unwrap_or(0);
                 v.samples.retain(|s| started + s[0] > since);
                 v
@@ -395,6 +459,22 @@ impl Manager {
         };
         if let Some((owner, id)) = found {
             let _ = self.control(&owner, Control { id, action: "cancel".into(), policy: None, all: false, bps: None, conflict: None, password: None });
+        }
+    }
+
+    /// After a cancel: a worker still running [`CANCEL_GRACE`] later gets SIGTERM, and
+    /// SIGKILL as long after that. Its pipe then closes and [`Manager::follow`] ends the job
+    /// as cancelled and cleans up after it.
+    fn enforce_cancel(&self, id: u64) {
+        for sig in [libc::SIGTERM, libc::SIGKILL] {
+            std::thread::sleep(CANCEL_GRACE);
+            let list = self.inner.jobs.lock().unwrap();
+            let Some(job) = list.iter().find(|j| j.view.id == id) else { return };
+            if job.view.state.finished() || job.proc.pidfd.is_none() {
+                return;
+            }
+            tracing::warn!("file job {id} did not stop after a cancel: sending {}", if sig == libc::SIGTERM { "SIGTERM" } else { "SIGKILL" });
+            job.proc.signal(sig);
         }
     }
 
@@ -428,7 +508,18 @@ impl Manager {
                 job.set_state(State::Cancelled, &journal);
                 true
             }
-            "cancel" if !job.view.state.finished() => job.send(&Command::Cancel),
+            // the worker stops between two chunks; one blocked (a server that stopped
+            // answering) is signalled after a grace period (`enforce_cancel`)
+            "cancel" if !job.view.state.finished() => {
+                let _ = job.send(&Command::Cancel);
+                if job.proc.cancel_at.is_none() {
+                    job.proc.cancel_at = Some(Instant::now());
+                    job.view.cancelling = true;
+                    let (m, id) = (self.clone(), job.view.id);
+                    std::thread::spawn(move || m.enforce_cancel(id));
+                }
+                true
+            }
             "answer" if job.view.state == State::Conflict || job.view.state == State::Paused => {
                 let Some(waiting) = job.view.conflict.as_ref().map(|c| c.id) else {
                     return Err(ApiError::conflict(t!("no conflict waiting")));
@@ -521,6 +612,8 @@ impl Manager {
         let stdin = child.stdin.take().ok_or_else(|| io::Error::other("no stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| io::Error::other("no stdout"))?;
         job.stdin = Some(stdin);
+        job.proc = Proc { pidfd: pidfd_of(&child), ..Proc::default() };
+        job.proc.moved(&job.view.progress);
         job.view.started = Some(now_ms());
         job.start_instant = Some(Instant::now());
         job.task = self.inner.cfg.hooks.job_started(kind_of(job.spec.op), &job.owner);
@@ -547,6 +640,7 @@ impl Manager {
             let Some(job) = list.iter_mut().find(|j| j.view.id == id) else { return };
             match event {
                 Event::Progress(p) => {
+                    job.proc.moved(&p);
                     job.view.progress = p;
                     job.sample(false);
                 }
@@ -582,14 +676,36 @@ impl Manager {
                 }
             }
         }
+        let mut cleanup = None;
         if !done {
             let mut list = self.inner.jobs.lock().unwrap();
             if let Some(job) = list.iter_mut().find(|j| j.view.id == id) {
                 job.sample(true);
-                job.view.msg = t!("the copy process stopped unexpectedly");
-                job.view.code = error_codes::INTERNAL.into();
-                job.set_state(State::Failed, &journal);
+                if job.proc.cancel_at.is_some() {
+                    // signalled after a cancel: its temporary files are removed by a
+                    // clean-up run, the job stays for Retry meanwhile
+                    job.view.msg = t!("cancelled");
+                    job.view.code = CODE_CANCELLED.into();
+                    if job.spec.op != Op::Delete && job.spec.dest.is_some() {
+                        job.cleaning = true;
+                        let mut clean = job.spec.clone();
+                        clean.op = Op::Cleanup;
+                        cleanup = Some((id, job.user.clone(), clean));
+                    }
+                    job.set_state(State::Cancelled, &journal);
+                } else {
+                    job.view.msg = t!("the copy process stopped unexpectedly");
+                    job.view.code = error_codes::INTERNAL.into();
+                    job.set_state(State::Failed, &journal);
+                }
             }
+        }
+        if let Some(job) = self.inner.jobs.lock().unwrap().iter_mut().find(|j| j.view.id == id) {
+            job.view.cancelling = false;
+            job.proc.pidfd = None;
+        }
+        if let Some(c) = cleanup {
+            self.clean_up(vec![c]);
         }
         self.schedule();
     }
@@ -794,6 +910,8 @@ fn interrupted(e: JournalEntry, cleaning: bool, journal: &Path) -> Job {
         samples: Vec::new(),
         interrupted: true,
         task_id: None,
+        stalled_s: 0,
+        cancelling: false,
     };
     let mut job = Job {
         view,
@@ -811,6 +929,7 @@ fn interrupted(e: JournalEntry, cleaning: bool, journal: &Path) -> Job {
         cleaning,
         task: None,
         last_pct: None,
+        proc: Proc::default(),
     };
     job.set_state(State::Failed, journal);
     job
@@ -823,6 +942,62 @@ pub fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A worker that ignores cancel and SIGTERM (blocked in a call that never returns):
+    /// rynasd ends it with SIGKILL and the job is cancelled, not left running.
+    #[test]
+    fn a_worker_that_ignores_cancel_is_killed() {
+        let dir = tempfile::tempdir().unwrap();
+        let worker = dir.path().join("worker");
+        std::fs::write(
+            &worker,
+            "#!/bin/sh\nread spec\ncase \"$spec\" in *'\"op\":\"cleanup\"'*) exit 0;; esac\ntrap '' TERM\nwhile read x; do :; done\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let m = Manager::new(Config { worker, journal: dir.path().join("journal"), hooks: Arc::new(NoHooks) });
+        let user = crate::identity::current().expect("the test user has a passwd entry");
+        let spec: Spec = serde_json::from_value(json!({ "op": "copy", "sources": [dir.path().join("a")], "dest": dir.path().join("d") })).unwrap();
+        let info = Info { sources: vec!["/s/a".into()], dest: Some("/d".into()), permanent: false };
+        let id = m.submit(user.clone(), false, spec, info).unwrap()["id"].as_u64().unwrap();
+        assert_eq!(m.list(&user.name, 0)["jobs"][0]["state"], "running");
+        let control = |action: &str| Control { id, action: action.into(), policy: None, all: false, bps: None, conflict: None, password: None };
+        // pausing a worker that does not listen answers at once all the same
+        assert_eq!(m.control(&user.name, control("pause")).unwrap()["ok"], true);
+        let asked = Instant::now();
+        assert_eq!(m.control(&user.name, control("cancel")).unwrap()["ok"], true);
+        let job = loop {
+            let job = m.list(&user.name, 0)["jobs"][0].clone();
+            if job["state"] == "cancelled" || asked.elapsed() > Duration::from_secs(10) {
+                break job;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(job["state"], "cancelled", "{job}");
+        assert_eq!(job["code"], CODE_CANCELLED);
+        // SIGTERM was ignored: SIGKILL after the second grace period
+        assert!(asked.elapsed() >= CANCEL_GRACE * 2, "{:?}", asked.elapsed());
+        // the clean-up run ends; Retry is possible again
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while m.inner.jobs.lock().unwrap()[0].cleaning && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!m.inner.jobs.lock().unwrap()[0].cleaning);
+    }
+
+    #[test]
+    fn stalls_show_once_progress_stops() {
+        let mut p = Proc::default();
+        let mut progress = Progress::default();
+        p.moved(&progress);
+        let first = p.moved_at.unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+        p.moved(&progress);
+        assert_eq!(p.moved_at, Some(first), "nothing moved");
+        progress.bytes_done = 1;
+        p.moved(&progress);
+        assert!(p.moved_at.unwrap() > first);
+    }
 
     #[test]
     fn folders_overlap() {
