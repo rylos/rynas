@@ -25,6 +25,9 @@
 //! - `rynasctl ups test quick|deep|stop`: a UPS battery test through rynasd (NUT or the
 //!   module layer),
 //!   followed to its outcome; the command of a scheduled battery test.
+//! - `rynasctl crypt auto-unlock`: `rynas-crypt-unlock.service`, ordered before Docker at
+//!   boot; rynasd unlocks the encrypted folders set to unlock automatically, so containers
+//!   start on unlocked folders. Always exits 0.
 //!
 //! Talks HTTP/1.1 to rynasd's socket (root is always allowed by `SO_PEERCRED`).
 
@@ -90,6 +93,18 @@ enum Command {
         #[command(subcommand)]
         action: NetAction,
     },
+    /// Encrypted folders.
+    Crypt {
+        #[command(subcommand)]
+        action: CryptCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum CryptCmd {
+    /// At boot, before Docker: unlock the encrypted folders whose password is sealed on this
+    /// machine (rynas-crypt-unlock.service).
+    AutoUnlock,
 }
 
 #[derive(Subcommand, Debug)]
@@ -217,8 +232,19 @@ fn request(
     path: &str,
     body: Option<&[u8]>,
 ) -> Result<Answer, String> {
+    request_waiting(socket, method, path, body, IO_TIMEOUT)
+}
+
+/// [`request`] whose answer may take up to `wait`.
+fn request_waiting(
+    socket: &PathBuf,
+    method: &str,
+    path: &str,
+    body: Option<&[u8]>,
+    wait: Duration,
+) -> Result<Answer, String> {
     let mut s = UnixStream::connect(socket).map_err(|e| format!("{}: {e}", socket.display()))?;
-    s.set_read_timeout(Some(IO_TIMEOUT)).ok();
+    s.set_read_timeout(Some(wait)).ok();
     s.set_write_timeout(Some(IO_TIMEOUT)).ok();
     let body = body.unwrap_or(b"");
     let head = format!(
@@ -650,7 +676,22 @@ fn main() -> ExitCode {
             no_flush,
             action,
         } => net(&args.socket, &state_dir, !no_flush, action),
+        Command::Crypt {
+            action: CryptCmd::AutoUnlock,
+        } => crypt_auto_unlock(&args.socket),
     }
+}
+
+/// `rynas-crypt-unlock.service`, before Docker at boot: rynasd unlocks the encrypted folders
+/// whose password is sealed on this machine and answers when it is done. A failure is
+/// reported by rynasd (notification) and never fails the unit: Docker starts anyway.
+fn crypt_auto_unlock(socket: &PathBuf) -> ExitCode {
+    match request_waiting(socket, "POST", "/v1/crypt/auto-unlock", None, Duration::from_secs(270)) {
+        Ok(a) if a.status / 100 == 2 => println!("rynas: unlocked {}", String::from_utf8_lossy(&a.body).trim()),
+        Ok(a) => eprintln!("rynasctl: automatic unlock: {}", a.error()),
+        Err(e) => eprintln!("rynasctl: automatic unlock: {e}"),
+    }
+    ExitCode::SUCCESS
 }
 
 #[cfg(test)]

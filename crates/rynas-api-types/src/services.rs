@@ -859,6 +859,10 @@ pub enum CryptState {
     Locked,
     /// Mounted (`fuse.gocryptfs` at the path).
     Unlocked,
+    /// Not mounted at the path any more, but gocryptfs still runs: a container or service
+    /// started while the folder was unlocked holds its own copy of the mount, so the files
+    /// stay readable there. Not locked; a lock succeeds once that copy is gone.
+    InUse,
 }
 
 /// [`ShareStatus::crypt`].
@@ -882,9 +886,39 @@ pub struct CryptInfo {
     /// `gocryptfs -version`, first word after the name (`2.5.1`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
-    /// A TPM2 is present: an automatic-unlock key is bound to it.
+    /// The installed version can make encrypted folders (2.5 or newer: `-init -masterkey`).
+    #[serde(default)]
+    pub supported: bool,
+    /// `systemd-creds has-tpm2` says yes: an automatic-unlock password is sealed with the
+    /// TPM2 and the host key (`--with-key=host+tpm2`), else with the host key only.
     #[serde(default)]
     pub tpm2: bool,
+}
+
+/// Answer of `POST /api/v1/shares/{share}/unlock`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CryptUnlockResponse {
+    pub share: ShareView,
+    /// Running containers that mount the folder: they were started while it was locked and
+    /// still see the empty locked folder until they are restarted.
+    #[serde(default)]
+    pub containers: Vec<String>,
+}
+
+/// Answer of `POST /api/v1/shares/{share}/crypt/password`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CryptPasswordResponse {
+    /// The password changed but the automatic unlock had to be turned off (the new password
+    /// could not be sealed): the reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_unlock_off: Option<String>,
+}
+
+/// `POST /api/v1/crypt/folders/{volume}/{name}/recovery-key`: the recovery key again, read
+/// with the folder's password (administrators).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CryptRecoveryKeyRequest {
+    pub password: String,
 }
 
 /// `POST /api/v1/crypt/folders`: a new encrypted folder `<place>/<name>` (task
@@ -940,6 +974,7 @@ crypt_redacted_debug!(CryptCreateRequest, volume, name, auto_unlock);
 crypt_redacted_debug!(CryptUnlockRequest);
 crypt_redacted_debug!(CryptPasswordRequest, recovery);
 crypt_redacted_debug!(CryptAutoUnlockRequest, enabled);
+crypt_redacted_debug!(CryptRecoveryKeyRequest);
 
 /// A remark of [`ShareStatus::warning_items`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

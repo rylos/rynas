@@ -31,8 +31,22 @@ pub struct Cmd {
     argv: Vec<OsString>,
     env: Vec<(OsString, OsString)>,
     clear_env: bool,
-    stdin: Option<Vec<u8>>,
+    stdin: Option<StdinData>,
     timeout: Duration,
+}
+
+/// Bytes for a child's standard input (passwords, keys): overwritten with zeros when dropped,
+/// copies included.
+#[derive(Clone)]
+struct StdinData(Vec<u8>);
+
+impl Drop for StdinData {
+    fn drop(&mut self) {
+        for b in self.0.iter_mut() {
+            // SAFETY: a valid, aligned pointer to a byte of this vector.
+            unsafe { std::ptr::write_volatile(b, 0) };
+        }
+    }
 }
 
 /// Standard input carries secrets (passwords for `chpasswd`, `smbpasswd`...) and environment
@@ -55,7 +69,7 @@ impl std::fmt::Debug for Cmd {
                 &self
                     .stdin
                     .as_ref()
-                    .map(|b| format!("<{} bytes redacted>", b.len())),
+                    .map(|b| format!("<{} bytes redacted>", b.0.len())),
             )
             .field("timeout", &self.timeout)
             .finish()
@@ -144,7 +158,7 @@ impl Cmd {
 
     /// Bytes written to the standard input (otherwise `/dev/null`).
     pub fn stdin(mut self, data: impl Into<Vec<u8>>) -> Self {
-        self.stdin = Some(data.into());
+        self.stdin = Some(StdinData(data.into()));
         self
     }
 
@@ -160,7 +174,7 @@ impl Cmd {
     /// The bytes given with [`Cmd::stdin`] (simulations read them; never log them: they can
     /// carry secrets).
     pub fn stdin_data(&self) -> Option<&[u8]> {
-        self.stdin.as_deref()
+        self.stdin.as_ref().map(|d| d.0.as_slice())
     }
 
     /// The command line for logs (arguments are not quoted: never feed it to a shell).
@@ -206,7 +220,7 @@ impl Cmd {
         let pgid = child.id().map(|p| Pid::from_raw(p as i32));
         if let (Some(data), Some(mut w)) = (self.stdin.clone(), child.stdin.take()) {
             tokio::spawn(async move {
-                let _ = w.write_all(&data).await;
+                let _ = w.write_all(&data.0).await;
             });
         }
         let out = child.stdout.take().expect("piped stdout");
@@ -288,7 +302,7 @@ impl Cmd {
         let pgid = Pid::from_raw(child.id() as i32);
         if let (Some(data), Some(mut w)) = (self.stdin.clone(), child.stdin.take()) {
             std::thread::spawn(move || {
-                let _ = w.write_all(&data);
+                let _ = w.write_all(&data.0);
             });
         }
         let mut out = child.stdout.take().expect("piped stdout");

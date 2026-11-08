@@ -1232,6 +1232,29 @@ fn hostname() -> String {
         .unwrap_or_else(|_| "rynas".into())
 }
 
+/// What is read for the folder `path`: an encrypted folder (D-CRYPT E1) is backed up as its
+/// ciphertext directory `<place>/.rynas-crypt/<name>` (with `gocryptfs.conf` and the key
+/// check), so the backup stays encrypted whether the folder is locked or not; restoring needs
+/// the password or the recovery key. Its mount point is never read: locked it is an empty
+/// folder, and an empty snapshot would let the retention expire the real ones. Without its
+/// ciphertext the source fails.
+fn backup_path(path: &str, encrypted: bool) -> Result<String, String> {
+    use rynas_services::crypt;
+    let cipher = crypt::cipher_dir(path);
+    let has_conf = |c: &str| FsPath::new(c).join(crypt::CONF).is_file();
+    if !encrypted && !cipher.as_deref().is_some_and(has_conf) {
+        return Ok(path.to_string());
+    }
+    match cipher {
+        Some(c) if has_conf(&c) => Ok(c),
+        Some(c) => Err(format!(
+            "{path} is an encrypted folder but its encrypted data ({c}/{}) is missing: not backed up",
+            crypt::CONF
+        )),
+        None => Err(format!("{path} cannot be an encrypted folder: not backed up")),
+    }
+}
+
 /// The folder of each source (shares resolved from the applied configuration).
 fn source_paths(s: &ResticSvc, job: &BackupJob) -> Result<Vec<(String, Option<BackupSource>)>, String> {
     let shares: SharesConfig = from_value(s.prot.ops.config.applied(SHARES_KEY).map_err(|e| e.to_string())?)
@@ -1245,9 +1268,9 @@ fn source_paths(s: &ResticSvc, job: &BackupJob) -> Result<Vec<(String, Option<Ba
                     .iter()
                     .find(|x| &x.name == name)
                     .ok_or_else(|| format!("share {name} is not in the applied configuration"))?;
-                out.push((sh.path.clone(), None));
+                out.push((backup_path(&sh.path, sh.encrypted)?, None));
             }
-            BackupSource::Folder { path } => out.push((path.clone(), None)),
+            BackupSource::Folder { path } => out.push((backup_path(path, false)?, None)),
             BackupSource::Config => out.push((String::new(), Some(BackupSource::Config))),
         }
     }
@@ -1369,6 +1392,13 @@ async fn run_job(
     }
     let state_dir = s.prot.state_dir.clone();
     let paths = source_paths(s, job)?;
+    for (p, _) in &paths {
+        if p.contains(&format!("/{}/", rynas_services::crypt::CRYPT_DIR)) {
+            ctx.log(&format!(
+                "{p}: the encrypted data of an encrypted folder, backed up as it is (restoring needs the folder's password or recovery key; exclude patterns do not match its encrypted names)"
+            ));
+        }
+    }
     // the configuration export, encrypted with the repository password
     let cfg_dir = state_dir.join("backup").join(format!("config-{}", job.name));
     let mut sources = Vec::new();
@@ -2468,6 +2498,25 @@ mod tests {
             repository_password: String::new(),
         };
         assert_eq!(req_public_key(&r), Some("ssh-ed25519 AAAA x"));
+    }
+
+    #[test]
+    fn encrypted_folders_are_backed_up_as_ciphertext() {
+        let d = tempfile::tempdir().unwrap();
+        let place = d.path().to_string_lossy().into_owned();
+        let mount = format!("{place}/secret");
+        let cipher = format!("{place}/.rynas-crypt/secret");
+        std::fs::create_dir_all(&mount).unwrap();
+        std::fs::create_dir_all(&cipher).unwrap();
+        // a plain folder is read as it is
+        assert_eq!(backup_path(&format!("{place}/plain"), false).unwrap(), format!("{place}/plain"));
+        // an encrypted share without its ciphertext fails: never an empty snapshot
+        let e = backup_path(&mount, true).unwrap_err();
+        assert!(e.contains("missing"), "{e}");
+        std::fs::write(format!("{cipher}/gocryptfs.conf"), "{}").unwrap();
+        assert_eq!(backup_path(&mount, true).unwrap(), cipher);
+        // a folder source on the mount point of an encrypted folder too
+        assert_eq!(backup_path(&mount, false).unwrap(), cipher);
     }
 
     #[test]

@@ -762,10 +762,6 @@ fn main() -> std::io::Result<()> {
             homes: opened.homes,
             moves: Arc::new(rynas_services::homes::MoveStore::in_dir(&args.state_dir)),
         }));
-        // encrypted folders whose password is sealed on this machine (D-CRYPT E1)
-        if let Some(s) = &state.services {
-            rynasd::services::crypt::auto_unlock_at_start(s);
-        }
         state.storage_ops = Some(Arc::new(rynasd::storage_ops::StorageOps::new(
             ops.clone(),
             state.storage.clone(),
@@ -780,6 +776,12 @@ fn main() -> std::io::Result<()> {
         let notifier: Arc<dyn Notifier> = Arc::new(engine.clone());
         rynasd::notifications::spawn_task_watch(&ops.tasks, notifier.clone());
         state.notifier = notifier.clone();
+        // encrypted folders whose password is sealed on this machine (D-CRYPT E1); a failed
+        // automatic unlock is notified
+        rynasd::services::crypt::set_notifier(notifier.clone());
+        if let Some(s) = &state.services {
+            rynasd::services::crypt::auto_unlock_at_start(s);
+        }
         // web access (W2): DNS credentials are sealed with the engine's key, certificate
         // trouble goes to the engine
         let _ = opened.web_access.notifier.set(notifier.clone());

@@ -120,6 +120,7 @@ pub fn routes() -> Router<AppState> {
         .route("/crypt/install", post(forward))
         .route("/crypt/folders", post(forward))
         .route("/crypt/folders/{volume}/{name}/reveal-recovery-key", post(forward))
+        .route("/crypt/folders/{volume}/{name}/recovery-key", post(forward))
         .route("/shares/plan/delete", post(forward))
         .route("/folders", get(forward))
         .route("/folders/plan/delete", post(forward))

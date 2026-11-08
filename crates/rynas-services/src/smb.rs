@@ -242,7 +242,9 @@ pub fn share_lines(s: &Share, btrfs: bool) -> Vec<Line> {
     if smb.recycle.enabled {
         vfs.push("recycle");
     }
-    if btrfs {
+    // an encrypted folder is a FUSE mount while unlocked and an empty folder on btrfs while
+    // locked: never vfs_btrfs, whatever its state at the apply
+    if btrfs && !s.encrypted {
         vfs.push("btrfs");
     }
     v.push(l("vfs objects", vfs.join(" ")));
@@ -468,8 +470,12 @@ mod tests {
         let get = |k: &str| lines.iter().find(|(a, _)| a == k).map(|(_, v)| v.clone());
         assert_eq!(get("root preexec").as_deref(), Some("/usr/bin/mountpoint -q \"/vol1/secret\""));
         assert_eq!(get("root preexec close").as_deref(), Some("yes"));
-        let plain = share_lines(&Share { encrypted: false, ..s }, false);
+        let plain = share_lines(&Share { encrypted: false, ..s.clone() }, false);
         assert!(!plain.iter().any(|(k, _)| k.starts_with("root preexec")));
+        // never vfs_btrfs, even when the locked folder sits on btrfs at the apply
+        let on_btrfs = share_lines(&s, true);
+        let vfs = on_btrfs.iter().find(|(k, _)| k == "vfs objects").map(|(_, v)| v.clone()).unwrap();
+        assert!(!vfs.contains("btrfs"), "{vfs}");
     }
 
     #[test]

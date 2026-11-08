@@ -1,7 +1,7 @@
 # Encrypted shared folders (phase E1)
 
 Status: implemented 2026-11-08 (backend, API, UI for create / unlock / lock / recovery key /
-password / automatic unlock). Decision row: `../phase0/05-decisions.md` (D-CRYPT). Earlier
+password / automatic unlock); security review fixes the same day (§6). Decision row: `../phase0/05-decisions.md` (D-CRYPT). Earlier
 research: `../research/encryption-compression-dedup.md`. Gap list: `dsm-migration-gaps.md`
 row E.
 
@@ -30,9 +30,18 @@ gocryptfs facts that shape the design (man page and source, v2.6):
   (`readLineUnbuffered`), so several secrets can follow each other on one pipe; at most 2048
   bytes; never on the command line.
 - **Master key**: `-init -masterkey stdin` takes a key we generate (32 bytes, printed as 8
-  groups of 8 hex digits), so rynas never parses gocryptfs output for it.
-  `-passwd -masterkey stdin` sets a new password with only the master key: that is the
-  recovery path. `-passwd` leaves `gocryptfs.conf.bak` wrapped with the **old** password:
+  groups of 8 hex digits). Order on standard input, checked live with 2.5.1 (Debian 13) and
+  2.6.1 (trixie-backports): `-init -masterkey stdin` reads the **password first, then the
+  key** (the other order fails with "Could not parse master key", exit 14, and a 64-hex
+  password would swap the roles); `-passwd` reads old, then new password; `-passwd
+  -masterkey stdin` reads the key, then the new password: that is the recovery path, and it
+  accepts any well-formed key, hence rynas' key check. `gocryptfs-xray -dumpmasterkey
+  <cipher>/gocryptfs.conf` reads the password on standard input and prints the key (64 hex
+  digits; a wrong password prints "Password incorrect." and exits 8): rynas uses it to show
+  the recovery key again and as a read-only password check (unlike `-passwd` it does not
+  rewrite `gocryptfs.conf`). `-init -masterkey` exists since 2.5.0: Debian 12 ships 2.3,
+  rynas refuses it with an install hint (`CryptInfo.supported`).
+  Upstream builds print `gocryptfs v2.6.1; …`, Debian's `gocryptfs 2.5.1; …`. `-passwd` leaves `gocryptfs.conf.bak` wrapped with the **old** password:
   rynas deletes it after a change (otherwise a leaked old password still opens the folder).
 - **Exit codes**: 12 wrong password, 6 cipher dir not empty, 10 mount point not empty, 23/24
   config file unreadable/unwritable.
@@ -88,9 +97,19 @@ unlocking an encrypted shared folder" (docs.qnap.com); TrueNAS SCALE "Encrypting
 - **Share**: an ordinary share with `path = <place>/<name>`, `encrypted: true`, no
   `subvolume`, no `show_snapshots` (the snapshots of an encrypted folder are snapshots of its
   ciphertext). A share whose path is an encrypted folder is marked encrypted on validation.
-- **State** (`ShareStatus.crypt`): `locked` (ciphertext there, not mounted), `unlocked`
-  (`fuse.gocryptfs` mounted at the path, from `/proc/self/mountinfo`), `missing` (no
-  `gocryptfs.conf`). Nothing about the state is stored: it is read from the system.
+- **State** (`ShareStatus.crypt`): `locked` (ciphertext there, not mounted, its unit not
+  running), `unlocked` (`fuse.gocryptfs` mounted at the path, from `/proc/self/mountinfo`),
+  `in_use` (not mounted for rynas any more but the gocryptfs unit still runs: a container or
+  service holds its own copy of the mount and reads the plaintext; never shown as locked),
+  `missing` (no `gocryptfs.conf`). Nothing about the state is stored: it is read from the
+  system (mountinfo and `systemctl is-active` of the unit).
+- **Key check**: SHA-256 over a label and the master key, in
+  `<cipher>/gocryptfs.longname.rynas-key-check.name` (0600) so snapshots, replicas and backups
+  carry it. The name has the form of a gocryptfs long-name side file: gocryptfs skips such
+  names silently when listing and `-fsck` does not report them (checked with 2.5.1 and
+  2.6.1); any other extra name in the ciphertext root logs "could not decrypt entry" at every
+  listing. The first release kept it in `<cipher>.check`, outside the subvolume: it is moved
+  inside at rynasd's start and whenever it is read.
 - **Backend trait** `rynas_services::crypt::CryptHost`: `HostCrypt` on the machine,
   `MemoryCrypt` for tests and `--dry-system` (a future fscrypt backend implements the same).
 
@@ -113,11 +132,28 @@ systemd-run --unit=rynas-crypt-<place>-<name> --service-type=forking --quiet
   `ExecMainStatus`: 12 → wrong password (400 `crypt_wrong_password`, answered after a
   1-second pause; unlocks are serialised), anything else → error with the unit name for the
   journal; the failed unit is reset.
-- **Lock**: Samba connections to the share are closed (`smbcontrol smbd close-share`), then
-  `umount <mount point>` runs outside the sandbox (`Outside`, never lazy). A busy folder is
-  refused (409 `crypt_busy`, with the containers using it); gocryptfs exits by itself after
-  the unmount. Stopping the unit is not used: gocryptfs falls back to a lazy unmount on
-  SIGTERM, which would leave open files readable.
+- **Lock**: refused first (409 `crypt_busy`, with their names) while running containers
+  bind-mount the folder or something inside it: a container's bind mount is an `rprivate`
+  copy of the FUSE mount, so the host unmount would succeed while gocryptfs keeps serving
+  the container. Then Samba connections to the share are closed (`smbcontrol smbd
+  close-share`) and `umount <mount point>` runs outside the sandbox (`Outside`, never lazy);
+  a busy folder is refused. gocryptfs exits by itself once the last copy of its mount is
+  gone: rynas waits up to 5 s for the unit to end, and a unit still running is an error
+  ("still in use", state `in_use`), never a lock. A later lock (or the end of that other
+  copy) finishes it. Stopping the unit is not used to lock: gocryptfs falls back to a lazy
+  unmount on SIGTERM, which would leave open files readable. Deleting the folder is refused
+  while its unit runs.
+- **Unlock of an `in_use` folder**: refused while running containers use it; otherwise the
+  password is checked (`gocryptfs-xray`), the stale unit stopped and a fresh one mounted.
+- **Containers started while the folder was locked** bind the empty mount point and keep it
+  after the unlock. The unlock answer lists the running containers that mount the folder
+  (`CryptUnlockResponse.containers`) and the UI offers to restart them (Docker restart tasks,
+  one per container). At boot the order avoids it: `rynas-crypt-unlock.service`
+  (`Before=docker.service containerd.service podman.service`, `Wants=rynasd.socket`, only when
+  `/var/lib/rynas/crypt` is not empty) runs `rynasctl crypt auto-unlock`, which asks rynasd
+  (`POST /v1/crypt/auto-unlock`, root peers only) to unlock the folders set to unlock
+  automatically and waits for the answer (never asks Docker, never fails the unit: `Before=`
+  without `Requires=` only orders).
 - **Services follow the state without a configuration apply**: the share's Samba section
   carries `root preexec = /usr/bin/mountpoint -q <path>` with `root preexec close = yes`
   (connections are refused while locked), the NFS export carries `mp` (exported only while
@@ -129,19 +165,37 @@ systemd-run --unit=rynas-crypt-<place>-<name> --service-type=forking --quiet
 
 The master key is generated by rynasd (getrandom, 32 bytes) and given to `gocryptfs -init` on
 standard input. It is kept in rynasd's memory for one hour and handed out **once**
-(`reveal-recovery-key`), like the LUKS recovery key of a new volume; the UI shows it right
-after the creation with copy / download and a mandatory "I stored it" confirmation. It is
-never written to disk by rynas. With it, "Change password" works without the old password.
-It cannot be shown again later (an export would need it to be stored).
+(`reveal-recovery-key`), only to the administrator who created the folder, like the LUKS
+recovery key of a new volume; the UI shows it right after the creation with copy / download
+and a mandatory "I stored it" confirmation. It is never written to disk by rynas. With it,
+"Change password" works without the old password.
+
+It can be **shown again** with the folder's password ("Show recovery key" in the folder's
+settings; `POST /v1/crypt/folders/{volume}/{name}/recovery-key`, administrators):
+`gocryptfs-xray -dumpmasterkey` reads it from `gocryptfs.conf` with the password on standard
+input (never argv), and writes the key check if the folder has none. The creation is robust:
+once `gocryptfs -init` succeeded the folder is kept even when the final unlock or the sealing
+of the automatic unlock fails (the task logs a warning; the folder stays locked and is
+unlocked with its password); if the kept key is gone before the UI fetched it (rynasd
+restarted), the UI reads it again with the password it still holds, and otherwise says to
+show it from the folder's settings.
 
 ### 2.3 Automatic unlock after a restart (opt-in)
 
 Off by default: after a restart every encrypted folder is locked. When turned on (at
-creation, or later with the password, which rynas checks first), the password is sealed with
-`systemd-creds encrypt` (`--name` bound to the folder) into
-`/var/lib/rynas/crypt/<unit>.cred` (0600): with a TPM2 it is bound to this machine's TPM and
-the host key, else to the host key `/var/lib/systemd/credential.secret` on the system disk.
-rynasd unlocks those folders when it starts. The UI says what this means: it protects data
+creation, or later with the password, which rynas checks read-only with `gocryptfs-xray`),
+the password is sealed with `systemd-creds encrypt` (`--name` bound to the folder) into
+`/var/lib/rynas/crypt/<unit>.cred` (0600). The key is always named: `--with-key=host+tpm2`
+when `systemd-creds has-tpm2 --quiet` says yes (what `CryptInfo.tpm2` and the UI then
+promise), else `--with-key=host` (the host key `/var/lib/systemd/credential.secret` on the
+system disk; the UI says "host key only"). The new file is written as `<file>.new` and
+renamed over the old one. After a password change the new password is sealed the same way;
+if that fails the change still succeeds, the stale credential (old password) is removed and
+the answer says "automatic unlock turned off: <reason>" (`CryptPasswordResponse`).
+The folders are unlocked at boot by `rynas-crypt-unlock.service` before the container
+engines (§2.1) and again by rynasd when it starts (idempotent). A failed automatic unlock is a
+notification (category storage, error) besides the log. At rynasd's start, credential files
+a crash left in `/run/rynas/crypt` are wiped. The UI says what this means: it protects data
 disks that leave the NAS (sold, returned under warranty, stolen without the system disk), not
 a NAS stolen whole (without TPM2) or someone with root access. A key on a USB drive is left
 for later.
@@ -150,8 +204,8 @@ for later.
 
 `gocryptfs` (Debian main) is installed on demand from the encryption section of the share
 dialog: task `crypt.install`, `apt-get install gocryptfs` in a transient unit (the same
-helper as System > Updates). `GET /api/v1/crypt` tells whether it is installed, its version
-and whether a TPM2 is present.
+helper as System > Updates). `GET /api/v1/crypt` tells whether it is installed, its version,
+whether that version is supported (2.5 or newer) and whether a TPM2 is usable.
 
 ## 3. API
 
@@ -160,11 +214,18 @@ and whether a TPM2 is present.
 | GET | `/api/v1/crypt` | — | `CryptInfo` |
 | POST | `/api/v1/crypt/install` | — | 202 task `crypt.install` |
 | POST | `/api/v1/crypt/folders` | `CryptCreateRequest {volume, name, password, auto_unlock}` | 202 task `crypt.create` (creates, initialises, mounts) |
-| POST | `/api/v1/crypt/folders/{volume}/{name}/reveal-recovery-key` | — | `RecoveryKey`, once within the hour |
-| POST | `/api/v1/shares/{share}/unlock` | `CryptUnlockRequest {password}` | `ShareView`; 400 `crypt_wrong_password` |
-| POST | `/api/v1/shares/{share}/lock` | — | `ShareView`; 409 `crypt_busy` |
-| POST | `/api/v1/shares/{share}/crypt/password` | `CryptPasswordRequest {current, recovery, new_password}` | 204; 400 `crypt_wrong_password` |
+| POST | `/api/v1/crypt/folders/{volume}/{name}/reveal-recovery-key` | — | `RecoveryKey`, once within the hour, to its creator |
+| POST | `/api/v1/crypt/folders/{volume}/{name}/recovery-key` | `CryptRecoveryKeyRequest {password}` | `RecoveryKey`; 400 `crypt_wrong_password` |
+| POST | `/api/v1/shares/{share}/unlock` | `CryptUnlockRequest {password}` | `CryptUnlockResponse {share, containers}`; 400 `crypt_wrong_password`; 409 `crypt_busy` (`in_use` with containers) |
+| POST | `/api/v1/shares/{share}/lock` | — | `ShareView`; 409 `crypt_busy` (open files, running containers, still served elsewhere) |
+| POST | `/api/v1/shares/{share}/crypt/password` | `CryptPasswordRequest {current, recovery, new_password}` | `CryptPasswordResponse {auto_unlock_off}`; 400 `crypt_wrong_password` |
 | PUT | `/api/v1/shares/{share}/crypt/auto-unlock` | `CryptAutoUnlockRequest {enabled, password}` | `ShareView` |
+| POST | `/v1/crypt/auto-unlock` (rynasd only, root peers) | — | unlocked paths |
+
+Every write is for administrators, checked by rynas-web and again by rynasd. Passwords: 8 to
+256 characters, no control characters (the same rule in the UI and the API). Secret request
+fields are moved into wiped `Secret`s, command standard input is wiped when dropped, the
+recovery key answer is serialised from a copy that is wiped.
 
 The share actions work on the applied share. The UI creates the folder first (task), then
 stages the share with `encrypted: true` and applies it, then shows the recovery key. An
@@ -176,15 +237,50 @@ with its ciphertext; a folder kept without share stays encrypted and can be shar
 Experimental; files are encrypted one by one (FUSE), slower than a plain folder on small
 files; compression and deduplication give nothing; snapshots, replication and backups of the
 folder hold ciphertext (restores need the password or the recovery key); apps and Docker
-containers using the folder see an empty, read-only folder while it is locked; encryption is
-chosen when the folder is created (an existing folder is not converted: copy the files into
-a new encrypted folder).
+containers see an empty, read-only folder while it is locked, and those started meanwhile
+must be restarted after the unlock (the unlock offers it); a folder is not locked while
+running containers use it; encryption is chosen when the folder is created (an existing
+folder is not converted: copy the files into a new encrypted folder).
+
+### 4.1 Backups and restores
+
+A restic job (Backup page) with an encrypted share as source backs up its **ciphertext
+directory** `<place>/.rynas-crypt/<name>` (with `gocryptfs.conf` and the key check), locked or
+not: the backup stays encrypted, as the UI promises, and the mount point is never read (an
+empty locked folder would make an empty snapshot and let the retention expire the real ones).
+A folder source on the mount point of an encrypted folder is treated the same way. Without
+`gocryptfs.conf` the source fails, so nothing is expired. Exclude patterns do not match the
+encrypted names. The job editor shows the ciphertext folder next to such a share and a note.
+
+Restore: restore the snapshot's `<place>/.rynas-crypt/<name>` folder (to a new place, or
+over the folder while it is locked and unused), then either use it as is (same place: unlock
+with the password that was valid when the snapshot was taken) or open it anywhere with
+`gocryptfs <restored folder> <mount point>` and that password; a lost password is reset from
+the restored copy with `gocryptfs -passwd -masterkey stdin` and the recovery key. Snapshot
+jobs on the ciphertext directory are listed and deleted with the folder.
 
 ## 5. Not in this phase
 
 - Converting an existing folder in place (copy into a new encrypted folder instead).
 - Key on a USB drive, Tang/Clevis, KMIP.
 - Unlock with the recovery key directly (reset the password with it, then unlock).
-- Snapshot jobs and backups that pick the ciphertext subvolume from the share (they can be
-  pointed at `<place>/.rynas-crypt/<name>` by path today).
+- Snapshot jobs that pick the ciphertext subvolume from the share (they can be pointed at
+  `<place>/.rynas-crypt/<name>` by path; backups already do it, §4.1).
 - fscrypt backend once btrfs supports it in a Debian kernel.
+
+## 6. Security review fixes (2026-11-08)
+
+| # | Finding | Fix |
+|---|---|---|
+| 1 | `-init` secrets in the wrong order | password, then key (checked live with 2.5.1 and 2.6.1); every stdin order pinned by tests and an ignored live test (`live_gocryptfs_secret_order`) |
+| 2 | Lock reported "locked" while a container kept the plaintext | lock refused while running containers use the folder; a unit still running after the unmount is "still in use" (`in_use`), never locked; unlock handles the stale unit; delete refused while it runs |
+| 3 | Containers started while locked keep the empty folder | unlock lists them and the UI restarts them; boot unit before the container engines; texts fixed |
+| 4 | Backups read the mount point | the ciphertext directory is backed up; a missing ciphertext fails the source (§4.1) |
+| 5 | Recovery key easily lost | shown again with the password (`gocryptfs-xray`); a failed final unlock keeps the folder |
+| 6 | Password change with automatic unlock | new credential written then renamed; a failed seal reports the change with "automatic unlock turned off" |
+| 7 | TPM promised but `auto` used | `systemd-creds has-tpm2`, explicit `--with-key`; failed boot unlock notified |
+| low | | one password limit (256 characters, no control characters); key check inside the ciphertext (migrated); folder delete removes the ciphertext's snapshots and nested subvolumes; leftover credentials wiped at start; secrets wiped (request fields moved, `Cmd` stdin, key answer); never `vfs_btrfs` on encrypted shares; gocryptfs 2.5 required; admin enforced in rynasd and the one-time reveal bound to its creator |
+
+Not verified live (needs root, systemd and Docker): the `in_use` path with a real container
+and the boot unit's ordering; they are covered by the in-memory backend's tests and the
+command-line tests.

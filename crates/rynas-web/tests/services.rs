@@ -75,7 +75,12 @@ async fn rig() -> Rig {
         "rynas",
     ));
     let mut st = DaemonState::new(Arc::new(FakeAuth), totp, clock);
-    let ops = Arc::new(Ops::new(Arc::new(config), tasks));
+    let mut ops = Ops::new(Arc::new(config), tasks);
+    // rynasd checks administrators itself (encrypted folders...): the test login is one
+    ops.admins = rynasd::roles::AdminPolicy::new(vec!["rynas-admin".into()], |u| {
+        (u == "admin").then(|| vec!["rynas-admin".to_string()])
+    });
+    let ops = Arc::new(ops);
     st.services = Some(Arc::new(Services {
         ops: ops.clone(),
         users,
@@ -213,7 +218,26 @@ async fn encrypted_folder_lifecycle() {
     assert_eq!((r.status, r.code()), (StatusCode::BAD_REQUEST, error_codes::CRYPT_WRONG_PASSWORD.into()));
     let r = app.send(Method::POST, "/api/v1/shares/secret/unlock", &c, Some(json!({ "password": pw }))).await;
     assert_eq!(r.status, StatusCode::OK, "{}", String::from_utf8_lossy(&r.body));
-    assert_eq!(r.json::<ShareView>().status.crypt.unwrap().state, CryptState::Unlocked);
+    let u: rynas_api_types::CryptUnlockResponse = r.json();
+    assert_eq!(u.share.status.crypt.unwrap().state, CryptState::Unlocked);
+    assert!(u.containers.is_empty());
+
+    // the recovery key again, with the password only
+    let again = "/api/v1/crypt/folders/vol1/secret/recovery-key";
+    let r = app.send(Method::POST, again, &c, Some(json!({ "password": "not the password" }))).await;
+    assert_eq!(r.code(), error_codes::CRYPT_WRONG_PASSWORD);
+    let r = app.send(Method::POST, again, &c, Some(json!({ "password": pw }))).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", String::from_utf8_lossy(&r.body));
+    assert_eq!(r.json::<RecoveryKey>().key, key.key);
+
+    // a copy still served elsewhere is never reported as locked
+    rig.crypt.set_elsewhere("/vol1/secret", true);
+    let r = app.send(Method::POST, "/api/v1/shares/secret/lock", &c, None).await;
+    assert_eq!((r.status, r.code()), (StatusCode::CONFLICT, error_codes::CRYPT_BUSY.into()));
+    let v: ShareView = app.get("/api/v1/shares/secret", &c).await.json();
+    assert_eq!(v.status.crypt.unwrap().state, CryptState::InUse);
+    let r = app.send(Method::POST, "/api/v1/shares/secret/unlock", &c, Some(json!({ "password": pw }))).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", String::from_utf8_lossy(&r.body));
 
     // a new password from the recovery key (typed with spaces), the old one stops working
     let new = "a much better passphrase";
@@ -225,7 +249,8 @@ async fn encrypted_folder_lifecycle() {
             Some(json!({ "current": key.key.replace('-', " "), "recovery": true, "new_password": new })),
         )
         .await;
-    assert_eq!(r.status, StatusCode::NO_CONTENT, "{}", String::from_utf8_lossy(&r.body));
+    assert_eq!(r.status, StatusCode::OK, "{}", String::from_utf8_lossy(&r.body));
+    assert_eq!(r.json::<rynas_api_types::CryptPasswordResponse>().auto_unlock_off, None);
     let r = app
         .send(Method::POST, "/api/v1/shares/secret/crypt/password", &c, Some(json!({ "current": pw, "new_password": "whatever else" })))
         .await;
@@ -241,6 +266,16 @@ async fn encrypted_folder_lifecycle() {
         .await;
     assert_eq!(r.status, StatusCode::OK, "{}", String::from_utf8_lossy(&r.body));
     assert!(r.json::<ShareView>().status.crypt.unwrap().auto_unlock);
+    // a password change whose new seal fails: changed, auto-unlock reported off
+    rig.crypt.set_seal_fails(true);
+    let r = app
+        .send(Method::POST, "/api/v1/shares/secret/crypt/password", &c, Some(json!({ "current": new, "new_password": "third password!" })))
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", String::from_utf8_lossy(&r.body));
+    assert!(r.json::<rynas_api_types::CryptPasswordResponse>().auto_unlock_off.is_some());
+    rig.crypt.set_seal_fails(false);
+    let v: ShareView = app.get("/api/v1/shares/secret", &c).await.json();
+    assert!(!v.status.crypt.unwrap().auto_unlock);
     let r = app
         .send(Method::PUT, "/api/v1/shares/secret/crypt/auto-unlock", &c, Some(json!({ "enabled": false })))
         .await;

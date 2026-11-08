@@ -117,4 +117,6 @@ systemd-units = [
     # neither runs at install time
     { unit-scripts = "../../packaging/systemd", unit-name = "rynas-net-guard", enable = true, start = false },
     { unit-scripts = "../../packaging/systemd", unit-name = "rynas-net-watchdog", enable = true, start = false },
+    # encrypted folders (D-CRYPT E1): automatic unlock at boot, before the container engines
+    { unit-scripts = "../../packaging/systemd", unit-name = "rynas-crypt-unlock", enable = true, start = false },
 ]

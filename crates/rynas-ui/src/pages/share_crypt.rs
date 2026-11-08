@@ -8,7 +8,9 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use rynas_api_types::storage::RecoveryKey;
-use rynas_api_types::{CryptInfo, CryptState, CryptStatus, ShareView, TaskStatus, error_codes};
+use rynas_api_types::{
+    CryptInfo, CryptPasswordResponse, CryptState, CryptStatus, CryptUnlockResponse, ShareView, TaskStatus, error_codes,
+};
 use serde_json::json;
 
 use crate::api;
@@ -18,8 +20,12 @@ use crate::icons::{self, Icon};
 use crate::toast::toast;
 use crate::ui::{self, Modal, Remote, Tone};
 
-/// Minimum length, as the server checks it.
+/// Password length in characters, as the server checks it (`rynas_services::crypt`).
 const MIN_LEN: usize = 8;
+const MAX_LEN: usize = 256;
+/// `maxlength` of the password inputs: it counts UTF-16 units, so 256 characters may need
+/// twice as many; the character limit itself is [`password_problem`]'s.
+const INPUT_MAX: u32 = 2 * MAX_LEN as u32;
 
 /// The encryption part of the new-folder form.
 #[derive(Clone, Copy)]
@@ -50,7 +56,7 @@ impl CryptForm {
 fn password_problem(pw: &str, pw2: &str) -> Option<&'static str> {
     if pw.chars().count() < MIN_LEN {
         Some("pw.too_short")
-    } else if pw.chars().count() > 256 {
+    } else if pw.chars().count() > MAX_LEN {
         Some("pw.too_long")
     } else if pw.chars().any(char::is_control) {
         Some("pw.control")
@@ -130,11 +136,15 @@ pub fn create_fields(f: CryptForm, show: RwSignal<bool>) -> AnyView {
                 }
                 .into_any();
             }
+            if !i.supported {
+                let v = i.version.clone().unwrap_or_else(|| "?".into());
+                return ui::note(Tone::Err, icons::TRIANGLE_ALERT, view! { {tf("crypt.too_old", &[("version", &v)])} }.into_any());
+            }
             view! {
                 {ui::note(Tone::Warn, icons::TRIANGLE_ALERT, limits())}
-                {text_field("crypt.password", f.pw.into(), Callback::new(move |v| f.pw.set(v)), pw_err, In { kind: "password", autocomplete: "new-password", maxlength: 256, help: Some("crypt.password_help"), ..In::default() })}
+                {text_field("crypt.password", f.pw.into(), Callback::new(move |v| f.pw.set(v)), pw_err, In { kind: "password", autocomplete: "new-password", maxlength: INPUT_MAX, help: Some("crypt.password_help"), ..In::default() })}
                 {strength_meter(score)}
-                {text_field("pw.confirm", f.pw2.into(), Callback::new(move |v| f.pw2.set(v)), pw2_err, In { kind: "password", autocomplete: "new-password", maxlength: 256, ..In::default() })}
+                {text_field("pw.confirm", f.pw2.into(), Callback::new(move |v| f.pw2.set(v)), pw2_err, In { kind: "password", autocomplete: "new-password", maxlength: INPUT_MAX, ..In::default() })}
                 {switch("crypt.auto", None, auto, set_auto)}
                 {auto_help(i.tpm2)}
             }
@@ -145,17 +155,27 @@ pub fn create_fields(f: CryptForm, show: RwSignal<bool>) -> AnyView {
 }
 
 /// Creates the folder (task `crypt.create`) and fetches its recovery key at once, so the key
-/// is not lost when a later step (the share, the apply) fails.
-pub async fn create_folder(volume: &str, name: &str, f: CryptForm) -> Result<String, String> {
+/// is not lost when a later step (the share, the apply) fails. `Err`: no folder; `Ok(Err)`:
+/// the folder exists but its key could not be fetched (shown again later with the password).
+pub async fn create_folder(volume: &str, name: &str, f: CryptForm) -> Result<Result<String, String>, String> {
     let body = json!({ "volume": volume, "name": name, "password": f.pw.get_untracked(), "auto_unlock": f.auto.get_untracked() });
     let task = crate::tasks::run_task("/api/v1/crypt/folders", Some(body.to_string())).await.map_err(|e| e.text())?;
     if task.status != TaskStatus::Ok {
         return Err(crate::tasks::task_error(&task));
     }
+    let base = format!("/api/v1/crypt/folders/{}/{}", api::encode(volume), api::encode(name));
+    let once = api::post::<(), RecoveryKey>(&format!("{base}/reveal-recovery-key"), None).await;
+    // the kept key is gone (rynasd restarted in between): read it again with the password
+    let key = match once {
+        Ok(k) => Ok(k.key),
+        Err(_) => {
+            let body = json!({ "password": f.pw.get_untracked() });
+            api::post::<_, RecoveryKey>(&format!("{base}/recovery-key"), Some(&body)).await.map(|k| k.key).map_err(|e| e.text())
+        }
+    };
     let _ = f.pw.try_set(String::new());
     let _ = f.pw2.try_set(String::new());
-    let url = format!("/api/v1/crypt/folders/{}/{}/reveal-recovery-key", api::encode(volume), api::encode(name));
-    api::post::<(), RecoveryKey>(&url, None).await.map(|k| k.key).map_err(|e| e.text())
+    Ok(key)
 }
 
 /// The recovery key of a new encrypted folder, shown once.
@@ -168,7 +188,7 @@ pub fn RecoveryDialog(name: String, key: String, on_done: Callback<()>) -> impl 
     view! {
         <Modal title=tf("sto.rk_title", &[("name", &name)]) on_close=Callback::new(|_| ())>
             <p class="muted small">{tr("crypt.rk_text")}</p>
-            {super::storage::volume::key_once(key.get_value(), file, on_done)}
+            {super::storage::volume::key_once(key.get_value(), file, "crypt.rk_keep", on_done)}
         </Modal>
     }
 }
@@ -178,6 +198,7 @@ pub fn state_chip(st: &CryptStatus) -> AnyView {
     match st.state {
         CryptState::Unlocked => ui::status(Tone::Ok, t("crypt.unlocked").to_string()),
         CryptState::Locked => ui::status(Tone::Warn, t("crypt.locked").to_string()),
+        CryptState::InUse => ui::status(Tone::Warn, t("crypt.in_use").to_string()),
         CryptState::Missing => ui::status(Tone::Err, t("crypt.missing").to_string()),
     }
 }
@@ -189,6 +210,8 @@ pub enum Action {
     Lock(String),
     Password(String),
     AutoOn(String),
+    /// The recovery key again: the share's name and its folder's path.
+    Reveal(String, String),
 }
 
 /// The dialog of an [`Action`]; `done` gets the share's new view (none for a password).
@@ -196,8 +219,9 @@ pub fn action_dialog(a: Action, close: Callback<()>, done: Callback<Option<Share
     match a {
         Action::Unlock(n) => view! { <UnlockDialog name=n on_close=close on_done=done /> }.into_any(),
         Action::Lock(n) => view! { <LockDialog name=n on_close=close on_done=done /> }.into_any(),
-        Action::Password(n) => view! { <PasswordDialog name=n on_close=close /> }.into_any(),
+        Action::Password(n) => view! { <PasswordDialog name=n on_close=close on_done=done /> }.into_any(),
         Action::AutoOn(n) => view! { <AutoDialog name=n on_close=close on_done=done /> }.into_any(),
+        Action::Reveal(n, path) => view! { <RevealDialog name=n path=path on_close=close /> }.into_any(),
     }
 }
 
@@ -215,6 +239,8 @@ fn UnlockDialog(name: String, on_close: Callback<()>, on_done: Callback<Option<S
     let pass = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
+    // running containers that still see the locked (empty) folder after the unlock
+    let stale = RwSignal::new(Vec::<String>::new());
     let n = StoredValue::new(name.clone());
     on_cleanup(move || {
         let _ = pass.try_set(String::new());
@@ -229,35 +255,79 @@ fn UnlockDialog(name: String, on_close: Callback<()>, on_done: Callback<Option<S
         error.set(None);
         spawn_local(async move {
             let name = n.get_value();
-            let r = api::post::<_, ShareView>(&share_url(&name, "unlock"), Some(&json!({ "password": p }))).await;
+            let r = api::post::<_, CryptUnlockResponse>(&share_url(&name, "unlock"), Some(&json!({ "password": p }))).await;
             let _ = busy.try_set(false);
+            let _ = pass.try_set(String::new());
             match r {
                 Ok(v) => {
                     toast(Tone::Ok, tf("crypt.unlocked_toast", &[("name", &name)]));
-                    on_done.run(Some(v));
-                    on_close.run(());
+                    on_done.run(Some(v.share));
+                    if v.containers.is_empty() {
+                        on_close.run(());
+                    } else {
+                        let _ = stale.try_set(v.containers);
+                    }
                 }
                 Err(e) => {
-                    let _ = pass.try_set(String::new());
                     let _ = error.try_set(Some(error_text(&e)));
                 }
             }
         });
     };
+    let restart = move |_| {
+        busy.set(true);
+        error.set(None);
+        spawn_local(async move {
+            let mut failed = Vec::new();
+            for c in stale.get_untracked() {
+                let url = format!("/api/v1/docker/containers/{}/restart", api::encode(&c));
+                match crate::tasks::run_task(&url, None).await {
+                    Ok(task) if task.status == TaskStatus::Ok => {}
+                    Ok(task) => failed.push(format!("{c}: {}", crate::tasks::task_error(&task))),
+                    Err(e) => failed.push(format!("{c}: {}", e.text())),
+                }
+            }
+            let _ = busy.try_set(false);
+            if failed.is_empty() {
+                toast(Tone::Ok, t("crypt.restarted").to_string());
+                on_close.run(());
+            } else {
+                let _ = error.try_set(Some(failed.join("; ")));
+            }
+        });
+    };
     view! {
         <Modal title=tf("sto.unlock_title", &[("name", &name)]) on_close=on_close>
-            <form class="form" on:submit=submit>
-                <p class="muted small">{tr("crypt.unlock_text")}</p>
-                <label class="field">
-                    <span class="field-label">{tr("crypt.password")}</span>
-                    <input class="input" type="password" autocomplete="current-password" maxlength="256" prop:value=move || pass.get() on:input=move |ev| pass.set(event_target_value(&ev)) />
-                </label>
-                {form_error(error)}
-                <div class="dialog-foot">
-                    <button class="btn ghost" type="button" on:click=move |_| on_close.run(())>{tr("cancel")}</button>
-                    <button class="btn primary" type="submit" disabled=move || busy.get() || pass.with(String::is_empty)>{spinner(busy)}{tr("crypt.unlock")}</button>
-                </div>
-            </form>
+            {move || if stale.with(Vec::is_empty) {
+                view! {
+                    <form class="form" on:submit=submit>
+                        <p class="muted small">{tr("crypt.unlock_text")}</p>
+                        <label class="field">
+                            <span class="field-label">{tr("crypt.password")}</span>
+                            <input class="input" type="password" autocomplete="current-password" maxlength=INPUT_MAX prop:value=move || pass.get() on:input=move |ev| pass.set(event_target_value(&ev)) />
+                        </label>
+                        {form_error(error)}
+                        <div class="dialog-foot">
+                            <button class="btn ghost" type="button" on:click=move |_| on_close.run(())>{tr("cancel")}</button>
+                            <button class="btn primary" type="submit" disabled=move || busy.get() || pass.with(String::is_empty)>{spinner(busy)}{tr("crypt.unlock")}</button>
+                        </div>
+                    </form>
+                }
+                .into_any()
+            } else {
+                view! {
+                    <div class="form">
+                        {ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {tr("crypt.stale_text")} }.into_any())}
+                        <ul class="nocow-costs">{stale.get().into_iter().map(|c| view! { <li class="mono">{c}</li> }).collect_view()}</ul>
+                        {form_error(error)}
+                        <div class="dialog-foot">
+                            <button class="btn ghost" type="button" on:click=move |_| on_close.run(())>{tr("crypt.later")}</button>
+                            <button class="btn primary" type="button" disabled=move || busy.get() on:click=restart>{spinner(busy)}{tr("crypt.restart")}</button>
+                        </div>
+                    </div>
+                }
+                .into_any()
+            }}
         </Modal>
     }
 }
@@ -296,7 +366,7 @@ fn LockDialog(name: String, on_close: Callback<()>, on_done: Callback<Option<Sha
 }
 
 #[component]
-fn PasswordDialog(name: String, on_close: Callback<()>) -> impl IntoView {
+fn PasswordDialog(name: String, on_close: Callback<()>, on_done: Callback<Option<ShareView>>) -> impl IntoView {
     const MODES: &[(&str, &str)] = &[("password", "crypt.pw_current"), ("recovery", "crypt.pw_recovery")];
     let mode = RwSignal::new("password".to_string());
     let cur = RwSignal::new(String::new());
@@ -336,11 +406,18 @@ fn PasswordDialog(name: String, on_close: Callback<()>) -> impl IntoView {
         let body = json!({ "current": cur.get_untracked(), "recovery": mode.get_untracked() == "recovery", "new_password": pw.get_untracked() });
         spawn_local(async move {
             let name = n.get_value();
-            let r = api::post_empty(&share_url(&name, "crypt/password"), Some(&body)).await;
+            let r = api::post::<_, CryptPasswordResponse>(&share_url(&name, "crypt/password"), Some(&body)).await;
             let _ = busy.try_set(false);
             match r {
-                Ok(()) => {
+                Ok(res) => {
                     toast(Tone::Ok, tf("crypt.pw_done", &[("name", &name)]));
+                    if let Some(why) = res.auto_unlock_off {
+                        // changed, but the folder no longer unlocks by itself: say so and
+                        // show the new state
+                        toast(Tone::Warn, format!("{}{}{why}", t("crypt.auto_off"), api::DETAIL_SEP));
+                        let v = api::get::<ShareView>(&format!("/api/v1/shares/{}", api::encode(&name))).await.ok();
+                        on_done.run(v);
+                    }
                     on_close.run(());
                 }
                 Err(e) => {
@@ -356,11 +433,11 @@ fn PasswordDialog(name: String, on_close: Callback<()>) -> impl IntoView {
                 {move || if mode.get() == "recovery" {
                     text_field("crypt.pw_recovery", cur.into(), Callback::new(move |v| cur.set(v)), Signal::derive(|| None), In { mono: true, maxlength: 200, help: Some("crypt.pw_recovery_help"), ..In::default() })
                 } else {
-                    text_field("crypt.pw_current", cur.into(), Callback::new(move |v| cur.set(v)), Signal::derive(|| None), In { kind: "password", autocomplete: "current-password", maxlength: 256, ..In::default() })
+                    text_field("crypt.pw_current", cur.into(), Callback::new(move |v| cur.set(v)), Signal::derive(|| None), In { kind: "password", autocomplete: "current-password", maxlength: INPUT_MAX, ..In::default() })
                 }}
-                {text_field("pw.new", pw.into(), Callback::new(move |v| pw.set(v)), pw_err, In { kind: "password", autocomplete: "new-password", maxlength: 256, ..In::default() })}
+                {text_field("pw.new", pw.into(), Callback::new(move |v| pw.set(v)), pw_err, In { kind: "password", autocomplete: "new-password", maxlength: INPUT_MAX, ..In::default() })}
                 {strength_meter(score)}
-                {text_field("pw.confirm", pw2.into(), Callback::new(move |v| pw2.set(v)), pw2_err, In { kind: "password", autocomplete: "new-password", maxlength: 256, ..In::default() })}
+                {text_field("pw.confirm", pw2.into(), Callback::new(move |v| pw2.set(v)), pw2_err, In { kind: "password", autocomplete: "new-password", maxlength: INPUT_MAX, ..In::default() })}
                 {form_error(error)}
                 <div class="dialog-foot">
                     <button class="btn ghost" type="button" on:click=move |_| on_close.run(())>{tr("cancel")}</button>
@@ -411,7 +488,7 @@ fn AutoDialog(name: String, on_close: Callback<()>, on_done: Callback<Option<Sha
                 {move || auto_help(info.data.with(|i| i.as_ref().is_some_and(|i| i.tpm2)))}
                 <label class="field">
                     <span class="field-label">{tr("crypt.password")}</span>
-                    <input class="input" type="password" autocomplete="current-password" maxlength="256" prop:value=move || pass.get() on:input=move |ev| pass.set(event_target_value(&ev)) />
+                    <input class="input" type="password" autocomplete="current-password" maxlength=INPUT_MAX prop:value=move || pass.get() on:input=move |ev| pass.set(event_target_value(&ev)) />
                 </label>
                 {form_error(error)}
                 <div class="dialog-foot">
@@ -423,10 +500,77 @@ fn AutoDialog(name: String, on_close: Callback<()>, on_done: Callback<Option<Sha
     }
 }
 
+/// The recovery key again, read with the folder's password.
+#[component]
+fn RevealDialog(name: String, path: String, on_close: Callback<()>) -> impl IntoView {
+    let pass = RwSignal::new(String::new());
+    let busy = RwSignal::new(false);
+    let error = RwSignal::new(None::<String>);
+    let key = RwSignal::new(None::<String>);
+    let url = rynas_api_types::storage::split_volume_path(&path)
+        .map(|(v, n)| format!("/api/v1/crypt/folders/{}/{}/recovery-key", api::encode(&v), api::encode(n)));
+    let url = StoredValue::new(url);
+    on_cleanup(move || {
+        let _ = pass.try_set(String::new());
+        let _ = key.try_set(None);
+    });
+    let submit = move |ev: leptos::ev::SubmitEvent| {
+        ev.prevent_default();
+        let p = pass.get_untracked();
+        let Some(u) = url.get_value() else { return };
+        if p.is_empty() {
+            return;
+        }
+        busy.set(true);
+        error.set(None);
+        spawn_local(async move {
+            let r = api::post::<_, RecoveryKey>(&u, Some(&json!({ "password": p }))).await;
+            let _ = busy.try_set(false);
+            let _ = pass.try_set(String::new());
+            match r {
+                Ok(k) => {
+                    let _ = key.try_set(Some(k.key));
+                }
+                Err(e) => {
+                    let _ = error.try_set(Some(error_text(&e)));
+                }
+            }
+        });
+    };
+    let file = format!("recovery-key-{name}.txt");
+    view! {
+        <Modal title=tf("sto.rk_title", &[("name", &name)]) on_close=on_close>
+            {move || match key.get() {
+                Some(k) => view! {
+                    <p class="muted small">{tr("crypt.rk_text")}</p>
+                    {super::storage::volume::key_once(k, file.clone(), "crypt.rk_keep", on_close)}
+                }
+                .into_any(),
+                None => view! {
+                    <form class="form" on:submit=submit>
+                        <p class="muted small">{tr("crypt.reveal_text")}</p>
+                        <label class="field">
+                            <span class="field-label">{tr("crypt.password")}</span>
+                            <input class="input" type="password" autocomplete="current-password" maxlength=INPUT_MAX prop:value=move || pass.get() on:input=move |ev| pass.set(event_target_value(&ev)) />
+                        </label>
+                        {form_error(error)}
+                        <div class="dialog-foot">
+                            <button class="btn ghost" type="button" on:click=move |_| on_close.run(())>{tr("cancel")}</button>
+                            <button class="btn primary" type="submit" disabled=move || busy.get() || pass.with(String::is_empty)>{spinner(busy)}{tr("sto.rk_reveal")}</button>
+                        </div>
+                    </form>
+                }
+                .into_any(),
+            }}
+        </Modal>
+    }
+}
+
 /// The encryption section of an existing encrypted folder's editor.
 pub fn existing(v: &ShareView) -> Option<AnyView> {
     let st = RwSignal::new(v.status.crypt.clone()?);
     let name = StoredValue::new(v.share.name.clone());
+    let path = StoredValue::new(v.share.path.clone());
     let act = RwSignal::new(None::<Action>);
     let off_busy = RwSignal::new(false);
     let off_err = RwSignal::new(None::<String>);
@@ -467,7 +611,7 @@ pub fn existing(v: &ShareView) -> Option<AnyView> {
                     {move || st.with(state_chip)}
                     {move || {
                         let locked = st.with(|s| s.state == CryptState::Locked);
-                        let unlocked = st.with(|s| s.state == CryptState::Unlocked);
+                        let unlocked = st.with(|s| matches!(s.state, CryptState::Unlocked | CryptState::InUse));
                         view! {
                             {locked.then(|| view! {
                                 <button type="button" class="btn ghost sm" on:click=move |_| act.set(Some(Action::Unlock(name.get_value())))>
@@ -483,6 +627,9 @@ pub fn existing(v: &ShareView) -> Option<AnyView> {
                     }}
                     <button type="button" class="btn ghost sm" on:click=move |_| act.set(Some(Action::Password(name.get_value())))>
                         <Icon icon=icons::KEY size=14 />{tr("crypt.pw_change")}
+                    </button>
+                    <button type="button" class="btn ghost sm" on:click=move |_| act.set(Some(Action::Reveal(name.get_value(), path.get_value())))>
+                        <Icon icon=icons::KEY size=14 />{tr("sto.rk_reveal")}
                     </button>
                 </div>
                 <span class="field-help">{tr("crypt.existing_help")}</span>

@@ -1,0 +1,24 @@
+# rynas: automatic unlock of encrypted shared folders at boot (D-CRYPT E1,
+# docs/phase2/encrypted-folders.md §2.3). Only folders whose password is sealed on this
+# machine (/var/lib/rynas/crypt/*.cred) are unlocked; without any it does not even start.
+#
+# Ordered before the container engines: a container started on a locked folder binds the
+# empty mount point and keeps it after the unlock. Before= without Requires= only orders: if
+# the unlock fails (rynasd notifies it) or takes too long, Docker still starts.
+[Unit]
+Description=rynas: unlock encrypted folders set to unlock automatically
+Documentation=https://github.com/rylos/rynas
+Wants=rynasd.socket
+After=local-fs.target rynasd.socket
+Before=docker.service containerd.service podman.service
+RequiresMountsFor=/var/lib/rynas
+ConditionDirectoryNotEmpty=/var/lib/rynas/crypt
+
+[Service]
+Type=oneshot
+# rynasd (socket-activated) unlocks and answers when done; never fails the unit
+ExecStart=/usr/libexec/rynas/rynasctl crypt auto-unlock
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

@@ -527,11 +527,22 @@ fn job_editor(init: Option<BackupJobView>, shown_password: RwSignal<Option<Strin
     let orig_name = init.as_ref().map(|v| v.job.name.clone());
 
     let share_list = move || {
-        let names: Vec<(String, String)> = shares.data.with(|l| l.iter().flatten().map(|s| (s.share.name.clone(), s.share.path.clone())).collect());
+        // an encrypted share is backed up as its encrypted data: that folder is shown
+        let names: Vec<(String, String)> = shares.data.with(|l| {
+            l.iter()
+                .flatten()
+                .map(|s| {
+                    let p = s.status.crypt.as_ref().filter(|c| s.share.encrypted && !c.cipher_dir.is_empty()).map(|c| c.cipher_dir.clone());
+                    (s.share.name.clone(), p.unwrap_or_else(|| s.share.path.clone()))
+                })
+                .collect()
+        });
         if names.is_empty() {
             return view! { <p class="field-help">{tr("apps.w.no_shares_yet")}</p> }.into_any();
         }
+        let any_crypt = shares.data.with(|l| l.iter().flatten().any(|s| s.share.encrypted));
         view! {
+            {any_crypt.then(|| view! { <p class="field-help">{tr("bk.crypt_note")}</p> })}
             <fieldset class="bk-checks">
                 <legend class="field-label">{tr("apps.d.shares")}</legend>
                 {names.into_iter().map(|(n, p)| {

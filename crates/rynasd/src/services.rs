@@ -148,6 +148,15 @@ pub fn router(st: SvcState) -> Router {
             "/v1/crypt/folders/{volume}/{name}/reveal-recovery-key",
             post(crypt::reveal),
         )
+        .route(
+            "/v1/crypt/folders/{volume}/{name}/recovery-key",
+            post(crypt::recovery_key),
+        )
+        .merge(
+            Router::new()
+                .route("/v1/crypt/auto-unlock", post(crypt::auto_unlock_now))
+                .route_layer(axum::middleware::from_fn(crate::server::require_root_peer)),
+        )
         .route("/v1/shares/plan/delete", post(share_delete_plan))
         .route("/v1/folders", get(folders_list))
         .route("/v1/folders/plan/delete", post(folder_delete_plan))
@@ -1157,14 +1166,20 @@ async fn share_delete(
 // folders: deletion plans, folders without a share
 // ---------------------------------------------------------------------------------------------
 
-/// Snapshot jobs (as the session user sees them) taking snapshots of `path`.
+/// Snapshot jobs (as the session user sees them) taking snapshots of `path`; for an
+/// encrypted folder also those of its ciphertext directory (what its snapshots hold).
 fn jobs_of(s: &Services, owner: &str, path: &str) -> Res<Vec<(String, SnapshotSource)>> {
     let (snaps, _, _): (SnapshotsConfig, SnapshotsConfig, _) =
         docs(&s.ops.config, owner, SNAPSHOTS_KEY)?;
+    let cipher = rynas_services::crypt::cipher_dir(path)
+        .filter(|_| s.shares.crypt().state(path) != rynas_api_types::CryptState::Missing);
     Ok(snaps
         .jobs
         .iter()
-        .filter(|j| j.subvolume.trim_end_matches('/') == path)
+        .filter(|j| {
+            let sub = j.subvolume.trim_end_matches('/');
+            sub == path || cipher.as_deref() == Some(sub)
+        })
         .map(|j| {
             (
                 j.name.clone(),
@@ -1214,14 +1229,15 @@ fn all_shares(s: &Services, owner: &str) -> Res<Vec<Share>> {
     Ok(v)
 }
 
-/// Containers that mount `path` or something inside it (when Docker is installed).
-fn containers_using(path: &str) -> Vec<String> {
+/// Containers that mount `path` or something inside it (when Docker is installed);
+/// `running`: only the running ones (they hold a copy of the mounts they started with).
+fn containers_using(path: &str, running: bool) -> Vec<String> {
     if !std::path::Path::new("/usr/bin/docker").exists() {
         return Vec::new();
     }
     let t = std::time::Duration::from_secs(10);
     let Ok(ids) = rynas_tasks::Cmd::new("docker")
-        .args(["ps", "-aq"])
+        .args(if running { ["ps", "-q"] } else { ["ps", "-aq"] })
         .timeout(t)
         .run_blocking()
     else {
@@ -1310,7 +1326,7 @@ fn usages(
             jobs_removed: removed_jobs.clone(),
             jobs_kept: kept,
             tasks,
-            containers: containers_using(path),
+            containers: containers_using(path, false),
         },
         removed_jobs,
     ))

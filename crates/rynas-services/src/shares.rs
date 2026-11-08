@@ -127,7 +127,7 @@ pub fn warning_text(w: &ShareWarning) -> String {
         ShareWarningCode::SnapshotFolderNoJob => "the snapshot folder needs a snapshot job for this share: it appears once the share has one".into(),
         ShareWarningCode::SnapshotFolderNfs => "NFS clients see the snapshot folder only when the export includes the mounts below it (crossmnt)".into(),
         ShareWarningCode::CryptLocked => format!(
-            "{path} is encrypted and locked: SMB and NFS clients cannot connect and apps using it see an empty folder until it is unlocked"
+            "{path} is encrypted and locked: SMB and NFS clients cannot connect; apps and containers started while it is locked see an empty folder and must be restarted after it is unlocked"
         ),
         ShareWarningCode::Other => String::new(),
     }
@@ -654,7 +654,7 @@ impl SharesDomain {
         }
         // an encrypted folder is a mount point; its ciphertext is the subvolume
         if s.encrypted {
-            if self.crypt.state(&s.path) == CryptState::Locked {
+            if matches!(self.crypt.state(&s.path), CryptState::Locked | CryptState::InUse) {
                 w.push(at_path(ShareWarningCode::CryptLocked));
             }
         } else if info.exists && !info.subvolume {

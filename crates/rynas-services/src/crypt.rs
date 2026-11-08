@@ -40,14 +40,30 @@ pub const UNIT_PREFIX: &str = "rynas-crypt";
 pub const RUN_DIR: &str = "/run/rynas/crypt";
 /// Debian package.
 pub const PACKAGE: &str = "gocryptfs";
+/// Reads the master key of a ciphertext directory with its password (`-dumpmasterkey`):
+/// "show the recovery key again". Shipped in the Debian `gocryptfs` package.
+pub const XRAY: &str = "/usr/bin/gocryptfs-xray";
+/// Password length in characters, the same limit in the UI and the API (at most 1024 bytes
+/// of UTF-8: gocryptfs reads up to 2048).
 pub const PASSWORD_MIN: usize = 8;
-/// gocryptfs reads at most 2048 bytes; rynas keeps well below.
-pub const PASSWORD_MAX: usize = 1024;
+pub const PASSWORD_MAX: usize = 256;
 /// `gocryptfs` exit code for a wrong password.
 pub const EXIT_WRONG_PASSWORD: i32 = 12;
+/// The oldest gocryptfs with `-init -masterkey` (2.5.0; Debian 12 ships 2.3).
+pub const MIN_VERSION: (u32, u32) = (2, 5);
+/// The key check of a folder (SHA-256 of the master key, see [`key_check`]), in the root of
+/// its ciphertext directory so that snapshots, replicas and backups carry it. The name has
+/// the form of a gocryptfs long-name side file: gocryptfs skips such names silently when it
+/// lists a directory and `-fsck` does not report them (checked with 2.5.1 and 2.6.1), while
+/// any other extra name would log "could not decrypt entry" on every listing.
+pub const KEY_CHECK_FILE: &str = "gocryptfs.longname.rynas-key-check.name";
+/// How long a lock waits for gocryptfs to end after the unmount.
+const UNIT_STOP_WAIT: Duration = Duration::from_secs(5);
 const CMD_TIMEOUT: Duration = Duration::from_secs(60);
 /// Bytes of a gocryptfs master key.
 const KEY_LEN: usize = 32;
+/// The answer of a lock that unmounted the folder while gocryptfs still serves it elsewhere.
+pub const IN_USE_ELSEWHERE: &str = "the folder is unmounted for rynas but gocryptfs still serves a copy of it to another mount namespace (a container or service started while it was unlocked): stop it, then lock again";
 
 /// Why an operation failed. The texts never carry a secret.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,9 +112,72 @@ pub fn cipher_dir(path: &str) -> Option<String> {
     Some(format!("{parent}/{CRYPT_DIR}/{name}"))
 }
 
-/// The key-check file of a folder, next to its ciphertext (`<cipher>.check`).
+/// The key-check file of a folder, inside its ciphertext root ([`KEY_CHECK_FILE`]).
 fn check_file(cipher: &str) -> String {
-    format!("{cipher}.check")
+    format!("{}/{KEY_CHECK_FILE}", cipher.trim_end_matches('/'))
+}
+
+/// Where the first release kept the key check: `<cipher>.check`, outside the ciphertext
+/// subvolume (so snapshots and backups missed it).
+fn legacy_check_file(cipher: &str) -> String {
+    format!("{}.check", cipher.trim_end_matches('/'))
+}
+
+/// A key check as stored: 64 hex digits.
+fn valid_check(s: &str) -> bool {
+    let t = s.trim();
+    t.len() == 64 && t.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Writes a key check into the ciphertext root (0600, never through a link).
+fn write_check(cipher: &str, check: &str) -> std::io::Result<()> {
+    let f = check_file(cipher);
+    let tmp = format!("{f}.new");
+    let _ = std::fs::remove_file(&tmp);
+    let mut h = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&tmp)?;
+    h.write_all(format!("{}\n", check.trim()).as_bytes())?;
+    h.sync_all()?;
+    std::fs::rename(&tmp, &f)
+}
+
+/// Moves a key check from its old place (`<cipher>.check`) into the ciphertext root; a
+/// no-op when there is nothing to move.
+pub fn migrate_check(cipher: &str, log: &dyn Fn(&str)) {
+    let old = legacy_check_file(cipher);
+    let Ok(m) = std::fs::symlink_metadata(&old) else { return };
+    if !m.is_file() || !Path::new(cipher).join(CONF).is_file() {
+        return;
+    }
+    if !Path::new(&check_file(cipher)).is_file() {
+        match std::fs::read_to_string(&old) {
+            Ok(c) if valid_check(&c) => {
+                if let Err(e) = write_check(cipher, &c) {
+                    log(&format!("warning: moving {old} into {cipher}: {e}"));
+                    return;
+                }
+            }
+            _ => {
+                log(&format!("warning: {old} is not a key check: left alone"));
+                return;
+            }
+        }
+    }
+    log(&format!("key check of {cipher} moved inside its ciphertext"));
+    let _ = std::fs::remove_file(&old);
+}
+
+/// The stored key check of a folder (moved from its old place first).
+fn read_check(cipher: &str, log: &dyn Fn(&str)) -> Option<String> {
+    migrate_check(cipher, log);
+    std::fs::read_to_string(check_file(cipher))
+        .ok()
+        .filter(|c| valid_check(c))
+        .map(|c| c.trim().to_ascii_lowercase())
 }
 
 /// `systemd-escape --path` of `path`.
@@ -128,16 +207,18 @@ pub fn file_stem(path: &str) -> String {
     format!("{UNIT_PREFIX}-{hex}")
 }
 
-/// A password rynas accepts: 8–1024 bytes, one line (gocryptfs reads up to the newline).
+/// A password rynas accepts: 8–256 characters (the UI checks the same), no control
+/// characters (gocryptfs reads up to the newline).
 pub fn check_password(p: &str) -> Result<(), String> {
-    if p.chars().count() < PASSWORD_MIN {
+    let n = p.chars().count();
+    if n < PASSWORD_MIN {
         return Err(format!("the password needs at least {PASSWORD_MIN} characters"));
     }
-    if p.len() > PASSWORD_MAX {
-        return Err(format!("the password is longer than {PASSWORD_MAX} bytes"));
+    if n > PASSWORD_MAX {
+        return Err(format!("the password is longer than {PASSWORD_MAX} characters"));
     }
-    if p.chars().any(|c| c == '\n' || c == '\r' || c == '\0') {
-        return Err("the password cannot contain line breaks".into());
+    if p.chars().any(char::is_control) {
+        return Err("the password cannot contain line breaks, tabs or other control characters".into());
     }
     Ok(())
 }
@@ -196,16 +277,23 @@ pub fn key_check(master: &Secret) -> String {
 }
 
 /// `gocryptfs -init` with our master key and the password on standard input.
+///
+/// Order checked live with gocryptfs 2.5.1 (Debian 13) and 2.6.1 (trixie-backports): `-init`
+/// reads the **password first, then the master key** ("Reading Password from stdin",
+/// "Reading Masterkey from stdin"). The other order fails with "Could not parse master key"
+/// (exit 14), and a password made of 64 hex digits would silently swap the two roles.
 pub fn init_cmd(cipher: &str, master: &Secret, password: &Secret) -> Cmd {
     Cmd::new(GOCRYPTFS)
         .args(["-init", "-masterkey", "stdin", "--", cipher])
-        .stdin(format!("{}\n{}\n", master.expose(), password.expose()))
+        .stdin(format!("{}\n{}\n", password.expose(), master.expose()))
         .env_clear()
         .timeout(CMD_TIMEOUT)
 }
 
 /// `gocryptfs -passwd`: the current password (or with `recovery` the master key), then the
-/// new password, on standard input.
+/// new password, on standard input. Checked live with 2.5.1 and 2.6.1: plain `-passwd` reads
+/// the old password, then the new one; `-passwd -masterkey stdin` reads the master key, then
+/// the new password.
 pub fn passwd_cmd(cipher: &str, current: &Secret, recovery: bool, new: &Secret) -> Cmd {
     let mut c = Cmd::new(GOCRYPTFS).arg("-passwd");
     if recovery {
@@ -258,10 +346,32 @@ pub fn immutable_cmd(path: &str, on: bool) -> Cmd {
 }
 
 /// `systemd-creds encrypt` of the password (standard input) into `file`, bound to `name`.
-pub fn seal_cmd(name: &str, file: &str, password: &Secret) -> Cmd {
+/// The key is named, never `auto`: `host+tpm2` exactly when [`has_tpm2_cmd`] said yes (what
+/// the UI then promises), else `host` only.
+pub fn seal_cmd(name: &str, file: &str, password: &Secret, tpm2: bool) -> Cmd {
+    let key = if tpm2 { "--with-key=host+tpm2" } else { "--with-key=host" };
     Cmd::new("systemd-creds")
-        .args(["encrypt", &format!("--name={name}"), "-", file])
+        .args(["encrypt", &format!("--name={name}"), key, "-", file])
         .stdin(password.expose().as_bytes().to_vec())
+        .env_clear()
+        .timeout(CMD_TIMEOUT)
+}
+
+/// `systemd-creds has-tpm2 --quiet`: exit 0 only with full TPM2 support (firmware, driver,
+/// system and the libraries systemd needs), the test `systemd-creds` itself uses.
+pub fn has_tpm2_cmd() -> Cmd {
+    Cmd::new("systemd-creds").args(["has-tpm2", "--quiet"]).env_clear().timeout(Duration::from_secs(10))
+}
+
+/// `gocryptfs-xray -dumpmasterkey` of the folder's configuration, the password on standard
+/// input (checked live with 2.5.1 and 2.6.1: it prints the key as 64 hex digits; a wrong
+/// password prints "Password incorrect." and exits 8). Also the read-only password check:
+/// unlike `-passwd` it does not rewrite `gocryptfs.conf`.
+pub fn xray_cmd(cipher: &str, password: &Secret) -> Cmd {
+    let conf = format!("{}/{CONF}", cipher.trim_end_matches('/'));
+    Cmd::new(XRAY)
+        .args(["-dumpmasterkey", "--", &conf])
+        .stdin(format!("{}\n", password.expose()))
         .env_clear()
         .timeout(CMD_TIMEOUT)
 }
@@ -320,11 +430,37 @@ pub fn mounted_in(mountinfo: &str, path: &str) -> bool {
     last.is_some_and(|t| t == "fuse.gocryptfs")
 }
 
-/// `gocryptfs 2.5.1; go-fuse 2.5.1; 2025-01-23 go1.24.1 linux/amd64` → `2.5.1`.
+/// `gocryptfs 2.5.1; go-fuse 2.4.2; …` (Debian 13) or `gocryptfs v2.6.1; go-fuse [vendored];
+/// …` (upstream builds) → `2.5.1` / `2.6.1`.
 pub fn parse_version(out: &str) -> Option<String> {
     let first = out.lines().next()?.split(';').next()?;
     let v = first.trim().strip_prefix("gocryptfs")?.trim();
+    let v = v.strip_prefix('v').unwrap_or(v);
     (!v.is_empty()).then(|| v.to_string())
+}
+
+/// The version has `-init -masterkey` ([`MIN_VERSION`] or newer); an unreadable one is not
+/// trusted.
+pub fn version_supported(v: &str) -> bool {
+    let mut it = v.split(|c: char| !c.is_ascii_digit()).filter(|s| !s.is_empty()).map(|s| s.parse::<u32>().unwrap_or(0));
+    match (it.next(), it.next()) {
+        (Some(major), minor) => (major, minor.unwrap_or(0)) >= MIN_VERSION,
+        _ => false,
+    }
+}
+
+/// The error of a gocryptfs too old for rynas.
+fn too_old(v: &str) -> CryptError {
+    CryptError::Invalid(format!(
+        "gocryptfs {v} is too old: encrypted folders need {}.{} or newer (Debian 13 or newer ships it; on Debian 12 install a newer gocryptfs first)",
+        MIN_VERSION.0, MIN_VERSION.1
+    ))
+}
+
+/// The master key printed by `gocryptfs-xray -dumpmasterkey` in rynas' form (8 groups).
+fn parse_xray_key(out: &str) -> Option<Secret> {
+    let line = out.lines().map(str::trim).find(|l| l.len() >= 64 && l.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'))?;
+    normalize_master_key(line)
 }
 
 /// The end of a command's error output, for an error text (never a secret: gocryptfs and
@@ -345,17 +481,32 @@ fn tail(o: &CmdOutput) -> String {
 // the backend trait
 // ---------------------------------------------------------------------------------------------
 
+/// What [`CryptHost::create`] made.
+#[derive(Debug)]
+pub struct Created {
+    /// The recovery key (the master key).
+    pub key: Secret,
+    /// The folder exists and is initialised but the final unlock failed: it stays (locked)
+    /// and is unlocked, or its recovery key shown again, with its password.
+    pub unlock_error: Option<CryptError>,
+}
+
 /// Encrypted folders on a system. `path` is always the mount point `<place>/<name>`.
 pub trait CryptHost: Send + Sync {
     fn info(&self) -> CryptInfo;
     fn state(&self, path: &str) -> CryptState;
     /// A sealed password exists: the folder is unlocked when rynasd starts.
     fn auto_unlock(&self, path: &str) -> bool;
-    /// Creates, initialises and unlocks a new folder; returns its recovery key.
-    fn create(&self, path: &str, password: &Secret, log: &dyn Fn(&str)) -> Result<Secret, CryptError>;
+    /// Creates, initialises and unlocks a new folder; returns its recovery key. Once the
+    /// ciphertext is initialised the folder is kept even when the unlock fails.
+    fn create(&self, path: &str, password: &Secret, log: &dyn Fn(&str)) -> Result<Created, CryptError>;
     fn unlock(&self, path: &str, password: &Secret, log: &dyn Fn(&str)) -> Result<(), CryptError>;
+    /// Unmounts the folder. Refused while it is in use, including when gocryptfs keeps
+    /// serving a copy of the mount held by another mount namespace ([`IN_USE_ELSEWHERE`]).
     fn lock(&self, path: &str, log: &dyn Fn(&str)) -> Result<(), CryptError>;
     /// A new password from the current one, or from the recovery key with `recovery`.
+    /// `Ok(Some(warning))`: the password changed but the automatic unlock had to be turned
+    /// off (the new password could not be sealed).
     fn change_password(
         &self,
         path: &str,
@@ -363,13 +514,19 @@ pub trait CryptHost: Send + Sync {
         recovery: bool,
         new: &Secret,
         log: &dyn Fn(&str),
-    ) -> Result<(), CryptError>;
+    ) -> Result<Option<String>, CryptError>;
     /// `Some`: checks the password and seals it on this machine; `None`: forgets it.
     fn set_auto_unlock(&self, path: &str, password: Option<&Secret>, log: &dyn Fn(&str)) -> Result<(), CryptError>;
     /// The sealed password, when there is one.
     fn sealed_password(&self, path: &str) -> Result<Option<Secret>, CryptError>;
+    /// The recovery key again, read from the folder's configuration with its password.
+    fn recovery_key(&self, path: &str, password: &Secret, log: &dyn Fn(&str)) -> Result<Secret, CryptError>;
     /// Locks the folder and deletes its ciphertext, its mount point and its keys.
     fn remove(&self, path: &str, log: &dyn Fn(&str)) -> Result<(), CryptError>;
+
+    /// When rynasd starts: credential files a crash left behind are wiped, key checks of
+    /// `paths` are moved into their ciphertext.
+    fn at_start(&self, _paths: &[String], _log: &dyn Fn(&str)) {}
 
     /// The folders live in memory (tests, `--dry-system`): nothing is installed or mounted.
     fn simulated(&self) -> bool {
@@ -405,11 +562,13 @@ pub struct HostCrypt {
     pub state_dir: PathBuf,
     /// One change at a time (two unlocks of one folder, a lock during a create...).
     pub busy: Mutex<()>,
+    /// `systemd-creds has-tpm2`, asked once.
+    tpm2: std::sync::OnceLock<bool>,
 }
 
 impl HostCrypt {
     pub fn new(subvolumes: Option<Arc<dyn SubvolumeCreator>>, state_dir: &Path) -> Self {
-        Self { subvolumes, state_dir: state_dir.to_path_buf(), busy: Mutex::new(()) }
+        Self { subvolumes, state_dir: state_dir.to_path_buf(), busy: Mutex::new(()), tpm2: std::sync::OnceLock::new() }
     }
 
     fn key_file(&self, path: &str) -> PathBuf {
@@ -418,6 +577,20 @@ impl HostCrypt {
 
     fn installed(&self) -> bool {
         Path::new(GOCRYPTFS).exists()
+    }
+
+    fn version(&self) -> Option<String> {
+        Cmd::new(GOCRYPTFS)
+            .arg("-version")
+            .env_clear()
+            .timeout(Duration::from_secs(10))
+            .output_blocking()
+            .ok()
+            .and_then(|o| parse_version(&o.stdout))
+    }
+
+    fn has_tpm2(&self) -> bool {
+        *self.tpm2.get_or_init(|| has_tpm2_cmd().output_blocking().is_ok_and(|o| o.success()))
     }
 
     fn mounted(&self, path: &str) -> bool {
@@ -432,9 +605,52 @@ impl HostCrypt {
             .map_err(|e| format!("systemctl: {e}"))
     }
 
+    /// The folder's gocryptfs unit is running (activating or deactivating included). It
+    /// outlives rynasd's view of the mount when another mount namespace holds a copy.
+    fn unit_active(&self, path: &str) -> bool {
+        let svc = format!("{}.service", unit_name(path));
+        self.systemctl(&["is-active", "--quiet", &svc]).is_ok_and(|o| o.success())
+    }
+
+    /// Waits up to `wait` for the unit to end; `true` when it did.
+    fn wait_inactive(&self, path: &str, wait: Duration) -> bool {
+        let end = std::time::Instant::now() + wait;
+        loop {
+            if !self.unit_active(path) {
+                return true;
+            }
+            if std::time::Instant::now() >= end {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
     fn run(&self, c: &Cmd, log: &dyn Fn(&str), what: &str) -> Result<CmdOutput, CryptError> {
         log(&format!("$ {}", c.display()));
         c.output_blocking().map_err(|e| CryptError::Failed(format!("{what}: {e}")))
+    }
+
+    /// The password opens the folder's configuration (read-only: [`xray_cmd`]); returns the
+    /// master key.
+    fn open_key(&self, cipher: &str, password: &Secret) -> Result<Secret, CryptError> {
+        if !Path::new(XRAY).exists() {
+            return Err(CryptError::Failed(format!("{XRAY} is missing: reinstall the gocryptfs package")));
+        }
+        let mut o = xray_cmd(cipher, password)
+            .output_blocking()
+            .map_err(|e| CryptError::Failed(format!("gocryptfs-xray: {e}")))?;
+        let key = parse_xray_key(&o.stdout);
+        wipe_string(&mut o.stdout);
+        if o.success()
+            && let Some(k) = key
+        {
+            return Ok(k);
+        }
+        if o.stderr.contains("Password incorrect") || o.code == Some(EXIT_WRONG_PASSWORD) {
+            return Err(CryptError::WrongPassword);
+        }
+        Err(CryptError::Failed(format!("gocryptfs-xray: {}", tail(&o))))
     }
 
     fn unlock_inner(&self, path: &str, password: &Secret, log: &dyn Fn(&str)) -> Result<(), CryptError> {
@@ -442,6 +658,19 @@ impl HostCrypt {
             CryptState::Unlocked => return Ok(()),
             CryptState::Missing => return Err(CryptError::Invalid(format!("{path} is not an encrypted folder"))),
             CryptState::Locked => {}
+            CryptState::InUse => {
+                // gocryptfs of an earlier unlock still serves a copy held elsewhere (rynasd
+                // refuses this while containers use the folder): the right password first,
+                // then the stale instance goes and a fresh one mounts here
+                let cipher = need_cipher(path)?;
+                self.open_key(&cipher, password)?;
+                let svc = format!("{}.service", unit_name(path));
+                log(&format!("{svc} still runs without a mount for rynas: stopping it"));
+                let _ = self.systemctl(&["stop", &svc]);
+                if !self.wait_inactive(path, UNIT_STOP_WAIT) {
+                    return Err(CryptError::Failed(format!("{svc} does not stop: see journalctl -u {svc}")));
+                }
+            }
         }
         if !self.installed() {
             return Err(CryptError::NotInstalled);
@@ -493,10 +722,20 @@ impl HostCrypt {
     }
 
     fn lock_inner(&self, path: &str, log: &dyn Fn(&str)) -> Result<(), CryptError> {
+        let svc = format!("{}.service", unit_name(path));
         match self.state(path) {
             CryptState::Unlocked => {}
             CryptState::Locked => return Ok(()),
             CryptState::Missing => return Err(CryptError::Invalid(format!("{path} is not an encrypted folder"))),
+            // unmounted here, still served elsewhere: locked only once that copy is gone
+            CryptState::InUse => {
+                if self.wait_inactive(path, Duration::from_secs(1)) {
+                    let _ = self.systemctl(&["reset-failed", &svc]);
+                    log(&format!("{path} locked"));
+                    return Ok(());
+                }
+                return Err(CryptError::Busy(IN_USE_ELSEWHERE.into()));
+            }
         }
         let o = self.run(&umount_cmd(path), log, "umount")?;
         if !o.success() {
@@ -507,13 +746,12 @@ impl HostCrypt {
                 CryptError::Failed(format!("umount {path}: {t}"))
             });
         }
-        // gocryptfs ends by itself once its filesystem is gone
-        let svc = format!("{}.service", unit_name(path));
-        for _ in 0..100 {
-            if self.systemctl(&["is-active", "--quiet", &svc]).map(|o| !o.success()).unwrap_or(true) {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(50));
+        // gocryptfs ends by itself once the last copy of its filesystem is gone; a copy held
+        // by another mount namespace (a container's bind mount is rprivate) keeps it running
+        // and the plaintext reachable there: then the folder is not locked
+        if !self.wait_inactive(path, UNIT_STOP_WAIT) {
+            log(&format!("warning: {svc} still runs after the unmount: {IN_USE_ELSEWHERE}"));
+            return Err(CryptError::Busy(IN_USE_ELSEWHERE.into()));
         }
         let _ = self.systemctl(&["reset-failed", &svc]);
         if self.mounted(path) {
@@ -523,14 +761,16 @@ impl HostCrypt {
         Ok(())
     }
 
-    /// Deletes a ciphertext directory (subvolume or plain folder) and its key check.
+    /// Deletes a ciphertext directory (subvolume, nested ones included, or plain folder) and
+    /// its key check.
     fn delete_cipher(&self, cipher: &str, log: &dyn Fn(&str)) -> Result<(), CryptError> {
         if let Ok(m) = std::fs::symlink_metadata(cipher) {
             if m.file_type().is_symlink() {
                 return Err(CryptError::Invalid(format!("{cipher} is a symbolic link: not deleted")));
             }
             if m.ino() == 256 {
-                let o = self.run(&Cmd::new("btrfs").args(["subvolume", "delete", cipher]), log, "btrfs")?;
+                let c = Cmd::new("btrfs").args(["subvolume", "delete", "--recursive", cipher]);
+                let o = self.run(&c, log, "btrfs")?;
                 if !o.success() {
                     return Err(CryptError::Failed(format!("btrfs subvolume delete {cipher}: {}", tail(&o))));
                 }
@@ -539,7 +779,7 @@ impl HostCrypt {
                 std::fs::remove_dir_all(cipher).map_err(|e| CryptError::Failed(format!("{cipher}: {e}")))?;
             }
         }
-        let _ = std::fs::remove_file(check_file(cipher));
+        let _ = std::fs::remove_file(legacy_check_file(cipher));
         if let Some(parent) = Path::new(cipher).parent() {
             let _ = std::fs::remove_dir(parent);
         }
@@ -560,6 +800,8 @@ impl HostCrypt {
         }
     }
 
+    /// Seals `password` into the folder's credential file: written as `<file>.new`, then
+    /// renamed over the old one, so an existing credential stays until the new one is there.
     fn seal(&self, path: &str, password: &Secret, log: &dyn Fn(&str)) -> Result<(), CryptError> {
         let file = self.key_file(path);
         let dir = file.parent().expect("key files live in a folder");
@@ -568,14 +810,43 @@ impl HostCrypt {
             .mode(0o700)
             .create(dir)
             .map_err(|e| CryptError::Failed(format!("{}: {e}", dir.display())))?;
-        let f = file.to_string_lossy().into_owned();
-        let o = self.run(&seal_cmd(&file_stem(path), &f, password), log, "systemd-creds")?;
+        let tmp = file.with_extension("cred.new");
+        let _ = std::fs::remove_file(&tmp);
+        let t = tmp.to_string_lossy().into_owned();
+        let o = self.run(&seal_cmd(&file_stem(path), &t, password, self.has_tpm2()), log, "systemd-creds")?;
         if !o.success() {
-            let _ = std::fs::remove_file(&file);
+            let _ = std::fs::remove_file(&tmp);
             return Err(CryptError::Failed(format!("systemd-creds encrypt: {}", tail(&o))));
         }
-        let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600));
-        Ok(())
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+        std::fs::rename(&tmp, &file).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            CryptError::Failed(format!("{}: {e}", file.display()))
+        })
+    }
+}
+
+/// Overwrites a string's bytes with zeros (command output that held a key).
+fn wipe_string(s: &mut String) {
+    // SAFETY: zero bytes are valid UTF-8; the caller drops or reuses the string as empty.
+    unsafe {
+        for b in s.as_bytes_mut() {
+            std::ptr::write_volatile(b, 0);
+        }
+    }
+    s.clear();
+}
+
+/// Wipes the credential files a crash between their write and their wipe left in
+/// [`RUN_DIR`].
+pub fn wipe_leftovers(dir: &Path, log: &dyn Fn(&str)) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.extension().is_some_and(|x| x == "pass") {
+            log(&format!("wiping the leftover credential {}", p.display()));
+            wipe(&p);
+        }
     }
 }
 
@@ -617,14 +888,12 @@ fn wipe(f: &Path) {
 impl CryptHost for HostCrypt {
     fn info(&self) -> CryptInfo {
         let installed = self.installed();
-        let version = installed
-            .then(|| Cmd::new(GOCRYPTFS).arg("-version").env_clear().timeout(Duration::from_secs(10)).output_blocking().ok())
-            .flatten()
-            .and_then(|o| parse_version(&o.stdout));
+        let version = installed.then(|| self.version()).flatten();
         CryptInfo {
             installed,
+            supported: version.as_deref().is_some_and(version_supported),
             version,
-            tpm2: Path::new("/sys/class/tpm/tpm0").exists(),
+            tpm2: self.has_tpm2(),
         }
     }
 
@@ -632,10 +901,12 @@ impl CryptHost for HostCrypt {
         let Some(cipher) = cipher_dir(path) else { return CryptState::Missing };
         if self.mounted(path) {
             CryptState::Unlocked
-        } else if Path::new(&cipher).join(CONF).is_file() {
-            CryptState::Locked
-        } else {
+        } else if !Path::new(&cipher).join(CONF).is_file() {
             CryptState::Missing
+        } else if self.unit_active(path) {
+            CryptState::InUse
+        } else {
+            CryptState::Locked
         }
     }
 
@@ -643,11 +914,15 @@ impl CryptHost for HostCrypt {
         self.key_file(path).is_file()
     }
 
-    fn create(&self, path: &str, password: &Secret, log: &dyn Fn(&str)) -> Result<Secret, CryptError> {
+    fn create(&self, path: &str, password: &Secret, log: &dyn Fn(&str)) -> Result<Created, CryptError> {
         let _g = self.busy.lock().unwrap_or_else(|e| e.into_inner());
         check_password(password.expose()).map_err(CryptError::Invalid)?;
         if !self.installed() {
             return Err(CryptError::NotInstalled);
+        }
+        match self.version() {
+            Some(v) if version_supported(&v) => {}
+            v => return Err(too_old(v.as_deref().unwrap_or("of unknown version"))),
         }
         let cipher = need_cipher(path)?;
         if std::fs::symlink_metadata(path).is_ok() {
@@ -698,7 +973,7 @@ impl CryptHost for HostCrypt {
             undo(log);
             return Err(CryptError::Failed(format!("gocryptfs -init: {}", tail(&o))));
         }
-        if let Err(e) = std::fs::write(check_file(&cipher), format!("{}\n", key_check(&master))) {
+        if let Err(e) = write_check(&cipher, &key_check(&master)) {
             log(&format!("warning: {}: {e}", check_file(&cipher)));
         }
         log(&format!("mkdir -m 000 {path}"));
@@ -718,8 +993,14 @@ impl CryptHost for HostCrypt {
                 return Err(e);
             }
         }
-        self.unlock_inner(path, password, log)?;
-        Ok(master)
+        // from here the folder exists for good: a failed unlock leaves it locked
+        let unlock_error = self.unlock_inner(path, password, log).err();
+        if let Some(e) = &unlock_error {
+            log(&format!(
+                "warning: {path} was created but not unlocked: {e}; unlock it with its password (its recovery key can be shown again with the password)"
+            ));
+        }
+        Ok(Created { key: master, unlock_error })
     }
 
     fn unlock(&self, path: &str, password: &Secret, log: &dyn Fn(&str)) -> Result<(), CryptError> {
@@ -739,7 +1020,7 @@ impl CryptHost for HostCrypt {
         recovery: bool,
         new: &Secret,
         log: &dyn Fn(&str),
-    ) -> Result<(), CryptError> {
+    ) -> Result<Option<String>, CryptError> {
         let _g = self.busy.lock().unwrap_or_else(|e| e.into_inner());
         check_password(new.expose()).map_err(CryptError::Invalid)?;
         if self.state(path) == CryptState::Missing {
@@ -751,14 +1032,14 @@ impl CryptHost for HostCrypt {
         let cipher = need_cipher(path)?;
         let current = if recovery {
             // -passwd -masterkey trusts any key: a wrong one would lock the files out for
-            // good. The key check made at creation tells.
+            // good. The key check made at creation (or when the key was shown again) tells.
             let k = normalize_master_key(current.expose()).ok_or(CryptError::WrongPassword)?;
-            let want = std::fs::read_to_string(check_file(&cipher)).map_err(|_| {
+            let want = read_check(&cipher, log).ok_or_else(|| {
                 CryptError::Invalid(format!(
-                    "{path} has no key check (it was not made by rynas): reset its password with gocryptfs -passwd -masterkey"
+                    "{path} has no key check (it was not made by rynas): show its recovery key once with the password, or reset the password with gocryptfs -passwd -masterkey"
                 ))
             })?;
-            if want.trim() != key_check(&k) {
+            if want != key_check(&k) {
                 return Err(CryptError::WrongPassword);
             }
             k
@@ -781,11 +1062,21 @@ impl CryptHost for HostCrypt {
             log(&format!("removing {}", bak.display()));
             let _ = std::fs::remove_file(&bak);
         }
-        if self.auto_unlock(path) {
-            log("sealing the new password for the automatic unlock");
-            self.seal(path, new, log)?;
+        if !self.auto_unlock(path) {
+            return Ok(None);
         }
-        Ok(())
+        log("sealing the new password for the automatic unlock");
+        match self.seal(path, new, log) {
+            Ok(()) => Ok(None),
+            Err(e) => {
+                // the old credential holds the old password, which no longer opens the
+                // folder: it goes, so the state says what happens at the next start
+                let f = self.key_file(path);
+                log(&format!("warning: the new password could not be sealed ({e}): removing {}", f.display()));
+                let _ = std::fs::remove_file(&f);
+                Ok(Some(format!("automatic unlock turned off: {e}")))
+            }
+        }
     }
 
     fn set_auto_unlock(&self, path: &str, password: Option<&Secret>, log: &dyn Fn(&str)) -> Result<(), CryptError> {
@@ -804,19 +1095,9 @@ impl CryptHost for HostCrypt {
         if !self.installed() {
             return Err(CryptError::NotInstalled);
         }
-        // the only check gocryptfs offers without mounting: re-wrap the key with the same
-        // password (a fresh salt, the folder's files are untouched)
+        // the password is checked without touching the folder's configuration
         let cipher = need_cipher(path)?;
-        let o = passwd_cmd(&cipher, p, false, p)
-            .output_blocking()
-            .map_err(|e| CryptError::Failed(format!("gocryptfs -passwd: {e}")))?;
-        if o.code == Some(EXIT_WRONG_PASSWORD) {
-            return Err(CryptError::WrongPassword);
-        }
-        if !o.success() {
-            return Err(CryptError::Failed(format!("gocryptfs -passwd: {}", tail(&o))));
-        }
-        let _ = std::fs::remove_file(Path::new(&cipher).join(CONF_BAK));
+        self.open_key(&cipher, p)?;
         self.seal(path, p, log)
     }
 
@@ -825,21 +1106,33 @@ impl CryptHost for HostCrypt {
         if !f.is_file() {
             return Ok(None);
         }
-        let o = unseal_cmd(&file_stem(path), &f.to_string_lossy())
+        let mut o = unseal_cmd(&file_stem(path), &f.to_string_lossy())
             .output_blocking()
             .map_err(|e| CryptError::Failed(format!("systemd-creds decrypt: {e}")))?;
         if !o.success() {
+            wipe_string(&mut o.stdout);
             return Err(CryptError::Failed(format!("systemd-creds decrypt: {}", tail(&o))));
         }
         let s = Secret::new(o.stdout.trim_end_matches('\n'));
-        let mut out = o.stdout;
-        // SAFETY: zero bytes are valid UTF-8; the string is dropped right after.
-        unsafe {
-            for b in out.as_bytes_mut() {
-                std::ptr::write_volatile(b, 0);
+        wipe_string(&mut o.stdout);
+        Ok(Some(s))
+    }
+
+    fn recovery_key(&self, path: &str, password: &Secret, log: &dyn Fn(&str)) -> Result<Secret, CryptError> {
+        if self.state(path) == CryptState::Missing {
+            return Err(CryptError::Invalid(format!("{path} is not an encrypted folder")));
+        }
+        let cipher = need_cipher(path)?;
+        let key = self.open_key(&cipher, password)?;
+        // a folder without a key check (made outside rynas, or a failed write) gets one now,
+        // so the recovery key can later reset the password
+        if read_check(&cipher, log).is_none() {
+            match write_check(&cipher, &key_check(&key)) {
+                Ok(()) => log(&format!("key check written into {cipher}")),
+                Err(e) => log(&format!("warning: key check of {cipher}: {e}")),
             }
         }
-        Ok(Some(s))
+        Ok(key)
     }
 
     fn remove(&self, path: &str, log: &dyn Fn(&str)) -> Result<(), CryptError> {
@@ -850,10 +1143,23 @@ impl CryptHost for HostCrypt {
             CryptError::Invalid(_) => Ok(()),
             e => Err(e),
         })?;
+        // gocryptfs still running means the plaintext is reachable somewhere: keep it all
+        if self.unit_active(path) {
+            return Err(CryptError::Busy(IN_USE_ELSEWHERE.into()));
+        }
         self.remove_mountpoint(path, log)?;
         self.delete_cipher(&cipher, log)?;
         let _ = std::fs::remove_file(self.key_file(path));
         Ok(())
+    }
+
+    fn at_start(&self, paths: &[String], log: &dyn Fn(&str)) {
+        wipe_leftovers(Path::new(RUN_DIR), log);
+        for p in paths {
+            if let Some(c) = cipher_dir(p) {
+                migrate_check(&c, log);
+            }
+        }
     }
 }
 
@@ -868,6 +1174,8 @@ struct MemFolder {
     unlocked: bool,
     sealed: bool,
     busy: bool,
+    /// Unmounted here but still served elsewhere ([`CryptState::InUse`]).
+    elsewhere: bool,
 }
 
 /// Encrypted folders kept in memory. With [`MemoryCrypt::with_shares`] the folders it creates
@@ -877,6 +1185,8 @@ pub struct MemoryCrypt {
     folders: Mutex<BTreeMap<String, MemFolder>>,
     installed: std::sync::atomic::AtomicBool,
     shares: Option<Arc<crate::host::MemoryShares>>,
+    /// Sealing fails (a broken TPM, a full disk): tests of the password change.
+    seal_fails: std::sync::atomic::AtomicBool,
     /// Every operation (`create /p`, `unlock /p`...), never with a secret.
     pub log: Mutex<Vec<String>>,
 }
@@ -907,6 +1217,7 @@ impl MemoryCrypt {
                 unlocked: false,
                 sealed: false,
                 busy: false,
+                elsewhere: false,
             },
         );
         if let Some(s) = &self.shares {
@@ -919,6 +1230,18 @@ impl MemoryCrypt {
         if let Some(f) = self.folders.lock().unwrap().get_mut(path) {
             f.busy = busy;
         }
+    }
+
+    /// A lock of `path` unmounts it but gocryptfs keeps serving another namespace.
+    pub fn set_elsewhere(&self, path: &str, on: bool) {
+        if let Some(f) = self.folders.lock().unwrap().get_mut(path) {
+            f.elsewhere = on;
+        }
+    }
+
+    /// Sealing a password fails from now on.
+    pub fn set_seal_fails(&self, on: bool) {
+        self.seal_fails.store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn note(&self, s: String) {
@@ -951,6 +1274,7 @@ impl CryptHost for MemoryCrypt {
         CryptInfo {
             installed: self.installed(),
             version: self.installed().then(|| "2.5.1".into()),
+            supported: self.installed(),
             tpm2: false,
         }
     }
@@ -959,6 +1283,7 @@ impl CryptHost for MemoryCrypt {
         match self.folders.lock().unwrap().get(path) {
             None => CryptState::Missing,
             Some(f) if f.unlocked => CryptState::Unlocked,
+            Some(f) if f.elsewhere => CryptState::InUse,
             Some(_) => CryptState::Locked,
         }
     }
@@ -967,7 +1292,7 @@ impl CryptHost for MemoryCrypt {
         self.folders.lock().unwrap().get(path).is_some_and(|f| f.sealed)
     }
 
-    fn create(&self, path: &str, password: &Secret, log: &dyn Fn(&str)) -> Result<Secret, CryptError> {
+    fn create(&self, path: &str, password: &Secret, log: &dyn Fn(&str)) -> Result<Created, CryptError> {
         check_password(password.expose()).map_err(CryptError::Invalid)?;
         if !self.installed() {
             return Err(CryptError::NotInstalled);
@@ -980,7 +1305,14 @@ impl CryptHost for MemoryCrypt {
         let master = new_master_key();
         m.insert(
             path.into(),
-            MemFolder { password: password.clone(), master: master.clone(), unlocked: true, sealed: false, busy: false },
+            MemFolder {
+                password: password.clone(),
+                master: master.clone(),
+                unlocked: true,
+                sealed: false,
+                busy: false,
+                elsewhere: false,
+            },
         );
         drop(m);
         if let Some(s) = &self.shares {
@@ -988,7 +1320,7 @@ impl CryptHost for MemoryCrypt {
         }
         log(&format!("created {path} (ciphertext {cipher}) and unlocked it (in memory)"));
         self.note(format!("create {path}"));
-        Ok(master)
+        Ok(Created { key: master, unlock_error: None })
     }
 
     fn unlock(&self, path: &str, password: &Secret, log: &dyn Fn(&str)) -> Result<(), CryptError> {
@@ -997,6 +1329,7 @@ impl CryptHost for MemoryCrypt {
                 return Err(CryptError::WrongPassword);
             }
             f.unlocked = true;
+            f.elsewhere = false;
             Ok(())
         })?;
         log(&format!("{path} unlocked (in memory)"));
@@ -1008,6 +1341,10 @@ impl CryptHost for MemoryCrypt {
         self.with(path, |f| {
             if f.unlocked && f.busy {
                 return Err(CryptError::Busy("target is busy".into()));
+            }
+            if f.elsewhere {
+                f.unlocked = false;
+                return Err(CryptError::Busy(IN_USE_ELSEWHERE.into()));
             }
             f.unlocked = false;
             Ok(())
@@ -1024,9 +1361,10 @@ impl CryptHost for MemoryCrypt {
         recovery: bool,
         new: &Secret,
         _log: &dyn Fn(&str),
-    ) -> Result<(), CryptError> {
+    ) -> Result<Option<String>, CryptError> {
         check_password(new.expose()).map_err(CryptError::Invalid)?;
-        self.with(path, |f| {
+        let seal_fails = self.seal_fails.load(std::sync::atomic::Ordering::Relaxed);
+        let warning = self.with(path, |f| {
             let ok = if recovery {
                 normalize_master_key(current.expose()).is_some_and(|k| k == f.master)
             } else {
@@ -1036,18 +1374,26 @@ impl CryptHost for MemoryCrypt {
                 return Err(CryptError::WrongPassword);
             }
             f.password = new.clone();
-            Ok(())
+            if f.sealed && seal_fails {
+                f.sealed = false;
+                return Ok(Some("automatic unlock turned off: sealing failed (simulated)".to_string()));
+            }
+            Ok(None)
         })?;
         self.note(format!("password {path}"));
-        Ok(())
+        Ok(warning)
     }
 
     fn set_auto_unlock(&self, path: &str, password: Option<&Secret>, _log: &dyn Fn(&str)) -> Result<(), CryptError> {
+        let seal_fails = self.seal_fails.load(std::sync::atomic::Ordering::Relaxed);
         self.with(path, |f| {
-            if let Some(p) = password
-                && f.password != *p
-            {
-                return Err(CryptError::WrongPassword);
+            if let Some(p) = password {
+                if f.password != *p {
+                    return Err(CryptError::WrongPassword);
+                }
+                if seal_fails {
+                    return Err(CryptError::Failed("systemd-creds encrypt: sealing failed (simulated)".into()));
+                }
             }
             f.sealed = password.is_some();
             Ok(())
@@ -1064,6 +1410,17 @@ impl CryptHost for MemoryCrypt {
             .get(path)
             .filter(|f| f.sealed)
             .map(|f| f.password.clone()))
+    }
+
+    fn recovery_key(&self, path: &str, password: &Secret, _log: &dyn Fn(&str)) -> Result<Secret, CryptError> {
+        let k = self.with(path, |f| {
+            if f.password != *password {
+                return Err(CryptError::WrongPassword);
+            }
+            Ok(f.master.clone())
+        })?;
+        self.note(format!("recovery key {path}"));
+        Ok(k)
     }
 
     fn remove(&self, path: &str, log: &dyn Fn(&str)) -> Result<(), CryptError> {
@@ -1112,10 +1469,62 @@ mod tests {
         assert!(check_password("correct horse").is_ok());
         assert!(check_password("short").is_err());
         assert!(check_password("eight\nchars").is_err());
+        assert!(check_password("tab\tinside!").is_err());
         assert!(check_password(&"x".repeat(PASSWORD_MAX + 1)).is_err());
-        // characters, not bytes, for the minimum
+        assert!(check_password(&"x".repeat(PASSWORD_MAX)).is_ok());
+        // characters, not bytes, for both limits (256 × 4 bytes stay below gocryptfs' 2048)
         assert!(check_password("ééééééé").is_err());
         assert!(check_password("éééééééé").is_ok());
+        assert!(check_password(&"😀".repeat(PASSWORD_MAX)).is_ok());
+        assert!(check_password(&"😀".repeat(PASSWORD_MAX + 1)).is_err());
+    }
+
+    #[test]
+    fn versions_and_xray_output() {
+        assert_eq!(parse_version("gocryptfs v2.6.1; go-fuse [vendored]; 2025-08-11 go1.24.6 linux/amd64").as_deref(), Some("2.6.1"));
+        assert!(version_supported("2.5.1"));
+        assert!(version_supported("2.6.1"));
+        assert!(version_supported("3.0"));
+        assert!(!version_supported("2.3"));
+        assert!(!version_supported("2.4.0"));
+        assert!(!version_supported("1.8.0"));
+        assert!(!version_supported(""));
+        assert!(matches!(too_old("2.3"), CryptError::Invalid(m) if m.contains("2.5 or newer")));
+        let k = parse_xray_key("0123abcd0123abcd0123abcd0123abcd0123abcd0123abcd0123abcd0123abcd\n").unwrap();
+        assert_eq!(k.expose(), "0123abcd-0123abcd-0123abcd-0123abcd-0123abcd-0123abcd-0123abcd-0123abcd");
+        assert!(parse_xray_key("Password incorrect.\n").is_none());
+    }
+
+    #[test]
+    fn key_check_lives_in_the_ciphertext_and_moves_there() {
+        let d = tempfile::tempdir().unwrap();
+        let cipher = d.path().join("docs");
+        std::fs::create_dir(&cipher).unwrap();
+        std::fs::write(cipher.join(CONF), "{}").unwrap();
+        let c = cipher.to_string_lossy().into_owned();
+        assert_eq!(check_file(&c), format!("{c}/{KEY_CHECK_FILE}"));
+        let k = new_master_key();
+        // the first release's place, outside the subvolume
+        std::fs::write(legacy_check_file(&c), format!("{}\n", key_check(&k))).unwrap();
+        let log = |_: &str| {};
+        assert_eq!(read_check(&c, &log), Some(key_check(&k)));
+        assert!(!Path::new(&legacy_check_file(&c)).exists());
+        assert_eq!(std::fs::metadata(check_file(&c)).unwrap().permissions().mode() & 0o777, 0o600);
+        // garbage is left alone and not trusted
+        std::fs::remove_file(check_file(&c)).unwrap();
+        std::fs::write(legacy_check_file(&c), "not a check").unwrap();
+        assert_eq!(read_check(&c, &log), None);
+        assert!(Path::new(&legacy_check_file(&c)).exists());
+    }
+
+    #[test]
+    fn leftover_credentials_are_wiped() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("rynas-crypt-x.pass"), "secret\n").unwrap();
+        std::fs::write(d.path().join("other.txt"), "keep").unwrap();
+        wipe_leftovers(d.path(), &|_| {});
+        assert!(!d.path().join("rynas-crypt-x.pass").exists());
+        assert!(d.path().join("other.txt").exists());
     }
 
     #[test]
@@ -1148,7 +1557,8 @@ mod tests {
         let d = init.display();
         assert_eq!(d, "/usr/bin/gocryptfs -init -masterkey stdin -- /vol1/.rynas-crypt/docs");
         assert!(!d.contains("horse") && !d.contains(mk.expose()));
-        assert_eq!(init.stdin_data().unwrap(), format!("{}\ncorrect horse battery\n", mk.expose()).as_bytes());
+        // password first, then the master key (checked live with gocryptfs 2.5.1 and 2.6.1)
+        assert_eq!(init.stdin_data().unwrap(), format!("correct horse battery\n{}\n", mk.expose()).as_bytes());
         let dbg = format!("{init:?}");
         assert!(!dbg.contains("horse") && !dbg.contains(mk.expose()), "{dbg}");
 
@@ -1159,6 +1569,11 @@ mod tests {
         let r = passwd_cmd("/c", &mk, true, &new);
         assert_eq!(r.display(), "/usr/bin/gocryptfs -passwd -masterkey stdin -- /c");
         assert!(!r.display().contains(mk.expose()));
+        // the master key, then the new password
+        assert_eq!(r.stdin_data().unwrap(), format!("{}\nnew password here\n", mk.expose()).as_bytes());
+        let x = xray_cmd("/vol1/.rynas-crypt/docs", &pw);
+        assert_eq!(x.display(), "/usr/bin/gocryptfs-xray -dumpmasterkey -- /vol1/.rynas-crypt/docs/gocryptfs.conf");
+        assert_eq!(x.stdin_data().unwrap(), b"correct horse battery\n");
 
         let m = mount_cmd("/vol1/docs", "/vol1/.rynas-crypt/docs", "/run/rynas/crypt/x.pass", true);
         let d = m.display();
@@ -1177,8 +1592,10 @@ mod tests {
         assert!(immutable_cmd("/vol1/docs", true).display().ends_with("-- chattr +i /vol1/docs"));
         assert!(immutable_cmd("/vol1/docs", false).display().ends_with("-- chattr -i /vol1/docs"));
 
-        let s = seal_cmd("rynas-crypt-x", "/var/lib/rynas/crypt/x.cred", &pw);
-        assert_eq!(s.display(), "systemd-creds encrypt --name=rynas-crypt-x - /var/lib/rynas/crypt/x.cred");
+        let s = seal_cmd("rynas-crypt-x", "/var/lib/rynas/crypt/x.cred", &pw, false);
+        assert_eq!(s.display(), "systemd-creds encrypt --name=rynas-crypt-x --with-key=host - /var/lib/rynas/crypt/x.cred");
+        assert!(seal_cmd("n", "/f", &pw, true).display().contains(" --with-key=host+tpm2 "));
+        assert_eq!(has_tpm2_cmd().display(), "systemd-creds has-tpm2 --quiet");
         assert_eq!(s.stdin_data().unwrap(), b"correct horse battery");
         assert_eq!(
             unseal_cmd("rynas-crypt-x", "/f").display(),
@@ -1224,11 +1641,22 @@ mod tests {
         let m = MemoryCrypt::new(false);
         let pw = Secret::new("correct horse");
         let log = |_: &str| {};
-        assert_eq!(m.create("/vol1/docs", &pw, &log), Err(CryptError::NotInstalled));
+        assert!(matches!(m.create("/vol1/docs", &pw, &log), Err(CryptError::NotInstalled)));
         m.set_installed(true);
         assert!(matches!(m.create("/vol1/docs", &Secret::new("short"), &log), Err(CryptError::Invalid(_))));
-        let key = m.create("/vol1/docs", &pw, &log).unwrap();
+        let created = m.create("/vol1/docs", &pw, &log).unwrap();
+        assert!(created.unlock_error.is_none());
+        let key = created.key;
         assert!(matches!(m.create("/vol1/docs", &pw, &log), Err(CryptError::Invalid(_))));
+        // the recovery key again, with the password only
+        assert_eq!(m.recovery_key("/vol1/docs", &Secret::new("wrong password"), &log), Err(CryptError::WrongPassword));
+        assert_eq!(m.recovery_key("/vol1/docs", &pw, &log).unwrap(), key);
+        // a copy served elsewhere: never reported as locked
+        m.set_elsewhere("/vol1/docs", true);
+        assert!(matches!(m.lock("/vol1/docs", &log), Err(CryptError::Busy(e)) if e == IN_USE_ELSEWHERE));
+        assert_eq!(m.state("/vol1/docs"), CryptState::InUse);
+        m.unlock("/vol1/docs", &pw, &log).unwrap();
+        assert_eq!(m.state("/vol1/docs"), CryptState::Unlocked);
         assert_eq!(m.state("/vol1/docs"), CryptState::Unlocked);
         assert_eq!(m.state("/vol1/other"), CryptState::Missing);
         m.set_busy("/vol1/docs", true);
@@ -1257,6 +1685,14 @@ mod tests {
         assert_eq!(st.state, CryptState::Locked);
         assert!(st.auto_unlock);
         assert_eq!(st.cipher_dir, "/vol1/.rynas-crypt/docs");
+        // a password change whose seal fails: changed, with a warning, auto-unlock off
+        m.set_seal_fails(true);
+        let newer = Secret::new("newer password!");
+        let w = m.change_password("/vol1/docs", &new, false, &newer, &log).unwrap();
+        assert!(w.unwrap().starts_with("automatic unlock turned off"));
+        assert!(!m.auto_unlock("/vol1/docs"));
+        m.set_seal_fails(false);
+        assert_eq!(m.change_password("/vol1/docs", &newer, false, &new, &log), Ok(None));
         m.set_auto_unlock("/vol1/docs", None, &log).unwrap();
         assert_eq!(m.sealed_password("/vol1/docs").unwrap(), None);
         m.remove("/vol1/docs", &log).unwrap();
@@ -1282,5 +1718,40 @@ mod tests {
         std::os::unix::fs::symlink(&target, &f).unwrap();
         wipe(&f);
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+    }
+
+    /// The command lines against the real gocryptfs, in user space and a temporary folder
+    /// (`cargo test -p rynas-services -- --ignored live_gocryptfs`; needs /usr/bin/gocryptfs).
+    #[test]
+    #[ignore]
+    fn live_gocryptfs_secret_order() {
+        if !Path::new(GOCRYPTFS).exists() || !Path::new(XRAY).exists() {
+            eprintln!("gocryptfs not installed: skipped");
+            return;
+        }
+        let d = tempfile::tempdir().unwrap();
+        let c = d.path().join("c");
+        std::fs::create_dir(&c).unwrap();
+        let c = c.to_string_lossy().into_owned();
+        let (pw, mk) = (Secret::new("correct horse battery"), new_master_key());
+        let o = init_cmd(&c, &mk, &pw).output_blocking().unwrap();
+        assert!(o.success(), "{o:?}");
+        let host = HostCrypt::new(None, d.path());
+        assert_eq!(host.open_key(&c, &pw).unwrap(), mk);
+        assert_eq!(host.open_key(&c, &Secret::new("wrong password")), Err(CryptError::WrongPassword));
+        let new = Secret::new("new password here");
+        let o = passwd_cmd(&c, &pw, false, &new).output_blocking().unwrap();
+        assert!(o.success(), "{o:?}");
+        assert_eq!(host.open_key(&c, &new).unwrap(), mk);
+        let o = passwd_cmd(&c, &new, false, &pw).output_blocking().unwrap();
+        assert!(o.success());
+        let o = passwd_cmd(&c, &Secret::new("wrong password"), false, &new).output_blocking().unwrap();
+        assert_eq!(o.code, Some(EXIT_WRONG_PASSWORD));
+        // the recovery path: the master key, then the new password
+        let third = Secret::new("third password!");
+        let o = passwd_cmd(&c, &mk, true, &third).output_blocking().unwrap();
+        assert!(o.success(), "{o:?}");
+        assert_eq!(host.open_key(&c, &third).unwrap(), mk);
+        assert!(host.info().supported);
     }
 }

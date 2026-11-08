@@ -19,7 +19,7 @@ use crate::icons::{self, Icon};
 use crate::live::use_live;
 use crate::pages::share_crypt;
 use crate::pages::share_folders::{self, Target};
-use crate::toast::saved_applied;
+use crate::toast::{saved_applied, toast};
 use crate::ui::{self, EmptyState, Meter, PageHeader, Remote, Tone, drawer, usage_tone};
 
 /// `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`.
@@ -190,7 +190,8 @@ fn share_row(v: ShareView, fss: &[rynas_api_types::Filesystem], edit: RwSignal<O
         let n = s.name.clone();
         let (unlock, icon, label) = match c.state {
             rynas_api_types::CryptState::Locked => (true, icons::LOCK_OPEN, "crypt.unlock"),
-            rynas_api_types::CryptState::Unlocked => (false, icons::KEY, "crypt.lock"),
+            // still served to a container: a lock is tried again (and explains why it waits)
+            rynas_api_types::CryptState::Unlocked | rynas_api_types::CryptState::InUse => (false, icons::KEY, "crypt.lock"),
             rynas_api_types::CryptState::Missing => return None,
         };
         let aria = format!("{} {}", t(label), s.name);
@@ -356,7 +357,9 @@ fn share_editor(e: ShareEdit, users: Remote<Vec<UserView>>, groups: Remote<Vec<G
             if crypt_new {
                 let volume = body.subvolume.as_ref().map(|v| v.volume.clone()).unwrap_or_default();
                 match share_crypt::create_folder(&volume, &body.name, cf).await {
-                    Ok(k) => new_key = Some((body.name.clone(), k)),
+                    Ok(Ok(k)) => new_key = Some((body.name.clone(), k)),
+                    // the folder exists: the share goes on, the key is shown later
+                    Ok(Err(e)) => toast(Tone::Warn, format!("{}{}{e}", t("crypt.rk_later"), api::DETAIL_SEP)),
                     Err(e) => {
                         let _ = error.try_set(Some(e));
                         let _ = busy.try_set(false);

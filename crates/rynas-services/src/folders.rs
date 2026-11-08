@@ -312,10 +312,13 @@ pub fn remove_folder(
             "{path} is not a folder directly on a rynas volume: not deleted"
         ));
     }
-    // an encrypted folder: locked (refused while busy), then its mount point, ciphertext
-    // and keys
+    // an encrypted folder: locked (refused while busy or still served elsewhere), then the
+    // snapshots of its ciphertext (the caller lists those of the jobs on the ciphertext
+    // directory too), then its mount point, ciphertext (nested subvolumes included) and keys
     if crypt.state(path) != rynas_api_types::CryptState::Missing {
         log(&format!("{path} is an encrypted folder: locking it and deleting its ciphertext"));
+        crypt.lock(path, log).map_err(|e| format!("{path}: {e}"))?;
+        delete_snapshots(system, host, snapshots, log)?;
         crypt.remove(path, log).map_err(|e| format!("{path}: {e}"))?;
         log(&format!("{path} deleted"));
         return Ok(());
@@ -334,26 +337,7 @@ pub fn remove_folder(
         log(&format!("stopping {unit}"));
         system.stop_unit(&unit)?;
     }
-    for s in snapshots {
-        let names = host.snapshot_names(&s.dir, &s.prefix);
-        if names.is_empty() {
-            continue;
-        }
-        log(&format!(
-            "deleting {} snapshots in {}",
-            names.len(),
-            s.dir
-        ));
-        for n in names {
-            let p = format!("{}/{n}", s.dir.trim_end_matches('/'));
-            run(
-                system,
-                log,
-                Cmd::new("btrfs").args(["subvolume", "delete", &p]),
-            )?;
-        }
-        host.remove_empty_dir(&s.dir);
-    }
+    delete_snapshots(system, host, snapshots, log)?;
     if info.exists {
         if info.subvolume {
             run(
@@ -375,6 +359,37 @@ pub fn remove_folder(
             )?;
         }
         log(&format!("{path} deleted"));
+    }
+    Ok(())
+}
+
+/// Deletes the snapshots of `snapshots` (each a read-only subvolume), then their folders
+/// when empty.
+fn delete_snapshots(
+    system: &dyn System,
+    host: &dyn ShareHost,
+    snapshots: &[SnapshotSource],
+    log: &dyn Fn(&str),
+) -> Result<(), String> {
+    for s in snapshots {
+        let names = host.snapshot_names(&s.dir, &s.prefix);
+        if names.is_empty() {
+            continue;
+        }
+        log(&format!(
+            "deleting {} snapshots in {}",
+            names.len(),
+            s.dir
+        ));
+        for n in names {
+            let p = format!("{}/{n}", s.dir.trim_end_matches('/'));
+            run(
+                system,
+                log,
+                Cmd::new("btrfs").args(["subvolume", "delete", &p]),
+            )?;
+        }
+        host.remove_empty_dir(&s.dir);
     }
     Ok(())
 }
@@ -662,7 +677,10 @@ mod tests {
         assert!(err.contains("in use"), "{err}");
         assert_eq!(c.state("/vol1/secret"), rynas_api_types::CryptState::Unlocked);
         c.set_busy("/vol1/secret", false);
-        remove_folder(&sys, h.as_ref(), &c, &vols(), "/vol1/secret", &[], &|_| {}).unwrap();
+        // the snapshots of its ciphertext go too (a job on the ciphertext directory)
+        remove_folder(&sys, h.as_ref(), &c, &vols(), "/vol1/secret", &src(), &|_| {}).unwrap();
+        let runs: Vec<String> = sys.state().calls.iter().filter(|c| c.starts_with("run btrfs")).cloned().collect();
+        assert_eq!(runs.len(), 2, "{runs:?}");
         assert_eq!(c.state("/vol1/secret"), rynas_api_types::CryptState::Missing);
         assert!(!h.probe("/vol1/secret").exists);
         // no plain delete ran on the mount point

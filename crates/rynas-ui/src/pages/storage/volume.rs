@@ -612,21 +612,22 @@ pub fn RevealDialog(id: String, on_close: Callback<()>) -> impl IntoView {
                     </div>
                 }
                 .into_any(),
-                Some(k) => key_once(k, format!("recovery-key-{}.txt", idv.get_value()), on_close),
+                Some(k) => key_once(k, format!("recovery-key-{}.txt", idv.get_value()), "sto.rk_once", on_close),
             }}
         </Modal>
     }
 }
 
 /// A recovery key shown once: copy, download as `file`, and the "I stored it" check that
-/// must be ticked before `on_done` (also for an encrypted shared folder).
-pub fn key_once(key: String, file: String, on_done: Callback<()>) -> AnyView {
+/// must be ticked before `on_done` (also for an encrypted shared folder). `warn`: the i18n key
+/// of the warning above the key.
+pub fn key_once(key: String, file: String, warn: &'static str, on_done: Callback<()>) -> AnyView {
     let stored = RwSignal::new(false);
     let copied = RwSignal::new(false);
     let k2 = key.clone();
     let k3 = key.clone();
     view! {
-        {ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {tr("sto.rk_once")} }.into_any())}
+        {ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {tr(warn)} }.into_any())}
         <code class="secret mono rk">{key}</code>
         <div class="card-actions">
             <button class="btn ghost sm" type="button" on:click=move |_| { if copy_text(&k2) { copied.set(true); } }>
