@@ -60,8 +60,9 @@ pub enum ConfigError {
     Conflict(Vec<String>),
     /// A partial apply selects a key of a review group ([`Config::stage_group`] with
     /// `review`: a destructive change such as a folder deletion), which only a full apply
-    /// commits: the pending keys of the group.
-    GroupSplit(Vec<String>),
+    /// commits. `asked`: the selected key that brings the group in (itself a member, or
+    /// joined to it through plain groups); `group`: the pending keys of the group.
+    GroupSplit { asked: String, group: Vec<String> },
     NotFound(String),
     /// The apply failed and was rolled back.
     Apply(String),
@@ -80,10 +81,14 @@ impl std::fmt::Display for ConfigError {
                 "{} changed after the change was staged: discard and stage it again",
                 keys.join(", ")
             ),
-            ConfigError::GroupSplit(keys) => write!(
+            ConfigError::GroupSplit { asked, group } if group.len() == 1 && group[0] == *asked => write!(
                 f,
-                "the pending change of {} includes a destructive step (such as deleting a folder) that is applied only with the whole changeset: review and apply it from the pending changes (apply without keys)",
-                keys.join(", ")
+                "the pending change of {asked} is a destructive step (such as deleting a folder) that is applied only with the whole changeset: review and apply it from the pending changes (apply without keys)"
+            ),
+            ConfigError::GroupSplit { asked, group } => write!(
+                f,
+                "the pending change of {asked} was staged together with a destructive step on {} (such as deleting a folder) that is applied only with the whole changeset: review and apply it from the pending changes (apply without keys)",
+                group.join(", ")
             ),
             ConfigError::NotFound(what) => write!(f, "{what} not found"),
             ConfigError::Apply(e) => write!(f, "{e}"),
@@ -499,18 +504,30 @@ impl Config {
             e.1 |= review;
         }
         let mut out: Vec<String> = keys.to_vec();
+        // the selected key each key of `out` joined through, for the refusal's message
+        let mut origin: BTreeMap<String, String> =
+            keys.iter().map(|k| (k.clone(), k.clone())).collect();
         loop {
             let before = out.len();
             for (members, review) in groups.values() {
-                if !members.iter().any(|k| out.contains(k)) {
+                let Some(via) = members
+                    .iter()
+                    .find(|k| keys.contains(k))
+                    .or_else(|| members.iter().find(|k| out.contains(k)))
+                else {
                     continue;
-                }
+                };
+                let asked = origin.get(via).cloned().unwrap_or_else(|| via.clone());
                 if *review {
-                    return Err(ConfigError::GroupSplit(members.clone()));
+                    return Err(ConfigError::GroupSplit {
+                        asked,
+                        group: members.clone(),
+                    });
                 }
                 for k in members {
                     if !out.contains(k) {
                         out.push(k.clone());
+                        origin.insert(k.clone(), asked.clone());
                     }
                 }
             }
@@ -553,7 +570,48 @@ impl Config {
         cancelled: &dyn Fn() -> bool,
     ) -> Result<u64> {
         let _apply = self.apply_lock.lock().unwrap();
-        let keys = &self.group_keys(owner, keys)?;
+        let keys = self.group_keys(owner, keys)?;
+        self.apply_selected(owner, author, comment, &keys, log, cancelled)
+    }
+
+    /// [`Config::apply_keys`] of keys a caller already expanded with [`Config::group_keys`]
+    /// and checked (e.g. the guards of the HTTP apply): exactly them are applied. When the
+    /// groups expand them further now (keys staged together since) or a review group joined,
+    /// nothing is applied, so the checked set is the applied set.
+    pub fn apply_expanded(
+        &self,
+        owner: &str,
+        author: &str,
+        comment: &str,
+        keys: &[String],
+        log: &dyn Fn(&str),
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<u64> {
+        let _apply = self.apply_lock.lock().unwrap();
+        let extra: Vec<String> = self
+            .group_keys(owner, keys)?
+            .into_iter()
+            .filter(|k| !keys.contains(k))
+            .collect();
+        if !extra.is_empty() {
+            return Err(ConfigError::Apply(format!(
+                "{} joined the selected changes after the apply was requested: nothing was applied, apply again",
+                extra.join(", ")
+            )));
+        }
+        self.apply_selected(owner, author, comment, keys, log, cancelled)
+    }
+
+    /// The apply of `keys` (expanded, empty: all), with the apply lock held.
+    fn apply_selected(
+        &self,
+        owner: &str,
+        author: &str,
+        comment: &str,
+        keys: &[String],
+        log: &dyn Fn(&str),
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<u64> {
         let mut pending = self.pending(owner)?;
         let selected = |k: &str| keys.is_empty() || keys.iter().any(|x| x == k);
         pending.changes.retain(|c| selected(&c.key));

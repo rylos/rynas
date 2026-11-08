@@ -115,6 +115,10 @@ Every `mount`/`umount` of steps 1, 3 and 4 runs in a transient unit outside ryna
 `rynas_tasks::Outside`): rynasd's seccomp filter (`@system-service`) has no mount calls, and
 `synodeb-dom`, which runs outside too, must see the restore point's mount. The mounts
 propagate into rynasd's mount namespace, where the btrfs steps (ioctls, renames) run.
+Living in the host's namespace they outlast rynasd: what a rollback interrupted by a restart
+left below `/run/rynas/rollback` is unmounted (deepest first, `umount -l` only when the plain
+unmount fails, logged) when rynasd starts and before a rollback mounts anything; a mount whose
+command failed (e.g. the client's timeout) is unmounted if it happened anyway.
 On other systems (no boot layer) the preview says `no_boot_layer` and the rollback stays a 409
 with a note (console procedure). `rynasd --dry-system` only logs the steps (with the boot layer
 when the fake hardware is a Synology or has `usr/sbin/synodeb-dom`). Tests: step order,

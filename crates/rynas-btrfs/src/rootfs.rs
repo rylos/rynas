@@ -27,6 +27,10 @@
 //! ([`rynas_tasks::Outside`], units `rynas-rollback-*`): rynasd's seccomp filter has no mount
 //! calls, and the boot layer's tool (outside too) must see the restore point's mount. They
 //! propagate into rynasd's mount namespace, where the btrfs steps run (ioctls and renames).
+//! Living in the host's namespace, they outlast rynasd: whatever an interrupted rollback left
+//! below `/run/rynas/rollback` is unmounted ([`clear_mounts`], deepest first) when rynasd
+//! starts and before a rollback mounts anything, and a mount whose command failed is
+//! unmounted if it happened anyway.
 //!
 //! Every effect goes through [`RootOps`]: [`HostRoot`] on the machine, [`DryRoot`] for
 //! `rynasd --dry-system` (logs only), a recording fake in the tests.
@@ -147,6 +151,12 @@ pub trait RootOps: Send + Sync {
     fn mount_top(&self, dir: &Path) -> Result<String, String>;
     /// Unmounts `dir` and removes it.
     fn unmount(&self, dir: &Path) -> Result<(), String>;
+    /// Unmounts whatever is mounted at or below `dir` (left by an interrupted rollback, or by
+    /// a mount whose command failed after mounting), deepest first; nothing mounted: nothing
+    /// done. `log` gets one line per mount. Err when one stays mounted.
+    fn clear_mounts(&self, _dir: &Path, _log: &dyn Fn(&str)) -> Result<(), String> {
+        Ok(())
+    }
     /// A read-only restore point of the running system, never skipped; its name.
     fn restore_point(&self, reason: &str, now_s: i64) -> Result<String, String>;
     /// Writable snapshot of `src` as `dir/name`.
@@ -208,13 +218,26 @@ pub fn rollback_root(
     let Some(boot) = boot else {
         return Err(NO_BOOT_LAYER.into());
     };
+    // mounts of an earlier rollback interrupted by a rynasd restart: never mount on top
+    ops.clear_mounts(&r.run_dir, log).map_err(|e| {
+        format!(
+            "leftover mounts below {}: {e}. Nothing was changed.",
+            r.run_dir.display()
+        )
+    })?;
     let mnt = r.run_dir.join(&r.id);
     log(&format!(
         "mounting {} read-only at {}",
         r.snapshot.display(),
         mnt.display()
     ));
-    ops.mount_ro(&r.snapshot, &mnt)?;
+    if let Err(e) = ops.mount_ro(&r.snapshot, &mnt) {
+        // the command may have failed after mounting (e.g. the client's timeout)
+        if let Err(e2) = ops.clear_mounts(&mnt, log) {
+            log(&format!("warning: {e2}"));
+        }
+        return Err(e);
+    }
     let out = with_snapshot(ops, boot, r, &mnt, log);
     if let Err(e) = ops.unmount(&mnt) {
         log(&format!("warning: unmounting {}: {e}", mnt.display()));
@@ -286,7 +309,15 @@ fn swap_root(
         "mounting the top level of the root filesystem at {}",
         top.display()
     ));
-    let root_name = ops.mount_top(&top)?;
+    let root_name = match ops.mount_top(&top) {
+        Ok(n) => n,
+        Err(e) => {
+            if let Err(e2) = ops.clear_mounts(&top, log) {
+                log(&format!("warning: {e2}"));
+            }
+            return Err(e);
+        }
+    };
     let out = in_top(ops, r, &top, &root_name, log);
     if let Err(e) = ops.unmount(&top) {
         log(&format!("warning: unmounting {}: {e}", top.display()));
@@ -401,26 +432,25 @@ fn root_mount() -> Option<(String, String, String)> {
     })
 }
 
-fn run(cmd: Cmd) -> Result<String, String> {
-    let shown = cmd.display();
-    match cmd.run_blocking() {
-        Ok(o) if o.success() => Ok(o.stdout),
-        Ok(o) => {
-            let text = if o.stderr.trim().is_empty() {
-                o.stdout
-            } else {
-                o.stderr
-            };
-            let last: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
-            let tail = last[last.len().saturating_sub(3)..].join(" / ");
-            Err(match o.code {
-                Some(c) if !tail.is_empty() => format!("{tail} (exit code {c})"),
-                Some(c) => format!("{shown}: exit code {c}"),
-                None => format!("{shown}: killed by a signal"),
-            })
-        }
-        Err(e) => Err(format!("{shown}: {e}")),
-    }
+fn run(argv: Vec<OsString>) -> Result<String, String> {
+    let shown = shown(&argv);
+    outside(argv)
+        .run_blocking()
+        .map(|o| o.stdout)
+        .map_err(|e| failure(&shown, &e))
+}
+
+/// The inner command line for errors and logs (not the `systemd-run` wrapper).
+fn shown(argv: &[OsString]) -> String {
+    argv.iter()
+        .map(|a| a.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// `mount …: exit code N: <last stderr line>` (or the timeout, the spawn error).
+fn failure(shown: &str, e: &rynas_tasks::CmdError) -> String {
+    format!("{shown}: {e}")
 }
 
 /// Prefix of the transient units the rollback mounts and unmounts in.
@@ -451,9 +481,89 @@ pub fn mount_top_argv(source: &str, dir: &Path) -> Vec<OsString> {
     ]
 }
 
-/// Unmount of `dir` (never lazy).
 pub fn umount_argv(dir: &Path) -> Vec<OsString> {
     vec!["umount".into(), dir.into()]
+}
+
+/// Lazy unmount of `dir`: only when the plain one failed on a leftover mount.
+pub fn umount_lazy_argv(dir: &Path) -> Vec<OsString> {
+    vec!["umount".into(), "-l".into(), dir.into()]
+}
+
+/// A mount point field of `/proc/self/mountinfo` decoded (`\040` space, `\011`, `\012`,
+/// `\134`).
+fn unescape_mountinfo(s: &str) -> PathBuf {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'\\'
+            && i + 4 <= b.len()
+            && b[i + 1..i + 4].iter().all(|c| (b'0'..=b'7').contains(c))
+        {
+            let v = b[i + 1..i + 4]
+                .iter()
+                .fold(0u32, |a, c| a * 8 + u32::from(c - b'0'));
+            if let Ok(v) = u8::try_from(v) {
+                out.push(v);
+                i += 4;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    PathBuf::from(<OsString as std::os::unix::ffi::OsStringExt>::from_vec(out))
+}
+
+/// The mount points at or below `dir` in `mountinfo` (the text of `/proc/self/mountinfo`),
+/// in the order they must be unmounted: deepest first, and of mounts stacked on one path
+/// the last mounted first (one entry per mount: a path mounted twice is listed twice).
+pub fn mounts_under(mountinfo: &str, dir: &Path) -> Vec<PathBuf> {
+    let mut v: Vec<(usize, PathBuf)> = mountinfo
+        .lines()
+        .filter_map(|l| l.split(' ').nth(4).map(unescape_mountinfo))
+        .filter(|p| p.starts_with(dir))
+        .enumerate()
+        .collect();
+    v.sort_by(|(i, a), (j, b)| {
+        b.components()
+            .count()
+            .cmp(&a.components().count())
+            .then(j.cmp(i))
+    });
+    v.into_iter().map(|(_, p)| p).collect()
+}
+
+/// [`RootOps::clear_mounts`] on the machine, also run when rynasd starts (on
+/// [`RUN_DIR`]): every mount at or below `dir` is unmounted outside the sandbox
+/// ([`outside`]), lazily (logged) only when the plain unmount fails; the emptied mount
+/// points are removed. Errors name the mounts that stayed.
+pub fn clear_mounts(dir: &Path, log: &dyn Fn(&str)) -> Result<(), String> {
+    let text = std::fs::read_to_string("/proc/self/mountinfo")
+        .map_err(|e| format!("/proc/self/mountinfo: {e}"))?;
+    let mut stuck = Vec::new();
+    for m in mounts_under(&text, dir) {
+        log(&format!(
+            "unmounting {} (left by an interrupted rollback)",
+            m.display()
+        ));
+        if let Err(e) = run(umount_argv(&m)) {
+            log(&format!("warning: {e}; detaching it lazily"));
+            if let Err(e) = run(umount_lazy_argv(&m)) {
+                stuck.push(e);
+                continue;
+            }
+        }
+        if m != dir {
+            let _ = std::fs::remove_dir(&m);
+        }
+    }
+    if stuck.is_empty() {
+        Ok(())
+    } else {
+        Err(stuck.join("; "))
+    }
 }
 
 /// The real thing (rynasd as root).
@@ -475,7 +585,7 @@ impl RootOps for HostRoot {
 
     fn mount_ro(&self, src: &Path, dir: &Path) -> Result<(), String> {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        run(outside(mount_ro_argv(src, dir))).map(drop)
+        run(mount_ro_argv(src, dir)).map(drop)
     }
 
     fn mount_top(&self, dir: &Path) -> Result<String, String> {
@@ -497,14 +607,18 @@ impl RootOps for HostRoot {
             ));
         }
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        run(outside(mount_top_argv(&source, dir)))?;
+        run(mount_top_argv(&source, dir))?;
         Ok(name)
     }
 
     fn unmount(&self, dir: &Path) -> Result<(), String> {
-        run(outside(umount_argv(dir)))?;
+        run(umount_argv(dir))?;
         let _ = std::fs::remove_dir(dir);
         Ok(())
+    }
+
+    fn clear_mounts(&self, dir: &Path, log: &dyn Fn(&str)) -> Result<(), String> {
+        clear_mounts(dir, log)
     }
 
     fn restore_point(&self, reason: &str, now_s: i64) -> Result<String, String> {
@@ -776,6 +890,9 @@ mod tests {
         fn unmount(&self, d: &Path) -> Result<(), String> {
             self.rec(format!("unmount {}", d.display()))
         }
+        fn clear_mounts(&self, d: &Path, _: &dyn Fn(&str)) -> Result<(), String> {
+            self.rec(format!("clear {}", d.display()))
+        }
         fn restore_point(&self, reason: &str, _: i64) -> Result<String, String> {
             self.rec(format!("restore_point {reason}"))
                 .map(|_| "rootfs.20261105T1200".into())
@@ -825,7 +942,8 @@ mod tests {
         let c = f.calls();
         let stamp = stamp_seconds(plan().now_s);
         let want = [
-            "mount_ro /.snapshots/rootfs/rootfs.20261101T0300 /run/rynas/rollback/rootfs.20261101T0300".to_string(),
+            "clear /run/rynas/rollback".to_string(),
+            "mount_ro /.snapshots/rootfs/rootfs.20261101T0300 /run/rynas/rollback/rootfs.20261101T0300".into(),
             "boot_sync /run/rynas/rollback/rootfs.20261101T0300".into(),
             "mount_top /run/rynas/rollback/top".into(),
             "restore_point before rollback".into(),
@@ -847,8 +965,81 @@ mod tests {
         let e = rollback_root(&f, Some(&f), &plan(), &|_| {}).unwrap_err();
         assert!(e.contains("boot-tool refused") && e.contains("boom"), "{e}");
         let c = f.calls();
+        assert_eq!(c.len(), 4, "{c:?}");
+        assert!(c[3].starts_with("unmount /run/rynas/rollback/rootfs."));
+    }
+
+    #[test]
+    fn leftover_mounts_that_stay_stop_everything() {
+        let f = Fake::new(Some("clear /run/rynas/rollback"));
+        let e = rollback_root(&f, Some(&f), &plan(), &|_| {}).unwrap_err();
+        assert!(e.contains("leftover mounts") && e.contains("Nothing was changed"), "{e}");
+        assert_eq!(f.calls(), ["clear /run/rynas/rollback"]);
+    }
+
+    #[test]
+    fn a_failed_mount_is_cleared_in_case_it_happened() {
+        let f = Fake::new(Some("mount_ro"));
+        rollback_root(&f, Some(&f), &plan(), &|_| {}).unwrap_err();
+        let c = f.calls();
         assert_eq!(c.len(), 3, "{c:?}");
-        assert!(c[2].starts_with("unmount /run/rynas/rollback/rootfs."));
+        assert_eq!(c[2], "clear /run/rynas/rollback/rootfs.20261101T0300");
+        let f = Fake::new(Some("mount_top"));
+        rollback_root(&f, Some(&f), &plan(), &|_| {}).unwrap_err();
+        let c = f.calls();
+        let i = c.iter().position(|x| x.starts_with("mount_top")).unwrap();
+        assert_eq!(c[i + 1], "clear /run/rynas/rollback/top");
+        assert_eq!(c[i + 2], "boot_sync /");
+        assert!(c[i + 3].starts_with("unmount /run/rynas/rollback/rootfs."));
+    }
+
+    #[test]
+    fn leftover_mounts_deepest_and_latest_first() {
+        // a rollback interrupted twice: top mounted twice, a restore point, a mount with a
+        // space; the root, other /run mounts and a sibling prefix stay out
+        let mi = "\
+22 1 0:21 /@rootfs / rw,noatime shared:1 - btrfs /dev/nvme0n1p2 rw
+30 22 0:25 / /run rw,nosuid shared:5 - tmpfs tmpfs rw
+41 30 0:21 / /run/rynas/rollback/top rw shared:1 - btrfs /dev/nvme0n1p2 rw,subvolid=5
+42 30 0:21 /@rootfs/.snapshots/rootfs/rootfs.20261101T0300 /run/rynas/rollback/rootfs.20261101T0300 ro shared:1 - btrfs /dev/nvme0n1p2 rw
+43 30 0:21 / /run/rynas/rollback/top rw shared:1 - btrfs /dev/nvme0n1p2 rw,subvolid=5
+44 41 0:30 / /run/rynas/rollback/top/@rootfs/x rw - tmpfs tmpfs rw
+45 30 0:31 / /run/rynas/rollback\\040odd rw - tmpfs tmpfs rw
+46 30 0:32 / /run/rynas/rollback2 rw - tmpfs tmpfs rw
+47 30 0:33 / /run/rynas/rollback/a\\040b rw - tmpfs tmpfs rw
+";
+        let got = mounts_under(mi, Path::new(RUN_DIR));
+        let want: Vec<PathBuf> = [
+            "/run/rynas/rollback/top/@rootfs/x",
+            "/run/rynas/rollback/a b",
+            "/run/rynas/rollback/top",
+            "/run/rynas/rollback/rootfs.20261101T0300",
+            "/run/rynas/rollback/top",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+        assert_eq!(got, want);
+        // one directory: only its own mounts
+        assert_eq!(
+            mounts_under(mi, Path::new("/run/rynas/rollback/rootfs.20261101T0300")),
+            [PathBuf::from("/run/rynas/rollback/rootfs.20261101T0300")]
+        );
+        assert!(mounts_under("", Path::new(RUN_DIR)).is_empty());
+    }
+
+    #[test]
+    fn errors_show_the_inner_command() {
+        let argv = mount_ro_argv(Path::new("/s"), Path::new("/run/rynas/rollback/x"));
+        let e = rynas_tasks::CmdError::Failed(rynas_tasks::CmdOutput {
+            code: Some(32),
+            stdout: String::new(),
+            stderr: "mount: /run/rynas/rollback/x: special device /s does not exist.\n".into(),
+        });
+        assert_eq!(
+            failure(&shown(&argv), &e),
+            "mount -o bind,ro /s /run/rynas/rollback/x: exit code 32: mount: /run/rynas/rollback/x: special device /s does not exist."
+        );
     }
 
     #[test]
@@ -913,6 +1104,7 @@ mod tests {
             "mount -t btrfs -o subvolid=5,noatime /dev/nvme0n1p2 /run/rynas/rollback/top"
         );
         assert_eq!(at(&outside(umount_argv(top))), "umount /run/rynas/rollback/top");
+        assert_eq!(at(&outside(umount_lazy_argv(top))), "umount -l /run/rynas/rollback/top");
         // a path that looks like an option stays a separate argument after `--`
         let odd = mount_ro_argv(Path::new("/s/-o x"), mnt);
         assert_eq!(odd[3], OsString::from("/s/-o x"));

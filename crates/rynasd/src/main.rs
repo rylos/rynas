@@ -783,6 +783,16 @@ fn main() -> std::io::Result<()> {
         state.notifications = Some(engine.clone());
         let history = History::open(&args.state_dir.join("scheduler.db"))
             .map_err(std::io::Error::other)?;
+        // a root rollback mounts in the host's namespace: what one interrupted by a restart
+        // of rynasd left mounted below /run/rynas/rollback goes away now
+        if !args.dry_system {
+            tokio::task::spawn_blocking(|| {
+                let dir = Path::new(rynas_btrfs::rootfs::RUN_DIR);
+                if let Err(e) = rynas_btrfs::rootfs::clear_mounts(dir, &|m| tracing::warn!("rollback: {m}")) {
+                    tracing::error!("rollback: leftover mounts below {}: {e}", dir.display());
+                }
+            });
+        }
         let protection = Protection::new(
             ops.clone(),
             opened.scheduler,

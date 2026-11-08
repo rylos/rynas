@@ -342,7 +342,10 @@ fn keys_staged_together_are_applied_together() {
     e.cfg.stage_group("alice", &[HOSTNAME_KEY], true).unwrap();
     assert_eq!(
         run(&keys(&[HOSTNAME_KEY])),
-        Err(ConfigError::GroupSplit(keys(&[HOSTNAME_KEY])))
+        Err(ConfigError::GroupSplit {
+            asked: HOSTNAME_KEY.into(),
+            group: keys(&[HOSTNAME_KEY])
+        })
     );
     // a partial apply that does not touch the group still works
     e.cfg
@@ -386,13 +389,46 @@ fn keys_staged_together_are_applied_together() {
     e.cfg
         .stage_group("alice", &["test.app", HOSTNAME_KEY], false)
         .unwrap();
+    // the refusal names the selected key, not only the destructive one it joined
+    let split = run(&keys(&["test.app"]));
     assert_eq!(
-        run(&keys(&["test.app"])),
-        Err(ConfigError::GroupSplit(keys(&[HOSTNAME_KEY])))
+        split,
+        Err(ConfigError::GroupSplit {
+            asked: "test.app".into(),
+            group: keys(&[HOSTNAME_KEY])
+        })
     );
+    let m = split.unwrap_err().to_string();
+    assert!(m.contains("test.app") && m.contains(HOSTNAME_KEY) && m.contains("destructive"), "{m}");
     assert_eq!(e.cfg.pending("alice").unwrap().changes.len(), 2);
     apply(&e, "alice", "").unwrap();
     assert_eq!(read(&e.root, "/etc/hostname"), "delta\n");
+    // an expanded selection is applied as it is; keys joining it since refuse the apply
+    e.cfg
+        .stage("alice", HOSTNAME_KEY, Some(hostname("echo")))
+        .unwrap();
+    e.cfg
+        .stage("alice", "test.app", Some(json!({"port": 3, "name": "x"})))
+        .unwrap();
+    let checked = e.cfg.group_keys("alice", &keys(&["test.app"])).unwrap();
+    assert_eq!(checked, keys(&["test.app"]));
+    e.cfg
+        .stage_group("alice", &["test.app", HOSTNAME_KEY], false)
+        .unwrap();
+    let late = e
+        .cfg
+        .apply_expanded("alice", "alice", "", &checked, &|_| {}, &|| false);
+    assert!(
+        matches!(&late, Err(ConfigError::Apply(m)) if m.contains(HOSTNAME_KEY) && m.contains("nothing was applied")),
+        "{late:?}"
+    );
+    assert_eq!(e.cfg.pending("alice").unwrap().changes.len(), 2);
+    let all = e.cfg.group_keys("alice", &checked).unwrap();
+    e.cfg
+        .apply_expanded("alice", "alice", "", &all, &|_| {}, &|| false)
+        .unwrap();
+    assert!(e.cfg.pending("alice").unwrap().changes.is_empty());
+    assert_eq!(read(&e.root, "/etc/hostname"), "echo\n");
 }
 
 #[test]

@@ -150,7 +150,7 @@ impl From<ConfigError> for Error {
             ConfigError::Conflict(_) => {
                 Error::new(StatusCode::CONFLICT, error_codes::CONFLICT, msg)
             }
-            ConfigError::GroupSplit(_) => {
+            ConfigError::GroupSplit { .. } => {
                 Error::new(StatusCode::CONFLICT, error_codes::APPLY_GROUP_SPLIT, msg)
             }
             ConfigError::Apply(_) | ConfigError::Cancelled | ConfigError::Storage(_) => {

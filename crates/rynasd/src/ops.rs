@@ -113,7 +113,7 @@ impl From<ConfigError> for Error {
             ConfigError::Invalid(_) => (StatusCode::BAD_REQUEST, error_codes::INVALID_VALUE),
             ConfigError::NothingPending => (StatusCode::CONFLICT, error_codes::NOTHING_PENDING),
             ConfigError::Conflict(_) => (StatusCode::CONFLICT, error_codes::CONFLICT),
-            ConfigError::GroupSplit(_) => (StatusCode::CONFLICT, error_codes::APPLY_GROUP_SPLIT),
+            ConfigError::GroupSplit { .. } => (StatusCode::CONFLICT, error_codes::APPLY_GROUP_SPLIT),
             ConfigError::Apply(_) | ConfigError::Cancelled | ConfigError::Storage(_) => {
                 tracing::error!("configuration: {msg}");
                 (StatusCode::INTERNAL_SERVER_ERROR, error_codes::INTERNAL)
@@ -311,13 +311,14 @@ async fn apply(
     let cfg = ops.config.clone();
     let owner = user.clone();
     let after = ops.after_apply.clone();
+    // the task applies exactly the keys checked above (refused if more joined since)
     let id = ops
         .tasks
         .spawn("config.apply", &user, move |ctx| async move {
             let c = ctx.clone();
             tokio::task::spawn_blocking(move || {
                 let log = |l: &str| c.log(l);
-                let rev = cfg.apply_keys(&owner, &owner, &req.comment, &req.keys, &log, &|| {
+                let rev = cfg.apply_expanded(&owner, &owner, &req.comment, &keys, &log, &|| {
                     c.is_cancelled()
                 })?;
                 log(&format!("revision {rev}"));
