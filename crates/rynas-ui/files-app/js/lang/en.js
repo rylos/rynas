@@ -527,6 +527,8 @@ export default {
   "Sessione scaduta: accedi di nuovo": "Session expired: sign in again",
   "La sessione è cambiata in un'altra scheda: ricarica la pagina": "The session changed in another tab: reload the page",
   "Non hai il permesso per questa operazione": "You are not allowed to do this",
+  "Permesso negato": "Permission denied",
+  "controlla le autorizzazioni della cartella condivisa": "check the shared folder's permissions",
   "Non trovato: forse è stato spostato o eliminato": "Not found: it may have been moved or deleted",
   "Il file è cambiato nel frattempo": "The file changed in the meantime",
   "Occupato: riprova tra poco": "Busy: try again shortly",

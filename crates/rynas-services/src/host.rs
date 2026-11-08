@@ -32,6 +32,10 @@ pub struct PathInfo {
     /// The folder has the btrfs no copy-on-write attribute ([`crate::nocow`]); `None`
     /// when not on btrfs or unreadable.
     pub nocow: Option<bool>,
+    /// A directory owned by root whose mode gives the group and others nothing (with a
+    /// POSIX ACL the group bits are its mask, so named entries count too): only root can
+    /// use it.
+    pub root_only: bool,
 }
 
 pub trait ShareHost: Send + Sync {
@@ -245,6 +249,11 @@ fn subvolume_uuid(path: &str) -> Option<String> {
     ))
 }
 
+/// Only root can use a directory with this owner and mode ([`PathInfo::root_only`]).
+pub fn root_only(uid: u32, mode: u32) -> bool {
+    uid == 0 && mode & 0o077 == 0
+}
+
 impl ShareHost for HostShares {
     fn probe(&self, path: &str) -> PathInfo {
         let Ok(md) = std::fs::metadata(path) else {
@@ -254,6 +263,7 @@ impl ShareHost for HostShares {
             exists: true,
             is_dir: md.is_dir(),
             symlink: std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()),
+            root_only: md.is_dir() && root_only(md.uid(), md.mode()),
             ..Default::default()
         };
         if let Ok(st) = nix::sys::statfs::statfs(path) {
@@ -500,8 +510,16 @@ impl MemoryShares {
                 subvolume_uuid: uuid.map(String::from),
                 symlink: false,
                 nocow: uuid.map(|_| false),
+                root_only: false,
             },
         );
+    }
+
+    /// Marks a declared directory as usable by root only ([`PathInfo::root_only`]).
+    pub fn set_root_only(&self, path: &str, on: bool) {
+        if let Some(i) = self.state().paths.get_mut(path) {
+            i.root_only = on;
+        }
     }
 
     /// Sets the no copy-on-write state of a declared btrfs directory.

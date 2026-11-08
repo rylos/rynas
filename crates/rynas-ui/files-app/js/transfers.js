@@ -54,7 +54,14 @@ export const finished = (j) => ["done", "failed", "cancelled"].includes(j.state)
 // "done" where every item failed reads as a failure, with the first reason
 const allFailed = (j) => j.state === "done" && j.progress.errors > 0 && j.progress.errors >= j.progress.files_done;
 const shownState = (j) => (allFailed(j) ? "failed" : j.state);
-const firstError = (j) => j.errors?.[0]?.msg || "";
+// a refused permission: the place is in the path, the remedy in the shared folder's permissions
+const PERM_HINT = "controlla le autorizzazioni della cartella condivisa";
+const errorText = (e) => (e.code === "permission_denied" ? `${t("Permesso negato")} · ${t(PERM_HINT)}` : e.msg || "");
+// one failed item with where it failed, never a bare reason
+const errorLine = (e) => (!e ? "" : e.path ? `${e.path}: ${errorText(e)}` : errorText(e));
+const firstError = (j) => errorLine(j.errors?.[0]);
+// why a whole job stopped, with the remedy when a permission was refused
+const jobMsg = (j) => (j.code === "permission_denied" && j.msg ? `${j.msg} · ${t(PERM_HINT)}` : j.msg || "");
 const active = (j) => !finished(j);
 
 export function init(theApp) {
@@ -280,12 +287,12 @@ function announce(job) {
   } else if (job.state === "failed" && job.msg === "need_password") {
     openDialog(job.id);
   } else if (job.state === "failed") {
-    toast(`${title(job)}: ${job.msg}`, { kind: "error", action: t("Dettagli"), onAction: () => openDialog(job.id), timeout: 9000 });
+    toast(`${title(job)}: ${jobMsg(job)}`, { kind: "error", action: t("Dettagli"), onAction: () => openDialog(job.id), timeout: 9000 });
   }
   // on another page of the shell: the shell's own toast says it
   if (!connected() && !document.hidden) {
     const failed = allFailed(job) || job.state === "failed";
-    emit("toast", { kind: failed ? "error" : "ok", text: failed ? `${title(job)}: ${firstError(job) || job.msg || t(STATE.failed)}` : `${t(op.done)} · ${title(job)}` });
+    emit("toast", { kind: failed ? "error" : "ok", text: failed ? `${title(job)}: ${firstError(job) || jobMsg(job) || t(STATE.failed)}` : `${t(op.done)} · ${title(job)}` });
   }
   if (prefs.notify && document.hidden && "Notification" in window && Notification.permission === "granted") {
     new Notification("rynas", { body: `${title(job)} · ${t(STATE[job.state])}`, icon: "/favicon.svg" });
@@ -437,7 +444,7 @@ function renderDrawer() {
       ? job.state === "running"
         ? `<span>${st.byBytes ? `${size(job.progress.bytes_done)} / ${size(job.progress.bytes_total)}` : `${int(job.progress.files_done)} / ${int(job.progress.files_total)}`}</span><span>${job.cancelling ? t("Annullamento in corso…") : job.stalled_s ? t("Nessun dato da {n} s", { n: int(job.stalled_s) }) : `${st.byBytes ? speed(st.now) : ""}${st.eta != null ? " · " + duration(st.eta) : ""}`}</span>`
         : `<span>${t(STATE[job.state])}</span><span>${pctText(st.pct, finished(job))}%</span>`
-      : `<span>${job.finished ? clock(job.finished) : ""} · ${duration(job.active_ms)}</span><span>${job.progress.errors ? count(job.progress.errors, "errore", "errori", int) : esc(job.msg || "")}</span>`;
+      : `<span>${job.finished ? clock(job.finished) : ""} · ${duration(job.active_ms)}</span><span>${job.progress.errors ? count(job.progress.errors, "errore", "errori", int) : esc(jobMsg(job))}</span>`;
     const card = h(`<div class="jcard">
       <div class="jcard-top"><div class="op">${svg(op.icon)}</div>
         <div class="tt"><b>${esc(title(job))}</b><small>${esc(r.from)} → ${esc(r.to || "")}</small></div>
@@ -689,7 +696,7 @@ class JobDialog {
           setTimeout(() => $("input", form)?.focus());
         }
       } else {
-        const head = allFailed(job) ? `${t(STATE.failed)}: ${firstError(job)}` : job.state === "done" ? t(op.done) : !job.msg || job.msg === t(STATE[job.state]) ? t(STATE[job.state]) : `${t(STATE[job.state])}: ${job.msg}`;
+        const head = allFailed(job) ? `${t(STATE.failed)}: ${firstError(job)}` : job.state === "done" ? t(op.done) : !job.msg || job.msg === t(STATE[job.state]) ? t(STATE[job.state]) : `${t(STATE[job.state])}: ${jobMsg(job)}`;
         sum.innerHTML = `${svg(ok ? "check" : "alert")}<div><b>${esc(head)}</b>${esc(parts.join(" · "))}</div>`;
       }
     } else sum.hidden = true;
@@ -703,7 +710,9 @@ class JobDialog {
     $(".b-open", d).hidden = !finished(job) || !job.info.dest;
     $(".b-retry", d).hidden = !job.interrupted;
     // no speed limit for uploads from this computer: the browser sends as fast as it can
-    $(".xf-foot .left", d).style.visibility = finished(job) || job.op === "delete" || job.source === "local" ? "hidden" : "visible";
+    // a finished job has no speed limit: the place goes to its buttons (a phone is narrow)
+    $(".xf-foot .left", d).style.display = finished(job) ? "none" : "";
+    $(".xf-foot .left", d).style.visibility = job.op === "delete" || job.source === "local" ? "hidden" : "visible";
     const sel = $(".limit", d);
     const mb = Math.round((job.limit || 0) / 1024 / 1024);
     if (activeElement() !== sel) {
@@ -753,7 +762,7 @@ class JobDialog {
     box.hidden = !errs.length;
     if (!errs.length) return;
     $("summary", box).textContent = count(job.progress.errors || errs.length, "errore", "errori", int);
-    $("ul", box).innerHTML = errs.map((e) => `<li><span title="${esc(e.path)}">${esc(e.path)}</span><span>${esc(e.msg)}</span></li>`).join("");
+    $("ul", box).innerHTML = errs.map((e) => `<li><span title="${esc(e.path)}">${esc(e.path)}</span><span title="${esc(e.msg || "")}">${esc(errorText(e))}</span></li>`).join("");
   }
 
   /** The speed chart: throughput against progress (or time), with the average. */

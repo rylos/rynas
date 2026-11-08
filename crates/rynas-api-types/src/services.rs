@@ -616,6 +616,10 @@ fn share_yes() -> bool {
     true
 }
 
+/// The administrators group of rynas ([`LocalUser::admin`]): created by the package, its
+/// members may log in to rynas. A new shared folder gives it read and write by default.
+pub const ADMIN_GROUP: &str = "rynas-admin";
+
 /// A shared folder, exported over SMB and/or NFS.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Share {
@@ -638,7 +642,11 @@ pub struct Share {
     pub nfs: ShareNfs,
     /// The share × principal matrix, rendered as POSIX ACLs on the share root (access and
     /// default) and as `valid users`/`write list`/`read list`/`invalid users`. Empty: rynas
-    /// leaves the permissions of the directory alone.
+    /// leaves the permissions of the directory alone. Nothing is filled in by the server
+    /// (an existing share keeps meaning what it meant): a new folder (`subvolume`) is created
+    /// owned by root with no access for anybody else, so an empty matrix there gives the
+    /// warning `no_permissions_root_only`. Clients should send a matrix for a new folder;
+    /// the rynas UI starts from the creating user and [`ADMIN_GROUP`] with read and write.
     #[serde(default)]
     pub permissions: Vec<Permission>,
     /// A read-only `#snapshot` folder at the share root with the share's snapshots (one
@@ -1031,6 +1039,11 @@ pub enum ShareWarningCode {
     MultiprotocolWithoutNfs,
     /// No permissions: the folder's own permissions apply.
     NoPermissions,
+    /// No permissions and the folder is (or, created on apply, will be) owned by root with
+    /// no access for anybody else: only root can use the share. Given instead of
+    /// `no_permissions`; the remedy is a permission matrix (the UI fills in the creating
+    /// user and [`ADMIN_GROUP`] with read and write for a new folder).
+    NoPermissionsRootOnly,
     /// Every entry denies access.
     AllDenied,
     /// The snapshot folder is on but the share has no snapshot job (no snapshot directory).

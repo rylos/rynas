@@ -212,9 +212,10 @@ export async function upload(dest, items, onDone) {
     updateLocal(job);
   };
 
-  const fail = (path, msg) => {
+  // `code`: the server's error code, so the list explains it like the NAS's own jobs
+  const fail = (path, msg, code = "") => {
     job.progress.errors++;
-    if (job.errors.length < 500) job.errors.push({ path, msg });
+    if (job.errors.length < 500) job.errors.push({ path, msg, code });
   };
   const stopJob = (e) => {
     failure ||= e;
@@ -235,13 +236,13 @@ export async function upload(dest, items, onDone) {
       if (e.status === 401) stopJob(sessionGone());
       else if (fatal(e)) stopJob(e);
       else {
-        brokenDirs.set(d, e.message);
-        fail(d, e.message);
+        brokenDirs.set(d, e);
+        fail(d, e.message, e.code);
       }
     }
   }
   const brokenDir = (rel) => {
-    for (const [d, msg] of brokenDirs) if (d === rel || rel.startsWith(d + "/")) return msg;
+    for (const [d, e] of brokenDirs) if (d === rel || rel.startsWith(d + "/")) return e;
     return null;
   };
 
@@ -427,14 +428,14 @@ export async function upload(dest, items, onDone) {
           else if (!e.abort) {
             const exists = e.status === 409 && e.offset === 0 && policy !== "overwrite" && policy !== "newer";
             if (exists && policy === "skip") outcome = "skipped";
-            else error = exists ? t("esiste già") : e.message;
+            else error = exists ? new Error(t("esiste già")) : e;
           }
         }
       }
     }
     if (cancelled) break;
     if (outcome === "skipped") p.skipped++;
-    else if (outcome !== "done") fail(f.rel, error || t("non riuscito"));
+    else if (outcome !== "done") fail(f.rel, error?.message || t("non riuscito"), error?.code);
     // skipped or failed: its bytes count as handled, so the bar and the time left stay true
     p.bytes_done += f.file.size - p.current_done;
     p.current_done = f.file.size;

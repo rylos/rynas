@@ -33,6 +33,7 @@ fn warning_text(w: &ShareWarning, english: Option<&String>) -> String {
         ShareWarningCode::TimemachineNoLimit => "shares.w.tm_no_limit",
         ShareWarningCode::MultiprotocolWithoutNfs => "shares.w.multi_no_nfs",
         ShareWarningCode::NoPermissions => "shares.w.no_permissions",
+        ShareWarningCode::NoPermissionsRootOnly => "shares.w.root_only",
         ShareWarningCode::AllDenied => "shares.w.all_denied",
         ShareWarningCode::SnapshotFolderNoJob => "shares.w.snapfolder_no_job",
         ShareWarningCode::SnapshotFolderNfs => "shares.w.snapfolder_nfs",

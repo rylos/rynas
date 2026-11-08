@@ -776,6 +776,12 @@ Shares (`shares` key, `SharesConfig` {smb, nfs, shares, remove_folders}):
   group get `u:<member>:---`), `create mask = 0666`/`directory mask = 0777` so the default ACL
   decides, and `valid users`/`write list`/`read list`/`invalid users`. Effective permission: deny >
   RW > RO, with the deciding entries. An empty matrix leaves the directory's permissions alone.
+  A new folder (`subvolume`) is created by rynasd owned by root, mode 0700: with an empty matrix
+  only root can use it, so the server reports `no_permissions_root_only` (also for an existing
+  folder owned by root with no group/other bits) and does not fill anything in (existing shares
+  keep their meaning). The UI starts a new folder with the signed-in user (when a local user) and
+  the group `rynas-admin` at read and write, and asks before saving an empty matrix there;
+  for an existing folder it offers "Keep the folder's own permissions" (empty matrix).
   The drift report compares the ACL with `getfacl` (group membership changes show up there until
   the next apply of `shares`).
 - Avahi `/etc/avahi/services/rynas-smb.service` (`_smb._tcp`, `_device-info._tcp` model RackMac,

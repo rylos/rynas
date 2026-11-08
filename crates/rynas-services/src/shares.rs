@@ -121,6 +121,9 @@ pub fn warning_text(w: &ShareWarning) -> String {
         ShareWarningCode::NoPermissions => {
             "no permissions: the directory's own permissions apply (rynas does not set ACLs)".into()
         }
+        ShareWarningCode::NoPermissionsRootOnly => format!(
+            "no permissions and {path} belongs to root with no access for others: nobody but root can use this share; give users or groups access in its permissions"
+        ),
         ShareWarningCode::AllDenied => {
             "every entry denies access: nobody can use this share".into()
         }
@@ -695,7 +698,13 @@ impl SharesDomain {
             w.push(warn(ShareWarningCode::MultiprotocolWithoutNfs));
         }
         if s.permissions.is_empty() {
-            w.push(warn(ShareWarningCode::NoPermissions));
+            // a new folder is made by rynasd (root, umask 077): nobody else gets in
+            let new_folder = s.subvolume.is_some() && !info.exists;
+            w.push(if new_folder || (info.exists && info.root_only) {
+                at_path(ShareWarningCode::NoPermissionsRootOnly)
+            } else {
+                warn(ShareWarningCode::NoPermissions)
+            });
         } else if s.permissions.iter().all(|p| p.access == Access::Deny) {
             w.push(warn(ShareWarningCode::AllDenied));
         }

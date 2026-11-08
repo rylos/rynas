@@ -39,7 +39,7 @@ use crate::validate::{self, account_name, one_line};
 
 pub const USERS_KEY: &str = "users";
 /// Members may log in to rynas (with `sudo`).
-pub const ADMIN_GROUP: &str = "rynas-admin";
+pub const ADMIN_GROUP: &str = rynas_api_types::ADMIN_GROUP;
 /// Members may log in over SSH with a shell (sshd `AllowGroups`, phase 2 plugin).
 pub const SSH_GROUP: &str = "rynas-ssh";
 /// Members may use SFTP only (chrooted, phase 2 plugin).

@@ -1406,6 +1406,7 @@ shares.st_ready	Pronta
 shares.st_missing	Cartella assente
 shares.st_on_apply	Creata all'applicazione
 shares.st_warnings	Avvisi
+shares.st_root_only	Solo root
 shares.delete_title	Eliminare la cartella condivisa {name}?
 shares.delete_text	La condivisione e le sue autorizzazioni vengono rimosse quando applichi le modifiche. La cartella e i suoi file restano sul volume: la trovi in Cartelle non condivise.
 shares.tab_general	Generale
@@ -1474,6 +1475,13 @@ perm.rw	Lettura e scrittura
 perm.deny	Nessun accesso
 perm.nobody	Nessuno da elencare.
 perm.empty_help	Nessuna autorizzazione impostata: rynas lascia invariate le autorizzazioni attuali della cartella.
+perm.admins	Amministratori di rynas
+perm.root_only_help	Nessuna autorizzazione: la nuova cartella appartiene a root e nessun altro potrà usarla. Dai accesso ad almeno un utente o gruppo.
+perm.keep_own	Mantieni i permessi della cartella
+perm.set_now	Imposta le autorizzazioni
+perm.empty_confirm_title	Salvare senza autorizzazioni?
+perm.empty_confirm_text	{path} appartiene a root e non dà accesso a nessun altro: senza autorizzazioni nessuno potrà usarla tranne root, nemmeno via SMB, NFS o dal file manager.
+perm.empty_confirm_ok	Salva solo per root
 perm.rule_help	Entrano solo gli utenti e i gruppi elencati. Nessun accesso prevale su Lettura e scrittura, che prevale su Sola lettura.
 eff.title	Autorizzazioni effettive
 eff.help	Cosa ottiene davvero un utente o un gruppo, contando i gruppi di cui l'utente fa parte.
@@ -1533,6 +1541,7 @@ shares.w.smb_off	SMB è disattivato nelle impostazioni dei servizi file.
 shares.w.tm_no_limit	Time Machine senza un limite di dimensione può riempire il volume.
 shares.w.multi_no_nfs	Il profilo multiprotocollo disattiva la cache dei client; è pensato per cartelle esportate anche via NFS.
 shares.w.no_permissions	Nessuna autorizzazione impostata: la cartella mantiene i propri permessi.
+shares.w.root_only	Nessuna autorizzazione e {path} appartiene a root senza accesso per gli altri: nessuno tranne root può usare questa cartella condivisa. Dai accesso a utenti o gruppi nelle sue autorizzazioni.
 shares.w.all_denied	Ogni voce nega l'accesso: nessuno può aprire questa cartella.
 shares.w.snapfolder_no_job	La cartella degli snapshot compare quando questa cartella condivisa ha un job di snapshot.
 shares.w.snapfolder_nfs	I client NFS vedono la cartella degli snapshot solo con Includi i mount annidati attivo (scheda NFS).

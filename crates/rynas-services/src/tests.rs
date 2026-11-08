@@ -765,6 +765,57 @@ fn a_share_can_ask_for_a_subvolume_without_copy_on_write() {
     assert_eq!(crate::ShareHost::probe(e.host.as_ref(), "/srv/vol1/cams").nocow, Some(true));
 }
 
+#[test]
+fn a_share_only_root_can_use_is_called_out() {
+    use rynas_api_types::ShareWarningCode as W;
+    let e = env();
+    let domain = crate::SharesDomain::new(e.host.clone(), e.acc.clone());
+    let codes = |c: &SharesConfig, s: &Share| -> Vec<W> {
+        domain.warning_items(c, s).into_iter().map(|w| w.code).collect()
+    };
+    let mut d = shares_doc();
+    // a new folder without permissions: rynasd makes it root's, nobody else gets in
+    let mut new = Share {
+        name: "sistema".into(),
+        path: "/srv/vol1/sistema".into(),
+        subvolume: Some(rynas_api_types::ShareSubvolume {
+            volume: "vol1".into(),
+            compression: true,
+            nocow: false,
+        }),
+        ..Default::default()
+    };
+    let got = codes(&d, &new);
+    assert!(got.contains(&W::NoPermissionsRootOnly) && !got.contains(&W::NoPermissions), "{got:?}");
+    let item = domain
+        .warning_items(&d, &new)
+        .into_iter()
+        .find(|w| w.code == W::NoPermissionsRootOnly)
+        .unwrap();
+    assert_eq!(item.args.path.as_deref(), Some("/srv/vol1/sistema"));
+    assert!(domain.warnings(&d, &new).iter().any(|t| t.contains("nobody but root")));
+    // the defaults of the UI: no remark about permissions
+    new.permissions = vec![
+        perm(PrincipalKind::User, "alice", Access::Rw),
+        perm(PrincipalKind::Group, rynas_api_types::ADMIN_GROUP, Access::Rw),
+    ];
+    let got = codes(&d, &new);
+    assert!(!got.contains(&W::NoPermissionsRootOnly) && !got.contains(&W::NoPermissions), "{got:?}");
+    // an existing folder keeps its own permissions; when only root may use it, it says so
+    d.shares[3].permissions.clear();
+    let scans = d.shares[3].clone();
+    assert_eq!(scans.path, "/srv/vol1/scans");
+    assert!(codes(&d, &scans).contains(&W::NoPermissions));
+    e.host.set_root_only("/srv/vol1/scans", true);
+    let got = codes(&d, &scans);
+    assert!(got.contains(&W::NoPermissionsRootOnly) && !got.contains(&W::NoPermissions), "{got:?}");
+    // a folder with permissions is fine whatever its mode
+    assert!(!codes(&d, &d.shares[0]).contains(&W::NoPermissionsRootOnly));
+    assert!(crate::host::root_only(0, 0o40700));
+    assert!(!crate::host::root_only(0, 0o40770));
+    assert!(!crate::host::root_only(1000, 0o40700));
+}
+
 fn calls(e: &Env) -> Vec<String> {
     std::mem::take(&mut e.sys.state().calls)
 }

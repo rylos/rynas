@@ -1931,6 +1931,7 @@ impl HomesHost for MemoryHomes {
                 subvolume_uuid: None,
                 symlink,
                 nocow: None,
+                root_only: false,
             };
         }
         if self.probe_host {

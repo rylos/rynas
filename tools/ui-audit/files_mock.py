@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """A tiny stand-in for the files API, for screenshots of the file manager before its backend exists.
 
-    files_mock.py <listen-port> <rynas-web-port> [empty|error|xfer]
+    files_mock.py <listen-port> <rynas-web-port> [empty|error|xfer|denied]
 
 Listens on 127.0.0.1:<listen-port>: `/api/v1/files/<route>` answers from fake data with SynoFile's
 JSON shapes (init, shares, list, stat, jobs, prefs, conns); everything else is forwarded to
 rynas-web on <rynas-web-port> (login, session, the UI files). Mode `empty`: no shared folders;
 mode `error`: every files route answers 503 `backend_unavailable` (the "unavailable" banner);
 mode `xfer`: one running tar.zst compression with bursty speed samples (a pause included), for
-the transfer dialog's speed chart (open it with `/files?xfer=last`).
+the transfer dialog's speed chart (open it with `/files?xfer=last`); mode `denied`: a finished copy
+whose only item was refused (`permission_denied`), for the error list and summary.
 Test only: no file is read or written.
 """
 import http.client
@@ -64,6 +65,20 @@ def xfer_job():
         "samples": s, "active_ms": ms - 6000, "errors": [], "msg": "",
     }
 
+def denied_job():
+    """A copy into a shared folder the user may not write to: every item refused (mode `denied`)."""
+    return {
+        "id": 4343, "op": "copy", "state": "done", "source": "nas", "created": NOW - 30, "started": NOW - 30, "finished": NOW - 30,
+        "verify": False, "info": {"sources": ["/documents/annual report.pdf"], "dest": "/sistema/reports"},
+        "progress": {"bytes_done": 2_480_000, "bytes_total": 2_480_000, "files_done": 1, "files_total": 1, "dirs": 0, "errors": 1,
+                     "skipped": 0, "verify_bytes": 0, "scanning": False, "phase": "end", "method": "copy", "current": "",
+                     "current_size": 0, "current_done": 0},
+        "samples": [[0, 0, 0, 0], [40, 2_480_000, 1, 0]], "active_ms": 40,
+        "errors": [{"path": "reports/annual report.pdf", "msg": "you are not allowed to write to the folder “reports”", "code": "permission_denied"}],
+        "msg": "complete: 1 errors", "code": "",
+    }
+
+
 SHARES = [] if MODE == "empty" else [
     {"name": "documents", "volume": "volume1", "comment": "Office documents", "recycle": True, "hidden": False, "encrypted": False, "home": False,
      "free": 1_600_000_000_000, "total": 3_900_000_000_000, "readable": True, "writable": True},
@@ -118,7 +133,7 @@ def route(name, q):
         base = path.rsplit("/", 1)[-1]
         return {**entry(base, size=1000), "owner": "tester", "group": "users"}
     if name == "jobs":
-        return {"jobs": [xfer_job()] if MODE == "xfer" else [], "now": NOW}
+        return {"jobs": [xfer_job()] if MODE == "xfer" else [denied_job()] if MODE == "denied" else [], "now": NOW}
     if name in ("prefs", "conns"):
         return {} if name == "prefs" else {"conns": [], "key": None}
     if name in ("usage", "media"):

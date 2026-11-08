@@ -8,8 +8,8 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::hooks::use_query_map;
 use rynas_api_types::{
-    Access, EffectiveAccess, EffectivePermission, GroupView, NfsRule, NfsSquash, Permission, PrincipalKind, Share, ShareStatus,
-    ShareSubvolume, ShareView, SmbPreset, UnsharedFolder, UserView, storage::VolumePlace,
+    ADMIN_GROUP, Access, EffectiveAccess, EffectivePermission, GroupView, NfsRule, NfsSquash, Permission, PrincipalKind, Share, ShareStatus,
+    ShareSubvolume, ShareView, ShareWarningCode, SmbPreset, UnsharedFolder, UserView, storage::VolumePlace,
 };
 
 use crate::api;
@@ -52,6 +52,32 @@ fn fs_for(path: &str, fss: &[rynas_api_types::Filesystem]) -> Option<(String, u6
         .filter(|f| path == f.mountpoint || path.starts_with(&format!("{}/", f.mountpoint.trim_end_matches('/'))))
         .max_by_key(|f| f.mountpoint.len())
         .map(|f| (f.mountpoint.clone(), f.used, f.size))
+}
+
+/// The permissions a new folder starts with (rynasd creates it owned by root, closed to
+/// everybody else): the signed-in user, when given, and the administrators group when it
+/// exists (`admins`: a listed user is a member; the server refuses unknown groups), both
+/// read and write. Visible and editable in the editor.
+fn default_permissions(me: Option<&str>, admins: bool) -> Vec<Permission> {
+    let mut v = Vec::new();
+    if let Some(me) = me.filter(|m| !m.is_empty() && *m != "root") {
+        v.push(Permission { kind: PrincipalKind::User, name: me.to_string(), access: Access::Rw });
+    }
+    if admins {
+        v.push(Permission { kind: PrincipalKind::Group, name: ADMIN_GROUP.to_string(), access: Access::Rw });
+    }
+    v
+}
+
+/// The server reports that only root can use the share's folder.
+fn reported_root_only(st: &ShareStatus) -> bool {
+    st.warning_items.iter().any(|w| w.code == ShareWarningCode::NoPermissionsRootOnly)
+}
+
+/// Saving `s` as it is leaves a folder only root can use: a new folder (subvolume, also an
+/// encrypted one) without permissions, or a folder the server already reports as such.
+fn root_only_save(s: &Share, is_new: bool, reported: bool) -> bool {
+    s.permissions.is_empty() && ((is_new && s.subvolume.is_some()) || reported)
 }
 
 #[derive(Clone)]
@@ -165,6 +191,8 @@ pub fn Shares() -> impl IntoView {
 fn share_status(st: &ShareStatus) -> (Tone, &'static str) {
     if !st.path_ok {
         if st.pending == Some(rynas_api_types::PendingOp::Add) { (Tone::Info, "shares.st_on_apply") } else { (Tone::Err, "shares.st_missing") }
+    } else if reported_root_only(st) {
+        (Tone::Err, "shares.st_root_only")
     } else if !st.warnings.is_empty() {
         (Tone::Warn, "shares.st_warnings")
     } else {
@@ -302,13 +330,58 @@ fn parse_u32(v: &str) -> u32 {
 fn share_editor(e: ShareEdit, users: Remote<Vec<UserView>>, groups: Remote<Vec<GroupView>>, close: Callback<()>) -> AnyView {
     let is_new = e.view.is_none();
     let saved = e.view.as_ref().map(|v| v.share.clone());
-    let warnings = e.view.as_ref().map(|v| share_folders::warnings(&v.status)).unwrap_or_default();
+    // a folder only root can use stands out from the other remarks, with the way out
+    let (root_warn, warnings): (Vec<String>, Vec<String>) = e
+        .view
+        .as_ref()
+        .map(|v| {
+            let mut split = (Vec::new(), Vec::new());
+            for (i, text) in share_folders::warnings(&v.status).into_iter().enumerate() {
+                if v.status.warning_items.get(i).is_some_and(|w| w.code == ShareWarningCode::NoPermissionsRootOnly) {
+                    split.0.push(text);
+                } else {
+                    split.1.push(text);
+                }
+            }
+            split
+        })
+        .unwrap_or_default();
     let nocow = e.view.as_ref().and_then(|v| super::share_nocow::existing(v.share.name.clone(), &v.status));
     let crypt_existing = e.view.as_ref().and_then(share_crypt::existing);
+    // a brand new folder (not a folder shared again): starts with the default permissions
+    let fresh = is_new && e.prefill.is_none();
+    let reported = e.view.as_ref().is_some_and(|v| reported_root_only(&v.status));
     let d = RwSignal::new(saved.clone().or(e.prefill).unwrap_or_else(|| Share {
         subvolume: Some(ShareSubvolume { volume: String::new(), compression: true, nocow: false }),
         ..Share::default()
     }));
+    // the defaults, once the user list tells who is a local user (an account of the internal
+    // realm has no folder permissions to get) and whether the administrators group exists
+    if fresh {
+        let me = crate::auth::auth().session.with_untracked(|s| s.as_ref().map(|s| s.user.username.clone()));
+        let seeded = StoredValue::new(false);
+        Effect::new(move |_| {
+            let Some((me_listed, admins)) = users.data.with(|u| {
+                u.as_ref().map(|u| (me.as_deref().filter(|m| u.iter().any(|x| x.user.name == *m)).map(String::from), u.iter().any(|x| x.user.admin)))
+            }) else {
+                return;
+            };
+            if seeded.get_value() {
+                return;
+            }
+            seeded.set_value(true);
+            d.update(|s| {
+                for p in default_permissions(me_listed.as_deref(), admins) {
+                    if !s.permissions.iter().any(|x| x.kind == p.kind && x.name == p.name) {
+                        s.permissions.push(p);
+                    }
+                }
+            });
+        });
+    }
+    // an empty matrix that leaves the folder to root: asked once more before saving
+    let ask_empty = RwSignal::new(false);
+    let empty_ok = RwSignal::new(false);
     let tab = RwSignal::new(e.tab);
     let show = RwSignal::new(false);
     let busy = RwSignal::new(false);
@@ -347,6 +420,11 @@ fn share_editor(e: ShareEdit, users: Remote<Vec<UserView>>, groups: Remote<Vec<G
             error.set(Some(t("form.check").to_string()));
             return;
         }
+        if d.with_untracked(|s| root_only_save(s, is_new, reported)) && !empty_ok.get_untracked() {
+            ask_empty.set(true);
+            return;
+        }
+        empty_ok.set(false);
         busy.set(true);
         error.set(None);
         let mut body = d.get_untracked();
@@ -412,6 +490,12 @@ fn share_editor(e: ShareEdit, users: Remote<Vec<UserView>>, groups: Remote<Vec<G
         {nocow}
         {let (v, s) = lens_bool(d, |s| s.show_snapshots, |s, v| s.show_snapshots = v);
          view! { <div hidden=move || encrypted.get()>{switch("shares.show_snapshots", Some("shares.show_snapshots_help"), v, s)}</div> }}
+        {(!root_warn.is_empty()).then(|| ui::note(Tone::Err, icons::TRIANGLE_ALERT, view! {
+            <div>
+                {root_warn.into_iter().map(|w| view! { <p>{w}</p> }).collect_view()}
+                <button type="button" class="btn ghost sm" on:click=move |_| tab.set(3)>{tr("perm.set_now")}</button>
+            </div>
+        }.into_any()))}
         {(!warnings.is_empty()).then(|| view! {
 
             {ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { <ul class="plain-list">{warnings.into_iter().map(|w| view! { <li>{w}</li> }).collect_view()}</ul> }.into_any())}
@@ -428,7 +512,11 @@ fn share_editor(e: ShareEdit, users: Remote<Vec<UserView>>, groups: Remote<Vec<G
             <div role="tabpanel" id="sh-p1" aria-labelledby="sh-t1" class="form" hidden=move || tab.get() != 1>{smb_fields(d)}</div>
             <div role="tabpanel" id="sh-p2" aria-labelledby="sh-t2" class="form" hidden=move || tab.get() != 2>{nfs_fields(d, show)}</div>
             <div role="tabpanel" id="sh-p3" aria-labelledby="sh-t3" class="form" hidden=move || tab.get() != 3>
-                {permissions_matrix(d, users, groups)}
+                {permissions_matrix(d, users, groups, Signal::derive(move || d.with(|s| root_only_save(s, is_new, reported))))}
+                // an existing folder may keep its own permissions: no ACL from rynas
+                <div class="btn-row" hidden=move || !(is_new && d.with(|s| s.subvolume.is_none() && !s.permissions.is_empty()))>
+                    <button type="button" class="btn ghost sm" on:click=move |_| d.update(|s| s.permissions.clear())>{tr("perm.keep_own")}</button>
+                </div>
                 {effective_view(d, share_name, saved_perms, users, groups)}
             </div>
             <button type="submit" hidden=true></button>
@@ -445,7 +533,26 @@ fn share_editor(e: ShareEdit, users: Remote<Vec<UserView>>, groups: Remote<Vec<G
             }
         }) /> })
     };
-    view! { <div class="wide-drawer">{drawer(title, close, body, foot)}</div>{reveal} }.into_any()
+    let ask = move || {
+        ask_empty.get().then(|| {
+            ui::confirm(ui::Confirm::new(
+                t("perm.empty_confirm_title").to_string(),
+                tf("perm.empty_confirm_text", &[("path", &d.with_untracked(share_path))]),
+                "perm.empty_confirm_ok",
+                true,
+                Callback::new(move |_| {
+                    ask_empty.set(false);
+                    empty_ok.set(true);
+                    save.run(());
+                }),
+                Callback::new(move |_| {
+                    ask_empty.set(false);
+                    tab.set(3);
+                }),
+            ))
+        })
+    };
+    view! { <div class="wide-drawer">{drawer(title, close, body, foot)}</div>{reveal}{ask} }.into_any()
 }
 
 /// New subvolume on a rynas volume, or an existing folder.
@@ -691,7 +798,8 @@ fn nfs_fields(d: RwSignal<Share>, show: RwSignal<bool>) -> AnyView {
 /// Columns of the matrix: not set, read only, read-write, no access.
 const LEVELS: [(Option<Access>, &str); 4] = [(None, "not_set"), (Some(Access::Ro), "perm.ro"), (Some(Access::Rw), "perm.rw"), (Some(Access::Deny), "perm.deny")];
 
-fn permissions_matrix(d: RwSignal<Share>, users: Remote<Vec<UserView>>, groups: Remote<Vec<GroupView>>) -> AnyView {
+/// `root_only`: saving the matrix as it is leaves the folder to root ([`root_only_save`]).
+fn permissions_matrix(d: RwSignal<Share>, users: Remote<Vec<UserView>>, groups: Remote<Vec<GroupView>>, root_only: Signal<bool>) -> AnyView {
     let kind = RwSignal::new(PrincipalKind::User);
     let q = RwSignal::new(String::new());
     let set_access = move |k: PrincipalKind, name: String, a: Option<Access>| {
@@ -720,7 +828,8 @@ fn permissions_matrix(d: RwSignal<Share>, users: Remote<Vec<UserView>>, groups: 
         d.with_untracked(|s| {
             for p in s.permissions.iter().filter(|p| p.kind == k) {
                 if !list.iter().any(|(n, _)| *n == p.name) {
-                    list.push((p.name.clone(), String::new()));
+                    let sub = if k == PrincipalKind::Group && p.name == ADMIN_GROUP { t("perm.admins").to_string() } else { String::new() };
+                    list.push((p.name.clone(), sub));
                 }
             }
         });
@@ -786,7 +895,11 @@ fn permissions_matrix(d: RwSignal<Share>, users: Remote<Vec<UserView>>, groups: 
             </div>
             {search_box("perm.search", q)}
         </div>
-        <p class="field-help">{move || if n_entries() == 0 { t("perm.empty_help") } else { t("perm.rule_help") }}</p>
+        {move || if root_only.get() {
+            ui::note(Tone::Err, icons::TRIANGLE_ALERT, view! { <span>{tr("perm.root_only_help")}</span> }.into_any())
+        } else {
+            view! { <p class="field-help">{if n_entries() == 0 { t("perm.empty_help") } else { t("perm.rule_help") }}</p> }.into_any()
+        }}
         {rows}
     }
     .into_any()
@@ -928,5 +1041,37 @@ mod tests {
         assert_eq!(fs_for("/srv/x", &list).map(|f| f.0), Some("/".into()));
         let sub = Share { name: "photos".into(), subvolume: Some(ShareSubvolume { volume: "vol1".into(), compression: true, nocow: false }), ..Share::default() };
         assert_eq!(share_path(&sub), "/vol1/photos");
+    }
+
+    #[test]
+    fn a_new_folder_starts_with_its_creator_and_the_administrators() {
+        let rw = |kind, name: &str| Permission { kind, name: name.into(), access: Access::Rw };
+        assert_eq!(default_permissions(Some("marco"), true), vec![rw(PrincipalKind::User, "marco"), rw(PrincipalKind::Group, ADMIN_GROUP)]);
+        // root gets in anyway; a signed-in user rynas does not list is left out
+        assert_eq!(default_permissions(Some("root"), true), vec![rw(PrincipalKind::Group, ADMIN_GROUP)]);
+        assert_eq!(default_permissions(None, true), vec![rw(PrincipalKind::Group, ADMIN_GROUP)]);
+        // no administrators group on the system: the server would refuse it
+        assert_eq!(default_permissions(Some("marco"), false), vec![rw(PrincipalKind::User, "marco")]);
+        assert!(default_permissions(None, false).is_empty());
+    }
+
+    #[test]
+    fn an_empty_matrix_on_a_new_folder_needs_a_confirmation() {
+        let sub = Some(ShareSubvolume { volume: "system".into(), compression: true, nocow: false });
+        let new = Share { name: "sistema".into(), subvolume: sub, ..Share::default() };
+        assert!(root_only_save(&new, true, false));
+        // with the defaults, or on an existing folder that keeps its own permissions: no question
+        assert!(!root_only_save(&Share { permissions: default_permissions(None, true), ..new.clone() }, true, false));
+        let adopted = Share { name: "data".into(), path: "/srv/data".into(), ..Share::default() };
+        assert!(!root_only_save(&adopted, true, false));
+        // a saved share the server reports as root only
+        assert!(root_only_save(&adopted, false, true));
+        assert!(!root_only_save(&new, false, false));
+        let mut st = ShareStatus::default();
+        assert!(!reported_root_only(&st));
+        st.warning_items.push(rynas_api_types::ShareWarning { code: ShareWarningCode::NoPermissionsRootOnly, args: Default::default() });
+        st.warnings.push("x".into());
+        assert!(reported_root_only(&st));
+        assert_eq!(share_status(&ShareStatus { path_ok: true, ..st }), (Tone::Err, "shares.st_root_only"));
     }
 }

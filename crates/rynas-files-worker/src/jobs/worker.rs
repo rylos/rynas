@@ -303,6 +303,35 @@ impl Engine {
         emit(&Event::Error { path: self.display(path), msg, code: code.into() });
     }
 
+    /// An item that failed while being written to `target`. When the user may not write
+    /// into the destination folder, the error names that place (`<destination>/…`, the way
+    /// the file manager shows it) instead of the source item, so the interface can point at
+    /// the permissions of the shared folder there.
+    fn write_error(&mut self, src: &Path, target: &Path, e: &io::Error) {
+        let code = crate::fsops::io_code(e);
+        if code == c::PERMISSION_DENIED
+            && let Some(dir) = target.parent()
+            && !crate::fsops::access(dir, libc::W_OK | libc::X_OK)
+        {
+            self.p.errors += 1;
+            let msg = t!("you are not allowed to write to the folder “{}”", self.dest_display(dir));
+            emit(&Event::Error { path: self.dest_display(target), msg, code: code.into() });
+            return;
+        }
+        self.error(src, e);
+    }
+
+    /// A path under the destination, as `<destination folder name>/<path below it>`.
+    fn dest_display(&self, p: &Path) -> String {
+        let Some(dest) = &self.spec.dest else { return p.display().to_string() };
+        let top = dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| dest.display().to_string());
+        match p.strip_prefix(dest) {
+            Ok(rel) if rel.as_os_str().is_empty() => top,
+            Ok(rel) => format!("{top}/{}", rel.display()),
+            Err(_) => p.display().to_string(),
+        }
+    }
+
     /// Stops the job with this error.
     fn fail(&mut self, code: &'static str, msg: String) {
         self.fatal = Some((code, msg));
@@ -491,7 +520,7 @@ impl Engine {
                         slow.push(src)
                     }
                     Err(e) => {
-                        self.error(&src, &e);
+                        self.write_error(&src, &target, &e);
                         self.p.files_done += 1;
                     }
                 }
@@ -630,7 +659,7 @@ impl Engine {
                 }
                 Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {}
                 Err(e) => {
-                    self.error(src, &e);
+                    self.write_error(src, &target, &e);
                     self.skip(&meta);
                     return Ok(());
                 }
@@ -659,7 +688,7 @@ impl Engine {
             }
             Err(e) if e.kind() == io::ErrorKind::Interrupted => return Err(Cancelled),
             Err(e) => {
-                self.error(src, &e);
+                self.write_error(src, &target, &e);
                 self.p.files_done += 1;
             }
         }
@@ -687,7 +716,7 @@ impl Engine {
                 Decision::Rename(other) => target = other,
                 Decision::Overwrite => {
                     if let Err(e) = fs::remove_file(&target) {
-                        self.error(src, &e);
+                        self.write_error(src, &target, &e);
                         self.skip_tree(src);
                         return Ok(());
                     }
@@ -704,7 +733,7 @@ impl Engine {
                         }
                         Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {}
                         Err(e) => {
-                            self.error(src, &e);
+                            self.write_error(src, &target, &e);
                             self.skip_tree(src);
                             return Ok(());
                         }
@@ -715,7 +744,7 @@ impl Engine {
         let created = fs::symlink_metadata(&target).is_err();
         if created {
             if let Err(e) = fs::create_dir(&target) {
-                self.error(src, &e);
+                self.write_error(src, &target, &e);
                 self.skip_tree(src);
                 return Ok(());
             }
@@ -2080,6 +2109,30 @@ mod tests {
 
     fn engine(spec: Spec) -> Engine {
         Engine::new(spec, Arc::new(Shared::new(0)))
+    }
+
+    #[test]
+    fn a_refused_write_names_the_destination() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("denied");
+        let (src, dest) = (dir.join("src"), dir.join("sistema"));
+        fs::create_dir_all(src.join("a")).unwrap();
+        fs::write(src.join("a/f.txt"), b"x").unwrap();
+        fs::create_dir_all(dest.join("a")).unwrap();
+        let spec: Spec = serde_json::from_value(serde_json::json!({ "op": "copy", "sources": [src.join("a")], "dest": dest })).unwrap();
+        let mut e = engine(spec);
+        assert_eq!(e.dest_display(&dest), "sistema");
+        assert_eq!(e.dest_display(&dest.join("a/f.txt")), "sistema/a/f.txt");
+        assert_eq!(e.dest_display(Path::new("/elsewhere/x")), "/elsewhere/x");
+        // a folder below the destination the user may not write to (root writes anyway)
+        if unsafe { libc::geteuid() } != 0 {
+            fs::set_permissions(dest.join("a"), fs::Permissions::from_mode(0o500)).unwrap();
+            let denied = io::Error::from_raw_os_error(libc::EACCES);
+            e.write_error(&src.join("a/f.txt"), &dest.join("a/f.txt"), &denied);
+            assert_eq!(e.p.errors, 1);
+            fs::set_permissions(dest.join("a"), fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
