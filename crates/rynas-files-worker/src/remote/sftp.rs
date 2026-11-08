@@ -515,11 +515,16 @@ impl Drop for SftpFile {
         // all the handles at once, and not for long: a connection that is gone must not
         // hold up the job here
         let files: Vec<RFile> = self.file.take().into_iter().chain(std::mem::take(&mut self.spare)).collect();
-        let _ = self.rt.block_on(tokio::time::timeout(Duration::from_secs(5), async move {
-            for mut f in files {
-                let _ = f.shutdown().await;
-            }
-        }));
+        // the timer is created inside the runtime: `tokio::time::timeout` built outside
+        // `block_on` panics ("there is no reactor running")
+        let _ = self.rt.block_on(async move {
+            tokio::time::timeout(Duration::from_secs(5), async move {
+                for mut f in files {
+                    let _ = f.shutdown().await;
+                }
+            })
+            .await
+        });
     }
 }
 
