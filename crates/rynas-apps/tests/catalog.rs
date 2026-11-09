@@ -43,7 +43,7 @@ fn catalogue_has_the_wave_a3_entries_and_a_featured_pick() {
     ] {
         assert!(c.get(id).is_some(), "missing entry {id}");
     }
-    assert_eq!(c.apps.len(), 25);
+    assert_eq!(c.apps.len(), 26);
     let featured: Vec<&str> = c.apps.values().filter(|a| a.manifest.featured).map(|a| a.manifest.id.as_str()).collect();
     assert!((5..=10).contains(&featured.len()), "featured is a small pick: {featured:?}");
     assert!(featured.contains(&"immich"));

@@ -1,0 +1,77 @@
+schema = 1
+id = "pigallery2"
+name = "PiGallery2"
+version = "1.0.0"
+app_version = "3.5.2"
+description = "Fast photo gallery for your folders, made for small systems: no machine learning, no separate database."
+homepage = "https://bpatrik.github.io/pigallery2/"
+source = "https://github.com/bpatrik/pigallery2"
+changelog_url = "https://github.com/bpatrik/pigallery2/releases"
+license = "MIT"
+maintainers = ["rynas"]
+categories = ["photos", "media"]
+min_rynas = "0.1.0"
+arch = ["amd64", "arm64"]
+main_service = "pigallery2"
+
+[resources]
+ram_min_mb = 512
+ram_recommended_mb = 1024
+
+[[ports]]
+name = "web"
+env = "WEB_PORT"
+service = "pigallery2"
+container = 80
+default = 8733
+protocol = "tcp"
+purpose = "Web gallery"
+proxied = true
+
+[web]
+port = "web"
+scheme = "http"
+auth = "app"
+websocket = false
+# needs its own Server-urlBase for a subpath; the entry keeps its own host name
+subpath = false
+timeout = "10m"
+buffering = false
+public = "warn"
+
+[[folders]]
+env = "CONFIG_FOLDER"
+path = "config"
+intent = "config"
+ssd = "ok"
+description = "Gallery settings"
+
+[[folders]]
+env = "DB_FOLDER"
+path = "db"
+intent = "db"
+ssd = "preferred"
+description = "Index of the photos and user accounts (SQLite)"
+
+[[folders]]
+env = "TMP_FOLDER"
+path = "tmp"
+intent = "cache"
+ssd = "ok"
+description = "Thumbnails and converted videos, made again if deleted"
+
+[[shares]]
+env = "PHOTOS"
+label = "Photos"
+description = "The shared folder with your photos, mounted read-only"
+access = "ro"
+required = false
+fallback = "photos"
+
+[[notes]]
+level = "warning"
+text = "Sign in with admin / admin and change the password right away: the gallery starts with that account."
+
+[[notes]]
+level = "info"
+text = "The gallery shows what is in the shared folder. To back up a phone into it, install Syncthing with the same shared folder and use a Syncthing app on the phone, or any app that copies photos over SMB or WebDAV."

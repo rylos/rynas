@@ -204,6 +204,7 @@ lists `linux/amd64` and `linux/arm64`.
 | cloudflared | `cloudflare/cloudflared:2026.10.7@sha256:4955524a…b9c5ba` | https://github.com/cloudflare/cloudflared/blob/master/Dockerfile |
 | AdGuard Home | `adguard/adguardhome:v0.107.80@sha256:e2e1b48c…93027c` | https://github.com/AdguardTeam/AdGuardHome/wiki/Docker · v0.107.80 (2026-11-03) |
 | Navidrome | `deluan/navidrome:0.64.2@sha256:38dc2727…a44ee52` | https://www.navidrome.org/docs/installation/docker/ · v0.64.2 (2026-09-24) |
+| PiGallery2 | `bpatrik/pigallery2:3.5.2@sha256:d7a61b6d…b63992` | https://bpatrik.github.io/pigallery2/setup/docker · for small systems: 103 MiB at rest on a DS920+, unprivileged |
 | Audiobookshelf | `ghcr.io/advplyr/audiobookshelf:2.37.2@sha256:b897c33f…a7658efa` | https://github.com/advplyr/audiobookshelf/blob/master/docker-compose.yml · v2.37.2 (2026-10-23) |
 | Stirling-PDF | `stirlingtools/stirling-pdf:3.3.0@sha256:ed7b1775…036025e6` | https://docs.stirlingpdf.com/Server/Install/Docker/ · v3.3.0 (2026-11-05) |
 | Actual Budget | `actualbudget/actual-server:26.11.0@sha256:06cf1865…1d398da6` | https://github.com/actualbudget/actual/blob/master/packages/sync-server/docker-compose.yml · v26.11.0 (2026-11-02) |
