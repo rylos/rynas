@@ -10,6 +10,8 @@ use std::cell::RefCell;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+use crate::jobs::writeback::WriteBehind;
 use std::path::{Path, PathBuf};
 
 use super::{CHUNK, Cancelled, ConflictInfo, Decision, Engine, Op, Policy, Side, Step, part_name};
@@ -213,7 +215,7 @@ impl End {
             End::Local => {
                 let file = OpenOptions::new().write(true).create_new(true).mode(0o666).open(p)?;
                 rynas_files::confine::check_made(&file, p)?;
-                Box::new(LocalWriter(file))
+                Box::new(LocalWriter { file, behind: WriteBehind::new() })
             }
             End::Remote(_) => self.call(|fs, _| fs.writer(&parts(p), None))?,
         })
@@ -299,20 +301,25 @@ impl End {
     }
 }
 
-struct LocalWriter(File);
+struct LocalWriter {
+    file: File,
+    behind: WriteBehind,
+}
 
 impl Write for LocalWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0.write(buf)
+        let n = self.file.write(buf)?;
+        self.behind.wrote(&self.file, n)?;
+        Ok(n)
     }
     fn flush(&mut self) -> io::Result<()> {
-        self.0.flush()
+        self.file.flush()
     }
 }
 
 impl remote::Writer for LocalWriter {
     fn finish(self: Box<Self>) -> io::Result<()> {
-        Ok(())
+        self.behind.finish(&self.file)
     }
 }
 

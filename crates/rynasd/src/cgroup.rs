@@ -87,6 +87,9 @@ pub fn split(base: &Path, daemon: &Limits, workers: &Limits) -> io::Result<Owned
     let (d, w) = (base.join(DAEMON), base.join(WORKERS));
     mkdir(&d)?;
     mkdir(&w)?;
+    // the workers read their memory limit to size what they keep unwritten (the daemon's umask
+    // is 077 and they do not run as root)
+    fs::set_permissions(&w, std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
     // a cgroup with controllers for its children holds no process itself
     for pid in fs::read_to_string(base.join("cgroup.procs"))?.split_whitespace() {
         match write(&d.join("cgroup.procs"), pid) {

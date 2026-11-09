@@ -112,7 +112,10 @@ browser ──HTTPS── rynas-web (user rynas) ──Unix socket── rynasd 
   `RYNAS_CGROUP_DAEMON` / `RYNAS_CGROUP_WORKERS` in the unit), and every worker moves itself
   there between fork and exec (one write of "0" to `cgroup.procs`, before the identity
   change). A `.tar.zst` job or the page cache of a big copy is reclaimed and throttled in
-  `workers/`, never in rynasd's leaf; a worker killed at `workers/`'s `memory.max` fails its
+  `workers/`, never in rynasd's leaf. So that a copy is not stopped in bursts by that limit,
+  the worker sends each window of a file to the disk as it completes and waits for the one
+  before (`jobs/writeback.rs`): the window is an eighth of the cgroup's memory limit or 1/64 of
+  the RAM, whichever is smaller. A worker killed at `workers/`'s `memory.max` fails its
   request or job and nothing else (`OOMPolicy=continue`). The unit's `MemoryHigh=288M` /
   `MemoryMax=640M` and `TasksMax=256` bound the sum. Without delegation (an older systemd, a
   container, `--dry-system`, the tests) everything stays in one cgroup and works the same.

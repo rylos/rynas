@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 use rynas_files::confine::{self, Jail};
 use rynas_files::jobs::protocol::{Command, ConflictInfo, Event, Op, Policy, Progress, RecycleRoot, Side, Spec, Status};
 use crate::fsops::{describe, rename_noreplace};
+use crate::jobs::writeback::WriteBehind;
 use rynas_api_types::error_codes as c;
 
 #[path = "remote_jobs.rs"]
@@ -910,6 +911,7 @@ impl Engine {
             return self.fill_verified(input, output, size, part);
         }
         let mut left = size;
+        let mut behind = WriteBehind::new();
         while left > 0 {
             let want = left.min(CHUNK as u64) as usize;
             // SAFETY: two open descriptors, offset taken from the input
@@ -929,24 +931,27 @@ impl Engine {
                 break;
             }
             left -= n as u64;
+            behind.wrote(output, n as usize)?;
             self.advance(n as u64);
             if self.checkpoint().is_err() {
                 return Err(io::Error::from(io::ErrorKind::Interrupted));
             }
         }
-        Ok(())
+        behind.finish(output)
     }
 
     fn fill_plain(&mut self, mut input: &File, mut output: &File, _size: u64) -> io::Result<()> {
         if self.buf.len() != CHUNK {
             self.buf = vec![0; CHUNK];
         }
+        let mut behind = WriteBehind::new();
         loop {
             let n = input.read(&mut self.buf)?;
             if n == 0 {
-                return Ok(());
+                return behind.finish(output);
             }
             output.write_all(&self.buf[..n])?;
+            behind.wrote(output, n)?;
             self.advance(n as u64);
             if self.checkpoint().is_err() {
                 return Err(io::Error::from(io::ErrorKind::Interrupted));
@@ -960,6 +965,7 @@ impl Engine {
             self.buf = vec![0; CHUNK];
         }
         let mut hash = xxhash_rust::xxh3::Xxh3::new();
+        let mut behind = WriteBehind::new();
         loop {
             let n = input.read(&mut self.buf)?;
             if n == 0 {
@@ -967,6 +973,7 @@ impl Engine {
             }
             hash.update(&self.buf[..n]);
             output.write_all(&self.buf[..n])?;
+            behind.wrote(output, n)?;
             self.advance(n as u64);
             if self.checkpoint().is_err() {
                 return Err(io::Error::from(io::ErrorKind::Interrupted));
