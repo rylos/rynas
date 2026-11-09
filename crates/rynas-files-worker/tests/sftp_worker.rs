@@ -82,6 +82,13 @@ fn file(len: usize) -> Vec<u8> {
 
 /// Runs a job to the end; (done event, stderr, how long).
 fn run_job(spec: serde_json::Value, feed: impl FnOnce(&mut std::process::ChildStdin)) -> (serde_json::Value, String, Duration) {
+    let (events, stderr, took) = run_job_events(spec, feed);
+    let done = events.iter().rfind(|v| v["t"] == "done").cloned().unwrap_or(serde_json::Value::Null);
+    (done, stderr, took)
+}
+
+/// The same, with every event of the job.
+fn run_job_events(spec: serde_json::Value, feed: impl FnOnce(&mut std::process::ChildStdin)) -> (Vec<serde_json::Value>, String, Duration) {
     let t = Instant::now();
     let mut child = Command::new(worker()).arg("job").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
     let mut stdin = child.stdin.take().unwrap();
@@ -90,16 +97,14 @@ fn run_job(spec: serde_json::Value, feed: impl FnOnce(&mut std::process::ChildSt
     let stdout = BufReader::new(child.stdout.take().unwrap());
     let stderr_pipe = child.stderr.take().unwrap();
     let err_thread = std::thread::spawn(move || std::io::read_to_string(stderr_pipe).unwrap_or_default());
-    let mut done = serde_json::Value::Null;
+    let mut events = Vec::new();
     for line in stdout.lines().map_while(Result::ok) {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line)
-            && v["t"] == "done"
-        {
-            done = v;
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+            events.push(v);
         }
     }
     let _ = child.wait();
-    (done, err_thread.join().unwrap(), t.elapsed())
+    (events, err_thread.join().unwrap(), t.elapsed())
 }
 
 #[test]
@@ -116,6 +121,46 @@ fn a_job_downloads_a_file_through_a_real_ssh_session() {
     assert!(!dest.join(".big.iso.rynas-part").exists());
     assert!(stderr.contains("SFTP 127.0.0.1"), "one line per connection: {stderr}");
     assert!(stderr.contains("cipher"), "{stderr}");
+}
+
+#[test]
+fn a_server_ending_a_file_early_never_replaces_the_target_or_deletes_a_move_source() {
+    // the size says 3 MiB, the file has 1: "end of file" in the middle of the copy
+    let data = file(1 << 20);
+    let (addr, key, seen, _rt) = start(Script { data, size: Some(3 << 20), ..Default::default() });
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("in");
+    std::fs::create_dir(&dest).unwrap();
+    std::fs::write(dest.join("big.iso"), b"the old file").unwrap();
+    let spec = serde_json::json!({ "op": "move", "sources": ["/:c/data/big.iso"], "dest": dest, "roots": [dir.path()], "conflict": "overwrite", "verify": false, "remotes": [conn(addr, &key, "secret")] });
+    let (events, stderr, _) = run_job_events(spec, |_| {});
+    let error = events.iter().find(|v| v["t"] == "error").unwrap_or_else(|| panic!("no error event: {events:?} {stderr}"));
+    assert_eq!(error["code"], "conflict", "{error}");
+    assert_eq!(std::fs::read(dest.join("big.iso")).unwrap(), b"the old file");
+    assert!(!dest.join(".big.iso.rynas-part").exists());
+    assert_eq!(*seen.removes.lock().unwrap(), 0, "a move keeps its source");
+}
+
+#[test]
+fn a_pause_works_while_the_server_is_flushing() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("big.iso");
+    std::fs::write(&src, file(1 << 20)).unwrap();
+    let (addr, key, seen, _rt) = start(Script { fsync_delay: Some(Duration::from_secs(4)), dirs: vec!["/data".to_string()], ..Default::default() });
+    let spec = serde_json::json!({ "op": "copy", "sources": [src], "dest": "/:c/data", "roots": [dir.path()], "conflict": "overwrite", "verify": false, "remotes": [conn(addr, &key, "secret")] });
+    let (events, stderr, took) = run_job_events(spec, |stdin| {
+        // the upload is over, the server is flushing
+        std::thread::sleep(Duration::from_millis(2500));
+        writeln!(stdin, "{}", serde_json::json!({ "c": "pause" })).unwrap();
+        std::thread::sleep(Duration::from_millis(1000));
+        writeln!(stdin, "{}", serde_json::json!({ "c": "resume" })).unwrap();
+    });
+    let done = events.iter().rfind(|v| v["t"] == "done").expect("done");
+    assert_eq!(done["status"], "ok", "{done} {stderr}");
+    assert!(events.iter().any(|v| v["t"] == "progress" && v["paused"] == true), "the pause showed during the fsync: {stderr}");
+    assert!(events.iter().any(|v| v["t"] == "progress" && v["method"] == "flush"), "the flush shows in the progress");
+    assert_eq!(*seen.fsyncs.lock().unwrap(), 1);
+    assert!(took >= Duration::from_secs(4), "took {took:?}");
 }
 
 #[test]

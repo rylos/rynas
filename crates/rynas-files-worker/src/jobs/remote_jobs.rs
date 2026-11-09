@@ -70,7 +70,12 @@ trait Source: Read + Seek {
     }
 }
 
-impl Source for File {}
+impl Source for File {
+    fn ident(&self) -> Option<remote::Ident> {
+        let m = self.metadata().ok()?;
+        Some(remote::Ident { size: m.len(), mtime: m.mtime(), change: m.ctime() })
+    }
+}
 
 impl Source for Box<dyn remote::Reader> {
     fn ident(&self) -> Option<remote::Ident> {
@@ -87,6 +92,18 @@ impl Source for Box<dyn remote::Reader> {
 fn changed() -> io::Error {
     rynas_files::fsops::coded(io::ErrorKind::Other, c::CONFLICT, t!("the file changed on the server during the copy (size or time differ): copy it again"))
 }
+
+/// The error of a file whose reading ended before (or went past) the size it had when it was
+/// opened: a server that answered "end of file" early, a file that shrank or grew. That file
+/// fails: the temporary copy goes, the existing target stays, a move keeps its source.
+fn size_changed(got: u64, want: u64) -> io::Error {
+    rynas_files::fsops::coded(io::ErrorKind::Other, c::CONFLICT, t!("the file changed during the copy ({} of {} bytes read): copy it again", got, want))
+}
+
+/// How often a job looks at pause and cancel while the server finishes a file.
+const FINISH_POLL: std::time::Duration = std::time::Duration::from_millis(200);
+/// A server taking longer than this to finish a file shows in the progress (`method`).
+const FINISH_SHOWN_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Tries of a file's copy on a new connection, after the one before broke or stopped
 /// answering; a try that moves data starts the count again.
@@ -230,6 +247,20 @@ impl End {
             End::Remote(_) => self.call(|fs, again| match fs.rename(&parts(from), &parts(to)) {
                 // done before the connection broke: the source is gone, the target there
                 Err(e) if again && e.raw_os_error() == Some(libc::ENOENT) && fs.stat(&parts(to)).is_ok() => Ok(()),
+                // the same, where the client looks at the target first (SFTP)
+                Err(e) if again && e.raw_os_error() == Some(libc::EEXIST) && fs.stat(&parts(from)).is_err_and(|e| e.raw_os_error() == Some(libc::ENOENT)) => Ok(()),
+                other => other,
+            }),
+        }
+    }
+
+    /// Puts `from` in the place of `to` in one step where that exists (a local rename, a
+    /// server's). `Ok(false)`: this server cannot, nothing changed.
+    fn replace(&self, from: &Path, to: &Path) -> io::Result<bool> {
+        match self {
+            End::Local => fs::rename(from, to).map(|()| true),
+            End::Remote(_) => self.call(|fs, again| match fs.replace(&parts(from), &parts(to)) {
+                Err(e) if again && e.raw_os_error() == Some(libc::ENOENT) && fs.stat(&parts(to)).is_ok() => Ok(true),
                 other => other,
             }),
         }
@@ -299,6 +330,8 @@ pub(super) struct RemoteLeft {
     pub(super) connect: Option<Connector>,
     pub(super) part: Option<Vec<String>>,
     pub(super) dirs: Vec<Vec<String>>,
+    /// an existing file moved aside while the copy takes its place: (hidden name, its name)
+    pub(super) aside: Option<(Vec<String>, Vec<String>)>,
 }
 
 impl RemoteLeft {
@@ -306,16 +339,26 @@ impl RemoteLeft {
     /// something in it stays), deepest first; waits at most `limit`, logs what it did.
     pub(super) fn clean(self, limit: std::time::Duration) {
         let Some(connect) = self.connect else { return };
-        if self.part.is_none() && self.dirs.is_empty() {
+        if self.part.is_none() && self.dirs.is_empty() && self.aside.is_none() {
             return;
         }
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        let (part, dirs) = (self.part, self.dirs);
+        let (part, dirs, aside) = (self.part, self.dirs, self.aside);
         let spawned = std::thread::Builder::new().name("remote-clean".into()).spawn(move || {
             let report = (|| -> io::Result<String> {
                 let fs = connect()?;
                 let mut done = Vec::new();
-                if let Some(part) = &part {
+                // the old file back first: the part is only worthless once it is
+                let mut restored = true;
+                if let Some((aside, target)) = &aside {
+                    if fs.stat(target).is_ok() {
+                        let _ = fs.remove(aside, false);
+                    } else if let Err(e) = fs.rename(aside, target) {
+                        restored = false;
+                        done.push(format!("cannot put {} back: {}", target.join("/"), describe(&e)));
+                    }
+                }
+                if let Some(part) = part.as_ref().filter(|_| restored) {
                     match fs.remove(part, false) {
                         Ok(()) => done.push(format!("removed {}", part.join("/"))),
                         Err(e) => done.push(format!("cannot remove {}: {}", part.join("/"), describe(&e))),
@@ -671,23 +714,87 @@ impl Engine {
         }
         let result = self.r_fill(ends, src, &part, &mut input, &mut output);
         drop(input);
+        let mut keep_part = false;
         let result = result.and_then(|hash| {
-            output.finish()?;
+            self.r_finish(ends, output)?;
             if let Some(hash) = hash {
                 self.r_verify(ends, &part, meta.size, hash)?;
             }
             ends.dst.set_mtime(&part, meta.mtime);
-            if replace {
-                ends.dst.remove(target, false)?;
-            }
-            ends.dst.rename(&part, target)
+            if replace { self.r_replace(ends, &part, target, &mut keep_part) } else { ends.dst.rename(&part, target) }
         });
-        if result.is_err() {
+        if result.is_err() && !keep_part {
             let _ = ends.dst.remove(&part, false);
         }
         *self.shared.part.lock().unwrap() = None;
         self.shared.remote.lock().unwrap().part = None;
         result
+    }
+
+    /// Waits for a server to finish the file (for SFTP an `fsync` that may take long) on a
+    /// thread of its own, so a pause or a cancel works meanwhile; a wait that lasts shows in
+    /// the progress.
+    fn r_finish(&mut self, ends: &Ends, output: Box<dyn remote::Writer>) -> io::Result<()> {
+        if !ends.dst.is_remote() {
+            return output.finish();
+        }
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        std::thread::Builder::new().name("remote-finish".into()).spawn(move || {
+            let _ = tx.send(output.finish());
+        })?;
+        let started = std::time::Instant::now();
+        let mut method = None;
+        let result = loop {
+            match rx.recv_timeout(FINISH_POLL) {
+                Ok(result) => break result,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break Err(io::Error::other("the file's closing ended unexpectedly")),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            if method.is_none() && started.elapsed() >= FINISH_SHOWN_AFTER {
+                method = Some(std::mem::replace(&mut self.p.method, "flush".into()));
+                self.emit_progress(true);
+            }
+            if self.checkpoint().is_err() {
+                break Err(io::Error::from(io::ErrorKind::Interrupted));
+            }
+        };
+        if let Some(method) = method {
+            self.p.method = method;
+        }
+        result
+    }
+
+    /// Puts the finished `part` in the place of `target`: in one step where the side can,
+    /// otherwise through a hidden name, without ever deleting the only copy. `keep_part` set:
+    /// the old file could not be put back, the new copy stays (both named in the error).
+    fn r_replace(&mut self, ends: &Ends, part: &Path, target: &Path, keep_part: &mut bool) -> io::Result<()> {
+        if ends.dst.replace(part, target)? {
+            return Ok(());
+        }
+        let name = target.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        let aside = target.parent().unwrap_or(Path::new("/")).join(remote::aside_name(name));
+        // left by a copy stopped hard, the file it stands for being there
+        if ends.dst.stat(target).is_ok() {
+            let _ = ends.dst.remove(&aside, false);
+        }
+        // known before it happens, like the part: a cancel that cannot wait puts it back
+        self.shared.remote.lock().unwrap().aside = Some((parts(&aside), parts(target)));
+        let swapped = remote::swap_in::<Path>(part, target, &aside, |a, b| ends.dst.rename(a, b), |a| ends.dst.remove(a, false));
+        self.shared.remote.lock().unwrap().aside = None;
+        match swapped {
+            Ok(None) => Ok(()),
+            Ok(Some(e)) => {
+                self.error_msg(target, t!("copied, but the old file could not be removed: it stays as “{}”: {}", self.display(&aside), describe(&e)));
+                Ok(())
+            }
+            Err(failed) if failed.keep_part => {
+                *keep_part = true;
+                let e = failed.error;
+                let msg = t!("the file could not be replaced: the old one is kept as “{}”, the new one as “{}”: {}", self.display(&aside), self.display(part), describe(&e));
+                Err(rynas_files::fsops::coded(e.kind(), crate::fsops::io_code(&e), msg))
+            }
+            Err(failed) => Err(failed.error),
+        }
     }
 
     fn r_fill(&mut self, ends: &Ends, src: &Path, part: &Path, input: &mut Box<dyn Source>, output: &mut Box<dyn remote::Writer>) -> io::Result<Option<u128>> {
@@ -723,6 +830,13 @@ impl Engine {
                 Err(e) => return Err(e),
             };
             if n == 0 {
+                // the end of the reading is not the end of the file: a server answering "end
+                // of file" early, or a file that shrank or grew, is never a finished copy
+                if let Some(ident) = ident
+                    && offset != ident.size
+                {
+                    return Err(size_changed(offset, ident.size));
+                }
                 // everything confirmed by the server before the file counts as copied
                 while let Err(e) = output.flush() {
                     self.r_recover(ends, part, output, offset, e, &mut tries)?;
@@ -895,15 +1009,36 @@ impl Engine {
                 stack.push((dest.join(name), true));
             }
         }
+        self.r_sweep(&end, stack);
+    }
+
+    /// Goes through the folders of a clean-up (each with whether to go into its subfolders):
+    /// removes the temporary files, puts back what was set aside.
+    fn r_sweep(&self, end: &End, mut stack: Vec<(PathBuf, bool)>) {
         let (mut seen, mut removed) = (0usize, 0usize);
         while let Some((dir, deep)) = stack.pop() {
             if seen > 100_000 {
                 break;
             }
             let Ok(items) = end.list(&dir) else { continue };
+            // the parts that stay: the old file they replace could not be put back
+            let mut keep = std::collections::HashSet::new();
             for (name, m) in items {
                 seen += 1;
-                if !m.dir && super::part_leftover(name.as_bytes()) {
+                if !m.dir
+                    && let Some(original) = remote::aside_of(&name)
+                {
+                    // sorted by name, so before its part: the file a stopped copy set aside
+                    // goes back to its place, unless a file is there again
+                    let (aside, target) = (dir.join(&name), dir.join(original));
+                    let done = if end.stat(&target).is_ok() { end.remove(&aside, false) } else { end.rename(&aside, &target) };
+                    if let Err(e) = done {
+                        eprintln!("rynas-files-worker: clean-up: cannot put {} back on the server: {}", self.display(&target), describe(&e));
+                        keep.insert(super::part_name(std::ffi::OsStr::new(original)));
+                    }
+                } else if !m.dir && super::part_leftover(name.as_bytes()) && keep.contains(std::ffi::OsStr::new(&name)) {
+                    eprintln!("rynas-files-worker: clean-up: keeping {}: it is the only complete copy", self.display(&dir.join(&name)));
+                } else if !m.dir && super::part_leftover(name.as_bytes()) {
                     match end.remove(&dir.join(&name), false) {
                         Ok(()) => removed += 1,
                         Err(e) => eprintln!("rynas-files-worker: clean-up: cannot remove {} on the server: {}", self.display(&dir.join(&name)), describe(&e)),
@@ -934,6 +1069,8 @@ mod tests {
         Breaks(u64),
         /// the server refuses the file (a lock, a disk error): that file's error only
         Refuses(u64),
+        /// the reading ends here, without an error: a server's early "end of file"
+        Ends(u64),
     }
 
     /// A remote file; `ident` is what the open reported.
@@ -949,6 +1086,7 @@ mod tests {
             match self.fault {
                 Some(Fault::Breaks(at)) if self.pos >= at => return Err(remote::stalled(std::time::Duration::from_secs(60))),
                 Some(Fault::Refuses(at)) if self.pos >= at => return Err(remote::errno(libc::EBUSY)),
+                Some(Fault::Ends(at)) if self.pos >= at => return Ok(0),
                 _ => {}
             }
             let from = (self.pos as usize).min(self.data.len());
@@ -1053,6 +1191,23 @@ mod tests {
         removed: Arc<Mutex<Vec<Vec<String>>>>,
         /// the writer blocks forever (a server that stopped answering)
         hang: bool,
+        rename: Renames,
+    }
+
+    /// How the fake server's renames go.
+    #[derive(Clone, Copy, Default, PartialEq)]
+    enum Renames {
+        /// all work; no replace in one step
+        #[default]
+        Plain,
+        /// the server replaces in one step
+        Replaces,
+        /// the temporary file cannot take the target's name
+        PartFails,
+        /// neither the temporary file nor the old file can get the target's name
+        BothFail,
+        /// the old file cannot be removed once the new one is in place
+        AsideStays,
     }
 
     impl Fs for FakeFs {
@@ -1067,7 +1222,9 @@ mod tests {
             if name.contains('.') { Err(remote::errno(libc::ENOENT)) } else { Ok(remote::Entry { name, kind: 'd', size: 0, mtime: 0, mode: 0o755 }) }
         }
         fn reader(&self, _: &[String]) -> io::Result<Box<dyn remote::Reader>> {
-            Ok(Box::new(FlakyReader { data: Arc::clone(&self.data), pos: 0, fault: self.fault, ident: self.ident }))
+            // a size the test did not set: the file's real one
+            let ident = remote::Ident { size: if self.ident.size == 0 { self.data.len() as u64 } else { self.ident.size }, ..self.ident };
+            Ok(Box::new(FlakyReader { data: Arc::clone(&self.data), pos: 0, fault: self.fault, ident }))
         }
         fn writer(&self, path: &[String], at: Option<u64>) -> io::Result<Box<dyn remote::Writer>> {
             if self.hang {
@@ -1082,13 +1239,34 @@ mod tests {
             Ok(())
         }
         fn rename(&self, from: &[String], to: &[String]) -> io::Result<()> {
+            let is = |p: &[String], tag: &str| p.last().is_some_and(|n| n.ends_with(tag));
+            let refused = match self.rename {
+                Renames::PartFails => is(from, ".rynas-part"),
+                Renames::BothFail => is(from, ".rynas-part") || is(from, ".rynas-aside"),
+                _ => false,
+            };
+            if refused {
+                return Err(remote::errno(libc::EIO));
+            }
             let mut disk = self.disk.lock().unwrap();
             let data = disk.remove(from).ok_or_else(|| remote::errno(libc::ENOENT))?;
             disk.insert(to.to_vec(), data);
             Ok(())
         }
+        fn replace(&self, from: &[String], to: &[String]) -> io::Result<bool> {
+            if self.rename != Renames::Replaces {
+                return Ok(false);
+            }
+            let mut disk = self.disk.lock().unwrap();
+            let data = disk.remove(from).ok_or_else(|| remote::errno(libc::ENOENT))?;
+            disk.insert(to.to_vec(), data);
+            Ok(true)
+        }
         fn remove(&self, path: &[String], _: bool) -> io::Result<()> {
             self.removed.lock().unwrap().push(path.to_vec());
+            if self.rename == Renames::AsideStays && path.last().is_some_and(|n| n.ends_with(".rynas-aside")) {
+                return Err(remote::errno(libc::EACCES));
+            }
             self.disk.lock().unwrap().remove(path);
             Ok(())
         }
@@ -1104,6 +1282,7 @@ mod tests {
         ident: remote::Ident,
         break_after: Option<u64>,
         hang: bool,
+        rename: Renames,
     }
 
     struct Server {
@@ -1122,7 +1301,7 @@ mod tests {
         let (d, n, k, r) = (Arc::clone(&data), Arc::clone(&connects), Arc::clone(&disk), Arc::clone(&removed));
         let connect: Connector = Arc::new(move || -> io::Result<Box<dyn Fs>> {
             let f = faults(n.fetch_add(1, Ordering::SeqCst) + 1);
-            Ok(Box::new(FakeFs { data: Arc::clone(&d), fault: f.read, ident: f.ident, break_after: f.break_after, disk: Arc::clone(&k), removed: Arc::clone(&r), hang: f.hang }))
+            Ok(Box::new(FakeFs { data: Arc::clone(&d), fault: f.read, ident: f.ident, break_after: f.break_after, disk: Arc::clone(&k), removed: Arc::clone(&r), hang: f.hang, rename: f.rename }))
         });
         Server { connect, connects, data, disk, removed }
     }
@@ -1225,6 +1404,225 @@ mod tests {
         let copy = disk.get(&vec!["share".to_string(), "big.iso".to_string()]).expect("the file is there");
         assert!(*copy == *s.data, "the upload differs ({} of {} bytes)", copy.len(), s.data.len());
         assert!(!disk.keys().any(|k| k.last().unwrap().ends_with(".rynas-part")));
+    }
+
+    /// The disk key of a file in the fake share.
+    fn on_share(name: &str) -> Vec<String> {
+        vec!["share".to_string(), name.to_string()]
+    }
+
+    /// A move of "big.iso" over a file already on the fake server, renames per `rename`.
+    fn upload_over_old(rename: Renames) -> (Server, tempfile::TempDir, Engine, Ends) {
+        let faults = match rename {
+            Renames::Plain => (|_| Faults { rename: Renames::Plain, ..Default::default() }) as fn(u32) -> Faults,
+            Renames::Replaces => |_| Faults { rename: Renames::Replaces, ..Default::default() },
+            Renames::PartFails => |_| Faults { rename: Renames::PartFails, ..Default::default() },
+            Renames::BothFail => |_| Faults { rename: Renames::BothFail, ..Default::default() },
+            Renames::AsideStays => |_| Faults { rename: Renames::AsideStays, ..Default::default() },
+        };
+        let s = server(faults);
+        s.disk.lock().unwrap().insert(on_share("big.iso"), b"old".to_vec());
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("big.iso"), &*s.data).unwrap();
+        let ends = to_server(&s);
+        let mut e = engine(Path::new("/:c/share"));
+        e.apply_all = Some(Policy::Overwrite);
+        (s, dir, e, ends)
+    }
+
+    fn upload(e: &mut Engine, ends: &Ends, dir: &Path) {
+        assert!(e.r_item(ends, &dir.join("big.iso"), None, Path::new("/:c/share"), "big.iso", true, false).is_ok());
+    }
+
+    #[test]
+    fn an_early_end_of_file_fails_that_file_and_keeps_both_sides() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = server(|_| Faults { read: Some(Fault::Ends(2 << 20)), ..Default::default() });
+        let target = dir.path().join("big.iso");
+        fs::write(&target, b"old").unwrap();
+        let ends = from_server(&s);
+        let mut e = engine(dir.path());
+        e.apply_all = Some(Policy::Overwrite);
+        assert!(e.r_item(&ends, Path::new("/:c/share/big.iso"), Some(meta(s.data.len())), dir.path(), "big.iso", true, false).is_ok());
+        assert_eq!(e.p.errors, 1, "that file fails");
+        assert!(e.fatal.is_none(), "the job goes on");
+        assert_eq!(fs::read(&target).unwrap(), b"old", "the old file is untouched");
+        assert!(!dir.path().join(".big.iso.rynas-part").exists());
+        assert!(!s.removed.lock().unwrap().contains(&on_share("big.iso")), "a move keeps its source");
+    }
+
+    #[test]
+    fn an_early_end_verified_is_still_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = server(|_| Faults { read: Some(Fault::Ends(1 << 20)), ..Default::default() });
+        let ends = from_server(&s);
+        let mut e = engine(dir.path());
+        e.spec.verify = true;
+        let target = dir.path().join("big.iso");
+        let err = e.r_file(&ends, Path::new("/:c/share/big.iso"), meta(s.data.len()), &target, false).unwrap_err();
+        assert!(err.to_string().contains("changed"), "{err}");
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn a_local_file_that_shrinks_during_an_upload_is_not_a_success() {
+        // a source whose reading ends before the size it was opened with
+        struct Short(std::io::Cursor<Vec<u8>>);
+        impl Read for Short {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                self.0.read(buf)
+            }
+        }
+        impl Seek for Short {
+            fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+                self.0.seek(pos)
+            }
+        }
+        impl Source for Short {
+            fn ident(&self) -> Option<remote::Ident> {
+                Some(remote::Ident { size: 2_000, mtime: 1, change: 1 })
+            }
+        }
+        let s = server(|_| Faults::default());
+        let ends = to_server(&s);
+        let mut e = engine(Path::new("/:c/share"));
+        let part = Path::new("/:c/share/.big.iso.rynas-part");
+        let mut input: Box<dyn Source> = Box::new(Short(std::io::Cursor::new(vec![7; 1_000])));
+        let mut output = ends.dst.writer(part).unwrap();
+        let err = e.r_fill(&ends, Path::new("/x"), part, &mut input, &mut output).unwrap_err();
+        assert_eq!(rynas_files::fsops::io_code(&err), c::CONFLICT, "{err}");
+    }
+
+    #[test]
+    fn a_complete_local_upload_passes_the_size_check() {
+        let s = server(|_| Faults::default());
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("big.iso"), &*s.data).unwrap();
+        let ends = to_server(&s);
+        let mut e = engine(Path::new("/:c/share"));
+        e.r_file(&ends, &dir.path().join("big.iso"), meta(s.data.len()), Path::new("/:c/share/big.iso"), false).unwrap();
+        assert!(s.disk.lock().unwrap().get(&on_share("big.iso")).is_some_and(|d| *d == *s.data));
+    }
+
+    #[test]
+    fn overwriting_goes_through_the_servers_own_replace_when_it_has_one() {
+        let (s, dir, mut e, ends) = upload_over_old(Renames::Replaces);
+        upload(&mut e, &ends, dir.path());
+        assert_eq!(e.p.errors, 0);
+        assert!(s.disk.lock().unwrap().get(&on_share("big.iso")).is_some_and(|d| *d == *s.data));
+        assert!(!s.removed.lock().unwrap().iter().any(|p| p.last().unwrap().contains("rynas-aside")), "no hidden name needed");
+    }
+
+    #[test]
+    fn overwriting_without_replace_goes_through_a_hidden_name() {
+        let (s, dir, mut e, ends) = upload_over_old(Renames::Plain);
+        upload(&mut e, &ends, dir.path());
+        assert_eq!(e.p.errors, 0);
+        let disk = s.disk.lock().unwrap();
+        assert!(disk.get(&on_share("big.iso")).is_some_and(|d| *d == *s.data));
+        assert!(!disk.keys().any(|k| k.last().unwrap().contains("rynas-")), "{:?}", disk.keys());
+        assert!(!dir.path().join("big.iso").exists(), "the move took the source");
+    }
+
+    #[test]
+    fn a_new_copy_that_cannot_take_the_name_puts_the_old_file_back() {
+        let (s, dir, mut e, ends) = upload_over_old(Renames::PartFails);
+        upload(&mut e, &ends, dir.path());
+        assert_eq!(e.p.errors, 1);
+        let disk = s.disk.lock().unwrap();
+        assert_eq!(disk.get(&on_share("big.iso")).unwrap(), b"old", "the old file is back");
+        assert!(!disk.keys().any(|k| k.last().unwrap().contains("rynas-")), "{:?}", disk.keys());
+        assert!(dir.path().join("big.iso").exists(), "a move that failed keeps its source");
+    }
+
+    #[test]
+    fn when_the_old_file_cannot_come_back_the_new_copy_stays() {
+        let (s, dir, mut e, ends) = upload_over_old(Renames::BothFail);
+        upload(&mut e, &ends, dir.path());
+        assert_eq!(e.p.errors, 1);
+        let disk = s.disk.lock().unwrap();
+        // both versions are there: the old one hidden, the new one under the part's name
+        assert_eq!(disk.get(&on_share(".big.iso.rynas-aside")).unwrap(), b"old");
+        assert!(disk.get(&on_share(".big.iso.rynas-part")).is_some_and(|d| *d == *s.data), "the new copy is kept");
+        assert!(!s.removed.lock().unwrap().iter().filter(|p| p.last().unwrap() == ".big.iso.rynas-part").nth(1).is_some(), "only the sweep before the copy removed the part's name");
+        assert!(dir.path().join("big.iso").exists(), "the source stays too");
+    }
+
+    #[test]
+    fn a_new_copy_in_place_with_the_old_one_stuck_is_a_warning() {
+        let (s, dir, mut e, ends) = upload_over_old(Renames::AsideStays);
+        upload(&mut e, &ends, dir.path());
+        assert_eq!(e.p.errors, 1);
+        let disk = s.disk.lock().unwrap();
+        assert!(disk.get(&on_share("big.iso")).is_some_and(|d| *d == *s.data));
+        assert_eq!(disk.get(&on_share(".big.iso.rynas-aside")).unwrap(), b"old");
+        assert!(!dir.path().join("big.iso").exists(), "copied: the move took the source");
+    }
+
+    #[test]
+    fn a_cancel_that_cannot_wait_puts_the_old_file_back() {
+        let s = server(|_| Faults::default());
+        s.disk.lock().unwrap().insert(on_share(".o.iso.rynas-aside"), b"old".to_vec());
+        s.disk.lock().unwrap().insert(on_share(".o.iso.rynas-part"), b"new".to_vec());
+        let left = RemoteLeft {
+            connect: Some(Arc::clone(&s.connect)),
+            part: Some(on_share(".o.iso.rynas-part")),
+            dirs: Vec::new(),
+            aside: Some((on_share(".o.iso.rynas-aside"), on_share("o.iso"))),
+        };
+        left.clean(std::time::Duration::from_secs(5));
+        let disk = s.disk.lock().unwrap();
+        assert_eq!(disk.get(&on_share("o.iso")).unwrap(), b"old");
+        assert!(!disk.contains_key(&on_share(".o.iso.rynas-part")));
+        assert!(!disk.contains_key(&on_share(".o.iso.rynas-aside")));
+    }
+
+    #[test]
+    fn the_clean_up_restores_what_a_stopped_copy_set_aside() {
+        // listing names files for the clean-up: a server with its folder contents
+        struct Listing(Arc<Mutex<Vec<remote::Entry>>>, FakeFs);
+        impl Fs for Listing {
+            fn list(&self, _: &[String]) -> io::Result<Vec<remote::Entry>> {
+                Ok(self.0.lock().unwrap().clone())
+            }
+            fn stat(&self, p: &[String]) -> io::Result<remote::Entry> {
+                if self.1.disk.lock().unwrap().contains_key(p) { self.1.stat(p) } else { Err(remote::errno(libc::ENOENT)) }
+            }
+            fn reader(&self, p: &[String]) -> io::Result<Box<dyn remote::Reader>> {
+                self.1.reader(p)
+            }
+            fn writer(&self, p: &[String], at: Option<u64>) -> io::Result<Box<dyn remote::Writer>> {
+                self.1.writer(p, at)
+            }
+            fn mkdir(&self, p: &[String]) -> io::Result<()> {
+                self.1.mkdir(p)
+            }
+            fn rename(&self, a: &[String], b: &[String]) -> io::Result<()> {
+                self.1.rename(a, b)
+            }
+            fn remove(&self, p: &[String], d: bool) -> io::Result<()> {
+                self.1.remove(p, d)
+            }
+            fn space(&self, _: &[String]) -> Option<(u64, u64)> {
+                None
+            }
+            fn set_mtime(&self, _: &[String], _: i64) {}
+        }
+        let disk: Disk = Arc::default();
+        disk.lock().unwrap().insert(on_share(".big.iso.rynas-aside"), b"old".to_vec());
+        disk.lock().unwrap().insert(on_share(".big.iso.rynas-part"), b"new".to_vec());
+        let entry = |n: &str| remote::Entry { name: n.into(), kind: 'f', size: 3, mtime: 0, mode: 0o644 };
+        let listing = Arc::new(Mutex::new(vec![entry(".big.iso.rynas-aside"), entry(".big.iso.rynas-part")]));
+        let conn = RemoteEnd {
+            connect: Arc::new(|| Err(remote::errno(libc::ECONNREFUSED))),
+            fs: RefCell::new(Box::new(Listing(listing, FakeFs { data: Arc::new(Vec::new()), fault: None, ident: Default::default(), break_after: None, disk: Arc::clone(&disk), removed: Arc::default(), hang: false, rename: Renames::Plain }))),
+        };
+        let end = End::Remote(conn);
+        engine(Path::new("/:c/share")).r_sweep(&end, vec![(PathBuf::from("/:c/share"), false)]);
+        let disk = disk.lock().unwrap();
+        assert_eq!(disk.get(&on_share("big.iso")).unwrap(), b"old");
+        assert!(!disk.contains_key(&on_share(".big.iso.rynas-aside")));
+        assert!(!disk.contains_key(&on_share(".big.iso.rynas-part")));
     }
 
     #[test]

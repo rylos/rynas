@@ -102,6 +102,12 @@ pub trait Fs: Send {
     fn mkdir(&self, path: &[String]) -> io::Result<()>;
     /// Never replaces: fails when `to` exists.
     fn rename(&self, from: &[String], to: &[String]) -> io::Result<()>;
+    /// Puts `from` in the place of `to` in one step, when the server can. `Ok(false)`: it
+    /// cannot, nothing was changed (see [`swap_in`]).
+    fn replace(&self, from: &[String], to: &[String]) -> io::Result<bool> {
+        let _ = (from, to);
+        Ok(false)
+    }
     fn remove(&self, path: &[String], dir: bool) -> io::Result<()>;
     /// free and total bytes where `path` is
     fn space(&self, path: &[String]) -> Option<(u64, u64)>;
@@ -110,6 +116,61 @@ pub trait Fs: Send {
     fn is_top(&self, path: &[String]) -> bool {
         let _ = path;
         false
+    }
+}
+
+/// Suffix of the hidden name an existing file waits under while a copy takes its place, on a
+/// server that cannot replace a file in one step ([`swap_in`]).
+const ASIDE_TAG: &str = "rynas-aside";
+
+/// The hidden name `name` waits under: ".name.rynas-aside".
+pub fn aside_name(name: &str) -> String {
+    crate::names::part_os(std::ffi::OsStr::new(name), ASIDE_TAG).to_string_lossy().into_owned()
+}
+
+/// The name a file set aside had, when `name` is one ([`aside_name`]).
+pub fn aside_of(name: &str) -> Option<&str> {
+    name.strip_prefix('.')?.strip_suffix(ASIDE_TAG)?.strip_suffix('.').filter(|n| !n.is_empty())
+}
+
+/// A file could not take the place of the old one. `keep_part`: the old file could not be put
+/// back, so the finished new copy is the only complete one left and must stay.
+pub struct ReplaceFailed {
+    pub error: io::Error,
+    pub keep_part: bool,
+}
+
+/// Replaces `target` with the finished `part` where the server has no replace in one step: the
+/// old file goes `aside`, the new one takes its name, the old one is removed; put back when
+/// the new one could not go there. At no point is either copy deleted before the other is in
+/// place. `Ok(Some(e))`: the new file is in place, the old one stayed behind as `aside`.
+pub fn swap_in<P: ?Sized>(part: &P, target: &P, aside: &P, rename: impl Fn(&P, &P) -> io::Result<()>, remove: impl Fn(&P) -> io::Result<()>) -> Result<Option<io::Error>, ReplaceFailed> {
+    rename(target, aside).map_err(|error| ReplaceFailed { error, keep_part: false })?;
+    match rename(part, target) {
+        Ok(()) => Ok(remove(aside).err()),
+        Err(error) => Err(ReplaceFailed { error, keep_part: rename(aside, target).is_err() }),
+    }
+}
+
+/// [`Fs::replace`], or [`swap_in`] where the server cannot: for callers without a job's
+/// reconnects. `keep_part` set: the part must not be removed.
+pub fn replace_file(fs: &dyn Fs, part: &[String], target: &[String], keep_part: &std::cell::Cell<bool>) -> io::Result<()> {
+    if fs.replace(part, target)? {
+        return Ok(());
+    }
+    let (name, dir) = target.split_last().ok_or_else(|| errno(libc::EINVAL))?;
+    let mut aside = dir.to_vec();
+    aside.push(aside_name(name));
+    // left by a copy stopped hard, the file it stands for being there
+    if fs.stat(target).is_ok() {
+        let _ = fs.remove(&aside, false);
+    }
+    match swap_in::<[String]>(part, target, &aside, |a, b| fs.rename(a, b), |a| fs.remove(a, false)) {
+        Ok(_) => Ok(()),
+        Err(f) => {
+            keep_part.set(f.keep_part);
+            Err(f.error)
+        }
     }
 }
 
@@ -197,6 +258,95 @@ mod tests {
         assert!(!retryable(&errno(libc::ENOENT)));
         assert!(!retryable(&errno(libc::EACCES)));
         assert!(!retryable(&io::Error::other("verification failed")));
+    }
+
+    /// A folder of named files in memory; a rename whose source ends in `refuse` fails.
+    #[derive(Default)]
+    struct Folder {
+        files: std::sync::Mutex<std::collections::BTreeMap<String, &'static str>>,
+        refuse: Vec<&'static str>,
+    }
+
+    impl Fs for Folder {
+        fn list(&self, _: &[String]) -> io::Result<Vec<Entry>> {
+            Ok(Vec::new())
+        }
+        fn stat(&self, p: &[String]) -> io::Result<Entry> {
+            if self.files.lock().unwrap().contains_key(&p[0]) { Ok(Entry { name: p[0].clone(), kind: 'f', size: 1, mtime: 0, mode: 0 }) } else { Err(errno(libc::ENOENT)) }
+        }
+        fn reader(&self, _: &[String]) -> io::Result<Box<dyn Reader>> {
+            Err(errno(libc::ENOSYS))
+        }
+        fn writer(&self, _: &[String], _: Option<u64>) -> io::Result<Box<dyn Writer>> {
+            Err(errno(libc::ENOSYS))
+        }
+        fn mkdir(&self, _: &[String]) -> io::Result<()> {
+            Ok(())
+        }
+        fn rename(&self, from: &[String], to: &[String]) -> io::Result<()> {
+            if self.refuse.iter().any(|r| from[0].ends_with(r)) {
+                return Err(errno(libc::EIO));
+            }
+            let mut f = self.files.lock().unwrap();
+            let v = f.remove(&from[0]).ok_or_else(|| errno(libc::ENOENT))?;
+            f.insert(to[0].clone(), v);
+            Ok(())
+        }
+        fn remove(&self, p: &[String], _: bool) -> io::Result<()> {
+            self.files.lock().unwrap().remove(&p[0]);
+            Ok(())
+        }
+        fn space(&self, _: &[String]) -> Option<(u64, u64)> {
+            None
+        }
+        fn set_mtime(&self, _: &[String], _: i64) {}
+    }
+
+    fn folder(refuse: Vec<&'static str>) -> Folder {
+        let f = Folder { refuse, ..Default::default() };
+        f.files.lock().unwrap().extend([("a.txt".to_string(), "old"), ("p".to_string(), "new")]);
+        f
+    }
+
+    fn state(f: &Folder) -> Vec<(String, &'static str)> {
+        f.files.lock().unwrap().iter().map(|(k, v)| (k.clone(), *v)).collect()
+    }
+
+    fn one(name: &str) -> Vec<String> {
+        vec![name.to_string()]
+    }
+
+    #[test]
+    fn replacing_without_a_servers_replace_leaves_only_the_new_file() {
+        let (f, keep) = (folder(vec![]), std::cell::Cell::new(false));
+        replace_file(&f, &one("p"), &one("a.txt"), &keep).unwrap();
+        assert_eq!(state(&f), vec![("a.txt".to_string(), "new")]);
+        assert!(!keep.get());
+    }
+
+    #[test]
+    fn a_replace_that_fails_puts_the_old_file_back() {
+        let (f, keep) = (folder(vec!["p"]), std::cell::Cell::new(false));
+        assert!(replace_file(&f, &one("p"), &one("a.txt"), &keep).is_err());
+        assert_eq!(state(&f), vec![("a.txt".to_string(), "old"), ("p".to_string(), "new")]);
+        assert!(!keep.get(), "the old file is back: the part may go");
+    }
+
+    #[test]
+    fn a_replace_that_cannot_restore_keeps_the_part() {
+        let (f, keep) = (folder(vec!["p", "aside"]), std::cell::Cell::new(false));
+        assert!(replace_file(&f, &one("p"), &one("a.txt"), &keep).is_err());
+        assert!(keep.get(), "the old file is not back: the part stays");
+        assert!(state(&f).iter().any(|(k, v)| k == ".a.txt.rynas-aside" && *v == "old"));
+        assert!(state(&f).iter().any(|(k, v)| k == "p" && *v == "new"));
+    }
+
+    #[test]
+    fn the_name_of_a_file_set_aside() {
+        assert_eq!(aside_name("a.txt"), ".a.txt.rynas-aside");
+        assert_eq!(aside_of(".a.txt.rynas-aside"), Some("a.txt"));
+        assert_eq!(aside_of(".a.txt.rynas-part"), None);
+        assert_eq!(aside_of("a.txt"), None);
     }
 
     #[test]

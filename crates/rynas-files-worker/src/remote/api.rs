@@ -360,11 +360,13 @@ struct RemoteUpload<'a> {
     /// the original's time, set on the file once renamed: on the hidden
     /// file it would make it look stale to another upload's sweep
     mtime: std::cell::Cell<Option<i64>>,
+    /// the old file could not be put back: the part is the only complete copy
+    keep_part: std::cell::Cell<bool>,
 }
 
 impl<'a> RemoteUpload<'a> {
     fn new(fs: &'a dyn Fs, dir: &[String], name: &str, id: &str) -> Self {
-        Self { fs, dir: dir.to_vec(), target: child(dir, name), part: child(dir, &transfer::upload_part_name(name, id)), mtime: Default::default() }
+        Self { fs, dir: dir.to_vec(), target: child(dir, name), part: child(dir, &transfer::upload_part_name(name, id)), mtime: Default::default(), keep_part: Default::default() }
     }
 }
 
@@ -398,9 +400,10 @@ impl transfer::UploadStore for RemoteUpload<'_> {
     fn commit(&self, replace: bool) -> io::Result<()> {
         // a server's rename never replaces
         if replace && self.fs.stat(&self.target).is_ok_and(|e| !e.is_dir()) {
-            self.fs.remove(&self.target, false)?;
+            super::replace_file(self.fs, &self.part, &self.target, &self.keep_part)?;
+        } else {
+            self.fs.rename(&self.part, &self.target)?;
         }
-        self.fs.rename(&self.part, &self.target)?;
         if let Some(mtime) = self.mtime.get() {
             self.fs.set_mtime(&self.target, mtime);
         }
@@ -408,7 +411,9 @@ impl transfer::UploadStore for RemoteUpload<'_> {
     }
 
     fn remove_part(&self) {
-        let _ = self.fs.remove(&self.part, false);
+        if !self.keep_part.get() {
+            let _ = self.fs.remove(&self.part, false);
+        }
     }
 
     fn sweep(&self) {

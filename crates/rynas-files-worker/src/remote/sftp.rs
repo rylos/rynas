@@ -12,8 +12,10 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use futures_util::stream::{FuturesOrdered, StreamExt};
@@ -23,7 +25,8 @@ use russh_sftp::client::RawSftpSession;
 use russh_sftp::client::error::Error as SftpError;
 use russh_sftp::client::rawsession::Limits;
 use russh_sftp::extensions;
-use russh_sftp::protocol::{FileAttributes, OpenFlags, StatusCode};
+use russh_sftp::protocol::{FileAttributes, OpenFlags, Packet, StatusCode};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 
@@ -32,7 +35,8 @@ use super::{Conn, Entry, Fs, Ident, Reader, Writer, errno};
 /// How long connecting, logging in and opening the channel may each take.
 const TIMEOUT: Duration = Duration::from_secs(20);
 /// How long the file's final `fsync@openssh.com` may take. A server flushing a large file to
-/// slow disks is not a failure, and a connection that died is noticed by the keepalives.
+/// slow disks is not a failure, and a connection that died is noticed by the keepalives. Also
+/// the library's own limit per request: the others end much sooner, by the [`Watch`].
 const FSYNC_LIMIT: Duration = Duration::from_secs(3600);
 /// How long closing a file may hold up the caller (a connection that is gone must not).
 const CLOSE_LIMIT: Duration = Duration::from_secs(5);
@@ -46,15 +50,30 @@ const WRITES_IN_FLIGHT: usize = 64;
 /// Blocks read and waiting for the copy (about 4 MiB): with the reads in flight, the memory a
 /// download takes is bounded near 20 MiB.
 const READ_QUEUE: usize = 16;
-/// Requests in flight are paced so that the last one waits at most this long behind those
-/// before it: a request's own timeout must never fire because the link is slow.
+/// Requests in flight are paced so that the last one waits at most about this long behind
+/// those before it: on a slow link the queue stays short and a pause or a change of limit
+/// takes effect soon (the watchdog does not depend on it: see [`Watch`]).
 const QUEUE_SECS: f64 = 20.0;
+/// What an upload may have handed to the session and not yet on its way: the library keeps its
+/// own encoded copy of each write until it leaves. With the unconfirmed blocks (the 16 MiB of
+/// the window), the memory an upload takes stays near 20 MiB, as for a download.
+const MAX_UNSENT: u64 = 16 * BLOCK as u64;
+/// How often an upload held back by [`MAX_UNSENT`] looks again.
+const UNSENT_POLL: Duration = Duration::from_millis(2);
+/// Bytes around the data in a write request: length, type, id, handle length, handle (256 at
+/// most), offset, data length.
+const WRITE_OVERHEAD: u64 = 4 + 1 + 4 + 4 + 256 + 8 + 4;
+/// The same in a read reply: length, type, id, data length.
+const READ_OVERHEAD: u64 = 4 + 1 + 4 + 4;
 /// The smallest block a short read shrinks requests to.
 const MIN_BLOCK: u32 = 32 * 1024;
 /// The channel's flow-control window: larger than everything a download keeps in flight.
 const WINDOW_BYTES: u32 = 32 * 1024 * 1024;
 /// SSH packets as large as the protocol allows (russh: +13 % over its 32 KiB default).
 const MAX_PACKET: u32 = 65535;
+
+/// The extension that renames over an existing file in one step (OpenSSH's `rename(2)`).
+const POSIX_RENAME: &str = "posix-rename@openssh.com";
 
 /// Whether to log each connection's terms: jobs do, browsing does not.
 static LOG_TERMS: AtomicBool = AtomicBool::new(false);
@@ -69,6 +88,8 @@ pub fn log_connections() {
 struct Features {
     fsync: bool,
     statvfs: bool,
+    /// `posix-rename@openssh.com`: renames over an existing file in one step
+    posix_rename: bool,
     read_block: u32,
     write_block: usize,
     limits: Option<Limits>,
@@ -76,13 +97,133 @@ struct Features {
 
 impl Features {
     fn none() -> Self {
-        Self { fsync: false, statvfs: false, read_block: BLOCK as u32, write_block: BLOCK, limits: None }
+        Self { fsync: false, statvfs: false, posix_rename: false, read_block: BLOCK as u32, write_block: BLOCK, limits: None }
+    }
+}
+
+/// The largest block a server's limits allow: the operation's own, and what fits in its
+/// largest packet with the bytes around the data.
+fn allowed_block(limit: Option<u64>, packet_len: Option<u64>, overhead: u64) -> Option<usize> {
+    let by_packet = packet_len.map(|p| p.saturating_sub(overhead));
+    limit.into_iter().chain(by_packet).min().map(|n| n.clamp(4096, BLOCK as u64) as usize)
+}
+
+/// The progress watchdog of a session: requests wait and nothing at all has come from the
+/// server for its limit. Each request waits on it instead of a timeout of its own, so the 64th
+/// read in flight behind a slow link is not cut off while the replies before it keep coming.
+/// [`Watched`] tells it about the bytes.
+struct Watch {
+    limit: Duration,
+    born: Instant,
+    /// when something last arrived, or the first request of a quiet session was sent: ms since `born`
+    last_ms: AtomicU64,
+    /// requests waiting for an answer
+    waiting: AtomicUsize,
+    /// bytes that left for the server, every packet counted
+    written: AtomicU64,
+}
+
+impl Watch {
+    fn new(limit: Duration) -> Self {
+        Self { limit, born: Instant::now(), last_ms: AtomicU64::new(0), waiting: AtomicUsize::new(0), written: AtomicU64::new(0) }
+    }
+
+    fn now_ms(&self) -> u64 {
+        self.born.elapsed().as_millis() as u64
+    }
+
+    fn mark(&self) {
+        self.last_ms.store(self.now_ms(), Ordering::Relaxed);
+    }
+
+    /// A request starts waiting; a session that was quiet starts counting from now.
+    fn enter(&self) -> Waiting<'_> {
+        if self.waiting.fetch_add(1, Ordering::Relaxed) == 0 {
+            self.mark();
+        }
+        Waiting(self)
+    }
+
+    /// Ends when nothing has arrived for the limit.
+    async fn stalled(&self) {
+        loop {
+            let idle = Duration::from_millis(self.now_ms().saturating_sub(self.last_ms.load(Ordering::Relaxed)));
+            if idle >= self.limit {
+                return;
+            }
+            tokio::time::sleep(self.limit - idle).await;
+        }
+    }
+}
+
+struct Waiting<'a>(&'a Watch);
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        self.0.waiting.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// The stream of a session with the [`Watch`] on it: every byte that arrives counts as
+/// progress, however large the reply it belongs to.
+struct Watched<S> {
+    inner: S,
+    watch: Arc<Watch>,
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for Watched<S> {
+    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let before = buf.filled().len();
+        let result = Pin::new(&mut this.inner).poll_read(cx, buf);
+        if matches!(result, Poll::Ready(Ok(()))) && buf.filled().len() > before {
+            this.watch.mark();
+        }
+        result
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for Watched<S> {
+    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut this.inner).poll_write(cx, buf);
+        if let Poll::Ready(Ok(n)) = result {
+            this.watch.written.fetch_add(n as u64, Ordering::Relaxed);
+        }
+        result
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
+/// A session and its watchdog.
+struct Link {
+    raw: RawSftpSession,
+    watch: Arc<Watch>,
+}
+
+impl Link {
+    /// One request, ending in [`SftpError::Timeout`] when the session stops making progress.
+    /// The reply is looked at first: one that is already there wins over the watchdog.
+    async fn watched<T>(&self, request: impl Future<Output = Result<T, SftpError>>) -> Result<T, SftpError> {
+        let _waiting = self.watch.enter();
+        tokio::select! {
+            biased;
+            result = request => result,
+            () = self.watch.stalled() => Err(SftpError::Timeout),
+        }
     }
 }
 
 pub struct Sftp {
     rt: Arc<Runtime>,
-    sftp: Arc<RawSftpSession>,
+    sftp: Arc<Link>,
     features: Features,
     _session: Option<russh::client::Handle<Check>>,
     /// the server's key as seen on this connection
@@ -180,7 +321,7 @@ fn map(e: SftpError) -> io::Error {
             _ if s.error_message.is_empty() => other(s.status_code),
             _ => other(s.error_message),
         },
-        // each request waits at most this long for its answer (the session's own timeout)
+        // the session stopped making progress (`Watch`)
         SftpError::Timeout => super::stalled(super::REMOTE_TIMEOUT),
         // the packet stream is broken or out of sync: the session cannot be trusted any more
         // (russh-sftp ends its receive loop on any such error, which fails the waiting
@@ -257,35 +398,37 @@ async fn tcp(host: &str, port: u16) -> io::Result<tokio::net::TcpStream> {
     Ok(stream)
 }
 
-/// Starts the SFTP protocol on a stream: asks the server's version and limits.
-async fn start_session<S>(stream: S) -> io::Result<(RawSftpSession, Features)>
+/// Starts the SFTP protocol on a stream: asks the server's version and limits. `limit`: the
+/// session's progress watchdog ([`Watch`]).
+async fn start_session<S>(stream: S, limit: Duration) -> io::Result<(Link, Features)>
 where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let config = russh_sftp::client::Config {
         // the largest packet accepted from the server: replies to reads, and a listing page
         // of a server that does not follow OpenSSH's
         max_packet_len: 2 * 1024 * 1024,
-        // each request waits at most this long for its answer (reads in flight each on
-        // their own, a listing each of its pages): set before the first request
-        request_timeout_secs: super::REMOTE_TIMEOUT.as_secs(),
+        // the library's own limit per request, above everything `Watch` ends sooner: set
+        // before the first request (the final fsync has only this one)
+        request_timeout_secs: FSYNC_LIMIT.as_secs(),
         ..Default::default()
     };
-    let mut session = RawSftpSession::new_with_config(stream, config);
+    let watch = Arc::new(Watch::new(limit));
+    let mut session = RawSftpSession::new_with_config(Watched { inner: stream, watch: Arc::clone(&watch) }, config);
     let version = session.init().await.map_err(map)?;
     let ext = |name: &str, v: &str| version.extensions.get(name).is_some_and(|x| x == v);
-    let mut features = Features { fsync: ext(extensions::FSYNC, "1"), statvfs: ext(extensions::STATVFS, "2"), ..Features::none() };
+    let mut features = Features { fsync: ext(extensions::FSYNC, "1"), statvfs: ext(extensions::STATVFS, "2"), posix_rename: ext(POSIX_RENAME, "1"), ..Features::none() };
     if ext(extensions::LIMITS, "1") {
         match session.limits().await {
             Ok(l) => {
                 let limits = Limits::from(l);
                 session.set_limits(limits);
                 features.limits = Some(limits);
-                if let Some(n) = limits.read_len {
-                    features.read_block = (n as usize).clamp(4096, BLOCK) as u32;
+                if let Some(n) = allowed_block(limits.read_len, limits.packet_len, READ_OVERHEAD) {
+                    features.read_block = n as u32;
                 }
-                if let Some(n) = limits.write_len {
-                    features.write_block = (n as usize).clamp(4096, BLOCK);
+                if let Some(n) = allowed_block(limits.write_len, limits.packet_len, WRITE_OVERHEAD) {
+                    features.write_block = n;
                 }
             }
             // the extension is advertised and refuses this request: no limits known
@@ -293,7 +436,17 @@ where
             Err(e) => return Err(map(e)),
         }
     }
-    Ok((session, features))
+    Ok((Link { raw: session, watch }, features))
+}
+
+/// The signature hashes to try for an RSA user key: what `server-sig-algs` says the server
+/// takes, SHA-1 (`ssh-rsa`) only when it says nothing else works. A server that does not send
+/// the extension is asked for SHA-256 first and only then SHA-1, the old servers' only one.
+fn rsa_hashes(server: Option<Option<HashAlg>>) -> Vec<Option<HashAlg>> {
+    match server {
+        Some(best) => vec![best],
+        None => vec![Some(HashAlg::Sha256), None],
+    }
 }
 
 /// The handshake, login and channel, each with its own time limit.
@@ -316,9 +469,18 @@ async fn ssh_session(conn: &Conn, host: &str, port: u16, config: Arc<russh::clie
                 },
             ));
         }
-        let key = russh::keys::decode_secret_key(&conn.ssh_key, None).map_err(other)?;
-        let hash = within(TIMEOUT, async { session.best_supported_rsa_hash().await.map_err(other) }).await?.flatten();
-        within(TIMEOUT, async { session.authenticate_publickey(&conn.user, PrivateKeyWithHashAlg::new(Arc::new(key), hash)).await.map_err(other) }).await?
+        let key = Arc::new(russh::keys::decode_secret_key(&conn.ssh_key, None).map_err(other)?);
+        let hashes = if key.algorithm().is_rsa() { rsa_hashes(within(TIMEOUT, async { session.best_supported_rsa_hash().await.map_err(other) }).await?) } else { vec![None] };
+        let mut answer = None;
+        for hash in hashes {
+            let result = within(TIMEOUT, async { session.authenticate_publickey(&conn.user, PrivateKeyWithHashAlg::new(Arc::clone(&key), hash)).await.map_err(other) }).await?;
+            let accepted = result.success();
+            answer = Some(result);
+            if accepted {
+                break;
+            }
+        }
+        answer.expect("rsa_hashes is never empty")
     } else {
         within(TIMEOUT, async { session.authenticate_password(&conn.user, &conn.password).await.map_err(other) }).await?
     };
@@ -348,8 +510,8 @@ impl Sftp {
         let result = rt.block_on(async {
             let config = Arc::new(client_config());
             let (session, stream) = ssh_session(conn, &host, port, config, check).await?;
-            let (sftp, features) = within(TIMEOUT, start_session(stream)).await?;
-            let home = match sftp.realpath(".").await {
+            let (sftp, features) = within(TIMEOUT, start_session(stream, super::REMOTE_TIMEOUT)).await?;
+            let home = match sftp.watched(sftp.raw.realpath(".")).await {
                 Ok(n) => n.files.first().map(|f| f.filename.clone()).unwrap_or_else(|| "/".into()),
                 Err(_) => "/".into(),
             };
@@ -380,23 +542,29 @@ impl Sftp {
         }
     }
 
+    /// One request from a plain thread, under the session's watchdog.
+    fn run<T>(&self, request: impl Future<Output = Result<T, SftpError>>) -> Result<T, SftpError> {
+        self.rt.block_on(self.sftp.watched(request))
+    }
+
     fn exists(&self, path: &str) -> bool {
-        self.rt.block_on(self.sftp.lstat(path)).is_ok()
+        self.run(self.sftp.raw.lstat(path)).is_ok()
     }
 
     /// The items of a folder.
     fn read_dir(&self, path: String) -> io::Result<Vec<(String, FileAttributes)>> {
         self.rt.block_on(async {
-            let handle = self.sftp.opendir(path).await.map_err(map)?.handle;
+            let link = &self.sftp;
+            let handle = link.watched(link.raw.opendir(path)).await.map_err(map)?.handle;
             let mut items = Vec::new();
             let result = loop {
-                match self.sftp.readdir(handle.as_str()).await {
+                match link.watched(link.raw.readdir(handle.as_str())).await {
                     Ok(name) => items.extend(name.files.into_iter().map(|f| (f.filename, f.attrs))),
                     Err(SftpError::Status(s)) if s.status_code == StatusCode::Eof => break Ok(()),
                     Err(e) => break Err(map(e)),
                 }
             };
-            let _ = self.sftp.close(handle).await;
+            let _ = link.watched(link.raw.close(handle)).await;
             result.map(|()| items)
         })
     }
@@ -431,7 +599,7 @@ impl Fs for Sftp {
             let mut e = Self::entry(name.clone(), &meta);
             if e.kind == 'l' {
                 // a link to a folder opens like one
-                if let Ok(target) = self.rt.block_on(self.sftp.stat(format!("{}/{}", path.trim_end_matches('/'), name))) {
+                if let Ok(target) = self.run(self.sftp.raw.stat(format!("{}/{}", path.trim_end_matches('/'), name))) {
                     e = Self::entry(name, &target.attrs);
                 }
             }
@@ -441,18 +609,19 @@ impl Fs for Sftp {
     }
 
     fn stat(&self, path: &[String]) -> io::Result<Entry> {
-        let meta = self.rt.block_on(self.sftp.stat(Self::path(path))).map_err(map)?.attrs;
+        let meta = self.run(self.sftp.raw.stat(Self::path(path))).map_err(map)?.attrs;
         Ok(Self::entry(path.last().cloned().unwrap_or_else(|| "/".into()), &meta))
     }
 
     fn reader(&self, path: &[String]) -> io::Result<Box<dyn Reader>> {
         let p = Self::path(path);
-        let meta = self.rt.block_on(self.sftp.stat(p.clone())).map_err(map)?.attrs;
+        let meta = self.run(self.sftp.raw.stat(p.clone())).map_err(map)?.attrs;
         if meta.is_dir() {
             return Err(errno(libc::EISDIR));
         }
-        let len = meta.size.unwrap_or(0);
-        let handle = self.rt.block_on(self.sftp.open(p, OpenFlags::READ, FileAttributes::empty())).map_err(map)?.handle;
+        // no size means no way to know the reading got to the end: not an empty file
+        let len = meta.size.ok_or_else(|| other(t!("the server does not tell the size of this file")))?;
+        let handle = self.run(self.sftp.raw.open(p, OpenFlags::READ, FileAttributes::empty())).map_err(map)?.handle;
         let ident = Ident { size: len, mtime: meta.mtime.unwrap_or(0) as i64, change: 0 };
         Ok(Box::new(SftpReader { rt: Arc::clone(&self.rt), session: Arc::clone(&self.sftp), handle: Some(handle), ident, len, pos: 0, block: self.features.read_block, cur: Vec::new(), cur_from: 0, pump: None }))
     }
@@ -460,7 +629,7 @@ impl Fs for Sftp {
     fn writer(&self, path: &[String], at: Option<u64>) -> io::Result<Box<dyn Writer>> {
         let p = Self::path(path);
         let flags = if at.is_some() { OpenFlags::WRITE } else { OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE };
-        let handle = self.rt.block_on(self.sftp.open(p, flags, FileAttributes::empty())).map_err(map)?.handle;
+        let handle = self.run(self.sftp.raw.open(p, flags, FileAttributes::empty())).map_err(map)?.handle;
         Ok(Box::new(SftpWriter::new(self, handle, at.unwrap_or(0))))
     }
 
@@ -469,7 +638,7 @@ impl Fs for Sftp {
         if self.exists(&p) {
             return Err(errno(libc::EEXIST));
         }
-        self.rt.block_on(self.sftp.mkdir(p, FileAttributes::empty())).map(|_| ()).map_err(map)
+        self.run(self.sftp.raw.mkdir(p, FileAttributes::empty())).map(|_| ()).map_err(map)
     }
 
     fn rename(&self, from: &[String], to: &[String]) -> io::Result<()> {
@@ -477,19 +646,35 @@ impl Fs for Sftp {
         if self.exists(&to) {
             return Err(errno(libc::EEXIST));
         }
-        self.rt.block_on(self.sftp.rename(Self::path(from), to)).map(|_| ()).map_err(map)
+        self.run(self.sftp.raw.rename(Self::path(from), to)).map(|_| ()).map_err(map)
+    }
+
+    /// `posix-rename@openssh.com` where the server has it: an atomic `rename(2)`.
+    fn replace(&self, from: &[String], to: &[String]) -> io::Result<bool> {
+        if !self.features.posix_rename {
+            return Ok(false);
+        }
+        // the same two strings on the wire as this extension's
+        let body: Vec<u8> = extensions::HardlinkExtension { oldpath: Self::path(from), newpath: Self::path(to) }.try_into().map_err(other)?;
+        match self.run(self.sftp.raw.extended(POSIX_RENAME, body)) {
+            Ok(Packet::Status(s)) if s.status_code == StatusCode::Ok => Ok(true),
+            Ok(Packet::Status(s)) if s.status_code == StatusCode::OpUnsupported => Ok(false),
+            Ok(Packet::Status(s)) => Err(map(SftpError::Status(s))),
+            Ok(_) => Err(map(SftpError::UnexpectedPacket)),
+            Err(e) => Err(map(e)),
+        }
     }
 
     fn remove(&self, path: &[String], dir: bool) -> io::Result<()> {
         let p = Self::path(path);
         if dir {
-            self.rt.block_on(self.sftp.rmdir(p)).map(|_| ()).map_err(|e| {
+            self.run(self.sftp.raw.rmdir(p)).map(|_| ()).map_err(|e| {
                 let e = map(e);
                 // OpenSSH answers a plain failure for a folder that is not empty
                 if e.kind() == io::ErrorKind::Other { errno(libc::ENOTEMPTY) } else { e }
             })
         } else {
-            self.rt.block_on(self.sftp.remove(p)).map(|_| ()).map_err(map)
+            self.run(self.sftp.raw.remove(p)).map(|_| ()).map_err(map)
         }
     }
 
@@ -497,7 +682,7 @@ impl Fs for Sftp {
         if !self.features.statvfs {
             return None;
         }
-        let s = self.rt.block_on(self.sftp.statvfs(Self::path(path))).ok()?;
+        let s = self.run(self.sftp.raw.statvfs(Self::path(path))).ok()?;
         Some((s.blocks_avail * s.fragment_size, s.blocks * s.fragment_size))
     }
 
@@ -505,14 +690,13 @@ impl Fs for Sftp {
         let mut attrs = FileAttributes::empty();
         attrs.mtime = Some(mtime.max(0) as u32);
         attrs.atime = Some(mtime.max(0) as u32);
-        let _ = self.rt.block_on(self.sftp.setstat(Self::path(path), attrs));
+        let _ = self.run(self.sftp.raw.setstat(Self::path(path), attrs));
     }
 }
 
 /// Requests in flight, like OpenSSH's window: one at first, one more for each reply, up to
 /// the largest allowed. Capped too at what the link carries in [`QUEUE_SECS`], measured
-/// over the last second: requests are not left to wait behind so many others that their own
-/// timeout (the watchdog) fires on a slow but working link.
+/// over the last second: the queue behind a slow link stays short.
 struct Pace {
     max: usize,
     block: u64,
@@ -554,9 +738,23 @@ enum Msg {
 }
 
 /// One read request and what came back.
-async fn read_one(session: Arc<RawSftpSession>, handle: String, at: u64, want: u32) -> (u64, u32, Result<Vec<u8>, SftpError>) {
-    let result = session.read(handle, at, want).await.map(|d| d.data);
+async fn read_one(session: Arc<Link>, handle: String, at: u64, want: u32) -> (u64, u32, Result<Vec<u8>, SftpError>) {
+    let result = session.watched(session.raw.read(handle, at, want)).await.map(|d| d.data);
     (at, want, result)
+}
+
+/// Hands a block to the copy; `false` when nobody wants it any more. A full queue means the
+/// copy is busy or paused: that time is not the server's, the watchdog starts again after it.
+async fn deliver(tx: &mpsc::Sender<Msg>, watch: &Watch, msg: Msg) -> bool {
+    match tx.try_send(msg) {
+        Ok(()) => true,
+        Err(mpsc::error::TrySendError::Closed(_)) => false,
+        Err(mpsc::error::TrySendError::Full(msg)) => {
+            let sent = tx.send(msg).await.is_ok();
+            watch.mark();
+            sent
+        }
+    }
 }
 
 /// The read-ahead of one file, on the runtime: a sliding window of requests from `start` up
@@ -564,7 +762,7 @@ async fn read_one(session: Arc<RawSftpSession>, handle: String, at: u64, want: u
 /// OpenSSH does with partial replies: the rest of a short read is asked for again and the
 /// following requests are made smaller; replies that arrive out of order wait in the
 /// ordered queue.
-async fn pump(session: Arc<RawSftpSession>, handle: String, start: u64, len: u64, mut block: u32, tx: mpsc::Sender<Msg>) {
+async fn pump(session: Arc<Link>, handle: String, start: u64, len: u64, mut block: u32, tx: mpsc::Sender<Msg>) {
     let mut pace = Pace::new(READS_IN_FLIGHT, block as u64);
     let mut pending = FuturesOrdered::new();
     let mut next = start;
@@ -591,7 +789,7 @@ async fn pump(session: Arc<RawSftpSession>, handle: String, start: u64, len: u64
             Ok(data) => {
                 let got = data.len() as u32;
                 pace.replied(got as u64);
-                if tx.send(Msg::Data(at, data)).await.is_err() {
+                if !deliver(&tx, &session.watch, Msg::Data(at, data)).await {
                     return;
                 }
                 if got < want {
@@ -617,7 +815,7 @@ async fn pump(session: Arc<RawSftpSession>, handle: String, start: u64, len: u64
 /// A file being read.
 struct SftpReader {
     rt: Arc<Runtime>,
-    session: Arc<RawSftpSession>,
+    session: Arc<Link>,
     handle: Option<String>,
     ident: Ident,
     len: u64,
@@ -735,11 +933,11 @@ impl Reader for SftpReader {
 
 /// Closes a file on the server without holding up the caller for long; the work and its
 /// timer are the runtime's, so this is safe from any thread.
-fn close_soon(rt: &Runtime, session: &Arc<RawSftpSession>, handle: String) {
+fn close_soon(rt: &Runtime, session: &Arc<Link>, handle: String) {
     let session = Arc::clone(session);
     let (done, wait) = std::sync::mpsc::sync_channel::<()>(1);
     rt.spawn(async move {
-        let _ = session.close(handle).await;
+        let _ = session.watched(session.raw.close(handle)).await;
         let _ = done.send(());
     });
     let _ = wait.recv_timeout(CLOSE_LIMIT);
@@ -760,6 +958,8 @@ struct WriteState {
     unconfirmed: BTreeMap<u64, Arc<[u8]>>,
     error: Option<io::Error>,
     pace: Pace,
+    /// bytes of write requests handed to the session, on the scale of [`Watch::written`]
+    handed: u64,
 }
 
 struct WriteShared {
@@ -772,7 +972,7 @@ struct WriteShared {
 /// back ([`Writer::unconfirmed`]) for a new connection to send.
 struct SftpWriter {
     rt: Arc<Runtime>,
-    session: Arc<RawSftpSession>,
+    session: Arc<Link>,
     handle: Option<String>,
     pos: u64,
     block: usize,
@@ -783,7 +983,8 @@ struct SftpWriter {
 impl SftpWriter {
     fn new(sftp: &Sftp, handle: String, pos: u64) -> Self {
         let pace = Pace::new(WRITES_IN_FLIGHT, sftp.features.write_block as u64);
-        let shared = Arc::new(WriteShared { state: Mutex::new(WriteState { in_flight: 0, unconfirmed: BTreeMap::new(), error: None, pace }), wake: Condvar::new() });
+        let handed = sftp.sftp.watch.written.load(Ordering::Relaxed);
+        let shared = Arc::new(WriteShared { state: Mutex::new(WriteState { in_flight: 0, unconfirmed: BTreeMap::new(), error: None, pace, handed }), wake: Condvar::new() });
         Self { rt: Arc::clone(&sftp.rt), session: Arc::clone(&sftp.sftp), handle: Some(handle), pos, block: sftp.features.write_block, fsync: sftp.features.fsync, shared }
     }
 
@@ -791,19 +992,28 @@ impl SftpWriter {
     fn send(&mut self, at: u64, data: Arc<[u8]>) -> io::Result<()> {
         let handle = self.handle.clone().ok_or_else(|| errno(libc::EBADF))?;
         {
+            let written = &self.session.watch.written;
             let mut s = self.shared.state.lock().unwrap();
-            while s.error.is_none() && s.in_flight >= s.pace.allowed() {
-                s = self.shared.wake.wait(s).unwrap();
+            while s.error.is_none() {
+                let unsent = s.handed.saturating_sub(written.load(Ordering::Relaxed)) > MAX_UNSENT;
+                if unsent {
+                    s = self.shared.wake.wait_timeout(s, UNSENT_POLL).unwrap().0;
+                } else if s.in_flight >= s.pace.allowed() {
+                    s = self.shared.wake.wait(s).unwrap();
+                } else {
+                    break;
+                }
             }
             if let Some(e) = s.error.take() {
                 return Err(e);
             }
             s.in_flight += 1;
+            s.handed += data.len() as u64 + WRITE_OVERHEAD - 256 + handle.len() as u64;
             s.unconfirmed.insert(at, Arc::clone(&data));
         }
         let (session, shared, len) = (Arc::clone(&self.session), Arc::clone(&self.shared), data.len() as u64);
         self.rt.spawn(async move {
-            let result = session.write(handle, at, data.to_vec()).await;
+            let result = session.watched(session.raw.write(handle, at, data.to_vec())).await;
             let mut s = shared.state.lock().unwrap();
             s.in_flight -= 1;
             match result {
@@ -823,7 +1033,7 @@ impl SftpWriter {
     /// Waits until nothing is in flight; the first error, if any.
     fn drain(&mut self) -> io::Result<()> {
         let mut s = self.shared.state.lock().unwrap();
-        // every wait ends: each request has its own timeout
+        // every wait ends: at worst when the session's watchdog gives up
         while s.in_flight > 0 {
             s = self.shared.wake.wait(s).unwrap();
         }
@@ -858,17 +1068,14 @@ impl Writer for SftpWriter {
         let (rt, session, fsync) = (Arc::clone(&self.rt), Arc::clone(&self.session), self.fsync);
         rt.block_on(async {
             if fsync {
-                // the limit of this request only: nothing else is in flight on this
-                // connection now, and a large file on a busy server can take minutes
-                session.set_timeout(FSYNC_LIMIT.as_secs());
-                let flushed = session.fsync(handle.as_str()).await;
-                session.set_timeout(super::REMOTE_TIMEOUT.as_secs());
-                flushed.map_err(|e| match e {
+                // not under the watchdog: nothing arrives while the server flushes, and a
+                // large file on a busy server can take minutes (the library's limit stands)
+                session.raw.fsync(handle.as_str()).await.map_err(|e| match e {
                     SftpError::Timeout => super::stalled(FSYNC_LIMIT),
                     e => map(e),
                 })?;
             }
-            session.close(handle).await.map(|_| ()).map_err(map)
+            session.watched(session.raw.close(handle)).await.map(|_| ()).map_err(map)
         })
     }
 

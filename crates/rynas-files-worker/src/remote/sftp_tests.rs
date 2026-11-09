@@ -12,10 +12,15 @@ fn file(len: usize) -> Vec<u8> {
 
 /// A connection to the scripted server.
 fn connected(script: Script, seen: Seen) -> Sftp {
+    connected_with(script, seen, Duration::from_secs(60))
+}
+
+/// The same, the session's watchdog at `limit`.
+fn connected_with(script: Script, seen: Seen, limit: Duration) -> Sftp {
     let (client, server) = tokio::io::duplex(1 << 20);
     let rt = runtime().unwrap();
     rt.spawn(serve(server, script, seen));
-    let (sftp, features) = rt.block_on(start_session(client)).unwrap();
+    let (sftp, features) = rt.block_on(start_session(client, limit)).unwrap();
     Sftp { rt, sftp: Arc::new(sftp), features, _session: None, host_key: String::new(), home: "/".into() }
 }
 
@@ -138,8 +143,7 @@ fn seeking_starts_a_new_read_ahead_from_there() {
 #[test]
 fn a_stalling_server_fails_as_the_connections_error() {
     let data = file(4 << 20);
-    let sftp = connected(Script { data, stall_read_at: Some(2 << 20), ..Default::default() }, Seen::default());
-    sftp.sftp.set_timeout(1);
+    let sftp = connected_with(Script { data, stall_read_at: Some(2 << 20), ..Default::default() }, Seen::default(), Duration::from_secs(1));
     let mut r = sftp.reader(&path()).unwrap();
     let start = Instant::now();
     let e = read_all(&mut r).unwrap_err();
@@ -215,9 +219,8 @@ fn an_upload_without_fsync_support_needs_none() {
 #[test]
 fn a_slow_fsync_is_not_a_lost_connection() {
     let seen = Seen::default();
-    let sftp = connected(Script { fsync_delay: Some(Duration::from_secs(2)), ..Default::default() }, seen.clone());
-    // the session gives each request a second; fsync takes two
-    sftp.sftp.set_timeout(1);
+    // the watchdog gives up after a second of silence; fsync takes two
+    let sftp = connected_with(Script { fsync_delay: Some(Duration::from_secs(2)), ..Default::default() }, seen.clone(), Duration::from_secs(1));
     let mut w = sftp.writer(&path(), None).unwrap();
     w.write_all(b"data").unwrap();
     w.finish().unwrap();
@@ -279,6 +282,124 @@ fn a_lost_connection_gives_the_unconfirmed_blocks_back() {
     w2.write_all(&data[at..]).unwrap();
     w2.finish().unwrap();
     assert!(*seen2.written.lock().unwrap() == data);
+}
+
+#[test]
+fn a_server_that_answers_slowly_is_never_cut_off_reading() {
+    let data = file(5 << 20);
+    // each reply takes 150 ms, one after the other: replies keep coming for about 3 s while
+    // the requests behind them wait far longer than the watchdog's second
+    let sftp = connected_with(Script { data: data.clone(), reply_delay: Some(Duration::from_millis(150)), ..Default::default() }, Seen::default(), Duration::from_secs(1));
+    let mut r = sftp.reader(&path()).unwrap();
+    let start = Instant::now();
+    assert!(read_all(&mut r).unwrap() == data);
+    assert!(start.elapsed() > Duration::from_secs(1), "the test must outlast the watchdog");
+}
+
+#[test]
+fn a_server_that_answers_slowly_is_never_cut_off_writing() {
+    let seen = Seen::default();
+    let data = file(5 << 20);
+    let sftp = connected_with(Script { reply_delay: Some(Duration::from_millis(150)), ..Default::default() }, seen.clone(), Duration::from_secs(1));
+    let mut w = sftp.writer(&path(), None).unwrap();
+    let start = Instant::now();
+    w.write_all(&data).unwrap();
+    w.finish().unwrap();
+    assert!(*seen.written.lock().unwrap() == data);
+    assert!(start.elapsed() > Duration::from_secs(1), "the test must outlast the watchdog");
+}
+
+#[test]
+fn a_session_quiet_for_longer_than_the_watchdog_is_not_stalled() {
+    let sftp = connected_with(Script { data: file(1000), ..Default::default() }, Seen::default(), Duration::from_millis(300));
+    assert!(sftp.stat(&path()).is_ok());
+    // nothing waits for an answer now: the time without replies does not count
+    std::thread::sleep(Duration::from_millis(700));
+    assert!(sftp.stat(&path()).is_ok());
+}
+
+#[test]
+fn a_slow_copy_behind_the_read_ahead_is_not_a_stalled_server() {
+    let data = file(6 << 20);
+    let sftp = connected_with(Script { data: data.clone(), ..Default::default() }, Seen::default(), Duration::from_millis(400));
+    let mut r = sftp.reader(&path()).unwrap();
+    let mut buf = Vec::new();
+    let mut out = Vec::new();
+    r.next_block(&mut buf).unwrap();
+    out.extend_from_slice(&buf);
+    // a paused job: the queue is full, the read-ahead waits, the server has nothing to say
+    std::thread::sleep(Duration::from_millis(1200));
+    while r.next_block(&mut buf).unwrap() > 0 {
+        out.extend_from_slice(&buf);
+    }
+    assert!(out == data);
+}
+
+#[test]
+fn an_upload_does_not_pile_up_behind_a_slow_wire() {
+    let sftp = connected(Script { stop_reading_at: Some(1 << 20), ..Default::default() }, Seen::default());
+    let handle = "h".to_string();
+    let writer = SftpWriter::new(&sftp, handle, 0);
+    let (shared, written) = (Arc::clone(&writer.shared), Arc::clone(&sftp.sftp.watch));
+    std::thread::spawn(move || {
+        let mut writer = writer;
+        let data = file(1 << 20);
+        loop {
+            if writer.write_all(&data).is_err() {
+                return;
+            }
+        }
+    });
+    std::thread::sleep(Duration::from_millis(800));
+    let s = shared.state.lock().unwrap();
+    let unsent = s.handed.saturating_sub(written.written.load(Ordering::Relaxed));
+    assert!(unsent <= MAX_UNSENT + BLOCK as u64 + 512, "{unsent} bytes wait to leave");
+    assert!(s.in_flight < WRITES_IN_FLIGHT, "held by what waits to leave, not by the window: {}", s.in_flight);
+}
+
+#[test]
+fn a_server_that_only_limits_its_packets_gets_uploads_that_fit() {
+    let seen = Seen::default();
+    let sftp = connected(Script { limits: Some((0, 0)), packet_limit: Some(64 * 1024), ..Default::default() }, seen.clone());
+    assert_eq!(sftp.features.write_block, 64 * 1024 - WRITE_OVERHEAD as usize);
+    assert_eq!(sftp.features.read_block, 64 * 1024 - READ_OVERHEAD as u32);
+    let data = file(1 << 20);
+    let mut w = sftp.writer(&path(), None).unwrap();
+    w.write_all(&data).unwrap();
+    w.finish().unwrap();
+    assert!(*seen.written.lock().unwrap() == data);
+}
+
+#[test]
+fn rsa_keys_ask_for_sha2_before_sha1() {
+    assert_eq!(rsa_hashes(Some(Some(HashAlg::Sha512))), vec![Some(HashAlg::Sha512)]);
+    // the server says it only takes the old one: asked for just that
+    assert_eq!(rsa_hashes(Some(None)), vec![None]);
+    // it says nothing: SHA-256 first, SHA-1 only when that fails
+    assert_eq!(rsa_hashes(None), vec![Some(HashAlg::Sha256), None]);
+}
+
+#[test]
+fn ed25519_comes_first_and_ssh_rsa_last_for_host_keys() {
+    use russh::keys::Algorithm;
+    let config = client_config();
+    let keys = config.preferred.key.as_ref();
+    assert_eq!(keys.first(), Some(&Algorithm::Ed25519));
+    assert_eq!(keys.last(), Some(&Algorithm::Rsa { hash: None }));
+    assert!(keys.iter().any(|k| matches!(k, Algorithm::Rsa { hash: Some(_) })));
+}
+
+#[test]
+fn posix_rename_replaces_where_the_server_has_it() {
+    let seen = Seen::default();
+    let sftp = connected(Script { posix_rename: true, ..Default::default() }, seen.clone());
+    assert!(sftp.replace(&path(), &path()).unwrap());
+    assert_eq!(*seen.posix_renames.lock().unwrap(), 1);
+    // not advertised: nothing is sent, the caller goes through a hidden name
+    let seen = Seen::default();
+    let sftp = connected(Script::default(), seen.clone());
+    assert!(!sftp.replace(&path(), &path()).unwrap());
+    assert_eq!(*seen.posix_renames.lock().unwrap(), 0);
 }
 
 #[test]

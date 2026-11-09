@@ -275,6 +275,7 @@ export default {
   "calcolo…": "estimating…",
   "{n}/s": "{n}/s",
   "verifica": "verify",
+  "Scrittura sui dischi del server": "Writing to the server's disks",
   "in {d}": "in {d}",
   "media {s}": "average {s}",
   "{n} saltati": "{n} skipped",

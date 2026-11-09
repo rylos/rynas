@@ -134,6 +134,25 @@ impl Smb {
         Ok(self.tree(share)?.with_path(&path[1..].join("\\")))
     }
 
+    fn rename_to(&self, from: &[String], to: &[String], replace: bool) -> io::Result<()> {
+        if from.len() < 2 || to.len() < 2 {
+            return Err(errno(libc::EACCES));
+        }
+        if from[0] != to[0] {
+            return Err(errno(libc::EXDEV));
+        }
+        let target = to[1..].join("\\");
+        self.with(from, FileCreateArgs::make_open_existing(FileAccessMask::new().with_delete(true).with_file_read_attributes(true)), |r| {
+            let info = FileRenameInformation { replace_if_exists: replace.into(), root_directory: 0, file_name: target.as_str().into() };
+            match r {
+                Resource::File(f) => f.set_info(info),
+                Resource::Directory(d) => d.set_info(info),
+                Resource::Pipe(_) => Ok(()),
+            }
+            .map_err(map)
+        })
+    }
+
     /// Opens `path` and runs `f` on what opened; the handle is closed after, whatever `f`
     /// returned (not when the connection broke: nothing would answer).
     fn with<T>(&self, path: &[String], args: FileCreateArgs, f: impl FnOnce(&Resource) -> io::Result<T>) -> io::Result<T> {
@@ -358,22 +377,12 @@ impl Fs for Smb {
     }
 
     fn rename(&self, from: &[String], to: &[String]) -> io::Result<()> {
-        if from.len() < 2 || to.len() < 2 {
-            return Err(errno(libc::EACCES));
-        }
-        if from[0] != to[0] {
-            return Err(errno(libc::EXDEV));
-        }
-        let target = to[1..].join("\\");
-        self.with(from, FileCreateArgs::make_open_existing(FileAccessMask::new().with_delete(true).with_file_read_attributes(true)), |r| {
-            let info = FileRenameInformation { replace_if_exists: false.into(), root_directory: 0, file_name: target.as_str().into() };
-            match r {
-                Resource::File(f) => f.set_info(info),
-                Resource::Directory(d) => d.set_info(info),
-                Resource::Pipe(_) => Ok(()),
-            }
-            .map_err(map)
-        })
+        self.rename_to(from, to, false)
+    }
+
+    /// SMB renames over the old file in one step.
+    fn replace(&self, from: &[String], to: &[String]) -> io::Result<bool> {
+        self.rename_to(from, to, true).map(|()| true)
     }
 
     fn remove(&self, path: &[String], dir: bool) -> io::Result<()> {

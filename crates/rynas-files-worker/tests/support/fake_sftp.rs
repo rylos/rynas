@@ -33,8 +33,18 @@ pub struct Script {
     pub drop_write_at: Option<u64>,
     /// answers to `fsync@openssh.com` take this long
     pub fsync_delay: Option<Duration>,
-    /// limits advertised as `limits@openssh.com` (read, write)
+    /// limits advertised as `limits@openssh.com` (read, write; 0: not limited)
     pub limits: Option<(u64, u64)>,
+    /// the largest packet the limits advertise (256 KiB otherwise)
+    pub packet_limit: Option<u64>,
+    /// `posix-rename@openssh.com` advertised and carried out
+    pub posix_rename: bool,
+    /// reads and writes are each answered after this long, one after the other
+    pub reply_delay: Option<Duration>,
+    /// after a write reaches this offset the server stops reading its stream
+    pub stop_reading_at: Option<u64>,
+    /// these paths are folders; every other one is the file
+    pub dirs: Vec<String>,
     /// no extensions advertised
     pub bare: bool,
 }
@@ -46,6 +56,8 @@ pub struct Seen {
     pub fsyncs: Arc<Mutex<u32>>,
     pub write_offsets: Arc<Mutex<Vec<u64>>>,
     pub writes_answered: Arc<Mutex<u32>>,
+    pub removes: Arc<Mutex<u32>>,
+    pub posix_renames: Arc<Mutex<u32>>,
 }
 
 fn ok(id: u32) -> Packet {
@@ -56,12 +68,12 @@ fn failure(id: u32) -> Packet {
     Packet::Status(Status { id, status_code: StatusCode::Failure, error_message: "the disk said no".into(), language_tag: "en".into() })
 }
 
-fn attrs(script: &Script) -> FileAttributes {
+fn attrs(script: &Script, path: &str) -> FileAttributes {
     let mut a = FileAttributes::empty();
     a.size = Some(script.size.unwrap_or(script.data.len() as u64));
     a.mtime = Some(script.mtime);
     a.atime = Some(script.mtime);
-    a.permissions = Some(0o100644);
+    a.permissions = Some(if script.dirs.iter().any(|d| d == path) { 0o040755 } else { 0o100644 });
     a
 }
 
@@ -126,12 +138,25 @@ where
                     if script.limits.is_some() {
                         extensions.insert("limits@openssh.com".to_string(), "1".to_string());
                     }
+                    if script.posix_rename {
+                        extensions.insert("posix-rename@openssh.com".to_string(), "1".to_string());
+                    }
                 }
                 Some(Packet::Version(Version { version: 3, extensions }))
             }
             Packet::RealPath(p) => Some(Packet::Name(Name { id: p.id, files: vec![File::dummy("/fake/home")] })),
-            Packet::Stat(p) => Some(Packet::Attrs(Attrs { id: p.id, attrs: attrs(&script) })),
-            Packet::Lstat(p) => Some(Packet::Attrs(Attrs { id: p.id, attrs: attrs(&script) })),
+            Packet::Stat(p) => Some(Packet::Attrs(Attrs { id: p.id, attrs: attrs(&script, &p.path) })),
+            Packet::Lstat(p) => Some(Packet::Attrs(Attrs { id: p.id, attrs: attrs(&script, &p.path) })),
+            Packet::Rename(p) => Some(ok(p.id)),
+            Packet::SetStat(p) => Some(ok(p.id)),
+            Packet::Remove(p) => {
+                *seen.removes.lock().unwrap() += 1;
+                Some(ok(p.id))
+            }
+            Packet::Extended(p) if p.request == "posix-rename@openssh.com" => {
+                *seen.posix_renames.lock().unwrap() += 1;
+                Some(ok(p.id))
+            }
             Packet::Open(p) => {
                 if p.pflags.contains(OpenFlags::TRUNCATE) {
                     seen.written.lock().unwrap().clear();
@@ -148,6 +173,9 @@ where
                 } else if script.refuse_read_at.is_some_and(|at| p.offset >= at) {
                     Some(failure(p.id))
                 } else {
+                    if let Some(d) = script.reply_delay {
+                        tokio::time::sleep(d).await;
+                    }
                     let r = read_reply(p.id, p.offset, p.len, &script);
                     if script.reverse_batches > 1 {
                         held.push_back(r);
@@ -168,6 +196,13 @@ where
                 seen.write_offsets.lock().unwrap().push(p.offset);
                 if script.drop_write_at.is_some_and(|at| p.offset >= at) {
                     return;
+                }
+                if script.stop_reading_at.is_some_and(|at| p.offset >= at) {
+                    // the wire backs up from here on: nothing more is read
+                    std::future::pending::<()>().await;
+                }
+                if let Some(d) = script.reply_delay {
+                    tokio::time::sleep(d).await;
                 }
                 if script.refuse_write_at.is_some_and(|at| p.offset >= at) {
                     Some(failure(p.id))
@@ -192,7 +227,7 @@ where
             }
             Packet::Extended(p) if p.request == "limits@openssh.com" => {
                 let (read, write) = script.limits.unwrap_or((0, 0));
-                let limits = russh_sftp::extensions::LimitsExtension { max_packet_len: 256 * 1024, max_read_len: read, max_write_len: write, max_open_handles: 16 };
+                let limits = russh_sftp::extensions::LimitsExtension { max_packet_len: script.packet_limit.unwrap_or(256 * 1024), max_read_len: read, max_write_len: write, max_open_handles: 16 };
                 let data = russh_sftp::ser::to_bytes(&limits).expect("limits encode").to_vec();
                 Some(Packet::ExtendedReply(ExtendedReply { id: p.id, data }))
             }

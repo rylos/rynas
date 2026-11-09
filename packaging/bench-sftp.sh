@@ -18,13 +18,14 @@
 #                                     Passed in the environment only, never on a command
 #                                     line, never stored. The baseline needs sshpass for it.
 #   DEST                              local folder on disk for the download (default: a new
-#                                     folder in /var/tmp, removed at the end). Not tmpfs:
-#                                     the disk is part of what is measured.
+#                                     folder in /var/tmp). The script makes its own hidden
+#                                     folder inside it and removes only that. Not tmpfs: the
+#                                     disk is part of what is measured.
 #   WORKER                            the worker binary (/usr/libexec/rynas/rynas-files-worker)
 #   CIPHERS                           the OpenSSH baseline's ciphers, space-separated
 #                                     (default: aes128-gcm@openssh.com aes256-gcm@openssh.com
 #                                     chacha20-poly1305@openssh.com)
-#   UPLOAD=1                          also upload the file back, as rynas-bench-<pid>.tmp next
+#   UPLOAD=1                          also upload the file back, as rynas-bench-<random>.tmp next
 #                                     to it (removed after)
 #   VERIFY=1                          the job verifies the copy (reads it back)
 #   TASKSET="taskset -c 0,1"          prefix for the worker (a rough stand-in for a smaller CPU)
@@ -48,24 +49,23 @@ if [ -z "${SFTP_KEY:-}" ] && [ -z "${RYNAS_BENCH_PASSWORD:-}" ]; then
 fi
 
 TMP=$(mktemp -d /var/tmp/rynas-bench.XXXXXX)
-OWN_DEST=0
-if [ -z "${DEST:-}" ]; then
-    DEST=$TMP/dest
-    mkdir "$DEST"
-    OWN_DEST=1
-fi
-DEST=$(cd "$DEST" && pwd -P)
-NAME=${SFTP_FILE##*/}
-UP_NAME=rynas-bench-$$.tmp
-UP_REMOTE=${SFTP_FILE%/*}/$UP_NAME
+WORK=
 cleanup() {
-    rm -f "$DEST/$NAME" "$DEST/.$NAME.rynas-part" "$DEST/$UP_NAME"
-    [ "$OWN_DEST" = 1 ] && rm -rf "$DEST"
-    rm -rf "$TMP"
+    rm -rf "$WORK" "$TMP"
 }
 trap cleanup EXIT
+[ -n "${DEST:-}" ] || DEST=$TMP
+DEST=$(cd "$DEST" && pwd -P)
+# everything the benchmark writes goes in a folder of its own: no file of the user's in DEST
+# can have one of these names, and only this folder is removed at the end
+WORK=$(mktemp -d "$DEST/.rynas-bench.XXXXXX")
+NAME=${SFTP_FILE##*/}
+UP_NAME=$(mktemp -u rynas-bench-XXXXXXXX.tmp)
+UP_REMOTE=${SFTP_FILE%/*}/$UP_NAME
 
-SSH_OPTS=(-o BatchMode=no -o StrictHostKeyChecking=no -o "UserKnownHostsFile=$TMP/known_hosts" -P "$SFTP_PORT")
+# an unknown server is recorded in the user's known_hosts the first time; a key that changed
+# is refused, before any password is sent
+SSH_OPTS=(-o BatchMode=no -o StrictHostKeyChecking=accept-new -P "$SFTP_PORT")
 sftp_run() { # cipher, then the batch on standard input
     local cipher=$1
     if [ -n "${SFTP_KEY:-}" ]; then
@@ -88,9 +88,9 @@ else
     for cipher in $CIPHERS; do
         t0=$(now)
         # to a real file in the same folder as the worker's copy: the disk is part of it
-        if printf 'get "%s" "%s"\n' "$SFTP_FILE" "$DEST/.baseline-$$.tmp" | sftp_run "$cipher" >"$TMP/out" 2>&1; then
+        if printf 'get "%s" "%s"\n' "$SFTP_FILE" "$WORK/.baseline-$$.tmp" | sftp_run "$cipher" >"$TMP/out" 2>&1; then
             t1=$(now)
-            rm -f "$DEST/.baseline-$$.tmp"
+            rm -f "$WORK/.baseline-$$.tmp"
             T=$(secs "$t0" "$t1")
             if [ -z "$SIZE" ]; then
                 SIZE=$(printf 'ls -l "%s"\n' "$SFTP_FILE" | sftp_run "$cipher" 2>/dev/null | awk '$NF ~ /[^ ]/ && $5 ~ /^[0-9]+$/ { s = $5 } END { print s }')
@@ -166,17 +166,16 @@ job() {
     done | sort -rn | head -5 | sed 's/^/    cpu /'
 }
 
-rm -f "$DEST/$NAME"
-SPEC="{\"op\":\"copy\",\"sources\":[$(json "/:bench$SFTP_FILE")],\"dest\":$(json "$DEST"),\"roots\":[$(json "$DEST")],\"conflict\":\"overwrite\",\"verify\":$VERIFY_JSON,\"remotes\":[$CONN]}"
+SPEC="{\"op\":\"copy\",\"sources\":[$(json "/:bench$SFTP_FILE")],\"dest\":$(json "$WORK"),\"roots\":[$(json "$WORK")],\"conflict\":\"overwrite\",\"verify\":$VERIFY_JSON,\"remotes\":[$CONN]}"
 job "$SPEC" download "${SIZE:-0}"
-[ -n "$SIZE" ] || SIZE=$(stat -c %s "$DEST/$NAME")
+[ -n "$SIZE" ] || SIZE=$(stat -c %s "$WORK/$NAME")
 
 if [ "$UPLOAD" = 1 ]; then
-    mv "$DEST/$NAME" "$DEST/$UP_NAME"
+    mv "$WORK/$NAME" "$WORK/$UP_NAME"
     if command -v sftp >/dev/null; then
         for cipher in $CIPHERS; do
             t0=$(now)
-            if printf 'put "%s" "%s"\n' "$DEST/$UP_NAME" "$UP_REMOTE" | sftp_run "$cipher" >"$TMP/out" 2>&1; then
+            if printf 'put "%s" "%s"\n' "$WORK/$UP_NAME" "$UP_REMOTE" | sftp_run "$cipher" >"$TMP/out" 2>&1; then
                 t1=$(now)
                 echo "sftp upload ($cipher): $(mbps "$SIZE" "$(secs "$t0" "$t1")")"
             fi
@@ -184,8 +183,8 @@ if [ "$UPLOAD" = 1 ]; then
         done
     fi
     DST="/:bench${SFTP_FILE%/*}"
-    SPEC="{\"op\":\"copy\",\"sources\":[$(json "$DEST/$UP_NAME")],\"dest\":$(json "$DST"),\"roots\":[$(json "$DEST")],\"conflict\":\"overwrite\",\"verify\":$VERIFY_JSON,\"remotes\":[$CONN]}"
+    SPEC="{\"op\":\"copy\",\"sources\":[$(json "$WORK/$UP_NAME")],\"dest\":$(json "$DST"),\"roots\":[$(json "$WORK")],\"conflict\":\"overwrite\",\"verify\":$VERIFY_JSON,\"remotes\":[$CONN]}"
     job "$SPEC" upload "$SIZE" || true
     printf 'rm "%s"\n' "$UP_REMOTE" | sftp_run "${CIPHERS%% *}" >/dev/null 2>&1 || true
-    rm -f "$DEST/$UP_NAME"
+    rm -f "$WORK/$UP_NAME"
 fi

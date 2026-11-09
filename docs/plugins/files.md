@@ -177,13 +177,29 @@ little and would keep processes with the reading capability alive between reques
   timeout with the patch above): `remote_unreachable` "the remote server stopped answering
   (no reply in 60 s)". A slow server that keeps answering is never cut off: a huge listing
   (each page is a request) or 8 reads in flight on a slow link take as long as they need.
-- SFTP: each request has the session's 60 s timeout (`request_timeout_secs`, set from the
-  first request: each read or write in flight and each page of a listing on its own), no batch
-  or whole-operation bound; connect, login and channel open have 20 s each. The final
-  `fsync@openssh.com` has a limit of its own (1 h: a server flushing a large file is not
-  a failure, a dead connection is found by the keepalives first). SSH keepalives every 15 s
+- SFTP: the same rule, one watchdog per session (`sftp::Watch`): any bytes from the server
+  reset it, and it fails the requests only when requests are outstanding and nothing has
+  arrived for 60 s, for reads, writes and metadata alike. The clock restarts when the first
+  request of a quiet session goes out and when the copy, not the server, was what waited
+  (a paused or busy job). So a large file over a slow link is never cut off while replies keep
+  coming, however far behind the last of 64 requests is. Connect, login and channel open have
+  20 s each. The final `fsync@openssh.com` is outside the watchdog (nothing arrives while a server
+  flushes) with a limit of its own (1 h; a dead connection is found by the keepalives
+  first); the job waits for it on a thread of its own, so pause and cancel work meanwhile and
+  a flush that lasts shows in the progress (`method: flush`). SSH keepalives every 15 s
   (3 missed end the session); the connection's runtime threads are always running, so
   keepalives, window adjusts and rekeys never wait for a caller.
+- A copy is complete only at the size the file had when it was opened (`remote::Ident.size`,
+  for a local source its `fstat`): reads that end early or run past it (an EOF status or empty
+  reply mid-file from a server, a file that shrank or grew, on SMB or SFTP, up- or download) fail
+  that file with `conflict`. The temporary file goes, the existing target stays, a move keeps
+  its source.
+- Overwriting a target (`Fs::replace`): in one step where the side can (local `rename`, SMB
+  rename with replace, SFTP `posix-rename@openssh.com`). Otherwise the old file is moved
+  aside to `.name.rynas-aside`, the part takes the name, the old file is removed, and it is
+  put back if the part could not take the name; if even that fails, both stay under their
+  hidden names and the error says so (the part is never deleted once the target has gone).
+  The clean-up run and the cancel watchdog put an aside file back too.
 - TCP keepalive (20 s idle, 10 s interval, 3 probes), `TCP_USER_TIMEOUT` 60 s and
   `TCP_NODELAY` on the worker's TCP sockets (`remote::tune_sockets`).
 - Errors by side: only the clients make connection errors (`remote::stalled`, `remote::lost`,
@@ -214,14 +230,21 @@ little and would keep processes with the reading capability alive between reques
   `packaging/bench-smb.sh` measures smbclient and the worker against a real server.
 - Throughput (SFTP): one continuous sliding window of reads on one handle (`sftp::pump`, a task
   on the connection's runtime): up to 64 requests of up to 255 KiB (`limits@openssh.com` when
-  the server has it), one at first and one more per reply (OpenSSH's ramp), capped so the last
-  request queued waits at most 20 s behind the others at the link's measured rate (a request's
-  own 60 s timeout must not fire on a slow link). Replies go in order over a bounded channel
-  (about 4 MiB) to the copy, so the thread writing to disk overlaps the network; about 20 MiB
-  at most per download. A short reply is asked for again from where it stopped (the following
-  requests made smaller, as OpenSSH), an empty reply or EOF status ends the file where it ends.
+  the server has it, read and write length and the largest packet it announces, minus the
+  bytes around the data), one at first and one more per reply (OpenSSH's ramp), capped so the
+  last request queued waits at most about 20 s behind the others at the link's measured rate
+  (a short queue on a slow link; the watchdog does not depend on it). Replies go in order over
+  a bounded channel (about 4 MiB) to the copy, so the thread writing to disk overlaps the
+  network; about 20 MiB at most per download. A short reply is asked for again from where it
+  stopped (the following requests made smaller, as OpenSSH); an empty reply or EOF status
+  ends the reading where it ends, and the copy then fails that file (see above).
   Uploads: the same window of writes on one handle, unconfirmed blocks kept by offset and given
-  back on a broken connection (`Writer::unconfirmed`/`resend`). The ciphers offered are
+  back on a broken connection (`Writer::unconfirmed`/`resend`). The session keeps its own
+  encoded copy of each write until it leaves for the server, so writes also wait while more
+  than 4 MiB of them have not left yet: about 20 MiB per upload (window plus that), as for a
+  download. Host keys: Ed25519 and ECDSA first, then RSA with SHA-2, `ssh-rsa` last; an RSA
+  user key signs with SHA-2 where the server takes it, SHA-1 only for a server that takes
+  nothing else (old servers keep working). The ciphers offered are
   AES-128/256-GCM first where the CPU has AES and carry-less multiply (`aes_accelerated`, at run
   time), ChaCha20-Poly1305 first otherwise; SSH packets of 65535 bytes (russh's largest), a
   32 MiB channel window, no compression; TCP_NODELAY set directly on the socket. Each job's

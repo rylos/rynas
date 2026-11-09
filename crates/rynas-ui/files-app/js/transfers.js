@@ -638,7 +638,7 @@ class JobDialog {
     // stats
     const end = st.eta != null ? Date.now() + st.eta : null;
     const methods = {
-      clone: t("Reflink btrfs"), copy: t("Copia dati"), rename: t("Rinomina"), recycle: t("Cestino"), delete: t("Eliminazione"),
+      clone: t("Reflink btrfs"), copy: t("Copia dati"), flush: t("Scrittura sui dischi del server"), rename: t("Rinomina"), recycle: t("Cestino"), delete: t("Eliminazione"),
       deflate: t("Zip (deflate)"), store: t("Zip senza compressione"), zstd: "tar.zst (zstd)", "7z": "7-Zip", unrar: "unrar", tar: "GNU tar",
     };
     const cells = [
