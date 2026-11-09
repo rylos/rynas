@@ -1,8 +1,6 @@
-# Applies only to cargo runs started from this directory (trunk): the wasm UI is size
-# sensitive, so its dependencies are optimized for size too (-24 KB brotli vs opt-level 3).
-# Builds of the server from the workspace root do not see this file.
-[profile.release.package."*"]
-opt-level = "z"
+# Applies only to cargo runs started from this directory (trunk); builds of the server from the
+# workspace root do not see this file. The wasm's optimization levels are the `wasm-release`
+# profile in the root Cargo.toml.
 
 # Leptos type erasure for views: much smaller wasm (-85 KB brotli measured on 2026-11-05),
 # no measurable runtime cost for this UI.

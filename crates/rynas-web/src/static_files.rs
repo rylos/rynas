@@ -99,6 +99,17 @@ fn etag_of(html: &str) -> String {
     format!("\"{hex}\"")
 }
 
+/// `If-None-Match` against an entity tag: `*`, or a list of tags compared weakly (a proxy that
+/// compresses the page marks the tag `W/`), RFC 9110 §13.1.2.
+fn etag_matches(if_none_match: &str, etag: &str) -> bool {
+    let if_none_match = if_none_match.trim();
+    if_none_match == "*"
+        || if_none_match
+            .split(',')
+            .map(|t| t.trim())
+            .any(|t| t.strip_prefix("W/").unwrap_or(t) == etag)
+}
+
 pub fn csp_for(html: &str) -> String {
     let hashes: String = inline_scripts(html)
         .into_iter()
@@ -176,8 +187,9 @@ async fn index(State(shell): State<Arc<Shell>>, uri: Uri, headers: HeaderMap) ->
             let matches = c
                 .etag
                 .as_ref()
-                .zip(headers.get(header::IF_NONE_MATCH))
-                .is_some_and(|(e, inm)| e == inm);
+                .and_then(|e| e.to_str().ok())
+                .zip(headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()))
+                .is_some_and(|(e, inm)| etag_matches(inm, e));
             let mut r = if matches {
                 StatusCode::NOT_MODIFIED.into_response()
             } else {
@@ -276,6 +288,18 @@ mod tests {
         assert!(FILE_VIEW_CSP.contains("frame-ancestors 'self'"));
         assert!(!FILE_VIEW_CSP.contains("script-src"));
         assert!(default_csp().contains("img-src 'self' data: blob:"));
+    }
+
+    #[test]
+    fn if_none_match_forms() {
+        let e = "\"abc\"";
+        assert!(etag_matches("\"abc\"", e));
+        assert!(etag_matches("W/\"abc\"", e));
+        assert!(etag_matches("*", e));
+        assert!(etag_matches("\"x\", W/\"abc\" , \"y\"", e));
+        assert!(!etag_matches("\"abd\"", e));
+        assert!(!etag_matches("\"x\", \"y\"", e));
+        assert!(!etag_matches("", e));
     }
 
     #[test]

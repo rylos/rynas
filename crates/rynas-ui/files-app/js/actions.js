@@ -24,7 +24,14 @@ export const actionMethods = {
   },
 
   async edit(pane, entry) {
-    const { editFile } = await import("./editor.js");
+    let editFile;
+    try {
+      ({ editFile } = await import("./editor.js"));
+    } catch {
+      // the module is not there any more: an upgrade happened while this tab was open
+      toast(t("Impossibile aprire l'editor: ricarica la pagina"), { kind: "error" });
+      return;
+    }
     const saved = await editFile(entry.path, { label: this.displayPath(entry.path) });
     pane.focus();
     if (saved) this.refreshFolders([parentOf(entry.path)]);

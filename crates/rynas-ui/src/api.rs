@@ -111,8 +111,6 @@ struct WireError {
 thread_local! {
     /// `Date` header of the last answer, in ms (to estimate the clock skew with the server).
     static LAST_DATE: Cell<Option<f64>> = const { Cell::new(None) };
-    /// When the wasm started ([`init`]).
-    static STARTED: Cell<f64> = const { Cell::new(0.0) };
     /// Time of the last key, click or wheel event (ms, `Date.now()`); page load counts.
     static LAST_INPUT: Cell<f64> = const { Cell::new(0.0) };
 }
@@ -127,7 +125,6 @@ fn user_active() -> bool {
 
 /// Starts tracking user input for the background marker (called once from `main`).
 pub fn init() {
-    STARTED.with(|c| c.set(js_sys::Date::now()));
     let mark = |_| LAST_INPUT.with(|c| c.set(js_sys::Date::now()));
     mark(());
     // registered once for the life of the page
@@ -150,6 +147,8 @@ pub const TIMEOUT_MS: u32 = 30_000;
 
 /// How long after the page started the requests of `index.html` can stand for a new one.
 const EARLY_MAX_MS: f64 = 10_000.0;
+/// Set by `index.html` on an early answer: when it arrived (`Date.now()`).
+const EARLY_ARRIVED: &str = "X-Rynas-Arrived";
 
 /// Drops the requests `index.html` started: they belong to the session of that moment (called
 /// when a session ends, so a new sign-in does not reuse a 401).
@@ -164,7 +163,8 @@ fn early_answer(method: &str, url: &str) -> Option<js_sys::Promise> {
         return None;
     }
     // for the page's own start only, not for a later resume with data that old
-    if js_sys::Date::now() - STARTED.with(Cell::get) > EARLY_MAX_MS {
+    // (`performance.now()` counts from the page's time origin, when those requests were made)
+    if window().performance().is_none_or(|p| p.now() > EARLY_MAX_MS) {
         forget_early();
         return None;
     }
@@ -177,7 +177,16 @@ fn early_answer(method: &str, url: &str) -> Option<js_sys::Promise> {
     Some(p)
 }
 
+/// The early answer for this GET when it is usable: complete and successful. Anything else
+/// (failed, timed out, an error status, too old) is `None` and the caller asks the server.
+async fn early_response(method: &str, url: &str) -> Option<Response> {
+    let p = early_answer(method, url)?;
+    let r: Response = JsFuture::from(p).await.ok()?.dyn_into().ok()?;
+    r.ok().then_some(r)
+}
+
 async fn send(method: &str, url: &str, body: Option<String>) -> Result<Response, ApiErr> {
+    let early = early_response(method, url).await;
     let init = RequestInit::new();
     init.set_method(method);
     let headers = Headers::new().map_err(|_| ApiErr::Network)?;
@@ -195,17 +204,29 @@ async fn send(method: &str, url: &str, body: Option<String>) -> Result<Response,
         let _ = headers.set(BACKGROUND_HEADER, "1");
     }
     init.set_headers(&headers);
-    init.set_signal(Some(&web_sys::AbortSignal::timeout_with_u32(TIMEOUT_MS)));
-    let call = early_answer(method, url).unwrap_or_else(|| window().fetch_with_str_and_init(url, &init));
-    let resp: Response = JsFuture::from(call)
-        .await
-        .map_err(|e| {
-            let name = js_sys::Reflect::get(&e, &JsValue::from_str("name")).ok().and_then(|n| n.as_string());
-            if name.as_deref() == Some("TimeoutError") { ApiErr::Timeout } else { ApiErr::Network }
-        })?
-        .unchecked_into();
+    let resp: Response = match early {
+        Some(r) => r,
+        None => {
+            // the timeout starts here, after any wait for the early answer
+            init.set_signal(Some(&web_sys::AbortSignal::timeout_with_u32(TIMEOUT_MS)));
+            JsFuture::from(window().fetch_with_str_and_init(url, &init))
+                .await
+                .map_err(|e| {
+                    let name = js_sys::Reflect::get(&e, &JsValue::from_str("name")).ok().and_then(|n| n.as_string());
+                    if name.as_deref() == Some("TimeoutError") { ApiErr::Timeout } else { ApiErr::Network }
+                })?
+                .unchecked_into()
+        }
+    };
     if let Ok(Some(d)) = resp.headers().get("Date") {
-        let ms = js_sys::Date::parse(&d);
+        let mut ms = js_sys::Date::parse(&d);
+        // an early answer waited for the wasm: the server's clock has moved on since then,
+        // and the session's clock offset is taken from this value
+        if let Ok(Some(at)) = resp.headers().get(EARLY_ARRIVED)
+            && let Ok(at) = at.parse::<f64>()
+        {
+            ms += js_sys::Date::now() - at;
+        }
         if ms.is_finite() {
             LAST_DATE.with(|c| c.set(Some(ms)));
         }

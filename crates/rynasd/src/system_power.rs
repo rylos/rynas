@@ -28,7 +28,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::rejection::JsonRejection;
+use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -330,8 +330,9 @@ struct StateQuery {
 
 async fn state_get(
     State(st): State<SpState>,
-    Query(q): Query<StateQuery>,
+    q: Result<Query<StateQuery>, QueryRejection>,
 ) -> Res<Json<SystemPowerState>> {
+    let Query(q) = q.map_err(|e| Error::bad_request(e.body_text()))?;
     let s = sp(&st)?;
     if q.pending_only {
         return Ok(Json(SystemPowerState {

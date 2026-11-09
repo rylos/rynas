@@ -324,7 +324,8 @@ class Editor {
       injectColors();
       loadSyntax(this.type.name)
         .then((def) => this.view.dispatch({ effects: this.colors.reconfigure(syntaxColors(def)) }))
-        .catch(() => {});
+        // the file opens anyway, without colours (an upgrade while this tab was open)
+        .catch(() => this.message(t("Colori della sintassi non disponibili: ricarica la pagina")));
     }
     this.message(this.readOnly ? t("Sola lettura: non hai il permesso di scrivere questo file") : t("Ctrl+G: i tasti dell'editor"));
     this.view.focus();

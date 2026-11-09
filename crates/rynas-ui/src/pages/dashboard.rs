@@ -1097,7 +1097,7 @@ fn HardwareWidget() -> impl IntoView {
                                 });
                                 view! {
                                     <span class=move || format!("temp-chip {}", temp_tone(&id3, c.get()).class())>
-                                        <Icon icon=icons::THERMOMETER size=14 />{temp_label(&id, &label)}<strong class="tnum">{move || i18n::celsius(c.get())}</strong>
+                                        <Icon icon=icons::THERMOMETER size=14 />{move || temp_label(&id, &label)}<strong class="tnum">{move || i18n::celsius(c.get())}</strong>
                                     </span>
                                 }
                             }

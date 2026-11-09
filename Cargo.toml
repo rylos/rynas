@@ -129,7 +129,7 @@ strip = true
 # size is never traded for speed. On a Celeron, an SMB copy built with "s" spent 76 % of
 # its CPU in the signature's polyval/ghash.
 
-# The wasm UI only (trunk builds it with this profile, see crates/rynas-ui/Trunk.toml): its
+# The wasm UI only (`trunk build --release` builds it with this profile: `data-cargo-profile-release` in crates/rynas-ui/index.html): its
 # download size is what the user waits for.
 [profile.wasm-release]
 inherits = "release"

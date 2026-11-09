@@ -29,7 +29,7 @@ features = [
   "Request", "RequestInit", "Response", "Headers", "AbortSignal",
   "ResizeObserver", "ResizeObserverEntry",
   "Blob", "BlobPropertyBag", "Url", "HtmlAnchorElement", "HtmlTextAreaElement", "HtmlDocument", "Clipboard",
-  "NodeList", "History", "File", "FileList",
+  "NodeList", "History", "File", "FileList", "Performance",
 ]
 
 [features]

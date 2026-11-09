@@ -29,7 +29,17 @@
       if (s && window.AbortSignal && AbortSignal.timeout) {
         var early = window.__rynasEarly = {};
         ["/api/v1/auth/session", "/api/v1/system", "/api/v1/metrics/history?minutes=10", "/api/v1/storage", "/api/v1/hardware"].forEach(function (u) {
-          early[u] = fetch(u, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(30000) });
+          // read to the end here: the timeout covers the body too, and on a slow link the wasm
+          // may arrive after it. A failure is null: the page then asks by itself.
+          early[u] = fetch(u, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(30000) })
+            .then(function (r) {
+              return r.blob().then(function (b) {
+                var h = new Headers(r.headers);
+                h.set("X-Rynas-Arrived", String(Date.now()));
+                return new Response(b, { status: r.status, headers: h });
+              });
+            })
+            .catch(function () { return null; });
         });
       }
     })();
@@ -42,7 +52,7 @@
   <link data-trunk rel="copy-file" href="assets/favicon.svg">
   <!-- the file manager (Web Component), loaded only by the Files page: pages/files.rs -->
   <link data-trunk rel="copy-dir" href="files-app">
-  <link data-trunk rel="rust" data-bin="rynas-ui" data-wasm-opt="z" data-weak-refs>
+  <link data-trunk rel="rust" data-bin="rynas-ui" data-wasm-opt="z" data-weak-refs data-cargo-profile-release="wasm-release">
   <style>
     #boot { position: fixed; inset: 0; display: grid; place-items: center; }
     #boot i { width: 40px; height: 40px; border-radius: 12px; background: linear-gradient(135deg, #7aa2f7, #bb9af7); animation: boot 1s ease-in-out infinite alternate; }

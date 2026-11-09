@@ -1,6 +1,8 @@
 // English for every Italian string of the interface (see i18n.js).
 export default {
   "Accesso": "Login",
+  "Colori della sintassi non disponibili: ricarica la pagina": "Syntax colours are not available: reload the page",
+  "Impossibile aprire l'editor: ricarica la pagina": "The editor cannot be opened: reload the page",
   "Cartella di partenza": "Starting folder",
   "Cartelle condivise del server": "The server's shared folders",
   "Chiave del server: {k}": "Server key: {k}",

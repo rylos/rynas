@@ -556,15 +556,16 @@ Files page; it needs the files API (`/api/v1/files/*`) from the backend part to 
 | What | Where |
 |---|---|
 | The component (ported code) | `crates/rynas-ui/files-app/`: `rynas-files.js` (custom element, shadow root, bootstrap), `js/` (the app), `app.css`, `fonts/eza-icons.woff2`, `vendor/codemirror` (MIT), `vendor/libheif` (LGPL-3.0, unmodified), `js/syntax` (from micro, MIT) |
-| Build and serving | trunk copies `files-app/` into `dist/files-app/` (`<link data-trunk rel="copy-dir">` in `index.html`); rynas-web serves it like the rest of the UI (`--ui-dir`), the .deb ships it precompressed (`packaging/build-deb.sh` compresses every `.js`/`.css`/`.wasm`) |
+| Build and serving | trunk copies `files-app/` into the build (`<link data-trunk rel="copy-dir">` in `index.html`) and `hash-files-app.sh` renames it `dist/files-app-<hash>/`, immutable, named in `<meta name="rynas-files-app">`; rynas-web serves it like the rest of the UI (`--ui-dir`), the .deb ships it precompressed (`packaging/build-deb.sh` compresses every `.js`/`.css`/`.wasm`) |
 | Leptos page | `crates/rynas-ui/src/pages/files.rs`: routes `/files` and `/files/*path`, the lazy script load, the bridge of window events |
 | Checks | `crates/rynas-ui/src/files_check.rs` (texts translated, no other product named, only it/en, no undeclared sideways scroll); `tools/ui-audit/files_mock.py` (fake files API for screenshots) |
 
 ### How it is mounted
 
 - **Lazy**: the wasm bundle does not grow. `pages/files.rs` adds
-  `<script type="module" src="/files-app/rynas-files.js">` the first time the Files page opens
-  (skeleton while it loads, an error box with Retry if it fails). `rynas-files.js` preloads the
+  `<script type="module" src="/files-app-<hash>/rynas-files.js">` the first time the Files page
+  opens (skeleton while it loads, an error box whose Retry reloads the page if it fails: after an
+  upgrade only the new page knows the new folder). `rynas-files.js` preloads the
   app's modules (`modulepreload`) so they come in parallel, not one import level at a time.
 - **One shadow root for the life of the page**: `<rynas-files>` hosts a single element that
   carries the shadow root. Leaving the Files page and coming back finds the same tabs, transfers,

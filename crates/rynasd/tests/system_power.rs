@@ -244,6 +244,22 @@ async fn warnings_list_what_would_be_interrupted() {
 }
 
 #[tokio::test]
+async fn pending_only_skips_the_warnings() {
+    let e = env(false);
+    std::fs::create_dir_all(e.hw.join("proc/4242")).unwrap();
+    std::fs::write(e.hw.join("proc/4242/comm"), "dpkg\n").unwrap();
+    assert_eq!(state(&e).await.warnings.len(), 1);
+    let (s, b) = call(&e, "GET", "/v1/system/power?pending_only=true", None).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    let only: SystemPowerState = serde_json::from_slice(&b).unwrap();
+    assert!(only.pending.is_none() && only.warnings.is_empty(), "{only:?}");
+    // a wrong value is the API's JSON error, not a bare text
+    let (s, b) = call(&e, "GET", "/v1/system/power?pending_only=1", None).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    serde_json::from_slice::<ApiError>(&b).expect("a JSON error");
+}
+
+#[tokio::test]
 async fn delayed_restart_then_cancel() {
     let e = env(false);
     let (s, b) = call(

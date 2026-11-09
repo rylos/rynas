@@ -362,7 +362,8 @@ shows in English and switches to Italian when the file arrives.
   none (`GET /system/power?pending_only=true`: the expensive warnings only for the dialog).
 - S9 MUST: every byte of the first screen earns its place. A signed-in page reload starts the first
   screen's API calls from `index.html` while the wasm is loading (`window.__rynasEarly`, taken once by
-  `src/api.rs`); `/metrics/history` carries per-thread and temperature data on its newest point only.
+  `src/api.rs`, read in full by the page, used only if successful and within 10 s of the page's time
+  origin, otherwise asked again); `/metrics/history` carries per-thread and temperature data on its newest point only.
 - S10 MUST: assets a build can change are named after their content and served immutable (trunk
   hashes; `hash-files-app.sh` renames `files-app/` the same way), `index.html` is `no-cache` + `ETag`.
   No service worker: the interface is tied to the server's version, and a stale worker is the failure
