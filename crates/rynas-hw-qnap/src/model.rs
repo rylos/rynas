@@ -11,8 +11,6 @@ pub struct PciDevice {
     pub address: &'static str,
     /// `vendor:device` as in sysfs without `0x`: `8086:0f23`.
     pub id: &'static str,
-    /// `subsystem_vendor:subsystem_device`.
-    pub subsystem: &'static str,
 }
 
 /// Where the Super I/O keeps the power-recovery setting, with the BIOS's copy in CMOS.
@@ -24,6 +22,8 @@ pub struct PowerRecoveryMap {
     pub sio_ids: (u16, u16),
     pub ldn: u8,
     pub reg: u8,
+    /// Logical device of the GPIO banks (the vendor activates it before using it).
+    pub gpio_ldn: u8,
     /// CMOS byte holding the copy in its two high bits.
     pub cmos_offset: u8,
 }
@@ -121,37 +121,37 @@ pub const MODELS: &[Model] = &[Model {
     board_name: "Aptio CRB",
     cpu: "J1800",
     pci: &[
-        dev("0000:00:00.0", "8086:0f00", "8086:0f31"),
-        dev("0000:00:02.0", "8086:0f31", "8086:0f31"),
-        dev("0000:00:11.0", "8086:0f15", "8086:0f15"),
-        dev("0000:00:12.0", "8086:0f16", "8086:0f16"),
-        dev("0000:00:13.0", "8086:0f23", "8086:0f23"),
-        dev("0000:00:14.0", "8086:0f35", "8086:0f35"),
-        dev("0000:00:17.0", "8086:0f50", "0000:0000"),
-        dev("0000:00:18.0", "8086:0f40", "8086:0f40"),
-        dev("0000:00:18.1", "8086:0f41", "8086:0f41"),
-        dev("0000:00:18.2", "8086:0f42", "8086:0f42"),
-        dev("0000:00:18.3", "8086:0f43", "8086:0f43"),
-        dev("0000:00:18.4", "8086:0f44", "8086:0f44"),
-        dev("0000:00:18.5", "8086:0f45", "8086:0f45"),
-        dev("0000:00:18.6", "8086:0f46", "8086:0f46"),
-        dev("0000:00:18.7", "8086:0f47", "8086:0f47"),
-        dev("0000:00:1a.0", "8086:0f18", "8086:0f18"),
-        dev("0000:00:1b.0", "8086:0f04", "8086:7270"),
-        dev("0000:00:1c.0", "8086:0f48", "8086:0f48"),
-        dev("0000:00:1c.1", "8086:0f4a", "8086:0f4a"),
-        dev("0000:00:1c.2", "8086:0f4c", "8086:0f4c"),
-        dev("0000:00:1c.3", "8086:0f4e", "8086:0f4e"),
-        dev("0000:00:1e.0", "8086:0f06", "0000:0000"),
-        dev("0000:00:1e.1", "8086:0f08", "0000:0000"),
-        dev("0000:00:1e.2", "8086:0f09", "0000:0000"),
-        dev("0000:00:1e.3", "8086:0f0a", "0000:0000"),
-        dev("0000:00:1e.4", "8086:0f0c", "0000:0000"),
-        dev("0000:00:1e.5", "8086:0f0e", "0000:0000"),
-        dev("0000:00:1f.0", "8086:0f1c", "8086:0f1c"),
-        dev("0000:00:1f.3", "8086:0f12", "8086:0f12"),
-        dev("0000:03:00.0", "8086:1533", "ffff:0000"),
-        dev("0000:04:00.0", "8086:1533", "ffff:0000"),
+        dev("0000:00:00.0", "8086:0f00"),
+        dev("0000:00:02.0", "8086:0f31"),
+        dev("0000:00:11.0", "8086:0f15"),
+        dev("0000:00:12.0", "8086:0f16"),
+        dev("0000:00:13.0", "8086:0f23"),
+        dev("0000:00:14.0", "8086:0f35"),
+        dev("0000:00:17.0", "8086:0f50"),
+        dev("0000:00:18.0", "8086:0f40"),
+        dev("0000:00:18.1", "8086:0f41"),
+        dev("0000:00:18.2", "8086:0f42"),
+        dev("0000:00:18.3", "8086:0f43"),
+        dev("0000:00:18.4", "8086:0f44"),
+        dev("0000:00:18.5", "8086:0f45"),
+        dev("0000:00:18.6", "8086:0f46"),
+        dev("0000:00:18.7", "8086:0f47"),
+        dev("0000:00:1a.0", "8086:0f18"),
+        dev("0000:00:1b.0", "8086:0f04"),
+        dev("0000:00:1c.0", "8086:0f48"),
+        dev("0000:00:1c.1", "8086:0f4a"),
+        dev("0000:00:1c.2", "8086:0f4c"),
+        dev("0000:00:1c.3", "8086:0f4e"),
+        dev("0000:00:1e.0", "8086:0f06"),
+        dev("0000:00:1e.1", "8086:0f08"),
+        dev("0000:00:1e.2", "8086:0f09"),
+        dev("0000:00:1e.3", "8086:0f0a"),
+        dev("0000:00:1e.4", "8086:0f0c"),
+        dev("0000:00:1e.5", "8086:0f0e"),
+        dev("0000:00:1f.0", "8086:0f1c"),
+        dev("0000:00:1f.3", "8086:0f12"),
+        dev("0000:03:00.0", "8086:1533"),
+        dev("0000:04:00.0", "8086:1533"),
     ],
     nics: &["0000:03:00.0", "0000:04:00.0"],
     mac_oui: "00:08:9b",
@@ -175,13 +175,14 @@ pub const MODELS: &[Model] = &[Model {
         sio_ids: (0x1007, 0x1934),
         ldn: 0x0A,
         reg: 0xF4,
+        gpio_ldn: 0x06,
         cmos_offset: 0x61,
     }),
     system_temp: 3,
 }];
 
-const fn dev(address: &'static str, id: &'static str, subsystem: &'static str) -> PciDevice {
-    PciDevice { address, id, subsystem }
+const fn dev(address: &'static str, id: &'static str) -> PciDevice {
+    PciDevice { address, id }
 }
 
 /// The value of a file below `root`, whitespace trimmed; empty if unreadable.
@@ -195,14 +196,11 @@ fn dmi(root: &Path, f: &str) -> String {
     read(root, &format!("/sys/class/dmi/id/{f}"))
 }
 
-/// `(vendor:device, subsystem)` of a PCI device.
-fn pci_ids(root: &Path, address: &str) -> (String, String) {
+/// `vendor:device` of a PCI device.
+fn pci_id(root: &Path, address: &str) -> String {
     let attr = |f: &str| read(root, &format!("/sys/bus/pci/devices/{address}/{f}"));
     let id = |v: String| v.strip_prefix("0x").unwrap_or("").to_string();
-    (
-        format!("{}:{}", id(attr("vendor")), id(attr("device"))),
-        format!("{}:{}", id(attr("subsystem_vendor")), id(attr("subsystem_device"))),
-    )
+    format!("{}:{}", id(attr("vendor")), id(attr("device")))
 }
 
 /// The machine has exactly the model's PCI devices: nothing missing, nothing extra.
@@ -215,7 +213,7 @@ fn pci_exact(root: &Path, m: &Model) -> bool {
         .collect();
     found.len() == m.pci.len()
         && m.pci.iter().all(|d| {
-            found.iter().any(|f| f == d.address) && pci_ids(root, d.address) == (d.id.to_string(), d.subsystem.to_string())
+            found.iter().any(|f| f == d.address) && pci_id(root, d.address) == d.id
         })
 }
 
@@ -230,7 +228,7 @@ fn ata_ports(root: &Path, m: &Model) -> usize {
         .count()
 }
 
-fn nic_mac(root: &Path, address: &str) -> Option<String> {
+pub(crate) fn nic_mac(root: &Path, address: &str) -> Option<String> {
     let net = rynas_hw::under(root, &format!("/sys/bus/pci/devices/{address}/net"));
     let iface = std::fs::read_dir(net).ok()?.flatten().next()?;
     Some(read(root, &format!("/sys/class/net/{}/address", iface.file_name().to_string_lossy())))
@@ -327,11 +325,8 @@ pub mod testing {
         for d in MODELS[0].pci {
             let at = |f: &str| format!("sys/bus/pci/devices/{}/{f}", d.address);
             let (v, i) = d.id.split_once(':').unwrap();
-            let (sv, si) = d.subsystem.split_once(':').unwrap();
             w(root, &at("vendor"), &format!("0x{v}\n"));
             w(root, &at("device"), &format!("0x{i}\n"));
-            w(root, &at("subsystem_vendor"), &format!("0x{sv}\n"));
-            w(root, &at("subsystem_device"), &format!("0x{si}\n"));
         }
         for a in ["ata1", "ata2"] {
             std::fs::create_dir_all(root.join(format!("sys/bus/pci/devices/0000:00:13.0/{a}"))).unwrap();
@@ -377,7 +372,6 @@ mod tests {
         change("sys/class/dmi/id/sys_vendor", "QNAP\n");
         change("proc/cpuinfo", "model name\t: Intel(R) Celeron(R) CPU J1900\n");
         change("sys/bus/pci/devices/0000:03:00.0/device", "0x1539\n");
-        change("sys/bus/pci/devices/0000:03:00.0/subsystem_vendor", "0x1baa\n");
         change("sys/class/net/eth1/address", "00:11:22:33:44:55\n");
     }
 

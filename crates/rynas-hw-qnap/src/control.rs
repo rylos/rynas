@@ -112,6 +112,27 @@ pub(crate) fn label_of(l: Line) -> String {
     chip_label(l)
 }
 
+/// What the confirmation file holds: the model and this machine's MAC addresses, so that a
+/// confirmation does not follow the disks to another machine. `None` when one is unreadable.
+fn confirmation_text(root: &Path, m: &Model) -> Option<String> {
+    let macs: Option<Vec<String>> = m.nics.iter().map(|n| model::nic_mac(root, n).map(|a| a.to_ascii_lowercase())).collect();
+    Some(format!("{}\n{}\n", m.id, macs?.join(" ")))
+}
+
+/// The user confirmed the mapping on this machine (always true on a verified model).
+pub fn mapping_confirmed_on(root: &Path, state_dir: &Path, m: &Model) -> bool {
+    m.verified
+        || (confirmation_text(root, m).is_some()
+            && std::fs::read_to_string(state_dir.join(CONFIRM_FILE)).ok() == confirmation_text(root, m))
+}
+
+/// Stores the confirmation for this machine (the tests of the Super I/O worker).
+#[cfg(test)]
+pub fn write_confirmation(root: &Path, state_dir: &Path, m: &Model) -> Result<(), String> {
+    let text = confirmation_text(root, m).ok_or("the machine's MAC addresses cannot be read")?;
+    std::fs::write(state_dir.join(CONFIRM_FILE), text).map_err(|e| format!("{CONFIRM_FILE}: {e}"))
+}
+
 /// What the LEDs should show.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Outputs {
@@ -262,24 +283,61 @@ pub struct Controller {
     speaker: Arc<dyn Speaker>,
     notify: Box<dyn Fn(&ButtonEvent) + Send + Sync>,
     state_dir: Option<PathBuf>,
+    /// What a confirmation on this machine stores (read once, at start).
+    confirmation: Option<String>,
     inner: Mutex<Inner>,
     tick_no: AtomicU64,
     beeping: Arc<AtomicBool>,
     beep_stop: Arc<AtomicBool>,
+    /// A Super I/O worker is running: no GPIO access at all.
+    paused: AtomicBool,
+    /// One worker at a time.
+    worker_gate: Mutex<()>,
+    /// `flock` held while polling, so that a worker cannot run behind rynasd's back.
+    lock_path: Option<PathBuf>,
+    lock: Mutex<Option<std::fs::File>>,
+}
+
+fn flock(path: &Path) -> Result<std::fs::File, String> {
+    use std::os::fd::AsRawFd;
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
+    }
+    let f = std::fs::File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    // SAFETY: flock on a descriptor this function owns; it blocks while a worker holds it
+    if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(format!("{}: {}", path.display(), std::io::Error::last_os_error()));
+    }
+    Ok(f)
 }
 
 impl Controller {
-    /// `state_dir`: where the mapping confirmation and the muted alarms are kept (`None` in
-    /// tests that do not need them). The speaker is silenced first: a previous process may
-    /// have died in the middle of a tone.
+    /// `root`: the tree the machine was identified in. `state_dir`: where the mapping
+    /// confirmation and the muted alarms are kept (`None` in tests that do not need them).
+    /// `lock_path`: taken while polling (`None`: nothing else can use the chip). The speaker
+    /// is silenced first: a previous process may have died in the middle of a tone.
     pub fn new(
         confirmed: Confirmed,
+        root: &Path,
         mut gpio: Box<dyn Gpio>,
         speaker: Arc<dyn Speaker>,
         notify: Box<dyn Fn(&ButtonEvent) + Send + Sync>,
         state_dir: Option<PathBuf>,
+        lock_path: Option<PathBuf>,
     ) -> Self {
         speaker.stop();
+        let lock = lock_path.as_deref().and_then(|p| match flock(p) {
+            Ok(f) => Some(f),
+            Err(e) => {
+                tracing::warn!("qnap: {e}");
+                None
+            }
+        });
         let m = confirmed.model();
         let bays = m
             .bays
@@ -306,7 +364,7 @@ impl Controller {
             }
         }
         let read_state = |file: &str| state_dir.as_ref().and_then(|d| std::fs::read_to_string(d.join(file)).ok());
-        let mapping_ok = m.verified || read_state(CONFIRM_FILE).is_some_and(|t| t.trim() == m.id);
+        let mapping_ok = m.verified || state_dir.as_ref().is_some_and(|d| mapping_confirmed_on(root, d, m));
         let muted = read_state(MUTE_FILE)
             .map(|t| t.lines().map(str::to_string).collect())
             .unwrap_or_default();
@@ -315,6 +373,7 @@ impl Controller {
             speaker,
             notify,
             state_dir,
+            confirmation: confirmation_text(root, m),
             inner: Mutex::new(Inner {
                 gpio,
                 settings: QnapSettings::default(),
@@ -337,6 +396,10 @@ impl Controller {
             tick_no: AtomicU64::new(0),
             beeping: Arc::new(AtomicBool::new(false)),
             beep_stop: Arc::new(AtomicBool::new(false)),
+            paused: AtomicBool::new(false),
+            worker_gate: Mutex::new(()),
+            lock_path,
+            lock: Mutex::new(lock),
         }
     }
 
@@ -348,11 +411,26 @@ impl Controller {
         self.inner.lock().unwrap().settings.clone()
     }
 
-    /// Runs `f` with the polling stopped (a Super I/O access from another process must not
-    /// interleave with this one's GPIO reads: the chip's configuration mode is one state).
-    pub fn exclusive<T>(&self, f: impl FnOnce() -> T) -> T {
-        let _g = self.inner.lock().unwrap();
-        f()
+    /// Runs a Super I/O worker: `f` runs with no GPIO access from this process (the chip's
+    /// configuration mode is one state) and with the lock free for the worker. Status, mute
+    /// and everything else keep working meanwhile: the state mutex is not held.
+    pub fn pause_for_worker<T>(&self, f: impl FnOnce() -> T) -> T {
+        let _one = self.worker_gate.lock().unwrap();
+        self.paused.store(true, Ordering::Release);
+        // waits for an access already under way; those after it see the flag
+        drop(self.inner.lock().unwrap());
+        drop(self.lock.lock().unwrap().take());
+        let r = f();
+        if let Some(p) = &self.lock_path {
+            match flock(p) {
+                Ok(l) => *self.lock.lock().unwrap() = Some(l),
+                Err(e) => tracing::warn!("qnap: {e}"),
+            }
+        }
+        self.paused.store(false, Ordering::Release);
+        let mut g = self.inner.lock().unwrap();
+        self.write_outputs(&mut g);
+        r
     }
 
     /// The user's confirmation of the mapping: `typed` must be the model's short name.
@@ -362,7 +440,8 @@ impl Controller {
             return Err(format!("type {} to confirm", m.short));
         }
         if let Some(d) = &self.state_dir {
-            std::fs::write(d.join(CONFIRM_FILE), format!("{}\n", m.id)).map_err(|e| format!("{CONFIRM_FILE}: {e}"))?;
+            let text = self.confirmation.as_ref().ok_or("the machine's MAC addresses cannot be read")?;
+            std::fs::write(d.join(CONFIRM_FILE), text).map_err(|e| format!("{CONFIRM_FILE}: {e}"))?;
         }
         let mut g = self.inner.lock().unwrap();
         g.mapping_ok = true;
@@ -424,9 +503,14 @@ impl Controller {
         }
         g.bays = bays;
         let before = g.muted.len();
-        let failing: HashSet<String> =
-            g.bays.iter().filter(|b| b.health == HealthVerdict::Failing).map(mute_key).collect();
-        g.muted.retain(|k| failing.contains(k));
+        // a mute goes only on a verdict: the disk recovered or another one is in the bay. No
+        // verdict yet (the first check after a restart) says nothing.
+        let bays = g.bays.clone();
+        g.muted.retain(|k| {
+            bays.iter().find(|b| k.starts_with(&format!("{}:", b.bay))).is_none_or(|b| {
+                *k == mute_key(b) && matches!(b.health, HealthVerdict::Failing | HealthVerdict::Unknown)
+            })
+        });
         if g.muted.len() != before {
             self.persist_muted(&g);
         }
@@ -457,7 +541,7 @@ impl Controller {
     }
 
     fn write_outputs(&self, g: &mut Inner) {
-        if !g.driving(self.confirmed.gpio_loaded()) {
+        if !g.driving(self.confirmed.gpio_loaded()) || self.paused.load(Ordering::Acquire) {
             return;
         }
         let want = outputs(&g.settings, &g.bays, g.fast, g.slow);
@@ -504,7 +588,7 @@ impl Controller {
         let mut sound = false;
         {
             let mut g = self.inner.lock().unwrap();
-            if self.confirmed.gpio_loaded() {
+            if self.confirmed.gpio_loaded() && !self.paused.load(Ordering::Acquire) {
                 let reset_action = g.settings.reset_button;
                 let usb_action = g.settings.usb_copy_button;
                 if let Some(ev) = self.poll(&mut g, m.reset_button, true, now, "reset", reset_action) {
@@ -804,10 +888,12 @@ pub mod tests {
         let n = notified.clone();
         let ctl = Controller::new(
             c,
+            d.path(),
             Box::new(gpio.clone()),
             rec.clone(),
             Box::new(move |e| n.lock().unwrap().push(e.clone())),
             state,
+            None,
         );
         (ctl, rec, notified)
     }
@@ -1121,6 +1207,59 @@ pub mod tests {
     }
 
     #[test]
+    fn a_mute_outlives_a_first_check_with_no_verdict() {
+        let st = tempfile::tempdir().unwrap();
+        let gpio = fake_gpio();
+        let (c, ..) = ctl_in(&gpio, Some(st.path().into()));
+        c.apply(QnapSettings::default());
+        c.set_bays(vec![bay(1, HealthVerdict::Failing)]);
+        c.mute();
+        // restart, and the first storage check has no verdict for the disk yet
+        let (c, ..) = ctl_in(&gpio, Some(st.path().into()));
+        c.apply(QnapSettings::default());
+        c.set_bays(vec![bay(1, HealthVerdict::Unknown)]);
+        c.set_bays(vec![bay(1, HealthVerdict::Failing)]);
+        assert!(!c.status().alarm, "the verdict came later: still muted");
+        // another disk in the bay is a new story
+        c.set_bays(vec![BayState { bay: 1, device: "sdz".into(), health: HealthVerdict::Failing }]);
+        assert!(c.status().alarm);
+    }
+
+    #[test]
+    fn the_confirmation_is_bound_to_the_machine() {
+        let st = tempfile::tempdir().unwrap();
+        let d = tempfile::tempdir().unwrap();
+        fake_hs251(d.path(), Some("f71869a"));
+        let m = &MODELS[0];
+        assert!(!mapping_confirmed_on(d.path(), st.path(), m));
+        write_confirmation(d.path(), st.path(), m).unwrap();
+        assert!(mapping_confirmed_on(d.path(), st.path(), m));
+        // the disks moved to another machine of the same model
+        std::fs::write(d.path().join("sys/class/net/eth0/address"), "00:08:9b:12:34:56\n").unwrap();
+        assert!(!mapping_confirmed_on(d.path(), st.path(), m));
+    }
+
+    #[test]
+    fn a_worker_runs_with_no_gpio_access_and_status_keeps_working() {
+        let gpio = fake_gpio();
+        let m = &MODELS[0];
+        gpio.set_direction(&chip_label(m.reset_button), m.reset_button.offset, Direction::Input);
+        gpio.set_direction(&chip_label(m.usb_copy_button), m.usb_copy_button.offset, Direction::Input);
+        let (c, ..) = driving(&gpio, QnapSettings::default());
+        let writes = gpio.writes().len();
+        let after = c.pause_for_worker(|| {
+            // during the worker: a status and a settings change, neither touches a line
+            assert!(c.status().mapping_confirmed);
+            c.apply(QnapSettings { led_control: true, status_led: StatusLed::Red, ..Default::default() });
+            c.tick(Instant::now());
+            gpio.writes().len()
+        });
+        assert_eq!(after, writes, "nothing written while the worker runs");
+        assert_eq!(c.status().status_led, "red");
+        assert_eq!(gpio.level("gpio-f7188x-6", 3), Some(false), "the pending change goes out afterwards");
+    }
+
+    #[test]
     fn no_verdict_is_not_a_recovery() {
         let gpio = fake_gpio();
         let (c, ..) = ctl(&gpio);
@@ -1159,7 +1298,7 @@ pub mod tests {
         let mut empty = MemoryGpio::new(Vec::new());
         let c = confirm(d.path(), &MODELS[0], &mut empty).unwrap();
         assert!(!c.gpio_loaded());
-        let ctl = Controller::new(c, Box::new(empty.clone()), Arc::new(Rec::default()), Box::new(|_| {}), None);
+        let ctl = Controller::new(c, d.path(), Box::new(empty.clone()), Arc::new(Rec::default()), Box::new(|_| {}), None, None);
         ctl.confirm_mapping("HS-251").unwrap();
         ctl.apply(QnapSettings { led_control: true, ..Default::default() });
         ctl.tick(Instant::now());

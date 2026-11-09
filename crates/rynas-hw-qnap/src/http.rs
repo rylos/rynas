@@ -37,7 +37,27 @@ pub fn router(ctx: Ctx, shared: Cell, runner: std::sync::Arc<dyn Runner>) -> Rou
         .route("/mute", post(mute))
         .route("/confirm-mapping", post(confirm_mapping).delete(revoke_mapping))
         .route("/power-recovery", get(power_recovery_get).put(power_recovery_put))
+        .route("/activate-gpio", post(activate_gpio))
         .with_state(St { ctx, shared, runner })
+}
+
+/// No port access of any kind before the user's confirmation.
+fn require_confirmed(st: &St) -> Res<()> {
+    if st.ctl()?.mapping_confirmed() {
+        return Ok(());
+    }
+    Err(Error::new(StatusCode::CONFLICT, error_codes::CONFLICT, "confirm the model on this machine first"))
+}
+
+/// The Super I/O's GPIO device, activated the way the vendor does it.
+async fn activate_gpio(State(st): State<St>) -> Res<Json<PowerRecoveryState>> {
+    Ok(Json(
+        blocking(move || {
+            require_confirmed(&st)?;
+            st.runner.activate_gpio().map_err(Error::unavailable)
+        })
+        .await?,
+    ))
 }
 
 /// The user typed the model's name after the first-boot procedure.
@@ -61,7 +81,7 @@ async fn revoke_mapping(State(st): State<St>) -> Res<StatusCode> {
 async fn power_recovery_get(State(st): State<St>) -> Res<Json<PowerRecoveryState>> {
     Ok(Json(
         blocking(move || {
-            st.ctl()?;
+            require_confirmed(&st)?;
             st.runner.read().map_err(Error::unavailable)
         })
         .await?,
@@ -76,13 +96,7 @@ async fn power_recovery_put(
     let Json(req) = body?;
     Ok(Json(
         blocking(move || {
-            if !st.ctl()?.mapping_confirmed() {
-                return Err(Error::new(
-                    StatusCode::CONFLICT,
-                    error_codes::CONFLICT,
-                    "confirm the model on this machine first",
-                ));
-            }
+            require_confirmed(&st)?;
             st.runner.set(req.mode).map_err(Error::unavailable)
         })
         .await?,

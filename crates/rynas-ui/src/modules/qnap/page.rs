@@ -289,10 +289,36 @@ fn mapping_card(st: Remote<QnapStatus>) -> AnyView {
 /// What happens when mains power comes back: read from the hardware when the card opens,
 /// written only when the button is pressed.
 fn power_card(st: Remote<QnapStatus>) -> AnyView {
+    let confirmed = Memo::new(move |_| st.data.with(|s| s.as_ref().is_some_and(|s| s.mapping_confirmed)));
+    // no port access at all before the confirmation: the card asks nothing until then
+    (move || if confirmed.get() {
+        power_card_body()
+    } else {
+        view! {
+            <section class="card widget w-6">
+                <WidgetHead icon=icons::LIFE_BUOY title="qnap.power" />
+                <p class="muted small">{tr("qnap.need_confirm")}</p>
+            </section>
+        }
+        .into_any()
+    })
+    .into_any()
+}
+
+fn power_card_body() -> AnyView {
     let current = Remote::<PowerRecoveryState>::new(POWER_URL);
     let choice = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
-    let confirmed = Memo::new(move |_| st.data.with(|s| s.as_ref().is_some_and(|s| s.mapping_confirmed)));
+    let eup = Memo::new(move |_| current.data.with(|d| d.as_ref().is_some_and(|s| s.eup)));
+    let gpio_active = Memo::new(move |_| current.data.with(|d| d.as_ref().is_none_or(|s| s.gpio_active)));
+    let activate = move |_| {
+        spawn_local(async move {
+            match api::post::<(), PowerRecoveryState>("/api/v1/modules/qnap/activate-gpio", None::<&()>).await {
+                Ok(_) => current.reload(),
+                Err(e) => toast(Tone::Err, e.text()),
+            }
+        });
+    };
     Effect::new(move || {
         if let Some(m) = current.data.with(|d| d.as_ref().and_then(|s| s.mode))
             && choice.with_untracked(String::is_empty)
@@ -333,9 +359,13 @@ fn power_card(st: Remote<QnapStatus>) -> AnyView {
                 })}
                 {select_field("qnap.pr_choice", None, POWER_MODES, Signal::derive(move || choice.get()), set_choice)}
                 <p class="muted small">{tr("qnap.pr_help")}</p>
-                {move || (!confirmed.get()).then(|| view! { <p class="muted small">{tr("qnap.need_confirm")}</p> })}
+                {move || eup.get().then(|| view! { <p class="muted small">{tr("qnap.pr_eup")}</p> })}
+                {move || (!gpio_active.get()).then(|| view! {
+                    <p class="muted small">{tr("qnap.gpio_inactive")}</p>
+                    <div class="row"><button type="button" class="btn ghost" on:click=activate>{tr("qnap.gpio_activate")}</button></div>
+                })}
                 <div class="row">
-                    <button type="button" class="btn primary" disabled=move || busy.get() || !confirmed.get() || same.get() on:click=apply>
+                    <button type="button" class="btn primary" disabled=move || busy.get() || eup.get() || same.get() on:click=apply>
                         {crate::form::spinner(busy)}{tr("qnap.pr_apply")}
                     </button>
                 </div>

@@ -42,6 +42,7 @@ const DEMO_DISK_PERIOD: Duration = Duration::from_secs(60);
 pub trait Runner: Send + Sync {
     fn read(&self) -> Result<PowerRecoveryState, String>;
     fn set(&self, mode: PowerRecovery) -> Result<PowerRecoveryState, String>;
+    fn activate_gpio(&self) -> Result<PowerRecoveryState, String>;
 }
 
 /// The worker outside rynasd's sandbox, with the polling stopped while it runs.
@@ -50,7 +51,7 @@ struct RealRunner(Cell);
 impl RealRunner {
     fn worker(&self, word: &str) -> Result<PowerRecoveryState, String> {
         let ctl = self.0.ctl.get().ok_or("not confirmed")?;
-        let out = ctl.exclusive(|| {
+        let out = ctl.pause_for_worker(|| {
             rynas_tasks::Outside::new("rynas-qnap-sio", "rynas: QNAP Super I/O", Duration::from_secs(20))
                 .cmd([RYNASCTL, "qnap", "power-recovery", word])
                 .run_blocking()
@@ -72,20 +73,30 @@ impl Runner for RealRunner {
             PowerRecovery::PowerOff => "power_off",
         })
     }
+
+    fn activate_gpio(&self) -> Result<PowerRecoveryState, String> {
+        self.worker("activate-gpio")
+    }
 }
 
-/// `rynasd --dry-system`: a register in memory.
+/// `rynasd --dry-system`: registers in memory.
 #[derive(Default)]
-struct DemoRunner(Mutex<Option<PowerRecovery>>);
+struct DemoRunner(Mutex<(Option<PowerRecovery>, bool)>);
 
 impl Runner for DemoRunner {
     fn read(&self) -> Result<PowerRecoveryState, String> {
-        let mode = self.0.lock().unwrap().unwrap_or(PowerRecovery::LastState);
-        Ok(PowerRecoveryState { mode: Some(mode), sio_bits: 0, cmos: 0x21 })
+        let g = self.0.lock().unwrap();
+        let mode = g.0.unwrap_or(PowerRecovery::LastState);
+        Ok(PowerRecoveryState { mode: Some(mode), sio_bits: 0, cmos: 0x21, eup: false, gpio_active: g.1 })
     }
 
     fn set(&self, mode: PowerRecovery) -> Result<PowerRecoveryState, String> {
-        *self.0.lock().unwrap() = Some(mode);
+        self.0.lock().unwrap().0 = Some(mode);
+        self.read()
+    }
+
+    fn activate_gpio(&self) -> Result<PowerRecoveryState, String> {
+        self.0.lock().unwrap().1 = true;
         self.read()
     }
 }
@@ -181,6 +192,11 @@ impl QnapModule {
     }
 
     fn bring_up(&self, state_dir: PathBuf) {
+        // first of all: a previous rynasd may have died in the middle of a tone, and the wait
+        // below can be long (nothing happens unless a PC speaker device exists)
+        if !self.dry {
+            PcSpeaker::new(&self.hw_root).stop();
+        }
         if !self.dry && !self.wait_for_signature() {
             tracing::info!("qnap: the full signature of {} does not match: the module stays out", self.model.display);
             remove_modules_load(&self.root);
@@ -224,7 +240,16 @@ impl QnapModule {
         }
         let speaker: Arc<dyn Speaker> =
             if self.dry { Arc::new(SilentSpeaker) } else { Arc::new(PcSpeaker::new(&self.hw_root)) };
-        let ctl = Arc::new(Controller::new(confirmed, gpio, speaker, Box::new(self.notifier_fn()), Some(state_dir)));
+        let lock = (!self.dry).then(|| PathBuf::from(crate::superio::POLL_LOCK));
+        let ctl = Arc::new(Controller::new(
+            confirmed,
+            &self.hw_root,
+            gpio,
+            speaker,
+            Box::new(self.notifier_fn()),
+            Some(state_dir),
+            lock,
+        ));
         ctl.apply(self.shared.latest.lock().unwrap().clone());
         let _ = self.shared.ctl.set(ctl.clone());
         if self.dry {
@@ -388,6 +413,10 @@ mod tests {
             Ok(PowerRecoveryState::default())
         }
         fn set(&self, _mode: PowerRecovery) -> Result<PowerRecoveryState, String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(PowerRecoveryState::default())
+        }
+        fn activate_gpio(&self) -> Result<PowerRecoveryState, String> {
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(PowerRecoveryState::default())
         }

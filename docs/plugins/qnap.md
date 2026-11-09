@@ -27,7 +27,7 @@ system vendor/product `To be filled by O.E.M.`, board `AMI Corporation` / `Aptio
 common on Bay Trail boards. Identification has three layers, each of which must hold:
 
 1. **The signature** (`model::identify`): DMI strings, CPU model, **exactly** the model's PCI device
-   set with subsystem ids (one more or one less device is another machine), as many ATA ports on
+   set (one more or one less device is another machine), as many ATA ports on
    the AHCI controller as the model has bays, and the NICs' vendor prefix (`00:08:9b`). Firmware
    strings and CPU alone are only "plausible": the module waits up to 2 minutes for the rest (NICs
    may appear late) and otherwise stays out. A machine that does not even look plausible has the
@@ -37,10 +37,13 @@ common on Bay Trail boards. Identification has three layers, each of which must 
    banks must have the layout of that chip (6, 8, 8, 8, 8, 5, 8, 8 lines). An unreadable chip list
    confirms nothing. The `Confirmed` value of that check is what the controller and the Super I/O
    worker are built from: there is no other way to reach a GPIO write or a port.
-3. **The user** (while `verified` is false): LED writes and the power-recovery write stay off until
-   someone who has run the first-boot procedure types the model name in Hardware › Front panel
-   (`POST confirm-mapping`, kept in the state directory, can be withdrawn). The LED switch alone
-   does not do it.
+3. **The user** (while `verified` is false): LED writes and every Super I/O port access stay off
+   until someone who has run the first-boot procedure types the model name in Hardware › Front
+   panel (`POST confirm-mapping`). The confirmation is kept in the state directory bound to this
+   machine's MAC addresses, so it does not follow the disks to another machine, and it can be
+   withdrawn. The LED switch alone does not do it. The worker checks the confirmation itself, so
+   `rynasctl qnap power-recovery` is refused without it. `rynasctl qnap led-test` is not: it is the
+   test the confirmation is the outcome of, and it only uses the kernel's GPIO driver.
 
 **What this can and cannot exclude.** A 4-bay sibling (TS-451, TS-453) fails on ATA ports and PCI
 devices. A sibling with another device set fails on PCI. A fan turning fails the fanless check. It
@@ -102,6 +105,27 @@ reader takes the chip's value and falls back on CMOS only for `01`. Whether "pow
 this model in QTS depends on `bIsStorageV2 && smbSupport.powerSchedule`, which could not be read
 without running the CGI.
 
+QTS disables these choices while EuP is on, so rynas reads EuP the vendor's way (`0xE0` bit 7 when
+the CMOS byte is initialized, otherwise `0xE1` bits 3:2) and refuses the write then. The worker reads
+the logical device back before and after every write, compares the whole register afterwards, and
+restores the register if the CMOS copy cannot be written.
+
+**Serialization.** The chip's configuration mode is one state, and `request_muxed_region`, the
+kernel's lock for it, cannot be taken from user space. rynasd holds `/run/rynas/qnap-superio.lock`
+while it polls and releases it only with its own GPIO access stopped, for the worker's whole run;
+the worker needs that lock, so a direct `rynasctl qnap power-recovery` is refused while rynasd is
+running. Unbinding `gpio-f7188x` around the access was considered and rejected: it would drop the
+held line requests for no gain, since rynasd is the only regular user. What remains: `f71882fg`
+enters only at its init, `fintek-cir` at probe, suspend and when its device is opened, and an
+administrator's `gpioinfo` or `gpioget` can do so at any moment. Such an access in the few port
+operations between the last logical-device check and the write cannot be excluded; the checks turn
+every wider overlap into an error.
+
+**GPIO logical device.** The vendor's HAL writes LDN 6 register `0x30` = 1 before using these lines
+and `gpio-f7188x` does not, so writes may succeed with no visible effect. The Front panel shows the
+activation state (after confirmation) and offers the vendor's activation through the same worker.
+"Commanded" in the interface means rynas wrote the line, not that an LED changed.
+
 ## Support matrix
 
 "Implemented" means the code exists and passes its tests against fake hardware. Nothing below has
@@ -144,14 +168,12 @@ file is removed when the machine does not match, so that disks moved elsewhere s
 `pcspkr` keeps a tone until told otherwise: rynas silences it at start and at shutdown, but a
 SIGKILL or a crash in the middle of a beep leaves the tone on until rynasd next starts.
 
-Super I/O accesses from the worker run with rynasd's GPIO polling stopped, since the chip's
-configuration mode is a single shared state. Nothing else in rynas uses those ports while it runs;
-an admin running `gpioget` at that moment could interleave.
+Super I/O accesses from the worker run with rynasd's GPIO polling stopped; see "Serialization".
 
 Debian 13 kernel config, read from the package `linux-config-6.12` (6.12.107-1, amd64,
 `config.amd64_none_amd64`): `CONFIG_GPIO_F7188X=m`, `CONFIG_SENSORS_F71882FG=m`,
 `CONFIG_INPUT_PCSPKR=m`, `CONFIG_PCSPKR_PLATFORM=y`, `CONFIG_GPIO_CDEV=y`, `CONFIG_ITCO_WDT=m`,
-`CONFIG_IR_FINTEK=m`. If `pcspkr` is blacklisted on an installation, systemd-modules-load skips it;
+`CONFIG_IR_FINTEK=m`, `CONFIG_RTC_DRV_CMOS=y`, `CONFIG_RTC_NVMEM=y`, `CONFIG_NVMEM_SYSFS=y`. If `pcspkr` is blacklisted on an installation, systemd-modules-load skips it;
 the interface then reports that no speaker was found.
 
 ## Install notes
@@ -223,29 +245,33 @@ line as is, like rynasd does.
    the result.
 
 5. **Buzzer**: `grep -H . /sys/class/input/*/device/name` must list `PC Speaker`. It is tested from
-   the interface in step 8.
+   the interface in step 9.
 
 6. **Bays**: with a disk in bay 1 only, `cat /sys/class/ata_port/ata*/port_no` and
    `readlink -f /sys/block/sd?/device` must show that disk on the port the table gives for bay 1.
 
-7. **Power recovery, reading only**: the current value before anything changes.
+7. **Confirm** (`systemctl start rynasd rynas-web`): type the model name in Hardware › Front panel.
+   No port of the Super I/O is touched before this step.
 
-       /usr/libexec/rynas/rynasctl qnap power-recovery read
-       # {"mode":"last_state","sio_bits":0,"cmos":33}: compare with the BIOS setup
+8. **Read the Super I/O, change nothing.** The card "After a power outage" reads it when it
+   opens: the current setting, EuP, and whether the GPIO device is activated. Compare with the
+   BIOS setup. With rynasd stopped the same reading is
+   `/usr/libexec/rynas/rynasctl qnap power-recovery read`
+   (`{"mode":"last_state","sio_bits":0,"cmos":33,"eup":false,"gpio_active":true}`). Note the
+   values. If `mode` is null or contradicts the BIOS setup, do not write it. If the LEDs did not
+   react in step 4 and `gpio_active` is false, press "Activate the GPIO device" and repeat step 4
+   with rynasd stopped; otherwise leave it alone.
 
-   Note the value. If `mode` is null, or it contradicts the BIOS setup, do not write it.
-
-8. **In the interface** (`systemctl start rynasd rynas-web`): type the model name in
-   Hardware › Front panel, turn on "Let rynas drive the LEDs", then: try each brightness level and
-   note which is brightest (it should be 100 %), press "Test beep", and only then change the
-   setting "After a power outage". Read it again with step 7 and in the BIOS setup, then test by
-   cutting mains power.
+9. **Then the writes, one at a time**: turn on "Let rynas drive the LEDs", try each brightness
+   level and note which is brightest (it should be 100 %), press "Test beep", and only then change
+   the setting "After a power outage". Read it again as in step 8 and in the BIOS setup, then test
+   by cutting mains power.
 
 When everything matches, set `verified: true` for the model in `model::MODELS`.
 
 ## Adding a model
 
 Add an entry to `model::MODELS` with values read from the machine: its DMI strings, CPU, the
-complete PCI device set with subsystem ids, NIC prefix, the chip's hwmon name and GPIO bank layout, the lines from the vendor's
+complete PCI device set, NIC prefix, the chip's hwmon name and GPIO bank layout, the lines from the vendor's
 `model.conf`, the bays from its `[System Disk N]` sections. Add the model's register checks to the
 unit test. Leave `verified: false` until the first-boot procedure has been run on that model.

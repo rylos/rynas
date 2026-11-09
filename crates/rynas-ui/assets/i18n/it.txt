@@ -4503,6 +4503,9 @@ qnap.pr_unknown	L'hardware contiene un valore senza significato noto
 qnap.pr_help	Letto dall'hardware all'apertura di questa pagina; scritto solo quando premi il pulsante.
 qnap.pr_apply	Scrivi sull'hardware
 qnap.pr_done	Scritto e riletto
+qnap.pr_eup	L'EuP è attivo nel BIOS: questa impostazione non può avere effetto finché non viene disattivato.
+qnap.gpio_inactive	Il dispositivo GPIO del chip non è attivato, quindi i comandi ai LED potrebbero non avere effetto visibile.
+qnap.gpio_activate	Attiva il dispositivo GPIO
 qnap.bay_failed	Disco guasto
 qnap.bay_warning	Avviso disco
 qnap.bay_ok	Nessun guasto segnalato
@@ -4525,9 +4528,9 @@ qnap.shown_none	Non comandato da rynas
 qnap.bays	Baie
 qnap.bay_n	Baia {n}
 qnap.bay_empty	Vuota
-qnap.bay_on	LED di errore acceso: disco guasto
-qnap.bay_blink	LED di errore lampeggiante: avviso disco
-qnap.bay_off	LED di errore spento
+qnap.bay_on	Disco guasto (LED di errore comandato acceso)
+qnap.bay_blink	Avviso disco (LED di errore comandato a lampeggiare)
+qnap.bay_off	Nessun guasto segnalato (LED di errore comandato spento)
 qnap.buttons	Pulsanti
 qnap.usb_copy	Pulsante copia USB
 qnap.btn_log	Elencalo soltanto qui sotto

@@ -8,13 +8,23 @@
 //!   it back changing bits 2:1 only (mask 0xF9), leave with 0xAA;
 //! - keep the BIOS's copy in CMOS byte 0x61: bits 7:6 only, encoded by whether the byte's low
 //!   five bits equal 1. Written through the kernel's `cmos_nvram`, which takes the RTC lock.
+//! - activation of the GPIO logical device (`sub_95A80`: LDN 6, register 0x30 = 1), which
+//!   `gpio-f7188x` does not do, only on an explicit request.
 //!
-//! Added for safety, reads only: the chip's device and manufacturer ids are checked after
-//! entering; both registers are read back. The vendor's modes: 0 last state (bits 00), 2 on
-//! (10), 3 off (11).
+//! Added for safety, reads only: the chip's ids after entering; the selected logical device
+//! before and after every write; the whole register read back.
 //!
-//! **Order is the guard**: identification and the driver's chip check come first, and the
-//! functions opening the ports and the CMOS are only called with their proof.
+//! **Order is the guard**: identification, the driver's chip check and the user's typed
+//! confirmation come first; the functions opening the ports and the CMOS are only called with
+//! that proof. Port access is refused while rynasd polls the GPIO banks ([`POLL_LOCK`]).
+//!
+//! The race that cannot be removed: the configuration mode is one state of the chip and the
+//! kernel's `request_muxed_region` cannot be taken from user space. `gpio-f7188x` only enters it
+//! when a line is used, and rynasd's are stopped for the worker's whole run; `f71882fg` only at
+//! its init; `fintek-cir` at probe, suspend and when its device is opened. A `gpioinfo` or
+//! `gpioget` by an administrator in the same milliseconds can still interleave. The checks make
+//! that fail with an error rather than a silent wrong write, within the few port accesses
+//! between the last check and the write.
 
 use std::os::unix::fs::FileExt;
 use std::path::Path;
@@ -29,8 +39,15 @@ const EXIT: u8 = 0xAA;
 const REG_LDN: u8 = 0x07;
 const REG_DEVID: u8 = 0x20;
 const REG_MANID: u8 = 0x23;
+const REG_ACTIVATE: u8 = 0x30;
+/// EuP registers of logical device 0x0A (`sio_sys_get_eup_state`): read only here.
+const REG_EUP_INIT: u8 = 0xE0;
+const REG_EUP: u8 = 0xE1;
 /// `cmos_nvram` starts at CMOS byte 14 (`NVRAM_OFFSET` in `rtc-cmos.c`).
 const NVMEM_START: u8 = 14;
+/// Held by rynasd while it polls: a worker may run only when it is free.
+pub const POLL_LOCK: &str = "/run/rynas/qnap-superio.lock";
+const STATE_DIR: &str = "/var/lib/rynas";
 
 pub trait Ports {
     fn outb(&mut self, port: u16, value: u8);
@@ -46,6 +63,7 @@ pub trait Cmos {
 pub enum Request {
     Read,
     Set(PowerRecovery),
+    ActivateGpio,
 }
 
 fn bits_of(m: PowerRecovery) -> u8 {
@@ -103,12 +121,30 @@ fn reg_read(io: &mut dyn Ports, map: &PowerRecoveryMap, reg: u8) -> u8 {
     io.inb(map.sio_port + 1)
 }
 
-/// `f` inside the chip's configuration mode with the logical device selected; refused when
-/// the chip does not answer with the model's ids. Always leaves configuration mode.
+/// The selected logical device is still `ldn`: someone else may have changed it.
+fn ensure_ldn(io: &mut dyn Ports, map: &PowerRecoveryMap, ldn: u8) -> Result<(), String> {
+    let now = reg_read(io, map, REG_LDN);
+    if now != ldn {
+        return Err(format!("the selected logical device became {now:#x}: nothing more is written"));
+    }
+    Ok(())
+}
+
+/// Writes one register of `ldn`, the logical device checked right before and right after.
+fn write_reg(io: &mut dyn Ports, map: &PowerRecoveryMap, ldn: u8, reg: u8, value: u8) -> Result<(), String> {
+    ensure_ldn(io, map, ldn)?;
+    io.outb(map.sio_port, reg);
+    io.outb(map.sio_port + 1, value);
+    ensure_ldn(io, map, ldn)
+}
+
+/// `f` inside the chip's configuration mode with `ldn` selected; refused when the chip does
+/// not answer with the model's ids. Always leaves configuration mode.
 fn in_chip<T>(
     io: &mut dyn Ports,
     map: &PowerRecoveryMap,
-    f: impl FnOnce(&mut dyn Ports) -> T,
+    ldn: u8,
+    f: impl FnOnce(&mut dyn Ports) -> Result<T, String>,
 ) -> Result<T, String> {
     io.outb(map.sio_port, ENTER);
     io.outb(map.sio_port, ENTER);
@@ -121,25 +157,102 @@ fn in_chip<T>(
         return Err(format!("the Super I/O answers {:04x}:{:04x}: not touched", ids.0, ids.1));
     }
     io.outb(map.sio_port, REG_LDN);
-    io.outb(map.sio_port + 1, map.ldn);
+    io.outb(map.sio_port + 1, ldn);
     let r = f(io);
     io.outb(map.sio_port, EXIT);
-    Ok(r)
+    r
+}
+
+/// The vendor's EuP reader: register 0xE0 bit 7 when the BIOS initialized the CMOS byte,
+/// otherwise register 0xE1 bits 3:2 both set.
+fn eup_on(init: u8, eup: u8, cmos: u8) -> bool {
+    if cmos_initialized(cmos) { init & 0x80 != 0 } else { eup & 0x0C == 0x0C }
 }
 
 fn read_state(io: &mut dyn Ports, cmos: &mut dyn Cmos, map: &PowerRecoveryMap) -> Result<PowerRecoveryState, String> {
-    let reg = in_chip(io, map, |io| reg_read(io, map, map.reg))?;
+    let (reg, init, eup) = in_chip(io, map, map.ldn, |io| {
+        Ok((reg_read(io, map, map.reg), reg_read(io, map, REG_EUP_INIT), reg_read(io, map, REG_EUP)))
+    })?;
+    let activate = in_chip(io, map, map.gpio_ldn, |io| Ok(reg_read(io, map, REG_ACTIVATE)))?;
     let byte = cmos.read(map.cmos_offset)?;
     let sio_bits = (reg & 0x06) >> 1;
     // the vendor's reader: the chip decides, the CMOS copy only for a value without a meaning
     let mode = mode_of_bits(sio_bits).or_else(|| mode_of_cmos(byte));
-    Ok(PowerRecoveryState { mode, sio_bits, cmos: byte })
+    Ok(PowerRecoveryState {
+        mode,
+        sio_bits,
+        cmos: byte,
+        eup: eup_on(init, eup, byte),
+        gpio_active: activate & 1 != 0,
+    })
 }
 
-/// Reads or changes the setting. Identification and the driver's confirmation come first;
-/// `open_ports` and `open_cmos` run only after them.
+/// Changes bits 2:1 and returns the register's previous and new value.
+fn write_mode(io: &mut dyn Ports, map: &PowerRecoveryMap, bits: u8) -> Result<(u8, u8), String> {
+    in_chip(io, map, map.ldn, |io| {
+        ensure_ldn(io, map, map.ldn)?;
+        let current = reg_read(io, map, map.reg);
+        let expected = (current & 0xF9) | (bits << 1);
+        write_reg(io, map, map.ldn, map.reg, expected)?;
+        Ok((current, expected))
+    })
+}
+
+/// Puts the whole register back after a failure further on.
+fn restore_reg(io: &mut dyn Ports, map: &PowerRecoveryMap, value: u8) -> Result<(), String> {
+    in_chip(io, map, map.ldn, |io| write_reg(io, map, map.ldn, map.reg, value))
+}
+
+fn set_mode(
+    io: &mut dyn Ports,
+    cmos: &mut dyn Cmos,
+    map: &PowerRecoveryMap,
+    byte: u8,
+    mode: PowerRecovery,
+) -> Result<PowerRecoveryState, String> {
+    let before = read_state(io, cmos, map)?;
+    if before.eup {
+        return Err("EuP is on: the power recovery setting has no effect until it is off".into());
+    }
+    let (previous, expected) = write_mode(io, map, bits_of(mode))?;
+    let now = in_chip(io, map, map.ldn, |io| Ok(reg_read(io, map, map.reg)))?;
+    if now != expected {
+        let undo = restore_reg(io, map, previous).map_or_else(|e| format!(", not restored: {e}"), |_| ", restored".into());
+        return Err(format!("register {:#x} reads {now:#04x}, expected {expected:#04x}{undo}", map.reg));
+    }
+    let new = cmos_with(byte, mode);
+    let written = cmos.write(map.cmos_offset, new).and_then(|_| cmos.read(map.cmos_offset)).and_then(|back| {
+        if back == new { Ok(()) } else { Err(format!("reads {back:#04x}, expected {new:#04x}")) }
+    });
+    if let Err(e) = written {
+        let undo = restore_reg(io, map, previous).map_or_else(|e| format!("; chip not restored: {e}"), |_| "; chip restored".into());
+        let _ = cmos.write(map.cmos_offset, byte);
+        return Err(format!("CMOS byte {:#x}: {e}{undo}", map.cmos_offset));
+    }
+    read_state(io, cmos, map)
+}
+
+/// The vendor's activation of the GPIO logical device; no write when it is already active.
+fn activate_gpio(io: &mut dyn Ports, cmos: &mut dyn Cmos, map: &PowerRecoveryMap) -> Result<PowerRecoveryState, String> {
+    in_chip(io, map, map.gpio_ldn, |io| {
+        ensure_ldn(io, map, map.gpio_ldn)?;
+        if reg_read(io, map, REG_ACTIVATE) & 1 == 0 {
+            write_reg(io, map, map.gpio_ldn, REG_ACTIVATE, 1)?;
+        }
+        Ok(())
+    })?;
+    let state = read_state(io, cmos, map)?;
+    if !state.gpio_active {
+        return Err("the GPIO logical device did not activate".into());
+    }
+    Ok(state)
+}
+
+/// Reads or changes the setting. Identification, the driver's confirmation and the user's
+/// typed confirmation come first; `open_ports` and `open_cmos` run only after them.
 pub fn power_recovery(
     root: &Path,
+    state_dir: &Path,
     gpio: &mut dyn Gpio,
     request: Request,
     open_ports: impl FnOnce(&Confirmed) -> Result<Box<dyn Ports>, String>,
@@ -148,31 +261,38 @@ pub fn power_recovery(
     let m = model::identify(root).ok_or("this machine is not an identified model")?;
     let proof = control::confirm(root, m, gpio).map_err(|e| format!("chip not confirmed: {e:?}"))?;
     let map = m.power_recovery.ok_or("this model has no power recovery setting")?;
+    if !control::mapping_confirmed_on(root, state_dir, m) {
+        return Err("the model is not confirmed on this machine (Hardware > Front panel)".into());
+    }
     // the CMOS first: without it the setting would be half written
     let mut cmos = open_cmos(&proof)?;
     let byte = cmos.read(map.cmos_offset)?;
     let mut ports = open_ports(&proof)?;
     let io = ports.as_mut();
-    let Request::Set(mode) = request else {
-        return read_state(io, cmos.as_mut(), &map);
-    };
-    let bits = bits_of(mode);
-    in_chip(io, &map, |io| {
-        let current = reg_read(io, &map, map.reg);
-        io.outb(map.sio_port, map.reg);
-        io.outb(map.sio_port + 1, (current & 0xF9) | (bits << 1));
-    })?;
-    let state = in_chip(io, &map, |io| reg_read(io, &map, map.reg))?;
-    if (state & 0x06) >> 1 != bits {
-        return Err(format!("register {:#x} reads {state:#04x} after the write", map.reg));
+    match request {
+        Request::Read => read_state(io, cmos.as_mut(), &map),
+        Request::Set(mode) => set_mode(io, cmos.as_mut(), &map, byte, mode),
+        Request::ActivateGpio => activate_gpio(io, cmos.as_mut(), &map),
     }
-    let new = cmos_with(byte, mode);
-    cmos.write(map.cmos_offset, new)?;
-    let back = cmos.read(map.cmos_offset)?;
-    if back != new {
-        return Err(format!("CMOS byte {:#x} reads {back:#04x} after writing {new:#04x}", map.cmos_offset));
+}
+
+/// Refuses a worker while rynasd is polling (it holds this lock except while it runs one).
+fn take_poll_lock(path: &Path) -> Result<std::fs::File, String> {
+    use std::os::fd::AsRawFd;
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
     }
-    read_state(io, cmos.as_mut(), &map)
+    let f = std::fs::File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    // SAFETY: flock on a descriptor this function owns
+    if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err("rynasd is polling this chip: use Hardware > Front panel".into());
+    }
+    Ok(f)
 }
 
 /// The I/O ports of the Super I/O. Needs a proof to exist.
@@ -276,6 +396,7 @@ fn parse_request(word: &str) -> Option<Request> {
         "last_state" => Some(Request::Set(PowerRecovery::LastState)),
         "power_on" => Some(Request::Set(PowerRecovery::PowerOn)),
         "power_off" => Some(Request::Set(PowerRecovery::PowerOff)),
+        "activate-gpio" => Some(Request::ActivateGpio),
         _ => None,
     }
 }
@@ -292,7 +413,9 @@ fn line_named(m: &model::Model, name: &str) -> Option<Line> {
 }
 
 /// `rynasctl qnap led-test`: lights one LED through the same as-is request rynasd uses (no
-/// direction or drive-mode change), then puts back the level it found.
+/// direction or drive-mode change), then puts back the level it found. It needs no typed
+/// confirmation: this is the test that confirmation is the outcome of. It uses the kernel's
+/// GPIO driver, not the ports, so the driver's own locking applies.
 fn led_test(root: &Path, gpio: &mut dyn Gpio, name: &str, seconds: u64) -> Result<String, String> {
     let m = model::identify(root).ok_or("this machine is not an identified model")?;
     control::confirm(root, m, gpio).map_err(|e| format!("chip not confirmed: {e:?}"))?;
@@ -309,13 +432,16 @@ fn led_test(root: &Path, gpio: &mut dyn Gpio, name: &str, seconds: u64) -> Resul
 }
 
 fn run_worker(args: &[String]) -> Result<String, String> {
-    const USAGE: &str = "usage: rynasctl qnap power-recovery read|last_state|power_on|power_off\n       rynasctl qnap led-test <led> <seconds>";
+    const USAGE: &str = "usage: rynasctl qnap power-recovery read|last_state|power_on|power_off|activate-gpio\n       rynasctl qnap led-test <led> <seconds>";
     let root = Path::new("/");
     match args {
         [cmd, word] if cmd == "power-recovery" => {
             let request = parse_request(word).ok_or(USAGE)?;
+            // held to the end of this process: rynasd is either stopped or paused for it
+            let _lock = take_poll_lock(Path::new(POLL_LOCK))?;
             let state = power_recovery(
                 root,
+                Path::new(STATE_DIR),
                 &mut CdevGpio::default(),
                 request,
                 |proof| {
@@ -354,6 +480,7 @@ mod tests {
     use crate::control::tests::fake_gpio;
     use crate::model::testing::fake_hs251;
     use std::cell::RefCell;
+    use std::collections::HashMap;
     use std::rc::Rc;
 
     #[derive(Default)]
@@ -361,9 +488,13 @@ mod tests {
         index: u8,
         entered: u8,
         ldn: u8,
-        f4: u8,
+        regs: HashMap<(u8, u8), u8>,
         ids: [u8; 4],
         log: Vec<(u16, u8)>,
+        /// After this register is read, another party selects LDN 6.
+        steal_after_read: Option<u8>,
+        /// Writes to this register do not stick.
+        stuck: Option<u8>,
     }
 
     /// The chip's configuration registers, with every port write logged.
@@ -382,26 +513,29 @@ mod tests {
                 return;
             }
             assert_eq!(c.entered, 2, "a register written outside configuration mode");
-            match c.index {
-                0x07 => c.ldn = v,
-                0xF4 => {
-                    assert_eq!(c.ldn, 0x0A);
-                    c.f4 = v
-                }
-                r => panic!("unexpected write to register {r:#x}"),
+            if c.index == 0x07 {
+                c.ldn = v;
+            } else if c.stuck != Some(c.index) {
+                let k = (c.ldn, c.index);
+                c.regs.insert(k, v);
             }
         }
 
         fn inb(&mut self, _port: u16) -> u8 {
-            let c = self.0.borrow();
-            match c.index {
+            let mut c = self.0.borrow_mut();
+            let index = c.index;
+            let v = match index {
+                0x07 => c.ldn,
                 0x20 => c.ids[0],
                 0x21 => c.ids[1],
                 0x23 => c.ids[2],
                 0x24 => c.ids[3],
-                0xF4 => c.f4,
-                r => panic!("unexpected read of register {r:#x}"),
+                _ => c.regs.get(&(c.ldn, index)).copied().unwrap_or(0),
+            };
+            if c.steal_after_read == Some(index) {
+                c.ldn = 6;
             }
+            v
         }
     }
 
@@ -409,6 +543,7 @@ mod tests {
     struct FakeCmosInner {
         byte: u8,
         writes: Vec<u8>,
+        fail_first_write: bool,
     }
 
     struct FakeCmos(Rc<RefCell<FakeCmosInner>>);
@@ -421,6 +556,9 @@ mod tests {
 
         fn write(&mut self, _offset: u8, v: u8) -> Result<(), String> {
             let mut c = self.0.borrow_mut();
+            if std::mem::take(&mut c.fail_first_write) {
+                return Err("nvmem".into());
+            }
             c.byte = v;
             c.writes.push(v);
             Ok(())
@@ -428,21 +566,31 @@ mod tests {
     }
 
     fn chip(f4: u8) -> Rc<RefCell<Chip>> {
-        Rc::new(RefCell::new(Chip { f4, ids: [0x10, 0x07, 0x19, 0x34], ..Chip::default() }))
+        let mut regs = HashMap::new();
+        regs.insert((0x0A, 0xF4), f4);
+        Rc::new(RefCell::new(Chip { regs, ids: [0x10, 0x07, 0x19, 0x34], ..Chip::default() }))
     }
 
     fn cmos(byte: u8) -> Rc<RefCell<FakeCmosInner>> {
-        Rc::new(RefCell::new(FakeCmosInner { byte, writes: Vec::new() }))
+        Rc::new(RefCell::new(FakeCmosInner { byte, ..FakeCmosInner::default() }))
     }
 
-    fn hs251() -> tempfile::TempDir {
+    fn f4(c: &Rc<RefCell<Chip>>) -> u8 {
+        c.borrow().regs[&(0x0A, 0xF4)]
+    }
+
+    /// The fake machine, and a state directory holding the user's confirmation.
+    fn hs251() -> (tempfile::TempDir, tempfile::TempDir) {
         let d = tempfile::tempdir().unwrap();
         fake_hs251(d.path(), Some("f71869a"));
-        d
+        let st = tempfile::tempdir().unwrap();
+        control::write_confirmation(d.path(), st.path(), &model::MODELS[0]).unwrap();
+        (d, st)
     }
 
     fn run(
         root: &Path,
+        state: &Path,
         request: Request,
         c: &Rc<RefCell<Chip>>,
         m: &Rc<RefCell<FakeCmosInner>>,
@@ -450,6 +598,7 @@ mod tests {
         let (cc, mm) = (c.clone(), m.clone());
         power_recovery(
             root,
+            state,
             &mut fake_gpio(),
             request,
             move |_| Ok(Box::new(FakePorts(cc)) as Box<dyn Ports>),
@@ -459,22 +608,25 @@ mod tests {
 
     #[test]
     fn the_vendor_sequence_and_only_bits_2_1_change() {
-        let d = hs251();
+        let (d, st) = hs251();
         let (c, m) = (chip(0xFF), cmos(0x3F));
-        let s = run(d.path(), Request::Set(PowerRecovery::LastState), &c, &m).unwrap();
-        assert_eq!(c.borrow().f4, 0xF9, "other bits kept");
+        let s = run(d.path(), st.path(), Request::Set(PowerRecovery::LastState), &c, &m).unwrap();
+        assert_eq!(f4(&c), 0xF9, "other bits kept");
         assert_eq!(s.mode, Some(PowerRecovery::LastState));
-        let log = &c.borrow().log;
-        assert_eq!(&log[..2], &[(0x2E, 0x87), (0x2E, 0x87)]);
-        assert_eq!(*log.last().unwrap(), (0x2E, 0xAA));
-        assert!(log.windows(2).any(|w| w == [(0x2E, 0x07), (0x2F, 0x0A)]), "logical device 0x0A");
-        assert_eq!(c.borrow().entered, 0, "left configuration mode");
+        {
+            let chip = c.borrow();
+            let log = &chip.log;
+            assert_eq!(&log[..2], &[(0x2E, 0x87), (0x2E, 0x87)]);
+            assert_eq!(*log.last().unwrap(), (0x2E, 0xAA));
+            assert!(log.windows(2).any(|w| w == [(0x2E, 0x07), (0x2F, 0x0A)]), "logical device 0x0A");
+            assert_eq!(chip.entered, 0, "left configuration mode");
+        }
         let (c, m) = (chip(0x00), cmos(0x3F));
-        let s = run(d.path(), Request::Set(PowerRecovery::PowerOn), &c, &m).unwrap();
-        assert_eq!((c.borrow().f4, s.mode), (0x04, Some(PowerRecovery::PowerOn)));
+        let s = run(d.path(), st.path(), Request::Set(PowerRecovery::PowerOn), &c, &m).unwrap();
+        assert_eq!((f4(&c), s.mode), (0x04, Some(PowerRecovery::PowerOn)));
         let (c, m) = (chip(0x00), cmos(0x3F));
-        run(d.path(), Request::Set(PowerRecovery::PowerOff), &c, &m).unwrap();
-        assert_eq!(c.borrow().f4, 0x06);
+        run(d.path(), st.path(), Request::Set(PowerRecovery::PowerOff), &c, &m).unwrap();
+        assert_eq!(f4(&c), 0x06);
     }
 
     #[test]
@@ -495,23 +647,56 @@ mod tests {
 
     #[test]
     fn reading_writes_nothing() {
-        let d = hs251();
+        let (d, st) = hs251();
         let (c, m) = (chip(0b100), cmos(0x21));
-        let s = run(d.path(), Request::Read, &c, &m).unwrap();
-        assert_eq!((s.mode, s.sio_bits), (Some(PowerRecovery::PowerOn), 0b10));
-        assert_eq!(c.borrow().f4, 0b100);
+        let s = run(d.path(), st.path(), Request::Read, &c, &m).unwrap();
+        assert_eq!((s.mode, s.sio_bits, s.eup, s.gpio_active), (Some(PowerRecovery::PowerOn), 0b10, false, false));
+        assert_eq!(f4(&c), 0b100);
         assert!(m.borrow().writes.is_empty());
+        assert_eq!(c.borrow().log.iter().filter(|(p, _)| *p == 0x2F).count(), 2, "only the two LDN selections");
         // a value without a meaning in the chip: the BIOS's copy decides, like the vendor's
         let (c, m) = (chip(0b010), cmos(0xE1));
-        assert_eq!(run(d.path(), Request::Read, &c, &m).unwrap().mode, Some(PowerRecovery::PowerOff));
+        assert_eq!(run(d.path(), st.path(), Request::Read, &c, &m).unwrap().mode, Some(PowerRecovery::PowerOff));
+    }
+
+    #[test]
+    fn no_port_without_the_users_confirmation() {
+        let d = tempfile::tempdir().unwrap();
+        fake_hs251(d.path(), Some("f71869a"));
+        let empty_state = tempfile::tempdir().unwrap();
+        let opened = RefCell::new(0);
+        let attempt = |state: &Path| {
+            power_recovery(
+                d.path(),
+                state,
+                &mut fake_gpio(),
+                Request::Read,
+                |_| {
+                    *opened.borrow_mut() += 1;
+                    Err("opened".to_string())
+                },
+                |_| {
+                    *opened.borrow_mut() += 1;
+                    Err("opened".to_string())
+                },
+            )
+        };
+        assert!(attempt(empty_state.path()).unwrap_err().contains("not confirmed"));
+        // confirmed on another machine: its MACs do not match
+        control::write_confirmation(d.path(), empty_state.path(), &model::MODELS[0]).unwrap();
+        std::fs::write(d.path().join("sys/class/net/eth1/address"), "00:08:9b:99:99:99\n").unwrap();
+        assert!(attempt(empty_state.path()).unwrap_err().contains("not confirmed"));
+        assert_eq!(*opened.borrow(), 0);
     }
 
     #[test]
     fn the_ports_are_never_opened_on_other_hardware() {
         let opened = RefCell::new(0);
+        let state = tempfile::tempdir().unwrap();
         let attempt = |root: &Path, gpio: &mut dyn Gpio| {
             power_recovery(
                 root,
+                state.path(),
                 gpio,
                 Request::Set(PowerRecovery::PowerOn),
                 |_| {
@@ -536,7 +721,7 @@ mod tests {
         fake_hs251(none.path(), None);
         assert!(attempt(none.path(), &mut fake_gpio()).is_err());
         // one PCI device more
-        let extra = hs251();
+        let (extra, _st) = hs251();
         std::fs::create_dir_all(extra.path().join("sys/bus/pci/devices/0000:05:00.0")).unwrap();
         assert!(attempt(extra.path(), &mut fake_gpio()).is_err());
         assert_eq!(*opened.borrow(), 0, "not one port, not the CMOS");
@@ -544,23 +729,24 @@ mod tests {
 
     #[test]
     fn another_chip_on_the_port_is_left_alone() {
-        let d = hs251();
+        let (d, st) = hs251();
         let (c, m) = (chip(0x00), cmos(0x21));
         c.borrow_mut().ids = [0x09, 0x09, 0x19, 0x34];
-        let e = run(d.path(), Request::Set(PowerRecovery::PowerOn), &c, &m).unwrap_err();
+        let e = run(d.path(), st.path(), Request::Set(PowerRecovery::PowerOn), &c, &m).unwrap_err();
         assert!(e.contains("not touched"), "{e}");
-        assert_eq!(c.borrow().f4, 0x00);
+        assert_eq!(f4(&c), 0x00);
         assert!(m.borrow().writes.is_empty());
         assert_eq!(*c.borrow().log.last().unwrap(), (0x2E, 0xAA), "still leaves configuration mode");
     }
 
     #[test]
     fn no_cmos_means_nothing_is_written() {
-        let d = hs251();
+        let (d, st) = hs251();
         let c = chip(0x00);
         let cc = c.clone();
         let r = power_recovery(
             d.path(),
+            st.path(),
             &mut fake_gpio(),
             Request::Set(PowerRecovery::PowerOn),
             move |_| Ok(Box::new(FakePorts(cc)) as Box<dyn Ports>),
@@ -571,8 +757,82 @@ mod tests {
     }
 
     #[test]
+    fn a_logical_device_changed_by_someone_else_stops_the_write() {
+        let (d, st) = hs251();
+        let (c, m) = (chip(0x00), cmos(0x21));
+        // the reader of 0xF4 runs in `read_state` too: let that pass, steal during the write
+        let before = run(d.path(), st.path(), Request::Read, &c, &m).unwrap();
+        assert_eq!(before.sio_bits, 0);
+        c.borrow_mut().steal_after_read = Some(0xF4);
+        // the first read of 0xF4 (in the state check) already moves it away
+        let e = run(d.path(), st.path(), Request::Set(PowerRecovery::PowerOn), &c, &m).unwrap_err();
+        assert!(e.contains("logical device"), "{e}");
+        assert_eq!(f4(&c), 0x00, "nothing written to the wrong device or the right one");
+        assert!(!c.borrow().regs.contains_key(&(6, 0xF4)), "the GPIO device's 0xF4 untouched");
+        assert!(m.borrow().writes.is_empty());
+        assert_eq!(*c.borrow().log.last().unwrap(), (0x2E, 0xAA));
+    }
+
+    #[test]
+    fn the_whole_register_is_compared_and_a_failed_copy_is_undone() {
+        let (d, st) = hs251();
+        // the register does not take the value: reported, CMOS untouched
+        let (c, m) = (chip(0x08), cmos(0x21));
+        c.borrow_mut().stuck = Some(0xF4);
+        let e = run(d.path(), st.path(), Request::Set(PowerRecovery::PowerOn), &c, &m).unwrap_err();
+        assert!(e.contains("expected"), "{e}");
+        assert!(m.borrow().writes.is_empty());
+        // the CMOS copy fails: the chip goes back to what it held
+        let (c, m) = (chip(0x08), cmos(0x21));
+        m.borrow_mut().fail_first_write = true;
+        let e = run(d.path(), st.path(), Request::Set(PowerRecovery::PowerOn), &c, &m).unwrap_err();
+        assert!(e.contains("chip restored"), "{e}");
+        assert_eq!(f4(&c), 0x08);
+    }
+
+    #[test]
+    fn eup_on_refuses_the_write_as_the_vendor_interface_does() {
+        let (d, st) = hs251();
+        let (c, m) = (chip(0x00), cmos(0x21));
+        c.borrow_mut().regs.insert((0x0A, 0xE0), 0x80);
+        let s = run(d.path(), st.path(), Request::Read, &c, &m).unwrap();
+        assert!(s.eup);
+        let e = run(d.path(), st.path(), Request::Set(PowerRecovery::PowerOn), &c, &m).unwrap_err();
+        assert!(e.contains("EuP"), "{e}");
+        assert_eq!(f4(&c), 0x00);
+        // the other reading of the vendor: CMOS not initialized, register 0xE1
+        assert!(eup_on(0, 0x0C, 0x3F) && !eup_on(0x80, 0x00, 0x3F) && eup_on(0x80, 0, 0x21));
+    }
+
+    #[test]
+    fn activation_of_the_gpio_device() {
+        let (d, st) = hs251();
+        let (c, m) = (chip(0x00), cmos(0x21));
+        let s = run(d.path(), st.path(), Request::ActivateGpio, &c, &m).unwrap();
+        assert!(s.gpio_active);
+        assert_eq!(c.borrow().regs[&(6, 0x30)], 1);
+        // already active: not written again
+        let (c, m) = (chip(0x00), cmos(0x21));
+        c.borrow_mut().regs.insert((6, 0x30), 1);
+        let writes_before = c.borrow().log.len();
+        run(d.path(), st.path(), Request::ActivateGpio, &c, &m).unwrap();
+        assert!(c.borrow().log.len() > writes_before);
+        assert!(!c.borrow().log.windows(2).any(|w| w == [(0x2E, 0x30), (0x2F, 1)]));
+    }
+
+    #[test]
+    fn a_held_lock_refuses_the_worker() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("run/lock");
+        let held = take_poll_lock(&path).unwrap();
+        assert!(take_poll_lock(&path).unwrap_err().contains("polling"));
+        drop(held);
+        assert!(take_poll_lock(&path).is_ok());
+    }
+
+    #[test]
     fn led_test_lights_and_puts_back() {
-        let d = hs251();
+        let (d, _st) = hs251();
         let g = fake_gpio();
         let mut g2 = g.clone();
         led_test(d.path(), &mut g2, "status-green", 0).unwrap();
@@ -589,6 +849,7 @@ mod tests {
     fn worker_arguments() {
         assert_eq!(parse_request("read"), Some(Request::Read));
         assert_eq!(parse_request("power_on"), Some(Request::Set(PowerRecovery::PowerOn)));
+        assert_eq!(parse_request("activate-gpio"), Some(Request::ActivateGpio));
         assert_eq!(parse_request("nope"), None);
         assert_ne!(worker_main(&["nope".to_string()]), 0);
     }

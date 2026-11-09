@@ -106,7 +106,9 @@ pub struct BayLed {
     pub device: String,
     /// What the disk's state asks of the LED: `off`, `on` (failure), `blink` (warning).
     pub led: String,
-    /// rynas is really driving this bay's LED (control on and confirmed, line usable).
+    /// rynas has written this bay's line (control on and confirmed, line usable). It says what
+    /// was commanded, not that the LED visibly changed: see `gpio_active` of the power recovery
+    /// state.
     pub driven: bool,
 }
 
@@ -173,6 +175,10 @@ pub struct PowerRecoveryState {
     pub sio_bits: u8,
     /// CMOS byte 0x61, the BIOS's copy.
     pub cmos: u8,
+    /// EuP is on: the vendor's interface disables this setting then, and so does rynas.
+    pub eup: bool,
+    /// The GPIO logical device of the Super I/O is activated (LDN 6, register 0x30).
+    pub gpio_active: bool,
 }
 
 /// `PUT /api/v1/modules/qnap/power-recovery`.
