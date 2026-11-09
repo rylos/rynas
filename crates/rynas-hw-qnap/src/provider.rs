@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use rynas_api_types::{Bay, HardwareStatus};
+use rynas_api_types::{Bay, HardwareStatus, Temperature};
 use rynas_hw::HardwareProvider;
 
 use crate::model::{self, Chip, Model};
@@ -40,18 +40,46 @@ pub fn disks_in_bays(root: &Path, m: &Model) -> Vec<(u32, String)> {
 pub struct QnapProvider {
     root: std::path::PathBuf,
     model: &'static Model,
+    /// The whole signature and the chip were seen once (a boot's drivers load after rynas-web
+    /// starts, so this is decided at each reading until it holds).
+    confirmed: std::sync::OnceLock<()>,
 }
 
 impl QnapProvider {
-    /// The provider, only on an identified machine whose chip the driver confirmed.
+    /// On a machine with a model's firmware strings and CPU; it answers nothing until the
+    /// whole signature and the chip are confirmed.
     pub fn detect(root: &Path) -> Option<Self> {
-        let model = model::identify(root)?;
-        (model::chip(root, model) == Chip::Confirmed).then(|| Self { root: root.to_path_buf(), model })
+        let model = model::plausible(root)?;
+        Some(Self { root: root.to_path_buf(), model, confirmed: std::sync::OnceLock::new() })
+    }
+
+    fn is_confirmed(&self) -> bool {
+        self.confirmed.get().is_some()
+            || (model::identify(&self.root).is_some()
+                && model::chip(&self.root, self.model) == Chip::Confirmed
+                && self.confirmed.set(()).is_ok())
+    }
+
+    /// The board sensor the vendor's model file names (`SYSTEM_TEMP_UNIT`).
+    fn system_temperature(&self) -> Option<Temperature> {
+        let hwmon = rynas_hw::under(&self.root, "/sys/class/hwmon");
+        let dir = std::fs::read_dir(hwmon).ok()?.flatten().find(|e| {
+            std::fs::read_to_string(e.path().join("name")).is_ok_and(|n| n.trim() == self.model.hwmon_chip)
+        })?;
+        let milli: i64 = std::fs::read_to_string(dir.path().join(format!("temp{}_input", self.model.system_temp)))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()?;
+        Some(Temperature { id: "board".into(), label: "System".into(), celsius: Some(milli as f32 / 1000.0) })
     }
 }
 
 impl HardwareProvider for QnapProvider {
     fn status(&self) -> Result<Option<HardwareStatus>, String> {
+        if !self.is_confirmed() {
+            return Ok(None);
+        }
         let found = disks_in_bays(&self.root, self.model);
         let bays = self
             .model
@@ -73,6 +101,7 @@ impl HardwareProvider for QnapProvider {
             provider: Some("qnap".into()),
             model: self.model.display.into(),
             bays,
+            board_temps: self.system_temperature().into_iter().collect(),
             ..HardwareStatus::default()
         }))
     }
@@ -108,13 +137,16 @@ mod tests {
     #[test]
     fn provider_only_with_the_chip_confirmed() {
         let d = tempfile::tempdir().unwrap();
-        fake_hs251(d.path(), None);
         assert!(QnapProvider::detect(d.path()).is_none());
-        fake_hs251(d.path(), Some("f71869a"));
+        fake_hs251(d.path(), None);
+        // the first boot: rynas-web starts before the drivers are loaded
         let p = QnapProvider::detect(d.path()).unwrap();
+        assert_eq!(p.status(), Ok(None));
+        fake_hs251(d.path(), Some("f71869a"));
         let s = p.status().unwrap().unwrap();
         assert_eq!(s.provider.as_deref(), Some("qnap"));
         assert_eq!(s.bays.len(), 2);
         assert!(s.fans.is_empty() && !s.bays[0].present);
+        assert_eq!(s.board_temps[0].celsius, Some(39.0));
     }
 }

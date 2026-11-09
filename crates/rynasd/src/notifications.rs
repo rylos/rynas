@@ -369,6 +369,7 @@ pub fn spawn_storage_watch(
     st: crate::server::DaemonState,
     notifier: Arc<dyn Notifier>,
     interval: Duration,
+    modules: rynas_module::Modules,
 ) {
     tokio::spawn(async move {
         let mut watch = StorageWatch::default();
@@ -379,6 +380,8 @@ pub fn spawn_storage_watch(
             tick.tick().await;
             match crate::server::inventory(&st).await {
                 Ok(inv) => {
+                    let health: Vec<_> = inv.disks.iter().map(|d| (d.name.clone(), d.health)).collect();
+                    modules.storage_update(&health);
                     for ev in watch.check(&inv.disks, &inv.arrays, &inv.filesystems) {
                         notifier.emit(ev);
                     }

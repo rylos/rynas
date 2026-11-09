@@ -198,6 +198,9 @@ pub struct HardwareStatus {
     pub events: Vec<(String, String)>,
     /// Age of the provider's last update; the UI flags data older than a few periods.
     pub age_s: Option<u64>,
+    /// Board sensors only the provider can name.
+    #[serde(default)]
+    pub board_temps: Vec<Temperature>,
 }
 
 /// `POST /api/v1/hardware/bays/{n}/identify`: blinks a bay's LED (the provider of a hardware

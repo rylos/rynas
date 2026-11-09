@@ -34,3 +34,5 @@ pub mod model;
 pub mod module;
 #[cfg(feature = "identify")]
 pub mod provider;
+#[cfg(feature = "domain")]
+pub mod superio;

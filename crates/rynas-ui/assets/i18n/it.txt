@@ -4481,7 +4481,34 @@ qnap.tab	Pannello frontale
 qnap.not_verified	La mappatura di LED, pulsanti e cicalino di questo modello deriva dalla configurazione del produttore e non è ancora stata provata su questo hardware. Esegui la prova del primo avvio prima di farvi affidamento.
 qnap.leds	LED
 qnap.led_control	Lascia che rynas comandi i LED
-qnap.led_control_help	Disattivato finché la mappatura non è stata controllata su questa macchina: quando è spento non viene scritta alcuna linea dei LED.
+qnap.led_control_help	Quando è spento non viene scritta alcuna linea dei LED e le linee vengono rilasciate.
+qnap.need_confirm	Disponibile dopo la conferma del modello su questa macchina.
+qnap.mapping	Controllo del primo avvio
+qnap.mapping_text	Il rilevamento automatico non distingue ogni modello: il firmware non lo indica. Dopo aver eseguito la prova del primo avvio su questa macchina, digita il nome del modello stampato sul case per consentire a rynas di scrivere le linee dei LED e l'impostazione di ripristino dell'alimentazione.
+qnap.mapping_type	Digita {model}
+qnap.mapping_confirm	Conferma questo modello
+qnap.mapping_done	Confermato su questa macchina
+qnap.mapping_revoke	Ritira la conferma
+qnap.brightness	Luminosità dei LED frontali
+qnap.bright_100	100 %
+qnap.bright_50	50 %
+qnap.bright_0	0 % (LED spenti)
+qnap.power	Dopo un'interruzione di corrente
+qnap.pr_choice	Al ritorno della corrente
+qnap.pr_last	Ripristina lo stato precedente
+qnap.pr_on	Accendi automaticamente
+qnap.pr_off	Resta spento
+qnap.pr_now	Impostato ora sull'hardware: {mode}
+qnap.pr_unknown	L'hardware contiene un valore senza significato noto
+qnap.pr_help	Letto dall'hardware all'apertura di questa pagina; scritto solo quando premi il pulsante.
+qnap.pr_apply	Scrivi sull'hardware
+qnap.pr_done	Scritto e riletto
+qnap.bay_failed	Disco guasto
+qnap.bay_warning	Avviso disco
+qnap.bay_ok	Nessun guasto segnalato
+qnap.feat_led_brightness	Controllo della luminosità dei LED
+qnap.why_mapping_unconfirmed	Il modello non è stato confermato su questa macchina
+qnap.why_write_failed	Scrittura sulla linea non riuscita; nuovo tentativo in corso
 qnap.led_auto	Segue i dischi
 qnap.led_green	Verde
 qnap.led_green_blink	Verde lampeggiante

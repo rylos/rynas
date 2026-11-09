@@ -43,6 +43,7 @@
 use std::sync::Arc;
 
 use rynas_api_types::network::ResetButton;
+use rynas_api_types::storage::HealthVerdict;
 use rynas_config::{Applier, Config};
 use rynas_hw::HardwareControl;
 pub use rynas_net::rescue::{Feedback, Signal};
@@ -128,6 +129,15 @@ pub trait Module: Send + Sync {
     fn wake_clock(&self) -> Option<WakeClock> {
         None
     }
+
+    /// The core's notification engine, once it is running.
+    fn attach(&self, _notifier: Arc<dyn rynas_notify::Notifier>) {}
+
+    /// The verdicts of the core's periodic storage check, `(kernel name, verdict)`.
+    fn storage_update(&self, _health: &[(String, HealthVerdict)]) {}
+
+    /// rynasd is stopping.
+    fn stop(&self) {}
 }
 
 /// The wake clock of a machine (the power schedule's startups).
@@ -230,6 +240,27 @@ impl Modules {
     /// The first module's hardware control.
     pub fn hardware_control(&self) -> Option<Arc<dyn HardwareControl>> {
         self.0.iter().find_map(|m| m.hardware_control())
+    }
+
+    /// Gives every module the notification engine.
+    pub fn attach(&self, notifier: Arc<dyn rynas_notify::Notifier>) {
+        for m in &self.0 {
+            m.attach(notifier.clone());
+        }
+    }
+
+    /// Hands the storage check's verdicts to every module.
+    pub fn storage_update(&self, health: &[(String, HealthVerdict)]) {
+        for m in &self.0 {
+            m.storage_update(health);
+        }
+    }
+
+    /// rynasd is stopping.
+    pub fn stop(&self) {
+        for m in &self.0 {
+            m.stop();
+        }
     }
 
     /// The ids of the detected modules.

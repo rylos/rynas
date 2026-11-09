@@ -3658,7 +3658,6 @@ dependencies = [
  "rynas-hw",
  "rynas-module",
  "rynas-notify",
- "rynas-storage",
  "rynas-tasks",
  "serde",
  "serde_json",

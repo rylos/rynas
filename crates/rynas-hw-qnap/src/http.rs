@@ -6,30 +6,87 @@ use axum::extract::rejection::JsonRejection;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use rynas_api_types::error_codes;
 use rynas_module::http::{Ctx, Error, Res, blocking, docs, stage, user};
 
-use crate::api::{BeepRequest, MuteResult, QnapSettings, QnapSettingsState, QnapStatus};
+use crate::api::{
+    BeepRequest, ConfirmMapping, MuteResult, PowerRecoveryRequest, PowerRecoveryState, QnapSettings, QnapSettingsState,
+    QnapStatus,
+};
 use crate::domain::{Cell, QNAP_KEY};
+use crate::module::Runner;
 
 #[derive(Clone)]
 struct St {
     ctx: Ctx,
-    ctl: Cell,
+    shared: Cell,
+    runner: std::sync::Arc<dyn Runner>,
 }
 
 impl St {
     fn ctl(&self) -> Res<std::sync::Arc<crate::control::Controller>> {
-        self.ctl.get().cloned().ok_or_else(|| Error::not_found("this machine is not an identified QNAP"))
+        self.shared.ctl.get().cloned().ok_or_else(|| Error::not_found("this machine is not an identified QNAP"))
     }
 }
 
-pub fn router(ctx: Ctx, ctl: Cell) -> Router {
+pub fn router(ctx: Ctx, shared: Cell, runner: std::sync::Arc<dyn Runner>) -> Router {
     Router::new()
         .route("/status", get(status))
         .route("/settings", get(settings_get).put(settings_put))
         .route("/beep", post(beep))
         .route("/mute", post(mute))
-        .with_state(St { ctx, ctl })
+        .route("/confirm-mapping", post(confirm_mapping).delete(revoke_mapping))
+        .route("/power-recovery", get(power_recovery_get).put(power_recovery_put))
+        .with_state(St { ctx, shared, runner })
+}
+
+/// The user typed the model's name after the first-boot procedure.
+async fn confirm_mapping(State(st): State<St>, body: Result<Json<ConfirmMapping>, JsonRejection>) -> Res<StatusCode> {
+    let Json(req) = body?;
+    blocking(move || {
+        st.ctl()?
+            .confirm_mapping(&req.typed)
+            .map_err(|m| Error::new(StatusCode::BAD_REQUEST, error_codes::INVALID_VALUE, m))
+    })
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn revoke_mapping(State(st): State<St>) -> Res<StatusCode> {
+    blocking(move || st.ctl()?.revoke_mapping().map_err(Error::internal)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Read from the hardware now, never cached.
+async fn power_recovery_get(State(st): State<St>) -> Res<Json<PowerRecoveryState>> {
+    Ok(Json(
+        blocking(move || {
+            st.ctl()?;
+            st.runner.read().map_err(Error::unavailable)
+        })
+        .await?,
+    ))
+}
+
+/// Only here, on an explicit request, and only with the mapping confirmed.
+async fn power_recovery_put(
+    State(st): State<St>,
+    body: Result<Json<PowerRecoveryRequest>, JsonRejection>,
+) -> Res<Json<PowerRecoveryState>> {
+    let Json(req) = body?;
+    Ok(Json(
+        blocking(move || {
+            if !st.ctl()?.mapping_confirmed() {
+                return Err(Error::new(
+                    StatusCode::CONFLICT,
+                    error_codes::CONFLICT,
+                    "confirm the model on this machine first",
+                ));
+            }
+            st.runner.set(req.mode).map_err(Error::unavailable)
+        })
+        .await?,
+    ))
 }
 
 async fn status(State(st): State<St>) -> Res<Json<QnapStatus>> {

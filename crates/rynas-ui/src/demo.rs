@@ -199,6 +199,7 @@ fn hardware(t: f64) -> HardwareStatus {
             ("2026-11-04 11:02:17".into(), "RAID md2 resync started".into()),
         ],
         age_s: Some(2),
+        board_temps: Vec::new(),
     }
 }
 

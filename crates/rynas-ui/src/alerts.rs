@@ -38,6 +38,7 @@ pub fn all_temps(sample: Option<&MetricsSample>, hw: Option<&HardwareStatus>) ->
         .map(|s| s.temps.iter().filter_map(|t| t.celsius.map(|c| (t.id.clone(), t.label.clone(), c))).collect())
         .unwrap_or_default();
     if let Some(h) = hw {
+        v.extend(h.board_temps.iter().filter_map(|t| t.celsius.map(|c| (t.id.clone(), t.label.clone(), c))));
         for b in &h.bays {
             let id = format!("bay{}", b.number);
             if let Some(c) = b.celsius

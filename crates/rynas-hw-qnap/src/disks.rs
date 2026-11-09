@@ -1,12 +1,10 @@
-//! What a bay's disk is doing, from rynas's own view: the storage service's SMART verdict and
-//! md's failed members. Empty bays have no state.
+//! What a bay's disk is doing: the verdicts of rynasd's own storage check (nothing here reads
+//! a disk, so nothing keeps one from spinning down) and md's failed members. Empty bays have
+//! no state.
 
 use std::path::Path;
-use std::sync::Arc;
 
 use rynas_api_types::storage::HealthVerdict;
-use rynas_storage::Storage;
-use rynas_storage::host::SystemHost;
 
 use crate::model::Model;
 use crate::provider;
@@ -20,32 +18,6 @@ pub struct BayState {
     pub health: HealthVerdict,
 }
 
-pub trait DiskSource: Send {
-    /// `(kernel name, verdict)` of every disk.
-    fn health(&mut self) -> Vec<(String, HealthVerdict)>;
-}
-
-/// The storage service (SMART is cached and never wakes a sleeping disk).
-pub struct SystemDisks(Storage);
-
-impl Default for SystemDisks {
-    fn default() -> Self {
-        Self(Storage::new(Arc::new(SystemHost)))
-    }
-}
-
-impl DiskSource for SystemDisks {
-    fn health(&mut self) -> Vec<(String, HealthVerdict)> {
-        match self.0.disks() {
-            Ok(d) => d.into_iter().map(|d| (d.name, d.health)).collect(),
-            Err(e) => {
-                tracing::warn!("qnap: disk state: {e}");
-                Vec::new()
-            }
-        }
-    }
-}
-
 /// Members md reports as failed: `sdb3[1](F)` → `sdb`.
 pub fn failed_members(mdstat: &str) -> Vec<String> {
     mdstat
@@ -56,10 +28,9 @@ pub fn failed_members(mdstat: &str) -> Vec<String> {
         .collect()
 }
 
-/// Every bay of the model and the state of the disk in it.
-pub fn bay_states(root: &Path, m: &Model, source: &mut dyn DiskSource) -> Vec<BayState> {
+/// Every bay of the model and the state of the disk in it, from `(kernel name, verdict)`.
+pub fn bay_states(root: &Path, m: &Model, health: &[(String, HealthVerdict)]) -> Vec<BayState> {
     let found = provider::disks_in_bays(root, m);
-    let health = source.health();
     let failed = failed_members(&crate::model::read(root, "/proc/mdstat"));
     m.bays
         .iter()

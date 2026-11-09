@@ -7,7 +7,6 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use crate::api::BeepKind;
 
@@ -27,8 +26,10 @@ pub fn pattern(kind: BeepKind) -> &'static [(u32, u32)] {
 }
 
 pub trait Speaker: Send + Sync {
-    /// Sounds `hz` for `ms`, blocking.
-    fn tone(&self, hz: u32, ms: u32) -> Result<(), String>;
+    /// Starts a tone; it lasts until [`Speaker::stop`].
+    fn start(&self, hz: u32) -> Result<(), String>;
+    /// Silence. Harmless when nothing is sounding.
+    fn stop(&self);
     /// Whether a speaker device exists.
     fn available(&self) -> bool {
         true
@@ -47,18 +48,32 @@ pub fn find_device(root: &Path) -> Option<PathBuf> {
 }
 
 /// The real speaker: `EV_SND`/`SND_TONE` on the input device (the tone stops at value 0).
+/// `pcspkr` has no timeout and no close callback: a tone already sounding when the process is
+/// killed goes on until something writes 0, so the controller silences at start and at
+/// shutdown, and the only remaining case is SIGKILL or a crash in the middle of a tone, which
+/// lasts until the next start of rynasd.
 pub struct PcSpeaker {
     device: Option<PathBuf>,
+    file: std::sync::Mutex<Option<std::fs::File>>,
 }
 
 impl PcSpeaker {
     pub fn new(root: &Path) -> Self {
-        Self { device: find_device(root) }
+        Self { device: find_device(root), file: std::sync::Mutex::new(None) }
     }
 
-    fn write_tone(mut f: &std::fs::File, hz: u32) -> Result<(), String> {
-        let e = event_bytes(hz);
-        f.write_all(&e).map_err(|e| format!("PC speaker: {e}"))
+    fn write_tone(&self, hz: u32) -> Result<(), String> {
+        let path = self.device.as_ref().ok_or("no PC speaker device")?;
+        let mut held = self.file.lock().unwrap();
+        if held.is_none() {
+            let f = std::fs::File::options()
+                .write(true)
+                .open(path)
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+            *held = Some(f);
+        }
+        let mut f = held.as_ref().unwrap();
+        f.write_all(&event_bytes(hz)).map_err(|e| format!("PC speaker: {e}"))
     }
 }
 
@@ -74,15 +89,16 @@ fn event_bytes(hz: u32) -> [u8; 24] {
 }
 
 impl Speaker for PcSpeaker {
-    fn tone(&self, hz: u32, ms: u32) -> Result<(), String> {
-        let path = self.device.as_ref().ok_or("no PC speaker device")?;
-        let f = std::fs::File::options()
-            .write(true)
-            .open(path)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
-        Self::write_tone(&f, hz)?;
-        std::thread::sleep(Duration::from_millis(ms.into()));
-        Self::write_tone(&f, 0)
+    fn start(&self, hz: u32) -> Result<(), String> {
+        self.write_tone(hz)
+    }
+
+    fn stop(&self) {
+        if self.device.is_some()
+            && let Err(e) = self.write_tone(0)
+        {
+            tracing::warn!("qnap: silencing the speaker: {e}");
+        }
     }
 
     fn available(&self) -> bool {
@@ -94,9 +110,11 @@ impl Speaker for PcSpeaker {
 pub struct SilentSpeaker;
 
 impl Speaker for SilentSpeaker {
-    fn tone(&self, _hz: u32, _ms: u32) -> Result<(), String> {
+    fn start(&self, _hz: u32) -> Result<(), String> {
         Ok(())
     }
+
+    fn stop(&self) {}
 }
 
 #[cfg(test)]

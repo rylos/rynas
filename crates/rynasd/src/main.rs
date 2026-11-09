@@ -776,6 +776,7 @@ fn main() -> std::io::Result<()> {
         let notifier: Arc<dyn Notifier> = Arc::new(engine.clone());
         rynasd::notifications::spawn_task_watch(&ops.tasks, notifier.clone());
         state.notifier = notifier.clone();
+        opened.modules.attach(notifier.clone());
         // encrypted folders whose password is sealed on this machine (D-CRYPT E1); a failed
         // automatic unlock is notified
         rynasd::services::crypt::set_notifier(notifier.clone());
@@ -1138,8 +1139,9 @@ fn main() -> std::io::Result<()> {
         if args.storage_check_interval > 0 {
             rynasd::notifications::spawn_storage_watch(
                 state.clone(),
-                notifier,
+                notifier.clone(),
                 std::time::Duration::from_secs(args.storage_check_interval),
+                opened.modules.clone(),
             );
         }
         let forward = opened.modules.event_forward();
@@ -1195,6 +1197,7 @@ fn main() -> std::io::Result<()> {
                 }
             } => tracing::info!("shutdown: closing open streams"),
         }
+        opened.modules.stop();
         if own_socket {
             let _ = std::fs::remove_file(&args.socket);
         }

@@ -33,9 +33,9 @@ pub enum UsbLed {
 #[serde(rename_all = "snake_case")]
 pub enum ButtonAction {
     /// Press recorded in the module's event list only.
+    #[default]
     Log,
     /// Recorded and sent as a notification.
-    #[default]
     Notify,
     /// Not even recorded.
     Ignore,
@@ -45,10 +45,12 @@ pub enum ButtonAction {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct QnapSettings {
-    /// Whether rynas may drive the LED lines at all. Off until the model's mapping was checked
-    /// on the machine (the first-boot procedure of `docs/plugins/qnap.md`).
+    /// Whether rynas may drive the LED lines at all. On a model not verified on hardware it
+    /// also needs the separate confirmation of `POST confirm-mapping`.
     pub led_control: bool,
     pub status_led: StatusLed,
+    /// Brightness of the front LEDs: the vendor's three levels, 0, 50 or 100 percent.
+    pub led_brightness: u8,
     /// The bay error LEDs follow the disks' state.
     pub disk_leds: bool,
     pub usb_led: UsbLed,
@@ -63,10 +65,12 @@ impl Default for QnapSettings {
         Self {
             led_control: false,
             status_led: StatusLed::Auto,
+            led_brightness: 100,
             disk_leds: true,
             usb_led: UsbLed::Off,
-            reset_button: ButtonAction::Notify,
-            usb_copy_button: ButtonAction::Notify,
+            // only listed until the model is verified: an unstable line must not notify anyone
+            reset_button: ButtonAction::Log,
+            usb_copy_button: ButtonAction::Log,
             beep_on_disk_failure: true,
         }
     }
@@ -84,12 +88,13 @@ pub struct QnapSettingsState {
 /// One hardware function and whether it can be used now.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Feature {
-    /// `status_led`, `disk_leds`, `usb_led`, `reset_button`, `usb_copy_button`, `buzzer`,
-    /// `temperatures`.
+    /// `status_led`, `led_brightness`, `disk_leds`, `usb_led`, `reset_button`,
+    /// `usb_copy_button`, `buzzer`.
     pub id: String,
     pub available: bool,
     /// Why not, as a stable code the interface translates (empty when available):
-    /// `driver_missing`, `wrong_direction`, `led_control_off`, `no_speaker`.
+    /// `driver_missing`, `wrong_direction`, `mapping_unconfirmed`, `led_control_off`,
+    /// `write_failed`, `no_speaker`.
     pub reason: String,
 }
 
@@ -99,8 +104,10 @@ pub struct BayLed {
     pub bay: u32,
     /// Kernel name of the disk (`sda`), empty for an empty bay.
     pub device: String,
-    /// `off`, `on` (failure), `blink` (warning).
+    /// What the disk's state asks of the LED: `off`, `on` (failure), `blink` (warning).
     pub led: String,
+    /// rynas is really driving this bay's LED (control on and confirmed, line usable).
+    pub driven: bool,
 }
 
 /// A button press.
@@ -118,9 +125,13 @@ pub struct ButtonEvent {
 pub struct QnapStatus {
     /// `QNAP HS-251`.
     pub model: String,
+    /// What the user must type to confirm the mapping: `HS-251`.
+    pub short_model: String,
     /// The line mapping of this model was checked on real hardware. False: it comes from
     /// the vendor's configuration and the driver's source only.
     pub verified: bool,
+    /// The user confirmed the mapping on this machine (always true on a verified model).
+    pub mapping_confirmed: bool,
     pub features: Vec<Feature>,
     /// What the status LED shows now: `green`, `green-blink`, `red`, `red-blink`,
     /// `alternate`, `off`, empty while rynas does not drive it.
@@ -132,6 +143,42 @@ pub struct QnapStatus {
     pub events: Vec<ButtonEvent>,
     /// The disk-failure alarm is sounding.
     pub alarm: bool,
+}
+
+/// `POST /api/v1/modules/qnap/confirm-mapping`: the user typed the model's name after the
+/// first-boot procedure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ConfirmMapping {
+    pub typed: String,
+}
+
+/// What the machine does when mains power comes back after an outage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PowerRecovery {
+    /// Back to the state before the outage.
+    LastState,
+    /// Always start.
+    PowerOn,
+    /// Stay off.
+    PowerOff,
+}
+
+/// `GET /api/v1/modules/qnap/power-recovery`: read from the hardware at this moment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PowerRecoveryState {
+    /// `None`: the register holds a value the vendor's code gives no meaning to.
+    pub mode: Option<PowerRecovery>,
+    /// Bits 2:1 of register 0xF4, logical device 0x0A.
+    pub sio_bits: u8,
+    /// CMOS byte 0x61, the BIOS's copy.
+    pub cmos: u8,
+}
+
+/// `PUT /api/v1/modules/qnap/power-recovery`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PowerRecoveryRequest {
+    pub mode: PowerRecovery,
 }
 
 /// The tone patterns of the vendor's buzzer modes.

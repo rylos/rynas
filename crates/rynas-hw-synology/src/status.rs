@@ -312,6 +312,7 @@ impl Raw {
                 .map(str::to_string),
             events: self.events.clone(),
             age_s: self.age_s(now_s),
+            board_temps: Vec::new(),
         }
     }
 

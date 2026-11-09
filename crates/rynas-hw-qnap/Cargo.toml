@@ -10,11 +10,11 @@ license.workspace = true
 # No feature: the API types only (the web interface links them; serde and nothing else).
 # `identify`: read-only identification and the web provider (rynas-web, not root).
 # `domain`: the daemon side (rynasd): GPIO, buzzer, settings, routes, the Module.
-default = []
+default = ["domain"]
 identify = ["dep:rynas-hw", "dep:rynas-api-types"]
 domain = [
     "identify", "dep:libc", "dep:tracing", "dep:serde_json", "dep:rynas-config", "dep:rynas-module",
-    "dep:rynas-notify", "dep:rynas-tasks", "dep:rynas-storage", "dep:axum",
+    "dep:rynas-notify", "dep:rynas-tasks", "dep:axum",
 ]
 
 [dependencies]
@@ -28,7 +28,6 @@ rynas-config = { workspace = true, optional = true }
 rynas-module = { workspace = true, optional = true }
 rynas-notify = { workspace = true, optional = true }
 rynas-tasks = { workspace = true, optional = true }
-rynas-storage = { workspace = true, optional = true }
 axum = { workspace = true, optional = true }
 
 [dev-dependencies]

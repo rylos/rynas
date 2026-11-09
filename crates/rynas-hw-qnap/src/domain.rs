@@ -1,7 +1,7 @@
 //! The `qnap.hw` configuration key: the settings of [`crate::control::Controller`]. No file is
 //! written (the hardware is driven by rynasd); applying a value hands it to the controller.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use rynas_config::{Applier, ApplyCtx, Config, ManagedFile};
 use serde_json::Value;
@@ -11,8 +11,15 @@ use crate::control::Controller;
 
 pub const QNAP_KEY: &str = "qnap.hw";
 
-/// The controller, set once at the start of rynasd (the domain is registered before it).
-pub type Cell = Arc<OnceLock<Arc<Controller>>>;
+/// The controller, set once it is confirmed (the domain and the routes are registered before
+/// it), and the latest settings until then.
+#[derive(Default)]
+pub struct Shared {
+    pub ctl: OnceLock<Arc<Controller>>,
+    pub latest: Mutex<QnapSettings>,
+}
+
+pub type Cell = Arc<Shared>;
 
 pub struct QnapDomain(pub Cell);
 
@@ -40,6 +47,9 @@ impl Applier for QnapDomain {
 
     fn validate(&self, value: Value) -> Result<Value, rynas_config::Invalid> {
         let s = settings_of(&value)?;
+        if ![0, 50, 100].contains(&s.led_brightness) {
+            return Err("led_brightness must be 0, 50 or 100".to_string().into());
+        }
         serde_json::to_value(s).map_err(|e| e.to_string().into())
     }
 
@@ -48,8 +58,9 @@ impl Applier for QnapDomain {
     }
 
     fn reload(&self, value: Option<&Value>, _ctx: &ApplyCtx) -> Result<(), String> {
-        if let Some(ctl) = self.0.get() {
-            let s = value.map(settings_of).transpose()?.unwrap_or_default();
+        let s = value.map(settings_of).transpose()?.unwrap_or_default();
+        *self.0.latest.lock().unwrap() = s.clone();
+        if let Some(ctl) = self.0.ctl.get() {
             ctl.apply(s);
         }
         Ok(())

@@ -98,6 +98,11 @@ enum Command {
         #[command(subcommand)]
         action: CryptCmd,
     },
+    /// QNAP module: the Super I/O worker and the first-boot LED test (see docs/plugins/qnap.md).
+    Qnap {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -679,6 +684,7 @@ fn main() -> ExitCode {
         Command::Crypt {
             action: CryptCmd::AutoUnlock,
         } => crypt_auto_unlock(&args.socket),
+        Command::Qnap { args } => ExitCode::from(rynas_hw_qnap::superio::worker_main(&args) as u8),
     }
 }
 

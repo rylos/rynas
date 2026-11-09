@@ -11,6 +11,21 @@ pub struct PciDevice {
     pub address: &'static str,
     /// `vendor:device` as in sysfs without `0x`: `8086:0f23`.
     pub id: &'static str,
+    /// `subsystem_vendor:subsystem_device`.
+    pub subsystem: &'static str,
+}
+
+/// Where the Super I/O keeps the power-recovery setting, with the BIOS's copy in CMOS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PowerRecoveryMap {
+    /// Index port of the Super I/O (data is the next port).
+    pub sio_port: u16,
+    /// `(device id, manufacturer id)` read back from the chip before anything is written.
+    pub sio_ids: (u16, u16),
+    pub ldn: u8,
+    pub reg: u8,
+    /// CMOS byte holding the copy in its two high bits.
+    pub cmos_offset: u8,
 }
 
 /// A line of a bank of the Super I/O: chip `gpio-f7188x-<bank>`, line `offset`.
@@ -24,6 +39,11 @@ pub struct Line {
 
 const fn low(bank: u8, offset: u32) -> Line {
     Line { bank, offset, active_low: true }
+}
+
+/// A line written as a raw level (the brightness lines).
+const fn raw(bank: u8, offset: u32) -> Line {
+    Line { bank, offset, active_low: false }
 }
 
 /// The gpio-f7188x register block of a bank (`f71869a_gpio_bank[]` in the driver): the
@@ -48,6 +68,8 @@ pub struct Model {
     pub id: &'static str,
     /// `QNAP HS-251`.
     pub display: &'static str,
+    /// `HS-251`: what the user types to confirm the mapping.
+    pub short: &'static str,
     /// The line mapping was tested on this model's hardware.
     pub verified: bool,
     pub bios_vendor: &'static str,
@@ -57,12 +79,15 @@ pub struct Model {
     pub board_name: &'static str,
     /// Text the CPU's model name must contain.
     pub cpu: &'static str,
+    /// **Every** PCI device of the machine: one more or one less is another machine.
     pub pci: &'static [PciDevice],
     /// PCI addresses of the NICs whose MAC starts with [`Self::mac_oui`].
     pub nics: &'static [&'static str],
     pub mac_oui: &'static str,
     /// `name` of the chip's hwmon (driver f71882fg).
     pub hwmon_chip: &'static str,
+    /// No fan: every tachometer of the chip must read 0 (a fan turning is another model).
+    pub fanless: bool,
     /// Lines of each gpio-f7188x bank, in bank order.
     pub gpio_banks: &'static [u32],
     /// PCI address of the disks' AHCI controller.
@@ -75,12 +100,19 @@ pub struct Model {
     pub usb_copy_button: Line,
     /// Buzzer tone, in Hz.
     pub beep_hz: u32,
+    /// The four brightness lines of the front LEDs (the vendor's register 0xA1).
+    pub brightness: [Line; 4],
+    /// `None`: the model has no known way to set it.
+    pub power_recovery: Option<PowerRecoveryMap>,
+    /// hwmon input of the board sensor (`SYSTEM_TEMP_UNIT` of the vendor's model file).
+    pub system_temp: u32,
 }
 
 /// The models the module knows (data, one entry per model).
 pub const MODELS: &[Model] = &[Model {
     id: "hs-251",
     display: "QNAP HS-251",
+    short: "HS-251",
     verified: false,
     bios_vendor: "American Megatrends Inc.",
     sys_vendor: "To be filled by O.E.M.",
@@ -89,16 +121,42 @@ pub const MODELS: &[Model] = &[Model {
     board_name: "Aptio CRB",
     cpu: "J1800",
     pci: &[
-        PciDevice { address: "0000:00:13.0", id: "8086:0f23" },
-        PciDevice { address: "0000:00:14.0", id: "8086:0f35" },
-        PciDevice { address: "0000:00:1c.2", id: "8086:0f4c" },
-        PciDevice { address: "0000:00:1c.3", id: "8086:0f4e" },
-        PciDevice { address: "0000:03:00.0", id: "8086:1533" },
-        PciDevice { address: "0000:04:00.0", id: "8086:1533" },
+        dev("0000:00:00.0", "8086:0f00", "8086:0f31"),
+        dev("0000:00:02.0", "8086:0f31", "8086:0f31"),
+        dev("0000:00:11.0", "8086:0f15", "8086:0f15"),
+        dev("0000:00:12.0", "8086:0f16", "8086:0f16"),
+        dev("0000:00:13.0", "8086:0f23", "8086:0f23"),
+        dev("0000:00:14.0", "8086:0f35", "8086:0f35"),
+        dev("0000:00:17.0", "8086:0f50", "0000:0000"),
+        dev("0000:00:18.0", "8086:0f40", "8086:0f40"),
+        dev("0000:00:18.1", "8086:0f41", "8086:0f41"),
+        dev("0000:00:18.2", "8086:0f42", "8086:0f42"),
+        dev("0000:00:18.3", "8086:0f43", "8086:0f43"),
+        dev("0000:00:18.4", "8086:0f44", "8086:0f44"),
+        dev("0000:00:18.5", "8086:0f45", "8086:0f45"),
+        dev("0000:00:18.6", "8086:0f46", "8086:0f46"),
+        dev("0000:00:18.7", "8086:0f47", "8086:0f47"),
+        dev("0000:00:1a.0", "8086:0f18", "8086:0f18"),
+        dev("0000:00:1b.0", "8086:0f04", "8086:7270"),
+        dev("0000:00:1c.0", "8086:0f48", "8086:0f48"),
+        dev("0000:00:1c.1", "8086:0f4a", "8086:0f4a"),
+        dev("0000:00:1c.2", "8086:0f4c", "8086:0f4c"),
+        dev("0000:00:1c.3", "8086:0f4e", "8086:0f4e"),
+        dev("0000:00:1e.0", "8086:0f06", "0000:0000"),
+        dev("0000:00:1e.1", "8086:0f08", "0000:0000"),
+        dev("0000:00:1e.2", "8086:0f09", "0000:0000"),
+        dev("0000:00:1e.3", "8086:0f0a", "0000:0000"),
+        dev("0000:00:1e.4", "8086:0f0c", "0000:0000"),
+        dev("0000:00:1e.5", "8086:0f0e", "0000:0000"),
+        dev("0000:00:1f.0", "8086:0f1c", "8086:0f1c"),
+        dev("0000:00:1f.3", "8086:0f12", "8086:0f12"),
+        dev("0000:03:00.0", "8086:1533", "ffff:0000"),
+        dev("0000:04:00.0", "8086:1533", "ffff:0000"),
     ],
     nics: &["0000:03:00.0", "0000:04:00.0"],
     mac_oui: "00:08:9b",
     hwmon_chip: "f71869a",
+    fanless: true,
     gpio_banks: &[6, 8, 8, 8, 8, 5, 8, 8],
     ahci: "0000:00:13.0",
     bays: &[
@@ -111,7 +169,20 @@ pub const MODELS: &[Model] = &[Model {
     reset_button: low(6, 1),
     usb_copy_button: low(1, 2),
     beep_hz: 800,
+    brightness: [raw(5, 0), raw(5, 1), raw(5, 2), raw(5, 3)],
+    power_recovery: Some(PowerRecoveryMap {
+        sio_port: 0x2E,
+        sio_ids: (0x1007, 0x1934),
+        ldn: 0x0A,
+        reg: 0xF4,
+        cmos_offset: 0x61,
+    }),
+    system_temp: 3,
 }];
+
+const fn dev(address: &'static str, id: &'static str, subsystem: &'static str) -> PciDevice {
+    PciDevice { address, id, subsystem }
+}
 
 /// The value of a file below `root`, whitespace trimmed; empty if unreadable.
 pub fn read(root: &Path, path: &str) -> String {
@@ -124,10 +195,39 @@ fn dmi(root: &Path, f: &str) -> String {
     read(root, &format!("/sys/class/dmi/id/{f}"))
 }
 
-fn pci_id(root: &Path, address: &str) -> String {
+/// `(vendor:device, subsystem)` of a PCI device.
+fn pci_ids(root: &Path, address: &str) -> (String, String) {
     let attr = |f: &str| read(root, &format!("/sys/bus/pci/devices/{address}/{f}"));
     let id = |v: String| v.strip_prefix("0x").unwrap_or("").to_string();
-    format!("{}:{}", id(attr("vendor")), id(attr("device")))
+    (
+        format!("{}:{}", id(attr("vendor")), id(attr("device"))),
+        format!("{}:{}", id(attr("subsystem_vendor")), id(attr("subsystem_device"))),
+    )
+}
+
+/// The machine has exactly the model's PCI devices: nothing missing, nothing extra.
+fn pci_exact(root: &Path, m: &Model) -> bool {
+    let found: Vec<String> = std::fs::read_dir(rynas_hw::under(root, "/sys/bus/pci/devices"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    found.len() == m.pci.len()
+        && m.pci.iter().all(|d| {
+            found.iter().any(|f| f == d.address) && pci_ids(root, d.address) == (d.id.to_string(), d.subsystem.to_string())
+        })
+}
+
+/// The disks' controller has as many ATA ports as the model has bays.
+fn ata_ports(root: &Path, m: &Model) -> usize {
+    std::fs::read_dir(rynas_hw::under(root, &format!("/sys/bus/pci/devices/{}", m.ahci)))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| n.strip_prefix("ata").is_some_and(|r| !r.is_empty() && r.bytes().all(|b| b.is_ascii_digit())))
+        .count()
 }
 
 fn nic_mac(root: &Path, address: &str) -> Option<String> {
@@ -136,8 +236,9 @@ fn nic_mac(root: &Path, address: &str) -> Option<String> {
     Some(read(root, &format!("/sys/class/net/{}/address", iface.file_name().to_string_lossy())))
 }
 
-/// The model whose **whole** signature matches this machine; `None` otherwise.
-pub fn identify(root: &Path) -> Option<&'static Model> {
+/// The model whose firmware strings and CPU match: nothing that appears late at boot. Enough
+/// to wait for the rest of the signature, never enough to touch anything.
+pub fn plausible(root: &Path) -> Option<&'static Model> {
     let cpuinfo = read(root, "/proc/cpuinfo");
     MODELS.iter().find(|m| {
         dmi(root, "bios_vendor") == m.bios_vendor
@@ -146,7 +247,22 @@ pub fn identify(root: &Path) -> Option<&'static Model> {
             && dmi(root, "board_vendor") == m.board_vendor
             && dmi(root, "board_name") == m.board_name
             && cpuinfo.lines().any(|l| l.starts_with("model name") && l.contains(m.cpu))
-            && m.pci.iter().all(|d| pci_id(root, d.address) == d.id)
+    })
+}
+
+/// The model whose **whole** signature matches this machine; `None` otherwise: the firmware
+/// strings and CPU, exactly its PCI devices, as many ATA ports as bays, the NICs' prefix.
+///
+/// What this excludes and what it cannot: a machine with another device set or another bay
+/// count is rejected, so a 4-bay sibling is. A two-bay sibling with the same CPU and the same
+/// PCI devices would pass here; only its fan makes a difference, checked in [`chip`]. Nothing
+/// readable from Linux names the model outright (the name is in the board's I²C EEPROM), so
+/// a model not verified on hardware also needs the user's own confirmation before any LED
+/// or Super I/O write.
+pub fn identify(root: &Path) -> Option<&'static Model> {
+    plausible(root).filter(|m| {
+        pci_exact(root, m)
+            && ata_ports(root, m) == m.bays.len()
             && m.nics
                 .iter()
                 .all(|n| nic_mac(root, n).is_some_and(|mac| mac.to_ascii_lowercase().starts_with(m.mac_oui)))
@@ -164,28 +280,29 @@ pub enum Chip {
     Mismatch,
 }
 
-/// The chip named by the f71882fg hwmon driver, against the model.
+/// The chip named by the f71882fg hwmon driver, against the model. A fanless model with a
+/// fan turning is another model.
 pub fn chip(root: &Path, m: &Model) -> Chip {
-    let mut names: Vec<String> = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(rynas_hw::under(root, "/sys/class/hwmon")) {
-        for e in rd.flatten() {
-            names.push(read(root, &format!("/sys/class/hwmon/{}/name", e.file_name().to_string_lossy())));
+    let mut other_fintek = false;
+    for e in std::fs::read_dir(rynas_hw::under(root, "/sys/class/hwmon")).into_iter().flatten().flatten() {
+        let dir = e.file_name().to_string_lossy().into_owned();
+        let name = read(root, &format!("/sys/class/hwmon/{dir}/name"));
+        if name == m.hwmon_chip {
+            let turning = m.fanless
+                && (1..=4).any(|n| {
+                    read(root, &format!("/sys/class/hwmon/{dir}/fan{n}_input")).parse::<u32>().is_ok_and(|rpm| rpm > 0)
+                });
+            return if turning { Chip::Mismatch } else { Chip::Confirmed };
         }
+        other_fintek |= FINTEK_HWMON.contains(&name.as_str());
     }
-    if names.iter().any(|n| n == m.hwmon_chip) {
-        return Chip::Confirmed;
-    }
-    // another Fintek chip was found by the driver: not the one the mapping is about
-    if names.iter().any(|n| FINTEK_HWMON.contains(&n.as_str())) {
-        return Chip::Mismatch;
-    }
-    Chip::Unknown
+    if other_fintek { Chip::Mismatch } else { Chip::Unknown }
 }
 
 /// `f71882fg_names[]` of the driver.
 const FINTEK_HWMON: &[&str] = &[
     "f71808e", "f71808a", "f71858fg", "f71862fg", "f71868a", "f71869", "f71869a", "f71882fg",
-    "f71889ed", "f71889a", "f8000", "f81768d", "f81865f", "f81866a",
+    "f71889fg", "f71889ed", "f71889a", "f8000", "f81768d", "f81865f", "f81866a",
 ];
 
 #[cfg(test)]
@@ -208,9 +325,16 @@ pub mod testing {
         w(root, &format!("{dmi}/board_name"), "Aptio CRB\n");
         w(root, "proc/cpuinfo", "processor\t: 0\nmodel name\t: Intel(R) Celeron(R)  CPU  J1800  @ 2.41GHz\n");
         for d in MODELS[0].pci {
+            let at = |f: &str| format!("sys/bus/pci/devices/{}/{f}", d.address);
             let (v, i) = d.id.split_once(':').unwrap();
-            w(root, &format!("sys/bus/pci/devices/{}/vendor", d.address), &format!("0x{v}\n"));
-            w(root, &format!("sys/bus/pci/devices/{}/device", d.address), &format!("0x{i}\n"));
+            let (sv, si) = d.subsystem.split_once(':').unwrap();
+            w(root, &at("vendor"), &format!("0x{v}\n"));
+            w(root, &at("device"), &format!("0x{i}\n"));
+            w(root, &at("subsystem_vendor"), &format!("0x{sv}\n"));
+            w(root, &at("subsystem_device"), &format!("0x{si}\n"));
+        }
+        for a in ["ata1", "ata2"] {
+            std::fs::create_dir_all(root.join(format!("sys/bus/pci/devices/0000:00:13.0/{a}"))).unwrap();
         }
         for (i, n) in MODELS[0].nics.iter().enumerate() {
             let dir = root.join(format!("sys/bus/pci/devices/{n}/net/eth{i}"));
@@ -219,6 +343,8 @@ pub mod testing {
         }
         if let Some(h) = hwmon {
             w(root, "sys/class/hwmon/hwmon1/name", &format!("{h}\n"));
+            w(root, "sys/class/hwmon/hwmon1/fan1_input", "0\n");
+            w(root, "sys/class/hwmon/hwmon1/temp3_input", "39000\n");
         }
     }
 }
@@ -251,7 +377,36 @@ mod tests {
         change("sys/class/dmi/id/sys_vendor", "QNAP\n");
         change("proc/cpuinfo", "model name\t: Intel(R) Celeron(R) CPU J1900\n");
         change("sys/bus/pci/devices/0000:03:00.0/device", "0x1539\n");
+        change("sys/bus/pci/devices/0000:03:00.0/subsystem_vendor", "0x1baa\n");
         change("sys/class/net/eth1/address", "00:11:22:33:44:55\n");
+    }
+
+    #[test]
+    fn sibling_shapes_are_rejected() {
+        // one extra PCI device (an added card, a different board)
+        let d = tempfile::tempdir().unwrap();
+        fake_hs251(d.path(), Some("f71869a"));
+        std::fs::create_dir_all(d.path().join("sys/bus/pci/devices/0000:05:00.0")).unwrap();
+        assert_eq!(identify(d.path()), None, "extra device");
+        // one PCI device missing
+        let d = tempfile::tempdir().unwrap();
+        fake_hs251(d.path(), Some("f71869a"));
+        std::fs::remove_dir_all(d.path().join("sys/bus/pci/devices/0000:04:00.0")).unwrap();
+        assert_eq!(identify(d.path()), None, "missing device");
+        // four bays
+        let d = tempfile::tempdir().unwrap();
+        fake_hs251(d.path(), Some("f71869a"));
+        for a in ["ata3", "ata4"] {
+            std::fs::create_dir_all(d.path().join(format!("sys/bus/pci/devices/0000:00:13.0/{a}"))).unwrap();
+        }
+        assert_eq!(identify(d.path()), None, "four bays");
+        assert!(plausible(d.path()).is_some(), "the firmware strings alone are not identification");
+        // a fan turning on a fanless model
+        let d = tempfile::tempdir().unwrap();
+        fake_hs251(d.path(), Some("f71869a"));
+        let m = identify(d.path()).unwrap();
+        std::fs::write(d.path().join("sys/class/hwmon/hwmon1/fan1_input"), "1100\n").unwrap();
+        assert_eq!(chip(d.path(), m), Chip::Mismatch);
     }
 
     #[test]
@@ -280,8 +435,12 @@ mod tests {
         assert_eq!((reg(m.usb_copy_button, 2), m.usb_copy_button.offset), (0xE2, 2));
         assert_eq!((reg(m.bays[0].err_led, 1), m.bays[0].err_led.offset), (0x81, 0));
         assert_eq!((reg(m.bays[1].err_led, 1), m.bays[1].err_led.offset), (0x81, 1));
+        // the vendor's brightness register 0xA1, bits 0-3
+        for (i, l) in m.brightness.iter().enumerate() {
+            assert_eq!((reg(*l, 1), l.offset), (0xA1, i as u32));
+        }
         // every line exists in its bank (F71869A: bank 6 has 8 lines, plain F71869 only 6)
-        for l in [m.status_green, m.status_red, m.usb_led, m.reset_button, m.usb_copy_button] {
+        for l in [m.status_green, m.status_red, m.usb_led, m.reset_button, m.usb_copy_button, m.brightness[3]] {
             assert!(l.offset < m.gpio_banks[l.bank as usize]);
         }
     }

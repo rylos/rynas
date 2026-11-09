@@ -4,7 +4,10 @@ use std::time::Duration;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use rynas_hw_qnap::api::{BeepKind, BeepRequest, ButtonAction, MuteResult, QnapSettings, QnapSettingsState, QnapStatus, StatusLed, UsbLed};
+use rynas_hw_qnap::api::{
+    BeepKind, BeepRequest, ButtonAction, ConfirmMapping, MuteResult, PowerRecovery, PowerRecoveryRequest, PowerRecoveryState, QnapSettings, QnapSettingsState,
+    QnapStatus, StatusLed, UsbLed,
+};
 
 use crate::api;
 use crate::form::{Draft, lens, lens_bool, select_field, stale_notice, switch};
@@ -25,6 +28,35 @@ const STATUS_LEDS: &[(&str, &str)] = &[
     ("off", "qnap.led_off"),
 ];
 const BUTTONS: &[(&str, &str)] = &[("notify", "sch.f.notify"), ("log", "qnap.btn_log"), ("ignore", "qnap.btn_ignore")];
+const BRIGHTNESS: &[(&str, &str)] = &[("100", "qnap.bright_100"), ("50", "qnap.bright_50"), ("0", "qnap.bright_0")];
+const POWER_MODES: &[(&str, &str)] = &[("last_state", "qnap.pr_last"), ("power_on", "qnap.pr_on"), ("power_off", "qnap.pr_off")];
+const POWER_URL: &str = "/api/v1/modules/qnap/power-recovery";
+const CONFIRM_URL: &str = "/api/v1/modules/qnap/confirm-mapping";
+
+fn power_str(m: PowerRecovery) -> &'static str {
+    match m {
+        PowerRecovery::LastState => "last_state",
+        PowerRecovery::PowerOn => "power_on",
+        PowerRecovery::PowerOff => "power_off",
+    }
+}
+
+fn power_of(s: &str) -> PowerRecovery {
+    match s {
+        "power_on" => PowerRecovery::PowerOn,
+        "power_off" => PowerRecovery::PowerOff,
+        _ => PowerRecovery::LastState,
+    }
+}
+
+fn power_key(m: PowerRecovery) -> &'static str {
+    match m {
+        PowerRecovery::LastState => "qnap.pr_last",
+        PowerRecovery::PowerOn => "qnap.pr_on",
+        PowerRecovery::PowerOff => "qnap.pr_off",
+    }
+}
+
 const USB_LEDS: &[(&str, &str)] = &[("off", "qnap.led_off"), ("on", "qnap.usb_on"), ("blink", "qnap.usb_blink")];
 
 fn usb_str(u: UsbLed) -> &'static str {
@@ -86,6 +118,7 @@ fn btn_of(s: &str) -> ButtonAction {
 fn feature_key(id: &str) -> &'static str {
     match id {
         "status_led" => "qnap.feat_status_led",
+        "led_brightness" => "qnap.feat_led_brightness",
         "disk_leds" => "qnap.feat_disk_leds",
         "usb_led" => "qnap.feat_usb_led",
         "reset_button" => "qnap.feat_reset_button",
@@ -97,6 +130,8 @@ fn feature_key(id: &str) -> &'static str {
 fn why_key(reason: &str) -> &'static str {
     match reason {
         "wrong_direction" => "qnap.why_wrong_direction",
+        "mapping_unconfirmed" => "qnap.why_mapping_unconfirmed",
+        "write_failed" => "qnap.why_write_failed",
         "led_control_off" => "qnap.why_led_control_off",
         "no_speaker" => "qnap.why_no_speaker",
         _ => "qnap.why_driver_missing",
@@ -170,11 +205,13 @@ fn body(s: QnapSettingsState, settings: Remote<QnapSettingsState>, st: Remote<Qn
     let unverified = Memo::new(move |_| st.data.with(|s| s.as_ref().is_some_and(|s| !s.verified)));
     view! {
         {move || unverified.get().then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {t("qnap.not_verified")} }.into_any()))}
+        {move || unverified.get().then(|| mapping_card(st))}
         <div class="grid">
             {leds_card(d, st)}
             {bays_card(st)}
             {buttons_card(d)}
             {buzzer_card(d, st)}
+            {power_card(st)}
             {events_card(st)}
             {features_card(st)}
         </div>
@@ -192,10 +229,128 @@ fn body(s: QnapSettingsState, settings: Remote<QnapSettingsState>, st: Remote<Qn
     .into_any()
 }
 
+/// The separate confirmation a model not verified on hardware needs: typing its name.
+fn mapping_card(st: Remote<QnapStatus>) -> AnyView {
+    let typed = RwSignal::new(String::new());
+    let busy = RwSignal::new(false);
+    let confirmed = Memo::new(move |_| st.data.with(|s| s.as_ref().is_some_and(|s| s.mapping_confirmed)));
+    let short = Memo::new(move |_| st.data.with(|s| s.as_ref().map(|s| s.short_model.clone()).unwrap_or_default()));
+    let confirm = move |_| {
+        busy.set(true);
+        let body = ConfirmMapping { typed: typed.get_untracked() };
+        spawn_local(async move {
+            let r = api::post_empty(CONFIRM_URL, Some(&body)).await;
+            busy.set(false);
+            match r {
+                Ok(()) => st.reload(),
+                Err(e) => toast(Tone::Err, e.text()),
+            }
+        });
+    };
+    let revoke = move |_| {
+        spawn_local(async move {
+            match api::delete_empty(CONFIRM_URL).await {
+                Ok(()) => st.reload(),
+                Err(e) => toast(Tone::Err, e.text()),
+            }
+        });
+    };
+    view! {
+        <section class="card widget w-12">
+            <WidgetHead icon=icons::TRIANGLE_ALERT title="qnap.mapping" />
+            {move || if confirmed.get() {
+                view! {
+                    <div class="form">
+                        {status(Tone::Ok, t("qnap.mapping_done").to_string())}
+                        <div class="row"><button type="button" class="btn ghost" on:click=revoke>{tr("qnap.mapping_revoke")}</button></div>
+                    </div>
+                }.into_any()
+            } else {
+                view! {
+                    <div class="form">
+                        <p class="muted small">{tr("qnap.mapping_text")}</p>
+                        <div class="field">
+                            <label class="field-label">{move || tf("qnap.mapping_type", &[("model", &short.get())])}</label>
+                            <input class="input" autocomplete="off" prop:value=move || typed.get() on:input=move |ev| typed.set(event_target_value(&ev)) />
+                        </div>
+                        <div class="row">
+                            <button type="button" class="btn primary" disabled=move || busy.get() || typed.with(|t| t.trim() != short.get().as_str()) on:click=confirm>
+                                {crate::form::spinner(busy)}{tr("qnap.mapping_confirm")}
+                            </button>
+                        </div>
+                    </div>
+                }.into_any()
+            }}
+        </section>
+    }
+    .into_any()
+}
+
+/// What happens when mains power comes back: read from the hardware when the card opens,
+/// written only when the button is pressed.
+fn power_card(st: Remote<QnapStatus>) -> AnyView {
+    let current = Remote::<PowerRecoveryState>::new(POWER_URL);
+    let choice = RwSignal::new(String::new());
+    let busy = RwSignal::new(false);
+    let confirmed = Memo::new(move |_| st.data.with(|s| s.as_ref().is_some_and(|s| s.mapping_confirmed)));
+    Effect::new(move || {
+        if let Some(m) = current.data.with(|d| d.as_ref().and_then(|s| s.mode))
+            && choice.with_untracked(String::is_empty)
+        {
+            choice.set(power_str(m).to_string());
+        }
+    });
+    let set_choice = Callback::new(move |v: String| choice.set(v));
+    let apply = move |_| {
+        let body = PowerRecoveryRequest { mode: power_of(&choice.get_untracked()) };
+        busy.set(true);
+        spawn_local(async move {
+            let r = api::put::<_, PowerRecoveryState>(POWER_URL, &body).await;
+            busy.set(false);
+            match r {
+                Ok(_) => {
+                    toast(Tone::Ok, t("qnap.pr_done").to_string());
+                    current.reload();
+                }
+                Err(e) => toast(Tone::Err, e.text()),
+            }
+        });
+    };
+    let same = Memo::new(move |_| {
+        current.data.with(|d| d.as_ref().and_then(|s| s.mode).map(power_str)) == choice.with(|c| POWER_MODES.iter().find(|(v, _)| v == c).map(|(v, _)| *v))
+    });
+    view! {
+        <section class="card widget w-6">
+            <WidgetHead icon=icons::LIFE_BUOY title="qnap.power" />
+            <div class="form">
+                {current.view(3, move || {
+                    let state = current.data.get().unwrap_or_default();
+                    let now = match state.mode {
+                        Some(m) => tf("qnap.pr_now", &[("mode", t(power_key(m)))]).to_string(),
+                        None => t("qnap.pr_unknown").to_string(),
+                    };
+                    view! { <p class="small">{now}</p> }.into_any()
+                })}
+                {select_field("qnap.pr_choice", None, POWER_MODES, Signal::derive(move || choice.get()), set_choice)}
+                <p class="muted small">{tr("qnap.pr_help")}</p>
+                {move || (!confirmed.get()).then(|| view! { <p class="muted small">{tr("qnap.need_confirm")}</p> })}
+                <div class="row">
+                    <button type="button" class="btn primary" disabled=move || busy.get() || !confirmed.get() || same.get() on:click=apply>
+                        {crate::form::spinner(busy)}{tr("qnap.pr_apply")}
+                    </button>
+                </div>
+            </div>
+        </section>
+    }
+    .into_any()
+}
+
 fn leds_card(d: RwSignal<QnapSettings>, st: Remote<QnapStatus>) -> AnyView {
     let (control, set_control) = lens_bool(d, |s| s.led_control, |s, v| s.led_control = v);
     let (mode, set_mode) = lens(d, |s| led_str(s.status_led).into(), |s, v| s.status_led = led_of(&v));
+    let (bright, set_bright) = lens(d, |s| s.led_brightness.to_string(), |s, v| s.led_brightness = v.parse().unwrap_or(100));
     let (disk, set_disk) = lens_bool(d, |s| s.disk_leds, |s, v| s.disk_leds = v);
+    let confirmed = Memo::new(move |_| st.data.with(|s| s.as_ref().is_some_and(|s| s.mapping_confirmed)));
     let (usb, set_usb) = lens(d, |s| usb_str(s.usb_led).into(), |s, v| s.usb_led = usb_of(&v));
     let shown = move || {
         st.data.with(|s| match s.as_ref().map(|s| s.status_led.as_str()) {
@@ -215,8 +370,13 @@ fn leds_card(d: RwSignal<QnapSettings>, st: Remote<QnapStatus>) -> AnyView {
         <section class="card widget w-6">
             <WidgetHead icon=icons::SETTINGS_2 title="qnap.leds" />
             <div class="form">
-                {switch("qnap.led_control", Some("qnap.led_control_help"), control, set_control)}
+                {move || if confirmed.get() {
+                    switch("qnap.led_control", Some("qnap.led_control_help"), control, set_control)
+                } else {
+                    view! { <p class="muted small">{tr("qnap.need_confirm")}</p> }.into_any()
+                }}
                 {select_field("hw.led", None, STATUS_LEDS, mode, set_mode)}
+                {select_field("qnap.brightness", None, BRIGHTNESS, bright, set_bright)}
                 {switch("qnap.disk_leds", None, disk, set_disk)}
                 {select_field("qnap.usb_led", None, USB_LEDS, usb, set_usb)}
                 <p class="muted small">{tr("qnap.shown")}": "{shown}</p>
@@ -233,15 +393,16 @@ fn bays_card(st: Remote<QnapStatus>) -> AnyView {
                 let state = if b.device.is_empty() {
                     t("qnap.bay_empty").to_string()
                 } else {
-                    format!(
-                        "{}: {}",
-                        b.device,
-                        t(match b.led.as_str() {
-                            "on" => "qnap.bay_on",
-                            "blink" => "qnap.bay_blink",
-                            _ => "qnap.bay_off",
-                        })
-                    )
+                    // the LED is only named when rynas is really driving it
+                    let key = match (b.led.as_str(), b.driven) {
+                        ("on", true) => "qnap.bay_on",
+                        ("blink", true) => "qnap.bay_blink",
+                        (_, true) => "qnap.bay_off",
+                        ("on", false) => "qnap.bay_failed",
+                        ("blink", false) => "qnap.bay_warning",
+                        _ => "qnap.bay_ok",
+                    };
+                    format!("{}: {}", b.device, t(key))
                 };
                 view! { <li><strong>{tf("qnap.bay_n", &[("n", &b.bay.to_string())])}</strong>" "<span class="muted">{state}</span></li> }
             }).collect_view()

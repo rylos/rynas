@@ -46,14 +46,33 @@ if qnap:
     w(dmi + "board_vendor", "AMI Corporation\n")
     w(dmi + "board_name", "Aptio CRB\n")
     w("proc/cpuinfo", "model name\t: Intel(R) Celeron(R)  CPU  J1800  @ 2.41GHz\n")
-    for addr, ident in (("00:13.0", "0f23"), ("00:14.0", "0f35"), ("00:1c.2", "0f4c"),
-                        ("00:1c.3", "0f4e"), ("03:00.0", "1533"), ("04:00.0", "1533")):
-        w(f"sys/bus/pci/devices/0000:{addr}/vendor", "0x8086\n")
-        w(f"sys/bus/pci/devices/0000:{addr}/device", f"0x{ident}\n")
+    # (address, device, subsystem): the model's exact PCI set
+    pci = [("00:00.0", "0f00", "8086:0f31"), ("00:02.0", "0f31", "8086:0f31"), ("00:17.0", "0f50", "0000:0000"),
+           ("00:1b.0", "0f04", "8086:7270")]
+    for addr, ident in (("00:11.0", "0f15"), ("00:12.0", "0f16"), ("00:13.0", "0f23"), ("00:14.0", "0f35"),
+                        ("00:18.0", "0f40"), ("00:18.1", "0f41"), ("00:18.2", "0f42"), ("00:18.3", "0f43"),
+                        ("00:18.4", "0f44"), ("00:18.5", "0f45"), ("00:18.6", "0f46"), ("00:18.7", "0f47"),
+                        ("00:1a.0", "0f18"), ("00:1c.0", "0f48"), ("00:1c.1", "0f4a"), ("00:1c.2", "0f4c"),
+                        ("00:1c.3", "0f4e"), ("00:1f.0", "0f1c"), ("00:1f.3", "0f12")):
+        pci.append((addr, ident, f"8086:{ident}"))
+    for addr, ident in (("00:1e.0", "0f06"), ("00:1e.1", "0f08"), ("00:1e.2", "0f09"), ("00:1e.3", "0f0a"),
+                        ("00:1e.4", "0f0c"), ("00:1e.5", "0f0e")):
+        pci.append((addr, ident, "0000:0000"))
+    pci += [("03:00.0", "1533", "ffff:0000"), ("04:00.0", "1533", "ffff:0000")]
+    for addr, ident, sub in pci:
+        d = f"sys/bus/pci/devices/0000:{addr}/"
+        sv, si = sub.split(":")
+        w(d + "vendor", "0x8086\n")
+        w(d + "device", f"0x{ident}\n")
+        w(d + "subsystem_vendor", f"0x{sv}\n")
+        w(d + "subsystem_device", f"0x{si}\n")
+    for a in ("ata1", "ata2"):
+        os.makedirs(os.path.join(root, f"sys/bus/pci/devices/0000:00:13.0/{a}"), exist_ok=True)
     for i, addr in enumerate(("03:00.0", "04:00.0")):
         os.makedirs(os.path.join(root, f"sys/bus/pci/devices/0000:{addr}/net/eth{i}"), exist_ok=True)
         w(f"sys/class/net/eth{i}/address", f"00:08:9b:00:00:0{i}\n")
     w("sys/class/hwmon/hwmon1/name", "f71869a\n")
+    w("sys/class/hwmon/hwmon1/fan1_input", "0\n")
     w("sys/class/hwmon/hwmon1/temp1_input", "41000\n")
     w("sys/class/hwmon/hwmon1/temp3_input", "33000\n")
     for disk, ata, port in (("sda", 1, 1), ("sdb", 2, 2)):

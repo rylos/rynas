@@ -1,8 +1,13 @@
 //! GPIO lines through the character device (`/dev/gpiochip*`, uAPI v2, kernel >= 5.10): chips
 //! are found by label, so no GPIO numbers are hardcoded (gpio-f7188x registers each bank with
 //! a dynamic base). The backends are behind [`Gpio`]: the real one, and [`MemoryGpio`] for
-//! tests and the dry instance. Requests are held open for the life of the backend, so a line
-//! is requested once. **Only `control` calls this, and only after `model::confirm`.**
+//! tests and the dry instance. Requests are held until [`Gpio::release`].
+//!
+//! Lines are requested with **no direction flag** ("as is", `gpiolib-cdev.c`): the kernel then
+//! neither rewrites the direction register nor forces push-pull (requesting `OUTPUT` writes
+//! `regbase + 3` and survives the process). Only the data register is written, which is all
+//! the vendor's HAL does on these lines; a write works because the line is already an output,
+//! which `direction` checks. **Only `control` and `superio` call this, after `confirm`.**
 
 use std::collections::HashMap;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -27,6 +32,8 @@ pub trait Gpio: Send {
     fn read(&mut self, chip: &str, line: u32) -> Result<bool, String>;
     /// Drives an output line to an electrical level.
     fn write(&mut self, chip: &str, line: u32, high: bool) -> Result<(), String>;
+    /// Gives a line back (its level stays).
+    fn release(&mut self, chip: &str, line: u32);
 }
 
 const fn ior(nr: u64, size: u64) -> libc::c_ulong {
@@ -104,9 +111,7 @@ const GET_LINEINFO: libc::c_ulong = iowr(0x05, size_of::<LineInfo>() as u64);
 const GET_LINE: libc::c_ulong = iowr(0x07, size_of::<LineRequest>() as u64);
 const GET_VALUES: libc::c_ulong = iowr(0x0E, size_of::<LineValues>() as u64);
 const SET_VALUES: libc::c_ulong = iowr(0x0F, size_of::<LineValues>() as u64);
-const FLAG_INPUT: u64 = 1 << 2;
 const FLAG_OUTPUT: u64 = 1 << 3;
-const ATTR_OUTPUT_VALUES: u32 = 2;
 
 /// SAFETY of the callers: `T` is the `repr(C)` structure the kernel expects for `req`.
 unsafe fn ioctl_ptr<T>(fd: i32, req: libc::c_ulong, arg: *mut T) -> std::io::Result<()> {
@@ -130,7 +135,7 @@ struct Chip {
     label: String,
     lines: u32,
     file: std::fs::File,
-    held: HashMap<(u32, bool), OwnedFd>,
+    held: HashMap<u32, OwnedFd>,
 }
 
 /// The real backend. Chips are opened once (the banks do not change while rynasd runs).
@@ -138,6 +143,16 @@ struct Chip {
 pub struct CdevGpio {
     chips: Vec<Chip>,
     opened: bool,
+}
+
+/// The request of one line, as is: no direction, no drive mode, no output value.
+fn line_request(line: u32) -> LineRequest {
+    let mut req: LineRequest = zero();
+    req.offsets[0] = line;
+    let name = b"rynas-qnap";
+    req.consumer[..name.len()].copy_from_slice(name);
+    req.num_lines = 1;
+    req
 }
 
 impl CdevGpio {
@@ -152,6 +167,8 @@ impl CdevGpio {
             .filter(|n| n.starts_with("gpiochip"))
             .collect();
         names.sort();
+        // all of them or none: a failure halfway must not leave a partial list behind
+        let mut chips = Vec::with_capacity(names.len());
         for n in names {
             let path = format!("/dev/{n}");
             let file = std::fs::File::options()
@@ -163,13 +180,14 @@ impl CdevGpio {
             // SAFETY: GET_CHIPINFO fills a gpiochip_info
             unsafe { ioctl_ptr(file.as_raw_fd(), GET_CHIPINFO, &mut info) }
                 .map_err(|e| format!("{path}: {e}"))?;
-            self.chips.push(Chip {
+            chips.push(Chip {
                 label: cstr(&info.label),
                 lines: info.lines,
                 file,
                 held: HashMap::new(),
             });
         }
+        self.chips = chips;
         self.opened = true;
         Ok(())
     }
@@ -182,31 +200,18 @@ impl CdevGpio {
             .ok_or_else(|| format!("no GPIO chip labelled {label}"))
     }
 
-    fn request(chip: &mut Chip, line: u32, output: Option<bool>) -> Result<i32, String> {
-        let key = (line, output.is_some());
-        if let Some(fd) = chip.held.get(&key) {
+    fn request(chip: &mut Chip, line: u32) -> Result<i32, String> {
+        if let Some(fd) = chip.held.get(&line) {
             return Ok(fd.as_raw_fd());
         }
-        let mut req: LineRequest = zero();
-        req.offsets[0] = line;
-        let name = b"rynas-qnap";
-        req.consumer[..name.len()].copy_from_slice(name);
-        req.num_lines = 1;
-        req.config.flags = if output.is_some() { FLAG_OUTPUT } else { FLAG_INPUT };
-        if let Some(high) = output {
-            req.config.num_attrs = 1;
-            req.config.attrs[0] = ConfigAttr {
-                attr: Attr { id: ATTR_OUTPUT_VALUES, padding: 0, value: u64::from(high) },
-                mask: 1,
-            };
-        }
+        let mut req = line_request(line);
         // SAFETY: GET_LINE reads and fills a gpio_v2_line_request
         unsafe { ioctl_ptr(chip.file.as_raw_fd(), GET_LINE, &mut req) }
             .map_err(|e| format!("{} line {line}: {e}", chip.label))?;
         // SAFETY: the kernel returned a new file descriptor that nothing else owns
         let fd = unsafe { OwnedFd::from_raw_fd(req.fd) };
         let raw = fd.as_raw_fd();
-        chip.held.insert(key, fd);
+        chip.held.insert(line, fd);
         Ok(raw)
     }
 }
@@ -233,7 +238,7 @@ impl Gpio for CdevGpio {
 
     fn read(&mut self, chip: &str, line: u32) -> Result<bool, String> {
         let c = self.chip(chip)?;
-        let fd = Self::request(c, line, None)?;
+        let fd = Self::request(c, line)?;
         let mut v = LineValues { bits: 0, mask: 1 };
         // SAFETY: GET_VALUES reads and fills a gpio_v2_line_values
         unsafe { ioctl_ptr(fd, GET_VALUES, &mut v) }.map_err(|e| format!("{chip} line {line}: {e}"))?;
@@ -242,14 +247,16 @@ impl Gpio for CdevGpio {
 
     fn write(&mut self, chip: &str, line: u32, high: bool) -> Result<(), String> {
         let c = self.chip(chip)?;
-        let known = c.held.contains_key(&(line, true));
-        let fd = Self::request(c, line, Some(high))?;
-        if known {
-            let mut v = LineValues { bits: u64::from(high), mask: 1 };
-            // SAFETY: SET_VALUES reads a gpio_v2_line_values
-            unsafe { ioctl_ptr(fd, SET_VALUES, &mut v) }.map_err(|e| format!("{chip} line {line}: {e}"))?;
+        let fd = Self::request(c, line)?;
+        let mut v = LineValues { bits: u64::from(high), mask: 1 };
+        // SAFETY: SET_VALUES reads a gpio_v2_line_values
+        unsafe { ioctl_ptr(fd, SET_VALUES, &mut v) }.map_err(|e| format!("{chip} line {line}: {e}"))
+    }
+
+    fn release(&mut self, chip: &str, line: u32) {
+        if let Ok(c) = self.chip(chip) {
+            c.held.remove(&line);
         }
-        Ok(())
     }
 }
 
@@ -263,6 +270,9 @@ struct Mem {
     direction: HashMap<(String, u32), Direction>,
     level: HashMap<(String, u32), bool>,
     writes: Vec<(String, u32, bool)>,
+    released: Vec<(String, u32)>,
+    fail_write: bool,
+    fail_chips: bool,
 }
 
 impl MemoryGpio {
@@ -282,6 +292,21 @@ impl MemoryGpio {
         self.0.lock().unwrap().level.get(&(chip.to_string(), line)).copied()
     }
 
+    /// Writes fail from now on (or work again).
+    pub fn set_fail_write(&self, fail: bool) {
+        self.0.lock().unwrap().fail_write = fail;
+    }
+
+    /// The chip list becomes unreadable (or readable again).
+    pub fn set_fail_chips(&self, fail: bool) {
+        self.0.lock().unwrap().fail_chips = fail;
+    }
+
+    /// Lines given back so far.
+    pub fn released(&self) -> Vec<(String, u32)> {
+        self.0.lock().unwrap().released.clone()
+    }
+
     /// Every write so far: `(chip, line, level)`.
     pub fn writes(&self) -> Vec<(String, u32, bool)> {
         self.0.lock().unwrap().writes.clone()
@@ -290,7 +315,11 @@ impl MemoryGpio {
 
 impl Gpio for MemoryGpio {
     fn chips(&mut self) -> Result<Vec<ChipInfo>, String> {
-        Ok(self.0.lock().unwrap().chips.clone())
+        let g = self.0.lock().unwrap();
+        if g.fail_chips {
+            return Err("permission denied".into());
+        }
+        Ok(g.chips.clone())
     }
 
     fn direction(&mut self, chip: &str, line: u32) -> Result<Direction, String> {
@@ -307,9 +336,16 @@ impl Gpio for MemoryGpio {
 
     fn write(&mut self, chip: &str, line: u32, high: bool) -> Result<(), String> {
         let mut g = self.0.lock().unwrap();
+        if g.fail_write {
+            return Err("write failed".into());
+        }
         g.level.insert((chip.to_string(), line), high);
         g.writes.push((chip.to_string(), line, high));
         Ok(())
+    }
+
+    fn release(&mut self, chip: &str, line: u32) {
+        self.0.lock().unwrap().released.push((chip.to_string(), line));
     }
 }
 
@@ -328,5 +364,12 @@ mod tests {
         assert_eq!(GET_LINE, 0xC250_B407);
         assert_eq!(GET_LINEINFO, 0xC100_B405);
         assert_eq!(GET_CHIPINFO, 0x8044_B401);
+    }
+
+    /// No direction flag and no drive flag: the kernel leaves the line's registers alone.
+    #[test]
+    fn lines_are_requested_as_is() {
+        let r = line_request(3);
+        assert_eq!((r.offsets[0], r.num_lines, r.config.flags, r.config.num_attrs), (3, 1, 0, 0));
     }
 }
