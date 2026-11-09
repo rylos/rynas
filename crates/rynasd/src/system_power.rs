@@ -28,8 +28,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::State;
 use axum::extract::rejection::JsonRejection;
+use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -319,8 +319,26 @@ pub fn router(st: SpState) -> Router {
         ))
 }
 
-async fn state_get(State(st): State<SpState>) -> Res<Json<SystemPowerState>> {
+/// `GET /v1/system/power?pending_only=true`: the scheduled action and nothing else. The UI asks
+/// this on every start; the warnings run `smbstatus`, so they are read only when the restart
+/// dialog opens.
+#[derive(serde::Deserialize, Default)]
+struct StateQuery {
+    #[serde(default)]
+    pending_only: bool,
+}
+
+async fn state_get(
+    State(st): State<SpState>,
+    Query(q): Query<StateQuery>,
+) -> Res<Json<SystemPowerState>> {
     let s = sp(&st)?;
+    if q.pending_only {
+        return Ok(Json(SystemPowerState {
+            pending: s.pending(),
+            warnings: Vec::new(),
+        }));
+    }
     Ok(Json(s.state().await))
 }
 

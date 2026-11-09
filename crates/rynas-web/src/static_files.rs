@@ -9,8 +9,9 @@
 //!   (`no-cache`, `Last-Modified` from `ServeDir`).
 //! - `.br`/`.gz` siblings, if the build produced them, are served as is; otherwise the
 //!   compression layer of the app gzips on the fly (level 4, bodies over 1 KiB).
-//! - `files-app/` is the file manager (a Web Component the Files page loads on demand): plain
-//!   ES modules without hashes, revalidated (`no-cache` + `Last-Modified`).
+//! - `files-app-<hash>/` is the file manager (a Web Component the Files page loads on demand):
+//!   plain ES modules in a folder named after its contents (`hash-files-app.sh`), so immutable
+//!   as well; the unhashed `files-app/` of a dev build is revalidated.
 //! - `/files/<path>` is a route of the interface even when the last segment has a dot (a
 //!   folder `photos.2024`): it gets `index.html`, not a 404.
 
@@ -20,7 +21,7 @@ use std::time::SystemTime;
 
 use axum::Router;
 use axum::extract::{Request, State};
-use axum::http::{HeaderValue, StatusCode, Uri, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
@@ -91,6 +92,13 @@ pub fn inline_scripts(html: &str) -> Vec<&str> {
     out
 }
 
+/// Entity tag of `index.html`: changes exactly when the page changes.
+fn etag_of(html: &str) -> String {
+    let d = Sha256::digest(html.as_bytes());
+    let hex: String = d.iter().take(8).map(|b| format!("{b:02x}")).collect();
+    format!("\"{hex}\"")
+}
+
 pub fn csp_for(html: &str) -> String {
     let hashes: String = inline_scripts(html)
         .into_iter()
@@ -102,12 +110,17 @@ pub fn csp_for(html: &str) -> String {
     CSP_TEMPLATE.replace("{scripts}", &hashes)
 }
 
-/// Whether a file name carries a content hash (trunk: `rynas-ui-0123456789abcdef_bg.wasm`).
+/// Whether a file name carries a content hash (trunk: `rynas-ui-0123456789abcdef_bg.wasm`), or
+/// it sits in a folder named after its contents (`/files-app-0123456789abcdef/js/main.js`).
 pub fn is_hashed(path: &str) -> bool {
+    let hex16 = |p: &str| p.len() >= 16 && p.bytes().all(|b| b.is_ascii_hexdigit());
     let file = path.rsplit('/').next().unwrap_or(path);
     let stem = file.split('.').next().unwrap_or(file);
-    stem.split(['-', '_'])
-        .any(|p| p.len() >= 16 && p.bytes().all(|b| b.is_ascii_hexdigit()))
+    stem.split(['-', '_']).any(hex16)
+        || path
+            .split('/')
+            .filter_map(|p| p.strip_prefix("files-app-"))
+            .any(hex16)
 }
 
 /// The UI directory and the last `index.html` read from it.
@@ -121,6 +134,7 @@ struct CachedIndex {
     mtime: SystemTime,
     html: Arc<str>,
     csp: Option<HeaderValue>,
+    etag: Option<HeaderValue>,
 }
 
 impl Shell {
@@ -141,6 +155,7 @@ impl Shell {
         let c = CachedIndex {
             mtime,
             csp: HeaderValue::from_str(&csp_for(&html)).ok(),
+            etag: HeaderValue::from_str(&etag_of(&html)).ok(),
             html: html.into(),
         };
         *self.cached.lock().unwrap_or_else(|e| e.into_inner()) = Some(c.clone());
@@ -148,7 +163,7 @@ impl Shell {
     }
 }
 
-async fn index(State(shell): State<Arc<Shell>>, uri: Uri) -> Response {
+async fn index(State(shell): State<Arc<Shell>>, uri: Uri, headers: HeaderMap) -> Response {
     let path = uri.path();
     let last = path.rsplit('/').next().unwrap_or("");
     if path != "/index.html" && last.contains('.') && !is_ui_route(path) {
@@ -157,9 +172,22 @@ async fn index(State(shell): State<Arc<Shell>>, uri: Uri) -> Response {
     }
     match shell.index().await {
         Ok(c) => {
-            let mut r = Html(c.html.to_string()).into_response();
+            // the page changes only with an upgrade: a repeat load revalidates and gets a 304
+            let matches = c
+                .etag
+                .as_ref()
+                .zip(headers.get(header::IF_NONE_MATCH))
+                .is_some_and(|(e, inm)| e == inm);
+            let mut r = if matches {
+                StatusCode::NOT_MODIFIED.into_response()
+            } else {
+                Html(c.html.to_string()).into_response()
+            };
             let h = r.headers_mut();
             h.insert(header::CACHE_CONTROL, HeaderValue::from_static(NO_CACHE));
+            if let Some(v) = c.etag {
+                h.insert(header::ETAG, v);
+            }
             if let Some(v) = c.csp {
                 h.insert(header::CONTENT_SECURITY_POLICY, v);
             }
@@ -234,6 +262,9 @@ mod tests {
         assert!(!is_hashed("/favicon.svg"));
         assert!(!is_hashed("/index.html"));
         assert!(!is_hashed("/fonts/inter-var.woff2"));
+        assert!(is_hashed("/files-app-0123456789abcdef/js/main.js"));
+        assert!(is_hashed("/files-app-0123456789abcdef/rynas-files.js"));
+        assert!(!is_hashed("/files-app/js/main.js"));
     }
 
     #[test]
@@ -245,6 +276,14 @@ mod tests {
         assert!(FILE_VIEW_CSP.contains("frame-ancestors 'self'"));
         assert!(!FILE_VIEW_CSP.contains("script-src"));
         assert!(default_csp().contains("img-src 'self' data: blob:"));
+    }
+
+    #[test]
+    fn index_etag_follows_the_contents() {
+        let a = etag_of("<html>a</html>");
+        assert!(a.starts_with('"') && a.ends_with('"') && a.len() == 18);
+        assert_eq!(a, etag_of("<html>a</html>"));
+        assert_ne!(a, etag_of("<html>b</html>"));
     }
 
     #[test]

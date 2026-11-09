@@ -279,10 +279,10 @@ impl Live {
         if self.conn.get_untracked() != Conn::Live {
             self.conn.set(Conn::Connecting);
         }
+        // the history does not wait for the system info: on a phone every hop in the chain is a
+        // round trip more before the dashboard can draw
+        self.refresh_system();
         spawn_local(async move {
-            if let Some(info) = self.outcome(Res::System, api::get::<SystemInfo>("/api/v1/system").await) {
-                self.set_system(info);
-            }
             self.load_history().await;
             if auth().is_ready() && !stream_open() {
                 self.open_stream();

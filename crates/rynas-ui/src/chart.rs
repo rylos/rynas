@@ -134,6 +134,11 @@ struct Snap {
     label: String,
     /// prefers-reduced-motion: no scrolling, the newest sample sits on the right edge.
     still: bool,
+    /// Size of the canvas in CSS pixels and the device pixel ratio, read with each new sample
+    /// or layout change: never in the animation loop, where each read forces a layout.
+    w: f64,
+    h: f64,
+    dpr: f64,
 }
 
 impl Snap {
@@ -250,11 +255,10 @@ impl Scale {
 /// Draw the snapshot with the right edge of the chart at server time `t` (ms) and the scale
 /// top at `top` (eased); the label shows `label_top`, where the scale is going: a round value.
 fn draw(canvas: &HtmlCanvasElement, series: &[Series], snap: &Snap, o: Opts, t: f64, top: f32, label_top: f32) {
-    let (cw, ch) = (canvas.client_width() as f64, canvas.client_height() as f64);
+    let (cw, ch, dpr) = (snap.w, snap.h, snap.dpr);
     if cw <= 0.0 || ch <= 0.0 {
         return;
     }
-    let dpr = window().device_pixel_ratio().max(1.0);
     let (pw, ph) = ((cw * dpr).round() as u32, (ch * dpr).round() as u32);
     if canvas.width() != pw || canvas.height() != ph {
         canvas.set_width(pw);
@@ -364,6 +368,10 @@ fn edge_time(snap: &Snap) -> f64 {
     (server_now() - 2.0 * step).clamp(last - 3.0 * step, last - step)
 }
 
+/// How long after a chart appears its animation loop starts (ms): under the first page's
+/// requests and layouts, canvases drawn 60 times a second are what the main thread can least afford.
+const LOOP_START_MS: u64 = 1200;
+
 /// A live chart bound to the metrics history. It scrolls continuously (requestAnimationFrame at
 /// 30-60 fps, paused in hidden tabs); static with reduced motion.
 #[component]
@@ -387,28 +395,43 @@ pub fn LiveChart(
     let snap = StoredValue::new(Snap::default());
     let running = StoredValue::new(false);
     let scale = StoredValue::new(Scale::default());
+    // the theme's colours (for `dark`): reading them forces a style recalculation of the page,
+    // so once per theme and not once per sample
+    let theme = StoredValue::new(None::<(bool, Vec<String>, String, String)>);
 
     // new sample, theme or layout change: refresh the snapshot and redraw once
     Effect::new(move || {
         live.tick.track();
-        ui.dark.track();
+        let dark = ui.dark.get();
         ui.layout_tick.track();
         ui.sidebar_collapsed.track();
         let Some(canvas) = node.get() else { return };
-        let style = window().get_computed_style(&canvas).ok().flatten();
-        let var = |name: &str| style.as_ref().and_then(|s| s.get_property_value(name).ok()).unwrap_or_default();
+        if !theme.with_value(|t| t.as_ref().is_some_and(|t| t.0 == dark)) {
+            let style = window().get_computed_style(&canvas).ok().flatten();
+            let var = |name: &str| style.as_ref().and_then(|s| s.get_property_value(name).ok()).unwrap_or_default();
+            let colors: Vec<String> = series.with_value(|ss| ss.iter().map(|s| var(s.color)).collect());
+            // an empty value means the styles were not applied yet: ask again next time
+            if colors.iter().all(|c| !c.is_empty()) {
+                theme.set_value(Some((dark, colors, var("--chart-grid"), var("--text-subtle"))));
+            }
+        }
+        let (colors, grid, label) = theme.with_value(|t| t.as_ref().map(|t| (t.1.clone(), t.2.clone(), t.3.clone()))).unwrap_or_default();
+        let (w, h, dpr) = (canvas.client_width() as f64, canvas.client_height() as f64, window().device_pixel_ratio().max(1.0));
         let next = series.with_value(|ss| {
-            live.history.with_value(|h| {
+            live.history.with_value(|hist| {
                 // two extra samples on the left: the line enters from the edge while scrolling and
                 // the first visible piece already has both of its tangents
-                let skip = h.len().saturating_sub(points + 2);
+                let skip = hist.len().saturating_sub(points + 2);
                 Snap {
-                    ts: h.iter().skip(skip).map(|m| m.ts_ms as f64).collect(),
-                    data: ss.iter().map(|s| h.iter().skip(skip).map(|m| (s.get)(m)).collect()).collect(),
-                    colors: ss.iter().map(|s| var(s.color)).collect(),
-                    grid: var("--chart-grid"),
-                    label: var("--text-subtle"),
+                    ts: hist.iter().skip(skip).map(|m| m.ts_ms as f64).collect(),
+                    data: ss.iter().map(|s| hist.iter().skip(skip).map(|m| (s.get)(m)).collect()).collect(),
+                    colors,
+                    grid,
+                    label,
                     still: reduced_motion(),
+                    w,
+                    h,
+                    dpr,
                 }
             })
         });
@@ -420,7 +443,10 @@ pub fn LiveChart(
         series.with_value(|ss| snap.with_value(|sn| draw(&canvas, ss, sn, opts, edge_time(sn), sc.at(now), sc.to)));
         if !running.get_value() && !still {
             running.set_value(true);
-            frame(canvas, series, snap, scale, running, opts, 0.0);
+            // the page is still arriving (requests, layouts): the loop starts once that is done;
+            // until then each new sample draws through this effect
+            let start = move || frame(canvas, series, snap, scale, running, opts, 0.0);
+            set_timeout(start, std::time::Duration::from_millis(LOOP_START_MS));
         }
     });
 
@@ -439,6 +465,15 @@ pub fn LiveChart(
             running.try_set_value(false);
             return;
         }
+        // not laid out yet when the sample arrived (just mounted): measure until it is
+        if snap.try_with_value(|sn| sn.w <= 0.0).unwrap_or(false) {
+            let (w, h) = (canvas.client_width() as f64, canvas.client_height() as f64);
+            snap.try_update_value(|sn| {
+                sn.w = w;
+                sn.h = h;
+                sn.dpr = window().device_pixel_ratio().max(1.0);
+            });
+        }
         let now = js_sys::Date::now();
         let mut drawn = last;
         if !document().hidden() {
@@ -446,7 +481,7 @@ pub fn LiveChart(
                 .try_with_value(|sn| {
                     let n = sn.ts.len().max(2);
                     let span = (window_len(n, o.points) - 1) as f64 * sn.step_ms();
-                    let px_per_ms = canvas.client_width() as f64 * window().device_pixel_ratio().max(1.0) / span;
+                    let px_per_ms = sn.w * sn.dpr / span;
                     // at least 30 fps: steep pieces move vertically much more than the scroll
                     // itself, so a slower rate shows steps; 60 fps only when the scroll is fast
                     (0.25 / px_per_ms.max(1e-9)).clamp(16.0, 33.0)

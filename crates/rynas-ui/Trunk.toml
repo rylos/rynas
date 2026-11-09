@@ -4,6 +4,14 @@ target = "index.html"
 dist = "dist"
 filehash = true
 minify = "on_release"
+# size-optimized profile for the wasm only (native binaries are built for speed)
+cargo_profile = "wasm-release"
+
+# the file manager's folder gets a content hash too (immutable caching): see the script
+[[hooks]]
+stage = "post_build"
+command = "sh"
+command_arguments = ["hash-files-app.sh"]
 
 [serve]
 addresses = ["127.0.0.1"]

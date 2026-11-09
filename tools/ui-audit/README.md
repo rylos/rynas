@@ -59,6 +59,13 @@ quality reviews (docs/quality/). Nothing here touches the host system or a runni
   `d.fake_btrfs()` (a btrfs `/volume1`, shares on btrfs), `d.fake_trial("boot"|"booted")` (the
   network migration planned for, or done at, this boot) and `d.answer(url_re, json)` rewrite
   answers in the page for states the dry instance cannot reach (see its docstring).
+- `perf.py <label>`: how fast the UI starts and changes page, repeatable: login and dashboard
+  cold/warm, every main page, the Files page, the endpoints; three scenarios (desktop, CPU 4x +
+  Wi-Fi, CPU 6x + weak link), as a plain-HTTP LAN site (the browser only sees gzip there). Serve
+  what a NAS serves: `perf_stage.sh <dist> <dir>` then `UI_DIR=<dir> tools/ui-audit/start.sh`
+  (`UI_DIR` picks the dist of the instance), and let it run ~10 min first (the dashboard loads
+  10 minutes of metrics). `perf.py --compare a b` prints two runs side by side; details in its
+  docstring. Results in `target/ui-audit/perf/`.
 - `cdp.py` is a minimal DevTools-protocol driver; `run_all.py` has login and client-side navigation;
   `states.py` checks the loading/error states (second instance with rynasd stopped).
 - `files_reenter.py`: leave the file manager and come back (sidebar, router, `?window`): the Files

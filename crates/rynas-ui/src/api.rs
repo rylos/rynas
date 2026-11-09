@@ -111,6 +111,8 @@ struct WireError {
 thread_local! {
     /// `Date` header of the last answer, in ms (to estimate the clock skew with the server).
     static LAST_DATE: Cell<Option<f64>> = const { Cell::new(None) };
+    /// When the wasm started ([`init`]).
+    static STARTED: Cell<f64> = const { Cell::new(0.0) };
     /// Time of the last key, click or wheel event (ms, `Date.now()`); page load counts.
     static LAST_INPUT: Cell<f64> = const { Cell::new(0.0) };
 }
@@ -125,6 +127,7 @@ fn user_active() -> bool {
 
 /// Starts tracking user input for the background marker (called once from `main`).
 pub fn init() {
+    STARTED.with(|c| c.set(js_sys::Date::now()));
     let mark = |_| LAST_INPUT.with(|c| c.set(js_sys::Date::now()));
     mark(());
     // registered once for the life of the page
@@ -145,6 +148,35 @@ async fn text(resp: &Response) -> Option<String> {
 /// Every request gives up after this long (the API answers in milliseconds; long work is a task).
 pub const TIMEOUT_MS: u32 = 30_000;
 
+/// How long after the page started the requests of `index.html` can stand for a new one.
+const EARLY_MAX_MS: f64 = 10_000.0;
+
+/// Drops the requests `index.html` started: they belong to the session of that moment (called
+/// when a session ends, so a new sign-in does not reuse a 401).
+pub fn forget_early() {
+    let _ = js_sys::Reflect::delete_property(window().unchecked_ref::<js_sys::Object>(), &"__rynasEarly".into());
+}
+
+/// The request `index.html` started for this GET while the wasm was loading
+/// (`window.__rynasEarly`), taken only once: a later reload of the same URL asks the server again.
+fn early_answer(method: &str, url: &str) -> Option<js_sys::Promise> {
+    if method != "GET" {
+        return None;
+    }
+    // for the page's own start only, not for a later resume with data that old
+    if js_sys::Date::now() - STARTED.with(Cell::get) > EARLY_MAX_MS {
+        forget_early();
+        return None;
+    }
+    let early = js_sys::Reflect::get(&window(), &"__rynasEarly".into()).ok()?;
+    if !early.is_object() {
+        return None;
+    }
+    let p = js_sys::Reflect::get(&early, &url.into()).ok()?.dyn_into::<js_sys::Promise>().ok()?;
+    let _ = js_sys::Reflect::delete_property(early.unchecked_ref::<js_sys::Object>(), &url.into());
+    Some(p)
+}
+
 async fn send(method: &str, url: &str, body: Option<String>) -> Result<Response, ApiErr> {
     let init = RequestInit::new();
     init.set_method(method);
@@ -164,7 +196,8 @@ async fn send(method: &str, url: &str, body: Option<String>) -> Result<Response,
     }
     init.set_headers(&headers);
     init.set_signal(Some(&web_sys::AbortSignal::timeout_with_u32(TIMEOUT_MS)));
-    let resp: Response = JsFuture::from(window().fetch_with_str_and_init(url, &init))
+    let call = early_answer(method, url).unwrap_or_else(|| window().fetch_with_str_and_init(url, &init));
+    let resp: Response = JsFuture::from(call)
         .await
         .map_err(|e| {
             let name = js_sys::Reflect::get(&e, &JsValue::from_str("name")).ok().and_then(|n| n.as_string());

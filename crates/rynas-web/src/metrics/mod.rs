@@ -160,6 +160,13 @@ impl Store {
                 history::average(&refs)
             })
             .collect();
+        // What only the live numbers read goes on the newest point alone: the charts plot CPU,
+        // memory, network and disk rates. Half the bytes the browser parses at start-up.
+        let n = out.len();
+        for s in out.iter_mut().take(n.saturating_sub(1)) {
+            s.cpu_per_thread = Vec::new();
+            s.temps = Vec::new();
+        }
         if let Some(last) = out.last_mut() {
             last.zram = self.zram.read().unwrap_or_else(|e| e.into_inner()).clone();
         }
@@ -405,5 +412,33 @@ impl Collector {
             store.disk_active_within(disk, temps::DRIVE_ACTIVE)
         });
         s
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn history_keeps_per_thread_and_temperatures_on_the_newest_point_only() {
+        let store = Store::new();
+        for ts_ms in 1..=3 {
+            store.push(MetricsSample {
+                ts_ms,
+                cpu_pct: 10.0,
+                cpu_per_thread: vec![1.0, 2.0],
+                temps: vec![rynas_api_types::Temperature { id: "cpu".into(), label: "CPU".into(), celsius: Some(40.0) }],
+                ..Default::default()
+            });
+        }
+        let h = store.history(60, 600);
+        assert_eq!(h.len(), 3);
+        for old in &h[..2] {
+            assert!(old.cpu_per_thread.is_empty() && old.temps.is_empty(), "{old:?}");
+        }
+        assert_eq!(h[2].cpu_per_thread, vec![1.0, 2.0]);
+        assert_eq!(h[2].temps.len(), 1);
+        // what the charts plot stays on every point
+        assert!(h.iter().all(|s| s.cpu_pct == 10.0));
     }
 }

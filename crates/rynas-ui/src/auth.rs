@@ -72,6 +72,8 @@ pub fn csrf_token() -> Option<String> {
 
 /// A request answered 401: back to the login screen (no reload, route kept).
 pub fn session_lost() {
+    storage_set("rynas.sess", "");
+    api::forget_early();
     if let Some(a) = AUTH.with(Cell::get) {
         match a.phase.get_untracked() {
             Phase::Ready => {
@@ -132,6 +134,7 @@ impl Auth {
     pub fn signed_in(self, s: Session) {
         self.note_skew();
         storage_set("rynas.user", &s.user.username);
+        storage_set("rynas.sess", "1"); // the next load asks for the first screen's data at once (index.html)
         self.session.set(Some(s));
         self.reason.set(Reason::None);
         self.unreachable.set(false);
@@ -154,6 +157,7 @@ impl Auth {
         spawn_local(async move {
             // whatever the answer, the session is over for this tab
             let _ = api::post_empty::<()>("/api/v1/auth/logout", None).await;
+            storage_set("rynas.sess", "");
             self.session.set(None);
             self.reason.set(Reason::SignedOut);
             self.phase.set(Phase::Locked);

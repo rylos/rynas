@@ -67,7 +67,8 @@ pub fn ask(action: SystemPowerAction) {
 fn refresh_pending() {
     let p = power();
     spawn_local(async move {
-        if let Ok(s) = api::get::<SystemPowerState>(URL).await {
+        // only the scheduled action: the warnings are expensive and belong to the dialog
+        if let Ok(s) = api::get::<SystemPowerState>(&format!("{URL}?pending_only=true")).await {
             p.pending.set(s.pending);
         }
         p.loaded.set(true);

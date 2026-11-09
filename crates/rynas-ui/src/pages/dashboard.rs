@@ -1057,6 +1057,12 @@ fn HardwareWidget() -> impl IntoView {
     let h = move || hw.get().unwrap_or_default();
     // the status changes with every reading: the LED pill is built again only when it changes
     let led = Memo::new(move |_| hw.with(|h| h.as_ref().and_then(|h| h.status_led.clone())));
+    // the sensors present, not their readings: the list of chips below is rebuilt only when
+    // one appears or goes away
+    let temp_names = Memo::new(move |_| {
+        let h = hw.get();
+        live.sample.with(|s| alerts::all_temps(s.as_ref(), h.as_ref()).into_iter().map(|t| (t.0, t.1)).collect::<Vec<_>>())
+    });
     view! {
         <section class="card widget">
             <WidgetHead icon=icons::FAN title="w.hardware">
@@ -1079,15 +1085,23 @@ fn HardwareWidget() -> impl IntoView {
                 <div class="hw-col">
                     <div class="mini-title">{tr("hw.temps")}</div>
                     <div class="temp-chips">
-                        {move || {
-                            let h = hw.get();
-                            let v = live.sample.with(|s| alerts::all_temps(s.as_ref(), h.as_ref()));
-                            v.into_iter().map(|(id, l, c)| view! {
-                                <span class=format!("temp-chip {}", temp_tone(&id, c).class())>
-                                    <Icon icon=icons::THERMOMETER size=14 />{temp_label(&id, &l)}<strong class="tnum">{i18n::celsius(c)}</strong>
-                                </span>
-                            }).collect_view()
-                        }}
+                        // one element per sensor, kept while its id exists: a sample changes
+                        // the text and the tone of a chip, not the chip
+                        <For each=move || temp_names.get() key=|t| t.0.clone() let:sensor>
+                            {
+                                let (id, label) = sensor;
+                                let (id2, id3) = (id.clone(), id.clone());
+                                let c = Memo::new(move |_| {
+                                    let h = hw.get();
+                                    live.sample.with(|s| alerts::all_temps(s.as_ref(), h.as_ref()).into_iter().find(|t| t.0 == id2).map(|t| t.2).unwrap_or(f32::NAN))
+                                });
+                                view! {
+                                    <span class=move || format!("temp-chip {}", temp_tone(&id3, c.get()).class())>
+                                        <Icon icon=icons::THERMOMETER size=14 />{temp_label(&id, &label)}<strong class="tnum">{move || i18n::celsius(c.get())}</strong>
+                                    </span>
+                                }
+                            }
+                        </For>
                     </div>
                 </div>
             </div>

@@ -62,7 +62,7 @@ the time), a free-text message (the wall message names rynas and the user).
 
 | Route | Body | Answer |
 |---|---|---|
-| `GET /v1/system/power` | — | `SystemPowerState` {pending? {action restart\|shutdown, at_ms, by?}, warnings [{code, subject?, op?, pct?, n?, text}]} |
+| `GET /v1/system/power[?pending_only=true]` (the option skips the warnings, which run `smbstatus`: what the interface asks at start) | — | `SystemPowerState` {pending? {action restart\|shutdown, at_ms, by?}, warnings [{code, subject?, op?, pct?, n?, text}]} |
 | `POST /v1/system/power` | `SystemPowerRequest` {action, delay_min 0\|1\|5} | 202 `TaskStarted` (`system.restart` / `system.shutdown`); 400 `invalid_value` (`delay_min`) |
 | `POST /v1/system/power/cancel` | — | 204; 409 `nothing_pending` |
 

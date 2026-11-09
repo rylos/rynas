@@ -316,7 +316,9 @@ outline on hover 4.4 on the case. A new dark token needs its row here.
 | Idle backend | < 1% CPU per process on J4125 | `/proc/<pid>/stat` utime+stime over 60 s |
 
 The wasm budget includes the default features of the release build. Track sizes in every UI PR
-(before/after line in the description).
+(before/after line in the description). Timings: `tools/ui-audit/perf.py` (startup, page changes,
+idle main-thread work, the Files page, per endpoint; CPU 4× and 6× + network throttling, cold and warm);
+a change that claims speed shows its numbers with `--compare`.
 
 Only the English texts are compiled into the wasm (2026-11-07): the Italian column of the
 dictionaries is `crates/rynas-ui/assets/i18n/it.txt` (served as `/i18n/it.txt`, `key<TAB>text` lines,
@@ -330,10 +332,16 @@ shows in English and switches to Italian when the file arrives.
   `document.hidden`, and stopped when no visible component needs it. Hardware status comes from
   `hardware.status` on `/events` (no `/hardware` polling); `/config/pending` is polled compact
   (`?detail=1` only for the review dialog).
-- S2 MUST: charts on `<canvas>`; colors and series data read once per sample, never per frame. Live
-  charts scroll continuously by timestamp (decided 2026-11-05 by Marco: smooth, not per sample) at
-  30–60 fps, paused in hidden tabs and when the chart leaves the page, static with reduced motion.
+- S2 MUST: charts on `<canvas>`; series data and sizes read once per sample (or layout change),
+  theme colors once per theme (`getComputedStyle` forces a style recalculation of the page), and
+  nothing read from the DOM inside the animation loop: `clientWidth` in a frame forces a layout.
+  Live charts scroll continuously by timestamp (decided 2026-11-05 by Marco: smooth, not per sample) at
+  30–60 fps, starting 1.2 s after the chart appears (the first page is still loading then), paused in
+  hidden tabs and when the chart leaves the page, static with reduced motion.
   Other animations ≤ 200 ms (the plan's 120–200 ms rule).
+- S2b MUST: anything that animates for long (skeletons, the live indicator) animates `transform` and
+  `opacity` only, in its own layer. `box-shadow`, `background-position` and the like repaint on the
+  main thread every frame; on the app bar that also repaints what the blur behind it covers.
 - S3 MUST: fine-grained signals: a sample updates only the text nodes that show it; `Memo` for derived
   values that feed DOM attributes; no `Vec` clones of the whole history per tick.
 - S4 SHOULD: features over ~20 KiB brotli (file manager, terminal, QR/TOTP enrolment, charts of long
@@ -350,7 +358,15 @@ shows in English and switches to Italian when the file arrives.
   network filesystems, reads on hung devices) run on a dedicated small pool or a child process, never on
   the shared blocking pool that also serves static files.
 - S8 MUST: results of external tools are cached with an explicit TTL and a single-flight guard
-  (concurrent requests share one run).
+  (concurrent requests share one run), and an endpoint read at every start of the interface runs
+  none (`GET /system/power?pending_only=true`: the expensive warnings only for the dialog).
+- S9 MUST: every byte of the first screen earns its place. A signed-in page reload starts the first
+  screen's API calls from `index.html` while the wasm is loading (`window.__rynasEarly`, taken once by
+  `src/api.rs`); `/metrics/history` carries per-thread and temperature data on its newest point only.
+- S10 MUST: assets a build can change are named after their content and served immutable (trunk
+  hashes; `hash-files-app.sh` renames `files-app/` the same way), `index.html` is `no-cache` + `ETag`.
+  No service worker: the interface is tied to the server's version, and a stale worker is the failure
+  this rule prevents (see the measurements in `tools/ui-audit/perf.py`).
 
 ---
 

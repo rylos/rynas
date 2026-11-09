@@ -23,8 +23,16 @@ use crate::auth::auth;
 use crate::i18n::t;
 use crate::ui::{ErrorBox, Skeleton, Tone};
 
-/// The component's entry module (see `files-app/rynas-files.js`).
-const SCRIPT: &str = "/files-app/rynas-files.js";
+/// The component's entry module: the build's folder with a content hash (`hash-files-app.sh`,
+/// `<meta name="rynas-files-app">`), or the plain folder of an unhashed build.
+fn script_url() -> String {
+    document()
+        .query_selector("meta[name=rynas-files-app]")
+        .ok()
+        .flatten()
+        .and_then(|m| m.get_attribute("content"))
+        .unwrap_or_else(|| "/files-app/rynas-files.js".to_string())
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Load {
@@ -71,7 +79,7 @@ fn load_script(state: RwSignal<Load>) {
         return;
     };
     let _ = script.set_attribute("type", "module");
-    let _ = script.set_attribute("src", SCRIPT);
+    let _ = script.set_attribute("src", &script_url());
     let _ = script.set_attribute("data-rynas-files", "");
     // the closures live as long as the page: the script is added once (or again after a
     // failure, which replaces them with new ones on a new element)
@@ -104,7 +112,9 @@ pub fn Files() -> impl IntoView {
             </Show>
             <Show when=move || state.get() == Load::Failed>
                 <div class="card files-wait">
-                    <ErrorBox code=Signal::derive(|| "network".to_string()) on_retry=Callback::new(move |_| load_script(state)) />
+                    // a reload, not a new attempt at the same URL: after an upgrade the old
+                    // folder is gone and only the new page knows the new one
+                    <ErrorBox code=Signal::derive(|| "network".to_string()) on_retry=Callback::new(move |_| { let _ = window().location().reload(); }) />
                 </div>
             </Show>
             <rynas-files

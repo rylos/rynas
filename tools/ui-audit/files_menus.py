@@ -112,7 +112,7 @@ async def drawer(p, tag):
 async def picker(p, tag):
     """The icon picker: opened from a row's context menu, beside the point it was asked at."""
     # open it as the app does from the menu ("Icona…"), at a known point
-    ok = await p.js(f"(async () => {{ const m = await import('/files-app/js/iconpick.js');"
+    ok = await p.js(f"(async () => {{ const m = await import(document.querySelector('meta[name=rynas-files-app]').content.replace('rynas-files.js', 'js/iconpick.js'));"
                     f" const rows = [...{SR}.querySelectorAll('.row')].filter(e => e.offsetParent);"
                     " if (!rows.length) return null; m.pickIcon({x: 300, y: 200}, '/documents'); return true; })()")
     await asyncio.sleep(0.4)

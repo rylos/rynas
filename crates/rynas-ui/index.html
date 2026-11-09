@@ -21,6 +21,17 @@
       if (l === "it" || (l !== "en" && /^it/i.test(navigator.language || ""))) {
         window.__rynasIt = fetch("/i18n/it.txt").then(function (r) { return r.ok ? r.text() : ""; }, function () { return ""; });
       }
+      // Signed in last time: ask now for what the first screen needs, while the wasm is on its
+      // way (src/api.rs takes these answers instead of asking again). Same requests, same rules:
+      // a 401 just means the login screen. The list matches src/live.rs.
+      var s = null;
+      try { s = localStorage.getItem("rynas.sess"); } catch (e) {}
+      if (s && window.AbortSignal && AbortSignal.timeout) {
+        var early = window.__rynasEarly = {};
+        ["/api/v1/auth/session", "/api/v1/system", "/api/v1/metrics/history?minutes=10", "/api/v1/storage", "/api/v1/hardware"].forEach(function (u) {
+          early[u] = fetch(u, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(30000) });
+        });
+      }
     })();
   </script>
   <link rel="preload" href="/fonts/inter-latin.woff2" as="font" type="font/woff2" crossorigin>

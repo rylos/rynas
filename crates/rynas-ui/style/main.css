@@ -251,7 +251,10 @@ kbd {
 .host > span { overflow: hidden; text-overflow: ellipsis; }
 .conn { display: flex; align-items: center; gap: var(--s-2); font-size: var(--fs-12); color: var(--text-subtle); white-space: nowrap; }
 .conn-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-subtle); }
-.conn.live .conn-dot { background: var(--success-fill); box-shadow: 0 0 0 3px color-mix(in oklch, var(--success-fill) 25%, transparent); animation: pulse 2s var(--ease) infinite; }
+/* the halo is a transform + opacity animation of its own layer: animating box-shadow repainted
+   the app bar (blurred background included) on every frame, for as long as the page was open */
+.conn.live .conn-dot { position: relative; background: var(--success-fill); }
+.conn.live .conn-dot::after { content: ""; position: absolute; inset: -3px; border-radius: 50%; background: var(--success-fill); opacity: .25; animation: pulse 2s var(--ease) infinite; }
 .conn.offline { color: var(--danger); }
 .conn.offline .conn-dot { background: var(--danger); }
 .conn.demo {
@@ -261,7 +264,7 @@ kbd {
   border: 1px solid color-mix(in oklch, var(--warning-fill) 45%, transparent);
 }
 .conn.demo .conn-dot { background: var(--warning-fill); }
-@keyframes pulse { 50% { box-shadow: 0 0 0 6px color-mix(in oklch, var(--success-fill) 0%, transparent); } }
+@keyframes pulse { 50% { transform: scale(1.5); opacity: 0; } }
 
 .search {
   margin: 0 auto;
@@ -615,13 +618,16 @@ kbd {
 .tone-text { color: var(--tone); }
 
 .skeleton-group { display: flex; flex-direction: column; gap: var(--s-2); padding: var(--s-1) 0; }
-.skeleton {
-  height: 12px; border-radius: var(--r-sm);
-  background: linear-gradient(90deg, var(--bg) 0%, var(--surface-hover) 50%, var(--bg) 100%);
-  background-size: 200% 100%;
+/* the sweep is a transform on its own layer, not a background-position (a repaint per frame):
+   the page keeps working on the main thread while the skeletons are up */
+.skeleton { position: relative; overflow: hidden; height: 12px; border-radius: var(--r-sm); background: var(--bg); }
+.skeleton::after {
+  content: ""; position: absolute; inset: 0;
+  background: linear-gradient(90deg, transparent, var(--surface-hover), transparent);
+  transform: translateX(-100%);
   animation: shimmer 1.2s linear infinite;
 }
-@keyframes shimmer { to { background-position: -200% 0; } }
+@keyframes shimmer { to { transform: translateX(100%); } }
 
 .empty { display: flex; flex-direction: column; align-items: center; text-align: center; gap: var(--s-3); padding: var(--s-12) var(--s-6); }
 .empty-icon {
@@ -677,7 +683,9 @@ kbd {
 .chart { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 
 .stack { display: flex; height: 10px; border-radius: var(--r-pill); overflow: hidden; gap: var(--s-half); }
-.stack-seg { flex-basis: 0; transition: flex-grow 400ms var(--ease); min-width: 0; }
+/* no transition: flex-grow lays the bar out on every frame, 25 layouts a second for a value that
+   changes once per second */
+.stack-seg { flex-basis: 0; min-width: 0; }
 .stack-seg.c1 { background: var(--c1); } .stack-seg.c2 { background: color-mix(in oklch, var(--c2) 55%, var(--surface)); }
 .stack-seg.rest { background: var(--bg); }
 .legend { display: flex; flex-direction: column; gap: var(--s-1); font-size: var(--fs-13); }
