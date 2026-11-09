@@ -35,7 +35,7 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
-opt-level = "s"
+opt-level = 3
 
 # the key derivation (scrypt) and the crypto are very slow unoptimized: the tests run the
 # dependencies optimized

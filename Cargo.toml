@@ -125,39 +125,18 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
-# Built for size where it pays (review 2026-11-07, M9): on a NAS the daemons are idle most
-# of the time and their resident set is mostly their own code pages (the page cache maps
-# whole large folios: ~95 % of .text is resident at start). Measured idle RSS of rynasd
-# with the dry instance: 23.8 MB at opt-level 3 (heap 2.7 MB, .text 16.8 MB), 20.6 MB
-# with "s", 19.6 MB with "z" (.text 12.3 MB). rynasd is a control-plane daemon: its fat
-# LTO pass runs at its own level, so "z" covers everything linked into it. rynas-web keeps
-# level 3 for itself (it serves files and streams); its dependencies are built with "s",
-# and the crates where speed matters keep full optimization below.
-[profile.release.package."*"]
-opt-level = "s"
-[profile.release.package.rynasd]
-opt-level = "z"
-# a package override does not inherit `strip` from the profile
-strip = true
-[profile.release.package.argon2]
-opt-level = 3
-[profile.release.package.blake2]
-opt-level = 3
-[profile.release.package.ring]
-opt-level = 3
-[profile.release.package.sha2]
-opt-level = 3
-[profile.release.package.sha1]
-opt-level = 3
-[profile.release.package.scrypt]
-opt-level = 3
-[profile.release.package.salsa20]
-opt-level = 3
-[profile.release.package.zstd-sys]
-opt-level = 3
+# Native binaries are built for speed on every hardware (opt-level 3, the release default):
+# size is never traded for speed. On a Celeron, an SMB copy built with "s" spent 76 % of
+# its CPU in the signature's polyval/ghash.
 
-# the wasm UI is size-sensitive
-[profile.release.package.rynas-ui]
+# The wasm UI only (trunk builds it with this profile, see crates/rynas-ui/Trunk.toml): its
+# download size is what the user waits for.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+[profile.wasm-release.package."*"]
+opt-level = "s"
+[profile.wasm-release.package.rynas-ui]
 opt-level = "z"
 
 # argon2 is unusably slow without optimizations: keep tests and debug builds realistic
