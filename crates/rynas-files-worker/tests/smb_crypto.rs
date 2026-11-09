@@ -6,10 +6,10 @@ use aes_gcm::{Aes128Gcm, Aes256Gcm, KeyInit, aead::AeadInOut};
 use smb::connection::transformer::TransformPhase;
 use smb::connection::worker::{Worker, WorkerImpl};
 use smb::crypto::{ENCRYPTING_ALGOS, GmacBackend, SIGNING_ALGOS, force_gmac_backend, kbkdf_hmacsha256, kbkdf_hmacsha256_256, make_encrypting_algo, make_gmac_signer, make_signing_algo};
-use smb::msg_handler::ReceiveOptions;
+use smb::msg_handler::{OutgoingMessage, ReceiveOptions};
 use smb::session::MessageSigner;
 use smb::transport::{IoVec, IoVecBuf, SmbTransport, SmbTransportRead, SmbTransportWrite, TransportError};
-use smb::{Command, EncryptedHeader, EncryptionCipher, Error, Header, HeaderFlags, SigningAlgorithmId};
+use smb::{Command, EncryptedHeader, EncryptionCipher, Error, Header, HeaderFlags, LogoffRequest, SigningAlgorithmId};
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, mpsc};
@@ -394,8 +394,26 @@ impl SmbTransportWrite for NoWrites {
     }
 }
 
-/// [`FakeTransport`] before it is split in two.
-struct FakeConnection(FakeTransport);
+/// A write that finds the connection gone, which ends the worker's send thread. Dropped when
+/// that thread returns, after its receiving end: the message on `gone` says it is over.
+struct BrokenWrites {
+    gone: mpsc::Sender<()>,
+}
+
+impl SmbTransportWrite for BrokenWrites {
+    fn send_raw(&mut self, _buf: &[u8]) -> Result<(), TransportError> {
+        Err(TransportError::NotConnected)
+    }
+}
+
+impl Drop for BrokenWrites {
+    fn drop(&mut self) {
+        let _ = self.gone.send(());
+    }
+}
+
+/// [`FakeTransport`] and the write half before they are split.
+struct FakeConnection(FakeTransport, Box<dyn SmbTransportWrite>);
 
 impl SmbTransportRead for FakeConnection {
     fn receive_exact(&mut self, out: &mut [u8]) -> Result<(), TransportError> {
@@ -423,7 +441,7 @@ impl SmbTransport for FakeConnection {
     }
 
     fn split(self: Box<Self>) -> Result<(Box<dyn SmbTransportRead>, Box<dyn SmbTransportWrite>), TransportError> {
-        Ok((Box::new(self.0), Box::new(NoWrites)))
+        Ok((Box::new(self.0), self.1))
     }
 
     fn remote_address(&self) -> Result<SocketAddr, TransportError> {
@@ -469,7 +487,7 @@ fn encrypted_frame(key: &[u8], message: &[u8], session_id: u64) -> Vec<u8> {
 /// A worker on a [`FakeTransport`] with one encrypted session, and the sender of its frames.
 fn worker_with_encrypted_session() -> (Arc<WorkerImpl>, mpsc::Sender<Vec<u8>>) {
     let (frames_tx, frames) = mpsc::channel();
-    let worker = <WorkerImpl as Worker>::start(Box::new(FakeConnection(FakeTransport { frames })), Duration::from_secs(30)).unwrap();
+    let worker = <WorkerImpl as Worker>::start(Box::new(FakeConnection(FakeTransport { frames }, Box::new(NoWrites))), Duration::from_secs(30)).unwrap();
     worker.transformer().add_session_for_test(TEST_SESSION, EncryptionCipher::Aes128Gcm, &TEST_KEY).unwrap();
     (worker, frames_tx)
 }
@@ -487,6 +505,18 @@ fn assert_authentication_failure<T: std::fmt::Debug>(res: smb::Result<T>, what: 
         }
         other => panic!("{what}: not an authentication failure: {other:?}"),
     }
+}
+
+/// Stopping after the send thread has already exited (a write found the connection gone) is
+/// a normal close: with `panic = "abort"` a panic here would end the worker and its jobs.
+#[test]
+fn stop_after_the_send_thread_has_exited() {
+    let (_frames_tx, frames) = mpsc::channel();
+    let (gone_tx, gone) = mpsc::channel();
+    let worker = <WorkerImpl as Worker>::start(Box::new(FakeConnection(FakeTransport { frames }, Box::new(BrokenWrites { gone: gone_tx }))), Duration::from_secs(30)).unwrap();
+    worker.send(OutgoingMessage::new(LogoffRequest {}.into())).unwrap();
+    gone.recv_timeout(Duration::from_secs(5)).expect("the send thread ended");
+    worker.stop().expect("a clean stop");
 }
 
 /// A tampered encrypted frame ends the connection at once, long before the watchdog (30 s

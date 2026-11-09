@@ -149,7 +149,9 @@ impl MultiWorkerBackend for ThreadingBackend {
             .ok_or(Error::ConnectionStopped)?;
 
         // wake up the sender to stop the loop.
-        self.worker.sender.send(None).unwrap();
+        // rynas patch: a failed send means the send thread is already gone (a write found the
+        // connection closed): nothing to wake. The worker builds with panic = "abort".
+        let _ = self.worker.sender.send(None);
 
         // Join the threads.
         handles
