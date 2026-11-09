@@ -128,23 +128,23 @@ macro_rules! dict {
 pub(crate) use dict;
 
 /// The tables: the core one first, then the modules'.
-fn tables() -> [(&'static str, &'static [u16]); 2] {
-    [(BLOB, LENS), (crate::modules::synology::i18n::BLOB, crate::modules::synology::i18n::LENS)]
+fn tables() -> [(&'static str, &'static [u16]); 3] {
+    [(BLOB, LENS), (crate::modules::synology::i18n::BLOB, crate::modules::synology::i18n::LENS), (crate::modules::qnap::i18n::BLOB, crate::modules::qnap::i18n::LENS)]
 }
 
 /// The Italian columns of [`tables`], in the same order (test build).
 #[cfg(test)]
-fn italian_tables() -> [&'static [&'static str]; 2] {
-    [IT, crate::modules::synology::i18n::IT]
+fn italian_tables() -> [&'static [&'static str]; 3] {
+    [IT, crate::modules::synology::i18n::IT, crate::modules::qnap::i18n::IT]
 }
 
 /// Start of every text of every table (and the end), the entries (table, index) sorted by
 /// key, built on first use, and the Italian texts once they are there.
 struct Index {
-    blobs: [&'static str; 2],
-    starts: [Vec<u32>; 2],
+    blobs: [&'static str; 3],
+    starts: [Vec<u32>; 3],
     by_key: Vec<(u8, u16)>,
-    italian: std::cell::RefCell<[Vec<&'static str>; 2]>,
+    italian: std::cell::RefCell<[Vec<&'static str>; 3]>,
 }
 
 impl Index {
@@ -177,7 +177,7 @@ thread_local! {
         #[cfg(test)]
         let italian = italian_tables().map(<[&str]>::to_vec);
         #[cfg(not(test))]
-        let italian = [Vec::new(), Vec::new()];
+        let italian = [Vec::new(), Vec::new(), Vec::new()];
         let mut idx = Index { blobs: tables.map(|t| t.0), starts, by_key, italian: std::cell::RefCell::new(italian) };
         let mut by_key = std::mem::take(&mut idx.by_key);
         by_key.sort_unstable_by_key(|&(t, e)| idx.text(t as usize, e as usize * 2));
@@ -311,7 +311,7 @@ pub fn text_in(lang: Lang, key: &str) -> Option<&'static str> {
 pub(crate) fn entries() -> Vec<(&'static str, &'static str, &'static str)> {
     INDEX.with(|idx| {
         let it = idx.italian.borrow();
-        (0..2usize)
+        (0..idx.starts.len())
             .flat_map(|t| (0..(idx.starts[t].len() - 1) / 2).map(move |e| (t, e)))
             .map(|(t, e)| (idx.text(t, e * 2), idx.text(t, e * 2 + 1), it[t][e]))
             .collect()

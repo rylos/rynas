@@ -5,7 +5,9 @@ G8d check that no Synology screen, tab or hint shows up on generic hardware."""
 import json, os, sys, time
 
 root, fixture = sys.argv[1], sys.argv[2]
-generic = fixture == "generic"
+# QNAP=1: a fake QNAP HS-251 (the module's whole signature, its chip's driver, two bays)
+qnap = bool(os.environ.get("QNAP"))
+generic = fixture == "generic" or qnap
 
 
 def w(rel, text):
@@ -36,6 +38,33 @@ for bay in range(1, 1 if generic else 5):
         else:
             w(d + "/trigger", "[none] timer\n")
             w(d + "/brightness", "0\n")
+if qnap:
+    dmi = "sys/class/dmi/id/"
+    w(dmi + "bios_vendor", "American Megatrends Inc.\n")
+    w(dmi + "sys_vendor", "To be filled by O.E.M.\n")
+    w(dmi + "product_name", "To be filled by O.E.M.\n")
+    w(dmi + "board_vendor", "AMI Corporation\n")
+    w(dmi + "board_name", "Aptio CRB\n")
+    w("proc/cpuinfo", "model name\t: Intel(R) Celeron(R)  CPU  J1800  @ 2.41GHz\n")
+    for addr, ident in (("00:13.0", "0f23"), ("00:14.0", "0f35"), ("00:1c.2", "0f4c"),
+                        ("00:1c.3", "0f4e"), ("03:00.0", "1533"), ("04:00.0", "1533")):
+        w(f"sys/bus/pci/devices/0000:{addr}/vendor", "0x8086\n")
+        w(f"sys/bus/pci/devices/0000:{addr}/device", f"0x{ident}\n")
+    for i, addr in enumerate(("03:00.0", "04:00.0")):
+        os.makedirs(os.path.join(root, f"sys/bus/pci/devices/0000:{addr}/net/eth{i}"), exist_ok=True)
+        w(f"sys/class/net/eth{i}/address", f"00:08:9b:00:00:0{i}\n")
+    w("sys/class/hwmon/hwmon1/name", "f71869a\n")
+    w("sys/class/hwmon/hwmon1/temp1_input", "41000\n")
+    w("sys/class/hwmon/hwmon1/temp3_input", "33000\n")
+    for disk, ata, port in (("sda", 1, 1), ("sdb", 2, 2)):
+        dev = f"sys/devices/pci0000:00/0000:00:13.0/ata{ata}/host0/target0:0:0/0:0:0:0"
+        os.makedirs(os.path.join(root, dev), exist_ok=True)
+        link = os.path.join(root, f"sys/block/{disk}/device")
+        os.makedirs(os.path.dirname(link), exist_ok=True)
+        if not os.path.islink(link):
+            os.symlink(os.path.join(root, dev), link)
+        w(f"sys/class/ata_port/ata{ata}/port_no", f"{port}\n")
+    w("run/qnap-fake-disks", "sda healthy\nsdb failing\n")
 if generic:
     while True:  # nothing to refresh; stays alive like the DS920+ tree (stop.sh kills the PID)
         time.sleep(3600)

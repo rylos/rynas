@@ -1,0 +1,36 @@
+[package]
+name = "rynas-hw-qnap"
+description = "rynas QNAP module: strict model identification, Super I/O GPIO LEDs and buttons through the gpio character device, buzzer through the PC speaker input device"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[features]
+# No feature: the API types only (the web interface links them; serde and nothing else).
+# `identify`: read-only identification and the web provider (rynas-web, not root).
+# `domain`: the daemon side (rynasd): GPIO, buzzer, settings, routes, the Module.
+default = []
+identify = ["dep:rynas-hw", "dep:rynas-api-types"]
+domain = [
+    "identify", "dep:libc", "dep:tracing", "dep:serde_json", "dep:rynas-config", "dep:rynas-module",
+    "dep:rynas-notify", "dep:rynas-tasks", "dep:rynas-storage", "dep:axum",
+]
+
+[dependencies]
+serde.workspace = true
+rynas-api-types = { workspace = true, optional = true }
+rynas-hw = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+libc = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+rynas-config = { workspace = true, optional = true }
+rynas-module = { workspace = true, optional = true }
+rynas-notify = { workspace = true, optional = true }
+rynas-tasks = { workspace = true, optional = true }
+rynas-storage = { workspace = true, optional = true }
+axum = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+serde_json.workspace = true

@@ -6,6 +6,7 @@
 //! the live hardware status, its endpoints, or a module backend in an API state. The core
 //! pages reach a module only through the slots below.
 
+pub mod qnap;
 pub mod synology;
 
 /// Texts of the UPS page and wizard that belong to the module's UPS layer when the backend is
@@ -82,5 +83,5 @@ pub fn reset_button(b: &rynas_api_types::network::ResetButton) -> Option<leptos:
 
 /// The label of a notification source sent by a module's tools, if it is one.
 pub fn source_label(source: &str) -> Option<&'static str> {
-    synology::source_label(source)
+    synology::source_label(source).or_else(|| qnap::source_label(source))
 }

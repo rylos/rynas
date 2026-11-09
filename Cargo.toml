@@ -18,6 +18,7 @@ members = [
     "crates/rynas-ui",
     "crates/rynas-hw",
     "crates/rynas-hw-synology",
+    "crates/rynas-hw-qnap",
     "crates/rynas-power",
     "crates/rynas-http",
     "crates/rynas-updates",
@@ -58,6 +59,7 @@ rynas-hw = { path = "crates/rynas-hw" }
 # the Synology module; without `domain` only the status, commands and provider (rynas-web);
 # rynasd enables `domain` (its daemon side)
 rynas-hw-synology = { path = "crates/rynas-hw-synology", default-features = false }
+rynas-hw-qnap = { path = "crates/rynas-hw-qnap", default-features = false }
 rynas-power = { path = "crates/rynas-power" }
 rynas-http = { path = "crates/rynas-http" }
 rynas-updates = { path = "crates/rynas-updates" }

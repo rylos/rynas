@@ -24,6 +24,8 @@ enum Kind {
     Nic,
     /// drivetemp of this block device
     Drive(String),
+    /// A Super I/O board sensor
+    Board,
 }
 
 #[derive(Debug, Clone)]
@@ -155,6 +157,14 @@ fn discover(root: &Path) -> Vec<Source> {
                     _ => None,
                 }
             }
+            // Fintek F71869A: temp3 is the board sensor (temp1 sits by the CPU, which coretemp
+            // already reports)
+            "f71869a" if dir.join("temp3_input").is_file() => Some(Source {
+                id: "board".into(),
+                label: "System".into(),
+                input: dir.join("temp3_input"),
+                kind: Kind::Board,
+            }),
             "atlantic" | "aqc" | "r8169" | "ixgbe" | "igb" => {
                 let iface = first_entry(&dir.join("device/net"));
                 match (iface, pick(&dir, "")) {

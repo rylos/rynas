@@ -5,6 +5,7 @@ quality reviews (docs/quality/). Nothing here touches the host system or a runni
 
     tools/ui-audit/start.sh            # rynasd --dry-system + rynas-web on 127.0.0.1:18600
     GENERIC=1 tools/ui-audit/start.sh 18611   # a plain PC: no Synology screens may appear (G8d)
+    QNAP=1 tools/ui-audit/start.sh 18612      # a fake QNAP HS-251: Hardware > Front panel appears only here
     python3 -I tools/ui-audit/scroll_audit.py        # G7: anything that scrolls sideways (ROUTES, LANGS, WIDTHS, ROUTE_TIMEOUT; a line per route)
     python3 -I tools/ui-audit/audit.py it light 9401 # every view: overflow, clipping, raw keys, English in it
     python3 -I tools/ui-audit/probe.py nav:/storage w:1024 shot:storage "document.title"   # lang:it switches and reloads

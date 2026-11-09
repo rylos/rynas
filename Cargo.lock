@@ -3648,6 +3648,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "rynas-hw-qnap"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "libc",
+ "rynas-api-types",
+ "rynas-config",
+ "rynas-hw",
+ "rynas-module",
+ "rynas-notify",
+ "rynas-storage",
+ "rynas-tasks",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "rynas-hw-synology"
 version = "0.1.0"
 dependencies = [
@@ -3861,6 +3880,7 @@ dependencies = [
  "leptos_router",
  "qrcodegen",
  "rynas-api-types",
+ "rynas-hw-qnap",
  "serde",
  "serde_json",
  "wasm-bindgen",
@@ -3898,6 +3918,7 @@ dependencies = [
  "rynas-config",
  "rynas-http",
  "rynas-hw",
+ "rynas-hw-qnap",
  "rynas-hw-synology",
  "rynas-notify",
  "rynas-nut",
@@ -3943,6 +3964,7 @@ dependencies = [
  "rynas-files",
  "rynas-http",
  "rynas-hw",
+ "rynas-hw-qnap",
  "rynas-hw-synology",
  "rynas-module",
  "rynas-net",

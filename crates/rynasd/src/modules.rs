@@ -15,5 +15,8 @@ pub fn detect(hw_root: &Path, root: &Path, dry: bool) -> Modules {
     if let Some(m) = rynas_hw_synology::module::SynologyModule::detect(hw_root, root, dry) {
         list.push(Arc::new(m));
     }
+    if let Some(m) = rynas_hw_qnap::module::QnapModule::detect(hw_root, root, dry) {
+        list.push(Arc::new(m));
+    }
     Modules::new(list)
 }

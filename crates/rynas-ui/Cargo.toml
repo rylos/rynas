@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 rynas-api-types.workspace = true
+rynas-hw-qnap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 leptos.workspace = true

@@ -16,6 +16,9 @@ pub fn detect(hw_root: &Path) -> Arc<dyn HardwareProvider> {
     if let Some(p) = rynas_hw_synology::Synology::web_provider(hw_root) {
         return Arc::new(p);
     }
+    if let Some(p) = rynas_hw_qnap::provider::QnapProvider::detect(hw_root) {
+        return Arc::new(p);
+    }
     Arc::new(NoProvider)
 }
 

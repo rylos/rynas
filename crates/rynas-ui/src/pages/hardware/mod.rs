@@ -17,7 +17,7 @@ use crate::i18n::{self, t, tr};
 use crate::icons::{self, Icon};
 use crate::live::{Res, use_live};
 use crate::alerts;
-use crate::modules::synology;
+use crate::modules::{qnap, synology};
 use crate::alerts::fan_label;
 use crate::pages::dashboard::{led_state, temp_label};
 use crate::form::tabs_shown;
@@ -25,8 +25,10 @@ use crate::ui::{self, EmptyState, Meter, PageHeader, Pending, Status, Tone, cpu_
 
 /// Index of the hardware module's tab.
 const SYN_TAB: usize = 1;
+/// Index of the QNAP module's tab.
+const QNAP_TAB: usize = 2;
 /// Index of the removable drives tab.
-const RM_TAB: usize = 4;
+const RM_TAB: usize = 5;
 
 #[component]
 pub fn Hardware() -> impl IntoView {
@@ -39,13 +41,15 @@ pub fn Hardware() -> impl IntoView {
         }
     });
     let syn = synology::present();
+    let qn = qnap::present();
     // a selected tab that stops existing falls back to the overview
     Effect::new(move || {
-        if !syn.get() && tab.get_untracked() == SYN_TAB {
+        let gone = (!syn.get() && tab.get_untracked() == SYN_TAB) || (!qn.get() && tab.get_untracked() == QNAP_TAB);
+        if gone {
             tab.set(0);
         }
     });
-    let seen = RwSignal::new([true, false, false, false, false]);
+    let seen = RwSignal::new([true, false, false, false, false, false]);
     Effect::new(move || {
         let i = tab.get();
         if !seen.with_untracked(|s| s[i]) {
@@ -65,11 +69,12 @@ pub fn Hardware() -> impl IntoView {
     view! {
         <div class="page">
             <PageHeader icon=icons::CPU title="nav.hardware" subtitle="hw.subtitle" />
-            <div class="card hw-tabs">{tabs_shown("hwt", &["hw.tab_overview", synology::TAB, "ps.title", "ups.tab", "rm.title"], tab, "nav.hardware", move |i| i != SYN_TAB || syn.get())}</div>
+            <div class="card hw-tabs">{tabs_shown("hwt", &["hw.tab_overview", synology::TAB, qnap::TAB, "ps.title", "ups.tab", "rm.title"], tab, "nav.hardware", move |i| (i != SYN_TAB || syn.get()) && (i != QNAP_TAB || qn.get()))}</div>
             {panel(0, overview)}
             {move || syn.get().then(|| panel(SYN_TAB, synology::panel))}
-            {panel(2, power::panel)}
-            {panel(3, ups::panel)}
+            {move || qn.get().then(|| panel(QNAP_TAB, qnap::panel))}
+            {panel(3, power::panel)}
+            {panel(4, ups::panel)}
             {panel(RM_TAB, removable::panel)}
         </div>
     }

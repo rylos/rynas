@@ -35,6 +35,7 @@ rynas-scheduler.workspace = true
 rynas-hw.workspace = true
 # the Synology module (D-MODULE): registered at start only on its hardware or system layer
 rynas-hw-synology = { workspace = true, features = ["domain"] }
+rynas-hw-qnap = { workspace = true, features = ["domain"] }
 rynas-module.workspace = true
 rynas-power.workspace = true
 jiff.workspace = true
