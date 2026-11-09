@@ -131,10 +131,12 @@ little and would keep processes with the reading capability alive between reques
   `names`, `transfer` (downloads, uploads), `shares`, `identity`, `caps`, `store`, `conns`,
   `conn_routes`, `jobs::{manager, protocol}`. rynasd links it.
 - `crates/rynas-files-worker` (its own `[workspace]` and `Cargo.lock`, excluded from the root
-  workspace): the binary, the SMB (`smb` 0.12) and SFTP (`russh` 0.54, `russh-sftp`) clients, the
-  remote routes and the transfer engine. Reason: `smb` pins release candidates of RustCrypto crates
-  (`curve25519-dalek 5.0.0-rc.1`, `p256 rc.14`…) and `russh` 0.54 pins `base64ct ~1.6`; no `russh`
-  release resolves together with both `smb` and the workspace's `argon2 0.6` (checked 0.54–0.65).
+  workspace): the binary, the SMB (`smb` 0.12) and SFTP (`russh` 0.65, `russh-sftp` 3) clients, the
+  remote routes and the transfer engine. Reason: `smb` goes through `sspi`/`picky`, which pin
+  release candidates of RustCrypto crates (`rsa 0.10.0-rc`…) and no `russh` release has resolved
+  with the workspace's own locked crypto crates and `argon2` so far. `sspi` is pinned to 0.22.1
+  in the vendored `smb` (`vendor/smb/Cargo.toml`, "rynas patch"): 0.21.3 pinned
+  `curve25519-dalek =5.0.0-rc.1`, which `russh` 0.65 cannot share a lock file with.
   Build, test and lint it with `--manifest-path crates/rynas-files-worker/Cargo.toml`;
   `cargo test --workspace` does not reach it, but rynasd's `tests/files.rs` builds it and drives
   it end to end. When `smb` releases on final crypto crates, the worker can rejoin the workspace.
@@ -175,19 +177,24 @@ little and would keep processes with the reading capability alive between reques
   timeout with the patch above): `remote_unreachable` "the remote server stopped answering
   (no reply in 60 s)". A slow server that keeps answering is never cut off: a huge listing
   (each page is a request) or 8 reads in flight on a slow link take as long as they need.
-- SFTP: each request has the session's 60 s timeout (russh-sftp, per request: each read in
-  flight and each page of a listing on its own), no batch or whole-operation bound; SSH
-  keepalives every 15 s (3 missed end the session).
+- SFTP: each request has the session's 60 s timeout (`request_timeout_secs`, set from the
+  first request: each read or write in flight and each page of a listing on its own), no batch
+  or whole-operation bound; connect, login and channel open have 20 s each. The final
+  `fsync@openssh.com` has a limit of its own (1 h: a server flushing a large file is not
+  a failure, a dead connection is found by the keepalives first). SSH keepalives every 15 s
+  (3 missed end the session); the connection's runtime threads are always running, so
+  keepalives, window adjusts and rekeys never wait for a caller.
 - TCP keepalive (20 s idle, 10 s interval, 3 probes), `TCP_USER_TIMEOUT` 60 s and
   `TCP_NODELAY` on the worker's TCP sockets (`remote::tune_sockets`).
 - Errors by side: only the clients make connection errors (`remote::stalled`, `remote::lost`,
   code `remote_unreachable`), and only those are retried (`remote::retryable`). The server's
   answer about one file (SMB `FILE_LOCK_CONFLICT`, `SHARING_VIOLATION`, `ACCESS_DENIED`, an
   unknown status; SFTP a status) fails that file only, as do the NAS's own errors (a local
-  `ETIMEDOUT` or `EPIPE` is not the server's). SMB session/handle loss
+  `ETIMEDOUT` or `EPIPE` is not the server's). SFTP errors are typed (russh-sftp's `Error`:
+  a server status is the file's; `Timeout`, a broken or out-of-sync session is the connection's,
+  and russh-sftp 3 ends its receive loop on those, failing the requests in flight). SMB session/handle loss
   (`USER_SESSION_DELETED`, `NETWORK_NAME_DELETED`, `FILE_CLOSED`, `INVALID_HANDLE`…) counts as
-  the connection's. SFTP hands file errors over as text: the worker asks the session
-  (`canonicalize(".")`) whether it still answers before blaming the connection.
+  the connection's.
 - Reconnects (2 tries in a row, `RECONNECTS`): every server request of a job (`End::call`:
   stat, list, open, mkdir, remove, rename) goes on over a new connection; a retried request
   that may have been carried out before the break takes "already exists"/"not found" as done.
@@ -205,6 +212,22 @@ little and would keep processes with the reading capability alive between reques
   Each job's connection logs once (journal): dialect, signing algorithm, encryption cipher,
   MaxRead/MaxWrite, credits granted. Encryption only where the server or the share asks.
   `packaging/bench-smb.sh` measures smbclient and the worker against a real server.
+- Throughput (SFTP): one continuous sliding window of reads on one handle (`sftp::pump`, a task
+  on the connection's runtime): up to 64 requests of up to 255 KiB (`limits@openssh.com` when
+  the server has it), one at first and one more per reply (OpenSSH's ramp), capped so the last
+  request queued waits at most 20 s behind the others at the link's measured rate (a request's
+  own 60 s timeout must not fire on a slow link). Replies go in order over a bounded channel
+  (about 4 MiB) to the copy, so the thread writing to disk overlaps the network; about 20 MiB
+  at most per download. A short reply is asked for again from where it stopped (the following
+  requests made smaller, as OpenSSH), an empty reply or EOF status ends the file where it ends.
+  Uploads: the same window of writes on one handle, unconfirmed blocks kept by offset and given
+  back on a broken connection (`Writer::unconfirmed`/`resend`). The ciphers offered are
+  AES-128/256-GCM first where the CPU has AES and carry-less multiply (`aes_accelerated`, at run
+  time), ChaCha20-Poly1305 first otherwise; SSH packets of 65535 bytes (russh's largest), a
+  32 MiB channel window, no compression; TCP_NODELAY set directly on the socket. Each job's
+  connection logs one line (journal): KEX, cipher, packet size, server limits, in-flight
+  settings. `packaging/bench-sftp.sh` measures OpenSSH's `sftp` and the worker on the target,
+  per thread, plus a cipher micro-benchmark (`rynas-files-worker bench-ciphers`).
 - Cancel: the worker stops between two chunks; if it has not within 3 s (a call blocked on the
   server) it removes the local `.rynas-part` it was writing — or, for a copy to a server, the
   remote `.rynas-part` and the folders the job made that are still empty, over a new

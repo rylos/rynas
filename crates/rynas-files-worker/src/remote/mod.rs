@@ -143,16 +143,10 @@ pub fn retryable(e: &io::Error) -> bool {
     rynas_files::fsops::io_code(e) == rynas_api_types::error_codes::REMOTE_UNREACHABLE
 }
 
-/// TCP keepalive and a user timeout on every TCP socket of this process: the SMB and SSH
-/// libraries open theirs without, so a peer that vanishes behind a router or VPN (or a
-/// path whose MTU swallows large segments) is noticed by the kernel within about a minute
-/// instead of never. The worker has no other TCP sockets; descriptors that are not TCP
-/// refuse the options harmlessly.
+/// [`tune_socket`] on every TCP socket of this process: the SMB library opens its own
+/// without these options; the worker has no other TCP sockets but SSH's, set up directly
+/// (`sftp`). Descriptors that are not TCP refuse the options harmlessly.
 pub fn tune_sockets() {
-    let set = |fd: i32, level: i32, opt: i32, value: i32| {
-        // SAFETY: setsockopt with a pointer to a local int and its size
-        unsafe { libc::setsockopt(fd, level, opt, (&value as *const i32).cast(), std::mem::size_of::<i32>() as libc::socklen_t) == 0 }
-    };
     let get = |fd: i32, opt: i32| -> Option<i32> {
         let mut value: i32 = 0;
         let mut len = std::mem::size_of::<i32>() as libc::socklen_t;
@@ -167,15 +161,25 @@ pub fn tune_sockets() {
         if get(fd, libc::SO_KEEPALIVE) == Some(1) {
             continue;
         }
-        // requests are small writes waiting for an answer: never held back for an ACK
-        set(fd, libc::IPPROTO_TCP, libc::TCP_NODELAY, 1);
-        set(fd, libc::SOL_SOCKET, libc::SO_KEEPALIVE, 1);
-        set(fd, libc::IPPROTO_TCP, libc::TCP_KEEPIDLE, 20);
-        set(fd, libc::IPPROTO_TCP, libc::TCP_KEEPINTVL, 10);
-        set(fd, libc::IPPROTO_TCP, libc::TCP_KEEPCNT, 3);
-        // data sent and not acknowledged for this long ends the connection
-        set(fd, libc::IPPROTO_TCP, libc::TCP_USER_TIMEOUT, REMOTE_TIMEOUT.as_millis() as i32);
+        tune_socket(fd);
     }
+}
+
+/// TCP keepalive and a user timeout on one socket: a peer that vanishes behind a router or
+/// VPN (or a path whose MTU swallows large segments) is noticed within about a minute.
+pub fn tune_socket(fd: i32) {
+    let set = |level: i32, opt: i32, value: i32| {
+        // SAFETY: setsockopt with a pointer to a local int and its size
+        unsafe { libc::setsockopt(fd, level, opt, (&value as *const i32).cast(), std::mem::size_of::<i32>() as libc::socklen_t) == 0 }
+    };
+    // requests are small writes waiting for an answer: never held back for an ACK
+    set(libc::IPPROTO_TCP, libc::TCP_NODELAY, 1);
+    set(libc::SOL_SOCKET, libc::SO_KEEPALIVE, 1);
+    set(libc::IPPROTO_TCP, libc::TCP_KEEPIDLE, 20);
+    set(libc::IPPROTO_TCP, libc::TCP_KEEPINTVL, 10);
+    set(libc::IPPROTO_TCP, libc::TCP_KEEPCNT, 3);
+    // data sent and not acknowledged for this long ends the connection
+    set(libc::IPPROTO_TCP, libc::TCP_USER_TIMEOUT, REMOTE_TIMEOUT.as_millis() as i32);
 }
 
 #[cfg(test)]

@@ -123,6 +123,7 @@ pub fn run() -> std::process::ExitCode {
     };
     // a job's SMB connections say once what they negotiated (rynasd's journal)
     crate::remote::smb::log_connections();
+    crate::remote::sftp::log_connections();
     // every local path inside its own share, links included (rynas_files::confine)
     let _jail = Jail::enter();
     let (spec, refused) = match confine_spec(spec) {

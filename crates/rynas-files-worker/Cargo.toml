@@ -6,7 +6,7 @@ edition = "2024"
 authors = ["Marco Ziliani"]
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/rylos/rynas"
-rust-version = "1.90"
+rust-version = "1.93"
 
 # A workspace of its own, with its own Cargo.lock: the SMB client (smb → sspi) and the SSH
 # client (russh) pin release candidates of RustCrypto crates that cannot share one lock
@@ -43,9 +43,12 @@ serde_json = "1"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 # remote connections: SMB 2/3 and SFTP, pure Rust (the versions SynoFile ships)
 smb = { version = "0.12.1", default-features = false, features = ["multi_threaded", "sign", "encrypt"] }
-russh = { version = "0.54.5", default-features = false, features = ["ring", "rsa"] }
-russh-sftp = "2.4"
-tokio = { version = "1", features = ["rt", "net", "time", "io-util"] }
+russh = { version = "0.65.1", default-features = false, features = ["ring", "rsa"] }
+russh-sftp = "3.0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "io-util", "sync", "macros"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# the ciphers' own speed, for packaging/bench-sftp.sh (the same library russh encrypts with)
+ring = "0.17"
 # Compress to .tar.zst in this process: the system libzstd (as rynasd links it), with its
 # worker threads; tar without xattrs (the archive keeps names, modes, times and links)
 zstd = { version = "0.14.3", default-features = false, features = ["pkg-config", "zstdmt"] }
@@ -53,6 +56,8 @@ tar = { version = "0.4.46", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"
+# the fake SFTP server of the tests speaks russh-sftp's own packets
+bytes = "1"
 # the transport itself, for the test of a message that arrives with a pause inside
 smb-transport = { version = "0.12.1", default-features = false, features = ["is_sync"] }
 

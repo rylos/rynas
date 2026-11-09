@@ -236,7 +236,9 @@ version = "=0.12.1"
 default-features = false
 
 [dependencies.sspi]
-version = "=0.21.3"
+# rynas patch: 0.22.1, the first release on final crypto crates (picky 7.0.0-rc.26): russh
+# 0.65 cannot share a lock file with the =rc pins of 0.21.3 (curve25519-dalek 5.0.0-rc.1)
+version = "=0.22.1"
 features = ["ring"]
 default-features = false
 

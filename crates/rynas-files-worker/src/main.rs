@@ -76,11 +76,53 @@ fn call() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// The speed of the SSH ciphers on this CPU, with the library russh encrypts with (ring), on
+/// 32 KiB buffers: what `packaging/bench-sftp.sh` prints before measuring the connection. No
+/// other use.
+fn bench_ciphers() -> ExitCode {
+    use ring::aead::{AES_128_GCM, AES_256_GCM, Aad, CHACHA20_POLY1305, LessSafeKey, Nonce, UnboundKey};
+    let cases: [(&str, &'static ring::aead::Algorithm, usize); 3] = [("aes128-gcm", &AES_128_GCM, 16), ("aes256-gcm", &AES_256_GCM, 32), ("chacha20-poly1305", &CHACHA20_POLY1305, 32)];
+    #[cfg(target_arch = "x86_64")]
+    println!("cpu features: aes={} pclmulqdq={} avx={} ssse3={}", std::arch::is_x86_feature_detected!("aes"), std::arch::is_x86_feature_detected!("pclmulqdq"), std::arch::is_x86_feature_detected!("avx"), std::arch::is_x86_feature_detected!("ssse3"));
+    for (name, algo, key_len) in cases {
+        let key = LessSafeKey::new(UnboundKey::new(algo, &vec![7u8; key_len]).expect("key length"));
+        let mut block = vec![7u8; 32 * 1024];
+        let (mut seal_bytes, mut seq) = (0u64, 0u64);
+        let t = std::time::Instant::now();
+        while t.elapsed() < Duration::from_secs(1) {
+            seq += 1;
+            let mut nonce = [0u8; 12];
+            nonce[4..].copy_from_slice(&seq.to_be_bytes());
+            let _ = key.seal_in_place_separate_tag(Nonce::assume_unique_for_key(nonce), Aad::empty(), &mut block).expect("seal");
+            seal_bytes += block.len() as u64;
+        }
+        let seal = seal_bytes as f64 / t.elapsed().as_secs_f64();
+        // what the client of a download does: authenticate and decrypt
+        let mut sealed = vec![7u8; 32 * 1024];
+        let nonce = [1u8; 12];
+        let tag = key.seal_in_place_separate_tag(Nonce::assume_unique_for_key(nonce), Aad::empty(), &mut sealed).expect("seal");
+        sealed.extend_from_slice(tag.as_ref());
+        let (mut open_bytes, mut work) = (0u64, sealed.clone());
+        let t = std::time::Instant::now();
+        while t.elapsed() < Duration::from_secs(1) {
+            work.copy_from_slice(&sealed);
+            let plain = key.open_in_place(Nonce::assume_unique_for_key(nonce), Aad::empty(), &mut work).expect("open");
+            open_bytes += plain.len() as u64;
+        }
+        let open = open_bytes as f64 / t.elapsed().as_secs_f64();
+        println!("{name}: encrypt {:.0} MB/s, decrypt {:.0} MB/s", seal / 1e6, open / 1e6);
+    }
+    ExitCode::SUCCESS
+}
+
 fn main() -> ExitCode {
     let mode = std::env::args().nth(1).unwrap_or_default();
     if mode == "version" {
         println!("rynas-files-worker {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::SUCCESS;
+    }
+    if mode == "bench-ciphers" {
+        return bench_ciphers();
     }
     if let Err(e) = rynas_files::caps::check_worker() {
         eprintln!("rynas-files-worker: {e}");
