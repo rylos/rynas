@@ -60,6 +60,9 @@ tempfile = "3"
 bytes = "1"
 # the transport itself, for the test of a message that arrives with a pause inside
 smb-transport = { version = "0.12.1", default-features = false, features = ["is_sync"] }
+# the implementation the vendored smb crate used before ring, as the reference for
+# tests/smb_crypto.rs
+aes-gcm = "0.11"
 
 [profile.release]
 lto = "fat"

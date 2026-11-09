@@ -16,15 +16,18 @@ pub(crate) fn trim_nonce<U: ArraySize>(
 
 /// A list of all the supported encryption algorithms,
 /// available in the current build.
+///
+/// rynas patch: AES-GCM first (ring, see encrypt_gcm.rs); CCM is serial AES on RustCrypto,
+/// for a server that offers nothing else.
 pub const ENCRYPTING_ALGOS: &[EncryptionCipher] = &[
-    #[cfg(feature = "encrypt_aes128ccm")]
-    EncryptionCipher::Aes128Ccm,
-    #[cfg(feature = "encrypt_aes256ccm")]
-    EncryptionCipher::Aes256Ccm,
     #[cfg(feature = "encrypt_aes128gcm")]
     EncryptionCipher::Aes128Gcm,
     #[cfg(feature = "encrypt_aes256gcm")]
     EncryptionCipher::Aes256Gcm,
+    #[cfg(feature = "encrypt_aes128ccm")]
+    EncryptionCipher::Aes128Ccm,
+    #[cfg(feature = "encrypt_aes256ccm")]
+    EncryptionCipher::Aes256Ccm,
 ];
 
 /// A factory method that instantiates a [`EncryptingAlgo`] implementation
@@ -55,11 +58,13 @@ pub fn make_encrypting_algo(
             encrypting_key,
         )?),
         #[cfg(feature = "encrypt_aes128gcm")]
-        EncryptionCipher::Aes128Gcm => Ok(super::encrypt_gcm::Aes128GcmEncryptor::build(
+        EncryptionCipher::Aes128Gcm => Ok(super::encrypt_gcm::AesGcmEncryptor::build(
+            &ring::aead::AES_128_GCM,
             encrypting_key,
         )?),
         #[cfg(feature = "encrypt_aes256gcm")]
-        EncryptionCipher::Aes256Gcm => Ok(super::encrypt_gcm::Aes256GcmEncryptor::build(
+        EncryptionCipher::Aes256Gcm => Ok(super::encrypt_gcm::AesGcmEncryptor::build(
+            &ring::aead::AES_256_GCM,
             encrypting_key,
         )?),
         #[allow(unreachable_patterns)]

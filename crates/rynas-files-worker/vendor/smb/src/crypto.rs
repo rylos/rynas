@@ -3,8 +3,10 @@ mod kbkdf;
 mod signing;
 
 pub use encryption::{ENCRYPTING_ALGOS, EncryptingAlgo, make_encrypting_algo};
-pub use kbkdf::{DerivedKey, KeyToDerive, kbkdf_hmacsha256};
+pub use kbkdf::{DerivedKey, KeyToDerive, kbkdf_hmacsha256, kbkdf_hmacsha256_256};
 pub use signing::{SIGNING_ALGOS, SigningAlgo, make_signing_algo};
+#[cfg(feature = "sign_gmac")]
+pub use signing::{GmacBackend, force_gmac_backend, make_gmac_signer};
 
 use crypto_common::InvalidLength;
 use thiserror::Error;

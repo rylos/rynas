@@ -91,7 +91,7 @@ encrypt_aes128ccm = [
     "__encrypt_core",
 ]
 encrypt_aes128gcm = [
-    "dep:aes-gcm",
+    "dep:ring",
     "dep:aead",
     "__encrypt_core",
 ]
@@ -101,7 +101,7 @@ encrypt_aes256ccm = [
     "__encrypt_core",
 ]
 encrypt_aes256gcm = [
-    "dep:aes-gcm",
+    "dep:ring",
     "dep:aead",
     "__encrypt_core",
 ]
@@ -128,7 +128,7 @@ sign = [
     "sign_hmac",
 ]
 sign_cmac = ["dep:cmac"]
-sign_gmac = ["dep:aes-gcm"]
+sign_gmac = ["dep:ring", "dep:aes-gcm"]
 sign_hmac = []
 single_threaded = ["__is_sync"]
 std-fs-impls = ["tokio?/fs"]
@@ -147,6 +147,12 @@ optional = true
 
 [dependencies.aes]
 version = "^0.9"
+
+# rynas patch: AES-GCM encryption goes through ring (src/crypto/encryption/encrypt_gcm.rs);
+# AES-GMAC signing through ring or aes-gcm by CPU (src/crypto/signing.rs, GmacBackend).
+[dependencies.ring]
+version = "0.17"
+optional = true
 
 [dependencies.aes-gcm]
 version = "^0.11"

@@ -42,6 +42,16 @@ pub const SIGNING_ALGOS: &[SigningAlgorithmId] = &[
     SigningAlgorithmId::HmacSha256,
 ];
 
+// rynas patch: the two AES-GMAC implementations, for the tests (see GmacBackend)
+#[cfg(feature = "sign_gmac")]
+pub use gmac_signer::{GmacBackend, force_gmac_backend};
+
+/// rynas patch: an AES-GMAC signer on one implementation (tests and benchmarks).
+#[cfg(feature = "sign_gmac")]
+pub fn make_gmac_signer(signing_key: &SigningKey, backend: GmacBackend) -> Box<dyn SigningAlgo> {
+    gmac_signer::Gmac128Signer::with_backend(signing_key, backend)
+}
+
 /// A trait for SMB signing algorithms.
 pub trait SigningAlgo: std::fmt::Debug + Send + Sync {
     /// Start a new signing session. This is called before any data is passed to the signer,
@@ -151,17 +161,78 @@ mod gmac_signer {
     };
     use binrw::prelude::*;
     use modular_bitfield::prelude::*;
+    use ring::aead::{AES_128_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
+    use std::sync::atomic::{AtomicU8, Ordering};
 
     use super::*;
 
     type Gmac128Nonce = [u8; 12];
 
+    /// rynas patch: which AES-GMAC implementation signs. AES-GMAC is the whole of a message
+    /// through GHASH, and neither is best everywhere:
+    /// - RustCrypto's GHASH (polyval) uses CLMUL only together with AVX. Without AVX
+    ///   (Celeron J4125 and other Atom-class NAS CPUs) it runs its software code, and that
+    ///   took the worker's one network thread to its limit at 1 GbE.
+    /// - ring feeds the additional data one block at a time, with CLMUL also without AVX. It
+    ///   is what such a CPU needs, but on a CPU with AVX it is about 3x slower than
+    ///   RustCrypto's aggregated GHASH (and GMAC is nothing but additional data).
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum GmacBackend {
+        Ring,
+        RustCrypto,
+    }
+
+    // rynas patch: 0 chooses by CPU; for the tests, which must exercise both on any CPU
+    static FORCED: AtomicU8 = AtomicU8::new(0);
+
+    /// rynas patch: tests only: use `backend` for the signers made from now on (`None`:
+    /// choose by CPU again). Both give the same signatures.
+    #[doc(hidden)]
+    pub fn force_gmac_backend(backend: Option<GmacBackend>) {
+        let value = match backend {
+            None => 0,
+            Some(GmacBackend::Ring) => 1,
+            Some(GmacBackend::RustCrypto) => 2,
+        };
+        FORCED.store(value, Ordering::Relaxed);
+    }
+
+    fn pick_backend() -> GmacBackend {
+        match FORCED.load(Ordering::Relaxed) {
+            1 => GmacBackend::Ring,
+            2 => GmacBackend::RustCrypto,
+            _ => by_cpu(),
+        }
+    }
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn by_cpu() -> GmacBackend {
+        if std::arch::is_x86_feature_detected!("avx")
+            && std::arch::is_x86_feature_detected!("pclmulqdq")
+        {
+            GmacBackend::RustCrypto
+        } else {
+            GmacBackend::Ring
+        }
+    }
+
+    // elsewhere (aarch64: PMULL) RustCrypto has no such gap
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    fn by_cpu() -> GmacBackend {
+        GmacBackend::RustCrypto
+    }
+
+    #[derive(Clone)]
+    enum Engine {
+        Ring(LessSafeKey),
+        RustCrypto(Aes128Gcm),
+    }
+
     #[derive(Clone)]
     pub struct Gmac128Signer {
-        gmac: Aes128Gcm,
+        gmac: Engine,
         nonce: OnceCell<Gmac128Nonce>,
-        // no online mode implemented un RustCrypto,
-        // so we'll buffer the input until finalized().
+        // neither implementation has an online mode: the message is buffered until finalize().
         buffer: Vec<u8>,
     }
 
@@ -183,9 +254,22 @@ mod gmac_signer {
 
     impl Gmac128Signer {
         pub fn build(key: &SigningKey) -> Box<dyn SigningAlgo> {
-            let key = Key::<Aes128>::from(*key);
+            Self::with_backend(key, pick_backend())
+        }
+
+        /// rynas patch: one backend explicitly (see [`GmacBackend`]).
+        pub fn with_backend(key: &SigningKey, backend: GmacBackend) -> Box<dyn SigningAlgo> {
+            let gmac = match backend {
+                // the only failure of UnboundKey::new is a key of the wrong length
+                GmacBackend::Ring => Engine::Ring(LessSafeKey::new(
+                    UnboundKey::new(&AES_128_GCM, key).expect("AES-128 key"),
+                )),
+                GmacBackend::RustCrypto => {
+                    Engine::RustCrypto(Aes128Gcm::new(&Key::<Aes128>::from(*key)))
+                }
+            };
             Box::new(Gmac128Signer {
-                gmac: Aes128Gcm::new(&key),
+                gmac,
                 nonce: OnceCell::new(),
                 buffer: vec![],
             })
@@ -218,16 +302,33 @@ mod gmac_signer {
         fn finalize(&mut self) -> u128 {
             debug_assert!(self.nonce.get().is_some());
 
-            let mut empty_data: Vec<u8> = vec![];
-            let result = self
-                .gmac
-                .encrypt_inout_detached(
-                    self.nonce.get().unwrap().into(),
-                    &self.buffer,
-                    empty_data.as_mut_slice().into(),
-                )
-                .unwrap();
-            u128::from_le_bytes(result.into())
+            // rynas patch: GMAC is GCM with the message as the additional data and nothing
+            // to encrypt. MS-SMB2 3.1.4.1 / RFC 4543; the nonce is make_nonce's, unchanged.
+            let nonce = self.nonce.get().unwrap();
+            match &self.gmac {
+                Engine::Ring(key) => {
+                    let tag = key
+                        .seal_in_place_separate_tag(
+                            Nonce::assume_unique_for_key(*nonce),
+                            Aad::from(&self.buffer),
+                            &mut [],
+                        )
+                        .unwrap();
+                    let tag: [u8; 16] = tag.as_ref().try_into().unwrap();
+                    u128::from_le_bytes(tag)
+                }
+                Engine::RustCrypto(gmac) => {
+                    let mut empty_data: Vec<u8> = vec![];
+                    let result = gmac
+                        .encrypt_inout_detached(
+                            nonce.into(),
+                            &self.buffer,
+                            empty_data.as_mut_slice().into(),
+                        )
+                        .unwrap();
+                    u128::from_le_bytes(result.into())
+                }
+            }
         }
 
         fn clone_box(&self) -> Box<dyn SigningAlgo> {

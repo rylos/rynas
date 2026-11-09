@@ -159,7 +159,19 @@ little and would keep processes with the reading capability alive between reques
     `STATUS_END_OF_FILE` as the end; `File::times` (last write and change time of the open,
     `ResourceHandle::raw_times`).
   - `crypto/signing.rs`: AES-GMAC offered first (a 3.1.1 server takes the client's order;
-    CMAC's AES chain is serial and every message is signed).
+    CMAC's AES chain is serial and every message is signed). AES-GMAC has two implementations,
+    chosen by CPU (`GmacBackend`): `ring` where AVX is missing, RustCrypto's `aes-gcm` where it is
+    there. RustCrypto's GHASH (`polyval`) uses CLMUL only together with AVX: on a NAS CPU without
+    AVX (Celeron J4125) it runs its software code, and that held the network thread at 99.9 % at
+    1 GbE. `ring` has CLMUL without AVX too, but feeds additional data one block at a time, so
+    on an AVX CPU it would sign about 3x slower than `polyval` (GMAC is nothing but additional
+    data). AES-CMAC and HMAC-SHA256 stay on RustCrypto (`ring` has HMAC-SHA256 only and no CMAC).
+  - `crypto/encryption/encrypt_gcm.rs`: AES-128/256-GCM encryption on `ring` on every CPU, about
+    2x RustCrypto's speed with AVX; AES-GCM is offered before CCM (`ENCRYPTING_ALGOS`), CCM stays
+    on RustCrypto. `crypto/kbkdf.rs`, `session/state.rs`: 32-byte keys for the AES-256 ciphers
+    (MS-SMB2 3.1.4.2; a session that negotiated AES-256 used to fail with "Invalid length").
+    `tests/smb_crypto.rs` cross-checks both implementations against each other, the old
+    implementation and published vectors.
   - `Connection::credits_granted`, `mod parallel` `pub(crate)` (for the credit wait).
   - `smb-transport` `tcp/transport.rs`: `TCP_NODELAY` (each request is two writes; with Nagle
     every round trip waited for a delayed ACK, up to 40 ms: the old reads crawled at ~85 MB/s

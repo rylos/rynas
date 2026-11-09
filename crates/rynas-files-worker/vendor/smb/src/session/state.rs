@@ -173,12 +173,14 @@ impl SessionAlgosFactory {
             return Ok(None);
         }
 
-        // Make the keys.
-        let enc_key = deriver.derive(
+        // Make the keys. rynas patch: the length follows the cipher (MS-SMB2 3.1.4.2).
+        let enc_key = deriver.derive_for(
+            cipher,
             info.dialect.c2s_encrypt_key_derive_label(),
             Self::preauth_hash_or(preauth_hash, Self::NO_PREAUTH_HASH_DERIVE_ENCRYPT_C2S_CTX),
         )?;
-        let dec_key = deriver.derive(
+        let dec_key = deriver.derive_for(
+            cipher,
             info.dialect.s2c_encrypt_key_derive_label(),
             Self::preauth_hash_or(preauth_hash, Self::NO_PREAUTH_HASH_DERIVE_ENCRYPT_S2C_CTX),
         )?;
@@ -472,6 +474,22 @@ impl<'a> KeyDeriver<'a> {
     #[inline]
     pub fn derive(&self, label: &[u8], context: &'a [u8]) -> Result<DerivedKey, CryptoError> {
         kbkdf_hmacsha256(self.session_key, label, context)
+    }
+
+    /// rynas patch: a key of the length `cipher` takes (MS-SMB2 3.1.4.2: L = 256 for the
+    /// AES-256 ciphers).
+    pub fn derive_for(
+        &self,
+        cipher: EncryptionCipher,
+        label: &[u8],
+        context: &'a [u8],
+    ) -> Result<Vec<u8>, CryptoError> {
+        Ok(match cipher {
+            EncryptionCipher::Aes256Gcm | EncryptionCipher::Aes256Ccm => {
+                crate::crypto::kbkdf_hmacsha256_256(self.session_key, label, context)?.to_vec()
+            }
+            _ => self.derive(label, context)?.to_vec(),
+        })
     }
 }
 

@@ -1074,6 +1074,93 @@ mod tests {
         w.finish().unwrap();
     }
 
+    /// A relay in front of the server that flips one bit of the byte at offset `at` of what
+    /// the server sends (`u64::MAX`: never, the control).
+    fn relay_flip(to: (String, u16), at: u64) -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for client in listener.incoming().flatten() {
+                let server = std::net::TcpStream::connect((to.0.as_str(), to.1)).unwrap();
+                let (client2, server2) = (client.try_clone().unwrap(), server.try_clone().unwrap());
+                std::thread::spawn(move || {
+                    let _ = std::io::copy(&mut &client2, &mut &server2);
+                });
+                std::thread::spawn(move || {
+                    let (mut from, mut to, mut seen) = (server, client, 0u64);
+                    let mut buf = vec![0u8; 64 * 1024];
+                    loop {
+                        let n = match from.read(&mut buf) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => n,
+                        };
+                        if at >= seen && at < seen + n as u64 {
+                            buf[(at - seen) as usize] ^= 0x10;
+                        }
+                        seen += n as u64;
+                        if to.write_all(&buf[..n]).is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        port
+    }
+
+    /// When the test server is set up for it, what it negotiated
+    /// (`RYNAS_TEST_SMBD_SIGNING=AesGmac|AesCmac`, `RYNAS_TEST_SMBD_CIPHER=Aes128Gcm|…`).
+    /// `RYNAS_TEST_SMBD_GMAC=ring|rustcrypto` picks the AES-GMAC implementation instead of
+    /// letting the CPU decide, so both can face the real server on any machine.
+    fn assert_negotiated(smb: &Smb, share: &str) {
+        match std::env::var("RYNAS_TEST_SMBD_GMAC").as_deref() {
+            Ok("ring") => smb::crypto::force_gmac_backend(Some(smb::crypto::GmacBackend::Ring)),
+            Ok("rustcrypto") => smb::crypto::force_gmac_backend(Some(smb::crypto::GmacBackend::RustCrypto)),
+            _ => {}
+        }
+        smb.tree(share).unwrap();
+        let conn = smb.client.get_connection(&smb.server).unwrap();
+        let info = conn.conn_info().unwrap();
+        if let Ok(want) = std::env::var("RYNAS_TEST_SMBD_SIGNING") {
+            assert_eq!(format!("{:?}", info.negotiation.signing_algo), format!("Some({want})"));
+        }
+        if let Ok(want) = std::env::var("RYNAS_TEST_SMBD_CIPHER") {
+            assert_eq!(format!("{:?}", info.negotiation.encryption_cipher), format!("Some({want})"));
+        }
+    }
+
+    /// With signing or encryption forced on the server: a server response with one bit
+    /// flipped on the way is refused, never delivered as data.
+    #[test]
+    fn local_samba_tampered_answer_is_rejected() {
+        let Some((conn, share)) = local_samba() else { return eprintln!("RYNAS_TEST_SMBD not set: skipped") };
+        if std::env::var("RYNAS_TEST_SMBD_SIGNING").is_err() && std::env::var("RYNAS_TEST_SMBD_CIPHER").is_err() {
+            return eprintln!("RYNAS_TEST_SMBD_SIGNING/_CIPHER not set: skipped");
+        }
+        let path = vec![share.clone(), format!("rynas-tamper-{}.bin", std::process::id())];
+        let data: Vec<u8> = (0..8u32 << 20).map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8).collect();
+        let smb = Smb::connect(&conn).unwrap();
+        assert_negotiated(&smb, &share);
+        copy_up(&smb, &path, &data);
+        // the control: the same relay, nothing flipped
+        let port = relay_flip((conn.host.clone(), conn.port), u64::MAX);
+        let clean = Smb::connect(&Conn { host: "127.0.0.1".into(), port, ..conn.clone() }).unwrap();
+        let mut back = Vec::new();
+        clean.reader(&path).unwrap().read_to_end(&mut back).unwrap();
+        assert!(back == data, "the copy through the relay differs");
+        // a bit of a READ response, 3 MiB into what the server sends
+        let port = relay_flip((conn.host.clone(), conn.port), 3 << 20);
+        let tampered = Smb::connect_with(&Conn { host: "127.0.0.1".into(), port, ..conn.clone() }, Duration::from_secs(5)).unwrap();
+        let mut back = Vec::new();
+        let res = tampered.reader(&path).and_then(|mut r| r.read_to_end(&mut back));
+        let e = res.expect_err("a tampered answer was accepted");
+        eprintln!("tampered answer refused: {e}");
+        assert!(back.len() < data.len() && back[..] == data[..back.len()], "the tampered bytes reached the caller");
+        drop(tampered);
+        drop(clean);
+        smb.remove(&path, false).unwrap();
+    }
+
     #[test]
     fn local_samba_round_trip_and_seek() {
         let Some((conn, share)) = local_samba() else { return eprintln!("RYNAS_TEST_SMBD not set: skipped") };
