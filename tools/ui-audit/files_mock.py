@@ -30,19 +30,19 @@ XFER_TOTAL = 20 * 1024 * MIB
 
 def xfer_samples(upto_ms):
     """Samples [ms since start, bytes, files, verify bytes] as the files worker writes them: one
-    every 500 ms, plus forced ones at file boundaries a few ms apart; zstd reads in bursts (big
+    every 250 ms, plus forced ones at file boundaries a few ms apart; zstd reads in bursts (big
     blocks, then almost nothing while it compresses), so the instantaneous speed jumps between ~0
     and ~300 MiB/s around a ~95 MiB/s average; paused from 40 s to 46 s (no samples)."""
     rnd = random.Random(7)
     out, t, b, f = [[0, 0, 0, 0]], 0, 0, 0
     while True:
-        t += 500
+        t += 250
         if 40_000 < t <= 46_000:
             continue
         if t > upto_ms:
             break
         burst = rnd.random() < 0.45
-        b += int((rnd.uniform(150, 260) if burst else rnd.uniform(0, 12)) * MIB / 2)
+        b += int((rnd.uniform(150, 260) if burst else rnd.uniform(0, 12)) * MIB / 4)
         out.append([t, b, f, 0])
         if rnd.random() < 0.2:  # a file ends: a forced sample right after
             f += 1
@@ -57,7 +57,7 @@ def xfer_job():
     s = xfer_samples(ms)
     done = min(s[-1][1], XFER_TOTAL)
     return {
-        "id": 4242, "op": "compress", "state": "running", "source": "nas", "created": NOW - 75, "verify": False,
+        "id": 4242, "op": "compress", "state": "running", "source": "nas", "created": NOW - 75, "started": int(STARTED * 1000), "verify": False,
         "info": {"sources": ["/documents/Projects"], "dest": "/documents/Projects.tar.zst"},
         "progress": {"bytes_done": done, "bytes_total": XFER_TOTAL, "files_done": s[-1][2], "files_total": 4100,
                      "dirs": 120, "errors": 0, "verify_bytes": 0, "scanning": False, "phase": "compress", "method": "zstd",
@@ -133,7 +133,7 @@ def route(name, q):
         base = path.rsplit("/", 1)[-1]
         return {**entry(base, size=1000), "owner": "tester", "group": "users"}
     if name == "jobs":
-        return {"jobs": [xfer_job()] if MODE == "xfer" else [denied_job()] if MODE == "denied" else [], "now": NOW}
+        return {"jobs": [xfer_job()] if MODE == "xfer" else [denied_job()] if MODE == "denied" else [], "now": int(time.time() * 1000)}
     if name in ("prefs", "conns"):
         return {} if name == "prefs" else {"conns": [], "key": None}
     if name in ("usage", "media"):

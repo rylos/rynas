@@ -27,7 +27,7 @@ use crate::identity::User;
 use crate::wire::ApiError;
 
 const MAX_PARALLEL: usize = 2;
-const SAMPLE_EVERY: Duration = Duration::from_millis(500);
+const SAMPLE_EVERY: Duration = Duration::from_millis(250);
 /// Speed series cap per job (M1): past it the older half is thinned.
 const MAX_SAMPLES: usize = 2400;
 /// Error list cap per job (M1).

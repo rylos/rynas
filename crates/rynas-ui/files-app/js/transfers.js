@@ -46,9 +46,9 @@ const PHASES = {
 };
 const LIMITS = [0, 5, 10, 25, 50, 100, 200, 500];
 // speed samples kept per job: past this the older ones are thinned out
-const MAX_SAMPLES = 600;
+const MAX_SAMPLES = 1200;
 // the most recent samples are never thinned: the speed shown reads them
-const KEEP_RECENT = 120;
+const KEEP_RECENT = 240;
 
 export const finished = (j) => ["done", "failed", "cancelled"].includes(j.state);
 // "done" where every item failed reads as a failure, with the first reason
@@ -149,9 +149,11 @@ export function stats(job) {
   const smooth = windowSpeed(10000);
   const avg = elapsed > 500 ? (doneWork / elapsed) * 1000 : 0;
   let peak = 0;
-  for (let i = 2; i < s.length; i++) {
-    const dt = (s[i][0] - s[i - 2][0]) / 1000;
-    if (dt > 0) peak = Math.max(peak, (work(s[i]) - work(s[i - 2])) / dt);
+  // over about a second, however close together the samples are
+  for (let i = 1, j = 0; i < s.length; i++) {
+    while (j + 1 < i && s[i][0] - s[j + 1][0] >= 1000) j++;
+    const dt = (s[i][0] - s[j][0]) / 1000;
+    if (dt >= 0.5) peak = Math.max(peak, (work(s[i]) - work(s[j])) / dt);
   }
   const rate = smooth || avg;
   const remaining = Math.max(0, totalWork - doneWork);
@@ -205,7 +207,10 @@ async function pollNow() {
     const ids = new Set();
     for (const j of data.jobs) {
       ids.add(j.id);
-      onUpdate(merge(j));
+      const job = merge(j);
+      const newest = job.samples[job.samples.length - 1];
+      job._sampleAge = data.now && job.started && newest ? data.now - job.started - newest[0] : undefined;
+      onUpdate(job);
     }
     // jobs the NAS forgot (dismissed elsewhere, daemon restarted)
     for (const [id, j] of jobs) if (j.source !== "local" && !ids.has(id)) jobs.delete(id);
@@ -245,13 +250,31 @@ addEventListener("storage", (e) => {
  * When to poll next. Each poll counts as activity of the session, so with nothing
  * running it goes once a minute, and not at all while the page is hidden.
  */
+/**
+ * With a running job's chart on screen, the ms until its next sample is ready on the NAS (and a
+ * little more for it to be recorded): each poll then brings one new sample. Null without one.
+ */
+function untilNextSample() {
+  let wait = null;
+  for (const id of dialogs.keys()) {
+    const j = jobs.get(id);
+    if (!j || j.state !== "running" || j.source === "local") continue;
+    const period = samplePeriod(j.samples);
+    const age = (((j._sampleAge ?? 0) % period) + period) % period;
+    const w = Math.min(1000, Math.max(30, period - age + 20));
+    wait = wait === null ? w : Math.min(wait, w);
+  }
+  return wait;
+}
+
 function schedule(ms) {
   clearTimeout(pollTimer);
   if (unauth) return;
   const busy = [...jobs.values()].some((j) => active(j) && j.source !== "local");
   const watching = !$("#xfer-drawer").hidden || dialogs.size > 0;
   if (document.hidden && !busy && ms === undefined) return;
-  let wait = ms ?? (busy ? (document.hidden ? 3000 : 700) : watching ? 2000 : 60000);
+  const sample = untilNextSample();
+  let wait = ms ?? (busy ? (document.hidden ? 3000 : sample ?? 700) : watching ? 2000 : 60000);
   if (pollErrors) wait = Math.max(wait, Math.min(60000, 1000 * 2 ** pollErrors));
   pollTimer = setTimeout(poll, wait);
 }
@@ -548,6 +571,19 @@ class JobDialog {
     };
     // one drawing per frame, however fast the mouse moves
     this.frame = 0;
+    // the moving line: at most ~30 drawings a second, only while something on it moves
+    this.anim = 0;
+    this.drawn = 0;
+    this.still = matchMedia("(prefers-reduced-motion: reduce)");
+    this.nextFrame = (now) => {
+      this.anim = 0;
+      if (now - this.drawn < 30) {
+        this.anim = requestAnimationFrame(this.nextFrame);
+        return;
+      }
+      this.drawn = now;
+      this.draw();
+    };
     this.canvas.addEventListener("mousemove", (e) => {
       this.hoverX = e.offsetX;
       this.frame ||= requestAnimationFrame(() => {
@@ -571,11 +607,58 @@ class JobDialog {
   destroy() {
     clearInterval(this.tick);
     cancelAnimationFrame(this.frame);
+    cancelAnimationFrame(this.anim);
     this.resize.disconnect();
+  }
+
+  /**
+   * How far along the samples the line has got. It follows the samples and nothing else: its
+   * target is the second-newest point (the piece before it has both tangents, so a new sample
+   * reshapes nothing on screen) and it walks from one sample to the next at the pace they were
+   * taken, faster only when more than a sample and a half is waiting. No sample, no movement.
+   */
+  headTime(job, pts) {
+    const last = pts[pts.length - 1].t;
+    const still = this.still.matches;
+    const target = active(job) && !still ? pts[Math.max(0, pts.length - 2)].t : last;
+    const wall = performance.now();
+    const period = samplePeriod(job.samples);
+    const c = (this.head ||= { wall, shown: active(job) ? target - period : last, target });
+    c.target = target;
+    const rate = Math.max(1, (target - c.shown) / (1.5 * period));
+    c.shown = still ? target : Math.min(target, c.shown + Math.min(250, wall - c.wall) * rate);
+    c.wall = wall;
+    return c.shown;
+  }
+
+  /** The top of the scale on screen: it glides to `top` as the dashboard's charts do. */
+  shownTop(top) {
+    const now = performance.now();
+    const c = (this.yShow ||= { from: top, to: top, at: 0 });
+    const at = () => {
+      const f = Math.min(1, (now - c.at) / 600);
+      return c.from + (c.to - c.from) * (1 - (1 - f) ** 3);
+    };
+    if (c.to !== top) {
+      c.from = this.still.matches ? top : at();
+      c.to = top;
+      c.at = now;
+    }
+    this.yMoving = now - c.at < 600 && c.from !== c.to;
+    return at();
   }
 
   update(job, tickOnly = false) {
     this.job = job;
+    // the chart takes every poll, the numbers change at a pace that can be read
+    const shown = `${job.state}/${!!job.cancelling}/${!!job.stalled_s}`;
+    const wall = performance.now();
+    if (shown === this.shownKey && wall - this.shownAt < 600) {
+      this.draw();
+      return;
+    }
+    this.shownKey = shown;
+    this.shownAt = wall;
     const p = job.progress;
     const st = stats(job);
     this.st = st;
@@ -799,21 +882,30 @@ class JobDialog {
     const hh = H - pad.t - pad.b;
     const progressAxis = this.axis === "progress";
     const tEnd = s.length ? s[s.length - 1][0] : 0;
-    const xmax = progressAxis ? Math.max(1, st.totalWork) : Math.max(30000, st.elapsed, tEnd);
 
-    // the speed: the work done over a sliding window of ~2 s, read on an even time grid from
-    // the cumulative counters, so bursts and samples a few ms apart average out instead of
-    // drawing spikes; the window widens when a pixel covers more than half a second
-    const spanMs = progressAxis ? Math.max(tEnd, 1) : xmax;
-    const win = Math.max(2000, (spanMs / Math.max(w, 1)) * 4);
-    const pts = speedCurve(s, work, win, Math.max(250, win / 4));
-    const xOf = (p) => pad.l + (Math.min(xmax, progressAxis ? p.w : p.t) / xmax) * w;
-    // one point per ~2 px: on the progress axis a slow stretch packs many points together
+    // the speed at each sample: the work done over the ~2 s before it, from the cumulative
+    // counters, so bursts average out instead of drawing spikes; the window widens when a pixel
+    // covers more than half a second, in steps, so the curve stays put between one and the next
+    const spanMs = progressAxis ? Math.max(tEnd, 1) : Math.max(30000, st.elapsed, tEnd);
+    const rawWin = (spanMs / Math.max(w, 1)) * 4;
+    const win = rawWin <= 2000 ? 2000 : 2000 * Math.SQRT2 ** Math.ceil(Math.log2(rawWin / 2000) * 2);
+    // read once per sample, not once per frame
+    const curveKey = `${s.length}/${tEnd}/${win}/${st.byBytes}`;
+    if (this.curveKey !== curveKey) {
+      this.curveKey = curveKey;
+      this.curve = speedCurve(s, work, win);
+    }
+    const pts = this.curve;
+    const headT = pts.length ? this.headTime(job, pts) : 0;
+    const xmax = progressAxis ? Math.max(1, st.totalWork) : active(job) ? Math.max(30000, headT) : spanMs;
+    const xOf = (p) => pad.l + ((progressAxis ? Math.min(xmax, p.w) : p.t) / xmax) * w;
+    // one point per ~2 px: on the progress axis a slow stretch packs many points together (the
+    // time axis has evenly spaced points, and its scale moves: merging there would shimmer)
     const plot = [];
     for (const p of pts) {
       const x = xOf(p);
       const last = plot[plot.length - 1];
-      if (last && x - last.x < 2) {
+      if (progressAxis && last && x - last.x < 2) {
         last.n++;
         last.v += (p.v - last.v) / last.n;
         last.verifying ||= p.verifying;
@@ -829,7 +921,7 @@ class JobDialog {
       this.yTop = roundTop(want);
       this.yAxis = this.axis;
     }
-    const ymax = this.yTop.top;
+    const ymax = this.shownTop(this.yTop.top);
     const tick = this.yTop.step;
     const yOf = (v) => pad.t + hh - (Math.min(Math.max(v, 0), ymax) / ymax) * hh;
 
@@ -860,11 +952,17 @@ class JobDialog {
       }
     }
     g.setLineDash([]);
+    // where the line has got to, between the two points of the grid around that moment
+    let hi = pts.length - 1;
+    while (hi > 1 && pts[hi - 1].t > headT) hi--;
+    const [pa, pb] = [pts[hi - 1], pts[hi]];
+    const f = pb.t > pa.t ? Math.min(1, Math.max(0, (headT - pa.t) / (pb.t - pa.t))) : 1;
+    const headX = xOf({ t: pa.t + (pb.t - pa.t) * f, w: pa.w + (pb.w - pa.w) * f });
     // the progress so far, faintly, on the progress axis
     if (progressAxis) {
       g.fillStyle = col("--accent-soft");
       g.globalAlpha = 0.45;
-      g.fillRect(pad.l, pad.t, (st.doneWork / xmax) * w, hh);
+      g.fillRect(pad.l, pad.t, active(job) ? Math.max(0, headX - pad.l) : (st.doneWork / xmax) * w, hh);
       g.globalAlpha = 1;
     } else {
       g.fillStyle = col("--faint");
@@ -874,7 +972,7 @@ class JobDialog {
       g.fillText(endLabel, pad.l + w - g.measureText(endLabel).width, H - 4);
       // pauses (holes in the samples), shaded
       g.globalAlpha = 0.12;
-      for (const [a, b] of pauses(s)) g.fillRect(xOf({ t: a }), pad.t, Math.max(1, xOf({ t: b }) - xOf({ t: a })), hh);
+      for (const [a, b] of pauses(s)) if (a < headT) g.fillRect(xOf({ t: a }), pad.t, Math.max(1, xOf({ t: Math.min(b, headT) }) - xOf({ t: a })), hh);
       g.globalAlpha = 1;
     }
     // the curve: monotone cubic through the points, so it never dips below 0 nor overshoots
@@ -887,7 +985,24 @@ class JobDialog {
       const d = (x1 - x0) / 3;
       g.bezierCurveTo(x0 + d, y0 + m[k] * d, x1 - d, y1 - m[k + 1] * d, x1, y1);
     };
+    // the height of the curve at `px`: the same cubic the pieces draw (x is linear in it)
+    const curveY = (px) => {
+      let k = xy.length - 2;
+      while (k > 0 && xy[k][0] > px) k--;
+      const [x0, y0] = xy[k];
+      const [x1, y1] = xy[k + 1];
+      const d = x1 - x0;
+      if (d <= 0) return y1;
+      const u = Math.min(1, Math.max(0, (px - x0) / d));
+      const [c0, c1, v] = [y0 + (m[k] * d) / 3, y1 - (m[k + 1] * d) / 3, 1 - u];
+      return v * v * v * y0 + 3 * v * v * u * c0 + 3 * v * u * u * c1 + u * u * u * y1;
+    };
     const accent = col("--accent");
+    // what is past the head is drawn already, and shows as the head gets there
+    g.save();
+    g.beginPath();
+    g.rect(0, 0, headX + 1, H);
+    g.clip();
     const grad = g.createLinearGradient(0, pad.t, 0, pad.t + hh);
     grad.addColorStop(0, alpha(accent, 0.38));
     grad.addColorStop(1, alpha(accent, 0.03));
@@ -914,9 +1029,11 @@ class JobDialog {
       g.stroke();
       a = b;
     }
+    g.restore();
     // the head of the line
-    if (active(job)) {
-      const [x, y] = xy[xy.length - 1];
+    if (active(job) || headT < this.head.target) {
+      const x = Math.min(headX, xy[xy.length - 1][0]);
+      const y = curveY(x);
       g.fillStyle = accent;
       g.beginPath();
       g.arc(x, y, 3.5, 0, Math.PI * 2);
@@ -940,7 +1057,7 @@ class JobDialog {
     // hover
     if (this.hoverX != null && pts.length) {
       let best = pts[0];
-      for (const p of pts) if (Math.abs(xOf(p) - this.hoverX) < Math.abs(xOf(best) - this.hoverX)) best = p;
+      for (const p of pts) if (p.t <= headT && Math.abs(xOf(p) - this.hoverX) < Math.abs(xOf(best) - this.hoverX)) best = p;
       const x = xOf(best);
       g.strokeStyle = col("--border-strong");
       g.lineWidth = 1;
@@ -959,6 +1076,7 @@ class JobDialog {
       this.tip.style.top = "4px";
       this.tip.hidden = false;
     } else if (this.tip) this.tip.hidden = true;
+    if ((headT < this.head.target || this.yMoving) && !this.anim) this.anim = requestAnimationFrame(this.nextFrame);
   }
 }
 
@@ -982,13 +1100,22 @@ function pauses(s) {
   return out;
 }
 
+/** The pace of the samples: the median of the last gaps (forced samples sit a few ms apart). */
+function samplePeriod(s) {
+  const gaps = [];
+  for (let i = Math.max(1, s.length - 9); i < s.length; i++) gaps.push(s[i][0] - s[i - 1][0]);
+  gaps.sort((a, b) => a - b);
+  return Math.min(1000, Math.max(100, gaps[gaps.length >> 1] || 250));
+}
+
 /**
- * The speed on an even time grid: the work done in the `win` ms before each point, divided by
- * `win`. The cumulative work is read between samples by linear interpolation, flat across a
- * pause; before the first sample it is the first sample's, so the curve rises from 0 over the
- * first window instead of starting with the spike of a first short interval.
+ * The speed at each sample: the work done in the `win` ms before it, divided by `win`. The
+ * cumulative work is read between samples by linear interpolation, flat across a pause; before
+ * the first sample it is the first sample's, so the curve rises from 0 over the first window
+ * instead of starting with the spike of a first short interval. A sample less than 100 ms after
+ * the one before it adds no point, and a new sample leaves the earlier points as they were.
  */
-function speedCurve(s, work, win, step) {
+function speedCurve(s, work, win) {
   if (s.length < 2) return [];
   const holes = pauses(s);
   const t0 = s[0][0];
@@ -1008,16 +1135,26 @@ function speedCurve(s, work, win, step) {
     const f = b > a ? (tm - a) / (b - a) : 1;
     return work(s[k]) + (work(s[k + 1]) - work(s[k])) * f;
   };
+  let v = 1;
   const ver = (tm) => {
-    // verifying: the verify counter grew around this point
-    let i = 1;
-    while (i < s.length - 1 && s[i][0] < tm) i++;
-    return s[i][3] > s[i - 1][3];
+    // verifying: the verify counter grew around this point (tm only grows)
+    while (v < s.length - 1 && s[v][0] < tm) v++;
+    return s[v][3] > s[v - 1][3];
   };
+  const times = [];
+  for (const x of s) if (!times.length || x[0] - times[times.length - 1] >= 100) times.push(x[0]);
+  // a job over within 100 ms still has a start and an end
+  if (times.length < 2 && tEnd > times[0]) times.push(tEnd);
+  // across a pause there is no sample: the speed reaches zero and stays there until it ends
+  for (const [a, b] of holes) {
+    if (a + win < b) times.push(a + win);
+    times.push(b);
+  }
+  times.sort((a, b) => a - b);
   const out = [];
-  const n = Math.max(1, Math.ceil((tEnd - t0) / step));
-  for (let i = 0; i <= n; i++) {
-    const tm = Math.min(tEnd, t0 + i * step);
+  for (let i = 0; i < times.length; i++) {
+    if (i && times[i] === times[i - 1]) continue;
+    const tm = times[i];
     const v = Math.max(0, (at(tm) - at(tm - win)) / (win / 1000));
     out.push({ t: tm, w: at(tm), v, verifying: ver(tm) });
   }
