@@ -620,7 +620,7 @@ impl ConnectionMessageHandler {
         let started = crate::connection::worker::parallel::base::clock_ms();
         loop {
             if worker.stopped() {
-                return Err(Error::ConnectionStopped);
+                return Err(worker.stopped_error());
             }
             let Some(left) = crate::connection::worker::parallel::base::idle_left(
                 started,

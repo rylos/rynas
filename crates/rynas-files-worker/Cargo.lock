@@ -2855,6 +2855,7 @@ dependencies = [
  "smb-rpc",
  "smb-transport",
  "sspi",
+ "subtle",
  "thiserror",
  "time",
  "url",

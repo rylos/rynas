@@ -2,6 +2,7 @@
 
 use binrw::prelude::*;
 use std::io::Cursor;
+use subtle::ConstantTimeEq; // rynas patch: see verify_signature
 
 use crate::{Error, crypto};
 use smb_msg::Header;
@@ -25,7 +26,9 @@ impl MessageSigner {
     /// This function assumes that the provided raw_data contains the plain message header at the beginning of the first buffer.
     pub fn verify_signature(&mut self, header: &mut Header, data: &IoVec) -> crate::Result<()> {
         let calculated_signature = self._calculate_signature(header, data)?;
-        if calculated_signature != header.signature {
+        // rynas patch: compared in constant time, for every signing algorithm and backend
+        let matches = calculated_signature.to_le_bytes()[..].ct_eq(&header.signature.to_le_bytes()[..]);
+        if !bool::from(matches) {
             return Err(Error::SignatureVerificationFailed);
         }
         Ok(())

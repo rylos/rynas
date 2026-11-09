@@ -129,6 +129,12 @@ impl SessionAlgosFactory {
         dialect: &Arc<DialectImpl>,
         preauth_hash: &Option<PreauthHashValue>,
     ) -> Result<MessageSigner, CryptoError> {
+        // rynas patch, open point: the signing key is derived with L = 128 under every cipher.
+        // MS-SMB2 3.1.4.2 ties L to Connection.CipherId for all keys, without exceptions, and
+        // Linux cifs does that (L = 256, truncated to 16 bytes); ksmbd's source uses 128 for
+        // the signing key. Samba 4.25 uses 128 too: tested, with L = 256 here the AES-256
+        // session setup response (the server signs it) fails to verify. No Windows server
+        // was tried: revisit if one refuses an AES-256 session on this.
         let signing_key = deriver.derive(
             dialect.get_signing_derive_label(),
             Self::preauth_hash_or(preauth_hash, Self::NO_PREAUTH_HASH_DERIVE_SIGN_CTX),
@@ -295,6 +301,27 @@ impl SessionInfo {
             session_id,
             state: Some(SessionInfoState::Initial),
         }
+    }
+
+    /// rynas patch: tests only: a session already `Ready`, encrypting with `key`.
+    #[doc(hidden)]
+    pub(crate) fn ready_for_test(
+        session_id: u64,
+        cipher: EncryptionCipher,
+        key: &[u8],
+    ) -> crate::Result<Self> {
+        let algos = SessionAlgos {
+            encryptor: Some(MessageEncryptor::new(make_encrypting_algo(cipher, key)?)),
+            decryptor: Some(MessageDecryptor::new(make_encrypting_algo(cipher, key)?)),
+        };
+        Ok(Self {
+            session_id,
+            state: Some(SessionInfoState::Ready {
+                algos,
+                flags: SessionFlags::new(),
+                force_encryption: true,
+            }),
+        })
     }
 
     /// # Returns
@@ -477,7 +504,12 @@ impl<'a> KeyDeriver<'a> {
     }
 
     /// rynas patch: a key of the length `cipher` takes (MS-SMB2 3.1.4.2: L = 256 for the
-    /// AES-256 ciphers).
+    /// AES-256 ciphers). The spec is only followed in part: under 3.1.1 with AES-256 the
+    /// encryption keys must come from Session.FullSessionKey (MS-SMB2 3.2.5.3.1), while
+    /// `session_key` is always its first 16 bytes ([`Authenticator::session_key`]). The same
+    /// thing for NTLM, whose key is 16 bytes; wrong for a longer Kerberos key (not built).
+    ///
+    /// [`Authenticator::session_key`]: crate::session::authenticator::Authenticator::session_key
     pub fn derive_for(
         &self,
         cipher: EncryptionCipher,

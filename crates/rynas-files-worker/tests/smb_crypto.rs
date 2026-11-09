@@ -3,10 +3,17 @@
 //! round trips against a real server are in `src/remote/smb.rs` (`RYNAS_TEST_SMBD`).
 
 use aes_gcm::{Aes128Gcm, Aes256Gcm, KeyInit, aead::AeadInOut};
-use smb::crypto::{GmacBackend, force_gmac_backend, make_encrypting_algo, make_gmac_signer, make_signing_algo};
+use smb::connection::transformer::TransformPhase;
+use smb::connection::worker::{Worker, WorkerImpl};
+use smb::crypto::{ENCRYPTING_ALGOS, GmacBackend, SIGNING_ALGOS, force_gmac_backend, kbkdf_hmacsha256, kbkdf_hmacsha256_256, make_encrypting_algo, make_gmac_signer, make_signing_algo};
+use smb::msg_handler::ReceiveOptions;
 use smb::session::MessageSigner;
-use smb::transport::{IoVec, IoVecBuf};
-use smb::{Command, EncryptionCipher, Error, Header, HeaderFlags, SigningAlgorithmId};
+use smb::transport::{IoVec, IoVecBuf, SmbTransport, SmbTransportRead, SmbTransportWrite, TransportError};
+use smb::{Command, EncryptedHeader, EncryptionCipher, Error, Header, HeaderFlags, SigningAlgorithmId};
+use std::net::SocketAddr;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, mpsc};
+use std::time::{Duration, Instant};
 
 const MESSAGE_SIZES: &[usize] = &[0, 1, 2, 15, 16, 17, 63, 64, 65, 255, 256, 4095, 4096, 4097, 65535, 65536, 65537, 1 << 20, (1 << 20) + 7, 8 << 20, (8 << 20) + 1];
 
@@ -103,22 +110,34 @@ fn gmac_matches_the_old_implementation() {
     }
 }
 
-/// The choice of implementation by CPU is overridable for the tests, and what is chosen signs
-/// like both.
+/// The choice of implementation by CPU is overridable for the tests, each signer says which
+/// one it runs on, and what is chosen signs like both.
 #[test]
 fn gmac_backend_can_be_forced() {
+    // what the CPU decides, written down apart from the code under test
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    let by_cpu = if std::arch::is_x86_feature_detected!("avx") && std::arch::is_x86_feature_detected!("pclmulqdq") { GmacBackend::RustCrypto } else { GmacBackend::Ring };
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    let by_cpu = GmacBackend::RustCrypto;
+
     let key = [9u8; 16];
     let sign = |backend| {
         force_gmac_backend(backend);
         let mut signer = make_signing_algo(SigningAlgorithmId::AesGmac, &key).unwrap();
         force_gmac_backend(None);
+        let ran_on = signer.gmac_backend().expect("an AES-GMAC signer");
         signer.start(&header(5, false, Command::Read));
         signer.update(b"hello");
-        signer.finalize()
+        (signer.finalize(), ran_on)
     };
-    let by_cpu = sign(None);
-    assert_eq!(by_cpu, sign(Some(GmacBackend::Ring)));
-    assert_eq!(by_cpu, sign(Some(GmacBackend::RustCrypto)));
+    let (chosen, ran_on) = sign(None);
+    assert_eq!(ran_on, by_cpu, "the implementation the CPU calls for");
+    for backend in [GmacBackend::Ring, GmacBackend::RustCrypto] {
+        let (signature, ran_on) = sign(Some(backend));
+        assert_eq!(ran_on, backend, "forced to {backend:?}");
+        assert_eq!(signature, chosen, "{backend:?} signs differently");
+    }
+    assert_eq!(make_signing_algo(SigningAlgorithmId::AesCmac, &key).unwrap().gmac_backend(), None);
 }
 
 /// What the upstream crate's own test holds: a real session logoff request and its signature
@@ -295,6 +314,240 @@ fn gcm_known_answers() {
         assert_eq!(tag, u128::from_le_bytes(want), "{:?}", case.cipher);
         algo.decrypt(&mut data, &[], &[0u8; 16], tag).unwrap();
         assert_eq!(data, hex(case.plain_hex));
+    }
+}
+
+/// A worked SP 800-108 counter-mode derivation, computed apart from this crate (Python's
+/// hmac/hashlib): one HMAC-SHA256 block of `00000001 || label || 00 || context || L`, with
+/// the session key, label and preauth hash of the upstream crate's own key test. The
+/// 128-bit answer is that test's signing key: the input is the same, only L differs, and L
+/// goes into the hash (the first 16 bytes do not match).
+#[test]
+fn kbkdf_known_answers() {
+    const SESSION_KEY: [u8; 16] = [0xDA, 0x90, 0xB1, 0xDF, 0x80, 0x5C, 0x34, 0x9F, 0x88, 0x86, 0xBA, 0x02, 0x9E, 0xA4, 0x5C, 0xB6];
+    const PREAUTH_HASH: [u8; 64] = [
+        0x47, 0x95, 0x78, 0xb1, 0x87, 0x23, 0x05, 0x6a, 0x4c, 0x3e, 0x6f, 0x73, 0x2f, 0x36, 0xf1, 0x9c, 0xcc, 0xdd, 0x51, 0x6f, 0x49, 0x56, 0x6b, 0xa0, 0x43, 0xce, 0x59, 0x6a, 0x13, 0x42, 0x27, 0xd9, 0x64, 0xef, 0x0a, 0xa6, 0xa6, 0x27, 0x1a, 0xfe, 0x4f, 0xe6, 0x4b, 0x4d, 0x8c, 0xb2, 0xe6, 0xa1, 0x95, 0x11, 0xed, 0xbb, 0xf6, 0xd7, 0x7d, 0xce, 0xf0, 0x33, 0xda, 0xed, 0x8c, 0x71, 0x81, 0xb2,
+    ];
+    let label = b"SMBSigningKey\x00";
+    let key128 = kbkdf_hmacsha256(&SESSION_KEY, label, &PREAUTH_HASH).unwrap();
+    assert_eq!(key128, [0x6D, 0xAC, 0xCE, 0xDE, 0x5B, 0x4E, 0x36, 0x08, 0xAD, 0x6E, 0xA5, 0x47, 0x33, 0xCA, 0x31, 0x63]);
+    let key256 = kbkdf_hmacsha256_256(&SESSION_KEY, label, &PREAUTH_HASH).unwrap();
+    let want: [u8; 32] = [0xa9, 0x1a, 0xac, 0xd6, 0x65, 0x74, 0xf5, 0x40, 0x18, 0xdb, 0x03, 0x26, 0x91, 0xaa, 0xc8, 0x70, 0xe2, 0x82, 0xa5, 0xd0, 0xba, 0x17, 0x98, 0xfe, 0x10, 0xf8, 0xa6, 0x6b, 0x5a, 0xd5, 0xf3, 0xe5];
+    assert_eq!(key256, want);
+    assert_ne!(key128, key256[..16]);
+}
+
+/// The additional data of the AEAD: MS-SMB2 2.2.41, the transform header from the nonce on.
+#[test]
+fn aead_bytes_are_the_transform_header_after_the_signature() {
+    let nonce: [u8; 16] = std::array::from_fn(|i| i as u8 + 1);
+    let header = EncryptedHeader { signature: 0xFFFF_FFFF, nonce, original_message_size: 0x0102_0304, session_id: 0x1122_3344_5566_7788 };
+    let mut want = Vec::new();
+    want.extend_from_slice(&nonce);
+    want.extend_from_slice(&[0x04, 0x03, 0x02, 0x01]); // OriginalMessageSize
+    want.extend_from_slice(&[0, 0]); // Reserved
+    want.extend_from_slice(&[1, 0]); // Flags: encrypted
+    want.extend_from_slice(&[0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11]); // SessionId
+    assert_eq!(header.aead_bytes().as_slice(), want.as_slice());
+    assert_eq!(want.len(), 32);
+}
+
+/// What the client offers first is what a 3.1.1 server picks.
+#[test]
+fn preference_order_of_the_algorithms() {
+    assert_eq!(ENCRYPTING_ALGOS, [EncryptionCipher::Aes128Gcm, EncryptionCipher::Aes256Gcm, EncryptionCipher::Aes128Ccm, EncryptionCipher::Aes256Ccm]);
+    assert_eq!(SIGNING_ALGOS, [SigningAlgorithmId::AesGmac, SigningAlgorithmId::AesCmac, SigningAlgorithmId::HmacSha256]);
+}
+
+const TEST_SESSION: u64 = 0x5500_0000_1234;
+const TEST_KEY: [u8; 16] = [0x42; 16];
+
+/// A transport that hands the worker the frames the test sends down `frames`, and answers
+/// "nothing yet" otherwise, as a socket with a read timeout does.
+struct FakeTransport {
+    frames: mpsc::Receiver<Vec<u8>>,
+}
+
+struct NoWrites;
+
+impl SmbTransportRead for FakeTransport {
+    fn receive_exact(&mut self, _out: &mut [u8]) -> Result<(), TransportError> {
+        unreachable!("the test's frames come whole, through receive")
+    }
+
+    fn receive(&mut self) -> Result<Vec<u8>, TransportError> {
+        match self.frames.recv_timeout(Duration::from_millis(20)) {
+            Ok(frame) => Ok(frame),
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(TransportError::IoError(std::io::ErrorKind::WouldBlock.into())),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(TransportError::NotConnected),
+        }
+    }
+
+    fn set_read_timeout(&self, _timeout: Duration) -> Result<(), TransportError> {
+        Ok(())
+    }
+}
+
+impl SmbTransportWrite for NoWrites {
+    fn send_raw(&mut self, _buf: &[u8]) -> Result<(), TransportError> {
+        Ok(())
+    }
+}
+
+/// [`FakeTransport`] before it is split in two.
+struct FakeConnection(FakeTransport);
+
+impl SmbTransportRead for FakeConnection {
+    fn receive_exact(&mut self, out: &mut [u8]) -> Result<(), TransportError> {
+        self.0.receive_exact(out)
+    }
+
+    fn set_read_timeout(&self, timeout: Duration) -> Result<(), TransportError> {
+        self.0.set_read_timeout(timeout)
+    }
+}
+
+impl SmbTransportWrite for FakeConnection {
+    fn send_raw(&mut self, _buf: &[u8]) -> Result<(), TransportError> {
+        Ok(())
+    }
+}
+
+impl SmbTransport for FakeConnection {
+    fn connect(&mut self, _server_name: &str, _address: SocketAddr) -> Result<(), TransportError> {
+        Ok(())
+    }
+
+    fn default_port(&self) -> u16 {
+        445
+    }
+
+    fn split(self: Box<Self>) -> Result<(Box<dyn SmbTransportRead>, Box<dyn SmbTransportWrite>), TransportError> {
+        Ok((Box::new(self.0), Box::new(NoWrites)))
+    }
+
+    fn remote_address(&self) -> Result<SocketAddr, TransportError> {
+        Ok(SocketAddr::from(([127, 0, 0, 1], 445)))
+    }
+}
+
+/// A plain LOGOFF response (MS-SMB2 2.2.1, 2.2.8), written out by hand.
+fn plain_logoff_response(message_id: u64, session_id: u64) -> Vec<u8> {
+    let mut frame = vec![0xFE, b'S', b'M', b'B', 64, 0, 1, 0];
+    frame.extend_from_slice(&0u32.to_le_bytes()); // status
+    frame.extend_from_slice(&2u16.to_le_bytes()); // LOGOFF
+    frame.extend_from_slice(&1u16.to_le_bytes()); // credits
+    frame.extend_from_slice(&1u32.to_le_bytes()); // flags: server to client
+    frame.extend_from_slice(&0u32.to_le_bytes()); // next command
+    frame.extend_from_slice(&message_id.to_le_bytes());
+    frame.extend_from_slice(&0u32.to_le_bytes()); // reserved
+    frame.extend_from_slice(&1u32.to_le_bytes()); // tree id
+    frame.extend_from_slice(&session_id.to_le_bytes());
+    frame.extend_from_slice(&[0u8; 16]); // signature
+    frame.extend_from_slice(&[4, 0, 0, 0]);
+    frame
+}
+
+/// An encrypted frame as a server sends it: transform header, then the sealed message.
+fn encrypted_frame(key: &[u8], message: &[u8], session_id: u64) -> Vec<u8> {
+    let mut nonce = [0u8; 16];
+    nonce[..12].copy_from_slice(&[7, 7, 7, 7, 1, 2, 3, 4, 5, 6, 7, 8]);
+    let mut aad = Vec::with_capacity(32);
+    aad.extend_from_slice(&nonce);
+    aad.extend_from_slice(&(message.len() as u32).to_le_bytes());
+    aad.extend_from_slice(&[0, 0, 1, 0]); // reserved, flags
+    aad.extend_from_slice(&session_id.to_le_bytes());
+    let mut sealed = message.to_vec();
+    let tag = make_encrypting_algo(EncryptionCipher::Aes128Gcm, key).unwrap().encrypt(&mut sealed, &aad, &nonce).unwrap().signature;
+    let mut frame = vec![0xFD, b'S', b'M', b'B'];
+    frame.extend_from_slice(&tag.to_le_bytes());
+    frame.extend_from_slice(&aad);
+    frame.extend_from_slice(&sealed);
+    frame
+}
+
+/// A worker on a [`FakeTransport`] with one encrypted session, and the sender of its frames.
+fn worker_with_encrypted_session() -> (Arc<WorkerImpl>, mpsc::Sender<Vec<u8>>) {
+    let (frames_tx, frames) = mpsc::channel();
+    let worker = <WorkerImpl as Worker>::start(Box::new(FakeConnection(FakeTransport { frames })), Duration::from_secs(30)).unwrap();
+    worker.transformer().add_session_for_test(TEST_SESSION, EncryptionCipher::Aes128Gcm, &TEST_KEY).unwrap();
+    (worker, frames_tx)
+}
+
+fn wait_for(worker: &Arc<WorkerImpl>, message_id: u64) -> std::thread::JoinHandle<smb::Result<smb::msg_handler::IncomingMessage>> {
+    let worker = Arc::clone(worker);
+    std::thread::spawn(move || worker.receive_next(&ReceiveOptions { msg_id: message_id, ..Default::default() }))
+}
+
+fn assert_authentication_failure<T: std::fmt::Debug>(res: smb::Result<T>, what: &str) {
+    match res {
+        Err(Error::TranformFailed(e)) => {
+            assert!(matches!(e.phase, TransformPhase::EncryptDecrypt) && !e.outgoing && e.msg_id.is_none(), "{what}: {e}");
+            assert!(e.why.contains("failed authentication"), "{what}: {e}");
+        }
+        other => panic!("{what}: not an authentication failure: {other:?}"),
+    }
+}
+
+/// A tampered encrypted frame ends the connection at once, long before the watchdog (30 s
+/// here), for every waiter and for what comes later; nothing of it is delivered, and it is
+/// not progress. Before it: a good frame is delivered and is progress; a frame that does not
+/// verify is neither.
+#[test]
+fn tampered_encrypted_frame_fails_the_connection_at_once() {
+    let settle = || std::thread::sleep(Duration::from_millis(30));
+    type Change = fn(&mut Vec<u8>);
+    let changes: [(&str, Change); 5] = [
+        ("the ciphertext", |f| *f.last_mut().unwrap() ^= 1),
+        ("the tag", |f| f[4] ^= 1),
+        ("the nonce", |f| f[20] ^= 1),
+        ("the session id", |f| f[44] ^= 1),
+        ("the flags", |f| f[42] ^= 1),
+    ];
+    for (name, tamper) in changes {
+        let (worker, frames) = worker_with_encrypted_session();
+        let good = encrypted_frame(&TEST_KEY, &plain_logoff_response(7, TEST_SESSION), TEST_SESSION);
+
+        settle();
+        let before = worker.activity().load(Ordering::Relaxed);
+        let waiter = wait_for(&worker, 7);
+        frames.send(good.clone()).unwrap();
+        let msg = waiter.join().unwrap().expect("the good frame arrives");
+        assert!(msg.form.encrypted, "{name}");
+        let progress = worker.activity().load(Ordering::Relaxed);
+        assert!(progress > before, "a verified frame is progress ({name})");
+
+        // no signature on a session that needs one: accepted by the transformer, not progress
+        settle();
+        frames.send(plain_logoff_response(20, TEST_SESSION)).unwrap();
+        // a signed frame that cannot verify, with a message id: its own error, not fatal, not progress
+        let mut signed = plain_logoff_response(21, TEST_SESSION);
+        signed[16] |= 8; // SMB2_FLAGS_SIGNED
+        signed[48] ^= 1;
+        frames.send(signed).unwrap();
+        settle();
+        assert!(!worker.stopped(), "{name}");
+        assert!(matches!(wait_for(&worker, 21).join().unwrap(), Err(Error::TranformFailed(_))), "{name}");
+        assert_eq!(worker.activity().load(Ordering::Relaxed), progress, "an unverified frame is not progress ({name})");
+
+        // two waiters, then the tampered frame; the first must not get the 7's copy
+        let (first, second) = (wait_for(&worker, 11), wait_for(&worker, 12));
+        settle();
+        let mut bad = encrypted_frame(&TEST_KEY, &plain_logoff_response(11, TEST_SESSION), TEST_SESSION);
+        tamper(&mut bad);
+        let start = Instant::now();
+        frames.send(bad).unwrap();
+        assert_authentication_failure(first.join().unwrap(), name);
+        assert_authentication_failure(second.join().unwrap(), name);
+        assert!(start.elapsed() < Duration::from_secs(5), "{name}: took {:?}", start.elapsed());
+        assert_eq!(worker.activity().load(Ordering::Relaxed), progress, "a tampered frame is not progress ({name})");
+        assert!(worker.stopped(), "{name}");
+
+        // and later requests are told the same, at once
+        let start = Instant::now();
+        assert_authentication_failure(wait_for(&worker, 13).join().unwrap(), name);
+        assert!(start.elapsed() < Duration::from_secs(5), "{name}: took {:?}", start.elapsed());
+        worker.stop().unwrap();
     }
 }
 

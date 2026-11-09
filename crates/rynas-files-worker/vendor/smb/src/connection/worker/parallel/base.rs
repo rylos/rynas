@@ -63,8 +63,11 @@ where
 
     /// A flag that indicates whether the worker is stopped.
     stopped: AtomicBool,
-    /// rynas patch: when the last message came from the server ([`clock_ms`])
+    /// rynas patch: when the last authenticated message came from the server ([`clock_ms`])
     activity: AtomicU64,
+    /// rynas patch: set (with the frame's session, if known) when an encrypted frame failed
+    /// authentication and the connection stopped for it.
+    auth_failure: std::sync::OnceLock<Option<u64>>,
     /// The current timeout configured for the worker.
     timeout: AtomicU64,
 }
@@ -118,6 +121,36 @@ where
         self.stopped.load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    /// rynas patch: what a caller gets once the worker stopped: the reason, when an encrypted
+    /// frame failed authentication, so it is the same for a waiter woken by the failure and
+    /// for a request that comes after it.
+    pub fn stopped_error(&self) -> Error {
+        match self.auth_failure.get() {
+            Some(session_id) => crate::connection::transformer::TransformError::not_authenticated(*session_id),
+            None => Error::ConnectionStopped,
+        }
+    }
+
+    /// rynas patch: an encrypted frame failed authentication: the connection stops here.
+    /// `stopped` comes first: a waiter registers under the state lock after checking it, so
+    /// none can slip in behind the drain. Nothing received before the failure is delivered
+    /// any more. The `ConnectionStopped` returned ends the backend's receive loop.
+    async fn fail_connection(
+        self: &Arc<Self>,
+        failure: crate::connection::transformer::TransformError,
+    ) -> crate::Result<()> {
+        log::error!("Closing the connection: {failure}");
+        let _ = self.auth_failure.set(failure.session_id);
+        self.stopped.store(true, Ordering::SeqCst);
+        if let Ok(mut state) = self.state.lock().await {
+            for (_, tx) in state.awaiting.drain() {
+                let _ = T::send_notify(tx, Err(self.stopped_error()));
+            }
+            state.pending.clear();
+        }
+        Err(Error::ConnectionStopped)
+    }
+
     /// This is a function that should be used by multi worker implementations (async/mtd),
     /// after gettting a messages from the server, this function processes it and
     /// notifies the awaiting tasks.
@@ -127,7 +160,6 @@ where
     ) -> crate::Result<()> {
         log::trace!("Received message from server.");
         let message = message?;
-        self.activity.store(clock_ms(), Ordering::Relaxed);
 
         // Tranform the message and verify it.
         let msg = self.transformer.transform_incoming(message).await;
@@ -135,7 +167,23 @@ where
             // Good flow, message is OK.
             Ok(msg) => {
                 let msg_id = msg.message.header.message_id;
+                // rynas patch: only what proves it comes from the server counts as its
+                // progress: a frame that fails to verify must not keep a job hanging, nor
+                // one that skipped verification on a session that requires it.
+                if msg.form.signed_or_encrypted()
+                    || self
+                        .transformer
+                        .allows_unsigned(msg.message.header.session_id)
+                        .await
+                {
+                    self.activity.store(clock_ms(), Ordering::Relaxed);
+                }
                 (Ok(msg), msg_id)
+            }
+            // rynas patch: no authenticated message ID, so no waiter to tell: every waiter
+            // is failed instead of waiting for the watchdog.
+            Err(crate::Error::TranformFailed(e)) if e.failed_authentication() => {
+                return self.fail_connection(e).await;
             }
             // If we have a message ID to notify the error, use it.
             Err(crate::Error::TranformFailed(e)) => match e.msg_id {
@@ -252,6 +300,7 @@ where
             sender: tx,
             stopped: AtomicBool::new(false),
             activity: AtomicU64::new(clock_ms()),
+            auth_failure: Default::default(),
             timeout: AtomicU64::new(u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX)),
         });
 
@@ -282,6 +331,10 @@ where
 
     async fn send(&self, msg: OutgoingMessage) -> crate::Result<SendMessageResult> {
         log::trace!("ParallelWorker::send({msg:?}) called");
+        // rynas patch: a stopped connection refuses at once; nothing would answer
+        if self.stopped() {
+            return Err(self.stopped_error());
+        }
         let return_raw_data = msg.return_raw_data;
 
         let id = msg.message.header.message_id;
@@ -309,7 +362,7 @@ where
             let mut state = self.state.lock().await?;
             if self.stopped() {
                 log::trace!("Connection is closed, avoid receiving.");
-                return Err(Error::ConnectionStopped);
+                return Err(self.stopped_error()); // rynas patch
             }
             if state.pending.contains_key(&options.msg_id) {
                 log::trace!(

@@ -1023,14 +1023,15 @@ mod tests {
     }
 
     /// The tests against a real Samba on the loopback (the benchmark's, see
-    /// `packaging/bench-smb.sh`): `RYNAS_TEST_SMBD=127.0.0.1:4455/share/user/password`.
-    /// Skipped without it.
-    fn local_samba() -> Option<(Conn, String)> {
-        let spec = std::env::var("RYNAS_TEST_SMBD").ok()?;
-        let mut it = spec.splitn(4, '/');
-        let (addr, share, user, password) = (it.next()?, it.next()?, it.next()?, it.next()?);
-        let (host, port) = addr.rsplit_once(':')?;
-        Some((Conn { host: host.into(), port: port.parse().ok()?, user: user.into(), password: password.into(), ..Default::default() }, share.into()))
+    /// `packaging/bench-smb.sh`): `#[ignore]`d, so a run without a server shows them as
+    /// ignored instead of passing. Run them with `--ignored` and
+    /// `RYNAS_TEST_SMBD=127.0.0.1:4455/share/user/password`; asked for without it, they fail.
+    fn local_samba() -> (Conn, String) {
+        let spec = std::env::var("RYNAS_TEST_SMBD").expect("RYNAS_TEST_SMBD=host:port/share/user/password");
+        let parts: Vec<&str> = spec.splitn(4, '/').collect();
+        let [addr, share, user, password] = parts[..] else { panic!("RYNAS_TEST_SMBD=host:port/share/user/password") };
+        let (host, port) = addr.rsplit_once(':').expect("RYNAS_TEST_SMBD: host:port");
+        (Conn { host: host.into(), port: port.parse().expect("RYNAS_TEST_SMBD: port"), user: user.into(), password: password.into(), ..Default::default() }, share.into())
     }
 
     /// A TCP relay in front of the server: `rate` bytes per second from the server (0: no
@@ -1132,11 +1133,13 @@ mod tests {
     /// With signing or encryption forced on the server: a server response with one bit
     /// flipped on the way is refused, never delivered as data.
     #[test]
+    #[ignore = "needs a local Samba: RYNAS_TEST_SMBD and RYNAS_TEST_SMBD_SIGNING or _CIPHER"]
     fn local_samba_tampered_answer_is_rejected() {
-        let Some((conn, share)) = local_samba() else { return eprintln!("RYNAS_TEST_SMBD not set: skipped") };
-        if std::env::var("RYNAS_TEST_SMBD_SIGNING").is_err() && std::env::var("RYNAS_TEST_SMBD_CIPHER").is_err() {
-            return eprintln!("RYNAS_TEST_SMBD_SIGNING/_CIPHER not set: skipped");
-        }
+        let (conn, share) = local_samba();
+        assert!(
+            std::env::var("RYNAS_TEST_SMBD_SIGNING").is_ok() || std::env::var("RYNAS_TEST_SMBD_CIPHER").is_ok(),
+            "set RYNAS_TEST_SMBD_SIGNING or RYNAS_TEST_SMBD_CIPHER to what the server was set up to require"
+        );
         let path = vec![share.clone(), format!("rynas-tamper-{}.bin", std::process::id())];
         let data: Vec<u8> = (0..8u32 << 20).map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8).collect();
         let smb = Smb::connect(&conn).unwrap();
@@ -1155,6 +1158,13 @@ mod tests {
         let res = tampered.reader(&path).and_then(|mut r| r.read_to_end(&mut back));
         let e = res.expect_err("a tampered answer was accepted");
         eprintln!("tampered answer refused: {e}");
+        // refused for its signature or its encryption tag, not by some other failure
+        let text = e.to_string();
+        assert!(
+            text.contains("SignVerify") || text.contains("failed authentication"),
+            "not a signature or authentication failure: {text}"
+        );
+        assert!(super::super::retryable(&e), "{e}");
         assert!(back.len() < data.len() && back[..] == data[..back.len()], "the tampered bytes reached the caller");
         drop(tampered);
         drop(clean);
@@ -1162,8 +1172,9 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "needs a local Samba: RYNAS_TEST_SMBD"]
     fn local_samba_round_trip_and_seek() {
-        let Some((conn, share)) = local_samba() else { return eprintln!("RYNAS_TEST_SMBD not set: skipped") };
+        let (conn, share) = local_samba();
         let smb = Smb::connect(&conn).unwrap();
         let path = vec![share.clone(), format!("rynas-test-{}.bin", std::process::id())];
         let data: Vec<u8> = (0..(21u32 << 20) + 12345).map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8).collect();
@@ -1195,8 +1206,9 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "needs a local Samba: RYNAS_TEST_SMBD"]
     fn local_samba_slow_but_answering_is_waited_for() {
-        let Some((conn, share)) = local_samba() else { return eprintln!("RYNAS_TEST_SMBD not set: skipped") };
+        let (conn, share) = local_samba();
         let path = vec![share.clone(), format!("rynas-slow-{}.bin", std::process::id())];
         let data = vec![7u8; 8 << 20];
         copy_up(&Smb::connect(&conn).unwrap(), &path, &data);

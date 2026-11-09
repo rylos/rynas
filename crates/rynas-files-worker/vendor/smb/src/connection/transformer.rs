@@ -155,6 +155,32 @@ impl Transformer {
         f(&session_info)
     }
 
+    /// rynas patch: whether frames of this session may legitimately be neither signed nor
+    /// encrypted (a guest or null session). Unknown session: no.
+    pub async fn allows_unsigned(&self, session_id: u64) -> bool {
+        self._with_session(session_id, |session| session.allow_unsigned())
+            .await
+            .unwrap_or(false)
+    }
+
+    /// rynas patch: tests only: a session in the `Ready` state that decrypts with `key`,
+    /// without the negotiation and the authentication that normally lead to it.
+    #[doc(hidden)]
+    pub async fn add_session_for_test(
+        &self,
+        session_id: u64,
+        cipher: EncryptionCipher,
+        key: &[u8],
+    ) -> crate::Result<()> {
+        let info = SessionInfo::ready_for_test(session_id, cipher, key)?;
+        let session = SessionAndChannel::new(session_id, Arc::new(RwLock::new(info)));
+        self.sessions
+            .write()
+            .await?
+            .insert(session_id, Arc::new(RwLock::new(session)));
+        Ok(())
+    }
+
     /// Transforms an outgoing message to a raw SMB message.
     pub async fn transform_outgoing(&self, mut msg: OutgoingMessage) -> crate::Result<IoVec> {
         let should_encrypt = msg.encrypt;
@@ -262,7 +288,13 @@ impl Transformer {
 
     /// Transforms an incoming message buffer to an [`IncomingMessage`].
     pub async fn transform_incoming(&self, data: Vec<u8>) -> crate::Result<IncomingMessage> {
-        let message = Response::try_from(data.as_ref())?;
+        let parsed = Response::try_from(data.as_ref());
+        // rynas patch: a frame that claims to be encrypted and cannot even be read has no
+        // authenticated message ID, like any other that fails to decrypt below
+        if parsed.is_err() && data.starts_with(b"\xfdSMB") {
+            return Err(TransformError::not_authenticated(None));
+        }
+        let message = parsed?;
 
         let mut form = MessageForm::default();
 
@@ -283,9 +315,20 @@ impl Transformer {
                     ))?;
                     Ok(decryptor.clone())
                 })
-                .await?;
+                .await
+                .map_err(|_| TransformError::not_authenticated(Some(session_id)))?; // rynas patch
             form.encrypted = true;
-            decryptor.decrypt_message(encrypted_message)?
+            // rynas patch: a failed authentication tag is an error of the connection (see
+            // TransformError::failed_authentication). A message that authenticated and then
+            // does not parse keeps the error it had.
+            decryptor
+                .decrypt_message(encrypted_message)
+                .map_err(|e| match e {
+                    crate::Error::CryptoError(_) => {
+                        TransformError::not_authenticated(Some(session_id))
+                    }
+                    e => e,
+                })?
         } else {
             (message, data)
         };
@@ -438,6 +481,29 @@ pub struct TransformError {
     /// If a message ID is available, it will be set here,
     /// for error-handling purposes.
     pub msg_id: Option<u64>,
+}
+
+impl TransformError {
+    /// rynas patch: the error of an incoming encrypted frame that did not authenticate: the
+    /// tag failed, or its session is not one we hold keys for (its session ID and the rest
+    /// of the transform header are authenticated data, so tampering can land there too).
+    pub(crate) fn not_authenticated(session_id: Option<u64>) -> crate::Error {
+        crate::Error::TranformFailed(TransformError {
+            outgoing: false,
+            phase: TransformPhase::EncryptDecrypt,
+            session_id,
+            why: "An encrypted message failed authentication, the connection is closed!",
+            msg_id: None,
+        })
+    }
+
+    /// rynas patch: whether this is the error of [`TransformError::not_authenticated`]. With
+    /// no authenticated message ID it cannot be handed to one waiter, and everything else
+    /// on the connection is suspect: the worker fails the whole connection at once, and a
+    /// reconnect is the caller's retry path.
+    pub(crate) fn failed_authentication(&self) -> bool {
+        !self.outgoing && self.msg_id.is_none() && matches!(self.phase, TransformPhase::EncryptDecrypt)
+    }
 }
 
 impl std::fmt::Display for TransformError {

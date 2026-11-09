@@ -75,6 +75,14 @@ pub trait SigningAlgo: std::fmt::Debug + Send + Sync {
     /// Clone the algo into a boxed trait object.
     /// See [EncryptionAlgo::clone_box](super::encryption::EncryptingAlgo::clone_box) for more information.
     fn clone_box(&self) -> Box<dyn SigningAlgo>;
+
+    /// rynas patch: tests only: the AES-GMAC implementation this signer runs on (`None` for
+    /// the other algorithms).
+    #[cfg(feature = "sign_gmac")]
+    #[doc(hidden)]
+    fn gmac_backend(&self) -> Option<GmacBackend> {
+        None
+    }
 }
 
 #[cfg(feature = "sign_hmac")]
@@ -232,7 +240,8 @@ mod gmac_signer {
     pub struct Gmac128Signer {
         gmac: Engine,
         nonce: OnceCell<Gmac128Nonce>,
-        // neither implementation has an online mode: the message is buffered until finalize().
+        // rynas patch: neither implementation has an online mode: the message is buffered
+        // until finalize().
         buffer: Vec<u8>,
     }
 
@@ -333,6 +342,13 @@ mod gmac_signer {
 
         fn clone_box(&self) -> Box<dyn SigningAlgo> {
             Box::new(self.clone())
+        }
+
+        fn gmac_backend(&self) -> Option<GmacBackend> {
+            Some(match self.gmac {
+                Engine::Ring(_) => GmacBackend::Ring,
+                Engine::RustCrypto(_) => GmacBackend::RustCrypto,
+            })
         }
     }
 

@@ -78,6 +78,8 @@ impl Authenticator {
 
     pub fn session_key(&self) -> crate::Result<[u8; 16]> {
         // Use the first 16 bytes of the session key.
+        // rynas patch: Session.SessionKey of MS-SMB2. Session.FullSessionKey (the whole key,
+        // for the AES-256 encryption keys under 3.1.1) is not kept; see KeyDeriver::derive_for.
         let key_info = self.ssp.query_context_session_key()?;
         let k = key_info.session_key.as_ref().get(..16).ok_or_else(|| {
             Error::InvalidState("SSPI session key is shorter than 16 bytes.".into())
