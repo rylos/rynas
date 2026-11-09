@@ -181,6 +181,44 @@ task.st.cancelled	Interrotta
 task.st.running	In corso
 task.st.queued	In coda
 task.config.apply	Applicazione configurazione
+task.zram.apply	Applicazione impostazioni memoria
+mem.title	Memoria
+mem.subtitle	Swap compresso in RAM
+mem.open_text	zram: swap compresso in RAM, con i valori consigliati per questo sistema.
+mem.status	Stato
+mem.state	zram
+mem.on	Attiva
+mem.off	Spenta
+mem.size	Dimensione
+mem.algorithm	Compressione
+mem.data	Dati contenuti
+mem.ram_used	RAM usata
+mem.disk_swaps	Swap su disco
+mem.no_disk_swap	Nessuno.
+mem.disk_line	{size}, {used} usati, priorità {priority}, {kind}
+mem.disk_hdd	disco meccanico
+mem.disk_ssd	SSD
+mem.disk_file	file di swap
+mem.disk_help	zram ha la priorità più alta: i dischi ricevono solo ciò che non ci sta più.
+mem.zram	zram
+mem.zram_help	Tiene le pagine di memoria compresse in RAM invece di scriverle su disco, così un sistema con poca memoria resta reattivo. Funziona insieme allo swap su disco.
+mem.enable	Usa zram
+mem.advice	Consigliati qui: {size}, {algorithm}, swappiness {swappiness}, page-cluster {cluster}.
+mem.use_advice	Usa questi valori
+mem.size_mib	Dimensione (MiB)
+mem.size_help	Dati che può contenere prima della compressione; occupa RAM solo per ciò che contiene.
+mem.algorithm_help	zstd fa risparmiare più RAM, lz4 usa meno CPU.
+mem.swappiness	Swappiness
+mem.swappiness_help	0-200: quanto volentieri la memoria va in swap invece di scartare la cache dei file. Oltre 100 è adatto allo swap in RAM.
+mem.cluster	Page-cluster
+mem.cluster_help	0-5: pagine lette insieme dallo swap, come potenza di due. 0 è adatto allo swap in RAM.
+mem.will_install	Applicando verrà installato il pacchetto systemd-zram-generator dall'archivio Debian.
+mem.apply	Applica
+mem.saved	Impostazioni della memoria salvate
+mem.pending_restart	I valori salvati non sono ancora in uso. Premi Applica per riprovare, oppure riavvia il sistema.
+mem.zswap	Anche zswap è attivo: due livelli di compressione sulla stessa memoria. Disattiva zswap.
+mem.unsupported	Il kernel in uso non ha zram.
+mem.external	Questo dispositivo zram è stato configurato fuori da rynas, quindi qui viene solo mostrato.
 task.config.overwrite	Ripristino file gestiti
 task.storage.volume-create	Creazione volume
 task.storage.volume-grow	Espansione volume

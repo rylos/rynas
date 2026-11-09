@@ -185,6 +185,7 @@ fn Shell() -> impl IntoView {
                     <Route path=path!("/hardware") view=pages::hardware::Hardware />
                     <Route path=path!("/system") view=pages::system::System />
                     <Route path=path!("/system/configuration") view=pages::config::Configuration />
+                    <Route path=path!("/system/memory") view=pages::memory::Memory />
                     <Route path=path!("/system/notifications") view=pages::notifications::NotificationSettings />
                     <Route path=path!("/system/scheduler") view=pages::scheduler::Scheduler />
                     <Route path=path!("/system/updates") view=pages::updates::Updates />

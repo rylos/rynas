@@ -227,8 +227,8 @@ ACTION=="add|change", KERNEL=="md[0-9]*", ATTR{md/stripe_cache_size}="%rynas_val
 
 | When | What |
 |---|---|
-| **automatic at install** (drop-ins, removed on purge) | journal limit (`SystemMaxUse=500M`); rynas RRD and SQLite with minimal writes; smartd `-n standby`; udev with per-type defaults, matching Debian's; zram **only** if there is no swap |
-| **proposed** (toggle with explanation) | volatile journal + hourly flush; noatime on btrfs; zram where swap is on flash; `stripe_cache_size`; `dirty_bytes`; HDD spin-down/hd-idle; idle3; choice of discard or fstrim; irqbalance; `zfs_arc_max`; oomd; SMB audit; remote syslog |
+| **automatic at install** (drop-ins, removed on purge) | journal limit (`SystemMaxUse=500M`); rynas RRD and SQLite with minimal writes; smartd `-n standby`; udev with per-type defaults, matching Debian's |
+| **proposed** (toggle with explanation) | volatile journal + hourly flush; noatime on btrfs; zram, in front of any swap on disk (see D-ZRAM); `stripe_cache_size`; `dirty_bytes`; HDD spin-down/hd-idle; idle3; choice of discard or fstrim; irqbalance; `zfs_arc_max`; oomd; SMB audit; remote syslog |
 | **never** | `nobarrier`, write cache disabled, `mitigations=off`, `devices_handle_discard_safely`, compress-force on existing volumes, autodefrag on SSD, TCP/BBR tweaks on the LAN, Samba `socket options`, `drop_caches` |
 
 **Mockup:**

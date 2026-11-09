@@ -83,6 +83,8 @@ pub struct DaemonState {
     pub tailscale: crate::tailscale::TsState,
     /// Manual restart and shut down ([`crate::system_power`]).
     pub system_power: crate::system_power::SpState,
+    /// Compressed swap in RAM ([`crate::zram`]).
+    pub zram: crate::zram::ZramHandle,
     /// PC backup, receive side ([`crate::pc_backup`]).
     pub pc_backup: crate::pc_backup::PbState,
     /// Backups to another NAS, a disk or the cloud; `None` answers 503 on its endpoints.
@@ -129,6 +131,7 @@ impl DaemonState {
             web_access: None,
             tailscale: None,
             system_power: None,
+            zram: None,
             pc_backup: None,
             restic: None,
         }
@@ -216,6 +219,7 @@ pub fn router(state: DaemonState) -> Router {
         .merge(crate::web_access::router(state.web_access))
         .merge(crate::tailscale::router(state.tailscale))
         .merge(crate::system_power::router(state.system_power))
+        .merge(crate::zram::router(state.zram))
         .merge(crate::pc_backup::router(state.pc_backup))
         .merge(crate::restic_backup::router(state.restic))
         .fallback(|| async { Error::not_found("no such endpoint") })

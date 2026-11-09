@@ -1195,6 +1195,7 @@ kbd {
 .rev-files ul { list-style: none; margin: 0; padding: 0; color: var(--text-muted); }
 .cell-note { display: block; white-space: normal; }
 .drift-ok { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; }
+.kv dt.mono { white-space: normal; overflow-wrap: anywhere; min-width: 0; }
 .link-card { flex-direction: row; align-items: center; gap: var(--s-3); }
 /* a long button label wraps below the text (right-aligned) instead of squeezing it */
 .link-card > .btn { margin-left: auto; }

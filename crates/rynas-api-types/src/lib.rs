@@ -28,6 +28,7 @@ pub mod updates;
 pub mod ups;
 pub mod validate;
 pub mod web_access;
+pub mod zram;
 pub use services::*;
 
 /// `GET /api/v1/system`: static or slow-changing facts about the machine.

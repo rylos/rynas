@@ -48,3 +48,4 @@ pub mod ups;
 pub mod ups_netserver;
 pub mod ups_setup;
 pub mod web_access;
+pub mod zram;

@@ -966,6 +966,10 @@ fn main() -> std::io::Result<()> {
         );
         rynasd::updates::spawn_daily(updates.clone());
         state.updates = Some(updates.clone());
+        state.zram = Some(Arc::new(rynasd::zram::ZramApi {
+            zram: Arc::new(rynasd::zram::Zram::new(config_root(&args), args.dry_system)),
+            ops: ops.clone(),
+        }));
         // manual restart and shut down: systemd's shutdown (never under --dry-system)
         if let Some(hw) = state.hardware.clone() {
             state.system_power = Some(Arc::new(rynasd::system_power::SystemPower {

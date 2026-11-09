@@ -25,7 +25,8 @@ if [ "$1" = "purge" ]; then
         fi
     done
     rm -f /etc/systemd/system/rynas-task-*.service /etc/systemd/system/rynas-task-*.timer \
-        /etc/systemd/system/timers.target.d/rynas-tasks.conf /etc/apt/apt.conf.d/80rynas-snapshot
+        /etc/systemd/system/timers.target.d/rynas-tasks.conf /etc/apt/apt.conf.d/80rynas-snapshot \
+        /etc/sysctl.d/60-rynas-zram.conf /etc/systemd/zram-generator.conf.d/50-rynas.conf
     rmdir /etc/systemd/system/timers.target.d 2>/dev/null || true
     rm -rf /etc/rynas
 fi

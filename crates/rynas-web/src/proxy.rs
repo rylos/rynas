@@ -203,6 +203,7 @@ pub fn routes() -> Router<AppState> {
         // manual restart and shut down: warnings, the action (a task), cancel of a delayed one
         .route("/system/power", get(forward).post(forward))
         .route("/system/power/cancel", post(forward))
+        .route("/system/zram", get(forward).post(forward))
         // PC backup, receive side: btrbk targets of the PCs (D-PCBACKUP phase 2)
         .route("/pc-backups/setup", get(forward))
         .route("/pc-backups/plan/adopt", post(forward))
