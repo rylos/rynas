@@ -420,6 +420,19 @@ fn Sidebar() -> impl IntoView {
                     })
                     .collect_view()}
             </ul>
+            <div class="sidebar-about">
+                <span class="about-text">{concat!("rynas ", env!("CARGO_PKG_VERSION"), " · Marco Ziliani")}</span>
+                <a
+                    class="icon-btn sm about-link"
+                    href=env!("CARGO_PKG_REPOSITORY")
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    aria-label=tr("nav.project")
+                    title=tr("nav.project")
+                >
+                    <Icon icon=icons::GITHUB size=16 />
+                </a>
+            </div>
             <button
                 class="nav-item collapse-btn"
                 aria-label=collapse_label

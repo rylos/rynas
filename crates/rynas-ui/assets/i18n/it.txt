@@ -11,6 +11,7 @@ nav.menu	Menu
 nav.main	Navigazione principale
 nav.collapse	Comprimi barra laterale
 nav.expand	Espandi barra laterale
+nav.project	Il progetto su GitHub
 nav.notifications	Notifiche
 bar.search	Cerca o esegui un comando…
 bar.theme	Tema

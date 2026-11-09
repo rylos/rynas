@@ -378,6 +378,7 @@ dict! { BLOB, LENS, IT;
     "nav.main" => "Main navigation", "Navigazione principale";
     "nav.collapse" => "Collapse sidebar", "Comprimi barra laterale";
     "nav.expand" => "Expand sidebar", "Espandi barra laterale";
+    "nav.project" => "The project on GitHub", "Il progetto su GitHub";
     "nav.notifications" => "Notifications", "Notifiche";
     // app bar
     "bar.search" => "Search or run a command…", "Cerca o esegui un comando…";

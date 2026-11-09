@@ -425,6 +425,14 @@ kbd {
   border-radius: 0 3px 3px 0; background: var(--accent);
 }
 .nav-label { overflow: hidden; text-overflow: ellipsis; transition: opacity var(--t-fast); }
+.sidebar-about {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--s-2);
+  margin-top: var(--s-2); padding-left: var(--s-3);
+  color: var(--text-subtle); font-size: var(--fs-12); white-space: nowrap;
+}
+.about-text { overflow: hidden; text-overflow: ellipsis; }
+.app.collapsed .about-text { display: none; }
+.app.collapsed .sidebar-about { padding-left: var(--s-2); }
 .collapse-btn { width: 100%; margin-top: var(--s-2); color: var(--text-subtle); }
 .collapse-btn .icon { transition: transform var(--t-med) var(--ease); }
 .app.collapsed .nav-label { opacity: 0; pointer-events: none; }
@@ -1322,6 +1330,8 @@ kbd {
   }
   .app.drawer-open .sidebar { transform: none; visibility: visible; transition: transform var(--t-med) var(--ease); }
   .app.collapsed .nav-label { opacity: 1; pointer-events: auto; }
+  .app.collapsed .about-text { display: inline; }
+  .app.collapsed .sidebar-about { padding-left: var(--s-3); }
   .collapse-btn { display: none; }
   .scrim { display: block; position: fixed; inset: var(--appbar-h) 0 0; z-index: 34; background: var(--scrim); opacity: 0; pointer-events: none; transition: opacity var(--t-med); }
   .app.drawer-open .scrim { opacity: 1; pointer-events: auto; }
