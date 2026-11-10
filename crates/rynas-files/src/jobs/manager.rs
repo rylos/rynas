@@ -28,7 +28,7 @@ use crate::wire::ApiError;
 
 const MAX_PARALLEL: usize = 2;
 const SAMPLE_EVERY: Duration = Duration::from_millis(250);
-/// Speed series cap per job (M1): past it the older half is thinned.
+/// Speed series cap per job (M1): past it the older samples are thinned ([`thin_samples`]).
 const MAX_SAMPLES: usize = 2400;
 /// Error list cap per job (M1).
 const MAX_ERRORS: usize = 500;
@@ -209,6 +209,12 @@ struct Job {
 impl Job {
     fn set_state(&mut self, state: State, journal: &Path) {
         let running = |s: State| s == State::Running;
+        // a sample where a pause or a question starts and where it ends: the chart finds the
+        // pause as a gap with nothing moved across it
+        let halted = |s: State| matches!(s, State::Paused | State::Conflict);
+        if (running(self.view.state) && halted(state)) || (halted(self.view.state) && running(state)) {
+            self.sample(true);
+        }
         if running(self.view.state) && !running(state) {
             if let Some(since) = self.run_since.take() {
                 self.active += since.elapsed();
@@ -249,10 +255,7 @@ impl Job {
         let p = &self.view.progress;
         self.view.samples.push([start.elapsed().as_millis() as u64, p.bytes_done, p.files_done, p.verify_bytes]);
         if self.view.samples.len() > MAX_SAMPLES {
-            // halve the resolution of the older half, keep the recent one sharp
-            let half = self.view.samples.len() / 2;
-            let old: Vec<[u64; 4]> = self.view.samples[..half].iter().step_by(2).copied().collect();
-            self.view.samples.splice(..half, old);
+            thin_samples(&mut self.view.samples);
         }
         let pct = percent(&self.view.progress);
         if pct != self.last_pct {
@@ -278,6 +281,34 @@ fn percent(p: &Progress) -> Option<u8> {
     }
     let by_bytes = (p.bytes_done.min(p.bytes_total) * 100).checked_div(p.bytes_total);
     by_bytes.or_else(|| (p.files_done.min(p.files_total) * 100).checked_div(p.files_total)).map(|v| v as u8)
+}
+
+
+/// Brings a speed series back under [`MAX_SAMPLES`]: the most recent quarter stays sharp, the
+/// older samples keep an even spacing (the first one always stays), the smallest power-of-two
+/// multiple of [`SAMPLE_EVERY`] that fits them in half the cap. The spacing only grows with
+/// the job, so a long job keeps its whole history at one resolution: halving the older half
+/// at every overflow thinned the oldest samples again each time, until hours of a copy were a
+/// single gap the chart took for a pause.
+fn thin_samples(samples: &mut Vec<[u64; 4]>) {
+    let recent = MAX_SAMPLES / 4;
+    if samples.len() <= recent + 1 {
+        return;
+    }
+    let cut = samples.len() - recent;
+    let span = samples[cut - 1][0].saturating_sub(samples[0][0]);
+    let mut grain = SAMPLE_EVERY.as_millis() as u64;
+    while span / grain > (MAX_SAMPLES / 2) as u64 - 1 {
+        grain *= 2;
+    }
+    let mut kept: Vec<[u64; 4]> = Vec::with_capacity(MAX_SAMPLES / 2 + recent + 1);
+    for s in &samples[..cut] {
+        if kept.last().is_none_or(|k| s[0] >= k[0] + grain) {
+            kept.push(*s);
+        }
+    }
+    kept.extend_from_slice(&samples[cut..]);
+    *samples = kept;
 }
 
 /// What a manager needs from rynasd.
@@ -942,6 +973,27 @@ pub fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Hours of samples every 250 ms, thinned as the job goes: the series stays under the
+    /// cap, the oldest stretch keeps even samples (no gap of an hour after the first one),
+    /// and the recent quarter stays at full resolution.
+    #[test]
+    fn a_long_job_keeps_its_whole_history() {
+        let mut s: Vec<[u64; 4]> = Vec::new();
+        for i in 0..(3 * 3600 * 4u64) {
+            s.push([i * 250, i * 16_000_000, i / 400, 0]);
+            if s.len() > MAX_SAMPLES {
+                thin_samples(&mut s);
+            }
+            assert!(s.len() <= MAX_SAMPLES);
+        }
+        assert_eq!(s[0][0], 0);
+        let widest = s.windows(2).map(|w| w[1][0] - w[0][0]).max().unwrap();
+        assert!(widest <= 16_000, "widest gap {widest} ms");
+        assert!(s.len() > MAX_SAMPLES / 2, "{} samples", s.len());
+        let tail = &s[s.len() - MAX_SAMPLES / 4..];
+        assert!(tail.windows(2).all(|w| w[1][0] - w[0][0] == 250));
+    }
 
     /// A worker that ignores cancel and SIGTERM (blocked in a call that never returns):
     /// rynasd ends it with SIGKILL and the job is cancelled, not left running.

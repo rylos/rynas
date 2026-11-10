@@ -1095,7 +1095,9 @@ function pauses(s) {
   for (let i = 1; i < s.length; i++) {
     const dt = s[i][0] - s[i - 1][0];
     const before = i > 1 ? s[i - 1][0] - s[i - 2][0] : 500;
-    if (dt > 2500 && dt > 3 * before) out.push([s[i - 1][0], s[i][0] - Math.min(before, 1000)]);
+    // a pause moves nothing: a gap with progress across it is only a thinned stretch
+    const still = s[i][1] === s[i - 1][1] && s[i][2] === s[i - 1][2] && s[i][3] === s[i - 1][3];
+    if (still && dt > 2500 && dt > 3 * before) out.push([s[i - 1][0], s[i][0] - Math.min(before, 1000)]);
   }
   return out;
 }
