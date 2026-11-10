@@ -370,6 +370,10 @@ impl Store {
         self.write_json("last-rollback.json", &LastRollback { report: r.clone() })
     }
 
+    pub fn clear_last_rollback(&self) -> std::io::Result<()> {
+        self.remove("last-rollback.json")
+    }
+
     /// Queues an event for the notification engine (rynasd collects them).
     pub fn push_event(&self, e: NewEvent) -> std::io::Result<()> {
         let mut v: Vec<NewEvent> = self.read_json("outbox.json")?.unwrap_or_default();

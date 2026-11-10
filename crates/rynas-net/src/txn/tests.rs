@@ -311,6 +311,14 @@ fn unconfirmed_change_is_rolled_back_and_verified() {
     );
     // the staged change stays for another try
     assert_eq!(t.e.state("admin", None).unwrap().pending, vec!["lan1"]);
+    // a later change that is confirmed makes the notice about the rollback obsolete
+    let plan =
+        t.e.plan_apply("admin", "admin", "", ip("198.51.100.20"), None, false)
+            .unwrap();
+    let token = new_token();
+    t.e.begin(&plan, Some(&token), None, &log).unwrap();
+    t.e.confirm(&token, Origin::Cli).unwrap();
+    assert!(t.e.state("admin", None).unwrap().last_rollback.is_none());
 }
 
 #[test]

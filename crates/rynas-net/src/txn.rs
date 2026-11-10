@@ -1594,6 +1594,11 @@ impl Engine {
         }
         staged.retain(|_, m| !m.is_empty());
         self.store.set_staged(&staged)?;
+        // a revision that works now: the notice about an earlier rollback is history (best
+        // effort: the revision is already the last known good one)
+        if let Err(e) = self.store.clear_last_rollback() {
+            tracing::warn!("network: cannot clear the last rollback notice: {e}");
+        }
         self.invalidate();
         Ok(())
     }
