@@ -57,9 +57,12 @@ fn fs_for(path: &str, fss: &[rynas_api_types::Filesystem]) -> Option<(String, u6
 
 /// The sizes of the shares' folders (`/api/v1/share-sizes`): asked when the list arrives or
 /// changes, then again while rynasd still measures some in the background (every 2 s, slower
-/// up to 15 s), until the page is left. The list never waits for them.
-fn share_sizes(shares: Remote<Vec<ShareView>>) -> RwSignal<Option<ShareSizes>> {
+/// up to 15 s), until the page is left. The list never waits for them. A failed request is
+/// kept as the error (shown in the size column) instead of stopping in silence; the next
+/// change of the list asks again.
+fn share_sizes(shares: Remote<Vec<ShareView>>) -> (RwSignal<Option<ShareSizes>>, RwSignal<Option<String>>) {
     let sizes = RwSignal::new(None::<ShareSizes>);
+    let failed = RwSignal::new(None::<String>);
     let polling = StoredValue::new(false);
     // the list changed while a request was out: ask once more at the end
     let again = StoredValue::new(false);
@@ -75,7 +78,14 @@ fn share_sizes(shares: Remote<Vec<ShareView>>) -> RwSignal<Option<ShareSizes>> {
         spawn_local(async move {
             let mut wait = 2000;
             loop {
-                let Ok(r) = api::get::<ShareSizes>("/api/v1/share-sizes").await else { break };
+                let r = match api::get::<ShareSizes>("/api/v1/share-sizes").await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let _ = failed.try_set(Some(e.text()));
+                        break;
+                    }
+                };
+                let _ = failed.try_set(None);
                 let more = r.measuring || again.try_get_value().unwrap_or(false);
                 let _ = again.try_set_value(false);
                 if sizes.try_set(Some(r)).is_some() || !more {
@@ -87,18 +97,29 @@ fn share_sizes(shares: Remote<Vec<ShareView>>) -> RwSignal<Option<ShareSizes>> {
             let _ = polling.try_set_value(false);
         });
     });
-    sizes
+    (sizes, failed)
 }
 
 /// The share's own size, a bar for its fraction of the volume, the volume by name and why
-/// the size is missing or old; the exact numbers in the tooltip.
-fn size_cell(path: &str, size: Option<ShareSize>, fss: &[rynas_api_types::Filesystem]) -> AnyView {
+/// the size is missing or old; the exact numbers in the tooltip. `failed`: the last request
+/// for the sizes failed (its error text).
+fn size_cell(path: &str, size: Option<ShareSize>, fss: &[rynas_api_types::Filesystem], failed: Option<String>) -> AnyView {
     let Some(z) = size else {
-        return view! { <span class="muted">"—"</span> }.into_any();
+        return match failed {
+            Some(e) => view! {
+                <div class="cell-main" title=e>
+                    <span class="muted">"—"</span>
+                    <span class="cell-sub danger-text">{tr("shares.size_failed")}</span>
+                </div>
+            }
+            .into_any(),
+            None => view! { <span class="muted">"—"</span> }.into_any(),
+        };
     };
     let volume = z.volume.as_deref().map(crate::places::name);
     let capacity = fs_for(path, fss).map(|(_, _, size)| size).filter(|c| *c > 0);
     let note = match (z.standby, z.at_ms) {
+        _ if failed.is_some() => Some(t("shares.size_failed").to_string()),
         (true, Some(at)) => Some(tf("shares.size_asleep_as_of", &[("when", &i18n::datetime(at))])),
         (true, None) => Some(t("shares.size_asleep").to_string()),
         _ if z.measuring && (z.bytes.is_none() || z.partial) => Some(t("shares.size_measuring").to_string()),
@@ -106,7 +127,7 @@ fn size_cell(path: &str, size: Option<ShareSize>, fss: &[rynas_api_types::Filesy
     };
     let Some(bytes) = z.bytes else {
         return view! {
-            <div class="cell-main">
+            <div class="cell-main" title=failed.unwrap_or_default()>
                 <span class="muted">"—"</span>
                 <span class="cell-sub">{note.or(volume)}</span>
             </div>
@@ -129,6 +150,9 @@ fn size_cell(path: &str, size: Option<ShareSize>, fss: &[rynas_api_types::Filesy
     }
     if let Some(at) = z.at_ms {
         tip.push(tf("shares.size_as_of", &[("when", &i18n::datetime(at))]));
+    }
+    if let Some(e) = failed {
+        tip.push(e);
     }
     view! {
         <div class="cell-main share-size" title=tip.join("\n")>
@@ -182,7 +206,7 @@ pub fn Shares() -> impl IntoView {
     let users = Remote::<Vec<UserView>>::with_config("/api/v1/users");
     let groups = Remote::<Vec<GroupView>>::with_config("/api/v1/groups");
     let folders = Remote::<Vec<UnsharedFolder>>::with_config("/api/v1/folders");
-    let sizes = share_sizes(shares);
+    let (sizes, sizes_failed) = share_sizes(shares);
     let live = use_live();
     let q = RwSignal::new(String::new());
     let edit = RwSignal::new(None::<ShareEdit>);
@@ -233,10 +257,11 @@ pub fn Shares() -> impl IntoView {
         }
         let fss = live.storage.with(|s| s.as_ref().map(|s| s.filesystems.clone()).unwrap_or_default());
         let known = sizes.get().map(|s| s.shares).unwrap_or_default();
+        let failed = sizes_failed.get();
         view! {
             {ui::table("shares-table", &["shares.name", "shares.location", "shares.size", "shares.protocols", "shares.recycle", "col.status", ""], rows.into_iter().map(|v| {
                 let size = known.iter().find(|s| s.name == v.share.name).cloned();
-                share_row(v, size, &fss, edit, del, cact)
+                share_row(v, size, failed.clone(), &fss, edit, del, cact)
             }).collect::<Vec<_>>())}
         }
         .into_any()
@@ -293,10 +318,10 @@ fn share_status(st: &ShareStatus) -> (Tone, &'static str) {
     }
 }
 
-fn share_row(v: ShareView, size: Option<ShareSize>, fss: &[rynas_api_types::Filesystem], edit: RwSignal<Option<ShareEdit>>, del: RwSignal<Option<String>>, cact: RwSignal<Option<share_crypt::Action>>) -> AnyView {
+fn share_row(v: ShareView, size: Option<ShareSize>, size_failed: Option<String>, fss: &[rynas_api_types::Filesystem], edit: RwSignal<Option<ShareEdit>>, del: RwSignal<Option<String>>, cact: RwSignal<Option<share_crypt::Action>>) -> AnyView {
     let s = &v.share;
     let path = share_path(s);
-    let size_view = size_cell(&path, size, fss);
+    let size_view = size_cell(&path, size, fss, size_failed);
     let (tone, key) = share_status(&v.status);
     let deleting = v.status.pending == Some(rynas_api_types::PendingOp::Delete);
     let name = s.name.clone();

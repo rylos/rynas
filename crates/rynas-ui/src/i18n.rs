@@ -1982,6 +1982,7 @@ dict! { BLOB, LENS, IT;
     "shares.size_measuring" => "Measuring…", "Misurazione in corso…";
     "shares.size_asleep" => "Not measured: the disks are asleep", "Non misurata: i dischi sono in standby";
     "shares.size_asleep_as_of" => "As of {when} (the disks are asleep)", "Al {when} (i dischi sono in standby)";
+    "shares.size_failed" => "Size not available", "Dimensione non disponibile";
     "shares.removed_at" => "Share removed", "Condivisione rimossa";
     "shares.was_shared_as" => "was shared as {name}", "era condivisa come {name}";
     "shares.share_again" => "Share again", "Condividi di nuovo";
