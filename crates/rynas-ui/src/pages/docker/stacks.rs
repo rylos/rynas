@@ -646,8 +646,8 @@ fn editor(name: Option<String>, settings: Remote<DockerSettingsState>, close: Ca
                 })}
                 {move || read_only.get().then(|| ui::note(Tone::Info, icons::LOCK, ui::text(t("dk.ad.ed_ro").to_string())))}
                 {move || other_files.with(|o| (!o.is_empty()).then(|| ui::note(Tone::Info, icons::FILE, ui::text(tf("dk.ad.ed_others", &[("files", &o.join(", "))])))))}
-                {code_field("dk.ed.compose", compose.into(), Callback::new(move |v| { compose.set(v); validation.set(None); }), compose_err.into(), 16)}
-                {code_field("dk.ed.env", env.into(), Callback::new(move |v| { env.set(v); validation.set(None); }), Signal::stored(None), 5)}
+                {code_field("dk.ed.compose", compose.into(), Callback::new(move |v| { compose.set(v); validation.set(None); }), compose_err.into(), 16, (!read_only.get_untracked()).then_some(".yaml,.yml,text/yaml,application/yaml"))}
+                {code_field("dk.ed.env", env.into(), Callback::new(move |v| { env.set(v); validation.set(None); }), Signal::stored(None), 5, (!read_only.get_untracked()).then_some(".env,text/plain"))}
                 <p class="field-help">{tr("dk.ed.env_help")}</p>
                 {creating.then(|| switch("dk.ed.start", None, start.into(), Callback::new(move |v| start.set(v))))}
                 {move || validation.get().map(validation_view)}

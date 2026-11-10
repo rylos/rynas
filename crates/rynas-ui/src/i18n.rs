@@ -4239,7 +4239,7 @@ dict! { BLOB, LENS, IT;
     "tls.import.certificate" => "Certificate (PEM)", "Certificato (PEM)";
     "tls.import.private_key" => "Private key (PEM)", "Chiave privata (PEM)";
     "tls.import.hint" => "Paste or load the full chain, server certificate first, and its private key without a password.", "Incolla o carica la catena completa, con il certificato del server per primo, e la sua chiave privata senza password.";
-    "tls.import.file" => "Load from a file", "Carica da un file";
+    "load_file" => "Load from a file", "Carica da un file";
     "tls.use_local" => "Use the local certificate", "Usa il certificato locale";
     "tls.use_local.confirm" => "The imported certificate is set aside and the local one, from this NAS's own authority, is served again.", "Il certificato importato viene messo da parte e torna in uso quello locale, dell'autorità di questo NAS.";
     "tls.warn.expires_soon" => "The certificate expires in less than 30 days.", "Il certificato scade fra meno di 30 giorni.";

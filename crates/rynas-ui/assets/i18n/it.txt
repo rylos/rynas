@@ -3815,7 +3815,7 @@ tls.import	Importa per la porta di emergenza
 tls.import.certificate	Certificato (PEM)
 tls.import.private_key	Chiave privata (PEM)
 tls.import.hint	Incolla o carica la catena completa, con il certificato del server per primo, e la sua chiave privata senza password.
-tls.import.file	Carica da un file
+load_file	Carica da un file
 tls.use_local	Usa il certificato locale
 tls.use_local.confirm	Il certificato importato viene messo da parte e torna in uso quello locale, dell'autorità di questo NAS.
 tls.warn.expires_soon	Il certificato scade fra meno di 30 giorni.

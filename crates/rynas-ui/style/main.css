@@ -1766,6 +1766,8 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .upd-list { margin: var(--s-2) 0; padding: var(--s-2) var(--s-3); list-style: none; max-height: min(240px, 40vh); overflow-y: auto; border: 1px solid var(--border); border-radius: var(--r-md); font-size: var(--fs-13); overflow-wrap: anywhere; }
 .upd-table td.mono { overflow-wrap: anywhere; }
 /* code editor (compose files, .env): line numbers + textarea, no wrapping */
+.code-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s-2); flex-wrap: wrap; }
+.code-file { cursor: pointer; }
 .code-edit {
   display: flex; height: calc(var(--rows) * 1.5em + var(--s-4)); min-height: 96px; resize: vertical; overflow: hidden;
   font: var(--fs-13)/1.5 var(--mono); background: var(--bg-sunken); border: 1px solid var(--border-strong); border-radius: var(--r-md);

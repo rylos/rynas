@@ -262,16 +262,41 @@ pub fn area_field(label: &'static str, value: Signal<String>, set: Callback<Stri
 
 /// Labelled code editor (compose files, `.env`): a monospace textarea with line numbers, no
 /// wrapping (indentation matters), an inline error under it. Plain text, no highlighting:
-/// nothing extra in the wasm.
-pub fn code_field(label: &'static str, value: Signal<String>, set: Callback<String>, err: Signal<Option<String>>, rows: u32) -> AnyView {
+/// nothing extra in the wasm. With `upload` (the file picker's `accept`), a "Load from a file"
+/// button next to the label reads a file of the computer into it, in the browser.
+pub fn code_field(label: &'static str, value: Signal<String>, set: Callback<String>, err: Signal<Option<String>>, rows: u32, upload: Option<&'static str>) -> AnyView {
     let id = fid();
     let eid = format!("{id}e");
     let gutter = NodeRef::<leptos::html::Pre>::new();
     let lines = Memo::new(move |_| value.with(|v| v.split('\n').count().max(1)));
     let numbers = move || (1..=lines.get()).map(|n| n.to_string()).collect::<Vec<_>>().join("\n");
+    let picker = upload.map(|accept| {
+        let pid = format!("{id}f");
+        let load = move |ev: leptos::ev::Event| {
+            let Some(input) = ev.target().and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok()) else { return };
+            let Some(file) = input.files().and_then(|f| f.get(0)) else { return };
+            let p = file.text();
+            // the same file can be picked again after an edit
+            input.set_value("");
+            leptos::task::spawn_local(async move {
+                if let Ok(v) = wasm_bindgen_futures::JsFuture::from(p).await
+                    && let Some(s) = v.as_string()
+                {
+                    set.run(s);
+                }
+            });
+        };
+        view! {
+            <label class="btn ghost sm code-file" for=pid.clone()><Icon icon=icons::FILE_INPUT size=14 />{tr("load_file")}</label>
+            <input id=pid class="sr-only" type="file" accept=accept on:change=load />
+        }
+    });
     view! {
         <div class="field">
-            <label class="field-label" for=id.clone()>{tr(label)}</label>
+            <div class="code-head">
+                <label class="field-label" for=id.clone()>{tr(label)}</label>
+                {picker}
+            </div>
             <div class="code-edit" style=format!("--rows:{rows}")>
                 <pre class="code-gutter" node_ref=gutter aria-hidden="true">{numbers}</pre>
                 <textarea

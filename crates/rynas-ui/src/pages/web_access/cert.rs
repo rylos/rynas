@@ -180,7 +180,7 @@ pub(super) fn pem_field(label: &'static str, value: RwSignal<String>, err: RwSig
             <textarea id=id class="input area mono tls-pem" rows="6" spellcheck="false" placeholder="-----BEGIN …-----"
                 aria-invalid=move || err.with(Option::is_some).then_some("true")
                 prop:value=move || value.get() on:input=move |ev| { value.set(event_target_value(&ev)); err.set(None); }></textarea>
-            <label class="btn ghost sm tls-file" for=fid.clone()><Icon icon=icons::FILE_INPUT size=14 />{tr("tls.import.file")}</label>
+            <label class="btn ghost sm tls-file" for=fid.clone()><Icon icon=icons::FILE_INPUT size=14 />{tr("load_file")}</label>
             <input id=fid class="sr-only" type="file" accept=accept on:change=load />
             <span class="field-error" aria-live="polite">{move || err.get().map(|e| view! { <Icon icon=icons::CIRCLE_X size=12 />{ui::err_view(e)} })}</span>
         </div>
