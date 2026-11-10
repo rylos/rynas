@@ -25,7 +25,8 @@ fn advice(r: &ZramSettings) -> String {
     tf(
         "mem.advice",
         &[
-            ("size", &i18n::bytes(u64::from(r.size_mib) << 20)),
+            // in the unit of the size field, so the advice can be typed in as it reads
+            ("size", &format!("{} MiB", r.size_mib)),
             ("algorithm", &r.algorithm),
             ("swappiness", &r.swappiness.to_string()),
             ("cluster", &r.page_cluster.to_string()),

@@ -55,6 +55,7 @@ export default {
   "NAS": "NAS",
   "Volume": "Volume",
   "Personale": "Personal",
+  "Sistema": "System",
   "Home ({u})": "Home ({u})",
   "Preferiti": "Favourites",
   "Cartelle condivise": "Shared folders",

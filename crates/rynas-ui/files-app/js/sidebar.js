@@ -22,6 +22,16 @@ const isRemovable = (s) => s.removable === true || REMOVABLE.test(s.volume || ""
 const SHARES_FRESH_MS = 1500;
 
 export const sidebarMethods = {
+  /** The name a volume is shown with: the one given to it (the system volume's reserved
+   * label "system" translated), else "Volume 1" from its mount; `plain` is the latter. */
+  volumeTitle(vol) {
+    if (vol === "home") return { title: t("Personale"), plain: t("Personale") };
+    const plain = vol.replace("volume", t("Volume") + " ").replace("USB", "USB ");
+    const given = this.volumeNames?.[vol];
+    if (given === "system") return { title: t("Sistema"), plain: t("Sistema") };
+    return { title: (prefs.volumeNames && given) || plain, plain };
+  },
+
   applyShares(data) {
     this.shares = data.shares || [];
     this.user = data.user || this.user;
@@ -212,11 +222,9 @@ export const sidebarMethods = {
       const list = volumes.get(vol);
       const first = list[0];
       const used = first.total ? 1 - first.free / first.total : 0;
-      const plain = vol === "home" ? t("Personale") : vol.replace("volume", t("Volume") + " ").replace("USB", "USB ");
-      // the name given in Storage Manager, with the plain one as the tooltip
-      const named = prefs.volumeNames ? this.volumeNames?.[vol] : null;
-      const title = named || plain;
-      html += `<div class="side-title vol-title" data-vol="${esc(vol)}" draggable="true"${named ? ` title="${esc(plain)}"` : ""}><span>${esc(title)}</span>${first.total && vol !== "home" ? `<span title="${t("{f} liberi di {t}", { f: size(first.free), t: size(first.total) })}">${size(first.free)}</span>` : ""}</div>`;
+      // the name given to the volume, with the plain one as the tooltip
+      const { title, plain } = this.volumeTitle(vol);
+      html += `<div class="side-title vol-title" data-vol="${esc(vol)}" draggable="true"${title !== plain ? ` title="${esc(plain)}"` : ""}><span>${esc(title)}</span>${first.total && vol !== "home" ? `<span title="${t("{f} liberi di {t}", { f: size(first.free), t: size(first.total) })}">${size(first.free)}</span>` : ""}</div>`;
       if (first.total && vol !== "home") html += `<div class="vol-bar ${used > 0.95 ? "full" : used > 0.85 ? "high" : ""}" style="margin:0 10px 6px"><div style="width:${(used * 100).toFixed(1)}%"></div></div>`;
       for (const s of list) {
         const badges = (s.encrypted ? `<span class="si-lock" title="${t("Cartella crittografata")}">${svg("lock")}</span>` : "") + (s.hidden ? `<span class="si-badge" title="${t("Nascosta in Rete")}">${t("nasc.")}</span>` : "") + this.ejectButton("/" + s.name);

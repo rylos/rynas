@@ -717,7 +717,8 @@ export class Pane {
     switch (c.key) {
       case "name": {
         const link = e.kind === "l" ? `<span class="link-target">→</span>` : "";
-        const share = e.share?.volume ? `<span class="si-badge" style="margin-left:6px">${esc(e.share.volume)}</span>` : "";
+        // the volume by its name (never its mount path); the home is under "Personal" already
+        const share = e.share?.volume && !e.share.home ? `<span class="si-badge" style="margin-left:6px">${esc(this.app.volumeTitle(e.share.volume).title)}</span>` : "";
         const m = this.matches?.get(e.path);
         return `<div class="cell name-cell">${iconHTML(e)}<span class="nm ${colorClass(e)}">${m ? highlight(e.name, m.positions, esc) : esc(e.name)}</span>${link}${share}</div>`;
       }
