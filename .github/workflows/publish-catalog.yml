@@ -1,0 +1,51 @@
+name: Publish the app catalogue
+
+# A signed catalogue (index.json + minisign signature + archive) on the catalogue site, read
+# daily by every NAS (D-APPCAT, docs/phase2/docker-apps.md § 6.12-6.13). Runs when apps/
+# changes on main, and weekly so the index never expires (NAS refuse it after 30 days).
+on:
+  push:
+    branches: [main]
+    paths: ["apps/**"]
+  schedule:
+    - cron: "41 5 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: publish-catalog
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq minisign zstd
+      - run: cargo test -p rynas-apps --all-features
+      - name: Build and sign
+        env:
+          MINISIGN_KEY: ${{ secrets.CATALOG_MINISIGN_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.CATALOG_MINISIGN_PASSWORD }}
+          RYNAS_CATALOG_KEY_CMD: 'printf "%s\n" "$MINISIGN_KEY"'
+          RYNAS_CATALOG_PASS_CMD: 'printf "%s\n" "$MINISIGN_PASSWORD"'
+        run: packaging/publish-catalog.sh --out "$RUNNER_TEMP/catalog"
+      - name: Upload to the catalogue site
+        env:
+          GH_TOKEN: ${{ secrets.CATALOG_DEPLOY_TOKEN }}
+        run: |
+          set -euo pipefail
+          git clone -q "https://x-access-token:${GH_TOKEN}@github.com/rylos/rynas-catalog.git" "$RUNNER_TEMP/site"
+          mkdir -p "$RUNNER_TEMP/site/v1"
+          cp "$RUNNER_TEMP"/catalog/* "$RUNNER_TEMP/site/v1/"
+          cd "$RUNNER_TEMP/site"
+          # keep the five newest archives: a NAS that read the previous index still finds its file
+          ls -1 v1/apps-*.tar.zst | sort -t- -k2 -n | head -n -5 | xargs -r git rm -q --
+          touch .nojekyll
+          git add -A
+          git -c user.name="Marco Ziliani" -c user.email="508111+rylos@users.noreply.github.com" \
+            commit -q -m "Catalogue $(sed -n 's/.*"serial" *: *\([0-9]*\).*/\1/p' v1/index.json | head -n1)"
+          git push -q

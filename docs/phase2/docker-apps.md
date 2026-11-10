@@ -2338,6 +2338,36 @@ check, "Check now", the error or expiry note).
 4. Rotation: add the next public key to `TRUSTED_KEYS` in a rynas release, wait until NAS run
    it, sign with the new key, then drop the old key in a later release.
 
+### 6.13 Catalogue automation (Renovate + CI, 2026-11-10)
+
+The model of TrueNAS (`truenas/apps`: a Renovate bot opens image bumps several times a day,
+patch and minor merged after the app test suite, majors reviewed) and Cloudron (tested
+packages right after upstream, backup before every automatic update): images stay pinned and
+tested, but a bot keeps them current, so a new upstream image reaches the NAS within a day.
+
+- `.github/workflows/renovate.yml` runs self-hosted Renovate daily with
+  `.github/renovate-config.js`: the `docker-compose` manager on `apps/*/compose.yaml`,
+  digests pinned, patch/minor/digest pull requests merged by themselves once
+  `.github/workflows/apps.yml` passes (`cargo test -p rynas-apps`, `apps-render-test.sh`),
+  majors labelled `catalogue-major` for a person. Calendar versions (Home Assistant,
+  cloudflared: `YYYY.M.patch`) count a new month as a major. Immich server and machine
+  learning move together; quay.io images are never pinned (quay drops untagged manifests).
+- `packaging/renovate-bump.sh` (post-upgrade, once per branch) keeps `app_version` on the
+  main service's tag and bumps the entry's `version` patch over the base branch, so NAS see
+  the update (§ 6.9).
+- `.github/workflows/publish-catalog.yml` publishes on every change of `apps/` on main and
+  weekly (the index expires after 30 days): `publish-catalog.sh` signs with the key from the
+  repository secrets and the files go to `rylos/rynas-catalog` (Pages), keeping the five
+  newest archives. The serial comes from the published index, so CI never commits back.
+- Secrets: `CATALOG_MINISIGN_KEY` (the minisign secret key file), `CATALOG_MINISIGN_PASSWORD`,
+  `CATALOG_DEPLOY_TOKEN` (fine-grained, contents write on `rylos/rynas-catalog`),
+  `RENOVATE_TOKEN` (fine-grained, contents and pull requests write on `rylos/rynas`: pull
+  requests opened with `GITHUB_TOKEN` would not start the tests). A second key pair (the
+  "next" key, compiled in too) stays offline as the way to rotate if the first is lost.
+
+On the NAS nothing changes: the daily catalogue check (§ 6.12) brings the new entry versions
+and the per-stack automatic update (§ 5.8) applies them inside the policy.
+
 ## 7. Open points between waves
 
 - **Loopback binding before the web access exists (A2 → W1).** With `RYNAS_BIND=127.0.0.1` an app is unreachable until the proxy (W1) runs. Rule:

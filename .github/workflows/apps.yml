@@ -1,0 +1,29 @@
+name: App catalogue tests
+
+on:
+  pull_request:
+    paths:
+      - "apps/**"
+      - "crates/rynas-apps/**"
+      - "packaging/apps-render-test.sh"
+      - "packaging/renovate-bump.sh"
+  push:
+    branches: [main]
+    paths:
+      - "apps/**"
+      - "crates/rynas-apps/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      # lint of every entry: pinned images, ports, privileges, forms (crates/rynas-apps)
+      - run: cargo test -p rynas-apps --all-features
+      # every entry rendered with its tests/values.toml and checked by `docker compose config`
+      - run: packaging/apps-render-test.sh
