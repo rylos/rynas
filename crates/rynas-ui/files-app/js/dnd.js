@@ -7,6 +7,7 @@ import { archiveOf, readOnlyToast } from "./archive.js";
 import { $, openMenu } from "./ui.js";
 import { upload, fromDataTransfer } from "./uploads.js";
 import { connected } from "./host.js";
+import { changed as appChanged } from "./appdata.js";
 
 const shareOf = (path) => path.split("/").filter(Boolean)[0] || "";
 
@@ -55,7 +56,10 @@ export const dndMethods = {
       } else if (ev.dataTransfer.types.includes("Files")) {
         if (archiveOf(d)) return readOnlyToast();
         const items = await fromDataTransfer(ev.dataTransfer);
-        upload(d, items, () => this.refreshFolders([d]));
+        upload(d, items, () => {
+          this.refreshFolders([d]);
+          appChanged(d);
+        });
       }
     });
   },

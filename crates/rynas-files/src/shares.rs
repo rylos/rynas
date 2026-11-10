@@ -18,6 +18,32 @@ use crate::wire::ApiError;
 
 pub const HOME: &str = "home";
 pub const RECYCLE: &str = "#recycle";
+/// The folder of the apps' data (administrators, when the Docker setting is on): one
+/// folder per stack below it, each a share named `@apps/<folder>`. A share name never
+/// starts with `@` (SMB names start with a letter or digit), so nothing clashes.
+pub const APPS: &str = "@apps";
+
+/// What an app data share belongs to.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct AppFolder {
+    /// The stack (compose project) whose folder this is.
+    pub stack: String,
+    /// The catalogue app it was installed from, when it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
+}
+
+/// Whether a virtual path is the app data folder itself (`/@apps`).
+pub fn is_apps_root(vpath: &str) -> bool {
+    let mut parts = vpath.split('/').filter(|p| !p.is_empty());
+    parts.next() == Some(APPS) && parts.next().is_none()
+}
+
+/// Whether a virtual path lies in an app's data folder (`/@apps/<folder>/…`).
+pub fn in_apps(vpath: &str) -> bool {
+    let mut parts = vpath.split('/').filter(|p| !p.is_empty());
+    parts.next() == Some(APPS) && parts.next().is_some()
+}
 
 /// A shared folder as the worker sees it. `path` is the real directory; it never goes to
 /// the interface (see [`Share::public`]).
@@ -49,6 +75,9 @@ pub struct Share {
     /// The disk's vendor and model, as the interface names it ("SanDisk Ultra").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_name: Option<String>,
+    /// An app's data folder ([`APPS`]): the stack it belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<AppFolder>,
 }
 
 impl Share {
@@ -98,7 +127,14 @@ pub fn resolve<'a>(shares: &'a [Share], vpath: &str) -> Result<Resolved<'a>, Api
         return Err(ApiError::invalid("path", "invalid path"));
     }
     let mut parts = vpath.split('/').filter(|p| !p.is_empty());
-    let name = parts.next().ok_or_else(|| ApiError::invalid("path", "a path starts with a shared folder"))?;
+    let first = parts.next().ok_or_else(|| ApiError::invalid("path", "a path starts with a shared folder"))?;
+    // an app's folder is named by two components: `@apps/<folder>`
+    let name = if first == APPS {
+        let folder = parts.next().ok_or_else(|| ApiError::read_only(t!("the app data folder only holds the apps' folders")))?;
+        format!("{APPS}/{folder}")
+    } else {
+        first.to_string()
+    };
     let share = shares
         .iter()
         .find(|s| s.name == name)
@@ -155,6 +191,23 @@ mod tests {
         // a share name is matched exactly, never as a path
         assert_eq!(resolve(&shares, "/../srv").err().unwrap().status, 404);
         assert_eq!(resolve(&shares, "/").err().unwrap().status, 400);
+    }
+
+    #[test]
+    fn app_folders_are_named_by_two_components() {
+        let mut list = shares();
+        list.push(Share { name: format!("{APPS}/immich"), path: "/srv/vol1/docker/stacks/immich".into(), app: Some(AppFolder { stack: "immich".into(), app: None }), ..Default::default() });
+        let r = resolve(&list, "/@apps/immich/library/a.jpg").unwrap();
+        assert_eq!(r.real, PathBuf::from("/srv/vol1/docker/stacks/immich/library/a.jpg"));
+        assert!(resolve(&list, "/@apps/immich").unwrap().is_root());
+        // the folder of the apps itself is no share: nothing is made or read there
+        assert_eq!(resolve(&list, "/@apps").err().unwrap().code, error_codes::READ_ONLY);
+        assert_eq!(resolve(&list, "/@apps/nope/x").err().unwrap().status, 404);
+        assert_eq!(resolve(&list, "/@apps/immich/../../etc").err().unwrap().status, 400);
+        // the full name is never a first component
+        assert_eq!(resolve(&list, "/@apps%2Fimmich").err().unwrap().status, 404);
+        assert!(is_apps_root("/@apps/") && !is_apps_root("/@apps/immich"));
+        assert!(in_apps("/@apps/immich/x") && in_apps("//@apps/immich") && !in_apps("/@apps") && !in_apps("/Documents/@apps/x"));
     }
 
     #[test]

@@ -133,10 +133,20 @@ fn bin_full(bin: &Path) -> bool {
     crate::confine::read_dir(bin).is_ok_and(|d| d.flatten().any(|i| !is_system_name(&i.file_name().to_string_lossy())))
 }
 
+/// Whether the user may `mode` the file: access(2), the real user's permissions. In the
+/// apps' data ([`crate::caps::app_data`]) the worker writes over owners, so the effective
+/// identity and its capabilities are asked instead (`AT_EACCESS`; Landlock keeps the
+/// writes in the apps' folders).
 pub fn access(path: &Path, mode: i32) -> bool {
     let Ok(c) = CString::new(path.as_os_str().as_bytes()) else { return false };
     // SAFETY: valid C string
-    unsafe { libc::access(c.as_ptr(), mode) == 0 }
+    unsafe {
+        if crate::caps::app_data() {
+            libc::faccessat(libc::AT_FDCWD, c.as_ptr(), mode, libc::AT_EACCESS) == 0
+        } else {
+            libc::access(c.as_ptr(), mode) == 0
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -193,8 +203,9 @@ pub fn details(path: &Path) -> Result<Details, ApiError> {
 
 pub fn mkdir(path: &Path) -> Result<(), ApiError> {
     fs::create_dir(path).map_err(|e| {
-        if e.kind() == io::ErrorKind::AlreadyExists { ApiError::exists(t!("an item with this name already exists")) } else { e.into() }
-    })
+        if e.kind() == io::ErrorKind::AlreadyExists { ApiError::exists(t!("an item with this name already exists")) } else { ApiError::from(e) }
+    })?;
+    Ok(crate::confine::made_dir(path)?)
 }
 
 /// Renames without ever replacing: renameat2 with RENAME_NOREPLACE, and a

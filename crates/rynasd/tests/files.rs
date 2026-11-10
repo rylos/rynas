@@ -421,3 +421,101 @@ async fn removable_volumes_for_admins_and_the_access_group() {
         assert_eq!(s == StatusCode::OK, sees, "admin {admin}, group {gid:?}");
     }
 }
+
+/// No program runs (the Docker service never reaches a tool in these tests).
+struct NoRun;
+
+impl rynas_docker::Runner for NoRun {
+    fn run(&self, _: &rynas_tasks::Cmd) -> Result<rynas_tasks::CmdOutput, String> {
+        Err("cannot start: No such file or directory".into())
+    }
+}
+
+/// A Docker service on the fake root `root` (stacks on `vol1`), with the setting
+/// `files_app_data` as given; the sender changes the settings later.
+fn docker_for(ops: &Arc<Ops>, dir: &Path, root: &Path, on: bool) -> tokio::sync::watch::Sender<rynas_api_types::docker::DockerSettings> {
+    let (domain, settings) = rynasd::docker::DockerDomain::new(true);
+    domain.tx.send_replace(rynas_api_types::docker::DockerSettings { volume: Some("vol1".into()), files_app_data: on, ..Default::default() });
+    let svc = rynasd::docker::DockerSvc::with_host(
+        ops.clone(),
+        Arc::new(rynas_notify::MemoryNotifier::default()),
+        root.to_path_buf(),
+        true,
+        Some(dir.join("no-docker.sock").to_string_lossy().into_owned()),
+        dir.join("state/docker"),
+        settings,
+        dir.join("host"),
+        Arc::new(NoRun),
+    );
+    let _ = ops.docker.set(svc);
+    domain.tx
+}
+
+#[tokio::test]
+async fn app_data_for_administrators_when_the_setting_is_on() {
+    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let docs = dir.path().join("docs");
+    std::fs::create_dir_all(&docs).unwrap();
+    // a fake root: an app stack, a custom stack, an app folder on another place, a link
+    let droot = dir.path().join("droot");
+    let stacks = droot.join("vol1/docker/stacks");
+    std::fs::create_dir_all(stacks.join("immich/library")).unwrap();
+    std::fs::write(stacks.join("immich/compose.yaml"), "services: {}\nx-rynas:\n  app: immich\n  version: 1.0.0\n  app_version: \"2.0\"\n  catalog: \"1\"\n").unwrap();
+    std::fs::write(stacks.join("immich/library/config.yml"), "a: 1\n").unwrap();
+    std::fs::create_dir_all(stacks.join("custom")).unwrap();
+    std::fs::write(stacks.join("custom/compose.yaml"), "services: {}\n").unwrap();
+    // no compose file: not a stack
+    std::fs::create_dir_all(stacks.join("notastack")).unwrap();
+
+    let (app, ops) = app_with(dir.path(), &[("docs", &docs)]);
+    let tx = docker_for(&ops, dir.path(), &droot, true);
+
+    let (s, v) = get(&app, "/v1/files/init").await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let names: Vec<&str> = v["shares"]["shares"].as_array().unwrap().iter().map(|s| s["name"].as_str().unwrap()).collect();
+    assert!(!names.iter().any(|n| n.starts_with('@')), "the apps' folders are not shared folders: {names:?}");
+    assert_eq!(v["shares"]["apps"], json!([{ "name": "custom", "stack": "custom" }, { "name": "immich", "stack": "immich", "app": "immich" }]));
+
+    let (s, v) = get(&app, "/v1/files/list?path=/@apps").await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!((v["apps"].as_bool(), v["writable"].as_bool()), (Some(true), Some(false)));
+    let listed: Vec<&str> = v["entries"].as_array().unwrap().iter().map(|e| e["name"].as_str().unwrap()).collect();
+    assert_eq!(listed, ["custom", "immich"]);
+    let (s, v) = get(&app, "/v1/files/list?path=/@apps/immich").await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["stack"], "immich");
+    assert!(v["entries"].as_array().unwrap().iter().any(|e| e["name"] == "library"));
+    // nothing is made in the folder of the apps itself, nor out of an app's folder
+    let (s, v) = json_call(&app, "POST", "/v1/files/mkdir?path=/@apps&name=x", json!({})).await;
+    assert_eq!((s, v["code"].as_str()), (StatusCode::CONFLICT, Some(error_codes::READ_ONLY)), "{v}");
+    let (s, _) = get(&app, "/v1/files/list?path=/@apps/immich/../custom").await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    // an app's folder is like a shared folder: not renamed, moved or deleted
+    let (s, v) = json_call(&app, "POST", "/v1/files/rename?path=/@apps/immich&name=x", json!({})).await;
+    assert_eq!((s, v["code"].as_str()), (StatusCode::BAD_REQUEST, Some(error_codes::SHARE_ROOT)), "{v}");
+    // inside: an ordinary folder (the worker here is the test user, who owns the files)
+    let (s, v) = json_call(&app, "POST", "/v1/files/mkdir?path=/@apps/immich/library&name=new", json!({})).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert!(stacks.join("immich/library/new").is_dir());
+    let (s, v) = get(&app, "/v1/files/edit?path=/@apps/immich/library/config.yml").await;
+    assert_eq!((s, v["text"].as_str()), (StatusCode::OK, Some("a: 1\n")), "{v}");
+
+    // the setting off: gone, for the interface and for every route
+    tx.send_replace(rynas_api_types::docker::DockerSettings { volume: Some("vol1".into()), files_app_data: false, ..Default::default() });
+    let (_, v) = get(&app, "/v1/files/shares").await;
+    assert!(v.get("apps").is_none(), "{v}");
+    let (s, _) = get(&app, "/v1/files/list?path=/@apps/immich").await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    // a user who is no administrator never sees them, setting on or off
+    let dir2 = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let (app2, ops2) = app_full(dir2.path(), &[("docs", &docs)], false, None);
+    let _tx2 = docker_for(&ops2, dir2.path(), &droot, true);
+    let (_, v) = get(&app2, "/v1/files/shares").await;
+    assert!(v.get("apps").is_none(), "{v}");
+    let (s, _) = get(&app2, "/v1/files/list?path=/@apps/immich").await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, v) = json_call(&app2, "POST", "/v1/files/jobs/new", json!({ "op": "delete", "sources": ["/@apps/immich/library/config.yml"] })).await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "{v}");
+    assert!(stacks.join("immich/library/config.yml").exists());
+}

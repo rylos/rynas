@@ -675,7 +675,7 @@ impl Engine {
                 if replace {
                     let _ = fs::remove_file(&target);
                 }
-                std::os::unix::fs::symlink(link, &target)
+                std::os::unix::fs::symlink(link, &target).and_then(|()| confine::adopt_link(&target))
             })
         } else {
             Err(io::Error::other(t!("special file (device, socket or pipe): skipped")))
@@ -745,7 +745,7 @@ impl Engine {
         }
         let created = fs::symlink_metadata(&target).is_err();
         if created {
-            if let Err(e) = fs::create_dir(&target) {
+            if let Err(e) = fs::create_dir(&target).and_then(|()| confine::made_dir(&target)) {
                 self.write_error(src, &target, &e);
                 self.skip_tree(src);
                 return Ok(());
@@ -1466,6 +1466,10 @@ impl Engine {
     /// came out.
     fn place_extracted(&mut self, work: &Unpack) {
         let policy = self.spec.conflict;
+        // in the apps' data: what the tool made (as the user) gets the folder's owner
+        if let Err(e) = confine::adopt_tree(&work.tmp, &work.target) {
+            self.error_msg(&work.target, describe(&e));
+        }
         let picked = !self.spec.members.is_empty();
         let moves: Vec<(PathBuf, PathBuf)> = if picked {
             self.spec.members.iter().map(|m| (work.tmp.join(m), work.target.join(m.rsplit('/').next().unwrap_or(m)))).collect()
@@ -1727,6 +1731,7 @@ impl Unpack {
         let target = if into_folder {
             let dir = unique_name(dest, OsStr::new(archive_stem(name)), "");
             fs::create_dir(&dir)?;
+            confine::made_dir(&dir)?;
             created = Some(dir.clone());
             dir
         } else {

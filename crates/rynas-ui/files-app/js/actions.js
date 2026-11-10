@@ -16,6 +16,7 @@ import { spaceAnalysis } from "./space.js";
 import { moveFolderIcons } from "./iconpick.js";
 import { mount } from "./host.js";
 import { serverAddress } from "./conns.js";
+import { changed as appChanged } from "./appdata.js";
 
 export const actionMethods = {
   /** A text file the editor opens: not in an archive, 8 MB at most. */
@@ -34,7 +35,10 @@ export const actionMethods = {
     }
     const saved = await editFile(entry.path, { label: this.displayPath(entry.path) });
     pane.focus();
-    if (saved) this.refreshFolders([parentOf(entry.path)]);
+    if (saved) {
+      this.refreshFolders([parentOf(entry.path)]);
+      appChanged(entry.path);
+    }
   },
 
   analyseSpace(path) {
@@ -276,6 +280,7 @@ export const actionMethods = {
       await pane.reload();
       pane.selectPath(joinPath(parentOf(e.path), name));
       this.refreshFolders([pane.path]);
+      appChanged(e.path);
     } catch (err) {
       errorToast(err);
     }
@@ -290,6 +295,7 @@ export const actionMethods = {
       await api.mkdir(pane.path, name);
       await pane.reload();
       pane.selectPath(joinPath(pane.path, name));
+      appChanged(pane.path);
     } catch (err) {
       errorToast(err);
     }
@@ -324,7 +330,10 @@ export const actionMethods = {
       const items = fromInput(input.files);
       const dest = this.uploadDest || this.pane.path;
       input.value = "";
-      upload(dest, items, () => this.refreshFolders([dest]));
+      upload(dest, items, () => {
+        this.refreshFolders([dest]);
+        appChanged(dest);
+      });
     };
     files.onchange = () => go(files);
     folder.onchange = () => go(folder);

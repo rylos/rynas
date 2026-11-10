@@ -17,7 +17,7 @@ import { shellTheme } from "./js/prefs.js";
 const BASE = new URL(".", import.meta.url);
 
 // what main.js imports at start, asked for at once instead of one level after another
-const PRELOAD = ["api", "prefs", "i18n", "format", "icons", "ui", "transfers", "settings", "iconpick", "tabs", "sidebar", "actions", "dnd", "menus", "keys", "health", "eza", "pane", "perms", "conns", "archive", "uploads", "preview", "space", "fuzzy", "heic", "zoom", "lang/en"];
+const PRELOAD = ["api", "prefs", "i18n", "format", "icons", "ui", "transfers", "settings", "iconpick", "tabs", "sidebar", "appdata", "actions", "dnd", "menus", "keys", "health", "eza", "pane", "perms", "conns", "archive", "uploads", "preview", "space", "fuzzy", "heic", "zoom", "lang/en"];
 
 const CHROME = `
 <div class="app" id="app">

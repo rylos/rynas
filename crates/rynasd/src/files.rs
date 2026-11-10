@@ -181,6 +181,7 @@ fn shares_for(files: &Files, user: &User, admin: bool) -> Res<(Vec<Share>, BTree
                 hidden: !s.smb.browseable,
                 encrypted: false,
                 home: false,
+                app: None,
             }
         })
         .collect();
@@ -191,7 +192,8 @@ fn shares_for(files: &Files, user: &User, admin: bool) -> Res<(Vec<Share>, BTree
             continue;
         }
         let base = v.mount_point.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        if base.is_empty() || base.starts_with('.') {
+        // `@…` is the apps' folder's (rynas_files::shares::APPS)
+        if base.is_empty() || base.starts_with('.') || base.starts_with('@') {
             continue;
         }
         let mut name = base.clone();
@@ -213,6 +215,11 @@ fn shares_for(files: &Files, user: &User, admin: bool) -> Res<(Vec<Share>, BTree
         });
     }
     out.sort_by_key(|s| s.name.to_lowercase());
+    // the apps' data: administrators only, when the Docker setting shows it (rynasd decides,
+    // not the interface: nobody else can name these folders)
+    if admin {
+        out.extend(app_shares(files));
+    }
     // a home in the homes folder is named through a symbolic link (/srv/rynas/homes/<user> →
     // <volume>/homes/<user>): the share is its real folder, so that the worker's jail (which
     // never follows links) can open it and the volume is the right one
@@ -228,6 +235,59 @@ fn shares_for(files: &Files, user: &User, admin: bool) -> Res<(Vec<Share>, BTree
         out.insert(0, Share { name: rynas_files::shares::HOME.into(), path: home, volume, home: true, recycle, ..Default::default() });
     }
     Ok((out, volumes))
+}
+
+/// The apps' data folders an administrator sees in the file manager when the Docker setting
+/// `files_app_data` is on (`@apps/<folder>`): every stack folder
+/// (`<volume>/docker/stacks/<stack>`), and the folders the install wizard put on another
+/// place (`<place>/docker/appdata/<stack>`, named `<stack> (<place>)`). Real folders only:
+/// a link is never a root. Empty when the setting is off or Docker is not set up.
+fn app_shares(files: &Files) -> Vec<Share> {
+    let Some(docker) = files.ops.docker.get() else { return Vec::new() };
+    if !docker.settings().files_app_data {
+        return Vec::new();
+    }
+    let Some(layout) = docker.layout() else { return Vec::new() };
+    let real_dir = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir());
+    let mut out = Vec::new();
+    let stacks = rynas_docker::under(&docker.root, &layout.stacks());
+    let (names, _) = docker.folders();
+    for stack in &names {
+        let path = stacks.join(stack);
+        if !real_dir(&path) {
+            continue;
+        }
+        let app = rynas_docker::stacks::find_compose(&path)
+            .and_then(|f| std::fs::read_to_string(path.join(f)).ok())
+            .and_then(|text| rynas_apps::render::installed_meta(&text).ok().flatten())
+            .map(|m| m.app);
+        out.push(Share {
+            name: format!("{}/{stack}", rynas_files::shares::APPS),
+            path,
+            app: Some(rynas_files::shares::AppFolder { stack: stack.clone(), app }),
+            ..Default::default()
+        });
+    }
+    for (label, dir) in crate::places::host_places() {
+        let base = rynas_docker::under(&docker.root, &format!("{dir}/docker/appdata"));
+        let mut found: Vec<String> = std::fs::read_dir(&base).into_iter().flatten().flatten().filter_map(|e| e.file_name().to_str().map(str::to_string)).collect();
+        found.sort();
+        for stack in found {
+            let path = base.join(&stack);
+            if rynas_docker::stacks::check_name(&stack).is_err() || !real_dir(&path) {
+                continue;
+            }
+            let app = out.iter().find(|s| s.app.as_ref().is_some_and(|a| a.stack == stack)).and_then(|s| s.app.as_ref()?.app.clone());
+            out.push(Share {
+                name: format!("{}/{stack} ({label})", rynas_files::shares::APPS),
+                path,
+                app: Some(rynas_files::shares::AppFolder { stack, app }),
+                ..Default::default()
+            });
+        }
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
 }
 
 /// "/" for the system disk, else the mount point's last component ("/srv/vol1" → "vol1").
@@ -318,6 +378,36 @@ fn context(files: &Files, w: &Who, conns: bool) -> Res<Context> {
         extra: Value::Null,
         thumbs: thumbs_dir(&files.thumbs, &w.user),
     })
+}
+
+/// The folders a request's worker may change over their owners: the app folder its `path`
+/// or `dir` names (`/@apps/<folder>/…`), for an administrator whose context holds it (the
+/// setting is on), and the user's thumbnail cache beside it (the worker writes it). Empty
+/// otherwise: the worker keeps reading only.
+fn app_roots_of(ctx: &Context, query: &HashMap<String, String>) -> Vec<PathBuf> {
+    if !ctx.admin {
+        return Vec::new();
+    }
+    let mut roots = Vec::new();
+    for key in ["path", "dir"] {
+        let Some(vpath) = query.get(key) else { continue };
+        if !rynas_files::shares::in_apps(vpath) {
+            // a request about a share or a server too: no powers at all
+            return Vec::new();
+        }
+        if let Ok(r) = rynas_files::shares::resolve(&ctx.shares, vpath)
+            && r.share.app.is_some()
+            && !roots.contains(&r.share.path)
+        {
+            roots.push(r.share.path.clone());
+        }
+    }
+    if !roots.is_empty()
+        && let Some(thumbs) = ctx.thumbs.as_ref().filter(|t| std::fs::symlink_metadata(t).is_ok_and(|m| m.is_dir()))
+    {
+        roots.push(thumbs.clone());
+    }
+    roots
 }
 
 /// The user's thumbnail cache, made on first use: `<root>/<uid>`, owned by the user, 0700.
@@ -446,7 +536,7 @@ async fn handle(st: FilesState, req: Request) -> Res<Response> {
             .await??;
             let _ = w;
             let wr = WorkerRequest { method: "POST".into(), route: "conns/test".into(), query: HashMap::new(), length: 0, range: None, ctx };
-            run_worker(&files, wr, Body::empty(), HEAD_DEADLINE).await
+            run_worker(&files, wr, Body::empty(), HEAD_DEADLINE, &[]).await
         }
         _ => {
             let probe = wire::Request::in_memory(&method, &route, query.clone(), Vec::new());
@@ -476,8 +566,9 @@ async fn handle(st: FilesState, req: Request) -> Res<Response> {
             };
             let range = parts.headers.get(header::RANGE).and_then(|v| v.to_str().ok()).map(String::from);
             let deadline = if route == "upload" || route == "edit/save" { UPLOAD_DEADLINE } else { HEAD_DEADLINE };
+            let app_roots = app_roots_of(&ctx, &query);
             let wr = WorkerRequest { method, route, query, length, range, ctx };
-            run_worker(&files, wr, body, deadline).await
+            run_worker(&files, wr, body, deadline, &app_roots).await
         }
     }
 }
@@ -557,12 +648,12 @@ impl Stream for WorkerBody {
 
 /// Starts a worker as the request's user, sends it the request line and the body, and
 /// streams its answer back.
-async fn run_worker(files: &Files, wr: WorkerRequest, body: Body, deadline: Duration) -> Res<Response> {
+async fn run_worker(files: &Files, wr: WorkerRequest, body: Body, deadline: Duration, app_roots: &[PathBuf]) -> Res<Response> {
     let slot = tokio::time::timeout(HEAD_DEADLINE, files.slots.clone().acquire_owned())
         .await
         .map_err(|_| Error::new(StatusCode::SERVICE_UNAVAILABLE, error_codes::BUSY, "the file manager is busy: try again".into()))?
         .map_err(Error::internal)?;
-    let std_cmd = rynas_files::jobs::manager::worker_command(&files.worker, &wr.ctx.user, wr.ctx.admin).map_err(Error::internal)?;
+    let std_cmd = rynas_files::jobs::manager::worker_command(&files.worker, &wr.ctx.user, wr.ctx.admin, app_roots).map_err(Error::internal)?;
     let mut cmd = tokio::process::Command::from(std_cmd);
     cmd.arg("serve").stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::inherit()).kill_on_drop(true);
     let mut child = cmd.spawn().map_err(|e| Error::internal(format!("{}: {e}", files.worker.display())))?;
@@ -658,7 +749,7 @@ impl WorkerSsh {
     fn call(&self, user: &str, request: Value) -> std::io::Result<Value> {
         use std::io::{BufRead, Write};
         let u = rynas_files::identity::lookup(user)?;
-        let mut cmd = rynas_files::jobs::manager::worker_command(&self.worker, &u, false)?;
+        let mut cmd = rynas_files::jobs::manager::worker_command(&self.worker, &u, false, &[])?;
         cmd.arg("call").stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::inherit());
         let mut child = cmd.spawn()?;
         let mut line = serde_json::to_vec(&request).map_err(std::io::Error::other)?;

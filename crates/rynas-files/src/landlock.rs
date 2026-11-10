@@ -1,5 +1,6 @@
 //! Landlock (Linux 5.13, unprivileged): the archive tools may write below their own folder
-//! only.
+//! only, and an administrator's worker in the apps' data below those app folders only
+//! ([`writes_below_all`], applied by `jobs::manager::worker_command`).
 //!
 //! An archive can hold a link (`a -> /etc`, `a -> ../../other-share`) and then a file below
 //! it (`a/passwd`): a tool that follows its own link writes out of the folder it extracts
@@ -61,7 +62,8 @@ pub fn abi() -> Option<i64> {
 fn add(ruleset: &OwnedFd, dir: &Path, access: u64) -> io::Result<()> {
     let c = CString::new(dir.as_os_str().as_bytes()).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
     // SAFETY: a valid C string
-    let fd = unsafe { libc::open(c.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+    // a folder that is a symbolic link is refused (its target would be allowed)
+    let fd = unsafe { libc::open(c.as_ptr(), libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -79,6 +81,12 @@ fn add(ruleset: &OwnedFd, dir: &Path, access: u64) -> io::Result<()> {
 /// Every write refused but below `dir` (and on `/dev/null`); `None` when the
 /// kernel has no Landlock or the ruleset cannot be made.
 pub fn writes_below(dir: &Path) -> Option<Ruleset> {
+    writes_below_all(&[dir])
+}
+
+/// Every write refused but below one of `dirs` (and on `/dev/null`); `None` when the kernel
+/// has no Landlock, or a folder cannot be opened (then nothing is allowed half-way).
+pub fn writes_below_all(dirs: &[&Path]) -> Option<Ruleset> {
     let abi = abi()?;
     let mut handled = WRITE_FILE | REMOVE_DIR | REMOVE_FILE | MAKE_CHAR | MAKE_DIR | MAKE_REG | MAKE_SOCK | MAKE_FIFO | MAKE_BLOCK | MAKE_SYM;
     if abi >= 2 {
@@ -95,7 +103,9 @@ pub fn writes_below(dir: &Path) -> Option<Ruleset> {
     }
     // SAFETY: just made
     let fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
-    add(&fd, dir, handled).ok()?;
+    for dir in dirs {
+        add(&fd, dir, handled).ok()?;
+    }
     let _ = add(&fd, Path::new("/dev/null"), WRITE_FILE | (handled & TRUNCATE));
     Some(Ruleset { fd })
 }
@@ -112,6 +122,24 @@ impl Ruleset {
                     return Err(io::Error::last_os_error());
                 }
                 if libc::syscall(libc::SYS_landlock_restrict_self, fd, 0u32) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+
+    /// As [`Ruleset::apply`], the ruleset handed to the command: it stays open as long as the
+    /// command, so a command returned by a function keeps it.
+    pub fn apply_owned(self, cmd: &mut std::process::Command) {
+        let fd = self.fd;
+        // SAFETY: only system calls between fork and exec
+        unsafe {
+            cmd.pre_exec(move || {
+                if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                if libc::syscall(libc::SYS_landlock_restrict_self, fd.as_raw_fd(), 0u32) != 0 {
                     return Err(io::Error::last_os_error());
                 }
                 Ok(())
@@ -144,5 +172,29 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&out.stdout), "a\n");
         assert!(inside.join("in.txt").exists());
         assert!(!outside.join("out.txt").exists() && !outside.join("out2.txt").exists());
+    }
+
+    #[test]
+    fn writes_below_several_folders_and_never_through_a_linked_root() {
+        let Some(_) = abi() else {
+            eprintln!("no Landlock in this kernel: skipped");
+            return;
+        };
+        let t = tempfile::tempdir().unwrap();
+        let (a, b, other) = (t.path().join("a"), t.path().join("b"), t.path().join("other"));
+        for d in [&a, &b, &other] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let rules = writes_below_all(&[&a, &b]).unwrap();
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.arg("-c").arg("echo 1 > a/x; echo 2 > b/y; echo 3 > other/z; mv a/x b/x; rm b/y").current_dir(t.path());
+        rules.apply_owned(&mut cmd);
+        let _ = cmd.output().unwrap();
+        assert!(b.join("x").exists() && !a.join("x").exists() && !b.join("y").exists());
+        assert!(!other.join("z").exists());
+        // a root that is a link would open its target to writes: no ruleset at all
+        std::os::unix::fs::symlink(&other, t.path().join("link")).unwrap();
+        assert!(writes_below_all(&[&a, &t.path().join("link")]).is_none());
+        assert!(writes_below_all(&[&a, &t.path().join("missing")]).is_none());
     }
 }

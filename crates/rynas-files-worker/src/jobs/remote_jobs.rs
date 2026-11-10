@@ -223,7 +223,7 @@ impl End {
 
     fn mkdir(&self, p: &Path) -> io::Result<()> {
         match self {
-            End::Local => fs::create_dir(p),
+            End::Local => fs::create_dir(p).and_then(|()| rynas_files::confine::made_dir(p)),
             End::Remote(_) => self.call(|fs, again| match fs.mkdir(&parts(p)) {
                 Err(e) if again && e.raw_os_error() == Some(libc::EEXIST) => Ok(()),
                 other => other,

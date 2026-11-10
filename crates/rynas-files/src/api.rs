@@ -81,10 +81,12 @@ fn route(req: &Request, out: &mut impl Write, ctx: &Context, remote: &dyn Remote
 }
 
 /// The shared folders with their space and what the user may do there: run as the user.
+/// The apps' folders, when the context has them, come apart in `apps`.
 pub fn shares_info(ctx: &Context) -> Value {
     let list: Vec<Value> = ctx
         .shares
         .iter()
+        .filter(|s| s.app.is_none())
         .map(|s| {
             let (free, total) = fsops::space(&s.path).unwrap_or((0, 0));
             let mut v = s.public();
@@ -95,7 +97,49 @@ pub fn shares_info(ctx: &Context) -> Value {
             v
         })
         .collect();
-    json!({ "shares": list, "user": ctx.user.name, "volumes": ctx.volumes, "hostname": ctx.hostname })
+    let mut v = json!({ "shares": list, "user": ctx.user.name, "volumes": ctx.volumes, "hostname": ctx.hostname });
+    // the apps' folders are one entry of the interface (`@apps`), not shared folders
+    let apps = app_folders(&ctx.shares);
+    if !apps.is_empty() {
+        v["apps"] = json!(apps);
+    }
+    v
+}
+
+/// The apps' folders (`@apps/<folder>` shares): `{name, stack, app?}` each, by name.
+fn app_folders(shares: &[Share]) -> Vec<Value> {
+    shares
+        .iter()
+        .filter_map(|s| {
+            let app = s.app.as_ref()?;
+            let name = s.name.strip_prefix(shares::APPS)?.strip_prefix('/')?;
+            let mut v = json!({ "name": name, "stack": app.stack });
+            if let Some(id) = &app.app {
+                v["app"] = json!(id);
+            }
+            Some(v)
+        })
+        .collect()
+}
+
+/// `list` of `/@apps`: one folder per app, never writable here (each is made by its app).
+fn apps_listing(shares: &[Share]) -> Value {
+    use std::os::unix::fs::MetadataExt;
+    let entries: Vec<Value> = shares
+        .iter()
+        .filter(|s| s.app.is_some())
+        .filter_map(|s| {
+            let name = s.name.strip_prefix(shares::APPS)?.strip_prefix('/')?;
+            let meta = std::fs::metadata(&s.path).ok()?;
+            let app = s.app.as_ref()?;
+            let mut v = json!({ "name": name, "kind": "d", "size": 0, "mtime": meta.mtime(), "mode": meta.mode() & 0o7777, "stack": app.stack });
+            if let Some(id) = &app.app {
+                v["app"] = json!(id);
+            }
+            Some(v)
+        })
+        .collect();
+    json!({ "entries": entries, "writable": false, "space": null, "recycle": false, "apps": true })
 }
 
 /// `rel` ("Photos/2024/Sea") below `dir`, each part a valid name.
@@ -116,7 +160,10 @@ fn make_dirs(dir: &Path, rel: &str) -> Result<(), ApiError> {
     for part in rel.split('/') {
         at.push(part);
         match std::fs::create_dir(&at) {
-            Ok(()) => continue,
+            Ok(()) => {
+                crate::confine::made_dir(&at)?;
+                continue;
+            }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
             Err(e) => return Err(e.into()),
         }
@@ -211,6 +258,7 @@ pub fn job_spec(shares: &[Share], conns: &[crate::conns::Conn], body: &NewJob) -
             roots.push(share.path.clone());
         }
     };
+    let mut app_roots: Vec<PathBuf> = Vec::new();
     let mut remotes: Vec<crate::conns::Conn> = Vec::new();
     // a remote path stays as it is, the worker connects: (path, whether it
     // is the server or one of its shares)
@@ -248,8 +296,13 @@ pub fn job_spec(shares: &[Share], conns: &[crate::conns::Conn], body: &NewJob) -
             }
         }
         add_root(r.share);
+        // a deletion, or a move's removal of its sources, changes an app's folder
+        if r.share.app.is_some() && matches!(body.op, Op::Delete | Op::Move) && !app_roots.contains(&r.share.path) {
+            app_roots.push(r.share.path.clone());
+        }
         sources.push(r.real);
     }
+    let mut dest_in_app = false;
     let dest = match (&body.dest, body.op) {
         (_, Op::Delete) => None,
         (Some(d), _) if crate::conns::split(d).is_some() => {
@@ -262,6 +315,12 @@ pub fn job_spec(shares: &[Share], conns: &[crate::conns::Conn], body: &NewJob) -
         (Some(d), _) => {
             let r = shares::resolve(shares, d)?;
             add_root(r.share);
+            if r.share.app.is_some() {
+                dest_in_app = true;
+                if !app_roots.contains(&r.share.path) {
+                    app_roots.push(r.share.path.clone());
+                }
+            }
             Some(r.real)
         }
         (None, _) => return Err(ApiError::invalid("dest", t!("no destination"))),
@@ -291,6 +350,9 @@ pub fn job_spec(shares: &[Share], conns: &[crate::conns::Conn], body: &NewJob) -
         members: body.members.iter().map(|m| valid_member(m)).collect::<Result<_, _>>()?,
         remotes,
         roots,
+        // the powers to change the apps' folders only when that is where the job writes: a
+        // move out of an app's folder into a share writes in the share as the user
+        app_roots: if body.op == Op::Delete || dest_in_app { app_roots } else { Vec::new() },
     })
 }
 
@@ -341,7 +403,11 @@ fn as_user(req: &Request, out: &mut impl Write, ctx: &Context, remote: &dyn Remo
     match req.route.as_str() {
         "shares" => reply(out, &shares_info(ctx)),
         "list" => {
-            let r = shares::resolve(shares, req.require("path")?)?;
+            let vpath = req.require("path")?;
+            if shares::is_apps_root(vpath) {
+                return reply(out, &apps_listing(shares));
+            }
+            let r = shares::resolve(shares, vpath)?;
             let real = place(&r, true)?;
             if let Some((_, inner, members)) = in_archive(&real)? {
                 if !archive::is_dir(&members, &inner) {
@@ -353,12 +419,17 @@ fn as_user(req: &Request, out: &mut impl Write, ctx: &Context, remote: &dyn Remo
             }
             let listing = fsops::list(&real)?;
             let space = fsops::space(&real).map(|(free, total)| json!({"free": free, "total": total}));
-            reply(
-                out,
-                &json!({ "entries": listing.entries, "writable": listing.writable, "space": space, "recycle": r.share.recycle }),
-            )
+            let mut v = json!({ "entries": listing.entries, "writable": listing.writable, "space": space, "recycle": r.share.recycle });
+            // in an app's folder: which stack (the interface offers its restart after a change)
+            if let Some(app) = &r.share.app {
+                v["stack"] = json!(app.stack);
+            }
+            reply(out, &v)
         }
         "stat" => {
+            if shares::is_apps_root(req.require("path")?) {
+                return reply(out, &json!({ "name": shares::APPS, "kind": "d", "size": 0, "mtime": 0, "atime": 0, "ctime": 0, "mode": 0o755, "owner": "root", "group": "root", "inode": 0, "links": 1, "target": null, "readable": true, "writable": false, "device": 0 }));
+            }
             let real = entry_param("path")?;
             if let Some((file, inner, members)) = in_archive(&real)?
                 && !inner.is_empty()
@@ -576,5 +647,64 @@ mod tests {
             assert!(nested(dir, bad).is_err(), "{bad:?}");
         }
         assert!(nested(dir, &format!("a/{}", "x".repeat(256))).is_err());
+    }
+
+    fn with_apps() -> Vec<Share> {
+        let app = |stack: &str, path: &str| Share { name: format!("{}/{stack}", shares::APPS), path: path.into(), app: Some(shares::AppFolder { stack: stack.into(), app: Some("immich".into()) }), ..Default::default() };
+        vec![Share { name: "Photos".into(), path: "/srv/vol1/Photos".into(), recycle: true, ..Default::default() }, app("immich", "/srv/vol1/docker/stacks/immich"), app("db", "/srv/ssd/docker/appdata/db")]
+    }
+
+    fn job(op: &str, sources: &[&str], dest: Option<&str>) -> NewJob {
+        serde_json::from_value(json!({ "op": op, "sources": sources, "dest": dest })).unwrap()
+    }
+
+    #[test]
+    fn jobs_get_the_app_powers_only_where_they_write() {
+        let shares = with_apps();
+        let roots = |op, sources: &[&str], dest| job_spec(&shares, &[], &job(op, sources, dest)).unwrap().app_roots;
+        let immich = PathBuf::from("/srv/vol1/docker/stacks/immich");
+        let db = PathBuf::from("/srv/ssd/docker/appdata/db");
+        // into an app's folder, from a share: only the app folder is written
+        assert_eq!(roots("copy", &["/Photos/a.jpg"], Some("/@apps/immich/library")), vec![immich.clone()]);
+        // within the apps: a move removes its sources there too
+        assert_eq!(roots("move", &["/@apps/db/x"], Some("/@apps/immich")), [db.clone(), immich.clone()]);
+        assert_eq!(roots("delete", &["/@apps/db/x", "/Photos/b.jpg"], None), vec![db.clone()]);
+        // out of the apps: written as the user, no powers
+        assert!(roots("copy", &["/@apps/immich/a"], Some("/Photos")).is_empty());
+        assert!(roots("move", &["/@apps/immich/a"], Some("/Photos")).is_empty());
+        assert!(roots("delete", &["/Photos/b.jpg"], None).is_empty());
+        // an app's folder itself is like a shared folder: never copied, moved or deleted
+        let e = job_spec(&shares, &[], &job("delete", &["/@apps/immich"], None)).unwrap_err();
+        assert_eq!(e.code, rynas_api_types::error_codes::SHARE_ROOT);
+        // and deletions there are for good: no bin
+        assert!(job_spec(&shares, &[], &job("delete", &["/@apps/immich/x"], None)).unwrap().recycle.is_empty());
+    }
+
+    #[test]
+    fn app_folders_are_listed_apart() {
+        let t = tempfile::tempdir().unwrap();
+        let photos = t.path().join("Photos");
+        let stack = t.path().join("immich");
+        std::fs::create_dir_all(&photos).unwrap();
+        std::fs::create_dir_all(&stack).unwrap();
+        let shares = vec![
+            Share { name: "Photos".into(), path: photos, ..Default::default() },
+            Share { name: format!("{}/immich", shares::APPS), path: stack, app: Some(shares::AppFolder { stack: "immich".into(), app: Some("immich".into()) }), ..Default::default() },
+            Share { name: format!("{}/gone", shares::APPS), path: t.path().join("gone"), app: Some(shares::AppFolder { stack: "gone".into(), app: None }), ..Default::default() },
+        ];
+        let ctx = Context { shares: shares.clone(), ..Default::default() };
+        let info = shares_info(&ctx);
+        let names: Vec<&str> = info["shares"].as_array().unwrap().iter().map(|s| s["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["Photos"]);
+        assert_eq!(info["apps"][0], json!({ "name": "immich", "stack": "immich", "app": "immich" }));
+        assert_eq!(info["apps"][1], json!({ "name": "gone", "stack": "gone" }));
+        // no apps' folders (a user, or the setting off): no `apps` at all
+        assert!(shares_info(&Context { shares: shares[..1].to_vec(), ..Default::default() }).get("apps").is_none());
+        let list = apps_listing(&shares);
+        assert_eq!(list["writable"], false);
+        let entries = list["entries"].as_array().unwrap();
+        // a folder that is not there (any more) is left out
+        assert_eq!(entries.len(), 1);
+        assert_eq!((entries[0]["name"].as_str(), entries[0]["kind"].as_str(), entries[0]["stack"].as_str()), (Some("immich"), Some("d"), Some("immich")));
     }
 }

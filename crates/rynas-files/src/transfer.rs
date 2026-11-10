@@ -495,6 +495,10 @@ impl LocalUpload {
         }
         // the folder swapped for a link meanwhile: not written to
         crate::confine::check(std::os::fd::AsFd::as_fd(&file))?;
+        if create {
+            // in the apps' data: the folder's owner (kept by the rename into place)
+            crate::confine::adopt(&file, &self.part)?;
+        }
         Ok(Some(file))
     }
 }

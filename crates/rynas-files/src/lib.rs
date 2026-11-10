@@ -29,6 +29,7 @@ pub mod edit;
 pub mod fsops;
 pub mod identity;
 pub mod jobs;
+pub mod landlock;
 pub mod media;
 pub mod names;
 pub mod shares;

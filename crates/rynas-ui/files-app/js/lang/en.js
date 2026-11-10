@@ -556,4 +556,10 @@ export default {
   "Il servizio dei file non ha risposto in tempo": "The file service did not answer in time",
   "Errore interno del server": "Internal server error",
   "Sola lettura": "Read-only",
+  "App": "Apps",
+  "Dati delle app": "App data",
+  "{n} cartelle": "{n} folders",
+  "L'app {s} potrebbe dover ripartire per vedere la modifica": "{s} may need a restart to see the change",
+  "Riavvia": "Restart",
+  "Riavvio di {s} avviato": "Restarting {s}",
 };

@@ -1,5 +1,5 @@
 //! The transfer job engine, run as the user.
 
 pub mod worker;
-pub mod landlock;
+pub use rynas_files::landlock;
 pub mod writeback;

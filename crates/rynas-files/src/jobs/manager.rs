@@ -852,7 +852,7 @@ fn prune(list: &mut VecDeque<Job>) {
 /// A worker for `spec`, running as `user` (as the user this process is in development,
 /// when rynasd is not root), with `spec` already sent.
 fn start_worker(exe: &Path, user: &User, admin: bool, spec: &Spec) -> io::Result<std::process::Child> {
-    let mut cmd = worker_command(exe, user, admin)?;
+    let mut cmd = worker_command(exe, user, admin, &spec.app_roots)?;
     cmd.arg("job").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
     let mut child = cmd.spawn()?;
     let mut line = serde_json::to_vec(spec).map_err(io::Error::other)?;
@@ -873,9 +873,12 @@ pub fn set_worker_cgroup(procs: std::os::fd::OwnedFd) {
 
 /// `rynas-files-worker` as `user`: an empty environment but `PATH`, moved into the workers'
 /// cgroup ([`set_worker_cgroup`]) and the user's identity set between fork and exec
-/// ([`crate::identity::become_raw`]). A process that is not root (development) cannot switch:
-/// the worker then runs as that process's own user, never as root.
-pub fn worker_command(exe: &Path, user: &User, admin: bool) -> io::Result<std::process::Command> {
+/// ([`crate::identity::become_raw`]). An administrator's worker with `app_roots` (it writes
+/// in the apps' folders) gets [`crate::caps::Powers::AppData`] under a Landlock ruleset
+/// that allows writes below those folders only ([`app_fence`]). A process that is not root
+/// (development) cannot switch: the worker then runs as that process's own user, never as
+/// root.
+pub fn worker_command(exe: &Path, user: &User, admin: bool, app_roots: &[PathBuf]) -> io::Result<std::process::Command> {
     let mut cmd = std::process::Command::new(exe);
     cmd.env_clear().env("PATH", "/usr/bin:/bin").env("LANG", "C.UTF-8").current_dir("/");
     if let Some(procs) = WORKER_CGROUP.get() {
@@ -895,14 +898,41 @@ pub fn worker_command(exe: &Path, user: &User, admin: bool) -> io::Result<std::p
         if user.uid == 0 {
             return Err(io::Error::other("the file manager never runs as root"));
         }
+        let fence = app_fence(admin, app_roots);
+        let powers = match (admin, &fence) {
+            (true, Some(_)) => crate::caps::Powers::AppData,
+            (true, None) => crate::caps::Powers::Read,
+            (false, _) => crate::caps::Powers::None,
+        };
         let groups = user.groups.clone();
         let (uid, gid) = (user.uid, user.gid);
         // SAFETY: only system calls between fork and exec (become_raw allocates nothing)
         unsafe {
-            cmd.pre_exec(move || crate::identity::become_raw(uid, gid, &groups, admin));
+            cmd.pre_exec(move || crate::identity::become_raw(uid, gid, &groups, powers));
+        }
+        // after the identity change (no_new_privs is set by then): writes below the apps'
+        // folders only, whatever the capabilities say
+        if let Some(rules) = fence {
+            rules.apply_owned(&mut cmd);
         }
     }
     Ok(cmd)
+}
+
+/// The Landlock ruleset of an administrator's worker that changes the apps' data: writes
+/// below `app_roots` only. `None` (the worker keeps reading only, writes stay the user's)
+/// for anyone else, without roots, or when the kernel has no Landlock: the powers to write
+/// over owners are never handed out unfenced.
+fn app_fence(admin: bool, app_roots: &[PathBuf]) -> Option<crate::landlock::Ruleset> {
+    if !admin || app_roots.is_empty() {
+        return None;
+    }
+    let dirs: Vec<&Path> = app_roots.iter().map(PathBuf::as_path).collect();
+    let rules = crate::landlock::writes_below_all(&dirs);
+    if rules.is_none() {
+        eprintln!("rynasd: no Landlock ruleset for the apps' folders (kernel without Landlock?): they stay read-only to the file manager");
+    }
+    rules
 }
 
 #[derive(Serialize, Deserialize)]

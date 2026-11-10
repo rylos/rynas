@@ -62,8 +62,7 @@ pub fn open(out: &mut impl Write, path: &Path) -> Result<(), ApiError> {
 }
 
 fn nix_access(path: &Path) -> bool {
-    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else { return false };
-    unsafe { libc::access(c.as_ptr(), libc::W_OK) == 0 }
+    crate::fsops::access(path, libc::W_OK)
 }
 
 /// Saves `text` over `path`. `stamp`: what the file was when opened; a
@@ -106,7 +105,10 @@ fn write(path: &Path, text: &[u8], expected: &str, force: bool) -> Result<String
             crate::confine::check_made(&f, &tmp)?;
             f.write_all(text)?;
             f.set_permissions(std::fs::Permissions::from_mode(meta.mode() & 0o7777))?;
-            let _ = std::os::unix::fs::fchown(&f, None, Some(meta.gid()));
+            // the file's own owner and group (check_made gave it the folder's in the apps'
+            // data; an ordinary user can only set the group)
+            let uid = crate::caps::app_data().then(|| meta.uid());
+            let _ = std::os::unix::fs::fchown(&f, uid, Some(meta.gid()));
             f.sync_all()?;
             std::fs::rename(&tmp, path)
         })();

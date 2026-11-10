@@ -239,6 +239,9 @@ With a volume, the apply:
 Drift detection covers the four files. A key never applied imports `volume` from a
 `daemon.json` whose data-root is `/<label>/docker/engine`.
 
+`files_app_data` (default false) shows the apps' data folders to administrators in the file
+manager (§5.9); it changes nothing on the system and needs no restart.
+
 Ranges (400 `invalid_value` with the field):
 - `keep_snapshots` 1-50, `data_root_full_pct` 50-99, `crash_restarts` 2-100,
   `crash_window_min` 1-120;
@@ -2048,6 +2051,77 @@ staged). The window is in Overview › settings.
   credentials of `/root/.docker/config.json` are not read yet.
 - Floating tags without the version label are always held after the download.
 - The Docker engine itself updates with the Debian packages (System › Updates, channel A).
+
+### 5.9 App data in the file manager (2026-11-10)
+
+#### Research
+
+How other NAS systems and tools let an administrator reach the files of their apps:
+
+- **TrueNAS SCALE**: the default app storage (ixVolumes) is a hidden dataset; the official
+  advice is host paths on datasets of one's own, with ACL entries for the app's run-as
+  user. Editing a config file in an ixVolume means a shell (`sudoedit`). Lesson: hidden by
+  default is right, but the administrator should not need a shell.
+- **Unraid**: `appdata` is an ordinary share. Its permission repair tool has a "Docker safe"
+  variant that skips appdata, because resetting owners there breaks containers. Lesson:
+  never change the owner or mode of what is already there.
+- **Synology (Container Manager)**: the `docker` shared folder; files a container writes
+  are often root's or a uid File Station users cannot write, so the usual fix is `chown`
+  over SSH. Lesson: an administrator must be able to change files whatever their owner,
+  and the files must stay the app's.
+- **Umbrel**: `app-data/<app>` is visible in its Files app but read-only (edits over SSH);
+  edits can be lost on app updates and apps need their restart script afterwards.
+- **CasaOS / ZimaOS**: `/DATA/AppData/<app>` in the Files app; the community notes say a
+  saved file is ignored until the app restarts or reloads.
+- **openmediavault (compose plugin)**: an `appdata` shared folder holds one folder per
+  stack (compose files beside the data), admin read/write, users none.
+
+Best ideas kept: hidden unless switched on (TrueNAS), one folder per app, the compose
+files next to the data (OMV, rynas rule 1), edits that keep owners (Unraid), writable
+whatever the owner for an administrator (what Synology and Umbrel users go to SSH for),
+and an offer to restart the app after a change (CasaOS, Umbrel).
+
+#### Behaviour
+
+- Setting `files_app_data` (Docker › Overview › settings, default off). Administrators only,
+  enforced in rynasd: `rynasd::files::shares_for` adds the app shares only for an
+  administrator and only while the applied setting is on, so a path `/@apps/…` is
+  `not_found` for anyone else, in every route and job.
+- The file manager shows one entry "App data" in its sidebar; `/@apps` lists one folder per
+  stack: every folder of `/<vol>/docker/stacks/` with a compose file, and each
+  `/<place>/docker/appdata/<stack>` the install wizard put on another place (named
+  `<stack> (<place>)`). Real folders only, never a link. `/@apps` itself and each app folder
+  behave like shared folders: nothing made at the top, the folders not renamed, moved or
+  deleted; no recycle bin (deletions are for good).
+- **Access**: a worker for a request whose `path`/`dir` is inside an app folder, or a job
+  that writes there (its destination, or the sources of a deletion or a move), runs as the
+  administrator with `CAP_DAC_READ_SEARCH`, `CAP_DAC_OVERRIDE`, `CAP_FOWNER`, `CAP_CHOWN`
+  (never ambient: 7z, tar and ffmpeg get reading only) under a **Landlock** ruleset made by
+  rynasd that allows writes below those app folders only (plus the user's thumbnail cache),
+  applied between fork and exec after the identity change. Without Landlock the worker gets
+  reading only and the folders stay read-only where their owners say so. The share jail of
+  `rynas_files::confine` applies as everywhere (no link out of the app folder is followed).
+- **Owners as the app expects**: a file edited is written in place (owner, mode, ACL and
+  links kept) or, for the administrator's own files, replaced keeping owner and group;
+  anything new (a file, folder, link, upload, copy, extracted item) gets the owner and group
+  of the folder it lands in (`confine::adopt`, `made_dir`, `adopt_tree`). Nothing that exists
+  is ever chowned or chmodded.
+- After a save, upload, new folder, rename, or a finished job that changed an app folder,
+  the interface asks `GET /api/v1/docker/stacks/{stack}`; when containers run it offers a
+  toast with "Restart" (`POST /api/v1/docker/stacks/{stack}/restart`), at most once per stack
+  in 20 s.
+- Shapes: `shares` answers `apps: [{name, stack, app?}]` beside `shares` (the app folders
+  never appear as shared folders); `list` of `/@apps` answers `{entries: [{name, kind: "d",
+  mtime, mode, stack, app?}], writable: false, space: null, recycle: false, apps: true}`;
+  `list` inside an app folder adds `stack`.
+
+#### Open points
+
+- Adopted stacks (§5.7) whose folder stays outside the stacks folder are not listed yet.
+- App icons in the `/@apps` listing (the catalogue icon route exists; the pane draws
+  folder glyphs only).
+- `packaging/test-files.sh` (root, container) should also check an app-data worker:
+  `CapEff`, a write refused outside the app folder by Landlock, owners of new files.
 
 ## 6. App catalog format (wave A1)
 

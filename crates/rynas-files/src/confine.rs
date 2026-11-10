@@ -372,11 +372,76 @@ pub fn open_write(path: &Path) -> io::Result<File> {
 
 /// Checks a file this call just made with `create_new` (a part file, an archive) and
 /// removes it again when it landed out of the jail (a folder on its way swapped for a link
-/// meanwhile).
+/// meanwhile). In the apps' data the file then gets its folder's owner ([`adopt`]).
 pub fn check_made(file: &File, path: &Path) -> io::Result<()> {
     check(file.as_fd()).inspect_err(|_| {
         let _ = fs::remove_file(path);
-    })
+    })?;
+    // in the apps' data: the folder's owner, as the app expects
+    adopt(file, path)
+}
+
+/// The owner and group of the folder `path` is in: what an item made there is given in the
+/// apps' data ([`adopt`]).
+fn parent_owner(path: &Path) -> io::Result<(u32, u32)> {
+    use std::os::unix::fs::MetadataExt;
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let meta = fs::metadata(parent)?;
+    Ok((meta.uid(), meta.gid()))
+}
+
+/// In the apps' data ([`crate::caps::app_data`]): gives a file this worker just made at
+/// `path` (open as `file`) the owner and group of its folder, so the app that owns the
+/// folder can change it as before. Nothing anywhere else: a user's files are the user's.
+pub fn adopt(file: &File, path: &Path) -> io::Result<()> {
+    if !crate::caps::app_data() {
+        return Ok(());
+    }
+    let (uid, gid) = parent_owner(path)?;
+    std::os::unix::fs::fchown(file, Some(uid), Some(gid))
+}
+
+/// [`adopt`] for a symbolic link this worker just made (the link itself, never its target).
+pub fn adopt_link(path: &Path) -> io::Result<()> {
+    if !crate::caps::app_data() {
+        return Ok(());
+    }
+    let (uid, gid) = parent_owner(path)?;
+    std::os::unix::fs::lchown(path, Some(uid), Some(gid))
+}
+
+/// Checks a folder this call just made with `mkdir`: opened without following a link, it
+/// must lie in the jail, else it is removed again (a folder on its way swapped for a link
+/// meanwhile); in the apps' data it gets its parent's owner ([`adopt`]).
+pub fn made_dir(path: &Path) -> io::Result<()> {
+    let fd = openat(libc::AT_FDCWD, path.as_os_str(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW)?;
+    if let Err(e) = check(fd.as_fd()) {
+        let _ = fs::remove_dir(path);
+        return Err(e);
+    }
+    adopt(&File::from(fd), path)
+}
+
+/// In the apps' data: gives everything below `dir` (items this worker has just made, an
+/// archive extracted into its hidden folder) the owner and group of the folder `like`;
+/// links themselves, never followed. Nothing anywhere else.
+pub fn adopt_tree(dir: &Path, like: &Path) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    if !crate::caps::app_data() {
+        return Ok(());
+    }
+    fn walk(dir: &Path, uid: u32, gid: u32) -> io::Result<()> {
+        for e in read_dir(dir)?.flatten() {
+            let path = e.path();
+            std::os::unix::fs::lchown(&path, Some(uid), Some(gid))?;
+            if e.file_type()?.is_dir() {
+                walk(&path, uid, gid)?;
+            }
+        }
+        Ok(())
+    }
+    let meta = fs::metadata(like)?;
+    walk(dir, meta.uid(), meta.gid())
 }
 
 /// Hands an open file to a program (ffmpeg) as its descriptor 3, and returns the name the

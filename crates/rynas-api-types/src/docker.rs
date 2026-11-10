@@ -278,6 +278,10 @@ pub struct DockerSettings {
     /// it); `None`: the official one.
     #[serde(default)]
     pub apps_catalog_url: Option<String>,
+    /// Files: administrators see the apps' data folders (`@apps`, one folder per stack) and
+    /// may change them, the owners kept as the apps expect; default off.
+    #[serde(default)]
+    pub files_app_data: bool,
 }
 
 fn default_keep() -> u32 {
@@ -395,6 +399,7 @@ impl Default for DockerSettings {
             auto_update: AutoUpdateSettings::default(),
             apps_online_catalog: true,
             apps_catalog_url: None,
+            files_app_data: false,
         }
     }
 }

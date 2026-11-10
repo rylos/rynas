@@ -11,6 +11,7 @@ import { $, toast, errorToast, openMenu, confirmBox, promptBox, copyText } from 
 import * as transfers from "./transfers.js";
 import { pickIcon } from "./iconpick.js";
 import { isRemote, connId, editConnection, renameConnection, parseAddress, serverAddress, startPath } from "./conns.js";
+import { APPS, APPS_PATH, setAppFolders, appFolders } from "./appdata.js";
 
 // a shared folder on a removable drive: `removable` from the server, or the
 // volume names of USB and eSATA drives on volumes migrated as they are
@@ -34,6 +35,8 @@ export const sidebarMethods = {
 
   applyShares(data) {
     this.shares = data.shares || [];
+    // the apps' folders (administrators, when the Docker setting shows them)
+    setAppFolders(data.apps);
     this.user = data.user || this.user;
     this.volumeNames = data.volumes || {};
     this.hostname = data.hostname || "";
@@ -88,6 +91,7 @@ export const sidebarMethods = {
 
   /** The last part of a path; a connection's root goes by its name. */
   pathName(path) {
+    if (path === APPS_PATH) return t("Dati delle app");
     return isRemote(path) && path.split("/").filter(Boolean).length === 1 ? this.connName(path) : baseName(path);
   },
 
@@ -208,7 +212,9 @@ export const sidebarMethods = {
       html += `<div class="side-title fav-title">${t("Preferiti")}</div>`;
       // a favourite on a shared folder that is gone (a USB drive unplugged)
       const there = new Set(this.shares.map((s) => s.name));
-      const gone = (f) => (isRemote(f.path) ? !this.connOf(f.path) : this.shares.length && !there.has(f.path.split("/")[1]));
+      // …or an app's folder no longer shown (the app removed, the setting off)
+      const appGone = (p) => !appFolders().length || (p !== APPS_PATH && !appFolders().some((a) => a.name === p.split("/")[2]));
+      const gone = (f) => (isRemote(f.path) ? !this.connOf(f.path) : f.path.split("/")[1] === APPS ? appGone(f.path) : this.shares.length && !there.has(f.path.split("/")[1]));
       if (favs.length) html += favs.map((f, i) => item(f.path, f.name || baseName(f.path), f.path.split("/").length === 2 && isRemote(f.path) ? svg("server") : folderGlyphHTML(f.path, baseName(f.path), glyph({ kind: "d", name: baseName(f.path) })), gone(f) ? `<span class="si-sub">${t("non disponibile")}</span>` : "", "nested" + (gone(f) ? "" : this.ejectButton(f.path)), i, gone(f))).join("");
       else html += `<div class="hint" style="padding:2px 10px 6px">${t("Ctrl+D aggiunge la cartella aperta")}</div>`;
     }
@@ -230,6 +236,11 @@ export const sidebarMethods = {
         const badges = (s.encrypted ? `<span class="si-lock" title="${t("Cartella crittografata")}">${svg("lock")}</span>` : "") + (s.hidden ? `<span class="si-badge" title="${t("Nascosta in Rete")}">${t("nasc.")}</span>` : "") + this.ejectButton("/" + s.name);
         html += item("/" + s.name, s.home ? t("Home ({u})", { u: this.user }) : s.name, folderGlyphHTML("/" + s.name, s.name, s.home ? shareGlyph("home") : shareGlyph(s.name)), s.comment ? `<span class="si-sub">${esc(s.comment)}</span>` : "", badges);
       }
+    }
+    const apps = appFolders();
+    if (apps.length) {
+      html += `<div class="side-title"><span>${t("App")}</span></div>`;
+      html += item(APPS_PATH, t("Dati delle app"), svg("archive"), `<span class="si-sub">${t("{n} cartelle", { n: apps.length })}</span>`);
     }
     html += `<div class="side-title conn-title"><span>${t("Connessioni")}</span><button class="side-add" title="${t("Nuova connessione")}">${svg("plus")}</button></div>`;
     if (this.conns.length) {

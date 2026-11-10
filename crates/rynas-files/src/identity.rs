@@ -72,21 +72,23 @@ pub fn names(file: &str, id: u32) -> Option<String> {
 }
 
 /// Becomes `uid`/`gid`/`groups` for good: from root (rynasd, between fork and exec) or
-/// from a process that holds `CAP_SETUID`/`CAP_SETGID`. With `read_all` the process keeps
-/// `CAP_DAC_READ_SEARCH` (and passes it on to the programs it runs: 7z, ffmpeg), without
-/// it nothing at all. Never root. Safe between fork and exec: only raw system calls, no
+/// from a process that holds `CAP_SETUID`/`CAP_SETGID`. With [`crate::caps::Powers::Read`]
+/// the process keeps `CAP_DAC_READ_SEARCH` (and passes it on to the programs it runs: 7z,
+/// ffmpeg), with `AppData` also what changing the apps' data needs (never passed on), with
+/// `None` nothing at all. Never root. Safe between fork and exec: only raw system calls, no
 /// allocation.
-pub fn become_raw(uid: u32, gid: u32, groups: &[u32], read_all: bool) -> io::Result<()> {
+pub fn become_raw(uid: u32, gid: u32, groups: &[u32], powers: crate::caps::Powers) -> io::Result<()> {
     // never root: the capabilities would come back with uid 0, and nobody signs in to the
     // file manager as root (refused before any system call)
     if uid == 0 {
         return Err(io::Error::from_raw_os_error(libc::EPERM));
     }
-    crate::caps::limit_bounding(read_all);
+    let keeps = powers != crate::caps::Powers::None;
+    crate::caps::limit_bounding(powers);
     // SAFETY: system calls with valid arguments
     unsafe {
-        // keep the permitted set across setresuid, only for what keep_reading keeps
-        if read_all && libc::prctl(libc::PR_SET_KEEPCAPS, 1, 0, 0, 0) < 0 {
+        // keep the permitted set across setresuid, only for what caps::keep keeps
+        if keeps && libc::prctl(libc::PR_SET_KEEPCAPS, 1, 0, 0, 0) < 0 {
             return Err(io::Error::last_os_error());
         }
         if libc::setgroups(groups.len(), groups.as_ptr()) < 0
@@ -99,8 +101,8 @@ pub fn become_raw(uid: u32, gid: u32, groups: &[u32], read_all: bool) -> io::Res
             return Err(io::Error::last_os_error());
         }
     }
-    if read_all {
-        crate::caps::keep_reading()?;
+    if keeps {
+        crate::caps::keep(powers)?;
     } else {
         crate::caps::clear()?;
     }
@@ -132,9 +134,11 @@ mod tests {
     #[test]
     fn never_becomes_root() {
         // refused before any system call, so safe to try in a test
-        let e = become_raw(0, 0, &[0], true).unwrap_err();
+        let e = become_raw(0, 0, &[0], crate::caps::Powers::Read).unwrap_err();
         assert_eq!(e.raw_os_error(), Some(libc::EPERM));
-        let e = become_raw(0, 100, &[100], false).unwrap_err();
+        let e = become_raw(0, 0, &[0], crate::caps::Powers::AppData).unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(libc::EPERM));
+        let e = become_raw(0, 100, &[100], crate::caps::Powers::None).unwrap_err();
         assert_eq!(e.raw_os_error(), Some(libc::EPERM));
     }
 }

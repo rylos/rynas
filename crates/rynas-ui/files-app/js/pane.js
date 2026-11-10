@@ -12,6 +12,7 @@ import { fuzzy, highlight } from "./fuzzy.js";
 import { isHeic, HEIC_LIMIT, fillHeic } from "./heic.js";
 import { rememberArchive } from "./archive.js";
 import { isRemote } from "./conns.js";
+import { APPS_PATH } from "./appdata.js";
 import { host, mount } from "./host.js";
 
 const COLS = {
@@ -287,6 +288,8 @@ export class Pane {
         this.cacheColumn(this.path, this.entries);
         // the shares of an SMB server: like shared folders, not to be moved
         if (data.remote?.top) this.entries.forEach((e) => (e.share = { name: e.name, remote: true }));
+        // the apps' folders: like shared folders, each made by its app
+        if (data.apps) this.entries.forEach((e) => (e.share = { name: e.name, app: true }));
         this.remote = data.remote || null;
         this.writable = data.writable;
         this.space = data.space;
@@ -601,7 +604,8 @@ export class Pane {
     }
     for (const p of parts) {
       acc += "/" + p;
-      html += `<span class="crumb-sep">${svg("chev")}</span><button class="crumb" data-path="${esc(acc)}">${esc(p)}</button>`;
+      const label = acc === APPS_PATH ? t("Dati delle app") : p;
+      html += `<span class="crumb-sep">${svg("chev")}</span><button class="crumb" data-path="${esc(acc)}">${esc(label)}</button>`;
     }
     this.crumbsEl.innerHTML = html;
     this.crumbsEl.querySelectorAll(".crumb").forEach((b) => {

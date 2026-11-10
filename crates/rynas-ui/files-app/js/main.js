@@ -20,6 +20,7 @@ import { dndMethods } from "./dnd.js";
 import { menuMethods } from "./menus.js";
 import { keyMethods } from "./keys.js";
 import { healthMethods } from "./health.js";
+import { changed as appChanged } from "./appdata.js";
 
 // what each preference redraws when it changes (prefsChanged)
 const QUIET_PREFS = new Set(["tabs", "folderViews", "sort", "view", "sidebar", "singleClick", "vimKeys", "confirmDelete", "conflict", "verify", "limit", "openDialog", "notify", "startIn", "newTabIn", "startFolder", "perFolder"]);
@@ -215,6 +216,8 @@ class App {
     if (job.info.dest) dirs.add(job.info.dest);
     this.refreshFolders([...dirs]);
     this.loadShares();
+    // what the job changed in an app's folder: the destination, and the sources it removed
+    if (job.state === "done") appChanged(job.op === "delete" || job.op === "move" ? job.info.sources : [], job.info.dest ? [job.info.dest] : []);
   }
 
   openPath(path) {

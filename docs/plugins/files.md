@@ -49,6 +49,12 @@ browser ──HTTPS── rynas-web (user rynas) ──Unix socket── rynasd 
   the rynas admin groups (`--admin-group`, default `rynas-admin`, `sudo`; `AdminPolicy`) the worker
   keeps `CAP_DAC_READ_SEARCH` only (effective, permitted, inheritable and ambient, so 7z and ffmpeg
   read too). Other users keep nothing.
+- **The apps' data** (`/@apps/<folder>/…`, administrators, Docker setting `files_app_data`,
+  `../phase2/docker-apps.md` §5.9): a worker that writes there also keeps `CAP_DAC_OVERRIDE`,
+  `CAP_FOWNER` and `CAP_CHOWN` (`caps::Powers::AppData`, never ambient) and runs under a
+  Landlock ruleset rynasd makes (`jobs::manager::worker_command`, `landlock::writes_below_all`)
+  that allows writes below those app folders only; no Landlock, no powers. What it makes takes
+  the owner of the folder it lands in (`confine::adopt`), existing files keep theirs.
 - The worker checks itself first (`caps::check_worker`): never root, nothing but reading,
   `PR_SET_DUMPABLE=0` (nobody attaches a debugger to borrow the reading capability). The test
   `packaging/test-files.sh` reads `/proc/<pid>/status` of live workers.
@@ -393,7 +399,8 @@ administrators sign in). Route names, query parameters and JSON bodies are SynoF
 Shapes added to SynoFile's (optional fields, nothing removed): `Share.removable`, `device`
 (disk, `sdc`), `device_name` (vendor + model); `JobView.code`, `JobView.task_id`, `JobView.stalled_s`, `JobView.cancelling`;
 `ErrorItem.code`; `whoami.admin`; `Entry.outside`, `Details.outside` (a link out of its share);
-`Spec.roots` (worker side).
+`Spec.roots`, `Spec.app_roots` (worker side); `shares.apps`, `list.apps`, `list.stack`,
+`Share.app` (the apps' data).
 
 ### Deviations from SynoFile's contract
 

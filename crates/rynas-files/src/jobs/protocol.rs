@@ -78,6 +78,11 @@ pub struct Spec {
     /// path no root holds is refused
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub roots: Vec<PathBuf>,
+    /// the apps' folders an administrator's job writes in (`@apps`): rynasd starts its worker
+    /// with the powers to change them and a Landlock ruleset that allows writes below these
+    /// folders only (`manager::worker_command`); empty for every other job
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub app_roots: Vec<PathBuf>,
 }
 
 impl Spec {
@@ -223,6 +228,7 @@ mod tests {
             members: Vec::new(),
             remotes: vec![conn],
             roots: Vec::new(),
+            app_roots: Vec::new(),
         };
         let clean = spec.without_secrets();
         let text = serde_json::to_string(&clean).unwrap();
