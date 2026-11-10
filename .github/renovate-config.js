@@ -63,6 +63,20 @@ module.exports = {
       labels: ["catalogue-major"],
     },
     {
+      // databases bundled with an app: a new major needs a dump and restore (or the app's
+      // own upgrade path, Immich pins its own Postgres), never a tag bump
+      matchPackageNames: [
+        "docker.io/library/postgres",
+        "postgres",
+        "ghcr.io/immich-app/postgres",
+        "mariadb",
+        "redis",
+        "docker.io/valkey/valkey",
+      ],
+      matchUpdateTypes: ["major"],
+      enabled: false,
+    },
+    {
       // Immich: server and machine learning always move together
       matchPackageNames: ["ghcr.io/immich-app/immich-server", "ghcr.io/immich-app/immich-machine-learning"],
       groupName: "immich",
