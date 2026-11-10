@@ -6,7 +6,9 @@ use std::sync::Arc;
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
-use rynas_api_types::storage::{DiskSettingsState, StoragePlan, StorageVolumes};
+use rynas_api_types::storage::{
+    DiskDetail, DiskSettingsState, HealthAckResult, StoragePlan, StorageVolumes,
+};
 use rynas_api_types::{ApiError, TaskStarted, TaskStatus, error_codes};
 use rynas_auth::ManualClock;
 use rynas_auth::backend::{AuthError, Authenticator, BoxFuture, Identity};
@@ -18,6 +20,7 @@ use rynas_storage::host::FakeHost;
 use rynas_storage::lsblk::LSBLK_ARGS;
 use rynas_tasks::{TaskConfig, TaskManager};
 use rynasd::ops::Ops;
+use rynasd::roles::AdminPolicy;
 use rynasd::server::{DaemonState, router};
 use rynasd::storage_ops::StorageOps;
 use serde_json::{Value, json};
@@ -79,6 +82,14 @@ fn env() -> Env {
         0,
         &fixture("mdadm-detail-md2.txt"),
     );
+    // sda has SMART (3 CRC errors), for the acknowledgements
+    h.cmd(
+        "smartctl --json=c -n standby -a -g apm -g wcache /dev/sda",
+        0,
+        &fixture("smartctl-sata-hdd.json"),
+    );
+    h.power
+        .insert("/dev/sda".into(), rynas_api_types::storage::PowerState::Active);
     let storage = Arc::new(Storage::new(Arc::new(h)));
     let config = Arc::new(
         Config::open(
@@ -89,7 +100,14 @@ fn env() -> Env {
         .unwrap(),
     );
     let tasks = TaskManager::new(dir.path().join("tasks"), "nas", TaskConfig::default()).unwrap();
-    let ops = Arc::new(Ops::new(config, tasks));
+    let mut ops = Ops::new(config, tasks);
+    // alice is an administrator, bob is not
+    ops.admins = AdminPolicy::new(vec!["rynas-admin".into()], |u| match u {
+        "alice" => Some(vec!["users".into(), "rynas-admin".into()]),
+        "bob" => Some(vec!["users".into()]),
+        _ => None,
+    });
+    let ops = Arc::new(ops);
     let clock = Arc::new(ManualClock::new(1_800_000_000_000));
     let totp = Arc::new(TotpManager::new(
         MemoryStorage::default(),
@@ -114,11 +132,21 @@ fn env() -> Env {
 }
 
 async fn call(e: &Env, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Vec<u8>) {
+    call_as(e, "alice", method, uri, body).await
+}
+
+async fn call_as(
+    e: &Env,
+    user: &str,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+) -> (StatusCode, Vec<u8>) {
     let req = Request::builder()
         .method(method)
         .uri(uri)
         .header(header::CONTENT_TYPE, "application/json")
-        .header("x-rynas-user", "alice")
+        .header("x-rynas-user", user)
         .body(body.map(|b| Body::from(b.to_string())).unwrap_or_default())
         .unwrap();
     let r = e.app.clone().oneshot(req).await.unwrap();
@@ -303,5 +331,52 @@ async fn disk_settings_are_staged() {
     let (s, _) = call(&e, "GET", "/v1/storage/disks/sdz/settings", None).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
     let (s, _) = call(&e, "GET", "/v1/storage/disks/..%2Fx/settings", None).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn smart_warnings_are_marked_as_seen_by_administrators() {
+    let e = env();
+    let url = "/v1/storage/disks/sda/health-ack";
+    let saw = |n: u64| Some(json!({"codes": [{"code": "crc_errors", "n": n}]}));
+    // not an administrator
+    let (s, b) = call_as(&e, "bob", "POST", url, saw(3)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    assert_eq!(err(&b).code, error_codes::FORBIDDEN);
+    let (s, _) = call_as(&e, "bob", "DELETE", url, None).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    // the client cannot raise a count above the drive's (3 CRC errors)
+    let (s, b) = call(&e, "POST", url, saw(999)).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    let r: HealthAckResult = serde_json::from_slice(&b).unwrap();
+    assert_eq!(r.acknowledged.len(), 1);
+    assert_eq!((r.acknowledged[0].code.as_str(), r.acknowledged[0].n), ("crc_errors", 3));
+    assert!(r.grew.is_empty());
+    let (s, b) = call(&e, "GET", "/v1/storage/disks/sda", None).await;
+    assert_eq!(s, StatusCode::OK);
+    let d: DiskDetail = serde_json::from_slice(&b).unwrap();
+    let crc = d.summary.health_reasons.iter().find(|r| r.code == "crc_errors").unwrap();
+    assert_eq!(crc.acknowledged.as_ref().map(|a| a.by.as_str()), Some("alice"));
+    let (s, _) = call(&e, "DELETE", url, None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    // the page saw fewer than there are now: recorded as seen, reported as grown
+    let (s, b) = call(&e, "POST", url, saw(1)).await;
+    assert_eq!(s, StatusCode::OK);
+    let r: HealthAckResult = serde_json::from_slice(&b).unwrap();
+    assert_eq!((r.acknowledged[0].n, r.grew.clone()), (1, vec!["crc_errors".to_string()]));
+    // nothing seen that can be marked
+    let (s, b) = call(&e, "POST", url, Some(json!({"codes": []}))).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    assert!(err(&b).message.contains("no SMART warning"));
+    // a body is required
+    let (s, _) = call(&e, "POST", url, None).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    // no SMART reading for nvme1n1 here: a distinct error
+    let (s, b) = call(&e, "POST", "/v1/storage/disks/nvme1n1/health-ack", saw(3)).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    assert!(err(&b).message.contains("no new SMART reading"), "{}", err(&b).message);
+    let (s, _) = call(&e, "POST", "/v1/storage/disks/sdz/health-ack", saw(3)).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, _) = call(&e, "POST", "/v1/storage/disks/..%2Fx/health-ack", saw(3)).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
 }

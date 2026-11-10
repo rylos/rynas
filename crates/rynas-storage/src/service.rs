@@ -5,8 +5,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::health_ack::{AckStore, DiskAcks, DriveId};
 use rynas_api_types::storage::{
-    BtrfsFilesystem, DiskDetail, DiskKind, DiskSummary, GrowPlanRequest, MdArray, NodeKind,
+    BtrfsFilesystem, DiskDetail, DiskKind, DiskSummary, GrowPlanRequest, HealthAckCode,
+    HealthAckResult,
+    MdArray, NodeKind,
     PowerState, ReplacePlanRequest, ScrubPlanRequest, StoragePlan, StorageTree, Subvolume,
     TreeNode, VolumePlanRequest,
 };
@@ -33,6 +36,12 @@ pub enum StorageError {
     /// A required tool failed (lsblk): the view cannot be built.
     Tool(String),
     NotFound(String),
+    /// The disk has no serial number: what follows a drive (SMART acknowledgements) cannot.
+    NoSerial(String),
+    /// Several attached disks report the same serial number: it does not identify a drive.
+    DuplicateSerial(String),
+    /// SMART could not be read now (standby, smartctl failed): the message says which.
+    Unreadable(String),
 }
 
 impl std::fmt::Display for StorageError {
@@ -40,6 +49,16 @@ impl std::fmt::Display for StorageError {
         match self {
             StorageError::Tool(m) => write!(f, "{m}"),
             StorageError::NotFound(m) => write!(f, "{m}: not found"),
+            StorageError::NoSerial(m) => write!(
+                f,
+                "{m} reports no serial number: its SMART warnings cannot be marked as seen"
+            ),
+            StorageError::DuplicateSerial(m) => write!(
+                f,
+                "{m} reports the same serial number as another attached disk (common with USB \
+                 bridges): it cannot be told apart, so its SMART warnings cannot be marked as seen"
+            ),
+            StorageError::Unreadable(m) => write!(f, "{m}"),
         }
     }
 }
@@ -80,10 +99,36 @@ pub struct Storage {
     /// Attached loop devices count as disks: tests of the write side on loop files only.
     pub loop_disks: bool,
     cache: Mutex<Cache>,
+    /// SMART reasons marked as seen, per drive (memory only until opened on a file).
+    acks: AckStore,
 }
 
 fn asleep(p: PowerState) -> bool {
     matches!(p, PowerState::Standby | PowerState::Sleep)
+}
+
+/// What identifies a drive for its SMART acknowledgements.
+fn drive_id(d: &BlockDev) -> DriveId<'_> {
+    DriveId {
+        serial: d.serial.as_deref().unwrap_or_default(),
+        model: d.model.as_deref().unwrap_or_default(),
+        wwn: d.wwn.as_deref(),
+    }
+}
+
+/// Serial numbers reported by more than one attached disk (cheap USB bridges and SSDs): they
+/// do not tell drives apart, so such disks get no acknowledgements.
+pub fn duplicate_serials(g: &BlockGraph) -> HashSet<String> {
+    let mut seen = HashSet::new();
+    let mut dups = HashSet::new();
+    for d in g.disks() {
+        if let Some(s) = d.serial.as_deref().filter(|s| !s.is_empty())
+            && !seen.insert(s)
+        {
+            dups.insert(s.to_string());
+        }
+    }
+    dups
 }
 
 impl Storage {
@@ -95,7 +140,104 @@ impl Storage {
             inventory_max_age: Duration::from_secs(5),
             loop_disks: false,
             cache: Mutex::new(Cache::default()),
+            acks: AckStore::memory(),
         }
+    }
+
+    /// The SMART acknowledgements ([`crate::health_ack`]); rynasd opens them on a file.
+    pub fn health_acks(&self) -> &AckStore {
+        &self.acks
+    }
+
+    /// The acknowledgements of a disk; none for a serial that more than one attached disk
+    /// reports (`dups`, see [`duplicate_serials`]): it does not identify a drive.
+    fn acks_for(&self, d: &BlockDev, dups: &HashSet<String>) -> Option<DiskAcks> {
+        let id = drive_id(d);
+        if dups.contains(id.serial) {
+            return None;
+        }
+        self.acks.for_disk(id)
+    }
+
+    /// A whole, real disk by kernel name.
+    fn disk_dev<'g>(&self, g: &'g BlockGraph, name: &str) -> Result<&'g BlockDev, StorageError> {
+        g.get(name)
+            .filter(|d| d.is_disk() && !crate::lsblk::is_virtual_disk(&d.kname))
+            .ok_or_else(|| StorageError::NotFound(name.to_string()))
+    }
+
+    /// A disk whose acknowledgements can follow it: a serial number of its own.
+    fn ack_target<'g>(&self, g: &'g BlockGraph, name: &str) -> Result<&'g BlockDev, StorageError> {
+        let d = self.disk_dev(g, name)?;
+        let serial = d.serial.as_deref().unwrap_or_default();
+        if serial.is_empty() {
+            return Err(StorageError::NoSerial(name.to_string()));
+        }
+        if duplicate_serials(g).contains(serial) {
+            return Err(StorageError::DuplicateSerial(name.to_string()));
+        }
+        Ok(d)
+    }
+
+    /// `POST /api/v1/storage/disks/{name}/health-ack`: marks as seen the acknowledgeable
+    /// SMART reasons the administrator saw (`seen`: code → count on the page). SMART is read
+    /// again and each code records the lower of the seen and the current count, so errors
+    /// that came after the page was loaded keep warning. Errors, each with its own message:
+    /// no serial or a serial shared by several attached disks (acknowledgements follow the
+    /// drive), the disk in standby (never woken), no new reading (smartctl failed or gave
+    /// nothing). `Ok` with nothing recorded when no seen code is acknowledgeable now.
+    pub fn acknowledge_health(
+        &self,
+        name: &str,
+        by: &str,
+        seen: &[HealthAckCode],
+    ) -> Result<HealthAckResult, StorageError> {
+        let g = self.graph()?;
+        let d = self.ack_target(&g, name)?;
+        let mut power = self.power_of(d);
+        if asleep(power) {
+            return Err(StorageError::Unreadable(format!(
+                "{name} is in standby: read its SMART data first (this wakes it), then mark the warnings as seen"
+            )));
+        }
+        let before = self.host.now_ms();
+        let smart = self.smart_for(d, &mut power, true);
+        if asleep(power) {
+            return Err(StorageError::Unreadable(format!(
+                "{name} went to standby before SMART could be read: try again"
+            )));
+        }
+        let Some(e) = smart.filter(|e| e.data.info.read_ms >= before) else {
+            return Err(StorageError::Unreadable(format!(
+                "{name}: no new SMART reading (smartctl failed or gave no data), so the current counts are unknown"
+            )));
+        };
+        let reasons = smart::verdict(&e.data.info, disk_kind(d)).1;
+        let o = self
+            .acks
+            .acknowledge(drive_id(d), &reasons, seen, by, self.host.now_ms())
+            .map_err(|e| StorageError::Tool(format!("SMART acknowledgements not saved: {e}")))?;
+        // the list views come from the inventory: build it again with the new verdict
+        self.cache.lock().unwrap().inventory = None;
+        Ok(HealthAckResult {
+            disk: name.to_string(),
+            serial: e.serial,
+            acknowledged: o.recorded,
+            grew: o.grew,
+        })
+    }
+
+    /// `DELETE /api/v1/storage/disks/{name}/health-ack`: forgets what the disk marked as
+    /// seen; `false` when there was nothing.
+    pub fn clear_health_acks(&self, name: &str) -> Result<bool, StorageError> {
+        let g = self.graph()?;
+        let d = self.ack_target(&g, name)?;
+        let cleared = self
+            .acks
+            .clear(drive_id(d))
+            .map_err(|e| StorageError::Tool(format!("SMART acknowledgements not saved: {e}")))?;
+        self.cache.lock().unwrap().inventory = None;
+        Ok(cleared)
     }
 
     fn run(&self, prog: &str, args: &[&str], t: Duration) -> Option<CmdOutput> {
@@ -206,8 +348,9 @@ impl Storage {
 
     /// SMART for a disk: from the cache when fresh or when the disk sleeps, else from
     /// smartctl (which still checks the power mode itself). Updates `power` with what
-    /// smartctl saw.
-    fn smart_for(&self, d: &BlockDev, power: &mut PowerState) -> Option<SmartEntry> {
+    /// smartctl saw. `force` reads again even when the cache is fresh (still never a sleeping
+    /// disk: then the cached reading is the latest one).
+    fn smart_for(&self, d: &BlockDev, power: &mut PowerState, force: bool) -> Option<SmartEntry> {
         let now = self.host.now_ms();
         let serial = d.serial.clone().unwrap_or_default();
         let cached = {
@@ -217,7 +360,8 @@ impl Storage {
                 .filter(|e| e.serial == serial)
                 .cloned()
         };
-        if let Some(c) = &cached
+        if !force
+            && let Some(c) = &cached
             && now.saturating_sub(c.data.info.read_ms) < self.smart_max_age.as_millis() as u64
         {
             return cached;
@@ -259,16 +403,19 @@ impl Storage {
     fn summaries(&self, g: &BlockGraph) -> Vec<(DiskSummary, Option<SmartEntry>)> {
         let disks = g.disks();
         let now = self.host.now_ms();
+        let dups = duplicate_serials(g);
+        let dups = &dups;
         std::thread::scope(|s| {
             let handles: Vec<_> = disks
                 .iter()
                 .map(|d| {
                     s.spawn(move || {
                         let mut power = self.power_of(d);
-                        let smart = self.smart_for(d, &mut power);
+                        let smart = self.smart_for(d, &mut power, false);
                         let zoned = self.zoned(&d.kname);
+                        let acks = self.acks_for(d, dups);
                         (
-                            inventory::summary(d, g, smart.as_ref(), power, now, zoned),
+                            inventory::summary(d, g, smart.as_ref(), acks.as_ref(), power, now, zoned),
                             smart,
                         )
                     })
@@ -318,8 +465,17 @@ impl Storage {
             .ok_or_else(|| StorageError::NotFound(name.to_string()))?;
         let now = self.host.now_ms();
         let mut power = self.power_of(d);
-        let smart = self.smart_for(d, &mut power);
-        let summary = inventory::summary(d, &g, smart.as_ref(), power, now, self.zoned(name));
+        let smart = self.smart_for(d, &mut power, false);
+        let acks = self.acks_for(d, &duplicate_serials(&g));
+        let summary = inventory::summary(
+            d,
+            &g,
+            smart.as_ref(),
+            acks.as_ref(),
+            power,
+            now,
+            self.zoned(name),
+        );
 
         let mut ti = TuningInput {
             kind: summary.kind,
@@ -862,6 +1018,121 @@ mod tests {
         assert_eq!(ra.current.as_deref(), Some("128"));
         assert_eq!(s.disk("md2"), Err(StorageError::NotFound("md2".into())));
         assert_eq!(s.disk("zram0"), Err(StorageError::NotFound("zram0".into())));
+    }
+
+    /// Marking as seen goes through the service: the counts are checked against smartctl,
+    /// every view shows the reason acknowledged, and undoing brings it back.
+    #[test]
+    fn health_acks_through_service() {
+        let s = Storage::new(Arc::new(host()));
+        let reason = |s: &Storage| {
+            s.disks()
+                .unwrap()
+                .into_iter()
+                .find(|d| d.name == "sda")
+                .unwrap()
+                .health_reasons
+                .into_iter()
+                .find(|r| r.code == "crc_errors")
+                .unwrap()
+        };
+        let seen = |n| {
+            vec![HealthAckCode {
+                code: "crc_errors".into(),
+                n,
+            }]
+        };
+        let before = reason(&s);
+        assert!(before.acknowledgeable && before.acknowledged.is_none());
+        let r = s.acknowledge_health("sda", "admin", &seen(3)).unwrap();
+        assert_eq!(r.acknowledged.len(), 1);
+        assert_eq!(
+            (r.acknowledged[0].code.as_str(), r.acknowledged[0].n),
+            ("crc_errors", 3)
+        );
+        let after = reason(&s);
+        assert_eq!(after.acknowledged.as_ref().map(|a| a.n), Some(3));
+        let d = s.disk("sda").unwrap();
+        assert!(
+            d.summary
+                .health_reasons
+                .iter()
+                .any(|r| r.acknowledged.is_some())
+        );
+        // the other disks with the same SMART fixture have other serials
+        let sdb = s.disks().unwrap().into_iter().find(|d| d.name == "sdb").unwrap();
+        assert!(sdb.health_reasons.iter().all(|r| r.acknowledged.is_none()));
+        assert!(s.clear_health_acks("sda").unwrap());
+        assert!(reason(&s).acknowledged.is_none());
+
+        // the page saw 2, the drive has 3 now: 2 is recorded and the reason keeps warning
+        let r = s.acknowledge_health("sda", "admin", &seen(2)).unwrap();
+        assert_eq!((r.acknowledged[0].n, r.grew.as_slice()), (2, &["crc_errors".to_string()][..]));
+        assert!(reason(&s).acknowledged.is_none());
+
+        assert_eq!(
+            s.acknowledge_health("md2", "admin", &seen(3)),
+            Err(StorageError::NotFound("md2".into()))
+        );
+        // sdd sleeps: never woken, a distinct error
+        assert!(matches!(
+            s.acknowledge_health("sdd", "admin", &seen(3)),
+            Err(StorageError::Unreadable(m)) if m.contains("standby")
+        ));
+    }
+
+    /// smartctl fails: no current counts, a distinct error (not "nothing to acknowledge").
+    #[test]
+    fn health_ack_needs_a_new_reading() {
+        let h = host();
+        h.commands
+            .lock()
+            .unwrap()
+            .remove("smartctl --json=c -n standby -a -g apm -g wcache /dev/sde");
+        let s = Storage::new(Arc::new(h));
+        let seen = [HealthAckCode {
+            code: "crc_errors".into(),
+            n: 3,
+        }];
+        assert!(matches!(
+            s.acknowledge_health("sde", "admin", &seen),
+            Err(StorageError::Unreadable(m)) if m.contains("no new SMART reading")
+        ));
+    }
+
+    /// Two attached disks with the same serial (USB bridges): no acknowledgements at all.
+    #[test]
+    fn duplicate_serials_are_not_acknowledged() {
+        let mut h = host();
+        let lsblk = format!("lsblk {}", LSBLK_ARGS.join(" "));
+        h.cmd(
+            &lsblk,
+            0,
+            &fx("lsblk-nas.json").replace("WD-CA0AAAA2", "WD-CA0AAAA1"),
+        );
+        let s = Storage::new(Arc::new(h));
+        let seen = [HealthAckCode {
+            code: "crc_errors".into(),
+            n: 3,
+        }];
+        assert_eq!(
+            s.acknowledge_health("sda", "admin", &seen),
+            Err(StorageError::DuplicateSerial("sda".into()))
+        );
+        assert_eq!(
+            s.clear_health_acks("sdb"),
+            Err(StorageError::DuplicateSerial("sdb".into()))
+        );
+        // acknowledged earlier (say, alone on the bus): not applied while the twin is there
+        let g = s.graph().unwrap();
+        let sda = g.get("sda").unwrap();
+        let SmartRead::Data(data) = smart::parse(&fx("smartctl-sata-hdd.json"), 1) else {
+            panic!("fixture parses")
+        };
+        let reasons = smart::verdict(&data.info, DiskKind::Hdd).1;
+        s.acks.acknowledge(drive_id(sda), &reasons, &seen, "admin", 1).unwrap();
+        let d = s.disks().unwrap().into_iter().find(|d| d.name == "sda").unwrap();
+        assert!(d.health_reasons.iter().all(|r| r.acknowledged.is_none()));
     }
 
     #[test]

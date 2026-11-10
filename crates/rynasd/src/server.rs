@@ -347,6 +347,14 @@ impl From<StorageError> for Error {
         match e {
             StorageError::NotFound(_) => Error::not_found(e.to_string()),
             StorageError::Tool(_) => Error::internal(format!("storage: {e}")),
+            StorageError::NoSerial(_) => Error::new(
+                StatusCode::BAD_REQUEST,
+                error_codes::INVALID_VALUE,
+                e.to_string(),
+            ),
+            StorageError::DuplicateSerial(_) | StorageError::Unreadable(_) => {
+                Error::new(StatusCode::CONFLICT, error_codes::CONFLICT, e.to_string())
+            }
         }
     }
 }

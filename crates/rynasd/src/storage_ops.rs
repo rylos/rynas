@@ -23,7 +23,7 @@ use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use rynas_api_types::storage::{
     ArrayTuning, BtrfsFilesystem, DiskOverride, DiskSettings, DiskSettingsState, DiskSummary,
-    GrowPlanRequest, MdArray, RecoveryKey, ReplacePlanRequest, ScrubAction, ScrubPlanRequest,
+    GrowPlanRequest, HealthAckRequest, HealthAckResult, MdArray, RecoveryKey, ReplacePlanRequest, ScrubAction, ScrubPlanRequest,
     StoragePlan, StorageTuning, StorageVolumes, SubvolumeCreateRequest, SubvolumeInfo,
     SubvolumeSettings, UnlockRequest, VolumeCreateRequest, VolumeGrowRequest, VolumeRecord,
     VolumeReplaceRequest, VolumeScrubRequest, VolumeSettings, VolumeSettingsState,
@@ -578,7 +578,109 @@ pub fn router(st: StoState) -> Router {
             "/v1/storage/disks/{name}/settings",
             get(disk_settings_get).put(disk_settings_put),
         )
+        .route(
+            "/v1/storage/disks/{name}/health-ack",
+            post(health_ack_post).delete(health_ack_delete),
+        )
         .with_state(st)
+}
+
+// ------------------------------------------------------------------------------- SMART acks
+
+/// Where the SMART acknowledgements live (`rynas_storage::health_ack`): runtime state of
+/// rynasd, not configuration (nothing on the system is rendered from them).
+pub fn health_acks_file(state_dir: &Path) -> std::path::PathBuf {
+    state_dir.join("storage").join("health-acks.json")
+}
+
+fn check_disk_name(name: &str) -> Res<()> {
+    if name.is_empty()
+        || name.len() > 32
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+    {
+        return Err(Error::bad_request("invalid disk name"));
+    }
+    Ok(())
+}
+
+/// The storage lock, as the inventory refresh takes it: an acknowledgement must not race a
+/// refresh that would cache the verdict from before it.
+async fn storage_guard(s: &StorageOps) -> Res<tokio::sync::MutexGuard<'_, ()>> {
+    tokio::time::timeout(STORAGE_WAIT, s.storage_lock.lock())
+        .await
+        .map_err(|_| {
+            Error::new(
+                StatusCode::GATEWAY_TIMEOUT,
+                error_codes::TIMEOUT,
+                "the storage inventory is still being read".into(),
+            )
+        })
+}
+
+/// Largest number of codes in one acknowledgement (there are six acknowledgeable ones).
+const MAX_ACK_CODES: usize = 32;
+
+/// `POST /v1/storage/disks/{name}/health-ack`: marks as seen the acknowledgeable SMART
+/// reasons the administrator saw ([`HealthAckRequest`]); rynasd reads SMART again and
+/// records per code the lower of the seen and the current count. Administrators only; 409
+/// when nothing seen can be acknowledged now, or SMART cannot be read now (standby,
+/// smartctl failed), or the serial is shared by several disks.
+async fn health_ack_post(
+    State(st): State<StoState>,
+    h: HeaderMap,
+    UrlPath(name): UrlPath<String>,
+    body: Result<Json<HealthAckRequest>, JsonRejection>,
+) -> Res<Json<HealthAckResult>> {
+    let (s, who) = (sto(&st)?, user(&h)?);
+    s.ops.admins.require_admin(&who, "SMART acknowledgements")?;
+    check_disk_name(&name)?;
+    let req = json_body(body)?;
+    if req.codes.len() > MAX_ACK_CODES {
+        return Err(Error::invalid("codes", "too many codes"));
+    }
+    let storage = s.storage.clone();
+    let _guard = storage_guard(&s).await?;
+    let r = tokio::task::spawn_blocking(move || storage.acknowledge_health(&name, &who, &req.codes))
+        .await
+        .map_err(Error::internal)??;
+    if r.acknowledged.is_empty() {
+        return Err(conflict(format!(
+            "{}: no SMART warning that can be marked as seen",
+            r.disk
+        )));
+    }
+    tracing::info!(
+        disk = %r.disk,
+        serial = %r.serial,
+        codes = ?r.acknowledged.iter().map(|c| format!("{}={}", c.code, c.n)).collect::<Vec<_>>(),
+        grew = ?r.grew,
+        "SMART warnings marked as seen"
+    );
+    Ok(Json(r))
+}
+
+/// `DELETE /v1/storage/disks/{name}/health-ack`: the disk's SMART warnings count again.
+/// Administrators only; 204 also when there was nothing to forget.
+async fn health_ack_delete(
+    State(st): State<StoState>,
+    h: HeaderMap,
+    UrlPath(name): UrlPath<String>,
+) -> Res<StatusCode> {
+    let (s, who) = (sto(&st)?, user(&h)?);
+    s.ops.admins.require_admin(&who, "SMART acknowledgements")?;
+    check_disk_name(&name)?;
+    let storage = s.storage.clone();
+    let n = name.clone();
+    let _guard = storage_guard(&s).await?;
+    let cleared = tokio::task::spawn_blocking(move || storage.clear_health_acks(&n))
+        .await
+        .map_err(Error::internal)??;
+    if cleared {
+        tracing::info!(disk = %name, by = %who, "SMART acknowledgements removed");
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ------------------------------------------------------------------------------- volumes
@@ -1139,14 +1241,7 @@ fn disk_settings_state(
 }
 
 async fn disk_of(s: &StorageOps, name: &str) -> Res<DiskSummary> {
-    if name.is_empty()
-        || name.len() > 32
-        || !name
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-    {
-        return Err(Error::bad_request("invalid disk name"));
-    }
+    check_disk_name(name)?;
     let inv = s.inventory(false).await?;
     inv.disks
         .iter()

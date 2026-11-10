@@ -42,7 +42,7 @@ pub fn nas_inventory() -> Inventory {
                 _ => (Some(smart_entry(hdd, "")), PowerState::Active),
             };
             let zoned = false;
-            inventory::summary(d, &graph, smart.as_ref(), power, now, zoned)
+            inventory::summary(d, &graph, smart.as_ref(), None, power, now, zoned)
         })
         .collect();
 

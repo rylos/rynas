@@ -13,7 +13,8 @@ use crate::Inventory;
 use crate::btrfs::{ShowFs, Usage, compression, total_errors};
 use crate::lsblk::{BlockDev, BlockGraph};
 use crate::mounts::Mount;
-use crate::smart::{SmartData, known_smr, verdict};
+use crate::health_ack::{DiskAcks, DriveId, apply as apply_acks};
+use crate::smart::{SmartData, known_smr, verdict, verdict_of};
 
 pub fn disk_kind(d: &BlockDev) -> DiskKind {
     if d.kname.starts_with("nvme") || d.transport.as_deref() == Some("nvme") {
@@ -132,10 +133,14 @@ pub struct SmartEntry {
     pub serial: String,
 }
 
+/// The summary of a disk. `acks` are the SMART reasons this drive has marked as seen
+/// ([`crate::health_ack`]): applied here and only here, so every view (disks, tree, plans,
+/// notifications) gets the same effective verdict.
 pub fn summary(
     d: &BlockDev,
     g: &BlockGraph,
     smart: Option<&SmartEntry>,
+    acks: Option<&DiskAcks>,
     power: PowerState,
     now_ms: u64,
     zoned: bool,
@@ -165,8 +170,14 @@ pub fn summary(
     };
     if let Some(e) = smart {
         let i = &e.data.info;
-        let (v, reasons) = verdict(i, kind);
-        s.health = v;
+        let (_, mut reasons) = verdict(i, kind);
+        let id = DriveId {
+            serial: &s.serial,
+            model: &s.model,
+            wwn: s.wwn.as_deref(),
+        };
+        apply_acks(&mut reasons, acks.filter(|a| a.matches(id)));
+        s.health = verdict_of(&reasons);
         s.health_reasons = reasons;
         s.temperature_c = i.temperature_c;
         s.power_on_hours = i.power_on_hours;
@@ -358,8 +369,8 @@ pub fn tree(inv: &Inventory) -> StorageTree {
             label: f.label.clone(),
             fstype: "btrfs".into(),
             mountpoint: f.mountpoint.clone(),
-            size: f.device_size,
-            used: f.used,
+            size: f.usable_size(),
+            used: f.logical_used(),
             health: HealthVerdict::Healthy,
             ..Default::default()
         };

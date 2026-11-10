@@ -731,6 +731,11 @@ fn main() -> std::io::Result<()> {
             s.loop_disks = true;
             state.storage = Arc::new(s);
         }
+        // SMART warnings marked as seen, per drive: survive restarts
+        state
+            .storage
+            .health_acks()
+            .open(&rynasd::storage_ops::health_acks_file(&args.state_dir));
         // the storage's power states keep the folder sizes from spinning up sleeping disks
         let opened = open_config(&args, system, Some(state.storage.clone()))?;
         let config = Arc::new(opened.config);

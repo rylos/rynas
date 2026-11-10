@@ -16,6 +16,7 @@
 pub mod btrfs;
 pub mod domain;
 pub mod exec;
+pub mod health_ack;
 pub mod host;
 pub mod inventory;
 pub mod lsblk;

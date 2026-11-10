@@ -84,6 +84,49 @@ pub struct HealthReason {
     /// The values `message` names, for the translated text.
     #[serde(default, skip_serializing_if = "ReasonArgs::is_empty")]
     pub args: ReasonArgs,
+    /// A counter that never goes back to zero: an administrator may mark it as seen
+    /// (`POST /api/v1/storage/disks/{name}/health-ack`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub acknowledgeable: bool,
+    /// Marked as seen at exactly the current count: still listed, but it no longer weighs in
+    /// the disk verdict. Gone as soon as the count changes (grows, or drops after a reset).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acknowledged: Option<ReasonAck>,
+}
+
+/// An acknowledgement of a [`HealthReason`]: the count that was seen, when and by whom.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ReasonAck {
+    pub n: u64,
+    pub at_ms: u64,
+    #[serde(default)]
+    pub by: String,
+}
+
+/// `POST /api/v1/storage/disks/{name}/health-ack`: the counts the administrator saw. rynasd
+/// reads SMART again and records, per code, the lower of this and the current count, so a
+/// count that grew meanwhile stays visible; a value can never be raised above the current one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct HealthAckRequest {
+    pub codes: Vec<HealthAckCode>,
+}
+
+/// Answer of `POST /api/v1/storage/disks/{name}/health-ack`: the reason codes recorded, with
+/// the counts, and those whose count had grown past what was seen (still warning).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct HealthAckResult {
+    pub disk: String,
+    pub serial: String,
+    pub acknowledged: Vec<HealthAckCode>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grew: Vec<String>,
+}
+
+/// One code of a [`HealthAckResult`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct HealthAckCode {
+    pub code: String,
+    pub n: u64,
 }
 
 /// Values of a [`HealthReason`]; which ones a code uses is documented next to the code in
@@ -557,6 +600,100 @@ pub struct BtrfsFilesystem {
     /// Details come from the cache because an underlying disk is in standby.
     pub stale: bool,
     pub read_ms: u64,
+}
+
+impl BtrfsFilesystem {
+    /// Copies of every data byte: `data_ratio` when btrfs gave it, else from the data profile
+    /// (raid1/dup/raid10: 2, raid1c3: 3, raid1c4: 4), else 1 (nothing known).
+    pub fn data_copies(&self) -> f64 {
+        if self.data_ratio.is_finite() && self.data_ratio >= 1.0 {
+            return f64::from(self.data_ratio);
+        }
+        let data = self.profiles.iter().find(|p| p.kind == "data");
+        match data.map(|p| p.profile.to_ascii_lowercase()).as_deref() {
+            Some("raid1" | "dup" | "raid10") => 2.0,
+            Some("raid1c3") => 3.0,
+            Some("raid1c4") => 4.0,
+            _ => 1.0,
+        }
+    }
+
+    /// What the files take, counted once: `device_size` and `used` are raw, so a btrfs RAID1
+    /// of two 4 TB disks has 8 TB of devices and every byte written twice. With the usage
+    /// figures (`profiles`) their logical sum, else the raw use over the copies.
+    pub fn logical_used(&self) -> u64 {
+        if self.profiles.is_empty() {
+            return (self.used as f64 / self.data_copies()) as u64;
+        }
+        self.profiles.iter().map(|p| p.used).sum()
+    }
+
+    /// The space files can use, counted once. With the usage figures (`profiles`): what they
+    /// take plus the estimated free space, which already accounts for the profiles (a full
+    /// filesystem has `free_estimated` 0 and stays full, never falls back to the devices).
+    /// Without them: the devices over the data copies; when nothing tells the copies either,
+    /// the raw `device_size` (an over-estimate for a mirror whose profile is unknown).
+    pub fn usable_size(&self) -> u64 {
+        if !self.profiles.is_empty() {
+            return self.logical_used() + self.free_estimated;
+        }
+        (self.device_size as f64 / self.data_copies()) as u64
+    }
+}
+
+#[cfg(test)]
+mod btrfs_size_tests {
+    use super::*;
+
+    /// btrfs RAID1 of two 4 TB disks, as on the QNAP HS-251 after installation.
+    #[test]
+    fn raid1_counts_once() {
+        let p = |kind: &str, used: u64| BtrfsProfile { kind: kind.into(), profile: "raid1".into(), size: 0, used };
+        let f = BtrfsFilesystem {
+            device_size: 7_995_448_623_104,
+            used: 4_970_000_000,
+            free_estimated: 3_993_103_138_816,
+            data_ratio: 2.0,
+            metadata_ratio: 2.0,
+            profiles: vec![p("data", 2_426_000_000), p("metadata", 48_350_000), p("system", 16_384)],
+            ..Default::default()
+        };
+        assert_eq!(f.logical_used(), 2_474_366_384);
+        assert_eq!(f.usable_size(), 2_474_366_384 + 3_993_103_138_816);
+        let bare = BtrfsFilesystem { device_size: 8_000, data_ratio: 2.0, ..Default::default() };
+        assert_eq!(bare.usable_size(), 4_000, "no usage figures: devices over the copies");
+    }
+
+    /// A really full filesystem: no free space left, it reads 100 %, not the raw devices.
+    #[test]
+    fn full_filesystem_stays_full() {
+        let f = BtrfsFilesystem {
+            device_size: 8_000,
+            used: 8_000,
+            free_estimated: 0,
+            data_ratio: 2.0,
+            profiles: vec![BtrfsProfile { kind: "data".into(), profile: "raid1".into(), size: 4_000, used: 4_000 }],
+            ..Default::default()
+        };
+        assert_eq!(f.logical_used(), 4_000);
+        assert_eq!(f.usable_size(), 4_000);
+    }
+
+    /// No usage figures: the ratio if known, else the raw sizes (documented over-estimate).
+    #[test]
+    fn missing_usage_figures() {
+        let unknown = BtrfsFilesystem { device_size: 8_000, used: 2_000, ..Default::default() };
+        assert_eq!(unknown.usable_size(), 8_000, "nothing known: raw devices");
+        assert_eq!(unknown.logical_used(), 2_000);
+        let mirrored = BtrfsFilesystem { device_size: 8_000, used: 2_000, data_ratio: 2.0, ..Default::default() };
+        assert_eq!(mirrored.usable_size(), 4_000);
+        assert_eq!(mirrored.logical_used(), 1_000);
+        let c3 = BtrfsFilesystem {
+            profiles: vec![BtrfsProfile { kind: "data".into(), profile: "raid1c3".into(), size: 0, used: 0 }],
+            ..Default::default()
+        };
+        assert_eq!(c3.data_copies(), 3.0, "ratio unknown, profile known");
+    }
 }
 
 // ------------------------------------------------------------------ tree
@@ -1039,6 +1176,7 @@ pub enum PlanStepKind {
 // | GET/POST | `/api/v1/storage/volumes/{name}/subvolumes` | [`SubvolumeCreateRequest`] | `Vec<SubvolumeInfo>` / 202 |
 // | PUT/DELETE | `/api/v1/storage/volumes/{name}/subvolumes/{sub}?confirm=` | [`SubvolumeSettings`] | 202 |
 // | GET/PUT | `/api/v1/storage/disks/{name}/settings` | [`DiskSettings`] | [`DiskSettingsState`] |
+// | POST/DELETE | `/api/v1/storage/disks/{name}/health-ack` | [`HealthAckRequest`] / — | [`HealthAckResult`] / 204 |
 
 /// `POST /api/v1/storage/volumes`: execute the plan of [`VolumePlanRequest`].
 ///

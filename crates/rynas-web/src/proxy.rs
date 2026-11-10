@@ -87,6 +87,11 @@ pub fn routes() -> Router<AppState> {
             put(forward).delete(forward),
         )
         .route("/storage/disks/{name}/settings", get(forward).put(forward))
+        // SMART warnings marked as seen (counts read by rynasd, never sent by the client)
+        .route(
+            "/storage/disks/{name}/health-ack",
+            post(forward).delete(forward),
+        )
         // users, groups, shares, SMB and NFS (step 8)
         .route("/users", get(forward).post(forward))
         .route("/users/{name}", get(forward).put(forward).delete(forward))

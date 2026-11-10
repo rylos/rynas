@@ -434,6 +434,7 @@ fn check_new_disk(
                 "{name}: SMART says the disk is failing ({})",
                 d.health_reasons
                     .iter()
+                    .filter(|r| r.acknowledged.is_none())
                     .map(|r| r.message.as_str())
                     .collect::<Vec<_>>()
                     .join("; ")
@@ -445,7 +446,10 @@ fn check_new_disk(
             let bad = || {
                 d.health_reasons
                     .iter()
-                    .filter(|r| r.severity >= rynas_api_types::storage::Severity::Warning)
+                    .filter(|r| {
+                        r.severity >= rynas_api_types::storage::Severity::Warning
+                            && r.acknowledged.is_none()
+                    })
             };
             let messages: Vec<&str> = bad().map(|r| r.message.as_str()).collect();
             p.warnings
@@ -1371,7 +1375,8 @@ pub fn plan_scrub(inv: &Inventory, req: &ScrubPlanRequest) -> StoragePlan {
             array_busy(a, &mut p);
         }
     }
-    p.usable_bytes = fs.device_size;
+    // counted once: a btrfs RAID1 holds every byte on two devices
+    p.usable_bytes = fs.usable_size();
     warn(&mut p, PlanWarningCode::ScrubCost, PlanArgs::default());
     if !p.errors.is_empty() {
         return finish(p);

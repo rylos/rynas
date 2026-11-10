@@ -3009,6 +3009,13 @@ sto.reason.wear_out	Resistenza nominale esaurita (100% o più).
 sto.reason.wear	Resta il {n} della resistenza nominale.
 sto.reason.self_test_failed	Ultimo autotest ({name}): {detail}.
 sto.reason.error_log	{n} errori nel registro errori del disco.
+sto.ack	Segna come visto
+sto.ack_undo	Annulla
+sto.ack_seen	visto il {d}
+sto.ack_hint	L'avviso torna se il conteggio aumenta.
+sto.ack_done	Avvisi segnati come visti
+sto.ack_undone	Gli avvisi contano di nuovo
+sto.ack_grew	Alcuni conteggi sono aumentati da quando hai aperto la pagina: quelli restano in avviso
 rm.title	Unità rimovibili
 rm.count_one	1 unità
 rm.count	{n} unità
@@ -4596,5 +4603,6 @@ qnap.why_driver_missing	Il driver del kernel non è caricato
 qnap.why_wrong_direction	Una linea non è nella direzione attesa: non viene comandata
 qnap.why_led_control_off	Disattivato qui sopra
 qnap.why_no_speaker	Nessun dispositivo PC speaker trovato
+qnap.why_not_fitted	Non presente su questo modello
 qnap.available	Disponibile
 qnap.unsaved	Modifiche non salvate

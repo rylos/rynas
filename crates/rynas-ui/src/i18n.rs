@@ -3426,6 +3426,14 @@ dict! { BLOB, LENS, IT;
     "sto.reason.wear" => "{n} of the rated endurance left.", "Resta il {n} della resistenza nominale.";
     "sto.reason.self_test_failed" => "Last self-test ({name}): {detail}.", "Ultimo autotest ({name}): {detail}.";
     "sto.reason.error_log" => "{n} errors in the drive's error log.", "{n} errori nel registro errori del disco.";
+    // SMART counters marked as seen (Storage › Drives › drive)
+    "sto.ack" => "Mark as seen", "Segna come visto";
+    "sto.ack_undo" => "Undo", "Annulla";
+    "sto.ack_seen" => "seen {d}", "visto il {d}";
+    "sto.ack_hint" => "The warning comes back if the count grows.", "L'avviso torna se il conteggio aumenta.";
+    "sto.ack_done" => "Warnings marked as seen", "Avvisi segnati come visti";
+    "sto.ack_undone" => "Warnings count again", "Gli avvisi contano di nuovo";
+    "sto.ack_grew" => "Some counts grew since this page was loaded: those still warn", "Alcuni conteggi sono aumentati da quando hai aperto la pagina: quelli restano in avviso";
     // removable drives (app bar menu, Hardware › Removable drives)
     "rm.title" => "Removable drives", "Unità rimovibili";
     "rm.count_one" => "1 drive", "1 unità";
@@ -4849,6 +4857,14 @@ pub fn datetime(ms: u64) -> String {
     let _ = js_sys::Reflect::set(&opts, &"dateStyle".into(), &"medium".into());
     let _ = js_sys::Reflect::set(&opts, &"timeStyle".into(), &"short".into());
     d.to_locale_string(lang().code(), &opts).as_string().unwrap_or_default()
+}
+
+/// Date in the current language, e.g. "Nov 5, 2026" / "5 nov 2026".
+pub fn date(ms: u64) -> String {
+    let d = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ms as f64));
+    let opts = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&opts, &"dateStyle".into(), &"medium".into());
+    d.to_locale_date_string(lang().code(), &opts).as_string().unwrap_or_default()
 }
 
 /// Time of day for today's moments, date and time otherwise (lists of events).

@@ -1504,6 +1504,10 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .reasons { display: flex; flex-direction: column; gap: var(--s-1); }
 .reasons li { display: flex; align-items: flex-start; gap: var(--s-2); font-size: var(--fs-13); color: var(--tone); }
 .reasons li .icon { margin-top: var(--s-half); flex: none; }
+.reasons li > span { min-width: 0; overflow-wrap: anywhere; }
+.reasons li.seen { color: var(--text-subtle); }
+.reason-seen { font-size: var(--fs-12); white-space: nowrap; }
+.reason-acks { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); margin-top: var(--s-2); }
 .standby-note { font-weight: 500; font-size: var(--fs-13); }
 .checks { display: flex; flex-direction: column; }
 .checks li { display: flex; flex-direction: column; gap: var(--s-1); padding: var(--s-2) 0; border-top: 1px solid var(--border); }

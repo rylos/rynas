@@ -366,12 +366,45 @@ fn ata_bytes_written(attrs: &[SmartAttribute]) -> Option<u64> {
 }
 
 fn reason(severity: Severity, code: &str, message: String, args: ReasonArgs) -> HealthReason {
+    let acknowledgeable = acknowledgeable(code, severity, args.n);
     HealthReason {
         severity,
         code: code.to_string(),
         message,
         args,
+        acknowledgeable,
+        acknowledged: None,
     }
+}
+
+/// Reason codes an administrator may mark as seen ("acknowledge", as in Unraid): counters
+/// the drive never brings back to zero, so an old event would keep the disk yellow forever.
+/// The acknowledgement records the count; when it grows the reason weighs in again.
+///
+/// - `command_timeouts` (188), `crc_errors` (199), `reported_uncorrect` (187): lifetime
+///   counts, usually cable/power events of the past.
+/// - `error_log`: the ATA error log count (only grows).
+/// - `reallocated_sectors` (5): only while it is a warning (below 100); remapped sectors stay
+///   remapped.
+/// - `media_errors`: the NVMe media and data integrity error count (only grows).
+///
+/// Never: anything Critical, `pending_sectors` / `offline_uncorrectable` (they go up and
+/// down), failed self-tests, temperature, age, wear and life, `load_cycles` (it grows with
+/// normal use, an acknowledgement would not last), SMART overall FAILED, NVMe warning bits.
+pub const ACKNOWLEDGEABLE: &[&str] = &[
+    "command_timeouts",
+    "crc_errors",
+    "reported_uncorrect",
+    "error_log",
+    "reallocated_sectors",
+    "media_errors",
+];
+
+/// A reason with this code, severity and count may be marked as seen ([`ACKNOWLEDGEABLE`]).
+pub fn acknowledgeable(code: &str, severity: Severity, n: Option<f64>) -> bool {
+    severity != Severity::Critical
+        && n.is_some_and(|n| n.is_finite() && n >= 0.0)
+        && ACKNOWLEDGEABLE.contains(&code)
 }
 
 /// [`ReasonArgs`] with only `n`.
@@ -473,8 +506,10 @@ pub fn verdict(info: &SmartInfo, kind: DiskKind) -> (HealthVerdict, Vec<HealthRe
             n_arg(n as f64),
         ));
     }
-    // Seagate packs three 16-bit counters in 188: look at the total only
-    if let Some(n) = raw(188).map(|n| (n & 0xffff) + ((n >> 16) & 0xffff) + ((n >> 32) & 0xffff))
+    // Seagate packs three 16-bit counters in 188: all timeouts (the low word), then those
+    // queued over 5 s and over 7.5 s, which the first already counts (smartmontools #551).
+    // Other vendors keep a plain count below 2^16, so the low word is the count for all.
+    if let Some(n) = raw(188).map(|n| n & 0xffff)
         && n > 0
     {
         r.push(reason(
@@ -630,13 +665,21 @@ pub fn verdict(info: &SmartInfo, kind: DiskKind) -> (HealthVerdict, Vec<HealthRe
             n_arg(n as f64),
         ));
     }
-    let worst = r.iter().map(|x| x.severity).max();
-    let v = match worst {
-        Some(Critical) => HealthVerdict::Failing,
-        Some(Warning) => HealthVerdict::Warning,
+    (verdict_of(&r), r)
+}
+
+/// The verdict of a list of reasons: the worst severity among those not marked as seen.
+pub fn verdict_of(reasons: &[HealthReason]) -> HealthVerdict {
+    let worst = reasons
+        .iter()
+        .filter(|x| x.acknowledged.is_none())
+        .map(|x| x.severity)
+        .max();
+    match worst {
+        Some(Severity::Critical) => HealthVerdict::Failing,
+        Some(Severity::Warning) => HealthVerdict::Warning,
         _ => HealthVerdict::Healthy,
-    };
-    (v, r)
+    }
 }
 
 /// Shingled (SMR) drives that are sold without saying so. Device-managed SMR stalls on RAID
@@ -817,5 +860,18 @@ mod tests {
         assert!(known_smr("ST2000DM008-2FR102"));
         assert!(!known_smr("WDC WD80EFZZ-68BTXN0"));
         assert!(!known_smr("WDC WD40EFZX-68AWUN0"));
+    }
+
+    /// Seagate's 188 as on an ST4000DM000 (`smartctl -v 188,raw16` shows "2 2 131"): 131
+    /// timeouts in all, 2 of them over 5 s and over 7.5 s, which are among the 131.
+    #[test]
+    fn seagate_command_timeouts() {
+        let raw: u64 = (2 << 32) | (2 << 16) | 131;
+        let j = format!(
+            r#"{{"smartctl":{{"exit_status":0}},"device":{{"protocol":"ATA"}},"ata_smart_attributes":{{"table":[{{"id":188,"name":"Command_Timeout","value":100,"worst":88,"thresh":0,"raw":{{"value":{raw},"string":"2 2 131"}}}}]}}}}"#
+        );
+        let (_, r) = verdict(&data(&j).info, DiskKind::Hdd);
+        let t = r.iter().find(|x| x.code == "command_timeouts").expect("a timeouts reason");
+        assert!(t.message.starts_with("131 "), "{}", t.message);
     }
 }

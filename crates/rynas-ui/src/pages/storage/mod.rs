@@ -134,6 +134,16 @@ impl Sto {
         self.refresh(true);
     }
 
+    /// Read the drives again now, even while a round runs (that round may carry the answer
+    /// from before a change to one disk).
+    pub fn reload_disks(self) {
+        spawn_local(async move {
+            if let Ok(text) = api::get_text("/api/v1/storage/disks").await {
+                put(self.disks, &text);
+            }
+        });
+    }
+
     /// Everything needed by the overview has arrived at least once.
     pub fn ready(self) -> bool {
         self.tree.with(Option::is_some) && self.arrays.with(Option::is_some) && self.disks.with(Option::is_some)
@@ -269,7 +279,7 @@ fn vol_of_tree(v: &VolumeTree, arrays: &[MdArray], fss: &[BtrfsFilesystem]) -> V
         encrypted: v.encrypted,
         fstype: v.fstype.clone(),
         mountpoint: v.mountpoint.clone(),
-        size: fs.as_ref().map(|f| f.device_size).filter(|s| *s > 0).unwrap_or(v.size),
+        size: fs.as_ref().map(|f| f.usable_size()).filter(|s| *s > 0).unwrap_or(v.size),
         used: v.used,
         health: v.health,
         md,

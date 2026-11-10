@@ -393,9 +393,11 @@ impl StorageWatch {
                         ("needs attention", "storage.disk_warning")
                     };
                     let mut e = firing(Cat::Storage, s, ST, &key, format!("Disk {name} {word}"));
+                    // reasons marked as seen do not weigh in the verdict: not listed either
                     e.body = d
                         .health_reasons
                         .iter()
+                        .filter(|r| r.acknowledged.is_none())
                         .map(|r| format!("- {}", r.message))
                         .collect::<Vec<_>>()
                         .join("\n");
@@ -556,11 +558,13 @@ impl StorageWatch {
                 );
             }
             // usage: only for mounted volumes with sizes
-            let total = fs.used + fs.free_estimated;
+            // counted once (a RAID1 holds every byte twice: `used` is raw)
+            let (logical, total) = (fs.logical_used(), fs.usable_size());
             if fs.mountpoint.is_none() || total == 0 {
                 continue;
             }
-            let pct = fs.used as f64 * 100.0 / total as f64;
+            let free_bytes = total.saturating_sub(logical);
+            let pct = logical as f64 * 100.0 / total as f64;
             let pct = pct as f32;
             let key = format!("storage:volume:{}:usage", fs.uuid);
             let level = usage_level(self.t.level(&key), pct);
@@ -577,8 +581,8 @@ impl StorageWatch {
                         format!("Volume {name} {pct:.0}% full"),
                     );
                     let (used, free) = (
-                        format!("{:.1}", fs.used as f64 / 1073741824.0),
-                        format!("{:.1}", fs.free_estimated as f64 / 1073741824.0),
+                        format!("{:.1}", logical as f64 / 1073741824.0),
+                        format!("{:.1}", free_bytes as f64 / 1073741824.0),
                     );
                     e.body = format!("{name} uses {used} GiB, about {free} GiB free ({pct:.1}%).");
                     let e = field(code(e, "storage.volume_full"), "volume", &name);
@@ -724,7 +728,7 @@ mod tests {
     use super::*;
     use crate::EventState;
     use rynas_api_types::Fan;
-    use rynas_api_types::storage::{BtrfsDevice, BtrfsDeviceErrors};
+    use rynas_api_types::storage::{BtrfsDevice, BtrfsDeviceErrors, BtrfsProfile};
 
     #[test]
     fn temperature_hysteresis() {
@@ -856,8 +860,16 @@ mod tests {
             uuid: "u1".into(),
             label: Some("vol1".into()),
             mountpoint: Some("/vol1".into()),
-            used,
+            // a RAID1: raw use twice the files, the profile counts them once
+            used: used * 2,
             free_estimated: 100 - used,
+            data_ratio: 2.0,
+            profiles: vec![BtrfsProfile {
+                kind: "data".into(),
+                profile: "raid1".into(),
+                size: 100,
+                used,
+            }],
             devices: vec![BtrfsDevice {
                 devid: 1,
                 path: "/dev/md2".into(),

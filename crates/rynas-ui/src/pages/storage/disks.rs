@@ -8,7 +8,7 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use rynas_api_types::storage::{
-    CheckStatus, CheckValue, DiskDetail, DiskKind, DiskSettings, DiskSettingsState, DiskSummary, HealthReason, IoScheduler,
+    CheckStatus, CheckValue, DiskDetail, DiskKind, DiskSettings, DiskSettingsState, DiskSummary, HealthAckCode, HealthAckRequest, HealthAckResult, HealthReason, IoScheduler,
     Severity, SmartInfo,
 };
 
@@ -232,6 +232,93 @@ fn value_view(v: Option<CheckValue>, text: Option<String>) -> AnyView {
     }
 }
 
+/// SMART reasons of a disk. Counters that never go back to zero can be marked as seen: they
+/// stay listed, muted with the date, and no longer weigh in the verdict until they grow.
+#[component]
+fn HealthReasons(name: String, reasons: Vec<HealthReason>) -> impl IntoView {
+    let s = super::sto();
+    let url = StoredValue::new(format!("/api/v1/storage/disks/{}/health-ack", api::encode(&name)));
+    let busy = RwSignal::new(false);
+    let error = RwSignal::new(None::<String>);
+    let can_ack = reasons.iter().any(|r| r.acknowledgeable && r.acknowledged.is_none());
+    let any_seen = reasons.iter().any(|r| r.acknowledged.is_some());
+    // the counts on screen: rynasd records the lower of these and a new reading, so errors
+    // that arrived since this page was loaded keep warning
+    let seen = StoredValue::new(HealthAckRequest {
+        codes: reasons
+            .iter()
+            .filter(|r| r.acknowledgeable)
+            .filter_map(|r| Some(HealthAckCode { code: r.code.clone(), n: r.args.n?.round() as u64 }))
+            .collect(),
+    });
+    let call = move |undo: bool| {
+        busy.set(true);
+        error.set(None);
+        spawn_local(async move {
+            let r = if undo {
+                api::delete_empty(&url.get_value()).await.map(|_| false)
+            } else {
+                api::post::<_, HealthAckResult>(&url.get_value(), Some(&seen.get_value())).await.map(|r| !r.grew.is_empty())
+            };
+            match r {
+                Ok(grew) => {
+                    let (tone, key) = match (undo, grew) {
+                        (true, _) => (Tone::Ok, "sto.ack_undone"),
+                        (false, false) => (Tone::Ok, "sto.ack_done"),
+                        (false, true) => (Tone::Warn, "sto.ack_grew"),
+                    };
+                    crate::toast::toast(tone, t(key).to_string());
+                    s.reload_disks();
+                }
+                Err(e) => {
+                    let _ = error.try_set(Some(e.text()));
+                }
+            }
+            let _ = busy.try_set(false);
+        });
+    };
+    view! {
+        <ul class="reasons">
+            {reasons.iter().map(|r| {
+                let seen = r.acknowledged.as_ref().map(|a| tf("sto.ack_seen", &[("d", &i18n::date(a.at_ms))]));
+                let tone = match r.severity {
+                    _ if seen.is_some() => Tone::Unknown,
+                    Severity::Critical => Tone::Err,
+                    Severity::Warning => Tone::Warn,
+                    Severity::Info => Tone::Info,
+                };
+                let (text, translated) = reason_text(r);
+                let is_seen = seen.is_some();
+                view! {
+                    <li class=tone.class() class:seen=is_seen>
+                        <Icon icon=if is_seen { icons::CHECK } else { tone.icon() } size=14 />
+                        <span>
+                            <span lang=(!translated).then_some("en")>{text}</span>
+                            {seen.map(|s| view! { " "<span class="reason-seen">{s}</span> })}
+                        </span>
+                    </li>
+                }
+            }).collect_view()}
+        </ul>
+        {(can_ack || any_seen).then(|| view! {
+            <div class="reason-acks">
+                {can_ack.then(|| view! {
+                    <button class="btn ghost sm" type="button" disabled=move || busy.get() on:click=move |_| call(false)>
+                        {spinner(busy)}<Icon icon=icons::CHECK size=14 />{tr("sto.ack")}
+                    </button>
+                })}
+                {any_seen.then(|| view! {
+                    <button class="btn ghost sm" type="button" disabled=move || busy.get() on:click=move |_| call(true)>
+                        <Icon icon=icons::ROTATE_CCW size=14 />{tr("sto.ack_undo")}
+                    </button>
+                })}
+                <span class="muted small">{tr("sto.ack_hint")}</span>
+            </div>
+            {form_error(error)}
+        })}
+    }
+}
+
 fn overview_tab(
     d: DiskSummary,
     detail: RwSignal<Option<Result<DiskDetail, String>>>,
@@ -254,15 +341,7 @@ fn overview_tab(
                 })}
                 {d.smr.then(|| view! { <span class="chip warn-chip" title=t("sto.smr_hint")>"SMR"</span> })}
             </div>
-            {(!d.health_reasons.is_empty()).then(|| view! {
-                <ul class="reasons">
-                    {d.health_reasons.iter().map(|r| {
-                        let tone = match r.severity { Severity::Critical => Tone::Err, Severity::Warning => Tone::Warn, Severity::Info => Tone::Info };
-                        let (text, translated) = reason_text(r);
-                        view! { <li class=tone.class()><Icon icon=tone.icon() size=14 /><span lang=(!translated).then_some("en")>{text}</span></li> }
-                    }).collect_view()}
-                </ul>
-            })}
+            {(!d.health_reasons.is_empty()).then(|| view! { <HealthReasons name=d.name.clone() reasons=d.health_reasons.clone() /> })}
             {d.smr.then(|| view! { <p class="muted small">{tr("sto.smr_hint")}</p> })}
             <dl class="kvs">
                 {kv_row("sto.model", Signal::derive({ let v = d.model.clone(); move || v.clone() }), "")}
