@@ -367,6 +367,9 @@ fn settings_form(init: DockerSettingsState, settings: Remote<DockerSettingsState
     let (full, set_full) = num_lens(d, |s| s.data_root_full_pct.to_string(), |s, v| s.data_root_full_pct = v.min(255) as u8);
     let (restarts, set_restarts) = num_lens(d, |s| s.crash_restarts.to_string(), |s, v| s.crash_restarts = v);
     let (window, set_window) = num_lens(d, |s| s.crash_window_min.to_string(), |s, v| s.crash_window_min = v);
+    let (au_hour, set_au_hour) = num_lens(d, |s| s.auto_update.hour.to_string(), |s, v| s.auto_update.hour = v.min(255) as u8);
+    let (au_minute, set_au_minute) = num_lens(d, |s| s.auto_update.minute.to_string(), |s, v| s.auto_update.minute = v.min(255) as u8);
+    let (au_len, set_au_len) = num_lens(d, |s| s.auto_update.window_min.to_string(), |s, v| s.auto_update.window_min = v.min(u32::from(u16::MAX)) as u16);
     let (mgr, set_mgr) = lens(
         d,
         |s| s.preferred_manager.map(|m| serde_json::to_value(m).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default()).unwrap_or_default(),
@@ -436,6 +439,13 @@ fn settings_form(init: DockerSettingsState, settings: Remote<DockerSettingsState
                 {number_field("dk.set.full", Some("dk.set.full_help"), full, set_full, 50, 99)}
                 {number_field("dk.set.restarts", Some("dk.set.restarts_help"), restarts, set_restarts, 2, 100)}
                 {number_field("dk.set.window", None, window, set_window, 1, 120)}
+            </div>
+            <h3 class="mini-title">{tr("dk.au.title")}</h3>
+            <p class="field-help">{tr("dk.au.text")}</p>
+            <div class="form-row">
+                {number_field("dk.au.hour", None, au_hour, set_au_hour, 0, 23)}
+                {number_field("dk.au.minute", None, au_minute, set_au_minute, 0, 59)}
+                {number_field("dk.au.window", Some("dk.au.window_help"), au_len, set_au_len, 10, 360)}
             </div>
             {stale_notice(draft.stale, reset)}
             {form_error(error)}

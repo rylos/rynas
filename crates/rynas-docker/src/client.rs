@@ -179,6 +179,46 @@ impl Engine {
         self.docker.inspect_image(image).await.is_ok()
     }
 
+    /// A label of a local image (`org.opencontainers.image.version`…).
+    pub async fn image_label(&self, image: &str, label: &str) -> Result<Option<String>, DockerError> {
+        let i = self.docker.inspect_image(image).await?;
+        Ok(i.config
+            .and_then(|c| c.labels)
+            .and_then(|l| l.get(label).cloned())
+            .filter(|v| !v.trim().is_empty()))
+    }
+
+    /// The local image id a reference points to now.
+    pub async fn image_id(&self, image: &str) -> Result<String, DockerError> {
+        let i = self.docker.inspect_image(image).await?;
+        i.id.ok_or_else(|| DockerError::Failed(format!("{image}: no image id")))
+    }
+
+    /// What the health check after an update reads of a container: running, its health
+    /// (`None` without a HEALTHCHECK), and the engine's restart count.
+    pub async fn container_health(&self, id: &str) -> Result<crate::health::Sample, DockerError> {
+        let c = self
+            .docker
+            .inspect_container(id, None::<qp::InspectContainerOptions>)
+            .await?;
+        let state = c.state.unwrap_or_default();
+        let health = state
+            .health
+            .and_then(|h| h.status)
+            .and_then(|s| match s {
+                bm::HealthStatusEnum::HEALTHY => Some(crate::health::Health::Healthy),
+                bm::HealthStatusEnum::UNHEALTHY => Some(crate::health::Health::Unhealthy),
+                bm::HealthStatusEnum::STARTING => Some(crate::health::Health::Starting),
+                _ => None,
+            });
+        Ok(crate::health::Sample {
+            running: state.running.unwrap_or(false) && !state.restarting.unwrap_or(false),
+            health,
+            restarts: c.restart_count.unwrap_or(0).max(0) as u64,
+            exit_code: state.exit_code.unwrap_or(0),
+        })
+    }
+
     /// The registry digest (`sha256:…`) of `image` now, without pulling.
     pub async fn registry_digest(&self, image: &str) -> Result<String, String> {
         match self.docker.inspect_registry_image(image, None).await {

@@ -11,13 +11,15 @@ use std::collections::HashSet;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use rynas_api_types::docker::{
-    CreateStackRequest, DockerSettingsState, RemoveStackRequest, RollbackRequest, StackCreated, StackDetail, StackFiles, StackManager, StackSnapshot, StackState, StackSummary,
-    StackValidation, UpdateStackRequest, ValidateStackRequest, valid_stack_name,
+    AutoOutcome, CreateStackRequest, DockerSettingsState, HoldReason, RemoveStackRequest, RollbackRequest, StackAutoUpdate, StackCreated, StackDetail, StackFiles, StackManager, StackSnapshot,
+    StackState, StackSummary, StackUpdate, StackValidation, UpdatePolicy, UpdateStackRequest, UpdateVerdict, ValidateStackRequest, valid_stack_name,
 };
 
 use super::{Busy, act, action_url, container_pill, done_toast, empty, image_ref, manager_key, page, remote, row_btn, update_chip, updatable};
 use crate::api;
-use crate::form::{In, code_field, form_error, search_box, spinner, switch, text_field};
+use crate::config::{apply_now, keys};
+use crate::form::{In, code_field, form_error, search_box, select_field, spinner, switch, text_field};
+use crate::toast::saved_applied;
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::tasks::{self, tasks};
@@ -88,7 +90,12 @@ pub fn panel() -> AnyView {
     let importing = RwSignal::new(false);
     let checking = RwSignal::new(false);
     let checked = move || {
-        updates.data.with(|u| u.as_ref().map(|u| if u.checked_at_ms == 0 { t("dk.upd.never").to_string() } else { tf("dk.upd.checked", &[("when", &i18n::short_when(u.checked_at_ms))]) }))
+        updates.data.with(|u| {
+            u.as_ref().map(|u| {
+                let last = if u.checked_at_ms == 0 { t("dk.upd.never").to_string() } else { tf("dk.upd.checked", &[("when", &i18n::short_when(u.checked_at_ms))]) };
+                if u.next_check_ms == 0 { last } else { format!("{last} · {}", tf("dk.upd.next", &[("when", &i18n::short_when(u.next_check_ms))])) }
+            })
+        })
     };
     let none = Memo::new(move |_| list.data.with(|l| l.as_ref().is_none_or(Vec::is_empty)));
     let groups = move || {
@@ -146,7 +153,9 @@ fn row(name: String, cx: Ctx) -> AnyView {
     let hidden = Signal::derive(move || !cx.q.with(|q| s.with(|s| s.as_ref().is_some_and(|s| shown(s, q)))));
     let state = Memo::new(move |_| s.with(|s| s.as_ref().map(|s| (s.state, s.unhealthy, s.running, s.containers))));
     let images = Memo::new(move |_| s.with(|s| s.as_ref().map(|s| s.images.clone()).unwrap_or_default()));
-    let has_update = Memo::new(move |_| images.with(|i| cx.upd.with(|u| i.iter().any(|x| u.contains(x)))));
+    let plan = stack_update(name.clone());
+    let has_update = Memo::new(move |_| plan.with(Option::is_some) || images.with(|i| cx.upd.with(|u| i.iter().any(|x| u.contains(x)))));
+    let auto = Memo::new(move |_| plan.with(|p| p.as_ref().is_some_and(|p| p.enabled && p.verdict != UpdateVerdict::Hold)));
     let can_start = Signal::derive(move || state.with(|s| s.is_some_and(|s| s.0 != StackState::Running)));
     let can_stop = Signal::derive(move || state.with(|s| s.is_some_and(|s| s.2 > 0)));
     let start = if first.editable { "up" } else { "start" };
@@ -171,6 +180,7 @@ fn row(name: String, cx: Ctx) -> AnyView {
                 <div class="cell-main">
                     {move || images.with(|l| l.iter().map(|i| image_ref(i)).collect_view())}
                     {move || has_update.get().then(update_chip)}
+                    {move || auto.get().then(|| view! { <span class="chip"><Icon icon=icons::CLOCK size=12 />{tr("dk.au.chip")}</span> })}
                 </div>
             }.into_any()),
             ui::actions(view! {
@@ -373,6 +383,7 @@ fn detail_drawer(name: String, settings: Remote<DockerSettingsState>, edit: RwSi
             {(!managed && !adopted).then(|| ui::note(Tone::Info, icons::INFO, ui::text(t(if manager == StackManager::Rynas { "dk.s.no_folder" } else if adoption == Adoption::Candidate { "dk.s.readonly_adopt" } else { "dk.s.readonly" }).to_string())))}
             {move || { let l = new_images(); (!l.is_empty()).then(|| ui::note(Tone::Info, icons::DOWNLOAD, ui::text(tf("dk.upd.stack", &[("images", &l.join(", "))])))) }}
             {action_bar(managed, adoption, n, busy, ask, edit)}
+            {managed.then(|| auto_section(n.get_value(), settings))}
             <div class="mini-title">{tr("dk.s.containers")}</div>
             {move || d.data.with(|d| d.as_ref().map(stack_containers))}
             {(managed && !adopted).then(|| view! {
@@ -512,6 +523,115 @@ fn ask_dialog(a: Ask, name: String, can_snap: bool, adopted: bool, dir: String, 
             ui::confirm(Confirm { busy, error, ..Confirm::new(t("dk.snap.delete").to_string(), tf("dk.snap.delete_text", &[("when", &when)]), "delete", true, go, cancel) })
         }
     }
+}
+
+// ------------------------------------------------------------------ automatic updates
+
+const POLICIES: &[(&str, &str)] = &[("", "dk.au.p_default"), ("patch", "dk.au.p_patch"), ("minor", "dk.au.p_minor"), ("calver-patch", "dk.au.p_calver"), ("notify", "dk.au.p_notify")];
+
+/// The stack's line of the update report (an update and what its policy does with it).
+fn stack_update(name: String) -> Memo<Option<StackUpdate>> {
+    let u = page().updates;
+    Memo::new(move |_| u.data.with(|u| u.as_ref().and_then(|u| u.stacks.iter().find(|s| s.stack == name).cloned())))
+}
+
+fn reason_text(r: HoldReason) -> &'static str {
+    match r {
+        HoldReason::Major => "dk.au.r_major",
+        HoldReason::Minor => "dk.au.r_minor",
+        HoldReason::Month => "dk.au.r_month",
+        HoldReason::Prerelease => "dk.au.r_pre",
+        HoldReason::Variant => "dk.au.r_variant",
+        HoldReason::Downgrade => "dk.au.r_downgrade",
+        HoldReason::UnknownVersion => "dk.au.r_unknown",
+        HoldReason::Policy => "dk.au.r_policy",
+        HoldReason::NeedsReview => "dk.au.r_review",
+        HoldReason::NotManaged => "dk.au.r_managed",
+    }
+}
+
+fn outcome_text(o: AutoOutcome) -> (Tone, &'static str) {
+    match o {
+        AutoOutcome::Updated => (Tone::Ok, "dk.au.o_updated"),
+        AutoOutcome::RolledBack => (Tone::Warn, "dk.au.o_rolled_back"),
+        AutoOutcome::Held => (Tone::Info, "dk.au.o_held"),
+        AutoOutcome::Failed => (Tone::Err, "dk.au.o_failed"),
+    }
+}
+
+/// What the policy does with the stack's pending update, in words.
+fn verdict_note(u: &StackUpdate) -> AnyView {
+    let what = u.change.clone().unwrap_or_else(|| u.images.join(", "));
+    let (tone, text) = match (u.verdict, u.enabled) {
+        (UpdateVerdict::Hold, _) => (Tone::Info, tf("dk.au.v_hold", &[("what", &what), ("why", t(u.reason.map(reason_text).unwrap_or("dk.au.r_unknown")))])),
+        (_, false) => (Tone::Info, tf("dk.au.v_off", &[("what", &what)])),
+        (UpdateVerdict::Auto, true) => (Tone::Ok, tf("dk.au.v_auto", &[("what", &what)])),
+        (UpdateVerdict::AfterPull, true) => (Tone::Ok, tf("dk.au.v_label", &[("what", &what)])),
+    };
+    ui::note(tone, icons::DOWNLOAD, ui::text(text))
+}
+
+/// The stack's automatic updates: on/off and the policy (stored in the `docker` key, applied
+/// at once), what the policy does with the pending update and the last automatic result.
+fn auto_section(name: String, settings: Remote<DockerSettingsState>) -> AnyView {
+    let updates = page().updates;
+    let n = StoredValue::new(name.clone());
+    let cur = Memo::new(move |_| settings.data.with(|s| s.as_ref().map(|s| s.pending.as_ref().unwrap_or(&s.applied).auto_update.of(&n.get_value())).unwrap_or_default()));
+    let busy = RwSignal::new(false);
+    let error = RwSignal::new(None::<String>);
+    let save = move |next: StackAutoUpdate| {
+        let Some(st) = settings.data.get_untracked() else { return };
+        let mut body = st.pending.clone().unwrap_or_else(|| st.applied.clone());
+        // never apply a staged engine move from here
+        if body.volume != st.applied.volume {
+            error.set(Some(t("dk.au.pending").to_string()));
+            return;
+        }
+        if next.enabled || next.policy.is_some() {
+            body.auto_update.stacks.insert(n.get_value(), next);
+        } else {
+            body.auto_update.stacks.remove(&n.get_value());
+        }
+        busy.set(true);
+        error.set(None);
+        spawn_local(async move {
+            match api::put::<_, DockerSettingsState>("/api/v1/docker/settings", &body).await {
+                Ok(_) => {
+                    if apply_now(&[keys::DOCKER], error).await {
+                        saved_applied();
+                    }
+                }
+                Err(e) => error.set(Some(e.text())),
+            }
+            let _ = busy.try_set(false);
+            settings.reload();
+            updates.reload();
+        });
+    };
+    let enabled = Signal::derive(move || cur.get().enabled);
+    let policy = Signal::derive(move || cur.get().policy.map(|p| p.as_str().to_string()).unwrap_or_default());
+    let plan = stack_update(name.clone());
+    let last = Memo::new(move |_| updates.data.with(|u| u.as_ref().and_then(|u| u.auto.iter().find(|a| a.stack == n.get_value()).cloned())));
+    let window = Memo::new(move |_| updates.data.with(|u| u.as_ref().map(|u| u.next_window_ms).unwrap_or(0)));
+    view! {
+        <div class="mini-title">{tr("dk.au.stack")}</div>
+        <div class="form">
+            {switch("dk.au.enable", Some("dk.au.enable_help"), enabled, Callback::new(move |v| if !busy.get_untracked() { save(StackAutoUpdate { enabled: v, ..cur.get_untracked() }) }))}
+            {select_field("dk.au.policy", Some("dk.au.policy_help"), POLICIES, policy, Callback::new(move |v: String| if !busy.get_untracked() { save(StackAutoUpdate { policy: UpdatePolicy::parse(&v), ..cur.get_untracked() }) }))}
+            {move || (enabled.get() && window.get() > 0).then(|| view! { <p class="field-help">{tf("dk.au.next", &[("when", &i18n::short_when(window.get()))])}</p> })}
+            {move || plan.with(|p| p.as_ref().map(verdict_note))}
+            {move || last.with(|l| l.as_ref().map(|l| {
+                let (tone, key) = outcome_text(l.outcome);
+                let mut text = tf(key, &[("when", &i18n::short_when(l.at_ms))]);
+                if let Some(d) = &l.detail {
+                    text = format!("{text} {d}");
+                }
+                ui::note(tone, icons::HISTORY, ui::text(text))
+            }))}
+            {form_error(error)}
+        </div>
+    }
+    .into_any()
 }
 
 // ------------------------------------------------------------------ editor

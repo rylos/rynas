@@ -17,6 +17,7 @@ pub mod backup;
 pub mod cgroup;
 pub mod docker;
 pub mod docker_adopt;
+pub mod docker_auto;
 pub mod error;
 pub mod files;
 pub mod groups;

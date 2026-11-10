@@ -9,7 +9,10 @@ use std::time::Duration;
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
-use rynas_api_types::docker::{DockerSettingsState, DockerStatus, EnginePlan, StackFiles};
+use rynas_api_types::docker::{
+    AutoOutcome, DockerSettingsState, DockerStatus, EnginePlan, StackFiles, StackUpdate,
+    UpdatePolicy, UpdateReport, UpdateVerdict,
+};
 use rynas_api_types::{ApiError, ApplyRequest, TaskInfo, TaskStarted, TaskStatus, error_codes};
 use rynas_auth::ManualClock;
 use rynas_auth::backend::{AuthError, Authenticator, BoxFuture, Identity};
@@ -1237,4 +1240,140 @@ async fn move_of_a_folder_made_a_link_is_refused() {
     }
     assert!(!r.0.lock().unwrap().iter().any(|c| c.starts_with("cp ")));
     assert!(!e.dir.path().join("root/vol1/docker/stacks/app").exists());
+}
+
+/// Compose commands succeed (`docker compose config` answers one service); every line is
+/// recorded. No engine socket: the health check after `up` cannot read the containers.
+struct ComposeOk(Mutex<Vec<String>>);
+
+impl Runner for ComposeOk {
+    fn run(&self, cmd: &Cmd) -> Result<CmdOutput, String> {
+        let line = cmd.display();
+        self.0.lock().unwrap().push(line.clone());
+        let out = if line.contains(" config") {
+            r#"{"services":{"web":{"image":"nginx:1.27.3"}}}"#
+        } else if line.starts_with("dpkg") {
+            "amd64\n"
+        } else {
+            ""
+        };
+        Ok(CmdOutput {
+            code: Some(0),
+            stdout: out.into(),
+            stderr: String::new(),
+        })
+    }
+}
+
+fn web_update() -> StackUpdate {
+    StackUpdate {
+        stack: "web".into(),
+        images: vec!["nginx:1.27.3".into()],
+        enabled: true,
+        verdict: UpdateVerdict::Auto,
+        ..Default::default()
+    }
+}
+
+fn web_stack(e: &Env) {
+    let dir = e.dir.path().join("root/vol1/docker/stacks/web");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("compose.yaml"),
+        "services:\n  web:\n    image: nginx:1.27.3\n",
+    )
+    .unwrap();
+}
+
+async fn report(e: &Env) -> UpdateReport {
+    let (s, b) = call(e, "GET", "/v1/docker/updates", None).await;
+    assert_eq!(s, StatusCode::OK);
+    serde_json::from_slice(&b).unwrap()
+}
+
+/// The `auto_update` part of the `docker` key: validated, entries that say nothing are
+/// dropped, and the report lists no stack while nothing has an update.
+#[tokio::test]
+async fn auto_update_settings_are_checked() {
+    let e = env();
+    let (s, b) = call(
+        &e,
+        "PUT",
+        "/v1/docker/settings",
+        Some(json!({"auto_update": {"window_min": 5}})),
+    )
+    .await;
+    assert_eq!(
+        (s, err(&b).field.as_deref()),
+        (StatusCode::BAD_REQUEST, Some("auto_update.window_min"))
+    );
+    let (s, b) = call(
+        &e,
+        "PUT",
+        "/v1/docker/settings",
+        Some(json!({"auto_update": {"hour": 2, "stacks": {
+            "web": {"enabled": true, "policy": "patch"},
+            "idle": {"enabled": false}
+        }}})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    let st: DockerSettingsState = serde_json::from_slice(&b).unwrap();
+    let p = st.pending.unwrap().auto_update;
+    assert_eq!(p.hour, 2);
+    assert_eq!(p.stacks.keys().cloned().collect::<Vec<_>>(), vec!["web".to_string()]);
+    assert_eq!(p.stacks["web"].policy, Some(UpdatePolicy::Patch));
+    let r = report(&e).await;
+    assert!(r.stacks.is_empty() && r.auto.is_empty());
+}
+
+/// An automatic update whose download fails changes nothing: no `up`, outcome `failed`.
+#[tokio::test]
+async fn auto_update_with_a_failed_download_changes_nothing() {
+    let r = Arc::new(Scripted {
+        calls: Mutex::default(),
+        du_bytes: 1,
+    });
+    let e = env_with(false, r.clone(), Some("vol1"));
+    web_stack(&e);
+    let id = rynasd::docker_auto::start_auto(&e.svc, &web_update(), "rynas").unwrap();
+    let t = wait_task(&e, &id).await;
+    let l = log(&e, &id);
+    assert_eq!(t.status, TaskStatus::Error, "{l}");
+    assert!(l.contains("download failed"), "{l}");
+    let calls = r.calls.lock().unwrap().clone();
+    assert!(!calls.iter().any(|c| c.contains(" up ")), "{calls:?}");
+    let rep = report(&e).await;
+    assert_eq!(rep.auto.len(), 1);
+    assert_eq!(rep.auto[0].outcome, AutoOutcome::Failed);
+    assert_eq!(rep.auto[0].task_id.as_deref(), Some(id.as_str()));
+}
+
+/// A new version that cannot be shown healthy is rolled back: pull, up, health check failed
+/// (no engine answers), then `up` again on the previous images; the stack is not busy
+/// afterwards.
+#[tokio::test]
+async fn auto_update_rolls_back_an_unhealthy_stack() {
+    let r = Arc::new(ComposeOk(Mutex::default()));
+    let e = env_with(false, r.clone(), Some("vol1"));
+    web_stack(&e);
+    let id = rynasd::docker_auto::start_auto(&e.svc, &web_update(), "rynas").unwrap();
+    let t = wait_task(&e, &id).await;
+    let l = log(&e, &id);
+    assert_eq!(t.status, TaskStatus::Error, "{l}");
+    assert!(l.contains("step 4/4: health check"), "{l}");
+    assert!(l.contains("rolling back"), "{l}");
+    let calls = r.0.lock().unwrap().clone();
+    let pulls = calls.iter().filter(|c| c.contains(" pull")).count();
+    let ups = calls.iter().filter(|c| c.contains(" up ")).count();
+    assert_eq!((pulls, ups), (1, 2), "{calls:?}");
+    let rep = report(&e).await;
+    assert_eq!(rep.auto[0].outcome, AutoOutcome::RolledBack);
+    assert!(
+        rep.auto[0].detail.as_deref().unwrap_or("").contains("Docker"),
+        "{:?}",
+        rep.auto
+    );
+    // the busy mark is gone: a second run starts
+    assert!(rynasd::docker_auto::start_auto(&e.svc, &web_update(), "rynas").is_ok());
 }

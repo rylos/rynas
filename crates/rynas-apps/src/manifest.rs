@@ -50,6 +50,11 @@ pub struct AppManifest {
     pub version: Version,
     /// Upstream version of the main image (free text, the tag without the digest).
     pub app_version: String,
+    /// Which jumps of the main image an automatic update may take (`patch`, `minor`,
+    /// `calver-patch`, `notify`); absent: by the tag (calendar versions `calver-patch`,
+    /// other versions `minor`). A stack's own choice wins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_policy: Option<rynas_api_types::docker::UpdatePolicy>,
     /// One line for the catalogue card. The long text is `description.md`.
     pub description: String,
     pub homepage: String,

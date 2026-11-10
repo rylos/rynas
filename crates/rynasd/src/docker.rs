@@ -121,6 +121,24 @@ pub fn normalize(s: DockerSettings) -> Result<DockerSettings, Invalid> {
     {
         return Err(Invalid::at("apps_ssd_volume", "not a valid volume label"));
     }
+    let a = &s.auto_update;
+    range("auto_update.hour", u32::from(a.hour), 0, 23)?;
+    range("auto_update.minute", u32::from(a.minute), 0, 59)?;
+    range("auto_update.window_min", u32::from(a.window_min), 10, 360)?;
+    if a.stacks.len() > 500 {
+        return Err(Invalid::at("auto_update.stacks", "too many stacks"));
+    }
+    if let Some(n) = a.stacks.keys().find(|n| !valid_stack_name(n)) {
+        return Err(Invalid::at(
+            "auto_update.stacks",
+            format!("{n:?} is not a stack name"),
+        ));
+    }
+    let mut s = s;
+    // entries that say nothing are dropped (off, policy by tag)
+    s.auto_update
+        .stacks
+        .retain(|_, v| v.enabled || v.policy.is_some());
     Ok(s)
 }
 
@@ -270,8 +288,15 @@ pub struct DockerSvc {
     engine_task: Mutex<Option<String>>,
     /// Stacks with an action in progress.
     busy: Mutex<HashSet<String>>,
-    report: Mutex<UpdateReport>,
+    pub(crate) report: Mutex<UpdateReport>,
     update_watch: Mutex<UpdateWatch>,
+    /// Automatic updates: results, held downloads, the last window, app candidates
+    /// (`<state>/docker/auto.json`, [`crate::docker_auto`]).
+    pub(crate) auto: Mutex<crate::docker_auto::AutoState>,
+    /// When the next scheduled check is due (ms, 0: not scheduled).
+    pub(crate) next_check_ms: AtomicU64,
+    /// The app catalogue, for the automatic updates of installed apps.
+    pub apps: std::sync::OnceLock<std::sync::Weak<crate::apps::AppsSvc>>,
     generation: AtomicU64,
     live: broadcast::Sender<(&'static str, Arc<str>)>,
     last_stats: Mutex<Option<Arc<str>>>,
@@ -431,6 +456,7 @@ impl DockerSvc {
             tracing::warn!("docker: adopted stacks not loaded: {e}");
             Default::default()
         });
+        let auto = crate::docker_auto::AutoState::load(&state_dir);
         let mut uw = UpdateWatch::default();
         for i in &report.images {
             if let (true, Some(r)) = (i.update_available, &i.remote_digest) {
@@ -453,6 +479,9 @@ impl DockerSvc {
             busy: Mutex::new(HashSet::new()),
             report: Mutex::new(report),
             update_watch: Mutex::new(uw),
+            auto: Mutex::new(auto),
+            next_check_ms: AtomicU64::new(0),
+            apps: std::sync::OnceLock::new(),
             generation: AtomicU64::new(1),
             live,
             last_stats: Mutex::new(None),
@@ -2705,6 +2734,11 @@ async fn snapshot_delete(
 async fn updates_get(State(st): State<DkState>) -> Res<Json<UpdateReport>> {
     let s = dsvc(&st)?;
     let r = s.report.lock().unwrap().clone();
+    let s2 = s.clone();
+    // folders are looked at (which stacks rynas can update): off the async threads
+    let r = tokio::task::spawn_blocking(move || crate::docker_auto::enrich(&s2, r))
+        .await
+        .map_err(Error::internal)?;
     Ok(Json(r))
 }
 
@@ -2718,13 +2752,71 @@ async fn updates_check(State(st): State<DkState>, hd: HeaderMap) -> Res<Response
         .ops
         .tasks
         .spawn("docker.update-check", &who, move |ctx| async move {
-            check_updates(&s2, &ctx).await
+            check_updates(&s2, &ctx, false).await
         })?;
     Ok(accepted(id))
 }
 
-/// Compares the registry digest of every image in use with the local one (no pull).
-pub async fn check_updates(s: &Arc<DockerSvc>, ctx: &TaskCtx) -> Result<(), String> {
+/// The registry digest of `image`: a manifest HEAD to its registry (no pull counted), else
+/// the engine's distribution endpoint. A `429` waits as the registry asks (at most 5
+/// minutes, once) and is retried; `limited` then holds the host and the error is kept for the
+/// other images of that registry.
+async fn remote_digest(
+    reg: Option<&rynas_docker::registry::Registry>,
+    e: &Engine,
+    ctx: &TaskCtx,
+    image: &str,
+    limited: &mut HashMap<String, String>,
+) -> Result<String, String> {
+    use rynas_docker::registry::RegistryError;
+    let host = rynas_docker::registry::host_of(image);
+    if let Some(m) = limited.get(&host) {
+        return Err(m.clone());
+    }
+    let Some(reg) = reg else {
+        return e.registry_digest(image).await;
+    };
+    let mut waited = false;
+    loop {
+        match reg.digest(image).await {
+            Ok(d) => return Ok(d),
+            Err(RegistryError::RateLimited(d)) if !waited && d <= Duration::from_secs(300) => {
+                ctx.log(&format!(
+                    "{host} limits requests: waiting {} s as it asks",
+                    d.as_secs()
+                ));
+                tokio::select! {
+                    _ = tokio::time::sleep(d) => {}
+                    _ = ctx.token().cancelled() => return Err("cancelled".into()),
+                }
+                waited = true;
+            }
+            Err(RegistryError::RateLimited(d)) => {
+                let m = format!(
+                    "{host} limits requests (retry in {} s): checked again next time",
+                    d.as_secs()
+                );
+                limited.insert(host, m.clone());
+                return Err(m);
+            }
+            // a private image or a registry without the header: the engine may know better
+            Err(RegistryError::Unsupported(why)) => {
+                return e
+                    .registry_digest(image)
+                    .await
+                    .map_err(|e2| format!("{why}; through Docker: {e2}"));
+            }
+            Err(RegistryError::Failed(m)) => return Err(m),
+        }
+    }
+}
+
+/// Compares the registry digest of every image in use with the local one (no pull), one
+/// request per distinct image. `spread` (the scheduled check): 1-4 s at random between
+/// requests, so a NAS never bursts at a registry. Also refreshes the installed apps with a
+/// newer catalogue entry. Notifications follow the state: an update notified once per new
+/// digest, resolved when the image is up to date.
+pub async fn check_updates(s: &Arc<DockerSvc>, ctx: &TaskCtx, spread: bool) -> Result<(), String> {
     let e = s.engine().await.map_err(|e| e.2)?;
     let cs = e.containers().await.map_err(|e| e.to_string())?;
     let imgs = e.images().await.map_err(|e| e.to_string())?;
@@ -2746,12 +2838,28 @@ pub async fn check_updates(s: &Arc<DockerSvc>, ctx: &TaskCtx) -> Result<(), Stri
     });
     let used = updates::in_use(rows);
     let n = used.len().max(1);
+    let reg = match rynas_docker::registry::Registry::new() {
+        Ok(r) => Some(r),
+        Err(e) => {
+            ctx.log(&format!("no HTTPS client ({e}): asking Docker for every image"));
+            None
+        }
+    };
+    let mut limited = HashMap::new();
     let mut out = Vec::new();
     for (i, u) in used.into_iter().enumerate() {
         if ctx.is_cancelled() {
             return Err("cancelled".into());
         }
-        let remote = e.registry_digest(&u.image).await;
+        if i > 0 {
+            let pause = if spread {
+                1000 + updates::random_below(3000)
+            } else {
+                100 + updates::random_below(300)
+            };
+            tokio::time::sleep(Duration::from_millis(pause)).await;
+        }
+        let remote = remote_digest(reg.as_ref(), &e, ctx, &u.image, &mut limited).await;
         let line = updates::compare(u, remote);
         match (&line.error, line.update_available) {
             (Some(err), _) => ctx.log(&format!("{}: {err}", line.image)),
@@ -2759,18 +2867,45 @@ pub async fn check_updates(s: &Arc<DockerSvc>, ctx: &TaskCtx) -> Result<(), Stri
             (None, false) => ctx.log(&format!("{}: up to date", line.image)),
         }
         out.push(line);
-        ctx.progress(((i + 1) * 100 / n) as u8);
+        ctx.progress(((i + 1) * 90 / n) as u8);
     }
     for l in &out {
-        if let (true, Some(r)) = (l.update_available, &l.remote_digest)
-            && s.update_watch.lock().unwrap().is_new(&l.image, r)
-        {
-            s.notifier.emit(update_event(l));
+        match (l.update_available, &l.remote_digest, &l.error) {
+            (true, Some(r), _) => {
+                if s.update_watch.lock().unwrap().is_new(&l.image, r) {
+                    s.notifier.emit(update_event(l));
+                }
+            }
+            // up to date now (a failed check says nothing)
+            (false, _, None) => s.resolve_updates(std::slice::from_ref(&l.image)),
+            _ => {}
         }
     }
+    // images no container uses any more
+    let gone: Vec<String> = s
+        .update_watch
+        .lock()
+        .unwrap()
+        .images()
+        .into_iter()
+        .filter(|i| !out.iter().any(|l| &l.image == i))
+        .collect();
+    s.resolve_updates(&gone);
+    if let Some(apps) = s.apps.get().and_then(|w| w.upgrade()) {
+        let c = apps.auto_candidates().await;
+        for a in &c {
+            ctx.log(&format!(
+                "app {}: catalogue update {} → {}",
+                a.stack, a.plan.from_version, a.plan.to_version
+            ));
+        }
+        s.auto_change(|st| st.apps = c);
+    }
+    ctx.progress(100);
     let report = UpdateReport {
         checked_at_ms: now_ms(),
         images: out,
+        ..Default::default()
     };
     let _ = std::fs::create_dir_all(&s.state_dir);
     let _ = std::fs::write(
@@ -2907,8 +3042,31 @@ fn disk_event(full: bool, path: &str, used_pct: f64, limit: u8) -> NewEvent {
     }
 }
 
+impl DockerSvc {
+    /// These images are up to date (or no longer used): their update notifications are
+    /// resolved and a later new digest notifies again.
+    pub(crate) fn resolve_updates(&self, images: &[String]) {
+        for i in images {
+            if self.update_watch.lock().unwrap().forget(i) {
+                self.notifier.emit(update_done_event(i));
+            }
+        }
+    }
+}
+
+fn update_done_event(image: &str) -> NewEvent {
+    let ev = resolved(
+        NotifyCategory::Update,
+        "docker",
+        format!("docker:update:{image}"),
+        format!("Image {image} is up to date"),
+    );
+    field(code(ev, "docker.update_done"), "image", image)
+}
+
+/// An image update (open until the image is up to date: [`DockerSvc::resolve_updates`]).
 fn update_event(u: &ImageUpdate) -> NewEvent {
-    let mut ev = oneshot(
+    let mut ev = firing(
         NotifyCategory::Update,
         NotifySeverity::Info,
         "docker",
@@ -3180,6 +3338,19 @@ mod tests {
         bad(&|s| s.keep_snapshots = 0, "keep_snapshots");
         bad(&|s| s.data_root_full_pct = 100, "data_root_full_pct");
         bad(&|s| s.crash_restarts = 1, "crash_restarts");
+        bad(&|s| s.auto_update.hour = 24, "auto_update.hour");
+        bad(&|s| s.auto_update.window_min = 5, "auto_update.window_min");
+        bad(
+            &|s| {
+                s.auto_update
+                    .stacks
+                    .insert("Bad Name".into(), Default::default());
+            },
+            "auto_update.stacks",
+        );
+        let mut s = DockerSettings::default();
+        s.auto_update.stacks.insert("idle".into(), Default::default());
+        assert!(normalize(s).unwrap().auto_update.stacks.is_empty());
         bad(
             &|s| s.address_pool.base = "10.0.0.1/16".into(),
             "address_pool.base",
@@ -3227,6 +3398,11 @@ mod tests {
         });
         assert_eq!(u.category, NotifyCategory::Update);
         assert_eq!(u.fields["stacks"], "web");
+        let r = update_done_event("nginx:1");
+        assert_eq!(
+            (r.key.as_deref(), r.code.as_str()),
+            (u.key.as_deref(), "docker.update_done")
+        );
     }
 
     #[test]

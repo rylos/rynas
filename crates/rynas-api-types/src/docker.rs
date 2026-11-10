@@ -267,10 +267,108 @@ pub struct DockerSettings {
     /// the folders an entry marks `ssd` (databases); `None`: no suggestion.
     #[serde(default)]
     pub apps_ssd_volume: Option<String>,
+    /// Automatic image updates of chosen stacks (off for every stack by default).
+    #[serde(default)]
+    pub auto_update: AutoUpdateSettings,
 }
 
 fn default_keep() -> u32 {
     5
+}
+
+/// Which version jumps an automatic update may take (D-UPDATES channel C). Versions are read
+/// from the image tag (`v` and suffixes such as `-alpine` normalised, pre-releases never
+/// taken) or, for a floating tag (`latest`, `stable`), from the image label
+/// `org.opencontainers.image.version`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UpdatePolicy {
+    /// Same major and minor (`1.4.2` → `1.4.3`).
+    Patch,
+    /// Same major (`1.4` → `1.5`); with major 0, same minor (`0.4.1` → `0.4.2`).
+    Minor,
+    /// Calendar versions (`2026.11.0` → `2026.11.1`): same year and month.
+    CalverPatch,
+    /// Never automatic: only the notification.
+    Notify,
+}
+
+impl UpdatePolicy {
+    pub const ALL: [UpdatePolicy; 4] = [
+        UpdatePolicy::Patch,
+        UpdatePolicy::Minor,
+        UpdatePolicy::CalverPatch,
+        UpdatePolicy::Notify,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UpdatePolicy::Patch => "patch",
+            UpdatePolicy::Minor => "minor",
+            UpdatePolicy::CalverPatch => "calver-patch",
+            UpdatePolicy::Notify => "notify",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.as_str() == s)
+    }
+}
+
+/// Automatic updates of one stack.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct StackAutoUpdate {
+    #[serde(default)]
+    pub enabled: bool,
+    /// `None`: the catalogue entry's `update_policy`, else by the tag (calendar tags
+    /// `calver-patch`, versions and floating tags `minor`, anything else `notify`).
+    #[serde(default)]
+    pub policy: Option<UpdatePolicy>,
+}
+
+fn default_auto_hour() -> u8 {
+    4
+}
+
+fn default_auto_window() -> u16 {
+    60
+}
+
+/// `docker.auto_update`: the daily window of automatic updates and the stacks that take
+/// them. The image check itself runs every day whatever this says.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AutoUpdateSettings {
+    /// Start of the daily window, local time (0-23).
+    #[serde(default = "default_auto_hour")]
+    pub hour: u8,
+    #[serde(default)]
+    pub minute: u8,
+    /// Length of the window (10-360 minutes): updates start only inside it.
+    #[serde(default = "default_auto_window")]
+    pub window_min: u16,
+    /// Per stack name; a stack not listed is off.
+    #[serde(default)]
+    pub stacks: std::collections::BTreeMap<String, StackAutoUpdate>,
+}
+
+impl Default for AutoUpdateSettings {
+    fn default() -> Self {
+        Self {
+            hour: default_auto_hour(),
+            minute: 0,
+            window_min: default_auto_window(),
+            stacks: Default::default(),
+        }
+    }
+}
+
+impl AutoUpdateSettings {
+    /// The stack's entry, or the default (off, policy by tag).
+    pub fn of(&self, stack: &str) -> StackAutoUpdate {
+        self.stacks.get(stack).cloned().unwrap_or_default()
+    }
 }
 
 impl Default for DockerSettings {
@@ -286,6 +384,7 @@ impl Default for DockerSettings {
             crash_window_min: default_window(),
             preferred_manager: None,
             apps_ssd_volume: None,
+            auto_update: AutoUpdateSettings::default(),
         }
     }
 }
@@ -863,6 +962,109 @@ pub struct UpdateReport {
     /// 0: never checked.
     pub checked_at_ms: u64,
     pub images: Vec<ImageUpdate>,
+    /// When the next automatic check is due (0: not scheduled, e.g. Docker absent).
+    #[serde(default)]
+    pub next_check_ms: u64,
+    /// Every stack with an update, and what its policy does with it (computed when the
+    /// report is read, from the last check and the applied settings).
+    #[serde(default)]
+    pub stacks: Vec<StackUpdate>,
+    /// The last automatic update of each stack.
+    #[serde(default)]
+    pub auto: Vec<AutoResult>,
+    /// Start of the next automatic update window (0: no stack takes automatic updates).
+    #[serde(default)]
+    pub next_window_ms: u64,
+}
+
+/// What the stack's policy does with its update (whether it runs depends on
+/// [`StackUpdate::enabled`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateVerdict {
+    /// Allowed: applied in the next window when automatic updates are on.
+    Auto,
+    /// Decided after the download, from the image version label (floating or short tags).
+    AfterPull,
+    /// The policy does not allow it (see the reason): notification only.
+    #[default]
+    Hold,
+}
+
+/// Why an update is held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HoldReason {
+    /// A new major version.
+    Major,
+    /// A new minor version where the policy allows patches only (or with major 0).
+    Minor,
+    /// A new calendar month (or year) under `calver-patch`.
+    Month,
+    /// The new version is a pre-release.
+    Prerelease,
+    /// Another image variant (`-alpine` to `-bookworm`…).
+    Variant,
+    /// An older version.
+    Downgrade,
+    /// The version cannot be read from the tag or the image label.
+    UnknownVersion,
+    /// The policy is `notify`.
+    Policy,
+    /// The new catalogue entry needs answers or a new package major.
+    NeedsReview,
+    /// rynas cannot update this stack (not in its folder, adopted read-only).
+    NotManaged,
+}
+
+/// One stack's update in [`UpdateReport::stacks`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct StackUpdate {
+    pub stack: String,
+    /// The catalogue app of the stack (its update comes from the catalogue).
+    #[serde(default)]
+    pub app: Option<String>,
+    /// Images (or `service: from → to` for an app) with an update.
+    pub images: Vec<String>,
+    /// The policy that applies (the stack's own, the catalogue's, or by tag).
+    pub policy: Option<UpdatePolicy>,
+    /// Automatic updates are on for the stack (off: notification only, whatever the
+    /// verdict).
+    pub enabled: bool,
+    pub verdict: UpdateVerdict,
+    #[serde(default)]
+    pub reason: Option<HoldReason>,
+    /// Version text of the change when known (`2026.11.0 → 2026.11.1`).
+    #[serde(default)]
+    pub change: Option<String>,
+}
+
+/// How an automatic update ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoOutcome {
+    #[default]
+    Updated,
+    /// The new version failed (pull, start or health): the snapshot was put back.
+    RolledBack,
+    /// The download showed a version the policy does not allow: nothing changed.
+    Held,
+    /// Failed and could not be rolled back (or there was no snapshot).
+    Failed,
+}
+
+/// One entry of [`UpdateReport::auto`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AutoResult {
+    pub stack: String,
+    pub at_ms: u64,
+    pub outcome: AutoOutcome,
+    /// The task that ran it.
+    #[serde(default)]
+    pub task_id: Option<String>,
+    /// Why it failed or was held (English, from the task).
+    #[serde(default)]
+    pub detail: Option<String>,
 }
 
 /// Data of the `docker.changed` event: containers, stacks or images changed (re-read the
@@ -926,6 +1128,17 @@ mod tests {
         assert_eq!(s, DockerSettings::default());
         assert!(s.snapshot_before_update && s.keep_snapshots == 5);
         assert!(serde_json::from_str::<DockerSettings>(r#"{"nope":1}"#).is_err());
+        assert!(s.auto_update.stacks.is_empty() && s.auto_update.hour == 4);
+        let a: AutoUpdateSettings = serde_json::from_str(
+            r#"{"stacks":{"ha":{"enabled":true,"policy":"calver-patch"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(a.of("ha").policy, Some(UpdatePolicy::CalverPatch));
+        assert!(!a.of("other").enabled);
+        for p in UpdatePolicy::ALL {
+            assert_eq!(UpdatePolicy::parse(p.as_str()), Some(p));
+            assert_eq!(serde_json::to_value(p).unwrap(), p.as_str());
+        }
     }
 
     #[test]

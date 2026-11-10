@@ -1087,6 +1087,9 @@ fn main() -> std::io::Result<()> {
             rynasd::docker::spawn_stats(docker.clone());
             let apps = rynasd::apps::AppsSvc::new(docker.clone(), args.apps_dir.clone());
             let _ = apps.web.set(opened.web_access.clone());
+            // the daily image check and the automatic update window (installed apps too)
+            let _ = docker.apps.set(Arc::downgrade(&apps));
+            rynasd::docker_auto::spawn(docker.clone());
             // the catalogue is parsed on the first apps request and dropped when idle
             {
                 let apps = apps.clone();

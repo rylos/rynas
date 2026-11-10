@@ -376,6 +376,17 @@ impl UpdateWatch {
         self.seen.insert(image.to_string(), remote.to_string());
         true
     }
+
+    /// `image` is up to date (or gone): `true` when an update of it had been notified (its
+    /// notification is then resolved). A later new digest notifies again.
+    pub fn forget(&mut self, image: &str) -> bool {
+        self.seen.remove(image).is_some()
+    }
+
+    /// Images with a notified update.
+    pub fn images(&self) -> Vec<String> {
+        self.seen.keys().cloned().collect()
+    }
 }
 
 #[cfg(test)]

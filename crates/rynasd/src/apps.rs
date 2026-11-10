@@ -1443,10 +1443,10 @@ async fn install_task(a: &Arc<AppsSvc>, ctx: &TaskCtx, j: InstallJob) -> Result<
     Ok(())
 }
 
-struct UpdateJob {
-    stack: String,
-    layout: Layout,
-    old: (String, String),
+pub(crate) struct UpdateJob {
+    pub(crate) stack: String,
+    pub(crate) layout: Layout,
+    pub(crate) old: (String, String),
     new: (String, String),
     folders: Vec<FolderPlan>,
     snapshot: bool,
@@ -1455,7 +1455,7 @@ struct UpdateJob {
     to: String,
 }
 
-async fn write_stack(
+pub(crate) async fn write_stack(
     s: &Arc<DockerSvc>,
     l: &Layout,
     stack: &str,
@@ -1477,7 +1477,13 @@ async fn write_stack(
     .await
 }
 
-async fn update_task(s: &Arc<DockerSvc>, ctx: &TaskCtx, j: UpdateJob) -> Result<(), String> {
+/// Runs an app update; `Ok` carries the snapshot taken first (the automatic update rolls
+/// back to it when the new version is not healthy).
+pub(crate) async fn update_task(
+    s: &Arc<DockerSvc>,
+    ctx: &TaskCtx,
+    j: UpdateJob,
+) -> Result<Option<String>, String> {
     ctx.log(&format!(
         "updating stack {} from {} to {}",
         j.stack, j.from, j.to
@@ -1503,10 +1509,10 @@ async fn update_task(s: &Arc<DockerSvc>, ctx: &TaskCtx, j: UpdateJob) -> Result<
     }
     .await;
     match (r, snap) {
-        (Ok(()), _) => {
+        (Ok(()), sn) => {
             ctx.progress(100);
             ctx.log(&format!("{} updated to {}", j.stack, j.to));
-            Ok(())
+            Ok(sn.map(|s| s.id))
         }
         (Err(e), Some(sn)) => {
             ctx.log(&format!(
@@ -1829,75 +1835,7 @@ async fn update_post(
     let a = asvc(&st)?;
     let who = admin(&a, &hd)?;
     let req: AppUpdateRequest = optional_body(&body)?;
-    // the account before the plan: its ids go into the rendered files (never `nobody`)
-    let d2 = a.docker.clone();
-    blocking(move || {
-        d2.ensure_apps_account_blocking(&|m| tracing::info!("apps: {m}"))
-            .map(|_| ())
-    })
-    .await
-    .map_err(Error::internal)?;
-    let (cat, l, d, plan) = a.update_plan(&stack).await?;
-    if plan.downgrade {
-        return Err(conflict(format!(
-            "the catalogue has {} {}, older than the installed {}",
-            plan.app, plan.to_version, plan.from_version
-        )));
-    }
-    if plan.up_to_date {
-        return Err(conflict(format!(
-            "{stack} is up to date ({})",
-            plan.from_version
-        )));
-    }
-    if let Some(f) = plan
-        .missing_values
-        .iter()
-        .find(|f| !req.answers.contains_key(*f))
-    {
-        return Err(Error::invalid(
-            f.clone(),
-            format!("the new version needs a value for {f}"),
-        ));
-    }
-    let app = cat
-        .get(&d.meta.app)
-        .ok_or_else(|| Error::not_found("no such app"))?;
-    let env = rynas_apps::render::parse_env(&d.env);
-    let ids = match (
-        env.get("PUID").and_then(|v| v.parse().ok()),
-        env.get("PGID").and_then(|v| v.parse().ok()),
-    ) {
-        (Some(u), Some(g)) => (u, g),
-        _ => a.apps_ids().unwrap_or((PLACEHOLDER_ID, PLACEHOLDER_ID)),
-    };
-    let bind = env
-        .get("RYNAS_BIND")
-        .cloned()
-        .unwrap_or_else(|| "127.0.0.1".into());
-    let provided = a.provided(&l, &stack, &bind, ids);
-    let r = rynas_apps::plan::prepare_update(
-        app,
-        &cat.source,
-        &provided,
-        &stack,
-        &d.compose,
-        &d.env,
-        &req.answers,
-    )
-    .map_err(render_err)?;
-    let set = a.docker.settings();
-    let job = UpdateJob {
-        stack: stack.clone(),
-        layout: l,
-        old: (d.compose.clone(), d.env.clone()),
-        new: (file_text(&r, COMPOSE_FILE), file_text(&r, ".env")),
-        folders: r.folders.clone(),
-        snapshot: req.snapshot.unwrap_or(set.snapshot_before_update),
-        stop_first: req.stop_first.unwrap_or(set.stop_for_snapshot),
-        from: plan.from_version.clone(),
-        to: plan.to_version.clone(),
-    };
+    let (job, plan) = a.prepare_update_job(&stack, &req).await?;
     let guard = mark_busy(&a.docker, &stack)?;
     audit(
         &who,
@@ -1911,9 +1849,126 @@ async fn update_post(
         .tasks
         .spawn("apps.update", &who, move |ctx| async move {
             let _guard = guard;
-            update_task(&s2, &ctx, job).await
+            update_task(&s2, &ctx, job).await.map(|_| ())
         })?;
     Ok(accepted(id))
+}
+
+impl AppsSvc {
+    /// The update of an installed app, checked and rendered (values migrated, secrets kept):
+    /// what `apps.update` runs. 409 when up to date or for a downgrade; 400 for a missing
+    /// answer.
+    pub(crate) async fn prepare_update_job(
+        &self,
+        stack: &str,
+        req: &AppUpdateRequest,
+    ) -> Res<(UpdateJob, AppUpdatePlan)> {
+        // the account before the plan: its ids go into the rendered files (never `nobody`)
+        let d2 = self.docker.clone();
+        blocking(move || {
+            d2.ensure_apps_account_blocking(&|m| tracing::info!("apps: {m}"))
+                .map(|_| ())
+        })
+        .await
+        .map_err(Error::internal)?;
+        let (cat, l, d, plan) = self.update_plan(stack).await?;
+        if plan.downgrade {
+            return Err(conflict(format!(
+                "the catalogue has {} {}, older than the installed {}",
+                plan.app, plan.to_version, plan.from_version
+            )));
+        }
+        if plan.up_to_date {
+            return Err(conflict(format!(
+                "{stack} is up to date ({})",
+                plan.from_version
+            )));
+        }
+        if let Some(f) = plan
+            .missing_values
+            .iter()
+            .find(|f| !req.answers.contains_key(*f))
+        {
+            return Err(Error::invalid(
+                f.clone(),
+                format!("the new version needs a value for {f}"),
+            ));
+        }
+        let app = cat
+            .get(&d.meta.app)
+            .ok_or_else(|| Error::not_found("no such app"))?;
+        let env = rynas_apps::render::parse_env(&d.env);
+        let ids = match (
+            env.get("PUID").and_then(|v| v.parse().ok()),
+            env.get("PGID").and_then(|v| v.parse().ok()),
+        ) {
+            (Some(u), Some(g)) => (u, g),
+            _ => self.apps_ids().unwrap_or((PLACEHOLDER_ID, PLACEHOLDER_ID)),
+        };
+        let bind = env
+            .get("RYNAS_BIND")
+            .cloned()
+            .unwrap_or_else(|| "127.0.0.1".into());
+        let provided = self.provided(&l, stack, &bind, ids);
+        let r = rynas_apps::plan::prepare_update(
+            app,
+            &cat.source,
+            &provided,
+            stack,
+            &d.compose,
+            &d.env,
+            &req.answers,
+        )
+        .map_err(render_err)?;
+        let set = self.docker.settings();
+        let job = UpdateJob {
+            stack: stack.to_string(),
+            layout: l,
+            old: (d.compose.clone(), d.env.clone()),
+            new: (file_text(&r, COMPOSE_FILE), file_text(&r, ".env")),
+            folders: r.folders.clone(),
+            snapshot: req.snapshot.unwrap_or(set.snapshot_before_update),
+            stop_first: req.stop_first.unwrap_or(set.stop_for_snapshot),
+            from: plan.from_version.clone(),
+            to: plan.to_version.clone(),
+        };
+        Ok((job, plan))
+    }
+
+    /// Installed apps whose catalogue entry is newer, with what the automatic update needs
+    /// to judge them: the plan, the entry's `update_policy` and its main service.
+    pub(crate) async fn auto_candidates(&self) -> Vec<AppCandidate> {
+        let (cat, _) = self.catalog().await;
+        let mut out = Vec::new();
+        for d in self.on_disk() {
+            let Some(app) = cat.get(&d.meta.app) else {
+                continue;
+            };
+            let (policy, main_service) = (app.manifest.update_policy, app.manifest.main_service.clone());
+            let Ok(p) = self.update_plan(&d.stack).await.map(|r| r.3) else {
+                continue;
+            };
+            if p.up_to_date || p.downgrade {
+                continue;
+            }
+            out.push(AppCandidate {
+                stack: d.stack.clone(),
+                policy,
+                main_service,
+                plan: p,
+            });
+        }
+        out
+    }
+}
+
+/// An installed app with a newer catalogue entry ([`AppsSvc::auto_candidates`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct AppCandidate {
+    pub stack: String,
+    pub policy: Option<rynas_api_types::docker::UpdatePolicy>,
+    pub main_service: String,
+    pub plan: AppUpdatePlan,
 }
 
 async fn rollback_post(

@@ -51,6 +51,19 @@ pub fn local_digest(image: &str, repo_digests: &[String]) -> Option<String> {
     })
 }
 
+/// A random number in `0..max` (0 when `max` is 0 or the random source fails): the spread of
+/// registry requests and scheduled runs.
+pub fn random_below(max: u64) -> u64 {
+    if max == 0 {
+        return 0;
+    }
+    let mut b = [0u8; 8];
+    if getrandom::fill(&mut b).is_err() {
+        return 0;
+    }
+    u64::from_le_bytes(b) % max
+}
+
 /// A reference worth checking: a tag (not a digest, not an image id).
 pub fn checkable(image: &str) -> bool {
     !image.is_empty() && !image.starts_with("sha256:") && split_ref(image).1.is_some()

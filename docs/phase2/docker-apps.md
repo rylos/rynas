@@ -167,7 +167,7 @@ Paths are relative to `/api/v1`.
 | GET | `/docker/networks` | — | `Vec<NetworkSummary>` {id, name, driver, scope, subnets, internal, stack?} |
 | GET | `/docker/df` | — | `DockerDiskUsage` {images_bytes, images_reclaimable_bytes, containers_bytes, volumes_bytes, build_cache_bytes}. `docker system df` walks every volume (seconds, wakes sleeping disks): rynasd runs it at most once per 60 s, shared by concurrent requests, and keeps only the totals and volume sizes |
 | GET | `/docker/stats` | — | `DockerStats`: the sampler's last sample, or one sample on demand when nobody listens (CPU reads 0 until the next one) |
-| GET | `/docker/updates` | — | `UpdateReport` {checked_at_ms (0 = never), images [`ImageUpdate` {image, local_digest?, remote_digest?, update_available, error?, stacks, containers}]}. Cheap: the report of the last check, held in memory (loaded from `<state>/docker/updates.json` at start); no registry or engine call. Only `POST /docker/updates/check` refreshes it |
+| GET | `/docker/updates` | — | `UpdateReport` {checked_at_ms (0 = never), images [`ImageUpdate` {image, local_digest?, remote_digest?, update_available, error?, stacks, containers}], next_check_ms, next_window_ms, stacks [`StackUpdate`], auto [`AutoResult`]} (§5.8). Cheap: the report of the last check, held in memory (loaded from `<state>/docker/updates.json` at start), with the stacks' verdicts computed from the applied settings; no registry or engine call. Only a check (`POST /docker/updates/check` or the daily one) refreshes it |
 | POST | `/docker/updates/check` | — | 202 (`docker.update-check`): registry digests compared without pulling; the report lands in `GET /docker/updates` |
 
 #### Shapes worth knowing
@@ -258,7 +258,8 @@ Ranges (400 `invalid_value` with the field):
 | `docker.stack.update` | snapshot (the services' images are recorded with their registry digests; `stop_first` stops the stack during the snapshot), `pull`, `up`. A non-zero exit of `pull` or `up` is a failure (compose's last error line in the message); on failure, an automatic rollback to that snapshot |
 | `docker.stack.rollback` | `down`; a `before-rollback` snapshot of the current folder; the folder swapped with a writable copy of the snapshot; each service's image tagged back (`docker image tag <image_id> <ref>`, or `docker pull <repo>@<digest>` first when the image is gone); `up` |
 | `docker.stack.remove` | `down`; with `delete_files`, the folder (subvolume) and its snapshots are deleted |
-| `docker.update-check` | the registry digest of every tagged image in use (distribution endpoint, no pull) against the local repo digest. New updates are notified once per registry digest; the report is saved in `<state>/docker/updates.json` |
+| `docker.update-check` | the registry digest of every tagged image in use (manifest HEAD, the engine's distribution endpoint as fallback; no pull) against the local repo digest, one request per distinct image; also the installed apps with a newer catalogue entry. New updates are notified once per registry digest and resolved when up to date; the report is saved in `<state>/docker/updates.json` (§5.8) |
+| `docker.auto-update`, `apps.auto-update` | one stack's automatic update (§5.8) |
 
 #### Stacks on disk (for the app catalogue, A1/A2)
 
@@ -317,7 +318,11 @@ Notification codes (source `docker`; texts `nev.docker.*` in en + it):
 | `docker.oom` | oneshot (at most one per container per crash window), app, warning | `container`, `stack` |
 | `docker.crash_loop` / `docker.crash_loop_over` | firing / resolved (key `docker:loop:<container>`), app, error | `container`, `stack`, `restarts`, `minutes` |
 | `docker.disk_full` / `docker.disk_ok` | firing / resolved (key `docker:disk`), storage, warning | `path`, `used_pct`, `limit_pct` |
-| `docker.update_available` | oneshot (key `docker:update:<image>`), update, info | `image`, `stacks` |
+| `docker.update_available` / `docker.update_done` | firing / resolved (key `docker:update:<image>`), update, info; fires once per new registry digest, resolved when the image is up to date or no longer used (since 2026-11-10; a oneshot before) | `image`, `stacks` |
+| `docker.auto_updated` | oneshot (key `docker:auto:<stack>`), update, info | `stack`, `change` |
+| `docker.auto_rolled_back` | oneshot (key `docker:auto:<stack>`), update, warning | `stack`, `reason` |
+| `docker.auto_held` | oneshot (key `docker:auto:<stack>`), update, info: the download showed a version outside the policy | `stack`, `reason` |
+| `docker.auto_failed` | oneshot (key `docker:auto:<stack>`), update, error | `stack`, `reason` |
 
 - **Crash loop.** It counts restarts made by the engine: a `die` followed by a `start`
   without a `stop` or `kill` in between. `crash_restarts` of them within
@@ -341,8 +346,8 @@ and statuses as they are), and the Install button shown while `install_block` is
 with `installed: true` ("Finish the Docker install"). Suggested keys:
 `docker.install_incomplete`, `docker.install_incomplete_hint`, `docker.install_finish`.
 
-Not yet: scheduled update checks, image prune, a per-stack backup export, the Docker page
-and the widget (D2).
+Not yet: image prune, a per-stack backup export, the Docker page and the widget (D2).
+Scheduled update checks and automatic updates: §5.8.
 
 ### 5.2 API — wave A2 (apps, `/api/v1/apps/...`)
 
@@ -1921,6 +1926,121 @@ lines: `stack.adopt`, `stack.import`, `stack.release`, `stack.move`, `stack.edit
 - Choosing which `-f` file the editor edits.
 - Adopting several stacks at once from a parent folder (a Dockhand-style "scan").
 
+### 5.8 Update checks and automatic updates (D-UPDATES channel C, 2026-11-10)
+
+#### Research (2026-11-10)
+
+Docker Hub's usage documentation counts a pull as a `GET` of a manifest; a `HEAD` is not
+counted (anonymous limit: 100 pulls per 6 hours per IP). What's Up Docker and Diun detect
+updates with a manifest `HEAD` and the `Docker-Content-Digest` header; Watchtower (archived
+2025-12) pulled to find out, and updated everything it saw. The digest to compare is the
+index (multi-platform list) digest, the one in the local image's `RepoDigests`, never a
+per-platform manifest digest. Renovate-style rules give the version policy: semver within
+a major (with 0.x, within a minor), calendar versions within a month, never pre-releases,
+the image variant (`-alpine`) kept.
+
+#### Detection
+
+`rynas_docker::registry`: `HEAD https://<registry>/v2/<repo>/manifests/<tag>` with
+`Accept` for the OCI index, the Docker manifest list and both single manifests; a `401`
+gets an anonymous token from the realm of `WWW-Authenticate` (as `docker pull` does for
+public images). A private image or a registry without the header falls back to the engine's
+distribution endpoint. One request per distinct image, 1-4 s apart at random in the
+scheduled check (0.1-0.4 s for "Check now"); a `429` waits the `Retry-After` (at most
+5 minutes, once) and otherwise holds that registry until the next check.
+
+#### Schedule
+
+- The check (`docker.update-check`, user `rynas`) runs 5-15 minutes after rynasd starts, or
+  24 hours after the last check when that is later, then every 24 hours plus up to an hour
+  at random. `UpdateReport.next_check_ms` says when.
+- Notifications follow the state: `docker.update_available` fires once per new registry
+  digest of an image and is resolved (`docker.update_done`) when the image is up to date or
+  no longer used.
+- The window: `docker.auto_update` {hour, minute, window_min 10-360} in the `docker` key
+  (staged and applied like the rest of it, Docker › Overview › settings). Once a day, at a
+  random minute of the first third of the window (at most 20), the stacks that take
+  automatic updates and whose update their policy allows are updated **one at a time**; no
+  new stack starts after the window has ended. A report older than 26 hours is refreshed
+  first. Nothing starts while rynas maintenance runs (tasks `storage.*`, snapshot rollback
+  or restore, replication, `updates.install`, `docker.install`/`migrate`, `ids.remap`,
+  `homes.move`, `power.*`, `config.apply`, `crypt.*`) or while `/proc/mdstat` shows a
+  resync, recovery, reshape or check; the window then waits for the next minute.
+
+#### Policy (`rynas_docker::policy`)
+
+`docker.auto_update.stacks.<stack>` = {enabled (default off), policy?}. The policy is the
+stack's own, else (an app) the catalogue entry's `update_policy`, else by the tag: calendar
+versions (first number 2000-2199, second 1-12) `calver-patch`, versions and floating tags
+`minor`, anything else `notify`.
+
+- Tags are read with the leading `v` dropped and the suffix split off: pre-release words
+  (`rc`, `alpha`, `beta`, `pre`, `dev`, `nightly`…) are never taken; any other suffix is a
+  variant that must stay the same.
+- `patch`: same major and minor; `minor`: same major (major 0: same minor);
+  `calver-patch`: same year and month (`2026.11.0` → `2026.11.1`); `notify`: never.
+- A new digest of a stack's tag: a full version (`1.27.3`) is a rebuild, allowed; a tag
+  precise enough for the policy (`1.27` under `patch`, `16` under `minor`) is allowed; any
+  other (`latest`, `16` under `patch`) is decided **after the download** from the
+  `org.opencontainers.image.version` labels of the old and the new image (missing label:
+  held).
+- An app: every tag change of the catalogue update is judged (the main service with the
+  app's policy, the others by their tag); a new package major, missing answers, an added
+  or removed service are held for review. Its pinned images are not judged again through
+  the digest check.
+- Stacks rynas cannot change (not in its folder, adopted read-only) are held
+  (`not_managed`).
+
+#### One stack (`docker.auto-update`, `apps.auto-update`)
+
+1. pull (a failure: nothing changed, outcome `failed`);
+2. for floating or short tags, the version labels; outside the policy the previous images
+   are tagged back, the stack is untouched, the registry digests are remembered so the
+   same download is not repeated (`held`, in `<state>/docker/auto.json`);
+3. snapshot (the D1 pre-update snapshot, when `snapshot_before_update` is on and the folder
+   is a subvolume);
+4. `up -d`, then the health check (`rynas_docker::health`): every container healthy when
+   its image has a HEALTHCHECK (at most 10 minutes of `starting`), otherwise running with
+   no restart for 120 s; a container that exits 0 without a restart counts as a finished
+   job;
+5. on failure: rollback to the snapshot (`do_rollback`), or without one the previous images
+   tagged back and `up -d`.
+
+An app runs the A2 update flow (`apps.update`: snapshot, new files, pull, up, its own
+rollback when pull or up fails), then the health check and, when that fails, the
+rollback to its snapshot (or the previous files put back). Every run is a task with its
+log, an audit line (`docker apps.auto-update <stack> by rynas`) and a notification
+(`docker.auto_updated` info, `docker.auto_rolled_back` warning, `docker.auto_held` info,
+`docker.auto_failed` error); the last result of each stack is in `UpdateReport.auto`.
+
+#### Shapes
+
+- `StackUpdate` {stack, app?, images (an app: `service: from → to`), policy?, enabled,
+  verdict `auto` · `after_pull` · `hold`, reason? `major` · `minor` · `month` ·
+  `prerelease` · `variant` · `downgrade` · `unknown_version` · `policy` · `needs_review` ·
+  `not_managed`, change?}. The verdict is what the policy does; `enabled` false means
+  notification only whatever it says.
+- `AutoResult` {stack, at_ms, outcome `updated` · `rolled_back` · `held` · `failed`,
+  task_id?, detail?}.
+
+#### UI (Docker)
+
+Stacks: "Checked … · next check …" and "Check for updates" in the toolbar; a stack with an
+update shows "Update available" (images of the digest check or the catalogue), plus
+"Automatic" when it takes automatic updates and the policy allows the update. The stack's
+details have "Automatic updates of this stack": the switch, the policy select ("Default
+(catalogue or tag)", patch, minor, same month, never), what the policy does with the
+pending update and why, the next window and the last automatic result. Saving stages the
+`docker` key and applies it at once (refused while a change of the engine volume is
+staged). The window is in Overview › settings.
+
+#### Open points
+
+- Private registries: the HEAD is anonymous (the engine fallback is anonymous too); the
+  credentials of `/root/.docker/config.json` are not read yet.
+- Floating tags without the version label are always held after the download.
+- The Docker engine itself updates with the Debian packages (System › Updates, channel A).
+
 ## 6. App catalog format (wave A1)
 
 Normative. Code: `crates/rynas-apps` (pure data in, files out; no Docker access). Entries:
@@ -1952,6 +2072,7 @@ Any other file is an error. `<id>` is `[a-z0-9][a-z0-9-]*`, at most 40 character
 | `id`, `name` | identifier (= folder), display name |
 | `version` | package version `MAJOR.MINOR.PATCH`, bumped on every change of the entry; drives migrations and updates |
 | `app_version` | upstream version; the main service's image tag must equal it or start with `<app_version>-` |
+| `update_policy` | optional: which jumps of the main image an automatic update may take, `patch` · `minor` · `calver-patch` · `notify` (§5.8); absent = by the tag (calendar versions `calver-patch`, other versions `minor`). Every entry of the catalogue sets it (Home Assistant and cloudflared `calver-patch`; 0.x apps, Immich, Frigate, Jellyfin, Actual `patch`; the rest `minor`) |
 | `description` | one line (≤ 140 characters) for the card |
 | `homepage`, `source`, `changelog_url` | `https://` URLs (`source` optional) |
 | `license` | SPDX expression of upstream |

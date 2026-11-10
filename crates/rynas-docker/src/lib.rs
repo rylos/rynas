@@ -18,6 +18,8 @@
 //! - [`events`]: Docker events → notification transitions (unhealthy, OOM, crash loop);
 //! - [`stats`]: the aggregated sampler (cgroup v2 files, no per-container API calls);
 //! - [`updates`]: image references and the digest comparison of the update check;
+//! - [`registry`]: the registry digest of a tag by manifest HEAD (no pull counted);
+//! - [`policy`]: which version jumps an automatic update may take, and the update window;
 //! - [`client`]: the bollard client over `/var/run/docker.sock` (whitelisted calls only).
 
 pub mod adopt;
@@ -25,8 +27,11 @@ pub mod client;
 pub mod detect;
 pub mod engine;
 pub mod events;
+pub mod health;
 pub mod install;
 pub mod model;
+pub mod policy;
+pub mod registry;
 pub mod safefs;
 pub mod snapshots;
 pub mod stacks;

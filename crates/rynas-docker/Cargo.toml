@@ -24,6 +24,11 @@ futures-util = { version = "0.3.34", default-features = false, features = ["std"
 # the Docker Engine API over /var/run/docker.sock only: no TLS, no SSH (`pipe` brings
 # hyperlocal for the Unix socket; its named-pipe half is Windows-only)
 bollard = { version = "=0.21.1", default-features = false, features = ["pipe"] }
+# manifest HEAD requests of the update check (the same HTTP stack as rynas-notify and
+# rynas-dns: OpenSSL through native-tls, Debian security updates)
+reqwest = { version = "0.13.5", default-features = false, features = ["native-tls-no-alpn"] }
+# random spread of the registry requests
+getrandom.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

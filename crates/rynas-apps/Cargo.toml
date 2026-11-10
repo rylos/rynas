@@ -7,6 +7,8 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
+# `update_policy` (the enum the Docker side and the UI share)
+rynas-api-types.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
