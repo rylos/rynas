@@ -1976,7 +1976,9 @@ versions (first number 2000-2199, second 1-12) `calver-patch`, versions and floa
 
 - Tags are read with the leading `v` dropped and the suffix split off: pre-release words
   (`rc`, `alpha`, `beta`, `pre`, `dev`, `nightly`…) are never taken; any other suffix is a
-  variant that must stay the same.
+  variant that must stay the same. A trailing number of a suffix word is a build counter,
+  not part of the variant (`-ls45` linuxserver, `-r1`, `-1`): the letters (`ls`, `r`) are
+  the variant, and a newer build of the same version is a patch-level update.
 - `patch`: same major and minor; `minor`: same major (major 0: same minor);
   `calver-patch`: same year and month (`2026.11.0` → `2026.11.1`); `notify`: never.
 - A new digest of a stack's tag: a full version (`1.27.3`) is a rebuild, allowed; a tag
@@ -1993,13 +1995,16 @@ versions (first number 2000-2199, second 1-12) `calver-patch`, versions and floa
 
 #### One stack (`docker.auto-update`, `apps.auto-update`)
 
-1. pull (a failure: nothing changed, outcome `failed`);
+1. pull of the services whose images were judged only (`pull -- <svc…>`, services from
+   `compose config` and the running containers): another image of the stack whose check
+   failed (rate limit, private registry) is neither pulled nor recreated (a failure:
+   nothing changed, outcome `failed`);
 2. for floating or short tags, the version labels; outside the policy the previous images
    are tagged back, the stack is untouched, the registry digests are remembered so the
    same download is not repeated (`held`, in `<state>/docker/auto.json`);
 3. snapshot (the D1 pre-update snapshot, when `snapshot_before_update` is on and the folder
    is a subvolume);
-4. `up -d`, then the health check (`rynas_docker::health`): every container healthy when
+4. `up -d -- <svc…>` (the same services), then the health check (`rynas_docker::health`): every container healthy when
    its image has a HEALTHCHECK (at most 10 minutes of `starting`), otherwise running with
    no restart for 120 s; a container that exits 0 without a restart counts as a finished
    job;
@@ -2012,6 +2017,9 @@ rollback to its snapshot (or the previous files put back). Every run is a task w
 log, an audit line (`docker apps.auto-update <stack> by rynas`) and a notification
 (`docker.auto_updated` info, `docker.auto_rolled_back` warning, `docker.auto_held` info,
 `docker.auto_failed` error); the last result of each stack is in `UpdateReport.auto`.
+One stack may take 45 minutes (`docker_auto::STACK_DEADLINE`): then its task is cancelled
+and, if it still has not ended 2 minutes later, recorded as `failed` with a notification,
+and the window goes on (the scheduled check has a 2-hour limit the same way).
 
 #### Shapes
 

@@ -2261,28 +2261,29 @@ pub(crate) async fn compose(
     l: &Layout,
     a: ComposeAction,
 ) -> Result<(), String> {
-    let native = rynas_docker::under(&s.root, &l.stack(name));
-    let file = rynas_docker::stacks::find_compose(&native);
-    let cmd_of: Box<dyn Fn(ComposeAction) -> Cmd + Send + Sync> =
-        match (file, s.adopted_get(name)) {
-            (Some(file), _) => {
-                let (dir_s, n) = (native.to_string_lossy().into_owned(), name.to_string());
-                Box::new(move |a| compose_cmd(&n, &dir_s, file, None, a))
-            }
-            (None, Some(ad)) => {
-                if ad.read_only {
-                    return Err(format!(
-                        "stack {name} is adopted read-only: Portainer manages its files"
-                    ));
-                }
-                Box::new(crate::docker_adopt::cmd_of(&s.root, name, &ad))
-            }
-            (None, None) => return Err(format!("stack {name} has no compose file")),
-        };
+    compose_for(s, ctx, name, l, a, &[]).await
+}
+
+/// The same for some services only (`pull <svc…>`, `up <svc…>`); empty: the whole stack.
+pub(crate) async fn compose_for(
+    s: &DockerSvc,
+    ctx: &TaskCtx,
+    name: &str,
+    l: &Layout,
+    a: ComposeAction,
+    services: &[String],
+) -> Result<(), String> {
+    let (cmd_of, own_file) = stack_cmd_of(s, name, l)?;
     if a == ComposeAction::Up {
-        prepare_up(s, ctx, cmd_of(ComposeAction::Config), file.is_some().then_some(l)).await?;
+        prepare_up(s, ctx, cmd_of(ComposeAction::Config), own_file.then_some(l)).await?;
     }
-    let out = s.run(ctx, &cmd_of(a)).await?;
+    // `--` keeps a service name from being read as an option
+    let cmd = if services.is_empty() {
+        cmd_of(a)
+    } else {
+        cmd_of(a).arg("--").args(services)
+    };
+    let out = s.run(ctx, &cmd).await?;
     // a failing pull or up must fail the task (and trigger the update's rollback)
     if !out.success() {
         return Err(format!(
@@ -2292,6 +2293,53 @@ pub(crate) async fn compose(
         ));
     }
     Ok(())
+}
+
+/// The compose command builder of a rynas stack, and whether the stack has its own compose
+/// file in its folder (`false`: adopted read-write).
+#[allow(clippy::type_complexity)]
+fn stack_cmd_of(
+    s: &DockerSvc,
+    name: &str,
+    l: &Layout,
+) -> Result<(Box<dyn Fn(ComposeAction) -> Cmd + Send + Sync>, bool), String> {
+    let native = rynas_docker::under(&s.root, &l.stack(name));
+    match (rynas_docker::stacks::find_compose(&native), s.adopted_get(name)) {
+        (Some(file), _) => {
+            let (dir_s, n) = (native.to_string_lossy().into_owned(), name.to_string());
+            Ok((Box::new(move |a| compose_cmd(&n, &dir_s, file, None, a)), true))
+        }
+        (None, Some(ad)) => {
+            if ad.read_only {
+                return Err(format!(
+                    "stack {name} is adopted read-only: Portainer manages its files"
+                ));
+            }
+            Ok((Box::new(crate::docker_adopt::cmd_of(&s.root, name, &ad)), false))
+        }
+        (None, None) => Err(format!("stack {name} has no compose file")),
+    }
+}
+
+/// The services of a rynas stack and their image references, from `docker compose config`.
+pub(crate) async fn stack_services(
+    s: &DockerSvc,
+    ctx: &TaskCtx,
+    name: &str,
+    l: &Layout,
+) -> Result<Vec<(String, Option<String>)>, String> {
+    let (cmd_of, _) = stack_cmd_of(s, name, l)?;
+    let out = s.run(ctx, &cmd_of(ComposeAction::Config)).await?;
+    if !out.success() {
+        return Err(format!(
+            "the compose files are not valid: {}",
+            compose_error(&out.stderr)
+        ));
+    }
+    Ok(parse_config(&out.stdout)?
+        .into_iter()
+        .map(|svc| (svc.name, svc.image))
+        .collect())
 }
 
 /// Before `up`: the `docker-apps` account, and the missing bind folders below the volume

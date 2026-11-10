@@ -28,7 +28,7 @@ use rynas_tasks::{Cmd, TaskCtx};
 use serde::{Deserialize, Serialize};
 
 use crate::apps::AppCandidate;
-use crate::docker::{DockerSvc, audit, compose, current_images, do_rollback, mark_busy, pre_snapshot};
+use crate::docker::{DockerSvc, audit, compose, compose_for, current_images, stack_services, do_rollback, mark_busy, pre_snapshot};
 
 const MIN: u64 = 60_000;
 const DAY: u64 = 24 * 60 * MIN;
@@ -38,6 +38,14 @@ const TICK: Duration = Duration::from_secs(60);
 const STALE_REPORT: u64 = 26 * 60 * MIN;
 /// Interval of the health readings after `up`.
 const HEALTH_POLL: Duration = Duration::from_secs(10);
+/// The most one automatic stack update may take (pull, snapshot, up, health check,
+/// rollback) before it is cancelled and recorded as failed, so a hung command cannot stop
+/// the window and the daily check.
+pub const STACK_DEADLINE: Duration = Duration::from_secs(45 * 60);
+/// The same for the scheduled update check (requests spread out, rate-limit pauses).
+const CHECK_DEADLINE: Duration = Duration::from_secs(2 * 60 * 60);
+/// After a cancellation, how long the task gets to end through its own failure path.
+const CANCEL_GRACE: Duration = Duration::from_secs(2 * 60);
 
 // ---------------------------------------------------------------------------------------------
 // state
@@ -365,13 +373,56 @@ pub fn maintenance(s: &DockerSvc) -> Option<String> {
     None
 }
 
-async fn wait_finished(s: &DockerSvc, id: &str) -> Option<rynas_api_types::TaskInfo> {
+async fn wait_finished(s: &DockerSvc, id: &str, deadline: Duration) -> Waited {
+    wait_task(
+        || s.ops.tasks.get(id),
+        || {
+            let _ = s.ops.tasks.cancel(id);
+        },
+        deadline,
+        CANCEL_GRACE,
+        Duration::from_secs(2),
+    )
+    .await
+}
+
+/// How a waited task ended.
+#[derive(Debug)]
+enum Waited {
+    Finished(rynas_api_types::TaskInfo),
+    /// No longer in the task list.
+    Gone,
+    /// Past its deadline, cancelled, and still not finished after the grace time.
+    TimedOut,
+}
+
+/// Waits for a task (`get`) until `deadline`; then `cancel`s it and gives it `grace` to end
+/// (its own failure path records the outcome) before giving up on it.
+async fn wait_task(
+    get: impl Fn() -> Option<rynas_api_types::TaskInfo>,
+    cancel: impl Fn(),
+    deadline: Duration,
+    grace: Duration,
+    poll: Duration,
+) -> Waited {
+    let t0 = tokio::time::Instant::now();
+    let mut until = t0 + deadline;
+    let mut cancelled = false;
     loop {
-        match s.ops.tasks.get(id) {
-            Some(t) if t.status.is_finished() => return Some(t),
-            None => return None,
-            _ => tokio::time::sleep(Duration::from_secs(2)).await,
+        match get() {
+            Some(t) if t.status.is_finished() => return Waited::Finished(t),
+            None => return Waited::Gone,
+            _ => {}
         }
+        if tokio::time::Instant::now() >= until {
+            if cancelled {
+                return Waited::TimedOut;
+            }
+            cancel();
+            cancelled = true;
+            until = tokio::time::Instant::now() + grace;
+        }
+        tokio::time::sleep(poll).await;
     }
 }
 
@@ -385,9 +436,14 @@ pub async fn scheduled_check(s: &Arc<DockerSvc>) -> bool {
     match s.ops.tasks.spawn("docker.update-check", "rynas", move |ctx| async move {
         crate::docker::check_updates(&s2, &ctx, true).await
     }) {
-        Ok(id) => wait_finished(s, &id)
-            .await
-            .is_some_and(|t| t.status == TaskStatus::Ok),
+        Ok(id) => match wait_finished(s, &id, CHECK_DEADLINE).await {
+            Waited::Finished(t) => t.status == TaskStatus::Ok,
+            Waited::Gone => false,
+            Waited::TimedOut => {
+                tracing::warn!("docker: the scheduled update check did not end in time");
+                false
+            }
+        },
         Err(e) => {
             tracing::warn!("docker: scheduled update check not started: {e}");
             false
@@ -483,7 +539,22 @@ pub async fn run_window(s: &Arc<DockerSvc>, end_ms: u64) {
         }
         match start_auto(s, &u, "rynas") {
             Ok(id) => {
-                wait_finished(s, &id).await;
+                if let Waited::TimedOut = wait_finished(s, &id, STACK_DEADLINE).await {
+                    // the task hangs past its cancellation: record it here and go on
+                    let detail = format!(
+                        "the update did not end within {} minutes and was cancelled",
+                        STACK_DEADLINE.as_secs() / 60
+                    );
+                    tracing::warn!("docker: automatic update of {}: {detail}", u.stack);
+                    s.notifier.emit(auto_event(AutoOutcome::Failed, &u.stack, Some(&detail), u.change.as_deref()));
+                    s.record_auto(AutoResult {
+                        stack: u.stack.clone(),
+                        at_ms: rynas_tasks::now_ms(),
+                        outcome: AutoOutcome::Failed,
+                        task_id: Some(id),
+                        detail: Some(detail),
+                    });
+                }
             }
             Err(e) => tracing::warn!("docker: automatic update of {} not started: {e}", u.stack),
         }
@@ -607,8 +678,19 @@ pub async fn stack_update(s: &Arc<DockerSvc>, ctx: &TaskCtx, u: &StackUpdate) ->
     for i in &before {
         old_labels.insert(i.image.clone(), label_of(s, &i.image_id).await);
     }
+    // only the services whose images the policy judged: another floating image of the stack
+    // (its check failed: rate limit, private registry) is neither pulled nor recreated
+    let config = match stack_services(s, ctx, &u.stack, &l).await {
+        Ok(c) => c,
+        Err(e) => return (AutoOutcome::Failed, Some(e)),
+    };
+    let services = services_of(&config, &before, &u.images);
+    if services.is_empty() {
+        return (AutoOutcome::Failed, Some("no service of the stack uses the updated images".into()));
+    }
+    ctx.log(&format!("services to update: {}", services.join(", ")));
     ctx.log("step 1/4: download the new images");
-    if let Err(e) = compose(s, ctx, &u.stack, &l, ComposeAction::Pull).await {
+    if let Err(e) = compose_for(s, ctx, &u.stack, &l, ComposeAction::Pull, &services).await {
         // the stack still runs the old images: nothing to roll back
         return (AutoOutcome::Failed, Some(format!("download failed: {e}")));
     }
@@ -673,7 +755,7 @@ pub async fn stack_update(s: &Arc<DockerSvc>, ctx: &TaskCtx, u: &StackUpdate) ->
     };
     ctx.progress(45);
     ctx.log("step 3/4: start the new version");
-    let mut r = compose(s, ctx, &u.stack, &l, ComposeAction::Up).await;
+    let mut r = compose_for(s, ctx, &u.stack, &l, ComposeAction::Up, &services).await;
     ctx.progress(60);
     if r.is_ok() {
         ctx.log("step 4/4: health check");
@@ -690,7 +772,7 @@ pub async fn stack_update(s: &Arc<DockerSvc>, ctx: &TaskCtx, u: &StackUpdate) ->
     let back = match &snap {
         Some(sn) => do_rollback(s, ctx, &u.stack, &l, &sn.id).await,
         None => match retag(s, ctx, &before).await {
-            Ok(()) => compose(s, ctx, &u.stack, &l, ComposeAction::Up).await,
+            Ok(()) => compose_for(s, ctx, &u.stack, &l, ComposeAction::Up, &services).await,
             Err(e2) => Err(e2),
         },
     };
@@ -698,6 +780,18 @@ pub async fn stack_update(s: &Arc<DockerSvc>, ctx: &TaskCtx, u: &StackUpdate) ->
         Ok(()) => (AutoOutcome::RolledBack, Some(e)),
         Err(e2) => (AutoOutcome::Failed, Some(format!("{e}; the rollback failed too: {e2}"))),
     }
+}
+
+/// The services of a stack that use one of `images` (the ones the policy judged), sorted:
+/// from the compose model, and from the running containers (the reference they run).
+fn services_of(config: &[(String, Option<String>)], before: &[ServiceImage], images: &[String]) -> Vec<String> {
+    let set: BTreeSet<String> = config
+        .iter()
+        .filter(|(_, image)| image.as_ref().is_some_and(|i| images.contains(i)))
+        .map(|(service, _)| service.clone())
+        .chain(before.iter().filter(|i| images.contains(&i.image)).map(|i| i.service.clone()))
+        .collect();
+    set.into_iter().collect()
 }
 
 /// A catalogue app: the app update flow (snapshot, new files, pull, up; it rolls back by
@@ -933,5 +1027,84 @@ mod tests {
         assert_eq!(e.fields["reason"], "container web is unhealthy");
         assert_eq!(auto_event(AutoOutcome::Updated, "web", None, Some("1 → 2")).severity, NotifySeverity::Info);
         assert_eq!(tag_of("x/y:1.2@sha256:ab").as_deref(), Some("1.2"));
+    }
+
+    #[test]
+    fn only_the_judged_services_are_updated() {
+        let si = |service: &str, image: &str| ServiceImage {
+            service: service.into(),
+            image: image.into(),
+            image_id: format!("sha256:{service}"),
+            digest: None,
+        };
+        let before = vec![
+            si("web", "nginx:1.27"),
+            si("worker", "nginx:1.27"),
+            // a floating image whose check failed: not in the judged list
+            si("db", "postgres:latest"),
+            si("cache", "redis:7"),
+        ];
+        let judged = vec!["nginx:1.27".to_string(), "redis:7".to_string()];
+        assert_eq!(services_of(&[], &before, &judged), vec!["cache", "web", "worker"]);
+        assert!(services_of(&[], &before, &["other:1".to_string()]).is_empty());
+        // services from the compose model (also the ones not running now)
+        let config = vec![
+            ("web".to_string(), Some("nginx:1.27".to_string())),
+            ("db".to_string(), Some("postgres:latest".to_string())),
+            ("proxy".to_string(), Some("nginx:1.27".to_string())),
+            ("built".to_string(), None),
+        ];
+        assert_eq!(services_of(&config, &[], &judged), vec!["proxy", "web"]);
+        assert_eq!(services_of(&config, &before, &judged), vec!["cache", "proxy", "web", "worker"]);
+    }
+
+    #[tokio::test]
+    async fn a_hung_task_is_cancelled_and_given_up() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let running = rynas_api_types::TaskInfo {
+            status: TaskStatus::Running,
+            ..Default::default()
+        };
+        let ms = Duration::from_millis;
+        // never ends, not even after the cancellation
+        let cancelled = AtomicBool::new(false);
+        let w = wait_task(|| Some(running.clone()), || cancelled.store(true, Ordering::Relaxed), ms(30), ms(30), ms(5)).await;
+        assert!(matches!(w, Waited::TimedOut));
+        assert!(cancelled.load(Ordering::Relaxed));
+        // ends through its failure path once cancelled
+        let cancelled = AtomicBool::new(false);
+        let w = wait_task(
+            || {
+                Some(if cancelled.load(Ordering::Relaxed) {
+                    rynas_api_types::TaskInfo {
+                        status: TaskStatus::Cancelled,
+                        ..Default::default()
+                    }
+                } else {
+                    running.clone()
+                })
+            },
+            || cancelled.store(true, Ordering::Relaxed),
+            ms(30),
+            ms(500),
+            ms(5),
+        )
+        .await;
+        assert!(matches!(w, Waited::Finished(t) if t.status == TaskStatus::Cancelled));
+        // a task that ends in time is not cancelled
+        let w = wait_task(
+            || {
+                Some(rynas_api_types::TaskInfo {
+                    status: TaskStatus::Ok,
+                    ..Default::default()
+                })
+            },
+            || panic!("cancelled a finished task"),
+            ms(30),
+            ms(30),
+            ms(5),
+        )
+        .await;
+        assert!(matches!(w, Waited::Finished(_)));
     }
 }

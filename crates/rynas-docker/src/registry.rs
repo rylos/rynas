@@ -96,10 +96,46 @@ fn enc(s: &str) -> String {
         .collect()
 }
 
-/// A small HTTPS client for manifest HEAD requests.
+/// The most a token answer may be (a bearer token is a few KiB).
+const TOKEN_MAX: usize = 64 * 1024;
+
+/// The client of the token requests: the realm comes from the registry's header, so a
+/// redirect elsewhere is not followed (a 3xx is "no anonymous token").
+fn token_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(TIMEOUT)
+        .user_agent(concat!("rynas/", env!("CARGO_PKG_VERSION")))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+/// The body of `r`, refused past `cap` bytes (by `Content-Length` before reading, and while
+/// reading).
+async fn read_capped(mut r: reqwest::Response, cap: usize) -> Result<Vec<u8>, RegistryError> {
+    let too_big = || RegistryError::Failed(format!("token answer: more than {} KiB", cap / 1024));
+    if r.content_length().is_some_and(|n| n > cap as u64) {
+        return Err(too_big());
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = r
+        .chunk()
+        .await
+        .map_err(|e| RegistryError::Failed(format!("token answer: {e}")))?
+    {
+        if body.len() + chunk.len() > cap {
+            return Err(too_big());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+/// A small HTTPS client for manifest HEAD requests (a HEAD answer has no body to read).
 #[derive(Clone)]
 pub struct Registry {
     http: reqwest::Client,
+    token_http: reqwest::Client,
 }
 
 impl Registry {
@@ -109,7 +145,10 @@ impl Registry {
             .user_agent(concat!("rynas/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| e.to_string())?;
-        Ok(Self { http })
+        Ok(Self {
+            http,
+            token_http: token_client()?,
+        })
     }
 
     async fn head(&self, url: &str, token: Option<&str>) -> Result<reqwest::Response, RegistryError> {
@@ -139,7 +178,7 @@ impl Registry {
             }
         }
         let r = self
-            .http
+            .token_http
             .get(&url)
             .send()
             .await
@@ -155,11 +194,8 @@ impl Registry {
                 r.status().as_u16()
             )));
         }
-        let text = r
-            .text()
-            .await
-            .map_err(|e| RegistryError::Failed(format!("token answer: {e}")))?;
-        let v: serde_json::Value = serde_json::from_str(&text)
+        let body = read_capped(r, TOKEN_MAX).await?;
+        let v: serde_json::Value = serde_json::from_slice(&body)
             .map_err(|e| RegistryError::Failed(format!("token answer: {e}")))?;
         v.get("token")
             .or_else(|| v.get("access_token"))
@@ -237,5 +273,45 @@ mod tests {
         assert_eq!(retry_after(Some("120")), Duration::from_secs(120));
         assert_eq!(retry_after(Some("Wed, 21 Oct 2026 07:28:00 GMT")), Duration::from_secs(60));
         assert_eq!(retry_after(Some("99999")), Duration::from_secs(900));
+    }
+
+    /// A one-shot HTTP server answering `answer` to the first request.
+    async fn serve_once(answer: Vec<u8>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut s, _) = l.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = s.read(&mut buf).await;
+            let _ = s.write_all(&answer).await;
+            let _ = s.shutdown().await;
+        });
+        format!("http://{addr}/token")
+    }
+
+    #[tokio::test]
+    async fn token_answers_are_capped_and_not_redirected() {
+        let c = token_client().unwrap();
+        // a redirect is handed back, not followed
+        let url = serve_once(
+            b"HTTP/1.1 302 Found\r\nLocation: http://192.0.2.1/x\r\nContent-Length: 0\r\n\r\n".to_vec(),
+        )
+        .await;
+        assert_eq!(c.get(&url).send().await.unwrap().status().as_u16(), 302);
+        // a small answer is read
+        let url = serve_once(b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\n{\"token\":\"t\"}".to_vec()).await;
+        let r = c.get(&url).send().await.unwrap();
+        assert_eq!(read_capped(r, TOKEN_MAX).await.unwrap(), b"{\"token\":\"t\"}");
+        // too long by Content-Length
+        let url = serve_once(b"HTTP/1.1 200 OK\r\nContent-Length: 70000\r\n\r\n".to_vec()).await;
+        let r = c.get(&url).send().await.unwrap();
+        assert!(read_capped(r, TOKEN_MAX).await.is_err());
+        // too long without Content-Length (read until the connection closes)
+        let mut big = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_vec();
+        big.extend(std::iter::repeat_n(b'a', TOKEN_MAX + 1));
+        let url = serve_once(big).await;
+        let r = c.get(&url).send().await.unwrap();
+        assert!(read_capped(r, TOKEN_MAX).await.is_err());
     }
 }

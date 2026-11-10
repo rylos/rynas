@@ -203,14 +203,23 @@ fn install(
     };
     let target = dir.join(idx.serial.to_string());
     if fs::symlink_metadata(&target).is_ok() {
-        // a leftover of an interrupted switch: never the one in use (its serial is lower)
+        // a leftover of an interrupted switch, or the damaged catalogue in use downloaded
+        // again at the same serial (the one in use is never replaced by a valid one)
         fs::remove_dir_all(&target).map_err(|e| io("remove a leftover", e))?;
     }
     fs::rename(&tmp, &target).map_err(|e| io("rename the new catalogue", e))?;
-    let previous = link_serial(dir, CURRENT).map(|(s, _)| s);
+    // the same serial again: `previous` stays as it is
+    let previous = link_serial(dir, CURRENT)
+        .map(|(s, _)| s)
+        .filter(|s| *s != idx.serial);
     if let Some(p) = previous {
         switch(dir, PREVIOUS, p)?;
     }
+    let kept = previous.or_else(|| {
+        link_serial(dir, PREVIOUS)
+            .map(|(s, _)| s)
+            .filter(|s| *s != idx.serial)
+    });
     switch(dir, CURRENT, idx.serial)?;
     if let Ok(d) = fs::File::open(dir) {
         let _ = d.sync_all();
@@ -220,7 +229,7 @@ fn install(
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
             let keep = name == idx.serial.to_string()
-                || previous.is_some_and(|p| name == p.to_string())
+                || kept.is_some_and(|p| name == p.to_string())
                 || matches!(name.as_str(), CURRENT | PREVIOUS | STATE);
             let numbered = name.parse::<u64>().is_ok() || name.starts_with(".new-");
             if !keep && numbered && e.file_type().is_ok_and(|t| t.is_dir()) {
@@ -271,6 +280,13 @@ impl Online {
             let index = read_index(&dir)?;
             Some(Active { serial, dir, index })
         })
+    }
+
+    /// The serial of `current` when it is there and its index loads with that serial (a
+    /// missing or damaged `current` is downloaded again even at the same serial).
+    fn current_serial(&self) -> Option<u64> {
+        let (serial, dir) = link_serial(&self.dir, CURRENT)?;
+        read_index(&dir).filter(|i| i.serial == serial).map(|_| serial)
     }
 
     /// What changes when the catalogue in use changes (for the reload stamp).
@@ -419,9 +435,13 @@ impl Online {
         let index_url = format!("{base}{INDEX}");
         let client = self.client()?;
         let active = self.active();
+        let current = self.current_serial();
         let validators = {
             let st = self.state.lock().unwrap();
-            if active.is_some() && st.url.as_deref() == Some(index_url.as_str()) {
+            // a 304 only means something when `current` is the catalogue of that answer
+            if current.is_some_and(|c| st.serial == Some(c))
+                && st.url.as_deref() == Some(index_url.as_str())
+            {
                 (st.etag.clone(), st.last_modified.clone())
             } else {
                 (None, None)
@@ -472,10 +492,13 @@ impl Online {
             st.etag = got.etag.clone();
             st.last_modified = got.last_modified.clone();
         };
-        if fresh == Fresh::Same {
+        if fresh == Fresh::Same && current == Some(idx.serial) {
             log("this catalogue is already in use");
             remember(&mut self.state.lock().unwrap());
             return Ok(Outcome::Unchanged(idx.serial));
+        }
+        if fresh == Fresh::Same {
+            log("the catalogue in use is missing or damaged: downloading it again");
         }
         let url = ol::archive_url(&index_url, &idx.archive, self.allow_http)?;
         log(&format!(

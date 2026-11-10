@@ -202,3 +202,35 @@ async fn no_key_never_downloads() {
     assert_eq!(o.check(&base, RUNNING, &|_| {}).await, Err(OnlineError::NoKey));
     assert!(o.active().is_none());
 }
+
+#[tokio::test]
+async fn a_damaged_current_catalogue_is_downloaded_again() {
+    let (base, files) = serve().await;
+    let t = tempfile::tempdir().unwrap();
+    let dir: PathBuf = t.path().join("catalog");
+    let key = TestKey::new(3);
+    let o = Online::new_for_tests(dir.clone(), &[&key.public()]);
+    let log = |_: &str| {};
+    publish(&files, t.path(), 3, &key, false, false);
+    o.check(&base, RUNNING, &log).await.unwrap();
+    publish(&files, t.path(), 4, &key, false, false);
+    o.check(&base, RUNNING, &log).await.unwrap();
+    assert_eq!(link(&dir, "previous").as_deref(), Some("3"));
+
+    // the index of `current` is damaged: same serial, fetched again (no 304, no "in use")
+    fs::write(dir.join("4/index.json"), b"{broken").unwrap();
+    let r = o.check(&base, RUNNING, &log).await.unwrap();
+    assert_eq!(r, Outcome::Updated { serial: 4, previous: None, skipped: vec![] });
+    assert_eq!(o.active().unwrap().serial, 4);
+    assert_eq!(link(&dir, "previous").as_deref(), Some("3"));
+    assert_eq!(numbered(&dir), ["3", "4"]);
+    // and in use again afterwards
+    assert_eq!(o.check(&base, RUNNING, &log).await.unwrap(), Outcome::NotModified);
+
+    // `current` missing altogether (the previous one would load)
+    fs::remove_file(dir.join("current")).unwrap();
+    let r = o.check(&base, RUNNING, &log).await.unwrap();
+    assert_eq!(r, Outcome::Updated { serial: 4, previous: None, skipped: vec![] });
+    assert_eq!(link(&dir, "current").as_deref(), Some("4"));
+    assert_eq!(link(&dir, "previous").as_deref(), Some("3"));
+}

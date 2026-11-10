@@ -5,7 +5,9 @@
 //! `org.opencontainers.image.version` of the old and the new image. Rules:
 //!
 //! - a leading `v` is dropped; what follows the first `-` or `+` is a suffix: a pre-release
-//!   (`rc1`, `beta`…) or a variant (`alpine`, `noble`) that must not change;
+//!   (`rc1`, `beta`…) or a variant (`alpine`, `noble`) that must not change; a trailing
+//!   number of a suffix word (`-ls45`, `-r1`, `-1`) is a build counter, not part of the
+//!   variant: a newer build of the same version is a patch-level update;
 //! - [`UpdatePolicy::Patch`]: same major and minor; [`UpdatePolicy::Minor`]: same major (with
 //!   major 0 also the same minor); [`UpdatePolicy::CalverPatch`]: same year and month
 //!   (`2026.11.0` → `2026.11.1`); [`UpdatePolicy::Notify`]: never;
@@ -27,8 +29,12 @@ pub enum TagVersion {
         calver: bool,
         /// The suffix is a pre-release.
         pre: bool,
-        /// The variant suffix (`alpine`, `noble`, `apache`), pre-release words removed.
+        /// The variant suffix (`alpine`, `noble`, `apache`, `ls` of `-ls45`), pre-release
+        /// words and build counters removed.
         variant: String,
+        /// Build counters of the suffix (`45` of `-ls45`, `1` of `-r1` or `-1`): a newer
+        /// build of the same version, compared after the version numbers.
+        build: Vec<u64>,
     },
     /// Letters only (`latest`, `stable`, `lts`, `main`).
     Floating,
@@ -79,16 +85,28 @@ pub fn parse_tag(tag: &str) -> TagVersion {
     let nums: Vec<u64> = parts.iter().filter_map(|p| p.parse().ok()).collect();
     let mut pre = false;
     let mut variant = Vec::new();
+    let mut build = Vec::new();
     for w in suffix.split(['-', '+', '_']).filter(|w| !w.is_empty()) {
         if is_pre_word(w) {
             pre = true;
-        } else {
-            // a variant word must start with a letter (`14-vectorchord0.4.3` stays a variant)
-            if !w.starts_with(|c: char| c.is_ascii_alphabetic()) {
-                return TagVersion::Unknown;
-            }
-            variant.push(w.to_ascii_lowercase());
+            continue;
         }
+        // a build counter: `1` (`-1`), `ls45` (linuxserver), `r1`; the letters are the
+        // variant, the trailing number is build metadata (a newer build of the same version)
+        let letters = w.len() - w.trim_start_matches(|c: char| c.is_ascii_alphabetic()).len();
+        let digits = &w[letters..];
+        if !digits.is_empty() && digits.len() <= 9 && digits.bytes().all(|b| b.is_ascii_digit()) {
+            if letters > 0 {
+                variant.push(w[..letters].to_ascii_lowercase());
+            }
+            build.push(digits.parse().unwrap_or(0));
+            continue;
+        }
+        // a variant word must start with a letter (`14-vectorchord0.4.3` stays a variant)
+        if letters == 0 {
+            return TagVersion::Unknown;
+        }
+        variant.push(w.to_ascii_lowercase());
     }
     let calver = nums.len() >= 2 && (2000..2200).contains(&nums[0]) && (1..=12).contains(&nums[1]);
     TagVersion::Version {
@@ -96,6 +114,7 @@ pub fn parse_tag(tag: &str) -> TagVersion {
         calver,
         pre,
         variant: variant.join("-"),
+        build,
     }
 }
 
@@ -164,12 +183,14 @@ pub fn judge_versions(policy: UpdatePolicy, from: &str, to: &str) -> Verdict {
             calver: ca,
             pre: pa,
             variant: va,
+            build: ba,
         },
         TagVersion::Version {
             nums: b,
             calver: cb,
             pre: pb,
             variant: vb,
+            build: bb,
         },
     ) = (parse_tag(from), parse_tag(to))
     else {
@@ -182,7 +203,13 @@ pub fn judge_versions(policy: UpdatePolicy, from: &str, to: &str) -> Verdict {
         return Verdict::Hold(HoldReason::Variant);
     }
     let n = a.len().max(b.len());
-    let cmp = (0..n).map(|i| num(&a, i).cmp(&num(&b, i))).find(|o| o.is_ne());
+    // version numbers first, then the build counters (`-ls45` → `-ls46` is a newer build of
+    // the same version: a patch-level change every policy but `notify` takes)
+    let builds = ba.len().max(bb.len());
+    let cmp = (0..n)
+        .map(|i| num(&a, i).cmp(&num(&b, i)))
+        .chain((0..builds).map(|i| num(&ba, i).cmp(&num(&bb, i))))
+        .find(|o| o.is_ne());
     if cmp == Some(std::cmp::Ordering::Greater) {
         return Verdict::Hold(HoldReason::Downgrade);
     }
@@ -246,7 +273,35 @@ mod tests {
             calver,
             pre,
             variant: variant.into(),
+            build: Vec::new(),
         }
+    }
+
+    #[test]
+    fn build_counters() {
+        let built = |nums: &[u64], variant: &str, build: &[u64]| TagVersion::Version {
+            nums: nums.to_vec(),
+            calver: false,
+            pre: false,
+            variant: variant.into(),
+            build: build.to_vec(),
+        };
+        assert_eq!(parse_tag("1.2.3-ls45"), built(&[1, 2, 3], "ls", &[45]));
+        assert_eq!(parse_tag("3.19.1-r1"), built(&[3, 19, 1], "r", &[1]));
+        assert_eq!(parse_tag("2.4.1-1"), built(&[2, 4, 1], "", &[1]));
+        assert_eq!(parse_tag("1.2.3-alpine-ls7"), built(&[1, 2, 3], "alpine-ls", &[7]));
+        // linuxserver: a newer build of the same version is taken even by `patch`
+        assert_eq!(judge_versions(Patch, "1.2.3-ls45", "1.2.3-ls46"), Verdict::Auto);
+        assert_eq!(judge_versions(Minor, "1.2.3-ls45", "1.3.0-ls1"), Verdict::Auto);
+        assert_eq!(judge_versions(Patch, "1.2.3-ls45", "1.3.0-ls1"), Verdict::Hold(HoldReason::Minor));
+        assert_eq!(judge_versions(Minor, "1.2.3-ls46", "1.2.3-ls45"), Verdict::Hold(HoldReason::Downgrade));
+        assert_eq!(judge_versions(Patch, "2.4.1-1", "2.4.1-2"), Verdict::Auto);
+        assert_eq!(judge_versions(Patch, "3.19.1-r1", "3.19.1-r2"), Verdict::Auto);
+        // the letters stay a variant
+        assert_eq!(judge_versions(Minor, "1.2.3-ls45", "1.2.4-r1"), Verdict::Hold(HoldReason::Variant));
+        assert_eq!(judge_versions(Minor, "1.2.3-ls45", "1.2.4"), Verdict::Hold(HoldReason::Variant));
+        assert_eq!(judge_versions(Notify, "1.2.3-ls45", "1.2.3-ls46"), Verdict::Hold(HoldReason::Policy));
+        assert_eq!(default_policy("2.4.1-1"), Minor);
     }
 
     #[test]

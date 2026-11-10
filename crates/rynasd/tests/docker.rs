@@ -485,7 +485,9 @@ impl Runner for Scripted {
             "docker" if line.contains(" pull") => {
                 fail("Error response from daemon: manifest unknown\n")
             }
-            "docker" if line.contains(" config") => ok(r#"{"services":{"web":{"image":"x"}}}"#),
+            "docker" if line.contains(" config") => {
+                ok(r#"{"services":{"web":{"image":"nginx:1.27.3"}}}"#)
+            }
             _ => ok(""),
         })
     }
@@ -1367,6 +1369,14 @@ async fn auto_update_rolls_back_an_unhealthy_stack() {
     let pulls = calls.iter().filter(|c| c.contains(" pull")).count();
     let ups = calls.iter().filter(|c| c.contains(" up ")).count();
     assert_eq!((pulls, ups), (1, 2), "{calls:?}");
+    // only the services whose images the policy judged are pulled and recreated
+    assert!(
+        calls
+            .iter()
+            .filter(|c| c.contains(" pull") || c.contains(" up "))
+            .all(|c| c.ends_with(" -- web")),
+        "{calls:?}"
+    );
     let rep = report(&e).await;
     assert_eq!(rep.auto[0].outcome, AutoOutcome::RolledBack);
     assert!(
