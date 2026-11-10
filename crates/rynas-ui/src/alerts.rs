@@ -2,7 +2,7 @@
 //! hardware status, storage overview). Pure functions: the notification center and the
 //! dashboard widgets localize the result, the tests run on the host.
 
-use rynas_api_types::{HardwareStatus, MetricsSample, RaidArray, StorageOverview};
+use rynas_api_types::{Filesystem, HardwareStatus, MetricsSample, RaidArray, StorageOverview};
 
 use crate::i18n::tf;
 use crate::ui::{Tone, temp_limits, usage_tone};
@@ -72,6 +72,12 @@ pub fn is_network_fs(fstype: &str) -> bool {
     matches!(fstype, "cifs" | "smb3" | "smbfs" | "nfs" | "nfs4" | "fuse.sshfs" | "sshfs" | "9p" | "ceph" | "glusterfs" | "fuse.glusterfs" | "davfs" | "fuse.rclone")
 }
 
+/// A volume of the NAS: local and not on a removable/USB disk. A full USB disk is the
+/// owner's business, not a storage problem: it is listed apart and counts for nothing.
+pub fn is_nas_volume(f: &Filesystem) -> bool {
+    !is_network_fs(&f.fstype) && !f.removable
+}
+
 pub fn fs_pct(used: u64, size: u64) -> f64 {
     if size == 0 { 0.0 } else { used as f64 * 100.0 / size as f64 }
 }
@@ -81,7 +87,7 @@ pub fn storage_health(st: &StorageOverview) -> (Tone, &'static str) {
     let arrays: Vec<Tone> = st.arrays.iter().map(|a| array_status(a).0).collect();
     if arrays.contains(&Tone::Err) {
         (Tone::Err, "h.err")
-    } else if arrays.contains(&Tone::Warn) || st.filesystems.iter().filter(|f| !is_network_fs(&f.fstype)).any(|f| usage_tone(fs_pct(f.used, f.size)) == Tone::Err) {
+    } else if arrays.contains(&Tone::Warn) || st.filesystems.iter().filter(|f| is_nas_volume(f)).any(|f| usage_tone(fs_pct(f.used, f.size)) == Tone::Err) {
         (Tone::Warn, "h.warn")
     } else if arrays.contains(&Tone::Info) {
         (Tone::Info, "h.syncing")
@@ -179,7 +185,7 @@ pub fn derive(
                 route: "/storage",
             });
         }
-        for f in st.filesystems.iter().filter(|f| !is_network_fs(&f.fstype)) {
+        for f in st.filesystems.iter().filter(|f| is_nas_volume(f)) {
             let pct = fs_pct(f.used, f.size);
             let tone = usage_tone(pct);
             if tone == Tone::Ok {
@@ -208,7 +214,30 @@ pub fn derive(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rynas_api_types::{Bay, Fan, Filesystem, Temperature};
+    use rynas_api_types::{Bay, Fan, Temperature};
+
+    #[test]
+    fn a_full_usb_disk_is_not_a_storage_problem() {
+        let mut st = StorageOverview {
+            arrays: vec![RaidArray { name: "root".into(), level: "btrfs raid1".into(), state: "clean".into(), members: vec!["sda2".into(), "sdb2".into()], ..Default::default() }],
+            filesystems: vec![
+                Filesystem { mountpoint: "/".into(), fstype: "btrfs".into(), size: 100, used: 30, ..Default::default() },
+                Filesystem { mountpoint: "/media/Elements".into(), fstype: "fuseblk".into(), size: 100, used: 99, removable: true, ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(storage_health(&st), (Tone::Ok, "h.ok"));
+        assert!(derive(None, None, Some(&st), 0.0, &[]).is_empty());
+        // a degraded btrfs RAID warns like an md array
+        st.arrays[0].state = "degraded".into();
+        assert_eq!(storage_health(&st), (Tone::Warn, "h.warn"));
+        let a = derive(None, None, Some(&st), 0.0, &[]);
+        assert_eq!(a[0].key, "array:root:degraded");
+        // the same disk, not removable: a full volume
+        st.arrays[0].state = "clean".into();
+        st.filesystems[1].removable = false;
+        assert_eq!(storage_health(&st), (Tone::Warn, "h.warn"));
+    }
 
     #[test]
     fn fan_labels_go_through_the_dictionary() {

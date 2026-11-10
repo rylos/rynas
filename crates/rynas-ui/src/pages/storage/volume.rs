@@ -692,7 +692,7 @@ pub fn disk_checklist(disks: Vec<rynas_api_types::storage::DiskSummary>, chosen:
             {disks.into_iter().map(|d| {
                 let name = d.name.clone();
                 let n2 = name.clone();
-                let (htone, hkey) = health(d.health);
+                let (htone, hkey) = super::disk_health(&d);
                 view! {
                     <li>
                         <label class="pick">

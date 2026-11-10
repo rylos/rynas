@@ -398,6 +398,8 @@ v.none	Nessun volume
 v.none_text	Non è stato trovato alcun file system montato.
 v.network	{n} mount di rete
 v.more	Altri {n} in Archiviazione
+v.removable	{n} su dischi USB o rimovibili
+v.removable_hint	Non sono volumi del NAS: non contano per lo stato dello storage.
 h.sub_ok	Nessun problema rilevato
 h.sub_sync	Ridondanza in ricostruzione
 h.sub_warn	Controlla i dettagli in Archiviazione
@@ -871,6 +873,8 @@ sto.scrub_running	Pulizia dati in corso
 health.healthy	Integro
 sto.h.warning	Avviso
 sto.h.failing	In avaria
+sto.h.no_smart	Non disponibile
+sto.h.no_smart_hint	Questo dispositivo non ha SMART (o l'adattatore USB non lo trasmette): non se ne può leggere lo stato di salute.
 health.degraded	Degradato
 sto.a.failed	Arrestato
 sto.a.inactive	Inattivo

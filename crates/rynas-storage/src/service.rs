@@ -81,6 +81,9 @@ struct FsCache {
 #[derive(Default)]
 struct Cache {
     smart: HashMap<String, SmartEntry>,
+    /// Disks smartctl found without SMART: kernel name → (serial, when, ms). Asked again
+    /// only after [`Storage::smart_max_age`].
+    no_smart: HashMap<String, (String, u64)>,
     md: HashMap<String, MdCache>,
     fs: HashMap<String, FsCache>,
     /// The last full inventory and when it was taken (ms): shared by the list views, the
@@ -369,6 +372,9 @@ impl Storage {
         if asleep(*power) {
             return cached;
         }
+        if cached.is_none() && !force && self.smart_unsupported(d) {
+            return None;
+        }
         let nvme = disk_kind(d) == DiskKind::Nvme;
         let mut args: Vec<&str> = smart::smartctl_args(nvme).to_vec();
         args.push(&d.path);
@@ -382,22 +388,59 @@ impl Storage {
                     data: *data,
                     serial,
                 };
-                self.cache
-                    .lock()
-                    .unwrap()
-                    .smart
-                    .insert(d.kname.clone(), e.clone());
+                let mut c = self.cache.lock().unwrap();
+                c.no_smart.remove(&d.kname);
+                c.smart.insert(d.kname.clone(), e.clone());
                 Some(e)
             }
             SmartRead::Asleep(p) => {
                 *power = p;
                 cached
             }
+            SmartRead::Unsupported(m) => {
+                tracing::debug!("smartctl {}: no SMART: {m}", d.path);
+                let mut c = self.cache.lock().unwrap();
+                c.smart.remove(&d.kname);
+                c.no_smart.insert(d.kname.clone(), (serial, now));
+                None
+            }
             SmartRead::Failed(m) => {
                 tracing::debug!("smartctl {}: {m}", d.path);
                 cached
             }
         }
+    }
+
+    /// smartctl found no SMART on this disk (the same drive) within [`Self::smart_max_age`].
+    fn smart_unsupported(&self, d: &BlockDev) -> bool {
+        let now = self.host.now_ms();
+        let serial = d.serial.as_deref().unwrap_or_default();
+        self.cache
+            .lock()
+            .unwrap()
+            .no_smart
+            .get(&d.kname)
+            .is_some_and(|(s, at)| {
+                s == serial
+                    && now.saturating_sub(*at) < self.smart_max_age.as_millis() as u64
+            })
+    }
+
+    /// The summary of a disk with what only the service knows (no SMART at all).
+    #[allow(clippy::too_many_arguments)]
+    fn summary_of(
+        &self,
+        d: &BlockDev,
+        g: &BlockGraph,
+        smart: Option<&SmartEntry>,
+        acks: Option<&DiskAcks>,
+        power: PowerState,
+        now: u64,
+        zoned: bool,
+    ) -> DiskSummary {
+        let mut s = inventory::summary(d, g, smart, acks, power, now, zoned);
+        s.smart_unsupported = smart.is_none() && self.smart_unsupported(d);
+        s
     }
 
     fn summaries(&self, g: &BlockGraph) -> Vec<(DiskSummary, Option<SmartEntry>)> {
@@ -415,7 +458,7 @@ impl Storage {
                         let zoned = self.zoned(&d.kname);
                         let acks = self.acks_for(d, dups);
                         (
-                            inventory::summary(d, g, smart.as_ref(), acks.as_ref(), power, now, zoned),
+                            self.summary_of(d, g, smart.as_ref(), acks.as_ref(), power, now, zoned),
                             smart,
                         )
                     })
@@ -467,7 +510,7 @@ impl Storage {
         let mut power = self.power_of(d);
         let smart = self.smart_for(d, &mut power, false);
         let acks = self.acks_for(d, &duplicate_serials(&g));
-        let summary = inventory::summary(
+        let summary = self.summary_of(
             d,
             &g,
             smart.as_ref(),
@@ -999,6 +1042,28 @@ mod tests {
         let d = s.disk("sdb").unwrap();
         assert_eq!(d.summary.power_state, PowerState::Standby);
         assert!(d.smart.is_none());
+    }
+
+    #[test]
+    fn device_without_smart_is_not_asked_again() {
+        let mut h = host();
+        let argv = "smartctl --json=c -n standby -a -g apm -g wcache /dev/sde";
+        h.cmd(
+            argv,
+            1,
+            r#"{"smartctl":{"exit_status":1,"messages":[{"string":"/dev/sde: Unknown USB bridge [0x1005:0xb155 (0x100)]"}]}}"#,
+        );
+        let h = Arc::new(h);
+        let s = Storage::new(h.clone());
+        let disks = s.disks().unwrap();
+        let sde = disks.iter().find(|d| d.name == "sde").unwrap();
+        assert_eq!(sde.health, HealthVerdict::Unknown);
+        assert!(sde.smart_unsupported);
+        // the others have SMART, or have not been read (sdd sleeps): not "unsupported"
+        assert!(disks.iter().filter(|d| d.name != "sde").all(|d| !d.smart_unsupported));
+        assert!(s.disk("sde").unwrap().summary.smart_unsupported);
+        let n = h.ran().iter().filter(|c| *c == argv).count();
+        assert_eq!(n, 1, "{:?}", h.ran());
     }
 
     #[test]

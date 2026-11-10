@@ -306,6 +306,15 @@ pub fn health(h: HealthVerdict) -> (Tone, &'static str) {
     }
 }
 
+/// A disk's health in words: "Not available" for a device without SMART, where "Unknown"
+/// would suggest a reading still to come.
+pub fn disk_health(d: &DiskSummary) -> (Tone, &'static str) {
+    match d.health {
+        HealthVerdict::Unknown if d.smart_unsupported => (Tone::Unknown, "sto.h.no_smart"),
+        h => health(h),
+    }
+}
+
 pub fn array_health(h: ArrayHealth) -> (Tone, &'static str) {
     match h {
         ArrayHealth::Healthy => (Tone::Ok, "health.healthy"),
@@ -616,7 +625,7 @@ fn disk_grid(disks: Vec<DiskSummary>, selected: RwSignal<Option<String>>) -> Any
                 .into_iter()
                 .map(|d| {
                     let (ptone, pkey) = power(d.power_state);
-                    let (htone, hkey) = health(d.health);
+                    let (htone, hkey) = disk_health(&d);
                     let name = d.name.clone();
                     view! {
                         <button class="disk-card" type="button" on:click=move |_| selected.set(Some(name.clone()))>

@@ -12,7 +12,7 @@ use rynas_api_types::storage::{
     Severity, SmartInfo,
 };
 
-use super::{SubNav, asleep, health, kind_key, loading, power, stale_notice, use_refresh};
+use super::{SubNav, asleep, disk_health, kind_key, loading, power, stale_notice, use_refresh};
 use crate::api;
 use crate::form::{form_error, spinner};
 use crate::i18n::{self, t, tf, tr};
@@ -57,7 +57,8 @@ fn disk_table(disks: Vec<DiskSummary>, selected: RwSignal<Option<String>>) -> An
     view! {
         {ui::table("", &["sto.drive", "#sto.bay", "#sto.size", "sto.type", "#sto.temp_short", "col.status", "sto.health", "sto.used_by"], disks.into_iter().map(|d| {
                         let (ptone, pkey) = power(d.power_state);
-                        let (htone, hkey) = health(d.health);
+                        let (htone, hkey) = disk_health(&d);
+                        let no_smart = d.smart_unsupported.then(|| t("sto.h.no_smart_hint"));
                         let name = d.name.clone();
                         let used = if d.used_by.is_empty() { t("sto.unused").to_string() } else { d.used_by.join(", ") };
                         // the server's own descriptions ("mounted /home", "member of md0") are English
@@ -84,7 +85,7 @@ fn disk_table(disks: Vec<DiskSummary>, selected: RwSignal<Option<String>>) -> An
                                 None => view! { "—" }.into_any(),
                             }),
                             ui::cell("col.status", "", view! { <Status tone=ptone text=t(pkey).to_string() /> }.into_any()),
-                            ui::cell("sto.health", "", view! { <Status tone=htone text=t(hkey).to_string() /> }.into_any()),
+                            ui::cell("sto.health", "", view! { <span title=no_smart><Status tone=htone text=t(hkey).to_string() /></span> }.into_any()),
                             ui::cell("sto.used_by", "muted small used-cell", view! { <span title=used.clone() lang=used_lang>{used.clone()}</span> }.into_any()),
                         ])
                     }).collect::<Vec<_>>())}
@@ -325,7 +326,7 @@ fn overview_tab(
     reading: RwSignal<bool>,
     read: impl Fn() + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
-    let (htone, hkey) = health(d.health);
+    let (htone, hkey) = disk_health(&d);
     let (ptone, pkey) = power(d.power_state);
     let sleeping = asleep(d.power_state);
     let opt = |v: Option<String>| Signal::derive(move || v.clone().unwrap_or_else(|| "—".into()));

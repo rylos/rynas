@@ -14,22 +14,22 @@ use crate::error::Error;
 
 const NONE: Option<&()> = None;
 
-/// Bay and M.2 slot numbers and the provider's sleeping flag (when our own power check had no answer).
+/// Bay and M.2 slot numbers, and the power state when rynasd's own check had no answer (USB
+/// bridges that do not pass ATA CHECK POWER MODE): recent I/O seen by the metrics collector
+/// means awake, else the provider's sleeping flag (the same rule as the dashboard).
 async fn add_hw(st: &AppState, disks: &mut [&mut DiskSummary]) {
     let hw = st.hw.clone();
-    let Ok(Ok(Some(h))) = tokio::task::spawn_blocking(move || hw.status()).await else {
-        return;
+    let h = match tokio::task::spawn_blocking(move || hw.status()).await {
+        Ok(Ok(h)) => h,
+        _ => None,
     };
     for d in disks.iter_mut() {
-        let x = rynas_storage::overview::hw_disk(Some(&h), &d.name);
+        let x = rynas_storage::overview::hw_disk(h.as_ref(), &d.name);
         d.bay = d.bay.or(x.bay);
         d.m2 = d.m2.or(x.m2);
         if d.power_state == PowerState::Unknown {
-            match x.asleep {
-                Some(true) => d.power_state = PowerState::Standby,
-                Some(false) => d.power_state = PowerState::Active,
-                None => {}
-            }
+            let recent = st.store.disk_active_within(&d.name, crate::api::RECENT_IO);
+            d.power_state = rynas_storage::overview::power_state(x.asleep, recent);
         }
     }
 }

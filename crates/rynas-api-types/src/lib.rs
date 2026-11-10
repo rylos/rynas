@@ -153,10 +153,11 @@ pub struct Disk {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct RaidArray {
-    /// e.g. "md2".
+    /// e.g. "md2"; for a multi-device btrfs its label, else the start of its UUID.
     pub name: String,
-    /// e.g. "raid5".
+    /// e.g. "raid5"; "btrfs raid1" for a btrfs filesystem with its own RAID profile.
     pub level: String,
+    /// Usable size in bytes (for btrfs estimated from the device sizes and the data profile).
     pub size: u64,
     /// Member devices, e.g. ["sda3", "sdb3"].
     pub members: Vec<String>,
@@ -176,6 +177,17 @@ pub struct Filesystem {
     pub size: u64,
     pub used: u64,
     pub avail: u64,
+    /// On a USB or removable disk (or mounted under `/media`): listed, but not a NAS volume
+    /// (not in the storage health, the fullest volume or the volume count).
+    #[serde(default)]
+    pub removable: bool,
+}
+
+impl RaidArray {
+    /// A btrfs filesystem with its own RAID profile, not an md array (no md page for it).
+    pub fn is_btrfs(&self) -> bool {
+        self.level.starts_with("btrfs")
+    }
 }
 
 /// `GET /api/v1/hardware`: platform hardware through a provider (e.g. synohwd on Synology).

@@ -36,6 +36,27 @@ pub struct DiskUsage {
     pub system: bool,
 }
 
+/// Where a device is mounted. lsblk lists the mountpoints of a multi-device btrfs only on the
+/// member the kernel names in mountinfo: the other members (same filesystem UUID) are just as
+/// mounted.
+fn mountpoints_of(g: &BlockGraph, x: &BlockDev) -> Vec<String> {
+    if !x.mountpoints.is_empty() || x.fstype.as_deref() != Some("btrfs") {
+        return x.mountpoints.clone();
+    }
+    let Some(uuid) = x.uuid.as_deref() else {
+        return Vec::new();
+    };
+    let mut v: Vec<String> = g
+        .with_fs_uuid(uuid)
+        .into_iter()
+        .filter(|o| o.fstype.as_deref() == Some("btrfs"))
+        .flat_map(|o| o.mountpoints.iter().cloned())
+        .collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
 pub fn disk_usage(g: &BlockGraph, disk: &str) -> DiskUsage {
     let mut u = DiskUsage::default();
     let Some(d) = g.get(disk) else { return u };
@@ -66,25 +87,35 @@ pub fn disk_usage(g: &BlockGraph, disk: &str) -> DiskUsage {
             push(format!("LVM {}", x.name));
             live = true;
         }
-        for mp in &x.mountpoints {
+        let mps = mountpoints_of(g, x);
+        let mut fs_mps: Vec<&str> = Vec::new();
+        for mp in &mps {
+            live = true;
             if mp == "[SWAP]" {
                 push("swap".into());
-            } else {
-                push(format!("mounted {mp}"));
+                continue;
             }
-            live = true;
             if mp == "/" || mp == "/usr" || mp == "/boot" || mp == "/boot/efi" {
                 system = true;
             }
+            fs_mps.push(mp);
         }
-        if let Some(fs) = &x.fstype
-            && x.mountpoints.is_empty()
+        let named = |fs: &str| match &x.label {
+            Some(l) => format!("{fs} \"{l}\""),
+            None => fs.to_string(),
+        };
+        // one entry per filesystem with its main mountpoint ("/" first, else the shortest),
+        // not one per btrfs subvolume or bind mount
+        if let Some(main) = fs_mps.iter().min_by_key(|m| (**m != "/", m.len(), **m)) {
+            push(match x.fstype.as_deref() {
+                Some(fs) if fs != "swap" => format!("{} on {main}", named(fs)),
+                _ => format!("mounted {main}"),
+            });
+        } else if let Some(fs) = &x.fstype
+            && mps.is_empty()
             && !matches!(fs.as_str(), "crypto_LUKS" | "linux_raid_member")
         {
-            push(match &x.label {
-                Some(l) => format!("{fs} \"{l}\""),
-                None => fs.clone(),
-            });
+            push(named(fs));
         }
         if x.fstype.as_deref() == Some("linux_raid_member") && x.children.is_empty() {
             push(format!(
@@ -478,7 +509,12 @@ mod tests {
             sda.used_by
                 .contains(&"LUKS rynas-vol1 (unlocked)".to_string())
         );
-        assert!(sda.used_by.contains(&"mounted /vol1".to_string()));
+        assert!(
+            sda.used_by
+                .contains(&"btrfs \"vol1\" on /vol1".to_string()),
+            "{:?}",
+            sda.used_by
+        );
         let nvme = disk_usage(g, "nvme0n1");
         assert!(nvme.system);
         let sdd = disk_usage(g, "sdd");
@@ -486,6 +522,39 @@ mod tests {
         let sde = disk_usage(g, "sde");
         assert!(!sde.in_use);
         assert_eq!(sde.used_by, ["LUKS (locked)"]);
+    }
+
+    /// A btrfs RAID1 root on sda2 + sdb2: lsblk lists every mountpoint on sda2 only.
+    #[test]
+    fn btrfs_raid1_members_read_alike() {
+        let dev = |name: &str, kind: &str, fstype: &str, label: &str, uuid: &str, mps: &str, children: &str| {
+            format!(
+                r#"{{"name":"{name}","kname":"{name}","path":"/dev/{name}","type":"{kind}","fstype":{fstype},"fsver":null,"label":{label},"uuid":{uuid},"partlabel":null,"size":1000,"rota":false,"tran":"sata","model":null,"serial":null,"wwn":null,"rev":null,"mountpoints":[{mps}],"rm":false,"hotplug":false,"maj:min":"8:0"{children}}}"#
+            )
+        };
+        let q = |s: &str| format!("\"{s}\"");
+        let root = q("1111-root");
+        let parts = |d: &str, efi: &str, root_mps: &str| {
+            format!(
+                r#","children":[{},{},{}]"#,
+                dev(&format!("{d}1"), "part", &q("vfat"), &q(efi), &q(&format!("{efi}-uuid")), if efi == "EFI" { "\"/boot/efi\"" } else { "null" }, ""),
+                dev(&format!("{d}2"), "part", &q("btrfs"), &q("root"), &root, root_mps, ""),
+                dev(&format!("{d}3"), "part", &q("swap"), "null", &q(&format!("{d}-swap")), "\"[SWAP]\"", ""),
+            )
+        };
+        let json = format!(
+            r#"{{"blockdevices":[{},{}]}}"#,
+            dev("sda", "disk", "null", "null", "null", "null", &parts("sda", "EFI", r#""/srv/rynas/system/Documenti/#snapshot","/var/tmp","/","/var/lib/rynas","/home""#)),
+            dev("sdb", "disk", "null", "null", "null", "null", &parts("sdb", "EFI2", "null")),
+        );
+        let g = BlockGraph::parse(&json).unwrap();
+        let sda = disk_usage(&g, "sda");
+        let sdb = disk_usage(&g, "sdb");
+        assert_eq!(sda.used_by, ["swap", "btrfs \"root\" on /", "vfat \"EFI\" on /boot/efi"]);
+        assert_eq!(sdb.used_by, ["swap", "btrfs \"root\" on /", "vfat \"EFI2\""]);
+        assert!(sda.in_use && sda.system);
+        // the second member holds the root filesystem just as much
+        assert!(sdb.in_use && sdb.system);
     }
 
     #[test]

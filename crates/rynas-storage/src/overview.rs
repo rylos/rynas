@@ -1,6 +1,7 @@
 //! The cheap, unprivileged storage overview of the dashboard (`GET /api/v1/storage`, served by
 //! rynas-web without rynasd): disks from `/sys/block` + the udev database, md arrays from
-//! `/proc/mdstat` + sysfs, mounted filesystems from `/proc/self/mountinfo`. No command, no
+//! `/proc/mdstat` + sysfs, btrfs RAID filesystems from `/sys/fs/btrfs`, mounted filesystems
+//! from `/proc/self/mountinfo` (flagged when on a removable/USB disk). No command, no
 //! SMART, no ioctl: nothing here wakes a disk, and nothing needs root.
 //!
 //! It reuses the parsers of the full inventory ([`crate::md::parse_mdstat`],
@@ -223,10 +224,101 @@ pub fn arrays_from(mdstat: &str, array_state: &dyn Fn(&str) -> Option<String>) -
         .collect()
 }
 
+/// md arrays, then the btrfs filesystems with a RAID profile of their own.
 pub fn arrays(host: &dyn Host) -> Vec<RaidArray> {
-    arrays_from(&host.read("/proc/mdstat").unwrap_or_default(), &|md| {
+    let mut v = arrays_from(&host.read("/proc/mdstat").unwrap_or_default(), &|md| {
         read_sysfs(host, md).array_state
-    })
+    });
+    v.extend(btrfs_arrays(host));
+    v
+}
+
+// ---------------------------------------------------------------- btrfs RAID
+
+/// btrfs RAID profiles, strongest first: (name, copies of each block, fewest devices).
+/// raid5/raid6 have parity instead of copies (0).
+const BTRFS_RAID: &[(&str, u64, usize)] = &[
+    ("raid1c4", 4, 4),
+    ("raid1c3", 3, 3),
+    ("raid6", 0, 3),
+    ("raid10", 2, 2),
+    ("raid5", 0, 2),
+    ("raid1", 2, 2),
+];
+
+/// Usable bytes of a btrfs profile over devices of `sizes` bytes: an estimate like the md
+/// array size (what the data could fill if all of it had this profile).
+fn btrfs_usable(profile: &str, sizes: &[u64]) -> u64 {
+    let total: u64 = sizes.iter().sum();
+    let n = sizes.len() as u64;
+    match profile {
+        "raid5" if n > 1 => total / n * (n - 1),
+        "raid6" if n > 2 => total / n * (n - 2),
+        "raid5" | "raid6" => 0,
+        _ => {
+            let copies = BTRFS_RAID
+                .iter()
+                .find(|(p, _, _)| *p == profile)
+                .map_or(1, |(_, c, _)| *c)
+                .max(1);
+            total / copies
+        }
+    }
+}
+
+/// Mounted btrfs filesystems with a RAID data profile, from sysfs only (no `btrfs` command,
+/// nothing that touches a disk): `/sys/fs/btrfs/<uuid>/{label, devices/, devinfo/<id>/missing,
+/// allocation/data/<profile>}`. `single`/`dup` filesystems are not arrays. "degraded" when a
+/// device is missing (`devinfo/<id>/missing`, kernel ≥ 5.9, or fewer devices present than
+/// known) or there are fewer devices than the profile needs, else "clean".
+pub fn btrfs_arrays(host: &dyn Host) -> Vec<RaidArray> {
+    let root = "/sys/fs/btrfs";
+    let mut uuids: Vec<String> = host
+        .list(root)
+        .into_iter()
+        .filter(|u| u != "features")
+        .collect();
+    uuids.sort();
+    uuids
+        .into_iter()
+        .filter_map(|uuid| {
+            let dir = format!("{root}/{uuid}");
+            let profiles = host.list(&format!("{dir}/allocation/data"));
+            let &(profile, _, needs) = BTRFS_RAID
+                .iter()
+                .find(|(p, _, _)| profiles.iter().any(|x| x == p))?;
+            let mut members = host.list(&format!("{dir}/devices"));
+            members.sort();
+            let devinfo = host.list(&format!("{dir}/devinfo"));
+            let missing = devinfo.iter().any(|id| {
+                host.read(&format!("{dir}/devinfo/{id}/missing"))
+                    .is_some_and(|m| m.trim() == "1")
+            });
+            let degraded = missing || members.len() < devinfo.len() || members.len() < needs;
+            let sizes: Vec<u64> = members
+                .iter()
+                .filter_map(|m| {
+                    host.read(&format!("/sys/class/block/{m}/size"))?
+                        .trim()
+                        .parse::<u64>()
+                        .ok()
+                })
+                .map(|s| s * 512)
+                .collect();
+            let label = host
+                .read(&format!("{dir}/label"))
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty());
+            Some(RaidArray {
+                name: label.unwrap_or_else(|| uuid.chars().take(8).collect()),
+                level: format!("btrfs {profile}"),
+                size: btrfs_usable(profile, &sizes),
+                members,
+                state: if degraded { "degraded" } else { "clean" }.into(),
+                sync_pct: None,
+            })
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------- filesystems
@@ -366,7 +458,7 @@ pub fn statvfs(path: &str) -> Option<FsSizes> {
     })
 }
 
-pub fn filesystem(m: &Mount, sizes: Option<FsSizes>) -> Filesystem {
+pub fn filesystem(m: &Mount, sizes: Option<FsSizes>, removable: bool) -> Filesystem {
     let s = sizes.unwrap_or_default();
     Filesystem {
         mountpoint: m.mountpoint.clone(),
@@ -375,7 +467,51 @@ pub fn filesystem(m: &Mount, sizes: Option<FsSizes>) -> Filesystem {
         size: s.size,
         used: s.used,
         avail: s.avail,
+        removable,
     }
+}
+
+/// The whole disk under a device node: "/dev/sdd1" → "sdd", "/dev/nvme0n1p2" → "nvme0n1",
+/// "/dev/sdd" → "sdd". None for md, dm, network sources...
+pub fn disk_of(host: &dyn Host, source: &str) -> Option<String> {
+    let name = source.strip_prefix("/dev/")?;
+    if is_physical_disk(name) {
+        return Some(name.to_string());
+    }
+    if name.is_empty() || name.contains('/') {
+        return None;
+    }
+    // /sys/class/block/sdd1 → /sys/devices/.../block/sdd/sdd1
+    let path = host.canonical(&format!("/sys/class/block/{name}"))?;
+    let mut up = path.rsplit('/');
+    up.next();
+    up.next()
+        .filter(|p| is_physical_disk(p))
+        .map(str::to_string)
+}
+
+/// A disk the NAS does not own: on USB, or flagged removable by the kernel.
+pub fn removable_disk(host: &dyn Host, d: &Disk) -> bool {
+    d.transport == "usb"
+        || host
+            .read(&format!("/sys/block/{}/removable", d.name))
+            .is_some_and(|r| r.trim() == "1")
+}
+
+/// A mounted filesystem that is not a NAS volume: it lives on a removable/USB disk, or is
+/// mounted where desktops mount removable media (`/media`, `/run/media`). The system's own
+/// mounts (`/`, `/boot`, `/usr`) never are, even from a USB stick.
+pub fn removable_mount(host: &dyn Host, disks: &[Disk], m: &Mount) -> bool {
+    let under = |p: &str| m.mountpoint == p || m.mountpoint.starts_with(&format!("{p}/"));
+    if m.mountpoint == "/" || under("/boot") || under("/usr") {
+        return false;
+    }
+    if under("/media") || under("/run/media") {
+        return true;
+    }
+    disk_of(host, &m.source)
+        .and_then(|n| disks.iter().find(|d| d.name == n))
+        .is_some_and(|d| removable_disk(host, d))
 }
 
 #[cfg(test)]
@@ -567,6 +703,144 @@ mod tests {
         assert!(d.rotational);
         assert_eq!(d.power_state, PowerState::Active);
         assert_eq!(d.model, "WDC WD40EFPX");
+    }
+
+    /// A mounted btrfs in fake sysfs: `profiles` under allocation/data, `devs` present,
+    /// `devinfo` (devid, missing) known to the kernel.
+    fn btrfs_fs(
+        h: &mut FakeHost,
+        uuid: &str,
+        label: &str,
+        profiles: &[&str],
+        devs: &[&str],
+        devinfo: &[(u32, &str)],
+    ) {
+        let dir = format!("/sys/fs/btrfs/{uuid}");
+        h.file(&format!("{dir}/label"), &format!("{label}\n"));
+        for p in profiles {
+            h.file(&format!("{dir}/allocation/data/{p}/total_bytes"), "1\n");
+        }
+        for d in devs {
+            h.links.insert(
+                format!("{dir}/devices/{d}"),
+                format!("/sys/devices/pci0000:00/ata1/block/x/{d}"),
+            );
+            h.file(&format!("/sys/class/block/{d}/size"), "1953525168\n");
+        }
+        for (id, missing) in devinfo {
+            h.file(&format!("{dir}/devinfo/{id}/missing"), missing);
+        }
+    }
+
+    #[test]
+    fn btrfs_raid_from_sysfs() {
+        let mut h = FakeHost::default();
+        h.file("/sys/fs/btrfs/features/raid1c34", "0\n");
+        btrfs_fs(
+            &mut h,
+            "11111111-aaaa",
+            "root",
+            &["raid1"],
+            &["sdb2", "sda2"],
+            &[(1, "0\n"), (2, "0\n")],
+        );
+        // a single-device filesystem is not an array
+        btrfs_fs(&mut h, "22222222-bbbb", "usb", &["single"], &["sdd1"], &[(1, "0\n")]);
+        // a degraded raid1c3 without label: one device missing
+        btrfs_fs(
+            &mut h,
+            "33333333-cccc",
+            "",
+            &["single", "raid1c3"],
+            &["sde", "sdf"],
+            &[(1, "0\n"), (2, "0\n"), (3, "1\n")],
+        );
+        // older kernel, no `missing` file: fewer devices present than known
+        btrfs_fs(&mut h, "44444444-dddd", "old", &["raid10"], &["sdg", "sdh", "sdi"], &[]);
+        for id in 1..=4 {
+            h.file(&format!("/sys/fs/btrfs/44444444-dddd/devinfo/{id}/fsid"), "x\n");
+        }
+        let v = btrfs_arrays(&h);
+        let got: Vec<_> = v
+            .iter()
+            .map(|a| (a.name.as_str(), a.level.as_str(), a.state.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("root", "btrfs raid1", "clean"),
+                ("33333333", "btrfs raid1c3", "degraded"),
+                ("old", "btrfs raid10", "degraded"),
+            ]
+        );
+        let root = &v[0];
+        assert_eq!(root.members, ["sda2", "sdb2"]);
+        // two copies of every block: the size of one device
+        assert_eq!(root.size, 1953525168 * 512);
+        assert_eq!(root.sync_pct, None);
+        assert!(root.is_btrfs());
+        // md arrays first, then btrfs
+        h.file(
+            "/proc/mdstat",
+            "md0 : active raid1 sdb1[1] sda1[0]\n      1048512 blocks [2/2] [UU]\n",
+        );
+        let all = arrays(&h);
+        assert_eq!(all[0].name, "md0");
+        assert!(!all[0].is_btrfs());
+        assert_eq!(all.len(), 4);
+        assert_eq!(btrfs_usable("raid5", &[4, 4, 4]), 8);
+        assert_eq!(btrfs_usable("raid6", &[4, 4, 4, 4]), 8);
+        assert_eq!(btrfs_usable("raid1c3", &[3, 3, 3]), 3);
+    }
+
+    #[test]
+    fn removable_filesystems() {
+        let mut h = FakeHost::default();
+        h.links.insert(
+            "/sys/class/block/sdd1".into(),
+            "/sys/devices/pci0000:00/usb2/2-1/host6/block/sdd/sdd1".into(),
+        );
+        h.links.insert(
+            "/sys/class/block/sda2".into(),
+            "/sys/devices/pci0000:00/ata1/host0/block/sda/sda2".into(),
+        );
+        h.links.insert(
+            "/sys/class/block/sdc1".into(),
+            "/sys/devices/pci0000:00/ata3/host2/block/sdc/sdc1".into(),
+        );
+        h.file("/sys/block/sdc/removable", "1\n");
+        let disk = |name: &str, transport: &str| Disk {
+            name: name.into(),
+            transport: transport.into(),
+            ..Default::default()
+        };
+        let disks = [
+            disk("sda", "sata"),
+            disk("sdc", "sata"),
+            disk("sdd", "usb"),
+        ];
+        let mount = |mp: &str, src: &str| Mount {
+            mountpoint: mp.into(),
+            source: src.into(),
+            ..Default::default()
+        };
+        assert_eq!(disk_of(&h, "/dev/sdd1").as_deref(), Some("sdd"));
+        assert_eq!(disk_of(&h, "/dev/sdd").as_deref(), Some("sdd"));
+        assert_eq!(disk_of(&h, "/dev/mapper/x"), None);
+        assert_eq!(disk_of(&h, "server:/export"), None);
+        let r = |mp: &str, src: &str| removable_mount(&h, &disks, &mount(mp, src));
+        // NTFS on a USB disk, wherever it is mounted
+        assert!(r("/media/Elements", "/dev/sdd1"));
+        assert!(r("/mnt/usb", "/dev/sdd1"));
+        // a disk the kernel calls removable
+        assert!(r("/mnt/card", "/dev/sdc1"));
+        // under /media even from an unknown source
+        assert!(r("/run/media/alice/stick", "/dev/sdz1"));
+        assert!(!r("/srv/data", "/dev/sda2"));
+        // the system is never removable, even from a USB stick
+        assert!(!r("/", "/dev/sdd1"));
+        assert!(!r("/boot/efi", "/dev/sdd1"));
+        assert!(!r("/volume1", "/dev/md2"));
     }
 
     #[test]

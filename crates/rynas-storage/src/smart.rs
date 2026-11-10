@@ -32,8 +32,24 @@ pub enum SmartRead {
     Data(Box<SmartData>),
     /// The disk is in a low-power mode and was left alone.
     Asleep(PowerState),
-    /// smartctl failed (no permission, device gone, unsupported).
+    /// The device has no SMART smartctl can reach (flash modules, USB bridges that do not
+    /// pass it through): nothing to read, now or later.
+    Unsupported(String),
+    /// smartctl failed (no permission, device gone, ...).
     Failed(String),
+}
+
+/// smartctl's words for a device without reachable SMART.
+fn unsupported_message(m: &str) -> bool {
+    const WORDS: &[&str] = &[
+        "Unknown USB bridge",
+        "Unsupported USB bridge",
+        "specify device type with the -d option",
+        "lacks SMART capability",
+        "SMART support is: Unavailable",
+        "Device does not support SMART",
+    ];
+    WORDS.iter().any(|w| m.contains(w))
 }
 
 /// Parsed SMART plus a few settings smartctl reports along the way.
@@ -113,11 +129,23 @@ pub fn parse(json: &str, now_ms: u64) -> SmartRead {
         .unwrap_or_default();
     // bit 1: device open failed; bit 0: command line error
     if exit_status & 0b11 != 0 {
+        if let Some(m) = messages.iter().find(|m| unsupported_message(m)) {
+            return SmartRead::Unsupported(m.clone());
+        }
         let msg = messages
             .first()
             .cloned()
             .unwrap_or_else(|| format!("smartctl exit status {exit_status}"));
         return SmartRead::Failed(msg);
+    }
+    if bool_at(&v, &["smart_support", "available"]) == Some(false) {
+        return SmartRead::Unsupported(
+            messages
+                .iter()
+                .find(|m| unsupported_message(m))
+                .cloned()
+                .unwrap_or_else(|| "SMART support is: Unavailable".into()),
+        );
     }
     let version = v
         .get("smartctl")
@@ -834,6 +862,19 @@ mod tests {
         assert_eq!(r, SmartRead::Asleep(PowerState::Standby));
         let s = parse_settings(include_str!("../tests/fixtures/smartctl-standby.json"));
         assert_eq!(s, SettingsRead::Skipped);
+    }
+
+    #[test]
+    fn devices_without_smart() {
+        // a flash module behind a bridge smartctl does not know
+        let bridge = r#"{"smartctl":{"version":[7,4],"exit_status":1,"messages":[{"string":"/dev/sdc: Unknown USB bridge [0x1005:0xb155 (0x100)]","severity":"error"},{"string":"Please specify device type with the -d option.","severity":"error"}]}}"#;
+        assert!(matches!(parse(bridge, 1), SmartRead::Unsupported(m) if m.contains("USB bridge")));
+        // opened, but no SMART in the device
+        let none = r#"{"smartctl":{"version":[7,4],"exit_status":4},"device":{"protocol":"SCSI"},"smart_support":{"available":false}}"#;
+        assert!(matches!(parse(none, 1), SmartRead::Unsupported(_)));
+        // other failures stay failures (the next view tries again)
+        let denied = r#"{"smartctl":{"exit_status":2,"messages":[{"string":"Smartctl open device: /dev/sda failed: Permission denied"}]}}"#;
+        assert!(matches!(parse(denied, 1), SmartRead::Failed(_)));
     }
 
     #[test]

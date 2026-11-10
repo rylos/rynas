@@ -849,7 +849,7 @@ fn HealthWidget() -> impl IntoView {
         st.with(|s| {
             s.as_ref().map(|s| {
                 let standby = s.disks.iter().filter(|d| d.power_state == rynas_api_types::storage::PowerState::Standby).count();
-                let local = s.filesystems.iter().filter(|f| !alerts::is_network_fs(&f.fstype)).count();
+                let local = s.filesystems.iter().filter(|f| alerts::is_nas_volume(f)).count();
                 (s.disks.len(), standby, s.arrays.len(), local)
             })
         })
@@ -859,7 +859,7 @@ fn HealthWidget() -> impl IntoView {
             s.as_ref().and_then(|s| {
                 s.filesystems
                     .iter()
-                    .filter(|f| !alerts::is_network_fs(&f.fstype))
+                    .filter(|f| alerts::is_nas_volume(f))
                     .map(|f| (f.mountpoint.clone(), fs_pct(f.used, f.size)))
                     .max_by(|a, b| a.1.total_cmp(&b.1))
             })
@@ -967,9 +967,10 @@ fn VolumesWidget() -> impl IntoView {
                         }.into_any();
                     }
                     let arrays = s.arrays.clone();
-                    let (local, remote): (Vec<_>, Vec<_>) = s.filesystems.iter().partition(|f| !alerts::is_network_fs(&f.fstype));
+                    let (local, other): (Vec<_>, Vec<_>) = s.filesystems.iter().partition(|f| alerts::is_nas_volume(f));
                     let more = local.len().saturating_sub(VOLUMES_SHOWN);
-                    let remote_n = remote.len();
+                    let remote_n = other.iter().filter(|f| alerts::is_network_fs(&f.fstype)).count();
+                    let removable_n = other.len() - remote_n;
                     view! {
                         <ul class="volumes">
                             {local.into_iter().take(VOLUMES_SHOWN).map(|f| {
@@ -992,10 +993,11 @@ fn VolumesWidget() -> impl IntoView {
                                 }
                             }).collect_view()}
                         </ul>
-                        {(more > 0 || remote_n > 0).then(|| view! {
+                        {(more > 0 || remote_n > 0 || removable_n > 0).then(|| view! {
                             <a class="vol-more" href="/storage">
                                 {(more > 0).then(|| view! { <span>{tf("v.more", &[("n", &more.to_string())])}</span> })}
                                 {(remote_n > 0).then(|| view! { <span class="chip"><Icon icon=icons::NETWORK size=12 />{tf("v.network", &[("n", &remote_n.to_string())])}</span> })}
+                                {(removable_n > 0).then(|| view! { <span class="chip" title=t("v.removable_hint")><Icon icon=icons::USB size=12 />{tf("v.removable", &[("n", &removable_n.to_string())])}</span> })}
                                 <Icon icon=icons::CHEVRON_RIGHT size=14 />
                             </a>
                         })}

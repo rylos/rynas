@@ -21,7 +21,7 @@ pub use crate::error::Error;
 type ApiResult<T> = Result<Json<T>, Error>;
 
 /// A disk with I/O in this window is reported "active".
-const RECENT_IO: Duration = Duration::from_secs(10);
+pub(crate) const RECENT_IO: Duration = Duration::from_secs(10);
 
 /// The `/api/v1` router: `auth/login` and `auth/session` are public, everything else goes
 /// through [`auth::require_session`] (session cookie + CSRF header).
@@ -107,14 +107,16 @@ async fn storage_overview(State(st): State<AppState>) -> ApiResult<StorageOvervi
     use rynas_storage::overview;
     let (hw, store) = (st.hw.clone(), st.store.clone());
     // sysfs and procfs only: quick, never blocks on a device
-    let (disks, arrays, mounts) = blocking(move || {
+    let (disks, arrays, mounts, removable) = blocking(move || {
         let hw = hw.status().ok().flatten();
         let recent = |d: &str| store.disk_active_within(d, RECENT_IO);
-        (
-            overview::disks(&SystemHost, hw.as_ref(), &recent),
-            overview::arrays(&SystemHost),
-            overview::mounts(&SystemHost),
-        )
+        let disks = overview::disks(&SystemHost, hw.as_ref(), &recent);
+        let mounts = overview::mounts(&SystemHost);
+        let removable: Vec<bool> = mounts
+            .iter()
+            .map(|m| overview::removable_mount(&SystemHost, &disks, m))
+            .collect();
+        (disks, overview::arrays(&SystemHost), mounts, removable)
     })
     .await?;
     // statvfs through the prober: own threads, bounded wait, never the shared pool (C3)
@@ -125,7 +127,8 @@ async fn storage_overview(State(st): State<AppState>) -> ApiResult<StorageOvervi
     let filesystems = mounts
         .iter()
         .zip(sizes)
-        .map(|(m, p)| overview::filesystem(m, p.sizes))
+        .zip(removable)
+        .map(|((m, p), r)| overview::filesystem(m, p.sizes, r))
         .collect();
     Ok(Json(StorageOverview {
         disks,

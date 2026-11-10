@@ -182,6 +182,10 @@ pub struct DiskSummary {
     pub health_reasons: Vec<HealthReason>,
     /// Age of the SMART data behind `health`; None when there is none.
     pub smart_age_s: Option<u64>,
+    /// The device has no SMART (flash modules, USB bridges that do not pass it through):
+    /// `health` stays `unknown` but there is nothing to wait for.
+    #[serde(default)]
+    pub smart_unsupported: bool,
     /// What sits on the disk: "md2", "btrfs root", "crypto_LUKS", "mounted /boot"... Empty
     /// means blank. Leftovers that are not live (old partitions, an unassembled array) do not
     /// make it busy: see `in_use`.
