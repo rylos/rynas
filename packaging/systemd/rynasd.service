@@ -79,6 +79,9 @@ ProtectKernelLogs=yes
 # 13): the split above. An older systemd does not know the value and ignores the line (the
 # tree stays writable, the split still works).
 ProtectControlGroups=private
+# that namespace hides the other cgroups: the host tree, read only, for the containers' CPU
+# and memory (crates/rynasd/src/cgroup.rs HOST_CGROUP_FS)
+BindReadOnlyPaths=/sys/fs/cgroup:/run/rynas-host-cgroup
 ProtectClock=yes
 # no ProtectHostname: a private UTS namespace would hide the hostname set by an apply
 # from its health check

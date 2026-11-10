@@ -23,6 +23,17 @@ use std::path::{Path, PathBuf};
 
 /// The cgroup tree (cgroup v2).
 pub const CGROUP_FS: &str = "/sys/fs/cgroup";
+/// The host's whole cgroup tree, read only. rynasd's cgroup namespace
+/// (`ProtectControlGroups=private`) shows only its own subtree at [`CGROUP_FS`], so the unit
+/// binds the host tree here (`BindReadOnlyPaths=`) for what reads other cgroups: the
+/// containers' CPU and memory.
+pub const HOST_CGROUP_FS: &str = "/run/rynas-host-cgroup";
+
+/// Where the host's cgroups are read: the bound tree, or [`CGROUP_FS`] when the unit has no
+/// private namespace (older systemd, a run by hand).
+pub fn host_tree() -> &'static str {
+    if Path::new(HOST_CGROUP_FS).join("cgroup.controllers").exists() { HOST_CGROUP_FS } else { CGROUP_FS }
+}
 /// rynasd's own leaf.
 pub const DAEMON: &str = "daemon";
 /// The leaf of the file manager workers.

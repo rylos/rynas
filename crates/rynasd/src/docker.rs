@@ -1662,7 +1662,7 @@ async fn stats_get(State(st): State<DkState>) -> Res<Response> {
     }
     // nobody listened yet: one sample now (CPU needs two: 0 % until the next)
     let cs = s.containers().await?;
-    let sample = sample_once(&mut stats::Sampler::new("/sys/fs/cgroup"), &cs);
+    let sample = sample_once(&mut stats::Sampler::new(crate::cgroup::host_tree()), &cs);
     Ok(Json(sample).into_response())
 }
 
@@ -3050,7 +3050,7 @@ fn sample_once(sampler: &mut stats::Sampler, cs: &[Seen]) -> DockerStats {
 /// the container list is read again on `docker_changed` or every 30 s. Idle otherwise.
 pub fn spawn_stats(s: Arc<DockerSvc>) {
     tokio::spawn(async move {
-        let mut sampler = stats::Sampler::new("/sys/fs/cgroup");
+        let mut sampler = stats::Sampler::new(crate::cgroup::host_tree());
         let mut tick = tokio::time::interval(STATS_TICK);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut cached: Option<(Instant, u64, Vec<Seen>)> = None;
