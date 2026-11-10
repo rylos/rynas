@@ -193,13 +193,13 @@ mod tests {
     #[test]
     fn login_keeps_the_key_off_the_command_line() {
         let req = TailscaleLogin {
-            auth_key: Some("tskey-auth-secret".into()),
+            auth_key: Some("test-only-secret".into()),
             hostname: Some("nas".into()),
             login_server: None,
         };
         let keep = TailscaleOptions { ssh: true, ..Default::default() };
         let c = login(&req, &keep, Some(DEFAULT_CONTROL), Some("/var/lib/rynas/tailscale/authkey")).display();
-        assert!(!c.contains("tskey"));
+        assert!(!c.contains("test-only-secret"));
         assert!(c.starts_with("/usr/bin/tailscale up --reset --timeout=600s"));
         assert!(c.contains("--auth-key=file:/var/lib/rynas/tailscale/authkey"));
         assert!(c.contains("--accept-dns=false") && c.contains("--ssh=true") && c.contains("--hostname=nas"));
@@ -212,7 +212,7 @@ mod tests {
     #[test]
     fn login_checks() {
         let ok = TailscaleLogin {
-            auth_key: Some("tskey-auth-k1-abc".into()),
+            auth_key: Some("test-only-key".into()),
             hostname: Some("nas-2".into()),
             login_server: Some("https://hs.example.com".into()),
         };

@@ -268,7 +268,7 @@ async fn login_never_logs_the_key() {
     let (s, b) = call(&e, "POST", "/v1/tailscale/login", Some(json!({"hostname": "bad.name"}))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
     assert_eq!(err(&b).field.as_deref(), Some("hostname"));
-    let (s, b) = call(&e, "POST", "/v1/tailscale/login", Some(json!({"auth_key": "tskey-auth-SECRET123", "hostname": "nas"}))).await;
+    let (s, b) = call(&e, "POST", "/v1/tailscale/login", Some(json!({"auth_key": "test-only-SECRET123", "hostname": "nas"}))).await;
     assert_eq!(s, StatusCode::ACCEPTED);
     let (t, log) = run_task(&e, &b).await;
     assert_eq!(t.status, TaskStatus::Ok, "{log}");
@@ -357,7 +357,7 @@ async fn pending_change_survives_a_restart() {
             json!({"deadline_ms": 1000, "previous": {"accept_routes": false, "accept_dns": true, "exit_node": false, "advertise_routes": [], "ssh": true}}).to_string(),
         )
         .unwrap();
-        std::fs::write(state.join("authkey"), "tskey-auth-LEFT").unwrap();
+        std::fs::write(state.join("authkey"), "test-only-LEFT").unwrap();
     });
     assert!(!e.state.join("authkey").exists());
     e.svc.resume_pending();
