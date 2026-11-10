@@ -2239,6 +2239,10 @@ Zigbee2MQTT (USB adapter through `security.devices`), Frigate, Forgejo, Mealie; 
 Immich, Jellyfin, Nextcloud, Vaultwarden, Home Assistant, Paperless-ngx and Dockhand. Picks,
 skips, digests and sources in `../research/app-catalog-format.md` § 4.
 
+2026-11-10: JDownloader 2 (`jlesage/jdownloader-2`, 27 entries): the image's own HTTPS with
+its web login page (`WEB_AUTHENTICATION` needs `SECURE_CONNECTION`), user `admin` with a
+generated password shown once, VNC not published, the MyJDownloader direct-connection port.
+
 ### 6.12 Online catalogue updates (signed, 2026-11-10)
 
 The catalogue changes faster than rynas: new entries, image bumps, fixes. Until there is an apt

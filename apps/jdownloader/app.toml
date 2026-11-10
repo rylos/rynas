@@ -1,0 +1,80 @@
+schema = 1
+id = "jdownloader"
+name = "JDownloader 2"
+version = "1.0.0"
+app_version = "v26.09.1"
+update_policy = "minor"
+description = "Download manager for file hosts and links, with its desktop interface in the browser."
+homepage = "https://jdownloader.org"
+source = "https://github.com/jlesage/docker-jdownloader-2"
+changelog_url = "https://github.com/jlesage/docker-jdownloader-2/releases"
+license = "MIT"
+maintainers = ["rynas"]
+categories = ["files", "network"]
+min_rynas = "0.1.0"
+arch = ["amd64", "arm64"]
+main_service = "jdownloader"
+
+[resources]
+ram_min_mb = 512
+ram_recommended_mb = 1024
+
+[[ports]]
+name = "web"
+env = "WEB_PORT"
+service = "jdownloader"
+container = 5800
+default = 5800
+protocol = "tcp"
+purpose = "Web interface (the JDownloader desktop in the browser)"
+proxied = true
+
+[[ports]]
+name = "myjd"
+env = "MYJD_PORT"
+service = "jdownloader"
+container = 3129
+default = 3129
+protocol = "tcp"
+purpose = "Direct connection of the MyJDownloader apps and browser extensions on the LAN"
+relocatable = false
+
+[web]
+port = "web"
+# the container serves its own HTTPS (needed for its login page): self-signed, on loopback
+scheme = "https"
+auth = "app"
+websocket = true
+subpath = false
+timeout = "1h"
+buffering = false
+public = "warn"
+
+[[secrets]]
+env = "WEB_PASSWORD"
+length = 20
+show = true
+description = "Password of the web interface (user admin)"
+
+[[folders]]
+env = "CONFIG_FOLDER"
+path = "config"
+intent = "config"
+ssd = "ok"
+description = "JDownloader settings, accounts, download list and logs"
+
+[[shares]]
+env = "DOWNLOADS"
+label = "Downloads"
+description = "The shared folder where finished downloads go, mounted at /output"
+access = "rw"
+required = false
+fallback = "downloads"
+
+[[notes]]
+level = "info"
+text = "Sign in as admin with the password shown at install. For the MyJDownloader phone app and browser extensions, set your MyJDownloader account in JDownloader (Settings > MyJDownloader)."
+
+[[notes]]
+level = "warning"
+text = "Downloads run with the rights of the apps account on the chosen folder: give it write access to that shared folder."

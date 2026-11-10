@@ -1,0 +1,24 @@
+# Upstream: https://github.com/jlesage/docker-jdownloader-2/blob/v26.09.1/README.md
+# Differences: image pinned, runs as PUID:PGID through the image's USER_ID/GROUP_ID, its own
+# HTTPS plus the web login page (WEB_AUTHENTICATION needs SECURE_CONNECTION) with a generated
+# password, the app restarted when it quits, dark mode; VNC (5900) is not published.
+services:
+  jdownloader:
+    image: jlesage/jdownloader-2:v26.09.1@sha256:bd6cd2fdc72818f30207e677b33cd7f1b425048c4e7132624e541e99f992be4c
+    restart: unless-stopped
+    environment:
+      USER_ID: "${PUID}"
+      GROUP_ID: "${PGID}"
+      TZ: "${TZ}"
+      KEEP_APP_RUNNING: "1"
+      DARK_MODE: "1"
+      SECURE_CONNECTION: "1"
+      WEB_AUTHENTICATION: "1"
+      WEB_AUTHENTICATION_USERNAME: admin
+      WEB_AUTHENTICATION_PASSWORD: "${WEB_PASSWORD}"
+    ports:
+      - "${RYNAS_BIND}:${WEB_PORT}:5800"
+      - "${MYJD_PORT}:3129"
+    volumes:
+      - ${CONFIG_FOLDER}:/config
+      - ${DOWNLOADS}:/output
