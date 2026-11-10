@@ -602,6 +602,30 @@ fn ifupdown_is_read_only_until_adopted_then_rolled_back() {
     assert!(s.enabled["networking"]);
 }
 
+/// ifupdown ran dhcpcd with a DUID (Debian's default): the DHCP port keeps that identity
+/// and its leased address; the static port gets no drop-in; a rollback removes it.
+#[test]
+fn ifupdown_dhcp_port_keeps_its_identity() {
+    let t = ifupdown_box();
+    t.os.write_config("/usr/sbin/dhcpcd", "");
+    t.os.write_config("/etc/dhcpcd.conf", "# defaults\nhostname\nduid\npersistent\nslaac private\n");
+    t.os.write_config("/var/lib/dhcpcd/duid", "00:01:00:01:32:85:aa:ac:00:11:32:ab:cd:02\n");
+    // the lease dhcpcd holds under ifupdown, and the one networkd will get
+    t.os.add_addr("lan2", "198.51.100.20/24", true);
+    t.os.state.lock().unwrap().leases.insert("lan2".into(), ("198.51.100.20/24".into(), "198.51.100.1".into()));
+    let plan = t.e.plan_adopt("admin", ip("192.0.2.37"), Some(300)).unwrap();
+    t.e.begin(&plan, Some("tok"), None, &log).unwrap();
+    let dropin = "/etc/systemd/network/05-rynas-lan2.network.d/10-dhcp-identity.conf";
+    let text = t.os.read_config(Path::new(dropin)).expect("drop-in written");
+    assert!(text.contains("ClientIdentifier=duid\n"), "{text}");
+    assert!(text.contains(&format!("IAID={}\n", 0x32abcd02u32)), "{text}");
+    assert!(text.contains("DUIDType=1\nDUIDRawData=00:01:32:85:aa:ac:00:11:32:ab:cd:02\n"), "{text}");
+    assert!(text.contains("RequestAddress=198.51.100.20\n"), "{text}");
+    assert!(t.os.read_config(Path::new("/etc/systemd/network/05-rynas-lan1.network.d/10-dhcp-identity.conf")).is_none());
+    t.e.rollback(reason::MANUAL, &log).unwrap().unwrap();
+    assert!(t.os.read_config(Path::new(dropin)).is_none(), "gone with the rollback");
+}
+
 #[test]
 fn ifupdown_adopted_and_confirmed() {
     let t = ifupdown_box();

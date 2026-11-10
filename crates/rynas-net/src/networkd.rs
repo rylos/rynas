@@ -111,6 +111,97 @@ pub fn render_network(iface: &str, cfg: &InterfaceConfig, mac: Option<&str>) -> 
     s
 }
 
+
+/// The DHCPv4 client identifier the DHCP client before rynas sent, so the server keeps
+/// giving the NAS the same address after the takeover (networkd's own default, a DUID from
+/// the machine id with an IAID from the interface name, is a new client to the server).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DhcpIdentity {
+    /// Hardware type 1 and the MAC address (`ClientIdentifier=mac`).
+    Mac,
+    /// RFC 4361: an IAID and a DUID (type in its first two bytes).
+    Duid { duid: Vec<u8>, iaid: u32 },
+}
+
+/// Lines of a client configuration without comments and blank lines.
+fn conf_lines(text: &str) -> impl Iterator<Item = &str> {
+    text.lines()
+        .map(|l| l.split('#').next().unwrap_or("").trim())
+        .filter(|l| !l.is_empty())
+}
+
+/// What dhcpcd sent, from `dhcpcd.conf` and its DUID file. Only the global options count;
+/// a configuration it cannot read for sure (an `iaid`, options per interface) gives `None`.
+/// dhcpcd's IAID is the last four bytes of the hardware address.
+pub fn dhcpcd_identity(conf: &str, duid_file: Option<&str>, mac: Option<&str>) -> Option<DhcpIdentity> {
+    let mut duid = false;
+    let mut clientid = false;
+    for l in conf_lines(conf) {
+        let key = l.split_whitespace().next().unwrap_or("");
+        match key {
+            "interface" | "ssid" | "profile" | "iaid" | "anonymous" => return None,
+            "duid" => duid = true,
+            "clientid" => clientid = true,
+            _ => {}
+        }
+    }
+    if duid {
+        let bytes: Vec<u8> = duid_file?
+            .trim()
+            .split(':')
+            .map(|b| u8::from_str_radix(b, 16).ok())
+            .collect::<Option<_>>()?;
+        if bytes.len() < 3 || bytes.len() > 130 {
+            return None;
+        }
+        let m = parse_mac(mac?)?;
+        Some(DhcpIdentity::Duid { duid: bytes, iaid: u32::from_be_bytes([m[2], m[3], m[4], m[5]]) })
+    } else if clientid {
+        Some(DhcpIdentity::Mac)
+    } else {
+        None
+    }
+}
+
+/// What ISC dhclient sent: no client identifier unless told (the server then knows it by
+/// its MAC, which `ClientIdentifier=mac` keeps), or the hardware address.
+pub fn dhclient_identity(conf: Option<&str>) -> Option<DhcpIdentity> {
+    let custom = conf.into_iter().flat_map(conf_lines).find(|l| l.contains("dhcp-client-identifier"));
+    match custom {
+        None => Some(DhcpIdentity::Mac),
+        Some(l) if l.trim_end_matches(';').trim().ends_with("= hardware") => Some(DhcpIdentity::Mac),
+        Some(_) => None,
+    }
+}
+
+/// The drop-in next to the port's rynas file that keeps the previous client's identity.
+pub fn dhcp_identity_path(iface: &str) -> PathBuf {
+    Path::new(NETWORKD_DIR)
+        .join(format!("{RYNAS_PREFIX}{iface}.network.d"))
+        .join("10-dhcp-identity.conf")
+}
+
+/// Its content: the identifier and, when the port had a lease, that address asked for again.
+pub fn render_dhcp_identity(id: &DhcpIdentity, client: &str, address: Option<Ipv4Addr>) -> String {
+    let mut s = format!(
+        "# rynas: the DHCP identity {client} used before rynas took over this port, so the\n# server keeps giving the same address.\n[DHCPv4]\n"
+    );
+    match id {
+        DhcpIdentity::Mac => s.push_str("ClientIdentifier=mac\n"),
+        DhcpIdentity::Duid { duid, iaid } => {
+            let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(":");
+            s.push_str("ClientIdentifier=duid\n");
+            s.push_str(&format!("IAID={iaid}\n"));
+            s.push_str(&format!("DUIDType={}\n", u16::from_be_bytes([duid[0], duid[1]])));
+            s.push_str(&format!("DUIDRawData={}\n", hex(&duid[2..])));
+        }
+    }
+    if let Some(a) = address {
+        s.push_str(&format!("RequestAddress={a}\n"));
+    }
+    s
+}
+
 /// A parsed INI-style systemd file: section → (key, value) in order.
 #[derive(Debug, Default, Clone)]
 pub struct UnitFile {
@@ -356,6 +447,38 @@ pub fn network_files(root: &Path) -> Vec<(String, PathBuf)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn previous_dhcp_identity() {
+        // Debian's dhcpcd.conf: DUID + IAID from the last four bytes of the MAC
+        let conf = "hostname\nduid\npersistent\nvendorclassid\noption host_name\nslaac private\n";
+        let duid = "00:01:00:01:32:85:aa:ac:02:00:5e:10:20:30\n";
+        let id = dhcpcd_identity(conf, Some(duid), Some("02:00:5e:10:20:30")).unwrap();
+        assert_eq!(
+            id,
+            DhcpIdentity::Duid {
+                duid: vec![0, 1, 0, 1, 0x32, 0x85, 0xaa, 0xac, 2, 0, 0x5e, 0x10, 0x20, 0x30],
+                iaid: 0x5e10_2030
+            }
+        );
+        let text = render_dhcp_identity(&id, "dhcpcd", Some(Ipv4Addr::new(192, 0, 2, 20)));
+        assert!(text.contains("[DHCPv4]\nClientIdentifier=duid\nIAID=1578115120\nDUIDType=1\n"), "{text}");
+        assert!(text.contains("DUIDRawData=00:01:32:85:aa:ac:02:00:5e:10:20:30\nRequestAddress=192.0.2.20\n"), "{text}");
+        // no DUID file or MAC: unknown, not guessed
+        assert_eq!(dhcpcd_identity(conf, None, Some("02:00:5e:10:20:30")), None);
+        assert_eq!(dhcpcd_identity(conf, Some(duid), None), None);
+        // the MAC as client id; options per interface or a chosen IAID are not guessed
+        assert_eq!(dhcpcd_identity("clientid\n", None, None), Some(DhcpIdentity::Mac));
+        assert_eq!(dhcpcd_identity("duid\ninterface eth0\n", Some(duid), Some("02:00:5e:10:20:30")), None);
+        assert_eq!(dhcpcd_identity("duid\niaid 1\n", Some(duid), Some("02:00:5e:10:20:30")), None);
+        assert_eq!(dhcpcd_identity("# duid\n", Some(duid), Some("02:00:5e:10:20:30")), None);
+        // dhclient: none sent (known by MAC) or the hardware address; anything else unknown
+        assert_eq!(dhclient_identity(None), Some(DhcpIdentity::Mac));
+        assert_eq!(dhclient_identity(Some("#send dhcp-client-identifier 1:0:a0:24:ab:fb:9c;\n")), Some(DhcpIdentity::Mac));
+        assert_eq!(dhclient_identity(Some("send dhcp-client-identifier = hardware;\n")), Some(DhcpIdentity::Mac));
+        assert_eq!(dhclient_identity(Some("send dhcp-client-identifier \"nas\";\n")), None);
+        assert_eq!(render_dhcp_identity(&DhcpIdentity::Mac, "dhclient", None).lines().last(), Some("ClientIdentifier=mac"));
+    }
 
     #[test]
     fn link_local_is_deterministic_and_valid() {

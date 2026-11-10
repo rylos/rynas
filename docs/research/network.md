@@ -138,6 +138,7 @@ NetworkManager has better rollback, but it is designed for desktops and would dr
 2. **Read-only** until "Let rynas manage this" is pressed (like Cockpit with unmanaged interfaces).
 3. **Migration from ifupdown** as a trial transaction:
    - generate equivalent networkd files, **same IP**;
+   - DHCP ports keep the **DHCP identity** of ifupdown's client, so the server gives the same address (2026-11-10, after the HS-251 got a new address at the takeover: networkd's default client id, a DUID from the machine id with an IAID hashed from the name, is a new client to the server). A drop-in `05-rynas-<port>.network.d/10-dhcp-identity.conf` holds `ClientIdentifier=`, and for dhcpcd's `duid` option (Debian's default) `IAID=` (the last 4 bytes of the MAC), `DUIDType=`/`DUIDRawData=` from `/var/lib/dhcpcd/duid`, plus `RequestAddress=` with the leased address. dhclient sends no client id unless configured: `ClientIdentifier=mac`. A configuration that cannot be read for sure (per-interface options, a chosen IAID, a custom dhclient id) gets no drop-in, and the revision comment says so. The drop-in is part of the adoption revision, so a rollback removes it; later edits of the port keep it;
    - `systemctl disable networking`, move `interfaces` to `interfaces.rynas-bak`, `systemctl enable --now systemd-networkd` (and `systemd-resolved` when installed; otherwise rynas writes `/etc/resolv.conf`, §4.1);
    - same timed confirmation;
    - rollback: put `interfaces` back, stop networkd and `systemctl restart networking`.

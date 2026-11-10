@@ -647,6 +647,52 @@ impl Engine {
         files
     }
 
+
+    /// Drop-ins that keep, on the ports networkd takes over on DHCP, the client identifier the
+    /// DHCP client of ifupdown sent and the address it had, so the server gives the same
+    /// address and the page is not lost. ifupdown runs dhclient when installed, else dhcpcd;
+    /// a port whose previous identity cannot be read for sure gets no drop-in (networkd's
+    /// default), and the reason comes back for the plan.
+    fn dhcp_identity_files(
+        &self,
+        config: &BTreeMap<String, InterfaceConfig>,
+        inv: &Inventory,
+    ) -> (Vec<FileState>, Vec<String>) {
+        let exists = |p: &str| self.os.path(Path::new(p)).exists();
+        let read = |p: &str| self.os.read_config(Path::new(p));
+        let client = if exists("/usr/sbin/dhclient") || exists("/sbin/dhclient") {
+            "dhclient"
+        } else if exists("/usr/sbin/dhcpcd") || exists("/sbin/dhcpcd") {
+            "dhcpcd"
+        } else {
+            return (Vec::new(), Vec::new());
+        };
+        let (mut files, mut unknown) = (Vec::new(), Vec::new());
+        for iface in config.iter().filter(|(_, c)| c.ipv4 == Ipv4Method::Dhcp).map(|(i, _)| i) {
+            let link = inv.link(iface);
+            let mac = link.and_then(|l| l.mac.as_deref());
+            let id = match client {
+                "dhclient" => networkd::dhclient_identity(read("/etc/dhcp/dhclient.conf").as_deref()),
+                _ => read("/etc/dhcpcd.conf").and_then(|conf| {
+                    let duid = read("/var/lib/dhcpcd/duid").or_else(|| read("/etc/dhcpcd.duid"));
+                    networkd::dhcpcd_identity(&conf, duid.as_deref(), mac)
+                }),
+            };
+            let Some(id) = id else {
+                unknown.push(iface.clone());
+                continue;
+            };
+            let leased = link.and_then(|l| {
+                l.routable_v4().into_iter().find(|a| a.dynamic).and_then(|a| a.address.parse().ok())
+            });
+            files.push(FileState::present(
+                networkd::dhcp_identity_path(iface),
+                networkd::render_dhcp_identity(&id, client, leased),
+            ));
+        }
+        (files, unknown)
+    }
+
     fn others(inv: &Inventory, managed: &BTreeMap<String, InterfaceConfig>) -> Vec<OtherPort> {
         inv.links
             .iter()
@@ -844,6 +890,8 @@ impl Engine {
             .filter(|i| !i.is_empty())
             .ok_or_else(|| NetError::Conflict("ifupdown configures no interface".into()))?;
         let mut config = ifupdown::to_networkd(&ifs).map_err(NetError::Invalid)?;
+        // the DHCP ports keep the identity ifupdown's client had (only those ifupdown ran)
+        let (identity, unknown) = self.dhcp_identity_files(&config, inv);
         // keep what rynas already manages on other interfaces
         for (k, v) in self.current_config() {
             config.entry(k).or_insert(v);
@@ -860,17 +908,25 @@ impl Engine {
             .read_config(Path::new(INTERFACES))
             .unwrap_or_default();
         let mut files = self.networkd_files(&config, inv);
+        files.extend(identity);
         files.push(FileState::present(
             INTERFACES,
             ifupdown::LOOPBACK_ONLY.into(),
         ));
         files.push(FileState::present(INTERFACES_BACKUP, original));
         let touched = ifs.names();
+        let mut comment = String::from("ifupdown configuration handed to rynas (systemd-networkd)");
+        if !unknown.is_empty() {
+            comment.push_str(&format!(
+                "; DHCP identity of the previous client not readable on {}: the server may give a new address",
+                unknown.join(", ")
+            ));
+        }
         Ok((
             Revision {
                 ts_ms: self.os.now_ms(),
                 author: author.into(),
-                comment: "ifupdown configuration handed to rynas (systemd-networkd)".into(),
+                comment,
                 kind: RevKind::Adopt,
                 files,
                 services: Services {
@@ -1248,6 +1304,10 @@ impl Engine {
             Some(c) => {
                 if std::fs::read_to_string(&real).ok().as_deref() == Some(c.as_str()) {
                     return Ok(());
+                }
+                // a drop-in folder (`05-rynas-<port>.network.d`) may not exist yet
+                if let Some(dir) = real.parent().filter(|d| !d.exists()) {
+                    std::fs::create_dir_all(dir)?;
                 }
                 let tmp = rynas_config::files::candidate_path(&real);
                 write_synced(&tmp, c.as_bytes(), f.mode)?;
