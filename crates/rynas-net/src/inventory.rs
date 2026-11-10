@@ -43,6 +43,10 @@ pub struct Link {
     pub nd_dns: Vec<String>,
     /// networkd: the search domains of the link (`DOMAINS`).
     pub nd_domains: Vec<String>,
+    /// A bond's details (`ip -d`).
+    pub bond: Option<BondInfo>,
+    /// A bond member's details (`ip -d`).
+    pub slave: Option<SlaveInfo>,
 }
 
 impl Link {
@@ -72,6 +76,22 @@ impl Link {
         self.addresses
             .iter()
             .any(|a| a.address.parse::<IpAddr>().is_ok_and(|x| x == *ip))
+    }
+
+    /// The port's own MAC address (a bond member shows the bond's MAC as its address).
+    pub fn perm_mac(&self) -> Option<&str> {
+        self.slave
+            .as_ref()
+            .and_then(|s| s.perm_hwaddr.as_deref())
+            .or(self.mac.as_deref())
+    }
+
+    /// The `.network` file networkd applied is one of rynas's.
+    pub fn rynas_file(&self) -> bool {
+        self.nd_file
+            .as_deref()
+            .and_then(|f| f.rsplit('/').next())
+            .is_some_and(crate::networkd::is_rynas_file)
     }
 
     /// networkd manages it (a `.network` file applies).
@@ -135,6 +155,27 @@ impl Inventory {
         self.links.iter().filter(|l| is_port(l)).collect()
     }
 
+    /// The links a management path can run on: the ports and the bonds (not enslaved).
+    pub fn paths(&self) -> Vec<&Link> {
+        self.links
+            .iter()
+            .filter(|l| is_port(l) || (l.kind == LinkKind::Bond && l.master.is_none()))
+            .collect()
+    }
+
+    /// Every physical port, also those enslaved to a bond (the factory network frees them).
+    pub fn physical_ports(&self) -> Vec<&Link> {
+        self.links.iter().filter(|l| is_physical_port(l)).collect()
+    }
+
+    /// The members of a bond now.
+    pub fn members_of(&self, bond: &str) -> Vec<&Link> {
+        self.links
+            .iter()
+            .filter(|l| l.master.as_deref() == Some(bond))
+            .collect()
+    }
+
     /// The gateway of the default IPv4 route through `iface`.
     pub fn default_gateway(&self, iface: &str) -> Option<String> {
         self.routes
@@ -165,7 +206,12 @@ impl Inventory {
 }
 
 pub fn is_port(l: &Link) -> bool {
-    if l.master.is_some() || l.kind == LinkKind::Loopback {
+    l.master.is_none() && is_physical_port(l)
+}
+
+/// A physical Ethernet interface (or a test port), enslaved or not.
+pub fn is_physical_port(l: &Link) -> bool {
+    if l.kind == LinkKind::Loopback {
         return false;
     }
     let tp = test_ports();
@@ -201,6 +247,75 @@ struct IpLink {
 struct IpLinkInfo {
     #[serde(default)]
     info_kind: Option<String>,
+    #[serde(default)]
+    info_data: Option<serde_json::Value>,
+    #[serde(default)]
+    info_slave_kind: Option<String>,
+    #[serde(default)]
+    info_slave_data: Option<serde_json::Value>,
+}
+
+/// A bond as `ip -d` shows it (`linkinfo.info_data`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BondInfo {
+    pub mode: Option<String>,
+    pub active_slave: Option<String>,
+    pub primary: Option<String>,
+    pub miimon: Option<u32>,
+    pub xmit_hash_policy: Option<String>,
+    pub ad_lacp_rate: Option<String>,
+    /// 802.3ad: the active aggregator and the partner's MAC.
+    pub ad_aggregator: Option<u32>,
+    pub ad_partner_mac: Option<String>,
+}
+
+/// A bond member as `ip -d` shows it (`linkinfo.info_slave_data`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SlaveInfo {
+    /// `ACTIVE` or `BACKUP`.
+    pub state: Option<String>,
+    /// `UP` or `DOWN`.
+    pub mii_status: Option<String>,
+    pub link_failure_count: u32,
+    /// The port's own MAC (the link's MAC may be the bond's).
+    pub perm_hwaddr: Option<String>,
+    pub ad_aggregator_id: Option<u32>,
+}
+
+fn json_str(v: &serde_json::Value, k: &str) -> Option<String> {
+    v.get(k).and_then(|x| x.as_str()).map(str::to_string).filter(|s| !s.is_empty())
+}
+
+fn json_u32(v: &serde_json::Value, k: &str) -> Option<u32> {
+    v.get(k).and_then(|x| x.as_u64()).and_then(|n| u32::try_from(n).ok())
+}
+
+impl BondInfo {
+    fn parse(v: &serde_json::Value) -> Self {
+        let ad = v.get("ad_info");
+        BondInfo {
+            mode: json_str(v, "mode"),
+            active_slave: json_str(v, "active_slave"),
+            primary: json_str(v, "primary"),
+            miimon: json_u32(v, "miimon"),
+            xmit_hash_policy: json_str(v, "xmit_hash_policy"),
+            ad_lacp_rate: json_str(v, "ad_lacp_rate"),
+            ad_aggregator: ad.and_then(|a| json_u32(a, "aggregator")),
+            ad_partner_mac: ad.and_then(|a| json_str(a, "partner_mac")),
+        }
+    }
+}
+
+impl SlaveInfo {
+    fn parse(v: &serde_json::Value) -> Self {
+        SlaveInfo {
+            state: json_str(v, "state"),
+            mii_status: json_str(v, "mii_status"),
+            link_failure_count: json_u32(v, "link_failure_count").unwrap_or(0),
+            perm_hwaddr: json_str(v, "perm_hwaddr"),
+            ad_aggregator_id: json_u32(v, "ad_aggregator_id"),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -236,7 +351,17 @@ pub fn parse_ip_addr(json: &str) -> Result<Vec<Link>, String> {
     let v: Vec<IpLink> = serde_json::from_str(json).map_err(|e| format!("ip -j addr: {e}"))?;
     Ok(v.into_iter()
         .map(|l| {
-            let info_kind = l.linkinfo.and_then(|i| i.info_kind);
+            let (info_kind, bond, slave) = match l.linkinfo {
+                Some(i) => {
+                    let bond = (i.info_kind.as_deref() == Some("bond"))
+                        .then(|| i.info_data.as_ref().map(BondInfo::parse).unwrap_or_default());
+                    let slave = (i.info_slave_kind.as_deref() == Some("bond")).then(|| {
+                        i.info_slave_data.as_ref().map(SlaveInfo::parse).unwrap_or_default()
+                    });
+                    (i.info_kind, bond, slave)
+                }
+                None => (None, None, None),
+            };
             let kind = match (l.link_type.as_str(), info_kind.as_deref()) {
                 ("loopback", _) => LinkKind::Loopback,
                 (_, Some("bond")) => LinkKind::Bond,
@@ -260,6 +385,8 @@ pub fn parse_ip_addr(json: &str) -> Result<Vec<Link>, String> {
                 max_mtu: l.max_mtu.filter(|m| *m > 0),
                 oper_state: l.operstate.to_ascii_lowercase(),
                 master: l.master,
+                bond,
+                slave,
                 addresses: l
                     .addr_info
                     .into_iter()
@@ -488,6 +615,34 @@ mod tests {
             "lan1"
         );
         assert!(inv.iface_of_ip(&"127.0.0.1".parse().unwrap()).is_none());
+    }
+
+    /// `ip -j -d addr show` of a 802.3ad bond (iproute2 6.x field names) and one member.
+    #[test]
+    fn parses_bonds_and_members() {
+        let json = r#"[
+ {"ifindex":3,"ifname":"enp3s0","flags":["BROADCAST","MULTICAST","SLAVE","UP","LOWER_UP"],"mtu":1500,"master":"bond0","operstate":"UP","link_type":"ether","address":"24:5e:be:00:00:01","max_mtu":9000,
+  "linkinfo":{"info_slave_kind":"bond","info_slave_data":{"state":"ACTIVE","mii_status":"UP","link_failure_count":2,"perm_hwaddr":"24:5e:be:00:00:03","queue_id":0,"prio":0,"ad_aggregator_id":1,"ad_actor_oper_port_state":61,"ad_actor_oper_port_state_str":["active","aggregating","in_sync","collecting","distributing"],"ad_partner_oper_port_state":61}},"addr_info":[]},
+ {"ifindex":9,"ifname":"bond0","flags":["BROADCAST","MULTICAST","MASTER","UP","LOWER_UP"],"mtu":1500,"operstate":"UP","link_type":"ether","address":"24:5e:be:00:00:01","max_mtu":65535,
+  "linkinfo":{"info_kind":"bond","info_data":{"mode":"802.3ad","miimon":100,"updelay":0,"downdelay":0,"peer_notify_delay":0,"use_carrier":1,"arp_interval":0,"arp_validate":null,"arp_all_targets":"any","primary_reselect":"always","fail_over_mac":"none","xmit_hash_policy":"layer2+3","resend_igmp":1,"num_peer_notif":1,"all_slaves_active":0,"min_links":0,"lp_interval":1,"packets_per_slave":1,"ad_lacp_active":"on","ad_lacp_rate":"slow","ad_select":"stable","ad_aggregator":1,"ad_num_ports":2,"ad_actor_key":9,"ad_partner_key":1,"ad_partner_mac":"00:11:22:33:44:55","ad_actor_sys_prio":65535,"ad_user_port_key":0,"ad_actor_system":"00:00:00:00:00:00","tlb_dynamic_lb":1,
+  "ad_info":{"aggregator":1,"num_ports":2,"actor_key":9,"partner_key":1,"partner_mac":"00:11:22:33:44:55"}}},
+  "addr_info":[{"family":"inet","local":"192.0.2.37","prefixlen":24,"scope":"global","dynamic":true}]}
+]"#;
+        let l = parse_ip_addr(json).unwrap();
+        let s = l[0].slave.clone().unwrap();
+        assert_eq!(s.perm_hwaddr.as_deref(), Some("24:5e:be:00:00:03"));
+        assert_eq!((s.link_failure_count, s.ad_aggregator_id), (2, Some(1)));
+        assert_eq!(l[0].perm_mac(), Some("24:5e:be:00:00:03"), "not the bond's MAC");
+        assert_eq!(l[1].kind, LinkKind::Bond);
+        let b = l[1].bond.clone().unwrap();
+        assert_eq!(b.mode.as_deref(), Some("802.3ad"));
+        assert_eq!(b.xmit_hash_policy.as_deref(), Some("layer2+3"));
+        assert_eq!((b.ad_aggregator, b.ad_partner_mac.as_deref()), (Some(1), Some("00:11:22:33:44:55")));
+        let inv = Inventory { links: l, ..Default::default() };
+        let st = crate::bond::status(&inv, inv.link("bond0").unwrap()).unwrap();
+        assert_eq!(st.lacp_ok, Some(true));
+        assert_eq!(st.members[0].link_failures, 2);
+        assert_eq!(inv.paths().len(), 1, "the bond, not its member");
     }
 
     #[test]

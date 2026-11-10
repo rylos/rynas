@@ -342,7 +342,7 @@ pub fn routes() -> Router<AppState> {
         .route("/tailscale/options/confirm", post(forward_client))
         // network (P4): with the local address of the session's connection
         .route("/network/interfaces", get(forward_net))
-        .route("/network/interfaces/{name}", put(forward_net))
+        .route("/network/interfaces/{name}", put(forward_net).delete(forward_net))
         .route("/network/state", get(forward_net))
         .route("/network/discard", post(forward_net))
         .route("/network/apply", post(forward_net))

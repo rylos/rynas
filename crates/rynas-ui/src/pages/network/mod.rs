@@ -5,9 +5,11 @@
 //! (link-local, mDNS, Synology reset button read-only), ifupdown adoption and diagnostics
 //! ([`tools`]).
 //!
-//! Phase 1 of the API edits IPv4 (DHCP / static / off), gateway, DNS and MTU of interfaces that
-//! systemd-networkd manages; IPv6, bonds, VLANs and bridges are shown read-only.
+//! The API edits IPv4 (DHCP / static / off), gateway, DNS and MTU of interfaces that
+//! systemd-networkd manages, and bonds of physical ports ([`bond`], D-BOND); IPv6, VLANs and
+//! bridges are shown read-only.
 
+pub mod bond;
 pub mod edit;
 pub mod remote;
 pub mod tools;
@@ -516,6 +518,10 @@ pub fn method_key(m: Ipv4Method) -> &'static str {
 
 /// Link state as tone and text.
 pub fn link_state(i: &NetInterface) -> (Tone, &'static str) {
+    // a bond the user is creating: no link yet
+    if i.kind == LinkKind::Bond && i.oper_state.is_empty() && i.carrier.is_none() {
+        return (Tone::Info, "net.st_new");
+    }
     match (i.carrier, i.oper_state.as_str()) {
         (Some(true), "up") | (None, "up") => (Tone::Ok, "net.st_up"),
         (Some(true), _) => (Tone::Warn, "net.st_dormant"),
@@ -541,6 +547,7 @@ fn listed(i: &NetInterface, virt: bool) -> bool {
 fn interfaces_panel(net: Net) -> AnyView {
     let virt = RwSignal::new(false);
     let open = RwSignal::new(None::<NetInterface>);
+    let creating = RwSignal::new(false);
     let table = move || {
         if let Some(v) = net.ifaces.gate(5) {
             return v;
@@ -560,14 +567,22 @@ fn interfaces_panel(net: Net) -> AnyView {
         )
     };
     let hidden = move || net.ifaces.data.with(|l| l.iter().flatten().filter(|i| i.kind == LinkKind::Virtual).count());
+    // a bond needs a free port rynas may configure
+    let can_bond = move || net.ifaces.data.with(|l| !bond::candidates(l.as_deref().unwrap_or_default(), "").is_empty());
     let editor = move || open.get().map(|i| edit::editor(net, i, Callback::new(move |_| open.set(None))));
+    let creator = move || creating.get().then(|| edit::create_bond(net, Callback::new(move |_| creating.set(false))));
     view! {
-        <div class="toolbar" hidden=move || hidden() == 0>
-            {switch("net.show_virtual", None, virt.into(), Callback::new(move |v| virt.set(v)))}
-            <span class="muted small net-count">{move || (!virt.get()).then(|| tf("net.hidden_virtual", &[("n", &hidden().to_string())]))}</span>
+        <div class="toolbar">
+            <span hidden=move || hidden() == 0>{switch("net.show_virtual", None, virt.into(), Callback::new(move |v| virt.set(v)))}</span>
+            <span class="muted small net-count" hidden=move || hidden() == 0>{move || (!virt.get()).then(|| tf("net.hidden_virtual", &[("n", &hidden().to_string())]))}</span>
+            <button type="button" class="btn ghost sm" disabled=move || !can_bond() title=move || (!can_bond()).then(|| t("net.no_ports_free").to_string())
+                on:click=move |_| creating.set(true)>
+                <Icon icon=icons::PLUS size=16 />{tr("net.bond_create")}
+            </button>
         </div>
         {table}
         {editor}
+        {creator}
     }
     .into_any()
 }
@@ -586,11 +601,25 @@ fn iface_row(i: NetInterface, open: RwSignal<Option<NetInterface>>) -> AnyView {
         })
         .collect();
     // what configures it: the IPv4 method when known, else who owns the interface
-    let (cfg_text, cfg_sub) = match (&i.pending, &i.applied) {
-        (Some(c), _) | (None, Some(c)) => (t(method_key(c.ipv4)).to_string(), Some(t(backend_key(i.backend)))),
-        (None, None) => (t(backend_key(i.backend)).to_string(), None),
+    let master = i.read_only.as_ref().filter(|r| r.code == ReadOnlyCode::Enslaved).and_then(|r| r.master.clone());
+    let (cfg_text, cfg_sub) = match (&master, &i.pending, &i.applied) {
+        // a bond member has no settings of its own
+        (Some(m), _, _) => (tf("net.member_of", &[("master", m)]), Some(t(backend_key(i.backend)))),
+        (None, Some(c), _) | (None, None, Some(c)) => (t(method_key(c.ipv4)).to_string(), Some(t(backend_key(i.backend)))),
+        (None, None, None) => (t(backend_key(i.backend)).to_string(), None),
     };
-    let sub = [Some(t(kind_key(i.kind)).to_string()), i.driver.clone()].into_iter().flatten().collect::<Vec<_>>().join(" · ");
+    // a bond: its mode, and its members with their link
+    let bond_mode = i.bond.as_ref().and_then(|b| b.mode.clone()).or_else(|| {
+        i.pending.as_ref().or(i.applied.as_ref()).and_then(|c| c.bond.as_ref()).map(|b| b.mode.kernel_name().to_string())
+    });
+    let sub = [Some(t(kind_key(i.kind)).to_string()), bond_mode.map(|m| t(bond::mode_key(&m)).to_string()), i.driver.clone()]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let members = bond::members_line(&i);
+    let removing = i.pending.as_ref().is_some_and(|p| p.removed);
+    let lacp_broken = bond::lacp_broken(&i);
     let mac = i.mac.clone();
     let name = i.name.clone();
     let editable = i.editable;
@@ -609,7 +638,9 @@ fn iface_row(i: NetInterface, open: RwSignal<Option<NetInterface>>) -> AnyView {
             {cfg_sub.map(|s| view! { <span class="cell-sub">{s}</span> })}
         </div>
         <div class="chips">
-            {i.pending.is_some().then(|| ui::status(Tone::Info, t("pending.change").to_string()))}
+            {(i.pending.is_some() && !removing).then(|| ui::status(Tone::Info, t("pending.change").to_string()))}
+            {removing.then(|| ui::status(Tone::Warn, t("net.bond_removed").to_string()))}
+            {lacp_broken.then(|| ui::status(Tone::Warn, t("net.lacp_bad").to_string()))}
             {(!editable).then(|| view! { <span class="chip" title=reason.clone()><Icon icon=icons::LOCK size=12 />{tr("net.read_only")}</span> })}
         </div>
     };
@@ -621,6 +652,7 @@ fn iface_row(i: NetInterface, open: RwSignal<Option<NetInterface>>) -> AnyView {
                 <div class="cell-main">
                     <button class="link-strong mono" aria-label=label on:click=move |_| open.set(Some(i2.clone()))>{name.clone()}</button>
                     <span class="cell-sub">{sub}</span>
+                    {members.map(|m| view! { <span class="cell-sub">{m}</span> })}
                     {mac.map(|m| view! { <span class="cell-sub mono" title=tr("net.col_mac")>{m}</span> })}
                     {i.management.then(|| view! { <span class="chip accent" title=tr("net.this_connection_help")>{tr("net.this_connection")}</span> })}
                 </div>
@@ -781,8 +813,7 @@ mod tests {
             ipv4: Ipv4Method::Static,
             addresses: addrs.iter().map(|s| s.to_string()).collect(),
             gateway: gw.map(str::to_string),
-            dns: vec![],
-            mtu: None,
+            ..Default::default()
         }
     }
 
@@ -851,11 +882,11 @@ mod read_only_tests {
     #[test]
     fn read_only_reason_is_translated_from_its_code() {
         let mut i = NetInterface {
-            read_only_reason: Some("enslaved to bond0: bonds and bridges are configured in a later version".into()),
+            read_only_reason: Some("a member of bond0: change it from there".into()),
             read_only: Some(ReadOnlyReason { code: ReadOnlyCode::Enslaved, master: Some("bond0".into()) }),
             ..Default::default()
         };
-        assert_eq!(read_only_text(&i), ("It is a port of bond0: bonds and bridges become configurable in a later version.".into(), false));
+        assert_eq!(read_only_text(&i), ("It is a member of bond0: change it from the bond.".into(), false));
         // a code of a newer server, and an older server without codes: the English text
         i.read_only = Some(ReadOnlyReason { code: ReadOnlyCode::Other, master: None });
         assert!(read_only_text(&i).1);

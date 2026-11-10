@@ -4,9 +4,9 @@
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use rynas_api_types::network::{InterfaceConfig, IpFamily, Ipv4Method, NetInterface};
+use rynas_api_types::network::{BondConfig, InterfaceConfig, IpFamily, Ipv4Method, LinkKind, NetBackend, NetInterface};
 
-use super::{Net, backend_key, read_only_text, check, diff, diff_table, link_state, method_key, speed_text, words};
+use super::{Net, bond, backend_key, read_only_text, check, diff, diff_table, link_state, method_key, speed_text, words};
 use crate::api;
 use crate::form::{In, area_field, save_bar, select_field, text_field};
 use crate::ui::{self, drawer};
@@ -71,12 +71,37 @@ impl Draft {
             gateway: (st && !gw.is_empty()).then_some(gw),
             dns: if ipv4 == Ipv4Method::Disabled { Vec::new() } else { words(&self.dns.get()) },
             mtu,
+            ..Default::default()
         })
     }
 }
 
 pub fn editor(net: Net, i: NetInterface, close: Callback<()>) -> AnyView {
-    let title = if i.editable { tf("edit_named", &[("name", &i.name)]) } else { tf("net.details_title", &[("name", &i.name)]) };
+    editor_with(net, i, None, close)
+}
+
+/// The editor of a new bond: the port this session comes through (else the first free port)
+/// as member, with its IPv4 settings, so the address does not change.
+pub fn create_bond(net: Net, close: Callback<()>) -> AnyView {
+    let all: Vec<NetInterface> = net.ifaces.data.with_untracked(|l| l.iter().flatten().cloned().collect());
+    let name = bond::next_name(&all);
+    let ports = bond::candidates(&all, &name);
+    let seed = ports.iter().find(|p| p.management).or(ports.first());
+    let mut base = seed.and_then(|p| p.pending.clone().or_else(|| p.applied.clone())).unwrap_or_default();
+    base.bond = Some(BondConfig { members: seed.map(|p| vec![p.name.clone()]).unwrap_or_default(), miimon_ms: 100, ..Default::default() });
+    let i = NetInterface { name, kind: LinkKind::Bond, editable: true, backend: NetBackend::Networkd, ..Default::default() };
+    editor_with(net, i, Some(base), close)
+}
+
+fn editor_with(net: Net, i: NetInterface, seed: Option<InterfaceConfig>, close: Callback<()>) -> AnyView {
+    let creating = seed.is_some();
+    let title = if creating {
+        tf("net.bond_create_title", &[("name", &i.name)])
+    } else if i.editable {
+        tf("edit_named", &[("name", &i.name)])
+    } else {
+        tf("net.details_title", &[("name", &i.name)])
+    };
     let details = details(&i);
     if !i.editable {
         let (reason, en) = read_only_text(&i);
@@ -92,20 +117,37 @@ pub fn editor(net: Net, i: NetInterface, close: Callback<()>) -> AnyView {
         return drawer(Signal::stored(title), close, body, foot);
     }
 
-    let base = i.pending.clone().or_else(|| i.applied.clone()).unwrap_or_default();
+    let base = seed.clone().or_else(|| i.pending.clone().filter(|p| !p.removed)).or_else(|| i.applied.clone()).unwrap_or_default();
     let d = Draft::new(&base);
     let show = RwSignal::new(false);
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
-    let max_mtu = i.max_mtu;
     let applied = i.applied.clone();
     let has_pending = i.pending.is_some();
+    let removing = i.pending.as_ref().is_some_and(|p| p.removed);
     let name = i.name.clone();
+    // a bond: its members, mode... (a bond rynas made, or one being created)
+    let bd = base.bond.as_ref().map(bond::BondDraft::new);
+    let ports = bd
+        .map(|_| net.ifaces.data.with_untracked(|l| bond::candidates(l.as_deref().unwrap_or_default(), &name)))
+        .unwrap_or_default();
+    // a bond's MTU: what every member accepts (the server checks it too)
+    let max_mtu = if bd.is_some() { ports.iter().filter_map(|p| p.max_mtu).min() } else { i.max_mtu };
+    let existing_bond = applied.as_ref().is_some_and(|a| a.bond.is_some());
 
     let d1 = d.clone();
-    let cfg = Memo::new(move |_| d1.config());
+    let cfg = Memo::new(move |_| {
+        d1.config().map(|mut c| {
+            c.bond = bd.map(|b| b.config());
+            c
+        })
+    });
     let problems = Memo::new(move |_| match cfg.get() {
-        Some(c) => check(&c, max_mtu),
+        Some(c) => {
+            let mut v = check(&c, max_mtu);
+            v.extend(c.bond.as_ref().map(bond::check).unwrap_or_default());
+            v
+        }
         None => vec![("mtu", "net.v_mtu")],
     });
     let err_of = move |field: &'static str| {
@@ -118,7 +160,7 @@ pub fn editor(net: Net, i: NetInterface, close: Callback<()>) -> AnyView {
     };
     let is_static = move || d.method.get() == "static";
     let base2 = base.clone();
-    let changed = Signal::derive(move || cfg.with(|c| c.as_ref().is_some_and(|c| *c != base2)));
+    let changed = Signal::derive(move || creating || cfg.with(|c| c.as_ref().is_some_and(|c| *c != base2)));
 
     let stage = move |body: InterfaceConfig| {
         busy.set(true);
@@ -148,10 +190,31 @@ pub fn editor(net: Net, i: NetInterface, close: Callback<()>) -> AnyView {
             stage(c);
         }
     });
-    // staging the applied value drops the staged change
-    let revert = applied.clone().map(|a| {
-        Callback::new(move |_| stage2(a.clone()))
+    // DELETE stages the deletion of a bond, or drops a bond that is only staged
+    let name2 = i.name.clone();
+    let remove = Callback::new(move |toast_key: &'static str| {
+        busy.set(true);
+        error.set(None);
+        let url = format!("/api/v1/network/interfaces/{}", api::encode(&name2));
+        spawn_local(async move {
+            let r = api::delete_empty(&url).await;
+            busy.set(false);
+            match r {
+                Ok(()) => {
+                    toast(Tone::Ok, t(toast_key).to_string());
+                    net.reload();
+                    close.run(());
+                }
+                Err(e) => error.set(Some(e.text())),
+            }
+        });
     });
+    // staging the applied value drops the staged change (a new bond: DELETE)
+    let revert = match applied.clone() {
+        Some(a) => Some(Callback::new(move |_| stage2(a.clone()))),
+        None if bd.is_some() && has_pending => Some(Callback::new(move |_| remove.run("net.bond_dropped"))),
+        None => None,
+    };
 
     let mgmt = i.management.then(|| {
         view! {
@@ -176,8 +239,15 @@ pub fn editor(net: Net, i: NetInterface, close: Callback<()>) -> AnyView {
     let body = view! {
         <form class="form" on:submit=move |ev| { ev.prevent_default(); save.run(()); }>
             {mgmt}
-            {has_pending.then(|| view! {
+            {(has_pending && !removing).then(|| view! {
                 {ui::note(Tone::Info, icons::INFO, view! { {tr("net.has_pending")} }.into_any())}
+            })}
+            {removing.then(|| view! {
+                {ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {tr("net.bond_removed_text")} }.into_any())}
+            })}
+            {bd.map(|b| view! {
+                <h3 class="form-section">{tr("net.k.bond")}</h3>
+                {bond::form(b, ports.clone(), show.into())}
             })}
             <h3 class="form-section">{tr("net.sec_ipv4")}</h3>
             {select_field("net.f_method", Some("net.method_help"), METHODS, d.method.into(), Callback::new(move |v| d.method.set(v)))}
@@ -204,6 +274,11 @@ pub fn editor(net: Net, i: NetInterface, close: Callback<()>) -> AnyView {
     .into_any();
 
     let foot = view! {
+        {(existing_bond && !removing).then(|| view! {
+            <button type="button" class="btn ghost net-revert" disabled=move || busy.get() on:click=move |_| remove.run("net.bond_deleted")>
+                <Icon icon=icons::TRASH_2 size=16 />{tr("net.bond_delete")}
+            </button>
+        })}
         {revert.filter(|_| has_pending).map(|cb| view! {
             <button type="button" class="btn ghost net-revert" disabled=move || busy.get() on:click=move |_| cb.run(())>
                 <Icon icon=icons::ROTATE_CCW size=16 />{tr("net.revert")}
@@ -247,6 +322,45 @@ fn details(i: &NetInterface) -> AnyView {
                 {(!c.dns.is_empty()).then(|| kv("net.dns", c.dns.join(", "), "mono"))}
                 {kv("net.f_mtu", c.mtu.map(|m| m.to_string()).unwrap_or_else(|| t("net.mtu_default").to_string()), "mono")}
             </dl>
+        }
+    });
+    // a bond now: mode, members with their link, the LACP partner
+    let bond_state = i.bond.as_ref().map(|s| {
+        let members = s
+            .members
+            .iter()
+            .map(|m| {
+                let state = if !m.link_up {
+                    t("net.member_down")
+                } else if m.active {
+                    t("net.member_active")
+                } else if s.active_member.is_some() {
+                    t("net.member_standby")
+                } else {
+                    t("net.st_up")
+                };
+                let speed = m.speed_mbps.map(crate::i18n::link_speed);
+                let failures = (m.link_failures > 0).then(|| tf("net.member_failures", &[("n", &m.link_failures.to_string())]));
+                let sub = [Some(state.to_string()), speed, failures].into_iter().flatten().collect::<Vec<_>>().join(" · ");
+                view! {
+                    <li class="net-addr">
+                        <span class="mono">{m.name.clone()}</span>
+                        <span class="muted small">{sub}</span>
+                    </li>
+                }
+            })
+            .collect_view();
+        let partner = s.lacp_ok.map(|_| match s.partner_mac.as_deref().filter(|m| *m != "00:00:00:00:00:00") {
+            Some(m) => kv("net.lacp_partner", m.to_string(), "mono"),
+            None => kv("net.lacp_partner", t("net.lacp_none").to_string(), ""),
+        });
+        view! {
+            <h3 class="form-section">{tr("net.f_members")}</h3>
+            <dl class="kvs">
+                {s.mode.as_deref().map(|m| kv("net.f_bond_mode", t(bond::mode_key(m)).to_string(), ""))}
+                {partner}
+            </dl>
+            <ul class="plain-list net-addr-list">{members}</ul>
         }
     });
     let stanzas = i
@@ -301,6 +415,7 @@ fn details(i: &NetInterface) -> AnyView {
             } else {
                 view! { <ul class="plain-list net-addr-list">{addrs}</ul> }.into_any()
             }}
+            {bond_state}
             {applied}
             {(!i.ifupdown.is_empty()).then(|| view! { <h3 class="form-section">{tr("net.sec_ifupdown")}</h3>{stanzas} })}
         </div>

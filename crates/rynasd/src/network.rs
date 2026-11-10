@@ -1,7 +1,8 @@
 //! Network endpoints of the internal API (`/v1/network/...`, public under
 //! `/api/v1/network/...`), on top of [`rynas_net::Engine`] (D-NET).
 //!
-//! Interface settings are staged per user (`PUT /v1/network/interfaces/{name}`) and applied
+//! Interface settings are staged per user (`PUT /v1/network/interfaces/{name}`, also a bond:
+//! settings with `bond`; `DELETE` stages the deletion of a bond) and applied
 //! with `POST /v1/network/apply`, which is **not** `/config/apply`: a network change is a
 //! transaction with a timed confirmation, so it has its own cycle. The apply answers at once
 //! with the confirmation token and the URLs to confirm from; the change itself runs in a task
@@ -141,7 +142,7 @@ fn json_body<T>(b: Result<Json<T>, JsonRejection>) -> Res<T> {
 pub fn router(st: NetState) -> Router {
     Router::new()
         .route("/v1/network/interfaces", get(interfaces))
-        .route("/v1/network/interfaces/{name}", put(stage))
+        .route("/v1/network/interfaces/{name}", put(stage).delete(stage_remove))
         .route("/v1/network/state", get(state))
         .route("/v1/network/discard", post(discard))
         .route("/v1/network/apply", post(apply))
@@ -181,7 +182,7 @@ async fn stage(
     let cfg = json_body(body)?;
     Ok(Json(
         blocking(&n, move |n| {
-            n.engine.stage(&owner, &name, &cfg)?;
+            n.engine.stage_from(&owner, &name, &cfg, local)?;
             n.engine.invalidate();
             n.engine
                 .interfaces(&owner, local)?
@@ -191,6 +192,23 @@ async fn stage(
         })
         .await?,
     ))
+}
+
+/// `DELETE /v1/network/interfaces/{name}`: stages the deletion of a bond (or drops a bond
+/// only staged).
+async fn stage_remove(
+    State(st): State<NetState>,
+    h: HeaderMap,
+    Path(name): Path<String>,
+) -> Res<StatusCode> {
+    let (n, owner) = (net(&st)?, user(&h)?);
+    blocking(&n, move |n| {
+        n.engine.stage_remove(&owner, &name)?;
+        n.engine.invalidate();
+        Ok(())
+    })
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn discard(State(st): State<NetState>, h: HeaderMap) -> Res<StatusCode> {
@@ -579,6 +597,8 @@ pub fn spawn_event_flush(n: Arc<Network>) {
             let n2 = n.clone();
             let _ = tokio::task::spawn_blocking(move || {
                 n2.engine.sync_resolv(&|l| tracing::info!("network: {l}"));
+                // members that lost their link, a new active member, a lost LACP partner
+                n2.engine.watch_bonds();
                 n2.flush_events()
             })
             .await;

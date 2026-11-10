@@ -88,6 +88,216 @@ pub struct InterfaceConfig {
     /// `None`: the driver default.
     #[serde(default)]
     pub mtu: Option<u32>,
+    /// The interface is a bond (`bondN`) made of these ports; the IPv4 settings, MTU and DNS
+    /// above are the bond's, its member ports carry none. `PUT` with a bond name that does
+    /// not exist yet stages a new bond.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bond: Option<BondConfig>,
+    /// A staged deletion of the bond (`DELETE /api/v1/network/interfaces/{name}`); set by
+    /// the server only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub removed: bool,
+}
+
+/// Bonding mode (the kernel's names on the wire).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum BondMode {
+    /// One member carries the traffic, another takes over when it fails; works with any
+    /// switch.
+    #[default]
+    #[serde(rename = "active-backup")]
+    ActiveBackup,
+    /// Adaptive load balancing (outgoing by load, incoming by ARP); any switch.
+    #[serde(rename = "balance-alb")]
+    BalanceAlb,
+    /// IEEE 802.3ad (LACP): needs a managed switch with a LACP group on the same ports.
+    #[serde(rename = "802.3ad")]
+    Lacp,
+    /// Static hash over the members: needs a static link aggregation group on the switch.
+    #[serde(rename = "balance-xor")]
+    BalanceXor,
+    /// Adaptive transmit load balancing (outgoing only); any switch.
+    #[serde(rename = "balance-tlb")]
+    BalanceTlb,
+    /// Round robin (reorders packets; not offered for new bonds).
+    #[serde(rename = "balance-rr")]
+    BalanceRr,
+    /// Every packet on every member (not offered for new bonds).
+    #[serde(rename = "broadcast")]
+    Broadcast,
+}
+
+impl BondMode {
+    /// The kernel's (and networkd's `Mode=`) name.
+    pub fn kernel_name(self) -> &'static str {
+        match self {
+            BondMode::ActiveBackup => "active-backup",
+            BondMode::BalanceAlb => "balance-alb",
+            BondMode::Lacp => "802.3ad",
+            BondMode::BalanceXor => "balance-xor",
+            BondMode::BalanceTlb => "balance-tlb",
+            BondMode::BalanceRr => "balance-rr",
+            BondMode::Broadcast => "broadcast",
+        }
+    }
+
+    /// From a kernel name or ifupdown's number (`0`-`6`).
+    pub fn parse(s: &str) -> Option<BondMode> {
+        Some(match s.trim() {
+            "active-backup" | "1" => BondMode::ActiveBackup,
+            "balance-alb" | "6" => BondMode::BalanceAlb,
+            "802.3ad" | "4" => BondMode::Lacp,
+            "balance-xor" | "2" => BondMode::BalanceXor,
+            "balance-tlb" | "5" => BondMode::BalanceTlb,
+            "balance-rr" | "0" => BondMode::BalanceRr,
+            "broadcast" | "3" => BondMode::Broadcast,
+            _ => return None,
+        })
+    }
+
+    /// The mode has a preferred member (`primary`).
+    pub fn has_primary(self) -> bool {
+        matches!(self, BondMode::ActiveBackup | BondMode::BalanceAlb | BondMode::BalanceTlb)
+    }
+
+    /// The mode uses a transmit hash policy.
+    pub fn has_hash(self) -> bool {
+        matches!(self, BondMode::Lacp | BondMode::BalanceXor | BondMode::BalanceTlb)
+    }
+}
+
+/// Transmit hash policy (802.3ad, balance-xor, balance-tlb).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum BondHash {
+    #[serde(rename = "layer2")]
+    Layer2,
+    #[serde(rename = "layer2+3")]
+    Layer23,
+    #[serde(rename = "layer3+4")]
+    Layer34,
+    #[serde(rename = "encap2+3")]
+    Encap23,
+    #[serde(rename = "encap3+4")]
+    Encap34,
+}
+
+impl BondHash {
+    pub fn kernel_name(self) -> &'static str {
+        match self {
+            BondHash::Layer2 => "layer2",
+            BondHash::Layer23 => "layer2+3",
+            BondHash::Layer34 => "layer3+4",
+            BondHash::Encap23 => "encap2+3",
+            BondHash::Encap34 => "encap3+4",
+        }
+    }
+
+    /// From a kernel name or ifupdown's number (`0`-`4`).
+    pub fn parse(s: &str) -> Option<BondHash> {
+        Some(match s.trim() {
+            "layer2" | "0" => BondHash::Layer2,
+            "layer3+4" | "1" => BondHash::Layer34,
+            "layer2+3" | "2" => BondHash::Layer23,
+            "encap2+3" | "3" => BondHash::Encap23,
+            "encap3+4" | "4" => BondHash::Encap34,
+            _ => return None,
+        })
+    }
+}
+
+/// How often the LACP partner is asked for LACPDUs (802.3ad).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BondLacpRate {
+    /// Every 30 s (the default, what switches expect).
+    #[default]
+    Slow,
+    /// Every second.
+    Fast,
+}
+
+fn miimon_default() -> u32 {
+    100
+}
+
+/// A bond: its member ports and how they work together.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BondConfig {
+    /// Physical ports, at least one (sorted by the server).
+    #[serde(default)]
+    pub members: Vec<String>,
+    #[serde(default)]
+    pub mode: BondMode,
+    /// 802.3ad, balance-xor, balance-tlb only (802.3ad: `layer2+3` when not given).
+    #[serde(default)]
+    pub hash_policy: Option<BondHash>,
+    /// 802.3ad only.
+    #[serde(default)]
+    pub lacp_rate: BondLacpRate,
+    /// The preferred member (active-backup, balance-alb, balance-tlb).
+    #[serde(default)]
+    pub primary: Option<String>,
+    /// Link monitoring interval (default 100 ms).
+    #[serde(default = "miimon_default")]
+    pub miimon_ms: u32,
+    /// The bond's MAC address. The server fills it with the MAC of the member that holds an
+    /// address now (else the primary, else the first): the DHCP server and the other hosts
+    /// keep seeing the same address.
+    #[serde(default)]
+    pub mac: Option<String>,
+    /// Members that must be up for the bond to have carrier (kernel default 0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_links: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updelay_ms: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub downdelay_ms: Option<u32>,
+}
+
+/// A bond as it runs now (`NetInterface.bond`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BondStatus {
+    /// Kernel mode name.
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// The member that carries the traffic (active-backup, alb, tlb).
+    #[serde(default)]
+    pub active_member: Option<String>,
+    #[serde(default)]
+    pub members: Vec<BondMemberStatus>,
+    /// 802.3ad: the active aggregator.
+    #[serde(default)]
+    pub aggregator_id: Option<u32>,
+    /// 802.3ad: the switch's MAC (`00:00:00:00:00:00` while no partner answers).
+    #[serde(default)]
+    pub partner_mac: Option<String>,
+    /// 802.3ad: a partner answers and every member with carrier is in the active
+    /// aggregator.
+    #[serde(default)]
+    pub lacp_ok: Option<bool>,
+}
+
+/// One member of a bond now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BondMemberStatus {
+    pub name: String,
+    /// The bond's link monitor sees the link up.
+    #[serde(default)]
+    pub link_up: bool,
+    #[serde(default)]
+    pub speed_mbps: Option<u32>,
+    /// Link failures the bond counted since it was created.
+    #[serde(default)]
+    pub link_failures: u32,
+    /// Carries the traffic now (active-backup, alb, tlb).
+    #[serde(default)]
+    pub active: bool,
+    /// 802.3ad: the aggregator the member is in.
+    #[serde(default)]
+    pub aggregator_id: Option<u32>,
+    /// The port's own MAC address.
+    #[serde(default)]
+    pub mac: Option<String>,
 }
 
 /// One `iface` stanza of `/etc/network/interfaces` (read-only view).
@@ -197,6 +407,9 @@ pub struct NetInterface {
     pub link_local_v4: Option<String>,
     /// The current session reaches rynas through this interface.
     pub management: bool,
+    /// A bond's state now (members, active member, LACP partner).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bond: Option<BondStatus>,
 }
 
 /// A route of the main table.

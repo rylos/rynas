@@ -122,6 +122,12 @@ nev.net.boot_dns_failed.title	Migrazione di rete all'avvio annullata: i nomi non
 nev.net.boot_dns_failed.body	systemd-networkd ha ottenuto un indirizzo instradabile, ma nessun server DNS di /etc/resolv.conf ha risposto; è stato ripristinato ifupdown (revisione {revision}).
 nev.net.dns_repaired.title	Risoluzione dei nomi riparata
 nev.net.dns_repaired.body	Nessun server DNS era configurato mentre systemd-networkd gestiva la rete; {detail}.
+nev.net.bond_member_down.title	{bond}: {member} ha perso il link
+nev.net.bond_member_down.body	Il bond ha contato {failures} interruzioni del link su {member}; il traffico passa dagli altri membri. Controlla il cavo e la porta dello switch.
+nev.net.bond_active_changed.title	{bond}: ora il traffico passa da {to}
+nev.net.bond_active_changed.body	Il bond è passato da {from} a {to}.
+nev.net.bond_lacp_lost.title	{bond}: il gruppo LACP con lo switch non funziona
+nev.net.bond_lacp_lost.body	Nessun partner LACP risponde, oppure i membri sono finiti in aggregatori diversi: controlla il gruppo LACP sullo switch.
 nev.net.boot_undone.title	Modifica di rete non confermata annullata all'avvio: ripristinata la revisione {revision}
 nev.net.boot_undone.body	Il sistema si è riavviato mentre la revisione {tested} era in prova.
 nev.net.watchdog_restored.title	Rete riportata all'ultima revisione funzionante ({revision})
@@ -398,6 +404,8 @@ v.none	Nessun volume
 v.none_text	Non è stato trovato alcun file system montato.
 v.network	{n} mount di rete
 v.more	Altri {n} in Archiviazione
+v.removable	{n} su dischi USB o rimovibili
+v.removable_hint	Non sono volumi del NAS: non contano per lo stato dello storage.
 h.sub_ok	Nessun problema rilevato
 h.sub_sync	Ridondanza in ricostruzione
 h.sub_warn	Controlla i dettagli in Archiviazione
@@ -871,6 +879,8 @@ sto.scrub_running	Pulizia dati in corso
 health.healthy	Integro
 sto.h.warning	Avviso
 sto.h.failing	In avaria
+sto.h.no_smart	Non disponibile
+sto.h.no_smart_hint	Questo dispositivo non ha SMART (o l'adattatore USB non lo trasmette): non se ne può leggere lo stato di salute.
 health.degraded	Degradato
 sto.a.failed	Arrestato
 sto.a.inactive	Inattivo
@@ -2669,8 +2679,8 @@ net.none_text	Il sistema non segnala interfacce di rete da mostrare.
 net.details_title	Dettagli di {name}
 net.read_only_text	Questa interfaccia è in sola lettura in rynas.
 net.ro.loopback	L'interfaccia di loopback non è configurabile.
-net.ro.enslaved	È una porta di {master}: bond e bridge diventano configurabili in una versione successiva.
-net.ro.not_ethernet	In questa versione si possono configurare solo le porte Ethernet.
+net.ro.enslaved	È un membro di {master}: modificalo dal bond.
+net.ro.not_ethernet	In questa versione si possono configurare solo le porte Ethernet e i bond creati da rynas.
 net.ro.ifupdown	Configurata da ifupdown (/etc/network/interfaces): usa prima Affida a rynas.
 net.ro.network_manager	Gestita da NetworkManager: rynas non la modifica.
 net.ro.no_networkd	systemd-networkd non è in esecuzione: rynas configura le interfacce tramite questo servizio.
@@ -2697,7 +2707,7 @@ net.stage	Prepara modifica
 net.staged	Modifica preparata: applicala dalla pagina Rete
 net.revert	Elimina modifica preparata
 net.no_changes	Nessuna modifica.
-net.phase_note	Per ora impostazioni IPv6, bond, VLAN e bridge sono in sola lettura.
+net.phase_note	Per ora impostazioni IPv6, VLAN e bridge sono in sola lettura.
 net.driver	Driver
 net.backend	Gestita da
 net.config_file	File di configurazione
@@ -2708,6 +2718,51 @@ net.ifu_bond	Membri del bond
 net.ifu_bridge	Porte del bridge
 net.ifu_vlan	Interfaccia padre VLAN
 net.ifu_file	File
+net.bond_create	Crea bond
+net.bond_create_title	Nuovo bond {name}
+net.no_ports_free	Nessuna porta Ethernet libera per un bond.
+net.f_members	Porte membro
+net.members_help	Porte fisiche che lavorano come un solo collegamento. Il bond prende le impostazioni di indirizzo qui sotto; le porte perdono le proprie.
+net.f_bond_mode	Modalità del bond
+net.bm.ab	Tolleranza ai guasti (active-backup)
+net.bm.alb	Bilanciamento adattivo del carico (balance-alb)
+net.bm.lacp	LACP (802.3ad)
+net.bm.xor	Aggregazione statica (balance-xor)
+net.bm.tlb	Bilanciamento adattivo in uscita (balance-tlb)
+net.bm.rr	Round robin (balance-rr)
+net.bm.bc	Broadcast (tutte le porte)
+net.bq.ab	Funziona con qualsiasi switch. Una porta porta il traffico; un'altra subentra se si guasta.
+net.bq.alb	Funziona con qualsiasi switch. Distribuisce il traffico sulle porte, anche quello in entrata per client.
+net.bq.lacp	Richiede uno switch gestito con un gruppo LACP sulle stesse porte. Più veloce con molti client, non per un singolo trasferimento.
+net.bq.xor	Richiede uno switch con un gruppo di aggregazione statico sulle stesse porte.
+net.bq.tlb	Funziona con qualsiasi switch. Bilancia solo il traffico in uscita.
+net.bq.legacy	Mantenuta come era configurata; non proposta per i nuovi bond.
+net.lacp_warn	Configura prima il gruppo LACP sullo switch. Senza, nessun partner risponde entro circa 35 secondi e la modifica viene annullata.
+net.f_primary	Porta preferita
+net.primary_none	Nessuna (la prima che funziona)
+net.primary_help	Porta il traffico ogni volta che ha il link; scegli la porta più veloce.
+net.f_hash	Hash di trasmissione
+net.hash_help	Come le connessioni vengono distribuite sulle porte. Livello 3+4 distribuisce meglio; livello 2+3 va bene con ogni switch.
+net.bh.l23	Livello 2+3 (MAC e IP)
+net.bh.l34	Livello 3+4 (IP e porta)
+net.bh.l2	Livello 2 (MAC)
+net.mixed_speeds	Le porte vanno a velocità diverse. Con la tolleranza ai guasti scegli la più veloce come porta preferita.
+net.v_bond_members	Scegli almeno una porta.
+net.bond_delete	Elimina bond
+net.bond_deleted	Eliminazione preparata: applicala dalla pagina Rete
+net.bond_dropped	Il nuovo bond non è più preparato
+net.bond_removed	Da eliminare
+net.bond_removed_text	Questo bond è preparato per l'eliminazione. Quando la applichi, la porta con il suo indirizzo MAC prende le sue impostazioni di indirizzo e le altre porte restano senza IPv4.
+net.bond_members	Membri: {list}
+net.member_of	Membro di {master}
+net.member_active	attiva
+net.member_standby	in riserva
+net.member_down	senza link
+net.member_failures	{n} interruzioni del link
+net.lacp_partner	Partner LACP
+net.lacp_none	Nessuno: lo switch non risponde
+net.lacp_bad	Nessun partner LACP
+net.st_new	Non ancora creato
 net.v_address	Usa indirizzi host con prefisso 8–32 (192.0.2.10/24).
 net.v_addresses_none	Una configurazione statica richiede almeno un indirizzo.
 net.v_gateway	Inserisci un indirizzo IPv4.
@@ -3106,6 +3161,7 @@ task.docker.stack.update	Aggiornamento dello stack
 task.docker.stack.rollback	Ripristino dello stack
 task.docker.stack.remove	Rimozione dello stack
 task.docker.update-check	Controllo aggiornamenti delle immagini
+task.docker.auto-update	Aggiornamento automatico dello stack
 nev.docker.unhealthy.title	Il container {container} non è in salute
 nev.docker.unhealthy.body	Il suo controllo di salute fallisce. Guarda i suoi log nella pagina Docker.
 nev.docker.recovered.title	Il container {container} è di nuovo in salute
@@ -3120,6 +3176,16 @@ nev.docker.disk_ok.title	Spazio di Docker di nuovo sotto il {limit_pct}%
 nev.docker.update_available.title	Aggiornamento disponibile per l'immagine {image}
 nev.docker.update_available.body	Usata da {stacks}. Aggiorna dalla pagina Docker (prima viene fatto uno snapshot).
 nev.docker.update_available.body_2	Nel registro c'è un'immagine più recente. Aggiorna dalla pagina Docker.
+nev.docker.update_done.title	L'immagine {image} è aggiornata
+nev.docker.auto_updated.title	Stack {stack} aggiornato automaticamente
+nev.docker.auto_updated.body	Nuova versione: {change}.
+nev.docker.auto_updated.body_2	Le nuove immagini sono in esecuzione e lo stack è in salute.
+nev.docker.auto_rolled_back.title	Aggiornamento automatico di {stack} annullato
+nev.docker.auto_rolled_back.body	La nuova versione non ha funzionato: {reason}. Lo stack è tornato alla versione precedente.
+nev.docker.auto_held.title	L'aggiornamento di {stack} richiede il tuo intervento
+nev.docker.auto_held.body	{reason}. Aggiornalo a mano dalla pagina Docker.
+nev.docker.auto_failed.title	Aggiornamento automatico di {stack} fallito
+nev.docker.auto_failed.body	{reason}. Guarda il log dell'attività nella pagina Docker.
 nev.apps.catalog_updates.title	Aggiornamenti disponibili per le app: {apps}
 nev.apps.catalog_updates.body	Il catalogo delle app è stato aggiornato. Controlla e aggiorna le app nella pagina App e plugin (prima viene fatto uno snapshot).
 nev.apps.catalog_refused.title	Catalogo online delle app rifiutato
@@ -3301,6 +3367,44 @@ dk.upd.text	Scarica le immagini più recenti e ricrea i container. Se l'aggiorna
 dk.upd.snapshot	Fai prima uno snapshot
 dk.upd.snapshot_help	Serve per il ripristino.
 dk.upd.stop	Ferma lo stack durante lo snapshot
+dk.upd.next	prossimo controllo {when}
+dk.au.title	Aggiornamenti automatici delle immagini
+dk.au.text	Le immagini vengono controllate ogni giorno. Gli stack con gli aggiornamenti automatici vengono aggiornati uno alla volta dentro questa finestra giornaliera: prima lo snapshot, poi il controllo di salute, e il ripristino se la nuova versione non funziona. Attivali per ogni stack in Stack, nei dettagli dello stack.
+dk.au.hour	Inizio della finestra (ora)
+dk.au.minute	Inizio della finestra (minuto)
+dk.au.window	Durata della finestra (minuti)
+dk.au.window_help	Gli aggiornamenti partono solo dentro la finestra.
+dk.au.chip	Automatico
+dk.au.stack	Aggiornamenti automatici di questo stack
+dk.au.enable	Aggiorna automaticamente
+dk.au.enable_help	Nella finestra giornaliera: scaricamento, snapshot, avvio, controllo di salute, ripristino se fallisce. Una notifica ti dice com'è andata.
+dk.au.policy	Versioni ammesse
+dk.au.policy_help	Quali salti di versione può fare un aggiornamento automatico. Le versioni di prova e le altre varianti dell'immagine non vengono mai prese.
+dk.au.p_default	Predefinite (catalogo o tag)
+dk.au.p_patch	Solo correzioni (1.4.2 → 1.4.3)
+dk.au.p_minor	Versioni minori (1.4 → 1.5; 0.x: correzioni)
+dk.au.p_calver	Stesso mese (2026.11.0 → 2026.11.1)
+dk.au.p_notify	Mai: solo notifica
+dk.au.next	Prossima finestra: {when}
+dk.au.pending	Le impostazioni di Docker hanno in sospeso un cambio del volume del motore: applicalo o scartalo prima.
+dk.au.v_hold	Aggiornamento {what}: solo notifica ({why}).
+dk.au.v_off	Aggiornamento {what}: gli aggiornamenti automatici sono spenti per questo stack.
+dk.au.v_auto	Aggiornamento {what}: verrà installato nella prossima finestra.
+dk.au.v_label	Aggiornamento {what}: dopo lo scaricamento decide l'etichetta di versione dell'immagine (solo salti ammessi).
+dk.au.r_major	nuova versione principale
+dk.au.r_minor	nuova versione minore
+dk.au.r_month	nuovo mese di calendario
+dk.au.r_pre	versione di prova
+dk.au.r_variant	un'altra variante dell'immagine
+dk.au.r_downgrade	versione più vecchia
+dk.au.r_unknown	versione non leggibile
+dk.au.r_policy	la regola è solo notifica
+dk.au.r_review	la nuova voce chiede risposte o è un cambio importante
+dk.au.r_managed	rynas non gestisce i file di questo stack
+dk.au.o_updated	Aggiornato automaticamente {when}.
+dk.au.o_rolled_back	Aggiornamento automatico di {when} annullato:
+dk.au.o_held	Aggiornamento automatico di {when} non installato:
+dk.au.o_failed	Aggiornamento automatico di {when} fallito:
 dk.g.rynas	Gestiti da rynas
 dk.g.portainer	Gestiti da Portainer
 dk.g.untracked	Altri progetti compose
@@ -3427,6 +3531,7 @@ task.apps.update	Aggiornamento dell'app
 task.apps.rollback	Ripristino dell'app
 task.apps.uninstall	Disinstallazione dell'app
 task.apps.proxy	Spostamento dell'app dietro il proxy
+task.apps.auto-update	Aggiornamento automatico dell'app
 task.apps.catalog-update	Controllo del catalogo delle app
 apps.subtitle	App selezionate in container e i moduli che aggiungono funzioni a rynas
 apps.docker_first	Le app girano in container Docker: installa prima Docker, poi ogni app del catalogo si installa in pochi passaggi.
@@ -3823,7 +3928,7 @@ tls.import	Importa per la porta di emergenza
 tls.import.certificate	Certificato (PEM)
 tls.import.private_key	Chiave privata (PEM)
 tls.import.hint	Incolla o carica la catena completa, con il certificato del server per primo, e la sua chiave privata senza password.
-tls.import.file	Carica da un file
+load_file	Carica da un file
 tls.use_local	Usa il certificato locale
 tls.use_local.confirm	Il certificato importato viene messo da parte e torna in uso quello locale, dell'autorità di questo NAS.
 tls.warn.expires_soon	Il certificato scade fra meno di 30 giorni.

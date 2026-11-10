@@ -109,6 +109,43 @@ networkd **does not modify** an existing netdev: VLAN id, bond mode. Removing a 
 
 **Interface renaming** (`.link`) only takes effect on reboot. The UI offers it as "apply on reboot", with the boot guard active.
 
+### 3.7 Bonds (D-BOND, 2026-11-10/11)
+
+Sources: systemd.netdev(5) and systemd.network(5) of v257 (trixie), the kernel's bonding documentation, and the bond screens of Proxmox VE, TrueNAS, DSM, QTS and OpenMediaVault.
+
+**Model.** A bond is an interface of rynas's model like a port: `InterfaceConfig` with `bond: BondConfig` {members, mode, hash_policy, lacp_rate (slow), primary, miimon_ms (100), mac, min_links, updelay_ms, downdelay_ms}. The bond carries the IPv4 settings, MTU and DNS; its members carry nothing. Names are `bond0`–`bond99`. `PUT /network/interfaces/bondN` with `bond` stages a new or changed bond, `DELETE` stages its deletion. The configuration in force is read back from the files, like a port's: `05-rynas-bondN.netdev` (Kind, MAC, `[Bond]`), `05-rynas-bondN.network` (addresses) and one `05-rynas-<member>.network` per member (`Bond=`, `PrimarySlave=`).
+
+**Modes offered.** As DSM and QTS do, the mode is chosen by what the switch can do:
+
+| Mode | UI name | Switch | Notes |
+|---|---|---|---|
+| active-backup | Fault tolerance | any (default) | the only mode where a preferred port makes mixed speeds fine |
+| balance-alb | Adaptive load balancing | any | balances incoming traffic per client through ARP |
+| 802.3ad | LACP | managed, LACP group on the same ports | hash `layer2+3` by default (`layer3+4` offered); "configure the switch first" warning |
+| balance-xor, balance-tlb | advanced (in the same list, after the others) | static LAG / any | |
+| balance-rr, broadcast | not offered | | kept when a migrated bond runs them |
+
+**networkd files.**
+- `.netdev`: `Kind=bond`, **`MACAddress=` always**: without it networkd derives a MAC from the name, so the DHCP server sees a new client and gives a new address. Default MAC: the member that holds an address now (management path or lease), else the primary, else the first member; an edit keeps the bond's MAC. `[Bond]`: **`Mode=` always** (networkd's default is balance-rr), `MIIMonitorSec=100ms` (the kernel default is 0: no link monitoring, so no failover), `TransmitHashPolicy=` (802.3ad, xor, tlb), `LACPTransmitRate=` (802.3ad), `PrimaryReselectPolicy=always` with a primary (back to the faster port as soon as it has link), `MinLinks=`, `UpDelaySec=`, `DownDelaySec=` when set.
+- member `.network`: `Bond=bondN`, `LinkLocalAddressing=no`, `PrimarySlave=yes` on the primary (active-backup, alb, tlb only).
+- bond `.network`: as a port's file: addresses or `DHCP=ipv4`, `MTUBytes=`, `LinkLocalAddressing=yes` with `IPv4LLStartAddress=` from the bond's MAC, so the rescue address is the one the port had.
+
+**DHCP identity.** A new DHCP bond takes the identity of the port whose MAC it takes: that port's drop-in `05-rynas-<port>.network.d/10-dhcp-identity.conf` (§4, written by the ifupdown migration: `ClientIdentifier=`, `IAID=` from the old port's MAC, DUID, `RequestAddress=`) moves to `05-rynas-bondN.network.d/` as it is. A port that never had a drop-in (networkd from the start) gets one written from networkd's own lease file (`/run/systemd/netif/leases/<ifindex>`: `CLIENTID=`, `ADDRESS=`), because networkd's default IAID is derived from the interface name and would change with it. A deleted bond gives its drop-in back to the member that takes its settings. The drop-ins are part of the revision: a rollback puts them back.
+
+**Transaction.** networkd never deletes a netdev nor changes the kind or mode of one that exists. `bond::teardown` compares the files on disk with the revision's: a `.netdev` that goes away or changes kind or mode → `ip link del` before the single `networkctl reload`; a port whose file loses `Bond=` while the bond stays → `ip link set nomaster`; members of a bond deleted and made again (their file unchanged, so the reload leaves them) → `networkctl reconfigure <members>` after the reload. The rollback runs the same function on the way back, so the bond is deleted and the former members are configured again. A bond change always runs the timed test (`skip_test` refused).
+
+**Verification.** After the address checks of §3.1: the link exists, is a bond with the expected mode, every member is enslaved, the MAC is the expected one; a bond the revision drops is gone. For 802.3ad rynas waits up to 35 s (one slow LACPDU period plus margin) for a non-zero partner MAC and every member with link in the active aggregator; otherwise the change fails with "the switch is not configured for LACP" and is rolled back like any failed verification.
+
+**Validation.** Members are physical Ethernet ports, not in another bond (in force or staged), not configured by ifupdown or NetworkManager, at least one with carrier (a bond nobody can test is refused); the primary is a member and only for active-backup/alb/tlb; a hash only for 802.3ad/xor/tlb; the LACP rate only for 802.3ad; MTU at most the smallest maximum of the members; the bond counts as a management path. Warnings (UI and task log): mixed speeds (unless active-backup with a primary), 802.3ad and balance-xor need the switch configured. Ports that leave a bond are staged with IPv4 off (link-local only); on deletion the member with the bond's MAC takes the bond's settings, the others IPv4 off.
+
+**Status and notifications.** `ip -j -d addr show` already has everything: `linkinfo.info_data` of the bond (mode, `active_slave`, `ad_info.aggregator`, `ad_info.partner_mac`) and `info_slave_data` of each member (`mii_status`, `link_failure_count`, `perm_hwaddr`, `ad_aggregator_id`). `NetInterface.bond` shows the active member, each member's link, speed and failure count, the LACP partner. rynasd looks every minute and notifies `net.bond_member_down` (link lost, or the failure counter grew: a flap between two looks), `net.bond_active_changed`, `net.bond_lacp_lost` (partner 00:00:00:00:00:00 or members in different aggregators).
+
+**Rescue.** The reset gesture puts every physical port on DHCP, members included, removes every `.netdev` (rynas's and foreign), deletes the bonds through the same teardown and gives the bond's DHCP identity back to its port. The watchdog, the rescue link-local list and the check of a migration at boot count bonds as paths.
+
+**ifupdown migration.** `bond-slaves` on the bond or `bond-master` on the ports, `bond-mode` (names or numbers), `bond-miimon`, `bond-primary`, `bond-xmit-hash-policy`, `bond-lacp-rate`, `bond-min-links`, `bond-updelay`, `bond-downdelay`, `hwaddress`; the bond keeps the MAC it runs with and its DHCP identity (a bond's `hwaddress` is the MAC the client saw). Without `bond-mode` the kernel runs balance-rr, which is kept; a missing or zero `bond-miimon` becomes 100 ms. Any other `bond-*` option, or a member with settings of its own, stops the migration as before. Bridges and VLANs stay "later version".
+
+**Not done yet.** ARP monitoring (`ARPIntervalSec=`), VLANs and bridges on top of a bond, LLDP to show the switch port, a per-port MAC choice in the UI.
+
 ## 4. Backend
 
 | | systemd-networkd | NetworkManager | ifupdown / ifupdown2 | netplan |
@@ -183,7 +220,7 @@ Installing resolved during the migration was rejected as the default: it needs t
 | DNS | resolved: servers, search domains, optional DNS over TLS; hostname and `/etc/hosts` | — |
 | IPv6 | SLAAC (`IPv6AcceptRA`), DHCPv6, static, privacy extensions off on the NAS | DSM |
 | MTU / jumbo | 1500/9000/custom; **DF test** `ping -M do -s 8972 <gw/peer>` before confirming; bonds and VLANs inherit the MTU | DSM had MTU 9000 on `ovs_eth2` |
-| Bond | **active-backup** ("fault tolerance") and **balance-alb** (DSM's "Adaptive Load Balancing") work with unmanaged switches; **802.3ad** only with a configured switch, with a "configure the switch first" warning. With a bridge for VMs/LXC: 802.3ad or active-backup, as Proxmox recommends. balance-alb only balances outgoing traffic ([RHEL](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/7/html/networking_guide/overview-of-bonding-modes-and-the-required-settings-on-the-switch)) | DSM, Proxmox |
+| Bond | **active-backup** ("fault tolerance") and **balance-alb** (DSM's "Adaptive Load Balancing") work with unmanaged switches; **802.3ad** only with a configured switch, with a "configure the switch first" warning. With a bridge for VMs/LXC: 802.3ad or active-backup, as Proxmox recommends. balance-alb only balances outgoing traffic ([RHEL](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/7/html/networking_guide/overview-of-bonding-modes-and-the-required-settings-on-the-switch)). Implemented: §3.7 | DSM, Proxmox |
 | VLAN | VLAN `.netdev` on a port or bond; warning if it is on the management interface (Cisco/Synology case) | TrueNAS |
 | Bridge | `br0` for Incus (D-LXC) and VMs; recommended over macvlan, which does not let the host talk to the guest. "Port → bridge" conversion that moves the IP to the bridge in a single transaction | Proxmox, TrueNAS |
 | Wake-on-LAN | per-port toggle, written via `synohwd.toml` (`wol`) or `ethtool`; shows the MAC for the magic packet | DSM |
@@ -256,7 +293,7 @@ Network ▸ Interfaces                   [⟲ 2 pending changes] [Diff] [Apply w
 - Lockout with bonds and VLANs: https://wundertech.net/how-to-set-up-link-aggregation-on-a-synology-nas-lacp · https://community.cisco.com/t5/switching/problem-with-link-aggregation-sg350-and-synology-nas/m-p/4721463 · https://www.synoforum.com/threads/dsm7-upgrade-gone-wrong.7909/
 - Debian: https://lists.debian.org/debian-boot/2025/06/msg00086.html · https://lists.debian.org/debian-user/2025/08/msg00288.html · https://lists.debian.org/debian-devel/2025/09/msg00133.html
 - systemd: https://www.freedesktop.org/software/systemd/man/latest/networkctl.html · https://www.freedesktop.org/software/systemd/man/latest/systemd.network.html · https://www.freedesktop.org/software/systemd/man/255/org.freedesktop.network1.html
-- Bonding: https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/7/html/networking_guide/overview-of-bonding-modes-and-the-required-settings-on-the-switch
+- Bonding: https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/7/html/networking_guide/overview-of-bonding-modes-and-the-required-settings-on-the-switch · https://www.kernel.org/doc/html/latest/networking/bonding.html · https://www.freedesktop.org/software/systemd/man/257/systemd.netdev.html (`[Bond]`, `MACAddress=`) · https://www.freedesktop.org/software/systemd/man/257/systemd.network.html (`Bond=`, `PrimarySlave=`, `IAID=`)
 - Tailscale: https://tailscale.com/docs/reference/tailscale-cli/up · https://tailscale.com/docs/reference/tailscale-cli/serve · https://tailscale.com/kb/1131/synology · https://docs.unraid.net/unraid-os/system-administration/secure-your-server/tailscale
 - WireGuard and mesh: https://mintlify.com/wg-easy/wg-easy/features/qr-codes · https://www.bitdoze.com/netbird-vs-headscale-vs-tailscale/
 - DNS with networkd (§4.1): https://www.freedesktop.org/software/systemd/man/latest/systemd-resolved.service.html · https://www.freedesktop.org/software/systemd/man/latest/systemd.network.html (`UseDNS=`, `DNS=`) · https://docs.debops.org/en/master/ansible/roles/resolved/getting-started.html (resolved a separate package since Debian 12, symlink on install) · https://forum.armbian.com/topic/39088-armbian-build-pr-remove-debootstrapped-static-resolvconf/ · https://www.github.com/openmediavault/openmediavault/issues/1710 · https://dietpi.com/forum/t/no-internet-after-power-outage/23283?page=2 (OMV: netplan + resolved, stub link) · https://manpages.debian.org/NetworkManager.conf (`rc-manager`) · https://tailscale.com/docs/reference/linux-dns · https://tailscale.com/blog/sisyphean-dns-client-linux · https://github.com/tailscale/tailscale/issues/7655 · https://gist.github.com/IslamAlam/0c9e9dc42126d60cfed66f4779fd8047 (Docker and 127.0.0.53) · https://www.truenas.com/community/threads/truenas-scale-not-setting-dns-server-from-dhcp.99309/latest (TrueNAS writes resolv.conf itself, DHCP race)

@@ -14,6 +14,7 @@ use std::time::Duration;
 use rynas_tasks::CmdOutput;
 
 use crate::networkd::{NetworkFile, network_files};
+use crate::bond;
 use crate::os::NetOs;
 
 #[derive(Debug, Clone, Default)]
@@ -30,6 +31,12 @@ pub struct FakeLink {
     pub nd_file: Option<String>,
     /// DNS servers networkd learned for the link (shown while it manages the link).
     pub nd_dns: Vec<String>,
+    /// A bond (made from a `.netdev`): its mode. Like networkd, never changed in place.
+    pub bond_mode: Option<String>,
+    /// Enslaved to this bond.
+    pub master: Option<String>,
+    /// Link failures the bond counted on this member.
+    pub failures: u32,
 }
 
 #[derive(Debug, Default)]
@@ -58,6 +65,9 @@ pub struct FakeState {
     /// `--on-active` of the armed rollback timer.
     pub timer: Option<String>,
     pub now_ms: u64,
+    /// The switch's MAC when it has a LACP group on the ports (802.3ad bonds find a partner);
+    /// `None`: no partner answers, each member ends up in its own aggregator.
+    pub lacp_partner: Option<String>,
 }
 
 pub struct FakeOs {
@@ -179,14 +189,104 @@ impl FakeOs {
                     serde_json::json!({"family": "inet", "local": a, "prefixlen": p, "scope": scope, "dynamic": d})
                 })
                 .collect();
-            v.push(serde_json::json!({
+            let carrier = Self::carrier(s, name);
+            let mut j = serde_json::json!({
                 "ifindex": l.index, "ifname": name, "mtu": l.mtu,
-                "operstate": if l.carrier { "UP" } else { "DOWN" },
+                "operstate": if carrier { "UP" } else { "DOWN" },
                 "link_type": "ether", "address": l.mac, "max_mtu": l.max_mtu,
                 "addr_info": addrs
-            }));
+            });
+            let lacp = |b: &str| s.links.get(b).and_then(|x| x.bond_mode.as_deref()) == Some("802.3ad");
+            if let Some(mode) = &l.bond_mode {
+                let slaves: Vec<(&String, &FakeLink)> = s
+                    .links
+                    .iter()
+                    .filter(|(_, x)| x.master.as_deref() == Some(name.as_str()))
+                    .collect();
+                let active = slaves.iter().find(|(_, x)| x.carrier).map(|(n, _)| n.to_string());
+                let mut data = serde_json::json!({"mode": mode, "miimon": 100});
+                if mode == "802.3ad" {
+                    data["ad_info"] = serde_json::json!({
+                        "aggregator": 1,
+                        "num_ports": slaves.len(),
+                        "partner_mac": s.lacp_partner.clone().unwrap_or("00:00:00:00:00:00".into()),
+                    });
+                } else if let Some(a) = active.filter(|_| mode != "balance-xor") {
+                    data["active_slave"] = a.into();
+                }
+                j["linkinfo"] = serde_json::json!({"info_kind": "bond", "info_data": data});
+            }
+            if let Some(m) = &l.master {
+                j["master"] = m.clone().into();
+                let mut data = serde_json::json!({
+                    "state": "ACTIVE",
+                    "mii_status": if l.carrier { "UP" } else { "DOWN" },
+                    "link_failure_count": l.failures,
+                    "perm_hwaddr": l.mac,
+                });
+                if lacp(m) {
+                    // without a partner every port forms its own aggregator
+                    let id = if s.lacp_partner.is_some() { 1 } else { l.index };
+                    data["ad_aggregator_id"] = id.into();
+                }
+                j["linkinfo"] = serde_json::json!({"info_slave_kind": "bond", "info_slave_data": data});
+            }
+            v.push(j);
         }
         serde_json::to_string(&v).unwrap()
+    }
+
+    /// A bond has carrier when one of its members has.
+    fn carrier(s: &FakeState, name: &str) -> bool {
+        let Some(l) = s.links.get(name) else {
+            return false;
+        };
+        if l.bond_mode.is_some() {
+            return s
+                .links
+                .values()
+                .any(|x| x.master.as_deref() == Some(name) && x.carrier);
+        }
+        l.carrier
+    }
+
+    /// networkd's reload: creates the netdevs of the `.netdev` files that do not exist (an
+    /// existing one is left as it is), then applies the `.network` files to every link.
+    fn networkd_reload(&self, s: &mut FakeState) {
+        if s.broken_networkd || !s.active.get("systemd-networkd").copied().unwrap_or(false) {
+            return;
+        }
+        let dir = self.path(Path::new(crate::NETWORKD_DIR));
+        let mut names: Vec<PathBuf> = std::fs::read_dir(dir)
+            .map(|rd| rd.flatten().map(|e| e.path()).collect())
+            .unwrap_or_default();
+        names.sort();
+        for p in names.iter().filter(|p| p.extension().is_some_and(|e| e == "netdev")) {
+            let Some(nd) = std::fs::read_to_string(p).ok().and_then(|t| bond::parse_netdev(&t)) else {
+                continue;
+            };
+            if nd.kind != "bond" || s.links.contains_key(&nd.name) {
+                continue;
+            }
+            let index = s.links.values().map(|l| l.index).max().unwrap_or(1) + 1;
+            let b = nd.bond.unwrap_or_default();
+            s.links.insert(
+                nd.name.clone(),
+                FakeLink {
+                    index,
+                    mac: b.mac.unwrap_or_else(|| format!("02:00:00:00:00:{index:02x}")),
+                    mtu: 1500,
+                    max_mtu: 65535,
+                    carrier: true,
+                    bond_mode: Some(b.mode.kernel_name().into()),
+                    ..Default::default()
+                },
+            );
+        }
+        let all: Vec<String> = s.links.keys().cloned().collect();
+        for n in all {
+            self.networkd_apply(s, &n);
+        }
     }
 
     fn route_json(s: &FakeState) -> String {
@@ -210,11 +310,29 @@ impl FakeOs {
             nf.matches(iface, Some(&l.mac), Some("ether"))
                 .then_some((p, nf))
         });
+        let bond_exists = file
+            .as_ref()
+            .and_then(|(_, nf)| nf.bond.as_ref())
+            .is_some_and(|b| s.links.contains_key(b));
         let link = s.links.get_mut(iface).unwrap();
         let Some((path, nf)) = file else {
             link.nd_file = None;
             return;
         };
+        if let Some(b) = &nf.bond {
+            // a member: enslaved once its bond exists, no addresses of its own
+            if bond_exists {
+                link.master = Some(b.clone());
+            }
+            link.addrs.clear();
+            link.nd_dns.clear();
+            link.nd_file = path
+                .strip_prefix(self.root())
+                .map(|r| format!("/{}", r.display()))
+                .ok();
+            s.default_routes.remove(iface);
+            return;
+        }
         let c = nf.to_config();
         link.addrs.retain(|(a, _, _)| a.starts_with("169.254."));
         for a in &c.addresses {
@@ -325,9 +443,24 @@ impl NetOs for FakeOs {
                 Ok(out(0, ""))
             }
             ["networkctl", "reload"] => {
-                let names: Vec<String> = s.links.keys().cloned().collect();
-                for n in names {
-                    self.networkd_apply(&mut s, &n);
+                self.networkd_reload(&mut s);
+                Ok(out(0, ""))
+            }
+            ["ip", "link", "set", "dev", dev, "nomaster"] => {
+                if let Some(l) = s.links.get_mut(*dev) {
+                    l.master = None;
+                }
+                Ok(out(0, ""))
+            }
+            ["ip", "link", "del", "dev", dev] => {
+                if s.links.remove(*dev).is_none() {
+                    return Ok(out(1, ""));
+                }
+                s.default_routes.remove(*dev);
+                for l in s.links.values_mut() {
+                    if l.master.as_deref() == Some(*dev) {
+                        l.master = None;
+                    }
                 }
                 Ok(out(0, ""))
             }
@@ -394,10 +527,7 @@ impl NetOs for FakeOs {
                     && units.iter().any(|u| u == "systemd-networkd")
                     && s.active.get("systemd-networkd").copied().unwrap_or(false)
                 {
-                    let names: Vec<String> = s.links.keys().cloned().collect();
-                    for n in names {
-                        self.networkd_apply(&mut s, &n);
-                    }
+                    self.networkd_reload(&mut s);
                 }
                 if matches!(*verb, "start" | "restart") && units.iter().any(|u| u == "networking") {
                     self.ifupdown_apply(&mut s);
@@ -448,11 +578,12 @@ impl NetOs for FakeOs {
         }
         if let Some(rest) = abs.strip_prefix("/sys/class/net/") {
             let (name, attr) = rest.split_once('/')?;
-            let l = s.links.get(name)?;
+            s.links.get(name)?;
+            let carrier = Self::carrier(&s, name);
             return match attr {
-                "carrier" => Some(if l.carrier { "1" } else { "0" }.into()),
-                "speed" => l.carrier.then(|| "1000".into()),
-                "duplex" => l.carrier.then(|| "full".into()),
+                "carrier" => Some(if carrier { "1" } else { "0" }.into()),
+                "speed" => carrier.then(|| "1000".into()),
+                "duplex" => carrier.then(|| "full".into()),
                 _ => None,
             };
         }

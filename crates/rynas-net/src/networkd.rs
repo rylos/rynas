@@ -26,9 +26,9 @@ pub fn network_path(iface: &str) -> PathBuf {
     Path::new(NETWORKD_DIR).join(format!("{RYNAS_PREFIX}{iface}.network"))
 }
 
-/// Whether a file name is one of rynas's.
+/// Whether a file name is one of rynas's (`.network`, or a bond's `.netdev`).
 pub fn is_rynas_file(name: &str) -> bool {
-    name.starts_with(RYNAS_PREFIX) && name.ends_with(".network")
+    name.starts_with(RYNAS_PREFIX) && (name.ends_with(".network") || name.ends_with(".netdev"))
 }
 
 /// The interface a rynas file configures.
@@ -206,6 +206,40 @@ pub fn render_dhcp_identity(id: &DhcpIdentity, client: &str, address: Option<Ipv
     s
 }
 
+/// The identity networkd itself used for a lease, from its lease file
+/// (`/run/systemd/netif/leases/<ifindex>`: `CLIENTID=` in hex, `ADDRESS=`): type 1 is the
+/// MAC (`ClientIdentifier=mac`), type 255 an IAID and a DUID (RFC 4361). Other identifiers
+/// give `None`.
+pub fn lease_identity(lease: &str) -> Option<(DhcpIdentity, Option<Ipv4Addr>)> {
+    let mut id = None;
+    let mut addr = None;
+    for l in lease.lines() {
+        if let Some(v) = l.strip_prefix("CLIENTID=") {
+            let v = v.trim();
+            if v.len() % 2 != 0 {
+                return None;
+            }
+            let bytes: Vec<u8> = (0..v.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&v[i..i + 2], 16).ok())
+                .collect::<Option<_>>()?;
+            id = Some(bytes);
+        } else if let Some(v) = l.strip_prefix("ADDRESS=") {
+            addr = v.trim().parse().ok();
+        }
+    }
+    let id = id?;
+    let ident = match id.first()? {
+        1 if id.len() == 7 => DhcpIdentity::Mac,
+        255 if id.len() >= 8 && id.len() <= 5 + 130 => DhcpIdentity::Duid {
+            iaid: u32::from_be_bytes([id[1], id[2], id[3], id[4]]),
+            duid: id[5..].to_vec(),
+        },
+        _ => return None,
+    };
+    Some((ident, addr))
+}
+
 /// A parsed INI-style systemd file: section → (key, value) in order.
 #[derive(Debug, Default, Clone)]
 pub struct UnitFile {
@@ -327,6 +361,10 @@ pub struct NetworkFile {
     pub dns: Vec<String>,
     pub mtu: Option<u32>,
     pub link_local: Option<String>,
+    /// `Bond=`: the link is a member of this bond.
+    pub bond: Option<String>,
+    /// `PrimarySlave=yes`.
+    pub primary_slave: bool,
 }
 
 impl NetworkFile {
@@ -365,6 +403,11 @@ impl NetworkFile {
             dns: u.list("Network", "DNS"),
             mtu: u.last("Link", "MTUBytes").and_then(|v| v.parse().ok()),
             link_local: u.last("Network", "LinkLocalAddressing").map(str::to_string),
+            bond: u.last("Network", "Bond").map(str::to_string).filter(|b| !b.is_empty()),
+            primary_slave: matches!(
+                u.last("Network", "PrimarySlave"),
+                Some("yes" | "true" | "on" | "1")
+            ),
         }
     }
 
@@ -417,6 +460,7 @@ impl NetworkFile {
                 .cloned()
                 .collect(),
             mtu: self.mtu,
+            ..Default::default()
         }
     }
 }
@@ -513,6 +557,7 @@ mod tests {
             gateway: Some("192.0.2.1".into()),
             dns: vec!["192.0.2.53".into()],
             mtu: Some(9000),
+            ..Default::default()
         };
         let text = render_network("lan1", &st, Some("00:11:32:ab:cd:01"));
         assert_eq!(

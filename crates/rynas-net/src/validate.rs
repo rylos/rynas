@@ -103,7 +103,7 @@ pub struct FieldError {
 }
 
 impl FieldError {
-    fn at(field: &'static str, message: String) -> Self {
+    pub(crate) fn at(field: &'static str, message: String) -> Self {
         Self { field, message }
     }
 }
@@ -119,8 +119,10 @@ pub fn check_interface(
     c: &InterfaceConfig,
     max_mtu: Option<u32>,
 ) -> Result<InterfaceConfig, FieldError> {
+    // a bond's own settings are checked against the ports by `bond::check`
     let mut out = InterfaceConfig {
         ipv4: c.ipv4,
+        bond: c.bond.clone(),
         ..Default::default()
     };
     match c.ipv4 {
@@ -307,10 +309,10 @@ pub fn check_config(
             }
         }
     }
-    // management paths: a port that keeps an IPv4 configuration
+    // management paths: a port (or a bond of ports) that keeps an IPv4 configuration
     let managed_paths = out
         .iter()
-        .filter(|(n, c)| is_port(n) && c.ipv4 != Ipv4Method::Disabled)
+        .filter(|(n, c)| (is_port(n) || c.bond.is_some()) && c.ipv4 != Ipv4Method::Disabled)
         .count();
     let other_paths = others
         .iter()

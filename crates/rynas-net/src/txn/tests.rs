@@ -703,7 +703,7 @@ fn read_only_codes_keep_their_english_text() {
     };
     assert_eq!(
         r(ReadOnlyCode::Enslaved, Some("bond0")),
-        "enslaved to bond0: bonds and bridges are configured in a later version"
+        "a member of bond0: change it from there"
     );
     for c in [
         ReadOnlyCode::Loopback,
@@ -949,4 +949,406 @@ fn no_dns_before_no_dns_after_is_not_a_failure() {
             .unwrap();
     t.e.begin(&plan, Some("tok"), None, &log).unwrap();
     assert!(t.e.trial().unwrap().is_some());
+}
+
+// ---------------------------------------------------------------------------------------------
+// bonds
+// ---------------------------------------------------------------------------------------------
+
+use rynas_api_types::network::{BondConfig, BondHash, BondMode};
+
+const MAC3: &str = "24:5e:be:00:00:03";
+const MAC4: &str = "24:5e:be:00:00:04";
+const DROPIN3: &str = "/etc/systemd/network/05-rynas-enp3s0.network.d/10-dhcp-identity.conf";
+const DROPIN_BOND: &str = "/etc/systemd/network/05-rynas-bond0.network.d/10-dhcp-identity.conf";
+const IDENTITY: &str = "# rynas: the DHCP identity dhcpcd used before rynas took over this port, so the\n\
+# server keeps giving the same address.\n[DHCPv4]\nClientIdentifier=duid\nIAID=3187671043\n\
+DUIDType=1\nDUIDRawData=00:01:32:85:aa:ac:24:5e:be:00:00:03\nRequestAddress=192.0.2.37\n";
+
+/// Two 1 GbE ports on networkd, both on DHCP (as an adoption from ifupdown leaves them):
+/// enp3s0 holds the lease the session comes through and the identity drop-in, enp4s0 is
+/// cabled too. The DHCP server gives the same address to the bond (same identity).
+fn two_port_box() -> T {
+    let os = Arc::new(FakeOs::new());
+    os.add_port("enp3s0", MAC3);
+    os.add_port("enp4s0", MAC4);
+    os.set_active("systemd-networkd", true);
+    {
+        let mut s = os.state.lock().unwrap();
+        let lease = ("192.0.2.37/24".to_string(), "192.0.2.1".to_string());
+        s.leases.insert("enp3s0".into(), lease.clone());
+        s.leases.insert("bond0".into(), lease);
+        s.leases.insert("enp4s0".into(), ("192.0.2.38/24".into(), "192.0.2.1".into()));
+        s.reachable = vec!["192.0.2.1".into()];
+    }
+    for (p, mac) in [("enp3s0", MAC3), ("enp4s0", MAC4)] {
+        os.write_config(
+            &format!("/etc/systemd/network/05-rynas-{p}.network"),
+            &render_file(p, &InterfaceConfig::default(), Some(mac)),
+        );
+    }
+    os.write_config(DROPIN3, IDENTITY);
+    os.run(&["networkctl", "reload"], QUICK).unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let e = engine(&os, state.path());
+    T { os, e, _state: state }
+}
+
+fn bond_cfg(mode: BondMode) -> InterfaceConfig {
+    InterfaceConfig {
+        bond: Some(BondConfig {
+            members: vec!["enp4s0".into(), "enp3s0".into()],
+            mode,
+            miimon_ms: 100,
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+fn master(t: &T, port: &str) -> Option<String> {
+    t.os.state.lock().unwrap().links[port].master.clone()
+}
+
+fn bond_mode(t: &T) -> Option<String> {
+    t.os.state
+        .lock()
+        .unwrap()
+        .links
+        .get("bond0")
+        .and_then(|l| l.bond_mode.clone())
+}
+
+/// The ports become an active-backup bond on DHCP: the bond takes the MAC and the DHCP
+/// identity of the port that had the address, so the address and the page stay.
+fn make_bond(t: &T) -> u64 {
+    t.e.stage("admin", "bond0", &bond_cfg(BondMode::ActiveBackup)).unwrap();
+    let plan = t.e.plan_apply("admin", "admin", "bond", ip("192.0.2.37"), None, false).unwrap();
+    let token = new_token();
+    t.e.begin(&plan, Some(&token), None, &log).unwrap();
+    t.e.confirm(&token, Origin::Web(ip("192.0.2.37"))).unwrap()
+}
+
+#[test]
+fn a_dhcp_port_becomes_a_bond_and_keeps_mac_and_identity() {
+    let t = two_port_box();
+    t.e.stage("admin", "bond0", &bond_cfg(BondMode::ActiveBackup)).unwrap();
+    // the staged bond shows up before it exists, normalized
+    let list = t.e.interfaces("admin", ip("192.0.2.37")).unwrap();
+    let staged = list.iter().find(|i| i.name == "bond0").unwrap();
+    let b = staged.pending.as_ref().unwrap().bond.clone().unwrap();
+    assert_eq!(b.members, vec!["enp3s0", "enp4s0"]);
+    assert_eq!(b.mac.as_deref(), Some(MAC3), "the MAC of the port with the address");
+    assert_eq!(staged.link_local_v4.as_deref(), Some("169.254.1.3"));
+    // a bond change never skips the timed test
+    assert!(matches!(
+        t.e.plan_apply("admin", "admin", "", None, None, true),
+        Err(NetError::Invalid(m)) if m.contains("timed test")
+    ));
+    let plan = t.e.plan_apply("admin", "admin", "bond", ip("192.0.2.37"), None, false).unwrap();
+    assert!(plan.management_touched);
+    assert_eq!(plan.interfaces, vec!["bond0", "enp3s0", "enp4s0"]);
+    assert!(plan.candidate_urls.contains(&"http://192.0.2.37:8080/".to_string()));
+    assert!(plan.removed_addresses.is_empty());
+    let file = |p: &str| {
+        plan.target
+            .files
+            .iter()
+            .find(|f| f.path == Path::new(p))
+            .unwrap_or_else(|| panic!("{p} in the plan"))
+            .content
+            .clone()
+    };
+    let netdev = file("/etc/systemd/network/05-rynas-bond0.netdev").unwrap();
+    assert!(netdev.contains(&format!("Kind=bond\nMACAddress={MAC3}\n")), "{netdev}");
+    assert!(netdev.contains("Mode=active-backup\nMIIMonitorSec=100ms\n"), "{netdev}");
+    assert!(file("/etc/systemd/network/05-rynas-enp3s0.network").unwrap().contains("Bond=bond0\nLinkLocalAddressing=no\n"));
+    // the identity moves to the bond as it is
+    assert_eq!(file(DROPIN_BOND).as_deref(), Some(IDENTITY));
+    assert_eq!(file(DROPIN3), None);
+    let token = new_token();
+    t.e.begin(&plan, Some(&token), None, &log).unwrap();
+    assert_eq!(bond_mode(&t).as_deref(), Some("active-backup"));
+    assert_eq!((master(&t, "enp3s0"), master(&t, "enp4s0")), (Some("bond0".into()), Some("bond0".into())));
+    assert_eq!(t.os.addrs("bond0"), vec!["192.0.2.37/24"]);
+    assert!(t.os.addrs("enp3s0").is_empty() && t.os.addrs("enp4s0").is_empty());
+    assert_eq!(t.os.state.lock().unwrap().links["bond0"].mac, MAC3);
+    assert_eq!(t.os.read_config(Path::new(DROPIN_BOND)).as_deref(), Some(IDENTITY));
+    assert!(t.os.read_config(Path::new(DROPIN3)).is_none());
+    // the same address, now on the bond, confirms
+    let rev = t.e.confirm(&token, Origin::Web(ip("192.0.2.37"))).unwrap();
+    assert_eq!(t.e.store.state().unwrap().lkg, Some(rev));
+    assert!(t.e.state("admin", None).unwrap().pending.is_empty());
+    let cur = t.e.current_config();
+    assert_eq!(cur.keys().collect::<Vec<_>>(), vec!["bond0"]);
+    assert_eq!(cur["bond0"].bond.as_ref().unwrap().mac.as_deref(), Some(MAC3));
+    // the page: the bond is editable with its members' state, the members are not
+    t.e.invalidate();
+    let list = t.e.interfaces("admin", ip("192.0.2.37")).unwrap();
+    let bond = list.iter().find(|i| i.name == "bond0").unwrap();
+    assert!(bond.editable && bond.managed_by_rynas && bond.management, "{bond:?}");
+    let st = bond.bond.as_ref().unwrap();
+    assert_eq!(st.mode.as_deref(), Some("active-backup"));
+    assert_eq!(st.active_member.as_deref(), Some("enp3s0"));
+    assert_eq!(st.members.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), vec!["enp3s0", "enp4s0"]);
+    assert!(st.members.iter().all(|m| m.link_up));
+    let enp4 = list.iter().find(|i| i.name == "enp4s0").unwrap();
+    assert_eq!(enp4.read_only.as_ref().unwrap().master.as_deref(), Some("bond0"));
+    assert!(matches!(t.e.stage("admin", "enp4s0", &InterfaceConfig::default()), Err(NetError::Conflict(_))));
+    // the rescue address lives on the bond
+    let ll = t.e.link_locals().unwrap();
+    assert_eq!(ll.iter().map(|l| l.interface.as_str()).collect::<Vec<_>>(), vec!["bond0"]);
+}
+
+#[test]
+fn bond_staging_rules() {
+    let t = two_port_box();
+    let mut c = bond_cfg(BondMode::ActiveBackup);
+    c.bond.as_mut().unwrap().members.push("nope9".into());
+    assert!(matches!(t.e.stage("admin", "bond0", &c), Err(NetError::InvalidField("bond.members", _))));
+    assert!(matches!(
+        t.e.stage("admin", "team0", &bond_cfg(BondMode::ActiveBackup)),
+        Err(NetError::InvalidField("name", _))
+    ));
+    let mut c = bond_cfg(BondMode::BalanceAlb);
+    c.bond.as_mut().unwrap().hash_policy = Some(BondHash::Layer34);
+    assert!(matches!(t.e.stage("admin", "bond0", &c), Err(NetError::InvalidField("bond.hash_policy", _))));
+    let mut c = bond_cfg(BondMode::ActiveBackup);
+    c.mtu = Some(9500);
+    assert!(matches!(t.e.stage("admin", "bond0", &c), Err(NetError::InvalidField("mtu", _))));
+    // a port staged on its own is dropped when it joins the bond
+    t.e.stage("admin", "enp4s0", &InterfaceConfig { mtu: Some(9000), ..Default::default() }).unwrap();
+    t.e.stage("admin", "bond0", &bond_cfg(BondMode::Lacp)).unwrap();
+    assert_eq!(t.e.state("admin", None).unwrap().pending, vec!["bond0"]);
+    // a second bond cannot take the same ports
+    assert!(t.e.stage("admin", "bond1", &bond_cfg(BondMode::ActiveBackup)).is_err());
+    // 802.3ad gets layer2+3
+    let list = t.e.interfaces("admin", None).unwrap();
+    let b = list.iter().find(|i| i.name == "bond0").unwrap().pending.clone().unwrap().bond.unwrap();
+    assert_eq!(b.hash_policy, Some(BondHash::Layer23));
+    // DELETE of a bond that is only staged drops it
+    t.e.stage_remove("admin", "bond0").unwrap();
+    assert!(t.e.state("admin", None).unwrap().pending.is_empty());
+    assert!(matches!(t.e.stage_remove("admin", "bond0"), Err(NetError::NotFound(_))));
+    // no member with a cable: refused
+    for p in ["enp3s0", "enp4s0"] {
+        t.os.state.lock().unwrap().links.get_mut(p).unwrap().carrier = false;
+    }
+    t.e.invalidate();
+    assert!(matches!(t.e.stage("admin", "bond0", &bond_cfg(BondMode::ActiveBackup)), Err(NetError::InvalidField("bond.members", m)) if m.contains("carrier")));
+}
+
+/// Both ports have a lease: the bond takes the MAC of the port the session comes through, and
+/// that port had no drop-in, so the identity networkd used for its lease is written down.
+#[test]
+fn the_session_port_gives_the_bond_its_mac_and_lease_identity() {
+    let t = two_port_box();
+    let idx = t.os.state.lock().unwrap().links["enp4s0"].index;
+    t.os.add_runtime_file(
+        &format!("/run/systemd/netif/leases/{idx}"),
+        "# This is private data. Do not parse.\nADDRESS=192.0.2.38\nNETMASK=255.255.255.0\n\
+         CLIENTID=ff00000004000200005ab12bc6e93a1c41\n",
+    );
+    t.e.stage_from("admin", "bond0", &bond_cfg(BondMode::ActiveBackup), ip("192.0.2.38")).unwrap();
+    let plan = t.e.plan_apply("admin", "admin", "", ip("192.0.2.38"), None, false).unwrap();
+    assert_eq!(plan.target.config["bond0"].bond.as_ref().unwrap().mac.as_deref(), Some(MAC4));
+    let dropin = plan.target.files.iter().find(|f| f.path == Path::new(DROPIN_BOND)).unwrap();
+    let text = dropin.content.clone().unwrap();
+    assert!(text.contains("ClientIdentifier=duid\nIAID=4\nDUIDType=2\nDUIDRawData=00:00:5a:b1:2b:c6:e9:3a:1c:41\nRequestAddress=192.0.2.38\n"), "{text}");
+    // enp3s0 keeps its own drop-in (not the bond's identity)
+    assert!(!plan.target.files.iter().any(|f| f.path == Path::new(DROPIN3)));
+    assert!(plan.candidate_urls.contains(&"http://192.0.2.38:8080/".to_string()));
+}
+
+#[test]
+fn an_unconfirmed_bond_is_rolled_back_and_the_ports_come_back() {
+    let t = two_port_box();
+    t.e.stage("admin", "bond0", &bond_cfg(BondMode::ActiveBackup)).unwrap();
+    let plan = t.e.plan_apply("admin", "admin", "", ip("192.0.2.37"), None, false).unwrap();
+    t.e.begin(&plan, Some("tok"), None, &log).unwrap();
+    assert_eq!(master(&t, "enp3s0").as_deref(), Some("bond0"));
+    t.os.sleep(Duration::from_secs(121));
+    let r = t.e.rollback(reason::TIMEOUT, &log).unwrap().unwrap();
+    assert!(r.verified, "{:?}", r.problems);
+    // the bond is deleted (networkd would keep it), the ports are free with their lease
+    assert!(t.os.ran("ip link del dev bond0"));
+    assert!(bond_mode(&t).is_none());
+    assert_eq!((master(&t, "enp3s0"), master(&t, "enp4s0")), (None, None));
+    assert_eq!(t.os.addrs("enp3s0"), vec!["192.0.2.37/24"]);
+    assert_eq!(t.os.read_config(Path::new(DROPIN3)).as_deref(), Some(IDENTITY), "the identity is back on the port");
+    assert!(t.os.read_config(Path::new(DROPIN_BOND)).is_none());
+    assert!(t.os.read_config(Path::new("/etc/systemd/network/05-rynas-bond0.netdev")).is_none());
+    assert!(!t.e.current_config().contains_key("bond0"));
+    // the staged bond stays for another try
+    assert_eq!(t.e.state("admin", None).unwrap().pending, vec!["bond0"]);
+}
+
+#[test]
+fn a_mode_change_deletes_the_bond_and_enslaves_the_ports_again() {
+    let t = two_port_box();
+    make_bond(&t);
+    t.os.state.lock().unwrap().lacp_partner = Some("00:11:22:33:44:55".into());
+    t.os.state.lock().unwrap().log.clear();
+    t.e.stage("admin", "bond0", &bond_cfg(BondMode::Lacp)).unwrap();
+    let plan = t.e.plan_apply("admin", "admin", "", ip("192.0.2.37"), None, false).unwrap();
+    assert_eq!(plan.interfaces, vec!["bond0", "enp3s0", "enp4s0"]);
+    t.e.begin(&plan, Some("tok"), None, &log).unwrap();
+    assert!(t.os.ran("ip link del dev bond0"));
+    assert!(t.os.ran("networkctl reconfigure enp3s0 enp4s0"));
+    assert_eq!(bond_mode(&t).as_deref(), Some("802.3ad"));
+    assert_eq!(master(&t, "enp4s0").as_deref(), Some("bond0"));
+    assert_eq!(t.os.addrs("bond0"), vec!["192.0.2.37/24"]);
+    assert_eq!(t.os.state.lock().unwrap().links["bond0"].mac, MAC3, "the MAC stays");
+    t.e.confirm("tok", Origin::Web(ip("192.0.2.37"))).unwrap();
+    t.e.invalidate();
+    let list = t.e.interfaces("admin", None).unwrap();
+    let st = list.iter().find(|i| i.name == "bond0").unwrap().bond.clone().unwrap();
+    assert_eq!((st.lacp_ok, st.partner_mac.as_deref()), (Some(true), Some("00:11:22:33:44:55")));
+}
+
+#[test]
+fn lacp_without_a_switch_group_is_rolled_back() {
+    let t = two_port_box();
+    make_bond(&t);
+    t.os.state.lock().unwrap().log.clear();
+    let start = t.os.now_ms();
+    t.e.stage("admin", "bond0", &bond_cfg(BondMode::Lacp)).unwrap();
+    let plan = t.e.plan_apply("admin", "admin", "", ip("192.0.2.37"), None, false).unwrap();
+    let err = t.e.begin(&plan, Some("tok"), None, &log).unwrap_err();
+    assert!(
+        matches!(&err, NetError::Failed(m) if m.contains("the switch is not configured for LACP") && m.contains("verified")),
+        "{err}"
+    );
+    // it waited for a partner before giving up
+    assert!(t.os.now_ms() - start >= 30_000);
+    // the active-backup bond runs again: deleted and made again, the ports enslaved
+    assert_eq!(bond_mode(&t).as_deref(), Some("active-backup"));
+    assert_eq!(t.os.log().iter().filter(|l| *l == "ip link del dev bond0").count(), 2);
+    assert_eq!(master(&t, "enp3s0").as_deref(), Some("bond0"));
+    assert_eq!(t.os.addrs("bond0"), vec!["192.0.2.37/24"]);
+    assert!(t.e.trial().unwrap().is_none());
+}
+
+#[test]
+fn a_deleted_bond_hands_its_settings_and_identity_to_the_port() {
+    let t = two_port_box();
+    make_bond(&t);
+    t.e.stage_remove("admin", "bond0").unwrap();
+    let list = t.e.interfaces("admin", None).unwrap();
+    assert!(list.iter().find(|i| i.name == "bond0").unwrap().pending.as_ref().unwrap().removed);
+    let plan = t.e.plan_apply("admin", "admin", "", ip("192.0.2.37"), None, false).unwrap();
+    assert_eq!(plan.interfaces, vec!["bond0", "enp3s0", "enp4s0"]);
+    assert_eq!(plan.target.config["enp3s0"], InterfaceConfig::default(), "the port with the bond's MAC");
+    assert_eq!(plan.target.config["enp4s0"].ipv4, Ipv4Method::Disabled);
+    t.e.begin(&plan, Some("tok"), None, &log).unwrap();
+    assert!(t.os.ran("ip link del dev bond0"));
+    assert!(bond_mode(&t).is_none());
+    assert_eq!((master(&t, "enp3s0"), master(&t, "enp4s0")), (None, None));
+    assert_eq!(t.os.addrs("enp3s0"), vec!["192.0.2.37/24"]);
+    assert_eq!(t.os.read_config(Path::new(DROPIN3)).as_deref(), Some(IDENTITY));
+    assert!(t.os.read_config(Path::new(DROPIN_BOND)).is_none());
+    t.e.confirm("tok", Origin::Web(ip("192.0.2.37"))).unwrap();
+    assert!(t.e.state("admin", None).unwrap().pending.is_empty(), "the deletion is done");
+    let cur = t.e.current_config();
+    assert_eq!(cur.keys().collect::<Vec<_>>(), vec!["enp3s0", "enp4s0"]);
+}
+
+#[test]
+fn removing_a_member_frees_it() {
+    let t = two_port_box();
+    make_bond(&t);
+    let mut c = bond_cfg(BondMode::ActiveBackup);
+    c.bond.as_mut().unwrap().members = vec!["enp3s0".into()];
+    t.e.stage("admin", "bond0", &c).unwrap();
+    assert_eq!(t.e.state("admin", None).unwrap().pending, vec!["bond0", "enp4s0"]);
+    let plan = t.e.plan_apply("admin", "admin", "", ip("192.0.2.37"), None, false).unwrap();
+    t.e.begin(&plan, Some("tok"), None, &log).unwrap();
+    assert!(t.os.ran("ip link set dev enp4s0 nomaster"));
+    assert!(!t.os.ran("ip link del dev bond0"));
+    assert_eq!((master(&t, "enp3s0").as_deref(), master(&t, "enp4s0")), (Some("bond0"), None));
+    t.e.confirm("tok", Origin::Web(ip("192.0.2.37"))).unwrap();
+    assert!(t.e.state("admin", None).unwrap().pending.is_empty());
+}
+
+#[test]
+fn the_reset_gesture_frees_the_members_of_a_bond() {
+    let t = two_port_box();
+    make_bond(&t);
+    assert_eq!(t.e.reset_button(&log).unwrap(), Press::First);
+    t.os.sleep(Duration::from_secs(3));
+    assert_eq!(t.e.reset_button(&log).unwrap(), Press::Second);
+    assert!(bond_mode(&t).is_none(), "bonds are suspended");
+    assert_eq!((master(&t, "enp3s0"), master(&t, "enp4s0")), (None, None));
+    for p in ["enp3s0", "enp4s0"] {
+        let f = t.os.read_config(Path::new(&format!("/etc/systemd/network/05-rynas-{p}.network"))).unwrap();
+        assert!(f.contains("DHCP=ipv4") && !f.contains("Bond="), "{f}");
+    }
+    assert_eq!(t.os.addrs("enp3s0"), vec!["192.0.2.37/24"]);
+    assert_eq!(t.os.read_config(Path::new(DROPIN3)).as_deref(), Some(IDENTITY), "the identity follows");
+}
+
+#[test]
+fn bond_watch_notifies_what_got_worse() {
+    let t = two_port_box();
+    make_bond(&t);
+    t.e.take_events();
+    t.e.watch_bonds();
+    assert!(t.e.take_events().is_empty(), "the first look only learns");
+    {
+        let mut s = t.os.state.lock().unwrap();
+        let l = s.links.get_mut("enp3s0").unwrap();
+        l.carrier = false;
+        l.failures = 1;
+    }
+    t.e.watch_bonds();
+    let codes = event_codes(&t.e);
+    assert_eq!(codes, vec!["net.bond_member_down", "net.bond_active_changed"]);
+    t.e.watch_bonds();
+    assert!(t.e.take_events().is_empty(), "nothing new");
+}
+
+#[test]
+fn an_ifupdown_bond_is_migrated_with_its_mac() {
+    let os = Arc::new(FakeOs::new());
+    os.add_port("enp3s0", MAC3);
+    os.add_port("enp4s0", MAC4);
+    os.set_active("networking", true);
+    {
+        // ifenslave made the bond: the members show the bond's MAC
+        let mut s = os.state.lock().unwrap();
+        s.links.insert(
+            "bond0".into(),
+            crate::fake::FakeLink {
+                index: 9,
+                mac: MAC4.into(),
+                mtu: 1500,
+                max_mtu: 65535,
+                carrier: true,
+                bond_mode: Some("active-backup".into()),
+                ..Default::default()
+            },
+        );
+        for p in ["enp3s0", "enp4s0"] {
+            s.links.get_mut(p).unwrap().master = Some("bond0".into());
+        }
+        s.leases.insert("bond0".into(), ("192.0.2.37/24".into(), "192.0.2.1".into()));
+        s.reachable = vec!["192.0.2.1".into()];
+    }
+    os.add_addr("bond0", "192.0.2.37/24", true);
+    os.write_config(
+        "/etc/network/interfaces",
+        "auto lo\niface lo inet loopback\n\nauto bond0\niface bond0 inet dhcp\n bond-slaves enp3s0 enp4s0\n\
+         \x20bond-mode active-backup\n bond-miimon 100\n bond-primary enp4s0\n",
+    );
+    let state = tempfile::tempdir().unwrap();
+    let e = engine(&os, state.path());
+    let plan = e.plan_adopt("admin", ip("192.0.2.37"), None).unwrap();
+    let b = plan.target.config["bond0"].bond.clone().unwrap();
+    assert_eq!(b.mac.as_deref(), Some(MAC4), "the MAC the bond runs with");
+    assert_eq!(b.primary.as_deref(), Some("enp4s0"));
+    assert_eq!(plan.target.config.keys().collect::<Vec<_>>(), vec!["bond0"]);
+    e.begin(&plan, Some("tok"), None, &log).unwrap();
+    let s = os.state.lock().unwrap();
+    assert_eq!(s.links["bond0"].bond_mode.as_deref(), Some("active-backup"));
+    assert_eq!(s.links["enp3s0"].master.as_deref(), Some("bond0"));
 }

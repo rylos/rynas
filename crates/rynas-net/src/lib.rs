@@ -25,11 +25,12 @@
 //! every port) when no connected port has a routable address; the rescue paths ([`rescue`]):
 //! deterministic IPv4 link-local addresses, the Avahi service file, the Synology reset button
 //! double press; the read-only parser of ifupdown and its guided migration ([`ifupdown`]);
-//! diagnostics ([`diag`]).
+//! bonds (link aggregation, [`bond`]); diagnostics ([`diag`]).
 //!
 //! Everything that touches the system goes through [`os::NetOs`], so the engine runs the
 //! same in production, under `--dry-system` and against the scripted kernel of [`fake`].
 
+pub mod bond;
 pub mod diag;
 pub mod fake;
 pub mod ifupdown;
