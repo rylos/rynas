@@ -137,9 +137,13 @@ pub fn dhcpcd_identity(conf: &str, duid_file: Option<&str>, mac: Option<&str>) -
     let mut duid = false;
     let mut clientid = false;
     for l in conf_lines(conf) {
-        let key = l.split_whitespace().next().unwrap_or("");
+        let mut words = l.split_whitespace();
+        let key = words.next().unwrap_or("");
+        let bare = words.next().is_none();
         match key {
             "interface" | "ssid" | "profile" | "iaid" | "anonymous" => return None,
+            // `duid ll` and the like: another DUID than the file's; `clientid <x>` sends <x>
+            "duid" | "clientid" if !bare => return None,
             "duid" => duid = true,
             "clientid" => clientid = true,
             _ => {}
@@ -472,6 +476,8 @@ mod tests {
         assert_eq!(dhcpcd_identity("duid\ninterface eth0\n", Some(duid), Some("02:00:5e:10:20:30")), None);
         assert_eq!(dhcpcd_identity("duid\niaid 1\n", Some(duid), Some("02:00:5e:10:20:30")), None);
         assert_eq!(dhcpcd_identity("# duid\n", Some(duid), Some("02:00:5e:10:20:30")), None);
+        assert_eq!(dhcpcd_identity("clientid nas-1\n", None, None), None);
+        assert_eq!(dhcpcd_identity("duid ll\n", Some(duid), Some("02:00:5e:10:20:30")), None);
         // dhclient: none sent (known by MAC) or the hardware address; anything else unknown
         assert_eq!(dhclient_identity(None), Some(DhcpIdentity::Mac));
         assert_eq!(dhclient_identity(Some("#send dhcp-client-identifier 1:0:a0:24:ab:fb:9c;\n")), Some(DhcpIdentity::Mac));

@@ -248,6 +248,16 @@ impl Job {
 
     fn sample(&mut self, force: bool) {
         let Some(start) = self.start_instant else { return };
+        // what the worker moved after a pause or a question was asked (it stops at its next
+        // check) belongs to the sample where the pause started: no progress across the pause
+        if !force
+            && matches!(self.view.state, State::Paused | State::Conflict)
+            && let Some(last) = self.view.samples.last_mut()
+        {
+            let p = &self.view.progress;
+            last[1..].copy_from_slice(&[p.bytes_done, p.files_done, p.verify_bytes]);
+            return;
+        }
         if !force && self.last_sample.is_some_and(|t| t.elapsed() < SAMPLE_EVERY) {
             return;
         }
@@ -301,9 +311,14 @@ fn thin_samples(samples: &mut Vec<[u64; 4]>) {
     while span / grain > (MAX_SAMPLES / 2) as u64 - 1 {
         grain *= 2;
     }
+    // both ends of a pause (a gap wider than the spacing with nothing moved) always stay,
+    // so the chart still finds it
+    let still = |a: &[u64; 4], b: &[u64; 4]| a[1..] == b[1..] && b[0] > a[0] + grain;
+    let old = &samples[..cut];
     let mut kept: Vec<[u64; 4]> = Vec::with_capacity(MAX_SAMPLES / 2 + recent + 1);
-    for s in &samples[..cut] {
-        if kept.last().is_none_or(|k| s[0] >= k[0] + grain) {
+    for (i, s) in old.iter().enumerate() {
+        let edge = old.get(i + 1).is_some_and(|n| still(s, n)) || (i > 0 && still(&old[i - 1], s));
+        if edge || kept.last().is_none_or(|k| s[0] >= k[0] + grain) {
             kept.push(*s);
         }
     }
@@ -993,6 +1008,29 @@ mod tests {
         assert!(s.len() > MAX_SAMPLES / 2, "{} samples", s.len());
         let tail = &s[s.len() - MAX_SAMPLES / 4..];
         assert!(tail.windows(2).all(|w| w[1][0] - w[0][0] == 250));
+    }
+
+    /// A ten-minute pause early in a long job: after hours of thinning both of its ends are
+    /// still there, with nothing moved between them.
+    #[test]
+    fn thinning_keeps_both_ends_of_a_pause() {
+        let mut s: Vec<[u64; 4]> = Vec::new();
+        let (mut t, mut bytes) = (0u64, 0u64);
+        for i in 0..(3 * 3600 * 4u64) {
+            if i == 2000 {
+                s.push([t, bytes, 0, 0]);
+                t += 600_000;
+                s.push([t, bytes, 0, 0]);
+            }
+            t += 250;
+            bytes += 16_000_000;
+            s.push([t, bytes, 0, 0]);
+            if s.len() > MAX_SAMPLES {
+                thin_samples(&mut s);
+            }
+        }
+        let pause = s.windows(2).find(|w| w[1][0] - w[0][0] >= 600_000).expect("the pause is still a gap");
+        assert_eq!(pause[0][1], pause[1][1], "nothing moved across it");
     }
 
     /// A worker that ignores cancel and SIGTERM (blocked in a call that never returns):

@@ -650,28 +650,35 @@ impl Engine {
 
     /// Drop-ins that keep, on the ports networkd takes over on DHCP, the client identifier the
     /// DHCP client of ifupdown sent and the address it had, so the server gives the same
-    /// address and the page is not lost. ifupdown runs dhclient when installed, else dhcpcd;
-    /// a port whose previous identity cannot be read for sure gets no drop-in (networkd's
-    /// default), and the reason comes back for the plan.
+    /// address and the page is not lost. ifupdown runs the first of dhclient, udhcpc, dhcpcd
+    /// that is installed; a port whose previous identity cannot be read for sure (udhcpc, a
+    /// `client` or `hwaddress` option in its stanza, a configuration the readers refuse)
+    /// gets no drop-in (networkd's default), and comes back in the second list.
     fn dhcp_identity_files(
         &self,
+        ifs: &Interfaces,
         config: &BTreeMap<String, InterfaceConfig>,
         inv: &Inventory,
     ) -> (Vec<FileState>, Vec<String>) {
-        let exists = |p: &str| self.os.path(Path::new(p)).exists();
+        let exists = |p: &str| ["/usr/sbin/", "/sbin/"].iter().any(|d| self.os.path(&Path::new(d).join(p)).exists());
         let read = |p: &str| self.os.read_config(Path::new(p));
-        let client = if exists("/usr/sbin/dhclient") || exists("/sbin/dhclient") {
+        let dhcp: Vec<&String> = config.iter().filter(|(_, c)| c.ipv4 == Ipv4Method::Dhcp).map(|(i, _)| i).collect();
+        let client = if exists("dhclient") {
             "dhclient"
-        } else if exists("/usr/sbin/dhcpcd") || exists("/sbin/dhcpcd") {
+        } else if exists("udhcpc") {
+            return (Vec::new(), dhcp.into_iter().cloned().collect());
+        } else if exists("dhcpcd") {
             "dhcpcd"
         } else {
             return (Vec::new(), Vec::new());
         };
         let (mut files, mut unknown) = (Vec::new(), Vec::new());
-        for iface in config.iter().filter(|(_, c)| c.ipv4 == Ipv4Method::Dhcp).map(|(i, _)| i) {
+        for iface in dhcp {
             let link = inv.link(iface);
             let mac = link.and_then(|l| l.mac.as_deref());
+            let own_id = ifs.of(iface).iter().any(|s| s.other.iter().any(|o| o.name == "client" || o.name == "hwaddress"));
             let id = match client {
+                _ if own_id => None,
                 "dhclient" => networkd::dhclient_identity(read("/etc/dhcp/dhclient.conf").as_deref()),
                 _ => read("/etc/dhcpcd.conf").and_then(|conf| {
                     let duid = read("/var/lib/dhcpcd/duid").or_else(|| read("/etc/dhcpcd.duid"));
@@ -891,7 +898,7 @@ impl Engine {
             .ok_or_else(|| NetError::Conflict("ifupdown configures no interface".into()))?;
         let mut config = ifupdown::to_networkd(&ifs).map_err(NetError::Invalid)?;
         // the DHCP ports keep the identity ifupdown's client had (only those ifupdown ran)
-        let (identity, unknown) = self.dhcp_identity_files(&config, inv);
+        let (identity, unknown) = self.dhcp_identity_files(&ifs, &config, inv);
         // keep what rynas already manages on other interfaces
         for (k, v) in self.current_config() {
             config.entry(k).or_insert(v);

@@ -1094,7 +1094,9 @@ function pauses(s) {
   const out = [];
   for (let i = 1; i < s.length; i++) {
     const dt = s[i][0] - s[i - 1][0];
-    const before = i > 1 ? s[i - 1][0] - s[i - 2][0] : 500;
+    // the first gap has none before it: the one after it gives the pace (thinned history
+    // is spaced by seconds, not by the 250 ms of a fresh job)
+    const before = i > 1 ? s[i - 1][0] - s[i - 2][0] : s.length > 2 ? s[2][0] - s[1][0] : 500;
     // a pause moves nothing: a gap with progress across it is only a thinned stretch
     const still = s[i][1] === s[i - 1][1] && s[i][2] === s[i - 1][2] && s[i][3] === s[i - 1][3];
     if (still && dt > 2500 && dt > 3 * before) out.push([s[i - 1][0], s[i][0] - Math.min(before, 1000)]);
