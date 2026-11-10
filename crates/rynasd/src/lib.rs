@@ -41,6 +41,7 @@ pub mod server;
 pub mod services;
 pub mod snapshots;
 pub mod storage_ops;
+pub mod ssh;
 pub mod system_power;
 pub mod tailscale;
 pub mod tls;

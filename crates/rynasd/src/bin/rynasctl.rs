@@ -29,6 +29,9 @@
 //!   boot; rynasd unlocks the encrypted folders set to unlock automatically, so containers
 //!   start on unlocked folders. Always exits 0.
 //!
+//! - `rynasctl ssh rollback`: `rynas-ssh-rollback.timer` of an unconfirmed SSH change; puts
+//!   the previous drop-in and units back without rynasd (under `/var/lib/rynas/ssh/lock`).
+//!
 //! Talks HTTP/1.1 to rynasd's socket (root is always allowed by `SO_PEERCRED`).
 
 use std::io::{Read, Write};
@@ -98,11 +101,26 @@ enum Command {
         #[command(subcommand)]
         action: CryptCmd,
     },
+    /// SSH service.
+    Ssh {
+        /// rynasd's state directory (the change under test in `ssh/trial.json`).
+        #[arg(long, default_value = "/var/lib/rynas")]
+        state_dir: PathBuf,
+        #[command(subcommand)]
+        action: SshCmd,
+    },
     /// QNAP module: the Super I/O worker and the first-boot LED test (see docs/plugins/qnap.md).
     Qnap {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum SshCmd {
+    /// Put back the SSH settings an unconfirmed change replaced (rynas-ssh-rollback.timer);
+    /// works without rynasd.
+    Rollback,
 }
 
 #[derive(Subcommand, Debug)]
@@ -684,6 +702,30 @@ fn main() -> ExitCode {
         Command::Crypt {
             action: CryptCmd::AutoUnlock,
         } => crypt_auto_unlock(&args.socket),
+        Command::Ssh {
+            state_dir,
+            action: SshCmd::Rollback,
+        } => {
+            let ssh = rynas_services::ssh::Ssh::new(
+                "/",
+                &state_dir,
+                std::sync::Arc::new(rynas_services::ssh::HostRunner),
+            );
+            match ssh.rollback("timeout") {
+                Ok(true) => {
+                    println!("rynas: the unconfirmed SSH change was undone");
+                    ExitCode::SUCCESS
+                }
+                Ok(false) => {
+                    println!("rynas: no SSH change to undo");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("rynasctl: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Command::Qnap { args } => ExitCode::from(rynas_hw_qnap::superio::worker_main(&args) as u8),
     }
 }

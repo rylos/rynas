@@ -114,6 +114,7 @@ only goes to the debug log (A13).
 | 409 | `containers_running` | Docker: refused while containers run (moving the engine) |
 | 409 | `tailscale_not_installed` | Tailscale: not installed (`../phase2/remote-access.md`) |
 | 409 | `stack_not_managed` | Docker: a stack outside the rynas stacks folder (Portainer's, untracked): no file edits, no compose actions |
+| 409 | `ssh_lockout` | SSH: the change would leave no administrator able to log in (`../phase2/ssh.md`) |
 
 ## API v1 (steps 2–3)
 | Method | Path | Response |
@@ -684,8 +685,8 @@ Users and groups (`users` key, `UsersConfig` {users, groups, remove_homes}):
   previous value; memberships only among the groups rynas manages (`sudo`, `docker`... stay).
 - `admin` = member of `rynas-admin` (role mapping unchanged: `rynas-admin`/`sudo`); `shell`:
   `none` (`/usr/sbin/nologin`, default), `sftp` (group `rynas-sftp`), `shell` (`/bin/bash`, group
-  `rynas-ssh`; an existing login shell such as zsh is kept). The sshd side (`AllowGroups`, chroot)
-  comes with the file-services plugin.
+  `rynas-ssh`; an existing login shell such as zsh is kept). The sshd side (`AllowGroups`,
+  SFTP only for `rynas-sftp`) is the SSH service, `../phase2/ssh.md` (D-SSH); chroot is open.
 - `disabled`: shadow expiry day 1 plus Samba flag `D` (smbd answers `NT_STATUS_ACCOUNT_DISABLED`);
   `expires` = shadow expiry date; `obey pam restrictions = yes` applies both to SMB.
 - **Password** (never stored, never in a log or in `config.db`): one transaction in task

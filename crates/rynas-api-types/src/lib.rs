@@ -20,6 +20,7 @@ pub mod replication;
 pub mod scheduler;
 mod services;
 pub mod snapshots;
+pub mod ssh;
 pub mod storage;
 pub mod synology;
 pub mod tailscale;
@@ -409,6 +410,9 @@ pub mod error_codes {
     pub const CRYPT_BUSY: &str = "crypt_busy";
     /// Encrypted folders: gocryptfs is not installed (409); `POST /api/v1/crypt/install`.
     pub const CRYPT_NOT_INSTALLED: &str = "crypt_not_installed";
+    /// SSH: the change would leave no administrator able to log in (password login off
+    /// without a key, nobody allowed) (409); the message says why.
+    pub const SSH_LOCKOUT: &str = "ssh_lockout";
 
     /// The code of a status when nothing more precise applies: used to turn framework
     /// rejections (bad query string, 405, 413...) into an `ApiError`.
@@ -484,6 +488,7 @@ pub mod error_codes {
         CRYPT_WRONG_PASSWORD,
         CRYPT_BUSY,
         CRYPT_NOT_INSTALLED,
+        SSH_LOCKOUT,
     ];
 }
 

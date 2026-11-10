@@ -106,6 +106,13 @@ pub fn routes() -> Router<AppState> {
         .route("/services/smb", get(forward).put(forward))
         .route("/services/smb/recycle-cleanup", post(forward))
         .route("/services/nfs", get(forward).put(forward))
+        // SSH service: settings with a confirmed trial, keys, logins of the last day
+        .route("/services/ssh", get(forward).put(forward))
+        .route("/services/ssh/confirm", post(forward))
+        .route("/services/ssh/rollback", post(forward))
+        .route("/services/ssh/logins", get(forward))
+        .route("/services/ssh/keys/{user}", get(forward).post(forward))
+        .route("/services/ssh/keys/{user}/remove", post(forward))
         // user homes: setting, home moves (plan, task, confirm, undo)
         .route("/services/homes", get(forward).put(forward))
         .route("/services/homes/move/plan", post(forward))

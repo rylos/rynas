@@ -20,8 +20,11 @@
 //! account's `authorized_keys`, `/etc/sudoers.d/rynas-pcbackup` checked by `visudo -c`,
 //! `btrfs subvolume create`, ioctls) or memory ([`MemoryReceive`], `--dry-system` and tests).
 //! Each key line is `restrict,command="rynas-btrbk-filter --device … --root … [rules]"`: the
-//! filter ([`rynas_btrfs::receive_filter`]) is the only thing a PC can run. sshd_config is
-//! never edited.
+//! filter ([`rynas_btrfs::receive_filter`]) is the only thing a PC can run. This module never
+//! edits sshd's configuration: the SSH service ([`crate::ssh`]) owns it, and when only listed
+//! accounts may log in its `AllowGroups` always has the account's group
+//! ([`rynas_api_types::ssh::SSH_BASE_GROUPS`]), so the `AllowUsers`/`AllowGroups` check below
+//! passes.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -147,7 +150,13 @@ fn btrfs_mounts(mountinfo: &str) -> Vec<String> {
 
 impl ReceiveHost for HostReceive {
     fn facts(&self) -> HostFacts {
-        let sshd_bin = rynas_btrfs::receive_filter::locate("sshd").is_some();
+        // installed and running (the SSH service page can turn it off)
+        let sshd_bin = rynas_btrfs::receive_filter::locate("sshd").is_some()
+            && Cmd::new("systemctl")
+                .args(["is-active", "--quiet", rynas_services::ssh::SERVICE, rynas_services::ssh::SOCKET])
+                .timeout(Duration::from_secs(5))
+                .run_blocking()
+                .is_ok_and(|o| o.success());
         let sshd_config = Cmd::new("sshd")
             .arg("-T")
             .env_clear()

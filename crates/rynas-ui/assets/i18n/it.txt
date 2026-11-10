@@ -1680,6 +1680,7 @@ shares.w.crypt_locked	{path} è crittografata e bloccata: i client SMB e NFS non
 err.crypt_wrong_password	Password o chiave di ripristino sbagliata
 err.crypt_busy	La cartella crittografata è in uso.
 err.crypt_not_installed	gocryptfs non è installato.
+err.ssh_lockout	Con questa modifica nessun amministratore potrebbe più entrare via SSH.
 task.crypt.create	Creazione cartella crittografata
 task.crypt.install	Installazione di gocryptfs
 svc.title	Servizi file
@@ -1692,6 +1693,82 @@ svc.off	Disattivato
 svc.exports	Esportazioni NFS
 svc.no_exports	Nessuna cartella condivisa è esportata via NFS.
 svc.exports_help	Le esportazioni e le regole dei client si modificano in ogni cartella condivisa (scheda NFS).
+ssh.title	SSH
+ssh.subtitle	Accesso da terminale e SFTP a questo NAS
+ssh.open_text	Accesso da terminale e SFTP: porta, accesso con password, chi può entrare, chiavi.
+ssh.settings	Impostazioni
+ssh.running_on	In esecuzione su {ports}
+ssh.enabled	Servizio SSH
+ssh.enabled_help	Gli account con accesso SSH entrano con un terminale o in SFTP.
+ssh.port	Porta
+ssh.port_help	22 è lo standard; un'altra porta riduce solo il rumore degli scanner.
+ssh.root	Accesso di root
+ssh.root_help	Meglio: gli amministratori entrano con il proprio account e usano sudo.
+ssh.root_no	No
+ssh.root_keys	Solo con chiave
+ssh.root_yes	Sì, anche con password
+ssh.password	Accesso con password
+ssh.password_help	Disattivato: solo chiavi, la scelta più sicura. Almeno un amministratore deve avere una chiave.
+ssh.allow	Chi può entrare
+ssh.allow_everyone	Ogni account
+ssh.allow_listed	Solo account con accesso SSH
+ssh.allow_everyone_help	Ogni account con una shell di login può entrare.
+ssh.allow_listed_help	Gli account con Shell o SFTP in Utenti, gli account del backup dei PC e dei certificati, e i gruppi qui sotto.
+ssh.allow_groups	Altri gruppi
+ssh.allow_groups_help	Separati da virgola, ad es. sudo per gli account creati fuori da rynas.
+ssh.who	Account
+ssh.admin	amministratore
+ssh.level_shell	shell
+ssh.level_sftp	solo SFTP
+ssh.level_none	niente SSH
+ssh.n_keys	chiavi: {n}
+ssh.tcp	Inoltro delle porte
+ssh.tcp_help	Tunnel attraverso SSH (ssh -L, -R, SOCKS). Lascialo spento se non serve.
+ssh.agent	Inoltro dell'agent
+ssh.agent_help	Le sessioni possono usare le chiavi del computer che si collega.
+ssh.x11	Inoltro X11
+ssh.x11_help	Programmi grafici via SSH; raramente utile su un NAS.
+ssh.lockout	Con queste impostazioni nessun amministratore potrebbe entrare via SSH. Prima aggiungi una chiave o consenti un amministratore.
+ssh.trial_note	Le modifiche all'accesso vengono provate: apri una nuova connessione SSH, poi confermale qui, altrimenti tornano indietro da sole.
+ssh.trial_title	Prova le nuove impostazioni SSH
+ssh.trial_text	Collegati da un nuovo terminale con il comando qui sotto. Se funziona, mantieni le impostazioni; altrimenti tornano indietro da sole. Le sessioni aperte restano collegate.
+ssh.trial_other	{user} sta provando nuove impostazioni SSH: tornano indietro da sole se non vengono confermate.
+ssh.left_sr	{n} secondi rimasti
+ssh.copy	Copia
+ssh.keep	Mantieni
+ssh.undo	Annulla ora
+ssh.kept	Impostazioni SSH mantenute.
+ssh.undone	Sono tornate le impostazioni SSH precedenti.
+ssh.saved	Impostazioni SSH salvate.
+ssh.host_keys	Chiavi dell'host
+ssh.host_keys_help	Alla prima connessione il computer ne mostra una: controlla che corrisponda prima di rispondere sì.
+ssh.no_host_keys	Ancora nessuna chiave dell'host: vengono create all'installazione di openssh-server.
+ssh.logins	Accessi, ultime 24 ore
+ssh.logins_sum	Accessi: {ok} · tentativi falliti: {failed}
+ssh.logins_top	Più tentativi falliti da: {list}
+ssh.login_ok	entrato
+ssh.login_failed	fallito
+ssh.login_invalid	account sconosciuto
+ssh.refresh	Aggiorna
+ssh.keys	Chiavi autorizzate
+ssh.account	Account
+ssh.no_accounts	Nessun account può usare SSH: dai a uno l'accesso Shell o SFTP in Utenti.
+ssh.no_keys	Nessuna chiave: questo account entra solo con la password.
+ssh.key_options	con opzioni
+ssh.key_weak	debole
+ssh.key_remove	Rimuovi chiave
+ssh.key_new	Chiave pubblica
+ssh.key_new_help	La riga del file .pub, ad es. creata con ssh-keygen -t ed25519.
+ssh.key_add	Aggiungi chiave
+ssh.key_added	Chiave aggiunta.
+ssh.key_removed	Chiave rimossa.
+ssh.p.not_installed	Il server SSH non è installato: `apt install openssh-server`.
+ssh.p.not_included	`/etc/ssh/sshd_config` non include `sshd_config.d/*.conf`: queste impostazioni non vengono lette. Rimetti quella riga.
+ssh.p.overridden	Anche `{file}` imposta `{key}`: vale il suo valore invece di quello di questa pagina.
+ssh.p.extra_ports	sshd ascolta anche su {ports} (impostata in un altro file).
+ssh.p.drift	Il file delle impostazioni è stato modificato a mano: salvando viene riscritto.
+ssh.p.socket	SSH parte su richiesta (`ssh.socket`): salvando passa al demone `ssh.service`.
+ssh.p.not_running	Il servizio SSH è attivo ma non in esecuzione.
 smb.enabled	Attiva SMB
 smb.enabled_help	Condivisione file per Windows, macOS e Linux.
 smb.workgroup	Gruppo di lavoro

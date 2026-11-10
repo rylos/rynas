@@ -1013,6 +1013,25 @@ fn main() -> std::io::Result<()> {
         );
         rynasd::pc_backup::spawn_watch(pc_backup.clone());
         state.pc_backup = Some(pc_backup);
+        // the SSH service: the machine, or (--dry-system) a seeded dry root and a stand-in
+        // for sshd and systemctl
+        {
+            let root = config_root(&args);
+            let runner: Arc<dyn rynas_services::ssh::SshRunner> = if args.dry_system {
+                if let Err(e) = rynas_services::ssh::fake::seed(&root) {
+                    tracing::warn!("ssh: dry root: {e}");
+                }
+                Arc::new(rynas_services::ssh::fake::FakeRunner::new(&args.state_dir, &root))
+            } else {
+                Arc::new(rynas_services::ssh::HostRunner)
+            };
+            let svc = Arc::new(rynasd::ssh::SshSvc {
+                ssh: Arc::new(rynas_services::ssh::Ssh::new(root, &args.state_dir, runner)),
+                admins: ops.admins.clone(),
+            });
+            rynasd::ssh::spawn_watch(svc.clone());
+            state.ssh = Some(svc);
+        }
         // the file manager: workers next to rynasd unless told otherwise
         let worker = args.files_worker.clone().unwrap_or_else(|| {
             std::env::current_exe()

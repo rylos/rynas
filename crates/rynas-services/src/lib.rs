@@ -26,6 +26,7 @@ pub mod removed;
 pub mod shares;
 pub mod smb;
 pub mod snapview;
+pub mod ssh;
 pub mod users;
 pub mod validate;
 

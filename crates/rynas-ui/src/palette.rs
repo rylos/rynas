@@ -40,6 +40,7 @@ fn entries() -> Vec<Entry> {
         Entry { key: "nav.security", icon: icons::SHIELD_CHECK, action: Action::Go("/security"), hint: "" },
         Entry { key: "wa.title", icon: icons::SHIELD_CHECK, action: Action::Go("/network/web-access"), hint: "" },
         Entry { key: "ts.title", icon: icons::LINK, action: Action::Go("/network/remote-access"), hint: "" },
+        Entry { key: "ssh.title", icon: icons::COMMAND, action: Action::Go("/services/ssh"), hint: "" },
         Entry { key: "mem.title", icon: icons::MEMORY_STICK, action: Action::Go("/system/memory"), hint: "" },
         Entry { key: "cfg.title", icon: icons::HISTORY, action: Action::Go("/system/configuration"), hint: "" },
         Entry { key: "sch.title", icon: icons::CALENDAR_CLOCK, action: Action::Go("/system/scheduler"), hint: "" },

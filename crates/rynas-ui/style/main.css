@@ -1649,6 +1649,11 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .repl-intro { flex: 1 1 260px; min-width: 0; margin: 0; }
 .repl-copy { display: flex; align-items: flex-start; gap: var(--s-2); min-width: 0; }
 .repl-copy .secret { flex: 1; min-width: 0; }
+/* SSH: accounts, logins and keys as wrapped rows (no table: 390 px without sideways scroll) */
+.ssh-acct, .ssh-key { display: flex; align-items: flex-start; gap: var(--s-2); padding: var(--s-2) 0; border-top: 1px solid var(--border); min-width: 0; }
+.ssh-acct:first-child, .ssh-key:first-child { border-top: 0; }
+.ssh-acct > svg { flex: none; }
+.ssh-acct .cell-main, .ssh-key-text { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow-wrap: anywhere; }
 .repl-keys li, .repl-browse .ellipsis-cell { overflow-wrap: anywhere; }
 /* a host key: type over its fingerprint, which breaks anywhere instead of widening the drawer */
 .repl-key { display: flex; flex-direction: column; gap: var(--s-1); min-width: 0; }

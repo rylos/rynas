@@ -198,6 +198,7 @@ fn Shell() -> impl IntoView {
                     <Route path=path!("/shares") view=pages::shares::Shares />
                     <Route path=path!("/users") view=pages::users::Users />
                     <Route path=path!("/services") view=pages::services::FileServices />
+                    <Route path=path!("/services/ssh") view=pages::ssh::SshPage />
                     <Route path=path!("/apps") view=pages::apps::AppsPage />
                     <Route path=path!("/plugins") view=pages::apps::AppsPage />
                     <Route path=path!("/docker") view=pages::docker::DockerPage />
