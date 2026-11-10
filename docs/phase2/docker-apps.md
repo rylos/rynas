@@ -2365,6 +2365,14 @@ tested, but a bot keeps them current, so a new upstream image reaches the NAS wi
   requests opened with `GITHUB_TOKEN` would not start the tests). A second key pair (the
   "next" key, compiled in too) stays offline as the way to rotate if the first is lost.
 
+Review fixes (2026-11-10): the publish run reads the serial from the clone of
+`rynas-catalog` (never through the Pages CDN, which lags, and a failed read stops the run, so
+the serial never goes down); the index tool is built before the step that holds the key;
+automerge waits `minimumReleaseAge: 3 days`, so a hijacked or broken tag is usually pulled
+upstream before it reaches a NAS. GitHub disables scheduled workflows after 60 days without
+activity in the repository: the weekly publish would stop and NAS would warn when the index
+expires (30 days); re-enable the workflow (or push) when GitHub says so.
+
 On the NAS nothing changes: the daily catalogue check (§ 6.12) brings the new entry versions
 and the per-stack automatic update (§ 5.8) applies them inside the policy.
 

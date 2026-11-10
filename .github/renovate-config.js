@@ -30,9 +30,12 @@ module.exports = {
       commitMessagePrefix: "Apps:",
     },
     {
+      // three days before a release can be merged by itself: a broken or hijacked tag is
+      // usually pulled or fixed upstream within that time, before it reaches any NAS
       matchUpdateTypes: ["patch", "minor", "digest", "pinDigest"],
       automerge: true,
       automergeType: "pr",
+      minimumReleaseAge: "3 days",
     },
     {
       matchUpdateTypes: ["major"],

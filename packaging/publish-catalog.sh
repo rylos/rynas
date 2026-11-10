@@ -8,6 +8,14 @@
 #   --days N       validity of the index (default 30; NAS refuse it afterwards)
 #   --out DIR      output folder (default target/catalog-publish)
 #   --base-url U   where the catalogue is published (default the official site)
+#   --serial-from F  the published index.json as a local file (CI: from the clone of the
+#                  catalogue repository, not through the CDN, which lags); must be readable
+#
+# Without --offline or --serial-from the published index is fetched, and a failed fetch
+# stops the run: a serial computed without it could go down, and every NAS would refuse
+# the catalogue as a rollback.
+# CATALOG_INDEX_BIN=<path> uses a prebuilt `catalog-index` example (CI builds it before the
+# step that holds the key, so no build script ever runs next to the secret).
 #
 # The minisign secret key, one of:
 #   RYNAS_CATALOG_KEY=<path>        the secret key file (on a RAM folder, please)
@@ -30,12 +38,14 @@ BASE_URL=https://rylos.github.io/rynas-catalog/v1/
 DAYS=30
 OUT=$ROOT/target/catalog-publish
 OFFLINE=0
+SERIAL_FROM=
 while [ $# -gt 0 ]; do
     case "$1" in
         --offline) OFFLINE=1 ;;
         --days) DAYS=$2; shift ;;
         --out) OUT=$2; shift ;;
         --base-url) BASE_URL=$2; shift ;;
+        --serial-from) SERIAL_FROM=$2; shift ;;
         -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
         *) echo "unknown option $1" >&2; exit 2 ;;
     esac
@@ -57,13 +67,24 @@ serial_of() { sed -n 's/^serial *= *\([0-9][0-9]*\).*/\1/p' "$1" | head -n1; }
 local_serial=$(serial_of apps/catalog.toml)
 [ -n "$local_serial" ] || { echo "apps/catalog.toml has no serial" >&2; exit 1; }
 remote_serial=0
-if [ "$OFFLINE" = 0 ]; then
-    if idx=$(curl -fsS --max-time 20 "${BASE_URL}index.json" 2>/dev/null); then
-        remote_serial=$(printf '%s' "$idx" | sed -n 's/.*"serial" *: *\([0-9][0-9]*\).*/\1/p' | head -n1)
-        remote_serial=${remote_serial:-0}
+read_serial() { printf '%s' "$1" | sed -n 's/.*"serial" *: *\([0-9][0-9]*\).*/\1/p' | head -n1; }
+if [ -n "$SERIAL_FROM" ]; then
+    if [ -f "$SERIAL_FROM" ]; then
+        remote_serial=$(read_serial "$(cat "$SERIAL_FROM")")
+        [ -n "$remote_serial" ] || { echo "no serial in $SERIAL_FROM" >&2; exit 1; }
     else
-        echo "note: no published index at ${BASE_URL}index.json (first publication?)" >&2
+        echo "note: $SERIAL_FROM does not exist: first publication" >&2
     fi
+elif [ "$OFFLINE" = 0 ]; then
+    tmpidx=$(mktemp)
+    code=$(curl -sS --max-time 20 -o "$tmpidx" -w '%{http_code}' "${BASE_URL}index.json" || true)
+    case "$code" in
+        200) remote_serial=$(read_serial "$(cat "$tmpidx")")
+             [ -n "$remote_serial" ] || { echo "the published index has no serial" >&2; exit 1; } ;;
+        404) echo "note: no published index at ${BASE_URL}index.json: first publication" >&2 ;;
+        *) echo "cannot read ${BASE_URL}index.json (HTTP ${code:-none}): stopping, the serial could go down" >&2; exit 1 ;;
+    esac
+    rm -f "$tmpidx"
 fi
 prev=$(( local_serial > remote_serial ? local_serial : remote_serial ))
 serial=$(( prev + 1 ))
@@ -85,9 +106,13 @@ tar --format=gnu --sort=name --owner=0 --group=0 --numeric-owner --mtime=@0 \
     --mode='u=rwX,go=rX' -C apps -cf - catalog.toml "${ids[@]}" \
     | zstd -19 -q -o "$OUT/$name"
 
-export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$ROOT/target}
-cargo run -q -p rynas-apps --features online --example catalog-index -- \
-    apps "$serial" "$published" "$expires" "$name" "$OUT/$name" > "$OUT/index.json"
+if [ -n "${CATALOG_INDEX_BIN:-}" ]; then
+    "$CATALOG_INDEX_BIN" apps "$serial" "$published" "$expires" "$name" "$OUT/$name" > "$OUT/index.json"
+else
+    export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$ROOT/target}
+    cargo run -q -p rynas-apps --features online --example catalog-index -- \
+        apps "$serial" "$published" "$expires" "$name" "$OUT/$name" > "$OUT/index.json"
+fi
 
 sign() {
     minisign -S -s "$1" -m "$OUT/index.json" -x "$OUT/index.json.minisig" \
