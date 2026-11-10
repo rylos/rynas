@@ -5,6 +5,7 @@ import { t } from "./i18n.js";
 import { esc } from "./format.js";
 import { svg } from "./icons.js";
 import { $, h, toast } from "./ui.js";
+import { host } from "./host.js";
 
 export const healthMethods = {
   /**
@@ -53,6 +54,9 @@ export const healthMethods = {
    */
   needLogin() {
     this.banner("login", t("Sessione scaduta: accedi di nuovo per continuare."));
+    // a modal <dialog> sits in the browser's top layer, above the shell's login screen:
+    // close them (a copy goes on on the server, its dialog opens again from the transfers)
+    for (const d of host.root?.querySelectorAll("dialog[open]") || []) d.close();
   },
 
   /** The session came back (signed in again): everything is read again. */

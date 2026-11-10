@@ -74,6 +74,11 @@ pub fn csrf_token() -> Option<String> {
 pub fn session_lost() {
     storage_set("rynas.sess", "");
     api::forget_early();
+    // the file manager closes its modal dialogs (they sit above the login screen) even when
+    // the shell, not the file manager, found the session gone
+    if let (Some(w), Ok(ev)) = (web_sys::window(), web_sys::CustomEvent::new("rynas-files:auth-lost")) {
+        let _ = w.dispatch_event(&ev);
+    }
     if let Some(a) = AUTH.with(Cell::get) {
         match a.phase.get_untracked() {
             Phase::Ready => {
