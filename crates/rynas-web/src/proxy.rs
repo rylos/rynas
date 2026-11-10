@@ -288,6 +288,9 @@ pub fn routes() -> Router<AppState> {
         .route("/apps/catalog/{id}/screenshots/{file}", get(forward))
         .route("/apps/catalog/{id}/plan", post(forward))
         .route("/apps/catalog/{id}/install", post(forward))
+        // signed online catalogue: its state and "Check now"
+        .route("/apps/catalog-source", get(forward))
+        .route("/apps/catalog-source/check", post(forward))
         .route("/apps/installed", get(forward))
         .route("/apps/installed/{stack}", get(forward))
         .route("/apps/installed/{stack}/update", get(forward).post(forward))

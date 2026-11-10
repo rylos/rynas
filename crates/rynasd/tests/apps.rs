@@ -73,6 +73,7 @@ struct Env {
     dir: tempfile::TempDir,
     app: axum::Router,
     ops: Arc<Ops>,
+    apps: Arc<AppsSvc>,
     /// Web access and its fake proxy, when the test asked for it.
     web: Option<(Arc<rynasd::web_access::WebAccessSvc>, fake_caddy::FakeCaddy)>,
 }
@@ -194,12 +195,13 @@ fn env_opts(web: Option<bool>) -> Env {
         let _ = apps.web.set(w.clone());
         st.web_access = Some(w.clone());
     }
-    st.apps = Some(apps);
+    st.apps = Some(apps.clone());
     st.docker = Some(svc);
     Env {
         dir,
         app: router(st),
         ops,
+        apps,
         web,
     }
 }
@@ -274,6 +276,79 @@ async fn install(e: &Env, id: &str, body: Value) -> (AppInstallStarted, String) 
     let (info, log) = wait_task(e, &started.task_id).await;
     assert_eq!(info.status, TaskStatus::Ok, "{log}");
     (started, log)
+}
+
+fn copy_dir(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap().flatten() {
+        let t = to.join(e.file_name());
+        if e.file_type().unwrap().is_dir() {
+            copy_dir(&e.path(), &t);
+        } else {
+            std::fs::copy(e.path(), t).unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn catalogue_source_without_a_key() {
+    let e = env();
+    let (s, b) = call(&e, "GET", "/v1/apps/catalog-source", None).await;
+    let src: CatalogSourceState = json_of(s, &b);
+    assert!(!src.online_enabled);
+    assert_eq!(src.disabled_reason.as_deref(), Some("no_key"));
+    assert_eq!(src.shipped_serial, Some(1));
+    assert_eq!(src.online_serial, None);
+    assert_eq!(src.url, rynasd::apps::online::DEFAULT_URL);
+    let (s, b) = call(&e, "POST", "/v1/apps/catalog-source/check", None).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{}", String::from_utf8_lossy(&b));
+}
+
+#[tokio::test]
+async fn downloaded_catalogue_is_merged() {
+    use rynas_apps::online::test_signer::TestKey;
+    let e = env();
+    // a catalogue downloaded earlier: serial 7 (above the shipped 1), a newer Uptime Kuma
+    let dir = e.dir.path().join("catalog");
+    let dl = dir.join("7");
+    std::fs::create_dir_all(&dl).unwrap();
+    std::fs::write(dl.join("catalog.toml"), "serial = 7\n").unwrap();
+    copy_dir(&catalogue().join("uptime-kuma"), &dl.join("uptime-kuma"));
+    let app_toml = dl.join("uptime-kuma/app.toml");
+    let t = std::fs::read_to_string(&app_toml)
+        .unwrap()
+        .replace("version = \"1.0.0\"", "version = \"1.0.1\"");
+    std::fs::write(&app_toml, t).unwrap();
+    let index = json!({
+        "schema": 1, "serial": 7, "published": "2026-11-10T00:00:00Z", "expires": "2099-01-01T00:00:00Z",
+        "archive": {"url": "apps-7.tar.zst", "sha256": "0".repeat(64), "size": 1},
+        "apps": [{"id": "uptime-kuma", "version": "1.0.1", "min_rynas": "0.1.0"}]
+    });
+    std::fs::write(dl.join("index.json"), index.to_string()).unwrap();
+    std::os::unix::fs::symlink("7", dir.join("current")).unwrap();
+    let key = TestKey::new(5).public();
+    let _ = e
+        .apps
+        .online
+        .set(rynasd::apps::online::Online::new_for_tests(dir, &[&key]));
+
+    let (s, b) = call(&e, "GET", "/v1/apps/catalog", None).await;
+    let c: AppCatalog = json_of(s, &b);
+    assert!(c.issues.is_empty(), "{:?}", c.issues);
+    assert_eq!(c.apps.len(), 26);
+    let uk = c.apps.iter().find(|a| a.id == "uptime-kuma").unwrap();
+    assert_eq!(uk.version, "1.0.1");
+    let (s, b) = call(&e, "GET", "/v1/apps/catalog-source", None).await;
+    let src: CatalogSourceState = json_of(s, &b);
+    assert!(src.online_enabled);
+    assert_eq!(
+        (src.online_serial, src.online_apps, src.expired),
+        (Some(7), 1, false)
+    );
+    assert_eq!(src.published.as_deref(), Some("2026-11-10T00:00:00Z"));
+    // the icon of the merged entry is served from the download
+    let (s, _) = call(&e, "GET", "/v1/apps/catalog/uptime-kuma/icon", None).await;
+    assert_eq!(s, StatusCode::OK);
 }
 
 #[tokio::test]

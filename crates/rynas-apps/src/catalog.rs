@@ -179,7 +179,57 @@ impl Catalog {
     }
 }
 
-const ALLOWED_TOP: &[&str] = &["app.toml", "compose.yaml", "form.json", "description.md", "metadata", "overlays", "migrations", "tests"];
+/// `catalog.toml` at the top of a catalogue folder: the catalogue's serial, which only goes
+/// up with each published catalogue (the shipped package and the online downloads count on
+/// the same scale, so an older download never wins over a newer package).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogMeta {
+    pub serial: u64,
+}
+
+/// The file name of [`CatalogMeta`].
+pub const CATALOG_META: &str = "catalog.toml";
+
+/// The serial in `<dir>/catalog.toml`: `Ok(None)` when the file is missing (an old package or
+/// a checkout without it), an error when it cannot be read or parsed.
+pub fn read_serial(dir: &Path) -> Result<Option<u64>, String> {
+    match fs::read_to_string(dir.join(CATALOG_META)) {
+        Ok(t) => toml::from_str::<CatalogMeta>(&t).map(|m| Some(m.serial)).map_err(|e| format!("{CATALOG_META}: {e}")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{CATALOG_META}: {e}")),
+    }
+}
+
+/// Where a merged entry comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    Shipped,
+    Online,
+}
+
+/// Joins the shipped catalogue with a downloaded one. Per app, an entry this rynas can run
+/// (`min_rynas` ≤ `running`) wins over one it cannot; among equals the higher version wins,
+/// and on the same version the shipped entry stays. Apps in one source only are kept.
+pub fn merge(shipped: Catalog, online: Catalog, running: Version) -> (Catalog, BTreeMap<String, Origin>) {
+    let mut origin: BTreeMap<String, Origin> = shipped.apps.keys().map(|k| (k.clone(), Origin::Shipped)).collect();
+    let mut apps = shipped.apps;
+    for (id, o) in online.apps {
+        let take = match apps.get(&id) {
+            None => true,
+            Some(s) => {
+                let (s_ok, o_ok) = (s.manifest.min_rynas <= running, o.manifest.min_rynas <= running);
+                (o_ok && !s_ok) || (o_ok == s_ok && o.manifest.version > s.manifest.version)
+            }
+        };
+        if take {
+            origin.insert(id.clone(), Origin::Online);
+            apps.insert(id, o);
+        }
+    }
+    (Catalog { source: shipped.source, apps }, origin)
+}
+
+const ALLOWED_TOP: &[&str] =&["app.toml", "compose.yaml", "form.json", "description.md", "metadata", "overlays", "migrations", "tests"];
 
 fn read(dir: &Path, rel: &str, app: &str, issues: &mut Issues) -> Option<String> {
     match fs::read_to_string(dir.join(rel)) {

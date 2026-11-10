@@ -201,12 +201,21 @@ pub fn AppsPage() -> impl IntoView {
             {panel(1, catalog::browse)}
             {panel(2, plugins)}
             {panel(3, installed::panel)}
-            {panel(4, installed::updates)}
+            {panel(4, updates_tab)}
             {move || a.detail.get().map(catalog::detail_drawer)}
             {move || a.wizard.get().map(wizard::wizard)}
             {move || a.manage.get().map(installed::drawer)}
         </div>
     }
+}
+
+/// Updates: the installed apps with updates, then where the catalogue comes from.
+fn updates_tab() -> AnyView {
+    view! {
+        {installed::updates()}
+        {catalog::source_panel()}
+    }
+    .into_any()
 }
 
 /// Plugins: the Docker module (install, then its page) and the system plugins to come.

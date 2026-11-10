@@ -1,0 +1,4 @@
+# Serial of this catalogue: it only goes up. packaging/publish-catalog.sh raises it for each
+# published online catalogue; a rynas package built from this folder carries the same number,
+# so an older download never overrides a newer package (docs/phase2/docker-apps.md § 6.12).
+serial = 1

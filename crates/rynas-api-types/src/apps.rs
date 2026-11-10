@@ -189,6 +189,50 @@ pub struct AppCatalog {
     pub stacks_dir: Option<String>,
 }
 
+/// `GET /api/v1/apps/catalog-source`: where the catalogue comes from and the state of the
+/// signed online updates (`docs/phase2/docker-apps.md` § 6.12). `POST
+/// /api/v1/apps/catalog-source/check` starts a check now (task `apps.catalog-update`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CatalogSourceState {
+    /// Online updates run: this build has a catalogue key and the setting is on.
+    pub online_enabled: bool,
+    /// Why they do not: `no_key` (this build has no catalogue signing key yet), `off`
+    /// (turned off in the Docker settings).
+    #[serde(default)]
+    pub disabled_reason: Option<String>,
+    /// Base URL (`index.json` below it).
+    pub url: String,
+    /// Serial of the catalogue shipped with rynas (`catalog.toml`); `None` without one.
+    #[serde(default)]
+    pub shipped_serial: Option<u64>,
+    /// Serial of the downloaded catalogue in use; `None` when there is none or it is off.
+    #[serde(default)]
+    pub online_serial: Option<u64>,
+    /// Entries taken from the downloaded catalogue (newer than the shipped ones, or new).
+    pub online_apps: u32,
+    /// Publication and expiry of the downloaded catalogue (RFC 3339).
+    #[serde(default)]
+    pub published: Option<String>,
+    #[serde(default)]
+    pub expires: Option<String>,
+    /// The downloaded catalogue's index expired and no newer one came: the site is not being
+    /// refreshed, or someone serves an old copy.
+    pub expired: bool,
+    /// Unix seconds of the last check and of the last one that worked.
+    #[serde(default)]
+    pub last_check: Option<i64>,
+    #[serde(default)]
+    pub last_success: Option<i64>,
+    /// Why the last check failed (English), and its code (`signature`, `rollback`,
+    /// `expired`, `download`...).
+    #[serde(default)]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub last_error_code: Option<String>,
+    /// A check runs now.
+    pub checking: bool,
+}
+
 // ------------------------------------------------------------------ entry detail
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

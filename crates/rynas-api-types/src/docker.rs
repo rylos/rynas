@@ -270,6 +270,14 @@ pub struct DockerSettings {
     /// Automatic image updates of chosen stacks (off for every stack by default).
     #[serde(default)]
     pub auto_update: AutoUpdateSettings,
+    /// App catalogue: download signed catalogue updates daily (default on; they also need a
+    /// catalogue key in this build).
+    #[serde(default = "yes")]
+    pub apps_online_catalog: bool,
+    /// App catalogue: base URL of the online catalogue (`https://…/`, `index.json` below
+    /// it); `None`: the official one.
+    #[serde(default)]
+    pub apps_catalog_url: Option<String>,
 }
 
 fn default_keep() -> u32 {
@@ -385,6 +393,8 @@ impl Default for DockerSettings {
             preferred_manager: None,
             apps_ssd_volume: None,
             auto_update: AutoUpdateSettings::default(),
+            apps_online_catalog: true,
+            apps_catalog_url: None,
         }
     }
 }

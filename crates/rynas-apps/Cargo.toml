@@ -6,6 +6,14 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# signed online catalogue updates (`online` module, rynasd only): minisign verification,
+# the .tar.zst archive and its checks
+online = ["dep:minisign-verify", "dep:zstd", "dep:tar", "dep:sha2", "dep:jiff"]
+# signs test indexes with a key made inside the tests (never a real key); for tests only
+test-signing = ["online", "dep:ed25519-dalek", "dep:blake2"]
+
 [dependencies]
 # `update_policy` (the enum the Docker side and the UI share)
 rynas-api-types.workspace = true
@@ -18,6 +26,20 @@ getrandom.workspace = true
 yaml_serde = "0.10.7"
 # `pattern` of form.json fields; small, no unicode tables
 regex-lite = "0.1.9"
+# minisign (Ed25519, prehashed BLAKE2b) verification, pure Rust without dependencies, MIT
+minisign-verify = { version = "0.3.0", optional = true }
+zstd = { workspace = true, optional = true }
+tar = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+jiff = { workspace = true, optional = true }
+ed25519-dalek = { version = "2.2.0", optional = true, default-features = false, features = ["std"] }
+blake2 = { version = "0.11.0", optional = true }
+
+[[example]]
+name = "catalog-index"
+required-features = ["online"]
 
 [dev-dependencies]
 tempfile.workspace = true
+# the crate itself with the test signer, so `cargo test -p rynas-apps` runs the online tests
+rynas-apps = { path = ".", features = ["test-signing"] }

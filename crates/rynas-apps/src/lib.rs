@@ -17,6 +17,8 @@ pub mod compose;
 pub mod error;
 pub mod form;
 pub mod manifest;
+#[cfg(feature = "online")]
+pub mod online;
 pub mod plan;
 pub mod render;
 pub mod version;

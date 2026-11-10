@@ -2,12 +2,14 @@
 //! drawer of one entry (description, screenshots, ports, folders, shares, web, resources).
 
 use leptos::prelude::*;
-use rynas_api_types::apps::{AppCard, AppCatalog, FolderIntent, FolderSsd, GpuNeed, NoteLevel, RamGate, ShareAccess, WebAuth, WebPublic};
+use rynas_api_types::TaskStatus;
+use rynas_api_types::apps::{AppCard, AppCatalog, CatalogSourceState, FolderIntent, FolderSsd, GpuNeed, NoteLevel, RamGate, ShareAccess, WebAuth, WebPublic};
 
 use super::{AppDetail, CATEGORIES, antifeature_chips, antifeature_keys, app_icon, apps, category_key, install_block, ram_pill};
 use crate::form::search_box;
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
+use crate::toast::toast;
 use crate::ui::{self, EmptyState, Remote, Tone};
 
 /// The catalogue's featured picks (`featured`) that are not installed yet, those that fit
@@ -463,4 +465,78 @@ pub fn detail_drawer(id: String) -> AnyView {
     }
     .into_any();
     ui::drawer(title, close, body, foot)
+}
+
+// ------------------------------------------------------------------ catalogue source
+
+/// Where the catalogue comes from (shipped with rynas, signed online updates), the last
+/// check and "Check now" (task `apps.catalog-update`).
+pub fn source_panel() -> AnyView {
+    let a = apps();
+    let src = Remote::<CatalogSourceState>::new("/api/v1/apps/catalog-source");
+    let checking = RwSignal::new(false);
+    let enabled = Memo::new(move |_| src.data.with(|s| s.as_ref().is_some_and(|s| s.online_enabled)));
+    let check = move |_| {
+        if checking.get_untracked() || !enabled.get_untracked() {
+            return;
+        }
+        checking.set(true);
+        leptos::task::spawn_local(async move {
+            let r = crate::tasks::run_task("/api/v1/apps/catalog-source/check", None).await;
+            let _ = checking.try_set(false);
+            match r {
+                Ok(tk) if tk.status == TaskStatus::Ok => toast(Tone::Ok, t("apps.src.checked").to_string()),
+                Ok(tk) => toast(Tone::Err, crate::tasks::task_error(&tk)),
+                Err(e) if e.status() == 401 => {}
+                Err(e) => toast(Tone::Err, e.text()),
+            }
+            src.reload();
+            a.reload();
+        });
+    };
+    let content = move || {
+        let Some(s) = src.data.get() else { return ().into_any() };
+        let when = |v: Option<i64>| v.map(|v| i18n::short_when(v.max(0) as u64 * 1000)).unwrap_or_else(|| t("apps.src.never").to_string());
+        let date = |v: &Option<String>| {
+            v.as_ref().map(|p| {
+                let ms = js_sys::Date::parse(p);
+                if ms.is_finite() { i18n::date(ms as u64) } else { p.clone() }
+            })
+        };
+        let origin = match s.online_serial {
+            Some(n) => tf("apps.src.online", &[("serial", &n.to_string()), ("n", &s.online_apps.to_string())]),
+            None => t("apps.src.shipped_only").to_string(),
+        };
+        let shipped = s.shipped_serial.map_or_else(|| "—".to_string(), |n| n.to_string());
+        let published = date(&s.published);
+        let note = match (s.disabled_reason.as_deref(), s.expired, &s.last_error) {
+            (Some("no_key"), ..) => Some(ui::note(Tone::Info, icons::INFO, ui::text(t("apps.src.no_key").to_string()))),
+            (Some(_), ..) => Some(ui::note(Tone::Info, icons::INFO, ui::text(t("apps.src.off").to_string()))),
+            (None, true, _) => Some(ui::note(Tone::Warn, icons::TRIANGLE_ALERT, ui::text(t("apps.src.expired").to_string()))),
+            (None, false, Some(e)) => Some(ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {tr("apps.src.error")}" "<span lang="en">{e.clone()}</span> }.into_any())),
+            _ => None,
+        };
+        view! {
+            {note}
+            <dl class="kvs">
+                {ui::kv_row("apps.src.source", Signal::stored(origin), "")}
+                {ui::kv_row("apps.src.shipped", Signal::stored(shipped), "mono")}
+                {published.map(|p| ui::kv_row("apps.src.published", Signal::stored(p), ""))}
+                {ui::kv_row("apps.src.last_check", Signal::stored(when(s.last_check)), "")}
+            </dl>
+        }
+        .into_any()
+    };
+    view! {
+        <section class="card widget w-12">
+            <div class="toolbar">
+                <h3 class="apps-sec-title">{tr("apps.src.title")}</h3>
+                <button type="button" class="btn ghost" aria-disabled=move || (checking.get() || !enabled.get()).then_some("true") on:click=check>
+                    {crate::form::spinner(checking)}<Icon icon=icons::REFRESH_CW size=16 /><span class="btn-label">{tr("upd.check")}</span>
+                </button>
+            </div>
+            {move || src.view(3, content)}
+        </section>
+    }
+    .into_any()
 }

@@ -12,7 +12,12 @@ rynas-nut.workspace = true
 rynas-removable.workspace = true
 rynas-docker.workspace = true
 rynas-tailscale.workspace = true
-rynas-apps.workspace = true
+# `online`: signed catalogue updates (minisign, .tar.zst)
+rynas-apps = { workspace = true, features = ["online"] }
+# downloads of the online catalogue: the HTTP stack of rynas-notify (OpenSSL through
+# native-tls, Debian security updates), already in this binary
+reqwest = { version = "0.13.5", default-features = false, features = ["native-tls-no-alpn"] }
+getrandom.workspace = true
 rynas-auth.workspace = true
 rynas-http.workspace = true
 rynas-storage.workspace = true
@@ -57,6 +62,8 @@ zbus.workspace = true
 zeroize = { version = "1.9.1", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
+# signs test catalogues with a key made in the test
+rynas-apps = { workspace = true, features = ["test-signing"] }
 tower = { version = "0.5.3", features = ["util"] }
 tokio = { workspace = true, features = ["io-util"] }
 tempfile.workspace = true

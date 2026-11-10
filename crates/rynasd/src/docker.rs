@@ -139,6 +139,11 @@ pub fn normalize(s: DockerSettings) -> Result<DockerSettings, Invalid> {
     s.auto_update
         .stacks
         .retain(|_, v| v.enabled || v.policy.is_some());
+    if let Some(u) = &s.apps_catalog_url
+        && let Err(m) = crate::apps::online::check_base_url(u)
+    {
+        return Err(Invalid::at("apps_catalog_url", m));
+    }
     Ok(s)
 }
 

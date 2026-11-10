@@ -1005,6 +1005,8 @@ schema 2 added the `code` and `body_format` columns.
 | `docker.auto_rolled_back` | `stack`, `reason` | Automatic update of {stack} rolled back |
 | `docker.auto_held` | `stack`, `reason` | Update of {stack} needs you |
 | `docker.auto_failed` | `stack`, `reason` | Automatic update of {stack} failed |
+| `apps.catalog_updates` | `apps`, `serial` | App updates available: {apps} (a new online catalogue, `../phase2/docker-apps.md` §6.12) |
+| `apps.catalog_refused` / `apps.catalog_ok` | `reason`, `code` (refused) | Online app catalogue refused / verified again |
 | `web_access.cert_expires_soon` / `web_access.cert_renewal_overdue` / `web_access.cert_failed` / `web_access.cert_expired` / `web_access.cert_ok` | `name`, `cert` | The certificate for {name} expires soon / is not being renewed / could not be obtained / has expired / is fine again (`../phase2/docker-apps.md` §5.4) |
 | `pcbackup.late` / `pcbackup.resumed` | `device`, `days`, `alert_days` (late) | No backup from {device} for {days} days / Backups from {device} arrive again (`../research/pc-backup.md` §10) |
 | `synodeb.<event>` | the forward's parameters | the forward's title; events and parameters in `../synodeb-integration.md` S1 |

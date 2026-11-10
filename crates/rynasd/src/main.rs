@@ -1090,6 +1090,14 @@ fn main() -> std::io::Result<()> {
             // the daily image check and the automatic update window (installed apps too)
             let _ = docker.apps.set(Arc::downgrade(&apps));
             rynasd::docker_auto::spawn(docker.clone());
+            // signed online catalogue updates: daily on a real system ("Check now" always)
+            let _ = apps.online.set(rynasd::apps::online::Online::new(
+                args.state_dir.join("catalog"),
+                rynas_apps::online::TRUSTED_KEYS,
+            ));
+            if !args.dry_system {
+                apps.spawn_catalog_updates();
+            }
             // the catalogue is parsed on the first apps request and dropped when idle
             {
                 let apps = apps.clone();

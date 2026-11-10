@@ -18,6 +18,11 @@
 //!   (`docs/phase2/docker-apps.md` §7). The proxy's ports (80/443) count as used unless
 //!   external proxy mode is on. "Move behind the proxy" (`POST .../proxy`) re-binds an
 //!   installed app to loopback and adds its route.
+//! - Signed online catalogue updates ([`online`], §6.12): the shipped catalogue is merged with
+//!   the last verified download (`<state>/catalog/current`), the higher runnable version of
+//!   each entry wins.
+
+pub mod online;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
@@ -82,6 +87,8 @@ pub struct AppsSvc {
     cache: Mutex<Option<Loaded>>,
     /// Web access, when this rynasd runs it (routes for apps, the proxy's ports).
     pub web: std::sync::OnceLock<Arc<WebAccessSvc>>,
+    /// Signed online catalogue updates (`<state>/catalog`), when this rynasd runs them.
+    pub online: std::sync::OnceLock<Arc<online::Online>>,
 }
 
 pub type AppsState = Option<Arc<AppsSvc>>;
@@ -181,9 +188,6 @@ fn load(dir: &Path) -> (Catalog, Vec<CatalogIssue>) {
             })),
         }
     }
-    for i in &issues {
-        tracing::warn!("apps: catalogue entry {}/{}: {}", i.app, i.file, i.message);
-    }
     (
         Catalog {
             source: CATALOG_SOURCE.into(),
@@ -191,6 +195,55 @@ fn load(dir: &Path) -> (Catalog, Vec<CatalogIssue>) {
         },
         issues,
     )
+}
+
+/// The running rynas version (entries' `min_rynas`).
+fn running_version() -> Version {
+    env!("CARGO_PKG_VERSION")
+        .parse()
+        .unwrap_or(Version::new(0, 0, 0))
+}
+
+/// [`stamp_of`] the shipped catalogue plus the downloaded catalogue in use.
+fn sources_stamp(dir: &Path, online: Option<&online::Active>) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    stamp_of(dir).hash(&mut h);
+    online.map(|a| (a.serial, &a.dir)).hash(&mut h);
+    h.finish()
+}
+
+/// The shipped catalogue merged with the downloaded one ([`rynas_apps::catalog::merge`]).
+/// A download whose serial is not above the shipped `catalog.toml` is ignored; its entries
+/// that need a newer rynas (and may not load in this one) are left out without an issue;
+/// a broken shipped entry that the download replaces is no issue either.
+fn load_sources(dir: &Path, online: Option<&online::Active>) -> (Catalog, Vec<CatalogIssue>) {
+    let (shipped, mut issues) = load(dir);
+    let shipped_serial = rynas_apps::catalog::read_serial(dir).ok().flatten();
+    let cat = match online.filter(|a| shipped_serial.is_none_or(|s| a.serial > s)) {
+        None => shipped,
+        Some(a) => {
+            let running = running_version();
+            let (dl, dl_issues) = load(&a.dir);
+            let newer: BTreeSet<&str> = a
+                .index
+                .apps
+                .iter()
+                .filter(|x| x.min_rynas > running)
+                .map(|x| x.id.as_str())
+                .collect();
+            issues.retain(|i| !dl.apps.contains_key(&i.app));
+            issues.extend(
+                dl_issues
+                    .into_iter()
+                    .filter(|i| !newer.contains(i.app.as_str())),
+            );
+            rynas_apps::catalog::merge(shipped, dl, running).0
+        }
+    };
+    for i in &issues {
+        tracing::warn!("apps: catalogue entry {}/{}: {}", i.app, i.file, i.message);
+    }
+    (cat, issues)
 }
 
 /// `amd64`/`arm64` of this machine (the catalogue's names).
@@ -457,6 +510,7 @@ impl AppsSvc {
             dir,
             cache: Mutex::new(None),
             web: std::sync::OnceLock::new(),
+            online: std::sync::OnceLock::new(),
         })
     }
 
@@ -485,13 +539,15 @@ impl AppsSvc {
             return (l.catalog.clone(), l.issues.clone());
         }
         let dir = self.dir.clone();
+        let online = self.online_use().online;
         let old = self.cache.lock().unwrap().as_ref().map(|l| l.stamp);
         let (stamp, loaded) = tokio::task::spawn_blocking(move || {
-            let stamp = stamp_of(&dir);
+            let active = online.as_ref().and_then(|o| o.active());
+            let stamp = sources_stamp(&dir, active.as_ref());
             if old == Some(stamp) {
                 return (stamp, None);
             }
-            (stamp, Some(load(&dir)))
+            (stamp, Some(load_sources(&dir, active.as_ref())))
         })
         .await
         .unwrap_or((0, None));
@@ -503,7 +559,7 @@ impl AppsSvc {
                 (l.catalog.clone(), l.issues.clone())
             }
             (loaded, _) => {
-                let (c, i) = loaded.unwrap_or_else(|| load(&self.dir));
+                let (c, i) = loaded.unwrap_or_else(|| load_sources(&self.dir, None));
                 let l = Loaded {
                     stamp,
                     checked: Instant::now(),
@@ -2181,9 +2237,54 @@ async fn proxy_post(
     Ok(accepted(id))
 }
 
+async fn catalog_source_get(
+    State(st): State<AppsState>,
+    hd: HeaderMap,
+) -> Res<Json<CatalogSourceState>> {
+    let a = asvc(&st)?;
+    admin(&a, &hd)?;
+    Ok(Json(a.catalog_source().await))
+}
+
+/// "Check now": task `apps.catalog-update`.
+async fn catalog_check_post(State(st): State<AppsState>, hd: HeaderMap) -> Res<Response> {
+    let a = asvc(&st)?;
+    let who = admin(&a, &hd)?;
+    if let Some(reason) = a.online_use().reason {
+        return Err(conflict(match reason {
+            "off" => "the online catalogue is turned off in the Docker settings",
+            _ => "this build has no catalogue signing key: the online catalogue is off",
+        }));
+    }
+    audit(&who, "catalog-update", "online catalogue");
+    let a2 = a.clone();
+    let id = a
+        .docker
+        .ops
+        .tasks
+        .spawn("apps.catalog-update", &who, move |ctx| async move {
+            let log = |l: &str| ctx.log(l);
+            match a2.check_catalog(&log).await {
+                Ok(online::Outcome::Updated { serial, .. }) => {
+                    ctx.log(&format!("the catalogue is now serial {serial}"));
+                    Ok(())
+                }
+                Ok(online::Outcome::Unchanged(s)) => {
+                    ctx.log(&format!("no newer catalogue (serial {s})"));
+                    Ok(())
+                }
+                Ok(online::Outcome::NotModified) => Ok(()),
+                Err(e) => Err(e.to_string()),
+            }
+        })?;
+    Ok(accepted(id))
+}
+
 pub fn router(st: AppsState) -> Router {
     Router::new()
         .route("/v1/apps/catalog", get(catalog_get))
+        .route("/v1/apps/catalog-source", get(catalog_source_get))
+        .route("/v1/apps/catalog-source/check", post(catalog_check_post))
         .route("/v1/apps/catalog/{id}", get(detail_get))
         .route("/v1/apps/catalog/{id}/icon", get(icon_get))
         .route(

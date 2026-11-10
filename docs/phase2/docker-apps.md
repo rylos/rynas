@@ -2231,6 +2231,113 @@ Zigbee2MQTT (USB adapter through `security.devices`), Frigate, Forgejo, Mealie; 
 Immich, Jellyfin, Nextcloud, Vaultwarden, Home Assistant, Paperless-ngx and Dockhand. Picks,
 skips, digests and sources in `../research/app-catalog-format.md` § 4.
 
+### 6.12 Online catalogue updates (signed, 2026-11-10)
+
+The catalogue changes faster than rynas: new entries, image bumps, fixes. Until there is an apt
+repository (D-APPCAT says "catalog shipped via apt"), the NAS fetches a signed catalogue from a
+static site, independently of rynas releases. The shipped catalogue (`/usr/share/rynas/apps`,
+`--apps-dir`) stays the base; the download only adds newer entries.
+
+**Site.** GitHub Pages of the repository `rylos/rynas-catalog`, base URL
+`https://rylos.github.io/rynas-catalog/v1/` (setting `DockerSettings::apps_catalog_url`,
+`https://` only). Three files below it: `index.json`, `index.json.minisig` and the archive
+`apps-<serial>.tar.zst` the index names (a file name next to the index, or an absolute
+`https://` URL such as a release asset; redirects only to `https://`). Not
+`raw.githubusercontent.com`: rate limited since 2025.
+
+**`index.json`** (schema 1; unknown fields ignored, all covered by the signature):
+
+```json
+{
+  "schema": 1,
+  "serial": 12,
+  "published": "2026-11-10T09:00:00Z",
+  "expires": "2026-12-10T09:00:00Z",
+  "archive": { "url": "apps-12.tar.zst", "sha256": "<64 hex>", "size": 412345 },
+  "apps": [ { "id": "immich", "version": "1.2.0", "min_rynas": "0.5.0" } ]
+}
+```
+
+**Signature.** minisign (Ed25519 over the BLAKE2b-512 hash, `minisign -S`; legacy signatures
+refused), verified with the `minisign-verify` crate (MIT, pure Rust, no dependencies). The
+trusted comment is `serial=<n> expires=<date>` and must equal the index's fields: the global
+signature covers it, so it cannot be edited, and an old index cannot be re-labelled. Accepted
+public keys are compiled in (`rynas_apps::online::TRUSTED_KEYS`, current + next for a
+rotation; a signature picks its key by key id). **The list is empty until the maintainer makes
+the key**: without a key rynasd logs `online catalogue disabled` once, fetches nothing, and the
+Apps & Plugins page says the catalogue comes with rynas updates.
+
+**Rules on the NAS** (`rynas_apps::online`, `rynasd::apps::online`):
+
+- index ≤ 1 MiB, signature ≤ 4 KiB, archive ≤ 20 MiB and exactly `archive.size` with the named
+  SHA-256; unpacked ≤ 64 MiB, ≤ 10 000 entries, files ≤ 8 MiB, depth ≤ 6;
+- refused: an expired index (freeze), one valid for more than 400 days, a serial below the
+  last accepted one (`/var/lib/rynas/catalog/state.json`, plus the catalogue in use), a
+  signature by an unknown key, a trusted comment that does not match;
+- extraction writes only regular files (0644) and folders (0755) below the new folder: no
+  absolute paths, no `..`, no links, devices or FIFOs, no modes or owners from the archive,
+  no duplicate names (`O_EXCL | O_NOFOLLOW`);
+- before the switch the whole unpacked catalogue is validated: `catalog.toml` has the index's
+  serial, the folders are exactly the listed apps, every entry loads with the catalogue loader
+  and lint (`CatalogApp::load`: manifest, form, compose lint of every overlay, test render) with
+  the listed version and `min_rynas`. An entry may fail only when it needs a newer rynas than
+  the running one (it may use fields this rynas does not know); it is left out. Anything else
+  refuses the whole catalogue: a broken catalogue never replaces a good one;
+- layout: `/var/lib/rynas/catalog/.new-<serial>/` while unpacking, then `<serial>/` with the
+  verified `index.json`, `current` → `<serial>` switched by renaming a new symbolic link,
+  `previous` → the one before (used when `current` is unreadable); older folders are deleted.
+
+**Merge** (`rynas_apps::catalog::merge`). The shipped catalogue has a serial too
+(`apps/catalog.toml`); a download whose serial is not above it is ignored, so a newer rynas
+package is never overridden by an older download. Otherwise, per app: an entry this rynas can
+run (`min_rynas` ≤ running version) wins over one it cannot; among equals the higher `version`
+wins, the shipped entry on the same version; apps in one source only are kept. Installed apps
+keep `x-rynas.catalog = "rynas"` (one official catalogue, two transports).
+
+**Checks.** Daily on a real system (first check 2–32 min after the start, then every 24 h plus
+up to 3 h at random; 3 h after a network failure; none with `--dry-system`), and "Check now"
+(administrator, task `apps.catalog-update`, audit line). The index is read with
+`If-None-Match` / `If-Modified-Since`; timeouts 15 s to connect, 60 s for the index, 300 s for
+the archive; a refused signature is tried once more after 30 s (the two files may be caught in
+the middle of a publish). Setting `DockerSettings::apps_online_catalog` (default on; switch in
+Docker › Settings) turns downloads and the merge off.
+
+**Notifications** (source `apps`): `apps.catalog_updates` (oneshot, key
+`apps:catalog:<serial>`, update, info; fields `apps`, `serial`) when a new catalogue brings a
+newer version of an installed app; `apps.catalog_refused` / `apps.catalog_ok` (firing / resolved,
+key `apps:catalog:refused`, security, warning; fields `reason`, `code`) when the site's data is
+refused and when a later check verifies again. Network failures only reach the log and the page.
+
+**API.** `GET /api/v1/apps/catalog-source` (`CatalogSourceState`: enabled or why not, URL,
+shipped and online serials, entries taken from the download, published/expires, expired, last
+check, last success, last error and its code, a check running) and `POST
+/api/v1/apps/catalog-source/check` (202 + task; 409 when off or without a key). UI: the Updates
+tab of Apps & Plugins ends with "Catalogue source" (source, serials, publication date, last
+check, "Check now", the error or expiry note).
+
+**Publishing** (`packaging/publish-catalog.sh`; nothing is uploaded by the script):
+
+1. One time, the maintainer makes the key on a trusted machine, in a RAM folder:
+   `minisign -G -p rynas-catalog.pub -s rynas-catalog.key` (with a passphrase), stores the
+   content of `rynas-catalog.key` as the note of a Bitwarden item and the passphrase as its
+   password, then deletes the file. The second line of `rynas-catalog.pub` goes into
+   `TRUSTED_KEYS` (and the `.pub` file into the catalogue repository for anyone to verify).
+2. Each publication: `RYNAS_CATALOG_KEY_CMD='rbw get --raw "rynas catalogue key" | jq -r .notes'
+   RYNAS_CATALOG_PASS_CMD='rbw get "rynas catalogue key"' packaging/publish-catalog.sh`. The
+   script reads the published serial (or `--offline`: only `apps/catalog.toml`), writes
+   serial + 1 into `apps/catalog.toml`, packs `catalog.toml` and the entry folders
+   (`tar --format=gnu`, reproducible order and owners, `zstd -19`), writes `index.json` with
+   the catalogue loader (`cargo run -p rynas-apps --features online --example catalog-index`,
+   which refuses a catalogue with any issue), signs it with
+   `minisign -S -t "serial=<n> expires=<date>"` (expiry `--days`, default 30) reading the key
+   through process substitution and the passphrase on minisign's standard input (never on the
+   command line, never in a file), verifies the signature when `RYNAS_CATALOG_PUB` names the
+   public key, and lists the three files to upload to `v1/`. Then commit `apps/catalog.toml`.
+3. The index must be re-signed (a new serial) before it expires: publish at least every 30
+   days even without changes, or NAS show "not renewed in time".
+4. Rotation: add the next public key to `TRUSTED_KEYS` in a rynas release, wait until NAS run
+   it, sign with the new key, then drop the old key in a later release.
+
 ## 7. Open points between waves
 
 - **Loopback binding before the web access exists (A2 → W1).** With `RYNAS_BIND=127.0.0.1` an app is unreachable until the proxy (W1) runs. Rule:

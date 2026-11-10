@@ -363,6 +363,7 @@ fn settings_form(init: DockerSettingsState, settings: Remote<DockerSettingsState
     let (size, set_size) = num_lens(d, |s| s.address_pool.size.to_string(), |s, v| s.address_pool.size = v.min(255) as u8);
     let (snap, set_snap) = lens_bool(d, |s| s.snapshot_before_update, |s, v| s.snapshot_before_update = v);
     let (stop, set_stop) = lens_bool(d, |s| s.stop_for_snapshot, |s, v| s.stop_for_snapshot = v);
+    let (online_cat, set_online_cat) = lens_bool(d, |s| s.apps_online_catalog, |s, v| s.apps_online_catalog = v);
     let (keep, set_keep) = num_lens(d, |s| s.keep_snapshots.to_string(), |s, v| s.keep_snapshots = v);
     let (full, set_full) = num_lens(d, |s| s.data_root_full_pct.to_string(), |s, v| s.data_root_full_pct = v.min(255) as u8);
     let (restarts, set_restarts) = num_lens(d, |s| s.crash_restarts.to_string(), |s, v| s.crash_restarts = v);
@@ -434,6 +435,7 @@ fn settings_form(init: DockerSettingsState, settings: Remote<DockerSettingsState
             </div>
             {switch("dk.set.snapshot", Some("dk.set.snapshot_help"), snap, set_snap)}
             {switch("dk.set.stop", Some("dk.set.stop_help"), stop, set_stop)}
+            {switch("dk.set.online_catalog", Some("dk.set.online_catalog_help"), online_cat, set_online_cat)}
             <div class="form-row">
                 {number_field("dk.set.keep", None, keep, set_keep, 1, 50)}
                 {number_field("dk.set.full", Some("dk.set.full_help"), full, set_full, 50, 99)}
