@@ -122,6 +122,10 @@ pub fn global_lines(g: &SmbSettings, hostname: &str) -> Vec<Line> {
         l("security", "user"),
         l("passdb backend", "tdbsam"),
         l("map to guest", "never"),
+        // no anonymous session either: with access based share enum an anonymous client
+        // sees an empty list, and file managers (Dolphin, Nautilus) that fall back to it
+        // show nothing instead of asking for a user and a password
+        l("restrict anonymous", "2"),
         // shadow expiry and disabled accounts apply to SMB too (pam_unix account)
         l("obey pam restrictions", "yes"),
         // rynas sets both passwords itself (chpasswd + pdbedit)
