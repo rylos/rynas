@@ -466,7 +466,13 @@ impl Engine {
             dns: inv.dns.clone(),
             trial: self.trial_view(st.lkg)?,
             lkg_revision: st.lkg,
-            last_rollback: self.store.last_rollback()?.map(|r| r.report),
+            // a change confirmed after the rollback makes it history, also when an older rynas
+            // confirmed it without clearing the notice
+            last_rollback: self.store.last_rollback()?.map(|r| r.report).filter(|r| {
+                !st.lkg
+                    .and_then(|id| self.store.revision(id).ok().flatten())
+                    .is_some_and(|lkg| lkg.id != r.restored_revision && lkg.ts_ms > r.ts_ms)
+            }),
             pending: self.staged_for(user)?.into_keys().collect(),
             management_interface: Self::management_iface(&inv, local),
             ifupdown_adoptable: inv.ifupdown.as_ref().is_some_and(|i| !i.is_empty())

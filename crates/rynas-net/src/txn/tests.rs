@@ -319,6 +319,10 @@ fn unconfirmed_change_is_rolled_back_and_verified() {
     t.e.begin(&plan, Some(&token), None, &log).unwrap();
     t.e.confirm(&token, Origin::Cli).unwrap();
     assert!(t.e.state("admin", None).unwrap().last_rollback.is_none());
+    // a notice an older rynas left behind after that confirmation is not shown either
+    let old = NetRollbackReport { ts_ms: t.os.now_ms() - 60_000, ..r.clone() };
+    t.e.store.set_last_rollback(&old).unwrap();
+    assert!(t.e.state("admin", None).unwrap().last_rollback.is_none());
 }
 
 #[test]
