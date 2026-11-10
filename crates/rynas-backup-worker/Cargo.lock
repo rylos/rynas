@@ -3842,7 +3842,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rynas-api-types"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3850,7 +3850,7 @@ dependencies = [
 
 [[package]]
 name = "rynas-backup-worker"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "libc",
  "rustic_backend",

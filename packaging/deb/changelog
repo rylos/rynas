@@ -1,3 +1,10 @@
+rynas (0.5.0-1) trixie; urgency=medium
+
+  * Version 0.5: storage, shares, users, network, Docker apps, backup and
+    replication, notifications, hardware modules (Synology, QNAP), zram.
+
+ -- Marco Ziliani <508111+rylos@users.noreply.github.com>  Tue, 10 Nov 2026 16:00:00 +0100
+
 rynas (0.1.0-1) trixie; urgency=medium
 
   * First package: rynasd (PAM, TOTP) and rynas-web (API, live metrics,

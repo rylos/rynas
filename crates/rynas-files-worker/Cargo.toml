@@ -1,7 +1,7 @@
 [package]
 name = "rynas-files-worker"
 description = "rynas file manager worker: started by rynasd as the logged-in user for file requests and transfers, with the SMB and SFTP clients"
-version = "0.1.0"
+version = "0.5.0"
 edition = "2024"
 authors = ["Marco Ziliani"]
 license = "AGPL-3.0-or-later"

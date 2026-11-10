@@ -284,7 +284,7 @@ async fn catalogue_cards_detail_and_images() {
     let (s, b) = call(&e, "GET", "/v1/apps/catalog", None).await;
     let c: AppCatalog = json_of(s, &b);
     assert!(c.issues.is_empty(), "{:?}", c.issues);
-    assert_eq!(c.apps.len(), 25);
+    assert_eq!(c.apps.len(), 26);
     assert_eq!(c.installed_ram_mb, Some(3808));
     assert!(c.docker_installed);
     assert_eq!(c.stacks_dir.as_deref(), Some("/vol1/docker/stacks"));
