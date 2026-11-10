@@ -1644,7 +1644,7 @@ fn image(path: &Path, max: u64, hd: &HeaderMap) -> Res<Response> {
         ),
         (
             header::CONTENT_SECURITY_POLICY,
-            HeaderValue::from_static("default-src 'none'; style-src 'unsafe-inline'; sandbox"),
+            HeaderValue::from_static("default-src 'none'; img-src data:; style-src 'unsafe-inline'; sandbox"),
         ),
         (
             header::CACHE_CONTROL,

@@ -406,7 +406,7 @@ Paths are relative to `/api/v1`.
 |---|---|---|---|
 | GET | `/apps/catalog` | — | `AppCatalog` {source, apps [`AppCard`] sorted by name, issues [{app, file, message}], installed_ram_mb?, arch, docker_installed, stacks_dir?} |
 | GET | `/apps/catalog/{id}` | — | `AppDetail` {card, description (Markdown), homepage, source?, changelog_url, maintainers, host_network, form `AppForm`, web `AppWeb`?, folders, shares, secrets [{env, description, show}], hardware, overlays, named_volumes, notes, screenshots [URL]} |
-| GET | `/apps/catalog/{id}/icon` | — | the SVG: `image/svg+xml`, at most 64 KiB, `nosniff`, a sandboxing CSP; `ETag`, and 304 on `If-None-Match` |
+| GET | `/apps/catalog/{id}/icon` | — | the SVG: `image/svg+xml`, at most 64 KiB, `nosniff`, a sandboxing CSP (only `data:` images and inline styles); `ETag`, and 304 on `If-None-Match` |
 | GET | `/apps/catalog/{id}/screenshots/{file}` | — | a PNG or WebP of the entry, at most 1 MiB. Only file names the loader listed are served; nothing from the request reaches the filesystem |
 | POST | `/apps/catalog/{id}/plan` | `AppInstallRequest` (optional) | `AppInstallPlan`. No side effects. Works without Docker (warning `docker_not_installed`) |
 | POST | `/apps/catalog/{id}/install` | `AppInstallRequest` | 202 `AppInstallStarted` {task_id, stack, stack_dir, secrets [`ShownSecret` {env, description, value}]} (task `apps.install`). Refusals, checked in this order: `docker_not_installed`, `invalid_value` on `volume`, the first plan error, a port conflict, the RAM, the architecture, `min_rynas` |
