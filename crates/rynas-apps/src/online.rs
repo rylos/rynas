@@ -30,10 +30,16 @@ use crate::version::Version;
 /// Public keys (minisign, the second line of the `.pub` file) whose signatures the NAS
 /// accepts: the current key and, during a rotation, the next one.
 ///
-/// PLACEHOLDER: empty until the catalogue's signing key exists (made by the maintainer,
-/// kept out of the repository; `docs/phase2/docker-apps.md` § 6.12). With no key the online
-/// catalogue stays off: rynasd logs it and the UI says so.
-pub const TRUSTED_KEYS: &[&str] = &[];
+/// The current key signs in CI (its secret key is a repository secret,
+/// `CATALOG_MINISIGN_KEY`); the next one is kept offline by the maintainer and takes over
+/// if the current one is lost or exposed (`docs/phase2/docker-apps.md` § 6.13). Keys made
+/// on 2026-11-10.
+pub const TRUSTED_KEYS: &[&str] = &[
+    // current
+    "RWSfdwkFZp8XBSRvif+fFMcGuL8lsgC9DzMC8ZSmLwJunB6VFIqxwRIV",
+    // next (offline)
+    "RWS94XMpNnUNgE7djMCP6+ooMQji2AvQ7uh8HVswKhYu2wYdPYm7DkcH",
+];
 
 /// The only index format this rynas reads.
 pub const INDEX_SCHEMA: u32 = 1;

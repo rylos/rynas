@@ -16,6 +16,9 @@ module.exports = {
   },
   pinDigests: true,
   prConcurrentLimit: 10,
+  // Renovate merges by itself once the checks passed (GitHub's own auto-merge would merge
+  // at once without branch protection)
+  platformAutomerge: false,
   prHourlyLimit: 0,
   allowedCommands: ["^packaging/renovate-bump\\.sh$"],
   packageRules: [
