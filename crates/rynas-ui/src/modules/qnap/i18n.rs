@@ -84,6 +84,7 @@ crate::i18n::dict! { BLOB, LENS, IT;
     "qnap.why_wrong_direction" => "A line is not in the expected direction: nothing is driven", "Una linea non è nella direzione attesa: non viene comandata";
     "qnap.why_led_control_off" => "Turned off above", "Disattivato qui sopra";
     "qnap.why_no_speaker" => "No PC speaker device was found", "Nessun dispositivo PC speaker trovato";
+    "qnap.why_not_fitted" => "Not present on this model", "Non presente su questo modello";
     "qnap.available" => "Available", "Disponibile";
     "qnap.unsaved" => "Changes not saved", "Modifiche non salvate";
 }

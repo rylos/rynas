@@ -84,6 +84,10 @@ pub struct Model {
     /// PCI addresses of the NICs whose MAC starts with [`Self::mac_oui`].
     pub nics: &'static [&'static str],
     pub mac_oui: &'static str,
+    /// USB `(vendor, product)` of the internal boot flash ("DOM") holding the vendor's
+    /// firmware: part of the machine, never a removable drive (HS-251: an Apacer module,
+    /// `USB DISK MODULE`, read on the box on 2026-11-10).
+    pub boot_flash_usb: &'static [(&'static str, &'static str)],
     /// `name` of the chip's hwmon (driver f71882fg).
     pub hwmon_chip: &'static str,
     /// No fan: every tachometer of the chip must read 0 (a fan turning is another model).
@@ -96,6 +100,15 @@ pub struct Model {
     pub status_green: Line,
     pub status_red: Line,
     pub usb_led: Line,
+    /// The bays' error LEDs and the USB LED exist on the front panel. The vendor's model file
+    /// names their lines on every sibling, but some cases have no such LED (HS-251: only the
+    /// status and LAN LEDs, per the specification and the first-boot test of 2026-11-10);
+    /// lines of a missing LED are never written.
+    pub disk_leds_fitted: bool,
+    pub usb_led_fitted: bool,
+    /// The front USB copy button exists (HS-251: no, and the BIOS leaves its line an output,
+    /// seen on 2026-11-10): a missing button's line is never read.
+    pub usb_copy_button_fitted: bool,
     pub reset_button: Line,
     pub usb_copy_button: Line,
     /// Buzzer tone, in Hz.
@@ -113,7 +126,8 @@ pub const MODELS: &[Model] = &[Model {
     id: "hs-251",
     display: "QNAP HS-251",
     short: "HS-251",
-    verified: false,
+    // first-boot procedure run on a real HS-251 on 2026-11-10 (docs/plugins/qnap.md)
+    verified: true,
     bios_vendor: "American Megatrends Inc.",
     sys_vendor: "To be filled by O.E.M.",
     product_name: "To be filled by O.E.M.",
@@ -155,6 +169,7 @@ pub const MODELS: &[Model] = &[Model {
     ],
     nics: &["0000:03:00.0", "0000:04:00.0"],
     mac_oui: "00:08:9b",
+    boot_flash_usb: &[("1005", "b155")],
     hwmon_chip: "f71869a",
     fanless: true,
     gpio_banks: &[6, 8, 8, 8, 8, 5, 8, 8],
@@ -166,6 +181,9 @@ pub const MODELS: &[Model] = &[Model {
     status_green: low(6, 2),
     status_red: low(6, 3),
     usb_led: low(1, 7),
+    disk_leds_fitted: false,
+    usb_led_fitted: false,
+    usb_copy_button_fitted: false,
     reset_button: low(6, 1),
     usb_copy_button: low(1, 2),
     beep_hz: 800,
@@ -281,20 +299,26 @@ pub enum Chip {
 /// The chip named by the f71882fg hwmon driver, against the model. A fanless model with a
 /// fan turning is another model.
 pub fn chip(root: &Path, m: &Model) -> Chip {
+    let attr = |dir: &Path, name: &str| std::fs::read_to_string(dir.join(name)).map(|s| s.trim().to_string()).unwrap_or_default();
     let mut other_fintek = false;
     for e in std::fs::read_dir(rynas_hw::under(root, "/sys/class/hwmon")).into_iter().flatten().flatten() {
-        let dir = e.file_name().to_string_lossy().into_owned();
-        let name = read(root, &format!("/sys/class/hwmon/{dir}/name"));
+        let dir = attr_dir(&e.path());
+        let name = attr(&dir, "name");
         if name == m.hwmon_chip {
             let turning = m.fanless
-                && (1..=4).any(|n| {
-                    read(root, &format!("/sys/class/hwmon/{dir}/fan{n}_input")).parse::<u32>().is_ok_and(|rpm| rpm > 0)
-                });
+                && (1..=4).any(|n| attr(&dir, &format!("fan{n}_input")).parse::<u32>().is_ok_and(|rpm| rpm > 0));
             return if turning { Chip::Mismatch } else { Chip::Confirmed };
         }
         other_fintek |= FINTEK_HWMON.contains(&name.as_str());
     }
     if other_fintek { Chip::Mismatch } else { Chip::Unknown }
+}
+
+/// Where a hwmon device keeps its attributes: the `hwmonN` directory itself, or its parent
+/// device for drivers that still register the old way (f71882fg on the HS-251: `name`,
+/// `fan*_input` and `temp*_input` are in `hwmonN/device`).
+pub fn attr_dir(hwmon: &Path) -> std::path::PathBuf {
+    if hwmon.join("name").exists() { hwmon.to_path_buf() } else { hwmon.join("device") }
 }
 
 /// `f71882fg_names[]` of the driver.
@@ -356,7 +380,7 @@ mod tests {
         fake_hs251(d.path(), Some("f71869a"));
         let m = identify(d.path()).unwrap();
         assert_eq!(m.id, "hs-251");
-        assert!(!m.verified, "the mapping was never tested on the hardware");
+        assert!(m.verified, "the first-boot procedure was run on an HS-251");
         assert_eq!(chip(d.path(), m), Chip::Confirmed);
     }
 
@@ -414,6 +438,22 @@ mod tests {
         assert_eq!(chip(d.path(), m), Chip::Mismatch, "plain F71869: another bank layout");
         std::fs::write(d.path().join("sys/class/hwmon/hwmon1/name"), "nct6775\n").unwrap();
         assert_eq!(chip(d.path(), m), Chip::Unknown);
+    }
+
+    /// As on a real HS-251 (Debian 13, kernel 6.12): f71882fg registers its hwmon the old
+    /// way, so the attributes are in `hwmonN/device` and `hwmonN` has no `name`.
+    #[test]
+    fn attributes_on_the_parent_device() {
+        let d = tempfile::tempdir().unwrap();
+        fake_hs251(d.path(), None);
+        let m = identify(d.path()).unwrap();
+        let dev = d.path().join("sys/class/hwmon/hwmon4/device");
+        std::fs::create_dir_all(&dev).unwrap();
+        std::fs::write(dev.join("name"), "f71869a\n").unwrap();
+        std::fs::write(dev.join("fan1_input"), "0\n").unwrap();
+        assert_eq!(chip(d.path(), m), Chip::Confirmed);
+        std::fs::write(dev.join("fan1_input"), "900\n").unwrap();
+        assert_eq!(chip(d.path(), m), Chip::Mismatch, "a fan turning on a fanless model");
     }
 
     /// The vendor's registers against the banks of the driver: `SIO:I91:B2` is bank 6

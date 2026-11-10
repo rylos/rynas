@@ -347,9 +347,15 @@ impl Controller {
         let mut wrong_direction = Vec::new();
         let mut led_lines = Vec::new();
         if confirmed.gpio_loaded() {
-            let mut leds = vec![m.status_green, m.status_red, m.usb_led];
+            // only the LEDs the case has: a missing one's line is never written
+            let mut leds = vec![m.status_green, m.status_red];
+            if m.usb_led_fitted {
+                leds.push(m.usb_led);
+            }
             leds.extend(m.brightness);
-            leds.extend(m.bays.iter().map(|b| b.err_led));
+            if m.disk_leds_fitted {
+                leds.extend(m.bays.iter().map(|b| b.err_led));
+            }
             for l in leds {
                 if gpio.direction(&chip_label(l), l.offset) == Ok(Direction::Output) {
                     led_lines.push(l);
@@ -357,7 +363,8 @@ impl Controller {
                     wrong_direction.push(l);
                 }
             }
-            for l in [m.reset_button, m.usb_copy_button] {
+            let buttons: &[Line] = if m.usb_copy_button_fitted { &[m.reset_button, m.usb_copy_button] } else { &[m.reset_button] };
+            for &l in buttons {
                 if gpio.direction(&chip_label(l), l.offset) != Ok(Direction::Input) {
                     wrong_direction.push(l);
                 }
@@ -594,7 +601,9 @@ impl Controller {
                 if let Some(ev) = self.poll(&mut g, m.reset_button, true, now, "reset", reset_action) {
                     events.push(ev);
                 }
-                if let Some(ev) = self.poll(&mut g, m.usb_copy_button, false, now, "usb_copy", usb_action) {
+                if m.usb_copy_button_fitted
+                    && let Some(ev) = self.poll(&mut g, m.usb_copy_button, false, now, "usb_copy", usb_action)
+                {
                     events.push(ev);
                 }
                 g.fast = !g.fast;
@@ -735,10 +744,10 @@ impl Controller {
         let features = vec![
             led_feature("status_led", &[m.status_green, m.status_red]),
             led_feature("led_brightness", &m.brightness),
-            led_feature("disk_leds", &bay_lines),
-            led_feature("usb_led", &[m.usb_led]),
+            if m.disk_leds_fitted { led_feature("disk_leds", &bay_lines) } else { feature("disk_leds", "not_fitted") },
+            if m.usb_led_fitted { led_feature("usb_led", &[m.usb_led]) } else { feature("usb_led", "not_fitted") },
             button_feature("reset_button", m.reset_button),
-            button_feature("usb_copy_button", m.usb_copy_button),
+            if m.usb_copy_button_fitted { button_feature("usb_copy_button", m.usb_copy_button) } else { feature("usb_copy_button", "not_fitted") },
             feature("buzzer", if self.speaker.available() { "" } else { "no_speaker" }),
         ];
         let want = outputs(&g.settings, &g.bays, g.fast, g.slow);
@@ -878,11 +887,21 @@ pub mod tests {
 
     type Notified = Arc<M<Vec<ButtonEvent>>>;
 
+    /// The HS-251 as if its case had every LED the vendor's model file names and the mapping
+    /// were still untested, so that the controller's handling of bay and USB LEDs and of the
+    /// user's confirmation is tested.
+    static ALL_LEDS: Model =
+        Model { disk_leds_fitted: true, usb_led_fitted: true, usb_copy_button_fitted: true, verified: false, ..MODELS[0] };
+
     fn ctl_in(gpio: &MemoryGpio, state: Option<PathBuf>) -> (Controller, Arc<Rec>, Notified) {
+        ctl_for(&ALL_LEDS, gpio, state)
+    }
+
+    fn ctl_for(m: &'static Model, gpio: &MemoryGpio, state: Option<PathBuf>) -> (Controller, Arc<Rec>, Notified) {
         let d = tempfile::tempdir().unwrap();
         fake_hs251(d.path(), Some("f71869a"));
         let mut g = gpio.clone();
-        let c = confirm(d.path(), &MODELS[0], &mut g).unwrap();
+        let c = confirm(d.path(), m, &mut g).unwrap();
         let rec = Arc::new(Rec::default());
         let notified: Notified = Arc::new(M::new(Vec::new()));
         let n = notified.clone();
@@ -1059,6 +1078,24 @@ pub mod tests {
         assert!(!c.status().bays[0].driven && c.status().bays[1].driven);
     }
 
+    /// The real HS-251 has no bay or USB LED: their lines are never written, and the status
+    /// says why.
+    #[test]
+    fn a_missing_led_is_never_written() {
+        let gpio = fake_gpio();
+        let (c, ..) = ctl_for(&MODELS[0], &gpio, None);
+        c.confirm_mapping("HS-251").unwrap();
+        c.apply(QnapSettings { led_control: true, disk_leds: true, usb_led: UsbLed::On, ..Default::default() });
+        c.set_bays(vec![bay(1, HealthVerdict::Failing), bay(2, HealthVerdict::Failing)]);
+        let m = &MODELS[0];
+        let missing = [m.usb_led, m.bays[0].err_led, m.bays[1].err_led];
+        assert!(gpio.writes().iter().all(|(ch, l, _)| !missing.iter().any(|x| chip_label(*x) == *ch && x.offset == *l)));
+        assert!(gpio.writes().iter().any(|(ch, l, _)| chip_label(m.status_red) == *ch && m.status_red.offset == *l), "the status LED is still driven");
+        let f = c.status().features;
+        assert!(f.iter().any(|f| f.id == "disk_leds" && f.reason == "not_fitted"));
+        assert!(f.iter().any(|f| f.id == "usb_led" && f.reason == "not_fitted"));
+    }
+
     #[test]
     fn a_failed_write_is_tried_again_and_reported() {
         let gpio = fake_gpio();
@@ -1230,7 +1267,8 @@ pub mod tests {
         let st = tempfile::tempdir().unwrap();
         let d = tempfile::tempdir().unwrap();
         fake_hs251(d.path(), Some("f71869a"));
-        let m = &MODELS[0];
+        // a model still untested: a verified one needs no confirmation
+        let m = &ALL_LEDS;
         assert!(!mapping_confirmed_on(d.path(), st.path(), m));
         write_confirmation(d.path(), st.path(), m).unwrap();
         assert!(mapping_confirmed_on(d.path(), st.path(), m));
@@ -1304,6 +1342,6 @@ pub mod tests {
         ctl.tick(Instant::now());
         assert!(empty.writes().is_empty());
         let s = ctl.status();
-        assert!(!s.verified && s.features.iter().any(|f| f.id == "status_led" && f.reason == "driver_missing"));
+        assert!(s.features.iter().any(|f| f.id == "status_led" && f.reason == "driver_missing"));
     }
 }

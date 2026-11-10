@@ -1,6 +1,8 @@
 # Module `qnap` — specification
 
-Status (2026-11-09): implemented, **not verified on real hardware**. The line mapping below comes
+Status: implemented; **HS-251 verified on real hardware on 2026-11-10** (results at the end of
+the [first-boot procedure](#first-boot-procedure)). Before that test it was (2026-11-09) **not
+verified on real hardware**. The line mapping below comes
 from the vendor's model file and reverse engineering of its HAL and web interface, cross-checked
 against the Linux driver source. No LED, button, buzzer or Super I/O register has been exercised on
 a real machine: treat every line in the support matrix as untested until the
@@ -268,6 +270,21 @@ line as is, like rynasd does.
    by cutting mains power.
 
 When everything matches, set `verified: true` for the model in `model::MODELS`.
+
+### HS-251, first boot on 2026-11-10 (Debian 13, kernel 6.12)
+
+| Step | Result |
+|---|---|
+| 1. Identification | DMI placeholders, 31 PCI devices, `ata1`/`ata2` on `0000:00:13.0`, hwmon `f71869a` (old-style registration: `name` and the inputs are in `hwmonN/device`), fans 0, banks 6,8,8,8,8,5,8,8 |
+| 2. Directions | as expected, **except the USB copy button** (bank 1 line 2): the BIOS leaves it an **output**. The case has **no such button** (checked on the front): `usb_copy_button_fitted` is false, its line is never read |
+| 3. Buttons | reset: 1 at rest, 0 pressed (twice, about 1 s each) |
+| 4. LEDs | status green and red work (both on: orange). Bay error LEDs and USB LED: **no LED on this case** (the specification lists only status and LAN): `disk_leds_fitted` and `usb_led_fitted` are false, their lines are never written |
+| 5. Buzzer | `PC Speaker` present |
+| 6. Bays | sysfs `port_no` is 1-based: WD on `ata1` (port_no 1, AHCI port 0) is in **bay 2** (right), the other disk on `ata2` in **bay 1** (left), as the table says |
+| 7. Confirm | done from Hardware › Front panel |
+| 8. Super I/O | `mode: power_on`, `sio_bits: 2`, `cmos: 129`, `eup: false`, `gpio_active: true` |
+| 9. Writes | LED control on: status LED and brightness levels work, test beep sounds; power recovery written and read back ("restore previous state"). The mains-cut test was not done |
+| — | the internal flash (`USB DISK MODULE`, USB `1005:b155`) is declared as boot flash: never a removable drive |
 
 ## Adding a model
 

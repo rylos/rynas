@@ -63,10 +63,10 @@ impl QnapProvider {
     /// The board sensor the vendor's model file names (`SYSTEM_TEMP_UNIT`).
     fn system_temperature(&self) -> Option<Temperature> {
         let hwmon = rynas_hw::under(&self.root, "/sys/class/hwmon");
-        let dir = std::fs::read_dir(hwmon).ok()?.flatten().find(|e| {
-            std::fs::read_to_string(e.path().join("name")).is_ok_and(|n| n.trim() == self.model.hwmon_chip)
+        let dir = std::fs::read_dir(hwmon).ok()?.flatten().map(|e| model::attr_dir(&e.path())).find(|d| {
+            std::fs::read_to_string(d.join("name")).is_ok_and(|n| n.trim() == self.model.hwmon_chip)
         })?;
-        let milli: i64 = std::fs::read_to_string(dir.path().join(format!("temp{}_input", self.model.system_temp)))
+        let milli: i64 = std::fs::read_to_string(dir.join(format!("temp{}_input", self.model.system_temp)))
             .ok()?
             .trim()
             .parse()

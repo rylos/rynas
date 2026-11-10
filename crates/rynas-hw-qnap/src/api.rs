@@ -94,7 +94,7 @@ pub struct Feature {
     pub available: bool,
     /// Why not, as a stable code the interface translates (empty when available):
     /// `driver_missing`, `wrong_direction`, `mapping_unconfirmed`, `led_control_off`,
-    /// `write_failed`, `no_speaker`.
+    /// `write_failed`, `no_speaker`, `not_fitted` (the case has no such LED).
     pub reason: String,
 }
 

@@ -318,6 +318,10 @@ impl Module for QnapModule {
         format!("qnap: candidate {}", self.model.display)
     }
 
+    fn system_disk_usb_ids(&self) -> &'static [(&'static str, &'static str)] {
+        self.model.boot_flash_usb
+    }
+
     fn domains(&self) -> Vec<Arc<dyn Applier>> {
         vec![Arc::new(QnapDomain(self.shared.clone()))]
     }

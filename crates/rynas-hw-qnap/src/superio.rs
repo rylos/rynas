@@ -681,6 +681,12 @@ mod tests {
                 },
             )
         };
+        if model::MODELS[0].verified {
+            // a model whose first-boot procedure was run needs no confirmation: the port is
+            // opened at once (here the fake opener refuses)
+            assert!(attempt(empty_state.path()).unwrap_err().contains("opened"));
+            return;
+        }
         assert!(attempt(empty_state.path()).unwrap_err().contains("not confirmed"));
         // confirmed on another machine: its MACs do not match
         control::write_confirmation(d.path(), empty_state.path(), &model::MODELS[0]).unwrap();

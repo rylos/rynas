@@ -134,6 +134,7 @@ fn why_key(reason: &str) -> &'static str {
         "write_failed" => "qnap.why_write_failed",
         "led_control_off" => "qnap.why_led_control_off",
         "no_speaker" => "qnap.why_no_speaker",
+        "not_fitted" => "qnap.why_not_fitted",
         _ => "qnap.why_driver_missing",
     }
 }
@@ -209,7 +210,7 @@ fn body(s: QnapSettingsState, settings: Remote<QnapSettingsState>, st: Remote<Qn
         <div class="grid">
             {leds_card(d, st)}
             {bays_card(st)}
-            {buttons_card(d)}
+            {buttons_card(d, st)}
             {buzzer_card(d, st)}
             {power_card(st)}
             {events_card(st)}
@@ -382,6 +383,10 @@ fn leds_card(d: RwSignal<QnapSettings>, st: Remote<QnapStatus>) -> AnyView {
     let (disk, set_disk) = lens_bool(d, |s| s.disk_leds, |s, v| s.disk_leds = v);
     let confirmed = Memo::new(move |_| st.data.with(|s| s.as_ref().is_some_and(|s| s.mapping_confirmed)));
     let (usb, set_usb) = lens(d, |s| usb_str(s.usb_led).into(), |s, v| s.usb_led = usb_of(&v));
+    // a LED the case does not have gets no control
+    let fitted = move |id: &'static str| {
+        st.data.with(|s| !s.as_ref().is_some_and(|s| s.features.iter().any(|f| f.id == id && f.reason == "not_fitted")))
+    };
     let shown = move || {
         st.data.with(|s| match s.as_ref().map(|s| s.status_led.as_str()) {
             Some("") | None => t("qnap.shown_none").to_string(),
@@ -407,8 +412,8 @@ fn leds_card(d: RwSignal<QnapSettings>, st: Remote<QnapStatus>) -> AnyView {
                 }}
                 {select_field("hw.led", None, STATUS_LEDS, mode, set_mode)}
                 {select_field("qnap.brightness", None, BRIGHTNESS, bright, set_bright)}
-                {switch("qnap.disk_leds", None, disk, set_disk)}
-                {select_field("qnap.usb_led", None, USB_LEDS, usb, set_usb)}
+                <Show when=move || fitted("disk_leds")>{switch("qnap.disk_leds", None, disk, set_disk)}</Show>
+                <Show when=move || fitted("usb_led")>{select_field("qnap.usb_led", None, USB_LEDS, usb, set_usb)}</Show>
                 <p class="muted small">{tr("qnap.shown")}": "{shown}</p>
             </div>
         </section>
@@ -447,15 +452,19 @@ fn bays_card(st: Remote<QnapStatus>) -> AnyView {
     .into_any()
 }
 
-fn buttons_card(d: RwSignal<QnapSettings>) -> AnyView {
+fn buttons_card(d: RwSignal<QnapSettings>, st: Remote<QnapStatus>) -> AnyView {
     let (reset, set_reset) = lens(d, |s| btn_str(s.reset_button).into(), |s, v| s.reset_button = btn_of(&v));
     let (usb, set_usb) = lens(d, |s| btn_str(s.usb_copy_button).into(), |s, v| s.usb_copy_button = btn_of(&v));
+    // a button the case does not have gets no setting
+    let usb_fitted = move || {
+        st.data.with(|s| !s.as_ref().is_some_and(|s| s.features.iter().any(|f| f.id == "usb_copy_button" && f.reason == "not_fitted")))
+    };
     view! {
         <section class="card widget w-6">
             <WidgetHead icon=icons::SETTINGS_2 title="qnap.buttons" />
             <div class="form">
                 {select_field("reset_button", None, BUTTONS, reset, set_reset)}
-                {select_field("qnap.usb_copy", None, BUTTONS, usb, set_usb)}
+                <Show when=usb_fitted>{select_field("qnap.usb_copy", None, BUTTONS, usb, set_usb)}</Show>
                 <p class="sec-note"><Icon icon=icons::LOCK size=16 /><span>{tr("qnap.buttons_help")}</span></p>
             </div>
         </section>
