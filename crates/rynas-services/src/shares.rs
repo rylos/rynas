@@ -1050,7 +1050,8 @@ impl Applier for SharesDomain {
                 self.manage_unit(ctx, NMBD, to.smb.netbios)?;
             }
             self.manage_unit(ctx, WSDD2, to.smb.wsdd)?;
-        } else if smb_running(&from) {
+        } else if smb_running(&from) || ctx.system.unit_active(SMBD)? {
+            // the Debian package starts smbd at install: "off" stops it even then
             self.manage_unit(ctx, SMBD, false)?;
             if from.smb.netbios {
                 self.manage_unit(ctx, NMBD, false)?;
@@ -1074,7 +1075,9 @@ impl Applier for SharesDomain {
                     (ctx.log)(&format!("exportfs: {l}"));
                 }
             }
-            if !nfs_running(&to) && nfs_running(&from) {
+            // also when it was never rynas's: the Debian package starts it at install, and an
+            // "off" that leaves it serving would be shown as off while it runs
+            if !nfs_running(&to) && (nfs_running(&from) || ctx.system.unit_active(NFS_SERVER)?) {
                 self.manage_unit(ctx, NFS_SERVER, false)?;
             }
         } else if nfs_running(&to) {

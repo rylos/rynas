@@ -997,6 +997,27 @@ fn turning_services_off_removes_the_avahi_file() {
     assert!(e.root.join("etc/avahi/services/rynas-smb.service").exists());
 }
 
+
+/// NFS off from the start, but the Debian package started nfs-server at install: the first
+/// apply stops it; once it is stopped, later applies leave it alone.
+#[test]
+fn nfs_off_stops_a_server_the_package_started() {
+    let e = env();
+    let mut d = shares_doc();
+    d.nfs.enabled = false;
+    stage(&e, SHARES_KEY, &d).unwrap();
+    apply(&e).unwrap();
+    let calls = e.sys.state().calls.clone();
+    assert!(calls.iter().any(|x| x == "run systemctl disable --now nfs-server.service"), "{calls:#?}");
+    e.sys.state().inactive.push("nfs-server.service".into());
+    e.sys.state().calls.clear();
+    d.smb.workgroup = "OTHER".into();
+    stage(&e, SHARES_KEY, &d).unwrap();
+    apply(&e).unwrap();
+    let calls = e.sys.state().calls.clone();
+    assert!(!calls.iter().any(|x| x.contains("nfs-server")), "{calls:#?}");
+}
+
 #[test]
 fn imported_users_keep_their_login_shell() {
     let e = env();
