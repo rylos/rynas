@@ -170,7 +170,8 @@ impl ComposeAction {
 
     fn args(self) -> &'static [&'static str] {
         match self {
-            ComposeAction::Up => &["up", "--detach", "--wait=false"],
+            // images it downloads first: no line per layer and progress step in the task log
+            ComposeAction::Up => &["up", "--detach", "--wait=false", "--quiet-pull"],
             ComposeAction::Pull => &["pull", "--quiet"],
             // never --volumes: named volumes hold data
             ComposeAction::Down => &["down"],
@@ -818,7 +819,7 @@ mod tests {
         );
         assert_eq!(
             c.display(),
-            "docker compose -p immich --project-directory /vol1/docker/stacks/immich -f /vol1/docker/stacks/immich/compose.yaml up --detach --wait=false"
+            "docker compose -p immich --project-directory /vol1/docker/stacks/immich -f /vol1/docker/stacks/immich/compose.yaml up --detach --wait=false --quiet-pull"
         );
         let c = compose_cmd("x", "/d", "docker-compose.yml", None, ComposeAction::Down);
         assert!(
