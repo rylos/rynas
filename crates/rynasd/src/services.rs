@@ -20,7 +20,7 @@ use rynas_api_types::snapshots::SnapshotsConfig;
 use rynas_api_types::{
     EffectivePermission, FolderDeletePlan, FolderRef, FolderRemoval, GroupRequest, GroupView,
     LocalGroup, LocalUser, NfsSettings, NfsState, PasswordRequest, PendingOp, PrincipalKind, Share,
-    ShareDeletePlanRequest, ShareNocowRequest, ShareStatus, ShareWarning, ShareWarningArgs, ShareWarningCode, ShareView, SharesConfig, SmbSettings, SmbState,
+    ShareDeletePlanRequest, ShareNocowRequest, ShareSizes, ShareStatus, ShareWarning, ShareWarningArgs, ShareWarningCode, ShareView, SharesConfig, SmbSettings, SmbState,
     SnapshotSource, StagedChanges, TaskStarted, UnsharedFolder, UserBadge, UserStatus, UserView,
     UsersConfig, error_codes,
 };
@@ -159,6 +159,7 @@ pub fn router(st: SvcState) -> Router {
         )
         .route("/v1/shares/plan/delete", post(share_delete_plan))
         .route("/v1/folders", get(folders_list))
+        .route("/v1/share-sizes", get(share_sizes))
         .route("/v1/folders/plan/delete", post(folder_delete_plan))
         .route(
             "/v1/folders/{volume}/{name}",
@@ -1430,6 +1431,60 @@ async fn folders_list(
                 s.shares.sizes(),
                 q.sizes.then_some(&measure),
             ))
+        })
+        .await?,
+    ))
+}
+
+/// A disk under the filesystem holding `path` (the longest mount point containing it)
+/// sleeps: its files must not be read now.
+fn path_asleep(shares: &rynas_services::SharesDomain, path: &str) -> bool {
+    let mounts = rynas_storage::mounts::parse_mountinfo(&crate::places::mountinfo());
+    mounts
+        .iter()
+        .filter(|m| folders::is_within(path, &m.mountpoint))
+        .max_by_key(|m| m.mountpoint.len())
+        .is_some_and(|m| shares.asleep(&m.mountpoint))
+}
+
+/// `GET /v1/share-sizes`: the sizes known now; the unknown and old ones are measured in
+/// the background ([`folders::ShareSizeMeter`]), the client asks again while `measuring`.
+async fn share_sizes(State(st): State<SvcState>, h: HeaderMap) -> Res<Json<ShareSizes>> {
+    let (s, owner) = (svc(&st)?, user(&h)?);
+    Ok(Json(
+        blocking(&s, move |s| {
+            let host = s.shares.host();
+            let list: Vec<folders::ShareFolder> = all_shares(s, &owner)?
+                .into_iter()
+                .filter_map(|sh| {
+                    // an encrypted folder: its ciphertext, whether locked or not
+                    let dir = if sh.encrypted {
+                        rynas_services::crypt::cipher_dir(&sh.path)?
+                    } else {
+                        sh.path.clone()
+                    };
+                    let info = host.probe(&dir);
+                    // a folder still to create, or gone: nothing to measure
+                    (info.exists && info.is_dir && !info.symlink).then_some(folders::ShareFolder {
+                        name: sh.name,
+                        path: sh.path,
+                        dir,
+                        subvolume: info.subvolume,
+                    })
+                })
+                .collect();
+            let meter = s.shares.share_sizes();
+            let (out, start) = meter.report(
+                &s.shares.volumes(),
+                &list,
+                rynas_tasks::now_ms(),
+                &|p: &str| path_asleep(&s.shares, p),
+            );
+            if start {
+                let shares = s.shares.clone();
+                meter.start(host.clone(), Arc::new(move |p: &str| path_asleep(&shares, p)));
+            }
+            Ok(out)
         })
         .await?,
     ))

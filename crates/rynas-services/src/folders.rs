@@ -70,12 +70,14 @@ fn count_snapshots(host: &dyn ShareHost, sources: &[SnapshotSource]) -> u32 {
         .sum()
 }
 
-/// A size of the list as measured: bytes, partial (the time budget ran out), when.
+/// A size as measured: bytes, partial (the time budget ran out), when.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CachedSize {
     pub bytes: u64,
     pub partial: bool,
     pub at_ms: u64,
+    /// Read from the btrfs quota group (no walk of the files).
+    pub exact: bool,
 }
 
 /// Sizes of the unshared folders, so that opening the page does not walk every file of
@@ -123,21 +125,32 @@ pub struct Measure<'a> {
     pub asleep: &'a dyn Fn(&str) -> bool,
 }
 
-/// The size of one folder: the quota group of a subvolume when quotas are enabled, else a
-/// walk of its files within the time budget.
 fn measure_one(host: &dyn ShareHost, path: &str, subvolume: bool, now_ms: u64) -> Option<CachedSize> {
+    measure_within(host, path, subvolume, now_ms, LIST_SIZE_BUDGET)
+}
+
+/// [`measure_one`] with the time budget of the walk.
+fn measure_within(
+    host: &dyn ShareHost,
+    path: &str,
+    subvolume: bool,
+    now_ms: u64,
+    budget: Duration,
+) -> Option<CachedSize> {
     if subvolume && let Some(bytes) = host.qgroup_size(path) {
         return Some(CachedSize {
             bytes,
             partial: false,
             at_ms: now_ms,
+            exact: true,
         });
     }
-    host.tree_size(path, LIST_SIZE_BUDGET)
+    host.tree_size(path, budget)
         .map(|(bytes, partial)| CachedSize {
             bytes,
             partial,
             at_ms: now_ms,
+            exact: false,
         })
 }
 
@@ -203,6 +216,187 @@ pub fn unshared(
     }
     out.sort_by(|a, b| (&a.volume, &a.name).cmp(&(&b.volume, &b.name)));
     out
+}
+
+/// Time one background walk of a share's folder may take; a folder with more files than
+/// that walk reaches is reported as "at least" ([`CachedSize::partial`]).
+pub const SHARE_WALK_BUDGET: Duration = Duration::from_secs(300);
+/// A size read from a btrfs quota group is served this long (reading it is cheap).
+pub const EXACT_TTL_MS: u64 = 60 * 1000;
+
+/// A share whose size is asked ([`ShareSizeMeter::report`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShareFolder {
+    pub name: String,
+    pub path: String,
+    /// The directory measured: `path`, or the ciphertext of an encrypted folder (its size
+    /// does not depend on the lock and is read without FUSE).
+    pub dir: String,
+    /// `dir` is a btrfs subvolume (its quota group may give the size).
+    pub subvolume: bool,
+}
+
+/// "A disk under this path sleeps", for the background thread.
+pub type AsleepFn = std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
+/// Sizes of the shares' folders for the shares list. The list never waits: it gets the
+/// sizes known now, and the unknown or old ones are measured one at a time by a background
+/// thread at idle IO priority (quota group of a subvolume when quotas are on, else a walk of
+/// at most [`SHARE_WALK_BUDGET`]). A folder on a sleeping disk is never read. Unlike the
+/// sizes of the unshared folders, these survive an apply of `shares` (they only age).
+#[derive(Debug, Default)]
+pub struct ShareSizeMeter {
+    cache: SizeCache,
+    queue: Mutex<SizeQueue>,
+}
+
+#[derive(Debug, Default)]
+struct SizeQueue {
+    /// Paths to measure, in order, with their subvolume flag.
+    waiting: std::collections::VecDeque<(String, bool)>,
+    /// Being measured now.
+    current: Option<String>,
+    /// A thread runs the queue.
+    running: bool,
+}
+
+impl SizeQueue {
+    fn has(&self, path: &str) -> bool {
+        self.current.as_deref() == Some(path) || self.waiting.iter().any(|(p, _)| p == path)
+    }
+}
+
+/// A cached size must be measured again (unknown, or older than its time to live).
+fn size_due(s: Option<CachedSize>, now_ms: u64) -> bool {
+    s.is_none_or(|s| {
+        let ttl = if s.exact { EXACT_TTL_MS } else { SIZE_TTL_MS };
+        now_ms.saturating_sub(s.at_ms) >= ttl
+    })
+}
+
+/// The volume (label) holding `path`: the one with the longest folder containing it.
+fn volume_of(volumes: &[(String, String)], path: &str) -> Option<String> {
+    volumes
+        .iter()
+        .filter(|(_, m)| is_within(path, m))
+        .max_by_key(|(_, m)| m.len())
+        .map(|(l, _)| l.clone())
+}
+
+/// Clears `running` when the thread ends, even by a panic, so that a later list starts a
+/// new one.
+struct RunGuard<'a>(&'a Mutex<SizeQueue>);
+
+impl Drop for RunGuard<'_> {
+    fn drop(&mut self) {
+        let mut q = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        q.running = false;
+        q.current = None;
+    }
+}
+
+impl ShareSizeMeter {
+    /// The sizes of `shares` as known now. Those due ([`size_due`]) are queued, except on a
+    /// sleeping disk (`asleep(path)`, then `standby`). The `bool` is true when the caller
+    /// must start the thread ([`ShareSizeMeter::start`]): there is work and none runs.
+    pub fn report(
+        &self,
+        volumes: &[(String, String)],
+        shares: &[ShareFolder],
+        now_ms: u64,
+        asleep: &dyn Fn(&str) -> bool,
+    ) -> (rynas_api_types::ShareSizes, bool) {
+        let mut q = self.queue.lock().unwrap();
+        let mut out = Vec::with_capacity(shares.len());
+        for f in shares {
+            let size = self.cache.get(&f.dir);
+            let mut measuring = q.has(&f.dir);
+            let mut standby = false;
+            if !measuring && size_due(size, now_ms) {
+                if asleep(&f.dir) {
+                    standby = true;
+                } else {
+                    q.waiting.push_back((f.dir.clone(), f.subvolume));
+                    measuring = true;
+                }
+            }
+            out.push(rynas_api_types::ShareSize {
+                name: f.name.clone(),
+                path: f.path.clone(),
+                volume: volume_of(volumes, &f.path),
+                bytes: size.map(|s| s.bytes),
+                partial: size.is_some_and(|s| s.partial),
+                exact: size.is_some_and(|s| s.exact),
+                at_ms: size.map(|s| s.at_ms),
+                standby,
+                measuring,
+            });
+        }
+        let start = !q.running && !q.waiting.is_empty();
+        if start {
+            q.running = true;
+        }
+        let measuring = out.iter().any(|s| s.measuring);
+        (rynas_api_types::ShareSizes { shares: out, measuring }, start)
+    }
+
+    /// Measures the queued folders until none is left: the body of the background thread
+    /// (the tests call it directly). A folder whose disk fell asleep meanwhile is skipped.
+    pub fn run(&self, host: &dyn ShareHost, asleep: &dyn Fn(&str) -> bool, now_ms: &dyn Fn() -> u64) {
+        let _guard = RunGuard(&self.queue);
+        loop {
+            let (path, subvolume) = {
+                let mut q = self.queue.lock().unwrap();
+                let Some(job) = q.waiting.pop_front() else {
+                    return;
+                };
+                q.current = Some(job.0.clone());
+                job
+            };
+            if !asleep(&path)
+                && let Some(s) = measure_within(host, &path, subvolume, now_ms(), SHARE_WALK_BUDGET)
+            {
+                self.cache.put(&path, s);
+            }
+            self.queue.lock().unwrap().current = None;
+        }
+    }
+
+    /// Runs the queue in a thread named `share-sizes`, at idle IO priority and lowest CPU
+    /// priority, after [`ShareSizeMeter::report`] asked for it.
+    pub fn start(self: &std::sync::Arc<Self>, host: std::sync::Arc<dyn ShareHost>, asleep: AsleepFn) {
+        let me = self.clone();
+        let spawned = std::thread::Builder::new()
+            .name("share-sizes".into())
+            .spawn(move || {
+                background_priority();
+                me.run(host.as_ref(), asleep.as_ref(), &rynas_tasks::now_ms);
+            });
+        if let Err(e) = spawned {
+            tracing::warn!("share sizes: cannot start the thread: {e}");
+            let mut q = self.queue.lock().unwrap();
+            q.running = false;
+            q.waiting.clear();
+        }
+    }
+
+    /// Nothing queued or being measured.
+    pub fn idle(&self) -> bool {
+        let q = self.queue.lock().unwrap();
+        !q.running && q.waiting.is_empty()
+    }
+}
+
+/// The calling thread reads the disk only when nobody else does (IO class idle) and gets
+/// the CPU last (nice 19): a walk of millions of files never slows the NAS down.
+fn background_priority() {
+    // SAFETY: plain syscalls on the calling thread, no memory passed
+    unsafe {
+        // ioprio_set(IOPRIO_WHO_PROCESS, 0 = this thread, IOPRIO_CLASS_IDLE << 13)
+        libc::syscall(libc::SYS_ioprio_set, 1, 0, 3 << 13);
+        // per thread on Linux: the thread id as the "process"
+        libc::setpriority(libc::PRIO_PROCESS, libc::gettid() as libc::id_t, 19);
+    }
 }
 
 /// What uses a folder besides the share being deleted, collected by the caller.
@@ -544,11 +738,103 @@ mod tests {
     fn the_size_cache_is_capped() {
         let c = SizeCache::default();
         for i in 0..SIZE_CACHE_MAX as u64 + 5 {
-            c.put(&format!("/v/{i}"), CachedSize { bytes: i, partial: false, at_ms: i });
+            c.put(&format!("/v/{i}"), CachedSize { bytes: i, partial: false, at_ms: i, exact: false });
         }
         assert_eq!(c.len(), SIZE_CACHE_MAX);
         assert!(c.get("/v/0").is_none(), "the oldest went first");
         assert!(c.get(&format!("/v/{}", SIZE_CACHE_MAX + 4)).is_some());
+    }
+
+    fn folder(name: &str, path: &str, subvolume: bool) -> ShareFolder {
+        ShareFolder {
+            name: name.into(),
+            path: path.into(),
+            dir: path.into(),
+            subvolume,
+        }
+    }
+
+    #[test]
+    fn share_sizes_answer_at_once_and_measure_in_the_background() {
+        let h = host();
+        h.state().sizes.insert("/vol1/old".into(), 700);
+        let m = ShareSizeMeter::default();
+        let list = [folder("photos", "/vol1/photos", true), folder("old", "/vol1/old", false)];
+        let awake = |_: &str| false;
+        // first answer: nothing known, both queued, nothing read yet
+        let (r, start) = m.report(&vols(), &list, 1_000, &awake);
+        assert!(start && r.measuring);
+        assert!(r.shares.iter().all(|s| s.bytes.is_none() && s.measuring));
+        assert_eq!(r.shares[0].volume.as_deref(), Some("vol1"));
+        assert!(h.state().size_log.is_empty());
+        // a second list meanwhile neither queues them again nor starts a second thread
+        let (r, start) = m.report(&vols(), &list, 1_500, &awake);
+        assert!(!start && r.measuring);
+        m.run(&h, &awake, &|| 2_000);
+        assert!(m.idle());
+        assert_eq!(
+            h.state().size_log,
+            ["qgroup /vol1/photos", "walk /vol1/photos", "walk /vol1/old"]
+        );
+        let (r, start) = m.report(&vols(), &list, 3_000, &awake);
+        assert!(!start && !r.measuring);
+        assert_eq!(r.shares[0].bytes, Some(5000));
+        assert_eq!(r.shares[1].bytes, Some(700));
+        assert_eq!(r.shares[1].at_ms, Some(2_000));
+        // an hour later the walked sizes are due again
+        let (_, start) = m.report(&vols(), &list, 2_000 + SIZE_TTL_MS, &awake);
+        assert!(start);
+    }
+
+    #[test]
+    fn quota_group_sizes_are_exact_and_refreshed_sooner() {
+        let h = host();
+        h.state().qgroups.insert("/vol1/photos".into(), 4096);
+        let m = ShareSizeMeter::default();
+        let list = [folder("photos", "/vol1/photos", true)];
+        let awake = |_: &str| false;
+        m.report(&vols(), &list, 0, &awake);
+        m.run(&h, &awake, &|| 0);
+        assert_eq!(h.state().size_log, ["qgroup /vol1/photos"]);
+        let (r, start) = m.report(&vols(), &list, 1, &awake);
+        assert!(!start);
+        assert!(r.shares[0].exact && !r.shares[0].partial);
+        assert_eq!(r.shares[0].bytes, Some(4096));
+        let (_, start) = m.report(&vols(), &list, EXACT_TTL_MS, &awake);
+        assert!(start);
+    }
+
+    #[test]
+    fn share_sizes_never_read_a_sleeping_disk() {
+        let h = host();
+        let m = ShareSizeMeter::default();
+        let list = [folder("photos", "/vol1/photos", true)];
+        // asleep when asked: standby, nothing queued
+        let (r, start) = m.report(&vols(), &list, 0, &|_: &str| true);
+        assert!(!start && !r.measuring);
+        assert!(r.shares[0].standby && r.shares[0].bytes.is_none());
+        // fell asleep after being queued: skipped by the thread
+        let (_, start) = m.report(&vols(), &list, 0, &|_: &str| false);
+        assert!(start);
+        m.run(&h, &|_: &str| true, &|| 0);
+        assert!(h.state().size_log.is_empty());
+        assert!(m.idle());
+    }
+
+    #[test]
+    fn share_sizes_thread_runs_the_queue() {
+        let h: std::sync::Arc<dyn ShareHost> = std::sync::Arc::new(host());
+        let m = std::sync::Arc::new(ShareSizeMeter::default());
+        let list = [folder("photos", "/vol1/photos", true)];
+        let (_, start) = m.report(&vols(), &list, 0, &|_: &str| false);
+        assert!(start);
+        m.start(h, std::sync::Arc::new(|_: &str| false));
+        let t = Instant::now();
+        while !m.idle() && t.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let (r, _) = m.report(&vols(), &list, 1, &|_: &str| false);
+        assert_eq!(r.shares[0].bytes, Some(5000));
     }
 
     #[test]

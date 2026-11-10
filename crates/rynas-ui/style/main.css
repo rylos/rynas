@@ -1221,6 +1221,11 @@ kbd {
 .table td.path-cell { white-space: normal; min-width: 200px; max-width: 360px; overflow-wrap: anywhere; }
 /* the shared folders table has seven columns: a narrower path keeps it inside its card at 1024 px */
 .shares-table td.path-cell { min-width: 120px; }
+/* a share's own size: bar (its part of the volume) + size, the volume and notes below */
+.share-size { min-width: 132px; }
+.share-size .usage-cell { width: 100%; grid-template-columns: minmax(40px, 1fr) auto; }
+.share-size .usage-cell span { white-space: nowrap; }
+.share-size .usage-cell > span:only-child { grid-column: 1 / -1; text-align: left; }
 /* NOCOW folders: state and action on one line; what the files give up, as bullets */
 .nocow-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
 .nocow-costs { margin: var(--s-1) 0 0; padding-left: var(--s-4); list-style: disc; }
@@ -1400,6 +1405,9 @@ kbd {
   /* the label keeps its words whole (a .wrap cell's overflow-wrap broke "Nota" into "Not/a") */
   .table td::before { content: attr(data-label); flex: 0 0 auto; max-width: 45%; overflow-wrap: normal; word-break: normal; color: var(--text-subtle); font-size: var(--fs-12); text-align: left; }
   .usage-cell { width: 60%; }
+  .share-size { width: 60%; min-width: 0; align-items: flex-end; text-align: right; }
+  .share-size .usage-cell { width: 100%; }
+  .share-size .usage-cell > span:only-child { text-align: right; }
   .pending-actions { width: 100%; justify-content: flex-end; }
   .pending-keys { display: none; }
   .tasks-body, .tasks-body.with-log { grid-template-columns: minmax(0, 1fr); height: 55vh; }

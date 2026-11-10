@@ -214,6 +214,46 @@ async fn folders(e: &Env) -> Vec<UnsharedFolder> {
 }
 
 #[tokio::test]
+async fn share_sizes_come_at_once_and_are_measured_in_the_background() {
+    use rynas_api_types::ShareSizes;
+    let e = env();
+    for body in [
+        json!({"name": "photos", "path": "/srv/vol1/photos"}),
+        // a subvolume created by the apply: no folder yet
+        json!({"name": "fresh", "subvolume": {"volume": "vol1"}}),
+    ] {
+        let (s, b) = call(&e, "POST", "/v1/shares", Some(body)).await;
+        assert_eq!(s, StatusCode::CREATED, "{}", String::from_utf8_lossy(&b));
+    }
+    e.host.state().size_log.clear();
+    let get = || async {
+        let (s, b) = call(&e, "GET", "/v1/share-sizes", None).await;
+        assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+        serde_json::from_slice::<ShareSizes>(&b).unwrap()
+    };
+    // the folder that does not exist is left out; the other one is measured later
+    let first = get().await;
+    assert_eq!(first.shares.len(), 1);
+    assert_eq!(first.shares[0].name, "photos");
+    assert_eq!(first.shares[0].volume.as_deref(), Some("vol1"));
+    let mut r = first;
+    for _ in 0..200 {
+        if !r.measuring {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        r = get().await;
+    }
+    assert!(!r.measuring);
+    assert_eq!((r.shares[0].bytes, r.shares[0].partial, r.shares[0].exact), (Some(123_456), false, false));
+    // served from the cache afterwards: nothing measured again
+    let log = std::mem::take(&mut e.host.state().size_log);
+    assert_eq!(log, ["qgroup /srv/vol1/photos", "walk /srv/vol1/photos"]);
+    assert_eq!(get().await.shares[0].bytes, Some(123_456));
+    assert!(e.host.state().size_log.is_empty());
+}
+
+#[tokio::test]
 async fn share_folders_from_snapshot_folder_to_deletion() {
     let e = env();
     for (name, path) in [("photos", "/srv/vol1/photos"), ("music", "/srv/vol1/music")] {

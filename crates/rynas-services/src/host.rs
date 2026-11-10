@@ -381,6 +381,10 @@ impl ShareHost for HostShares {
             .timeout(CMD_TIMEOUT)
             .run_blocking()
             .ok()?;
+        // "qgroup data inconsistent, rescan recommended": the numbers may be wrong, walk
+        if o.stderr.contains("inconsistent") {
+            return None;
+        }
         parse_qgroup_referenced(&o.stdout)
     }
 

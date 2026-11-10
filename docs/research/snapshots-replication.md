@@ -86,6 +86,8 @@ shadow:sort = desc
 - "space held by snapshots" computed on request as a task (`btrfs filesystem du -s`, or enabling qgroups only for the duration of the computation);
 - **never classic qgroups enabled by default**.
 
+**Size of a shared folder (2026-11-10).** Mature NAS UIs show each share's own space, not the volume's: TrueNAS lists used/available per dataset (from ZFS, instant), DSM shows a shared folder's size on demand (File Station "Properties", Storage Analyzer) and its quota where Btrfs quotas are on, Unraid computes share sizes only when asked ("Compute") because a walk of a big array is slow. rynas does the same without a quota by default: the Shares page column "Size" shows the folder's bytes with a bar for its part of the volume, answered at once from a cache, measured in the background by rynasd (`folders::ShareSizeMeter`: one thread at idle IO class and nice 19, quota group of the subvolume when quotas are on, else a walk of at most 5 min shown as "at least" when cut; never on a volume with a disk in standby; walked sizes kept 1 h, quota sizes 1 min; an encrypted folder is measured on its ciphertext). A quota group reported as inconsistent is not used. Squotas would make the size exact and instant, but they start from zero: enabled on a volume that already holds data they do not account the existing extents (kernel and btrfs-progs 6.13), so they only help when enabled on an empty volume (at creation, `mkfs.btrfs -O squota`) or before the shares get data. Hence an explicit opt-in at volume creation, never automatic (see `../phase1/plan.md`, `GET /api/v1/share-sizes`).
+
 ## 4. Proposal for rynas
 
 ### 4.1 The engine: btrbk as engine, Rust for reading and restore

@@ -62,6 +62,8 @@ pub struct SharesDomain {
     removed: Arc<RemovedShares>,
     /// Sizes of the folders without a share, cleared by every apply.
     sizes: Arc<crate::folders::SizeCache>,
+    /// Sizes of the shares' folders, measured in the background; kept across applies.
+    share_sizes: Arc<crate::folders::ShareSizeMeter>,
     /// Encrypted folders (D-CRYPT E1); in memory and empty unless set.
     crypt: Arc<dyn CryptHost>,
 }
@@ -191,6 +193,7 @@ impl SharesDomain {
             subvolumes: None,
             removed: Arc::new(RemovedShares::memory()),
             sizes: Arc::default(),
+            share_sizes: Arc::default(),
             crypt: Arc::new(crate::crypt::MemoryCrypt::default()),
         }
     }
@@ -223,6 +226,11 @@ impl SharesDomain {
     /// Sizes of the folders without a share ([`crate::folders::unshared`]).
     pub fn sizes(&self) -> &Arc<crate::folders::SizeCache> {
         &self.sizes
+    }
+
+    /// Sizes of the shares' folders ([`crate::folders::ShareSizeMeter`]).
+    pub fn share_sizes(&self) -> &Arc<crate::folders::ShareSizeMeter> {
+        &self.share_sizes
     }
 
     /// A disk under the volume mounted at `mount` sleeps ([`SubvolumeCreator::asleep`]).

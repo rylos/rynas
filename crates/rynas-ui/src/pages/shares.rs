@@ -1,5 +1,6 @@
 //! Shared folders (DSM Control Panel › Shared Folder, TrueNAS Shares, OMV Shared folders): list
-//! with location, volume usage and protocols; editor with general settings (new subvolume on a
+//! with location, the folder's own size (measured in the background by rynasd, never
+//! waking sleeping disks) and protocols; editor with general settings (new subvolume on a
 //! volume or existing folder), SMB and NFS export settings, and the DSM-style permissions
 //! matrix users/groups × (not set / read only / read-write / no access) with the server's
 //! explained effective permission (`/shares/{name}/effective`).
@@ -9,7 +10,7 @@ use leptos::task::spawn_local;
 use leptos_router::hooks::use_query_map;
 use rynas_api_types::{
     ADMIN_GROUP, Access, EffectiveAccess, EffectivePermission, GroupView, NfsRule, NfsSquash, Permission, PrincipalKind, Share, ShareStatus,
-    ShareSubvolume, ShareView, ShareWarningCode, SmbPreset, UnsharedFolder, UserView, storage::VolumePlace,
+    ShareSize, ShareSizes, ShareSubvolume, ShareView, ShareWarningCode, SmbPreset, UnsharedFolder, UserView, storage::VolumePlace,
 };
 
 use crate::api;
@@ -20,7 +21,7 @@ use crate::live::use_live;
 use crate::pages::share_crypt;
 use crate::pages::share_folders::{self, Target};
 use crate::toast::{saved_applied, toast};
-use crate::ui::{self, EmptyState, Meter, PageHeader, Remote, Tone, drawer, usage_tone};
+use crate::ui::{self, EmptyState, Meter, PageHeader, Remote, Tone, drawer};
 
 /// `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`.
 pub fn valid_share_name(n: &str) -> bool {
@@ -52,6 +53,93 @@ fn fs_for(path: &str, fss: &[rynas_api_types::Filesystem]) -> Option<(String, u6
         .filter(|f| path == f.mountpoint || path.starts_with(&format!("{}/", f.mountpoint.trim_end_matches('/'))))
         .max_by_key(|f| f.mountpoint.len())
         .map(|f| (f.mountpoint.clone(), f.used, f.size))
+}
+
+/// The sizes of the shares' folders (`/api/v1/share-sizes`): asked when the list arrives or
+/// changes, then again while rynasd still measures some in the background (every 2 s, slower
+/// up to 15 s), until the page is left. The list never waits for them.
+fn share_sizes(shares: Remote<Vec<ShareView>>) -> RwSignal<Option<ShareSizes>> {
+    let sizes = RwSignal::new(None::<ShareSizes>);
+    let polling = StoredValue::new(false);
+    // the list changed while a request was out: ask once more at the end
+    let again = StoredValue::new(false);
+    Effect::new(move |_| {
+        if !shares.data.with(|d| d.as_ref().is_some_and(|v| !v.is_empty())) {
+            return;
+        }
+        if polling.get_value() {
+            again.set_value(true);
+            return;
+        }
+        polling.set_value(true);
+        spawn_local(async move {
+            let mut wait = 2000;
+            loop {
+                let Ok(r) = api::get::<ShareSizes>("/api/v1/share-sizes").await else { break };
+                let more = r.measuring || again.try_get_value().unwrap_or(false);
+                let _ = again.try_set_value(false);
+                if sizes.try_set(Some(r)).is_some() || !more {
+                    break; // the page was left, or nothing more to wait for
+                }
+                api::sleep(wait).await;
+                wait = (wait * 3 / 2).min(15_000);
+            }
+            let _ = polling.try_set_value(false);
+        });
+    });
+    sizes
+}
+
+/// The share's own size, a bar for its fraction of the volume, the volume by name and why
+/// the size is missing or old; the exact numbers in the tooltip.
+fn size_cell(path: &str, size: Option<ShareSize>, fss: &[rynas_api_types::Filesystem]) -> AnyView {
+    let Some(z) = size else {
+        return view! { <span class="muted">"—"</span> }.into_any();
+    };
+    let volume = z.volume.as_deref().map(crate::places::name);
+    let capacity = fs_for(path, fss).map(|(_, _, size)| size).filter(|c| *c > 0);
+    let note = match (z.standby, z.at_ms) {
+        (true, Some(at)) => Some(tf("shares.size_asleep_as_of", &[("when", &i18n::datetime(at))])),
+        (true, None) => Some(t("shares.size_asleep").to_string()),
+        _ if z.measuring && (z.bytes.is_none() || z.partial) => Some(t("shares.size_measuring").to_string()),
+        _ => None,
+    };
+    let Some(bytes) = z.bytes else {
+        return view! {
+            <div class="cell-main">
+                <span class="muted">"—"</span>
+                <span class="cell-sub">{note.or(volume)}</span>
+            </div>
+        }
+        .into_any();
+    };
+    let pct = capacity.map(|c| bytes as f64 * 100.0 / c as f64);
+    let text = if z.partial { tf("shares.size_min", &[("size", &i18n::bytes(bytes))]) } else { i18n::bytes(bytes) };
+    let vol_name = volume.clone().unwrap_or_else(|| t("shares.volume").to_string());
+    let sub = note.or_else(|| match pct {
+        Some(p) => Some(tf("shares.size_of_volume", &[("pct", &i18n::pct(p)), ("volume", &vol_name)])),
+        None => volume.clone(),
+    });
+    let mut tip = vec![format!("{text} · {}", tf("shares.size_bytes", &[("n", &i18n::num(bytes as f64, 0))]))];
+    if let Some(c) = capacity {
+        tip.push(tf("shares.size_capacity", &[("volume", &vol_name), ("capacity", &i18n::bytes(c))]));
+    }
+    if z.exact {
+        tip.push(t("shares.size_exact").to_string());
+    }
+    if let Some(at) = z.at_ms {
+        tip.push(tf("shares.size_as_of", &[("when", &i18n::datetime(at))]));
+    }
+    view! {
+        <div class="cell-main share-size" title=tip.join("\n")>
+            <div class="usage-cell">
+                {pct.map(|p| view! { <Meter pct=Signal::stored(p) /> })}
+                <span class="tnum small">{text}</span>
+            </div>
+            <span class="cell-sub">{sub}</span>
+        </div>
+    }
+    .into_any()
 }
 
 /// The permissions a new folder starts with (rynasd creates it owned by root, closed to
@@ -94,6 +182,7 @@ pub fn Shares() -> impl IntoView {
     let users = Remote::<Vec<UserView>>::with_config("/api/v1/users");
     let groups = Remote::<Vec<GroupView>>::with_config("/api/v1/groups");
     let folders = Remote::<Vec<UnsharedFolder>>::with_config("/api/v1/folders");
+    let sizes = share_sizes(shares);
     let live = use_live();
     let q = RwSignal::new(String::new());
     let edit = RwSignal::new(None::<ShareEdit>);
@@ -143,8 +232,12 @@ pub fn Shares() -> impl IntoView {
             };
         }
         let fss = live.storage.with(|s| s.as_ref().map(|s| s.filesystems.clone()).unwrap_or_default());
+        let known = sizes.get().map(|s| s.shares).unwrap_or_default();
         view! {
-            {ui::table("shares-table", &["shares.name", "shares.location", "shares.volume_usage", "shares.protocols", "shares.recycle", "col.status", ""], rows.into_iter().map(|v| share_row(v, &fss, edit, del, cact)).collect::<Vec<_>>())}
+            {ui::table("shares-table", &["shares.name", "shares.location", "shares.size", "shares.protocols", "shares.recycle", "col.status", ""], rows.into_iter().map(|v| {
+                let size = known.iter().find(|s| s.name == v.share.name).cloned();
+                share_row(v, size, &fss, edit, del, cact)
+            }).collect::<Vec<_>>())}
         }
         .into_any()
     };
@@ -200,10 +293,10 @@ fn share_status(st: &ShareStatus) -> (Tone, &'static str) {
     }
 }
 
-fn share_row(v: ShareView, fss: &[rynas_api_types::Filesystem], edit: RwSignal<Option<ShareEdit>>, del: RwSignal<Option<String>>, cact: RwSignal<Option<share_crypt::Action>>) -> AnyView {
+fn share_row(v: ShareView, size: Option<ShareSize>, fss: &[rynas_api_types::Filesystem], edit: RwSignal<Option<ShareEdit>>, del: RwSignal<Option<String>>, cact: RwSignal<Option<share_crypt::Action>>) -> AnyView {
     let s = &v.share;
     let path = share_path(s);
-    let usage = fs_for(&path, fss);
+    let size_view = size_cell(&path, size, fss);
     let (tone, key) = share_status(&v.status);
     let deleting = v.status.pending == Some(rynas_api_types::PendingOp::Delete);
     let name = s.name.clone();
@@ -256,22 +349,7 @@ fn share_row(v: ShareView, fss: &[rynas_api_types::Filesystem], edit: RwSignal<O
             </div>
         }
         .into_any()),
-        ui::cell("shares.volume_usage", "", view! {
-            {match usage {
-                Some((mp, used, size)) if size > 0 => {
-                    let pct = used as f64 * 100.0 / size as f64;
-                    view! {
-                        <div class="usage-cell" title=format!("{mp}: {} / {}", i18n::bytes(used), i18n::bytes(size))>
-                            <Meter pct=Signal::stored(pct) tone=Signal::stored(usage_tone(pct)) />
-                            <span class="tnum small">{i18n::pct(pct)}</span>
-                        </div>
-                        <span class="cell-sub mono">{mp}</span>
-                    }.into_any()
-                }
-                _ => view! { <span class="muted">"—"</span> }.into_any(),
-            }}
-        }
-        .into_any()),
+        ui::cell("shares.size", "", size_view),
         ui::cell("shares.protocols", "", view! {
             <div class="chips">
                 {s.smb.enabled.then(|| view! { <span class="chip accent">"SMB"</span> })}

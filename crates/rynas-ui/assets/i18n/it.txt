@@ -1443,7 +1443,11 @@ shares.name	Nome
 shares.name_help	Il nome che vedono i client; non si può cambiare in seguito.
 shares.location	Posizione
 shares.volume	Volume
-shares.volume_usage	Uso del volume
+shares.size_of_volume	{pct} di {volume}
+shares.size_bytes	{n} byte
+shares.size_capacity	{volume}: {capacity}
+shares.size_exact	Esatta (quota btrfs)
+shares.size_as_of	Al {when}
 shares.protocols	Protocolli
 shares.no_protocol	Non condivisa
 shares.recycle	Cestino

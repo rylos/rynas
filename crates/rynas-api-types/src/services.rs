@@ -1169,6 +1169,48 @@ pub struct UnsharedFolder {
     pub previous: Option<Share>,
 }
 
+/// `GET /api/v1/share-sizes`: the space each share's folder uses. Answered at once from
+/// what rynasd already knows; sizes that are unknown or old are measured in the background
+/// (low IO priority) and `measuring` stays true until they are done.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ShareSizes {
+    pub shares: Vec<ShareSize>,
+    /// Some size is still being measured: ask again later for the result.
+    #[serde(default)]
+    pub measuring: bool,
+}
+
+/// The size of one share's folder ([`ShareSizes`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ShareSize {
+    pub name: String,
+    pub path: String,
+    /// Label of the volume holding the folder (`system` for the system volume); `None`
+    /// for a folder outside the rynas volumes.
+    #[serde(default)]
+    pub volume: Option<String>,
+    /// Bytes used by the files of the folder (nested subvolumes and mounts left out);
+    /// `None` until first measured.
+    #[serde(default)]
+    pub bytes: Option<u64>,
+    /// The walk of the files stopped at its time limit: the folder uses at least `bytes`.
+    #[serde(default)]
+    pub partial: bool,
+    /// Read from the btrfs quota group of the subvolume: exact, kept for a minute only.
+    #[serde(default)]
+    pub exact: bool,
+    /// When `bytes` was measured.
+    #[serde(default)]
+    pub at_ms: Option<u64>,
+    /// A disk of the volume is in standby: the size is not measured now, so as not to wake
+    /// it (`bytes` is the last known one, if any).
+    #[serde(default)]
+    pub standby: bool,
+    /// The size is being measured now, or waits its turn.
+    #[serde(default)]
+    pub measuring: bool,
+}
+
 /// `GET/PUT /api/v1/services/smb`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SmbState {
