@@ -100,6 +100,14 @@ pub fn check_device(d: &UpsDevice) -> Result<(), (String, String)> {
                 "option given twice".into(),
             ));
         }
+        if matches!(o.key.as_str(), "vendorid" | "productid")
+            && NO_USB_MATCHING.contains(&d.driver.as_str())
+        {
+            return Err((
+                format!("device.options.{i}.key"),
+                format!("{} takes no vendorid or productid", d.driver),
+            ));
+        }
         if let Some(v) = &o.value
             && !valid_option_value(v)
         {
@@ -519,11 +527,34 @@ pub const KNOWN: &[Known] = &[
 /// Generic drivers tried for any USB UPS, in this order.
 pub const GENERIC_USB: &[&str] = &["usbhid-ups", "nutdrv_qx", "blazer_usb"];
 
+/// USB drivers that take NUT's USB matching options (`vendorid`, `productid`, …: the ones
+/// whose variable table calls `nut_usb_addvars()`, NUT 2.8.1 to 2.8.5). Any other driver
+/// refuses them ("'vendorid' is not a valid variable name for this driver"): `richcomm_usb`
+/// and `bcmxcp_usb` (NUT issue 1768; `nut-scanner` 2.8.5 leaves the IDs out for them too)
+/// and `nutdrv_atcl_usb` (only `vendor`).
+pub const USB_MATCHING_DRIVERS: &[&str] = &[
+    "usbhid-ups",
+    "nutdrv_qx",
+    "blazer_usb",
+    "tripplite_usb",
+    "riello_usb",
+    "apc_modbus",
+];
+
+/// USB drivers known to refuse `vendorid`/`productid` (checked in a setting entered by hand).
+pub const NO_USB_MATCHING: &[&str] = &["richcomm_usb", "bcmxcp_usb", "nutdrv_atcl_usb"];
+
+/// Whether `driver` takes `vendorid`/`productid`.
+pub fn takes_usb_ids(driver: &str) -> bool {
+    USB_MATCHING_DRIVERS.contains(&driver)
+}
+
 fn usb_device(driver: &str, u: &UpsUsbDevice, extra: &[(&str, Option<&str>)]) -> UpsDevice {
-    let mut options = vec![
-        UpsOption::new("vendorid", Some(&u.vendor_id)),
-        UpsOption::new("productid", Some(&u.product_id)),
-    ];
+    let mut options = Vec::new();
+    if takes_usb_ids(driver) {
+        options.push(UpsOption::new("vendorid", Some(&u.vendor_id)));
+        options.push(UpsOption::new("productid", Some(&u.product_id)));
+    }
     options.extend(extra.iter().map(|(k, v)| UpsOption::new(k, *v)));
     UpsDevice {
         driver: driver.into(),
@@ -638,6 +669,19 @@ mod tests {
         );
         assert_eq!(c[0].source, UpsCandidateSource::Known);
         assert_eq!(c[0].min_nut.as_deref(), Some("2.8.5"));
+        // richcomm_usb refuses the USB matching options: none passed to it
+        assert_eq!(
+            driver_probe_args(&c[1].device).join(" "),
+            "-s rynasprobe -x port=auto -d 1"
+        );
+        assert!(c[1].device.options.is_empty());
+        for d in &c[2..] {
+            assert!(
+                d.device.options.iter().any(|o| o.key == "vendorid"),
+                "{}",
+                d.device.driver
+            );
+        }
         assert_eq!(
             driver_probe_args(&c[0].device).join(" "),
             "-s rynasprobe -x port=auto -x vendorid=0925 -x productid=1234 -x subdriver=armac \
@@ -729,6 +773,27 @@ mod tests {
         d.port = "/dev/ttyUSB0".into();
         d.driver = "../bin/sh".into();
         assert_eq!(check_device(&d).unwrap_err().0, "device.driver");
+    }
+
+    #[test]
+    fn usb_matching_options_only_where_the_driver_takes_them() {
+        assert!(takes_usb_ids("usbhid-ups") && takes_usb_ids("nutdrv_qx"));
+        for d in NO_USB_MATCHING {
+            assert!(!takes_usb_ids(d), "{d}");
+        }
+        let mut d = UpsDevice {
+            driver: "richcomm_usb".into(),
+            port: "auto".into(),
+            options: vec![UpsOption::new("vendorid", Some("0925"))],
+        };
+        let e = check_device(&d).unwrap_err();
+        assert_eq!(e.0, "device.options.0.key");
+        assert!(e.1.contains("richcomm_usb"), "{}", e.1);
+        d.options.clear();
+        assert!(check_device(&d).is_ok());
+        d.driver = "usbhid-ups".into();
+        d.options = vec![UpsOption::new("productid", Some("1234"))];
+        assert!(check_device(&d).is_ok());
     }
 
     #[test]
