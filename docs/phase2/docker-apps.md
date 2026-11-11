@@ -2113,7 +2113,11 @@ and an offer to restart the app after a change (CasaOS, Umbrel).
   links kept) or, for the administrator's own files, replaced keeping owner and group;
   anything new (a file, folder, link, upload, copy, extracted item) gets the owner and group
   of the folder it lands in (`confine::adopt`, `made_dir`, `adopt_tree`). Nothing that exists
-  is ever chowned or chmodded.
+  is ever chowned or chmodded. The ownership changes go through descriptors only: the
+  folder is opened with `O_NOFOLLOW` and checked to lie in the jail, read with `fstat`, each
+  folder below is opened from its parent's descriptor with `O_NOFOLLOW`, and each item is
+  changed with `fchownat(.., AT_SYMLINK_NOFOLLOW)`: a container that swaps a subfolder for a
+  link (to `/etc`) meanwhile gets the link itself changed, never what it points to.
 - After a save, upload, new folder, rename, or a finished job that changed an app folder,
   the interface asks `GET /api/v1/docker/stacks/{stack}`; when containers run it offers a
   toast with "Restart" (`POST /api/v1/docker/stacks/{stack}/restart`), at most once per stack

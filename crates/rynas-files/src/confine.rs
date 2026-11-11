@@ -381,13 +381,51 @@ pub fn check_made(file: &File, path: &Path) -> io::Result<()> {
     adopt(file, path)
 }
 
-/// The owner and group of the folder `path` is in: what an item made there is given in the
-/// apps' data ([`adopt`]).
-fn parent_owner(path: &Path) -> io::Result<(u32, u32)> {
-    use std::os::unix::fs::MetadataExt;
+/// The folder `path` is in, opened without following a last link and checked to lie in the
+/// jail (an intermediate folder swapped for a link meanwhile leads out of it: refused), with
+/// the name of `path` in it.
+fn open_parent(path: &Path) -> io::Result<(OwnedFd, &OsStr)> {
     let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
-    let meta = fs::metadata(parent)?;
-    Ok((meta.uid(), meta.gid()))
+    let name = path.file_name().ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let fd = openat(libc::AT_FDCWD, parent.as_os_str(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW)?;
+    check(fd.as_fd())?;
+    Ok((fd, name))
+}
+
+/// The owner and group of an open folder.
+fn owner_of(fd: BorrowedFd) -> io::Result<(u32, u32)> {
+    let st = fstat(fd)?;
+    Ok((st.st_uid, st.st_gid))
+}
+
+/// The owner and group of the folder `path` is in: what an item made there is given in the
+/// apps' data ([`adopt`]). Read through the folder's descriptor ([`open_parent`]), never by
+/// a path that a link could lead elsewhere.
+fn parent_owner(path: &Path) -> io::Result<(u32, u32)> {
+    let (fd, _) = open_parent(path)?;
+    owner_of(fd.as_fd())
+}
+
+/// `fstatat(dir, name, AT_SYMLINK_NOFOLLOW)`: the item itself, a link as the link.
+fn lstat_at(dir: BorrowedFd, name: &OsStr) -> io::Result<libc::stat> {
+    let c = cstr(name)?;
+    // SAFETY: zeroed out-parameter, an open descriptor and a valid C string
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstatat(dir.as_raw_fd(), c.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(st)
+}
+
+/// `fchownat(dir, name, uid, gid, AT_SYMLINK_NOFOLLOW)`: the item itself, never a link's
+/// target, and only in the folder the descriptor holds.
+fn lchown_at(dir: BorrowedFd, name: &OsStr, uid: u32, gid: u32) -> io::Result<()> {
+    let c = cstr(name)?;
+    // SAFETY: an open descriptor and a valid C string
+    if unsafe { libc::fchownat(dir.as_raw_fd(), c.as_ptr(), uid, gid, libc::AT_SYMLINK_NOFOLLOW) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// In the apps' data ([`crate::caps::app_data`]): gives a file this worker just made at
@@ -401,13 +439,15 @@ pub fn adopt(file: &File, path: &Path) -> io::Result<()> {
     std::os::unix::fs::fchown(file, Some(uid), Some(gid))
 }
 
-/// [`adopt`] for a symbolic link this worker just made (the link itself, never its target).
+/// [`adopt`] for a symbolic link this worker just made (the link itself, never its target),
+/// through its folder's descriptor.
 pub fn adopt_link(path: &Path) -> io::Result<()> {
     if !crate::caps::app_data() {
         return Ok(());
     }
-    let (uid, gid) = parent_owner(path)?;
-    std::os::unix::fs::lchown(path, Some(uid), Some(gid))
+    let (dir, name) = open_parent(path)?;
+    let (uid, gid) = owner_of(dir.as_fd())?;
+    lchown_at(dir.as_fd(), name, uid, gid)
 }
 
 /// Checks a folder this call just made with `mkdir`: opened without following a link, it
@@ -425,23 +465,47 @@ pub fn made_dir(path: &Path) -> io::Result<()> {
 /// In the apps' data: gives everything below `dir` (items this worker has just made, an
 /// archive extracted into its hidden folder) the owner and group of the folder `like`;
 /// links themselves, never followed. Nothing anywhere else.
+///
+/// Done through descriptors only: `dir` and `like` are opened without following a last link
+/// and checked to lie in the jail, each folder below is opened from its parent's descriptor
+/// with `O_NOFOLLOW`, and each item is changed with `fchownat(.., AT_SYMLINK_NOFOLLOW)` in
+/// the folder that holds it. A folder the container swaps for a link meanwhile (to `/etc`)
+/// is then a link that is changed as a link and never entered.
 pub fn adopt_tree(dir: &Path, like: &Path) -> io::Result<()> {
-    use std::os::unix::fs::MetadataExt;
     if !crate::caps::app_data() {
         return Ok(());
     }
-    fn walk(dir: &Path, uid: u32, gid: u32) -> io::Result<()> {
-        for e in read_dir(dir)?.flatten() {
-            let path = e.path();
-            std::os::unix::fs::lchown(&path, Some(uid), Some(gid))?;
-            if e.file_type()?.is_dir() {
-                walk(&path, uid, gid)?;
+    let like = openat(libc::AT_FDCWD, like.as_os_str(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW)?;
+    check(like.as_fd())?;
+    let (uid, gid) = owner_of(like.as_fd())?;
+    let top = openat(libc::AT_FDCWD, dir.as_os_str(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW)?;
+    check(top.as_fd())?;
+    adopt_below(top, uid, gid)
+}
+
+/// [`adopt_tree`] below an open, checked folder: depth first, each subfolder entered as soon
+/// as it is met, so that only one descriptor per level is open.
+fn adopt_below(dir: OwnedFd, uid: u32, gid: u32) -> io::Result<()> {
+    // the magic link reopens this very folder, whatever its name is by now
+    let names: Vec<OsString> = fs::read_dir(fd_path(dir.as_fd()))?.map(|e| e.map(|e| e.file_name())).collect::<io::Result<_>>()?;
+    for name in names {
+        let st = match lstat_at(dir.as_fd(), &name) {
+            Ok(st) => st,
+            // gone meanwhile: nothing to give
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        };
+        lchown_at(dir.as_fd(), &name, uid, gid)?;
+        if is_dir(&st) {
+            match openat(dir.as_raw_fd(), &name, libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW) {
+                Ok(sub) => adopt_below(sub, uid, gid)?,
+                // swapped for a link or removed since the stat: not entered
+                Err(e) if matches!(e.raw_os_error(), Some(libc::ELOOP) | Some(libc::ENOTDIR) | Some(libc::ENOENT)) => {}
+                Err(e) => return Err(e),
             }
         }
-        Ok(())
     }
-    let meta = fs::metadata(like)?;
-    walk(dir, meta.uid(), meta.gid())
+    Ok(())
 }
 
 /// Hands an open file to a program (ffmpeg) as its descriptor 3, and returns the name the
@@ -660,5 +724,45 @@ mod tests {
         fs::write(t.path().join("x/b/f.txt"), "outside").unwrap();
         symlink(t.path().join("x"), docs.join("a")).unwrap();
         assert!(is_outside(&open(&real).unwrap_err()));
+    }
+
+    fn ctime(p: &Path) -> (i64, i64) {
+        use std::os::unix::fs::MetadataExt;
+        let m = fs::symlink_metadata(p).unwrap();
+        (m.ctime(), m.ctime_nsec())
+    }
+
+    #[test]
+    fn adoption_never_follows_a_swapped_folder() {
+        // a container owning the app folder swaps a subfolder for a link to the outside
+        // (`/etc`): the ownership walk changes the link itself and never what it leads to.
+        // chown to the ids an item already has still updates its ctime: that tells what was
+        // touched without any capability.
+        let (t, docs, _) = layout();
+        let outside = t.path().join("etc");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("shadow"), "secret").unwrap();
+        fs::create_dir_all(docs.join("new/sub")).unwrap();
+        fs::write(docs.join("new/sub/f"), "x").unwrap();
+        fs::rename(docs.join("new/sub"), docs.join("new/sub-old")).unwrap();
+        symlink(&outside, docs.join("new/sub")).unwrap();
+        let before = (ctime(&outside), ctime(&outside.join("shadow")));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let _jail = Jail::enter();
+        Jail::admit(&docs).unwrap();
+        let top = openat(libc::AT_FDCWD, docs.join("new").as_os_str(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW).unwrap();
+        // SAFETY: plain getters
+        let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+        let old_file = ctime(&docs.join("new/sub-old/f"));
+        adopt_below(top, uid, gid).unwrap();
+        assert_eq!((ctime(&outside), ctime(&outside.join("shadow"))), before, "the link's target was changed");
+        assert_ne!(ctime(&docs.join("new/sub-old/f")), old_file, "the real items were not changed");
+        // the folder of an item, reached through a link: refused, never read for its owner
+        assert!(parent_owner(&docs.join("new/sub/shadow")).is_err());
+        assert!(parent_owner(&docs.join("new/sub-old/f")).is_ok());
+        // a folder swapped for a link to the outside of the jail on the way: refused too
+        fs::create_dir_all(outside.join("x")).unwrap();
+        symlink(&outside, docs.join("away")).unwrap();
+        assert!(is_outside(&open_parent(&docs.join("away/x/y")).unwrap_err()));
     }
 }
