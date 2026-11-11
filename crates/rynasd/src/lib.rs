@@ -35,6 +35,7 @@ pub mod pam;
 pub mod pc_backup;
 pub mod places;
 pub mod power;
+pub mod processes;
 pub mod protection;
 pub mod removable;
 pub mod replication;

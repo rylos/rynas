@@ -114,7 +114,10 @@ RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6 AF_PACKET
 # No file capabilities on any binary.
 # Network (D-NET): CAP_NET_ADMIN (MTU and address repairs after a reload or a rollback,
 # ifupdown hand-back), CAP_NET_RAW (arping, ping of the gateway, diagnostics)
-CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_SETUID CAP_SETGID CAP_AUDIT_WRITE CAP_SYS_ADMIN CAP_SYS_RAWIO CAP_MKNOD CAP_IPC_LOCK CAP_FSETID CAP_NET_ADMIN CAP_NET_RAW
+# Processes (D-PROCESSES): CAP_KILL (terminate/kill another user's process), CAP_SYS_NICE
+# (nice and I/O priority of another user's process, a lower nice). No CAP_SYS_PTRACE: the
+# disk I/O counters of other users' processes stay unread.
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_SETUID CAP_SETGID CAP_AUDIT_WRITE CAP_SYS_ADMIN CAP_SYS_RAWIO CAP_MKNOD CAP_IPC_LOCK CAP_FSETID CAP_NET_ADMIN CAP_NET_RAW CAP_KILL CAP_SYS_NICE
 
 [Install]
 WantedBy=multi-user.target

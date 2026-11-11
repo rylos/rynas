@@ -115,6 +115,7 @@ only goes to the debug log (A13).
 | 409 | `tailscale_not_installed` | Tailscale: not installed (`../phase2/remote-access.md`) |
 | 409 | `stack_not_managed` | Docker: a stack outside the rynas stacks folder (Portainer's, untracked): no file edits, no compose actions |
 | 409 | `ssh_lockout` | SSH: the change would leave no administrator able to log in (`../phase2/ssh.md`) |
+| 403 | `process_protected` | Processes: the system or rynas needs this process or service (PID 1, kernel threads, rynasd, rynas-web, the main sshd, journald…): no signal, priority or restart |
 
 ## API v1 (steps 2–3)
 | Method | Path | Response |
@@ -1634,3 +1635,28 @@ connections before an unmount; `--dry-system` reads the drives and only logs the
 Tests: `crates/rynas-removable` (fixture sysfs trees, recording host), `crates/rynasd/tests/removable.rs`
 (simulated host whose mount table and USB ports follow the commands). Not yet: per-device
 overrides, filesystem check/repair, NTFS dirty-flag clearing, formatting.
+
+## API v1: processes
+Module `rynasd::processes`, types in `rynas_api_types::processes`, design and research in
+`../research/processes.md` (D-PROCESSES). Administrators only, reads included (command lines
+can hold secrets): rynasd's `admin_only` layer plus the role check and an audit line
+(`rynas::audit`) on every action. `/proc` is read directly; a sample is taken only when a
+request asks and the last one is older than 1 s, the previous sample (for CPU % and I/O
+rates) is dropped 60 s after the last request. Every action names the process by PID **and**
+start time (`start_ms`): another start time is 404 `not_found` (the PID was reused).
+Protected processes (PID 1, kernel threads, rynasd and rynas-web with their children, the
+main sshd, journald, logind, udevd, networkd, D-Bus) answer 403 `process_protected`.
+`--dry-system` logs signals, priorities and restarts and does none.
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/api/v1/processes?kernel=true` | — | `ProcessList` {read_at_ms, cpus, mem_total_bytes, cpu_pct?, groups: [`ProcessGroup` {kind service\|container\|session\|user\|kernel\|system, id, name, app?, stack?, restartable}], processes: [`ProcessInfo` {pid, ppid, start_ms, name, cmd (≤ 256 chars), user, state running\|sleeping\|disk_wait\|stopped\|zombie\|idle\|other, threads, nice, cpu_pct? (100 = one core), rss_bytes, read_bytes_s?, write_bytes_s?, group (index), protected}], dry}; kernel threads only with `kernel=true` (their group is always listed) |
+| GET | `/api/v1/processes/{pid}?start_ms=` | — | `ProcessDetail` {info, group, cmdline, exe?, cgroup?, io_class none\|realtime\|best_effort\|idle, io_level, pss_bytes?, swap_bytes?, read_total_bytes?, write_total_bytes?, ports: [`ListenPort` {protocol tcp\|udp, address, port}]} |
+| POST | `/api/v1/processes/{pid}/signal` | `SignalRequest` {signal term\|kill, start_ms} | 204; 403 `process_protected` |
+| POST | `/api/v1/processes/{pid}/priority` | `PriorityRequest` {start_ms, nice? (−20…19), io_class? best_effort\|idle, io_level (0–7)} | 204, applied to every thread; 400 `invalid_value` fields `nice`, `io_class`, `io_level`; 403 `process_protected` |
+| POST | `/api/v1/processes/{pid}/restart-service` | `RestartRequest` {start_ms} | 202 (`processes.restart-service`: `systemctl restart <unit>`); 409 not a system service; 403 `process_protected` (protected units, SSH: its own page) |
+
+Containers are restarted through `POST /api/v1/docker/containers/{id}/restart`. The browser
+asks every 2 s while the page is visible (a written exception to S1, see D-PROCESSES). The
+unit gains `CAP_KILL` and `CAP_SYS_NICE`; without `CAP_SYS_PTRACE` the I/O counters of other
+users' processes are `null`.

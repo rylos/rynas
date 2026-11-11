@@ -227,6 +227,12 @@ pub fn routes() -> Router<AppState> {
         .route("/system/power", get(forward).post(forward))
         .route("/system/power/cancel", post(forward))
         .route("/system/zram", get(forward).post(forward))
+        // processes (D-PROCESSES; administrators, reads included, checked in rynasd)
+        .route("/processes", get(forward))
+        .route("/processes/{pid}", get(forward))
+        .route("/processes/{pid}/signal", post(forward))
+        .route("/processes/{pid}/priority", post(forward))
+        .route("/processes/{pid}/restart-service", post(forward))
         // date, time and time zone (D-TIME): state and settings, zones, manual time, sync now
         .route("/system/time", get(forward).post(forward))
         .route("/system/time/zones", get(forward))

@@ -1175,6 +1175,12 @@ fn main() -> std::io::Result<()> {
             state.apps = Some(apps);
             state.docker = Some(docker);
         }
+        // processes: sampled only while a page asks (D-PROCESSES)
+        {
+            let p = rynasd::processes::Processes::new(args.dry_system, state.docker.clone(), state.apps.clone());
+            rynasd::processes::spawn_trim(p.clone());
+            state.processes = Some(Arc::new(rynasd::processes::ProcessesApi { processes: p, ops: ops.clone() }));
+        }
         // Tailscale (remote access): status from tailscaled's LocalAPI, tasks for the rest
         {
             let socket = match (&args.tailscale_socket, args.dry_system) {

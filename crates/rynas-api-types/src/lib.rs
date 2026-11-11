@@ -17,6 +17,7 @@ pub mod network;
 pub mod notify;
 pub mod pcbackup;
 pub mod power;
+pub mod processes;
 pub mod removable;
 pub mod replication;
 pub mod scheduler;
@@ -415,6 +416,9 @@ pub mod error_codes {
     /// SSH: the change would leave no administrator able to log in (password login off
     /// without a key, nobody allowed) (409); the message says why.
     pub const SSH_LOCKOUT: &str = "ssh_lockout";
+    /// Processes: the system or rynas cannot do without this process or service (PID 1,
+    /// kernel threads, rynasd, rynas-web, sshd, journald…): no signal, priority or restart (403).
+    pub const PROCESS_PROTECTED: &str = "process_protected";
 
     /// The code of a status when nothing more precise applies: used to turn framework
     /// rejections (bad query string, 405, 413...) into an `ApiError`.
@@ -491,6 +495,7 @@ pub mod error_codes {
         CRYPT_BUSY,
         CRYPT_NOT_INSTALLED,
         SSH_LOCKOUT,
+        PROCESS_PROTECTED,
     ];
 }
 
