@@ -307,6 +307,7 @@ proc.restart_ct	Riavvia il container
 proc.restart_svc_title	Riavviare {name}?
 proc.restart_ct_title	Riavviare il container {name}?
 proc.restart_svc_text	Il servizio si ferma e riparte. Chi lo sta usando viene disconnesso per un momento.
+proc.restart_docker_text	Docker si ferma e riparte: si fermano anche tutti i container e le loro app, che tornano dopo un minuto o due.
 proc.restart_ct_text	Il container si ferma e riparte; la sua app non risponde per un momento.
 proc.restarted	Riavviato
 proc.priority	Priorità
@@ -1270,7 +1271,7 @@ loading	Caricamento…
 error.load	Impossibile caricare i dati
 soon	In arrivo
 soon.plugins	Plugin che aggiungono pagine, widget e comandi tramite un manifest dichiarativo.
-soon.system	Rete, aggiornamenti software, notifiche, log di sistema e terminale web sono in arrivo.
+soon.system	Log di sistema e terminale web sono in arrivo.
 sys.subtitle	Informazioni di sistema e preferenze dell'interfaccia
 sys.info	Informazioni di sistema
 sys.prefs	Interfaccia
@@ -2398,9 +2399,7 @@ dd.eta	mancano {time}
 dd.freed	{size} liberati
 dd.nothing_freed	niente da liberare
 dd.checked	Controllati
-dd.checked_line	{files} file, {size} · {dups}
-dd.no_dups	nessun duplicato
-dd.dups	{files} file duplicati
+dd.checked_line	{files} file, {size}
 dd.window	Fascia oraria
 dd.window_help	Le esecuzioni partono all'inizio di ogni blocco e si fermano alla sua fine; il blocco successivo riprende da lì.
 dd.window_empty	Scegli almeno un'ora.
@@ -2408,7 +2407,6 @@ dd.grid_on	Può lavorare
 dd.grid_off	Ferma
 dd.none	Ancora nessuna
 dd.total	Liberato in totale
-dd.left	Ancora da liberare
 dd.next	Prossima fascia
 dd.estimate_result	Stima
 dd.estimate_line	{size} duplicati in {files} di {scanned} file analizzati ({pct} di {total})

@@ -315,13 +315,12 @@ fn card(
                         view! { <div class="kv"><dt>{tr("sch.col.last")}</dt><dd class="chips"><Status tone=tn text=t(k).to_string() /><span class="small tnum">{record_line(r)}</span></dd></div> }
                     })}
                     {report.as_ref().filter(|r| r.reclaimed_total_bytes > 0).map(|r| kv_row("dd.total", Signal::stored(i18n::bytes(r.reclaimed_total_bytes)), "tnum"))}
-                    {report.as_ref().filter(|r| r.reclaimable_bytes > 0 && r.dedupe_configured == Some(true)).map(|r| kv_row("dd.left", Signal::stored(i18n::bytes(r.reclaimable_bytes)), "tnum"))}
                     {j.next_window_ms.map(|m| kv_row("dd.next", Signal::stored(i18n::short_when(m)), "tnum"))}
                     // what the hashfile holds after a run; an older estimate would describe other shares
+                    // (the engine's duplicate counts include blocks already shared: not shown as "left")
                     {report.as_ref().filter(|r| r.runs > 0 && r.files_tracked > 0 && !estimate_newer).map(|r| {
-                        let dups = if r.dup_files == 0 { t("dd.no_dups").to_string() } else { tf("dd.dups", &[("files", &r.dup_files.to_string())]) };
                         kv_row("dd.checked", Signal::stored(tf("dd.checked_line", &[
-                            ("files", &r.files_tracked.to_string()), ("size", &i18n::bytes(r.logical_bytes)), ("dups", &dups),
+                            ("files", &r.files_tracked.to_string()), ("size", &i18n::bytes(r.logical_bytes)),
                         ])), "tnum")
                     })}
                     {j.estimate.as_ref().filter(|_| estimate_newer).map(|e| {

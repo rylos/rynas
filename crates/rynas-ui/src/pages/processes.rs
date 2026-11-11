@@ -517,7 +517,12 @@ fn detail_drawer(pid: u32, start_ms: u64, data: RwSignal<Option<ProcessList>>, c
         let (title, text, action, danger) = match act {
             Act::Term => (tf("proc.term_title", &[("name", &name)]), t("proc.term_text").to_string(), "proc.term", true),
             Act::Kill => (tf("proc.kill_title", &[("name", &name)]), t("proc.kill_text").to_string(), "proc.kill", true),
-            Act::RestartService => (tf("proc.restart_svc_title", &[("name", &group)]), t("proc.restart_svc_text").to_string(), "proc.restart_svc", false),
+            Act::RestartService => {
+                // the engine itself: every container stops and starts again
+                let engine = d.group.id.strip_suffix(".service").is_some_and(|u| matches!(u, "docker" | "containerd"));
+                let text = t(if engine { "proc.restart_docker_text" } else { "proc.restart_svc_text" }).to_string();
+                (tf("proc.restart_svc_title", &[("name", &group)]), text, "proc.restart_svc", engine)
+            }
             Act::RestartContainer => (tf("proc.restart_ct_title", &[("name", &group)]), t("proc.restart_ct_text").to_string(), "proc.restart_ct", false),
         };
         let cid = d.group.id.clone();

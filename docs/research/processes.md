@@ -122,9 +122,9 @@ Source: <https://learn.netdata.cloud/docs/collecting-metrics/processes-and-syste
 - **Where**: rynasd (root) reads `/proc`; rynas-web forwards. rynasd can read every process's
   `io` and command line, and it already owns the Docker and catalogue state the groups need.
   The unit gains `CAP_KILL` and `CAP_SYS_NICE` (signals and priorities of other users'
-  processes) — nothing else. `/proc/<pid>/io` of processes of other users needs
-  `CAP_SYS_PTRACE`, which rynas does **not** take: those rates show as unknown ("—"),
-  root-owned processes (most services) have them.
+  processes) and `CAP_SYS_PTRACE`: `/proc/<pid>/io` and the `fd` links of other users'
+  processes need it (Marco, 2026-11-11: the page must see everything). rynasd only reads;
+  it never attaches, and it already holds `CAP_SYS_ADMIN`.
 - **Sampling only on demand**: `GET /processes` takes a sample when the last one is older
   than 1 s (concurrent viewers share it) and computes CPU % and I/O rates against the
   previous sample of the same PID (same start time: no confusion with a reused PID). The

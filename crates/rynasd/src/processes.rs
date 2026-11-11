@@ -9,8 +9,9 @@
 //! - Per sample: `/proc/stat`, `/proc/meminfo`, and per process `stat` and `io`. The command
 //!   line, owner and cgroup are read once per process and again only when its name changes
 //!   (an exec) or while it is younger than [`YOUNG_S`] (sshd and runc move their children).
-//! - `/proc/<pid>/io` of another user's process needs `CAP_SYS_PTRACE`, which rynasd does not
-//!   have: those rates are `None`. Signals and priorities need `CAP_KILL` and `CAP_SYS_NICE`.
+//! - `/proc/<pid>/io` and the `fd` links (listening ports) of another user's process need
+//!   `CAP_SYS_PTRACE` (read only: rynasd never attaches); a kernel that refuses them anyway
+//!   gives `None`. Signals and priorities need `CAP_KILL` and `CAP_SYS_NICE`.
 //! - rynasd runs in a private cgroup namespace (`ProtectControlGroups=private`): other
 //!   processes' cgroup paths start with `/..`, rynasd's own children have paths without it.
 //! - Under `--dry-system` signals, priorities and restarts are logged, never done.

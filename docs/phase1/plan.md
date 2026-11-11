@@ -1658,5 +1658,5 @@ main sshd, journald, logind, udevd, networkd, D-Bus) answer 403 `process_protect
 
 Containers are restarted through `POST /api/v1/docker/containers/{id}/restart`. The browser
 asks every 2 s while the page is visible (a written exception to S1, see D-PROCESSES). The
-unit gains `CAP_KILL` and `CAP_SYS_NICE`; without `CAP_SYS_PTRACE` the I/O counters of other
-users' processes are `null`.
+unit gains `CAP_KILL`, `CAP_SYS_NICE` and `CAP_SYS_PTRACE` (read only: the I/O counters and
+listening ports of every user's processes; Marco 2026-11-11).
