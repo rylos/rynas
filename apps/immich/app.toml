@@ -1,8 +1,8 @@
 schema = 1
 id = "immich"
 name = "Immich"
-version = "1.0.0"
-app_version = "v3.3.6"
+version = "1.0.1"
+app_version = "v3.4.0"
 update_policy = "patch"
 description = "Photo and video library with mobile backup, faces, maps and smart search."
 homepage = "https://immich.app"
