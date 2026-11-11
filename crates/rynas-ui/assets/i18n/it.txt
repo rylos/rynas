@@ -135,7 +135,7 @@ nev.net.watchdog_restored.body	Dopo l'avvio nessuna porta aveva un indirizzo ins
 nev.net.rescue.title	Configurazione di rete di emergenza applicata
 nev.net.rescue.body	Dopo l'avvio nessuna porta aveva un indirizzo instradabile. Tutte le porte sono in DHCP con link-local; le impostazioni precedenti sono la revisione {revision}.
 nev.net.reset.title	Rete di fabbrica ripristinata con il pulsante di reset
-nev.net.reset.body	Tutte le porte sono in DHCP con link-local; bond, VLAN e bridge sono sospesi. Le impostazioni precedenti sono la revisione {revision} (Rete → revisioni → ripristina).
+nev.net.reset.body	Tutte le porte sono in DHCP con link-local; bond, VLAN e bridge sono sospesi. Le impostazioni precedenti sono la revisione {revision} (Rete › Revisioni).
 theme.auto	Sistema
 theme.light	Chiaro
 theme.dark	Scuro
@@ -2288,7 +2288,7 @@ sch.run.exit	Non riuscita (uscita {code})
 sch.run.signal	Interrotta ({sig})
 sch.delete_title	Eliminare l'attività {name}?
 sch.delete_text	Il timer e le unità vengono rimossi all'applicazione delle modifiche. La cronologia resta.
-sch.delete_job_task	Questa attività appartiene a un job di snapshot o a una pianificazione di alimentazione: modificala o eliminala lì.
+sch.delete_job_task	Questa attività appartiene a un job di snapshot, replica o backup, o alla pianificazione di alimentazione: modificala o eliminala lì.
 sch.sec.general	Generale
 sch.sec.action	Azione
 sch.sec.schedule	Pianificazione
@@ -2384,7 +2384,7 @@ dd.st.running	In corso
 dd.st.estimating	Stima in corso
 dd.st.waiting	In attesa
 dd.engine_missing	Il motore di deduplicazione (oans) non è installato.
-dd.engine_unavailable	Il motore di deduplicazione (pacchetto rynas-oans) non è installato e nessuna sorgente lo offre: aggiungi la sorgente dei pacchetti rynas, o metti il pacchetto della release di rynas in /var/lib/rynas/packages.
+dd.engine_unavailable	Il motore di deduplicazione (pacchetto rynas-oans) non è installato e nessuna sorgente dei pacchetti lo offre: metti il pacchetto della release di rynas in /var/lib/rynas/packages.
 dd.engine_unsupported	oans {version} è fuori dalle versioni provate con rynas (da {min} a {max}): le esecuzioni sono rifiutate.
 dd.install	Installa
 dd.waiting_for	In attesa che finisca {task}
@@ -2964,7 +2964,7 @@ net.rollback_unverified	Non è stato possibile verificare lo stato ripristinato:
 net.adopt_title	Rete configurata da ifupdown
 net.adopt_text	Le porte sono configurate da /etc/network/interfaces e qui sono in sola lettura. Affidale a rynas per modificarle in sicurezza (stessi indirizzi, con prova a tempo).
 net.adopt_btn	Affida a rynas…
-net.adopt_dialog_text	rynas scrive i file di systemd-networkd con gli stessi indirizzi, conserva l'originale come interfaces.rynas-bak e passa da ifupdown a systemd-networkd. Bond, bridge, VLAN e IPv6 statico non vengono ancora migrati.
+net.adopt_dialog_text	rynas scrive i file di systemd-networkd con gli stessi indirizzi, conserva l'originale come interfaces.rynas-bak e passa da ifupdown a systemd-networkd. I bond vengono migrati; bridge, VLAN e IPv6 statico non ancora.
 net.adopt_when	Quando
 net.adopt_next_boot	Al prossimo riavvio (consigliato)
 net.adopt_next_boot_help	La scelta più sicura se sei collegato via rete: se 3 minuti dopo l'avvio nessuna porta ha un indirizzo instradabile, torna ifupdown.
@@ -3945,7 +3945,7 @@ apps.feat.managers	Gestori di Docker
 apps.feat.managers_text	Un gestore di container completo accanto a rynas, sulla stessa cartella degli stack. Riceve il socket di Docker, quindi ha privilegi di root e un proprio login.
 apps.browse_all	Sfoglia tutte le app
 apps.empty	Il catalogo è vuoto
-apps.empty_text	Nessuna app è stata caricata. Reinstalla il pacchetto del catalogo o controlla le voci elencate sotto.
+apps.empty_text	Nessuna app è stata caricata. Reinstalla rynas o controlla le voci elencate sotto.
 apps.issues	Voci non caricate: {n}
 apps.count	Mostrate: {n}
 apps.no_match	Nessuna app corrisponde
