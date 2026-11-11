@@ -1,305 +1,310 @@
-# PC backup in rynas: our own ABB server and agent, for every system
+# PC backup in rynas: a restic repository per PC, our own agent, bare-metal restore
 
-**In short:** rynas gets its own **PC backup server** and a cross-platform **`rynas-agent`**, centrally managed in the style of Active Backup for Business, with **bare-metal restore**. Each device uses one engine, chosen by the user:
+**In short:** rynas keeps **one restic-format repository per PC**, served append-only by rynas itself. Only the NAS runs retention, prune and checks. A Rust **`rynas-agent`** built on `rustic_core` backs up the PC's files from a consistent point in time. With every version it also stores a **layout manifest**: disks, partitions, filesystems, boot loader and kernel command line. The same agent binary does the **bare-metal restore from any live Linux**, through a TUI, with no recovery ISO. Single files are restored from the rynas web UI.
 
-- **image**: block-level images of the used blocks with incrementals, our own engine grown from abb-agent;
-- **btrbk**: btrfs send/receive;
-- **files**: restic.
+Marco's request, 2026-11-11: "voglio una soluzione completa che permetta anche il bare metal restore. le idee le puoi prendere da synology active backup for business. vorrei questo: rynas gestisce un archivio restic/rustic, il pc invia tutto il necessario (come l'agent synology o rustic/restic bastano?)". He added these constraints the same day:
+- the agent works on ext2/3/4 too, as abb-agent does;
+- no recovery USB/ISO: the agent binary (AUR, GitHub releases) is enough, started from any live Linux;
+- a TUI in the agent that, in the first version, does **only bare-metal restore** (PC → version → target disk → everything);
+- single files come back from the web UI.
 
-All three keep their data on the NAS, show up in one console, can be browsed in the file manager, and restore through one recovery environment.
-
-This decision is D-PCBACKUP. It refines D-SNAP ("PC backups, ex btrbk-nas") and D-BACKUP.
-
-Marco's requests, 2026-11-06/07:
-- "voglio un backup in stile abb che permetta anche il bare metal. Btrbk quando possibile e restic/rustic negli altri casi. Ma sceglie l'utente";
-- "una versione migliorata di abb server e abb client che va su tutti i sistemi. Fatta a modo nostro".
-
-Sources: Marco's disaster-recovery notes and projects (§1), plus two rounds of web research done on 2026-11-07 (§2, sources at the end). **[U]** marks a claim that could not be verified.
+This **replaces the design of 2026-11-07** (D-PCBACKUP: three engines image/btrbk/files, `rynas-recovery` ISO, netboot). What already ships stays as it is: btrbk receiving (§10, and §7 for its future). Web research was done on 2026-11-07 and 2026-11-11, and the VM tests on 2026-11-11 (§3). **[U]** marks a claim that could not be verified.
 
 ---
 
-## 1. What Marco's own tools already prove
+## 1. Are restic or rustic enough on their own? No
 
-| | btrbk + `restore_btrfs_system` | abb-agent + abb-restore | rustic full system (retired) |
-|---|---|---|---|
-| Data | btrfs snapshots received on the NAS | block image of the used blocks, incrementals without a kernel driver | files of `/` in a restic repository |
-| Layout | `sfdisk -d` dump inside the `@` snapshot (written by a pacman hook) and ESP copies | inside the image | rebuilt by hand |
-| Boot media | Arch ISO netbooted with iPXE from the NAS | any live system + the static `abb-restore` | Arch ISO + rustic |
-| Strengths | choice of subvolume and date; additive restore; dry run that tries the fixups; disk picked by model + serial; "disk in use" guard | **one-step bare metal**; whole device / system / single volume; scheduling (`on_boot`, `on_boot_delay`, `only_if` gateway+MAC, `wait_locks`), hooks, `status` | works on any filesystem |
-| Weak spots | never tested on real hardware; root key in clear on a USB disk; the hook copy drifts from the repo | needs a proprietary server; races with boot-time writes; `.pacnew`/`.pacsave` overwrote the config | manual layout, slow restore |
+They store files well: dedup, encryption, versions, checks. A bare-metal restore needs six more things:
 
-**abb-agent code that can be reused** (Rust; Marco is its only author, 124 + 44 commits, licence GPL-3.0-or-later):
+1. **A consistent point in time.** On btrfs and LVM a snapshot gives one. On **ext4 without LVM there is no snapshot**, and a plain walk of a live system corrupted a SQLite database in the test (§3.1).
+2. **The disk layout.** GPT with its GUIDs, partition types, md/LUKS/LVM, filesystem UUIDs, labels and options, btrfs subvolumes and the default subvolume.
+3. **What is not a file.** The BIOS boot partition; an ESP that cannot be frozen (vfat refuses FIFREEZE, §3.1).
+4. **Boot repair after the restore.** Initramfs, boot loader, the NVRAM entry or the removable path, and the **kernel command line**. The test lost it: `kernel-install` in a chroot reads the *live system's* `/proc/cmdline` (§3.3).
+5. **Pairing, schedule, progress and "late" alerts.** Every PC needs these, and they are what makes it a product (ABB) rather than a cron job.
+6. **Ransomware resistance.** restic clients may delete their own snapshots by default. Kopia server and Backrest multihost have the same weakness. Here the server must refuse that, per PC.
 
-- **`btrfs-image`** (about 3,500 lines):
-  - read-only snapshots, with a capture step that avoids block-reuse races;
-  - a map of the blocks in use;
-  - per-block fingerprints taken from the btrfs checksums, which also catch writes to NOCOW files;
-  - every block checked against its checksum before it is sent;
-  - excluded subvolumes edited out of the image.
-- **`ext-image`**:
-  - used blocks from the group bitmaps;
-  - incrementals by comparing the inode tables with the previous run;
-  - a brief FIFREEZE while the metadata is read.
-- **`abb-restore`**: GPT handling, restore plan, TUI, guards.
-- **`abb-agent`**:
-  - scheduler, `only_if`, hooks;
-  - an 8-thread read/verify/LZ4 pipeline (about 2.2 GB/s);
-  - fixup after restore;
-  - file restore that does not follow symbolic links (`O_NOFOLLOW`).
+So: **restic/rustic as the storage engine, plus our own agent around it.** ReaR does this for Linux, but its restic support is "BACKUP=EXTERNAL, unsupported". ABB and Veeam do it with block images and kernel drivers.
 
-Moving this code into rynas (AGPL-3.0-or-later since 2026-11-07) is **Marco's licensing decision**: GPL-3.0-or-later code can be combined with it, GPL-2.0-only code cannot. The copies already published stay GPL.
+## 2. Comparison (checked 2026-11-07/11)
 
-## 2. What the others do (checked 2026-11-07)
+| Product | What is stored | Bare metal | Agent model | Dedup / encryption | Licence |
+|---|---|---|---|---|---|
+| **Synology ABB** (PC / physical server) | disk images; incrementals via a snapshot/CBT driver on Linux, VSS on Windows | Windows: recovery media built **on the PC** from the local ADK/WinPE or `Winre.wim`. Linux: a prebuilt ISO | agent paired with the NAS; schedule, retention and templates in the console; file-restore portal; trial boot in VMM with a video | global dedup on btrfs; TLS in transit | proprietary, free with Synology |
+| **Veeam Agent** (Linux/Windows) | volume or file images; blksnap module on Linux (not in mainline, last series v7 in 2024-02) | Linux: ISO built on the machine (unsigned) or Veeam's ISO. Windows: media **based on the local WinRE**, drivers added | standalone or managed by VBR | dedup, AES | proprietary (free edition) |
+| **UrBackup** 2.5.38 | Windows NTFS images (VHD/raw), files for Windows/Linux/FreeBSD; Linux images through dattobd | restore CD, Debian trixie since 2.6.0 | client pulls from the server | file dedup, hardlinks/reflinks | AGPL-3.0+ (Windows CBT driver paid) |
+| **Proxmox Backup Client** 4.2 | `.pxar` file archives, `.img` block archives | none documented for hosts | CLI client to PBS | SHA-256 chunks, AES-GCM | AGPL-3.0 |
+| **ReaR** 2.9 | layout (`disklayout.conf`) + any file backup | builds its own rescue ISO; `diskrestore.sh` can be read; migration mode when disks differ | runs on the host | depends on the backup method (BORG native, restic only EXTERNAL) | GPL-3.0 |
+| **Clonezilla** 3.3 | offline partclone images | its own live system | none (boot it) | none / optional | GPL |
+| **Borg / Vorta** 1.4 | files | none | SSH client; **append-only per SSH key** (`borg serve --append-only`, 2.0: `--permissions`) | CDC dedup, AES/chacha | BSD-3 / Vorta GPL-3 |
+| **restic** 0.19.1 | files; Windows VSS with `--use-fs-snapshot` since 0.11 | none | CLI only, **not a library** (Go `internal/`) | CDC dedup, AES-256 + Poly1305, zstd (repo v2) | BSD-2 |
+| **rustic** 0.11.4 / **`rustic_core` 0.13** | files, restic format | none | CLI; `rustic_core` is a documented library | as restic; **lock-free**, never honours restic locks; no VSS (#1412 open) | Apache-2.0 OR MIT |
+| **rest-server** 0.14.0 | serves a restic REST v2 repository | n/a | HTTP + htpasswd | n/a. `--append-only` and `--max-size` apply to the **whole server**; `--private-repos` = first path part is the user | BSD-2 |
+| **abb-agent** 0.2.17 (Marco) | ABB disk images; btrfs and ext2/3/4, no kernel module | `abb-restore`: a static binary + TUI, **from any live Linux** | ABB agent | ABB's | GPL-3.0-or-later |
 
-- **Synology ABB**:
-  - one image per disk with an interval table;
-  - deduplication in a shared pool, versions kept as btrfs snapshots;
-  - files browsed through a FUSE image plus `losetup`/mount;
-  - Linux snapshots through synosnap, a fork of elastio-snap. The fork was archived on 2025-01-02, more evidence that out-of-tree block drivers are fragile.
-- **Proxmox Backup Server**:
-  - **images in a fixed index** (`.fidx`, 4 MiB chunks) and files in a dynamic index (`.didx`);
-  - chunks named by SHA-256, zstd, optionally AES-256-GCM;
-  - dirty bitmaps map straight onto chunks;
-  - an HTTP/2 backup protocol;
-  - **files of an image browsed inside a micro-VM**, so the host never mounts filesystems it cannot trust;
-  - no Windows client, no bare-metal agent for hosts ("on the roadmap"); AGPL.
-  - We take the format ideas and none of the code.
-- **UrBackup** (server 2.5.38 of 2026-08-30, restore media 2.6.0, AGPL):
-  - Windows NTFS images stored as VHD, or as raw reflink copies on btrfs/ZFS;
-  - the Windows change-block tracking (CBT) driver is a **paid** add-on;
-  - Linux images go through dattobd, a kernel module that needs free space and has no support listed for 6.x kernels;
-  - a macOS client for files.
-- **Veeam Agent**: a CBT driver, proprietary.
-- **Rescuezilla / Clonezilla**: images taken offline only, after a reboot.
-- **wimlib** `wimcapture --snapshot`: captures a running Windows through VSS. **[U]** whether the image boots after `wimapply`.
-- **ReaR 2.9** (2025-01):
-  - `disklayout.conf` with `disk`, `part` (with PARTUUID), `raidarray`, `lvm*`, `crypt`, `fs` (UUID, label, btrfs features) and the btrfs subvolume lines;
-  - it **generates a `diskrestore.sh` script you can read and edit**, shows a disk-mapping table, and keeps UUIDs when the hardware is the same;
-  - **LUKS: a new passphrase at restore time, the header is not restored**;
-  - no restic workflow.
-- **Backrest multihost** (experimental): pairing tokens; the server owns forget, prune and check.
-- **Kopia repository server**: one user per `user@host`; **clients never hold the repository password**, but by default they can delete their own snapshots.
-- **rest-server 0.14**: `--append-only` applies to the whole server, not per user.
-- **restic 0.19.1**:
-  - Windows VSS with `--use-fs-snapshot`;
-  - on macOS it records the snapshot's mount path (#2092 open), and there is no APFS support (#3714).
-- **rustic 0.11.4**:
-  - binaries for Windows and macOS;
-  - **no VSS** (#1412 open, PR #1833 closed without merging);
-  - wrong restores on Windows (#635), Windows paths that cannot be restored elsewhere (#1986);
-  - **it does not honour restic's locks**.
-- **btrbk**:
-  - **CVE-2026-62943** in `ssh_filter_btrbk.sh` (the regex had no end anchor), fixed in 0.32.7;
-  - **trixie and sid ship 0.32.6-2, vulnerable, with no DSA**;
-  - the filter has `--source`, `--target`, `--delete`, `--restrict-path`, `--sudo`;
-  - a restored subvolume is made writable with `btrfs subvolume snapshot`, never `property set ro false`, which breaks later incrementals.
-- **Secure Boot netboot**: Microsoft signed the iPXE shim (ipxe-16.1) in November 2025. The simplest path stays UEFI HTTP boot of Debian's signed shim, GRUB and kernel.
-- **macOS**:
-  - images are not realistic (signed system volume, Apple Silicon); Carbon Copy Cloner too now makes non-bootable backups and restores with Migration Assistant;
-  - files are backed up from an APFS local snapshot (`tmutil localsnapshot`, mounted read-only against `/System/Volumes/Data`) by a root LaunchDaemon inside a signed .app that has Full Disk Access;
-  - EDR products flag `mount_apfs`.
+What we take: ABB's console, pairing, NAS-owned retention, portal file restore and "verified" state. ReaR's manifest and readable restore plan. Borg's per-client append-only. abb-agent's live-system restore (no ISO), TUI, freeze handling and GPT code. What we leave: kernel drivers, WinPE, our own image formats.
 
-## 3. Design
+## 3. Tests in VMs (2026-11-11)
 
-### 3.1 Roles
+Throwaway qemu/KVM VMs on pc-work: UEFI (OVMF), user-mode network, everything in the session scratchpad, deleted afterwards. **Source:** Debian 13 genericcloud, one 4 GiB disk (GPT: p1 ext4 `/` with no LVM, p14 BIOS boot, p15 ESP vfat), restic 0.18.0. The repository sat on a second virtual disk. **Live system:** a Debian 12 genericcloud VM (restic 0.14.0), chosen for its different UUIDs. **Target:** an empty **3 GiB** disk, smaller than the source. abb-agent 0.2.17 came from its release tarball.
 
-- **NAS** (rynas, `backup` plugin, "PC backup" page):
-  - devices, templates and plans;
-  - storage and maintenance (append-only for devices; prune, forget and check only on the NAS);
-  - console, file browsing, recovery media.
-- **`rynas-agent`** (one Rust codebase; Linux, Windows, macOS):
-  - pairing with a one-time token;
-  - plans pushed by the NAS: no local configuration a package manager can overwrite, only the pairing;
-  - consistent snapshot, change tracking, sending;
-  - layout manifest, status and progress;
-  - the abb-agent scheduling: `on_boot` + `on_boot_delay`, interval, `only_if` gateway IP **and MAC**, `wait_locks`, retry with backoff on boot-time races, a `systemd-inhibit` sleep lock while a backup runs.
+```sh
+qemu-img create -f qcow2 -F qcow2 -b debian-13-genericcloud-amd64.qcow2 src.qcow2 4G
+qemu-system-x86_64 -enable-kvm -cpu host -m 2048 -smp 2 \
+  -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF_CODE.4m.fd \
+  -drive if=pflash,format=raw,file=src.vars \
+  -drive file=src.qcow2,if=none,id=d0 -device virtio-blk-pci,drive=d0,serial=src-disk0 \
+  -nic user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:2221-:22 \
+  -smbios "type=1,serial=ds=nocloud-net;s=http://10.0.2.2:8765/src/" -display none -daemonize
+```
 
-### 3.2 Engines, chosen per device by the user
+(cloud-init seeds come from `python3 -m http.server`. Debian 12's cloud-init needs `ds=nocloud-net`, not `ds=nocloud`.)
 
-| | **image** (own) | **btrbk** | **files** (restic) |
-|---|---|---|---|
-| Systems | Linux btrfs, ext2/3/4 (XFS and LVM thin later); Windows NTFS (phase 3a) | Linux with btrfs | Linux, Windows, macOS |
-| What it takes | used blocks of each partition + ESP + layout | btrfs subvolumes | files |
-| Incrementals | changed chunks from the filesystem metadata, no kernel driver | `btrfs send -p` | dedup |
-| Bare metal | yes, in one step | yes (§3.5) | yes on Linux (§3.5); macOS no |
-| File browsing | from the image (§3.6) | snapshots are folders | restic browser |
-| When to pick it | ABB replacement, fastest bare metal, Windows | btrfs PCs that also want readable snapshots on the NAS | macOS, unusual filesystems, file-level only |
+### 3.1 Consistency of ext4 `/` without LVM
 
-The wizard reads the agent's report and proposes an engine: image for Linux and Windows, btrbk when the user wants subvolume snapshots, files for macOS. The user can change it. A device can combine engines, for example an image of the system disk plus files from a data disk. Changing engine starts a new chain, and the UI says so.
+The writer loop updated two files `a`/`b` with the same counter, a 200 kB blob, and a SQLite database in WAL mode.
 
-### 3.3 Image engine: storage and transfer
+| Method | Result |
+|---|---|
+| `restic backup --one-file-system / /boot/efi`, live (1.9 s, 896 MiB) | **SQLite "database disk image is malformed"**, `a=8740 b=8739`, blob truncated to 81920 bytes |
+| `fsfreeze -f /` for the whole run; `TMPDIR=/dev/shm restic backup --no-cache …` (repo on another filesystem) | **frozen 9.3 s** for 869 MiB; SQLite `integrity_check` ok, `a=b`, blob whole |
+| abb-agent's way: `abb-agent bench vda` with the writer running | `/: ext, 1.1 GiB used, frozen 0.12s to read 29.5 MiB of metadata, files read while in use` |
+| `fsfreeze -f /boot/efi` | `Operation not supported` (vfat) |
+| `e2image` while `/` was frozen | **hung until thawed** (193 s): a frozen root allows no tool that writes to it, which matches abb-agent's own rules |
 
-- **Storage, recommended: the restic repository format with fixed 1 MiB chunks, written through `rustic_core`.** It is the same engine, maintenance lock and browse path as D-BACKUP.
-  - Each partition is stored as files of 64 GiB segments (`disk-<serial>/p2/000.img`), each a list of 1 MiB blobs.
-  - Free or zero chunks point to one shared zero blob.
-  - Each version also has a `device-spec.json` (the layout manifest).
-  - Emergency exit: stock `restic restore` or `restic mount` rebuilds the raw partitions.
-  - Repository v2 gives zstd, and encryption is built in.
-  - **First spike:** check that `rustic_core` can write a file node from a list of blob IDs. **[U]**
-  - **Fallback:** our own store in the style of PBS: a fixed index, chunks named by SHA-256, mark-and-sweep GC.
-- **Transport:**
-  - rynas serves the restic REST backend v2 itself inside its axum API (`/api/v1/pcbackup/repo/<device>/`), so there is no separate rest-server;
-  - a token per device, **append-only enforced by rynas for each device**;
-  - several HTTP/1.1 connections in parallel.
-- **Repository creation:** the NAS creates every repository and gives the device its own key. The device never runs `init`.
-- **Maintenance:**
-  - only on the NAS, under the per-repository lock of D-BACKUP;
-  - **rynas refuses that device's writes while a prune runs**, because rustic does not honour restic's locks;
-  - a rynas key is added to each repository so the NAS can browse and maintain it. Consequence written in the UI: whoever owns the NAS can read the backups, as with ABB.
-- **Pipeline in the agent:**
-  1. snapshot;
-  2. map of used blocks;
-  3. dirty chunks from the fingerprints (64 KiB, grouped into 1 MiB);
-  4. read, verify, zstd, encrypt;
-  5. upload the blobs the server lacks;
-  6. new tree and snapshot.
+Conclusions:
+- abb-agent's brief freeze makes the **filesystem structure** consistent. File data is still read live, so a file written during the backup can be mixed, as abb-agent's README says.
+- In a file backup the structure is rebuilt by `mkfs` at restore time anyway. What matters is **per-file consistency**, and only a snapshot or a freeze held for the whole read gives that.
 
-  If the local chunk table does not match the server's base version, the run is full (the abb-agent rule).
-- **Change tracking per system, with no kernel driver:**
-  - **btrfs:** generations + checksums (`btrfs-image`);
-  - **ext:** inode table comparison (`ext-image`);
-  - **XFS:** later; until then, hash all used blocks;
-  - **LVM thin:** `thin_delta` **[U]**;
-  - **Windows:**
-    - VSS + `FSCTL_GET_VOLUME_BITMAP` for the used blocks;
-    - first version: hash every used chunk;
-    - then a comparison of the `$MFT` with the previous run (the NTFS counterpart of `ext-image`), with the USN journal as a shortcut when it is continuous;
-    - **no CBT driver** (EV signing, attestation, risk of crashes).
+### 3.2 Layout capture and recreation on a smaller disk
 
-### 3.4 btrbk and files engines
+On the source the test captured `sfdisk --json`, `lsblk -J -b -O`, `blkid -o export`, `findmnt -J --real`, `dumpe2fs -h`, `/proc/cmdline` and a `dd` of the BIOS boot partition, all in the snapshot. On the live system:
 
-- **btrbk, pull mode (default):**
-  - btrbk runs only on the NAS; the PC needs only btrfs-progs and **a filter shipped and pinned by `rynas-agent`** (the fixed regex of 0.32.7, or an allowlist in Rust), whatever the distro's btrbk version;
-  - an unprivileged user with sudo, filter options `--source --delete -p <root> --sudo` (`--delete` lets the NAS prune the PC's local snapshots);
-  - the NAS pins the PC's ssh host key;
-  - the agent tells the NAS "I'm up, on the right network, idle" and the NAS starts the job; this suits laptops that are off at schedule time;
-  - off the home LAN: push mode, or a reverse ssh tunnel opened by the agent;
-  - stated threat: a compromised NAS can read every paired PC and delete its local snapshots.
-- **btrbk, push mode:** the target on the NAS uses rynas' own copy of the filter.
-- **Files:**
-  - **restic** on Windows (VSS) and macOS, because rustic has no VSS and has the open Windows issues above;
-  - on macOS: an APFS snapshot, then either a bind mount at the original paths or rustic with `--as-path`;
-  - signed .app + LaunchDaemon + Full Disk Access profile.
+```sh
+# GPT with the same label-id, partition numbers, types and PARTUUIDs; the last partition takes what is left
+label: gpt
+label-id: 1E2B8F6D-3643-4D8D-AAC5-AB7EDEBECACC
+first-lba: 2048
+/dev/vdc14 : start=2048, size=6144, type=21686148-…, uuid=2BDA7513-…
+/dev/vdc15 : start=8192, size=253952, type=C12A7328-…, uuid=0397CC02-…
+/dev/vdc1 : start=262144, type=4F68BCE3-…, uuid=3612A9BF-…
+wipefs -a /dev/vdc; sfdisk /dev/vdc < layout.sfdisk
+mkfs.ext4 -F -U 2d5cddec-8777-4aef-9b8d-1d7093e60982 /dev/vdc1
+mkfs.vfat -i 91BCA784 /dev/vdc15
+dd if=vda14.bios-boot.raw of=/dev/vdc14
+mount /dev/vdc1 /mnt; mount /dev/vdc15 /mnt/boot/efi
+restic --no-lock restore <snapshot> --target /mnt        # 4 s; then mkdir proc sys dev run tmp
+```
 
-### 3.5 Bare metal: manifest, recovery environment, restore
+`fstab` and `root=` use PARTUUIDs, so nothing had to be rewritten. 4 GiB → 3 GiB worked: a file restore can shrink as long as the data fits, which `abb-restore` cannot do. restic 0.14 refused a read-only repository until it was given `--no-lock`. rustic is lock-free, so this is one more reason for the agent to embed its own engine instead of relying on the live system's restic.
 
-- **Layout manifest** (`device-spec.json`, with field names close to ReaR's records), written by the agent at every backup; in pull mode it is refreshed before the NAS takes the snapshot. It records:
-  - disks by model, serial, size and sector size;
-  - `sfdisk --dump`, PARTUUIDs, types;
-  - filesystems: type, label, UUID, creation options;
-  - btrfs subvolumes, the default subvolume, and which subvolumes are excluded or recreated empty (`@log`, `@pkg`, Docker, `/var/lib/machines`, Timeshift, `.snapshots`);
-  - md/LVM;
-  - **LUKS: cipher, pbkdf, label, UUID and token types, never the header**;
-  - the ESP (inside the image, or as a tar for btrbk/files);
-  - bootloader, cmdline, initramfs generator;
-  - on Windows: BitLocker state.
-- **`rynas-recovery`:**
-  - a small Debian live image, started by **UEFI HTTP boot from the NAS** (Debian's signed shim → GRUB → kernel, so Secure Boot stays on), by iPXE through Microsoft's signed shim, or from a USB image downloaded from the UI with the NAS address and a **one-time token** (never credentials in clear);
-  - it runs the agent's restore mode.
-- **Restore:**
-  1. NAS → device → version (date per subvolume for btrbk) → **mapping of the target disks by model + serial**, with the "disk in use" guard;
-  2. like ReaR, a **restore script generated in advance, readable and editable**: that is the dry run, fstab and loader diff included;
-  3. partitions (the last one grows on a larger disk);
-  4. **original UUIDs when no attached disk has them**, otherwise new UUIDs and a rewrite of fstab, crypttab, loader entries and cmdline;
-  5. data: image chunks streamed to the disk / `btrfs receive` + writable snapshots / `restic restore`;
-  6. subvolumes recreated empty, ESP, bootloader + initramfs in chroot;
-  7. LUKS recreated with a passphrase typed at restore time; TPM2/FIDO2 to enrol again.
-- **Restore of Windows** (phase 3a):
-  - GPT and NTFS blocks, with the same GUIDs so the BCD keeps working;
-  - `ntfsresize` on a different disk size;
-  - on different hardware: storahci/stornvme enabled in the offline registry with hivex, as virt-v2v does **[U]**;
-  - BitLocker volumes come back **unencrypted**, and the user turns BitLocker on again (stated in the UI);
-  - no WinPE shipped.
-- Modes: whole device, system only, single volume or subvolume (additive), files only.
-- **Restore test** (phase 3, virtualization plugin): restore into a VM on the NAS, boot it, take a screenshot, monthly. The console shows the date of the last test.
+### 3.3 Boot loader reinstall and boot
 
-### 3.6 File browsing
+```sh
+for d in dev proc sys run; do mount --rbind /$d /mnt/$d; done
+chroot /mnt sh -c 'grub-install --target=x86_64-efi --efi-directory=/boot/efi \
+    --bootloader-id=debian --force-extra-removable && update-grub && update-initramfs -u'
+```
 
-- **btrbk:** snapshots are folders, so they open directly in the file manager.
-- **files:** the restic browser of D-BACKUP.
-- **image:**
-  - a version is exposed as a read-only block device (NBD or FUSE over the segments);
-  - filesystems that FUSE can read (ntfs-3g, fuse2fs) are opened that way;
-  - **btrfs and the rest go through a micro-VM** (virtualization plugin), as PBS does: never mount untrusted images in the NAS kernel;
-  - without that plugin, browsing goes through the device's agent.
-- Everywhere: download a file or folder as tar/zip, restore into a share, restore to the device through its agent.
+- **GRUB:** the target disk booted alone, with **fresh NVRAM**, through `\EFI\BOOT\BOOTX64.EFI`: `systemctl is-system-running` = running, no failed units, SQLite ok.
+- **The rbind of `/sys` exposes the live system's efivarfs.** `grub-install` and `bootctl` therefore wrote NVRAM boot entries. On real hardware this is wanted, because it is the machine being restored. In the test it made the live VM boot the restored disk on its next start.
+- **systemd-boot** on an **emptied ESP**: `apt install systemd-boot; bootctl --esp-path=/boot/efi install; kernel-install add <kver> /boot/vmlinuz-<kver>` booted systemd-boot, which then **dropped to the initramfs shell**: `ALERT! PARTUUID=180a0c80-… does not exist`. `kernel-install` had taken the live system's `/proc/cmdline`. After writing the source's command line from the manifest to `/etc/kernel/cmdline` first, the VM booted (`Current Boot Loader: systemd-boot 257.13-1~deb13u1`, running).
 
-### 3.7 Console
+Rule taken: **the manifest stores the kernel command line, and the restore writes `/etc/kernel/cmdline` (and checks `GRUB_CMDLINE_LINUX`) before any boot-loader tool runs.**
 
-- One card per device:
-  - engine, last good backup, next run;
-  - state (ok, late after 26 h, critical after 72 h, thresholds per device);
-  - size, quota, speed, last error.
-- btrbk details: freshness per subvolume, interrupted receives, next incremental parent, deletion that cannot break the chain (all from btrbk-nas).
-- **"Bare metal ready"** check: recent manifest, ESP saved, bootloader known, recovery key stored, last restore test.
-- Templates as in ABB: schedule, GFS retention, excludes. Notifications only when the state changes.
+## 4. Architecture
 
-## 4. Marco's machines
+### 4.1 NAS side
 
-All three run Arch on btrfs:
+- **Repositories:** one restic repository (v2, zstd) per PC at `<volume>/pcbackup/<device>/`, a btrfs subvolume when the volume is btrfs. The NAS creates it with `rustic_core`; the PC never runs `init`.
+- **Served by rynas, not rest-server.** rynas serves the restic REST v2 protocol (config, keys, index, snapshots, data, locks: GET/HEAD/POST/DELETE) inside its own HTTPS API, `/api/v1/pcbackup/repo/<device>/`.
+  - rest-server's append-only mode and quota apply to the whole server, it has its own htpasswd, and it knows nothing about prunes. Every per-PC rule would need a proxy in front of it anyway.
+  - The protocol is small: a few hundred lines in axum, tested against restic and rustic.
+  - rest-server (BSD-2) stays the fallback if this ever proves wrong.
+- **Per-device rules in that handler:**
+  - a bearer token per device, which reaches only its own path;
+  - **append-only**: no DELETE except the device's own lock files, no overwrite, `config` and `keys` read-only;
+  - a **quota** per device, counted at POST time;
+  - **writes refused with 423 while the NAS prunes that repository** (rustic ignores locks);
+  - optional rate limiting.
+- **Retention, prune and verification run only on the NAS,** in the existing `rynas-backup-worker` (D-BACKUP):
+  - GFS / smart retention per plan, with a forget preview;
+  - prune (never `--instant-delete`), then `check` and a rotating `read-data` subset;
+  - a per-repository maintenance lock;
+  - **a minimum age**: no version younger than N days is ever forgotten.
+- **Second layer:** read-only btrfs snapshots of the `pcbackup` subvolume (D-SNAP). The restic copy of the NAS elsewhere (D-BACKUP) can include the PC repositories, with `restic copy` or a copy of the folder.
+- **Console** (Backup › PC backup), one card per PC:
+  - last good version and next run;
+  - state: ok, late after 26 h, critical after 72 h;
+  - size and quota, speed, live progress, last error, files changed during the backup;
+  - the **"Bare-metal ready"** check: recent manifest, every volume covered, boot loader known, restore code and recovery kit available.
 
-| Device | Today | With rynas |
-|---|---|---|
-| pc-casa | btrbk + ABB image | image (replaces ABB) and/or btrbk |
-| pc-work | ABB image on vdsm, Timeshift | image |
-| NB-Marco (Surface, ecryptfs home) | ABB image, only on the home LAN | image with `only_if` at home |
+  Templates as in ABB: schedule, retention, excludes. Notifications only when the state changes (`pcbackup.*`, as today).
+
+### 4.2 Pairing, auth, revocation
+
+1. In the UI, **Add PC**: rynas shows a one-time pairing code (15 min) and the NAS certificate's SHA-256 fingerprint.
+2. On the PC: `sudo rynas-agent pair https://nas:5443 <code>`. The agent prints the fingerprint and the NAS name and pins the certificate.
+3. The NAS creates the repository and a device record, and returns:
+   - a random 256-bit **device token** (the NAS keeps only its hash; the PC stores it at `/var/lib/rynas-agent/` 0600 root);
+   - the **repository password of a restic key file of its own** (`key add`).
+4. **Revocation:** delete the device in the UI. Its token stops working at once and its key file is removed.
+   - Limit to state in the UI: restic key files all wrap one master key, so a stolen copy of a PC's key can still decrypt data it can *read*. With the token gone it can read nothing.
+   - Rotating the master key means a new repository (`restic copy`).
+5. **Restore access** from a live system, where the PC's own token is gone with its disk: a **restore code** made in the UI. It is one-time, valid for 1 hour, **read-only**, and covers one device, or every device after re-authentication. Or an administrator login with TOTP in the TUI. Over pinned TLS the NAS hands the TUI the repository password for that session.
+6. A restored PC carries its old token back, so backups go on without pairing again. A *second* machine restored from the same backup (a clone) is noticed by machine-id plus hardware, and the console asks whether to pair it as a new PC.
+
+### 4.3 The agent (`rynas-agent`, Rust)
+
+- **One binary for every role:** the service, `pair`, `backup`, `status [-w]`, and `restore` (the TUI).
+  - Engine: `rustic_core` (Apache-2.0/MIT), the same as `rynas-backup-worker`, so both ends share one format and one code base.
+  - Linux: a static musl binary (x86_64, aarch64), signed, in the GitHub releases and the AUR (`rynas-agent-bin`, `rynas-agent`), with a systemd unit. A .deb/.rpm via cargo-deb / cargo-generate-rpm costs little and can follow. Windows: §5.
+- **Plans come from the NAS:** schedule, sources and excludes. The only local state is the pairing, so no local configuration file can be overwritten by a package manager (a `.pacnew` once broke abb-agent).
+- **Scheduler,** taken from abb-agent:
+  - after boot with a delay, every N hours, retries with backoff;
+  - `only_if` gateway IP + MAC (laptops), `wait_locks`;
+  - a `systemd-inhibit` sleep lock while running;
+  - "Back up now" and "Cancel" from the console, through a long poll.
+- **Consistent point in time, per filesystem:**
+
+  | Filesystem | Method |
+  |---|---|
+  | btrfs | read-only snapshot of every subvolume under one run folder (abb-agent's `btrfs-image` snapshot code), backed up with `as_path` = the original path, then removed |
+  | LVM (thick or thin) | `lvcreate -s` / thin snapshot, mounted read-only; when the VG has no free extents, fall back to the next row |
+  | ext2/3/4, XFS, no LVM | **abb-agent's freeze machinery**, in two modes. (a) default: files read live with **change detection**: ctime/size/mtime before and after each file, one re-read, then the file is listed as "changed during backup" in the version and on the card. Pre-backup hooks cover databases. This is abb-agent's own guarantee for file data. (b) opt-in **"freeze up to N s"**: the filesystem stays frozen for the whole run, with cache and temp in `/run`, nothing written to it, and a watchdog that thaws at N s and goes on in mode (a). §3.1 measured 9.3 s for a 0.9 GiB full backup; incrementals read only changed files |
+  | vfat ESP | copied as files (small), never frozen |
+  | BIOS boot partition, unknown filesystems | raw copy, unmounted only, stored as a file in the version |
+
+  Freeze safety comes from abb-agent: thaw on every signal and on exit, a list of frozen mounts in `/run` thawed by the next start, and no logging to a frozen filesystem.
+- **Layout manifest** `/.rynas/manifest.json`, stored in every version:
+  - disks by model, serial, `by-id`, size and sector size; the GPT (label-id, every entry with type, PARTUUID, name and attributes);
+  - md (`mdadm --detail --export`), LVM (`vgs/lvs --reportformat json`);
+  - **LUKS parameters only** (cipher, pbkdf, UUID, label, token types), **never the header**;
+  - filesystems: type, UUID, label, features (from abb-agent's superblock readers), btrfs subvolumes, the default subvolume and the subvolumes excluded or recreated empty;
+  - fstab, crypttab, `/proc/cmdline`, `/etc/kernel/cmdline`, boot mode, loader (GRUB, systemd-boot, shim, UKI, rEFInd), initramfs generator, os-release.
+- **Progress:** every 2 s to `/api/v1/pcbackup/agent/status`: phase, bytes, files, speed, ETA. At the end, a summary with the counts and the changed-during-backup list.
+- **Privileges:** root (block devices, FIFREEZE, snapshots), with a systemd sandbox where possible (`ProtectHome=read-only` is impossible for a backup agent, but `ProtectKernelModules`, `NoNewPrivileges` and the rest are fine).
+
+### 4.4 Bare-metal restore: the agent from any live Linux
+
+There is no ISO. The user boots any live system in the same firmware mode (Arch ISO, SystemRescue, Debian/Ubuntu/Fedora live), with Secure Boot left on: the agent is a userspace binary. The PC page shows two commands:
+
+```sh
+curl -fLO https://nas:5443/api/v1/pcbackup/agent/rynas-agent-x86_64   # or from the GitHub release
+sha256sum rynas-agent-x86_64     # compare with the value on the page
+sudo ./rynas-agent restore
+```
+
+**TUI, version 1: bare metal only** (Marco, 2026-11-11). It is built on `abb-restore`'s ratatui flow:
+1. Network and NAS address; the fingerprint is shown and confirmed.
+2. Restore code, or administrator + TOTP.
+3. PC, then version (date, size, "bare-metal ready").
+4. Target disk(s), by model, serial and size, mapped from the manifest:
+   - the "disk in use" guard;
+   - a smaller disk is refused only when the data does not fit;
+   - typing the disk name confirms the wipe.
+5. Summary with the generated plan (the commands, ReaR-style, readable).
+6. Progress, then reboot.
+
+What the agent does:
+1. **Preflight:** checks for `mkfs.*`, `cryptsetup`, `lvm` and `mdadm` as the manifest needs them, and names the package to install on the live system when one is missing. GPT and the restic engine are inside the agent.
+2. **GPT:** the same label-id, numbers, types, PARTUUIDs, names and attributes (abb-restore's `gpt.rs`). The last partition grows or shrinks; fixed partitions keep their size.
+3. **md / LUKS / LVM:** LUKS is created with a passphrase typed in the TUI and the original UUID, so crypttab keeps working. TPM2/FIDO2 are enrolled again by the user, and the TUI says so.
+4. **Filesystems with the original UUIDs and labels** when no other attached disk has them; otherwise new ones, and fstab, crypttab, the loader entries and the cmdline are rewritten. btrfs subvolumes and the default subvolume are recreated, excluded subvolumes empty.
+5. **Data:** a `rustic_core` restore that keeps owners, modes, xattrs (`security.capability`, SELinux), ACLs, hard links and sparse files. NOCOW folders get `chattr +C` before their content. Raw items are written back.
+6. **Chroot** (`--rbind` dev/proc/sys/run):
+   - write `/etc/kernel/cmdline` from the manifest (§3.3);
+   - regenerate the initramfs (`update-initramfs -u -k all` / `mkinitcpio -P` / `dracut --regenerate-all`), which also covers new hardware;
+   - reinstall the loader (`grub-install` + `grub-mkconfig`, or `bootctl install` + `kernel-install add` for each kernel; shim when it was there);
+   - add the **removable fallback** `\EFI\BOOT\BOOTX64.EFI` (as abb-restore does) on top of the NVRAM entry written through efivarfs;
+   - BIOS: `grub-install --target=i386-pc` plus the BIOS boot partition;
+   - `/.autorelabel` when SELinux is enforcing.
+7. **Report** to the NAS: the restore appears in the PC's history.
+
+Later TUI phases: single files/folders, restore of one volume, "restore into a folder".
+
+### 4.5 File restore from the rynas web UI
+
+Built on the D-BACKUP restic browser, which already exists (browse, restore, download through the worker):
+- pick a PC and a version, then browse;
+- **download one file**, streamed. Today's 64 MiB `MAX_DOWNLOAD` becomes a stream from the worker;
+- **download a folder or a selection as a zip**, streamed and not compressed (store), with zip64;
+- **restore into a NAS folder**, with the §10 copy-out rules: owned by the destination's owner, no set-id bits, no `security.*`/ACL xattrs, never overwrite;
+- **restore to the PC (phase 2):** the agent writes under a temporary name and renames into place with `O_NOFOLLOW` (abb-agent's `filerestore.rs`), with skip or overwrite, and reports progress.
+
+### 4.6 Security and keys
+
+- **Who holds the keys:**
+  - the PC, its own key file;
+  - the **NAS, a key in every repository**: retention, prune, check, web browsing and restore codes need it;
+  - the administrator, a **recovery kit** shown once per PC: the repository password and path, enough for stock `restic` on any machine (print it or put it in Bitwarden).
+
+  The UI states that whoever owns the NAS can read the backups, as with ABB. Zero-knowledge would move prune and browsing to the PC; it is decision 3.
+- **Ransomware:**
+  - a stolen or infected PC can add data, not delete or rewrite it (append-only per token);
+  - it can fill the quota, which raises an alert;
+  - the minimum-age rule and the btrfs snapshots of `pcbackup` protect against a bad retention change;
+  - a compromised NAS loses everything, which is why the off-NAS copy (D-BACKUP) matters.
+- **Never:** credentials in a file on a USB stick; the LUKS header in the backup; a device token in the URL; a pairing code that is not one-time.
 
 ## 5. Phases
 
-| Phase | Content |
+| Phase | Content | Rough size | Main risks |
+|---|---|---|---|
+| **1. MVP: Linux files + layout + BMR** | NAS: device registry, pairing, REST v2 handler (append-only, quota, prune gate), console, retention via the existing worker, web browse/zip/copy-out. Agent: pairing, scheduler, btrfs/LVM snapshots, ext/XFS freeze modes, manifest, progress, AUR + release. TUI bare-metal restore with GRUB and systemd-boot, GPT/ext4/btrfs/vfat, then LUKS/LVM/md | **L**: about 12–16k new lines (3–4k reused from abb-agent/abb-restore), plus a VM test matrix (Debian, Arch, Fedora; GRUB, systemd-boot, UKI; ext4, btrfs, LUKS) | ext4 without LVM consistency (§3.1); `rustic_core` restore fidelity (xattrs, ACLs, hard links, sparse) to measure against restic; the chroot fixups per distro; restores on real hardware |
+| **2. Windows file backup** | Windows service (windows-service), **VSS made by the agent**, files into the same kind of repository, MSI installer (WiX), signed binaries; web restore unchanged; restore to the PC through the agent | **M**: 5–7k lines + signing and CI | rustic on Windows (no VSS, open restore bugs #635/#1986) → decision 5; code signing and AV false positives; VSS edge cases (timeouts, writers) |
+| **3. Windows BMR** | at the same VSS moment, a **used-cluster image of each NTFS volume** (`FSCTL_GET_VOLUME_BITMAP`), stored as a file in the version, plus ESP/MSR/recovery partitions; restored **by the same agent from a Linux live system**: GPT with the same GUIDs (BCD keeps working), clusters written, `ntfsresize` for other sizes | **M–L**: 5–8k lines | different hardware (storage drivers: `storahci`/`stornvme` start type in the offline SYSTEM hive) **[U]**; BitLocker volumes come back decrypted; a cluster image doubles what the PC reads, though dedup limits what it sends **[U]**; no WinPE means no Windows-side repair tools |
+| later | TUI single-file restore; scheduled restore test in a VM (ABB's "verification"); fast incrementals from abb-agent's inode-table comparison instead of a stat walk; MBR disks; macOS **out of scope** (signed system volume, APFS snapshots, notarized .app, Full Disk Access) | | |
+
+Why no WinPE: Microsoft gives no redistribution licence for WinPE images. Vendors build the media on the customer's PC from the installed ADK (ABB) or from the local `Winre.wim` (Veeam, ABB manual mode). The Linux live system plus our agent avoids that, and it also keeps one restore code path. If phase 3 shows that Windows needs Windows tools, the fallback is a "create recovery media" button in the Windows agent that builds from the PC's own WinRE, never media we ship.
+
+## 6. Reuse from abb-agent
+
+abb-agent is **GPL-3.0-or-later**, workspace-wide. It has 133 commits: 132 are Marco's, and one external commit (#3, 4 lines in `abb-agent/src/stream.rs`) is in ABB-protocol code that is not reused. Marco can relicense his code to AGPL-3.0-or-later. Even without relicensing, GPL-3.0 §13 allows combining it with rynas' AGPL-3.0-or-later code.
+
+| Piece | Reuse |
 |---|---|
-| 2 | receiving btrbk backups (**done 2026-11-08, §10**) + console (btrbk-nas port); repositories per device served by rynas, append-only, maintenance on the NAS; manual pairing |
-| 2b | `rynas-agent` for Linux (pairing, plans, image engine from abb-agent, btrbk pull, manifest); `rynas-recovery` and bare metal for Linux; restore tested in a VM |
-| 3a | Windows: VSS, used-block bitmap, hashing then `$MFT` comparison; restore on the same hardware, then on different hardware |
-| 3b | macOS: files with restic |
-| 3 | scheduled restore tests in a VM, micro-VM browsing, XFS / LVM thin |
+| `abb-agent/scheduler.rs`, `control.rs` | the scheduler (boot, interval, retries, `only_if`, `wait_locks`) and clean stops on signals |
+| `abb-agent/volume.rs` | `Freeze` (FIFREEZE/FITHAW, thaw on drop, leftovers in `/run`, live-path checks) |
+| `abb-agent/disk.rs`, `ui.rs` | disk discovery by stable ids and `system`; the terminal progress bar |
+| `abb-agent/filerestore.rs` | restore to the PC (phase 2): temporary name + rename, `O_NOFOLLOW` |
+| `btrfs-image` (snapshot/capture parts) | read-only snapshots of every subvolume, cleanup, subvolume enumeration and exclusion rules |
+| `ext-image` | superblock and feature parsing for the manifest; later, inode-table comparison for fast incrementals |
+| `abb-restore/tui.rs`, `plan.rs`, `gpt.rs`, parts of `restore.rs` | TUI flow, disk mapping and guards, GPT writer (same GUIDs, backup GPT moved, last partition resized), EFI fallback copy |
+| packaging | static musl build, signed releases, AUR PKGBUILDs (`-bin` and source) |
+| not reused | `abb-proto` (Synology protocol), the block-image streaming and CBT (files are stored, not images) |
 
-Until phase 3a, Windows images are documented with UrBackup as a curated app.
+## 7. The current btrbk "PC" tab
 
-## 6. Main risks
+It **stays as it is**, renamed "PC snapshots (btrbk)". It is implemented, hardened by a security review, and useful for btrfs PCs that want readable snapshots on the NAS. It gets maintenance only. The plans for it in the earlier design are **dropped**:
+- pull mode with a filter shipped by the agent;
+- the btrbk-nas console port;
+- bare metal through btrbk.
 
-- Windows restore on different hardware (BCD, storage drivers).
-- BitLocker.
-- Correctness of an NTFS parser written by us.
-- Whether `rustic_core` exposes the low-level write API.
-- Prune memory on repositories of several TB (the 25 GB RSS seen on 5.7 TiB): one repository per device, `MemoryMax`, repacking in stages.
-- The Secure Boot chain for netboot.
-- Mounting untrusted images in the kernel.
-- The test burden: VM restore tests are mandatory before each release.
+The new restic-based "PC backup" tab becomes the recommended path, and the wizard says so. A PC may use both. Rewritten D-PCBACKUP text follows Marco's answers below.
 
-## 7. Mistakes to avoid
+## 8. Decisions for Marco
+
+1. **Storage: files (proposed) or images in the restic repository.** Files give web browsing for free, restore onto any disk size (shrink included, §3.2), and an emergency exit with stock restic. abb-agent-style images would give the fastest bare metal and exact filesystems, but browsing would mean parsing untrusted images on the NAS. *Recommendation: files; keep images as a later option only if restore times on real PCs disappoint.*
+2. **ext/XFS without LVM:** default "live + change detection" with opt-in "freeze up to N s" (proposed), or freeze by default with a short cap (30 s?). *Recommendation: live by default on desktops, freeze offered in the wizard for servers; suggest btrfs or LVM in the UI.*
+3. **NAS key in every repository** (proposed: NAS-side retention, web restore, restore codes) or zero-knowledge (prune and browsing through the PC, no web restore while the PC is off). *Recommendation: NAS key + recovery kit.*
+4. **Serve REST v2 from rynas** (proposed) or run rest-server behind a rynas proxy. *Recommendation: rynas; rest-server's global append-only and quota do not fit.*
+5. **Windows file engine:** `rustic_core` + our own VSS (one engine everywhere) or a bundled `restic.exe` (BSD-2, mature VSS and Windows metadata) driven by the agent. *Recommendation: decide at the start of phase 2 with a restore-fidelity test; lean towards restic.exe until rustic closes #635/#1986.*
+6. **Licence of the reused abb-agent code:** relicense to AGPL-3.0-or-later (simplest, one licence in the repository) or keep those files GPL-3.0-or-later. *Recommendation: relicense; Marco is the author of all reused code.*
+7. **Repository per PC (proposed) or shared with cross-PC dedup** (as ABB's global dedup). A shared repository cannot be append-only per PC, has one master key for all, and needs the 25 GB RSS prune seen on 5.7 TiB. *Recommendation: per PC.*
+8. **Agent distribution:** AUR + GitHub releases only (Marco's minimum), or also .deb/.rpm and an apt repository later. *Recommendation: AUR + releases in phase 1, .deb/.rpm files in the release (cheap); a repository when rynas has one (D-APPCAT).*
+9. **Code signing for Windows** (phase 2): a paid certificate, or Azure Trusted Signing. *Recommendation: decide before phase 2; unsigned installers trigger SmartScreen and AV.*
+
+## 9. Mistakes to avoid
 
 1. Recognising disks by kernel name.
-2. A layout hook that drifts from the tool.
-3. Credentials in clear on recovery media.
-4. Deleting the last common parent.
-5. Prune from two places, or with writes still open.
-6. Backups at boot racing with boot-time writes.
-7. A local configuration the package manager can overwrite.
-8. `btrfs property set ro false` on a restored snapshot.
-9. Saving the LUKS header in the backup.
-10. Never testing the restore on real hardware.
-
-## 8. Marco's decisions
-
-1. **Licence** of the abb-agent crates in rynas: relicensed to AGPL-3.0-or-later like rynas, or kept as a separate GPL component. He is the only author.
-2. **NAS key**: the NAS holds a key and can browse and run maintenance (recommended), or zero-knowledge, where the NAS sees nothing and maintenance and browsing go through the device.
-3. Confirm: no Windows CBT driver.
-
-Chosen by default, open to change:
-- restic format with 1 MiB chunks;
-- one repository per device;
-- image engine as the default proposal on Linux and Windows.
-
-## 9. Note for the next round (2026-11-07)
-
-Marco: "il motore restic vince su tutti in velocità e deduplica". For the next round:
-- **Deduplication:** agreed. Content-defined chunks, dedup across snapshots and across devices in a shared repository, zstd. This is why the image engine already stores into a restic-format repository: dedup is restic's in every case.
-- **Speed:** it depends on what is measured.
-  - Incremental backup of a large tree: restic still has to walk and `stat` every file, using the parent snapshot to skip unchanged files. `btrfs send` and changed-block tracking find the changes from the filesystem metadata without walking anything, so they win on millions of files.
-  - Bare-metal restore: streaming an image is faster than recreating millions of files.
-  - Prune memory on large repositories: the 25 GB RSS seen with rustic needs to be measured against restic.
-- **Option to evaluate:** restic as the single storage and dedup layer for everything (files and images), with btrbk only where the user wants readable btrfs snapshots on the NAS. To measure on pc-casa / pc-work data before deciding.
+2. Trusting the live system's `/proc/cmdline` in a chroot (§3.3).
+3. Writing to a frozen filesystem, logs and caches included (§3.1).
+4. Prune with writes open, or from two places.
+5. Credentials on removable media.
+6. Saving the LUKS header.
+7. A local agent configuration the package manager can overwrite.
+8. Depending on the live system's restic (0.14 on Debian 12).
+9. Never booting a restored machine: the VM test matrix runs before each agent release.
 
 ## 10. Implemented: receiving btrbk backups (phase 2, 2026-11-08)
 
@@ -398,20 +403,24 @@ The first slice of phase 2: Linux PCs push btrbk snapshots to the NAS (`target s
 - **Same-filesystem clones** (btrfs-receive BUGS): a malicious stream from a PC could reference extents of other files on the volume. The filter never lets a PC read anything back (no `send`, no `cat` of files), which limits this to the snapshot's own content seen by NAS administrators. A dedicated volume for PC backups removes it.
 - The account is shared, so a hole in the filter would reach every device folder through sudo (but only those folders, with the fixed forms above). Per-device accounts would make the sudoers lines per account; the folder check would stay the same.
 - **Real-btrbk test** (manual until automated): in a throwaway privileged container (`container=docker`, getty masked) with a loop-mounted btrfs image, install the .deb, add a device through the API, and from a second container with btrbk 0.32 push `btrbk run` to `ssh://nas/<root>`; check the ACCEPT lines in the auth log, then try by hand `ssh rynas-pcbackup@nas "btrfs receive '<root>/home.X/link'"` (REJECT), a future-named snapshot (`btrfs subvolume snapshot -r` named 2099, delete of a real one refused) and `sudo -l -U rynas-pcbackup` (only the per-folder lines). Outline: `packaging/test-pcbackup.sh`.
-- Pull mode (btrbk on the NAS, `--source` on the PC through `rynas-agent`) and the console of §3.7 (next incremental parent, chain-safe NAS-side deletion with the PC's UUID list as in btrbk-nas) are the next steps.
+- Pull mode and the btrbk-nas console port, once planned as next steps, are dropped (§7, 2026-11-11).
 - Space per device through qgroups is not done: `du` on demand only.
 
 Sources (2026-11-08): https://github.com/digint/btrbk/blob/v0.32.7/ssh_filter_btrbk.sh · https://github.com/digint/btrbk/blob/master/doc/ssh_filter_btrbk.1.asciidoc · https://github.com/digint/btrbk#setting-up-ssh · https://github.com/digint/btrbk/blob/master/doc/btrbk.conf.5.asciidoc · https://security-tracker.debian.org/tracker/CVE-2026-62943 · https://btrfs.readthedocs.io/en/latest/btrfs-receive.html · https://forums.urbackup.org/t/ho-do-you-add-clients/12848/6 · https://kb.synology.com/en-ca/DSM/tutorial/How_back_up_PC_physical_server_with_ABB · https://truenas.com/docs/core/coretutorials/systemconfiguration/configuringsshconnections/
 
 ## Sources
 
-- Marco's notes: Disaster Recovery PC-Casa (github.com/rylos/restore_btrfs_system), Disaster Recovery pc-work, abb-agent (github.com/rylos/abb-agent; local `~/dev/syno-abb`), btrbk-nas (github.com/rylos/btrbk-nas)
-- https://pbs.proxmox.com/docs/technical-overview.html · https://pbs.proxmox.com/docs/file-formats.html · https://pbs.proxmox.com/docs/backup-protocol.html · https://forum.proxmox.com/threads/proxmox-backup-client.164363/
-- https://urbackup.org/ · https://blog.urbackup.org/189/using-btrfs-on-linux-to-store-raw-image-files-in-an-efficient-manner · https://www.urbackup.org/CbtUserManual.pdf · https://github.com/datto/dattobd/releases
-- https://github.com/rear/rear/blob/master/doc/user-guide/06-layout-configuration.md · https://relax-and-recover.org/rear-user-guide/scenarios/restic.html
-- https://github.com/rustic-rs/rustic/releases · https://github.com/rustic-rs/rustic/issues/1412 · https://github.com/restic/restic/blob/master/doc/040_backup.rst
-- https://security-tracker.debian.org/tracker/CVE-2026-62943 · https://github.com/digint/btrbk/blob/v0.32.7/ssh_filter_btrbk.sh · https://github.com/digint/btrbk#restoring-backups
-- https://garethgeorge.github.io/backrest/docs/multihost · https://kopia.io/docs/repository-server/
-- https://lists.ipxe.org/pipermail/ipxe-devel/2025-November/007651.html · https://ipxe.org/secboot
-- https://learn.microsoft.com/windows-hardware/drivers/dashboard/code-signing-attestation
-- https://arqbackup.com/documentation/arq7/English.lproj/permissionRequirements.html · https://forum.restic.net/t/utilizing-macos-local-apfs-snapshots-for-restic-backups/4232 · https://talk.tidbits.com/t/carbon-copy-cloner-restore-limitations/26822
+Checked 2026-11-11 unless noted.
+
+- restic: https://github.com/restic/restic/releases/tag/v0.19.1 · https://restic.readthedocs.io/en/stable/040_backup.html · https://restic.readthedocs.io/en/stable/REST_backend.html · https://pkg.go.dev/github.com/restic/restic
+- rest-server: https://github.com/restic/rest-server/releases/tag/v0.14.0 · https://github.com/restic/rest-server/blob/master/handlers.go · https://github.com/restic/rest-server/blob/master/repo/repo.go
+- rustic: https://docs.rs/rustic_core · https://rustic.cli.rs/docs/FAQ.html · https://rustic.cli.rs/docs/comparison-restic.html · https://github.com/rustic-rs/rustic/issues/1412
+- Synology ABB: https://www.synology.com/en-global/dsm/7.4/software_spec/abb · https://kb.synology.com/en-in/DSM/help/ActiveBackup/activebackup_business_physicalserver_tasklist?version=7 · https://global.download.synology.com/download/Document/Software/AdminGuide/Package/ActiveBackup/All/enu/ABB_Recovery_Media_Creation_Guide_enu.pdf
+- Veeam: https://helpcenter.veeam.com/docs/agentforlinux/userguide/system_requirements.html · https://helpcenter.veeam.com/docs/agentforlinux/userguide/val_first_steps_iso.html · https://helpcenter.veeam.com/docs/agentforwindows/userguide/recovery_media.html · https://github.com/veeam/blksnap
+- UrBackup: https://www.urbackup.org/download.html · https://wwwold.urbackup.org/restore_changelog.html · https://www.urbackup.org/features.html
+- PBS client: https://pbs.proxmox.com/docs/backup-client.html
+- ReaR: https://github.com/rear/rear/releases · https://relax-and-recover.org/rear-user-guide/scenarios/restic.html · https://github.com/rear/rear/blob/master/doc/user-guide/06-layout-configuration.md
+- Clonezilla: https://clonezilla.org/downloads/stable/release-notes.php · Borg: https://borgbackup.readthedocs.io/en/2.0.0b20/usage/serve.html
+- Windows: https://learn.microsoft.com/en-us/windows/win32/vss/security-considerations-for-requestors · https://learn.microsoft.com/windows-hardware/drivers/dashboard/code-signing-attestation
+- fsfreeze: https://man7.org/linux/man-pages/man8/fsfreeze.8.html · Debian cloud images: https://cloud.debian.org/images/cloud/
+- abb-agent: https://github.com/rylos/abb-agent (README, 0.2.17) · Marco's notes: restore_btrfs_system, btrbk-nas
