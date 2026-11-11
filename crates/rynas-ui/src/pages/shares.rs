@@ -127,7 +127,7 @@ fn size_cell(path: &str, size: Option<ShareSize>, fss: &[rynas_api_types::Filesy
     };
     let Some(bytes) = z.bytes else {
         return view! {
-            <div class="cell-main" title=failed.unwrap_or_default()>
+            <div class="cell-main share-size" title=failed.unwrap_or_default()>
                 <span class="muted">"—"</span>
                 <span class="cell-sub">{note.or(volume)}</span>
             </div>
@@ -135,7 +135,9 @@ fn size_cell(path: &str, size: Option<ShareSize>, fss: &[rynas_api_types::Filesy
         .into_any();
     };
     let pct = capacity.map(|c| bytes as f64 * 100.0 / c as f64);
-    let text = if z.partial { tf("shares.size_min", &[("size", &i18n::bytes(bytes))]) } else { i18n::bytes(bytes) };
+    // number and unit stay together: a narrow column wraps "at least" above them instead
+    let size = i18n::bytes(bytes).replace(' ', "\u{a0}");
+    let text = if z.partial { tf("shares.size_min", &[("size", &size)]) } else { size };
     let vol_name = volume.clone().unwrap_or_else(|| t("shares.volume").to_string());
     let sub = note.or_else(|| match pct {
         Some(p) => Some(tf("shares.size_of_volume", &[("pct", &i18n::pct(p)), ("volume", &vol_name)])),

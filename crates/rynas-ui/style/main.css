@@ -1224,9 +1224,11 @@ kbd {
 /* the shared folders table has seven columns: a narrower path keeps it inside its card at 1024 px */
 .shares-table td.path-cell { min-width: 120px; }
 /* a share's own size: bar (its part of the volume) + size, the volume and notes below */
-.share-size { min-width: 132px; }
-.share-size .usage-cell { width: 100%; grid-template-columns: minmax(40px, 1fr) auto; }
-.share-size .usage-cell span { white-space: nowrap; }
+/* narrow enough for seven columns at 1024 px: "at least" wraps above the size (number and unit
+   are joined by a no-break space), notes wrap under it */
+.share-size { min-width: 108px; }
+.share-size .usage-cell { width: 100%; grid-template-columns: minmax(32px, 1fr) auto; }
+.share-size .usage-cell span { white-space: normal; overflow-wrap: normal; }
 .share-size .usage-cell > span:only-child { grid-column: 1 / -1; text-align: left; }
 /* NOCOW folders: state and action on one line; what the files give up, as bullets */
 .nocow-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
