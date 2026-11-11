@@ -236,6 +236,101 @@ nev.system.clock_drift.title	L'orologio sta andando alla deriva
 nev.system.clock_drift.body	L'orologio è a {offset} dal server dell'ora e non recupera. Controlla i server dell'ora.
 nev.system.clock_in_step.title	L'orologio è di nuovo allineato
 nev.system.clock_sync_off.title	La sincronizzazione automatica dell'ora è stata disattivata
+proc.title	Processi
+proc.subtitle	Cosa gira sul sistema, raggruppato per servizio, app e sessione
+proc.open_text	Ogni processo con CPU, memoria e disco usati; riavvia un servizio, cambia una priorità o ferma un processo.
+proc.search	Filtra per nome, comando, utente o app
+proc.view	Vista
+proc.view_groups	Gruppi
+proc.view_list	Elenco
+proc.view_tree	Albero
+proc.sort	Ordina per
+proc.sort_cpu	CPU
+proc.sort_mem	Memoria usata
+proc.sort_read	Letture dal disco
+proc.sort_write	Scritture sul disco
+proc.sort_age	Più vecchi prima
+proc.sort_name	Nome
+proc.summary	{n} processi · CPU {cpu} su {cores} core · {mem} di memoria nei processi
+proc.none	Nessun processo corrisponde al filtro.
+proc.col.name	Nome
+proc.col.user	Utente
+proc.col.cpu	CPU
+proc.col.memory	Memoria
+proc.col.disk	Disco
+proc.read	Lettura
+proc.write	Scrittura
+proc.g.session	Sessione di {user}
+proc.g.user	Servizi di {user}
+proc.g.kernel	Kernel
+proc.k.service	Servizio di sistema
+proc.k.container	Container
+proc.k.app	App
+proc.k.session	Sessione di accesso
+proc.k.user	Servizi dell'utente
+proc.k.kernel	Thread del kernel
+proc.k.system	Sistema
+proc.st.running	In esecuzione
+proc.st.sleeping	In attesa
+proc.st.disk_wait	In attesa del disco
+proc.st.stopped	Fermo
+proc.st.zombie	Terminato, non ancora raccolto
+proc.st.idle	Inattivo
+proc.st.other	Altro
+proc.cpu_graph	CPU di questo processo
+proc.mem_graph	Memoria di questo processo
+proc.cpu_aria	CPU del processo: {v}
+proc.mem_aria	Memoria del processo: {v}
+proc.f.group	Appartiene a
+proc.f.rss	Memoria (residente)
+proc.f.pss	Memoria (quota propria)
+proc.f.swap	In swap
+proc.f.io_total	Letti / scritti dall'avvio
+proc.f.threads	Thread
+proc.f.nice	Nice
+proc.f.parent	Processo padre
+proc.f.started	Avviato
+proc.f.ports	In ascolto su
+proc.f.exe	Programma
+proc.f.cgroup	Gruppo di controllo
+proc.f.cmdline	Riga di comando
+proc.io_normal	Normale
+proc.io_idle	Solo quando il disco è libero
+proc.io_be	Normale, livello {level}
+proc.io_rt	Tempo reale, livello {level}
+proc.ended	Questo processo è terminato.
+proc.protected	Il sistema o rynas ha bisogno di questo processo: da qui non si può fermare né cambiare.
+proc.in_service	Questo processo appartiene al servizio {name}: se lo fermi, il sistema lo riavvia. Riavvia invece il servizio.
+proc.in_container	Questo processo gira nel container {name}. Di solito la soluzione giusta è riavviare il container.
+proc.restart_svc	Riavvia il servizio
+proc.restart_ct	Riavvia il container
+proc.restart_svc_title	Riavviare {name}?
+proc.restart_ct_title	Riavviare il container {name}?
+proc.restart_svc_text	Il servizio si ferma e riparte. Chi lo sta usando viene disconnesso per un momento.
+proc.restart_ct_text	Il container si ferma e riparte; la sua app non risponde per un momento.
+proc.restarted	Riavviato
+proc.priority	Priorità
+proc.cpu_prio	Priorità CPU
+proc.io_prio	Accesso al disco
+proc.prio_high	Alta
+proc.prio_above	Sopra il normale
+proc.prio_normal	Normale
+proc.prio_low	Bassa
+proc.prio_lowest	Minima
+proc.prio_custom	Ora impostata a mano a nice {nice}.
+proc.prio_apply	Cambia priorità
+proc.prio_done	Priorità cambiata
+proc.stop	Ferma il processo
+proc.stop_help	Termina chiede al processo di chiudersi; Uccidi lo chiude subito, senza salvare niente.
+proc.term	Termina
+proc.kill	Uccidi
+proc.term_title	Terminare {name}?
+proc.kill_title	Uccidere {name}?
+proc.term_text	Al processo viene chiesto di chiudersi. Il lavoro non salvato può andare perso.
+proc.kill_text	Il processo termina subito, senza chiudere i suoi file. Usalo solo quando Termina non funziona.
+proc.signal_sent	Inviato al processo
+task.processes.restart-service	Riavvio di un servizio
+err.process_protected	Il sistema o rynas ha bisogno di questo processo: non si può fermare né cambiare.
 mem.title	Memoria
 mem.subtitle	Swap compresso in RAM
 mem.open_text	zram: swap compresso in RAM, con i valori consigliati per questo sistema.

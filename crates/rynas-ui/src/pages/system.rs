@@ -114,6 +114,14 @@ pub fn System() -> impl IntoView {
                     <a class="btn ghost" href="/system/memory">{tr("open")}<Icon icon=icons::CHEVRON_RIGHT size=16 /></a>
                 </section>
                 <section class="card widget w-12 link-card" style="--i:2">
+                    <span class="w-icon"><Icon icon=icons::ACTIVITY size=18 /></span>
+                    <div class="link-card-text">
+                        <h2 class="w-title">{tr("proc.title")}</h2>
+                        <p class="muted small">{tr("proc.open_text")}</p>
+                    </div>
+                    <a class="btn ghost" href="/system/processes">{tr("open")}<Icon icon=icons::CHEVRON_RIGHT size=16 /></a>
+                </section>
+                <section class="card widget w-12 link-card" style="--i:2">
                     <span class="w-icon"><Icon icon=icons::DOWNLOAD size=18 /></span>
                     <div class="link-card-text">
                         <h2 class="w-title">{tr("upd.title")}</h2>

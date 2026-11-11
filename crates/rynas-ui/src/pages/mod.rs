@@ -10,6 +10,7 @@ pub mod hardware;
 pub mod notifications;
 pub mod scheduler;
 pub mod memory;
+pub mod processes;
 pub mod network;
 pub mod replication;
 pub mod security;

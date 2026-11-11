@@ -497,6 +497,49 @@ pub fn LiveChart(
     view! { <canvas node_ref=node class=class role="img" aria-label=aria></canvas> }
 }
 
+/// A still chart of series the page keeps itself (not the metrics history, e.g. one process's
+/// CPU): drawn again when `data` changes, with the newest sample on the right edge and no
+/// animation loop. `data`: timestamps (ms) and one value list per entry of `colors`.
+#[component]
+pub fn StillChart(
+    colors: &'static [&'static str],
+    data: Signal<(Vec<f64>, Vec<Vec<f32>>)>,
+    #[prop(optional)] max: Option<f32>,
+    #[prop(default = 150)] points: usize,
+    #[prop(optional)] label: Option<fn(f32) -> String>,
+    #[prop(optional)] binary: bool,
+    aria: Signal<String>,
+) -> impl IntoView {
+    let ui = use_ui();
+    let node = NodeRef::<Canvas>::new();
+    let opts = Opts { max, points, grid: true, label, binary };
+    let series = StoredValue::new(colors.iter().map(|c| Series::new(c, true, |_| 0.0)).collect::<Vec<_>>());
+    let theme = StoredValue::new(None::<(bool, Vec<String>, String, String)>);
+    let top = StoredValue::new(0f32);
+    Effect::new(move || {
+        let (ts, vals) = data.get();
+        let dark = ui.dark.get();
+        ui.layout_tick.track();
+        let Some(canvas) = node.get() else { return };
+        if !theme.with_value(|t| t.as_ref().is_some_and(|t| t.0 == dark)) {
+            let style = window().get_computed_style(&canvas).ok().flatten();
+            let var = |name: &str| style.as_ref().and_then(|s| s.get_property_value(name).ok()).unwrap_or_default();
+            let cs: Vec<String> = colors.iter().map(|c| var(c)).collect();
+            if cs.iter().all(|c| !c.is_empty()) {
+                theme.set_value(Some((dark, cs, var("--chart-grid"), var("--text-subtle"))));
+            }
+        }
+        let (colors, grid, label) = theme.with_value(|t| t.as_ref().map(|t| (t.1.clone(), t.2.clone(), t.3.clone()))).unwrap_or_default();
+        let (w, h, dpr) = (canvas.client_width() as f64, canvas.client_height() as f64, window().device_pixel_ratio().max(1.0));
+        let snap = Snap { ts, data: vals, colors, grid, label, still: true, w, h, dpr };
+        let t = next_top(peak(&snap), top.get_value(), opts.max, opts.binary);
+        top.set_value(t);
+        let edge = snap.ts.last().copied().unwrap_or(0.0);
+        series.with_value(|ss| draw(&canvas, ss, &snap, opts, edge, t, t));
+    });
+    view! { <canvas node_ref=node class="chart" role="img" aria-label=aria></canvas> }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
