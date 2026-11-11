@@ -1769,7 +1769,7 @@ ssh.n_keys	chiavi: {n}
 ssh.keys_unread	chiavi non lette (disco in standby)
 ssh.tcp	Inoltro delle porte
 ssh.tcp_help	Tunnel attraverso SSH (ssh -L, -R, SOCKS). Lascialo spento se non serve.
-ssh.agent	Inoltro dell'agent
+ssh.agent	Inoltro dell'agente SSH
 ssh.agent_help	Le sessioni possono usare le chiavi del computer che si collega.
 ssh.x11	Inoltro X11
 ssh.x11_help	Programmi grafici via SSH; raramente utile su un NAS.
@@ -1808,6 +1808,11 @@ ssh.key_new_help	La riga del file .pub, ad es. creata con ssh-keygen -t ed25519.
 ssh.key_add	Aggiungi chiave
 ssh.key_added	Chiave aggiunta.
 ssh.key_removed	Chiave rimossa.
+ssh.key_remove_title	Rimuovere la chiave {name}?
+ssh.key_remove_text	Chi usa questa chiave non potrà più entrare come {user}.
+ssh.other_lines	Il file ha anche {n} righe che non sono chiavi (commenti o altre voci): restano come sono e non si gestiscono da qui.
+ssh.logins_all	Mostra tutti ({n})
+ssh.logins_fewer	Mostra meno
 ssh.p.not_installed	Il server SSH non è installato: `apt install openssh-server`.
 ssh.p.not_included	`/etc/ssh/sshd_config` non include `sshd_config.d/*.conf`: queste impostazioni non vengono lette. Rimetti quella riga.
 ssh.p.overridden	Anche `{file}` imposta `{key}`: vale il suo valore invece di quello di questa pagina.

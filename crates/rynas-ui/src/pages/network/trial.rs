@@ -418,7 +418,7 @@ pub fn banner(net: Net) -> AnyView {
                         <p>{text}</p>
                         <p class="muted small">{move || trial.with(|t| t.as_ref().map(|t| tf("net.booted_planned", &[("user", &t.author)])))}</p>
                     </div>
-                    <div class="net-trial-count tnum" aria-hidden="true">{move || clock(left.get())}</div>
+                    <div class="net-trial-count tnum" class:urgent=move || left.get() <= 30 aria-hidden="true">{move || clock(left.get())}</div>
                     <span class="sr-only" aria-live="polite">{move || tf("net.booted_left_sr", &[("n", &spoken.get().to_string())])}</span>
                 </div>
                 {crate::form::form_error(tl.error)}
@@ -466,7 +466,7 @@ pub fn banner(net: Net) -> AnyView {
                         <p>{text}</p>
                         <p class="muted small">{who}</p>
                     </div>
-                    <div class="net-trial-count tnum" aria-hidden="true" hidden=skip>{move || clock(left.get())}</div>
+                    <div class="net-trial-count tnum" class:urgent=move || left.get() <= 30 aria-hidden="true" hidden=skip>{move || clock(left.get())}</div>
                     <span class="sr-only" aria-live="polite">{move || (!skip()).then(|| tf("net.left_sr", &[("n", &spoken.get().to_string())]))}</span>
                 </div>
                 <div hidden=skip><Meter pct=pct tone=tone /></div>

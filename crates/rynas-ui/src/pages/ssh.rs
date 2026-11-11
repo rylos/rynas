@@ -11,11 +11,13 @@ use crate::form::{Draft, In, lens, lens_bool, select_field, stale_notice, switch
 use crate::i18n::{t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::toast::toast;
-use crate::ui::{self, Meter, PageHeader, Remote, Skeleton, Tone, WidgetHead};
+use crate::ui::{self, Confirm, Meter, PageHeader, Remote, Skeleton, Tone, WidgetHead, confirm};
 
 const URL: &str = "/api/v1/services/ssh";
 const ROOT_OPTS: &[(&str, &str)] = &[("no", "ssh.root_no"), ("keys", "ssh.root_keys"), ("yes", "ssh.root_yes")];
 const ALLOW_OPTS: &[(&str, &str)] = &[("everyone", "ssh.allow_everyone"), ("listed", "ssh.allow_listed")];
+/// Logins listed before "show all".
+const LOGINS_SHOWN: usize = 12;
 
 fn root_str(r: SshRootLogin) -> String {
     match r {
@@ -63,11 +65,27 @@ struct Page {
     /// Local time of the deadline of my own trial (`Date.now()` + timeout at the answer).
     local_deadline: RwSignal<Option<f64>>,
     now: RwSignal<f64>,
+    /// The account of the keys card: kept across the reloads that rebuild the card.
+    key_user: RwSignal<Option<String>>,
 }
 
 #[component]
 pub fn SshPage() -> impl IntoView {
-    let pg = Page { st: Remote::<SshState>::new(URL), local_deadline: RwSignal::new(None), now: RwSignal::new(js_sys::Date::now()) };
+    let pg = Page {
+        st: Remote::<SshState>::new(URL),
+        local_deadline: RwSignal::new(None),
+        now: RwSignal::new(js_sys::Date::now()),
+        key_user: RwSignal::new(None),
+    };
+    // the accounts of the keys card: a reload after a key change (other counts, same names)
+    // does not rebuild it
+    let key_names = Memo::new(move |_| {
+        pg.st.data.with(|s| {
+            s.as_ref()
+                .map(|s| s.accounts.iter().filter(|a| a.level != SshLevel::None || a.uid == 0).map(|a| a.name.clone()).collect::<Vec<_>>())
+                .unwrap_or_default()
+        })
+    });
     // the countdown and a read every 5 s while a change waits
     let tick = StoredValue::new(0u32);
     if let Ok(h) = set_interval_with_handle(
@@ -102,24 +120,25 @@ pub fn SshPage() -> impl IntoView {
                         settings_form(pg, s.settings)
                     })}
                 </section>
-                <section class="card widget w-6">
+                <section class="card widget w-6 self-start">
                     <WidgetHead icon=icons::SHIELD_CHECK title="ssh.host_keys" />
                     {move || pg.st.gate(3).unwrap_or_else(|| host_keys(pg))}
                 </section>
-                <section class="card widget w-6">
+                <section class="card widget w-6 self-start">
                     <WidgetHead icon=icons::SCROLL_TEXT title="ssh.logins" />
                     {logins()}
                 </section>
                 <section class="card widget w-12">
                     <WidgetHead icon=icons::KEY title="ssh.keys" />
-                    {move || pg.st.gate(4).unwrap_or_else(|| keys_card(pg))}
+                    {move || pg.st.gate(4).unwrap_or_else(|| keys_card(pg, key_names.get()))}
                 </section>
             </div>
         </div>
     }
 }
 
-fn status_pill(s: &SshState) -> AnyView {
+/// Off, stopped or running (on which ports): the settings card and the Services page.
+pub(crate) fn status_pill(s: &SshState) -> AnyView {
     match (s.installed, s.settings.enabled, s.running) {
         (false, _, _) => ui::status(Tone::Unknown, t("wa.eng.not_installed").to_string()),
         (_, _, true) => ui::status(Tone::Ok, tf("ssh.running_on", &[("ports", &s.ports.iter().map(u16::to_string).collect::<Vec<_>>().join(", "))])),
@@ -187,13 +206,13 @@ fn trial_banner(pg: Page) -> Option<AnyView> {
                         <h2 id="ssh-trial-h">{tr("ssh.trial_title")}</h2>
                         <p>{if mine { t("ssh.trial_text").to_string() } else { tf("ssh.trial_other", &[("user", &trial.owner)]) }}</p>
                     </div>
-                    <div class="net-trial-count tnum" aria-hidden="true">{move || clock(left.get())}</div>
+                    <div class="net-trial-count tnum" class:urgent=move || left.get() <= 30 aria-hidden="true">{move || clock(left.get())}</div>
                     <span class="sr-only" aria-live="polite">{move || tf("ssh.left_sr", &[("n", &spoken.get().to_string())])}</span>
                 </div>
                 <Meter pct=pct tone=tone />
                 {mine.then(|| view! {
                     <div class="repl-copy">
-                        <code class="secret mono">{cmd.clone()}</code>
+                        <code class="secret mono ssh-cmd">{cmd.clone()}</code>
                         {crate::pages::security::copy_button("ssh.copy", cmd.clone())}
                     </div>
                 })}
@@ -357,11 +376,16 @@ fn host_keys(pg: Page) -> AnyView {
     }
     view! {
         <p class="muted small">{tr("ssh.host_keys_help")}</p>
-        <dl>
+        <ul class="plain-list ssh-hostkeys">
             {keys.into_iter().map(|k| view! {
-                <div class="kv"><dt>{format!("{} {}", k.kind, k.bits)}</dt><dd class="mono">{k.fingerprint}</dd></div>
+                <li class="ssh-key">
+                    <div class="ssh-key-text">
+                        <span class="cell-main">{format!("{} {}", k.kind, k.bits)}</span>
+                        <code class="cell-sub muted small mono ssh-fp">{k.fingerprint}</code>
+                    </div>
+                </li>
             }).collect_view()}
-        </dl>
+        </ul>
     }
     .into_any()
 }
@@ -378,15 +402,18 @@ fn kind_key(k: SshLoginKind) -> &'static str {
 
 fn logins() -> AnyView {
     let r = Remote::<SshLogins>::new(format!("{URL}/logins"));
+    let all = RwSignal::new(false);
     r.view(4, move || {
         let l = r.data.get().unwrap_or_default();
+        let total = l.events.len();
+        let shown = if all.get() { total } else { total.min(LOGINS_SHOWN) };
         let top = l.top_failed.iter().map(|(a, n)| format!("{a} ({n})")).collect::<Vec<_>>().join(", ");
         view! {
             <p class="small">{tf("ssh.logins_sum", &[("ok", &l.accepted.to_string()), ("failed", &l.failed.to_string())])}</p>
             {(!top.is_empty()).then(|| view! { <p class="muted small">{tf("ssh.logins_top", &[("list", &top)])}</p> })}
             {l.since_ms.map(|at| view! { <p class="muted small">{tf("ssh.logins_since", &[("when", &crate::i18n::datetime(at))])}</p> })}
             <ul class="plain-list ssh-events">
-                {l.events.into_iter().take(12).map(|e| {
+                {l.events.into_iter().take(shown).map(|e| {
                     let sub = format!("{} · {}{}", crate::i18n::datetime(e.at_ms), e.address, if e.method.is_empty() { String::new() } else { format!(" · {}", e.method) });
                     let icon = if e.kind == SshLoginKind::Accepted { icons::CIRCLE_CHECK } else { icons::CIRCLE_X };
                     view! {
@@ -397,7 +424,14 @@ fn logins() -> AnyView {
                     }
                 }).collect_view()}
             </ul>
-            <div class="card-actions"><button type="button" class="btn ghost sm" on:click=move |_| r.reload()><Icon icon=icons::REFRESH_CW size=14 />{tr("ssh.refresh")}</button></div>
+            <div class="card-actions">
+                <button type="button" class="btn ghost sm" on:click=move |_| r.reload()><Icon icon=icons::REFRESH_CW size=14 />{tr("ssh.refresh")}</button>
+                {(total > LOGINS_SHOWN).then(|| view! {
+                    <button type="button" class="btn ghost sm" aria-expanded=move || all.get().to_string() on:click=move |_| all.update(|a| *a = !*a)>
+                        {move || if all.get() { t("ssh.logins_fewer").to_string() } else { tf("ssh.logins_all", &[("n", &total.to_string())]) }}
+                    </button>
+                })}
+            </div>
         }
         .into_any()
     })
@@ -405,37 +439,55 @@ fn logins() -> AnyView {
 
 // ------------------------------------------------------------------ keys
 
-fn keys_card(pg: Page) -> AnyView {
-    let names: Vec<(String, String)> = pg.st.data.with(|s| {
-        s.as_ref().map(|s| s.accounts.iter().filter(|a| a.level != SshLevel::None || a.uid == 0).map(|a| (a.name.clone(), a.name.clone())).collect()).unwrap_or_default()
-    });
+/// The key a removal waits to confirm: account, fingerprint and the name shown.
+#[derive(Clone)]
+struct Removal {
+    user: String,
+    fingerprint: String,
+    title: String,
+}
+
+fn keys_card(pg: Page, names: Vec<String>) -> AnyView {
     if names.is_empty() {
         return ui::note(Tone::Info, icons::INFO, ui::text(t("ssh.no_accounts").to_string()));
     }
-    let first = names.iter().find(|(n, _)| *n == me()).or_else(|| names.iter().find(|(n, _)| n != "root")).unwrap_or(&names[0]).0.clone();
+    // the account chosen before (still listed), else my own, else the first that is not root
+    let first = pg
+        .key_user
+        .get_untracked()
+        .filter(|u| names.contains(u))
+        .or_else(|| names.iter().find(|n| **n == me()).cloned())
+        .or_else(|| names.iter().find(|n| *n != "root").cloned())
+        .unwrap_or_else(|| names[0].clone());
     let who = RwSignal::new(first);
     let list = RwSignal::new(None::<Result<SshKeyList, String>>);
     let load = move || {
         let u = who.get_untracked();
         spawn_local(async move {
-            let r = api::get::<SshKeyList>(&format!("{URL}/keys/{u}")).await.map_err(|e| e.text());
-            let _ = list.try_set(Some(r));
+            let r = api::get::<SshKeyList>(&format!("{URL}/keys/{}", api::encode(&u))).await.map_err(|e| e.text());
+            // an answer for an account no longer selected is dropped
+            if who.try_with_untracked(|w| *w == u).unwrap_or(false) {
+                let _ = list.try_set(Some(r));
+            }
         });
     };
     Effect::new(move |_| {
-        who.track();
+        pg.key_user.set(Some(who.get()));
         load();
     });
     let new_key = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let add = move || {
+        if busy.get_untracked() {
+            return;
+        }
         let (u, key) = (who.get_untracked(), new_key.get_untracked());
         busy.set(true);
         error.set(None);
         spawn_local(async move {
-            let r = api::post::<_, SshKey>(&format!("{URL}/keys/{u}"), Some(&SshKeyAdd { key })).await;
-            busy.set(false);
+            let r = api::post::<_, SshKey>(&format!("{URL}/keys/{}", api::encode(&u)), Some(&SshKeyAdd { key })).await;
+            let _ = busy.try_set(false);
             match r {
                 Ok(_) => {
                     new_key.set(String::new());
@@ -443,64 +495,106 @@ fn keys_card(pg: Page) -> AnyView {
                     load();
                     pg.st.reload();
                 }
-                Err(e) => error.set(Some(e.text())),
-            }
-        });
-    };
-    let remove = move |fp: String| {
-        let u = who.get_untracked();
-        spawn_local(async move {
-            let r = api::post_empty(&format!("{URL}/keys/{u}/remove"), Some(&SshKeyRemove { fingerprint: fp })).await;
-            match r {
-                Ok(()) => {
-                    toast(Tone::Ok, t("ssh.key_removed").to_string());
-                    load();
-                    pg.st.reload();
+                Err(e) => {
+                    let _ = error.try_set(Some(e.text()));
                 }
-                Err(e) => toast(Tone::Err, e.text()),
             }
         });
     };
-    let opts = names.clone();
+    let del = RwSignal::new(None::<Removal>);
+    let deleter = move || {
+        del.get().map(|k| {
+            let busy = RwSignal::new(false);
+            let error = RwSignal::new(None::<String>);
+            let close = Callback::new(move |_| del.set(None));
+            let title = tf("ssh.key_remove_title", &[("name", &k.title)]);
+            confirm(Confirm {
+                title,
+                text: tf("ssh.key_remove_text", &[("user", &k.user)]),
+                action: "ssh.key_remove",
+                danger: true,
+                extra: None,
+                typed: Signal::stored(None),
+                busy,
+                error,
+                on_confirm: Callback::new(move |_| {
+                    if busy.get_untracked() {
+                        return;
+                    }
+                    busy.set(true);
+                    let k = k.clone();
+                    spawn_local(async move {
+                        let url = format!("{URL}/keys/{}/remove", api::encode(&k.user));
+                        let r = api::post_empty(&url, Some(&SshKeyRemove { fingerprint: k.fingerprint })).await;
+                        let _ = busy.try_set(false);
+                        match r {
+                            Ok(()) => {
+                                toast(Tone::Ok, t("ssh.key_removed").to_string());
+                                close.run(());
+                                load();
+                                pg.st.reload();
+                            }
+                            Err(e) => {
+                                let _ = error.try_set(Some(e.text()));
+                            }
+                        }
+                    });
+                }),
+                on_cancel: close,
+            })
+        })
+    };
     view! {
         <div class="form">
             <div class="field">
                 <label class="field-label" for="ssh-key-user">{tr("ssh.account")}</label>
                 <select id="ssh-key-user" class="input" on:change=move |ev| who.set(event_target_value(&ev))>
-                    {opts.into_iter().map(|(v, l)| {
-                        let v2 = v.clone();
-                        view! { <option value=v selected=move || who.with(|w| *w == v2)>{l}</option> }
+                    {names.into_iter().map(|v| {
+                        let (v2, label) = (v.clone(), v.clone());
+                        view! { <option value=v selected=move || who.with(|w| *w == v2)>{label}</option> }
                     }).collect_view()}
                 </select>
             </div>
             {move || match list.get() {
                 None => view! { <Skeleton lines=2 /> }.into_any(),
                 Some(Err(e)) => ui::note(Tone::Err, icons::CIRCLE_X, ui::err_view(e)),
-                Some(Ok(l)) if l.keys.is_empty() => view! { <p class="muted">{tr("ssh.no_keys")}</p> }.into_any(),
-                Some(Ok(l)) => view! {
-                    <ul class="plain-list ssh-keys">
-                        {l.keys.into_iter().map(|k| {
-                            let fp = k.fingerprint.clone();
-                            let title = if k.comment.is_empty() { k.kind.clone() } else { k.comment.clone() };
-                            let mut sub = format!("{} {} · {}", k.kind, k.bits, k.fingerprint);
-                            if k.options {
-                                sub.push_str(&format!(" · {}", t("ssh.key_options")));
-                            }
-                            view! {
-                                <li class="ssh-key">
-                                    <div class="ssh-key-text">
-                                        <span class="cell-main">{title}{k.weak.then(|| view! { " " <span class="chip warn-chip">{tr("ssh.key_weak")}</span> })}</span>
-                                        <span class="cell-sub muted small mono">{sub}</span>
-                                    </div>
-                                    <button type="button" class="icon-btn sm" title=tr("ssh.key_remove") aria-label=tr("ssh.key_remove") on:click=move |_| remove(fp.clone())>
-                                        <Icon icon=icons::TRASH_2 size=16 />
-                                    </button>
-                                </li>
-                            }
-                        }).collect_view()}
-                    </ul>
-                }.into_any(),
+                Some(Ok(l)) => {
+                    let others = (l.other_lines > 0).then(|| ui::note(Tone::Info, icons::INFO, ui::text(tf("ssh.other_lines", &[("n", &l.other_lines.to_string())]))));
+                    let keys = if l.keys.is_empty() {
+                        view! { <p class="muted">{tr("ssh.no_keys")}</p> }.into_any()
+                    } else {
+                        let user = l.user.clone();
+                        view! {
+                            <ul class="plain-list ssh-keys">
+                                {l.keys.into_iter().map(|k| {
+                                    let title = if k.comment.is_empty() { k.kind.clone() } else { k.comment.clone() };
+                                    let mut sub = format!("{} {} · {}", k.kind, k.bits, k.fingerprint);
+                                    if k.options {
+                                        sub.push_str(&format!(" · {}", t("ssh.key_options")));
+                                    }
+                                    let label = format!("{} {}", t("ssh.key_remove"), title);
+                                    let r = Removal { user: user.clone(), fingerprint: k.fingerprint.clone(), title: title.clone() };
+                                    view! {
+                                        <li class="ssh-key">
+                                            <div class="ssh-key-text">
+                                                <span class="cell-main">{title}{k.weak.then(|| view! { " " <span class="chip warn-chip">{tr("ssh.key_weak")}</span> })}</span>
+                                                <span class="cell-sub muted small mono">{sub}</span>
+                                            </div>
+                                            <button type="button" class="icon-btn sm danger" title=tr("ssh.key_remove") aria-label=label
+                                                disabled=move || del.with(Option::is_some) on:click=move |_| del.set(Some(r.clone()))>
+                                                <Icon icon=icons::TRASH_2 size=16 />
+                                            </button>
+                                        </li>
+                                    }
+                                }).collect_view()}
+                            </ul>
+                        }
+                        .into_any()
+                    };
+                    view! { {keys}{others} }.into_any()
+                }
             }}
+            {deleter}
             <form class="form" on:submit=move |ev| { ev.prevent_default(); add(); }>
                 <div class="field">
                     <label class="field-label" for="ssh-new-key">{tr("ssh.key_new")}</label>

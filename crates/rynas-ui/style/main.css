@@ -1658,6 +1658,10 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .ssh-acct:first-child, .ssh-key:first-child { border-top: 0; }
 .ssh-acct > svg { flex: none; }
 .ssh-acct .cell-main, .ssh-key-text { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow-wrap: anywhere; }
+/* a host key's fingerprint under its type, one line at desktop widths */
+.ssh-fp { font-size: var(--fs-12); background: none; padding: 0; }
+/* the login command breaks at its spaces only (never inside user@host, unless that alone is too long) */
+.secret.ssh-cmd { word-break: normal; overflow-wrap: break-word; }
 .repl-keys li, .repl-browse .ellipsis-cell { overflow-wrap: anywhere; }
 /* a host key: type over its fingerprint, which breaks anywhere instead of widening the drawer */
 .repl-key { display: flex; flex-direction: column; gap: var(--s-1); min-width: 0; }
@@ -1690,7 +1694,8 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .net-trial.calm .net-trial-icon { color: var(--info); background: color-mix(in oklch, var(--info) 12%, var(--surface)); }
 .net-trial-text { flex: 1 1 320px; min-width: 0; display: flex; flex-direction: column; gap: var(--s-1); }
 .net-trial-text h2 { font-size: var(--fs-20); letter-spacing: -.01em; }
-.net-trial-count { font-size: var(--fs-32); font-weight: 700; line-height: 1; letter-spacing: -.02em; color: var(--warning); min-width: 4ch; text-align: right; }
+.net-trial-count { font-size: var(--fs-32); font-weight: 700; line-height: 1; letter-spacing: -.02em; color: var(--warning); min-width: 4ch; text-align: right; margin-left: auto; }
+.net-trial-count.urgent { color: var(--danger); }
 .net-trial .meter { height: 8px; }
 .net-trial-actions { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; }
 .btn.lg { height: 44px; padding: 0 var(--s-6); font-size: var(--fs-16); }
@@ -1721,7 +1726,9 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .net-table td { vertical-align: top; padding-top: var(--s-2); padding-bottom: var(--s-2); }
 @media (max-width: 767px) {
   .net-trial { padding: var(--s-4); }
+  /* icon and countdown on the first row (the countdown at the right), the text under them */
   .net-trial-count { font-size: var(--fs-24); }
+  .net-trial-text { order: 1; flex-basis: 100%; }
   .net-trial-actions .btn { flex: 1 1 100%; justify-content: center; }
 }
 

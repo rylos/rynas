@@ -35,18 +35,12 @@ pub fn FileServices() -> impl IntoView {
     let smb = Remote::<SmbState>::with_config("/api/v1/services/smb");
     let nfs = Remote::<NfsState>::with_config("/api/v1/services/nfs");
     let shares = Remote::<Vec<ShareView>>::with_config("/api/v1/shares");
+    // only for the SSH card's state (running, stopped, off)
+    let ssh = Remote::<rynas_api_types::ssh::SshState>::new("/api/v1/services/ssh");
     view! {
         <div class="page">
             <PageHeader icon=icons::SERVER title="svc.title" subtitle="svc.subtitle" />
             <div class="grid">
-                <section class="card widget w-12 link-card">
-                    <span class="w-icon"><Icon icon=icons::COMMAND size=18 /></span>
-                    <div class="link-card-text">
-                        <h2 class="w-title">{tr("ssh.title")}</h2>
-                        <p class="muted small">{tr("ssh.open_text")}</p>
-                    </div>
-                    <a class="btn ghost" href="/services/ssh">{tr("open")}<Icon icon=icons::CHEVRON_RIGHT size=16 /></a>
-                </section>
                 <section class="card widget w-6">
                     <WidgetHead icon=icons::SHARE_2 title="svc.smb">
                         {move || smb.data.with(|s| s.as_ref().map(|s| view! { {running_pill(s.settings.enabled, s.running)}{s.pending.then(|| ui::status(Tone::Info, t("pending.change").to_string()))} }))}
@@ -69,6 +63,15 @@ pub fn FileServices() -> impl IntoView {
                 <section class="card widget w-12">
                     <WidgetHead icon=icons::LIST_CHECKS title="svc.exports" />
                     {move || shares.gate(3).unwrap_or_else(|| exports(shares))}
+                </section>
+                <section class="card widget w-12 link-card">
+                    <span class="w-icon"><Icon icon=icons::COMMAND size=18 /></span>
+                    <div class="link-card-text">
+                        <h2 class="w-title">{tr("ssh.title")}</h2>
+                        <p class="muted small">{tr("ssh.open_text")}</p>
+                    </div>
+                    {move || ssh.data.with(|s| s.as_ref().map(crate::pages::ssh::status_pill))}
+                    <a class="btn ghost" href="/services/ssh">{tr("open")}<Icon icon=icons::CHEVRON_RIGHT size=16 /></a>
                 </section>
             </div>
         </div>
