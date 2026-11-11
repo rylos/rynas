@@ -114,9 +114,46 @@ pub fn subvolume_name(n: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
 }
 
+/// A time server: a DNS name (letters, digits, `-`, `.`, `_`; at most 253 bytes, labels of
+/// 1-63) or an IPv4/IPv6 address. Nothing else reaches a daemon's configuration line.
+pub fn ntp_server(s: &str) -> bool {
+    if s.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    !s.is_empty()
+        && s.len() <= 253
+        && !s.starts_with(['-', '.'])
+        && s.split('.').all(|l| {
+            !l.is_empty()
+                && l.len() <= 63
+                && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        })
+}
+
+/// IANA time zone name as a path below the zoneinfo folder: `Region/City`, `UTC`; segments of
+/// `[A-Za-z0-9_+-]`, never `.`/`..`.
+pub fn time_zone(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.split('/').all(|p| {
+            !p.is_empty()
+                && p.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric())
+                && p.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'+' | b'-'))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn time_names() {
+        assert!(ntp_server("0.debian.pool.ntp.org") && ntp_server("192.0.2.1") && ntp_server("2001:db8::1"));
+        assert!(ntp_server("ntp") && !ntp_server("") && !ntp_server("a..b") && !ntp_server("-x"));
+        assert!(!ntp_server("pool.ntp.org iburst") && !ntp_server("x\nserver y") && !ntp_server("a/b"));
+        assert!(time_zone("Europe/Rome") && time_zone("UTC") && time_zone("America/Argentina/Buenos_Aires"));
+        assert!(time_zone("Etc/GMT+5") && !time_zone("../etc/passwd") && !time_zone("Europe/") && !time_zone("a b"));
+    }
 
     #[test]
     fn names() {

@@ -1002,6 +1002,10 @@ fn main() -> std::io::Result<()> {
             zram: Arc::new(rynasd::zram::Zram::new(config_root(&args), args.dry_system)),
             ops: ops.clone(),
         }));
+        // date, time and time zone; the sync state is watched for notifications
+        let clock = Arc::new(rynasd::clock::Clock::new(config_root(&args), args.dry_system));
+        rynasd::clock::spawn_watch(clock.clone(), notifier.clone());
+        state.clock = Some(Arc::new(rynasd::clock::ClockApi { clock, ops: ops.clone() }));
         // manual restart and shut down: systemd's shutdown (never under --dry-system)
         if let Some(hw) = state.hardware.clone() {
             state.system_power = Some(Arc::new(rynasd::system_power::SystemPower {

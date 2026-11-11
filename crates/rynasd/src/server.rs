@@ -85,6 +85,8 @@ pub struct DaemonState {
     pub system_power: crate::system_power::SpState,
     /// Compressed swap in RAM ([`crate::zram`]).
     pub zram: crate::zram::ZramHandle,
+    /// Date, time and time zone ([`crate::clock`]).
+    pub clock: crate::clock::ClockHandle,
     /// PC backup, receive side ([`crate::pc_backup`]).
     pub pc_backup: crate::pc_backup::PbState,
     /// The SSH service ([`crate::ssh`]).
@@ -136,6 +138,7 @@ impl DaemonState {
             tailscale: None,
             system_power: None,
             zram: None,
+            clock: None,
             pc_backup: None,
             ssh: None,
             restic: None,
@@ -226,6 +229,7 @@ pub fn router(state: DaemonState) -> Router {
         .merge(crate::tailscale::router(state.tailscale))
         .merge(crate::system_power::router(state.system_power))
         .merge(crate::zram::router(state.zram))
+        .merge(crate::clock::router(state.clock))
         .merge(crate::pc_backup::router(state.pc_backup))
         .merge(crate::ssh::router(state.ssh))
         .merge(crate::restic_backup::router(state.restic))

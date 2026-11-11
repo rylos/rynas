@@ -227,6 +227,11 @@ pub fn routes() -> Router<AppState> {
         .route("/system/power", get(forward).post(forward))
         .route("/system/power/cancel", post(forward))
         .route("/system/zram", get(forward).post(forward))
+        // date, time and time zone (D-TIME): state and settings, zones, manual time, sync now
+        .route("/system/time", get(forward).post(forward))
+        .route("/system/time/zones", get(forward))
+        .route("/system/time/set", post(forward))
+        .route("/system/time/sync-now", post(forward))
         // PC backup, receive side: btrbk targets of the PCs (D-PCBACKUP phase 2)
         .route("/pc-backups/setup", get(forward))
         .route("/pc-backups/plan/adopt", post(forward))
