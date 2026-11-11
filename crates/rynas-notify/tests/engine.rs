@@ -328,6 +328,18 @@ async fn state_machine_transitions_only() {
         .unwrap();
     assert_ne!(n2.id, n.id);
     assert_eq!(e.engine.deliver_due().await.unwrap(), 1);
+    http.taken();
+    // a quiet resolution closes the condition and sends nothing
+    let quiet = event::quietly(event::resolved(
+        NotifyCategory::Storage,
+        "storage",
+        "storage:disk:S1:health",
+        "Disk sda healthy again",
+    ));
+    let qn = e.engine.ingest(quiet, false).unwrap().unwrap();
+    assert_eq!(qn.state, EventState::Resolved);
+    assert_eq!(e.engine.deliver_due().await.unwrap(), 0);
+    assert!(http.taken().is_empty());
 }
 
 #[tokio::test]

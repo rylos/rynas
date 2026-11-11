@@ -276,6 +276,7 @@ pub fn sanitize(ev: NewEvent) -> Result<NewEvent> {
             String::new()
         },
         body_format: ev.body_format,
+        quiet: ev.quiet,
     })
 }
 
@@ -530,7 +531,7 @@ impl Engine {
                         "UPDATE keys SET firing = 0, event_id = ?2 WHERE key = ?1",
                         params![key, id as i64],
                     )?;
-                    if !quiet {
+                    if !quiet && !ev.quiet {
                         deliver.push(id);
                     }
                     changes.push((NotificationChangeKind::Updated, n.id));

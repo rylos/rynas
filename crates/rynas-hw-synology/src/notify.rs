@@ -312,6 +312,7 @@ pub fn parse_forward(content_type: Option<&str>, body: &[u8]) -> Result<(NewEven
             format!("synodeb.{event}")
         },
         body_format,
+        quiet: false,
     };
     Ok((ev, f.force))
 }

@@ -154,4 +154,10 @@ pub mod event {
         ev.code = code.into();
         ev
     }
+
+    /// A resolution kept in the list but sent to no target ([`NewEvent::quiet`]).
+    pub fn quietly(mut ev: NewEvent) -> NewEvent {
+        ev.quiet = true;
+        ev
+    }
 }

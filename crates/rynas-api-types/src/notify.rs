@@ -193,6 +193,10 @@ pub struct NewEvent {
     pub code: String,
     #[serde(default)]
     pub body_format: BodyFormat,
+    /// A resolution stored without a message to any target: the condition ended by the
+    /// administrator's own choice (automatic time sync turned off), nothing to tell.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub quiet: bool,
 }
 
 /// `GET /api/v1/notifications`: one stored event.
