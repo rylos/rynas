@@ -218,9 +218,12 @@ pub fn unshared(
     out
 }
 
-/// Time one background walk of a share's folder may take; a folder with more files than
-/// that walk reaches is reported as "at least" ([`CachedSize::partial`]).
-pub const SHARE_WALK_BUDGET: Duration = Duration::from_secs(300);
+/// One slice of the background walk of a share's folder: then the folder goes to the back of
+/// the queue, so that one huge share never starves the others, and its walk goes on where
+/// it stopped at its next turn ([`crate::host::TreeWalk`]). Until the walk is done, a folder
+/// without an earlier complete size shows the bytes counted so far as "at least"
+/// ([`CachedSize::partial`]).
+pub const SHARE_WALK_SLICE: Duration = Duration::from_secs(60);
 /// A size read from a btrfs quota group is served this long (reading it is cheap).
 pub const EXACT_TTL_MS: u64 = 60 * 1000;
 
@@ -241,13 +244,16 @@ pub type AsleepFn = std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 /// Sizes of the shares' folders for the shares list. The list never waits: it gets the
 /// sizes known now, and the unknown or old ones are measured one at a time by a background
-/// thread at idle IO priority (quota group of a subvolume when quotas are on, else a walk of
-/// at most [`SHARE_WALK_BUDGET`]). A folder on a sleeping disk is never read. Unlike the
-/// sizes of the unshared folders, these survive an apply of `shares` (they only age).
+/// thread at idle IO priority (quota group of a subvolume when quotas are on, else a walk in
+/// slices of [`SHARE_WALK_SLICE`] that resumes until it is done). A folder on a sleeping
+/// disk is never read. Unlike the sizes of the unshared folders, these survive an apply of
+/// `shares` (they only age).
 #[derive(Debug, Default)]
 pub struct ShareSizeMeter {
     cache: SizeCache,
     queue: Mutex<SizeQueue>,
+    /// Walks begun and not done yet, by folder.
+    walks: Mutex<HashMap<String, crate::host::TreeWalk>>,
 }
 
 #[derive(Debug, Default)]
@@ -341,8 +347,15 @@ impl ShareSizeMeter {
     }
 
     /// Measures the queued folders until none is left: the body of the background thread
-    /// (the tests call it directly). A folder whose disk fell asleep meanwhile is skipped.
+    /// (the tests call it directly). A folder whose disk fell asleep meanwhile is skipped
+    /// (its walk waits for the next time it is queued). Walks go in slices
+    /// ([`ShareSizeMeter::run_sliced`] with [`SHARE_WALK_SLICE`]).
     pub fn run(&self, host: &dyn ShareHost, asleep: &dyn Fn(&str) -> bool, now_ms: &dyn Fn() -> u64) {
+        self.run_sliced(host, asleep, now_ms, SHARE_WALK_SLICE)
+    }
+
+    /// [`ShareSizeMeter::run`] with slices of `slice`.
+    pub fn run_sliced(&self, host: &dyn ShareHost, asleep: &dyn Fn(&str) -> bool, now_ms: &dyn Fn() -> u64, slice: Duration) {
         let _guard = RunGuard(&self.queue);
         loop {
             let (path, subvolume) = {
@@ -353,12 +366,44 @@ impl ShareSizeMeter {
                 q.current = Some(job.0.clone());
                 job
             };
-            if !asleep(&path)
-                && let Some(s) = measure_within(host, &path, subvolume, now_ms(), SHARE_WALK_BUDGET)
-            {
-                self.cache.put(&path, s);
+            let more = !asleep(&path) && self.measure_slice(host, &path, subvolume, now_ms(), slice);
+            let mut q = self.queue.lock().unwrap();
+            q.current = None;
+            if more {
+                // the rest of the walk at its next turn, behind the others
+                q.waiting.push_back((path, subvolume));
             }
-            self.queue.lock().unwrap().current = None;
+        }
+    }
+
+    /// One turn of `path`: its quota group, or one slice of its walk. `true` when the walk
+    /// goes on at a later turn.
+    fn measure_slice(&self, host: &dyn ShareHost, path: &str, subvolume: bool, now: u64, slice: Duration) -> bool {
+        if subvolume && let Some(bytes) = host.qgroup_size(path) {
+            self.walks.lock().unwrap().remove(path);
+            self.cache.put(path, CachedSize { bytes, partial: false, at_ms: now, exact: true });
+            return false;
+        }
+        let taken = self.walks.lock().unwrap().remove(path);
+        // a walk begun longer ago than a size lives counts a tree that has changed since
+        let mut walk = taken
+            .filter(|w| now.saturating_sub(w.started_ms) < SIZE_TTL_MS)
+            .unwrap_or_else(|| crate::host::TreeWalk::new(path, now));
+        match host.tree_walk(&mut walk, slice) {
+            None => false,
+            Some(true) => {
+                self.cache.put(path, CachedSize { bytes: walk.total, partial: walk.incomplete, at_ms: now, exact: false });
+                false
+            }
+            Some(false) => {
+                // the bytes so far, "at least", unless an earlier complete size is known: that
+                // one stays until this walk is done
+                if self.cache.get(path).is_none_or(|s| s.partial) {
+                    self.cache.put(path, CachedSize { bytes: walk.total, partial: true, at_ms: now, exact: false });
+                }
+                self.walks.lock().unwrap().insert(path.to_string(), walk);
+                true
+            }
         }
     }
 
@@ -835,6 +880,44 @@ mod tests {
         }
         let (r, _) = m.report(&vols(), &list, 1, &|_: &str| false);
         assert_eq!(r.shares[0].bytes, Some(5000));
+    }
+
+    #[test]
+    fn a_long_walk_resumes_behind_the_others_and_counts_hard_links_once() {
+        use std::os::unix::fs::MetadataExt;
+        // a real tree, read in slices of one folder each
+        let t = tempfile::tempdir().unwrap();
+        let big = t.path().join("big");
+        std::fs::create_dir_all(big.join("a/b/c")).unwrap();
+        for (i, d) in ["", "a", "a/b", "a/b/c"].iter().enumerate() {
+            std::fs::write(big.join(d).join(format!("f{i}")), vec![7u8; 64 * 1024]).unwrap();
+        }
+        // the same file under two names: counted once
+        std::fs::hard_link(big.join("f0"), big.join("a/f0-again")).unwrap();
+        let small = t.path().join("small");
+        std::fs::create_dir(&small).unwrap();
+        std::fs::write(small.join("x"), b"x").unwrap();
+        let (big_s, small_s) = (big.display().to_string(), small.display().to_string());
+        let host = crate::host::HostShares;
+        let m = ShareSizeMeter::default();
+        // the first slice of the big folder: not done, "at least" what was counted
+        assert!(m.measure_slice(&host, &big_s, false, 0, Duration::ZERO));
+        let first = m.cache.get(&big_s).unwrap();
+        assert!(first.partial);
+        // the whole queue: the big one goes back behind the small one after each slice
+        m.queue.lock().unwrap().waiting.extend([(big_s.clone(), false), (small_s.clone(), false)]);
+        let order = std::sync::Mutex::new(Vec::new());
+        m.run_sliced(&host, &|p: &str| { order.lock().unwrap().push(p.to_string()); false }, &|| 1, Duration::ZERO);
+        let order = order.into_inner().unwrap();
+        assert_eq!(order[..3], [big_s.clone(), small_s.clone(), big_s.clone()], "{order:?}");
+        let done = m.cache.get(&big_s).unwrap();
+        assert!(!done.partial && done.bytes > first.bytes);
+        let (full, _) = crate::host::tree_size(&big, Duration::from_secs(10)).unwrap();
+        // tree_size counts the linked file twice, the walk once
+        let linked = std::fs::symlink_metadata(big.join("f0")).unwrap().blocks() * 512;
+        assert_eq!(done.bytes, full - linked);
+        assert!(m.walks.lock().unwrap().is_empty());
+        assert!(m.queue.lock().unwrap().waiting.is_empty());
     }
 
     #[test]

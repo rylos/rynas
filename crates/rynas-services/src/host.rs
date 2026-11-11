@@ -51,6 +51,15 @@ pub trait ShareHost: Send + Sync {
     /// Space used by the files below `path` on its own filesystem (nested subvolumes and
     /// mounts are skipped), counting for at most `budget`: `(bytes, partial)`.
     fn tree_size(&self, path: &str, budget: Duration) -> Option<(u64, bool)>;
+    /// One slice of a resumable [`ShareHost::tree_size`]: goes on with `walk` for about
+    /// `budget` (whole folders at a time) and says whether it is done; `None` when its root
+    /// cannot be read. The default walks it all at once within `budget`.
+    fn tree_walk(&self, walk: &mut TreeWalk, budget: Duration) -> Option<bool> {
+        let (bytes, partial) = self.tree_size(&walk.root, budget)?;
+        walk.total = bytes;
+        walk.incomplete |= partial;
+        Some(true)
+    }
     /// Bytes referenced by the btrfs subvolume at `path` according to its quota group
     /// (`btrfs qgroup show -f --raw`), when quotas are enabled on its filesystem: read from
     /// the quota tree, no walk of the files. `None` otherwise.
@@ -373,6 +382,10 @@ impl ShareHost for HostShares {
         tree_size(std::path::Path::new(path), budget)
     }
 
+    fn tree_walk(&self, walk: &mut TreeWalk, budget: Duration) -> Option<bool> {
+        tree_walk_step(walk, budget)
+    }
+
     fn qgroup_size(&self, path: &str) -> Option<u64> {
         // fails at once ("quotas not enabled") when the filesystem has no quotas
         let o = Cmd::new("btrfs")
@@ -414,6 +427,90 @@ impl ShareHost for HostShares {
         // rmdir refuses a directory that is not empty (or still a mount point)
         let _ = std::fs::remove_dir(path);
     }
+}
+
+/// Folders a [`TreeWalk`] keeps to read at most: a tree wider than that is counted without
+/// the folders over it, and its size stays "at least" ([`TreeWalk::incomplete`]).
+pub const WALK_MAX_PENDING: usize = 100_000;
+/// Files with several links a [`TreeWalk`] remembers to count once; past that they are
+/// counted at each link.
+pub const WALK_MAX_LINKED: usize = 200_000;
+
+/// A walk of a folder's files that goes on across slices ([`tree_walk_step`]): the folders
+/// still to read and what was counted so far.
+#[derive(Debug, Clone, Default)]
+pub struct TreeWalk {
+    pub root: String,
+    /// When it began (ms): a walk older than a measurement's time to live starts again.
+    pub started_ms: u64,
+    pub total: u64,
+    /// The device of the root (files elsewhere are another filesystem: skipped).
+    dev: Option<u64>,
+    /// Folders still to read, depth first, at most [`WALK_MAX_PENDING`].
+    pending: Vec<std::path::PathBuf>,
+    /// `(dev, inode)` of files with more than one link already counted.
+    linked: std::collections::HashSet<(u64, u64)>,
+    /// Some folders were left out (over [`WALK_MAX_PENDING`]): the total is a lower bound.
+    pub incomplete: bool,
+}
+
+impl TreeWalk {
+    pub fn new(root: &str, now_ms: u64) -> TreeWalk {
+        TreeWalk { root: root.into(), started_ms: now_ms, ..TreeWalk::default() }
+    }
+}
+
+/// One slice of a walk on the real filesystem: `st_blocks` of every entry on the device of
+/// the root, without following symlinks, a file with several hard links counted once.
+/// Whole folders are read until `budget` is over (a slice may run past it by one folder);
+/// `Some(true)` when the walk is done, `None` when the root cannot be read.
+pub fn tree_walk_step(walk: &mut TreeWalk, budget: Duration) -> Option<bool> {
+    let start = std::time::Instant::now();
+    let dev = match walk.dev {
+        Some(d) => d,
+        None => {
+            let md = std::fs::symlink_metadata(&walk.root).ok()?;
+            walk.dev = Some(md.dev());
+            walk.total = md.blocks() * 512;
+            if !md.is_dir() {
+                return Some(true);
+            }
+            walk.pending.push(walk.root.clone().into());
+            md.dev()
+        }
+    };
+    while let Some(dir) = walk.pending.pop() {
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                let Ok(m) = std::fs::symlink_metadata(e.path()) else {
+                    continue;
+                };
+                if m.dev() != dev {
+                    continue; // nested subvolume or mount (the snapshot folder)
+                }
+                if !m.is_dir() && m.nlink() > 1 {
+                    if walk.linked.contains(&(m.dev(), m.ino())) {
+                        continue;
+                    }
+                    if walk.linked.len() < WALK_MAX_LINKED {
+                        walk.linked.insert((m.dev(), m.ino()));
+                    }
+                }
+                walk.total += m.blocks() * 512;
+                if m.is_dir() {
+                    if walk.pending.len() < WALK_MAX_PENDING {
+                        walk.pending.push(e.path());
+                    } else {
+                        walk.incomplete = true;
+                    }
+                }
+            }
+        }
+        if start.elapsed() >= budget {
+            break;
+        }
+    }
+    Some(walk.pending.is_empty())
 }
 
 /// [`ShareHost::tree_size`] on the real filesystem: `st_blocks` of every entry on the
