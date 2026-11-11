@@ -1794,7 +1794,12 @@ ssh.host_keys	Chiavi dell'host
 ssh.host_keys_help	Alla prima connessione il computer ne mostra una: controlla che corrisponda prima di rispondere sì.
 ssh.no_host_keys	Ancora nessuna chiave dell'host: vengono create all'installazione di openssh-server.
 ssh.logins	Accessi, ultime 24 ore
-ssh.logins_sum	Accessi: {ok} · tentativi falliti: {failed}
+ssh.logins_ok	{n} accessi
+ssh.logins_failed	{n} falliti
+ssh.logins_once	una volta
+ssh.logins_last	ultimo {when}
+ssh.logins_recent	Raggruppati dagli ultimi {n} eventi
+ssh.logins_none	Nessun accesso oggi.
 ssh.logins_top	Più tentativi falliti da: {list}
 ssh.logins_since	Troppe voci oggi: conteggio dal {when}
 ssh.login_ok	entrato
@@ -1816,8 +1821,8 @@ ssh.key_removed	Chiave rimossa.
 ssh.key_remove_title	Rimuovere la chiave {name}?
 ssh.key_remove_text	Chi usa questa chiave non potrà più entrare come {user}.
 ssh.other_lines	Il file ha anche {n} righe che non sono chiavi (commenti o altre voci): restano come sono e non si gestiscono da qui.
-ssh.logins_all	Mostra tutti ({n})
-ssh.logins_fewer	Mostra meno
+ssh.logins_timeline	Cronologia
+ssh.logins_grouped	Raggruppati
 ssh.p.not_installed	Il server SSH non è installato: `apt install openssh-server`.
 ssh.p.not_included	`/etc/ssh/sshd_config` non include `sshd_config.d/*.conf`: queste impostazioni non vengono lette. Rimetti quella riga.
 ssh.p.overridden	Anche `{file}` imposta `{key}`: vale il suo valore invece di quello di questa pagina.

@@ -1658,6 +1658,18 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .ssh-acct:first-child, .ssh-key:first-child { border-top: 0; }
 .ssh-acct > svg { flex: none; }
 .ssh-acct .cell-main, .ssh-key-text { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow-wrap: anywhere; }
+.ssh-acct > svg, .ssh-ev > svg { color: var(--success); }
+.ssh-acct.bad > svg, .ssh-ev.bad > svg { color: var(--danger); }
+/* the two columns under the settings: authorized keys over host keys, logins beside them */
+.col-stack { display: flex; flex-direction: column; gap: var(--gap); min-width: 0; align-self: start; }
+.ssh-login-stats { display: flex; flex-wrap: wrap; gap: var(--s-2); margin-bottom: var(--s-2); }
+/* the timeline: one compact line per entry, wrapping on a phone */
+.ssh-ev { display: flex; flex-wrap: wrap; align-items: center; column-gap: var(--s-2); padding: var(--s-1) 0; border-top: 1px solid var(--border); font-size: var(--fs-13); min-width: 0; }
+.ssh-ev:first-child { border-top: 0; }
+.ssh-ev > svg { flex: none; }
+.ssh-ev-when { font-size: var(--fs-12); }
+.ssh-ev-who { font-weight: 500; }
+.ssh-ev.bad .ssh-ev-who { color: var(--danger); }
 /* a host key's fingerprint under its type, one line at desktop widths */
 .ssh-fp { font-size: var(--fs-12); background: none; padding: 0; }
 /* the login command breaks at its spaces only (never inside user@host, unless that alone is too long) */

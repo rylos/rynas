@@ -97,13 +97,18 @@ pub fn RemoteAccess() -> impl IntoView {
 
 fn body(ts: Ts) -> AnyView {
     let Some(s) = ts.st.data.get() else { return ().into_any() };
-    // a task started here, or one the server reports (another tab, a reload)
-    let running = ts.task.get().or(s.task_id.clone());
+    // a task started here, or one the server reports (another tab, a reload). A status read
+    // before the task ended still names it: one already known as finished is not shown
+    // again, or its TaskRun would end at once, run on_done and render this again, forever
+    let finished = |id: &String| crate::tasks::tasks().find(id).is_some_and(|t| t.status.is_finished());
+    let running = ts.task.get().or_else(|| s.task_id.clone().filter(|id| !finished(id)));
     let task = running.map(|id| {
         view! {
             <section class="card widget w-12">
                 <TaskRun id=id on_done=Callback::new(move |t: rynas_api_types::TaskInfo| {
-                    ts.task.set(None);
+                    if ts.task.with_untracked(Option::is_some) {
+                        ts.task.set(None);
+                    }
                     if ts.confirm_after.get_untracked() {
                         ts.confirm_after.set(false);
                         if t.status == rynas_api_types::TaskStatus::Ok {

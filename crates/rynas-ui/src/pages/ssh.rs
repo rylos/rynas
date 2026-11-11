@@ -16,8 +16,6 @@ use crate::ui::{self, Confirm, Meter, PageHeader, Remote, Skeleton, Tone, Widget
 const URL: &str = "/api/v1/services/ssh";
 const ROOT_OPTS: &[(&str, &str)] = &[("no", "ssh.root_no"), ("keys", "ssh.root_keys"), ("yes", "ssh.root_yes")];
 const ALLOW_OPTS: &[(&str, &str)] = &[("everyone", "ssh.allow_everyone"), ("listed", "ssh.allow_listed")];
-/// Logins listed before "show all".
-const LOGINS_SHOWN: usize = 12;
 
 fn root_str(r: SshRootLogin) -> String {
     match r {
@@ -120,17 +118,19 @@ pub fn SshPage() -> impl IntoView {
                         settings_form(pg, s.settings)
                     })}
                 </section>
-                <section class="card widget w-6 self-start">
-                    <WidgetHead icon=icons::SHIELD_CHECK title="ssh.host_keys" />
-                    {move || pg.st.gate(3).unwrap_or_else(|| host_keys(pg))}
-                </section>
+                <div class="w-6 col-stack">
+                    <section class="card widget">
+                        <WidgetHead icon=icons::KEY title="ssh.keys" />
+                        {move || pg.st.gate(4).unwrap_or_else(|| keys_card(pg, key_names.get()))}
+                    </section>
+                    <section class="card widget">
+                        <WidgetHead icon=icons::SHIELD_CHECK title="ssh.host_keys" />
+                        {move || pg.st.gate(3).unwrap_or_else(|| host_keys(pg))}
+                    </section>
+                </div>
                 <section class="card widget w-6 self-start">
                     <WidgetHead icon=icons::SCROLL_TEXT title="ssh.logins" />
                     {logins()}
-                </section>
-                <section class="card widget w-12">
-                    <WidgetHead icon=icons::KEY title="ssh.keys" />
-                    {move || pg.st.gate(4).unwrap_or_else(|| keys_card(pg, key_names.get()))}
                 </section>
             </div>
         </div>
@@ -400,35 +400,109 @@ fn kind_key(k: SshLoginKind) -> &'static str {
     }
 }
 
+/// One line of the grouped view: the same account, address, method and outcome.
+struct LoginGroup {
+    kind: SshLoginKind,
+    user: String,
+    address: String,
+    method: String,
+    count: u32,
+    /// The newest one (events come newest first).
+    last_ms: u64,
+}
+
+/// Groups the events (newest first): failures before logins, then by the newest one.
+fn group_logins(events: &[SshLoginEvent]) -> Vec<LoginGroup> {
+    let mut groups: Vec<LoginGroup> = Vec::new();
+    for e in events {
+        match groups.iter_mut().find(|g| g.kind == e.kind && g.user == e.user && g.address == e.address && g.method == e.method) {
+            Some(g) => g.count += 1,
+            None => groups.push(LoginGroup {
+                kind: e.kind,
+                user: e.user.clone(),
+                address: e.address.clone(),
+                method: e.method.clone(),
+                count: 1,
+                last_ms: e.at_ms,
+            }),
+        }
+    }
+    // stable: within each outcome the order stays newest first
+    groups.sort_by_key(|g| g.kind == SshLoginKind::Accepted);
+    groups
+}
+
+fn login_icon(k: SshLoginKind) -> &'static str {
+    if k == SshLoginKind::Accepted { icons::CIRCLE_CHECK } else { icons::CIRCLE_X }
+}
+
 fn logins() -> AnyView {
     let r = Remote::<SshLogins>::new(format!("{URL}/logins"));
-    let all = RwSignal::new(false);
+    let timeline = RwSignal::new(false);
     r.view(4, move || {
         let l = r.data.get().unwrap_or_default();
         let total = l.events.len();
-        let shown = if all.get() { total } else { total.min(LOGINS_SHOWN) };
         let top = l.top_failed.iter().map(|(a, n)| format!("{a} ({n})")).collect::<Vec<_>>().join(", ");
+        let partial = (l.accepted + l.failed) as usize > total;
+        let list = if timeline.get() {
+            view! {
+                <ul class="plain-list ssh-timeline">
+                    {l.events.into_iter().map(|e| {
+                        let bad = e.kind != SshLoginKind::Accepted;
+                        view! {
+                            <li class="ssh-ev" class:bad=bad title=t(kind_key(e.kind))>
+                                <Icon icon=login_icon(e.kind) size=14 />
+                                <span class="ssh-ev-when muted mono">{crate::i18n::datetime(e.at_ms)}</span>
+                                <span class="ssh-ev-who">{e.user}</span>
+                                <span class="muted">{e.address}</span>
+                                {(!e.method.is_empty()).then(|| view! { <span class="muted">{e.method}</span> })}
+                            </li>
+                        }
+                    }).collect_view()}
+                </ul>
+            }
+            .into_any()
+        } else {
+            view! {
+                <ul class="plain-list ssh-events">
+                    {group_logins(&l.events).into_iter().map(|g| {
+                        let times = if g.count == 1 { t("ssh.logins_once").to_string() } else { tf("nt.times", &[("n", &g.count.to_string())]) };
+                        let mut sub = vec![times];
+                        if !g.method.is_empty() {
+                            sub.push(g.method.clone());
+                        }
+                        sub.push(tf("ssh.logins_last", &[("when", &crate::i18n::datetime(g.last_ms))]));
+                        let main = if g.kind == SshLoginKind::Accepted {
+                            format!("{} · {}", g.user, g.address)
+                        } else {
+                            format!("{} · {} — {}", g.user, g.address, t(kind_key(g.kind)))
+                        };
+                        view! {
+                            <li class="ssh-acct" class:bad=g.kind != SshLoginKind::Accepted>
+                                <Icon icon=login_icon(g.kind) size=16 />
+                                {ui::two_lines(ui::text(main), Some(sub.join(" · ")), "cell-sub muted small")}
+                            </li>
+                        }
+                    }).collect_view()}
+                </ul>
+            }
+            .into_any()
+        };
         view! {
-            <p class="small">{tf("ssh.logins_sum", &[("ok", &l.accepted.to_string()), ("failed", &l.failed.to_string())])}</p>
+            <div class="ssh-login-stats">
+                {ui::status(Tone::Ok, tf("ssh.logins_ok", &[("n", &l.accepted.to_string())]))}
+                {ui::status(if l.failed == 0 { Tone::Unknown } else { Tone::Warn }, tf("ssh.logins_failed", &[("n", &l.failed.to_string())]))}
+            </div>
             {(!top.is_empty()).then(|| view! { <p class="muted small">{tf("ssh.logins_top", &[("list", &top)])}</p> })}
             {l.since_ms.map(|at| view! { <p class="muted small">{tf("ssh.logins_since", &[("when", &crate::i18n::datetime(at))])}</p> })}
-            <ul class="plain-list ssh-events">
-                {l.events.into_iter().take(shown).map(|e| {
-                    let sub = format!("{} · {}{}", crate::i18n::datetime(e.at_ms), e.address, if e.method.is_empty() { String::new() } else { format!(" · {}", e.method) });
-                    let icon = if e.kind == SshLoginKind::Accepted { icons::CIRCLE_CHECK } else { icons::CIRCLE_X };
-                    view! {
-                        <li class="ssh-acct">
-                            <Icon icon=icon size=16 />
-                            {ui::two_lines(ui::text(format!("{} — {}", e.user, t(kind_key(e.kind)))), Some(sub), "cell-sub muted small")}
-                        </li>
-                    }
-                }).collect_view()}
-            </ul>
+            {(partial && total != 0).then(|| view! { <p class="muted small">{tf("ssh.logins_recent", &[("n", &total.to_string())])}</p> })}
+            {(total == 0).then(|| view! { <p class="muted small">{tr("ssh.logins_none")}</p> })}
+            {list}
             <div class="card-actions">
                 <button type="button" class="btn ghost sm" on:click=move |_| r.reload()><Icon icon=icons::REFRESH_CW size=14 />{tr("ssh.refresh")}</button>
-                {(total > LOGINS_SHOWN).then(|| view! {
-                    <button type="button" class="btn ghost sm" aria-expanded=move || all.get().to_string() on:click=move |_| all.update(|a| *a = !*a)>
-                        {move || if all.get() { t("ssh.logins_fewer").to_string() } else { tf("ssh.logins_all", &[("n", &total.to_string())]) }}
+                {(total > 1).then(|| view! {
+                    <button type="button" class="btn ghost sm" aria-pressed=move || timeline.get().to_string() on:click=move |_| timeline.update(|a| *a = !*a)>
+                        {move || if timeline.get() { t("ssh.logins_grouped").to_string() } else { t("ssh.logins_timeline").to_string() }}
                     </button>
                 })}
             </div>
