@@ -31,7 +31,12 @@ pub async fn spawn(p: &Arc<Protection>, t: &ScheduledTask, user: &str) -> Res<St
                 .arg(filesystem)
                 .env_clear()
                 .timeout(SCRUB_TIMEOUT);
-            spawn_cmd(p, "btrfs.scrub", user, cmd)
+            let fs = filesystem.clone();
+            Ok(p.ops.tasks.spawn("btrfs.scrub", user, move |ctx| async move {
+                // deduplication of the filesystem gives way (D-DEDUP)
+                let _fs = crate::fslock::FsLocks::global().heavy_paths(&[&fs], "btrfs.scrub").await;
+                ctx.run(&cmd).await.map(|_| ()).map_err(|e| e.to_string())
+            })?)
         }
         TaskAction::SmartTest { disk, test } => {
             let kind = match test {
@@ -52,6 +57,7 @@ pub async fn spawn(p: &Arc<Protection>, t: &ScheduledTask, user: &str) -> Res<St
             "scheduled shutdowns are started by rynasctl power scheduled-shutdown",
         )),
         TaskAction::Backup { job } => crate::restic_backup::spawn_run(user, job),
+        TaskAction::Dedup { volume } => crate::dedup::spawn_scheduled(volume, user).await,
         TaskAction::Command { .. } | TaskAction::Script { .. } => {
             Err(invalid("not an internal action"))
         }

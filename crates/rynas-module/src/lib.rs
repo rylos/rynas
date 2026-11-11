@@ -94,6 +94,13 @@ pub trait Module: Send + Sync {
         Vec::new()
     }
 
+    /// Folder or file names deduplication never looks at (D-DEDUP), matched by name at any
+    /// depth: what data migrated from this machine's own system carries (thumbnails,
+    /// metadata folders). gitignore patterns without `/` inside (a trailing one: folders only).
+    fn dedup_excludes(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// Once at the start of rynasd (blocking, as root), after the configuration store is open:
     /// hooks into the module's system layer, its layer's settings adopted into its keys.
     /// Errors are logged, never fatal.
@@ -198,6 +205,17 @@ impl Modules {
         self.0.iter().flat_map(|m| m.domains()).collect()
     }
 
+    /// The deduplication excludes of every module, without repeats.
+    pub fn dedup_excludes(&self) -> Vec<String> {
+        let mut v: Vec<String> = Vec::new();
+        for p in self.0.iter().flat_map(|m| m.dedup_excludes().iter()) {
+            if !v.iter().any(|x| x == p) {
+                v.push(p.to_string());
+            }
+        }
+        v
+    }
+
     pub fn start(&self, cfg: &Config, log: &dyn Fn(&str)) {
         for m in &self.0 {
             m.start(cfg, log);
@@ -286,6 +304,7 @@ mod tests {
         assert!(m.ups().is_none() && m.event_forward().is_none());
         assert!(m.notify_imports().is_empty() && m.system_disk_usb_ids().is_empty());
         assert!(m.domains().is_empty() && Modules::none().is_empty());
+        assert!(m.dedup_excludes().is_empty());
         assert!(m.hardware_control().is_none() && m.ids() == ["bare"]);
         assert!(m.boot().is_none() && m.rescue_feedback().is_none() && m.wake_clock().is_none());
         assert_eq!(m.iter().map(|m| m.id()).collect::<Vec<_>>(), ["bare"]);

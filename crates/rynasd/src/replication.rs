@@ -615,6 +615,13 @@ pub async fn transfer(
     t: &ReplicaTarget,
 ) -> Result<TransferReport, String> {
     ctx.log(&format!("replica {} of {} -> {}", t.id, job.name, t.destination.url()));
+    // a send and a deduplication exclude each other on one filesystem: the deduplication
+    // gives way (D-DEDUP); a local target's filesystem too (it receives)
+    let mut fs_paths = vec![job.subvolume.as_str()];
+    if let ReplicaDestination::Local { path } = &t.destination {
+        fs_paths.push(path.as_str());
+    }
+    let _fs = crate::fslock::FsLocks::global().heavy_paths(&fs_paths, "replication.run").await;
     let r = transfer_inner(ctx, p, job, t).await;
     let prev = read_status(&p.state_dir, &job.name, &t.id);
     let now = rynas_tasks::now_ms();

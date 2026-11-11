@@ -99,6 +99,10 @@ pub enum TaskAction {
     /// Backup job (`/api/v1/backup/restic/jobs`): backup, retention and maintenance of its
     /// repository by `rynas-backup-worker`; created, changed and removed with its job.
     Backup { job: String },
+    /// Deduplication job of a filesystem (`/api/v1/storage/dedup`, key: a volume label or
+    /// `uuid.<uuid>`): fires at the start of its window blocks, runs until the block ends;
+    /// created, changed and removed with the job's settings.
+    Dedup { volume: String },
 }
 
 fn default_root() -> String {

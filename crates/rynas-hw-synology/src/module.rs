@@ -158,6 +158,12 @@ impl Module for SynologyModule {
         if self.hardware.is_some() { BOOT_FLASH_IDS } else { &[] }
     }
 
+    /// Folders data copied from this machine's former system carries: thumbnails and
+    /// extended attributes, temporary folders, the sync client's working folder.
+    fn dedup_excludes(&self) -> &'static [&'static str] {
+        if self.hardware.is_some() { &["@eaDir/", "@tmp/", ".SynologyWorkingDirectory/"] } else { &[] }
+    }
+
     fn domains(&self) -> Vec<Arc<dyn Applier>> {
         if self.hardware.is_some() {
             vec![Arc::new(crate::domain::SynologyDomain)]

@@ -1392,6 +1392,9 @@ async fn run_job(
     }
     let state_dir = s.prot.state_dir.clone();
     let paths = source_paths(s, job)?;
+    // the backup reads the volumes of its sources: their deduplication gives way (D-DEDUP)
+    let fs_paths: Vec<&str> = paths.iter().filter(|(_, sp)| sp.is_none()).map(|(p, _)| p.as_str()).collect();
+    let _fs = crate::fslock::FsLocks::global().heavy_paths(&fs_paths, "backup.run").await;
     for (p, _) in &paths {
         if p.contains(&format!("/{}/", rynas_services::crypt::CRYPT_DIR)) {
             ctx.log(&format!(

@@ -243,12 +243,14 @@ async fn busy_reasons(h: &Arc<Hardware>, p: &ShutdownPolicy, me: &str, unit: &st
     }
     if p.check_tasks {
         for t in h.ops.tasks.list(500) {
-            if t.status == TaskStatus::Running && t.id != me && !t.kind.contains("scrub") {
+            // a deduplication run never holds a shutdown back: it is stopped, saves its
+            // work and goes on in its next window (D-DEDUP)
+            if t.status == TaskStatus::Running && t.id != me && !t.kind.contains("scrub") && !crate::dedup::gives_way(&t.kind) {
                 busy.push(format!("rynas task {} running", t.kind));
             }
         }
         if let Some(prot) = &h.protection {
-            for u in prot.runtime().await.running.iter().filter(|u| *u != unit) {
+            for u in prot.runtime().await.running.iter().filter(|u| *u != unit && !crate::dedup::gives_way(u)) {
                 busy.push(format!("scheduler task {u} running"));
             }
         }

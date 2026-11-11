@@ -15,11 +15,13 @@
 pub mod apps;
 pub mod backup;
 pub mod cgroup;
+pub mod dedup;
 pub mod docker;
 pub mod docker_adopt;
 pub mod docker_auto;
 pub mod error;
 pub mod files;
+pub mod fslock;
 pub mod groups;
 pub mod hardware;
 pub mod jobs;

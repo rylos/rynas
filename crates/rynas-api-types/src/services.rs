@@ -661,6 +661,11 @@ pub struct Share {
     /// `subvolume` and no `show_snapshots`. Set by validation when `path` is one.
     #[serde(default, skip_serializing_if = "is_false")]
     pub encrypted: bool,
+    /// Offline deduplication of the folder (D-DEDUP, `docs/phase2/dedup.md`): the share is a
+    /// root of its filesystem's job (`dedup` key). Refused on encrypted and no
+    /// copy-on-write folders.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dedup: Option<crate::dedup::ShareDedup>,
 }
 
 fn is_false(b: &bool) -> bool {

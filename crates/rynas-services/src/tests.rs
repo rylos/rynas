@@ -245,6 +245,7 @@ fn shares_doc() -> SharesConfig {
                 subvolume: None,
                 show_snapshots: false,
                 encrypted: false,
+                dedup: None,
             },
             Share {
                 name: "media".into(),

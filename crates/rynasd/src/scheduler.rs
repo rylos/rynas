@@ -285,6 +285,11 @@ async fn create(
                 "backup tasks are created with their job (/backup/restic/jobs)",
             ));
         }
+        if matches!(t.action, TaskAction::Dedup { .. }) {
+            return Err(invalid(
+                "deduplication tasks are created with their settings (/storage/dedup)",
+            ));
+        }
         stage_tasks(p, &o, |doc| {
             if doc.tasks.iter().any(|x| x.id == t.id) {
                 return Err(conflict(
@@ -328,6 +333,11 @@ async fn put(
                 .find(|x| x.id == t.id)
                 .ok_or_else(|| not_found(format!("task {}", t.id)))?;
             guard_root_task(p, &o, cur)?;
+            if matches!(cur.action, TaskAction::Dedup { .. }) {
+                return Err(invalid(
+                    "a deduplication task follows its window: change it in Storage (/storage/dedup)",
+                ));
+            }
             if cur.action.is_internal() && cur.action != t.action {
                 return Err(invalid(
                     "the action of an internal task cannot change (only its schedule and options)",
@@ -377,6 +387,12 @@ async fn delete(
                     format!("task {id} runs backup job {job}: delete the job instead"),
                 ));
             }
+            if let TaskAction::Dedup { volume } = &t.action {
+                return Err(conflict(
+                    error_codes::CONFLICT,
+                    format!("task {id} runs the deduplication of {volume}: turn it off in Storage instead"),
+                ));
+            }
             if let TaskAction::PowerShutdown { rule } = &t.action {
                 return Err(conflict(
                     error_codes::CONFLICT,
@@ -405,6 +421,11 @@ async fn set_enabled(st: ProtState, h: HeaderMap, id: String, on: bool) -> Res<J
                 .find(|x| x.id == i)
                 .ok_or_else(|| not_found(format!("task {i}")))?;
             guard_root_task(p, &o, t)?;
+            if matches!(t.action, TaskAction::Dedup { .. }) {
+                return Err(invalid(
+                    "a deduplication task is turned on and off with its settings in Storage",
+                ));
+            }
             t.enabled = on;
             Ok(())
         })

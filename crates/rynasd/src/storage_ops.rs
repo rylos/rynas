@@ -811,12 +811,15 @@ async fn volume_grow(
     }
     let ops = s.clone();
     let disks = req.disks.clone();
+    let mnt = v.mounted().and_then(|f| f.mountpoint.clone());
     let id = spawn(
         &s,
         "storage.volume-grow",
         &user,
         held,
         move |m| async move {
+            // deduplication of the volume gives way (D-DEDUP)
+            let _fs = heavy_on(mnt.as_deref(), "storage.volume-grow").await;
             let inv = ops.inventory(true).await.map_err(|e| e.2)?;
             let fresh = plan::plan_grow(&inv, &preq);
             if !fresh.valid || fresh.steps != p.steps {
@@ -863,12 +866,15 @@ async fn volume_replace(
         return Ok(Json(p).into_response());
     }
     let ops = s.clone();
+    let mnt = v.mounted().and_then(|f| f.mountpoint.clone());
     let id = spawn(
         &s,
         "storage.volume-replace",
         &user,
         held,
         move |m| async move {
+            // deduplication of the volume gives way (D-DEDUP)
+            let _fs = heavy_on(mnt.as_deref(), "storage.volume-replace").await;
             let inv = ops.inventory(true).await.map_err(|e| e.2)?;
             let fresh = plan::plan_replace(&inv, &preq);
             if !fresh.valid || fresh.steps != p.steps {
@@ -881,6 +887,15 @@ async fn volume_replace(
         },
     )?;
     Ok(started(id))
+}
+
+/// The filesystem lock of heavy work on the volume mounted at `mnt` ([`crate::fslock`]):
+/// a deduplication run there stops first.
+async fn heavy_on(mnt: Option<&str>, what: &str) -> Option<crate::fslock::HeavyGuard> {
+    match mnt {
+        Some(p) => Some(crate::fslock::FsLocks::global().heavy_paths(&[p], what).await),
+        None => None,
+    }
 }
 
 async fn volume_scrub(
@@ -944,7 +959,10 @@ async fn volume_scrub(
     }
     let ops = s.clone();
     let label = name.clone();
+    let mnt = fs.mountpoint.clone();
     let id = spawn(&s, "storage.scrub", &user, held, move |m| async move {
+        // deduplication of the volume gives way (D-DEDUP)
+        let _fs = heavy_on(mnt.as_deref(), "storage.scrub").await;
         let inv = ops.inventory(false).await.map_err(|e| e.2)?;
         let r = exec::run_plan(&m, &inv, &p, &[], &Secrets::default()).await;
         ops.scrubs.lock().unwrap().remove(&label);

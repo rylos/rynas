@@ -316,6 +316,7 @@ fn open_config(
         Arc::new(rynas_storage::domain::TuningDomain),
         snapshots.clone(),
         Arc::new(rynas_backup::BackupDomain),
+        Arc::new(rynas_dedup::DedupDomain),
         scheduler.clone(),
         Arc::new(rynas_power::PowerDomain {
             rynasctl: PathBuf::from(rynas_btrfs::domain::RYNASCTL),
@@ -763,7 +764,7 @@ fn main() -> std::io::Result<()> {
         state.services = Some(Arc::new(Services {
             ops: ops.clone(),
             users: opened.users,
-            shares: opened.shares,
+            shares: opened.shares.clone(),
             homes: opened.homes,
             moves: Arc::new(rynas_services::homes::MoveStore::in_dir(&args.state_dir)),
         }));
@@ -860,6 +861,30 @@ fn main() -> std::io::Result<()> {
             // snapshots, downloads in flight; then the files of removed jobs
             tokio::spawn(rynasd::restic_backup::recover(svc.clone()));
             state.restic = Some(svc);
+        }
+        // deduplication (D-DEDUP): the engine in transient units; --dry-system plays
+        // scripted runs on the places it sees
+        {
+            let host: Arc<dyn rynasd::dedup::DedupHost> = if args.dry_system {
+                let mi = rynasd::places::mountinfo();
+                let places = rynasd::places::places_in(&mi)
+                    .into_iter()
+                    .map(|(l, d)| (l, d, "btrfs".to_string()))
+                    .collect();
+                Arc::new(rynasd::dedup::MemoryDedup::new(true, places))
+            } else {
+                Arc::new(rynasd::dedup::HostDedup { shares: opened.shares.clone() })
+            };
+            let svc = Arc::new(rynasd::dedup::DedupSvc::new(
+                protection.clone(),
+                host,
+                Arc::new(rynas_dedup::Oans::default()),
+                args.state_dir.join("dedup"),
+                opened.modules.dedup_excludes(),
+                rynasd::fslock::FsLocks::global(),
+            ));
+            let _ = rynasd::dedup::SVC.set(svc.clone());
+            state.dedup = Some(svc);
         }
         let ups = Arc::new(rynasd::ups::Ups {
             ops: ops.clone(),

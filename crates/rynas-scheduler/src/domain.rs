@@ -171,6 +171,11 @@ pub fn normalize_task(mut t: ScheduledTask) -> Result<ScheduledTask, String> {
                 return Err(format!("task {id}: invalid backup job {job:?}"));
             }
         }
+        TaskAction::Dedup { volume } => {
+            if !rynas_api_types::dedup::job_key_valid(volume) {
+                return Err(format!("task {id}: invalid deduplication job {volume:?}"));
+            }
+        }
         TaskAction::Snapshot { job } => {
             if !valid_ref(job) {
                 return Err(format!("task {id}: invalid snapshot job {job:?}"));

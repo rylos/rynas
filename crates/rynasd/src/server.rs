@@ -91,6 +91,8 @@ pub struct DaemonState {
     pub ssh: crate::ssh::SshHandle,
     /// Backups to another NAS, a disk or the cloud; `None` answers 503 on its endpoints.
     pub restic: crate::restic_backup::RsState,
+    /// Deduplication of shared folders ([`crate::dedup`]); `None` answers 503.
+    pub dedup: crate::dedup::DedupState,
 }
 
 impl DaemonState {
@@ -137,6 +139,7 @@ impl DaemonState {
             pc_backup: None,
             ssh: None,
             restic: None,
+            dedup: None,
         }
     }
 }
@@ -226,6 +229,7 @@ pub fn router(state: DaemonState) -> Router {
         .merge(crate::pc_backup::router(state.pc_backup))
         .merge(crate::ssh::router(state.ssh))
         .merge(crate::restic_backup::router(state.restic))
+        .merge(crate::dedup::router(state.dedup))
         .fallback(|| async { Error::not_found("no such endpoint") })
         // 405, query string and path rejections: ApiError bodies too
         .layer(axum::middleware::from_fn(crate::error::json_errors))

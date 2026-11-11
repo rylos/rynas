@@ -53,6 +53,10 @@ rynas-tls.workspace = true
 rynas-dns.workspace = true
 base64.workspace = true
 rynas-backup.workspace = true
+# offline deduplication (D-DEDUP): domain, oans command line and parsers
+rynas-dedup.workspace = true
+# checksums of the rynas-oans packages carried until there is an apt repository
+sha2.workspace = true
 tempfile.workspace = true
 tokio-util = { workspace = true, features = ["io"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }

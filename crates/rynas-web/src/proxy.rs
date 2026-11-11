@@ -92,6 +92,15 @@ pub fn routes() -> Router<AppState> {
             "/storage/disks/{name}/health-ack",
             post(forward).delete(forward),
         )
+        // deduplication of shared folders (D-DEDUP; administrators, checked in rynasd)
+        .route("/storage/dedup", get(forward))
+        .route("/storage/dedup/install", post(forward))
+        .route("/storage/dedup/jobs/{key}", put(forward).delete(forward))
+        .route("/storage/dedup/jobs/{key}/estimate", post(forward))
+        .route("/storage/dedup/jobs/{key}/run", post(forward))
+        .route("/storage/dedup/jobs/{key}/stop", post(forward))
+        .route("/storage/dedup/jobs/{key}/history", get(forward))
+        .route("/storage/dedup/jobs/{key}/reset", post(forward))
         // users, groups, shares, SMB and NFS (step 8)
         .route("/users", get(forward).post(forward))
         .route("/users/{name}", get(forward).put(forward).delete(forward))

@@ -322,6 +322,12 @@ impl Module for QnapModule {
         self.model.boot_flash_usb
     }
 
+    /// Folders data copied from this machine's former system carries: thumbnails, media
+    /// indexes, its recycle bin.
+    fn dedup_excludes(&self) -> &'static [&'static str] {
+        &[".@__thumb/", ".@__qini/", "@Recycle/"]
+    }
+
     fn domains(&self) -> Vec<Arc<dyn Applier>> {
         vec![Arc::new(QnapDomain(self.shared.clone()))]
     }

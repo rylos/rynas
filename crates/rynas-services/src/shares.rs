@@ -439,6 +439,24 @@ impl SharesDomain {
                     ));
                 }
             }
+            // deduplication (D-DEDUP): nothing to share in a ciphertext, no extents to share
+            // in a folder without copy-on-write
+            s.dedup = rynas_api_types::dedup::normalize_share(s.dedup.take())
+                .map_err(|e| Invalid::at("dedup", format!("share {name}: {e}")))?;
+            if s.dedup.as_ref().is_some_and(|d| d.enabled) {
+                if s.encrypted {
+                    return Err(Invalid::at(
+                        "dedup",
+                        format!("share {name}: an encrypted folder cannot be deduplicated"),
+                    ));
+                }
+                if s.subvolume.as_ref().is_some_and(|v| v.nocow) {
+                    return Err(Invalid::at(
+                        "dedup",
+                        format!("share {name}: a folder without copy-on-write cannot be deduplicated"),
+                    ));
+                }
+            }
             let info = self.host.probe(&s.path);
             if !info.exists && s.subvolume.is_some() {
                 // created on apply: nothing more to check now
