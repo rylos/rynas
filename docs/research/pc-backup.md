@@ -602,6 +602,48 @@ For PCs that already push with btrbk over SSH (§10). Code: `crates/rynasd/src/p
 - **Tests:** unit tests of the plan, runs, manifest and alerts in `pc_backup.rs`, API tests on the memory host (`tests/pc_backup.rs`), and `tests/pc_backup_host.rs` (`#[ignore]`, root) on a real loop-mounted btrfs folder: sysfs quota sizes with and without quotas, measure, a symlinked manifest refused (`ELOOP`), the lock shared with the filter, delete under the lock.
 - **Open:** the GFS buckets use the NAS's time zone for names without an offset (as `name.rs` reads them), so a PC in another zone shifts by those hours; one shared account still serves every PC (§10.3).
 
+## 12. Implemented: the file method, phase 1 (2026-11-11)
+
+What runs (API in `../phase1/plan.md` "API v1: PC backup, file method"):
+
+- **NAS** (`rynasd::pc_agent`, `rynas_web::pc_agent`):
+  - restic REST v2 served per backup group, with append-only, quota, the 423 gate and token/session rules (§4.1);
+  - pairing, revocation, restore codes, recovery kits, the daily maintenance in the memory budget (§4.7), alerts;
+  - streamed downloads and zips: the worker writes to its stdout, events go to its stderr;
+  - the console tab "PCs: file backup".
+- **Worker** (`rynas-backup-worker`): `init_pc` (§4.7 profile), `add_key`/`remove_key`, `index_info`, `stream` (one file or a stored zip64), and a minimum age for `forget`.
+- **Agent** (`crates/rynas-agent`, its own workspace; a static musl binary of 6.6 MB, `packaging/agent/build.sh`):
+  - pairing with the certificate pinned by its SHA-256;
+  - its own small HTTP/1.1 client: rustls with a pin verifier and keep-alive, so no CA store is needed on a live system;
+  - a `rustic_core` backend over the REST protocol, waiting out 423;
+  - the service with a long poll, Back up now and Cancel, and a sleep inhibitor;
+  - the backup run itself: a private mount namespace in which every source is bound read-only at its mount point and saved as `/` in one version. btrfs gets read-only snapshots of the mounted and nested subvolumes (snapper `.snapshots`, Timeshift and container engines excluded); LVM gets snapshots; ext/XFS are read hot with the changed files listed, or frozen with a watchdog; the ESP is copied as files;
+  - the manifest, progress and reports.
+- **Restore** (`rynas-agent restore`):
+  - a TUI and a scripted mode over the same engine (`restore/exec.rs`): GPT with the same GUIDs, LUKS with the same UUID, mkfs with the original IDs (FAT16/32 kept), btrfs subvolumes and the default one;
+  - files restored with `rustic_core` (numeric owners, xattrs, hard links);
+  - ID rewrite when another disk has the IDs; a chroot that writes `/etc/kernel/cmdline` first, then the initramfs, GRUB (EFI/BIOS) or systemd-boot with `kernel-install` for machine-id entries, and the removable fallback;
+  - a report to the NAS. The `RestoreSource` trait has the btrfs pool step (§11.4).
+
+**Tests on 2026-11-11** (pc-work; at most 2 VMs at a time, 2 GiB RAM each, OVMF, user-mode network; the NAS was a local `rynasd --dry-system` + `rynas-web` on 127.0.0.1 with its real certificate on :18651):
+
+| Test | Result |
+|---|---|
+| stock restic 0.18.1 as the client of the REST handler | backup and snapshots ok; `forget` refused (append-only); `key add` refused; no token → 401; a restore session reads and cannot write (403); stock restic opens the folder with the recovery kit; download of a 50 MB file identical; the zip checks with `unzip -t`; maintenance refused with `busy` within 10 min of an upload; a revoked token → 401 |
+| Debian 13 genericcloud (ext4 `/` without LVM, ESP FAT16, GRUB + shim, UEFI), SQLite writer running | pairing with the pinned certificate; first backup read hot: 22 953 files, 1.46 GB in 40 s, 8 files listed as changed while read (the SQLite files and the writer's counters); second backup frozen: 6.5 s, nothing changed; manifest correct (UUIDs, PARTUUIDs, GPT, loader, initramfs tool) |
+| btrfs on a loop device, `@data` with a nested subvolume and a snapper `.snapshots` | read-only snapshots, the nested subvolume's files in the version, `.snapshots` empty, snapshots removed after the run, manifest subvolumes right |
+| service: "Back up now" from the console | picked up by the long poll at once; progress (phase, bytes) visible in the console; version in 6 s |
+| bare-metal restore from a Debian 12 live VM onto an empty **3 GiB** disk (source 4 GiB), scripted mode | preflight named the missing `dosfstools`; GPT, mkfs with the original UUIDs, 1.4 GB restored, initramfs, `grub-install`, `update-grub`, removable fallback: 32 s in all |
+| boot of the restored disk alone, fresh NVRAM | `running`, no failed units; SQLite `integrity_check` ok and both counters equal (the frozen version); a 20 MB file's SHA-256 ok; `cap_net_raw` on ping kept; a hard link kept |
+
+**Not tested in a VM yet:** systemd-boot and UKI, LUKS, LVM snapshots, XFS, Arch and Fedora, the TUI itself (the scripted mode runs the same engine), BIOS boot. LVM and md layouts are refused by the restore of this version (`manual_layout`).
+
+**Open:**
+- the TUI logs in with a restore code only; logging in as an administrator with TOTP is not done;
+- a dry run uses up the restore code;
+- the agent binary is not served by the NAS yet (the commands point to the GitHub release);
+- the btrfs method's source in the TUI (B3) is listed there, but is not in this build.
+
 ## Sources
 
 Checked 2026-11-11 unless noted.

@@ -36,6 +36,13 @@ struct Tab {
     open: RwSignal<Option<String>>,
     pair: RwSignal<bool>,
     settings: RwSignal<bool>,
+    /// A group action running, and its error (shown above the groups).
+    g_busy: RwSignal<bool>,
+    g_error: RwSignal<Option<String>>,
+    /// The recovery kit just made (shown once).
+    kit: RwSignal<Option<RecoveryKit>>,
+    /// The group whose deletion waits for a confirmation.
+    del_group: RwSignal<Option<String>>,
 }
 
 fn dev_url(d: &str) -> String {
@@ -146,7 +153,15 @@ pub fn panel(header: RwSignal<Option<bool>>) -> AnyView {
         open: RwSignal::new(None),
         pair: RwSignal::new(false),
         settings: RwSignal::new(false),
+        g_busy: RwSignal::new(false),
+        g_error: RwSignal::new(None),
+        kit: RwSignal::new(None),
+        del_group: RwSignal::new(None),
     };
+    let delete_group = Callback::new(move |_| {
+        let Some(n) = tab.del_group.get_untracked() else { return };
+        run_task(tab, "DELETE", group_url(&n), tf("pca.group_deleted", &[("group", &n)]), tab.g_busy, tab.g_error, Callback::new(move |_| tab.del_group.set(None)));
+    });
     Effect::new(move |_| match header.get() {
         Some(true) => {
             tab.pair.set(true);
@@ -248,6 +263,7 @@ pub fn panel(header: RwSignal<Option<bool>>) -> AnyView {
             {(!groups.is_empty()).then(|| view! {
                 <h3 class="mini-title">{tr("pca.groups")}</h3>
                 <p class="small muted">{tf("pca.groups_note", &[("budget", &i18n::bytes(budget))])}</p>
+                {move || tab.del_group.with(Option::is_none).then(|| form_error(tab.g_error))}
                 {ui::table("pca-groups", &["pca.col.group", "pca.col.pcs", "#pca.col.size", "pca.col.maintenance", ""], groups)}
             })}
         }
@@ -259,6 +275,8 @@ pub fn panel(header: RwSignal<Option<bool>>) -> AnyView {
         {move || tab.open.get().map(|d| drawer(tab, d))}
         {move || tab.pair.get().then(|| pair_dialog(tab))}
         {move || tab.settings.get().then(|| settings_dialog(tab))}
+        {move || tab.kit.get().map(|k| kit_dialog(k, Callback::new(move |_| tab.kit.set(None))))}
+        {move || tab.del_group.get().map(|g| ui::confirm(Confirm { busy: tab.g_busy, error: tab.g_error, ..Confirm::new(tf("pca.group_delete_title", &[("group", &g)]), t("pca.group_delete_text").to_string(), "pca.group_delete", true, delete_group, Callback::new(move |_| tab.del_group.set(None))) }))}
     }
     .into_any()
 }
@@ -266,12 +284,9 @@ pub fn panel(header: RwSignal<Option<bool>>) -> AnyView {
 // ------------------------------------------------------------------ groups
 
 fn group_row(tab: Tab, g: PcGroup, budget: u64, all_revoked: bool) -> AnyView {
+    // the row is rebuilt by every reload of the tab: what must survive lives in `tab`
     let name = StoredValue::new(g.group.clone());
-    let busy = RwSignal::new(false);
-    let error = RwSignal::new(None::<String>);
-    let kit = RwSignal::new(None::<RecoveryKit>);
-    let kit_busy = RwSignal::new(false);
-    let ask_delete = RwSignal::new(false);
+    let (busy, error, kit, kit_busy, ask_delete) = (tab.g_busy, tab.g_error, tab.kit, tab.g_busy, tab.del_group);
     let size = if g.settings.quota_gib > 0 { format!("{} / {} GiB", i18n::bytes(g.used_bytes), g.settings.quota_gib) } else { i18n::bytes(g.used_bytes) };
     let m = &g.maintenance;
     let over = m.estimate_bytes > budget && budget > 0;
@@ -304,10 +319,6 @@ fn group_row(tab: Tab, g: PcGroup, budget: u64, all_revoked: bool) -> AnyView {
             }
         });
     };
-    let delete = Callback::new(move |_| {
-        let n = name.get_value();
-        run_task(tab, "DELETE", group_url(&n), tf("pca.group_deleted", &[("group", &n)]), busy, error, Callback::new(move |_| ask_delete.set(false)));
-    });
     let label_m = format!("{}: {}", t("pca.maint.run"), g.group);
     let label_k = format!("{}: {}", t("pca.kit"), g.group);
     let label_d = format!("{}: {}", t("pca.group_delete"), g.group);
@@ -319,10 +330,7 @@ fn group_row(tab: Tab, g: PcGroup, budget: u64, all_revoked: bool) -> AnyView {
         ui::actions(view! {
             <button class="icon-btn sm" title=tr("pca.maint.run") aria-label=label_m disabled=move || busy.get() on:click=maintain><Icon icon=icons::REFRESH_CW size=16 /></button>
             <button class="icon-btn sm" title=tr("pca.kit") aria-label=label_k disabled=move || kit_busy.get() on:click=make_kit><Icon icon=icons::KEY size=16 /></button>
-            {all_revoked.then(|| view! { <button class="icon-btn sm" title=tr("pca.group_delete") aria-label=label_d on:click=move |_| ask_delete.set(true)><Icon icon=icons::TRASH_2 size=16 /></button> })}
-            {form_error(error)}
-            {move || kit.get().map(|k| kit_dialog(k, Callback::new(move |_| kit.set(None))))}
-            {move || ask_delete.get().then(|| ui::confirm(Confirm { busy, error, ..Confirm::new(tf("pca.group_delete_title", &[("group", &name.get_value())]), t("pca.group_delete_text").to_string(), "pca.group_delete", true, delete, Callback::new(move |_| ask_delete.set(false))) }))}
+            {all_revoked.then(|| view! { <button class="icon-btn sm" title=tr("pca.group_delete") aria-label=label_d on:click=move |_| { error.set(None); ask_delete.set(Some(name.get_value())); }><Icon icon=icons::TRASH_2 size=16 /></button> })}
         }
         .into_any()),
     ])
@@ -589,7 +597,7 @@ fn drawer(tab: Tab, device: String) -> AnyView {
         let ready = if p.bare_metal.ready {
             ui::status(Tone::Ok, t("pca.ready.yes").to_string())
         } else {
-            view! { <div class="cell-main">{ui::status(Tone::Warn, t("pca.ready.no").to_string())}{p.bare_metal.reasons.iter().map(|r| view! { <span class="cell-sub small">{tr(reason_text(*r))}</span> }).collect_view()}</div> }.into_any()
+            view! { <div class="cell-main">{ui::status(Tone::Warn, t("bkpc.bm.not_ready").to_string())}{p.bare_metal.reasons.iter().map(|r| view! { <span class="cell-sub small">{tr(reason_text(*r))}</span> }).collect_view()}</div> }.into_any()
         };
         let captures = run.as_ref().map(|r| {
             r.captures

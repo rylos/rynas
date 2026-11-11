@@ -4912,8 +4912,8 @@ nev.power.manual_shutdown.title	Spegnimento del NAS richiesto da {user}
 nev.power.manual_shutdown.body	{user} spegne il NAS (ritardo {delay_min} min).
 nev.power.manual_cancelled.title	Riavvio o spegnimento annullato da {user}
 nev.power.manual_cancelled.body	Il NAS resta acceso.
-bk.tab.agent	Backup dei file dei PC
-pca.intro	I PC hanno due metodi. Snapshot btrfs: il NAS riceve gli snapshot del PC (scheda PC; la scelta migliore per i PC con btrfs). Backup dei file: rynas-agent su qualsiasi PC Linux manda i suoi file e la disposizione dei dischi in un archivio sul NAS, e lo stesso programma ripristina tutto il PC da un sistema live.
+bk.tab.agent	PC: backup dei file
+pca.intro	I PC hanno due metodi. Snapshot btrfs: il NAS riceve gli snapshot del PC (la scheda precedente; la scelta migliore per i PC con btrfs). Backup dei file: rynas-agent su qualsiasi PC Linux manda i suoi file e la disposizione dei dischi in un archivio sul NAS, e lo stesso programma ripristina tutto il PC da un sistema live.
 pca.settings	Impostazioni
 pca.setup	Scegli dove vanno i backup dei PC
 pca.setup_text	Una cartella su un volume contiene un archivio per ogni gruppo di backup. Sceglila prima, poi aggiungi i PC.
@@ -4984,7 +4984,6 @@ pca.last_seen	Ultimo contatto
 pca.os	Sistema
 pca.bare_metal	Ripristino completo
 pca.ready.yes	Pronto
-pca.ready.no	Non pronto
 pca.ready.no_version	Ancora nessuna versione
 pca.ready.no_manifest	Disposizione dei dischi non ancora ricevuta
 pca.ready.stale	La disposizione dei dischi è più vecchia dell'ultima versione

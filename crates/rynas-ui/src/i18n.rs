@@ -5414,7 +5414,6 @@ dict! { BLOB, LENS, IT;
     "pca.os" => "System", "Sistema";
     "pca.bare_metal" => "Bare-metal restore", "Ripristino completo";
     "pca.ready.yes" => "Ready", "Pronto";
-    "pca.ready.no" => "Not ready", "Non pronto";
     "pca.ready.no_version" => "No version yet", "Ancora nessuna versione";
     "pca.ready.no_manifest" => "No disk layout received yet", "Disposizione dei dischi non ancora ricevuta";
     "pca.ready.stale" => "The disk layout is older than the last version", "La disposizione dei dischi è più vecchia dell'ultima versione";
