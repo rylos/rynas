@@ -245,6 +245,8 @@ fn logs_drawer(c: ContainerSummary, close: Callback<()>) -> AnyView {
     let pre = NodeRef::<leptos::html::Pre>::new();
     let buf = StoredValue::new_local(LogBuf::default());
     let stream = StoredValue::new_local(None::<LogStream>);
+    // reconnections in a row since the last line received
+    let retries = StoredValue::new(0u32);
     let url_base = format!("/api/v1/docker/containers/{}/logs/stream?tail=200", crate::api::encode(&c.id));
     let append = move |line: String| {
         let schedule = buf
@@ -276,6 +278,7 @@ fn logs_drawer(c: ContainerSummary, close: Callback<()>) -> AnyView {
             if let Some(txt) = ev.data().as_string()
                 && let Ok(l) = crate::api::decode::<LogLine>(&txt)
             {
+                retries.set_value(0);
                 append(l.line);
             }
         });
@@ -288,9 +291,20 @@ fn logs_drawer(c: ContainerSummary, close: Callback<()>) -> AnyView {
         });
         let _ = es.add_event_listener_with_callback("end", on_end.as_ref().unchecked_ref());
         let on_err = Closure::<dyn Fn()>::new(move || {
-            // a dropped connection would be retried by the browser and repeat the tail
+            // a dropped connection would be retried by the browser and repeat the tail: closed
+            // here, then opened again by us after a pause that grows (2, 4, 8 … 30 s); the new
+            // stream starts from a fresh tail
             if state.try_get_untracked() == Some(LogState::Following) {
                 let _ = state.try_set(LogState::Lost);
+                let n = retries.try_update_value(|r| { *r = r.saturating_add(1); *r }).unwrap_or(1);
+                let wait = std::time::Duration::from_secs((1u64 << n.min(5)).min(30));
+                set_timeout(move || {
+                    // (the drawer may be closed by now: every access is a try_)
+                    if state.try_get_untracked() == Some(LogState::Lost) && follow.try_get_untracked() == Some(true) {
+                        let _ = follow.try_set(false);
+                        let _ = follow.try_set(true);
+                    }
+                }, wait);
             }
             set_timeout(move || { let _ = stream.try_update_value(|s| *s = None); }, std::time::Duration::ZERO);
         });
