@@ -6,8 +6,9 @@
 #
 #   --no-docker   run directly (already inside the pinned builder image, e.g. as a CI job)
 #
-# Inputs are pinned in versions.env (source tarball by SHA-256, builder image by digest).
-# The build runs in that image, verifies the tarball, builds with -O2 -march=$MARCH (the
+# Inputs are pinned in versions.env (source tarball by SHA-256 and tag commit, builder image
+# by digest, build packages from a snapshot.debian.org timestamp). The build runs in that
+# image, verifies the tarball and the commit it was made from, builds with -O2 -march=$MARCH (the
 # upstream hardening flags stay), strips the binary and dates every file with
 # SOURCE_DATE_EPOCH from the last commit touching packaging/oans, so the same inputs give
 # the same package.
@@ -56,15 +57,34 @@ fi
 
 # ---- inside the builder image (root: it installs the build dependencies) ----
 export DEBIAN_FRONTEND=noninteractive
+# the build packages from a fixed state of the archive, not today's mirror
+cat > /etc/apt/sources.list.d/debian.sources <<EOF
+Types: deb
+URIs: http://snapshot.debian.org/archive/debian/$DEBIAN_SNAPSHOT
+Suites: trixie trixie-updates
+Components: main
+Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp
+Check-Valid-Until: no
+
+Types: deb
+URIs: http://snapshot.debian.org/archive/debian-security/$DEBIAN_SNAPSHOT
+Suites: trixie-security
+Components: main
+Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp
+Check-Valid-Until: no
+EOF
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends build-essential pkg-config ca-certificates \
     libglib2.0-dev libsqlite3-dev libxxhash-dev uuid-dev libmount-dev libblkid-dev libbsd-dev \
-    dpkg-dev file >/dev/null
+    dpkg-dev file git >/dev/null
 SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-1762819200}
 export SOURCE_DATE_EPOCH
 
 tarball="$OUT/oans-$OANS_VERSION.tar.gz"
 echo "$OANS_SOURCE_SHA256  $tarball" | sha256sum -c --quiet - || { echo "source tarball checksum mismatch" >&2; exit 1; }
+# GitHub's archive records the commit it was made from: it must be the pinned tag commit
+commit=$(gzip -dc "$tarball" | git get-tar-commit-id || true)
+[ "$commit" = "$OANS_COMMIT" ] || { echo "source tarball is of commit '$commit', not $OANS_COMMIT" >&2; exit 1; }
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
