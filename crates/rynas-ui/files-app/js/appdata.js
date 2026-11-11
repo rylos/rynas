@@ -24,10 +24,32 @@ export function setAppFolders(list) {
 
 export const appFolders = () => [...folders.values()];
 
+/** The folder entry ({ name, stack, app? }) that holds `path`, else null. */
+function folderOf(path) {
+  if (!inApps(path || "")) return null;
+  return folders.get(path.split("/")[2]) || null;
+}
+
 /** The stack whose folder holds `path`, else null. */
 export function stackOf(path) {
-  if (!inApps(path || "")) return null;
-  return folders.get(path.split("/")[2])?.stack || null;
+  return folderOf(path)?.stack || null;
+}
+
+// stack → the catalogue name of the app installed there (asked once)
+const names = new Map();
+
+/** What the user knows the stack as: the catalogue app's name, else the stack. */
+async function displayName(stack, app) {
+  if (!app) return stack;
+  if (!names.has(stack)) {
+    try {
+      const d = await rynas(`/api/v1/apps/installed/${encodeURIComponent(stack)}`);
+      names.set(stack, d?.app?.name || stack);
+    } catch {
+      return stack;
+    }
+  }
+  return names.get(stack);
 }
 
 // one offer per stack in a while: a copy of many files is one change
@@ -53,8 +75,9 @@ async function rynas(path, method = "GET") {
  * offers to restart that app.
  */
 export async function changed(...paths) {
-  const stacks = new Set(paths.flat().map(stackOf).filter(Boolean));
-  for (const stack of stacks) {
+  const apps = new Map();
+  for (const f of paths.flat().map(folderOf)) if (f?.stack) apps.set(f.stack, f.app || null);
+  for (const [stack, app] of apps) {
     if (Date.now() - (offered.get(stack) || 0) < QUIET_MS) continue;
     offered.set(stack, Date.now());
     let running = 0;
@@ -65,18 +88,19 @@ export async function changed(...paths) {
       continue;
     }
     if (!running) continue;
-    toast(t("L'app {s} potrebbe dover ripartire per vedere la modifica", { s: stack }), {
+    const name = await displayName(stack, app);
+    toast(t("L'app {s} potrebbe dover ripartire per vedere la modifica", { s: name }), {
       action: t("Riavvia"),
       timeout: 12_000,
-      onAction: () => restart(stack),
+      onAction: () => restart(stack, name),
     });
   }
 }
 
-async function restart(stack) {
+async function restart(stack, name) {
   try {
     await rynas(`/api/v1/docker/stacks/${encodeURIComponent(stack)}/restart`, "POST");
-    toast(t("Riavvio di {s} avviato", { s: stack }), { kind: "ok" });
+    toast(t("Riavvio di {s} avviato", { s: name }), { kind: "ok" });
   } catch (e) {
     errorToast(e);
   }

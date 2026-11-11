@@ -240,7 +240,7 @@ export const sidebarMethods = {
     const apps = appFolders();
     if (apps.length) {
       html += `<div class="side-title"><span>${t("App")}</span></div>`;
-      html += item(APPS_PATH, t("Dati delle app"), svg("archive"), `<span class="si-sub">${t("{n} cartelle", { n: apps.length })}</span>`);
+      html += item(APPS_PATH, t("Dati delle app"), svg("box"), `<span class="si-sub">${t("{n} cartelle", { n: apps.length })}</span>`);
     }
     html += `<div class="side-title conn-title"><span>${t("Connessioni")}</span><button class="side-add" title="${t("Nuova connessione")}">${svg("plus")}</button></div>`;
     if (this.conns.length) {

@@ -3968,7 +3968,7 @@ dict! { BLOB, LENS, IT;
     "dk.set.stop" => "Stop the stack for the snapshot", "Ferma lo stack per lo snapshot";
     "dk.set.stop_help" => "Recommended for databases: the files are consistent while nothing writes.", "Consigliato per i database: i file sono coerenti mentre nessuno scrive.";
     "dk.set.online_catalog" => "Download app catalogue updates", "Scarica gli aggiornamenti del catalogo delle app";
-    "dk.set.files_app_data" => "Show app data in Files", "Mostra i dati delle app in File";
+    "dk.set.files_app_data" => "Show app data in Files", "Mostra i dati delle app nell'app File";
     "dk.set.files_app_data_help" => "Administrators see a folder per app and can edit its files; owners stay as the app expects. A wrong change can break an app.", "Gli amministratori vedono una cartella per app e possono modificarne i file; i proprietari restano quelli che l'app si aspetta. Una modifica sbagliata può rompere un'app.";
     "dk.set.online_catalog_help" => "Once a day rynas fetches the signed app catalogue, so new apps and app versions arrive without waiting for a rynas update. A catalogue that fails verification is never used.", "Una volta al giorno rynas scarica il catalogo firmato delle app, così nuove app e nuove versioni arrivano senza aspettare un aggiornamento di rynas. Un catalogo che non supera la verifica non viene mai usato.";
     "dk.set.keep" => "Snapshots kept per stack", "Snapshot conservati per stack";

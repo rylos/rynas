@@ -434,12 +434,15 @@ fn settings_form(init: DockerSettingsState, settings: Remote<DockerSettingsState
                 {text_field("dk.set.pool", base, set_base, base_err, In { mono: true, help: Some("dk.set.pool_help"), maxlength: 18, ..In::default() })}
                 {number_field("dk.set.pool_size", Some("dk.set.pool_size_help"), size, set_size, 9, 30)}
             </div>
+            // the snapshots of the stacks together, then the other switches
             {switch("dk.set.snapshot", Some("dk.set.snapshot_help"), snap, set_snap)}
             {switch("dk.set.stop", Some("dk.set.stop_help"), stop, set_stop)}
+            <div class="form-row">
+                {number_field("dk.set.keep", None, keep, set_keep, 1, 50)}
+            </div>
             {switch("dk.set.online_catalog", Some("dk.set.online_catalog_help"), online_cat, set_online_cat)}
             {switch("dk.set.files_app_data", Some("dk.set.files_app_data_help"), app_files, set_app_files)}
             <div class="form-row">
-                {number_field("dk.set.keep", None, keep, set_keep, 1, 50)}
                 {number_field("dk.set.full", Some("dk.set.full_help"), full, set_full, 50, 99)}
                 {number_field("dk.set.restarts", Some("dk.set.restarts_help"), restarts, set_restarts, 2, 100)}
                 {number_field("dk.set.window", None, window, set_window, 1, 120)}

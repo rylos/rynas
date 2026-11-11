@@ -3545,7 +3545,7 @@ dk.set.snapshot_help	Uno snapshot in sola lettura della cartella dello stack, pe
 dk.set.stop	Ferma lo stack per lo snapshot
 dk.set.stop_help	Consigliato per i database: i file sono coerenti mentre nessuno scrive.
 dk.set.online_catalog	Scarica gli aggiornamenti del catalogo delle app
-dk.set.files_app_data	Mostra i dati delle app in File
+dk.set.files_app_data	Mostra i dati delle app nell'app File
 dk.set.files_app_data_help	Gli amministratori vedono una cartella per app e possono modificarne i file; i proprietari restano quelli che l'app si aspetta. Una modifica sbagliata può rompere un'app.
 dk.set.online_catalog_help	Una volta al giorno rynas scarica il catalogo firmato delle app, così nuove app e nuove versioni arrivano senza aspettare un aggiornamento di rynas. Un catalogo che non supera la verifica non viene mai usato.
 dk.set.keep	Snapshot conservati per stack
