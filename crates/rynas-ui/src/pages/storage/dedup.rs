@@ -135,6 +135,8 @@ fn record_line(r: &DedupRecord) -> String {
     }
     if r.reclaimed_bytes > 0 {
         s.push_str(&format!(" · {}", tf("dd.freed", &[("size", &i18n::bytes(r.reclaimed_bytes))])));
+    } else if r.kind == DedupKind::Run && r.outcome == DedupOutcome::Done {
+        s.push_str(&format!(" · {}", t("dd.nothing_freed")));
     }
     s
 }
@@ -265,6 +267,12 @@ fn card(
     let can_run = engine.installed && engine.supported && running.is_none();
     let window = j.settings.as_ref().map(|s| summary_text(&s.window, LEVELS));
     let report = j.report.clone();
+    // the estimate is shown only while nothing ran after it
+    let estimate_newer = match (&j.estimate, &j.last) {
+        (Some(e), Some(r)) => e.at_ms >= r.end_ms,
+        (Some(_), None) => true,
+        _ => false,
+    };
     view! {
         <section class="card widget w-6">
             <WidgetHead icon=icons::COPY title="dd.title"><Status tone=tone text=t(state).to_string() /></WidgetHead>
@@ -309,7 +317,14 @@ fn card(
                     {report.as_ref().filter(|r| r.reclaimed_total_bytes > 0).map(|r| kv_row("dd.total", Signal::stored(i18n::bytes(r.reclaimed_total_bytes)), "tnum"))}
                     {report.as_ref().filter(|r| r.reclaimable_bytes > 0 && r.dedupe_configured == Some(true)).map(|r| kv_row("dd.left", Signal::stored(i18n::bytes(r.reclaimable_bytes)), "tnum"))}
                     {j.next_window_ms.map(|m| kv_row("dd.next", Signal::stored(i18n::short_when(m)), "tnum"))}
-                    {j.estimate.as_ref().map(|e| {
+                    // what the hashfile holds after a run; an older estimate would describe other shares
+                    {report.as_ref().filter(|r| r.runs > 0 && r.files_tracked > 0 && !estimate_newer).map(|r| {
+                        let dups = if r.dup_files == 0 { t("dd.no_dups").to_string() } else { tf("dd.dups", &[("files", &r.dup_files.to_string())]) };
+                        kv_row("dd.checked", Signal::stored(tf("dd.checked_line", &[
+                            ("files", &r.files_tracked.to_string()), ("size", &i18n::bytes(r.logical_bytes)), ("dups", &dups),
+                        ])), "tnum")
+                    })}
+                    {j.estimate.as_ref().filter(|_| estimate_newer).map(|e| {
                         let pct = if e.logical_bytes > 0 { e.reclaimable_bytes as f64 * 100.0 / e.logical_bytes as f64 } else { 0.0 };
                         kv_row("dd.estimate_result", Signal::stored(tf("dd.estimate_line", &[
                             ("size", &i18n::bytes(e.reclaimable_bytes)), ("files", &e.dup_files.to_string()), ("scanned", &e.files.to_string()), ("pct", &i18n::pct(pct)), ("total", &i18n::bytes(e.logical_bytes)),

@@ -2301,6 +2301,11 @@ dd.ph.hashing	Lettura dei file
 dd.ph.dedupe	Condivisione dei duplicati
 dd.eta	mancano {time}
 dd.freed	{size} liberati
+dd.nothing_freed	niente da liberare
+dd.checked	Controllati
+dd.checked_line	{files} file, {size} · {dups}
+dd.no_dups	nessun duplicato
+dd.dups	{files} file duplicati
 dd.window	Fascia oraria
 dd.window_help	Le esecuzioni partono all'inizio di ogni blocco e si fermano alla sua fine; il blocco successivo riprende da lì.
 dd.window_empty	Scegli almeno un'ora.
