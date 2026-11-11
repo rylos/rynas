@@ -21,6 +21,7 @@
 //!   for btrbk snapshot names directly inside the folder, subject to the NAS rules
 //!   ([`crate::receive::delete_refusal`], checked by the binary on a fresh listing); always
 //!   run as `btrfs subvolume delete --commit-each` (the one form the sudoers line allows);
+//!   with `--delete-interrupted` instead, the same command only for interrupted receives;
 //! - read only: `btrfs subvolume show|list …` and `btrfs filesystem usage …` on the folder
 //!   or below it,
 //!   `readlink [-v] -e|-f '<root>…'`, `test -d '<root>…'`, `cat /proc/self/mountinfo|mounts`.
@@ -39,6 +40,9 @@ pub struct FilterArgs {
     pub delete: bool,
     pub keep_last: u32,
     pub min_age_days: u32,
+    /// `--delete-interrupted`: deletes are accepted only for interrupted receives (the PC
+    /// can only add; the NAS deletes old snapshots itself or keeps them).
+    pub interrupted_only: bool,
 }
 
 pub fn parse_args(args: &[String]) -> Result<FilterArgs, String> {
@@ -53,6 +57,10 @@ pub fn parse_args(args: &[String]) -> Result<FilterArgs, String> {
             "--device" => a.device = it.next().cloned().ok_or("--device needs a name")?,
             "--root" => a.root = it.next().cloned().ok_or("--root needs a path")?,
             "--delete" => a.delete = true,
+            "--delete-interrupted" => {
+                a.delete = true;
+                a.interrupted_only = true;
+            }
             "--keep-last" => a.keep_last = num(it.next(), "--keep-last")?,
             "--min-age-days" => a.min_age_days = num(it.next(), "--min-age-days")?,
             other => return Err(format!("unknown argument {other}")),
@@ -459,7 +467,7 @@ mod tests {
     use super::*;
 
     fn args(delete: bool) -> FilterArgs {
-        FilterArgs { device: "pc".into(), root: "/volume1/backup/pc".into(), delete, keep_last: 0, min_age_days: 0 }
+        FilterArgs { device: "pc".into(), root: "/volume1/backup/pc".into(), delete, keep_last: 0, min_age_days: 0, interrupted_only: false }
     }
 
     #[test]
@@ -581,7 +589,11 @@ mod tests {
     fn arguments_round_trip() {
         let p = rynas_api_types::pcbackup::DeletePolicy { allowed: true, keep_last: 3, min_age_days: 7 };
         let a = parse_args(&crate::receive::filter_args("pc", "/volume1/backup/pc", &p)).unwrap();
-        assert_eq!(a, FilterArgs { device: "pc".into(), root: "/volume1/backup/pc".into(), delete: true, keep_last: 3, min_age_days: 7 });
+        assert_eq!(a, FilterArgs { device: "pc".into(), root: "/volume1/backup/pc".into(), delete: true, keep_last: 3, min_age_days: 7, interrupted_only: false });
+        // the PC can only add: deletes reach the binary, which accepts only interrupted receives
+        let p = rynas_api_types::pcbackup::DeletePolicy { allowed: false, keep_last: 3, min_age_days: 7 };
+        let a = parse_args(&crate::receive::filter_args("pc", "/volume1/backup/pc", &p)).unwrap();
+        assert!(a.delete && a.interrupted_only && a.keep_last == 0);
         assert!(parse_args(&["--device".into(), "pc".into()]).is_err());
         assert!(parse_args(&["--device".into(), "pc".into(), "--root".into(), "/etc/x".into()]).is_err());
         assert!(parse_args(&["--bogus".into()]).is_err());

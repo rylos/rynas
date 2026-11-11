@@ -238,7 +238,8 @@ async fn settings_rules_and_removal() {
     let t = task(&e, "PUT", "/v1/pc-backups/targets/laptop", Some(json!({"public_key": KEY, "alert_days": 0, "delete": {"allowed": false, "keep_last": 5, "min_age_days": 30}}))).await;
     assert_eq!(t.status, TaskStatus::Ok);
     let k = keys(&e);
-    assert!(k.contains("--root /volume1/backup/laptop\" ssh-ed25519") && !k.contains("--delete"), "{k}");
+    // deletes off: the PC can only remove its own interrupted receives
+    assert!(k.contains("--root /volume1/backup/laptop --delete-interrupted\" ssh-ed25519") && !k.contains("--delete "), "{k}");
     // no key: no line, the PC cannot log in
     task(&e, "PUT", "/v1/pc-backups/targets/laptop", Some(json!({"public_key": "", "alert_days": 3, "delete": {"allowed": true, "keep_last": 1, "min_age_days": 0}}))).await;
     assert!(!keys(&e).contains("ssh-ed25519"));
@@ -376,4 +377,147 @@ async fn sudoers_follow_the_devices_and_the_last_removal_cleans_up() {
     assert!(e.host.sudo_roots.lock().unwrap().is_none());
     assert!(keys(&e).is_empty());
     assert_eq!(e.host.released.lock().unwrap().len(), 2);
+}
+
+/// A complete snapshot received `days_ago` with its own subvolume UUID.
+fn snap_u(group: &str, days_ago: i64) -> Entry {
+    let mut s = snap(group, days_ago);
+    s.info.as_mut().unwrap().uuid = Some(format!("{group}-{days_ago}"));
+    s
+}
+
+fn folder(e: &Env, path: &str, mut entries: Vec<Entry>) {
+    entries.sort_by(|a, b| rynas_btrfs::name::compare_names(&b.name, &a.name));
+    e.host.folders.lock().unwrap().insert(path.into(), (true, entries));
+}
+
+async fn detail(e: &Env, device: &str) -> PcTargetDetail {
+    let (s, b) = call(e, "GET", &format!("/v1/pc-backups/targets/{device}"), None).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    serde_json::from_slice(&b).unwrap()
+}
+
+#[tokio::test]
+async fn nas_retention_keeps_the_parent_and_the_pc_can_only_add() {
+    let e = env();
+    let path = "/volume1/backup/pc";
+    // one run a day for 20 days, home and root
+    folder(&e, path, (1..=20).flat_map(|d| [snap_u("home", d), snap_u("root", d)]).collect());
+    let retention = json!({"owner": "nas", "gfs": {"hourly": 0, "daily": 6, "weekly": 0, "monthly": 0, "yearly": 0, "min": "latest"}});
+    let t = task(&e, "POST", "/v1/pc-backups/targets", Some(json!({"device": "pc", "path": path, "adopt": true, "public_key": KEY, "retention": retention}))).await;
+    assert_eq!(t.status, TaskStatus::Ok, "{:?}", t.error);
+    // the key cannot delete snapshots, only interrupted receives
+    let k = keys(&e);
+    assert!(k.contains("--root /volume1/backup/pc --delete-interrupted\"") && !k.contains("--delete "), "{k}");
+    let d = detail(&e, "pc").await;
+    assert!(d.client_config.contains("target_preserve_min    all"));
+    assert_eq!(d.runs.len(), 20);
+    assert!(d.runs.iter().all(|r| r.lacks.is_empty()));
+    // the preview: per subvolume the parent and 4 more dailies stay
+    let (s, b) = call(&e, "POST", "/v1/pc-backups/plan/retention", Some(json!({"device": "pc", "retention": retention}))).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    let p: PcRetentionPreview = serde_json::from_slice(&b).unwrap();
+    assert_eq!(p.items.len(), 40);
+    assert_eq!(p.delete, 30, "{:?}", p.items);
+    assert_eq!(p.frees_at_least_bytes, None);
+    let parents: Vec<&RetentionItem> = p.items.iter().filter(|i| i.reason == RetentionReason::Parent).collect();
+    assert_eq!(parents.len(), 2);
+    let (s, b) = call(&e, "POST", "/v1/pc-backups/plan/retention", Some(json!({"device": "pc", "retention": {"owner": "nas", "gfs": {"min": "1x"}}}))).await;
+    assert_eq!((s, err(&b).field.as_deref()), (StatusCode::BAD_REQUEST, Some("retention.gfs.min")));
+    // the parent cannot be deleted by hand; an old snapshot can
+    let parent = parents[0].name.clone();
+    let (s, b) = call(&e, "DELETE", &format!("/v1/pc-backups/targets/pc/snapshots/{parent}"), None).await;
+    assert_eq!((s, err(&b).field.as_deref()), (StatusCode::CONFLICT, Some("snapshot")));
+    let old = snap("home", 20).name;
+    let t = task(&e, "DELETE", &format!("/v1/pc-backups/targets/pc/snapshots/{old}"), None).await;
+    assert_eq!(t.status, TaskStatus::Ok, "{:?}", t.error);
+    // a pass while a receive runs does nothing; then it deletes what the preview said
+    e.host.busy.lock().unwrap().push(path.into());
+    let t = task(&e, "POST", "/v1/pc-backups/targets/pc/prune", None).await;
+    assert_eq!(t.status, TaskStatus::Error);
+    assert!(list(&e).await[0].last_prune.as_ref().unwrap().error.is_some());
+    e.host.busy.lock().unwrap().clear();
+    let t = task(&e, "POST", "/v1/pc-backups/targets/pc/prune", None).await;
+    assert_eq!(t.status, TaskStatus::Ok, "{:?}", t.error);
+    assert_eq!(e.host.deleted.lock().unwrap().len(), 30);
+    let d = detail(&e, "pc").await;
+    assert_eq!(d.list.len(), 10);
+    assert!(d.list.iter().any(|s| s.name == parent && s.parent));
+    assert_eq!(d.target.last_prune.as_ref().map(|r| (r.deleted, r.error.is_none())), Some((29, true)));
+    // a PC that deletes for itself has no NAS passes
+    task(&e, "PUT", "/v1/pc-backups/targets/pc", Some(json!({"public_key": KEY, "alert_days": 3, "delete": {"allowed": true, "keep_last": 1, "min_age_days": 0}, "retention": {"owner": "pc"}}))).await;
+    let (s, _) = call(&e, "POST", "/v1/pc-backups/targets/pc/prune", None).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    assert!(keys(&e).contains("--delete --keep-last 1"));
+}
+
+#[tokio::test]
+async fn sizes_bare_metal_and_the_new_alerts() {
+    let e = env();
+    let path = "/volume1/backup/pc";
+    let mut entries: Vec<Entry> = (1..=3).flat_map(|d| [snap_u("@", d), snap_u("@home", d)]).collect();
+    // @games stopped 10 days ago; an interrupted receive from yesterday
+    entries.push(snap_u("@games", 10));
+    let mut broken = snap_u("@home", 0);
+    broken.info.as_mut().unwrap().readonly = false;
+    broken.info.as_mut().unwrap().received_uuid = None;
+    broken.info.as_mut().unwrap().otime -= 3600;
+    entries.push(broken);
+    folder(&e, path, entries);
+    // the newest @ snapshot carries a manifest that needs @ and @home
+    let newest_root = snap("@", 1).name;
+    e.host.manifests.lock().unwrap().insert(
+        PathBuf::from(path).join(&newest_root),
+        serde_json::to_vec(&json!({"format": 1, "boot": {"loader": "grub"}, "btrbk": {"subvolumes": [{"name": "@", "mount": "/"}, {"name": "@home", "mount": "/home"}, {"name": "@games", "mount": "/home/games"}]}})).unwrap(),
+    );
+    *e.host.space.lock().unwrap() = Some((10 << 30, 1 << 40));
+    task(&e, "POST", "/v1/pc-backups/targets", Some(json!({"device": "pc", "path": path, "adopt": true, "alert_hours": 48}))).await;
+    let d = detail(&e, "pc").await;
+    let b = &d.target.bare_metal;
+    assert_eq!(b.manifest_snapshot.as_deref(), Some(newest_root.as_str()));
+    assert_eq!(b.loader.as_deref(), Some("grub"));
+    // @games has a snapshot: ready, but the newest run lacks it
+    assert!(b.ready, "{b:?}");
+    assert_eq!(b.warnings.iter().map(|w| (w.code, w.subject.clone())).collect::<Vec<_>>(), [(BareMetalCode::LatestRunIncomplete, Some("@games".into()))]);
+    let codes: Vec<PcIssueCode> = d.target.issues.iter().map(|i| i.code).collect();
+    assert_eq!(codes, [PcIssueCode::SubvolumeLate, PcIssueCode::ReceiveFailed, PcIssueCode::LowSpace]);
+    assert!(d.list.iter().all(|s| s.size.is_none()) && !d.sizes_from_quota);
+    // measure: every complete snapshot once; the second run has nothing to do
+    let t = task(&e, "POST", "/v1/pc-backups/targets/pc/sizes", None).await;
+    assert_eq!(t.status, TaskStatus::Ok, "{:?}", t.error);
+    assert_eq!(e.host.measured.lock().unwrap().len(), 7);
+    task(&e, "POST", "/v1/pc-backups/targets/pc/sizes", None).await;
+    assert_eq!(e.host.measured.lock().unwrap().len(), 7);
+    let d = detail(&e, "pc").await;
+    assert!(d.list.iter().filter(|s| !s.incomplete).all(|s| s.size.is_some_and(|z| !z.from_quota)));
+    assert!(d.runs[1].referenced_bytes.is_some());
+    // the alerts fire once each and close when it is over
+    e.svc.check_freshness();
+    e.svc.check_freshness();
+    let codes = |e: &Env| e.notifier.0.lock().unwrap().iter().map(|ev| (ev.code.clone(), ev.state)).collect::<Vec<_>>();
+    let c = codes(&e);
+    assert_eq!(c.len(), 3, "{c:?}");
+    assert!(c.iter().all(|x| x.1 == EventState::Firing));
+    assert!(c.iter().any(|x| x.0 == "pcbackup.subvolume_late") && c.iter().any(|x| x.0 == "pcbackup.receive_failed") && c.iter().any(|x| x.0 == "pcbackup.low_space"));
+    *e.host.space.lock().unwrap() = Some((900 << 30, 1 << 40));
+    task(&e, "PUT", "/v1/pc-backups/targets/pc", Some(json!({"alert_days": 2, "alert_hours": 48, "delete": {"allowed": true, "keep_last": 1, "min_age_days": 0}, "ignored_groups": ["@games"]}))).await;
+    e.svc.check_freshness();
+    let c = codes(&e);
+    assert_eq!(c.len(), 5, "{c:?}");
+    assert!(c[3..].iter().all(|x| x.1 == EventState::Resolved));
+    assert!(c[3..].iter().any(|x| x.0 == "pcbackup.space_ok") && c[3..].iter().any(|x| x.0 == "pcbackup.subvolume_resumed"));
+    // quota groups win when they are on
+    *e.host.quota.lock().unwrap() = Some(d.list.iter().map(|s| (s.name.clone(), (5, 1))).collect());
+    let d = detail(&e, "pc").await;
+    assert!(d.sizes_from_quota && d.list.iter().all(|s| s.size.is_some_and(|z| z.from_quota && z.referenced_bytes == 5)));
+}
+
+#[tokio::test]
+async fn no_manifest_is_not_ready() {
+    let e = env();
+    folder(&e, "/volume1/backup/pc", vec![snap_u("@", 1)]);
+    task(&e, "POST", "/v1/pc-backups/targets", Some(json!({"device": "pc", "path": "/volume1/backup/pc", "adopt": true}))).await;
+    let b = list(&e).await.remove(0).bare_metal;
+    assert!(!b.ready);
+    assert_eq!(b.missing.iter().map(|g| g.code).collect::<Vec<_>>(), [BareMetalCode::NoManifest]);
 }
