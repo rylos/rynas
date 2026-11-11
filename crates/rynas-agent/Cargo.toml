@@ -1,0 +1,67 @@
+[package]
+name = "rynas-agent"
+description = "rynas PC backup agent: file backups into the NAS' restic repository with a layout manifest, and bare-metal restore from any live Linux"
+version = "0.1.0"
+edition = "2024"
+authors = ["Marco Ziliani"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/rylos/rynas"
+rust-version = "1.91"
+
+# A workspace of its own, like rynas-backup-worker (D-BACKUP, D-PCBACKUP): rustic_core is a
+# large dependency tree that never links into rynasd or the UI. Built as a static binary:
+# `packaging/agent/build.sh` (musl, x86_64 and aarch64).
+[workspace]
+
+[[bin]]
+name = "rynas-agent"
+path = "src/main.rs"
+
+[dependencies]
+rynas-api-types = { path = "../rynas-api-types" }
+# the same engine version as the NAS' worker
+rustic_core = "=0.13.0"
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+sha2 = "0.10"
+# TLS with the NAS' certificate pinned (no system CA store on a live system)
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
+crossterm = "0.28"
+
+[dev-dependencies]
+tempfile = "3"
+
+# .deb (cargo-deb) and .rpm (cargo-generate-rpm) files attached to the GitHub release, from
+# the static musl binary: `cargo deb --no-build --target x86_64-unknown-linux-musl`,
+# `cargo generate-rpm --target x86_64-unknown-linux-musl`.
+[package.metadata.deb]
+maintainer = "Marco Ziliani"
+section = "admin"
+priority = "optional"
+depends = ""
+recommends = "btrfs-progs, dosfstools"
+suggests = "lvm2, cryptsetup"
+extended-description = "File backups of this PC into a repository on a rynas NAS, with the disk layout for a bare-metal restore from any live Linux."
+assets = [
+    ["target/release/rynas-agent", "usr/bin/", "755"],
+    ["../../packaging/agent/rynas-agent.service", "lib/systemd/system/", "644"],
+]
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/rynas-agent", dest = "/usr/bin/rynas-agent", mode = "755" },
+    { source = "../../packaging/agent/rynas-agent.service", dest = "/usr/lib/systemd/system/rynas-agent.service", mode = "644" },
+]
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = 3
+
+[profile.dev.package."*"]
+opt-level = 2

@@ -1049,6 +1049,22 @@ fn main() -> std::io::Result<()> {
         );
         rynasd::pc_backup::spawn_watch(pc_backup.clone());
         state.pc_backup = Some(pc_backup);
+        // PC backup, file method (agent, restic repositories per backup group): the same
+        // worker launch and worker slots as the NAS backups
+        if let Some(rs) = state.restic.as_ref() {
+            let agent = rynasd::pc_agent::PcAgent::new(
+                ops.clone(),
+                notifier.clone(),
+                args.state_dir.clone(),
+                args.dry_system,
+                rs.launch.clone(),
+                rs.workers.clone(),
+                Some(opened.tls.clone()),
+                running_hostname(),
+            );
+            rynasd::pc_agent::maint::spawn_watch(agent.clone());
+            state.pc_agent = Some(agent);
+        }
         // the SSH service: the machine, or (--dry-system) a seeded dry root and a stand-in
         // for sshd and systemctl
         {

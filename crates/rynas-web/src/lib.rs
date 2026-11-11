@@ -11,6 +11,7 @@ pub mod hardware;
 pub mod listen;
 pub mod metrics;
 pub mod notify;
+pub mod pc_agent;
 pub mod proxy;
 pub mod rynasd_client;
 pub mod static_files;

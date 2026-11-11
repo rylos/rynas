@@ -592,6 +592,10 @@ pub enum WorkerOp {
         scope: SnapshotScope,
         retention: Retention,
         dry_run: bool,
+        /// Snapshots younger than this many days are always kept (the PC repositories'
+        /// minimum age).
+        #[serde(default)]
+        min_age_days: u32,
     },
     Prune,
     /// `read_percent` 0: structure only; `slice` `(n, 12)` reads the n-th twelfth.
@@ -632,6 +636,32 @@ pub enum WorkerOp {
     },
     /// Size of the repository.
     Stats,
+    /// Adds a key file with this password (the PC's own, the recovery kit's).
+    AddKey {
+        password: String,
+        #[serde(default)]
+        hostname: String,
+    },
+    /// Removes a key file (never the one the worker opened the repository with).
+    RemoveKey { id: String },
+    /// Creates the repository of a PC backup group: larger packs and a larger average chunk
+    /// than the restic defaults (fewer blobs, a smaller index, less memory for prune and
+    /// check; still readable by stock restic). Nothing happens when one exists.
+    InitPc,
+    /// Counts the blobs and packs of the index (one index file at a time: little memory),
+    /// for the memory estimate of a maintenance.
+    IndexInfo,
+    /// Writes one file, or a stored zip (zip64) of the files and folders `paths`, to the
+    /// standard output, which rynasd streams to the browser; the events go to the standard
+    /// error instead (the last one is the result or the error).
+    Stream {
+        snapshot: String,
+        paths: Vec<String>,
+        #[serde(default)]
+        zip: bool,
+        #[serde(default)]
+        scope: Option<SnapshotScope>,
+    },
 }
 
 /// Standard input of the worker.
@@ -691,6 +721,16 @@ pub enum WorkerEvent {
     Restored { files: u64, bytes: u64 },
     Dumped { bytes: u64 },
     Stats { bytes: u64, files: u64 },
+    KeyAdded { id: String },
+    KeyRemoved,
+    IndexInfo {
+        data_blobs: u64,
+        tree_blobs: u64,
+        packs: u64,
+        /// Packs marked for deletion by an earlier prune.
+        packs_delete: u64,
+    },
+    Streamed { bytes: u64, files: u64 },
     /// The operation failed (the last line).
     Error { message: String },
 }

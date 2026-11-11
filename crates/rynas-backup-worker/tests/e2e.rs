@@ -212,7 +212,7 @@ fn backup_restore_forget_prune_check() {
 
     // retention: preview, then keep the last one of this NAS
     let keep1 = Retention { last: 1, hourly: 0, daily: 0, weekly: 0, monthly: 0, yearly: 0 };
-    let forget = |dry_run| WorkerOp::Forget { scope: docs().unwrap(), retention: keep1, dry_run };
+    let forget = |dry_run| WorkerOp::Forget { scope: docs().unwrap(), retention: keep1, dry_run, min_age_days: 0 };
     let r = run(&s, forget(true));
     let WorkerEvent::Forgot { keep, remove } = last(&r) else { panic!("{}", r.2) };
     assert_eq!((keep.len(), remove.len()), (1, 1));
@@ -224,6 +224,7 @@ fn backup_restore_forget_prune_check() {
         scope: scope("rynas-job:other", "nas"),
         retention: keep1,
         dry_run: false,
+        min_age_days: 0,
     });
     assert!(matches!(last(&r), WorkerEvent::Forgot { remove, .. } if remove.is_empty()));
     // nor is the other NAS' snapshot
@@ -232,7 +233,7 @@ fn backup_restore_forget_prune_check() {
     assert_eq!(list.len(), 2);
     assert!(list.iter().any(|x| x.id == other.id));
     // forget without a tag: refused
-    let r = run(&s, WorkerOp::Forget { scope: scope("", ""), retention: keep1, dry_run: true });
+    let r = run(&s, WorkerOp::Forget { scope: scope("", ""), retention: keep1, dry_run: true, min_age_days: 0 });
     assert!(!r.1);
 
     let r = run(&s, WorkerOp::Prune);
@@ -253,6 +254,69 @@ fn backup_restore_forget_prune_check() {
     assert!(!r.1 && matches!(last(&r), WorkerEvent::Error { .. }));
     assert!(!r.2.contains("wrong-password-123"), "{}", r.2);
     assert!(!run(&s, WorkerOp::Snapshots { scope: None }).2.contains(PW));
+}
+
+/// A PC group's repository: `init_pc`, a PC key that opens it, `index_info`, the minimum
+/// age of `forget`, `stream` of a file and of a zip (data on stdout, events on stderr), a
+/// removed key that no longer opens it.
+#[test]
+fn pc_repository_keys_stream_and_min_age() {
+    let t = tempfile::tempdir().unwrap();
+    let repo = t.path().join("repo");
+    let data = t.path().join("pc");
+    std::fs::create_dir_all(data.join("docs")).unwrap();
+    std::fs::write(data.join("docs/a.txt"), "hello pc").unwrap();
+    let nas = spec(&repo, PW);
+    let r = run(&nas, WorkerOp::InitPc);
+    assert!(matches!(last(&r), WorkerEvent::Initialized { created: true }), "{}", r.2);
+    let r = run(&nas, WorkerOp::AddKey { password: "pc-password".into(), hostname: "pc".into() });
+    let WorkerEvent::KeyAdded { id } = last(&r).clone() else { panic!("{}", r.2) };
+    let pc = spec(&repo, "pc-password");
+    let backup = WorkerOp::Backup {
+        sources: vec![WorkerSource { read: data.display().to_string(), as_path: "/".into(), excludes: vec![] }],
+        tags: vec!["rynas-pc".into(), "pc-laptop".into()],
+        host: "laptop".into(),
+        excludes: vec![],
+    };
+    let r = run(&pc, backup);
+    assert!(matches!(last(&r), WorkerEvent::BackedUp { .. }), "{}", r.2);
+    let r = run(&nas, WorkerOp::IndexInfo);
+    assert!(matches!(last(&r), WorkerEvent::IndexInfo { data_blobs, .. } if *data_blobs >= 1), "{}", r.2);
+    // younger than the minimum age: kept although the retention keeps nothing by count
+    let r = run(&nas, WorkerOp::Forget {
+        scope: scope("pc-laptop", ""),
+        retention: Retention { last: 1, ..Default::default() },
+        dry_run: true,
+        min_age_days: 7,
+    });
+    assert!(matches!(last(&r), WorkerEvent::Forgot { remove, .. } if remove.is_empty()), "{}", r.2);
+    // stream: raw bytes on stdout
+    let stream = |zip: bool, paths: Vec<String>| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_rynas-backup-worker"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let req = WorkerRequest {
+            repo: nas.clone(),
+            op: WorkerOp::Stream { snapshot: "latest".into(), paths, zip, scope: Some(scope("pc-laptop", "")) },
+            cache_dir: None,
+        };
+        child.stdin.take().unwrap().write_all(serde_json::to_string(&req).unwrap().as_bytes()).unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        out.stdout
+    };
+    assert_eq!(stream(false, vec!["/docs/a.txt".into()]), b"hello pc");
+    let z = stream(true, vec!["/docs".into()]);
+    assert_eq!(&z[..4], b"PK\x03\x04");
+    assert!(z.windows(8).any(|w| w == b"hello pc"));
+    // the PC's key removed: its password opens nothing
+    let r = run(&nas, WorkerOp::RemoveKey { id });
+    assert!(matches!(last(&r), WorkerEvent::KeyRemoved), "{}", r.2);
+    let r = run(&pc, WorkerOp::Snapshots { scope: None });
+    assert!(!r.1, "{}", r.2);
 }
 
 #[test]

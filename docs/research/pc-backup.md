@@ -248,6 +248,24 @@ Built on the D-BACKUP restic browser, which already exists (browse, restore, dow
   - a compromised NAS loses everything, which is why the off-NAS copy (D-BACKUP) matters.
 - **Never:** credentials in a file on a USB stick; the LUKS header in the backup; a device token in the URL; a pairing code that is not one-time.
 
+### 4.7 Memory of the NAS-side maintenance (implemented 2026-11-11)
+
+Marco's request: size the maintenance to the machine's RAM.
+
+- **Engine.** Prune, check and forget run in `rynas-backup-worker` (`rustic_core`), never the restic binary. rustic loads only the index a command needs (forget reads only the snapshots). Nowhere in rynas does the restic binary run, so no GOGC/GOMEMLIMIT is needed.
+- **Budget.** `maintenance_memory_pct` (10–80 %, default 40) of MemTotal, at least 256 MiB. The worker runs in its transient unit with `MemoryMax` = the budget and `MemoryHigh` = 3/4 of it, plus `Nice=19`, idle I/O and the same sandbox as the other worker units (the dedup units follow the same pattern).
+- **Estimate before running.** Counting the blobs with the worker would cost as much memory as the prune itself (measured below), so the NAS reads only the **size of the index files**: about 40 bytes per blob on disk (zstd-compressed JSON; the 32-byte blob ids do not compress). Need = 32 MiB + blobs × 250 bytes. A prune and check that would not fit are **postponed**, and the reason shows on the group (forget still runs). The console shows each group's estimate against the budget. "Join a group" warns when one more PC would push the group past it.
+- **New repositories** (`init_pc` in the worker) use larger packs: data packs of 64 MiB that grow with the repository up to 512 MiB (restic: 16 MiB; rustic's default: 32 MiB without a limit). They also use a **2 MiB average chunk** (min 1, max 16) instead of restic's fixed 1 MiB (512 KiB–8 MiB). That means about half the data blobs, and so half the index in memory, for files over 1 MiB. Files under 1 MiB are one blob either way. The price is less dedup inside large files that change in small places: a changed region rewrites about 2 MiB instead of 1. Stock restic still reads these repositories (blobs are content-addressed, and it ignores the extra config fields); backups it writes into one would be chunked with its own defaults. **Existing repositories never change chunking**, because that would split their dedup in two.
+
+Measured on pc-work, 2026-11-11 (`rynas-backup-worker` release build; restic 0.18.1 wrote N one-blob files twice, the second time without 1000 of them; peak RSS from `getrusage`):
+
+| blobs | index on disk | index_info | forget | prune | check (structure) | check + 1/12 data |
+|---|---|---|---|---|---|---|
+| 300 000 | — | 72 MiB | 40 MiB | 77 MiB | 79 MiB | 97 MiB |
+| 1 200 000 | 46 MiB (40.4 B/blob) | 237 MiB | 40 MiB | 247 MiB | 282 MiB | 271 MiB |
+
+The slope is about 198 bytes per blob for prune and 236 for check; the base is about 20 MiB. A 4 GB DS920+ with the default 40 % budget (≈1.6 GB) therefore maintains a group of about 6 million blobs: roughly 6–12 TB of PC data at 1–2 MiB per blob.
+
 ## 5. Phases
 
 | Phase | Content | Rough size | Main risks |
@@ -583,6 +601,48 @@ For PCs that already push with btrbk over SSH (§10). Code: `crates/rynasd/src/p
 - **Manifest fields B1 reads** (B2 must write at least these): `format` (1), `written_at_ms`, `boot.loader`, `btrbk.subvolumes[] {name (the btrbk name), path, mount}`; other fields (`subvolumes[]` with `excluded`, disks, GPT…) are ignored by B1.
 - **Tests:** unit tests of the plan, runs, manifest and alerts in `pc_backup.rs`, API tests on the memory host (`tests/pc_backup.rs`), and `tests/pc_backup_host.rs` (`#[ignore]`, root) on a real loop-mounted btrfs folder: sysfs quota sizes with and without quotas, measure, a symlinked manifest refused (`ELOOP`), the lock shared with the filter, delete under the lock.
 - **Open:** the GFS buckets use the NAS's time zone for names without an offset (as `name.rs` reads them), so a PC in another zone shifts by those hours; one shared account still serves every PC (§10.3).
+
+## 12. Implemented: the file method, phase 1 (2026-11-11)
+
+What runs (API in `../phase1/plan.md` "API v1: PC backup, file method"):
+
+- **NAS** (`rynasd::pc_agent`, `rynas_web::pc_agent`):
+  - restic REST v2 served per backup group, with append-only, quota, the 423 gate and token/session rules (§4.1);
+  - pairing, revocation, restore codes, recovery kits, the daily maintenance in the memory budget (§4.7), alerts;
+  - streamed downloads and zips: the worker writes to its stdout, events go to its stderr;
+  - the console tab "PCs: file backup".
+- **Worker** (`rynas-backup-worker`): `init_pc` (§4.7 profile), `add_key`/`remove_key`, `index_info`, `stream` (one file or a stored zip64), and a minimum age for `forget`.
+- **Agent** (`crates/rynas-agent`, its own workspace; a static musl binary of 6.6 MB, `packaging/agent/build.sh`):
+  - pairing with the certificate pinned by its SHA-256;
+  - its own small HTTP/1.1 client: rustls with a pin verifier and keep-alive, so no CA store is needed on a live system;
+  - a `rustic_core` backend over the REST protocol, waiting out 423;
+  - the service with a long poll, Back up now and Cancel, and a sleep inhibitor;
+  - the backup run itself: a private mount namespace in which every source is bound read-only at its mount point and saved as `/` in one version. btrfs gets read-only snapshots of the mounted and nested subvolumes (snapper `.snapshots`, Timeshift and container engines excluded); LVM gets snapshots; ext/XFS are read hot with the changed files listed, or frozen with a watchdog; the ESP is copied as files;
+  - the manifest, progress and reports.
+- **Restore** (`rynas-agent restore`):
+  - a TUI and a scripted mode over the same engine (`restore/exec.rs`): GPT with the same GUIDs, LUKS with the same UUID, mkfs with the original IDs (FAT16/32 kept), btrfs subvolumes and the default one;
+  - files restored with `rustic_core` (numeric owners, xattrs, hard links);
+  - ID rewrite when another disk has the IDs; a chroot that writes `/etc/kernel/cmdline` first, then the initramfs, GRUB (EFI/BIOS) or systemd-boot with `kernel-install` for machine-id entries, and the removable fallback;
+  - a report to the NAS. The `RestoreSource` trait has the btrfs pool step (§11.4).
+
+**Tests on 2026-11-11** (pc-work; at most 2 VMs at a time, 2 GiB RAM each, OVMF, user-mode network; the NAS was a local `rynasd --dry-system` + `rynas-web` on 127.0.0.1 with its real certificate on :18651):
+
+| Test | Result |
+|---|---|
+| stock restic 0.18.1 as the client of the REST handler | backup and snapshots ok; `forget` refused (append-only); `key add` refused; no token → 401; a restore session reads and cannot write (403); stock restic opens the folder with the recovery kit; download of a 50 MB file identical; the zip checks with `unzip -t`; maintenance refused with `busy` within 10 min of an upload; a revoked token → 401 |
+| Debian 13 genericcloud (ext4 `/` without LVM, ESP FAT16, GRUB + shim, UEFI), SQLite writer running | pairing with the pinned certificate; first backup read hot: 22 953 files, 1.46 GB in 40 s, 8 files listed as changed while read (the SQLite files and the writer's counters); second backup frozen: 6.5 s, nothing changed; manifest correct (UUIDs, PARTUUIDs, GPT, loader, initramfs tool) |
+| btrfs on a loop device, `@data` with a nested subvolume and a snapper `.snapshots` | read-only snapshots, the nested subvolume's files in the version, `.snapshots` empty, snapshots removed after the run, manifest subvolumes right |
+| service: "Back up now" from the console | picked up by the long poll at once; progress (phase, bytes) visible in the console; version in 6 s |
+| bare-metal restore from a Debian 12 live VM onto an empty **3 GiB** disk (source 4 GiB), scripted mode | preflight named the missing `dosfstools`; GPT, mkfs with the original UUIDs, 1.4 GB restored, initramfs, `grub-install`, `update-grub`, removable fallback: 32 s in all |
+| boot of the restored disk alone, fresh NVRAM | `running`, no failed units; SQLite `integrity_check` ok and both counters equal (the frozen version); a 20 MB file's SHA-256 ok; `cap_net_raw` on ping kept; a hard link kept |
+
+**Not tested in a VM yet:** systemd-boot and UKI, LUKS, LVM snapshots, XFS, Arch and Fedora, the TUI itself (the scripted mode runs the same engine), BIOS boot. LVM and md layouts are refused by the restore of this version (`manual_layout`).
+
+**Open:**
+- the TUI logs in with a restore code only; logging in as an administrator with TOTP is not done;
+- a dry run uses up the restore code;
+- the agent binary is not served by the NAS yet (the commands point to the GitHub release);
+- the btrfs method's source in the TUI (B3) is listed there, but is not in this build.
 
 ## Sources
 

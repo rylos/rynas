@@ -96,7 +96,7 @@ pub struct ResticSvc {
     /// `host:port` → (host key lines seen by a test, when): pinned by the job's save.
     host_keys: Mutex<HashMap<String, (String, Instant)>>,
     /// Worker operations of tasks at once ([`MAX_WORKERS`]).
-    workers: Arc<tokio::sync::Semaphore>,
+    pub workers: Arc<tokio::sync::Semaphore>,
 }
 
 pub type RsState = Option<Arc<ResticSvc>>;
@@ -1685,6 +1685,7 @@ async fn maintenance(s: &ResticSvc, job: &BackupJob, spec: &RepoSpec, ctx: &Task
             scope: scope_of(&job.name),
             retention: job.retention,
             dry_run: false,
+            min_age_days: 0,
         },
         ctx,
     )
@@ -2324,6 +2325,7 @@ async fn preview_retention(
             scope: scope_of(&name),
             retention: job.retention,
             dry_run: true,
+            min_age_days: 0,
         },
     )
     .await?

@@ -44,6 +44,8 @@ use rustic_core::{
     RestoreOptions, RusticProgress, SnapshotOptions,
 };
 use rustic_core::repofile::SnapshotFile;
+mod zipstream;
+
 use rynas_api_types::backup::{
     NodeEntry, RepoSpec, Retention, SnapshotEntry, SnapshotScope, TestOutcome, WorkerEvent,
     WorkerOp, WorkerRequest, WorkerSource, redact_secrets,
@@ -96,8 +98,17 @@ fn emit_secret(name: &str, content: &str) {
     write_line(&serde_json::to_string(&ev).unwrap_or_default());
 }
 
+/// The standard output carries data ([`WorkerOp::Stream`]): events go to stderr.
+static RAW_STDOUT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn write_line(line: &str) {
     let _g = OUT.lock();
+    if RAW_STDOUT.load(Ordering::Relaxed) {
+        let mut out = std::io::stderr().lock();
+        let _ = writeln!(out, "{line}");
+        let _ = out.flush();
+        return;
+    }
     let mut out = std::io::stdout().lock();
     let _ = writeln!(out, "{line}");
     let _ = out.flush();
@@ -542,6 +553,7 @@ fn run(req: WorkerRequest, private: &Private) -> Res<WorkerEvent> {
             scope,
             retention,
             dry_run,
+            min_age_days,
         } => {
             if retention.is_empty() {
                 return Err("no retention rule".into());
@@ -566,10 +578,12 @@ fn run(req: WorkerRequest, private: &Private) -> Res<WorkerEvent> {
             }
             let keep_opts = keep_options(&retention);
             let now = rustic_core::jiff::Zoned::now();
+            let young_from = (now.timestamp().as_millisecond().max(0) as u64)
+                .saturating_sub(u64::from(min_age_days) * 86_400_000);
             let (mut keep, mut remove, mut ids) = (Vec::new(), Vec::new(), Vec::new());
             for (_, snaps) in groups {
                 for f in keep_opts.apply(snaps, &now).map_err(err)? {
-                    if f.keep {
+                    if f.keep || (min_age_days > 0 && ms(&f.snapshot.time) >= young_from) {
                         keep.push(entry(&f.snapshot));
                     } else {
                         ids.push(f.snapshot.id);
@@ -738,6 +752,100 @@ fn run(req: WorkerRequest, private: &Private) -> Res<WorkerEvent> {
                 bytes: node.meta.size,
             })
         }
+        WorkerOp::InitPc => {
+            let repo = repository(spec, private, None)?;
+            if repo.config_id().map_err(err)?.is_some() {
+                repo.open(&credentials(spec)).map_err(err)?;
+                return Ok(WorkerEvent::Initialized { created: false });
+            }
+            repo.init(&credentials(spec), &KeyOptions::default(), &pc_profile())
+                .map_err(err)?;
+            Ok(WorkerEvent::Initialized { created: true })
+        }
+        WorkerOp::IndexInfo => {
+            let repo = open(&cx)?;
+            let info = repo.infos_index().map_err(err)?;
+            let count = |v: &[rustic_core::BlobInfo], tree: bool| {
+                v.iter()
+                    .filter(|b| (format!("{:?}", b.blob_type) == "Tree") == tree)
+                    .map(|b| b.count)
+                    .sum::<u64>()
+            };
+            Ok(WorkerEvent::IndexInfo {
+                data_blobs: count(&info.blobs, false) + count(&info.blobs_delete, false),
+                tree_blobs: count(&info.blobs, true) + count(&info.blobs_delete, true),
+                packs: info.packs.iter().map(|p| p.count).sum(),
+                packs_delete: info.packs_delete.iter().map(|p| p.count).sum(),
+            })
+        }
+        WorkerOp::AddKey { password, hostname } => {
+            let repo = open(&cx)?;
+            let mut opts = KeyOptions::default();
+            if !hostname.is_empty() {
+                opts = opts.hostname(Some(hostname));
+            }
+            let id = repo.add_key(&password, &opts).map_err(err)?;
+            Ok(WorkerEvent::KeyAdded { id: id.to_hex().to_string() })
+        }
+        WorkerOp::RemoveKey { id } => {
+            let repo = open(&cx)?;
+            let id = rustic_core::repofile::KeyId::from_str(&id).map_err(err)?;
+            repo.delete_key(&id).map_err(err)?;
+            Ok(WorkerEvent::KeyRemoved)
+        }
+        WorkerOp::Stream {
+            snapshot,
+            paths,
+            zip,
+            scope,
+        } => {
+            let repo = open(&cx)?.to_indexed().map_err(err)?;
+            let snap = pick(&repo, &snapshot, scope.as_ref())?;
+            // the data on stdout (events go to stderr in this mode: see `RAW_STDOUT`)
+            let mut w = std::io::BufWriter::with_capacity(1 << 20, std::io::stdout().lock());
+            if !zip {
+                let path = clean(paths.first().ok_or("no path")?);
+                let node = repo.node_from_snapshot_and_path(&snap, &path).map_err(err)?;
+                if !node.is_file() {
+                    return Err(format!("{path} is not a file"));
+                }
+                repo.dump(&node, &mut w).map_err(err)?;
+                w.flush().map_err(err)?;
+                return Ok(WorkerEvent::Streamed { bytes: node.meta.size, files: 1 });
+            }
+            let mut z = zipstream::ZipStream::new(w);
+            for p in &paths {
+                let p = clean(p);
+                let node = repo.node_from_snapshot_and_path(&snap, &p).map_err(err)?;
+                // names inside the zip: relative to the parent of the chosen path
+                let base = std::path::Path::new(&p)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "root".into());
+                let mtime = |n: &rustic_core::repofile::Node| {
+                    n.meta.mtime.as_ref().map(|t| t.as_second()).unwrap_or(0)
+                };
+                if node.is_file() {
+                    z.file(&base, mtime(&node), |mut w| repo.dump(&node, &mut w).map_err(err))?;
+                    continue;
+                }
+                if !node.is_dir() {
+                    continue;
+                }
+                z.dir(&base, mtime(&node))?;
+                for item in repo.ls(&node, &LsOptions::default()).map_err(err)? {
+                    let (rel, n) = item.map_err(err)?;
+                    let name = format!("{base}/{}", rel.to_string_lossy());
+                    if n.is_dir() {
+                        z.dir(&name, mtime(&n))?;
+                    } else if n.is_file() {
+                        z.file(&name, mtime(&n), |mut w| repo.dump(&n, &mut w).map_err(err))?;
+                    }
+                }
+            }
+            let (files, bytes) = z.finish()?;
+            Ok(WorkerEvent::Streamed { bytes, files })
+        }
         WorkerOp::Stats => {
             let repo = open(&cx)?;
             let infos = repo.infos_files().map_err(err)?;
@@ -748,6 +856,28 @@ fn run(req: WorkerRequest, private: &Private) -> Res<WorkerEvent> {
             Ok(WorkerEvent::Stats { bytes, files })
         }
     }
+}
+
+/// The repository profile of PC backup groups (D-PCBACKUP, memory of maintenance):
+/// - average chunk 2 MiB (min 1, max 16) instead of restic's fixed 1 MiB (512 KiB–8 MiB):
+///   about half the data blobs, so half the index entries prune and check hold; files under
+///   1 MiB are one blob either way; the price is less dedup inside large files that change in
+///   small places (a changed region rewrites ~2 MiB instead of ~1). Stock restic reads such a
+///   repository (blobs are content addressed; it ignores the extra config fields) and would
+///   chunk its own backups with its defaults;
+/// - data packs of 64 MiB growing with the repository size up to 512 MiB (restic: 16 MiB
+///   fixed, rustic: 32 MiB without limit): fewer pack files and pack index entries, and one
+///   upload never larger than 512 MiB.
+///
+/// Existing repositories never change chunking (that would split the dedup in two).
+fn pc_profile() -> ConfigOptions {
+    use bytesize::ByteSize;
+    ConfigOptions::default()
+        .set_chunk_size(Some(ByteSize::mib(2)))
+        .set_chunk_min_size(Some(ByteSize::mib(1)))
+        .set_chunk_max_size(Some(ByteSize::mib(16)))
+        .set_datapack_size(Some(ByteSize::mib(64)))
+        .set_datapack_size_limit(Some(ByteSize::mib(512)))
 }
 
 /// The start of the error of a dump over its `max_bytes` (rynasd answers 409 on it).
@@ -800,6 +930,9 @@ fn main() {
         }
     };
     let _ = SECRETS.set(req.repo.secret_values());
+    if matches!(req.op, WorkerOp::Stream { .. }) {
+        RAW_STDOUT.store(true, Ordering::Relaxed);
+    }
     install_signal_handlers();
     let private = match Private::new() {
         Ok(p) => p,
