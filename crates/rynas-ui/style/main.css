@@ -1595,6 +1595,27 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .level-card:disabled { opacity: .55; }
 .level-top { display: flex; align-items: center; gap: var(--s-2); width: 100%; justify-content: space-between; }
 .level-num { font-size: var(--fs-20); font-weight: 600; margin-top: var(--s-1); }
+/* UPS setup: the drivers tried, one full-width card each (stacked); the driver output folded,
+   wrapped, scrolling vertically only */
+.ups-note { display: flex; flex-direction: column; gap: var(--s-2); }
+.ups-cands { display: flex; flex-direction: column; gap: var(--s-2); min-width: 0; }
+.ups-cand {
+  display: flex; flex-direction: column; gap: var(--s-1); min-width: 0;
+  padding: var(--s-3); border-radius: var(--r-md); border: 1px solid var(--border); background: var(--surface-2);
+  transition: border-color var(--t-fast), background var(--t-fast), box-shadow var(--t-fast);
+}
+.ups-cand.selected { border-color: var(--accent); background: color-mix(in oklch, var(--accent) 7%, var(--surface)); box-shadow: 0 0 0 1px var(--accent); }
+.ups-cand.idle { opacity: .7; }
+.ups-cand p { margin: 0; overflow-wrap: anywhere; }
+.ups-cand-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-2); min-width: 0; cursor: pointer; }
+.ups-cand-head:has(input:disabled) { cursor: default; }
+.ups-cand-head input { margin: 0; flex: none; }
+.ups-cand-head strong { min-width: 0; overflow-wrap: anywhere; }
+.ups-cand-log summary { display: inline-flex; align-items: center; gap: var(--s-1); cursor: pointer; font-size: var(--fs-13); font-weight: 500; color: var(--text-subtle); list-style: none; }
+.ups-cand-log summary::-webkit-details-marker { display: none; }
+.ups-cand-log summary .icon { transition: transform var(--t-fast); }
+.ups-cand-log[open] summary .icon { transform: rotate(90deg); }
+.ups-cand-log .log-text { margin-top: var(--s-2); max-height: 240px; overflow-y: auto; overflow-x: hidden; }
 .level-detail { display: flex; flex-direction: column; gap: var(--s-2); }
 .erase-box { display: flex; flex-direction: column; gap: var(--s-2); padding: var(--s-3) var(--s-4); border-radius: var(--r-md); border: 1px solid color-mix(in oklch, var(--danger) 35%, var(--border)); background: color-mix(in oklch, var(--danger) 7%, var(--surface)); }
 .erase-box strong { display: flex; align-items: center; gap: var(--s-2); color: var(--danger); }

@@ -163,7 +163,7 @@ fn nut_missing(settings: Remote<UpsSettingsState>) -> Memo<bool> {
 }
 
 /// The signed-in user may install packages (rynasd checks again).
-fn is_admin() -> bool {
+pub(super) fn is_admin() -> bool {
     crate::auth::auth().session.with(|s| s.as_ref().is_some_and(|s| s.user.role == rynas_api_types::Role::Admin))
 }
 

@@ -11,6 +11,8 @@
 # With synodeb, rynasd's simulated synodeb-ups answers 'netserver status|set|off' like synodeb 4.6
 # (state in $R/state/dry-root/etc/synodeb/ups-network.conf, no passwords);
 # FAKE_SYNODEB_VERSION=4.5 makes it a synodeb before the network UPS server (the update note).
+# FAKE_NUT_VERSION=2.8.1 (plain NUT): the simulated NUT is that old, so UPS setup's detection
+# skips the 0925:1234 setting and offers "Update NUT" (the dry update writes 2.8.5).
 # FAKE_USB=1: fake removable drives (a mounted USB stick, a USB disk with NTFS and a locked
 # LUKS volume, an SD card) below the fake tree: the USB icon of the app bar and its menu.
 # FAKE_DOCKER=1: a fake Docker Engine (fakedocker.py on $R/docker.sock: a rynas stack, a Portainer
@@ -62,6 +64,7 @@ if [ -n "${FAKE_UPS:-}" ]; then
     mkdir -p "$D/nut"
     [ -f "$D/nut/nut.conf" ] || printf 'MODE=standalone\n' > "$D/nut/nut.conf"
     [ -f "$D/nut/upsd.users" ] || { printf '[upsmon]\n\tpassword = fake\n\tupsmon primary\n' > "$D/nut/upsd.users"; chmod 640 "$D/nut/upsd.users"; }
+    if [ -n "${FAKE_NUT_VERSION:-}" ]; then echo "$FAKE_NUT_VERSION" > "$D/nut/fake-version"; else rm -f "$D/nut/fake-version"; fi
   fi
 fi
 DOCKER_ARGS=(--docker-socket "")

@@ -398,6 +398,7 @@ pub fn router(st: UpsState) -> Router {
         )
         .with_state(st.clone())
         .merge(crate::ups_setup::router(st.clone()))
+        .merge(crate::ups_update::router(st.clone()))
         .merge(crate::ups_netserver::router(st))
 }
 
@@ -722,6 +723,8 @@ async fn install(State(st): State<UpsState>, hd: HeaderMap) -> Res<Response> {
             if crate::ups_setup::installed_drivers(&u2.root).is_empty() {
                 return Err("no UPS driver found after the install".into());
             }
+            // the package's udev rules for a UPS already plugged in
+            crate::ups_update::after_packages(&ctx).await;
         }
         // every page reads the backend from the files; the version is read again too
         *u2.setup.version.lock().unwrap() = None;

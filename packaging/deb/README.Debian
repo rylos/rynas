@@ -35,6 +35,17 @@ attached to the rynas release, copied to /var/lib/rynas/packages/ (rynasd
 installs it only when its SHA-256 is one rynas knows). btrfs-compsize is
 recommended with it.
 
+NUT newer than Debian's (rynas NUT packages)
+--------------------------------------------
+Install NUT (Hardware > UPS) installs Debian's nut. When UPS setup finds a UPS
+that needs a newer NUT than the system's (USB 0925:1234 needs NUT 2.8.5; Debian
+13 has 2.8.1), it offers Update NUT: from an apt source with a new enough NUT,
+otherwise from rynas's rebuild of Debian's NUT for Debian 13 (packages
+nut-server, nut-client, libupsclient7 and libnutscan4, version
+2.8.5-1~rynas13+1, attached to the rynas release), copied to
+/var/lib/rynas/packages/ (rynasd installs them only when every SHA-256 is one
+rynas knows). A Debian NUT package of the same or a newer version replaces them.
+
 Backup of the configuration
 ---------------------------
     /usr/libexec/rynas/rynasd export --out nas.rynasbak --passphrase-file pass.txt

@@ -109,7 +109,8 @@ pub struct HostDedup {
     cache: Mutex<Cache>,
 }
 
-fn file_sha256(p: &Path) -> Option<String> {
+/// SHA-256 of a file, lowercase hex.
+pub(crate) fn file_sha256(p: &Path) -> Option<String> {
     use sha2::Digest;
     use std::io::Read;
     let mut f = std::fs::File::open(p).ok()?;

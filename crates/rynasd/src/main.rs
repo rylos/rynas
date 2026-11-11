@@ -905,6 +905,10 @@ fn main() -> std::io::Result<()> {
             setup: rynasd::ups_setup::Setup::new(if args.dry_system {
                 Arc::new(rynasd::ups_setup::DryRunner {
                     layer: opened.modules.ups(),
+                    version_file: Some(rynas_config::files::under_root(
+                        &opened.root,
+                        std::path::Path::new(rynasd::ups_setup::DRY_NUT_VERSION_FILE),
+                    )),
                     ..Default::default()
                 })
             } else {

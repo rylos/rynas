@@ -245,6 +245,7 @@ pub fn routes() -> Router<AppState> {
         .route("/ups/settings", get(forward).put(forward))
         .route("/ups/test", post(forward))
         .route("/ups/install", post(forward))
+        .route("/ups/update-nut", post(forward))
         // UPS setup wizard: state, USB detection task, drivers, plan of an apply
         .route("/ups/device", get(forward).put(forward))
         .route("/ups/detect", post(forward))

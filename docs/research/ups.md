@@ -124,7 +124,13 @@ Picked:
 - **Candidates, then a test run of each** (none of the others does it). For each UPS on
   USB: rynas's small table of USB IDs known to need a driver setting first
   (`rynas_nut::setup::KNOWN`, with the lowest NUT version it works with), then the
-  scanner's suggestion, then `usbhid-ups`, `nutdrv_qx`, `blazer_usb`, all with the USB IDs.
+  scanner's suggestion, then `usbhid-ups`, `nutdrv_qx`, `blazer_usb`, with the USB IDs
+  (`vendorid`, `productid`) only for drivers that take NUT's USB matching options
+  (`rynas_nut::setup::USB_MATCHING_DRIVERS`: the ones calling `nut_usb_addvars()`).
+  `richcomm_usb` and `bcmxcp_usb` refuse them in 2.8.1 and 2.8.5 ("Fatal error: 'vendorid'
+  is not a valid variable name for this driver", NUT issue 1768; `nut-scanner` 2.8.5 leaves
+  them out for those two), `nutdrv_atcl_usb` only takes `vendor`; a manual entry giving them
+  to one of those three is refused with that reason. Seen on a real NAS on 2026-11-11.
   Each runs as `<driver> -s rynasprobe -x port=… -x k=v … -d 1` under a 45 s timeout; the
   first one that reports `ups.status` wins and the others are not run. A candidate known to
   need a newer NUT than the installed one (`upsdrvctl -V`) is skipped and the result says
@@ -355,6 +361,61 @@ Not done, documented:
   can write `MONITOR ups@other 1 user pass secondary` in `upsmon.conf` by hand (outside
   rynas's blocks); the UPS page then stays "not configured".
 - A list of connected clients (`LIST CLIENT <ups>`, NUT ≥ 2.8) on the card.
+
+## NUT newer than Debian's (2026-11-11)
+
+Real case on a Debian 13 NAS: the USB UPS `0925:1234` above, NUT 2.8.1-5 from trixie. Only
+`nutdrv_qx subdriver=armac protocol=megatec norating` reads it, and armac exists from NUT
+2.8.5 (2.8.1: "Device not supported!"). `richcomm_usb` 2.8.1: "driver callback failed:
+Entity not found"; `usbhid-ups` does not match it.
+
+Facts (checked 2026-11-11): Debian has NUT 2.8.5-1 in forky and sid only (uploaded
+2026-09-09); trixie has 2.8.1-5 (a 2.8.1-5+deb13u1 stable update is listed by
+snapshot.debian.org), there is no trixie-backports upload. NUT 2.8.2 moved the drivers to
+`/usr/libexec/nut` (rynas looks there first, then `/lib/nut`). 2.8.5's `libupsclient7` and
+`libnutscan4` are new sonames next to trixie's (`libupsclient6t64`, `libnutscan2t64`), so the
+old libraries stay for other programs. synodeb already rebuilt sid's 2.8.5 for its own
+repository; the same rebuild for rynas works unmodified on trixie.
+
+What the others do: TrueNAS and openmediavault ship the distribution's NUT and do not offer a
+newer one; Home Assistant's add-on follows its base image. None of them offers a newer NUT
+for one UPS that needs it.
+
+Picked (D-UPS-NUT):
+
+- **Stay on the distribution's NUT.** "Install NUT" installs Debian's package. The update is
+  offered only when the wizard's detection skipped a known setting for its NUT version
+  (`UpsDeviceState.nut_update`), never with a module's UPS layer (it brings its own NUT).
+- **Sources in order**: an apt source of the system whose `nut-server` candidate is new
+  enough (a future trixie-backports, a vendor repository: synodeb systems run NUT through
+  their layer and never see rynas's packages), then **rynas's rebuild**: `packaging/nut/`
+  builds Debian's own 2.8.5-1 source (pinned by the SHA-256 of its `.dsc`) on trixie in the
+  pinned builder image with build dependencies from snapshot.debian.org, version
+  `2.8.5-1~rynas13+1` (below Debian's `2.8.5-1`, so a Debian package replaces it), Debian's
+  `nodoc` profile (no manual pages: the PDF/HTML manuals need a TeX toolchain), reproducible
+  (two builds give the same files). Only `nut-server`, `nut-client`, `libupsclient7` and
+  `libnutscan4` (the metapackage `nut` stays Debian's: unversioned dependencies). The
+  packages are attached to the rynas release; the admin copies them to
+  `/var/lib/rynas/packages` and rynasd installs them only when every file of
+  `ups_update::PINNED_DEBS` is there with its SHA-256 (the same delivery as the
+  deduplication engine). Debian 13 on x86-64 only; elsewhere the note just says a newer NUT
+  is needed.
+- **The install**: apt's simulation first (`--no-remove`: a system with `nut-snmp`, `nut-xml`…
+  of the old version is refused before anything runs, since those packages depend on the
+  exact `nut-server` version), then `apt-get install --no-remove` in the `rynas-apt`
+  transient unit with `--force-confold`: the configuration files rynas or the admin changed
+  stay (dpkg says "Keeping old config file as default" and leaves `*.dpkg-dist`, no
+  question), untouched ones follow the package. Tested by `packaging/nut/test.sh` (trixie
+  container, 2.8.1 then the update with rynasd's exact apt line).
+- **After any NUT package change** (install and update): udev rules applied to the UPS
+  already plugged in (`udevadm control --reload-rules`, `udevadm trigger
+  --subsystem-match=usb --action=change`, `udevadm settle --timeout=30`); seen on the real
+  NAS: without it the device stays `root:root` and the drivers fail "insufficient
+  permissions" until a replug. Then `systemctl reset-failed` of the driver units (the
+  package may start NUT with the old setting), the version read again and the detection
+  report dropped: the admin detects again.
+- CI watch: `packaging/nut/check-upstream.sh` says when sid has a newer NUT or trixie reaches
+  the pinned one (then the rebuild can go).
 
 ## Left for later
 SNMP/XML scans (`nut-scanner -S/-M` need a range or a host:

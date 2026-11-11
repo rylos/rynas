@@ -517,6 +517,7 @@ ups.tab	UPS
 task.ups.test	Test batteria UPS
 task.ups.detect	Rilevamento UPS
 task.ups.install	Installazione di NUT
+task.ups.update-nut	Aggiornamento di NUT
 ups.install	Installa NUT
 ups.installed	NUT installato. Configura l'UPS con Configurazione UPS.
 ups.missing_text	NUT, il servizio UPS, non è installato su questo NAS. Installalo da qui (pacchetto Debian nut), poi configura l'UPS con Configurazione UPS qui sotto.
@@ -611,7 +612,15 @@ upsw.manual	Inserisci a mano
 upsw.testing	Ogni driver ha fino a 45 secondi per rispondere.
 upsw.no_report	Ancora nessun risultato del rilevamento.
 upsw.busy	Un driver UPS è in funzione e occupa il dispositivo: non è stato provato nulla. Consenti di fermarlo e rileva di nuovo.
-upsw.need_newer	Nessun driver ha letto questo UPS. La sua impostazione nota richiede NUT {need} o successivo e questo NAS ha NUT {have}: aggiorna NUT (per esempio dai backports di Debian), poi rileva di nuovo.
+upsw.need_newer	Nessun driver ha letto questo UPS. La sua impostazione nota richiede NUT {need} o successivo e questo NAS ha NUT {have}: installa un NUT più recente su questo sistema, poi rileva di nuovo.
+upsw.need_newer_update	Nessun driver ha letto questo UPS. La sua impostazione nota richiede NUT {need} o successivo e questo NAS ha NUT {have}. rynas può aggiornare NUT alla {v} ({source}), poi rilevi di nuovo.
+upsw.need_newer_files	Nessun driver ha letto questo UPS. La sua impostazione nota richiede NUT {need} o successivo e questo NAS ha NUT {have}. rynas ha NUT {v} per questo sistema, allegato alla release di rynas: copia i suoi pacchetti (nut-server, nut-client, libupsclient7, libnutscan4) in {dir}, poi rileva di nuovo per aggiornare.
+upsw.nut_src_apt	dalle sorgenti dei pacchetti di questo sistema
+upsw.nut_src_rynas	la build di rynas del pacchetto NUT di Debian
+upsw.update_nut	Aggiorna NUT alla {v}
+upsw.updating	apt installa i nuovi pacchetti di NUT; i tuoi file di configurazione di NUT restano.
+upsw.updated	NUT {v} è installato: rileva di nuovo l'UPS.
+upsw.driver_output	Output del driver
 upsw.no_usb	Nessun UPS trovato su USB. Controlla il cavo, oppure inserisci a mano un UPS seriale o di rete.
 upsw.none_answered	Nessun driver ha letto lo stato dell'UPS. Qui sotto le ultime righe di ogni driver: prova a mano un altro driver o altre opzioni.
 upsw.found	Trovato: {model}, stato {status}, carica {charge}.

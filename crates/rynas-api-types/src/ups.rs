@@ -419,6 +419,32 @@ pub struct UpsDeviceState {
     #[serde(default)]
     pub drivers_running: bool,
     pub detect: Option<UpsDetectReport>,
+    /// The last detection found a setting that needs a newer NUT and rynasd can bring one
+    /// (plain NUT only, never with a module's UPS layer): `POST /api/v1/ups/update-nut`.
+    #[serde(default)]
+    pub nut_update: Option<UpsNutUpdate>,
+}
+
+/// A newer NUT rynasd can install (`UpsDeviceState::nut_update`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct UpsNutUpdate {
+    /// The NUT version it brings (`2.8.5`).
+    pub version: String,
+    /// Where it comes from; `null`: rynas has a build for this system but its packages
+    /// are not on this NAS (put them in `dir`).
+    pub source: Option<UpsNutSource>,
+    /// Where rynasd takes rynas's own packages from (`/var/lib/rynas/packages`).
+    pub dir: String,
+}
+
+/// Where a NUT update comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpsNutSource {
+    /// An apt source of the system has a new enough NUT.
+    Apt,
+    /// rynas's NUT build for this Debian release, from the local package folder.
+    Rynas,
 }
 
 /// One driver of `GET /api/v1/ups/drivers`: installed NUT drivers with the manufacturers

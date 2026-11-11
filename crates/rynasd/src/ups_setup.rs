@@ -93,17 +93,36 @@ impl Runner for HostRunner {
 /// `UpsLayer::dry_output`.
 pub struct DryRunner {
     pub nut_version: &'static str,
+    /// A file whose first line replaces `nut_version` when present (`--dry-system`:
+    /// [`DRY_NUT_VERSION_FILE`] below the dry root, written by `tools/ui-audit` and by the
+    /// dry NUT update).
+    pub version_file: Option<PathBuf>,
     pub calls: Mutex<Vec<String>>,
     pub layer: Option<Arc<dyn UpsLayer>>,
 }
+
+/// `--dry-system`: the simulated NUT version (below the dry root).
+pub const DRY_NUT_VERSION_FILE: &str = "/etc/nut/fake-version";
 
 impl Default for DryRunner {
     fn default() -> Self {
         Self {
             nut_version: "2.8.5",
+            version_file: None,
             calls: Mutex::new(Vec::new()),
             layer: None,
         }
+    }
+}
+
+impl DryRunner {
+    fn version(&self) -> String {
+        self.version_file
+            .as_ref()
+            .and_then(|f| std::fs::read_to_string(f).ok())
+            .and_then(|t| t.lines().next().map(|l| l.trim().to_string()))
+            .filter(|v| nut::parse_version(v).is_some())
+            .unwrap_or_else(|| self.nut_version.to_string())
     }
 }
 
@@ -140,16 +159,17 @@ impl Runner for DryRunner {
             .unwrap_or_default();
         let ok_vars = "battery.charge: 100\nbattery.voltage: 13.70\ninput.voltage: 230.0\n\
             ups.load: 12\nups.status: OL\n";
+        let version = self.version();
         let armac = line.contains("subdriver=armac");
         match program.as_str() {
             "upsdrvctl" => Self::out(
                 0,
-                &format!(
-                    "Network UPS Tools - UPS driver controller {}\n",
-                    self.nut_version
-                ),
+                &format!("Network UPS Tools - UPS driver controller {version}\n"),
                 "",
             ),
+            _ if armac && nut::parse_version(&version) < Some((2, 8, 5)) => {
+                Self::out(1, "", "Device not supported!\n")
+            }
             "nut-scanner" => Self::out(
                 0,
                 "[nutdev1]\n\tdriver = \"richcomm_usb\"\n\tport = \"auto\"\n\tvendorid = \"0925\"\n\
@@ -158,6 +178,11 @@ impl Runner for DryRunner {
             ),
             "systemctl" => Self::out(0, "", ""),
             _ if armac => Self::out(0, ok_vars, ""),
+            "richcomm_usb" if line.contains("vendorid=") => Self::out(
+                1,
+                "",
+                "Fatal error: 'vendorid' is not a valid variable name for this driver.\n",
+            ),
             "richcomm_usb" => Self::out(1, "", "driver callback failed: Entity not found\n"),
             _ => Self::out(1, "", "No supported UPS detected\n"),
         }
@@ -980,6 +1005,13 @@ fn device_state(u: &Ups, owner: &str) -> Res<UpsDeviceState> {
             pending.as_ref().or(applied.as_ref()),
         )
     };
+    // each its own statement: the report's lock is released before the offer takes it
+    let detect = u.setup.report.lock().unwrap().clone();
+    let nut_update = if blocked.is_none() {
+        crate::ups_update::offer(u).map(|(info, _)| info)
+    } else {
+        None
+    };
     Ok(UpsDeviceState {
         backend,
         blocked,
@@ -992,7 +1024,8 @@ fn device_state(u: &Ups, owner: &str) -> Res<UpsDeviceState> {
         pending,
         foreign,
         drivers_running: blocked.is_none() && !running_drivers(u.setup.runner.as_ref()).is_empty(),
-        detect: u.setup.report.lock().unwrap().clone(),
+        detect,
+        nut_update,
     })
 }
 
@@ -1289,6 +1322,16 @@ mod tests {
             Some("driver callback failed: Entity not found")
         );
         assert!(log.iter().any(|l| l.contains("needs NUT 2.8.5 or newer")));
+        // richcomm_usb gets no vendorid/productid (it refuses them)
+        let calls = fake.calls.lock().unwrap().clone();
+        let rc = calls
+            .iter()
+            .find(|c| c.contains("richcomm_usb -s"))
+            .unwrap();
+        assert!(
+            rc.ends_with("lib/nut/richcomm_usb -s rynasprobe -x port=auto -d 1"),
+            "{rc}"
+        );
         // the armac candidate was not even started
         assert!(
             !fake

@@ -1300,7 +1300,8 @@ upsd protocol client is the crate `rynas-nut` (shared by both daemons).
 | GET/PUT | `/api/v1/ups/settings` | `UpsSettings` {safemode_after_s? (60–86400, whole minutes; null = off), pre_safemode_timeout_s (10–900, default 120)} | `UpsSettingsState` {available, backend nut\|synodeb\|not_installed, applied, pending?}; PUT stages `ups.safemode`; 404 `not_found` when NUT is not installed |
 | POST | `/api/v1/ups/test` | `BatteryTestRequest` {test quick\|deep\|stop} | 202 `TaskStarted` (task `ups.test`); 404 when NUT is not installed |
 | POST | `/api/v1/ups/install` | — | 202 `TaskStarted` (task `ups.install`: `apt-get install nut` through the transient `rynas-apt` unit, then a check that `nut.conf` and the drivers are there); administrators only (rynasd checks too, 403 `forbidden`); 409 `already_exists` when NUT is installed, 409 `conflict` with a module's UPS layer |
-| GET/PUT | `/api/v1/ups/device` | `UpsDeviceConfig` {name (default `ups`), device `UpsDevice` {driver, port, options [{key, value?}]}, take_over [ups.conf sections]} | `UpsDeviceState` {backend, blocked? nut_missing\|synodeb_too_old, nut_version?, applied?, pending?, foreign [`UpsSection` {name, driver?, port?, conflict}], drivers_running, detect? (last `UpsDetectReport`)}; PUT stages `ups.device` (409 `conflict` with `field` `take_over` for a section in the way, 409 when blocked) |
+| POST | `/api/v1/ups/update-nut` | — | 202 `TaskStarted` (task `ups.update-nut`: `apt-get install --no-remove` of the apt candidate of `nut-server`/`nut-client`, or of rynas's NUT packages from `/var/lib/rynas/packages` (every pinned file with its SHA-256), through the transient `rynas-apt` unit, then udev rules applied to the plugged-in UPS, failed driver units reset, version checked, detection report dropped); only while `UpsDeviceState.nut_update.source` is set; administrators only (403 `forbidden`); 409 `conflict` with a module's UPS layer, without NUT, when nothing needs or brings a newer NUT, when the packages are missing, or when apt's simulation fails (e.g. it would remove `nut-snmp`) |
+| GET/PUT | `/api/v1/ups/device` | `UpsDeviceConfig` {name (default `ups`), device `UpsDevice` {driver, port, options [{key, value?}]}, take_over [ups.conf sections]} | `UpsDeviceState` {backend, blocked? nut_missing\|synodeb_too_old, nut_version?, applied?, pending?, foreign [`UpsSection` {name, driver?, port?, conflict}], drivers_running, detect? (last `UpsDetectReport`), nut_update? `UpsNutUpdate` {version, source? apt\|rynas (null: rynas's packages are not in `dir`), dir} (only when the last detection skipped a setting for its NUT version, plain NUT only)}; PUT stages `ups.device` (409 `conflict` with `field` `take_over` for a section in the way, 409 when blocked) |
 | POST | `/api/v1/ups/detect` | `UpsDetectRequest` {device? (test only this one), stop_drivers} | 202 `TaskStarted` (task `ups.detect`; the report lands in `GET /api/v1/ups/device`); 409 `busy` while one runs |
 | GET | `/api/v1/ups/drivers` | — | `Vec<NutDriver>` {name, manufacturers} (installed drivers, manufacturers from NUT's driver.list) |
 | POST | `/api/v1/ups/plan/device` | `UpsDeviceConfig` | `UpsSetupPlan` {files [{path, before?, after, removed}], commands, conflicts} (no side effects, passwords masked) |
@@ -1315,7 +1316,18 @@ upsd protocol client is the crate `rynas-nut` (shared by both daemons).
   "UPS setup" then writes `MODE`, the UPS and upsmon and enables/restarts the units. The backend
   is read from the files at every request, so the pages flip without restarting rynasd (the
   cached NUT version is cleared). `--dry-system` writes Debian's default files below the dry
-  root instead.
+  root instead. After the package install the task applies NUT's udev rules to a UPS already
+  plugged in (`udevadm control --reload-rules`, `udevadm trigger --subsystem-match=usb
+  --action=change`, `udevadm settle --timeout=30`; otherwise the device stays root-only and
+  the drivers fail with "insufficient permissions") and resets failed `nut-driver@` units.
+- Update NUT (D-UPS-NUT, 2026-11-11): "Install NUT" stays on the distribution's package; only
+  when a detection skipped a setting for its NUT version (USB `0925:1234` needs 2.8.5, trixie
+  has 2.8.1) does the wizard offer **Update NUT to X** (`/api/v1/ups/update-nut`): from an apt
+  source with a new enough NUT, else from rynas's rebuild of Debian's NUT for Debian 13
+  (`packaging/nut/`, packages attached to the release, copied to `/var/lib/rynas/packages`).
+  With a module's UPS layer, or when rynas has nothing to install, the note only says a newer
+  NUT is needed. `--dry-system`: `FAKE_NUT_VERSION=2.8.1` (tools/ui-audit) starts with an old
+  NUT and the update writes the new version into the dry root's `/etc/nut/fake-version`.
 - upsd `127.0.0.1:3493` (`rynas-web --upsd`, `rynasd --upsd`), plain-text protocol `LIST UPS`,
   `LIST VAR <ups>`, `LIST CMD <ups>` (first UPS; a refused `LIST CMD` gives no commands), 2 s
   bound, no login, no child process. rynas-web polls every 5 s only while an `/events` stream

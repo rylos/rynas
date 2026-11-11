@@ -16,7 +16,8 @@ quality reviews (docs/quality/). Nothing here touches the host system or a runni
   files in the dry root; `FAKE_UPS_CMDS=all|quick|none` picks the offered battery tests,
   `FAKE_UPS_BACKEND=synodeb` the synodeb backend (see `start.sh`; its simulated
   `synodeb-ups netserver` keeps state in the dry root, `FAKE_SYNODEB_VERSION=4.5` shows the
-  update note). The UPS page is the 4th tab of
+  update note); `FAKE_NUT_VERSION=2.8.1` makes the simulated NUT old, so UPS setup's "Test"
+  step shows "needs a newer NUT" and "Update NUT". The UPS page is the 4th tab of
   `/hardware` (`#hwt-t3`): the route audits only see the first tab.
 - Docker page and widget: `FAKE_DOCKER=1` adds `fakedocker.py` (a fake Engine API on
   `rt-<port>/docker.sock`: a rynas stack `media` with its folder in the dry root, a Portainer
