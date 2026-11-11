@@ -859,12 +859,11 @@ mod tests {
     #[test]
     fn chart_window() {
         use crate::chart::{span_minutes, window_len};
-        assert_eq!(window_len(3, 300), 60);
-        assert_eq!(window_len(150, 300), 150);
-        assert_eq!(window_len(900, 300), 300);
-        assert_eq!(span_minutes(3, 300), 1);
-        assert_eq!(span_minutes(150, 300), 3);
-        assert_eq!(span_minutes(600, 300), 5);
+        // the full window from the first sample on: never widened while the history fills
+        assert_eq!(window_len(300), 300);
+        assert_eq!(window_len(0), 2);
+        assert_eq!(span_minutes(300), 5);
+        assert_eq!(span_minutes(60), 1);
     }
 
     #[test]

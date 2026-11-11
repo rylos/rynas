@@ -85,18 +85,16 @@ fn nice_binary(v: f32) -> f32 {
     nice(v / unit) * unit
 }
 
-/// Samples always spanned by the x axis: with fewer (right after start) the chart shows the
-/// last minute instead of a lone stub on the right of a 5 minute axis, and widens as data comes.
-pub const MIN_WINDOW: usize = 60;
-
-/// Samples across the width for `n` available samples and a full window of `points`.
-pub fn window_len(n: usize, points: usize) -> usize {
-    n.clamp(MIN_WINDOW.min(points), points.max(2))
+/// Samples across the width: always the full window, also while the history fills (the curve
+/// comes in from the right and the left stays empty). A window that grows with the samples
+/// squeezes the whole curve sideways until it is full, which looks like a stutter.
+pub fn window_len(points: usize) -> usize {
+    points.max(2)
 }
 
 /// Minutes covered by the chart, for the "Last N min" captions.
-pub fn span_minutes(n: usize, points: usize) -> usize {
-    window_len(n, points).div_ceil(60).max(1)
+pub fn span_minutes(points: usize) -> usize {
+    window_len(points).div_ceil(60).max(1)
 }
 
 thread_local! {
@@ -293,8 +291,7 @@ fn draw(canvas: &HtmlCanvasElement, series: &[Series], snap: &Snap, o: Opts, t: 
         let _ = ctx.set_line_dash(&js_sys::Array::new());
     }
 
-    let n_max = snap.data.iter().map(Vec::len).max().unwrap_or(0);
-    let span = (window_len(n_max, o.points) - 1) as f64 * snap.step_ms();
+    let span = (window_len(o.points) - 1) as f64 * snap.step_ms();
     ctx.save();
     ctx.begin_path();
     ctx.rect(0.0, 0.0, cw, ch);
@@ -479,8 +476,7 @@ pub fn LiveChart(
         if !document().hidden() {
             let due = snap
                 .try_with_value(|sn| {
-                    let n = sn.ts.len().max(2);
-                    let span = (window_len(n, o.points) - 1) as f64 * sn.step_ms();
+                    let span = (window_len(o.points) - 1) as f64 * sn.step_ms();
                     let px_per_ms = sn.w * sn.dpr / span;
                     // at least 30 fps: steep pieces move vertically much more than the scroll
                     // itself, so a slower rate shows steps; 60 fps only when the scroll is fast

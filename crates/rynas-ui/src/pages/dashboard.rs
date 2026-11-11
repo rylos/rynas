@@ -533,14 +533,8 @@ fn SystemWidget() -> impl IntoView {
     }
 }
 
-/// "Last N min" under a chart: follows the window the chart really shows.
 fn span_label() -> impl Fn() -> String + Copy {
-    let live = use_live();
-    move || {
-        live.tick.track();
-        let n = live.history.with_value(|h| h.len());
-        tf("last_min", &[("n", &span_minutes(n, 300).to_string())])
-    }
+    move || tf("last_min", &[("n", &span_minutes(300).to_string())])
 }
 
 #[component]
