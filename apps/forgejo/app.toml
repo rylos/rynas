@@ -1,8 +1,8 @@
 schema = 1
 id = "forgejo"
 name = "Forgejo"
-version = "1.0.0"
-app_version = "15.0.11"
+version = "1.0.1"
+app_version = "17.0.1-rootless"
 update_policy = "minor"
 description = "Lightweight self-hosted Git forge: repositories, issues, pull requests, packages and CI."
 homepage = "https://forgejo.org"

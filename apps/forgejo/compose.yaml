@@ -5,7 +5,7 @@
 # /var/lib/gitea/custom/conf, so one data folder holds everything.
 services:
   forgejo:
-    image: codeberg.org/forgejo/forgejo:15.0.11-rootless@sha256:3cd6bc2b74c87cbde0a0fd527c9665cb416f5a0540dee54fe5afb3fa2df9f40c
+    image: codeberg.org/forgejo/forgejo:17.0.1-rootless@sha256:5ef02fbcf22beef56b8c844952ffad58cfe177b6f98e46e6abb5df90b88dc8d3
     restart: unless-stopped
     user: "${PUID}:${PGID}"
     ports:
