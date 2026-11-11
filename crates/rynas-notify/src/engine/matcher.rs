@@ -14,37 +14,27 @@ pub struct LocalTime {
     pub weekday: u8,
 }
 
-fn from_tm(tm: &libc::tm) -> LocalTime {
+fn broken_down(ms: u64, tz: jiff::tz::TimeZone) -> LocalTime {
+    let ts = i64::try_from(ms).ok().and_then(|ms| jiff::Timestamp::from_millisecond(ms).ok()).unwrap_or(jiff::Timestamp::MAX);
+    let z = ts.to_zoned(tz);
     LocalTime {
-        year: tm.tm_year + 1900,
-        month: (tm.tm_mon + 1) as u8,
-        day: tm.tm_mday as u8,
-        hour: tm.tm_hour as u8,
-        minute: tm.tm_min as u8,
-        weekday: if tm.tm_wday == 0 { 7 } else { tm.tm_wday as u8 },
+        year: i32::from(z.year()),
+        month: z.month() as u8,
+        day: z.day() as u8,
+        hour: z.hour() as u8,
+        minute: z.minute() as u8,
+        weekday: z.weekday().to_monday_one_offset() as u8,
     }
 }
 
-/// The system's local time (TZ, /etc/localtime).
+/// The system's local time (TZ, /etc/localtime), read again when the zone changes (D-TIME).
 pub fn local_time(ms: u64) -> LocalTime {
-    let t = (ms / 1000) as libc::time_t;
-    // SAFETY: localtime_r only writes the tm we own; a zeroed tm is a valid value.
-    unsafe {
-        let mut tm: libc::tm = std::mem::zeroed();
-        libc::localtime_r(&t, &mut tm);
-        from_tm(&tm)
-    }
+    broken_down(ms, rynas_tz::system_tz())
 }
 
 /// UTC (tests, and systems without a time zone).
 pub fn utc_time(ms: u64) -> LocalTime {
-    let t = (ms / 1000) as libc::time_t;
-    // SAFETY: as above.
-    unsafe {
-        let mut tm: libc::tm = std::mem::zeroed();
-        libc::gmtime_r(&t, &mut tm);
-        from_tm(&tm)
-    }
+    broken_down(ms, jiff::tz::TimeZone::UTC)
 }
 
 /// "HH:MM" → minutes after midnight.

@@ -13,7 +13,7 @@ license.workspace = true
 default = ["engine"]
 engine = [
     "dep:rusqlite", "dep:minijinja", "dep:age", "dep:lettre", "dep:reqwest", "dep:regex-lite",
-    "dep:tokio", "dep:libc", "dep:sha2",
+    "dep:tokio", "dep:sha2", "dep:jiff", "dep:rynas-tz",
 ]
 
 [dependencies]
@@ -25,7 +25,9 @@ rusqlite = { workspace = true, optional = true }
 minijinja = { workspace = true, optional = true, features = ["json"] }
 age = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["rt", "time", "sync", "macros"] }
-libc = { workspace = true, optional = true }
+# quiet hours in the system's local time, read again when the zone changes
+jiff = { workspace = true, optional = true }
+rynas-tz = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 regex-lite = { version = "0.1.9", optional = true }
 # OpenSSL through native-tls, like the system libsqlite3/libzstd: Debian security updates

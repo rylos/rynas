@@ -3593,11 +3593,13 @@ name = "rynas-btrfs"
 version = "0.5.0"
 dependencies = [
  "base64 0.23.1",
+ "jiff",
  "libc",
  "minijinja",
  "rynas-api-types",
  "rynas-config",
  "rynas-tasks",
+ "rynas-tz",
  "serde",
  "serde_json",
  "sha2 0.11.1",
@@ -3793,13 +3795,14 @@ name = "rynas-notify"
 version = "0.5.0"
 dependencies = [
  "age",
+ "jiff",
  "lettre",
- "libc",
  "minijinja",
  "regex-lite",
  "reqwest",
  "rusqlite",
  "rynas-api-types",
+ "rynas-tz",
  "serde",
  "serde_json",
  "sha2 0.11.1",
@@ -3824,6 +3827,7 @@ dependencies = [
  "jiff",
  "rynas-api-types",
  "rynas-config",
+ "rynas-tz",
  "serde",
  "serde_json",
  "tempfile",
@@ -3932,6 +3936,14 @@ dependencies = [
  "tempfile",
  "time",
  "x509-parser",
+]
+
+[[package]]
+name = "rynas-tz"
+version = "0.5.0"
+dependencies = [
+ "jiff",
+ "tempfile",
 ]
 
 [[package]]

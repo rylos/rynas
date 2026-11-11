@@ -21,27 +21,14 @@ pub use domain::{POWER_KEY, PowerDomain};
 
 /// The time zone the rules are read in: the system's (`/etc/localtime`, `TZ`).
 ///
-/// Read from the file every time: jiff keeps the system zone for five minutes, and a zone
-/// changed in System > Date and time must count at once (D-TIME).
+/// The shared cache of [`rynas_tz`]: read again as soon as `/etc/localtime` changes (jiff
+/// alone keeps the system zone for five minutes), so a zone changed in System > Date and time
+/// counts at once (D-TIME).
 pub fn system_tz() -> jiff::tz::TimeZone {
-    const LOCALTIME: &str = "/etc/localtime";
-    if std::env::var_os("TZ").is_none()
-        && let Some(name) = std::fs::read_link(LOCALTIME).ok().as_deref().and_then(zone_name)
-        && let Ok(data) = std::fs::read(LOCALTIME)
-        && let Ok(tz) = jiff::tz::TimeZone::tzif(&name, &data)
-    {
-        return tz;
-    }
-    jiff::tz::TimeZone::system()
+    rynas_tz::system_tz()
 }
 
-/// The IANA name in the target of `/etc/localtime` (`../usr/share/zoneinfo/Europe/Rome`).
-pub fn zone_name(target: &std::path::Path) -> Option<String> {
-    let s = target.to_str()?;
-    let (_, name) = s.rsplit_once("zoneinfo/")?;
-    let name = name.strip_prefix("posix/").unwrap_or(name);
-    (!name.is_empty() && !name.contains("..")).then(|| name.to_string())
-}
+pub use rynas_tz::zone_name;
 
 /// IANA name of a zone, "UTC" when unknown.
 pub fn tz_name(tz: &jiff::tz::TimeZone) -> String {

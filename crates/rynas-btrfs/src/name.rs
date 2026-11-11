@@ -220,39 +220,38 @@ fn days_in_month(y: i32, m: u32) -> u32 {
 }
 
 fn local_time(epoch_s: i64) -> Stamp {
-    // SAFETY: localtime_r only writes into the struct we pass
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    let t: libc::time_t = epoch_s as libc::time_t;
-    let ok = !unsafe { libc::localtime_r(&t, &mut tm) }.is_null();
-    if !ok {
-        tm = unsafe { std::mem::zeroed() };
-        tm.tm_year = 70;
-        tm.tm_mday = 1;
-    }
+    // the system zone, read again when /etc/localtime changes (D-TIME)
+    let t = jiff::Timestamp::from_second(epoch_s)
+        .map(|t| t.to_zoned(rynas_tz::system_tz()).datetime())
+        .unwrap_or_else(|_| jiff::civil::date(1970, 1, 1).at(0, 0, 0, 0));
     Stamp {
-        year: tm.tm_year + 1900,
-        month: (tm.tm_mon + 1) as u32,
-        day: tm.tm_mday as u32,
-        hour: tm.tm_hour as u32,
-        minute: tm.tm_min as u32,
-        second: tm.tm_sec as u32,
+        year: i32::from(t.year()),
+        month: t.month() as u32,
+        day: t.day() as u32,
+        hour: t.hour() as u32,
+        minute: t.minute() as u32,
+        second: t.second() as u32,
         offset: None,
         suffix: 0,
     }
 }
 
 fn local_to_epoch_s(s: &Stamp) -> i64 {
-    // SAFETY: mktime reads and normalizes the struct we pass
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    tm.tm_year = s.year - 1900;
-    tm.tm_mon = s.month as i32 - 1;
-    tm.tm_mday = s.day as i32;
-    tm.tm_hour = s.hour as i32;
-    tm.tm_min = s.minute as i32;
-    tm.tm_sec = s.second as i32;
-    tm.tm_isdst = -1;
-    let t = unsafe { libc::mktime(&mut tm) };
-    if t == -1 { s.civil_utc_s() } else { t as i64 }
+    // an hour that happens twice (DST end) is the first one, a skipped one (DST start) moves
+    // forward by the gap, like mktime with tm_isdst = -1
+    let civil = jiff::civil::DateTime::new(
+        i16::try_from(s.year).unwrap_or(i16::MAX),
+        s.month as i8,
+        s.day as i8,
+        s.hour as i8,
+        s.minute as i8,
+        s.second as i8,
+        0,
+    );
+    civil
+        .and_then(|dt| rynas_tz::system_tz().to_ambiguous_zoned(dt).compatible())
+        .map(|z| z.timestamp().as_second())
+        .unwrap_or_else(|_| s.civil_utc_s())
 }
 
 #[cfg(test)]

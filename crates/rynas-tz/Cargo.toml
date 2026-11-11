@@ -1,0 +1,13 @@
+[package]
+name = "rynas-tz"
+description = "rynas: the system time zone (/etc/localtime) for long-running processes, read again when the file changes"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+jiff.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
