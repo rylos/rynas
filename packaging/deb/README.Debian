@@ -26,6 +26,15 @@ avahi-daemon and wsdd2 (file services and discovery), btrbk and btrfs-progs
 and hdparm (storage). Without one of them only its feature fails, with a
 message naming the missing tool.
 
+Deduplication engine (rynas-oans)
+---------------------------------
+Deduplication of shared folders uses oans, packaged as rynas-oans (binary in
+/usr/lib/rynas/oans, outside PATH). Storage > volume > Deduplication offers
+to install it: from an apt source that has it, otherwise from the .deb
+attached to the rynas release, copied to /var/lib/rynas/packages/ (rynasd
+installs it only when its SHA-256 is one rynas knows). btrfs-compsize is
+recommended with it.
+
 Backup of the configuration
 ---------------------------
     /usr/libexec/rynas/rynasd export --out nas.rynasbak --passphrase-file pass.txt
