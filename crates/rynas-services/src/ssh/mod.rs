@@ -60,10 +60,18 @@ pub trait SshRunner: Send + Sync {
     fn simulated(&self) -> bool {
         false
     }
+    /// Before `sshd -t` / `sshd -T`: sshd wants its privilege separation directory, which
+    /// only its own unit creates (`RuntimeDirectory=sshd`); with SSH stopped every check would
+    /// fail with "Missing privilege separation directory".
+    fn prepare_sshd(&self) {}
 }
 
 /// The machine.
 pub struct HostRunner;
+
+/// sshd's privilege separation directory (Debian's `ssh.service`: `RuntimeDirectory=sshd`,
+/// mode 0755, root).
+const PRIVSEP_DIR: &str = "/run/sshd";
 
 impl SshRunner for HostRunner {
     fn run(&self, argv: &[&str]) -> std::result::Result<Out, String> {
@@ -72,6 +80,21 @@ impl SshRunner for HostRunner {
         let shown = c.display();
         let o = c.run_blocking().map_err(|e| format!("{shown}: {e}"))?;
         Ok(Out { code: o.code, stdout: o.stdout, stderr: o.stderr })
+    }
+
+    fn prepare_sshd(&self) {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        if std::fs::symlink_metadata(PRIVSEP_DIR).is_ok() {
+            return;
+        }
+        match std::fs::DirBuilder::new().mode(0o755).create(PRIVSEP_DIR) {
+            // whatever the umask: 0755, as the unit makes it
+            Ok(()) => {
+                let _ = std::fs::set_permissions(PRIVSEP_DIR, std::fs::Permissions::from_mode(0o755));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => tracing::warn!("ssh: {PRIVSEP_DIR}: {e}"),
+        }
     }
 }
 
@@ -135,6 +158,37 @@ struct Trial {
     /// The drop-in before the change (`None`: there was none).
     previous: Option<String>,
     units: Units,
+    /// The boot the trial began in (`/proc/sys/kernel/random/boot_id`) and its deadline on
+    /// that boot's `CLOCK_BOOTTIME` (ms): the expiry rynasd checks does not move with the wall
+    /// clock (an NTP step at boot). Empty in a trial written by an older version: the wall
+    /// clock `deadline_ms` then.
+    #[serde(default)]
+    boot_id: String,
+    #[serde(default)]
+    boot_deadline_ms: u64,
+}
+
+impl Trial {
+    /// Whether the time to confirm is over: on the boot clock of the boot it began in; any
+    /// other boot means the machine restarted meanwhile, and the rollback timer (a transient
+    /// unit) with it: over. `now_ms` (wall clock) only for a trial without boot data.
+    fn expired(&self, now_ms: u64, boot: Option<&(String, u64)>) -> bool {
+        match boot {
+            Some((id, ms)) if !self.boot_id.is_empty() => *id != self.boot_id || *ms >= self.boot_deadline_ms,
+            _ => now_ms >= self.deadline_ms,
+        }
+    }
+}
+
+/// This boot's id and `CLOCK_BOOTTIME` in ms (counts suspend, never steps).
+fn boot_clock() -> Option<(String, u64)> {
+    let id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?.trim().to_string();
+    // SAFETY: zeroed out-parameter for clock_gettime
+    let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
+    if unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut ts) } != 0 || id.is_empty() {
+        return None;
+    }
+    Some((id, ts.tv_sec as u64 * 1000 + ts.tv_nsec as u64 / 1_000_000))
 }
 
 /// A local account as `/etc/passwd` and `/etc/group` describe it.
@@ -153,6 +207,9 @@ pub struct Ssh {
     state: PathBuf,
     run: Arc<dyn SshRunner>,
     rynasctl: String,
+    /// A disk under this path sleeps ([`crate::folders::AsleepFn`]): the page's view leaves
+    /// homes there unread.
+    asleep: Option<crate::folders::AsleepFn>,
 }
 
 fn under(root: &Path, p: &str) -> PathBuf {
@@ -192,10 +249,12 @@ fn shell_level(a: &Account) -> SshLevel {
 
 pub use rynas_api_types::ssh::{admin_can_log_in, passes};
 
-fn token() -> String {
+/// The confirmation token of a trial; no randomness from the kernel is an error, never a
+/// guessable (all-zero) token.
+fn token() -> Result<String> {
     let mut b = [0u8; 18];
-    let _ = getrandom::fill(&mut b);
-    b.iter().map(|x| format!("{x:02x}")).collect()
+    getrandom::fill(&mut b).map_err(|e| SshError::Failed(format!("no random token for the confirmation: {e}")))?;
+    Ok(b.iter().map(|x| format!("{x:02x}")).collect())
 }
 
 /// Ports in `LISTEN` state in `/proc/net/tcp` text.
@@ -216,11 +275,19 @@ impl Ssh {
     /// `root`: where `/etc`, `/proc` and the homes are ("/" on the machine); `state`: rynasd's
     /// state directory (the engine uses `<state>/ssh`).
     pub fn new(root: impl Into<PathBuf>, state: impl Into<PathBuf>, run: Arc<dyn SshRunner>) -> Self {
-        Ssh { root: root.into(), state: state.into().join("ssh"), run, rynasctl: RYNASCTL.into() }
+        Ssh { root: root.into(), state: state.into().join("ssh"), run, rynasctl: RYNASCTL.into(), asleep: None }
     }
 
     pub fn with_rynasctl(mut self, path: &str) -> Self {
         self.rynasctl = path.into();
+        self
+    }
+
+    /// Tells which paths lie on a sleeping disk: the page's view of the accounts then leaves
+    /// their `authorized_keys` unread instead of waking the disk (the guards of a change still
+    /// read them).
+    pub fn with_asleep(mut self, asleep: crate::folders::AsleepFn) -> Self {
+        self.asleep = Some(asleep);
         self
     }
 
@@ -350,16 +417,29 @@ impl Ssh {
             .ok_or_else(|| SshError::NotFound(format!("no local account {name}")))
     }
 
-    /// Root and the local users, with their level and key count.
+    /// Root and the local users, with their level and key count; homes on a sleeping disk are
+    /// left unread (`keys_unread`).
     pub fn accounts(&self) -> Vec<SshAccount> {
+        self.accounts_read(false)
+    }
+
+    /// [`Ssh::accounts`]; `wake`: every home read, sleeping disks too (a change's guard).
+    fn accounts_read(&self, wake: bool) -> Vec<SshAccount> {
         self.accounts_raw()
             .into_iter()
             .filter(|a| keyed(a.uid))
             .map(|a| {
-                let keys = keys::read(&self.path(&a.home), a.uid, a.gid)
-                    .map(|t| keys::parse_file(&t).0.iter().filter(|k| !k.weak).count() as u32)
-                    .unwrap_or(0);
+                let home = self.path(&a.home);
+                let unread = !wake && self.asleep.as_ref().is_some_and(|f| f(&home.to_string_lossy()));
+                let keys = if unread {
+                    0
+                } else {
+                    keys::read(&home, a.uid, a.gid)
+                        .map(|t| keys::parse_file(&t).0.iter().filter(|k| !k.weak).count() as u32)
+                        .unwrap_or(0)
+                };
                 SshAccount {
+                    keys_unread: unread,
                     admin: a.uid == 0 || a.groups.iter().any(|g| ADMIN_GROUPS.contains(&g.as_str())),
                     level: if a.uid == 0 && shell_level(&a) == SshLevel::Sftp { SshLevel::Shell } else { shell_level(&a) },
                     name: a.name,
@@ -372,8 +452,41 @@ impl Ssh {
     }
 
     fn effective(&self) -> config::Effective {
+        self.run.prepare_sshd();
         let o = self.run(&["sshd", "-T"]);
         if o.ok() { config::effective(&o.stdout) } else { config::Effective::default() }
+    }
+
+    /// Whether some administrator in `accounts` can open a shell, as sshd itself evaluates
+    /// the configuration for each of them (`sshd -T -C user=…`; `main`: a candidate main file,
+    /// `None`: the real one): `Match` blocks, `AllowUsers`/`DenyUsers`/`AllowGroups`/
+    /// `DenyGroups`, `AuthorizedKeysFile` and `AuthenticationMethods` of every file count
+    /// ([`config::admin_allowed`]). `None` when sshd cannot tell.
+    fn sshd_admin_in(&self, accounts: &[SshAccount], main: Option<&str>) -> Option<bool> {
+        self.run.prepare_sshd();
+        for a in accounts.iter().filter(|a| a.admin && a.level == SshLevel::Shell) {
+            let spec = format!("user={},host=localhost,addr=127.0.0.1", a.name);
+            let mut argv = vec!["sshd", "-T", "-C", spec.as_str()];
+            if let Some(m) = main {
+                argv.extend(["-f", m]);
+            }
+            let o = self.run(&argv);
+            if !o.ok() {
+                return None;
+            }
+            if config::admin_allowed(a, &config::effective(&o.stdout)) {
+                return Some(true);
+            }
+        }
+        Some(false)
+    }
+
+    /// The lockout guard's answer under `s` (`main`: the candidate main file that holds `s`,
+    /// `None`: the configuration as it is): nobody with SSH off; else sshd's own evaluation
+    /// ([`Ssh::sshd_admin_in`]), or our settings rule ([`admin_can_log_in`]) when sshd cannot
+    /// tell.
+    fn admin_in(&self, accounts: &[SshAccount], main: Option<&str>, s: &SshSettings) -> bool {
+        s.enabled && self.sshd_admin_in(accounts, main).unwrap_or_else(|| accounts.iter().any(|a| admin_can_log_in(a, s)))
     }
 
     fn layout(&self) -> config::Layout {
@@ -551,8 +664,9 @@ impl Ssh {
         v
     }
 
-    /// `sshd -t` on the candidate where the drop-in will be.
-    fn check_candidate(&self, text: &str) -> Result<()> {
+    /// Writes the candidate drop-in and a copy of `sshd_config` whose `Include` lines name it
+    /// where the drop-in will be, runs `f` with that copy's path, then removes both.
+    fn with_candidate<T>(&self, text: &str, f: impl FnOnce(&str) -> T) -> Result<T> {
         let dir = self.state.join("check");
         let io = |e: std::io::Error| SshError::Failed(format!("{}: {e}", dir.display()));
         std::fs::create_dir_all(&dir).map_err(io)?;
@@ -563,8 +677,15 @@ impl Ssh {
         let main_text = config::candidate_main(&main, &cand_s, &|d| self.list_dir(d));
         let main_p = dir.join("sshd_config");
         std::fs::write(&main_p, main_text).map_err(io)?;
-        let o = self.run(&["sshd", "-t", "-f", &main_p.display().to_string()]);
+        let r = f(&main_p.display().to_string());
         let _ = std::fs::remove_dir_all(&dir);
+        Ok(r)
+    }
+
+    /// `sshd -t` on a candidate main file ([`Ssh::with_candidate`]).
+    fn check_candidate(&self, main_p: &str) -> Result<()> {
+        self.run.prepare_sshd();
+        let o = self.run(&["sshd", "-t", "-f", main_p]);
         if !o.ok() {
             let why = format!("{}{}", o.stderr.trim(), o.stdout.trim());
             return Err(SshError::Invalid("settings", format!("sshd refuses the configuration: {why}")));
@@ -630,18 +751,47 @@ impl Ssh {
         if !eff.ports.contains(&new.port) && self.ports_in_use().contains(&new.port) {
             return Err(SshError::Invalid("port", format!("port {} is already in use", new.port)));
         }
-        // nobody who can log in as an administrator now may lose it
-        let accounts = self.accounts();
+        let text = config::render(&new);
+        let layout = self.layout();
+        if !layout.includes_dropin {
+            return Err(SshError::Conflict(format!(
+                "{} does not include {}/*.conf: rynas settings would not be read",
+                config::MAIN,
+                config::DROPIN_DIR
+            )));
+        }
+        // a ListenAddress with a port of its own elsewhere: sshd listens there whatever
+        // `Port` says, the change would not take (and the check after it would fail)
+        if new.enabled
+            && let Some((file, value, port)) = config::listen_ports(&layout).into_iter().find(|(_, _, p)| *p != new.port)
+        {
+            return Err(SshError::Invalid(
+                "port",
+                format!("{file} has \"ListenAddress {value}\": sshd listens on port {port} there whatever the port setting says; remove the port from that line first"),
+            ));
+        }
+        // nobody who can log in as an administrator now may lose it: as sshd evaluates the
+        // whole configuration for each administrator, now and with the candidate
+        let accounts = self.accounts_read(true);
         let mut cur_eff = cur.clone();
         cur_eff.enabled = units.running() || units.on();
-        let before = accounts.iter().any(|a| admin_can_log_in(a, &cur_eff));
-        let after = accounts.iter().any(|a| admin_can_log_in(a, &new));
+        let before = self.admin_in(&accounts, None, &cur_eff);
+        let (checked, after_sshd) = self.with_candidate(&text, |main| {
+            let checked = self.check_candidate(main);
+            let after = if checked.is_ok() && new.enabled && before { self.sshd_admin_in(&accounts, Some(main)) } else { None };
+            (checked, after)
+        })?;
+        checked?;
+        let by_rule = accounts.iter().any(|a| admin_can_log_in(a, &new));
+        let after = after_sshd.unwrap_or(by_rule);
         if new.enabled && before && !after {
             let with_shell: Vec<&SshAccount> = accounts
                 .iter()
                 .filter(|a| a.admin && a.level == SshLevel::Shell && passes(&a.groups, &new))
                 .collect();
-            let msg = if with_shell.is_empty() {
+            let msg = if by_rule {
+                "with the other sshd configuration files (AllowUsers, DenyUsers, DenyGroups, Match blocks, AuthorizedKeysFile, AuthenticationMethods), no administrator could log in: check them first".to_string()
+            } else if with_shell.is_empty() {
                 "no administrator would be allowed to log in: give one the SSH shell level (Users) or allow one of their groups".to_string()
             } else if !new.password_auth {
                 "password login off, but no administrator who may log in has a key: add a key first".to_string()
@@ -650,15 +800,6 @@ impl Ssh {
             };
             return Err(SshError::Lockout(msg));
         }
-        let text = config::render(&new);
-        if !self.layout().includes_dropin {
-            return Err(SshError::Conflict(format!(
-                "{} does not include {}/*.conf: rynas settings would not be read",
-                config::MAIN,
-                config::DROPIN_DIR
-            )));
-        }
-        self.check_candidate(&text)?;
 
         let target = Units::wanted(new.enabled);
         let risky = !managed && cur != new
@@ -671,14 +812,17 @@ impl Ssh {
                 || cur.tcp_forwarding != new.tcp_forwarding)
             || units != target && (units.on() != new.enabled || units.socket_enabled || units.socket_active);
         let previous = std::fs::read_to_string(self.dropin_path()).ok();
+        let boot = boot_clock();
         let trial = Trial {
-            token: token(),
+            token: token()?,
             owner: owner.into(),
             deadline_ms: now_ms() + u64::from(timeout_s) * 1000,
             timeout_s,
             port: new.port,
             previous: previous.clone(),
             units,
+            boot_deadline_ms: boot.as_ref().map_or(0, |(_, ms)| ms + u64::from(timeout_s) * 1000),
+            boot_id: boot.map(|(id, _)| id).unwrap_or_default(),
         };
         if risky {
             self.write_trial(Some(&trial))?;
@@ -733,6 +877,11 @@ impl Ssh {
     pub fn rollback(&self, reason: &str) -> Result<bool> {
         let _lock = self.lock()?;
         let Some(t) = self.read_trial() else { return Ok(false) };
+        self.rollback_locked(t, reason)
+    }
+
+    /// [`Ssh::rollback`] of the trial `t`, read under the lock the caller holds.
+    fn rollback_locked(&self, t: Trial, reason: &str) -> Result<bool> {
         tracing::warn!("ssh: undoing the unconfirmed change ({reason})");
         let mut errs = Vec::new();
         if let Err(e) = self.write_dropin(t.previous.as_deref()) {
@@ -748,10 +897,18 @@ impl Ssh {
         }
     }
 
-    /// Rolls back a trial whose time is over (rynasd's watch, after a restart).
+    /// Rolls back a trial whose time is over (rynasd's watch, after a restart): the trial is
+    /// read, judged and undone under one hold of the lock, so a confirmation (or a new
+    /// change) in between is never undone. Over on this boot's clock ([`Trial::expired`]);
+    /// `now` (wall clock, ms) only for a trial written without boot data.
     pub fn expire(&self, now: u64) -> Result<bool> {
+        self.expire_at(now, boot_clock().as_ref())
+    }
+
+    fn expire_at(&self, now: u64, boot: Option<&(String, u64)>) -> Result<bool> {
+        let _lock = self.lock()?;
         match self.read_trial() {
-            Some(t) if now >= t.deadline_ms => self.rollback("timeout"),
+            Some(t) if t.expired(now, boot) => self.rollback_locked(t, "timeout"),
             _ => Ok(false),
         }
     }
@@ -774,6 +931,8 @@ impl Ssh {
         let a = self.account(user)?;
         let (clean, key) = keys::check_new(line).map_err(|e| SshError::Invalid("key", e))?;
         let fp = key.fingerprint.clone();
+        // one writer at a time (rynasd's requests, the lockout guard of a removal)
+        let _lock = self.lock()?;
         keys::update(&self.path(&a.home), a.uid, a.gid, &|old| {
             if keys::parse_file(old).0.iter().any(|k| k.fingerprint == fp) {
                 return Err(format!("already there: {fp}"));
@@ -792,19 +951,25 @@ impl Ssh {
 
     pub fn remove_key(&self, user: &str, fingerprint: &str) -> Result<()> {
         let a = self.account(user)?;
-        // the last key of the administrator who keeps password login off: refused
-        let accounts = self.accounts();
+        // the guard and the write under one hold of the lock: two removals at once cannot
+        // both pass the guard on the same count
+        let _lock = self.lock()?;
+        // the last key of an administrator who could log in only with it: refused (the same
+        // guard as a change of the settings, sshd's own evaluation included)
+        let accounts = self.accounts_read(true);
         let units = self.units();
         let (cur, _, _) = self.current(units);
         let mut cur_eff = cur;
         cur_eff.enabled = units.on() || units.running();
         let mut after: Vec<SshAccount> = accounts.clone();
-        if let Some(x) = after.iter_mut().find(|x| x.name == a.name) {
+        let removes_one = keys::read(&self.path(&a.home), a.uid, a.gid)
+            .is_ok_and(|t| keys::parse_file(&t).0.iter().any(|k| k.fingerprint == fingerprint && !k.weak));
+        if let Some(x) = after.iter_mut().find(|x| x.name == a.name)
+            && removes_one
+        {
             x.keys = x.keys.saturating_sub(1);
         }
-        let before_ok = accounts.iter().any(|x| admin_can_log_in(x, &cur_eff));
-        let after_ok = after.iter().any(|x| admin_can_log_in(x, &cur_eff));
-        if before_ok && !after_ok {
+        if self.admin_in(&accounts, None, &cur_eff) && !self.admin_in(&after, None, &cur_eff) {
             return Err(SshError::Lockout(
                 "this is the last key of the only administrator who can log in (password login is off): turn password login on or add another key first".into(),
             ));

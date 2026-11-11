@@ -297,7 +297,8 @@ fn settings_form(pg: Page, init: SshSettings) -> AnyView {
             .filter(|a| a.uid != 0 || s.root_login != SshRootLogin::No)
             .map(|a| {
                 let ok = s.enabled && a.level != SshLevel::None && passes(&a.groups, &s) && (a.keys > 0 || (s.password_auth && (a.uid != 0 || s.root_login == SshRootLogin::Yes)));
-                let mut sub = vec![t(level_key(a.level)).to_string(), tf("ssh.n_keys", &[("n", &a.keys.to_string())])];
+                let keys = if a.keys_unread { t("ssh.keys_unread").to_string() } else { tf("ssh.n_keys", &[("n", &a.keys.to_string())]) };
+                let mut sub = vec![t(level_key(a.level)).to_string(), keys];
                 if a.admin {
                     sub.insert(0, t("ssh.admin").to_string());
                 }
@@ -383,6 +384,7 @@ fn logins() -> AnyView {
         view! {
             <p class="small">{tf("ssh.logins_sum", &[("ok", &l.accepted.to_string()), ("failed", &l.failed.to_string())])}</p>
             {(!top.is_empty()).then(|| view! { <p class="muted small">{tf("ssh.logins_top", &[("list", &top)])}</p> })}
+            {l.since_ms.map(|at| view! { <p class="muted small">{tf("ssh.logins_since", &[("when", &crate::i18n::datetime(at))])}</p> })}
             <ul class="plain-list ssh-events">
                 {l.events.into_iter().take(12).map(|e| {
                     let sub = format!("{} · {}{}", crate::i18n::datetime(e.at_ms), e.address, if e.method.is_empty() { String::new() } else { format!(" · {}", e.method) });

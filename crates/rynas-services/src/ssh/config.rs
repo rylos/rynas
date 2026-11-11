@@ -12,7 +12,7 @@
 
 use std::collections::BTreeSet;
 
-use rynas_api_types::ssh::{SSH_BASE_GROUPS, SSH_SFTP_GROUP, SshAllow, SshRootLogin, SshSettings};
+use rynas_api_types::ssh::{SSH_BASE_GROUPS, SSH_SFTP_GROUP, SshAccount, SshAllow, SshLevel, SshRootLogin, SshSettings};
 
 /// The drop-in's file name: sorts before the usual `50-cloud-init.conf` and friends.
 pub const DROPIN_NAME: &str = "00-rynas.conf";
@@ -202,6 +202,11 @@ pub struct Effective {
     pub agent_forwarding: Option<bool>,
     pub x11_forwarding: Option<bool>,
     pub authorized_keys_files: Vec<String>,
+    pub pubkey_auth: Option<bool>,
+    /// `AuthenticationMethods`: lists of methods that must all succeed (`any`: none).
+    pub auth_methods: Vec<String>,
+    /// `PermitRootLogin forced-commands-only`: keys with a forced command, never a shell.
+    pub root_forced_only: bool,
 }
 
 pub fn effective(t: &str) -> Effective {
@@ -216,7 +221,10 @@ pub fn effective(t: &str) -> Effective {
             "port" => e.ports.extend(v.parse::<u16>().ok()),
             "passwordauthentication" => e.password_auth = Some(yes(v)),
             "kbdinteractiveauthentication" => e.kbd_interactive = Some(yes(v)),
+            "pubkeyauthentication" => e.pubkey_auth = Some(yes(v)),
+            "authenticationmethods" => e.auth_methods = vals.iter().map(|s| s.to_string()).collect(),
             "permitrootlogin" => {
+                e.root_forced_only = v.eq_ignore_ascii_case("forced-commands-only");
                 e.root_login = Some(match v.to_ascii_lowercase().as_str() {
                     "yes" => SshRootLogin::Yes,
                     "no" => SshRootLogin::No,
@@ -322,4 +330,86 @@ pub fn who_sets<'a>(layout: &'a Layout, keyword: &str) -> Option<&'a str> {
         }
         None
     })
+}
+
+/// Does the `AllowUsers`/`DenyUsers` pattern `p` (`user` or `user@host`) name `user`? The
+/// host part is not known before a login: only the user part counts.
+fn user_pattern(p: &str, user: &str) -> bool {
+    let u = p.split_once('@').map_or(p, |(u, _)| u);
+    glob(u, user)
+}
+
+pub fn admin_allowed(a: &SshAccount, e: &Effective) -> bool {
+    if !a.admin || a.level != SshLevel::Shell {
+        return false;
+    }
+    if e.deny_users.iter().any(|p| user_pattern(p, &a.name))
+        || (!e.allow_users.is_empty() && !e.allow_users.iter().any(|p| user_pattern(p, &a.name)))
+        || e.deny_groups.iter().any(|p| a.groups.iter().any(|g| glob(p, g)))
+        || (!e.allow_groups.is_empty() && !e.allow_groups.iter().any(|p| a.groups.iter().any(|g| glob(p, g))))
+    {
+        return false;
+    }
+    // sshd's default reads .ssh/authorized_keys (and authorized_keys2); relative paths are
+    // below the home, `%h` is the home
+    let our_file = e.authorized_keys_files.is_empty()
+        || e.authorized_keys_files.iter().any(|f| matches!(f.as_str(), ".ssh/authorized_keys" | "%h/.ssh/authorized_keys"));
+    let keys = a.keys > 0 && e.pubkey_auth != Some(false) && our_file;
+    let (mut password, mut kbd) = (e.password_auth.unwrap_or(true), e.kbd_interactive.unwrap_or(true));
+    if a.uid == 0 {
+        match e.root_login {
+            _ if e.root_forced_only => return false,
+            Some(SshRootLogin::No) => return false,
+            Some(SshRootLogin::Keys) | None => (password, kbd) = (false, false),
+            Some(SshRootLogin::Yes) => {}
+        }
+    }
+    let lists: Vec<&str> = e.auth_methods.iter().map(String::as_str).filter(|m| !m.eq_ignore_ascii_case("any")).collect();
+    if lists.is_empty() {
+        return keys || password || kbd;
+    }
+    // one list whose every method can succeed
+    lists.iter().any(|list| {
+        list.split(',').all(|m| match m.split(':').next().unwrap_or("") {
+            "publickey" => keys,
+            "password" => password,
+            "keyboard-interactive" => kbd,
+            _ => false,
+        })
+    })
+}
+
+/// `ListenAddress` lines with a port of their own (`host:port`, `[v6]:port`) in the global
+/// part of a file other than the drop-in: sshd listens there whatever `Port` says, so a port
+/// change of ours would not take. `(file, value, port)`.
+pub fn listen_ports(layout: &Layout) -> Vec<(String, String, u16)> {
+    let dropin = format!("{DROPIN_DIR}/{DROPIN_NAME}");
+    let mut out = Vec::new();
+    for (path, text) in &layout.files {
+        if *path == dropin {
+            continue;
+        }
+        for l in text.lines() {
+            let mut w = l.split_whitespace();
+            let Some(k) = w.next() else { continue };
+            if k.eq_ignore_ascii_case("match") {
+                break;
+            }
+            if !k.eq_ignore_ascii_case("listenaddress") {
+                continue;
+            }
+            let Some(v) = w.next() else { continue };
+            let port = if let Some(rest) = v.strip_prefix('[') {
+                rest.split_once("]:").and_then(|(_, p)| p.parse::<u16>().ok())
+            } else if v.matches(':').count() == 1 {
+                v.rsplit_once(':').and_then(|(_, p)| p.parse::<u16>().ok())
+            } else {
+                None
+            };
+            if let Some(p) = port {
+                out.push((path.split('#').next().unwrap_or(path).to_string(), v.to_string(), p));
+            }
+        }
+    }
+    out
 }

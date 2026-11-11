@@ -72,7 +72,11 @@ keeps every open session (`KillMode=process`).
 - **Host key fingerprints** (`SHA256:…`) to check on the first connection.
 - **Logins of the last day** from the journal on request (`sshd`, `sshd-session`,
   `sshd-auth`): accepted, failed, unknown accounts, top failing addresses. Bans stay with
-  fail2ban.
+  fail2ban. The address is read anchored at the end of the line (the word before the last
+  ` port `), never from the client-chosen user name; at most the newest 20000 lines are
+  read, and a day with more says from when it counts (`since_ms`).
+- **Sleeping disks**: the page's account list leaves homes on a sleeping disk unread
+  (`keys_unread`); the guards of a change read them anyway.
 
 ## 3. Applying without locking anyone out
 
@@ -82,7 +86,18 @@ keeps every open session (`KillMode=process`).
    or password login; root only as its setting allows). Password login off without an
    administrator key is refused with `ssh_lockout`; so is removing the last key of the only
    administrator who can log in. The page runs the same rule
-   (`rynas_api_types::ssh::admin_can_log_in`) live and keeps Save off.
+   (`rynas_api_types::ssh::admin_can_log_in`) live and keeps Save off. On the server the
+   guard also asks sshd itself, for each administrator, before (the configuration as it is)
+   and after (the candidate main file of step 2): `sshd -T -C
+   user=<admin>,host=localhost,addr=127.0.0.1 [-f <candidate>]`, so `Match` blocks,
+   `AllowUsers`/`DenyUsers`/`AllowGroups`/`DenyGroups`, `AuthorizedKeysFile` (the keys we
+   count help only when sshd reads `~/.ssh/authorized_keys`) and `AuthenticationMethods` of
+   any file count (`config::admin_allowed`); the settings rule stands in only when sshd
+   cannot answer. Key additions and removals take the engine's lock, the removal's guard and
+   write under one hold. sshd's privilege separation directory `/run/sshd` (0755, root) is
+   made before any `sshd -t`/`-T` when it is missing (SSH stopped: only its unit makes it).
+   A `ListenAddress host:port` in another file is refused up front (`invalid_value` field
+   `port`): sshd would listen there whatever `Port` says.
 2. The candidate is checked **in place**: a copy of `sshd_config` whose `Include` lines name
    each file explicitly, the candidate where the drop-in goes; `sshd -t -f` on it. A main file
    that does not include `sshd_config.d/*.conf` is refused (the drop-in would not be read).
@@ -90,7 +105,11 @@ keeps every open session (`KillMode=process`).
    socket activation) is a **trial**: `<state>/ssh/trial.json` keeps the previous drop-in and
    unit states, and `systemd-run --on-active=120s` arms `rynas-ssh-rollback.timer`
    (`rynasctl ssh rollback`, works without rynasd). rynasd also undoes an expired trial every
-   5 s. Window 60-600 s (default 120).
+   5 s: judged on `CLOCK_BOOTTIME` against the boot the trial began in (`boot_id`), so an
+   NTP step of the wall clock neither shortens nor stretches it; another boot means the
+   machine restarted (and the transient timer with it): undone. The trial is read, judged and
+   undone under one hold of the lock. The confirmation token comes from `getrandom`; no
+   randomness is an error, never a guessable token. Window 60-600 s (default 120).
 4. Write the drop-in (new file + rename), bring the units to the wanted state (socket
    activation switched off, `ssh.service` enabled), **reload** (sessions stay).
 5. sshd must be active and listen on the port within 5 s, else everything goes back at once.
@@ -103,11 +122,11 @@ Every writer takes `<state>/ssh/lock` (`flock`), so rynasd and the timer never i
 
 | Method | Path | Body | Answer |
 |---|---|---|---|
-| GET | `/api/v1/services/ssh` | — | `SshState` {installed, managed, settings, running, ports, dropin, host_keys, accounts [{name, uid, admin, level, groups, keys}], problems [{code not_installed\|not_included\|overridden\|extra_ports\|drift\|socket_activation\|not_running, subject?}], trial? {token (author only), owner, deadline_ms, timeout_s, port}} |
+| GET | `/api/v1/services/ssh` | — | `SshState` {installed, managed, settings, running, ports, dropin, host_keys, accounts [{name, uid, admin, level, groups, keys, keys_unread (home on a sleeping disk: not read for the page)}], problems [{code not_installed\|not_included\|overridden\|extra_ports\|drift\|socket_activation\|not_running, subject?}], trial? {token (author only), owner, deadline_ms, timeout_s, port}} |
 | PUT | `/api/v1/services/ssh` | `SshApply` {settings, timeout_s?} | `SshApplied` {trial?}; 400 `invalid_value` (field `port`, `allow_groups`, `timeout_s`, `settings` = sshd refused), 409 `ssh_lockout`, 409 `conflict` (trial running, not installed, drop-in not included), 500 (sshd did not start: undone) |
-| POST | `/api/v1/services/ssh/confirm` | {token} | 204 |
+| POST | `/api/v1/services/ssh/confirm` | {token} | 204; 400 `invalid_value` field `token` (not the token of the change under test); 409 `conflict` (nothing waits) |
 | POST | `/api/v1/services/ssh/rollback` | — | 204; 409 when nothing waits |
-| GET | `/api/v1/services/ssh/logins` | — | `SshLogins` {events, failed, accepted, top_failed} |
+| GET | `/api/v1/services/ssh/logins` | — | `SshLogins` {events, failed, accepted, top_failed, since_ms? (the newest 20000 journal lines held less than the day: counts start there)} |
 | GET | `/api/v1/services/ssh/keys/{user}` | — | `SshKeyList` {user, keys, other_lines} |
 | POST | `/api/v1/services/ssh/keys/{user}` | {key} | 201 `SshKey`; 400 `invalid_value` field `key`, 409 already there |
 | POST | `/api/v1/services/ssh/keys/{user}/remove` | {fingerprint} | 204; 404; 409 `ssh_lockout` |

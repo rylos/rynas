@@ -6,8 +6,12 @@ use std::collections::BTreeMap;
 
 use rynas_api_types::ssh::{SshLoginEvent, SshLoginKind, SshLogins};
 
-/// Events kept for the page (the counts cover the whole day).
+/// Events kept for the page (the counts cover what was read: [`MAX_LINES`]).
 pub const MAX_EVENTS: usize = 100;
+
+/// Newest journal lines read at most; a day with more (a brute-force run) is counted from the
+/// oldest line read, and the answer says so (`SshLogins::since_ms`).
+pub const MAX_LINES: usize = 20000;
 
 /// The command (argv).
 pub fn argv() -> Vec<&'static str> {
@@ -17,10 +21,16 @@ pub fn argv() -> Vec<&'static str> {
     ]
 }
 
-/// `user` and `address` of "... for USER from ADDR port N ...".
+/// `user` and `address` of "... for USER from ADDR port N ...". Anchored at the end: the
+/// user name is the client's to choose ("Invalid user x from 1.2.3.4 port 1 from 9.9.9.9"),
+/// so the address is the word before the last " port ", and " from " the last one before it.
 fn who(rest: &str) -> Option<(String, String)> {
-    let (user, after) = rest.split_once(" from ")?;
-    let addr = after.split_whitespace().next()?;
+    let (head, port) = rest.rsplit_once(" port ")?;
+    port.split_whitespace().next()?.parse::<u16>().ok()?;
+    let (user, addr) = head.rsplit_once(" from ")?;
+    if addr.is_empty() || addr.contains(char::is_whitespace) {
+        return None;
+    }
     Some((user.trim().to_string(), addr.to_string()))
 }
 
@@ -61,6 +71,11 @@ pub fn parse_line(line: &str) -> Option<SshLoginEvent> {
 pub fn summarize(out: &str) -> SshLogins {
     let mut events: Vec<SshLoginEvent> = out.lines().filter_map(parse_line).collect();
     let mut s = SshLogins::default();
+    // `--lines` keeps the newest lines: when they were all used, the oldest one read is where
+    // the counts start, not 24 hours ago
+    if out.lines().count() >= MAX_LINES {
+        s.since_ms = out.lines().find_map(|l| l.split_once(' ')?.0.parse::<f64>().ok()).map(|secs| (secs * 1000.0) as u64);
+    }
     let mut by_addr: BTreeMap<String, u32> = BTreeMap::new();
     for e in &events {
         match e.kind {

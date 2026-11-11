@@ -120,6 +120,10 @@ pub struct SshAccount {
     pub groups: Vec<String>,
     /// Usable keys in `~/.ssh/authorized_keys`.
     pub keys: u32,
+    /// The home is on a disk that sleeps: its keys were not read (`keys` is 0), so as not to
+    /// wake it for a page view.
+    #[serde(default)]
+    pub keys_unread: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -268,6 +272,10 @@ pub struct SshLogins {
     pub accepted: u32,
     /// Addresses with the most failures, `(address, count)`.
     pub top_failed: Vec<(String, u32)>,
+    /// The day held more journal lines than are read: the counts start here (ms), not 24
+    /// hours ago. `None`: the whole day is counted.
+    #[serde(default)]
+    pub since_ms: Option<u64>,
 }
 
 /// `AllowGroups` of [`SshAllow::Listed`]: the base groups, then the administrator's.

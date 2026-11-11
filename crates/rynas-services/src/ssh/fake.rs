@@ -11,7 +11,8 @@ use super::config::glob;
 use super::{Out, SshRunner};
 
 const MULTI: [&str; 5] = ["port", "allowgroups", "allowusers", "denyusers", "denygroups"];
-const KNOWN: [&str; 30] = [
+const KNOWN: [&str; 31] = [
+    "authenticationmethods",
     "port", "allowgroups", "allowusers", "denyusers", "denygroups", "include", "match",
     "passwordauthentication", "kbdinteractiveauthentication", "permitrootlogin",
     "permitemptypasswords", "pubkeyauthentication", "allowtcpforwarding",
@@ -81,9 +82,12 @@ impl FakeRunner {
         }
     }
 
-    fn lines_of(&self, file: &str, out: &mut Vec<(String, String)>, check: &mut Vec<String>, depth: u32) {
+    /// The lines sshd reads, in order: `(keyword, value, in a Match block that applies to
+    /// `who`)`. Without `who` (plain `sshd -T`) no Match block applies.
+    fn lines_of(&self, file: &str, who: Option<&(String, Vec<String>)>, out: &mut Vec<(String, String, bool)>, check: &mut Vec<String>, depth: u32) {
         let Ok(text) = std::fs::read_to_string(self.path(file)) else { return };
-        let mut in_match = false;
+        // None: global part; Some(applies)
+        let mut in_match: Option<bool> = None;
         for l in text.lines() {
             let l = l.trim();
             if l.is_empty() || l.starts_with('#') {
@@ -96,11 +100,16 @@ impl FakeRunner {
                 check.push(format!("{file}: Bad configuration option: {k}"));
             }
             if k == "match" {
-                in_match = true;
+                in_match = Some(who.is_some_and(|w| match_applies(&rest, w)));
                 continue;
             }
-            if in_match {
-                continue;
+            match in_match {
+                Some(false) => continue,
+                Some(true) => {
+                    out.push((k, rest.join(" "), true));
+                    continue;
+                }
+                None => {}
             }
             if k == "include" && depth < 8 {
                 for arg in rest {
@@ -112,13 +121,30 @@ impl FakeRunner {
                     names.retain(|n| glob(pat, n));
                     names.sort();
                     for n in names {
-                        self.lines_of(&format!("{dir}/{n}"), out, check, depth + 1);
+                        self.lines_of(&format!("{dir}/{n}"), who, out, check, depth + 1);
                     }
                 }
                 continue;
             }
-            out.push((k, rest.join(" ")));
+            out.push((k, rest.join(" "), false));
         }
+    }
+
+    /// The groups of `user` from the files below the root (primary and supplementary).
+    fn groups_of(&self, user: &str) -> Vec<String> {
+        let read = |p: &str| std::fs::read_to_string(self.root.join(p)).unwrap_or_default();
+        let gid = read("etc/passwd").lines().find_map(|l| {
+            let f: Vec<&str> = l.split(':').collect();
+            (f.first() == Some(&user)).then(|| f.get(3).map(|g| g.to_string())).flatten()
+        });
+        read("etc/group")
+            .lines()
+            .filter_map(|l| {
+                let f: Vec<&str> = l.split(':').collect();
+                let member = f.get(3).is_some_and(|m| m.split(',').any(|x| x == user));
+                (member || f.get(2).map(|g| g.to_string()) == gid).then(|| f[0].to_string())
+            })
+            .collect()
     }
 
     fn sshd(&self, argv: &[&str]) -> Out {
@@ -128,9 +154,16 @@ impl FakeRunner {
             .and_then(|i| argv.get(i + 1))
             .copied()
             .unwrap_or("/etc/ssh/sshd_config");
+        // `-C user=NAME,host=…,addr=…`: the Match blocks for that user apply
+        let who = argv
+            .iter()
+            .position(|a| *a == "-C")
+            .and_then(|i| argv.get(i + 1))
+            .and_then(|spec| spec.split(',').find_map(|kv| kv.strip_prefix("user=")))
+            .map(|u| (u.to_string(), self.groups_of(u)));
         let mut lines = Vec::new();
         let mut errors = Vec::new();
-        self.lines_of(main, &mut lines, &mut errors, 0);
+        self.lines_of(main, who.as_ref(), &mut lines, &mut errors, 0);
         if let Some(e) = self.st.lock().unwrap().sshd_error.clone() {
             errors.push(e);
         }
@@ -139,22 +172,39 @@ impl FakeRunner {
         }
         let mut single: BTreeMap<String, String> = BTreeMap::new();
         let mut multi: Vec<(String, String)> = Vec::new();
-        for (k, v) in lines {
+        // a Match block that applies wins over the global lines (its first value)
+        for (k, v, _) in lines.iter().filter(|l| l.2) {
             if MULTI.contains(&k.as_str()) {
                 for x in v.split_whitespace() {
                     multi.push((k.clone(), x.to_string()));
                 }
             } else {
-                single.entry(k).or_insert(v);
+                single.entry(k.clone()).or_insert(v.clone());
+            }
+        }
+        let from_match: Vec<String> = multi.iter().map(|(k, _)| k.clone()).collect();
+        for (k, v, _) in lines.iter().filter(|l| !l.2) {
+            if MULTI.contains(&k.as_str()) {
+                if from_match.contains(k) {
+                    continue;
+                }
+                for x in v.split_whitespace() {
+                    multi.push((k.clone(), x.to_string()));
+                }
+            } else {
+                single.entry(k.clone()).or_insert(v.clone());
             }
         }
         for (k, v) in [
             ("passwordauthentication", "yes"),
+            ("pubkeyauthentication", "yes"),
+            ("kbdinteractiveauthentication", "yes"),
             ("permitrootlogin", "without-password"),
             ("allowtcpforwarding", "yes"),
             ("allowagentforwarding", "yes"),
             ("x11forwarding", "no"),
             ("authorizedkeysfile", ".ssh/authorized_keys .ssh/authorized_keys2"),
+            ("authenticationmethods", "any"),
         ] {
             single.entry(k.into()).or_insert(v.into());
         }
@@ -201,6 +251,31 @@ impl FakeRunner {
         }
         ok("")
     }
+}
+
+/// Whether the criteria of a `Match` line (`User a,b`, `Group g`, `All`; pairs all apply)
+/// hold for `(user, groups)`.
+fn match_applies(criteria: &[&str], who: &(String, Vec<String>)) -> bool {
+    let mut it = criteria.iter();
+    while let Some(c) = it.next() {
+        if c.eq_ignore_ascii_case("all") {
+            continue;
+        }
+        let Some(arg) = it.next() else { return false };
+        let any = |set: &[String]| arg.split(',').any(|p| set.iter().any(|x| glob(p, x)));
+        let hit = match c.to_ascii_lowercase().as_str() {
+            "user" => any(std::slice::from_ref(&who.0)),
+            "group" => any(&who.1),
+            // host, address, …: the fake says "localhost", 127.0.0.1
+            "host" => arg.split(',').any(|p| glob(p, "localhost")),
+            "address" => arg.split(',').any(|p| glob(p, "127.0.0.1")),
+            _ => false,
+        };
+        if !hit {
+            return false;
+        }
+    }
+    true
 }
 
 fn ok(s: &str) -> Out {

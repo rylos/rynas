@@ -1025,8 +1025,14 @@ fn main() -> std::io::Result<()> {
             } else {
                 Arc::new(rynas_services::ssh::HostRunner)
             };
+            // homes on a sleeping disk: the page shows their keys unread instead of waking it
+            let mut ssh = rynas_services::ssh::Ssh::new(root, &args.state_dir, runner);
+            if let Some(services) = state.services.as_ref() {
+                let shares = services.shares.clone();
+                ssh = ssh.with_asleep(Arc::new(move |p: &str| rynasd::services::path_asleep(&shares, p)));
+            }
             let svc = Arc::new(rynasd::ssh::SshSvc {
-                ssh: Arc::new(rynas_services::ssh::Ssh::new(root, &args.state_dir, runner)),
+                ssh: Arc::new(ssh),
                 admins: ops.admins.clone(),
             });
             rynasd::ssh::spawn_watch(svc.clone());

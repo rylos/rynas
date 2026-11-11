@@ -1723,6 +1723,7 @@ ssh.level_shell	shell
 ssh.level_sftp	solo SFTP
 ssh.level_none	niente SSH
 ssh.n_keys	chiavi: {n}
+ssh.keys_unread	chiavi non lette (disco in standby)
 ssh.tcp	Inoltro delle porte
 ssh.tcp_help	Tunnel attraverso SSH (ssh -L, -R, SOCKS). Lascialo spento se non serve.
 ssh.agent	Inoltro dell'agent
@@ -1747,6 +1748,7 @@ ssh.no_host_keys	Ancora nessuna chiave dell'host: vengono create all'installazio
 ssh.logins	Accessi, ultime 24 ore
 ssh.logins_sum	Accessi: {ok} · tentativi falliti: {failed}
 ssh.logins_top	Più tentativi falliti da: {list}
+ssh.logins_since	Troppe voci oggi: conteggio dal {when}
 ssh.login_ok	entrato
 ssh.login_failed	fallito
 ssh.login_invalid	account sconosciuto

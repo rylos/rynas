@@ -318,11 +318,16 @@ pub fn update(
         Some((_, (u, g, m))) => (*u, *g, m & 0o600),
         None => (uid, gid, 0o600),
     };
-    let tmp_c = cstr(TMP);
-    // a leftover of an interrupted write
+    // a leftover of an interrupted write of an older version
+    let old_tmp = cstr(TMP);
     // SAFETY: valid C string, descriptor owned above.
-    unsafe { libc::unlinkat(ssh.as_raw_fd(), tmp_c.as_ptr(), 0) };
-    let fd = openat(ssh.as_raw_fd(), TMP, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL, 0o600)
+    unsafe { libc::unlinkat(ssh.as_raw_fd(), old_tmp.as_ptr(), 0) };
+    // a name of this write's own (the callers serialize on the engine's lock as well): two
+    // writers never share, nor remove, each other's file
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = format!("{TMP}.{}.{}", std::process::id(), SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    let tmp_c = cstr(&tmp);
+    let fd = openat(ssh.as_raw_fd(), &tmp, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL, 0o600)
         .map_err(|e| format!("{FILE}: {e}"))?;
     let raw = fd.as_raw_fd();
     let mut f = std::fs::File::from(fd);

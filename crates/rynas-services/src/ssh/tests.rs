@@ -173,7 +173,13 @@ fn an_unconfirmed_change_goes_back_by_itself() {
     let t = f.ssh.apply(s, Some(60), "admin").unwrap().unwrap();
     assert!(f.dropin().is_some());
     assert!(!f.ssh.expire(t.deadline_ms - 1).unwrap());
-    assert!(f.ssh.expire(t.deadline_ms).unwrap());
+    // judged on the boot clock: a wall clock that jumps past the deadline (an NTP step)
+    // undoes nothing, the boot clock reaching it does
+    let tr = f.ssh.read_trial().unwrap();
+    assert!(!tr.boot_id.is_empty(), "a trial records its boot");
+    let boot = |ms| Some((tr.boot_id.clone(), ms));
+    assert!(!f.ssh.expire_at(t.deadline_ms + 3_600_000, boot(tr.boot_deadline_ms - 1).as_ref()).unwrap());
+    assert!(f.ssh.expire_at(0, boot(tr.boot_deadline_ms).as_ref()).unwrap());
     // there was no drop-in before: none again, the machine as it was
     assert!(f.dropin().is_none());
     let st = f.ssh.state();
@@ -429,7 +435,7 @@ fn listening_ports_from_proc() {
 
 #[test]
 fn root_login_follows_its_setting() {
-    let root = SshAccount { name: "root".into(), uid: 0, admin: true, level: SshLevel::Shell, groups: vec!["root".into()], keys: 0 };
+    let root = SshAccount { name: "root".into(), uid: 0, admin: true, level: SshLevel::Shell, groups: vec!["root".into()], keys: 0, keys_unread: false };
     let mut s = SshSettings { root_login: SshRootLogin::Yes, ..SshSettings::default() };
     assert!(admin_can_log_in(&root, &s));
     s.root_login = SshRootLogin::Keys;
@@ -439,4 +445,110 @@ fn root_login_follows_its_setting() {
     assert!(!admin_can_log_in(&with_key, &s));
     s.allow_groups = vec!["root".into()];
     assert!(admin_can_log_in(&with_key, &s));
+}
+
+#[test]
+fn a_trial_ends_with_its_boot() {
+    let t = Trial {
+        token: "t".into(),
+        owner: "admin".into(),
+        deadline_ms: 10_000,
+        timeout_s: 60,
+        port: 22,
+        previous: None,
+        units: Units::default(),
+        boot_id: "b1".into(),
+        boot_deadline_ms: 500,
+    };
+    let b = |id: &str, ms| Some((id.to_string(), ms));
+    assert!(!t.expired(20_000, b("b1", 499).as_ref()));
+    assert!(t.expired(0, b("b1", 500).as_ref()));
+    // another boot: the machine restarted, the rollback timer with it
+    assert!(t.expired(0, b("b2", 1).as_ref()));
+    // written by an older version: the wall clock
+    let old = Trial { boot_id: String::new(), boot_deadline_ms: 0, ..t };
+    assert!(!old.expired(9_999, b("b1", 1).as_ref()));
+    assert!(old.expired(10_000, None));
+}
+
+#[test]
+fn the_guard_reads_every_file_as_sshd_does() {
+    let f = Fx::new();
+    f.ssh.add_key("admin", ED2).unwrap();
+    // another file points sshd at other key files: the key we count would not open a session
+    let other = f.root.join("etc/ssh/sshd_config.d/50-keys.conf");
+    std::fs::write(&other, "AuthorizedKeysFile .ssh/other_keys\n").unwrap();
+    let mut s = f.settings();
+    s.password_auth = false;
+    let e = f.ssh.apply(s.clone(), None, "admin").unwrap_err();
+    assert!(matches!(&e, SshError::Lockout(m) if m.contains("AuthorizedKeysFile")), "{e}");
+    assert!(f.dropin().is_none());
+    let calls = f.fake.calls();
+    assert!(calls.iter().any(|c| c.starts_with("sshd -T -C user=admin,host=localhost,addr=127.0.0.1 -f ")), "{calls:?}");
+    // a Match block of another file that takes the password away: the last key stays
+    std::fs::write(&other, "Match User admin\n    PasswordAuthentication no\n").unwrap();
+    assert!(matches!(f.ssh.remove_key("admin", ED2_FP), Err(SshError::Lockout(_))));
+    std::fs::remove_file(&other).unwrap();
+    f.ssh.remove_key("admin", ED2_FP).unwrap();
+}
+
+#[test]
+fn admin_allowed_follows_the_effective_configuration() {
+    let admin = SshAccount { name: "admin".into(), uid: 1000, admin: true, level: SshLevel::Shell, groups: vec!["sudo".into()], keys: 1, keys_unread: false };
+    let e = |t: &str| config::effective(t);
+    assert!(config::admin_allowed(&admin, &e("passwordauthentication no\nkbdinteractiveauthentication no\n")));
+    assert!(!config::admin_allowed(&admin, &e("denyusers admin@*\n")));
+    assert!(!config::admin_allowed(&admin, &e("allowusers bob\n")));
+    assert!(config::admin_allowed(&admin, &e("allowusers adm*@192.0.2.0/24\n")));
+    assert!(!config::admin_allowed(&admin, &e("denygroups sudo\n")));
+    assert!(!config::admin_allowed(&admin, &e("allowgroups wheel\n")));
+    let no_keys = "passwordauthentication no\nkbdinteractiveauthentication no\npubkeyauthentication no\n";
+    assert!(!config::admin_allowed(&admin, &e(no_keys)));
+    // both a key and a password: with a key only, never
+    assert!(!config::admin_allowed(&admin, &e("authenticationmethods publickey,password\npasswordauthentication no\nkbdinteractiveauthentication no\n")));
+    assert!(config::admin_allowed(&admin, &e("authenticationmethods publickey,keyboard-interactive:pam publickey\n")));
+    let root = SshAccount { name: "root".into(), uid: 0, groups: vec!["root".into()], keys: 0, ..admin.clone() };
+    assert!(!config::admin_allowed(&root, &e("permitrootlogin without-password\n")));
+    assert!(config::admin_allowed(&root, &e("permitrootlogin yes\n")));
+    assert!(!config::admin_allowed(&SshAccount { keys: 1, ..root }, &e("permitrootlogin forced-commands-only\n")));
+}
+
+#[test]
+fn a_listen_address_with_its_own_port_is_reported_up_front() {
+    let f = Fx::new();
+    std::fs::write(f.root.join("etc/ssh/sshd_config.d/60-listen.conf"), "ListenAddress 192.0.2.10:2200\n").unwrap();
+    let mut s = f.settings();
+    s.port = 2222;
+    let e = f.ssh.apply(s, None, "admin").unwrap_err();
+    assert!(matches!(&e, SshError::Invalid("port", m) if m.contains("ListenAddress 192.0.2.10:2200")), "{e}");
+    assert!(f.dropin().is_none());
+    let l = config::layout("ListenAddress [2001:db8::1]:22\nListenAddress 192.0.2.1\nListenAddress ::1\n", &|_| vec![], &|_| None);
+    assert_eq!(config::listen_ports(&l).iter().map(|x| x.2).collect::<Vec<_>>(), vec![22]);
+}
+
+#[test]
+fn homes_on_a_sleeping_disk_are_not_read_for_the_page() {
+    let f = Fx::new();
+    f.ssh.add_key("admin", ED2).unwrap();
+    let home = f.root.join("home/admin").display().to_string();
+    let ssh = Ssh::new(&f.root, f._dir.path().join("state"), f.fake.clone()).with_asleep(Arc::new(move |p: &str| p == home));
+    let a = ssh.accounts().into_iter().find(|a| a.name == "admin").unwrap();
+    assert!(a.keys_unread && a.keys == 0);
+    // a change's guard reads it anyway: password login off is allowed with that key
+    let mut s = ssh.state().settings;
+    s.password_auth = false;
+    assert!(ssh.apply(s, None, "admin").unwrap().is_some());
+}
+
+#[test]
+fn login_lines_name_the_real_address() {
+    // the user name is the client's: it cannot pass for the address
+    let e = logins::parse_line("1700000000.0 nas sshd-session[1]: Invalid user x from 192.0.2.66 port 1 from 198.51.100.7 port 4000").unwrap();
+    assert_eq!((e.user.as_str(), e.address.as_str()), ("x from 192.0.2.66 port 1", "198.51.100.7"));
+    // a day with more lines than are read says where its counts start
+    let line = "1700000000.0 nas sshd-session[1]: Failed password for admin from 198.51.100.7 port 4001 ssh2\n";
+    let many = format!("1600000000.5 nas sshd[1]: Server listening on 0.0.0.0 port 22.\n{}", line.repeat(logins::MAX_LINES));
+    assert_eq!(logins::summarize(&many).since_ms, Some(1_600_000_000_500));
+    assert_eq!(logins::summarize(line).since_ms, None);
+    assert!(logins::argv().contains(&format!("--lines={}", logins::MAX_LINES).as_str()));
 }

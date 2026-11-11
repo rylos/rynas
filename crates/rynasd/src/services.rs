@@ -1437,8 +1437,8 @@ async fn folders_list(
 }
 
 /// A disk under the filesystem holding `path` (the longest mount point containing it)
-/// sleeps: its files must not be read now.
-fn path_asleep(shares: &rynas_services::SharesDomain, path: &str) -> bool {
+/// sleeps: its files must not be read now (share sizes, the SSH page's key counts).
+pub fn path_asleep(shares: &rynas_services::SharesDomain, path: &str) -> bool {
     let mounts = rynas_storage::mounts::parse_mountinfo(&crate::places::mountinfo());
     mounts
         .iter()
