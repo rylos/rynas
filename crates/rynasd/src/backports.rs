@@ -311,7 +311,7 @@ async fn put_state(
 /// 0644 root file, written next to it then renamed.
 fn write_file(path: &Path, text: &str) -> std::io::Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d)?;
     }
@@ -323,6 +323,9 @@ fn write_file(path: &Path, text: &str) -> std::io::Result<()> {
         .mode(0o644)
         .custom_flags(libc::O_NOFOLLOW)
         .open(&tmp)?;
+    // readable like the rest of /etc: rynasd's UMask=0077 strips the mode given to open, and
+    // apt run by a normal user warns on a sources file it cannot read
+    f.set_permissions(std::fs::Permissions::from_mode(0o644))?;
     f.write_all(text.as_bytes())?;
     f.sync_all()?;
     std::fs::rename(&tmp, path)
