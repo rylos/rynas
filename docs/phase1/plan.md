@@ -1001,6 +1001,8 @@ schema 2 added the `code` and `body_format` columns.
 | `removable.unplugged` | `drive`, `device`, `mount_points` | {drive} was unplugged while mounted (warning; not after a safe removal) |
 | `removable.safe_to_remove` | `drive`, `device`, `method` (`power_off`/`eject`/`release`) | {drive} can be removed safely (info; setting `notify_safe_removal`) |
 | `removable.ntfs_read_only` | `volume`, `drive`, `mount_point` | {volume} mounted read-only (warning: Windows left the NTFS volume dirty or hibernated) |
+| `system.clock_unsynced` / `system.clock_synced` | `minutes` | The clock is not synchronized: automatic sync is on and no server answered for an hour (warning) / synchronized again (resolved; D-TIME) |
+| `system.clock_drift` / `system.clock_in_step` | `offset` | The clock is more than 1 s from the time server in two looks in a row (warning) / back below 0.5 s (resolved; D-TIME) |
 | `docker.unhealthy` / `docker.recovered` | `container`, `stack` | Container {container} is unhealthy / healthy again (`../phase2/docker-apps.md` §5.1) |
 | `docker.oom` | `container`, `stack` | Container {container} ran out of memory |
 | `docker.crash_loop` / `docker.crash_loop_over` | `container`, `stack`, `restarts`, `minutes` | Container {container} keeps restarting / stopped restarting |
