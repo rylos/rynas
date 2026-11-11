@@ -432,62 +432,11 @@ fn group_logins(events: &[SshLoginEvent]) -> Vec<LoginGroup> {
     groups
 }
 
-fn login_icon(k: SshLoginKind) -> &'static str {
-    if k == SshLoginKind::Accepted { icons::CIRCLE_CHECK } else { icons::CIRCLE_X }
-}
-
 fn logins() -> AnyView {
     let r = Remote::<SshLogins>::new(format!("{URL}/logins"));
-    let timeline = RwSignal::new(false);
     r.view(4, move || {
         let l = r.data.get().unwrap_or_default();
-        let total = l.events.len();
         let top = l.top_failed.iter().map(|(a, n)| format!("{a} ({n})")).collect::<Vec<_>>().join(", ");
-        let partial = (l.accepted + l.failed) as usize > total;
-        let list = if timeline.get() {
-            view! {
-                <ul class="plain-list ssh-timeline">
-                    {l.events.into_iter().map(|e| {
-                        let bad = e.kind != SshLoginKind::Accepted;
-                        view! {
-                            <li class="ssh-ev" class:bad=bad title=t(kind_key(e.kind))>
-                                <Icon icon=login_icon(e.kind) size=14 />
-                                <span class="ssh-ev-when muted mono">{crate::i18n::datetime(e.at_ms)}</span>
-                                <span class="ssh-ev-who">{e.user}</span>
-                                <span class="muted">{e.address}</span>
-                                {(!e.method.is_empty()).then(|| view! { <span class="muted">{e.method}</span> })}
-                            </li>
-                        }
-                    }).collect_view()}
-                </ul>
-            }
-            .into_any()
-        } else {
-            view! {
-                <ul class="plain-list ssh-events">
-                    {group_logins(&l.events).into_iter().map(|g| {
-                        let times = if g.count == 1 { t("ssh.logins_once").to_string() } else { tf("nt.times", &[("n", &g.count.to_string())]) };
-                        let mut sub = vec![times];
-                        if !g.method.is_empty() {
-                            sub.push(g.method.clone());
-                        }
-                        sub.push(tf("ssh.logins_last", &[("when", &crate::i18n::datetime(g.last_ms))]));
-                        let main = if g.kind == SshLoginKind::Accepted {
-                            format!("{} · {}", g.user, g.address)
-                        } else {
-                            format!("{} · {} — {}", g.user, g.address, t(kind_key(g.kind)))
-                        };
-                        view! {
-                            <li class="ssh-acct" class:bad=g.kind != SshLoginKind::Accepted>
-                                <Icon icon=login_icon(g.kind) size=16 />
-                                {ui::two_lines(ui::text(main), Some(sub.join(" · ")), "cell-sub muted small")}
-                            </li>
-                        }
-                    }).collect_view()}
-                </ul>
-            }
-            .into_any()
-        };
         view! {
             <div class="ssh-login-stats">
                 {ui::status(Tone::Ok, tf("ssh.logins_ok", &[("n", &l.accepted.to_string())]))}
@@ -495,16 +444,23 @@ fn logins() -> AnyView {
             </div>
             {(!top.is_empty()).then(|| view! { <p class="muted small">{tf("ssh.logins_top", &[("list", &top)])}</p> })}
             {l.since_ms.map(|at| view! { <p class="muted small">{tf("ssh.logins_since", &[("when", &crate::i18n::datetime(at))])}</p> })}
-            {(partial && total != 0).then(|| view! { <p class="muted small">{tf("ssh.logins_recent", &[("n", &total.to_string())])}</p> })}
-            {(total == 0).then(|| view! { <p class="muted small">{tr("ssh.logins_none")}</p> })}
-            {list}
+            <ul class="plain-list ssh-events">
+                {group_logins(&l.events).into_iter().map(|g| {
+                    let ok = g.kind == SshLoginKind::Accepted;
+                    let times = if g.count == 1 { t("ssh.logins_once").to_string() } else { tf("nt.times", &[("n", &g.count.to_string())]) };
+                    let method = if g.method.is_empty() { String::new() } else { format!(" · {}", g.method) };
+                    let sub = format!("{times}{method} · {}", tf("ssh.logins_last", &[("when", &crate::i18n::datetime(g.last_ms))]));
+                    let main = if ok { format!("{} · {}", g.user, g.address) } else { format!("{} · {} — {}", g.user, g.address, t(kind_key(g.kind))) };
+                    view! {
+                        <li class="ssh-acct ssh-login" class:bad=!ok>
+                            <Icon icon=if ok { icons::CIRCLE_CHECK } else { icons::CIRCLE_X } size=16 />
+                            {ui::two_lines(ui::text(main), Some(sub), "cell-sub muted small")}
+                        </li>
+                    }
+                }).collect_view()}
+            </ul>
             <div class="card-actions">
                 <button type="button" class="btn ghost sm" on:click=move |_| r.reload()><Icon icon=icons::REFRESH_CW size=14 />{tr("ssh.refresh")}</button>
-                {(total > 1).then(|| view! {
-                    <button type="button" class="btn ghost sm" aria-pressed=move || timeline.get().to_string() on:click=move |_| timeline.update(|a| *a = !*a)>
-                        {move || if timeline.get() { t("ssh.logins_grouped").to_string() } else { t("ssh.logins_timeline").to_string() }}
-                    </button>
-                })}
             </div>
         }
         .into_any()
