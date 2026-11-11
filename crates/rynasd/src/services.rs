@@ -1387,10 +1387,11 @@ async fn folders_list(
     let (s, owner) = (svc(&st)?, user(&h)?);
     Ok(Json(
         blocking(&s, move |s| {
-            // the homes folder counts as used, like a share
+            // the homes folder and rynas's own folders (Docker) count as used, like a share
             let mut paths: Vec<String> =
                 all_shares(s, &owner)?.into_iter().map(|x| x.path).collect();
             paths.extend(homes::homes_folders(s));
+            paths.extend(rynas_folders(s, &owner));
             let removed = s.shares.removed().list();
             let (snaps, _, _): (SnapshotsConfig, SnapshotsConfig, _) =
                 docs(&s.ops.config, &owner, SNAPSHOTS_KEY)?;
@@ -1520,6 +1521,15 @@ fn unshared_path(s: &Services, owner: &str, r: &FolderRef) -> Res<String> {
             format!("{path} holds the users' homes: it is not deleted"),
         ));
     }
+    if rynas_folders(s, owner)
+        .iter()
+        .any(|r| folders::is_within(r, &path))
+    {
+        return Err(conflict(
+            error_codes::CONFLICT,
+            format!("{path} holds Docker and the apps' data: it is not deleted"),
+        ));
+    }
     if let Some(sh) = all_shares(s, owner)?
         .into_iter()
         .find(|x| folders::is_within(&x.path, &path))
@@ -1530,6 +1540,26 @@ fn unshared_path(s: &Services, owner: &str, r: &FolderRef) -> Res<String> {
         ));
     }
     Ok(path)
+}
+
+/// Folders rynas itself keeps on the volumes, never "unshared" nor deletable from there:
+/// the Docker folder of the chosen volume (`/<vol>/docker`: engine, stacks, the apps' data)
+/// and the engine's data-root when daemon.json puts it on a volume.
+fn rynas_folders(s: &Services, owner: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let vols = s.shares.volumes();
+    let docker: Option<rynas_api_types::docker::DockerSettings> =
+        docs(&s.ops.config, owner, crate::docker::DOCKER_KEY).ok().and_then(|(_, cur, applied)| applied.or(Some(cur)));
+    if let Some(label) = docker.and_then(|d| d.volume)
+        && let Some((_, mnt)) = vols.iter().find(|(l, _)| *l == label)
+    {
+        out.push(format!("{}/docker", mnt.trim_end_matches('/')));
+    }
+    let daemon = std::fs::read_to_string(rynas_docker::engine::DAEMON_JSON).ok();
+    if let Some(dr) = rynas_docker::engine::data_root_of(daemon.as_deref()) {
+        out.push(dr.trim_end_matches('/').to_string());
+    }
+    out
 }
 
 fn folder_plan(s: &Services, owner: &str, r: &FolderRef) -> Res<(FolderDeletePlan, Vec<SnapshotSource>)> {
