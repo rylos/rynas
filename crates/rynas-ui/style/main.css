@@ -1200,6 +1200,8 @@ kbd {
 /* a long button label wraps below the text (right-aligned) instead of squeezing it */
 .link-card > .btn { margin-left: auto; }
 .link-card-text { flex: 1 1 160px; min-width: 0; display: flex; flex-direction: column; gap: var(--s-1); }
+/* System > Date and time: the NAS's clock, ticking */
+.time-now { margin: 0 0 var(--s-3); font-size: var(--fs-20); font-weight: 600; overflow-wrap: anywhere; }
 /* configuration pages: users, groups, shared folders, file services */
 .toolbar { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; margin-bottom: var(--s-3); }
 .toolbar .btn { margin-left: auto; }

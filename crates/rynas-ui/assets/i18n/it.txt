@@ -188,6 +188,49 @@ task.st.running	In corso
 task.st.queued	In coda
 task.config.apply	Applicazione configurazione
 task.zram.apply	Applicazione impostazioni memoria
+task.time.apply	Applicazione impostazioni data e ora
+task.time.set	Impostazione di data e ora
+task.time.sync	Sincronizzazione dell'orologio
+time.title	Data e ora
+time.subtitle	Fuso orario e sincronizzazione dell'orologio
+time.open_text	Fuso orario, server dell'ora e stato dell'orologio.
+time.settings	Impostazioni
+time.zone_search	Cerca una città o regione
+time.zone_help	Le app in esecuzione mantengono il fuso precedente fino al riavvio.
+time.sync	Sincronizza automaticamente
+time.sync_help	Certificati, codici a due fattori e pianificazioni richiedono l'ora esatta.
+time.servers	Server dell'ora
+time.servers_help	Uno per riga, al massimo 8. Vuoto: i server predefiniti del sistema.
+time.defaults	Server predefiniti: {list}.
+time.dhcp	Da DHCP, usati anch'essi: {list}.
+time.also_own	Restano in uso anche i server della configurazione del servizio dell'ora.
+time.will_install	Il servizio dell'ora verrà installato dall'archivio della distribuzione.
+time.apply	Applica
+time.saved	Impostazioni di data e ora applicate
+time.status	Orologio
+time.state	Stato
+time.st_off	Manuale
+time.st_synced	Sincronizzato
+time.st_unsynced	Non sincronizzato
+time.source	Server
+time.offset	Scarto
+time.last	Ultima sincronizzazione
+time.poll	Controllo ogni
+time.sync_now	Sincronizza ora
+time.synced	L'orologio è sincronizzato
+time.manual	Impostazione manuale
+time.manual_label	Data e ora (fuso orario del sistema)
+time.browser	Usa l'ora di questo browser
+time.set	Imposta
+time.set_done	Data e ora impostate
+time.local_rtc	L'orologio hardware è in ora locale: i cambi dell'ora legale possono spostarlo di un'ora.
+time.rtc_utc	Tienilo in UTC
+nev.system.clock_unsynced.title	L'orologio non è sincronizzato
+nev.system.clock_unsynced.body	Nessun server dell'ora risponde da {minutes} minuti. Certificati, codici a due fattori, pianificazioni e snapshot richiedono l'ora esatta: controlla la rete e i server dell'ora.
+nev.system.clock_synced.title	L'orologio è di nuovo sincronizzato
+nev.system.clock_drift.title	L'orologio sta andando alla deriva
+nev.system.clock_drift.body	L'orologio è a {offset} dal server dell'ora e non recupera. Controlla i server dell'ora.
+nev.system.clock_in_step.title	L'orologio è di nuovo allineato
 mem.title	Memoria
 mem.subtitle	Swap compresso in RAM
 mem.open_text	zram: swap compresso in RAM, con i valori consigliati per questo sistema.

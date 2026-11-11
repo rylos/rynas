@@ -22,6 +22,7 @@ pub mod snapshots;
 pub mod ssh;
 pub mod storage;
 pub mod system;
+pub mod time;
 pub mod updates;
 pub mod user_homes;
 pub mod user_ids;
