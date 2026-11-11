@@ -616,7 +616,8 @@ upsw.need_newer	Nessun driver ha letto questo UPS. La sua impostazione nota rich
 upsw.need_newer_update	Nessun driver ha letto questo UPS. La sua impostazione nota richiede NUT {need} o successivo e questo NAS ha NUT {have}. rynas può aggiornare NUT alla {v} ({source}), poi rilevi di nuovo.
 upsw.need_newer_files	Nessun driver ha letto questo UPS. La sua impostazione nota richiede NUT {need} o successivo e questo NAS ha NUT {have}. rynas ha NUT {v} per questo sistema, allegato alla release di rynas: copia i suoi pacchetti (nut-server, nut-client, libupsclient7, libnutscan4) in {dir}, poi rileva di nuovo per aggiornare.
 upsw.nut_src_apt	dalle sorgenti dei pacchetti di questo sistema
-upsw.nut_src_rynas	la build di rynas del pacchetto NUT di Debian
+upsw.nut_src_backports	dai backports di Debian configurati su questo sistema
+upsw.nut_src_rynas	la build di rynas del pacchetto NUT di Debian, scaricata dalla release di rynas se non è già su questo NAS
 upsw.update_nut	Aggiorna NUT alla {v}
 upsw.updating	apt installa i nuovi pacchetti di NUT; i tuoi file di configurazione di NUT restano.
 upsw.updated	NUT {v} è installato: rileva di nuovo l'UPS.

@@ -441,9 +441,12 @@ pub struct UpsNutUpdate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UpsNutSource {
-    /// An apt source of the system has a new enough NUT.
+    /// An apt source of the system has a new enough NUT (its candidate).
     Apt,
-    /// rynas's NUT build for this Debian release, from the local package folder.
+    /// A `<codename>-backports` source configured on the system has it (`apt -t`).
+    Backports,
+    /// rynas's NUT build for this Debian release (the local package folder, else downloaded
+    /// from its fixed release, checked against the pinned SHA-256).
     Rynas,
 }
 

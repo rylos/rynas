@@ -40,11 +40,13 @@ NUT newer than Debian's (rynas NUT packages)
 Install NUT (Hardware > UPS) installs Debian's nut. When UPS setup finds a UPS
 that needs a newer NUT than the system's (USB 0925:1234 needs NUT 2.8.5; Debian
 13 has 2.8.1), it offers Update NUT: from an apt source with a new enough NUT,
-otherwise from rynas's rebuild of Debian's NUT for Debian 13 (packages
-nut-server, nut-client, libupsclient7 and libnutscan4, version
-2.8.5-1~rynas13+1, attached to the rynas release), copied to
-/var/lib/rynas/packages/ (rynasd installs them only when every SHA-256 is one
-rynas knows). A Debian NUT package of the same or a newer version replaces them.
+then from a trixie-backports source already configured (System > Updates has a
+switch for it), otherwise from rynas's rebuild of Debian's NUT for Debian 13
+(packages nut-server, nut-client, libupsclient7 and libnutscan4, version
+2.8.5-0~rynas13+1, attached to the release nut-2.8.5-0rynas1): rynasd uses
+them from /var/lib/rynas/packages/ when they are there, otherwise downloads
+them from that release, and installs them only when every SHA-256 is one rynas
+knows. Any Debian build of NUT 2.8.5 (backports included) replaces them.
 
 Backup of the configuration
 ---------------------------

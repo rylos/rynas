@@ -509,6 +509,7 @@ fn results(
         let dir = update.as_ref().map(|u| u.dir.clone()).unwrap_or_default();
         let source = match update.as_ref().and_then(|u| u.source) {
             Some(UpsNutSource::Apt) => t("upsw.nut_src_apt"),
+            Some(UpsNutSource::Backports) => t("upsw.nut_src_backports"),
             Some(UpsNutSource::Rynas) => t("upsw.nut_src_rynas"),
             None => "",
         };
@@ -775,7 +776,7 @@ mod tests {
         }
         assert!(i18n::text_in(i18n::Lang::En, "upsw.need_newer_files").unwrap().contains("{dir}"));
         assert!(i18n::text_in(i18n::Lang::It, "upsw.need_newer_update").unwrap().contains("{source}"));
-        for k in ["upsw.update_nut", "upsw.updated", "upsw.updating", "upsw.driver_output", "upsw.nut_src_apt", "upsw.nut_src_rynas", "task.ups.update-nut"] {
+        for k in ["upsw.update_nut", "upsw.updated", "upsw.updating", "upsw.driver_output", "upsw.nut_src_apt", "upsw.nut_src_backports", "upsw.nut_src_rynas", "task.ups.update-nut"] {
             assert!(i18n::try_t(k).is_some(), "{k}");
         }
         let cand = |state| UpsCandidate {
@@ -803,7 +804,8 @@ mod tests {
             for (k, en, _) in i18n::entries().into_iter().filter(|e| e.0.starts_with("upsw.")) {
                 let s = i18n::text_in(lang, k).unwrap_or(en);
                 assert!(!s.to_ascii_lowercase().contains("synodeb"), "{k}: {s}");
-                assert!(!s.to_ascii_lowercase().contains("backports"), "{k}: {s}");
+                // backports are named only as the source rynas found configured
+                assert!(k == "upsw.nut_src_backports" || !s.to_ascii_lowercase().contains("backports"), "{k}: {s}");
             }
         }
     }

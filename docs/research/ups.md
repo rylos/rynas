@@ -386,20 +386,37 @@ Picked (D-UPS-NUT):
 - **Stay on the distribution's NUT.** "Install NUT" installs Debian's package. The update is
   offered only when the wizard's detection skipped a known setting for its NUT version
   (`UpsDeviceState.nut_update`), never with a module's UPS layer (it brings its own NUT).
-- **Sources in order**: an apt source of the system whose `nut-server` candidate is new
-  enough (a future trixie-backports, a vendor repository: synodeb systems run NUT through
-  their layer and never see rynas's packages), then **rynas's rebuild**: `packaging/nut/`
-  builds Debian's own 2.8.5-1 source (pinned by the SHA-256 of its `.dsc`) on trixie in the
-  pinned builder image with build dependencies from snapshot.debian.org, version
-  `2.8.5-1~rynas13+1` (below Debian's `2.8.5-1`, so a Debian package replaces it), Debian's
-  `nodoc` profile (no manual pages: the PDF/HTML manuals need a TeX toolchain), reproducible
-  (two builds give the same files). Only `nut-server`, `nut-client`, `libupsclient7` and
-  `libnutscan4` (the metapackage `nut` stays Debian's: unversioned dependencies). The
-  packages are attached to the rynas release; the admin copies them to
-  `/var/lib/rynas/packages` and rynasd installs them only when every file of
-  `ups_update::PINNED_DEBS` is there with its SHA-256 (the same delivery as the
-  deduplication engine). Debian 13 on x86-64 only; elsewhere the note just says a newer NUT
-  is needed.
+- **Sources in order** (synodeb systems run NUT through their layer and never get here):
+  1. the apt candidate of `nut-server` when new enough (a vendor repository);
+  2. a `<codename>-backports` suite **already configured** (by the admin, or rynas's switch
+     in System › Updates): Debian's backports are `NotAutomatic` (pin 100), never the
+     candidate, so rynasd reads the version table of `apt-cache policy nut-server` and
+     installs `-t trixie-backports nut-server nut-client` (the libraries follow from the
+     same suite). This is the long-term path: once Debian uploads NUT ≥ 2.8.5 to
+     trixie-backports, apt takes over and rynas's build is no longer used;
+  3. **rynas's rebuild**, built once: `packaging/nut/` builds Debian's own 2.8.5-1 source
+     (pinned by the SHA-256 of its `.dsc`) on trixie in the pinned builder image with build
+     dependencies from snapshot.debian.org, version `2.8.5-0~rynas13+1` (above trixie's
+     2.8.1-5, below every Debian build of 2.8.5-1 such as `2.8.5-1~bpo13+1` and
+     `2.8.5-1~synodeb13+1`, so any of them replaces it; checked with
+     `dpkg --compare-versions` in build.sh and test.sh), Debian's `nodoc` profile (no manual
+     pages: the PDF/HTML manuals need a TeX toolchain), reproducible (two builds give the
+     same files). Only `nut-server`, `nut-client`, `libupsclient7` and `libnutscan4` (the
+     metapackage `nut` stays Debian's: unversioned dependencies). The packages are attached
+     to **one fixed GitHub release**, tag `nut-2.8.5-0rynas1` (not to every rynas release);
+     rynasd uses the files in `/var/lib/rynas/packages` when the admin copied them there,
+     otherwise downloads them from
+     `https://github.com/rylos/rynas/releases/download/nut-2.8.5-0rynas1/<asset>` (asset
+     names: `~` and `+` as dots, as GitHub stores them), each into a `.part` file with a
+     16 MiB cap, kept (rename) only with its SHA-256 from `ups_update::PINNED_DEBS`; a
+     download error says so and points to the local copy. Debian 13 on x86-64 only;
+     elsewhere the note just says a newer NUT is needed.
+- **Publishing that release (one-off, Marco)**: `packaging/nut/build.sh`, then
+  `packaging/nut/test.sh`, then `gh release create nut-2.8.5-0rynas1 --repo rylos/rynas
+  --latest=false --title "NUT 2.8.5 for Debian 13 (rynas build)" --notes "…"
+  target/nut/release/*.deb target/nut/release/SHA256SUMS target/nut/source/*`; check that
+  the asset names on the release page are those of `target/nut/release/SHA256SUMS`. A new
+  NUT version (or a packaging fix) means a new tag, new `PINNED_DEBS` and `RELEASE_TAG`.
 - **The install**: apt's simulation first (`--no-remove`: a system with `nut-snmp`, `nut-xml`…
   of the old version is refused before anything runs, since those packages depend on the
   exact `nut-server` version), then `apt-get install --no-remove` in the `rynas-apt`
