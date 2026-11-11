@@ -153,6 +153,28 @@ impl Default for AutoUpdates {
     }
 }
 
+/// `GET /updates/backports`: Debian backports of this release (`<codename>-backports`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BackportsState {
+    /// rynas can switch them here: plain Debian with a codename, no module system layer.
+    pub available: bool,
+    /// The release codename (`trixie`).
+    pub codename: Option<String>,
+    /// Some configured apt source has `<codename>-backports`.
+    pub enabled: bool,
+    /// rynas's own file (`/etc/apt/sources.list.d/rynas-backports.sources`) is there.
+    pub by_rynas: bool,
+    /// Another source of the system has it (shown read-only: rynas never touches it).
+    pub by_system: bool,
+}
+
+/// `PUT /updates/backports` → 202 `TaskStarted` (task `updates.backports`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct BackportsRequest {
+    pub enabled: bool,
+}
+
 /// `GET/PUT /updates/auto`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct AutoUpdatesState {

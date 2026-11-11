@@ -80,6 +80,9 @@ pub struct Updates {
     kernel_lock: tokio::sync::Mutex<()>,
     /// A hardware module's boot layer.
     boot: Option<Arc<dyn rynas_module::BootLayer>>,
+    /// A hardware module runs a system layer (UPS or boot): it manages its apt sources
+    /// itself, so the Debian backports switch is not offered ([`crate::backports`]).
+    system_layer: bool,
 }
 
 pub type UpdState = Option<Arc<Updates>>;
@@ -164,7 +167,18 @@ impl Updates {
             kernel: std::sync::Mutex::new(None),
             kernel_lock: tokio::sync::Mutex::new(()),
             boot: None,
+            system_layer: false,
         }
+    }
+
+    /// A hardware module's system layer is present (no backports switch then).
+    pub fn with_system_layer(mut self, on: bool) -> Self {
+        self.system_layer = on;
+        self
+    }
+
+    pub fn system_layer(&self) -> bool {
+        self.system_layer
     }
 
     /// The boot layer of a hardware module (its boot device on the kernel card).
@@ -341,7 +355,7 @@ impl Updates {
 
     /// Starts an `updates.*` task, refusing a second one (409 `busy`). When it ends the cache
     /// is refreshed and the notification re-evaluated.
-    fn spawn<F, Fut>(self: &Arc<Self>, kind: &str, who: &str, job: F) -> Res<Response>
+    pub(crate) fn spawn<F, Fut>(self: &Arc<Self>, kind: &str, who: &str, job: F) -> Res<Response>
     where
         F: FnOnce(Arc<Updates>, TaskCtx) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<(), String>> + Send + 'static,
@@ -368,7 +382,7 @@ impl Updates {
     }
 
     /// Runs `cmd` in the task, or only logs it on a dry system.
-    async fn run(&self, ctx: &TaskCtx, cmd: Cmd) -> Result<String, String> {
+    pub(crate) async fn run(&self, ctx: &TaskCtx, cmd: Cmd) -> Result<String, String> {
         if self.dry {
             ctx.log(&format!("dry system, not run: {}", cmd.display()));
             tokio::time::sleep(Duration::from_millis(600)).await;
@@ -473,7 +487,8 @@ pub fn router(st: UpdState) -> Router {
         .route("/v1/updates/packages/{name}/changelog", post(changelog))
         .route("/v1/updates/auto", get(auto_get).put(auto_put))
         .route("/v1/updates/kernel", get(kernel_get))
-        .with_state(st)
+        .with_state(st.clone())
+        .merge(crate::backports::router(st))
 }
 
 async fn status_get(State(st): State<UpdState>) -> Res<Json<UpdatesStatus>> {

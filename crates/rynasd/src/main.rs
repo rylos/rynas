@@ -998,7 +998,8 @@ fn main() -> std::io::Result<()> {
                 args.dry_system,
                 config_root(&args),
             )
-            .with_boot(opened.modules.boot()),
+            .with_boot(opened.modules.boot())
+            .with_system_layer(opened.modules.boot().is_some() || opened.modules.ups().is_some()),
         );
         rynasd::updates::spawn_daily(updates.clone());
         state.updates = Some(updates.clone());

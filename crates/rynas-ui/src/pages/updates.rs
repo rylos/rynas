@@ -26,6 +26,7 @@ use crate::ui::{self, cell, confirm, row, status, table, text, Confirm, DlgKind,
 const URL: &str = "/api/v1/updates";
 const AUTO: &str = "/api/v1/updates/auto";
 const KERNEL: &str = "/api/v1/updates/kernel";
+const BACKPORTS: &str = "/api/v1/updates/backports";
 const MODES: &[(&str, &str)] = &[("off", "upd.mode_off"), ("security", "upd.mode_security"), ("all", "upd.mode_all")];
 
 /// What the confirmation dialog asks.
@@ -44,6 +45,7 @@ pub fn Updates() -> impl IntoView {
     let st = Remote::<UpdatesStatus>::new(URL);
     let auto = Remote::<AutoUpdatesState>::with_config(AUTO);
     let kernel = Remote::<KernelStatus>::new(KERNEL);
+    let backports = Remote::<BackportsState>::new(BACKPORTS);
     #[cfg(feature = "demo")]
     demo::fill(st, auto, kernel);
     let selected = RwSignal::new(Vec::<String>::new());
@@ -80,6 +82,7 @@ pub fn Updates() -> impl IntoView {
                 {summary_card(st, selected, ask, busy)}
                 {packages_card(st, selected, busy, start)}
                 {auto_card(auto)}
+                {backports_card(backports, run, busy)}
                 {kernel_card(kernel)}
             </div>
             {move || ask.get().map(|a| ask_dialog(a, ask, start))}
@@ -348,6 +351,74 @@ fn run_dialog(title: String, id: String, run: RwSignal<Run>, st: Remote<UpdatesS
     }
     .into_any();
     ui::dialog(DlgKind::Wide, Signal::stored(title), close, body, None)
+}
+
+// ------------------------------------------------------------------ Debian backports
+
+/// The "Debian backports" switch (`/api/v1/updates/backports`): rynas's own sources file,
+/// or "configured by the system" read-only; hidden where rynas cannot switch it.
+fn backports_card(bp: Remote<BackportsState>, run: RwSignal<Run>, busy: Signal<bool>) -> AnyView {
+    let saving = RwSignal::new(false);
+    let error = RwSignal::new(None::<String>);
+    // read again when the task dialog closes
+    Effect::new(move |prev: Option<bool>| {
+        let open = run.with(Option::is_some);
+        if prev == Some(true) && !open {
+            bp.reload();
+        }
+        open
+    });
+    let set = Callback::new(move |on: bool| {
+        saving.set(true);
+        error.set(None);
+        spawn_local(async move {
+            let r = api::put::<_, rynas_api_types::TaskStarted>(BACKPORTS, &BackportsRequest { enabled: on }).await;
+            let _ = saving.try_set(false);
+            match r {
+                Ok(t) => run.set(Some((t_backports(), t.task_id))),
+                Err(e) => {
+                    let _ = error.try_set(Some(e.text()));
+                    bp.reload();
+                }
+            }
+        });
+    });
+    let body = move || {
+        if let Some(v) = bp.gate(2) {
+            return v;
+        }
+        let s = bp.data.get().unwrap_or_default();
+        let by_system = s.by_system;
+        let value = Signal::derive(move || bp.data.with(|s| s.as_ref().is_some_and(|s| s.enabled)));
+        view! {
+            <p class="muted small">{t("upd.bp_help")}</p>
+            {if by_system {
+                view! { <dl class="kvs"><div class="kv"><dt>{tr("upd.bp")}</dt><dd>{status(Tone::Ok, t("upd.bp_system").to_string())}</dd></div></dl> }.into_any()
+            } else {
+                view! {
+                    <fieldset class="sf-group" disabled=move || busy.get() || saving.get()>
+                        {switch("upd.bp", None, value, set)}
+                    </fieldset>
+                }
+                .into_any()
+            }}
+            {form_error(error)}
+        }
+        .into_any()
+    };
+    view! {
+        {move || bp.data.with(|s| s.as_ref().is_none_or(|s| s.available)).then(|| view! {
+            <section class="card widget w-6">
+                <WidgetHead icon=icons::BOX title="upd.bp_title" />
+                {body}
+            </section>
+        })}
+    }
+    .into_any()
+}
+
+fn t_backports() -> String {
+    t("task.updates.backports").to_string()
 }
 
 // ------------------------------------------------------------------ automatic updates

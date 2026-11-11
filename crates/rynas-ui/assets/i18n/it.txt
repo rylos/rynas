@@ -3201,6 +3201,7 @@ task.tailscale.logout	Uscita da Tailscale
 task.tailscale.options	Opzioni Tailscale
 task.tailscale.revert	Ripristino opzioni Tailscale
 task.updates.check	Controllo aggiornamenti
+task.updates.backports	Impostazione dei backports di Debian
 task.updates.install	Installazione aggiornamenti
 task.updates.autoremove	Rimozione pacchetti inutilizzati
 task.updates.changelog	Changelog del pacchetto
@@ -3249,6 +3250,10 @@ upd.autoremove_text	apt autoremove rimuove i pacchetti da cui non dipende più n
 upd.autoremove_warn	Controlla l'elenco: può includere il kernel precedente o pacchetti che servono all'avvio del sistema.
 upd.remove	Rimuovi
 upd.auto	Aggiornamenti automatici
+upd.bp_title	Backports di Debian
+upd.bp	Usa i backports di Debian
+upd.bp_help	I backports sono pacchetti più recenti ricompilati per questa versione di Debian. Attivandoli non viene installato né aggiornato nulla da lì se non lo si chiede (priorità apt 100). rynas li usa per NUT quando un UPS ne richiede uno più recente.
+upd.bp_system	Configurati dal sistema
 upd.no_unattended	unattended-upgrades non è installato: gli aggiornamenti automatici non verranno eseguiti.
 upd.mode	Installa automaticamente
 upd.mode_help	Gli elenchi dei pacchetti vengono aggiornati ogni giorno in ogni modalità, per la notifica. I pacchetti non vengono mai rimossi automaticamente.

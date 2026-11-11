@@ -3618,6 +3618,7 @@ dict! { BLOB, LENS, IT;
     "task.tailscale.revert" => "Tailscale options restored", "Ripristino opzioni Tailscale";
     // ---- System › Updates (upd.*) and its task names
     "task.updates.check" => "Check for updates", "Controllo aggiornamenti";
+    "task.updates.backports" => "Debian backports setting", "Impostazione dei backports di Debian";
     "task.updates.install" => "Install updates", "Installazione aggiornamenti";
     "task.updates.autoremove" => "Remove unused packages", "Rimozione pacchetti inutilizzati";
     "task.updates.changelog" => "Package changelog", "Changelog del pacchetto";
@@ -3666,6 +3667,10 @@ dict! { BLOB, LENS, IT;
     "upd.autoremove_warn" => "Check the list: it may include the previous kernel or packages the system needs to boot.", "Controlla l'elenco: può includere il kernel precedente o pacchetti che servono all'avvio del sistema.";
     "upd.remove" => "Remove", "Rimuovi";
     "upd.auto" => "Automatic updates", "Aggiornamenti automatici";
+    "upd.bp_title" => "Debian backports", "Backports di Debian";
+    "upd.bp" => "Use Debian backports", "Usa i backports di Debian";
+    "upd.bp_help" => "Backports are newer packages rebuilt for this Debian release. With them on, nothing is installed or upgraded from them unless asked (apt priority 100). rynas uses them for NUT when a UPS needs a newer one.", "I backports sono pacchetti più recenti ricompilati per questa versione di Debian. Attivandoli non viene installato né aggiornato nulla da lì se non lo si chiede (priorità apt 100). rynas li usa per NUT quando un UPS ne richiede uno più recente.";
+    "upd.bp_system" => "Configured by the system", "Configurati dal sistema";
     "upd.no_unattended" => "unattended-upgrades is not installed: automatic updates will not run.", "unattended-upgrades non è installato: gli aggiornamenti automatici non verranno eseguiti.";
     "upd.mode" => "Install automatically", "Installa automaticamente";
     "upd.mode_help" => "Package lists are refreshed daily in every mode, for the notification. Packages are never removed automatically.", "Gli elenchi dei pacchetti vengono aggiornati ogni giorno in ogni modalità, per la notifica. I pacchetti non vengono mai rimossi automaticamente.";
