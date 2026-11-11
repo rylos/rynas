@@ -88,7 +88,7 @@ fn run(pcs: Pcs, (method, url, body): (&'static str, String, Option<String>), ok
     error.set(None);
     spawn_local(async move {
         let started = match method {
-            "PUT" => api::put::<_, rynas_api_types::TaskStarted>(&url, &serde_json::from_str::<serde_json::Value>(body.as_deref().unwrap_or("{}")).unwrap_or_default()).await.map(|t| t.task_id),
+            "PUT" => api::put::<_, rynas_api_types::TaskStarted>(&url, &crate::api::decode::<serde_json::Value>(body.as_deref().unwrap_or("{}")).unwrap_or_default()).await.map(|t| t.task_id),
             "DELETE" => api::delete::<rynas_api_types::TaskStarted>(&url).await.map(|t| t.task_id),
             _ => api::start_task(&url, body).await,
         };

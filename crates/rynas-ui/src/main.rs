@@ -14,6 +14,7 @@ mod files_check;
 mod form;
 mod i18n;
 mod icons;
+mod json;
 mod layout;
 mod live;
 mod markdown;

@@ -81,13 +81,13 @@ fn same(a: &DockerStatus, b: &DockerStatus) -> bool {
 /// The one reader of `DockerStatus` (kept out of line: one copy of the deserializer).
 #[inline(never)]
 fn parse_status(text: &str) -> Option<DockerStatus> {
-    serde_json::from_str(text).ok()
+    crate::api::decode(text).ok()
 }
 
 /// A `docker.stats` event (one copy of the deserializer).
 #[inline(never)]
 pub fn parse_stats(text: &str) -> Option<Stats> {
-    serde_json::from_str(text).ok()
+    crate::api::decode(text).ok()
 }
 
 /// Wait after a change before reading a list again (a compose up sends several hints).

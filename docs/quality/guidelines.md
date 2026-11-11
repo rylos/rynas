@@ -320,6 +320,15 @@ The wasm budget includes the default features of the release build. Track sizes 
 idle main-thread work, the Files page, per endpoint; CPU 4× and 6× + network throttling, cold and warm);
 a change that claims speed shows its numbers with `--compare`.
 
+How the wasm is built (A/B measured 2026-11-11 on the same code, brotli -q 11): LLVM `opt-level = "z"`
+for the UI crate and its dependencies (profile `wasm-release`; "s" for the UI crate gave +16 %), then
+`wasm-opt -O2 --low-memory-unused` (`index.html`). `-Oz` was the largest after brotli (its shrinking
+passes leave less for the compressor): `-O2` is 1–2 % smaller and runs the optimizations meant for
+speed. `--low-memory-unused` is safe because rustc lays the stack out first (stack pointer and
+data at 1 MiB): the low KiB is reached only by a stack overflow. JSON goes through `api::decode`
+only (never `serde_json::from_str` in the UI): one reader frame for every type, and structs read
+as objects only (`json::Objects`), which drops the array path serde derives for each struct.
+
 Only the English texts are compiled into the wasm (2026-11-07): the Italian column of the
 dictionaries is `crates/rynas-ui/assets/i18n/it.txt` (served as `/i18n/it.txt`, `key<TAB>text` lines,
 about 44 KiB brotli; a key the file lacks stays English), written by the test `i18n::tests::italian_file_is_current` (after a text change it fails

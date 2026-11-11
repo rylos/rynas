@@ -119,7 +119,7 @@ impl Trial {
 
     pub fn init(self, net: Net) {
         let tl = self;
-        let saved: Option<Saved> = store_get(STORE_KEY).and_then(|s| serde_json::from_str(&s).ok());
+        let saved: Option<Saved> = store_get(STORE_KEY).and_then(|s| crate::api::decode(&s).ok());
         let token = token_from_fragment().or_else(|| saved.as_ref().and_then(|s| s.s.token.clone())).or_else(|| store_get(TOKEN_KEY));
         tl.token.set(token);
         if let Some(s) = saved {

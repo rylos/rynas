@@ -269,7 +269,7 @@ pub fn diagnostics_panel(net: Net) -> AnyView {
             }),
         }
         .unwrap_or_default();
-        let value: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+        let value: Value = crate::api::decode(&body).unwrap_or(Value::Null);
         spawn_local(async move {
             let r = api::post::<_, DiagnosticResult>(&format!("/api/v1/network/diagnostics/{which}"), Some(&value)).await;
             busy.set(false);

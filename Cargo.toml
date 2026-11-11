@@ -132,12 +132,13 @@ strip = true
 # its CPU in the signature's polyval/ghash.
 
 # The wasm UI only (`trunk build --release` builds it with this profile: `data-cargo-profile-release` in crates/rynas-ui/index.html): its
-# download size is what the user waits for.
+# download size is what the user waits for. Dependencies at "z" too (2026-11-11: -11 KB brotli
+# against "s"; the UI's time goes to layout, paint and the network, not to Rust code).
 [profile.wasm-release]
 inherits = "release"
 opt-level = "z"
 [profile.wasm-release.package."*"]
-opt-level = "s"
+opt-level = "z"
 [profile.wasm-release.package.rynas-ui]
 opt-level = "z"
 

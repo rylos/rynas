@@ -290,7 +290,7 @@ impl<T: serde::de::DeserializeOwned + Send + Sync + 'static> Remote<T> {
         fetch_text(
             self.src,
             err,
-            Callback::new(move |text: String| match serde_json::from_str::<T>(&text) {
+            Callback::new(move |text: String| match crate::api::decode::<T>(&text) {
                 Ok(v) => {
                     let _ = data.try_set(Some(v));
                 }

@@ -236,7 +236,7 @@ async fn send(method: &str, url: &str, body: Option<String>) -> Result<Response,
     }
     let status = resp.status();
     let retry_after = resp.headers().get("Retry-After").ok().flatten().and_then(|v| v.trim().parse().ok());
-    let err: WireError = text(&resp).await.and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    let err: WireError = text(&resp).await.and_then(|t| decode(&t).ok()).unwrap_or_default();
     let login_answer = matches!(
         err.code.as_str(),
         error_codes::INVALID_CREDENTIALS | error_codes::TOTP_REQUIRED | error_codes::INVALID_TOTP
@@ -247,9 +247,36 @@ async fn send(method: &str, url: &str, body: Option<String>) -> Result<Response,
     Err(ApiErr::Http { status, code: err.code, retry_after, message: err.message, field: err.field })
 }
 
+/// A JSON text that does not read as the expected type (the reason is not needed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BadJson;
+
+/// The one JSON reader of the interface (answers, events, saved state), instead of
+/// `serde_json::from_str`.
+///
+/// Only `T::deserialize` is generic; the reader around it (the deserializer, the check of what
+/// follows the value, the error) is one function. With `from_str::<T>` that frame was a copy per
+/// type in every caller: ~100 copies (measured 2026-11-11, see the commit).
+pub fn decode<T: DeserializeOwned>(text: &str) -> Result<T, BadJson> {
+    let mut out = None;
+    read_json(text, &mut |de| {
+        out = Some(T::deserialize(crate::json::Objects(de))?);
+        Ok(())
+    })?;
+    out.ok_or(BadJson)
+}
+
+type JsonReader<'a> = serde_json::Deserializer<serde_json::de::StrRead<'a>>;
+
+#[inline(never)]
+fn read_json(text: &str, value: &mut dyn FnMut(&mut JsonReader<'_>) -> serde_json::Result<()>) -> Result<(), BadJson> {
+    let mut de = serde_json::Deserializer::from_str(text);
+    value(&mut de).and_then(|()| de.end()).map_err(|_| BadJson)
+}
+
 async fn json<T: DeserializeOwned>(resp: Response) -> Result<T, ApiErr> {
     let t = text(&resp).await.ok_or(ApiErr::Decode)?;
-    serde_json::from_str(&t).map_err(|_| ApiErr::Decode)
+    decode(&t).map_err(|_| ApiErr::Decode)
 }
 
 pub async fn get<T: DeserializeOwned>(url: &str) -> Result<T, ApiErr> {

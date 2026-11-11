@@ -385,7 +385,7 @@ impl Live {
         };
         let on_sample = Closure::<dyn Fn(MessageEvent)>::new(move |ev: MessageEvent| {
             if let Some(txt) = ev.data().as_string()
-                && let Ok(s) = serde_json::from_str::<MetricsSample>(&txt)
+                && let Ok(s) = crate::api::decode::<MetricsSample>(&txt)
             {
                 self.push(s);
             }
@@ -393,7 +393,7 @@ impl Live {
         let _ = es.add_event_listener_with_callback("metrics.sample", on_sample.as_ref().unchecked_ref());
         let on_hardware = Closure::<dyn Fn(MessageEvent)>::new(move |ev: MessageEvent| {
             if let Some(txt) = ev.data().as_string()
-                && let Ok(h) = serde_json::from_str::<HardwareStatus>(&txt)
+                && let Ok(h) = crate::api::decode::<HardwareStatus>(&txt)
             {
                 if self.hardware_err.with_untracked(Option::is_some) {
                     self.hardware_err.set(None);
@@ -406,7 +406,7 @@ impl Live {
         let _ = es.add_event_listener_with_callback("hardware.status", on_hardware.as_ref().unchecked_ref());
         let on_ups = Closure::<dyn Fn(MessageEvent)>::new(move |ev: MessageEvent| {
             if let Some(txt) = ev.data().as_string()
-                && let Ok(u) = serde_json::from_str::<rynas_api_types::ups::UpsStatus>(&txt)
+                && let Ok(u) = crate::api::decode::<rynas_api_types::ups::UpsStatus>(&txt)
                 && self.ups.with_untracked(|cur| cur.as_ref() != Some(&u))
             {
                 self.ups.set(Some(u));
@@ -415,7 +415,7 @@ impl Live {
         let _ = es.add_event_listener_with_callback("ups.status", on_ups.as_ref().unchecked_ref());
         let on_removable = Closure::<dyn Fn(MessageEvent)>::new(move |ev: MessageEvent| {
             if let Some(txt) = ev.data().as_string()
-                && let Ok(r) = serde_json::from_str::<rynas_api_types::removable::RemovableState>(&txt)
+                && let Ok(r) = crate::api::decode::<rynas_api_types::removable::RemovableState>(&txt)
             {
                 self.set_removable(r);
             }
@@ -423,7 +423,7 @@ impl Live {
         let _ = es.add_event_listener_with_callback("removable.state", on_removable.as_ref().unchecked_ref());
         let on_task = Closure::<dyn Fn(MessageEvent)>::new(move |ev: MessageEvent| {
             if let Some(txt) = ev.data().as_string()
-                && let Ok(e) = serde_json::from_str::<TaskEvent>(&txt)
+                && let Ok(e) = crate::api::decode::<TaskEvent>(&txt)
             {
                 crate::tasks::tasks().on_event(e);
             }
@@ -433,7 +433,7 @@ impl Live {
         }
         let on_notif = Closure::<dyn Fn(MessageEvent)>::new(move |ev: MessageEvent| {
             if let Some(txt) = ev.data().as_string()
-                && let Ok(e) = serde_json::from_str::<rynas_api_types::notify::NotificationEvent>(&txt)
+                && let Ok(e) = crate::api::decode::<rynas_api_types::notify::NotificationEvent>(&txt)
                 && let Some(n) = crate::notify::server()
             {
                 n.on_event(e);

@@ -274,7 +274,7 @@ fn logs_drawer(c: ContainerSummary, close: Callback<()>) -> AnyView {
         };
         let on_log = Closure::<dyn Fn(MessageEvent)>::new(move |ev: MessageEvent| {
             if let Some(txt) = ev.data().as_string()
-                && let Ok(l) = serde_json::from_str::<LogLine>(&txt)
+                && let Ok(l) = crate::api::decode::<LogLine>(&txt)
             {
                 append(l.line);
             }

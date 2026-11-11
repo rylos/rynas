@@ -100,7 +100,7 @@ fn fetch(url: &'static str, apply: fn(Sto, &str) -> bool, left: Rc<Cell<u8>>, ro
 
 /// Set `sig` from `text` when it parses and differs (no re-render for an equal answer).
 fn put<T: serde::de::DeserializeOwned + PartialEq + Send + Sync + 'static>(sig: RwSignal<Option<T>>, text: &str) -> bool {
-    match serde_json::from_str::<T>(text) {
+    match crate::api::decode::<T>(text) {
         Ok(v) => {
             if sig.with_untracked(|cur| cur.as_ref() != Some(&v)) {
                 sig.set(Some(v));
