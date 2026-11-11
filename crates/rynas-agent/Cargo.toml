@@ -34,6 +34,28 @@ crossterm = "0.28"
 [dev-dependencies]
 tempfile = "3"
 
+# .deb (cargo-deb) and .rpm (cargo-generate-rpm) files attached to the GitHub release, from
+# the static musl binary: `cargo deb --no-build --target x86_64-unknown-linux-musl`,
+# `cargo generate-rpm --target x86_64-unknown-linux-musl`.
+[package.metadata.deb]
+maintainer = "Marco Ziliani"
+section = "admin"
+priority = "optional"
+depends = ""
+recommends = "btrfs-progs, dosfstools"
+suggests = "lvm2, cryptsetup"
+extended-description = "File backups of this PC into a repository on a rynas NAS, with the disk layout for a bare-metal restore from any live Linux."
+assets = [
+    ["target/release/rynas-agent", "usr/bin/", "755"],
+    ["../../packaging/agent/rynas-agent.service", "lib/systemd/system/", "644"],
+]
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/rynas-agent", dest = "/usr/bin/rynas-agent", mode = "755" },
+    { source = "../../packaging/agent/rynas-agent.service", dest = "/usr/lib/systemd/system/rynas-agent.service", mode = "644" },
+]
+
 [profile.release]
 lto = "fat"
 codegen-units = 1

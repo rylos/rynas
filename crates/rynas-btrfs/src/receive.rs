@@ -4,7 +4,7 @@
 //!
 //! The filter that enforces all this on every SSH command is [`crate::receive_filter`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::Path;
 
@@ -62,14 +62,15 @@ pub fn scan_dir(dir: &Path) -> io::Result<(Vec<Entry>, u32)> {
     Ok((out, other))
 }
 
-fn name_ms(name: &str) -> Option<u64> {
+/// The time written in a snapshot name, in ms (the PC's clock).
+pub fn name_ms(name: &str) -> Option<u64> {
     let (_, ts) = split_snapshot_name(name)?;
     let ms = parse_timestamp(ts)?.epoch_ms();
     (ms >= 0).then_some(ms as u64)
 }
 
 /// When the NAS made the snapshot (its `otime`), in ms.
-fn otime_ms(e: &Entry) -> Option<u64> {
+pub fn otime_ms(e: &Entry) -> Option<u64> {
     e.info
         .as_ref()
         .and_then(|i| (i.otime > 0).then_some(i.otime as u64 * 1000))
@@ -147,7 +148,32 @@ pub struct Summary {
     pub last_received_ms: Option<u64>,
 }
 
+/// The newest complete snapshot of each subvolume, by the NAS-side `otime` (the name breaks
+/// ties): the parent btrbk on the PC uses for its next incremental send. Names more than a
+/// day in the future only count when a subvolume has nothing else.
+pub fn parents(entries: &[Entry], now_ms: u64) -> BTreeSet<String> {
+    let mut best: BTreeMap<&str, &Entry> = BTreeMap::new();
+    let rank = |e: &Entry| (!future_dated(&e.name, now_ms), otime_ms(e));
+    for e in entries.iter().filter(|e| e.info.is_some() && !e.incomplete()) {
+        let Some((group, _)) = split_snapshot_name(&e.name) else { continue };
+        let better = |a: &Entry, b: &Entry| {
+            rank(a)
+                .cmp(&rank(b))
+                .then_with(|| compare_names(&a.name, &b.name))
+                .is_gt()
+        };
+        match best.get(group) {
+            Some(b) if !better(e, b) => {}
+            _ => {
+                best.insert(group, e);
+            }
+        }
+    }
+    best.values().map(|e| e.name.clone()).collect()
+}
+
 pub fn summarize(entries: &[Entry], policy: &DeletePolicy, now_ms: u64) -> Summary {
+    let parents = parents(entries, now_ms);
     let mut s = Summary::default();
     let mut groups: BTreeMap<String, ReceivedGroup> = BTreeMap::new();
     for e in entries {
@@ -183,6 +209,8 @@ pub fn summarize(entries: &[Entry], policy: &DeletePolicy, now_ms: u64) -> Summa
                 && !incomplete
                 && delete_refusal(&e.name, entries, policy, now_ms).is_some(),
             not_subvolume: e.info.is_none(),
+            parent: parents.contains(&e.name),
+            size: None,
         });
     }
     s.groups = groups.into_values().collect();
@@ -294,6 +322,10 @@ pub fn filter_args(device: &str, root: &str, policy: &DeletePolicy) -> Vec<Strin
         if policy.min_age_days > 0 {
             a.extend(["--min-age-days".into(), policy.min_age_days.to_string()]);
         }
+    } else {
+        // the PC can only add, but btrbk must still clear its own interrupted receive
+        // before it sends that snapshot again
+        a.push("--delete-interrupted".into());
     }
     a
 }
@@ -353,11 +385,26 @@ pub fn sudoers(btrfs: &str, roots: &[&str]) -> String {
     s
 }
 
-/// The lines for the PC's `/etc/btrbk/btrbk.conf`.
-pub fn client_config(device: &str, host: &str, port: Option<u16>, path: &str) -> String {
+/// The lines for the PC's `/etc/btrbk/btrbk.conf`. With `nas_retention` the NAS deletes old
+/// snapshots, so btrbk keeps every one it sent (it could not delete them anyway).
+pub fn client_config(
+    device: &str,
+    host: &str,
+    port: Option<u16>,
+    path: &str,
+    nas_retention: bool,
+) -> String {
     let at = match port {
         Some(p) if p != 22 => format!("{host}:{p}"),
         _ => host.to_string(),
+    };
+    let target = if nas_retention {
+        "# old snapshots on the NAS are deleted by the NAS\n\
+         target_preserve_min    all\n\
+         target_preserve        no\n"
+    } else {
+        "target_preserve_min    no\n\
+         target_preserve        20d 10w 6m\n"
     };
     format!(
         "# /etc/btrbk/btrbk.conf on {device}\n\
@@ -368,8 +415,7 @@ pub fn client_config(device: &str, host: &str, port: Option<u16>, path: &str) ->
          \n\
          snapshot_preserve_min  2d\n\
          snapshot_preserve      14d\n\
-         target_preserve_min    no\n\
-         target_preserve        20d 10w 6m\n\
+         {target}\
          \n\
          # the btrfs volume of this PC and its subvolumes (change to your layout)\n\
          volume /mnt/btr_pool\n\
@@ -603,6 +649,24 @@ mod tests {
         assert!(l[0].incomplete && !l[0].protected);
         assert!(l[1].protected && !l[2].protected && l[3].protected);
         assert!(l[4].not_subvolume && !l[4].protected);
+        // the newest complete snapshot of each subvolume is the next parent
+        assert!(!l[0].parent && l[1].parent && !l[2].parent && l[3].parent && !l[4].parent);
+    }
+
+    #[test]
+    fn parents_ignore_future_names_and_follow_the_nas_clock() {
+        let now = ms("home.20261108T0300");
+        let all = vec![
+            at("home.20991231T0000", 10),
+            at("home.20261108T0100", 5),
+            at("home.20261107T0100", 1),
+            snap("root.20261108T0200", false, false),
+        ];
+        // home.20261108T0100 was received last on the NAS: it is the parent; the future name
+        // and the interrupted receive are not
+        assert_eq!(parents(&all, now), BTreeSet::from(["home.20261108T0100".to_string()]));
+        // a subvolume with only a future name still has that as its parent
+        assert_eq!(parents(&all[..1], now).len(), 1);
     }
 
     const ED: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl marco@pc";
@@ -624,7 +688,8 @@ mod tests {
             format!("restrict,command=\"{FILTER} --device laptop --root /volume1/backup/laptop --delete --keep-last 3 --min-age-days 7\" ssh-ed25519 {b} rynas:laptop")
         );
         let line = key_line("laptop", "/v/b/l", &DeletePolicy { allowed: false, keep_last: 3, min_age_days: 7 }, &k, &b);
-        assert!(!line.contains("--delete") && !line.contains("--keep-last"));
+        // the PC can only add: its own interrupted receives are all it may delete
+        assert!(line.contains(" --delete-interrupted\"") && !line.contains("--delete ") && !line.contains("--keep-last"));
     }
 
     #[test]
@@ -648,10 +713,13 @@ mod tests {
         assert!(!s.contains("readlink") && s.contains("!use_pty"));
         assert_eq!(s.matches("NOPASSWD").count(), 2);
         assert!(!sudoers("/usr/bin/btrfs", &[]).contains("NOPASSWD"));
-        let c = client_config("laptop", "nas.local", Some(2222), "/volume1/backup/laptop");
+        let c = client_config("laptop", "nas.local", Some(2222), "/volume1/backup/laptop", false);
         assert!(c.contains("target ssh://nas.local:2222/volume1/backup/laptop"));
         assert!(c.contains("ssh_user          rynas-pcbackup"));
-        assert!(client_config("l", "nas", Some(22), "/a/b").contains("ssh://nas/a/b"));
+        assert!(c.contains("target_preserve        20d 10w 6m"));
+        let c = client_config("l", "nas", Some(22), "/a/b", true);
+        assert!(c.contains("ssh://nas/a/b"));
+        assert!(c.contains("target_preserve_min    all") && !c.contains("20d 10w"));
         assert!(client_test_commands("nas", Some(2222)).contains("-p 2222 rynas-pcbackup@nas"));
         assert!(client_key_commands("laptop").contains("btrbk@laptop"));
     }

@@ -1,0 +1,31 @@
+# AUR: rynas-agent (built from source). Copy to PKGBUILD in the AUR repository.
+pkgname=rynas-agent
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="rynas PC backup agent: file backups to a rynas NAS and bare-metal restore from any live Linux"
+arch=('x86_64' 'aarch64')
+url="https://github.com/rylos/rynas"
+license=('AGPL-3.0-or-later')
+makedepends=('cargo')
+optdepends=('btrfs-progs: btrfs snapshots and restores'
+            'lvm2: LVM snapshots'
+            'dosfstools: restoring an ESP'
+            'cryptsetup: restoring LUKS volumes')
+source=("rynas-${pkgver}.tar.gz::https://github.com/rylos/rynas/archive/refs/tags/agent-v${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "rynas-agent-v${pkgver}/crates/rynas-agent"
+  cargo build --release --locked
+}
+
+check() {
+  cd "rynas-agent-v${pkgver}/crates/rynas-agent"
+  cargo test --release --locked
+}
+
+package() {
+  cd "rynas-agent-v${pkgver}"
+  install -Dm755 crates/rynas-agent/target/release/rynas-agent "$pkgdir/usr/bin/rynas-agent"
+  install -Dm644 packaging/agent/rynas-agent.service "$pkgdir/usr/lib/systemd/system/rynas-agent.service"
+}

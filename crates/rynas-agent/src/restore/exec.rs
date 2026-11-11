@@ -14,8 +14,9 @@ use rynas_api_types::pcagent::*;
 use super::plan::{Plan, mkfs_argv};
 use super::source::{Fill, PoolTarget, RestoreSource, Version};
 
-pub const TARGET: &str = "/run/rynas-agent/target";
-const TOPS: &str = "/run/rynas-agent/top";
+/// Outside `/run`, which the chroot step binds recursively.
+pub const TARGET: &str = "/mnt/rynas-restore";
+const TOPS: &str = "/mnt/rynas-restore-top";
 
 /// The restore log: printed, and kept for the NAS and the target's `/var/log`.
 pub struct Log {

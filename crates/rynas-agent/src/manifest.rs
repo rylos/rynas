@@ -359,6 +359,8 @@ pub fn collect(captures: &BTreeMap<String, CaptureMethod>) -> Manifest {
         md,
         fstab: read("/etc/fstab"),
         crypttab: std::fs::read_to_string("/etc/crypttab").ok(),
+        // the btrfs method fills it (`rynas-agent manifest` on a btrfs PC, a later step)
+        btrbk: None,
     }
 }
 

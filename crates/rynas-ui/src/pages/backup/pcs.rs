@@ -1,19 +1,23 @@
-//! Backup › PCs: folders where Linux PCs push btrbk snapshots over SSH (D-PCBACKUP phase 2).
+//! Backup › PCs: native btrfs snapshots that PCs push with btrbk over SSH (D-PCBACKUP phase
+//! 2, B1 of `docs/research/pc-backup.md` §11).
 //!
-//! - The card lists each PC with its freshness, snapshots and space; setup problems (no sshd,
+//! - The card lists each PC with its freshness, open problems, snapshots, space and whether
+//!   the snapshots are enough for a restore on an empty disk; setup problems (no sshd,
 //!   `AllowUsers` without the account, no sudo/btrfs/filter) show above it.
 //! - "Add a PC": a new subvolume folder, or an existing folder of received snapshots (Check
-//!   shows what it holds, nothing inside changes). Key, alert and the NAS-side delete rules.
-//! - The drawer of a PC: status, the steps for the PC (key, `btrbk.conf`, first connection)
-//!   and the `authorized_keys` line, copyable; Measure space, Settings, Remove (the folder
-//!   stays); every snapshot with Browse.
+//!   shows what it holds, nothing inside changes). Key, alert, who deletes old snapshots (the
+//!   NAS with GFS counts, the PC can only add; or the PC within the NAS floor).
+//! - The drawer of a PC: problems, status, the full-restore check, the steps for the PC (key,
+//!   `btrbk.conf`, first connection) and the `authorized_keys` line, copyable; Measure space,
+//!   Delete old snapshots now, Settings, Remove (the folder stays); the snapshots by subvolume
+//!   or by run, with sizes, Browse and Delete.
 //! - Browse: read-only folders inside a snapshot; Copy out puts a file or folder into a NAS
 //!   folder (nothing is overwritten).
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use rynas_api_types::pcbackup::*;
-use rynas_api_types::snapshots::{EntryKind, SnapshotEntry, SnapshotListing};
+use rynas_api_types::snapshots::{EntryKind, Retention, RetentionPreset, SnapshotEntry, SnapshotListing};
 use rynas_api_types::TaskStatus;
 
 use crate::api;
@@ -21,7 +25,7 @@ use crate::form::{In, area_field, form_error, number_field, segmented, spinner, 
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::pages::security::copy_button;
-use crate::pages::snapshots::mode_text;
+use crate::pages::snapshots::{mode_text, retention_text};
 use crate::tasks;
 use crate::toast::toast;
 use crate::ui::{self, Confirm, DlgKind, EmptyState, ErrorBox, Remote, Skeleton, Tone};
@@ -79,6 +83,83 @@ fn problem_text(p: &SetupProblem) -> String {
         SetupProblemCode::FilterMissing => "bk.problem.filter_missing",
     };
     tf(k, &[("subject", p.subject.as_deref().unwrap_or(""))])
+}
+
+/// One open problem of a PC, as a sentence.
+fn issue_text(i: &PcIssue) -> String {
+    let subject = i.subject.as_deref().unwrap_or("");
+    let since = when(i.since_ms);
+    let k = match i.code {
+        PcIssueCode::Late => "bkpc.issue.late",
+        PcIssueCode::SubvolumeLate if i.since_ms.is_none() => "bkpc.issue.subvolume_never",
+        PcIssueCode::SubvolumeLate => "bkpc.issue.subvolume_late",
+        PcIssueCode::ReceiveFailed => "bkpc.issue.receive_failed",
+        PcIssueCode::ReceiveStuck => "bkpc.issue.receive_stuck",
+        PcIssueCode::LowSpace => "bkpc.issue.low_space",
+    };
+    let b = |v: Option<u64>| i18n::bytes(v.unwrap_or(0));
+    tf(k, &[("subject", subject), ("when", &since), ("free", &b(i.free_bytes)), ("needed", &b(i.needed_bytes))])
+}
+
+/// The first problem in a few words (the list).
+fn issue_short(i: &PcIssue) -> &'static str {
+    match i.code {
+        PcIssueCode::Late => "bk.st.late",
+        PcIssueCode::SubvolumeLate => "bkpc.short.subvolume_late",
+        PcIssueCode::ReceiveFailed => "bkpc.short.receive_failed",
+        PcIssueCode::ReceiveStuck => "bkpc.short.receive_stuck",
+        PcIssueCode::LowSpace => "bkpc.short.low_space",
+    }
+}
+
+fn gap_text(g: &BareMetalGap) -> String {
+    let k = match g.code {
+        BareMetalCode::NoSnapshots => "bkpc.bm.no_snapshots",
+        BareMetalCode::NoManifest => "bkpc.bm.no_manifest",
+        BareMetalCode::ManifestInvalid => "bkpc.bm.manifest_invalid",
+        BareMetalCode::ManifestUnsupported => "bkpc.bm.manifest_unsupported",
+        BareMetalCode::NoRoot => "bkpc.bm.no_root",
+        BareMetalCode::SubvolumeMissing => "bkpc.bm.subvolume_missing",
+        BareMetalCode::LoaderUnknown => "bkpc.bm.loader_unknown",
+        BareMetalCode::ManifestStale => "bkpc.bm.manifest_stale",
+        BareMetalCode::LatestRunIncomplete => "bkpc.bm.latest_run_incomplete",
+    };
+    tf(k, &[("subject", g.subject.as_deref().unwrap_or(""))])
+}
+
+fn bm_status(b: &BareMetal) -> AnyView {
+    if b.ready {
+        ui::status(Tone::Ok, t("bkpc.bm.ready").to_string())
+    } else {
+        ui::status(Tone::Info, t("bkpc.bm.not_ready").to_string())
+    }
+}
+
+/// "12.0 GiB · 310 MiB its own".
+fn size_text(z: Option<SnapshotSize>) -> String {
+    z.map(|z| tf("bkpc.size_text", &[("ref", &i18n::bytes(z.referenced_bytes)), ("excl", &i18n::bytes(z.exclusive_bytes))]))
+        .unwrap_or_else(|| "—".into())
+}
+
+/// Who deletes old snapshots, in a sentence.
+fn rules_text(p: &PcTarget) -> String {
+    if p.retention.owner == RetentionOwner::Nas {
+        let g = &p.retention.gfs;
+        return tf("bkpc.ret.nas", &[("counts", &retention_text(g)), ("min", &g.min)]);
+    }
+    if !p.delete.allowed {
+        return t("bk.rules.off").to_string();
+    }
+    let one = p.delete.keep_last == 1;
+    let k = match (p.delete.keep_last > 0, p.delete.min_age_days > 0) {
+        (true, true) if one => "bk.rules.on_one",
+        (true, true) => "bk.rules.on",
+        (true, false) if one => "bk.rules.on_keep_one",
+        (true, false) => "bk.rules.on_keep",
+        (false, true) => "bk.rules.on_days",
+        (false, false) => "bk.rules.on_free",
+    };
+    tf(k, &[("keep", &p.delete.keep_last.to_string()), ("days", &p.delete.min_age_days.to_string())])
 }
 
 /// Runs a task, toasts the outcome, reloads the list.
@@ -171,17 +252,23 @@ pub fn panel(add: RwSignal<Option<bool>>) -> AnyView {
                 let sub = if p.description.is_empty() { None } else { Some(p.description.clone()) };
                 let space = p.usage.map(|u| i18n::bytes(u.exclusive_bytes)).unwrap_or_else(|| "—".into());
                 let label = format!("{}: {}", t("bk.open"), p.device);
+                // the first problem other than "late" (the state already says that)
+                let problem = p.issues.iter().find(|i| i.code != PcIssueCode::Late).map(|i| {
+                    let tone = if i.code == PcIssueCode::LowSpace { Tone::Err } else { Tone::Warn };
+                    ui::status(tone, t(issue_short(i)).to_string())
+                });
                 ui::row(vec![
                     ui::cell("bk.col.pc", "wrap", ui::two_lines(view! { <strong>{p.device.clone()}</strong> }.into_any(), sub, "cell-sub small")),
                     ui::cell("bk.col.folder", "wrap", ui::breakable(&p.path, "mono small")),
-                    ui::cell("col.status", "wrap", view! { <div class="cell-main">{state_status(p.state)}<span class="cell-sub small">{when(p.last_received_ms)}</span></div> }.into_any()),
+                    ui::cell("col.status", "wrap", view! { <div class="cell-main">{state_status(p.state)}{problem}<span class="cell-sub small">{when(p.last_received_ms)}</span></div> }.into_any()),
                     ui::cell("bk.col.snapshots", "wrap", ui::two_lines(view! { <span class="tnum">{i18n::count(u64::from(p.snapshots))}</span> }.into_any(), (!groups.is_empty()).then_some(groups), "cell-sub small mono")),
                     ui::text_cell("bk.col.space", "num tnum", space),
+                    ui::cell("bkpc.col.restore", "", bm_status(&p.bare_metal)),
                     ui::actions(view! { <button class="btn ghost sm" aria-label=label on:click=move |_| pcs.open.set(Some(dev.clone()))><Icon icon=icons::EYE size=14 />{tr("bk.open")}</button> }.into_any()),
                 ])
             })
             .collect::<Vec<_>>();
-        ui::table("bk-table", &["bk.col.pc", "bk.col.folder", "col.status", "bk.col.snapshots", "#bk.col.space", ""], rows)
+        ui::table("bk-table", &["bk.col.pc", "bk.col.folder", "col.status", "bk.col.snapshots", "#bk.col.space", "bkpc.col.restore", ""], rows)
     };
     view! {
         <p class="sec-note"><Icon icon=icons::INFO size=16 />{tr("bk.intro")}</p>
@@ -196,29 +283,59 @@ pub fn panel(add: RwSignal<Option<bool>>) -> AnyView {
 
 // ------------------------------------------------------------------ add and settings
 
+const OWNERS: &[(&str, &str)] = &[("nas", "bkpc.owner.nas"), ("pc", "bkpc.owner.pc")];
+const PRESETS: &[(&str, &str)] = &[("standard", "snap.preset.standard"), ("light", "snap.preset.light"), ("long", "snap.preset.long"), ("custom", "snap.preset.custom")];
+
 /// Shared fields of the add and settings dialogs.
 #[derive(Clone, Copy)]
 struct Fields {
     description: RwSignal<String>,
     key: RwSignal<String>,
+    /// Alert time in hours.
     alert: RwSignal<String>,
     allowed: RwSignal<bool>,
     keep: RwSignal<String>,
     min_age: RwSignal<String>,
+    /// `nas` or `pc`.
+    owner: RwSignal<String>,
+    preset: RwSignal<String>,
+    /// hourly, daily, weekly, monthly, yearly (custom preset).
+    counts: [RwSignal<String>; 5],
+    min: RwSignal<String>,
+    ignored: RwSignal<Vec<String>>,
     key_err: RwSignal<Option<String>>,
     desc_err: RwSignal<Option<String>>,
 }
 
 impl Fields {
-    fn new(p: Option<&PcTarget>) -> Self {
+    /// `p`: the PC's settings; a new PC lets the NAS own retention, an adopted folder keeps
+    /// btrbk on the PC deleting (its chain was set up that way).
+    fn new(p: Option<&PcTarget>, adopt: bool) -> Self {
         let d = p.map(|p| p.delete).unwrap_or_default();
+        let r = p.map(|p| p.retention.clone()).unwrap_or_else(|| PcRetention {
+            owner: if adopt { RetentionOwner::Pc } else { RetentionOwner::Nas },
+            gfs: Retention::default(),
+        });
+        let g = &r.gfs;
+        let preset = match g.preset {
+            Some(RetentionPreset::Standard) => "standard",
+            Some(RetentionPreset::Light) => "light",
+            Some(RetentionPreset::Long) => "long",
+            None => "custom",
+        };
+        let s = |n: u32| RwSignal::new(n.to_string());
         Fields {
             description: RwSignal::new(p.map(|p| p.description.clone()).unwrap_or_default()),
             key: RwSignal::new(p.map(|p| p.public_key.clone()).unwrap_or_default()),
-            alert: RwSignal::new(p.map(|p| p.alert_days).unwrap_or_else(default_alert).to_string()),
+            alert: RwSignal::new(p.map(|p| p.alert_after_hours()).unwrap_or(default_alert() * 24).to_string()),
             allowed: RwSignal::new(d.allowed),
             keep: RwSignal::new(d.keep_last.to_string()),
             min_age: RwSignal::new(d.min_age_days.to_string()),
+            owner: RwSignal::new(if r.owner == RetentionOwner::Nas { "nas" } else { "pc" }.to_string()),
+            preset: RwSignal::new(preset.to_string()),
+            counts: [s(g.hourly), s(g.daily), s(g.weekly), s(g.monthly), s(g.yearly)],
+            min: RwSignal::new(g.min.clone()),
+            ignored: RwSignal::new(p.map(|p| p.ignored_groups.clone()).unwrap_or_default()),
             key_err: RwSignal::new(None),
             desc_err: RwSignal::new(None),
         }
@@ -229,24 +346,100 @@ impl Fields {
         DeletePolicy { allowed: self.allowed.get_untracked(), keep_last: n(self.keep), min_age_days: n(self.min_age) }
     }
 
-    fn alert_days(self) -> u32 {
+    fn alert_hours(self) -> u32 {
         self.alert.get_untracked().trim().parse().unwrap_or(0)
     }
 
-    fn view(self) -> AnyView {
+    /// The days of older clients: the hours rounded up (the hours win on the NAS).
+    fn alert_days(self) -> u32 {
+        self.alert_hours().div_ceil(24)
+    }
+
+    fn retention(self) -> PcRetention {
+        let owner = if self.owner.get_untracked() == "nas" { RetentionOwner::Nas } else { RetentionOwner::Pc };
+        let gfs = match self.preset.get_untracked().as_str() {
+            "standard" => RetentionPreset::Standard.retention(),
+            "light" => RetentionPreset::Light.retention(),
+            "long" => RetentionPreset::Long.retention(),
+            _ => {
+                let n = |i: usize| self.counts[i].get_untracked().trim().parse::<u32>().unwrap_or(0);
+                Retention { preset: None, hourly: n(0), daily: n(1), weekly: n(2), monthly: n(3), yearly: n(4), min: self.min.get_untracked().trim().to_string() }
+            }
+        };
+        PcRetention { owner, gfs }
+    }
+
+    /// `groups`: the PC's subvolumes (the "no longer sent" choice; none in the add dialog).
+    /// `preview`: the preview of the settings dialog.
+    fn view(self, groups: Vec<String>, preview: Option<AnyView>) -> AnyView {
+        let nas = move || self.owner.get() == "nas";
+        let custom = move || self.preset.get() == "custom";
+        let count = move |label: &'static str, i: usize| number_field(label, None, self.counts[i].into(), Callback::new(move |v| self.counts[i].set(v)), 0, 1000);
+        let ignored = (!groups.is_empty()).then(|| {
+            view! {
+                <div class="field">
+                    <span class="field-label">{tr("bkpc.f.ignored")}</span>
+                    {groups
+                        .into_iter()
+                        .map(|g| {
+                            let g2 = g.clone();
+                            let on = move || self.ignored.with(|v| v.contains(&g2));
+                            let g3 = g.clone();
+                            view! {
+                                <label class="check">
+                                    <input type="checkbox" prop:checked=on on:change=move |ev| {
+                                        let c = event_target_checked(&ev);
+                                        self.ignored.update(|v| { v.retain(|x| x != &g3); if c { v.push(g3.clone()); } });
+                                    } />
+                                    <span class="mono">{g}</span>
+                                </label>
+                            }
+                        })
+                        .collect_view()}
+                    <span class="field-help">{tr("bkpc.f.ignored_help")}</span>
+                </div>
+            }
+        });
         view! {
             {area_field("bk.f.key", self.key.into(), Callback::new(move |v| { self.key_err.set(None); self.key.set(v); }), Some("bk.f.key_help"), "ssh-ed25519 AAAA… btrbk@pc")}
             {form_error(self.key_err)}
-            {number_field("bk.f.alert", Some("bk.f.alert_help"), self.alert.into(), Callback::new(move |v| self.alert.set(v)), 0, 365)}
+            {number_field("bkpc.f.alert_hours", Some("bkpc.f.alert_hours_help"), self.alert.into(), Callback::new(move |v| self.alert.set(v)), 0, 8760)}
+            {ignored}
             <h3 class="mini-title">{tr("bk.f.rules")}</h3>
-            {switch("bk.f.allowed", Some("bk.f.allowed_help"), self.allowed.into(), Callback::new(move |v| self.allowed.set(v)))}
-            <Show when=move || self.allowed.get()>
+            {segmented("bkpc.f.owner", OWNERS, self.owner.into(), Callback::new(move |v| self.owner.set(v)))}
+            <p class="field-help">{move || if nas() { t("bkpc.owner.nas_help") } else { t("bkpc.owner.pc_help") }}</p>
+            <Show when=nas>
+                {segmented("snap.f.preset", PRESETS, self.preset.into(), Callback::new(move |v| self.preset.set(v)))}
+                {move || if custom() {
+                    view! {
+                        <div class="form-row three">
+                            {count("snap.f.hourly", 0)}
+                            {count("snap.f.daily", 1)}
+                            {count("snap.f.weekly", 2)}
+                            {count("snap.f.monthly", 3)}
+                            {count("snap.f.yearly", 4)}
+                            {text_field("snap.f.min", self.min.into(), Callback::new(move |v| self.min.set(v)), Signal::derive(|| None), In { mono: true, help: Some("snap.f.min_help"), ..In::default() })}
+                        </div>
+                    }
+                    .into_any()
+                } else {
+                    let r = self.retention().gfs;
+                    view! { <p class="field-help">{tf("snap.preset_keeps", &[("counts", &retention_text(&r)), ("min", &r.min)])}</p> }.into_any()
+                }}
+            </Show>
+            <Show when=move || !nas()>
+                {switch("bk.f.allowed", Some("bk.f.allowed_help"), self.allowed.into(), Callback::new(move |v| self.allowed.set(v)))}
+            </Show>
+            <Show when=move || nas() || self.allowed.get()>
                 <div class="form-row">
-                    {number_field("bk.f.keep", Some("bkpc.f.keep_help"), self.keep.into(), Callback::new(move |v| self.keep.set(v)), 0, 1000)}
-                    {number_field("bk.f.min_age", Some("bk.f.min_age_help"), self.min_age.into(), Callback::new(move |v| self.min_age.set(v)), 0, 3650)}
+                    {move || number_field("bk.f.keep", Some(if nas() { "bkpc.f.keep_nas_help" } else { "bkpc.f.keep_help" }), self.keep.into(), Callback::new(move |v| self.keep.set(v)), 0, 1000)}
+                    {move || number_field("bk.f.min_age", Some(if nas() { "bkpc.f.min_age_nas_help" } else { "bk.f.min_age_help" }), self.min_age.into(), Callback::new(move |v| self.min_age.set(v)), 0, 3650)}
                 </div>
             </Show>
-            <p class="small muted">{tr("bk.f.rules_note")}</p>
+            {preview}
+            <Show when=move || !nas()>
+                <p class="small muted">{tr("bk.f.rules_note")}</p>
+            </Show>
         }
         .into_any()
     }
@@ -277,7 +470,7 @@ fn add_dialog(pcs: Pcs, adopt_first: bool) -> AnyView {
     let device = RwSignal::new(String::new());
     let path = RwSignal::new(String::new());
     let path_touched = RwSignal::new(false);
-    let f = Fields::new(None);
+    let f = Fields::new(None, adopt_first);
     let dev_err = RwSignal::new(None::<String>);
     let path_err = RwSignal::new(None::<String>);
     let error = RwSignal::new(None::<String>);
@@ -330,6 +523,8 @@ fn add_dialog(pcs: Pcs, adopt_first: bool) -> AnyView {
             public_key: f.key.get_untracked().trim().to_string(),
             alert_days: f.alert_days(),
             delete: f.policy(),
+            alert_hours: f.alert_hours(),
+            retention: f.retention(),
         };
         let ok = tf("bk.added", &[("device", &dev)]);
         let url = if adopt && preview.with_untracked(|p| p.as_ref().is_some_and(|p| p.permission_change.is_some())) { format!("{URL}?confirm_permission_change=true") } else { URL.to_string() };
@@ -390,7 +585,13 @@ fn add_dialog(pcs: Pcs, adopt_first: bool) -> AnyView {
     };
     const MODES: &[(&str, &str)] = &[("new", "bk.mode.new"), ("adopt", "shares.loc_folder")];
     let body = view! {
-        {segmented("bk.mode", MODES, mode.into(), Callback::new(move |v| { preview.set(None); path_err.set(None); mode.set(v); }))}
+        {segmented("bk.mode", MODES, mode.into(), Callback::new(move |v: String| {
+            preview.set(None);
+            path_err.set(None);
+            // a new PC lets the NAS delete; an adopted chain keeps btrbk on the PC deleting
+            f.owner.set(if v == "adopt" { "pc" } else { "nas" }.to_string());
+            mode.set(v);
+        }))}
         <p class="field-help">{move || if mode.get() == "adopt" { t("bk.mode.adopt_help") } else { t("bk.mode.new_help") }}</p>
         {text_field("bk.f.device", device.into(), Callback::new(move |v: String| {
             dev_err.set(None);
@@ -413,7 +614,7 @@ fn add_dialog(pcs: Pcs, adopt_first: bool) -> AnyView {
                 </label>
             </Show>
         </Show>
-        {f.view()}
+        {f.view(Vec::new(), None)}
         {form_error(error)}
     }
     .into_any();
@@ -428,7 +629,7 @@ fn add_dialog(pcs: Pcs, adopt_first: bool) -> AnyView {
 
 fn settings_dialog(pcs: Pcs, p: PcTarget) -> AnyView {
     let close = Callback::new(move |_| pcs.edit.set(None));
-    let f = Fields::new(Some(&p));
+    let f = Fields::new(Some(&p), p.adopted);
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let device = StoredValue::new(p.device.clone());
@@ -438,12 +639,51 @@ fn settings_dialog(pcs: Pcs, p: PcTarget) -> AnyView {
             public_key: f.key.get_untracked().trim().to_string(),
             alert_days: f.alert_days(),
             delete: f.policy(),
+            alert_hours: f.alert_hours(),
+            retention: Some(f.retention()),
+            ignored_groups: Some(f.ignored.get_untracked()),
         };
         run(pcs, ("PUT", target_url(&device.get_value()), serde_json::to_string(&body).ok()), t("bk.saved").to_string(), (busy, error, Some(f)), Callback::new(move |_| pcs.edit.set(None)));
     };
+    // what the NAS would delete now with the settings in the form (nothing is saved)
+    let previewing = RwSignal::new(false);
+    let shown = RwSignal::new(None::<PcRetentionPreview>);
+    let run_preview = move |_| {
+        previewing.set(true);
+        error.set(None);
+        let body = PcRetentionPlanRequest { device: device.get_value(), retention: f.retention(), delete: f.policy() };
+        spawn_local(async move {
+            let r = api::post::<_, PcRetentionPreview>("/api/v1/pc-backups/plan/retention", Some(&body)).await;
+            let _ = previewing.try_set(false);
+            match r {
+                Ok(p) => {
+                    let _ = shown.try_set(Some(p));
+                }
+                Err(e) => {
+                    let _ = error.try_set(Some(e.text()));
+                }
+            }
+        });
+    };
+    let preview = view! {
+        <Show when=move || f.owner.get() == "nas">
+            <div>
+                <button type="button" class="btn ghost sm" disabled=move || previewing.get() on:click=run_preview>
+                    {spinner(previewing)}<Icon icon=icons::EYE size=14 />{tr("snap.preview")}
+                </button>
+            </div>
+            {move || shown.get().map(|p| {
+                let keep = (p.items.len() as u32).saturating_sub(p.delete);
+                let frees = p.frees_at_least_bytes.filter(|b| *b > 0).map(|b| tf("bkpc.preview_frees", &[("bytes", &i18n::bytes(b))]));
+                view! { <p class="small">{tf("snap.preview_counts", &[("keep", &keep.to_string()), ("delete", &p.delete.to_string())])}" "{frees}</p> }
+            })}
+        </Show>
+    }
+    .into_any();
+    let groups: Vec<String> = p.groups.iter().map(|g| g.name.clone()).chain(p.ignored_groups.iter().cloned()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
     let body = view! {
         {text_field("bk.f.description", f.description.into(), Callback::new(move |v| { f.desc_err.set(None); f.description.set(v); }), f.desc_err.into(), In { maxlength: 120, ..In::default() })}
-        {f.view()}
+        {f.view(groups, Some(preview))}
         {form_error(error)}
     }
     .into_any();
@@ -477,70 +717,153 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
             pcs.open.set(None);
         }));
     });
+    // one busy flag and error line for the actions on snapshots (sizes, cleanup, delete)
+    let working = RwSignal::new(false);
+    let work_err = RwSignal::new(None::<String>);
+    let reload = Callback::new(move |_| detail.reload());
+    let sizes = move |_| run(pcs, ("POST", format!("{}/sizes", target_url(&dev.get_value())), None), t("bkpc.sizes_done").to_string(), (working, work_err, None), reload);
+    let prune = move |_| run(pcs, ("POST", format!("{}/prune", target_url(&dev.get_value())), None), t("bkpc.pruned").to_string(), (working, work_err, None), reload);
+    let by_run = RwSignal::new("subvolume".to_string());
+    let del = RwSignal::new(None::<String>);
+    let del_busy = RwSignal::new(false);
+    let del_err = RwSignal::new(None::<String>);
+    let delete_snap = Callback::new(move |_| {
+        let Some(name) = del.get_untracked() else { return };
+        let url = format!("{}/snapshots/{}", target_url(&dev.get_value()), api::encode(&name));
+        run(pcs, ("DELETE", url, None), tf("bkpc.deleted_snap", &[("name", &name)]), (del_busy, del_err, None), Callback::new(move |_| {
+            del.set(None);
+            detail.reload();
+        }));
+    });
     let content = move || {
         let Some(d) = detail.data.get() else { return ().into_any() };
         let p = d.target.clone();
         let p_edit = p.clone();
+        let nas = p.retention.owner == RetentionOwner::Nas;
         let usage = p.usage.map(|u| tf("bk.usage_text", &[("excl", &i18n::bytes(u.exclusive_bytes)), ("total", &i18n::bytes(u.total_bytes)), ("when", &i18n::datetime(u.read_at_ms))])).unwrap_or_else(|| t("bk.usage_none").to_string());
-        let rules = if !p.delete.allowed {
-            t("bk.rules.off").to_string()
-        } else {
-            let one = p.delete.keep_last == 1;
-            let k = match (p.delete.keep_last > 0, p.delete.min_age_days > 0) {
-                (true, true) if one => "bk.rules.on_one",
-                (true, true) => "bk.rules.on",
-                (true, false) if one => "bk.rules.on_keep_one",
-                (true, false) => "bk.rules.on_keep",
-                (false, true) => "bk.rules.on_days",
-                (false, false) => "bk.rules.on_free",
-            };
-            tf(k, &[("keep", &p.delete.keep_last.to_string()), ("days", &p.delete.min_age_days.to_string())])
+        let free = p.free_bytes.zip(p.volume_bytes).map(|(f, v)| tf("bkpc.free_text", &[("free", &i18n::bytes(f)), ("total", &i18n::bytes(v))]));
+        let alert = match p.alert_after_hours() {
+            0 => t("bk.alert_off").to_string(),
+            h if h % 24 == 0 => tf("bk.alert_days", &[("n", &(h / 24).to_string())]),
+            h => tf("bkpc.alert_hours", &[("n", &h.to_string())]),
         };
-        let rows = d
-            .list
+        let issues = p
+            .issues
+            .iter()
+            .map(|i| {
+                let (tone, icon) = match i.code {
+                    PcIssueCode::LowSpace => (Tone::Err, icons::TRIANGLE_ALERT),
+                    PcIssueCode::Late | PcIssueCode::SubvolumeLate => (Tone::Warn, icons::CLOCK),
+                    _ => (Tone::Warn, icons::TRIANGLE_ALERT),
+                };
+                ui::note(tone, icon, ui::text(issue_text(i)))
+            })
+            .collect_view();
+        let b = p.bare_metal.clone();
+        let gaps = b.missing.iter().chain(&b.warnings).map(|g| view! { <li>{gap_text(g)}</li> }).collect_view();
+        let bare = view! {
+            <h3 class="mini-title">{tr("bkpc.bm.title")}</h3>
+            <p class="small muted">{tr("bkpc.bm.intro")}</p>
+            <dl class="kvs">
+                {kv("col.status", bm_status(&b))}
+                {b.manifest_snapshot.clone().map(|s| kv("bkpc.bm.manifest", ui::breakable(&s, "mono small")))}
+                {(!b.subvolumes.is_empty()).then(|| kv("bkpc.bm.subvolumes", ui::breakable(&b.subvolumes.join(", "), "mono small")))}
+                {b.loader.clone().map(|l| kv("bkpc.bm.loader", ui::text(l)))}
+            </dl>
+            {(!b.missing.is_empty() || !b.warnings.is_empty()).then(|| view! { <ul class="small bkpc-gaps">{gaps}</ul> })}
+        };
+        let flag = |s: &ReceivedSnapshot| {
+            if s.incomplete {
+                ui::status(Tone::Warn, t("bk.snap.incomplete").to_string())
+            } else if s.not_subvolume {
+                ui::status(Tone::Err, t("bk.snap.not_subvolume").to_string())
+            } else if s.parent {
+                ui::status(Tone::Info, t("bkpc.snap.parent").to_string())
+            } else if s.protected {
+                ui::status(Tone::Info, t("bk.snap.protected").to_string())
+            } else {
+                ui::status(Tone::Ok, t("bk.snap.received").to_string())
+            }
+        };
+        // by subvolume: grouped, newest first inside each
+        let mut list = d.list.clone();
+        list.sort_by(|a, b| a.group.cmp(&b.group).then_with(|| b.created_ms.cmp(&a.created_ms)));
+        let snap_rows = list
             .iter()
             .map(|s| {
                 let name = s.name.clone();
+                let name_del = s.name.clone();
                 let label = format!("{}: {}", t("bk.browse"), s.name);
-                let flag = if s.incomplete {
-                    ui::status(Tone::Warn, t("bk.snap.incomplete").to_string())
-                } else if s.not_subvolume {
-                    ui::status(Tone::Err, t("bk.snap.not_subvolume").to_string())
-                } else if s.protected {
-                    ui::status(Tone::Info, t("bk.snap.protected").to_string())
-                } else {
-                    ui::status(Tone::Ok, t("bk.snap.received").to_string())
-                };
+                let label_del = format!("{}: {}", t("bkpc.delete_snap"), s.name);
                 let can = s.readonly && !s.not_subvolume;
+                let deletable = !s.parent && !s.not_subvolume && !(s.incomplete && p.receiving);
                 ui::row(vec![
                     ui::cell("bk.col.snapshot", "wrap", ui::breakable(&s.name, "mono small")),
                     ui::text_cell("bk.col.received", "tnum", when(s.received_at_ms)),
-                    ui::cell("col.status", "", flag),
-                    ui::actions(view! { <button class="icon-btn sm" title=tr("bk.browse") aria-label=label disabled=!can on:click=move |_| browse.set(Some(name.clone()))><Icon icon=icons::FOLDER_OPEN size=16 /></button> }.into_any()),
+                    ui::text_cell("snap.col.size", "tnum", size_text(s.size)),
+                    ui::cell("col.status", "", flag(s)),
+                    ui::actions(view! {
+                        <button class="icon-btn sm" title=tr("bk.browse") aria-label=label disabled=!can on:click=move |_| browse.set(Some(name.clone()))><Icon icon=icons::FOLDER_OPEN size=16 /></button>
+                        <button class="icon-btn sm" title=tr("bkpc.delete_snap") aria-label=label_del disabled=!deletable on:click=move |_| { del_err.set(None); del.set(Some(name_del.clone())); }><Icon icon=icons::TRASH_2 size=16 /></button>
+                    }.into_any()),
                 ])
             })
             .collect::<Vec<_>>();
+        let run_rows = d
+            .runs
+            .iter()
+            .map(|r| {
+                let groups: Vec<String> = r.snapshots.iter().filter_map(|n| n.rsplit_once('.').map(|x| x.0.to_string())).collect();
+                let size = match (r.referenced_bytes, r.exclusive_bytes) {
+                    (Some(rb), Some(x)) => size_text(Some(SnapshotSize { referenced_bytes: rb, exclusive_bytes: x, ..Default::default() })),
+                    _ => "—".into(),
+                };
+                let st = if r.incomplete {
+                    ui::status(Tone::Warn, t("bk.snap.incomplete").to_string())
+                } else if r.lacks.is_empty() {
+                    ui::status(Tone::Ok, t("bkpc.run.full").to_string())
+                } else {
+                    ui::status(Tone::Info, tf("bkpc.run.lacks", &[("names", &r.lacks.join(", "))]))
+                };
+                ui::row(vec![
+                    ui::text_cell("bkpc.view.run", "tnum", when(r.created_ms)),
+                    ui::cell("bk.col.subvolume", "wrap", ui::breakable(&groups.join(", "), "mono small")),
+                    ui::text_cell("snap.col.size", "tnum", size),
+                    ui::cell("col.status", "wrap", st),
+                ])
+            })
+            .collect::<Vec<_>>();
+        let last_prune = p.last_prune.clone().map(|r| match r.error {
+            Some(e) => format!("{}: {e}", i18n::datetime(r.at_ms)),
+            None => tf("bkpc.last_prune_text", &[("when", &i18n::datetime(r.at_ms)), ("n", &r.deleted.to_string())]),
+        });
+        const VIEWS: &[(&str, &str)] = &[("subvolume", "bk.col.subvolume"), ("run", "bkpc.view.run")];
         view! {
             {(p.public_key.is_empty()).then(|| ui::note(Tone::Warn, icons::KEY, ui::text(t("bk.no_key").to_string())))}
-            {(p.state == ReceiveState::Late).then(|| ui::note(Tone::Warn, icons::CLOCK, ui::text(tf("bk.late_note", &[("days", &p.alert_days.to_string())]))))}
+            {issues}
             <dl class="kvs">
                 {kv("col.status", state_status(p.state))}
+                {p.receiving.then(|| kv("bkpc.receiving", ui::status(Tone::Info, t("bkpc.receiving").to_string())))}
                 {kv("bk.last", ui::text(when(p.last_received_ms)))}
                 {kv("bk.col.snapshots", ui::text(i18n::count(u64::from(p.snapshots))))}
                 {(p.incomplete > 0).then(|| kv("bk.incomplete", ui::text(i18n::count(u64::from(p.incomplete)))))}
                 {kv("bk.col.folder", ui::breakable(&p.path, "mono"))}
+                {free.map(|f| kv("bkpc.free", ui::text(f)))}
                 {kv("bk.col.space", ui::text(usage))}
-                {kv("bk.f.rules", ui::text(rules))}
-                {kv("bk.f.alert", ui::text(if p.alert_days == 0 { t("bk.alert_off").to_string() } else { tf("bk.alert_days", &[("n", &p.alert_days.to_string())]) }))}
+                {kv("bk.f.rules", ui::text(rules_text(&p)))}
+                {last_prune.filter(|_| nas).map(|l| kv("bkpc.last_prune", ui::text(l)))}
+                {kv("bkpc.alert", ui::text(alert))}
                 {p.key_fingerprint.clone().map(|fp| kv("bk.key", ui::breakable(&fp, "mono small")))}
                 {p.adopted.then(|| kv("bk.adopted", ui::text(t("bk.adopted_yes").to_string())))}
             </dl>
             {form_error(measure_err)}
             <div class="sec-actions">
                 <button class="btn ghost sm" disabled=move || measuring.get() on:click=measure>{spinner(measuring)}<Icon icon=icons::DATABASE size=14 />{tr("bk.measure")}</button>
+                {nas.then(|| view! { <button class="btn ghost sm" disabled=move || working.get() on:click=prune><Icon icon=icons::TRASH_2 size=14 />{tr("bkpc.prune")}</button> })}
                 <button class="btn ghost sm" on:click=move |_| pcs.edit.set(Some(p_edit.clone()))><Icon icon=icons::SETTINGS size=14 />{tr("bk.settings")}</button>
                 <button class="btn danger sm" on:click=move |_| { error.set(None); ask.set(true); }><Icon icon=icons::TRASH_2 size=14 />{tr("bk.remove")}</button>
             </div>
+            {bare}
             <details class="tls-step" open=p.state == ReceiveState::Waiting>
                 <summary>{tr("bk.steps")}</summary>
                 <p class="small muted">{tr("bk.steps_intro")}</p>
@@ -551,10 +874,26 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
                 <p class="small muted">{tr("bk.steps_note")}</p>
             </details>
             <h3 class="mini-title">{tr("bk.snapshots")}</h3>
-            {if rows.is_empty() {
+            {if snap_rows.is_empty() {
                 view! { <p class="small muted">{tr("bk.no_snapshots")}</p> }.into_any()
             } else {
-                ui::table("bk-snaps", &["bk.col.snapshot", "bk.col.received", "col.status", ""], rows)
+                view! {
+                    {segmented("bkpc.view", VIEWS, by_run.into(), Callback::new(move |v| by_run.set(v)))}
+                    <p class="small muted">{if d.sizes_from_quota { t("bkpc.sizes_quota") } else { t("bkpc.sizes_note") }}</p>
+                    {(!d.sizes_from_quota).then(|| view! {
+                        <div class="sec-actions">
+                            <button class="btn ghost sm" disabled=move || working.get() on:click=sizes>{spinner(working)}<Icon icon=icons::DATABASE size=14 />{tr("bkpc.sizes")}</button>
+                        </div>
+                    })}
+                    {form_error(work_err)}
+                    <div hidden=move || by_run.get() != "subvolume">
+                        {ui::table("bk-snaps", &["bk.col.snapshot", "bk.col.received", "snap.col.size", "col.status", ""], snap_rows)}
+                    </div>
+                    <div hidden=move || by_run.get() != "run">
+                        {ui::table("bk-runs", &["bkpc.view.run", "bk.col.subvolume", "snap.col.size", "col.status"], run_rows)}
+                    </div>
+                }
+                .into_any()
             }}
         }
         .into_any()
@@ -565,6 +904,7 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
         <div class="wide-drawer">{ui::drawer(Signal::stored(device.clone()), close, body, foot)}</div>
         {move || ask.get().then(|| ui::confirm(Confirm { busy, error, ..Confirm::new(tf("bk.remove_title", &[("device", &dev.get_value())]), t("bk.remove_text").to_string(), "bk.remove", true, remove, Callback::new(move |_| ask.set(false))) }))}
         {move || browse.get().map(|s| browse_drawer(pcs, dev.get_value(), s, Callback::new(move |_| browse.set(None))))}
+        {move || del.get().map(|n| ui::confirm(Confirm { busy: del_busy, error: del_err, ..Confirm::new(tf("bkpc.delete_snap_title", &[("name", &n)]), t("bkpc.delete_snap_text").to_string(), "bkpc.delete_snap", true, delete_snap, Callback::new(move |_| del.set(None))) }))}
     }
     .into_any()
 }

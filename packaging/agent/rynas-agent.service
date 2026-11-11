@@ -1,0 +1,34 @@
+[Unit]
+Description=rynas PC backup agent
+Documentation=https://github.com/rylos/rynas
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/rynas-agent run
+Restart=on-failure
+RestartSec=30
+# a backup reads everything and makes snapshots, freezes and private mounts: root, but
+# nothing it does not need
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+StateDirectory=rynas-agent
+StateDirectoryMode=0700
+CacheDirectory=rynas-agent
+CacheDirectoryMode=0700
+# the service stops a running backup with SIGTERM: the child thaws first
+KillMode=mixed
+TimeoutStopSec=90
+
+[Install]
+WantedBy=multi-user.target

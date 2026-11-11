@@ -7,6 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::snapshots::Retention;
+
 /// The system account PCs log in as. One account, one key per device.
 pub const ACCOUNT: &str = "rynas-pcbackup";
 
@@ -102,6 +104,165 @@ pub struct ReceivedSnapshot {
     pub protected: bool,
     /// Not a subvolume (a plain folder with a snapshot name).
     pub not_subvolume: bool,
+    /// The newest complete snapshot of its subvolume (by the NAS-side creation time): the
+    /// parent of the PC's next incremental send. The NAS never deletes it.
+    #[serde(default)]
+    pub parent: bool,
+    /// Its size, when known (quota groups, or measured on demand).
+    #[serde(default)]
+    pub size: Option<SnapshotSize>,
+}
+
+/// The size of one received snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SnapshotSize {
+    /// Data the snapshot references: about what a restore transfers.
+    pub referenced_bytes: u64,
+    /// Data only this snapshot holds: about what deleting it alone frees.
+    pub exclusive_bytes: u64,
+    /// When it was read (measured sizes stay until measured again; quota sizes are live).
+    pub read_at_ms: u64,
+    /// From the volume's quota groups (live) rather than measured.
+    #[serde(default)]
+    pub from_quota: bool,
+}
+
+/// Who deletes old snapshots of a PC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RetentionOwner {
+    /// btrbk on the PC (`target_preserve`), under the NAS rules of [`DeletePolicy`].
+    #[default]
+    Pc,
+    /// The NAS, by [`PcRetention::gfs`]: the PC's key can only add snapshots (and remove its
+    /// own interrupted receives).
+    Nas,
+}
+
+/// Retention of the received snapshots.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PcRetention {
+    #[serde(default)]
+    pub owner: RetentionOwner,
+    /// With `owner: nas`: what the NAS keeps, per subvolume, by the time in the snapshot
+    /// names (the same counts as snapshot jobs). The newest complete snapshot of each
+    /// subvolume and the floor of [`DeletePolicy`] always stay.
+    #[serde(default)]
+    pub gfs: Retention,
+}
+
+/// The last time the NAS applied the retention of a PC.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PruneRun {
+    pub at_ms: u64,
+    pub deleted: u32,
+    /// Interrupted receives removed (part of `deleted`).
+    #[serde(default)]
+    pub interrupted: u32,
+    /// Why it did not run or stopped (a receive was running, a delete failed).
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// Something wrong with a PC's backups (the alerts).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PcIssueCode {
+    /// Nothing new from the PC for longer than the alert time.
+    Late,
+    /// One subvolume stopped while the others go on (`group`).
+    SubvolumeLate,
+    /// A receive was interrupted and nothing is receiving now.
+    ReceiveFailed,
+    /// A receive has been running for many hours.
+    ReceiveStuck,
+    /// The volume has less free space than one more full set of the PC's snapshots.
+    LowSpace,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PcIssue {
+    pub code: PcIssueCode,
+    /// The subvolume (btrbk name) or snapshot it is about.
+    #[serde(default)]
+    pub subject: Option<String>,
+    /// Since when (the newest snapshot of the PC or subvolume, or the interrupted receive).
+    #[serde(default)]
+    pub since_ms: Option<u64>,
+    /// Low space: free bytes and the bytes wanted.
+    #[serde(default)]
+    pub free_bytes: Option<u64>,
+    #[serde(default)]
+    pub needed_bytes: Option<u64>,
+}
+
+/// Whether the received snapshots are enough to rebuild the PC on an empty disk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BareMetal {
+    pub ready: bool,
+    /// The snapshot the layout manifest (`/.rynas/manifest.json`) was read from.
+    #[serde(default)]
+    pub manifest_snapshot: Option<String>,
+    /// Subvolumes (btrbk names) the manifest says a restore needs.
+    #[serde(default)]
+    pub subvolumes: Vec<String>,
+    /// The PC's boot loader as the manifest names it.
+    #[serde(default)]
+    pub loader: Option<String>,
+    /// What stops a restore (empty when ready).
+    #[serde(default)]
+    pub missing: Vec<BareMetalGap>,
+    /// What a restore can live with but should be looked at.
+    #[serde(default)]
+    pub warnings: Vec<BareMetalGap>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BareMetalCode {
+    /// No complete snapshot received yet.
+    NoSnapshots,
+    /// No newest snapshot carries `/.rynas/manifest.json` (the PC does not write it).
+    NoManifest,
+    /// The manifest is there but cannot be read (too big, not JSON, wrong shape).
+    ManifestInvalid,
+    /// A manifest format this NAS does not know (`subject`: the format number).
+    ManifestUnsupported,
+    /// The manifest names no subvolume mounted at `/`.
+    NoRoot,
+    /// A subvolume the manifest needs has no complete snapshot here (`subject`).
+    SubvolumeMissing,
+    /// The manifest does not name the boot loader.
+    LoaderUnknown,
+    /// The manifest was written long before the snapshot that carries it (`subject`: days).
+    ManifestStale,
+    /// The newest run lacks a subvolume: a restore mixes runs (`subject`).
+    LatestRunIncomplete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BareMetalGap {
+    pub code: BareMetalCode,
+    #[serde(default)]
+    pub subject: Option<String>,
+}
+
+/// One backup run: the snapshots with the same timestamp (btrbk names every subvolume of a
+/// run with one time).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PcRun {
+    /// The timestamp of the names (`20261110T0300`).
+    pub timestamp: String,
+    pub created_ms: Option<u64>,
+    /// Snapshot names, by subvolume.
+    pub snapshots: Vec<String>,
+    /// The expected subvolumes this run lacks (empty: a full set).
+    pub lacks: Vec<String>,
+    /// Some snapshot of the run is an interrupted receive.
+    pub incomplete: bool,
+    /// Sums over the run's snapshots when every size is known.
+    pub referenced_bytes: Option<u64>,
+    pub exclusive_bytes: Option<u64>,
 }
 
 /// A device folder, as listed.
@@ -128,6 +289,41 @@ pub struct PcTarget {
     pub last_received_ms: Option<u64>,
     pub groups: Vec<ReceivedGroup>,
     pub usage: Option<ReceiveUsage>,
+    /// Alert after this many hours without a new snapshot (0: `alert_days` counts).
+    #[serde(default)]
+    pub alert_hours: u32,
+    #[serde(default)]
+    pub retention: PcRetention,
+    /// Subvolumes the PC no longer sends: no alert, not expected in a run.
+    #[serde(default)]
+    pub ignored_groups: Vec<String>,
+    /// What is wrong now (the open alerts).
+    #[serde(default)]
+    pub issues: Vec<PcIssue>,
+    #[serde(default)]
+    pub bare_metal: BareMetal,
+    /// Free and total bytes of the volume holding the folder.
+    #[serde(default)]
+    pub free_bytes: Option<u64>,
+    #[serde(default)]
+    pub volume_bytes: Option<u64>,
+    /// A receive is running now.
+    #[serde(default)]
+    pub receiving: bool,
+    #[serde(default)]
+    pub last_prune: Option<PruneRun>,
+}
+
+impl PcTarget {
+    /// The alert time in hours (0: off).
+    pub fn alert_after_hours(&self) -> u32 {
+        alert_hours(self.alert_hours, self.alert_days)
+    }
+}
+
+/// `alert_hours` when set, else `alert_days` in hours (0: off).
+pub fn alert_hours(hours: u32, days: u32) -> u32 {
+    if hours > 0 { hours } else { days.saturating_mul(24) }
 }
 
 /// `GET /api/v1/pc-backups/targets/{device}`: the target and every snapshot, newest first.
@@ -142,6 +338,63 @@ pub struct PcTargetDetail {
     pub key_commands: String,
     pub client_config: String,
     pub test_commands: String,
+    /// The snapshots grouped by run, newest first.
+    #[serde(default)]
+    pub runs: Vec<PcRun>,
+    /// Sizes come live from the volume's quota groups (otherwise from Measure).
+    #[serde(default)]
+    pub sizes_from_quota: bool,
+}
+
+/// `POST /api/v1/pc-backups/plan/retention`: what the NAS would delete now with these
+/// settings (read only; the settings need not be saved).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PcRetentionPlanRequest {
+    pub device: String,
+    pub retention: PcRetention,
+    #[serde(default)]
+    pub delete: DeletePolicy,
+}
+
+/// Why a snapshot stays (or goes) in a retention plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetentionReason {
+    /// The parent of the next incremental send.
+    Parent,
+    /// The NAS floor: one of the newest N, or younger than the minimum age.
+    Floor,
+    /// Younger than the retention's minimum.
+    Recent,
+    Hourly,
+    Daily,
+    Weekly,
+    Monthly,
+    Yearly,
+    /// Named in the future: never deleted by the NAS on its own.
+    Future,
+    /// An interrupted receive that nothing is receiving any more.
+    Interrupted,
+    /// Beyond every count.
+    Expired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetentionItem {
+    pub name: String,
+    pub group: String,
+    pub keep: bool,
+    pub reason: RetentionReason,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PcRetentionPreview {
+    /// Every snapshot, newest first.
+    pub items: Vec<RetentionItem>,
+    pub delete: u32,
+    /// Sum of the exclusive sizes of what goes, when every one is known (deleting several
+    /// snapshots frees at least this: what only they share goes too).
+    pub frees_at_least_bytes: Option<u64>,
 }
 
 /// What the PCs connect to and whether this NAS can receive.
@@ -197,6 +450,11 @@ pub struct PcTargetCreate {
     pub alert_days: u32,
     #[serde(default)]
     pub delete: DeletePolicy,
+    /// Wins over `alert_days` when not 0.
+    #[serde(default)]
+    pub alert_hours: u32,
+    #[serde(default)]
+    pub retention: PcRetention,
 }
 
 pub fn default_alert() -> u32 {
@@ -212,6 +470,14 @@ pub struct PcTargetUpdate {
     pub public_key: String,
     pub alert_days: u32,
     pub delete: DeletePolicy,
+    #[serde(default)]
+    pub alert_hours: u32,
+    /// Missing: unchanged.
+    #[serde(default)]
+    pub retention: Option<PcRetention>,
+    /// Missing: unchanged.
+    #[serde(default)]
+    pub ignored_groups: Option<Vec<String>>,
 }
 
 /// `POST /api/v1/pc-backups/plan/adopt`: what a folder holds, read only.

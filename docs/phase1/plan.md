@@ -1018,7 +1018,10 @@ schema 2 added the `code` and `body_format` columns.
 | `apps.catalog_updates` | `apps`, `serial` | App updates available: {apps} (a new online catalogue, `../phase2/docker-apps.md` §6.12) |
 | `apps.catalog_refused` / `apps.catalog_ok` | `reason`, `code` (refused) | Online app catalogue refused / verified again |
 | `web_access.cert_expires_soon` / `web_access.cert_renewal_overdue` / `web_access.cert_failed` / `web_access.cert_expired` / `web_access.cert_ok` | `name`, `cert` | The certificate for {name} expires soon / is not being renewed / could not be obtained / has expired / is fine again (`../phase2/docker-apps.md` §5.4) |
-| `pcbackup.late` / `pcbackup.resumed` | `device`, `days`, `alert_days` (late) | No backup from {device} for {days} days / Backups from {device} arrive again (`../research/pc-backup.md` §10) |
+| `pcbackup.late` / `pcbackup.resumed` | `device`, `days` (empty under 48 h), `hours`, `alert_hours`, `alert_days` (late) | No backup from {device} for {days} days (or {hours} hours) / Backups from {device} arrive again (`../research/pc-backup.md` §10, §11.8) |
+| `pcbackup.subvolume_late` / `pcbackup.subvolume_resumed` | `device`, `subject` (btrbk name) | {subject} of {device} is not backed up any more / is backed up again (§11.8) |
+| `pcbackup.receive_failed` / `pcbackup.receive_stuck` / `pcbackup.receive_ok` | `device`, `subject` (snapshot) | A backup from {device} was interrupted / has been running for over a day / is received normally again (§11.8) |
+| `pcbackup.low_space` / `pcbackup.space_ok` | `device`, `free_gib`, `needed_gib` | Little space left for the backups of {device} / enough again (§11.8) |
 | `synodeb.<event>` | the forward's parameters | the forward's title; events and parameters in `../synodeb-integration.md` S1 |
 
 Not coded: the target test message (built in the target's language already) and events from
@@ -1213,12 +1216,16 @@ shows the Hardware › Synology tab only when the live provider is `synology` or
 | POST | `/api/v1/system/power/cancel` | — | 204 (`shutdown -c`); 409 `nothing_pending` |
 | GET | `/api/v1/pc-backups/setup` | — | `ReceiveSetup` {account, filter, host, ssh_port?, volumes, problems [{code sshd_missing\|sshd_allow_list\|sudo_missing\|btrfs_missing\|filter_missing, subject?}]}; administrators only (all `/pc-backups` routes). See `../research/pc-backup.md` §10 |
 | POST | `/api/v1/pc-backups/plan/adopt` | `AdoptRequest` {path} | `AdoptPreview` {path, subvolume, list, groups, other_entries, suggested_device?}; read only; 400 `invalid_value` (`path`) |
-| GET | `/api/v1/pc-backups/targets` | — | `[PcTarget]` {device, description, path, public_key, key_fingerprint?, alert_days, delete {allowed, keep_last, min_age_days}, adopted, created_at_ms, state ok\|late\|waiting\|missing, snapshots, incomplete, last_received_ms?, groups, usage?} |
-| POST | `/api/v1/pc-backups/targets` | `PcTargetCreate` {device, description, path, adopt, public_key, alert_days, delete} | 202 `TaskStarted` (`pcbackup.create`: account + sudoers, new subvolume or adopted folder, `authorized_keys`); 400 `invalid_value` (`device`, `path`, `public_key`, `alert_days`, `delete.*`); 409 `already_exists` |
-| GET / PUT / DELETE | `/api/v1/pc-backups/targets/{device}` | — / `PcTargetUpdate` {description, public_key, alert_days, delete} / — | `PcTargetDetail` {target, list, key_line?, key_commands, client_config, test_commands} (`?host=` for the PC's snippets) / 202 (`pcbackup.update`) / 202 (`pcbackup.remove`: key gone, folder kept); 404 `not_found` |
+| GET | `/api/v1/pc-backups/targets` | — | `[PcTarget]` {device, description, path, public_key, key_fingerprint?, alert_days, alert_hours (0: alert_days counts), delete {allowed, keep_last, min_age_days}, retention {owner pc\|nas, gfs `Retention`}, ignored_groups, adopted, created_at_ms, state ok\|late\|waiting\|missing, snapshots, incomplete, last_received_ms?, groups, usage?, issues [{code late\|subvolume_late\|receive_failed\|receive_stuck\|low_space, subject?, since_ms?, free_bytes?, needed_bytes?}], bare_metal {ready, manifest_snapshot?, subvolumes, loader?, missing, warnings [{code no_snapshots\|no_manifest\|manifest_invalid\|manifest_unsupported\|no_root\|subvolume_missing\|loader_unknown\|manifest_stale\|latest_run_incomplete, subject?}]}, free_bytes?, volume_bytes?, receiving, last_prune? {at_ms, deleted, interrupted, error?}} |
+| POST | `/api/v1/pc-backups/targets` | `PcTargetCreate` {device, description, path, adopt, public_key, alert_days, delete, alert_hours, retention} | 202 `TaskStarted` (`pcbackup.create`: account + sudoers, new subvolume or adopted folder, `authorized_keys`); 400 `invalid_value` (`device`, `path`, `public_key`, `alert_days`, `alert_hours`, `delete.*`, `retention.gfs.*`); 409 `already_exists`. With `retention.owner: nas` the key line gets `--delete-interrupted` instead of `--delete`: the PC can only add |
+| GET / PUT / DELETE | `/api/v1/pc-backups/targets/{device}` | — / `PcTargetUpdate` {description, public_key, alert_days, delete, alert_hours, retention? , ignored_groups?} (missing: unchanged) / — | `PcTargetDetail` {target, list [`ReceivedSnapshot` {…, parent, size? {referenced_bytes, exclusive_bytes, read_at_ms, from_quota}}], runs [{timestamp, created_ms?, snapshots, lacks, incomplete, referenced_bytes?, exclusive_bytes?}], sizes_from_quota, key_line?, key_commands, client_config, test_commands} (`?host=` for the PC's snippets) / 202 (`pcbackup.update`) / 202 (`pcbackup.remove`: key gone, folder kept); 404 `not_found` |
 | POST | `/api/v1/pc-backups/targets/{device}/usage` | — | 202 (`pcbackup.usage`, `btrfs filesystem du -s`) |
 | GET | `/api/v1/pc-backups/targets/{device}/browse?snapshot=&path=` | — | `SnapshotListing`; 400 `invalid_value` (`snapshot`, `path`) |
 | POST | `/api/v1/pc-backups/targets/{device}/copy-out` | `CopyOutRequest` {snapshot, path, destination} | 202 (`pcbackup.copy_out`, reflink or copy, never overwrites); 400 `invalid_value` (`destination`, `path`) |
+| POST | `/api/v1/pc-backups/plan/retention` | `PcRetentionPlanRequest` {device, retention, delete} | `PcRetentionPreview` {items [{name, group, keep, reason parent\|floor\|recent\|hourly\|daily\|weekly\|monthly\|yearly\|future\|interrupted\|expired}], delete, frees_at_least_bytes?}; read only; 400 `invalid_value` (`retention.gfs.*`), 404 (`device`). See `../research/pc-backup.md` §11.8 |
+| POST | `/api/v1/pc-backups/targets/{device}/prune` | — | 202 (`pcbackup.prune`: one retention pass now, under the folder's lock, at most 50 deletes; also hourly); 409 `conflict` when the PC owns retention |
+| POST | `/api/v1/pc-backups/targets/{device}/sizes?again=` | — | 202 (`pcbackup.sizes`: `btrfs filesystem du -s` of each snapshot not measured yet, idle I/O, cancellable; nothing to do with quota groups on) |
+| DELETE | `/api/v1/pc-backups/targets/{device}/snapshots/{name}` | — | 202 (`pcbackup.delete_snapshot`, under the folder's lock); 409 `conflict` (`snapshot`: the parent of the next incremental send), 409 `busy` (an interrupted receive while a receive runs), 404 |
 
 Internal only (rynasd, never forwarded, called as root by `rynasctl power scheduled-shutdown
 <rule>`): `POST /v1/power/schedule/rules/{rule}/shutdown` (202 `TaskStarted`, task
@@ -1661,77 +1668,113 @@ asks every 2 s while the page is visible (a written exception to S1, see D-PROCE
 unit gains `CAP_KILL`, `CAP_SYS_NICE` and `CAP_SYS_PTRACE` (read only: the I/O counters and
 listening ports of every user's processes; Marco 2026-11-11).
 
-## API v1: PC backup (agent, restic repository per PC)
+## API v1: PC backup, file method (agent, restic repository per backup group)
 Module `rynasd::pc_agent`, types in `rynas_api_types::pcagent`, design in
-`../research/pc-backup.md` §4 (D-PCBACKUP, taken 2026-11-11). Two audiences:
+`../research/pc-backup.md` §4 (D-PCBACKUP, taken 2026-11-11; groups and the memory budget
+§4.7). The btrfs method (snapshots received with btrbk) is `/api/v1/pc-backups/…`
+(`rynasd::pc_backup`). Two audiences:
 
 - **the console** (session + administrator, rynasd's `admin_only` layer and an audit line on
   every change), under `/api/v1/pcbackup/…`;
 - **the agent** (`rynas-agent` on the PC or on a live system), with no session and no CSRF:
   a pairing code, a device token or a restore session, checked by rynasd only. rynas-web
-  passes these routes through as a stream (`Authorization`, `Content-Type`, `Content-Length`,
-  `Range`, `Accept` and the client address; nothing else) and never reads a session for them.
+  (`rynas_web::pc_agent`) passes these routes through as a stream (`Authorization`,
+  `Content-Type`, `Content-Length`, `Range`, `Accept` and the client address; nothing else)
+  and never reads a session for them.
+
+**Backup groups.** A repository belongs to a group; by default every PC gets a group of its
+own (any key of a restic repository reads all of it). A pairing may join an existing group
+(identical data stored once; the PCs of one group can read each other's data, which the
+console says). Every version carries the tags `rynas-pc` and `pc-<device>`: listings,
+browsing and retention are per PC; the quota and the maintenance are per group, and the
+bytes each PC uploads are counted per PC.
 
 Codes and tokens: pairing codes `XXXX-XXXX-XXXX` (Crockford base32, 60 bits, one-time,
-15 min), restore codes (same form, one-time, 1 h, read-only), device tokens and restore
-session tokens (256 bits, hex). rynasd keeps only their SHA-256. Ten wrong codes in ten
-minutes refuse every code for ten minutes (429 `rate_limited` with `Retry-After`).
+15 min), restore codes (same form, one-time, 1 h, read-only, one PC), device tokens and
+restore session tokens (256 bits, hex). rynasd keeps only their SHA-256. Ten wrong codes in
+ten minutes refuse every code for ten minutes (429 `rate_limited`).
 
-State: `<state>/pc-agent/registry.json` (devices, settings, history, codes hashed; written
-atomically), the latest manifest of each device in `<state>/pc-agent/manifests/<device>.json`
-(≤ 1 MiB, display only), the NAS key password of each repository sealed with rynasd's age key.
-Repositories: `<folder>/<device>/` (a btrfs subvolume when the folder is on btrfs,
-`0700 root:root`), created by the NAS with the worker (`init`, then `add_key` for the PC and
-for the recovery kit).
+State: `<state>/pc-agent/registry.json` (settings, groups, devices, history, codes hashed;
+written atomically), the newest manifest of each PC in `<state>/pc-agent/manifests/`
+(≤ 1 MiB, display only), restore logs in `<state>/pc-agent/restore-logs/`, the NAS key
+password of each group sealed with rynasd's age key. Repositories: `<folder>/<group>/` (a
+btrfs subvolume when the folder is on btrfs, `0700 root:root`), created by the NAS with the
+worker (`init_pc`, then `add_key` for each PC and for the recovery kit).
+
+**Maintenance** (daily at `maintenance_hour`, or on demand): forget per PC (its retention and
+minimum age), prune, check with a rotating twelfth of the data read back, sizes again; in the
+worker's unit with `MemoryMax` = `maintenance_memory_pct` of the RAM. The need is estimated
+from the size of the index files (40 bytes per blob on disk, 250 in memory, 32 MiB base); over
+the budget, prune and check are postponed and `PcMaintenance.postponed` says why. A
+maintenance starts only when no PC of the group uploaded in the last ten minutes or reports
+progress; while it runs, uploads answer 423.
 
 ### Console
 
 | Method | Path | Body | Response |
 |---|---|---|---|
-| GET | `/api/v1/pcbackup` | — | `PcBackupOverview` {settings `PcAgentSettings` {folder, default_quota_gib, maintenance_hour}, devices: [`PcDevice`], pairings: [`PairingView` {id, description, expires_ms}], fingerprint? (SHA-256 of the served certificate), dry} |
-| PUT | `/api/v1/pcbackup/settings` | `PcAgentSettings` | 204; 400 `invalid_value` field `folder` (must be inside a volume or the system folder), `maintenance_hour` |
-| POST | `/api/v1/pcbackup/pairings` | `PairingRequest` {description, quota_gib?} | 201 `PairingCreated` {id, code, expires_ms, fingerprint?, command}; 409 `conflict` without a folder |
+| GET | `/api/v1/pcbackup` | — | `PcBackupOverview` {settings `PcAgentSettings` {folder, default_quota_gib, maintenance_hour, maintenance_memory_pct}, groups: [`PcGroup`], devices: [`PcDevice`], pairings: [`PairingView` {id, description, group?, expires_ms}], memory_budget_bytes, fingerprint? (SHA-256 of the served certificate), dry} |
+| PUT | `/api/v1/pcbackup/settings` | `PcAgentSettings` | 204; 400 `invalid_value` fields `folder` (inside a volume or the system folder), `maintenance_hour` (0–23), `maintenance_memory_pct` (10–80) |
+| POST | `/api/v1/pcbackup/pairings` | `PairingRequest` {description, group? (join), quota_gib? (new group)} | 201 `PairingCreated` {id, code, expires_ms, fingerprint?, command (`{url}` for the browser to fill)}; 409 `conflict` without a folder; 400 field `group` |
 | DELETE | `/api/v1/pcbackup/pairings/{id}` | — | 204 |
-| GET | `/api/v1/pcbackup/devices/{device}` | — | `PcDeviceDetail` {device `PcDevice`, history: [`PcRun`], manifest? `Manifest`} |
-| PUT | `/api/v1/pcbackup/devices/{device}` | `PcDeviceSettings` {description, plan `PcPlan` {interval_hours 1–168, start_delay_min, excludes, freeze hot\|freeze, freeze_max_secs 5–3600, paused}, retention `Retention`, min_age_days, quota_gib (0 = none), alert_hours, critical_hours} | `PcDevice`; the plan reaches the agent at its next poll |
-| DELETE | `/api/v1/pcbackup/devices/{device}?delete_data=` | — | 202 (`pcbackup.revoke`): the token stops at once, the PC's key file is removed; the repository stays unless `delete_data=true` |
-| POST | `/api/v1/pcbackup/devices/{device}/backup-now` | — | 204 (command queued for the agent's poll) |
+| PUT | `/api/v1/pcbackup/groups/{group}` | `PcGroupSettings` {description, quota_gib} | `PcGroup` |
+| DELETE | `/api/v1/pcbackup/groups/{group}` | — | 202 (`pcbackup.delete-group`: the repository and every version deleted); 409 while a PC of the group is not revoked |
+| POST | `/api/v1/pcbackup/groups/{group}/maintenance` | — | 202 (`pcbackup.maintenance`); 409 `busy` while a PC of the group uploads |
+| POST | `/api/v1/pcbackup/groups/{group}/recovery-kit` | — | `RecoveryKit` {group, description, devices, repository, password, created_ms, fingerprint?}: a new recovery key file each time (the previous one is removed); the password is answered only here |
+| GET | `/api/v1/pcbackup/devices/{device}` | — | `PcDeviceDetail` {device `PcDevice`, history: [`PcRun`] newest first, manifest? `Manifest`} |
+| PUT | `/api/v1/pcbackup/devices/{device}` | `PcDeviceSettings` {description, plan `PcPlan` {interval_hours 1–168, start_delay_min ≤ 1440, excludes ≤ 200, freeze hot\|freeze, freeze_max_secs 5–3600, paused}, retention `Retention`, min_age_days, alert_hours, critical_hours} | `PcDevice`; the plan reaches the agent at once (its long poll answers) |
+| DELETE | `/api/v1/pcbackup/devices/{device}` | — | 202 (`pcbackup.revoke`): the token stops at once, the PC's key file is removed; the versions stay readable in the group until the group is deleted |
+| POST | `/api/v1/pcbackup/devices/{device}/backup-now` | — | 204 (a command for the agent's poll); 409 when revoked |
 | POST | `/api/v1/pcbackup/devices/{device}/cancel` | — | 204 |
-| POST | `/api/v1/pcbackup/devices/{device}/maintenance` | — | 202 (`pcbackup.maintenance`: forget with the retention and the minimum age, prune, check with a rotating twelfth read back); 409 `busy` while the PC uploads |
-| GET | `/api/v1/pcbackup/devices/{device}/versions` | — | `[SnapshotEntry]` (`backup` types) |
-| GET | `/api/v1/pcbackup/devices/{device}/browse?version=&path=` | — | `[NodeEntry]` |
-| GET | `/api/v1/pcbackup/devices/{device}/download?version=&path=` | — | the file, streamed from the worker (no size limit, `Content-Disposition: attachment`) |
-| GET | `/api/v1/pcbackup/devices/{device}/zip?version=&path=…` | — | a zip (stored, zip64) of the files and folders named by every `path`, streamed |
-| POST | `/api/v1/pcbackup/devices/{device}/recovery-kit` | — | `RecoveryKit` {device, description, repository, password, created_ms, fingerprint?}: a new recovery key file each time (the previous one is removed); the password is answered only here |
+| GET | `/api/v1/pcbackup/devices/{device}/versions` | — | `[SnapshotEntry]` (`backup` types) of this PC |
+| GET | `/api/v1/pcbackup/devices/{device}/browse?version=&path=` | — | `[NodeEntry]`, folders first |
+| GET | `/api/v1/pcbackup/devices/{device}/download?version=&path=` | — | the file, streamed from the worker's stdout (no size limit, `Content-Disposition: attachment`); 2 downloads at once (429 beyond) |
+| GET | `/api/v1/pcbackup/devices/{device}/zip?version=&path=…` | — | a zip (stored, zip64, data descriptors) of the files and folders named by every `path`, streamed |
 | POST | `/api/v1/pcbackup/devices/{device}/restore-code` | — | 201 `RestoreCodeCreated` {code, expires_ms, device} |
 
 `PcDevice`: {device, description, hostname, os, arch, agent_version, created_ms,
-last_seen_ms?, state waiting\|ok\|running\|late\|critical\|failed, last_ok_ms?, last_run? `PcRun`,
-progress? `PcProgress`, repository, used_bytes, quota_bytes, versions, settings,
-bare_metal `BareMetalReady` {ready, reasons}, maintenance `PcMaintenance`, command?,
-recovery_kit_ms?}. Notifications `pcbackup.agent_late` (firing, warning) / `pcbackup.agent_critical`
-(critical) close with `pcbackup.agent_resumed`; a failed run raises `pcbackup.agent_failed` once
-per failure streak.
+last_seen_ms?, state waiting\|ok\|running\|late\|critical\|failed, last_ok_ms?, last_run?
+`PcRun`, progress? `PcProgress`, group, uploaded_bytes, versions, settings, bare_metal
+`BareMetalReady` {ready, reasons}, command?, revoked}. `PcGroup`: {group, settings,
+repository, created_ms, devices, used_bytes, maintenance `PcMaintenance` {last_ms?, ok,
+running, error?, freed_bytes, removed_versions, estimate_bytes, blobs, postponed?},
+recovery_kit_ms?}. Notifications `pcbackup.agent_late` (warning) / `pcbackup.agent_critical`
+(critical) close with `pcbackup.agent_resumed`; a failed run raises `pcbackup.agent_failed`
+once per failure streak.
 
 ### Agent
 
 | Method | Path | Auth | Body | Response |
 |---|---|---|---|---|
-| POST | `/api/v1/pcbackup/agent/pair` | pairing code in the body | `PairRequest` {code, hostname, machine_id, os, arch, agent_version} | `PairResponse` {device, token, repo_password, nas_name, plan `AgentPlan`}; 401 `invalid_credentials` |
-| GET | `/api/v1/pcbackup/agent/plan?rev=&wait=` | device token | — | `AgentPlan` {rev, plan, command?}; with `wait` (≤ 55 s) it answers when `rev` changes or at the deadline |
-| POST | `/api/v1/pcbackup/agent/status` | device token | `AgentStatus` {run_id, phase, bytes_done, bytes_total, files_done, files_total, message?} | 204 |
-| POST | `/api/v1/pcbackup/agent/report` | device token | `AgentReport` {run_id, started_ms, ended_ms, ok, snapshot?, files, bytes_read, bytes_added, changed_during, changed_count, error?, captures, manifest?} | 204 |
-| POST | `/api/v1/pcbackup/agent/restore/login` | restore code in the body | `RestoreLogin` {code} | `RestoreSession` {token, expires_ms, devices: [`RestoreDevice` {device, description, hostname, repo_password}]} |
-| POST | `/api/v1/pcbackup/agent/restore/report` | restore session | `RestoreReport` {device, version, ok, message, log} | 204 |
-| HEAD, GET | `/api/v1/pcbackup/repo/{device}/config` | token or session | — | the repository config |
-| GET | `/api/v1/pcbackup/repo/{device}/{type}/` | token or session | — | list; `[{name, size}]` with `Accept: application/vnd.x.restic.rest.v2`, names otherwise |
-| HEAD, GET | `/api/v1/pcbackup/repo/{device}/{type}/{name}` | token or session | — | the file; `Range: bytes=a-b` answers 206 |
-| POST | `/api/v1/pcbackup/repo/{device}/{type}/{name}` | device token | the file | 200; the name must be the SHA-256 of the body (400 otherwise), an existing name is never overwritten (200 when it is the same file, 403 otherwise); `config` and `keys` 403; over the quota 413; 423 `busy` while the NAS maintains the repository |
-| DELETE | `/api/v1/pcbackup/repo/{device}/locks/{name}` | device token | — | 200; any other DELETE 403 |
-| POST | `/api/v1/pcbackup/repo/{device}/?create=true` | — | — | 403 (the NAS creates repositories) |
+| POST | `/api/v1/pcbackup/agent/pair` | pairing code in the body | `PairRequest` {code, hostname, machine_id, os, arch, agent_version} | `PairResponse` {device, group, token, repo_password, nas_name, plan `AgentPlan`}; 401 `invalid_credentials` |
+| GET | `/api/v1/pcbackup/agent/plan?rev=&wait=` | device token | — | `AgentPlan` {rev, plan, command?}; with `wait` (≤ 55 s) it answers when `rev` changes or at the deadline; 401 once revoked |
+| POST | `/api/v1/pcbackup/agent/status` | device token | `AgentStatus` {run_id, phase preparing\|snapshot\|uploading\|finishing, bytes_done, bytes_total, files_done, files_total, message?} | 204 |
+| POST | `/api/v1/pcbackup/agent/report` | device token | `AgentReport` {`PcRun` fields, manifest?, agent_version} | 204 |
+| POST | `/api/v1/pcbackup/agent/restore/login` | restore code in the body | `RestoreLogin` {code} | `RestoreSession` {token, expires_ms, devices: [`RestoreDevice` {device, group, description, hostname, repo_password}]} |
+| POST | `/api/v1/pcbackup/agent/restore/report` | restore session | `RestoreReport` {device, version, ok, message, log (≤ 64 KiB)} | 204 |
+| HEAD, GET | `/api/v1/pcbackup/repo/{group}/config` | token or session | — | the repository config |
+| GET | `/api/v1/pcbackup/repo/{group}/{type}/` | token or session | — | list; `[{name, size}]` with `Accept: application/vnd.x.restic.rest.v2`, names otherwise |
+| HEAD, GET | `/api/v1/pcbackup/repo/{group}/{type}/{name}` | token or session | — | the file; `Range: bytes=a-b` answers 206 |
+| POST | `/api/v1/pcbackup/repo/{group}/{type}/{name}` | device token | the file | 200; the name must be the SHA-256 of the body (400 otherwise), an existing name is never overwritten (200 when it is the same file, 403 otherwise); `config` and `keys` 403; over the quota or 1 GiB 413; 423 `busy` while the NAS maintains the repository |
+| DELETE | `/api/v1/pcbackup/repo/{group}/locks/{name}` | device token | — | 200; any other DELETE 403 |
+| POST | `/api/v1/pcbackup/repo/{group}/?create=true` | — | — | 403 (the NAS creates repositories) |
 
 Types are `data`, `keys`, `locks`, `snapshots`, `index`; on disk the restic local layout
-(`data/<2 hex>/<name>`), so stock restic and the worker open the folder directly. Device tokens
-work only on their own device's path; restore sessions only read, only their devices. A token
-is accepted as `Authorization: Bearer <token>` or as the password of HTTP Basic (user = device),
-which is what restic's `rest:` URLs send.
+(`data/<2 hex>/<name>`), so stock restic and the worker open the folder directly. Device
+tokens work only on their own group's path; restore sessions only read, only their PCs'
+groups. A token is accepted as `Authorization: Bearer <token>` or as the password of HTTP
+Basic (user = device), which is what restic's `rest:` URLs send. Tested with stock restic
+0.18.1 as the client (backup, snapshots; forget and key add refused; a restore session only
+reads) and with `rynas-agent`.
+
+**Layout manifest** (`/.rynas/manifest.json`, `rynas_api_types::pcagent::Manifest`, one schema
+for both methods): `format` 1, `written_at_ms`, `agent_version`, `hostname`, `machine_id`,
+`arch`, `os_release`, `boot` {uefi, loader grub\|systemd_boot\|refind\|unknown, shim, uki,
+esp?, efi_id?, initramfs, cmdline, kernel_cmdline?, grub_cmdline?, kernels}, `disks` [{name,
+model, serial, wwn, size_bytes, logical_sector, table? {kind, disk_guid, partitions [{number,
+start_lba, size_lba, type_guid, part_guid, name, attrs, dev}]}}], `filesystems` [{device,
+source partition\|luks\|lvm\|md\|disk, fstype, uuid, label, mounts [{path, subvol?,
+options}], size_bytes, used_bytes, capture?, features, subvolumes, default_subvol?}], `luks`
+(parameters only), `swap`, `lvm_report?`, `md`, `fstab`, `crypttab?`, and for the btrfs
+method `btrbk` {snapshot_dir, subvolumes [{name, path, mount}]}. A reader refuses an unknown
+`format`.

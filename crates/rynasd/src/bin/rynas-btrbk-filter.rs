@@ -42,7 +42,9 @@ fn deletes_allowed(a: &FilterArgs, plan: &Plan) -> Result<(), String> {
     let (entries, _) =
         scan_dir(std::path::Path::new(&a.root)).map_err(|e| format!("{}: {e}", a.root))?;
     let policy = DeletePolicy {
-        allowed: a.delete,
+        // with --delete-interrupted only interrupted receives may go (delete_refusal lets
+        // those through before it looks at `allowed`)
+        allowed: a.delete && !a.interrupted_only,
         keep_last: a.keep_last,
         min_age_days: a.min_age_days,
     };

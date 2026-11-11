@@ -10,6 +10,8 @@ Marco's request, 2026-11-11: "voglio una soluzione completa che permetta anche i
 
 This **replaces the design of 2026-11-07** (D-PCBACKUP: three engines image/btrbk/files, `rynas-recovery` ISO, netboot). What already ships stays as it is: btrbk receiving (§10, and §7 for its future). Web research was done on 2026-11-07 and 2026-11-11, and the VM tests on 2026-11-11 (§3). **[U]** marks a claim that could not be verified.
 
+> **Marco, 2026-11-11, after review:** (1) repositories are per **backup group**: one group per PC by default (isolation), several PCs may share a group to deduplicate across them (they can then read each other's data; prune memory grows with the group's size). (2) **btrbk is an equal alternative**, not a secondary engine: a PC chooses native btrfs snapshots (btrbk, recommended when the root is btrfs) or file backup (restic); both are first-class in the UI and in the restore TUI. Where the text below says "per PC" or "maintenance only", these two points win.
+
 ---
 
 ## 1. Are restic or rustic enough on their own? No
@@ -246,6 +248,24 @@ Built on the D-BACKUP restic browser, which already exists (browse, restore, dow
   - a compromised NAS loses everything, which is why the off-NAS copy (D-BACKUP) matters.
 - **Never:** credentials in a file on a USB stick; the LUKS header in the backup; a device token in the URL; a pairing code that is not one-time.
 
+### 4.7 Memory of the NAS-side maintenance (implemented 2026-11-11)
+
+Marco's request: size the maintenance to the machine's RAM.
+
+- **Engine.** Prune, check and forget run in `rynas-backup-worker` (`rustic_core`), never the restic binary. rustic loads only the index a command needs (forget reads only the snapshots). Nowhere in rynas does the restic binary run, so no GOGC/GOMEMLIMIT is needed.
+- **Budget.** `maintenance_memory_pct` (10–80 %, default 40) of MemTotal, at least 256 MiB. The worker runs in its transient unit with `MemoryMax` = the budget and `MemoryHigh` = 3/4 of it, plus `Nice=19`, idle I/O and the same sandbox as the other worker units (the dedup units follow the same pattern).
+- **Estimate before running.** Counting the blobs with the worker would cost as much memory as the prune itself (measured below), so the NAS reads only the **size of the index files**: about 40 bytes per blob on disk (zstd-compressed JSON; the 32-byte blob ids do not compress). Need = 32 MiB + blobs × 250 bytes. A prune and check that would not fit are **postponed**, and the reason shows on the group (forget still runs). The console shows each group's estimate against the budget. "Join a group" warns when one more PC would push the group past it.
+- **New repositories** (`init_pc` in the worker) use larger packs: data packs of 64 MiB that grow with the repository up to 512 MiB (restic: 16 MiB; rustic's default: 32 MiB without a limit). They also use a **2 MiB average chunk** (min 1, max 16) instead of restic's fixed 1 MiB (512 KiB–8 MiB). That means about half the data blobs, and so half the index in memory, for files over 1 MiB. Files under 1 MiB are one blob either way. The price is less dedup inside large files that change in small places: a changed region rewrites about 2 MiB instead of 1. Stock restic still reads these repositories (blobs are content-addressed, and it ignores the extra config fields); backups it writes into one would be chunked with its own defaults. **Existing repositories never change chunking**, because that would split their dedup in two.
+
+Measured on pc-work, 2026-11-11 (`rynas-backup-worker` release build; restic 0.18.1 wrote N one-blob files twice, the second time without 1000 of them; peak RSS from `getrusage`):
+
+| blobs | index on disk | index_info | forget | prune | check (structure) | check + 1/12 data |
+|---|---|---|---|---|---|---|
+| 300 000 | — | 72 MiB | 40 MiB | 77 MiB | 79 MiB | 97 MiB |
+| 1 200 000 | 46 MiB (40.4 B/blob) | 237 MiB | 40 MiB | 247 MiB | 282 MiB | 271 MiB |
+
+The slope is about 198 bytes per blob for prune and 236 for check; the base is about 20 MiB. A 4 GB DS920+ with the default 40 % budget (≈1.6 GB) therefore maintains a group of about 6 million blobs: roughly 6–12 TB of PC data at 1–2 MiB per blob.
+
 ## 5. Phases
 
 | Phase | Content | Rough size | Main risks |
@@ -280,7 +300,7 @@ It **stays as it is**, renamed "PC snapshots (btrbk)". It is implemented, harden
 - the btrbk-nas console port;
 - bare metal through btrbk.
 
-The new restic-based "PC backup" tab becomes the recommended path, and the wizard says so. A PC may use both. Rewritten D-PCBACKUP text follows Marco's answers below.
+**Revised 2026-11-11:** bare metal through btrbk comes back as a source of the same agent TUI, see §11. The new restic-based "PC backup" tab becomes the recommended path, and the wizard says so. A PC may use both. Rewritten D-PCBACKUP text follows Marco's answers below.
 
 ## 8. Decisions for Marco
 
@@ -407,6 +427,180 @@ The first slice of phase 2: Linux PCs push btrbk snapshots to the NAS (`target s
 - Space per device through qgroups is not done: `du` on demand only.
 
 Sources (2026-11-08): https://github.com/digint/btrbk/blob/v0.32.7/ssh_filter_btrbk.sh · https://github.com/digint/btrbk/blob/master/doc/ssh_filter_btrbk.1.asciidoc · https://github.com/digint/btrbk#setting-up-ssh · https://github.com/digint/btrbk/blob/master/doc/btrbk.conf.5.asciidoc · https://security-tracker.debian.org/tracker/CVE-2026-62943 · https://btrfs.readthedocs.io/en/latest/btrfs-receive.html · https://forums.urbackup.org/t/ho-do-you-add-clients/12848/6 · https://kb.synology.com/en-ca/DSM/tutorial/How_back_up_PC_physical_server_with_ABB · https://truenas.com/docs/core/coretutorials/systemconfiguration/configuringsshconnections/
+
+## 11. btrbk PCs: stronger receive and bare-metal restore
+
+> **Marco, 2026-11-11, decisions on §11:** all seven recommendations accepted. On retention and transport: for new btrfs PCs **the agent does everything** (read-only snapshots, parent choice, `btrfs send` of the system's btrfs-progs over HTTPS to rynas, a few local snapshots kept as parents); rynas runs the NAS-side retention. Snapshot names stay btrbk-compatible so a PC can switch either way without a new full send. PCs already set up with btrbk over SSH (such as PC-casa) keep working as today; the agent restores both.
+
+**In short:** Marco's request (2026-11-11) brings **bare metal through btrbk** back. §7 had dropped it. The btrbk receive of §10 stays as it is. The plan adds four things:
+- a **layout manifest that travels inside the root snapshot**;
+- NAS-side views, retention and readiness checks;
+- a **btrbk source in the same `rynas-agent` restore TUI** that phase 1 builds for restic;
+- an HTTPS stream from rynas, so nothing has to be kept by hand on a USB stick.
+
+The logic comes from Marco's `restore_btrfs_system` (MIT; https://github.com/rylos/restore_btrfs_system, read 2026-11-11). B1 (the NAS side) is implemented, see §11.8; the rest is not. **[U]** marks claims still to verify in a VM.
+
+### 11.1 What `restore_btrfs_system` does (and what we take)
+
+It is two bash front ends with the same logic (`restore_btrfs_system.sh` CLI, `restore_tui.sh` dialog), plus a pacman hook and a read-only test (`test_restore.sh`). Its job is to restore an Arch btrfs PC from btrbk snapshots on a Synology NAS.
+
+| Area | What it does | Taken? |
+|---|---|---|
+| **Modes** | `--standard` (@ + @home), `--full` (+ @games), `--system-only` (format, @ only), additive `--home-only` / `--games-only` (no format, @ must already be in the pool), interactive, TUI "Custom" checklist | yes, generalised from the manifest (§11.4) |
+| **Snapshot choice** | newest per subvolume by default; `--snapshot-root/home/games TS` checked against `YYYYMMDDTHHMM`; menu lists from the NAS; override flags that a mode ignores raise a warning | yes, plus a "same run" set (the same btrbk timestamp across subvolumes) |
+| **Subvolume rules** | @games is mounted inside @home: formatting with @games requires @home; additive @games requires @home in the pool | yes, derived from fstab nesting instead of hard-coded names |
+| **Disk identity** | NVMe list with size, model and **serial**; the summary repeats model + serial ("nvmeX changed between two boots on 2026-10-26"); the disk holding the script is marked but still selectable; the script's own disk is mounted by **PARTUUID** | yes; disks from the manifest by model + serial + size |
+| **Safety before wiping** | root required; `flock` lock; NAS ping + persistent SSH; **every snapshot checked on the NAS before formatting**; **disk-in-use guard** (mounts or swap, `MOUNTPOINTS` with a `MOUNTPOINT` fallback); **empty partition dump refused** (`test -s`: `sfdisk < empty` returns 0); disk-too-small warning computed from the dump; partition table and `/boot` backup **checked before the wipe**; typed `yes` in every mode (`--yes` = 5 s countdown) | all of it, except the countdown |
+| **Partitioning** | `sfdisk` dump kept inside @ by a pacman hook (atomic tmp + `mv`); keeps label-id and PARTUUIDs; **if another attached disk already has those GUIDs**, they are stripped and new ones generated; `udevadm settle` + polling for the device nodes | yes; the GPT is written by the agent (phase 1 `gpt.rs`), from the manifest |
+| **Data** | `ssh nas btrfs send` piped (`pv` for progress) into `btrfs receive` into `btrbk_snapshots/`, then `btrfs subvolume snapshot` writable as `@`, `@home`…; existing subvolumes renamed `_backup_<ts>`, never deleted; after the receive, checks that the subvolume exists with a non-zero generation | yes; this is also btrbk's documented restore. The received snapshot stays as the parent of the next incremental (btrbk README) |
+| **Recreated empty** | `@log`, `@pkg` | yes, from the manifest's "excluded" list |
+| **Boot** | `/boot` (the ESP, kernels included on Arch) from the newest `.bootbackup/*_post` copy inside the snapshot; `arch-chroot bootctl install`, **non-fatal** (BIOS-booted live system, no efivars); the README says "boot the live system in UEFI mode" | partly; regeneration comes first, the ESP copy is the fallback (§11.4 step 7) |
+| **fstab/loader fix** | rewrites old→new PARTUUID in fstab and `loader/entries`; comments out non-restored subvolumes and uncomments restored ones (only lines it commented, `^#\s*PARTUUID=`); **sanity check on active lines**; old PARTUUID still in entries = failure | yes, with an explicit marker comment instead of a regex |
+| **End** | reboot offered **only** when the PARTUUID fix is verified and the boot files came back; the log is copied to the target's `/var/log`, or to the script's disk when the run fails earlier; **dry-run** runs the real fstab regex on a copy with mock IDs and shows the diff | yes; the log also goes to the NAS |
+| **Not taken** | SSH key in `keys/id_rsa` on the stick, `root@NAS`, `StrictHostKeyChecking=no`, CIFS with a password, fixed IP/paths/user, NVMe only, `pacman -Sy` of dependencies, hard-coded subvolume names | §9 mistakes 1 and 5 |
+
+### 11.2 NAS side: what to add to Backup › PCs
+
+1. **Received snapshots per PC.** A table grouped by subvolume. Each row shows the btrbk timestamp, the NAS receive time (`otime`) and its size. Sizes come from the existing `du` task, run per snapshot: exclusive bytes (what deleting it frees) and referenced bytes (what a restore transfers). A **run view** groups by timestamp, so "everything from 2026-11-10 03:00" is one row. Incomplete receives get their own badge and a delete action.
+2. **NAS-side retention (optional per PC).** Today btrbk's `target_preserve` on the PC deletes through the filter, and the NAS only adds a floor (keep-last N, min-age). The plan adds a **"NAS owns retention"** mode with GFS presets (D-SNAP's preview code: what would go, and how much it frees). In this mode the PC's key gets no `--delete` and its `target_preserve` is `no`. A NAS task then deletes through `rynas-btrfs`'s chain-safe delete, which always keeps the newest complete snapshot of each subvolume, the parent of the next incremental. That gives ABB-like ransomware resistance: a PC's key can only add. **Recommended as the default for new PCs.**
+3. **Health and alerts** (on top of `pcbackup.late`/`resumed`):
+   - **missing subvolume**: a group that stops while the others go on, for example `@home` and not `@`;
+   - **stuck interrupted receive** older than 1 day;
+   - **manifest stale**: older than its root snapshot by more than N days, or one that lists a subvolume the NAS never received;
+   - **volume free space** below the size of the last full set;
+   - **"Bare-metal ready"**: the manifest is present and parsed, every non-excluded subvolume has a snapshot, the boot loader is known, and a restore code can be made. One state per PC with a reason, the same check as the restic card (§4.1).
+
+   Notifications fire only when the state changes, as today.
+4. **Layout manifest from the snapshot.** The PC keeps `/.rynas/manifest.json` inside its root subvolume (§11.3), so each `@` snapshot carries the layout *of that moment*. This is the coherence argument of `restore_btrfs_system`'s hook. The NAS reads it from received snapshots:
+   - descriptor walk, `O_NOFOLLOW`, size cap 1 MiB, parsed as untrusted input, cached by snapshot UUID;
+   - shown as disks, partitions, subvolumes and boot loader on the PC page. No hand-kept table like the README's.
+5. **Setup helper.** The existing panel already prints the key commands, a `btrbk.conf` and a test. Three additions:
+   - `rynas-agent btrbk-setup --nas <url> --device <d>` (one command, shown filled in) reads the PC's real layout (top-level mount, subvolumes, which are snapshot-worthy, the existing `snapshot_dir`) and writes `/etc/btrbk/btrbk.conf`. It shows a diff when one exists and never overwrites silently. It also creates the key and installs the manifest hook (§11.3). For PCs without the agent, the panel keeps the hand-written snippet, now generated from the subvolume list the user ticks;
+   - the timer: the distro's `btrbk.timer`, with a `btrbk.service.d/rynas.conf` drop-in that runs `ExecStartPre=rynas-agent manifest`;
+   - a **first-run check** on the NAS, "first snapshot of each subvolume received", which turns the card green.
+6. **Restore path.** The PC page gets two parts:
+   - "Restore bare metal", with the same two commands as §4.4 (download the agent, `sudo ./rynas-agent restore`) and a **restore code** button (one-time, 1 h, read-only, one device);
+   - file restore and copy-out, already in place (§10).
+
+   The NAS serves the data over **HTTPS**:
+   - `GET /api/v1/pc-backups/targets/{device}/manifest?snapshot=`;
+   - `GET …/send?snapshot=<name>[&parent=<name>]`, a `btrfs send` stream compressed with zstd. It is allowed only for read-only, received, complete snapshots directly in the device folder. The same `verify_root` walk applies, it is audited, and one stream per device runs at a time;
+   - authentication: a restore-code session or an administrator with TOTP, as in §4.2 step 5.
+
+   No SSH key, no sshd and no NAS root access are needed on the live system.
+
+### 11.3 PC side without a daemon: the manifest hook
+
+btrbk has no pre/post hooks (README), so the manifest is written by `rynas-agent manifest`. It writes to a temporary file in `/.rynas/` and renames it into place, as the hook does. It runs from three places:
+- the btrbk drop-in above, so every snapshot run refreshes it first;
+- a package-manager hook for kernel and boot changes: pacman `.hook`, apt `DPkg::Post-Invoke`, dnf `post-transaction-actions`;
+- once at setup.
+
+Content: the §4.3 manifest (disks by model, serial and size; GPT with GUIDs; LUKS parameters, never the header; filesystems with UUIDs and labels; subvolumes with mount points, the default subvolume, NOCOW and excluded ones; fstab, crypttab, `/proc/cmdline`, `/etc/kernel/cmdline`, boot mode, loader, initramfs generator, os-release), plus a btrbk block: the `snapshot_dir`, and the btrbk name → subvolume path → mount point map.
+
+**ESP copy:** when the ESP (or a separate non-btrfs `/boot`, as Fedora uses) is not inside a snapshotted subvolume, the hook also copies its files to `/.rynas/boot/<mount>/`. It uses tmp + rename, keeps one copy, and records the size in the manifest.
+
+A **PC without the agent** keeps working as today, with no manifest. The restore TUI then asks for the layout through a guided step (one disk, ESP + btrfs, sizes) and shows a "not bare-metal ready" badge.
+
+### 11.4 Bare-metal restore in the agent TUI (btrbk source)
+
+**Fit with phase 1.** The restic TUI already does network, NAS, fingerprint and code, then PC → version → target disks → plan → progress → reboot. Its restore source is a trait. The btrbk source implements it. **This part is shared:** GPT, LUKS/LVM, mkfs with the original IDs, the chroot and boot fixes, and the report. **Only these differ:**
+- `list_versions`: btrbk runs, grouped by timestamp, with a per-subvolume override;
+- `manifest(version)`: from `…/manifest`;
+- **data**: per subvolume, a stream received into the pool. The restic source restores files into mounted filesystems instead.
+
+The trait needs a data step that can say "I fill a btrfs pool" or "I fill mounted filesystems". If phase 1's trait is file-only, this is the one change to ask for.
+
+Flow:
+1. **Connect:** NAS URL, pinned fingerprint, restore code (as restic).
+2. **PC → btrbk run** (date, sizes, ready badge) → **mode:**
+   - *Whole PC*: format and restore every non-excluded subvolume;
+   - *System only*;
+   - *Custom* checklist;
+   - *Add subvolumes* (additive, no format; needs the target's btrfs pool with its root subvolume, mounted with `subvolid=5`).
+
+   Each subvolume can take another snapshot from a list.
+3. **Rules from the manifest:** a subvolume mounted under another selected one (like @games in @home) needs its parent when formatting, or the parent already in the pool when adding. At least one subvolume must be chosen.
+4. **Target disk(s)** by model, serial and size, mapped to the manifest's disks; a disk with the same serial is suggested. Guards:
+   - the disk-in-use guard, with no override;
+   - firmware mode of the live system = the manifest's boot mode (UEFI vs BIOS), refused otherwise, because `restore_btrfs_system`'s README rule becomes a check;
+   - "fits" = the sum of the chosen snapshots' referenced bytes plus 10 % ≤ the new btrfs partition. A smaller disk works, because send/receive does not care about the old geometry;
+   - the original GUIDs/UUIDs are reused only when no attached disk has them.
+5. **Preflight, nothing written yet:**
+   - each chosen snapshot exists, is complete and read-only (one NAS call);
+   - the manifest parses;
+   - the ESP copy is there, or regeneration is possible;
+   - `btrfs`, `mkfs.vfat`, `cryptsetup` are present as needed (the package name is printed when one is missing);
+   - free RAM is enough for buffers.
+6. **Plan + typed confirmation:** the readable plan (ReaR-style), the disk's model and serial again, "WILL BE ERASED", and the disk name typed to confirm. `--dry-run` runs every step that only reads, and runs the fstab, entry and cmdline rewrites on copies with mock IDs, showing the diffs (`restore_btrfs_system`'s dry-run idea).
+7. **Execute:**
+   1. GPT and filesystems through the shared code: `mkfs.btrfs -U <fs uuid>`, `mkfs.vfat -i`; wait with `udevadm settle` + polling;
+   2. mount the top level; make `snapshot_dir`; for each subvolume, receive the stream with the btrbk name (progress from the byte count against the known size); verify `received_uuid`, read-only and a non-zero generation; then `btrfs subvolume snapshot` to the original path (an existing one is renamed `_rynas_old_<ts>`, never deleted);
+   3. recreate the excluded subvolumes empty, with NOCOW where the manifest says so; recreate the swapfile; restore the default subvolume;
+   4. mount everything as fstab says;
+   5. **boot**, the shared §4.4 chroot step: `/etc/kernel/cmdline` from the manifest; kernels from `/usr/lib/modules/<kver>/vmlinuz` (Arch, Fedora) or `/boot` (Debian); initramfs regenerated (`mkinitcpio -P` / `update-initramfs -u -k all` / `dracut --regenerate-all`); loader reinstalled (`bootctl install` + `kernel-install`, or `grub-install` + `grub-mkconfig`) with the removable fallback. When regeneration fails, the ESP copy from `/.rynas/boot/` is laid down (Arch's case in `restore_btrfs_system`), and a loader-install failure stays non-fatal when the copied EFI files are there;
+   6. **ID fix** only when new IDs were generated: fstab, crypttab, loader entries, `/etc/kernel/cmdline`, `GRUB_CMDLINE_LINUX`. Lines of subvolumes that were not restored are commented with `# rynas-restore:` and uncommented by a later *Add*. Then a sanity check: the new root ID on an **active** fstab line, and no old ID left in the entries or the cmdline.
+8. **End:** the reboot is offered only when the ID check, the boot files and the loader are all good; otherwise the TUI says exactly what to check. The log goes to the target's `/var/log/rynas-restore-<ts>.log` **and to the NAS**, where it shows in the PC's history. The next btrbk run on the restored PC continues incrementally from the received snapshots (btrbk README) **[U]: to be tested, including PARTUUID-only vs fs-UUID changes**.
+
+Manual fallback, documented on the PC page: with NAS administrator access, `ssh admin@nas sudo btrfs send … | btrfs receive …` and btrbk's own restore steps. This replaces the old hand-kept table.
+
+### 11.5 Arch-specific vs generic
+
+| Stays specific (data-driven, not code) | Becomes generic |
+|---|---|
+| subvolume names (`@`, `@home`, `@games`, `@log`, `@pkg`) → read from the manifest | presets → "whole / system / custom / add" over the manifest's subvolumes |
+| `/.bootbackup/*_post` from an Arch hook → read only for adopted old snapshots (legacy, the newest `_post`) | `/.rynas/boot/` ESP copy + regeneration with the distro's tools |
+| `arch-chroot` → our own `--rbind` of dev/proc/sys/run | chroot step shared with restic |
+| `bootctl` only, PARTUUID only | systemd-boot, GRUB (Debian/Fedora/Arch), UKI; UUID=, PARTUUID=, LABEL= |
+| `pacman -Sy` of tools on the live system | preflight names the package for apt/dnf/pacman; GPT and stream code in the agent |
+| NVMe only, Samsung table name `part_table_samsung` | any block device by stable id; GPT from the manifest (MBR later, as §5) |
+| Synology `btrfs send --without-syno-features` | Debian `btrfs send` on the NAS (the flag is Synology-only) |
+
+The legacy reader means Marco's existing PC-casa chain (adopted from the Synology into rynas as in §10.2) restores with no new manifest. In that case the TUI uses `.bootbackup/part_table_samsung` as the GPT source and warns that it is legacy.
+
+### 11.6 Phases and rough sizes
+
+| Phase | Content | Size |
+|---|---|---|
+| **B1: NAS views and retention** | snapshot table with per-snapshot `du`, run view, health states and the new alerts, "NAS owns retention" with GFS preview and chain-safe delete, setup snippet from ticked subvolumes | **M**: ~2–3k lines (Rust + UI), reuses D-SNAP preview/delete |
+| **B2: manifest and setup** | `rynas-agent manifest` and `btrbk-setup` (the shared manifest code from phase 1 + btrbk block + ESP copy), package hooks, btrbk drop-in; NAS manifest reader and "bare-metal ready" | **S–M**: ~1.5–2k lines; depends on phase 1's manifest module |
+| **B3: restore source** | `…/send` and `…/manifest` endpoints under restore codes; btrbk source in the agent (versions, pool receive, writable snapshots, excluded/default subvolumes); modes and rules; legacy `.bootbackup` reader; dry-run on copies | **M**: ~2.5–3.5k lines; needs phase 1's TUI, GPT and chroot steps |
+| **B4: VM matrix** | Arch + systemd-boot (ESP = /boot), Debian + GRUB, Fedora (separate ext4 /boot), LUKS root; same disk / smaller disk / GUID conflict; first incremental after restore | part of the phase 1 VM matrix (§9 rule 9) |
+
+Order: B1 can start now; it does not touch the agent. B2 and B3 wait for phase 1's manifest and TUI.
+
+### 11.7 Decisions for Marco
+
+1. **Bring back "bare metal through btrbk"** (reverses part of §7) and make the btrbk tab a first-class engine next to restic in the wizard, instead of "maintenance only". *Recommendation: yes; btrfs PCs get the fastest exact restore and readable snapshots on the NAS.*
+2. **Transport for restore:** HTTPS stream from rynas under a restore code (proposed), or a second SSH key line with a `--send` mode in `rynas-btrbk-filter`. *Recommendation: HTTPS: one auth path with restic, no key on the live system; the filter keeps its "a PC never reads back" rule.*
+3. **Retention owner for new PCs:** NAS (GFS, the PC can only add) or btrbk's `target_preserve` with the NAS floor (today). *Recommendation: NAS by default, PC-side kept for adopted chains.*
+4. **Boot files:** regeneration only, or regeneration + the ESP copy in `/.rynas/boot/` as fallback. *Recommendation: both; the copy is small and saved Arch restores without network.*
+5. **Manifest writer:** require `rynas-agent` on btrbk PCs (manifest, setup, later status), or also offer a tiny shell hook for PCs without it. *Recommendation: agent only; the bash version would be a second code path to keep in step, and the guided layout step covers PCs without it.*
+6. **Legacy support for `restore_btrfs_system` snapshots** (`.bootbackup`, `part_table_samsung`). *Recommendation: read-only support in B3, removed once PC-casa has manifests in all kept snapshots.*
+7. **What happens to `restore_btrfs_system`:** keep it as Marco's independent fallback until B4 passes on PC-casa's hardware, then archive it with a pointer to rynas. *Recommendation: as stated; never delete a working restore path before the new one has booted real hardware.*
+
+Sources (2026-11-11): https://github.com/rylos/restore_btrfs_system (README, scripts, hook, tests) · https://github.com/digint/btrbk#restoring-backups · btrfs-send(8)/btrfs-receive(8) as in §10.
+
+### 11.8 Implemented: B1, the NAS side (2026-11-11)
+
+For PCs that already push with btrbk over SSH (§10). Code: `crates/rynasd/src/pc_backup.rs` (logic and routes), new types in `rynas_api_types::pcbackup`, UI `crates/rynas-ui/src/pages/backup/pcs.rs` (Backup › "PCs: btrfs snapshots", presented as a method of its own next to the files engine). API in `../phase1/plan.md`.
+
+- **Snapshot table.** Each snapshot carries `parent` (below) and `size` {referenced, exclusive}. The drawer groups them by subvolume or by **run** (`PcRun`: the snapshots with one btrbk timestamp, `_N` suffix ignored, with the expected subvolumes it lacks and the summed sizes).
+- **Sizes, measured cost** (loop image, 3 received snapshots of 20 000 files + 80 MiB, `packaging/test-pcbackup-loop.sh`):
+  - quota groups on (non-simple, not marked inconsistent): read live from `/sys/fs/btrfs/<fsid>/qgroups/0_<subvolid>/{referenced,exclusive}`, two small reads per snapshot, 0.1 ms for the folder, no command and no walk;
+  - otherwise **Measure sizes** (task `pcbackup.sizes`): `ionice -c3 nice -n19 btrfs filesystem du -s --raw` per snapshot, one at a time, cancellable, 0.21–0.26 s per 20 000-file snapshot here (warm cache): it reads every file's extents, so a 1 M-file PC on HDDs takes minutes per snapshot. Each snapshot is measured **once** (results kept by subvolume UUID; received snapshots are read-only so the referenced size never changes; the exclusive one grows as neighbours go, `?again=true` measures again). No measure ever runs per request.
+- **NAS-side retention** (`retention.owner: nas`, Marco's decision 3: the default for new PCs, `pc` for adopted folders):
+  - the key line gets `--delete-interrupted` instead of `--delete`: the filter accepts `btrfs subvolume delete` only for interrupted receives (btrbk removes its own "garbled" target before sending again). The same now applies to `delete.allowed: false`, which until now refused even those, against §10.2;
+  - the GFS counts are the snapshot jobs' `Retention` (presets and custom, `min` as btrbk's `*_preserve_min`), computed in Rust by btrbk's rules: per subvolume, the first snapshot of each hour/day/week (from Sunday)/month/year within that many of them, by the time in the name (the PC's clock, as btrbk counts), in the NAS's local calendar;
+  - **the parent is protected** whatever the counts say: per subvolume the newest complete snapshot by the NAS-side `otime` (names more than a day in the future do not count, so a junk name cannot displace it) is never deleted, by the hourly pass or by hand (`DELETE …/snapshots/{name}` answers 409). On top, the floor of `delete` (`keep_last`, at least 1, and `min_age_days`, both on `otime`), as for deletes the PC asks for; future names are never deleted on the NAS's own; interrupted receives go after an hour with no receive running;
+  - each pass (hourly after the alerts' check, or "Delete old snapshots now", task `pcbackup.prune`) takes the filter's own per-device `flock` on the folder (opened by `verify_root`: walked from `/` without symlinks, then checked to be the same inode as the path), lists it again and deletes with `BTRFS_IOC_SNAP_DESTROY` relative to that descriptor, at most 50 per pass; a running receive skips the pass (`last_prune.error`);
+  - `POST /pc-backups/plan/retention` previews keep/delete with a reason per snapshot and "frees at least" (the sum of the exclusive sizes, when known);
+  - the PC's `btrbk.conf` snippet says `target_preserve_min all` / `target_preserve no` in this mode.
+- **Alerts** (one notification per condition, fired once, resolved when it is over, keys `pcbackup:<kind>:<device>`): `pcbackup.late` (now in hours: `alert_hours`, 0 = `alert_days` × 24), `pcbackup.subvolume_late` (an expected subvolume older than the alert time while the PC is not late; "expected" = the manifest's subvolumes, else every received one, minus `ignored_groups`), `pcbackup.receive_failed` (an interrupted receive older than 10 min with nothing receiving: the lock is free) and `pcbackup.receive_stuck` (receiving for more than 24 h), `pcbackup.low_space` (free space below the referenced size of one more full set of parents, or below 5 % of the volume while sizes are unknown).
+- **"Ready for bare metal"** (`bare_metal`): a manifest in the newest snapshot of some subvolume (the root names first), read through descriptors (`O_NOFOLLOW` on every step, regular file, at most 1 MiB, parsed as untrusted JSON, cached by subvolume UUID), `format: 1`, a subvolume mounted at `/`, every listed subvolume with a complete snapshot, and a boot loader. Warnings: manifest written more than 7 days before its snapshot, newest run lacking a listed subvolume. Without the PC side (B2) every PC shows `no_manifest` today.
+- **Manifest fields B1 reads** (B2 must write at least these): `format` (1), `written_at_ms`, `boot.loader`, `btrbk.subvolumes[] {name (the btrbk name), path, mount}`; other fields (`subvolumes[]` with `excluded`, disks, GPT…) are ignored by B1.
+- **Tests:** unit tests of the plan, runs, manifest and alerts in `pc_backup.rs`, API tests on the memory host (`tests/pc_backup.rs`), and `tests/pc_backup_host.rs` (`#[ignore]`, root) on a real loop-mounted btrfs folder: sysfs quota sizes with and without quotas, measure, a symlinked manifest refused (`ELOOP`), the lock shared with the filter, delete under the lock.
+- **Open:** the GFS buckets use the NAS's time zone for names without an offset (as `name.rs` reads them), so a PC in another zone shifts by those hours; one shared account still serves every PC (§10.3).
 
 ## Sources
 

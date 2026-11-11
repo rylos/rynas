@@ -246,6 +246,10 @@ pub fn routes() -> Router<AppState> {
         .route("/pc-backups/targets/{device}/usage", post(forward))
         .route("/pc-backups/targets/{device}/browse", get(forward))
         .route("/pc-backups/targets/{device}/copy-out", post(forward))
+        .route("/pc-backups/plan/retention", post(forward))
+        .route("/pc-backups/targets/{device}/prune", post(forward))
+        .route("/pc-backups/targets/{device}/sizes", post(forward))
+        .route("/pc-backups/targets/{device}/snapshots/{name}", delete(forward))
         // UPS (P6): the shutdown policy and the battery test; the status itself is
         // read from upsd by rynas-web (`/ups`, `ups.status` events)
         .route("/ups/settings", get(forward).put(forward))

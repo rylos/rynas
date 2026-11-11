@@ -939,6 +939,31 @@ mod tests {
         assert_eq!(back, r);
     }
 
+    /// The fields the btrfs method's NAS side reads (`rynasd::pc_backup`): `format`,
+    /// `written_at_ms`, `boot.loader`, `btrbk.subvolumes[].name` and `.mount`.
+    #[test]
+    fn manifest_shape_shared_by_both_methods() {
+        let m = Manifest {
+            format: MANIFEST_FORMAT,
+            written_at_ms: 5,
+            hostname: "pc".into(),
+            boot: BootInfo { loader: Loader::SystemdBoot, ..Default::default() },
+            btrbk: Some(BtrbkLayout {
+                snapshot_dir: "/.snapshots".into(),
+                subvolumes: vec![BtrbkSubvolume { name: "@".into(), path: "@".into(), mount: "/".into() }],
+            }),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&m).unwrap();
+        assert_eq!(v["format"], 1);
+        assert_eq!(v["written_at_ms"], 5);
+        assert_eq!(v["boot"]["loader"], "systemd_boot");
+        assert_eq!(v["btrbk"]["subvolumes"][0]["name"], "@");
+        assert_eq!(v["btrbk"]["subvolumes"][0]["mount"], "/");
+        let plain = serde_json::to_value(Manifest::default()).unwrap();
+        assert!(plain.get("btrbk").is_none());
+    }
+
     #[test]
     fn readiness() {
         let mut m = Manifest {

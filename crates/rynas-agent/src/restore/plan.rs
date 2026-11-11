@@ -448,7 +448,7 @@ pub fn describe(m: &Manifest, p: &Plan) -> Vec<String> {
     for s in &p.swap {
         out.push(format!("mkswap -U {} {}", s.uuid, s.device));
     }
-    out.push("mount the filesystems as the PC's fstab says, below /run/rynas-agent/target".into());
+    out.push("mount the filesystems as the PC's fstab says, below /mnt/rynas-restore".into());
     out.push("restore the version's files (owners, modes, ACLs, xattrs, hard links)".into());
     if !p.id_map.is_empty() {
         out.push(format!("rewrite {} changed IDs in fstab, crypttab, loader entries and the cmdline", p.id_map.len()));

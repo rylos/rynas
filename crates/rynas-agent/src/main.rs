@@ -58,7 +58,8 @@ fn positional(args: &[String]) -> Vec<String> {
     let with_value = ["--fingerprint", "--nas", "--code", "--version", "--disk", "--confirm", "--passphrase-file"];
     let mut out = Vec::new();
     let mut skip = false;
-    for a in args {
+    // the program's own name is not an argument
+    for a in args.iter().skip(1) {
         if skip {
             skip = false;
             continue;

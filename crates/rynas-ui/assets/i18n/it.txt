@@ -4671,8 +4671,8 @@ sf.err.pattern	Non è nel formato previsto.
 sf.err.hostname	Inserisci un nome host, ad es. nas.example.lan.
 sf.err.uri	Inserisci un indirizzo che inizia con http:// o https://.
 sf.err.email	Inserisci un indirizzo e-mail.
-bk.tab.pcs	PC
-bk.intro	I PC Linux con btrfs mandano qui i loro snapshot con btrbk via SSH. Ogni PC ha la sua cartella e la sua chiave, e la sua chiave può solo ricevere in quella cartella.
+bk.tab.pcs	PC: snapshot btrfs
+bk.intro	I PC con il sistema su btrfs fanno il backup con gli snapshot nativi di btrfs: btrbk sul PC crea snapshot in sola lettura e invia via SSH solo ciò che è cambiato dall'ultimo. Ogni snapshot qui è una copia completa e sfogliabile del PC in quel momento. Ogni PC ha la sua cartella e la sua chiave, e la sua chiave può solo ricevere in quella cartella.
 bkpc.empty	Ancora nessun PC
 bkpc.empty_text	Aggiungi un PC per avere una cartella e le righe per la sua configurazione di btrbk, oppure adotta una cartella che contiene già snapshot ricevuti.
 bk.add	Aggiungi un PC
@@ -4706,8 +4706,6 @@ bkpc.f.path	Cartella sul NAS
 bkpc.f.path_help	Su un volume btrfs. Solo lettere, cifre e _ @ + . -.
 bk.f.key	Chiave pubblica del PC
 bk.f.key_help	Il file .pub creato sul PC (i passaggi sono nel pannello del PC). Puoi aggiungerla dopo.
-bk.f.alert	Avviso dopo giorni senza backup
-bk.f.alert_help	Una notifica quando non arriva niente per questi giorni; 0 la disattiva.
 bk.f.rules	Eliminazione dei vecchi snapshot
 bk.f.allowed	Il PC può eliminare qui i vecchi snapshot
 bk.f.allowed_help	btrbk elimina quello che il suo target_preserve non tiene più. Spento: il PC può solo aggiungere, e i vecchi snapshot restano finché non li elimini tu.
@@ -4753,7 +4751,6 @@ bk.key	Chiave
 bk.adopted	Origine
 bk.adopted_yes	Cartella adottata
 bk.no_key	Ancora nessuna chiave: il PC non può collegarsi. Aggiungi la sua chiave pubblica in Impostazioni.
-bk.late_note	Niente ricevuto da più di {days} giorni.
 bk.steps	Configura il PC
 bk.steps_intro	Sul PC, con sudo (i comandi qui sotto lo usano): crea una chiave per btrbk, aggiungi le righe a /etc/btrbk/btrbk.conf (cambia volume e sottovolumi secondo il PC), poi collegati una volta per accettare la chiave del NAS e prova una simulazione.
 bk.step.key	1. Chiave del PC
@@ -4773,13 +4770,92 @@ bkpc.copy	Copia sul NAS
 bk.copy_this	Copia questa cartella
 bk.copy_text	{path} viene copiato con le sue cartelle nella cartella che scegli.
 bkpc.copied	{path} copiato
+bkpc.col.restore	Ripristino completo
+bkpc.bm.ready	Pronto
+bkpc.bm.not_ready	Non pronto
+bkpc.bm.title	Ripristino su un disco vuoto
+bkpc.bm.intro	Se questi snapshot bastano per ricostruire il PC su un disco nuovo: il manifest della struttura che il PC tiene nel suo sottovolume di root, e uno snapshot di ogni sottovolume che elenca.
+bkpc.bm.manifest	Manifest della struttura
+bkpc.bm.loader	Caricatore di avvio
+bkpc.bm.subvolumes	Sottovolumi necessari
+bkpc.bm.no_snapshots	Ancora nessuno snapshot completo.
+bkpc.bm.no_manifest	Gli snapshot più recenti non contengono il manifest della struttura (/.rynas/manifest.json): il PC non lo scrive ancora. L'agente rynas sul PC lo scrive prima di ogni esecuzione.
+bkpc.bm.manifest_invalid	Il manifest della struttura non si può leggere.
+bkpc.bm.manifest_unsupported	Il manifest della struttura ha il formato {subject}, che questo NAS non conosce ancora.
+bkpc.bm.no_root	Il manifest non indica nessun sottovolume montato su /.
+bkpc.bm.subvolume_missing	{subject} serve per un ripristino ma qui non ha nessuno snapshot completo.
+bkpc.bm.loader_unknown	Il manifest non indica il caricatore di avvio.
+bkpc.bm.manifest_stale	Il manifest è più vecchio di {subject} giorni rispetto allo snapshot che lo contiene.
+bkpc.bm.latest_run_incomplete	L'esecuzione più recente non ha {subject}: un ripristino lo prende da un'esecuzione precedente.
+bkpc.issue.late	Niente di nuovo da questo PC dal {when}.
+bkpc.issue.subvolume_late	{subject}: niente di nuovo dal {when}, mentre gli altri sottovolumi arrivano.
+bkpc.issue.subvolume_never	{subject} è previsto ma non è mai stato ricevuto.
+bkpc.issue.receive_failed	Una ricezione si è interrotta ({subject}) e ora non si sta ricevendo niente. Il PC invia di nuovo quello snapshot alla prossima esecuzione.
+bkpc.issue.receive_stuck	Una ricezione è in corso dal {when} ({subject}).
+bkpc.issue.low_space	{free} liberi sul volume, {needed} necessari per un'altra serie completa di snapshot.
+bkpc.short.subvolume_late	Un sottovolume si è fermato
+bkpc.short.receive_failed	Ricezione interrotta
+bkpc.short.receive_stuck	Ricezione bloccata
+bkpc.short.low_space	Poco spazio
+bkpc.f.owner	Chi elimina i vecchi snapshot
+bkpc.owner.nas	Questo NAS
+bkpc.owner.pc	Il PC
+bkpc.owner.nas_help	Il PC può solo aggiungere snapshot, quindi un PC rubato o guasto non può eliminare i suoi backup. Il NAS conserva per ogni sottovolume quello che dicono i numeri qui sotto, e sempre lo snapshot più recente (la base del prossimo invio incrementale). Controlla ogni ora.
+bkpc.owner.pc_help	btrbk sul PC elimina quello che il suo target_preserve non tiene più, entro le regole del NAS qui sotto.
+bkpc.f.keep_nas_help	Per sottovolume, secondo quando il NAS li ha ricevuti, qualunque cosa dicano i numeri.
+bkpc.f.min_age_nas_help	Contati da quando il NAS ha ricevuto lo snapshot.
+bkpc.f.alert_hours	Avviso dopo ore senza backup
+bkpc.f.alert_hours_help	Una notifica quando non arriva niente per queste ore, anche quando si ferma un solo sottovolume; 0 la disattiva.
+bkpc.alert_hours	Dopo {n} ore
+bkpc.alert	Avviso se non arriva niente
+bkpc.f.ignored	Sottovolumi che il PC non invia più
+bkpc.f.ignored_help	Nessun avviso per loro e non previsti in una serie completa. I loro snapshot restano.
+bkpc.ret.nas	Elimina il NAS; conserva {counts}, e tutto ciò che ha meno di {min}
+bkpc.prune	Elimina ora i vecchi snapshot
+bkpc.pruned	Vecchi snapshot eliminati
+bkpc.last_prune	Ultima pulizia
+bkpc.last_prune_text	{when}: {n} eliminati
+bkpc.preview_frees	Libera almeno {bytes}.
+bkpc.free	Libero sul volume
+bkpc.free_text	{free} su {total}
+bkpc.receiving	Ricezione in corso
+bkpc.view	Raggruppa per
+bkpc.view.run	Esecuzione del backup
+bkpc.size_text	{ref} · {excl} propri
+bkpc.sizes	Misura le dimensioni
+bkpc.sizes_done	Dimensioni misurate
+bkpc.sizes_quota	Le dimensioni arrivano in tempo reale dai gruppi di quota del volume.
+bkpc.sizes_note	Dimensione: quanto lo snapshot referenzia (circa quanto trasferisce un ripristino) · quanto contiene solo lui (circa quanto libera eliminarlo da solo). La misura legge gli extent di ogni file a bassa priorità e può richiedere tempo; ogni snapshot viene misurato una volta sola.
+bkpc.snap.parent	Base del prossimo invio
+bkpc.run.full	Serie completa
+bkpc.run.lacks	Manca {names}
+bkpc.delete_snap	Elimina lo snapshot
+bkpc.delete_snap_title	Eliminare {name}?
+bkpc.delete_snap_text	Lo snapshot viene eliminato dal NAS e il suo spazio liberato in background. Gli altri snapshot e il prossimo invio incrementale del PC non ne risentono.
+bkpc.deleted_snap	{name} eliminato
 task.pcbackup.create	Aggiunta di una destinazione di backup per PC
 task.pcbackup.update	Impostazioni del backup di un PC
 task.pcbackup.remove	Rimozione di una destinazione di backup per PC
 task.pcbackup.usage	Misura dei backup di un PC
 task.pcbackup.copy_out	Copia da un backup di PC
+task.pcbackup.prune	Eliminazione dei vecchi snapshot di un PC
+task.pcbackup.sizes	Misura degli snapshot di un PC
+task.pcbackup.delete_snapshot	Eliminazione di uno snapshot di un PC
 nev.pcbackup.late.title	Nessun backup da {device} da {days} giorni
+nev.pcbackup.late.title_2	Nessun backup da {device} da {hours} ore
 nev.pcbackup.late.body	Niente ricevuto da {days} giorni (avviso dopo {alert_days}).
+nev.pcbackup.late.body_2	Niente ricevuto da {hours} ore (avviso dopo {alert_hours} ore).
+nev.pcbackup.subvolume_late.title	{subject} di {device} non viene più salvato
+nev.pcbackup.subvolume_late.body	{device} invia ancora altri sottovolumi, ma niente di nuovo di {subject}.
+nev.pcbackup.subvolume_resumed.title	{subject} di {device} viene di nuovo salvato
+nev.pcbackup.receive_failed.title	Un backup da {device} si è interrotto
+nev.pcbackup.receive_failed.body	{subject} non è stato ricevuto per intero e ora non si sta ricevendo niente.
+nev.pcbackup.receive_stuck.title	Un backup da {device} è in corso da più di un giorno
+nev.pcbackup.receive_stuck.body	{subject} è in ricezione da più di un giorno.
+nev.pcbackup.receive_ok.title	I backup da {device} vengono di nuovo ricevuti normalmente
+nev.pcbackup.low_space.title	Poco spazio rimasto per i backup di {device}
+nev.pcbackup.low_space.body	{free_gib} GiB liberi, {needed_gib} GiB necessari per un'altra serie completa di snapshot.
+nev.pcbackup.space_ok.title	Di nuovo spazio sufficiente per i backup di {device}
 nev.pcbackup.resumed.title	I backup da {device} arrivano di nuovo
 nev.pcbackup.resumed.body	{device} ha inviato un nuovo snapshot.
 sysp.restart	Riavvia
