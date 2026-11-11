@@ -9,7 +9,7 @@ Storage, shares, snapshots, Docker apps and HTTPS from one web interface, writte
   <a href="LICENSE"><img alt="License: AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0-blue"></a>
   <img alt="Debian 13" src="https://img.shields.io/badge/Debian-13%20trixie-a80030">
   <img alt="Rust" src="https://img.shields.io/badge/Rust-2024-orange">
-  <img alt="Status: alpha" src="https://img.shields.io/badge/status-alpha-yellow">
+  <img alt="Status: beta" src="https://img.shields.io/badge/status-beta-blue">
 </p>
 
 <p align="center">
@@ -21,9 +21,10 @@ manage from the browser. Nothing is hidden: everything rynas does is plain Debia
 (mdadm, btrfs, Samba, NFS, systemd, Docker Compose, Caddy), so your data and your system stay
 yours, with or without rynas.
 
-> [!WARNING]
-> rynas is **alpha software**. It works every day on test machines, but interfaces and on-disk
-> formats can still change. Keep backups and try it on a machine you can afford to reinstall.
+> [!NOTE]
+> rynas is **beta software**. The main features are in place and it runs every day on real NAS
+> hardware, but there can still be rough edges and small changes before 1.0. Keep backups, as
+> with any storage system, and report what you find.
 
 ## Why rynas
 
@@ -34,6 +35,9 @@ yours, with or without rynas.
 - **Safe changes.** Changes are staged and applied together. Network changes roll back by
   themselves if you lose the connection. Snapshots and system restore points come before
   risky operations.
+- **Apps that stay up to date.** The app catalogue is signed and updated on its own, apart from
+  rynas releases; image updates are checked every day and can be applied automatically, stack
+  by stack.
 - **Made for the keyboard.** <kbd>Ctrl</kbd> <kbd>K</kbd> finds any page, setting or action. Light and dark
   themes, English and Italian.
 - **Free software, every feature included.** AGPL-3.0, free for everyone, companies included.
@@ -43,16 +47,17 @@ yours, with or without rynas.
 | | |
 |---|---|
 | **Dashboard** | live CPU, memory, network, disk I/O and temperatures; customizable widgets |
-| **Storage** | RAID arrays and volumes (mdadm, btrfs, ext4, LUKS2 encryption), a drive view of the chassis, SMART, spin-down |
+| **Storage** | RAID arrays and volumes (mdadm, btrfs, ext4, LUKS2 encryption), a drive view of the chassis, SMART, spin-down, zram |
 | **Files** | a full web file manager: upload, preview, text editor, space analysis |
 | **Shared folders and services** | SMB (with Time Machine), NFS, per-user and per-group permissions, quotas, recycle bin |
-| **Snapshots** | scheduled btrfs snapshots with retention, file restore, rollback, system restore points |
-| **Docker** | engine setup, compose stacks with an editor, containers, logs, image updates; works next to Portainer, Dockge or Dockhand |
-| **Apps** | a curated catalogue (Immich, Jellyfin, Home Assistant, Nextcloud, Paperless-ngx, Vaultwarden, Frigate… 25 and growing) installed in a few clicks |
-| **Web access** | HTTPS for the interface and every app through a built-in Caddy: `.local` names, Let's Encrypt certificates through your DNS provider, LAN or VPN access rules |
+| **Snapshots** | scheduled btrfs snapshots with retention, file restore, rollback, system restore points, replication to another volume or NAS |
+| **Backup** | encrypted, deduplicated backups (restic format) to another NAS, a USB disk or the cloud (SFTP, S3, B2, REST, rclone); backups of your PCs |
+| **Docker** | engine setup, compose stacks with an editor, containers with CPU and memory, logs, daily image update checks with optional automatic updates; works next to Portainer, Dockge or Dockhand |
+| **Apps** | a curated, signed catalogue (Immich, Jellyfin, Home Assistant, Nextcloud, Paperless-ngx, Vaultwarden, Frigate, JDownloader… 27 and growing) installed in a few clicks, kept current by automated, tested updates |
+| **Web access** | HTTPS for the interface and every app through a built-in Caddy: `.local` names, Let's Encrypt certificates through your DNS provider, LAN or VPN access rules, Tailscale |
 | **Users and security** | users, groups, PAM login, two-factor authentication (TOTP), fail2ban |
 | **System** | network (bonding, VLANs) with safe apply, task scheduler, notifications (e-mail, ntfy, Gotify), updates, configuration restore |
-| **Hardware** | fans, temperatures, status LEDs, UPS (NUT), power schedule, removable drives |
+| **Hardware** | fans, temperatures, status LEDs, UPS (NUT), power schedule, removable drives; dedicated modules for Synology (with synodeb) and QNAP hardware |
 
 <table>
   <tr>
@@ -84,6 +89,9 @@ watchdog, every bay and both M.2 slots. DSM can stay on its own disks.
 Put rynas on top and you get a modern NAS interface on Synology hardware. rynas detects synodeb
 and adds its hardware screens: the real chassis with its bays, fan modes, LEDs and the power
 schedule. On any other Debian server those screens simply stay hidden.
+
+QNAP models get the same treatment through their own module, starting with the **HS-251**
+(verified on the hardware): bays, fans, LEDs and power recovery.
 
 ## Install
 
