@@ -55,6 +55,11 @@ pub const FILES_UPLOAD_DEADLINE: Duration = Duration::from_secs(610);
 /// Backup reads (snapshot lists and folders of a cloud repository, connection tests;
 /// rynasd gives the worker 110 s).
 pub const BACKUP_DEADLINE: Duration = Duration::from_secs(120);
+/// PC backup: an agent's upload of a repository file (up to 512 MiB on a home uplink).
+pub const PC_REPO_DEADLINE: Duration = Duration::from_secs(3600);
+/// PC backup: pairing (creates a repository: two key derivations), the plan's long poll
+/// (55 s), the console's reads and downloads of a repository (the worker has 110 s).
+pub const PC_AGENT_DEADLINE: Duration = Duration::from_secs(120);
 /// Largest answer read into memory by [`RynasdClient::call`] (pass-through answers stream).
 pub const MAX_ANSWER: usize = 8 << 20;
 
@@ -73,6 +78,10 @@ pub fn deadline(path: &str) -> Duration {
         UPDATES_DEADLINE
     } else if path.starts_with("/v1/backup/") {
         BACKUP_DEADLINE
+    } else if path.starts_with("/v1/pcbackup/repo/") {
+        PC_REPO_DEADLINE
+    } else if path.starts_with("/v1/pcbackup/") {
+        PC_AGENT_DEADLINE
     } else if path.starts_with("/v1/files/upload") || path.starts_with("/v1/files/edit/save") {
         FILES_UPLOAD_DEADLINE
     } else if path.starts_with("/v1/files/") {
@@ -276,6 +285,36 @@ impl RynasdClient {
                 .uri(path_and_query)
                 .header(header::HOST, "rynasd")
                 .header(USER_HEADER, user);
+            for (k, v) in headers {
+                req = req.header(k, v);
+            }
+            let req = req.body(body).map_err(|e| UpstreamError::BadGateway(e.to_string()))?;
+            sender
+                .send_request(req)
+                .await
+                .map_err(|e| UpstreamError::Unavailable(e.to_string()))
+        };
+        tokio::time::timeout(limit, fut)
+            .await
+            .unwrap_or(Err(UpstreamError::Timeout))
+    }
+
+    /// [`RynasdClient::send_stream`] without a user: the PC agents' calls, which rynasd
+    /// authenticates by their own token or code.
+    pub async fn send_stream_anonymous(
+        &self,
+        method: Method,
+        path_and_query: &str,
+        headers: &[(header::HeaderName, HeaderValue)],
+        body: axum::body::Body,
+    ) -> Result<hyper::Response<Incoming>, UpstreamError> {
+        let limit = self.deadline(path_and_query);
+        let fut = async {
+            let mut sender = self.connect::<axum::body::Body>().await.map_err(UpstreamError::Unavailable)?;
+            let mut req = Request::builder()
+                .method(method)
+                .uri(path_and_query)
+                .header(header::HOST, "rynasd");
             for (k, v) in headers {
                 req = req.header(k, v);
             }

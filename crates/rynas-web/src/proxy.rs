@@ -365,6 +365,27 @@ pub fn routes() -> Router<AppState> {
         .route("/backup/restic/jobs/{name}/restore", post(forward))
         .route("/backup/restic/jobs/{name}/download", get(forward))
         .route("/backup/restic/jobs/{name}/preview-retention", get(forward))
+        // PC backup, file method (D-PCBACKUP): groups, PCs, pairing codes, versions,
+        // browse, streamed downloads and zips, recovery kits, restore codes; the agents'
+        // own routes are in crate::pc_agent
+        .route("/pcbackup", get(forward))
+        .route("/pcbackup/settings", put(forward))
+        .route("/pcbackup/pairings", post(forward))
+        .route("/pcbackup/pairings/{id}", delete(forward))
+        .route("/pcbackup/groups/{group}", put(forward).delete(forward))
+        .route("/pcbackup/groups/{group}/maintenance", post(forward))
+        .route("/pcbackup/groups/{group}/recovery-kit", post(forward))
+        .route(
+            "/pcbackup/devices/{device}",
+            get(forward).put(forward).delete(forward),
+        )
+        .route("/pcbackup/devices/{device}/backup-now", post(forward))
+        .route("/pcbackup/devices/{device}/cancel", post(forward))
+        .route("/pcbackup/devices/{device}/versions", get(forward))
+        .route("/pcbackup/devices/{device}/browse", get(forward))
+        .route("/pcbackup/devices/{device}/download", get(forward))
+        .route("/pcbackup/devices/{device}/zip", get(forward))
+        .route("/pcbackup/devices/{device}/restore-code", post(forward))
         .route("/tailscale", get(forward_client))
         .route("/tailscale/install", post(forward_client))
         .route("/tailscale/uninstall", post(forward_client))

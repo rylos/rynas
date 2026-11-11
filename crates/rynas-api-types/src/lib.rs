@@ -15,6 +15,7 @@ pub mod dedup;
 pub mod docker;
 pub mod network;
 pub mod notify;
+pub mod pcagent;
 pub mod pcbackup;
 pub mod power;
 pub mod processes;

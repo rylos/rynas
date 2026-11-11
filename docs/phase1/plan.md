@@ -1660,3 +1660,78 @@ Containers are restarted through `POST /api/v1/docker/containers/{id}/restart`. 
 asks every 2 s while the page is visible (a written exception to S1, see D-PROCESSES). The
 unit gains `CAP_KILL`, `CAP_SYS_NICE` and `CAP_SYS_PTRACE` (read only: the I/O counters and
 listening ports of every user's processes; Marco 2026-11-11).
+
+## API v1: PC backup (agent, restic repository per PC)
+Module `rynasd::pc_agent`, types in `rynas_api_types::pcagent`, design in
+`../research/pc-backup.md` §4 (D-PCBACKUP, taken 2026-11-11). Two audiences:
+
+- **the console** (session + administrator, rynasd's `admin_only` layer and an audit line on
+  every change), under `/api/v1/pcbackup/…`;
+- **the agent** (`rynas-agent` on the PC or on a live system), with no session and no CSRF:
+  a pairing code, a device token or a restore session, checked by rynasd only. rynas-web
+  passes these routes through as a stream (`Authorization`, `Content-Type`, `Content-Length`,
+  `Range`, `Accept` and the client address; nothing else) and never reads a session for them.
+
+Codes and tokens: pairing codes `XXXX-XXXX-XXXX` (Crockford base32, 60 bits, one-time,
+15 min), restore codes (same form, one-time, 1 h, read-only), device tokens and restore
+session tokens (256 bits, hex). rynasd keeps only their SHA-256. Ten wrong codes in ten
+minutes refuse every code for ten minutes (429 `rate_limited` with `Retry-After`).
+
+State: `<state>/pc-agent/registry.json` (devices, settings, history, codes hashed; written
+atomically), the latest manifest of each device in `<state>/pc-agent/manifests/<device>.json`
+(≤ 1 MiB, display only), the NAS key password of each repository sealed with rynasd's age key.
+Repositories: `<folder>/<device>/` (a btrfs subvolume when the folder is on btrfs,
+`0700 root:root`), created by the NAS with the worker (`init`, then `add_key` for the PC and
+for the recovery kit).
+
+### Console
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/api/v1/pcbackup` | — | `PcBackupOverview` {settings `PcAgentSettings` {folder, default_quota_gib, maintenance_hour}, devices: [`PcDevice`], pairings: [`PairingView` {id, description, expires_ms}], fingerprint? (SHA-256 of the served certificate), dry} |
+| PUT | `/api/v1/pcbackup/settings` | `PcAgentSettings` | 204; 400 `invalid_value` field `folder` (must be inside a volume or the system folder), `maintenance_hour` |
+| POST | `/api/v1/pcbackup/pairings` | `PairingRequest` {description, quota_gib?} | 201 `PairingCreated` {id, code, expires_ms, fingerprint?, command}; 409 `conflict` without a folder |
+| DELETE | `/api/v1/pcbackup/pairings/{id}` | — | 204 |
+| GET | `/api/v1/pcbackup/devices/{device}` | — | `PcDeviceDetail` {device `PcDevice`, history: [`PcRun`], manifest? `Manifest`} |
+| PUT | `/api/v1/pcbackup/devices/{device}` | `PcDeviceSettings` {description, plan `PcPlan` {interval_hours 1–168, start_delay_min, excludes, freeze hot\|freeze, freeze_max_secs 5–3600, paused}, retention `Retention`, min_age_days, quota_gib (0 = none), alert_hours, critical_hours} | `PcDevice`; the plan reaches the agent at its next poll |
+| DELETE | `/api/v1/pcbackup/devices/{device}?delete_data=` | — | 202 (`pcbackup.revoke`): the token stops at once, the PC's key file is removed; the repository stays unless `delete_data=true` |
+| POST | `/api/v1/pcbackup/devices/{device}/backup-now` | — | 204 (command queued for the agent's poll) |
+| POST | `/api/v1/pcbackup/devices/{device}/cancel` | — | 204 |
+| POST | `/api/v1/pcbackup/devices/{device}/maintenance` | — | 202 (`pcbackup.maintenance`: forget with the retention and the minimum age, prune, check with a rotating twelfth read back); 409 `busy` while the PC uploads |
+| GET | `/api/v1/pcbackup/devices/{device}/versions` | — | `[SnapshotEntry]` (`backup` types) |
+| GET | `/api/v1/pcbackup/devices/{device}/browse?version=&path=` | — | `[NodeEntry]` |
+| GET | `/api/v1/pcbackup/devices/{device}/download?version=&path=` | — | the file, streamed from the worker (no size limit, `Content-Disposition: attachment`) |
+| GET | `/api/v1/pcbackup/devices/{device}/zip?version=&path=…` | — | a zip (stored, zip64) of the files and folders named by every `path`, streamed |
+| POST | `/api/v1/pcbackup/devices/{device}/recovery-kit` | — | `RecoveryKit` {device, description, repository, password, created_ms, fingerprint?}: a new recovery key file each time (the previous one is removed); the password is answered only here |
+| POST | `/api/v1/pcbackup/devices/{device}/restore-code` | — | 201 `RestoreCodeCreated` {code, expires_ms, device} |
+
+`PcDevice`: {device, description, hostname, os, arch, agent_version, created_ms,
+last_seen_ms?, state waiting\|ok\|running\|late\|critical\|failed, last_ok_ms?, last_run? `PcRun`,
+progress? `PcProgress`, repository, used_bytes, quota_bytes, versions, settings,
+bare_metal `BareMetalReady` {ready, reasons}, maintenance `PcMaintenance`, command?,
+recovery_kit_ms?}. Notifications `pcbackup.agent_late` (firing, warning) / `pcbackup.agent_critical`
+(critical) close with `pcbackup.agent_resumed`; a failed run raises `pcbackup.agent_failed` once
+per failure streak.
+
+### Agent
+
+| Method | Path | Auth | Body | Response |
+|---|---|---|---|---|
+| POST | `/api/v1/pcbackup/agent/pair` | pairing code in the body | `PairRequest` {code, hostname, machine_id, os, arch, agent_version} | `PairResponse` {device, token, repo_password, nas_name, plan `AgentPlan`}; 401 `invalid_credentials` |
+| GET | `/api/v1/pcbackup/agent/plan?rev=&wait=` | device token | — | `AgentPlan` {rev, plan, command?}; with `wait` (≤ 55 s) it answers when `rev` changes or at the deadline |
+| POST | `/api/v1/pcbackup/agent/status` | device token | `AgentStatus` {run_id, phase, bytes_done, bytes_total, files_done, files_total, message?} | 204 |
+| POST | `/api/v1/pcbackup/agent/report` | device token | `AgentReport` {run_id, started_ms, ended_ms, ok, snapshot?, files, bytes_read, bytes_added, changed_during, changed_count, error?, captures, manifest?} | 204 |
+| POST | `/api/v1/pcbackup/agent/restore/login` | restore code in the body | `RestoreLogin` {code} | `RestoreSession` {token, expires_ms, devices: [`RestoreDevice` {device, description, hostname, repo_password}]} |
+| POST | `/api/v1/pcbackup/agent/restore/report` | restore session | `RestoreReport` {device, version, ok, message, log} | 204 |
+| HEAD, GET | `/api/v1/pcbackup/repo/{device}/config` | token or session | — | the repository config |
+| GET | `/api/v1/pcbackup/repo/{device}/{type}/` | token or session | — | list; `[{name, size}]` with `Accept: application/vnd.x.restic.rest.v2`, names otherwise |
+| HEAD, GET | `/api/v1/pcbackup/repo/{device}/{type}/{name}` | token or session | — | the file; `Range: bytes=a-b` answers 206 |
+| POST | `/api/v1/pcbackup/repo/{device}/{type}/{name}` | device token | the file | 200; the name must be the SHA-256 of the body (400 otherwise), an existing name is never overwritten (200 when it is the same file, 403 otherwise); `config` and `keys` 403; over the quota 413; 423 `busy` while the NAS maintains the repository |
+| DELETE | `/api/v1/pcbackup/repo/{device}/locks/{name}` | device token | — | 200; any other DELETE 403 |
+| POST | `/api/v1/pcbackup/repo/{device}/?create=true` | — | — | 403 (the NAS creates repositories) |
+
+Types are `data`, `keys`, `locks`, `snapshots`, `index`; on disk the restic local layout
+(`data/<2 hex>/<name>`), so stock restic and the worker open the folder directly. Device tokens
+work only on their own device's path; restore sessions only read, only their devices. A token
+is accepted as `Authorization: Bearer <token>` or as the password of HTTP Basic (user = device),
+which is what restic's `rest:` URLs send.

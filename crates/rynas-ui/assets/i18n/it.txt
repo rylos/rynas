@@ -4836,6 +4836,161 @@ nev.power.manual_shutdown.title	Spegnimento del NAS richiesto da {user}
 nev.power.manual_shutdown.body	{user} spegne il NAS (ritardo {delay_min} min).
 nev.power.manual_cancelled.title	Riavvio o spegnimento annullato da {user}
 nev.power.manual_cancelled.body	Il NAS resta acceso.
+bk.tab.agent	Backup dei file dei PC
+pca.intro	I PC hanno due metodi. Snapshot btrfs: il NAS riceve gli snapshot del PC (scheda PC; la scelta migliore per i PC con btrfs). Backup dei file: rynas-agent su qualsiasi PC Linux manda i suoi file e la disposizione dei dischi in un archivio sul NAS, e lo stesso programma ripristina tutto il PC da un sistema live.
+pca.settings	Impostazioni
+pca.setup	Scegli dove vanno i backup dei PC
+pca.setup_text	Una cartella su un volume contiene un archivio per ogni gruppo di backup. Sceglila prima, poi aggiungi i PC.
+pca.choose_folder	Scegli la cartella
+pca.empty_text	Aggiungi un PC: ricevi un codice valido una volta e il comando da eseguire sul PC.
+pca.col.pc	PC
+pca.col.group	Gruppo
+pca.col.versions	Versioni
+pca.col.uploaded	Inviati
+pca.col.pcs	PC
+pca.col.size	Dimensione
+pca.col.maintenance	Manutenzione
+pca.col.expires	Valido fino a
+pca.col.when	Quando
+pca.col.what	Cosa
+pca.col.files	File
+pca.col.added	Dati nuovi
+pca.st.running	Backup in corso
+pca.st.late	In ritardo
+pca.st.critical	Molto in ritardo
+pca.st.failed	Non riuscito
+pca.st.revoked	Revocato
+pca.pairings	Codici in attesa di un PC
+pca.pairing_cancel	Annulla il codice
+pca.groups	Gruppi di backup
+pca.groups_note	Ogni gruppo è un archivio. Conservazione, pulizia e verifica girano qui sul NAS ogni notte, entro {budget} di memoria.
+pca.maint.never	Non ancora mantenuto
+pca.maint.ok	Mantenuto il {when}
+pca.maint.failed	Manutenzione non riuscita il {when}
+pca.maint.estimate	Richiede circa {mem} di memoria
+pca.maint.run	Mantieni ora
+pca.maint.done	Gruppo {group} mantenuto
+pca.kit	Kit di ripristino
+pca.kit_once	La password è mostrata solo ora. Stampa il kit o conservalo in un gestore di password: con esso e una copia della cartella, restic apre i backup su qualsiasi computer.
+pca.kit_text	Un nuovo kit sostituisce il precedente: la vecchia password non funziona più.
+pca.kit.repo	Archivio
+pca.kit.password	Password
+pca.kit.print	Stampa
+pca.group_delete	Elimina il gruppo
+pca.group_delete_title	Eliminare il gruppo {group}?
+pca.group_delete_text	L'archivio e tutte le sue versioni vengono eliminati dal NAS. Non si può annullare.
+pca.group_deleted	Gruppo {group} eliminato
+pca.own_group	Gruppo proprio
+pca.join_group	Unisci a un gruppo
+pca.own_help	Il PC ha un archivio tutto suo: nessun altro PC può leggerne i dati.
+pca.join_help	I dati uguali dei PC di uno stesso gruppo sono salvati una volta sola.
+pca.join_warning	I PC di uno stesso gruppo possono leggere i dati l'uno dell'altro. Unisci solo PC della stessa persona, o macchine con lo stesso contenuto.
+pca.join_memory	Con un PC in più la manutenzione del gruppo può richiedere circa {mem}, oltre i {budget} che può usare: pulizia e verifica aspetterebbero. Aumenta la quota di memoria nelle impostazioni, o dai al PC un gruppo proprio.
+pca.no_groups	Ancora nessun gruppo: il primo PC ne ha uno proprio.
+pca.f.quota	Quota del gruppo (GiB)
+pca.f.quota_help	0: nessun limite. Un PC oltre la quota non può inviare altro finché le versioni non vengono ripulite.
+pca.make_code	Crea il codice
+pca.code	Codice di abbinamento
+pca.code_valid	Il codice funziona una volta, fino al {until}.
+pca.fingerprint	Certificato di questo NAS
+pca.step.install	1. Installa rynas-agent sul PC
+pca.step.pair	2. Abbinalo
+pca.step.note	L'agente mostra l'impronta del certificato: confrontala con quella qui sopra. Poi avvia il servizio: systemctl enable --now rynas-agent.service. I pacchetti per Arch, Debian e Fedora sono nelle release.
+pca.f.folder	Cartella degli archivi
+pca.f.folder_help	Dentro un volume. I gruppi esistenti restano dove sono.
+pca.f.default_quota	Quota dei nuovi gruppi (GiB)
+pca.f.hour	Ora della manutenzione
+pca.f.hour_help	0–23, ogni notte.
+pca.f.memory	Quota di memoria (%)
+pca.f.memory_help	Della memoria del NAS, per una manutenzione. Una pulizia che richiede di più aspetta.
+pca.last_ok	Ultima versione riuscita
+pca.last_seen	Ultimo contatto
+pca.os	Sistema
+pca.bare_metal	Ripristino completo
+pca.ready.yes	Pronto
+pca.ready.no	Non pronto
+pca.ready.no_version	Ancora nessuna versione
+pca.ready.no_manifest	Disposizione dei dischi non ancora ricevuta
+pca.ready.stale	La disposizione dei dischi è più vecchia dell'ultima versione
+pca.ready.skipped	Un filesystem montato non è nel backup
+pca.ready.loader	Il boot loader è sconosciuto
+pca.ready.no_table	Nessuna tabella delle partizioni letta
+pca.ready.no_kit	Il gruppo non ha un kit di ripristino
+pca.ready.manual	LVM o md: da ricreare a mano prima del ripristino
+pca.last_error	Ultimo errore
+pca.changed	File cambiati durante la lettura
+pca.changed_n	{n} file
+pca.changed_note	Questi file sono stati scritti mentre il backup li leggeva: la loro copia può mescolare contenuto vecchio e nuovo. Il congelamento del filesystem, uno snapshot (btrfs, LVM) o un dump prima del backup lo evitano.
+pca.how_read	Come è stato letto ogni filesystem
+pca.m.btrfs	snapshot btrfs
+pca.m.lvm	snapshot LVM
+pca.m.frozen	congelato
+pca.m.thawed	congelato, poi letto in uso
+pca.m.hot	letto in uso
+pca.m.files	file
+pca.m.skipped	escluso
+pca.backup_now	Esegui ora
+pca.cancel	Annulla
+pca.backup_sent	Il PC parte al prossimo contatto
+pca.cancel_sent	Il PC si ferma al prossimo contatto
+pca.restore_code	Codice di ripristino
+pca.restore_code_valid	Codice di ripristino {code}: funziona una volta, solo in lettura, fino al {until}.
+pca.restore_steps	Avvia un qualsiasi Linux live sul PC (nella stessa modalità UEFI o BIOS), poi esegui:
+pca.revoke	Revoca
+pca.revoke_title	Revocare {device}?
+pca.revoke_text	Il suo token smette subito di funzionare e il suo file di chiave viene rimosso. Le sue versioni restano leggibili nel gruppo finché il gruppo non viene eliminato.
+pca.revoked	{device} revocato
+pca.revoked_note	Questo PC è revocato: non può inviare nulla; le sue versioni si possono ancora sfogliare e ripristinare.
+pca.versions	Versioni
+pca.no_versions	Ancora nessuna versione.
+pca.history	Cronologia
+pca.h.backup	Backup
+pca.f.schedule	Pianificazione
+pca.f.state	Backup
+pca.f.scheduled	Pianificati
+pca.f.paused	In pausa
+pca.f.interval	Ogni (ore)
+pca.f.interval_help	1–168.
+pca.f.delay	Dopo l'avvio (minuti)
+pca.f.delay_help	Un backup in scadenza aspetta tanto dopo l'avvio del PC.
+pca.f.consistency	Filesystem senza snapshot
+pca.f.read	ext e XFS senza LVM
+pca.f.hot	Lettura in uso
+pca.f.freeze	Congela
+pca.f.hot_help	Il PC continua a lavorare; i file scritti nel frattempo sono elencati con la versione.
+pca.f.freeze_help	Ogni file è coerente, ma i programmi che scrivono aspettano la fine del backup (al massimo il tempo qui sotto).
+pca.f.freeze_max	Congelamento massimo (secondi)
+pca.f.freeze_max_help	Poi il filesystem si scongela e il resto è letto in uso.
+pca.f.excludes	Esclusioni
+pca.f.excludes_help	Uno schema per riga, oltre a cache, file temporanei e file di swap.
+pca.f.retention	Versioni conservate
+pca.f.last	Ultime
+pca.f.daily	Giornaliere
+pca.f.weekly	Settimanali
+pca.f.monthly	Mensili
+pca.f.yearly	Annuali
+pca.f.min_age	Mai eliminare prima di (giorni)
+pca.f.min_age_help	Protegge da una modifica sbagliata della conservazione.
+pca.f.alerts	Avvisi
+pca.f.alert	In ritardo dopo (ore)
+pca.f.alert_help	0: nessun avviso.
+pca.f.critical	Molto in ritardo dopo (ore)
+pca.download	Scarica
+pca.zip_folder	Scarica questa cartella (zip)
+pca.zip_selected	Scarica i {n} selezionati (zip)
+pca.browse_note	I file arrivano direttamente dal backup; lo zip si crea mentre si scarica.
+pca.browse_title	{device}: versione {id}
+task.pcbackup.revoke	Revoca di un PC
+task.pcbackup.maintenance	Manutenzione di un gruppo di backup dei PC
+task.pcbackup.delete-group	Eliminazione di un gruppo di backup dei PC
+nev.pcbackup.agent_late.title	Nessun backup da {device} da {hours} ore
+nev.pcbackup.agent_late.body	L'ultima versione riuscita di {device} è più vecchia di {hours} ore.
+nev.pcbackup.agent_critical.title	Nessun backup da {device} da {hours} ore
+nev.pcbackup.agent_critical.body	{device} non ha una versione riuscita da {hours} ore.
+nev.pcbackup.agent_resumed.title	I backup da {device} arrivano di nuovo
+nev.pcbackup.agent_resumed.body	{device} ha una nuova versione riuscita.
+nev.pcbackup.agent_failed.title	Il backup di {device} non è riuscito
+nev.pcbackup.agent_failed.body	Vedi il PC nella pagina Backup.
 nt.src.synodeb	Sistema di base
 nev.synodeb.unit_failed.title	Servizio non riuscito: {unit}
 nev.synodeb.smart_error.title	SMART {device}: {failtype}

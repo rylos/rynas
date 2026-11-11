@@ -54,6 +54,8 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/auth/login", post(auth::login))
         .route("/auth/session", get(auth::session))
+        // the PC agents: their own token or code, checked by rynasd (no session)
+        .merge(crate::pc_agent::routes())
         .merge(protected)
         // unknown endpoints: 401 without a session, so they do not reveal what exists
         .route("/{*rest}", any(auth::fallback))
