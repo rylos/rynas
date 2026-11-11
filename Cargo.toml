@@ -32,6 +32,7 @@ members = [
     "crates/rynas-dns",
     "crates/rynas-tailscale",
     "crates/rynas-backup",
+    "crates/rynas-dedup",
 ]
 
 [workspace.package]
@@ -77,6 +78,7 @@ rynas-apps = { path = "crates/rynas-apps" }
 rynas-docker = { path = "crates/rynas-docker" }
 rynas-tailscale = { path = "crates/rynas-tailscale" }
 rynas-backup = { path = "crates/rynas-backup" }
+rynas-dedup = { path = "crates/rynas-dedup" }
 # local time zone arithmetic of the power schedule (DST-safe); the system tz database
 jiff = { version = "0.2.38", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 serde = { version = "1", features = ["derive"] }

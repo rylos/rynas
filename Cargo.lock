@@ -3626,6 +3626,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rynas-dedup"
+version = "0.5.0"
+dependencies = [
+ "jiff",
+ "rynas-api-types",
+ "rynas-config",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "rynas-dns"
 version = "0.5.0"
 dependencies = [

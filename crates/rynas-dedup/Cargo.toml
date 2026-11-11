@@ -1,0 +1,19 @@
+[package]
+name = "rynas-dedup"
+description = "rynas offline deduplication (D-DEDUP): the dedup configuration domain, the oans command line, its progress and report parsers, the weekly window and the job state"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+# oans (GPL-2.0-only) is only ever executed as a separate program: nothing of it is linked,
+# vendored or ported here; the parsers follow its documented output formats.
+[dependencies]
+rynas-api-types.workspace = true
+rynas-config.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+jiff.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
