@@ -14,7 +14,7 @@ ROOT=$(cd "$HERE/../.." && pwd)
 # shellcheck source=versions.env
 . "$HERE/versions.env"
 OUT="$ROOT/target/nut"
-ls "$OUT"/*_"$NUT_DEBIAN_VERSION"~rynas13+"$PKG_REVISION"_*.deb >/dev/null || { echo "run build.sh first" >&2; exit 1; }
+ls "$OUT"/*_"${NUT_DEBIAN_VERSION%-*}"-0~rynas13+"$PKG_REVISION"_*.deb >/dev/null || { echo "run build.sh first" >&2; exit 1; }
 
 # shellcheck disable=SC2016  # the script runs in the container
 docker run --rm -i -e DEBIAN_SNAPSHOT="$DEBIAN_SNAPSHOT" -v "$OUT:/debs:ro" "$BUILDER_IMAGE" bash -euo pipefail <<'SCRIPT'
@@ -61,6 +61,11 @@ CHANGED="nut.conf ups.conf upsd.users upsmon.conf"
 before=$(cd /etc/nut && sha256sum $CHANGED)
 
 TARGETS=(/debs/*_*~rynas13+*_*.deb)
+# the version sorts above trixie's and below every Debian build of 2.8.5-1
+V=$(dpkg-deb -f /debs/nut-server_*.deb Version)
+for lower in 2.8.1-5 2.8.1-5+deb13u1; do dpkg --compare-versions "$V" gt "$lower" || fail "$V <= $lower"; done
+for higher in 2.8.5-1 2.8.5-1~bpo13+1 2.8.5-1~synodeb13+1; do dpkg --compare-versions "$V" lt "$higher" || fail "$V >= $higher"; done
+echo "$V: above 2.8.1-5(+deb13u1), below 2.8.5-1, 2.8.5-1~bpo13+1, 2.8.5-1~synodeb13+1"
 # rynasd's simulation, then its install line (crate::updates::apt + ups_update)
 apt-get -s -q -o Debug::NoLocking=true --no-remove install -- "${TARGETS[@]}" >/dev/null
 apt-get -q -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold \

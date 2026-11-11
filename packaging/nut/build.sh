@@ -3,7 +3,20 @@
 # forky/sid rebuilt unmodified on trixie (D-UPS-NUT, docs/research/ups.md "NUT newer than
 # Debian's"). Some UPSes need a NUT newer than trixie's 2.8.1 (USB 0925:1234 needs
 # nutdrv_qx subdriver=armac, NUT 2.8.5); rynasd offers this build in UPS setup only when a
-# UPS needs it and no apt source has a new enough NUT (crates/rynasd/src/ups_update.rs).
+# UPS needs it and no apt source (nor a configured trixie-backports) has a new enough NUT
+# (crates/rynasd/src/ups_update.rs). Built once, attached to one fixed release (versions.env:
+# RELEASE_TAG), not rebuilt per rynas release.
+#
+# Publishing (one-off, by hand, after build.sh and test.sh):
+#   gh release create nut-2.8.5-0rynas1 --repo rylos/rynas --latest=false \
+#       --title "NUT 2.8.5 for Debian 13 (rynas build)" \
+#       --notes "Debian's NUT 2.8.5-1 rebuilt for trixie by packaging/nut; rynasd installs it from here." \
+#       target/nut/release/*.deb target/nut/release/SHA256SUMS target/nut/source/*
+#   (--latest=false: the rynas releases stay "latest"). rynasd downloads
+#   https://github.com/rylos/rynas/releases/download/<RELEASE_TAG>/<asset> and keeps a file
+#   only when its SHA-256 is the pinned one; the asset names are the package names with ~
+#   and + turned into dots (target/nut/release/). Check after the upload: the names on the
+#   release page must be exactly those in target/nut/release/SHA256SUMS.
 #
 #   packaging/nut/build.sh [--no-docker]
 #
@@ -12,8 +25,9 @@
 # Inputs are pinned in versions.env: the Debian source by the SHA-256 of its .dsc (which pins
 # the upstream tarball and the Debian packaging; dpkg-source checks them), the builder image
 # by digest, the build dependencies from a snapshot.debian.org timestamp. The only change to
-# the source is one changelog entry giving the version <Debian version>~rynas13+<revision>
-# (below Debian's own, so a Debian package replaces it) dated SOURCE_DATE_EPOCH, the time
+# the source is one changelog entry giving the version <upstream>-0~rynas13+<revision>
+# (above trixie's 2.8.1, below every Debian build of 2.8.5-1, so a Debian package replaces
+# it; checked with dpkg --compare-versions) dated SOURCE_DATE_EPOCH, the time
 # of the last commit touching packaging/nut: the same inputs give the same packages.
 # Built with Debian's nodoc profile (no manual pages) and without the test suite, in a
 # fixed path. The metapackage nut stays Debian's (it depends on nut-server and nut-client
@@ -25,8 +39,8 @@
 # NUT is GPL-2.0-or-later: the corresponding source (the .dsc and its files, plus this
 # folder) is published next to the packages (GPL-2.0 §3(a)); target/nut/source/ gets it.
 #
-# Output: target/nut/<package>_<version>_<arch>.deb, target/nut/SHA256SUMS and
-# target/nut/source/. Nothing is installed on the build host. Test: packaging/nut/test.sh.
+# Output: target/nut/<package>_<version>_<arch>.deb, target/nut/SHA256SUMS, the release
+# assets in target/nut/release/ and target/nut/source/. Nothing is installed on the build host. Test: packaging/nut/test.sh.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -38,7 +52,7 @@ DOCKER=1
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-docker|--inside) DOCKER=0 ;;
-        -h|--help) sed -n '2,27p' "$0"; exit 0 ;;
+        -h|--help) awk 'NR > 1 && /^set -e/ {exit} NR > 1' "$0"; exit 0 ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
     shift
@@ -103,7 +117,10 @@ upstream=${NUT_DEBIAN_VERSION%-*}
 dpkg-source -x "$DSC" "$BUILD/nut-$upstream" >/dev/null
 cd "$BUILD/nut-$upstream"
 [ "$(dpkg-parsechangelog -S Version)" = "$NUT_DEBIAN_VERSION" ] || { echo "unexpected source version" >&2; exit 1; }
-VERSION="$NUT_DEBIAN_VERSION~rynas13+$PKG_REVISION"
+# below every Debian build of this upstream version (2.8.5-1~bpo13+1 included)
+VERSION="$upstream-0~rynas13+$PKG_REVISION"
+dpkg --compare-versions "$VERSION" lt "$NUT_DEBIAN_VERSION~bpo13+1" && dpkg --compare-versions "$VERSION" gt 2.8.1-5+deb13u9 \
+    || { echo "$VERSION does not sort between trixie's NUT and Debian's backport" >&2; exit 1; }
 {
     printf 'nut (%s) trixie; urgency=medium\n\n' "$VERSION"
     printf '  * Debian %s rebuilt unmodified for Debian 13 (trixie) for rynas\n' "$NUT_DEBIAN_VERSION"
@@ -121,7 +138,7 @@ DEB_BUILD_OPTIONS="nocheck nodoc parallel=$JOBS" DEB_BUILD_PROFILES=nodoc \
     dpkg-buildpackage -b -us -uc > "$BUILD/build.log" 2>&1 || { tail -n 60 "$BUILD/build.log"; exit 1; }
 
 cd "$BUILD"
-rm -f "$OUT"/*_"$NUT_DEBIAN_VERSION"~rynas13+*.deb
+rm -rf "$OUT"/*_*~rynas13+*.deb "$OUT/release"
 kept=()
 for p in $PACKAGES; do
     f=$(find "$BUILD" -maxdepth 1 -name "${p}_${VERSION}_*.deb" | head -n 1)
@@ -141,6 +158,11 @@ for f in "${kept[@]}"; do
 done
 "$BUILD/nut-$upstream/drivers/nutdrv_qx" -h 2>&1 | head -n 1 || true
 (cd "$OUT" && sha256sum "${kept[@]}" > SHA256SUMS)
+# the release assets: GitHub turns ~ and + in asset names into dots, so the files get
+# those names here already (rynasd asks for them: ups_update::asset_name), same bytes
+mkdir -p "$OUT/release"
+for f in "${kept[@]}"; do cp "$OUT/$f" "$OUT/release/$(printf '%s' "$f" | tr '~+' '..')"; done
+(cd "$OUT/release" && sha256sum ./*.deb | sed 's|  \./|  |' > SHA256SUMS)
 chown -R "${HOST_UID:-0}:${HOST_GID:-0}" "$OUT" 2>/dev/null || true
 echo "built in $OUT:"
 cat "$OUT/SHA256SUMS"
