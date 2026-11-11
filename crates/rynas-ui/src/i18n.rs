@@ -2723,7 +2723,7 @@ dict! { BLOB, LENS, IT;
     "dd.left" => "Still to free", "Ancora da liberare";
     "dd.next" => "Next window", "Prossima fascia";
     "dd.estimate_result" => "Estimate", "Stima";
-    "dd.estimate_line" => "{size} duplicated in {files} files ({pct} of {total})", "{size} duplicati in {files} file ({pct} di {total})";
+    "dd.estimate_line" => "{size} duplicated in {files} of {scanned} files scanned ({pct} of {total})", "{size} duplicati in {files} di {scanned} file analizzati ({pct} di {total})";
     "dd.logical_note" => "Sizes count data before compression; snapshots taken earlier keep their copy until they expire.", "Le dimensioni contano i dati prima della compressione; gli snapshot precedenti tengono la loro copia finché non scadono.";
     "dd.out.done" => "Done", "Completata";
     "dd.out.window_ended" => "Window ended", "Fascia finita";

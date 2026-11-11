@@ -304,7 +304,7 @@ fn card(
                     {j.settings.is_some().then(|| kv_row("apps.d.shares", Signal::stored(if enabled.is_empty() { t("dd.none").to_string() } else { enabled.join(", ") }), ""))}
                     {j.last.as_ref().map(|r| {
                         let (tn, k) = outcome_text(r.outcome);
-                        view! { <div class="kv"><dt>{tr("sch.col.last")}</dt><dd><Status tone=tn text=t(k).to_string() />" "<span class="small tnum">{record_line(r)}</span></dd></div> }
+                        view! { <div class="kv"><dt>{tr("sch.col.last")}</dt><dd class="chips"><Status tone=tn text=t(k).to_string() /><span class="small tnum">{record_line(r)}</span></dd></div> }
                     })}
                     {report.as_ref().filter(|r| r.reclaimed_total_bytes > 0).map(|r| kv_row("dd.total", Signal::stored(i18n::bytes(r.reclaimed_total_bytes)), "tnum"))}
                     {report.as_ref().filter(|r| r.reclaimable_bytes > 0 && r.dedupe_configured == Some(true)).map(|r| kv_row("dd.left", Signal::stored(i18n::bytes(r.reclaimable_bytes)), "tnum"))}
@@ -312,7 +312,7 @@ fn card(
                     {j.estimate.as_ref().map(|e| {
                         let pct = if e.logical_bytes > 0 { e.reclaimable_bytes as f64 * 100.0 / e.logical_bytes as f64 } else { 0.0 };
                         kv_row("dd.estimate_result", Signal::stored(tf("dd.estimate_line", &[
-                            ("size", &i18n::bytes(e.reclaimable_bytes)), ("files", &e.dup_files.to_string()), ("pct", &i18n::pct(pct)), ("total", &i18n::bytes(e.logical_bytes)),
+                            ("size", &i18n::bytes(e.reclaimable_bytes)), ("files", &e.dup_files.to_string()), ("scanned", &e.files.to_string()), ("pct", &i18n::pct(pct)), ("total", &i18n::bytes(e.logical_bytes)),
                         ])), "")
                     })}
                 </dl>

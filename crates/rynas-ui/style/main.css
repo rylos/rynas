@@ -1215,6 +1215,7 @@ kbd {
 .tab[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
 .tab:focus-visible, .link-strong:focus-visible, .switch:focus-visible, .perm-radio:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .chips { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1); }
+.kv dd.chips { justify-content: flex-end; }
 .cell-main { display: flex; flex-direction: column; align-items: flex-start; gap: var(--s-1); min-width: 0; }
 .cell-sub { font-size: var(--fs-12); color: var(--text-subtle); }
 .link-strong { font-weight: 600; color: var(--text); text-align: left; border-radius: var(--r-sm); }

@@ -2311,7 +2311,7 @@ dd.total	Liberato in totale
 dd.left	Ancora da liberare
 dd.next	Prossima fascia
 dd.estimate_result	Stima
-dd.estimate_line	{size} duplicati in {files} file ({pct} di {total})
+dd.estimate_line	{size} duplicati in {files} di {scanned} file analizzati ({pct} di {total})
 dd.logical_note	Le dimensioni contano i dati prima della compressione; gli snapshot precedenti tengono la loro copia finché non scadono.
 dd.out.done	Completata
 dd.out.window_ended	Fascia finita

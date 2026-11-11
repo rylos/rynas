@@ -258,7 +258,9 @@ pub fn summary_text(value: &str, levels: &[GridLevel]) -> String {
                     .collect::<Vec<_>>()
                     .join(", ")
             };
-            let runs = g.runs.iter().map(|&(a, b, c)| format!("{a:02}–{b:02} {}", level_label(levels, c))).collect::<Vec<_>>().join(", ");
+            // with only two levels every run is the other one: its name adds nothing
+            let label = |c| if levels.len() == 2 { String::new() } else { format!(" {}", level_label(levels, c)) };
+            let runs = g.runs.iter().map(|&(a, b, c)| format!("{a:02}–{b:02}{}", label(c))).collect::<Vec<_>>().join(", ");
             format!("{days} {runs}")
         })
         .collect::<Vec<_>>()
