@@ -473,6 +473,7 @@ impl ActionDraft {
             TaskAction::Replicate { .. } => d.kind = "replicate".into(),
             TaskAction::PowerShutdown { .. } => d.kind = "power_shutdown".into(),
             TaskAction::Backup { .. } => d.kind = "backup".into(),
+            TaskAction::Dedup { .. } => d.kind = "dedup".into(),
         }
         d
     }
@@ -540,6 +541,15 @@ pub fn action_text(a: &TaskAction) -> (String, String) {
         TaskAction::RecycleCleanup { share, .. } => (t("sch.act.recycle_cleanup").to_string(), share.clone().unwrap_or_else(|| t("sch.all_shares").to_string())),
         TaskAction::PowerShutdown { rule } => (t("sch.act.power_shutdown").to_string(), rule.clone()),
         TaskAction::Backup { job } => (t("sch.act.backup").to_string(), job.clone()),
+        TaskAction::Dedup { volume } => (t("sch.act.dedup").to_string(), crate::pages::storage::dedup::job_name(volume)),
+    }
+}
+
+/// Where a task managed by another page is changed (`None`: edited here).
+fn managed_href(a: &TaskAction) -> Option<String> {
+    match a {
+        TaskAction::Dedup { volume } => Some(crate::pages::storage::dedup::job_href(volume)),
+        _ => None,
     }
 }
 
@@ -725,7 +735,10 @@ fn task_row(
     let id = task.id.clone();
     let name = if task.name.is_empty() { task.id.clone() } else { task.name.clone() };
     let deleting = st.pending == Some(PendingOp::Delete);
-    let fixed = matches!(task.action, TaskAction::Snapshot { .. } | TaskAction::Replicate { .. } | TaskAction::PowerShutdown { .. });
+    // a deduplication task follows its window in Storage: read-only here
+    let managed = managed_href(&task.action);
+    let is_managed = managed.is_some();
+    let fixed = is_managed || matches!(task.action, TaskAction::Snapshot { .. } | TaskAction::Replicate { .. } | TaskAction::PowerShutdown { .. });
     let (akind, adetail) = action_text(&task.action);
     let enabled = task.enabled;
     let toggling = RwSignal::new(false);
@@ -797,13 +810,17 @@ fn task_row(
         vec![
             ui::cell("sch.col.enabled", "switch-col", view! {
                 <input type="checkbox" role="switch" class="switch" aria-label=format!("{}: {}", t("sch.col.enabled"), n1)
-                prop:checked=enabled disabled=move || toggling.get() || deleting
+                prop:checked=enabled disabled=move || toggling.get() || deleting || is_managed
                 on:change=move |ev| toggle(event_target_checked(&ev)) />
             }
             .into_any()),
             ui::cell("sch.col.task", "", view! {
                 <div class="cell-main">
-                    <button class="link-strong" disabled=deleting on:click=move |_| edit.set(Some((t_edit.clone(), false)))>{name.clone()}</button>
+                    {match managed.clone() {
+                        Some(href) => view! { <a class="link-strong" href=href title=tr("sch.managed_storage")>{name.clone()}</a> }.into_any(),
+                        None => view! { <button class="link-strong" disabled=deleting on:click=move |_| edit.set(Some((t_edit.clone(), false)))>{name.clone()}</button> }.into_any(),
+                    }}
+                    {is_managed.then(|| view! { <span class="cell-sub">{tr("sch.managed_storage")}</span> })}
                     <span class="cell-sub mono">{task.id.clone()}</span>
                     {(!task.description.is_empty()).then(|| view! { <span class="cell-sub">{task.description.clone()}</span> })}
                 </div>
@@ -834,16 +851,16 @@ fn task_row(
             .into_any()),
             ui::actions(view! {
                 <button class="icon-btn sm" title=tr("run_now") aria-label=format!("{}: {}", t("run_now"), n2)
-                    disabled=move || running.get() || st.running || !st.applied on:click=run>
+                    disabled=move || running.get() || st.running || !st.applied || is_managed on:click=run>
                     <Icon icon=icons::PLAY size=16 />
                 </button>
                 <button class="icon-btn sm" title=tr("sch.history") aria-label=format!("{}: {}", t("sch.history"), n3) on:click=move |_| history.set(Some(t_hist.clone()))>
                     <Icon icon=icons::HISTORY size=16 />
                 </button>
-                <button class="icon-btn sm" title=tr("edit") aria-label=format!("{} {}", t("edit"), n4) disabled=deleting on:click=move |_| edit.set(Some((task.clone(), false)))>
+                <button class="icon-btn sm" title=tr("edit") aria-label=format!("{} {}", t("edit"), n4) disabled=deleting || is_managed on:click=move |_| edit.set(Some((task.clone(), false)))>
                     <Icon icon=icons::PENCIL size=16 />
                 </button>
-                <button class="icon-btn sm danger" title=move || if fixed { t("sch.delete_job_task") } else { t("delete") } aria-label=format!("{} {}", t("delete"), n5)
+                <button class="icon-btn sm danger" title=move || if is_managed { t("sch.managed_storage") } else if fixed { t("sch.delete_job_task") } else { t("delete") } aria-label=format!("{} {}", t("delete"), n5)
                     disabled=deleting || fixed on:click=move |_| del.set(Some((id_d.clone(), name.clone())))>
                     <Icon icon=icons::TRASH_2 size=16 />
                 </button>

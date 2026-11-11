@@ -282,6 +282,7 @@ fn volume_view(vol: Vol, modal: RwSignal<Open>, selected: RwSignal<Option<String
             {(!vol.locked).then(|| usage_card(&vol))}
             {vol.md.clone().map(|a| raid_card(a, selected))}
             {(!vol.locked && vol.fs.is_some()).then(|| scrub_card(&vol, modal))}
+            {(!vol.locked && vol.mountpoint.is_some()).then(|| view! { <super::dedup::DedupCard key=vol.id.clone() /> })}
         </div>
     }
     .into_any()

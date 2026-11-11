@@ -1971,3 +1971,12 @@ body:has(.sysp-overlay) { overflow: hidden; }
   .wg-cell { grid-row: calc(var(--h) + 2); grid-column: calc(var(--r) + 2); }
   .wg-hour button { padding: 0 var(--s-2); }
 }
+
+/* Deduplication (pages/storage/dedup.rs) and the note under the shares table */
+.table-note { margin: var(--s-3) 0 0; }
+.wrap-anywhere { overflow-wrap: anywhere; min-width: 0; }
+.field-group { display: flex; flex-direction: column; gap: var(--s-3); }
+.switch-row.disabled { cursor: default; opacity: .7; }
+.dd-history li { padding: var(--s-2) 0; border-bottom: 1px solid var(--border); }
+.dd-history li:last-child { border-bottom: 0; }
+.dd-hrow { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }

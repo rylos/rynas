@@ -8,6 +8,7 @@
 //! are read on demand only, and never automatically for a disk in standby (S6).
 //! Every change is planned first (`POST /storage/plan/*`), shown, confirmed, then run as a task.
 
+pub mod dedup;
 pub mod disks;
 pub mod plan;
 pub mod volume;
@@ -492,6 +493,8 @@ pub fn Storage() -> impl IntoView {
                         (move || disk_grid(s.disks.get().unwrap_or_default(), selected)).into_any()
                     }}
                 </section>
+                // deduplication of filesystems without a volume page (system volume, other folders)
+                <dedup::OtherDedupJobs volumes=Signal::derive(move || vols.with(|v| v.iter().map(|x| x.id.clone()).collect::<Vec<_>>())) />
             </Show>
             {move || selected.get().map(|name| view! { <disks::DiskDrawer name=name on_close=Callback::new(move |_| selected.set(None)) /> })}
             {move || unlock.get().map(|id| view! { <volume::UnlockDialog id=id on_close=Callback::new(move |_| unlock.set(None)) /> })}

@@ -2204,6 +2204,140 @@ sch.act.smart_test	Test SMART
 sch.act.recycle_cleanup	Pulizia del cestino
 sch.act.power_shutdown	Spegnimento pianificato
 sch.act.backup	Job di backup
+sch.act.dedup	Deduplicazione
+sch.managed_storage	Gestita in Archiviazione: modificala lì.
+dd.title	Deduplicazione
+dd.short	Deduplicata
+dd.text	Trova dati identici nelle cartelle condivise abilitate e ne tiene una sola copia su disco. Lavora solo nella sua fascia oraria.
+dd.fs_name	Filesystem {id}
+dd.st.off	Disattivata
+dd.st.on	Attiva
+dd.st.paused	In pausa
+dd.st.running	In corso
+dd.st.estimating	Stima in corso
+dd.st.waiting	In attesa
+dd.engine_missing	Il motore di deduplicazione (oans) non è installato.
+dd.engine_unavailable	Il motore di deduplicazione (pacchetto rynas-oans) non è installato e nessuna sorgente lo offre: aggiungi la sorgente dei pacchetti rynas, o metti il pacchetto della release di rynas in /var/lib/rynas/packages.
+dd.engine_unsupported	oans {version} è fuori dalle versioni provate con rynas (da {min} a {max}): le esecuzioni sono rifiutate.
+dd.install	Installa
+dd.waiting_for	In attesa che finisca {task}
+dd.starting	Avvio…
+dd.until	fino a {when}
+dd.ends	Si ferma
+dd.stopping	Arresto: il lavoro fatto viene salvato (fino a 5 minuti).
+dd.ph.scanning	Ricerca dei file
+dd.ph.hashing	Lettura dei file
+dd.ph.dedupe	Condivisione dei duplicati
+dd.eta	mancano {time}
+dd.freed	{size} liberati
+dd.window	Fascia oraria
+dd.window_help	Le esecuzioni partono all'inizio di ogni blocco e si fermano alla sua fine; il blocco successivo riprende da lì.
+dd.window_empty	Scegli almeno un'ora.
+dd.grid_on	Può lavorare
+dd.grid_off	Ferma
+dd.none	Ancora nessuna
+dd.total	Liberato in totale
+dd.left	Ancora da liberare
+dd.next	Prossima fascia
+dd.estimate_result	Stima
+dd.estimate_line	{size} duplicati in {files} file ({pct} di {total})
+dd.logical_note	Le dimensioni contano i dati prima della compressione; gli snapshot precedenti tengono la loro copia finché non scadono.
+dd.out.done	Completata
+dd.out.window_ended	Fascia finita
+dd.out.preempted	Ha ceduto il passo
+dd.out.stopped	Fermata
+dd.out.partial	Parziale
+dd.out.failed	Non riuscita
+dd.out.skipped	Saltata
+dd.block.encrypted	Le cartelle crittografate non si possono deduplicare.
+dd.block.nocow	Le cartelle senza copy-on-write non si possono deduplicare.
+dd.block.filesystem	Si possono deduplicare solo cartelle btrfs e XFS.
+dd.block.xfs_no_reflink	Questo filesystem XFS è stato creato senza reflink.
+dd.block.other_fs	La cartella è su un filesystem diverso dal suo volume.
+dd.block.not_mounted	La cartella o il suo filesystem non è disponibile.
+dd.warn.qgroups	Le quote btrfs sono attive: con molti extent condivisi le scritture possono bloccarsi per un po'.
+dd.warn.replicated	È inclusa una cartella replicata: la prossima replica può durare di più o inviare di più.
+dd.warn.no_shares	Nessuna cartella condivisa abilitata: attivala nelle impostazioni di una cartella.
+dd.warn.blocked	Alcune cartelle abilitate non si possono deduplicare e restano fuori.
+dd.warn.flash	Il disco di sistema è spesso memoria flash: l'indice viene scritto lì.
+dd.estimate	Stima
+dd.estimate_title	Stima su {name}
+dd.estimate_text	Legge le cartelle e conta i duplicati senza cambiare nulla. Il lavoro viene riusato dalla prima esecuzione.
+dd.run_title	Deduplica {name} ora
+dd.run_text	Parte ora con bassa priorità. Altre attività sul volume (scrub, replica, backup) hanno la precedenza.
+dd.until_label	Fermati
+dd.until_help	Il lavoro fatto resta; la prossima fascia continua.
+dd.until_window	Alla fine della fascia
+dd.h1	Dopo 1 ora
+dd.h2	Dopo 2 ore
+dd.h4	Dopo 4 ore
+dd.h8	Dopo 8 ore
+dd.h24	Dopo 24 ore
+dd.snapshots_note	Lo spazio degli snapshot più vecchi torna solo quando scadono.
+dd.start	Avvia
+dd.stop	Ferma
+dd.history	Cronologia
+dd.history_title	Cronologia della deduplicazione di {name}
+dd.by	per {task}
+dd.skipped_files	{n} file non leggibili
+dd.settings	Impostazioni
+dd.settings_title	Deduplicazione di {name}
+dd.enabled	Esecuzioni pianificate
+dd.enabled_help	Disattivato: lavora solo se avviata a mano.
+dd.only_awake	Solo se i dischi sono già attivi
+dd.only_awake_help	Salta una fascia invece di svegliare i dischi in standby.
+dd.advanced	Avanzate
+dd.min_size	File più piccolo
+dd.min_size_help	I file più piccoli vengono saltati: liberano poco e cambiano spesso.
+dd.block	Dimensione del blocco
+dd.block_help	La maggior parte dei volumi tiene il valore predefinito.
+dd.block_changed	Una nuova dimensione del blocco fa rileggere tutto alla prossima esecuzione.
+dd.partial	Corrispondenze parziali
+dd.partial_help	Condivide anche parti di file. Molta più CPU e un indice più grande.
+dd.zeroes	Salta i blocchi vuoti
+dd.zeroes_help	Più veloce su immagini disco e file preallocati.
+dd.cpu	Thread CPU
+dd.io	Thread disco
+dd.io_help	Automatico si adatta ai dischi.
+dd.memory	Limite di memoria
+dd.auto	Automatico
+dd.n1	1
+dd.n2	2
+dd.n4	4
+dd.n8	8
+dd.mem.512	512 MiB
+dd.mem.1024	1 GiB
+dd.mem.2048	2 GiB
+dd.mem.4096	4 GiB
+dd.sz.4k	4 KiB
+dd.sz.16k	16 KiB
+dd.sz.32k	32 KiB
+dd.sz.64k	64 KiB
+dd.sz.128k	128 KiB
+dd.sz.256k	256 KiB
+dd.sz.512k	512 KiB
+dd.sz.1m	1 MiB
+dd.sz.4m	4 MiB
+dd.always_excluded	Mai deduplicati
+dd.reset	Azzera l'indice
+dd.reset_text	L'indice dei dati noti viene eliminato: la prossima esecuzione rilegge tutto. I dati non vengono toccati.
+dd.reset_done	Indice azzerato
+dd.turn_off_text	La deduplicazione di {name} si ferma. Lo spazio già liberato resta libero.
+dd.share_switch	Deduplica questa cartella
+dd.share_switch_help	I dati identici qui e nelle altre cartelle abilitate del volume vengono tenuti una volta sola.
+dd.share_job_off	La deduplicazione di questo volume è disattivata.
+dd.include_recycle	Includi il cestino
+dd.include_recycle_help	Disattivato: i file in attesa in #recycle vengono saltati.
+dd.excludes	Salta
+dd.excludes_help	Un modello per riga, relativo alla cartella (cache/, *.iso).
+task.storage.dedup	Deduplicazione
+task.storage.dedup-estimate	Stima della deduplicazione
+task.storage.dedup-reset	Azzeramento dell'indice di deduplicazione
+task.dedup.install	Installazione del motore di deduplicazione
+nev.dedup.ok.title	Deduplicazione di {volume} completata: {reclaimed} liberati
+nev.dedup.partial.title	La deduplicazione di {volume} ha coperto solo parte delle cartelle
+nev.dedup.failed.title	Deduplicazione di {volume} non riuscita
+shares.size_shared	I dati condivisi con altre cartelle o snapshot sono contati in ciascuna.
 sch.smart.short	Breve
 sch.smart.long	Esteso
 sch.all_shares	Tutte le cartelle condivise

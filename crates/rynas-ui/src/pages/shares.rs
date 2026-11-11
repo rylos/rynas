@@ -148,6 +148,7 @@ fn size_cell(path: &str, size: Option<ShareSize>, fss: &[rynas_api_types::Filesy
     if z.exact {
         tip.push(t("shares.size_exact").to_string());
     }
+    tip.push(t("shares.size_shared").to_string());
     if let Some(at) = z.at_ms {
         tip.push(tf("shares.size_as_of", &[("when", &i18n::datetime(at))]));
     }
@@ -263,6 +264,8 @@ pub fn Shares() -> impl IntoView {
                 let size = known.iter().find(|s| s.name == v.share.name).cloned();
                 share_row(v, size, failed.clone(), &fss, edit, del, cact)
             }).collect::<Vec<_>>())}
+            // deduplication, copies and snapshots share data: sizes do not add up
+            <p class="muted small table-note">{tr("shares.size_shared")}</p>
         }
         .into_any()
     };
@@ -370,6 +373,7 @@ fn share_row(v: ShareView, size: Option<ShareSize>, size_failed: Option<String>,
                     {s.encrypted.then(|| t("crypt.encrypted"))}
                     {(!v.status.fs_type.is_empty() && !s.encrypted).then(|| format!(" · {}", v.status.fs_type))}
                     {(v.status.nocow == Some(true)).then(|| format!(" · {}", t("shares.nocow")))}
+                    {s.dedup.as_ref().is_some_and(|d| d.enabled).then(|| format!(" · {}", t("dd.short")))}
                 </span>
             </div>
         }
@@ -450,6 +454,9 @@ fn share_editor(e: ShareEdit, users: Remote<Vec<UserView>>, groups: Remote<Vec<G
         })
         .unwrap_or_default();
     let nocow = e.view.as_ref().and_then(|v| super::share_nocow::existing(v.share.name.clone(), &v.status));
+    // deduplication: no copy-on-write folders cannot share extents
+    let dedup_nocow = e.view.as_ref().is_some_and(|v| v.status.nocow == Some(true));
+    let saved_name = e.view.as_ref().map(|v| v.share.name.clone());
     let crypt_existing = e.view.as_ref().and_then(share_crypt::existing);
     // a brand new folder (not a folder shared again): starts with the default permissions
     let fresh = is_new && e.prefill.is_none();
@@ -591,6 +598,7 @@ fn share_editor(e: ShareEdit, users: Remote<Vec<UserView>>, groups: Remote<Vec<G
         {location_fields(d, is_new, show, cf)}
         {crypt_existing}
         {nocow}
+        {super::storage::dedup::share_fields(d, dedup_nocow, saved_name)}
         {let (v, s) = lens_bool(d, |s| s.show_snapshots, |s, v| s.show_snapshots = v);
          view! { <div hidden=move || encrypted.get()>{switch("shares.show_snapshots", Some("shares.show_snapshots_help"), v, s)}</div> }}
         {(!root_warn.is_empty()).then(|| ui::note(Tone::Err, icons::TRIANGLE_ALERT, view! {
