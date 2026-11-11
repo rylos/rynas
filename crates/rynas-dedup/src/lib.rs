@@ -18,8 +18,21 @@ use serde_json::Value;
 pub use config::normalize;
 pub use engine::{DedupEngine, DedupJob, EngineLine, ExitKind, Oans};
 
-/// The `dedup` key: settings only, no files (the runs are scheduler tasks).
-pub struct DedupDomain;
+/// Called with the key of each job an apply removed.
+pub type OnRemoved = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
+
+/// The `dedup` key: settings only, no files (the runs are scheduler tasks). A removed job
+/// is handed to `removed` (rynasd stops its run and deletes its hashfile and state).
+#[derive(Default)]
+pub struct DedupDomain {
+    pub removed: Option<OnRemoved>,
+}
+
+impl DedupDomain {
+    pub fn with_removed(removed: OnRemoved) -> Self {
+        Self { removed: Some(removed) }
+    }
+}
 
 impl rynas_config::Applier for DedupDomain {
     fn key(&self) -> &str {
@@ -40,5 +53,19 @@ impl rynas_config::Applier for DedupDomain {
 
     fn render(&self, _value: &Value, _ctx: &ApplyCtx) -> Result<Vec<ManagedFile>, String> {
         Ok(Vec::new())
+    }
+
+    fn reconcile(&self, from: Option<&Value>, to: Option<&Value>, _ctx: &ApplyCtx) -> Result<(), String> {
+        let Some(cb) = &self.removed else { return Ok(()) };
+        let keys = |v: Option<&Value>| -> Vec<String> {
+            v.and_then(|v| serde_json::from_value::<DedupConfig>(v.clone()).ok())
+                .map(|c| c.jobs.into_keys().collect())
+                .unwrap_or_default()
+        };
+        let after = keys(to);
+        for k in keys(from).into_iter().filter(|k| !after.contains(k)) {
+            cb(&k);
+        }
+        Ok(())
     }
 }

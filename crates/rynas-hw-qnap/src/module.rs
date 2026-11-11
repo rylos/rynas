@@ -323,7 +323,8 @@ impl Module for QnapModule {
     }
 
     /// Folders data copied from this machine's former system carries: thumbnails, media
-    /// indexes, its recycle bin.
+    /// indexes, its recycle bin. Like every extension point here, only on the hardware: the
+    /// module exists only when [`QnapModule::detect`] found it.
     fn dedup_excludes(&self) -> &'static [&'static str] {
         &[".@__thumb/", ".@__qini/", "@Recycle/"]
     }

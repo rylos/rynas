@@ -59,6 +59,11 @@ pub trait DedupEngine: Send + Sync {
     fn parse_line(&self, line: &str) -> Option<EngineLine>;
     fn parse_report(&self, json: &str) -> Option<DedupReport>;
     fn exit_kind(&self, code: Option<i32>) -> ExitKind;
+    /// An output line that says the hashfile is damaged (the only reason it is reset).
+    fn corrupt_hashfile(&self, line: &str) -> bool;
+    /// A `-R` with this exit code and error output forgot every path asked (paths it did
+    /// not hold count as forgotten).
+    fn forgot(&self, code: Option<i32>, stderr: &str) -> bool;
 }
 
 /// oans (`martinus/oans`), package `rynas-oans`.
@@ -199,7 +204,8 @@ impl DedupEngine for Oans {
 
     fn parse_report(&self, json: &str) -> Option<DedupReport> {
         let start = json.find('{')?;
-        let v: Value = serde_json::from_str(json[start..].trim()).ok()?;
+        // the first JSON value; whatever follows it (a warning line) is left alone
+        let v: Value = serde_json::Deserializer::from_str(&json[start..]).into_iter::<Value>().next()?.ok()?;
         v.as_object()?;
         let mut skipped = BTreeMap::new();
         if let Some(o) = v.get("scan_skipped_last_run").and_then(Value::as_object) {
@@ -230,6 +236,24 @@ impl DedupEngine for Oans {
             Some(2) => ExitKind::Partial,
             Some(130) | Some(143) => ExitKind::Interrupted,
             _ => ExitKind::Failed,
+        }
+    }
+
+    /// SQLite's own words for a damaged database (`SQLITE_CORRUPT`, `SQLITE_NOTADB`).
+    fn corrupt_hashfile(&self, line: &str) -> bool {
+        let l = line.to_ascii_lowercase();
+        l.contains("database disk image is malformed") || l.contains("file is not a database")
+    }
+
+    /// Exit 0, or exit 1 with only "… is not in the hashfile" lines.
+    fn forgot(&self, code: Option<i32>, stderr: &str) -> bool {
+        match code {
+            Some(0) => true,
+            Some(1) => {
+                let lines: Vec<&str> = stderr.lines().filter(|l| !l.trim().is_empty()).collect();
+                !lines.is_empty() && lines.iter().all(|l| l.trim_end().ends_with("is not in the hashfile"))
+            }
+            _ => false,
         }
     }
 }
@@ -362,6 +386,14 @@ mod tests {
         assert_eq!(r.dedupe_configured, Some(true));
         assert_eq!(r.skipped_last_run["permission"], 3);
         assert_eq!(o.parse_report("garbage"), None);
+        // a line after the object does not lose the report
+        assert_eq!(o.parse_report("{\"runs\":3}\nwarning: something\n").unwrap().runs, 3);
+        assert!(o.corrupt_hashfile("ERROR: (dbfile.c:201) preparing statement: 11 (database disk image is malformed)"));
+        assert!(!o.corrupt_hashfile("ERROR: /vol1/x: Permission denied"));
+        assert!(o.forgot(Some(0), ""));
+        assert!(o.forgot(Some(1), "\"/vol1/old\" is not in the hashfile\n"));
+        assert!(!o.forgot(Some(1), "cannot open hashfile\n"));
+        assert!(!o.forgot(None, ""));
         let empty = o.parse_report(r#"{"scan_configured_dedupe":null}"#).unwrap();
         assert_eq!(empty.dedupe_configured, None);
     }

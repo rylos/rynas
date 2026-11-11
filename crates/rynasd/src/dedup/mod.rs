@@ -58,6 +58,8 @@ pub static SVC: OnceLock<Arc<DedupSvc>> = OnceLock::new();
 const ENGINE_TTL: Duration = Duration::from_secs(60);
 /// A run asked for by hand ends at most this far ahead.
 const MAX_MANUAL: u64 = 24 * 3600 * 1000;
+/// A run does not start (or start again after giving way) with less of its window left.
+const MIN_LEFT_MS: u64 = 5 * 60 * 1000;
 /// Engine output lines kept in a task log (progress lines are not logged).
 const LOG_LINES: usize = 400;
 const LOG_LINE_CHARS: usize = 400;
@@ -288,7 +290,8 @@ impl DedupSvc {
                 return format!("{cache}/dedup/volume.hash");
             }
         }
-        self.dir.join(format!("{}.hash", job.key)).to_string_lossy().into_owned()
+        // a folder of its own: the run's sandbox makes it writable, not rynasd's state files
+        self.dir.join("hash").join(format!("{}.hash", job.key)).to_string_lossy().into_owned()
     }
 
     /// Folders of the volume never looked at: Docker's engine data, local backup
@@ -451,14 +454,14 @@ impl DedupSvc {
         self.live.lock().unwrap().contains_key(key)
     }
 
-    /// Starts a run or an estimate; returns the task id.
-    pub fn start(self: &Arc<Self>, key: &str, kind: DedupKind, until_ms: u64, chosen: &[String], who: &str, scheduled: bool) -> Res<String> {
+    /// Why no run can start: the engine is missing or untested (`(error code, message)`).
+    fn engine_problem(&self) -> Option<(&'static str, String)> {
         let eng = self.engine_info(false);
         if !eng.installed {
-            return Err(conflict(error_codes::CONFLICT, "the deduplication engine is not installed"));
+            return Some((error_codes::CONFLICT, "the deduplication engine is not installed".into()));
         }
         if !eng.supported {
-            return Err(conflict(
+            return Some((
                 "engine_unsupported",
                 format!(
                     "oans {} is outside the versions rynas was tested with ({} to {})",
@@ -467,6 +470,44 @@ impl DedupSvc {
                     eng.max_version
                 ),
             ));
+        }
+        None
+    }
+
+    /// Reads the engine facts again now (after an install, or in tests).
+    pub fn refresh_engine(&self) {
+        self.engine_info(true);
+    }
+
+    /// A scheduled run that cannot start: one record and one notification, not one every
+    /// night (repeats only move the record's end).
+    fn engine_missing_run(&self, key: &str, msg: String, task_id: &str) {
+        let cfg_shares: Vec<String> = self
+            .applied::<SharesConfig>(SHARES_KEY)
+            .map(|c| c.shares.into_iter().filter(|s| s.dedup.as_ref().is_some_and(|d| d.enabled)).map(|s| s.name).collect())
+            .unwrap_or_default();
+        let now = now_ms();
+        let rec = DedupRecord {
+            kind: DedupKind::Run,
+            start_ms: now,
+            end_ms: now,
+            outcome: DedupOutcome::Failed,
+            message: msg,
+            task_id: Some(task_id.to_string()),
+            ..Default::default()
+        };
+        let mut repeat = false;
+        let r2 = rec.clone();
+        self.record(key, |st| repeat = st.push(r2));
+        if !repeat {
+            self.notify(key, key, &cfg_shares, &rec);
+        }
+    }
+
+    /// Starts a run or an estimate; returns the task id.
+    pub fn start(self: &Arc<Self>, key: &str, kind: DedupKind, until_ms: u64, chosen: &[String], who: &str, scheduled: bool) -> Res<String> {
+        if let Some((code, msg)) = self.engine_problem() {
+            return Err(conflict(code, msg));
         }
         let plan = self.plan(key, kind, chosen)?;
         let live = {
@@ -542,13 +583,19 @@ impl DedupSvc {
         let skip = |msg: String, by: Option<String>| {
             let rec = DedupRecord { outcome: DedupOutcome::Skipped, end_ms: now_ms(), message: msg.clone(), by, ..base.clone() };
             ctx.log(&format!("skipped: {msg}"));
-            self.record(&plan.key, |st| st.push(rec));
+            self.record(&plan.key, |st| {
+                st.push(rec);
+            });
             Ok(())
         };
+        let too_little = || until_ms.saturating_sub(now_ms()) < MIN_LEFT_MS;
         if plan.roots.is_empty() {
             return skip("no shared folder to deduplicate".into(), None);
         }
         loop {
+            if too_little() {
+                return skip("less than 5 minutes of the window left".into(), None);
+            }
             if scheduled && plan.settings.only_if_awake && self.host.asleep(&plan.mountpoint) {
                 return skip("the disks are in standby".into(), None);
             }
@@ -567,18 +614,28 @@ impl DedupSvc {
                 Ok(g) => g,
                 Err(h) if h == "stop" => {
                     let rec = DedupRecord { outcome: DedupOutcome::Stopped, end_ms: now_ms(), ..base.clone() };
-                    self.record(&plan.key, |st| st.push(rec));
+                    self.record(&plan.key, |st| {
+                        st.push(rec);
+                    });
                     return Ok(());
                 }
                 Err(h) => return skip(format!("{h} was running until the window closed"), Some(h)),
             };
+            if too_little() {
+                drop(guard);
+                return skip("less than 5 minutes of the window left after other work".into(), None);
+            }
             let rec = self.run_once(ctx, &plan, kind, until_ms, &guard, live, &user_stop, &base).await;
-            let again = rec.outcome == DedupOutcome::Preempted && now_ms() + 60_000 < until_ms;
+            let again = rec.outcome == DedupOutcome::Preempted && !too_little();
             drop(guard);
             let failed = rec.outcome == DedupOutcome::Failed;
             let msg = rec.message.clone();
-            self.notify(&plan, &rec);
-            self.record(&plan.key, |st| st.push(rec));
+            let mut repeat = false;
+            let r2 = rec.clone();
+            self.record(&plan.key, |st| repeat = st.push(r2));
+            if !repeat {
+                self.notify(&plan.key, &plan.volume_label, &plan.shares, &rec);
+            }
             if again {
                 ctx.log("other work holds the filesystem: going on after it, while the window is open");
                 live.lock().unwrap().view.progress = None;
@@ -601,7 +658,7 @@ impl DedupSvc {
         base: &DedupRecord,
     ) -> DedupRecord {
         let dedupe = kind == DedupKind::Run;
-        let mut st = state::read(&self.dir, &plan.key);
+        let st = state::read(&self.dir, &plan.key);
         let hashdir = std::path::Path::new(&plan.hashfile)
             .parent()
             .map(|p| p.to_string_lossy().into_owned())
@@ -610,26 +667,41 @@ impl DedupSvc {
         if let Err(e) = self.host.prepare_dir(&hashdir) {
             return fail(format!("hashfile folder: {e}"));
         }
-        // a new block size: the stored hashes are of no use
+        // the roots the hashfile holds; a new block size: the stored hashes are of no use
+        let mut held = st.roots.clone();
         if st.block_size.is_some_and(|b| b != plan.settings.block_size) {
             ctx.log("the block size changed: the hashfile starts again (everything is hashed once more)");
             if let Err(e) = self.host.remove_hashfile(&plan.hashfile) {
                 return fail(e);
             }
-            st.roots.clear();
+            held.clear();
         }
-        // roots that left the job: forgotten, so their hashes do not linger
+        // roots that left the job (also those only an estimate looked at): forgotten, so
+        // their hashes do not linger; kept for the next run when that failed
         if dedupe {
-            let gone: Vec<String> = st.roots.iter().filter(|r| !plan.roots.contains(r)).cloned().collect();
+            let gone: Vec<String> = held.iter().filter(|r| !plan.roots.contains(r)).cloned().collect();
             if !gone.is_empty() {
                 let argv = self.engine.remove_command(&plan.hashfile, &gone);
                 ctx.log(&format!("forgetting {}", gone.join(", ")));
                 match self.host.exec(argv).await {
-                    Ok((Some(0), _, _)) => {}
-                    Ok((c, _, e)) => ctx.log(&format!("not all forgotten (exit {c:?}): {}", e.trim())),
-                    Err(e) => ctx.log(&format!("not forgotten: {e}")),
+                    Ok((c, _, e)) if self.engine.forgot(c, &e) => held.retain(|r| !gone.contains(r)),
+                    Ok((c, _, e)) => ctx.log(&format!("not forgotten (exit {c:?}), tried again next time: {}", e.trim())),
+                    Err(e) => ctx.log(&format!("not forgotten, tried again next time: {e}")),
                 }
             }
+        }
+        let (hf, h2, block) = (plan.hashfile.clone(), held.clone(), plan.settings.block_size);
+        self.record(&plan.key, |s| {
+            s.roots = h2;
+            s.block_size = Some(block);
+            s.hashfile = Some(hf);
+        });
+        // a stop or other work asked for while getting ready: the engine does not start
+        if guard.preempt.is_cancelled() {
+            return DedupRecord { outcome: DedupOutcome::Preempted, end_ms: now_ms(), by: guard.preempted_by(), ..base.clone() };
+        }
+        if user_stop.is_cancelled() || ctx.is_cancelled() {
+            return DedupRecord { outcome: DedupOutcome::Stopped, end_ms: now_ms(), ..base.clone() };
         }
         let job = DedupJob {
             hashfile: plan.hashfile.clone(),
@@ -647,6 +719,7 @@ impl DedupSvc {
             properties: unit_properties(&plan.settings, &writable),
             max: Duration::from_millis(until_ms.saturating_sub(now_ms()).max(1000)),
         };
+        let max = spec.max;
         ctx.log(&format!("$ {}", spec.argv.join(" ")));
         // every reason to stop ends in one token for the engine
         let stop = CancellationToken::new();
@@ -668,8 +741,9 @@ impl DedupSvc {
         // the engine's final line: (reclaimed bytes, files scanned)
         type Finished = Option<(u64, Option<u64>)>;
         let done: Arc<Mutex<Finished>> = Arc::new(Mutex::new(None));
+        let corrupt = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let consumer = {
-            let (engine, done, live, ctx) = (self.engine.clone(), done.clone(), live.clone(), ctx.clone());
+            let (engine, done, live, ctx, corrupt) = (self.engine.clone(), done.clone(), live.clone(), ctx.clone(), corrupt.clone());
             tokio::spawn(async move {
                 let mut logged = 0usize;
                 let mut last_pct = None;
@@ -693,6 +767,9 @@ impl DedupSvc {
                             *done.lock().unwrap() = Some((reclaimed_bytes, files_scanned));
                         }
                         None if !l.trim().is_empty() => {
+                            if engine.corrupt_hashfile(l) {
+                                corrupt.store(true, std::sync::atomic::Ordering::Relaxed);
+                            }
                             if logged < LOG_LINES {
                                 ctx.log(&l.chars().take(LOG_LINE_CHARS).collect::<String>());
                             } else if logged == LOG_LINES {
@@ -705,7 +782,10 @@ impl DedupSvc {
                 }
             })
         };
+        let t0 = Instant::now();
         let end = self.host.run(spec, tx, stop.clone()).await;
+        // the unit's own clock: RuntimeMaxSec counts from its start, monotonic
+        let window_over = t0.elapsed() + Duration::from_secs(5) >= max;
         let _ = consumer.await;
         let stopping = stop.is_cancelled();
         stop.cancel();
@@ -737,7 +817,7 @@ impl DedupSvc {
                     DedupOutcome::Preempted
                 } else if stopping {
                     DedupOutcome::Stopped
-                } else if now_ms() + 5_000 >= until_ms || k == ExitKind::Interrupted {
+                } else if window_over || k == ExitKind::Interrupted {
                     DedupOutcome::WindowEnded
                 } else {
                     rec.message = format!("the engine failed (exit {})", end.code.map(|c| c.to_string()).unwrap_or_else(|| "unknown".into()));
@@ -748,15 +828,21 @@ impl DedupSvc {
         // the hashfile's figures (read-only, quick)
         let report = match self.host.exec(self.engine.report_command(&plan.hashfile)).await {
             Ok((Some(0), out, _)) => self.engine.parse_report(&out),
-            _ => None,
+            Ok((_, _, err)) => {
+                if err.lines().any(|l| self.engine.corrupt_hashfile(l)) {
+                    corrupt.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                None
+            }
+            Err(_) => None,
         };
         if let Some(r) = &report {
             rec.skipped_files = r.skipped_last_run.values().sum();
         }
-        let failed = rec.outcome == DedupOutcome::Failed;
-        let block = plan.settings.block_size;
+        let damaged = rec.outcome == DedupOutcome::Failed && corrupt.load(std::sync::atomic::Ordering::Relaxed);
         let roots = plan.roots.clone();
         let shares = plan.shares.clone();
+        let mut failures = 0;
         self.record(&plan.key, |s| {
             if let Some(mut r) = report.clone() {
                 r.read_ms = now_ms();
@@ -772,22 +858,26 @@ impl DedupSvc {
                 }
                 s.report = Some(r);
             }
-            if dedupe {
-                s.roots = roots;
+            // runs and estimates alike leave hashes of their roots behind
+            for r in roots {
+                if !s.roots.contains(&r) {
+                    s.roots.push(r);
+                }
             }
-            s.block_size = Some(block);
-            s.failures = if failed { s.failures + 1 } else { 0 };
+            s.failures = if damaged { s.failures + 1 } else { 0 };
+            failures = s.failures;
         });
-        // a second failure in a row with an unusable hashfile: start it again
-        if failed && st.failures >= 1 && report.is_none() {
-            ctx.log("the hashfile cannot be read after two failed runs: it starts again");
-            if let Err(e) = self.host.remove_hashfile(&plan.hashfile) {
-                ctx.log(&format!("hashfile not removed: {e}"));
+        // the engine said the hashfile is damaged, twice in a row: it starts again
+        if damaged && failures >= 2 {
+            ctx.log("the hashfile is damaged (twice in a row): it starts again");
+            match self.host.remove_hashfile(&plan.hashfile) {
+                Ok(()) => self.record(&plan.key, |s| {
+                    s.roots.clear();
+                    s.failures = 0;
+                    s.report = None;
+                }),
+                Err(e) => ctx.log(&format!("hashfile not removed: {e}")),
             }
-            self.record(&plan.key, |s| {
-                s.roots.clear();
-                s.failures = 0;
-            });
         }
         ctx.log(&format!(
             "{:?}: {} freed{}",
@@ -798,29 +888,29 @@ impl DedupSvc {
         rec
     }
 
-    fn notify(&self, plan: &Plan, rec: &DedupRecord) {
+    fn notify(&self, key: &str, label: &str, shares: &[String], rec: &DedupRecord) {
         let (sev, code, title) = match rec.outcome {
             DedupOutcome::Done if rec.kind == DedupKind::Run => (
                 NotifySeverity::Info,
                 "dedup.ok",
-                format!("Deduplication of {} done: {} freed", plan.volume_label, human(rec.reclaimed_bytes)),
+                format!("Deduplication of {label} done: {} freed", human(rec.reclaimed_bytes)),
             ),
             DedupOutcome::Partial => (
                 NotifySeverity::Warning,
                 "dedup.partial",
-                format!("Deduplication of {} covered only part of its shares", plan.volume_label),
+                format!("Deduplication of {label} covered only part of its shares"),
             ),
-            DedupOutcome::Failed => (NotifySeverity::Error, "dedup.failed", format!("Deduplication of {} failed", plan.volume_label)),
+            DedupOutcome::Failed => (NotifySeverity::Error, "dedup.failed", format!("Deduplication of {label} failed")),
             _ => return,
         };
-        let mut ev = event::oneshot(NotifyCategory::Storage, sev, "dedup", format!("dedup:{}:{code}", plan.key), title);
+        let mut ev = event::oneshot(NotifyCategory::Storage, sev, "dedup", format!("dedup:{key}:{code}"), title);
         ev.body = match rec.outcome {
             DedupOutcome::Partial if !rec.missing.is_empty() => format!("{}\n{}", rec.message, rec.missing.join("\n")),
             _ => rec.message.clone(),
         };
-        let ev = event::field(ev, "volume", &plan.volume_label);
+        let ev = event::field(ev, "volume", label);
         let ev = event::field(ev, "reclaimed", human(rec.reclaimed_bytes));
-        let ev = event::field(ev, "shares", plan.shares.join(", "));
+        let ev = event::field(ev, "shares", shares.join(", "));
         self.prot.notifier.emit(event::code(ev, code));
     }
 
@@ -836,6 +926,43 @@ impl DedupSvc {
             None => false,
         }
     }
+
+    /// A job removed by an apply: its run stops, then its hashfile and state go (under the
+    /// filesystem lock, so no other run of it starts meanwhile).
+    pub async fn forget_job(self: &Arc<Self>, key: &str) {
+        self.stop(key);
+        let end = Instant::now() + Duration::from_secs(6 * 60);
+        while self.running(key) && Instant::now() < end {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        let st = state::read(&self.dir, key);
+        if let Some(hf) = &st.hashfile {
+            let dir = std::path::Path::new(hf).parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+            let fs = self.host.fs_of(&dir).map(|f| f.key);
+            let _g = match fs {
+                Some(k) => self.locks.dedup(&k, tokio::time::Instant::now() + Duration::from_secs(600), &|_| {}).await.ok(),
+                None => None,
+            };
+            if let Err(e) = self.host.remove_hashfile(hf) {
+                tracing::warn!("dedup: hashfile of removed job {key}: {e}");
+            }
+        }
+        if let Err(e) = state::remove(&self.dir, key) {
+            tracing::warn!("dedup: state of removed job {key}: {e}");
+        }
+        tracing::info!("dedup: job {key} removed with its hashfile and history");
+    }
+
+    /// At start: runs a previous rynasd left are stopped (SIGINT, their time to save) before
+    /// anything takes the filesystem lock, which lived in that rynasd's memory.
+    pub fn recover(self: &Arc<Self>) {
+        self.locks.hold();
+        let s = self.clone();
+        tokio::spawn(async move {
+            s.host.stop_orphans().await;
+            s.locks.release();
+        });
+    }
 }
 
 static DEFAULT_SHARE: ShareDedup = ShareDedup { enabled: false, excludes: Vec::new(), include_recycle: false };
@@ -850,6 +977,16 @@ pub fn overall_pct(p: &DedupProgress) -> u8 {
         _ => 0.0,
     };
     v.round().clamp(0.0, 100.0) as u8
+}
+
+/// The `dedup` domain's hook (`rynas_dedup::DedupDomain::with_removed`): a job an apply
+/// removed is forgotten in the background ([`DedupSvc::forget_job`]).
+pub fn job_removed(key: &str) {
+    let (Some(s), Ok(h)) = (SVC.get().cloned(), tokio::runtime::Handle::try_current()) else {
+        return;
+    };
+    let k = key.to_string();
+    h.spawn(async move { s.forget_job(&k).await });
 }
 
 /// A task type or scheduler unit of deduplication: never counted as busy by a scheduled
@@ -915,6 +1052,20 @@ pub async fn spawn_scheduled(key: &str, who: &str) -> Res<String> {
         Ok((kind, until)) => {
             let s3 = s.clone();
             let k2 = key.to_string();
+            let problem = {
+                let s4 = s.clone();
+                tokio::task::spawn_blocking(move || s4.engine_problem()).await.map_err(Error::internal)?
+            };
+            if let Some((_, msg)) = problem {
+                // recorded and notified (once), the task fails
+                let (s5, k3) = (s.clone(), key.to_string());
+                return Ok(s.prot.ops.tasks.spawn("storage.dedup", who, move |ctx| async move {
+                    ctx.log(&msg);
+                    let (m2, id) = (msg.clone(), ctx.id().to_string());
+                    let _ = tokio::task::spawn_blocking(move || s5.engine_missing_run(&k3, m2, &id)).await;
+                    Err(msg)
+                })?);
+            }
             tokio::task::spawn_blocking(move || s3.start(&k2, kind, until, &[], &w, true))
                 .await
                 .map_err(Error::internal)?
@@ -1045,8 +1196,8 @@ async fn job_delete(State(st): State<DedupState>, h: HeaderMap, Path(key): Path<
 fn manual_until(s: &DedupSvc, key: &str, asked: Option<u64>) -> Res<u64> {
     let now = now_ms();
     if let Some(u) = asked {
-        if u < now + 60_000 || u > now + MAX_MANUAL {
-            return Err(invalid("the end is one minute to 24 hours from now"));
+        if u < now + MIN_LEFT_MS || u > now + MAX_MANUAL {
+            return Err(invalid("the end is 5 minutes to 24 hours from now"));
         }
         return Ok(u);
     }
@@ -1059,7 +1210,11 @@ async fn start_post(st: DedupState, h: HeaderMap, key: String, body: Result<Json
     let s = svc(&st)?;
     let who = admin(&s, &h, "deduplication")?;
     check_key(&key)?;
-    let req = json_body(body).unwrap_or_default();
+    // no body at all is an empty request; a malformed one is refused like elsewhere
+    let req = match body {
+        Err(JsonRejection::MissingJsonContentType(_)) => DedupRunRequest::default(),
+        b => json_body(b)?,
+    };
     let w = who.clone();
     let k = key.clone();
     let id = blocking(&s, move |s| {

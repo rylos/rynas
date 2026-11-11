@@ -1035,7 +1035,10 @@ async fn volume_lock(
     let (_, v) = volume(&s, &name, true).await?;
     let lv = luks_volume(&v)?;
     let held = s.reserve(vec![format!("volume:{name}")])?;
+    let mnt = v.mounted().and_then(|f| f.mountpoint.clone());
     let id = spawn(&s, "storage.lock", &user, held, move |m| async move {
+        // a deduplication run would keep the volume busy: it stops first (D-DEDUP)
+        let _fs = heavy_on(mnt.as_deref(), "storage.lock").await;
         exec::lock(&m, &lv).await
     })?;
     Ok(started(id))
@@ -1494,7 +1497,11 @@ async fn subvolume_delete(
         "storage.subvolume-delete",
         &user,
         held,
-        move |m| async move { exec::run_commands(&m, cmds).await },
+        move |m| async move {
+            // a deduplication run may hold files of it open: it stops first (D-DEDUP)
+            let _fs = heavy_on(Some(&path), "storage.subvolume-delete").await;
+            exec::run_commands(&m, cmds).await
+        },
     )?;
     Ok(started(id))
 }

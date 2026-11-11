@@ -316,7 +316,7 @@ fn open_config(
         Arc::new(rynas_storage::domain::TuningDomain),
         snapshots.clone(),
         Arc::new(rynas_backup::BackupDomain),
-        Arc::new(rynas_dedup::DedupDomain),
+        Arc::new(rynas_dedup::DedupDomain::with_removed(Arc::new(rynasd::dedup::job_removed))),
         scheduler.clone(),
         Arc::new(rynas_power::PowerDomain {
             rynasctl: PathBuf::from(rynas_btrfs::domain::RYNASCTL),
@@ -873,7 +873,7 @@ fn main() -> std::io::Result<()> {
                     .collect();
                 Arc::new(rynasd::dedup::MemoryDedup::new(true, places))
             } else {
-                Arc::new(rynasd::dedup::HostDedup { shares: opened.shares.clone() })
+                Arc::new(rynasd::dedup::HostDedup::new(opened.shares.clone()))
             };
             let svc = Arc::new(rynasd::dedup::DedupSvc::new(
                 protection.clone(),
@@ -884,6 +884,8 @@ fn main() -> std::io::Result<()> {
                 rynasd::fslock::FsLocks::global(),
             ));
             let _ = rynasd::dedup::SVC.set(svc.clone());
+            // runs left by a previous rynasd: stopped before anything takes the lock
+            svc.recover();
             state.dedup = Some(svc);
         }
         let ups = Arc::new(rynasd::ups::Ups {

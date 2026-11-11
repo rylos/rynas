@@ -189,6 +189,33 @@ pub fn exclude_valid(p: &str) -> Result<(), &'static str> {
     if t.trim_matches('/').is_empty() || t.trim_matches(|c| c == '/' || c == '*').is_empty() {
         return Err("a pattern cannot exclude the whole folder");
     }
+    // the engine refuses to run with a malformed pattern: catch it here
+    let (mut esc, mut class, mut first) = (false, false, false);
+    for c in t.chars() {
+        if esc {
+            esc = false;
+            first = false;
+            continue;
+        }
+        match c {
+            '\\' => esc = true,
+            '[' if !class => {
+                class = true;
+                first = true;
+                continue;
+            }
+            '!' | '^' if class && first => continue,
+            ']' if class && !first => class = false,
+            _ => {}
+        }
+        first = false;
+    }
+    if esc {
+        return Err("a pattern cannot end with \\");
+    }
+    if class {
+        return Err("a [ without its ]");
+    }
     Ok(())
 }
 
@@ -516,6 +543,16 @@ mod tests {
             task_id_of("uuid.0f6e2c1a-1b2c-4d5e-8f90-123456789abc"),
             "dedup-u0f6e2c1a1b2c4d5e8f90123456789abc"
         );
+    }
+
+    #[test]
+    fn malformed_patterns() {
+        for ok in ["cache/", "*.iso", "a[bc]d", "[]x]y", "x\\[", "a\\\\"] {
+            assert_eq!(exclude_valid(ok), Ok(()), "{ok}");
+        }
+        for bad in ["cache\\", "a[bc", "[]", "x[\\]"] {
+            assert!(exclude_valid(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

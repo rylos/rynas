@@ -125,10 +125,14 @@ Same pattern as `packaging/caddy/` (D-PROXY):
 ### 3.2 Where things live
 
 - Hashfile: `/<vol>/@rynas-cache/dedup/volume.hash` (+ `-wal`, `-shm`): the volume's
-  existing NOCOW cache subvolume (not snapshotted, not replicated). XFS folders and the
-  system volume: `/var/lib/rynas/dedup/<fs-uuid>.hash`. Deleted after an unclean shutdown
-  during a run only if `PRAGMA integrity_check` fails.
-- rynas state: `/var/lib/rynas/dedup/<fs-uuid>.json`: last `--json` report, the history
+  existing NOCOW cache subvolume (not snapshotted, not replicated). XFS folders, the
+  system volume and volumes without `@rynas-cache`: `/var/lib/rynas/dedup/hash/<key>.hash`
+  (a folder of its own: the run's sandbox makes only it writable, not rynasd's state). Reset
+  only when the engine reports a damaged database (SQLite "database disk image is
+  malformed" / "file is not a database") in two runs in a row; other failures (a timeout,
+  memory, a missing binary) never reset it.
+- rynas state: `/var/lib/rynas/dedup/<key>.json` (`<key>`: the job key, a volume label or
+  `uuid.<uuid>`): last `--json` report, the roots the hashfile holds, the history
   (one record per run: start, end, outcome, exit code, reclaimed, files hashed, skipped
   counts, preempted by), the last estimate. Read by the UI; written only by rynasd.
 
@@ -155,7 +159,8 @@ Always-on excludes (not editable, shown read-only): `<root>/#snapshot/`, `<root>
 `.rynas-crypt/`, the Docker engine/containerd roots, local restic repositories of backup jobs,
 `.*.rynas-part`, `.*.rynas-aside`, plus the names the hardware modules add (§5 Q4: the
 Synology module `@eaDir/`, `@tmp/`, `.SynologyWorkingDirectory/`; the QNAP module
-`.@__thumb/`, `.@__qini/`, `@Recycle/`; the core list names no other system).
+`.@__thumb/`, `.@__qini/`, `@Recycle/`; a module gives them only on its own hardware; the
+core list names no other system).
 
 ### 3.4 Estimate before enabling
 
@@ -192,10 +197,14 @@ mq-deadline the run is limited by the window and the thread counts (research §3
 
 ### 3.7 One run per filesystem, never next to other heavy work
 
-A new rynasd **filesystem lock** keyed by filesystem UUID (none exists today:
-`storage_lock` serializes storage API calls, btrbk has per-job lockfiles only). Holders:
-dedup, dedup estimate, `oans -R`, scrub, replication transfer and snapshot runs that send,
-restic backup reading the volume, storage operations (grow, replace, convert, balance).
+A new rynasd **filesystem lock** keyed by the filesystem's superblock `major:minor` (none
+existed: `storage_lock` serializes storage API calls, btrbk has per-job lockfiles only).
+Holders: dedup, dedup estimate, `oans -R` and the hashfile reset; scrub (manual and
+scheduled), replication transfers, restic backups, volume grow and replace, locking an
+encrypted volume, subvolume delete. rynas has no balance or profile conversion action yet:
+they take the lock when they come. The lock lives in rynasd's memory: at start rynasd stops
+the runs a previous rynasd left (`systemctl stop 'rynas-dedup-*'`, SIGINT and their time to
+save) before anything takes it.
 Rules:
 
 - dedup is the only **preemptible** holder: any other holder asking for the lock sends it
@@ -363,6 +372,18 @@ documentation of `rynas_api_types::dedup`.
   `--json` figures are kept as the job's estimate.
 - **Scheduled shutdown**: deduplication never counts as busy (`dedup::gives_way`); the unit
   is stopped with SIGINT (`BindsTo=rynasd.service`) and resumes in its next window.
+- **Stops are never lost**: a stop or a preemption asked while a run gets ready (folder,
+  `-R`) keeps the engine from starting; once it runs, the stop is asked again every 5 s
+  until the client returns (a stop sent while systemd-run creates the unit finds none). The
+  end of the window is the unit's own monotonic clock (`RuntimeMaxSec` from its start).
+- **No run with less than 5 minutes** of its window left, also after giving way.
+- **Roots the hashfile holds** are kept in the state, from runs and estimates alike; the
+  next run forgets (`-R`) the ones no longer in the job and keeps them for another try when
+  that fails.
+- **Repeats collapse**: skips for the same reason and the same failure without an exit code
+  (engine missing or untested at a scheduled run) are one history entry with one
+  notification.
+- **A removed job** (apply) stops its run and deletes its hashfile and state.
 - **Engine versions**: 1.14.1 up to 1.14.x are accepted (`engine::MIN`, `MAX_MINOR`); others
   are refused with `engine_unsupported` until a bump passed `test-dedup.sh`.
 
@@ -373,7 +394,10 @@ in the pinned `debian:trixie` image (verified tarball, `-O2 -march=x86-64-v2`, s
 `SOURCE_DATE_EPOCH` of the last commit of `packaging/oans`). "Install" in the card runs
 `apt-get install rynas-oans` when an apt source has it, otherwise the pinned `.deb` from
 `/var/lib/rynas/packages/` when its SHA-256 is one compiled into rynasd
-(`dedup::host::PINNED_DEBS`, updated with each package release). The release publishes the
+(`dedup::host::PINNED_DEBS`, updated with each package release). The build packages come
+from snapshot.debian.org at a pinned timestamp and the tarball must be GitHub's archive of
+the pinned tag commit (`git get-tar-commit-id`), so the package is the same file on every
+machine. The release publishes the
 `.deb`, its checksum and the upstream tarball (corresponding source).
 
 ### 6.4 Verified with `packaging/test-dedup.sh` (2026-11-11, kernel 7.3, Debian 13 userland)

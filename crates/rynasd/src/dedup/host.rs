@@ -2,11 +2,12 @@
 //! runs. [`HostDedup`] is the machine; [`MemoryDedup`] plays scripted runs (tests and
 //! `--dry-system`) and never touches a disk.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rynas_api_types::dedup::{ENGINE_PACKAGE, ENGINE_PATH};
 use rynas_tasks::{CancellationToken, Cmd, Outside};
@@ -80,6 +81,8 @@ pub trait DedupHost: Send + Sync {
     /// Runs the engine: every output line goes to `lines` (stderr lines prefixed with
     /// `stderr: `); `stop` asks it to save its work and end (SIGINT, then 5 minutes).
     fn run(&self, spec: RunSpec, lines: UnboundedSender<String>, stop: CancellationToken) -> BoxFuture<'_, RunEnd>;
+    /// Stops every run a previous rynasd left (SIGINT, its 5 minutes to save), and waits.
+    fn stop_orphans(&self) -> BoxFuture<'_, ()>;
 }
 
 // ------------------------------------------------------------------------------------------
@@ -94,13 +97,16 @@ pub const LOCAL_PACKAGES: &str = "/var/lib/rynas/packages";
 /// commit of `packaging/oans` gives the same file).
 pub const PINNED_DEBS: &[(&str, &str)] = &[(
     "rynas-oans_1.14.1-1_amd64.deb",
-    "30502609454d06ff917e70b93c99bf2d4c62d1a5df6e9cb571234fb5159d9085",
+    "961a10eb427a68cfa0ccad574915f1405090aab01732204c1f915f1c53bebbbc",
 )];
 
 const UNIT_PREFIX: &str = "rynas-dedup";
+/// A stop is asked again this often until the run has ended.
+const STOP_RETRY: Duration = Duration::from_secs(5);
 
 pub struct HostDedup {
     pub shares: std::sync::Arc<rynas_services::SharesDomain>,
+    cache: Mutex<Cache>,
 }
 
 fn file_sha256(p: &Path) -> Option<String> {
@@ -145,13 +151,87 @@ pub fn xfs_reflink(info: &str) -> Option<bool> {
         .map(|v| v.trim() == "1")
 }
 
-/// The UUID of a block device, from `/dev/disk/by-uuid`.
-fn uuid_of(source: &str) -> Option<String> {
-    let dev = std::fs::canonicalize(source).ok()?;
-    std::fs::read_dir("/dev/disk/by-uuid").ok()?.flatten().find_map(|e| {
-        let t = std::fs::canonicalize(e.path()).ok()?;
-        (t == dev).then(|| e.file_name().to_string_lossy().to_ascii_lowercase())
-    })
+/// What the host side reads often, kept for a moment: one overview asks about every share
+/// and every place.
+#[derive(Default)]
+struct Cache {
+    /// Mounts, read again after [`MOUNTS_TTL`].
+    mounts: Option<(Instant, Vec<rynas_storage::mounts::Mount>)>,
+    /// `/dev/disk/by-uuid`: (device, uuid), read again with the mounts.
+    uuids: Option<(Instant, Vec<(PathBuf, String)>)>,
+    /// `xfs_info`'s reflink by `major:minor mountpoint` (set at mkfs time).
+    reflink: HashMap<String, Option<bool>>,
+    /// The package source, until the apt lists, the local folder or dpkg change.
+    package: Option<(String, Option<String>)>,
+    /// `--version` output, until the binary changes.
+    version: Option<(String, Option<String>)>,
+}
+
+const MOUNTS_TTL: Duration = Duration::from_secs(2);
+
+impl HostDedup {
+    pub fn new(shares: std::sync::Arc<rynas_services::SharesDomain>) -> Self {
+        Self { shares, cache: Mutex::new(Cache::default()) }
+    }
+
+    fn mounts(&self) -> Vec<rynas_storage::mounts::Mount> {
+        let mut c = self.cache.lock().unwrap();
+        match &c.mounts {
+            Some((at, m)) if at.elapsed() < MOUNTS_TTL => m.clone(),
+            _ => {
+                let m = rynas_storage::mounts::parse_mountinfo(&crate::places::mountinfo());
+                c.mounts = Some((Instant::now(), m.clone()));
+                m
+            }
+        }
+    }
+
+    fn uuid_of(&self, source: &str) -> Option<String> {
+        let dev = std::fs::canonicalize(source).ok()?;
+        let mut c = self.cache.lock().unwrap();
+        let fresh = matches!(&c.uuids, Some((at, _)) if at.elapsed() < MOUNTS_TTL);
+        if !fresh {
+            let list = std::fs::read_dir("/dev/disk/by-uuid")
+                .map(|d| {
+                    d.flatten()
+                        .filter_map(|e| Some((std::fs::canonicalize(e.path()).ok()?, e.file_name().to_string_lossy().to_ascii_lowercase())))
+                        .collect()
+                })
+                .unwrap_or_default();
+            c.uuids = Some((Instant::now(), list));
+        }
+        c.uuids.as_ref()?.1.iter().find(|(d, _)| *d == dev).map(|(_, u)| u.clone())
+    }
+
+    fn reflink(&self, m: &rynas_storage::mounts::Mount) -> Option<bool> {
+        let k = format!("{} {}", m.majmin, m.mountpoint);
+        if let Some(r) = self.cache.lock().unwrap().reflink.get(&k) {
+            return *r;
+        }
+        let r = Cmd::new("xfs_info")
+            .arg(&m.mountpoint)
+            .env_clear()
+            .timeout(Duration::from_secs(10))
+            .output_blocking()
+            .ok()
+            .and_then(|o| xfs_reflink(&o.stdout));
+        self.cache.lock().unwrap().reflink.insert(k, r);
+        r
+    }
+}
+
+/// Modification times of `paths` as one string (a cache key).
+fn mtimes(paths: &[&str]) -> String {
+    paths
+        .iter()
+        .map(|p| {
+            std::fs::metadata(p)
+                .ok()
+                .and_then(|m| Some(format!("{:?}/{}", m.modified().ok()?, m.len())))
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join("|")
 }
 
 impl DedupHost for HostDedup {
@@ -162,23 +242,15 @@ impl DedupHost for HostDedup {
     fn fs_of(&self, path: &str) -> Option<FsFacts> {
         let real = std::fs::canonicalize(path).ok()?;
         let real = real.to_string_lossy();
-        let mounts = rynas_storage::mounts::parse_mountinfo(&crate::places::mountinfo());
+        let mounts = self.mounts();
         let m = crate::fslock::mount_of(&mounts, &real)?;
-        let reflink = (m.fstype == "xfs").then(|| {
-            Cmd::new("xfs_info")
-                .arg(&m.mountpoint)
-                .env_clear()
-                .timeout(Duration::from_secs(10))
-                .output_blocking()
-                .ok()
-                .and_then(|o| xfs_reflink(&o.stdout))
-        });
+        let reflink = if m.fstype == "xfs" { self.reflink(m) } else { None };
         Some(FsFacts {
             key: m.majmin.clone(),
-            uuid: uuid_of(&m.source),
+            uuid: self.uuid_of(&m.source),
             fs_type: m.fstype.clone(),
             mountpoint: m.mountpoint.clone(),
-            reflink: reflink.flatten(),
+            reflink,
         })
     }
 
@@ -191,17 +263,17 @@ impl DedupHost for HostDedup {
     }
 
     fn asleep(&self, path: &str) -> bool {
-        let mounts = rynas_storage::mounts::parse_mountinfo(&crate::places::mountinfo());
+        let mounts = self.mounts();
         crate::fslock::mount_of(&mounts, path).is_some_and(|m| self.shares.asleep(&m.mountpoint))
     }
 
     fn qgroups(&self, mountpoint: &str) -> bool {
         // the quota tree of a btrfs filesystem shows up in sysfs while quotas are on
-        let mounts = rynas_storage::mounts::parse_mountinfo(&crate::places::mountinfo());
+        let mounts = self.mounts();
         let Some(m) = mounts.iter().rfind(|m| m.mountpoint == mountpoint && m.fstype == "btrfs") else {
             return false;
         };
-        let Some(uuid) = uuid_of(&m.source) else { return false };
+        let Some(uuid) = self.uuid_of(&m.source) else { return false };
         let q = Path::new("/sys/fs/btrfs").join(&uuid).join("qgroups");
         // simple quotas (squota) count extents to their first owner: no slow commits
         let simple = std::fs::read_to_string(q.join("mode")).is_ok_and(|s| s.trim() == "squota");
@@ -212,21 +284,39 @@ impl DedupHost for HostDedup {
         if !Path::new(ENGINE_PATH).is_file() {
             return None;
         }
+        let key = mtimes(&[ENGINE_PATH]);
+        if let Some((k, v)) = &self.cache.lock().unwrap().version
+            && *k == key
+        {
+            return v.clone();
+        }
         let (prog, args) = argv.split_first()?;
-        Cmd::new(prog)
+        let v = Cmd::new(prog)
             .args(args)
             .env_clear()
             .timeout(Duration::from_secs(10))
             .output_blocking()
             .ok()
-            .map(|o| o.stdout)
+            .map(|o| o.stdout);
+        self.cache.lock().unwrap().version = Some((key, v.clone()));
+        v
     }
 
     fn package_source(&self) -> Option<String> {
-        if apt_candidate() {
-            return Some("apt".into());
+        // apt-cache and a checksum of the .deb only when something they read changed
+        let key = mtimes(&["/var/lib/apt/lists", LOCAL_PACKAGES, "/var/lib/dpkg/status"]);
+        if let Some((k, v)) = &self.cache.lock().unwrap().package
+            && *k == key
+        {
+            return v.clone();
         }
-        local_package(Path::new(LOCAL_PACKAGES)).map(|p| p.to_string_lossy().into_owned())
+        let v = if apt_candidate() {
+            Some("apt".into())
+        } else {
+            local_package(Path::new(LOCAL_PACKAGES)).map(|p| p.to_string_lossy().into_owned())
+        };
+        self.cache.lock().unwrap().package = Some((key, v.clone()));
+        v
     }
 
     fn exec(&self, argv: Vec<String>) -> BoxFuture<'_, Result<ExecOut, String>> {
@@ -287,20 +377,27 @@ impl DedupHost for HostDedup {
                 let name = name.clone();
                 async move {
                     tokio::select! {
-                        _ = stop.cancelled() => {
-                            // KillSignal=SIGINT, TimeoutStopSec=5min: the engine saves and ends
-                            let r = Cmd::new("systemctl")
-                                .args(["stop", "--no-block", "--"])
-                                .arg(&name)
-                                .env_clear()
-                                .timeout(Duration::from_secs(30))
-                                .run(None, None)
-                                .await;
-                            if let Err(e) = r {
-                                tracing::warn!("dedup: stopping {name}: {e}");
-                            }
+                        _ = stop.cancelled() => {}
+                        _ = finished.cancelled() => return,
+                    }
+                    // KillSignal=SIGINT, TimeoutStopSec=5min: the engine saves and ends. Asked
+                    // again every few seconds until the client returns: a stop sent while
+                    // systemd-run is still creating the unit finds no unit
+                    loop {
+                        let r = Cmd::new("systemctl")
+                            .args(["stop", "--no-block", "--"])
+                            .arg(&name)
+                            .env_clear()
+                            .timeout(Duration::from_secs(30))
+                            .run(None, None)
+                            .await;
+                        if let Err(e) = r {
+                            tracing::debug!("dedup: stopping {name}: {e}");
                         }
-                        _ = finished.cancelled() => {}
+                        tokio::select! {
+                            _ = tokio::time::sleep(STOP_RETRY) => {}
+                            _ = finished.cancelled() => return,
+                        }
                     }
                 }
             };
@@ -317,6 +414,22 @@ impl DedupHost for HostDedup {
                 Ok(o) => RunEnd { code: o.code, start_error: None },
                 Err(rynas_tasks::CmdError::Spawn(e)) => RunEnd { code: None, start_error: Some(e.to_string()) },
                 Err(e) => RunEnd { code: None, start_error: Some(e.to_string()) },
+            }
+        })
+    }
+
+    fn stop_orphans(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            let r = Cmd::new("systemctl")
+                .args(["stop", "--", &format!("{UNIT_PREFIX}-*.service")])
+                .env_clear()
+                .timeout(Duration::from_secs(6 * 60))
+                .run(None, None)
+                .await;
+            match r {
+                Ok(o) if o.success() => {}
+                Ok(o) => tracing::warn!("dedup: stopping leftover runs: {}", o.stderr.trim()),
+                Err(e) => tracing::warn!("dedup: stopping leftover runs: {e}"),
             }
         })
     }
@@ -362,6 +475,8 @@ struct MemState {
     removed: Vec<String>,
     asleep: bool,
     nocow: Vec<String>,
+    /// How long each short engine command takes (`-R`, the report).
+    exec_delay: Duration,
 }
 
 /// Scripted runs and a made-up machine: places `(label, folder, fs type)`, every path below
@@ -400,6 +515,16 @@ impl MemoryDedup {
 
     pub fn set_nocow(&self, path: &str) {
         self.state.lock().unwrap().nocow.push(path.into());
+    }
+
+    /// Every short engine command takes this long.
+    pub fn set_exec_delay(&self, d: Duration) {
+        self.state.lock().unwrap().exec_delay = d;
+    }
+
+    /// Engine installed or not.
+    pub fn set_installed(&self, on: bool) {
+        self.state.lock().unwrap().installed = on;
     }
 
     pub fn started(&self) -> Vec<RunSpec> {
@@ -474,6 +599,8 @@ impl DedupHost for MemoryDedup {
     fn exec(&self, argv: Vec<String>) -> BoxFuture<'_, Result<ExecOut, String>> {
         Box::pin(async move {
             let report = argv.iter().any(|a| a == "--json");
+            let delay = self.state.lock().unwrap().exec_delay;
+            tokio::time::sleep(delay).await;
             self.state.lock().unwrap().execs.push(argv);
             if report {
                 Ok((Some(0), self.report.lock().unwrap().clone(), String::new()))
@@ -514,6 +641,10 @@ impl DedupHost for MemoryDedup {
             }
             RunEnd { code: Some(script.code), start_error: None }
         })
+    }
+
+    fn stop_orphans(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async {})
     }
 }
 

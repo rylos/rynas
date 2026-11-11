@@ -42,13 +42,24 @@ pub struct FsLocks {
     slots: Mutex<HashMap<String, Slot>>,
     seq: Mutex<u64>,
     changed: watch::Sender<u64>,
+    /// `false` while runs left by a previous rynasd are being stopped: the lock lives in
+    /// memory only, so nothing takes it until they are gone ([`FsLocks::hold`]).
+    ready: watch::Sender<bool>,
 }
 
 impl Default for FsLocks {
     fn default() -> Self {
-        Self { slots: Mutex::new(HashMap::new()), seq: Mutex::new(0), changed: watch::channel(0).0 }
+        Self {
+            slots: Mutex::new(HashMap::new()),
+            seq: Mutex::new(0),
+            changed: watch::channel(0).0,
+            ready: watch::channel(true).0,
+        }
     }
 }
+
+/// How long a lock request waits for the leftovers of a previous rynasd to be stopped.
+const READY_WAIT: Duration = Duration::from_secs(7 * 60);
 
 /// Held by heavy work; released on drop.
 pub struct HeavyGuard {
@@ -121,7 +132,25 @@ impl FsLocks {
     /// Registers heavy work `what` (a task type) on the filesystems `keys` at once, asks a
     /// deduplication run there to stop and waits until it has ended (at most `grace`; the
     /// work goes on after it either way).
+    /// Nothing takes the lock until [`FsLocks::release`] (at start, while runs a previous
+    /// rynasd left are stopped).
+    pub fn hold(&self) {
+        self.ready.send_replace(false);
+    }
+
+    pub fn release(&self) {
+        self.ready.send_replace(true);
+    }
+
+    async fn wait_ready(&self) {
+        let mut rx = self.ready.subscribe();
+        if tokio::time::timeout(READY_WAIT, rx.wait_for(|r| *r)).await.is_err() {
+            tracing::warn!("filesystem lock: leftover deduplication runs still stopping, going on");
+        }
+    }
+
     pub async fn heavy_with(self: &Arc<Self>, keys: &[String], what: &str, grace: Duration) -> HeavyGuard {
+        self.wait_ready().await;
         let id = self.next_id();
         let mut keys: Vec<String> = keys.to_vec();
         keys.sort();
@@ -181,6 +210,10 @@ impl FsLocks {
         deadline: Instant,
         waiting: &(dyn Fn(Option<&str>) + Sync),
     ) -> Result<DedupGuard, String> {
+        let mut ready = self.ready.subscribe();
+        if tokio::time::timeout_at(deadline, ready.wait_for(|r| *r)).await.is_err() {
+            return Err("storage.dedup".into());
+        }
         let mut rx = self.changed.subscribe();
         let mut told: Option<String> = None;
         loop {
@@ -295,6 +328,21 @@ mod tests {
         };
         assert!(l.dedup("0:43", Instant::now(), &told).await.is_ok());
         assert_eq!(n.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn nothing_takes_the_lock_while_leftovers_stop() {
+        let l = Arc::new(FsLocks::default());
+        l.hold();
+        let r = l.dedup("0:44", Instant::now() + Duration::from_millis(100), &|_| {}).await;
+        assert!(r.is_err());
+        let l2 = l.clone();
+        let heavy = tokio::spawn(async move { l2.heavy(&["0:44".into()], "btrfs.scrub").await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!heavy.is_finished());
+        l.release();
+        drop(heavy.await.unwrap());
+        assert!(l.dedup("0:44", Instant::now() + Duration::from_millis(100), &|_| {}).await.is_ok());
     }
 
     #[test]

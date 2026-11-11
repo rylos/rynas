@@ -51,9 +51,13 @@ struct Env {
     host: Arc<MemoryDedup>,
     notifier: Arc<MemoryNotifier>,
     locks: Arc<FsLocks>,
+    svc: Arc<DedupSvc>,
+    state_dir: std::path::PathBuf,
 }
 
 fn env() -> Env {
+    // the service, for the dedup domain's hook (made after the configuration)
+    let slot: Arc<std::sync::OnceLock<Arc<DedupSvc>>> = Arc::new(std::sync::OnceLock::new());
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("root");
     std::fs::create_dir_all(&root).unwrap();
@@ -73,7 +77,15 @@ fn env() -> Env {
                 Arc::new(UsersDomain::new(acc.clone())),
                 Arc::new(SharesDomain::new(shares_host, acc)),
                 snapshots.clone(),
-                Arc::new(rynas_dedup::DedupDomain),
+                Arc::new(rynas_dedup::DedupDomain::with_removed({
+                    let slot = slot.clone();
+                    Arc::new(move |k: &str| {
+                        if let (Some(s), Ok(h)) = (slot.get().cloned(), tokio::runtime::Handle::try_current()) {
+                            let k = k.to_string();
+                            h.spawn(async move { s.forget_job(&k).await });
+                        }
+                    })
+                })),
                 scheduler.clone(),
             ],
         )
@@ -116,8 +128,10 @@ fn env() -> Env {
     let mut st = DaemonState::new(Arc::new(NoAuth), totp, clock);
     st.ops = Some(ops.clone());
     st.protection = Some(protection);
-    st.dedup = Some(svc);
-    Env { _dir: dir, app: router(st), config, ops, host, notifier, locks }
+    let _ = slot.set(svc.clone());
+    st.dedup = Some(svc.clone());
+    let state_dir = dir.path().join("state/dedup");
+    Env { _dir: dir, app: router(st), config, ops, host, notifier, locks, svc, state_dir }
 }
 
 async fn call_as(e: &Env, user: &str, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Vec<u8>) {
@@ -428,4 +442,123 @@ async fn reset_and_install() {
     // already installed
     let (s, _) = call(&e, "POST", "/v1/storage/dedup/install", None).await;
     assert_eq!(s, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn other_work_asked_while_getting_ready_keeps_the_engine_from_starting() {
+    let e = env();
+    shares(&e, true);
+    set_up(&e, &"1".repeat(168)).await;
+    let id = start(&e, "run", json!({"until_ms": in_an_hour()})).await;
+    e.ops.tasks.wait(&id).await.unwrap();
+    // media leaves the job: the next run forgets it first, slowly
+    shares(&e, false);
+    e.host.set_exec_delay(Duration::from_millis(800));
+    let id = start(&e, "run", json!({"until_ms": in_an_hour()})).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let guard = e.locks.heavy(&["0:40".into()], "btrfs.scrub").await;
+    // the run gave way before its engine started
+    assert_eq!(e.host.started().len(), 1);
+    e.host.set_exec_delay(Duration::ZERO);
+    drop(guard);
+    assert_eq!(e.ops.tasks.wait(&id).await.unwrap().status, TaskStatus::Ok);
+    let h = history(&e).await;
+    assert_eq!(h[1].outcome, DedupOutcome::Preempted);
+    assert_eq!(h[0].outcome, DedupOutcome::Done);
+    assert_eq!(e.host.started().len(), 2);
+}
+
+#[tokio::test]
+async fn roots_only_an_estimate_looked_at_are_forgotten_by_the_next_run() {
+    let e = env();
+    let doc = json!({"shares": [{"name": "docs", "path": "/vol1/docs"}, {"name": "media", "path": "/vol1/media"}]});
+    e.config.stage("admin", rynas_services::SHARES_KEY, Some(doc)).unwrap();
+    apply(&e);
+    let id = start(&e, "estimate", json!({"until_ms": in_an_hour()})).await;
+    e.ops.tasks.wait(&id).await.unwrap();
+    shares(&e, false);
+    set_up(&e, &"1".repeat(168)).await;
+    let id = start(&e, "run", json!({"until_ms": in_an_hour()})).await;
+    e.ops.tasks.wait(&id).await.unwrap();
+    let removed = e.host.execs().into_iter().find(|a| a.iter().any(|x| x == "-R")).expect("a -R");
+    assert_eq!(removed.last().map(String::as_str), Some("/vol1/media"));
+}
+
+#[tokio::test]
+async fn the_hashfile_is_reset_only_when_the_engine_says_it_is_damaged() {
+    let e = env();
+    shares(&e, false);
+    set_up(&e, &"1".repeat(168)).await;
+    let failing = |line: &str| Script { lines: vec![(Duration::from_millis(10), line.to_string())], code: 1, stop_after: Duration::ZERO };
+    // two plain failures, even without a readable report: the hashfile stays
+    e.host.set_report("not json");
+    for _ in 0..2 {
+        e.host.push_script(failing("ERROR: out of memory"));
+        let id = start(&e, "run", json!({"until_ms": in_an_hour()})).await;
+        assert_eq!(e.ops.tasks.wait(&id).await.unwrap().status, TaskStatus::Error);
+    }
+    assert!(e.host.removed().is_empty());
+    // damaged twice in a row: it starts again
+    for _ in 0..2 {
+        e.host.push_script(failing("ERROR: preparing statement: 11 (database disk image is malformed)"));
+        let id = start(&e, "run", json!({"until_ms": in_an_hour()})).await;
+        e.ops.tasks.wait(&id).await.unwrap();
+    }
+    assert_eq!(e.host.removed(), ["/vol1/@rynas-cache/dedup/volume.hash"]);
+}
+
+#[tokio::test]
+async fn requests_with_too_little_time_or_a_bad_body_are_refused() {
+    let e = env();
+    shares(&e, false);
+    set_up(&e, &"1".repeat(168)).await;
+    let soon = rynas_tasks::now_ms() + 4 * 60_000;
+    let (s, _) = call(&e, "POST", "/v1/storage/dedup/jobs/vol1/run", Some(json!({"until_ms": soon}))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, _) = call(&e, "POST", "/v1/storage/dedup/jobs/vol1/run", Some(json!({"until_ms": "tomorrow"}))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn a_removed_job_takes_its_hashfile_and_history_along() {
+    let e = env();
+    shares(&e, false);
+    set_up(&e, &"1".repeat(168)).await;
+    let id = start(&e, "run", json!({"until_ms": in_an_hour()})).await;
+    e.ops.tasks.wait(&id).await.unwrap();
+    let state = e.state_dir.join("vol1.json");
+    assert!(state.exists());
+    let (s, _) = call(&e, "DELETE", "/v1/storage/dedup/jobs/vol1", None).await;
+    assert_eq!(s, StatusCode::OK);
+    apply(&e);
+    for _ in 0..50 {
+        if !state.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(!state.exists());
+    assert_eq!(e.host.removed(), ["/vol1/@rynas-cache/dedup/volume.hash"]);
+    let _ = &e.svc;
+}
+
+#[tokio::test]
+async fn a_scheduled_run_without_the_engine_is_recorded_and_notified_once() {
+    let e = env();
+    shares(&e, false);
+    set_up(&e, &"1".repeat(168)).await;
+    e.host.set_installed(false);
+    // the engine facts are cached for a minute: a fresh read
+    let _ = rynasd::dedup::SVC.set(e.svc.clone());
+    e.svc.refresh_engine();
+    for _ in 0..3 {
+        let id = rynasd::dedup::spawn_scheduled("vol1", "root").await.unwrap();
+        assert_eq!(e.ops.tasks.wait(&id).await.unwrap().status, TaskStatus::Error);
+    }
+    let h = history(&e).await;
+    assert_eq!(h.len(), 1);
+    assert_eq!(h[0].outcome, DedupOutcome::Failed);
+    assert!(h[0].message.contains("not installed"));
+    assert_eq!(codes(&e), ["dedup.failed"]);
+    assert!(e.host.started().is_empty());
 }
