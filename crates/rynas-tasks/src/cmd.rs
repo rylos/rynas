@@ -496,21 +496,54 @@ async fn read_lines(
     prefix: &str,
     sink: Option<&(dyn Fn(&str) + Sync)>,
 ) -> String {
-    let mut lines = BufReader::new(r).split(b'\n');
+    let mut reader = BufReader::new(r);
     let mut captured = String::new();
-    while let Ok(Some(l)) = lines.next_segment().await {
-        let l = String::from_utf8_lossy(&l);
+    let emit = |line: &[u8], cut: bool, captured: &mut String| {
+        let l = String::from_utf8_lossy(line);
         let l = l.trim_end_matches('\r');
+        let mark = if cut { " …" } else { "" };
         if let Some(s) = sink {
-            s(&format!("{prefix}{l}"));
+            s(&format!("{prefix}{l}{mark}"));
         }
         if captured.len() < CAPTURE_CAP {
             captured.push_str(l);
+            captured.push_str(mark);
             captured.push('\n');
         }
+    };
+    // a line is cut at MAX_LINE while it is read: a program that never prints a newline
+    // cannot make the reader hold all of its output
+    let mut line: Vec<u8> = Vec::new();
+    let mut cut = false;
+    loop {
+        let buf = match reader.fill_buf().await {
+            Ok(b) if !b.is_empty() => b,
+            _ => break,
+        };
+        let (take, newline) = match buf.iter().position(|&b| b == b'\n') {
+            Some(i) => (i, true),
+            None => (buf.len(), false),
+        };
+        let room = MAX_LINE.saturating_sub(line.len());
+        if take > room {
+            cut = true;
+        }
+        line.extend_from_slice(&buf[..take.min(room)]);
+        reader.consume(take + usize::from(newline));
+        if newline {
+            emit(&line, cut, &mut captured);
+            line.clear();
+            cut = false;
+        }
+    }
+    if !line.is_empty() || cut {
+        emit(&line, cut, &mut captured);
     }
     captured
 }
+
+/// Longest output line kept (the rest of the line is dropped while reading).
+const MAX_LINE: usize = 64 << 10;
 
 #[cfg(test)]
 mod tests {
@@ -540,6 +573,19 @@ mod tests {
         );
         assert_eq!(super::transient_unit(&c, "rynas-apt"), None);
         assert_eq!(super::transient_unit(&super::Cmd::new("mount"), "rynas-rollback"), None);
+    }
+
+    #[tokio::test]
+    async fn long_lines_are_cut_while_reading() {
+        let c = super::Cmd::new("sh").args(["-c", "head -c 200000 /dev/zero | tr '\\0' a; echo; echo next; printf tail"]);
+        let seen = std::sync::Mutex::new(Vec::<usize>::new());
+        let sink = |l: &str| seen.lock().unwrap().push(l.len());
+        let o = c.run(None, Some(&sink)).await.unwrap();
+        let lines: Vec<&str> = o.stdout.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].len(), super::MAX_LINE + " …".len());
+        assert_eq!(lines[1..], ["next", "tail"]);
+        assert_eq!(seen.lock().unwrap()[1..], [4, 4]);
     }
 
     #[test]
