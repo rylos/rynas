@@ -10,6 +10,8 @@ Marco's request, 2026-11-11: "voglio una soluzione completa che permetta anche i
 
 This **replaces the design of 2026-11-07** (D-PCBACKUP: three engines image/btrbk/files, `rynas-recovery` ISO, netboot). What already ships stays as it is: btrbk receiving (§10, and §7 for its future). Web research was done on 2026-11-07 and 2026-11-11, and the VM tests on 2026-11-11 (§3). **[U]** marks a claim that could not be verified.
 
+> **Marco, 2026-11-11, after review:** (1) repositories are per **backup group**: one group per PC by default (isolation), several PCs may share a group to deduplicate across them (they can then read each other's data; prune memory grows with the group's size). (2) **btrbk is an equal alternative**, not a secondary engine: a PC chooses native btrfs snapshots (btrbk, recommended when the root is btrfs) or file backup (restic); both are first-class in the UI and in the restore TUI. Where the text below says "per PC" or "maintenance only", these two points win.
+
 ---
 
 ## 1. Are restic or rustic enough on their own? No
