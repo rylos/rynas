@@ -1002,7 +1002,8 @@ schema 2 added the `code` and `body_format` columns.
 | `removable.safe_to_remove` | `drive`, `device`, `method` (`power_off`/`eject`/`release`) | {drive} can be removed safely (info; setting `notify_safe_removal`) |
 | `removable.ntfs_read_only` | `volume`, `drive`, `mount_point` | {volume} mounted read-only (warning: Windows left the NTFS volume dirty or hibernated) |
 | `system.clock_unsynced` / `system.clock_synced` | `minutes` | The clock is not synchronized: automatic sync is on and no server answered for an hour (warning) / synchronized again (resolved; D-TIME) |
-| `system.clock_drift` / `system.clock_in_step` | `offset` | The clock is more than 1 s from the time server in two looks in a row (warning) / back below 0.5 s (resolved; D-TIME) |
+| `system.clock_drift` / `system.clock_in_step` | `offset` | The clock is more than 1 s from the time server in two looks in a row, each on a new answer (warning) / back below 0.5 s (resolved; D-TIME) |
+| `system.clock_sync_off` | — | Automatic time sync was turned off while one of the two above was open: resolved quietly (`NewEvent::quiet`, kept in the list, sent to no target; D-TIME) |
 | `docker.unhealthy` / `docker.recovered` | `container`, `stack` | Container {container} is unhealthy / healthy again (`../phase2/docker-apps.md` §5.1) |
 | `docker.oom` | `container`, `stack` | Container {container} ran out of memory |
 | `docker.crash_loop` / `docker.crash_loop_over` | `container`, `stack`, `restarts`, `minutes` | Container {container} keeps restarting / stopped restarting |

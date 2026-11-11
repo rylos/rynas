@@ -15,6 +15,9 @@ pub enum TimeDaemon {
     Timesyncd,
     /// chrony.
     Chrony,
+    /// Another daemon (ntpsec, OpenNTPD: `/usr/sbin/ntpd`): sync and servers are managed
+    /// outside rynas and shown read-only; rynas never installs a daemon over it.
+    Other,
     /// None installed: turning sync on installs `systemd-timesyncd`.
     #[default]
     None,
@@ -58,8 +61,18 @@ pub struct ClockState {
     /// The distribution's servers (used while [`ClockState::servers`] is empty; with chrony
     /// always used besides them).
     pub default_servers: Vec<String>,
-    /// Servers handed out by DHCP, used besides the others.
+    /// Servers handed out by DHCP to the network interfaces, used besides the others (with
+    /// timesyncd asked first, even when rynas has its own list).
     pub dhcp_servers: Vec<String>,
+    /// Servers DHCP handed out through the DHCP client's hook into the server list
+    /// (timesyncd with dhclient): used only while [`ClockState::servers`] is empty, rynas's
+    /// own list replaces them.
+    #[serde(default)]
+    pub dhcp_hook_servers: Vec<String>,
+    /// chrony's configuration does not read the folder rynas writes its servers to
+    /// (`sourcedir /etc/chrony/sources.d` missing): rynas's servers are ignored.
+    #[serde(default)]
+    pub servers_ignored: bool,
     pub source: Option<TimeSource>,
 }
 
@@ -96,6 +109,10 @@ pub struct ZoneInfo {
 }
 
 pub const MAX_SERVERS: usize = 8;
+/// The years a manual setting accepts (a clock outside them is a typing slip, and certificate
+/// checks and schedules would break).
+pub const MIN_YEAR: i32 = 2000;
+pub const MAX_YEAR: i32 = 2099;
 
 /// `YYYY-MM-DD HH:MM:SS` (or without seconds), the shape [`SetClock::local`] takes.
 pub fn local_time_ok(s: &str) -> bool {

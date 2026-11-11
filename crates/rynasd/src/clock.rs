@@ -4,22 +4,24 @@
 //! The system holds the state, nothing is kept in rynas's configuration:
 //! - the zone and the hardware clock go through timedated (`timedatectl`), which writes
 //!   `/etc/localtime` and `/etc/adjtime` itself: rynasd's sandbox (ProtectClock) needs no change;
-//! - the time daemon is detected: chrony when installed, else `systemd-timesyncd`; with none,
-//!   turning sync on installs `systemd-timesyncd`;
+//! - the time daemon is detected: chrony when installed, else another `ntpd` (ntpsec, OpenNTPD:
+//!   shown read-only, managed outside rynas), else `systemd-timesyncd`; with none, turning sync
+//!   on installs `systemd-timesyncd` (never over another daemon, and apt may remove nothing);
 //! - rynas's servers are one drop-in of that daemon (`timesyncd.conf.d/60-rynas.conf`, or
-//!   `/etc/chrony/sources.d/rynas.sources`); without it the distribution's servers are used.
-//!   chrony keeps the sources of `chrony.conf` besides rynas's (said in the page);
-//! - after a zone change rynasd re-reads it (`tzset`), so snapshot names and quiet hours use it at
-//!   once; `rynas_power::system_tz` reads the file every time. systemd recomputes its timers by
-//!   itself, `systemd-analyze` and every child started later read the new zone.
+//!   `/etc/chrony/sources.d/rynas.sources`); without it the distribution's servers and those of
+//!   DHCP are used. chrony keeps the sources of `chrony.conf` besides rynas's (said in the page);
+//! - snapshot names, quiet hours and the power schedule read the zone through `rynas_tz`, which
+//!   reads `/etc/localtime` again when it changes, whoever changed it. systemd recomputes its
+//!   timers by itself, `systemd-analyze` and every child started later read the new zone.
 //!
 //! `--dry-system`: nothing is run; the zone, sync and hardware clock live in a small file below
 //! the dry root.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::os::unix::fs::MetadataExt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::extract::State;
@@ -33,7 +35,7 @@ use rynas_api_types::notify::{NewEvent, NotifyCategory, NotifySeverity};
 use rynas_api_types::{TaskStarted, error_codes, validate};
 use rynas_hw::under;
 use rynas_notify::Notifier;
-use rynas_notify::event::{code, field, firing, resolved};
+use rynas_notify::event::{code, field, firing, quietly, resolved};
 use rynas_tasks::{Cmd, TaskCtx};
 use serde::{Deserialize, Serialize};
 
@@ -45,7 +47,13 @@ const TIMESYNCD_UNIT: &str = "systemd-timesyncd.service";
 const CHRONY_UNIT: &str = "chrony.service";
 const TIMESYNCD_CONF: &str = "/etc/systemd/timesyncd.conf";
 const TIMESYNCD_DROPIN: &str = "/etc/systemd/timesyncd.conf.d/60-rynas.conf";
+/// Runtime drop-ins: Debian's dhclient hook writes `01-dhclient.conf` here with `NTP=`.
+const TIMESYNCD_RUN_DIR: &str = "/run/systemd/timesyncd.conf.d";
+/// ntpsec and OpenNTPD (both `/usr/sbin/ntpd` on Debian): another `time-daemon`.
+const NTPD_BIN: &str = "/usr/sbin/ntpd";
+const NTPD_UNITS: [&str; 3] = ["ntpsec.service", "openntpd.service", "ntp.service"];
 const CHRONY_CONF: &str = "/etc/chrony/chrony.conf";
+const CHRONY_CONF_DIR: &str = "/etc/chrony/conf.d";
 const CHRONY_SOURCES_DIR: &str = "/etc/chrony/sources.d";
 const CHRONY_SOURCES: &str = "/etc/chrony/sources.d/rynas.sources";
 const CHRONY_DHCP_DIR: &str = "/run/chrony-dhcp";
@@ -169,6 +177,24 @@ pub fn parse_tracking(text: &str) -> Option<TimeSource> {
     })
 }
 
+/// chrony's own verdict, the leap status of `chronyc -c tracking` (last field): anything but
+/// "Not synchronised". The kernel flag timedated reports is no use with chrony: chronyd clears
+/// `STA_UNSYNC` only with `rtcsync` (sys_timex.c, "clear the UNSYNC flag only if rtcsync is
+/// enabled").
+pub fn tracking_synced(text: &str) -> bool {
+    let Some(line) = text.lines().next() else { return false };
+    let f: Vec<&str> = line.split(',').collect();
+    f.len() >= 14 && f.last().is_some_and(|l| !l.trim().is_empty() && l.trim() != "Not synchronised")
+}
+
+/// The configuration reads `/etc/chrony/sources.d` (`sourcedir`), where rynas writes.
+pub fn chrony_reads_sources<'a>(texts: impl IntoIterator<Item = &'a str>) -> bool {
+    texts.into_iter().flat_map(str::lines).any(|l| {
+        let mut w = l.split_whitespace();
+        w.next() == Some("sourcedir") && w.next().is_some_and(|d| d.trim_end_matches('/') == CHRONY_SOURCES_DIR)
+    })
+}
+
 /// `pool`/`server` names of chrony configuration text.
 pub fn chrony_sources(text: &str) -> Vec<String> {
     text.lines()
@@ -236,8 +262,9 @@ fn tzif_offset(name: &str, data: &[u8]) -> Option<i32> {
 
 // ------------------------------------------------------------------ checks
 
-pub fn validate(req: &ClockSettings, now: &ClockState, zone_exists: impl Fn(&str) -> bool) -> Res<()> {
-    if !validate::time_zone(&req.timezone) || !zone_exists(&req.timezone) {
+/// `zone_offered`: the zone is one of [`Clock::zones`] (or the current one).
+pub fn validate(req: &ClockSettings, now: &ClockState, zone_offered: impl Fn(&str) -> bool) -> Res<()> {
+    if !validate::time_zone(&req.timezone) || !zone_offered(&req.timezone) {
         return Err(Error::invalid("timezone", format!("{:?} is not a time zone of this system", req.timezone)));
     }
     if req.servers.len() > MAX_SERVERS {
@@ -250,6 +277,9 @@ pub fn validate(req: &ClockSettings, now: &ClockState, zone_exists: impl Fn(&str
         if req.servers[..i].contains(s) {
             return Err(Error::invalid("servers", format!("{s} is listed twice")));
         }
+    }
+    if now.daemon == TimeDaemon::Other && (req.sync_enabled != now.sync_enabled || req.servers != now.servers) {
+        return Err(Error::invalid("sync_enabled", "time sync is managed outside rynas on this system"));
     }
     if req.local_rtc && !now.local_rtc {
         return Err(Error::invalid("local_rtc", "the hardware clock is only moved to UTC"));
@@ -277,6 +307,10 @@ pub fn plan(req: &ClockSettings, now: &ClockState) -> Vec<Step> {
     if now.local_rtc && !req.local_rtc {
         v.push(Step::RtcUtc);
     }
+    // another daemon: sync and servers are not rynas's (validation refuses changes)
+    if now.daemon == TimeDaemon::Other {
+        return v;
+    }
     let servers = req.servers != now.servers;
     // before the package: its postinst starts the daemon, which then reads rynas's servers
     if servers && (now.daemon != TimeDaemon::None || req.sync_enabled) {
@@ -302,8 +336,11 @@ pub fn step_cmd(step: &Step, daemon: TimeDaemon) -> Option<Cmd> {
     Some(match step {
         Step::Zone(z) => td(&["set-timezone", z]),
         Step::RtcUtc => td(&["set-local-rtc", "0"]),
-        Step::Install => crate::updates::apt(&["install", "--", PACKAGE], APT_TIMEOUT),
+        // only when no time daemon is there; `--no-remove` still: systemd-timesyncd conflicts
+        // with `time-daemon`, and -y would otherwise remove one rynas did not see
+        Step::Install => crate::updates::apt(&["install", "--no-remove", "--", PACKAGE], APT_TIMEOUT),
         Step::Servers => return None,
+        Step::SyncOn | Step::SyncOff | Step::Reload if daemon == TimeDaemon::Other => return None,
         Step::SyncOn if chrony => sys(&["enable", "--now", CHRONY_UNIT]),
         Step::SyncOn => td(&["set-ntp", "true"]),
         Step::SyncOff if chrony => sys(&["disable", "--now", CHRONY_UNIT]),
@@ -313,14 +350,46 @@ pub fn step_cmd(step: &Step, daemon: TimeDaemon) -> Option<Cmd> {
     })
 }
 
-/// `timedatectl set-time` argument of a manual setting.
+/// `timedatectl set-time` argument of a manual setting: a real date and time from
+/// [`MIN_YEAR`](rynas_api_types::clock::MIN_YEAR) to [`MAX_YEAR`](rynas_api_types::clock::MAX_YEAR),
+/// the error on the field that was given.
 pub fn set_time_arg(req: &SetClock) -> Res<String> {
+    use rynas_api_types::clock::{MAX_YEAR, MIN_YEAR};
+    let years = format!("a date from {MIN_YEAR} to {MAX_YEAR} is needed");
     match (req.epoch_ms, req.local.as_deref()) {
-        (Some(ms), None) if ms >= 946_684_800_000 => Ok(format!("@{}", ms / 1000)),
-        (None, Some(l)) if rynas_api_types::clock::local_time_ok(l) && !l.starts_with("19") => Ok(l.to_string()),
-        (Some(_), None) | (None, Some(_)) => Err(Error::invalid("local", "a date after 2000 is needed")),
+        (Some(ms), None) => {
+            let year = i64::try_from(ms)
+                .ok()
+                .and_then(|ms| jiff::Timestamp::from_millisecond(ms).ok())
+                .map(|t| i32::from(t.to_zoned(jiff::tz::TimeZone::UTC).year()));
+            match year {
+                Some(y) if (MIN_YEAR..=MAX_YEAR).contains(&y) => Ok(format!("@{}", ms / 1000)),
+                _ => Err(Error::invalid("epoch_ms", years)),
+            }
+        }
+        (None, Some(l)) => {
+            if !rynas_api_types::clock::local_time_ok(l) {
+                return Err(Error::invalid("local", "the date and time need the shape YYYY-MM-DD HH:MM[:SS]"));
+            }
+            let n = |r: std::ops::Range<usize>| l.get(r).and_then(|x| x.parse::<i16>().ok()).unwrap_or(-1);
+            let sec = if l.len() == 19 { n(17..19) } else { 0 };
+            let real = jiff::civil::DateTime::new(n(0..4), n(5..7) as i8, n(8..10) as i8, n(11..13) as i8, n(14..16) as i8, sec as i8, 0);
+            match real {
+                Ok(dt) if (MIN_YEAR..=MAX_YEAR).contains(&i32::from(dt.year())) => Ok(l.to_string()),
+                Ok(_) => Err(Error::invalid("local", years)),
+                Err(_) => Err(Error::invalid("local", format!("{l:?} is not a real date and time"))),
+            }
+        }
         _ => Err(Error::bad_request("give epoch_ms or local, not both")),
     }
+}
+
+/// Looks (2 s apart) a sync now waits for a fresh answer.
+const SYNC_WAIT_LOOKS: u64 = 15;
+
+/// A server answered after `before` (the last answer when sync now was asked).
+pub fn answered_since(before: Option<u64>, s: &ClockState) -> bool {
+    s.source.as_ref().and_then(|x| x.last_sync_ms).is_some_and(|t| before.is_none_or(|b| t > b))
 }
 
 // ------------------------------------------------------------------ the machine
@@ -353,6 +422,23 @@ pub struct Clock {
     pub probe: Arc<dyn ClockProbe>,
     pub dry: bool,
     pub busy: AtomicBool,
+    /// The offered zones, parsed, until the zone database changes.
+    zones: Mutex<Option<Zones>>,
+}
+
+/// What identifies one version of the zone database: `tzdata.zi` and the zoneinfo folder.
+type ZoneKey = Option<(u64, u64, i64, i64, u64, i64, i64)>;
+
+fn zone_key(root: &Path) -> ZoneKey {
+    let zi = std::fs::metadata(under(root, TZDATA)).ok()?;
+    let dir = std::fs::metadata(under(root, ZONEINFO)).ok()?;
+    Some((zi.dev(), zi.ino(), zi.mtime(), zi.mtime_nsec(), zi.size(), dir.mtime(), dir.mtime_nsec()))
+}
+
+/// The zones of [`parse_zones`] that have a TZif file, parsed once (about 600 files).
+struct Zones {
+    key: ZoneKey,
+    list: Arc<Vec<(String, jiff::tz::TimeZone)>>,
 }
 
 fn q(program: &str, args: &[&str]) -> Cmd {
@@ -361,7 +447,7 @@ fn q(program: &str, args: &[&str]) -> Cmd {
 
 impl Clock {
     pub fn new(root: PathBuf, dry: bool) -> Self {
-        Clock { root, probe: Arc::new(HostProbe), dry, busy: AtomicBool::new(false) }
+        Clock { root, probe: Arc::new(HostProbe), dry, busy: AtomicBool::new(false), zones: Mutex::new(None) }
     }
 
     fn read(&self, path: &str) -> Option<String> {
@@ -381,11 +467,15 @@ impl Clock {
     }
 
     pub fn daemon(&self) -> TimeDaemon {
+        let has = |p: &str| under(&self.root, p).exists();
         if self.dry {
             TimeDaemon::Timesyncd
-        } else if under(&self.root, CHRONYD_BIN).exists() {
+        } else if has(CHRONYD_BIN) {
             TimeDaemon::Chrony
-        } else if under(&self.root, TIMESYNCD_BIN).exists() {
+        } else if has(NTPD_BIN) {
+            // before timesyncd: never manage (or install) over another daemon
+            TimeDaemon::Other
+        } else if has(TIMESYNCD_BIN) {
             TimeDaemon::Timesyncd
         } else {
             TimeDaemon::None
@@ -407,6 +497,26 @@ impl Clock {
         self.probe.query(&q("systemctl", &["is-active", unit])).is_ok_and(|t| t.trim() == "active")
     }
 
+    fn enabled(&self, unit: &str) -> bool {
+        self.probe.query(&q("systemctl", &["is-enabled", unit])).is_ok_and(|t| t.trim() == "enabled")
+    }
+
+    /// The text of a configuration file and of the `*.<ext>` files of a folder, sorted.
+    fn texts(&self, file: Option<&str>, dir: &str, ext: &str, before: Option<&str>) -> Vec<String> {
+        let mut out: Vec<String> = file.and_then(|f| self.read(f)).into_iter().collect();
+        if let Ok(rd) = std::fs::read_dir(under(&self.root, dir)) {
+            let mut files: Vec<PathBuf> = rd
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|x| x == ext))
+                .filter(|p| before.is_none_or(|b| p.file_name().is_some_and(|n| n.to_string_lossy().as_ref() < b)))
+                .collect();
+            files.sort();
+            out.extend(files.iter().filter_map(|p| std::fs::read_to_string(p).ok()));
+        }
+        out
+    }
+
     /// Where the zone database is: the machine's even on a dry system (read only).
     fn zone_root(&self) -> &Path {
         if self.dry { Path::new("/") } else { &self.root }
@@ -419,24 +529,50 @@ impl Clock {
         std::fs::read(under(self.zone_root(), &format!("{ZONEINFO}/{name}"))).ok().filter(|d| d.starts_with(b"TZif"))
     }
 
-    /// The zone file exists below the zoneinfo folder and is a TZif file.
-    pub fn zone_exists(&self, name: &str) -> bool {
-        self.zone_file(name).is_some()
-    }
-
     fn offset_of(&self, name: &str) -> Option<i32> {
         tzif_offset(name, &self.zone_file(name)?)
     }
 
+    /// The offered zones (`tzdata.zi` in the IANA regions, with a TZif file), parsed once
+    /// and kept until `tzdata.zi` or the zoneinfo folder changes (a tzdata upgrade).
+    fn zone_list(&self) -> Arc<Vec<(String, jiff::tz::TimeZone)>> {
+        let key = zone_key(self.zone_root());
+        let mut st = self.zones.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(z) = st.as_ref().filter(|z| z.key == key) {
+            return z.list.clone();
+        }
+        let zi = std::fs::read_to_string(under(self.zone_root(), TZDATA)).unwrap_or_default();
+        let list: Vec<(String, jiff::tz::TimeZone)> = parse_zones(&zi)
+            .into_iter()
+            .filter_map(|n| {
+                let tz = jiff::tz::TimeZone::tzif(&n, &self.zone_file(&n)?).ok()?;
+                Some((n, tz))
+            })
+            .collect();
+        let list = Arc::new(list);
+        *st = Some(Zones { key, list: list.clone() });
+        list
+    }
+
+    /// A zone an apply accepts: one of [`Clock::zones`] (never `right/…`, `posix/…`,
+    /// `Factory` or legacy links), or the current one.
+    pub fn zone_offered(&self, name: &str, current: &str) -> bool {
+        let listed = self.zone_list().iter().any(|(n, _)| n == name);
+        (listed || name == current) && self.zone_file(name).is_some()
+    }
+
     /// `GET /system/time/zones`.
     pub fn zones(&self) -> Vec<ZoneInfo> {
-        let zi = std::fs::read_to_string(under(self.zone_root(), TZDATA)).unwrap_or_default();
-        let mut names = parse_zones(&zi);
+        let now = jiff::Timestamp::now();
+        let mut out: Vec<ZoneInfo> =
+            self.zone_list().iter().map(|(n, tz)| ZoneInfo { name: n.clone(), offset_s: tz.to_offset(now).seconds() }).collect();
         let current = self.timedate().timezone;
-        if !names.contains(&current) {
-            names.push(current);
+        if !out.iter().any(|z| z.name == current)
+            && let Some(offset_s) = self.offset_of(&current)
+        {
+            out.push(ZoneInfo { name: current, offset_s });
         }
-        names.into_iter().filter_map(|n| Some(ZoneInfo { offset_s: self.offset_of(&n)?, name: n })).collect()
+        out
     }
 
     fn dir_sources(&self, dir: &str, skip: Option<&str>) -> Vec<String> {
@@ -467,6 +603,13 @@ impl Clock {
                 s.sync_enabled = td.ntp;
                 s.servers = timesyncd_list(&self.read(TIMESYNCD_DROPIN).unwrap_or_default(), "NTP");
                 s.default_servers = timesyncd_list(&self.read(TIMESYNCD_CONF).unwrap_or_default(), "FallbackNTP");
+                // dhclient's hook (01-dhclient.conf): read before rynas's drop-in, whose reset
+                // drops them while rynas has its own list
+                s.dhcp_hook_servers = self
+                    .texts(None, TIMESYNCD_RUN_DIR, "conf", Some("60-rynas.conf"))
+                    .iter()
+                    .flat_map(|t| timesyncd_list(t, "NTP"))
+                    .collect();
                 if self.dry && s.sync_enabled {
                     s.source = Some(TimeSource {
                         server: s.servers.first().cloned().unwrap_or_else(|| "pool.ntp.example".into()),
@@ -492,14 +635,25 @@ impl Clock {
                 }
             }
             TimeDaemon::Chrony => {
-                s.sync_enabled = self.active(CHRONY_UNIT);
+                // "on" is the unit wanted: a failed chronyd stays on (and unsynchronized)
+                s.sync_enabled = self.active(CHRONY_UNIT) || self.enabled(CHRONY_UNIT);
                 s.servers = chrony_sources(&self.read(CHRONY_SOURCES).unwrap_or_default());
                 s.default_servers = chrony_sources(&self.read(CHRONY_CONF).unwrap_or_default());
                 s.default_servers.extend(self.dir_sources(CHRONY_SOURCES_DIR, Some("rynas.sources")));
                 s.dhcp_servers = self.dir_sources(CHRONY_DHCP_DIR, None);
-                if s.sync_enabled {
-                    s.source = self.probe.query(&q("chronyc", &["-c", "-n", "tracking"])).ok().and_then(|t| parse_tracking(&t));
+                let conf = self.texts(Some(CHRONY_CONF), CHRONY_CONF_DIR, "conf", None);
+                s.servers_ignored = !chrony_reads_sources(conf.iter().map(String::as_str));
+                s.synchronized = false;
+                if s.sync_enabled
+                    && let Ok(t) = self.probe.query(&q("chronyc", &["-c", "-n", "tracking"]))
+                {
+                    s.synchronized = tracking_synced(&t);
+                    s.source = parse_tracking(&t);
                 }
+            }
+            TimeDaemon::Other => {
+                // read-only: whatever runs it, the kernel's flag says whether it keeps time
+                s.sync_enabled = td.ntp || NTPD_UNITS.iter().any(|u| self.active(u));
             }
             TimeDaemon::None => {}
         }
@@ -568,7 +722,7 @@ impl Clock {
                 }
             }
             if let Step::Zone(z) = &step {
-                refresh_zone();
+                // rynasd's own readers (rynas_tz) see the new /etc/localtime by themselves
                 ctx.log(&format!("time zone: {z}; running apps keep the old one until they restart"));
             }
         }
@@ -583,8 +737,8 @@ impl Clock {
     }
 
     /// The task behind `POST /v1/system/time/sync-now`: a fresh question to the servers, then
-    /// up to 30 s for the kernel to count the clock as synchronized.
-    async fn sync_now(&self, ctx: &TaskCtx, daemon: TimeDaemon) -> Result<(), String> {
+    /// up to 30 s for an answer newer than `before` (the last one when it was asked).
+    async fn sync_now(self: Arc<Self>, ctx: &TaskCtx, daemon: TimeDaemon, before: Option<u64>) -> Result<(), String> {
         match daemon {
             TimeDaemon::Chrony => {
                 self.run(ctx, Cmd::new("chronyc").args(["burst", "4/4"]).timeout(ACTION_TIMEOUT)).await?;
@@ -595,29 +749,25 @@ impl Clock {
             }
             _ => self.run(ctx, Cmd::new("systemctl").args(["restart", TIMESYNCD_UNIT]).timeout(ACTION_TIMEOUT)).await?,
         }
-        for _ in 0..15 {
+        // done only when a server has answered after the request: the kernel's flag (and the
+        // last answer) are usually still those of before
+        for _ in 0..SYNC_WAIT_LOOKS {
+            tokio::time::sleep(Duration::from_secs(2)).await;
             if ctx.is_cancelled() {
                 return Err("cancelled".into());
             }
-            if self.timedate().synchronized {
-                ctx.log("the clock is synchronized");
+            let c = self.clone();
+            let s = tokio::task::spawn_blocking(move || c.state()).await.map_err(|e| e.to_string())?;
+            if answered_since(before, &s) {
+                ctx.log(&match s.source.as_ref().and_then(|x| x.offset_us) {
+                    Some(o) => format!("the time server answered (offset {:.1} ms)", o as f64 / 1000.0),
+                    None => "the time server answered".to_string(),
+                });
                 return Ok(());
             }
-            tokio::time::sleep(Duration::from_secs(2)).await;
         }
-        Err("no time server answered within 30 s".into())
+        Err(format!("no time server answered within {} s", SYNC_WAIT_LOOKS * 2))
     }
-}
-
-unsafe extern "C" {
-    fn tzset();
-}
-
-/// glibc keeps the zone it read first (`localtime_r` never looks again): read
-/// `/etc/localtime` again after a change.
-pub fn refresh_zone() {
-    // SAFETY: tzset takes glibc's own zone lock; it only reads TZ and the zone file.
-    unsafe { tzset() };
 }
 
 // ------------------------------------------------------------------ notifications
@@ -635,8 +785,12 @@ const KEY_DRIFT: &str = "time:drift";
 pub struct Watch {
     unsynced_since: Option<u64>,
     unsynced_open: bool,
+    /// Looks over the limit, each on a new answer of the server.
     drift_seen: u32,
     drift_open: bool,
+    /// The answer of the last look counted (a server asked every 34 min gives the same
+    /// offset to several looks: one measurement, not several).
+    drift_answer: Option<u64>,
 }
 
 fn seconds(us: i64) -> String {
@@ -646,8 +800,21 @@ fn seconds(us: i64) -> String {
 impl Watch {
     pub fn step(&mut self, s: &ClockState) -> Vec<NewEvent> {
         let mut out = Vec::new();
-        let lost = s.sync_enabled && !s.synchronized;
-        if lost {
+        if !s.sync_enabled {
+            // the administrator's choice: no alarm, and what was open closes without a message
+            // ("synchronized again" would be false)
+            self.unsynced_since = None;
+            self.drift_seen = 0;
+            self.drift_answer = None;
+            for (open, key) in [(&mut self.unsynced_open, KEY_UNSYNCED), (&mut self.drift_open, KEY_DRIFT)] {
+                if std::mem::take(open) {
+                    let ev = resolved(NotifyCategory::System, SRC, key, "Automatic time sync was turned off");
+                    out.push(quietly(code(ev, "system.clock_sync_off")));
+                }
+            }
+            return out;
+        }
+        if !s.synchronized {
             let since = *self.unsynced_since.get_or_insert(s.now_ms);
             let minutes = s.now_ms.saturating_sub(since) / 60_000;
             if !self.unsynced_open && s.now_ms.saturating_sub(since) >= UNSYNCED_AFTER_MS {
@@ -666,10 +833,15 @@ impl Watch {
                 out.push(code(ev, "system.clock_synced"));
             }
         }
-        let off = s.source.as_ref().and_then(|x| x.offset_us).filter(|_| s.sync_enabled);
-        match off {
+        let src = s.source.as_ref();
+        let answer = src.and_then(|x| x.last_sync_ms);
+        match src.and_then(|x| x.offset_us) {
             Some(o) if o.abs() > DRIFT_US => {
-                self.drift_seen += 1;
+                // a new measurement only: the same answer seen again counts once
+                if answer.is_none() || answer != self.drift_answer {
+                    self.drift_seen += 1;
+                    self.drift_answer = answer;
+                }
                 if self.drift_seen >= 2 && !self.drift_open {
                     self.drift_open = true;
                     let ev = firing(NotifyCategory::System, NotifySeverity::Warning, SRC, KEY_DRIFT, "The clock is drifting");
@@ -681,10 +853,13 @@ impl Watch {
                     out.push(field(ev, "offset", seconds(o)));
                 }
             }
-            Some(o) if o.abs() > DRIFT_US / 2 => {}
-            _ => {
+            off => {
+                // below the limit: the next alarm needs two new looks in a row again
                 self.drift_seen = 0;
-                if std::mem::take(&mut self.drift_open) {
+                self.drift_answer = None;
+                // an open alarm closes only well below the limit (or without a measurement)
+                let back = off.is_none_or(|o| o.abs() <= DRIFT_US / 2);
+                if back && std::mem::take(&mut self.drift_open) {
                     let ev = resolved(NotifyCategory::System, SRC, KEY_DRIFT, "The clock is in step again");
                     out.push(code(ev, "system.clock_in_step"));
                 }
@@ -784,9 +959,12 @@ async fn apply_post(
     let (a, who) = (api(&st)?, user(&hd)?);
     let Json(req) = body?;
     let c = a.clock.clone();
-    let now = current(&c).await?;
-    validate(&req, &now, |z| c.zone_exists(z))?;
+    // first: the state the request is checked and planned against stays true until it ends
     let guard = claim(&c)?;
+    let now = current(&c).await?;
+    let (c2, zone, cur) = (c.clone(), req.timezone.clone(), now.timezone.clone());
+    let offered = tokio::task::spawn_blocking(move || c2.zone_offered(&zone, &cur)).await.map_err(Error::internal)?;
+    validate(&req, &now, |_| offered)?;
     tracing::info!(target: "rynas::audit", "time apply zone={} sync={} servers={} by {who}", req.timezone, req.sync_enabled, req.servers.join(","));
     let id = a.ops.tasks.spawn("time.apply", &who, move |ctx| async move {
         let _guard = guard;
@@ -800,10 +978,11 @@ async fn set_post(State(st): State<ClockHandle>, hd: HeaderMap, body: Result<Jso
     let Json(req) = body?;
     let arg = set_time_arg(&req)?;
     let c = a.clock.clone();
+    // before reading the state: an apply turning sync on cannot slip in between
+    let guard = claim(&c)?;
     if current(&c).await?.sync_enabled {
         return Err(conflict("turn automatic sync off before setting the time by hand"));
     }
-    let guard = claim(&c)?;
     tracing::info!(target: "rynas::audit", "time set {arg} by {who}");
     let id = a.ops.tasks.spawn("time.set", &who, move |ctx| async move {
         let _guard = guard;
@@ -815,15 +994,19 @@ async fn set_post(State(st): State<ClockHandle>, hd: HeaderMap, body: Result<Jso
 async fn sync_post(State(st): State<ClockHandle>, hd: HeaderMap) -> Res<Response> {
     let (a, who) = (api(&st)?, user(&hd)?);
     let c = a.clock.clone();
+    let guard = claim(&c)?;
     let now = current(&c).await?;
+    if now.daemon == TimeDaemon::Other {
+        return Err(conflict("time sync is managed outside rynas on this system"));
+    }
     if !now.sync_enabled {
         return Err(conflict("automatic sync is off"));
     }
-    let guard = claim(&c)?;
+    let before = now.source.as_ref().and_then(|x| x.last_sync_ms);
     tracing::info!(target: "rynas::audit", "time sync now by {who}");
     let id = a.ops.tasks.spawn("time.sync", &who, move |ctx| async move {
         let _guard = guard;
-        c.sync_now(&ctx, now.daemon).await
+        c.sync_now(&ctx, now.daemon, before).await
     })?;
     Ok(started(id))
 }
@@ -908,6 +1091,12 @@ mod tests {
         assert_eq!((s.server.as_str(), s.stratum, s.offset_us, s.poll_s), ("192.0.2.1", Some(3), Some(-12), Some(65)));
         assert_eq!(s.last_sync_ms, Some(1_794_353_944_123));
         assert_eq!(parse_tracking("00000000,,0,0.0,0,0,0,0,0,0,0,0,0,Not synchronised\n"), None);
+        assert!(tracking_synced(t), "chrony's leap status, whatever the kernel flag says");
+        assert!(!tracking_synced("00000000,,0,0.0,0,0,0,0,0,0,0,0,0,Not synchronised\n"));
+        assert!(!tracking_synced("506 Cannot talk to daemon\n") && !tracking_synced(""));
+        assert!(chrony_reads_sources(["pool x iburst\nsourcedir /etc/chrony/sources.d/\n"]));
+        assert!(chrony_reads_sources(["# none here", "sourcedir /etc/chrony/sources.d"]), "or in conf.d");
+        assert!(!chrony_reads_sources(["sourcedir /run/chrony-dhcp\n#sourcedir /etc/chrony/sources.d\n"]));
         let conf = "# x\npool 2.debian.pool.ntp.org iburst\nsourcedir /run/chrony-dhcp\nserver ntp.example.lan iburst prefer\n";
         assert_eq!(chrony_sources(conf), ["2.debian.pool.ntp.org", "ntp.example.lan"]);
     }
@@ -944,6 +1133,11 @@ mod tests {
         let local = ClockSettings { local_rtc: true, ..settings("UTC", true, &[]) };
         assert!(validate(&local, &now, ok).is_err(), "never to local time");
         assert!(validate(&local, &ClockState { local_rtc: true, ..now.clone() }, ok).is_ok());
+        // another daemon: the zone changes, sync and servers stay as they are
+        let other = ClockState { daemon: TimeDaemon::Other, sync_enabled: true, ..now.clone() };
+        assert!(validate(&settings("Europe/Rome", true, &[]), &other, ok).is_ok());
+        assert!(validate(&settings("UTC", false, &[]), &other, ok).is_err());
+        assert!(validate(&settings("UTC", true, &["ntp.example.lan"]), &other, ok).is_err());
     }
 
     #[test]
@@ -974,16 +1168,33 @@ mod tests {
         assert!(cmds[2].contains("chronyc reload sources"), "{cmds:?}");
         assert!(step_cmd(&Step::SyncOn, TimeDaemon::Timesyncd).unwrap().display().contains("timedatectl set-ntp true"));
         assert!(step_cmd(&Step::Zone("Asia/Tokyo".into()), TimeDaemon::Timesyncd).unwrap().display().contains("set-timezone Asia/Tokyo"));
+        let install = step_cmd(&Step::Install, TimeDaemon::None).unwrap().display();
+        assert!(install.contains("install --no-remove -- systemd-timesyncd"), "{install}");
+        // another daemon: never installed over, never driven
+        let other = ClockState { daemon: TimeDaemon::Other, sync_enabled: false, ..now.clone() };
+        assert_eq!(plan(&settings("Asia/Tokyo", true, &["a"]), &other), [Step::Zone("Asia/Tokyo".into())]);
+        assert!(step_cmd(&Step::SyncOn, TimeDaemon::Other).is_none());
     }
 
     #[test]
     fn manual_time() {
         let a = |e: Option<u64>, l: Option<&str>| set_time_arg(&SetClock { epoch_ms: e, local: l.map(str::to_string) });
+        let field = |r: Res<String>| match r {
+            Err(e) => e.3.unwrap_or_default(),
+            Ok(v) => panic!("accepted {v}"),
+        };
         assert_eq!(a(Some(1_794_353_944_999), None).unwrap(), "@1794353944");
         assert_eq!(a(None, Some("2026-11-11 09:30:00")).unwrap(), "2026-11-11 09:30:00");
+        assert_eq!(a(None, Some("2099-12-31 23:59")).unwrap(), "2099-12-31 23:59");
         assert!(a(None, Some("now; reboot")).is_err());
-        assert!(a(Some(5), None).is_err(), "before 2000");
-        assert!(a(None, Some("1970-01-01 00:00")).is_err());
+        assert_eq!(field(a(Some(5), None)), "epoch_ms", "before 2000, blamed on the right field");
+        assert_eq!(field(a(Some(4_102_444_800_000), None)), "epoch_ms", "2100");
+        assert_eq!(field(a(Some(u64::MAX), None)), "epoch_ms");
+        assert_eq!(field(a(None, Some("1970-01-01 00:00"))), "local");
+        assert_eq!(field(a(None, Some("2100-01-01 00:00"))), "local");
+        assert_eq!(field(a(None, Some("9999-01-01 00:00"))), "local");
+        assert_eq!(field(a(None, Some("2026-02-30 10:00"))), "local", "not a real day");
+        assert_eq!(field(a(None, Some("2026-11-11 24:00"))), "local");
         assert!(a(Some(1_794_353_944_999), Some("2026-11-11 09:30")).is_err());
         assert!(a(None, None).is_err());
     }
@@ -994,12 +1205,19 @@ mod tests {
         let (c, fake) = machine(
             d.path(),
             &[("timedatectl show", SHOW), ("busctl", BUS)],
-            &[(TIMESYNCD_BIN, ""), (TIMESYNCD_DROPIN, &render_timesyncd(&["ntp.example.lan".into()]))],
+            &[
+                (TIMESYNCD_BIN, ""),
+                (TIMESYNCD_DROPIN, &render_timesyncd(&["ntp.example.lan".into()])),
+                // Debian's dhclient hook
+                ("/run/systemd/timesyncd.conf.d/01-dhclient.conf", "[Time]\nNTP=192.0.2.5 192.0.2.6\n"),
+                ("/run/systemd/timesyncd.conf.d/90-late.conf", "[Time]\nNTP=192.0.2.9\n"),
+            ],
         );
         let s = c.state();
         assert_eq!(s.daemon, TimeDaemon::Timesyncd);
         assert!(s.sync_enabled && s.synchronized && !s.local_rtc);
         assert_eq!(s.servers, ["ntp.example.lan"]);
+        assert_eq!(s.dhcp_hook_servers, ["192.0.2.5", "192.0.2.6"], "only the files rynas's reset drops");
         assert_eq!(s.default_servers, ["0.debian.pool.ntp.org", "1.debian.pool.ntp.org"]);
         assert_eq!(s.dhcp_servers, ["192.0.2.1"]);
         assert_eq!(s.source.unwrap().server, "2.debian.pool.ntp.org");
@@ -1013,7 +1231,8 @@ mod tests {
         let tracking = "C0000201,192.0.2.1,3,1794353944.1,0.0005,0,0,0,0,0,0,0,64,Normal\n";
         let (c, _) = machine(
             d.path(),
-            &[("timedatectl show", "Timezone=UTC\nNTP=no\nNTPSynchronized=yes\n"), ("systemctl is-active", "active\n"), ("chronyc", tracking)],
+            // no rtcsync: the kernel flag says unsynchronized while chrony is
+            &[("timedatectl show", "Timezone=UTC\nNTP=no\nNTPSynchronized=no\n"), ("systemctl is-active", "active\n"), ("chronyc", tracking)],
             &[
                 (CHRONYD_BIN, ""),
                 (TIMESYNCD_BIN, ""),
@@ -1030,6 +1249,36 @@ mod tests {
         assert_eq!(s.default_servers, ["2.debian.pool.ntp.org", "other.example.lan"]);
         assert_eq!(s.dhcp_servers, ["192.0.2.1"]);
         assert_eq!(s.source.unwrap().offset_us, Some(500));
+        assert!(s.synchronized, "chrony's leap status");
+        assert!(s.servers_ignored, "chrony.conf without the sources folder");
+        std::fs::create_dir_all(under(d.path(), CHRONY_CONF_DIR)).unwrap();
+        std::fs::write(under(d.path(), "/etc/chrony/conf.d/x.conf"), "sourcedir /etc/chrony/sources.d\n").unwrap();
+        assert!(!c.state().servers_ignored);
+    }
+
+    #[test]
+    fn chrony_not_synchronised_and_stopped() {
+        let d = tempfile::tempdir().unwrap();
+        let tracking = "00000000,,0,0.0,0,0,0,0,0,0,0,0,0,Not synchronised\n";
+        let show = "Timezone=UTC\nNTPSynchronized=yes\n";
+        let (c, _) = machine(d.path(), &[("timedatectl show", show), ("systemctl is-enabled", "enabled\n"), ("chronyc", tracking)], &[(CHRONYD_BIN, "")]);
+        let s = c.state();
+        assert!(s.sync_enabled, "enabled but not running: still on");
+        assert!(!s.synchronized && s.source.is_none());
+    }
+
+    #[test]
+    fn another_daemon_is_read_only() {
+        let d = tempfile::tempdir().unwrap();
+        let (c, fake) = machine(
+            d.path(),
+            &[("timedatectl show", "Timezone=UTC\nNTP=no\nNTPSynchronized=yes\n"), ("systemctl is-active ntpsec.service", "active\n")],
+            &[(NTPD_BIN, ""), (TIMESYNCD_BIN, "")],
+        );
+        let s = c.state();
+        assert_eq!(s.daemon, TimeDaemon::Other, "never timesyncd (or an install) over ntpd");
+        assert!(s.sync_enabled && s.synchronized && s.source.is_none());
+        assert!(!fake.asked.lock().unwrap().iter().any(|l| l.contains("busctl") || l.contains("chronyc")));
     }
 
     #[test]
@@ -1059,21 +1308,56 @@ mod tests {
 
     #[test]
     fn zones_of_the_system() {
-        // the host's zone files, read only; skipped where there are none
-        let host = Path::new("/usr/share/zoneinfo/Europe/Rome");
-        let Ok(rome) = std::fs::read(host) else { return };
         let d = tempfile::tempdir().unwrap();
-        let (c, _) = machine(d.path(), &[("timedatectl show", "Timezone=Europe/Rome\n")], &[(TZDATA, "Z Europe/Rome 1\nL Europe/Rome Europe/Vatican\n")]);
-        for n in ["Europe/Rome", "Europe/Vatican"] {
+        let (c, _) = machine(
+            d.path(),
+            &[("timedatectl show", "Timezone=Etc/GMT-3\n")],
+            &[(TZDATA, "Z Europe/Rome 1\nL Europe/Rome Europe/Vatican\nZ Factory 0\n")],
+        );
+        let zone = |n: &str, hours: i32| {
             let f = under(d.path(), &format!("{ZONEINFO}/{n}"));
             std::fs::create_dir_all(f.parent().unwrap()).unwrap();
-            std::fs::write(f, &rome).unwrap();
+            std::fs::write(f, tzif(hours)).unwrap();
+        };
+        for n in ["Europe/Rome", "Europe/Vatican", "right/Europe/Rome", "posix/Europe/Rome", "Factory"] {
+            zone(n, 1);
         }
+        zone("Etc/GMT-3", 3);
         let z = c.zones();
-        assert_eq!(z.iter().map(|z| z.name.as_str()).collect::<Vec<_>>(), ["Europe/Rome", "Europe/Vatican"], "UTC has no file here");
-        assert!(z[0].offset_s == 3600 || z[0].offset_s == 7200);
-        assert!(c.zone_exists("Europe/Rome") && !c.zone_exists("Europe/Paris") && !c.zone_exists("../x"));
-        assert_eq!(c.state().utc_offset_s, z[0].offset_s);
+        let names = |z: &[ZoneInfo]| z.iter().map(|z| z.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&z), ["Europe/Rome", "Europe/Vatican", "Etc/GMT-3"], "UTC has no file here; the current zone is added");
+        assert_eq!((z[0].offset_s, z[2].offset_s), (3600, 10800));
+        assert!(c.zone_offered("Europe/Rome", "UTC"));
+        assert!(c.zone_offered("Etc/GMT-3", "Etc/GMT-3"), "the current zone");
+        for n in ["Etc/GMT-3", "right/Europe/Rome", "posix/Europe/Rome", "Factory", "Europe/Paris", "../x"] {
+            assert!(!c.zone_offered(n, "UTC"), "{n}");
+        }
+        assert_eq!(c.state().utc_offset_s, 10800);
+        // kept until the database changes
+        std::fs::remove_file(under(d.path(), &format!("{ZONEINFO}/Europe/Vatican"))).unwrap();
+        assert_eq!(c.zones().len(), 3, "cached");
+        zone("Asia/Tokyo", 9);
+        std::fs::write(under(d.path(), TZDATA), "Z Europe/Rome 1\nZ Asia/Tokyo 9\n# a longer file\n").unwrap();
+        assert_eq!(names(&c.zones()), ["Asia/Tokyo", "Europe/Rome", "Etc/GMT-3"], "a new tzdata is read again");
+    }
+
+    /// A TZif v2 file of a fixed offset (hours east of UTC), no transitions.
+    fn tzif(hours: i32) -> Vec<u8> {
+        let header = |out: &mut Vec<u8>| {
+            out.extend(b"TZif2");
+            out.extend([0u8; 15]);
+            for n in [0u32, 0, 0, 0, 1, 4] {
+                out.extend(n.to_be_bytes());
+            }
+            out.extend((hours * 3600).to_be_bytes());
+            out.extend([0u8, 0]);
+            out.extend(b"XYZ\0");
+        };
+        let mut out = Vec::new();
+        header(&mut out);
+        header(&mut out);
+        out.extend(format!("\nXYZ{}\n", -hours).as_bytes());
+        out
     }
 
     fn st(sync: bool, synced: bool, at: u64, offset: Option<i64>) -> ClockState {
@@ -1081,7 +1365,8 @@ mod tests {
             now_ms: at,
             sync_enabled: sync,
             synchronized: synced,
-            source: offset.map(|o| TimeSource { offset_us: Some(o), ..Default::default() }),
+            // every look a new answer of the server, unless a test says otherwise
+            source: offset.map(|o| TimeSource { offset_us: Some(o), last_sync_ms: Some(at), ..Default::default() }),
             ..Default::default()
         }
     }
@@ -1099,7 +1384,26 @@ mod tests {
         assert!(w.step(&st(true, false, 120 * m, None)).is_empty(), "once");
         let ev = w.step(&st(true, true, 125 * m, None));
         assert_eq!(ev[0].code, "system.clock_synced");
-        assert!(w.step(&st(false, false, 300 * m, None)).is_empty(), "sync off: the administrator's choice");
+        assert!(!ev[0].quiet);
+        for i in 0..20 {
+            assert!(w.step(&st(false, false, (300 + i * 5) * m, None)).is_empty(), "sync off: the administrator's choice");
+        }
+    }
+
+    #[test]
+    fn turning_sync_off_closes_quietly() {
+        let mut w = Watch::default();
+        let m = 60_000;
+        w.step(&st(true, false, 0, Some(2_000_000)));
+        let ev = w.step(&st(true, false, 61 * m, Some(2_000_000)));
+        let codes: Vec<&str> = ev.iter().map(|e| e.code.as_str()).collect();
+        assert_eq!(codes, ["system.clock_unsynced", "system.clock_drift"]);
+        let ev = w.step(&st(false, false, 62 * m, None));
+        assert_eq!(ev.len(), 2);
+        assert!(ev.iter().all(|e| e.quiet && e.code == "system.clock_sync_off" && e.state == rynas_api_types::notify::EventState::Resolved));
+        assert!(w.step(&st(false, false, 63 * m, None)).is_empty(), "closed once");
+        // on again: counting starts over, nothing "again" to say
+        assert!(w.step(&st(true, true, 64 * m, Some(1_000))).is_empty());
     }
 
     #[test]
@@ -1111,5 +1415,34 @@ mod tests {
         assert_eq!(ev[0].fields["offset"], "-1.5 s");
         assert!(w.step(&st(true, true, 2, Some(700_000))).is_empty(), "between half and the limit: still open");
         assert_eq!(w.step(&st(true, true, 3, Some(1_000))).first().map(|e| e.code.as_str()), Some("system.clock_in_step"));
+    }
+
+    #[test]
+    fn drift_counts_new_answers_in_a_row() {
+        let mut w = Watch::default();
+        // timesyncd asks every 34 min: the same answer seen by several looks is one measurement
+        let same = |at: u64| ClockState {
+            source: Some(TimeSource { offset_us: Some(1_500_000), last_sync_ms: Some(7), ..Default::default() }),
+            ..st(true, true, at, None)
+        };
+        for at in 0..6 {
+            assert!(w.step(&same(at)).is_empty(), "look {at}");
+        }
+        // over, between half and the limit, over: not two in a row
+        let mut w = Watch::default();
+        assert!(w.step(&st(true, true, 10, Some(1_500_000))).is_empty());
+        assert!(w.step(&st(true, true, 11, Some(700_000))).is_empty());
+        assert!(w.step(&st(true, true, 12, Some(1_500_000))).is_empty());
+        assert_eq!(w.step(&st(true, true, 13, Some(1_500_000)))[0].code, "system.clock_drift");
+    }
+
+    #[test]
+    fn sync_now_waits_for_a_new_answer() {
+        let at = |t: Option<u64>| ClockState { source: Some(TimeSource { last_sync_ms: t, ..Default::default() }), ..Default::default() };
+        assert!(!answered_since(Some(100), &at(Some(100))), "the answer of before");
+        assert!(!answered_since(Some(100), &at(None)), "restarted, no answer yet");
+        assert!(!answered_since(None, &ClockState::default()));
+        assert!(answered_since(Some(100), &at(Some(2_100))));
+        assert!(answered_since(None, &at(Some(5))));
     }
 }
