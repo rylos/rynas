@@ -148,6 +148,7 @@ fn storage() -> StorageOverview {
                 size: 460 * GIB,
                 used: 38 * GIB,
                 avail: 399 * GIB,
+                removable: false,
             },
             Filesystem {
                 mountpoint: "/srv/data".into(),
@@ -156,6 +157,7 @@ fn storage() -> StorageOverview {
                 size: 10_900 * GIB,
                 used: 7_420 * GIB,
                 avail: 3_480 * GIB,
+                removable: false,
             },
             Filesystem {
                 mountpoint: "/srv/backup".into(),
@@ -164,6 +166,7 @@ fn storage() -> StorageOverview {
                 size: 7_450 * GIB,
                 used: 6_980 * GIB,
                 avail: 470 * GIB,
+                removable: false,
             },
         ],
     }
