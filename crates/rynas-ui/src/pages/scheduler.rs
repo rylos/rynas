@@ -738,7 +738,7 @@ fn task_row(
     // a deduplication task follows its window in Storage: read-only here
     let managed = managed_href(&task.action);
     let is_managed = managed.is_some();
-    let fixed = is_managed || matches!(task.action, TaskAction::Snapshot { .. } | TaskAction::Replicate { .. } | TaskAction::PowerShutdown { .. });
+    let fixed = is_managed || matches!(task.action, TaskAction::Snapshot { .. } | TaskAction::Replicate { .. } | TaskAction::Backup { .. } | TaskAction::PowerShutdown { .. });
     let (akind, adetail) = action_text(&task.action);
     let enabled = task.enabled;
     let toggling = RwSignal::new(false);
