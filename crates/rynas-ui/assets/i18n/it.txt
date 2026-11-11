@@ -1801,6 +1801,9 @@ ssh.logins	Accessi, ultime 24 ore
 ssh.logins_ok	{n} accessi
 ssh.logins_failed	{n} falliti
 ssh.logins_once	una volta
+ssh.logins_recent	Dagli ultimi {n} eventi
+ssh.logins_timeline	Cronologia
+ssh.logins_grouped	Raggruppati
 ssh.logins_last	ultimo {when}
 ssh.logins_top	Più tentativi falliti da: {list}
 ssh.logins_since	Troppe voci oggi: conteggio dal {when}
