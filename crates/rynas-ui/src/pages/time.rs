@@ -3,7 +3,7 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use rynas_api_types::TaskStatus;
-use rynas_api_types::clock::{ClockSettings, ClockState, MAX_SERVERS, SetClock, TimeDaemon, ZoneInfo};
+use rynas_api_types::clock::{ClockSettings, ClockState, MAX_SERVERS, MAX_YEAR, MIN_YEAR, SetClock, TimeDaemon, ZoneInfo};
 
 use crate::form::{Draft, area_field, form_error, fid, spinner, stale_notice, switch};
 use crate::i18n::{self, t, tf, tr};
@@ -143,6 +143,7 @@ fn form_card(init: ClockState, st: Remote<ClockState>, zones: Remote<Vec<ZoneInf
     let text = Signal::derive(move || d.with(|f| f.servers.clone()));
     let valid = Signal::derive(move || d.with(|f| servers(&f.servers).len() <= MAX_SERVERS));
     let defaults = move || {
+        let own = d.with(|f| !servers(&f.servers).is_empty());
         st.data.with(|s| {
             let s = s.as_ref()?;
             let mut v = Vec::new();
@@ -150,7 +151,13 @@ fn form_card(init: ClockState, st: Remote<ClockState>, zones: Remote<Vec<ZoneInf
                 v.push(tf("time.defaults", &[("list", &s.default_servers.join(", "))]));
             }
             if !s.dhcp_servers.is_empty() {
-                v.push(tf("time.dhcp", &[("list", &s.dhcp_servers.join(", "))]));
+                // timesyncd asks the servers of the interfaces before any other
+                let key = if s.daemon == TimeDaemon::Timesyncd { "time.dhcp_first" } else { "time.dhcp" };
+                v.push(tf(key, &[("list", &s.dhcp_servers.join(", "))]));
+            }
+            if !s.dhcp_hook_servers.is_empty() {
+                let key = if own { "time.dhcp_replaced" } else { "time.dhcp" };
+                v.push(tf(key, &[("list", &s.dhcp_hook_servers.join(", "))]));
             }
             if s.daemon == TimeDaemon::Chrony {
                 v.push(t("time.also_own").to_string());
@@ -158,6 +165,12 @@ fn form_card(init: ClockState, st: Remote<ClockState>, zones: Remote<Vec<ZoneInf
             (!v.is_empty()).then(|| view! { <p class="muted small">{v.join(" ")}</p> })
         })
     };
+    let ignored = move || {
+        let own = d.with(|f| !servers(&f.servers).is_empty());
+        let off = st.data.with(|s| s.as_ref().is_some_and(|s| s.servers_ignored));
+        (own && off).then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {tr("time.servers_ignored")} }.into_any()))
+    };
+    let other = Signal::derive(move || st.data.with(|s| s.as_ref().is_some_and(|s| s.daemon == TimeDaemon::Other)));
     let needs_install = Signal::derive(move || sync.get() && st.data.with(|s| s.as_ref().is_some_and(|s| s.daemon == TimeDaemon::None)));
     let save = move |_| {
         let rtc = st.data.with_untracked(|s| s.as_ref().is_some_and(|s| s.local_rtc));
@@ -169,10 +182,13 @@ fn form_card(init: ClockState, st: Remote<ClockState>, zones: Remote<Vec<ZoneInf
             <h2 class="section-title">{tr("time.settings")}</h2>
             {stale_notice(draft.stale, Callback::new(move |_| draft.reset()))}
             {zone_field(d, zones)}
-            {switch("time.sync", Some("time.sync_help"), sync, Callback::new(move |v| d.update(|f| f.sync = v)))}
-            <Show when=move || sync.get()>
-                {area_field("time.servers", text, Callback::new(move |v| d.update(|f| f.servers = v)), Some("time.servers_help"), "ntp.example.lan")}
-                {defaults}
+            <Show when=move || !other.get() fallback=|| view! { <p class="muted small">{tr("time.other_daemon")}</p> }>
+                {switch("time.sync", Some("time.sync_help"), sync, Callback::new(move |v| d.update(|f| f.sync = v)))}
+                <Show when=move || sync.get()>
+                    {area_field("time.servers", text, Callback::new(move |v| d.update(|f| f.servers = v)), Some("time.servers_help"), "ntp.example.lan")}
+                    {ignored}
+                    {defaults}
+                </Show>
             </Show>
             <Show when=move || needs_install.get()>
                 <p class="muted small">{tr("time.will_install")}</p>
@@ -195,13 +211,15 @@ fn kv(label: &'static str, value: String) -> AnyView {
 
 /// The clock now (ticking) and what the time service says.
 fn status_card(st: Remote<ClockState>) -> AnyView {
+    // the tick only says when to draw again: the time is the server's answer plus this
+    // browser's clock since it came, right after a reload and in a throttled background tab
     let tick = crate::live::use_live().uptime_offset;
-    let start = tick.get_untracked();
+    let anchor = Memo::new(move |_| st.data.with(|s| s.as_ref().map(|s| (s.now_ms as f64 + s.utc_offset_s as f64 * 1000.0, js_sys::Date::now()))));
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let clock = move || {
-        let secs = tick.get().saturating_sub(start);
-        st.data.with(|s| s.as_ref().map(|s| wall_text(s.now_ms as f64 + (secs as f64 + s.utc_offset_s as f64) * 1000.0)))
+        tick.track();
+        anchor.get().map(|(wall_ms, received)| wall_text(wall_ms + (js_sys::Date::now() - received)))
     };
     let rows = move || {
         st.data.with(|s| {
@@ -234,7 +252,7 @@ fn status_card(st: Remote<ClockState>) -> AnyView {
             Some(v)
         })
     };
-    let can_sync = Signal::derive(move || st.data.with(|s| s.as_ref().is_some_and(|s| s.sync_enabled)));
+    let can_sync = Signal::derive(move || st.data.with(|s| s.as_ref().is_some_and(|s| s.sync_enabled && s.daemon != TimeDaemon::Other)));
     view! {
         <section class="card widget w-6" style="--i:1">
             <h2 class="section-title">{tr("time.status")}</h2>
@@ -266,7 +284,7 @@ fn manual_card(st: Remote<ClockState>) -> AnyView {
             <h2 class="section-title">{tr("time.manual")}</h2>
             <div class="field">
                 <label class="field-label" for=id.clone()>{tr("time.manual_label")}</label>
-                <input id=id class="input" type="datetime-local" step="1" prop:value=move || value.get() on:input=move |ev| value.set(event_target_value(&ev)) />
+                <input id=id class="input" type="datetime-local" step="1" min=format!("{MIN_YEAR}-01-01T00:00:00") max=format!("{MAX_YEAR}-12-31T23:59:59") prop:value=move || value.get() on:input=move |ev| value.set(event_target_value(&ev)) />
             </div>
             {form_error(error)}
             <div class="card-actions">
