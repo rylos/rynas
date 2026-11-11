@@ -105,8 +105,13 @@ RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6 AF_PACKET
 # drives likewise: transient units through systemd-mount below /media (writable here).
 # CAP_FSETID: restored snapshot files keep their setgid bits
 # File manager: CAP_SETUID/CAP_SETGID switch each rynas-files-worker to the signed-in user
-# between fork and exec; CAP_DAC_READ_SEARCH is the only one an administrator's worker
-# keeps (read every folder; writes stay the user's). No file capabilities on any binary.
+# between fork and exec; an administrator's worker keeps CAP_DAC_READ_SEARCH (read every
+# folder; writes stay the user's). Only a request or job that writes in the apps' data
+# folders (Docker setting "app data in Files", never a read: list, preview, thumbnail,
+# download) gets CAP_DAC_OVERRIDE, CAP_FOWNER and CAP_CHOWN instead, never ambient, under a
+# Landlock ruleset (ABI 3 or later, truncate included) that allows writes below those
+# folders only; ownership changes there go through descriptors without following links.
+# No file capabilities on any binary.
 # Network (D-NET): CAP_NET_ADMIN (MTU and address repairs after a reload or a rollback,
 # ifupdown hand-back), CAP_NET_RAW (arping, ping of the gateway, diagnostics)
 CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_SETUID CAP_SETGID CAP_AUDIT_WRITE CAP_SYS_ADMIN CAP_SYS_RAWIO CAP_MKNOD CAP_IPC_LOCK CAP_FSETID CAP_NET_ADMIN CAP_NET_RAW

@@ -2093,13 +2093,21 @@ and an offer to restart the app after a change (CasaOS, Umbrel).
   `<stack> (<place>)`). Real folders only, never a link. `/@apps` itself and each app folder
   behave like shared folders: nothing made at the top, the folders not renamed, moved or
   deleted; no recycle bin (deletions are for good).
-- **Access**: a worker for a request whose `path`/`dir` is inside an app folder, or a job
-  that writes there (its destination, or the sources of a deletion or a move), runs as the
-  administrator with `CAP_DAC_READ_SEARCH`, `CAP_DAC_OVERRIDE`, `CAP_FOWNER`, `CAP_CHOWN`
-  (never ambient: 7z, tar and ffmpeg get reading only) under a **Landlock** ruleset made by
-  rynasd that allows writes below those app folders only (plus the user's thumbnail cache),
-  applied between fork and exec after the identity change. Without Landlock the worker gets
-  reading only and the folders stay read-only where their owners say so. The share jail of
+- **Access**: only a request that writes inside an app folder (POST `mkdir`, `rename`,
+  `edit/save`, `upload`, `upload/abort`: `rynasd::files::WRITING_ROUTES`), or a job that
+  writes there (its destination, or the sources of a deletion), runs as the administrator
+  with `CAP_DAC_READ_SEARCH`, `CAP_DAC_OVERRIDE`, `CAP_FOWNER`, `CAP_CHOWN` (never ambient:
+  7z, tar and ffmpeg get reading only) under a **Landlock** ruleset made by rynasd that
+  allows writes below those app folders only (plus the user's thumbnail cache), applied
+  between fork and exec after the identity change. Every read (GET/HEAD: list, preview,
+  thumbnail, text, download, and POST `exists`) runs as the plain administrator's worker
+  (`CAP_DAC_READ_SEARCH` only): files a container wrote are decoded without any power over
+  owners. The powers need **Landlock ABI 3** (Linux 6.2: truncate is fenced too); below it,
+  or without Landlock, a write there is refused (`read_only`, with the reason) and the
+  folders stay read-only. A **move** between an app folder and a share (either way, or with
+  mixed sources) is refused (`invalid_value` field `dest`): one side would be written with
+  the powers and the other as the user, so the copy would succeed and the removal of the
+  sources fail half-way; copy, then delete the originals. The share jail of
   `rynas_files::confine` applies as everywhere (no link out of the app folder is followed).
 - **Owners as the app expects**: a file edited is written in place (owner, mode, ACL and
   links kept) or, for the administrator's own files, replaced keeping owner and group;

@@ -380,20 +380,27 @@ fn context(files: &Files, w: &Who, conns: bool) -> Res<Context> {
     })
 }
 
+/// Worker routes that change files (all POST); every other route only reads.
+const WRITING_ROUTES: &[&str] = &["mkdir", "rename", "edit/save", "upload", "upload/abort"];
+
 /// The folders a request's worker may change over their owners: the app folder its `path`
 /// or `dir` names (`/@apps/<folder>/…`), for an administrator whose context holds it (the
-/// setting is on), and the user's thumbnail cache beside it (the worker writes it). Empty
-/// otherwise: the worker keeps reading only.
-fn app_roots_of(ctx: &Context, query: &HashMap<String, String>) -> Vec<PathBuf> {
-    if !ctx.admin {
-        return Vec::new();
+/// setting is on), on a route that writes ([`WRITING_ROUTES`], never GET or HEAD), and the
+/// user's thumbnail cache beside it (the worker writes it). Empty otherwise: the worker runs
+/// as the plain administrator's worker and reads only, so files a container wrote are
+/// listed, previewed, thumbnailed and downloaded without any power over owners. A writing
+/// request in an app folder where the kernel cannot fence the powers is refused with the
+/// reason ([`rynas_files::landlock::app_powers_ready`]).
+fn app_roots_of(ctx: &Context, method: &str, route: &str, query: &HashMap<String, String>) -> Res<Vec<PathBuf>> {
+    if !ctx.admin || method != "POST" || !WRITING_ROUTES.contains(&route) {
+        return Ok(Vec::new());
     }
     let mut roots = Vec::new();
     for key in ["path", "dir"] {
         let Some(vpath) = query.get(key) else { continue };
         if !rynas_files::shares::in_apps(vpath) {
             // a request about a share or a server too: no powers at all
-            return Vec::new();
+            return Ok(Vec::new());
         }
         if let Ok(r) = rynas_files::shares::resolve(&ctx.shares, vpath)
             && r.share.app.is_some()
@@ -402,12 +409,14 @@ fn app_roots_of(ctx: &Context, query: &HashMap<String, String>) -> Vec<PathBuf> 
             roots.push(r.share.path.clone());
         }
     }
-    if !roots.is_empty()
-        && let Some(thumbs) = ctx.thumbs.as_ref().filter(|t| std::fs::symlink_metadata(t).is_ok_and(|m| m.is_dir()))
-    {
+    if roots.is_empty() {
+        return Ok(roots);
+    }
+    rynas_files::landlock::app_powers_ready().map_err(ApiError::read_only)?;
+    if let Some(thumbs) = ctx.thumbs.as_ref().filter(|t| std::fs::symlink_metadata(t).is_ok_and(|m| m.is_dir())) {
         roots.push(thumbs.clone());
     }
-    roots
+    Ok(roots)
 }
 
 /// The user's thumbnail cache, made on first use: `<root>/<uid>`, owned by the user, 0700.
@@ -499,6 +508,10 @@ async fn handle(st: FilesState, req: Request) -> Res<Response> {
             let answer = off_thread(move || -> Res<Value> {
                 let ctx = context(&f, &w, remote)?;
                 let spec = rynas_files::api::job_spec(&ctx.shares, &ctx.conns, &job)?;
+                // a job that changes an app's folder: only where the kernel can fence it
+                if w.admin && !spec.app_roots.is_empty() {
+                    rynas_files::landlock::app_powers_ready().map_err(ApiError::read_only)?;
+                }
                 let info = Info { sources: job.sources.clone(), dest: job.dest.clone(), permanent: job.permanent };
                 Ok(f.manager.submit(w.user, w.admin, spec, info)?)
             })
@@ -566,7 +579,7 @@ async fn handle(st: FilesState, req: Request) -> Res<Response> {
             };
             let range = parts.headers.get(header::RANGE).and_then(|v| v.to_str().ok()).map(String::from);
             let deadline = if route == "upload" || route == "edit/save" { UPLOAD_DEADLINE } else { HEAD_DEADLINE };
-            let app_roots = app_roots_of(&ctx, &query);
+            let app_roots = app_roots_of(&ctx, method.as_str(), &route, &query)?;
             let wr = WorkerRequest { method, route, query, length, range, ctx };
             run_worker(&files, wr, body, deadline, &app_roots).await
         }
@@ -908,5 +921,38 @@ mod tests {
         // the manager's states that end a job are the ones a task ends on
         assert!(JobState::Done.finished() && JobState::Cancelled.finished() && JobState::Failed.finished());
         assert!(!JobState::Paused.finished());
+    }
+
+    #[test]
+    fn app_powers_only_for_writing_routes() {
+        let t = tempfile::tempdir().unwrap();
+        let app = t.path().join("immich");
+        std::fs::create_dir(&app).unwrap();
+        let shares = vec![
+            Share { name: "Photos".into(), path: t.path().join("Photos"), ..Default::default() },
+            Share {
+                name: format!("{}/immich", rynas_files::shares::APPS),
+                path: app.clone(),
+                app: Some(rynas_files::shares::AppFolder { stack: "immich".into(), app: Some("immich".into()) }),
+                ..Default::default()
+            },
+        ];
+        let ctx = Context { shares, admin: true, ..Default::default() };
+        let q = |k: &str, v: &str| HashMap::from([(k.to_string(), v.to_string())]);
+        let inside = q("path", "/@apps/immich/library");
+        // reads of files a container wrote: never any power, whatever the method
+        for (m, r) in [("GET", "list"), ("GET", "thumb"), ("GET", "view"), ("GET", "download"), ("HEAD", "download"), ("GET", "text"), ("GET", "edit"), ("POST", "exists"), ("GET", "mkdir")] {
+            assert!(app_roots_of(&ctx, m, r, &inside).unwrap().is_empty(), "{m} {r}");
+        }
+        // writes into a share or by a non-administrator: none either
+        assert!(app_roots_of(&ctx, "POST", "mkdir", &q("path", "/Photos")).unwrap().is_empty());
+        let user = Context { admin: false, ..ctx.clone() };
+        assert!(app_roots_of(&user, "POST", "mkdir", &inside).unwrap().is_empty());
+        // writes into the app's folder: its folder, where the kernel can fence them
+        let w = app_roots_of(&ctx, "POST", "upload", &q("dir", "/@apps/immich/library"));
+        match rynas_files::landlock::app_powers_ready() {
+            Ok(()) => assert_eq!(w.unwrap(), vec![app]),
+            Err(_) => assert!(w.is_err()),
+        }
     }
 }

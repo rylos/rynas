@@ -325,6 +325,18 @@ pub fn job_spec(shares: &[Share], conns: &[crate::conns::Conn], body: &NewJob) -
         }
         (None, _) => return Err(ApiError::invalid("dest", t!("no destination"))),
     };
+    // a move between an app's folder and a share (or a server) writes one side with the
+    // powers over owners and the other as the user: the copy would succeed and the removal
+    // of the sources fail half-way, leaving duplicates
+    if body.op == Op::Move {
+        let app_sources = body.sources.iter().filter(|p| shares::in_apps(p)).count();
+        if (dest_in_app && app_sources < body.sources.len()) || (!dest_in_app && app_sources > 0) {
+            return Err(ApiError::invalid(
+                "dest",
+                t!("items cannot be moved between an app's folder and a shared folder: copy them, then delete the originals"),
+            ));
+        }
+    }
     if let Some(name) = &body.name {
         shares::valid_name(name)?;
     }
@@ -671,7 +683,11 @@ mod tests {
         assert_eq!(roots("delete", &["/@apps/db/x", "/Photos/b.jpg"], None), vec![db.clone()]);
         // out of the apps: written as the user, no powers
         assert!(roots("copy", &["/@apps/immich/a"], Some("/Photos")).is_empty());
-        assert!(roots("move", &["/@apps/immich/a"], Some("/Photos")).is_empty());
+        // a move across the boundary would copy, then fail to remove: refused, copy instead
+        for (sources, dest) in [(&["/@apps/immich/a"][..], "/Photos"), (&["/Photos/b.jpg"][..], "/@apps/immich"), (&["/@apps/db/x", "/Photos/b.jpg"][..], "/@apps/immich")] {
+            let e = job_spec(&shares, &[], &job("move", sources, Some(dest))).unwrap_err();
+            assert_eq!(e.field.as_deref(), Some("dest"), "{sources:?} -> {dest}");
+        }
         assert!(roots("delete", &["/Photos/b.jpg"], None).is_empty());
         // an app's folder itself is like a shared folder: never copied, moved or deleted
         let e = job_spec(&shares, &[], &job("delete", &["/@apps/immich"], None)).unwrap_err();

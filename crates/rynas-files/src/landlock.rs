@@ -59,6 +59,23 @@ pub fn abi() -> Option<i64> {
     (v > 0).then_some(v)
 }
 
+/// Lowest Landlock ABI under which a worker gets the powers to change the apps' folders over
+/// their owners: ABI 3 handles truncate(2), below it a worker with CAP_DAC_OVERRIDE could
+/// still truncate any file it can name, anywhere.
+pub const APP_POWERS_ABI: i64 = 3;
+
+/// Whether the kernel can fence the powers to change the apps' folders ([`APP_POWERS_ABI`]);
+/// the message for the administrator otherwise.
+pub fn app_powers_ready() -> Result<(), String> {
+    match abi() {
+        Some(v) if v >= APP_POWERS_ABI => Ok(()),
+        found => Err(format!(
+            "the apps' folders stay read-only here: changing them needs Landlock ABI {APP_POWERS_ABI} or later (Linux 6.2), and this kernel has {}",
+            found.map_or_else(|| "no Landlock".to_string(), |v| format!("ABI {v}"))
+        )),
+    }
+}
+
 fn add(ruleset: &OwnedFd, dir: &Path, access: u64) -> io::Result<()> {
     let c = CString::new(dir.as_os_str().as_bytes()).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
     // SAFETY: a valid C string

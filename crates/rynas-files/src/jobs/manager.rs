@@ -921,16 +921,21 @@ pub fn worker_command(exe: &Path, user: &User, admin: bool, app_roots: &[PathBuf
 
 /// The Landlock ruleset of an administrator's worker that changes the apps' data: writes
 /// below `app_roots` only. `None` (the worker keeps reading only, writes stay the user's)
-/// for anyone else, without roots, or when the kernel has no Landlock: the powers to write
-/// over owners are never handed out unfenced.
+/// for anyone else, without roots, or when the kernel's Landlock cannot fence every write
+/// (no Landlock, or an ABI without truncate control: [`crate::landlock::APP_POWERS_ABI`]):
+/// the powers to write over owners are never handed out unfenced.
 fn app_fence(admin: bool, app_roots: &[PathBuf]) -> Option<crate::landlock::Ruleset> {
     if !admin || app_roots.is_empty() {
+        return None;
+    }
+    if let Err(why) = crate::landlock::app_powers_ready() {
+        eprintln!("rynasd: {why}");
         return None;
     }
     let dirs: Vec<&Path> = app_roots.iter().map(PathBuf::as_path).collect();
     let rules = crate::landlock::writes_below_all(&dirs);
     if rules.is_none() {
-        eprintln!("rynasd: no Landlock ruleset for the apps' folders (kernel without Landlock?): they stay read-only to the file manager");
+        eprintln!("rynasd: no Landlock ruleset for the apps' folders: they stay read-only to the file manager");
     }
     rules
 }
