@@ -30,7 +30,7 @@ services:
       retries: 5
 
   app:
-    image: nextcloud:34.0.5-apache@sha256:b89746a4febc93de82141921417f43b0d5ce69c3746feb485372559e9fbeec3f
+    image: nextcloud:35.0.2-apache@sha256:786c102155d2717ba0f53a62b3fdd7a1354edc48e800b94dbe32294d9a5752a2
     restart: always
     ports:
       - "${RYNAS_BIND}:${WEB_PORT}:80"
