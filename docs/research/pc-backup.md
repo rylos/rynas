@@ -412,6 +412,8 @@ Sources (2026-11-08): https://github.com/digint/btrbk/blob/v0.32.7/ssh_filter_bt
 
 ## 11. btrbk PCs: stronger receive and bare-metal restore
 
+> **Marco, 2026-11-11, decisions on §11:** all seven recommendations accepted. On retention and transport: for new btrfs PCs **the agent does everything** (read-only snapshots, parent choice, `btrfs send` of the system's btrfs-progs over HTTPS to rynas, a few local snapshots kept as parents); rynas runs the NAS-side retention. Snapshot names stay btrbk-compatible so a PC can switch either way without a new full send. PCs already set up with btrbk over SSH (such as PC-casa) keep working as today; the agent restores both.
+
 **In short:** Marco's request (2026-11-11) brings **bare metal through btrbk** back. §7 had dropped it. The btrbk receive of §10 stays as it is. The plan adds four things:
 - a **layout manifest that travels inside the root snapshot**;
 - NAS-side views, retention and readiness checks;
