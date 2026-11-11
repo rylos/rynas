@@ -1882,6 +1882,8 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 
 /* ---- Backup (restic, pages/backup/restic.rs) */
 .bk-wrap { overflow-wrap: anywhere; min-width: 0; }
+/* what a PC's full restore still lacks (pages/backup/pcs.rs) */
+.bkpc-gaps { display: flex; flex-direction: column; gap: var(--s-1); margin: 0; padding-left: var(--s-4); overflow-wrap: anywhere; }
 .bk-err { color: var(--danger); overflow-wrap: anywhere; }
 .bk-checks { display: flex; flex-direction: column; gap: var(--s-2); margin: 0; padding: 0; border: 0; min-width: 0; }
 .bk-checks .check { align-items: baseline; flex-wrap: wrap; }

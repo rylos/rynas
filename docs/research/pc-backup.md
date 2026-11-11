@@ -420,7 +420,7 @@ Sources (2026-11-08): https://github.com/digint/btrbk/blob/v0.32.7/ssh_filter_bt
 - a **btrbk source in the same `rynas-agent` restore TUI** that phase 1 builds for restic;
 - an HTTPS stream from rynas, so nothing has to be kept by hand on a USB stick.
 
-The logic comes from Marco's `restore_btrfs_system` (MIT; https://github.com/rylos/restore_btrfs_system, read 2026-11-11). Nothing here is implemented yet. **[U]** marks claims still to verify in a VM.
+The logic comes from Marco's `restore_btrfs_system` (MIT; https://github.com/rylos/restore_btrfs_system, read 2026-11-11). B1 (the NAS side) is implemented, see §11.8; the rest is not. **[U]** marks claims still to verify in a VM.
 
 ### 11.1 What `restore_btrfs_system` does (and what we take)
 
@@ -562,6 +562,27 @@ Order: B1 can start now; it does not touch the agent. B2 and B3 wait for phase 1
 7. **What happens to `restore_btrfs_system`:** keep it as Marco's independent fallback until B4 passes on PC-casa's hardware, then archive it with a pointer to rynas. *Recommendation: as stated; never delete a working restore path before the new one has booted real hardware.*
 
 Sources (2026-11-11): https://github.com/rylos/restore_btrfs_system (README, scripts, hook, tests) · https://github.com/digint/btrbk#restoring-backups · btrfs-send(8)/btrfs-receive(8) as in §10.
+
+### 11.8 Implemented: B1, the NAS side (2026-11-11)
+
+For PCs that already push with btrbk over SSH (§10). Code: `crates/rynasd/src/pc_backup.rs` (logic and routes), new types in `rynas_api_types::pcbackup`, UI `crates/rynas-ui/src/pages/backup/pcs.rs` (Backup › "PCs: btrfs snapshots", presented as a method of its own next to the files engine). API in `../phase1/plan.md`.
+
+- **Snapshot table.** Each snapshot carries `parent` (below) and `size` {referenced, exclusive}. The drawer groups them by subvolume or by **run** (`PcRun`: the snapshots with one btrbk timestamp, `_N` suffix ignored, with the expected subvolumes it lacks and the summed sizes).
+- **Sizes, measured cost** (loop image, 3 received snapshots of 20 000 files + 80 MiB, `packaging/test-pcbackup-loop.sh`):
+  - quota groups on (non-simple, not marked inconsistent): read live from `/sys/fs/btrfs/<fsid>/qgroups/0_<subvolid>/{referenced,exclusive}`, two small reads per snapshot, 0.1 ms for the folder, no command and no walk;
+  - otherwise **Measure sizes** (task `pcbackup.sizes`): `ionice -c3 nice -n19 btrfs filesystem du -s --raw` per snapshot, one at a time, cancellable, 0.21–0.26 s per 20 000-file snapshot here (warm cache): it reads every file's extents, so a 1 M-file PC on HDDs takes minutes per snapshot. Each snapshot is measured **once** (results kept by subvolume UUID; received snapshots are read-only so the referenced size never changes; the exclusive one grows as neighbours go, `?again=true` measures again). No measure ever runs per request.
+- **NAS-side retention** (`retention.owner: nas`, Marco's decision 3: the default for new PCs, `pc` for adopted folders):
+  - the key line gets `--delete-interrupted` instead of `--delete`: the filter accepts `btrfs subvolume delete` only for interrupted receives (btrbk removes its own "garbled" target before sending again). The same now applies to `delete.allowed: false`, which until now refused even those, against §10.2;
+  - the GFS counts are the snapshot jobs' `Retention` (presets and custom, `min` as btrbk's `*_preserve_min`), computed in Rust by btrbk's rules: per subvolume, the first snapshot of each hour/day/week (from Sunday)/month/year within that many of them, by the time in the name (the PC's clock, as btrbk counts), in the NAS's local calendar;
+  - **the parent is protected** whatever the counts say: per subvolume the newest complete snapshot by the NAS-side `otime` (names more than a day in the future do not count, so a junk name cannot displace it) is never deleted, by the hourly pass or by hand (`DELETE …/snapshots/{name}` answers 409). On top, the floor of `delete` (`keep_last`, at least 1, and `min_age_days`, both on `otime`), as for deletes the PC asks for; future names are never deleted on the NAS's own; interrupted receives go after an hour with no receive running;
+  - each pass (hourly after the alerts' check, or "Delete old snapshots now", task `pcbackup.prune`) takes the filter's own per-device `flock` on the folder (opened by `verify_root`: walked from `/` without symlinks, then checked to be the same inode as the path), lists it again and deletes with `BTRFS_IOC_SNAP_DESTROY` relative to that descriptor, at most 50 per pass; a running receive skips the pass (`last_prune.error`);
+  - `POST /pc-backups/plan/retention` previews keep/delete with a reason per snapshot and "frees at least" (the sum of the exclusive sizes, when known);
+  - the PC's `btrbk.conf` snippet says `target_preserve_min all` / `target_preserve no` in this mode.
+- **Alerts** (one notification per condition, fired once, resolved when it is over, keys `pcbackup:<kind>:<device>`): `pcbackup.late` (now in hours: `alert_hours`, 0 = `alert_days` × 24), `pcbackup.subvolume_late` (an expected subvolume older than the alert time while the PC is not late; "expected" = the manifest's subvolumes, else every received one, minus `ignored_groups`), `pcbackup.receive_failed` (an interrupted receive older than 10 min with nothing receiving: the lock is free) and `pcbackup.receive_stuck` (receiving for more than 24 h), `pcbackup.low_space` (free space below the referenced size of one more full set of parents, or below 5 % of the volume while sizes are unknown).
+- **"Ready for bare metal"** (`bare_metal`): a manifest in the newest snapshot of some subvolume (the root names first), read through descriptors (`O_NOFOLLOW` on every step, regular file, at most 1 MiB, parsed as untrusted JSON, cached by subvolume UUID), `format: 1`, a subvolume mounted at `/`, every listed subvolume with a complete snapshot, and a boot loader. Warnings: manifest written more than 7 days before its snapshot, newest run lacking a listed subvolume. Without the PC side (B2) every PC shows `no_manifest` today.
+- **Manifest fields B1 reads** (B2 must write at least these): `format` (1), `written_at_ms`, `boot.loader`, `btrbk.subvolumes[] {name (the btrbk name), path, mount}`; other fields (`subvolumes[]` with `excluded`, disks, GPT…) are ignored by B1.
+- **Tests:** unit tests of the plan, runs, manifest and alerts in `pc_backup.rs`, API tests on the memory host (`tests/pc_backup.rs`), and `tests/pc_backup_host.rs` (`#[ignore]`, root) on a real loop-mounted btrfs folder: sysfs quota sizes with and without quotas, measure, a symlinked manifest refused (`ELOOP`), the lock shared with the filter, delete under the lock.
+- **Open:** the GFS buckets use the NAS's time zone for names without an offset (as `name.rs` reads them), so a PC in another zone shifts by those hours; one shared account still serves every PC (§10.3).
 
 ## Sources
 
