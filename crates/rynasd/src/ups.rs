@@ -390,6 +390,7 @@ pub fn router(st: UpsState) -> Router {
     Router::new()
         .route("/v1/ups/settings", get(settings_get).put(settings_put))
         .route("/v1/ups/test", post(test))
+        .route("/v1/ups/install", post(install))
         .merge(
             Router::new()
                 .route("/v1/ups/safe-mode", post(safe_mode))
@@ -644,6 +645,92 @@ async fn test(
         .ops
         .tasks
         .spawn("ups.test", &who, move |ctx| run_test(u2, ctx, req.test))?;
+    Ok((StatusCode::ACCEPTED, Json(TaskStarted { task_id: id })).into_response())
+}
+
+// ---------------------------------------------------------------------------------------------
+// installing NUT
+// ---------------------------------------------------------------------------------------------
+
+/// The Debian package that brings upsd, upsmon, upsc and the drivers (metapackage of
+/// `nut-server` and `nut-client`).
+pub const NUT_PACKAGE: &str = "nut";
+
+/// Why `who` may not install NUT now (`Ok`: they may): administrators only, and only on a
+/// plain Debian without NUT (a module's UPS layer brings its own).
+pub fn install_refusal(
+    admins: &crate::roles::AdminPolicy,
+    who: &str,
+    has_layer: bool,
+    backend: UpsBackend,
+) -> Res<()> {
+    admins.require_admin(who, "NUT install")?;
+    if has_layer {
+        return Err(Error::new(
+            StatusCode::CONFLICT,
+            rynas_api_types::error_codes::CONFLICT,
+            "the UPS of this machine is run by its hardware module".into(),
+        ));
+    }
+    if backend != UpsBackend::NotInstalled {
+        return Err(Error::new(
+            StatusCode::CONFLICT,
+            rynas_api_types::error_codes::ALREADY_EXISTS,
+            "NUT is already installed".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// `--dry-system`: the configuration files Debian's packages bring (`MODE=none`, nothing
+/// defined), written below the dry root when missing, so the pages see NUT installed.
+pub fn dry_install(root: &Path) -> std::io::Result<()> {
+    let defaults = [
+        (NUT_CONF, "MODE=none\n"),
+        ("/etc/nut/ups.conf", "maxretry = 3\n"),
+        ("/etc/nut/upsd.conf", ""),
+        (NUT_USERS, ""),
+        ("/etc/nut/upsmon.conf", "SHUTDOWNCMD \"/sbin/shutdown -h +0\"\n"),
+    ];
+    for (p, text) in defaults {
+        let p = files::under_root(root, Path::new(p));
+        if !p.exists() {
+            std::fs::create_dir_all(p.parent().expect("has a parent"))?;
+            std::fs::write(&p, text)?;
+        }
+    }
+    Ok(())
+}
+
+/// `POST /v1/ups/install`: installs NUT from the Debian archive (task `ups.install`). Nothing
+/// is started or enabled here: Debian leaves `MODE=none`, and "UPS setup" sets the mode and
+/// starts the units when the UPS is set up.
+async fn install(State(st): State<UpsState>, hd: HeaderMap) -> Res<Response> {
+    let (u, who) = (ups(&st)?, user(&hd)?);
+    install_refusal(&u.ops.admins, &who, u.layer.is_some(), u.backend())?;
+    tracing::info!(target: "rynas::audit", "ups install {NUT_PACKAGE} by {who}");
+    let u2 = u.clone();
+    let id = u.ops.tasks.spawn("ups.install", &who, move |ctx| async move {
+        if u2.dry {
+            ctx.log(&format!("dry system, not run: apt-get install {NUT_PACKAGE}"));
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            dry_install(&u2.root).map_err(|e| format!("dry root: {e}"))?;
+        } else {
+            ctx.log(&format!("installing {NUT_PACKAGE} from the Debian archive"));
+            let cmd = crate::updates::apt(&["install", "--", NUT_PACKAGE], Duration::from_secs(1800));
+            ctx.run(&cmd).await.map_err(|e| e.to_string())?;
+            if crate::ups_setup::installed_drivers(&u2.root).is_empty() {
+                return Err("no UPS driver found after the install".into());
+            }
+        }
+        // every page reads the backend from the files; the version is read again too
+        *u2.setup.version.lock().unwrap() = None;
+        if u2.backend() == UpsBackend::NotInstalled {
+            return Err(format!("{NUT_CONF} is still missing after the install"));
+        }
+        ctx.log("NUT installed: set up the UPS with UPS setup");
+        Ok(())
+    })?;
     Ok((StatusCode::ACCEPTED, Json(TaskStarted { task_id: id })).into_response())
 }
 
@@ -926,6 +1013,38 @@ pub async fn watch(u: Arc<Ups>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn install_is_for_admins_on_a_debian_without_nut() {
+        let admins = crate::roles::AdminPolicy::new(vec!["rynas-admin".into()], |u| match u {
+            "admin" => Some(vec!["rynas-admin".into()]),
+            "bob" => Some(vec!["users".into()]),
+            _ => None,
+        });
+        assert!(install_refusal(&admins, "admin", false, UpsBackend::NotInstalled).is_ok());
+        let e = install_refusal(&admins, "bob", false, UpsBackend::NotInstalled).unwrap_err();
+        assert_eq!((e.0, e.1), (StatusCode::FORBIDDEN, rynas_api_types::error_codes::FORBIDDEN));
+        let e = install_refusal(&admins, "admin", false, UpsBackend::Nut).unwrap_err();
+        assert_eq!((e.0, e.1), (StatusCode::CONFLICT, rynas_api_types::error_codes::ALREADY_EXISTS));
+        let e = install_refusal(&admins, "admin", true, UpsBackend::Module).unwrap_err();
+        assert_eq!((e.0, e.1), (StatusCode::CONFLICT, rynas_api_types::error_codes::CONFLICT));
+        // the role is checked first: a non-admin learns nothing about the machine
+        let e = install_refusal(&admins, "bob", false, UpsBackend::Nut).unwrap_err();
+        assert_eq!(e.0, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn dry_install_flips_the_backend_and_keeps_existing_files() {
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(backend_of(root.path(), None), UpsBackend::NotInstalled);
+        let users = root.path().join("etc/nut/upsd.users");
+        std::fs::create_dir_all(users.parent().unwrap()).unwrap();
+        std::fs::write(&users, "[admin]\n").unwrap();
+        dry_install(root.path()).unwrap();
+        assert_eq!(backend_of(root.path(), None), UpsBackend::Nut);
+        assert_eq!(std::fs::read_to_string(&users).unwrap(), "[admin]\n");
+        assert_eq!(std::fs::read_to_string(root.path().join("etc/nut/nut.conf")).unwrap(), "MODE=none\n");
+    }
 
     #[test]
     fn policy_round_trip() {

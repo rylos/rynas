@@ -7,7 +7,8 @@ anyone leaving DSM, TrueNAS or a hand-made Debian setup. 2026-11-07.
 ## Already covered
 
 md RAID and btrfs volumes, snapshots, SMB, NFS v3 with per-host restrictions, scheduled scrub
-and RAID checks, SMART alerts, notifications for unhealthy containers, local UPS (NUT), the
+and RAID checks, SMART alerts, notifications for unhealthy containers, local UPS (NUT, installable from the UPS page:
+`../phase1/plan.md`, "API v1: UPS"), the
 synodeb hardware screens, the app catalogue, Docker stacks next to other managers.
 
 ## Missing, in order

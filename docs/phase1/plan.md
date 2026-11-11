@@ -1299,11 +1299,23 @@ upsd protocol client is the crate `rynas-nut` (shared by both daemons).
 | GET | `/api/v1/ups` | — | `UpsStatus` {link connected\|not_configured\|unreachable, name?, flags [OL, OB, LB, CHRG, DISCHRG, RB, FSD…], battery_charge_pct?, battery_runtime_s?, load_pct?, input_voltage_v?, output_voltage_v?, manufacturer?, model?, serial?, beeper?, battery_date?, test_result?, driver?, commands [the `test.battery.*` instant commands of `LIST CMD`], read_at_ms}; served by rynas-web (last reading if younger than 5 s) |
 | GET/PUT | `/api/v1/ups/settings` | `UpsSettings` {safemode_after_s? (60–86400, whole minutes; null = off), pre_safemode_timeout_s (10–900, default 120)} | `UpsSettingsState` {available, backend nut\|synodeb\|not_installed, applied, pending?}; PUT stages `ups.safemode`; 404 `not_found` when NUT is not installed |
 | POST | `/api/v1/ups/test` | `BatteryTestRequest` {test quick\|deep\|stop} | 202 `TaskStarted` (task `ups.test`); 404 when NUT is not installed |
+| POST | `/api/v1/ups/install` | — | 202 `TaskStarted` (task `ups.install`: `apt-get install nut` through the transient `rynas-apt` unit, then a check that `nut.conf` and the drivers are there); administrators only (rynasd checks too, 403 `forbidden`); 409 `already_exists` when NUT is installed, 409 `conflict` with a module's UPS layer |
 | GET/PUT | `/api/v1/ups/device` | `UpsDeviceConfig` {name (default `ups`), device `UpsDevice` {driver, port, options [{key, value?}]}, take_over [ups.conf sections]} | `UpsDeviceState` {backend, blocked? nut_missing\|synodeb_too_old, nut_version?, applied?, pending?, foreign [`UpsSection` {name, driver?, port?, conflict}], drivers_running, detect? (last `UpsDetectReport`)}; PUT stages `ups.device` (409 `conflict` with `field` `take_over` for a section in the way, 409 when blocked) |
 | POST | `/api/v1/ups/detect` | `UpsDetectRequest` {device? (test only this one), stop_drivers} | 202 `TaskStarted` (task `ups.detect`; the report lands in `GET /api/v1/ups/device`); 409 `busy` while one runs |
 | GET | `/api/v1/ups/drivers` | — | `Vec<NutDriver>` {name, manufacturers} (installed drivers, manufacturers from NUT's driver.list) |
 | POST | `/api/v1/ups/plan/device` | `UpsDeviceConfig` | `UpsSetupPlan` {files [{path, before?, after, removed}], commands, conflicts} (no side effects, passwords masked) |
 
+- Install NUT (2026-11-11): without NUT and without a module layer, the "UPS service not
+  running" card of Hardware › UPS has an **Install NUT** button (administrators only); the other
+  cards point to it. The task installs the Debian metapackage `nut` (`nut-server` + `nut-client`:
+  upsd, upsmon, upsc, drivers in `/lib/nut`) and starts nothing itself: Debian ships
+  `MODE=none` and no UPS; its maintainer scripts enable the units, which then either sit idle or
+  fail to start for lack of a UPS (`nut-server`/`nut-monitor` failed is normal here), and with
+  no `MONITOR` line upsmon never shuts the machine down;
+  "UPS setup" then writes `MODE`, the UPS and upsmon and enables/restarts the units. The backend
+  is read from the files at every request, so the pages flip without restarting rynasd (the
+  cached NUT version is cleared). `--dry-system` writes Debian's default files below the dry
+  root instead.
 - upsd `127.0.0.1:3493` (`rynas-web --upsd`, `rynasd --upsd`), plain-text protocol `LIST UPS`,
   `LIST VAR <ups>`, `LIST CMD <ups>` (first UPS; a refused `LIST CMD` gives no commands), 2 s
   bound, no login, no child process. rynas-web polls every 5 s only while an `/events` stream

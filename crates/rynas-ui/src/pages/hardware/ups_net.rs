@@ -114,8 +114,16 @@ struct Shown {
 
 // ------------------------------------------------------------------ the card
 
-pub fn card() -> AnyView {
+/// `installed` changes when NUT was just installed from the status card: the state is read again.
+pub fn card(installed: ReadSignal<u32>) -> AnyView {
     let state = Remote::<UpsNetServerState>::with_config(URL);
+    Effect::new(move |prev: Option<u32>| {
+        let n = installed.get();
+        if prev.is_some_and(|p| p != n) {
+            state.reload();
+        }
+        n
+    });
     #[cfg(feature = "demo")]
     if crate::auth::auth().phase.get_untracked() == crate::auth::Phase::Demo {
         state.data.set(Some(crate::demo::ups_netserver()));

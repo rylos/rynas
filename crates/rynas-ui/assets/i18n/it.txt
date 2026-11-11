@@ -516,6 +516,10 @@ ps.none_text	Aggiungi una regola per accendere o spegnere il NAS in giorni e ora
 ups.tab	UPS
 task.ups.test	Test batteria UPS
 task.ups.detect	Rilevamento UPS
+task.ups.install	Installazione di NUT
+ups.install	Installa NUT
+ups.installed	NUT installato. Configura l'UPS con Configurazione UPS.
+ups.missing_text	NUT, il servizio UPS, non è installato su questo NAS. Installalo da qui (pacchetto Debian nut), poi configura l'UPS con Configurazione UPS qui sotto.
 ups.status	Stato UPS
 ups.st_unreachable	Servizio UPS non raggiungibile
 ups.st_none	Nessun UPS
@@ -539,7 +543,7 @@ ups.f_over	OVER · sovraccarico
 ups.none_title	Nessun UPS collegato
 ups.none_text	Il servizio UPS è attivo ma non segnala alcun UPS. Collega l'UPS e configuralo con Configurazione UPS qui sotto.
 ups.down_title	Servizio UPS non attivo
-ups.down_text	Nessuna risposta sulla porta NUT di questo NAS (127.0.0.1:3493). Installa NUT (pacchetto Debian nut), poi configura l'UPS con Configurazione UPS qui sotto.
+ups.down_text	Nessuna risposta sulla porta NUT di questo NAS (127.0.0.1:3493). Configura l'UPS con Configurazione UPS qui sotto.
 ups.charge	Carica batteria
 ups.runtime	Autonomia residua
 ups.load	Carico
@@ -554,7 +558,7 @@ ups.battery_date	Data batteria
 ups.driver	Nome NUT e driver
 ups.safemode	Interruzione di corrente
 ups.lb_always_nut	upsmon di NUT spegne sempre il sistema quando l'UPS segnala batteria scarica (LB) o è critico, e rynas prima ferma le sue attività. Il timer qui sotto aggiunge solo uno spegnimento anticipato.
-ups.need_nut	Installa NUT, il servizio UPS (pacchetto Debian nut), e configura l'UPS: la politica di spegnimento e i test batteria lo usano.
+ups.need_nut	La politica di spegnimento e i test batteria usano NUT: installalo con Installa NUT in Stato UPS qui sopra, poi configura l'UPS.
 ups.timer_nut	Spegni dopo un tempo a batteria
 ups.timer_help_nut	rynas ferma le sue attività, poi chiede a upsmon di NUT di spegnere il sistema (upsmon -c fsd), con lo spegnimento dell'UPS configurato in NUT.
 ups.minutes	Minuti a batteria
@@ -590,7 +594,7 @@ ups.no_events	Ancora nessun evento UPS.
 ups.device	Driver e collegamento
 upsw.title	Configurazione UPS
 upsw.intro	Nessun UPS comunica con questo NAS. rynas può cercare un UPS su USB, provare quale driver NUT lo legge e configurarlo.
-upsw.need_nut	Installa NUT (pacchetto Debian nut) per configurare qui un UPS.
+upsw.need_nut	Installa NUT con Installa NUT in Stato UPS qui sopra per configurare qui un UPS.
 upsw.name	Nome NUT
 upsw.name_help	Il nome dell'UPS in NUT (lettere minuscole, cifre, - e _).
 upsw.change	Cambia UPS
@@ -650,7 +654,7 @@ upsn.intro	Gli altri computer in rete leggono questo UPS sulla porta 3493 e si s
 upsn.on	Attivo
 upsn.off	Spento
 upsn.pending	Modifiche non ancora applicate
-upsn.need_nut	Il server UPS di rete richiede NUT (pacchetto Debian nut).
+upsn.need_nut	Il server UPS di rete richiede NUT: installalo con Installa NUT in Stato UPS qui sopra.
 upsn.module	Su questo hardware NUT è gestito dal livello di sistema con i suoi file: qui il server UPS di rete non si può configurare.
 upsn.listen_all	Tutti gli indirizzi del NAS
 upsn.listen_chosen	Indirizzi scelti

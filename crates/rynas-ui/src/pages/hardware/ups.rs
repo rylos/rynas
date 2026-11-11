@@ -121,10 +121,12 @@ pub fn panel(_active: Signal<bool>) -> AnyView {
         settings.data.set(Some(crate::demo::ups_settings()));
         events.data.set(Some(crate::demo::ups_events()));
     }
+    // NUT installed from the status card: the other cards read their state again
+    let installed = RwSignal::new(0u32);
     view! {
-        {status_card(settings)}
-        {super::ups_setup::card()}
-        {super::ups_net::card()}
+        {status_card(settings, installed)}
+        {super::ups_setup::card(installed.read_only())}
+        {super::ups_net::card(installed.read_only())}
         <div class="grid">
             {safemode_card(settings)}
             {test_card(settings)}
@@ -155,20 +157,56 @@ fn pick<T: PartialEq + Default + Send + Sync + 'static>(u: RwSignal<Option<UpsSt
     Memo::new(move |_| u.with(|s| s.as_ref().map(&f).unwrap_or_default()))
 }
 
-fn status_card(settings: Remote<UpsSettingsState>) -> AnyView {
+/// NUT is missing (settings loaded, no backend): only then the status card offers to install it.
+fn nut_missing(settings: Remote<UpsSettingsState>) -> Memo<bool> {
+    Memo::new(move |_| settings.data.with(|s| s.as_ref().is_some_and(|s| s.backend == UpsBackend::NotInstalled)))
+}
+
+/// The signed-in user may install packages (rynasd checks again).
+fn is_admin() -> bool {
+    crate::auth::auth().session.with(|s| s.as_ref().is_some_and(|s| s.user.role == rynas_api_types::Role::Admin))
+}
+
+fn status_card(settings: Remote<UpsSettingsState>, installed: RwSignal<u32>) -> AnyView {
     let live = use_live();
     let u = live.ups;
     let backend = backend_of(settings);
+    let missing = nut_missing(settings);
+    let installing = RwSignal::new(false);
+    let install = move |_| {
+        installing.set(true);
+        spawn_local(async move {
+            let r = crate::tasks::run_task("/api/v1/ups/install", None).await;
+            let _ = installing.try_set(false);
+            match r {
+                Ok(task) if task.status == rynas_api_types::TaskStatus::Ok => {
+                    toast(Tone::Ok, t("ups.installed").to_string());
+                    settings.reload();
+                    live.refresh_ups();
+                    let _ = installed.try_update(|n| *n += 1);
+                }
+                Ok(task) => toast(Tone::Err, crate::tasks::task_error(&task)),
+                Err(e) => toast(Tone::Err, e.text()),
+            }
+        });
+    };
     // the card's frame changes only with the link; a new reading updates texts and bars
     let link = pick(u, |s| Some(s.link));
     let body = move || match link.get() {
         None => view! { <Skeleton lines=4 /> }.into_any(),
         Some(link) if link != UpsLink::Connected => {
             let title = if link == UpsLink::NotConfigured { "ups.none_title" } else { "ups.down_title" };
-            let body = move || empty_text(link, backend.get());
+            let body = move || if missing.get() { "ups.missing_text" } else { empty_text(link, backend.get()) };
             view! {
                 <EmptyState icon=icons::BATTERY_CHARGING title=Signal::derive(move || t(title).to_string()) text=Signal::derive(move || t(body()).to_string())>
-                    <button class="btn ghost" on:click=move |_| live.refresh_ups()><Icon icon=icons::REFRESH_CW size=16 />{tr("err.retry")}</button>
+                    <div class="btn-row">
+                        {move || (missing.get() && is_admin()).then(|| view! {
+                            <button type="button" class="btn primary" disabled=move || installing.get() on:click=install>
+                                {spinner(installing)}<Icon icon=icons::DOWNLOAD size=16 />{tr("ups.install")}
+                            </button>
+                        })}
+                        <button type="button" class="btn ghost" on:click=move |_| live.refresh_ups()><Icon icon=icons::REFRESH_CW size=16 />{tr("err.retry")}</button>
+                    </div>
                 </EmptyState>
             }
             .into_any()
@@ -613,7 +651,7 @@ mod tests {
             k.push(empty_text(UpsLink::Unreachable, b));
             k
         };
-        let generic: Vec<&str> = [UpsBackend::Nut, UpsBackend::NotInstalled].into_iter().flat_map(keys).chain(["ups.need_nut", "ups.test_unsupported", "ups.test_lb_nut", "ups.deep_text_nut", "ups.safemode", "ups.schedule_hint"]).collect();
+        let generic: Vec<&str> = [UpsBackend::Nut, UpsBackend::NotInstalled].into_iter().flat_map(keys).chain(["ups.need_nut", "ups.missing_text", "ups.install", "ups.installed", "task.ups.install", "ups.test_unsupported", "ups.test_lb_nut", "ups.deep_text_nut", "ups.safemode", "ups.schedule_hint"]).collect();
         for lang in [i18n::Lang::En, i18n::Lang::It] {
             for k in &generic {
                 let s = i18n::text_in(lang, k).unwrap_or_else(|| panic!("missing {k}"));
