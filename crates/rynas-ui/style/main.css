@@ -1882,6 +1882,7 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 
 /* ---- Backup (restic, pages/backup/restic.rs) */
 .bk-wrap { overflow-wrap: anywhere; min-width: 0; }
+.bk-sec { margin: var(--s-6) 0 var(--s-2); }
 /* what a PC's full restore still lacks (pages/backup/pcs.rs) */
 .bkpc-gaps { display: flex; flex-direction: column; gap: var(--s-1); margin: 0; padding-left: var(--s-4); overflow-wrap: anywhere; }
 .bk-err { color: var(--danger); overflow-wrap: anywhere; }
@@ -1940,7 +1941,7 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .app-port { width: 112px; }
 .app-conflict { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
 .app-preview summary { cursor: pointer; font-size: var(--fs-13); font-weight: 500; }
-.app-code { margin: var(--s-2) 0 0; max-height: 320px; overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--mono); font-size: var(--fs-12); background: var(--bg-sunken); border: 1px solid var(--border); border-radius: var(--r-md); padding: var(--s-2) var(--s-3); }
+.app-code { flex-shrink: 0; margin: var(--s-2) 0 0; max-height: 320px; overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--mono); font-size: var(--fs-12); background: var(--bg-sunken); border: 1px solid var(--border); border-radius: var(--r-md); padding: var(--s-2) var(--s-3); }
 .app-secrets { display: flex; flex-direction: column; gap: var(--s-2); }
 .app-secrets h4 { display: flex; align-items: center; gap: var(--s-1); margin: 0; }
 .app-secret { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--s-2); padding: var(--s-2) var(--s-3); border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface-2); }

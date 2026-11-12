@@ -4971,7 +4971,7 @@ pca.code_valid	Il codice funziona una volta, fino al {until}.
 pca.fingerprint	Certificato di questo NAS
 pca.step.install	1. Installa rynas-agent sul PC
 pca.step.pair	2. Abbinalo
-pca.step.note	L'agente mostra l'impronta del certificato: confrontala con quella qui sopra. Poi avvia il servizio: systemctl enable --now rynas-agent.service. I pacchetti per Arch, Debian e Fedora sono nelle release.
+pca.step.note	Il comando contiene l'impronta del certificato: l'agente si abbina solo a questo NAS. Senza, l'agente mostra l'impronta da confrontare con quella qui sopra. Poi avvia il servizio: systemctl enable --now rynas-agent.service. I pacchetti per Arch, Debian e Fedora sono nelle release.
 pca.f.folder	Cartella degli archivi
 pca.f.folder_help	Dentro un volume. I gruppi esistenti restano dove sono.
 pca.f.default_quota	Quota dei nuovi gruppi (GiB)
@@ -5010,6 +5010,9 @@ pca.backup_sent	Il PC parte al prossimo contatto
 pca.cancel_sent	Il PC si ferma al prossimo contatto
 pca.restore_code	Codice di ripristino
 pca.restore_code_valid	Codice di ripristino {code}: funziona una volta, solo in lettura, fino al {until}.
+pca.restore_code_shared	Questo PC condivide il gruppo con altri PC: durante il ripristino si possono leggere i file di tutti i PC del gruppo.
+pca.h.ok	Completato
+pca.zip_too_long	Troppi elementi selezionati per un solo zip: selezionane meno, oppure scarica la loro cartella.
 pca.restore_steps	Avvia un qualsiasi Linux live sul PC (nella stessa modalità UEFI o BIOS), poi esegui:
 pca.revoke	Revoca
 pca.revoke_title	Revocare {device}?

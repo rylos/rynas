@@ -243,7 +243,8 @@ pub fn panel(header: RwSignal<Option<bool>>) -> AnyView {
                 let label = format!("{}: {}", t("pca.pairing_cancel"), p.description);
                 ui::row(vec![
                     ui::text_cell("bk.f.description", "wrap", if p.description.is_empty() { "—".into() } else { p.description.clone() }),
-                    ui::text_cell("pca.col.group", "mono small", p.group.clone().unwrap_or_else(|| t("pca.own_group").to_string())),
+                    // a group name in the mono face, "its own group" as plain text
+                    ui::text_cell("pca.col.group", if p.group.is_some() { "mono small" } else { "small" }, p.group.clone().unwrap_or_else(|| t("pca.own_group").to_string())),
                     ui::text_cell("pca.col.expires", "tnum", i18n::datetime(p.expires_ms)),
                     ui::actions(view! { <button class="icon-btn sm" title=tr("pca.pairing_cancel") aria-label=label on:click=move |_| {
                         let u = format!("{URL}/pairings/{}", api::encode(&id));
@@ -257,11 +258,11 @@ pub fn panel(header: RwSignal<Option<bool>>) -> AnyView {
         view! {
             {pcs}
             {(!pairings.is_empty()).then(|| view! {
-                <h3 class="mini-title">{tr("pca.pairings")}</h3>
+                <h3 class="mini-title bk-sec">{tr("pca.pairings")}</h3>
                 {ui::table("pca-pairings", &["bk.f.description", "pca.col.group", "pca.col.expires", ""], pairings)}
             })}
             {(!groups.is_empty()).then(|| view! {
-                <h3 class="mini-title">{tr("pca.groups")}</h3>
+                <h3 class="mini-title bk-sec">{tr("pca.groups")}</h3>
                 <p class="small muted">{tf("pca.groups_note", &[("budget", &i18n::bytes(budget))])}</p>
                 {move || tab.del_group.with(Option::is_none).then(|| form_error(tab.g_error))}
                 {ui::table("pca-groups", &["pca.col.group", "pca.col.pcs", "#pca.col.size", "pca.col.maintenance", ""], groups)}
@@ -614,7 +615,7 @@ fn drawer(tab: Tab, device: String) -> AnyView {
                 ui::row(vec![
                     ui::text_cell("pca.col.when", "tnum", i18n::datetime(h.started_ms)),
                     ui::text_cell("pca.col.what", "", what),
-                    ui::cell("col.status", "wrap", if h.ok { ui::status(Tone::Ok, t("upd.uptodate").to_string()) } else { view! { <div class="cell-main">{ui::status(Tone::Err, t("pca.st.failed").to_string())}<span class="cell-sub small">{h.error.clone().unwrap_or_default()}</span></div> }.into_any() }),
+                    ui::cell("col.status", "wrap", if h.ok { ui::status(Tone::Ok, t("pca.h.ok").to_string()) } else { view! { <div class="cell-main">{ui::status(Tone::Err, t("pca.st.failed").to_string())}<span class="cell-sub small">{h.error.clone().unwrap_or_default()}</span></div> }.into_any() }),
                     ui::text_cell("pca.col.added", "num tnum", if h.restore { "—".into() } else { i18n::bytes(h.bytes_added) }),
                 ])
             })
@@ -655,9 +656,14 @@ fn drawer(tab: Tab, device: String) -> AnyView {
                 {(!revoked).then(|| view! { <button class="btn danger sm" on:click=move |_| { error.set(None); ask_revoke.set(true); }><Icon icon=icons::TRASH_2 size=14 />{tr("pca.revoke")}</button> })}
             </div>
             {move || code.get().map(|c| {
+                // a shared group is one repository: its restore key reads every PC in it
+                let shared = tab.data.data.with(|d| {
+                    d.as_ref().is_some_and(|d| d.groups.iter().any(|g| g.devices.len() > 1 && g.devices.contains(&c.device)))
+                });
                 let cmd = format!("curl -fLO https://github.com/rylos/rynas/releases/latest/download/rynas-agent-x86_64\nchmod +x rynas-agent-x86_64\nsudo ./rynas-agent-x86_64 restore --nas {host}");
                 view! {
                     {ui::note(Tone::Ok, icons::LIFE_BUOY, ui::text(tf("pca.restore_code_valid", &[("code", &c.code), ("until", &i18n::datetime(c.expires_ms))])))}
+                    {shared.then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, ui::text(t("pca.restore_code_shared").to_string())))}
                     <p class="small muted">{tr("pca.restore_steps")}</p>
                     <pre class="app-code">{cmd.clone()}</pre>
                     <div class="sec-actions">{copy_button("dns.copy", cmd)}</div>
@@ -795,6 +801,9 @@ fn device_settings(p: PcDevice, detail: Remote<PcDeviceDetail>, tab: Tab, close:
 
 // ------------------------------------------------------------------ browse a version
 
+/// Longest download address of a zip selection (proxies and browsers start refusing near 8 KiB).
+const MAX_ZIP_LINK: usize = 7000;
+
 fn browse_drawer(device: String, version: String, close: Callback<()>) -> AnyView {
     let base = StoredValue::new((dev_url(&device), version.clone()));
     let path = RwSignal::new("/".to_string());
@@ -873,12 +882,22 @@ fn browse_drawer(device: String, version: String, close: Callback<()>) -> AnyVie
         let paths = if sel.is_empty() { vec![path.get()] } else { sel };
         link("zip", &paths)
     };
+    // the selection travels in the address: past this, servers and browsers refuse it
+    let zip_too_long = move || zip_href().len() > MAX_ZIP_LINK;
     let body = view! {
         <div class="toolbar browse-bar">
             <button class="icon-btn sm" title=tr("snap.up") aria-label=tr("snap.up") disabled=move || path.with(|p| p == "/") on:click=up><Icon icon=icons::ARROW_UP size=16 /></button>
             <span class="mono small bk-where">{move || path.get()}</span>
-            <a class="btn ghost sm" href=zip_href download=""><Icon icon=icons::DOWNLOAD size=14 />{move || if selected.with(Vec::is_empty) { t("pca.zip_folder").to_string() } else { tf("pca.zip_selected", &[("n", &selected.with(|s| s.len()).to_string())]) }}</a>
+            {move || {
+                let label = if selected.with(Vec::is_empty) { t("pca.zip_folder").to_string() } else { tf("pca.zip_selected", &[("n", &selected.with(|s| s.len()).to_string())]) };
+                if zip_too_long() {
+                    view! { <button class="btn ghost sm" disabled=true><Icon icon=icons::DOWNLOAD size=14 />{label}</button> }.into_any()
+                } else {
+                    view! { <a class="btn ghost sm" href=zip_href download=""><Icon icon=icons::DOWNLOAD size=14 />{label}</a> }.into_any()
+                }
+            }}
         </div>
+        <Show when=zip_too_long>{ui::note(Tone::Warn, icons::TRIANGLE_ALERT, ui::text(t("pca.zip_too_long").to_string()))}</Show>
         <p class="small muted">{tr("pca.browse_note")}</p>
         {move || listing.view(6, entries)}
     }
