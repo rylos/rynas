@@ -720,6 +720,9 @@ pub struct AppInstallPlan {
     /// proxied ports to loopback and adds a route.
     #[serde(default)]
     pub proxy_active: bool,
+    /// The web UI speaks HTTPS on its port (the entry's `web.scheme`).
+    #[serde(default)]
+    pub web_https: bool,
     /// The address the app gets through web access (`https://<label>-<host>.local/`), when
     /// the install adds a route.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -770,6 +773,10 @@ pub struct InstalledApp {
     /// Host port of the web UI (from `.env`) and its path, for the Open button.
     pub web_port: Option<u16>,
     pub web_path: Option<String>,
+    /// The web UI speaks HTTPS on that port (the entry's `web.scheme`); otherwise plain HTTP,
+    /// whatever the scheme of rynas' own page.
+    #[serde(default)]
+    pub web_https: bool,
     /// `RYNAS_BIND` of the stack: `127.0.0.1` (behind the proxy) or `0.0.0.0` (LAN).
     pub bind: Option<String>,
     /// The web access route of the stack (`https://<label>-<host>.local/`), when it has one;

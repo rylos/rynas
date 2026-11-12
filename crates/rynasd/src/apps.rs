@@ -1030,6 +1030,7 @@ impl AppsSvc {
             notes: conv(&m.notes),
             warnings,
             proxy_active,
+            web_https: m.web.as_ref().is_some_and(|w| w.scheme == rynas_apps::manifest::Scheme::Https),
             web_url,
             ..Default::default()
         };
@@ -1163,6 +1164,9 @@ impl AppsSvc {
             let p = a.manifest.port(&w.port)?;
             Some((env.get(&p.env)?.parse::<u16>().ok()?, w.path.clone()))
         });
+        let web_https = entry
+            .and_then(|a| a.manifest.web.as_ref())
+            .is_some_and(|w| w.scheme == rynas_apps::manifest::Scheme::Https);
         InstalledApp {
             stack: d.stack.clone(),
             app: d.meta.app.clone(),
@@ -1181,6 +1185,7 @@ impl AppsSvc {
             stack_dir: l.map(|l| l.stack(&d.stack)).unwrap_or_default(),
             web_port: web.as_ref().map(|w| w.0),
             web_path: web.map(|w| w.1),
+            web_https,
             bind: env.get("RYNAS_BIND").cloned(),
             web_url: self.web.get().and_then(|w| w.stack_url(&d.stack)),
             snapshots: l.is_some_and(|l| snapshots::supported(&self.docker.root, l, &d.stack)),

@@ -568,7 +568,7 @@ fn network(w: W) -> AnyView {
 
 /// Web access is off: the app opens on its LAN port.
 fn inactive_note(p: &AppInstallPlan) -> AnyView {
-    let lan_url = p.ports.iter().find(|x| x.proxied).map(|x| super::host_url(x.port, "/")).unwrap_or_default();
+    let lan_url = p.ports.iter().find(|x| x.proxied).map(|x| super::host_url(p.web_https, x.port, "/")).unwrap_or_default();
     ui::note(Tone::Info, icons::NETWORK, view! {
         <span>{tf("apps.w.access_inactive", &[("url", &lan_url)])}" "<a href="/network/web-access">{tr("apps.w.access_enable")}</a></span>
     }.into_any())
@@ -581,7 +581,7 @@ fn access(w: W) -> AnyView {
         let Some(p) = w.plan.get() else { return ui::loading(Signal::stored(None), Callback::new(move |_| w.replan(None)), 4) };
         let proxy_active = p.proxy_active;
         let web_port = p.ports.iter().find(|x| x.proxied).map(|x| x.port);
-        let lan_url = web_port.map(|port| super::host_url(port, "/")).unwrap_or_default();
+        let lan_url = web_port.map(|port| super::host_url(p.web_https, port, "/")).unwrap_or_default();
         let lan = Signal::derive(move || w.publish.get().unwrap_or(!proxy_active));
         if !proxy_active {
             return inactive_note(&p);

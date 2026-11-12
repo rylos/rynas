@@ -262,10 +262,11 @@ fn manager_name(k: ManagerKind) -> &'static str {
     }
 }
 
-/// `http(s)://<this host>:<port>/`: where a published port of the NAS answers.
+/// `http://<this host>:<port>/`: where a published port of the NAS answers. Plain HTTP, the
+/// usual case for a container's port (not the scheme of rynas' page: an HTTP-only app does
+/// not answer `https://`; one that speaks HTTPS redirects or says so).
 fn port_href(port: u16) -> String {
-    let loc = window().location();
-    format!("{}//{}:{port}/", loc.protocol().unwrap_or_default(), loc.hostname().unwrap_or_default())
+    format!("http://{}:{port}/", window().location().hostname().unwrap_or_default())
 }
 
 /// The first published TCP port.

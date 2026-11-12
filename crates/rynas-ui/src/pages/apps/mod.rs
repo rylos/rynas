@@ -349,11 +349,14 @@ pub(super) fn app_icon(src: String, size: u32) -> AnyView {
     view! { <img class="app-icon" src=src alt="" width=size height=size loading="lazy" decoding="async" /> }.into_any()
 }
 
-/// `http(s)://<this host>:<port><path>`.
-pub(super) fn host_url(port: u16, path: &str) -> String {
-    let loc = window().location();
+/// `http(s)://<this host>:<port><path>`: the scheme is the app's own (`https` from its
+/// entry's `web.scheme`), never the one of rynas' page — an app that speaks plain HTTP does
+/// not answer `https://`.
+pub(super) fn host_url(https: bool, port: u16, path: &str) -> String {
+    let host = window().location().hostname().unwrap_or_default();
+    let host = if host.contains(':') && !host.starts_with('[') { format!("[{host}]") } else { host };
     let path = if path.starts_with('/') { path.to_string() } else { format!("/{path}") };
-    format!("{}//{}:{port}{path}", loc.protocol().unwrap_or_default(), loc.hostname().unwrap_or_default())
+    format!("{}://{host}:{port}{path}", if https { "https" } else { "http" })
 }
 
 /// The address "Move behind the proxy" gives a stack (`https://<label>-<host>.local/`, the
@@ -373,7 +376,7 @@ pub(super) fn open_href(a: &InstalledApp) -> Option<String> {
     let lan = a.bind.as_deref() != Some("127.0.0.1");
     match (&a.web_url, a.web_port) {
         (Some(u), _) if !lan => Some(u.clone()),
-        (_, Some(p)) if lan => Some(host_url(p, a.web_path.as_deref().unwrap_or("/"))),
+        (_, Some(p)) if lan => Some(host_url(a.web_https, p, a.web_path.as_deref().unwrap_or("/"))),
         (Some(u), _) => Some(u.clone()),
         _ => None,
     }
