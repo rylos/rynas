@@ -433,3 +433,19 @@ a=$(awk '{print $14+$15}' /proc/<pid>/stat); sleep 60; b=$(awk '{print $14+$15}'
 Always report: idle after 1 min, after 1 login, after 5 parallel logins, with 3/20 SSE clients, after a
 minute of mixed GETs, and after 1 h (full metrics ring). Run the release binaries from a private target
 dir, `rynasd --dry-system` with a temp `--state-dir`, `rynas-web --users-file` on a free localhost port.
+
+## 5. Verification
+
+The root workspace does not cover the crates with their own workspace and lock file
+(`crates/rynas-files-worker`, `crates/rynas-backup-worker`, `crates/rynas-agent`, listed in the root
+`exclude`): `cargo test --workspace` and clippy skip them. Run them on their own, with
+`CARGO_BUILD_JOBS=2` and a target folder on disk:
+```
+cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
+cargo test -p rynas-ui && cargo clippy -p rynas-ui --target wasm32-unknown-unknown -- -D warnings
+for c in rynas-files-worker rynas-backup-worker rynas-agent; do
+  cargo clippy --manifest-path crates/$c/Cargo.toml --all-targets -- -D warnings &&
+  cargo test --manifest-path crates/$c/Cargo.toml || break
+done
+```
+`italian_file_is_current` (rynas-ui) rewrites `assets/i18n/it.txt` when it is stale: run it twice.

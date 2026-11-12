@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 # own lock file, see its Cargo.toml
-exclude = ["crates/rynas-files-worker", "crates/rynas-backup-worker"]
+exclude = ["crates/rynas-files-worker", "crates/rynas-backup-worker", "crates/rynas-agent"]
 members = [
     "crates/rynas-api-types",
     "crates/rynas-auth",
