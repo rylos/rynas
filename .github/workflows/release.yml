@@ -5,24 +5,29 @@ name: Release
 # and aarch64), with SHA-256 sums. It becomes the "latest" release, which the agent commands
 # in the UI download from (releases/latest/download/rynas-agent-<arch>); the NUT backport
 # keeps its own fixed tag.
+#
+# Run by hand (workflow_dispatch) on a branch or commit, it only builds: the packages stay as
+# the run's artifacts (`gh run download`), for a test install with `dpkg -i` (which reinstalls
+# the same version), and no release is made.
 on:
   push:
     tags: ["v*.*.*"]
   workflow_dispatch:
     inputs:
-      tag:
-        description: "Existing tag to build (vX.Y.Z)"
+      ref:
+        description: "Branch, commit or tag to build (artifacts only, no release)"
         required: true
+        default: main
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  group: release-${{ github.event.inputs.ref || github.ref_name }}
   cancel-in-progress: false
 
 env:
-  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+  TAG: ${{ github.event.inputs.ref || github.ref_name }}
   CARGO_TERM_COLOR: never
 
 jobs:
@@ -34,13 +39,15 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ env.TAG }}
-      # the tag, the workspace and the agent must say the same version
+      # the tag, the workspace and the agent must say the same version (a test build: only
+      # the workspace and the agent)
       - id: v
         run: |
           set -euo pipefail
-          ver=${TAG#v}
           ws=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           agent=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/rynas-agent/Cargo.toml | head -1)
+          ver=$ws
+          [ "${{ github.event_name }}" = push ] && ver=${TAG#v}
           [ "$ver" = "$ws" ] || { echo "::error::tag $TAG but the workspace is $ws"; exit 1; }
           [ "$ver" = "$agent" ] || { echo "::error::tag $TAG but rynas-agent is $agent"; exit 1; }
           echo "version=$ver" >> "$GITHUB_OUTPUT"
@@ -117,6 +124,7 @@ jobs:
 
   publish:
     needs: [check, nas, agent]
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
