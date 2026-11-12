@@ -95,13 +95,29 @@ QNAP models get the same treatment through their own module, starting with the *
 
 ## Install
 
-rynas targets **Debian 13 (trixie), amd64**. There is no apt repository yet, so for now you
-build the package yourself:
+rynas targets **Debian 13 (trixie), amd64**. There is no apt repository yet. Each
+[release](https://github.com/rylos/rynas/releases/latest) has the package, built by GitHub
+Actions, with its `SHA256SUMS`:
 
 ```sh
-packaging/build-deb.sh --build-ui          # builds target/debian/rynas_*.deb in a trixie container
-sudo apt install ./target/debian/rynas_*.deb
+curl -fLO https://github.com/rylos/rynas/releases/latest/download/rynas_<version>-1_amd64.deb
+sudo apt install ./rynas_<version>-1_amd64.deb
 ```
+
+Or build it yourself: `packaging/build-deb.sh --build-ui` writes `target/debian/rynas_*.deb`,
+built in a trixie container.
+
+The PC backup agent is in the same release: static binaries `rynas-agent-x86_64` and
+`rynas-agent-aarch64`, plus `.deb` and `.rpm` packages.
+
+### Releases
+
+A `vX.Y.Z` tag runs [`.github/workflows/release.yml`](.github/workflows/release.yml). It
+checks that the tag, the workspace version and `rynas-agent`'s version are the same, then
+builds the NAS package and the agent and publishes them as the latest release. Fixed-tag
+releases such as the NUT backport (`nut-2.8.5-0rynas1`) never become "latest". Run by hand
+(`gh workflow run release.yml -f ref=main`), the workflow only builds: the packages stay as
+artifacts of the run, for a test install with `dpkg -i`, and no release is made.
 
 Then open `https://<your-server>.local/` (or `http://<your-server>:8080/` before HTTPS is set
 up) and log in with an administrator account of the server. Installed layout and first login:
