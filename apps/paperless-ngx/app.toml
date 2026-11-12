@@ -1,7 +1,7 @@
 schema = 1
 id = "paperless-ngx"
 name = "Paperless-ngx"
-version = "1.0.0"
+version = "1.0.1"
 app_version = "3.4.2"
 update_policy = "minor"
 description = "Document archive: scans, OCRs, tags and indexes your paperwork for full-text search."
