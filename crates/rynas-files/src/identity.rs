@@ -2,10 +2,10 @@
 //!
 //! rynasd (root) starts every worker through [`become_raw`] between fork and exec: the
 //! supplementary groups, the gid and the uid of the logged-in user, `PR_SET_NO_NEW_PRIVS`,
-//! and no capability left — except `CAP_DAC_READ_SEARCH` for administrators, who read and
-//! open every folder while every change still goes through their own permissions (see
-//! [`crate::caps`]). The kernel then applies the user's permissions and POSIX ACLs to
-//! everything the worker does, as it does for SMB.
+//! and no capability left — except for administrators, who read every folder and, where
+//! Landlock fences it to the shares and removable drives, write over the mode bits and ACLs
+//! too (see [`crate::caps`]). The kernel then applies the user's permissions and POSIX ACLs
+//! to everything any other user's worker does, as it does for SMB.
 
 use std::fs;
 use std::io;
@@ -74,8 +74,8 @@ pub fn names(file: &str, id: u32) -> Option<String> {
 /// Becomes `uid`/`gid`/`groups` for good: from root (rynasd, between fork and exec) or
 /// from a process that holds `CAP_SETUID`/`CAP_SETGID`. With [`crate::caps::Powers::Read`]
 /// the process keeps `CAP_DAC_READ_SEARCH` (and passes it on to the programs it runs: 7z,
-/// ffmpeg), with `AppData` also what changing the apps' data needs (never passed on), with
-/// `None` nothing at all. Never root. Safe between fork and exec: only raw system calls, no
+/// ffmpeg), with `Admin` also `CAP_DAC_OVERRIDE` and `CAP_FOWNER`, with `AppData` also
+/// `CAP_CHOWN` (those never passed on), with `None` nothing at all. Never root. Safe between fork and exec: only raw system calls, no
 /// allocation.
 pub fn become_raw(uid: u32, gid: u32, groups: &[u32], powers: crate::caps::Powers) -> io::Result<()> {
     // never root: the capabilities would come back with uid 0, and nobody signs in to the
@@ -135,6 +135,8 @@ mod tests {
     fn never_becomes_root() {
         // refused before any system call, so safe to try in a test
         let e = become_raw(0, 0, &[0], crate::caps::Powers::Read).unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(libc::EPERM));
+        let e = become_raw(0, 0, &[0], crate::caps::Powers::Admin).unwrap_err();
         assert_eq!(e.raw_os_error(), Some(libc::EPERM));
         let e = become_raw(0, 0, &[0], crate::caps::Powers::AppData).unwrap_err();
         assert_eq!(e.raw_os_error(), Some(libc::EPERM));

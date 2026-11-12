@@ -1385,7 +1385,8 @@ upsd protocol client is the crate `rynas-nut` (shared by both daemons).
 ## API v1: file manager (P5)
 `/api/v1/files/<route>` ⇄ `/v1/files/<route>`, every method, SynoFile's route names and JSON
 shapes; every signed-in user (rynasd runs each request in `rynas-files-worker` as the session's
-Linux user, administrators keep `CAP_DAC_READ_SEARCH` only); bodies stream both ways (uploads up
+Linux user; administrators keep `CAP_DAC_READ_SEARCH`, `CAP_DAC_OVERRIDE` and `CAP_FOWNER`
+under a Landlock ruleset that allows writes in the shares only); bodies stream both ways (uploads up
 to 80 MiB per request). Route table, security model, deviations and error codes:
 `../plugins/files.md`. The worker crate has its own lock file:
 `cargo test --manifest-path crates/rynas-files-worker/Cargo.toml`.

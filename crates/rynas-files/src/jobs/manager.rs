@@ -852,7 +852,10 @@ fn prune(list: &mut VecDeque<Job>) {
 /// A worker for `spec`, running as `user` (as the user this process is in development,
 /// when rynasd is not root), with `spec` already sent.
 fn start_worker(exe: &Path, user: &User, admin: bool, spec: &Spec) -> io::Result<std::process::Child> {
-    let mut cmd = worker_command(exe, user, admin, &spec.app_roots)?;
+    // an administrator's job that writes in no share (on a server only, or written to the
+    // journal before write_roots) keeps reading only
+    let share_roots = (!spec.write_roots.is_empty()).then_some(&spec.write_roots[..]);
+    let mut cmd = worker_command(exe, user, admin, &spec.app_roots, share_roots)?;
     cmd.arg("job").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
     let mut child = cmd.spawn()?;
     let mut line = serde_json::to_vec(spec).map_err(io::Error::other)?;
@@ -873,12 +876,14 @@ pub fn set_worker_cgroup(procs: std::os::fd::OwnedFd) {
 
 /// `rynas-files-worker` as `user`: an empty environment but `PATH`, moved into the workers'
 /// cgroup ([`set_worker_cgroup`]) and the user's identity set between fork and exec
-/// ([`crate::identity::become_raw`]). An administrator's worker with `app_roots` (it writes
-/// in the apps' folders) gets [`crate::caps::Powers::AppData`] under a Landlock ruleset
-/// that allows writes below those folders only ([`app_fence`]). A process that is not root
-/// (development) cannot switch: the worker then runs as that process's own user, never as
-/// root.
-pub fn worker_command(exe: &Path, user: &User, admin: bool, app_roots: &[PathBuf]) -> io::Result<std::process::Command> {
+/// ([`crate::identity::become_raw`]). An administrator's worker writes over owners under a
+/// Landlock ruleset ([`admin_fence`]): with `app_roots` (it writes in the apps' folders)
+/// [`crate::caps::Powers::AppData`] and writes below those folders only; otherwise, with
+/// `share_roots` (the shares' and removable drives' folders it may write in, maybe none),
+/// [`crate::caps::Powers::Admin`] and writes below those only. Without either, or where the
+/// kernel cannot fence, it reads only. A process that is not root (development) cannot
+/// switch: the worker then runs as that process's own user, never as root.
+pub fn worker_command(exe: &Path, user: &User, admin: bool, app_roots: &[PathBuf], share_roots: Option<&[PathBuf]>) -> io::Result<std::process::Command> {
     let mut cmd = std::process::Command::new(exe);
     cmd.env_clear().env("PATH", "/usr/bin:/bin").env("LANG", "C.UTF-8").current_dir("/");
     if let Some(procs) = WORKER_CGROUP.get() {
@@ -898,19 +903,14 @@ pub fn worker_command(exe: &Path, user: &User, admin: bool, app_roots: &[PathBuf
         if user.uid == 0 {
             return Err(io::Error::other("the file manager never runs as root"));
         }
-        let fence = app_fence(admin, app_roots);
-        let powers = match (admin, &fence) {
-            (true, Some(_)) => crate::caps::Powers::AppData,
-            (true, None) => crate::caps::Powers::Read,
-            (false, _) => crate::caps::Powers::None,
-        };
+        let (powers, fence) = if admin { admin_fence(app_roots, share_roots) } else { (crate::caps::Powers::None, None) };
         let groups = user.groups.clone();
         let (uid, gid) = (user.uid, user.gid);
         // SAFETY: only system calls between fork and exec (become_raw allocates nothing)
         unsafe {
             cmd.pre_exec(move || crate::identity::become_raw(uid, gid, &groups, powers));
         }
-        // after the identity change (no_new_privs is set by then): writes below the apps'
+        // after the identity change (no_new_privs is set by then): writes below the fenced
         // folders only, whatever the capabilities say
         if let Some(rules) = fence {
             rules.apply_owned(&mut cmd);
@@ -919,25 +919,60 @@ pub fn worker_command(exe: &Path, user: &User, admin: bool, app_roots: &[PathBuf
     Ok(cmd)
 }
 
-/// The Landlock ruleset of an administrator's worker that changes the apps' data: writes
-/// below `app_roots` only. `None` (the worker keeps reading only, writes stay the user's)
-/// for anyone else, without roots, or when the kernel's Landlock cannot fence every write
-/// (no Landlock, or an ABI without truncate control: [`crate::landlock::APP_POWERS_ABI`]):
-/// the powers to write over owners are never handed out unfenced.
-fn app_fence(admin: bool, app_roots: &[PathBuf]) -> Option<crate::landlock::Ruleset> {
-    if !admin || app_roots.is_empty() {
-        return None;
+/// What an administrator's worker keeps, and the Landlock ruleset it runs under
+/// ([`admin_level`]); [`crate::caps::Powers::Read`] and no ruleset when the kernel's
+/// Landlock cannot fence every write (no Landlock, or an ABI without truncate control:
+/// [`crate::landlock::APP_POWERS_ABI`]) or the ruleset cannot be made: the powers to write
+/// over owners are never handed out unfenced.
+fn admin_fence(app_roots: &[PathBuf], share_roots: Option<&[PathBuf]>) -> (crate::caps::Powers, Option<crate::landlock::Ruleset>) {
+    use crate::caps::Powers;
+    static TOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let (powers, dirs) = admin_level(app_roots, share_roots);
+    if powers == Powers::Read {
+        return (powers, None);
     }
     if let Err(why) = crate::landlock::app_powers_ready() {
-        eprintln!("rynasd: {why}");
-        return None;
+        if powers == Powers::AppData {
+            eprintln!("rynasd: {why}");
+        } else if !TOLD.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            // said once: every request of an administrator comes here
+            eprintln!(
+                "rynasd: administrators write as themselves in the file manager: writing over permissions needs Landlock ABI {} or later (Linux 6.2)",
+                crate::landlock::APP_POWERS_ABI
+            );
+        }
+        return (Powers::Read, None);
     }
-    let dirs: Vec<&Path> = app_roots.iter().map(PathBuf::as_path).collect();
-    let rules = crate::landlock::writes_below_all(&dirs);
-    if rules.is_none() {
-        eprintln!("rynasd: no Landlock ruleset for the apps' folders: they stay read-only to the file manager");
+    match crate::landlock::writes_below_all(&dirs) {
+        Some(rules) => (powers, Some(rules)),
+        None => {
+            eprintln!("rynasd: no Landlock ruleset for the folders an administrator's worker writes in: it reads only");
+            (Powers::Read, None)
+        }
     }
-    rules
+}
+
+/// The level of an administrator's worker and the folders it may write in:
+/// - with `app_roots`, [`crate::caps::Powers::AppData`], below those;
+/// - otherwise with `share_roots` (even none: a request that only reads still asks the
+///   kernel with the powers what it may do), [`crate::caps::Powers::Admin`], below those of
+///   them that are real folders (a share whose volume is missing, or a link, is left out:
+///   the worker's jail never follows links anyway, and one missing folder must not cost the
+///   others);
+/// - otherwise (a job of the journal written before `Spec::write_roots`, a job that writes
+///   on a server only) [`crate::caps::Powers::Read`].
+fn admin_level<'a>(app_roots: &'a [PathBuf], share_roots: Option<&'a [PathBuf]>) -> (crate::caps::Powers, Vec<&'a Path>) {
+    use crate::caps::Powers;
+    if !app_roots.is_empty() {
+        return (Powers::AppData, app_roots.iter().map(PathBuf::as_path).collect());
+    }
+    match share_roots {
+        Some(roots) => {
+            let real = |p: &&PathBuf| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir());
+            (Powers::Admin, roots.iter().filter(real).map(PathBuf::as_path).collect())
+        }
+        None => (Powers::Read, Vec::new()),
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1131,6 +1166,57 @@ mod tests {
         assert!(overlaps("/Film/2024", "/Film"));
         assert!(!overlaps("/Film", "/Filmati"));
         assert!(!overlaps("/Film/a", "/Film/b"));
+    }
+
+    #[test]
+    fn administrators_write_over_owners_only_where_fenced() {
+        use crate::caps::Powers;
+        let t = tempfile::tempdir().unwrap();
+        let (share, drive, app) = (t.path().join("Photos"), t.path().join("usb"), t.path().join("immich"));
+        for d in [&share, &drive, &app] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::os::unix::fs::symlink(&share, t.path().join("link")).unwrap();
+        let missing = t.path().join("gone");
+        // the apps' folders take the apps' powers, whatever the shares
+        let (apps, shares) = ([app.clone()], [share.clone()]);
+        let (p, dirs) = admin_level(&apps, Some(&shares));
+        assert_eq!((p, dirs), (Powers::AppData, vec![app.as_path()]));
+        // shares and drives: real folders only, a missing one or a link left out
+        let roots = [share.clone(), missing, t.path().join("link"), drive.clone()];
+        let (p, dirs) = admin_level(&[], Some(&roots));
+        assert_eq!((p, dirs), (Powers::Admin, vec![share.as_path(), drive.as_path()]));
+        // a request that only reads: the powers, nothing to write in
+        assert_eq!(admin_level(&[], Some(&[])), (Powers::Admin, vec![]));
+        // a job that writes in no share (or an old journal's): reading only
+        assert_eq!(admin_level(&[], None), (Powers::Read, vec![]));
+    }
+
+    #[test]
+    fn an_administrators_fence_keeps_writes_in_the_shares() {
+        let Some(abi) = crate::landlock::abi() else {
+            eprintln!("no Landlock in this kernel: skipped");
+            return;
+        };
+        let t = tempfile::tempdir().unwrap();
+        let (share, system) = (t.path().join("Photos"), t.path().join("etc"));
+        std::fs::create_dir_all(&share).unwrap();
+        std::fs::create_dir_all(&system).unwrap();
+        let roots = [share.clone()];
+        let (powers, fence) = admin_fence(&[], Some(&roots));
+        if abi < crate::landlock::APP_POWERS_ABI {
+            assert_eq!(powers, crate::caps::Powers::Read);
+            assert!(fence.is_none());
+            return;
+        }
+        assert_eq!(powers, crate::caps::Powers::Admin);
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.arg("-c").arg("echo a > Photos/a; echo b > etc/b; mv Photos/a etc/a").current_dir(t.path());
+        fence.unwrap().apply_owned(&mut cmd);
+        let _ = cmd.output().unwrap();
+        assert!(!system.join("b").exists() && !system.join("a").exists());
+        // written in the share, never moved out of it
+        assert!(share.join("a").exists());
     }
 
     #[test]

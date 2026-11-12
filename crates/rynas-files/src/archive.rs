@@ -168,6 +168,24 @@ fn cache_dir() -> Option<PathBuf> {
     (meta.is_dir() && meta.uid() == unsafe { libc::getuid() } && meta.permissions().mode() & 0o077 == 0).then_some(dir)
 }
 
+/// The folder [`cache_dir`] of `user`'s workers, made by rynasd (root) before an
+/// administrator's worker starts under a Landlock ruleset that refuses to make it in `/tmp`
+/// (rynasd's private one, `PrivateTmp`; the worker's environment has no `TMPDIR`): owned by
+/// the user, 0700. `None` when it is not such a folder, or when this process is not root.
+pub fn prepare_cache(uid: u32, gid: u32) -> Option<PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    // SAFETY: plain getter
+    if unsafe { libc::geteuid() } != 0 || uid == 0 {
+        return None;
+    }
+    let dir = Path::new("/tmp").join(format!("synofile-{uid}"));
+    if fs::DirBuilder::new().mode(0o700).create(&dir).is_ok() {
+        std::os::unix::fs::lchown(&dir, Some(uid), Some(gid)).ok()?;
+    }
+    let meta = fs::symlink_metadata(&dir).ok()?;
+    (meta.is_dir() && meta.uid() == uid && meta.permissions().mode() & 0o077 == 0).then_some(dir)
+}
+
 /// Listings unused for a day go.
 fn prune(dir: &Path) {
     let Ok(items) = fs::read_dir(dir) else { return };

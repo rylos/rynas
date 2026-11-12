@@ -9,10 +9,12 @@
 # build-deb.sh), then inside the container: real users alice and bob and the administrator
 # carol, a share whose folders belong to them, and the internal API over the Unix socket.
 # Checks: what a worker creates belongs to the user who asked; a folder of alice's is
-# closed to bob (permission_denied) and readable but not writable for carol (the
-# administrator keeps CAP_DAC_READ_SEARCH only); uploads, copies and the recycle bin run
-# as the user; the worker refuses to run as root and holds no other capability; symbolic
-# links never lead an administrator's worker out of the share (/etc/shadow).
+# closed to bob (permission_denied) and readable and writable for carol (the administrator
+# keeps CAP_DAC_READ_SEARCH, CAP_DAC_OVERRIDE and CAP_FOWNER under Landlock; what she makes
+# stays hers, alice's files stay alice's; without Landlock ABI 3 in the container she
+# reads only); uploads, copies and the recycle bin run as the user; the worker refuses to
+# run as root and holds nothing beyond its level; symbolic links never lead an
+# administrator's worker out of the share (/etc/shadow).
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 NAME=rynas-test-files-$$
@@ -97,10 +99,28 @@ step "permissions are the kernel's"
 [ "$(code bob GET '/v1/files/list?path=/docs/alice-only')" = 403 ] || fail "bob reads alice's folder"
 api bob GET '/v1/files/list?path=/docs/alice-only' | jq -e '.code == "permission_denied"' >/dev/null || fail "code"
 [ "$(code alice GET '/v1/files/list?path=/docs/alice-only')" = 200 ] || fail "alice reads her folder"
-# carol, administrator: reads everything, writes only where her permissions allow
+# carol, administrator: reads everything; writes over permissions where Landlock (ABI 3)
+# fences her worker to the shares, else only where her permissions allow
 [ "$(code carol GET '/v1/files/list?path=/docs/alice-only')" = 200 ] || fail "carol cannot read alice's folder"
 [ "$(api carol GET '/v1/files/text?path=/docs/alice-only/plan.txt' | jq -r .text)" = secret ] || fail "carol cannot read alice's file"
-[ "$(code carol POST '/v1/files/mkdir?path=/docs/alice-only&name=x' '{}')" = 403 ] || fail "carol writes into alice's folder"
+FENCED=yes
+grep -q 'administrators write as themselves' /var/log/rynasd.log && FENCED=no
+echo "administrator's worker fenced by Landlock: $FENCED"
+if [ "$FENCED" = yes ]; then
+    # the listing says so (the interface shows Delete, Rename, Cut), and it is true
+    api carol GET '/v1/files/list?path=/docs/alice-only' | jq -e '.writable == true' >/dev/null || fail "alice's folder not writable for carol"
+    [ "$(code carol POST '/v1/files/mkdir?path=/docs/alice-only&name=x' '{}')" = 200 ] || fail "carol cannot write into alice's folder"
+    [ "$(stat -c %U /srv/vol1/docs/alice-only/x)" = carol ] || fail "what carol made is not hers"
+    [ "$(code carol POST '/v1/files/rename?path=/docs/alice-only/plan.txt&name=plan2.txt' '{}')" = 200 ] || fail "carol cannot rename alice's file"
+    [ "$(stat -c %U /srv/vol1/docs/alice-only/plan2.txt)" = alice ] || fail "alice's file changed owner"
+    [ "$(code carol POST '/v1/files/rename?path=/docs/alice-only/plan2.txt&name=plan.txt' '{}')" = 200 ] || fail "rename back"
+    rmdir /srv/vol1/docs/alice-only/x
+    # bob, not an administrator: unchanged (alice's 0755 folder is not his to write in)
+    api bob GET '/v1/files/list?path=/docs/common/by-alice' | jq -e '.writable == false' >/dev/null || fail "bob may write in alice's folder"
+    [ "$(code bob POST '/v1/files/mkdir?path=/docs/alice-only&name=x' '{}')" = 403 ] || fail "bob writes into alice's folder"
+else
+    [ "$(code carol POST '/v1/files/mkdir?path=/docs/alice-only&name=x' '{}')" = 403 ] || fail "carol writes into alice's folder"
+fi
 [ "$(code bob POST '/v1/files/rename?path=/docs/common/by-alice&name=y' '{}')" = 200 ] || fail "rename in a 0777 folder"
 
 step "jobs run as the user too"
@@ -142,7 +162,8 @@ rm -rf /srv/vol1/docs/common/etc /srv/vol1/docs/common/up /srv/vol1/docs/common/
 
 step "the worker itself"
 if /opt/rynas/rynas-files-worker serve </dev/null 2>/dev/null; then fail "the worker ran as root"; fi
-# a worker started by rynasd: no capability but reading for carol, nothing for bob
+# a worker started by rynasd: reading and writing over owners for carol (reading only
+# without Landlock), reading alone ambient; nothing for bob
 # (shown by the kernel while a long answer streams)
 head -c 20000000 /dev/zero > /srv/vol1/docs/common/big.bin
 for who in carol bob; do
@@ -154,8 +175,15 @@ for who in carol bob; do
     grep -E 'Uid|Gid|CapEff|CapPrm|CapAmb|NoNewPrivs' "/proc/$pid/status"
     eff=$(awk '/^CapEff/ {print $2}' "/proc/$pid/status")
     want=0000000000000000
-    [ "$who" = carol ] && want=0000000000000004
+    amb_want=0000000000000000
+    if [ "$who" = carol ]; then
+        want=0000000000000004
+        [ "$FENCED" = yes ] && want=000000000000000e
+        amb_want=0000000000000004
+    fi
     [ "$eff" = "$want" ] || fail "$who's worker has CapEff $eff"
+    amb=$(awk '/^CapAmb/ {print $2}' "/proc/$pid/status")
+    [ "$amb" = "$amb_want" ] || fail "$who's worker has CapAmb $amb"
     grep -q '^NoNewPrivs:[[:space:]]*1' "/proc/$pid/status" || fail "no_new_privs not set"
     kill "$client" 2>/dev/null || true
     wait "$client" 2>/dev/null || true

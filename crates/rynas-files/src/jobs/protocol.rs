@@ -83,6 +83,13 @@ pub struct Spec {
     /// folders only (`manager::worker_command`); empty for every other job
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub app_roots: Vec<PathBuf>,
+    /// the shares' and removable drives' folders (never the apps') a job writes in: the
+    /// destination's, and the sources' for a deletion or a move. An administrator's worker
+    /// writes there over the mode bits and ACLs, under a Landlock ruleset that allows writes
+    /// below these folders only (`manager::worker_command`). Empty for a job of the journal
+    /// written before it: that worker reads only, as it did
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub write_roots: Vec<PathBuf>,
 }
 
 impl Spec {
@@ -233,6 +240,7 @@ mod tests {
             remotes: vec![conn],
             roots: Vec::new(),
             app_roots: Vec::new(),
+            write_roots: Vec::new(),
         };
         let clean = spec.without_secrets();
         let text = serde_json::to_string(&clean).unwrap();

@@ -2,8 +2,10 @@
 //!
 //! Every route that touches files runs in `rynas-files-worker`, started for the request
 //! already switched to the user rynas-web names in `x-rynas-user` (groups, gid, uid,
-//! `no_new_privs`, no capability but `CAP_DAC_READ_SEARCH` for administrators): the kernel
-//! applies the user's permissions and POSIX ACLs, as for SMB. The worker gets the request
+//! `no_new_privs`, no capability): the kernel applies the user's permissions and POSIX
+//! ACLs, as for SMB. An administrator's worker reads everything and writes over the mode
+//! bits and ACLs of the shares and removable drives, under a Landlock ruleset that allows
+//! writes there only ([`share_roots_of`], `rynas_files::caps`). The worker gets the request
 //! and the context (user, shares, volumes, the connections the request names) as one JSON
 //! line, then the body, and answers in the gateway form, streamed back as it comes — an
 //! upload never sits whole in rynasd's memory, nor does a download.
@@ -419,6 +421,36 @@ fn app_roots_of(ctx: &Context, method: &str, route: &str, query: &HashMap<String
     Ok(roots)
 }
 
+/// Where an administrator's request worker may write over the mode bits and ACLs
+/// ([`rynas_files::caps::Powers::Admin`], fenced by Landlock): on a route that writes
+/// ([`WRITING_ROUTES`], POST), the shared folder its `path` or `dir` names (a share, the
+/// home, a removable drive — never an app's folder, which takes the apps' powers through
+/// [`app_roots_of`]); on every route its thumbnail cache and its archive listing cache.
+/// Reading routes get the powers too, with no share to write in: the listing's `writable`
+/// flags then tell what the administrator may really do, and the interface stops hiding
+/// Delete, Rename or Cut. `None` (no powers over owners) for anyone else, and for a request
+/// that already has app roots.
+fn share_roots_of(ctx: &Context, method: &str, route: &str, query: &HashMap<String, String>, app_roots: &[PathBuf]) -> Option<Vec<PathBuf>> {
+    if !ctx.admin || !app_roots.is_empty() {
+        return None;
+    }
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if method == "POST" && WRITING_ROUTES.contains(&route) {
+        for key in ["path", "dir"] {
+            let Some(vpath) = query.get(key) else { continue };
+            if let Ok(r) = rynas_files::shares::resolve(&ctx.shares, vpath)
+                && r.share.app.is_none()
+                && !roots.contains(&r.share.path)
+            {
+                roots.push(r.share.path.clone());
+            }
+        }
+    }
+    roots.extend(ctx.thumbs.clone());
+    roots.extend(rynas_files::archive::prepare_cache(ctx.user.uid, ctx.user.gid));
+    Some(roots)
+}
+
 /// The user's thumbnail cache, made on first use: `<root>/<uid>`, owned by the user, 0700.
 fn thumbs_dir(root: &Path, user: &User) -> Option<PathBuf> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt};
@@ -549,7 +581,7 @@ async fn handle(st: FilesState, req: Request) -> Res<Response> {
             .await??;
             let _ = w;
             let wr = WorkerRequest { method: "POST".into(), route: "conns/test".into(), query: HashMap::new(), length: 0, range: None, ctx };
-            run_worker(&files, wr, Body::empty(), HEAD_DEADLINE, &[]).await
+            run_worker(&files, wr, Body::empty(), HEAD_DEADLINE, &[], None).await
         }
         _ => {
             let probe = wire::Request::in_memory(&method, &route, query.clone(), Vec::new());
@@ -580,8 +612,9 @@ async fn handle(st: FilesState, req: Request) -> Res<Response> {
             let range = parts.headers.get(header::RANGE).and_then(|v| v.to_str().ok()).map(String::from);
             let deadline = if route == "upload" || route == "edit/save" { UPLOAD_DEADLINE } else { HEAD_DEADLINE };
             let app_roots = app_roots_of(&ctx, method.as_str(), &route, &query)?;
+            let share_roots = share_roots_of(&ctx, method.as_str(), &route, &query, &app_roots);
             let wr = WorkerRequest { method, route, query, length, range, ctx };
-            run_worker(&files, wr, body, deadline, &app_roots).await
+            run_worker(&files, wr, body, deadline, &app_roots, share_roots.as_deref()).await
         }
     }
 }
@@ -661,12 +694,12 @@ impl Stream for WorkerBody {
 
 /// Starts a worker as the request's user, sends it the request line and the body, and
 /// streams its answer back.
-async fn run_worker(files: &Files, wr: WorkerRequest, body: Body, deadline: Duration, app_roots: &[PathBuf]) -> Res<Response> {
+async fn run_worker(files: &Files, wr: WorkerRequest, body: Body, deadline: Duration, app_roots: &[PathBuf], share_roots: Option<&[PathBuf]>) -> Res<Response> {
     let slot = tokio::time::timeout(HEAD_DEADLINE, files.slots.clone().acquire_owned())
         .await
         .map_err(|_| Error::new(StatusCode::SERVICE_UNAVAILABLE, error_codes::BUSY, "the file manager is busy: try again".into()))?
         .map_err(Error::internal)?;
-    let std_cmd = rynas_files::jobs::manager::worker_command(&files.worker, &wr.ctx.user, wr.ctx.admin, app_roots).map_err(Error::internal)?;
+    let std_cmd = rynas_files::jobs::manager::worker_command(&files.worker, &wr.ctx.user, wr.ctx.admin, app_roots, share_roots).map_err(Error::internal)?;
     let mut cmd = tokio::process::Command::from(std_cmd);
     cmd.arg("serve").stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::inherit()).kill_on_drop(true);
     let mut child = cmd.spawn().map_err(|e| Error::internal(format!("{}: {e}", files.worker.display())))?;
@@ -762,7 +795,7 @@ impl WorkerSsh {
     fn call(&self, user: &str, request: Value) -> std::io::Result<Value> {
         use std::io::{BufRead, Write};
         let u = rynas_files::identity::lookup(user)?;
-        let mut cmd = rynas_files::jobs::manager::worker_command(&self.worker, &u, false, &[])?;
+        let mut cmd = rynas_files::jobs::manager::worker_command(&self.worker, &u, false, &[], None)?;
         cmd.arg("call").stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::inherit());
         let mut child = cmd.spawn()?;
         let mut line = serde_json::to_vec(&request).map_err(std::io::Error::other)?;
@@ -954,5 +987,37 @@ mod tests {
             Ok(()) => assert_eq!(w.unwrap(), vec![app]),
             Err(_) => assert!(w.is_err()),
         }
+    }
+
+    #[test]
+    fn administrators_write_in_the_share_a_writing_route_names() {
+        let t = tempfile::tempdir().unwrap();
+        let (photos, docs, app, thumbs) = (t.path().join("Photos"), t.path().join("Docs"), t.path().join("immich"), t.path().join("thumbs"));
+        let shares = vec![
+            Share { name: "Photos".into(), path: photos.clone(), ..Default::default() },
+            Share { name: "Docs".into(), path: docs, ..Default::default() },
+            Share {
+                name: format!("{}/immich", rynas_files::shares::APPS),
+                path: app.clone(),
+                app: Some(rynas_files::shares::AppFolder { stack: "immich".into(), app: Some("immich".into()) }),
+                ..Default::default()
+            },
+        ];
+        // as a test user, prepare_cache adds nothing (only root makes the cache)
+        let ctx = Context { shares, admin: true, thumbs: Some(thumbs.clone()), ..Default::default() };
+        let q = |k: &str, v: &str| HashMap::from([(k.to_string(), v.to_string())]);
+        // a writing route: the share it names, never another one
+        assert_eq!(share_roots_of(&ctx, "POST", "rename", &q("path", "/Photos/a.jpg"), &[]), Some(vec![photos.clone(), thumbs.clone()]));
+        assert_eq!(share_roots_of(&ctx, "POST", "upload", &q("dir", "/Photos/2024"), &[]), Some(vec![photos, thumbs.clone()]));
+        // reading routes: the powers (honest `writable` flags) and no share to write in
+        for (m, r) in [("GET", "list"), ("GET", "shares"), ("GET", "stat"), ("POST", "exists"), ("GET", "mkdir")] {
+            assert_eq!(share_roots_of(&ctx, m, r, &q("path", "/Photos"), &[]), Some(vec![thumbs.clone()]), "{m} {r}");
+        }
+        // an app's folder takes the apps' powers instead, never the shares'
+        assert_eq!(share_roots_of(&ctx, "POST", "mkdir", &q("path", "/@apps/immich/x"), &[]), Some(vec![thumbs.clone()]));
+        assert_eq!(share_roots_of(&ctx, "POST", "mkdir", &q("path", "/@apps/immich/x"), &[app]), None);
+        // anyone else: nothing over owners
+        let user = Context { admin: false, ..ctx.clone() };
+        assert_eq!(share_roots_of(&user, "POST", "rename", &q("path", "/Photos/a.jpg"), &[]), None);
     }
 }

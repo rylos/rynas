@@ -259,6 +259,13 @@ pub fn job_spec(shares: &[Share], conns: &[crate::conns::Conn], body: &NewJob) -
         }
     };
     let mut app_roots: Vec<PathBuf> = Vec::new();
+    // the shares (never the apps' folders) the job writes in
+    let mut write_roots: Vec<PathBuf> = Vec::new();
+    let mut writes_in = |share: &Share| {
+        if share.app.is_none() && !write_roots.contains(&share.path) {
+            write_roots.push(share.path.clone());
+        }
+    };
     let mut remotes: Vec<crate::conns::Conn> = Vec::new();
     // a remote path stays as it is, the worker connects: (path, whether it
     // is the server or one of its shares)
@@ -296,6 +303,9 @@ pub fn job_spec(shares: &[Share], conns: &[crate::conns::Conn], body: &NewJob) -
             }
         }
         add_root(r.share);
+        if matches!(body.op, Op::Delete | Op::Move) {
+            writes_in(r.share);
+        }
         // a deletion, or a move's removal of its sources, changes an app's folder
         if r.share.app.is_some() && matches!(body.op, Op::Delete | Op::Move) && !app_roots.contains(&r.share.path) {
             app_roots.push(r.share.path.clone());
@@ -315,6 +325,7 @@ pub fn job_spec(shares: &[Share], conns: &[crate::conns::Conn], body: &NewJob) -
         (Some(d), _) => {
             let r = shares::resolve(shares, d)?;
             add_root(r.share);
+            writes_in(r.share);
             if r.share.app.is_some() {
                 dest_in_app = true;
                 if !app_roots.contains(&r.share.path) {
@@ -365,6 +376,7 @@ pub fn job_spec(shares: &[Share], conns: &[crate::conns::Conn], body: &NewJob) -
         // the powers to change the apps' folders only when that is where the job writes: a
         // move out of an app's folder into a share writes in the share as the user
         app_roots: if body.op == Op::Delete || dest_in_app { app_roots } else { Vec::new() },
+        write_roots,
     })
 }
 
@@ -508,6 +520,7 @@ fn as_user(req: &Request, out: &mut impl Write, ctx: &Context, remote: &dyn Remo
             let name = req.require("name")?;
             shares::valid_name(name)?;
             let real = place(&r, false)?;
+            fsops::refuse_snapshot(&real)?;
             fsops::rename(&real, &real.with_file_name(name))?;
             reply(out, &json!({ "ok": true }))
         }
@@ -694,6 +707,24 @@ mod tests {
         assert_eq!(e.code, rynas_api_types::error_codes::SHARE_ROOT);
         // and deletions there are for good: no bin
         assert!(job_spec(&shares, &[], &job("delete", &["/@apps/immich/x"], None)).unwrap().recycle.is_empty());
+    }
+
+    #[test]
+    fn jobs_name_the_shares_they_write_in() {
+        let mut shares = with_apps();
+        shares.push(Share { name: "Docs".into(), path: "/srv/vol2/Docs".into(), ..Default::default() });
+        let roots = |op, sources: &[&str], dest| job_spec(&shares, &[], &job(op, sources, dest)).unwrap().write_roots;
+        let (photos, docs) = (PathBuf::from("/srv/vol1/Photos"), PathBuf::from("/srv/vol2/Docs"));
+        // a copy writes in its destination only, the sources are read
+        assert_eq!(roots("copy", &["/Photos/a.jpg"], Some("/Docs")), vec![docs.clone()]);
+        // a move also removes its sources, a deletion only removes
+        assert_eq!(roots("move", &["/Photos/a.jpg"], Some("/Docs")), [photos.clone(), docs.clone()]);
+        assert_eq!(roots("delete", &["/Photos/a.jpg", "/Photos/b.jpg"], None), vec![photos.clone()]);
+        assert_eq!(roots("compress", &["/Photos/a.jpg"], Some("/Photos")), vec![photos.clone()]);
+        // never an app's folder: writing there takes the apps' powers (app_roots)
+        assert_eq!(roots("copy", &["/@apps/immich/a"], Some("/Photos")), vec![photos.clone()]);
+        assert!(roots("copy", &["/Photos/a.jpg"], Some("/@apps/immich")).is_empty());
+        assert!(roots("delete", &["/@apps/immich/x"], None).is_empty());
     }
 
     #[test]

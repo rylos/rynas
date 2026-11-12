@@ -8,7 +8,9 @@
 //!   ([`identity::become_raw`]) for every request that touches files ([`api::serve`]) and
 //!   for every transfer job (`rynas-files-worker job`, a separate crate with its own lock
 //!   file: the SMB and SFTP clients pin crypto crates the rest of rynas cannot share). The kernel decides what that user may read
-//!   and change: the user's permissions and POSIX ACLs apply, as for SMB.
+//!   and change: the user's permissions and POSIX ACLs apply, as for SMB — except that an
+//!   administrator's worker reads everything and writes over permissions in the shares
+//!   ([`caps`]).
 //!
 //! Messages are English; the interface translates the error `code`s (rynas's
 //! `error_codes`) and the job message codes (see `docs/plugins/files.md`).
@@ -53,7 +55,9 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Context {
     pub user: identity::User,
-    /// An administrator: reads every folder (writes stay the user's).
+    /// An administrator: reads every folder and, where Landlock fences it to the shares and
+    /// removable drives, writes over their mode bits and ACLs (what it makes stays its own:
+    /// [`caps`]).
     #[serde(default)]
     pub admin: bool,
     /// The shares this user may see, with their real paths.

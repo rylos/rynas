@@ -6,7 +6,9 @@
 //! - `call`: one SSH chore rynasd keeps out of its own process (learning a server's key,
 //!   making or opening a private key), JSON in, JSON out.
 //!
-//! It refuses to run as root or with any capability but reading (administrators).
+//! It refuses to run as root or with any capability beyond the set of its level
+//! (`rynas_files::caps::check_worker`: nothing; reading, or reading and writing over owners
+//! under Landlock, for administrators; the apps' data), and with any but reading ambient.
 
 /// A message (English); the interface translates codes.
 macro_rules! t {

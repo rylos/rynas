@@ -305,6 +305,19 @@ impl Engine {
         emit(&Event::Error { path: self.display(path), msg, code: code.into() });
     }
 
+    /// Whether `src` is the top of a read-only snapshot, which is never moved nor deleted
+    /// ([`crate::fsops::refuse_snapshot`]): the error is counted for it.
+    fn snapshot_refused(&mut self, src: &Path) -> bool {
+        match crate::fsops::refuse_snapshot(src) {
+            Ok(()) => false,
+            Err(e) => {
+                self.error_code(src, c::READ_ONLY, e.message);
+                self.p.files_done += 1;
+                true
+            }
+        }
+    }
+
     /// An item that failed while being written to `target`. When the user may not write
     /// into the destination folder, the error names that place (`<destination>/…`, the way
     /// the file manager shows it) instead of the source item, so the interface can point at
@@ -528,6 +541,9 @@ impl Engine {
                 if src == target {
                     self.p.skipped += 1;
                     self.p.files_done += 1;
+                    continue;
+                }
+                if self.snapshot_refused(&src) {
                     continue;
                 }
                 self.p.current = self.display(&src);
@@ -1525,6 +1541,9 @@ impl Engine {
         self.p.phase = "delete".into();
         self.p.files_total = sources.len() as u64;
         for src in sources {
+            if self.snapshot_refused(&src) {
+                continue;
+            }
             // no shares at all: the user asked to delete for good
             let bin = if recycle.is_empty() { Bin::Permanent } else { recycle_target(&recycle, &src) };
             match bin {

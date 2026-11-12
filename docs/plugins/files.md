@@ -45,22 +45,61 @@ browser ──HTTPS── rynas-web (user rynas) ──Unix socket── rynasd 
   (refused for uid 0), `PR_SET_NO_NEW_PRIVS`, the bounding set reduced, then every capability
   dropped. The kernel applies the user's permissions and POSIX ACLs — the same ones rynas renders
   for SMB and NFS from the share matrix.
-- **Administrators read every folder, writes stay theirs** (SynoFile 0.8.12): for a member of
+- **Administrators can do everything in the shares** (like DSM's File Station): for a member of
   the rynas admin groups (`--admin-group`, default `rynas-admin`, `sudo`; `AdminPolicy`) the worker
-  keeps `CAP_DAC_READ_SEARCH` only (effective, permitted, inheritable and ambient, so 7z and ffmpeg
-  read too). Other users keep nothing.
+  keeps `CAP_DAC_READ_SEARCH`, `CAP_DAC_OVERRIDE` and `CAP_FOWNER` (`caps::Powers::Admin`): it
+  reads every file, and deletes, renames, moves and writes whatever the mode bits, ACLs and
+  sticky bits say. Never `CAP_CHOWN`: what it makes is the administrator's (as before), existing
+  files keep their owners. The powers are fenced:
+  - rynasd starts that worker under a Landlock ruleset (`jobs::manager::worker_command`,
+    `admin_fence`, `landlock::writes_below_all`) that allows writes only below the shared folder a
+    writing request names (`rynasd::files::share_roots_of`: `mkdir`, `rename`, `edit/save`,
+    `upload`, `upload/abort` — a share, the home or a removable drive, never an app's folder), the
+    folders a job writes in (`Spec::write_roots`: its destination's share, the sources' for a
+    move or a deletion), the user's thumbnail cache and archive listing cache
+    (`/tmp/synofile-<uid>` in rynasd's private `/tmp`, made by rynasd: `archive::prepare_cache`).
+    Reading requests get the powers with no share to write in. System folders, rynasd's stores
+    and the apps' folders stay out of reach. Landlock ABI 3 (Linux 6.2, truncate) is required;
+    below it, or without Landlock, the administrator's worker keeps reading only and writes as
+    itself, as before. A job of the journal written before `write_roots` (or one that writes on a
+    server only) also keeps reading only.
+  - A read-only mount stays read-only, and so does a read-only btrfs snapshot (EROFS comes before
+    any capability: `inode_permission` → `sb_permission`, `btrfs_permission`). The top of a
+    read-only snapshot, whose folder lies in the writable subvolume above, is never renamed, moved
+    or deleted (`fsops::refuse_snapshot`, in `rename` and in the jobs; 409 `read_only`), and the
+    listing flags it (`readonly`) as before.
+  - Only reading passes on to the programs the worker runs (7z, unrar, tar, ffmpeg: inheritable and
+    ambient). The powers over owners never do: those programs parse archives and media from
+    anyone, and Landlock does not cover chmod or extended attributes. They write into folders the
+    worker made for them (`.rynas-x-…`), which are the administrator's.
+  - Residual risk: Landlock does not fence chmod, utimes or ACL changes, so a compromised worker
+    of an administrator (with `CAP_FOWNER`) could change the modes of files outside the shares it
+    can name; the jail (`confine`) keeps every path the worker opens inside its shares.
+  - `writable` flags (`list`, `shares`, `stat`, `edit`) are asked with the worker's own powers
+    (`fsops::access`): access(2) — and faccessat(2) without `AT_EACCESS` — check with the real
+    credentials and clear the effective capabilities of a uid other than 0
+    (`access_override_creds`), so a 0755 folder of another uid would show as not writable and the
+    interface would keep hiding Delete. faccessat2(2) with `AT_EACCESS` (raw system call, Linux
+    5.8) keeps the capabilities and still answers EROFS on read-only places; without faccessat2
+    (ENOSYS) the answer is access(2), or an existing item not written on a read-only volume.
+    Checked in an unprivileged user namespace (`fsops::tests::an_administrators_worker_asks_with_its_powers`).
+  - The interface needs nothing of its own: it already follows the server's `writable` and
+    `readonly` flags (menus, Cut, Delete, Rename, editor, destinations), never owners or modes.
+
+  Other users keep nothing, and their workers are unchanged.
 - **The apps' data** (`/@apps/<folder>/…`, administrators, Docker setting `files_app_data`,
-  `../phase2/docker-apps.md` §5.9): a worker that writes there also keeps `CAP_DAC_OVERRIDE`,
-  `CAP_FOWNER` and `CAP_CHOWN` (`caps::Powers::AppData`, never ambient) and runs under a
-  Landlock ruleset rynasd makes (`jobs::manager::worker_command`, `landlock::writes_below_all`)
-  that allows writes below those app folders only; no Landlock, no powers. What it makes takes
-  the owner of the folder it lands in (`confine::adopt`), existing files keep theirs.
-- The worker checks itself first (`caps::check_worker`): never root, nothing but reading,
-  `PR_SET_DUMPABLE=0` (nobody attaches a debugger to borrow the reading capability). The test
-  `packaging/test-files.sh` reads `/proc/<pid>/status` of live workers.
+  `../phase2/docker-apps.md` §5.9): a worker that writes there keeps `CAP_CHOWN` as well
+  (`caps::Powers::AppData`, never ambient) and runs under a Landlock ruleset that allows writes
+  below those app folders only; no Landlock, no powers. What it makes takes the owner of the
+  folder it lands in (`confine::adopt`), existing files keep theirs.
+- The worker checks itself first (`caps::check_worker`): never root, no capability beyond the set
+  of its level (nothing, reading, an administrator's, the apps' data: each holds the one before),
+  effective within permitted, nothing but reading ambient, `PR_SET_DUMPABLE=0` (nobody attaches a
+  debugger to borrow the capabilities). The test `packaging/test-files.sh` reads
+  `/proc/<pid>/status` of live workers.
 - No file capabilities, no setup step: `rynasd.service` already has `CAP_SETUID`,
-  `CAP_SETGID`, `CAP_DAC_READ_SEARCH` in its bounding set; `NoNewPrivileges=yes` is inherited by
-  the workers.
+  `CAP_SETGID`, `CAP_DAC_READ_SEARCH`, `CAP_DAC_OVERRIDE`, `CAP_FOWNER` and `CAP_CHOWN` in its
+  bounding set; `NoNewPrivileges=yes` is inherited by the workers.
 - **Paths never leave a share**: a virtual path is `/<share>/<plain components>`; `..`, `.`,
   NUL and absolute parts are refused (400 `invalid_value`, `field: path`), a share name is
   matched exactly. Real paths never go to the interface (`Share::public`).
@@ -97,8 +136,8 @@ browser ──HTTPS── rynas-web (user rynas) ──Unix socket── rynasd 
     folder only, so an archive's `a -> /etc` followed by `a/passwd` writes nothing out of it;
     without Landlock the tools' own guards apply (GNU tar delays links that go up or are
     absolute), and what they made is moved into place without following links.
-  - External programs (7z, unrar, tar, ffmpeg) run without the administrator's capability (exec
-    drops it): the worst a race gets them is what the user may read anyway.
+  - External programs (7z, unrar, tar, ffmpeg) run without the administrator's powers over owners
+    (only reading is ambient): the worst a race gets them is what the administrator may read.
 - **Stores** (`/var/lib/rynas/files/`, root 0700, only rynasd reads them): `<user>/prefs.json`,
   `<user>/conns.json` (passwords and imported keys sealed with AES-256-GCM under `conns.key`, made
   once under a lock and never replaced), `<user>/id_ed25519{,.pub}`, `journal/`. A worker gets
@@ -418,7 +457,7 @@ Shapes added to SynoFile's (optional fields, nothing removed): `Share.removable`
 | thumbnails only from `@eaDir` | own cache first, `@eaDir` second, ffmpeg third | generic first |
 | `.name.synofile-part`, `.name.<id>.synofile-upload`, `.rynas-x-*` | `.name.rynas-part`, `.name.<id>.rynas-upload`, `.rynas-x-*`; the old names are hidden and cleaned | rename, compatibility with migrated volumes |
 | recycle through the host's recycle tool (`name_HHMMSS.ext`) | own move, Samba `vfs_recycle` layout (`Copy #N of name`) | the bin SMB uses |
-| only administrators | every signed-in user (admins read everywhere) | rynas roles |
+| only administrators | every signed-in user (admins read and write everywhere in the shares, fenced by Landlock) | rynas roles |
 
 ### Error codes
 
@@ -504,8 +543,9 @@ answer head, 610 s for `upload` and `edit/save`.
   bin as a `files.delete` task, share roots refused).
 - rynas-web `tests/files.rs`: session, CSRF, 5 MiB streamed upload, 413, headers, no gzip.
 - `packaging/test-files.sh` (Debian 13 container, rynasd as root): ownership of what workers
-  create, permission denied for another user, an administrator reading but not writing, jobs and
-  the bin as the user, the worker refusing root, `CapEff` and `NoNewPrivs` of live workers.
+  create, permission denied for another user, an administrator writing over permissions (what she
+  makes is hers, existing files keep their owners; reading only without Landlock ABI 3), jobs and
+  the bin as the user, the worker refusing root, `CapEff`, `CapAmb` and `NoNewPrivs` of live workers.
 
 ### Measurements
 

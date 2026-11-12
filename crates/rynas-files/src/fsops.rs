@@ -97,6 +97,20 @@ fn readonly_subvolume(path: &Path, meta: &Metadata) -> bool {
     rc == 0 && flags & BTRFS_SUBVOL_RDONLY != 0
 }
 
+/// Refuses to rename, move or delete the top of a read-only btrfs snapshot
+/// ([`Entry::readonly`]). Its contents the kernel protects (EROFS, whatever the
+/// capabilities), but its folder lies in the writable subvolume above: an administrator's
+/// worker, which writes over the parent's permissions, would otherwise rename it or move it
+/// into the recycle bin.
+pub fn refuse_snapshot(path: &Path) -> Result<(), ApiError> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() && readonly_subvolume(path, &meta) => {
+            Err(ApiError::read_only(t!("a read-only snapshot cannot be renamed, moved or deleted")))
+        }
+        _ => Ok(()),
+    }
+}
+
 #[derive(Serialize)]
 pub struct Listing {
     pub entries: Vec<Entry>,
@@ -133,19 +147,56 @@ fn bin_full(bin: &Path) -> bool {
     crate::confine::read_dir(bin).is_ok_and(|d| d.flatten().any(|i| !is_system_name(&i.file_name().to_string_lossy())))
 }
 
-/// Whether the user may `mode` the file: access(2), the real user's permissions. In the
-/// apps' data ([`crate::caps::app_data`]) the worker writes over owners, so the effective
-/// identity and its capabilities are asked instead (`AT_EACCESS`; Landlock keeps the
-/// writes in the apps' folders).
+/// Whether the worker may `mode` the file.
+///
+/// An ordinary worker asks access(2): the real user's permissions and ACLs. A worker that
+/// writes over owners ([`crate::caps::writes_over_owners`]: an administrator's) must ask with
+/// its effective identity *and capabilities*: access(2), and faccessat(2) without
+/// `AT_EACCESS`, check with the real credentials and, for a uid other than 0, clear the
+/// effective capabilities first (`access_override_creds` in the kernel), so a folder of
+/// another uid would show as not writable although the worker can write there, and the
+/// interface would hide Delete. faccessat2(2) with `AT_EACCESS` (Linux 5.8) keeps the
+/// worker's credentials: `CAP_DAC_OVERRIDE` counts, and a read-only mount or a read-only
+/// btrfs subvolume still answers EROFS, which no capability overrides. Asked as a system call
+/// of its own: glibc emulates `AT_EACCESS` without faccessat2 from the mode bits alone.
+/// Landlock is not asked (it does not answer access checks): the callers only ask inside the
+/// shares, which the ruleset allows.
 pub fn access(path: &Path, mode: i32) -> bool {
     let Ok(c) = CString::new(path.as_os_str().as_bytes()) else { return false };
     // SAFETY: valid C string
+    let plain = || unsafe { libc::access(c.as_ptr(), mode) == 0 };
+    if !crate::caps::writes_over_owners() {
+        return plain();
+    }
+    // SAFETY: valid C string, integer arguments
+    let rc = unsafe { libc::syscall(libc::SYS_faccessat2, libc::AT_FDCWD, c.as_ptr(), mode, libc::AT_EACCESS) };
+    if rc == 0 {
+        return true;
+    }
+    if io::Error::last_os_error().raw_os_error() != Some(libc::ENOSYS) {
+        return false;
+    }
+    // a kernel older than 5.8: what the capabilities let through, the volume permitting
+    let exists = fs::symlink_metadata(path).is_ok();
+    access_without_faccessat2(plain(), exists, mode & libc::W_OK != 0, || read_only_mount(path))
+}
+
+/// [`access`] for a worker that writes over owners, where the kernel has no faccessat2:
+/// what the user may do anyway, or anything on an existing item but writing on a read-only
+/// volume. (A read-only btrfs snapshot on a writable volume is then not seen here: its top
+/// is flagged by [`Entry::readonly`] and refused by [`refuse_snapshot`], and the kernel
+/// refuses every write inside it.)
+fn access_without_faccessat2(plain: bool, exists: bool, write: bool, read_only: impl FnOnce() -> bool) -> bool {
+    plain || (exists && !(write && read_only()))
+}
+
+/// Whether `path` lies on a filesystem mounted read-only.
+fn read_only_mount(path: &Path) -> bool {
+    let Ok(c) = CString::new(path.as_os_str().as_bytes()) else { return false };
+    // SAFETY: valid C string, a statvfs for the kernel to fill
     unsafe {
-        if crate::caps::app_data() {
-            libc::faccessat(libc::AT_FDCWD, c.as_ptr(), mode, libc::AT_EACCESS) == 0
-        } else {
-            libc::access(c.as_ptr(), mode) == 0
-        }
+        let mut st: libc::statvfs = std::mem::zeroed();
+        libc::statvfs(c.as_ptr(), &mut st) == 0 && st.f_flag & libc::ST_RDONLY != 0
     }
 }
 
@@ -473,6 +524,100 @@ mod tests {
         assert!(!g.matches("IMG_0001.jpeg"));
         assert!(Pattern::new("img_00??.*").matches("IMG_0042.heic"));
         assert!(!Pattern::new("  ").matches("x"));
+    }
+
+    #[test]
+    fn without_faccessat2_the_powers_count_but_never_on_a_read_only_volume() {
+        let ro = || true;
+        let rw = || false;
+        // what the user may do anyway
+        assert!(access_without_faccessat2(true, true, true, ro));
+        // an administrator's worker: any existing item, writable where the volume is
+        assert!(access_without_faccessat2(false, true, true, rw));
+        assert!(!access_without_faccessat2(false, true, true, ro));
+        // reading or opening on a read-only volume is fine
+        assert!(access_without_faccessat2(false, true, false, ro));
+        // nothing there: nothing to do
+        assert!(!access_without_faccessat2(false, false, false, rw));
+    }
+
+    #[test]
+    fn an_ordinary_worker_asks_the_real_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: plain getter
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let t = tempfile::tempdir().unwrap();
+        let locked = t.path().join("locked");
+        fs::create_dir(&locked).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(!crate::caps::writes_over_owners());
+        assert!(access(t.path(), libc::W_OK | libc::X_OK));
+        assert!(access(&locked, libc::R_OK | libc::X_OK));
+        assert!(!access(&locked, libc::W_OK | libc::X_OK));
+        assert!(!access(&t.path().join("missing"), libc::R_OK));
+        assert!(!read_only_mount(t.path()));
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// The trap of access(2) for an administrator's worker, checked in an unprivileged user
+    /// namespace: there the test runs as its own uid (not 0) with every capability effective
+    /// (`unshare --keep-caps`), as a worker with `CAP_DAC_OVERRIDE` does. access(2) says a
+    /// folder of mode 0555 is not writable (the kernel clears the capabilities of a uid other
+    /// than 0 for it), [`access`] says it is (faccessat2 `AT_EACCESS`), and a read-only
+    /// mount stays not writable (EROFS before any capability). Skipped where user namespaces
+    /// or `unshare` are missing.
+    #[test]
+    fn an_administrators_worker_asks_with_its_powers() {
+        use std::os::unix::fs::PermissionsExt;
+        const STEP: &str = "RYNAS_TEST_ACCESS_DIR";
+        if let Ok(dir) = std::env::var(STEP) {
+            // inside the namespace
+            let dir = Path::new(&dir);
+            let (locked, ro) = (dir.join("locked"), dir.join("ro"));
+            assert!(crate::caps::writes_over_owners(), "no CAP_DAC_OVERRIDE in the namespace");
+            let c = CString::new(locked.as_os_str().as_bytes()).unwrap();
+            // SAFETY: valid C string
+            assert_ne!(unsafe { libc::access(c.as_ptr(), libc::W_OK | libc::X_OK) }, 0, "access(2) honoured the capabilities");
+            assert!(access(&locked, libc::W_OK | libc::X_OK));
+            let mounted = std::process::Command::new("mount").args(["--bind", "-o", "ro"]).arg(&ro).arg(&ro).status().is_ok_and(|s| s.success());
+            if mounted {
+                assert!(read_only_mount(&ro));
+                assert!(!access(&ro, libc::W_OK | libc::X_OK));
+                assert!(access(&ro, libc::R_OK | libc::X_OK));
+            } else {
+                eprintln!("no bind mount in the namespace: the read-only part is skipped");
+            }
+            return;
+        }
+        // SAFETY: plain getter
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let t = tempfile::tempdir().unwrap();
+        let (locked, ro) = (t.path().join("locked"), t.path().join("ro"));
+        fs::create_dir(&locked).unwrap();
+        fs::create_dir(&ro).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+        let exe = std::env::current_exe().unwrap();
+        let out = std::process::Command::new("unshare")
+            .args(["--user", "--map-current-user", "--mount", "--keep-caps", "--"])
+            .arg(&exe)
+            .args(["--exact", "fsops::tests::an_administrators_worker_asks_with_its_powers", "--nocapture", "--test-threads=1"])
+            .env(STEP, t.path())
+            .output();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        let Ok(out) = out else {
+            eprintln!("no unshare: skipped");
+            return;
+        };
+        let text = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+        if !out.status.success() && (text.contains("unshare failed") || text.contains("Operation not permitted") || text.contains("unrecognized option")) {
+            eprintln!("no user namespace here: skipped ({})", text.trim());
+            return;
+        }
+        assert!(out.status.success() && text.contains("1 passed"), "{text}");
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! Landlock (Linux 5.13, unprivileged): the archive tools may write below their own folder
-//! only, and an administrator's worker in the apps' data below those app folders only
-//! ([`writes_below_all`], applied by `jobs::manager::worker_command`).
+//! only, and an administrator's worker, which writes over owners, below the shares and
+//! removable drives it writes in (or the apps' folders) only ([`writes_below_all`], applied
+//! by `jobs::manager::worker_command`).
 //!
 //! An archive can hold a link (`a -> /etc`, `a -> ../../other-share`) and then a file below
 //! it (`a/passwd`): a tool that follows its own link writes out of the folder it extracts
@@ -59,9 +60,9 @@ pub fn abi() -> Option<i64> {
     (v > 0).then_some(v)
 }
 
-/// Lowest Landlock ABI under which a worker gets the powers to change the apps' folders over
-/// their owners: ABI 3 handles truncate(2), below it a worker with CAP_DAC_OVERRIDE could
-/// still truncate any file it can name, anywhere.
+/// Lowest Landlock ABI under which a worker gets the powers to write over owners (an
+/// administrator's in the shares, or in the apps' folders): ABI 3 handles truncate(2), below
+/// it a worker with CAP_DAC_OVERRIDE could still truncate any file it can name, anywhere.
 pub const APP_POWERS_ABI: i64 = 3;
 
 /// Whether the kernel can fence the powers to change the apps' folders ([`APP_POWERS_ABI`]);
