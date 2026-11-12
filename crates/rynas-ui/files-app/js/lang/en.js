@@ -175,6 +175,8 @@ export default {
   "Copia con verifica in…": "Copy with verification to…",
   "Sposta con verifica in…": "Move with verification to…",
   "Incolla con verifica": "Paste with verification",
+  "Incolla con verifica (sposta {n})": "Paste with verification (move {n})",
+  "Incolla con verifica ({n})": "Paste with verification ({n})",
   "Copia qui con verifica": "Copy here with verification",
   "Sposta qui con verifica": "Move here with verification",
   "Copia completata e verificata": "Copy complete and verified",

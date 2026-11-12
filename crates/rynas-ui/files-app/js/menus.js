@@ -26,7 +26,7 @@ export const menuMethods = {
         !atRootOrRo && { label: t("Carica cartella…"), icon: "upload", action: () => this.pickUpload("folder", pane) },
         canPaste && !pane.archive && "-",
         canPaste && !pane.archive && { label: t(this.clipboard.op === "cut" ? "Incolla (sposta {n})" : "Incolla ({n})", { n: this.clipboard.paths.length }), icon: "paste", key: "Ctrl+V", action: () => this.paste(pane) },
-        canPaste && !pane.archive && { label: t("Incolla con verifica"), icon: "shield", key: "Ctrl+Shift+V", action: () => this.paste(pane, pane.path, true) },
+        canPaste && !pane.archive && { label: t(this.clipboard.op === "cut" ? "Incolla con verifica (sposta {n})" : "Incolla con verifica ({n})", { n: this.clipboard.paths.length }), icon: "shield", key: "Ctrl+Shift+V", action: () => this.paste(pane, pane.path, true) },
         "-",
         { label: t("Seleziona tutto"), key: "Ctrl+A", action: () => pane.selectAll() },
         { label: prefs.showHidden ? t("Nascondi i file nascosti") : t("Mostra i file nascosti"), icon: prefs.showHidden ? "eyeOff" : "eye", key: "Ctrl+H", action: () => this.toggleHidden() },

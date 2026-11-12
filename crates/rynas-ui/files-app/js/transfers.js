@@ -295,9 +295,10 @@ function onUpdate(job) {
   }
 }
 
-/** "Copy complete", or "… and verified" for a job with verification and no error. */
+/** "Copy complete", or "… and verified" for a job with verification, no error and data that
+ * was actually read back (a move inside one volume is a rename: nothing to verify). */
 function doneLabel(job, op) {
-  return t(job.verify && op.verified && !job.progress.errors ? op.verified : op.done);
+  return t(job.verify && op.verified && !job.progress.errors && job.progress.verify_bytes > 0 ? op.verified : op.done);
 }
 
 function announce(job) {
