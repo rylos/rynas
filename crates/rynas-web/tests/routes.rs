@@ -22,6 +22,10 @@ const INTERNAL: &[(&str, &str)] = &[
     ("/v1/health", "rynas-web's own readiness check"),
     ("/v1/authenticate", "rynas-web's login (PAM behind rynasd)"),
     ("/v1/users/{user}/groups", "rynas-web's session refresh"),
+    (
+        "/v1/pcbackup/restore-choice",
+        "rynas-web's restore TUI administrator login, after its own password and TOTP check",
+    ),
     ("/v1/totp/{user}", "rynas-web's login and /auth/totp/*"),
     ("/v1/totp/{user}/enroll", "rynas-web's /auth/totp/enroll"),
     ("/v1/totp/{user}/confirm", "rynas-web's /auth/totp/confirm"),

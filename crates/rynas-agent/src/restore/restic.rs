@@ -42,6 +42,19 @@ impl ResticSource {
         })
     }
 
+    /// The administrator login (password + TOTP): the PCs with a one-time code each, for
+    /// [`ResticSource::login`].
+    pub fn admin_choice(client: &Client, username: &str, password: &str, totp: &str) -> Result<RestoreChoice, String> {
+        client.post_json(
+            "/api/v1/pcbackup/agent/restore/admin-login",
+            &RestoreAdminLogin {
+                username: username.to_string(),
+                password: password.to_string(),
+                totp: totp.trim().to_string(),
+            },
+        )
+    }
+
     fn repo(&mut self) -> Result<&Opened, String> {
         if self.repo.is_none() {
             let backends = crate::backend::NasBackend::new(self.client.clone(), &self.dev.group).backends();

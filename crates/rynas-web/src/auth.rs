@@ -56,7 +56,7 @@ pub fn session_token(headers: &HeaderMap) -> Option<&str> {
 /// The client's address for the rate limit, the failure log (fail2ban) and notifications:
 /// the TCP peer, or the right-most untrusted `X-Forwarded-For` entry when the request came
 /// from the reverse proxy on this host ([`crate::conn`]). Never a header from anyone else.
-fn client_ip(client: Option<Extension<Client>>) -> IpAddr {
+pub(crate) fn client_ip(client: Option<Extension<Client>>) -> IpAddr {
     client
         .map(|Extension(c)| c.ip)
         .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
@@ -234,25 +234,38 @@ pub async fn login(
             );
             r
         }
-        Err(LoginError::InvalidCredentials) => Error::new(
+        Err(e) => login_failed(&st, &req, ip, e),
+    }
+}
+
+/// The answer to a refused login (the web login and the restore TUI's administrator login).
+pub(crate) fn login_failed(st: &AppState, req: &LoginRequest, ip: IpAddr, e: LoginError) -> Response {
+    match e {
+        LoginError::TotpNotEnabled => Error::new(
+            StatusCode::UNAUTHORIZED,
+            error_codes::TOTP_NOT_ENROLLED,
+            "this login needs an administrator account with TOTP turned on",
+        )
+        .into_response(),
+        LoginError::InvalidCredentials => Error::new(
             StatusCode::UNAUTHORIZED,
             error_codes::INVALID_CREDENTIALS,
             "invalid user name or password",
         )
         .into_response(),
-        Err(LoginError::TotpRequired) => Error::new(
+        LoginError::TotpRequired => Error::new(
             StatusCode::UNAUTHORIZED,
             error_codes::TOTP_REQUIRED,
             "a TOTP code is required",
         )
         .into_response(),
-        Err(LoginError::InvalidTotp) => Error::new(
+        LoginError::InvalidTotp => Error::new(
             StatusCode::UNAUTHORIZED,
             error_codes::INVALID_TOTP,
             "invalid TOTP or recovery code",
         )
         .into_response(),
-        Err(LoginError::RateLimited(d)) => {
+        LoginError::RateLimited(d) => {
             // once per account and lockout window, not for every refused attempt
             st.notifier.emit_once(
                 rynas_notify::checks::auth_lockout(&req.username, &ip.to_string(), d.as_secs()),
@@ -260,7 +273,7 @@ pub async fn login(
             );
             rate_limited(d)
         }
-        Err(LoginError::Unavailable(e)) => {
+        LoginError::Unavailable(e) => {
             tracing::error!("login unavailable: {e}");
             Error::new(
                 StatusCode::SERVICE_UNAVAILABLE,

@@ -529,6 +529,32 @@ pub struct RestoreLogin {
     pub code: String,
 }
 
+/// The restore TUI's other login: an administrator with TOTP turned on (an account without
+/// TOTP is refused). Checked by rynas-web, which then asks rynasd for a [`RestoreChoice`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RestoreAdminLogin {
+    pub username: String,
+    pub password: String,
+    pub totp: String,
+}
+
+/// The PCs an administrator may restore, each with a one-time restore code of its own (5
+/// minutes; using one ends the others). The TUI logs in with the chosen PC's code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RestoreChoice {
+    pub devices: Vec<RestoreChoiceDevice>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RestoreChoiceDevice {
+    pub device: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub hostname: String,
+    pub code: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct RestoreDevice {
     pub device: String,

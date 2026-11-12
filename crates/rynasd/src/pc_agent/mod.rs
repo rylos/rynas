@@ -55,6 +55,8 @@ use crate::ops::{Error, Ops, Res, user};
 
 const PAIRING_TTL_MS: u64 = 15 * 60 * 1000;
 const RESTORE_CODE_TTL_MS: u64 = 3600 * 1000;
+/// The codes of a restore TUI's administrator login: the PC is chosen right away.
+const ADMIN_CODE_TTL_MS: u64 = 5 * 60 * 1000;
 /// A restore session ends after this long without a request (each accepted request pushes
 /// the end out again) …
 pub const SESSION_IDLE_MS: u64 = 3600 * 1000;
@@ -239,6 +241,9 @@ pub struct RestoreCode {
     pub code_sha: String,
     pub device: String,
     pub expires_ms: u64,
+    /// The codes of one administrator login (one per PC): using one ends the others.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -922,6 +927,7 @@ pub fn router(st: PaState) -> Router {
         .route("/v1/pcbackup/devices/{device}/download", get(download_get))
         .route("/v1/pcbackup/devices/{device}/zip", get(zip_get))
         .route("/v1/pcbackup/devices/{device}/restore-code", post(restore_code_post))
+        .route("/v1/pcbackup/restore-choice", post(restore_choice_post))
         .with_state(st.clone())
         .route_layer(axum::middleware::from_fn_with_state(
             crate::roles::AdminGate {
@@ -1533,6 +1539,7 @@ async fn restore_code_post(
             code_sha: code_hash(&code),
             device: device.clone(),
             expires_ms,
+            batch: None,
         });
         Ok(())
     })?;
@@ -1546,6 +1553,35 @@ async fn restore_code_post(
         }),
     )
         .into_response())
+}
+
+async fn restore_choice_post(State(st): State<PaState>, h: HeaderMap) -> Res<Json<RestoreChoice>> {
+    let svc = pa(&st)?;
+    let who = user(&h)?;
+    let batch = new_code()?;
+    let devices = svc.edit(|r| {
+        let now = now_ms();
+        r.restore_codes.retain(|c| c.expires_ms > now);
+        let mut devices = Vec::new();
+        for (name, d) in r.devices.iter() {
+            let code = new_code()?;
+            r.restore_codes.push(RestoreCode {
+                code_sha: code_hash(&code),
+                device: name.clone(),
+                expires_ms: now + ADMIN_CODE_TTL_MS,
+                batch: Some(batch.clone()),
+            });
+            devices.push(RestoreChoiceDevice {
+                device: name.clone(),
+                description: d.settings.description.clone(),
+                hostname: d.hostname.clone(),
+                code,
+            });
+        }
+        Ok(devices)
+    })?;
+    audit(&who, "restore login from a live system", &format!("{} PCs", devices.len()));
+    Ok(Json(RestoreChoice { devices }))
 }
 
 // ------------------------------------------------------------------ the agent
@@ -1675,7 +1711,12 @@ async fn restore_login(
         let now = now_ms();
         r.restore_codes.retain(|c| c.expires_ms > now);
         let i = r.restore_codes.iter().position(|c| c.code_sha == hash);
-        Ok(i.map(|i| r.restore_codes.remove(i)))
+        let code = i.map(|i| r.restore_codes.remove(i));
+        // an administrator login's other codes end with this one
+        if let Some(b) = code.as_ref().and_then(|c| c.batch.as_ref()) {
+            r.restore_codes.retain(|c| c.batch.as_ref() != Some(b));
+        }
+        Ok(code)
     })?;
     let Some(code) = code else {
         return Err(svc.failed(&source));

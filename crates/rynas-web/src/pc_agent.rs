@@ -14,7 +14,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
 use axum::{Extension, Router};
 use http_body_util::{BodyExt, Limited};
-use rynas_api_types::error_codes;
+use rynas_api_types::pcagent::{RestoreAdminLogin, RestoreChoice};
+use rynas_api_types::{LoginRequest, error_codes};
 use rynas_auth::ipc::CLIENT_ADDR_HEADER;
 
 use crate::app::AppState;
@@ -33,10 +34,44 @@ pub fn routes() -> Router<AppState> {
         .route("/pcbackup/agent/status", post(forward))
         .route("/pcbackup/agent/report", post(forward))
         .route("/pcbackup/agent/restore/login", post(forward))
+        .route("/pcbackup/agent/restore/admin-login", post(restore_admin_login))
         .route("/pcbackup/agent/restore/report", post(forward))
         .route("/pcbackup/repo/{group}", post(forward))
         .route("/pcbackup/repo/{group}/", post(forward))
         .route("/pcbackup/repo/{group}/{*rest}", any(forward))
+}
+
+/// The restore TUI's administrator login: password and TOTP checked here like a web login
+/// (same rate limit and lockout), with no session; then rynasd hands out one-time codes for
+/// the PCs, and the TUI logs in with the chosen PC's code as with a restore code.
+async fn restore_admin_login(
+    State(st): State<AppState>,
+    client: Option<Extension<Client>>,
+    body: Result<axum::Json<RestoreAdminLogin>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Ok(axum::Json(req)) = body else {
+        return Error::new(StatusCode::BAD_REQUEST, error_codes::BAD_REQUEST, "invalid JSON body".to_string()).into_response();
+    };
+    let ip = crate::auth::client_ip(client);
+    let login = LoginRequest {
+        username: req.username,
+        password: req.password,
+        totp: Some(req.totp),
+    };
+    match st.auth.verify_admin_totp(ip, &login).await {
+        Ok(user) => {
+            tracing::info!(target: "rynas_auth", "restore login of {} from {ip}", user.username);
+            match st
+                .rynasd
+                .call::<RestoreChoice>(axum::http::Method::POST, "/v1/pcbackup/restore-choice", Some(&user.username), None::<&()>)
+                .await
+            {
+                Ok(c) => axum::Json(c).into_response(),
+                Err(e) => Error::from(e).into_response(),
+            }
+        }
+        Err(e) => crate::auth::login_failed(&st, &login, ip, e),
+    }
 }
 
 const REQUEST_HEADERS: [HeaderName; 5] = [

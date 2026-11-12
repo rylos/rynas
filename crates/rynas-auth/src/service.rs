@@ -47,6 +47,8 @@ pub enum LoginError {
     InvalidCredentials,
     TotpRequired,
     InvalidTotp,
+    /// A login that needs TOTP (the restore TUI's) by an account that has not turned it on.
+    TotpNotEnabled,
     RateLimited(Duration),
     Unavailable(String),
 }
@@ -116,6 +118,25 @@ impl AuthService {
         ip: IpAddr,
         req: &LoginRequest,
     ) -> Result<(String, SessionData), LoginError> {
+        let (info, totp) = self.verify(ip, req, false).await?;
+        Ok(self.sessions.create(info, totp))
+    }
+
+    /// Checks an administrator's password and TOTP code without opening a session: the PC
+    /// restore TUI's second login (D-PCBACKUP). An account without TOTP is refused even with
+    /// the right password, so a password alone never opens a PC's backups from a live system.
+    pub async fn verify_admin_totp(&self, ip: IpAddr, req: &LoginRequest) -> Result<UserInfo, LoginError> {
+        self.verify(ip, req, true).await.map(|(info, _)| info)
+    }
+
+    /// The checks of a login: user, password, group, then TOTP (required by the account, or by
+    /// `need_totp`). Returns the user and whether TOTP was checked.
+    async fn verify(
+        &self,
+        ip: IpAddr,
+        req: &LoginRequest,
+        need_totp: bool,
+    ) -> Result<(UserInfo, bool), LoginError> {
         let started = Instant::now();
         let user = req.username.as_str();
         self.limiter
@@ -177,6 +198,9 @@ impl AuthService {
             .status(&identity.username)
             .await
             .map_err(|e| LoginError::Unavailable(e.to_string()))?;
+        if need_totp && !status.enabled {
+            return Err(self.fail(started, ip, user, LoginError::TotpNotEnabled).await);
+        }
         if status.enabled {
             match req.totp.as_deref().filter(|c| !c.trim().is_empty()) {
                 None => return Err(LoginError::TotpRequired),
@@ -201,7 +225,7 @@ impl AuthService {
             realm,
             role,
         };
-        Ok(self.sessions.create(info, status.enabled))
+        Ok((info, status.enabled))
     }
 
     pub fn logout(&self, id: &SessionId) {

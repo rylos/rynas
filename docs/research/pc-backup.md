@@ -639,7 +639,7 @@ What runs (API in `../phase1/plan.md` "API v1: PC backup, file method"):
 **Not tested in a VM yet:** systemd-boot and UKI, LUKS, LVM snapshots, XFS, Arch and Fedora, the TUI itself (the scripted mode runs the same engine), BIOS boot. LVM and md layouts are refused by the restore of this version (`manual_layout`).
 
 **Open:**
-- the TUI logs in with a restore code only; logging in as an administrator with TOTP is not done;
+- the administrator + TOTP login (2026-11-12, Marco: "si") is only in the TUI, not in the scripted mode. rynas-web checks it like a web login (same rate limit; an account without TOTP is refused), opens no session, and rynasd gives one-time codes for every PC: 5 minutes, one batch, and using one ends the others;
 - a dry run uses up the restore code;
 - the agent binary is not served by the NAS yet (the commands point to the GitHub release);
 - the btrfs method's source in the TUI (B3) is listed there, but is not in this build.

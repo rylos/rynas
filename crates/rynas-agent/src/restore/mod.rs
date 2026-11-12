@@ -1,6 +1,7 @@
 //! `rynas-agent restore`: bare-metal restore from any live Linux, no ISO (D-PCBACKUP).
 //!
-//! The TUI of this version does one thing: NAS → fingerprint → restore code → PC → version →
+//! The TUI of this version does one thing: NAS → fingerprint → restore code (or an
+//! administrator with TOTP, then the PC from a list) → PC → version →
 //! target disk(s) → plan → the disk's name typed → restore → reboot. The same steps run
 //! without the TUI when every answer is on the command line (tests, scripts):
 //! `--nas URL --fingerprint FP --code CODE --version ID|latest --disk /dev/X --confirm X`.

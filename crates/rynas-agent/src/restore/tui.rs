@@ -1,4 +1,5 @@
-//! The restore TUI (ratatui): NAS → certificate → method → restore code → PC → version →
+//! The restore TUI (ratatui): NAS → certificate → method → restore code, or administrator +
+//! TOTP and the PC from a list → version →
 //! target disk → passphrase (LUKS) → plan → the disk name typed → restore (plain log in
 //! the terminal) → reboot. Esc goes back one step, Ctrl-C leaves.
 
@@ -197,6 +198,8 @@ fn flow(term: &mut DefaultTerminal, args: &[String]) -> Result<Option<Job>, Stri
     let mut ep: Option<Endpoint> = None;
     let mut fp = String::new();
     let mut src: Option<restic::ResticSource> = None;
+    let mut admin_user = String::new();
+    let mut choice: Vec<rynas_api_types::pcagent::RestoreChoiceDevice> = Vec::new();
     let mut versions = Vec::new();
     let mut version: Option<super::source::Version> = None;
     let mut manifest: Option<rynas_api_types::pcagent::Manifest> = None;
@@ -268,12 +271,82 @@ fn flow(term: &mut DefaultTerminal, args: &[String]) -> Result<Option<Job>, Stri
                 stage = 3;
             }
             3 => {
+                let items = vec![
+                    ("Restore code, made on the PC page of the NAS".to_string(), None),
+                    ("Administrator of the NAS with TOTP".to_string(), None),
+                ];
+                let intro = vec!["How do you log in to the NAS?".to_string()];
+                let i = step!(choose(term, "Access", &intro, &items), stage = 2);
+                error = None;
+                stage = if i == 0 { 30 } else { 31 };
+            }
+            31 => {
+                let mut help = vec![
+                    "An administrator account of the NAS with TOTP turned on (without TOTP it is refused).".to_string(),
+                    "It can restore any PC; the codes it gets last 5 minutes.".into(),
+                    String::new(),
+                    "User name:".into(),
+                ];
+                help.extend(err_lines(&error));
+                admin_user = step!(input(term, "Administrator", &help, &admin_user, false), stage = 3);
+                let password = step!(input(term, "Password", &[format!("Password of {admin_user}:")], "", true), stage = 3);
+                let totp = step!(input(term, "TOTP", &["The 6-digit code of the authenticator app, or a recovery code:".to_string()], "", false), stage = 3);
+                match restic::ResticSource::admin_choice(&Client::new(ep.clone().ok_or("no NAS")?, &fp), &admin_user, &password, &totp) {
+                    Ok(c) if !c.devices.is_empty() => {
+                        choice = c.devices;
+                        error = None;
+                        stage = 32;
+                    }
+                    Ok(_) => error = Some("the NAS has no PC with backups".into()),
+                    Err(e) => error = Some(e),
+                }
+            }
+            32 => {
+                let items: Vec<(String, Option<String>)> = choice
+                    .iter()
+                    .map(|d| {
+                        let mut s = format!("{}  {}", d.device, d.hostname);
+                        if !d.description.is_empty() {
+                            s.push_str(&format!("  {}", d.description));
+                        }
+                        (s, None)
+                    })
+                    .collect();
+                let mut intro = vec!["Which PC?".to_string()];
+                intro.extend(err_lines(&error));
+                let i = step!(choose(term, "PC", &intro, &items), stage = 31);
+                let d = choice[i].clone();
+                match restic::ResticSource::login(Client::new(ep.clone().ok_or("no NAS")?, &fp), &d.code, Some(&d.device)) {
+                    Ok(mut s) => match s.versions() {
+                        Ok(v) if !v.is_empty() => {
+                            versions = v;
+                            src = Some(s);
+                            error = None;
+                            stage = 4;
+                        }
+                        // the batch is used up: log in again for another PC
+                        Ok(_) => {
+                            error = Some(format!("{} has no version yet; log in again", d.device));
+                            stage = 31;
+                        }
+                        Err(e) => {
+                            error = Some(e);
+                            stage = 31;
+                        }
+                    },
+                    Err(e) => {
+                        error = Some(format!("{e} (the codes last 5 minutes: log in again)"));
+                        stage = 31;
+                    }
+                }
+            }
+            30 => {
                 let mut help = vec![
                     "Restore code: made on the PC page of the NAS (Restore → Restore code).".to_string(),
                     "It works once, for one hour, and only reads.".into(),
                 ];
                 help.extend(err_lines(&error));
-                let code = step!(input(term, "Restore code", &help, "", false), stage = 2);
+                let code = step!(input(term, "Restore code", &help, "", false), stage = 3);
                 match restic::ResticSource::login(Client::new(ep.clone().ok_or("no NAS")?, &fp), &code, None) {
                     Ok(mut s) => match s.versions() {
                         Ok(v) if !v.is_empty() => {
