@@ -1,0 +1,140 @@
+{
+  "format": 1,
+  "written_at_ms": 1762905600000,
+  "agent_version": "0.5.1",
+  "hostname": "pc-1",
+  "machine_id": "",
+  "arch": "x86_64",
+  "os_release": {},
+  "boot": {
+    "uefi": true,
+    "loader": "systemd_boot",
+    "shim": false,
+    "uki": false,
+    "esp": "/boot",
+    "initramfs": "mkinitcpio",
+    "cmdline": "root=UUID=11111111-2222-3333-4444-555555555555 rootflags=subvol=@ rw",
+    "kernels": [
+      "6.17.7-arch1-1"
+    ]
+  },
+  "disks": [
+    {
+      "name": "nvme0n1",
+      "model": "Example NVMe 1TB",
+      "serial": "S123456789",
+      "wwn": "",
+      "size_bytes": 1000204886016,
+      "logical_sector": 512,
+      "table": {
+        "kind": "gpt",
+        "disk_guid": "0D4B3F6A-0000-4000-8000-000000000001",
+        "first_lba": 0,
+        "last_lba": 1953525134,
+        "partitions": [
+          {
+            "number": 1,
+            "start_lba": 2048,
+            "size_lba": 2097152,
+            "type_guid": "C12A7328-F81F-11D2-BA4B-00A0C93EC93B",
+            "part_guid": "0D4B3F6A-0000-4000-8000-000000000002",
+            "name": "EFI",
+            "attrs": 0,
+            "dev": "nvme0n1p1"
+          },
+          {
+            "number": 2,
+            "start_lba": 2099200,
+            "size_lba": 1951425935,
+            "type_guid": "0FC63DAF-8483-4772-8E79-3D69D8477DE4",
+            "part_guid": "0D4B3F6A-0000-4000-8000-000000000003",
+            "name": "root",
+            "attrs": 0,
+            "dev": "nvme0n1p2"
+          }
+        ]
+      }
+    }
+  ],
+  "filesystems": [
+    {
+      "device": "/dev/nvme0n1p2",
+      "source": {
+        "kind": "partition",
+        "disk": 0,
+        "number": 2
+      },
+      "fstype": "btrfs",
+      "uuid": "11111111-2222-3333-4444-555555555555",
+      "label": "",
+      "mounts": [
+        {
+          "path": "/",
+          "subvol": "@",
+          "options": "rw,noatime"
+        },
+        {
+          "path": "/home",
+          "subvol": "@home",
+          "options": "rw,noatime"
+        },
+        {
+          "path": "/var/log",
+          "subvol": "@log",
+          "options": "rw,noatime"
+        }
+      ],
+      "size_bytes": 0,
+      "used_bytes": 0,
+      "features": [],
+      "subvolumes": [
+        {
+          "path": "@",
+          "id": 256,
+          "captured": true,
+          "nocow": false
+        },
+        {
+          "path": "@home",
+          "id": 257,
+          "captured": true,
+          "nocow": false
+        },
+        {
+          "path": "@log",
+          "id": 258,
+          "captured": false,
+          "nocow": false
+        }
+      ]
+    }
+  ],
+  "luks": [],
+  "swap": [],
+  "md": [],
+  "fstab": "UUID=11111111-2222-3333-4444-555555555555 / btrfs subvol=/@,noatime 0 0\n",
+  "btrbk": {
+    "snapshot_dir": "/.btrbk_snapshots",
+    "subvolumes": [
+      {
+        "name": "@",
+        "path": "@",
+        "mount": "/"
+      },
+      {
+        "name": "@home",
+        "path": "@home",
+        "mount": "/home"
+      }
+    ],
+    "boot_copies": [
+      {
+        "mount": "/boot",
+        "dir": "/.rynas/boot/boot",
+        "bytes": 12309,
+        "files": 3,
+        "signature": "fixture"
+      }
+    ]
+  }
+}

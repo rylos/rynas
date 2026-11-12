@@ -6,6 +6,7 @@
 //! rynas-agent backup              one backup now, in the foreground
 //! rynas-agent status              pairing, plan, last backup
 //! rynas-agent manifest [--print]  writes /.rynas/manifest.json (or prints it)
+//! rynas-agent btrbk-setup ...     the btrfs method: btrbk.conf, key and manifest hooks
 //! rynas-agent restore [...]       bare-metal restore from a live system (TUI)
 //! ```
 //!
@@ -14,6 +15,7 @@
 
 mod backend;
 mod backup;
+mod btrbk;
 mod btrfs;
 mod freeze;
 // the whole GPT reader/writer of abb-restore: the btrfs method's restore will use the rest
@@ -42,7 +44,9 @@ const USAGE: &str = "usage:
   rynas-agent run
   rynas-agent backup
   rynas-agent status
-  rynas-agent manifest [--print]
+  rynas-agent manifest [--print] [--quiet]
+  rynas-agent btrbk-setup --nas ssh://HOST[:PORT]/PATH --device NAME [--retention nas|pc]
+                          [--dry-run] [--yes]
   rynas-agent restore [--nas URL] [--code CODE] [--fingerprint FP] [--version ID]
                       [--disk /dev/X] [--confirm X] [--allow-http] [--dry-run]
   rynas-agent --version";
@@ -56,7 +60,7 @@ fn opt(args: &[String], name: &str) -> Option<String> {
 }
 
 fn positional(args: &[String]) -> Vec<String> {
-    let with_value = ["--fingerprint", "--nas", "--code", "--version", "--disk", "--confirm", "--passphrase-file"];
+    let with_value = ["--fingerprint", "--nas", "--code", "--version", "--disk", "--confirm", "--passphrase-file", "--device", "--retention", "--root"];
     let mut out = Vec::new();
     let mut skip = false;
     // the program's own name is not an argument
@@ -247,17 +251,141 @@ fn status() -> Result<(), String> {
 
 fn manifest_cmd(args: &[String]) -> Result<(), String> {
     root_only()?;
-    let m = manifest::collect(&BTreeMap::new());
-    if flag(args, "--print") {
+    let print = flag(args, "--print");
+    let quiet = flag(args, "--quiet");
+    let root = std::path::Path::new("/");
+    let mut m = manifest::collect(&BTreeMap::new());
+    // the btrfs method: the btrbk block and the boot copies (never for --print)
+    if let Ok(conf) = std::fs::read_to_string(root.join(btrbk::CONF)) {
+        for p in manifest::add_btrbk(&mut m, &mounts::read(), &conf, root, !print) {
+            eprintln!("rynas-agent: {p}");
+        }
+    }
+    if print {
         println!("{}", serde_json::to_string_pretty(&m).map_err(|e| e.to_string())?);
         return Ok(());
     }
-    let p = manifest::write(&m, std::path::Path::new("/"))?;
-    let reasons = m.ready_reasons();
+    let p = manifest::write(&m, root)?;
+    if quiet {
+        return Ok(());
+    }
     println!("{} written", p.display());
+    if let Some(b) = &m.btrbk {
+        for c in &b.boot_copies {
+            println!("{} copied to {} ({} files, {} bytes)", c.mount, c.dir, c.files, c.bytes);
+            if !c.skipped.is_empty() {
+                println!("  left out as key material: {}", c.skipped.join(", "));
+            }
+        }
+    }
+    let reasons = m.ready_reasons();
     if !reasons.is_empty() {
         println!("bare-metal notes: {reasons:?}");
     }
+    Ok(())
+}
+
+/// `btrbk-setup`: this PC's btrbk for the NAS' btrfs method (`docs/research/pc-backup.md`
+/// §11.2.5): `btrbk.conf` from the real subvolumes, the key, the manifest hooks, one
+/// manifest. Nothing that exists is replaced without a diff and a confirmation (`--yes`),
+/// and the old file is kept. `--root DIR` writes under DIR instead of `/` (tests).
+fn btrbk_setup(args: &[String]) -> Result<(), String> {
+    let dry = flag(args, "--dry-run");
+    if !dry {
+        root_only()?;
+    }
+    let root = std::path::PathBuf::from(opt(args, "--root").unwrap_or_else(|| "/".into()));
+    let live = root == std::path::Path::new("/");
+    let target = opt(args, "--nas").ok_or(USAGE)?;
+    let device = opt(args, "--device").ok_or(USAGE)?;
+    let nas_retention = match opt(args, "--retention").as_deref() {
+        None | Some("nas") => true,
+        Some("pc") => false,
+        Some(o) => return Err(format!("--retention {o}: nas or pc")),
+    };
+    let agent = std::env::current_exe()
+        .ok()
+        .and_then(|p| std::fs::canonicalize(p).ok())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "/usr/bin/rynas-agent".into());
+    let all = mounts::read();
+    let layout = btrbk::layout(&all)?;
+    let existing = std::fs::read_to_string(root.join(btrbk::CONF)).map(|t| btrbk::parse_conf(&t)).unwrap_or_default();
+    let o = btrbk::Opts { device: device.clone(), target: target.clone(), nas_retention, agent: agent.clone() };
+    let plan = btrbk::plan(&o, &layout, &existing, &all, btrbk::Distro::detect(&root))?;
+    println!("Subvolumes of this PC:");
+    for c in &layout.subvolumes {
+        match (c.skip, plan.sent.iter().find(|s| s.path == c.path)) {
+            (None, Some(s)) => println!("  send      {:<24} {} (snapshots named {})", c.mount, c.path, s.name),
+            (Some(why), _) => println!("  not sent  {:<24} {} ({why})", c.mount, c.path),
+            _ => {}
+        }
+    }
+    println!("Local snapshots in {}", plan.snapshot_dir);
+    let changes = btrbk::changes(&plan.files, &root);
+    for c in &changes {
+        let p = root.join(&c.file.rel);
+        match &c.old {
+            Some(old) => println!("\n--- {} (changes)\n{}", p.display(), btrbk::diff(old, &c.file.content)),
+            None => println!("\n--- {} (new)\n{}", p.display(), c.file.content),
+        }
+    }
+    if changes.is_empty() {
+        println!("\nThe configuration and the hooks are already in place.");
+    }
+    for n in &plan.notes {
+        println!("note: {n}");
+    }
+    let key = root.join(btrbk::KEY);
+    let pubkey = std::path::PathBuf::from(format!("{}.pub", key.display()));
+    if dry {
+        if !pubkey.exists() {
+            println!("would create the key {}", key.display());
+        }
+        println!("dry run: nothing written");
+        return Ok(());
+    }
+    if changes.iter().any(btrbk::Change::replaces_foreign) && !flag(args, "--yes") {
+        // SAFETY: plain query of a descriptor
+        if unsafe { libc::isatty(0) } != 1 {
+            return Err("existing files would change (diff above): run again with --yes to replace them (the old ones are kept)".into());
+        }
+        if !ask("Replace the files above? The old ones are kept as .bak [y/N] ").eq_ignore_ascii_case("y") {
+            return Err("nothing changed".into());
+        }
+    }
+    let stamp = now_ms().to_string();
+    for b in btrbk::apply(&changes, &root, &stamp)? {
+        println!("kept the old file as {}", b.display());
+    }
+    let snap = root.join(plan.snapshot_dir.trim_start_matches('/'));
+    std::fs::create_dir_all(&snap).map_err(|e| format!("{}: {e}", snap.display()))?;
+    if !pubkey.exists() {
+        let dir = key.parent().unwrap_or(&root);
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let _ = std::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700));
+        let ok = std::process::Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-C", &format!("btrbk@{device}"), "-f"])
+            .arg(&key)
+            .status()
+            .map_err(|e| format!("ssh-keygen: {e} (install openssh)"))?;
+        if !ok.success() {
+            return Err("ssh-keygen failed".into());
+        }
+    }
+    if live {
+        let _ = std::process::Command::new("systemctl").arg("daemon-reload").status();
+        manifest_cmd(&["rynas-agent".into(), "manifest".into()])?;
+    }
+    let line = std::fs::read_to_string(&pubkey).map_err(|e| format!("{}: {e}", pubkey.display()))?;
+    let (host, port) = btrbk::target_host(&target);
+    let p = port.filter(|p| *p != 22).map(|p| format!(" -p {p}")).unwrap_or_default();
+    println!("\n1. Paste this public key into rynas (Backup, PCs: btrfs snapshots, {device}, Settings):\n\n{}\n", line.trim());
+    println!("2. Then, on this PC:");
+    println!("   sudo ssh -i /{}{p} {}@{host}     (accept the NAS key once)", btrbk::KEY, btrbk::ACCOUNT);
+    println!("   sudo btrbk -v dryrun");
+    println!("   sudo btrbk -v run");
+    println!("   sudo systemctl enable --now btrbk.timer");
     Ok(())
 }
 
@@ -274,6 +402,7 @@ fn main() {
         "backup" => backup_cmd(&args),
         "status" => status(),
         "manifest" => manifest_cmd(&args),
+        "btrbk-setup" => btrbk_setup(&args),
         "restore" => root_only().and_then(|_| restore::main(&args)),
         _ => Err(USAGE.into()),
     };

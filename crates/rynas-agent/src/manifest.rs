@@ -3,8 +3,8 @@
 //! btrfs subvolumes, LUKS parameters (never a header or a key slot), md/LVM reports, swap,
 //! fstab, crypttab, the kernel command line and the boot loader. Written into the root
 //! filesystem (temporary file + rename) before every run, so every version carries the
-//! layout of its own moment; also by `rynas-agent manifest` (and, later, the btrfs method's
-//! hooks).
+//! layout of its own moment; also by `rynas-agent manifest`, which the btrfs method's hooks
+//! run (btrbk drop-in, package managers; [`add_btrbk`] adds the btrbk block and boot copies).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -378,7 +378,8 @@ pub fn statvfs(path: &str) -> (u64, u64) {
     }
 }
 
-/// Writes the manifest into `/.rynas/manifest.json` of the root filesystem.
+/// Writes the manifest into `/.rynas/manifest.json` of the root filesystem (temporary file,
+/// fsync, rename, fsync of the folder).
 pub fn write(m: &Manifest, root: &Path) -> Result<PathBuf, String> {
     let dir = root.join(".rynas");
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -391,7 +392,45 @@ pub fn write(m: &Manifest, root: &Path) -> Result<PathBuf, String> {
         );
     }
     crate::state::write_atomic(&p, &serde_json::to_vec_pretty(m).map_err(|e| e.to_string())?, 0o600)?;
+    if let Ok(d) = std::fs::File::open(&dir) {
+        let _ = d.sync_all();
+    }
     Ok(p)
+}
+
+/// The btrfs method's part of the manifest: the btrbk block read from `btrbk.conf` (none
+/// when it sends nothing) and, with `copy`, the boot filesystems outside the sent subvolumes
+/// copied into `<root>/.rynas/boot/` (unchanged trees are not copied again). Returns the
+/// problems met (a failed copy never stops the manifest).
+pub fn add_btrbk(m: &mut Manifest, all: &[Mount], conf: &str, root: &Path, copy: bool) -> Vec<String> {
+    use crate::btrbk;
+    let Some(mut b) = btrbk::manifest_block(&btrbk::parse_conf(conf), all) else {
+        return Vec::new();
+    };
+    btrbk::mark_captured(m, &b, all);
+    let mut problems = Vec::new();
+    if copy {
+        let previous: Vec<BootCopy> = std::fs::read(root.join(".rynas/manifest.json"))
+            .ok()
+            .and_then(|t| serde_json::from_slice::<Manifest>(&t).ok())
+            .and_then(|old| old.btrbk)
+            .map(|o| o.boot_copies)
+            .unwrap_or_default();
+        let boot_dir = root.join(".rynas/boot");
+        for mount in btrbk::boot_mounts(all, &b.subvolumes) {
+            let src = root.join(mount.trim_start_matches('/'));
+            match btrbk::copy_boot(&src, &mount, &boot_dir, "/.rynas/boot", previous.iter().find(|p| p.mount == mount)) {
+                Ok(c) => b.boot_copies.push(c),
+                Err(e) => problems.push(format!("copy of {mount}: {e}")),
+            }
+        }
+        // a failed copy keeps its previous folder; a mount that is gone loses it
+        let mut keep = b.boot_copies.clone();
+        keep.extend(previous.into_iter().filter(|p| problems.iter().any(|e| e.starts_with(&format!("copy of {}:", p.mount)))));
+        btrbk::prune_copies(&boot_dir, &keep);
+    }
+    m.btrbk = Some(b);
+    problems
 }
 
 #[cfg(test)]
@@ -422,5 +461,99 @@ mod tests {
         assert_eq!(b.efi_id.as_deref(), Some("debian"));
         assert_eq!(b.initramfs, InitramfsTool::UpdateInitramfs);
         assert_eq!(b.grub_cmdline.as_deref(), Some("quiet"));
+    }
+
+    /// The btrfs method's manifest from fixture inputs (mount table, btrbk.conf, a boot
+    /// tree), compared with the golden file the NAS-side parser test reads
+    /// (`rynasd::pc_backup` tests). `RYNAS_UPDATE_GOLDEN=1` rewrites it.
+    #[test]
+    fn btrbk_manifest_matches_what_the_nas_reads() {
+        let t = tempfile::tempdir().unwrap();
+        let r = t.path();
+        std::fs::create_dir_all(r.join("boot/EFI/systemd")).unwrap();
+        std::fs::create_dir_all(r.join("boot/loader/entries")).unwrap();
+        std::fs::write(r.join("boot/EFI/systemd/systemd-bootx64.efi"), vec![0u8; 4096]).unwrap();
+        std::fs::write(r.join("boot/loader/entries/arch.conf"), "linux /vmlinuz-linux\n").unwrap();
+        std::fs::write(r.join("boot/vmlinuz-linux"), vec![1u8; 8192]).unwrap();
+        std::fs::create_dir_all(r.join("usr/lib/modules/6.17.7-arch1-1")).unwrap();
+        std::fs::create_dir_all(r.join("usr/bin")).unwrap();
+        std::fs::write(r.join("usr/bin/mkinitcpio"), b"").unwrap();
+        std::fs::create_dir_all(r.join("etc")).unwrap();
+        std::fs::write(r.join("etc/mkinitcpio.conf"), b"").unwrap();
+        let all = mounts::parse(
+            "22 1 0:25 /@ / rw,noatime shared:1 - btrfs /dev/nvme0n1p2 rw,subvolid=256,subvol=/@
+40 22 0:25 /@home /home rw,noatime shared:2 - btrfs /dev/nvme0n1p2 rw,subvolid=257,subvol=/@home
+42 22 0:25 /@log /var/log rw,noatime shared:4 - btrfs /dev/nvme0n1p2 rw,subvolid=258,subvol=/@log
+45 22 259:1 / /boot rw,relatime shared:7 - vfat /dev/nvme0n1p1 rw,fmask=0077,dmask=0077
+",
+        );
+        let conf = "snapshot_dir /.btrbk_snapshots\nsubvolume /\n  snapshot_name @\n  target ssh://nas.example.lan/volume1/backup/pc-1\nsubvolume /home\n  snapshot_name @home\n  target ssh://nas.example.lan/volume1/backup/pc-1\n";
+        let sub = |path: &str, id| Subvolume { path: path.into(), id, captured: true, nocow: false };
+        let mut m = Manifest {
+            format: MANIFEST_FORMAT,
+            written_at_ms: 1_762_905_600_000,
+            agent_version: "0.5.1".into(),
+            hostname: "pc-1".into(),
+            arch: "x86_64".into(),
+            boot: BootInfo { uefi: true, ..boot_info(r, Some("/boot"), "root=UUID=11111111-2222-3333-4444-555555555555 rootflags=subvol=@ rw") },
+            disks: vec![Disk {
+                name: "nvme0n1".into(),
+                model: "Example NVMe 1TB".into(),
+                serial: "S123456789".into(),
+                size_bytes: 1_000_204_886_016,
+                logical_sector: 512,
+                table: Some(PartTable {
+                    kind: "gpt".into(),
+                    disk_guid: "0D4B3F6A-0000-4000-8000-000000000001".into(),
+                    first_lba: 0,
+                    last_lba: 1_953_525_134,
+                    partitions: vec![
+                        Partition { number: 1, start_lba: 2048, size_lba: 2_097_152, type_guid: "C12A7328-F81F-11D2-BA4B-00A0C93EC93B".into(), part_guid: "0D4B3F6A-0000-4000-8000-000000000002".into(), name: "EFI".into(), attrs: 0, dev: "nvme0n1p1".into() },
+                        Partition { number: 2, start_lba: 2_099_200, size_lba: 1_951_425_935, type_guid: "0FC63DAF-8483-4772-8E79-3D69D8477DE4".into(), part_guid: "0D4B3F6A-0000-4000-8000-000000000003".into(), name: "root".into(), attrs: 0, dev: "nvme0n1p2".into() },
+                    ],
+                }),
+                ..Default::default()
+            }],
+            filesystems: vec![Filesystem {
+                device: "/dev/nvme0n1p2".into(),
+                source: FsSource::Partition { disk: 0, number: 2 },
+                fstype: "btrfs".into(),
+                uuid: "11111111-2222-3333-4444-555555555555".into(),
+                mounts: vec![
+                    MountEntry { path: "/".into(), subvol: Some("@".into()), options: "rw,noatime".into() },
+                    MountEntry { path: "/home".into(), subvol: Some("@home".into()), options: "rw,noatime".into() },
+                    MountEntry { path: "/var/log".into(), subvol: Some("@log".into()), options: "rw,noatime".into() },
+                ],
+                subvolumes: vec![sub("@", 256), sub("@home", 257), sub("@log", 258), sub("@/.btrbk_snapshots/@home.20261111T0300", 300)],
+                ..Default::default()
+            }],
+            fstab: "UUID=11111111-2222-3333-4444-555555555555 / btrfs subvol=/@,noatime 0 0\n".into(),
+            ..Default::default()
+        };
+        let problems = add_btrbk(&mut m, &all, conf, r, true);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(m.boot.loader, Loader::SystemdBoot);
+        assert_eq!(m.boot.initramfs, InitramfsTool::Mkinitcpio);
+        let b = m.btrbk.as_mut().unwrap();
+        assert_eq!(b.boot_copies.len(), 1);
+        assert_eq!((b.boot_copies[0].mount.as_str(), b.boot_copies[0].files, b.boot_copies[0].bytes), ("/boot", 3, 4096 + 8192 + 21));
+        assert!(r.join(".rynas/boot/boot/vmlinuz-linux").exists());
+        // the signature holds file times: fixed for the golden file
+        b.boot_copies[0].signature = "fixture".into();
+        // @log is recreated empty, local btrbk snapshots are not part of the layout
+        let caps: Vec<_> = m.filesystems[0].subvolumes.iter().map(|s| (s.path.as_str(), s.captured)).collect();
+        assert_eq!(caps, [("@", true), ("@home", true), ("@log", false)]);
+        // written atomically: no temporary file left
+        let p = write(&m, r).unwrap();
+        assert!(!r.join(".rynas/manifest.tmp").exists());
+        let back: Manifest = serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap();
+        assert_eq!(back, m);
+        let golden = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../rynasd/tests/golden/pc-manifest-b2.json");
+        let text = serde_json::to_string_pretty(&m).unwrap() + "\n";
+        if std::env::var_os("RYNAS_UPDATE_GOLDEN").is_some() {
+            std::fs::write(&golden, &text).unwrap();
+        }
+        let want: Manifest = serde_json::from_str(&std::fs::read_to_string(&golden).unwrap()).unwrap();
+        assert_eq!(want, m, "golden file differs: RYNAS_UPDATE_GOLDEN=1 rewrites it");
     }
 }

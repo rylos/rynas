@@ -209,6 +209,15 @@ pub struct BareMetal {
     /// The PC's boot loader as the manifest names it.
     #[serde(default)]
     pub loader: Option<String>,
+    /// The PC's layout from the manifest, for display: disks with their partitions, and
+    /// btrbk name → subvolume path → mount point (`docs/research/pc-backup.md` §11.2.4).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disks: Vec<crate::pcagent::Disk>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layout: Vec<crate::pcagent::BtrbkSubvolume>,
+    /// Boot filesystems the PC copies into its root subvolume (ESP, separate `/boot`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub boot_copies: Vec<crate::pcagent::BootCopy>,
     /// What stops a restore (empty when ready).
     #[serde(default)]
     pub missing: Vec<BareMetalGap>,
@@ -338,6 +347,10 @@ pub struct PcTargetDetail {
     pub key_commands: String,
     pub client_config: String,
     pub test_commands: String,
+    /// The one command that does all of the above on a PC with `rynas-agent`
+    /// (`rynas-agent btrbk-setup --nas ssh://… --device …`).
+    #[serde(default)]
+    pub agent_setup: String,
     /// The snapshots grouped by run, newest first.
     #[serde(default)]
     pub runs: Vec<PcRun>,

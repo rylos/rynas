@@ -973,6 +973,10 @@ struct Manifest {
     subvolumes: Vec<String>,
     /// One of them is mounted at `/`.
     root: bool,
+    /// For display only (§11.2.4): kept when they parse, dropped otherwise.
+    disks: Vec<rynas_api_types::pcagent::Disk>,
+    layout: Vec<rynas_api_types::pcagent::BtrbkSubvolume>,
+    boot_copies: Vec<rynas_api_types::pcagent::BootCopy>,
 }
 
 /// A manifest found in a snapshot, or why it cannot be used.
@@ -1000,11 +1004,25 @@ fn parse_manifest(b: &[u8]) -> ManifestRead {
             subvolumes.push(name);
         }
     }
+    // the display parts: typed, bounded, and never a reason to refuse the manifest
+    fn shown<T: serde::de::DeserializeOwned>(v: Option<&serde_json::Value>, max: usize) -> Vec<T> {
+        let Some(a) = v.and_then(serde_json::Value::as_array) else { return Vec::new() };
+        a.iter().take(max).filter_map(|x| serde_json::from_value(x.clone()).ok()).collect()
+    }
+    let mut disks: Vec<rynas_api_types::pcagent::Disk> = shown(v.get("disks"), 16);
+    for d in &mut disks {
+        if let Some(t) = &mut d.table {
+            t.partitions.truncate(128);
+        }
+    }
     Ok(Manifest {
         written_at_ms: v.get("written_at_ms").and_then(serde_json::Value::as_u64),
         loader: v.pointer("/boot/loader").and_then(serde_json::Value::as_str).and_then(short),
         subvolumes,
         root,
+        disks,
+        layout: shown(v.pointer("/btrbk/subvolumes"), 256),
+        boot_copies: shown(v.pointer("/btrbk/boot_copies"), 8),
     })
 }
 
@@ -1051,6 +1069,9 @@ fn bare_metal(
             }
             b.subvolumes = m.subvolumes;
             b.loader = m.loader;
+            b.disks = m.disks;
+            b.layout = m.layout;
+            b.boot_copies = m.boot_copies;
         }
     }
     b.ready = b.missing.is_empty();
@@ -1918,6 +1939,7 @@ async fn detail_get(
                 key_line,
                 key_commands: receive::client_key_commands(&device),
                 client_config: receive::client_config(&device, &host, port, &t.path, nas),
+                agent_setup: receive::agent_setup_command(&device, &host, port, &t.path, nas),
                 test_commands: receive::client_test_commands(&host, port),
                 target: v.target,
                 list: v.list,
@@ -2684,6 +2706,31 @@ mod tests {
         // no manifest at all (the PC side comes later), no snapshots at all
         assert_eq!(bare_metal(&groups, None, None).missing[0].code, BareMetalCode::NoManifest);
         assert_eq!(bare_metal(&BTreeSet::new(), None, None).missing[0].code, BareMetalCode::NoSnapshots);
+    }
+
+    /// The manifest `rynas-agent manifest` writes on a btrbk PC (golden file produced by the
+    /// agent's own test from fixture inputs) is what B1 reads.
+    #[test]
+    fn manifest_written_by_the_agent() {
+        let m = parse_manifest(include_bytes!("../tests/golden/pc-manifest-b2.json")).unwrap();
+        assert_eq!(m.subvolumes, ["@", "@home"]);
+        assert!(m.root);
+        assert_eq!(m.loader.as_deref(), Some("systemd_boot"));
+        assert_eq!(m.written_at_ms, Some(1_762_905_600_000));
+        assert_eq!(m.disks.len(), 1);
+        assert_eq!(m.disks[0].table.as_ref().unwrap().partitions.len(), 2);
+        assert_eq!(m.layout[1].mount, "/home");
+        assert_eq!(m.boot_copies[0].mount, "/boot");
+        let groups = BTreeSet::from(["@".to_string(), "@home".to_string()]);
+        let b = bare_metal(&groups, Some(("@.20261112T0300".into(), Some(1_762_905_700_000), Ok(m))), None);
+        assert!(b.ready, "{:?}", b.missing);
+        assert_eq!(b.disks[0].serial, "S123456789");
+        assert_eq!(b.layout[0].path, "@");
+        // display parts that do not parse are dropped, the manifest stays usable
+        let odd = br#"{"format":1,"boot":{"loader":"grub"},"disks":[{"name":5}],
+            "btrbk":{"subvolumes":[{"name":"@","mount":"/"}],"boot_copies":"x"}}"#;
+        let m = parse_manifest(odd).unwrap();
+        assert!(m.disks.is_empty() && m.boot_copies.is_empty() && m.root);
     }
 
     #[test]

@@ -883,6 +883,27 @@ pub struct BtrbkLayout {
     #[serde(default)]
     pub snapshot_dir: String,
     pub subvolumes: Vec<BtrbkSubvolume>,
+    /// Boot filesystems outside every sent subvolume (the ESP, a separate non-btrfs
+    /// `/boot`), copied as files into the root subvolume so its snapshots carry them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub boot_copies: Vec<BootCopy>,
+}
+
+/// One boot filesystem copied into `/.rynas/boot/<name>/` (one copy kept, replaced whole).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BootCopy {
+    /// The mount point copied (`/boot/efi`).
+    pub mount: String,
+    /// Where the copy is on the PC (`/.rynas/boot/boot-efi`).
+    pub dir: String,
+    pub bytes: u64,
+    pub files: u64,
+    /// SHA-256 of the copied names, sizes and times: an unchanged tree is not copied again.
+    #[serde(default)]
+    pub signature: String,
+    /// Files left out because they look like key material (`*.key`, `*keyfile*`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<String>,
 }
 
 /// One subvolume the btrfs method sends: btrbk name → subvolume path → mount point.
@@ -1012,6 +1033,7 @@ mod tests {
             btrbk: Some(BtrbkLayout {
                 snapshot_dir: "/.snapshots".into(),
                 subvolumes: vec![BtrbkSubvolume { name: "@".into(), path: "@".into(), mount: "/".into() }],
+                boot_copies: Vec::new(),
             }),
             ..Default::default()
         };

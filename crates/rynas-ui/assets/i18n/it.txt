@@ -4772,6 +4772,19 @@ bk.copy_text	{path} viene copiato con le sue cartelle nella cartella che scegli.
 bkpc.copied	{path} copiato
 bkpc.col.restore	Ripristino completo
 bkpc.bm.ready	Pronto
+bkpc.bm.disks	Dischi
+bkpc.bm.serial	N. di serie {serial}
+bkpc.bm.part_line	Partizione {n} · {size}
+bkpc.bm.boot_copies	File di avvio copiati
+bkpc.bm.copy_line	{mount} in {dir} ({size})
+bkpc.agent_step	Con rynas-agent (consigliato)
+bkpc.agent_intro	Installa rynas-agent sul PC (pacchetto o file della release), poi esegui questo comando. Legge i sottovolumi del PC, scrive /etc/btrbk/btrbk.conf (prima mostra le modifiche e conserva il file vecchio), crea la chiave, installa gli hook che tengono aggiornato il manifest della struttura e stampa la chiave da incollare nelle Impostazioni.
+bkpc.manual_steps	Senza l'agente
+bkpc.first_run	Primo backup
+bkpc.first_run_intro	Il PC è configurato quando è arrivato il primo snapshot di ogni sottovolume.
+bkpc.first_run_ok	Ricevuto
+bkpc.first_run_wait	In attesa
+bkpc.first_run_none	Ancora nessuno snapshot ricevuto.
 bkpc.bm.not_ready	Non pronto
 bkpc.bm.title	Ripristino su un disco vuoto
 bkpc.bm.intro	Se questi snapshot bastano per ricostruire il PC su un disco nuovo: il manifest della struttura che il PC tiene nel suo sottovolume di root, e uno snapshot di ogni sottovolume che elenca.

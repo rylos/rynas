@@ -426,6 +426,26 @@ pub fn client_config(
     )
 }
 
+/// The btrbk target URL of a device folder (`ssh://host[:port]/path`).
+pub fn target_url(host: &str, port: Option<u16>, path: &str) -> String {
+    match port {
+        Some(p) if p != 22 => format!("ssh://{host}:{p}{path}"),
+        _ => format!("ssh://{host}{path}"),
+    }
+}
+
+/// The one command that sets up a PC with `rynas-agent`: it reads the PC's subvolumes,
+/// writes the same `btrbk.conf` settings as [`client_config`] (diff and confirmation when
+/// one exists), makes the key and installs the manifest hooks
+/// (`docs/research/pc-backup.md` §11.2.5).
+pub fn agent_setup_command(device: &str, host: &str, port: Option<u16>, path: &str, nas_retention: bool) -> String {
+    let retention = if nas_retention { "nas" } else { "pc" };
+    format!(
+        "sudo rynas-agent btrbk-setup --nas {} --device {device} --retention {retention}",
+        target_url(host, port, path)
+    )
+}
+
 /// The commands that make the PC's key and print the public half.
 pub fn client_key_commands(device: &str) -> String {
     format!(
@@ -722,6 +742,11 @@ mod tests {
         assert!(c.contains("target_preserve_min    all") && !c.contains("20d 10w"));
         assert!(client_test_commands("nas", Some(2222)).contains("-p 2222 rynas-pcbackup@nas"));
         assert!(client_key_commands("laptop").contains("btrbk@laptop"));
+        assert_eq!(
+            agent_setup_command("laptop", "nas.local", Some(2222), "/volume1/backup/laptop", true),
+            "sudo rynas-agent btrbk-setup --nas ssh://nas.local:2222/volume1/backup/laptop --device laptop --retention nas"
+        );
+        assert!(agent_setup_command("l", "nas", Some(22), "/a/b", false).contains("--nas ssh://nas/a/b --device l --retention pc"));
     }
 
     #[test]

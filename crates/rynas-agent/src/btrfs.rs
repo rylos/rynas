@@ -26,6 +26,8 @@ pub fn excluded_subvolume(rel: &str) -> bool {
     let last = rel.rsplit('/').next().unwrap_or(rel);
     last == ".snapshots"
         || last == SNAP_DIR
+        // btrbk's local snapshots (the usual folder names and the agent's default)
+        || rel.split('/').any(|c| c == "btrbk_snapshots" || c == ".btrbk_snapshots")
         || rel.contains("timeshift-btrfs")
         || rel.contains("var/lib/docker/btrfs")
         || rel.contains("var/lib/containers/storage")
@@ -113,6 +115,7 @@ mod tests {
         assert!(excluded_subvolume("home/.snapshots"));
         assert!(excluded_subvolume("var/lib/docker/btrfs/subvolumes/abc"));
         assert!(excluded_subvolume(".rynas-snap/run-1"));
+        assert!(excluded_subvolume(".btrbk_snapshots/@.20261112T0300"));
         assert!(!excluded_subvolume("var/lib/machines"));
         assert!(!excluded_subvolume("srv"));
     }

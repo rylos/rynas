@@ -7,8 +7,10 @@
 //! - "Add a PC": a new subvolume folder, or an existing folder of received snapshots (Check
 //!   shows what it holds, nothing inside changes). Key, alert, who deletes old snapshots (the
 //!   NAS with GFS counts, the PC can only add; or the PC within the NAS floor).
-//! - The drawer of a PC: problems, status, the full-restore check, the steps for the PC (key,
-//!   `btrbk.conf`, first connection) and the `authorized_keys` line, copyable; Measure space,
+//! - The drawer of a PC: problems, status, the full-restore check with the manifest's disks,
+//!   subvolumes and boot copies, the steps for the PC (first-backup check per subvolume, the
+//!   `rynas-agent btrbk-setup` command, or by hand: key, `btrbk.conf`, first connection) and
+//!   the `authorized_keys` line, copyable; Measure space,
 //!   Delete old snapshots now, Settings, Remove (the folder stays); the snapshots by subvolume
 //!   or by run, with sizes, Browse and Delete.
 //! - Browse: read-only folders inside a snapshot; Copy out puts a file or folder into a NAS
@@ -133,6 +135,69 @@ fn bm_status(b: &BareMetal) -> AnyView {
     } else {
         ui::status(Tone::Info, t("bkpc.bm.not_ready").to_string())
     }
+}
+
+/// The PC's disks from its manifest: name, model, serial and size, then each partition.
+fn disk_items(disks: &[rynas_api_types::pcagent::Disk]) -> impl IntoView + use<> {
+    disks
+        .iter()
+        .map(|d| {
+            let mut head = vec![d.name.clone()];
+            if !d.model.is_empty() {
+                head.push(d.model.clone());
+            }
+            if !d.serial.is_empty() {
+                head.push(tf("bkpc.bm.serial", &[("serial", &d.serial)]));
+            }
+            head.push(i18n::bytes(d.size_bytes));
+            let parts = d
+                .table
+                .iter()
+                .flat_map(|t| t.partitions.iter())
+                .map(|p| {
+                    let size = i18n::bytes(p.size_lba.saturating_mul(u64::from(d.logical_sector)));
+                    let mut s = tf("bkpc.bm.part_line", &[("n", &p.number.to_string()), ("size", &size)]);
+                    if !p.name.is_empty() {
+                        s.push_str(" · ");
+                        s.push_str(&p.name);
+                    }
+                    view! { <li>{s}</li> }
+                })
+                .collect_view();
+            view! { <li><span class="mono">{head.join(" · ")}</span><ul class="bkpc-gaps">{parts}</ul></li> }
+        })
+        .collect_view()
+}
+
+/// "First backup": one line per subvolume (the manifest's, else those received so far),
+/// received or still waiting.
+fn first_run(b: &BareMetal, list: &[ReceivedSnapshot]) -> AnyView {
+    let mut names: Vec<String> = b.layout.iter().map(|s| s.name.clone()).collect();
+    if names.is_empty() {
+        for s in list {
+            if !names.contains(&s.group) {
+                names.push(s.group.clone());
+            }
+        }
+    }
+    let rows = names
+        .iter()
+        .map(|n| {
+            let got = list.iter().any(|s| &s.group == n && !s.incomplete && !s.not_subvolume);
+            let st = if got { ui::status(Tone::Ok, t("bkpc.first_run_ok").to_string()) } else { ui::status(Tone::Info, t("bkpc.first_run_wait").to_string()) };
+            view! { <li><span class="mono">{n.clone()}</span>" "{st}</li> }
+        })
+        .collect_view();
+    view! {
+        <h4 class="small"><strong>{tr("bkpc.first_run")}</strong></h4>
+        <p class="small muted">{tr("bkpc.first_run_intro")}</p>
+        {if names.is_empty() {
+            view! { <p class="small muted">{tr("bkpc.first_run_none")}</p> }.into_any()
+        } else {
+            view! { <ul class="small bkpc-gaps">{rows}</ul> }.into_any()
+        }}
+    }
+    .into_any()
 }
 
 /// "12.0 GiB · 310 MiB its own".
@@ -761,14 +826,28 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
             .collect_view();
         let b = p.bare_metal.clone();
         let gaps = b.missing.iter().chain(&b.warnings).map(|g| view! { <li>{gap_text(g)}</li> }).collect_view();
+        let layout = (!b.layout.is_empty()).then(|| {
+            let items = b.layout.iter().map(|s| {
+                let at = if s.mount.is_empty() { t("rm.tip_not_mounted").to_string() } else { s.mount.clone() };
+                view! { <li class="mono">{format!("{} → {at}", s.name)}</li> }
+            }).collect_view();
+            kv("bkpc.bm.subvolumes", view! { <ul class="small bkpc-gaps">{items}</ul> }.into_any())
+        });
+        let disks = (!b.disks.is_empty()).then(|| kv("bkpc.bm.disks", view! { <ul class="small bkpc-gaps">{disk_items(&b.disks)}</ul> }.into_any()));
+        let copies = (!b.boot_copies.is_empty()).then(|| {
+            let items = b.boot_copies.iter().map(|c| view! { <li>{tf("bkpc.bm.copy_line", &[("mount", &c.mount), ("dir", &c.dir), ("size", &i18n::bytes(c.bytes))])}</li> }).collect_view();
+            kv("bkpc.bm.boot_copies", view! { <ul class="small bkpc-gaps">{items}</ul> }.into_any())
+        });
         let bare = view! {
             <h3 class="mini-title">{tr("bkpc.bm.title")}</h3>
             <p class="small muted">{tr("bkpc.bm.intro")}</p>
             <dl class="kvs">
                 {kv("col.status", bm_status(&b))}
                 {b.manifest_snapshot.clone().map(|s| kv("bkpc.bm.manifest", ui::breakable(&s, "mono small")))}
-                {(!b.subvolumes.is_empty()).then(|| kv("bkpc.bm.subvolumes", ui::breakable(&b.subvolumes.join(", "), "mono small")))}
+                {if layout.is_some() { layout } else { (!b.subvolumes.is_empty()).then(|| kv("bkpc.bm.subvolumes", ui::breakable(&b.subvolumes.join(", "), "mono small"))) }}
                 {b.loader.clone().map(|l| kv("bkpc.bm.loader", ui::text(l)))}
+                {disks}
+                {copies}
             </dl>
             {(!b.missing.is_empty() || !b.warnings.is_empty()).then(|| view! { <ul class="small bkpc-gaps">{gaps}</ul> })}
         };
@@ -866,6 +945,12 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
             {bare}
             <details class="tls-step" open=p.state == ReceiveState::Waiting>
                 <summary>{tr("bk.steps")}</summary>
+                {first_run(&b, &d.list)}
+                <h4 class="small"><strong>{tr("bkpc.agent_step")}</strong></h4>
+                <p class="small muted">{tr("bkpc.agent_intro")}</p>
+                <pre class="app-code">{d.agent_setup.clone()}</pre>
+                <div class="sec-actions">{copy_button("dns.copy", d.agent_setup.clone())}</div>
+                <h4 class="small"><strong>{tr("bkpc.manual_steps")}</strong></h4>
                 <p class="small muted">{tr("bk.steps_intro")}</p>
                 {code_block("bk.step.key", d.key_commands.clone())}
                 {code_block("bk.step.config", d.client_config.clone())}
