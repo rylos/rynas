@@ -722,6 +722,9 @@ impl Processes {
     }
 
     pub fn signal(&self, pid: u32, req: &SignalRequest, who: &str) -> Res<()> {
+        // a pidfd before the check: the signal then reaches this very process even if it
+        // ends and its number is reused between the check and the signal
+        let pidfd = if self.dry { None } else { pidfd_open(pid) };
         let (st, meta) = self.identify(pid, req.start_ms)?;
         self.refuse_protected(pid, &st, &meta)?;
         let (sig, name) = match req.signal {
@@ -732,8 +735,16 @@ impl Processes {
         if self.dry {
             return Ok(());
         }
-        // SAFETY: kill(2) with a checked PID and a fixed signal
-        if unsafe { libc::kill(pid as libc::pid_t, sig) } != 0 {
+        use std::os::fd::AsRawFd;
+        let sent = match &pidfd {
+            // SAFETY: pidfd_send_signal(2) on a descriptor we own, a fixed signal, no siginfo
+            Some(fd) => unsafe {
+                libc::syscall(libc::SYS_pidfd_send_signal, fd.as_raw_fd(), sig, std::ptr::null::<libc::siginfo_t>(), 0)
+            },
+            // SAFETY: kill(2) with a checked PID and a fixed signal (kernels without pidfd)
+            None => libc::c_long::from(unsafe { libc::kill(pid as libc::pid_t, sig) }),
+        };
+        if sent != 0 {
             return Err(os_error("signal", pid));
         }
         Ok(())
@@ -829,6 +840,18 @@ fn ioprio(pid: u32) -> (IoClass, u8) {
         _ => IoClass::None,
     };
     (class, (v & 0x7) as u8)
+}
+
+/// A pidfd of `pid` (`None` when the process is gone or the kernel has no pidfd_open).
+fn pidfd_open(pid: u32) -> Option<std::os::fd::OwnedFd> {
+    use std::os::fd::FromRawFd;
+    // SAFETY: pidfd_open(2) with no flags; a non-negative result is a new descriptor we own
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
+    if fd < 0 {
+        return None;
+    }
+    // SAFETY: fd is a fresh descriptor returned by the kernel, owned by nobody else
+    Some(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as std::os::fd::RawFd) })
 }
 
 fn os_error(what: &str, pid: u32) -> Error {
