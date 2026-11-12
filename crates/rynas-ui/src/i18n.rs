@@ -2918,7 +2918,7 @@ dict! { BLOB, LENS, IT;
     "nev.dedup.ok.title" => "Deduplication of {volume} done: {reclaimed} freed", "Deduplicazione di {volume} completata: {reclaimed} liberati";
     "nev.dedup.partial.title" => "Deduplication of {volume} covered only part of its folders", "La deduplicazione di {volume} ha coperto solo parte delle cartelle";
     "nev.dedup.failed.title" => "Deduplication of {volume} failed", "Deduplicazione di {volume} non riuscita";
-    "shares.size_shared" => "Data shared with other folders or snapshots is counted in each.", "I dati condivisi con altre cartelle o snapshot sono contati in ciascuna.";
+    "shares.size_shared" => "Includes data shared with other folders or snapshots (copies, deduplication): deleting the folder frees only the part that is not shared.", "Include i dati in comune con altre cartelle o con gli snapshot (copie, deduplica): eliminando la cartella si libera solo la parte non in comune.";
     "sch.smart.short" => "Short", "Breve";
     "sch.smart.long" => "Extended", "Esteso";
     "sch.all_shares" => "All shared folders", "Tutte le cartelle condivise";

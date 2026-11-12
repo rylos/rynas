@@ -2506,7 +2506,7 @@ task.dedup.install	Installazione del motore di deduplicazione
 nev.dedup.ok.title	Deduplicazione di {volume} completata: {reclaimed} liberati
 nev.dedup.partial.title	La deduplicazione di {volume} ha coperto solo parte delle cartelle
 nev.dedup.failed.title	Deduplicazione di {volume} non riuscita
-shares.size_shared	I dati condivisi con altre cartelle o snapshot sono contati in ciascuna.
+shares.size_shared	Include i dati in comune con altre cartelle o con gli snapshot (copie, deduplica): eliminando la cartella si libera solo la parte non in comune.
 sch.smart.short	Breve
 sch.smart.long	Esteso
 sch.all_shares	Tutte le cartelle condivise
