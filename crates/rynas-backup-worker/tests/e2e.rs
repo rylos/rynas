@@ -267,7 +267,7 @@ fn pc_repository_keys_stream_and_min_age() {
     std::fs::create_dir_all(data.join("docs")).unwrap();
     std::fs::write(data.join("docs/a.txt"), "hello pc").unwrap();
     let nas = spec(&repo, PW);
-    let r = run(&nas, WorkerOp::InitPc);
+    let r = run(&nas, WorkerOp::InitPc { chunk_mib: 2 });
     assert!(matches!(last(&r), WorkerEvent::Initialized { created: true }), "{}", r.2);
     let r = run(&nas, WorkerOp::AddKey { password: "pc-password".into(), hostname: "pc".into() });
     let WorkerEvent::KeyAdded { id } = last(&r).clone() else { panic!("{}", r.2) };

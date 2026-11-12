@@ -221,6 +221,13 @@ pub struct Grp {
     /// Next twelfth read back by the check (1–12).
     #[serde(default)]
     pub check_slice: u32,
+    /// Average chunk of the repository in MiB (groups made before the choice existed: 2).
+    #[serde(default = "two_mib")]
+    pub chunk_mib: u8,
+}
+
+fn two_mib() -> u8 {
+    2
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -615,6 +622,7 @@ impl PcAgent {
             used_bytes: used,
             maintenance,
             recovery_kit_ms: g.recovery_kit_ms,
+            chunk_mib: g.chunk_mib,
         }
     }
 

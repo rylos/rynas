@@ -4979,6 +4979,12 @@ pca.f.hour	Ora della manutenzione
 pca.f.hour_help	0–23, ogni notte.
 pca.f.memory	Quota di memoria (%)
 pca.f.memory_help	Della memoria del NAS, per una manutenzione. Una pulizia che richiede di più aspetta.
+pca.f.chunking	Dimensione dei blocchi dei nuovi gruppi
+pca.f.chunking_help	1 MiB deduplica un po' meglio; 2 MiB richiede circa metà memoria per la manutenzione. Un gruppo tiene la dimensione con cui è stato creato.
+pca.chunk.auto	Automatica: 1 MiB con almeno 8 GiB di memoria, altrimenti 2 MiB
+pca.chunk.small	1 MiB (deduplica migliore)
+pca.chunk.large	2 MiB (meno memoria)
+pca.chunk_line	Blocchi da {mib} MiB
 pca.last_ok	Ultima versione riuscita
 pca.last_seen	Ultimo contatto
 pca.os	Sistema

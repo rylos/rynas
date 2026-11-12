@@ -752,13 +752,13 @@ fn run(req: WorkerRequest, private: &Private) -> Res<WorkerEvent> {
                 bytes: node.meta.size,
             })
         }
-        WorkerOp::InitPc => {
+        WorkerOp::InitPc { chunk_mib } => {
             let repo = repository(spec, private, None)?;
             if repo.config_id().map_err(err)?.is_some() {
                 repo.open(&credentials(spec)).map_err(err)?;
                 return Ok(WorkerEvent::Initialized { created: false });
             }
-            repo.init(&credentials(spec), &KeyOptions::default(), &pc_profile())
+            repo.init(&credentials(spec), &KeyOptions::default(), &pc_profile(chunk_mib))
                 .map_err(err)?;
             Ok(WorkerEvent::Initialized { created: true })
         }
@@ -861,24 +861,29 @@ fn run(req: WorkerRequest, private: &Private) -> Res<WorkerEvent> {
 }
 
 /// The repository profile of PC backup groups (D-PCBACKUP, memory of maintenance):
-/// - average chunk 2 MiB (min 1, max 16) instead of restic's fixed 1 MiB (512 KiB–8 MiB):
-///   about half the data blobs, so half the index entries prune and check hold; files under
-///   1 MiB are one blob either way; the price is less dedup inside large files that change in
-///   small places (a changed region rewrites ~2 MiB instead of ~1). Stock restic reads such a
-///   repository (blobs are content addressed; it ignores the extra config fields) and would
-///   chunk its own backups with its defaults;
+/// - average chunk `chunk_mib` (the feature's setting, by default from the NAS' memory):
+///   1 MiB is restic's own (512 KiB–8 MiB); 2 MiB (min 1, max 16) means about half the data
+///   blobs, so half the index entries prune and check hold; files under 1 MiB are one blob
+///   either way; the price is less dedup inside large files that change in small places (a
+///   changed region rewrites ~2 MiB instead of ~1). Stock restic reads such a repository
+///   (blobs are content addressed; it ignores the extra config fields) and would chunk its
+///   own backups with its defaults;
 /// - data packs of 64 MiB growing with the repository size up to 512 MiB (restic: 16 MiB
 ///   fixed, rustic: 32 MiB without limit): fewer pack files and pack index entries, and one
 ///   upload never larger than 512 MiB.
 ///
 /// Existing repositories never change chunking (that would split the dedup in two).
-fn pc_profile() -> ConfigOptions {
+fn pc_profile(chunk_mib: u8) -> ConfigOptions {
     use bytesize::ByteSize;
-    ConfigOptions::default()
-        .set_chunk_size(Some(ByteSize::mib(2)))
-        .set_chunk_min_size(Some(ByteSize::mib(1)))
-        .set_chunk_max_size(Some(ByteSize::mib(16)))
-        .set_datapack_size(Some(ByteSize::mib(64)))
+    let c = ConfigOptions::default();
+    let c = if chunk_mib >= 2 {
+        c.set_chunk_size(Some(ByteSize::mib(2)))
+            .set_chunk_min_size(Some(ByteSize::mib(1)))
+            .set_chunk_max_size(Some(ByteSize::mib(16)))
+    } else {
+        c
+    };
+    c.set_datapack_size(Some(ByteSize::mib(64)))
         .set_datapack_size_limit(Some(ByteSize::mib(512)))
 }
 

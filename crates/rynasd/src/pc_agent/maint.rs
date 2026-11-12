@@ -398,13 +398,14 @@ pub async fn pair(svc: &Arc<PcAgent>, p: &Pairing, settings: &PcAgentSettings, r
                 created_ms: now_ms(),
                 sealed: svc.seal(&nas)?,
                 check_slice: 1,
+                chunk_mib: settings.chunking.mib(mem_total()),
                 ..Default::default()
             };
             let undo = |e: String| {
                 let _ = remove_repo_dir(&dir, svc.dry);
                 Error::new(StatusCode::BAD_GATEWAY, error_codes::BACKEND_UNAVAILABLE, format!("creating the repository: {e}"))
             };
-            match op(svc, &g, &name, WorkerOp::InitPc, &svc.launch, None).await {
+            match op(svc, &g, &name, WorkerOp::InitPc { chunk_mib: g.chunk_mib }, &svc.launch, None).await {
                 Ok(WorkerEvent::Initialized { .. }) => {}
                 Ok(other) => return Err(undo(format!("unexpected answer {other:?}"))),
                 Err(e) => return Err(undo(e)),

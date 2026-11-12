@@ -250,6 +250,10 @@ fn yes() -> bool {
     true
 }
 
+fn two() -> u8 {
+    2
+}
+
 /// The `backup` configuration document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct BackupConfig {
@@ -647,7 +651,11 @@ pub enum WorkerOp {
     /// Creates the repository of a PC backup group: larger packs and a larger average chunk
     /// than the restic defaults (fewer blobs, a smaller index, less memory for prune and
     /// check; still readable by stock restic). Nothing happens when one exists.
-    InitPc,
+    InitPc {
+        /// Average chunk: 1 (restic's) or 2 MiB.
+        #[serde(default = "two")]
+        chunk_mib: u8,
+    },
     /// Counts the blobs and packs of the index (one index file at a time: little memory),
     /// for the memory estimate of a maintenance.
     IndexInfo,

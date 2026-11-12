@@ -133,6 +133,38 @@ pub struct PcAgentSettings {
     /// as `MemoryMax`, and a prune whose estimate does not fit is postponed.
     #[serde(default = "default_memory_pct")]
     pub maintenance_memory_pct: u8,
+    /// Average chunk of new groups' repositories; a repository keeps its own for good.
+    #[serde(default)]
+    pub chunking: PcChunking,
+}
+
+/// Average chunk of a new group's repository. Smaller chunks deduplicate a little better;
+/// larger ones mean half the blobs, so about half the memory of prune and check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PcChunking {
+    /// 1 MiB with 8 GiB of memory or more, 2 MiB below.
+    #[default]
+    Auto,
+    /// 1 MiB (512 KiB–8 MiB), restic's own.
+    Small,
+    /// 2 MiB (1–16 MiB).
+    Large,
+}
+
+/// Memory from which [`PcChunking::Auto`] picks 1 MiB chunks.
+pub const AUTO_SMALL_CHUNKS_FROM: u64 = 8 << 30;
+
+impl PcChunking {
+    /// The average chunk in MiB for a NAS with `mem_total` bytes of memory.
+    pub fn mib(self, mem_total: u64) -> u8 {
+        match self {
+            Self::Small => 1,
+            Self::Large => 2,
+            Self::Auto if mem_total >= AUTO_SMALL_CHUNKS_FROM => 1,
+            Self::Auto => 2,
+        }
+    }
 }
 
 fn default_hour() -> u8 {
@@ -376,6 +408,9 @@ pub struct PcGroup {
     pub maintenance: PcMaintenance,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_kit_ms: Option<u64>,
+    /// Average chunk of its repository in MiB, fixed when it was created.
+    #[serde(default)]
+    pub chunk_mib: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

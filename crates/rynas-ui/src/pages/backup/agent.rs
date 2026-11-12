@@ -295,6 +295,7 @@ fn group_row(tab: Tab, g: PcGroup, budget: u64, all_revoked: bool) -> AnyView {
         <div class="cell-main">
             <span>{match m.last_ms { Some(ms) => tf(if m.ok { "pca.maint.ok" } else { "pca.maint.failed" }, &[("when", &i18n::datetime(ms))]), None => t("pca.maint.never").to_string() }}</span>
             <span class=if over { "cell-sub small warn-text" } else { "cell-sub small" }>{tf("pca.maint.estimate", &[("mem", &i18n::bytes(m.estimate_bytes))])}</span>
+            {(g.chunk_mib > 0).then(|| view! { <span class="cell-sub small">{tf("pca.chunk_line", &[("mib", &g.chunk_mib.to_string())])}</span> })}
             {m.postponed.clone().map(|p| view! { <span class="cell-sub small warn-text">{p}</span> })}
             {m.error.clone().map(|p| view! { <span class="cell-sub small err-text">{p}</span> })}
         </div>
@@ -490,6 +491,15 @@ fn settings_dialog(tab: Tab) -> AnyView {
     let quota = RwSignal::new(cur.default_quota_gib.to_string());
     let hour = RwSignal::new(cur.maintenance_hour.to_string());
     let pct = RwSignal::new(if cur.maintenance_memory_pct == 0 { "40".to_string() } else { cur.maintenance_memory_pct.to_string() });
+    const CHUNKING: &[(&str, &str)] = &[("auto", "pca.chunk.auto"), ("small", "pca.chunk.small"), ("large", "pca.chunk.large")];
+    let chunking = RwSignal::new(
+        match cur.chunking {
+            PcChunking::Auto => "auto",
+            PcChunking::Small => "small",
+            PcChunking::Large => "large",
+        }
+        .to_string(),
+    );
     let folder_err = RwSignal::new(None::<String>);
     let error = RwSignal::new(None::<String>);
     let busy = RwSignal::new(false);
@@ -500,6 +510,11 @@ fn settings_dialog(tab: Tab) -> AnyView {
             default_quota_gib: n(quota),
             maintenance_hour: n(hour).min(23) as u8,
             maintenance_memory_pct: n(pct).clamp(10, 80) as u8,
+            chunking: match chunking.get_untracked().as_str() {
+                "small" => PcChunking::Small,
+                "large" => PcChunking::Large,
+                _ => PcChunking::Auto,
+            },
         };
         busy.set(true);
         error.set(None);
@@ -524,6 +539,7 @@ fn settings_dialog(tab: Tab) -> AnyView {
             {number_field("pca.f.hour", Some("pca.f.hour_help"), hour.into(), Callback::new(move |v| hour.set(v)), 0, 23)}
             {number_field("pca.f.memory", Some("pca.f.memory_help"), pct.into(), Callback::new(move |v| pct.set(v)), 10, 80)}
         </div>
+        {select_field("pca.f.chunking", Some("pca.f.chunking_help"), CHUNKING, chunking.into(), Callback::new(move |v| chunking.set(v)))}
         {form_error(error)}
     }
     .into_any();
