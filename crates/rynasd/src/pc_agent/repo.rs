@@ -285,10 +285,27 @@ fn list(repo: &Path, t: &str) -> std::io::Result<Vec<RestEntry>> {
     Ok(out)
 }
 
-/// Frees the write slot of an upload, however it ends.
+/// The SHA-256 of a stored file, hex (read without following a link).
+fn file_sha256(p: &Path) -> std::io::Result<String> {
+    use std::io::Read;
+    let mut f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(p)?;
+    let mut sha = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        sha.update(&buf[..n]);
+    }
+    Ok(sha.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Frees the write slot of an upload and its quota reservation, however it ends.
 struct Writing {
     svc: Arc<PcAgent>,
     group: String,
+    reserved: u64,
 }
 
 impl Drop for Writing {
@@ -296,6 +313,7 @@ impl Drop for Writing {
         let mut live = self.svc.live.lock().unwrap_or_else(|p| p.into_inner());
         let l = live.entry(self.group.clone()).or_default();
         l.writes = l.writes.saturating_sub(1);
+        l.reserved = l.reserved.saturating_sub(self.reserved);
         l.last_write = Some(Instant::now());
     }
 }
@@ -319,26 +337,31 @@ async fn upload(
         return Err(refuse(StatusCode::PAYLOAD_TOO_LARGE, "file over 1 GiB"));
     }
     let quota = u64::from(svc.group(group)?.settings.quota_gib) << 30;
-    let used = super::maint::used_bytes(svc, group, repo);
-    // the slot and the gate under one lock: a maintenance cannot start between them
-    let _slot = {
+    // counted once (off the async threads), then kept up to date by the uploads
+    super::maint::ensure_used(svc, group, repo).await;
+    // the slot, the gate and the quota under one lock: a maintenance cannot start between
+    // them, and parallel uploads reserve their bytes so together they stay inside the quota
+    let (_slot, limit) = {
         let mut live = svc.live.lock().unwrap_or_else(|p| p.into_inner());
         let l = live.entry(group.to_string()).or_default();
         if l.maintaining {
             return Err(refuse(StatusCode::LOCKED, "the NAS is maintaining this repository: try again later"));
         }
-        if quota > 0 && used + declared.unwrap_or(0) > quota {
-            return Err(refuse(StatusCode::PAYLOAD_TOO_LARGE, "the group's quota is used up"));
-        }
+        let (reserved, limit) = l
+            .reserve(quota, declared, MAX_UPLOAD)
+            .map_err(|m| refuse(StatusCode::PAYLOAD_TOO_LARGE, m))?;
         l.writes += 1;
-        Writing {
-            svc: svc.clone(),
-            group: group.to_string(),
-        }
+        (
+            Writing {
+                svc: svc.clone(),
+                group: group.to_string(),
+                reserved,
+            },
+            limit,
+        )
     };
     let final_path = object_path(repo, t, name);
     let dir = final_path.parent().map(Path::to_path_buf).ok_or_else(|| Error::internal("no folder"))?;
-    let limit = if quota > 0 { (quota.saturating_sub(used)).min(MAX_UPLOAD) } else { MAX_UPLOAD };
     let (tx, mut rx) = tokio::sync::mpsc::channel::<axum::body::Bytes>(16);
     let tmp = dir.join(format!(".tmp-{}-{}", std::process::id(), &super::new_token()?[..16]));
     let (tmp2, dir2) = (tmp.clone(), dir.clone());
@@ -407,28 +430,46 @@ async fn upload(
         cleanup(&tmp);
         return Err(refuse(StatusCode::BAD_REQUEST, "the name is not the SHA-256 of the content"));
     }
-    let (tmp3, fin) = (tmp.clone(), final_path.clone());
+    let (tmp3, fin, sha_of_name) = (tmp.clone(), final_path.clone(), name.to_string());
     let placed = tokio::task::spawn_blocking(move || -> std::io::Result<bool> {
         let r = std::fs::hard_link(&tmp3, &fin);
-        let _ = std::fs::remove_file(&tmp3);
+        let sync_dir = |p: &Path| -> std::io::Result<()> {
+            if let Some(d) = p.parent() {
+                std::fs::File::open(d)?.sync_all()?;
+            }
+            Ok(())
+        };
         match r {
             Ok(()) => {
+                let _ = std::fs::remove_file(&tmp3);
                 let _ = std::fs::set_permissions(&fin, std::fs::Permissions::from_mode(0o600));
-                if let Some(d) = fin.parent() {
-                    std::fs::File::open(d)?.sync_all()?;
-                }
+                sync_dir(&fin)?;
                 Ok(true)
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                // the same name is the same content (checked above): already there
+                // the same name is the same content (checked above): already there, unless
+                // the stored file is damaged (bit rot, a partial copy): then the verified
+                // upload takes its place (its content is proven by its name: append-only holds)
                 let m = std::fs::symlink_metadata(&fin)?;
-                if m.is_file() && m.len() == size {
-                    Ok(false)
-                } else {
-                    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "a different file has this name"))
+                if !m.is_file() {
+                    let _ = std::fs::remove_file(&tmp3);
+                    return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "a different file has this name"));
                 }
+                let same = m.len() == size && file_sha256(&fin).is_ok_and(|h| h == sha_of_name);
+                if same {
+                    let _ = std::fs::remove_file(&tmp3);
+                    return Ok(false);
+                }
+                tracing::warn!("pc backup: {} was damaged; replaced by the verified upload", fin.display());
+                let _ = std::fs::set_permissions(&tmp3, std::fs::Permissions::from_mode(0o600));
+                std::fs::rename(&tmp3, &fin)?;
+                sync_dir(&fin)?;
+                Ok(false)
             }
-            Err(e) => Err(e),
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp3);
+                Err(e)
+            }
         }
     })
     .await

@@ -731,6 +731,9 @@ pub enum WorkerEvent {
         packs_delete: u64,
     },
     Streamed { bytes: u64, files: u64 },
+    /// A single file's stream: its size, sent before its first byte (rynasd answers it as
+    /// `Content-Length`, so a download that breaks off shows as broken).
+    StreamSize { bytes: u64 },
     /// The operation failed (the last line).
     Error { message: String },
 }

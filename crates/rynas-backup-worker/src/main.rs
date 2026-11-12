@@ -809,6 +809,8 @@ fn run(req: WorkerRequest, private: &Private) -> Res<WorkerEvent> {
                 if !node.is_file() {
                     return Err(format!("{path} is not a file"));
                 }
+                // the size first (on stderr, flushed): rynasd sends it as Content-Length
+                emit(&WorkerEvent::StreamSize { bytes: node.meta.size });
                 repo.dump(&node, &mut w).map_err(err)?;
                 w.flush().map_err(err)?;
                 return Ok(WorkerEvent::Streamed { bytes: node.meta.size, files: 1 });

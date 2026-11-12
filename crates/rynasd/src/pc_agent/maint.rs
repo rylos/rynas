@@ -109,30 +109,40 @@ fn dir_size(p: &Path) -> u64 {
     total
 }
 
-/// The group's bytes on disk (counted once, then kept up to date by the uploads).
+/// The group's bytes on disk (counted once, then kept up to date by the uploads). Walks the
+/// repository the first time: call it from a blocking thread.
 pub fn used_bytes(svc: &PcAgent, group: &str, repo: &Path) -> u64 {
     if let Some(u) = svc.live.lock().unwrap_or_else(|p| p.into_inner()).get(group).and_then(|l| l.used) {
         return u;
     }
     let n = dir_size(repo);
-    svc.live
+    *svc.live
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .entry(group.to_string())
         .or_default()
         .used
-        .get_or_insert(n);
-    n
+        .get_or_insert(n)
 }
 
-/// Counts every group not counted yet (the console's first look).
+/// [`used_bytes`] for the async paths: a first count runs on a blocking thread.
+pub async fn ensure_used(svc: &Arc<PcAgent>, group: &str, repo: &Path) -> u64 {
+    if let Some(u) = svc.live.lock().unwrap_or_else(|p| p.into_inner()).get(group).and_then(|l| l.used) {
+        return u;
+    }
+    let (s2, g2, r2) = (svc.clone(), group.to_string(), repo.to_path_buf());
+    tokio::task::spawn_blocking(move || used_bytes(&s2, &g2, &r2)).await.unwrap_or(0)
+}
+
+/// Counts every group not counted yet (the console's first look, rynasd's start).
 pub fn count_used(svc: &PcAgent, reg: &Registry) {
     for (n, g) in &reg.groups {
         used_bytes(svc, n, Path::new(&g.repo));
     }
 }
 
-/// A new file of `size` bytes from `device`.
+/// A new file of `size` bytes from `device`: counted in memory, written to the registry
+/// within [`super::FLUSH_EVERY`] (never a registry write per uploaded file).
 pub fn add_used(svc: &PcAgent, group: &str, device: &str, size: u64) {
     {
         let mut live = svc.live.lock().unwrap_or_else(|p| p.into_inner());
@@ -141,12 +151,115 @@ pub fn add_used(svc: &PcAgent, group: &str, device: &str, size: u64) {
             *u += size;
         }
     }
-    let _ = svc.edit(|r| {
+    svc.touch(|r| {
         if let Some(d) = r.devices.get_mut(device) {
             d.uploaded_bytes += size;
         }
-        Ok(())
     });
+}
+
+// ------------------------------------------------------------------ memory of reads
+
+/// Memory reserved against the budget, given back however the work ends.
+pub struct MemSlot {
+    svc: Arc<PcAgent>,
+    bytes: u64,
+}
+
+impl Drop for MemSlot {
+    fn drop(&mut self) {
+        let mut m = self.svc.mem_used.lock().unwrap_or_else(|p| p.into_inner());
+        *m = m.saturating_sub(self.bytes);
+    }
+}
+
+/// Reserves `need` bytes of `budget` when they fit with what runs already.
+pub fn try_reserve(svc: &Arc<PcAgent>, need: u64, budget: u64) -> Option<MemSlot> {
+    let mut m = svc.mem_used.lock().unwrap_or_else(|p| p.into_inner());
+    if m.saturating_add(need) > budget {
+        return None;
+    }
+    *m += need;
+    Some(MemSlot { svc: svc.clone(), bytes: need })
+}
+
+/// A read of a group's repository (versions, browse, a download or zip) loads its whole
+/// index: admitted only when its estimate fits in the maintenance budget with what runs
+/// already, never while the group is maintained; it runs in a unit limited to the budget.
+pub async fn admit_read(svc: &Arc<PcAgent>, group: &str, g: &Grp) -> Res<(MemSlot, Launch)> {
+    let busy = |msg: String| Error::new(StatusCode::LOCKED, error_codes::BUSY, msg);
+    if svc.live.lock().unwrap_or_else(|p| p.into_inner()).get(group).is_some_and(|l| l.maintaining) {
+        return Err(busy("the NAS is maintaining this group's repository: browsing and downloads work again when it ends".into()));
+    }
+    let budget = memory_budget(svc.snapshot().settings.maintenance_memory_pct);
+    let p = PathBuf::from(&g.repo);
+    let blobs = tokio::task::spawn_blocking(move || blobs_estimate(&p)).await.unwrap_or(0);
+    let need = prune_estimate(blobs);
+    if need > budget {
+        return Err(busy(format!(
+            "reading this repository needs about {} MiB, over the memory budget of {} MiB: raise the maintenance memory share",
+            need >> 20,
+            budget >> 20
+        )));
+    }
+    let slot = try_reserve(svc, need, budget).ok_or_else(|| {
+        busy(format!(
+            "reading this repository needs about {} MiB of the {} MiB budget, which maintenances and other downloads use now: try again in a few minutes",
+            need >> 20,
+            budget >> 20
+        ))
+    })?;
+    Ok((slot, maintenance_launch(&svc.launch, budget)))
+}
+
+// ------------------------------------------------------------------ restore sessions
+
+/// A key of its own for a restore session; its password is the only one the agent gets.
+pub async fn add_session_key(svc: &Arc<PcAgent>, group: &str, g: &Grp, device: &str) -> Res<(String, String)> {
+    let password = rynas_backup::repo::generate_password().map_err(Error::internal)?;
+    let gw = |e: String| Error::new(StatusCode::BAD_GATEWAY, error_codes::BACKEND_UNAVAILABLE, format!("adding the restore key: {e}"));
+    match op(
+        svc,
+        g,
+        group,
+        WorkerOp::AddKey {
+            password: password.clone(),
+            hostname: format!("restore-{device}"),
+        },
+        &svc.launch,
+        None,
+    )
+    .await
+    .map_err(gw)?
+    {
+        WorkerEvent::KeyAdded { id } => Ok((id, password)),
+        other => Err(gw(format!("unexpected answer {other:?}"))),
+    }
+}
+
+/// Ends the sessions that expired or reported: their key files go, then the records. A key
+/// that cannot be removed now is tried again on the next round.
+pub async fn end_sessions(svc: &Arc<PcAgent>) {
+    let now = now_ms();
+    let ended: Vec<super::Session> = svc.snapshot().sessions.into_iter().filter(|s| s.expires_ms <= now).collect();
+    for s in ended {
+        if !s.key_id.is_empty()
+            && let Ok(g) = svc.group(&s.key_group)
+        {
+            match op(svc, &g, &s.key_group, WorkerOp::RemoveKey { id: s.key_id.clone() }, &svc.launch, None).await {
+                Ok(_) => {}
+                Err(e) if e.contains("not found") || e.contains("No such file") => {}
+                Err(e) => {
+                    tracing::warn!("pc backup: the restore key of {} stays for now: {e}", s.key_group);
+                    continue;
+                }
+            }
+        }
+        let _ = svc.edit(|r| {
+            r.sessions.retain(|x| x.token_sha != s.token_sha);
+            Ok(())
+        });
+    }
 }
 
 // ------------------------------------------------------------------ worker calls
@@ -241,6 +354,10 @@ fn remove_repo_dir(p: &Path, dry: bool) -> Result<(), String> {
     }
 }
 
+fn group_gone(group: &str) -> Error {
+    Error::new(StatusCode::CONFLICT, error_codes::CONFLICT, format!("group {group} was deleted meanwhile"))
+}
+
 fn unique(base: &str, taken: impl Fn(&str) -> bool) -> String {
     if !taken(base) {
         return base.to_string();
@@ -321,6 +438,7 @@ pub async fn pair(svc: &Arc<PcAgent>, p: &Pairing, settings: &PcAgentSettings, r
             ));
         }
     };
+    let dev_key = pc_key.clone();
     let ds = PcDeviceSettings {
         description: p.description.clone(),
         ..Default::default()
@@ -345,13 +463,29 @@ pub async fn pair(svc: &Arc<PcAgent>, p: &Pairing, settings: &PcAgentSettings, r
         plan: dev.settings.plan.clone(),
         command: None,
     };
-    svc.edit(|r| {
+    // the name is picked again against the registry as it is now: another pairing may have
+    // taken it meanwhile (two PCs with the same host name at once)
+    let stored = svc.edit(|r| {
         if let Some((n, g, _)) = &created {
             r.groups.insert(n.clone(), g.clone());
+        } else if !r.groups.contains_key(&group) {
+            return Err(group_gone(&group));
         }
+        let device = unique(&device, |n| r.devices.contains_key(n));
         r.devices.insert(device.clone(), dev);
-        Ok(())
-    })?;
+        Ok(device)
+    });
+    let device = match stored {
+        Ok(d) => d,
+        Err(e) => {
+            if let Some((_, _, dir)) = &created {
+                let _ = remove_repo_dir(dir, svc.dry);
+            } else if let Ok(g) = svc.group(&group) {
+                let _ = op(svc, &g, &group, WorkerOp::RemoveKey { id: dev_key }, &svc.launch, None).await;
+            }
+            return Err(e);
+        }
+    };
     Ok(PairResponse {
         device,
         group,
@@ -393,13 +527,8 @@ pub async fn revoke(svc: &Arc<PcAgent>, device: &str, d: &Dev, ctx: &TaskCtx) ->
     Ok(())
 }
 
+/// Deletes a group the caller took with [`take`] (so nothing else runs on it).
 pub async fn delete_group(svc: &Arc<PcAgent>, group: &str, g: &Grp, ctx: &TaskCtx) -> Result<(), String> {
-    {
-        let live = svc.live.lock().unwrap_or_else(|p| p.into_inner());
-        if live.get(group).is_some_and(|l| l.maintaining) {
-            return Err("the group is being maintained".into());
-        }
-    }
     ctx.log(&format!("deleting {}", g.repo));
     let (p, dry) = (PathBuf::from(&g.repo), svc.dry);
     tokio::task::spawn_blocking(move || remove_repo_dir(&p, dry))
@@ -552,7 +681,7 @@ pub fn report(svc: &PcAgent, device: &str, r: AgentReport) -> Res<()> {
 // ------------------------------------------------------------------ maintenance
 
 /// Clears the maintenance flag of a group, however the task ends.
-struct Maintaining {
+pub struct Maintaining {
     svc: Arc<PcAgent>,
     group: String,
 }
@@ -568,7 +697,7 @@ impl Drop for Maintaining {
 
 /// Takes the group for a maintenance: no upload running or in the last [`QUIET`], no PC
 /// reporting progress.
-fn take(svc: &Arc<PcAgent>, group: &str) -> Result<Maintaining, String> {
+pub(super) fn take(svc: &Arc<PcAgent>, group: &str) -> Result<Maintaining, String> {
     if svc.group_running(group) {
         return Err("a PC of the group is backing up".into());
     }
@@ -585,6 +714,57 @@ fn take(svc: &Arc<PcAgent>, group: &str) -> Result<Maintaining, String> {
         svc: svc.clone(),
         group: group.to_string(),
     })
+}
+
+/// Waits (up to 30 minutes) until `need` bytes of the budget are free of reads; `None` when
+/// they never were, `Err` when the task is cancelled.
+async fn wait_memory(svc: &Arc<PcAgent>, need: u64, budget: u64, ctx: &TaskCtx) -> Result<Option<MemSlot>, String> {
+    let until = std::time::Instant::now() + Duration::from_secs(30 * 60);
+    let mut said = false;
+    loop {
+        if let Some(s) = try_reserve(svc, need, budget) {
+            return Ok(Some(s));
+        }
+        if std::time::Instant::now() >= until {
+            return Ok(None);
+        }
+        if !said {
+            ctx.log("waiting for downloads or browsing to give back memory of the budget");
+            said = true;
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(10)) => {}
+            _ = ctx.token().cancelled() => return Err("cancelled".into()),
+        }
+    }
+}
+
+/// Removes upload temporaries (`.tmp-*`) older than `age` in the repository's folders.
+pub fn sweep_temp(repo: &Path, age: Duration) -> usize {
+    let mut dirs: Vec<PathBuf> = ["keys", "locks", "snapshots", "index"].iter().map(|t| repo.join(t)).collect();
+    if let Ok(rd) = std::fs::read_dir(repo.join("data")) {
+        dirs.extend(rd.flatten().map(|e| e.path()));
+    }
+    let mut n = 0;
+    for d in dirs {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            if !e.file_name().to_string_lossy().starts_with(".tmp-") {
+                continue;
+            }
+            let old = e
+                .metadata()
+                .ok()
+                .filter(std::fs::Metadata::is_file)
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|el| el >= age);
+            if old && std::fs::remove_file(e.path()).is_ok() {
+                n += 1;
+            }
+        }
+    }
+    n
 }
 
 /// Starts the maintenance task of a group (`scheduled`: from the daily timer).
@@ -664,14 +844,19 @@ async fn maintain(svc: &Arc<PcAgent>, group: &str, ctx: &TaskCtx, scheduled: boo
         }
     }
     ctx.progress(30);
-    // 3. prune and check, only inside the budget
+    // 3. prune and check, only inside the budget, which reads of other groups share
     let mut freed = 0;
+    let room = if estimate > budget { None } else { wait_memory(svc, estimate, budget, ctx).await? };
     let postponed = if estimate > budget {
         let why = format!(
             "prune and check postponed: they need about {} MiB, over the budget of {} MiB",
             estimate >> 20,
             budget >> 20
         );
+        ctx.log(&why);
+        Some(why)
+    } else if room.is_none() {
+        let why = "prune and check postponed: downloads and browsing kept the memory budget busy for 30 minutes".to_string();
         ctx.log(&why);
         Some(why)
     } else {
@@ -704,10 +889,21 @@ async fn maintain(svc: &Arc<PcAgent>, group: &str, ctx: &TaskCtx, scheduled: boo
         }
         None
     };
+    drop(room);
     ctx.progress(90);
-    // 4. sizes again
+    // 4. upload leftovers (rynasd stopped in the middle of an upload; no upload runs now),
+    // then the sizes again
     let (p, n) = (PathBuf::from(&g.repo), group.to_string());
-    let used = tokio::task::spawn_blocking(move || dir_size(&p)).await.unwrap_or(0);
+    let used = tokio::task::spawn_blocking(move || {
+        let swept = sweep_temp(&p, Duration::from_secs(86_400));
+        (swept, dir_size(&p))
+    })
+    .await
+    .unwrap_or((0, 0));
+    if used.0 > 0 {
+        ctx.log(&format!("{} unfinished upload files removed", used.0));
+    }
+    let used = used.1;
     if let Some(l) = svc.live.lock().unwrap_or_else(|p| p.into_inner()).get_mut(&n) {
         l.used = Some(used);
     }
@@ -790,9 +986,22 @@ fn alerts(svc: &PcAgent, name: &str, d: &Dev) {
 /// Every five minutes: notifications, and each group's maintenance in its hour (retried
 /// within the hour while a PC is busy; the reason stays on the group when it cannot run).
 pub fn spawn_watch(svc: Arc<PcAgent>) {
+    // the registry's touched counters, written now and then off the async threads
+    let s2 = svc.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(super::FLUSH_EVERY).await;
+            let s3 = s2.clone();
+            let _ = tokio::task::spawn_blocking(move || s3.flush()).await;
+        }
+    });
+    // the groups' sizes counted once at the start, so no upload walks a repository
+    let s2 = svc.clone();
+    tokio::task::spawn_blocking(move || count_used(&s2, &s2.snapshot()));
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(90)).await;
         loop {
+            end_sessions(&svc).await;
             let reg = svc.snapshot();
             for (n, d) in &reg.devices {
                 alerts(&svc, n, d);
@@ -848,13 +1057,15 @@ fn content_disposition(name: &str) -> String {
 }
 
 /// A file or a zip of one version, streamed from the worker's stdout (no size limit, never
-/// whole in memory; the events of the worker come on its stderr).
+/// whole in memory; the events of the worker come on its stderr). Inside the memory budget
+/// and never while the group is maintained ([`admit_read`]).
 pub async fn stream(svc: &Arc<PcAgent>, device: &str, version: String, paths: Vec<String>, zip: bool, name: &str) -> Res<Response> {
     let d = svc.device(device)?;
     let g = svc.group(&d.group)?;
     let permit = svc.streams.clone().try_acquire_owned().map_err(|_| {
         Error::new(StatusCode::TOO_MANY_REQUESTS, error_codes::RATE_LIMITED, "two downloads are running: wait for one to finish".into())
     })?;
+    let (mem, launch) = admit_read(svc, &d.group, &g).await?;
     let req = svc.request(
         &g,
         WorkerOp::Stream {
@@ -864,8 +1075,8 @@ pub async fn stream(svc: &Arc<PcAgent>, device: &str, version: String, paths: Ve
             scope: Some(super::scope(device)),
         },
     )?;
-    let (argv, _) = rynas_backup::runner::command(&svc.launch, &format!("pc-{device}"), &req, None).map_err(Error::internal)?;
-    let mut child = tokio::process::Command::new(&argv[0])
+    let (argv, _) = rynas_backup::runner::command(&launch, &format!("pc-{device}"), &req, None).map_err(Error::internal)?;
+    let child = tokio::process::Command::new(&argv[0])
         .args(&argv[1..])
         .env_clear()
         .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
@@ -877,11 +1088,62 @@ pub async fn stream(svc: &Arc<PcAgent>, device: &str, version: String, paths: Ve
         .spawn()
         .map_err(|e| Error::internal(format!("cannot start the worker: {e}")))?;
     let body = serde_json::to_vec(&req).map_err(Error::internal)?;
+    let (stream, size) = from_worker(child, &body, !zip, (permit, mem)).await?;
+    let mut r = attachment(Body::from_stream(stream), name, zip);
+    if let Some(n) = size {
+        // a body shorter than this is a broken download to the browser too
+        r.headers_mut().insert(header::CONTENT_LENGTH, HeaderValue::from(n));
+    }
+    Ok(r)
+}
+
+/// The worker's stderr: the size of a single file (sent before its data) and the last error.
+struct Events {
+    size: Option<tokio::sync::oneshot::Receiver<u64>>,
+    done: tokio::task::JoinHandle<Option<String>>,
+}
+
+fn read_events(stderr: tokio::process::ChildStderr) -> Events {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let done = tokio::spawn(async move {
+        use tokio::io::AsyncBufReadExt;
+        let mut tx = Some(tx);
+        let mut last = None;
+        let mut lines = tokio::io::BufReader::new(stderr).lines();
+        // read to the end (a worker writing to a full pipe would stop), keep what matters
+        while let Ok(Some(l)) = lines.next_line().await {
+            match serde_json::from_str::<WorkerEvent>(&l) {
+                Ok(WorkerEvent::StreamSize { bytes }) => {
+                    if let Some(t) = tx.take() {
+                        let _ = t.send(bytes);
+                    }
+                }
+                Ok(WorkerEvent::Error { message }) => last = Some(message),
+                _ => {}
+            }
+        }
+        last
+    });
+    Events { size: Some(rx), done }
+}
+
+/// The body of a download from a started worker (`want_size`: a single file, whose size the
+/// worker sends first). The stream yields an error, and so breaks the download in the
+/// browser, when the worker ends badly after the first bytes: a missing pack, a read error,
+/// the memory limit. `hold` is kept until the stream ends.
+pub async fn from_worker<H: Send + 'static>(
+    mut child: tokio::process::Child,
+    request: &[u8],
+    want_size: bool,
+    hold: H,
+) -> Res<(futures_util::stream::BoxStream<'static, std::io::Result<axum::body::Bytes>>, Option<u64>)> {
+    use futures_util::StreamExt;
     let mut stdin = child.stdin.take().ok_or_else(|| Error::internal("no stdin"))?;
-    stdin.write_all(&body).await.map_err(Error::internal)?;
+    stdin.write_all(request).await.map_err(Error::internal)?;
     drop(stdin);
     let mut stdout = child.stdout.take().ok_or_else(|| Error::internal("no stdout"))?;
-    let mut stderr = child.stderr.take().ok_or_else(|| Error::internal("no stderr"))?;
+    let stderr = child.stderr.take().ok_or_else(|| Error::internal("no stderr"))?;
+    let mut events = read_events(stderr);
     // the first bytes decide: data → 200 and the rest streams; nothing → the worker's error
     let mut first = vec![0u8; 64 << 10];
     let n = match tokio::time::timeout(READ_TIMEOUT, stdout.read(&mut first)).await {
@@ -890,40 +1152,72 @@ pub async fn stream(svc: &Arc<PcAgent>, device: &str, version: String, paths: Ve
         Err(_) => return Err(Error::new(StatusCode::GATEWAY_TIMEOUT, error_codes::TIMEOUT, "the worker did not answer".into())),
     };
     if n == 0 {
-        let mut err = String::new();
-        let _ = (&mut stderr).take(64 << 10).read_to_string(&mut err).await;
-        let _ = child.wait().await;
-        let msg = err
-            .lines()
-            .rev()
-            .find_map(|l| match serde_json::from_str::<WorkerEvent>(l) {
-                Ok(WorkerEvent::Error { message }) => Some(message),
-                _ => None,
-            });
-        // an empty file is a whole answer
-        if msg.is_none() {
-            return Ok(attachment(Body::empty(), name, zip));
-        }
-        let msg = msg.unwrap_or_default();
+        let msg = (&mut events.done).await.ok().flatten();
+        let status = child.wait().await.ok();
+        let msg = match msg {
+            Some(m) => m,
+            // an empty file is a whole answer
+            None if status.is_some_and(|s| s.success()) => {
+                return Ok((futures_util::stream::iter(Vec::new()).boxed(), want_size.then_some(0)));
+            }
+            None => "the worker ended without an answer".into(),
+        };
         let status = if msg.contains("not found") || msg.contains("is not a file") { StatusCode::NOT_FOUND } else { StatusCode::BAD_GATEWAY };
         let code = if status == StatusCode::NOT_FOUND { error_codes::NOT_FOUND } else { error_codes::BACKEND_UNAVAILABLE };
         return Err(Error::new(status, code, msg));
     }
     first.truncate(n);
+    // the size event was written (and flushed) before the first byte of data
+    let size = match (want_size, events.size.take()) {
+        (true, Some(rx)) => tokio::time::timeout(Duration::from_secs(2), rx).await.ok().and_then(Result::ok),
+        _ => None,
+    };
     let head = futures_util::stream::once(async move { Ok::<_, std::io::Error>(axum::body::Bytes::from(first)) });
-    let rest = futures_util::stream::unfold((stdout, child, stderr, permit), |(mut out, child, err, permit)| async move {
+    struct St<H> {
+        out: tokio::process::ChildStdout,
+        child: tokio::process::Child,
+        events: Events,
+        _hold: H,
+        over: bool,
+    }
+    let st = St {
+        out: stdout,
+        child,
+        events,
+        _hold: hold,
+        over: false,
+    };
+    let rest = futures_util::stream::unfold(st, |mut st| async move {
+        if st.over {
+            return None;
+        }
         let mut buf = vec![0u8; 256 << 10];
-        match out.read(&mut buf).await {
-            Ok(0) => None,
+        match st.out.read(&mut buf).await {
+            Ok(0) => {
+                // the end of the data: only a worker that ended well makes it a whole file
+                st.over = true;
+                let status = st.child.wait().await;
+                let msg = (&mut st.events.done).await.ok().flatten();
+                match status {
+                    Ok(s) if s.success() => None,
+                    other => {
+                        let why = msg.unwrap_or_else(|| format!("the worker ended with {other:?}"));
+                        tracing::warn!("pc backup: a download broke off: {why}");
+                        Some((Err(std::io::Error::other(why)), st))
+                    }
+                }
+            }
             Ok(k) => {
                 buf.truncate(k);
-                Some((Ok(axum::body::Bytes::from(buf)), (out, child, err, permit)))
+                Some((Ok(axum::body::Bytes::from(buf)), st))
             }
-            Err(e) => Some((Err(e), (out, child, err, permit))),
+            Err(e) => {
+                st.over = true;
+                Some((Err(e), st))
+            }
         }
     });
-    use futures_util::StreamExt;
-    Ok(attachment(Body::from_stream(head.chain(rest)), name, zip))
+    Ok((head.chain(rest).boxed(), size))
 }
 
 fn attachment(body: Body, name: &str, zip: bool) -> Response {
@@ -971,6 +1265,78 @@ mod tests {
         let long = "a".repeat(32);
         let u = unique(&long, |n| n == long);
         assert!(u.len() <= 32 && u.ends_with("-2"), "{u}");
+    }
+
+    fn fake_worker(script: &str) -> tokio::process::Child {
+        let size = serde_json::to_string(&WorkerEvent::StreamSize { bytes: 204_800 }).unwrap();
+        let error = serde_json::to_string(&WorkerEvent::Error { message: "pack 1234 is missing".into() }).unwrap();
+        tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .env("SIZE", size)
+            .env("ERROR", error)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap()
+    }
+
+    async fn collect(s: futures_util::stream::BoxStream<'static, std::io::Result<axum::body::Bytes>>) -> (usize, Option<String>) {
+        use futures_util::StreamExt;
+        let mut s = s;
+        let mut n = 0;
+        while let Some(c) = s.next().await {
+            match c {
+                Ok(b) => n += b.len(),
+                Err(e) => return (n, Some(e.to_string())),
+            }
+        }
+        (n, None)
+    }
+
+    #[tokio::test]
+    async fn a_worker_failing_mid_stream_breaks_the_download() {
+        // half the file, then the worker fails: the body ends with an error, not cleanly
+        let c = fake_worker(r#"cat >/dev/null; printf '%s\n' "$SIZE" >&2; head -c 102400 /dev/zero; printf '%s\n' "$ERROR" >&2; exit 1"#);
+        let (body, size) = from_worker(c, b"{}", true, ()).await.unwrap();
+        assert_eq!(size, Some(204_800));
+        let (n, err) = collect(body).await;
+        assert_eq!(n, 102_400);
+        assert_eq!(err.as_deref(), Some("pack 1234 is missing"));
+        // killed without a word (the memory limit): broken as well
+        let c = fake_worker(r#"cat >/dev/null; head -c 70000 /dev/zero; kill -9 $$"#);
+        let (body, size) = from_worker(c, b"{}", false, ()).await.unwrap();
+        assert_eq!(size, None);
+        let (n, err) = collect(body).await;
+        assert_eq!(n, 70_000);
+        assert!(err.is_some());
+        // a whole file ends cleanly
+        let c = fake_worker(r#"cat >/dev/null; printf '%s\n' "$SIZE" >&2; head -c 204800 /dev/zero"#);
+        let (body, size) = from_worker(c, b"{}", true, ()).await.unwrap();
+        assert_eq!(size, Some(204_800));
+        assert_eq!(collect(body).await, (204_800, None));
+        // nothing but an error: refused before any byte
+        let c = fake_worker(r#"cat >/dev/null; printf '%s\n' "$ERROR" >&2; exit 1"#);
+        let e = from_worker(c, b"{}", true, ()).await.err().unwrap();
+        assert_eq!(e.0, StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn upload_leftovers_are_swept() {
+        let dir = std::env::temp_dir().join(format!("rynas-sweep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("data/ab")).unwrap();
+        std::fs::create_dir_all(dir.join("index")).unwrap();
+        std::fs::write(dir.join("data/ab/.tmp-1-x"), b"x").unwrap();
+        std::fs::write(dir.join("index/.tmp-1-y"), b"y").unwrap();
+        std::fs::write(dir.join("data/ab/abcd"), b"keep").unwrap();
+        // too young: kept
+        assert_eq!(sweep_temp(&dir, Duration::from_secs(3600)), 0);
+        assert_eq!(sweep_temp(&dir, Duration::ZERO), 2);
+        assert!(dir.join("data/ab/abcd").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

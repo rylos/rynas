@@ -1289,6 +1289,8 @@ fn main() -> std::io::Result<()> {
             shutdown_signal().await;
             let _ = stop_tx.send(());
         };
+        // the PC backup registry's touched counters are written on the way out
+        let pc_agent = state.pc_agent.clone();
         let server = rynasd::server::serve(PeerCheckedListener::new(listener, allowed), router(state), signal);
         tokio::select! {
             r = server => r?,
@@ -1299,6 +1301,9 @@ fn main() -> std::io::Result<()> {
                     std::future::pending::<()>().await;
                 }
             } => tracing::info!("shutdown: closing open streams"),
+        }
+        if let Some(a) = &pc_agent {
+            a.flush();
         }
         opened.modules.stop();
         if own_socket {

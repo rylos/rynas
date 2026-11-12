@@ -55,11 +55,25 @@ use crate::ops::{Error, Ops, Res, user};
 
 const PAIRING_TTL_MS: u64 = 15 * 60 * 1000;
 const RESTORE_CODE_TTL_MS: u64 = 3600 * 1000;
-const SESSION_TTL_MS: u64 = 3600 * 1000;
+/// A restore session ends after this long without a request (each accepted request pushes
+/// the end out again) …
+pub const SESSION_IDLE_MS: u64 = 3600 * 1000;
+/// … and at the latest this long after the login, however busy it is.
+pub const SESSION_MAX_MS: u64 = 48 * 3600 * 1000;
 pub const HISTORY: usize = 30;
-/// Wrong codes allowed in [`FAIL_WINDOW`] before every code is refused for that long.
+/// Wrong codes allowed from one client (an IPv4 address, an IPv6 /64) in [`FAIL_WINDOW`]
+/// before that client's codes are refused for that long.
 const MAX_FAILURES: usize = 10;
+/// Wrong codes from everybody in [`FAIL_WINDOW`] after which every code check is slowed
+/// down by [`SLOW_CHECK`] (never refused: nobody can lock the others out).
+const SLOW_FAILURES: usize = 200;
+const SLOW_CHECK: Duration = Duration::from_secs(2);
 const FAIL_WINDOW: Duration = Duration::from_secs(600);
+/// Clients remembered with wrong codes at most (the oldest are dropped).
+const MAX_FAIL_SOURCES: usize = 4096;
+/// The registry changes that need no immediate write (bytes uploaded, last seen, the end of
+/// a restore session) are written at most this often.
+pub const FLUSH_EVERY: Duration = Duration::from_secs(30);
 /// Reads (versions, browse) give up after this long.
 pub const READ_TIMEOUT: Duration = Duration::from_secs(110);
 /// Downloads and zips running at once.
@@ -239,26 +253,138 @@ pub struct Registry {
     pub pairings: Vec<Pairing>,
     #[serde(default)]
     pub restore_codes: Vec<RestoreCode>,
+    /// Restore sessions, kept here so that a rynasd restart does not cut a restore off.
+    #[serde(default)]
+    pub sessions: Vec<Session>,
     #[serde(default)]
     pub seq: u64,
 }
 
-/// A restore session (memory only: a rynasd restart ends it).
-#[derive(Debug, Clone)]
+/// A restore session: a token (only its SHA-256 here) that reads its devices' groups.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Session {
+    pub token_sha: String,
     pub devices: Vec<String>,
+    pub created_ms: u64,
+    /// Pushed to now + [`SESSION_IDLE_MS`] by every request, never past created + [`SESSION_MAX_MS`].
     pub expires_ms: u64,
+    /// The group of the session's temporary key and its id: the password the agent got opens
+    /// only this key file, which goes when the session ends.
+    #[serde(default)]
+    pub key_group: String,
+    #[serde(default)]
+    pub key_id: String,
+}
+
+impl Session {
+    /// The session is still valid at `now`: its devices, and the end pushed out.
+    pub fn slide(&mut self, now: u64) -> Option<Vec<String>> {
+        if self.expires_ms <= now {
+            return None;
+        }
+        self.expires_ms = (now + SESSION_IDLE_MS).min(self.created_ms + SESSION_MAX_MS);
+        Some(self.devices.clone())
+    }
 }
 
 /// What is happening to a group's repository right now (memory only).
 #[derive(Debug, Default)]
 pub struct Live {
-    /// The NAS maintains the repository: agent writes answer 423.
+    /// The NAS maintains the repository (or deletes the group): agent writes answer 423,
+    /// browsing and downloads 423 too.
     pub maintaining: bool,
     pub writes: u32,
     pub last_write: Option<Instant>,
     /// Bytes on disk, counted once and kept up to date by the uploads.
     pub used: Option<u64>,
+    /// Bytes the uploads running now may still add (their Content-Length, or what is left of
+    /// the quota): counted against the quota with `used`.
+    pub reserved: u64,
+}
+
+impl Live {
+    /// Room for an upload of `declared` bytes (unknown: up to `max`) in a group with `quota`
+    /// (0: none): the bytes to reserve and the most the body may carry.
+    pub fn reserve(&mut self, quota: u64, declared: Option<u64>, max: u64) -> Result<(u64, u64), &'static str> {
+        if quota == 0 {
+            return Ok((0, declared.unwrap_or(max).min(max)));
+        }
+        let free = quota.saturating_sub(self.used.unwrap_or(0).saturating_add(self.reserved));
+        let want = declared.unwrap_or(free.min(max));
+        if want > free || free == 0 {
+            return Err("the group's quota is used up");
+        }
+        self.reserved += want;
+        Ok((want, want))
+    }
+}
+
+/// Wrong codes lately, per client and in all.
+#[derive(Debug, Default)]
+struct Failures {
+    by_source: HashMap<String, VecDeque<Instant>>,
+    all: VecDeque<Instant>,
+}
+
+impl Failures {
+    fn trim(&mut self) {
+        let old = |t: &Instant| t.elapsed() > FAIL_WINDOW;
+        while self.all.front().is_some_and(old) {
+            self.all.pop_front();
+        }
+        self.by_source.retain(|_, q| {
+            while q.front().is_some_and(old) {
+                q.pop_front();
+            }
+            !q.is_empty()
+        });
+    }
+
+    /// `source` may try a code: `Err` when it sent too many wrong ones, `Ok(true)` when
+    /// everybody together did and the check is slowed down.
+    fn check(&mut self, source: &str) -> Result<bool, ()> {
+        self.trim();
+        if self.by_source.get(source).is_some_and(|q| q.len() >= MAX_FAILURES) {
+            return Err(());
+        }
+        Ok(self.all.len() >= SLOW_FAILURES)
+    }
+
+    fn record(&mut self, source: &str) {
+        let now = Instant::now();
+        self.all.push_back(now);
+        if self.all.len() > MAX_FAIL_SOURCES * MAX_FAILURES {
+            self.all.pop_front();
+        }
+        if !self.by_source.contains_key(source) && self.by_source.len() >= MAX_FAIL_SOURCES {
+            // the source whose last failure is oldest makes room
+            if let Some(k) = self.by_source.iter().min_by_key(|(_, q)| q.back().copied()).map(|(k, _)| k.clone()) {
+                self.by_source.remove(&k);
+            }
+        }
+        self.by_source.entry(source.to_string()).or_default().push_back(now);
+    }
+}
+
+/// The client a code comes from, as rynas-web saw it: an IPv4 address or an IPv6 /64 (one
+/// host usually holds a whole /64).
+pub fn source_of(h: &HeaderMap) -> String {
+    let raw = h
+        .get(rynas_auth::ipc::CLIENT_ADDR_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .trim();
+    match raw.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(a)) => a.to_string(),
+        Ok(std::net::IpAddr::V6(a)) => match a.to_ipv4_mapped() {
+            Some(v4) => v4.to_string(),
+            None => {
+                let s = a.segments();
+                format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+            }
+        },
+        Err(_) => "local".to_string(),
+    }
 }
 
 pub struct PcAgent {
@@ -279,8 +405,11 @@ pub struct PcAgent {
     pub live: Mutex<HashMap<String, Live>>,
     /// Per device: the run's progress and the bytes seen at the last speed sample.
     progress: Mutex<HashMap<String, (PcProgress, SpeedSample)>>,
-    sessions: Mutex<HashMap<String, Session>>,
-    failures: Mutex<VecDeque<Instant>>,
+    failures: Mutex<Failures>,
+    /// The registry in memory has changes not written yet ([`PcAgent::touch`]).
+    dirty: std::sync::atomic::AtomicBool,
+    /// Memory the running maintenances and reads expect to use, against the budget.
+    pub mem_used: Mutex<u64>,
     /// Woken on every plan or command change (the agents' long polls).
     pub changed: tokio::sync::Notify,
 }
@@ -320,8 +449,9 @@ impl PcAgent {
             reg: Mutex::new(reg),
             live: Mutex::new(HashMap::new()),
             progress: Mutex::new(HashMap::new()),
-            sessions: Mutex::new(HashMap::new()),
-            failures: Mutex::new(VecDeque::new()),
+            failures: Mutex::new(Failures::default()),
+            dirty: std::sync::atomic::AtomicBool::new(false),
+            mem_used: Mutex::new(0),
             changed: tokio::sync::Notify::new(),
         })
     }
@@ -360,7 +490,29 @@ impl PcAgent {
         crate::tls::write_atomic(&Self::reg_path(&self.state_dir), &bytes, 0o600, None)
             .map_err(Error::internal)?;
         *reg = next;
+        // the touches made before are in this write too (same lock)
+        self.dirty.store(false, std::sync::atomic::Ordering::Relaxed);
         Ok(out)
+    }
+
+    /// Changes the registry in memory only; the change is written by the next [`Self::edit`]
+    /// or [`Self::flush`] (within [`FLUSH_EVERY`]). For counters and times whose loss in a
+    /// crash costs nothing (bytes uploaded, last seen, a session's sliding end): the hot
+    /// paths never rewrite and sync the file.
+    pub fn touch<T>(&self, f: impl FnOnce(&mut Registry) -> T) -> T {
+        let mut reg = self.reg.lock().unwrap_or_else(|p| p.into_inner());
+        let out = f(&mut reg);
+        self.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+        out
+    }
+
+    /// Writes the touched changes, if any (blocking: call it from a blocking thread).
+    pub fn flush(&self) {
+        if self.dirty.load(std::sync::atomic::Ordering::Relaxed)
+            && let Err(e) = self.edit(|_| Ok(()))
+        {
+            tracing::warn!("pc backup: writing the registry: {}", e.2);
+        }
     }
 
     pub fn fingerprint(&self) -> Option<String> {
@@ -402,27 +554,29 @@ impl PcAgent {
         })
     }
 
-    /// Too many wrong codes lately: 429.
-    fn check_rate(&self) -> Res<()> {
-        let mut f = self.failures.lock().unwrap_or_else(|p| p.into_inner());
-        while f.front().is_some_and(|t| t.elapsed() > FAIL_WINDOW) {
-            f.pop_front();
-        }
-        if f.len() >= MAX_FAILURES {
-            return Err(Error::new(
+    /// Too many wrong codes from this client lately: 429. Many from everybody: the check
+    /// waits a moment (60-bit codes make guessing hopeless anyway; the others still get in).
+    async fn check_rate(&self, source: &str) -> Res<()> {
+        let slow = self.failures.lock().unwrap_or_else(|p| p.into_inner()).check(source);
+        match slow {
+            Err(()) => Err(Error::new(
                 StatusCode::TOO_MANY_REQUESTS,
                 error_codes::RATE_LIMITED,
                 "too many wrong codes: try again in ten minutes".into(),
-            ));
+            )),
+            Ok(true) => {
+                tokio::time::sleep(SLOW_CHECK).await;
+                Ok(())
+            }
+            Ok(false) => Ok(()),
         }
-        Ok(())
     }
 
-    fn failed(&self) -> Error {
+    fn failed(&self, source: &str) -> Error {
         self.failures
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .push_back(Instant::now());
+            .record(source);
         tracing::warn!(target: "rynas::audit", "pc backup: a wrong pairing or restore code");
         Error::new(
             StatusCode::UNAUTHORIZED,
@@ -566,26 +720,32 @@ impl PcAgent {
         )
     }
 
-    /// The devices a restore session may read.
+    /// The devices a restore session may read; the request keeps the session alive
+    /// ([`Session::slide`], written within [`FLUSH_EVERY`]).
     pub fn session_devices(&self, token: &str) -> Option<Vec<String>> {
         let h = sha_hex(token.as_bytes());
-        let mut s = self.sessions.lock().unwrap_or_else(|p| p.into_inner());
         let now = now_ms();
-        s.retain(|_, v| v.expires_ms > now);
-        s.get(&h).map(|v| v.devices.clone())
+        let mut reg = self.reg.lock().unwrap_or_else(|p| p.into_inner());
+        let out = reg.sessions.iter_mut().find(|s| s.token_sha == h).and_then(|s| s.slide(now));
+        if out.is_some() {
+            self.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        out
     }
 
-    /// One worker read on a device's repository (with a timeout, no task slot).
-    pub async fn read_op(&self, device: &str, op: WorkerOp) -> Res<WorkerEvent> {
+    /// One worker read on a device's repository (with a timeout, no task slot), inside the
+    /// memory budget and never while the group is maintained.
+    pub async fn read_op(self: &Arc<Self>, device: &str, op: WorkerOp) -> Res<WorkerEvent> {
         let d = self.device(device)?;
         let g = self.group(&d.group)?;
+        let (_mem, launch) = maint::admit_read(self, &d.group, &g).await?;
         let req = self.request(&g, op)?;
         let limits = Limits {
             timeout: Some(READ_TIMEOUT),
             ..Default::default()
         };
         run_worker(
-            &self.launch,
+            &launch,
             &format!("pc-{}", d.group),
             &req,
             &CancellationToken::new(),
@@ -914,14 +1074,25 @@ async fn pairing_post(
         Ok(())
     })?;
     audit(&who, "pairing", &id);
+    let fingerprint = svc.fingerprint();
     let body = PairingCreated {
         id: id.clone(),
-        command: format!("sudo rynas-agent pair {{url}} {code}"),
+        command: pair_command(&code, fingerprint.as_deref()),
         code,
         expires_ms,
-        fingerprint: svc.fingerprint(),
+        fingerprint,
     };
     Ok(crate::error::created("/api/v1/pcbackup/pairings", &id, body))
+}
+
+/// The command the console shows for a pairing (`{url}` is filled in by the browser): with
+/// the certificate's fingerprint, so the agent pins the NAS' certificate without asking and
+/// nobody in the path can pose as the NAS.
+pub fn pair_command(code: &str, fingerprint: Option<&str>) -> String {
+    match fingerprint.filter(|f| !f.is_empty() && f.bytes().all(|b| b.is_ascii_hexdigit() || b == b':')) {
+        Some(f) => format!("sudo rynas-agent pair {{url}} {code} --fingerprint {f}"),
+        None => format!("sudo rynas-agent pair {{url}} {code}"),
+    }
 }
 
 async fn pairing_delete(
@@ -1063,9 +1234,17 @@ async fn group_delete(
             "revoke every PC of the group first".into(),
         ));
     }
+    // the group is taken like a maintenance (no upload, no maintenance, no read meanwhile),
+    // and the pairings that would join it go now
+    let guard = maint::take(&svc, &group).map_err(|e| Error::new(StatusCode::CONFLICT, error_codes::BUSY, e))?;
+    svc.edit(|r| {
+        r.pairings.retain(|p| p.group.as_deref() != Some(group.as_str()));
+        Ok(())
+    })?;
     audit(&who, "delete group", &group);
     let s2 = svc.clone();
     let id = svc.ops.tasks.spawn("pcbackup.delete-group", &who, move |ctx| async move {
+        let _guard = guard;
         maint::delete_group(&s2, &group, &g, &ctx).await
     })?;
     Ok((StatusCode::ACCEPTED, Json(TaskStarted { task_id: id })).into_response())
@@ -1177,11 +1356,10 @@ async fn versions_get(
     {
         WorkerEvent::Snapshots { list } => {
             let n = list.len() as u32;
-            let _ = svc.edit(|r| {
+            svc.touch(|r| {
                 if let Some(d) = r.devices.get_mut(&device) {
                     d.versions = n;
                 }
-                Ok(())
             });
             Ok(Json(list))
         }
@@ -1374,11 +1552,13 @@ async fn restore_code_post(
 
 async fn pair_post(
     State(st): State<PaState>,
+    h: HeaderMap,
     body: Result<Json<PairRequest>, JsonRejection>,
 ) -> Res<Json<PairResponse>> {
     let svc = pa(&st)?;
     let req = json_body(body)?;
-    svc.check_rate()?;
+    let source = source_of(&h);
+    svc.check_rate(&source).await?;
     if req.hostname.is_empty() || req.hostname.len() > 255 || req.hostname.chars().any(char::is_control) {
         return Err(Error::invalid("hostname", "not a host name"));
     }
@@ -1391,7 +1571,7 @@ async fn pair_post(
         Ok(i.map(|i| (r.pairings.remove(i), r.settings.clone())))
     })?;
     let Some((pairing, settings)) = pairing else {
-        return Err(svc.failed());
+        return Err(svc.failed(&source));
     };
     let out = maint::pair(&svc, &pairing, &settings, &req).await;
     match &out {
@@ -1434,11 +1614,10 @@ async fn plan_get(
         }
         let seen = now_ms();
         if d.last_seen_ms.is_none_or(|t| seen.saturating_sub(t) > 60_000) {
-            let _ = svc.edit(|r| {
+            svc.touch(|r| {
                 if let Some(x) = r.devices.get_mut(&device) {
                     x.last_seen_ms = Some(seen);
                 }
-                Ok(())
             });
         }
         if q.rev != Some(d.rev) || Instant::now() >= deadline {
@@ -1484,32 +1663,54 @@ async fn report_post(
 
 async fn restore_login(
     State(st): State<PaState>,
+    h: HeaderMap,
     body: Result<Json<RestoreLogin>, JsonRejection>,
 ) -> Res<Json<RestoreSession>> {
     let svc = pa(&st)?;
     let req = json_body(body)?;
-    svc.check_rate()?;
-    let h = code_hash(&req.code);
+    let source = source_of(&h);
+    svc.check_rate(&source).await?;
+    let hash = code_hash(&req.code);
     let code = svc.edit(|r| {
         let now = now_ms();
         r.restore_codes.retain(|c| c.expires_ms > now);
-        let i = r.restore_codes.iter().position(|c| c.code_sha == h);
+        let i = r.restore_codes.iter().position(|c| c.code_sha == hash);
         Ok(i.map(|i| r.restore_codes.remove(i)))
     })?;
     let Some(code) = code else {
-        return Err(svc.failed());
+        return Err(svc.failed(&source));
     };
     let d = svc.device(&code.device)?;
     let g = svc.group(&d.group)?;
+    // a key of its own for this session (never the NAS' key): its password stops opening the
+    // repository when the session ends and the key file goes
+    let (key_id, password) = match maint::add_session_key(&svc, &d.group, &g, &code.device).await {
+        Ok(k) => k,
+        Err(e) => {
+            // the code was not used up: it works again
+            let back = code.clone();
+            let _ = svc.edit(move |r| {
+                r.restore_codes.push(back);
+                Ok(())
+            });
+            return Err(e);
+        }
+    };
     let token = new_token()?;
-    let expires_ms = now_ms() + SESSION_TTL_MS;
-    svc.sessions.lock().unwrap_or_else(|p| p.into_inner()).insert(
-        sha_hex(token.as_bytes()),
-        Session {
-            devices: vec![code.device.clone()],
-            expires_ms,
-        },
-    );
+    let now = now_ms();
+    let session = Session {
+        token_sha: sha_hex(token.as_bytes()),
+        devices: vec![code.device.clone()],
+        created_ms: now,
+        expires_ms: now + SESSION_IDLE_MS,
+        key_group: d.group.clone(),
+        key_id,
+    };
+    let expires_ms = session.expires_ms;
+    svc.edit(|r| {
+        r.sessions.push(session);
+        Ok(())
+    })?;
     tracing::info!(target: "rynas::audit", "pc backup: restore session for {}", code.device);
     Ok(Json(RestoreSession {
         token,
@@ -1519,7 +1720,7 @@ async fn restore_login(
             group: d.group.clone(),
             description: d.settings.description.clone(),
             hostname: d.hostname.clone(),
-            repo_password: svc.nas_password(&g)?,
+            repo_password: password,
         }],
     }))
 }
@@ -1530,9 +1731,11 @@ async fn restore_report(
     body: Result<Json<RestoreReport>, JsonRejection>,
 ) -> Res<StatusCode> {
     let svc = pa(&st)?;
-    let devices = bearer(&h)
-        .and_then(|t| svc.session_devices(&t))
+    let token = bearer(&h).unwrap_or_default();
+    let devices = svc
+        .session_devices(&token)
         .ok_or_else(|| Error::new(StatusCode::UNAUTHORIZED, error_codes::UNAUTHENTICATED, "no restore session".into()))?;
+    let token_sha = sha_hex(token.as_bytes());
     let mut r = json_body(body)?;
     if !devices.contains(&r.device) {
         return Err(Error::new(StatusCode::FORBIDDEN, error_codes::FORBIDDEN, "not this session's PC".into()));
@@ -1565,8 +1768,14 @@ async fn restore_report(
         while d.history.len() > HISTORY {
             d.history.pop_front();
         }
+        // the report is the restore's last call: the session ends, its key goes
+        if let Some(s) = reg.sessions.iter_mut().find(|s| s.token_sha == token_sha) {
+            s.expires_ms = now;
+        }
         Ok(())
     })?;
+    let s2 = svc.clone();
+    tokio::spawn(async move { maint::end_sessions(&s2).await });
     let dir = PcAgent::dir(&svc.state_dir).join("restore-logs");
     let _ = std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir);
     let _ = crate::tls::write_atomic(
@@ -1650,5 +1859,107 @@ mod tests {
         });
         assert_eq!(state_of(&d, false, 101 * h), PcState::Failed);
         assert!(!ready_of(&d, None).ready);
+    }
+
+    #[test]
+    fn a_busy_session_outlives_the_idle_time_up_to_the_cap() {
+        let mut s = Session {
+            devices: vec!["pc".into()],
+            created_ms: 0,
+            expires_ms: SESSION_IDLE_MS,
+            ..Default::default()
+        };
+        // a request every 10 minutes for 30 hours: alive all along
+        let step = 10 * 60 * 1000;
+        let mut now = 0;
+        while now < 30 * 3600 * 1000 {
+            assert_eq!(s.slide(now), Some(vec!["pc".to_string()]), "at {now}");
+            now += step;
+        }
+        assert!(now > SESSION_IDLE_MS * 20);
+        // never past the cap, however busy
+        while now < SESSION_MAX_MS - 1000 {
+            assert!(s.slide(now).is_some(), "at {now}");
+            now += step;
+        }
+        now = SESSION_MAX_MS - 1000;
+        assert!(s.slide(now).is_some());
+        assert_eq!(s.expires_ms, SESSION_MAX_MS);
+        now = SESSION_MAX_MS;
+        assert!(s.slide(now).is_none());
+        // idle longer than the idle time: gone
+        let mut idle = Session {
+            devices: vec!["pc".into()],
+            created_ms: 0,
+            expires_ms: SESSION_IDLE_MS,
+            ..Default::default()
+        };
+        assert!(idle.slide(SESSION_IDLE_MS + 1).is_none());
+        // kept in the registry: it survives a restart
+        let mut reg = Registry::default();
+        reg.sessions.push(s.clone());
+        let back: Registry = serde_json::from_slice(&serde_json::to_vec(&reg).unwrap()).unwrap();
+        assert_eq!(back.sessions[0].expires_ms, s.expires_ms);
+    }
+
+    #[test]
+    fn parallel_uploads_share_the_quota() {
+        let gib = 1u64 << 30;
+        let mut l = Live {
+            used: Some(gib),
+            ..Default::default()
+        };
+        // 2 GiB quota, 1 GiB used: two 400 MiB uploads fit, the third does not
+        let q = 2 * gib;
+        let mib = 1u64 << 20;
+        assert_eq!(l.reserve(q, Some(400 * mib), gib), Ok((400 * mib, 400 * mib)));
+        assert_eq!(l.reserve(q, Some(400 * mib), gib), Ok((400 * mib, 400 * mib)));
+        assert!(l.reserve(q, Some(400 * mib), gib).is_err());
+        // without a length: only what is left
+        assert_eq!(l.reserve(q, None, gib), Ok((224 * mib, 224 * mib)));
+        assert!(l.reserve(q, None, gib).is_err());
+        // no quota: no reservation, the size limit only
+        let mut free = Live::default();
+        assert_eq!(free.reserve(0, None, gib), Ok((0, gib)));
+    }
+
+    #[test]
+    fn wrong_codes_count_per_client() {
+        let mut f = Failures::default();
+        for _ in 0..MAX_FAILURES {
+            assert!(f.check("192.0.2.1").is_ok());
+            f.record("192.0.2.1");
+        }
+        assert!(f.check("192.0.2.1").is_err());
+        // somebody else still gets in, unslowed
+        assert_eq!(f.check("192.0.2.2"), Ok(false));
+        // many clients together only slow the checks down
+        for i in 0..SLOW_FAILURES {
+            f.record(&format!("198.51.100.{}", i % 250));
+        }
+        assert_eq!(f.check("192.0.2.2"), Ok(true));
+        assert!(f.by_source.len() <= MAX_FAIL_SOURCES);
+    }
+
+    #[test]
+    fn client_sources() {
+        let mut h = HeaderMap::new();
+        assert_eq!(source_of(&h), "local");
+        h.insert(rynas_auth::ipc::CLIENT_ADDR_HEADER, "192.0.2.7".parse().unwrap());
+        assert_eq!(source_of(&h), "192.0.2.7");
+        h.insert(rynas_auth::ipc::CLIENT_ADDR_HEADER, "2001:db8:1:2:3:4:5:6".parse().unwrap());
+        assert_eq!(source_of(&h), "2001:db8:1:2::/64");
+        h.insert(rynas_auth::ipc::CLIENT_ADDR_HEADER, "::ffff:192.0.2.9".parse().unwrap());
+        assert_eq!(source_of(&h), "192.0.2.9");
+    }
+
+    #[test]
+    fn pairing_command_pins_the_certificate() {
+        assert_eq!(
+            pair_command("ABCD-EFGH-JKMN", Some("AA:BB:01")),
+            "sudo rynas-agent pair {url} ABCD-EFGH-JKMN --fingerprint AA:BB:01"
+        );
+        assert_eq!(pair_command("C", None), "sudo rynas-agent pair {url} C");
+        assert_eq!(pair_command("C", Some("x; rm")), "sudo rynas-agent pair {url} C");
     }
 }

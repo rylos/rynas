@@ -1692,7 +1692,13 @@ bytes each PC uploads are counted per PC.
 Codes and tokens: pairing codes `XXXX-XXXX-XXXX` (Crockford base32, 60 bits, one-time,
 15 min), restore codes (same form, one-time, 1 h, read-only, one PC), device tokens and
 restore session tokens (256 bits, hex). rynasd keeps only their SHA-256. Ten wrong codes in
-ten minutes refuse every code for ten minutes (429 `rate_limited`).
+ten minutes from one client (an IPv4 address, an IPv6 /64, as rynas-web saw it) refuse that
+client's codes for ten minutes (429 `rate_limited`); 200 wrong codes from everybody only slow
+every check down by two seconds, so nobody can lock the others out. A restore session ends one
+hour after its last request and at the latest 48 h after the login, or with its report; sessions
+are kept in the registry (a rynasd restart does not cut a restore off). Its password opens a key
+file of its own (`restore-<device>`), never the NAS key; the key file is removed when the session
+ends. In a shared group that key reads every PC of the group (the console says so).
 
 State: `<state>/pc-agent/registry.json` (settings, groups, devices, history, codes hashed;
 written atomically), the newest manifest of each PC in `<state>/pc-agent/manifests/`
@@ -1715,10 +1721,10 @@ progress; while it runs, uploads answer 423.
 |---|---|---|---|
 | GET | `/api/v1/pcbackup` | — | `PcBackupOverview` {settings `PcAgentSettings` {folder, default_quota_gib, maintenance_hour, maintenance_memory_pct}, groups: [`PcGroup`], devices: [`PcDevice`], pairings: [`PairingView` {id, description, group?, expires_ms}], memory_budget_bytes, fingerprint? (SHA-256 of the served certificate), dry} |
 | PUT | `/api/v1/pcbackup/settings` | `PcAgentSettings` | 204; 400 `invalid_value` fields `folder` (inside a volume or the system folder), `maintenance_hour` (0–23), `maintenance_memory_pct` (10–80) |
-| POST | `/api/v1/pcbackup/pairings` | `PairingRequest` {description, group? (join), quota_gib? (new group)} | 201 `PairingCreated` {id, code, expires_ms, fingerprint?, command (`{url}` for the browser to fill)}; 409 `conflict` without a folder; 400 field `group` |
+| POST | `/api/v1/pcbackup/pairings` | `PairingRequest` {description, group? (join), quota_gib? (new group)} | 201 `PairingCreated` {id, code, expires_ms, fingerprint?, command (`{url}` for the browser to fill; with `--fingerprint` when TLS has one: the agent's `--yes` refuses https without it)}; 409 `conflict` without a folder; 400 field `group` |
 | DELETE | `/api/v1/pcbackup/pairings/{id}` | — | 204 |
 | PUT | `/api/v1/pcbackup/groups/{group}` | `PcGroupSettings` {description, quota_gib} | `PcGroup` |
-| DELETE | `/api/v1/pcbackup/groups/{group}` | — | 202 (`pcbackup.delete-group`: the repository and every version deleted); 409 while a PC of the group is not revoked |
+| DELETE | `/api/v1/pcbackup/groups/{group}` | — | 202 (`pcbackup.delete-group`: the repository and every version deleted); 409 while a PC of the group is not revoked, 409 `busy` while the group is maintained or uploaded to (it is taken like a maintenance); the pending pairings that would join it are removed |
 | POST | `/api/v1/pcbackup/groups/{group}/maintenance` | — | 202 (`pcbackup.maintenance`); 409 `busy` while a PC of the group uploads |
 | POST | `/api/v1/pcbackup/groups/{group}/recovery-kit` | — | `RecoveryKit` {group, description, devices, repository, password, created_ms, fingerprint?}: a new recovery key file each time (the previous one is removed); the password is answered only here |
 | GET | `/api/v1/pcbackup/devices/{device}` | — | `PcDeviceDetail` {device `PcDevice`, history: [`PcRun`] newest first, manifest? `Manifest`} |
@@ -1728,7 +1734,7 @@ progress; while it runs, uploads answer 423.
 | POST | `/api/v1/pcbackup/devices/{device}/cancel` | — | 204 |
 | GET | `/api/v1/pcbackup/devices/{device}/versions` | — | `[SnapshotEntry]` (`backup` types) of this PC |
 | GET | `/api/v1/pcbackup/devices/{device}/browse?version=&path=` | — | `[NodeEntry]`, folders first |
-| GET | `/api/v1/pcbackup/devices/{device}/download?version=&path=` | — | the file, streamed from the worker's stdout (no size limit, `Content-Disposition: attachment`); 2 downloads at once (429 beyond) |
+| GET | `/api/v1/pcbackup/devices/{device}/download?version=&path=` | — | the file, streamed from the worker's stdout (no size limit, `Content-Disposition: attachment`, `Content-Length` from the worker); 2 downloads at once (429 beyond); a worker that fails after the first bytes breaks the body off (never a short "complete" file). Versions, browse, download and zip load the whole index: they run in a unit limited to the maintenance budget, are admitted only when their estimate fits next to running maintenances and reads, and answer 423 `busy` (with the estimate) otherwise or while the group is maintained |
 | GET | `/api/v1/pcbackup/devices/{device}/zip?version=&path=…` | — | a zip (stored, zip64, data descriptors) of the files and folders named by every `path`, streamed |
 | POST | `/api/v1/pcbackup/devices/{device}/restore-code` | — | 201 `RestoreCodeCreated` {code, expires_ms, device} |
 
@@ -1755,7 +1761,7 @@ once per failure streak.
 | HEAD, GET | `/api/v1/pcbackup/repo/{group}/config` | token or session | — | the repository config |
 | GET | `/api/v1/pcbackup/repo/{group}/{type}/` | token or session | — | list; `[{name, size}]` with `Accept: application/vnd.x.restic.rest.v2`, names otherwise |
 | HEAD, GET | `/api/v1/pcbackup/repo/{group}/{type}/{name}` | token or session | — | the file; `Range: bytes=a-b` answers 206 |
-| POST | `/api/v1/pcbackup/repo/{group}/{type}/{name}` | device token | the file | 200; the name must be the SHA-256 of the body (400 otherwise), an existing name is never overwritten (200 when it is the same file, 403 otherwise); `config` and `keys` 403; over the quota or 1 GiB 413; 423 `busy` while the NAS maintains the repository |
+| POST | `/api/v1/pcbackup/repo/{group}/{type}/{name}` | device token | the file | 200; the name must be the SHA-256 of the body (400 otherwise), an existing name is never overwritten (200 when it is the same file, checked by size and SHA-256; a damaged stored file is replaced by the verified upload; 403 when the name is not a file); `config` and `keys` 403; over the quota or 1 GiB 413 (parallel uploads reserve their Content-Length against the quota); 423 `busy` while the NAS maintains the repository |
 | DELETE | `/api/v1/pcbackup/repo/{group}/locks/{name}` | device token | — | 200; any other DELETE 403 |
 | POST | `/api/v1/pcbackup/repo/{group}/?create=true` | — | — | 403 (the NAS creates repositories) |
 
