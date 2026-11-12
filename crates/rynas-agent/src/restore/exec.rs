@@ -128,6 +128,18 @@ pub fn disk_in_use(name: &str) -> Option<String> {
             return Some(format!("/dev/{d} is held by a device mapping (LUKS, LVM, md)"));
         }
     }
+    // claims that are neither in mountinfo nor in holders (a member of a btrfs mounted from
+    // another disk, a ZFS vdev, another restore): Linux refuses an exclusive open of a block
+    // device somebody holds
+    for d in &devs {
+        use std::os::unix::fs::OpenOptionsExt;
+        let r = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_EXCL).open(format!("/dev/{d}"));
+        if let Err(e) = r
+            && e.raw_os_error() == Some(libc::EBUSY)
+        {
+            return Some(format!("/dev/{d} is in use (a filesystem of several disks, ZFS, or another program)"));
+        }
+    }
     None
 }
 

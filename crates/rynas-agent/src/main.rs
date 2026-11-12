@@ -38,6 +38,7 @@ use crate::state::{State, now_ms};
 
 const USAGE: &str = "usage:
   rynas-agent pair <nas address> <code> [--fingerprint AA:BB:..] [--yes] [--allow-http]
+                   (--yes over https needs --fingerprint)
   rynas-agent run
   rynas-agent backup
   rynas-agent status
@@ -124,10 +125,17 @@ fn pair(args: &[String]) -> Result<(), String> {
         match opt(args, "--fingerprint") {
             Some(f) if http::normalize_fp(&f) == seen => {}
             Some(f) => return Err(format!("the NAS shows certificate {seen}, not {}", http::normalize_fp(&f))),
+            // --yes never accepts an unchecked certificate: anyone in the path could pose as
+            // the NAS and take the code and the PC's repository password
+            None if flag(args, "--yes") => {
+                return Err(format!(
+                    "--yes needs --fingerprint over https (the NAS shows certificate {seen}): copy the whole command from the NAS' \"Add a PC\" dialog"
+                ));
+            }
             None => {
                 eprintln!("NAS certificate (SHA-256):\n  {seen}");
                 eprintln!("Compare it with the fingerprint in the NAS' \"Add a PC\" dialog.");
-                if !flag(args, "--yes") && !ask("Is it the same? [y/N] ").eq_ignore_ascii_case("y") {
+                if !ask("Is it the same? [y/N] ").eq_ignore_ascii_case("y") {
                     return Err("not paired".into());
                 }
             }

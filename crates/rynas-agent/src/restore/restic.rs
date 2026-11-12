@@ -1,5 +1,6 @@
 //! The file method as a restore source: a restore session from a one-time restore code
-//! (read-only, one PC, one hour), the group's repository opened with `rustic_core` over the
+//! (read-only, one PC; alive while it reads, ended by the report; its password opens a key
+//! of its own that the NAS removes when the session ends), the group's repository opened with `rustic_core` over the
 //! NAS' REST protocol, the PC's versions (tag `pc-<device>`), the manifest read from the
 //! version itself, and a full restore with owners (numeric ids: the live system's users
 //! mean nothing), modes, times, xattrs (ACLs, capabilities, SELinux labels), hard links and
