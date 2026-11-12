@@ -23,7 +23,7 @@ use crate::api;
 use crate::form::{In, area_field, form_error, number_field, segmented, select_field, spinner, text_field};
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
-use crate::pages::security::copy_button;
+use crate::pages::security::{copy_button, copy_button_for};
 use crate::tasks;
 use crate::toast::toast;
 use crate::ui::{self, Confirm, DlgKind, EmptyState, Remote, Tone};
@@ -45,7 +45,7 @@ struct Tab {
     del_group: RwSignal<Option<String>>,
 }
 
-fn dev_url(d: &str) -> String {
+pub(super) fn dev_url(d: &str) -> String {
     format!("{URL}/devices/{}", api::encode(d))
 }
 
@@ -61,7 +61,7 @@ fn kv(label: &'static str, value: AnyView) -> AnyView {
     view! { <div class="kv"><dt>{tr(label)}</dt><dd>{value}</dd></div> }.into_any()
 }
 
-fn state_view(s: PcState, revoked: bool) -> AnyView {
+pub(super) fn state_view(s: PcState, revoked: bool) -> AnyView {
     if revoked {
         return ui::status(Tone::Info, t("pca.st.revoked").to_string());
     }
@@ -89,7 +89,7 @@ fn reason_text(r: ReadyReason) -> &'static str {
     }
 }
 
-fn method_text(m: CaptureMethod) -> &'static str {
+pub(super) fn method_text(m: CaptureMethod) -> &'static str {
     match m {
         CaptureMethod::BtrfsSnapshot => "pca.m.btrfs",
         CaptureMethod::LvmSnapshot => "pca.m.lvm",
@@ -102,7 +102,7 @@ fn method_text(m: CaptureMethod) -> &'static str {
 }
 
 /// The address of this NAS as the browser reaches it.
-fn origin() -> String {
+pub(super) fn origin() -> String {
     window().location().origin().unwrap_or_default()
 }
 
@@ -198,7 +198,11 @@ pub fn panel(header: RwSignal<Option<bool>>) -> AnyView {
             }
             .into_any();
         }
-        let pcs = if o.devices.is_empty() {
+        // PCs of the btrfs method are managed in the btrfs tab
+        let on_btrfs = o.devices.iter().filter(|d| d.settings.method == PcMethod::Btrfs).count() as u64;
+        let files: Vec<&PcDevice> = o.devices.iter().filter(|d| d.settings.method != PcMethod::Btrfs).collect();
+        let btrfs_note = (on_btrfs > 0).then(|| view! { <p class="small muted">{tf("pca.on_btrfs", &[("n", &i18n::count(on_btrfs))])}</p> });
+        let pcs = if files.is_empty() {
             view! {
                 <EmptyState icon=icons::MONITOR title=Signal::derive(move || t("bkpc.empty").to_string()) text=Signal::derive(move || t("pca.empty_text").to_string())>
                     <div class="sec-actions"><button class="btn primary" on:click=move |_| tab.pair.set(true)><Icon icon=icons::PLUS size=16 />{tr("bk.add")}</button></div>
@@ -206,8 +210,7 @@ pub fn panel(header: RwSignal<Option<bool>>) -> AnyView {
             }
             .into_any()
         } else {
-            let rows = o
-                .devices
+            let rows = files
                 .iter()
                 .map(|d| {
                     let dev = d.device.clone();
@@ -244,7 +247,15 @@ pub fn panel(header: RwSignal<Option<bool>>) -> AnyView {
                 ui::row(vec![
                     ui::text_cell("bk.f.description", "wrap", if p.description.is_empty() { "—".into() } else { p.description.clone() }),
                     // a group name in the mono face, "its own group" as plain text
-                    ui::text_cell("pca.col.group", if p.group.is_some() { "mono small" } else { "small" }, p.group.clone().unwrap_or_else(|| t("pca.own_group").to_string())),
+                    ui::text_cell(
+                        "pca.col.group",
+                        if p.group.is_some() { "mono small" } else { "small" },
+                        match (&p.group, &p.btrfs_target) {
+                            (Some(g), _) => g.clone(),
+                            (None, Some(b)) => t("pca.pairing_btrfs").replace("{name}", b),
+                            (None, None) => t("pca.own_group").to_string(),
+                        },
+                    ),
                     ui::text_cell("pca.col.expires", "tnum", i18n::datetime(p.expires_ms)),
                     ui::actions(view! { <button class="icon-btn sm" title=tr("pca.pairing_cancel") aria-label=label on:click=move |_| {
                         let u = format!("{URL}/pairings/{}", api::encode(&id));
@@ -257,6 +268,7 @@ pub fn panel(header: RwSignal<Option<bool>>) -> AnyView {
             .collect::<Vec<_>>();
         view! {
             {pcs}
+            {btrfs_note}
             {(!pairings.is_empty()).then(|| view! {
                 <h3 class="mini-title bk-sec">{tr("pca.pairings")}</h3>
                 {ui::table("pca-pairings", &["bk.f.description", "pca.col.group", "pca.col.expires", ""], pairings)}
@@ -369,6 +381,28 @@ fn kit_dialog(k: RecoveryKit, close: Callback<()>) -> AnyView {
 
 // ------------------------------------------------------------------ pairing
 
+/// What to run on the PC once a pairing code exists: the code, the NAS certificate's
+/// fingerprint, the install and pair commands (also the btrfs tab's pairing).
+pub(super) fn pairing_steps(c: &PairingCreated) -> AnyView {
+    let cmd = c.command.replace("{url}", &origin());
+    let install = "curl -fLO https://github.com/rylos/rynas/releases/latest/download/rynas-agent-x86_64 && chmod +x rynas-agent-x86_64 && sudo install rynas-agent-x86_64 /usr/local/bin/rynas-agent".to_string();
+    view! {
+        {ui::note(Tone::Ok, icons::CIRCLE_CHECK, ui::text(tf("pca.code_valid", &[("until", &i18n::datetime(c.expires_ms))])))}
+        <dl class="kvs">
+            {kv("pca.code", ui::breakable(&c.code, "mono"))}
+            {c.fingerprint.clone().map(|f| kv("pca.fingerprint", ui::breakable(f.as_str(), "mono small")))}
+        </dl>
+        <h4 class="small"><strong>{tr("pca.step.install")}</strong></h4>
+        <pre class="app-code">{install.clone()}</pre>
+        <div class="sec-actions">{copy_button_for("dns.copy", t("pca.copy_install").to_string(), install)}</div>
+        <h4 class="small"><strong>{tr("pca.step.pair")}</strong></h4>
+        <pre class="app-code">{cmd.clone()}</pre>
+        <div class="sec-actions">{copy_button_for("dns.copy", t("pca.copy_pair").to_string(), cmd)}</div>
+        <p class="small muted">{tr("pca.step.note")}</p>
+    }
+    .into_any()
+}
+
 fn pair_dialog(tab: Tab) -> AnyView {
     let close = Callback::new(move |_| tab.pair.set(false));
     let description = RwSignal::new(String::new());
@@ -386,6 +420,7 @@ fn pair_dialog(tab: Tab) -> AnyView {
             description: description.get_untracked().trim().to_string(),
             group: join.then(|| group.get_untracked()).filter(|g| !g.is_empty()),
             quota_gib: quota.get_untracked().trim().parse().ok(),
+            btrfs_target: None,
         };
         busy.set(true);
         error.set(None);
@@ -449,28 +484,7 @@ fn pair_dialog(tab: Tab) -> AnyView {
         }
         .into_any()
     };
-    let done = move || {
-        created.get().map(|c| {
-            let url = origin();
-            let cmd = c.command.replace("{url}", &url);
-            let install = "curl -fLO https://github.com/rylos/rynas/releases/latest/download/rynas-agent-x86_64 && chmod +x rynas-agent-x86_64 && sudo install rynas-agent-x86_64 /usr/local/bin/rynas-agent".to_string();
-            view! {
-                {ui::note(Tone::Ok, icons::CIRCLE_CHECK, ui::text(tf("pca.code_valid", &[("until", &i18n::datetime(c.expires_ms))])))}
-                <dl class="kvs">
-                    {kv("pca.code", ui::breakable(&c.code, "mono"))}
-                    {c.fingerprint.clone().map(|f| kv("pca.fingerprint", ui::breakable(f.as_str(), "mono small")))}
-                </dl>
-                <h4 class="small"><strong>{tr("pca.step.install")}</strong></h4>
-                <pre class="app-code">{install.clone()}</pre>
-                <div class="sec-actions">{copy_button("dns.copy", install)}</div>
-                <h4 class="small"><strong>{tr("pca.step.pair")}</strong></h4>
-                <pre class="app-code">{cmd.clone()}</pre>
-                <div class="sec-actions">{copy_button("dns.copy", cmd)}</div>
-                <p class="small muted">{tr("pca.step.note")}</p>
-            }
-            .into_any()
-        })
-    };
+    let done = move || created.get().map(|c| pairing_steps(&c));
     let body = view! { {move || if created.with(Option::is_some) { done().unwrap_or_else(|| ().into_any()) } else { form() }} }.into_any();
     let foot = view! {
         <button type="button" class="btn ghost" on:click=move |_| close.run(())>{move || if created.with(Option::is_some) { t("close") } else { t("cancel") }}</button>
@@ -707,7 +721,7 @@ fn drawer(tab: Tab, device: String) -> AnyView {
                 <h3 class="mini-title">{tr("pca.history")}</h3>
                 {ui::table("pca-history", &["pca.col.when", "pca.col.what", "col.status", "#pca.col.added"], history)}
             })}
-            {move || edit.get().then(|| device_settings(p.clone(), detail, tab, Callback::new(move |_| edit.set(false))))}
+            {move || edit.get().then(|| device_settings(p.clone(), Callback::new(move |_| { detail.reload(); tab.data.reload(); }), Callback::new(move |_| edit.set(false))))}
         }
         .into_any()
     };
@@ -721,8 +735,184 @@ fn drawer(tab: Tab, device: String) -> AnyView {
     .into_any()
 }
 
-fn device_settings(p: PcDevice, detail: Remote<PcDeviceDetail>, tab: Tab, close: Callback<()>) -> AnyView {
+/// The rynas-agent part of a btrfs-method PC's drawer (Backup › PCs: btrfs snapshots): its
+/// status, live progress, last runs, Back up now / Cancel, schedule, revoke; or, when no
+/// agent is paired under this name yet, a pairing code for it.
+pub(super) fn agent_section(device: String, changed: Callback<()>) -> AnyView {
+    let dev = StoredValue::new(device.clone());
+    let detail = Remote::<PcDeviceDetail>::new(dev_url(&device));
+    let edit = RwSignal::new(false);
+    let ask_revoke = RwSignal::new(false);
+    let busy = RwSignal::new(false);
+    let error = RwSignal::new(None::<String>);
+    let created = RwSignal::new(None::<PairingCreated>);
+    // live progress: read again every 5 s while the PC backs up and the page is visible
+    let ticking = RwSignal::new(false);
+    Effect::new(move |_| {
+        let running = detail.data.with(|d| d.as_ref().is_some_and(|d| d.device.state == PcState::Running || d.device.command.is_some()));
+        if running && !ticking.get_untracked() {
+            ticking.set(true);
+            spawn_local(async move {
+                api::sleep(5000).await;
+                let _ = ticking.try_set(false);
+                if !document().hidden() {
+                    detail.reload();
+                }
+            });
+        }
+    });
+    let command = move |what: &'static str| {
+        let u = format!("{}/{what}", dev_url(&dev.get_value()));
+        busy.set(true);
+        error.set(None);
+        spawn_local(async move {
+            let r = api::post_empty::<()>(&u, None).await;
+            let _ = busy.try_set(false);
+            match r {
+                Ok(()) => {
+                    toast(Tone::Ok, t(if what == "cancel" { "pca.cancel_sent" } else { "pca.backup_sent" }).to_string());
+                    detail.reload();
+                }
+                Err(e) => error.set(Some(e.text())),
+            }
+        });
+    };
+    let pair = move |_| {
+        let body = PairingRequest { btrfs_target: Some(dev.get_value()), ..Default::default() };
+        busy.set(true);
+        error.set(None);
+        spawn_local(async move {
+            let r = api::post::<_, PairingCreated>(&format!("{URL}/pairings"), Some(&body)).await;
+            let _ = busy.try_set(false);
+            match r {
+                Ok(c) => created.set(Some(c)),
+                Err(e) => error.set(Some(e.text())),
+            }
+        });
+    };
+    let revoke = Callback::new(move |_| {
+        let d = dev.get_value();
+        busy.set(true);
+        error.set(None);
+        spawn_local(async move {
+            let r = match api::delete::<rynas_api_types::TaskStarted>(&dev_url(&d)).await {
+                Ok(t) => tasks::follow(&t.task_id).await,
+                Err(e) => Err(e),
+            };
+            let _ = busy.try_set(false);
+            match r {
+                Ok(task) if task.status == TaskStatus::Ok => {
+                    toast(Tone::Ok, tf("pca.revoked", &[("device", &d)]));
+                    ask_revoke.set(false);
+                    detail.reload();
+                    changed.run(());
+                }
+                Ok(task) => error.set(Some(tasks::task_error(&task))),
+                Err(e) => error.set(Some(e.text())),
+            }
+        });
+    });
+    let unpaired = move || {
+        view! {
+            {ui::note(Tone::Info, icons::KEY, ui::text(t("pcb.agent.unpaired").to_string()))}
+            {move || match created.get() {
+                Some(c) => pairing_steps(&c),
+                None => view! {
+                    {form_error(error)}
+                    <div class="sec-actions">
+                        <button class="btn primary sm" disabled=move || busy.get() on:click=pair>{spinner(busy)}<Icon icon=icons::KEY size=14 />{tr("pca.make_code")}</button>
+                    </div>
+                }
+                .into_any(),
+            }}
+        }
+        .into_any()
+    };
+    let content = move || {
+        let Some(d) = detail.data.get() else { return ().into_any() };
+        let p = d.device.clone();
+        let run = p.last_run.clone();
+        let progress = p.progress.clone().map(|pr| {
+            let pct = if pr.bytes_total > 0 { (pr.bytes_done as f64 / pr.bytes_total as f64 * 100.0).min(100.0) } else { 0.0 };
+            let total = if pr.bytes_total > 0 { format!(" / {}", i18n::bytes(pr.bytes_total)) } else { String::new() };
+            view! {
+                <div class="pca-progress">
+                    {(pr.bytes_total > 0).then(|| view! { <ui::Meter pct=pct /> })}
+                    <span class="small tnum">{format!("{}{total} · {}/s", i18n::bytes(pr.bytes_done), i18n::bytes(pr.speed_bps))}</span>
+                    {pr.message.clone().map(|m| view! { <span class="small muted bk-wrap">{m}</span> })}
+                </div>
+            }
+        });
+        let captures = run.as_ref().filter(|r| !r.captures.is_empty()).map(|r| {
+            r.captures
+                .iter()
+                .map(|c| view! { <li><span class="mono">{c.path.clone()}</span>" · "{tr(method_text(c.method))}{c.note.clone().map(|n| format!(" ({n})"))}</li> })
+                .collect_view()
+        });
+        let history = d
+            .history
+            .iter()
+            .filter(|h| !h.restore)
+            .take(10)
+            .map(|h| {
+                ui::row(vec![
+                    ui::text_cell("pca.col.when", "tnum", i18n::datetime(h.started_ms)),
+                    ui::cell("col.status", "wrap", if h.ok { ui::status(Tone::Ok, t("pca.h.ok").to_string()) } else { view! { <div class="cell-main">{ui::status(Tone::Err, t("pca.st.failed").to_string())}<span class="cell-sub small bk-wrap">{h.error.clone().unwrap_or_default()}</span></div> }.into_any() }),
+                    ui::text_cell("pcb.agent.sent", "num tnum", i18n::bytes(h.bytes_added)),
+                ])
+            })
+            .collect::<Vec<_>>();
+        let running = p.state == PcState::Running;
+        let revoked = p.revoked;
+        view! {
+            {revoked.then(|| ui::note(Tone::Info, icons::LOCK, ui::text(t("pcb.agent.revoked").to_string())))}
+            <dl class="kvs">
+                {kv("pcb.agent.state", state_view(p.state, p.revoked))}
+                {kv("pca.last_ok", ui::text(when(p.last_ok_ms)))}
+                {kv("pca.os", ui::text(format!("{} {} · rynas-agent {}", p.os, p.arch, p.agent_version)))}
+                {kv("pca.last_seen", ui::text(when(p.last_seen_ms)))}
+                {kv("pcb.agent.schedule", ui::text(if p.settings.plan.paused { t("pca.f.paused").to_string() } else { tf("pcb.agent.every_h", &[("n", &p.settings.plan.interval_hours.to_string())]) }))}
+                {run.as_ref().and_then(|r| r.error.clone()).map(|e| kv("pca.last_error", ui::breakable(e.as_str(), "small")))}
+            </dl>
+            {progress}
+            {captures.map(|c| view! { <details class="tls-step"><summary>{tr("pcb.agent.last_run")}</summary><ul class="small bkpc-gaps">{c}</ul></details> })}
+            {form_error(error)}
+            {(!revoked).then(|| view! {
+                <div class="sec-actions">
+                    <button class="btn primary sm" disabled=move || busy.get() || running on:click=move |_| command("backup-now")><Icon icon=icons::PLAY size=14 />{tr("pca.backup_now")}</button>
+                    <button class="btn ghost sm" disabled=move || busy.get() || !running on:click=move |_| command("cancel")><Icon icon=icons::SQUARE size=14 />{tr("pca.cancel")}</button>
+                    <button class="btn ghost sm" on:click=move |_| edit.set(true)><Icon icon=icons::CALENDAR_CLOCK size=14 />{tr("pcb.agent.schedule")}</button>
+                    <button class="btn danger sm" on:click=move |_| { error.set(None); ask_revoke.set(true); }><Icon icon=icons::TRASH_2 size=14 />{tr("pca.revoke")}</button>
+                </div>
+            })}
+            {(!history.is_empty()).then(|| view! {
+                <h4 class="small"><strong>{tr("pca.history")}</strong></h4>
+                {ui::table("pca-history", &["pca.col.when", "col.status", "#pcb.agent.sent"], history)}
+            })}
+            {move || edit.get().then(|| device_settings(p.clone(), Callback::new(move |_| detail.reload()), Callback::new(move |_| edit.set(false))))}
+        }
+        .into_any()
+    };
+    view! {
+        <h3 class="mini-title">{tr("pcb.agent.title")}</h3>
+        {move || {
+            if detail.err.with(|e| e.as_deref() == Some("not_found")) && detail.data.with(Option::is_none) {
+                unpaired()
+            } else {
+                detail.view(4, content)
+            }
+        }}
+        {move || ask_revoke.get().then(|| ui::confirm(Confirm { busy, error, ..Confirm::new(tf("pca.revoke_title", &[("device", &dev.get_value())]), t("pcb.agent.revoke_text").to_string(), "pca.revoke", true, revoke, Callback::new(move |_| ask_revoke.set(false))) }))}
+    }
+    .into_any()
+}
+
+/// The settings of one PC. With the btrfs method only the schedule and the description
+/// apply (the folder's retention and alerts are the btrfs tab's); the method is kept.
+pub(super) fn device_settings(p: PcDevice, saved: Callback<()>, close: Callback<()>) -> AnyView {
     let s = p.settings.clone();
+    let btrfs = s.method == PcMethod::Btrfs;
+    let method = s.method;
     let description = RwSignal::new(s.description.clone());
     let interval = RwSignal::new(s.plan.interval_hours.to_string());
     let delay = RwSignal::new(s.plan.start_delay_min.to_string());
@@ -754,6 +944,7 @@ fn device_settings(p: PcDevice, detail: Remote<PcDeviceDetail>, tab: Tab, close:
             min_age_days: n(min_age),
             alert_hours: n(alert),
             critical_hours: n(critical),
+            method,
         };
         busy.set(true);
         error.set(None);
@@ -763,8 +954,7 @@ fn device_settings(p: PcDevice, detail: Remote<PcDeviceDetail>, tab: Tab, close:
             match r {
                 Ok(_) => {
                     toast(Tone::Ok, t("bk.saved").to_string());
-                    detail.reload();
-                    tab.data.reload();
+                    saved.run(());
                     close.run(());
                 }
                 Err(e) => error.set(Some(e.text())),
@@ -773,6 +963,39 @@ fn device_settings(p: PcDevice, detail: Remote<PcDeviceDetail>, tab: Tab, close:
     };
     const FREEZE: &[(&str, &str)] = &[("hot", "pca.f.hot"), ("freeze", "pca.f.freeze")];
     const PAUSED: &[(&str, &str)] = &[("on", "pca.f.scheduled"), ("paused", "pca.f.paused")];
+    let files_only = (!btrfs).then(|| {
+        view! {
+            <h3 class="mini-title">{tr("pca.f.consistency")}</h3>
+            {segmented("pca.f.read", FREEZE, freeze.into(), Callback::new(move |v| freeze.set(v)))}
+            <p class="field-help">{move || if freeze.get() == "freeze" { t("pca.f.freeze_help") } else { t("pca.f.hot_help") }}</p>
+            <Show when=move || freeze.get() == "freeze">
+                {number_field("pca.f.freeze_max", Some("pca.f.freeze_max_help"), freeze_max.into(), Callback::new(move |v| freeze_max.set(v)), 5, 3600)}
+            </Show>
+            {area_field("pca.f.excludes", excludes.into(), Callback::new(move |v| excludes.set(v)), Some("pca.f.excludes_help"), "/home/*/Downloads\n*.iso")}
+            <h3 class="mini-title">{tr("pca.f.retention")}</h3>
+            <div class="form-row">
+                {number_field("pca.f.last", None, last.into(), Callback::new(move |v| last.set(v)), 0, 1000)}
+                {number_field("pca.f.daily", None, daily.into(), Callback::new(move |v| daily.set(v)), 0, 1000)}
+                {number_field("pca.f.weekly", None, weekly.into(), Callback::new(move |v| weekly.set(v)), 0, 1000)}
+            </div>
+            <div class="form-row">
+                {number_field("pca.f.monthly", None, monthly.into(), Callback::new(move |v| monthly.set(v)), 0, 1000)}
+                {number_field("pca.f.yearly", None, yearly.into(), Callback::new(move |v| yearly.set(v)), 0, 100)}
+                {number_field("pca.f.min_age", Some("pca.f.min_age_help"), min_age.into(), Callback::new(move |v| min_age.set(v)), 0, 3650)}
+            </div>
+            <h3 class="mini-title">{tr("pca.f.alerts")}</h3>
+            <div class="form-row">
+                {number_field("pca.f.alert", Some("pca.f.alert_help"), alert.into(), Callback::new(move |v| alert.set(v)), 0, 8760)}
+                {number_field("pca.f.critical", None, critical.into(), Callback::new(move |v| critical.set(v)), 0, 8760)}
+            </div>
+        }
+    });
+    let btrfs_only = btrfs.then(|| {
+        view! {
+            {area_field("pca.f.skip_mounts", excludes.into(), Callback::new(move |v| excludes.set(v)), Some("pca.f.skip_mounts_help"), "/srv/vm")}
+            <p class="small muted">{tr("pca.f.btrfs_note")}</p>
+        }
+    });
     let body = view! {
         {text_field("bk.f.description", description.into(), Callback::new(move |v| description.set(v)), Signal::stored(None), In { maxlength: 120, ..In::default() })}
         <h3 class="mini-title">{tr("pca.f.schedule")}</h3>
@@ -781,29 +1004,8 @@ fn device_settings(p: PcDevice, detail: Remote<PcDeviceDetail>, tab: Tab, close:
             {number_field("pca.f.interval", Some("pca.f.interval_help"), interval.into(), Callback::new(move |v| interval.set(v)), 1, 168)}
             {number_field("pca.f.delay", Some("pca.f.delay_help"), delay.into(), Callback::new(move |v| delay.set(v)), 0, 1440)}
         </div>
-        <h3 class="mini-title">{tr("pca.f.consistency")}</h3>
-        {segmented("pca.f.read", FREEZE, freeze.into(), Callback::new(move |v| freeze.set(v)))}
-        <p class="field-help">{move || if freeze.get() == "freeze" { t("pca.f.freeze_help") } else { t("pca.f.hot_help") }}</p>
-        <Show when=move || freeze.get() == "freeze">
-            {number_field("pca.f.freeze_max", Some("pca.f.freeze_max_help"), freeze_max.into(), Callback::new(move |v| freeze_max.set(v)), 5, 3600)}
-        </Show>
-        {area_field("pca.f.excludes", excludes.into(), Callback::new(move |v| excludes.set(v)), Some("pca.f.excludes_help"), "/home/*/Downloads\n*.iso")}
-        <h3 class="mini-title">{tr("pca.f.retention")}</h3>
-        <div class="form-row">
-            {number_field("pca.f.last", None, last.into(), Callback::new(move |v| last.set(v)), 0, 1000)}
-            {number_field("pca.f.daily", None, daily.into(), Callback::new(move |v| daily.set(v)), 0, 1000)}
-            {number_field("pca.f.weekly", None, weekly.into(), Callback::new(move |v| weekly.set(v)), 0, 1000)}
-        </div>
-        <div class="form-row">
-            {number_field("pca.f.monthly", None, monthly.into(), Callback::new(move |v| monthly.set(v)), 0, 1000)}
-            {number_field("pca.f.yearly", None, yearly.into(), Callback::new(move |v| yearly.set(v)), 0, 100)}
-            {number_field("pca.f.min_age", Some("pca.f.min_age_help"), min_age.into(), Callback::new(move |v| min_age.set(v)), 0, 3650)}
-        </div>
-        <h3 class="mini-title">{tr("pca.f.alerts")}</h3>
-        <div class="form-row">
-            {number_field("pca.f.alert", Some("pca.f.alert_help"), alert.into(), Callback::new(move |v| alert.set(v)), 0, 8760)}
-            {number_field("pca.f.critical", None, critical.into(), Callback::new(move |v| critical.set(v)), 0, 8760)}
-        </div>
+        {files_only}
+        {btrfs_only}
         {form_error(error)}
     }
     .into_any();

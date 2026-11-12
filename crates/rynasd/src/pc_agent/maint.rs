@@ -372,9 +372,56 @@ fn unique(base: &str, taken: impl Fn(&str) -> bool) -> String {
         .unwrap_or_else(|| format!("pc-{}", now_ms() % 100_000))
 }
 
+/// A pairing for the btrfs method: the device takes the folder's name, gets no repository
+/// and no key file (`group` stays empty), and sends `btrfs send` streams into the folder.
+fn pair_btrfs(svc: &Arc<PcAgent>, p: &Pairing, target: &str, req: &PairRequest) -> Res<PairResponse> {
+    if !svc.btrfs_side()?.has_agent_target(target) {
+        return Err(Error::new(StatusCode::CONFLICT, error_codes::CONFLICT, format!("the folder {target} is gone")));
+    }
+    let token = super::new_token()?;
+    let ds = PcDeviceSettings {
+        description: p.description.clone(),
+        method: PcMethod::Btrfs,
+        ..Default::default()
+    };
+    let dev = Dev {
+        hostname: req.hostname.clone(),
+        os: req.os.chars().take(120).collect(),
+        arch: req.arch.chars().take(32).collect(),
+        agent_version: req.agent_version.chars().take(32).collect(),
+        machine_id: req.machine_id.chars().take(64).collect(),
+        created_ms: now_ms(),
+        last_seen_ms: Some(now_ms()),
+        group: String::new(),
+        token_sha: super::sha_hex(token.as_bytes()),
+        settings: ds,
+        rev: 1,
+        ..Default::default()
+    };
+    let plan = super::plan_of(&dev);
+    svc.edit(|r| {
+        if r.devices.contains_key(target) {
+            return Err(Error::new(StatusCode::CONFLICT, error_codes::ALREADY_EXISTS, format!("a PC named {target} is already paired")));
+        }
+        r.devices.insert(target.to_string(), dev);
+        Ok(())
+    })?;
+    Ok(PairResponse {
+        device: target.to_string(),
+        group: String::new(),
+        token,
+        repo_password: String::new(),
+        nas_name: svc.hostname.clone(),
+        plan,
+    })
+}
+
 /// A pairing code was accepted: the device (and its group, unless it joins one), its key
 /// file and token.
 pub async fn pair(svc: &Arc<PcAgent>, p: &Pairing, settings: &PcAgentSettings, req: &PairRequest) -> Res<PairResponse> {
+    if let Some(t) = &p.btrfs_target {
+        return pair_btrfs(svc, p, t, req);
+    }
     let reg = svc.snapshot();
     let device = unique(&device_from_hostname(&req.hostname), |n| reg.devices.contains_key(n));
     let token = super::new_token()?;
@@ -459,11 +506,7 @@ pub async fn pair(svc: &Arc<PcAgent>, p: &Pairing, settings: &PcAgentSettings, r
         rev: 1,
         ..Default::default()
     };
-    let plan = AgentPlan {
-        rev: dev.rev,
-        plan: dev.settings.plan.clone(),
-        command: None,
-    };
+    let plan = super::plan_of(&dev);
     // the name is picked again against the registry as it is now: another pairing may have
     // taken it meanwhile (two PCs with the same host name at once)
     let stored = svc.edit(|r| {
@@ -500,6 +543,12 @@ pub async fn pair(svc: &Arc<PcAgent>, p: &Pairing, settings: &PcAgentSettings, r
 // ------------------------------------------------------------------ revocation, groups, kit
 
 pub async fn revoke(svc: &Arc<PcAgent>, device: &str, d: &Dev, ctx: &TaskCtx) -> Result<(), String> {
+    // a PC of the btrfs method only: no repository, no key file; its snapshots stay in its
+    // folder of the btrfs method
+    if d.group.is_empty() {
+        ctx.log(&format!("{device} revoked; its snapshots stay in its folder"));
+        return Ok(());
+    }
     let g = svc.group(&d.group).map_err(|e| e.2)?;
     if !d.pc_key.is_empty() {
         ctx.log(&format!("removing the key file of {device}"));
@@ -939,7 +988,8 @@ fn local_day_hour() -> (i64, i8) {
 
 /// Late and critical notifications of one device (state changes only).
 fn alerts(svc: &PcAgent, name: &str, d: &Dev) {
-    if d.revoked {
+    // the btrfs method's alerts are the folder's (`pcbackup.late` and the rest)
+    if d.revoked || (d.settings.method == PcMethod::Btrfs && d.alert == Alert::None) {
         return;
     }
     let want = match super::state_of(d, false, now_ms()) {

@@ -33,6 +33,8 @@ pub fn routes() -> Router<AppState> {
         .route("/pcbackup/agent/plan", get(forward))
         .route("/pcbackup/agent/status", post(forward))
         .route("/pcbackup/agent/report", post(forward))
+        .route("/pcbackup/agent/btrfs/snapshots", get(forward))
+        .route("/pcbackup/agent/btrfs/receive", post(forward))
         .route("/pcbackup/agent/restore/login", post(forward))
         .route("/pcbackup/agent/restore/admin-login", post(restore_admin_login))
         .route("/pcbackup/agent/restore/report", post(forward))
@@ -93,7 +95,16 @@ const ANSWER_HEADERS: [HeaderName; 5] = [
 async fn forward(State(st): State<AppState>, client: Option<Extension<Client>>, req: Request) -> Response {
     let (parts, body) = req.into_parts();
     let repo = parts.uri.path().starts_with("/pcbackup/repo/") || parts.uri.path().contains("/pcbackup/repo/");
-    let max = if repo { MAX_REPO_BODY } else { MAX_AGENT_BODY };
+    // a btrfs send stream has no size known in advance: rynasd keeps a free-space reserve
+    // and stops a receive that would cross it
+    let stream = parts.uri.path().ends_with("/pcbackup/agent/btrfs/receive");
+    let max = if stream {
+        usize::MAX
+    } else if repo {
+        MAX_REPO_BODY
+    } else {
+        MAX_AGENT_BODY
+    };
     let declared = parts
         .headers
         .get(header::CONTENT_LENGTH)

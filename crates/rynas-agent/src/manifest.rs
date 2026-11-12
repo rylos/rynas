@@ -4,7 +4,8 @@
 //! fstab, crypttab, the kernel command line and the boot loader. Written into the root
 //! filesystem (temporary file + rename) before every run, so every version carries the
 //! layout of its own moment; also by `rynas-agent manifest`, which the btrfs method's hooks
-//! run (btrbk drop-in, package managers; [`add_btrbk`] adds the btrbk block and boot copies).
+//! runs on PCs that still push with btrbk ([`add_btrbk`]); the agent's own btrfs sender adds
+//! its block with [`add_block`] (boot copies included). [`lock`] keeps runs one at a time.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -398,15 +399,22 @@ pub fn write(m: &Manifest, root: &Path) -> Result<PathBuf, String> {
     Ok(p)
 }
 
-/// The btrfs method's part of the manifest: the btrbk block read from `btrbk.conf` (none
-/// when it sends nothing) and, with `copy`, the boot filesystems outside the sent subvolumes
-/// copied into `<root>/.rynas/boot/` (unchanged trees are not copied again). Returns the
-/// problems met (a failed copy never stops the manifest).
+/// The legacy btrbk PC's part of the manifest: the btrbk block read from `btrbk.conf`
+/// (none when it sends nothing), then [`add_block`].
 pub fn add_btrbk(m: &mut Manifest, all: &[Mount], conf: &str, root: &Path, copy: bool) -> Vec<String> {
-    use crate::btrbk;
-    let Some(mut b) = btrbk::manifest_block(&btrbk::parse_conf(conf), all) else {
+    let Some(b) = crate::btrbk::manifest_block(&crate::btrbk::parse_conf(conf), all) else {
         return Vec::new();
     };
+    add_block(m, all, b, root, copy)
+}
+
+/// The btrfs method's block (btrbk's or the agent's): the captured marks and, with `copy`,
+/// the boot filesystems outside the sent subvolumes copied into `<root>/.rynas/boot/`. A
+/// failed copy keeps the previous record (marked `stale`, with the error) and its folder;
+/// only a copy whose mount is gone is removed. Returns the problems met (a failed copy
+/// never stops the manifest).
+pub fn add_block(m: &mut Manifest, all: &[Mount], mut b: BtrbkLayout, root: &Path, copy: bool) -> Vec<String> {
+    use crate::{bootcopy, btrbk};
     btrbk::mark_captured(m, &b, all);
     let mut problems = Vec::new();
     if copy {
@@ -419,18 +427,51 @@ pub fn add_btrbk(m: &mut Manifest, all: &[Mount], conf: &str, root: &Path, copy:
         let boot_dir = root.join(".rynas/boot");
         for mount in btrbk::boot_mounts(all, &b.subvolumes) {
             let src = root.join(mount.trim_start_matches('/'));
-            match btrbk::copy_boot(&src, &mount, &boot_dir, "/.rynas/boot", previous.iter().find(|p| p.mount == mount)) {
+            let prev = previous.iter().find(|p| p.mount == mount);
+            match bootcopy::copy_boot(&src, &mount, &boot_dir, "/.rynas/boot", prev) {
                 Ok(c) => b.boot_copies.push(c),
-                Err(e) => problems.push(format!("copy of {mount}: {e}")),
+                Err(e) => {
+                    problems.push(format!("copy of {mount}: {e}"));
+                    if let Some(p) = prev {
+                        b.boot_copies.push(BootCopy { stale: true, error: Some(e), ..p.clone() });
+                    }
+                }
             }
         }
-        // a failed copy keeps its previous folder; a mount that is gone loses it
-        let mut keep = b.boot_copies.clone();
-        keep.extend(previous.into_iter().filter(|p| problems.iter().any(|e| e.starts_with(&format!("copy of {}:", p.mount)))));
-        btrbk::prune_copies(&boot_dir, &keep);
+        bootcopy::prune_copies(&boot_dir, &b.boot_copies);
     }
     m.btrbk = Some(b);
     problems
+}
+
+/// `<root>/.rynas/.lock` (folder made `0700`), taken exclusively: one manifest, boot copy or
+/// backup at a time. Waits up to `wait` for another run to end. The lock goes with the file.
+pub fn lock(root: &Path, wait: std::time::Duration) -> Result<std::fs::File, String> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let dir = root.join(".rynas");
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let p = dir.join(".lock");
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&p)
+        .map_err(|e| format!("{}: {e}", p.display()))?;
+    let end = std::time::Instant::now() + wait;
+    loop {
+        // SAFETY: flock(2) on our own descriptor
+        if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(f);
+        }
+        if std::time::Instant::now() >= end {
+            return Err(format!("another rynas-agent run holds {} (a backup or a manifest): try again later", p.display()));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
 }
 
 #[cfg(test)]
@@ -555,5 +596,55 @@ mod tests {
         }
         let want: Manifest = serde_json::from_str(&std::fs::read_to_string(&golden).unwrap()).unwrap();
         assert_eq!(want, m, "golden file differs: RYNAS_UPDATE_GOLDEN=1 rewrites it");
+    }
+
+    /// The agent's own block: a failed boot copy keeps the last good record, marked stale,
+    /// and its folder.
+    #[test]
+    fn a_failed_boot_copy_keeps_the_previous_record() {
+        let t = tempfile::tempdir().unwrap();
+        let r = t.path();
+        std::fs::create_dir_all(r.join("boot/EFI/BOOT")).unwrap();
+        std::fs::write(r.join("boot/EFI/BOOT/BOOTX64.EFI"), vec![7u8; 100]).unwrap();
+        let all = mounts::parse(
+            "22 1 0:25 /@ / rw shared:1 - btrfs /dev/vda2 rw,subvolid=256,subvol=/@
+45 22 259:1 / /boot rw shared:7 - vfat /dev/vda1 rw
+",
+        );
+        let block = BtrbkLayout {
+            snapshot_dir: AGENT_SNAPSHOT_DIR.into(),
+            subvolumes: vec![BtrbkSubvolume { name: "@".into(), path: "@".into(), mount: "/".into() }],
+            agent: true,
+            ..Default::default()
+        };
+        let mut m = Manifest { format: MANIFEST_FORMAT, ..Default::default() };
+        assert!(add_block(&mut m, &all, block.clone(), r, true).is_empty());
+        write(&m, r).unwrap();
+        let good = m.btrbk.as_ref().unwrap().boot_copies[0].clone();
+        assert_eq!(good.files, 1);
+        // the ESP is not there any more (an empty folder): the copy is refused
+        std::fs::remove_dir_all(r.join("boot/EFI")).unwrap();
+        let mut m2 = Manifest { format: MANIFEST_FORMAT, ..Default::default() };
+        let problems = add_block(&mut m2, &all, block, r, true);
+        assert_eq!(problems.len(), 1);
+        let b = m2.btrbk.unwrap();
+        assert!(b.agent);
+        assert_eq!(b.boot_copies.len(), 1);
+        let c = &b.boot_copies[0];
+        assert!(c.stale && c.error.as_deref().is_some_and(|e| e.contains("empty")));
+        assert_eq!((c.files, &c.signature), (good.files, &good.signature));
+        assert!(r.join(".rynas/boot/boot/EFI/BOOT/BOOTX64.EFI").exists());
+    }
+
+    #[test]
+    fn one_run_at_a_time() {
+        let t = tempfile::tempdir().unwrap();
+        let first = lock(t.path(), std::time::Duration::ZERO).unwrap();
+        let e = lock(t.path(), std::time::Duration::from_millis(300)).unwrap_err();
+        assert!(e.contains("another rynas-agent run"));
+        drop(first);
+        assert!(lock(t.path(), std::time::Duration::ZERO).is_ok());
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(t.path().join(".rynas")).unwrap().permissions().mode() & 0o777, 0o700);
     }
 }

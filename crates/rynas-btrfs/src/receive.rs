@@ -394,10 +394,7 @@ pub fn client_config(
     path: &str,
     nas_retention: bool,
 ) -> String {
-    let at = match port {
-        Some(p) if p != 22 => format!("{host}:{p}"),
-        _ => host.to_string(),
-    };
+    let url = target_url(host, port, path);
     let target = if nas_retention {
         "# old snapshots on the NAS are deleted by the NAS\n\
          target_preserve_min    all\n\
@@ -420,30 +417,25 @@ pub fn client_config(
          # the btrfs volume of this PC and its subvolumes (change to your layout)\n\
          volume /mnt/btr_pool\n\
          \x20 snapshot_dir btrbk_snapshots\n\
-         \x20 target ssh://{at}{path}\n\
+         \x20 target {url}\n\
          \x20 subvolume @\n\
          \x20 subvolume @home\n"
     )
 }
 
-/// The btrbk target URL of a device folder (`ssh://host[:port]/path`).
+/// The btrbk target URL of a device folder (`ssh://host[:port]/path`, IPv6 in brackets).
 pub fn target_url(host: &str, port: Option<u16>, path: &str) -> String {
-    match port {
-        Some(p) if p != 22 => format!("ssh://{host}:{p}{path}"),
-        _ => format!("ssh://{host}{path}"),
-    }
+    rynas_api_types::pcbackup::ssh_target_url(host, port, path)
 }
 
-/// The one command that sets up a PC with `rynas-agent`: it reads the PC's subvolumes,
-/// writes the same `btrbk.conf` settings as [`client_config`] (diff and confirmation when
-/// one exists), makes the key and installs the manifest hooks
-/// (`docs/research/pc-backup.md` §11.2.5).
-pub fn agent_setup_command(device: &str, host: &str, port: Option<u16>, path: &str, nas_retention: bool) -> String {
-    let retention = if nas_retention { "nas" } else { "pc" };
-    format!(
-        "sudo rynas-agent btrbk-setup --nas {} --device {device} --retention {retention}",
-        target_url(host, port, path)
-    )
+/// For a btrbk PC with `rynas-agent` installed: a systemd drop-in that writes the layout
+/// manifest before every btrbk run (`docs/research/pc-backup.md` §11.9). Shown, never
+/// installed: a failed manifest never stops the backup (`-`).
+pub fn manifest_hook() -> String {
+    "sudo mkdir -p /etc/systemd/system/btrbk.service.d\n\
+     printf '[Service]\\nExecStartPre=-/usr/bin/rynas-agent manifest --quiet\\n' | sudo tee /etc/systemd/system/btrbk.service.d/rynas-manifest.conf\n\
+     sudo systemctl daemon-reload\n"
+        .to_string()
 }
 
 /// The commands that make the PC's key and print the public half.
@@ -742,11 +734,13 @@ mod tests {
         assert!(c.contains("target_preserve_min    all") && !c.contains("20d 10w"));
         assert!(client_test_commands("nas", Some(2222)).contains("-p 2222 rynas-pcbackup@nas"));
         assert!(client_key_commands("laptop").contains("btrbk@laptop"));
-        assert_eq!(
-            agent_setup_command("laptop", "nas.local", Some(2222), "/volume1/backup/laptop", true),
-            "sudo rynas-agent btrbk-setup --nas ssh://nas.local:2222/volume1/backup/laptop --device laptop --retention nas"
-        );
-        assert!(agent_setup_command("l", "nas", Some(22), "/a/b", false).contains("--nas ssh://nas/a/b --device l --retention pc"));
+        let h = manifest_hook();
+        assert!(h.contains("ExecStartPre=-/usr/bin/rynas-agent manifest --quiet"));
+        assert!(h.contains("btrbk.service.d/rynas-manifest.conf"));
+        // IPv6 in brackets, so the port is not read as part of the address
+        assert_eq!(target_url("fd00::2", Some(2222), "/v/b/l"), "ssh://[fd00::2]:2222/v/b/l");
+        assert_eq!(target_url("[fd00::2]", None, "/v/b/l"), "ssh://[fd00::2]/v/b/l");
+        assert!(client_config("l", "fd00::2", None, "/a/b", true).contains("target ssh://[fd00::2]/a/b"));
     }
 
     #[test]

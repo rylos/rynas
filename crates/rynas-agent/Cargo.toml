@@ -30,6 +30,8 @@ sha2 = "0.10"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
 crossterm = "0.28"
+# the btrfs method's stream (`btrfs send | zstd`); the same version rustic_core links
+zstd = "0.13"
 
 [dev-dependencies]
 tempfile = "3"

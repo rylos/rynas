@@ -226,12 +226,17 @@ impl Client {
     }
 
     fn connect(&self) -> io::Result<Conn> {
+        self.connect_with(TIMEOUT)
+    }
+
+    /// A new connection whose reads give up after `read` without a byte.
+    fn connect_with(&self, read: Duration) -> io::Result<Conn> {
         let addrs = (self.ep.host.as_str(), self.ep.port).to_socket_addrs()?;
         let mut last = io::Error::other(format!("{}: no address", self.ep.host));
         for a in addrs {
             match TcpStream::connect_timeout(&a, Duration::from_secs(15)) {
                 Ok(s) => {
-                    s.set_read_timeout(Some(TIMEOUT))?;
+                    s.set_read_timeout(Some(read))?;
                     s.set_write_timeout(Some(TIMEOUT))?;
                     let _ = s.set_nodelay(true);
                     let stream: Box<dyn Stream> = match &self.tls {
@@ -316,6 +321,60 @@ impl Client {
             }
             w.flush()?;
         }
+        Self::read_response(conn, method)
+    }
+
+    /// `POST path` with a body of unknown length read from `body` (`Transfer-Encoding:
+    /// chunked`), on a fresh connection that is not reused. When `body` fails the upload
+    /// stops without the last chunk (the server sees a broken body, never a short complete
+    /// one) and the error is returned. When the server answers early (an error before the
+    /// whole body) and the write fails, that answer is returned. Reads of the answer wait up
+    /// to `answer_wait` (the server answers once it has finished with the body).
+    pub fn upload(&self, path: &str, headers: &[(&str, &str)], body: &mut dyn Read, answer_wait: Duration) -> io::Result<Response> {
+        let mut conn = self.connect_with(answer_wait)?;
+        let mut head = format!(
+            "POST {path} HTTP/1.1\r\nHost: {}\r\nUser-Agent: rynas-agent/{}\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n",
+            self.ep.host,
+            env!("CARGO_PKG_VERSION")
+        );
+        if let Some(a) = &self.auth {
+            head.push_str(&format!("Authorization: {a}\r\n"));
+        }
+        for (k, v) in headers {
+            head.push_str(&format!("{k}: {v}\r\n"));
+        }
+        head.push_str("\r\n");
+        let written = (|| -> io::Result<Result<(), io::Error>> {
+            let w = conn.get_mut();
+            w.write_all(head.as_bytes())?;
+            let mut buf = vec![0u8; 256 << 10];
+            loop {
+                let n = match body.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    // the body failed: no last chunk
+                    Err(e) => return Ok(Err(e)),
+                };
+                w.write_all(format!("{n:x}\r\n").as_bytes())?;
+                w.write_all(&buf[..n])?;
+                w.write_all(b"\r\n")?;
+            }
+            w.write_all(b"0\r\n\r\n")?;
+            w.flush()?;
+            Ok(Ok(()))
+        })();
+        match written {
+            Ok(Ok(())) => Self::read_response(&mut conn, "POST").map(|(r, _)| r),
+            Ok(Err(body_err)) => Err(body_err),
+            // the server stopped reading: its answer says why, when there is one
+            Err(write_err) => Self::read_response(&mut conn, "POST").map(|(r, _)| r).map_err(|_| write_err),
+        }
+    }
+
+    /// The status line, headers and body of an answer; `true` when the connection can be
+    /// reused.
+    fn read_response(conn: &mut Conn, method: &str) -> io::Result<(Response, bool)> {
         // status line and headers
         let mut line = String::new();
         let mut total = 0;
@@ -480,5 +539,70 @@ mod tests {
         assert_eq!(r.body, b"abcde");
         let r = c.request("GET", "/y", &[], &[]).unwrap();
         assert_eq!((r.status, r.body.as_slice()), (200, b"abcde".as_slice()));
+    }
+
+    /// A chunked upload arrives whole; a body that fails never sends the last chunk.
+    #[test]
+    fn chunked_upload() {
+        use std::net::TcpListener;
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for _ in 0..2 {
+                let (mut s, _) = l.accept().unwrap();
+                let mut r = BufReader::new(s.try_clone().unwrap());
+                let mut line = String::new();
+                let mut chunked = false;
+                loop {
+                    line.clear();
+                    r.read_line(&mut line).unwrap();
+                    chunked |= line.to_ascii_lowercase().starts_with("transfer-encoding: chunked");
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                }
+                assert!(chunked);
+                let mut body = Vec::new();
+                let complete = loop {
+                    line.clear();
+                    if r.read_line(&mut line).unwrap_or(0) == 0 {
+                        break false;
+                    }
+                    let n = usize::from_str_radix(line.trim(), 16).unwrap();
+                    if n == 0 {
+                        break true;
+                    }
+                    let start = body.len();
+                    body.resize(start + n, 0);
+                    r.read_exact(&mut body[start..]).unwrap();
+                    let mut crlf = [0u8; 2];
+                    r.read_exact(&mut crlf).unwrap();
+                };
+                seen.push((complete, body.len()));
+                let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}", body.len().to_string().len(), body.len()).as_bytes());
+            }
+            seen
+        });
+        let c = Client::new(Endpoint::parse(&format!("http://127.0.0.1:{port}")).unwrap(), "").with_token("t");
+        let data = vec![9u8; 700_000];
+        let r = c.upload("/up", &[("Content-Type", "application/zstd")], &mut data.as_slice(), Duration::from_secs(10)).unwrap();
+        assert_eq!((r.status, r.body.as_slice()), (200, b"700000".as_slice()));
+        struct Failing(usize);
+        impl Read for Failing {
+            fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
+                if self.0 == 0 {
+                    return Err(io::Error::other("btrfs send failed"));
+                }
+                self.0 -= 1;
+                b[0] = 1;
+                Ok(1)
+            }
+        }
+        let e = c.upload("/up", &[], &mut Failing(3), Duration::from_secs(10)).unwrap_err();
+        assert!(e.to_string().contains("btrfs send failed"));
+        drop(c);
+        let seen = server.join().unwrap();
+        assert_eq!(seen, [(true, 700_000), (false, 3)]);
     }
 }

@@ -4672,9 +4672,9 @@ sf.err.hostname	Inserisci un nome host, ad es. nas.example.lan.
 sf.err.uri	Inserisci un indirizzo che inizia con http:// o https://.
 sf.err.email	Inserisci un indirizzo e-mail.
 bk.tab.pcs	PC: snapshot btrfs
-bk.intro	I PC con il sistema su btrfs fanno il backup con gli snapshot nativi di btrfs: btrbk sul PC crea snapshot in sola lettura e invia via SSH solo ciò che è cambiato dall'ultimo. Ogni snapshot qui è una copia completa e sfogliabile del PC in quel momento. Ogni PC ha la sua cartella e la sua chiave, e la sua chiave può solo ricevere in quella cartella.
+bk.intro	I PC con btrfs mandano qui snapshot in sola lettura dei loro sottovolumi, solo ciò che è cambiato dall'ultimo. Ogni snapshot è una copia completa del PC che puoi sfogliare. rynas-agent li manda via HTTPS; i PC già configurati con btrbk possono continuare a mandarli via SSH.
 bkpc.empty	Ancora nessun PC
-bkpc.empty_text	Aggiungi un PC per avere una cartella e le righe per la sua configurazione di btrbk, oppure adotta una cartella che contiene già snapshot ricevuti.
+bkpc.empty_text	Aggiungi un PC: rynas-agent sul PC manda qui i suoi snapshot. Una cartella che contiene già snapshot ricevuti si può adottare.
 bk.add	Aggiungi un PC
 bk.add_title	Nuova destinazione di backup
 bk.adopt	Adotta una cartella
@@ -4774,17 +4774,13 @@ bkpc.col.restore	Ripristino completo
 bkpc.bm.ready	Pronto
 bkpc.bm.disks	Dischi
 bkpc.bm.serial	N. di serie {serial}
-bkpc.bm.part_line	Partizione {n} · {size}
+bkpc.bm.part	Partizione {n}
 bkpc.bm.boot_copies	File di avvio copiati
-bkpc.bm.copy_line	{mount} in {dir} ({size})
-bkpc.agent_step	Con rynas-agent (consigliato)
-bkpc.agent_intro	Installa rynas-agent sul PC (pacchetto o file della release), poi esegui questo comando. Legge i sottovolumi del PC, scrive /etc/btrbk/btrbk.conf (prima mostra le modifiche e conserva il file vecchio), crea la chiave, installa gli hook che tengono aggiornato il manifest della struttura e stampa la chiave da incollare nelle Impostazioni.
-bkpc.manual_steps	Senza l'agente
+bkpc.manual_steps	Configura btrbk a mano
 bkpc.first_run	Primo backup
 bkpc.first_run_intro	Il PC è configurato quando è arrivato il primo snapshot di ogni sottovolume.
 bkpc.first_run_ok	Ricevuto
 bkpc.first_run_wait	In attesa
-bkpc.first_run_none	Ancora nessuno snapshot ricevuto.
 bkpc.bm.not_ready	Non pronto
 bkpc.bm.title	Ripristino su un disco vuoto
 bkpc.bm.intro	Se questi snapshot bastano per ricostruire il PC su un disco nuovo: il manifest della struttura che il PC tiene nel suo sottovolume di root, e uno snapshot di ogni sottovolume che elenca.
@@ -4792,7 +4788,7 @@ bkpc.bm.manifest	Manifest della struttura
 bkpc.bm.loader	Caricatore di avvio
 bkpc.bm.subvolumes	Sottovolumi necessari
 bkpc.bm.no_snapshots	Ancora nessuno snapshot completo.
-bkpc.bm.no_manifest	Gli snapshot più recenti non contengono il manifest della struttura (/.rynas/manifest.json): il PC non lo scrive ancora. L'agente rynas sul PC lo scrive prima di ogni esecuzione.
+bkpc.bm.no_manifest	Gli snapshot più recenti non contengono il manifest della struttura (/.rynas/manifest.json). rynas-agent lo scrive prima di ogni esecuzione.
 bkpc.bm.manifest_invalid	Il manifest della struttura non si può leggere.
 bkpc.bm.manifest_unsupported	Il manifest della struttura ha il formato {subject}, che questo NAS non conosce ancora.
 bkpc.bm.no_root	Il manifest non indica nessun sottovolume montato su /.
@@ -4800,6 +4796,47 @@ bkpc.bm.subvolume_missing	{subject} serve per un ripristino ma qui non ha nessun
 bkpc.bm.loader_unknown	Il manifest non indica il caricatore di avvio.
 bkpc.bm.manifest_stale	Il manifest è più vecchio di {subject} giorni rispetto allo snapshot che lo contiene.
 bkpc.bm.latest_run_incomplete	L'esecuzione più recente non ha {subject}: un ripristino lo prende da un'esecuzione precedente.
+bkpc.bm.layout	Sottovolumi
+bkpc.owner.agent_help	Il NAS elimina gli snapshot vecchi con questi numeri; rynas-agent può solo aggiungere. Lo snapshot più recente di ogni sottovolume resta sempre: il prossimo invio parte da lì.
+pcb.how	Inviati da
+pcb.how.agent	rynas-agent (consigliato)
+pcb.how.ssh	btrbk via SSH
+pcb.how.agent_help	rynas-agent sul PC crea gli snapshot e li manda via HTTPS. Niente SSH, niente btrbk: installi l'agente e lo abbini con un codice.
+pcb.how.ssh_help	btrbk sul PC manda via SSH con una sua chiave. Per i PC già configurati così; la configurazione la scrivi a mano.
+pcb.via.agent	rynas-agent
+pcb.via.ssh	btrbk (SSH)
+pcb.f.pc	PC
+pcb.f.pc_new	Un PC nuovo (da abbinare dopo)
+pcb.f.pc_help	Un PC già abbinato per il backup dei file può passare qui: tiene il suo nome e passa agli snapshot btrfs.
+pcb.pair_after	Quando la cartella esiste, il suo pannello dà il codice di abbinamento per il PC.
+pcb.link_failed	La cartella è stata creata, ma il PC non è passato a usarla: {error}
+pcb.switch_to_agent	D'ora in poi rynas-agent manda in questa cartella: la chiave di btrbk smette di funzionare. Gli snapshot restano, quindi l'agente riparte da quelli; spegni il timer di btrbk sul PC.
+pcb.switch_to_ssh	D'ora in poi btrbk manda in questa cartella via SSH con la chiave qui sotto; rynas-agent non può più mandare qui.
+pcb.ssh_recommend	rynas-agent è più semplice (niente chiave SSH, nessun file di configurazione): puoi passarci quando vuoi dalle Impostazioni, gli snapshot restano.
+pcb.hook	Manifest della struttura prima di ogni esecuzione di btrbk
+pcb.hook_intro	Con rynas-agent installato, questi comandi aggiungono a btrbk.service un drop-in che scrive il manifest della struttura prima di ogni esecuzione di btrbk.
+pca.pairing_btrfs	snapshot btrfs ({name})
+pcb.copy_of	Copia: {what}
+pcb.loader_unknown	Sconosciuto
+pcb.copy_skipped	Esclusi perché sembrano chiavi: {files}
+pcb.copy_stale	L'ultima copia non è riuscita, resta quella precedente: {error}
+pcb.first_run_so_far	Arrivati finora: {names}
+pcb.first_run_no_manifest	Quali sottovolumi aspettarsi lo dice il manifest della struttura (lo scrive rynas-agent).
+pcb.agent.title	rynas-agent
+pcb.agent.unpaired	Nessun rynas-agent è ancora abbinato a questo PC. Crea un codice, installa l'agente sul PC ed esegui il comando di abbinamento: il PC prende il nome di questa cartella.
+pcb.agent.state	Agente
+pcb.agent.every_h	Ogni {n} h
+pcb.agent.last_run	Sottovolumi dell'ultima esecuzione
+pcb.agent.schedule	Pianificazione
+pcb.agent.sent	Inviati
+pcb.agent.revoked	L'agente di questo PC è stato revocato: non può più inviare. Gli snapshot restano.
+pcb.agent.revoke_text	Il token del PC smette subito di funzionare e il suo agente non può più inviare. La cartella e i suoi snapshot restano.
+pca.copy_install	Copia il comando di installazione
+pca.copy_pair	Copia il comando di abbinamento
+pca.on_btrfs	I PC che mandano snapshot btrfs ({n}) sono nella scheda PC: snapshot btrfs.
+pca.f.skip_mounts	Sottovolumi non inviati
+pca.f.skip_mounts_help	Punti di montaggio, uno per riga, i cui sottovolumi restano fuori (cache, log e dati dei container restano fuori comunque).
+pca.f.btrfs_note	Conservazione e avvisi di questo PC sono quelli della cartella (le sue Impostazioni in questa scheda).
 bkpc.issue.late	Niente di nuovo da questo PC dal {when}.
 bkpc.issue.subvolume_late	{subject}: niente di nuovo dal {when}, mentre gli altri sottovolumi arrivano.
 bkpc.issue.subvolume_never	{subject} è previsto ma non è mai stato ricevuto.

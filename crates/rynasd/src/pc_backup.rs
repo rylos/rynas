@@ -93,10 +93,16 @@ pub trait ReceiveHost: Send + Sync {
     /// The home folders of the users of this machine.
     fn home_dirs(&self) -> Vec<String>;
     fn write_keys(&self, content: &str) -> Result<(), String>;
-    /// A new subvolume folder `0750 root:<account>` (parents made as needed).
-    fn create_folder(&self, path: &Path) -> Result<(), String>;
-    /// An existing folder: only its own owner group and mode change.
-    fn prepare_adopted(&self, path: &Path) -> Result<(), String>;
+    /// A new subvolume folder (parents made as needed): `0750 root:<account>`, or with
+    /// `agent` (fed by `rynas-agent` over HTTPS, no SSH account) `0700 root:root`.
+    fn create_folder(&self, path: &Path, agent: bool) -> Result<(), String>;
+    /// An existing folder: only its own owner group and mode change (as `create_folder`).
+    fn prepare_adopted(&self, path: &Path, agent: bool) -> Result<(), String>;
+    /// `btrfs receive` of the (decompressed) send stream `input` into the locked folder of
+    /// `device`, confined to that folder (chroot, and a transient unit that can write only
+    /// there). `expect` is the snapshot name the caller checks afterwards (memory uses it as
+    /// the received name). Blocking; returns when the receive has ended.
+    fn receive(&self, device: &str, lock: &FolderLock, expect: &str, input: &mut dyn std::io::Read) -> Result<(), String>;
     /// (is a subvolume, snapshot entries, other entries).
     fn scan(&self, path: &Path) -> Result<Scan, String>;
     fn usage(&self, path: &Path) -> Result<(u64, u64, u64), String>;
@@ -130,6 +136,44 @@ pub trait ReceiveHost: Send + Sync {
 
 /// Largest manifest read from a snapshot.
 pub const MANIFEST_MAX: u64 = 1 << 20;
+
+/// Longest display string kept from a manifest (model, serial, paths, file names).
+pub const SHOWN_MAX: usize = 256;
+
+/// Prefix of the transient unit of an agent PC's receive (`<prefix>-<device>.service`).
+pub const RECEIVE_UNIT: &str = "rynas-pcreceive";
+
+/// The sandbox of an agent PC's `btrfs receive` (`docs/research/pc-backup.md` §11.9): on top
+/// of `--chroot` into the folder, the transient unit sees the whole filesystem read-only
+/// except the device folder, has no network, only the capabilities a receive needs (subvolume
+/// ioctls, owners, modes, set-id bits, device nodes, the chroot) and the system-service
+/// syscalls plus `chroot`/`mknod`. Checked on a loop btrfs: full and incremental receives
+/// work, a parent outside the folder is refused by btrfs itself ("not reachable from inside
+/// the root subvol"). No `PrivateTmp`: a folder below `/tmp` would vanish behind it.
+pub fn receive_unit_properties(root: &str) -> Vec<String> {
+    [
+        "ProtectSystem=strict".to_string(),
+        format!("ReadWritePaths={root}"),
+        "PrivateNetwork=yes".into(),
+        "NoNewPrivileges=yes".into(),
+        "RestrictAddressFamilies=AF_UNIX".into(),
+        "CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_CHROOT CAP_CHOWN CAP_FOWNER CAP_FSETID CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_MKNOD".into(),
+        "SystemCallArchitectures=native".into(),
+        "SystemCallFilter=@system-service chroot mknod mknodat".into(),
+        "ProtectKernelModules=yes".into(),
+        "ProtectKernelTunables=yes".into(),
+        "ProtectControlGroups=yes".into(),
+        "RestrictRealtime=yes".into(),
+        "LockPersonality=yes".into(),
+        "MemoryMax=512M".into(),
+        "Nice=10".into(),
+        "IOSchedulingClass=best-effort".into(),
+        "IOSchedulingPriority=7".into(),
+        // a first full send over a slow link can take a long time
+        "RuntimeMaxSec=172800".into(),
+    ]
+    .into()
+}
 
 /// The device folder, opened and locked; the lock goes with it.
 pub struct FolderLock {
@@ -319,7 +363,7 @@ impl ReceiveHost for HostReceive {
         write_file(&Path::new(HOME).join(".ssh/authorized_keys"), content, 0o644)
     }
 
-    fn create_folder(&self, path: &Path) -> Result<(), String> {
+    fn create_folder(&self, path: &Path, agent: bool) -> Result<(), String> {
         // in the system volume: its folder made ready and checked first (D-ROOTVOL)
         if crate::places::in_system_dir(&path.to_string_lossy()) {
             crate::places::ensure_system_dir(Path::new("/"), true, &|m| {
@@ -330,17 +374,76 @@ impl ReceiveHost for HostReceive {
             std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
         cmd_ok(Cmd::new("btrfs").args(["subvolume", "create"]).arg(path))?;
-        self.prepare_adopted(path)
+        self.prepare_adopted(path, agent)
     }
 
-    fn prepare_adopted(&self, path: &Path) -> Result<(), String> {
+    fn prepare_adopted(&self, path: &Path, agent: bool) -> Result<(), String> {
         use std::os::unix::fs::PermissionsExt;
-        let gid = self.account_gid().ok_or_else(|| format!("group {ACCOUNT} not found"))?;
+        let (gid, mode) = if agent {
+            (0, 0o700)
+        } else {
+            (self.account_gid().ok_or_else(|| format!("group {ACCOUNT} not found"))?, 0o750)
+        };
         // on the descriptor: a symlink swapped in for the folder is not followed
         let dir = rynas_btrfs::ioctl::open_dir(path).map_err(|e| format!("{}: {e}", path.display()))?;
         std::os::unix::fs::fchown(&dir, Some(0), Some(gid)).map_err(|e| format!("{}: {e}", path.display()))?;
-        dir.set_permissions(std::fs::Permissions::from_mode(0o750))
+        dir.set_permissions(std::fs::Permissions::from_mode(mode))
             .map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    fn receive(&self, device: &str, lock: &FolderLock, _expect: &str, input: &mut dyn std::io::Read) -> Result<(), String> {
+        use std::io::Read as _;
+        use std::process::{Command, Stdio};
+        if !valid_device(device) {
+            return Err(format!("{device}: not a device name"));
+        }
+        let btrfs = rynas_btrfs::receive_filter::locate("btrfs").ok_or("btrfs-progs is not installed")?;
+        let root = lock.path.to_string_lossy().into_owned();
+        // the folder came through verify_root (no symlink on the way, not inside a received
+        // snapshot) and valid_path (no spaces or quotes: safe as a unit property value)
+        receive::valid_path(&root)?;
+        let mut c = Command::new("systemd-run");
+        c.args(["--wait", "--pipe", "--collect", "--quiet", "--service-type=exec"])
+            // one name per device: systemd refuses a second unit while one still runs (even
+            // when rynasd restarted and lost the folder lock meanwhile)
+            .arg(format!("--unit={RECEIVE_UNIT}-{device}"))
+            .arg(format!("--description=rynas: receive of PC {device}"));
+        for p in receive_unit_properties(&root) {
+            c.arg(format!("--property={p}"));
+        }
+        c.arg("--").arg(&btrfs).args(["receive", "--chroot"]).arg(format!("{root}/"));
+        c.env_clear()
+            .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+            .env("LC_ALL", "C")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        let mut child = c.spawn().map_err(|e| format!("systemd-run: {e}"))?;
+        let mut err = child.stderr.take().ok_or("no stderr")?;
+        let errs = std::thread::spawn(move || {
+            let mut s = Vec::new();
+            let _ = (&mut err).take(16 << 10).read_to_end(&mut s);
+            let _ = std::io::copy(&mut err, &mut std::io::sink());
+            String::from_utf8_lossy(&s).into_owned()
+        });
+        let mut stdin = child.stdin.take().ok_or("no stdin")?;
+        let copied = std::io::copy(input, &mut stdin);
+        // end of stream (or the stream broke: a short stream makes the receive fail)
+        drop(stdin);
+        let status = child.wait().map_err(|e| e.to_string())?;
+        let text = errs.join().unwrap_or_default();
+        let last = text
+            .lines()
+            .rfind(|l| !l.starts_with("At ") && !l.starts_with("Chroot to "))
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        match copied {
+            // the input failed first: that is the cause
+            Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => Err(format!("the stream broke off: {e}")),
+            _ if status.success() => Ok(()),
+            _ => Err(if last.is_empty() { format!("btrfs receive failed ({status})") } else { format!("btrfs receive: {last}") }),
+        }
     }
 
     fn scan(&self, path: &Path) -> Result<Scan, String> {
@@ -570,6 +673,8 @@ pub struct MemoryReceive {
     pub busy: Mutex<Vec<PathBuf>>,
     /// Snapshots deleted by the NAS, `<folder>/<name>`.
     pub deleted: Mutex<Vec<String>>,
+    /// The name the next receives create instead of the expected one (tests).
+    pub receive_as: Mutex<Option<String>>,
 }
 
 /// The account group's gid in memory.
@@ -687,15 +792,55 @@ impl ReceiveHost for MemoryReceive {
         *self.keys.lock().unwrap() = content.to_string();
         Ok(())
     }
-    fn create_folder(&self, path: &Path) -> Result<(), String> {
+    fn create_folder(&self, path: &Path, agent: bool) -> Result<(), String> {
         self.folders
             .lock()
             .unwrap()
             .insert(path.to_path_buf(), (true, Vec::new()));
+        self.prepare_adopted(path, agent)
+    }
+    fn prepare_adopted(&self, path: &Path, agent: bool) -> Result<(), String> {
+        let mut m = self.meta.lock().unwrap();
+        if agent {
+            m.insert(path.to_path_buf(), (0, 0, 0o700));
+        } else {
+            m.remove(path);
+        }
         Ok(())
     }
-    fn prepare_adopted(&self, path: &Path) -> Result<(), String> {
-        self.meta.lock().unwrap().remove(path);
+    /// Reads the stream to its end; an empty one fails (as `btrfs receive` would), anything
+    /// else becomes the complete snapshot `expect` (or `self.receive_as` when set: a stream
+    /// that names another subvolume).
+    fn receive(&self, _device: &str, lock: &FolderLock, expect: &str, input: &mut dyn std::io::Read) -> Result<(), String> {
+        let copied = std::io::copy(input, &mut std::io::sink());
+        let name = self.receive_as.lock().unwrap().clone().unwrap_or_else(|| expect.to_string());
+        let mut f = self.folders.lock().unwrap();
+        let (_, entries) = f.get_mut(&lock.path).ok_or("no such folder")?;
+        if !matches!(copied, Ok(n) if n > 0) {
+            // what an interrupted receive leaves: a writable subvolume without received UUID
+            entries.push(Entry {
+                name,
+                info: Some(rynas_btrfs::ioctl::SubvolInfo { root_id: 900, ..Default::default() }),
+            });
+            return Err(match copied {
+                Err(e) => format!("the stream broke off: {e}"),
+                Ok(_) => "btrfs receive: short read from stream".into(),
+            });
+        }
+        let now = rynas_tasks::now_ms();
+        let id = 1000 + entries.len() as u64;
+        entries.push(Entry {
+            name,
+            info: Some(rynas_btrfs::ioctl::SubvolInfo {
+                root_id: id,
+                readonly: true,
+                uuid: Some(format!("0b7d9e4c-0000-4000-8000-{id:012x}")),
+                received_uuid: Some(format!("6f1c2a8e-0000-4000-8000-{:012x}", now % 0xffff_ffff_ffff + id)),
+                otime: (now / 1000) as i64,
+                ..Default::default()
+            }),
+        });
+        entries.sort_by(|a, b| rynas_btrfs::name::compare_names(&b.name, &a.name));
         Ok(())
     }
     fn scan(&self, path: &Path) -> Result<Scan, String> {
@@ -1009,10 +1154,49 @@ fn parse_manifest(b: &[u8]) -> ManifestRead {
         let Some(a) = v.and_then(serde_json::Value::as_array) else { return Vec::new() };
         a.iter().take(max).filter_map(|x| serde_json::from_value(x.clone()).ok()).collect()
     }
+    // display strings: at most SHOWN_MAX characters, control characters out
+    fn cap(s: &mut String) {
+        if s.chars().count() > SHOWN_MAX || s.chars().any(char::is_control) {
+            *s = s.chars().filter(|c| !c.is_control()).take(SHOWN_MAX).collect();
+        }
+    }
     let mut disks: Vec<rynas_api_types::pcagent::Disk> = shown(v.get("disks"), 16);
     for d in &mut disks {
+        for s in [&mut d.name, &mut d.model, &mut d.serial, &mut d.wwn] {
+            cap(s);
+        }
         if let Some(t) = &mut d.table {
             t.partitions.truncate(128);
+            cap(&mut t.kind);
+            cap(&mut t.disk_guid);
+            for p in &mut t.partitions {
+                for s in [&mut p.type_guid, &mut p.part_guid, &mut p.name, &mut p.dev] {
+                    cap(s);
+                }
+            }
+        }
+    }
+    // name → path → mount: only entries that look like what the agent writes
+    let layout: Vec<rynas_api_types::pcagent::BtrbkSubvolume> = shown(v.pointer("/btrbk/subvolumes"), 256);
+    let plain = |s: &str| s.len() <= SHOWN_MAX && !s.chars().any(char::is_control);
+    let layout = layout
+        .into_iter()
+        .filter(|l| {
+            valid_snapshot_prefix(&l.name)
+                && plain(&l.path)
+                && plain(&l.mount)
+                && (l.mount.is_empty() || l.mount.starts_with('/'))
+        })
+        .collect();
+    let mut boot_copies: Vec<rynas_api_types::pcagent::BootCopy> = shown(v.pointer("/btrbk/boot_copies"), 8);
+    for c in &mut boot_copies {
+        for s in [&mut c.mount, &mut c.dir, &mut c.signature] {
+            cap(s);
+        }
+        c.skipped.truncate(32);
+        c.skipped.iter_mut().for_each(cap);
+        if let Some(e) = &mut c.error {
+            cap(e);
         }
     }
     Ok(Manifest {
@@ -1021,8 +1205,8 @@ fn parse_manifest(b: &[u8]) -> ManifestRead {
         subvolumes,
         root,
         disks,
-        layout: shown(v.pointer("/btrbk/subvolumes"), 256),
-        boot_copies: shown(v.pointer("/btrbk/boot_copies"), 8),
+        layout,
+        boot_copies,
     })
 }
 
@@ -1181,6 +1365,9 @@ struct Stored {
     open_alerts: BTreeMap<String, String>,
     #[serde(default)]
     last_prune: Option<PruneRun>,
+    /// Fed by `rynas-agent` over HTTPS (no key line, retention on the NAS).
+    #[serde(default)]
+    agent: bool,
 }
 
 impl Stored {
@@ -1300,6 +1487,7 @@ impl PcBackup {
         let lines: Vec<String> = reg
             .targets
             .iter()
+            .filter(|(_, t)| !t.agent)
             .filter_map(|(d, t)| {
                 let (k, b) = receive::parse_public_key(&t.public_key).ok()?;
                 Some(receive::key_line(d, &t.path, &t.key_policy(), &k, &b))
@@ -1444,6 +1632,7 @@ impl PcBackup {
             volume_bytes: space.map(|x| x.1),
             receiving,
             last_prune: t.last_prune.clone(),
+            agent: t.agent,
         };
         View { target, list: s.list, runs, quota: quota.is_some() }
     }
@@ -1693,8 +1882,9 @@ impl PcBackup {
     }
 
     /// The folders of every device (the sudoers lines).
+    /// The folders of the PCs that send over SSH (the sudoers lines); agent folders need none.
     fn roots(&self) -> Vec<String> {
-        self.reg.lock().unwrap().targets.values().map(|t| t.path.clone()).collect()
+        self.reg.lock().unwrap().targets.values().filter(|t| !t.agent).map(|t| t.path.clone()).collect()
     }
 
     /// What the NAS would delete of `t`'s folder now with these settings (read only).
@@ -1859,6 +2049,244 @@ fn started(id: String) -> Response {
     (StatusCode::ACCEPTED, Json(TaskStarted { task_id: id })).into_response()
 }
 
+// ------------------------------------------------------------------ rynas-agent's receive
+
+/// A receive gives up after this long without a byte from the PC.
+pub const RECEIVE_IDLE: Duration = Duration::from_secs(600);
+/// Free space kept on the volume during a receive: this much, or 2 % of the volume.
+pub const RECEIVE_RESERVE: u64 = 1 << 30;
+
+/// The names of an agent's receive: `snapshot` in btrbk's `long` form, not dated more than
+/// a day ahead, and `parent` (when there is one) of the same subvolume.
+pub fn check_agent_names(snapshot: &str, parent: Option<&str>, now_ms: u64) -> Res<()> {
+    let ok = |n: &str| {
+        split_long_snapshot(n).is_some()
+            && rynas_btrfs::name::split_snapshot_name(n).is_some()
+            && !receive::future_dated(n, now_ms)
+    };
+    if !ok(snapshot) {
+        return Err(Error::invalid("snapshot", "<name>.YYYYMMDDTHHMM[_N], not in the future"));
+    }
+    if let Some(p) = parent {
+        let same = split_long_snapshot(p).map(|x| x.0) == split_long_snapshot(snapshot).map(|x| x.0);
+        if !ok(p) || !same || p == snapshot {
+            return Err(Error::invalid("parent", "an older snapshot of the same subvolume, or none"));
+        }
+    }
+    Ok(())
+}
+
+/// The request body as a blocking reader (fed by an async task), counting the bytes.
+struct BodyReader {
+    rx: tokio::sync::mpsc::Receiver<Result<axum::body::Bytes, String>>,
+    cur: axum::body::Bytes,
+    read: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl std::io::Read for BodyReader {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        while self.cur.is_empty() {
+            match self.rx.blocking_recv() {
+                Some(Ok(b)) => {
+                    self.read.fetch_add(b.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                    self.cur = b;
+                }
+                Some(Err(e)) => return Err(std::io::Error::other(e)),
+                None => return Ok(0),
+            }
+        }
+        let n = out.len().min(self.cur.len());
+        out[..n].copy_from_slice(&self.cur[..n]);
+        let _ = self.cur.split_to(n);
+        Ok(n)
+    }
+}
+
+/// Stops a decompressed stream that would leave the volume with less than the reserve.
+struct Capped<R> {
+    inner: R,
+    left: Option<u64>,
+}
+
+impl<R: std::io::Read> std::io::Read for Capped<R> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(out)?;
+        if let Some(l) = &mut self.left {
+            *l = l.checked_sub(n as u64).ok_or_else(|| std::io::Error::other("the stream is larger than the free space of the volume"))?;
+        }
+        Ok(n)
+    }
+}
+
+fn agent_entry(e: &Entry) -> rynas_api_types::pcagent::AgentBtrfsSnapshot {
+    let i = e.info.as_ref();
+    rynas_api_types::pcagent::AgentBtrfsSnapshot {
+        name: e.name.clone(),
+        received_uuid: i.and_then(|i| i.received_uuid.clone()),
+        complete: i.is_some_and(|i| i.readonly && i.received_uuid.is_some()),
+    }
+}
+
+impl PcBackup {
+    /// The folder of `device` fed by `rynas-agent` (404 without one, 409 when btrbk feeds it).
+    fn agent_target(&self, device: &str) -> Res<Stored> {
+        let t = self.stored(device)?;
+        if !t.agent {
+            return Err(Error::new(
+                StatusCode::CONFLICT,
+                error_codes::CONFLICT,
+                format!("the folder of {device} is fed by btrbk over SSH, not by rynas-agent"),
+            ));
+        }
+        Ok(t)
+    }
+
+    /// `rynas-agent`'s folder exists for `device` (the btrfs method may be chosen).
+    pub fn has_agent_target(&self, device: &str) -> bool {
+        self.reg.lock().unwrap().targets.get(device).is_some_and(|t| t.agent)
+    }
+
+    /// What the agent's folder holds (the agent picks its parents from it).
+    pub async fn agent_listing(self: &Arc<Self>, device: &str) -> Res<rynas_api_types::pcagent::AgentBtrfsListing> {
+        let t = self.agent_target(device)?;
+        let s = self.clone();
+        blocking(move || {
+            let root = Path::new(&t.path);
+            let Some((_, entries, _)) = s.host.scan(root).map_err(Error::internal)? else {
+                return Err(Error::not_found(format!("{}: no such folder", t.path)));
+            };
+            Ok(rynas_api_types::pcagent::AgentBtrfsListing {
+                snapshots: entries.iter().map(agent_entry).collect(),
+                receiving: s.host.receiving(root),
+            })
+        })
+        .await?
+    }
+
+    /// One `btrfs send` stream (zstd) from `rynas-agent` into the folder of `device`, with
+    /// the protections of the SSH filter: the folder walked from `/` without symlinks and
+    /// locked (the filter's per-device lock: one receive at a time, no prune meanwhile),
+    /// btrbk-style names, a parent that is a complete snapshot here, a free-space reserve,
+    /// the stream checked command by command ([`rynas_btrfs::send_stream`]: exactly this
+    /// subvolume, on this parent), the receive confined to the folder
+    /// ([`receive_unit_properties`]), and afterwards the snapshot read-only with a received
+    /// UUID, or removed.
+    pub async fn agent_receive(
+        self: &Arc<Self>,
+        device: &str,
+        snapshot: String,
+        parent: Option<String>,
+        body: axum::body::Body,
+    ) -> Res<rynas_api_types::pcagent::AgentBtrfsReceived> {
+        use futures_util::StreamExt;
+        let t = self.agent_target(device)?;
+        check_agent_names(&snapshot, parent.as_deref(), rynas_tasks::now_ms())?;
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<axum::body::Bytes, String>>(16);
+        let pump = tokio::spawn(async move {
+            let mut stream = body.into_data_stream();
+            loop {
+                let msg = match tokio::time::timeout(RECEIVE_IDLE, stream.next()).await {
+                    Ok(Some(Ok(b))) => Ok(b),
+                    Ok(Some(Err(e))) => Err(format!("the upload broke off: {e}")),
+                    Ok(None) => break,
+                    Err(_) => Err("no data from the PC for 10 minutes".to_string()),
+                };
+                let stop = msg.is_err();
+                if tx.send(msg).await.is_err() || stop {
+                    break;
+                }
+            }
+        });
+        let read = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (s, dev, read2) = (self.clone(), device.to_string(), read.clone());
+        let out = blocking(move || -> Res<rynas_api_types::pcagent::AgentBtrfsReceived> {
+            let root = PathBuf::from(&t.path);
+            let busy = || Error::new(StatusCode::CONFLICT, error_codes::BUSY, format!("a receive or a retention pass of {dev} is running"));
+            let lock = s
+                .host
+                .lock(&root)
+                .map_err(|e| Error::new(StatusCode::CONFLICT, error_codes::CONFLICT, e))?
+                .ok_or_else(busy)?;
+            let scan = |s: &PcBackup| -> Res<Vec<Entry>> {
+                match s.host.scan(&root).map_err(Error::internal)? {
+                    Some((_, e, _)) => Ok(e),
+                    None => Err(Error::not_found(format!("{}: no such folder", root.display()))),
+                }
+            };
+            let before = scan(&s)?;
+            if before.iter().any(|e| e.name == snapshot) {
+                return Err(Error::new(StatusCode::CONFLICT, error_codes::ALREADY_EXISTS, format!("{snapshot} is already on the NAS")));
+            }
+            let parent_uuid = match &parent {
+                None => None,
+                Some(p) => {
+                    let e = before.iter().find(|e| &e.name == p).map(agent_entry);
+                    match e {
+                        Some(e) if e.complete => e.received_uuid,
+                        _ => {
+                            return Err(Error::new(
+                                StatusCode::CONFLICT,
+                                error_codes::CONFLICT,
+                                format!("{p} is not a complete snapshot on the NAS: send in full"),
+                            ));
+                        }
+                    }
+                }
+            };
+            let room = match s.host.space(&root) {
+                Some((free, total)) => {
+                    let reserve = RECEIVE_RESERVE.max(total / 50);
+                    if free <= reserve {
+                        return Err(Error::new(
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            error_codes::PAYLOAD_TOO_LARGE,
+                            format!("the NAS volume has {} MiB free, less than the {} MiB it keeps", free >> 20, reserve >> 20),
+                        ));
+                    }
+                    Some(free - reserve)
+                }
+                None => None,
+            };
+            let body = BodyReader { rx, cur: axum::body::Bytes::new(), read: read2.clone() };
+            let decoded = zstd::stream::read::Decoder::new(body).map_err(Error::internal)?;
+            let expect = rynas_btrfs::send_stream::Expect { name: snapshot.clone(), parent_uuid };
+            let mut guard = rynas_btrfs::send_stream::Guard::new(Capped { inner: decoded, left: room }, expect);
+            let res = s.host.receive(&dev, &lock, &snapshot, &mut guard);
+            // checked again, still under the lock
+            let after = scan(&s)?;
+            let got = after.iter().find(|e| e.name == snapshot).map(agent_entry);
+            match (&res, got) {
+                (Ok(()), Some(e)) if e.complete => Ok(rynas_api_types::pcagent::AgentBtrfsReceived {
+                    name: snapshot.clone(),
+                    received_uuid: e.received_uuid.unwrap_or_default(),
+                    bytes: read2.load(std::sync::atomic::Ordering::Relaxed),
+                }),
+                (_, got) => {
+                    // an interrupted or wrong receive goes at once (never a later parent)
+                    if got.is_some()
+                        && let Err(e) = s.host.delete_snapshot(&lock, &snapshot)
+                    {
+                        tracing::warn!("pc backup: {dev}: removing the failed receive {snapshot}: {e}");
+                    }
+                    let why = match res {
+                        Err(e) => e,
+                        Ok(()) => "the received snapshot is not read-only with a received UUID".into(),
+                    };
+                    Err(Error::new(StatusCode::UNPROCESSABLE_ENTITY, error_codes::INVALID_VALUE, why))
+                }
+            }
+        })
+        .await;
+        pump.abort();
+        let out = out?;
+        match &out {
+            Ok(r) => tracing::info!(target: "rynas::audit", "pc backup: {device}: received {} ({} bytes)", r.name, r.bytes),
+            Err(e) => tracing::warn!("pc backup: {device}: receive refused or failed: {}", e.2),
+        }
+        out
+    }
+}
+
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Res<T> {
     tokio::task::spawn_blocking(f).await.map_err(Error::internal)
 }
@@ -1939,7 +2367,7 @@ async fn detail_get(
                 key_line,
                 key_commands: receive::client_key_commands(&device),
                 client_config: receive::client_config(&device, &host, port, &t.path, nas),
-                agent_setup: receive::agent_setup_command(&device, &host, port, &t.path, nas),
+                manifest_hook: if t.agent { String::new() } else { receive::manifest_hook() },
                 test_commands: receive::client_test_commands(&host, port),
                 target: v.target,
                 list: v.list,
@@ -2053,6 +2481,14 @@ async fn create_post(
     }
     receive::valid_path(&req.path).map_err(|m| Error::invalid("path", m))?;
     check_key(&req.public_key)?;
+    let mut req = req;
+    if req.agent {
+        if !req.public_key.trim().is_empty() {
+            return Err(Error::invalid("public_key", "a folder for rynas-agent takes no SSH key"));
+        }
+        // the agent never deletes on the NAS: retention is the NAS's
+        req.retention.owner = RetentionOwner::Nas;
+    }
     check_policy(req.alert_days, &req.delete)?;
     check_more(req.alert_hours, Some(&req.retention), None)?;
     // early answers; checked again under the change lock in the task
@@ -2085,9 +2521,14 @@ async fn create_post(
             s.clash(&req.device, &req.path).map_err(|e| e.2)?;
             let f = s.host.facts();
             let btrfs = f.btrfs.ok_or("btrfs-progs is not installed")?;
-            let mut roots = s.roots();
-            roots.push(req.path.clone());
-            let mut log = s.host.ensure_account(&btrfs, &roots)?;
+            // an agent folder needs no SSH account, key or sudoers line
+            let mut log = if req.agent {
+                Vec::new()
+            } else {
+                let mut roots = s.roots();
+                roots.push(req.path.clone());
+                s.host.ensure_account(&btrfs, &roots)?
+            };
             let path = Path::new(&req.path);
             match (s.host.scan(path)?, req.adopt) {
                 (Some((_, entries, _)), true) => {
@@ -2100,7 +2541,7 @@ async fn create_post(
                             req.path, c.uid, c.gid, c.mode
                         ));
                     }
-                    s.host.prepare_adopted(path)?;
+                    s.host.prepare_adopted(path, req.agent)?;
                     log.push(format!("{} adopted as it is: {} snapshots", req.path, entries.len()));
                 }
                 (None, true) => return Err(format!("{}: no such folder", req.path)),
@@ -2108,7 +2549,7 @@ async fn create_post(
                     return Err(format!("{} already exists: adopt it instead", req.path));
                 }
                 (None, false) => {
-                    s.host.create_folder(path)?;
+                    s.host.create_folder(path, req.agent)?;
                     log.push(format!("subvolume {} created", req.path));
                 }
             }
@@ -2127,12 +2568,15 @@ async fn create_post(
                         alerted: false,
                         alert_hours: req.alert_hours,
                         retention: req.retention.clone(),
+                        agent: req.agent,
                         ..Default::default()
                     },
                 );
             })?;
-            s.host.write_keys(&s.keys_text())?;
-            log.push("keys of the account written".into());
+            if !req.agent {
+                s.host.write_keys(&s.keys_text())?;
+                log.push("keys of the account written".into());
+            }
             Ok(log)
         })
         .await
@@ -2153,14 +2597,25 @@ async fn update_put(
     body: Result<Json<PcTargetUpdate>, JsonRejection>,
 ) -> Res<Response> {
     let (s, who) = (pb(&st)?, user(&hd)?);
-    let Json(req) = body?;
-    s.stored(&device)?;
+    let Json(mut req) = body?;
+    let cur = s.stored(&device)?;
     if req.description.chars().count() > 120 {
         return Err(Error::invalid("description", "at most 120 characters"));
     }
     check_key(&req.public_key)?;
+    let agent = req.agent.unwrap_or(cur.agent);
+    if agent {
+        if !req.public_key.trim().is_empty() {
+            return Err(Error::invalid("public_key", "a folder for rynas-agent takes no SSH key"));
+        }
+        // the agent never deletes on the NAS: retention is the NAS's
+        let mut r = req.retention.take().unwrap_or_else(|| cur.retention.clone());
+        r.owner = RetentionOwner::Nas;
+        req.retention = Some(r);
+    }
     check_policy(req.alert_days, &req.delete)?;
     check_more(req.alert_hours, req.retention.as_ref(), req.ignored_groups.as_deref())?;
+    let switched = agent != cur.agent;
     let s2 = s.clone();
     let who2 = who.clone();
     let id = s.ops.tasks.spawn("pcbackup.update", &who, move |ctx| async move {
@@ -2168,7 +2623,7 @@ async fn update_put(
         let _g = s.change.lock().await;
         let s3 = s.clone();
         let dev = device.clone();
-        tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let log = tokio::task::spawn_blocking(move || -> Result<Vec<String>, String> {
             s3.edit(|r| {
                 if let Some(t) = r.targets.get_mut(&dev) {
                     t.description = req.description.trim().to_string();
@@ -2182,13 +2637,41 @@ async fn update_put(
                     if let Some(g) = &req.ignored_groups {
                         t.ignored_groups = g.clone();
                     }
+                    t.agent = agent;
                 }
             })?;
-            s3.host.write_keys(&s3.keys_text())
+            let mut log = Vec::new();
+            let roots = s3.roots();
+            if roots.is_empty() {
+                // no PC sends over SSH any more
+                if switched {
+                    log.extend(s3.host.remove_account()?);
+                }
+            } else {
+                if switched {
+                    let btrfs = s3.host.facts().btrfs.ok_or("btrfs-progs is not installed")?;
+                    log.extend(s3.host.ensure_account(&btrfs, &roots)?);
+                }
+                s3.host.write_keys(&s3.keys_text())?;
+                log.push("keys of the account written".into());
+            }
+            if switched {
+                // the snapshots stay as they are: the chain goes on with the other sender
+                s3.host.prepare_adopted(Path::new(&cur.path), agent)?;
+                log.push(if agent {
+                    format!("{dev}: now sent by rynas-agent over HTTPS (key line removed)")
+                } else {
+                    format!("{dev}: now sent by btrbk over SSH")
+                });
+            }
+            Ok(log)
         })
         .await
         .map_err(|e| e.to_string())??;
-        ctx.log("settings saved, keys of the account written");
+        for l in log {
+            ctx.log(&l);
+        }
+        ctx.log("settings saved");
         audit(&who, "update", &device);
         Ok(())
     })?;
@@ -2768,5 +3251,59 @@ mod tests {
         for bad in ["volume1/x", "/volume1", "/etc/x", "/volume1/../etc", "/volume1/x/", "/var/lib/rynas/x"] {
             assert!(valid_dest(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn agent_names_and_the_receive_sandbox() {
+        let now = 1_794_500_000_000;
+        let ts = |h: i64| rynas_btrfs::name::long_timestamp((now / 1000) as i64 - h * 3600);
+        let (a, b) = (format!("@home.{}", ts(2)), format!("@home.{}", ts(1)));
+        assert!(check_agent_names(&a, None, now).is_ok());
+        assert!(check_agent_names(&b, Some(&a), now).is_ok());
+        assert!(check_agent_names(&format!("{b}_3"), Some(&a), now).is_ok());
+        for (s, p) in [
+            ("@home".to_string(), None),
+            ("@home.29991231T0000".to_string(), None),
+            (format!("../@home.{}", ts(1)), None),
+            (format!("@home.{}+0100", ts(1)), None),
+            (b.clone(), Some(format!("@.{}", ts(2)))),
+            (b.clone(), Some(b.clone())),
+            (b.clone(), Some("junk".to_string())),
+        ] {
+            assert!(check_agent_names(&s, p.as_deref(), now).is_err(), "{s} {p:?}");
+        }
+        let p = receive_unit_properties("/volume1/backup/pc");
+        for want in ["ProtectSystem=strict", "ReadWritePaths=/volume1/backup/pc", "PrivateNetwork=yes", "NoNewPrivileges=yes"] {
+            assert!(p.iter().any(|x| x == want), "{want}");
+        }
+        let caps = p.iter().find(|x| x.starts_with("CapabilityBoundingSet=")).unwrap();
+        assert!(caps.contains("CAP_SYS_CHROOT") && !caps.contains("CAP_NET") && !caps.contains("CAP_SYS_PTRACE"));
+        assert!(!p.iter().any(|x| x.starts_with("PrivateTmp")));
+    }
+
+    #[test]
+    fn manifest_display_strings_are_bounded() {
+        let long = "x".repeat(1000);
+        let m = serde_json::json!({
+            "format": 1,
+            "boot": {"loader": "grub"},
+            "disks": [{"name": "nvme0n1", "model": long, "serial": "a\u{1b}[31mb", "size_bytes": 1}],
+            "btrbk": {
+                "subvolumes": [
+                    {"name": "@", "path": "@", "mount": "/"},
+                    {"name": ".bad", "path": "x", "mount": "/x"},
+                    {"name": "ok", "path": "p", "mount": "relative"},
+                    {"name": "ctl", "path": "a\nb", "mount": "/c"}
+                ],
+                "boot_copies": [{"mount": "/boot", "dir": "/.rynas/boot/boot", "bytes": 1, "files": 1, "skipped": vec![long.clone(); 50], "stale": true, "error": long}]
+            }
+        });
+        let r = parse_manifest(&serde_json::to_vec(&m).unwrap()).unwrap();
+        assert_eq!(r.disks[0].model.chars().count(), SHOWN_MAX);
+        assert_eq!(r.disks[0].serial, "a[31mb");
+        assert_eq!(r.layout.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), ["@"]);
+        let c = &r.boot_copies[0];
+        assert!(c.stale && c.skipped.len() == 32 && c.skipped[0].len() == SHOWN_MAX);
+        assert_eq!(c.error.as_ref().unwrap().len(), SHOWN_MAX);
     }
 }

@@ -57,6 +57,10 @@ pub const FILES_UPLOAD_DEADLINE: Duration = Duration::from_secs(610);
 pub const BACKUP_DEADLINE: Duration = Duration::from_secs(120);
 /// PC backup: an agent's upload of a repository file (up to 512 MiB on a home uplink).
 pub const PC_REPO_DEADLINE: Duration = Duration::from_secs(3600);
+/// PC backup, btrfs method: rynasd answers a receive when the whole stream is in (a first
+/// full send of a large PC over a slow link takes hours; rynasd stops one after 10 minutes
+/// without data and the receive unit after 48 h).
+pub const PC_BTRFS_DEADLINE: Duration = Duration::from_secs(48 * 3600);
 /// PC backup: pairing (creates a repository: two key derivations), the plan's long poll
 /// (55 s), the console's reads and downloads of a repository (the worker has 110 s).
 pub const PC_AGENT_DEADLINE: Duration = Duration::from_secs(120);
@@ -80,6 +84,8 @@ pub fn deadline(path: &str) -> Duration {
         BACKUP_DEADLINE
     } else if path.starts_with("/v1/pcbackup/repo/") {
         PC_REPO_DEADLINE
+    } else if path.starts_with("/v1/pcbackup/agent/btrfs/receive") {
+        PC_BTRFS_DEADLINE
     } else if path.starts_with("/v1/pcbackup/") {
         PC_AGENT_DEADLINE
     } else if path.starts_with("/v1/files/upload") || path.starts_with("/v1/files/edit/save") {

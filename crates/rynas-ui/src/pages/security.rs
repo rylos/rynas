@@ -67,6 +67,23 @@ pub fn copy_button(label: &'static str, text: String) -> impl IntoView {
     }
 }
 
+/// [`copy_button`] with its own accessible name (`aria`), for pages with several copy
+/// buttons that would otherwise all read "Copy".
+pub fn copy_button_for(label: &'static str, aria: String, text: String) -> impl IntoView {
+    let copied = RwSignal::new(false);
+    view! {
+        <button class="btn ghost sm" type="button" aria-label=aria on:click=move |_| {
+            if copy_text(&text) {
+                copied.set(true);
+                set_timeout(move || copied.set(false), std::time::Duration::from_millis(1800));
+            }
+        }>
+            {move || view! { <Icon icon=if copied.get() { icons::CHECK } else { icons::COPY } size=14 /> }}
+            {move || if copied.get() { t("copied") } else { t(label) }}
+        </button>
+    }
+}
+
 #[component]
 pub fn Security() -> impl IntoView {
     let a = auth();

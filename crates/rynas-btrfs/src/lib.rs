@@ -14,6 +14,7 @@
 //!   replicas browse and promote; [`btrbk_ssh`]: reusable SSH key and filter helpers;
 //! - [`receive`], [`receive_filter`]: PC backup, receive side (btrbk pushes from PCs): folder
 //!   summary, NAS-side delete rules, account texts, and the forced command's allowlist;
+//!   [`send_stream`]: the guard in front of `btrfs receive` for `rynas-agent`'s streams;
 //! - [`sysvol`]: the system volume's folder (D-ROOTVOL), the top-level subvolume
 //!   `@rynas-system` mounted on `/srv/rynas/system` on a btrfs root;
 //! - [`domain`]: the `snapshots` configuration domain.
@@ -33,6 +34,7 @@ pub mod replication;
 pub mod restore;
 pub mod rootfs;
 pub mod scan;
+pub mod send_stream;
 pub mod system;
 pub mod sysvol;
 

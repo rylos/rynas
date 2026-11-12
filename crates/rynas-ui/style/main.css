@@ -1885,6 +1885,13 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .bk-sec { margin: var(--s-6) 0 var(--s-2); }
 /* what a PC's full restore still lacks (pages/backup/pcs.rs) */
 .bkpc-gaps { display: flex; flex-direction: column; gap: var(--s-1); margin: 0; padding-left: var(--s-4); overflow-wrap: anywhere; }
+.bkpc-gaps li { overflow-wrap: anywhere; min-width: 0; }
+/* the manifest's subvolumes, disks and boot copies: a left-aligned block, partitions and
+   notes indented below their disk or copy, sizes on one line (strings come from the PC) */
+.bkpc-list { display: flex; flex-direction: column; gap: var(--s-2); margin: 0 0 var(--s-3); padding: 0; list-style: none; text-align: left; }
+.bkpc-list li, .bkpc-sub li { overflow-wrap: anywhere; min-width: 0; }
+.bkpc-sub { display: flex; flex-direction: column; gap: var(--s-1); margin: var(--s-1) 0 0; padding-left: var(--s-6); list-style: disc; color: var(--text-subtle); }
+.nowrap { white-space: nowrap; }
 .bk-err { color: var(--danger); overflow-wrap: anywhere; }
 .bk-checks { display: flex; flex-direction: column; gap: var(--s-2); margin: 0; padding: 0; border: 0; min-width: 0; }
 .bk-checks .check { align-items: baseline; flex-wrap: wrap; }

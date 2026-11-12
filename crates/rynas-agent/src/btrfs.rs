@@ -105,6 +105,82 @@ pub fn cleanup_leftovers(mount: &Path) {
     let _ = std::fs::remove_dir(&dir);
 }
 
+/// A read-only snapshot of the subvolume at `src` at exactly `dst`.
+pub fn snapshot_ro(src: &Path, dst: &Path) -> Result<(), String> {
+    btrfs(&["subvolume".as_ref(), "snapshot".as_ref(), "-r".as_ref(), src.as_os_str(), dst.as_os_str()]).map(|_| ())
+}
+
+/// What `BTRFS_IOC_GET_SUBVOL_INFO` says about a subvolume (unprivileged, kernel ≥ 4.18).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SubvolInfo {
+    pub uuid: Option<String>,
+    pub received_uuid: Option<String>,
+    pub readonly: bool,
+}
+
+#[repr(C)]
+struct Timespec {
+    sec: u64,
+    nsec: u32,
+}
+
+/// `struct btrfs_ioctl_get_subvol_info_args`.
+#[repr(C)]
+struct SubvolInfoArgs {
+    treeid: u64,
+    name: [u8; 256],
+    parent_id: u64,
+    dirid: u64,
+    generation: u64,
+    flags: u64,
+    uuid: [u8; 16],
+    parent_uuid: [u8; 16],
+    received_uuid: [u8; 16],
+    ctransid: u64,
+    otransid: u64,
+    stransid: u64,
+    rtransid: u64,
+    ctime: Timespec,
+    otime: Timespec,
+    stime: Timespec,
+    rtime: Timespec,
+    reserved: [u64; 8],
+}
+
+/// `_IOR(0x94, 60, struct btrfs_ioctl_get_subvol_info_args)`.
+const IOC_GET_SUBVOL_INFO: u64 = (2 << 30) | ((std::mem::size_of::<SubvolInfoArgs>() as u64) << 16) | (0x94 << 8) | 60;
+
+pub fn uuid_text(b: &[u8; 16]) -> Option<String> {
+    if b.iter().all(|&x| x == 0) {
+        return None;
+    }
+    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    Some(format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32]))
+}
+
+/// The facts of the subvolume whose top folder is `p` (not following a final symlink);
+/// `None` when it is not a subvolume or the ioctl fails.
+pub fn subvol_info(p: &Path) -> Option<SubvolInfo> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(p)
+        .ok()?;
+    // the top folder of every subvolume is inode 256
+    if f.metadata().ok()?.ino() != 256 {
+        return None;
+    }
+    // SAFETY: plain old data, zeroes are valid
+    let mut a: Box<SubvolInfoArgs> = Box::new(unsafe { std::mem::zeroed() });
+    // SAFETY: the kernel writes at most size_of::<SubvolInfoArgs>() bytes
+    if unsafe { libc::ioctl(f.as_raw_fd(), IOC_GET_SUBVOL_INFO as _, &mut *a) } < 0 {
+        return None;
+    }
+    Some(SubvolInfo { uuid: uuid_text(&a.uuid), received_uuid: uuid_text(&a.received_uuid), readonly: a.flags & 1 != 0 })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,5 +194,16 @@ mod tests {
         assert!(excluded_subvolume(".btrbk_snapshots/@.20261112T0300"));
         assert!(!excluded_subvolume("var/lib/machines"));
         assert!(!excluded_subvolume("srv"));
+    }
+
+    #[test]
+    fn subvol_info_layout() {
+        // the kernel's struct is 504 bytes (`_IOR(0x94, 60, …)` = 0x81f8943c)
+        assert_eq!(std::mem::size_of::<SubvolInfoArgs>(), 504);
+        assert_eq!(IOC_GET_SUBVOL_INFO, 0x81f8_943c);
+        assert_eq!(uuid_text(&[0; 16]), None);
+        assert_eq!(uuid_text(&[0x11; 16]).unwrap(), "11111111-1111-1111-1111-111111111111");
+        // a plain folder is no subvolume
+        assert_eq!(subvol_info(&std::env::temp_dir()), None);
     }
 }

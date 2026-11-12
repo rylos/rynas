@@ -26,6 +26,63 @@ pub fn valid_device(d: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
 }
 
+/// A btrbk snapshot name prefix (the subvolume's name in btrbk, `@home`, `rootfs`): 1–64 of
+/// `[A-Za-z0-9_@.-]`, not starting with `.` or `-`. Shared by the agent (names it gives)
+/// and the NAS (names it accepts).
+pub fn valid_snapshot_prefix(p: &str) -> bool {
+    !p.is_empty()
+        && p.len() <= 64
+        && p
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'@'))
+        && !p.starts_with(['.', '-'])
+}
+
+/// `<prefix>.YYYYMMDDTHHMM[_N]`, btrbk's `long` format (what `rynas-agent` writes), split
+/// into prefix and timestamp. Only the shape and the field ranges are checked here; the NAS
+/// also parses the date ([`valid_snapshot_prefix`] for the prefix).
+pub fn split_long_snapshot(name: &str) -> Option<(&str, &str)> {
+    let (prefix, ts) = name.rsplit_once('.')?;
+    if !valid_snapshot_prefix(prefix) || name.len() > 96 {
+        return None;
+    }
+    let (stamp, suffix) = match ts.split_once('_') {
+        Some((s, n)) => (s, Some(n)),
+        None => (ts, None),
+    };
+    if let Some(n) = suffix
+        && (n.is_empty() || n.len() > 6 || !n.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return None;
+    }
+    let b = stamp.as_bytes();
+    if b.len() != 13 || b[8] != b'T' || !b.iter().enumerate().all(|(i, c)| i == 8 || c.is_ascii_digit()) {
+        return None;
+    }
+    let num = |r: std::ops::Range<usize>| stamp[r].parse::<u32>().unwrap_or(99);
+    let ok = (1..=12).contains(&num(4..6))
+        && (1..=31).contains(&num(6..8))
+        && num(9..11) < 24
+        && num(11..13) < 60
+        && num(0..4) >= 1970;
+    ok.then_some((prefix, ts))
+}
+
+/// btrbk's `long` timestamp `YYYYMMDDTHHMM` from civil fields (local time of the PC).
+pub fn long_timestamp(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> String {
+    format!("{year:04}{month:02}{day:02}T{hour:02}{minute:02}")
+}
+
+/// btrbk's SSH target URL `ssh://host[:port]/path`; a bare IPv6 address gets its brackets
+/// (`ssh://[fd00::2]:2222/…`), so the port cannot be read as part of the address.
+pub fn ssh_target_url(host: &str, port: Option<u16>, path: &str) -> String {
+    let host = if host.contains(':') && !host.starts_with('[') { format!("[{host}]") } else { host.to_string() };
+    match port {
+        Some(p) if p != 22 => format!("ssh://{host}:{p}{path}"),
+        _ => format!("ssh://{host}{path}"),
+    }
+}
+
 /// Freshness of a device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -321,6 +378,10 @@ pub struct PcTarget {
     pub receiving: bool,
     #[serde(default)]
     pub last_prune: Option<PruneRun>,
+    /// Fed by `rynas-agent` over HTTPS (the paired PC of the same name, btrfs method): no
+    /// SSH key, retention always on the NAS.
+    #[serde(default)]
+    pub agent: bool,
 }
 
 impl PcTarget {
@@ -347,10 +408,10 @@ pub struct PcTargetDetail {
     pub key_commands: String,
     pub client_config: String,
     pub test_commands: String,
-    /// The one command that does all of the above on a PC with `rynas-agent`
-    /// (`rynas-agent btrbk-setup --nas ssh://… --device …`).
+    /// For btrbk PCs with `rynas-agent` installed: a systemd drop-in for `btrbk.service`
+    /// that writes the layout manifest before every btrbk run (shown, never installed).
     #[serde(default)]
-    pub agent_setup: String,
+    pub manifest_hook: String,
     /// The snapshots grouped by run, newest first.
     #[serde(default)]
     pub runs: Vec<PcRun>,
@@ -468,6 +529,10 @@ pub struct PcTargetCreate {
     pub alert_hours: u32,
     #[serde(default)]
     pub retention: PcRetention,
+    /// A folder for `rynas-agent` (btrfs method over HTTPS): no key (`public_key` must be
+    /// empty), retention on the NAS, no SSH account needed.
+    #[serde(default)]
+    pub agent: bool,
 }
 
 pub fn default_alert() -> u32 {
@@ -491,6 +556,11 @@ pub struct PcTargetUpdate {
     /// Missing: unchanged.
     #[serde(default)]
     pub ignored_groups: Option<Vec<String>>,
+    /// Switch between btrbk over SSH (`false`, needs `public_key`) and `rynas-agent` over
+    /// HTTPS (`true`: the key line goes). Missing: unchanged. The snapshots stay, so the
+    /// chain goes on incrementally either way.
+    #[serde(default)]
+    pub agent: Option<bool>,
 }
 
 /// `POST /api/v1/pc-backups/plan/adopt`: what a folder holds, read only.
@@ -546,4 +616,40 @@ pub struct CopyOutRequest {
     pub path: String,
     /// An existing folder on the NAS.
     pub destination: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_names_shared_by_agent_and_nas() {
+        assert!(valid_snapshot_prefix("@home"));
+        assert!(valid_snapshot_prefix("rootfs"));
+        assert!(valid_snapshot_prefix("a.b"));
+        assert!(!valid_snapshot_prefix(".hidden"));
+        assert!(!valid_snapshot_prefix("-x"));
+        assert!(!valid_snapshot_prefix("a/b"));
+        assert!(!valid_snapshot_prefix(""));
+        assert!(!valid_snapshot_prefix(&"a".repeat(65)));
+        assert_eq!(split_long_snapshot("@home.20261112T0300"), Some(("@home", "20261112T0300")));
+        assert_eq!(split_long_snapshot("@.20261112T0300_2"), Some(("@", "20261112T0300_2")));
+        assert_eq!(split_long_snapshot("a.b.20261112T0300"), Some(("a.b", "20261112T0300")));
+        for bad in [
+            "@home",
+            "@home.20261112",
+            "@home.20261112T030",
+            "@home.20261312T0300",
+            "@home.20261112T2400",
+            "@home.20261112T0300_",
+            "@home.20261112T0300_x",
+            "../x.20261112T0300",
+            "a/b.20261112T0300",
+            ".x.20261112T0300",
+            "@home.20261112T0300+0100",
+        ] {
+            assert!(split_long_snapshot(bad).is_none(), "{bad}");
+        }
+        assert_eq!(long_timestamp(2026, 1, 2, 3, 4), "20260102T0304");
+    }
 }

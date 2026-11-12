@@ -80,6 +80,7 @@ impl Default for PcPlan {
 
 /// Settings of one PC (`PUT /api/v1/pcbackup/devices/{device}`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+
 pub struct PcDeviceSettings {
     #[serde(default)]
     pub description: String,
@@ -94,6 +95,25 @@ pub struct PcDeviceSettings {
     /// Critical after this many hours.
     #[serde(default = "default_critical")]
     pub critical_hours: u32,
+    /// Files into the group's repository, or btrfs snapshots sent to the PC's folder of
+    /// the btrfs method (`crate::pcbackup::PcTarget` with `agent`, same name). With
+    /// `btrfs`, `retention`, `min_age_days` and the alert hours of the files method do not
+    /// apply: the folder's NAS-side retention and alerts do.
+    #[serde(default)]
+    pub method: PcMethod,
+}
+
+/// How `rynas-agent` backs a PC up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PcMethod {
+    /// Files into a restic-format repository on the NAS (any filesystem).
+    #[default]
+    Files,
+    /// Read-only btrfs snapshots of the PC's subvolumes, sent with `btrfs send` over HTTPS
+    /// and received into the PC's folder (btrbk-style names, `docs/research/pc-backup.md`
+    /// §11.9).
+    Btrfs,
 }
 
 fn default_alert() -> u32 {
@@ -113,6 +133,7 @@ impl Default for PcDeviceSettings {
             min_age_days: 7,
             alert_hours: default_alert(),
             critical_hours: default_critical(),
+            method: PcMethod::Files,
         }
     }
 }
@@ -430,6 +451,9 @@ pub struct PairingView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
     pub expires_ms: u64,
+    /// A pairing for the btrfs method into this folder (no group).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub btrfs_target: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -460,6 +484,11 @@ pub struct PairingRequest {
     /// Quota of a new group.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_gib: Option<u32>,
+    /// Pair a PC for the btrfs method into this folder of the btrfs method (a
+    /// `crate::pcbackup::PcTarget` with `agent`): the device takes the folder's name, gets
+    /// [`PcMethod::Btrfs`] and no repository (`group` and `quota_gib` are ignored).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub btrfs_target: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -513,13 +542,59 @@ pub struct PairRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+
 pub struct AgentPlan {
     /// Changes with every new plan or command.
     pub rev: u64,
     pub plan: PcPlan,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<AgentCommand>,
+    /// What a backup run does (an older agent ignores it and runs the files method).
+    #[serde(default)]
+    pub method: PcMethod,
 }
+
+/// `GET /api/v1/pcbackup/agent/btrfs/snapshots` (device token, btrfs method): what the PC's
+/// folder holds, so the agent picks the parent of each incremental send (the newest local
+/// snapshot whose UUID, or received UUID, is a complete snapshot's `received_uuid` here).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AgentBtrfsListing {
+    /// Every entry with a btrbk snapshot name, newest first.
+    pub snapshots: Vec<AgentBtrfsSnapshot>,
+    /// A receive of this PC is running now.
+    #[serde(default)]
+    pub receiving: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AgentBtrfsSnapshot {
+    pub name: String,
+    /// The PC-side UUID it was sent from (`None`: interrupted or not a received subvolume).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub received_uuid: Option<String>,
+    /// Read-only with a received UUID: usable as a parent.
+    pub complete: bool,
+}
+
+/// Answer of `POST /api/v1/pcbackup/agent/btrfs/receive`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AgentBtrfsReceived {
+    pub name: String,
+    pub received_uuid: String,
+    /// Bytes of the (zstd-compressed) request body the NAS read.
+    #[serde(default)]
+    pub bytes: u64,
+}
+
+/// The btrfs method's listing (see [`AgentBtrfsListing`]).
+pub const AGENT_BTRFS_SNAPSHOTS: &str = "/api/v1/pcbackup/agent/btrfs/snapshots";
+/// The btrfs method's upload: `POST …?snapshot=<name.YYYYMMDDTHHMM[_N]>&parent=<name|none>`,
+/// body = `btrfs send` stream compressed with zstd (`Content-Type: application/zstd`,
+/// chunked). One receive per PC at a time.
+pub const AGENT_BTRFS_RECEIVE: &str = "/api/v1/pcbackup/agent/btrfs/receive";
+/// The agent's local snapshot folder for the btrfs method when the PC has no btrbk
+/// `snapshot_dir` of its own (btrbk's usual name, so btrbk could take the chain over).
+pub const AGENT_SNAPSHOT_DIR: &str = "/.btrbk_snapshots";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PairResponse {
@@ -876,10 +951,11 @@ pub struct Manifest {
     pub btrbk: Option<BtrbkLayout>,
 }
 
-/// The btrfs method's block of the manifest.
+/// The btrfs method's block of the manifest (btrbk over SSH, or the agent itself).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+
 pub struct BtrbkLayout {
-    /// btrbk's `snapshot_dir` on the PC.
+    /// The local snapshot folder on the PC (btrbk's `snapshot_dir`, or the agent's).
     #[serde(default)]
     pub snapshot_dir: String,
     pub subvolumes: Vec<BtrbkSubvolume>,
@@ -887,10 +963,16 @@ pub struct BtrbkLayout {
     /// `/boot`), copied as files into the root subvolume so its snapshots carry them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub boot_copies: Vec<BootCopy>,
+    /// Sent by `rynas-agent` itself over HTTPS (the btrfs method without btrbk); `false`:
+    /// btrbk over SSH (`/etc/btrbk/btrbk.conf`). The names are btrbk's either way.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub agent: bool,
 }
 
-/// One boot filesystem copied into `/.rynas/boot/<name>/` (one copy kept, replaced whole).
+/// One boot filesystem copied into `/.rynas/boot/<name>/` (one copy kept, changed files
+/// replaced one by one).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+
 pub struct BootCopy {
     /// The mount point copied (`/boot/efi`).
     pub mount: String,
@@ -904,6 +986,12 @@ pub struct BootCopy {
     /// Files left out because they look like key material (`*.key`, `*keyfile*`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<String>,
+    /// The last copy failed: this record (and the copy on disk) is the previous good one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stale: bool,
+    /// Why the last copy failed (with `stale`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// One subvolume the btrfs method sends: btrbk name → subvolume path → mount point.
@@ -1034,6 +1122,7 @@ mod tests {
                 snapshot_dir: "/.snapshots".into(),
                 subvolumes: vec![BtrbkSubvolume { name: "@".into(), path: "@".into(), mount: "/".into() }],
                 boot_copies: Vec::new(),
+                agent: false,
             }),
             ..Default::default()
         };

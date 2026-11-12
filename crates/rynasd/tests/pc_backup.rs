@@ -22,7 +22,7 @@ use rynas_config::{Config, ConfigOptions, MemorySystem};
 use rynas_notify::MemoryNotifier;
 use rynas_tasks::{TaskConfig, TaskManager};
 use rynasd::ops::Ops;
-use rynasd::pc_backup::{MemoryReceive, PcBackup};
+use rynasd::pc_backup::{MemoryReceive, PcBackup, ReceiveHost};
 use rynasd::roles::AdminPolicy;
 use rynasd::server::{DaemonState, router};
 use serde_json::{Value, json};
@@ -520,4 +520,240 @@ async fn no_manifest_is_not_ready() {
     let b = list(&e).await.remove(0).bare_metal;
     assert!(!b.ready);
     assert_eq!(b.missing.iter().map(|g| g.code).collect::<Vec<_>>(), [BareMetalCode::NoManifest]);
+}
+
+// ------------------------------------------------------------------ rynas-agent's btrfs method
+
+/// The memory host plus the agent side (`/v1/pcbackup/…`) linked to it, as rynasd wires them.
+fn env_agent() -> (Env, Arc<rynasd::pc_agent::PcAgent>) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("root");
+    let state_dir = dir.path().join("state");
+    std::fs::create_dir_all(&root).unwrap();
+    let sys = Arc::new(MemorySystem::new("nas"));
+    let config = Arc::new(Config::open(ConfigOptions::new(&state_dir, &root), sys, Vec::new()).unwrap());
+    let tasks = TaskManager::new(dir.path().join("tasks"), "nas", TaskConfig::default()).unwrap();
+    let mut ops = Ops::new(config, tasks);
+    // the agent side's console takes the administrators from Ops
+    ops.admins = AdminPolicy::new(vec!["rynas-admin".into()], groups);
+    let ops = Arc::new(ops);
+    let notifier = Arc::new(MemoryNotifier::default());
+    let clock = Arc::new(ManualClock::new(1_800_000_000_000));
+    let totp = Arc::new(TotpManager::new(MemoryStorage::default(), clock.clone(), "rynas"));
+    let mut st = DaemonState::new(Arc::new(NoAuth), totp, clock);
+    st.ops = Some(ops.clone());
+    let host = Arc::new(MemoryReceive::new());
+    let svc = PcBackup::new(
+        ops.clone(),
+        host.clone(),
+        notifier.clone(),
+        state_dir.clone(),
+        AdminPolicy::new(vec!["rynas-admin".into()], groups),
+        "nas".into(),
+    );
+    // no worker is ever started: a btrfs PC has no repository
+    let agent = rynasd::pc_agent::PcAgent::new(
+        ops.clone(),
+        notifier.clone(),
+        state_dir,
+        true,
+        rynas_backup::Launch::Direct { exe: "/nonexistent/rynas-backup-worker".into() },
+        Arc::new(tokio::sync::Semaphore::new(1)),
+        None,
+        "nas".into(),
+    );
+    let _ = agent.btrfs.set(svc.clone());
+    st.pc_backup = Some(svc.clone());
+    st.pc_agent = Some(agent.clone());
+    (Env { _dir: dir, app: router(st), ops, host, svc, notifier }, agent)
+}
+
+/// An agent call: device token (or none), raw body.
+async fn agent_call(e: &Env, token: Option<&str>, method: &str, uri: &str, body: Vec<u8>) -> (StatusCode, Vec<u8>) {
+    let ct = if body.first() == Some(&b'{') { "application/json" } else { "application/zstd" };
+    let mut req = Request::builder().method(method).uri(uri).header(header::CONTENT_TYPE, ct);
+    if let Some(t) = token {
+        req = req.header(header::AUTHORIZATION, format!("Bearer {t}"));
+    }
+    let r = e.app.clone().oneshot(req.body(Body::from(body)).unwrap()).await.unwrap();
+    let s = r.status();
+    (s, to_bytes(r.into_body(), 1 << 20).await.unwrap().to_vec())
+}
+
+fn zst(data: &[u8]) -> Vec<u8> {
+    zstd::stream::encode_all(data, 3).unwrap()
+}
+
+/// A btrbk `long` name for the subvolume, `hours_ago` back (the receive refuses future names).
+fn agent_name(prefix: &str, hours_ago: i64) -> String {
+    format!("{prefix}.{}", rynas_btrfs::name::long_timestamp(now_s() - hours_ago * 3600))
+}
+
+async fn listing(e: &Env, token: &str) -> rynas_api_types::pcagent::AgentBtrfsListing {
+    let (s, b) = agent_call(e, Some(token), "GET", "/v1/pcbackup/agent/btrfs/snapshots", Vec::new()).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    serde_json::from_slice(&b).unwrap()
+}
+
+#[tokio::test]
+async fn agent_folder_pairing_listing_and_receive() {
+    use rynas_btrfs::send_stream::fake::stream;
+    let (e, _agent) = env_agent();
+    let path = "/volume1/backup/laptop";
+    // an agent folder takes no key
+    let (s, b) = call(&e, "POST", "/v1/pc-backups/targets", Some(json!({"device": "laptop", "path": path, "agent": true, "public_key": KEY}))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{}", String::from_utf8_lossy(&b));
+    let t = task(&e, "POST", "/v1/pc-backups/targets", Some(json!({"device": "laptop", "path": path, "agent": true, "retention": {"owner": "pc"}}))).await;
+    assert_eq!(t.status, TaskStatus::Ok, "{:?}", t.error);
+    let tg = list(&e).await.remove(0);
+    assert!(tg.agent);
+    assert_eq!(tg.retention.owner, RetentionOwner::Nas, "the agent never deletes: retention is the NAS's");
+    // no SSH account, key line or sudoers line for it
+    assert!(!keys(&e).contains("laptop"));
+    assert!(e.host.sudo_roots.lock().unwrap().is_none());
+    assert_eq!(e.host.folder_meta(std::path::Path::new(path)), Some((0, 0, 0o700)));
+    assert!(detail(&e, "laptop").await.manifest_hook.is_empty());
+
+    // pairing into it: the device takes the folder's name, no repository
+    let (s, _) = call(&e, "POST", "/v1/pcbackup/pairings", Some(json!({"btrfs_target": "nope"}))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, b) = call(&e, "POST", "/v1/pcbackup/pairings", Some(json!({"btrfs_target": "laptop", "description": "desk"}))).await;
+    assert_eq!(s, StatusCode::CREATED, "{}", String::from_utf8_lossy(&b));
+    let code = serde_json::from_slice::<rynas_api_types::pcagent::PairingCreated>(&b).unwrap().code;
+    let pair = json!({"code": code, "hostname": "some-host"}).to_string().into_bytes();
+    let (s, b) = agent_call(&e, None, "POST", "/v1/pcbackup/agent/pair", pair).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    let p: rynas_api_types::pcagent::PairResponse = serde_json::from_slice(&b).unwrap();
+    assert_eq!((p.device.as_str(), p.group.as_str(), p.repo_password.as_str()), ("laptop", "", ""));
+    assert_eq!(p.plan.method, rynas_api_types::pcagent::PcMethod::Btrfs);
+    let tok = p.token.clone();
+    // a second PC cannot take the name
+    let (s, _) = call(&e, "POST", "/v1/pcbackup/pairings", Some(json!({"btrfs_target": "laptop"}))).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+
+    // listing: token needed
+    let (s, _) = agent_call(&e, None, "GET", "/v1/pcbackup/agent/btrfs/snapshots", Vec::new()).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let (s, _) = agent_call(&e, Some("0000"), "GET", "/v1/pcbackup/agent/btrfs/snapshots", Vec::new()).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    assert!(listing(&e, &tok).await.snapshots.is_empty());
+
+    // a full send, then an incremental one on it
+    let n1 = agent_name("@home", 2);
+    let recv = |snap: &str, parent: &str| format!("/v1/pcbackup/agent/btrfs/receive?snapshot={snap}&parent={parent}");
+    let u1 = "0d7dc2d7-878a-5446-8596-6b5b6b021473";
+    let (s, b) = agent_call(&e, Some(&tok), "POST", &recv(&n1, "none"), zst(&stream(&n1, u1, None))).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    let r1: rynas_api_types::pcagent::AgentBtrfsReceived = serde_json::from_slice(&b).unwrap();
+    assert_eq!(r1.name, n1);
+    assert!(r1.bytes > 0);
+    let l = listing(&e, &tok).await;
+    assert_eq!(l.snapshots.len(), 1);
+    assert!(l.snapshots[0].complete);
+    assert_eq!(l.snapshots[0].received_uuid.as_deref(), Some(r1.received_uuid.as_str()));
+    // the same name again
+    let (s, b) = agent_call(&e, Some(&tok), "POST", &recv(&n1, "none"), zst(&stream(&n1, u1, None))).await;
+    assert_eq!((s, err(&b).code.as_str()), (StatusCode::CONFLICT, "already_exists"));
+    let n2 = agent_name("@home", 1);
+    let u2 = "4704ff2c-f735-d741-b649-cc1f58aea7f6";
+    let (s, b) = agent_call(&e, Some(&tok), "POST", &recv(&n2, &n1), zst(&stream(&n2, u2, Some(&r1.received_uuid)))).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    assert_eq!(listing(&e, &tok).await.snapshots.len(), 2);
+
+    // refused before anything is received: bad names, another subvolume's parent, a parent
+    // the NAS does not have, a busy folder
+    let n3 = agent_name("@home", 0);
+    for (uri, code) in [
+        (recv("x", "none"), StatusCode::BAD_REQUEST),
+        (recv("@home.29991231T0000", "none"), StatusCode::BAD_REQUEST),
+        (recv("../x.20261112T0300", "none"), StatusCode::BAD_REQUEST),
+        (recv(&n3, &agent_name("@", 2)), StatusCode::BAD_REQUEST),
+        (recv(&n3, &n3), StatusCode::BAD_REQUEST),
+        (recv(&n3, &agent_name("@home", 30)), StatusCode::CONFLICT),
+    ] {
+        let (s, b) = agent_call(&e, Some(&tok), "POST", &uri, zst(&stream(&n3, u2, None))).await;
+        assert_eq!(s, code, "{uri}: {}", String::from_utf8_lossy(&b));
+    }
+    e.host.busy.lock().unwrap().push(path.into());
+    let (s, b) = agent_call(&e, Some(&tok), "POST", &recv(&n3, "none"), zst(&stream(&n3, u2, None))).await;
+    assert_eq!((s, err(&b).code.as_str()), (StatusCode::CONFLICT, "busy"));
+    e.host.busy.lock().unwrap().clear();
+
+    // streams that do not match what was announced fail, and what they left goes at once
+    for body in [
+        zst(&stream("evil.20261112T0300", u2, None)),
+        zst(&stream(&n3, u2, Some(u1))),
+        zst(b"not a stream"),
+        b"not zstd".to_vec(),
+        Vec::new(),
+    ] {
+        let (s, b) = agent_call(&e, Some(&tok), "POST", &recv(&n3, "none"), body).await;
+        assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{}", String::from_utf8_lossy(&b));
+    }
+    let l = listing(&e, &tok).await;
+    assert_eq!(l.snapshots.len(), 2, "{l:?}");
+    assert!(e.host.deleted.lock().unwrap().iter().all(|d| d.ends_with(&n3)));
+    assert!(!e.host.deleted.lock().unwrap().is_empty());
+    // incremental on a parent whose UUID the stream does not carry
+    let (s, _) = agent_call(&e, Some(&tok), "POST", &recv(&n3, &n2), zst(&stream(&n3, u2, Some(u1)))).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+    // not enough room on the volume
+    *e.host.space.lock().unwrap() = Some((512 << 20, 4 << 30));
+    let (s, _) = agent_call(&e, Some(&tok), "POST", &recv(&n3, "none"), zst(&stream(&n3, u2, None))).await;
+    assert_eq!(s, StatusCode::PAYLOAD_TOO_LARGE);
+    *e.host.space.lock().unwrap() = None;
+
+    // the PC keeps the btrfs method (no repository to fall back to), cannot get a restore
+    // code for files, and its folder's runs and retention are the B1 ones
+    let dev: Value = serde_json::from_slice(&call(&e, "GET", "/v1/pcbackup/devices/laptop", None).await.1).unwrap();
+    let mut settings = dev["device"]["settings"].clone();
+    settings["method"] = json!("files");
+    let (s, _) = call(&e, "PUT", "/v1/pcbackup/devices/laptop", Some(settings)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, _) = call(&e, "POST", "/v1/pcbackup/devices/laptop/restore-code", None).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    let d = detail(&e, "laptop").await;
+    assert_eq!(d.list.len(), 2);
+    assert_eq!(d.runs.len(), 2);
+    assert!(d.list.iter().any(|x| x.parent && x.name == n2));
+
+    // switching the folder to btrbk over SSH: the key line comes, the agent's receive stops
+    task(&e, "PUT", "/v1/pc-backups/targets/laptop", Some(json!({"agent": false, "public_key": KEY, "alert_days": 3, "delete": {"allowed": false, "keep_last": 1, "min_age_days": 0}}))).await;
+    assert!(keys(&e).contains("--device laptop"));
+    let (s, _) = agent_call(&e, Some(&tok), "GET", "/v1/pcbackup/agent/btrfs/snapshots", Vec::new()).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    // and back: the key line goes, the chain is still there
+    let t = task(&e, "PUT", "/v1/pc-backups/targets/laptop", Some(json!({"agent": true, "alert_days": 3, "delete": {"allowed": false, "keep_last": 1, "min_age_days": 0}}))).await;
+    assert_eq!(t.status, TaskStatus::Ok, "{:?}", t.error);
+    assert!(!keys(&e).contains("--device laptop"));
+    assert_eq!(listing(&e, &tok).await.snapshots.len(), 2);
+
+    // revoked: the token stops, the snapshots stay
+    let t = task(&e, "DELETE", "/v1/pcbackup/devices/laptop", None).await;
+    assert_eq!(t.status, TaskStatus::Ok, "{:?}", t.error);
+    let (s, _) = agent_call(&e, Some(&tok), "GET", "/v1/pcbackup/agent/btrfs/snapshots", Vec::new()).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    assert_eq!(detail(&e, "laptop").await.list.len(), 2);
+}
+
+#[tokio::test]
+async fn switching_a_btrbk_folder_to_the_agent_keeps_the_chain() {
+    let (e, agent) = env_agent();
+    folder(&e, "/volume1/backup/pc", vec![snap_u("@", 2), snap_u("@home", 2)]);
+    task(&e, "POST", "/v1/pc-backups/targets", Some(json!({"device": "pc", "path": "/volume1/backup/pc", "adopt": true, "public_key": KEY}))).await;
+    assert!(keys(&e).contains("--device pc"));
+    // a file PC of that name cannot switch to btrfs while the folder is btrbk's
+    assert!(!agent.btrfs.get().unwrap().has_agent_target("pc"));
+    let t = task(&e, "PUT", "/v1/pc-backups/targets/pc", Some(json!({"agent": true, "public_key": "", "alert_days": 3, "delete": {"allowed": true, "keep_last": 1, "min_age_days": 0}}))).await;
+    assert_eq!(t.status, TaskStatus::Ok, "{:?}", t.error);
+    assert!(agent.btrfs.get().unwrap().has_agent_target("pc"));
+    // the last SSH PC went: no account, sudoers or keys left behind
+    assert!(e.host.sudo_roots.lock().unwrap().is_none());
+    let tg = list(&e).await.remove(0);
+    assert!(tg.agent && tg.public_key.is_empty());
+    assert_eq!(tg.retention.owner, RetentionOwner::Nas);
+    assert_eq!(tg.snapshots, 2);
+    // a key with the agent is refused
+    let (s, _) = call(&e, "PUT", "/v1/pc-backups/targets/pc", Some(json!({"public_key": KEY, "alert_days": 3, "delete": {"allowed": true, "keep_last": 1, "min_age_days": 0}}))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
 }

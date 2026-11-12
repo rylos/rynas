@@ -64,6 +64,9 @@ futures-util = { version = "0.3.34", default-features = false, features = ["std"
 zbus.workspace = true
 # wipes opened DNS credential values (review 2026-11-07, L6)
 zeroize = { version = "1.9.1", default-features = false, features = ["alloc"] }
+# PC backup, btrfs method: the agents' `btrfs send` streams arrive zstd-compressed (the
+# system libzstd, as rynas-config)
+zstd.workspace = true
 
 [dev-dependencies]
 # signs test catalogues with a key made in the test

@@ -1062,6 +1062,10 @@ fn main() -> std::io::Result<()> {
                 Some(opened.tls.clone()),
                 running_hostname(),
             );
+            // the btrfs method's folders: agent PCs with that method send into them
+            if let Some(pb) = state.pc_backup.clone() {
+                let _ = agent.btrfs.set(pb);
+            }
             rynasd::pc_agent::maint::spawn_watch(agent.clone());
             state.pc_agent = Some(agent);
         }

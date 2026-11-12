@@ -87,6 +87,8 @@ pub struct Counters {
     pub bytes_total: AtomicU64,
     pub files_done: AtomicU64,
     pub phase: Mutex<AgentPhase>,
+    /// What is happening now, for the console (the btrfs method: the subvolume being sent).
+    pub message: Mutex<Option<String>>,
 }
 
 #[derive(Clone)]
@@ -442,7 +444,7 @@ fn reporter(client: Arc<Client>, run_id: String, c: Arc<Counters>, stop: Arc<Ato
                 bytes_total: c.bytes_total.load(Ordering::Relaxed),
                 files_done: c.files_done.load(Ordering::Relaxed),
                 files_total: 0,
-                message: None,
+                message: c.message.lock().ok().and_then(|m| m.clone()),
             };
             let _: Result<serde_json::Value, String> = client.post_json("/api/v1/pcbackup/agent/status", &s);
             for _ in 0..20 {
@@ -486,7 +488,10 @@ pub fn run(st: &State) -> PcRun {
             *x = p;
         }
     };
-    let result = run_inner(st, &client, &counters, &set_phase, &run_id, started_ms);
+    let result = match st.plan.method {
+        PcMethod::Btrfs => crate::send::run(st, &client, &counters, &set_phase, &run_id, started_ms),
+        PcMethod::Files => run_inner(st, &client, &counters, &set_phase, &run_id, started_ms),
+    };
     stop.store(true, Ordering::SeqCst);
     let _ = rep.join();
     speak_again();
@@ -524,7 +529,8 @@ fn send_report(client: &Client, run: PcRun, manifest: Option<Manifest>) {
     }
 }
 
-type Failure = Box<(String, Vec<Capture>, Option<Manifest>)>;
+/// A failed run: the error, what was captured so far, the manifest when it was written.
+pub(crate) type Failure = Box<(String, Vec<Capture>, Option<Manifest>)>;
 
 fn run_inner(
     st: &State,
@@ -535,7 +541,10 @@ fn run_inner(
     started_ms: u64,
 ) -> Result<(PcRun, Option<Manifest>), Failure> {
     let plan = &st.plan.plan;
+    // one run at a time with `rynas-agent manifest` (taken before any freeze)
+    let _lock = manifest::lock(Path::new("/"), Duration::from_secs(60)).map_err(|e| Box::new((e, Vec::new(), None)))?;
     set_phase(AgentPhase::Snapshot);
+    crate::bootcopy::trigger_automounts(Path::new("/"));
     let all = mounts::read();
     let backed = mounts::backup_mounts(&all);
     // what each mount point will be (for the manifest written before the snapshots)

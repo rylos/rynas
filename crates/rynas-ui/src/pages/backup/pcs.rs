@@ -1,18 +1,21 @@
-//! Backup › PCs: native btrfs snapshots that PCs push with btrbk over SSH (D-PCBACKUP phase
-//! 2, B1 of `docs/research/pc-backup.md` §11).
+//! Backup › PCs: btrfs snapshots: the PCs' read-only btrfs snapshots received on the NAS
+//! (D-PCBACKUP, `docs/research/pc-backup.md` §10–§11). Two senders, one folder model:
+//! `rynas-agent` over HTTPS (recommended: no SSH, the NAS owns retention) or btrbk over SSH
+//! (legacy, manual set-up). Snapshot names are btrbk's either way, so a PC can switch.
 //!
-//! - The card lists each PC with its freshness, open problems, snapshots, space and whether
-//!   the snapshots are enough for a restore on an empty disk; setup problems (no sshd,
-//!   `AllowUsers` without the account, no sudo/btrfs/filter) show above it.
-//! - "Add a PC": a new subvolume folder, or an existing folder of received snapshots (Check
-//!   shows what it holds, nothing inside changes). Key, alert, who deletes old snapshots (the
-//!   NAS with GFS counts, the PC can only add; or the PC within the NAS floor).
-//! - The drawer of a PC: problems, status, the full-restore check with the manifest's disks,
-//!   subvolumes and boot copies, the steps for the PC (first-backup check per subvolume, the
-//!   `rynas-agent btrbk-setup` command, or by hand: key, `btrbk.conf`, first connection) and
-//!   the `authorized_keys` line, copyable; Measure space,
-//!   Delete old snapshots now, Settings, Remove (the folder stays); the snapshots by subvolume
-//!   or by run, with sizes, Browse and Delete.
+//! - The card lists each PC with how it sends, its freshness, open problems, snapshots,
+//!   space and whether the snapshots are enough for a restore on an empty disk; SSH setup
+//!   problems show above it.
+//! - "Add a PC": rynas-agent (a new PC, paired from the drawer, or an already paired file PC
+//!   moved here) or btrbk; a new subvolume folder, or an existing folder of received
+//!   snapshots (Check shows what it holds, nothing inside changes). Alert, retention (the
+//!   NAS with GFS counts, or for btrbk the PC within the NAS floor); the btrbk key.
+//! - The drawer: the agent's status, progress, runs, Back up now / Cancel and schedule (or
+//!   its pairing code); problems, status, the full-restore check with the manifest's
+//!   subvolumes, disks and boot copies; for btrbk the folded manual steps (key, `btrbk.conf`,
+//!   first connection, the manifest drop-in) then the first-backup check; Measure, Delete old
+//!   snapshots now, Settings (also the switch between the senders), Remove; the snapshots by
+//!   subvolume or by run, with sizes, Browse and Delete.
 //! - Browse: read-only folders inside a snapshot; Copy out puts a file or folder into a NAS
 //!   folder (nothing is overwritten).
 
@@ -26,7 +29,8 @@ use crate::api;
 use crate::form::{In, area_field, form_error, number_field, segmented, spinner, switch, text_field};
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
-use crate::pages::security::copy_button;
+use crate::pages::security::copy_button_for;
+use rynas_api_types::pcagent::PcMethod;
 use crate::pages::snapshots::{mode_text, retention_text};
 use crate::tasks;
 use crate::toast::toast;
@@ -67,13 +71,21 @@ fn kv(label: &'static str, value: AnyView) -> AnyView {
     view! { <div class="kv"><dt>{tr(label)}</dt><dd>{value}</dd></div> }.into_any()
 }
 
-fn code_block(title: &'static str, text: String) -> AnyView {
-    view! {
-        <h4 class="small"><strong>{tr(title)}</strong></h4>
-        <pre class="app-code">{text.clone()}</pre>
-        <div class="sec-actions">{copy_button("dns.copy", text)}</div>
+/// A titled command block with its own Copy button (named after the title for screen
+/// readers); nothing when the text is empty.
+fn code_block(title: &'static str, text: String) -> Option<AnyView> {
+    if text.trim().is_empty() {
+        return None;
     }
-    .into_any()
+    let aria = tf("pcb.copy_of", &[("what", t(title))]);
+    Some(
+        view! {
+            <h4 class="small"><strong>{tr(title)}</strong></h4>
+            <pre class="app-code">{text.clone()}</pre>
+            <div class="sec-actions">{copy_button_for("dns.copy", aria, text)}</div>
+        }
+        .into_any(),
+    )
 }
 
 fn problem_text(p: &SetupProblem) -> String {
@@ -137,7 +149,8 @@ fn bm_status(b: &BareMetal) -> AnyView {
     }
 }
 
-/// The PC's disks from its manifest: name, model, serial and size, then each partition.
+/// The PC's disks from its manifest: name, model, serial and size, then each partition
+/// indented below (a left-aligned block; sizes never break).
 fn disk_items(disks: &[rynas_api_types::pcagent::Disk]) -> impl IntoView + use<> {
     disks
         .iter()
@@ -149,55 +162,97 @@ fn disk_items(disks: &[rynas_api_types::pcagent::Disk]) -> impl IntoView + use<>
             if !d.serial.is_empty() {
                 head.push(tf("bkpc.bm.serial", &[("serial", &d.serial)]));
             }
-            head.push(i18n::bytes(d.size_bytes));
             let parts = d
                 .table
                 .iter()
                 .flat_map(|t| t.partitions.iter())
                 .map(|p| {
                     let size = i18n::bytes(p.size_lba.saturating_mul(u64::from(d.logical_sector)));
-                    let mut s = tf("bkpc.bm.part_line", &[("n", &p.number.to_string()), ("size", &size)]);
-                    if !p.name.is_empty() {
-                        s.push_str(" · ");
-                        s.push_str(&p.name);
-                    }
-                    view! { <li>{s}</li> }
+                    let name = (!p.name.is_empty()).then(|| format!(" · {}", p.name));
+                    view! { <li>{tf("bkpc.bm.part", &[("n", &p.number.to_string())])}" "<span class="nowrap tnum">{size}</span>{name}</li> }
                 })
                 .collect_view();
-            view! { <li><span class="mono">{head.join(" · ")}</span><ul class="bkpc-gaps">{parts}</ul></li> }
+            view! {
+                <li>
+                    <span class="mono">{head.join(" · ")}</span>" "<span class="nowrap tnum">{i18n::bytes(d.size_bytes)}</span>
+                    <ul class="bkpc-sub">{parts}</ul>
+                </li>
+            }
         })
         .collect_view()
 }
 
-/// "First backup": one line per subvolume (the manifest's, else those received so far),
-/// received or still waiting.
-fn first_run(b: &BareMetal, list: &[ReceivedSnapshot]) -> AnyView {
-    let mut names: Vec<String> = b.layout.iter().map(|s| s.name.clone()).collect();
-    if names.is_empty() {
-        for s in list {
-            if !names.contains(&s.group) {
-                names.push(s.group.clone());
+/// The boot loader as the manifest names it, as people write it.
+fn loader_label(raw: &str) -> String {
+    match raw {
+        "grub" => "GRUB".into(),
+        "systemd_boot" => "systemd-boot".into(),
+        "refind" => "rEFInd".into(),
+        "unknown" | "" => t("pcb.loader_unknown").to_string(),
+        other => other.replace('_', "-"),
+    }
+}
+
+/// The boot filesystems the PC copies into its root subvolume: mount, copy, size, the
+/// files left out as key material, and a failed last copy (the previous one is kept).
+fn boot_copy_items(copies: &[rynas_api_types::pcagent::BootCopy]) -> impl IntoView + use<> {
+    copies
+        .iter()
+        .map(|c| {
+            let skipped = (!c.skipped.is_empty()).then(|| view! { <li class="muted">{tf("pcb.copy_skipped", &[("files", &c.skipped.join(", "))])}</li> });
+            let stale = c.stale.then(|| view! { <li class="warn-text">{tf("pcb.copy_stale", &[("error", c.error.as_deref().unwrap_or(""))])}</li> });
+            view! {
+                <li>
+                    <span class="mono">{c.mount.clone()}</span>" → "<span class="mono">{c.dir.clone()}</span>" "<span class="nowrap tnum">{i18n::bytes(c.bytes)}</span>
+                    {(skipped.is_some() || stale.is_some()).then(|| view! { <ul class="bkpc-sub">{stale}{skipped}</ul> })}
+                </li>
+            }
+        })
+        .collect_view()
+}
+
+/// "First backup": with a manifest, one row per subvolume it lists, received or waiting.
+/// Without one the NAS does not know which subvolumes to expect: it names what arrived so
+/// far and says the full check comes with the manifest. Nothing at all before the first
+/// snapshot (the snapshot list already says so).
+fn first_run(b: &BareMetal, list: &[ReceivedSnapshot]) -> Option<AnyView> {
+    let title = view! { <h4 class="small"><strong>{tr("bkpc.first_run")}</strong></h4> };
+    if b.layout.is_empty() {
+        let mut seen: Vec<String> = Vec::new();
+        for s in list.iter().filter(|s| !s.incomplete && !s.not_subvolume) {
+            if !seen.contains(&s.group) {
+                seen.push(s.group.clone());
             }
         }
+        if seen.is_empty() {
+            return None;
+        }
+        return Some(
+            view! {
+                {title}
+                <p class="small">{tf("pcb.first_run_so_far", &[("names", &seen.join(", "))])}</p>
+                <p class="small muted">{tr("pcb.first_run_no_manifest")}</p>
+            }
+            .into_any(),
+        );
     }
-    let rows = names
+    let rows = b
+        .layout
         .iter()
-        .map(|n| {
-            let got = list.iter().any(|s| &s.group == n && !s.incomplete && !s.not_subvolume);
+        .map(|s| {
+            let got = list.iter().any(|x| x.group == s.name && !x.incomplete && !x.not_subvolume);
             let st = if got { ui::status(Tone::Ok, t("bkpc.first_run_ok").to_string()) } else { ui::status(Tone::Info, t("bkpc.first_run_wait").to_string()) };
-            view! { <li><span class="mono">{n.clone()}</span>" "{st}</li> }
+            view! { <div class="kv"><dt class="mono">{s.name.clone()}</dt><dd>{st}</dd></div> }
         })
         .collect_view();
-    view! {
-        <h4 class="small"><strong>{tr("bkpc.first_run")}</strong></h4>
-        <p class="small muted">{tr("bkpc.first_run_intro")}</p>
-        {if names.is_empty() {
-            view! { <p class="small muted">{tr("bkpc.first_run_none")}</p> }.into_any()
-        } else {
-            view! { <ul class="small bkpc-gaps">{rows}</ul> }.into_any()
-        }}
-    }
-    .into_any()
+    Some(
+        view! {
+            {title}
+            <p class="small muted">{tr("bkpc.first_run_intro")}</p>
+            <dl class="kvs">{rows}</dl>
+        }
+        .into_any(),
+    )
 }
 
 /// "12.0 GiB · 310 MiB its own".
@@ -314,7 +369,8 @@ pub fn panel(add: RwSignal<Option<bool>>) -> AnyView {
             .map(|p| {
                 let dev = p.device.clone();
                 let groups = p.groups.iter().map(|g| g.name.clone()).collect::<Vec<_>>().join(", ");
-                let sub = if p.description.is_empty() { None } else { Some(p.description.clone()) };
+                let via = t(if p.agent { "pcb.via.agent" } else { "pcb.via.ssh" });
+                let sub = Some(if p.description.is_empty() { via.to_string() } else { format!("{} · {via}", p.description) });
                 let space = p.usage.map(|u| i18n::bytes(u.exclusive_bytes)).unwrap_or_else(|| "—".into());
                 let label = format!("{}: {}", t("bk.open"), p.device);
                 // the first problem other than "late" (the state already says that)
@@ -435,9 +491,10 @@ impl Fields {
     }
 
     /// `groups`: the PC's subvolumes (the "no longer sent" choice; none in the add dialog).
-    /// `preview`: the preview of the settings dialog.
-    fn view(self, groups: Vec<String>, preview: Option<AnyView>) -> AnyView {
-        let nas = move || self.owner.get() == "nas";
+    /// `preview`: the preview of the settings dialog. `agent`: sent by rynas-agent (no key,
+    /// the NAS always owns retention).
+    fn view(self, groups: Vec<String>, preview: Option<AnyView>, agent: Signal<bool>) -> AnyView {
+        let nas = move || agent.get() || self.owner.get() == "nas";
         let custom = move || self.preset.get() == "custom";
         let count = move |label: &'static str, i: usize| number_field(label, None, self.counts[i].into(), Callback::new(move |v| self.counts[i].set(v)), 0, 1000);
         let ignored = (!groups.is_empty()).then(|| {
@@ -466,13 +523,17 @@ impl Fields {
             }
         });
         view! {
-            {area_field("bk.f.key", self.key.into(), Callback::new(move |v| { self.key_err.set(None); self.key.set(v); }), Some("bk.f.key_help"), "ssh-ed25519 AAAA… btrbk@pc")}
-            {form_error(self.key_err)}
+            <Show when=move || !agent.get()>
+                {area_field("bk.f.key", self.key.into(), Callback::new(move |v| { self.key_err.set(None); self.key.set(v); }), Some("bk.f.key_help"), "ssh-ed25519 AAAA… btrbk@pc")}
+                {form_error(self.key_err)}
+            </Show>
             {number_field("bkpc.f.alert_hours", Some("bkpc.f.alert_hours_help"), self.alert.into(), Callback::new(move |v| self.alert.set(v)), 0, 8760)}
             {ignored}
             <h3 class="mini-title">{tr("bk.f.rules")}</h3>
-            {segmented("bkpc.f.owner", OWNERS, self.owner.into(), Callback::new(move |v| self.owner.set(v)))}
-            <p class="field-help">{move || if nas() { t("bkpc.owner.nas_help") } else { t("bkpc.owner.pc_help") }}</p>
+            <Show when=move || !agent.get()>
+                {segmented("bkpc.f.owner", OWNERS, self.owner.into(), Callback::new(move |v| self.owner.set(v)))}
+            </Show>
+            <p class="field-help">{move || if agent.get() { t("bkpc.owner.agent_help") } else if nas() { t("bkpc.owner.nas_help") } else { t("bkpc.owner.pc_help") }}</p>
             <Show when=nas>
                 {segmented("snap.f.preset", PRESETS, self.preset.into(), Callback::new(move |v| self.preset.set(v)))}
                 {move || if custom() {
@@ -531,11 +592,27 @@ fn perm_view(c: &PermissionChange) -> AnyView {
 
 fn add_dialog(pcs: Pcs, adopt_first: bool) -> AnyView {
     let close = Callback::new(move |_| pcs.add.set(None));
+    // how the PC sends: rynas-agent over HTTPS (recommended) or btrbk over SSH
+    let how = RwSignal::new("agent".to_string());
+    let agent = Signal::derive(move || how.get() == "agent");
+    // with the agent: a PC to pair now ("" = a new one), or one already paired
+    let linked = RwSignal::new(String::new());
+    let paired = Remote::<rynas_api_types::pcagent::PcBackupOverview>::new("/api/v1/pcbackup");
+    let linkable = move || {
+        paired.data.with(|o| {
+            o.as_ref()
+                .map(|o| o.devices.iter().filter(|d| !d.revoked && d.settings.method == PcMethod::Files).cloned().collect::<Vec<_>>())
+                .unwrap_or_default()
+        })
+    };
     let mode = RwSignal::new(if adopt_first { "adopt" } else { "new" }.to_string());
     let device = RwSignal::new(String::new());
     let path = RwSignal::new(String::new());
     let path_touched = RwSignal::new(false);
     let f = Fields::new(None, adopt_first);
+    if !adopt_first {
+        f.owner.set("nas".into());
+    }
     let dev_err = RwSignal::new(None::<String>);
     let path_err = RwSignal::new(None::<String>);
     let error = RwSignal::new(None::<String>);
@@ -553,6 +630,13 @@ fn add_dialog(pcs: Pcs, adopt_first: bool) -> AnyView {
         Some("public_key") => f.key_err.set(Some(e.text())),
         Some("description") => f.desc_err.set(Some(e.text())),
         _ => error.set(Some(e.text())),
+    };
+    let set_device = move |v: String| {
+        dev_err.set(None);
+        if !path_touched.get_untracked() && mode.get_untracked() == "new" {
+            path.set(suggest(v.trim()));
+        }
+        device.set(v);
     };
     let check = move |_| {
         checking.set(true);
@@ -579,18 +663,30 @@ fn add_dialog(pcs: Pcs, adopt_first: bool) -> AnyView {
     };
     let save = move |_| {
         let adopt = mode.get_untracked() == "adopt";
-        let dev = device.get_untracked().trim().to_string();
+        let is_agent = how.get_untracked() == "agent";
+        // a linked PC keeps its name: the folder takes it
+        let dev = match linked.get_untracked() {
+            l if is_agent && !l.is_empty() => l,
+            _ => device.get_untracked().trim().to_string(),
+        };
+        let mut retention = f.retention();
+        if is_agent {
+            retention.owner = RetentionOwner::Nas;
+        }
         let body = PcTargetCreate {
             device: dev.clone(),
             description: f.description.get_untracked().trim().to_string(),
             path: path.get_untracked().trim().to_string(),
             adopt,
-            public_key: f.key.get_untracked().trim().to_string(),
+            public_key: if is_agent { String::new() } else { f.key.get_untracked().trim().to_string() },
             alert_days: f.alert_days(),
             delete: f.policy(),
             alert_hours: f.alert_hours(),
-            retention: f.retention(),
+            retention,
+            agent: is_agent,
         };
+        // an already paired PC moves to this folder once it exists
+        let link = if is_agent { paired.data.with_untracked(|o| o.as_ref().and_then(|o| o.devices.iter().find(|d| d.device == linked.get_untracked()).cloned())) } else { None };
         let ok = tf("bk.added", &[("device", &dev)]);
         let url = if adopt && preview.with_untracked(|p| p.as_ref().is_some_and(|p| p.permission_change.is_some())) { format!("{URL}?confirm_permission_change=true") } else { URL.to_string() };
         busy.set(true);
@@ -598,26 +694,38 @@ fn add_dialog(pcs: Pcs, adopt_first: bool) -> AnyView {
         spawn_local(async move {
             let started = api::start_task(&url, serde_json::to_string(&body).ok()).await;
             let r = match started {
-                Ok(id) => tasks::follow(&id).await.map(Some),
+                Ok(id) => tasks::follow(&id).await,
                 Err(e) => {
                     let _ = busy.try_set(false);
                     route(e);
                     return;
                 }
             };
-            let _ = busy.try_set(false);
             match r {
-                Ok(Some(task)) if task.status == TaskStatus::Ok => {
+                Ok(task) if task.status == TaskStatus::Ok => {
+                    if let Some(d) = link {
+                        let mut s = d.settings.clone();
+                        s.method = PcMethod::Btrfs;
+                        let u = format!("/api/v1/pcbackup/devices/{}", api::encode(&d.device));
+                        if let Err(e) = api::put::<_, serde_json::Value>(&u, &s).await {
+                            let _ = busy.try_set(false);
+                            let _ = error.try_set(Some(tf("pcb.link_failed", &[("error", &e.text())])));
+                            pcs.list.reload();
+                            return;
+                        }
+                    }
+                    let _ = busy.try_set(false);
                     toast(Tone::Ok, ok);
                     pcs.list.reload();
                     pcs.add.set(None);
                     pcs.open.set(Some(dev));
                 }
-                Ok(Some(task)) => {
+                Ok(task) => {
+                    let _ = busy.try_set(false);
                     let _ = error.try_set(Some(tasks::task_error(&task)));
                 }
-                Ok(None) => {}
                 Err(e) => {
+                    let _ = busy.try_set(false);
                     let _ = error.try_set(Some(e.text()));
                 }
             }
@@ -648,23 +756,61 @@ fn add_dialog(pcs: Pcs, adopt_first: bool) -> AnyView {
             })
         })
     };
+    // the PC to connect: a new one (pairing code in the drawer) or an already paired one
+    let pc_choice = move || {
+        let list = linkable();
+        (agent.get() && !list.is_empty()).then(|| {
+            view! {
+                <div class="field">
+                    <label class="field-label" for="pcb-link">{tr("pcb.f.pc")}</label>
+                    <select id="pcb-link" class="input" on:change=move |ev| {
+                        let v = event_target_value(&ev);
+                        if !v.is_empty() {
+                            set_device(v.clone());
+                        }
+                        linked.set(v);
+                    }>
+                        <option value="" selected=move || linked.get().is_empty()>{tr("pcb.f.pc_new")}</option>
+                        {list.iter().map(|d| {
+                            let v = d.device.clone();
+                            let v2 = v.clone();
+                            let label = if d.hostname.is_empty() { v.clone() } else { format!("{} ({})", v, d.hostname) };
+                            view! { <option value=v selected=move || linked.get() == v2>{label}</option> }
+                        }).collect_view()}
+                    </select>
+                    <span class="field-help">{tr("pcb.f.pc_help")}</span>
+                </div>
+            }
+        })
+    };
+    const HOWS: &[(&str, &str)] = &[("agent", "pcb.how.agent"), ("ssh", "pcb.how.ssh")];
     const MODES: &[(&str, &str)] = &[("new", "bk.mode.new"), ("adopt", "shares.loc_folder")];
     let body = view! {
+        {segmented("pcb.how", HOWS, how.into(), Callback::new(move |v: String| {
+            // the agent always lets the NAS delete; btrbk on an adopted chain keeps deleting
+            if v == "agent" || mode.get_untracked() == "new" {
+                f.owner.set("nas".into());
+            } else {
+                f.owner.set("pc".into());
+            }
+            if v != "agent" {
+                linked.set(String::new());
+            }
+            how.set(v);
+        }))}
+        <p class="field-help">{move || if agent.get() { t("pcb.how.agent_help") } else { t("pcb.how.ssh_help") }}</p>
+        {pc_choice}
         {segmented("bk.mode", MODES, mode.into(), Callback::new(move |v: String| {
             preview.set(None);
             path_err.set(None);
             // a new PC lets the NAS delete; an adopted chain keeps btrbk on the PC deleting
-            f.owner.set(if v == "adopt" { "pc" } else { "nas" }.to_string());
+            f.owner.set(if v == "adopt" && !agent.get_untracked() { "pc" } else { "nas" }.to_string());
             mode.set(v);
         }))}
         <p class="field-help">{move || if mode.get() == "adopt" { t("bk.mode.adopt_help") } else { t("bk.mode.new_help") }}</p>
-        {text_field("bk.f.device", device.into(), Callback::new(move |v: String| {
-            dev_err.set(None);
-            if !path_touched.get_untracked() && mode.get_untracked() == "new" {
-                path.set(suggest(v.trim()));
-            }
-            device.set(v);
-        }), dev_err.into(), In { mono: true, maxlength: 32, help: Some("bk.f.device_help"), placeholder: "laptop", ..In::default() })}
+        <Show when=move || linked.with(String::is_empty)>
+            {text_field("bk.f.device", device.into(), Callback::new(set_device), dev_err.into(), In { mono: true, maxlength: 32, help: Some("bk.f.device_help"), placeholder: "laptop", ..In::default() })}
+        </Show>
         {text_field("bk.f.description", f.description.into(), Callback::new(move |v| { f.desc_err.set(None); f.description.set(v); }), f.desc_err.into(), In { maxlength: 120, ..In::default() })}
         {text_field("bkpc.f.path", path.into(), Callback::new(move |v| { path_err.set(None); path_touched.set(true); preview.set(None); path.set(v); }), path_err.into(), In { mono: true, maxlength: 512, help: Some("bkpc.f.path_help"), placeholder: "/volume1/backup/laptop", ..In::default() })}
         <Show when=move || mode.get() == "adopt">
@@ -679,11 +825,14 @@ fn add_dialog(pcs: Pcs, adopt_first: bool) -> AnyView {
                 </label>
             </Show>
         </Show>
-        {f.view(Vec::new(), None)}
+        {f.view(Vec::new(), None, agent)}
+        <Show when=move || agent.get() && linked.get().is_empty()>
+            <p class="small muted">{tr("pcb.pair_after")}</p>
+        </Show>
         {form_error(error)}
     }
     .into_any();
-    let ready = move || !device.with(|d| d.trim().is_empty()) && !path.with(|p| p.trim().is_empty()) && (mode.get() == "new" || (preview.with(Option::is_some) && (!needs_perm() || perm_ok.get())));
+    let ready = move || (!device.with(|d| d.trim().is_empty()) || !linked.with(String::is_empty)) && !path.with(|p| p.trim().is_empty()) && (mode.get() == "new" || (preview.with(Option::is_some) && (!needs_perm() || perm_ok.get())));
     let foot = view! {
         <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("cancel")}</button>
         <button type="button" class="btn primary" disabled=move || busy.get() || !ready() on:click=save>{spinner(busy)}<Icon icon=icons::PLUS size=16 />{move || if mode.get() == "adopt" { t("bk.adopt") } else { t("bkpc.create") }}</button>
@@ -695,18 +844,27 @@ fn add_dialog(pcs: Pcs, adopt_first: bool) -> AnyView {
 fn settings_dialog(pcs: Pcs, p: PcTarget) -> AnyView {
     let close = Callback::new(move |_| pcs.edit.set(None));
     let f = Fields::new(Some(&p), p.adopted);
+    let was_agent = p.agent;
+    let how = RwSignal::new(if p.agent { "agent" } else { "ssh" }.to_string());
+    let agent = Signal::derive(move || how.get() == "agent");
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let device = StoredValue::new(p.device.clone());
     let save = move |_| {
+        let is_agent = how.get_untracked() == "agent";
+        let mut retention = f.retention();
+        if is_agent {
+            retention.owner = RetentionOwner::Nas;
+        }
         let body = PcTargetUpdate {
             description: f.description.get_untracked().trim().to_string(),
-            public_key: f.key.get_untracked().trim().to_string(),
+            public_key: if is_agent { String::new() } else { f.key.get_untracked().trim().to_string() },
             alert_days: f.alert_days(),
             delete: f.policy(),
             alert_hours: f.alert_hours(),
-            retention: Some(f.retention()),
+            retention: Some(retention),
             ignored_groups: Some(f.ignored.get_untracked()),
+            agent: (is_agent != was_agent).then_some(is_agent),
         };
         run(pcs, ("PUT", target_url(&device.get_value()), serde_json::to_string(&body).ok()), t("bk.saved").to_string(), (busy, error, Some(f)), Callback::new(move |_| pcs.edit.set(None)));
     };
@@ -716,7 +874,11 @@ fn settings_dialog(pcs: Pcs, p: PcTarget) -> AnyView {
     let run_preview = move |_| {
         previewing.set(true);
         error.set(None);
-        let body = PcRetentionPlanRequest { device: device.get_value(), retention: f.retention(), delete: f.policy() };
+        let mut retention = f.retention();
+        if agent.get_untracked() {
+            retention.owner = RetentionOwner::Nas;
+        }
+        let body = PcRetentionPlanRequest { device: device.get_value(), retention, delete: f.policy() };
         spawn_local(async move {
             let r = api::post::<_, PcRetentionPreview>("/api/v1/pc-backups/plan/retention", Some(&body)).await;
             let _ = previewing.try_set(false);
@@ -731,7 +893,7 @@ fn settings_dialog(pcs: Pcs, p: PcTarget) -> AnyView {
         });
     };
     let preview = view! {
-        <Show when=move || f.owner.get() == "nas">
+        <Show when=move || agent.get() || f.owner.get() == "nas">
             <div>
                 <button type="button" class="btn ghost sm" disabled=move || previewing.get() on:click=run_preview>
                     {spinner(previewing)}<Icon icon=icons::EYE size=14 />{tr("snap.preview")}
@@ -746,9 +908,17 @@ fn settings_dialog(pcs: Pcs, p: PcTarget) -> AnyView {
     }
     .into_any();
     let groups: Vec<String> = p.groups.iter().map(|g| g.name.clone()).chain(p.ignored_groups.iter().cloned()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+    const HOWS: &[(&str, &str)] = &[("agent", "pcb.how.agent"), ("ssh", "pcb.how.ssh")];
     let body = view! {
         {text_field("bk.f.description", f.description.into(), Callback::new(move |v| { f.desc_err.set(None); f.description.set(v); }), f.desc_err.into(), In { maxlength: 120, ..In::default() })}
-        {f.view(groups, Some(preview))}
+        {segmented("pcb.how", HOWS, how.into(), Callback::new(move |v: String| how.set(v)))}
+        <p class="field-help">{move || match (was_agent, agent.get()) {
+            (false, true) => t("pcb.switch_to_agent"),
+            (true, false) => t("pcb.switch_to_ssh"),
+            (_, true) => t("pcb.how.agent_help"),
+            (_, false) => t("pcb.how.ssh_help"),
+        }}</p>
+        {f.view(groups, Some(preview), agent)}
         {form_error(error)}
     }
     .into_any();
@@ -825,31 +995,32 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
             })
             .collect_view();
         let b = p.bare_metal.clone();
-        let gaps = b.missing.iter().chain(&b.warnings).map(|g| view! { <li>{gap_text(g)}</li> }).collect_view();
+        // "no snapshots yet" is said once, by the snapshot list
+        let shown_gaps: Vec<&BareMetalGap> = b.missing.iter().chain(&b.warnings).filter(|g| g.code != BareMetalCode::NoSnapshots).collect();
+        let has_gaps = !shown_gaps.is_empty();
+        let gaps = shown_gaps.into_iter().map(|g| view! { <li>{gap_text(g)}</li> }).collect_view();
         let layout = (!b.layout.is_empty()).then(|| {
             let items = b.layout.iter().map(|s| {
                 let at = if s.mount.is_empty() { t("rm.tip_not_mounted").to_string() } else { s.mount.clone() };
-                view! { <li class="mono">{format!("{} → {at}", s.name)}</li> }
+                view! { <li><span class="mono">{s.name.clone()}</span>" → "<span class="mono">{at}</span></li> }
             }).collect_view();
-            kv("bkpc.bm.subvolumes", view! { <ul class="small bkpc-gaps">{items}</ul> }.into_any())
+            view! { <h4 class="small"><strong>{tr("bkpc.bm.layout")}</strong></h4><ul class="small bkpc-list">{items}</ul> }
         });
-        let disks = (!b.disks.is_empty()).then(|| kv("bkpc.bm.disks", view! { <ul class="small bkpc-gaps">{disk_items(&b.disks)}</ul> }.into_any()));
-        let copies = (!b.boot_copies.is_empty()).then(|| {
-            let items = b.boot_copies.iter().map(|c| view! { <li>{tf("bkpc.bm.copy_line", &[("mount", &c.mount), ("dir", &c.dir), ("size", &i18n::bytes(c.bytes))])}</li> }).collect_view();
-            kv("bkpc.bm.boot_copies", view! { <ul class="small bkpc-gaps">{items}</ul> }.into_any())
-        });
+        let disks = (!b.disks.is_empty()).then(|| view! { <h4 class="small"><strong>{tr("bkpc.bm.disks")}</strong></h4><ul class="small bkpc-list">{disk_items(&b.disks)}</ul> });
+        let copies = (!b.boot_copies.is_empty()).then(|| view! { <h4 class="small"><strong>{tr("bkpc.bm.boot_copies")}</strong></h4><ul class="small bkpc-list">{boot_copy_items(&b.boot_copies)}</ul> });
         let bare = view! {
             <h3 class="mini-title">{tr("bkpc.bm.title")}</h3>
             <p class="small muted">{tr("bkpc.bm.intro")}</p>
             <dl class="kvs">
                 {kv("col.status", bm_status(&b))}
                 {b.manifest_snapshot.clone().map(|s| kv("bkpc.bm.manifest", ui::breakable(&s, "mono small")))}
-                {if layout.is_some() { layout } else { (!b.subvolumes.is_empty()).then(|| kv("bkpc.bm.subvolumes", ui::breakable(&b.subvolumes.join(", "), "mono small"))) }}
-                {b.loader.clone().map(|l| kv("bkpc.bm.loader", ui::text(l)))}
-                {disks}
-                {copies}
+                {(b.layout.is_empty() && !b.subvolumes.is_empty()).then(|| kv("bkpc.bm.subvolumes", ui::breakable(&b.subvolumes.join(", "), "mono small")))}
+                {b.loader.clone().map(|l| kv("bkpc.bm.loader", ui::text(loader_label(&l))))}
             </dl>
-            {(!b.missing.is_empty() || !b.warnings.is_empty()).then(|| view! { <ul class="small bkpc-gaps">{gaps}</ul> })}
+            {has_gaps.then(|| view! { <ul class="small bkpc-gaps">{gaps}</ul> })}
+            {layout}
+            {disks}
+            {copies}
         };
         let flag = |s: &ReceivedSnapshot| {
             if s.incomplete {
@@ -916,12 +1087,44 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
             Some(e) => format!("{}: {e}", i18n::datetime(r.at_ms)),
             None => tf("bkpc.last_prune_text", &[("when", &i18n::datetime(r.at_ms)), ("n", &r.deleted.to_string())]),
         });
+        // how the PC is set up: nothing to do by hand with rynas-agent (its part is above);
+        // with btrbk the commands, folded, then the first-backup check
+        let check = first_run(&b, &d.list);
+        let steps = if p.agent {
+            check
+        } else {
+            let hook = (!d.manifest_hook.trim().is_empty()).then(|| {
+                view! {
+                    <p class="small muted">{tr("pcb.hook_intro")}</p>
+                    {code_block("pcb.hook", d.manifest_hook.clone())}
+                }
+            });
+            Some(
+                view! {
+                    <h3 class="mini-title">{tr("bk.steps")}</h3>
+                    <p class="small muted">{tr("pcb.ssh_recommend")}</p>
+                    <details class="tls-step">
+                        <summary>{tr("bkpc.manual_steps")}</summary>
+                        <p class="small muted">{tr("bk.steps_intro")}</p>
+                        {code_block("bk.step.key", d.key_commands.clone())}
+                        {code_block("bk.step.config", d.client_config.clone())}
+                        {code_block("bk.step.test", d.test_commands.clone())}
+                        {d.key_line.clone().and_then(|l| code_block("bk.step.line", l))}
+                        {hook}
+                        <p class="small muted">{tr("bk.steps_note")}</p>
+                    </details>
+                    {check}
+                }
+                .into_any(),
+            )
+        };
         const VIEWS: &[(&str, &str)] = &[("subvolume", "bk.col.subvolume"), ("run", "bkpc.view.run")];
         view! {
-            {(p.public_key.is_empty()).then(|| ui::note(Tone::Warn, icons::KEY, ui::text(t("bk.no_key").to_string())))}
+            {(p.public_key.is_empty() && !p.agent).then(|| ui::note(Tone::Warn, icons::KEY, ui::text(t("bk.no_key").to_string())))}
             {issues}
             <dl class="kvs">
                 {kv("col.status", state_status(p.state))}
+                {kv("pcb.how", ui::text(t(if p.agent { "pcb.how.agent" } else { "pcb.how.ssh" }).to_string()))}
                 {p.receiving.then(|| kv("bkpc.receiving", ui::status(Tone::Info, t("bkpc.receiving").to_string())))}
                 {kv("bk.last", ui::text(when(p.last_received_ms)))}
                 {kv("bk.col.snapshots", ui::text(i18n::count(u64::from(p.snapshots))))}
@@ -943,21 +1146,7 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
                 <button class="btn danger sm" on:click=move |_| { error.set(None); ask.set(true); }><Icon icon=icons::TRASH_2 size=14 />{tr("bk.remove")}</button>
             </div>
             {bare}
-            <details class="tls-step" open=p.state == ReceiveState::Waiting>
-                <summary>{tr("bk.steps")}</summary>
-                {first_run(&b, &d.list)}
-                <h4 class="small"><strong>{tr("bkpc.agent_step")}</strong></h4>
-                <p class="small muted">{tr("bkpc.agent_intro")}</p>
-                <pre class="app-code">{d.agent_setup.clone()}</pre>
-                <div class="sec-actions">{copy_button("dns.copy", d.agent_setup.clone())}</div>
-                <h4 class="small"><strong>{tr("bkpc.manual_steps")}</strong></h4>
-                <p class="small muted">{tr("bk.steps_intro")}</p>
-                {code_block("bk.step.key", d.key_commands.clone())}
-                {code_block("bk.step.config", d.client_config.clone())}
-                {code_block("bk.step.test", d.test_commands.clone())}
-                {d.key_line.clone().map(|l| code_block("bk.step.line", l))}
-                <p class="small muted">{tr("bk.steps_note")}</p>
-            </details>
+            {steps}
             <h3 class="mini-title">{tr("bk.snapshots")}</h3>
             {if snap_rows.is_empty() {
                 view! { <p class="small muted">{tr("bk.no_snapshots")}</p> }.into_any()
@@ -983,7 +1172,11 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
         }
         .into_any()
     };
-    let body = view! { {move || detail.view(8, content)} }.into_any();
+    // the rynas-agent part (status, progress, runs) of a PC fed by the agent: built once
+    // (it polls on its own), not on every reload of the folder's detail
+    let is_agent = Memo::new(move |_| detail.data.with(|d| d.as_ref().map(|d| d.target.agent)));
+    let agent_part = move || (is_agent.get() == Some(true)).then(|| super::agent::agent_section(dev.get_value(), Callback::new(move |_| detail.reload())));
+    let body = view! { {agent_part}{move || detail.view(8, content)} }.into_any();
     let foot = view! { <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("close")}</button> }.into_any();
     view! {
         <div class="wide-drawer">{ui::drawer(Signal::stored(device.clone()), close, body, foot)}</div>
