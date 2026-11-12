@@ -513,6 +513,27 @@ export function openDialog(id) {
   schedule(100);
 }
 
+function methodLabels() {
+  return {
+    clone: t("Reflink btrfs"), copy: t("Copia dati"), flush: t("Scrittura sui dischi del server"), rename: t("Rinomina"), recycle: t("Cestino"), delete: t("Eliminazione"),
+    deflate: t("Zip (deflate)"), store: t("Zip senza compressione"), zstd: "tar.zst (zstd)", "7z": "7-Zip", unrar: "unrar", tar: "GNU tar",
+  };
+}
+
+/** Where a glide is at `now` (JobDialog.glide). A frame's time can be a little before the glide began. */
+function glidePos(g, now) {
+  return g.dur ? g.from + (g.to - g.from) * Math.min(1, Math.max(0, (now - g.at) / g.dur)) : g.to;
+}
+
+/** The file in flight: a new one, or its verify pass, gets its own bar. */
+function fileKey(p) {
+  return `${p.current}\n${p.phase}\n${p.method}\n${p.current_size ? 1 : 0}`;
+}
+
+function fileShare(p) {
+  return p.current_size ? Math.min(1, p.current_done / p.current_size) : 0;
+}
+
 class JobDialog {
   constructor(job) {
     this.axis = localStorage.getItem("rynas.files.axis") || "progress";
@@ -529,7 +550,7 @@ class JobDialog {
           <div class="big"><span class="pct">0</span><small>%</small></div>
           <div class="side"><div class="bytes"></div><div class="files"></div></div>
         </div>
-        <div class="pbar big main"><div class="fill"></div><div class="verify"></div></div>
+        <div class="pbar big main glide"><div class="fill"></div><div class="verify"></div></div>
         <div class="xf-substate"><span class="sub-l"></span><span class="sub-r"></span></div>
         <div class="xf-chart"><canvas></canvas>
           <div class="legend"><span><i style="background:var(--accent)"></i>${t("velocità")}</span><span><i style="background:var(--muted)"></i>${t("media")}</span><span class="axis-toggle" style="pointer-events:auto;cursor:pointer;text-decoration:underline dotted"></span></div>
@@ -590,6 +611,18 @@ class JobDialog {
       this.drawn = now;
       this.draw();
     };
+    // the bars: each poll's value is walked to, not jumped to (see glide)
+    this.glides = new Map();
+    this.barAnim = 0;
+    this.barFrame = (now) => {
+      this.barAnim = 0;
+      let moving = false;
+      for (const g of this.glides.values()) {
+        g.apply(glidePos(g, now));
+        moving ||= now < g.at + g.dur;
+      }
+      if (moving) this.barAnim = requestAnimationFrame(this.barFrame);
+    };
     this.canvas.addEventListener("mousemove", (e) => {
       this.hoverX = e.offsetX;
       this.frame ||= requestAnimationFrame(() => {
@@ -614,6 +647,7 @@ class JobDialog {
     clearInterval(this.tick);
     cancelAnimationFrame(this.frame);
     cancelAnimationFrame(this.anim);
+    cancelAnimationFrame(this.barAnim);
     this.resize.disconnect();
   }
 
@@ -654,8 +688,65 @@ class JobDialog {
     return at();
   }
 
+  /**
+   * Moves a bar to `value` over a little more than the time since its previous value, so that it
+   * keeps going at the pace of the transfer instead of jumping at each poll. Going back is at
+   * once; `fresh` (a new file, or its verify pass) starts the bar from 0.
+   */
+  glide(key, value, apply, fresh = false) {
+    const now = performance.now();
+    let g = this.glides.get(key);
+    if (!g || fresh) {
+      g = { from: fresh ? 0 : value, to: value, at: now, dur: fresh && !this.still.matches ? 300 : 0, last: now };
+      this.glides.set(key, g);
+    } else if (value !== g.to) {
+      const pos = glidePos(g, now);
+      g.dur = value < pos || this.still.matches ? 0 : Math.min(1500, 1.3 * (now - g.last));
+      Object.assign(g, { from: pos, to: value, at: now, last: now });
+    }
+    g.apply = apply;
+    apply(glidePos(g, now));
+    if (g.dur && !this.barAnim) this.barAnim = requestAnimationFrame(this.barFrame);
+  }
+
+  /** The job's bar and the current file's, with every poll (the numbers next to them wait). */
+  glideBars(job) {
+    const p = job.progress;
+    const st = stats(job);
+    const split = st.verify && st.byBytes;
+    const main = $(".pbar.main", this.dlg);
+    const ver = $(".verify", main);
+    this.glide("copy", split ? p.bytes_done / st.totalWork : st.pct, (v) => {
+      main.style.setProperty("--p", (Math.min(1, v) * 100).toFixed(2) + "%");
+      ver.style.left = split ? (v * 100).toFixed(2) + "%" : "0";
+    });
+    this.glide("verify", split ? p.verify_bytes / st.totalWork : 0, (v) => (ver.style.width = (v * 100).toFixed(2) + "%"));
+
+    // the item in flight: built once per file (and once for its verify pass), as soon as it starts
+    const cur = $(".xf-current", this.dlg);
+    if (!p.current || !active(job)) {
+      cur.hidden = true;
+      this.fileKey = null;
+      return;
+    }
+    cur.hidden = false;
+    const fresh = this.fileKey !== fileKey(p);
+    if (fresh) {
+      this.fileKey = fileKey(p);
+      const name = baseName(p.current) || p.current;
+      cur.innerHTML = `<div class="row1">${svg(p.phase === "verify" ? "shield" : "file")}<span class="nm">${esc(name)}</span><span class="meth">${esc(p.phase === "verify" ? t("verifica") : methodLabels()[p.method] || "")}</span></div>
+        <div class="path">${esc(p.current)}</div>
+        ${p.current_size ? `<div class="pbar thin glide ${barClass(job)}"><div class="fill"></div></div><div class="row3"><span class="done">${size(p.current_done)} ${t("di")} ${size(p.current_size)}</span><span class="share">${pctText(fileShare(p), false)}%</span></div>` : ""}`;
+    }
+    const bar = $(".pbar", cur);
+    // one file's share only grows: a value a hair below the last one is a counter read early
+    const share = fresh ? fileShare(p) : Math.max(fileShare(p), this.glides.get("file")?.to ?? 0);
+    if (bar) this.glide("file", share, (v) => bar.style.setProperty("--p", (v * 100).toFixed(2) + "%"), fresh);
+  }
+
   update(job, tickOnly = false) {
     this.job = job;
+    this.glideBars(job);
     // the chart takes every poll, the numbers change at a pace that can be read
     const shown = `${job.state}/${!!job.cancelling}/${!!job.stalled_s}`;
     const wall = performance.now();
@@ -710,11 +801,7 @@ class JobDialog {
         ? t("{a} di {b} file", { a: int(p.files_done), b: int(p.files_total) }) + (p.dirs ? " · " + count(p.dirs, "cartella", "cartelle", int) : "")
         : count(p.files_total, "elemento", "elementi", int);
     const bar = $(".pbar.main", d);
-    bar.className = "pbar big main " + barClass(job);
-    const copyShare = st.verify && st.byBytes ? p.bytes_done / st.totalWork : st.pct;
-    bar.style.setProperty("--p", (Math.min(1, copyShare) * 100).toFixed(2) + "%");
-    $(".verify", bar).style.width = st.verify && st.byBytes ? ((p.verify_bytes / st.totalWork) * 100).toFixed(2) + "%" : "0";
-    $(".verify", bar).style.left = st.verify && st.byBytes ? ((p.bytes_done / st.totalWork) * 100).toFixed(2) + "%" : "0";
+    bar.className = "pbar big main glide " + barClass(job);
 
     const subL = job.cancelling ? t("Annullamento in corso…") : job.state === "queued" ? t("In attesa che finisca un altro trasferimento") : job.state === "paused" ? t("In pausa") : job.state === "conflict" ? t("In attesa di una tua scelta") : job.stalled_s ? t("Nessun dato da {n} s", { n: int(job.stalled_s) }) : p.scanning ? t("Conteggio di file e cartelle…") : "";
     $(".sub-l", d).textContent = subL;
@@ -726,10 +813,7 @@ class JobDialog {
 
     // stats
     const end = st.eta != null ? Date.now() + st.eta : null;
-    const methods = {
-      clone: t("Reflink btrfs"), copy: t("Copia dati"), flush: t("Scrittura sui dischi del server"), rename: t("Rinomina"), recycle: t("Cestino"), delete: t("Eliminazione"),
-      deflate: t("Zip (deflate)"), store: t("Zip senza compressione"), zstd: "tar.zst (zstd)", "7z": "7-Zip", unrar: "unrar", tar: "GNU tar",
-    };
+    const methods = methodLabels();
     const cells = [
       [t("Velocità"), st.byBytes ? speed(st.now) : t("{n}/s", { n: int(Math.round(st.filesRate)) }), true],
       [t("Media"), st.byBytes ? speed(st.avg) : "—"],
@@ -742,16 +826,14 @@ class JobDialog {
     ];
     $(".xf-stats", d).innerHTML = cells.map(([k, v, hl]) => `<div class="stat ${hl ? "hl" : ""}"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join("");
 
-    // the item in flight
+    // the item in flight is built by glideBars, with every poll; its numbers change here
     const cur = $(".xf-current", d);
-    if (p.current && active(job)) {
-      cur.hidden = false;
-      const name = baseName(p.current) || p.current;
-      const cp = p.current_size ? Math.min(1, p.current_done / p.current_size) : 0;
-      cur.innerHTML = `<div class="row1">${svg(p.phase === "verify" ? "shield" : "file")}<span class="nm">${esc(name)}</span><span class="meth">${esc(p.phase === "verify" ? t("verifica") : methods[p.method] || "")}</span></div>
-        <div class="path">${esc(p.current)}</div>
-        ${p.current_size ? `<div class="pbar thin ${barClass(job)}" style="--p:${(cp * 100).toFixed(1)}%"><div class="fill"></div></div><div class="row3"><span>${size(p.current_done)} ${t("di")} ${size(p.current_size)}</span><span>${pctText(cp, false)}%</span></div>` : ""}`;
-    } else cur.hidden = true;
+    const fileBar = $(".pbar", cur);
+    if (!cur.hidden && fileBar) {
+      fileBar.className = "pbar thin glide " + barClass(job);
+      $(".done", cur).textContent = `${size(p.current_done)} ${t("di")} ${size(p.current_size)}`;
+      $(".share", cur).textContent = `${pctText(fileShare(p), false)}%`;
+    }
 
     if (!tickOnly) {
       this.renderConflict(job);
