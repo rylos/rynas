@@ -1,0 +1,139 @@
+name: Release
+
+# One release per tag vX.Y.Z (the workspace version, which rynas-agent follows): the NAS
+# package (Debian 13, amd64) and the PC agent (static musl binaries, .deb and .rpm, x86_64
+# and aarch64), with SHA-256 sums. It becomes the "latest" release, which the agent commands
+# in the UI download from (releases/latest/download/rynas-agent-<arch>); the NUT backport
+# keeps its own fixed tag.
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build (vX.Y.Z)"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+  CARGO_TERM_COLOR: never
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ env.TAG }}
+      # the tag, the workspace and the agent must say the same version
+      - id: v
+        run: |
+          set -euo pipefail
+          ver=${TAG#v}
+          ws=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          agent=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/rynas-agent/Cargo.toml | head -1)
+          [ "$ver" = "$ws" ] || { echo "::error::tag $TAG but the workspace is $ws"; exit 1; }
+          [ "$ver" = "$agent" ] || { echo "::error::tag $TAG but rynas-agent is $agent"; exit 1; }
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+
+  nas:
+    needs: check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: wasm32-unknown-unknown
+      # trunk from its own release, pinned by SHA-256 (checked 2026-11-12)
+      - name: Install trunk
+        env:
+          TRUNK_URL: https://github.com/trunk-rs/trunk/releases/download/v0.22.0/trunk-x86_64-unknown-linux-gnu.tar.gz
+          TRUNK_SHA256: f78c1989240c56592d8cfc4df5cc27399a3ff66a3f9cc819e16f1e3d809ce7c2
+        run: |
+          set -euo pipefail
+          curl -sSfL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/trunk.tgz" "$TRUNK_URL"
+          echo "$TRUNK_SHA256  $RUNNER_TEMP/trunk.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/trunk.tgz" -C "$RUNNER_TEMP" trunk
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      # the UI with trunk here, the binaries and cargo deb in a Debian 13 container
+      - run: packaging/build-deb.sh --build-ui
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: nas
+          path: target/debian/rynas_*_amd64.deb
+          if-no-files-found: error
+
+  agent:
+    needs: check
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    env:
+      T: ${{ matrix.arch }}-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: ${{ env.T }}
+      # musl-gcc for ring and zstd (native on each runner, no cross compiler)
+      - run: sudo apt-get update -q && sudo apt-get install -yq --no-install-recommends musl-tools
+      - name: Build the static binary
+        env:
+          CC_aarch64_unknown_linux_musl: musl-gcc
+          OUT: ${{ github.workspace }}/dist
+        run: packaging/agent/build.sh "${{ matrix.arch }}"
+      - name: .deb and .rpm from that binary
+        run: |
+          set -euo pipefail
+          cargo install --locked cargo-deb --version 3.8.0
+          cargo install --locked cargo-generate-rpm --version 0.21.1
+          cd crates/rynas-agent
+          cargo deb --no-build --no-strip --target "$T" -o "$GITHUB_WORKSPACE/dist/"
+          cargo generate-rpm --target "$T" -o "$GITHUB_WORKSPACE/dist/"
+          ls -l "$GITHUB_WORKSPACE/dist"
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: agent-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: [check, nas, agent]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd dist
+          rm -f ./*.sha256
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --latest \
+            --title "rynas $VERSION" --generate-notes -- *
