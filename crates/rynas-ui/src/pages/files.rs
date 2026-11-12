@@ -140,7 +140,11 @@ pub fn bridge() {
     });
     let _ = window_event_listener_untyped("rynas-files:toast", |ev| {
         if let Some(text) = detail_str(&ev, "text") {
-            let tone = if detail_str(&ev, "kind").as_deref() == Some("error") { Tone::Err } else { Tone::Ok };
+            let tone = match detail_str(&ev, "kind").as_deref() {
+                Some("error") => Tone::Err,
+                Some("info") => Tone::Info,
+                _ => Tone::Ok,
+            };
             crate::toast::toast(tone, text);
         }
     });

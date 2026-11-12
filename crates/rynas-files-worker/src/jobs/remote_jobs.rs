@@ -575,6 +575,8 @@ impl Engine {
                 }
             }
         }
+        let start = (self.p.bytes_done, self.p.verify_bytes);
+        let phase = self.p.phase.clone();
         match self.r_file(ends, src, meta, &target, replace) {
             Ok(()) => {
                 self.p.files_done += 1;
@@ -590,6 +592,7 @@ impl Engine {
             Err(e) => {
                 self.error(src, &e);
                 self.p.files_done += 1;
+                self.file_failed(start, meta.size, phase);
             }
         }
         Ok(())
@@ -599,6 +602,7 @@ impl Engine {
         self.p.skipped += 1;
         self.p.files_done += 1;
         self.p.bytes_done += meta.size;
+        self.unverified(meta.size);
     }
 
     fn r_skip_tree(&mut self, ends: &Ends, root: &Path) {

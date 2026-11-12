@@ -165,6 +165,10 @@ pub struct Progress {
     pub scanning: bool,
     /// bytes read back by the verification
     pub verify_bytes: u64,
+    /// with verification on: bytes counted in `bytes_done` that no verification will read
+    /// (skipped, renamed, or of a file that failed), so the verify share can reach its end
+    #[serde(default)]
+    pub verify_skip: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -107,6 +107,26 @@ fn copies_through_a_worker_and_answers_conflicts() {
     assert!(!m.busy(&user.name));
 }
 
+/// A verified copy with a file skipped: what the verification read plus what it never will
+/// is the whole job, so its share of the bar reaches the end.
+#[test]
+fn a_verified_copy_counts_skipped_bytes_as_never_verified() {
+    let (_dir, docs, _, _) = shares();
+    let (src, dest) = (docs.join("src"), docs.join("dest"));
+    std::fs::write(src.join("big.bin"), vec![7u8; 300_000]).unwrap();
+    std::fs::write(src.join("kept.txt"), "new contents").unwrap();
+    std::fs::write(dest.join("kept.txt"), "old").unwrap();
+    let user = me();
+    let m = Manager::new(Config { worker: worker(), journal: docs.join("journal"), hooks: Arc::new(NoHooks) });
+    let job = run(&m, &user, json!({ "op": "copy", "sources": [src.join("big.bin"), src.join("kept.txt")], "dest": dest, "roots": [&docs], "conflict": "skip", "verify": true }));
+    assert_eq!(job["state"], "done", "{job}");
+    let p = &job["progress"];
+    assert_eq!(p["skipped"], 1, "{job}");
+    assert_eq!(p["verify_bytes"], 300_000, "{job}");
+    assert_eq!(p["verify_skip"], "new contents".len(), "{job}");
+    assert_eq!(p["bytes_done"], p["bytes_total"], "{job}");
+}
+
 #[test]
 fn cancelling_leaves_nothing_behind() {
     let dir = tempfile::tempdir().unwrap();

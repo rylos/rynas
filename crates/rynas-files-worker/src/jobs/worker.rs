@@ -405,6 +405,24 @@ impl Engine {
         self.window.1 += n;
     }
 
+    /// `n` bytes counted as done that the verification will never read (skipped, renamed):
+    /// with verification on they count towards its share too, so it reaches the end.
+    fn unverified(&mut self, n: u64) {
+        if self.spec.verify {
+            self.p.verify_skip += n;
+        }
+    }
+
+    /// A file of `len` bytes failed after `bytes_done` and `verify_bytes` were `start`: it
+    /// counts as handled, whatever part of it was copied or verified, so the bar and the
+    /// verify share still reach their end. The phase it was in (the verify pass) is undone.
+    fn file_failed(&mut self, start: (u64, u64), len: u64, phase: String) {
+        self.p.bytes_done = self.p.bytes_done.max(start.0 + len);
+        let verified = self.p.verify_bytes.saturating_sub(start.1);
+        self.unverified(len.saturating_sub(verified));
+        self.p.phase = phase;
+    }
+
     fn run(&mut self) -> Step<()> {
         // a local destination is cleaned whatever the sources were (a copy from a server
         // cancelled mid-file leaves its temporary file here)
@@ -656,7 +674,9 @@ impl Engine {
                     self.p.method = "rename".into();
                     self.p.instant += 1;
                     self.p.files_done += 1;
-                    self.advance(if meta.is_file() { meta.len() } else { 0 });
+                    let len = if meta.is_file() { meta.len() } else { 0 };
+                    self.advance(len);
+                    self.unverified(len);
                     return Ok(());
                 }
                 Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {}
@@ -668,6 +688,8 @@ impl Engine {
             }
         }
         let t = meta.file_type();
+        let start = (self.p.bytes_done, self.p.verify_bytes);
+        let phase = self.p.phase.clone();
         let result = if t.is_file() {
             self.file(src, &meta, &target)
         } else if t.is_symlink() {
@@ -692,6 +714,7 @@ impl Engine {
             Err(e) => {
                 self.write_error(src, &target, &e);
                 self.p.files_done += 1;
+                self.file_failed(start, if t.is_file() { meta.len() } else { 0 }, phase);
             }
         }
         Ok(())
@@ -703,6 +726,7 @@ impl Engine {
         if meta.is_file() {
             // skipped bytes count as handled, so the bar and the time left stay true
             self.p.bytes_done += meta.len();
+            self.unverified(meta.len());
         }
     }
 
@@ -792,6 +816,7 @@ impl Engine {
         self.p.files_done += files;
         self.p.instant += files;
         self.p.bytes_done += bytes;
+        self.unverified(bytes);
     }
 
     fn skip_tree(&mut self, path: &Path) {
@@ -799,6 +824,7 @@ impl Engine {
         self.p.files_done += files;
         self.p.skipped += files;
         self.p.bytes_done += bytes;
+        self.unverified(bytes);
     }
 
     fn decide(&mut self, src: &Path, meta: &Metadata, target: &Path, old: &Metadata) -> Step<Decision> {

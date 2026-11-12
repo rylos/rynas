@@ -572,4 +572,6 @@ export default {
   "L'app {s} potrebbe dover ripartire per vedere la modifica": "{s} may need a restart to see the change",
   "Riavvia": "Restart",
   "Riavvio di {s} avviato": "Restarting {s}",
+  "Interrotto da un riavvio del NAS": "Interrupted by a restart of the NAS",
+  "Grafico della velocità del trasferimento": "Transfer speed chart",
 };

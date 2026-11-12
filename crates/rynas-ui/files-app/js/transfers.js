@@ -4,7 +4,7 @@
 
 import { api, notifyUnauth } from "./api.js";
 import { prefs } from "./prefs.js";
-import { t, count, LANG, LOCALE } from "./i18n.js";
+import { t, count, errText, LANG, LOCALE } from "./i18n.js";
 import { esc, size, sizeParts, speed, duration, clock, int, baseName, parentOf, dateTime } from "./format.js";
 import { svg } from "./icons.js";
 import { h, $, toast, errorToast } from "./ui.js";
@@ -23,6 +23,8 @@ let firstPoll = true;
 const dialogs = new Map(); // id -> dialog view
 const seenFinished = new Set();
 const seenConflict = new Set();
+// failed jobs the user has seen in the drawer (the job objects are replaced at every poll)
+const seenFail = new Set();
 
 const OP = {
   copy: { icon: "copy", running: "Copia in corso", done: "Copia completata", verified: "Copia completata e verificata", noun: "Copia|op" },
@@ -38,15 +40,15 @@ const STATE = {
 };
 const PHASES = {
   copy: [["scan", "Analisi"], ["copy", "Copia"], ["verify", "Verifica"], ["end", "Fine"]],
-  move: [["scan", "Analisi"], ["move", "Spostamento"], ["end", "Fine"]],
+  move: [["scan", "Analisi"], ["move", "Spostamento"], ["verify", "Verifica"], ["end", "Fine"]],
   delete: [["scan", "Conteggio"], ["delete", "Eliminazione"], ["end", "Fine"]],
   upload: [["copy", "Trasmissione"], ["end", "Fine"]],
   compress: [["scan", "Analisi"], ["compress", "Compressione"], ["end", "Fine"]],
   extract: [["extract", "Estrazione"], ["end", "Fine"]],
 };
 const LIMITS = [0, 5, 10, 25, 50, 100, 200, 500];
-// speed samples kept per job: past this the older ones are thinned out
-const MAX_SAMPLES = 1200;
+// speed samples kept per job: past this the older ones are thinned out (the NAS keeps as many)
+const MAX_SAMPLES = 2400;
 // the most recent samples are never thinned: the speed shown reads them
 const KEEP_RECENT = 240;
 
@@ -56,12 +58,30 @@ const allFailed = (j) => j.state === "done" && j.progress.errors > 0 && j.progre
 const shownState = (j) => (allFailed(j) ? "failed" : j.state);
 // a refused permission: the place is in the path, the remedy in the shared folder's permissions
 const PERM_HINT = "controlla le autorizzazioni della cartella condivisa";
-const errorText = (e) => (e.code === "permission_denied" ? `${t("Permesso negato")} · ${t(PERM_HINT)}` : e.msg || "");
+// The NAS writes its messages in English, with a code: the code is what is shown, in the
+// interface's language, and the message only where there is no text for the code. "internal"
+// and "invalid_value" cover reasons of their own (a verification that failed, a folder into
+// itself): there the message says more than the code.
+const OWN_MSG = new Set(["", "internal", "invalid_value"]);
+const codeText = (code, msg) => (!OWN_MSG.has(code || "") && errText(code)) || msg || "";
+// how a job ended, for the codes of the jobs themselves (not API error codes)
+const JOB_CODES = {
+  // the state says it already
+  cancelled: () => "",
+  interrupted: () => t("Interrotto da un riavvio del NAS"),
+};
+const errorText = (e) => (e.code === "permission_denied" ? `${t("Permesso negato")} · ${t(PERM_HINT)}` : codeText(e.code, e.msg));
 // one failed item with where it failed, never a bare reason
 const errorLine = (e) => (!e ? "" : e.path ? `${e.path}: ${errorText(e)}` : errorText(e));
 const firstError = (j) => errorLine(j.errors?.[0]);
-// why a whole job stopped, with the remedy when a permission was refused
-const jobMsg = (j) => (j.code === "permission_denied" && j.msg ? `${j.msg} · ${t(PERM_HINT)}` : j.msg || "");
+// why a whole job stopped, with the remedy when a permission was refused; nothing for a job
+// that ended well (its message is a summary in English: "complete: 2 skipped")
+function jobMsg(j) {
+  if (j.state === "done" && !j.code) return "";
+  if (JOB_CODES[j.code]) return JOB_CODES[j.code]();
+  if (j.code === "permission_denied" && j.msg) return `${j.msg} · ${t(PERM_HINT)}`;
+  return codeText(j.code, j.msg);
+}
 const active = (j) => !finished(j);
 
 export function init(theApp) {
@@ -124,24 +144,33 @@ function pctText(pct, done) {
   return v.toLocaleString(LANG, { minimumFractionDigits: one ? 1 : 0, maximumFractionDigits: one ? 1 : 0 });
 }
 
-/** Everything the views show, worked out once per update. */
+/** A count per second (files): two decimals below 1, one below 10, whole above, in the interface's language. */
+function perSecond(n) {
+  const v = n || 0;
+  return v.toLocaleString(LOCALE, { maximumFractionDigits: v < 1 ? 2 : v < 10 ? 1 : 0 });
+}
+
+/** Everything the views show, worked out once per poll. */
 export function stats(job) {
   const p = job.progress;
   const verify = job.verify && job.op !== "delete";
   const byBytes = p.bytes_total > 0 && job.op !== "delete";
+  // bytes that no verification will read (skipped, renamed, failed) count as verified
+  const verified = verify ? p.verify_bytes + (p.verify_skip || 0) : 0;
   const totalWork = byBytes ? p.bytes_total * (verify ? 2 : 1) : p.files_total;
-  const doneWork = byBytes ? p.bytes_done + (verify ? p.verify_bytes : 0) : p.files_done;
+  const doneWork = byBytes ? p.bytes_done + verified : p.files_done;
   let pct = totalWork > 0 ? Math.min(1, doneWork / totalWork) : job.state === "done" ? 1 : 0;
   if (job.state === "done") pct = 1;
   const s = job.samples;
   const elapsed = job.active_ms + (job.state === "running" && job._polledAt ? Date.now() - job._polledAt : 0);
   // throughput: bytes moved plus bytes verified
   const work = (x) => (byBytes ? x[1] + x[3] : x[2]);
+  // over the last `ms`, never across a pause (a gap in the samples)
   const windowSpeed = (ms) => {
     if (s.length < 2) return 0;
     const last = s[s.length - 1];
     let k = s.length - 2;
-    while (k > 0 && last[0] - s[k][0] < ms) k--;
+    while (k > 0 && last[0] - s[k][0] < ms && s[k][0] - s[k - 1][0] < 2500) k--;
     const dt = (last[0] - s[k][0]) / 1000;
     return dt > 0 ? Math.max(0, (work(last) - work(s[k])) / dt) : 0;
   };
@@ -159,7 +188,7 @@ export function stats(job) {
   const remaining = Math.max(0, totalWork - doneWork);
   const eta = job.state === "running" && rate > 0 && !p.scanning ? (remaining / rate) * 1000 : null;
   const filesRate = elapsed > 1000 ? (p.files_done / elapsed) * 1000 : 0;
-  return { pct, now, avg, peak, eta, elapsed, byBytes, verify, filesRate, totalWork, doneWork };
+  return { pct, now, avg, peak, eta, elapsed, byBytes, verify, verified, filesRate, totalWork, doneWork };
 }
 
 function merge(update) {
@@ -179,12 +208,24 @@ function merge(update) {
 /**
  * Keeps a job's samples under MAX_SAMPLES: every other one of the older part
  * goes, so the start of a long transfer grows coarser and the recent part,
- * which the speed shown is read from, stays as it is.
+ * which the speed shown is read from, stays as it is. The edges of a pause (a gap of more than
+ * 2 s before or after a sample) always stay, and so do the first and the last sample: without
+ * them the chart would lose the pause.
  */
 function thin(s) {
   if (s.length <= MAX_SAMPLES) return s;
   const cut = s.length - KEEP_RECENT;
-  return s.slice(0, cut).filter((_, i) => i % 2 === 0).concat(s.slice(cut));
+  // a gap beside it of more than 2 s and three times the other one (thinned history is evenly
+  // spaced, and after a few halvings every gap there is over 2 s)
+  const edge = (i) => {
+    const a = i > 0 ? s[i][0] - s[i - 1][0] : 0;
+    const b = i + 1 < s.length ? s[i + 1][0] - s[i][0] : 0;
+    const [hi, lo] = [Math.max(a, b), Math.min(a, b)];
+    return hi > 2000 && hi > 3 * lo;
+  };
+  const old = [];
+  for (let i = 0; i < cut; i++) if (i % 2 === 0 || edge(i)) old.push(s[i]);
+  return old.concat(s.slice(cut));
 }
 
 /**
@@ -247,10 +288,6 @@ addEventListener("storage", (e) => {
 });
 
 /**
- * When to poll next. Each poll counts as activity of the session, so with nothing
- * running it goes once a minute, and not at all while the page is hidden.
- */
-/**
  * With a running job's chart on screen, the ms until its next sample is ready on the NAS (and a
  * little more for it to be recorded): each poll then brings one new sample. Null without one.
  */
@@ -267,6 +304,10 @@ function untilNextSample() {
   return wait;
 }
 
+/**
+ * When to poll next. Each poll counts as activity of the session, so with nothing
+ * running it goes once a minute, and not at all while the page is hidden.
+ */
 function schedule(ms) {
   clearTimeout(pollTimer);
   if (unauth) return;
@@ -321,10 +362,12 @@ function announce(job) {
   // on another page of the shell: the shell's own toast says it
   if (!connected() && !document.hidden) {
     const failed = allFailed(job) || job.state === "failed";
-    emit("toast", { kind: failed ? "error" : "ok", text: failed ? `${title(job)}: ${firstError(job) || jobMsg(job) || t(STATE.failed)}` : `${doneLabel(job, op)} · ${title(job)}` });
+    if (failed) emit("toast", { kind: "error", text: `${title(job)}: ${firstError(job) || jobMsg(job) || t(STATE.failed)}` });
+    else if (job.state === "cancelled") emit("toast", { kind: "info", text: `${title(job)} · ${t(STATE.cancelled)}` });
+    else emit("toast", { kind: job.progress.errors ? "error" : "ok", text: `${doneLabel(job, op)} · ${title(job)}` });
   }
   if (prefs.notify && document.hidden && "Notification" in window && Notification.permission === "granted") {
-    new Notification("rynas", { body: `${title(job)} · ${t(STATE[job.state])}`, icon: "/favicon.svg" });
+    new Notification("rynas", { body: `${title(job)} · ${t(STATE[shownState(job)])}`, icon: "/favicon.svg" });
   }
 }
 
@@ -368,43 +411,47 @@ export async function start(request) {
   }
 }
 
+/** Sends `action` to a job; true when it was taken (a refusal with a reason shows as a toast). */
 async function control(job, action, extra = {}) {
   if (job.source === "local") {
     local.get(job.id)?.[action]?.(extra);
     renderAll();
-    return;
+    return true;
   }
+  let ok = true;
   try {
-    await api.control(job.id, action, extra);
+    // {ok: false}: the job could not take it (it ended, its worker is gone)
+    ok = (await api.control(job.id, action, extra))?.ok !== false;
   } catch (e) {
     errorToast(e);
+    ok = false;
   }
   nudgeTray();
   kick();
+  return ok;
 }
 
 /**
  * Runs a job again (`extra`: the archive's password): the NAS gives it a
- * new id, so the dialog opens on the newest active job of the same kind.
+ * new id, and the dialog opens on that one.
  */
 async function retryAndOpen(old, extra = {}) {
+  let next;
   try {
-    await api.control(old.id, "retry", extra);
+    next = await api.control(old.id, "retry", extra);
   } catch (e) {
     return errorToast(e);
   }
   nudgeTray();
   since = 0;
   await poll();
-  const next = [...jobs.values()].filter((j) => j.op === old.op && j.source !== "local" && active(j)).sort((a, b) => b.created - a.created)[0];
-  if (next) openDialog(next.id);
+  if (next?.id != null && jobs.has(next.id)) openDialog(next.id);
 }
 
 function clearFinished() {
   for (const j of [...jobs.values()]) {
     if (!finished(j)) continue;
-    if (j.source === "local") jobs.delete(j.id);
-    else api.control(j.id, "dismiss").catch(() => {});
+    if (j.source !== "local") api.control(j.id, "dismiss").catch(() => {});
     jobs.delete(j.id);
   }
   renderAll();
@@ -415,9 +462,11 @@ function clearFinished() {
 export function renderAll() {
   renderButton();
   if (!$("#xfer-drawer").hidden) renderDrawer();
-  for (const [id, view] of dialogs) {
+  for (const [id, view] of [...dialogs]) {
     const job = jobs.get(id);
     if (job) view.update(job);
+    // dismissed elsewhere, or forgotten by the NAS: nothing left to show
+    else if (view.dlg.open) view.dlg.close();
   }
 }
 
@@ -427,7 +476,7 @@ function renderButton() {
   const btn = $("#xfer-btn");
   btn.classList.toggle("active", running.length > 0);
   btn.classList.toggle("attention", running.some((j) => j.state === "conflict" || j.state === "paused"));
-  const recentFail = list.some((j) => j.state === "failed" && !j._seenFail);
+  const recentFail = list.some((j) => j.state === "failed" && !seenFail.has(j.id));
   btn.classList.toggle("failed", recentFail && !running.length);
   $("#xfer-count").textContent = running.length || (recentFail ? "!" : "");
   let total = 0;
@@ -446,7 +495,7 @@ function toggleDrawer(show) {
   const d = $("#xfer-drawer");
   d.hidden = show === undefined ? !d.hidden : !show;
   if (!d.hidden) {
-    for (const j of jobs.values()) if (j.state === "failed") j._seenFail = true;
+    for (const j of jobs.values()) if (j.state === "failed") seenFail.add(j.id);
     renderDrawer();
   }
   renderButton();
@@ -464,25 +513,37 @@ function renderDrawer() {
     el.innerHTML = `<div class="drawer-empty">${svg("transfers")}<br>${t("Nessun trasferimento")}</div>`;
     return;
   }
+  // a card with the keyboard focus keeps it across the rebuild
+  const focused = [...el.children].indexOf(activeElement());
   el.innerHTML = "";
   for (const job of list) {
     const st = stats(job);
     const r = route(job);
     const op = OP[job.op] || OP.copy;
+    const state = shownState(job);
+    // seen here: no "!" on the button for it
+    if (state === "failed") seenFail.add(job.id);
+    const ended = [job.finished ? clock(job.finished) : "", duration(job.active_ms)].filter(Boolean).join(" · ");
     const meta = active(job)
       ? job.state === "running"
-        ? `<span>${st.byBytes ? `${size(job.progress.bytes_done)} / ${size(job.progress.bytes_total)}` : `${int(job.progress.files_done)} / ${int(job.progress.files_total)}`}</span><span>${job.cancelling ? t("Annullamento in corso…") : job.stalled_s ? t("Nessun dato da {n} s", { n: int(job.stalled_s) }) : `${st.byBytes ? speed(st.now) : ""}${st.eta != null ? " · " + duration(st.eta) : ""}`}</span>`
+        ? `<span>${st.byBytes ? `${size(job.progress.bytes_done)} / ${size(job.progress.bytes_total)}` : `${int(job.progress.files_done)} / ${int(job.progress.files_total)}`}</span><span>${job.cancelling ? t("Annullamento in corso…") : job.stalled_s ? t("Nessun dato da {n} s", { n: int(job.stalled_s) }) : [st.byBytes ? speed(st.now) : "", st.eta != null ? duration(st.eta) : ""].filter(Boolean).join(" · ")}</span>`
         : `<span>${t(STATE[job.state])}</span><span>${pctText(st.pct, finished(job))}%</span>`
-      : `<span>${job.finished ? clock(job.finished) : ""} · ${duration(job.active_ms)}</span><span>${job.progress.errors ? count(job.progress.errors, "errore", "errori", int) : esc(jobMsg(job))}</span>`;
-    const card = h(`<div class="jcard">
+      : `<span>${ended}</span><span>${job.progress.errors ? count(job.progress.errors, "errore", "errori", int) : esc(jobMsg(job))}</span>`;
+    const card = h(`<div class="jcard" tabindex="0" role="button">
       <div class="jcard-top"><div class="op">${svg(op.icon)}</div>
         <div class="tt"><b>${esc(title(job))}</b><small>${esc(r.from)} → ${esc(r.to || "")}</small></div>
-        <span class="chip ${job.state}">${t(STATE[job.state])}</span></div>
+        <span class="chip ${state}">${t(STATE[state])}</span></div>
       <div class="pbar thin mini ${barClass(job)}" style="--p:${(st.pct * 100).toFixed(2)}%"><div class="fill"></div></div>
       <div class="jcard-meta">${meta}</div></div>`);
     card.onclick = () => openDialog(job.id);
+    card.onkeydown = (e) => {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      e.preventDefault();
+      openDialog(job.id);
+    };
     el.append(card);
   }
+  if (focused >= 0) el.children[Math.min(focused, el.children.length - 1)]?.focus();
 }
 
 function barClass(job) {
@@ -525,6 +586,22 @@ function glidePos(g, now) {
   return g.dur ? g.from + (g.to - g.from) * Math.min(1, Math.max(0, (now - g.at) / g.dur)) : g.to;
 }
 
+/** Sets `el`'s markup only when it changed: no rebuilt nodes (nor lost hover or focus) at every update. */
+function setHTML(el, html) {
+  if (el._html === html) return;
+  el._html = html;
+  el.innerHTML = html;
+}
+
+/** "Dark" from the system: with the app's own theme, the key of the colours the chart reads. */
+const darkScheme = matchMedia("(prefers-color-scheme: dark)");
+const themeKey = () => `${host.box?.dataset.theme || ""}/${darkScheme.matches}`;
+
+/** A tick of the files-per-second scale: decimals only where the step has them. */
+function tickCount(n) {
+  return `${n.toLocaleString(LOCALE, { maximumFractionDigits: 2 })}/s`;
+}
+
 /** The file in flight: a new one, or its verify pass, gets its own bar. */
 function fileKey(p) {
   return `${p.current}\n${p.phase}\n${p.method}\n${p.current_size ? 1 : 0}`;
@@ -536,13 +613,17 @@ function fileShare(p) {
 
 class JobDialog {
   constructor(job) {
-    this.axis = localStorage.getItem("rynas.files.axis") || "progress";
+    this.axis = "progress";
+    try {
+      this.axis = localStorage.getItem("rynas.files.axis") || "progress";
+    } catch {}
     const op = OP[job.op] || OP.copy;
-    this.dlg = h(`<dialog class="dlg xfer" tabindex="-1">
+    const ttl = `xf-ttl-${job.id}`;
+    this.dlg = h(`<dialog class="dlg xfer" tabindex="-1" aria-labelledby="${ttl}">
       <div class="xf-head"><div class="op">${svg(op.icon)}</div>
-        <div class="tt"><h2><span class="ttl"></span><span class="chip"></span></h2>
+        <div class="tt"><h2><span class="ttl" id="${ttl}"></span><span class="chip"></span></h2>
           <div class="route"><span class="from"></span>${svg("forward")}<span class="to"></span></div></div>
-        <button class="icon-btn b-min" title="${t("Riduci (continua in background)")}">${svg("minimize")}</button>
+        <button class="icon-btn b-min" title="${t("Riduci (continua in background)")}" aria-label="${t("Riduci (continua in background)")}">${svg("minimize")}</button>
       </div>
       <div class="xf-body">
         <div class="xf-steps"></div>
@@ -550,19 +631,19 @@ class JobDialog {
           <div class="big"><span class="pct">0</span><small>%</small></div>
           <div class="side"><div class="bytes"></div><div class="files"></div></div>
         </div>
-        <div class="pbar big main glide"><div class="fill"></div><div class="verify"></div></div>
-        <div class="xf-substate"><span class="sub-l"></span><span class="sub-r"></span></div>
-        <div class="xf-chart"><canvas></canvas>
-          <div class="legend"><span><i style="background:var(--accent)"></i>${t("velocità")}</span><span><i style="background:var(--muted)"></i>${t("media")}</span><span class="axis-toggle" style="pointer-events:auto;cursor:pointer;text-decoration:underline dotted"></span></div>
+        <div class="pbar big main glide" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-labelledby="${ttl}"><div class="fill"></div><div class="verify"></div></div>
+        <div class="xf-substate" role="status"><span class="sub-l"></span><span class="sub-r"></span></div>
+        <div class="xf-chart"><canvas role="img" aria-label="${t("Grafico della velocità del trasferimento")}"></canvas>
+          <div class="legend"><span><i style="background:var(--accent)"></i>${t("velocità")}</span><span><i style="background:var(--muted)"></i>${t("media")}</span><button type="button" class="axis-toggle"></button></div>
         </div>
         <div class="xf-stats"></div>
         <div class="xf-current"></div>
         <div class="xf-conflict" hidden></div>
         <details class="xf-errors" hidden><summary></summary><ul></ul></details>
-        <div class="xf-summary" hidden></div>
+        <div class="xf-summary" role="status" hidden></div>
       </div>
       <div class="xf-foot">
-        <div class="left">${svg("zap")}<span>${t("Limite")}</span><select class="limit">${LIMITS.map((l) => `<option value="${l}">${l ? speed(l * 1024 * 1024) : t("nessuno")}</option>`).join("")}</select></div>
+        <div class="left">${svg("zap")}<span>${t("Limite")}</span><select class="limit" aria-label="${t("Limite di velocità")}">${LIMITS.map((l) => `<option value="${l}">${l ? speed(l * 1024 * 1024) : t("nessuno")}</option>`).join("")}</select></div>
         <button class="btn b-start" hidden>${t("Avvia ora")}</button>
         <button class="btn b-pause"></button>
         <button class="btn b-cancel">${svg("stop")} ${t("Annulla")}</button>
@@ -590,10 +671,17 @@ class JobDialog {
       this.dlg.close();
       app.openPath(this.job.info.dest);
     };
-    $(".limit", this.dlg).onchange = (e) => control(this.job, "limit", { bps: +e.target.value * 1024 * 1024 });
+    $(".limit", this.dlg).onchange = async (e) => {
+      const sel = e.target;
+      // refused: back to the limit the job has
+      if (!(await control(this.job, "limit", { bps: +sel.value * 1024 * 1024 }))) sel.value = String(Math.round((this.job.limit || 0) / 1024 / 1024));
+    };
     $(".axis-toggle", this.dlg).onclick = () => {
       this.axis = this.axis === "progress" ? "time" : "progress";
-      localStorage.setItem("rynas.files.axis", this.axis);
+      try {
+        localStorage.setItem("rynas.files.axis", this.axis);
+      } catch {}
+      $(".axis-toggle", this.dlg).textContent = this.axis === "progress" ? t("asse: avanzamento") : t("asse: tempo");
       this.draw();
     };
     // one drawing per frame, however fast the mouse moves
@@ -639,8 +727,8 @@ class JobDialog {
     this.tick = setInterval(() => this.job && active(this.job) && this.update(this.job, true), 1000);
     this.dlg.showModal();
     this.update(job);
-    // no button should look pressed when the dialog opens
-    this.dlg.focus();
+    // no button should look pressed when the dialog opens; a question keeps it on its first answer
+    if (!$(".xf-conflict", this.dlg).contains(activeElement())) this.dlg.focus();
   }
 
   destroy() {
@@ -710,9 +798,8 @@ class JobDialog {
   }
 
   /** The job's bar and the current file's, with every poll (the numbers next to them wait). */
-  glideBars(job) {
+  glideBars(job, st) {
     const p = job.progress;
-    const st = stats(job);
     const split = st.verify && st.byBytes;
     const main = $(".pbar.main", this.dlg);
     const ver = $(".verify", main);
@@ -720,7 +807,7 @@ class JobDialog {
       main.style.setProperty("--p", (Math.min(1, v) * 100).toFixed(2) + "%");
       ver.style.left = split ? (v * 100).toFixed(2) + "%" : "0";
     });
-    this.glide("verify", split ? p.verify_bytes / st.totalWork : 0, (v) => (ver.style.width = (v * 100).toFixed(2) + "%"));
+    this.glide("verify", split ? st.verified / st.totalWork : 0, (v) => (ver.style.width = (v * 100).toFixed(2) + "%"));
 
     // the item in flight: built once per file (and once for its verify pass), as soon as it starts
     const cur = $(".xf-current", this.dlg);
@@ -739,14 +826,20 @@ class JobDialog {
         ${p.current_size ? `<div class="pbar thin glide ${barClass(job)}"><div class="fill"></div></div><div class="row3"><span class="done">${size(p.current_done)} ${t("di")} ${size(p.current_size)}</span><span class="share">${pctText(fileShare(p), false)}%</span></div>` : ""}`;
     }
     const bar = $(".pbar", cur);
-    // one file's share only grows: a value a hair below the last one is a counter read early
-    const share = fresh ? fileShare(p) : Math.max(fileShare(p), this.glides.get("file")?.to ?? 0);
-    if (bar) this.glide("file", share, (v) => bar.style.setProperty("--p", (v * 100).toFixed(2) + "%"), fresh);
+    // one file's share only grows: a value a hair below the last one is a counter read early;
+    // a real drop (an upload sending the file again from its start) starts the bar again
+    const was = this.glides.get("file")?.to ?? 0;
+    const restart = !fresh && fileShare(p) < was - 0.02;
+    const share = fresh || restart ? fileShare(p) : Math.max(fileShare(p), was);
+    if (bar) this.glide("file", share, (v) => bar.style.setProperty("--p", (v * 100).toFixed(2) + "%"), fresh || restart);
   }
 
   update(job, tickOnly = false) {
     this.job = job;
-    this.glideBars(job);
+    // worked out once per update, for the bars, the numbers and the chart alike
+    const st = stats(job);
+    this.st = st;
+    this.glideBars(job, st);
     // the chart takes every poll, the numbers change at a pace that can be read
     const shown = `${job.state}/${!!job.cancelling}/${!!job.stalled_s}`;
     const wall = performance.now();
@@ -757,8 +850,6 @@ class JobDialog {
     this.shownKey = shown;
     this.shownAt = wall;
     const p = job.progress;
-    const st = stats(job);
-    this.st = st;
     const d = this.dlg;
     const op = OP[job.op] || OP.copy;
     const r = route(job);
@@ -776,24 +867,30 @@ class JobDialog {
     const phases = PHASES[job.op] || PHASES.copy;
     const visiblePhases = phases.filter(([k]) => k !== "verify" || st.verify);
     let now = p.scanning ? "scan" : p.phase || "scan";
+    // each file's verify pass, while there is data left to copy, is still the copy step: the
+    // steps would flip at every file
+    if (now === "verify" && p.bytes_done < p.bytes_total) now = job.op === "move" ? "move" : "copy";
     if (job.state === "done") now = "end";
     if (job.state === "queued") now = "";
-    const nowIndex = visiblePhases.findIndex(([k]) => k === now);
+    let nowIndex = visiblePhases.findIndex(([k]) => k === now);
+    // a phase this kind of job does not list (an extraction before its first progress): the first step
+    if (nowIndex < 0 && now) nowIndex = 0;
     const broken = job.state === "failed" || job.state === "cancelled";
-    $(".xf-steps", d).innerHTML = visiblePhases
+    setHTML($(".xf-steps", d), visiblePhases
       .map(([k, label], i) => {
         const cls = i < nowIndex || job.state === "done" ? "past" : i === nowIndex ? (broken ? "stop" : "now") : "";
         const mark = cls === "past" ? "✓" : cls === "stop" ? "✕" : i + 1;
         return (i ? `<span class="line ${i <= nowIndex ? "past" : ""}"></span>` : "") + `<span class="st ${cls}"><i>${mark}</i>${t(label)}</span>`;
       })
-      .join("");
+      .join(""));
 
     // the big numbers
-    $(".pct", d).textContent = pctText(st.pct, finished(job));
+    const pctShown = pctText(st.pct, finished(job));
+    $(".pct", d).textContent = pctShown;
     if (st.byBytes) {
-      $(".bytes", d).innerHTML = `${size(p.bytes_done)} <span>${t("di")} ${size(p.bytes_total)}</span>`;
+      setHTML($(".bytes", d), `${size(p.bytes_done)} <span>${t("di")} ${size(p.bytes_total)}</span>`);
     } else {
-      $(".bytes", d).innerHTML = `${int(p.files_done)} <span>${t("di")} ${int(p.files_total)}</span>`;
+      setHTML($(".bytes", d), `${int(p.files_done)} <span>${t("di")} ${int(p.files_total)}</span>`);
     }
     $(".files", d).textContent = p.scanning
       ? t("Analisi: {f} file, {b} trovati…", { f: int(p.files_total), b: size(p.bytes_total) })
@@ -802,29 +899,34 @@ class JobDialog {
         : count(p.files_total, "elemento", "elementi", int);
     const bar = $(".pbar.main", d);
     bar.className = "pbar big main glide " + barClass(job);
+    // what a screen reader announces: the number on screen; none while counting
+    if (p.scanning) bar.removeAttribute("aria-valuenow");
+    else bar.setAttribute("aria-valuenow", String(Math.min(100, Math.floor(st.pct * 100))));
 
     const subL = job.cancelling ? t("Annullamento in corso…") : job.state === "queued" ? t("In attesa che finisca un altro trasferimento") : job.state === "paused" ? t("In pausa") : job.state === "conflict" ? t("In attesa di una tua scelta") : job.stalled_s ? t("Nessun dato da {n} s", { n: int(job.stalled_s) }) : p.scanning ? t("Conteggio di file e cartelle…") : "";
     $(".sub-l", d).textContent = subL;
     const notes = [];
-    if (st.verify && st.byBytes) notes.push(t("verificati {a} di {b}", { a: size(p.verify_bytes), b: size(p.bytes_total) }));
+    // what no verification will read (skipped, renamed) is left out of both numbers
+    if (st.verify && st.byBytes) notes.push(t("verificati {a} di {b}", { a: size(p.verify_bytes), b: size(Math.max(0, p.bytes_total - (p.verify_skip || 0))) }));
     if (p.instant) notes.push(t("{n} senza copiare dati (reflink o rinomina)", { n: int(p.instant) }));
     if (p.skipped) notes.push(t("{n} saltati", { n: int(p.skipped) }));
     $(".sub-r", d).textContent = notes.join(" · ");
 
     // stats
+    const running = job.state === "running";
     const end = st.eta != null ? Date.now() + st.eta : null;
     const methods = methodLabels();
     const cells = [
-      [t("Velocità"), st.byBytes ? speed(st.now) : t("{n}/s", { n: int(Math.round(st.filesRate)) }), true],
+      [t("Velocità"), !running ? "—" : st.byBytes ? speed(st.now) : t("{n}/s", { n: perSecond(st.now) }), true],
       [t("Media"), st.byBytes ? speed(st.avg) : "—"],
       [t("Picco"), st.byBytes ? speed(st.peak) : "—"],
-      [t("File al secondo"), st.filesRate ? st.filesRate.toFixed(st.filesRate < 10 ? 1 : 0).replace(".", ",") : "—"],
+      [t("File al secondo"), st.filesRate ? perSecond(st.filesRate) : "—"],
       [t("Trascorso"), duration(st.elapsed)],
       [t("Rimanente"), finished(job) ? "—" : st.eta != null ? "~ " + duration(st.eta) : p.scanning ? t("calcolo…") : "—", true],
       [t("Fine prevista"), end ? clock(end) : finished(job) && job.finished ? clock(job.finished) : "—"],
       [t("Metodo"), methods[p.method] || "—"],
     ];
-    $(".xf-stats", d).innerHTML = cells.map(([k, v, hl]) => `<div class="stat ${hl ? "hl" : ""}"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join("");
+    setHTML($(".xf-stats", d), cells.map(([k, v, hl]) => `<div class="stat ${hl ? "hl" : ""}"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join(""));
 
     // the item in flight is built by glideBars, with every poll; its numbers change here
     const cur = $(".xf-current", d);
@@ -835,6 +937,9 @@ class JobDialog {
       $(".share", cur).textContent = `${pctText(fileShare(p), false)}%`;
     }
 
+    // where the keyboard focus is, read before buttons and boxes are hidden: the browser drops
+    // the focus of an element the moment it hides it
+    const focused = activeElement();
     if (!tickOnly) {
       this.renderConflict(job);
       this.renderErrors(job);
@@ -854,8 +959,9 @@ class JobDialog {
       if (job.msg === "need_password") {
         sum.className = "xf-summary failed";
         if (!$(".pw", sum)) {
+          sum._html = null;
           sum.innerHTML = `${svg("shield")}<div style="flex:1"><b>${t("L'archivio è protetto da password")}</b>
-            <form class="pw" style="display:flex;gap:8px;margin-top:8px"><input type="password" class="input" style="flex:1" placeholder="${t("Password")}" autocomplete="off"><button class="btn primary">${t("Estrai")}</button></form></div>`;
+            <form class="pw" style="display:flex;gap:8px;margin-top:8px"><input type="password" class="input" style="flex:1" placeholder="${t("Password")}" aria-label="${t("Password")}" autocomplete="off"><button class="btn primary">${t("Estrai")}</button></form></div>`;
           const form = $(".pw", sum);
           form.onsubmit = (e) => {
             e.preventDefault();
@@ -867,19 +973,34 @@ class JobDialog {
           setTimeout(() => $("input", form)?.focus());
         }
       } else {
-        const head = allFailed(job) ? `${t(STATE.failed)}: ${firstError(job)}` : job.state === "done" ? doneLabel(job, op) : !job.msg || job.msg === t(STATE[job.state]) ? t(STATE[job.state]) : `${t(STATE[job.state])}: ${jobMsg(job)}`;
-        sum.innerHTML = `${svg(ok ? "check" : "alert")}<div><b>${esc(head)}</b>${esc(parts.join(" · "))}</div>`;
+        const why = jobMsg(job);
+        const head = allFailed(job) ? `${t(STATE.failed)}: ${firstError(job)}` : job.state === "done" ? doneLabel(job, op) : why ? `${t(STATE[job.state])}: ${why}` : t(STATE[job.state]);
+        setHTML(sum, `${svg(ok ? "check" : "alert")}<div><b>${esc(head)}</b>${esc(parts.join(" · "))}</div>`);
       }
     } else sum.hidden = true;
 
     // buttons
-    $(".b-pause", d).hidden = finished(job) || job.state === "queued" || job.op === "delete" && job.source !== "local";
-    $(".b-pause", d).innerHTML = job.state === "paused" ? `${svg("play")} ${t("Riprendi")}` : `${svg("pause")} ${t("Pausa")}`;
-    $(".b-cancel", d).hidden = finished(job);
+    const pause = $(".b-pause", d);
+    const cancel = $(".b-cancel", d);
+    // with a question waiting, the answer is what goes on: no pause there
+    pause.hidden = finished(job) || job.state === "queued" || job.state === "conflict" || (job.op === "delete" && job.source !== "local");
+    setHTML(pause, job.state === "paused" ? `${svg("play")} ${t("Riprendi")}` : `${svg("pause")} ${t("Pausa")}`);
+    cancel.hidden = finished(job);
+    // being cancelled: nothing more to ask of it
+    pause.disabled = cancel.disabled = !!job.cancelling;
     $(".b-start", d).hidden = job.state !== "queued" || job.source === "local";
     $(".b-close", d).hidden = !finished(job);
     $(".b-open", d).hidden = !finished(job) || !job.info.dest;
     $(".b-retry", d).hidden = !job.interrupted;
+    // the focus was on something that went away (Pause, Cancel, a conflict answered): to Close
+    // once the job is over, else to the dialog itself; not when the focus has moved on since (to
+    // a conflict's first answer)
+    const nowFocus = activeElement();
+    const moved = nowFocus && nowFocus !== focused && d.contains(nowFocus);
+    if (!moved && focused && focused !== d && d.contains(focused) && (!focused.getClientRects().length || focused.disabled)) {
+      const close = $(".b-close", d);
+      (close.hidden ? d : close).focus();
+    }
     // no speed limit for uploads from this computer: the browser sends as fast as it can
     // a finished job has no speed limit: the place goes to its buttons (a phone is narrow)
     $(".xf-foot .left", d).style.display = finished(job) ? "none" : "";
@@ -921,10 +1042,18 @@ class JobDialog {
         <label class="check" style="margin-left:auto"><input type="checkbox" class="all"> ${t("Applica a tutti")}</label>
       </div>
       <div class="hint" style="margin-top:6px">${t("«Mantieni entrambi» salva il nuovo come {n}", { n: `<b>${esc(c.rename_to)}</b>` })}</div>`;
-    box.querySelectorAll("[data-a]").forEach((b) => (b.onclick = () => {
-      control(job, "answer", { policy: b.dataset.a, all: $(".all", box).checked, conflict: c.id });
+    box.querySelectorAll("[data-a]").forEach((b) => (b.onclick = async () => {
+      // hidden at once; back if the answer did not get through
       box.hidden = true;
+      this.dlg.focus();
+      const ok = await control(job, "answer", { policy: b.dataset.a, all: $(".all", box).checked, conflict: c.id });
+      if (!ok && this.conflictId === c.id) {
+        this.conflictId = null;
+        this.renderConflict(this.job);
+      }
     }));
+    // a question to answer: the keyboard goes to its first answer
+    $("[data-a]", box).focus();
   }
 
   renderErrors(job) {
@@ -932,6 +1061,10 @@ class JobDialog {
     const errs = job.errors || [];
     box.hidden = !errs.length;
     if (!errs.length) return;
+    // rebuilt only when there are more: an open list keeps its scroll and selection
+    const key = `${errs.length}/${job.progress.errors}`;
+    if (this.errorsKey === key) return;
+    this.errorsKey = key;
     $("summary", box).textContent = count(job.progress.errors || errs.length, "errore", "errori", int);
     $("ul", box).innerHTML = errs.map((e) => `<li><span title="${esc(e.path)}">${esc(e.path)}</span><span title="${esc(e.msg || "")}">${esc(errorText(e))}</span></li>`).join("");
   }
@@ -952,8 +1085,12 @@ class JobDialog {
     const g = c.getContext("2d");
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     g.clearRect(0, 0, W, H);
-    // the theme's colours, read once per dialog (a full style lookup each frame is not free)
-    this.colors ||= new Map();
+    // the theme's colours, read once per theme (a full style lookup each frame is not free)
+    const theme = themeKey();
+    if (!this.colors || this.colorsTheme !== theme) {
+      this.colors = new Map();
+      this.colorsTheme = theme;
+    }
     const col = (v) => {
       let c = this.colors.get(v);
       if (c === undefined) {
@@ -1005,9 +1142,10 @@ class JobDialog {
     // at once, shrinks only once everything fits in half of it), so it does not breathe
     const peakV = plot.reduce((a, p) => Math.max(a, p.v), 0);
     const want = Math.max(peakV * 1.1, st.avg * 1.3, 1);
-    if (!this.yTop || want > this.yTop.top || want < this.yTop.top * 0.5 || this.yAxis !== this.axis) {
-      this.yTop = roundTop(want);
+    if (!this.yTop || want > this.yTop.top || want < this.yTop.top * 0.5 || this.yAxis !== this.axis || this.yBytes !== st.byBytes) {
+      this.yTop = roundTop(want, st.byBytes);
       this.yAxis = this.axis;
+      this.yBytes = st.byBytes;
     }
     const ymax = this.shownTop(this.yTop.top);
     const tick = this.yTop.step;
@@ -1036,7 +1174,7 @@ class JobDialog {
       g.stroke();
       if (k) {
         g.fillStyle = col("--faint");
-        g.fillText(st.byBytes ? tickSpeed(k * tick) : t("{n}/s", { n: int(k * tick) }), pad.l + w + 6, y);
+        g.fillText(st.byBytes ? tickSpeed(k * tick) : tickCount(k * tick), pad.l + w + 6, y);
       }
     }
     g.setLineDash([]);
@@ -1159,8 +1297,14 @@ class JobDialog {
       g.fill();
       if (!this.tip) this.tip = this.chartBox.appendChild(h(`<div class="tip"></div>`));
       const pct = st.totalWork ? Math.round((best.w / st.totalWork) * 100) : 0;
-      this.tip.textContent = `${fmtTime(best.t)} · ${st.byBytes ? speed(best.v) : t("{n}/s", { n: int(best.v) })} · ${pct}%`;
-      this.tip.style.left = Math.min(W - this.tip.offsetWidth - 4, Math.max(4, x - this.tip.offsetWidth / 2)) + "px";
+      const text = `${fmtTime(best.t)} · ${st.byBytes ? speed(best.v) : t("{n}/s", { n: perSecond(best.v) })} · ${pct}%`;
+      // measured only when its text changes: a layout read at every mouse move is not free
+      if (this.tip.textContent !== text || this.tip.hidden) {
+        this.tip.hidden = false;
+        this.tip.textContent = text;
+        this.tipW = this.tip.offsetWidth;
+      }
+      this.tip.style.left = Math.min(W - this.tipW - 4, Math.max(4, x - this.tipW / 2)) + "px";
       this.tip.style.top = "4px";
       this.tip.hidden = false;
     } else if (this.tip) this.tip.hidden = true;
@@ -1276,9 +1420,12 @@ function monotoneTangents(xy) {
   return m;
 }
 
-/** A round scale over `v`: 3–5 ticks of 1, 2, 2.5 or 5 × 10ⁿ in the unit the labels use. */
-function roundTop(v) {
-  const unit = speedUnit(v / 3);
+/**
+ * A round scale over `v`: 3–5 ticks of 1, 2, 2.5 or 5 × 10ⁿ in the unit the labels use (bytes per
+ * second in 1024ⁿ or 1000ⁿ, files per second as they are).
+ */
+function roundTop(v, bytes = true) {
+  const unit = bytes ? speedUnit(v / 3) : 1;
   const step = niceStep(v / unit / 4) * unit;
   return { top: step * Math.ceil(v / step - 1e-9), step };
 }
@@ -1293,7 +1440,7 @@ function speedUnit(bps) {
 function tickSpeed(bps) {
   const [, unit] = sizeParts(bps);
   const v = bps / speedUnit(bps);
-  return `${(Math.round(v * 10) / 10).toLocaleString(LOCALE)} ${unit}/s`;
+  return `${v.toLocaleString(LOCALE, { maximumFractionDigits: 2 })} ${unit}/s`;
 }
 
 function niceStep(x) {

@@ -507,6 +507,7 @@ img[data-heic]:not([src]) { display: none; }
   border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: var(--surface-2); cursor: pointer;
 }
 .jcard:hover { border-color: var(--border-strong); }
+.jcard:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .jcard-top { display: flex; align-items: center; gap: 9px; }
 .jcard-top .op { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); flex: none; }
 .jcard-top .op svg { width: 15px; height: 15px; }
@@ -547,12 +548,21 @@ img[data-heic]:not([src]) { display: none; }
 /* bars moved frame by frame from JS (JobDialog.glide): a CSS transition would lag behind */
 .pbar.glide > .fill, .pbar.glide > .verify { transition: none; }
 .pbar.paused > .fill { background: var(--warn); box-shadow: none; }
-.pbar.paused > .fill::after, .pbar.idle > .fill::after { animation: none; background: none; }
+/* the sheen says "moving": not on a bar that stopped */
+.pbar.paused > .fill::after, .pbar.idle > .fill::after,
+.pbar.done > .fill::after, .pbar.failed > .fill::after { animation: none; background: none; }
 .pbar.done > .fill { background: var(--ok); box-shadow: 0 0 10px color-mix(in oklch, var(--ok) 35%, transparent); }
 .pbar.failed > .fill { background: var(--crit); }
-.pbar.indeterminate > .fill { width: 30% !important; animation: indet 1.3s ease-in-out infinite; transition: none; }
+/* moved with transform (no layout per frame); the bar is 30% wide: -100% to 333% crosses it all */
+.pbar.indeterminate > .fill { width: 30% !important; animation: indet 1.3s ease-in-out infinite; transition: none; will-change: transform; }
 @keyframes sheen { from { background-position: 120% 0; } to { background-position: -120% 0; } }
-@keyframes indet { from { left: -30%; } to { left: 100%; } }
+@keyframes indet { from { transform: translateX(-100%); } to { transform: translateX(333%); } }
+@media (prefers-reduced-motion: reduce) {
+  .pbar > .fill, .pbar > .verify { transition: none; }
+  .pbar > .fill::after { animation: none; background: none; }
+  /* still, in the middle */
+  .pbar.indeterminate > .fill { animation: none; transform: translateX(117%); }
+}
 
 /* ---------- transfers: the detailed dialog ---------- */
 dialog.xfer { max-width: min(96vw, 520px); }
@@ -598,6 +608,11 @@ dialog.xfer { max-width: min(96vw, 520px); }
   background: var(--surface-3); border: 1px solid var(--border-strong); white-space: nowrap; font-variant-numeric: tabular-nums; z-index: 2;
 }
 .xf-chart .legend { position: absolute; top: 3px; left: 8px; display: flex; gap: 10px; font-size: 10px; color: var(--faint); pointer-events: none; }
+.xf-chart .legend .axis-toggle {
+  pointer-events: auto; cursor: pointer; background: none; border: 0; padding: 0; margin: 0;
+  font: inherit; color: inherit; text-decoration: underline dotted;
+}
+.xf-chart .legend .axis-toggle:hover { color: var(--muted); }
 .xf-chart .legend i { display: inline-block; width: 10px; height: 3px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
 
 .xf-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
