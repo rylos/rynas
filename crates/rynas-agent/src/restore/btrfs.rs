@@ -102,11 +102,17 @@ pub struct Choice {
 impl Choice {
     /// Its mount point, or what the plan and the log say when it has none.
     pub fn where_text(&self) -> String {
-        match (self.mount.is_empty(), self.place.is_empty()) {
-            (false, _) => self.mount.clone(),
-            (true, false) => format!("not mounted, inside {}", self.place),
-            (true, true) => "not mounted".into(),
-        }
+        where_text(&self.mount, &self.place)
+    }
+}
+
+/// Where a subvolume is, in the plan, the log and the TUI: its mount point, or for a nested
+/// one without a mount its place (`not mounted, inside /home/games`).
+pub fn where_text(mount: &str, place: &str) -> String {
+    match (mount.is_empty(), place.is_empty()) {
+        (false, _) => mount.to_string(),
+        (true, false) => format!("not mounted, inside {place}"),
+        (true, true) => "not mounted".into(),
     }
 }
 
@@ -360,6 +366,28 @@ fn set_aside(target: &Path, stamp: &str) -> Result<PathBuf, String> {
     Err(format!("{}: too many earlier copies set aside", target.display()))
 }
 
+/// A new folder `<staging>/<stamp>` for one run, or `<stamp>_N` like btrbk's names when a
+/// run of the same minute (a retry) left its folder there.
+fn new_run_dir(staging: &Path, stamp: &str) -> Result<PathBuf, String> {
+    for k in 0..100 {
+        let p = staging.join(if k == 0 { stamp.to_string() } else { format!("{stamp}_{k}") });
+        match std::fs::create_dir(&p) {
+            Ok(()) => return Ok(p),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("{}: {e}", p.display())),
+        }
+    }
+    Err(format!("{}: too many runs in the same minute", staging.display()))
+}
+
+/// `there` (in the snapshot folder) is the snapshot `got` was received from: read-only, and a
+/// copy received earlier (same received UUID) or the PC's own original (its UUID is what the
+/// NAS copy was received from).
+fn same_snapshot(there: &Path, got: &Path) -> bool {
+    let (a, b) = (btrfs::subvol_info(there), btrfs::subvol_info(got));
+    matches!((&a, &b), (Some(a), Some(b)) if a.readonly && b.received_uuid.is_some() && a.received_uuid.as_ref().or(a.uuid.as_ref()) == b.received_uuid.as_ref())
+}
+
 /// Removes what a run received into `dir` (the subvolume of the stream, if any), then the
 /// folder itself.
 fn discard(dir: &Path, log: &mut Log) {
@@ -604,8 +632,9 @@ impl RestoreSource for BtrfsSource {
             use std::os::unix::fs::DirBuilderExt;
             std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&staging).map_err(|e| format!("{}: {e}", staging.display()))?;
         }
-        let run_dir = staging.join(&stamp);
-        std::fs::create_dir(&run_dir).map_err(|e| format!("{}: {e}", run_dir.display()))?;
+        let run_dir = new_run_dir(&staging, &stamp)?;
+        // the PC's snapshot folder in the pool (made after the data)
+        let sd = in_pool(&top, &snapshot_dir_in_pool(&m)?)?;
         let total: u64 = sel.chosen.iter().filter_map(|c| c.referenced).sum();
         let mut done = 0u64;
         let mut received: Vec<(PathBuf, &Choice)> = Vec::new();
@@ -631,7 +660,12 @@ impl RestoreSource for BtrfsSource {
                 if let Some(parent) = target.parent() {
                     std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
                 }
-                btrfs::snapshot_rw(&got, &target)?;
+                // the same snapshot already in the snapshot folder (adding to the PC's own
+                // filesystem) stays the parent of the next send, so the subvolume is made from
+                // it: the next send's parent must be a snapshot the subvolume comes from
+                let kept = sd.join(&c.snapshot);
+                let from = if same_snapshot(&kept, &got) { kept } else { got.clone() };
+                btrfs::snapshot_rw(&from, &target)?;
                 log.line(format!("{}: writable from {}", c.path, c.snapshot));
             }
             Ok(())
@@ -647,7 +681,6 @@ impl RestoreSource for BtrfsSource {
             return Err(e);
         }
         // the received snapshots into the PC's snapshot folder: the parents of the next sends
-        let sd = in_pool(&top, &snapshot_dir_in_pool(&m)?)?;
         std::fs::create_dir_all(&sd).map_err(|e| format!("{}: {e}", sd.display()))?;
         for (dir, c) in &received {
             let to = sd.join(&c.snapshot);
@@ -661,10 +694,7 @@ impl RestoreSource for BtrfsSource {
                     // copy received earlier (same received UUID) or the PC's own original
                     // (its UUID is what the NAS copy was received from); that one stays the
                     // parent, the copy just received goes
-                    let there = btrfs::subvol_info(&to);
-                    let got = btrfs::subvol_info(&dir.join(&c.snapshot));
-                    let same = matches!((&there, &got), (Some(a), Some(b)) if a.readonly && b.received_uuid.is_some() && a.received_uuid.as_ref().or(a.uuid.as_ref()) == b.received_uuid.as_ref());
-                    if same {
+                    if same_snapshot(&to, &dir.join(&c.snapshot)) {
                         discard(dir, log);
                         log.line(format!("{} is already in {} (the same snapshot): it stays the parent, the copy just received is removed", c.snapshot, sd.display()));
                     } else {
@@ -943,5 +973,15 @@ mod tests {
         m.btrbk.as_mut().unwrap().subvolumes[0].path = "@".into();
         m.btrbk.as_mut().unwrap().snapshot_dir = "/../../etc".into();
         assert!(snapshot_dir_in_pool(&m).is_err());
+    }
+
+    #[test]
+    fn a_retry_in_the_same_minute_gets_its_own_folder() {
+        let t = tempfile::tempdir().unwrap();
+        let a = new_run_dir(t.path(), "20261113T1200").unwrap();
+        let b = new_run_dir(t.path(), "20261113T1200").unwrap();
+        assert_eq!((a.file_name().unwrap(), b.file_name().unwrap()), ("20261113T1200".as_ref(), "20261113T1200_1".as_ref()));
+        assert_eq!(where_text("", "/home/games"), "not mounted, inside /home/games");
+        assert_eq!(where_text("/home", ""), "/home");
     }
 }

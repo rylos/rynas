@@ -326,17 +326,8 @@ fn manifest_cmd(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// `btrfs-send` (hidden, for tests on throwaway filesystems): the btrfs method's snapshot,
-/// parent, send and keep steps for the subvolumes named on the command line, to the NAS
-/// named on the command line (no pairing state, no manifest, no lock on `/`).
-fn btrfs_send_cmd(args: &[String]) -> Result<(), String> {
-    root_only()?;
-    let nas = opt(args, "--nas").ok_or(USAGE)?;
-    let token = opt(args, "--token").ok_or(USAGE)?;
-    let dir = opt(args, "--snapshot-dir").ok_or(USAGE)?;
-    if !dir.starts_with('/') {
-        return Err("--snapshot-dir: an absolute path".into());
-    }
+/// The `--subvol A=B` options of the hidden test commands (one or more).
+fn subvol_args(args: &[String]) -> Result<Vec<(String, String)>, String> {
     let mut subvols = Vec::new();
     for (i, a) in args.iter().enumerate() {
         if a == "--subvol" {
@@ -348,6 +339,21 @@ fn btrfs_send_cmd(args: &[String]) -> Result<(), String> {
     if subvols.is_empty() {
         return Err("--subvol NAME=PATH (one or more)".into());
     }
+    Ok(subvols)
+}
+
+/// `btrfs-send` (hidden, for tests on throwaway filesystems): the btrfs method's snapshot,
+/// parent, send and keep steps for the subvolumes named on the command line, to the NAS
+/// named on the command line (no pairing state, no manifest, no lock on `/`).
+fn btrfs_send_cmd(args: &[String]) -> Result<(), String> {
+    root_only()?;
+    let nas = opt(args, "--nas").ok_or(USAGE)?;
+    let token = opt(args, "--token").ok_or(USAGE)?;
+    let dir = opt(args, "--snapshot-dir").ok_or(USAGE)?;
+    if !dir.starts_with('/') {
+        return Err("--snapshot-dir: an absolute path".into());
+    }
+    let subvols = subvol_args(args)?;
     let ep = Endpoint::parse(&nas)?;
     if !ep.tls && !flag(args, "--allow-http") {
         return Err("plain http: add --allow-http".into());
@@ -370,6 +376,8 @@ fn main() {
         "status" => status(),
         "manifest" => manifest_cmd(&args),
         "btrfs-send" => btrfs_send_cmd(&args),
+        // hidden, tests: what a run sends of the subvolumes nested in the given ones
+        "btrfs-nested" => root_only().and_then(|_| send::nested_test_command(std::path::Path::new(&opt(&args, "--root").unwrap_or_else(|| "/".into())), &subvol_args(&args)?)),
         // hidden, tests: the btrfs restore's pool step into a mounted throwaway filesystem
         "btrfs-restore-pool" => root_only().and_then(|_| restore::pool_test(&args)),
         "restore" => root_only().and_then(|_| restore::main(&args)),

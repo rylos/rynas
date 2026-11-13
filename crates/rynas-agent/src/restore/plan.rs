@@ -543,19 +543,13 @@ pub fn fix_cmdline(text: &str, m: &Manifest, map: &[(String, String)]) -> String
 /// old ID left in the loader entries and command lines (`texts`: name, content).
 pub fn sanity(fstab: &str, root_ids: &[String], texts: &[(String, String)], map: &[(String, String)]) -> Vec<String> {
     let mut problems = Vec::new();
-    let root_line = fstab
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.starts_with('#'))
-        .find(|l| l.split_whitespace().nth(1) == Some("/"));
-    if let Some(l) = root_line {
-        let first = l.split_whitespace().next().unwrap_or("");
-        let id = ["UUID=", "PARTUUID="].iter().find_map(|p| first.strip_prefix(p)).map(|v| v.trim_matches('"').to_lowercase());
+    if let Some(l) = fstab::parse(fstab).into_iter().find(|l| l.path == "/") {
+        let id = l.id("UUID=").or_else(|| l.id("PARTUUID=")).map(|v| v.to_lowercase());
         let ids: Vec<String> = root_ids.iter().filter(|i| !i.is_empty()).map(|i| i.to_lowercase()).collect();
         if let Some(id) = id
             && !ids.contains(&id)
         {
-            problems.push(format!("/etc/fstab: the root line names {first}, not the restored root filesystem"));
+            problems.push(format!("/etc/fstab: the root line names {}, not the restored root filesystem", l.spec));
         }
     } else if !fstab.trim().is_empty() {
         problems.push("/etc/fstab: no active line mounts /".into());

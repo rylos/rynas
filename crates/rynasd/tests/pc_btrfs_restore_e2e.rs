@@ -347,7 +347,9 @@ async fn older_nested_snapshot_and_subvolid_fstab() {
 }
 
 /// A subvolume nested in another **without a mount of its own** (`@nhome/games`, the B4 data
-/// loss): sent as its own group (`games`, btrbk's basename), listed in the manifest with its
+/// loss): found by the agent's own discovery (`btrfs-nested`: a read-only, a badly named and
+/// a hidden nested subvolume are notes, the rest goes on), sent as its own group
+/// (`@nhome_games`, its whole path: the same name every run), listed in the manifest with its
 /// parent and its path inside it, and restored after the parent at its nested place, where
 /// the parent's snapshot left an empty folder (or nothing): a writable subvolume with its
 /// files, its received snapshot kept in the snapshot folder, the next backup incremental.
@@ -377,6 +379,30 @@ async fn nested_subvolume_without_a_mount() {
     std::fs::create_dir_all(root.join("etc")).unwrap();
     std::fs::write(home.join("file"), "home").unwrap();
     std::fs::write(games.join("save"), "games v1").unwrap();
+    // the agent's own discovery: games goes with its stable name; a badly named, a read-only
+    // and a hidden nested subvolume (a tmpfs over its folder) are notes, the rest goes on
+    let extra = [home.join("vm+win"), home.join("frozen"), home.join("over/inner")];
+    sh(Command::new("btrfs").args(["subvolume", "create"]).arg(&extra[0]));
+    sh(Command::new("btrfs").args(["subvolume", "snapshot", "-r"]).arg(&games).arg(&extra[1]));
+    std::fs::create_dir_all(home.join("over")).unwrap();
+    sh(Command::new("btrfs").args(["subvolume", "create"]).arg(&extra[2]));
+    sh(Command::new("mount").args(["-t", "tmpfs", "rynas-e2e", "-o", "size=1m"]).arg(home.join("over")));
+    // the source tree stands for `/` (the throwaway mount may be below /tmp, a cache place)
+    let found = Command::new(&agent_bin).args(["btrfs-nested", "--root"]).arg(&src).args(["--subvol", "@nhome=/@nhome"]).output().unwrap();
+    sh(Command::new("umount").arg(home.join("over")));
+    let text = format!("{}{}", String::from_utf8_lossy(&found.stdout), String::from_utf8_lossy(&found.stderr));
+    println!("discovery: {text}");
+    assert!(found.status.success(), "{text}");
+    let sends: Vec<&str> = text.lines().filter(|l| l.starts_with("send ")).collect();
+    assert_eq!(sends, ["send @nhome_games @nhome/games /@nhome/games"], "{text}");
+    assert!(text.lines().any(|l| l.contains("vm+win") && l.contains("no usable snapshot name")), "{text}");
+    assert!(text.lines().any(|l| l.contains("/frozen") && l.contains("read-only")), "{text}");
+    assert!(text.lines().any(|l| l.contains("over/inner") && l.contains("hides it")), "{text}");
+    for p in &extra {
+        sh(Command::new("btrfs").args(["subvolume", "delete"]).arg(p));
+    }
+    std::fs::remove_dir(home.join("over")).unwrap();
+    println!("ok: discovery sends games as @nhome_games, the others are notes");
     let fs_uuid = "00000000-0000-4000-8000-0000000000cc";
     std::fs::write(root.join("etc/fstab"), format!("UUID={fs_uuid} / btrfs subvol=/@n 0 0\nUUID={fs_uuid} /home btrfs subvol=/@nhome 0 0\n")).unwrap();
     let manifest = json!({
@@ -392,7 +418,7 @@ async fn nested_subvolume_without_a_mount() {
         "btrbk": {"snapshot_dir": "/.btrbk_snapshots", "subvolumes": [
             {"name": "@n", "path": "@n", "mount": "/"},
             {"name": "@nhome", "path": "@nhome", "mount": "/home"},
-            {"name": "games", "path": "@nhome/games", "nested_in": "@nhome", "inside": "games"}
+            {"name": "@nhome_games", "path": "@nhome/games", "nested_in": "@nhome", "inside": "games"}
         ], "agent": true}
     });
     std::fs::write(root.join(".rynas/manifest.json"), serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
@@ -404,25 +430,25 @@ async fn nested_subvolume_without_a_mount() {
     let token = n.pair("pc3").await;
     let nas = n.serve().await;
     let (a1, nas1, t1, sd1, r1, h1, g1) = (agent_bin.clone(), nas.clone(), token.clone(), snap_dir.clone(), root.clone(), home.clone(), games.clone());
-    tokio::task::spawn_blocking(move || agent_send(&a1, &nas1, &t1, "run 1", &sd1, &[("@n", r1.as_path()), ("@nhome", h1.as_path()), ("games", g1.as_path())])).await.unwrap();
+    tokio::task::spawn_blocking(move || agent_send(&a1, &nas1, &t1, "run 1", &sd1, &[("@n", r1.as_path()), ("@nhome", h1.as_path()), ("@nhome_games", g1.as_path())])).await.unwrap();
     // the parent's snapshot on the PC holds only an empty folder where games is
     let (_, b) = call(&app, "GET", "/v1/pc-backups/targets/pc3", None).await;
     let d: Value = serde_json::from_slice(&b).unwrap();
     let names: Vec<String> = d["list"].as_array().unwrap().iter().map(|x| x["name"].as_str().unwrap().to_string()).collect();
-    let games_snap = names.iter().find(|x| x.starts_with("games.")).cloned().unwrap_or_else(|| panic!("no games snapshot on the NAS: {names:?}"));
+    let games_snap = names.iter().find(|x| x.starts_with("@nhome_games.")).cloned().unwrap_or_else(|| panic!("no games snapshot on the NAS: {names:?}"));
     let home_snap = names.iter().find(|x| x.starts_with("@nhome.")).unwrap().clone();
     assert!(!folder.join(&home_snap).join("games/save").exists(), "the parent's snapshot carried the nested data");
     // the NAS sees the nested group as part of the PC: ready for bare metal, nothing missing
     let bm = &d["target"]["bare_metal"];
-    assert!(bm["missing"].as_array().unwrap().iter().all(|g| g["subject"] != "games"), "{bm}");
-    assert!(bm["layout"].as_array().unwrap().iter().any(|l| l["name"] == "games" && l["nested_in"] == "@nhome" && l["inside"] == "games"), "{bm}");
+    assert!(bm["missing"].as_array().unwrap().iter().all(|g| g["subject"] != "@nhome_games"), "{bm}");
+    assert!(bm["layout"].as_array().unwrap().iter().any(|l| l["name"] == "@nhome_games" && l["nested_in"] == "@nhome" && l["inside"] == "games"), "{bm}");
     let nas_received = info(&folder.join(&games_snap)).received_uuid;
 
     // custom without the parent: refused before anything is received
     let rcode = n.restore_code("pc3").await;
     let (a2, nas2, pool2) = (agent_bin.clone(), nas.clone(), pool.clone());
     let refused = tokio::task::spawn_blocking(move || {
-        let out = Command::new(&a2).args(["btrfs-restore-pool", "--nas", &nas2, "--allow-http", "--code", &rcode, "--pool"]).arg(&pool2).args(["--mode", "custom", "--subvol", "@n", "--subvol", "games"]).output().unwrap();
+        let out = Command::new(&a2).args(["btrfs-restore-pool", "--nas", &nas2, "--allow-http", "--code", &rcode, "--pool"]).arg(&pool2).args(["--mode", "custom", "--subvol", "@n", "--subvol", "@nhome_games"]).output().unwrap();
         (out.status.success(), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
     })
     .await
@@ -443,7 +469,7 @@ async fn nested_subvolume_without_a_mount() {
     let kept = pool.join("@n/.btrbk_snapshots").join(&games_snap);
     let ki = info(&kept);
     assert!(ki.readonly && ki.received_uuid == nas_received, "{} is not the received games snapshot", kept.display());
-    assert!(!out.contains("games: made empty"), "{out}");
+    assert!(!out.contains("@nhome_games: made empty"), "{out}");
     assert!(!pool.join(".rynas-restore-incoming").exists(), "no staging folder left: {out}");
     println!("ok: @nhome/games restored at its nested place with its data");
 
@@ -452,7 +478,7 @@ async fn nested_subvolume_without_a_mount() {
     sh(Command::new("btrfs").args(["subvolume", "delete"]).arg(pool.join("@nhome/games")));
     let rcode = n.restore_code("pc3").await;
     let (a5, nas5, pool5) = (agent_bin.clone(), nas.clone(), pool.clone());
-    let out = tokio::task::spawn_blocking(move || agent_restore_pool(&a5, &nas5, &rcode, &pool5, &["--mode", "add", "--subvol", "games"])).await.unwrap();
+    let out = tokio::task::spawn_blocking(move || agent_restore_pool(&a5, &nas5, &rcode, &pool5, &["--mode", "add", "--subvol", "@nhome_games"])).await.unwrap();
     assert_eq!(std::fs::read_to_string(pool.join("@nhome/games/save")).unwrap(), "games v1");
     assert!(out.contains("the copy just received is removed"), "{out}");
     assert!(!pool.join(".rynas-restore-incoming").exists(), "no staging folder left after adding: {out}");
@@ -462,7 +488,7 @@ async fn nested_subvolume_without_a_mount() {
     // the next backup of the nested subvolume is incremental on the restored snapshot
     std::fs::write(pool.join("@nhome/games/save"), "games v2").unwrap();
     let (a4, nas4, t4, sd4, g4) = (agent_bin.clone(), nas.clone(), token.clone(), pool.join("@n/.btrbk_snapshots"), pool.join("@nhome/games"));
-    let next = tokio::task::spawn_blocking(move || agent_send(&a4, &nas4, &t4, "after restore", &sd4, &[("games", g4.as_path())])).await.unwrap();
+    let next = tokio::task::spawn_blocking(move || agent_send(&a4, &nas4, &t4, "after restore", &sd4, &[("@nhome_games", g4.as_path())])).await.unwrap();
     assert!(next.contains(&format!("incremental from {games_snap}")), "{next}");
     println!("ok: the next backup of games is incremental on {games_snap}");
 }

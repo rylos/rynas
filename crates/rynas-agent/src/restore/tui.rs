@@ -562,11 +562,8 @@ fn flow(term: &mut DefaultTerminal, args: &[String]) -> Result<Option<Job>, Stri
                     .iter()
                     .map(|x| {
                         let snap = overrides.iter().find(|(n, _)| n == &x.name).map(|(_, s)| s.clone()).unwrap_or_else(|| "the run's snapshot".into());
-                        let at = match (x.mount.is_empty(), whole.place_of(x)) {
-                            (false, _) => x.mount.clone(),
-                            (true, Some(p)) if !x.nested_in.is_empty() => format!("inside {}: {p}", x.nested_in),
-                            _ => "not mounted".into(),
-                        };
+                        let place = if x.nested_in.is_empty() { None } else { whole.place_of(x) };
+                        let at = btrfs::where_text(&x.mount, place.as_deref().unwrap_or(""));
                         format!("{}  {at}  ({snap})", x.name)
                     })
                     .collect();

@@ -194,15 +194,17 @@ pub fn mount_of(path: &str, dev: &str, all: &[Mount]) -> String {
 }
 
 /// The manifest's btrbk block from a `btrbk.conf`: every subvolume with a target, located
-/// on the mount table. `None` when there is none.
-pub fn manifest_block(conf: &[ConfSubvolume], all: &[Mount]) -> Option<BtrbkLayout> {
+/// on the mount table, with the UUID of its filesystem from the device it was located on
+/// (`uuid_of(major:minor)`, empty when unknown): a subvolume not mounted on a second
+/// filesystem still names that filesystem. `None` when there is none.
+pub fn manifest_block(conf: &[ConfSubvolume], all: &[Mount], uuid_of: &dyn Fn(&str) -> String) -> Option<BtrbkLayout> {
     let mut subs = Vec::new();
     for c in conf.iter().filter(|c| !c.targets.is_empty()) {
         let Some((dev, path)) = locate(&c.dir, all) else { continue };
         if subs.iter().any(|s: &BtrbkSubvolume| s.name == c.name) {
             continue;
         }
-        subs.push(BtrbkSubvolume { name: c.name.clone(), mount: mount_of(&path, &dev, all), path, ..Default::default() });
+        subs.push(BtrbkSubvolume { name: c.name.clone(), mount: mount_of(&path, &dev, all), fs_uuid: uuid_of(&dev), path, ..Default::default() });
     }
     if subs.is_empty() {
         return None;
@@ -413,7 +415,8 @@ volume /mnt/btr_pool
         let sent: Vec<_> = l.subvolumes.iter().filter(|c| c.skip.is_none()).map(|c| (c.path.as_str(), c.mount.as_str())).collect();
         assert_eq!(sent, [("@", "/"), ("@home", "/home"), ("@games", "/home/user/games")]);
         // the legacy manifest block keeps btrbk's names
-        let b = manifest_block(&parse_conf(ARCH_CONF), &all).unwrap();
+        let b = manifest_block(&parse_conf(ARCH_CONF), &all, &|dev| if dev == "0:25" { "fs-root".into() } else { String::new() }).unwrap();
+        assert!(b.subvolumes.iter().all(|s| s.fs_uuid == "fs-root"));
         assert_eq!(b.snapshot_dir, "/mnt/btr_pool/btrbk_snapshots");
         assert!(!b.agent);
         let names: Vec<_> = b.subvolumes.iter().map(|s| (s.name.as_str(), s.path.as_str(), s.mount.as_str())).collect();

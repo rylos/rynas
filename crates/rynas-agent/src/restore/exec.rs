@@ -107,9 +107,10 @@ fn chroot(log: &mut Log, argv: &[&str]) -> Result<String, String> {
 
 /// GRUB's configuration made again inside the target (`update-grub`, `grub-mkconfig` or
 /// `grub2-mkconfig`), with os-prober off for this run only (`GRUB_DISABLE_OS_PROBER=true` in
-/// its environment): it would add the live system to the PC's menu. The target's
-/// `/etc/default/grub` is not changed.
+/// its environment, and the target's `30_os-prober` not executable meanwhile): it would add
+/// the live system to the PC's menu. The target's `/etc/default/grub` is not changed.
 fn grub_mkconfig(log: &mut Log) -> Result<String, String> {
+    use std::os::unix::fs::PermissionsExt;
     let argv: &[&str] = if chroot_has("update-grub") {
         &["update-grub"]
     } else if chroot_has("grub-mkconfig") {
@@ -119,7 +120,24 @@ fn grub_mkconfig(log: &mut Log) -> Result<String, String> {
     };
     let mut v = vec!["chroot", TARGET];
     v.extend_from_slice(argv);
-    run_env(log, &v, &[("GRUB_DISABLE_OS_PROBER", "true")])
+    // grub-mkconfig sources /etc/default/grub (and grub.d/*.cfg) after its environment, so
+    // a `GRUB_DISABLE_OS_PROBER=false` there wins over the variable: the os-prober script
+    // itself is made non-executable for this run, and its mode put back after
+    let prober = in_target("/etc/grub.d/30_os-prober");
+    let mode = std::fs::symlink_metadata(&prober).ok().filter(|m| m.is_file()).map(|m| m.permissions().mode()).filter(|m| m & 0o111 != 0);
+    if let Some(m) = mode {
+        match std::fs::set_permissions(&prober, std::fs::Permissions::from_mode(m & !0o111)) {
+            Ok(()) => log.line("/etc/grub.d/30_os-prober: not executable while GRUB's menu is made (the live system stays out of it)"),
+            Err(e) => log.line(format!("/etc/grub.d/30_os-prober: {e} (os-prober may add the live system to the menu)")),
+        }
+    }
+    let r = run_env(log, &v, &[("GRUB_DISABLE_OS_PROBER", "true")]);
+    if let Some(m) = mode
+        && let Err(e) = std::fs::set_permissions(&prober, std::fs::Permissions::from_mode(m))
+    {
+        log.problem(format!("/etc/grub.d/30_os-prober: its mode could not be put back ({e}): chmod {m:o} it"));
+    }
+    r
 }
 
 /// `tool` is on this live system (`PATH` or the usual folders).
@@ -593,12 +611,42 @@ fn add_crypttab_keys(log: &mut Log, plan: &Plan, passphrase: Option<&str>) {
             log.problem(format!("{}: crypttab opens it with {}, which is not in the restored system: add a key for it after the first boot", f[0], f[2]));
             continue;
         }
+        let part = match keyfile_args(f.get(3).copied().unwrap_or("")) {
+            Ok(a) => a,
+            Err(e) => {
+                log.problem(format!("{}: crypttab {e}: add a key for it after the first boot", f[0]));
+                continue;
+            }
+        };
         let k = key.to_string_lossy().into_owned();
-        match run_input(log, &["cryptsetup", "luksAddKey", "--batch-mode", "--key-file", "-", &l.partition, &k], pass.as_bytes()) {
+        let mut argv = vec!["cryptsetup", "luksAddKey", "--batch-mode", "--key-file", "-"];
+        argv.extend(part.iter().map(String::as_str));
+        argv.extend([l.partition.as_str(), k.as_str()]);
+        match run_input(log, &argv, pass.as_bytes()) {
             Ok(()) => log.line(format!("{}: the key file {} added as a second key (crypttab)", f[0], f[2])),
             Err(e) => log.problem(format!("{}: adding the key file {}: {e}", f[0], f[2])),
         }
     }
+}
+
+/// The part of a key file crypttab uses (its options `keyfile-offset=` and `keyfile-size=`)
+/// as `cryptsetup luksAddKey` options for the new key, so the key added is the bytes the
+/// initramfs will read. A value that is not a number is an error (no key added).
+pub fn keyfile_args(opts: &str) -> Result<Vec<String>, String> {
+    let mut v = Vec::new();
+    for o in opts.split(',') {
+        let Some((k, val)) = o.trim().split_once('=') else { continue };
+        let flag = match k {
+            "keyfile-offset" => "--new-keyfile-offset",
+            "keyfile-size" => "--new-keyfile-size",
+            _ => continue,
+        };
+        if val.is_empty() || !val.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(format!("option {k}={val} is not a number"));
+        }
+        v.extend([flag.to_string(), val.to_string()]);
+    }
+    Ok(v)
 }
 
 /// The text fixes after the data: fstab lines of subvolumes not restored commented (with
@@ -879,5 +927,14 @@ mod tests {
         assert_eq!(kernel_cmdline(&m), "root=PARTUUID=x ro quiet");
         m.boot.kernel_cmdline = Some("root=UUID=y rw\n".into());
         assert_eq!(kernel_cmdline(&m), "root=UUID=y rw");
+    }
+
+    #[test]
+    fn crypttab_key_offsets_go_to_the_new_key() {
+        assert!(keyfile_args("luks,discard").unwrap().is_empty());
+        assert!(keyfile_args("").unwrap().is_empty());
+        assert_eq!(keyfile_args("luks,keyfile-offset=512,keyfile-size=4096").unwrap(), ["--new-keyfile-offset", "512", "--new-keyfile-size", "4096"]);
+        assert!(keyfile_args("keyfile-size=4k").is_err());
+        assert!(keyfile_args("keyfile-offset=").is_err());
     }
 }

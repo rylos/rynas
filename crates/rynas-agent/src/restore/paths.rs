@@ -5,27 +5,8 @@
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 
-/// A path of the manifest below a top level or a root, as plain names joined by `/` (the
-/// leading and trailing `/` dropped; `""` is the top itself). `None` for `..`, `.`, an
-/// empty component or a NUL.
-pub fn safe_rel(p: &str) -> Option<String> {
-    if p.contains('\0') {
-        return None;
-    }
-    let t = p.trim_matches('/');
-    if t.is_empty() {
-        return Some(String::new());
-    }
-    t.split('/').all(|c| !c.is_empty() && c != "." && c != "..").then(|| t.to_string())
-}
-
-/// `child` is `parent` or below it: mount points (`/home`, `/home/me`) and paths from a top
-/// level (`@`, `@/var/lib`) alike, with or without the slashes at the ends; `/` (or `""`)
-/// holds everything. `/home` does not hold `/homework`.
-pub fn under(parent: &str, child: &str) -> bool {
-    let (p, c) = (parent.trim_matches('/'), child.trim_matches('/'));
-    p.is_empty() || c == p || c.strip_prefix(p).is_some_and(|r| r.starts_with('/'))
-}
+/// The path rules shared with the backup side.
+pub use crate::mounts::{safe_rel, under};
 
 /// Most symlinks followed on one path (Linux' own limit).
 const MAX_LINKS: usize = 40;

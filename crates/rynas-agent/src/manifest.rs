@@ -403,10 +403,22 @@ pub fn write(m: &Manifest, root: &Path) -> Result<PathBuf, String> {
 /// The legacy btrbk PC's part of the manifest: the btrbk block read from `btrbk.conf`
 /// (none when it sends nothing), then [`add_block`].
 pub fn add_btrbk(m: &mut Manifest, all: &[Mount], conf: &str, root: &Path, copy: bool) -> Vec<String> {
-    let Some(b) = crate::btrbk::manifest_block(&crate::btrbk::parse_conf(conf), all) else {
+    let uuid_of = |dev: &str| btrfs_uuid_of_dev(m, all, dev);
+    let Some(b) = crate::btrbk::manifest_block(&crate::btrbk::parse_conf(conf), all, &uuid_of) else {
         return Vec::new();
     };
     add_block(m, all, b, root, copy)
+}
+
+/// The UUID of the manifest's btrfs filesystem mounted from the device `dev` (`major:minor`
+/// of the mount table), empty when none is.
+fn btrfs_uuid_of_dev(m: &Manifest, all: &[Mount], dev: &str) -> String {
+    m.filesystems
+        .iter()
+        .filter(|f| f.fstype == "btrfs")
+        .find(|f| f.mounts.iter().any(|me| all.iter().any(|x| x.fstype == "btrfs" && x.dev == dev && x.path == me.path)))
+        .map(|f| f.uuid.clone())
+        .unwrap_or_default()
 }
 
 /// `/etc/crypttab` lines that open a device with a key file: (name, key file). `none`, `-`,
@@ -433,14 +445,15 @@ pub fn crypttab_keyfiles(text: &str) -> Vec<(String, String)> {
 pub fn add_block(m: &mut Manifest, all: &[Mount], mut b: BtrbkLayout, root: &Path, copy: bool) -> Vec<String> {
     use crate::{bootcopy, btrbk};
     btrbk::mark_captured(m, &b, all);
-    // the filesystem of each subvolume: the btrfs one with the longest mount point above it
-    for s in b.subvolumes.iter_mut().filter(|s| !s.mount.is_empty()) {
+    // the filesystem of each subvolume not told yet: the btrfs one with the longest mount
+    // point above it
+    for s in b.subvolumes.iter_mut().filter(|s| s.fs_uuid.is_empty() && !s.mount.is_empty()) {
         s.fs_uuid = m
             .filesystems
             .iter()
             .filter(|f| f.fstype == "btrfs")
             .flat_map(|f| f.mounts.iter().map(move |me| (me.path.as_str(), f)))
-            .filter(|(p, _)| crate::restore::paths::under(p, &s.mount))
+            .filter(|(p, _)| crate::mounts::under(p, &s.mount))
             .max_by_key(|(p, _)| p.trim_end_matches('/').len())
             .map(|(_, f)| f.uuid.clone())
             .unwrap_or_default();

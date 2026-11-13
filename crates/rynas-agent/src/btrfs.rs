@@ -21,11 +21,30 @@ fn btrfs(args: &[&std::ffi::OsStr]) -> Result<String, String> {
     }
 }
 
+/// `rel` (a path from a top level or below a mount) holds the components `seq` in a row:
+/// `docker/btrfs` matches `var/lib/docker/btrfs/…` and `home/me/.local/share/docker/btrfs/…`.
+fn has_components(rel: &str, seq: &[&str]) -> bool {
+    // `@docker` (a subvolume of its own, mounted at /var/lib/docker) counts as `docker`
+    let c: Vec<&str> = rel.split('/').map(|x| x.trim_start_matches('@')).collect();
+    c.windows(seq.len()).any(|w| w == seq)
+}
+
+/// Container engines' storage, wherever it is (the system's and rootless engines' under a
+/// home: `~/.local/share/docker/btrfs`, `~/.local/share/containers/storage`), and Incus' and
+/// LXD's storage pools: layers and instances the engine manages, never PC data the agent
+/// sends, and never made again by a restore.
+fn container_storage(rel: &str) -> bool {
+    has_components(rel, &["docker", "btrfs"])
+        || has_components(rel, &["containers", "storage"])
+        || has_components(rel, &["incus", "storage-pools"])
+        || has_components(rel, &["lxd", "storage-pools"])
+}
+
 /// Excluded subvolumes a restore makes again, empty (snapper's `.snapshots`, btrbk's
-/// snapshot folders): container engines' layers, Timeshift's and the agent's own snapshots
+/// snapshot folders): container engines' storage, Timeshift's and the agent's own snapshots
 /// are not made again.
 pub fn recreated_on_restore(rel: &str) -> bool {
-    !(rel.contains("docker/btrfs") || rel.contains("containers/storage") || rel.contains("timeshift-btrfs") || rel.split('/').any(|c| c == SNAP_DIR))
+    !(container_storage(rel) || rel.contains("timeshift-btrfs") || rel.split('/').any(|c| c == SNAP_DIR))
 }
 
 /// Nested subvolumes never backed up (some are made again empty at restore:
@@ -38,25 +57,29 @@ pub fn excluded_subvolume(rel: &str) -> bool {
         // btrbk's local snapshots (the usual folder names and the agent's default)
         || rel.split('/').any(|c| c == "btrbk_snapshots" || c == ".btrbk_snapshots")
         || rel.contains("timeshift-btrfs")
-        || rel.contains("var/lib/docker/btrfs")
-        || rel.contains("var/lib/containers/storage")
+        || container_storage(rel)
         || rel.starts_with(SNAP_DIR)
         || rel.contains(&format!("/{SNAP_DIR}/"))
 }
 
 /// Subvolumes nested below the subvolume mounted at `mount`, as paths relative to it (with
 /// their ids), from `btrfs subvolume list -o` (direct children) on it and on each child, down
-/// to `max_depth` levels. Errors give an empty list ([`nested_checked`] tells them).
+/// to `max_depth` levels. Errors give what could be listed ([`nested_checked`] tells them).
 pub fn nested(mount: &Path, max_depth: usize) -> Vec<(String, u64)> {
-    nested_checked(mount, max_depth, &|rel| !excluded_subvolume(rel)).unwrap_or_default()
+    nested_checked(mount, max_depth, &|rel| !excluded_subvolume(rel)).map(|(v, _)| v).unwrap_or_default()
 }
 
+/// What [`nested_checked`] found: the subvolumes (relative path, id), and the children whose
+/// own listing failed (relative path, error): what is below those is missing.
+pub type Nested = (Vec<(String, u64)>, Vec<(String, String)>);
+
 /// [`nested`] with its errors; `descend(rel)` says whether to look inside a child (snapshot
-/// folders hold many subvolumes and are never sent: no need to list them).
-pub fn nested_checked(mount: &Path, max_depth: usize, descend: &dyn Fn(&str) -> bool) -> Result<Vec<(String, u64)>, String> {
-    let mut v = Vec::new();
+/// folders hold many subvolumes and are never sent: no need to list them). Only the listing
+/// of `mount` itself is an `Err`: a child that cannot be listed is noted and the others go on.
+pub fn nested_checked(mount: &Path, max_depth: usize, descend: &dyn Fn(&str) -> bool) -> Result<Nested, String> {
+    let (mut v, mut failed) = (Vec::new(), Vec::new());
     if max_depth == 0 {
-        return Ok(v);
+        return Ok((v, failed));
     }
     let out = btrfs(&["subvolume".as_ref(), "list".as_ref(), "-o".as_ref(), mount.as_os_str()])?;
     let base = btrfs(&["subvolume".as_ref(), "show".as_ref(), mount.as_os_str()])?.lines().next().map(|l| l.trim().to_string()).unwrap_or_default();
@@ -66,26 +89,21 @@ pub fn nested_checked(mount: &Path, max_depth: usize, descend: &dyn Fn(&str) -> 
         let id = l.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
         let Some(path) = l.split(" path ").nth(1) else { continue };
         let path = path.trim().trim_start_matches("<FS_TREE>/");
-        let rel = if base.is_empty() {
-            path.to_string()
-        } else {
-            match path.strip_prefix(&format!("{base}/")) {
-                Some(r) => r.to_string(),
-                None => continue,
-            }
-        };
-        if rel.is_empty() || rel.split('/').any(|c| c.is_empty() || c == "." || c == "..") {
-            continue;
-        }
+        let rel = if base.is_empty() { Some(path) } else { path.strip_prefix(&format!("{base}/")) };
+        let Some(rel) = rel.and_then(crate::mounts::safe_rel).filter(|r| !r.is_empty()) else { continue };
         if max_depth > 1 && descend(&rel) {
-            for (r, i) in nested_checked(&mount.join(&rel), max_depth - 1, &|x| descend(&format!("{rel}/{x}")))? {
-                v.push((format!("{rel}/{r}"), i));
+            match nested_checked(&mount.join(&rel), max_depth - 1, &|x| descend(&format!("{rel}/{x}"))) {
+                Ok((below, bad)) => {
+                    v.extend(below.into_iter().map(|(r, i)| (format!("{rel}/{r}"), i)));
+                    failed.extend(bad.into_iter().map(|(r, e)| (format!("{rel}/{r}"), e)));
+                }
+                Err(e) => failed.push((rel.clone(), e)),
             }
         }
         v.push((rel, id));
     }
     v.sort();
-    Ok(v)
+    Ok((v, failed))
 }
 
 /// The default subvolume as a path from the top level (`None`: the top level itself).
