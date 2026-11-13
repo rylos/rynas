@@ -240,9 +240,43 @@ pub struct PcProgress {
     /// Bytes per second over the last reports.
     #[serde(default)]
     pub speed_bps: u64,
+    /// Free text (English) for older interfaces; [`Self::btrfs`] says the same in fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// The btrfs method: the subvolume being sent now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub btrfs: Option<BtrfsStep>,
     pub updated_ms: u64,
+}
+
+/// What the btrfs method does or did with one subvolume, in fields, so an interface can say
+/// it in its own language (the English `message`/`note` stays for older ones).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BtrfsStep {
+    /// The subvolume's snapshot name prefix (`@home`).
+    pub subvolume: String,
+    /// The snapshot sent (`@home.20261112T0300`).
+    pub snapshot: String,
+    /// The local parent of an incremental send; `None`: a full send.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// Why it failed (finished steps only): one of [`btrfs_step_error`], or a NAS error code
+    /// (`busy`, `already_exists`, `parent_missing`, `invalid_value`, `payload_too_large`…).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    /// The error as it came (English), next to the code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Agent-side error codes of a [`BtrfsStep`].
+pub mod btrfs_step_error {
+    /// The local read-only snapshot could not be taken.
+    pub const SNAPSHOT: &str = "snapshot";
+    /// The connection to the NAS failed (or `btrfs send` itself).
+    pub const TRANSPORT: &str = "transport";
+    /// Cancel was asked for.
+    pub const CANCELLED: &str = "cancelled";
 }
 
 /// How one filesystem was read.
@@ -270,8 +304,12 @@ pub struct Capture {
     pub path: String,
     pub fstype: String,
     pub method: CaptureMethod,
+    /// Free text (English) for older interfaces.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// The btrfs method: what was sent for this subvolume, in fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub btrfs: Option<BtrfsStep>,
 }
 
 /// One run of the agent.
@@ -375,6 +413,9 @@ pub struct PcDevice {
     pub arch: String,
     #[serde(default)]
     pub agent_version: String,
+    /// The PC's root filesystem is btrfs, as its agent last said (`None`: an older agent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_btrfs: Option<bool>,
     pub created_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_seen_ms: Option<u64>,
@@ -539,6 +580,9 @@ pub struct PairRequest {
     pub arch: String,
     #[serde(default)]
     pub agent_version: String,
+    /// The PC's root filesystem is btrfs (sent at pairing, so a PC that never ran is known).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_btrfs: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -590,8 +634,17 @@ pub struct AgentBtrfsReceived {
 pub const AGENT_BTRFS_SNAPSHOTS: &str = "/api/v1/pcbackup/agent/btrfs/snapshots";
 /// The btrfs method's upload: `POST …?snapshot=<name.YYYYMMDDTHHMM[_N]>&parent=<name|none>`,
 /// body = `btrfs send` stream compressed with zstd (`Content-Type: application/zstd`,
-/// chunked). One receive per PC at a time.
+/// chunked). One receive per PC at a time. The stream must be a v1 stream (`btrfs send
+/// --proto 1`). Refusals (409) carry the error code: `busy` (this PC's folder, or too many
+/// PCs at once), `already_exists` (the snapshot is there), [`PARENT_MISSING`] (send in full).
 pub const AGENT_BTRFS_RECEIVE: &str = "/api/v1/pcbackup/agent/btrfs/receive";
+/// Error code of a receive whose parent is not a complete snapshot on the NAS (any more):
+/// the agent sends the same snapshot again in full.
+pub const PARENT_MISSING: &str = "parent_missing";
+/// zstd window of the agent's stream (2 MiB, level 3's own); the NAS decodes windows up to
+/// [`AGENT_ZSTD_WINDOW_LOG_MAX`] (8 MiB) and refuses larger ones (decoder memory).
+pub const AGENT_ZSTD_WINDOW_LOG: u32 = 21;
+pub const AGENT_ZSTD_WINDOW_LOG_MAX: u32 = 23;
 /// The agent's local snapshot folder for the btrfs method when the PC has no btrbk
 /// `snapshot_dir` of its own (btrbk's usual name, so btrbk could take the chain over).
 pub const AGENT_SNAPSHOT_DIR: &str = "/.btrbk_snapshots";
@@ -622,6 +675,8 @@ pub struct AgentStatus {
     pub files_total: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub btrfs: Option<BtrfsStep>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -632,6 +687,9 @@ pub struct AgentReport {
     pub manifest: Option<Manifest>,
     #[serde(default)]
     pub agent_version: String,
+    /// The PC's root filesystem is btrfs (the btrfs method can serve it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_btrfs: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1102,6 +1160,7 @@ mod tests {
             },
             manifest: None,
             agent_version: "0.1.0".into(),
+            root_btrfs: None,
         };
         let j = serde_json::to_value(&r).unwrap();
         assert_eq!(j["run_id"], "r1");

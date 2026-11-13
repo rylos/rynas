@@ -3,9 +3,10 @@
 //! btrfs subvolumes, LUKS parameters (never a header or a key slot), md/LVM reports, swap,
 //! fstab, crypttab, the kernel command line and the boot loader. Written into the root
 //! filesystem (temporary file + rename) before every run, so every version carries the
-//! layout of its own moment; also by `rynas-agent manifest`, which the btrfs method's hooks
-//! runs on PCs that still push with btrbk ([`add_btrbk`]); the agent's own btrfs sender adds
-//! its block with [`add_block`] (boot copies included). [`lock`] keeps runs one at a time.
+//! layout of its own moment; also by `rynas-agent manifest`, which PCs that push with btrbk
+//! run before btrbk (the snippet the NAS shows for such a folder; [`add_btrbk`]); the agent's
+//! own btrfs sender adds its block with [`add_block`] (boot copies included). [`lock`] keeps
+//! runs one at a time.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -408,6 +409,22 @@ pub fn add_btrbk(m: &mut Manifest, all: &[Mount], conf: &str, root: &Path, copy:
     add_block(m, all, b, root, copy)
 }
 
+/// `/etc/crypttab` lines that open a device with a key file: (name, key file). `none`, `-`,
+/// an empty field, a password prompt (`/dev/…` key devices, `/dev/random`/`urandom` for swap
+/// and tmp) are not key files.
+pub fn crypttab_keyfiles(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .map(|l| l.split('#').next().unwrap_or("").trim())
+        .filter(|l| !l.is_empty())
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            let key = *f.get(2)?;
+            let none = key == "none" || key == "-" || key.starts_with("/dev/") || key.starts_with("/proc/");
+            (!none).then(|| (f[0].to_string(), key.to_string()))
+        })
+        .collect()
+}
+
 /// The btrfs method's block (btrbk's or the agent's): the captured marks and, with `copy`,
 /// the boot filesystems outside the sent subvolumes copied into `<root>/.rynas/boot/`. A
 /// failed copy keeps the previous record (marked `stale`, with the error) and its folder;
@@ -416,7 +433,14 @@ pub fn add_btrbk(m: &mut Manifest, all: &[Mount], conf: &str, root: &Path, copy:
 pub fn add_block(m: &mut Manifest, all: &[Mount], mut b: BtrbkLayout, root: &Path, copy: bool) -> Vec<String> {
     use crate::{bootcopy, btrbk};
     btrbk::mark_captured(m, &b, all);
-    let mut problems = Vec::new();
+    let mut problems = crypttab_keyfiles(m.crypttab.as_deref().unwrap_or(""))
+        .into_iter()
+        .map(|(name, key)| {
+            format!(
+                "crypttab: {name} opens with the key file {key}: a bare-metal restore needs that key (keep a copy apart from the PC); an initramfs that embeds it carries it into every root snapshot and boot copy"
+            )
+        })
+        .collect::<Vec<_>>();
     if copy {
         let previous: Vec<BootCopy> = std::fs::read(root.join(".rynas/manifest.json"))
             .ok()
@@ -482,6 +506,13 @@ mod tests {
     fn lvm_names() {
         assert_eq!(split_lvm_name("vg0-root"), ("vg0".into(), "root".into()));
         assert_eq!(split_lvm_name("my--vg-lv--home"), ("my-vg".into(), "lv-home".into()));
+    }
+
+    #[test]
+    fn crypttab_key_files_are_noticed() {
+        let t = "# comment\nroot UUID=1 none luks\nhome UUID=2 /etc/keys/home.key luks\nswap /dev/sda3 /dev/urandom swap\ndata UUID=3 - luks\nusb UUID=4 /dev/disk/by-label/KEY luks # key on a stick\nbad\n";
+        assert_eq!(crypttab_keyfiles(t), [("home".to_string(), "/etc/keys/home.key".to_string())]);
+        assert!(crypttab_keyfiles("").is_empty());
     }
 
     #[test]

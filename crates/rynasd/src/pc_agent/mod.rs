@@ -199,6 +199,13 @@ pub struct Dev {
     pub manifest_reasons: Vec<ReadyReason>,
     #[serde(default)]
     pub revoked: bool,
+    /// The btrfs method's folder this PC sends into ([`crate::pc_backup::PcBackup::agent_folder_id`]),
+    /// set when the method is chosen: a folder removed and made again does not take it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub btrfs_folder: Option<u64>,
+    /// The PC's root filesystem is btrfs (from pairing, then every report).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_btrfs: Option<bool>,
 }
 
 /// A backup group: one repository.
@@ -475,6 +482,18 @@ impl PcAgent {
         })
     }
 
+    /// Wires the btrfs method's side (once, at start): PCs of that method send into its
+    /// folders, and a folder removed there unbinds its PC here ([`Self::folder_removed`]).
+    pub fn bind_btrfs(self: &Arc<Self>, side: Arc<crate::pc_backup::PcBackup>) {
+        let me = Arc::downgrade(self);
+        let _ = side.on_agent_removed.set(Box::new(move |device, folder| {
+            if let Some(a) = me.upgrade() {
+                a.folder_removed(device, folder);
+            }
+        }));
+        let _ = self.btrfs.set(side);
+    }
+
     /// The btrfs method's side, or 409 when it is not running.
     pub fn btrfs_side(&self) -> Res<&Arc<crate::pc_backup::PcBackup>> {
         self.btrfs.get().ok_or_else(|| {
@@ -657,6 +676,7 @@ impl PcAgent {
             os: d.os.clone(),
             arch: d.arch.clone(),
             agent_version: d.agent_version.clone(),
+            root_btrfs: d.root_btrfs,
             created_ms: d.created_ms,
             last_seen_ms: d.last_seen_ms,
             state: state_of(d, progress.is_some(), now_ms()),
@@ -701,6 +721,7 @@ impl PcAgent {
             files_total: s.files_total,
             speed_bps: speed,
             message: s.message,
+            btrfs: s.btrfs,
             updated_ms: now_ms(),
         };
         all.insert(device.to_string(), (p, last));
@@ -1227,13 +1248,24 @@ async fn device_put(
     check_settings(&s)?;
     // the btrfs method sends into the folder of the PC's name (made with `agent` on the
     // btrfs side first); the files method needs the repository the pairing made
-    if s.method == PcMethod::Btrfs && !svc.btrfs_side()?.has_agent_target(&device) {
-        return Err(Error::invalid("method", "make the PC's folder for rynas-agent on the btrfs side first"));
-    }
+    let folder = if s.method == PcMethod::Btrfs {
+        let f = svc.btrfs_side()?.agent_folder_id(&device);
+        if f.is_none() {
+            return Err(Error::invalid("method", "make the PC's folder for rynas-agent on the btrfs side first"));
+        }
+        f
+    } else {
+        None
+    };
     let d = svc.edit(|r| {
         let d = r.devices.get_mut(&device).ok_or_else(|| not_found(&device))?;
         if s.method == PcMethod::Files && d.group.is_empty() {
             return Err(Error::invalid("method", "this PC was paired for btrfs snapshots only (no repository)"));
+        }
+        // choosing the btrfs method binds the PC to the folder there now; saving other
+        // settings keeps the binding (a folder made again is bound only by choosing again)
+        if s.method == PcMethod::Btrfs && (d.settings.method != PcMethod::Btrfs || d.btrfs_folder.is_none()) {
+            d.btrfs_folder = folder;
         }
         if d.settings.plan != s.plan || d.settings.method != s.method {
             d.rev += 1;
@@ -1740,6 +1772,9 @@ async fn status_post(
         }
         m.truncate(cut);
     }
+    if let Some(b) = &mut s.btrfs {
+        maint::bound_step(b);
+    }
     svc.progress(&device, s);
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1757,23 +1792,57 @@ async fn report_post(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// The device of an agent request of the btrfs method: token, then [`PcMethod::Btrfs`].
-fn btrfs_device(svc: &PcAgent, h: &HeaderMap) -> Res<String> {
+/// The device of an agent request of the btrfs method (token, then [`PcMethod::Btrfs`]) and
+/// the folder it is bound to.
+fn btrfs_device(svc: &PcAgent, h: &HeaderMap) -> Res<(String, Option<u64>)> {
     let device = agent_device(svc, h)?;
-    if svc.device(&device)?.settings.method != PcMethod::Btrfs {
+    let d = svc.device(&device)?;
+    if d.settings.method != PcMethod::Btrfs {
         return Err(Error::new(
             StatusCode::CONFLICT,
             error_codes::CONFLICT,
             "this PC uses the files method (choose btrfs snapshots on the NAS)".into(),
         ));
     }
-    Ok(device)
+    Ok((device, d.btrfs_folder))
+}
+
+impl PcAgent {
+    /// The agent folder `folder` of `device` was removed: a PC bound to it stops sending into
+    /// any folder of that name. A PC with only that method is revoked (its token goes); one
+    /// that also has a repository falls back to the files method.
+    pub fn folder_removed(&self, device: &str, folder: u64) {
+        let changed = self.edit(|r| {
+            let Some(d) = r.devices.get_mut(device).filter(|d| d.btrfs_folder == Some(folder)) else {
+                return Ok(false);
+            };
+            d.btrfs_folder = None;
+            if d.group.is_empty() {
+                d.token_sha.clear();
+                d.revoked = true;
+                d.command = None;
+            } else if d.settings.method == PcMethod::Btrfs {
+                d.settings.method = PcMethod::Files;
+            }
+            d.rev += 1;
+            Ok(true)
+        });
+        match changed {
+            Ok(true) => {
+                self.clear_progress(device);
+                self.changed.notify_waiters();
+                tracing::info!(target: "rynas::audit", "pc backup: {device}: its btrfs folder was removed, the PC no longer sends into it");
+            }
+            Ok(false) => {}
+            Err(e) => tracing::warn!("pc backup: {device}: unbinding the removed folder: {}", e.2),
+        }
+    }
 }
 
 async fn btrfs_snapshots_get(State(st): State<PaState>, h: HeaderMap) -> Res<Json<AgentBtrfsListing>> {
     let svc = pa(&st)?;
-    let device = btrfs_device(&svc, &h)?;
-    Ok(Json(svc.btrfs_side()?.agent_listing(&device).await?))
+    let (device, folder) = btrfs_device(&svc, &h)?;
+    Ok(Json(svc.btrfs_side()?.agent_listing(&device, folder).await?))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1793,7 +1862,7 @@ async fn btrfs_receive_post(
     body: axum::body::Body,
 ) -> Res<Json<AgentBtrfsReceived>> {
     let svc = pa(&st)?;
-    let device = btrfs_device(&svc, &h)?;
+    let (device, folder) = btrfs_device(&svc, &h)?;
     let Query(q) = q.map_err(|e| Error::bad_request(e.body_text()))?;
     let parent = q.parent.filter(|p| !p.is_empty() && p != "none");
     let side = svc.btrfs_side()?.clone();
@@ -1803,7 +1872,7 @@ async fn btrfs_receive_post(
             x.last_seen_ms = Some(seen);
         }
     });
-    Ok(Json(side.agent_receive(&device, q.snapshot, parent, body).await?))
+    Ok(Json(side.agent_receive(&device, folder, q.snapshot, parent, body).await?))
 }
 
 async fn restore_login(

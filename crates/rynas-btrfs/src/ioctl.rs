@@ -25,6 +25,8 @@ const IOC_FS_INFO: u64 = ioc(2, 31, 1024);
 const IOC_GET_SUBVOL_INFO: u64 = ioc(2, 60, 504);
 /// `FICLONE` = `_IOW(0x94, 9, int)`.
 const IOC_FICLONE: u64 = ioc(1, 9, 4);
+/// `BTRFS_IOC_SUBVOL_SETFLAGS` = `_IOW(0x94, 26, __u64)`.
+const IOC_SUBVOL_SETFLAGS: u64 = ioc(1, 26, 8);
 
 /// `BTRFS_SUBVOL_RDONLY` (snapshot creation flags).
 const SUBVOL_RDONLY: u64 = 1 << 1;
@@ -262,6 +264,44 @@ pub fn rename_noreplace(dir: &File, from: &str, to: &str) -> io::Result<()> {
         )
     };
     if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// `renameat2(from_dir, from, to_dir, to, RENAME_NOREPLACE)`: never replaces `to`, follows
+/// no symlink in either name (both are single components).
+pub fn rename_noreplace_at(from_dir: &File, from: &str, to_dir: &File, to: &str) -> io::Result<()> {
+    check_name(from, 4088)?;
+    check_name(to, 4088)?;
+    let (f, t) = (
+        CString::new(from).map_err(io::Error::other)?,
+        CString::new(to).map_err(io::Error::other)?,
+    );
+    // SAFETY: valid descriptors and C strings
+    let rc = unsafe {
+        libc::renameat2(
+            from_dir.as_raw_fd(),
+            f.as_ptr(),
+            to_dir.as_raw_fd(),
+            t.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Sets or clears the read-only flag of the subvolume whose top folder is `f`
+/// (`BTRFS_IOC_SUBVOL_SETFLAGS`, needs `CAP_SYS_ADMIN`). Unlike `btrfs property set ro
+/// false`, the received UUID stays: rynasd clears the flag only for the moment a received
+/// snapshot moves out of its staging folder (a read-only directory cannot change parent).
+pub fn set_readonly(f: &File, readonly: bool) -> io::Result<()> {
+    let flags: u64 = if readonly { SUBVOL_RDONLY } else { 0 };
+    // SAFETY: the kernel reads one u64
+    if unsafe { libc::ioctl(f.as_raw_fd(), IOC_SUBVOL_SETFLAGS as _, &flags) } < 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())

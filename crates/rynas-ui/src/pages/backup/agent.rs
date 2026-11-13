@@ -146,8 +146,8 @@ pub fn header_buttons(pair: RwSignal<Option<bool>>) -> AnyView {
 }
 
 /// The tab. `header` is set by the page header's buttons: `Some(true)` add a PC,
-/// `Some(false)` the settings.
-pub fn panel(header: RwSignal<Option<bool>>) -> AnyView {
+/// `Some(false)` the settings. `to_btrfs` opens the tab of the btrfs snapshots.
+pub fn panel(header: RwSignal<Option<bool>>, to_btrfs: Callback<()>) -> AnyView {
     let tab = Tab {
         data: Remote::new(URL),
         open: RwSignal::new(None),
@@ -201,7 +201,14 @@ pub fn panel(header: RwSignal<Option<bool>>) -> AnyView {
         // PCs of the btrfs method are managed in the btrfs tab
         let on_btrfs = o.devices.iter().filter(|d| d.settings.method == PcMethod::Btrfs).count() as u64;
         let files: Vec<&PcDevice> = o.devices.iter().filter(|d| d.settings.method != PcMethod::Btrfs).collect();
-        let btrfs_note = (on_btrfs > 0).then(|| view! { <p class="small muted">{tf("pca.on_btrfs", &[("n", &i18n::count(on_btrfs))])}</p> });
+        let btrfs_note = (on_btrfs > 0).then(|| {
+            view! {
+                <p class="small muted bk-note">
+                    {tf("pca.on_btrfs", &[("n", &i18n::count(on_btrfs))])}" "
+                    <button type="button" class="link-btn" on:click=move |_| to_btrfs.run(())>{tr("pca.on_btrfs_open")}</button>
+                </p>
+            }
+        });
         let pcs = if files.is_empty() {
             view! {
                 <EmptyState icon=icons::MONITOR title=Signal::derive(move || t("bkpc.empty").to_string()) text=Signal::derive(move || t("pca.empty_text").to_string())>
@@ -243,7 +250,8 @@ pub fn panel(header: RwSignal<Option<bool>>) -> AnyView {
             .iter()
             .map(|p| {
                 let id = p.id.clone();
-                let label = format!("{}: {}", t("pca.pairing_cancel"), p.description);
+                let named = if p.description.is_empty() { p.btrfs_target.clone().or_else(|| p.group.clone()).unwrap_or_else(|| i18n::datetime(p.expires_ms)) } else { p.description.clone() };
+                let label = format!("{}: {}", t("pca.pairing_cancel"), named);
                 ui::row(vec![
                     ui::text_cell("bk.f.description", "wrap", if p.description.is_empty() { "—".into() } else { p.description.clone() }),
                     // a group name in the mono face, "its own group" as plain text
@@ -616,15 +624,9 @@ fn drawer(tab: Tab, device: String) -> AnyView {
         let Some(d) = detail.data.get() else { return ().into_any() };
         let p = d.device.clone();
         let run = p.last_run.clone();
-        let progress = p.progress.clone().map(|pr| {
-            let pct = if pr.bytes_total > 0 { (pr.bytes_done as f64 / pr.bytes_total as f64 * 100.0).min(100.0) } else { 0.0 };
-            view! {
-                <div class="pca-progress">
-                    <ui::Meter pct=pct />
-                    <span class="small tnum">{format!("{} / {} · {}/s", i18n::bytes(pr.bytes_done), i18n::bytes(pr.bytes_total), i18n::bytes(pr.speed_bps))}</span>
-                </div>
-            }
-        });
+        let progress = p.progress.as_ref().map(progress_view);
+        // the error of the last run while it is the news: failed, nothing running
+        let last_error = (p.state == PcState::Failed && p.progress.is_none()).then(|| run.as_ref().and_then(|r| r.error.clone())).flatten();
         let ready = if p.bare_metal.ready {
             ui::status(Tone::Ok, t("pca.ready.yes").to_string())
         } else {
@@ -633,7 +635,7 @@ fn drawer(tab: Tab, device: String) -> AnyView {
         let captures = run.as_ref().map(|r| {
             r.captures
                 .iter()
-                .map(|c| view! { <li><span class="mono">{c.path.clone()}</span>" · "{c.fstype.clone()}" · "{tr(method_text(c.method))}{c.note.clone().map(|n| format!(" ({n})"))}</li> })
+                .map(|c| view! { <li><span class="mono">{c.path.clone()}</span>" · "{c.fstype.clone()}" · "{tr(method_text(c.method))}{agent_note(c.btrfs.as_ref(), |s| s.snapshot.as_str(), c.note.as_deref()).map(|n| format!(" ({n})"))}</li> })
                 .collect_view()
         });
         let history = d
@@ -664,7 +666,7 @@ fn drawer(tab: Tab, device: String) -> AnyView {
                 {kv("pca.os", ui::text(format!("{} {} · rynas-agent {}", p.os, p.arch, p.agent_version)))}
                 {kv("pca.last_seen", ui::text(when(p.last_seen_ms)))}
                 {kv("pca.bare_metal", ready)}
-                {run.as_ref().and_then(|r| r.error.clone()).map(|e| kv("pca.last_error", ui::breakable(e.as_str(), "small")))}
+                {last_error.map(|e| kv("pca.last_error", ui::breakable(e.as_str(), "small")))}
                 {run.as_ref().filter(|r| r.changed_count > 0).map(|r| kv("pca.changed", ui::text(tf("pca.changed_n", &[("n", &i18n::count(r.changed_count))]))))}
             </dl>
             {progress}
@@ -735,183 +737,351 @@ fn drawer(tab: Tab, device: String) -> AnyView {
     .into_any()
 }
 
-/// The rynas-agent part of a btrfs-method PC's drawer (Backup › PCs: btrfs snapshots): its
-/// status, live progress, last runs, Back up now / Cancel, schedule, revoke; or, when no
-/// agent is paired under this name yet, a pairing code for it.
-pub(super) fn agent_section(device: String, changed: Callback<()>) -> AnyView {
-    let dev = StoredValue::new(device.clone());
-    let detail = Remote::<PcDeviceDetail>::new(dev_url(&device));
-    let edit = RwSignal::new(false);
-    let ask_revoke = RwSignal::new(false);
-    let busy = RwSignal::new(false);
-    let error = RwSignal::new(None::<String>);
-    let created = RwSignal::new(None::<PairingCreated>);
-    // live progress: read again every 5 s while the PC backs up and the page is visible
-    let ticking = RwSignal::new(false);
-    Effect::new(move |_| {
-        let running = detail.data.with(|d| d.as_ref().is_some_and(|d| d.device.state == PcState::Running || d.device.command.is_some()));
-        if running && !ticking.get_untracked() {
-            ticking.set(true);
-            spawn_local(async move {
-                api::sleep(5000).await;
-                let _ = ticking.try_set(false);
-                if !document().hidden() {
-                    detail.reload();
-                }
-            });
-        }
-    });
-    let command = move |what: &'static str| {
-        let u = format!("{}/{what}", dev_url(&dev.get_value()));
-        busy.set(true);
-        error.set(None);
+/// The rynas-agent part of a btrfs-method PC's drawer (Backup › PCs: btrfs snapshots), in
+/// pieces the drawer places: status and live progress (or, with no agent paired under this
+/// name yet, the code waiting for it or Make a code), Back up now / Cancel for the drawer's
+/// single button row, the last runs, the revoke confirmation. The schedule and Revoke live
+/// in the folder's Settings.
+pub(super) struct AgentCtl {
+    /// The agent paired under the folder's name (fetched once the folder says so).
+    pub detail: Remote<PcDeviceDetail>,
+    dev: StoredValue<String>,
+    busy: RwSignal<bool>,
+    error: RwSignal<Option<String>>,
+    created: RwSignal<Option<PairingCreated>>,
+    /// The codes waiting (read only while no agent is paired).
+    overview: Remote<PcBackupOverview>,
+    /// The revoke confirmation (asked from the folder's Settings).
+    pub ask_revoke: RwSignal<bool>,
+    changed: Callback<()>,
+    /// An agent is paired under this name (changes once, not on every progress poll).
+    pub paired: Memo<bool>,
+}
+
+impl Clone for AgentCtl {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl Copy for AgentCtl {}
+
+impl AgentCtl {
+    /// Nothing is fetched until [`AgentCtl::start`]. `changed`: the folder may have changed
+    /// (a revoke).
+    pub fn new(device: String, ask_revoke: RwSignal<bool>, changed: Callback<()>) -> Self {
+        let detail = Remote::<PcDeviceDetail>::idle(dev_url(&device));
+        let ctl = AgentCtl {
+            detail,
+            paired: Memo::new(move |_| detail.data.with(Option::is_some)),
+            dev: StoredValue::new(device),
+            busy: RwSignal::new(false),
+            error: RwSignal::new(None),
+            created: RwSignal::new(None),
+            overview: Remote::idle(URL),
+            ask_revoke,
+            changed,
+        };
+        // live progress: read again every 5 s while the PC backs up and the page is visible
+        let ticking = RwSignal::new(false);
+        Effect::new(move |_| {
+            let running = ctl.detail.data.with(|d| d.as_ref().is_some_and(|d| d.device.state == PcState::Running || d.device.command.is_some()));
+            if running && !ticking.get_untracked() {
+                ticking.set(true);
+                spawn_local(async move {
+                    api::sleep(5000).await;
+                    let _ = ticking.try_set(false);
+                    if !document().hidden() {
+                        ctl.detail.reload();
+                    }
+                });
+            }
+        });
+        // no agent yet: the codes already made for this folder
+        Effect::new(move |_| {
+            if ctl.unpaired() {
+                ctl.overview.reload();
+            }
+        });
+        ctl
+    }
+
+    pub fn start(self) {
+        self.detail.reload();
+    }
+
+    /// No agent is paired under this name (tracked).
+    fn unpaired(self) -> bool {
+        self.detail.err.with(|e| e.as_deref() == Some("not_found")) && self.detail.data.with(Option::is_none)
+    }
+
+    fn command(self, what: &'static str) {
+        let u = format!("{}/{what}", dev_url(&self.dev.get_value()));
+        self.busy.set(true);
+        self.error.set(None);
         spawn_local(async move {
             let r = api::post_empty::<()>(&u, None).await;
-            let _ = busy.try_set(false);
+            let _ = self.busy.try_set(false);
             match r {
                 Ok(()) => {
                     toast(Tone::Ok, t(if what == "cancel" { "pca.cancel_sent" } else { "pca.backup_sent" }).to_string());
-                    detail.reload();
+                    self.detail.reload();
                 }
-                Err(e) => error.set(Some(e.text())),
-            }
-        });
-    };
-    let pair = move |_| {
-        let body = PairingRequest { btrfs_target: Some(dev.get_value()), ..Default::default() };
-        busy.set(true);
-        error.set(None);
-        spawn_local(async move {
-            let r = api::post::<_, PairingCreated>(&format!("{URL}/pairings"), Some(&body)).await;
-            let _ = busy.try_set(false);
-            match r {
-                Ok(c) => created.set(Some(c)),
-                Err(e) => error.set(Some(e.text())),
-            }
-        });
-    };
-    let revoke = Callback::new(move |_| {
-        let d = dev.get_value();
-        busy.set(true);
-        error.set(None);
-        spawn_local(async move {
-            let r = match api::delete::<rynas_api_types::TaskStarted>(&dev_url(&d)).await {
-                Ok(t) => tasks::follow(&t.task_id).await,
-                Err(e) => Err(e),
-            };
-            let _ = busy.try_set(false);
-            match r {
-                Ok(task) if task.status == TaskStatus::Ok => {
-                    toast(Tone::Ok, tf("pca.revoked", &[("device", &d)]));
-                    ask_revoke.set(false);
-                    detail.reload();
-                    changed.run(());
+                Err(e) => {
+                    let _ = self.error.try_set(Some(e.text()));
                 }
-                Ok(task) => error.set(Some(tasks::task_error(&task))),
-                Err(e) => error.set(Some(e.text())),
             }
         });
-    });
-    let unpaired = move || {
+    }
+
+    /// No agent yet: the code waiting for this PC (with Cancel), or Make a code.
+    fn unpaired_view(self) -> AnyView {
+        let dev = self.dev;
+        let pair = move |_| {
+            let body = PairingRequest { btrfs_target: Some(dev.get_value()), ..Default::default() };
+            self.busy.set(true);
+            self.error.set(None);
+            spawn_local(async move {
+                let r = api::post::<_, PairingCreated>(&format!("{URL}/pairings"), Some(&body)).await;
+                let _ = self.busy.try_set(false);
+                match r {
+                    Ok(c) => {
+                        self.created.set(Some(c));
+                        self.overview.reload();
+                    }
+                    Err(e) => self.error.set(Some(e.text())),
+                }
+            });
+        };
+        let cancel = move |id: String| {
+            let u = format!("{URL}/pairings/{}", api::encode(&id));
+            self.error.set(None);
+            spawn_local(async move {
+                match api::delete_empty(&u).await {
+                    Ok(_) => {
+                        if self.created.with_untracked(|c| c.as_ref().is_some_and(|c| c.id == id)) {
+                            self.created.set(None);
+                        }
+                        self.overview.reload();
+                    }
+                    Err(e) => self.error.set(Some(e.text())),
+                }
+            });
+        };
+        let waiting = move || {
+            self.overview
+                .data
+                .with(|o| o.as_ref().map(|o| o.pairings.iter().filter(|p| p.btrfs_target.as_deref() == Some(dev.get_value().as_str())).cloned().collect::<Vec<_>>()).unwrap_or_default())
+        };
         view! {
             {ui::note(Tone::Info, icons::KEY, ui::text(t("pcb.agent.unpaired").to_string()))}
-            {move || match created.get() {
-                Some(c) => pairing_steps(&c),
-                None => view! {
-                    {form_error(error)}
-                    <div class="sec-actions">
-                        <button class="btn primary sm" disabled=move || busy.get() on:click=pair>{spinner(busy)}<Icon icon=icons::KEY size=14 />{tr("pca.make_code")}</button>
-                    </div>
+            {move || match self.created.get() {
+                Some(c) => {
+                    let id = c.id.clone();
+                    view! {
+                        {pairing_steps(&c)}
+                        <div class="sec-actions">
+                            <button class="btn ghost sm" on:click=move |_| cancel(id.clone())><Icon icon=icons::X size=14 />{tr("pca.pairing_cancel")}</button>
+                        </div>
+                    }
+                    .into_any()
                 }
-                .into_any(),
+                None => {
+                    let list = waiting();
+                    if list.is_empty() {
+                        view! {
+                            <div class="sec-actions">
+                                <button class="btn primary sm" disabled=move || self.busy.get() on:click=pair>{spinner(self.busy)}<Icon icon=icons::KEY size=14 />{tr("pca.make_code")}</button>
+                            </div>
+                        }
+                        .into_any()
+                    } else {
+                        list.into_iter()
+                            .map(|p| {
+                                let id = p.id.clone();
+                                let label = format!("{}: {}", t("pca.pairing_cancel"), dev.get_value());
+                                view! {
+                                    <p class="small">{tf("pcb.agent.code_waiting", &[("until", &i18n::datetime(p.expires_ms))])}</p>
+                                    <div class="sec-actions">
+                                        <button class="btn ghost sm" aria-label=label on:click=move |_| cancel(id.clone())><Icon icon=icons::X size=14 />{tr("pca.pairing_cancel")}</button>
+                                    </div>
+                                }
+                            })
+                            .collect_view()
+                            .into_any()
+                    }
+                }
             }}
+            {form_error(self.error)}
         }
         .into_any()
-    };
-    let content = move || {
-        let Some(d) = detail.data.get() else { return ().into_any() };
-        let p = d.device.clone();
-        let run = p.last_run.clone();
-        let progress = p.progress.clone().map(|pr| {
-            let pct = if pr.bytes_total > 0 { (pr.bytes_done as f64 / pr.bytes_total as f64 * 100.0).min(100.0) } else { 0.0 };
-            let total = if pr.bytes_total > 0 { format!(" / {}", i18n::bytes(pr.bytes_total)) } else { String::new() };
+    }
+
+    /// Title, status, live progress and the subvolumes of the last run; the pairing code when
+    /// no agent is paired.
+    pub fn status(self) -> AnyView {
+        let content = move || {
+            let Some(d) = self.detail.data.get() else { return ().into_any() };
+            let p = d.device.clone();
+            let run = p.last_run.clone();
+            let progress = p.progress.as_ref().map(progress_view);
+            let captures = run.as_ref().filter(|r| !r.captures.is_empty()).map(|r| {
+                r.captures
+                    .iter()
+                    .map(|c| view! { <li><span class="mono">{c.path.clone()}</span>" · "{tr(method_text(c.method))}{agent_note(c.btrfs.as_ref(), |s| s.snapshot.as_str(), c.note.as_deref()).map(|n| format!(" ({n})"))}</li> })
+                    .collect_view()
+            });
+            // the error of the last run while it is the news: failed, nothing running
+            let last_error = (p.state == PcState::Failed && p.progress.is_none()).then(|| run.as_ref().and_then(|r| r.error.clone())).flatten();
             view! {
-                <div class="pca-progress">
-                    {(pr.bytes_total > 0).then(|| view! { <ui::Meter pct=pct /> })}
-                    <span class="small tnum">{format!("{}{total} · {}/s", i18n::bytes(pr.bytes_done), i18n::bytes(pr.speed_bps))}</span>
-                    {pr.message.clone().map(|m| view! { <span class="small muted bk-wrap">{m}</span> })}
-                </div>
+                {p.revoked.then(|| ui::note(Tone::Info, icons::LOCK, ui::text(t("pcb.agent.revoked").to_string())))}
+                <dl class="kvs">
+                    {kv("col.status", state_view(p.state, p.revoked))}
+                    {kv("pca.last_ok", ui::text(when(p.last_ok_ms)))}
+                    {kv("pca.os", ui::text(format!("{} {} · rynas-agent {}", p.os, p.arch, p.agent_version)))}
+                    {kv("pca.last_seen", ui::text(when(p.last_seen_ms)))}
+                    {kv("pcb.agent.schedule", ui::text(if p.settings.plan.paused { t("pca.f.paused").to_string() } else { tf("pcb.agent.every_h", &[("n", &p.settings.plan.interval_hours.to_string())]) }))}
+                    {last_error.map(|e| kv("pca.last_error", ui::breakable(e.as_str(), "small")))}
+                </dl>
+                {progress}
+                {captures.map(|c| view! { <details class="tls-step"><summary>{tr("pcb.agent.last_run")}</summary><ul class="small bkpc-gaps">{c}</ul></details> })}
+                {form_error(self.error)}
             }
-        });
-        let captures = run.as_ref().filter(|r| !r.captures.is_empty()).map(|r| {
-            r.captures
-                .iter()
-                .map(|c| view! { <li><span class="mono">{c.path.clone()}</span>" · "{tr(method_text(c.method))}{c.note.clone().map(|n| format!(" ({n})"))}</li> })
-                .collect_view()
-        });
-        let history = d
-            .history
-            .iter()
-            .filter(|h| !h.restore)
-            .take(10)
-            .map(|h| {
-                ui::row(vec![
-                    ui::text_cell("pca.col.when", "tnum", i18n::datetime(h.started_ms)),
-                    ui::cell("col.status", "wrap", if h.ok { ui::status(Tone::Ok, t("pca.h.ok").to_string()) } else { view! { <div class="cell-main">{ui::status(Tone::Err, t("pca.st.failed").to_string())}<span class="cell-sub small bk-wrap">{h.error.clone().unwrap_or_default()}</span></div> }.into_any() }),
-                    ui::text_cell("pcb.agent.sent", "num tnum", i18n::bytes(h.bytes_added)),
-                ])
-            })
-            .collect::<Vec<_>>();
-        let running = p.state == PcState::Running;
-        let revoked = p.revoked;
+            .into_any()
+        };
+        // a memo: the progress polls must not rebuild the whole block twice
+        let unpaired = Memo::new(move |_| self.unpaired());
         view! {
-            {revoked.then(|| ui::note(Tone::Info, icons::LOCK, ui::text(t("pcb.agent.revoked").to_string())))}
-            <dl class="kvs">
-                {kv("pcb.agent.state", state_view(p.state, p.revoked))}
-                {kv("pca.last_ok", ui::text(when(p.last_ok_ms)))}
-                {kv("pca.os", ui::text(format!("{} {} · rynas-agent {}", p.os, p.arch, p.agent_version)))}
-                {kv("pca.last_seen", ui::text(when(p.last_seen_ms)))}
-                {kv("pcb.agent.schedule", ui::text(if p.settings.plan.paused { t("pca.f.paused").to_string() } else { tf("pcb.agent.every_h", &[("n", &p.settings.plan.interval_hours.to_string())]) }))}
-                {run.as_ref().and_then(|r| r.error.clone()).map(|e| kv("pca.last_error", ui::breakable(e.as_str(), "small")))}
-            </dl>
-            {progress}
-            {captures.map(|c| view! { <details class="tls-step"><summary>{tr("pcb.agent.last_run")}</summary><ul class="small bkpc-gaps">{c}</ul></details> })}
-            {form_error(error)}
-            {(!revoked).then(|| view! {
-                <div class="sec-actions">
-                    <button class="btn primary sm" disabled=move || busy.get() || running on:click=move |_| command("backup-now")><Icon icon=icons::PLAY size=14 />{tr("pca.backup_now")}</button>
-                    <button class="btn ghost sm" disabled=move || busy.get() || !running on:click=move |_| command("cancel")><Icon icon=icons::SQUARE size=14 />{tr("pca.cancel")}</button>
-                    <button class="btn ghost sm" on:click=move |_| edit.set(true)><Icon icon=icons::CALENDAR_CLOCK size=14 />{tr("pcb.agent.schedule")}</button>
-                    <button class="btn danger sm" on:click=move |_| { error.set(None); ask_revoke.set(true); }><Icon icon=icons::TRASH_2 size=14 />{tr("pca.revoke")}</button>
-                </div>
-            })}
-            {(!history.is_empty()).then(|| view! {
-                <h4 class="small"><strong>{tr("pca.history")}</strong></h4>
-                {ui::table("pca-history", &["pca.col.when", "col.status", "#pcb.agent.sent"], history)}
-            })}
-            {move || edit.get().then(|| device_settings(p.clone(), Callback::new(move |_| detail.reload()), Callback::new(move |_| edit.set(false))))}
+            <h3 class="mini-title">{tr("pcb.agent.title")}</h3>
+            {move || if unpaired.get() { self.unpaired_view() } else { self.detail.view(4, content) }}
         }
         .into_any()
-    };
+    }
+
+    /// Back up now and Cancel, for the drawer's button row (nothing without a live agent).
+    pub fn buttons(self) -> AnyView {
+        let live = move || self.detail.data.with(|d| d.as_ref().filter(|d| !d.device.revoked).map(|d| d.device.state == PcState::Running));
+        view! {
+            {move || live().map(|running| view! {
+                <button class="btn primary sm" disabled=move || self.busy.get() || running on:click=move |_| self.command("backup-now")><Icon icon=icons::PLAY size=14 />{tr("pca.backup_now")}</button>
+                <button class="btn ghost sm" disabled=move || self.busy.get() || !running on:click=move |_| self.command("cancel")><Icon icon=icons::SQUARE size=14 />{tr("pca.cancel")}</button>
+            })}
+        }
+        .into_any()
+    }
+
+    /// The agent's last runs.
+    pub fn history(self) -> AnyView {
+        view! {
+            {move || self.detail.data.with(|d| {
+                let rows = d
+                    .as_ref()?
+                    .history
+                    .iter()
+                    .filter(|h| !h.restore)
+                    .take(10)
+                    .map(|h| {
+                        ui::row(vec![
+                            ui::text_cell("pca.col.when", "tnum", i18n::datetime(h.started_ms)),
+                            ui::cell("col.status", "wrap", if h.ok { ui::status(Tone::Ok, t("pca.h.ok").to_string()) } else { view! { <div class="cell-main">{ui::status(Tone::Err, t("pca.st.failed").to_string())}<span class="cell-sub small bk-wrap">{h.error.clone().unwrap_or_default()}</span></div> }.into_any() }),
+                            ui::text_cell("pcb.agent.sent", "num tnum", i18n::bytes(h.bytes_added)),
+                        ])
+                    })
+                    .collect::<Vec<_>>();
+                (!rows.is_empty()).then(|| view! {
+                    <h3 class="mini-title">{tr("pca.history")}</h3>
+                    {ui::table("pca-history", &["pca.col.when", "col.status", "#pcb.agent.sent"], rows)}
+                })
+            })}
+        }
+        .into_any()
+    }
+
+    /// The revoke confirmation.
+    pub fn confirm(self) -> AnyView {
+        let revoke = Callback::new(move |_| {
+            let d = self.dev.get_value();
+            self.busy.set(true);
+            self.error.set(None);
+            spawn_local(async move {
+                let r = match api::delete::<rynas_api_types::TaskStarted>(&dev_url(&d)).await {
+                    Ok(t) => tasks::follow(&t.task_id).await,
+                    Err(e) => Err(e),
+                };
+                let _ = self.busy.try_set(false);
+                match r {
+                    Ok(task) if task.status == TaskStatus::Ok => {
+                        toast(Tone::Ok, tf("pca.revoked", &[("device", &d)]));
+                        self.ask_revoke.set(false);
+                        self.detail.reload();
+                        self.changed.run(());
+                    }
+                    Ok(task) => self.error.set(Some(tasks::task_error(&task))),
+                    Err(e) => self.error.set(Some(e.text())),
+                }
+            });
+        });
+        view! {
+            {move || self.ask_revoke.get().then(|| ui::confirm(Confirm { busy: self.busy, error: self.error, ..Confirm::new(tf("pca.revoke_title", &[("device", &self.dev.get_value())]), t("pcb.agent.revoke_text").to_string(), "pca.revoke", true, revoke, Callback::new(move |_| self.ask_revoke.set(false))) }))}
+        }
+        .into_any()
+    }
+}
+
+/// A run's progress: a bar when the total is known, then the phase, the bytes, the speed and
+/// what the agent is doing, on one line that wraps.
+pub(super) fn progress_view(pr: &PcProgress) -> AnyView {
+    let pct = if pr.bytes_total > 0 { (pr.bytes_done as f64 / pr.bytes_total as f64 * 100.0).min(100.0) } else { 0.0 };
+    let mut parts = vec![t(phase_text(pr.phase)).to_string()];
+    if pr.bytes_total > 0 {
+        parts.push(format!("{} / {}", i18n::bytes(pr.bytes_done), i18n::bytes(pr.bytes_total)));
+    } else if pr.bytes_done > 0 {
+        parts.push(i18n::bytes(pr.bytes_done));
+    }
+    if pr.speed_bps > 0 {
+        parts.push(format!("{}/s", i18n::bytes(pr.speed_bps)));
+    }
+    if let Some(m) = agent_note(pr.btrfs.as_ref(), |s| s.subvolume.as_str(), pr.message.as_deref()) {
+        parts.push(m);
+    }
     view! {
-        <h3 class="mini-title">{tr("pcb.agent.title")}</h3>
-        {move || {
-            if detail.err.with(|e| e.as_deref() == Some("not_found")) && detail.data.with(Option::is_none) {
-                unpaired()
-            } else {
-                detail.view(4, content)
-            }
-        }}
-        {move || ask_revoke.get().then(|| ui::confirm(Confirm { busy, error, ..Confirm::new(tf("pca.revoke_title", &[("device", &dev.get_value())]), t("pcb.agent.revoke_text").to_string(), "pca.revoke", true, revoke, Callback::new(move |_| ask_revoke.set(false))) }))}
+        <div class="pca-progress">
+            {(pr.bytes_total > 0).then(|| view! { <ui::Meter pct=pct /> })}
+            <div class="pca-progress-line small tnum">{parts.into_iter().map(|p| view! { <span>{p}</span> }).collect_view()}</div>
+        </div>
     }
     .into_any()
 }
 
-/// The settings of one PC. With the btrfs method only the schedule and the description
-/// apply (the folder's retention and alerts are the btrfs tab's); the method is kept.
-pub(super) fn device_settings(p: PcDevice, saved: Callback<()>, close: Callback<()>) -> AnyView {
+fn phase_text(p: AgentPhase) -> &'static str {
+    match p {
+        AgentPhase::Preparing => "pca.phase.preparing",
+        AgentPhase::Snapshot => "pca.phase.snapshot",
+        AgentPhase::Uploading => "pca.phase.uploading",
+        AgentPhase::Finishing => "pca.phase.finishing",
+    }
+}
+
+/// The agent's note on a subvolume (btrfs method) in the interface's language, from the
+/// structured step (`name_of` picks the snapshot or the subvolume name); an older agent's
+/// free text, or a files-method note, as it came.
+pub(super) fn agent_note(step: Option<&BtrfsStep>, name_of: fn(&BtrfsStep) -> &str, raw: Option<&str>) -> Option<String> {
+    let Some(s) = step else {
+        // an older agent: its English text as it came
+        return raw.filter(|r| !r.is_empty()).map(str::to_string);
+    };
+    let name = name_of(s);
+    Some(match (&s.error_code, &s.error, &s.parent) {
+        (_, Some(e), _) => tf("pcb.note.error", &[("error", e)]),
+        (Some(c), None, _) => tf("pcb.note.error", &[("error", c)]),
+        (None, None, Some(p)) => tf("pcb.note.incr", &[("name", name), ("parent", p)]),
+        (None, None, None) => tf("pcb.note.full", &[("name", name)]),
+    })
+}
+
+/// The settings of one PC of the file method (a btrfs-method PC's schedule is in its
+/// folder's Settings, Backup › PCs: btrfs snapshots); the method is kept.
+fn device_settings(p: PcDevice, saved: Callback<()>, close: Callback<()>) -> AnyView {
     let s = p.settings.clone();
-    let btrfs = s.method == PcMethod::Btrfs;
     let method = s.method;
     let description = RwSignal::new(s.description.clone());
     let interval = RwSignal::new(s.plan.interval_hours.to_string());
@@ -963,7 +1133,7 @@ pub(super) fn device_settings(p: PcDevice, saved: Callback<()>, close: Callback<
     };
     const FREEZE: &[(&str, &str)] = &[("hot", "pca.f.hot"), ("freeze", "pca.f.freeze")];
     const PAUSED: &[(&str, &str)] = &[("on", "pca.f.scheduled"), ("paused", "pca.f.paused")];
-    let files_only = (!btrfs).then(|| {
+    let files_only = {
         view! {
             <h3 class="mini-title">{tr("pca.f.consistency")}</h3>
             {segmented("pca.f.read", FREEZE, freeze.into(), Callback::new(move |v| freeze.set(v)))}
@@ -989,13 +1159,7 @@ pub(super) fn device_settings(p: PcDevice, saved: Callback<()>, close: Callback<
                 {number_field("pca.f.critical", None, critical.into(), Callback::new(move |v| critical.set(v)), 0, 8760)}
             </div>
         }
-    });
-    let btrfs_only = btrfs.then(|| {
-        view! {
-            {area_field("pca.f.skip_mounts", excludes.into(), Callback::new(move |v| excludes.set(v)), Some("pca.f.skip_mounts_help"), "/srv/vm")}
-            <p class="small muted">{tr("pca.f.btrfs_note")}</p>
-        }
-    });
+    };
     let body = view! {
         {text_field("bk.f.description", description.into(), Callback::new(move |v| description.set(v)), Signal::stored(None), In { maxlength: 120, ..In::default() })}
         <h3 class="mini-title">{tr("pca.f.schedule")}</h3>
@@ -1005,7 +1169,6 @@ pub(super) fn device_settings(p: PcDevice, saved: Callback<()>, close: Callback<
             {number_field("pca.f.delay", Some("pca.f.delay_help"), delay.into(), Callback::new(move |v| delay.set(v)), 0, 1440)}
         </div>
         {files_only}
-        {btrfs_only}
         {form_error(error)}
     }
     .into_any();

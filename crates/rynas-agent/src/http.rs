@@ -19,6 +19,56 @@ use sha2::{Digest, Sha256};
 
 const TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_HEADER: usize = 64 << 10;
+/// A read on the socket waits at most this long before it looks at Cancel again.
+const READ_SLICE: Duration = Duration::from_secs(1);
+
+/// The flag a run that honours Cancel (SIGTERM) sets: a read waiting on the NAS (even the
+/// hour-long wait for a receive's answer) stops within [`READ_SLICE`].
+static CANCEL: std::sync::OnceLock<&'static std::sync::atomic::AtomicBool> = std::sync::OnceLock::new();
+
+/// Makes every read of every client stop once `flag` is set.
+pub fn cancel_on(flag: &'static std::sync::atomic::AtomicBool) {
+    let _ = CANCEL.set(flag);
+}
+
+fn cancelled() -> bool {
+    CANCEL.get().is_some_and(|f| f.load(std::sync::atomic::Ordering::SeqCst))
+}
+
+/// The TCP socket under TLS: a read waits in slices of [`READ_SLICE`] (Cancel is looked at
+/// between them) for up to `limit` without data, as one `SO_RCVTIMEO` of `limit` would.
+struct Patient {
+    s: TcpStream,
+    limit: Duration,
+}
+
+impl Read for Patient {
+    fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
+        let start = std::time::Instant::now();
+        loop {
+            match self.s.read(b) {
+                Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
+                    if cancelled() {
+                        return Err(io::Error::other("cancelled"));
+                    }
+                    if start.elapsed() >= self.limit {
+                        return Err(io::Error::new(io::ErrorKind::TimedOut, "no answer from the NAS"));
+                    }
+                }
+                r => return r,
+            }
+        }
+    }
+}
+
+impl Write for Patient {
+    fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+        self.s.write(b)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.s.flush()
+    }
+}
 
 /// `AA:BB:…` (upper case hex), as the NAS shows it.
 pub fn fingerprint(der: &[u8]) -> String {
@@ -178,6 +228,11 @@ impl Response {
     }
 
     /// The API error text of a failed answer.
+    /// The machine-readable `code` of an error answer (`busy`, `already_exists`…).
+    pub fn error_code(&self) -> Option<String> {
+        serde_json::from_slice::<serde_json::Value>(&self.body).ok()?.get("code")?.as_str().map(str::to_string)
+    }
+
     pub fn error_text(&self) -> String {
         let msg = serde_json::from_slice::<serde_json::Value>(&self.body)
             .ok()
@@ -236,9 +291,10 @@ impl Client {
         for a in addrs {
             match TcpStream::connect_timeout(&a, Duration::from_secs(15)) {
                 Ok(s) => {
-                    s.set_read_timeout(Some(read))?;
+                    s.set_read_timeout(Some(READ_SLICE.min(read)))?;
                     s.set_write_timeout(Some(TIMEOUT))?;
                     let _ = s.set_nodelay(true);
+                    let s = Patient { s, limit: read };
                     let stream: Box<dyn Stream> = match &self.tls {
                         None => Box::new(s),
                         Some(cfg) => {

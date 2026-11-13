@@ -89,6 +89,8 @@ pub struct Counters {
     pub phase: Mutex<AgentPhase>,
     /// What is happening now, for the console (the btrfs method: the subvolume being sent).
     pub message: Mutex<Option<String>>,
+    /// The same as `message` in fields (the btrfs method's current subvolume).
+    pub step: Mutex<Option<BtrfsStep>>,
 }
 
 #[derive(Clone)]
@@ -445,6 +447,7 @@ fn reporter(client: Arc<Client>, run_id: String, c: Arc<Counters>, stop: Arc<Ato
                 files_done: c.files_done.load(Ordering::Relaxed),
                 files_total: 0,
                 message: c.message.lock().ok().and_then(|m| m.clone()),
+                btrfs: c.step.lock().ok().and_then(|m| m.clone()),
             };
             let _: Result<serde_json::Value, String> = client.post_json("/api/v1/pcbackup/agent/status", &s);
             for _ in 0..20 {
@@ -517,6 +520,7 @@ fn send_report(client: &Client, run: PcRun, manifest: Option<Manifest>) {
         run,
         manifest,
         agent_version: env!("CARGO_PKG_VERSION").into(),
+        root_btrfs: Some(crate::btrfs::root_is_btrfs()),
     };
     for attempt in 0..5 {
         match client.post_json::<_, serde_json::Value>("/api/v1/pcbackup/agent/report", &r) {
@@ -575,6 +579,7 @@ fn run_inner(
                 fstype: s.mount.fstype.clone(),
                 method: s.method,
                 note: s.note.clone(),
+                btrfs: None,
             })
             .collect()
     };

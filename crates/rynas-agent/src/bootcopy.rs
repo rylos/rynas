@@ -11,7 +11,8 @@
 //!   source that is still `autofs`, or empty while the last copy was not, is refused (the
 //!   previous copy stays).
 //! - At most [`MAX_BYTES`], and only when the root filesystem has room for what changes.
-//! - Names that look like key material are never copied (and are listed).
+//! - Names that look like key material, and systemd-boot's `loader/random-seed`, are never
+//!   copied (and are listed).
 
 use std::ffi::CString;
 use std::io::Write;
@@ -35,6 +36,12 @@ const TMP: &str = ".rynas-tmp.";
 fn secret_name(n: &str) -> bool {
     let l = n.to_ascii_lowercase();
     l.contains("keyfile") || l.ends_with(".key") || l.ends_with(".keys")
+}
+
+/// Paths (relative to the boot mount, any case: the ESP is FAT) never copied: systemd-boot's
+/// random seed (`loader/random-seed`), which must never be reused on another boot or machine.
+fn secret_path(rel: &Path) -> bool {
+    rel.to_string_lossy().eq_ignore_ascii_case("loader/random-seed")
 }
 
 /// The folder name of a mount point's copy: `/boot/efi` → `boot-efi`.
@@ -118,7 +125,7 @@ fn scan(src: &Path, dev: u64) -> Result<(Vec<Item>, String, Vec<String>), String
             if md.dev() != dev {
                 continue;
             }
-            if secret_name(&e.file_name().to_string_lossy()) {
+            if secret_name(&e.file_name().to_string_lossy()) || secret_path(&r) {
                 skipped.push(r.to_string_lossy().into_owned());
                 continue;
             }
@@ -362,6 +369,8 @@ mod tests {
         std::fs::write(src.join("EFI/systemd/systemd-bootx64.efi"), vec![1u8; 1000]).unwrap();
         std::fs::write(src.join("vmlinuz-linux"), vec![2u8; 500]).unwrap();
         std::fs::write(src.join("crypto_keyfile.bin"), b"secret").unwrap();
+        std::fs::create_dir_all(src.join("loader")).unwrap();
+        std::fs::write(src.join("loader/random-seed"), [9u8; 32]).unwrap();
         std::os::unix::fs::symlink("vmlinuz-linux", src.join("vmlinuz")).unwrap();
     }
 
@@ -375,10 +384,11 @@ mod tests {
         let c = copy_boot(&src, "/boot", &boot, "/.rynas/boot", None).unwrap();
         assert_eq!((c.bytes, c.files), (1500, 2));
         assert_eq!(c.dir, "/.rynas/boot/boot");
-        assert_eq!(c.skipped, ["crypto_keyfile.bin"]);
+        assert_eq!(c.skipped, ["crypto_keyfile.bin", "loader/random-seed"]);
         assert!(!c.stale);
         let d = boot.join("boot");
         assert!(!d.join("crypto_keyfile.bin").exists());
+        assert!(!d.join("loader/random-seed").exists());
         assert_eq!(std::fs::read(d.join("vmlinuz-linux")).unwrap(), vec![2u8; 500]);
         assert_eq!(std::fs::read_link(d.join("vmlinuz")).unwrap(), Path::new("vmlinuz-linux"));
         let (s, c2) = (std::fs::metadata(src.join("vmlinuz-linux")).unwrap(), std::fs::metadata(d.join("vmlinuz-linux")).unwrap());

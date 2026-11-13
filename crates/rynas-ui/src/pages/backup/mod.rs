@@ -35,7 +35,7 @@ pub fn BackupPage() -> impl IntoView {
                 {tabs("bkp", TABS, tab, "bk.title")}
                 <div role="tabpanel" id="bkp-p0" aria-labelledby="bkp-t0" hidden=move || tab.get() != 0>{restic::panel(edit)}</div>
                 <div role="tabpanel" id="bkp-p1" aria-labelledby="bkp-t1" hidden=move || tab.get() != 1>{pcs::panel(add_pc)}</div>
-                <div role="tabpanel" id="bkp-p2" aria-labelledby="bkp-t2" hidden=move || tab.get() != 2>{agent::panel(agent_header)}</div>
+                <div role="tabpanel" id="bkp-p2" aria-labelledby="bkp-t2" hidden=move || tab.get() != 2>{agent::panel(agent_header, Callback::new(move |_| tab.set(1)))}</div>
             </section>
         </div>
     }

@@ -70,7 +70,7 @@ fn normalize(p: &str) -> String {
     format!("/{}", parts.join("/"))
 }
 
-fn basename(p: &str) -> &str {
+pub(crate) fn basename(p: &str) -> &str {
     p.trim_end_matches('/').rsplit('/').next().unwrap_or(p)
 }
 

@@ -1892,6 +1892,29 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .bkpc-list li, .bkpc-sub li { overflow-wrap: anywhere; min-width: 0; }
 .bkpc-sub { display: flex; flex-direction: column; gap: var(--s-1); margin: var(--s-1) 0 0; padding-left: var(--s-6); list-style: disc; color: var(--text-subtle); }
 .nowrap { white-space: nowrap; }
+/* a run's progress: bar, then phase · bytes · speed · what is being sent, wrapping as a line */
+.pca-progress { display: flex; flex-direction: column; gap: var(--s-1); min-width: 0; }
+.pca-progress-line { display: flex; flex-wrap: wrap; gap: 0 var(--s-2); min-width: 0; }
+.pca-progress-line > span { overflow-wrap: anywhere; min-width: 0; }
+.pca-progress-line > span:not(:last-child)::after { content: "·"; margin-left: var(--s-2); color: var(--text-subtle); }
+/* the PC drawers: headings without the browser's margins, sections a step apart */
+.wide-drawer .dialog-body h4 { margin: 0; }
+.wide-drawer .dialog-body > h3.mini-title:not(:first-child) { margin-top: var(--s-3); }
+.tls-step[open] > :not(summary) { margin-top: var(--s-2); }
+.wide-drawer .tls-step[open] > h4 { margin-top: var(--s-4); }
+.tls-step > pre.app-code { margin-bottom: 0; }
+/* the note under the file-backup PCs, with its link to the btrfs tab */
+.bk-note { margin-top: var(--s-3); }
+.bk-note .link-btn { display: inline; margin-left: 0; height: auto; padding: 0; font-size: inherit; }
+/* where there is room, the PC column keeps whole words (names break at their hyphens, not
+   mid-word); narrower, the table would scroll sideways */
+@media (min-width: 1200px) {
+  .bk-table td:first-child { min-width: 9rem; overflow-wrap: break-word; }
+}
+@media (max-width: 767px) {
+  /* cards: every value on the right, also the stacked ones (count over the names) */
+  .bk-table td .cell-main { align-items: flex-end; text-align: right; }
+}
 .bk-err { color: var(--danger); overflow-wrap: anywhere; }
 .bk-checks { display: flex; flex-direction: column; gap: var(--s-2); margin: 0; padding: 0; border: 0; min-width: 0; }
 .bk-checks .check { align-items: baseline; flex-wrap: wrap; }

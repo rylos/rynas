@@ -562,7 +562,7 @@ fn env_agent() -> (Env, Arc<rynasd::pc_agent::PcAgent>) {
         None,
         "nas".into(),
     );
-    let _ = agent.btrfs.set(svc.clone());
+    agent.bind_btrfs(svc.clone());
     st.pc_backup = Some(svc.clone());
     st.pc_agent = Some(agent.clone());
     (Env { _dir: dir, app: router(st), ops, host, svc, notifier }, agent)
@@ -669,11 +669,13 @@ async fn agent_folder_pairing_listing_and_receive() {
         (recv("../x.20261112T0300", "none"), StatusCode::BAD_REQUEST),
         (recv(&n3, &agent_name("@", 2)), StatusCode::BAD_REQUEST),
         (recv(&n3, &n3), StatusCode::BAD_REQUEST),
-        (recv(&n3, &agent_name("@home", 30)), StatusCode::CONFLICT),
     ] {
         let (s, b) = agent_call(&e, Some(&tok), "POST", &uri, zst(&stream(&n3, u2, None))).await;
         assert_eq!(s, code, "{uri}: {}", String::from_utf8_lossy(&b));
     }
+    // a parent the NAS does not have: its own code, so the agent sends in full
+    let (s, b) = agent_call(&e, Some(&tok), "POST", &recv(&n3, &agent_name("@home", 30)), zst(&stream(&n3, u2, None))).await;
+    assert_eq!((s, err(&b).code.as_str()), (StatusCode::CONFLICT, rynas_api_types::pcagent::PARENT_MISSING));
     e.host.busy.lock().unwrap().push(path.into());
     let (s, b) = agent_call(&e, Some(&tok), "POST", &recv(&n3, "none"), zst(&stream(&n3, u2, None))).await;
     assert_eq!((s, err(&b).code.as_str()), (StatusCode::CONFLICT, "busy"));
@@ -692,8 +694,26 @@ async fn agent_folder_pairing_listing_and_receive() {
     }
     let l = listing(&e, &tok).await;
     assert_eq!(l.snapshots.len(), 2, "{l:?}");
-    assert!(e.host.deleted.lock().unwrap().iter().all(|d| d.ends_with(&n3)));
-    assert!(!e.host.deleted.lock().unwrap().is_empty());
+    // what they left was in the staging folder, and went with it
+    let deleted = e.host.deleted.lock().unwrap().clone();
+    assert!(!deleted.is_empty());
+    assert!(deleted.iter().all(|d| d.starts_with(&format!("{path}/.incoming/"))), "{deleted:?}");
+    assert!(e.host.staged.lock().unwrap().is_empty());
+    // a stream that leaves something next to its subvolume (a file through a symlink, say):
+    // the snapshot never reaches the folder
+    e.host.staged_extra.lock().unwrap().push("big-file".into());
+    let (s, b) = agent_call(&e, Some(&tok), "POST", &recv(&n3, "none"), zst(&stream(&n3, u2, None))).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{}", String::from_utf8_lossy(&b));
+    assert!(err(&b).message.contains("entries"), "{}", String::from_utf8_lossy(&b));
+    assert_eq!(listing(&e, &tok).await.snapshots.len(), 2);
+    assert!(e.host.staged.lock().unwrap().is_empty());
+    e.host.staged_extra.lock().unwrap().clear();
+    // a stream that names another subvolume (the receive created another name)
+    *e.host.receive_as.lock().unwrap() = Some("other.20261112T0300".into());
+    let (s, _) = agent_call(&e, Some(&tok), "POST", &recv(&n3, "none"), zst(&stream(&n3, u2, None))).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+    *e.host.receive_as.lock().unwrap() = None;
+    assert_eq!(listing(&e, &tok).await.snapshots.len(), 2);
     // incremental on a parent whose UUID the stream does not carry
     let (s, _) = agent_call(&e, Some(&tok), "POST", &recv(&n3, &n2), zst(&stream(&n3, u2, Some(u1)))).await;
     assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
@@ -734,6 +754,65 @@ async fn agent_folder_pairing_listing_and_receive() {
     let (s, _) = agent_call(&e, Some(&tok), "GET", "/v1/pcbackup/agent/btrfs/snapshots", Vec::new()).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
     assert_eq!(detail(&e, "laptop").await.list.len(), 2);
+}
+
+#[tokio::test]
+async fn an_agent_folder_removed_and_made_again_does_not_take_the_old_token() {
+    use rynas_btrfs::send_stream::fake::stream;
+    let (e, agent) = env_agent();
+    let mk = |dev: &'static str| json!({"device": dev, "path": format!("/volume1/backup/{dev}"), "agent": true});
+    for d in ["laptop", "desk"] {
+        let t = task(&e, "POST", "/v1/pc-backups/targets", Some(mk(d))).await;
+        assert_eq!(t.status, TaskStatus::Ok, "{:?}", t.error);
+    }
+    let (_, b) = call(&e, "POST", "/v1/pcbackup/pairings", Some(json!({"btrfs_target": "laptop"}))).await;
+    let code = serde_json::from_slice::<rynas_api_types::pcagent::PairingCreated>(&b).unwrap().code;
+    let (_, b) = agent_call(&e, None, "POST", "/v1/pcbackup/agent/pair", json!({"code": code, "hostname": "h"}).to_string().into_bytes()).await;
+    let tok = serde_json::from_slice::<rynas_api_types::pcagent::PairResponse>(&b).unwrap().token;
+    let n1 = agent_name("@", 2);
+    let uri = format!("/v1/pcbackup/agent/btrfs/receive?snapshot={n1}&parent=none");
+    let (s, b) = agent_call(&e, Some(&tok), "POST", &uri, zst(&stream(&n1, "0d7dc2d7-878a-5446-8596-6b5b6b021473", None))).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    // the receive did not see the other PC's folder
+    assert_eq!(*e.host.hidden.lock().unwrap(), ["/volume1/backup/desk"]);
+
+    // the folder goes: the PC (btrfs method only) is revoked with it
+    let t = task(&e, "DELETE", "/v1/pc-backups/targets/laptop", None).await;
+    assert_eq!(t.status, TaskStatus::Ok, "{:?}", t.error);
+    assert!(agent.snapshot().devices["laptop"].revoked);
+    // made again under the same name: the old token gets nowhere
+    let t = task(&e, "POST", "/v1/pc-backups/targets", Some(json!({"device": "laptop", "path": "/volume1/backup/laptop2", "agent": true}))).await;
+    assert_eq!(t.status, TaskStatus::Ok, "{:?}", t.error);
+    let (s, _) = agent_call(&e, Some(&tok), "GET", "/v1/pcbackup/agent/btrfs/snapshots", Vec::new()).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+
+    // a PC still bound to an older folder of the same name (the binding is the folder's
+    // identity, not its name) is refused until the method is chosen again
+    agent
+        .edit(|r| {
+            let d = r.devices.get_mut("laptop").unwrap();
+            d.revoked = false;
+            d.token_sha = rynasd::pc_agent::sha_hex(tok.as_bytes());
+            Ok(())
+        })
+        .unwrap();
+    let (s, b) = agent_call(&e, Some(&tok), "GET", "/v1/pcbackup/agent/btrfs/snapshots", Vec::new()).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{}", String::from_utf8_lossy(&b));
+    let dev: Value = serde_json::from_slice(&call(&e, "GET", "/v1/pcbackup/devices/laptop", None).await.1).unwrap();
+    let mut settings = dev["device"]["settings"].clone();
+    settings["method"] = json!("files");
+    // (no repository: files is refused) — choosing btrfs again rebinds only when it changes
+    let (s, _) = call(&e, "PUT", "/v1/pcbackup/devices/laptop", Some(settings.clone())).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    agent.edit(|r| {
+        r.devices.get_mut("laptop").unwrap().btrfs_folder = None;
+        Ok(())
+    })
+    .unwrap();
+    settings["method"] = json!("btrfs");
+    let (s, b) = call(&e, "PUT", "/v1/pcbackup/devices/laptop", Some(settings)).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    assert_eq!(listing(&e, &tok).await.snapshots.len(), 0);
 }
 
 #[tokio::test]

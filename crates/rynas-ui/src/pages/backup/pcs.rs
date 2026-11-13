@@ -10,12 +10,15 @@
 //!   moved here) or btrbk; a new subvolume folder, or an existing folder of received
 //!   snapshots (Check shows what it holds, nothing inside changes). Alert, retention (the
 //!   NAS with GFS counts, or for btrbk the PC within the NAS floor); the btrbk key.
-//! - The drawer: the agent's status, progress, runs, Back up now / Cancel and schedule (or
-//!   its pairing code); problems, status, the full-restore check with the manifest's
-//!   subvolumes, disks and boot copies; for btrbk the folded manual steps (key, `btrbk.conf`,
-//!   first connection, the manifest drop-in) then the first-backup check; Measure, Delete old
-//!   snapshots now, Settings (also the switch between the senders), Remove; the snapshots by
-//!   subvolume or by run, with sizes, Browse and Delete.
+//! - The drawer: problems; with rynas-agent its status, progress and last run (or the code
+//!   waiting for it, or Make a code), then the folder under its own title; one row of
+//!   buttons (Back up now / Cancel, Measure, Delete old snapshots now, Settings, Remove); the
+//!   agent's runs; the full-restore check with the manifest's subvolumes, disks and boot
+//!   copies; for btrbk the folded manual steps (key, `btrbk.conf`, first connection, the
+//!   manifest drop-in; open while they are the only way forward) then the first-backup
+//!   check; the snapshots by subvolume or by run, with sizes, Browse and Delete.
+//! - Settings: one dialog per PC: the folder's (also the switch between the senders) and,
+//!   with rynas-agent, its schedule, the subvolumes it leaves out and Revoke.
 //! - Browse: read-only folders inside a snapshot; Copy out puts a file or folder into a NAS
 //!   folder (nothing is overwritten).
 
@@ -26,11 +29,11 @@ use rynas_api_types::snapshots::{EntryKind, Retention, RetentionPreset, Snapshot
 use rynas_api_types::TaskStatus;
 
 use crate::api;
-use crate::form::{In, area_field, form_error, number_field, segmented, spinner, switch, text_field};
+use crate::form::{In, area_field, form_error, number_field, segmented, select_field, spinner, switch, text_field};
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::pages::security::copy_button_for;
-use rynas_api_types::pcagent::PcMethod;
+use rynas_api_types::pcagent::{PcDevice, PcMethod};
 use crate::pages::snapshots::{mode_text, retention_text};
 use crate::tasks;
 use crate::toast::toast;
@@ -46,7 +49,12 @@ struct Pcs {
     open: RwSignal<Option<String>>,
     /// The add dialog (`Some(adopt)`), or the settings of a device.
     add: RwSignal<Option<bool>>,
-    edit: RwSignal<Option<PcTarget>>,
+    /// The folder, and the agent paired under its name (its schedule is in the same dialog).
+    edit: RwSignal<Option<(PcTarget, Option<PcDevice>)>>,
+    /// Revoke the drawer's agent (asked from Settings, confirmed in the drawer).
+    ask_revoke: RwSignal<bool>,
+    /// Bumped when Settings saved: the open drawer reads its PC again.
+    saved: RwSignal<u32>,
 }
 
 fn target_url(device: &str) -> String {
@@ -126,9 +134,12 @@ fn issue_short(i: &PcIssue) -> &'static str {
     }
 }
 
-fn gap_text(g: &BareMetalGap) -> String {
+/// `agent`: sent by rynas-agent (it writes the manifest itself; btrbk needs the drop-in of
+/// the manual steps).
+fn gap_text(g: &BareMetalGap, agent: bool) -> String {
     let k = match g.code {
         BareMetalCode::NoSnapshots => "bkpc.bm.no_snapshots",
+        BareMetalCode::NoManifest if !agent => "pcb.bm.no_manifest_btrbk",
         BareMetalCode::NoManifest => "bkpc.bm.no_manifest",
         BareMetalCode::ManifestInvalid => "bkpc.bm.manifest_invalid",
         BareMetalCode::ManifestUnsupported => "bkpc.bm.manifest_unsupported",
@@ -169,12 +180,12 @@ fn disk_items(disks: &[rynas_api_types::pcagent::Disk]) -> impl IntoView + use<>
                 .map(|p| {
                     let size = i18n::bytes(p.size_lba.saturating_mul(u64::from(d.logical_sector)));
                     let name = (!p.name.is_empty()).then(|| format!(" · {}", p.name));
-                    view! { <li>{tf("bkpc.bm.part", &[("n", &p.number.to_string())])}" "<span class="nowrap tnum">{size}</span>{name}</li> }
+                    view! { <li>{tf("bkpc.bm.part", &[("n", &p.number.to_string())])}" · "<span class="nowrap tnum">{size}</span>{name}</li> }
                 })
                 .collect_view();
             view! {
                 <li>
-                    <span class="mono">{head.join(" · ")}</span>" "<span class="nowrap tnum">{i18n::bytes(d.size_bytes)}</span>
+                    <span class="mono">{head.join(" · ")}</span>" · "<span class="nowrap tnum">{i18n::bytes(d.size_bytes)}</span>
                     <ul class="bkpc-sub">{parts}</ul>
                 </li>
             }
@@ -211,13 +222,11 @@ fn boot_copy_items(copies: &[rynas_api_types::pcagent::BootCopy]) -> impl IntoVi
         .collect_view()
 }
 
-/// "First backup": with a manifest, one row per subvolume it lists, received or waiting.
-/// Without one the NAS does not know which subvolumes to expect: it names what arrived so
-/// far and says the full check comes with the manifest. Nothing at all before the first
-/// snapshot (the snapshot list already says so).
 fn first_run(b: &BareMetal, list: &[ReceivedSnapshot]) -> Option<AnyView> {
     let title = view! { <h4 class="small"><strong>{tr("bkpc.first_run")}</strong></h4> };
-    if b.layout.is_empty() {
+    // only mounted subvolumes are sent: one not mounted is never expected
+    let expected: Vec<&rynas_api_types::pcagent::BtrbkSubvolume> = b.layout.iter().filter(|s| !s.mount.is_empty()).collect();
+    if expected.is_empty() {
         let mut seen: Vec<String> = Vec::new();
         for s in list.iter().filter(|s| !s.incomplete && !s.not_subvolume) {
             if !seen.contains(&s.group) {
@@ -236,12 +245,15 @@ fn first_run(b: &BareMetal, list: &[ReceivedSnapshot]) -> Option<AnyView> {
             .into_any(),
         );
     }
-    let rows = b
-        .layout
+    let got = |name: &str| list.iter().any(|x| x.group == name && !x.incomplete && !x.not_subvolume);
+    // everything there: one line, no list
+    if expected.iter().all(|s| got(&s.name)) {
+        return Some(view! { <div>{ui::status(Tone::Ok, t("pcb.first_run_all").to_string())}</div> }.into_any());
+    }
+    let rows = expected
         .iter()
         .map(|s| {
-            let got = list.iter().any(|x| x.group == s.name && !x.incomplete && !x.not_subvolume);
-            let st = if got { ui::status(Tone::Ok, t("bkpc.first_run_ok").to_string()) } else { ui::status(Tone::Info, t("bkpc.first_run_wait").to_string()) };
+            let st = if got(&s.name) { ui::status(Tone::Ok, t("bkpc.first_run_ok").to_string()) } else { ui::status(Tone::Info, t("bkpc.first_run_wait").to_string()) };
             view! { <div class="kv"><dt class="mono">{s.name.clone()}</dt><dd>{st}</dd></div> }
         })
         .collect_view();
@@ -261,11 +273,34 @@ fn size_text(z: Option<SnapshotSize>) -> String {
         .unwrap_or_else(|| "—".into())
 }
 
+/// A retention age as written in the settings ("1d", "12h", "2w") in words with the right
+/// plural ("1 day", "12 hours"); anything else as written.
+fn age_text(raw: &str) -> String {
+    let s = raw.trim();
+    let (num, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
+    let Ok(n) = num.parse::<u64>() else { return s.to_string() };
+    let one = n == 1;
+    let k = match unit {
+        "h" if one => "pcb.age.h1",
+        "h" => "pcb.age.h",
+        "d" if one => "pcb.age.d1",
+        "d" => "pcb.age.d",
+        "w" if one => "pcb.age.w1",
+        "w" => "pcb.age.w",
+        "m" if one => "pcb.age.m1",
+        "m" => "pcb.age.m",
+        "y" if one => "pcb.age.y1",
+        "y" => "pcb.age.y",
+        _ => return s.to_string(),
+    };
+    tf(k, &[("n", &n.to_string())])
+}
+
 /// Who deletes old snapshots, in a sentence.
 fn rules_text(p: &PcTarget) -> String {
     if p.retention.owner == RetentionOwner::Nas {
         let g = &p.retention.gfs;
-        return tf("bkpc.ret.nas", &[("counts", &retention_text(g)), ("min", &g.min)]);
+        return tf("bkpc.ret.nas", &[("counts", &retention_text(g)), ("min", &age_text(&g.min))]);
     }
     if !p.delete.allowed {
         return t("bk.rules.off").to_string();
@@ -340,6 +375,8 @@ pub fn panel(add: RwSignal<Option<bool>>) -> AnyView {
         open: RwSignal::new(None),
         add,
         edit: RwSignal::new(None),
+        ask_revoke: RwSignal::new(false),
+        saved: RwSignal::new(0),
     };
     let problems = move || {
         pcs.setup.data.with(|s| {
@@ -397,7 +434,7 @@ pub fn panel(add: RwSignal<Option<bool>>) -> AnyView {
         {move || pcs.list.view(4, content)}
         {move || pcs.open.get().map(|d| drawer(pcs, d))}
         {move || pcs.add.get().map(|adopt| add_dialog(pcs, adopt))}
-        {move || pcs.edit.get().map(|p| settings_dialog(pcs, p))}
+        {move || pcs.edit.get().map(|(p, d)| settings_dialog(pcs, p, d))}
     }
     .into_any()
 }
@@ -493,14 +530,15 @@ impl Fields {
     /// `groups`: the PC's subvolumes (the "no longer sent" choice; none in the add dialog).
     /// `preview`: the preview of the settings dialog. `agent`: sent by rynas-agent (no key,
     /// the NAS always owns retention).
-    fn view(self, groups: Vec<String>, preview: Option<AnyView>, agent: Signal<bool>) -> AnyView {
+    /// `extra`: shown right after the subvolume choice (the agent's other excludes).
+    fn view(self, groups: Vec<String>, extra: Option<AnyView>, preview: Option<AnyView>, agent: Signal<bool>) -> AnyView {
         let nas = move || agent.get() || self.owner.get() == "nas";
         let custom = move || self.preset.get() == "custom";
         let count = move |label: &'static str, i: usize| number_field(label, None, self.counts[i].into(), Callback::new(move |v| self.counts[i].set(v)), 0, 1000);
         let ignored = (!groups.is_empty()).then(|| {
             view! {
                 <div class="field">
-                    <span class="field-label">{tr("bkpc.f.ignored")}</span>
+                    <span class="field-label">{move || if agent.get() { t("pcb.f.not_sent") } else { t("bkpc.f.ignored") }}</span>
                     {groups
                         .into_iter()
                         .map(|g| {
@@ -518,7 +556,7 @@ impl Fields {
                             }
                         })
                         .collect_view()}
-                    <span class="field-help">{tr("bkpc.f.ignored_help")}</span>
+                    <span class="field-help">{move || if agent.get() { t("pcb.f.not_sent_help") } else { t("bkpc.f.ignored_help") }}</span>
                 </div>
             }
         });
@@ -529,6 +567,7 @@ impl Fields {
             </Show>
             {number_field("bkpc.f.alert_hours", Some("bkpc.f.alert_hours_help"), self.alert.into(), Callback::new(move |v| self.alert.set(v)), 0, 8760)}
             {ignored}
+            {extra}
             <h3 class="mini-title">{tr("bk.f.rules")}</h3>
             <Show when=move || !agent.get()>
                 {segmented("bkpc.f.owner", OWNERS, self.owner.into(), Callback::new(move |v| self.owner.set(v)))}
@@ -550,7 +589,7 @@ impl Fields {
                     .into_any()
                 } else {
                     let r = self.retention().gfs;
-                    view! { <p class="field-help">{tf("snap.preset_keeps", &[("counts", &retention_text(&r)), ("min", &r.min)])}</p> }.into_any()
+                    view! { <p class="field-help">{tf("snap.preset_keeps", &[("counts", &retention_text(&r)), ("min", &age_text(&r.min))])}</p> }.into_any()
                 }}
             </Show>
             <Show when=move || !nas()>
@@ -774,8 +813,13 @@ fn add_dialog(pcs: Pcs, adopt_first: bool) -> AnyView {
                         {list.iter().map(|d| {
                             let v = d.device.clone();
                             let v2 = v.clone();
-                            let label = if d.hostname.is_empty() { v.clone() } else { format!("{} ({})", v, d.hostname) };
-                            view! { <option value=v selected=move || linked.get() == v2>{label}</option> }
+                            let mut label = if d.hostname.is_empty() { v.clone() } else { format!("{} ({})", v, d.hostname) };
+                            // the last run says how `/` was read: a root that is not btrfs cannot send snapshots
+                            let not_btrfs = d.last_run.as_ref().and_then(|r| r.captures.iter().find(|c| c.path == "/")).is_some_and(|c| c.fstype != "btrfs");
+                            if not_btrfs {
+                                label = tf("pcb.f.pc_no_btrfs", &[("pc", &label)]);
+                            }
+                            view! { <option value=v selected=move || linked.get() == v2 disabled=not_btrfs>{label}</option> }
                         }).collect_view()}
                     </select>
                     <span class="field-help">{tr("pcb.f.pc_help")}</span>
@@ -825,7 +869,7 @@ fn add_dialog(pcs: Pcs, adopt_first: bool) -> AnyView {
                 </label>
             </Show>
         </Show>
-        {f.view(Vec::new(), None, agent)}
+        {f.view(Vec::new(), None, None, agent)}
         <Show when=move || agent.get() && linked.get().is_empty()>
             <p class="small muted">{tr("pcb.pair_after")}</p>
         </Show>
@@ -838,10 +882,10 @@ fn add_dialog(pcs: Pcs, adopt_first: bool) -> AnyView {
         <button type="button" class="btn primary" disabled=move || busy.get() || !ready() on:click=save>{spinner(busy)}<Icon icon=icons::PLUS size=16 />{move || if mode.get() == "adopt" { t("bk.adopt") } else { t("bkpc.create") }}</button>
     }
     .into_any();
-    ui::dialog(DlgKind::Normal, Signal::derive(move || t("bk.add_title").to_string()), close, body, Some(foot))
+    ui::dialog(DlgKind::Normal, Signal::derive(move || t("bk.add").to_string()), close, body, Some(foot))
 }
 
-fn settings_dialog(pcs: Pcs, p: PcTarget) -> AnyView {
+fn settings_dialog(pcs: Pcs, p: PcTarget, agent_dev: Option<PcDevice>) -> AnyView {
     let close = Callback::new(move |_| pcs.edit.set(None));
     let f = Fields::new(Some(&p), p.adopted);
     let was_agent = p.agent;
@@ -850,14 +894,47 @@ fn settings_dialog(pcs: Pcs, p: PcTarget) -> AnyView {
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let device = StoredValue::new(p.device.clone());
+    // the agent paired under this name: its schedule and the subvolumes it leaves out are set
+    // here too (one dialog per PC); a revoked agent has nothing left to set
+    let live = agent_dev.filter(|d| p.agent && !d.revoked);
+    let has_agent = live.is_some();
+    let plan = live.as_ref().map(|d| d.settings.plan.clone()).unwrap_or_default();
+    let interval = RwSignal::new(plan.interval_hours.to_string());
+    let delay = RwSignal::new(plan.start_delay_min.to_string());
+    let paused = RwSignal::new(if plan.paused { "paused" } else { "on" }.to_string());
+    // a subvolume left out = its mount point in the agent's excludes and no alert for it on
+    // the NAS; excludes that name no known subvolume stay as written
+    let mounts: Vec<(String, String)> = p.bare_metal.layout.iter().filter(|s| !s.mount.is_empty()).map(|s| (s.name.clone(), s.mount.trim_end_matches('/').to_string())).collect();
+    let norm = |e: &str| if e == "/" { "/".to_string() } else { e.trim_end_matches('/').to_string() };
+    let mount_of = |m: &str| if m.is_empty() { "/".to_string() } else { m.to_string() };
+    let mounts: Vec<(String, String)> = mounts.into_iter().map(|(n, m)| (n, mount_of(&m))).collect();
+    if has_agent {
+        let ex: Vec<String> = plan.excludes.iter().map(|e| norm(e)).collect();
+        f.ignored.update(|v| {
+            for (n, m) in &mounts {
+                if ex.contains(m) && !v.contains(n) {
+                    v.push(n.clone());
+                }
+            }
+        });
+    }
+    let other = RwSignal::new(plan.excludes.iter().filter(|e| !mounts.iter().any(|(_, m)| *m == norm(e))).cloned().collect::<Vec<_>>().join("\n"));
+    let show_other = has_agent && (mounts.is_empty() || !other.with_untracked(String::is_empty));
+    let mounts = StoredValue::new(mounts);
+    let agent_body = live.clone().map(|d| {
+        let mut s = d.settings;
+        s.plan.excludes.clear();
+        s
+    });
     let save = move |_| {
         let is_agent = how.get_untracked() == "agent";
         let mut retention = f.retention();
         if is_agent {
             retention.owner = RetentionOwner::Nas;
         }
+        let description = f.description.get_untracked().trim().to_string();
         let body = PcTargetUpdate {
-            description: f.description.get_untracked().trim().to_string(),
+            description: description.clone(),
             public_key: if is_agent { String::new() } else { f.key.get_untracked().trim().to_string() },
             alert_days: f.alert_days(),
             delete: f.policy(),
@@ -866,7 +943,45 @@ fn settings_dialog(pcs: Pcs, p: PcTarget) -> AnyView {
             ignored_groups: Some(f.ignored.get_untracked()),
             agent: (is_agent != was_agent).then_some(is_agent),
         };
-        run(pcs, ("PUT", target_url(&device.get_value()), serde_json::to_string(&body).ok()), t("bk.saved").to_string(), (busy, error, Some(f)), Callback::new(move |_| pcs.edit.set(None)));
+        let folder = ("PUT", target_url(&device.get_value()), serde_json::to_string(&body).ok());
+        let done = Callback::new(move |_| {
+            pcs.edit.set(None);
+            pcs.saved.update(|n| *n += 1);
+        });
+        // the agent's schedule first (answers at once), then the folder (a task)
+        let agent_settings = agent_body.clone().filter(|_| is_agent).map(|mut s| {
+            let n = |s: RwSignal<String>| s.get_untracked().trim().parse::<u32>().unwrap_or(0);
+            s.description = description;
+            s.plan.interval_hours = n(interval);
+            s.plan.start_delay_min = n(delay);
+            s.plan.paused = paused.get_untracked() == "paused";
+            let ignored = f.ignored.get_untracked();
+            let mut ex: Vec<String> = other.get_untracked().lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+            for (n, m) in mounts.get_value() {
+                if ignored.contains(&n) && !ex.iter().any(|e| norm(e) == m) {
+                    ex.push(m);
+                }
+            }
+            s.plan.excludes = ex;
+            s
+        });
+        match agent_settings {
+            None => run(pcs, folder, t("bk.saved").to_string(), (busy, error, Some(f)), done),
+            Some(s) => {
+                busy.set(true);
+                error.set(None);
+                let u = super::agent::dev_url(&device.get_value());
+                spawn_local(async move {
+                    match api::put::<_, PcDevice>(&u, &s).await {
+                        Ok(_) => run(pcs, folder, t("bk.saved").to_string(), (busy, error, Some(f)), done),
+                        Err(e) => {
+                            let _ = busy.try_set(false);
+                            let _ = error.try_set(Some(e.text()));
+                        }
+                    }
+                });
+            }
+        }
     };
     // what the NAS would delete now with the settings in the form (nothing is saved)
     let previewing = RwSignal::new(false);
@@ -907,8 +1022,44 @@ fn settings_dialog(pcs: Pcs, p: PcTarget) -> AnyView {
         </Show>
     }
     .into_any();
-    let groups: Vec<String> = p.groups.iter().map(|g| g.name.clone()).chain(p.ignored_groups.iter().cloned()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+    let mut groups: std::collections::BTreeSet<String> = p.groups.iter().map(|g| g.name.clone()).chain(p.ignored_groups.iter().cloned()).collect();
+    if has_agent {
+        groups.extend(mounts.get_value().into_iter().map(|(n, _)| n));
+    }
+    let groups: Vec<String> = groups.into_iter().collect();
     const HOWS: &[(&str, &str)] = &[("agent", "pcb.how.agent"), ("ssh", "pcb.how.ssh")];
+    const PAUSED: &[(&str, &str)] = &[("on", "pca.f.scheduled"), ("paused", "pca.f.paused")];
+    let schedule = has_agent.then(|| {
+        view! {
+            <Show when=move || agent.get()>
+                <h3 class="mini-title">{tr("pca.f.schedule")}</h3>
+                {select_field("pca.f.state", None, PAUSED, paused.into(), Callback::new(move |v| paused.set(v)))}
+                <div class="form-row">
+                    {number_field("pca.f.interval", Some("pca.f.interval_help"), interval.into(), Callback::new(move |v| interval.set(v)), 1, 168)}
+                    {number_field("pca.f.delay", Some("pca.f.delay_help"), delay.into(), Callback::new(move |v| delay.set(v)), 0, 1440)}
+                </div>
+            </Show>
+        }
+    });
+    let other_view = show_other.then(|| {
+        view! {
+            <Show when=move || agent.get()>
+                {area_field("pcb.f.other_mounts", other.into(), Callback::new(move |v| other.set(v)), Some("pcb.f.other_mounts_help"), "/srv/vm")}
+            </Show>
+        }
+    });
+    // Revoke: rare and final, so here rather than next to Back up now
+    let revoke = has_agent.then(|| {
+        view! {
+            <Show when=move || was_agent && agent.get()>
+                <h3 class="mini-title">{tr("pcb.agent.title")}</h3>
+                <p class="small muted">{tr("pcb.agent.revoke_help")}</p>
+                <div class="sec-actions">
+                    <button type="button" class="btn danger sm" on:click=move |_| { pcs.edit.set(None); pcs.ask_revoke.set(true); }><Icon icon=icons::TRASH_2 size=14 />{tr("pca.revoke")}</button>
+                </div>
+            </Show>
+        }
+    });
     let body = view! {
         {text_field("bk.f.description", f.description.into(), Callback::new(move |v| { f.desc_err.set(None); f.description.set(v); }), f.desc_err.into(), In { maxlength: 120, ..In::default() })}
         {segmented("pcb.how", HOWS, how.into(), Callback::new(move |v: String| how.set(v)))}
@@ -918,7 +1069,9 @@ fn settings_dialog(pcs: Pcs, p: PcTarget) -> AnyView {
             (_, true) => t("pcb.how.agent_help"),
             (_, false) => t("pcb.how.ssh_help"),
         }}</p>
-        {f.view(groups, Some(preview), agent)}
+        {schedule}
+        {f.view(groups, other_view.map(IntoAny::into_any), Some(preview), agent)}
+        {revoke}
         {form_error(error)}
     }
     .into_any();
@@ -937,6 +1090,8 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
     let dev = StoredValue::new(device.clone());
     let host = window().location().hostname().unwrap_or_default();
     let detail = Remote::<PcTargetDetail>::new(format!("{}?host={}", target_url(&device), api::encode(&host)));
+    pcs.ask_revoke.set(false);
+    let ctl = super::agent::AgentCtl::new(device.clone(), pcs.ask_revoke, Callback::new(move |_| detail.reload()));
     let browse = RwSignal::new(None::<String>);
     let ask = RwSignal::new(false);
     let busy = RwSignal::new(false);
@@ -998,7 +1153,10 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
         // "no snapshots yet" is said once, by the snapshot list
         let shown_gaps: Vec<&BareMetalGap> = b.missing.iter().chain(&b.warnings).filter(|g| g.code != BareMetalCode::NoSnapshots).collect();
         let has_gaps = !shown_gaps.is_empty();
-        let gaps = shown_gaps.into_iter().map(|g| view! { <li>{gap_text(g)}</li> }).collect_view();
+        // btrbk without a manifest: the drop-in of the manual steps writes it
+        let no_manifest = shown_gaps.iter().any(|g| g.code == BareMetalCode::NoManifest);
+        let agent = p.agent;
+        let gaps = shown_gaps.into_iter().map(|g| view! { <li>{gap_text(g, agent)}</li> }).collect_view();
         let layout = (!b.layout.is_empty()).then(|| {
             let items = b.layout.iter().map(|s| {
                 let at = if s.mount.is_empty() { t("rm.tip_not_mounted").to_string() } else { s.mount.clone() };
@@ -1090,6 +1248,9 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
         // how the PC is set up: nothing to do by hand with rynas-agent (its part is above);
         // with btrbk the commands, folded, then the first-backup check
         let check = first_run(&b, &d.list);
+        // the manual steps open by themselves while they are the only way forward: no key
+        // yet, or no manifest (its drop-in is one of them)
+        let steps_open = (p.public_key.is_empty() && d.list.is_empty()) || no_manifest;
         let steps = if p.agent {
             check
         } else {
@@ -1103,7 +1264,7 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
                 view! {
                     <h3 class="mini-title">{tr("bk.steps")}</h3>
                     <p class="small muted">{tr("pcb.ssh_recommend")}</p>
-                    <details class="tls-step">
+                    <details class="tls-step" open=steps_open>
                         <summary>{tr("bkpc.manual_steps")}</summary>
                         <p class="small muted">{tr("bk.steps_intro")}</p>
                         {code_block("bk.step.key", d.key_commands.clone())}
@@ -1122,11 +1283,22 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
         view! {
             {(p.public_key.is_empty() && !p.agent).then(|| ui::note(Tone::Warn, icons::KEY, ui::text(t("bk.no_key").to_string())))}
             {issues}
+            // with rynas-agent its block first: the PC's status, progress and schedule; the
+            // folder below under its own title (one status, one date, one row of buttons)
+            {agent.then(|| view! {
+                {ctl.status()}
+                <h3 class="mini-title">{tr("bkpc.f.path")}</h3>
+            })}
             <dl class="kvs">
-                {kv("col.status", state_status(p.state))}
-                {kv("pcb.how", ui::text(t(if p.agent { "pcb.how.agent" } else { "pcb.how.ssh" }).to_string()))}
+                {(!agent).then(|| kv("col.status", state_status(p.state)))}
+                {kv("pcb.how", ui::text(t(if agent { "pcb.via.agent" } else { "pcb.via.ssh" }).to_string()))}
                 {p.receiving.then(|| kv("bkpc.receiving", ui::status(Tone::Info, t("bkpc.receiving").to_string())))}
-                {kv("bk.last", ui::text(when(p.last_received_ms)))}
+                {if agent {
+                    let last = p.last_received_ms;
+                    view! { {move || (!ctl.paired.get()).then(|| kv("bk.last", ui::text(when(last))))} }.into_any()
+                } else {
+                    kv("bk.last", ui::text(when(p.last_received_ms)))
+                }}
                 {kv("bk.col.snapshots", ui::text(i18n::count(u64::from(p.snapshots))))}
                 {(p.incomplete > 0).then(|| kv("bk.incomplete", ui::text(i18n::count(u64::from(p.incomplete)))))}
                 {kv("bk.col.folder", ui::breakable(&p.path, "mono"))}
@@ -1140,11 +1312,13 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
             </dl>
             {form_error(measure_err)}
             <div class="sec-actions">
+                {agent.then(|| ctl.buttons())}
                 <button class="btn ghost sm" disabled=move || measuring.get() on:click=measure>{spinner(measuring)}<Icon icon=icons::DATABASE size=14 />{tr("bk.measure")}</button>
                 {nas.then(|| view! { <button class="btn ghost sm" disabled=move || working.get() on:click=prune><Icon icon=icons::TRASH_2 size=14 />{tr("bkpc.prune")}</button> })}
-                <button class="btn ghost sm" on:click=move |_| pcs.edit.set(Some(p_edit.clone()))><Icon icon=icons::SETTINGS size=14 />{tr("bk.settings")}</button>
+                <button class="btn ghost sm" on:click=move |_| pcs.edit.set(Some((p_edit.clone(), ctl.detail.data.with_untracked(|d| d.as_ref().map(|d| d.device.clone())))))><Icon icon=icons::SETTINGS size=14 />{tr("bk.settings")}</button>
                 <button class="btn danger sm" on:click=move |_| { error.set(None); ask.set(true); }><Icon icon=icons::TRASH_2 size=14 />{tr("bk.remove")}</button>
             </div>
+            {agent.then(|| ctl.history())}
             {bare}
             {steps}
             <h3 class="mini-title">{tr("bk.snapshots")}</h3>
@@ -1172,14 +1346,32 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
         }
         .into_any()
     };
-    // the rynas-agent part (status, progress, runs) of a PC fed by the agent: built once
-    // (it polls on its own), not on every reload of the folder's detail
+    // the agent of a PC fed by rynas-agent: read once the folder says so (it polls on its own
+    // while a run goes on)
     let is_agent = Memo::new(move |_| detail.data.with(|d| d.as_ref().map(|d| d.target.agent)));
-    let agent_part = move || (is_agent.get() == Some(true)).then(|| super::agent::agent_section(dev.get_value(), Callback::new(move |_| detail.reload())));
-    let body = view! { {agent_part}{move || detail.view(8, content)} }.into_any();
+    let started = StoredValue::new(false);
+    Effect::new(move |_| {
+        if is_agent.get() == Some(true) && !started.get_value() {
+            started.set_value(true);
+            ctl.start();
+        }
+    });
+    // Settings saved: the folder and its agent again
+    Effect::new(move |prev: Option<u32>| {
+        let n = pcs.saved.get();
+        if prev.is_some() {
+            detail.reload();
+            if started.get_value() {
+                ctl.detail.reload();
+            }
+        }
+        n
+    });
+    let body = view! { {move || detail.view(8, content)} }.into_any();
     let foot = view! { <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("close")}</button> }.into_any();
     view! {
         <div class="wide-drawer">{ui::drawer(Signal::stored(device.clone()), close, body, foot)}</div>
+        {ctl.confirm()}
         {move || ask.get().then(|| ui::confirm(Confirm { busy, error, ..Confirm::new(tf("bk.remove_title", &[("device", &dev.get_value())]), t("bk.remove_text").to_string(), "bk.remove", true, remove, Callback::new(move |_| ask.set(false))) }))}
         {move || browse.get().map(|s| browse_drawer(pcs, dev.get_value(), s, Callback::new(move |_| browse.set(None))))}
         {move || del.get().map(|n| ui::confirm(Confirm { busy: del_busy, error: del_err, ..Confirm::new(tf("bkpc.delete_snap_title", &[("name", &n)]), t("bkpc.delete_snap_text").to_string(), "bkpc.delete_snap", true, delete_snap, Callback::new(move |_| del.set(None))) }))}

@@ -98,11 +98,24 @@ pub trait ReceiveHost: Send + Sync {
     fn create_folder(&self, path: &Path, agent: bool) -> Result<(), String>;
     /// An existing folder: only its own owner group and mode change (as `create_folder`).
     fn prepare_adopted(&self, path: &Path, agent: bool) -> Result<(), String>;
-    /// `btrfs receive` of the (decompressed) send stream `input` into the locked folder of
-    /// `device`, confined to that folder (chroot, and a transient unit that can write only
-    /// there). `expect` is the snapshot name the caller checks afterwards (memory uses it as
-    /// the received name). Blocking; returns when the receive has ended.
-    fn receive(&self, device: &str, lock: &FolderLock, expect: &str, input: &mut dyn std::io::Read) -> Result<(), String>;
+    /// `btrfs receive` of the (decompressed) send stream `input` for `device`, chrooted in the
+    /// staging folder `<folder>/.incoming/<staging>/` of the locked folder, in a transient
+    /// unit that can write only in the folder and does not see the `hidden` folders (the
+    /// other PCs'). Memory uses the stream's own subvolume name. Blocking; returns when the
+    /// receive has ended.
+    fn receive(&self, device: &str, lock: &FolderLock, staging: &str, hidden: &[String], input: &mut dyn std::io::Read) -> Result<(), String>;
+    /// Makes the empty staging folder `<folder>/.incoming/<staging>/` (`0700 root`).
+    fn make_staging(&self, lock: &FolderLock, staging: &str) -> Result<(), String>;
+    /// Everything directly in `<folder>/.incoming/<staging>/` (subvolume facts for the
+    /// subvolumes, `None` for anything else).
+    fn staged(&self, lock: &FolderLock, staging: &str) -> Result<Vec<Entry>, String>;
+    /// Moves the received read-only subvolume `.incoming/<staging>/<name>` to `<folder>/<name>`
+    /// (never replacing; the read-only flag is lifted only for the move: a read-only folder
+    /// cannot change parent).
+    fn adopt_staged(&self, lock: &FolderLock, staging: &str, name: &str) -> Result<(), String>;
+    /// Removes `<folder>/.incoming` with whatever an earlier or failed receive left there
+    /// (subvolumes deleted, files and folders removed without following links).
+    fn clear_staging(&self, lock: &FolderLock) -> Result<(), String>;
     /// (is a subvolume, snapshot entries, other entries).
     fn scan(&self, path: &Path) -> Result<Scan, String>;
     fn usage(&self, path: &Path) -> Result<(u64, u64, u64), String>;
@@ -143,36 +156,93 @@ pub const SHOWN_MAX: usize = 256;
 /// Prefix of the transient unit of an agent PC's receive (`<prefix>-<device>.service`).
 pub const RECEIVE_UNIT: &str = "rynas-pcreceive";
 
-/// The sandbox of an agent PC's `btrfs receive` (`docs/research/pc-backup.md` §11.9): on top
-/// of `--chroot` into the folder, the transient unit sees the whole filesystem read-only
-/// except the device folder, has no network, only the capabilities a receive needs (subvolume
-/// ioctls, owners, modes, set-id bits, device nodes, the chroot) and the system-service
-/// syscalls plus `chroot`/`mknod`. Checked on a loop btrfs: full and incremental receives
-/// work, a parent outside the folder is refused by btrfs itself ("not reachable from inside
-/// the root subvol"). No `PrivateTmp`: a folder below `/tmp` would vanish behind it.
-pub fn receive_unit_properties(root: &str) -> Vec<String> {
-    [
+/// Staging folder inside a device folder: every receive lands in a fresh empty folder below
+/// it and moves into the device folder only once checked.
+pub const STAGING_DIR: &str = ".incoming";
+
+/// Why an agent folder must be a subvolume: inside the receive unit the folder is a bind
+/// mount (`ReadWritePaths`), `btrfs receive` resolves parents relative to that mount's
+/// subvolume, and with a plain folder it finds none (checked on a loop btrfs).
+const AGENT_NOT_SUBVOLUME: &str =
+    "the folder is not a btrfs subvolume: rynas-agent's incremental receives need one (make a new folder from rynas, or turn this one into a subvolume)";
+
+/// The sandbox of an agent PC's `btrfs receive` (`docs/research/pc-backup.md` §11.9).
+///
+/// - `--chroot` into the receive's own empty staging folder (`<root>/.incoming/<random>/`):
+///   every path of the stream, and every symlink a later command follows, stays there. The
+///   other snapshots of the PC are not reachable by path.
+/// - What the chroot does not cover: `btrfs receive` opens the mount holding its target
+///   *before* it chroots, looks the parent of an incremental stream (and any clone source)
+///   up by UUID across the whole filesystem, and opens it through that descriptor. In this
+///   unit that mount is the bind mount `ReadWritePaths` makes of the device folder, and
+///   btrfs-progs refuses a parent outside that mount's subvolume ("parent subvol is not
+///   reachable from inside the root subvol"; 7.3 says the same of clone sources). That
+///   limit holds only because the folder is a subvolume and its own mount here (an agent
+///   folder must be one, [`AGENT_NOT_SUBVOLUME`]); it is not a promise of btrfs. So the
+///   stream guard ([`rynas_btrfs::send_stream`]) admits only the announced parent and the
+///   subvolume itself as sources, rynasd checks the received subvolume's `parent_uuid`
+///   afterwards, and `hidden` (the other device folders) is made inaccessible in the unit.
+/// - `ReadWritePaths` is the device folder, not only the staging folder: a clone needs its
+///   source and target on the same mount (`FICLONERANGE` refuses across bind mounts), and
+///   the parent lives in the device folder. The rest of the system is read-only.
+/// - No network, no device can be opened (`DevicePolicy=closed` with `DeviceAllow=… m`: a
+///   stream may create device nodes, as system snapshots hold them, but a write into one is
+///   refused by the kernel), the capabilities a receive needs (subvolume ioctls, owners, modes,
+///   set-id bits, device nodes, the chroot), the system-service syscalls plus
+///   `chroot`/`mknod`; no `RestrictSUIDSGID` (system snapshots carry set-id files). CPU,
+///   memory and tasks capped. No `PrivateTmp`/`PrivateDevices`: a folder below `/tmp` would
+///   vanish behind the first, and the second removes `CAP_MKNOD`.
+///
+/// Checked on a loop btrfs (btrfs-progs 7.3, kernel 7.3) with this set: full and incremental
+/// receives with clones, a parent and a clone source in another folder refused, a plain
+/// folder unable to find its parents, a device node created but not writable.
+pub fn receive_unit_properties(root: &str, hidden: &[String]) -> Vec<String> {
+    let mut p: Vec<String> = vec![
         "ProtectSystem=strict".to_string(),
         format!("ReadWritePaths={root}"),
         "PrivateNetwork=yes".into(),
+        "PrivateIPC=yes".into(),
         "NoNewPrivileges=yes".into(),
         "RestrictAddressFamilies=AF_UNIX".into(),
-        "CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_CHROOT CAP_CHOWN CAP_FOWNER CAP_FSETID CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_MKNOD".into(),
+        // subvolume ioctls, chroot, owners, modes on others' files, set-id bits kept across a
+        // write (CAP_FSETID), others' read-only folders (CAP_DAC_OVERRIDE), device nodes;
+        // CAP_DAC_READ_SEARCH is not needed (checked on a loop: same result without it)
+        "CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_CHROOT CAP_CHOWN CAP_FOWNER CAP_FSETID CAP_DAC_OVERRIDE CAP_MKNOD".into(),
         "SystemCallArchitectures=native".into(),
         "SystemCallFilter=@system-service chroot mknod mknodat".into(),
+        // device nodes may be created (overlayfs whiteouts, container root filesystems) but
+        // never opened: a block node written to would be a disk of the NAS
+        "DevicePolicy=closed".into(),
+        "DeviceAllow=char-* m".into(),
+        "DeviceAllow=block-* m".into(),
         "ProtectKernelModules=yes".into(),
         "ProtectKernelTunables=yes".into(),
+        "ProtectKernelLogs=yes".into(),
         "ProtectControlGroups=yes".into(),
+        "ProtectClock=yes".into(),
+        "ProtectHostname=yes".into(),
+        "ProtectProc=invisible".into(),
+        "ProcSubset=pid".into(),
+        "RestrictNamespaces=yes".into(),
         "RestrictRealtime=yes".into(),
         "LockPersonality=yes".into(),
+        "MemoryDenyWriteExecute=yes".into(),
+        "UMask=0077".into(),
         "MemoryMax=512M".into(),
+        "TasksMax=16".into(),
+        "CPUQuota=100%".into(),
         "Nice=10".into(),
         "IOSchedulingClass=best-effort".into(),
         "IOSchedulingPriority=7".into(),
-        // a first full send over a slow link can take a long time
+        // a first full send over a slow link can take a long time (the receive also stops
+        // below a minimum average rate, see `RECEIVE_MIN_RATE`)
         "RuntimeMaxSec=172800".into(),
-    ]
-    .into()
+    ];
+    for h in hidden {
+        // `-`: a folder that is not there is no error
+        p.push(format!("InaccessiblePaths=-{h}"));
+    }
+    p
 }
 
 /// The device folder, opened and locked; the lock goes with it.
@@ -386,32 +456,47 @@ impl ReceiveHost for HostReceive {
         };
         // on the descriptor: a symlink swapped in for the folder is not followed
         let dir = rynas_btrfs::ioctl::open_dir(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        if agent && !rynas_btrfs::ioctl::is_subvolume(&dir) {
+            return Err(format!("{}: {AGENT_NOT_SUBVOLUME}", path.display()));
+        }
         std::os::unix::fs::fchown(&dir, Some(0), Some(gid)).map_err(|e| format!("{}: {e}", path.display()))?;
         dir.set_permissions(std::fs::Permissions::from_mode(mode))
             .map_err(|e| format!("{}: {e}", path.display()))
     }
 
-    fn receive(&self, device: &str, lock: &FolderLock, _expect: &str, input: &mut dyn std::io::Read) -> Result<(), String> {
+    fn receive(&self, device: &str, lock: &FolderLock, staging: &str, hidden: &[String], input: &mut dyn std::io::Read) -> Result<(), String> {
         use std::io::Read as _;
         use std::process::{Command, Stdio};
         if !valid_device(device) {
             return Err(format!("{device}: not a device name"));
         }
         let btrfs = rynas_btrfs::receive_filter::locate("btrfs").ok_or("btrfs-progs is not installed")?;
+        if !lock.dir.as_ref().is_some_and(rynas_btrfs::ioctl::is_subvolume) {
+            return Err(AGENT_NOT_SUBVOLUME.into());
+        }
         let root = lock.path.to_string_lossy().into_owned();
+        let into = format!("{root}/{STAGING_DIR}/{staging}");
         // the folder came through verify_root (no symlink on the way, not inside a received
-        // snapshot) and valid_path (no spaces or quotes: safe as a unit property value)
+        // snapshot) and valid_path (no spaces or quotes: safe as a unit property value); the
+        // staging name is rynasd's own (hex)
         receive::valid_path(&root)?;
+        receive::valid_path(&into)?;
+        let hidden: Vec<String> = hidden
+            .iter()
+            .filter(|h| receive::valid_path(h).is_ok() && !within(&root, h) && !within(h, &root))
+            .cloned()
+            .collect();
         let mut c = Command::new("systemd-run");
         c.args(["--wait", "--pipe", "--collect", "--quiet", "--service-type=exec"])
             // one name per device: systemd refuses a second unit while one still runs (even
             // when rynasd restarted and lost the folder lock meanwhile)
             .arg(format!("--unit={RECEIVE_UNIT}-{device}"))
             .arg(format!("--description=rynas: receive of PC {device}"));
-        for p in receive_unit_properties(&root) {
+        for p in receive_unit_properties(&root, &hidden) {
             c.arg(format!("--property={p}"));
         }
-        c.arg("--").arg(&btrfs).args(["receive", "--chroot"]).arg(format!("{root}/"));
+        // -e: stop at the end command (the guard lets nothing follow it anyway)
+        c.arg("--").arg(&btrfs).args(["receive", "-e", "--chroot"]).arg(format!("{into}/"));
         c.env_clear()
             .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
             .env("LC_ALL", "C")
@@ -444,6 +529,53 @@ impl ReceiveHost for HostReceive {
             _ if status.success() => Ok(()),
             _ => Err(if last.is_empty() { format!("btrfs receive failed ({status})") } else { format!("btrfs receive: {last}") }),
         }
+    }
+
+    fn make_staging(&self, lock: &FolderLock, staging: &str) -> Result<(), String> {
+        let dir = lock.dir.as_ref().ok_or("folder not open")?;
+        let top = mkdir_open(dir, STAGING_DIR)?;
+        mkdir_open(&top, staging).map(|_| ())
+    }
+
+    fn staged(&self, lock: &FolderLock, staging: &str) -> Result<Vec<Entry>, String> {
+        use std::os::fd::AsRawFd;
+        let dir = lock.dir.as_ref().ok_or("folder not open")?;
+        let top = rynas_btrfs::ioctl::open_dir_at(dir, STAGING_DIR).map_err(|e| format!("{STAGING_DIR}: {e}"))?;
+        let st = rynas_btrfs::ioctl::open_dir_at(&top, staging).map_err(|e| format!("{staging}: {e}"))?;
+        let mut out = Vec::new();
+        for e in std::fs::read_dir(format!("/proc/self/fd/{}", st.as_raw_fd())).map_err(|e| e.to_string())? {
+            let e = e.map_err(|e| e.to_string())?;
+            let name = e.file_name().to_string_lossy().into_owned();
+            let info = e
+                .file_name()
+                .to_str()
+                .and_then(|n| rynas_btrfs::ioctl::open_dir_at(&st, n).ok())
+                .filter(rynas_btrfs::ioctl::is_subvolume)
+                .and_then(|f| rynas_btrfs::ioctl::subvol_info(&f).ok());
+            out.push(Entry { name, info });
+        }
+        Ok(out)
+    }
+
+    fn adopt_staged(&self, lock: &FolderLock, staging: &str, name: &str) -> Result<(), String> {
+        use rynas_btrfs::ioctl;
+        let dir = lock.dir.as_ref().ok_or("folder not open")?;
+        let top = ioctl::open_dir_at(dir, STAGING_DIR).map_err(|e| format!("{STAGING_DIR}: {e}"))?;
+        let st = ioctl::open_dir_at(&top, staging).map_err(|e| format!("{staging}: {e}"))?;
+        let sub = ioctl::open_dir_at(&st, name).map_err(|e| format!("{name}: {e}"))?;
+        if !ioctl::is_subvolume(&sub) {
+            return Err(format!("{name}: not a subvolume"));
+        }
+        ioctl::set_readonly(&sub, false).map_err(|e| format!("{name}: {e}"))?;
+        let moved = ioctl::rename_noreplace_at(&st, name, dir, name).map_err(|e| format!("moving {name}: {e}"));
+        // read-only again wherever it is now (the same subvolume, by descriptor)
+        let ro = ioctl::set_readonly(&sub, true).map_err(|e| format!("{name}: {e}"));
+        moved.and(ro)
+    }
+
+    fn clear_staging(&self, lock: &FolderLock) -> Result<(), String> {
+        let dir = lock.dir.as_ref().ok_or("folder not open")?;
+        remove_tree_at(dir, STAGING_DIR, 0)
     }
 
     fn scan(&self, path: &Path) -> Result<Scan, String> {
@@ -622,6 +754,87 @@ impl ReceiveHost for HostReceive {
     }
 }
 
+/// `name` inside `dir` as a folder of root, `0700`: made when missing, refused when it is
+/// anything else (a symlink, a file, another owner).
+fn mkdir_open(dir: &std::fs::File, name: &str) -> Result<std::fs::File, String> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::MetadataExt;
+    let c = std::ffi::CString::new(name).map_err(|e| e.to_string())?;
+    // SAFETY: valid descriptor and C string
+    if unsafe { libc::mkdirat(dir.as_raw_fd(), c.as_ptr(), 0o700) } != 0 {
+        let e = std::io::Error::last_os_error();
+        if e.kind() != std::io::ErrorKind::AlreadyExists {
+            return Err(format!("{name}: {e}"));
+        }
+    }
+    let f = rynas_btrfs::ioctl::open_dir_at(dir, name).map_err(|e| format!("{name}: {e}"))?;
+    let m = f.metadata().map_err(|e| format!("{name}: {e}"))?;
+    if m.uid() != 0 || m.mode() & 0o077 != 0 {
+        return Err(format!("{name}: not a 0700 folder of root"));
+    }
+    Ok(f)
+}
+
+/// Deepest folder level [`remove_tree_at`] goes down to.
+const REMOVE_DEPTH: usize = 64;
+
+fn remove_tree_at(dir: &std::fs::File, name: &str, depth: usize) -> Result<(), String> {
+    let c = std::ffi::CString::new(name).map_err(|e| e.to_string())?;
+    remove_tree_c(dir, &c, depth)
+}
+
+fn remove_tree_c(dir: &std::fs::File, c: &std::ffi::CStr, depth: usize) -> Result<(), String> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    let shown = c.to_string_lossy().into_owned();
+    let unlink = |flags: libc::c_int| -> Result<(), String> {
+        // SAFETY: valid descriptor and C string
+        if unsafe { libc::unlinkat(dir.as_raw_fd(), c.as_ptr(), flags) } != 0 {
+            let e = std::io::Error::last_os_error();
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return Err(format!("{shown}: {e}"));
+            }
+        }
+        Ok(())
+    };
+    // SAFETY: valid descriptor and C string
+    let fd = unsafe { libc::openat(dir.as_raw_fd(), c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+    if fd < 0 {
+        let e = std::io::Error::last_os_error();
+        return if e.kind() == std::io::ErrorKind::NotFound {
+            Ok(())
+        } else {
+            // a symlink (ELOOP), a file (ENOTDIR), a device node, a socket
+            unlink(0)
+        };
+    }
+    // SAFETY: a descriptor we own
+    let sub = unsafe { std::fs::File::from_raw_fd(fd) };
+    if rynas_btrfs::ioctl::is_subvolume(&sub) {
+        drop(sub);
+        let name = c.to_str().map_err(|_| format!("{shown}: a subvolume whose name is not UTF-8"))?;
+        return rynas_btrfs::ioctl::destroy_subvolume(dir, name).map_err(|e| format!("deleting {shown}: {e}"));
+    }
+    if depth >= REMOVE_DEPTH {
+        return Err(format!("{shown}: folders nested deeper than {REMOVE_DEPTH} levels"));
+    }
+    let names: Vec<std::ffi::CString> = std::fs::read_dir(format!("/proc/self/fd/{}", sub.as_raw_fd()))
+        .map_err(|e| format!("{shown}: {e}"))?
+        .flatten()
+        .filter_map(|e| std::ffi::CString::new(e.file_name().as_bytes()).ok())
+        .collect();
+    let mut first_err = None;
+    for n in names {
+        if let Err(e) = remove_tree_c(&sub, &n, depth + 1) {
+            first_err.get_or_insert(e);
+        }
+    }
+    if let Some(e) = first_err {
+        return Err(e);
+    }
+    unlink(libc::AT_REMOVEDIR)
+}
+
 fn set_mode(p: &Path, mode: u32) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode))
@@ -675,6 +888,13 @@ pub struct MemoryReceive {
     pub deleted: Mutex<Vec<String>>,
     /// The name the next receives create instead of the expected one (tests).
     pub receive_as: Mutex<Option<String>>,
+    /// Staging folders of receives (`<folder>/.incoming/<name>`) and what they hold.
+    pub staged: Mutex<BTreeMap<PathBuf, Vec<Entry>>>,
+    /// Extra non-subvolume entries every staging folder shows (tests: what a stream could
+    /// leave next to its subvolume).
+    pub staged_extra: Mutex<Vec<String>>,
+    /// The folders hidden from the last receive.
+    pub hidden: Mutex<Vec<String>>,
 }
 
 /// The account group's gid in memory.
@@ -808,15 +1028,23 @@ impl ReceiveHost for MemoryReceive {
         }
         Ok(())
     }
-    /// Reads the stream to its end; an empty one fails (as `btrfs receive` would), anything
-    /// else becomes the complete snapshot `expect` (or `self.receive_as` when set: a stream
-    /// that names another subvolume).
-    fn receive(&self, _device: &str, lock: &FolderLock, expect: &str, input: &mut dyn std::io::Read) -> Result<(), String> {
-        let copied = std::io::copy(input, &mut std::io::sink());
-        let name = self.receive_as.lock().unwrap().clone().unwrap_or_else(|| expect.to_string());
-        let mut f = self.folders.lock().unwrap();
-        let (_, entries) = f.get_mut(&lock.path).ok_or("no such folder")?;
-        if !matches!(copied, Ok(n) if n > 0) {
+    fn receive(&self, _device: &str, lock: &FolderLock, staging: &str, hidden: &[String], input: &mut dyn std::io::Read) -> Result<(), String> {
+        *self.hidden.lock().unwrap() = hidden.to_vec();
+        let mut data = Vec::new();
+        let copied = std::io::copy(input, &mut data);
+        let first = rynas_btrfs::send_stream::first_subvolume(&data);
+        let name = self
+            .receive_as
+            .lock()
+            .unwrap()
+            .clone()
+            .or_else(|| first.as_ref().map(|f| f.0.clone()))
+            .unwrap_or_else(|| "unknown".into());
+        let key = lock.path.join(STAGING_DIR).join(staging);
+        let folder = self.folders.lock().unwrap().get(&lock.path).map(|(_, e)| e.clone()).ok_or("no such folder")?;
+        let mut st = self.staged.lock().unwrap();
+        let entries = st.get_mut(&key).ok_or("no staging folder")?;
+        if !matches!(copied, Ok(n) if n > 0) || first.is_none() {
             // what an interrupted receive leaves: a writable subvolume without received UUID
             entries.push(Entry {
                 name,
@@ -827,20 +1055,62 @@ impl ReceiveHost for MemoryReceive {
                 Ok(_) => "btrfs receive: short read from stream".into(),
             });
         }
+        let (_, uuid, clone) = first.unwrap_or_default();
+        let parent_uuid = clone.and_then(|c| folder.iter().find(|e| e.info.as_ref().and_then(|i| i.received_uuid.as_deref()) == Some(c.as_str())))
+            .and_then(|e| e.info.as_ref().and_then(|i| i.uuid.clone()));
         let now = rynas_tasks::now_ms();
-        let id = 1000 + entries.len() as u64;
+        let id = 1000 + folder.len() as u64 + entries.len() as u64;
         entries.push(Entry {
             name,
             info: Some(rynas_btrfs::ioctl::SubvolInfo {
                 root_id: id,
                 readonly: true,
-                uuid: Some(format!("0b7d9e4c-0000-4000-8000-{id:012x}")),
-                received_uuid: Some(format!("6f1c2a8e-0000-4000-8000-{:012x}", now % 0xffff_ffff_ffff + id)),
+                uuid: Some(format!("0b7d9e4c-0000-4000-8000-{:012x}", now % 0xffff_ffff_ffff + id)),
+                parent_uuid,
+                received_uuid: uuid,
                 otime: (now / 1000) as i64,
                 ..Default::default()
             }),
         });
-        entries.sort_by(|a, b| rynas_btrfs::name::compare_names(&b.name, &a.name));
+        Ok(())
+    }
+
+    fn make_staging(&self, lock: &FolderLock, staging: &str) -> Result<(), String> {
+        self.staged.lock().unwrap().insert(lock.path.join(STAGING_DIR).join(staging), Vec::new());
+        Ok(())
+    }
+
+    fn staged(&self, lock: &FolderLock, staging: &str) -> Result<Vec<Entry>, String> {
+        let key = lock.path.join(STAGING_DIR).join(staging);
+        let mut v = self.staged.lock().unwrap().get(&key).cloned().ok_or("no staging folder")?;
+        v.extend(self.staged_extra.lock().unwrap().iter().map(|n| Entry { name: n.clone(), info: None }));
+        Ok(v)
+    }
+
+    fn adopt_staged(&self, lock: &FolderLock, staging: &str, name: &str) -> Result<(), String> {
+        let key = lock.path.join(STAGING_DIR).join(staging);
+        let mut st = self.staged.lock().unwrap();
+        let entries = st.get_mut(&key).ok_or("no staging folder")?;
+        let at = entries.iter().position(|e| e.name == name).ok_or_else(|| format!("{name}: not staged"))?;
+        let mut f = self.folders.lock().unwrap();
+        let (_, folder) = f.get_mut(&lock.path).ok_or("no such folder")?;
+        if folder.iter().any(|e| e.name == name) {
+            return Err(format!("moving {name}: File exists"));
+        }
+        folder.push(entries.remove(at));
+        folder.sort_by(|a, b| rynas_btrfs::name::compare_names(&b.name, &a.name));
+        Ok(())
+    }
+
+    fn clear_staging(&self, lock: &FolderLock) -> Result<(), String> {
+        let top = lock.path.join(STAGING_DIR);
+        let mut st = self.staged.lock().unwrap();
+        let gone: Vec<PathBuf> = st.keys().filter(|k| k.starts_with(&top)).cloned().collect();
+        for k in gone {
+            for e in st.remove(&k).unwrap_or_default() {
+                self.deleted.lock().unwrap().push(format!("{}/{}", k.display(), e.name));
+            }
+        }
         Ok(())
     }
     fn scan(&self, path: &Path) -> Result<Scan, String> {
@@ -1395,6 +1665,9 @@ struct Registry {
     targets: BTreeMap<String, Stored>,
 }
 
+/// Called with (device, folder id) when an agent folder is removed.
+pub type AgentRemoved = Box<dyn Fn(&str, u64) + Send + Sync>;
+
 pub struct PcBackup {
     pub ops: Arc<Ops>,
     pub host: Arc<dyn ReceiveHost>,
@@ -1409,6 +1682,11 @@ pub struct PcBackup {
     /// Manifests read from snapshots, by subvolume UUID (received snapshots are read-only:
     /// what a snapshot holds never changes). `None`: the snapshot has none.
     manifests: Mutex<BTreeMap<String, Option<ManifestRead>>>,
+    /// Agent receives running now (all PCs, at most [`MAX_RECEIVES`]).
+    receives: std::sync::atomic::AtomicUsize,
+    /// Told when an agent folder goes (device, folder id): the PC records bound to it are
+    /// revoked or fall back to the files method (set once at start, [`crate::pc_agent`]).
+    pub on_agent_removed: std::sync::OnceLock<AgentRemoved>,
 }
 
 /// Most manifests remembered (a few per device).
@@ -1447,6 +1725,8 @@ impl PcBackup {
             reg: Mutex::new(reg),
             change: tokio::sync::Mutex::new(()),
             manifests: Mutex::new(BTreeMap::new()),
+            receives: std::sync::atomic::AtomicUsize::new(0),
+            on_agent_removed: std::sync::OnceLock::new(),
         })
     }
 
@@ -2015,6 +2295,11 @@ pub fn adopt_refusal(path: &str, shares: &[String], homes: &[String]) -> Option<
 /// the NAS owns, then the alerts.
 pub fn spawn_watch(svc: Arc<PcBackup>) {
     tokio::spawn(async move {
+        // what receives cut off by a stop of rynasd left in the staging folders
+        {
+            let s = svc.clone();
+            let _ = tokio::task::spawn_blocking(move || s.clear_all_staging()).await;
+        }
         tokio::time::sleep(Duration::from_secs(120)).await;
         loop {
             {
@@ -2055,6 +2340,18 @@ fn started(id: String) -> Response {
 pub const RECEIVE_IDLE: Duration = Duration::from_secs(600);
 /// Free space kept on the volume during a receive: this much, or 2 % of the volume.
 pub const RECEIVE_RESERVE: u64 = 1 << 30;
+/// Receives running at once on the NAS, all PCs together: they share the disks and the free
+/// space (each one checks the space as it goes, see [`RECEIVE_SPACE_EVERY`]).
+pub const MAX_RECEIVES: usize = 2;
+/// The free space is read again after every this many bytes of decompressed stream: a
+/// receive stops once the volume is down to the reserve, whoever filled it.
+pub const RECEIVE_SPACE_EVERY: u64 = 64 << 20;
+/// Lowest average rate (decompressed stream bytes per second, counted from the start) a
+/// receive may run at after [`RECEIVE_RATE_GRACE`]: a PC that trickles holds its folder's
+/// lock and one of the [`MAX_RECEIVES`] slots. 64 KiB/s is about 0.5 Mbit/s; the unit's
+/// `RuntimeMaxSec` (48 h) stays the hard end.
+pub const RECEIVE_MIN_RATE: u64 = 64 << 10;
+pub const RECEIVE_RATE_GRACE: Duration = Duration::from_secs(15 * 60);
 
 /// The names of an agent's receive: `snapshot` in btrbk's `long` form, not dated more than
 /// a day ahead, and `parent` (when there is one) of the same subvolume.
@@ -2102,10 +2399,17 @@ impl std::io::Read for BodyReader {
     }
 }
 
-/// Stops a decompressed stream that would leave the volume with less than the reserve.
+/// Stops a decompressed stream that would leave the volume with less than the reserve (the
+/// room at the start, and the free space read again every [`RECEIVE_SPACE_EVERY`] bytes:
+/// other receives share it), or that runs below [`RECEIVE_MIN_RATE`] on average.
 struct Capped<R> {
     inner: R,
     left: Option<u64>,
+    /// Reads the volume again: `Err` once it is down to the reserve.
+    space_ok: Box<dyn FnMut() -> Result<(), String> + Send>,
+    since_check: u64,
+    total: u64,
+    started: std::time::Instant,
 }
 
 impl<R: std::io::Read> std::io::Read for Capped<R> {
@@ -2114,8 +2418,72 @@ impl<R: std::io::Read> std::io::Read for Capped<R> {
         if let Some(l) = &mut self.left {
             *l = l.checked_sub(n as u64).ok_or_else(|| std::io::Error::other("the stream is larger than the free space of the volume"))?;
         }
+        self.total += n as u64;
+        self.since_check += n as u64;
+        if self.since_check >= RECEIVE_SPACE_EVERY {
+            self.since_check = 0;
+            (self.space_ok)().map_err(std::io::Error::other)?;
+        }
+        // reading the monotonic clock is cheap (vDSO): checked on every read
+        let secs = self.started.elapsed();
+        if secs > RECEIVE_RATE_GRACE && self.total < RECEIVE_MIN_RATE.saturating_mul(secs.as_secs()) {
+            return Err(std::io::Error::other(format!("the PC sends slower than {} KiB/s on average", RECEIVE_MIN_RATE >> 10)));
+        }
         Ok(n)
     }
+}
+
+/// A slot among the [`MAX_RECEIVES`]; given back on drop.
+struct ReceiveSlot<'a>(&'a std::sync::atomic::AtomicUsize);
+
+impl<'a> ReceiveSlot<'a> {
+    fn take(n: &'a std::sync::atomic::AtomicUsize) -> Option<Self> {
+        use std::sync::atomic::Ordering;
+        let mut v = n.load(Ordering::SeqCst);
+        while v < MAX_RECEIVES {
+            match n.compare_exchange(v, v + 1, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => return Some(ReceiveSlot(n)),
+                Err(now) => v = now,
+            }
+        }
+        None
+    }
+}
+
+impl Drop for ReceiveSlot<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// A fresh staging name: 16 hex characters.
+fn staging_name() -> Result<String, String> {
+    let mut b = [0u8; 8];
+    getrandom::fill(&mut b).map_err(|e| e.to_string())?;
+    Ok(b.iter().map(|x| format!("{x:02x}")).collect())
+}
+
+/// What a finished receive must have left in its staging folder: exactly one entry, the
+/// announced snapshot, a read-only subvolume whose received UUID is the stream's and whose
+/// parent (incremental) is the NAS' copy of the announced parent.
+fn check_staged(staged: &[Entry], name: &str, stream_uuid: Option<&str>, parent_nas_uuid: Option<&str>) -> Result<(), String> {
+    let [only] = staged else {
+        let names: Vec<&str> = staged.iter().map(|e| e.name.as_str()).take(5).collect();
+        return Err(format!("the receive left {} entries ({}), not just {name}", staged.len(), names.join(", ")));
+    };
+    let i = only.info.as_ref().filter(|_| only.name == name).ok_or_else(|| format!("the receive left {:?}, not the subvolume {name}", only.name))?;
+    if !i.readonly || i.received_uuid.is_none() {
+        return Err("the received snapshot is not read-only with a received UUID".into());
+    }
+    if stream_uuid.is_none() || i.received_uuid.as_deref() != stream_uuid {
+        return Err("the received UUID is not the stream's".into());
+    }
+    if let Some(p) = parent_nas_uuid
+        && i.parent_uuid.as_deref() != Some(p)
+    {
+        return Err("the received snapshot is not based on the announced parent".into());
+    }
+    Ok(())
 }
 
 fn agent_entry(e: &Entry) -> rynas_api_types::pcagent::AgentBtrfsSnapshot {
@@ -2128,8 +2496,11 @@ fn agent_entry(e: &Entry) -> rynas_api_types::pcagent::AgentBtrfsSnapshot {
 }
 
 impl PcBackup {
-    /// The folder of `device` fed by `rynas-agent` (404 without one, 409 when btrbk feeds it).
-    fn agent_target(&self, device: &str) -> Res<Stored> {
+    /// The folder of `device` fed by `rynas-agent` (404 without one, 409 when btrbk feeds it),
+    /// and only the very folder the PC was bound to (`folder` = its [`Self::agent_folder_id`]
+    /// then): a folder removed and made again under the same name does not take the old
+    /// token's streams.
+    fn agent_target(&self, device: &str, folder: Option<u64>) -> Res<Stored> {
         let t = self.stored(device)?;
         if !t.agent {
             return Err(Error::new(
@@ -2138,7 +2509,42 @@ impl PcBackup {
                 format!("the folder of {device} is fed by btrbk over SSH, not by rynas-agent"),
             ));
         }
+        if folder != Some(t.created_at_ms) {
+            return Err(Error::new(
+                StatusCode::CONFLICT,
+                error_codes::CONFLICT,
+                format!("the folder of {device} on the NAS is not the one this PC was set up for: choose the btrfs method for the PC again"),
+            ));
+        }
         Ok(t)
+    }
+
+    /// The identity of `device`'s agent folder (when it was made): the PC records keep it, so
+    /// the token works only with that folder.
+    pub fn agent_folder_id(&self, device: &str) -> Option<u64> {
+        self.reg.lock().unwrap().targets.get(device).filter(|t| t.agent).map(|t| t.created_at_ms)
+    }
+
+    /// The other device folders (hidden from a receive).
+    fn other_folders(&self, device: &str) -> Vec<String> {
+        self.reg.lock().unwrap().targets.iter().filter(|(d, _)| d.as_str() != device).map(|(_, t)| t.path.clone()).collect()
+    }
+
+    /// Clears what earlier receives left in the staging folders of the agent folders (after
+    /// a crash or a restart of rynasd); folders being received into are skipped.
+    pub fn clear_all_staging(&self) {
+        let targets: Vec<(String, String)> = self.reg.lock().unwrap().targets.iter().filter(|(_, t)| t.agent).map(|(d, t)| (d.clone(), t.path.clone())).collect();
+        for (device, path) in targets {
+            match self.host.lock(Path::new(&path)) {
+                Ok(Some(lock)) => {
+                    if let Err(e) = self.host.clear_staging(&lock) {
+                        tracing::warn!("pc backup: {device}: clearing {path}/{STAGING_DIR}: {e}");
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!("pc backup: {device}: {e}"),
+            }
+        }
     }
 
     /// `rynas-agent`'s folder exists for `device` (the btrfs method may be chosen).
@@ -2147,8 +2553,8 @@ impl PcBackup {
     }
 
     /// What the agent's folder holds (the agent picks its parents from it).
-    pub async fn agent_listing(self: &Arc<Self>, device: &str) -> Res<rynas_api_types::pcagent::AgentBtrfsListing> {
-        let t = self.agent_target(device)?;
+    pub async fn agent_listing(self: &Arc<Self>, device: &str, folder: Option<u64>) -> Res<rynas_api_types::pcagent::AgentBtrfsListing> {
+        let t = self.agent_target(device, folder)?;
         let s = self.clone();
         blocking(move || {
             let root = Path::new(&t.path);
@@ -2164,22 +2570,26 @@ impl PcBackup {
     }
 
     /// One `btrfs send` stream (zstd) from `rynas-agent` into the folder of `device`, with
-    /// the protections of the SSH filter: the folder walked from `/` without symlinks and
-    /// locked (the filter's per-device lock: one receive at a time, no prune meanwhile),
-    /// btrbk-style names, a parent that is a complete snapshot here, a free-space reserve,
-    /// the stream checked command by command ([`rynas_btrfs::send_stream`]: exactly this
-    /// subvolume, on this parent), the receive confined to the folder
-    /// ([`receive_unit_properties`]), and afterwards the snapshot read-only with a received
-    /// UUID, or removed.
+    /// the protections of the SSH filter and more: the folder walked from `/` without
+    /// symlinks and locked (the filter's per-device lock: one receive at a time, no prune
+    /// meanwhile), at most [`MAX_RECEIVES`] PCs at once, btrbk-style names, a parent that is
+    /// a complete snapshot here, a free-space reserve checked as the stream goes, a minimum
+    /// rate, the stream checked command by command ([`rynas_btrfs::send_stream`]: exactly
+    /// this subvolume, on this parent, nothing outside it), the receive confined to a fresh
+    /// staging folder ([`receive_unit_properties`]); afterwards the staging folder must hold
+    /// exactly the announced read-only subvolume with the stream's UUID on the announced
+    /// parent ([`check_staged`]), which then moves into the folder. Anything else is deleted.
     pub async fn agent_receive(
         self: &Arc<Self>,
         device: &str,
+        folder: Option<u64>,
         snapshot: String,
         parent: Option<String>,
         body: axum::body::Body,
     ) -> Res<rynas_api_types::pcagent::AgentBtrfsReceived> {
         use futures_util::StreamExt;
-        let t = self.agent_target(device)?;
+        use rynas_api_types::pcagent::{AGENT_ZSTD_WINDOW_LOG_MAX, PARENT_MISSING};
+        let t = self.agent_target(device, folder)?;
         check_agent_names(&snapshot, parent.as_deref(), rynas_tasks::now_ms())?;
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<axum::body::Bytes, String>>(16);
         let pump = tokio::spawn(async move {
@@ -2198,15 +2608,20 @@ impl PcBackup {
             }
         });
         let read = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let hidden = self.other_folders(device);
         let (s, dev, read2) = (self.clone(), device.to_string(), read.clone());
         let out = blocking(move || -> Res<rynas_api_types::pcagent::AgentBtrfsReceived> {
             let root = PathBuf::from(&t.path);
-            let busy = || Error::new(StatusCode::CONFLICT, error_codes::BUSY, format!("a receive or a retention pass of {dev} is running"));
+            let busy = |why: String| Error::new(StatusCode::CONFLICT, error_codes::BUSY, why);
+            let _slot = ReceiveSlot::take(&s.receives)
+                .ok_or_else(|| busy(format!("the NAS is receiving from {MAX_RECEIVES} PCs already: try again later")))?;
             let lock = s
                 .host
                 .lock(&root)
                 .map_err(|e| Error::new(StatusCode::CONFLICT, error_codes::CONFLICT, e))?
-                .ok_or_else(busy)?;
+                .ok_or_else(|| busy(format!("a receive or a retention pass of {dev} is running")))?;
+            // what an earlier receive may have left (rynasd stopped in the middle)
+            s.host.clear_staging(&lock).map_err(Error::internal)?;
             let scan = |s: &PcBackup| -> Res<Vec<Entry>> {
                 match s.host.scan(&root).map_err(Error::internal)? {
                     Some((_, e, _)) => Ok(e),
@@ -2217,25 +2632,23 @@ impl PcBackup {
             if before.iter().any(|e| e.name == snapshot) {
                 return Err(Error::new(StatusCode::CONFLICT, error_codes::ALREADY_EXISTS, format!("{snapshot} is already on the NAS")));
             }
-            let parent_uuid = match &parent {
+            // (received UUID the stream must name, the NAS copy's own UUID it must be based on)
+            let parent_ids = match &parent {
                 None => None,
                 Some(p) => {
-                    let e = before.iter().find(|e| &e.name == p).map(agent_entry);
-                    match e {
-                        Some(e) if e.complete => e.received_uuid,
-                        _ => {
-                            return Err(Error::new(
-                                StatusCode::CONFLICT,
-                                error_codes::CONFLICT,
-                                format!("{p} is not a complete snapshot on the NAS: send in full"),
-                            ));
+                    let e = before.iter().find(|e| &e.name == p).filter(|e| agent_entry(e).complete);
+                    match e.and_then(|e| e.info.as_ref()) {
+                        Some(i) => Some((i.received_uuid.clone(), i.uuid.clone())),
+                        None => {
+                            return Err(Error::new(StatusCode::CONFLICT, PARENT_MISSING, format!("{p} is not a complete snapshot on the NAS: send in full")));
                         }
                     }
                 }
             };
+            let reserve_of = |total: u64| RECEIVE_RESERVE.max(total / 50);
             let room = match s.host.space(&root) {
                 Some((free, total)) => {
-                    let reserve = RECEIVE_RESERVE.max(total / 50);
+                    let reserve = reserve_of(total);
                     if free <= reserve {
                         return Err(Error::new(
                             StatusCode::PAYLOAD_TOO_LARGE,
@@ -2247,22 +2660,45 @@ impl PcBackup {
                 }
                 None => None,
             };
+            let staging = staging_name().map_err(Error::internal)?;
+            s.host.make_staging(&lock, &staging).map_err(Error::internal)?;
             let body = BodyReader { rx, cur: axum::body::Bytes::new(), read: read2.clone() };
-            let decoded = zstd::stream::read::Decoder::new(body).map_err(Error::internal)?;
-            let expect = rynas_btrfs::send_stream::Expect { name: snapshot.clone(), parent_uuid };
-            let mut guard = rynas_btrfs::send_stream::Guard::new(Capped { inner: decoded, left: room }, expect);
-            let res = s.host.receive(&dev, &lock, &snapshot, &mut guard);
-            // checked again, still under the lock
+            let mut decoded = zstd::stream::read::Decoder::new(body).map_err(Error::internal)?;
+            // a bounded window: the agent sends 2 MiB windows, a larger one is refused
+            decoded.window_log_max(AGENT_ZSTD_WINDOW_LOG_MAX).map_err(Error::internal)?;
+            let (host, root2) = (s.host.clone(), root.clone());
+            let space_ok = Box::new(move || match host.space(&root2) {
+                Some((free, total)) if free <= reserve_of(total) => {
+                    Err(format!("the NAS volume is down to {} MiB free (other receives, or other writes)", free >> 20))
+                }
+                _ => Ok(()),
+            });
+            let limits = Capped { inner: decoded, left: room, space_ok, since_check: 0, total: 0, started: std::time::Instant::now() };
+            let expect = rynas_btrfs::send_stream::Expect { name: snapshot.clone(), parent_uuid: parent_ids.as_ref().and_then(|p| p.0.clone()) };
+            let mut guard = rynas_btrfs::send_stream::Guard::new(limits, expect);
+            let res = s.host.receive(&dev, &lock, &staging, &hidden, &mut guard);
+            // checked under the lock: the staging folder, then the move
+            let res = res.and_then(|()| {
+                if !guard.seen.ended {
+                    return Err("the stream did not end".into());
+                }
+                let staged = s.host.staged(&lock, &staging)?;
+                check_staged(&staged, &snapshot, guard.seen.uuid.as_deref(), parent_ids.as_ref().and_then(|p| p.1.as_deref()))?;
+                s.host.adopt_staged(&lock, &staging, &snapshot)
+            });
+            if let Err(e) = s.host.clear_staging(&lock) {
+                tracing::warn!("pc backup: {dev}: clearing the staging folder: {e}");
+            }
             let after = scan(&s)?;
             let got = after.iter().find(|e| e.name == snapshot).map(agent_entry);
-            match (&res, got) {
+            match (res, got) {
                 (Ok(()), Some(e)) if e.complete => Ok(rynas_api_types::pcagent::AgentBtrfsReceived {
                     name: snapshot.clone(),
                     received_uuid: e.received_uuid.unwrap_or_default(),
                     bytes: read2.load(std::sync::atomic::Ordering::Relaxed),
                 }),
-                (_, got) => {
-                    // an interrupted or wrong receive goes at once (never a later parent)
+                (res, got) => {
+                    // a move that half failed (writable in the folder): never a later parent
                     if got.is_some()
                         && let Err(e) = s.host.delete_snapshot(&lock, &snapshot)
                     {
@@ -2722,6 +3158,13 @@ async fn remove_delete(
             "{device}: key removed; the folder {} and its snapshots stay",
             t.path
         ));
+        // the agent PC bound to this folder: its token stops working with it at once
+        if t.agent
+            && let Some(f) = s.on_agent_removed.get()
+        {
+            f(&device, t.created_at_ms);
+            ctx.log(&format!("{device}: the PC bound to this folder can no longer send into it"));
+        }
         if t.alerted {
             s.notifier.emit(resolved(
                 NotifyCategory::Backup,
@@ -3272,13 +3715,91 @@ mod tests {
         ] {
             assert!(check_agent_names(&s, p.as_deref(), now).is_err(), "{s} {p:?}");
         }
-        let p = receive_unit_properties("/volume1/backup/pc");
-        for want in ["ProtectSystem=strict", "ReadWritePaths=/volume1/backup/pc", "PrivateNetwork=yes", "NoNewPrivileges=yes"] {
+        let p = receive_unit_properties("/volume1/backup/pc", &["/volume1/backup/other".into()]);
+        for want in [
+            "ProtectSystem=strict",
+            "ReadWritePaths=/volume1/backup/pc",
+            "InaccessiblePaths=-/volume1/backup/other",
+            "PrivateNetwork=yes",
+            "NoNewPrivileges=yes",
+            "DevicePolicy=closed",
+            "DeviceAllow=char-* m",
+            "DeviceAllow=block-* m",
+            "RestrictNamespaces=yes",
+            "ProtectKernelLogs=yes",
+            "ProtectClock=yes",
+            "ProtectHostname=yes",
+        ] {
             assert!(p.iter().any(|x| x == want), "{want}");
         }
+        assert!(p.iter().any(|x| x.starts_with("TasksMax=")) && p.iter().any(|x| x.starts_with("CPUQuota=")));
         let caps = p.iter().find(|x| x.starts_with("CapabilityBoundingSet=")).unwrap();
-        assert!(caps.contains("CAP_SYS_CHROOT") && !caps.contains("CAP_NET") && !caps.contains("CAP_SYS_PTRACE"));
-        assert!(!p.iter().any(|x| x.starts_with("PrivateTmp")));
+        assert!(caps.contains("CAP_SYS_CHROOT") && caps.contains("CAP_MKNOD") && !caps.contains("CAP_NET") && !caps.contains("CAP_SYS_PTRACE"));
+        // set-id files and device nodes must still be received
+        for never in ["PrivateTmp", "PrivateDevices", "RestrictSUIDSGID"] {
+            assert!(!p.iter().any(|x| x.starts_with(never)), "{never}");
+        }
+    }
+
+    #[test]
+    fn a_staging_folder_must_hold_exactly_the_announced_snapshot() {
+        use rynas_btrfs::ioctl::SubvolInfo;
+        let (u, pu, n) = ("u-stream", "u-parent-on-nas", "@.20261112T0300");
+        let good = |name: &str| Entry {
+            name: name.into(),
+            info: Some(SubvolInfo { readonly: true, received_uuid: Some(u.into()), parent_uuid: Some(pu.into()), ..Default::default() }),
+        };
+        assert!(check_staged(&[good(n)], n, Some(u), Some(pu)).is_ok());
+        assert!(check_staged(&[good(n)], n, Some(u), None).is_ok());
+        // nothing, two entries, another name, a file, writable, another received or parent UUID
+        assert!(check_staged(&[], n, Some(u), None).is_err());
+        assert!(check_staged(&[good(n), Entry { name: "big-file".into(), info: None }], n, Some(u), None).is_err());
+        assert!(check_staged(&[good("other.20261112T0300")], n, Some(u), None).is_err());
+        assert!(check_staged(&[Entry { name: n.into(), info: None }], n, Some(u), None).is_err());
+        let mut w = good(n);
+        w.info.as_mut().unwrap().readonly = false;
+        assert!(check_staged(&[w], n, Some(u), None).is_err());
+        assert!(check_staged(&[good(n)], n, Some("u-other"), None).is_err());
+        assert!(check_staged(&[good(n)], n, None, None).is_err());
+        assert!(check_staged(&[good(n)], n, Some(u), Some("u-another-pcs")).is_err());
+    }
+
+    #[test]
+    fn receive_slots_and_limits() {
+        use std::io::Read;
+        let n = std::sync::atomic::AtomicUsize::new(0);
+        let slots: Vec<_> = (0..MAX_RECEIVES).map(|_| ReceiveSlot::take(&n).unwrap()).collect();
+        assert!(ReceiveSlot::take(&n).is_none());
+        drop(slots);
+        assert!(ReceiveSlot::take(&n).is_some());
+        // the free space read again as the stream goes: another receive filled the volume
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c2 = calls.clone();
+        let data = vec![0u8; (RECEIVE_SPACE_EVERY as usize) * 2 + 10];
+        let mut r = Capped {
+            inner: &data[..],
+            left: None,
+            space_ok: Box::new(move || if c2.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 { Ok(()) } else { Err("full".into()) }),
+            since_check: 0,
+            total: 0,
+            started: std::time::Instant::now(),
+        };
+        let e = std::io::copy(&mut r, &mut std::io::sink()).unwrap_err();
+        assert!(e.to_string().contains("full"));
+        // the room at the start
+        let mut r = Capped { inner: &data[..], left: Some(100), space_ok: Box::new(|| Ok(())), since_check: 0, total: 0, started: std::time::Instant::now() };
+        assert!(std::io::copy(&mut r, &mut std::io::sink()).is_err());
+        // too slow on average once the grace is over
+        let mut r = Capped {
+            inner: &data[..10],
+            left: None,
+            space_ok: Box::new(|| Ok(())),
+            since_check: 0,
+            total: 0,
+            started: std::time::Instant::now() - RECEIVE_RATE_GRACE - Duration::from_secs(60),
+        };
+        let mut b = [0u8; 4];
+        assert!(r.read(&mut b).unwrap_err().to_string().contains("slower"));
     }
 
     #[test]

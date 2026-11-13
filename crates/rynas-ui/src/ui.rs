@@ -274,6 +274,11 @@ impl<T: serde::de::DeserializeOwned + Send + Sync + 'static> Remote<T> {
         r
     }
 
+    /// Like [`Remote::new`] without the first fetch: nothing is asked until [`Remote::reload`].
+    pub fn idle(url: impl Into<String>) -> Self {
+        Self::make(url.into())
+    }
+
     /// Like [`Remote::new`], and read again after every configuration change.
     pub fn with_config(url: impl Into<String>) -> Self {
         let r = Self::make(url.into());

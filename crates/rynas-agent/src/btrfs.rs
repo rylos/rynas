@@ -116,6 +116,8 @@ pub struct SubvolInfo {
     pub uuid: Option<String>,
     pub received_uuid: Option<String>,
     pub readonly: bool,
+    /// Creation time (seconds): the real order of snapshots, whatever their names say.
+    pub otime: i64,
 }
 
 #[repr(C)]
@@ -150,6 +152,16 @@ struct SubvolInfoArgs {
 /// `_IOR(0x94, 60, struct btrfs_ioctl_get_subvol_info_args)`.
 const IOC_GET_SUBVOL_INFO: u64 = (2 << 30) | ((std::mem::size_of::<SubvolInfoArgs>() as u64) << 16) | (0x94 << 8) | 60;
 
+/// `/` is on btrfs (the btrfs method can serve this PC).
+pub fn root_is_btrfs() -> bool {
+    const BTRFS_MAGIC: i64 = 0x9123_683E;
+    // SAFETY: statfs fills the struct it is given; the path is a static C string
+    unsafe {
+        let mut s: libc::statfs = std::mem::zeroed();
+        libc::statfs(c"/".as_ptr(), &mut s) == 0 && s.f_type as i64 == BTRFS_MAGIC
+    }
+}
+
 pub fn uuid_text(b: &[u8; 16]) -> Option<String> {
     if b.iter().all(|&x| x == 0) {
         return None;
@@ -178,7 +190,7 @@ pub fn subvol_info(p: &Path) -> Option<SubvolInfo> {
     if unsafe { libc::ioctl(f.as_raw_fd(), IOC_GET_SUBVOL_INFO as _, &mut *a) } < 0 {
         return None;
     }
-    Some(SubvolInfo { uuid: uuid_text(&a.uuid), received_uuid: uuid_text(&a.received_uuid), readonly: a.flags & 1 != 0 })
+    Some(SubvolInfo { uuid: uuid_text(&a.uuid), received_uuid: uuid_text(&a.received_uuid), readonly: a.flags & 1 != 0, otime: a.otime.sec as i64 })
 }
 
 #[cfg(test)]

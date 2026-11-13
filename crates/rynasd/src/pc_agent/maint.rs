@@ -375,9 +375,9 @@ fn unique(base: &str, taken: impl Fn(&str) -> bool) -> String {
 /// A pairing for the btrfs method: the device takes the folder's name, gets no repository
 /// and no key file (`group` stays empty), and sends `btrfs send` streams into the folder.
 fn pair_btrfs(svc: &Arc<PcAgent>, p: &Pairing, target: &str, req: &PairRequest) -> Res<PairResponse> {
-    if !svc.btrfs_side()?.has_agent_target(target) {
+    let Some(folder) = svc.btrfs_side()?.agent_folder_id(target) else {
         return Err(Error::new(StatusCode::CONFLICT, error_codes::CONFLICT, format!("the folder {target} is gone")));
-    }
+    };
     let token = super::new_token()?;
     let ds = PcDeviceSettings {
         description: p.description.clone(),
@@ -390,12 +390,14 @@ fn pair_btrfs(svc: &Arc<PcAgent>, p: &Pairing, target: &str, req: &PairRequest) 
         arch: req.arch.chars().take(32).collect(),
         agent_version: req.agent_version.chars().take(32).collect(),
         machine_id: req.machine_id.chars().take(64).collect(),
+        root_btrfs: req.root_btrfs,
         created_ms: now_ms(),
         last_seen_ms: Some(now_ms()),
         group: String::new(),
         token_sha: super::sha_hex(token.as_bytes()),
         settings: ds,
         rev: 1,
+        btrfs_folder: Some(folder),
         ..Default::default()
     };
     let plan = super::plan_of(&dev);
@@ -497,6 +499,7 @@ pub async fn pair(svc: &Arc<PcAgent>, p: &Pairing, settings: &PcAgentSettings, r
         arch: req.arch.chars().take(32).collect(),
         agent_version: req.agent_version.chars().take(32).collect(),
         machine_id: req.machine_id.chars().take(64).collect(),
+        root_btrfs: req.root_btrfs,
         created_ms: now_ms(),
         last_seen_ms: Some(now_ms()),
         group: group.clone(),
@@ -656,6 +659,21 @@ fn trunc(s: &mut String, n: usize) {
     }
 }
 
+/// Bounds the strings of a btrfs step from an agent (names, code, error text).
+pub fn bound_step(b: &mut BtrfsStep) {
+    trunc(&mut b.subvolume, 128);
+    trunc(&mut b.snapshot, 160);
+    if let Some(p) = &mut b.parent {
+        trunc(p, 160);
+    }
+    if let Some(c) = &mut b.error_code {
+        trunc(c, 64);
+    }
+    if let Some(e) = &mut b.error {
+        trunc(e, 500);
+    }
+}
+
 /// The end of a run, from the agent.
 pub fn report(svc: &PcAgent, device: &str, r: AgentReport) -> Res<()> {
     let mut run = r.run;
@@ -668,6 +686,11 @@ pub fn report(svc: &PcAgent, device: &str, r: AgentReport) -> Res<()> {
         trunc(c, 1024);
     }
     run.captures.truncate(64);
+    for c in &mut run.captures {
+        if let Some(b) = &mut c.btrfs {
+            bound_step(b);
+        }
+    }
     run.restore = false;
     if run.snapshot.as_ref().is_some_and(|s| s.len() > 64 || !s.bytes().all(|b| b.is_ascii_hexdigit())) {
         run.snapshot = None;
@@ -693,6 +716,9 @@ pub fn report(svc: &PcAgent, device: &str, r: AgentReport) -> Res<()> {
         }
         if !r.agent_version.is_empty() {
             d.agent_version = r.agent_version.chars().take(32).collect();
+        }
+        if r.root_btrfs.is_some() {
+            d.root_btrfs = r.root_btrfs;
         }
         if let Some((m, _)) = &manifest {
             d.manifest_ms = Some(m.written_at_ms);

@@ -159,6 +159,7 @@ fn pair(args: &[String]) -> Result<(), String> {
         os,
         arch: std::env::consts::ARCH.into(),
         agent_version: env!("CARGO_PKG_VERSION").into(),
+        root_btrfs: Some(btrfs::root_is_btrfs()),
     };
     let r: PairResponse = client.post_json("/api/v1/pcbackup/agent/pair", &req)?;
     let st = State {
@@ -254,7 +255,7 @@ fn manifest_cmd(args: &[String]) -> Result<(), String> {
     let print = flag(args, "--print");
     let quiet = flag(args, "--quiet");
     let root = std::path::Path::new("/");
-    // one at a time with a backup (a btrbk drop-in and a package hook may meet)
+    // one at a time with the agent's own runs (a backup writes the manifest too)
     let _lock = if print { None } else { Some(manifest::lock(root, std::time::Duration::from_secs(120))?) };
     bootcopy::trigger_automounts(root);
     let mut m = manifest::collect(&BTreeMap::new());

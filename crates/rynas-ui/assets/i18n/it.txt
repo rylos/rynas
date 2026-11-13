@@ -4676,7 +4676,6 @@ bk.intro	I PC con btrfs mandano qui snapshot in sola lettura dei loro sottovolum
 bkpc.empty	Ancora nessun PC
 bkpc.empty_text	Aggiungi un PC: rynas-agent sul PC manda qui i suoi snapshot. Una cartella che contiene già snapshot ricevuti si può adottare.
 bk.add	Aggiungi un PC
-bk.add_title	Nuova destinazione di backup
 bk.adopt	Adotta una cartella
 bkpc.create	Crea
 bk.open	Apri
@@ -4807,7 +4806,7 @@ pcb.via.agent	rynas-agent
 pcb.via.ssh	btrbk (SSH)
 pcb.f.pc	PC
 pcb.f.pc_new	Un PC nuovo (da abbinare dopo)
-pcb.f.pc_help	Un PC già abbinato per il backup dei file può passare qui: tiene il suo nome e passa agli snapshot btrfs.
+pcb.f.pc_help	Un PC già abbinato per il backup dei file può passare qui: tiene il suo nome e passa agli snapshot btrfs. Le versioni dei file già salvate restano nel loro gruppo.
 pcb.pair_after	Quando la cartella esiste, il suo pannello dà il codice di abbinamento per il PC.
 pcb.link_failed	La cartella è stata creata, ma il PC non è passato a usarla: {error}
 pcb.switch_to_agent	D'ora in poi rynas-agent manda in questa cartella: la chiave di btrbk smette di funzionare. Gli snapshot restano, quindi l'agente riparte da quelli; spegni il timer di btrbk sul PC.
@@ -4824,7 +4823,6 @@ pcb.first_run_so_far	Arrivati finora: {names}
 pcb.first_run_no_manifest	Quali sottovolumi aspettarsi lo dice il manifest della struttura (lo scrive rynas-agent).
 pcb.agent.title	rynas-agent
 pcb.agent.unpaired	Nessun rynas-agent è ancora abbinato a questo PC. Crea un codice, installa l'agente sul PC ed esegui il comando di abbinamento: il PC prende il nome di questa cartella.
-pcb.agent.state	Agente
 pcb.agent.every_h	Ogni {n} h
 pcb.agent.last_run	Sottovolumi dell'ultima esecuzione
 pcb.agent.schedule	Pianificazione
@@ -4833,10 +4831,34 @@ pcb.agent.revoked	L'agente di questo PC è stato revocato: non può più inviare
 pcb.agent.revoke_text	Il token del PC smette subito di funzionare e il suo agente non può più inviare. La cartella e i suoi snapshot restano.
 pca.copy_install	Copia il comando di installazione
 pca.copy_pair	Copia il comando di abbinamento
-pca.on_btrfs	I PC che mandano snapshot btrfs ({n}) sono nella scheda PC: snapshot btrfs.
-pca.f.skip_mounts	Sottovolumi non inviati
-pca.f.skip_mounts_help	Punti di montaggio, uno per riga, i cui sottovolumi restano fuori (cache, log e dati dei container restano fuori comunque).
-pca.f.btrfs_note	Conservazione e avvisi di questo PC sono quelli della cartella (le sue Impostazioni in questa scheda).
+pca.on_btrfs	PC che mandano snapshot btrfs: {n}.
+pca.on_btrfs_open	Apri la loro scheda
+pca.phase.preparing	Preparazione…
+pca.phase.snapshot	Snapshot…
+pca.phase.uploading	Invio…
+pca.phase.finishing	Conclusione…
+pcb.note.full	{name}: invio completo
+pcb.note.incr	{name}: modifiche da {parent}
+pcb.note.error	errore: {error}
+pcb.agent.code_waiting	Un codice per questo PC vale fino a {until}. Si vede solo quando lo crei: se non ce l'hai più, annullalo e creane uno nuovo.
+pcb.agent.revoke_help	Revoca: il PC non può più inviare. La cartella e i suoi snapshot restano.
+pcb.f.not_sent	Sottovolumi non inviati
+pcb.f.not_sent_help	Il PC smette di mandarli e il NAS non li aspetta più. I loro snapshot restano.
+pcb.f.other_mounts	Altri punti di montaggio non inviati
+pcb.f.other_mounts_help	Uno per riga. Cache, log e dati dei container restano fuori comunque.
+pcb.f.pc_no_btrfs	{pc} — root non su btrfs
+pcb.bm.no_manifest_btrbk	Gli snapshot più recenti non contengono il manifest della struttura (/.rynas/manifest.json). Aggiungi l'ultimo passo di “Configura btrbk a mano” qui sotto: scrive il manifest prima di ogni esecuzione di btrbk.
+pcb.first_run_all	Tutti i sottovolumi ricevuti
+pcb.age.h1	{n} ora
+pcb.age.h	{n} ore
+pcb.age.d1	{n} giorno
+pcb.age.d	{n} giorni
+pcb.age.w1	{n} settimana
+pcb.age.w	{n} settimane
+pcb.age.m1	{n} mese
+pcb.age.m	{n} mesi
+pcb.age.y1	{n} anno
+pcb.age.y	{n} anni
 bkpc.issue.late	Niente di nuovo da questo PC dal {when}.
 bkpc.issue.subvolume_late	{subject}: niente di nuovo dal {when}, mentre gli altri sottovolumi arrivano.
 bkpc.issue.subvolume_never	{subject} è previsto ma non è mai stato ricevuto.
