@@ -14,83 +14,29 @@
 //! 4. `btrfs-send` from the restored pool: the NAS gets an **incremental** stream on the
 //!    restored snapshot.
 //!
-//! Needs root, systemd and two throwaway mounted btrfs filesystems, so it is `#[ignore]`d:
+//! The second test covers the review fixes: two subvolumes with the snapshot folder inside
+//! `@`, an older snapshot of `@home` restored (the next backup still incremental), and a
+//! genfstab fstab with `subvolid=` that must mount after the restore.
+//!
+//! Needs root, systemd and two throwaway mounted btrfs filesystems (top levels), so it is
+//! `#[ignore]`d; both tests use the same two mounts, one after the other:
 //!
 //! ```sh
 //! cargo test -p rynasd --test pc_btrfs_restore_e2e --no-run
-//! sudo RYNAS_TEST_BTRFS=/mnt/a RYNAS_TEST_POOL=/mnt/b RYNAS_AGENT_BIN=…/rynas-agent <test binary> --ignored --nocapture
+//! sudo RYNAS_TEST_BTRFS=/mnt/a RYNAS_TEST_POOL=/mnt/b RYNAS_AGENT_BIN=…/rynas-agent <test binary> --ignored --nocapture --test-threads=1
 //! ```
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
-use rynas_api_types::TaskStarted;
-use rynas_auth::ManualClock;
-use rynas_auth::backend::{AuthError, Authenticator, BoxFuture, Identity};
-use rynas_auth::totp::{MemoryStorage, TotpManager};
-use rynas_config::{Config, ConfigOptions, MemorySystem};
-use rynas_notify::MemoryNotifier;
-use rynas_tasks::{TaskConfig, TaskManager};
-use rynasd::ops::Ops;
-use rynasd::pc_backup::{HostReceive, PcBackup};
-use rynasd::roles::AdminPolicy;
-use rynasd::server::{DaemonState, router};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-struct NoAuth;
-
-impl Authenticator for NoAuth {
-    fn realm(&self) -> &str {
-        "none"
-    }
-    fn authenticate<'a>(&'a self, _: &'a str, _: &'a str) -> BoxFuture<'a, Result<Identity, AuthError>> {
-        Box::pin(async { Err(AuthError::InvalidCredentials) })
-    }
-}
-
-fn groups(u: &str) -> Option<Vec<String>> {
-    (u == "admin").then(|| vec!["rynas-admin".into()])
-}
-
-fn sh(cmd: &mut Command) -> String {
-    let o = cmd.output().unwrap();
-    assert!(o.status.success(), "{cmd:?}: {}", String::from_utf8_lossy(&o.stderr));
-    String::from_utf8_lossy(&o.stdout).into_owned()
-}
-
-async fn call(app: &axum::Router, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Vec<u8>) {
-    let req = Request::builder()
-        .method(method)
-        .uri(uri)
-        .header(header::CONTENT_TYPE, "application/json")
-        .header("x-rynas-user", "admin")
-        .body(body.map(|b| Body::from(b.to_string())).unwrap_or_default())
-        .unwrap();
-    let r = app.clone().oneshot(req).await.unwrap();
-    let s = r.status();
-    (s, to_bytes(r.into_body(), 1 << 20).await.unwrap().to_vec())
-}
-
-fn info(p: &Path) -> rynas_btrfs::ioctl::SubvolInfo {
-    rynas_btrfs::ioctl::subvol_info(&rynas_btrfs::ioctl::open_dir(p).unwrap()).unwrap()
-}
-
-async fn wait_task(ops: &Ops, b: &[u8]) {
-    let id = serde_json::from_slice::<TaskStarted>(b).unwrap().task_id;
-    for _ in 0..500 {
-        if ops.tasks.get(&id).is_some_and(|t| t.status.is_finished()) {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let t = ops.tasks.get(&id).unwrap();
-    assert!(t.error.is_none(), "{:?}", t.error);
-}
+mod common;
+use common::*;
 
 #[tokio::test]
 #[ignore = "root, systemd and two throwaway btrfs mounts: RYNAS_TEST_BTRFS=<nas mount> RYNAS_TEST_POOL=<restore mount> RYNAS_AGENT_BIN=<rynas-agent>"]
@@ -134,66 +80,16 @@ async fn restore_from_the_nas_then_back_up_incrementally() {
     std::fs::write(data.join(".rynas/manifest.json"), serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
 
     // rynasd, as main.rs wires it, on the real host
-    let dir = tempfile::tempdir().unwrap();
-    let (root, state_dir) = (dir.path().join("root"), dir.path().join("state"));
-    std::fs::create_dir_all(&root).unwrap();
-    let config = Arc::new(Config::open(ConfigOptions::new(&state_dir, &root), Arc::new(MemorySystem::new("nas")), Vec::new()).unwrap());
-    let mut ops = Ops::new(config, TaskManager::new(dir.path().join("tasks"), "nas", TaskConfig::default()).unwrap());
-    ops.admins = AdminPolicy::new(vec!["rynas-admin".into()], groups);
-    let ops = Arc::new(ops);
-    let notifier = Arc::new(MemoryNotifier::default());
-    let clock = Arc::new(ManualClock::new(1_800_000_000_000));
-    let totp = Arc::new(TotpManager::new(MemoryStorage::default(), clock.clone(), "rynas"));
-    let mut st = DaemonState::new(Arc::new(NoAuth), totp, clock);
-    st.ops = Some(ops.clone());
-    let svc = PcBackup::new(ops.clone(), Arc::new(HostReceive), notifier.clone(), state_dir.clone(), AdminPolicy::new(vec!["rynas-admin".into()], groups), "nas".into());
-    let agent = rynasd::pc_agent::PcAgent::new(
-        ops.clone(),
-        notifier,
-        state_dir,
-        true,
-        rynas_backup::Launch::Direct { exe: "/nonexistent".into() },
-        Arc::new(tokio::sync::Semaphore::new(1)),
-        None,
-        "nas".into(),
-    );
-    agent.bind_btrfs(svc.clone());
-    st.pc_backup = Some(svc);
-    st.pc_agent = Some(agent);
-    let app = router(st);
-
+    let n = Nas::new();
+    let app = n.app.clone();
     let folder = nas_parent.join("pc");
-    let (s, b) = call(&app, "POST", "/v1/pc-backups/targets", Some(json!({"device": "pc", "path": folder, "agent": true}))).await;
-    assert_eq!(s, StatusCode::ACCEPTED, "{}", String::from_utf8_lossy(&b));
-    wait_task(&ops, &b).await;
-    let (s, b) = call(&app, "POST", "/v1/pcbackup/pairings", Some(json!({"btrfs_target": "pc"}))).await;
-    assert_eq!(s, StatusCode::CREATED, "{}", String::from_utf8_lossy(&b));
-    let code = serde_json::from_slice::<Value>(&b).unwrap()["code"].as_str().unwrap().to_string();
-    let (s, b) = call(&app, "POST", "/v1/pcbackup/agent/pair", Some(json!({"code": code, "hostname": "pc"}))).await;
-    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
-    let token = serde_json::from_slice::<Value>(&b).unwrap()["token"].as_str().unwrap().to_string();
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let served = axum::Router::new().nest("/api", app.clone());
-    tokio::spawn(async move { axum::serve(listener, served).await.unwrap() });
-    let nas = format!("http://{addr}");
+    n.folder("pc", &folder).await;
+    let token = n.pair("pc").await;
+    let nas = n.serve().await;
 
     let send = {
         let (agent_bin, nas, token) = (agent_bin.clone(), nas.clone(), token.clone());
-        move |round: &str, snap_dir: &Path, subvol: &Path| {
-            let out = Command::new(&agent_bin)
-                .args(["btrfs-send", "--nas", &nas, "--allow-http", "--token", &token, "--snapshot-dir"])
-                .arg(snap_dir)
-                .arg("--subvol")
-                .arg(format!("@data={}", subvol.display()))
-                .output()
-                .unwrap();
-            let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-            println!("{round}: {text}");
-            assert!(out.status.success(), "{round}: {text}");
-            text
-        }
+        move |round: &str, snap_dir: &Path, subvol: &Path| agent_send(&agent_bin, &nas, &token, round, snap_dir, &[("@data", subvol)])
     };
     // 1. the PC's first backup
     let (s1, snaps1, data1) = (send.clone(), snaps.clone(), data.clone());
@@ -206,19 +102,9 @@ async fn restore_from_the_nas_then_back_up_incrementally() {
     assert!(nas_received.is_some());
 
     // 2. a restore code, then the restore's pool step into the other filesystem
-    let (s, b) = call(&app, "POST", "/v1/pcbackup/devices/pc/restore-code", None).await;
-    assert_eq!(s, StatusCode::CREATED, "{}", String::from_utf8_lossy(&b));
-    let rcode = serde_json::from_slice::<Value>(&b).unwrap()["code"].as_str().unwrap().to_string();
+    let rcode = n.restore_code("pc").await;
     let (agent2, nas2, pool2) = (agent_bin.clone(), nas.clone(), pool.clone());
-    let restored = tokio::task::spawn_blocking(move || {
-        let out = Command::new(&agent2).args(["btrfs-restore-pool", "--nas", &nas2, "--allow-http", "--code", &rcode, "--pool"]).arg(&pool2).output().unwrap();
-        let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-        println!("restore: {text}");
-        assert!(out.status.success(), "restore: {text}");
-        text
-    })
-    .await
-    .unwrap();
+    let restored = tokio::task::spawn_blocking(move || agent_restore_pool(&agent2, &nas2, &rcode, &pool2, &[])).await.unwrap();
     assert!(restored.contains("pool filled"), "{restored}");
 
     // 3. the restored pool
@@ -239,8 +125,7 @@ async fn restore_from_the_nas_then_back_up_incrementally() {
     assert!(attrs.split_whitespace().next().unwrap_or("").contains('C'), "NOCOW: {attrs}");
     assert!(!pool.join(".rynas-restore-incoming").exists(), "no staging folder left");
     // the send unit is gone
-    let unit = Command::new("systemctl").args(["is-active", "rynas-pcsend-pc.service"]).output().unwrap();
-    assert!(!unit.status.success());
+    assert!(!unit_active("rynas-pcsend-pc-"));
 
     // 4. the restored PC's next backup is incremental on the restored snapshot
     // incompressible, so a send of it later takes a while (the cancel below)
@@ -268,8 +153,7 @@ async fn restore_from_the_nas_then_back_up_incrementally() {
     println!("ok: restored from {sent_name}, next backup {newest} incremental");
 
     // 5. a restore that goes away in the middle of a send: the unit and btrfs send stop
-    let (_, b) = call(&app, "POST", "/v1/pcbackup/devices/pc/restore-code", None).await;
-    let rcode = serde_json::from_slice::<Value>(&b).unwrap()["code"].as_str().unwrap().to_string();
+    let rcode = n.restore_code("pc").await;
     let (s, b) = call(&app, "POST", "/v1/pcbackup/agent/restore/login", Some(json!({"code": rcode}))).await;
     assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
     let rtok = serde_json::from_slice::<Value>(&b).unwrap()["token"].as_str().unwrap().to_string();
@@ -297,7 +181,7 @@ async fn restore_from_the_nas_then_back_up_incrementally() {
     use futures_util::StreamExt;
     let first = body.next().await.unwrap().unwrap();
     assert!(!first.is_empty());
-    let active = || Command::new("systemctl").args(["is-active", "--quiet", "rynas-pcsend-pc.service"]).status().unwrap().success();
+    let active = || unit_active("rynas-pcsend-pc-");
     assert!(active(), "the send runs in its unit while the client reads");
     drop(body);
     let mut gone = false;
@@ -329,4 +213,133 @@ async fn restore_from_the_nas_then_back_up_incrementally() {
     let all = to_bytes(r.into_body(), 64 << 20).await.unwrap();
     assert!(!zstd::stream::decode_all(&all[..]).unwrap().is_empty());
     println!("ok: a cancelled send stops its unit");
+}
+
+/// Review fixes, on real btrfs: a PC with `@` and `@home`, both snapshotted into
+/// `/.btrbk_snapshots` **inside `@`**, and a genfstab-style fstab with `subvolid=`.
+///
+/// - The restore takes the latest run of `@` and an **older** snapshot of `@home`: the
+///   received `@home` snapshot must land in `@/.btrbk_snapshots` of the restored `@` (the
+///   review feared an empty folder there, the place a nested snapshot leaves in a local
+///   snapshot, would keep it in the staging folder and make the next backup a full one).
+/// - The next backup of the restored `@home` is incremental on it.
+/// - The restored fstab has no `subvolid=` left: its lines mount on the new filesystem
+///   (the old line does not: the IDs changed).
+///
+/// Uses fresh paths of the same two mounts as the test above (`--test-threads=1`).
+#[tokio::test]
+#[ignore = "root, systemd and two throwaway btrfs mounts: RYNAS_TEST_BTRFS=<nas mount> RYNAS_TEST_POOL=<restore mount> RYNAS_AGENT_BIN=<rynas-agent>"]
+async fn older_nested_snapshot_and_subvolid_fstab() {
+    let mnt = PathBuf::from(std::env::var("RYNAS_TEST_BTRFS").expect("RYNAS_TEST_BTRFS=<btrfs mount>"));
+    let pool = PathBuf::from(std::env::var("RYNAS_TEST_POOL").expect("RYNAS_TEST_POOL=<another btrfs mount>"));
+    let agent_bin = std::env::var("RYNAS_AGENT_BIN").expect("RYNAS_AGENT_BIN=<rynas-agent binary>");
+    let (src, nas_parent) = (mnt.join("b3r-src"), mnt.join("b3r-nas"));
+    for p in [&src, &nas_parent, &pool.join("@"), &pool.join("@home")] {
+        assert!(!p.exists(), "{} exists: use fresh filesystems", p.display());
+    }
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(&nas_parent).unwrap();
+    let (root, home) = (src.join("@"), src.join("@home"));
+    for s in [&root, &home] {
+        sh(Command::new("btrfs").args(["subvolume", "create"]).arg(s));
+    }
+    let snap_dir = root.join(".btrbk_snapshots");
+    std::fs::create_dir_all(&snap_dir).unwrap();
+    std::fs::create_dir_all(root.join("etc")).unwrap();
+    std::fs::create_dir_all(root.join(".rynas")).unwrap();
+    std::fs::write(home.join("file"), "home v1").unwrap();
+    // what genfstab writes: subvolid next to subvol, and a line with subvolid alone
+    let fs_uuid = "00000000-0000-4000-8000-0000000000bb";
+    std::fs::write(root.join("etc/fstab"), format!("UUID={fs_uuid}\t/\tbtrfs\trw,relatime,subvolid=256,subvol=/@\t0 0\nUUID={fs_uuid}\t/home\tbtrfs\trw,relatime,subvolid=257\t0 0\n")).unwrap();
+    let manifest = json!({
+        "format": 1, "written_at_ms": 1, "hostname": "pc2",
+        "boot": {"uefi": true, "loader": "systemd_boot", "initramfs": "mkinitcpio"},
+        "disks": [],
+        "filesystems": [{
+            "device": "/dev/vda2", "source": {"kind": "partition", "disk": 0, "number": 2}, "fstype": "btrfs",
+            "uuid": fs_uuid,
+            "mounts": [{"path": "/", "subvol": "@"}, {"path": "/home", "subvol": "@home"}],
+            "subvolumes": [{"path": "@", "id": 256, "captured": true}, {"path": "@home", "id": 257, "captured": true}]
+        }],
+        "btrbk": {"snapshot_dir": "/.btrbk_snapshots", "subvolumes": [{"name": "@", "path": "@", "mount": "/"}, {"name": "@home", "path": "@home", "mount": "/home"}], "agent": true}
+    });
+    std::fs::write(root.join(".rynas/manifest.json"), serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+
+    let n = Nas::new();
+    let app = n.app.clone();
+    let folder = nas_parent.join("pc2");
+    n.folder("pc2", &folder).await;
+    let token = n.pair("pc2").await;
+    let nas = n.serve().await;
+    let send = {
+        let (agent_bin, nas, token, snap_dir) = (agent_bin.clone(), nas.clone(), token.clone(), snap_dir.clone());
+        move |round: &str, subvols: Vec<(&'static str, PathBuf)>| {
+            let s: Vec<(&str, &Path)> = subvols.iter().map(|(n, p)| (*n, p.as_path())).collect();
+            agent_send(&agent_bin, &nas, &token, round, &snap_dir, &s)
+        }
+    };
+    // two runs; @home changes in between
+    let (s1, r1, h1) = (send.clone(), root.clone(), home.clone());
+    tokio::task::spawn_blocking(move || s1("run 1", vec![("@", r1), ("@home", h1)])).await.unwrap();
+    std::fs::write(home.join("file"), "home v2").unwrap();
+    let (s2, r2, h2) = (send.clone(), root.clone(), home.clone());
+    tokio::task::spawn_blocking(move || s2("run 2", vec![("@", r2), ("@home", h2)])).await.unwrap();
+    let (_, b) = call(&app, "GET", "/v1/pc-backups/targets/pc2", None).await;
+    let d: Value = serde_json::from_slice(&b).unwrap();
+    let names: Vec<String> = d["list"].as_array().unwrap().iter().map(|x| x["name"].as_str().unwrap().to_string()).collect();
+    let of = |g: &str| {
+        let mut v: Vec<&String> = names.iter().filter(|x| x.starts_with(&format!("{g}."))).collect();
+        v.sort();
+        v.into_iter().cloned().collect::<Vec<_>>()
+    };
+    let (roots, homes) = (of("@"), of("@home"));
+    assert_eq!((roots.len(), homes.len()), (2, 2), "{names:?}");
+    let older_home = homes[0].clone();
+    // the PC's own newest @ snapshot holds an empty folder where the older @home snapshot
+    // was (a nested subvolume); `btrfs send` leaves such folders out (kernel 7.3), the
+    // restore makes way for one either way
+    let local = snap_dir.join(&roots[1]).join(".btrbk_snapshots").join(&older_home);
+    assert!(local.is_dir() && std::fs::read_dir(&local).unwrap().next().is_none(), "{} is not an empty folder", local.display());
+    let received = folder.join(&roots[1]).join(".btrbk_snapshots").join(&older_home);
+    println!("the received {} holds the empty folder: {}", roots[1], received.exists());
+    let nas_received = info(&folder.join(&older_home)).received_uuid;
+
+    // the restore: latest run, the older @home
+    let rcode = n.restore_code("pc2").await;
+    let (agent2, nas2, pool2, pick) = (agent_bin.clone(), nas.clone(), pool.clone(), format!("@home={older_home}"));
+    let out = tokio::task::spawn_blocking(move || agent_restore_pool(&agent2, &nas2, &rcode, &pool2, &["--subvol", &pick])).await.unwrap();
+    assert!(out.contains("pool filled"), "{out}");
+    assert_eq!(std::fs::read_to_string(pool.join("@home/file")).unwrap(), "home v1");
+    let kept = pool.join("@/.btrbk_snapshots").join(&older_home);
+    let ki = info(&kept);
+    assert!(ki.readonly, "{} is not the received snapshot", kept.display());
+    assert_eq!(ki.received_uuid, nas_received);
+    assert!(!pool.join(".rynas-restore-incoming").exists(), "no staging folder left: {out}");
+    println!("ok: the older @home snapshot is in @/.btrbk_snapshots");
+
+    // the fstab: no subvolid left; the new lines mount, the old one does not
+    let fstab = std::fs::read_to_string(pool.join("@/etc/fstab")).unwrap();
+    println!("restored fstab:\n{fstab}");
+    assert!(!fstab.contains("subvolid="), "{fstab}");
+    let opts: Vec<String> = fstab.lines().map(|l| l.split_whitespace().nth(3).unwrap().to_string()).collect();
+    assert_eq!(opts, vec!["rw,relatime,subvol=/@".to_string(), "rw,relatime,subvol=/@home".to_string()]);
+    let dev = sh(Command::new("findmnt").args(["-nvo", "SOURCE", "--target"]).arg(&pool)).trim().to_string();
+    let at = tempfile::tempdir().unwrap();
+    let try_mount = |o: &str| Command::new("mount").args(["-t", "btrfs", "-o", &format!("{o},ro"), &dev]).arg(at.path()).status().unwrap().success();
+    let umount = || sh(Command::new("umount").arg(at.path()));
+    assert!(try_mount(&opts[1]), "the fixed /home line does not mount");
+    assert_eq!(std::fs::read_to_string(at.path().join("file")).unwrap(), "home v1");
+    umount();
+    assert!(try_mount(&opts[0]), "the fixed / line does not mount");
+    assert!(at.path().join("etc/fstab").is_file());
+    umount();
+    assert!(!try_mount("rw,relatime,subvolid=256,subvol=/@"), "the PC's old line mounted: the IDs did not change?");
+    println!("ok: the fixed fstab lines mount");
+
+    // the next backup of the restored @home is incremental on the restored snapshot
+    std::fs::write(pool.join("@home/file"), "home v3").unwrap();
+    let (agent3, nas3, token3, sd3, h3) = (agent_bin.clone(), nas.clone(), token.clone(), pool.join("@/.btrbk_snapshots"), pool.join("@home"));
+    let next = tokio::task::spawn_blocking(move || agent_send(&agent3, &nas3, &token3, "after restore", &sd3, &[("@home", h3.as_path())])).await.unwrap();
+    assert!(next.contains(&format!("incremental from {older_home}")), "{next}");
+    println!("ok: the next backup of @home is incremental on {older_home}");
 }

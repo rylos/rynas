@@ -23,6 +23,11 @@ mod freeze;
 #[allow(dead_code)]
 mod gpt;
 mod http;
+// the NAS' btrfs ioctls on descriptors (rynas-btrfs, std + libc only), shared as a source
+// file like the stream guard below
+#[path = "../../rynas-btrfs/src/ioctl.rs"]
+#[allow(dead_code)]
+mod ioctl;
 mod lvm;
 mod manifest;
 mod mounts;

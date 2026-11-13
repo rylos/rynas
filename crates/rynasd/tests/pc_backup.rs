@@ -839,8 +839,9 @@ async fn switching_a_btrbk_folder_to_the_agent_keeps_the_chain() {
 
 
 /// B3: a restore session reads the btrfs snapshots of its own PC only (a btrbk folder with
-/// no PC record here): listing with runs, the manifest, the legacy files, the send stream
-/// (full and on a parent), its refusals, the scope, the report that ends it.
+/// no PC record here): a new code replacing the earlier one, listing with runs, the
+/// manifest, the legacy files, the send stream, its refusals, the scope, the report that
+/// ends it.
 #[tokio::test]
 async fn btrfs_restore_session_reads_only_its_own_pc() {
     use rynas_api_types::pcagent::{RestoreBtrfsListing, RestoreChoice, RestoreLegacy, RestoreSession};
@@ -871,7 +872,13 @@ async fn btrfs_restore_session_reads_only_its_own_pc() {
     assert_eq!(s, StatusCode::NOT_FOUND);
     let (s, b) = call(&e, "POST", "/v1/pcbackup/devices/casa/restore-code", None).await;
     assert_eq!(s, StatusCode::CREATED, "{}", String::from_utf8_lossy(&b));
+    let first = serde_json::from_slice::<Value>(&b).unwrap()["code"].as_str().unwrap().to_string();
+    // a new code replaces the earlier one
+    let (s, b) = call(&e, "POST", "/v1/pcbackup/devices/casa/restore-code", None).await;
+    assert_eq!(s, StatusCode::CREATED);
     let code = serde_json::from_slice::<Value>(&b).unwrap()["code"].as_str().unwrap().to_string();
+    let (s, _) = agent_call(&e, None, "POST", "/v1/pcbackup/agent/restore/login", json!({"code": first}).to_string().into_bytes()).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "the earlier code no longer works");
     let (s, b) = agent_call(&e, None, "POST", "/v1/pcbackup/agent/restore/login", json!({"code": code}).to_string().into_bytes()).await;
     assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
     let sess: RestoreSession = serde_json::from_slice(&b).unwrap();
@@ -923,18 +930,12 @@ async fn btrfs_restore_session_reads_only_its_own_pc() {
     let raw = zstd::stream::decode_all(&to_bytes(r.into_body(), 1 << 20).await.unwrap()[..]).unwrap();
     let (name, uuid, clone) = rynas_btrfs::send_stream::first_subvolume(&raw).unwrap();
     assert_eq!((name.as_str(), uuid.as_deref(), clone), (newest.as_str(), Some("6f1c2a8e-0d3b-4c5e-9a7f-000000000001"), None));
-    // on a parent of the same subvolume
-    let (s, b) = agent_call(&e, Some(&tok), "GET", &format!("{base}/casa/send?snapshot={newest}&parent={older}"), Vec::new()).await;
-    assert_eq!(s, StatusCode::OK);
-    let raw = zstd::stream::decode_all(&b[..]).unwrap();
-    assert!(rynas_btrfs::send_stream::first_subvolume(&raw).unwrap().2.is_some());
-    assert_eq!(e.host.sent.lock().unwrap().len(), 2);
-    // refused: an interrupted receive, another subvolume's parent, itself, a missing one
+    assert_eq!(e.host.sent.lock().unwrap().len(), 1);
+    // refused: an interrupted receive, a missing one, a bad name
     for (q, code) in [
         (format!("snapshot={broken_name}"), StatusCode::NOT_FOUND),
-        (format!("snapshot={newest}&parent={home}"), StatusCode::BAD_REQUEST),
-        (format!("snapshot={newest}&parent={newest}"), StatusCode::BAD_REQUEST),
         ("snapshot=@.20200101T0000".to_string(), StatusCode::NOT_FOUND),
+        ("snapshot=../x.20261101T0300".to_string(), StatusCode::BAD_REQUEST),
     ] {
         let (s, b) = agent_call(&e, Some(&tok), "GET", &format!("{base}/casa/send?{q}"), Vec::new()).await;
         assert_eq!(s, code, "{q}: {}", String::from_utf8_lossy(&b));
@@ -944,7 +945,7 @@ async fn btrfs_restore_session_reads_only_its_own_pc() {
     let (s, b) = agent_call(&e, Some(&tok), "GET", &format!("{base}/casa/send?snapshot={newest}"), Vec::new()).await;
     assert_eq!((s, err(&b).code.as_str()), (StatusCode::CONFLICT, "busy"));
     e.host.busy.lock().unwrap().clear();
-    assert_eq!(e.host.sent.lock().unwrap().len(), 2, "nothing was sent while busy");
+    assert_eq!(e.host.sent.lock().unwrap().len(), 1, "nothing was sent while busy");
 
     // the report ends the session (a btrbk folder has no PC history: the log is kept)
     let rep = json!({"device": "casa", "version": "btrfs x", "ok": true, "message": "restored", "log": "..."}).to_string().into_bytes();

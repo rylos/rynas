@@ -247,26 +247,36 @@ pub fn clone_file(src: &File, dst: &File) -> io::Result<()> {
     Ok(())
 }
 
-/// `renameat(dir, from, dir, to)` refusing to replace an existing `to` (`RENAME_NOREPLACE`).
-pub fn rename_noreplace(dir: &File, from: &str, to: &str) -> io::Result<()> {
-    let (f, t) = (
-        CString::new(from).map_err(io::Error::other)?,
-        CString::new(to).map_err(io::Error::other)?,
-    );
-    // SAFETY: valid descriptor and C strings
+/// `RENAME_NOREPLACE` of `renameat2(2)`.
+const RENAME_NOREPLACE: libc::c_uint = 1;
+
+/// `renameat2(from_dir, from, to_dir, to, RENAME_NOREPLACE)` as a raw system call: musl (the
+/// agent's static build shares this file) has no `renameat2` wrapper.
+fn renameat2_noreplace(from_dir: &File, from: &CString, to_dir: &File, to: &CString) -> io::Result<()> {
+    // SAFETY: valid descriptors and C strings; the kernel reads only these arguments
     let rc = unsafe {
-        libc::renameat2(
-            dir.as_raw_fd(),
-            f.as_ptr(),
-            dir.as_raw_fd(),
-            t.as_ptr(),
-            libc::RENAME_NOREPLACE,
+        libc::syscall(
+            libc::SYS_renameat2,
+            from_dir.as_raw_fd(),
+            from.as_ptr(),
+            to_dir.as_raw_fd(),
+            to.as_ptr(),
+            RENAME_NOREPLACE,
         )
     };
     if rc != 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+/// `renameat(dir, from, dir, to)` refusing to replace an existing `to` (`RENAME_NOREPLACE`).
+pub fn rename_noreplace(dir: &File, from: &str, to: &str) -> io::Result<()> {
+    let (f, t) = (
+        CString::new(from).map_err(io::Error::other)?,
+        CString::new(to).map_err(io::Error::other)?,
+    );
+    renameat2_noreplace(dir, &f, dir, &t)
 }
 
 /// `renameat2(from_dir, from, to_dir, to, RENAME_NOREPLACE)`: never replaces `to`, follows
@@ -278,20 +288,7 @@ pub fn rename_noreplace_at(from_dir: &File, from: &str, to_dir: &File, to: &str)
         CString::new(from).map_err(io::Error::other)?,
         CString::new(to).map_err(io::Error::other)?,
     );
-    // SAFETY: valid descriptors and C strings
-    let rc = unsafe {
-        libc::renameat2(
-            from_dir.as_raw_fd(),
-            f.as_ptr(),
-            to_dir.as_raw_fd(),
-            t.as_ptr(),
-            libc::RENAME_NOREPLACE,
-        )
-    };
-    if rc != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
+    renameat2_noreplace(from_dir, &f, to_dir, &t)
 }
 
 /// Sets or clears the read-only flag of the subvolume whose top folder is `f`
@@ -388,5 +385,21 @@ mod tests {
         assert!(!is_subvolume(&x));
         std::os::unix::fs::symlink("x", d.path().join("l")).unwrap();
         assert!(open_dir_at(&f, "l").is_err(), "symlinks are not followed");
+    }
+
+    #[test]
+    fn renames_never_replace() {
+        let d = tempfile::tempdir().unwrap();
+        let f = open_dir(d.path()).unwrap();
+        std::fs::write(d.path().join("a"), b"a").unwrap();
+        std::fs::write(d.path().join("b"), b"b").unwrap();
+        let e = rename_noreplace(&f, "a", "b").unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(libc::EEXIST));
+        rename_noreplace(&f, "a", "c").unwrap();
+        std::fs::create_dir(d.path().join("sub")).unwrap();
+        let sub = open_dir_at(&f, "sub").unwrap();
+        rename_noreplace_at(&f, "c", &sub, "c").unwrap();
+        assert_eq!(std::fs::read(d.path().join("sub/c")).unwrap(), b"a");
+        assert!(rename_noreplace_at(&f, "b", &sub, "c").is_err());
     }
 }

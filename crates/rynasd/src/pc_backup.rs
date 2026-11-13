@@ -150,22 +150,12 @@ pub trait ReceiveHost: Send + Sync {
     /// restore's send only reads, and while it runs no receive or retention pass (they take
     /// it exclusively) can start; `Ok(None)` when one holds it now.
     fn lock_shared(&self, root: &Path) -> Result<Option<FolderLock>, String>;
-    /// `btrfs send [-p <parent>] <folder>/<name>` (the raw stream) into `out`, for a
-    /// bare-metal restore: both must be complete read-only received subvolumes directly in
-    /// the locked folder. Runs in a transient unit that can only read and does not see the
-    /// `hidden` folders ([`send_unit_properties`]); stops (and the unit with it) as soon as
-    /// `out` fails or `stop` says so.
-    #[allow(clippy::too_many_arguments)]
-    fn send(
-        &self,
-        device: &str,
-        lock: &FolderLock,
-        name: &str,
-        parent: Option<&str>,
-        hidden: &[String],
-        out: &mut dyn std::io::Write,
-        stop: &dyn Fn() -> bool,
-    ) -> Result<(), String>;
+    /// `btrfs send <folder>/<name>` (the raw full stream) into `out`, for a bare-metal
+    /// restore: a complete read-only received subvolume directly in the locked folder. Runs
+    /// in a transient unit that can only read and does not see the `hidden` folders
+    /// ([`send_unit_properties`]); stops (and the unit with it) as soon as `out` fails or
+    /// `stop` says so.
+    fn send(&self, device: &str, lock: &FolderLock, name: &str, hidden: &[String], out: &mut dyn std::io::Write, stop: &dyn Fn() -> bool) -> Result<(), String>;
     /// What an older restore script left in root snapshot `name` without a manifest
     /// (descriptor walk, no symlink followed, each file at most [`LEGACY_FILE_MAX`]).
     fn read_legacy(&self, root: &Path, name: &str) -> Result<RestoreLegacy, String>;
@@ -180,16 +170,34 @@ pub const SEND_UNIT: &str = "rynas-pcsend";
 /// (`CAP_DAC_READ_SEARCH`), capped CPU, memory and tasks, idle-ish I/O. No `PrivateTmp`: a
 /// folder below `/tmp` would vanish (tests on loop images).
 pub fn send_unit_properties(hidden: &[String]) -> Vec<String> {
+    let mut p = base_unit_properties(hidden);
+    p.extend(
+        [
+            "ProtectHome=read-only",
+            "CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_READ_SEARCH",
+            "SystemCallFilter=@system-service",
+            "RestrictSUIDSGID=yes",
+            "MemoryMax=256M",
+            "TasksMax=8",
+        ]
+        .iter()
+        .map(|s| s.to_string()),
+    );
+    p
+}
+
+/// What every confined btrfs unit of the PC backup has (the agent PCs' receive, a restore's
+/// send): the whole system read-only, the other device folders (`hidden`) inaccessible, no
+/// network, IPC or device, no new privileges, the kernel's knobs out of reach, capped CPU,
+/// idle-ish I/O, at most 48 h (a first full send over a slow link takes long).
+fn base_unit_properties(hidden: &[String]) -> Vec<String> {
     let mut p: Vec<String> = [
         "ProtectSystem=strict",
-        "ProtectHome=read-only",
         "PrivateNetwork=yes",
         "PrivateIPC=yes",
         "NoNewPrivileges=yes",
         "RestrictAddressFamilies=AF_UNIX",
-        "CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_READ_SEARCH",
         "SystemCallArchitectures=native",
-        "SystemCallFilter=@system-service",
         "DevicePolicy=closed",
         "ProtectKernelModules=yes",
         "ProtectKernelTunables=yes",
@@ -199,12 +207,9 @@ pub fn send_unit_properties(hidden: &[String]) -> Vec<String> {
         "ProtectHostname=yes",
         "RestrictNamespaces=yes",
         "RestrictRealtime=yes",
-        "RestrictSUIDSGID=yes",
         "LockPersonality=yes",
         "MemoryDenyWriteExecute=yes",
         "UMask=0077",
-        "MemoryMax=256M",
-        "TasksMax=8",
         "CPUQuota=100%",
         "Nice=10",
         "IOSchedulingClass=best-effort",
@@ -214,10 +219,42 @@ pub fn send_unit_properties(hidden: &[String]) -> Vec<String> {
     .iter()
     .map(|s| s.to_string())
     .collect();
-    for h in hidden {
-        p.push(format!("InaccessiblePaths=-{h}"));
-    }
+    // `-`: a folder that is not there is no error
+    p.extend(hidden.iter().map(|h| format!("InaccessiblePaths=-{h}")));
     p
+}
+
+/// `systemd-run --wait --pipe` of `argv` in the transient unit `unit` with `props`, the
+/// environment cleared; stdout and stderr piped, stdin as `stdin` says.
+fn confined(unit: &str, desc: &str, props: &[String], argv: &[&std::ffi::OsStr], stdin: std::process::Stdio) -> std::process::Command {
+    use std::process::{Command, Stdio};
+    let mut c = Command::new("systemd-run");
+    c.args(["--wait", "--pipe", "--collect", "--quiet", "--service-type=exec"]).arg(format!("--unit={unit}")).arg(format!("--description={desc}"));
+    for p in props {
+        c.arg(format!("--property={p}"));
+    }
+    c.arg("--").args(argv);
+    c.env_clear().env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin").env("LC_ALL", "C").stdin(stdin).stdout(Stdio::piped()).stderr(Stdio::piped());
+    c
+}
+
+/// The first 16 KiB of the child's stderr, read in a thread (the rest drained): join it
+/// for the error text.
+fn stderr_tail(child: &mut std::process::Child) -> std::thread::JoinHandle<String> {
+    use std::io::Read as _;
+    let err = child.stderr.take();
+    std::thread::spawn(move || {
+        let Some(mut err) = err else { return String::new() };
+        let mut s = Vec::new();
+        let _ = (&mut err).take(16 << 10).read_to_end(&mut s);
+        let _ = std::io::copy(&mut err, &mut std::io::sink());
+        String::from_utf8_lossy(&s).into_owned()
+    })
+}
+
+/// The last line of a btrfs tool's stderr worth showing (not its progress chatter).
+fn last_line(text: &str) -> String {
+    text.lines().rfind(|l| !l.trim().is_empty() && !l.starts_with("At ") && !l.starts_with("Chroot to ")).unwrap_or("").trim().to_string()
 }
 
 /// A received snapshot fit to be sent: a read-only subvolume with a received UUID, directly
@@ -237,9 +274,17 @@ fn sendable(dir: &std::fs::File, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// A regular file `name` in `dir` (never through a symlink, never a FIFO), at most `max`
-/// bytes: `Ok(None)` when it is not there or not a regular file.
-fn read_small_at(dir: &std::fs::File, name: &str, max: usize) -> Result<Option<Vec<u8>>, String> {
+/// What [`read_at`] found.
+enum SmallFile {
+    Missing,
+    /// There, but a symlink, not a regular file, or bigger than allowed.
+    Refused(String),
+    Data(Vec<u8>),
+}
+
+/// A regular file `name` in `dir`, never through a symlink, never blocking on a FIFO, at
+/// most `max` bytes.
+fn read_at(dir: &std::fs::File, name: &str, max: usize) -> Result<SmallFile, String> {
     use std::io::Read;
     use std::os::fd::{AsRawFd, FromRawFd};
     let c = std::ffi::CString::new(name).map_err(|e| e.to_string())?;
@@ -251,7 +296,8 @@ fn read_small_at(dir: &std::fs::File, name: &str, max: usize) -> Result<Option<V
     if fd < 0 {
         let e = std::io::Error::last_os_error();
         return match e.raw_os_error() {
-            Some(libc::ENOENT) | Some(libc::ELOOP) | Some(libc::ENOTDIR) => Ok(None),
+            Some(libc::ENOENT) | Some(libc::ENOTDIR) => Ok(SmallFile::Missing),
+            Some(libc::ELOOP) => Ok(SmallFile::Refused(format!("{name}: a symlink"))),
             _ => Err(format!("{name}: {e}")),
         };
     }
@@ -259,11 +305,19 @@ fn read_small_at(dir: &std::fs::File, name: &str, max: usize) -> Result<Option<V
     let f = unsafe { std::fs::File::from_raw_fd(fd) };
     let m = f.metadata().map_err(|e| e.to_string())?;
     if !m.is_file() || m.len() > max as u64 {
-        return Ok(None);
+        return Ok(SmallFile::Refused(format!("{name}: not a regular file of at most {max} bytes")));
     }
-    let mut buf = Vec::new();
+    let mut buf = Vec::with_capacity(m.len() as usize);
     f.take(max as u64 + 1).read_to_end(&mut buf).map_err(|e| e.to_string())?;
-    Ok((buf.len() <= max).then_some(buf))
+    Ok(if buf.len() <= max { SmallFile::Data(buf) } else { SmallFile::Refused(format!("{name}: bigger than {max} bytes")) })
+}
+
+/// [`read_at`], anything but a fitting regular file being `None`.
+fn read_small_at(dir: &std::fs::File, name: &str, max: usize) -> Result<Option<Vec<u8>>, String> {
+    Ok(match read_at(dir, name, max)? {
+        SmallFile::Data(b) => Some(b),
+        SmallFile::Missing | SmallFile::Refused(_) => None,
+    })
 }
 
 /// Text from a file of the PC (control characters but tab and newline dropped).
@@ -297,6 +351,20 @@ pub const STAGING_DIR: &str = ".incoming";
 const AGENT_NOT_SUBVOLUME: &str =
     "the folder is not a btrfs subvolume: rynas-agent's incremental receives need one (make a new folder from rynas, or turn this one into a subvolume)";
 
+/// The capabilities of an agent PC's receive, one per line: subvolume ioctls, chroot,
+/// owners, modes on others' files, set-id bits kept across a write (`CAP_FSETID`), others'
+/// read-only folders (`CAP_DAC_OVERRIDE`), device nodes. `CAP_DAC_READ_SEARCH` is not needed
+/// (checked on a loop: same result without it).
+const RECEIVE_CAPS: &[&str] = &[
+    "CAP_SYS_ADMIN",
+    "CAP_SYS_CHROOT",
+    "CAP_CHOWN",
+    "CAP_FOWNER",
+    "CAP_FSETID",
+    "CAP_DAC_OVERRIDE",
+    "CAP_MKNOD",
+];
+
 /// The sandbox of an agent PC's `btrfs receive` (`docs/research/pc-backup.md` §11.9).
 ///
 /// - `--chroot` into the receive's own empty staging folder (`<root>/.incoming/<random>/`):
@@ -328,51 +396,20 @@ const AGENT_NOT_SUBVOLUME: &str =
 /// receives with clones, a parent and a clone source in another folder refused, a plain
 /// folder unable to find its parents, a device node created but not writable.
 pub fn receive_unit_properties(root: &str, hidden: &[String]) -> Vec<String> {
-    let mut p: Vec<String> = vec![
-        "ProtectSystem=strict".to_string(),
+    let mut p = base_unit_properties(hidden);
+    p.extend([
         format!("ReadWritePaths={root}"),
-        "PrivateNetwork=yes".into(),
-        "PrivateIPC=yes".into(),
-        "NoNewPrivileges=yes".into(),
-        "RestrictAddressFamilies=AF_UNIX".into(),
-        // subvolume ioctls, chroot, owners, modes on others' files, set-id bits kept across a
-        // write (CAP_FSETID), others' read-only folders (CAP_DAC_OVERRIDE), device nodes;
-        // CAP_DAC_READ_SEARCH is not needed (checked on a loop: same result without it)
-        "CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_CHROOT CAP_CHOWN CAP_FOWNER CAP_FSETID CAP_DAC_OVERRIDE CAP_MKNOD".into(),
-        "SystemCallArchitectures=native".into(),
+        format!("CapabilityBoundingSet={}", RECEIVE_CAPS.join(" ")),
         "SystemCallFilter=@system-service chroot mknod mknodat".into(),
         // device nodes may be created (overlayfs whiteouts, container root filesystems) but
         // never opened: a block node written to would be a disk of the NAS
-        "DevicePolicy=closed".into(),
         "DeviceAllow=char-* m".into(),
         "DeviceAllow=block-* m".into(),
-        "ProtectKernelModules=yes".into(),
-        "ProtectKernelTunables=yes".into(),
-        "ProtectKernelLogs=yes".into(),
-        "ProtectControlGroups=yes".into(),
-        "ProtectClock=yes".into(),
-        "ProtectHostname=yes".into(),
         "ProtectProc=invisible".into(),
         "ProcSubset=pid".into(),
-        "RestrictNamespaces=yes".into(),
-        "RestrictRealtime=yes".into(),
-        "LockPersonality=yes".into(),
-        "MemoryDenyWriteExecute=yes".into(),
-        "UMask=0077".into(),
         "MemoryMax=512M".into(),
         "TasksMax=16".into(),
-        "CPUQuota=100%".into(),
-        "Nice=10".into(),
-        "IOSchedulingClass=best-effort".into(),
-        "IOSchedulingPriority=7".into(),
-        // a first full send over a slow link can take a long time (the receive also stops
-        // below a minimum average rate, see `RECEIVE_MIN_RATE`)
-        "RuntimeMaxSec=172800".into(),
-    ];
-    for h in hidden {
-        // `-`: a folder that is not there is no error
-        p.push(format!("InaccessiblePaths=-{h}"));
-    }
+    ]);
     p
 }
 
@@ -381,6 +418,24 @@ pub struct FolderLock {
     pub path: PathBuf,
     /// `None` in memory.
     pub dir: Option<std::fs::File>,
+}
+
+/// The device folder checked from `/` without symlinks (and still the same folder at its
+/// path), then `flock(op | LOCK_NB)` on it; `Ok(None)` when somebody holds it.
+fn lock_with(root: &Path, op: libc::c_int) -> Result<Option<FolderLock>, String> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::MetadataExt;
+    let dir = rynas_btrfs::receive_filter::verify_root(&root.to_string_lossy())?;
+    // the path still names the folder that was checked (nothing swapped in since)
+    let (a, b) = (dir.metadata().map_err(|e| e.to_string())?, std::fs::symlink_metadata(root).map_err(|e| e.to_string())?);
+    if (a.dev(), a.ino()) != (b.dev(), b.ino()) {
+        return Err(format!("{}: changed while it was checked", root.display()));
+    }
+    // SAFETY: flock(2) on our own descriptor; the lock goes when `dir` closes
+    if unsafe { libc::flock(dir.as_raw_fd(), op | libc::LOCK_NB) } != 0 {
+        return Ok(None);
+    }
+    Ok(Some(FolderLock { path: root.to_path_buf(), dir: Some(dir) }))
 }
 
 /// The machine.
@@ -596,8 +651,7 @@ impl ReceiveHost for HostReceive {
     }
 
     fn receive(&self, device: &str, lock: &FolderLock, staging: &str, hidden: &[String], input: &mut dyn std::io::Read) -> Result<(), String> {
-        use std::io::Read as _;
-        use std::process::{Command, Stdio};
+        use std::process::Stdio;
         if !valid_device(device) {
             return Err(format!("{device}: not a device name"));
         }
@@ -617,43 +671,21 @@ impl ReceiveHost for HostReceive {
             .filter(|h| receive::valid_path(h).is_ok() && !within(&root, h) && !within(h, &root))
             .cloned()
             .collect();
-        let mut c = Command::new("systemd-run");
-        c.args(["--wait", "--pipe", "--collect", "--quiet", "--service-type=exec"])
-            // one name per device: systemd refuses a second unit while one still runs (even
-            // when rynasd restarted and lost the folder lock meanwhile)
-            .arg(format!("--unit={RECEIVE_UNIT}-{device}"))
-            .arg(format!("--description=rynas: receive of PC {device}"));
-        for p in receive_unit_properties(&root, &hidden) {
-            c.arg(format!("--property={p}"));
-        }
-        // -e: stop at the end command (the guard lets nothing follow it anyway)
-        c.arg("--").arg(&btrfs).args(["receive", "-e", "--chroot"]).arg(format!("{into}/"));
-        c.env_clear()
-            .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
-            .env("LC_ALL", "C")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
+        // one name per device: systemd refuses a second unit while one still runs (even when
+        // rynasd restarted and lost the folder lock meanwhile); -e: stop at the end command
+        // (the guard lets nothing follow it anyway)
+        let target = format!("{into}/");
+        let argv: [&std::ffi::OsStr; 5] = [btrfs.as_os_str(), "receive".as_ref(), "-e".as_ref(), "--chroot".as_ref(), target.as_ref()];
+        let mut c = confined(&format!("{RECEIVE_UNIT}-{device}"), &format!("rynas: receive of PC {device}"), &receive_unit_properties(&root, &hidden), &argv, Stdio::piped());
+        c.stdout(Stdio::null());
         let mut child = c.spawn().map_err(|e| format!("systemd-run: {e}"))?;
-        let mut err = child.stderr.take().ok_or("no stderr")?;
-        let errs = std::thread::spawn(move || {
-            let mut s = Vec::new();
-            let _ = (&mut err).take(16 << 10).read_to_end(&mut s);
-            let _ = std::io::copy(&mut err, &mut std::io::sink());
-            String::from_utf8_lossy(&s).into_owned()
-        });
+        let errs = stderr_tail(&mut child);
         let mut stdin = child.stdin.take().ok_or("no stdin")?;
         let copied = std::io::copy(input, &mut stdin);
         // end of stream (or the stream broke: a short stream makes the receive fail)
         drop(stdin);
         let status = child.wait().map_err(|e| e.to_string())?;
-        let text = errs.join().unwrap_or_default();
-        let last = text
-            .lines()
-            .rfind(|l| !l.starts_with("At ") && !l.starts_with("Chroot to "))
-            .unwrap_or("")
-            .trim()
-            .to_string();
+        let last = last_line(&errs.join().unwrap_or_default());
         match copied {
             // the input failed first: that is the cause
             Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => Err(format!("the stream broke off: {e}")),
@@ -809,8 +841,6 @@ impl ReceiveHost for HostReceive {
     }
 
     fn read_manifest(&self, root: &Path, name: &str) -> Result<Option<Vec<u8>>, String> {
-        use std::io::Read;
-        use std::os::fd::{AsRawFd, FromRawFd};
         use rynas_btrfs::ioctl::{open_dir, open_dir_at};
         let gone = |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound;
         let snap = open_dir_at(&open_dir(root).map_err(|e| e.to_string())?, name).map_err(|e| format!("{name}: {e}"))?;
@@ -819,31 +849,11 @@ impl ReceiveHost for HostReceive {
             Err(e) if gone(&e) => return Ok(None),
             Err(e) => return Err(format!("{name}/.rynas: {e}")),
         };
-        // SAFETY: openat(2) on a directory descriptor with a constant C name; never follows a
-        // symlink, never blocks on a FIFO
-        let fd = unsafe {
-            libc::openat(
-                dot.as_raw_fd(),
-                c"manifest.json".as_ptr(),
-                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC | libc::O_NOCTTY,
-            )
-        };
-        if fd < 0 {
-            let e = std::io::Error::last_os_error();
-            return if gone(&e) { Ok(None) } else { Err(format!("{name}/.rynas/manifest.json: {e}")) };
+        match read_at(&dot, "manifest.json", MANIFEST_MAX as usize)? {
+            SmallFile::Data(b) => Ok(Some(b)),
+            SmallFile::Missing => Ok(None),
+            SmallFile::Refused(why) => Err(format!("{name}/.rynas/{why}")),
         }
-        // SAFETY: a descriptor we just opened and own
-        let f = unsafe { std::fs::File::from_raw_fd(fd) };
-        let m = f.metadata().map_err(|e| e.to_string())?;
-        if !m.is_file() || m.len() > MANIFEST_MAX {
-            return Err(format!("{name}/.rynas/manifest.json: not a regular file of at most 1 MiB"));
-        }
-        let mut buf = Vec::with_capacity(m.len() as usize);
-        f.take(MANIFEST_MAX + 1).read_to_end(&mut buf).map_err(|e| e.to_string())?;
-        if buf.len() as u64 > MANIFEST_MAX {
-            return Err(format!("{name}/.rynas/manifest.json: bigger than 1 MiB"));
-        }
-        Ok(Some(buf))
     }
 
     fn receiving(&self, root: &Path) -> bool {
@@ -855,19 +865,8 @@ impl ReceiveHost for HostReceive {
     }
 
     fn lock(&self, root: &Path) -> Result<Option<FolderLock>, String> {
-        use std::os::fd::AsRawFd;
-        use std::os::unix::fs::MetadataExt;
-        let dir = rynas_btrfs::receive_filter::verify_root(&root.to_string_lossy())?;
-        // the path still names the folder that was checked (nothing swapped in since)
-        let (a, b) = (dir.metadata().map_err(|e| e.to_string())?, std::fs::symlink_metadata(root).map_err(|e| e.to_string())?);
-        if (a.dev(), a.ino()) != (b.dev(), b.ino()) {
-            return Err(format!("{}: changed while it was checked", root.display()));
-        }
-        // SAFETY: flock(2) on our own descriptor, the same lock the filter takes per receive
-        if unsafe { libc::flock(dir.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Ok(None);
-        }
-        Ok(Some(FolderLock { path: root.to_path_buf(), dir: Some(dir) }))
+        // the same lock the filter takes per receive
+        lock_with(root, libc::LOCK_EX)
     }
 
     fn delete_snapshot(&self, lock: &FolderLock, name: &str) -> Result<(), String> {
@@ -885,32 +884,11 @@ impl ReceiveHost for HostReceive {
     }
 
     fn lock_shared(&self, root: &Path) -> Result<Option<FolderLock>, String> {
-        use std::os::fd::AsRawFd;
-        use std::os::unix::fs::MetadataExt;
-        let dir = rynas_btrfs::receive_filter::verify_root(&root.to_string_lossy())?;
-        let (a, b) = (dir.metadata().map_err(|e| e.to_string())?, std::fs::symlink_metadata(root).map_err(|e| e.to_string())?);
-        if (a.dev(), a.ino()) != (b.dev(), b.ino()) {
-            return Err(format!("{}: changed while it was checked", root.display()));
-        }
-        // SAFETY: flock(2) on our own descriptor: shared, so a receive or a retention pass
-        // (exclusive) cannot start while the send reads
-        if unsafe { libc::flock(dir.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } != 0 {
-            return Ok(None);
-        }
-        Ok(Some(FolderLock { path: root.to_path_buf(), dir: Some(dir) }))
+        // shared: a receive or a retention pass (exclusive) cannot start while a send reads
+        lock_with(root, libc::LOCK_SH)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn send(
-        &self,
-        device: &str,
-        lock: &FolderLock,
-        name: &str,
-        parent: Option<&str>,
-        hidden: &[String],
-        out: &mut dyn std::io::Write,
-        stop: &dyn Fn() -> bool,
-    ) -> Result<(), String> {
+    fn send(&self, device: &str, lock: &FolderLock, name: &str, hidden: &[String], out: &mut dyn std::io::Write, stop: &dyn Fn() -> bool) -> Result<(), String> {
         use std::io::Read as _;
         use std::process::{Command, Stdio};
         if !valid_device(device) {
@@ -919,52 +897,27 @@ impl ReceiveHost for HostReceive {
         let btrfs = rynas_btrfs::receive_filter::locate("btrfs").ok_or("btrfs-progs is not installed")?;
         let dir = lock.dir.as_ref().ok_or("folder not open")?;
         sendable(dir, name)?;
-        if let Some(p) = parent {
-            sendable(dir, p)?;
-        }
         let root = lock.path.to_string_lossy().into_owned();
         let snap = format!("{root}/{name}");
         receive::valid_path(&snap)?;
-        let parent_path = parent.map(|p| format!("{root}/{p}"));
-        if let Some(p) = &parent_path {
-            receive::valid_path(p)?;
-        }
         let hidden: Vec<String> = hidden
             .iter()
             .filter(|h| receive::valid_path(h).is_ok() && !within(&root, h) && !within(h, &root))
             .cloned()
             .collect();
-        let unit = format!("{SEND_UNIT}-{device}");
-        let mut c = Command::new("systemd-run");
-        c.args(["--wait", "--pipe", "--collect", "--quiet", "--service-type=exec"])
-            .arg(format!("--unit={unit}"))
-            .arg(format!("--description=rynas: restore send of PC {device}"));
-        for p in send_unit_properties(&hidden) {
-            c.arg(format!("--property={p}"));
-        }
-        c.arg("--").arg(&btrfs).args(["send", "-q"]);
+        // a name of its own per send: a retry right after a cancelled one does not meet the
+        // old unit still stopping (one send per PC is SendSlot's rule, not the unit name's)
+        let unit = format!("{SEND_UNIT}-{device}-{}", staging_name()?);
+        let mut argv: Vec<&std::ffi::OsStr> = vec![btrfs.as_os_str(), "send".as_ref(), "-q".as_ref()];
         // v1 (what every btrfs receive reads, and what the agent's own guard takes)
         if send_knows_proto(&btrfs) {
-            c.args(["--proto", "1"]);
+            argv.extend([std::ffi::OsStr::new("--proto"), std::ffi::OsStr::new("1")]);
         }
-        if let Some(p) = &parent_path {
-            c.arg("-p").arg(p);
-        }
-        c.arg(&snap);
-        c.env_clear()
-            .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
-            .env("LC_ALL", "C")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = c.spawn().map_err(|e| format!("systemd-run: {e}"))?;
-        let mut err = child.stderr.take().ok_or("no stderr")?;
-        let errs = std::thread::spawn(move || {
-            let mut s = Vec::new();
-            let _ = (&mut err).take(16 << 10).read_to_end(&mut s);
-            let _ = std::io::copy(&mut err, &mut std::io::sink());
-            String::from_utf8_lossy(&s).into_owned()
-        });
+        argv.push(snap.as_ref());
+        let mut child = confined(&unit, &format!("rynas: restore send of PC {device}"), &send_unit_properties(&hidden), &argv, Stdio::null())
+            .spawn()
+            .map_err(|e| format!("systemd-run: {e}"))?;
+        let errs = stderr_tail(&mut child);
         let mut stdout = child.stdout.take().ok_or("no stdout")?;
         let mut buf = vec![0u8; 1 << 20];
         let copied: Result<(), String> = loop {
@@ -989,13 +942,12 @@ impl ReceiveHost for HostReceive {
         }
         drop(stdout);
         let status = child.wait().map_err(|e| e.to_string())?;
-        let text = errs.join().unwrap_or_default();
+        let last = last_line(&errs.join().unwrap_or_default());
         copied?;
         out.flush().map_err(|e| format!("the client went away: {e}"))?;
         if status.success() {
             Ok(())
         } else {
-            let last = text.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string();
             Err(if last.is_empty() { format!("btrfs send failed ({status})") } else { format!("btrfs send: {last}") })
         }
     }
@@ -1509,33 +1461,12 @@ impl ReceiveHost for MemoryReceive {
     fn lock_shared(&self, root: &Path) -> Result<Option<FolderLock>, String> {
         self.lock(root)
     }
-    #[allow(clippy::too_many_arguments)]
-    fn send(
-        &self,
-        _device: &str,
-        lock: &FolderLock,
-        name: &str,
-        parent: Option<&str>,
-        _hidden: &[String],
-        out: &mut dyn std::io::Write,
-        stop: &dyn Fn() -> bool,
-    ) -> Result<(), String> {
+    fn send(&self, _device: &str, lock: &FolderLock, name: &str, _hidden: &[String], out: &mut dyn std::io::Write, stop: &dyn Fn() -> bool) -> Result<(), String> {
         let entries = self.folders.lock().unwrap().get(&lock.path).map(|(_, e)| e.clone()).ok_or("no such folder")?;
-        let received = |n: &str| {
-            entries
-                .iter()
-                .find(|e| e.name == n)
-                .and_then(|e| e.info.as_ref())
-                .filter(|i| i.readonly)
-                .and_then(|i| i.received_uuid.clone())
-                .ok_or_else(|| format!("{n}: not a complete received snapshot"))
-        };
-        let uuid = received(name)?;
-        let parent_uuid = parent.map(received).transpose()?;
-        self.sent.lock().unwrap().push(format!("{}/{name}{}", lock.path.display(), parent.map(|p| format!(" -p {p}")).unwrap_or_default()));
-        // the stream `btrfs send` writes for a received snapshot: its received UUID, and the
-        // parent's as clone source
-        let s = rynas_btrfs::send_stream::fake::stream(name, &uuid, parent_uuid.as_deref());
+        let e = entries.iter().map(agent_entry).find(|e| e.name == name && e.complete).ok_or_else(|| format!("{name}: not a complete received snapshot"))?;
+        self.sent.lock().unwrap().push(format!("{}/{name}", lock.path.display()));
+        // the stream `btrfs send` writes for a received snapshot: its received UUID
+        let s = rynas_btrfs::send_stream::fake::stream(name, e.received_uuid.as_deref().unwrap_or_default(), None);
         for chunk in s.chunks(64) {
             if stop() {
                 return Err("cancelled".into());
@@ -3114,27 +3045,52 @@ struct ChanWriter {
     tx: tokio::sync::mpsc::Sender<Result<axum::body::Bytes, std::io::Error>>,
     buf: Vec<u8>,
     sent: u64,
-    /// Called every [`KEEPALIVE_EVERY`] while the stream runs (the restore session stays
-    /// alive during one long send).
-    keepalive: Box<dyn Fn() + Send + Sync>,
+    /// Called every [`KEEPALIVE_EVERY`] while the stream runs: keeps the restore session
+    /// alive during one long send, and says whether it still is (`false`: it ended, e.g. the
+    /// report closed it, and the stream stops).
+    keepalive: Box<dyn Fn() -> bool + Send + Sync>,
     last: std::time::Instant,
 }
 
 /// See [`ChanWriter::keepalive`].
 const KEEPALIVE_EVERY: Duration = Duration::from_secs(300);
 
+/// A client that takes nothing for this long is gone: the send stops, and with it the
+/// shared lock of the folder and the NAS-wide send slot.
+const SEND_STALL: Duration = Duration::from_secs(600);
+
 impl ChanWriter {
     fn push(&mut self) -> std::io::Result<()> {
+        use tokio::sync::mpsc::error::TrySendError;
+        let gone = |why: &str| std::io::Error::new(std::io::ErrorKind::BrokenPipe, why.to_string());
         if self.buf.is_empty() {
             return Ok(());
         }
         if self.last.elapsed() >= KEEPALIVE_EVERY {
             self.last = std::time::Instant::now();
-            (self.keepalive)();
+            if !(self.keepalive)() {
+                return Err(gone("the restore session ended"));
+            }
         }
-        let b = axum::body::Bytes::from(std::mem::take(&mut self.buf));
-        self.sent += b.len() as u64;
-        self.tx.blocking_send(Ok(b)).map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "the client went away"))
+        let mut b = Ok(axum::body::Bytes::from(std::mem::take(&mut self.buf)));
+        let len = b.as_ref().map(|x| x.len()).unwrap_or(0) as u64;
+        // never wait without end on a full channel: a stalled client would hold the folder
+        let since = std::time::Instant::now();
+        loop {
+            match self.tx.try_send(b) {
+                Ok(()) => break,
+                Err(TrySendError::Closed(_)) => return Err(gone("the client went away")),
+                Err(TrySendError::Full(back)) => {
+                    if since.elapsed() >= SEND_STALL {
+                        return Err(gone("the client took nothing for 10 minutes"));
+                    }
+                    b = back;
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+        }
+        self.sent += len;
+        Ok(())
     }
 }
 
@@ -3200,7 +3156,7 @@ impl PcBackup {
     }
 
     /// `/.rynas/manifest.json` of snapshot `name` (B1's descriptor-walk reader), checked to
-    /// be a JSON object of format 1.
+    /// be a JSON object of the format this NAS knows (`MANIFEST_FORMAT`).
     pub async fn restore_manifest(self: &Arc<Self>, device: &str, name: String) -> Res<Vec<u8>> {
         let t = self.stored(device)?;
         let s = self.clone();
@@ -3213,7 +3169,7 @@ impl PcBackup {
                 .ok_or_else(|| Error::not_found(format!("{name} has no layout manifest")))?;
             let v: serde_json::Value = serde_json::from_slice(&b)
                 .map_err(|_| Error::new(StatusCode::UNPROCESSABLE_ENTITY, error_codes::INVALID_VALUE, format!("the manifest of {name} does not parse")))?;
-            if v.get("format").and_then(serde_json::Value::as_u64) != Some(1) {
+            if v.get("format").and_then(serde_json::Value::as_u64) != Some(u64::from(rynas_api_types::pcagent::MANIFEST_FORMAT)) {
                 return Err(Error::new(StatusCode::UNPROCESSABLE_ENTITY, error_codes::INVALID_VALUE, format!("the manifest of {name} has a format this NAS does not know")));
             }
             Ok(b)
@@ -3232,35 +3188,19 @@ impl PcBackup {
         .await?
     }
 
-    /// `btrfs send [-p parent] <snapshot> | zstd` of the folder of `device` for a bare-metal
-    /// restore: complete read-only snapshots directly in the folder (and the parent of the
-    /// same subvolume), the folder walked from `/` without symlinks and locked shared (no
-    /// receive or retention pass meanwhile), one stream per PC and at most [`MAX_SENDS`] on
-    /// the NAS, the send in its read-only unit ([`send_unit_properties`]); a client that goes
-    /// away stops it. Audited.
-    pub async fn restore_send(
-        self: &Arc<Self>,
-        device: &str,
-        name: String,
-        parent: Option<String>,
-        who: String,
-        keepalive: Box<dyn Fn() + Send + Sync>,
-    ) -> Res<axum::body::Body> {
+    /// `btrfs send <snapshot> | zstd` (full) of the folder of `device` for a bare-metal
+    /// restore: a complete read-only snapshot directly in the folder, the folder walked from
+    /// `/` without symlinks and locked shared (no receive or retention pass meanwhile), one
+    /// stream per PC and at most [`MAX_SENDS`] on the NAS, the send in its read-only unit
+    /// ([`send_unit_properties`]); a client that goes away, takes nothing for
+    /// [`SEND_STALL`], or whose session ends stops it. Audited.
+    pub async fn restore_send(self: &Arc<Self>, device: &str, name: String, who: String, keepalive: Box<dyn Fn() -> bool + Send + Sync>) -> Res<axum::body::Body> {
         use rynas_api_types::pcagent::AGENT_ZSTD_WINDOW_LOG;
         let t = self.stored(device)?;
-        if let Some(p) = &parent {
-            let group = |n: &str| rynas_btrfs::name::split_snapshot_name(n).map(|x| x.0.to_string());
-            if p == &name || group(p).is_none() || group(p) != group(&name) {
-                return Err(Error::invalid("parent", "an older snapshot of the same subvolume, or none"));
-            }
-        }
         let slot = SendSlot::take(self, device)?;
-        let (s, n, p) = (self.clone(), name.clone(), parent.clone());
+        let (s, n) = (self.clone(), name.clone());
         let lock = blocking(move || -> Res<FolderLock> {
             s.complete_entry(&t, &n)?;
-            if let Some(p) = &p {
-                s.complete_entry(&t, p)?;
-            }
             s.host
                 .lock_shared(Path::new(&t.path))
                 .map_err(|e| Error::new(StatusCode::CONFLICT, error_codes::CONFLICT, e))?
@@ -3270,7 +3210,7 @@ impl PcBackup {
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(8);
         let hidden = self.other_folders(device);
         let (s, dev) = (self.clone(), device.to_string());
-        tracing::info!(target: "rynas::audit", "pc backup: {dev}: restore send of {name}{} to {who}", parent.as_deref().map(|p| format!(" on {p}")).unwrap_or_default());
+        tracing::info!(target: "rynas::audit", "pc backup: {dev}: restore send of {name} to {who}");
         std::thread::Builder::new()
             .name("pc-send".into())
             .spawn(move || {
@@ -3280,7 +3220,7 @@ impl PcBackup {
                     let mut enc = zstd::stream::write::Encoder::new(w, 3).map_err(|e| e.to_string())?;
                     enc.window_log(AGENT_ZSTD_WINDOW_LOG).map_err(|e| e.to_string())?;
                     let closed = tx.clone();
-                    s.host.send(&dev, &lock, &name, parent.as_deref(), &hidden, &mut enc, &|| closed.is_closed())?;
+                    s.host.send(&dev, &lock, &name, &hidden, &mut enc, &|| closed.is_closed())?;
                     let mut w = enc.finish().map_err(|e| e.to_string())?;
                     std::io::Write::flush(&mut w).map_err(|e| e.to_string())?;
                     Ok(w.sent)
@@ -3290,7 +3230,9 @@ impl PcBackup {
                     Ok(bytes) => tracing::info!(target: "rynas::audit", "pc backup: {dev}: restore send of {name} done ({bytes} bytes)"),
                     Err(e) => {
                         tracing::warn!("pc backup: {dev}: restore send of {name} stopped: {e}");
-                        let _ = tx.blocking_send(Err(std::io::Error::other(e)));
+                        // the body ends in an error, never cleanly; a client that takes
+                        // nothing gets no wait (its stream is cut short, which its guard sees)
+                        let _ = tx.try_send(Err(std::io::Error::other(e)));
                     }
                 }
             })

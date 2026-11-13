@@ -1635,7 +1635,8 @@ async fn restore_code_post(
             });
         }
         let now = now_ms();
-        r.restore_codes.retain(|c| c.expires_ms > now);
+        // a new code replaces the PC's earlier ones (one valid code per PC at a time)
+        r.restore_codes.retain(|c| c.expires_ms > now && c.device != device);
         r.restore_codes.push(RestoreCode {
             code_sha: code_hash(&code),
             device: device.clone(),
@@ -2004,8 +2005,6 @@ fn session_for(svc: &PcAgent, h: &HeaderMap, device: &str) -> Res<String> {
 pub struct RestoreSnapQuery {
     #[serde(default)]
     pub snapshot: String,
-    #[serde(default)]
-    pub parent: Option<String>,
 }
 
 fn snap_query(q: Result<Query<RestoreSnapQuery>, axum::extract::rejection::QueryRejection>) -> Res<RestoreSnapQuery> {
@@ -2051,8 +2050,8 @@ async fn restore_btrfs_legacy(
     Ok(Json(svc.btrfs_side()?.restore_legacy(&device, q.snapshot).await?))
 }
 
-/// `GET …/restore/btrfs/{device}/send?snapshot=[&parent=]` (restore session): the stream,
-/// zstd-compressed. The session stays alive while it runs.
+/// `GET …/restore/btrfs/{device}/send?snapshot=` (restore session): the full stream,
+/// zstd-compressed. The session stays alive while it runs; the stream stops when it ends.
 async fn restore_btrfs_send(
     State(st): State<PaState>,
     h: HeaderMap,
@@ -2062,15 +2061,12 @@ async fn restore_btrfs_send(
     let svc = pa(&st)?;
     let token = session_for(&svc, &h, &device)?;
     let q = snap_query(q)?;
-    let parent = q.parent.filter(|p| !p.is_empty() && p != "none");
     let weak = Arc::downgrade(&svc);
-    let keepalive = Box::new(move || {
-        if let Some(s) = weak.upgrade() {
-            let _ = s.session_devices(&token);
-        }
-    });
+    let dev = device.clone();
+    // keeps the session alive; `false` once it ended (the report closed it, it expired)
+    let keepalive = Box::new(move || weak.upgrade().and_then(|s| s.session_devices(&token)).is_some_and(|d| d.contains(&dev)));
     let who = format!("a restore session from {}", source_of(&h));
-    let body = svc.btrfs_side()?.restore_send(&device, q.snapshot, parent, who, keepalive).await?;
+    let body = svc.btrfs_side()?.restore_send(&device, q.snapshot, who, keepalive).await?;
     Ok(([(header::CONTENT_TYPE, "application/zstd")], body).into_response())
 }
 

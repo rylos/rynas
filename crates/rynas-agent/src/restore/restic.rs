@@ -147,14 +147,14 @@ impl RestoreSource for ResticSource {
         }
         let mut buf = Vec::new();
         repo.dump(&node, &mut buf).map_err(|e| e.to_string())?;
-        serde_json::from_slice(&buf).map_err(|e| format!("the manifest does not parse: {e}"))
+        super::source::parse_manifest(&buf, "the manifest")
     }
 
     fn fill(&self) -> Fill {
         Fill::MountedTree
     }
 
-    fn fill_tree(&mut self, v: &Version, root: &Path, p: Progress) -> Result<(), String> {
+    fn fill_tree(&mut self, v: &Version, root: &Path, p: Progress<'_>) -> Result<(), String> {
         let snap = self.snapshot(&v.id)?;
         let shared = Arc::new(Shared {
             done: Default::default(),

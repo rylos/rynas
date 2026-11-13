@@ -14,11 +14,14 @@
 //! The btrfs method's scripted options: `--version <run>|latest`, `--mode
 //! whole|system|custom|add`, `--subvol NAME[=SNAPSHOT]` (the custom or added subvolumes, and
 //! per-subvolume snapshots), `--add-to /dev/X` (the PC's existing btrfs filesystem, for
-//! `add`), `--esp-mib N` (the guided layout of a legacy PC without partition table dump).
+//! `add`; it must be the PC's own filesystem by UUID unless `--other-filesystem`), `--esp-mib
+//! N` (the guided layout of a legacy PC without partition table dump).
 
 pub mod btrfs;
 pub mod exec;
+pub mod fstab;
 pub mod legacy;
+pub mod paths;
 pub mod plan;
 pub mod restic;
 pub mod source;
@@ -65,16 +68,15 @@ fn subvol_args(args: &[String]) -> (Vec<String>, Vec<(String, String)>) {
     (names, over)
 }
 
-/// The btrfs method's own preflight on top of [`preflight`]: `btrfs` for the receive, the
-/// boot files (a copy in the snapshot or a known regeneration tool), memory for buffers.
-fn btrfs_preflight(m: &rynas_api_types::pcagent::Manifest, src: &btrfs::BtrfsSource) -> (Vec<String>, Vec<String>) {
+/// The btrfs method's own preflight (on top of [`preflight`] when formatting): `btrfs` for
+/// the receive when adding (formatting has it in the plan's tools), the boot files (a copy
+/// in the snapshot or a known regeneration tool), memory for buffers.
+fn btrfs_preflight(m: &rynas_api_types::pcagent::Manifest, src: &btrfs::BtrfsSource, adding: bool) -> (Vec<String>, Vec<String>) {
     let (mut problems, mut notes) = (Vec::new(), Vec::new());
-    let found = |t: &str| ["/usr/sbin", "/sbin", "/usr/bin", "/bin"].iter().any(|d| Path::new(d).join(t).is_file());
-    if !found("btrfs") {
+    if adding && !exec::has("btrfs") {
         problems.push(format!("btrfs is missing on this live system: install {}", plan::package_of("btrfs")));
     }
-    let copies = src.boot_copies(m);
-    if m.boot.uefi && copies.is_empty() && m.boot.initramfs == rynas_api_types::pcagent::InitramfsTool::Unknown && src.legacy.is_none() {
+    if m.boot.uefi && src.boot_copies(m).is_empty() && m.boot.initramfs == rynas_api_types::pcagent::InitramfsTool::Unknown && src.legacy.is_none() {
         notes.push("no copy of the boot files in the snapshot and no known initramfs tool: the boot step may need a hand".into());
     }
     if let Some(b) = m.btrbk.as_ref() {
@@ -161,8 +163,7 @@ pub fn source_disk(m: &rynas_api_types::pcagent::Manifest) -> Option<usize> {
 fn preflight(m: &rynas_api_types::pcagent::Manifest, p: &plan::Plan) -> Vec<String> {
     let mut problems = Vec::new();
     for t in plan::tools(p) {
-        let found = ["/usr/sbin", "/sbin", "/usr/bin", "/bin"].iter().any(|d| Path::new(d).join(&t).is_file());
-        if !found {
+        if !exec::has(&t) {
             problems.push(format!("{t} is missing on this live system: install {}", plan::package_of(&t)));
         }
     }
@@ -197,7 +198,7 @@ pub fn main(args: &[String]) -> Result<(), String> {
         Some("btrfs") => true,
         Some("files") => false,
         Some(x) => return Err(format!("--method {x}: files or btrfs")),
-        None => dev.group.is_empty(),
+        None => !dev.has_files(),
     };
     if use_btrfs {
         if !dev.btrfs {
@@ -205,18 +206,12 @@ pub fn main(args: &[String]) -> Result<(), String> {
         }
         return run_btrfs(args, client, dev);
     }
-    if dev.group.is_empty() {
+    if !dev.has_files() {
         return Err(format!("{} has no file backups on the NAS (--method btrfs)", dev.device));
     }
     let mut src = restic::ResticSource::from_session(client, dev);
     let versions = src.versions()?;
-    let want = opt(args, "--version").unwrap_or_else(|| "latest".into());
-    let v = if want == "latest" {
-        versions.first().cloned()
-    } else {
-        versions.iter().find(|x| x.id.starts_with(&want)).cloned()
-    }
-    .ok_or("no such version")?;
+    let v = source::pick_version(&versions, &opt(args, "--version").unwrap_or_else(|| "latest".into()), true).ok_or("no such version")?;
     eprintln!("PC {}: version {} ({} files)", src.device(), &v.id[..8.min(v.id.len())], v.files);
     let m = src.manifest(&v)?;
     let t = scripted_target(args)?;
@@ -293,8 +288,7 @@ fn run_btrfs(args: &[String], client: Arc<Client>, dev: RestoreDevice) -> Result
         src.esp_mib = n.parse().ok().filter(|n| (64..=8192).contains(n)).ok_or("--esp-mib: 64 to 8192")?;
     }
     let versions = src.versions()?;
-    let want = opt(args, "--version").unwrap_or_else(|| "latest".into());
-    let v = if want == "latest" { versions.first().cloned() } else { versions.iter().find(|x| x.id == want).cloned() }.ok_or("no such run of btrfs snapshots")?;
+    let v = source::pick_version(&versions, &opt(args, "--version").unwrap_or_else(|| "latest".into()), false).ok_or("no such run of btrfs snapshots")?;
     eprintln!("PC {}: btrfs snapshots of {}", src.device(), v.id);
     let m = src.manifest(&v)?;
     let mode = match opt(args, "--mode") {
@@ -304,14 +298,12 @@ fn run_btrfs(args: &[String], client: Arc<Client>, dev: RestoreDevice) -> Result
     let (names, over) = subvol_args(args);
     if mode == btrfs::Mode::Add {
         let device = opt(args, "--add-to").ok_or("--add-to /dev/X: the PC's btrfs filesystem to add to")?;
-        let paths: Vec<String> = m.btrbk.as_ref().map(|b| b.subvolumes.iter().map(|s| s.path.clone()).collect()).unwrap_or_default();
-        let present = exec::existing_paths(&device, &paths)?;
-        let has = |p: &str| present.iter().any(|x| x.trim_start_matches('/') == p.trim_start_matches('/'));
-        let sel = src.choose(&v, mode, &names, &over, &has)?.clone();
+        let other_ok = flag(args, "--other-filesystem");
+        let restored = src.prepare_add(&v, &device, &names, &over, other_ok)?;
         for l in src.describe() {
             println!("{l}");
         }
-        let (problems, notes) = btrfs_preflight(&m, &src);
+        let (problems, notes) = btrfs_preflight(&m, &src, true);
         for n in notes {
             println!("note: {n}");
         }
@@ -327,23 +319,19 @@ fn run_btrfs(args: &[String], client: Arc<Client>, dev: RestoreDevice) -> Result
             return Err(format!("--confirm {name} is needed: subvolumes are added to that filesystem"));
         }
         let mut log = exec::Log::new(Box::new(|s| eprintln!("{s}")));
-        let restored: Vec<String> = sel.chosen.iter().map(|c| c.path.clone()).collect();
-        let r = exec::execute_add(&mut src, &v, &m, &device, &restored, &mut log);
+        let r = exec::execute_add(&mut src, &v, &m, &device, &restored, other_ok, &mut log);
         return finish(&mut src, &v, r, &log);
     }
     src.choose(&v, mode, &names, &over, &|_| false)?;
-    let mut pm = src.planned_manifest(&m);
     let t = scripted_target(args)?;
-    if src.legacy.as_ref().is_some_and(|l| l.guided) {
-        legacy::refit_guided(&mut pm, t.logical_sector, src.esp_mib);
-    }
+    let pm = src.planned_manifest(&m, t.logical_sector);
     let src_disk = source_disk(&pm).ok_or("the manifest has no disk with a partition table")?;
     let p = plan::build(&pm, &[(src_disk, t.clone())], &in_use_except(std::slice::from_ref(&t.name)))?;
     for l in plan::describe(&pm, &p, true).into_iter().chain(src.describe()) {
         println!("{l}");
     }
     let mut problems = preflight(&pm, &p);
-    let (more, notes) = btrfs_preflight(&pm, &src);
+    let (more, notes) = btrfs_preflight(&pm, &src, false);
     problems.extend(more);
     for n in notes {
         println!("note: {n}");
@@ -361,12 +349,11 @@ fn run_btrfs(args: &[String], client: Arc<Client>, dev: RestoreDevice) -> Result
     run_execute(args, &mut src, &v, &pm, &p, &t)
 }
 
-
 /// `rynas-agent btrfs-restore-pool` (hidden, for tests on throwaway filesystems): a restore
 /// session from a code, then only the btrfs source's pool step (receive, checks, writable
 /// subvolumes, the snapshot folder, the subvolumes made empty) into the top level of a btrfs
-/// filesystem already mounted at `--pool`. No disk is partitioned or formatted, nothing is
-/// mounted, no boot step.
+/// filesystem already mounted at `--pool`, then the fixes of the restored root's
+/// `/etc/fstab`. No disk is partitioned or formatted, nothing is mounted, no boot step.
 pub fn pool_test(args: &[String]) -> Result<(), String> {
     let url = opt(args, "--nas").ok_or("--nas is needed")?;
     let ep = Endpoint::parse(&url)?;
@@ -377,21 +364,29 @@ pub fn pool_test(args: &[String]) -> Result<(), String> {
     let (client, dev) = login(Client::new(ep, &opt(args, "--fingerprint").unwrap_or_default()), &opt(args, "--code").ok_or("--code")?, opt(args, "--device").as_deref())?;
     let mut src = btrfs::BtrfsSource::new(client, dev)?;
     let versions = src.versions()?;
-    let want = opt(args, "--version").unwrap_or_else(|| "latest".into());
-    let v = if want == "latest" { versions.first().cloned() } else { versions.iter().find(|x| x.id == want).cloned() }.ok_or("no such run")?;
+    let v = source::pick_version(&versions, &opt(args, "--version").unwrap_or_else(|| "latest".into()), false).ok_or("no such run")?;
     let m = src.manifest(&v)?;
     let mode = btrfs::Mode::parse(&opt(args, "--mode").unwrap_or_else(|| "whole".into())).ok_or("--mode")?;
     let (names, over) = subvol_args(args);
-    src.choose(&v, mode, &names, &over, &|p| pool.join(p).exists())?;
+    src.choose(&v, mode, &names, &over, &|p| paths::in_pool(&pool, p).is_ok_and(|x| x.exists()))?;
     for l in src.describe() {
         println!("{l}");
     }
     let subvolumes = m.root().map(|f| f.subvolumes.clone()).unwrap_or_default();
-    let pools = vec![source::PoolTarget { uuid: String::new(), top_level: pool.clone(), subvolumes: subvolumes.clone() }];
+    let pools = vec![source::PoolTarget { uuid: m.root().map(|f| f.uuid.clone()).unwrap_or_default(), top_level: pool.clone(), subvolumes: subvolumes.clone() }];
     let mut log = exec::Log::new(Box::new(|s| eprintln!("{s}")));
-    let r = src.fill_pool(&v, &pools, &|_, _| {});
-    log.lines.extend(src.drain_log());
-    let r = r.and_then(|()| if mode.formats() { exec::finish_pool(&mut log, &pool, &subvolumes, &src.skipped_subvolumes()) } else { Ok(()) });
+    let r = src.fill_pool(&v, &pools, &|_, _| {}, &mut log);
+    let skipped = src.skipped_subvolumes();
+    let r = r.and_then(|()| if mode.formats() { exec::finish_pool(&mut log, &pool, &subvolumes, &skipped) } else { Ok(()) });
+    // the restored root's fstab gets the restore's text fixes (no IDs change here)
+    let root_path = m.btrbk.as_ref().and_then(|b| b.subvolumes.iter().find(|s| s.mount == "/")).map(|s| s.path.clone());
+    let r = r.and_then(|()| match root_path {
+        Some(rp) if mode.formats() => {
+            exec::rewrite_in(&mut log, &paths::in_pool(&pool, &rp)?, "/etc/fstab", &|t| plan::fix_fstab(t, &m, &skipped, &[]));
+            Ok(())
+        }
+        _ => Ok(()),
+    });
     finish(&mut src, &v, r, &log)?;
     println!("pool filled from run {}", v.id);
     Ok(())

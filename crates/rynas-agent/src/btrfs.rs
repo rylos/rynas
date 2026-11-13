@@ -21,7 +21,15 @@ fn btrfs(args: &[&std::ffi::OsStr]) -> Result<String, String> {
     }
 }
 
-/// Nested subvolumes never backed up (recreated empty at restore).
+/// Excluded subvolumes a restore makes again, empty (snapper's `.snapshots`, btrbk's
+/// snapshot folders): container engines' layers, Timeshift's and the agent's own snapshots
+/// are not made again.
+pub fn recreated_on_restore(rel: &str) -> bool {
+    !(rel.contains("docker/btrfs") || rel.contains("containers/storage") || rel.contains("timeshift-btrfs") || rel.split('/').any(|c| c == SNAP_DIR))
+}
+
+/// Nested subvolumes never backed up (some are made again empty at restore:
+/// [`recreated_on_restore`]).
 pub fn excluded_subvolume(rel: &str) -> bool {
     let last = rel.rsplit('/').next().unwrap_or(rel);
     last == ".snapshots"
@@ -111,139 +119,53 @@ pub fn snapshot_ro(src: &Path, dst: &Path) -> Result<(), String> {
 }
 
 /// What `BTRFS_IOC_GET_SUBVOL_INFO` says about a subvolume (unprivileged, kernel ≥ 4.18).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SubvolInfo {
-    pub uuid: Option<String>,
-    pub received_uuid: Option<String>,
-    pub readonly: bool,
-    /// Creation time (seconds): the real order of snapshots, whatever their names say.
-    pub otime: i64,
-    /// Last transaction that changed it (0: nothing was ever written, e.g. a receive that
-    /// stopped at once).
-    pub generation: u64,
-    pub parent_uuid: Option<String>,
-}
-
-#[repr(C)]
-struct Timespec {
-    sec: u64,
-    nsec: u32,
-}
-
-/// `struct btrfs_ioctl_get_subvol_info_args`.
-#[repr(C)]
-struct SubvolInfoArgs {
-    treeid: u64,
-    name: [u8; 256],
-    parent_id: u64,
-    dirid: u64,
-    generation: u64,
-    flags: u64,
-    uuid: [u8; 16],
-    parent_uuid: [u8; 16],
-    received_uuid: [u8; 16],
-    ctransid: u64,
-    otransid: u64,
-    stransid: u64,
-    rtransid: u64,
-    ctime: Timespec,
-    otime: Timespec,
-    stime: Timespec,
-    rtime: Timespec,
-    reserved: [u64; 8],
-}
-
-/// `_IOR(0x94, 60, struct btrfs_ioctl_get_subvol_info_args)`.
-const IOC_GET_SUBVOL_INFO: u64 = (2 << 30) | ((std::mem::size_of::<SubvolInfoArgs>() as u64) << 16) | (0x94 << 8) | 60;
+pub use crate::ioctl::SubvolInfo;
 
 /// `/` is on btrfs (the btrfs method can serve this PC).
 pub fn root_is_btrfs() -> bool {
-    const BTRFS_MAGIC: i64 = 0x9123_683E;
-    // SAFETY: statfs fills the struct it is given; the path is a static C string
-    unsafe {
-        let mut s: libc::statfs = std::mem::zeroed();
-        libc::statfs(c"/".as_ptr(), &mut s) == 0 && s.f_type as i64 == BTRFS_MAGIC
-    }
-}
-
-pub fn uuid_text(b: &[u8; 16]) -> Option<String> {
-    if b.iter().all(|&x| x == 0) {
-        return None;
-    }
-    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
-    Some(format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32]))
+    crate::ioctl::open_dir(Path::new("/")).is_ok_and(|f| crate::ioctl::is_btrfs(&f))
 }
 
 /// The facts of the subvolume whose top folder is `p` (not following a final symlink);
 /// `None` when it is not a subvolume or the ioctl fails.
 pub fn subvol_info(p: &Path) -> Option<SubvolInfo> {
-    use std::os::fd::AsRawFd;
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-    let f = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(p)
-        .ok()?;
-    // the top folder of every subvolume is inode 256
-    if f.metadata().ok()?.ino() != 256 {
+    let f = crate::ioctl::open_dir(p).ok()?;
+    if !crate::ioctl::is_subvolume(&f) {
         return None;
     }
-    // SAFETY: plain old data, zeroes are valid
-    let mut a: Box<SubvolInfoArgs> = Box::new(unsafe { std::mem::zeroed() });
-    // SAFETY: the kernel writes at most size_of::<SubvolInfoArgs>() bytes
-    if unsafe { libc::ioctl(f.as_raw_fd(), IOC_GET_SUBVOL_INFO as _, &mut *a) } < 0 {
-        return None;
+    crate::ioctl::subvol_info(&f).ok()
+}
+
+/// The UUID of the btrfs filesystem mounted at (or holding) `p`.
+pub fn fs_uuid(p: &Path) -> Option<String> {
+    crate::ioctl::open_dir(p).ok().and_then(|f| crate::ioctl::fs_uuid(&f).ok())
+}
+
+/// A plain folder (not a subvolume, not a symlink) with nothing in it: the place a nested
+/// subvolume leaves in its parent's snapshot.
+pub fn is_empty_plain_dir(p: &Path) -> bool {
+    let Ok(f) = crate::ioctl::open_dir(p) else { return false };
+    !crate::ioctl::is_subvolume(&f) && std::fs::read_dir(p).is_ok_and(|mut r| r.next().is_none())
+}
+
+/// Moves the read-only subvolume `name` of folder `from` to `to_name` in folder `to` (same
+/// filesystem, never replacing anything, no symlink followed in either name): a read-only
+/// subvolume cannot change parent folder, so the flag is lifted for the moment of the move
+/// and set again on the same subvolume (by descriptor) wherever it is then. The ioctl keeps
+/// the received UUID, unlike `btrfs property set ro false`: a received snapshot stays the
+/// parent of incremental sends (the NAS moves its own received snapshots the same way).
+pub fn move_readonly(from: &Path, name: &str, to: &Path, to_name: &str) -> Result<(), String> {
+    use crate::ioctl;
+    let at = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
+    let fd = ioctl::open_dir(from).map_err(|e| at(from, e))?;
+    let td = ioctl::open_dir(to).map_err(|e| at(to, e))?;
+    let sub = ioctl::open_dir_at(&fd, name).map_err(|e| at(&from.join(name), e))?;
+    if !ioctl::is_subvolume(&sub) {
+        return Err(format!("{}: not a subvolume", from.join(name).display()));
     }
-    Some(SubvolInfo {
-        uuid: uuid_text(&a.uuid),
-        received_uuid: uuid_text(&a.received_uuid),
-        readonly: a.flags & 1 != 0,
-        otime: a.otime.sec as i64,
-        generation: a.generation,
-        parent_uuid: uuid_text(&a.parent_uuid),
-    })
-}
-
-/// `_IOW(0x94, 26, __u64)`: `BTRFS_IOC_SUBVOL_SETFLAGS`.
-const IOC_SUBVOL_SETFLAGS: u64 = (1 << 30) | (8 << 16) | (0x94 << 8) | 26;
-/// `BTRFS_SUBVOL_RDONLY`.
-const SUBVOL_RDONLY: u64 = 1 << 1;
-
-fn open_top(p: &Path) -> Result<std::fs::File, String> {
-    use std::os::unix::fs::OpenOptionsExt;
-    std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(p)
-        .map_err(|e| format!("{}: {e}", p.display()))
-}
-
-/// Sets or clears the read-only flag of the subvolume at `p` with the ioctl itself: unlike
-/// `btrfs property set ro false`, the received UUID stays (a received snapshot keeps being
-/// the parent of incremental sends; the NAS moves its own received snapshots the same way).
-pub fn set_readonly(p: &Path, readonly: bool) -> Result<(), String> {
-    use std::os::fd::AsRawFd;
-    let f = open_top(p)?;
-    let flags: u64 = if readonly { SUBVOL_RDONLY } else { 0 };
-    // SAFETY: the kernel reads one u64
-    if unsafe { libc::ioctl(f.as_raw_fd(), IOC_SUBVOL_SETFLAGS as _, &flags) } < 0 {
-        return Err(format!("{}: {}", p.display(), std::io::Error::last_os_error()));
-    }
-    Ok(())
-}
-
-/// Moves the read-only subvolume `from` to `to` (another folder of the same filesystem,
-/// never replacing anything): a read-only subvolume cannot change parent folder, so the flag
-/// is lifted for the moment of the move and set again wherever it is then.
-pub fn move_readonly(from: &Path, to: &Path) -> Result<(), String> {
-    let c = |p: &Path| std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).map_err(|e| e.to_string());
-    let (f, t) = (c(from)?, c(to)?);
-    set_readonly(from, false)?;
-    // SAFETY: two valid C strings
-    let rc = unsafe { libc::renameat2(libc::AT_FDCWD, f.as_ptr(), libc::AT_FDCWD, t.as_ptr(), libc::RENAME_NOREPLACE) };
-    let moved = if rc == 0 { Ok(()) } else { Err(format!("moving {} to {}: {}", from.display(), to.display(), std::io::Error::last_os_error())) };
-    let at = if moved.is_ok() { to } else { from };
-    let ro = set_readonly(at, true);
+    ioctl::set_readonly(&sub, false).map_err(|e| at(&from.join(name), e))?;
+    let moved = ioctl::rename_noreplace_at(&fd, name, &td, to_name).map_err(|e| format!("moving {} to {}: {e}", from.join(name).display(), to.join(to_name).display()));
+    let ro = ioctl::set_readonly(&sub, true).map_err(|e| at(&to.join(to_name), e));
     moved.and(ro)
 }
 
@@ -301,13 +223,18 @@ mod tests {
     }
 
     #[test]
-    fn subvol_info_layout() {
-        // the kernel's struct is 504 bytes (`_IOR(0x94, 60, …)` = 0x81f8943c)
-        assert_eq!(std::mem::size_of::<SubvolInfoArgs>(), 504);
-        assert_eq!(IOC_GET_SUBVOL_INFO, 0x81f8_943c);
-        assert_eq!(uuid_text(&[0; 16]), None);
-        assert_eq!(uuid_text(&[0x11; 16]).unwrap(), "11111111-1111-1111-1111-111111111111");
-        // a plain folder is no subvolume
-        assert_eq!(subvol_info(&std::env::temp_dir()), None);
+    fn plain_folders() {
+        // a plain folder is no subvolume (the ioctl layouts are tested in `ioctl`)
+        let d = tempfile::tempdir().unwrap();
+        assert_eq!(subvol_info(d.path()), None);
+        assert!(is_empty_plain_dir(d.path()));
+        std::fs::write(d.path().join("f"), b"x").unwrap();
+        assert!(!is_empty_plain_dir(d.path()));
+        std::os::unix::fs::symlink("/", d.path().join("l")).unwrap();
+        assert!(!is_empty_plain_dir(&d.path().join("l")), "a symlink is not followed");
+        assert!(recreated_on_restore("@/.snapshots"));
+        assert!(!recreated_on_restore("@/var/lib/docker/btrfs/subvolumes/x"));
+        assert!(!recreated_on_restore("@docker/btrfs/subvolumes/x"));
+        assert!(!recreated_on_restore("@/.rynas-snap/run-1"));
     }
 }

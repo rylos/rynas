@@ -4769,15 +4769,13 @@ bkpc.copy	Copia sul NAS
 bk.copy_this	Copia questa cartella
 bk.copy_text	{path} viene copiato con le sue cartelle nella cartella che scegli.
 bkpc.copied	{path} copiato
-bkpc.col.restore	Ripristino completo
+bkpc.col.restore	Ripristino su disco vuoto
 bkpc.bm.ready	Pronto
 bkpc.bm.disks	Dischi
 bkpc.bm.serial	N. di serie {serial}
 bkpc.bm.part	Partizione {n}
 bkpc.bm.boot_copies	File di avvio copiati
-bkpc.restore.title	Ripristino bare metal
-bkpc.restore.intro	Ricostruisce il PC su un disco vuoto da questi snapshot: crea un codice di ripristino (funziona una volta, per un'ora, solo in lettura, solo per questo PC), avvia un qualsiasi Linux live sul PC ed esegui l'agente. Riceve gli snapshot scelti in un nuovo pool btrfs, oppure aggiunge sottovolumi a quello esistente.
-bkpc.restore.copy	Copia i comandi di ripristino
+bkpc.restore.intro	Per ripristinare, crea un codice di ripristino (monouso, valido un'ora, in sola lettura, solo per questo PC), avvia un qualsiasi Linux live sul PC ed esegui l'agente qui sotto. L'agente riceve gli snapshot scelti in un nuovo filesystem btrfs, oppure aggiunge sottovolumi a quello già presente sul PC.
 bkpc.manual_steps	Configura btrbk a mano
 bkpc.first_run	Primo backup
 bkpc.first_run_intro	Il PC è configurato quando è arrivato il primo snapshot di ogni sottovolume.
@@ -5063,7 +5061,7 @@ pca.chunk_line	Blocchi da {mib} MiB
 pca.last_ok	Ultima versione riuscita
 pca.last_seen	Ultimo contatto
 pca.os	Sistema
-pca.bare_metal	Ripristino completo
+pca.h.restore	Ripristino
 pca.ready.yes	Pronto
 pca.ready.no_version	Ancora nessuna versione
 pca.ready.no_manifest	Disposizione dei dischi non ancora ricevuta
@@ -5090,7 +5088,16 @@ pca.cancel	Annulla
 pca.backup_sent	Il PC parte al prossimo contatto
 pca.cancel_sent	Il PC si ferma al prossimo contatto
 pca.restore_code	Codice di ripristino
-pca.restore_code_valid	Codice di ripristino {code}: funziona una volta, solo in lettura, fino al {until}.
+pca.restore_code_valid	Codice di ripristino creato: monouso, in sola lettura, valido fino al {until}. I codici creati prima restano validi fino alla scadenza.
+pca.restore_not_ready	Sul NAS non c'è ancora tutto quello che serve per un ripristino su un disco vuoto (vedi le note sopra): il ripristino potrebbe fermarsi a metà o lasciare il PC senza avvio.
+pca.restore_nas	Indirizzo del NAS
+pca.restore_nas_local	Questa pagina è aperta su {host}, che il PC non può raggiungere: dopo --nas metti l'indirizzo del NAS in rete, per esempio https://192.0.2.10:8443.
+pca.restore_nas_note	Il comando usa la porta HTTPS del NAS e contiene l'impronta del suo certificato, così l'agente si collega solo a questo NAS senza chiedere. Se il PC raggiunge il NAS con un altro indirizzo, cambialo dopo --nas.
+pca.restore_nas_note_nofp	Il comando usa la porta HTTPS del NAS; l'agente mostra l'impronta del certificato da confermare. Se il PC raggiunge il NAS con un altro indirizzo, cambialo dopo --nas.
+pca.rstep.download	1. Scarica l'agente
+pca.rstep.run	2. Avvia il ripristino
+pca.copy_download	Copia il comando di download
+pca.copy_restore	Copia il comando di ripristino
 pca.restore_code_shared	Questo PC condivide il gruppo con altri PC: durante il ripristino si possono leggere i file di tutti i PC del gruppo.
 pca.h.ok	Completato
 pca.zip_too_long	Troppi elementi selezionati per un solo zip: selezionane meno, oppure scarica la loro cartella.

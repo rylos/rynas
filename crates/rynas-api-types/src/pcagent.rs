@@ -740,6 +740,13 @@ pub struct RestoreDevice {
     pub btrfs: bool,
 }
 
+impl RestoreDevice {
+    /// The PC has file backups on the NAS (a backup group).
+    pub fn has_files(&self) -> bool {
+        !self.group.is_empty()
+    }
+}
+
 /// The btrfs routes of a restore session (bearer = the session token), below
 /// `/api/v1/pcbackup/agent/restore/btrfs/<device>/`:
 /// - `snapshots`: [`RestoreBtrfsListing`];
@@ -747,8 +754,8 @@ pub struct RestoreDevice {
 ///   (JSON, at most [`MAX_MANIFEST`]; 404 `not_found` when the snapshot has none);
 /// - `legacy?snapshot=<name>`: [`RestoreLegacy`], what an older restore script left inside a
 ///   root snapshot without manifest;
-/// - `send?snapshot=<name>[&parent=<name>]`: `btrfs send` of a complete read-only snapshot
-///   of the PC's folder compressed with zstd (`application/zstd`), one stream per PC at a time.
+/// - `send?snapshot=<name>`: `btrfs send` (full) of a complete read-only snapshot of the
+///   PC's folder compressed with zstd (`application/zstd`), one stream per PC at a time.
 pub const RESTORE_BTRFS: &str = "/api/v1/pcbackup/agent/restore/btrfs";
 
 /// `GET …/restore/btrfs/<device>/snapshots`: the PC's received snapshots and its runs.
@@ -1126,6 +1133,10 @@ pub struct BtrbkSubvolume {
     /// Where it is mounted (`/home`); empty when not mounted.
     #[serde(default)]
     pub mount: String,
+    /// UUID of the btrfs filesystem that holds it; empty: the one mounted at `/` (older
+    /// manifests, and the agent's method, which sends only that filesystem's subvolumes).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub fs_uuid: String,
 }
 
 impl Manifest {
@@ -1242,7 +1253,7 @@ mod tests {
             boot: BootInfo { loader: Loader::SystemdBoot, ..Default::default() },
             btrbk: Some(BtrbkLayout {
                 snapshot_dir: "/.snapshots".into(),
-                subvolumes: vec![BtrbkSubvolume { name: "@".into(), path: "@".into(), mount: "/".into() }],
+                subvolumes: vec![BtrbkSubvolume { name: "@".into(), path: "@".into(), mount: "/".into(), ..Default::default() }],
                 boot_copies: Vec::new(),
                 agent: false,
             }),

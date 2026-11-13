@@ -21,58 +21,14 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
-use std::time::Duration;
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
-use rynas_api_types::TaskStarted;
-use rynas_auth::ManualClock;
-use rynas_auth::backend::{AuthError, Authenticator, BoxFuture, Identity};
-use rynas_auth::totp::{MemoryStorage, TotpManager};
-use rynas_config::{Config, ConfigOptions, MemorySystem};
-use rynas_notify::MemoryNotifier;
-use rynas_tasks::{TaskConfig, TaskManager};
-use rynasd::ops::Ops;
-use rynasd::pc_backup::{HostReceive, PcBackup};
-use rynasd::roles::AdminPolicy;
-use rynasd::server::{DaemonState, router};
-use serde_json::{Value, json};
+use serde_json::Value;
 use tower::ServiceExt;
 
-struct NoAuth;
-
-impl Authenticator for NoAuth {
-    fn realm(&self) -> &str {
-        "none"
-    }
-    fn authenticate<'a>(&'a self, _: &'a str, _: &'a str) -> BoxFuture<'a, Result<Identity, AuthError>> {
-        Box::pin(async { Err(AuthError::InvalidCredentials) })
-    }
-}
-
-fn groups(u: &str) -> Option<Vec<String>> {
-    (u == "admin").then(|| vec!["rynas-admin".into()])
-}
-
-fn sh(cmd: &mut Command) -> String {
-    let o = cmd.output().unwrap();
-    assert!(o.status.success(), "{cmd:?}: {}", String::from_utf8_lossy(&o.stderr));
-    String::from_utf8_lossy(&o.stdout).into_owned()
-}
-
-async fn call(app: &axum::Router, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Vec<u8>) {
-    let req = Request::builder()
-        .method(method)
-        .uri(uri)
-        .header(header::CONTENT_TYPE, "application/json")
-        .header("x-rynas-user", "admin")
-        .body(body.map(|b| Body::from(b.to_string())).unwrap_or_default())
-        .unwrap();
-    let r = app.clone().oneshot(req).await.unwrap();
-    let s = r.status();
-    (s, to_bytes(r.into_body(), 1 << 20).await.unwrap().to_vec())
-}
+mod common;
+use common::*;
 
 fn uuid_of(p: &Path) -> (Option<String>, Option<String>) {
     let f = rynas_btrfs::ioctl::open_dir(p).unwrap();
@@ -96,87 +52,20 @@ async fn agent_send_into_rynasd() {
     std::fs::write(data.join("a"), vec![7u8; 3 << 20]).unwrap();
 
     // rynasd's side, as main.rs wires it, on the real host
-    let dir = tempfile::tempdir().unwrap();
-    let (root, state_dir) = (dir.path().join("root"), dir.path().join("state"));
-    std::fs::create_dir_all(&root).unwrap();
-    let config = Arc::new(Config::open(ConfigOptions::new(&state_dir, &root), Arc::new(MemorySystem::new("nas")), Vec::new()).unwrap());
-    let mut ops = Ops::new(config, TaskManager::new(dir.path().join("tasks"), "nas", TaskConfig::default()).unwrap());
-    ops.admins = AdminPolicy::new(vec!["rynas-admin".into()], groups);
-    let ops = Arc::new(ops);
-    let notifier = Arc::new(MemoryNotifier::default());
-    let clock = Arc::new(ManualClock::new(1_800_000_000_000));
-    let totp = Arc::new(TotpManager::new(MemoryStorage::default(), clock.clone(), "rynas"));
-    let mut st = DaemonState::new(Arc::new(NoAuth), totp, clock);
-    st.ops = Some(ops.clone());
-    let svc = PcBackup::new(ops.clone(), Arc::new(HostReceive), notifier.clone(), state_dir.clone(), AdminPolicy::new(vec!["rynas-admin".into()], groups), "nas".into());
-    let agent = rynasd::pc_agent::PcAgent::new(
-        ops.clone(),
-        notifier,
-        state_dir,
-        true,
-        rynas_backup::Launch::Direct { exe: "/nonexistent".into() },
-        Arc::new(tokio::sync::Semaphore::new(1)),
-        None,
-        "nas".into(),
-    );
-    agent.bind_btrfs(svc.clone());
-    st.pc_backup = Some(svc);
-    st.pc_agent = Some(agent);
-    let app = router(st);
-
+    let nas = Nas::new();
+    let app = nas.app.clone();
     // the folder (agent: no key, no account), the pairing, the token
     let folder = nas_parent.join("pc");
-    let (s, b) = call(&app, "POST", "/v1/pc-backups/targets", Some(json!({"device": "pc", "path": folder, "agent": true}))).await;
-    assert_eq!(s, StatusCode::ACCEPTED, "{}", String::from_utf8_lossy(&b));
-    let id = serde_json::from_slice::<TaskStarted>(&b).unwrap().task_id;
-    for _ in 0..500 {
-        if ops.tasks.get(&id).is_some_and(|t| t.status.is_finished()) {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let t = ops.tasks.get(&id).unwrap();
-    assert!(t.error.is_none(), "{:?}", t.error);
-    let (s, b) = call(&app, "POST", "/v1/pcbackup/pairings", Some(json!({"btrfs_target": "pc"}))).await;
-    assert_eq!(s, StatusCode::CREATED, "{}", String::from_utf8_lossy(&b));
-    let code = serde_json::from_slice::<Value>(&b).unwrap()["code"].as_str().unwrap().to_string();
-    let (s, b) = call(&app, "POST", "/v1/pcbackup/agent/pair", Some(json!({"code": code, "hostname": "pc"}))).await;
-    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
-    let token = serde_json::from_slice::<Value>(&b).unwrap()["token"].as_str().unwrap().to_string();
+    nas.folder("pc", &folder).await;
+    let token = nas.pair("pc").await;
     let token_for_crafted = token.clone();
     // another PC's folder: hidden from this PC's receives (InaccessiblePaths in the unit)
-    let other = nas_parent.join("other");
-    let (s, b) = call(&app, "POST", "/v1/pc-backups/targets", Some(json!({"device": "other", "path": other, "agent": true}))).await;
-    assert_eq!(s, StatusCode::ACCEPTED, "{}", String::from_utf8_lossy(&b));
-    let id = serde_json::from_slice::<TaskStarted>(&b).unwrap().task_id;
-    for _ in 0..500 {
-        if ops.tasks.get(&id).is_some_and(|t| t.status.is_finished()) {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-
+    nas.folder("other", &nas_parent.join("other")).await;
     // served as rynas-web would: the agent talks to /api/v1/…
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let served = axum::Router::new().nest("/api", app.clone());
-    tokio::spawn(async move { axum::serve(listener, served).await.unwrap() });
+    let url = nas.serve().await;
 
     let (snaps2, data2) = (snaps.clone(), data.clone());
-    let send = move |round: &str| {
-        let (snaps, data) = (&snaps2, &data2);
-        let out = Command::new(&agent_bin)
-            .args(["btrfs-send", "--nas", &format!("http://{addr}"), "--allow-http", "--token", &token, "--snapshot-dir"])
-            .arg(snaps)
-            .arg("--subvol")
-            .arg(format!("@data={}", data.display()))
-            .output()
-            .unwrap();
-        let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-        println!("{round}: {text}");
-        assert!(out.status.success(), "{round}: {text}");
-        text
-    };
+    let send = move |round: &str| agent_send(&agent_bin, &url, &token, round, &snaps2, &[("@data", data2.as_path())]);
     let first = tokio::task::spawn_blocking({
         let send = send.clone();
         move || send("full")

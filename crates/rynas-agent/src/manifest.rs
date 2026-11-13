@@ -433,6 +433,18 @@ pub fn crypttab_keyfiles(text: &str) -> Vec<(String, String)> {
 pub fn add_block(m: &mut Manifest, all: &[Mount], mut b: BtrbkLayout, root: &Path, copy: bool) -> Vec<String> {
     use crate::{bootcopy, btrbk};
     btrbk::mark_captured(m, &b, all);
+    // the filesystem of each subvolume: the btrfs one with the longest mount point above it
+    for s in b.subvolumes.iter_mut().filter(|s| !s.mount.is_empty()) {
+        s.fs_uuid = m
+            .filesystems
+            .iter()
+            .filter(|f| f.fstype == "btrfs")
+            .flat_map(|f| f.mounts.iter().map(move |me| (me.path.as_str(), f)))
+            .filter(|(p, _)| crate::restore::paths::under(p, &s.mount))
+            .max_by_key(|(p, _)| p.trim_end_matches('/').len())
+            .map(|(_, f)| f.uuid.clone())
+            .unwrap_or_default();
+    }
     let mut problems = crypttab_keyfiles(m.crypttab.as_deref().unwrap_or(""))
         .into_iter()
         .map(|(name, key)| {
@@ -644,7 +656,7 @@ mod tests {
         );
         let block = BtrbkLayout {
             snapshot_dir: AGENT_SNAPSHOT_DIR.into(),
-            subvolumes: vec![BtrbkSubvolume { name: "@".into(), path: "@".into(), mount: "/".into() }],
+            subvolumes: vec![BtrbkSubvolume { name: "@".into(), path: "@".into(), mount: "/".into(), ..Default::default() }],
             agent: true,
             ..Default::default()
         };

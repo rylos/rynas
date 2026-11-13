@@ -529,7 +529,7 @@ pub fn run(st: &crate::state::State, client: &Arc<Client>, counters: &Arc<Counte
     let snapshot_dir = subs.iter().find(|s| s.mount == "/").unwrap_or(&subs[0]).snap_dir.clone();
     let block = BtrbkLayout {
         snapshot_dir,
-        subvolumes: subs.iter().map(|s| BtrbkSubvolume { name: s.name.clone(), path: s.path.clone(), mount: s.mount.clone() }).collect(),
+        subvolumes: subs.iter().map(|s| BtrbkSubvolume { name: s.name.clone(), path: s.path.clone(), mount: s.mount.clone(), ..Default::default() }).collect(),
         boot_copies: Vec::new(),
         agent: true,
     };

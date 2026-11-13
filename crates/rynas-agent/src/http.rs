@@ -238,9 +238,13 @@ impl Read for BodyStream {
             }
             let n = u64::from_str_radix(sz.trim().split(';').next().unwrap_or(""), 16).map_err(|_| io::Error::other("bad chunk size"))?;
             if n == 0 {
+                // the trailer, up to its empty line
                 loop {
                     let mut t = String::new();
-                    if self.conn.read_line(&mut t)? == 0 || t.trim().is_empty() {
+                    if self.conn.read_line(&mut t)? == 0 {
+                        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "the answer was cut off"));
+                    }
+                    if t.trim().is_empty() {
                         break;
                     }
                 }
@@ -268,6 +272,9 @@ impl Read for BodyStream {
         if self.chunked && self.left == 0 {
             let mut crlf = [0u8; 2];
             self.conn.read_exact(&mut crlf)?;
+            if crlf != *b"\r\n" {
+                return Err(io::Error::other("bad chunk end (the answer is garbled)"));
+            }
         }
         Ok(n)
     }

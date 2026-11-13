@@ -202,7 +202,7 @@ pub fn manifest_block(conf: &[ConfSubvolume], all: &[Mount]) -> Option<BtrbkLayo
         if subs.iter().any(|s: &BtrbkSubvolume| s.name == c.name) {
             continue;
         }
-        subs.push(BtrbkSubvolume { name: c.name.clone(), mount: mount_of(&path, &dev, all), path });
+        subs.push(BtrbkSubvolume { name: c.name.clone(), mount: mount_of(&path, &dev, all), path, ..Default::default() });
     }
     if subs.is_empty() {
         return None;
@@ -413,7 +413,7 @@ volume /mnt/btr_pool
         assert!(!b.agent);
         let names: Vec<_> = b.subvolumes.iter().map(|s| (s.name.as_str(), s.path.as_str(), s.mount.as_str())).collect();
         assert_eq!(names, [("@", "@", "/"), ("home_old", "@home", "/home")]);
-        let sent = vec![BtrbkSubvolume { name: "@".into(), path: "@".into(), mount: "/".into() }];
+        let sent = vec![BtrbkSubvolume { name: "@".into(), path: "@".into(), mount: "/".into(), ..Default::default() }];
         assert_eq!(boot_mounts(&all, &sent), ["/boot"]);
         // Debian: one root subvolume; the ESP behind an automount is still copied
         let all = mounts::parse(DEBIAN);

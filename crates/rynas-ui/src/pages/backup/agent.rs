@@ -411,6 +411,53 @@ pub(super) fn pairing_steps(c: &PairingCreated) -> AnyView {
     .into_any()
 }
 
+/// The address the restore command gives the agent: the NAS' own HTTPS port (`:8443`, whose
+/// certificate is the fingerprint shown) at the host this page was opened with, and whether
+/// that host is this browser's own machine (the PC cannot reach it).
+fn restore_nas_url() -> (String, bool) {
+    let loc = window().location();
+    let host = loc.hostname().unwrap_or_default();
+    let url = if loc.protocol().unwrap_or_default() == "https:" && loc.port().unwrap_or_default() == "8443" {
+        origin()
+    } else {
+        format!("https://{host}:8443")
+    };
+    let local = host == "localhost" || host.ends_with(".localhost") || host.starts_with("127.") || host == "[::1]";
+    (url, local)
+}
+
+/// After "Restore code" (both restore panels): the code, the NAS certificate and address, a
+/// warning when that address only works on this machine, then the two commands to run on
+/// the PC, each with its own Copy. `fingerprint`: `PcBackupOverview::fingerprint`.
+pub(super) fn restore_code_view(c: &RestoreCodeCreated, fingerprint: Option<String>) -> AnyView {
+    let (nas, local) = restore_nas_url();
+    let fingerprint = fingerprint.filter(|f| !f.is_empty() && f.bytes().all(|b| b.is_ascii_hexdigit() || b == b':'));
+    let download = "curl -fLO https://github.com/rylos/rynas/releases/latest/download/rynas-agent-x86_64 && chmod +x rynas-agent-x86_64".to_string();
+    let restore = match &fingerprint {
+        Some(f) => format!("sudo ./rynas-agent-x86_64 restore --nas {nas} --fingerprint {f}"),
+        None => format!("sudo ./rynas-agent-x86_64 restore --nas {nas}"),
+    };
+    let host = window().location().hostname().unwrap_or_default();
+    view! {
+        {ui::note(Tone::Ok, icons::LIFE_BUOY, ui::text(tf("pca.restore_code_valid", &[("until", &i18n::datetime(c.expires_ms))])))}
+        <dl class="kvs">
+            {kv("pca.restore_code", ui::breakable(&c.code, "mono"))}
+            {fingerprint.clone().map(|f| kv("pca.fingerprint", ui::breakable(&f, "mono small")))}
+            {kv("pca.restore_nas", ui::breakable(&nas, "mono small"))}
+        </dl>
+        {local.then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, ui::text(tf("pca.restore_nas_local", &[("host", &host)]))))}
+        <p class="small muted">{tr("pca.restore_steps")}</p>
+        <h4 class="small"><strong>{tr("pca.rstep.download")}</strong></h4>
+        <pre class="app-code">{download.clone()}</pre>
+        <div class="sec-actions">{copy_button_for("dns.copy", t("pca.copy_download").to_string(), download)}</div>
+        <h4 class="small"><strong>{tr("pca.rstep.run")}</strong></h4>
+        <pre class="app-code">{restore.clone()}</pre>
+        <div class="sec-actions">{copy_button_for("dns.copy", t("pca.copy_restore").to_string(), restore)}</div>
+        <p class="small muted">{tr(if fingerprint.is_some() { "pca.restore_nas_note" } else { "pca.restore_nas_note_nofp" })}</p>
+    }
+    .into_any()
+}
+
 fn pair_dialog(tab: Tab) -> AnyView {
     let close = Callback::new(move |_| tab.pair.set(false));
     let description = RwSignal::new(String::new());
@@ -643,7 +690,7 @@ fn drawer(tab: Tab, device: String) -> AnyView {
             .iter()
             .take(10)
             .map(|h| {
-                let what = if h.restore { t("pca.bare_metal").to_string() } else { t("pca.h.backup").to_string() };
+                let what = if h.restore { t("pca.h.restore").to_string() } else { t("pca.h.backup").to_string() };
                 ui::row(vec![
                     ui::text_cell("pca.col.when", "tnum", i18n::datetime(h.started_ms)),
                     ui::text_cell("pca.col.what", "", what),
@@ -654,7 +701,7 @@ fn drawer(tab: Tab, device: String) -> AnyView {
             .collect::<Vec<_>>();
         let running = p.state == PcState::Running;
         let revoked = p.revoked;
-        let host = origin();
+        let bm_ready = p.bare_metal.ready;
         view! {
             {p.revoked.then(|| ui::note(Tone::Info, icons::LOCK, ui::text(t("pca.revoked_note").to_string())))}
             <dl class="kvs">
@@ -665,7 +712,7 @@ fn drawer(tab: Tab, device: String) -> AnyView {
                 {kv("pca.col.uploaded", ui::text(i18n::bytes(p.uploaded_bytes)))}
                 {kv("pca.os", ui::text(format!("{} {} · rynas-agent {}", p.os, p.arch, p.agent_version)))}
                 {kv("pca.last_seen", ui::text(when(p.last_seen_ms)))}
-                {kv("pca.bare_metal", ready)}
+                {kv("bkpc.bm.title", ready)}
                 {last_error.map(|e| kv("pca.last_error", ui::breakable(e.as_str(), "small")))}
                 {run.as_ref().filter(|r| r.changed_count > 0).map(|r| kv("pca.changed", ui::text(tf("pca.changed_n", &[("n", &i18n::count(r.changed_count))]))))}
             </dl>
@@ -689,16 +736,17 @@ fn drawer(tab: Tab, device: String) -> AnyView {
             </div>
             {move || code.get().map(|c| {
                 // a shared group is one repository: its restore key reads every PC in it
-                let shared = tab.data.data.with(|d| {
-                    d.as_ref().is_some_and(|d| d.groups.iter().any(|g| g.devices.len() > 1 && g.devices.contains(&c.device)))
+                let (shared, fingerprint) = tab.data.data.with(|d| {
+                    (
+                        d.as_ref().is_some_and(|d| d.groups.iter().any(|g| g.devices.len() > 1 && g.devices.contains(&c.device))),
+                        d.as_ref().and_then(|d| d.fingerprint.clone()),
+                    )
                 });
-                let cmd = format!("curl -fLO https://github.com/rylos/rynas/releases/latest/download/rynas-agent-x86_64\nchmod +x rynas-agent-x86_64\nsudo ./rynas-agent-x86_64 restore --nas {host}");
                 view! {
-                    {ui::note(Tone::Ok, icons::LIFE_BUOY, ui::text(tf("pca.restore_code_valid", &[("code", &c.code), ("until", &i18n::datetime(c.expires_ms))])))}
+                    // the panel above says what is missing; with the code in hand, say what it means
+                    {(!bm_ready).then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, ui::text(t("pca.restore_not_ready").to_string())))}
                     {shared.then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, ui::text(t("pca.restore_code_shared").to_string())))}
-                    <p class="small muted">{tr("pca.restore_steps")}</p>
-                    <pre class="app-code">{cmd.clone()}</pre>
-                    <div class="sec-actions">{copy_button("dns.copy", cmd)}</div>
+                    {restore_code_view(&c, fingerprint)}
                 }
             })}
             <h3 class="mini-title">{tr("pca.versions")}</h3>
