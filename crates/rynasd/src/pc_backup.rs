@@ -38,6 +38,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use rynas_api_types::notify::{NotifyCategory, NotifySeverity};
+use rynas_api_types::pcagent::{LEGACY_BOOT_DIR, LEGACY_FILE_MAX, LegacyFile, RestoreBtrfsListing, RestoreLegacy};
 use rynas_api_types::pcbackup::*;
 use rynas_api_types::snapshots::{Retention, SnapshotEntry, SnapshotListing};
 use rynas_api_types::{TaskStarted, error_codes};
@@ -145,6 +146,136 @@ pub trait ReceiveHost: Send + Sync {
     fn lock(&self, root: &Path) -> Result<Option<FolderLock>, String>;
     /// Deletes snapshot `name` directly inside the locked folder.
     fn delete_snapshot(&self, lock: &FolderLock, name: &str) -> Result<(), String>;
+    /// Takes the folder's lock **shared** after the same check as [`ReceiveHost::lock`]: a
+    /// restore's send only reads, and while it runs no receive or retention pass (they take
+    /// it exclusively) can start; `Ok(None)` when one holds it now.
+    fn lock_shared(&self, root: &Path) -> Result<Option<FolderLock>, String>;
+    /// `btrfs send [-p <parent>] <folder>/<name>` (the raw stream) into `out`, for a
+    /// bare-metal restore: both must be complete read-only received subvolumes directly in
+    /// the locked folder. Runs in a transient unit that can only read and does not see the
+    /// `hidden` folders ([`send_unit_properties`]); stops (and the unit with it) as soon as
+    /// `out` fails or `stop` says so.
+    #[allow(clippy::too_many_arguments)]
+    fn send(
+        &self,
+        device: &str,
+        lock: &FolderLock,
+        name: &str,
+        parent: Option<&str>,
+        hidden: &[String],
+        out: &mut dyn std::io::Write,
+        stop: &dyn Fn() -> bool,
+    ) -> Result<(), String>;
+    /// What an older restore script left in root snapshot `name` without a manifest
+    /// (descriptor walk, no symlink followed, each file at most [`LEGACY_FILE_MAX`]).
+    fn read_legacy(&self, root: &Path, name: &str) -> Result<RestoreLegacy, String>;
+}
+
+/// Prefix of the transient unit of a restore's send (`<prefix>-<device>.service`).
+pub const SEND_UNIT: &str = "rynas-pcsend";
+
+/// The sandbox of a restore's `btrfs send`: it only reads. The whole system read-only, the
+/// other device folders inaccessible, no network, no device, only the capabilities of the
+/// send ioctl (`CAP_SYS_ADMIN`) and of reading folders of other owners on the way
+/// (`CAP_DAC_READ_SEARCH`), capped CPU, memory and tasks, idle-ish I/O. No `PrivateTmp`: a
+/// folder below `/tmp` would vanish (tests on loop images).
+pub fn send_unit_properties(hidden: &[String]) -> Vec<String> {
+    let mut p: Vec<String> = [
+        "ProtectSystem=strict",
+        "ProtectHome=read-only",
+        "PrivateNetwork=yes",
+        "PrivateIPC=yes",
+        "NoNewPrivileges=yes",
+        "RestrictAddressFamilies=AF_UNIX",
+        "CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_READ_SEARCH",
+        "SystemCallArchitectures=native",
+        "SystemCallFilter=@system-service",
+        "DevicePolicy=closed",
+        "ProtectKernelModules=yes",
+        "ProtectKernelTunables=yes",
+        "ProtectKernelLogs=yes",
+        "ProtectControlGroups=yes",
+        "ProtectClock=yes",
+        "ProtectHostname=yes",
+        "RestrictNamespaces=yes",
+        "RestrictRealtime=yes",
+        "RestrictSUIDSGID=yes",
+        "LockPersonality=yes",
+        "MemoryDenyWriteExecute=yes",
+        "UMask=0077",
+        "MemoryMax=256M",
+        "TasksMax=8",
+        "CPUQuota=100%",
+        "Nice=10",
+        "IOSchedulingClass=best-effort",
+        "IOSchedulingPriority=7",
+        "RuntimeMaxSec=172800",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    for h in hidden {
+        p.push(format!("InaccessiblePaths=-{h}"));
+    }
+    p
+}
+
+/// A received snapshot fit to be sent: a read-only subvolume with a received UUID, directly
+/// in the folder (`dir`), its name a snapshot name.
+fn sendable(dir: &std::fs::File, name: &str) -> Result<(), String> {
+    if name.contains('/') || rynas_btrfs::name::split_snapshot_name(name).is_none() {
+        return Err(format!("{name}: not a snapshot name"));
+    }
+    let sub = rynas_btrfs::ioctl::open_dir_at(dir, name).map_err(|e| format!("{name}: {e}"))?;
+    if !rynas_btrfs::ioctl::is_subvolume(&sub) {
+        return Err(format!("{name}: not a subvolume"));
+    }
+    let i = rynas_btrfs::ioctl::subvol_info(&sub).map_err(|e| format!("{name}: {e}"))?;
+    if !i.readonly || i.received_uuid.is_none() {
+        return Err(format!("{name}: not a complete received snapshot"));
+    }
+    Ok(())
+}
+
+/// A regular file `name` in `dir` (never through a symlink, never a FIFO), at most `max`
+/// bytes: `Ok(None)` when it is not there or not a regular file.
+fn read_small_at(dir: &std::fs::File, name: &str, max: usize) -> Result<Option<Vec<u8>>, String> {
+    use std::io::Read;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let c = std::ffi::CString::new(name).map_err(|e| e.to_string())?;
+    // SAFETY: openat(2) on a directory descriptor with a C name; never follows a final
+    // symlink, never blocks on a FIFO
+    let fd = unsafe {
+        libc::openat(dir.as_raw_fd(), c.as_ptr(), libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC | libc::O_NOCTTY)
+    };
+    if fd < 0 {
+        let e = std::io::Error::last_os_error();
+        return match e.raw_os_error() {
+            Some(libc::ENOENT) | Some(libc::ELOOP) | Some(libc::ENOTDIR) => Ok(None),
+            _ => Err(format!("{name}: {e}")),
+        };
+    }
+    // SAFETY: a descriptor we just opened and own
+    let f = unsafe { std::fs::File::from_raw_fd(fd) };
+    let m = f.metadata().map_err(|e| e.to_string())?;
+    if !m.is_file() || m.len() > max as u64 {
+        return Ok(None);
+    }
+    let mut buf = Vec::new();
+    f.take(max as u64 + 1).read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    Ok((buf.len() <= max).then_some(buf))
+}
+
+/// Text from a file of the PC (control characters but tab and newline dropped).
+fn legacy_text(b: &[u8]) -> String {
+    String::from_utf8_lossy(b).chars().filter(|c| !c.is_control() || *c == '\n' || *c == '\t').collect()
+}
+
+/// `sfdisk --dump` output of a GPT disk: a `label: gpt` line and partition lines.
+pub fn looks_like_sfdisk_dump(text: &str) -> bool {
+    let label = text.lines().any(|l| l.trim().replace(' ', "") == "label:gpt");
+    let parts = text.lines().any(|l| l.contains(": start=") || l.contains(":start="));
+    label && parts
 }
 
 /// Largest manifest read from a snapshot.
@@ -752,6 +883,180 @@ impl ReceiveHost for HostReceive {
         drop(sub);
         rynas_btrfs::ioctl::destroy_subvolume(dir, name).map_err(|e| format!("deleting {name}: {e}"))
     }
+
+    fn lock_shared(&self, root: &Path) -> Result<Option<FolderLock>, String> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::MetadataExt;
+        let dir = rynas_btrfs::receive_filter::verify_root(&root.to_string_lossy())?;
+        let (a, b) = (dir.metadata().map_err(|e| e.to_string())?, std::fs::symlink_metadata(root).map_err(|e| e.to_string())?);
+        if (a.dev(), a.ino()) != (b.dev(), b.ino()) {
+            return Err(format!("{}: changed while it was checked", root.display()));
+        }
+        // SAFETY: flock(2) on our own descriptor: shared, so a receive or a retention pass
+        // (exclusive) cannot start while the send reads
+        if unsafe { libc::flock(dir.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } != 0 {
+            return Ok(None);
+        }
+        Ok(Some(FolderLock { path: root.to_path_buf(), dir: Some(dir) }))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn send(
+        &self,
+        device: &str,
+        lock: &FolderLock,
+        name: &str,
+        parent: Option<&str>,
+        hidden: &[String],
+        out: &mut dyn std::io::Write,
+        stop: &dyn Fn() -> bool,
+    ) -> Result<(), String> {
+        use std::io::Read as _;
+        use std::process::{Command, Stdio};
+        if !valid_device(device) {
+            return Err(format!("{device}: not a device name"));
+        }
+        let btrfs = rynas_btrfs::receive_filter::locate("btrfs").ok_or("btrfs-progs is not installed")?;
+        let dir = lock.dir.as_ref().ok_or("folder not open")?;
+        sendable(dir, name)?;
+        if let Some(p) = parent {
+            sendable(dir, p)?;
+        }
+        let root = lock.path.to_string_lossy().into_owned();
+        let snap = format!("{root}/{name}");
+        receive::valid_path(&snap)?;
+        let parent_path = parent.map(|p| format!("{root}/{p}"));
+        if let Some(p) = &parent_path {
+            receive::valid_path(p)?;
+        }
+        let hidden: Vec<String> = hidden
+            .iter()
+            .filter(|h| receive::valid_path(h).is_ok() && !within(&root, h) && !within(h, &root))
+            .cloned()
+            .collect();
+        let unit = format!("{SEND_UNIT}-{device}");
+        let mut c = Command::new("systemd-run");
+        c.args(["--wait", "--pipe", "--collect", "--quiet", "--service-type=exec"])
+            .arg(format!("--unit={unit}"))
+            .arg(format!("--description=rynas: restore send of PC {device}"));
+        for p in send_unit_properties(&hidden) {
+            c.arg(format!("--property={p}"));
+        }
+        c.arg("--").arg(&btrfs).args(["send", "-q"]);
+        // v1 (what every btrfs receive reads, and what the agent's own guard takes)
+        if send_knows_proto(&btrfs) {
+            c.args(["--proto", "1"]);
+        }
+        if let Some(p) = &parent_path {
+            c.arg("-p").arg(p);
+        }
+        c.arg(&snap);
+        c.env_clear()
+            .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+            .env("LC_ALL", "C")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = c.spawn().map_err(|e| format!("systemd-run: {e}"))?;
+        let mut err = child.stderr.take().ok_or("no stderr")?;
+        let errs = std::thread::spawn(move || {
+            let mut s = Vec::new();
+            let _ = (&mut err).take(16 << 10).read_to_end(&mut s);
+            let _ = std::io::copy(&mut err, &mut std::io::sink());
+            String::from_utf8_lossy(&s).into_owned()
+        });
+        let mut stdout = child.stdout.take().ok_or("no stdout")?;
+        let mut buf = vec![0u8; 1 << 20];
+        let copied: Result<(), String> = loop {
+            if stop() {
+                break Err("cancelled".into());
+            }
+            match stdout.read(&mut buf) {
+                Ok(0) => break Ok(()),
+                Ok(n) => {
+                    if let Err(e) = out.write_all(&buf[..n]) {
+                        break Err(format!("the client went away: {e}"));
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => break Err(format!("reading btrfs send: {e}")),
+            }
+        };
+        if copied.is_err() {
+            // the unit and the process go: a cancelled restore leaves nothing running
+            let _ = Command::new("systemctl").args(["stop", "--no-block", &format!("{unit}.service")]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+            let _ = child.kill();
+        }
+        drop(stdout);
+        let status = child.wait().map_err(|e| e.to_string())?;
+        let text = errs.join().unwrap_or_default();
+        copied?;
+        out.flush().map_err(|e| format!("the client went away: {e}"))?;
+        if status.success() {
+            Ok(())
+        } else {
+            let last = text.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string();
+            Err(if last.is_empty() { format!("btrfs send failed ({status})") } else { format!("btrfs send: {last}") })
+        }
+    }
+
+    fn read_legacy(&self, root: &Path, name: &str) -> Result<RestoreLegacy, String> {
+        use std::os::fd::AsRawFd;
+        use rynas_btrfs::ioctl::{open_dir, open_dir_at};
+        let gone = |e: &std::io::Error| matches!(e.raw_os_error(), Some(libc::ENOENT) | Some(libc::ELOOP) | Some(libc::ENOTDIR));
+        let snap = open_dir_at(&open_dir(root).map_err(|e| e.to_string())?, name).map_err(|e| format!("{name}: {e}"))?;
+        let mut out = RestoreLegacy { snapshot: name.to_string(), ..Default::default() };
+        if let Ok(etc) = open_dir_at(&snap, "etc") {
+            out.fstab = read_small_at(&etc, "fstab", LEGACY_FILE_MAX)?.map(|b| legacy_text(&b));
+            out.os_release = read_small_at(&etc, "os-release", LEGACY_FILE_MAX)?.map(|b| legacy_text(&b));
+        }
+        if out.os_release.is_none()
+            && let Ok(lib) = open_dir_at(&snap, "usr").and_then(|u| open_dir_at(&u, "lib"))
+        {
+            out.os_release = read_small_at(&lib, "os-release", LEGACY_FILE_MAX)?.map(|b| legacy_text(&b));
+        }
+        let bb = match open_dir_at(&snap, LEGACY_BOOT_DIR) {
+            Ok(d) => d,
+            Err(e) if gone(&e) => return Ok(out),
+            Err(e) => return Err(format!("{name}/{LEGACY_BOOT_DIR}: {e}")),
+        };
+        let mut names: Vec<String> = std::fs::read_dir(format!("/proc/self/fd/{}", bb.as_raw_fd()))
+            .map_err(|e| e.to_string())?
+            .flatten()
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|n| n.len() <= 128 && !n.starts_with('.'))
+            .collect();
+        names.sort();
+        for n in names.iter().take(256) {
+            if n.ends_with("_post") {
+                if open_dir_at(&bb, n).is_ok() && out.boot_backups.len() < 64 {
+                    out.boot_backups.push(n.clone());
+                }
+                continue;
+            }
+            if out.partition_dumps.len() < 8
+                && let Some(b) = read_small_at(&bb, n, LEGACY_FILE_MAX)?
+            {
+                let text = legacy_text(&b);
+                if looks_like_sfdisk_dump(&text) {
+                    out.partition_dumps.push(LegacyFile { name: n.clone(), text });
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// `btrfs send --help` lists `--proto` (btrfs-progs 5.19 and later).
+fn send_knows_proto(btrfs: &Path) -> bool {
+    static KNOWS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *KNOWS.get_or_init(|| {
+        std::process::Command::new(btrfs)
+            .args(["send", "--help"])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("--proto") || String::from_utf8_lossy(&o.stderr).contains("--proto"))
+    })
 }
 
 /// `name` inside `dir` as a folder of root, `0700`: made when missing, refused when it is
@@ -895,6 +1200,10 @@ pub struct MemoryReceive {
     pub staged_extra: Mutex<Vec<String>>,
     /// The folders hidden from the last receive.
     pub hidden: Mutex<Vec<String>>,
+    /// Restore sends: `<folder>/<name>[ -p <parent>]`, in order.
+    pub sent: Mutex<Vec<String>>,
+    /// What [`ReceiveHost::read_legacy`] answers, by snapshot path.
+    pub legacy: Mutex<BTreeMap<PathBuf, RestoreLegacy>>,
 }
 
 /// The account group's gid in memory.
@@ -1196,6 +1505,47 @@ impl ReceiveHost for MemoryReceive {
         }
         self.deleted.lock().unwrap().push(format!("{}/{name}", lock.path.display()));
         Ok(())
+    }
+    fn lock_shared(&self, root: &Path) -> Result<Option<FolderLock>, String> {
+        self.lock(root)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn send(
+        &self,
+        _device: &str,
+        lock: &FolderLock,
+        name: &str,
+        parent: Option<&str>,
+        _hidden: &[String],
+        out: &mut dyn std::io::Write,
+        stop: &dyn Fn() -> bool,
+    ) -> Result<(), String> {
+        let entries = self.folders.lock().unwrap().get(&lock.path).map(|(_, e)| e.clone()).ok_or("no such folder")?;
+        let received = |n: &str| {
+            entries
+                .iter()
+                .find(|e| e.name == n)
+                .and_then(|e| e.info.as_ref())
+                .filter(|i| i.readonly)
+                .and_then(|i| i.received_uuid.clone())
+                .ok_or_else(|| format!("{n}: not a complete received snapshot"))
+        };
+        let uuid = received(name)?;
+        let parent_uuid = parent.map(received).transpose()?;
+        self.sent.lock().unwrap().push(format!("{}/{name}{}", lock.path.display(), parent.map(|p| format!(" -p {p}")).unwrap_or_default()));
+        // the stream `btrfs send` writes for a received snapshot: its received UUID, and the
+        // parent's as clone source
+        let s = rynas_btrfs::send_stream::fake::stream(name, &uuid, parent_uuid.as_deref());
+        for chunk in s.chunks(64) {
+            if stop() {
+                return Err("cancelled".into());
+            }
+            out.write_all(chunk).map_err(|e| format!("the client went away: {e}"))?;
+        }
+        out.flush().map_err(|e| e.to_string())
+    }
+    fn read_legacy(&self, root: &Path, name: &str) -> Result<RestoreLegacy, String> {
+        Ok(self.legacy.lock().unwrap().get(&root.join(name)).cloned().unwrap_or_else(|| RestoreLegacy { snapshot: name.to_string(), ..Default::default() }))
     }
 }
 
@@ -1684,6 +2034,8 @@ pub struct PcBackup {
     manifests: Mutex<BTreeMap<String, Option<ManifestRead>>>,
     /// Agent receives running now (all PCs, at most [`MAX_RECEIVES`]).
     receives: std::sync::atomic::AtomicUsize,
+    /// Restore sends running now: the devices (one stream per PC), at most [`MAX_SENDS`].
+    sending: Mutex<BTreeSet<String>>,
     /// Told when an agent folder goes (device, folder id): the PC records bound to it are
     /// revoked or fall back to the files method (set once at start, [`crate::pc_agent`]).
     pub on_agent_removed: std::sync::OnceLock<AgentRemoved>,
@@ -1726,6 +2078,7 @@ impl PcBackup {
             change: tokio::sync::Mutex::new(()),
             manifests: Mutex::new(BTreeMap::new()),
             receives: std::sync::atomic::AtomicUsize::new(0),
+            sending: Mutex::new(BTreeSet::new()),
             on_agent_removed: std::sync::OnceLock::new(),
         })
     }
@@ -2720,6 +3073,230 @@ impl PcBackup {
             Err(e) => tracing::warn!("pc backup: {device}: receive refused or failed: {}", e.2),
         }
         out
+    }
+}
+
+// ------------------------------------------------------------------ bare-metal restore
+
+/// Restore sends running at once on the NAS, all PCs together.
+pub const MAX_SENDS: usize = 2;
+
+/// A restore send's place among [`MAX_SENDS`], one per device; given back on drop.
+struct SendSlot {
+    svc: Arc<PcBackup>,
+    device: String,
+}
+
+impl SendSlot {
+    fn take(svc: &Arc<PcBackup>, device: &str) -> Res<SendSlot> {
+        let busy = |why: String| Error::new(StatusCode::CONFLICT, error_codes::BUSY, why);
+        let mut s = svc.sending.lock().unwrap();
+        if s.contains(device) {
+            return Err(busy(format!("a restore of {device} is already reading from the NAS")));
+        }
+        if s.len() >= MAX_SENDS {
+            return Err(busy(format!("the NAS is sending to {MAX_SENDS} restores already: try again later")));
+        }
+        s.insert(device.to_string());
+        Ok(SendSlot { svc: svc.clone(), device: device.to_string() })
+    }
+}
+
+impl Drop for SendSlot {
+    fn drop(&mut self) {
+        self.svc.sending.lock().unwrap().remove(&self.device);
+    }
+}
+
+/// The compressed stream as chunks for the response body; a failed send ends the body with
+/// an error (the client never sees a clean end of a broken stream).
+struct ChanWriter {
+    tx: tokio::sync::mpsc::Sender<Result<axum::body::Bytes, std::io::Error>>,
+    buf: Vec<u8>,
+    sent: u64,
+    /// Called every [`KEEPALIVE_EVERY`] while the stream runs (the restore session stays
+    /// alive during one long send).
+    keepalive: Box<dyn Fn() + Send + Sync>,
+    last: std::time::Instant,
+}
+
+/// See [`ChanWriter::keepalive`].
+const KEEPALIVE_EVERY: Duration = Duration::from_secs(300);
+
+impl ChanWriter {
+    fn push(&mut self) -> std::io::Result<()> {
+        if self.buf.is_empty() {
+            return Ok(());
+        }
+        if self.last.elapsed() >= KEEPALIVE_EVERY {
+            self.last = std::time::Instant::now();
+            (self.keepalive)();
+        }
+        let b = axum::body::Bytes::from(std::mem::take(&mut self.buf));
+        self.sent += b.len() as u64;
+        self.tx.blocking_send(Ok(b)).map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "the client went away"))
+    }
+}
+
+impl std::io::Write for ChanWriter {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.buf.extend_from_slice(b);
+        if self.buf.len() >= 256 << 10 {
+            self.push()?;
+        }
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.push()
+    }
+}
+
+impl PcBackup {
+    /// `device` has a folder of btrfs snapshots (agent or btrbk): a restore code may cover it.
+    pub fn has_target(&self, device: &str) -> bool {
+        self.reg.lock().unwrap().targets.contains_key(device)
+    }
+
+    /// Every folder: (device, description).
+    pub fn target_names(&self) -> Vec<(String, String)> {
+        self.reg.lock().unwrap().targets.iter().map(|(d, t)| (d.clone(), t.description.clone())).collect()
+    }
+
+    /// A restore's view of the folder of `device`: every snapshot with its state and size,
+    /// the runs, the manifest's snapshot.
+    pub async fn restore_listing(self: &Arc<Self>, device: &str) -> Res<RestoreBtrfsListing> {
+        let t = self.stored(device)?;
+        let (s, d) = (self.clone(), device.to_string());
+        blocking(move || {
+            let v = s.view(&d, &t, rynas_tasks::now_ms());
+            if v.target.state == ReceiveState::Missing {
+                return Err(Error::not_found(format!("{}: no such folder", t.path)));
+            }
+            Ok(RestoreBtrfsListing {
+                device: d.clone(),
+                agent: t.agent,
+                snapshots: v.list,
+                runs: v.runs,
+                manifest_snapshot: v.target.bare_metal.manifest_snapshot,
+            })
+        })
+        .await?
+    }
+
+    /// `name` is a complete received snapshot directly in the folder of `t` (what a restore
+    /// may read).
+    fn complete_entry(&self, t: &Stored, name: &str) -> Res<Entry> {
+        if name.contains('/') || rynas_btrfs::name::split_snapshot_name(name).is_none() {
+            return Err(Error::invalid("snapshot", "a snapshot name of this PC"));
+        }
+        let entries = match self.host.scan(Path::new(&t.path)).map_err(Error::internal)? {
+            Some((_, e, _)) => e,
+            None => return Err(Error::not_found(format!("{}: no such folder", t.path))),
+        };
+        entries
+            .into_iter()
+            .find(|e| e.name == name && agent_entry(e).complete)
+            .ok_or_else(|| Error::not_found(format!("{name} is not a complete snapshot of this PC")))
+    }
+
+    /// `/.rynas/manifest.json` of snapshot `name` (B1's descriptor-walk reader), checked to
+    /// be a JSON object of format 1.
+    pub async fn restore_manifest(self: &Arc<Self>, device: &str, name: String) -> Res<Vec<u8>> {
+        let t = self.stored(device)?;
+        let s = self.clone();
+        blocking(move || {
+            s.complete_entry(&t, &name)?;
+            let b = s
+                .host
+                .read_manifest(Path::new(&t.path), &name)
+                .map_err(|e| Error::new(StatusCode::UNPROCESSABLE_ENTITY, error_codes::INVALID_VALUE, e))?
+                .ok_or_else(|| Error::not_found(format!("{name} has no layout manifest")))?;
+            let v: serde_json::Value = serde_json::from_slice(&b)
+                .map_err(|_| Error::new(StatusCode::UNPROCESSABLE_ENTITY, error_codes::INVALID_VALUE, format!("the manifest of {name} does not parse")))?;
+            if v.get("format").and_then(serde_json::Value::as_u64) != Some(1) {
+                return Err(Error::new(StatusCode::UNPROCESSABLE_ENTITY, error_codes::INVALID_VALUE, format!("the manifest of {name} has a format this NAS does not know")));
+            }
+            Ok(b)
+        })
+        .await?
+    }
+
+    /// What an older restore script left in root snapshot `name` (no manifest).
+    pub async fn restore_legacy(self: &Arc<Self>, device: &str, name: String) -> Res<RestoreLegacy> {
+        let t = self.stored(device)?;
+        let s = self.clone();
+        blocking(move || {
+            s.complete_entry(&t, &name)?;
+            s.host.read_legacy(Path::new(&t.path), &name).map_err(Error::internal)
+        })
+        .await?
+    }
+
+    /// `btrfs send [-p parent] <snapshot> | zstd` of the folder of `device` for a bare-metal
+    /// restore: complete read-only snapshots directly in the folder (and the parent of the
+    /// same subvolume), the folder walked from `/` without symlinks and locked shared (no
+    /// receive or retention pass meanwhile), one stream per PC and at most [`MAX_SENDS`] on
+    /// the NAS, the send in its read-only unit ([`send_unit_properties`]); a client that goes
+    /// away stops it. Audited.
+    pub async fn restore_send(
+        self: &Arc<Self>,
+        device: &str,
+        name: String,
+        parent: Option<String>,
+        who: String,
+        keepalive: Box<dyn Fn() + Send + Sync>,
+    ) -> Res<axum::body::Body> {
+        use rynas_api_types::pcagent::AGENT_ZSTD_WINDOW_LOG;
+        let t = self.stored(device)?;
+        if let Some(p) = &parent {
+            let group = |n: &str| rynas_btrfs::name::split_snapshot_name(n).map(|x| x.0.to_string());
+            if p == &name || group(p).is_none() || group(p) != group(&name) {
+                return Err(Error::invalid("parent", "an older snapshot of the same subvolume, or none"));
+            }
+        }
+        let slot = SendSlot::take(self, device)?;
+        let (s, n, p) = (self.clone(), name.clone(), parent.clone());
+        let lock = blocking(move || -> Res<FolderLock> {
+            s.complete_entry(&t, &n)?;
+            if let Some(p) = &p {
+                s.complete_entry(&t, p)?;
+            }
+            s.host
+                .lock_shared(Path::new(&t.path))
+                .map_err(|e| Error::new(StatusCode::CONFLICT, error_codes::CONFLICT, e))?
+                .ok_or_else(|| Error::new(StatusCode::CONFLICT, error_codes::BUSY, "a receive or a retention pass of this PC is running: try again in a moment".into()))
+        })
+        .await??;
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(8);
+        let hidden = self.other_folders(device);
+        let (s, dev) = (self.clone(), device.to_string());
+        tracing::info!(target: "rynas::audit", "pc backup: {dev}: restore send of {name}{} to {who}", parent.as_deref().map(|p| format!(" on {p}")).unwrap_or_default());
+        std::thread::Builder::new()
+            .name("pc-send".into())
+            .spawn(move || {
+                let _slot = slot;
+                let w = ChanWriter { tx: tx.clone(), buf: Vec::new(), sent: 0, keepalive, last: std::time::Instant::now() };
+                let r = (|| -> Result<u64, String> {
+                    let mut enc = zstd::stream::write::Encoder::new(w, 3).map_err(|e| e.to_string())?;
+                    enc.window_log(AGENT_ZSTD_WINDOW_LOG).map_err(|e| e.to_string())?;
+                    let closed = tx.clone();
+                    s.host.send(&dev, &lock, &name, parent.as_deref(), &hidden, &mut enc, &|| closed.is_closed())?;
+                    let mut w = enc.finish().map_err(|e| e.to_string())?;
+                    std::io::Write::flush(&mut w).map_err(|e| e.to_string())?;
+                    Ok(w.sent)
+                })();
+                drop(lock);
+                match r {
+                    Ok(bytes) => tracing::info!(target: "rynas::audit", "pc backup: {dev}: restore send of {name} done ({bytes} bytes)"),
+                    Err(e) => {
+                        tracing::warn!("pc backup: {dev}: restore send of {name} stopped: {e}");
+                        let _ = tx.blocking_send(Err(std::io::Error::other(e)));
+                    }
+                }
+            })
+            .map_err(Error::internal)?;
+        let stream = futures_util::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|x| (x, rx)) });
+        Ok(axum::body::Body::from_stream(stream))
     }
 }
 
@@ -3826,5 +4403,46 @@ mod tests {
         let c = &r.boot_copies[0];
         assert!(c.stale && c.skipped.len() == 32 && c.skipped[0].len() == SHOWN_MAX);
         assert_eq!(c.error.as_ref().unwrap().len(), SHOWN_MAX);
+    }
+
+
+    #[test]
+    fn restore_sends_one_per_pc_and_a_read_only_unit() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("r")).unwrap();
+        let config = Arc::new(
+            rynas_config::Config::open(rynas_config::ConfigOptions::new(dir.path().join("s"), dir.path().join("r")), Arc::new(rynas_config::MemorySystem::new("nas")), Vec::new()).unwrap(),
+        );
+        let tasks = rynas_tasks::TaskManager::new(dir.path().join("t"), "nas", rynas_tasks::TaskConfig::default()).unwrap();
+        let svc = PcBackup::new(
+            Arc::new(crate::ops::Ops::new(config, tasks)),
+            Arc::new(MemoryReceive::new()),
+            Arc::new(rynas_notify::MemoryNotifier::default()),
+            dir.path().join("s"),
+            AdminPolicy::default(),
+            "nas".into(),
+        );
+        let a = SendSlot::take(&svc, "a").unwrap();
+        assert_eq!(SendSlot::take(&svc, "a").err().unwrap().1, error_codes::BUSY);
+        let b = SendSlot::take(&svc, "b").unwrap();
+        assert!(SendSlot::take(&svc, "c").is_err(), "at most {MAX_SENDS} on the NAS");
+        drop(a);
+        let _a = SendSlot::take(&svc, "a").unwrap();
+        drop(b);
+        assert!(svc.sending.lock().unwrap().len() == 1);
+        // the send's unit only reads: nothing writable, the other folders hidden
+        let p = send_unit_properties(&["/volume1/backup/other".into()]);
+        assert!(p.contains(&"ProtectSystem=strict".to_string()));
+        assert!(!p.iter().any(|x| x.starts_with("ReadWritePaths")));
+        assert!(p.contains(&"CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_READ_SEARCH".to_string()));
+        assert!(p.contains(&"InaccessiblePaths=-/volume1/backup/other".to_string()));
+        assert!(p.contains(&"DevicePolicy=closed".to_string()));
+    }
+
+    #[test]
+    fn partition_table_dumps_are_told_by_their_content() {
+        assert!(looks_like_sfdisk_dump("label: gpt\nlabel-id: X\n\n/dev/sda1 : start=2048, size=10, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B\n"));
+        assert!(!looks_like_sfdisk_dump("label: gpt\n"));
+        assert!(!looks_like_sfdisk_dump("loader.conf\ntimeout 3\n"));
     }
 }

@@ -501,6 +501,13 @@ impl PcAgent {
         })
     }
 
+
+    /// `device` has a folder of btrfs snapshots on this NAS (the agent's btrfs method or btrbk
+    /// over SSH): a restore can read it.
+    pub fn has_btrfs_folder(&self, device: &str) -> bool {
+        self.btrfs.get().is_some_and(|b| b.has_target(device))
+    }
+
     pub fn dir(state_dir: &Path) -> PathBuf {
         state_dir.join("pc-agent")
     }
@@ -988,6 +995,10 @@ pub fn router(st: PaState) -> Router {
         .route("/v1/pcbackup/agent/btrfs/receive", post(btrfs_receive_post))
         .route("/v1/pcbackup/agent/restore/login", post(restore_login))
         .route("/v1/pcbackup/agent/restore/report", post(restore_report))
+        .route("/v1/pcbackup/agent/restore/btrfs/{device}/snapshots", get(restore_btrfs_snapshots))
+        .route("/v1/pcbackup/agent/restore/btrfs/{device}/manifest", get(restore_btrfs_manifest))
+        .route("/v1/pcbackup/agent/restore/btrfs/{device}/legacy", get(restore_btrfs_legacy))
+        .route("/v1/pcbackup/agent/restore/btrfs/{device}/send", get(restore_btrfs_send))
         .route("/v1/pcbackup/repo/{group}", post(repo::create_refused))
         .route("/v1/pcbackup/repo/{group}/", post(repo::create_refused))
         .route("/v1/pcbackup/repo/{group}/{*rest}", axum::routing::any(repo::handle))
@@ -1610,17 +1621,18 @@ async fn restore_code_post(
     check_name(&device)?;
     let code = new_code()?;
     let expires_ms = now_ms() + RESTORE_CODE_TTL_MS;
+    let btrfs = svc.has_btrfs_folder(&device);
     svc.edit(|r| {
-        match r.devices.get(&device) {
-            None => return Err(not_found(&device)),
-            Some(d) if d.group.is_empty() => {
-                return Err(Error::new(
+        let files = r.devices.get(&device).is_some_and(|d| !d.group.is_empty());
+        if !files && !btrfs {
+            return Err(match r.devices.get(&device) {
+                None => not_found(&device),
+                Some(_) => Error::new(
                     StatusCode::CONFLICT,
                     error_codes::CONFLICT,
-                    format!("{device} has no file backups to restore (btrfs snapshots only)"),
-                ));
-            }
-            Some(_) => {}
+                    format!("{device} has neither file backups nor a folder of btrfs snapshots to restore from"),
+                ),
+            });
         }
         let now = now_ms();
         r.restore_codes.retain(|c| c.expires_ms > now);
@@ -1648,13 +1660,23 @@ async fn restore_choice_post(State(st): State<PaState>, h: HeaderMap) -> Res<Jso
     let svc = pa(&st)?;
     let who = user(&h)?;
     let batch = new_code()?;
+    // PCs with file backups, with a folder of btrfs snapshots (paired agents or btrbk over
+    // SSH), or both
+    let folders: BTreeMap<String, String> = svc.btrfs.get().map(|b| b.target_names().into_iter().collect()).unwrap_or_default();
     let devices = svc.edit(|r| {
         let now = now_ms();
         r.restore_codes.retain(|c| c.expires_ms > now);
         let mut devices = Vec::new();
-        // the restore reads repositories: PCs of the btrfs method only have none (their
-        // source in the restore comes later, `docs/research/pc-backup.md` §11.4)
-        for (name, d) in r.devices.iter().filter(|(_, d)| !d.group.is_empty()) {
+        let mut names: BTreeMap<String, (String, String)> = r
+            .devices
+            .iter()
+            .filter(|(n, d)| !d.group.is_empty() || folders.contains_key(*n))
+            .map(|(n, d)| (n.clone(), (d.settings.description.clone(), d.hostname.clone())))
+            .collect();
+        for (n, desc) in &folders {
+            names.entry(n.clone()).or_insert_with(|| (desc.clone(), String::new()));
+        }
+        for (name, (description, hostname)) in names {
             let code = new_code()?;
             r.restore_codes.push(RestoreCode {
                 code_sha: code_hash(&code),
@@ -1664,8 +1686,8 @@ async fn restore_choice_post(State(st): State<PaState>, h: HeaderMap) -> Res<Jso
             });
             devices.push(RestoreChoiceDevice {
                 device: name.clone(),
-                description: d.settings.description.clone(),
-                hostname: d.hostname.clone(),
+                description,
+                hostname,
                 code,
             });
         }
@@ -1899,20 +1921,40 @@ async fn restore_login(
     let Some(code) = code else {
         return Err(svc.failed(&source));
     };
-    let d = svc.device(&code.device)?;
-    let g = svc.group(&d.group)?;
+    // a PC with file backups (a paired record with a group), a folder of btrfs snapshots, or
+    // both; a btrbk folder has no PC record at all
+    let d = svc.device(&code.device).ok();
+    let btrfs = svc.has_btrfs_folder(&code.device);
+    let group = d.as_ref().map(|d| d.group.clone()).unwrap_or_default();
+    let give_back = |code: RestoreCode| {
+        // the code was not used up: it works again
+        let _ = svc.edit(move |r| {
+            r.restore_codes.push(code);
+            Ok(())
+        });
+    };
+    if group.is_empty() && !btrfs {
+        give_back(code.clone());
+        return Err(not_found(&code.device));
+    }
     // a key of its own for this session (never the NAS' key): its password stops opening the
     // repository when the session ends and the key file goes
-    let (key_id, password) = match maint::add_session_key(&svc, &d.group, &g, &code.device).await {
-        Ok(k) => k,
-        Err(e) => {
-            // the code was not used up: it works again
-            let back = code.clone();
-            let _ = svc.edit(move |r| {
-                r.restore_codes.push(back);
-                Ok(())
-            });
-            return Err(e);
+    let (key_id, password) = if group.is_empty() {
+        (String::new(), String::new())
+    } else {
+        let g = match svc.group(&group) {
+            Ok(g) => g,
+            Err(e) => {
+                give_back(code.clone());
+                return Err(e);
+            }
+        };
+        match maint::add_session_key(&svc, &group, &g, &code.device).await {
+            Ok(k) => k,
+            Err(e) => {
+                give_back(code.clone());
+                return Err(e);
+            }
         }
     };
     let token = new_token()?;
@@ -1922,7 +1964,7 @@ async fn restore_login(
         devices: vec![code.device.clone()],
         created_ms: now,
         expires_ms: now + SESSION_IDLE_MS,
-        key_group: d.group.clone(),
+        key_group: group.clone(),
         key_id,
     };
     let expires_ms = session.expires_ms;
@@ -1936,12 +1978,100 @@ async fn restore_login(
         expires_ms,
         devices: vec![RestoreDevice {
             device: code.device.clone(),
-            group: d.group.clone(),
-            description: d.settings.description.clone(),
-            hostname: d.hostname.clone(),
+            group,
+            description: d.as_ref().map(|d| d.settings.description.clone()).unwrap_or_default(),
+            hostname: d.as_ref().map(|d| d.hostname.clone()).unwrap_or_default(),
             repo_password: password,
+            btrfs,
         }],
     }))
+}
+
+/// A restore session's request about `device`: 401 without a live session, 403 when the
+/// session does not cover that PC. The request keeps the session alive.
+fn session_for(svc: &PcAgent, h: &HeaderMap, device: &str) -> Res<String> {
+    let token = bearer(h).unwrap_or_default();
+    let devices = svc
+        .session_devices(&token)
+        .ok_or_else(|| Error::new(StatusCode::UNAUTHORIZED, error_codes::UNAUTHENTICATED, "no restore session".into()))?;
+    if !devices.iter().any(|d| d == device) {
+        return Err(Error::new(StatusCode::FORBIDDEN, error_codes::FORBIDDEN, "not this session's PC".into()));
+    }
+    Ok(token)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RestoreSnapQuery {
+    #[serde(default)]
+    pub snapshot: String,
+    #[serde(default)]
+    pub parent: Option<String>,
+}
+
+fn snap_query(q: Result<Query<RestoreSnapQuery>, axum::extract::rejection::QueryRejection>) -> Res<RestoreSnapQuery> {
+    let Query(q) = q.map_err(|e| Error::bad_request(e.body_text()))?;
+    if q.snapshot.is_empty() {
+        return Err(Error::invalid("snapshot", "a snapshot name"));
+    }
+    Ok(q)
+}
+
+/// `GET /v1/pcbackup/agent/restore/btrfs/{device}/snapshots` (restore session).
+async fn restore_btrfs_snapshots(State(st): State<PaState>, h: HeaderMap, UrlPath(device): UrlPath<String>) -> Res<Json<RestoreBtrfsListing>> {
+    let svc = pa(&st)?;
+    session_for(&svc, &h, &device)?;
+    Ok(Json(svc.btrfs_side()?.restore_listing(&device).await?))
+}
+
+/// `GET …/restore/btrfs/{device}/manifest?snapshot=` (restore session): the manifest as the
+/// PC wrote it.
+async fn restore_btrfs_manifest(
+    State(st): State<PaState>,
+    h: HeaderMap,
+    UrlPath(device): UrlPath<String>,
+    q: Result<Query<RestoreSnapQuery>, axum::extract::rejection::QueryRejection>,
+) -> Res<Response> {
+    let svc = pa(&st)?;
+    session_for(&svc, &h, &device)?;
+    let q = snap_query(q)?;
+    let b = svc.btrfs_side()?.restore_manifest(&device, q.snapshot).await?;
+    Ok(([(header::CONTENT_TYPE, "application/json")], b).into_response())
+}
+
+/// `GET …/restore/btrfs/{device}/legacy?snapshot=` (restore session).
+async fn restore_btrfs_legacy(
+    State(st): State<PaState>,
+    h: HeaderMap,
+    UrlPath(device): UrlPath<String>,
+    q: Result<Query<RestoreSnapQuery>, axum::extract::rejection::QueryRejection>,
+) -> Res<Json<RestoreLegacy>> {
+    let svc = pa(&st)?;
+    session_for(&svc, &h, &device)?;
+    let q = snap_query(q)?;
+    Ok(Json(svc.btrfs_side()?.restore_legacy(&device, q.snapshot).await?))
+}
+
+/// `GET …/restore/btrfs/{device}/send?snapshot=[&parent=]` (restore session): the stream,
+/// zstd-compressed. The session stays alive while it runs.
+async fn restore_btrfs_send(
+    State(st): State<PaState>,
+    h: HeaderMap,
+    UrlPath(device): UrlPath<String>,
+    q: Result<Query<RestoreSnapQuery>, axum::extract::rejection::QueryRejection>,
+) -> Res<Response> {
+    let svc = pa(&st)?;
+    let token = session_for(&svc, &h, &device)?;
+    let q = snap_query(q)?;
+    let parent = q.parent.filter(|p| !p.is_empty() && p != "none");
+    let weak = Arc::downgrade(&svc);
+    let keepalive = Box::new(move || {
+        if let Some(s) = weak.upgrade() {
+            let _ = s.session_devices(&token);
+        }
+    });
+    let who = format!("a restore session from {}", source_of(&h));
+    let body = svc.btrfs_side()?.restore_send(&device, q.snapshot, parent, who, keepalive).await?;
+    Ok(([(header::CONTENT_TYPE, "application/zstd")], body).into_response())
 }
 
 async fn restore_report(
@@ -1973,19 +2103,21 @@ async fn restore_report(
     r.message.truncate(cut);
     let now = now_ms();
     svc.edit(|reg| {
-        let d = reg.devices.get_mut(&r.device).ok_or_else(|| not_found(&r.device))?;
-        d.history.push_back(PcRun {
-            run_id: format!("restore-{now}"),
-            started_ms: now,
-            ended_ms: now,
-            ok: r.ok,
-            snapshot: Some(r.version.clone()),
-            error: (!r.ok).then(|| r.message.clone()),
-            restore: true,
-            ..Default::default()
-        });
-        while d.history.len() > HISTORY {
-            d.history.pop_front();
+        // a btrbk folder has no PC record: its restore is in the audit log and the log file
+        if let Some(d) = reg.devices.get_mut(&r.device) {
+            d.history.push_back(PcRun {
+                run_id: format!("restore-{now}"),
+                started_ms: now,
+                ended_ms: now,
+                ok: r.ok,
+                snapshot: Some(r.version.clone()),
+                error: (!r.ok).then(|| r.message.clone()),
+                restore: true,
+                ..Default::default()
+            });
+            while d.history.len() > HISTORY {
+                d.history.pop_front();
+            }
         }
         // the report is the restore's last call: the session ends, its key goes
         if let Some(s) = reg.sessions.iter_mut().find(|s| s.token_sha == token_sha) {

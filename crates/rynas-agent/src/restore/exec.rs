@@ -22,9 +22,21 @@ const TOPS: &str = "/mnt/rynas-restore-top";
 pub struct Log {
     pub lines: Vec<String>,
     pub echo: Box<dyn Fn(&str)>,
+    /// Checks that failed after the restore (IDs, boot files): no reboot is offered, the
+    /// user is told what to look at.
+    pub problems: Vec<String>,
 }
 
 impl Log {
+    pub fn new(echo: Box<dyn Fn(&str)>) -> Log {
+        Log { lines: Vec::new(), echo, problems: Vec::new() }
+    }
+    /// A failed check: logged, and remembered in [`Log::problems`].
+    pub fn problem(&mut self, s: impl Into<String>) {
+        let s = s.into();
+        self.line(format!("check failed: {s}"));
+        self.problems.push(s);
+    }
     pub fn line(&mut self, s: impl Into<String>) {
         let s = s.into();
         (self.echo)(&s);
@@ -162,18 +174,114 @@ fn umount_all(log: &mut Log) {
     }
 }
 
-/// Replaces every old ID with the new one in a text file of the target.
 fn rewrite(log: &mut Log, p: &Path, map: &[(String, String)]) {
     let Ok(text) = std::fs::read_to_string(p) else { return };
-    let mut t = text.clone();
-    for (old, new) in map {
-        t = t.replace(old.as_str(), new).replace(&old.to_uppercase(), &new.to_uppercase());
-    }
+    let t = super::plan::rewrite_ids(&text, map);
     if t != text {
         if std::fs::write(p, &t).is_ok() {
             log.line(format!("rewrote IDs in {}", p.display()));
         } else {
             log.line(format!("could not rewrite {}", p.display()));
+        }
+    }
+}
+
+/// After a [`Fill::BtrfsPool`] source: the manifest's subvolumes that are not there yet and
+/// not left out on purpose are made empty (excluded ones such as logs, caches, snapper's
+/// `.snapshots`; NOCOW where the manifest says so), parents first. Container engines'
+/// layers and other tools' snapshots are not made again.
+pub fn finish_pool(log: &mut Log, top: &Path, subvolumes: &[Subvolume], skipped: &[String]) -> Result<(), String> {
+    let mut subs: Vec<&Subvolume> = subvolumes.iter().collect();
+    subs.sort_by_key(|s| s.path.matches('/').count());
+    for s in subs {
+        let rel = s.path.trim_start_matches('/');
+        if rel.is_empty() || skipped.iter().any(|k| k == rel || rel.starts_with(&format!("{k}/"))) {
+            continue;
+        }
+        if ["docker/btrfs", "containers/storage", "timeshift-btrfs", crate::btrfs::SNAP_DIR].iter().any(|x| rel.contains(x)) {
+            continue;
+        }
+        let p = top.join(rel);
+        if std::fs::symlink_metadata(&p).is_ok() {
+            // an empty folder left by the parent's snapshot becomes the subvolume
+            let empty = p.is_dir() && crate::btrfs::subvol_info(&p).is_none() && std::fs::read_dir(&p).map(|mut r| r.next().is_none()).unwrap_or(false);
+            if !empty {
+                continue;
+            }
+            std::fs::remove_dir(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+        }
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+        }
+        crate::btrfs::create(&p)?;
+        log.line(format!("{rel}: made empty (not in the backup)"));
+        if s.nocow {
+            match crate::btrfs::set_nocow(&p) {
+                Ok(()) => log.line(format!("{rel}: NOCOW")),
+                Err(e) => log.line(format!("warning: {e}")),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Copies the files of `from` into `to` (folders made, existing files replaced; symlinks
+/// and special files skipped: a FAT ESP has none).
+fn copy_tree(from: &Path, to: &Path) -> std::io::Result<(u64, u64)> {
+    let (mut files, mut bytes) = (0, 0);
+    std::fs::create_dir_all(to)?;
+    for e in std::fs::read_dir(from)? {
+        let e = e?;
+        let t = e.file_type()?;
+        let (src, dst) = (e.path(), to.join(e.file_name()));
+        if t.is_dir() {
+            let (f, b) = copy_tree(&src, &dst)?;
+            files += f;
+            bytes += b;
+        } else if t.is_file() {
+            bytes += std::fs::copy(&src, &dst)?;
+            files += 1;
+        }
+    }
+    Ok((files, bytes))
+}
+
+/// A swap file of the manifest made again (it is never in a backup): NOCOW, allocated,
+/// `mkswap` with its UUID.
+fn make_swapfiles(log: &mut Log, m: &Manifest) {
+    for s in m.swap.iter().filter(|s| s.file && s.size_bytes > 0 && s.path.starts_with('/')) {
+        let p = in_target(&s.path);
+        if p.exists() {
+            continue;
+        }
+        let made = (|| -> Result<(), String> {
+            use std::os::fd::AsRawFd;
+            use std::os::unix::fs::OpenOptionsExt;
+            if let Some(d) = p.parent() {
+                std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+            }
+            let f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&p).map_err(|e| e.to_string())?;
+            // NOCOW before any data (btrfs refuses a copy-on-write swap file)
+            let _ = crate::btrfs::set_nocow(&p);
+            // SAFETY: fallocate(2) on our own descriptor
+            if unsafe { libc::fallocate(f.as_raw_fd(), 0, 0, s.size_bytes as libc::off_t) } != 0 {
+                return Err(std::io::Error::last_os_error().to_string());
+            }
+            drop(f);
+            let path = p.to_string_lossy().into_owned();
+            let mut argv = vec!["mkswap"];
+            if !s.uuid.is_empty() {
+                argv.extend(["-U", &s.uuid]);
+            }
+            argv.push(&path);
+            run(log, &argv).map(|_| ())
+        })();
+        match made {
+            Ok(()) => log.line(format!("swap file {} made again ({} MiB)", s.path, s.size_bytes >> 20)),
+            Err(e) => {
+                let _ = std::fs::remove_file(&p);
+                log.line(format!("warning: swap file {}: {e}", s.path));
+            }
         }
     }
 }
@@ -315,9 +423,16 @@ fn execute_inner(src: &mut dyn RestoreSource, v: &Version, m: &Manifest, plan: &
             eprint!("\r  {} / {} MiB ({}%)   ", done >> 20, total >> 20, done * 100 / total.max(1));
         }
     };
+    let skipped = src.skipped_subvolumes();
     if src.fill() == Fill::BtrfsPool {
         log.line(format!("receiving the subvolumes of version {}", v.id));
-        src.fill_pool(v, &pools, &progress)?;
+        let r = src.fill_pool(v, &pools, &progress);
+        // already printed by the source
+        log.lines.extend(src.drain_log());
+        r?;
+        for pool in &pools {
+            finish_pool(log, &pool.top_level, &pool.subvolumes, &skipped)?;
+        }
         if let Some((f, a)) = plan.filesystems.iter().filter(|a| a.fstype == "btrfs").map(|a| (&m.filesystems[a.fs], a)).next()
             && let Some(d) = &f.default_subvol
             && let Some(pool) = pools.iter().find(|p| p.uuid == a.uuid)
@@ -327,8 +442,15 @@ fn execute_inner(src: &mut dyn RestoreSource, v: &Version, m: &Manifest, plan: &
     }
     // 5. the tree as fstab says (shallow mount points first)
     let mut mounts: Vec<(String, &super::plan::FsAction, Option<String>)> = Vec::new();
+    let left_out = |s: &Option<String>| {
+        s.as_deref().map(|s| s.trim_start_matches('/')).is_some_and(|s| skipped.iter().any(|k| k == s || s.starts_with(&format!("{k}/"))))
+    };
     for a in &plan.filesystems {
         for me in &m.filesystems[a.fs].mounts {
+            if a.fstype == "btrfs" && left_out(&me.subvol) {
+                log.line(format!("{}: not restored, not mounted", me.path));
+                continue;
+            }
             mounts.push((me.path.clone(), a, me.subvol.clone()));
         }
     }
@@ -352,35 +474,39 @@ fn execute_inner(src: &mut dyn RestoreSource, v: &Version, m: &Manifest, plan: &
         eprintln!();
         log.line("files restored");
     }
+    // the boot filesystems a pool restore leaves empty (the ESP): the PC's own copy inside
+    // the restored root first, so the kernels are there; the boot step then regenerates what
+    // it can, and the copy stands where it cannot
+    let mut boot_files = src.fill() == Fill::MountedTree;
+    if src.fill() == Fill::BtrfsPool {
+        for (dir, at) in src.boot_copies(m) {
+            let (from, to) = (in_target(&dir), in_target(&at));
+            if !from.is_dir() {
+                log.line(format!("warning: the boot copy {dir} is not in the restored system"));
+                continue;
+            }
+            match copy_tree(&from, &to) {
+                Ok((files, bytes)) => {
+                    log.line(format!("{dir} → {at}: {files} files, {} MiB", bytes >> 20));
+                    boot_files |= files > 0;
+                }
+                Err(e) => log.line(format!("warning: copying {dir} to {at}: {e}")),
+            }
+        }
+    }
+    make_swapfiles(log, m);
     for d in ["proc", "sys", "dev", "run", "tmp"] {
         let _ = std::fs::create_dir_all(in_target(d));
     }
     let _ = std::fs::set_permissions(in_target("tmp"), std::os::unix::fs::PermissionsExt::from_mode(0o1777));
-    // 7. ID fixes
-    if !plan.id_map.is_empty() {
-        for f in ["/etc/fstab", "/etc/crypttab", "/etc/kernel/cmdline", "/etc/default/grub"] {
-            rewrite(log, &in_target(f), &plan.id_map);
-        }
-        if let Some(esp) = &m.boot.esp
-            && let Ok(rd) = std::fs::read_dir(in_target(esp).join("loader/entries"))
-        {
-            for e in rd.flatten() {
-                rewrite(log, &e.path(), &plan.id_map);
-            }
-        }
-        let root_new = plan.filesystems.iter().find(|a| m.filesystems[a.fs].mounts.iter().any(|x| x.path == "/")).map(|a| a.uuid.clone()).unwrap_or_default();
-        let fstab = std::fs::read_to_string(in_target("/etc/fstab")).unwrap_or_default();
-        let active = fstab.lines().filter(|l| !l.trim_start().starts_with('#')).any(|l| l.contains(&root_new));
-        if !root_new.is_empty() && !active && fstab.contains("UUID=") {
-            log.line("warning: the root filesystem's new UUID is on no active fstab line: check /etc/fstab");
-        }
-    }
+    // 7. ID fixes, the lines of subvolumes not restored, then the checks
+    fix_texts(log, m, plan, &skipped);
     if std::fs::read_to_string(in_target("/etc/selinux/config")).is_ok_and(|t| t.lines().any(|l| l.trim() == "SELINUX=enforcing")) {
         let _ = std::fs::write(in_target("/.autorelabel"), b"");
         log.line("SELinux enforcing: /.autorelabel set");
     }
     // 8. boot
-    boot(m, plan, log)?;
+    boot(m, plan, log, boot_files)?;
     // 9. log into the target, unmount
     let ts = crate::state::now_ms() / 1000;
     let _ = std::fs::create_dir_all(in_target("/var/log"));
@@ -392,6 +518,120 @@ fn execute_inner(src: &mut dyn RestoreSource, v: &Version, m: &Manifest, plan: &
     }
     log.line("restore finished");
     Ok(())
+}
+
+/// The text fixes after the data: fstab lines of subvolumes not restored commented (with
+/// [`super::plan::RESTORE_MARK`]), the old IDs replaced when new ones were made (fstab,
+/// crypttab, `/etc/kernel/cmdline`, `/etc/default/grub`, the loader entries), then the
+/// checks: the restored root's ID on the active fstab line of `/`, no old ID left.
+fn fix_texts(log: &mut Log, m: &Manifest, plan: &Plan, skipped: &[String]) {
+    let fstab_p = in_target("/etc/fstab");
+    if !skipped.is_empty()
+        && let Ok(t) = std::fs::read_to_string(&fstab_p)
+    {
+        let c = super::plan::comment_unrestored(&t, skipped);
+        if c != t {
+            match std::fs::write(&fstab_p, &c) {
+                Ok(()) => log.line(format!("/etc/fstab: lines of {} commented ({})", skipped.join(", "), super::plan::RESTORE_MARK.trim())),
+                Err(e) => log.problem(format!("/etc/fstab: {e}")),
+            }
+        }
+    }
+    let mut entries: Vec<PathBuf> = Vec::new();
+    if let Some(esp) = &m.boot.esp
+        && let Ok(rd) = std::fs::read_dir(in_target(esp).join("loader/entries"))
+    {
+        entries.extend(rd.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "conf")));
+    }
+    if plan.id_map.is_empty() {
+        return;
+    }
+    let texts = ["/etc/fstab", "/etc/crypttab", "/etc/kernel/cmdline", "/etc/default/grub"];
+    for f in texts {
+        rewrite(log, &in_target(f), &plan.id_map);
+    }
+    for e in &entries {
+        rewrite(log, e, &plan.id_map);
+    }
+    // the checks on what is there now
+    let root = plan.filesystems.iter().find(|a| m.filesystems[a.fs].mounts.iter().any(|x| x.path == "/"));
+    let mut root_ids: Vec<String> = root.map(|a| vec![a.uuid.clone()]).unwrap_or_default();
+    if let Some(a) = root
+        && let FsSource::Partition { disk, number } = &m.filesystems[a.fs].source
+        && let Some(d) = plan.disks.iter().find(|d| d.source == *disk)
+        && let Some(e) = d.gpt.entries.get(*number as usize - 1)
+    {
+        root_ids.push(crate::gpt::guid_text(&e.guid));
+    }
+    let fstab = std::fs::read_to_string(&fstab_p).unwrap_or_default();
+    let mut checked: Vec<(String, String)> = Vec::new();
+    for f in ["/etc/kernel/cmdline", "/etc/default/grub"] {
+        if let Ok(t) = std::fs::read_to_string(in_target(f)) {
+            checked.push((f.to_string(), t));
+        }
+    }
+    for e in &entries {
+        if let Ok(t) = std::fs::read_to_string(e) {
+            checked.push((e.display().to_string(), t));
+        }
+    }
+    for p in super::plan::sanity(&fstab, &root_ids, &checked, &plan.id_map) {
+        log.problem(p);
+    }
+}
+
+/// Which of `paths` (from the top level) exist in the btrfs filesystem on `device`: mounted
+/// read-only at its top level for the look, then unmounted.
+pub fn existing_paths(device: &str, paths: &[String]) -> Result<Vec<String>, String> {
+    let at = PathBuf::from(TOPS).join("probe");
+    let mut log = Log::new(Box::new(|_| {}));
+    mount(&mut log, device, &at, "btrfs", "ro,subvolid=5")?;
+    let found = paths.iter().filter(|p| at.join(p.trim_start_matches('/')).exists()).cloned().collect();
+    let _ = run(&mut log, &["umount", &at.to_string_lossy()]);
+    Ok(found)
+}
+
+/// "Add subvolumes" (btrfs method): nothing is formatted. The PC's pool on `device` is
+/// mounted at its top level, the source receives the chosen subvolumes into it, and the
+/// fstab lines an earlier restore commented for them are active again.
+pub fn execute_add(src: &mut dyn RestoreSource, v: &Version, m: &Manifest, device: &str, restored: &[String], log: &mut Log) -> Result<(), String> {
+    let name = device.trim_start_matches("/dev/");
+    if let Some(why) = disk_in_use(name) {
+        return Err(format!("{device}: {why}"));
+    }
+    let top = PathBuf::from(TOPS).join("add");
+    mount(log, device, &top, "btrfs", "subvolid=5")?;
+    let r = (|| -> Result<(), String> {
+        let root = m.root().ok_or("the manifest has no root filesystem")?;
+        let pools = vec![PoolTarget { uuid: root.uuid.clone(), top_level: top.clone(), subvolumes: root.subvolumes.clone() }];
+        let progress = |done: u64, total: u64| {
+            if total > 0 {
+                eprint!("\r  {} / {} MiB ({}%)   ", done >> 20, total >> 20, done * 100 / total.max(1));
+            }
+        };
+        log.line(format!("adding to the pool on {device} from version {}", v.id));
+        let r = src.fill_pool(v, &pools, &progress);
+        log.lines.extend(src.drain_log());
+        r?;
+        let root_path = m.btrbk.as_ref().and_then(|b| b.subvolumes.iter().find(|s| s.mount == "/")).map(|s| s.path.trim_start_matches('/').to_string());
+        if let Some(rp) = root_path {
+            let f = top.join(rp).join("etc/fstab");
+            if let Ok(t) = std::fs::read_to_string(&f) {
+                let u = super::plan::uncomment_restored(&t, restored);
+                if u != t {
+                    std::fs::write(&f, &u).map_err(|e| format!("{}: {e}", f.display()))?;
+                    log.line(format!("/etc/fstab: the lines of {} are active again", restored.join(", ")));
+                }
+            }
+        }
+        Ok(())
+    })();
+    let _ = run(log, &["sync"]);
+    let _ = run(log, &["umount", &top.to_string_lossy()]);
+    if r.is_ok() {
+        log.line("subvolumes added");
+    }
+    r
 }
 
 fn bind_system(log: &mut Log) -> Result<(), String> {
@@ -416,16 +656,42 @@ fn removable_fallback(log: &mut Log, esp: &Path, files: &[(&str, &str)]) {
     }
 }
 
-fn boot(m: &Manifest, plan: &Plan, log: &mut Log) -> Result<(), String> {
+/// The initramfs tool and the boot loader of the restored system when the manifest does not
+/// say (a legacy snapshot): what is installed in it, and what the ESP holds.
+fn detect_boot(m: &Manifest) -> (InitramfsTool, Loader) {
+    let tool = match m.boot.initramfs {
+        InitramfsTool::Unknown if chroot_has("mkinitcpio") => InitramfsTool::Mkinitcpio,
+        InitramfsTool::Unknown if chroot_has("dracut") => InitramfsTool::Dracut,
+        InitramfsTool::Unknown if chroot_has("update-initramfs") => InitramfsTool::UpdateInitramfs,
+        t => t,
+    };
+    let esp = in_target(m.boot.esp.as_deref().unwrap_or("/boot/efi"));
+    let loader = match m.boot.loader {
+        Loader::Unknown if esp.join("loader").is_dir() || esp.join("EFI/systemd").is_dir() => Loader::SystemdBoot,
+        Loader::Unknown if chroot_has("grub-install") || chroot_has("grub2-install") => Loader::Grub,
+        l => l,
+    };
+    (tool, loader)
+}
+
+fn boot(m: &Manifest, plan: &Plan, log: &mut Log, boot_files: bool) -> Result<(), String> {
     bind_system(log)?;
     let uefi_live = Path::new("/sys/firmware/efi").exists();
+    let (initramfs_tool, loader) = detect_boot(m);
+    if (initramfs_tool, loader) != (m.boot.initramfs, m.boot.loader) {
+        log.line(format!("found in the restored system: initramfs {initramfs_tool:?}, boot loader {loader:?}"));
+    }
+    let mut m = m.clone();
+    m.boot.initramfs = initramfs_tool;
+    m.boot.loader = loader;
+    let m = &m;
     // the PC's command line, before any tool that writes boot entries
     let cmdline = kernel_cmdline(m);
     let mut cmdline_mapped = cmdline.clone();
     for (o, n) in &plan.id_map {
         cmdline_mapped = cmdline_mapped.replace(o.as_str(), n);
     }
-    if m.boot.kernel_cmdline.is_some() || matches!(m.boot.loader, Loader::SystemdBoot) || m.boot.uki {
+    if !cmdline_mapped.trim().is_empty() && (m.boot.kernel_cmdline.is_some() || matches!(m.boot.loader, Loader::SystemdBoot) || m.boot.uki) {
         let _ = std::fs::create_dir_all(in_target("/etc/kernel"));
         std::fs::write(in_target("/etc/kernel/cmdline"), format!("{cmdline_mapped}\n")).map_err(|e| format!("/etc/kernel/cmdline: {e}"))?;
         log.line(format!("/etc/kernel/cmdline: {cmdline_mapped}"));
@@ -528,6 +794,16 @@ fn boot(m: &Manifest, plan: &Plan, log: &mut Log) -> Result<(), String> {
         }
         (Loader::Refind, _) | (Loader::Unknown, _) => {
             log.line("warning: the boot loader is unknown or rEFInd: reinstall it by hand if the PC does not boot (the ESP files were restored)");
+        }
+    }
+    // the boot files must be there: an empty ESP does not boot
+    if m.boot.uefi {
+        let efi = esp.join("EFI");
+        let has_efi = std::fs::read_dir(&efi).map(|mut r| r.next().is_some()).unwrap_or(false);
+        if !has_efi {
+            log.problem(format!("{esp_rel} has no EFI boot files: reinstall the boot loader from the restored system before rebooting"));
+        } else if !boot_files && matches!(m.boot.loader, Loader::Unknown | Loader::Refind) {
+            log.problem("the boot loader is unknown and no boot files were restored: check the ESP before rebooting".to_string());
         }
     }
     Ok(())

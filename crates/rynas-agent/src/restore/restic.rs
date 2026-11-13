@@ -27,23 +27,13 @@ pub struct ResticSource {
 }
 
 impl ResticSource {
-    /// Logs in with a restore code; `device` picks one when the code covers several.
-    pub fn login(client: Client, code: &str, device: Option<&str>) -> Result<ResticSource, String> {
-        let s: RestoreSession = client.post_json("/api/v1/pcbackup/agent/restore/login", &RestoreLogin { code: code.to_string() })?;
-        let dev = match device {
-            Some(d) => s.devices.iter().find(|x| x.device == d).cloned(),
-            None => s.devices.first().cloned(),
-        }
-        .ok_or("the restore code covers no such PC")?;
-        Ok(ResticSource {
-            client: Arc::new(client.with_token(&s.token)),
-            dev,
-            repo: None,
-        })
+    /// The file backups of the session's PC.
+    pub fn from_session(client: Arc<Client>, dev: RestoreDevice) -> ResticSource {
+        ResticSource { client, dev, repo: None }
     }
 
     /// The administrator login (password + TOTP): the PCs with a one-time code each, for
-    /// [`ResticSource::login`].
+    /// [`super::login`].
     pub fn admin_choice(client: &Client, username: &str, password: &str, totp: &str) -> Result<RestoreChoice, String> {
         client.post_json(
             "/api/v1/pcbackup/agent/restore/admin-login",

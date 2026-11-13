@@ -214,6 +214,65 @@ pub struct Response {
     pub body: Vec<u8>,
 }
 
+
+/// A body read as it arrives ([`Client::get_stream`]).
+pub struct BodyStream {
+    conn: Conn,
+    chunked: bool,
+    /// Bytes left in the current chunk (chunked) or in the body.
+    left: u64,
+    /// No length and not chunked: the body ends with the connection.
+    to_eof: bool,
+    done: bool,
+}
+
+impl Read for BodyStream {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if self.done || out.is_empty() {
+            return Ok(0);
+        }
+        if self.chunked && self.left == 0 {
+            let mut sz = String::new();
+            if self.conn.read_line(&mut sz)? == 0 {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "the answer was cut off"));
+            }
+            let n = u64::from_str_radix(sz.trim().split(';').next().unwrap_or(""), 16).map_err(|_| io::Error::other("bad chunk size"))?;
+            if n == 0 {
+                loop {
+                    let mut t = String::new();
+                    if self.conn.read_line(&mut t)? == 0 || t.trim().is_empty() {
+                        break;
+                    }
+                }
+                self.done = true;
+                return Ok(0);
+            }
+            self.left = n;
+        }
+        if !self.chunked && !self.to_eof && self.left == 0 {
+            self.done = true;
+            return Ok(0);
+        }
+        let want = (out.len() as u64).min(self.left) as usize;
+        let n = self.conn.read(&mut out[..want])?;
+        if n == 0 {
+            if self.to_eof {
+                self.done = true;
+                return Ok(0);
+            }
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "the answer was cut off"));
+        }
+        if !self.to_eof {
+            self.left -= n as u64;
+        }
+        if self.chunked && self.left == 0 {
+            let mut crlf = [0u8; 2];
+            self.conn.read_exact(&mut crlf)?;
+        }
+        Ok(n)
+    }
+}
+
 impl Response {
     #[allow(dead_code)]
     pub fn header(&self, name: &str) -> Option<&str> {
@@ -428,10 +487,8 @@ impl Client {
         }
     }
 
-    /// The status line, headers and body of an answer; `true` when the connection can be
-    /// reused.
-    fn read_response(conn: &mut Conn, method: &str) -> io::Result<(Response, bool)> {
-        // status line and headers
+    /// The status line and headers of an answer.
+    fn read_head(conn: &mut Conn) -> io::Result<(u16, Vec<(String, String)>)> {
         let mut line = String::new();
         let mut total = 0;
         let mut read_line = |conn: &mut Conn, line: &mut String| -> io::Result<()> {
@@ -463,6 +520,50 @@ impl Client {
                 hdrs.push((k.trim().to_string(), v.trim().to_string()));
             }
         }
+        Ok((status, hdrs))
+    }
+
+    /// `GET path` whose body is read as it arrives, on a fresh connection that is closed
+    /// afterwards; reads wait up to `read_wait` without a byte (Cancel is honoured). The
+    /// reader ends at the body's end and fails when the body is cut (a chunked body without
+    /// its last chunk, a short `Content-Length` body). An error answer is read whole and
+    /// returned as `Err(answer)`.
+    pub fn get_stream(&self, path: &str, headers: &[(&str, &str)], read_wait: Duration) -> io::Result<Result<BodyStream, Response>> {
+        let mut conn = self.connect_with(read_wait)?;
+        let mut head = format!(
+            "GET {path} HTTP/1.1\r\nHost: {}\r\nUser-Agent: rynas-agent/{}\r\nConnection: close\r\n",
+            self.ep.host,
+            env!("CARGO_PKG_VERSION")
+        );
+        if let Some(a) = &self.auth {
+            head.push_str(&format!("Authorization: {a}\r\n"));
+        }
+        for (k, v) in headers {
+            head.push_str(&format!("{k}: {v}\r\n"));
+        }
+        head.push_str("\r\n");
+        {
+            let w = conn.get_mut();
+            w.write_all(head.as_bytes())?;
+            w.flush()?;
+        }
+        let (status, hdrs) = Self::read_head(&mut conn)?;
+        let get = |n: &str| hdrs.iter().find(|(k, _)| k.eq_ignore_ascii_case(n)).map(|(_, v)| v.clone());
+        let chunked = get("transfer-encoding").is_some_and(|v| v.to_ascii_lowercase().contains("chunked"));
+        let length = get("content-length").and_then(|v| v.parse::<u64>().ok());
+        let mut body = BodyStream { conn, chunked, left: if chunked { 0 } else { length.unwrap_or(u64::MAX) }, to_eof: !chunked && length.is_none(), done: false };
+        if !(200..300).contains(&status) {
+            let mut b = Vec::new();
+            (&mut body).take(1 << 20).read_to_end(&mut b)?;
+            return Ok(Err(Response { status, headers: hdrs, body: b }));
+        }
+        Ok(Ok(body))
+    }
+
+    /// The status line, headers and body of an answer; `true` when the connection can be
+    /// reused.
+    fn read_response(conn: &mut Conn, method: &str) -> io::Result<(Response, bool)> {
+        let (status, hdrs) = Self::read_head(conn)?;
         let get = |n: &str| hdrs.iter().find(|(k, _)| k.eq_ignore_ascii_case(n)).map(|(_, v)| v.clone());
         let close = get("connection").is_some_and(|v| v.eq_ignore_ascii_case("close"));
         let mut body_out = Vec::new();

@@ -399,7 +399,7 @@ pub fn tools(p: &Plan) -> Vec<String> {
 }
 
 /// The plan as readable steps.
-pub fn describe(m: &Manifest, p: &Plan) -> Vec<String> {
+pub fn describe(m: &Manifest, p: &Plan, pool: bool) -> Vec<String> {
     let mut out = Vec::new();
     for d in &p.disks {
         let src = &m.disks[d.source];
@@ -438,8 +438,10 @@ pub fn describe(m: &Manifest, p: &Plan) -> Vec<String> {
             out.push(argv.join(" "));
         }
         let f = &m.filesystems[a.fs];
-        for s in f.subvolumes.iter() {
-            out.push(format!("  btrfs subvolume create {}{}", s.path, if s.captured { "" } else { " (empty)" }));
+        if !pool {
+            for s in f.subvolumes.iter() {
+                out.push(format!("  btrfs subvolume create {}{}", s.path, if s.captured { "" } else { " (empty)" }));
+            }
         }
         if let Some(d) = &f.default_subvol {
             out.push(format!("  btrfs subvolume set-default {d}"));
@@ -449,13 +451,194 @@ pub fn describe(m: &Manifest, p: &Plan) -> Vec<String> {
         out.push(format!("mkswap -U {} {}", s.uuid, s.device));
     }
     out.push("mount the filesystems as the PC's fstab says, below /mnt/rynas-restore".into());
-    out.push("restore the version's files (owners, modes, ACLs, xattrs, hard links)".into());
+    if pool {
+        out.push("receive the chosen subvolumes from the NAS (below), make the ones not in the backup empty, lay down the boot copies".into());
+    } else {
+        out.push("restore the version's files (owners, modes, ACLs, xattrs, hard links)".into());
+    }
     if !p.id_map.is_empty() {
         out.push(format!("rewrite {} changed IDs in fstab, crypttab, loader entries and the cmdline", p.id_map.len()));
     }
     out.push(format!("chroot: /etc/kernel/cmdline from the manifest, initramfs ({:?}), boot loader ({:?}), removable EFI fallback", m.boot.initramfs, m.boot.loader));
     for n in &p.notes {
         out.push(format!("note: {n}"));
+    }
+    out
+}
+
+
+// ------------------------------------------------------------------ text fixes
+
+/// Marker of an fstab line the restore commented out (a subvolume that was not restored); a
+/// later "add subvolumes" restore takes it away again.
+pub const RESTORE_MARK: &str = "# rynas-restore: ";
+
+/// Every old ID replaced by its new one (as written, and in upper case: FAT serials and
+/// GPT GUIDs are often upper case).
+pub fn rewrite_ids(text: &str, map: &[(String, String)]) -> String {
+    let mut t = text.to_string();
+    for (old, new) in map {
+        t = t.replace(old.as_str(), new).replace(&old.to_uppercase(), &new.to_uppercase());
+    }
+    t
+}
+
+/// The subvolume an fstab line mounts (`subvol=@home`, `subvol=/@home`), without the
+/// leading `/`.
+pub fn fstab_subvol(line: &str) -> Option<String> {
+    let l = line.trim();
+    if l.starts_with('#') {
+        return None;
+    }
+    let f: Vec<&str> = l.split_whitespace().collect();
+    if f.len() < 4 || f[2] != "btrfs" {
+        return None;
+    }
+    f[3].split(',').find_map(|o| o.strip_prefix("subvol=")).map(|s| s.trim_start_matches('/').to_string())
+}
+
+/// Comments out the fstab lines of subvolumes that were not restored (`skipped`: paths
+/// from the top level), with [`RESTORE_MARK`].
+pub fn comment_unrestored(fstab: &str, skipped: &[String]) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for l in fstab.lines() {
+        match fstab_subvol(l) {
+            Some(s) if skipped.iter().any(|k| k.trim_start_matches('/') == s) => out.push(format!("{RESTORE_MARK}{l}")),
+            _ => out.push(l.to_string()),
+        }
+    }
+    let mut t = out.join("\n");
+    if fstab.ends_with('\n') {
+        t.push('\n');
+    }
+    t
+}
+
+/// Uncomments the lines [`comment_unrestored`] commented for the subvolumes now restored.
+pub fn uncomment_restored(fstab: &str, restored: &[String]) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for l in fstab.lines() {
+        match l.strip_prefix(RESTORE_MARK) {
+            Some(orig) if fstab_subvol(orig).is_some_and(|s| restored.iter().any(|k| k.trim_start_matches('/') == s)) => out.push(orig.to_string()),
+            _ => out.push(l.to_string()),
+        }
+    }
+    let mut t = out.join("\n");
+    if fstab.ends_with('\n') {
+        t.push('\n');
+    }
+    t
+}
+
+/// The checks after the ID fixes: the root filesystem's ID (`root_ids`: its new UUID and
+/// PARTUUID) on an active fstab line mounted at `/` (when fstab names `/` by an ID), and no
+/// old ID left in the loader entries and command lines (`texts`: name, content).
+pub fn sanity(fstab: &str, root_ids: &[String], texts: &[(String, String)], map: &[(String, String)]) -> Vec<String> {
+    let mut problems = Vec::new();
+    let root_line = fstab
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#'))
+        .find(|l| l.split_whitespace().nth(1) == Some("/"));
+    if let Some(l) = root_line {
+        let first = l.split_whitespace().next().unwrap_or("");
+        let by_id = ["UUID=", "PARTUUID="].iter().any(|p| first.starts_with(p));
+        let ids: Vec<String> = root_ids.iter().filter(|i| !i.is_empty()).map(|i| i.to_lowercase()).collect();
+        if by_id && !ids.iter().any(|i| first.to_lowercase().ends_with(i.as_str())) {
+            problems.push(format!("/etc/fstab: the root line names {first}, not the restored root filesystem"));
+        }
+    } else if !fstab.trim().is_empty() {
+        problems.push("/etc/fstab: no active line mounts /".into());
+    }
+    for (name, text) in texts {
+        let lower = text.to_lowercase();
+        for (old, _) in map {
+            if lower.contains(&old.to_lowercase()) {
+                problems.push(format!("{name}: still names the old ID {old}"));
+            }
+        }
+    }
+    problems
+}
+
+/// A diff of two texts, line by line (`-`/`+` for changed lines only).
+pub fn diff_lines(name: &str, before: &str, after: &str) -> Vec<String> {
+    let (a, b): (Vec<&str>, Vec<&str>) = (before.lines().collect(), after.lines().collect());
+    let mut out = Vec::new();
+    for i in 0..a.len().max(b.len()) {
+        let (x, y) = (a.get(i).copied(), b.get(i).copied());
+        if x != y {
+            if let Some(x) = x {
+                out.push(format!("- {x}"));
+            }
+            if let Some(y) = y {
+                out.push(format!("+ {y}"));
+            }
+        }
+    }
+    if out.is_empty() {
+        return vec![format!("{name}: no change")];
+    }
+    let mut v = vec![format!("--- {name}")];
+    v.extend(out);
+    v
+}
+
+/// Every ID of the manifest mapped to a made-up one, as if every one were taken by another
+/// disk: what a dry run feeds the real rewrites with.
+pub fn mock_ids(m: &Manifest) -> Vec<(String, String)> {
+    let mut map: Vec<(String, String)> = Vec::new();
+    let mut n = 0u32;
+    let mut add = |id: &str, fat: bool| {
+        if id.is_empty() || map.iter().any(|(o, _)| o.eq_ignore_ascii_case(id)) {
+            return;
+        }
+        n += 1;
+        let new = if fat { format!("0000-{n:04X}") } else { format!("00000000-0000-4000-8000-{n:012x}") };
+        map.push((id.to_lowercase(), new));
+    };
+    for f in &m.filesystems {
+        add(&f.uuid, f.fstype == "vfat");
+    }
+    for d in &m.disks {
+        if let Some(t) = &d.table {
+            for p in &t.partitions {
+                add(&p.part_guid, false);
+            }
+        }
+    }
+    for l in &m.luks {
+        add(&l.uuid, false);
+    }
+    for s in &m.swap {
+        add(&s.uuid, false);
+    }
+    // FAT serials are matched as written (upper case)
+    for (o, _) in map.iter_mut() {
+        if o.len() == 9 && o.as_bytes()[4] == b'-' {
+            *o = o.to_uppercase();
+        }
+    }
+    map
+}
+
+/// The dry run of the text fixes: fstab, `/etc/kernel/cmdline`, `GRUB_CMDLINE_LINUX` and a
+/// loader entry's `options` line from the manifest, each rewritten on a copy with
+/// [`mock_ids`] and with the unrestored subvolumes commented, shown as diffs.
+pub fn dry_run_rewrites(m: &Manifest, skipped: &[String]) -> Vec<String> {
+    let map = mock_ids(m);
+    let mut out = vec![format!("dry run of the text fixes, every ID replaced by a made-up one ({} IDs):", map.len())];
+    let fstab = m.fstab.clone();
+    out.extend(diff_lines("/etc/fstab", &fstab, &comment_unrestored(&rewrite_ids(&fstab, &map), skipped)));
+    let cmdline = super::exec::kernel_cmdline(m);
+    if !cmdline.is_empty() {
+        out.extend(diff_lines("/etc/kernel/cmdline", &cmdline, &rewrite_ids(&cmdline, &map)));
+        let entry = format!("title restored\noptions {cmdline}");
+        out.extend(diff_lines("loader entry (options)", &entry, &rewrite_ids(&entry, &map)));
+    }
+    if let Some(g) = &m.boot.grub_cmdline {
+        let line = format!("GRUB_CMDLINE_LINUX=\"{g}\"");
+        out.extend(diff_lines("/etc/default/grub", &line, &rewrite_ids(&line, &map)));
     }
     out
 }
@@ -546,7 +729,7 @@ pub(crate) mod tests {
         let p = build(&m, &[(0, target(8 << 30))], &|u| u == "2d5cddec-8777-4aef-9b8d-1d7093e60982").unwrap();
         assert_eq!(p.filesystems[0].old_uuid.as_deref(), Some("2d5cddec-8777-4aef-9b8d-1d7093e60982"));
         assert_eq!(p.id_map.len(), 1);
-        assert!(!describe(&m, &p).is_empty());
+        assert!(!describe(&m, &p, false).is_empty());
     }
 
     #[test]
@@ -560,5 +743,59 @@ pub(crate) mod tests {
         let mut m = sample();
         m.lvm_report = Some("{}".into());
         assert!(build(&m, &[(0, target(8 << 30))], &|_| false).is_err());
+    }
+
+
+    const FSTAB: &str = "# /etc/fstab\nPARTUUID=3612a9bf-0000-4000-8000-000000000003 / btrfs rw,subvol=/@ 0 0\nUUID=2d5cddec-8777-4aef-9b8d-1d7093e60982 /home btrfs rw,subvol=@home 0 0\nUUID=2d5cddec-8777-4aef-9b8d-1d7093e60982 /home/me/games btrfs rw,subvol=/@games 0 0\nUUID=91BC-A784 /boot vfat rw 0 2\n";
+
+    #[test]
+    fn unrestored_lines_are_commented_and_come_back() {
+        let c = comment_unrestored(FSTAB, &["@home".into(), "@games".into()]);
+        assert!(c.lines().any(|l| l.starts_with(RESTORE_MARK) && l.contains("subvol=@home")));
+        assert!(c.lines().any(|l| l.starts_with(RESTORE_MARK) && l.contains("subvol=/@games")));
+        assert!(c.lines().any(|l| l.starts_with("PARTUUID=") && l.contains("subvol=/@ ")), "the root line stays");
+        assert!(c.ends_with('\n'));
+        // adding @games later: only its line comes back
+        let u = uncomment_restored(&c, &["@games".into()]);
+        assert!(u.lines().any(|l| l.starts_with("UUID=") && l.contains("subvol=/@games")));
+        assert!(u.lines().any(|l| l.starts_with(RESTORE_MARK) && l.contains("subvol=@home")));
+        assert_eq!(uncomment_restored(&u, &["@home".into()]), FSTAB);
+        assert_eq!(fstab_subvol("UUID=x /a btrfs rw,subvol=/@a 0 0").as_deref(), Some("@a"));
+        assert_eq!(fstab_subvol("UUID=x /a ext4 rw 0 0"), None);
+    }
+
+    #[test]
+    fn id_rewrites_on_copies_and_the_checks() {
+        let map = vec![("2d5cddec-8777-4aef-9b8d-1d7093e60982".to_string(), "00000000-0000-4000-8000-000000000001".to_string()), ("3612a9bf-0000-4000-8000-000000000003".to_string(), "aaaaaaaa-0000-4000-8000-000000000009".to_string())];
+        let t = rewrite_ids(FSTAB, &map);
+        assert!(!t.contains("2d5cddec") && !t.contains("3612a9bf"));
+        assert!(t.contains("PARTUUID=aaaaaaaa-0000-4000-8000-000000000009 / "));
+        // upper-case forms too (FAT serials, GUIDs)
+        assert_eq!(rewrite_ids("root=PARTUUID=3612A9BF-0000-4000-8000-000000000003", &map), "root=PARTUUID=AAAAAAAA-0000-4000-8000-000000000009");
+        // the checks: the new root ID on the active line of /, no old ID in the entries
+        assert!(sanity(&t, &["AAAAAAAA-0000-4000-8000-000000000009".into()], &[("entry".into(), "options root=PARTUUID=aaaaaaaa-0000-4000-8000-000000000009".into())], &map).is_empty());
+        let bad = sanity(FSTAB, &["aaaaaaaa-0000-4000-8000-000000000009".into()], &[("entry".into(), "options root=PARTUUID=3612A9BF-0000-4000-8000-000000000003".into())], &map);
+        assert_eq!(bad.len(), 2, "{bad:?}");
+        let commented = comment_unrestored(&t, &["@".into()]);
+        assert!(sanity(&commented, &["x".into()], &[], &map).iter().any(|p| p.contains("no active line")));
+    }
+
+    #[test]
+    fn dry_run_uses_mock_ids_and_shows_diffs() {
+        let mut m = sample();
+        m.fstab = "UUID=2d5cddec-8777-4aef-9b8d-1d7093e60982 / ext4 defaults 0 1\nUUID=91BC-A784 /boot/efi vfat umask=0077 0 1\n".into();
+        m.boot.kernel_cmdline = Some("root=UUID=2d5cddec-8777-4aef-9b8d-1d7093e60982 ro quiet".into());
+        m.boot.grub_cmdline = Some("quiet".into());
+        let map = mock_ids(&m);
+        assert!(map.iter().any(|(o, n)| o == "91BC-A784" && n.len() == 9), "{map:?}");
+        assert!(map.iter().any(|(o, _)| o == "3612a9bf-0000-4000-8000-000000000003"));
+        let out = dry_run_rewrites(&m, &[]);
+        let text = out.join("\n");
+        assert!(text.contains("--- /etc/fstab"), "{text}");
+        assert!(text.contains("- UUID=2d5cddec-8777-4aef-9b8d-1d7093e60982 / ext4"), "{text}");
+        assert!(text.contains("+ UUID=00000000-0000-4000-8000-"), "{text}");
+        assert!(text.contains("+ UUID=0000-0"), "{text}");
+        assert!(text.contains("--- /etc/kernel/cmdline"), "{text}");
+        assert!(text.contains("/etc/default/grub: no change"), "{text}");
     }
 }

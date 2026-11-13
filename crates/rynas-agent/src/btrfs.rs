@@ -118,6 +118,10 @@ pub struct SubvolInfo {
     pub readonly: bool,
     /// Creation time (seconds): the real order of snapshots, whatever their names say.
     pub otime: i64,
+    /// Last transaction that changed it (0: nothing was ever written, e.g. a receive that
+    /// stopped at once).
+    pub generation: u64,
+    pub parent_uuid: Option<String>,
 }
 
 #[repr(C)]
@@ -190,7 +194,95 @@ pub fn subvol_info(p: &Path) -> Option<SubvolInfo> {
     if unsafe { libc::ioctl(f.as_raw_fd(), IOC_GET_SUBVOL_INFO as _, &mut *a) } < 0 {
         return None;
     }
-    Some(SubvolInfo { uuid: uuid_text(&a.uuid), received_uuid: uuid_text(&a.received_uuid), readonly: a.flags & 1 != 0, otime: a.otime.sec as i64 })
+    Some(SubvolInfo {
+        uuid: uuid_text(&a.uuid),
+        received_uuid: uuid_text(&a.received_uuid),
+        readonly: a.flags & 1 != 0,
+        otime: a.otime.sec as i64,
+        generation: a.generation,
+        parent_uuid: uuid_text(&a.parent_uuid),
+    })
+}
+
+/// `_IOW(0x94, 26, __u64)`: `BTRFS_IOC_SUBVOL_SETFLAGS`.
+const IOC_SUBVOL_SETFLAGS: u64 = (1 << 30) | (8 << 16) | (0x94 << 8) | 26;
+/// `BTRFS_SUBVOL_RDONLY`.
+const SUBVOL_RDONLY: u64 = 1 << 1;
+
+fn open_top(p: &Path) -> Result<std::fs::File, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(p)
+        .map_err(|e| format!("{}: {e}", p.display()))
+}
+
+/// Sets or clears the read-only flag of the subvolume at `p` with the ioctl itself: unlike
+/// `btrfs property set ro false`, the received UUID stays (a received snapshot keeps being
+/// the parent of incremental sends; the NAS moves its own received snapshots the same way).
+pub fn set_readonly(p: &Path, readonly: bool) -> Result<(), String> {
+    use std::os::fd::AsRawFd;
+    let f = open_top(p)?;
+    let flags: u64 = if readonly { SUBVOL_RDONLY } else { 0 };
+    // SAFETY: the kernel reads one u64
+    if unsafe { libc::ioctl(f.as_raw_fd(), IOC_SUBVOL_SETFLAGS as _, &flags) } < 0 {
+        return Err(format!("{}: {}", p.display(), std::io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+/// Moves the read-only subvolume `from` to `to` (another folder of the same filesystem,
+/// never replacing anything): a read-only subvolume cannot change parent folder, so the flag
+/// is lifted for the moment of the move and set again wherever it is then.
+pub fn move_readonly(from: &Path, to: &Path) -> Result<(), String> {
+    let c = |p: &Path| std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).map_err(|e| e.to_string());
+    let (f, t) = (c(from)?, c(to)?);
+    set_readonly(from, false)?;
+    // SAFETY: two valid C strings
+    let rc = unsafe { libc::renameat2(libc::AT_FDCWD, f.as_ptr(), libc::AT_FDCWD, t.as_ptr(), libc::RENAME_NOREPLACE) };
+    let moved = if rc == 0 { Ok(()) } else { Err(format!("moving {} to {}: {}", from.display(), to.display(), std::io::Error::last_os_error())) };
+    let at = if moved.is_ok() { to } else { from };
+    let ro = set_readonly(at, true);
+    moved.and(ro)
+}
+
+/// `FS_IOC_GETFLAGS` / `FS_IOC_SETFLAGS` (`_IOR/_IOW('f', 1/2, long)`) and `FS_NOCOW_FL`.
+const FS_IOC_GETFLAGS: u64 = (2 << 30) | (8 << 16) | ((b'f' as u64) << 8) | 1;
+const FS_IOC_SETFLAGS: u64 = (1 << 30) | (8 << 16) | ((b'f' as u64) << 8) | 2;
+const FS_NOCOW_FL: libc::c_int = 0x0080_0000;
+
+/// `chattr +C` on an empty folder or file (new files inside inherit it).
+pub fn set_nocow(p: &Path) -> Result<(), String> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(p)
+        .map_err(|e| format!("{}: {e}", p.display()))?;
+    let mut flags: libc::c_int = 0;
+    // SAFETY: the kernel reads and writes one int
+    unsafe {
+        if libc::ioctl(f.as_raw_fd(), FS_IOC_GETFLAGS as _, &mut flags) < 0 {
+            return Err(format!("{}: {}", p.display(), std::io::Error::last_os_error()));
+        }
+        flags |= FS_NOCOW_FL;
+        if libc::ioctl(f.as_raw_fd(), FS_IOC_SETFLAGS as _, &flags) < 0 {
+            return Err(format!("{}: {}", p.display(), std::io::Error::last_os_error()));
+        }
+    }
+    Ok(())
+}
+
+/// A writable snapshot of `src` at `dst` (`dst` must not exist).
+pub fn snapshot_rw(src: &Path, dst: &Path) -> Result<(), String> {
+    btrfs(&["subvolume".as_ref(), "snapshot".as_ref(), src.as_os_str(), dst.as_os_str()]).map(|_| ())
+}
+
+/// An empty subvolume at `p`.
+pub fn create(p: &Path) -> Result<(), String> {
+    btrfs(&["subvolume".as_ref(), "create".as_ref(), p.as_os_str()]).map(|_| ())
 }
 
 #[cfg(test)]

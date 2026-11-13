@@ -1,7 +1,10 @@
-//! The restore TUI (ratatui): NAS → certificate → method → restore code, or administrator +
-//! TOTP and the PC from a list → version →
-//! target disk → passphrase (LUKS) → plan → the disk name typed → restore (plain log in
-//! the terminal) → reboot. Esc goes back one step, Ctrl-C leaves.
+//! The restore TUI (ratatui): NAS → certificate → restore code, or administrator + TOTP
+//! and the PC from a list → method (when the PC has both) → version (file method) or run of
+//! btrfs snapshots → mode (whole / system / custom / add) and subvolumes with their
+//! snapshots → target disk (or, adding, the PC's btrfs filesystem) → passphrase (LUKS) →
+//! plan → the disk name typed → restore (plain log in the terminal) → reboot, offered only
+//! when the checks after the restore passed. `--dry-run` shows the plan and the text fixes
+//! on copies, and writes nothing. Esc goes back one step, Ctrl-C leaves.
 
 use std::time::Duration;
 
@@ -12,8 +15,12 @@ use ratatui::style::{Modifier, Style, Stylize};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 
-use super::source::RestoreSource;
-use super::{exec, plan, restic};
+use std::sync::Arc;
+
+use rynas_api_types::pcagent::{Manifest, RestoreDevice};
+
+use super::source::{RestoreSource, Version};
+use super::{btrfs, exec, plan, restic};
 use crate::http::{self, Client, Endpoint};
 
 enum Answer<T> {
@@ -161,25 +168,30 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let mut term = ratatui::init();
     let r = flow(&mut term, args);
     ratatui::restore();
-    let job = r?;
-    let Some((mut src, v, m, p, pass)) = job else {
+    let Some(job) = r? else {
         return Ok(());
     };
     // the work itself, with a plain log
-    println!("Restoring {} version {} …", src.device(), &v.id[..8]);
-    let mut log = exec::Log {
-        lines: Vec::new(),
-        echo: Box::new(|s| println!("{s}")),
-    };
-    let r = exec::execute(&mut src, &v, &m, &p, &exec::Options { passphrase: pass.as_deref() }, &mut log);
-    let text = log.text();
-    let cut = text.len().saturating_sub(60 << 10);
-    let cut = (cut..text.len()).find(|i| text.is_char_boundary(*i)).unwrap_or(text.len());
-    match &r {
-        Ok(()) => src.report(&v, true, "restored", &text[cut..]),
-        Err(e) => src.report(&v, false, e, &text[cut..]),
+    let mut log = exec::Log::new(Box::new(|s| println!("{s}")));
+    let format = matches!(job, Job::Format { .. });
+    match job {
+        Job::Format { mut src, v, m, p, pass } => {
+            println!("Restoring {} ({}) version {} …", src.device(), src.kind(), &v.id[..8.min(v.id.len())]);
+            let r = exec::execute(src.as_mut(), &v, &m, &p, &exec::Options { passphrase: pass.as_deref() }, &mut log);
+            super::finish(src.as_mut(), &v, r, &log)?;
+        }
+        Job::Add { mut src, v, m, device, restored } => {
+            println!("Adding {} to {device} …", restored.join(", "));
+            let r = exec::execute_add(src.as_mut(), &v, &m, &device, &restored, &mut log);
+            super::finish(src.as_mut(), &v, r, &log)?;
+            println!("\nThe subvolumes were added.");
+            return Ok(());
+        }
     }
-    r?;
+    if format && !log.problems.is_empty() {
+        println!("\nThe data is restored, but do not reboot yet: check what is listed above.");
+        return Ok(());
+    }
     println!("\nThe PC is restored. Remove the live medium and reboot.");
     eprint!("Reboot now? [y/N] ");
     let mut a = String::new();
@@ -190,25 +202,89 @@ pub fn run(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-type Job = (restic::ResticSource, super::source::Version, rynas_api_types::pcagent::Manifest, plan::Plan, Option<String>);
+/// A checklist: Space ticks, `o` asks for another snapshot of the highlighted line
+/// (`Ok(Some(i))`), Enter goes on (`Ok(None)`).
+fn checklist(term: &mut DefaultTerminal, title: &str, intro: &[String], items: &[String], checked: &mut [bool]) -> Answer<Option<usize>> {
+    let mut st = ListState::default();
+    st.select(Some(0));
+    loop {
+        let _ = term.draw(|f| {
+            let h = (intro.len() as u16 + 2).min(f.area().height / 2);
+            let [top, list] = Layout::vertical([Constraint::Length(h), Constraint::Min(3)]).areas(f.area());
+            let lines: Vec<Line> = intro.iter().map(|l| Line::from(l.as_str())).collect();
+            f.render_widget(Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }).block(frame_title(title)), top);
+            let li: Vec<ListItem> = items.iter().zip(checked.iter()).map(|(t, c)| ListItem::new(format!("[{}] {t}", if *c { "x" } else { " " }))).collect();
+            let l = List::new(li)
+                .block(Block::default().borders(Borders::ALL).title(" ↑↓ · Space: tick · o: another snapshot · Enter: next · Esc: back "))
+                .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+                .highlight_symbol("› ");
+            f.render_stateful_widget(l, list, &mut st);
+        });
+        match key() {
+            Some((KeyCode::Char('c'), m)) if m.contains(KeyModifiers::CONTROL) => return Answer::Quit,
+            Some((KeyCode::Esc, _)) => return Answer::Back,
+            Some((KeyCode::Up, _)) => st.select(Some(st.selected().unwrap_or(0).saturating_sub(1))),
+            Some((KeyCode::Down, _)) => st.select(Some((st.selected().unwrap_or(0) + 1).min(items.len().saturating_sub(1)))),
+            Some((KeyCode::Char(' '), _)) => {
+                if let Some(c) = st.selected().and_then(|i| checked.get_mut(i)) {
+                    *c = !*c;
+                }
+            }
+            Some((KeyCode::Char('o'), _)) => {
+                if let Some(i) = st.selected() {
+                    return Answer::Ok(Some(i));
+                }
+            }
+            Some((KeyCode::Enter, _)) => return Answer::Ok(None),
+            _ => {}
+        }
+    }
+}
+
+/// btrfs filesystems the live system sees (for "add subvolumes").
+fn btrfs_devices() -> Vec<String> {
+    std::process::Command::new("blkid")
+        .args(["-t", "TYPE=btrfs", "-o", "device"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
+        .unwrap_or_default()
+}
+
+enum Job {
+    /// Format the target disk and restore.
+    Format { src: Box<dyn RestoreSource>, v: Version, m: Manifest, p: plan::Plan, pass: Option<String> },
+    /// btrfs: add subvolumes into the PC's existing pool, nothing formatted.
+    Add { src: Box<btrfs::BtrfsSource>, v: Version, m: Manifest, device: String, restored: Vec<String> },
+}
 
 fn flow(term: &mut DefaultTerminal, args: &[String]) -> Result<Option<Job>, String> {
     let mut stage = 0;
     let mut url = super::opt(args, "--nas").unwrap_or_default();
     let mut ep: Option<Endpoint> = None;
     let mut fp = String::new();
-    let mut src: Option<restic::ResticSource> = None;
+    let mut session: Option<(Arc<Client>, RestoreDevice)> = None;
+    let mut restic_src: Option<restic::ResticSource> = None;
+    let mut bsrc: Option<btrfs::BtrfsSource> = None;
+    let mut use_btrfs = false;
     let mut admin_user = String::new();
     let mut choice: Vec<rynas_api_types::pcagent::RestoreChoiceDevice> = Vec::new();
-    let mut versions = Vec::new();
-    let mut version: Option<super::source::Version> = None;
-    let mut manifest: Option<rynas_api_types::pcagent::Manifest> = None;
+    let mut versions: Vec<Version> = Vec::new();
+    let mut version: Option<Version> = None;
+    let mut manifest: Option<Manifest> = None;
+    // the manifest the plan is built from (btrfs: sizes of the chosen snapshots, guided layout)
+    let mut planned: Option<Manifest> = None;
+    let mut mode = btrfs::Mode::Whole;
+    let mut checked: Vec<bool> = Vec::new();
+    let mut overrides: Vec<(String, String)> = Vec::new();
+    let mut override_for: Option<usize> = None;
     let mut target: Option<plan::TargetDisk> = None;
     let mut pass: Option<String> = None;
     let mut the_plan: Option<plan::Plan> = None;
     let mut error: Option<String> = None;
+    let dry = super::flag(args, "--dry-run");
     loop {
         let err_lines = |e: &Option<String>| -> Vec<String> { e.iter().map(|x| format!("! {x}")).collect() };
+        let layout = |m: &Option<Manifest>| -> Vec<rynas_api_types::pcagent::BtrbkSubvolume> { m.as_ref().and_then(|m| m.btrbk.as_ref()).map(|b| b.subvolumes.clone()).unwrap_or_default() };
         match stage {
             0 => {
                 let mut help = vec![
@@ -233,7 +309,7 @@ fn flow(term: &mut DefaultTerminal, args: &[String]) -> Result<Option<Job>, Stri
                 let e = ep.clone().ok_or("no NAS")?;
                 if !e.tls {
                     fp.clear();
-                    stage = 2;
+                    stage = 3;
                     continue;
                 }
                 let probe = Client::new(e.clone(), "");
@@ -247,7 +323,7 @@ fn flow(term: &mut DefaultTerminal, args: &[String]) -> Result<Option<Job>, Stri
                     && http::normalize_fp(&given) == seen
                 {
                     fp = seen;
-                    stage = 2;
+                    stage = 3;
                     continue;
                 }
                 let lines = vec![
@@ -259,15 +335,6 @@ fn flow(term: &mut DefaultTerminal, args: &[String]) -> Result<Option<Job>, Stri
                 ];
                 step!(message(term, "Certificate", &lines), stage = 0);
                 fp = seen;
-                stage = 2;
-            }
-            2 => {
-                let items = vec![
-                    ("File backup: the PC's repository on the NAS".to_string(), None),
-                    ("btrfs snapshots received by the NAS".to_string(), Some("not in this build of the agent".to_string())),
-                ];
-                let intro = vec!["Which backup of the PC?".to_string()];
-                step!(choose(term, "Method", &intro, &items), stage = 1);
                 stage = 3;
             }
             3 => {
@@ -276,7 +343,7 @@ fn flow(term: &mut DefaultTerminal, args: &[String]) -> Result<Option<Job>, Stri
                     ("Administrator of the NAS with TOTP".to_string(), None),
                 ];
                 let intro = vec!["How do you log in to the NAS?".to_string()];
-                let i = step!(choose(term, "Access", &intro, &items), stage = 2);
+                let i = step!(choose(term, "Access", &intro, &items), stage = 1);
                 error = None;
                 stage = if i == 0 { 30 } else { 31 };
             }
@@ -316,24 +383,12 @@ fn flow(term: &mut DefaultTerminal, args: &[String]) -> Result<Option<Job>, Stri
                 intro.extend(err_lines(&error));
                 let i = step!(choose(term, "PC", &intro, &items), stage = 31);
                 let d = choice[i].clone();
-                match restic::ResticSource::login(Client::new(ep.clone().ok_or("no NAS")?, &fp), &d.code, Some(&d.device)) {
-                    Ok(mut s) => match s.versions() {
-                        Ok(v) if !v.is_empty() => {
-                            versions = v;
-                            src = Some(s);
-                            error = None;
-                            stage = 4;
-                        }
-                        // the batch is used up: log in again for another PC
-                        Ok(_) => {
-                            error = Some(format!("{} has no version yet; log in again", d.device));
-                            stage = 31;
-                        }
-                        Err(e) => {
-                            error = Some(e);
-                            stage = 31;
-                        }
-                    },
+                match super::login(Client::new(ep.clone().ok_or("no NAS")?, &fp), &d.code, Some(&d.device)) {
+                    Ok(s) => {
+                        session = Some(s);
+                        error = None;
+                        stage = 2;
+                    }
                     Err(e) => {
                         error = Some(format!("{e} (the codes last 5 minutes: log in again)"));
                         stage = 31;
@@ -347,31 +402,70 @@ fn flow(term: &mut DefaultTerminal, args: &[String]) -> Result<Option<Job>, Stri
                 ];
                 help.extend(err_lines(&error));
                 let code = step!(input(term, "Restore code", &help, "", false), stage = 3);
-                match restic::ResticSource::login(Client::new(ep.clone().ok_or("no NAS")?, &fp), &code, None) {
-                    Ok(mut s) => match s.versions() {
-                        Ok(v) if !v.is_empty() => {
-                            versions = v;
-                            src = Some(s);
-                            error = None;
-                            stage = 4;
-                        }
-                        Ok(_) => error = Some("the PC has no version yet".into()),
-                        Err(e) => error = Some(e),
-                    },
+                match super::login(Client::new(ep.clone().ok_or("no NAS")?, &fp), &code, None) {
+                    Ok(s) => {
+                        session = Some(s);
+                        error = None;
+                        stage = 2;
+                    }
                     Err(e) => error = Some(e),
                 }
             }
+            2 => {
+                let (client, dev) = session.clone().ok_or("no session")?;
+                let files = !dev.group.is_empty();
+                use_btrfs = if files && dev.btrfs {
+                    let items = vec![
+                        ("File backup: the PC's repository on the NAS".to_string(), None),
+                        ("btrfs snapshots received by the NAS".to_string(), None),
+                    ];
+                    let mut intro = vec![format!("{} has both kinds of backup. Which one?", dev.device)];
+                    intro.extend(err_lines(&error));
+                    // the session is open: going back means a new code
+                    step!(choose(term, "Method", &intro, &items), stage = 3) == 1
+                } else {
+                    dev.btrfs
+                };
+                let loaded = if use_btrfs {
+                    btrfs::BtrfsSource::new(client, dev).and_then(|mut s| {
+                        let v = s.versions()?;
+                        bsrc = Some(s);
+                        Ok(v)
+                    })
+                } else {
+                    let mut s = restic::ResticSource::from_session(client, dev);
+                    let v = s.versions();
+                    restic_src = Some(s);
+                    v
+                };
+                match loaded {
+                    Ok(v) if !v.is_empty() => {
+                        versions = v;
+                        error = None;
+                        stage = if use_btrfs { 40 } else { 4 };
+                    }
+                    Ok(_) => {
+                        error = Some("the PC has no version yet".into());
+                        stage = 3;
+                    }
+                    Err(e) => {
+                        error = Some(e);
+                        stage = 3;
+                    }
+                }
+            }
             4 => {
-                let s = src.as_ref().ok_or("no source")?;
+                let s = restic_src.as_ref().ok_or("no source")?;
                 let items: Vec<(String, Option<String>)> = versions
                     .iter()
-                    .map(|v| (format!("{}  {}  {} files  {}", date(v.time_ms), &v.id[..8], v.files, gib(v.bytes)), None))
+                    .map(|v| (format!("{}  {}  {} files  {}", date(v.time_ms), &v.id[..8.min(v.id.len())], v.files, gib(v.bytes)), None))
                     .collect();
                 let intro = vec![format!("PC {} ({}): choose the version", s.device(), s.dev.hostname)];
                 let i = step!(choose(term, "Version", &intro, &items), stage = 3);
                 let v = versions[i].clone();
-                match src.as_mut().ok_or("no source")?.manifest(&v) {
+                match restic_src.as_mut().ok_or("no source")?.manifest(&v) {
                     Ok(m) => {
+                        planned = Some(m.clone());
                         manifest = Some(m);
                         version = Some(v);
                         error = None;
@@ -382,11 +476,194 @@ fn flow(term: &mut DefaultTerminal, args: &[String]) -> Result<Option<Job>, Stri
                     }
                 }
             }
+            40 => {
+                let s = bsrc.as_ref().ok_or("no source")?;
+                let items: Vec<(String, Option<String>)> = versions
+                    .iter()
+                    .map(|v| {
+                        let run = s.run(&v.id);
+                        let size = if v.bytes > 0 { gib(v.bytes) } else { "size not measured".into() };
+                        let state = match run {
+                            Some(r) if r.incomplete => "an interrupted receive in it".to_string(),
+                            Some(r) if !r.lacks.is_empty() => format!("lacks {}", r.lacks.join(", ")),
+                            _ => "complete".into(),
+                        };
+                        (format!("{}  {}  {}  {}", date(v.time_ms), v.id, size, state), None)
+                    })
+                    .collect();
+                let mut intro = vec![format!("PC {}: choose the run of btrfs snapshots", s.device())];
+                if s.listing.manifest_snapshot.is_none() {
+                    intro.push("no layout manifest on the NAS: an older snapshot's own files are read (legacy)".into());
+                }
+                intro.extend(err_lines(&error));
+                let i = step!(choose(term, "Version", &intro, &items), stage = 3);
+                let v = versions[i].clone();
+                match bsrc.as_mut().ok_or("no source")?.manifest(&v) {
+                    Ok(m) => {
+                        checked = vec![true; layout(&Some(m.clone())).len()];
+                        overrides.clear();
+                        manifest = Some(m);
+                        version = Some(v);
+                        error = None;
+                        stage = 41;
+                    }
+                    Err(e) => {
+                        step!(message(term, "Version", &[e]));
+                    }
+                }
+            }
+            41 => {
+                let items = vec![
+                    ("Whole PC: format the disk, restore every subvolume".to_string(), None),
+                    ("System only: format the disk, restore / and the system subvolumes".to_string(), None),
+                    ("Custom: format the disk, restore the subvolumes you tick".to_string(), None),
+                    ("Add subvolumes: into the PC's existing btrfs filesystem, nothing formatted".to_string(), None),
+                ];
+                let mut intro = vec!["What do you restore?".to_string()];
+                if let Some(l) = bsrc.as_ref().and_then(|s| s.legacy.as_ref()) {
+                    intro.extend(l.notes.iter().map(|n| format!("note: {n}")));
+                }
+                intro.extend(err_lines(&error));
+                let i = step!(choose(term, "Mode", &intro, &items), stage = 40);
+                mode = [btrfs::Mode::Whole, btrfs::Mode::System, btrfs::Mode::Custom, btrfs::Mode::Add][i];
+                error = None;
+                if matches!(mode, btrfs::Mode::Custom | btrfs::Mode::Add) {
+                    stage = 42;
+                    continue;
+                }
+                let v = version.clone().ok_or("no version")?;
+                let s = bsrc.as_mut().ok_or("no source")?;
+                match s.choose(&v, mode, &[], &overrides, &|_| false) {
+                    Ok(_) => {
+                        planned = Some(s.planned_manifest(manifest.as_ref().ok_or("no manifest")?));
+                        stage = 5;
+                    }
+                    Err(e) => error = Some(e),
+                }
+            }
+            42 => {
+                let subs = layout(&manifest);
+                let s = bsrc.as_ref().ok_or("no source")?;
+                let items: Vec<String> = subs
+                    .iter()
+                    .map(|x| {
+                        let snap = overrides.iter().find(|(n, _)| n == &x.name).map(|(_, s)| s.clone()).unwrap_or_else(|| "the run's snapshot".into());
+                        format!("{}  {}  ({snap})", x.name, if x.mount.is_empty() { "not mounted" } else { x.mount.as_str() })
+                    })
+                    .collect();
+                let mut intro = vec![if mode == btrfs::Mode::Add {
+                    "Tick the subvolumes to add (a subvolume mounted inside another needs that one, here or already in the pool).".to_string()
+                } else {
+                    "Tick the subvolumes to restore (the root is needed; a subvolume mounted inside another needs that one too).".to_string()
+                }];
+                intro.push(format!("{} snapshots on the NAS", s.listing.snapshots.len()));
+                intro.extend(err_lines(&error));
+                checked.resize(items.len(), true);
+                match step!(checklist(term, "Subvolumes", &intro, &items, &mut checked), stage = 41) {
+                    Some(i) => {
+                        override_for = Some(i);
+                        stage = 43;
+                    }
+                    None => {
+                        let names: Vec<String> = subs.iter().zip(&checked).filter(|(_, c)| **c).map(|(x, _)| x.name.clone()).collect();
+                        if mode == btrfs::Mode::Add {
+                            if names.is_empty() {
+                                error = Some("tick at least one subvolume".into());
+                            } else {
+                                error = None;
+                                stage = 44;
+                            }
+                            continue;
+                        }
+                        let v = version.clone().ok_or("no version")?;
+                        let s = bsrc.as_mut().ok_or("no source")?;
+                        match s.choose(&v, mode, &names, &overrides, &|_| false) {
+                            Ok(_) => {
+                                planned = Some(s.planned_manifest(manifest.as_ref().ok_or("no manifest")?));
+                                error = None;
+                                stage = 5;
+                            }
+                            Err(e) => error = Some(e),
+                        }
+                    }
+                }
+            }
+            43 => {
+                let subs = layout(&manifest);
+                let i = override_for.ok_or("no subvolume")?;
+                let name = subs.get(i).map(|x| x.name.clone()).ok_or("no subvolume")?;
+                let s = bsrc.as_ref().ok_or("no source")?;
+                let snaps: Vec<&rynas_api_types::pcbackup::ReceivedSnapshot> = s.listing.snapshots.iter().filter(|x| x.group == name && btrfs::complete(x)).collect();
+                let mut items: Vec<(String, Option<String>)> = vec![("the run's snapshot".to_string(), None)];
+                items.extend(snaps.iter().map(|x| (format!("{}  {}", x.name, x.size.map(|z| gib(z.referenced_bytes)).unwrap_or_default()), None)));
+                let k = step!(choose(term, "Snapshot", &[format!("Which snapshot of {name}?")], &items), stage = 42);
+                overrides.retain(|(n, _)| n != &name);
+                if k > 0 {
+                    overrides.push((name, snaps[k - 1].name.clone()));
+                }
+                stage = 42;
+            }
+            44 => {
+                let devs = btrfs_devices();
+                let items: Vec<(String, Option<String>)> = devs.iter().map(|d| (d.clone(), exec::disk_in_use(d.trim_start_matches("/dev/")))).collect();
+                if items.is_empty() {
+                    step!(message(term, "Add subvolumes", &["No btrfs filesystem found on this machine (blkid). Unlock or attach the PC's disk first.".to_string()]), stage = 42);
+                    stage = 42;
+                    continue;
+                }
+                let mut intro = vec!["The PC's btrfs filesystem to add to (it must not be mounted):".to_string()];
+                intro.extend(err_lines(&error));
+                let i = step!(choose(term, "Add to", &intro, &items), stage = 42);
+                let device = devs[i].clone();
+                let subs = layout(&manifest);
+                let names: Vec<String> = subs.iter().zip(&checked).filter(|(_, c)| **c).map(|(x, _)| x.name.clone()).collect();
+                let paths: Vec<String> = subs.iter().map(|x| x.path.clone()).collect();
+                let present = match exec::existing_paths(&device, &paths) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        error = Some(e);
+                        continue;
+                    }
+                };
+                let has = |p: &str| present.iter().any(|x| x.trim_start_matches('/') == p.trim_start_matches('/'));
+                let v = version.clone().ok_or("no version")?;
+                let s = bsrc.as_mut().ok_or("no source")?;
+                let sel = match s.choose(&v, mode, &names, &overrides, &has) {
+                    Ok(sel) => sel.clone(),
+                    Err(e) => {
+                        error = Some(e);
+                        continue;
+                    }
+                };
+                let mut lines = s.describe();
+                let (problems, notes) = super::btrfs_preflight(manifest.as_ref().ok_or("no manifest")?, s);
+                lines.extend(notes.into_iter().map(|n| format!("note: {n}")));
+                if !problems.is_empty() {
+                    step!(message(term, "Before restoring", &problems), stage = 42);
+                    continue;
+                }
+                let name = device.trim_start_matches("/dev/").to_string();
+                lines.push(String::new());
+                if dry {
+                    lines.push("dry run: nothing is written. Enter leaves.".into());
+                    step!(message(term, "Plan", &lines), stage = 42);
+                    return Ok(None);
+                }
+                lines.push(format!("The subvolumes are added to {device}; nothing is formatted. Type its name ({name}) to start:"));
+                let typed = step!(input(term, "Plan", &lines, "", false), stage = 42);
+                if typed.trim_start_matches("/dev/") != name {
+                    error = Some("that is not the device's name".into());
+                    continue;
+                }
+                let restored = sel.chosen.iter().map(|c| c.path.clone()).collect();
+                return Ok(Some(Job::Add { src: Box::new(bsrc.take().ok_or("no source")?), v, m: manifest.take().ok_or("no manifest")?, device, restored }));
+            }
             5 => {
-                let m = manifest.as_ref().ok_or("no manifest")?;
-                let src_index = super::source_disk(m).unwrap_or(0);
-                let src_disk = m.disks.get(src_index);
+                let base = planned.as_ref().ok_or("no manifest")?;
+                let src_index = super::source_disk(base).unwrap_or(0);
+                let src_disk = base.disks.get(src_index);
                 let mut intro = vec![match src_disk {
+                    Some(d) if d.name == super::legacy::GUIDED => "The PC's layout is the guided one (an ESP and btrfs). Choose the target disk: it will be ERASED.".to_string(),
                     Some(d) => format!("The PC's disk: {} {} {} ({}). Choose the target disk: it will be ERASED.", d.name, d.model, d.serial, gib(d.size_bytes)),
                     None => "Choose the target disk: it will be ERASED.".into(),
                 }];
@@ -405,16 +682,26 @@ fn flow(term: &mut DefaultTerminal, args: &[String]) -> Result<Option<Job>, Stri
                 if items.is_empty() {
                     return Err("no disk found".into());
                 }
-                let i = step!(choose(term, "Target disk", &intro, &items), stage = 4);
+                let back = if use_btrfs { 41 } else { 4 };
+                let i = step!(choose(term, "Target disk", &intro, &items), stage = back);
                 let t = disks[i].clone();
+                let mut m = base.clone();
+                if let Some(s) = bsrc.as_ref().filter(|s| s.legacy.as_ref().is_some_and(|l| l.guided)) {
+                    super::legacy::refit_guided(&mut m, t.logical_sector, s.esp_mib);
+                }
                 let names = vec![t.name.clone()];
-                match plan::build(m, &[(src_index, t.clone())], &super::in_use_except(&names)) {
+                let built = plan::build(&m, &[(src_index, t.clone())], &super::in_use_except(&names));
+                match built {
                     Ok(p) => {
-                        let problems = super::preflight(m, &p);
+                        let mut problems = super::preflight(&m, &p);
+                        if let Some(s) = bsrc.as_ref().filter(|_| use_btrfs) {
+                            problems.extend(super::btrfs_preflight(&m, s).0);
+                        }
                         if !problems.is_empty() {
                             step!(message(term, "Before restoring", &problems));
                             continue;
                         }
+                        planned = Some(m);
                         target = Some(t);
                         the_plan = Some(p);
                         error = None;
@@ -442,22 +729,39 @@ fn flow(term: &mut DefaultTerminal, args: &[String]) -> Result<Option<Job>, Stri
                 stage = 7;
             }
             7 => {
-                let (m, p, t) = (manifest.as_ref().ok_or("no manifest")?, the_plan.as_ref().ok_or("no plan")?, target.as_ref().ok_or("no target")?);
-                let mut lines = plan::describe(m, p);
+                let (m, p, t) = (planned.as_ref().ok_or("no manifest")?, the_plan.as_ref().ok_or("no plan")?, target.as_ref().ok_or("no target")?);
+                let mut lines = plan::describe(m, p, use_btrfs);
+                let skipped: Vec<String> = match bsrc.as_ref().filter(|_| use_btrfs) {
+                    Some(s) => {
+                        lines.extend(s.describe());
+                        let (_, notes) = super::btrfs_preflight(m, s);
+                        lines.extend(notes.into_iter().map(|n| format!("note: {n}")));
+                        s.skipped_subvolumes()
+                    }
+                    None => Vec::new(),
+                };
                 let reasons = m.ready_reasons();
                 if !reasons.is_empty() {
                     lines.push(format!("readiness notes: {reasons:?}"));
                 }
+                let back = if p.luks.is_empty() { 5 } else { 6 };
+                if dry {
+                    lines.push(String::new());
+                    lines.extend(plan::dry_run_rewrites(m, &skipped));
+                    lines.push("dry run: nothing is written. Enter leaves.".into());
+                    step!(message(term, "Plan", &lines), stage = back);
+                    return Ok(None);
+                }
                 lines.push(String::new());
                 lines.push(format!("/dev/{} ({} {}) WILL BE ERASED. Type its name ({}) to start:", t.name, t.model, t.serial, t.name));
                 lines.extend(err_lines(&error));
-                let typed = step!(input(term, "Plan", &lines, "", false), stage = if p.luks.is_empty() { 5 } else { 6 });
+                let typed = step!(input(term, "Plan", &lines, "", false), stage = back);
                 if typed.trim_start_matches("/dev/") != t.name {
                     error = Some("that is not the disk's name".into());
                     continue;
                 }
-                let s = src.take().ok_or("no source")?;
-                return Ok(Some((s, version.take().ok_or("no version")?, manifest.take().ok_or("no manifest")?, the_plan.take().ok_or("no plan")?, pass.take())));
+                let src: Box<dyn RestoreSource> = if use_btrfs { Box::new(bsrc.take().ok_or("no source")?) } else { Box::new(restic_src.take().ok_or("no source")?) };
+                return Ok(Some(Job::Format { src, v: version.take().ok_or("no version")?, m: planned.take().ok_or("no manifest")?, p: the_plan.take().ok_or("no plan")?, pass: pass.take() }));
             }
             _ => return Ok(None),
         }

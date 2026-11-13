@@ -726,13 +726,76 @@ pub struct RestoreChoiceDevice {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct RestoreDevice {
     pub device: String,
+    /// The file method's backup group (empty: the PC has no file backups).
     pub group: String,
     #[serde(default)]
     pub description: String,
     #[serde(default)]
     pub hostname: String,
+    /// Opens the session's own key of the group's repository (empty without a group).
     pub repo_password: String,
+    /// The PC has a folder of btrfs snapshots on the NAS (the agent's btrfs method, or btrbk
+    /// over SSH): the restore can read it through [`RESTORE_BTRFS`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub btrfs: bool,
 }
+
+/// The btrfs routes of a restore session (bearer = the session token), below
+/// `/api/v1/pcbackup/agent/restore/btrfs/<device>/`:
+/// - `snapshots`: [`RestoreBtrfsListing`];
+/// - `manifest?snapshot=<name>`: `/.rynas/manifest.json` of that snapshot, as the PC wrote it
+///   (JSON, at most [`MAX_MANIFEST`]; 404 `not_found` when the snapshot has none);
+/// - `legacy?snapshot=<name>`: [`RestoreLegacy`], what an older restore script left inside a
+///   root snapshot without manifest;
+/// - `send?snapshot=<name>[&parent=<name>]`: `btrfs send` of a complete read-only snapshot
+///   of the PC's folder compressed with zstd (`application/zstd`), one stream per PC at a time.
+pub const RESTORE_BTRFS: &str = "/api/v1/pcbackup/agent/restore/btrfs";
+
+/// `GET …/restore/btrfs/<device>/snapshots`: the PC's received snapshots and its runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RestoreBtrfsListing {
+    pub device: String,
+    /// Fed by `rynas-agent` (otherwise btrbk over SSH).
+    #[serde(default)]
+    pub agent: bool,
+    /// Every snapshot, newest first, with its subvolume (`group`), state and size when known.
+    pub snapshots: Vec<crate::pcbackup::ReceivedSnapshot>,
+    /// The snapshots grouped by the timestamp of their names, newest first.
+    pub runs: Vec<crate::pcbackup::PcRun>,
+    /// The snapshot whose manifest the NAS reads for the bare-metal check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_snapshot: Option<String>,
+}
+
+/// A text file of a root snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct LegacyFile {
+    /// Its name inside the folder it was found in.
+    pub name: String,
+    pub text: String,
+}
+
+/// `GET …/restore/btrfs/<device>/legacy?snapshot=`: a root snapshot written before the
+/// manifest existed (an older restore script's hook): `/etc/fstab`, os-release, partition
+/// table dumps (`sfdisk --dump` text found in `/.bootbackup/`, whatever their names) and the
+/// boot folder copies in `/.bootbackup/` (folders ending in `_post`, newest last).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RestoreLegacy {
+    pub snapshot: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fstab: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_release: Option<String>,
+    #[serde(default)]
+    pub partition_dumps: Vec<LegacyFile>,
+    #[serde(default)]
+    pub boot_backups: Vec<String>,
+}
+
+/// Folder of the older restore script's copies inside the root subvolume.
+pub const LEGACY_BOOT_DIR: &str = ".bootbackup";
+/// Largest text file read for [`RestoreLegacy`].
+pub const LEGACY_FILE_MAX: usize = 64 << 10;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct RestoreSession {

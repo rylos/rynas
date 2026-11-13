@@ -14,7 +14,7 @@
 //!   waiting for it, or Make a code), then the folder under its own title; one row of
 //!   buttons (Back up now / Cancel, Measure, Delete old snapshots now, Settings, Remove); the
 //!   agent's runs; the full-restore check with the manifest's subvolumes, disks and boot
-//!   copies; for btrbk the folded manual steps (key, `btrbk.conf`, first connection, the
+//!   copies; "Restore bare metal" (a restore code and the agent's commands); for btrbk the folded manual steps (key, `btrbk.conf`, first connection, the
 //!   manifest drop-in; open while they are the only way forward) then the first-backup
 //!   check; the snapshots by subvolume or by run, with sizes, Browse and Delete.
 //! - Settings: one dialog per PC: the folder's (also the switch between the senders) and,
@@ -1085,6 +1085,50 @@ fn settings_dialog(pcs: Pcs, p: PcTarget, agent_dev: Option<PcDevice>) -> AnyVie
 
 // ------------------------------------------------------------------ drawer
 
+/// "Restore bare metal" for a PC of this folder (sent by rynas-agent or by btrbk): a
+/// one-time restore code (one hour, read-only, this PC only) and the commands to run on the
+/// PC from any live Linux; the agent receives the snapshots back into a new btrfs pool
+/// (`docs/research/pc-backup.md` §11.2 point 6, §11.10).
+fn restore_part(device: String) -> AnyView {
+    use rynas_api_types::pcagent::RestoreCodeCreated;
+    let code = RwSignal::new(None::<RestoreCodeCreated>);
+    let error = RwSignal::new(None::<String>);
+    let busy = RwSignal::new(false);
+    let dev = StoredValue::new(device);
+    let make = move |_| {
+        let u = format!("/api/v1/pcbackup/devices/{}/restore-code", api::encode(&dev.get_value()));
+        error.set(None);
+        busy.set(true);
+        spawn_local(async move {
+            let r = api::post::<(), RestoreCodeCreated>(&u, None).await;
+            let _ = busy.try_set(false);
+            match r {
+                Ok(c) => code.set(Some(c)),
+                Err(e) => error.set(Some(e.text())),
+            }
+        });
+    };
+    let host = super::agent::origin();
+    view! {
+        <h3 class="mini-title">{tr("bkpc.restore.title")}</h3>
+        <p class="small muted">{tr("bkpc.restore.intro")}</p>
+        {form_error(error)}
+        <div class="sec-actions">
+            <button class="btn ghost sm" disabled=move || busy.get() on:click=make><Icon icon=icons::LIFE_BUOY size=14 />{tr("pca.restore_code")}</button>
+        </div>
+        {move || code.get().map(|c| {
+            let cmd = format!("curl -fLO https://github.com/rylos/rynas/releases/latest/download/rynas-agent-x86_64\nchmod +x rynas-agent-x86_64\nsudo ./rynas-agent-x86_64 restore --nas {host}");
+            view! {
+                {ui::note(Tone::Ok, icons::LIFE_BUOY, ui::text(tf("pca.restore_code_valid", &[("code", &c.code), ("until", &i18n::datetime(c.expires_ms))])))}
+                <p class="small muted">{tr("pca.restore_steps")}</p>
+                <pre class="app-code">{cmd.clone()}</pre>
+                <div class="sec-actions">{copy_button_for("dns.copy", t("bkpc.restore.copy").to_string(), cmd)}</div>
+            }
+        })}
+    }
+    .into_any()
+}
+
 fn drawer(pcs: Pcs, device: String) -> AnyView {
     let close = Callback::new(move |_| pcs.open.set(None));
     let dev = StoredValue::new(device.clone());
@@ -1320,6 +1364,7 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
             </div>
             {agent.then(|| ctl.history())}
             {bare}
+            {(!d.list.is_empty()).then(|| restore_part(dev.get_value()))}
             {steps}
             <h3 class="mini-title">{tr("bk.snapshots")}</h3>
             {if snap_rows.is_empty() {

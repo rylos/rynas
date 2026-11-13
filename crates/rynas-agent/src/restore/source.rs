@@ -2,11 +2,10 @@
 //! sources behind one trait:
 //! - [`super::restic::ResticSource`]: the file method; it **fills mounted filesystems** with
 //!   the files of a version;
-//! - the btrfs method (btrfs snapshots received by the NAS, `docs/research/pc-backup.md` §11):
-//!   it **fills a btrfs pool** with `btrfs receive` of send streams streamed over HTTPS, then
-//!   writable snapshots at the subvolume paths. Not in this build; the trait has its step
-//!   ([`RestoreSource::fill_pool`], [`Fill::BtrfsPool`]) so the engine's order of work already
-//!   fits it.
+//! - [`super::btrfs::BtrfsSource`]: the btrfs method (btrfs snapshots received by the NAS,
+//!   `docs/research/pc-backup.md` §11): it **fills a btrfs pool** with `btrfs receive` of send
+//!   streams streamed over HTTPS, then writable snapshots at the subvolume paths
+//!   ([`RestoreSource::fill_pool`], [`Fill::BtrfsPool`]).
 //!
 //! The rest is shared and lives in [`super::exec`]: GPT, LUKS, mkfs with the original IDs,
 //! mounts, ID fixes, the chroot that writes `/etc/kernel/cmdline` and reinstalls the boot
@@ -45,7 +44,6 @@ pub struct PoolTarget {
     pub top_level: PathBuf,
     /// The manifest's subvolumes of this filesystem (captured ones are filled, the others
     /// were created empty by the engine); read by the btrfs method's source.
-    #[allow(dead_code)]
     pub subvolumes: Vec<Subvolume>,
 }
 
@@ -71,4 +69,26 @@ pub trait RestoreSource {
     }
     /// The outcome, for the PC's history on the NAS (best effort).
     fn report(&mut self, v: &Version, ok: bool, message: &str, log: &str);
+    /// Subvolumes (paths from the top level) this restore leaves out on purpose: not created,
+    /// not mounted, their fstab lines commented ([`super::plan::RESTORE_MARK`]).
+    fn skipped_subvolumes(&self) -> Vec<String> {
+        Vec::new()
+    }
+    /// Boot folder copies inside the restored tree to lay on their mount points before the
+    /// boot step (a [`Fill::BtrfsPool`] source has no ESP files otherwise): (folder in the
+    /// target, mount point).
+    fn boot_copies(&self, m: &Manifest) -> Vec<(String, String)> {
+        m.btrbk
+            .as_ref()
+            .map(|b| b.boot_copies.iter().filter(|c| c.files > 0).map(|c| (c.dir.clone(), c.mount.clone())).collect())
+            .unwrap_or_default()
+    }
+    /// Lines for the plan: what this source restores and from which snapshots.
+    fn describe(&self) -> Vec<String> {
+        Vec::new()
+    }
+    /// What the source said while it filled the target, for the restore log.
+    fn drain_log(&mut self) -> Vec<String> {
+        Vec::new()
+    }
 }

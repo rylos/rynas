@@ -38,6 +38,12 @@ pub fn routes() -> Router<AppState> {
         .route("/pcbackup/agent/restore/login", post(forward))
         .route("/pcbackup/agent/restore/admin-login", post(restore_admin_login))
         .route("/pcbackup/agent/restore/report", post(forward))
+        // a bare-metal restore from btrfs snapshots: listing, manifest, legacy files, and the
+        // send stream (streamed back as rynasd writes it)
+        .route("/pcbackup/agent/restore/btrfs/{device}/snapshots", get(forward))
+        .route("/pcbackup/agent/restore/btrfs/{device}/manifest", get(forward))
+        .route("/pcbackup/agent/restore/btrfs/{device}/legacy", get(forward))
+        .route("/pcbackup/agent/restore/btrfs/{device}/send", get(forward))
         .route("/pcbackup/repo/{group}", post(forward))
         .route("/pcbackup/repo/{group}/", post(forward))
         .route("/pcbackup/repo/{group}/{*rest}", any(forward))

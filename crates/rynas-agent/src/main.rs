@@ -30,6 +30,11 @@ mod probe;
 mod restore;
 mod scheduler;
 mod send;
+// the NAS' own guard for `btrfs send` streams (rynas-btrfs), shared as a source file: the
+// restore checks the streams it receives from the NAS the way the NAS checks the PC's
+#[path = "../../rynas-btrfs/src/send_stream.rs"]
+#[allow(dead_code)]
+mod send_stream;
 mod state;
 
 use std::collections::BTreeMap;
@@ -49,6 +54,8 @@ const USAGE: &str = "usage:
   rynas-agent manifest [--print] [--quiet]
   rynas-agent restore [--nas URL] [--code CODE] [--fingerprint FP] [--version ID]
                       [--disk /dev/X] [--confirm X] [--allow-http] [--dry-run]
+                      [--method files|btrfs] [--mode whole|system|custom|add]
+                      [--subvol NAME[=SNAPSHOT]]... [--add-to /dev/X] [--esp-mib N]
   rynas-agent --version";
 
 fn flag(args: &[String], name: &str) -> bool {
@@ -60,7 +67,24 @@ fn opt(args: &[String], name: &str) -> Option<String> {
 }
 
 fn positional(args: &[String]) -> Vec<String> {
-    let with_value = ["--fingerprint", "--nas", "--code", "--version", "--disk", "--confirm", "--passphrase-file", "--token", "--snapshot-dir", "--subvol"];
+    let with_value = [
+        "--fingerprint",
+        "--nas",
+        "--code",
+        "--version",
+        "--disk",
+        "--confirm",
+        "--passphrase-file",
+        "--token",
+        "--snapshot-dir",
+        "--subvol",
+        "--method",
+        "--mode",
+        "--add-to",
+        "--esp-mib",
+        "--pool",
+        "--device",
+    ];
     let mut out = Vec::new();
     let mut skip = false;
     // the program's own name is not an argument
@@ -341,6 +365,8 @@ fn main() {
         "status" => status(),
         "manifest" => manifest_cmd(&args),
         "btrfs-send" => btrfs_send_cmd(&args),
+        // hidden, tests: the btrfs restore's pool step into a mounted throwaway filesystem
+        "btrfs-restore-pool" => root_only().and_then(|_| restore::pool_test(&args)),
         "restore" => root_only().and_then(|_| restore::main(&args)),
         _ => Err(USAGE.into()),
     };

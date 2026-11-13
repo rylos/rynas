@@ -723,15 +723,15 @@ async fn agent_folder_pairing_listing_and_receive() {
     assert_eq!(s, StatusCode::PAYLOAD_TOO_LARGE);
     *e.host.space.lock().unwrap() = None;
 
-    // the PC keeps the btrfs method (no repository to fall back to), cannot get a restore
-    // code for files, and its folder's runs and retention are the B1 ones
+    // the PC keeps the btrfs method (no repository to fall back to), gets a restore code
+    // for its btrfs snapshots (B3), and its folder's runs and retention are the B1 ones
     let dev: Value = serde_json::from_slice(&call(&e, "GET", "/v1/pcbackup/devices/laptop", None).await.1).unwrap();
     let mut settings = dev["device"]["settings"].clone();
     settings["method"] = json!("files");
     let (s, _) = call(&e, "PUT", "/v1/pcbackup/devices/laptop", Some(settings)).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
     let (s, _) = call(&e, "POST", "/v1/pcbackup/devices/laptop/restore-code", None).await;
-    assert_eq!(s, StatusCode::CONFLICT);
+    assert_eq!(s, StatusCode::CREATED);
     let d = detail(&e, "laptop").await;
     assert_eq!(d.list.len(), 2);
     assert_eq!(d.runs.len(), 2);
@@ -835,4 +835,128 @@ async fn switching_a_btrbk_folder_to_the_agent_keeps_the_chain() {
     // a key with the agent is refused
     let (s, _) = call(&e, "PUT", "/v1/pc-backups/targets/pc", Some(json!({"public_key": KEY, "alert_days": 3, "delete": {"allowed": true, "keep_last": 1, "min_age_days": 0}}))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
+}
+
+
+/// B3: a restore session reads the btrfs snapshots of its own PC only (a btrbk folder with
+/// no PC record here): listing with runs, the manifest, the legacy files, the send stream
+/// (full and on a parent), its refusals, the scope, the report that ends it.
+#[tokio::test]
+async fn btrfs_restore_session_reads_only_its_own_pc() {
+    use rynas_api_types::pcagent::{RestoreBtrfsListing, RestoreChoice, RestoreLegacy, RestoreSession};
+    let (e, _agent) = env_agent();
+    let (path, other) = ("/volume1/backup/casa", "/volume1/backup/other");
+    for (d, p) in [("casa", path), ("other", other)] {
+        let t = task(&e, "POST", "/v1/pc-backups/targets", Some(json!({"device": d, "path": p, "public_key": KEY}))).await;
+        assert_eq!(t.status, TaskStatus::Ok, "{:?}", t.error);
+    }
+    let mut broken = snap_u("@home", 0);
+    broken.info.as_mut().unwrap().readonly = false;
+    broken.info.as_mut().unwrap().received_uuid = None;
+    let broken_name = broken.name.clone();
+    folder(&e, path, vec![snap_u("@", 1), snap_u("@home", 1), snap_u("@", 2), snap_u("@home", 2), broken]);
+    folder(&e, other, vec![snap_u("@", 1)]);
+    let (newest, older, home) = (snap("@", 1).name, snap("@", 2).name, snap("@home", 1).name);
+    e.host.manifests.lock().unwrap().insert(
+        PathBuf::from(path).join(&newest),
+        serde_json::to_vec(&json!({"format": 1, "written_at_ms": 1, "hostname": "casa", "boot": {"uefi": true, "loader": "systemd_boot", "initramfs": "mkinitcpio"}, "disks": [], "btrbk": {"snapshot_dir": "/mnt/pool/btrbk_snapshots", "subvolumes": [{"name": "@", "path": "@", "mount": "/"}, {"name": "@home", "path": "@home", "mount": "/home"}]}})).unwrap(),
+    );
+    e.host.legacy.lock().unwrap().insert(
+        PathBuf::from(path).join(&older),
+        RestoreLegacy { snapshot: older.clone(), fstab: Some("UUID=x / btrfs subvol=@ 0 0\n".into()), boot_backups: vec!["20261101_post".into()], ..Default::default() },
+    );
+
+    // a restore code for a folder of btrfs snapshots only (no PC record), none for nothing
+    let (s, _) = call(&e, "POST", "/v1/pcbackup/devices/nope/restore-code", None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, b) = call(&e, "POST", "/v1/pcbackup/devices/casa/restore-code", None).await;
+    assert_eq!(s, StatusCode::CREATED, "{}", String::from_utf8_lossy(&b));
+    let code = serde_json::from_slice::<Value>(&b).unwrap()["code"].as_str().unwrap().to_string();
+    let (s, b) = agent_call(&e, None, "POST", "/v1/pcbackup/agent/restore/login", json!({"code": code}).to_string().into_bytes()).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    let sess: RestoreSession = serde_json::from_slice(&b).unwrap();
+    let d = &sess.devices[0];
+    assert_eq!((d.device.as_str(), d.group.as_str(), d.repo_password.as_str(), d.btrfs), ("casa", "", "", true));
+    let tok = sess.token.clone();
+    // the code was used up
+    let (s, _) = agent_call(&e, None, "POST", "/v1/pcbackup/agent/restore/login", json!({"code": code}).to_string().into_bytes()).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+
+    let base = "/v1/pcbackup/agent/restore/btrfs";
+    // the listing: every snapshot with its subvolume, the runs, the manifest's snapshot
+    let (s, b) = agent_call(&e, Some(&tok), "GET", &format!("{base}/casa/snapshots"), Vec::new()).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    let l: RestoreBtrfsListing = serde_json::from_slice(&b).unwrap();
+    assert_eq!(l.snapshots.len(), 5);
+    assert!(l.snapshots.iter().any(|x| x.name == broken_name && x.incomplete));
+    assert!(l.runs.len() >= 2);
+    assert_eq!(l.manifest_snapshot.as_deref(), Some(newest.as_str()));
+    assert!(!l.agent);
+    // scope: only this session's PC, only with the session's token
+    let (s, _) = agent_call(&e, Some(&tok), "GET", &format!("{base}/other/snapshots"), Vec::new()).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _) = agent_call(&e, None, "GET", &format!("{base}/casa/snapshots"), Vec::new()).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let (s, _) = agent_call(&e, Some("0000"), "GET", &format!("{base}/casa/send?snapshot={newest}"), Vec::new()).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+
+    // the manifest as the PC wrote it; none, or a bad name
+    let (s, b) = agent_call(&e, Some(&tok), "GET", &format!("{base}/casa/manifest?snapshot={newest}"), Vec::new()).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(serde_json::from_slice::<Value>(&b).unwrap()["format"], 1);
+    let (s, _) = agent_call(&e, Some(&tok), "GET", &format!("{base}/casa/manifest?snapshot={home}"), Vec::new()).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    for bad in ["../x.20261101T0300", "x", ""] {
+        let (s, _) = agent_call(&e, Some(&tok), "GET", &format!("{base}/casa/manifest?snapshot={bad}"), Vec::new()).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    // the legacy files of a root snapshot without manifest
+    let (s, b) = agent_call(&e, Some(&tok), "GET", &format!("{base}/casa/legacy?snapshot={older}"), Vec::new()).await;
+    assert_eq!(s, StatusCode::OK);
+    let lg: RestoreLegacy = serde_json::from_slice(&b).unwrap();
+    assert_eq!(lg.boot_backups, vec!["20261101_post".to_string()]);
+
+    // the stream: zstd of what btrfs send writes for a received snapshot
+    let r = e.app.clone().oneshot(Request::builder().uri(format!("{base}/casa/send?snapshot={newest}")).header(header::AUTHORIZATION, format!("Bearer {tok}")).body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(r.headers().get(header::CONTENT_TYPE).unwrap(), "application/zstd");
+    let raw = zstd::stream::decode_all(&to_bytes(r.into_body(), 1 << 20).await.unwrap()[..]).unwrap();
+    let (name, uuid, clone) = rynas_btrfs::send_stream::first_subvolume(&raw).unwrap();
+    assert_eq!((name.as_str(), uuid.as_deref(), clone), (newest.as_str(), Some("6f1c2a8e-0d3b-4c5e-9a7f-000000000001"), None));
+    // on a parent of the same subvolume
+    let (s, b) = agent_call(&e, Some(&tok), "GET", &format!("{base}/casa/send?snapshot={newest}&parent={older}"), Vec::new()).await;
+    assert_eq!(s, StatusCode::OK);
+    let raw = zstd::stream::decode_all(&b[..]).unwrap();
+    assert!(rynas_btrfs::send_stream::first_subvolume(&raw).unwrap().2.is_some());
+    assert_eq!(e.host.sent.lock().unwrap().len(), 2);
+    // refused: an interrupted receive, another subvolume's parent, itself, a missing one
+    for (q, code) in [
+        (format!("snapshot={broken_name}"), StatusCode::NOT_FOUND),
+        (format!("snapshot={newest}&parent={home}"), StatusCode::BAD_REQUEST),
+        (format!("snapshot={newest}&parent={newest}"), StatusCode::BAD_REQUEST),
+        ("snapshot=@.20200101T0000".to_string(), StatusCode::NOT_FOUND),
+    ] {
+        let (s, b) = agent_call(&e, Some(&tok), "GET", &format!("{base}/casa/send?{q}"), Vec::new()).await;
+        assert_eq!(s, code, "{q}: {}", String::from_utf8_lossy(&b));
+    }
+    // a receive or a retention pass holds the folder: busy
+    e.host.busy.lock().unwrap().push(path.into());
+    let (s, b) = agent_call(&e, Some(&tok), "GET", &format!("{base}/casa/send?snapshot={newest}"), Vec::new()).await;
+    assert_eq!((s, err(&b).code.as_str()), (StatusCode::CONFLICT, "busy"));
+    e.host.busy.lock().unwrap().clear();
+    assert_eq!(e.host.sent.lock().unwrap().len(), 2, "nothing was sent while busy");
+
+    // the report ends the session (a btrbk folder has no PC history: the log is kept)
+    let rep = json!({"device": "casa", "version": "btrfs x", "ok": true, "message": "restored", "log": "..."}).to_string().into_bytes();
+    let (s, _) = agent_call(&e, Some(&tok), "POST", "/v1/pcbackup/agent/restore/report", rep).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (s, _) = agent_call(&e, Some(&tok), "GET", &format!("{base}/casa/snapshots"), Vec::new()).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+
+    // the administrator login's choice lists the btrfs folders too
+    let (s, b) = call(&e, "POST", "/v1/pcbackup/restore-choice", None).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    let c: RestoreChoice = serde_json::from_slice(&b).unwrap();
+    let names: Vec<&str> = c.devices.iter().map(|d| d.device.as_str()).collect();
+    assert_eq!(names, vec!["casa", "other"]);
 }
