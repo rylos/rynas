@@ -38,9 +38,11 @@ pub fn valid_snapshot_prefix(p: &str) -> bool {
         && !p.starts_with(['.', '-'])
 }
 
-/// `<prefix>.YYYYMMDDTHHMM[_N]`, btrbk's `long` format (what `rynas-agent` writes), split
-/// into prefix and timestamp. Only the shape and the field ranges are checked here; the NAS
-/// also parses the date ([`valid_snapshot_prefix`] for the prefix).
+/// `<prefix>.<timestamp>[_N]` in one of btrbk's `timestamp_format`s, split into prefix and
+/// timestamp: `short` `YYYYMMDD`, `long` `YYYYMMDDTHHMM` (what `rynas-agent` writes) or
+/// `long-iso` `YYYYMMDDTHHMMSS±hhmm`. Snapshots a btrbk setup made with any of them can be
+/// parents of the agent's sends. Only the shape and the field ranges are checked here; the
+/// NAS also parses the date ([`valid_snapshot_prefix`] for the prefix).
 pub fn split_long_snapshot(name: &str) -> Option<(&str, &str)> {
     let (prefix, ts) = name.rsplit_once('.')?;
     if !valid_snapshot_prefix(prefix) || name.len() > 96 {
@@ -55,17 +57,43 @@ pub fn split_long_snapshot(name: &str) -> Option<(&str, &str)> {
     {
         return None;
     }
-    let b = stamp.as_bytes();
-    if b.len() != 13 || b[8] != b'T' || !b.iter().enumerate().all(|(i, c)| i == 8 || c.is_ascii_digit()) {
-        return None;
-    }
-    let num = |r: std::ops::Range<usize>| stamp[r].parse::<u32>().unwrap_or(99);
-    let ok = (1..=12).contains(&num(4..6))
+    // long-iso: seconds, then a `+hhmm`/`-hhmm` offset
+    let (base, offset) = match stamp.find(['+', '-']) {
+        Some(at) => (&stamp[..at], Some(&stamp[at + 1..])),
+        None => (stamp, None),
+    };
+    let digits = |s: &str| s.bytes().all(|c| c.is_ascii_digit());
+    let num = |r: std::ops::Range<usize>| base[r].parse::<u32>().unwrap_or(99);
+    let b = base.as_bytes();
+    let time_ok = match (b.len(), offset) {
+        (8, None) => digits(base),
+        (13, None) => b[8] == b'T' && digits(&base[..8]) && digits(&base[9..]),
+        (15, Some(o)) => {
+            b[8] == b'T'
+                && digits(&base[..8])
+                && digits(&base[9..])
+                && num(13..15) < 60
+                && o.len() == 4
+                && digits(o)
+                && o[..2].parse::<u32>().unwrap_or(99) <= 14
+                && o[2..].parse::<u32>().unwrap_or(99) < 60
+        }
+        _ => false,
+    };
+    let ok = time_ok
+        && (1..=12).contains(&num(4..6))
         && (1..=31).contains(&num(6..8))
-        && num(9..11) < 24
-        && num(11..13) < 60
-        && num(0..4) >= 1970;
+        && num(0..4) >= 1970
+        && (b.len() == 8 || (num(9..11) < 24 && num(11..13) < 60));
     ok.then_some((prefix, ts))
+}
+
+/// True for a name in btrbk's `long` format, the one the agent gives its own snapshots.
+pub fn is_long_snapshot(name: &str) -> bool {
+    split_long_snapshot(name).is_some_and(|(_, ts)| {
+        let stamp = ts.split_once('_').map_or(ts, |x| x.0);
+        stamp.len() == 13
+    })
 }
 
 /// btrbk's `long` timestamp `YYYYMMDDTHHMM` from civil fields (local time of the PC).
@@ -635,9 +663,19 @@ mod tests {
         assert_eq!(split_long_snapshot("@home.20261112T0300"), Some(("@home", "20261112T0300")));
         assert_eq!(split_long_snapshot("@.20261112T0300_2"), Some(("@", "20261112T0300_2")));
         assert_eq!(split_long_snapshot("a.b.20261112T0300"), Some(("a.b", "20261112T0300")));
+        assert_eq!(split_long_snapshot("@home.20261112"), Some(("@home", "20261112")));
+        assert_eq!(split_long_snapshot("@.20261112T030512+0100_3"), Some(("@", "20261112T030512+0100_3")));
+        assert_eq!(split_long_snapshot("@.20261112T030512-0530"), Some(("@", "20261112T030512-0530")));
+        assert!(is_long_snapshot("@.20261112T0300_2"));
+        assert!(!is_long_snapshot("@.20261112T030512+0100"));
+        assert!(!is_long_snapshot("@.20261112"));
         for bad in [
             "@home",
-            "@home.20261112",
+            "@home.2026111",
+            "@home.20261112T030512",
+            "@home.20261112T030560+0100",
+            "@home.20261112T030512+1500",
+            "@home.20261112T030512+01",
             "@home.20261112T030",
             "@home.20261312T0300",
             "@home.20261112T2400",

@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use rynas_api_types::pcagent::*;
-use rynas_api_types::pcbackup::{long_timestamp, split_long_snapshot, valid_snapshot_prefix};
+use rynas_api_types::pcbackup::{is_long_snapshot, long_timestamp, split_long_snapshot, valid_snapshot_prefix};
 
 use crate::backup::{Counters, Failure, say};
 use crate::btrbk::{self, ConfSubvolume, Layout};
@@ -89,6 +89,9 @@ pub struct Found {
     pub received: bool,
     /// What is nested in it could not be listed (the error): those are missing.
     pub unlisted: Option<String>,
+    /// Holds nothing (e.g. the `/var/lib/machines` and `/var/lib/portables` systemd makes
+    /// on every btrfs root): not sent, the restored parent keeps an empty folder there.
+    pub empty: bool,
 }
 
 /// The subvolumes nested inside the sent ones with no mount of their own (a `@home/games`
@@ -97,7 +100,8 @@ pub struct Found {
 /// `list(mount)` lists what is nested below a mount, at every depth. Left out quietly:
 /// snapshot folders (the agent's, btrbk.conf's, snapper's `.snapshots`, Timeshift's),
 /// container storage, [`crate::btrfs::excluded_subvolume`], cache and log paths
-/// ([`btrbk::NOT_SENT`]), received snapshots, the plan's excludes naming the place or a
+/// ([`btrbk::NOT_SENT`]), received snapshots, empty ones (systemd's `/var/lib/machines` and
+/// `/var/lib/portables` until something is put there), the plan's excludes naming the place or a
 /// folder above it, and whatever lies inside one left out. Returns the candidates (parents
 /// first) and the notes for the run: a listing that failed (of a sent subvolume or of a
 /// nested one: the others go on), a place another mount hides (`mounts`: every mount point),
@@ -127,7 +131,7 @@ pub fn nested_candidates(l: &Layout, snap_dirs: &[String], excludes: &[String], 
             let quiet = |left_out: &mut Vec<String>| left_out.push(rel.clone());
             // mounted elsewhere: handled as a mounted subvolume (sent or not); what is
             // nested in it is found from its own mount
-            if l.subvolumes.iter().any(|x| x.path == path) || not_looked_into(&rel, &place) || snap_dirs.iter().any(|d| !d.trim_matches('/').is_empty() && under(d, &place)) || f.received {
+            if l.subvolumes.iter().any(|x| x.path == path) || not_looked_into(&rel, &place) || snap_dirs.iter().any(|d| !d.trim_matches('/').is_empty() && under(d, &place)) || f.received || f.empty {
                 quiet(&mut left_out);
                 continue;
             }
@@ -207,6 +211,7 @@ fn list_nested(root: &Path, mount: &str, mounts: &[String]) -> Result<Vec<Found>
                 readonly: i.as_ref().is_some_and(|i| i.readonly),
                 received: i.as_ref().is_some_and(|i| i.received_uuid.is_some()),
                 unlisted: failed.iter().find(|(r, _)| *r == rel).map(|(_, e)| e.clone()),
+                empty: std::fs::read_dir(p.join(&rel)).is_ok_and(|mut d| d.next().is_none()),
                 rel,
             }
         })
@@ -336,7 +341,7 @@ impl Local {
     }
 }
 
-/// Sort key of a `<prefix>.YYYYMMDDTHHMM[_N]` name of `prefix`: (timestamp, N).
+/// Sort key of a `<prefix>.<btrbk timestamp>[_N]` name of `prefix`: (timestamp, N).
 fn order(prefix: &str, name: &str) -> Option<(String, u64)> {
     let (p, ts) = split_long_snapshot(name)?;
     if p != prefix {
@@ -397,7 +402,8 @@ pub fn unique_name(prefix: &str, ts: &str, taken: impl Fn(&str) -> bool) -> Stri
 /// parent it was sent on), never a name that is not `<prefix>.<long timestamp>`.
 pub fn to_delete(prefix: &str, snaps: &[(String, i64)], keep: usize, never: &[&str]) -> Vec<String> {
     type Keyed<'a> = ((i64, (String, u64)), &'a String);
-    let mut mine: Vec<Keyed> = snaps.iter().filter_map(|(n, t)| order(prefix, n).map(|k| ((*t, k), n))).collect();
+    // only the agent's own `long` names: snapshots btrbk made in another format stay
+    let mut mine: Vec<Keyed> = snaps.iter().filter(|(n, _)| is_long_snapshot(n)).filter_map(|(n, t)| order(prefix, n).map(|k| ((*t, k), n))).collect();
     mine.sort_by(|a, b| b.0.cmp(&a.0));
     let mut kept = 0;
     let mut out = Vec::new();
@@ -922,6 +928,17 @@ mod tests {
         assert_eq!(picked("a", &l2, &nas2), same("a.20261112T0300_1"));
         // nothing in common: a full send
         assert!(pick_parent("@home", &locals, &AgentBtrfsListing::default(), Some(&src())).is_none());
+        // a btrbk chain in `long-iso` (or `short`) is a parent too: no full send after a switch
+        let nas3 = AgentBtrfsListing { snapshots: vec![snap("@home.20261112T030512+0100", Some("i")), snap("@home.20261111", Some("s"))], receiving: false };
+        let l3 = vec![local("@home.20261112T030512+0100", "i", None, true), local("@home.20261111", "s", None, true)];
+        assert_eq!(picked("@home", &l3, &nas3), same("@home.20261112T030512+0100"));
+    }
+
+    #[test]
+    fn local_cleanup_never_deletes_btrbk_names_in_another_format() {
+        let snaps: Vec<(String, i64)> =
+            [("@.20261110T030512+0100", 1), ("@.20261110", 2), ("@.20261111T0300", 3), ("@.20261112T0300", 4), ("@.20261113T0300", 5)].iter().map(|(n, t)| (n.to_string(), *t)).collect();
+        assert_eq!(to_delete("@", &snaps, 1, &[]), ["@.20261112T0300", "@.20261111T0300"]);
     }
 
     #[test]
@@ -1039,6 +1056,7 @@ mod tests {
             match mount {
                 "/" => Ok(vec![
                     f("var/lib/machines"),
+                    Found { empty: true, ..f("var/lib/portables") },
                     f(".btrbk_snapshots"),
                     f(".snapshots/1/snapshot"),
                     f("var/lib/docker/btrfs/subvolumes/abc"),
@@ -1090,7 +1108,7 @@ mod tests {
     }
 
     fn f(rel: &str) -> Found {
-        Found { rel: rel.into(), readonly: false, received: false, unlisted: None }
+        Found { rel: rel.into(), readonly: false, received: false, unlisted: None, empty: false }
     }
 
     /// Item: a child that cannot be listed, and a nested subvolume under another mount.

@@ -143,7 +143,7 @@ SVG gets the app-wide CSP instead. §5.2 promises "a sandboxing CSP".
 
 ## Memory and speed
 
-Measured on pc-work, release build of `main`, `FAKE_DOCKER=1 tools/ui-audit/start.sh 18690`,
+Measured on a developer PC, release build of `main`, `FAKE_DOCKER=1 tools/ui-audit/start.sh 18690`,
 idle with no browser connected, sampled about 25 s after start:
 
 | Process | RSS | Budget |

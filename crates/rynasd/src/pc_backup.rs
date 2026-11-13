@@ -2645,14 +2645,15 @@ pub const RECEIVE_MIN_RATE: u64 = 64 << 10;
 pub const RECEIVE_RATE_GRACE: Duration = Duration::from_secs(15 * 60);
 
 /// The names of an agent's receive: `snapshot` in btrbk's `long` form, not dated more than
-/// a day ahead, and `parent` (when there is one) of the same subvolume.
+/// a day ahead, and `parent` (when there is one) of the same subvolume, in any btrbk
+/// timestamp format (a parent can be a copy an earlier btrbk setup sent with `long-iso`).
 pub fn check_agent_names(snapshot: &str, parent: Option<&str>, now_ms: u64) -> Res<()> {
     let ok = |n: &str| {
         split_long_snapshot(n).is_some()
             && rynas_btrfs::name::split_snapshot_name(n).is_some()
             && !receive::future_dated(n, now_ms)
     };
-    if !ok(snapshot) {
+    if !ok(snapshot) || !is_long_snapshot(snapshot) {
         return Err(Error::invalid("snapshot", "<name>.YYYYMMDDTHHMM[_N], not in the future"));
     }
     if let Some(p) = parent {
@@ -4258,7 +4259,10 @@ mod tests {
         assert!(check_agent_names(&a, None, now).is_ok());
         assert!(check_agent_names(&b, Some(&a), now).is_ok());
         assert!(check_agent_names(&format!("{b}_3"), Some(&a), now).is_ok());
+        // a parent btrbk sent with `long-iso` before the switch to the agent
+        assert!(check_agent_names(&b, Some("@home.20261101T030512+0100"), now).is_ok());
         for (s, p) in [
+            ("@home.20261101T030512+0100".to_string(), None),
             ("@home".to_string(), None),
             ("@home.29991231T0000".to_string(), None),
             (format!("../@home.{}", ts(1)), None),

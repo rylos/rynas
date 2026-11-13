@@ -198,7 +198,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     match job {
         Job::Format { mut src, v, m, p, pass } => {
             println!("Restoring {} ({}) version {} …", src.device(), src.kind(), &v.id[..8.min(v.id.len())]);
-            let r = exec::execute(src.as_mut(), &v, &m, &p, &exec::Options { passphrase: pass.as_deref() }, &mut log);
+            let r = exec::execute(src.as_mut(), &v, &m, &p, &exec::Options { passphrase: pass.as_deref(), no_nvram: args.iter().any(|a| a == "--no-nvram") }, &mut log);
             super::finish(src.as_mut(), &v, r, &log)?;
         }
         Job::Add { mut src, v, m, device, restored } => {

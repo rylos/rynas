@@ -15,7 +15,9 @@
 //! whole|system|custom|add`, `--subvol NAME[=SNAPSHOT]` (the custom or added subvolumes, and
 //! per-subvolume snapshots), `--add-to /dev/X` (the PC's existing btrfs filesystem, for
 //! `add`; it must be the PC's own filesystem by UUID unless `--other-filesystem`), `--esp-mib
-//! N` (the guided layout of a legacy PC without partition table dump).
+//! N` (the guided layout of a legacy PC without partition table dump). `--no-nvram`: no EFI
+//! boot entry in this machine's firmware (the disk goes into another PC; implied for a USB
+//! disk), the removable path EFI/BOOT boots it.
 
 pub mod btrfs;
 pub mod exec;
@@ -284,7 +286,7 @@ fn run_execute(args: &[String], src: &mut dyn RestoreSource, v: &source::Version
         None => None,
     };
     let mut log = exec::Log::new(Box::new(|s| eprintln!("{s}")));
-    let r = exec::execute(src, v, m, p, &exec::Options { passphrase: pass.as_deref() }, &mut log);
+    let r = exec::execute(src, v, m, p, &exec::Options { passphrase: pass.as_deref(), no_nvram: flag(args, "--no-nvram") }, &mut log);
     finish(src, v, r, &log)
 }
 

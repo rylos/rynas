@@ -382,6 +382,14 @@ pub fn kernel_cmdline(m: &Manifest) -> String {
 
 pub struct Options<'a> {
     pub passphrase: Option<&'a str>,
+    /// No EFI boot entry in the firmware of the machine running the restore (`--no-nvram`):
+    /// the disk goes into another PC. Also implied when a target disk is on USB.
+    pub no_nvram: bool,
+}
+
+/// `/dev/<name>` hangs off a USB bus.
+fn usb_disk(name: &str) -> bool {
+    std::fs::canonicalize(format!("/sys/block/{name}")).is_ok_and(|p| p.to_string_lossy().contains("/usb"))
 }
 
 /// The whole restore. On error the target stays unmounted and the log says where it stopped.
@@ -581,7 +589,7 @@ fn execute_inner(src: &mut dyn RestoreSource, v: &Version, m: &Manifest, plan: &
         log.line("SELinux enforcing: /.autorelabel set");
     }
     // 8. boot
-    boot(m, plan, log, boot_files)?;
+    boot(m, plan, log, boot_files, opts.no_nvram)?;
     // 9. log into the target, unmount
     let ts = crate::state::now_ms() / 1000;
     let _ = std::fs::create_dir_all(in_target("/var/log"));
@@ -801,9 +809,17 @@ fn detect_boot(m: &Manifest) -> (InitramfsTool, Loader) {
     (tool, loader)
 }
 
-fn boot(m: &Manifest, plan: &Plan, log: &mut Log, boot_files: bool) -> Result<(), String> {
+fn boot(m: &Manifest, plan: &Plan, log: &mut Log, boot_files: bool, no_nvram: bool) -> Result<(), String> {
     bind_system(log)?;
-    let uefi_live = Path::new("/sys/firmware/efi").exists();
+    // EFI boot entries go into the firmware of the machine running the restore, which is
+    // the restored PC itself except when the disk is on USB or `--no-nvram` says otherwise;
+    // the removable path EFI/BOOT boots it either way
+    let usb = plan.disks.iter().any(|d| usb_disk(&d.target.name));
+    let uefi_live = Path::new("/sys/firmware/efi").exists() && !no_nvram && !usb;
+    if m.boot.uefi && !uefi_live {
+        let why = if no_nvram { "--no-nvram" } else if usb { "the disk is on USB" } else { "the live system did not boot in UEFI mode" };
+        log.line(format!("no EFI boot entry written ({why}): the disk boots through the removable path EFI/BOOT"));
+    }
     let (initramfs_tool, loader) = detect_boot(m);
     if (initramfs_tool, loader) != (m.boot.initramfs, m.boot.loader) {
         log.line(format!("found in the restored system: initramfs {initramfs_tool:?}, boot loader {loader:?}"));

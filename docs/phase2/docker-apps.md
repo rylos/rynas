@@ -14,7 +14,7 @@ D-APPCAT, adopted after D-DOCKER, moves the catalogue into **phase 2**. That sup
 ## 1. Research refresh (2026-11-07)
 
 - **Docker Engine.**
-  - The 29.x line is current. pc-work runs 29.9.3, and the third-party trackers I found stop at 29.6.1 in June, so they lag behind.
+  - The 29.x line is current. a developer PC runs 29.9.3, and the third-party trackers I found stop at 29.6.1 in June, so they lag behind.
   - The containerd image store is the default for new installs, and the minimum API is 1.44.
   - The native nftables firewall backend is still experimental. In that mode Docker creates no `DOCKER-USER` chain, so rynas keeps iptables-nft plus `DOCKER-USER`, as in the research.
   - Sources: https://linuxiac.com/docker-engine-29-containerd-becomes-default-experimental-nftables-support/ · https://blog.canadianwebhosting.com/docker-v29-migration-guide-self-hosters/

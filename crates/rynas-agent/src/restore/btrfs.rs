@@ -132,8 +132,10 @@ impl Selection {
     }
 }
 
-/// Mount points of the "system only" mode besides `/`.
-const SYSTEM_MOUNTS: &[&str] = &["/usr", "/var", "/opt", "/boot", "/etc", "/root"];
+/// Mount points of the "system only" mode besides `/` (and anything mounted below them).
+/// Home folders are user data, `/root` included, as in Timeshift's defaults: a subvolume of
+/// its own there (openSUSE's `@/root`) is kept like `/home`. `/srv` is site data, not system.
+const SYSTEM_MOUNTS: &[&str] = &["/usr", "/var", "/opt", "/boot", "/etc"];
 
 fn system_mount(m: &str) -> bool {
     m == "/" || SYSTEM_MOUNTS.iter().any(|s| under(s, m))
@@ -932,6 +934,9 @@ mod tests {
         assert!(system_mount("/var/lib/machines"));
         assert!(!system_mount("/variable"));
         assert!(!system_mount("/home"));
+        assert!(!system_mount("/root"));
+        assert!(!system_mount("/srv"));
+        assert!(system_mount("/usr/local"));
         for m in Mode::ALL {
             assert_eq!(Mode::parse(m.cli()), Some(m));
         }
