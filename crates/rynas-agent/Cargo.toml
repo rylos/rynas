@@ -1,7 +1,7 @@
 [package]
 name = "rynas-agent"
 description = "rynas PC backup agent: file backups into the NAS' restic repository with a layout manifest, and bare-metal restore from any live Linux"
-version = "0.8.2"
+version = "0.8.3"
 edition = "2024"
 authors = ["Marco Ziliani"]
 license = "AGPL-3.0-or-later"
