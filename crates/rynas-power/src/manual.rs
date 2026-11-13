@@ -52,15 +52,25 @@ pub fn valid_delay(delay_min: u32) -> bool {
 }
 
 /// The package manager processes running (`/proc/<pid>/comm` below `proc`), sorted, once each.
+/// Debian's `unattended-upgrade-shutdown --wait-for-signal` (the always-running helper that
+/// makes a shutdown wait for an upgrade) has the same 15-character name as an upgrade: it is
+/// told apart by its command line and never counts.
 pub fn apt_processes(proc: &Path) -> Vec<String> {
     let mut out: Vec<String> = std::fs::read_dir(proc)
         .into_iter()
         .flatten()
         .flatten()
         .filter(|e| e.file_name().to_string_lossy().bytes().all(|b| b.is_ascii_digit()))
-        .filter_map(|e| std::fs::read_to_string(e.path().join("comm")).ok())
-        .map(|c| c.trim().to_string())
-        .filter(|c| APT_PROCESSES.contains(&c.as_str()))
+        .filter_map(|e| {
+            let comm = std::fs::read_to_string(e.path().join("comm")).ok()?.trim().to_string();
+            if !APT_PROCESSES.contains(&comm.as_str()) {
+                return None;
+            }
+            let helper = comm == "unattended-upgr"
+                && std::fs::read(e.path().join("cmdline"))
+                    .is_ok_and(|c| c.split(|b| *b == 0).any(|a| a.ends_with(b"unattended-upgrade-shutdown")));
+            (!helper).then_some(comm)
+        })
         .collect();
     out.sort();
     out.dedup();
@@ -86,6 +96,24 @@ mod tests {
         assert_eq!(parse_scheduled("USEC=1\nMODE=halt\n"), None);
         assert_eq!(parse_scheduled("MODE=reboot\n"), None);
         assert_eq!(parse_scheduled(""), None);
+    }
+
+    #[test]
+    fn the_unattended_upgrades_shutdown_helper_is_no_upgrade() {
+        let t = tempfile::tempdir().unwrap();
+        let proc = |pid: &str, comm: &str, cmdline: &[&str]| {
+            let d = t.path().join(pid);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("comm"), format!("{comm}\n")).unwrap();
+            std::fs::write(d.join("cmdline"), cmdline.join("\0") + "\0").unwrap();
+        };
+        proc("835", "unattended-upgr", &["/usr/bin/python3", "/usr/share/unattended-upgrades/unattended-upgrade-shutdown", "--wait-for-signal"]);
+        proc("900", "bash", &["bash"]);
+        assert!(apt_processes(t.path()).is_empty());
+        // a real run, and dpkg under it
+        proc("1200", "unattended-upgr", &["/usr/bin/python3", "/usr/bin/unattended-upgrade"]);
+        proc("1201", "dpkg", &["/usr/bin/dpkg", "--configure", "-a"]);
+        assert_eq!(apt_processes(t.path()), ["dpkg", "unattended-upgr"]);
     }
 
     #[test]
