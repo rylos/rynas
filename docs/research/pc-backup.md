@@ -753,6 +753,17 @@ Extra cases: **smaller disk + GUID conflict** (Arch 6 → 4 GiB, the original di
 
 Bugs found by this run: the duplicate received copy in *add* (above, fixed and covered by the e2e test). The harness's `matrix.sh check` left the restored VM running, which made the next PC's steps fail at once (one VM at a time); it now stops it.
 
+**Third run (da2bdcd)** (2026-11-13, a quick confirmation after the final review fixes: path-based nested names, the parent_uuid check in the parent choice, Add then incremental, the os-prober hook, crypttab key offset/size; same harness and rules, a fresh 16 GiB loop btrfs as the NAS volume). "Incremental" was checked on the NAS: every received snapshot after the first has a btrfs Parent UUID equal to the previous one's UUID.
+
+| PC | full + incremental | restore (dry run first) | boot alone, fresh NVRAM | markers incl. `/home/games` | next backup |
+|---|---|---|---|---|---|
+| Arch, systemd-boot | ok (959 MB in 30 s; 23 KB in 0.9 s); nested names `@home_games`, `@_var_lib_machines`, `@_var_lib_portables` | ok, 11 s; ESP mounted `fmask=0077,dmask=0077` | ok | all 6 ok; swapfile active | incremental (33 MB, all 5 subvolumes) |
+| Arch, Add (`@home` + `@home_games` deleted on the restored disk) | — | `--subvol @home_games` alone refused ("nested inside @home … restore @home too"); both together ok, no staging left, "it stays the parent, the copy just received is removed" | ok | all 6 ok | incremental for all 5, `@home` and `@home_games` with the Add-received snapshots as parents |
+| Debian 13, LUKS2 + btrfs, key file | ok (495 MB in 17 s; 10 KB) | ok, 31 s; key file added as second key; `cryptsetup close` ok | ok, unattended | all 6 ok; swapfile active | incremental (62 MB) |
+| Debian 13, GRUB | ok (489 MB in 10 s) | ok, 11 s; `30_os-prober` not executable during `update-grub` (and executable again after) | ok | all 6 ok | incremental (48 MB) |
+
+grub.cfg of the restored debian-grub has no os-prober entry (only "Debian GNU/Linux" and its submenu); the image has no os-prober package, so this shows the hook is put back, not that it kept an entry out. Found: in scripted mode a LUKS restore without `--passphrase-file` erases and partitions the disk before it fails ("a LUKS container needs a passphrase", `restore/exec.rs:439`); the dry run does not flag it either. Checking it in `run_execute` (`restore/mod.rs:279`) before `exec::execute` would fail at once. The harness's `cycle.sh` had dropped the `EXTRA="--passphrase-file /root/pass"` the earlier LUKS runs used.
+
 Not verified in either run: the TUI on a real terminal, very large streams through rynas-web over TLS, the UI at 390 px in a browser, real hardware NVRAM.
 
 ## 12. Implemented: the file method, phase 1 (2026-11-11)

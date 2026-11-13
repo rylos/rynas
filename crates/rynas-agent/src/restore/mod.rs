@@ -253,6 +253,9 @@ pub fn main(args: &[String]) -> Result<(), String> {
         for l in plan::dry_run_rewrites(&m, &[]) {
             println!("{l}");
         }
+        if !p.luks.is_empty() && opt(args, "--passphrase-file").is_none() {
+            println!("note: the real run needs --passphrase-file for the LUKS container");
+        }
         println!("dry run: nothing written");
         return Ok(());
     }
@@ -366,6 +369,9 @@ fn run_btrfs(args: &[String], client: Arc<Client>, dev: RestoreDevice) -> Result
     if flag(args, "--dry-run") {
         for l in plan::dry_run_rewrites(&pm, &src.skipped_subvolumes()) {
             println!("{l}");
+        }
+        if !p.luks.is_empty() && opt(args, "--passphrase-file").is_none() {
+            println!("note: the real run needs --passphrase-file for the LUKS container");
         }
         println!("dry run: nothing written");
         return Ok(());

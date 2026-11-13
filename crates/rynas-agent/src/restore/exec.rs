@@ -397,6 +397,10 @@ pub fn execute(src: &mut dyn RestoreSource, v: &Version, m: &Manifest, plan: &Pl
 }
 
 fn execute_inner(src: &mut dyn RestoreSource, v: &Version, m: &Manifest, plan: &Plan, opts: &Options, log: &mut Log) -> Result<(), String> {
+    // before anything is written: a LUKS container cannot be made without its passphrase
+    if !plan.luks.is_empty() && opts.passphrase.is_none_or(str::is_empty) {
+        return Err("a LUKS container needs a passphrase (--passphrase-file); nothing was written".into());
+    }
     // 1. disks
     for d in &plan.disks {
         let dev = format!("/dev/{}", d.target.name);
