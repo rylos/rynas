@@ -338,7 +338,7 @@ mod tests {
     #[test]
     fn legacy_layout_from_the_dump_and_fstab() {
         let groups = vec!["@".to_string(), "@home".into(), "@games".into()];
-        let l = synthesize("pc-casa", &legacy(true), &groups, 40 << 30, 1024).unwrap();
+        let l = synthesize("old-pc", &legacy(true), &groups, 40 << 30, 1024).unwrap();
         let m = &l.manifest;
         assert_ne!(m.disks[0].name, GUIDED);
         let root = m.root().unwrap();
