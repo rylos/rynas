@@ -692,6 +692,23 @@ The restore source of §11.4 for both kinds of btrfs folder: PCs of the agent's 
 
 **Open:** a received snapshot's `received_uuid` differing from the NAS copy's is reported, not fatal (the next backup of it is then full); the restore always sends full streams; *system only* is a fixed list of system mount points; the guided layout has no swap partition; a dry run uses up the restore code, as for the file method.
 
+### 11.11 B4 results: the bare-metal restore VM matrix (2026-11-13)
+
+Setup (pc-work, at most 2 VMs of 2 GiB, OVMF, user-mode network): the four source PCs of `~/vm-scratch/vms/b4` (README there), a Debian 12 live VM with an empty target disk, the static musl `rynas-agent` of this commit, and as the NAS rynasd's router with the real `HostReceive` (receive and send units, root) on a 16 GiB loop btrfs, served on loopback (the agent with `--allow-http`, reached at 10.0.2.2). Scripted mode throughout (`restore --method btrfs --mode … --disk /dev/vdb --confirm vdb`, `--dry-run` first); the TUI was not driven.
+
+| PC | B2 full + incremental | dry run | restore | boot of the restored disk alone, fresh NVRAM | markers, fstab, swap | next backup |
+|---|---|---|---|---|---|---|
+| Arch, systemd-boot, ESP = `/boot` | ok (958 MB full in 32 s, 22 KB incr.) | ok | ok, 12 s | ok (`BOOTX64.EFI` fallback, `bootctl` entry) | ok; swapfile made again and active | incremental (33 MB, parent = the restored snapshot) |
+| Debian 13, GRUB, `/boot` in `@` | ok (489 MB, 12 s) | ok | ok, 15 s | ok | ok (no swap in this image) | incremental |
+| Fedora 45, separate ext4 `/boot`, shim | ok (3 subvolumes, 1.2 GB, 55 s) | ok | ok, 28 s (`grub2-install` refuses on Fedora EFI: non-fatal, the copied shim/GRUB stand) | ok (SELinux relabel, then running) | ok (zram swap) | incremental |
+| Debian 13, LUKS2 + btrfs, key file in crypttab | ok | ok | ok, 29–39 s | **failed** before the fix below (initramfs never unlocked), ok after it | ok; swapfile active | incremental |
+
+Extra cases: **smaller disk** (Arch 6 → 4 GiB) together with the **GUID conflict** (original disk attached): new fs UUIDs and PARTUUIDs, fstab, `/etc/kernel/cmdline` and the loader entry rewritten, boots alone and with the original attached, next backup incremental. **Add subvolumes** (Arch, `@home` deleted from the restored pool): `@home` back with its files; the received copy stays in `.rynas-restore-incoming` when the same snapshot is already in the snapshot folder (known, fixed on main). **Firmware mode**: the live VM booted with SeaBIOS is refused at preflight ("the PC booted in UEFI mode, this live system in BIOS"). **Legacy reader**: a folder of debian-grub snapshots without manifest, with `/.bootbackup/vda.sfdisk` and a `*_post` ESP copy, received on the NAS: GPT from the dump, fstab IDs, the `_post` copy on `/boot/efi`, loader and initramfs tool found in the restored system; boots.
+
+Fixed in this phase: the musl release build did not link (`renameat2` has no musl wrapper: raw syscall now); the receive unit lacked `CAP_SETFCAP`, so any real root with file capabilities (Arch's `newgidmap`) failed with EPERM; a LUKS container opened by a crypttab key file now gets that file (from the restored system) as a second key.
+
+Still open from B4: unmounted nested subvolumes (`@home/games`) are not backed up, so their data is lost on restore (made empty, as §11.9 says); the disk GUID conflict is never detected (only `/dev/disk/by-uuid` and `by-partuuid` are looked at), so the restored disk shares the original's GPT label-id; mounts made by the restore propagate into the live system's service mount namespaces (systemd-udevd, -resolved, -logind…), so after `umount -R` the pool stays mounted there and `cryptsetup close` fails (a private mount namespace for the restore would avoid it); the ESP is mounted without its fstab options during the restore (`bootctl` warns about a world-readable random seed); `grub-mkconfig` in the chroot lets os-prober add the live system; the boot step writes EFI entries into the NVRAM of the machine running the live system (intended on real hardware).
+
 ## 12. Implemented: the file method, phase 1 (2026-11-11)
 
 What runs (API in `../phase1/plan.md` "API v1: PC backup, file method"):
