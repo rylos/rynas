@@ -24,7 +24,7 @@ pub mod files;
 pub mod system;
 
 pub use domain::{Applier, ApplyCtx, Candidate, FileDomain, HOSTNAME_KEY, HostnameDomain, Invalid};
-pub use engine::{Config, ConfigError, ConfigOptions, Result};
+pub use engine::{Config, ConfigError, ConfigOptions, Refreshed, Result};
 pub use files::{FileKind, ManagedFile};
 pub use system::{HostSystem, MemorySystem, System};
 

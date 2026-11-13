@@ -225,6 +225,93 @@ pub struct RemapOpts<'a> {
     pub cancelled: &'a dyn Fn() -> bool,
     /// Called every [`TICK`] entries with the number of entries seen.
     pub tick: &'a dyn Fn(u64),
+    /// Also give a group access to every file and folder (an app's account on the shared
+    /// folder it was installed with): [`grant_acl`].
+    pub grant: Option<GroupGrant>,
+}
+
+/// Access for one group, added to the ACLs of a tree ([`grant_acl`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GroupGrant {
+    pub gid: u32,
+    /// Read and write; otherwise read (folders also get `x`, to be entered).
+    pub write: bool,
+}
+
+const ACL_USER_OBJ: u16 = 0x01;
+const ACL_GROUP_OBJ: u16 = 0x04;
+const ACL_MASK: u16 = 0x10;
+const ACL_OTHER: u16 = 0x20;
+const ACL_UNDEFINED_ID: u32 = u32::MAX;
+
+/// The ACL xattr `raw` (access or default; `None`: the entry has none) with an entry for
+/// `g.gid` that allows at least what `g` asks: read (and `x` on folders), plus write. An
+/// existing entry of that group only gains bits, never loses any; the mask gains the same
+/// bits, so no other entry gets more than it had except up to what the group gets. An entry
+/// without an ACL starts from its mode, the way `setfacl -m` does; a folder without a
+/// default ACL starts its default from its access ACL (as `setfacl -d -m`), so files made
+/// later inside get the group too. `None`: nothing to change, or a format this code does not
+/// know (left alone).
+pub fn grant_acl(raw: Option<&[u8]>, access: Option<&[u8]>, mode: u32, dir: bool, g: GroupGrant) -> Option<Vec<u8>> {
+    let parse = |raw: &[u8]| -> Option<Vec<(u16, u16, u32)>> {
+        if raw.len() < 4 || !(raw.len() - 4).is_multiple_of(8) || u32::from_le_bytes(raw[0..4].try_into().ok()?) != ACL_VERSION {
+            return None;
+        }
+        Some(raw[4..].as_chunks::<8>().0.iter().map(|e| (u16::from_le_bytes([e[0], e[1]]), u16::from_le_bytes([e[2], e[3]]), u32::from_le_bytes([e[4], e[5], e[6], e[7]]))).collect())
+    };
+    let from_mode = || {
+        vec![
+            (ACL_USER_OBJ, ((mode >> 6) & 7) as u16, ACL_UNDEFINED_ID),
+            (ACL_GROUP_OBJ, ((mode >> 3) & 7) as u16, ACL_UNDEFINED_ID),
+            (ACL_OTHER, (mode & 7) as u16, ACL_UNDEFINED_ID),
+        ]
+    };
+    let mut ents = match (raw, access) {
+        (Some(r), _) => parse(r)?,
+        (None, Some(a)) => parse(a)?,
+        (None, None) => from_mode(),
+    };
+    let want: u16 = 4 | if g.write { 2 } else { 0 } | if dir { 1 } else { 0 };
+    let before = ents.clone();
+    match ents.iter_mut().find(|e| e.0 == ACL_GROUP && e.2 == g.gid) {
+        Some(e) => e.1 |= want,
+        None => ents.push((ACL_GROUP, want, g.gid)),
+    }
+    match ents.iter_mut().find(|e| e.0 == ACL_MASK) {
+        Some(m) => m.1 |= want,
+        None => {
+            let group_obj = ents.iter().find(|e| e.0 == ACL_GROUP_OBJ).map_or(0, |e| e.1);
+            ents.push((ACL_MASK, group_obj | want, ACL_UNDEFINED_ID));
+        }
+    }
+    if raw.is_some() && ents == before {
+        return None;
+    }
+    ents.sort_by_key(|e| (e.0, e.2));
+    let mut v = ACL_VERSION.to_le_bytes().to_vec();
+    for (t, p, id) in ents {
+        v.extend(t.to_le_bytes());
+        v.extend(p.to_le_bytes());
+        v.extend(id.to_le_bytes());
+    }
+    Some(v)
+}
+
+/// Gives the group of `grant` access to every file and folder below `roots` (same walk as
+/// [`remap`]: no links followed, one file system, read-only snapshots skipped). Counts the
+/// ACLs written in [`RemapCounts::acl_entries`].
+pub fn grant(fs: &dyn RemapFs, roots: &[PathBuf], grant: GroupGrant, cancelled: &dyn Fn() -> bool) -> RemapCounts {
+    let opts = RemapOpts {
+        map: IdMap::default(),
+        acls: false,
+        keep_setid: false,
+        dry_run: false,
+        deadline: None,
+        cancelled,
+        tick: &|_| {},
+        grant: Some(grant),
+    };
+    remap(fs, roots, &opts)
 }
 
 /// Entries between two calls of [`RemapOpts::tick`].
@@ -561,6 +648,26 @@ fn visit(fs: &dyn RemapFs, e: &Entry, opts: &RemapOpts, c: &mut RemapCounts) -> 
             c.groups += 1;
         }
     }
+    if let Some(g) = opts.grant
+        && matches!(e.kind, Kind::Dir | Kind::File)
+    {
+        let access = fs.get_acl(e, false)?;
+        if let Some(new) = grant_acl(access.as_deref(), None, e.mode, e.kind == Kind::Dir, g) {
+            if !opts.dry_run {
+                fs.set_acl(e, false, &new)?;
+            }
+            c.acl_entries += 1;
+        }
+        if e.kind == Kind::Dir {
+            let default = fs.get_acl(e, true)?;
+            if let Some(new) = grant_acl(default.as_deref(), access.as_deref(), e.mode, true, g) {
+                if !opts.dry_run {
+                    fs.set_acl(e, true, &new)?;
+                }
+                c.acl_entries += 1;
+            }
+        }
+    }
     if opts.acls && matches!(e.kind, Kind::Dir | Kind::File) {
         let kinds: &[bool] = if e.kind == Kind::Dir { &[false, true] } else { &[false] };
         for &default in kinds {
@@ -889,7 +996,28 @@ mod tests {
             deadline: None,
             cancelled: &|| false,
             tick: &|_| {},
+            grant: None,
         }
+    }
+
+    #[test]
+    fn a_group_grant_only_adds_and_starts_from_the_mode() {
+        let g = GroupGrant { gid: 986, write: false };
+        let u = ACL_UNDEFINED_ID;
+        // a 0600 file without ACL: base entries from the mode, the group, a mask that lets it read
+        assert_eq!(grant_acl(None, None, 0o600, false, g), Some(acl(&[(ACL_USER_OBJ, 6, u), (ACL_GROUP_OBJ, 0, u), (ACL_GROUP, 4, 986), (ACL_MASK, 4, u), (ACL_OTHER, 0, u)])));
+        // an ACL with a named user masked to rw-: the mask gains only r (already there)
+        let had = acl(&[(ACL_USER_OBJ, 6, u), (ACL_USER, 7, 1000), (ACL_GROUP_OBJ, 0, u), (ACL_MASK, 6, u), (ACL_OTHER, 0, u)]);
+        assert_eq!(grant_acl(Some(&had), None, 0o660, false, g), Some(acl(&[(ACL_USER_OBJ, 6, u), (ACL_USER, 7, 1000), (ACL_GROUP_OBJ, 0, u), (ACL_GROUP, 4, 986), (ACL_MASK, 6, u), (ACL_OTHER, 0, u)])));
+        // already allowed (more than asked): nothing to write, never fewer bits
+        let has = acl(&[(ACL_USER_OBJ, 7, u), (ACL_GROUP_OBJ, 0, u), (ACL_GROUP, 7, 986), (ACL_MASK, 7, u), (ACL_OTHER, 0, u)]);
+        assert_eq!(grant_acl(Some(&has), None, 0o770, true, g), None);
+        // read and write on a folder: rwx; its missing default starts from the access ACL
+        let rw = GroupGrant { gid: 986, write: true };
+        let dir = acl(&[(ACL_USER_OBJ, 7, u), (ACL_USER, 5, 1000), (ACL_GROUP_OBJ, 0, u), (ACL_MASK, 5, u), (ACL_OTHER, 0, u)]);
+        assert_eq!(grant_acl(None, Some(&dir), 0o750, true, rw), Some(acl(&[(ACL_USER_OBJ, 7, u), (ACL_USER, 5, 1000), (ACL_GROUP_OBJ, 0, u), (ACL_GROUP, 7, 986), (ACL_MASK, 7, u), (ACL_OTHER, 0, u)])));
+        // an unknown format is left alone
+        assert_eq!(grant_acl(Some(&[1, 2, 3]), None, 0o600, false, g), None);
     }
 
     fn acl(entries: &[(u16, u16, u32)]) -> Vec<u8> {
@@ -1406,6 +1534,27 @@ mod tests {
         let text = String::from_utf8_lossy(&out.stdout);
         assert!(text.contains("user:54322:r--"), "{text}");
         assert!(!text.contains("54321"), "{text}");
+    }
+
+    #[test]
+    fn real_group_grant_on_a_tree() {
+        let t = tree();
+        let probe = t.path().join("a");
+        if !std::process::Command::new("setfacl").args(["-m", "g:54321:r"]).arg(&probe).status().is_ok_and(|s| s.success()) {
+            eprintln!("setfacl not available or no ACL support: skipped");
+            return;
+        }
+        let fake = Fake { real_acls: true, ..Default::default() };
+        let root = t.path().to_path_buf();
+        let c = grant(&fake, std::slice::from_ref(&root), GroupGrant { gid: 54400, write: false }, &|| false);
+        assert!(c.acl_entries > 0 && c.errors == 0, "{c:?}");
+        let out = std::process::Command::new("getfacl").args(["-R", "-n", "-p"]).arg(&root).output().unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains("group:54400:r-x") && text.contains("default:group:54400:r-x") && text.contains("group:54400:r--"), "{text}");
+        // the earlier entry stays as it was
+        assert!(text.contains("group:54321:r--"), "{text}");
+        // a second pass writes nothing
+        assert_eq!(grant(&fake, std::slice::from_ref(&root), GroupGrant { gid: 54400, write: false }, &|| false).acl_entries, 0);
     }
 
     #[test]

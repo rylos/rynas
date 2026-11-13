@@ -341,6 +341,7 @@ fn plan(s: &Services, req: &IdRemapRequest, scan: bool) -> Res<IdRemapPlan> {
                     deadline: Some(Instant::now() + PLAN_BUDGET),
                     cancelled: &|| false,
                     tick: &|_| {},
+                    grant: None,
                 },
             ))
         }
@@ -537,6 +538,7 @@ pub(super) async fn ids_remap(
                         deadline: None,
                         cancelled: &|| c.is_cancelled(),
                         tick: &tick,
+                        grant: None,
                     },
                 );
                 log(&idremap::counts_text(&counts));

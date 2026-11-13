@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use rynas_api_types::TaskStatus;
-use rynas_api_types::apps::{AppInstallPlan, AppInstallRequest, AppInstallStarted, FieldErrorKind, FolderIntent, FolderSsd, PlanWarning, ShareAccess};
+use rynas_api_types::apps::{AppInstallPlan, AppInstallRequest, AppInstallStarted, FieldErrorKind, FolderIntent, FolderSsd, PlanWarning, PlannedShareGrant, ShareAccess, ShareGrantAction};
 use rynas_api_types::docker::{DockerSettingsState, valid_stack_name};
 use rynas_api_types::ShareView;
 
@@ -637,6 +637,7 @@ fn review(w: W) -> AnyView {
             {has_errors.then(|| ui::note(Tone::Err, icons::CIRCLE_X, view! { {tr("apps.w.errors")}<ul class="small app-list">{errors}</ul> }.into_any()))}
             {p.port_conflicts.iter().filter(|c| !c.relocatable).map(|c| ui::note(Tone::Err, icons::CIRCLE_X, ui::text(tf("apps.w.port_fixed_used", &[("port", &c.port.to_string())])))).collect_view()}
             {p.warnings.iter().map(|w| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, ui::text(t(warning_key(*w)).to_string()))).collect_view()}
+            {p.share_grants.iter().filter(|g| g.action == ShareGrantAction::Denied).map(|g| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, ui::text(tf("apps.grant.denied", &[("share", g.share.as_deref().unwrap_or(&g.path))])))).collect_view()}
             {(!matches!(p.ram, rynas_api_types::apps::RamGate::Ok)).then(|| view! { <div class="chips">{ram_pill(p.ram)}</div> })}
             {notes_view(&p.notes)}
             <dl class="kvs">
@@ -647,7 +648,13 @@ fn review(w: W) -> AnyView {
             </dl>
             {(!create.is_empty()).then(|| view! { <h4 class="mini-title">{tr("apps.w.create")}</h4>{list(create)} })}
             {(!existing.is_empty()).then(|| view! { <h4 class="mini-title">{tr("apps.w.existing")}</h4>{list(existing)} })}
-            {(!shares.is_empty()).then(|| view! { <h4 class="mini-title">{tr("apps.w.shares_used")}</h4>{list(shares)} })}
+            {(!shares.is_empty()).then(|| view! {
+                <h4 class="mini-title">{tr("apps.w.shares_used")}</h4>
+                <ul class="small app-list">{shares.into_iter().map(|path| {
+                    let g = p.share_grants.iter().find(|g| g.path == path).cloned();
+                    view! { <li><span class="mono">{path}</span>{g.map(|g| view! { <span class="cell-sub">{grant_text(&g)}</span> })}</li> }
+                }).collect_view()}</ul>
+            })}
             {(!ports.is_empty()).then(|| view! { <h4 class="mini-title">{tr("apps.d.ports")}</h4>{list(ports)} })}
             {(!p.secrets.is_empty()).then(|| view! {
                 <h4 class="mini-title">{tr("apps.d.secrets")}</h4>
@@ -670,6 +677,19 @@ fn review(w: W) -> AnyView {
         .into_any()
     };
     view! { {body} }.into_any()
+}
+
+/// What the install does so the apps' account can use a chosen shared folder.
+fn grant_text(g: &PlannedShareGrant) -> String {
+    let access = t(if g.write { "apps.grant.rw" } else { "apps.grant.read" }).to_string();
+    let key = match g.action {
+        ShareGrantAction::Ok => "apps.grant.ok",
+        ShareGrantAction::Add => "apps.grant.add",
+        ShareGrantAction::Raise => "apps.grant.raise",
+        ShareGrantAction::Files => "apps.grant.files",
+        ShareGrantAction::Denied => "apps.grant.denied_short",
+    };
+    tf(key, &[("access", &access)])
 }
 
 // ------------------------------------------------------------------ install

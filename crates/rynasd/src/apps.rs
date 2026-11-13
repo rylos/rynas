@@ -1034,6 +1034,7 @@ impl AppsSvc {
             web_url,
             ..Default::default()
         };
+        plan.share_grants = plan_share_grants(self, m, &request);
         let mut rendered = None;
         if plan.errors.is_empty()
             && let Some(l) = &layout
@@ -1420,6 +1421,7 @@ struct InstallJob {
     start: bool,
     route: Option<AppRouteSpec>,
     who: String,
+    share_grants: Vec<PlannedShareGrant>,
 }
 
 async fn install_task(a: &Arc<AppsSvc>, ctx: &TaskCtx, j: InstallJob) -> Result<(), String> {
@@ -1483,6 +1485,10 @@ async fn install_task(a: &Arc<AppsSvc>, ctx: &TaskCtx, j: InstallJob) -> Result<
     })
     .await
     .map_err(keep)?;
+    // the apps' account into the chosen shared folders, before the app starts reading them
+    grant_shares(a, ctx, &j.who, &j.name, ids.1, &j.share_grants)
+        .await
+        .map_err(keep)?;
     s.changed();
     if j.start {
         ctx.log("starting the stack (images are downloaded first; this can take a while)");
@@ -1501,6 +1507,144 @@ async fn install_task(a: &Arc<AppsSvc>, ctx: &TaskCtx, j: InstallJob) -> Result<
     }
     ctx.progress(100);
     ctx.log(&format!("{} installed", j.name));
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------------------------
+// shared folders: the apps' account gets in
+// ---------------------------------------------------------------------------------------------
+
+/// What the apps' group `group` needs on `path`, a folder an app is installed with: from the
+/// rynas share with that folder and its permission matrix. A matrix that names nobody
+/// leaves the folder's permissions alone (adding the group would shut everybody else out),
+/// so only the files get it then; an explicit deny is respected.
+pub(crate) fn share_grant_action(shares: &[rynas_api_types::Share], path: &str, group: &str, write: bool) -> (Option<String>, ShareGrantAction) {
+    use rynas_api_types::{Access, PrincipalKind};
+    let norm = |p: &str| p.trim_end_matches('/').to_string();
+    let Some(s) = shares.iter().find(|s| norm(&s.path) == norm(path)) else {
+        return (None, ShareGrantAction::Files);
+    };
+    let name = Some(s.name.clone());
+    if s.permissions.is_empty() {
+        return (name, ShareGrantAction::Files);
+    }
+    let entry = s.permissions.iter().find(|p| p.kind == PrincipalKind::Group && p.name == group);
+    let user_deny = s.permissions.iter().any(|p| p.kind == PrincipalKind::User && p.name == group && p.access == Access::Deny);
+    let action = match entry.map(|p| p.access) {
+        _ if user_deny => ShareGrantAction::Denied,
+        Some(Access::Deny) => ShareGrantAction::Denied,
+        Some(Access::Rw) => ShareGrantAction::Ok,
+        Some(Access::Ro) if !write => ShareGrantAction::Ok,
+        Some(Access::Ro) => ShareGrantAction::Raise,
+        None => ShareGrantAction::Add,
+    };
+    (name, action)
+}
+
+/// The share document with the apps' group let into the share at `path` (add or raise, as
+/// [`share_grant_action`] says now); `None` when nothing changes.
+pub(crate) fn with_share_grant(cfg: &rynas_api_types::SharesConfig, path: &str, group: &str, write: bool) -> Option<rynas_api_types::SharesConfig> {
+    use rynas_api_types::{Access, Permission, PrincipalKind};
+    let (Some(share), action) = share_grant_action(&cfg.shares, path, group, write) else {
+        return None;
+    };
+    if !matches!(action, ShareGrantAction::Add | ShareGrantAction::Raise) {
+        return None;
+    }
+    let access = if write { Access::Rw } else { Access::Ro };
+    let mut out = cfg.clone();
+    let s = out.shares.iter_mut().find(|s| s.name == share)?;
+    match s.permissions.iter_mut().find(|p| p.kind == PrincipalKind::Group && p.name == group) {
+        Some(p) => p.access = access,
+        None => s.permissions.push(Permission { kind: PrincipalKind::Group, name: group.to_string(), access }),
+    }
+    Some(out)
+}
+
+/// The plan's lines for the shared folders of `request`.
+fn plan_share_grants(a: &AppsSvc, m: &rynas_apps::manifest::AppManifest, request: &rynas_apps::InstallRequest) -> Vec<PlannedShareGrant> {
+    let shares: Vec<rynas_api_types::Share> = a
+        .docker
+        .ops
+        .config
+        .applied(rynas_services::shares::SHARES_KEY)
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_value::<rynas_api_types::SharesConfig>(v).ok())
+        .map(|c| c.shares)
+        .unwrap_or_default();
+    m.shares
+        .iter()
+        .filter_map(|s| {
+            let path = request.shares.get(&s.env)?;
+            let write = s.access == rynas_apps::manifest::Access::Rw;
+            let (share, action) = share_grant_action(&shares, path, rynas_docker::APPS_USER, write);
+            Some(PlannedShareGrant { env: s.env.clone(), path: path.clone(), share, write, action })
+        })
+        .collect()
+}
+
+/// Lets the apps' account into the shared folders of the install: the share's permissions
+/// first (an apply of `shares`, which also writes the folder's own ACL), then the files and
+/// folders already there ([`rynas_services::idremap::grant`]). Trouble with single files is
+/// logged; the app is installed anyway.
+async fn grant_shares(a: &Arc<AppsSvc>, ctx: &TaskCtx, who: &str, app: &str, gid: u32, grants: &[PlannedShareGrant]) -> Result<(), String> {
+    for g in grants {
+        if g.action == ShareGrantAction::Denied {
+            ctx.log(&format!(
+                "warning: {} denies {}: the app cannot use {}",
+                g.share.as_deref().unwrap_or(&g.path),
+                rynas_docker::APPS_USER,
+                g.path
+            ));
+            continue;
+        }
+        let (cfg, log, path, write, who2) = (a.docker.ops.config.clone(), ctx.clone(), g.path.clone(), g.write, who.to_string());
+        let what = format!(
+            "{} gets {} access to {} for {app}",
+            rynas_docker::APPS_USER,
+            if g.write { "read and write" } else { "read" },
+            g.share.as_deref().unwrap_or(&g.path)
+        );
+        blocking(move || {
+            cfg.apply_update(&who2, rynas_services::shares::SHARES_KEY, &what, &|l| log.log(l), |cur| {
+                let Some(cur) = cur else { return Ok(None) };
+                let doc: rynas_api_types::SharesConfig = serde_json::from_value(cur).map_err(|e| e.to_string())?;
+                with_share_grant(&doc, &path, rynas_docker::APPS_USER, write)
+                    .map(|d| serde_json::to_value(d).map_err(|e| e.to_string()))
+                    .transpose()
+            })
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        })
+        .await?;
+        let (dry, root, path, log, write) = (a.docker.dry, a.docker.root.clone(), g.path.clone(), ctx.clone(), g.write);
+        let cancel = ctx.clone();
+        blocking(move || {
+            use rynas_services::idremap::{self, DryRemap, GroupGrant, HostRemap, RemapFs};
+            let fs: &dyn RemapFs = if dry { &DryRemap } else { &HostRemap };
+            let real = rynas_docker::under(&root, &path);
+            let c = idremap::grant(fs, &[real], GroupGrant { gid, write }, &|| cancel.is_cancelled());
+            log.log(&format!(
+                "{path}: {} access for {} on {} of {} entries",
+                if write { "read and write" } else { "read" },
+                rynas_docker::APPS_USER,
+                c.acl_entries,
+                c.scanned
+            ));
+            if !c.readonly.is_empty() {
+                log.log(&format!("read-only snapshots left as they are: {}", c.readonly.join(", ")));
+            }
+            if !c.other_fs.is_empty() {
+                log.log(&format!("other file systems inside, not entered: {}", c.other_fs.join(", ")));
+            }
+            if c.errors > 0 {
+                log.log(&format!("warning: {} entries could not be changed: {}", c.errors, c.error_samples.join("; ")));
+            }
+            Ok::<(), String>(())
+        })
+        .await?;
+    }
     Ok(())
 }
 
@@ -1832,6 +1976,7 @@ async fn install_post(
         start: req.start,
         route: p.route,
         who: who.clone(),
+        share_grants: p.plan.share_grants.clone(),
     };
     let a2 = a.clone();
     let task_id = a
@@ -2343,6 +2488,40 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn the_apps_account_gets_into_a_chosen_share() {
+        use rynas_api_types::{Access, Permission, PrincipalKind, Share, SharesConfig};
+        let p = |kind, name: &str, access| Permission { kind, name: name.into(), access };
+        let share = |name: &str, path: &str, perms: Vec<Permission>| Share { name: name.into(), path: path.into(), permissions: perms, ..Default::default() };
+        let me = p(PrincipalKind::User, "alice", Access::Rw);
+        let shares = vec![
+            share("Photos", "/srv/v1/Photos", vec![me.clone()]),
+            share("Open", "/srv/v1/Open", vec![]),
+            share("Ro", "/srv/v1/Ro", vec![me.clone(), p(PrincipalKind::Group, "docker-apps", Access::Ro)]),
+            share("No", "/srv/v1/No", vec![me.clone(), p(PrincipalKind::Group, "docker-apps", Access::Deny)]),
+            share("NoUser", "/srv/v1/NoUser", vec![me.clone(), p(PrincipalKind::User, "docker-apps", Access::Deny)]),
+        ];
+        let act = |path, write| share_grant_action(&shares, path, "docker-apps", write);
+        assert_eq!(act("/srv/v1/Photos/", false), (Some("Photos".into()), ShareGrantAction::Add));
+        // permissions left to the folder: adding the group would shut the others out
+        assert_eq!(act("/srv/v1/Open", true), (Some("Open".into()), ShareGrantAction::Files));
+        assert_eq!(act("/srv/v1/plain", true), (None, ShareGrantAction::Files));
+        assert_eq!(act("/srv/v1/Ro", false), (Some("Ro".into()), ShareGrantAction::Ok));
+        assert_eq!(act("/srv/v1/Ro", true), (Some("Ro".into()), ShareGrantAction::Raise));
+        assert_eq!(act("/srv/v1/No", false).1, ShareGrantAction::Denied);
+        assert_eq!(act("/srv/v1/NoUser", false).1, ShareGrantAction::Denied);
+        // the document: the entry added or raised, nothing else touched; no change → None
+        let cfg = SharesConfig { shares, ..Default::default() };
+        let added = with_share_grant(&cfg, "/srv/v1/Photos", "docker-apps", false).unwrap();
+        assert_eq!(added.shares[0].permissions, vec![me.clone(), p(PrincipalKind::Group, "docker-apps", Access::Ro)]);
+        assert_eq!(added.shares[1..], cfg.shares[1..]);
+        let raised = with_share_grant(&cfg, "/srv/v1/Ro", "docker-apps", true).unwrap();
+        assert_eq!(raised.shares[2].permissions[1].access, Access::Rw);
+        for (path, write) in [("/srv/v1/Ro", false), ("/srv/v1/No", true), ("/srv/v1/Open", true), ("/srv/v1/plain", false)] {
+            assert!(with_share_grant(&cfg, path, "docker-apps", write).is_none(), "{path}");
+        }
     }
 
     #[test]

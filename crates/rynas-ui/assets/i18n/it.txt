@@ -232,6 +232,8 @@ time.rtc_utc	Tienilo in UTC
 nev.system.clock_unsynced.title	L'orologio non è sincronizzato
 nev.system.clock_unsynced.body	Nessun server dell'ora risponde da {minutes} minuti. Certificati, codici a due fattori, pianificazioni e snapshot richiedono l'ora esatta: controlla la rete e i server dell'ora.
 nev.system.clock_synced.title	L'orologio è di nuovo sincronizzato
+nev.system.config_refresh_failed.title	Impostazioni non aggiornate dopo l'aggiornamento
+nev.system.config_refresh_failed.body	rynas {version} scrive i file di {keys} in modo diverso, ma la scrittura non è riuscita e restano i file di prima. Apri l'impostazione e salvala di nuovo per vedere l'errore.
 nev.system.clock_drift.title	L'orologio sta andando alla deriva
 nev.system.clock_drift.body	L'orologio è a {offset} dal server dell'ora e non recupera. Controlla i server dell'ora.
 nev.system.clock_in_step.title	L'orologio è di nuovo allineato
@@ -4090,6 +4092,14 @@ apps.w.address	Indirizzo
 apps.w.create	Cartelle da creare
 apps.w.existing	Cartelle già presenti
 apps.w.shares_used	Cartelle condivise usate
+apps.grant.read	lettura
+apps.grant.rw	lettura e scrittura
+apps.grant.ok	La condivisione fa già entrare le app ({access}); file e cartelle che non lo hanno lo ricevono
+apps.grant.add	L'account delle app (docker-apps) viene aggiunto ai permessi della condivisione in {access}, anche sui file già presenti
+apps.grant.raise	L'accesso delle app a questa condivisione passa da lettura a lettura e scrittura, anche sui file già presenti
+apps.grant.files	I suoi permessi non sono impostati da rynas: l'account delle app (docker-apps) riceve l'accesso in {access} su file e cartelle
+apps.grant.denied_short	La condivisione nega l'accesso alle app: non viene cambiato niente
+apps.grant.denied	{share} nega l'accesso all'account delle app (docker-apps): l'app non potrà usare questa cartella. Cambia i permessi della condivisione o scegli un'altra cartella.
 apps.w.compose	compose.yaml che verrà scritto
 apps.w.env	.env che verrà scritto (segreti nascosti)
 apps.w.installing	Installazione come stack {stack} in {path}.

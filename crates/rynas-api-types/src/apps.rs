@@ -727,6 +727,42 @@ pub struct AppInstallPlan {
     /// the install adds a route.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_url: Option<String>,
+    /// What the install does so the apps' account (`docker-apps`) can use each shared
+    /// folder chosen for the app.
+    #[serde(default)]
+    pub share_grants: Vec<PlannedShareGrant>,
+}
+
+/// How the apps' account gets into a shared folder chosen at install.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ShareGrantAction {
+    /// The share's permissions already let the group in; only files that lack it get it.
+    #[default]
+    Ok,
+    /// The group is added to the share's permissions, and to the files already there.
+    Add,
+    /// The group's read-only entry becomes read and write, on the share and its files.
+    Raise,
+    /// Not a share with permissions set by rynas (a plain folder, or a share whose
+    /// permissions are left to the folder): only the files get the group.
+    Files,
+    /// The share denies the group: nothing is changed and the app cannot use the folder.
+    Denied,
+}
+
+/// One shared folder of [`AppInstallPlan::share_grants`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PlannedShareGrant {
+    /// The key of [`AppInstallRequest::shares`].
+    pub env: String,
+    pub path: String,
+    /// The rynas share with this folder, when there is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share: Option<String>,
+    /// The app writes there (`access = "rw"`); otherwise it only reads.
+    pub write: bool,
+    pub action: ShareGrantAction,
 }
 
 /// A generated secret the entry marks `show`: in the install answer only, once.

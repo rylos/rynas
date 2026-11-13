@@ -24,6 +24,27 @@ use crate::files::{
 };
 use crate::system::System;
 
+/// `meta` key of the rynas version that last compared the rendered files.
+const RENDERED_BY: &str = "rendered_by";
+
+/// What [`Config::refresh_rendered`] did, key by key.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Refreshed {
+    /// Keys whose files were written again (this build renders them differently).
+    pub written: Vec<String>,
+    /// Keys left alone: one of their files was changed or removed by hand.
+    pub kept: Vec<String>,
+    /// Keys whose rewrite failed (rolled back, the old files stay): (key, error).
+    pub failed: Vec<(String, String)>,
+}
+
+enum Rendered {
+    Same,
+    Changed,
+    HandEdited,
+    Failed(String),
+}
+
 /// Where the store lives and how much history it keeps.
 #[derive(Debug, Clone)]
 pub struct ConfigOptions {
@@ -1348,6 +1369,85 @@ impl Config {
         tx.commit()?;
         log(&format!("{key}: {} files written", paths.len()));
         Ok(())
+    }
+
+    /// After rynas itself was updated: writes again the applied configuration of each key
+    /// whose files this build renders differently from what an older build wrote (a new
+    /// template line, a fixed default), the way a package's postinst redeploys its managed
+    /// configuration. Runs once per `version` (the one that last checked is kept in `meta`;
+    /// none recorded counts as an update). A key one of whose files was changed or removed
+    /// by hand is left alone: the drift report shows it and the user decides. Each rewrite is
+    /// [`Config::drift_overwrite`] (checks, reload, health, rollback on failure, no new
+    /// revision). `None` when this version already checked.
+    pub fn refresh_rendered(&self, version: &str, log: &dyn Fn(&str)) -> Result<Option<Refreshed>> {
+        let stored: Option<String> = self
+            .db()
+            .query_row("SELECT v FROM meta WHERE k = ?1", [RENDERED_BY], |r| r.get(0))
+            .optional()?;
+        if stored.as_deref() == Some(version) {
+            return Ok(None);
+        }
+        let mut out = Refreshed::default();
+        let mut keys: Vec<(&String, &Arc<dyn Applier>)> = self.appliers.iter().collect();
+        keys.sort_by_key(|(k, a)| (a.order(), (*k).clone()));
+        for (key, applier) in keys {
+            let Some(value) = self.applied(key)? else { continue };
+            match self.renders_differently(key, applier.as_ref(), &value)? {
+                Rendered::Same => {}
+                Rendered::HandEdited => {
+                    log(&format!("{key}: changed by hand, kept as it is (see the drift report)"));
+                    out.kept.push(key.clone());
+                }
+                Rendered::Failed(e) => {
+                    log(&format!("{key}: render: {e}"));
+                    out.failed.push((key.clone(), e));
+                }
+                Rendered::Changed => match self.drift_overwrite(key, log) {
+                    Ok(()) => out.written.push(key.clone()),
+                    Err(e) => out.failed.push((key.clone(), e.to_string())),
+                },
+            }
+        }
+        self.db().execute(
+            "INSERT OR REPLACE INTO meta (k, v) VALUES (?1, ?2)",
+            params![RENDERED_BY, version],
+        )?;
+        Ok(Some(out))
+    }
+
+    /// Compares what `applier` renders now for `value` with the files recorded for `key`.
+    fn renders_differently(&self, key: &str, applier: &dyn Applier, value: &Value) -> Result<Rendered> {
+        let recorded: Vec<(String, String, String)> = {
+            let db = self.db();
+            let mut st = db.prepare("SELECT path, kind, sha256 FROM managed_files WHERE key = ?1")?;
+            st.query_map([key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let ctx = self.ctx();
+        for (path, kind, sha) in &recorded {
+            let kind: FileKind = serde_json::from_str(kind)?;
+            let on_disk = ctx.read(Path::new(path)).and_then(|t| current_hash(&kind, &t));
+            if on_disk.as_deref() != Some(sha.as_str()) {
+                return Ok(Rendered::HandEdited);
+            }
+        }
+        let files = match applier.render(value, &ctx) {
+            Ok(f) => f,
+            Err(e) => return Ok(Rendered::Failed(e)),
+        };
+        let mut now: BTreeMap<String, String> = BTreeMap::new();
+        for f in &files {
+            if f.kind == FileKind::Absent {
+                if ctx.path(&f.path).exists() {
+                    return Ok(Rendered::Changed);
+                }
+                continue;
+            }
+            let existing = ctx.read(&f.path);
+            now.insert(f.path.to_string_lossy().into_owned(), render_final(&f.kind, &f.content, existing.as_deref()).1);
+        }
+        let before: BTreeMap<String, String> = recorded.into_iter().map(|(p, _, s)| (p, s)).collect();
+        Ok(if now == before { Rendered::Same } else { Rendered::Changed })
     }
 
     fn applied_rev(&self, key: &str) -> Result<Option<i64>> {

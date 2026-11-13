@@ -711,6 +711,49 @@ fn drift_detection_import_and_overwrite() {
 }
 
 #[test]
+fn an_update_rewrites_what_it_renders_differently_but_never_hand_edits() {
+    let e = env();
+    e.cfg
+        .stage("alice", "test.app", Some(json!({"port": 1, "name": "x"})))
+        .unwrap();
+    e.cfg
+        .stage("alice", HOSTNAME_KEY, Some(hostname("nas")))
+        .unwrap();
+    apply(&e, "alice", "").unwrap();
+    // the first start of a build that records its version: nothing renders differently
+    let r = e.cfg.refresh_rendered("1.0.0", &|_| {}).unwrap().unwrap();
+    assert_eq!(r, Refreshed::default());
+    assert!(e.cfg.refresh_rendered("1.0.0", &|_| {}).unwrap().is_none(), "once per version");
+    // a hand edit of the hostname; then a new build whose app template has a new line
+    std::fs::write(e.root.join("etc/hostname"), "handmade\n").unwrap();
+    let state = e.state.clone();
+    let root = e.root.clone();
+    drop(e.cfg);
+    let v2: Vec<Arc<dyn Applier>> = vec![
+        Arc::new(HostnameDomain),
+        Arc::new(
+            FileDomain::new(
+                "test.app",
+                "/etc/app/app.conf",
+                "port = {{ port }}\nname = {{ name }}\nsafe = yes\n",
+            )
+            .unit("app.service")
+            .validator(&["app-check", "-s", "{}"]),
+        ),
+    ];
+    let cfg = Config::open(ConfigOptions::new(&state, &root), Arc::new(MemorySystem::new("nas")), v2).unwrap();
+    let r = cfg.refresh_rendered("1.1.0", &|_| {}).unwrap().unwrap();
+    assert_eq!(r.written, ["test.app"]);
+    assert_eq!(r.kept, [HOSTNAME_KEY]);
+    assert!(r.failed.is_empty());
+    assert!(read(&root, "/etc/app/app.conf").contains("safe = yes\n"));
+    assert_eq!(read(&root, "/etc/hostname"), "handmade\n");
+    // no revision for it, and the app file is clean for the drift check
+    assert_eq!(cfg.revisions(10).unwrap().len(), 1);
+    assert!(cfg.drift().unwrap().entries.iter().all(|d| d.key == HOSTNAME_KEY));
+}
+
+#[test]
 fn unchanged_files_are_not_rewritten() {
     let e = env();
     e.cfg

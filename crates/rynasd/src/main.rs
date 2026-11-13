@@ -411,6 +411,45 @@ fn open_config(
     })
 }
 
+/// [`Config::refresh_rendered`] for this build's version, logged; failures become one
+/// `system.config_refresh_failed` event.
+fn refresh_rendered(config: &Config, notifier: &dyn Notifier) {
+    use rynas_api_types::notify::{NotifyCategory, NotifySeverity};
+    use rynas_notify::event::{code, field, oneshot};
+    let version = env!("CARGO_PKG_VERSION");
+    let r = match config.refresh_rendered(version, &|l| tracing::info!("update {version}: {l}")) {
+        Ok(Some(r)) => r,
+        Ok(None) => return,
+        Err(e) => {
+            tracing::warn!("update {version}: the managed files could not be compared: {e}");
+            return;
+        }
+    };
+    if !r.written.is_empty() {
+        tracing::info!("update {version}: files written again for {}", r.written.join(", "));
+    }
+    if r.failed.is_empty() {
+        return;
+    }
+    let keys: Vec<&str> = r.failed.iter().map(|(k, _)| k.as_str()).collect();
+    for (k, e) in &r.failed {
+        tracing::warn!("update {version}: {k}: {e}");
+    }
+    let mut ev = oneshot(
+        NotifyCategory::System,
+        NotifySeverity::Warning,
+        "config",
+        format!("config:refresh:{version}"),
+        "Settings not brought up to date after the update",
+    );
+    ev.body = format!(
+        "rynas {version} writes the files of {} differently, but writing them failed and the previous files stay. Open the setting and save it again to see the error.",
+        keys.join(", ")
+    );
+    let ev = field(code(ev, "system.config_refresh_failed"), "version", version);
+    notifier.emit(field(ev, "keys", keys.join(", ")));
+}
+
 fn read_passphrase(path: &Option<PathBuf>) -> std::io::Result<Option<String>> {
     let Some(p) = path else { return Ok(None) };
     let text = std::fs::read_to_string(p)?;
@@ -782,6 +821,12 @@ fn main() -> std::io::Result<()> {
         let notifier: Arc<dyn Notifier> = Arc::new(engine.clone());
         rynasd::notifications::spawn_task_watch(&ops.tasks, notifier.clone());
         state.notifier = notifier.clone();
+        // after an update of rynas: managed files this build renders differently are written
+        // again (never one changed by hand); a failed rewrite is rolled back and notified
+        {
+            let (config, notifier) = (ops.config.clone(), notifier.clone());
+            tokio::task::spawn_blocking(move || refresh_rendered(&config, &*notifier));
+        }
         opened.modules.attach(notifier.clone());
         // encrypted folders whose password is sealed on this machine (D-CRYPT E1); a failed
         // automatic unlock is notified

@@ -458,6 +458,7 @@ Model and rules:
   (files rewritten by other tools, like `/etc/hostname`, go without it); shared files get a
   `# BEGIN rynas <id> … # END rynas <id>` block (e.g. the `127.0.1.1` line of `/etc/hosts`; edits
   outside the block are not drift). The hash of the generated content is stored per file.
+- **After an update of rynas** (`Config::refresh_rendered`, once per version at rynasd's start, the version that last checked kept in `meta.rendered_by`): each applied key is rendered again; when the new build renders its files differently (a new template line, a fixed default) the applied value is written again through the drift-overwrite pipeline (checks, reload, health, rollback; no revision), like a package postinst redeploying its configuration (openmediavault's `omv-salt deploy`, TrueNAS regenerating `/etc` from its database). A key with a file changed or removed by hand is never rewritten: the drift report shows it. A failed rewrite keeps the old files and raises `system.config_refresh_failed`.
 - **Tasks** (crate `rynas-tasks`): id `UPID:<node>:<pid>:<seq>:<start>:<type>:<user>:` (hex),
   status `queued|running|ok|error|cancelled`, log `/var/lib/rynas/tasks/<id>.log` capped at 1 MiB
   (ends with `TASK OK`, `TASK ERROR: …` or `TASK CANCELLED`), 4 concurrent (`--max-tasks`), 32
@@ -1005,6 +1006,7 @@ schema 2 added the `code` and `body_format` columns.
 | `system.clock_unsynced` / `system.clock_synced` | `minutes` | The clock is not synchronized: automatic sync is on and no server answered for an hour (warning) / synchronized again (resolved; D-TIME) |
 | `system.clock_drift` / `system.clock_in_step` | `offset` | The clock is more than 1 s from the time server in two looks in a row, each on a new answer (warning) / back below 0.5 s (resolved; D-TIME) |
 | `system.clock_sync_off` | — | Automatic time sync was turned off while one of the two above was open: resolved quietly (`NewEvent::quiet`, kept in the list, sent to no target; D-TIME) |
+| `system.config_refresh_failed` | `version`, `keys` | After an update, rynas {version} renders the managed files of {keys} differently but writing them failed: rolled back, the previous files stay (warning; `Config::refresh_rendered`, once per version at rynasd's start, keys changed by hand are never rewritten) |
 | `docker.unhealthy` / `docker.recovered` | `container`, `stack` | Container {container} is unhealthy / healthy again (`../phase2/docker-apps.md` §5.1) |
 | `docker.oom` | `container`, `stack` | Container {container} ran out of memory |
 | `docker.crash_loop` / `docker.crash_loop_over` | `container`, `stack`, `restarts`, `minutes` | Container {container} keeps restarting / stopped restarting |
