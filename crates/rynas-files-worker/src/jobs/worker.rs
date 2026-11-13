@@ -2169,19 +2169,22 @@ fn set_times(path: &Path, meta: &Metadata) {
 /// Narrows what was just made (`made`, open) to no more mode bits than its source has
 /// (`source_mode`, in group `source_gid`), `keep` bits aside (the owner's, while a folder
 /// fills or a file is verified): whatever the umask or a default ACL of the destination
-/// gave, a copy is never more open than its original. With an ACL the group bits are its
-/// mask, so named entries narrow too. Copies to a server (SFTP, SMB) take the server's
+/// gave, a copy is never more open than its original. Owner and others keep at most the
+/// source's bits; the group the source's group bits when the copy has the source's group,
+/// else the source's "other" bits (0644 root:root stays 0644, 0640 root:shadow becomes
+/// 0600). With an ACL the group bits are its mask, so named entries narrow too. Copies to a server (SFTP, SMB) take the server's
 /// modes: SMB has none, and the file manager's SFTP client sets none.
 fn keep_private(made: &File, source_mode: u32, source_gid: Option<u32>, keep: u32) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let m = made.metadata()?;
     let now = m.mode() & 0o7777;
-    // a copy in another group than its source's: that group's members never had access, so
-    // it gets no group bits (and none for others), the owner's only
-    let allowed = match source_gid {
-        Some(gid) if gid != m.gid() => source_mode & 0o700,
-        _ => source_mode & 0o777,
+    // a copy in another group than its source's: that group's members get what anybody
+    // could do with the source (its "other" bits), never what its own group could
+    let group = match source_gid {
+        Some(gid) if gid != m.gid() => (source_mode & 0o007) << 3,
+        _ => source_mode & 0o070,
     };
+    let allowed = (source_mode & 0o700) | group | (source_mode & 0o007);
     // a setgid the folder inherited from its parent stays (new files keep the parent's group)
     let mode = (now & (allowed | keep) & 0o777) | (now & 0o2000);
     if mode != now {
@@ -2342,10 +2345,19 @@ mod tests {
         let p = made("same", 0o664);
         keep_private(&File::open(&p).unwrap(), 0o640, Some(gid(&p)), 0).unwrap();
         assert_eq!(mode(&p), 0o640);
-        // another group: the owner's bits only
-        let p = made("other", 0o664);
-        keep_private(&File::open(&p).unwrap(), 0o644, Some(gid(&p).wrapping_add(1)), 0).unwrap();
-        assert_eq!(mode(&p), 0o600);
+        // another group: its bits are what anybody could do with the source
+        let other = |name: &str, source: u32| {
+            let p = made(name, 0o664);
+            keep_private(&File::open(&p).unwrap(), source, Some(gid(&p).wrapping_add(1)), 0).unwrap();
+            mode(&p)
+        };
+        // /etc/hostname 0644 root:root: readable by the share's users as before
+        assert_eq!(other("hostname", 0o644), 0o644);
+        // /etc/shadow-like 0640 root:shadow, a 0600 key: the owner's only
+        assert_eq!(other("shadow", 0o640), 0o600);
+        assert_eq!(other("key", 0o600), 0o600);
+        // never more than what would be made (0664 here, the umask's)
+        assert_eq!(other("open", 0o777), 0o664);
         // a source nobody may read (0200, read by the administrator's powers): the copy keeps
         // the owner's reading and writing while it is verified, then the source's bits
         let p = made("verified", 0o644);

@@ -147,8 +147,10 @@ browser ──HTTPS── rynas-web (user rynas) ──Unix socket── rynasd 
     downloads included);
   - copies out of a backup stay as private as their originals (`Spec.private_roots`): the
     worker narrows a copied file, before any byte is written, and a copied folder to no more
-    mode bits than the source had, the owner's only when the copy's group differs from the
-    source's (`keep_private`; with a default ACL the mask narrows; an inherited setgid stays);
+    mode bits than the source had: owner and others at most the source's, the group the
+    source's group bits when the copy keeps the source's group, else the source's "other"
+    bits (0644 root:root stays 0644 for the share's users, 0640 root:shadow becomes 0600)
+    (`keep_private`; with a default ACL the mask narrows likewise; an inherited setgid stays);
     the owner keeps reading and writing while a file fills and is verified (a 0000 source), a
     folder while it fills; an archive made from backup files is 0600; ordinary copies keep the
     destination's usual modes. Copies to a server (SFTP, SMB) take the server's modes;
