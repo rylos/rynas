@@ -3692,21 +3692,12 @@ async fn remove_delete(
             f(&device, t.created_at_ms);
             ctx.log(&format!("{device}: the PC bound to this folder can no longer send into it"));
         }
+        let removed = |key: String| field(code(resolved(NotifyCategory::Backup, "pcbackup", key, format!("{device} removed")), "pcbackup.removed"), "device", &device);
         if t.alerted {
-            s.notifier.emit(resolved(
-                NotifyCategory::Backup,
-                "pcbackup",
-                format!("pcbackup:late:{device}"),
-                format!("{device} removed"),
-            ));
+            s.notifier.emit(removed(format!("pcbackup:late:{device}")));
         }
         for k in t.open_alerts.keys() {
-            s.notifier.emit(resolved(
-                NotifyCategory::Backup,
-                "pcbackup",
-                format!("pcbackup:{k}:{device}"),
-                format!("{device} removed"),
-            ));
+            s.notifier.emit(removed(format!("pcbackup:{k}:{device}")));
         }
         audit(&who, "remove", &device);
         Ok(())

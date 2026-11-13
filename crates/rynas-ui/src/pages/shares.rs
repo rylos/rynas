@@ -375,7 +375,7 @@ fn share_row(v: ShareView, size: Option<ShareSize>, size_failed: Option<String>,
                     {s.encrypted.then(|| t("crypt.encrypted"))}
                     {(!v.status.fs_type.is_empty() && !s.encrypted).then(|| format!(" · {}", v.status.fs_type))}
                     {(v.status.nocow == Some(true)).then(|| format!(" · {}", t("shares.nocow")))}
-                    {s.dedup.as_ref().is_some_and(|d| d.enabled).then(|| format!(" · {}", t("dd.short")))}
+                    {s.dedup.as_ref().is_some_and(|d| d.enabled).then(|| view! { " "<span class="chip dedup-chip">{tr("dd.short")}</span> })}
                 </span>
             </div>
         }

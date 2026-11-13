@@ -51,7 +51,7 @@ use rynas_config::files::{self, FileKind};
 use rynas_module::UpsLayer;
 use rynas_config::{Applier, ApplyCtx, Invalid, ManagedFile};
 use rynas_notify::Notifier;
-use rynas_notify::event::oneshot;
+use rynas_notify::event::{code, field, oneshot};
 use rynas_tasks::{Cmd, TaskCtx};
 use serde_json::Value;
 
@@ -776,6 +776,8 @@ pub async fn stop_work(u: &Arc<Ups>, reason: &str, budget: Duration) -> SafeMode
         title,
     );
     ev.body = body;
+    // a module layer words its own notice (its shutdown is its own); rynas's is translated
+    let ev = if u.layer.is_none() { field(code(ev, "ups.shutdown"), "reason", reason) } else { ev };
     u.notifier.emit(ev);
     tokio::time::timeout(budget, stop_everything(u, budget))
         .await
@@ -908,9 +910,11 @@ impl Watch {
     }
 }
 
-fn notify(u: &Ups, sev: NotifySeverity, key: &str, title: String, body: String) {
+/// A UPS event with its code (`nev.<code>.*` in the UI) and fields.
+fn notify(u: &Ups, sev: NotifySeverity, key: &str, title: String, body: String, c: &str, fields: &[(&str, String)]) {
     let mut ev = oneshot(NotifyCategory::Ups, sev, "ups", key.to_string(), title);
     ev.body = body;
+    let ev = fields.iter().fold(code(ev, c), |ev, (k, v)| field(ev, k, v));
     u.notifier.emit(ev);
 }
 
@@ -941,6 +945,8 @@ async fn shutdown(u: &Ups) {
         "ups:upsmon",
         "UPS: upsmon did not take the shutdown request".into(),
         format!("upsmon -c fsd: {why}. rynas powers the system off itself."),
+        "ups.upsmon_failed",
+        &[("error", why.to_string())],
     );
     let off = Cmd::new("systemctl")
         .arg("poweroff")
@@ -984,6 +990,8 @@ pub async fn watch(u: Arc<Ups>) {
                         ),
                         None => "Mains power is gone. The system shuts down on low battery.".into(),
                     },
+                    "ups.on_battery",
+                    &policy.safemode_after_s.map(|a| ("minutes", (a / 60).to_string())).into_iter().collect::<Vec<_>>(),
                 ),
                 WatchAction::PowerBack => notify(
                     &u,
@@ -991,6 +999,8 @@ pub async fn watch(u: Arc<Ups>) {
                     "ups:online",
                     "UPS back on mains power".into(),
                     "Mains power is back.".into(),
+                    "ups.power_back",
+                    &[],
                 ),
                 WatchAction::Stop {
                     reason,

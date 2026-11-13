@@ -569,12 +569,8 @@ pub async fn revoke(svc: &Arc<PcAgent>, device: &str, d: &Dev, ctx: &TaskCtx) ->
         Ok(())
     });
     if d.alert != Alert::None || d.failed_alerted {
-        svc.notifier.emit(resolved(
-            NotifyCategory::Backup,
-            "pcbackup",
-            format!("pcbackup:agent:{device}"),
-            format!("{device} revoked"),
-        ));
+        let ev = resolved(NotifyCategory::Backup, "pcbackup", format!("pcbackup:agent:{device}"), format!("{device} revoked"));
+        svc.notifier.emit(field(code(ev, "pcbackup.revoked"), "device", device));
     }
     ctx.log(&format!("{device} revoked; its versions stay in group {}", d.group));
     Ok(())

@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use rynas_api_types::notify::{NotifyCategory, NotifySeverity};
 use rynas_notify::Notifier;
-use rynas_notify::event::oneshot;
+use rynas_notify::event::{code, field, oneshot};
 
 use axum::Json;
 use axum::extract::rejection::JsonRejection;
@@ -506,7 +506,8 @@ fn unlock_sealed(s: &Arc<Services>) -> Vec<String> {
                         "{} stays locked: {e}. Unlock it with its password in Shared folders, then restart the apps and containers that use it.",
                         sh.path
                     );
-                    n.emit(ev);
+                    let ev = field(field(code(ev, "crypt.auto_unlock_failed"), "share", &sh.name), "path", &sh.path);
+                    n.emit(field(ev, "error", e));
                 }
             }
         }

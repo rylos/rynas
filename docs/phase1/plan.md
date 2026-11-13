@@ -1007,6 +1007,12 @@ schema 2 added the `code` and `body_format` columns.
 | `system.clock_drift` / `system.clock_in_step` | `offset` | The clock is more than 1 s from the time server in two looks in a row, each on a new answer (warning) / back below 0.5 s (resolved; D-TIME) |
 | `system.clock_sync_off` | — | Automatic time sync was turned off while one of the two above was open: resolved quietly (`NewEvent::quiet`, kept in the list, sent to no target; D-TIME) |
 | `system.config_refresh_failed` | `version`, `keys` | After an update, rynas {version} renders the managed files of {keys} differently but writing them failed: rolled back, the previous files stay (warning; `Config::refresh_rendered`, once per version at rynasd's start, keys changed by hand are never rewritten) |
+| `updates.available` / `updates.up_to_date` | `updates`, `security` (only when some are), `packages` | {updates} updates available[, {security} for security] (notice, warning with security updates) / the system is up to date (resolved) |
+| `ups.on_battery` / `ups.power_back` | `minutes` (when a time on battery is set) | UPS on battery (warning) / back on mains power (info) |
+| `ups.shutdown` | `reason` (`lowbatt`/`waittimeup`/`nocomm`/`fsd`/`shutdowncmd`) | UPS shutdown: {reason} (critical; rynas's own NUT stop, a module layer words its own notice) |
+| `ups.upsmon_failed` | `error` | upsmon did not take the shutdown request: rynas powers off itself (error) |
+| `crypt.auto_unlock_failed` | `share`, `path`, `error` | Encrypted folder {share} was not unlocked automatically (error; D-CRYPT) |
+| `pcbackup.revoked` / `pcbackup.removed` | `device` | {device} revoked / removed: its open alerts resolve (resolved) |
 | `docker.unhealthy` / `docker.recovered` | `container`, `stack` | Container {container} is unhealthy / healthy again (`../phase2/docker-apps.md` §5.1) |
 | `docker.oom` | `container`, `stack` | Container {container} ran out of memory |
 | `docker.crash_loop` / `docker.crash_loop_over` | `container`, `stack`, `restarts`, `minutes` | Container {container} keeps restarting / stopped restarting |
@@ -1032,7 +1038,7 @@ plugins (they may send their own code; without a dictionary entry the text is sh
 ### Emitters and options
 
 The watchers emit only on transitions (first observation after a start included); the engine
-ignores repeats and resolutions of keys that were not firing. Other crates emit through the
+ignores repeats and resolutions of keys that were not firing. A resolution never doubles the unread list: when the problem is still unacknowledged the resolution is stored acknowledged (`acked_by` `@resolved`, still delivered to the targets) and the problem shows "Resolved <time>" in the bell; a problem of severity info or notice (updates available) is acknowledged with it. A resolution of a problem already read stays unread (it is news). Other crates emit through the
 `rynas_notify::Notifier` trait (`emit(NewEvent)`, never blocks): rynasd hands out the engine
 (`DaemonState::notifier`), rynas-web its `WebNotifier`; plugins will use JSON-RPC with source
 `plugin:<id>` set by the core. `.rynasbak` archives carry `notify.db` and, encrypted, its key

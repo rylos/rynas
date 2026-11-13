@@ -527,6 +527,21 @@ impl Engine {
                         "UPDATE events SET resolved_ms = ?2 WHERE id = ?1",
                         params![n.id as i64, now as i64],
                     )?;
+                    // the reader has not seen the problem yet: the resolution adds nothing to
+                    // the unread list (the problem shows it is resolved); a problem that only
+                    // informed (info, notice: updates available) leaves it too
+                    if n.acked_ms.is_none() {
+                        tx.execute(
+                            "UPDATE events SET acked_ms = ?2, acked_by = ?3 WHERE id = ?1",
+                            params![id as i64, now as i64, AUTO_ACK],
+                        )?;
+                        if sev <= NotifySeverity::Notice {
+                            tx.execute(
+                                "UPDATE events SET acked_ms = ?2, acked_by = ?3 WHERE id = ?1 AND acked_ms IS NULL",
+                                params![n.id as i64, now as i64, AUTO_ACK],
+                            )?;
+                        }
+                    }
                     tx.execute(
                         "UPDATE keys SET firing = 0, event_id = ?2 WHERE key = ?1",
                         params![key, id as i64],
@@ -1728,6 +1743,10 @@ fn is_silenced(c: &Connection, key: &str, now: u64) -> rusqlite::Result<bool> {
     }
     Ok(false)
 }
+
+/// `acked_by` of a notification acknowledged by the engine itself (a resolution of a problem
+/// still unread, an informational problem that resolved).
+pub const AUTO_ACK: &str = "@resolved";
 
 fn insert_event(
     tx: &Transaction,

@@ -350,6 +350,7 @@ kbd {
 .notif-line strong { font-size: var(--fs-13); font-weight: 600; }
 .notif-time { font-size: var(--fs-12); color: var(--text-subtle); white-space: nowrap; }
 .notif-text { font-size: var(--fs-12); color: var(--text-muted); line-height: 1.45; }
+.notif-resolved { display: inline-flex; align-items: center; gap: var(--s-1); color: var(--success); font-size: var(--fs-12); }
 .notif-dot { width: 8px; height: 8px; margin-top: var(--s-3); border-radius: 50%; }
 .notif.unread .notif-dot { background: var(--accent); box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent) 22%, transparent); }
 .notif:not(.unread) strong { font-weight: 500; }
@@ -2086,3 +2087,5 @@ body:has(.sysp-overlay) { overflow: hidden; }
 .dd-history li { padding: var(--s-2) 0; border-bottom: 1px solid var(--border); }
 .dd-history li:last-child { border-bottom: 0; }
 .dd-hrow { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
+/* shared folder list: deduplication on, a coloured label like the protocol ones */
+.chip.dedup-chip { color: var(--accent-2); background: color-mix(in oklch, var(--accent-2) 10%, var(--surface)); border-color: color-mix(in oklch, var(--accent-2) 25%, var(--border)); margin-left: var(--s-1); vertical-align: middle; }

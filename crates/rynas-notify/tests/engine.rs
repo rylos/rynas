@@ -343,6 +343,30 @@ async fn state_machine_transitions_only() {
 }
 
 #[tokio::test]
+async fn a_resolution_never_doubles_the_unread_list() {
+    let e = env();
+    let res = |key: &str| event::resolved(NotifyCategory::Update, "updates", key, "Back to normal");
+    // a warning still unread: it stays (shown resolved), the resolution enters read
+    let w = e.engine.ingest(disk_failing(NotifySeverity::Warning), false).unwrap().unwrap();
+    let r = e.engine.ingest(event::resolved(NotifyCategory::Storage, "storage", "storage:disk:S1:health", "Disk sda healthy again"), false).unwrap().unwrap();
+    assert!(r.acked_ms.is_some());
+    assert_eq!(e.engine.unacked().unwrap(), 1);
+    let unread = e.engine.list(&ListQuery { limit: 50, acked: Some(false), ..Default::default() }).unwrap();
+    assert_eq!((unread[0].id, unread[0].resolved_ms.is_some()), (w.id, true));
+    // a notice (updates available) that resolves leaves the list with its resolution
+    e.engine.ingest(event::firing(NotifyCategory::Update, NotifySeverity::Notice, "updates", "updates", "3 updates available"), false).unwrap();
+    assert_eq!(e.engine.unacked().unwrap(), 2);
+    e.engine.ingest(res("updates"), false).unwrap();
+    assert_eq!(e.engine.unacked().unwrap(), 1);
+    // a problem already read: its resolution is news
+    let w2 = e.engine.ingest(event::firing(NotifyCategory::Storage, NotifySeverity::Error, "storage", "raid", "RAID md2 degraded"), false).unwrap().unwrap();
+    e.engine.ack(w2.id, "admin").unwrap();
+    let r2 = e.engine.ingest(res("raid"), false).unwrap().unwrap();
+    assert!(r2.acked_ms.is_none());
+    assert_eq!(e.engine.unacked().unwrap(), 2);
+}
+
+#[tokio::test]
 async fn oneshot_dedup_and_force() {
     let e = env();
     let ev = || {

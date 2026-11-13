@@ -14,7 +14,7 @@ use std::cell::Cell;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use rynas_api_types::notify::{AckAllResult, BodyFormat, Notification, NotificationChangeKind, NotificationEvent, NotifySeverity, event_text};
+use rynas_api_types::notify::{AckAllResult, BodyFormat, EventState, Notification, NotificationChangeKind, NotificationEvent, NotifySeverity, event_text};
 
 use crate::alerts::{self, Alert};
 use crate::api;
@@ -297,6 +297,7 @@ fn server_item(n: Notification, server: Server, open: RwSignal<bool>) -> AnyView
     let id = n.id;
     let when = i18n::short_when(n.last_ms);
     let count = (n.count > 1).then(|| format!("×{}", n.count));
+    let resolved = n.resolved_ms.filter(|_| n.state == EventState::Firing).map(i18n::short_when);
     let log = n.body_format == BodyFormat::Log;
     let (n1, n2, n3) = (n.clone(), n.clone(), n.clone());
     let title = move || event_title(&n1);
@@ -311,6 +312,8 @@ fn server_item(n: Notification, server: Server, open: RwSignal<bool>) -> AnyView
                         <strong>{title}</strong>
                         <span class="notif-time tnum">{count.map(|c| view! { <span class="chip">{c}</span> " " })}{when}</span>
                     </span>
+                    // the condition is over: the problem stays until read, marked resolved
+                    {resolved.map(|r| view! { <span class="notif-resolved small"><Icon icon=icons::CIRCLE_CHECK size=12 />{tf("nt.resolved_at", &[("when", &r)])}</span> })}
                     // command output keeps its line breaks, still clamped to two lines
                     <span class=if log { "notif-text clamp-2 pre-line mono" } else { "notif-text clamp-2" }>{body}</span>
                 </span>

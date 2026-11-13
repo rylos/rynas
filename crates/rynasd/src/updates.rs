@@ -41,7 +41,7 @@ use rynas_api_types::updates::{
 };
 use rynas_api_types::{TaskStarted, TaskStatus, error_codes};
 use rynas_notify::Notifier;
-use rynas_notify::event::{field, firing, resolved};
+use rynas_notify::event::{code, field, firing, resolved};
 use rynas_tasks::{Cmd, TaskCtx};
 use rynas_updates::apt::{parse_reboot_pkgs, parse_simulation, valid_package_name};
 use rynas_updates::domain::unattended_installed;
@@ -322,11 +322,9 @@ impl Updates {
         }
         let n = s.packages.len();
         if n == 0 {
-            self.notifier.emit(resolved(
-                NotifyCategory::Update,
-                "updates",
-                NOTIFY_KEY,
-                "The system is up to date",
+            self.notifier.emit(code(
+                resolved(NotifyCategory::Update, "updates", NOTIFY_KEY, "The system is up to date"),
+                "updates.up_to_date",
             ));
             return;
         }
@@ -349,8 +347,10 @@ impl Updates {
             label: "Open updates".into(),
             url: "/system/updates".into(),
         }];
-        let ev = field(ev, "updates", n);
-        self.notifier.emit(field(ev, "security", sec));
+        let ev = field(code(ev, "updates.available"), "updates", n);
+        let ev = field(ev, "packages", names.join(", "));
+        // no field when there are none: the title without the security part is chosen
+        self.notifier.emit(if sec > 0 { field(ev, "security", sec) } else { ev });
     }
 
     /// Starts an `updates.*` task, refusing a second one (409 `busy`). When it ends the cache

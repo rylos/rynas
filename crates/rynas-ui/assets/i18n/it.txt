@@ -232,6 +232,26 @@ time.rtc_utc	Tienilo in UTC
 nev.system.clock_unsynced.title	L'orologio non è sincronizzato
 nev.system.clock_unsynced.body	Nessun server dell'ora risponde da {minutes} minuti. Certificati, codici a due fattori, pianificazioni e snapshot richiedono l'ora esatta: controlla la rete e i server dell'ora.
 nev.system.clock_synced.title	L'orologio è di nuovo sincronizzato
+nev.updates.available.title	{updates} aggiornamenti disponibili, {security} di sicurezza
+nev.updates.available.title_2	{updates} aggiornamenti disponibili
+nev.updates.available.body	Pacchetti: {packages}.
+nev.updates.up_to_date.title	Il sistema è aggiornato
+nev.ups.on_battery.title	UPS a batteria
+nev.ups.on_battery.body	Manca la corrente. Il sistema si spegne dopo {minutes} min a batteria, o prima se la batteria si scarica.
+nev.ups.on_battery.body_2	Manca la corrente. Il sistema si spegne quando la batteria si scarica.
+nev.ups.power_back.title	UPS di nuovo sulla corrente
+nev.ups.power_back.body	La corrente è tornata.
+nev.ups.upsmon_failed.title	UPS: upsmon non ha accettato la richiesta di spegnimento
+nev.ups.upsmon_failed.body	upsmon -c fsd: {error}. rynas spegne il sistema da solo.
+nev.ups.shutdown.title	Spegnimento per l'UPS: {reason}
+nev.ups.shutdown.reason.fsd	forzato dal server dell'UPS
+nev.ups.shutdown.reason.lowbatt	batteria scarica
+nev.ups.shutdown.reason.waittimeup	tempo a batteria finito
+nev.ups.shutdown.reason.nocomm	l'UPS non risponde
+nev.ups.shutdown.reason.shutdowncmd	comando di spegnimento
+nev.ups.shutdown.body	Il sistema si spegne con l'UPS: prima rynas ferma le attività in corso e quelle pianificate.
+nev.crypt.auto_unlock_failed.title	La cartella cifrata {share} non è stata sbloccata automaticamente
+nev.crypt.auto_unlock_failed.body	{path} resta bloccata: {error}. Sbloccala con la sua password in Cartelle condivise, poi riavvia le app e i container che la usano.
 nev.system.config_refresh_failed.title	Impostazioni non aggiornate dopo l'aggiornamento
 nev.system.config_refresh_failed.body	rynas {version} scrive i file di {keys} in modo diverso, ma la scrittura non è riuscita e restano i file di prima. Apri l'impostazione e salvala di nuovo per vedere l'errore.
 nev.system.clock_drift.title	L'orologio sta andando alla deriva
@@ -2073,6 +2093,7 @@ nt.ack_all	Presa visione di tutte
 nt.acked_n	Presa visione di {n} notifiche
 nt.acked	Vista
 nt.resolved	Risolta
+nt.resolved_at	Risolto {when}
 nt.active	Attiva
 nt.silenced	Silenziata
 nt.silence	Silenzia
@@ -4940,6 +4961,8 @@ nev.pcbackup.low_space.title	Poco spazio rimasto per i backup di {device}
 nev.pcbackup.low_space.body	{free_gib} GiB liberi, {needed_gib} GiB necessari per un'altra serie completa di snapshot.
 nev.pcbackup.space_ok.title	Di nuovo spazio sufficiente per i backup di {device}
 nev.pcbackup.resumed.title	I backup da {device} arrivano di nuovo
+nev.pcbackup.revoked.title	{device} revocato
+nev.pcbackup.removed.title	{device} rimosso
 nev.pcbackup.resumed.body	{device} ha inviato un nuovo snapshot.
 sysp.restart	Riavvia
 sysp.shutdown	Spegni
