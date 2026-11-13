@@ -426,9 +426,7 @@ pub fn select_filesystems(mounts: Vec<Mount>) -> Vec<Mount> {
 }
 
 pub fn mounts(host: &dyn Host) -> Vec<Mount> {
-    select_filesystems(parse_mountinfo(
-        &host.read("/proc/self/mountinfo").unwrap_or_default(),
-    ))
+    select_filesystems(parse_mountinfo(&crate::mounts::read_host_mountinfo(|p| host.read(p))))
 }
 
 /// Sizes of a mounted filesystem in bytes.

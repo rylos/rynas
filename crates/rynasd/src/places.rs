@@ -25,9 +25,10 @@ const NOT_A_DISK: &[&str] = &[
     "virtiofs", "fuse",
 ];
 
-/// `/proc/self/mountinfo`.
+/// The system's mount table as the host sees it ([`rynas_storage::mounts::host_mountinfo`]):
+/// rynasd's own namespace adds the bind mounts of its sandbox.
 pub fn mountinfo() -> String {
-    std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default()
+    rynas_storage::mounts::host_mountinfo()
 }
 
 pub fn root_fstype(mountinfo: &str) -> Option<String> {

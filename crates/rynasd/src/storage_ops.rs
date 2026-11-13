@@ -1553,9 +1553,7 @@ impl rynas_services::SubvolumeCreator for HostSubvolumes {
             return Err(format!("invalid volume name {volume:?}"));
         }
         let want = format!("/{volume}");
-        let mounts = rynas_storage::mounts::parse_mountinfo(
-            &std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default(),
-        );
+        let mounts = rynas_storage::mounts::parse_mountinfo(&rynas_storage::mounts::host_mountinfo());
         if mounts
             .iter()
             .any(|m| m.mountpoint == want && m.fstype == "btrfs")

@@ -48,7 +48,45 @@ pub fn unescape(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// The system's mount table: init's, not this process' own.
+pub const HOST_MOUNTINFO: &str = "/proc/1/mountinfo";
+/// This process' own mount table (its mount namespace).
+pub const OWN_MOUNTINFO: &str = "/proc/self/mountinfo";
+
+/// What the system has mounted, as the host sees it. rynasd runs in a sandboxed mount
+/// namespace (`PrivateTmp=`, `ProtectSystem=`, `ReadWritePaths=`) where systemd adds bind
+/// mounts of the same filesystems: read from there an ext4 root also looks mounted on
+/// `/var/tmp` (from a private subdirectory), `/usr`, `/boot` and the state folders, and a
+/// volume list shows a foreign volume named by its UUID (GitHub issue #14). init's table
+/// (`/proc/1/mountinfo`, readable by rynasd as root) has none of these. Falls back to our own
+/// table when init's cannot be read (tests, containers without the right).
+pub fn read_host_mountinfo(read: impl Fn(&str) -> Option<String>) -> String {
+    read(HOST_MOUNTINFO)
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| read(OWN_MOUNTINFO))
+        .unwrap_or_default()
+}
+
+/// [`read_host_mountinfo`] from the real `/proc`.
+pub fn host_mountinfo() -> String {
+    read_host_mountinfo(|p| std::fs::read_to_string(p).ok())
+}
+
+/// Parses mountinfo. A mount point listed twice with the same superblock (a mount stacked on
+/// the same filesystem, e.g. an ESP mounted twice) is kept once, as the topmost (last) entry.
 pub fn parse_mountinfo(s: &str) -> Vec<Mount> {
+    let all = parse_all(s);
+    let mut out: Vec<Mount> = Vec::with_capacity(all.len());
+    for m in all {
+        match out.iter_mut().find(|o| o.majmin == m.majmin && o.mountpoint == m.mountpoint) {
+            Some(o) => *o = m,
+            None => out.push(m),
+        }
+    }
+    out
+}
+
+fn parse_all(s: &str) -> Vec<Mount> {
     s.lines()
         .filter_map(|line| {
             let (left, right) = line.split_once(" - ")?;
@@ -95,5 +133,37 @@ mod tests {
         assert_eq!(root.subvolid(), Some(256));
         let share = m.iter().find(|m| m.mountpoint == "/srv/nas share").unwrap();
         assert_eq!(share.fstype, "cifs");
+    }
+
+    /// GitHub issue #14: an ext4 root seen from rynasd's sandboxed namespace is also mounted
+    /// on `/var/tmp` (from a private subdirectory) and other places; init's table is used.
+    #[test]
+    fn host_table_wins_over_the_sandbox_and_duplicates_go() {
+        let own = "\
+21 1 259:2 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p2 rw
+22 21 259:2 /var/tmp/systemd-private-x-rynasd.service-y/tmp /var/tmp rw shared:2 - ext4 /dev/nvme0n1p2 rw
+23 21 259:2 /usr /usr ro shared:3 - ext4 /dev/nvme0n1p2 rw
+24 21 259:1 / /boot/efi rw shared:4 - vfat /dev/nvme0n1p1 rw
+25 24 259:1 / /boot/efi rw shared:5 - vfat /dev/nvme0n1p1 rw
+";
+        let host = "\
+21 1 259:2 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p2 rw
+24 21 259:1 / /boot/efi rw shared:4 - vfat /dev/nvme0n1p1 rw
+25 24 259:1 / /boot/efi rw shared:5 - vfat /dev/nvme0n1p1 rw
+";
+        let read = |p: &str| match p {
+            HOST_MOUNTINFO => Some(host.to_string()),
+            OWN_MOUNTINFO => Some(own.to_string()),
+            _ => None,
+        };
+        let m = parse_mountinfo(&read_host_mountinfo(read));
+        let points: Vec<&str> = m.iter().map(|m| m.mountpoint.as_str()).collect();
+        // no /var/tmp or /usr bind, the ESP once
+        assert_eq!(points, ["/", "/boot/efi"]);
+        // init's table unreadable: our own, still deduplicated
+        let only_own = |p: &str| (p == OWN_MOUNTINFO).then(|| own.to_string());
+        let m = parse_mountinfo(&read_host_mountinfo(only_own));
+        assert_eq!(m.iter().filter(|m| m.mountpoint == "/boot/efi").count(), 1);
+        assert_eq!(m.len(), 4);
     }
 }

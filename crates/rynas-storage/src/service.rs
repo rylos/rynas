@@ -330,7 +330,7 @@ impl Storage {
     }
 
     fn mounts(&self) -> Vec<Mount> {
-        parse_mountinfo(&self.host.read("/proc/self/mountinfo").unwrap_or_default())
+        parse_mountinfo(&crate::mounts::read_host_mountinfo(|p| self.host.read(p)))
     }
 
     fn power_of(&self, d: &BlockDev) -> PowerState {
