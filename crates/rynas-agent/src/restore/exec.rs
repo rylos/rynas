@@ -519,6 +519,7 @@ fn execute_inner(src: &mut dyn RestoreSource, v: &Version, m: &Manifest, plan: &
         let _ = std::fs::create_dir_all(in_target(d));
     }
     let _ = std::fs::set_permissions(in_target("tmp"), std::os::unix::fs::PermissionsExt::from_mode(0o1777));
+    add_crypttab_keys(log, plan, opts.passphrase);
     // 7. ID fixes, the lines of subvolumes not restored, then the checks
     fix_texts(log, m, plan, &skipped);
     if std::fs::read_to_string(in_target("/etc/selinux/config")).is_ok_and(|t| t.lines().any(|l| l.trim() == "SELINUX=enforcing")) {
@@ -540,6 +541,38 @@ fn execute_inner(src: &mut dyn RestoreSource, v: &Version, m: &Manifest, plan: &
     Ok(())
 }
 
+/// A restored container that `/etc/crypttab` opens with a key file (unattended boot, the key
+/// often embedded in the initramfs) gets that file, found in the restored system, as a second
+/// key: the new container has only the passphrase typed for the restore, and the initramfs
+/// tries the key file without asking for a passphrase (seen on Debian in the B4 VMs).
+fn add_crypttab_keys(log: &mut Log, plan: &Plan, passphrase: Option<&str>) {
+    let (Some(pass), Ok(tab)) = (passphrase, std::fs::read_to_string(in_target("/etc/crypttab"))) else {
+        return;
+    };
+    for line in tab.lines() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() < 3 || f[0].starts_with('#') || !f[2].starts_with('/') {
+            continue;
+        }
+        let Some(l) = plan.luks.iter().find(|l| l.mapper == f[0]) else { continue };
+        let key = in_target(f[2]);
+        // a regular file inside the restored system, never a link out of it
+        if !std::fs::symlink_metadata(&key).is_ok_and(|md| md.is_file()) {
+            log.problem(format!("{}: crypttab opens it with {}, which is not in the restored system: add a key for it after the first boot", f[0], f[2]));
+            continue;
+        }
+        let k = key.to_string_lossy().into_owned();
+        match run_input(log, &["cryptsetup", "luksAddKey", "--batch-mode", "--key-file", "-", &l.partition, &k], pass.as_bytes()) {
+            Ok(()) => log.line(format!("{}: the key file {} added as a second key (crypttab)", f[0], f[2])),
+            Err(e) => log.problem(format!("{}: adding the key file {}: {e}", f[0], f[2])),
+        }
+    }
+}
+
+/// The text fixes after the data: fstab lines of subvolumes not restored commented (with
+/// [`super::plan::RESTORE_MARK`]), the old IDs replaced when new ones were made (fstab,
+/// crypttab, `/etc/kernel/cmdline`, `/etc/default/grub`, the loader entries), then the
+/// checks: the restored root's ID on the active fstab line of `/`, no old ID left.
 fn fix_texts(log: &mut Log, m: &Manifest, plan: &Plan, skipped: &[String]) {
     let map = &plan.id_map;
     rewrite(log, "/etc/fstab", &|t| super::plan::fix_fstab(t, m, skipped, map));
