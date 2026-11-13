@@ -59,6 +59,28 @@ pub fn map_lines(text: &str, mut f: impl FnMut(&str) -> String) -> String {
     t
 }
 
+/// The options a FAT filesystem (the ESP) is mounted with during the restore: the
+/// permission options of the PC's fstab line for `path` (`umask`, `fmask`, `dmask`, `uid`,
+/// `gid`), and `fmask=0077,dmask=0077` when it names no mask: mounted world-readable,
+/// `bootctl` warns that its random seed is readable by everybody.
+pub fn fat_options(fstab: &str, path: &str) -> String {
+    let norm = |p: &str| if p == "/" { "/".to_string() } else { p.trim_end_matches('/').to_string() };
+    let line = parse(fstab).into_iter().rfind(|l| norm(&l.path) == norm(path));
+    let mut opts: Vec<String> = line
+        .map(|l| {
+            l.options
+                .split(',')
+                .filter(|o| ["umask=", "fmask=", "dmask=", "uid=", "gid="].iter().any(|k| o.starts_with(k)))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if !opts.iter().any(|o| o.starts_with("umask=") || o.starts_with("fmask=") || o.starts_with("dmask=")) {
+        opts.extend(["fmask=0077".to_string(), "dmask=0077".to_string()]);
+    }
+    opts.join(",")
+}
+
 /// The line with its whitespace-separated field `idx` replaced (the rest as written).
 fn replace_field(line: &str, idx: usize, new: &str) -> String {
     let mut n = 0;
@@ -191,5 +213,15 @@ mod tests {
         assert_eq!(fix_rootflags("root=UUID=x rootflags=subvolid=256", &ids), "root=UUID=x rootflags=subvol=/@");
         assert!(stale_subvolids(None, Some(&g)).is_empty());
         assert_eq!(stale_subvolids(None, Some("rootflags=subvolid=300")).len(), 1);
+    }
+
+    #[test]
+    fn fat_mount_options_from_fstab() {
+        let f = "UUID=A996 /boot vfat rw,relatime,fmask=0077,dmask=0077,codepage=437,utf8 0 2\nUUID=B236 /boot/efi vfat umask=0077 0 1\n";
+        assert_eq!(fat_options(f, "/boot"), "fmask=0077,dmask=0077");
+        assert_eq!(fat_options(f, "/boot/efi/"), "umask=0077");
+        // no line, or a line without masks: private all the same
+        assert_eq!(fat_options(f, "/efi"), "fmask=0077,dmask=0077");
+        assert_eq!(fat_options("UUID=9767 /boot/efi vfat defaults,uid=0,shortname=winnt 0 0\n", "/boot/efi"), "uid=0,fmask=0077,dmask=0077");
     }
 }

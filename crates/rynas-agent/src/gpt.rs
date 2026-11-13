@@ -320,6 +320,14 @@ pub fn guid_text(g: &[u8; 16]) -> String {
     )
 }
 
+/// The GPT disk GUID (sfdisk's label-id) of a block device, as text; `None` without a GPT
+/// or when the device cannot be read.
+pub fn disk_guid_of(dev: &std::path::Path, sector: u64) -> Option<String> {
+    let f = File::open(dev).ok()?;
+    let g = Gpt::read(&f, sector).ok()??;
+    Some(guid_text(&g.disk_guid))
+}
+
 /// The bytes of a GUID in text form.
 pub fn parse_guid(s: &str) -> Option<[u8; 16]> {
     let hex: String = s.chars().filter(|c| *c != '-').collect();

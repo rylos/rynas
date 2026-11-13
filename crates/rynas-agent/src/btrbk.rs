@@ -41,7 +41,7 @@ fn strip_comment(line: &str) -> &str {
 
 /// Mount points whose subvolume is cache, logs or other rebuildable data: not sent, recreated
 /// empty by a restore (the manifest lists them as not captured).
-const NOT_SENT: &[&str] = &["/var/log", "/var/cache", "/var/tmp", "/tmp", "/swap", "/var/swap", "/var/lib/docker", "/var/lib/containers", "/srv/swap"];
+pub const NOT_SENT: &[&str] = &["/var/log", "/var/cache", "/var/tmp", "/tmp", "/swap", "/var/swap", "/var/lib/docker", "/var/lib/containers", "/srv/swap"];
 
 // ------------------------------------------------------------------ btrbk.conf
 
@@ -227,14 +227,19 @@ pub fn mark_captured(m: &mut Manifest, b: &BtrbkLayout, all: &[Mount]) {
 
 // ------------------------------------------------------------------ the PC's layout
 
-/// A mounted subvolume of the root filesystem.
+/// A subvolume of the root filesystem: mounted, or nested in a sent one without a mount
+/// of its own ([`crate::send::nested_candidates`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
     /// Path from the top level (`@home`).
     pub path: String,
+    /// Its mount point; for a nested one, where it is reached through its parent
+    /// (`/home/games`).
     pub mount: String,
     /// Why it is not sent (`None`: sent).
     pub skip: Option<&'static str>,
+    /// Not mounted: the top-level path of the sent subvolume it is nested in.
+    pub nested_in: Option<String>,
 }
 
 /// The root filesystem's mounted subvolumes.
@@ -287,7 +292,7 @@ pub fn layout(all: &[Mount]) -> Result<Layout, String> {
         } else {
             None
         };
-        subs.push(Candidate { path, mount: m.path.clone(), skip });
+        subs.push(Candidate { path, mount: m.path.clone(), skip, nested_in: None });
     }
     subs.sort_by(|a, b| a.mount.cmp(&b.mount));
     Ok(Layout { dev: root.dev.clone(), subvolumes: subs })

@@ -5,9 +5,11 @@
 //! - Versions are runs: the snapshots with one timestamp in their names; each chosen
 //!   subvolume can take another snapshot instead (`--subvol NAME=SNAPSHOT`, or the TUI).
 //! - Modes over the manifest's subvolumes: whole PC, system only, a custom list, or *add*
-//!   (into an existing pool, nothing formatted). The rules come from the mount points: a
-//!   subvolume mounted inside another needs that one too (restored with it, or already in
-//!   the pool when adding); formatting needs the root subvolume; at least one subvolume.
+//!   (into an existing pool, nothing formatted). The rules come from the mount points and
+//!   the paths: a subvolume mounted inside another, or nested in it without a mount of its
+//!   own (`@home/games`, placed after its parent where the parent's snapshot left an empty
+//!   folder), needs that one too (restored with it, or already in the pool when adding);
+//!   formatting needs the root subvolume; at least one subvolume.
 //! - Each stream goes through the NAS' own stream guard ([`crate::send_stream`]: exactly the
 //!   announced snapshot, v1, paths inside the subvolume, clones only from itself) into
 //!   `btrfs receive -e --chroot` in an empty staging folder of the pool, which must then hold
@@ -89,9 +91,23 @@ pub struct Choice {
     /// Path from the top level (a plain path).
     pub path: String,
     pub mount: String,
+    /// Where it is on the PC: the mount point, or for a nested subvolume without a mount its
+    /// place inside its parent (`/home/games`).
+    pub place: String,
     pub snapshot: String,
     pub received_uuid: String,
     pub referenced: Option<u64>,
+}
+
+impl Choice {
+    /// Its mount point, or what the plan and the log say when it has none.
+    pub fn where_text(&self) -> String {
+        match (self.mount.is_empty(), self.place.is_empty()) {
+            (false, _) => self.mount.clone(),
+            (true, false) => format!("not mounted, inside {}", self.place),
+            (true, true) => "not mounted".into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +136,12 @@ fn system_mount(m: &str) -> bool {
 /// `parent` is a proper mount-point parent of `child` (both mounted).
 fn mounted_inside(parent: &str, child: &str) -> bool {
     !parent.is_empty() && !child.is_empty() && parent.trim_end_matches('/') != child.trim_end_matches('/') && under(parent, child)
+}
+
+/// `parent` is a proper ancestor of `child` by their paths from the top level.
+fn nested_by_path(parent: &str, child: &str) -> bool {
+    let (p, c) = (parent.trim_matches('/'), child.trim_matches('/'));
+    !p.is_empty() && p != c && under(p, c)
 }
 
 /// A complete received snapshot (read-only with a received UUID).
@@ -164,9 +186,18 @@ pub fn select(
         safe_rel(&s.path).filter(|p| !p.is_empty()).ok_or_else(|| format!("{}: the manifest's path {:?} is not a plain path", s.name, s.path))?;
     }
     let root = layout.iter().find(|s| s.mount == "/");
+    // where each one is on the PC: its mount point, or for a nested one its parent's place
+    // with its path inside it
+    let whole = BtrbkLayout { subvolumes: layout.clone(), ..Default::default() };
+    let place = |s: &BtrbkSubvolume| whole.place_of(s).unwrap_or_default();
+    for s in layout.iter().filter(|s| !s.nested_in.is_empty()) {
+        if place(s).is_empty() || safe_rel(&s.inside).is_none_or(|p| p.is_empty()) {
+            return Err(format!("{}: nested in {:?}, which the manifest does not list (or a path {:?} that is not plain)", s.name, s.nested_in, s.inside));
+        }
+    }
     let wanted: Vec<&BtrbkSubvolume> = match mode {
         Mode::Whole => layout.iter().collect(),
-        Mode::System => layout.iter().filter(|s| system_mount(&s.mount)).collect(),
+        Mode::System => layout.iter().filter(|s| system_mount(&place(s))).collect(),
         Mode::Custom | Mode::Add => {
             let mut v = Vec::new();
             for n in names {
@@ -204,6 +235,15 @@ pub fn select(
         {
             return Err(format!("{} is mounted inside {} ({} in {}): restore {} too", c.name, p.name, c.mount, p.mount, p.name));
         }
+        // a subvolume nested in another by path (a `@home/games` without a mount of its
+        // own) lives inside that one: it needs it too
+        let holder = layout.iter().filter(|p| p.name != c.name && nested_by_path(&p.path, &c.path)).max_by_key(|p| p.path.len());
+        if let Some(p) = holder
+            && !wanted.contains(&p)
+            && (mode.formats() || !pool_has(&p.path))
+        {
+            return Err(format!("{} is nested inside {} ({} in {}): restore {} too", c.name, p.name, c.path, p.path, p.name));
+        }
     }
     for (n, s) in overrides {
         if !wanted.iter().any(|c| &c.name == n) {
@@ -226,6 +266,7 @@ pub fn select(
             name: c.name.clone(),
             path: c.path.trim_matches('/').to_string(),
             mount: c.mount.clone(),
+            place: if c.nested_in.is_empty() { String::new() } else { place(c) },
             snapshot: snap.name.clone(),
             received_uuid: snap.received_uuid.clone().unwrap_or_default(),
             referenced: snap.size.map(|z| z.referenced_bytes),
@@ -570,7 +611,7 @@ impl RestoreSource for BtrfsSource {
         let mut received: Vec<(PathBuf, &Choice)> = Vec::new();
         let r = (|| -> Result<(), String> {
             for (i, c) in sel.chosen.iter().enumerate() {
-                log.line(format!("receiving {} ({}) from the NAS", c.snapshot, if c.mount.is_empty() { "not mounted" } else { c.mount.as_str() }));
+                log.line(format!("receiving {} ({}) from the NAS", c.snapshot, c.where_text()));
                 let dir = run_dir.join(i.to_string());
                 std::fs::create_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
                 received.push((dir.clone(), c));
@@ -616,7 +657,19 @@ impl RestoreSource for BtrfsSource {
                     // in the received root
                     std::fs::remove_dir(&to).map_err(|e| format!("{}: {e}", to.display()))?;
                 } else {
-                    log.line(format!("{} is already in {}: the received copy stays in {}", c.snapshot, sd.display(), dir.display()));
+                    // the same snapshot already there (adding to the PC's own filesystem): a
+                    // copy received earlier (same received UUID) or the PC's own original
+                    // (its UUID is what the NAS copy was received from); that one stays the
+                    // parent, the copy just received goes
+                    let there = btrfs::subvol_info(&to);
+                    let got = btrfs::subvol_info(&dir.join(&c.snapshot));
+                    let same = matches!((&there, &got), (Some(a), Some(b)) if a.readonly && b.received_uuid.is_some() && a.received_uuid.as_ref().or(a.uuid.as_ref()) == b.received_uuid.as_ref());
+                    if same {
+                        discard(dir, log);
+                        log.line(format!("{} is already in {} (the same snapshot): it stays the parent, the copy just received is removed", c.snapshot, sd.display()));
+                    } else {
+                        log.line(format!("{} is already in {} and is another snapshot: the received copy stays in {}", c.snapshot, sd.display(), dir.display()));
+                    }
                     continue;
                 }
             }
@@ -665,7 +718,7 @@ impl RestoreSource for BtrfsSource {
             out.push(format!("btrfs: {}", s.mode.label()));
             for c in &s.chosen {
                 let size = c.referenced.map(|b| format!(", {} MiB", b >> 20)).unwrap_or_default();
-                out.push(format!("  receive {} → writable {} ({}){size}", c.snapshot, c.path, if c.mount.is_empty() { "not mounted" } else { c.mount.as_str() }));
+                out.push(format!("  receive {} → writable {} ({}){size}", c.snapshot, c.path, c.where_text()));
             }
             for k in &s.skipped {
                 out.push(format!("  not restored: {k} (its fstab line is commented: {})", super::plan::RESTORE_MARK.trim()));
@@ -760,6 +813,45 @@ mod tests {
         let o = select(&m, &snaps, &run, Mode::System, &[], &[("@".into(), "@.20261109T0300".into())], &none).unwrap();
         assert_eq!(o.chosen[0].snapshot, "@.20261109T0300");
         assert!(select(&m, &snaps, &run, Mode::System, &[], &[("@".into(), "@home.20261109T0300".into())], &none).is_err());
+    }
+
+    #[test]
+    fn nested_subvolumes_without_a_mount() {
+        let mut m = manifest();
+        let b = m.btrbk.as_mut().unwrap();
+        let nested = |n: &str, p: &str, parent: &str, inside: &str| BtrbkSubvolume { name: n.into(), path: p.into(), nested_in: parent.into(), inside: inside.into(), ..Default::default() };
+        b.subvolumes.push(nested("saves", "@home/saves", "@home", "saves"));
+        b.subvolumes.push(nested("deep", "@home/saves/deep", "saves", "deep"));
+        b.subvolumes.push(nested("machines", "@/var/lib/machines", "@", "var/lib/machines"));
+        let (mut snaps, mut run) = data();
+        for g in ["saves", "deep", "machines"] {
+            snaps.push(snap(g, "20261110T0300", 2000, Some(1 << 20)));
+            run.snapshots.push(format!("{g}.20261110T0300"));
+        }
+        let none = |_: &str| false;
+        // whole: parents first, the nested ones after them
+        let w = select(&m, &snaps, &run, Mode::Whole, &[], &[], &none).unwrap();
+        let order: Vec<&str> = w.chosen.iter().map(|c| c.path.as_str()).collect();
+        let pos = |p: &str| order.iter().position(|x| *x == p).unwrap();
+        assert!(pos("@home") < pos("@home/saves") && pos("@home/saves") < pos("@home/saves/deep") && pos("@") < pos("@/var/lib/machines"), "{order:?}");
+        // system: a nested one at a system place goes with /, one in /home does not
+        let s = select(&m, &snaps, &run, Mode::System, &[], &[], &none).unwrap();
+        assert!(names(&s).contains(&"machines") && !names(&s).contains(&"saves"));
+        assert!(s.skipped.contains(&"@home/saves".to_string()));
+        // custom: a nested one needs its parent, at every level
+        let e = select(&m, &snaps, &run, Mode::Custom, &["@".into(), "saves".into()], &[], &none).unwrap_err();
+        assert!(e.contains("nested inside @home"), "{e}");
+        let e = select(&m, &snaps, &run, Mode::Custom, &["@".into(), "@home".into(), "deep".into()], &[], &none).unwrap_err();
+        assert!(e.contains("nested inside saves"), "{e}");
+        assert!(select(&m, &snaps, &run, Mode::Custom, &["@".into(), "@home".into(), "saves".into(), "deep".into()], &[], &none).is_ok());
+        // add: the parent already in the pool is enough
+        let pool = |p: &str| p == "@" || p == "@home";
+        let a = select(&m, &snaps, &run, Mode::Add, &["saves".into()], &[], &pool).unwrap();
+        assert_eq!(names(&a), vec!["saves"]);
+        assert!(select(&m, &snaps, &run, Mode::Add, &["saves".into()], &[], &|p: &str| p == "@").is_err());
+        // a parent the manifest does not list is refused
+        m.btrbk.as_mut().unwrap().subvolumes.push(nested("lost", "@x/lost", "@x", "lost"));
+        assert!(select(&m, &snaps, &run, Mode::Whole, &[], &[], &none).unwrap_err().contains("lost"));
     }
 
     #[test]

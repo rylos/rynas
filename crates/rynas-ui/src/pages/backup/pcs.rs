@@ -225,8 +225,9 @@ fn boot_copy_items(copies: &[rynas_api_types::pcagent::BootCopy]) -> impl IntoVi
 
 fn first_run(b: &BareMetal, list: &[ReceivedSnapshot]) -> Option<AnyView> {
     let title = view! { <h4 class="small"><strong>{tr("bkpc.first_run")}</strong></h4> };
-    // only mounted subvolumes are sent: one not mounted is never expected
-    let expected: Vec<&rynas_api_types::pcagent::BtrbkSubvolume> = b.layout.iter().filter(|s| !s.mount.is_empty()).collect();
+    // mounted subvolumes and the ones nested in them are sent: any other unmounted one is
+    // never expected
+    let expected: Vec<&rynas_api_types::pcagent::BtrbkSubvolume> = b.layout.iter().filter(|s| !s.mount.is_empty() || !s.nested_in.is_empty()).collect();
     if expected.is_empty() {
         let mut seen: Vec<String> = Vec::new();
         for s in list.iter().filter(|s| !s.incomplete && !s.not_subvolume) {
@@ -905,7 +906,9 @@ fn settings_dialog(pcs: Pcs, p: PcTarget, agent_dev: Option<PcDevice>) -> AnyVie
     let paused = RwSignal::new(if plan.paused { "paused" } else { "on" }.to_string());
     // a subvolume left out = its mount point in the agent's excludes and no alert for it on
     // the NAS; excludes that name no known subvolume stay as written
-    let mounts: Vec<(String, String)> = p.bare_metal.layout.iter().filter(|s| !s.mount.is_empty()).map(|s| (s.name.clone(), s.mount.trim_end_matches('/').to_string())).collect();
+    // (a nested subvolume without a mount: its place inside its parent, `/home/games`)
+    let whole = rynas_api_types::pcagent::BtrbkLayout { subvolumes: p.bare_metal.layout.clone(), ..Default::default() };
+    let mounts: Vec<(String, String)> = p.bare_metal.layout.iter().filter_map(|s| whole.place_of(s).map(|at| (s.name.clone(), at.trim_end_matches('/').to_string()))).collect();
     let norm = |e: &str| if e == "/" { "/".to_string() } else { e.trim_end_matches('/').to_string() };
     let mount_of = |m: &str| if m.is_empty() { "/".to_string() } else { m.to_string() };
     let mounts: Vec<(String, String)> = mounts.into_iter().map(|(n, m)| (n, mount_of(&m))).collect();
@@ -1200,8 +1203,14 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
         let agent = p.agent;
         let gaps = shown_gaps.into_iter().map(|g| view! { <li>{gap_text(g, agent)}</li> }).collect_view();
         let layout = (!b.layout.is_empty()).then(|| {
+            let whole = rynas_api_types::pcagent::BtrbkLayout { subvolumes: b.layout.clone(), ..Default::default() };
             let items = b.layout.iter().map(|s| {
-                let at = if s.mount.is_empty() { t("rm.tip_not_mounted").to_string() } else { s.mount.clone() };
+                let at = match (s.mount.is_empty(), whole.place_of(s)) {
+                    (false, _) => s.mount.clone(),
+                    // nested in another sent subvolume, reached through it
+                    (true, Some(place)) => format!("{place} ({})", t("rm.tip_not_mounted")),
+                    (true, None) => t("rm.tip_not_mounted").to_string(),
+                };
                 view! { <li><span class="mono">{s.name.clone()}</span>" → "<span class="mono">{at}</span></li> }
             }).collect_view();
             view! { <h4 class="small"><strong>{tr("bkpc.bm.layout")}</strong></h4><ul class="small bkpc-list">{items}</ul> }

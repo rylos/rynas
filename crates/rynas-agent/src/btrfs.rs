@@ -32,7 +32,8 @@ pub fn recreated_on_restore(rel: &str) -> bool {
 /// [`recreated_on_restore`]).
 pub fn excluded_subvolume(rel: &str) -> bool {
     let last = rel.rsplit('/').next().unwrap_or(rel);
-    last == ".snapshots"
+    // snapper's folder, and anything inside it
+    rel.split('/').any(|c| c == ".snapshots")
         || last == SNAP_DIR
         // btrbk's local snapshots (the usual folder names and the agent's default)
         || rel.split('/').any(|c| c == "btrbk_snapshots" || c == ".btrbk_snapshots")
@@ -44,17 +45,22 @@ pub fn excluded_subvolume(rel: &str) -> bool {
 }
 
 /// Subvolumes nested below the subvolume mounted at `mount`, as paths relative to it (with
-/// their ids), from `btrfs subvolume list -o`.
+/// their ids), from `btrfs subvolume list -o` (direct children) on it and on each child, down
+/// to `max_depth` levels. Errors give an empty list ([`nested_checked`] tells them).
 pub fn nested(mount: &Path, max_depth: usize) -> Vec<(String, u64)> {
-    let Ok(out) = btrfs(&["subvolume".as_ref(), "list".as_ref(), "-o".as_ref(), mount.as_os_str()]) else {
-        return Vec::new();
-    };
-    let base = btrfs(&["subvolume".as_ref(), "show".as_ref(), mount.as_os_str()])
-        .ok()
-        .and_then(|s| s.lines().next().map(|l| l.trim().to_string()))
-        .unwrap_or_default();
-    let base = if base == "/" || base.starts_with('<') { String::new() } else { base.trim_start_matches('/').to_string() };
+    nested_checked(mount, max_depth, &|rel| !excluded_subvolume(rel)).unwrap_or_default()
+}
+
+/// [`nested`] with its errors; `descend(rel)` says whether to look inside a child (snapshot
+/// folders hold many subvolumes and are never sent: no need to list them).
+pub fn nested_checked(mount: &Path, max_depth: usize, descend: &dyn Fn(&str) -> bool) -> Result<Vec<(String, u64)>, String> {
     let mut v = Vec::new();
+    if max_depth == 0 {
+        return Ok(v);
+    }
+    let out = btrfs(&["subvolume".as_ref(), "list".as_ref(), "-o".as_ref(), mount.as_os_str()])?;
+    let base = btrfs(&["subvolume".as_ref(), "show".as_ref(), mount.as_os_str()])?.lines().next().map(|l| l.trim().to_string()).unwrap_or_default();
+    let base = if base == "/" || base.starts_with('<') { String::new() } else { base.trim_start_matches("<FS_TREE>/").trim_start_matches('/').to_string() };
     for l in out.lines() {
         // ID 258 gen 10 top level 256 path @/var/lib/machines
         let id = l.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -68,12 +74,18 @@ pub fn nested(mount: &Path, max_depth: usize) -> Vec<(String, u64)> {
                 None => continue,
             }
         };
-        if rel.split('/').count() <= max_depth {
-            v.push((rel, id));
+        if rel.is_empty() || rel.split('/').any(|c| c.is_empty() || c == "." || c == "..") {
+            continue;
         }
+        if max_depth > 1 && descend(&rel) {
+            for (r, i) in nested_checked(&mount.join(&rel), max_depth - 1, &|x| descend(&format!("{rel}/{x}")))? {
+                v.push((format!("{rel}/{r}"), i));
+            }
+        }
+        v.push((rel, id));
     }
     v.sort();
-    v
+    Ok(v)
 }
 
 /// The default subvolume as a path from the top level (`None`: the top level itself).

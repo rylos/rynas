@@ -1740,6 +1740,10 @@ fn parse_manifest(b: &[u8]) -> ManifestRead {
                 && plain(&l.path)
                 && plain(&l.mount)
                 && (l.mount.is_empty() || l.mount.starts_with('/'))
+                // a nested one without a mount: its parent's name and a relative path
+                && (l.nested_in.is_empty() || (valid_snapshot_prefix(&l.nested_in) && l.mount.is_empty()))
+                && plain(&l.inside)
+                && !l.inside.starts_with('/')
         })
         .collect();
     let mut boot_copies: Vec<rynas_api_types::pcagent::BootCopy> = shown(v.pointer("/btrbk/boot_copies"), 8);
@@ -4154,6 +4158,34 @@ mod tests {
         // no manifest at all (the PC side comes later), no snapshots at all
         assert_eq!(bare_metal(&groups, None, None).missing[0].code, BareMetalCode::NoManifest);
         assert_eq!(bare_metal(&BTreeSet::new(), None, None).missing[0].code, BareMetalCode::NoSnapshots);
+    }
+
+    /// A subvolume nested in another without a mount (`@home/games`) is a group of its own:
+    /// expected, needed for bare metal, kept in the layout with its parent.
+    #[test]
+    fn nested_subvolumes_in_the_manifest() {
+        let m = parse_manifest(
+            br#"{"format":1,"boot":{"loader":"grub"},"btrbk":{"subvolumes":[
+            {"name":"@","path":"@","mount":"/"},{"name":"@home","path":"@home","mount":"/home"},
+            {"name":"games","path":"@home/games","nested_in":"@home","inside":"games"},
+            {"name":"bad","path":"@home/bad","mount":"/x","nested_in":"@home","inside":"bad"},
+            {"name":"abs","path":"@home/abs","nested_in":"@home","inside":"/abs"}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(m.subvolumes, ["@", "@home", "games", "bad", "abs"]);
+        // the layout shown keeps only well-formed nested entries
+        let names: Vec<&str> = m.layout.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["@", "@home", "games"]);
+        assert_eq!((m.layout[2].nested_in.as_str(), m.layout[2].inside.as_str()), ("@home", "games"));
+        let b = bare_metal(&BTreeSet::from(["@".to_string(), "@home".to_string()]), Some(("@.x".into(), None, Ok(m.clone()))), None);
+        assert!(b.missing.iter().any(|g| g.code == BareMetalCode::SubvolumeMissing && g.subject.as_deref() == Some("games")));
+        let all: BTreeSet<String> = m.subvolumes.iter().cloned().collect();
+        assert!(bare_metal(&all, Some(("@.x".into(), None, Ok(m))), None).ready);
+        // expected groups of a run: the nested one counts
+        let snap = |g: &str| ReceivedSnapshot { name: format!("{g}.20261110T0300"), group: g.into(), created_ms: Some(1), readonly: true, received_uuid: Some("u".into()), ..Default::default() };
+        let list = vec![snap("@"), snap("@home")];
+        let r = runs(&list, &BTreeSet::from(["@".to_string(), "@home".to_string(), "games".to_string()]));
+        assert_eq!(r[0].lacks, ["games"]);
     }
 
     /// The manifest `rynas-agent manifest` writes on a btrbk PC (golden file produced by the

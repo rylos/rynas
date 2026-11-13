@@ -19,3 +19,4 @@ __pycache__/
 *.pyc
 /crates/rynas-files-worker/target/
 crates/rynas-backup-worker/target/
+/crates/rynas-agent/target/

@@ -5088,7 +5088,7 @@ pca.cancel	Annulla
 pca.backup_sent	Il PC parte al prossimo contatto
 pca.cancel_sent	Il PC si ferma al prossimo contatto
 pca.restore_code	Codice di ripristino
-pca.restore_code_valid	Codice di ripristino creato: monouso, in sola lettura, valido fino al {until}. I codici creati prima restano validi fino alla scadenza.
+pca.restore_code_valid	Codice di ripristino creato: monouso, in sola lettura, valido fino al {until}. Sostituisce i codici creati prima per questo PC, che non funzionano più.
 pca.restore_not_ready	Sul NAS non c'è ancora tutto quello che serve per un ripristino su un disco vuoto (vedi le note sopra): il ripristino potrebbe fermarsi a metà o lasciare il PC senza avvio.
 pca.restore_nas	Indirizzo del NAS
 pca.restore_nas_local	Questa pagina è aperta su {host}, che il PC non può raggiungere: dopo --nas metti l'indirizzo del NAS in rete, per esempio https://192.0.2.10:8443.

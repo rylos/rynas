@@ -121,9 +121,19 @@ pub fn target_disks() -> Vec<plan::TargetDisk> {
 }
 
 /// IDs in use on attached devices other than the targets (their partitions may still carry
-/// the old IDs: they are about to be wiped).
+/// the old IDs: they are about to be wiped): filesystem UUIDs, PARTUUIDs, and the GPT disk
+/// GUID of every other attached disk (read from its table once, here).
 fn in_use_except(targets: &[String]) -> impl Fn(&str) -> bool + '_ {
+    let disk_guids: Vec<String> = probe::disks()
+        .iter()
+        .filter(|b| !targets.contains(&b.name))
+        .filter_map(|b| crate::gpt::disk_guid_of(&probe::dev_path(&b.name), u64::from(b.logical_sector)))
+        .map(|g| g.to_lowercase())
+        .collect();
     move |id: &str| {
+        if disk_guids.iter().any(|g| g.eq_ignore_ascii_case(id)) {
+            return true;
+        }
         for dir in ["/dev/disk/by-uuid", "/dev/disk/by-partuuid"] {
             let Ok(rd) = std::fs::read_dir(dir) else { continue };
             for e in rd.flatten() {
@@ -179,7 +189,21 @@ fn preflight(m: &rynas_api_types::pcagent::Manifest, p: &plan::Plan) -> Vec<Stri
     problems
 }
 
+/// The restore's mounts in a mount namespace of its own, private from `/` down: on a live
+/// system they would otherwise propagate into the namespaces of systemd-udevd, -resolved,
+/// -logind…, where `umount -R` never reaches them (the pool stays mounted there and
+/// `cryptsetup close` fails). Every tool the restore runs inherits it; it goes with the
+/// process. Not root: nothing to do (the restore refuses later).
+fn private_namespace() -> Result<(), String> {
+    // SAFETY: plain syscall
+    if unsafe { libc::geteuid() } != 0 {
+        return Ok(());
+    }
+    crate::backup::private_mounts().map_err(|e| format!("a mount namespace of its own for the restore: {e}"))
+}
+
 pub fn main(args: &[String]) -> Result<(), String> {
+    private_namespace()?;
     let scripted = opt(args, "--code").is_some() && (opt(args, "--disk").is_some() || opt(args, "--add-to").is_some());
     if !scripted {
         return tui::run(args);

@@ -1137,6 +1137,40 @@ pub struct BtrbkSubvolume {
     /// manifests, and the agent's method, which sends only that filesystem's subvolumes).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub fs_uuid: String,
+    /// Not mounted: nested inside another sent subvolume and reached through it; the btrbk
+    /// name of that parent (empty for a mounted subvolume).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub nested_in: String,
+    /// With `nested_in`: its path inside the parent (`games` for `@home/games`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub inside: String,
+}
+
+impl BtrbkLayout {
+    /// Where `s` is on the PC: its mount point, or for a nested subvolume its parent's place
+    /// joined with its path inside it (`/home/games`). `None` when the chain of parents is
+    /// broken (a parent missing, a loop).
+    pub fn place_of(&self, s: &BtrbkSubvolume) -> Option<String> {
+        let mut parts: Vec<&str> = Vec::new();
+        let mut cur = s;
+        for _ in 0..32 {
+            if cur.nested_in.is_empty() {
+                if cur.mount.is_empty() {
+                    return None;
+                }
+                let base = cur.mount.trim_end_matches('/');
+                let rest: Vec<&str> = parts.iter().rev().map(|p| p.trim_matches('/')).filter(|p| !p.is_empty()).collect();
+                return Some(if rest.is_empty() {
+                    if base.is_empty() { "/".into() } else { base.to_string() }
+                } else {
+                    format!("{base}/{}", rest.join("/"))
+                });
+            }
+            parts.push(&cur.inside);
+            cur = self.subvolumes.iter().find(|p| p.name == cur.nested_in)?;
+        }
+        None
+    }
 }
 
 impl Manifest {
@@ -1290,5 +1324,38 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(m.ready_reasons(), vec![ReadyReason::VolumeSkipped]);
+    }
+
+    #[test]
+    fn place_of_nested_subvolumes() {
+        let sv = |name: &str, mount: &str, nested_in: &str, inside: &str| BtrbkSubvolume {
+            name: name.into(),
+            mount: mount.into(),
+            nested_in: nested_in.into(),
+            inside: inside.into(),
+            ..Default::default()
+        };
+        let b = BtrbkLayout {
+            subvolumes: vec![
+                sv("@", "/", "", ""),
+                sv("@home", "/home", "", ""),
+                sv("games", "", "@home", "games"),
+                sv("deep", "", "games", "x/deep"),
+                sv("machines", "", "@", "var/lib/machines"),
+                sv("orphan", "", "gone", "o"),
+            ],
+            ..Default::default()
+        };
+        let place = |n: &str| b.place_of(b.subvolumes.iter().find(|s| s.name == n).unwrap());
+        assert_eq!(place("@").as_deref(), Some("/"));
+        assert_eq!(place("games").as_deref(), Some("/home/games"));
+        assert_eq!(place("deep").as_deref(), Some("/home/games/x/deep"));
+        assert_eq!(place("machines").as_deref(), Some("/var/lib/machines"));
+        assert_eq!(place("orphan"), None);
+        // the manifest field names
+        let v = serde_json::to_value(&b.subvolumes[2]).unwrap();
+        assert_eq!(v["nested_in"], "@home");
+        assert_eq!(v["inside"], "games");
+        assert!(serde_json::to_value(&b.subvolumes[0]).unwrap().get("nested_in").is_none());
     }
 }

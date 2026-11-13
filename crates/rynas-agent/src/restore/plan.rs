@@ -739,6 +739,13 @@ pub(crate) mod tests {
         assert_eq!(p.filesystems[0].old_uuid.as_deref(), Some("2d5cddec-8777-4aef-9b8d-1d7093e60982"));
         assert_eq!(p.id_map.len(), 1);
         assert!(!describe(&m, &p, false).is_empty());
+        // the GPT disk GUID (label-id) taken by another attached disk: a new one, said so
+        let guid = "1e2b8f6d-3643-4d8d-aac5-ab7edebecacc";
+        let kept = build(&m, &[(0, target(8 << 30))], &|_| false).unwrap();
+        assert_eq!(crate::gpt::guid_text(&kept.disks[0].gpt.disk_guid).to_lowercase(), guid);
+        let p = build(&m, &[(0, target(8 << 30))], &|u| u == guid).unwrap();
+        assert_ne!(crate::gpt::guid_text(&p.disks[0].gpt.disk_guid).to_lowercase(), guid);
+        assert!(p.notes.iter().any(|n| n.contains("disk GUID")), "{:?}", p.notes);
     }
 
     #[test]

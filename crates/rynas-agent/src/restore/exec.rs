@@ -49,9 +49,16 @@ impl Log {
 }
 
 fn run(log: &mut Log, argv: &[&str]) -> Result<String, String> {
-    log.line(format!("$ {}", argv.join(" ")));
+    run_env(log, argv, &[])
+}
+
+/// [`run`] with extra environment variables for that command only.
+fn run_env(log: &mut Log, argv: &[&str], env: &[(&str, &str)]) -> Result<String, String> {
+    let shown: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    log.line(format!("$ {}{}", if shown.is_empty() { String::new() } else { format!("{} ", shown.join(" ")) }, argv.join(" ")));
     let o = Command::new(argv[0])
         .args(&argv[1..])
+        .envs(env.iter().copied())
         .output()
         .map_err(|e| format!("{}: {e}", argv[0]))?;
     let out = String::from_utf8_lossy(&o.stdout).into_owned();
@@ -96,6 +103,23 @@ fn chroot(log: &mut Log, argv: &[&str]) -> Result<String, String> {
     let mut v = vec!["chroot", TARGET];
     v.extend_from_slice(argv);
     run(log, &v)
+}
+
+/// GRUB's configuration made again inside the target (`update-grub`, `grub-mkconfig` or
+/// `grub2-mkconfig`), with os-prober off for this run only (`GRUB_DISABLE_OS_PROBER=true` in
+/// its environment): it would add the live system to the PC's menu. The target's
+/// `/etc/default/grub` is not changed.
+fn grub_mkconfig(log: &mut Log) -> Result<String, String> {
+    let argv: &[&str] = if chroot_has("update-grub") {
+        &["update-grub"]
+    } else if chroot_has("grub-mkconfig") {
+        &["grub-mkconfig", "-o", "/boot/grub/grub.cfg"]
+    } else {
+        &["grub2-mkconfig", "-o", "/boot/grub2/grub.cfg"]
+    };
+    let mut v = vec!["chroot", TARGET];
+    v.extend_from_slice(argv);
+    run_env(log, &v, &[("GRUB_DISABLE_OS_PROBER", "true")])
 }
 
 /// `tool` is on this live system (`PATH` or the usual folders).
@@ -179,9 +203,15 @@ fn mount(log: &mut Log, dev: &str, at: &Path, fstype: &str, opts: &str) -> Resul
 
 fn umount_all(log: &mut Log) {
     let _ = run(log, &["umount", "-R", TARGET]);
+    // only what is mounted (the probe and add folders usually are not: no noise in the log)
+    let mi = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
+    let mounted: Vec<String> = mi.lines().filter_map(|l| l.split_whitespace().nth(4)).map(crate::mounts::unescape).collect();
     if let Ok(rd) = std::fs::read_dir(TOPS) {
         for e in rd.flatten() {
-            let _ = run(log, &["umount", &e.path().to_string_lossy()]);
+            let p = e.path().to_string_lossy().into_owned();
+            if mounted.contains(&p) {
+                let _ = run(log, &["umount", &p]);
+            }
         }
     }
 }
@@ -476,6 +506,8 @@ fn execute_inner(src: &mut dyn RestoreSource, v: &Version, m: &Manifest, plan: &
             ("btrfs", Some(Some(s))) if !s.is_empty() => format!("subvol=/{s}"),
             ("btrfs", Some(None)) => return Err(format!("{path}: the subvolume {} is not a plain path", subvol.as_deref().unwrap_or(""))),
             ("btrfs", _) => "subvolid=5".to_string(),
+            // the ESP with the PC's masks (bootctl refuses a world-readable random seed)
+            ("vfat", _) => super::fstab::fat_options(&m.fstab, path),
             _ => String::new(),
         };
         mount(log, &a.device, &at, &a.fstype, &opts)?;
@@ -767,14 +799,7 @@ fn boot(m: &Manifest, plan: &Plan, log: &mut Log, boot_files: bool) -> Result<()
                     return Err(e);
                 }
             }
-            let mk = if chroot_has("update-grub") {
-                chroot(log, &["update-grub"])
-            } else if chroot_has("grub-mkconfig") {
-                chroot(log, &["grub-mkconfig", "-o", "/boot/grub/grub.cfg"])
-            } else {
-                chroot(log, &["grub2-mkconfig", "-o", "/boot/grub2/grub.cfg"])
-            };
-            mk?;
+            grub_mkconfig(log)?;
             let dir = format!("EFI/{id}");
             if m.boot.shim {
                 removable_fallback(log, &esp, &[(&format!("{dir}/shimx64.efi"), "BOOTX64.EFI"), (&format!("{dir}/grubx64.efi"), "grubx64.efi"), (&format!("{dir}/mmx64.efi"), "mmx64.efi")]);
@@ -787,13 +812,7 @@ fn boot(m: &Manifest, plan: &Plan, log: &mut Log, boot_files: bool) -> Result<()
             for d in &plan.disks {
                 chroot(log, &[tool, "--target=i386-pc", &format!("/dev/{}", d.target.name)])?;
             }
-            if chroot_has("update-grub") {
-                chroot(log, &["update-grub"])?;
-            } else if chroot_has("grub-mkconfig") {
-                chroot(log, &["grub-mkconfig", "-o", "/boot/grub/grub.cfg"])?;
-            } else {
-                chroot(log, &["grub2-mkconfig", "-o", "/boot/grub2/grub.cfg"])?;
-            }
+            grub_mkconfig(log)?;
         }
         (Loader::SystemdBoot, _) => {
             let esp_arg = format!("--esp-path={esp_rel}");

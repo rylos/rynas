@@ -9,8 +9,9 @@
 //! folder, so it can switch between btrbk and the agent without a new full send.
 //!
 //! One run: lock `/.rynas/.lock` → refuse while `btrbk.timer` is active → manifest first
-//! (inside the root subvolume, so its snapshot carries it) → per subvolume: snapshot,
-//! parent, send, keep. The pure parts ([`plan_subvolumes`], [`pick_parent`],
+//! (inside the root subvolume, so its snapshot carries it) → per subvolume (the mounted
+//! ones, then the ones nested in them without a mount of their own, each a group of its
+//! own: [`nested_candidates`]): snapshot, parent, send, keep. The pure parts ([`plan_subvolumes`], [`pick_parent`],
 //! [`unique_name`], [`to_delete`]) need no btrfs.
 
 use std::collections::BTreeMap;
@@ -70,10 +71,136 @@ pub struct Sub {
     pub name: String,
     /// Path from the top level (empty when unknown, the test command).
     pub path: String,
-    /// Where it is mounted: the snapshot's source.
+    /// Where it is mounted, or reached through its parent when nested: the snapshot's source.
     pub mount: String,
     /// The local snapshot folder, absolute on the PC.
     pub snap_dir: String,
+    /// Not mounted: the top-level path of the sent subvolume it is nested in.
+    pub nested_in: Option<String>,
+}
+
+/// A subvolume found inside a sent one ([`nested_candidates`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Found {
+    /// Path relative to the sent subvolume (`games`, `games/deep`).
+    pub rel: String,
+    pub readonly: bool,
+    /// Has a received UUID (a snapshot received onto this PC).
+    pub received: bool,
+}
+
+/// The subvolumes nested inside the sent ones with no mount of their own (a `@home/games`
+/// made inside `@home`): the parent's snapshot holds only an empty folder there, so each is
+/// sent as a group of its own, the way btrbk needs a `subvolume` section for each one.
+/// `list(mount)` lists what is nested below a mount, at every depth. Left out: snapshot
+/// folders (the agent's, btrbk.conf's, snapper's `.snapshots`, Timeshift's), container
+/// storage, [`crate::btrfs::excluded_subvolume`], cache and log paths ([`btrbk::NOT_SENT`]),
+/// received snapshots, the plan's excludes naming the place, and whatever lies inside one
+/// left out. Returns the candidates (parents first) and the notes for the run: a listing
+/// that failed, a read-only subvolume, a name that cannot be used.
+pub fn nested_candidates(l: &Layout, snap_dirs: &[String], excludes: &[String], list: &dyn Fn(&str) -> Result<Vec<Found>, String>) -> (Vec<btrbk::Candidate>, Vec<String>) {
+    use crate::restore::paths::under;
+    let mut out: Vec<btrbk::Candidate> = Vec::new();
+    let mut notes = Vec::new();
+    for c in l.subvolumes.iter().filter(|c| c.skip.is_none() && c.nested_in.is_none()) {
+        let mut found = match list(&c.mount) {
+            Ok(f) => f,
+            Err(e) => {
+                notes.push(format!("{}: the subvolumes nested in it could not be listed ({e}); any of them is not sent", c.mount));
+                continue;
+            }
+        };
+        found.sort_by_key(|f| (f.rel.matches('/').count(), f.rel.clone()));
+        let mut left_out: Vec<String> = Vec::new();
+        for f in found {
+            let rel = f.rel.trim_matches('/').to_string();
+            if rel.is_empty() || rel.split('/').any(|x| x.is_empty() || x == "." || x == "..") {
+                continue;
+            }
+            let path = format!("{}/{rel}", c.path);
+            let place = if c.mount == "/" { format!("/{rel}") } else { format!("{}/{rel}", c.mount.trim_end_matches('/')) };
+            // inside one left out (its own reason was said, or it is a rule)
+            if left_out.iter().any(|k| under(k, &rel)) {
+                continue;
+            }
+            let quiet = |left_out: &mut Vec<String>| left_out.push(rel.clone());
+            // mounted elsewhere: handled as a mounted subvolume (sent or not); what is
+            // nested in it is found from its own mount
+            if l.subvolumes.iter().any(|x| x.path == path)
+                || crate::btrfs::excluded_subvolume(&rel)
+                || crate::btrfs::excluded_subvolume(&path)
+                || snap_dirs.iter().any(|d| !d.trim_matches('/').is_empty() && under(d, &place))
+                || btrbk::NOT_SENT.iter().any(|p| under(p, &place))
+                || f.received
+            {
+                quiet(&mut left_out);
+                continue;
+            }
+            // left out by the plan: kept as a skipped candidate, so the plan knows the
+            // exclusion names a subvolume (applied, not "cannot be applied")
+            if excludes.iter().any(|e| e.trim().trim_end_matches('/') == place) {
+                quiet(&mut left_out);
+                out.push(btrbk::Candidate { path, mount: place, skip: Some("left out by the plan"), nested_in: Some(c.path.clone()) });
+                continue;
+            }
+            if f.readonly {
+                notes.push(format!("{place}: a read-only subvolume nested in {} (a snapshot?), not sent", c.mount));
+                quiet(&mut left_out);
+                continue;
+            }
+            if place.chars().any(|ch| ch.is_whitespace() || ch == '#' || ch == '"' || ch == '\'' || ch.is_control()) {
+                notes.push(format!("{place}: a subvolume nested in {} whose path cannot be used in a snapshot name, not sent", c.mount));
+                quiet(&mut left_out);
+                continue;
+            }
+            let parent = out
+                .iter()
+                .filter(|o| o.skip.is_none())
+                .filter(|o| o.path != path && under(&o.path, &path) && under(&c.path, &o.path))
+                .max_by_key(|o| o.path.len())
+                .map(|o| o.path.clone())
+                .unwrap_or_else(|| c.path.clone());
+            out.push(btrbk::Candidate { path, mount: place, skip: None, nested_in: Some(parent) });
+        }
+    }
+    (out, notes)
+}
+
+/// What is nested below the subvolume mounted at `mount` (at most 8 levels; snapshot
+/// folders are not looked into), with each one's read-only and received state.
+fn list_nested(root: &Path, mount: &str) -> Result<Vec<Found>, String> {
+    let p = root.join(mount.trim_start_matches('/'));
+    let v = btrfs::nested_checked(&p, 8, &|rel| !btrfs::excluded_subvolume(rel))?;
+    Ok(v.into_iter()
+        .map(|(rel, _)| {
+            let i = btrfs::subvol_info(&p.join(&rel));
+            Found {
+                readonly: i.as_ref().is_some_and(|i| i.readonly),
+                received: i.as_ref().is_some_and(|i| i.received_uuid.is_some()),
+                rel,
+            }
+        })
+        .collect())
+}
+
+/// The manifest's `btrbk.subvolumes`: name → path → mount, and for a nested one its
+/// parent's name and its path inside it (no mount).
+pub fn manifest_subvolumes(subs: &[Sub]) -> Vec<BtrbkSubvolume> {
+    subs.iter()
+        .map(|s| {
+            let parent = s.nested_in.as_ref().and_then(|pp| subs.iter().find(|p| &p.path == pp));
+            match parent {
+                Some(p) => BtrbkSubvolume {
+                    name: s.name.clone(),
+                    path: s.path.clone(),
+                    nested_in: p.name.clone(),
+                    inside: s.path.strip_prefix(&format!("{}/", p.path)).unwrap_or(&s.path).to_string(),
+                    ..Default::default()
+                },
+                None => BtrbkSubvolume { name: s.name.clone(), path: s.path.clone(), mount: s.mount.clone(), ..Default::default() },
+            }
+        })
+        .collect()
 }
 
 /// The subvolumes to send from the PC's layout: the ones [`btrbk::layout`] sends, minus the
@@ -86,9 +213,17 @@ pub struct Sub {
 pub fn plan_subvolumes(l: &Layout, conf: &[ConfSubvolume], all: &[Mount], excludes: &[String], root: &Path) -> (Vec<Sub>, Vec<String>, Vec<String>) {
     let mut out: Vec<Sub> = Vec::new();
     let mut problems = Vec::new();
+    let mut nested_notes: Vec<String> = Vec::new();
     let names_mount = |e: &str, m: &str| e.trim_end_matches('/') == m || (e == "/" && m == "/");
     for c in l.subvolumes.iter().filter(|c| c.skip.is_none()) {
         if excludes.iter().any(|e| names_mount(e, &c.mount)) {
+            continue;
+        }
+        // a nested one goes only with its parent
+        if let Some(pp) = &c.nested_in
+            && !out.iter().any(|s| &s.path == pp)
+        {
+            nested_notes.push(format!("{} is nested in a subvolume that is not sent ({pp}): not sent either", c.mount));
             continue;
         }
         let from_conf = conf.iter().find(|x| btrbk::locate(&x.dir, all).is_some_and(|(d, p)| d == l.dev && p == c.path));
@@ -105,7 +240,7 @@ pub fn plan_subvolumes(l: &Layout, conf: &[ConfSubvolume], all: &[Mount], exclud
             .filter(|d| !d.is_empty() && root.join(d.trim_start_matches('/')).is_dir())
             .filter(|d| btrbk::locate(d, all).is_some_and(|(dev, _)| dev == l.dev))
             .unwrap_or_else(|| AGENT_SNAPSHOT_DIR.to_string());
-        out.push(Sub { name, path: c.path.clone(), mount: c.mount.clone(), snap_dir });
+        out.push(Sub { name, path: c.path.clone(), mount: c.mount.clone(), snap_dir, nested_in: c.nested_in.clone() });
     }
     // an exclude that is not a subvolume's mount point but lies in a sent one (or is a
     // pattern, which could): sent anyway, and said so
@@ -117,6 +252,7 @@ pub fn plan_subvolumes(l: &Layout, conf: &[ConfSubvolume], all: &[Mount], exclud
         .filter(|e| !l.subvolumes.iter().any(|c| names_mount(e, &c.mount)))
         .filter(|e| !e.starts_with('/') || out.iter().any(|s| inside(e.trim_end_matches('/'), &s.mount)))
         .map(|e| format!("the exclusion {e} is not applied: the btrfs method sends whole subvolumes (only a subvolume's mount point can be left out)"))
+        .chain(nested_notes)
         .collect();
     (out, problems, notices)
 }
@@ -508,7 +644,7 @@ pub fn run(st: &crate::state::State, client: &Arc<Client>, counters: &Arc<Counte
     set_phase(AgentPhase::Snapshot);
     crate::bootcopy::trigger_automounts(root);
     let all = mounts::read();
-    let layout = btrbk::layout(&all).map_err(|e| fail(e, Vec::new(), None))?;
+    let mut layout = btrbk::layout(&all).map_err(|e| fail(e, Vec::new(), None))?;
     let conf = match btrbk::read_conf(root) {
         Ok(c) => c.map(|t| btrbk::parse_conf(&t)).unwrap_or_default(),
         Err(e) => {
@@ -516,7 +652,12 @@ pub fn run(st: &crate::state::State, client: &Arc<Client>, counters: &Arc<Counte
             Vec::new()
         }
     };
-    let (subs, problems, notices) = plan_subvolumes(&layout, &conf, &all, &st.plan.plan.excludes, root);
+    // the subvolumes nested in the sent ones without a mount of their own
+    let snap_dirs: Vec<String> = std::iter::once(AGENT_SNAPSHOT_DIR.to_string()).chain(conf.iter().map(|c| c.snapshot_dir.clone())).collect();
+    let (nested, nested_notes) = nested_candidates(&layout, &snap_dirs, &st.plan.plan.excludes, &|mount| list_nested(root, mount));
+    layout.subvolumes.extend(nested);
+    let (subs, problems, mut notices) = plan_subvolumes(&layout, &conf, &all, &st.plan.plan.excludes, root);
+    notices.extend(nested_notes);
     for n in &notices {
         say(n.clone());
     }
@@ -524,12 +665,12 @@ pub fn run(st: &crate::state::State, client: &Arc<Client>, counters: &Arc<Counte
         return Err(fail("no subvolume to send", Vec::new(), None));
     }
     // the manifest first: the root snapshot carries it
-    let planned: BTreeMap<String, CaptureMethod> = subs.iter().map(|s| (s.mount.clone(), CaptureMethod::BtrfsSnapshot)).collect();
+    let planned: BTreeMap<String, CaptureMethod> = subs.iter().filter(|s| s.nested_in.is_none()).map(|s| (s.mount.clone(), CaptureMethod::BtrfsSnapshot)).collect();
     let mut man = manifest::collect(&planned);
     let snapshot_dir = subs.iter().find(|s| s.mount == "/").unwrap_or(&subs[0]).snap_dir.clone();
     let block = BtrbkLayout {
         snapshot_dir,
-        subvolumes: subs.iter().map(|s| BtrbkSubvolume { name: s.name.clone(), path: s.path.clone(), mount: s.mount.clone(), ..Default::default() }).collect(),
+        subvolumes: manifest_subvolumes(&subs),
         boot_copies: Vec::new(),
         agent: true,
     };
@@ -615,7 +756,7 @@ pub fn test_command(client: &Client, snap_dir: &str, subvols: &[(String, String)
         if !valid_snapshot_prefix(name) {
             return Err(format!("{name}: not a snapshot name"));
         }
-        let sub = Sub { name: name.clone(), path: String::new(), mount: path.clone(), snap_dir: snap_dir.to_string() };
+        let sub = Sub { name: name.clone(), path: String::new(), mount: path.clone(), snap_dir: snap_dir.to_string(), nested_in: None };
         match send_one(client, &sub, Path::new("/"), &ts, &nas, None) {
             Ok(s) => println!(
                 "{name}: {} sent ({}), {} bytes, {} compressed",
@@ -785,5 +926,65 @@ mod tests {
         assert_eq!(notices.len(), 3, "{notices:?}");
         assert!(notices.iter().all(|n| n.contains("not applied")));
         assert!(notices[0].contains("/home/me/.cache") && notices[1].contains("*.iso") && notices[2].contains("/srv/b/tmp"));
+    }
+
+    #[test]
+    fn nested_subvolumes_without_a_mount_are_sent_as_their_own_groups() {
+        let t = tempfile::tempdir().unwrap();
+        let all = mounts::parse(MI);
+        let l = btrbk::layout(&all).unwrap();
+        let f = |rel: &str| Found { rel: rel.into(), readonly: false, received: false };
+        let list = |mount: &str| -> Result<Vec<Found>, String> {
+            match mount {
+                "/" => Ok(vec![
+                    f("var/lib/machines"),
+                    f(".btrbk_snapshots"),
+                    f(".snapshots/1/snapshot"),
+                    f("var/lib/docker/btrfs/subvolumes/abc"),
+                    f("var/cache/thing"),
+                    Found { rel: "backup/old".into(), readonly: false, received: true },
+                    Found { rel: "frozen".into(), readonly: true, received: false },
+                    f("frozen/inner"),
+                    f("bad name"),
+                ]),
+                "/home" => Ok(vec![f("games"), f("games/deep"), f("skipme"), f("skipme/below")]),
+                "/srv/a" => Err("permission denied".into()),
+                _ => Ok(Vec::new()),
+            }
+        };
+        let excludes = vec!["/home/skipme".to_string()];
+        let (nested, notes) = nested_candidates(&l, &[AGENT_SNAPSHOT_DIR.into()], &excludes, &list);
+        let got: Vec<_> = nested.iter().filter(|c| c.skip.is_none()).map(|c| (c.path.as_str(), c.mount.as_str(), c.nested_in.as_deref().unwrap())).collect();
+        // the plan's exclusion: kept as a skipped candidate (nothing below it)
+        let skipped: Vec<_> = nested.iter().filter(|c| c.skip.is_some()).map(|c| c.mount.as_str()).collect();
+        assert_eq!(skipped, ["/home/skipme"]);
+        assert_eq!(
+            got,
+            [("@/var/lib/machines", "/var/lib/machines", "@"), ("@home/games", "/home/games", "@home"), ("@home/games/deep", "/home/games/deep", "@home/games")]
+        );
+        // a failed listing, a read-only subvolume and an unusable name are said, never silent
+        assert_eq!(notes.len(), 3, "{notes:?}");
+        assert!(notes.iter().any(|n| n.contains("/frozen") && n.contains("read-only")));
+        assert!(notes.iter().any(|n| n.contains("/bad name")));
+        assert!(notes.iter().any(|n| n.contains("/srv/a") && n.contains("could not be listed")));
+        // into the plan: btrbk names (the basename), the parent kept in the manifest
+        let mut l2 = l.clone();
+        l2.subvolumes.extend(nested.clone());
+        let (subs, problems, notices) = plan_subvolumes(&l2, &[], &all, &excludes, t.path());
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(notices.is_empty(), "the exclusion of a nested place is applied: {notices:?}");
+        let games = subs.iter().find(|s| s.path == "@home/games").unwrap();
+        assert_eq!((games.name.as_str(), games.mount.as_str(), games.snap_dir.as_str()), ("games", "/home/games", AGENT_SNAPSHOT_DIR));
+        let man = manifest_subvolumes(&subs);
+        let g = man.iter().find(|s| s.name == "games").unwrap();
+        assert_eq!((g.mount.as_str(), g.nested_in.as_str(), g.inside.as_str()), ("", "@home", "games"));
+        let d = man.iter().find(|s| s.name == "deep").unwrap();
+        assert_eq!((d.nested_in.as_str(), d.inside.as_str()), ("games", "deep"));
+        let b = BtrbkLayout { subvolumes: man.clone(), ..Default::default() };
+        assert_eq!(b.place_of(d).as_deref(), Some("/home/games/deep"));
+        // the parent left out by the plan: the nested ones go with it, said
+        let (subs, _, notices) = plan_subvolumes(&l2, &[], &all, &["/home".into()], t.path());
+        assert!(!subs.iter().any(|s| s.path.starts_with("@home")));
+        assert_eq!(notices.iter().filter(|n| n.contains("nested in a subvolume that is not sent")).count(), 2, "{notices:?}");
     }
 }

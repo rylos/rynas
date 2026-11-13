@@ -5518,7 +5518,7 @@ dict! { BLOB, LENS, IT;
     "pca.backup_sent" => "The PC starts at its next contact", "Il PC parte al prossimo contatto";
     "pca.cancel_sent" => "The PC stops at its next contact", "Il PC si ferma al prossimo contatto";
     "pca.restore_code" => "Restore code", "Codice di ripristino";
-    "pca.restore_code_valid" => "Restore code made: single use, read-only, valid until {until}. Codes made earlier stay valid until they expire.", "Codice di ripristino creato: monouso, in sola lettura, valido fino al {until}. I codici creati prima restano validi fino alla scadenza.";
+    "pca.restore_code_valid" => "Restore code made: single use, read-only, valid until {until}. It replaces the codes made earlier for this PC: they no longer work.", "Codice di ripristino creato: monouso, in sola lettura, valido fino al {until}. Sostituisce i codici creati prima per questo PC, che non funzionano più.";
     "pca.restore_not_ready" => "Not everything a restore on an empty disk needs is on the NAS yet (see the notes above): the restore may stop halfway or leave the PC unable to boot.", "Sul NAS non c'è ancora tutto quello che serve per un ripristino su un disco vuoto (vedi le note sopra): il ripristino potrebbe fermarsi a metà o lasciare il PC senza avvio.";
     "pca.restore_nas" => "NAS address", "Indirizzo del NAS";
     "pca.restore_nas_local" => "This page is open on {host}, which the PC cannot reach: after --nas put the NAS' address on the network, for example https://192.0.2.10:8443.", "Questa pagina è aperta su {host}, che il PC non può raggiungere: dopo --nas metti l'indirizzo del NAS in rete, per esempio https://192.0.2.10:8443.";

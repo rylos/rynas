@@ -557,17 +557,23 @@ fn flow(term: &mut DefaultTerminal, args: &[String]) -> Result<Option<Job>, Stri
             42 => {
                 let subs = layout(&manifest);
                 let s = bsrc.as_ref().ok_or(INTERNAL)?;
+                let whole = rynas_api_types::pcagent::BtrbkLayout { subvolumes: subs.clone(), ..Default::default() };
                 let items: Vec<String> = subs
                     .iter()
                     .map(|x| {
                         let snap = overrides.iter().find(|(n, _)| n == &x.name).map(|(_, s)| s.clone()).unwrap_or_else(|| "the run's snapshot".into());
-                        format!("{}  {}  ({snap})", x.name, if x.mount.is_empty() { "not mounted" } else { x.mount.as_str() })
+                        let at = match (x.mount.is_empty(), whole.place_of(x)) {
+                            (false, _) => x.mount.clone(),
+                            (true, Some(p)) if !x.nested_in.is_empty() => format!("inside {}: {p}", x.nested_in),
+                            _ => "not mounted".into(),
+                        };
+                        format!("{}  {at}  ({snap})", x.name)
                     })
                     .collect();
                 let mut intro = vec![if mode == btrfs::Mode::Add {
-                    "Tick the subvolumes to add (a subvolume mounted inside another needs that one, here or already in the PC's filesystem).".to_string()
+                    "Tick the subvolumes to add (a subvolume mounted or nested inside another needs that one, here or already in the PC's filesystem).".to_string()
                 } else {
-                    "Tick the subvolumes to restore (the root is needed; a subvolume mounted inside another needs that one too).".to_string()
+                    "Tick the subvolumes to restore (the root is needed; a subvolume mounted or nested inside another needs that one too).".to_string()
                 }];
                 intro.push(format!("{} snapshots on the NAS", s.listing.snapshots.len()));
                 intro.extend(err_lines(&error));
