@@ -40,6 +40,9 @@ const ANSWER_WAIT: Duration = Duration::from_secs(3600);
 /// zstd level of the stream (fast; the NAS stores what btrfs receive writes).
 const ZSTD_LEVEL: i32 = 3;
 
+/// The raw stream read ahead of the compression: chunks of 1 MiB, 32 of them (32 MiB).
+const READ_AHEAD: (usize, usize) = (1 << 20, 32);
+
 static CANCEL: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn on_signal(_: libc::c_int) {
@@ -584,7 +587,11 @@ fn stream_to_nas(client: &Client, snap: &Path, parent: Option<&Path>, query: &st
         s
     });
     let raw = Arc::new(AtomicU64::new(0));
+    // btrfs send goes on reading the disk while the network or the NAS waits: a 1 MiB pipe
+    // and READ_AHEAD read in advance on a thread of its own
+    crate::readahead::grow_pipe(std::os::fd::AsRawFd::as_raw_fd(&out), 1 << 20);
     let stream = SendStream { child, out, err: Some(err), raw: raw.clone(), progress };
+    let stream = crate::readahead::ReadAhead::new(stream, READ_AHEAD.0, READ_AHEAD.1);
     let mut enc = zstd::stream::read::Encoder::new(stream, ZSTD_LEVEL).map_err(|e| format!("zstd: {e}"))?;
     // the NAS decodes windows up to AGENT_ZSTD_WINDOW_LOG_MAX
     enc.window_log(AGENT_ZSTD_WINDOW_LOG).map_err(|e| format!("zstd: {e}"))?;

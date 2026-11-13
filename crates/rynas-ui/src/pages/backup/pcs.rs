@@ -390,8 +390,28 @@ pub fn panel(add: RwSignal<Option<bool>>) -> AnyView {
             })
         })
     };
+    // the agents' live progress: both lists read again every 5 s while one PC backs up and
+    // the page is visible
+    let agents = Remote::<rynas_api_types::pcagent::PcBackupOverview>::new("/api/v1/pcbackup");
+    let ticking = RwSignal::new(false);
+    Effect::new(move |_| {
+        let busy = pcs.list.data.with(|l| l.as_ref().is_some_and(|l| l.iter().any(|p| p.receiving)))
+            || agents.data.with(|o| o.as_ref().is_some_and(|o| o.devices.iter().any(|d| d.state == rynas_api_types::pcagent::PcState::Running)));
+        if busy && !ticking.get_untracked() {
+            ticking.set(true);
+            spawn_local(async move {
+                api::sleep(5000).await;
+                let _ = ticking.try_set(false);
+                if !document().hidden() {
+                    pcs.list.reload();
+                    agents.reload();
+                }
+            });
+        }
+    });
     let content = move || {
         let Some(list) = pcs.list.data.get() else { return ().into_any() };
+        let progress_of = |dev: &str| agents.data.with(|o| o.as_ref().and_then(|o| o.devices.iter().find(|d| d.device == dev && d.settings.method == PcMethod::Btrfs).and_then(|d| d.progress.clone())));
         if list.is_empty() {
             return view! {
                 <EmptyState icon=icons::MONITOR title=Signal::derive(move || t("bkpc.empty").to_string()) text=Signal::derive(move || t("bkpc.empty_text").to_string())>
@@ -420,7 +440,21 @@ pub fn panel(add: RwSignal<Option<bool>>) -> AnyView {
                 ui::row(vec![
                     ui::cell("bk.col.pc", "wrap", ui::two_lines(view! { <strong>{p.device.clone()}</strong> }.into_any(), sub, "cell-sub small")),
                     ui::cell("bk.col.folder", "wrap", ui::breakable(&p.path, "mono small")),
-                    ui::cell("col.status", "wrap", view! { <div class="cell-main">{state_status(p.state)}{problem}<span class="cell-sub small">{when(p.last_received_ms)}</span></div> }.into_any()),
+                    ui::cell("col.status", "wrap", {
+                        // a backup running: its progress instead of the last date
+                        let progress = p.agent.then(|| progress_of(&p.device)).flatten();
+                        view! {
+                            <div class="cell-main">
+                                {if p.receiving || progress.is_some() { ui::status(Tone::Info, t("bkpc.receiving").to_string()) } else { state_status(p.state) }}
+                                {problem}
+                                {match progress {
+                                    Some(pr) => super::agent::progress_view(&pr),
+                                    None => view! { <span class="cell-sub small">{when(p.last_received_ms)}</span> }.into_any(),
+                                }}
+                            </div>
+                        }
+                        .into_any()
+                    }),
                     ui::cell("bk.col.snapshots", "wrap", ui::two_lines(view! { <span class="tnum">{i18n::count(u64::from(p.snapshots))}</span> }.into_any(), (!groups.is_empty()).then_some(groups), "cell-sub small mono")),
                     ui::text_cell("bk.col.space", "num tnum", space),
                     ui::cell("bkpc.col.restore", "", bm_status(&p.bare_metal)),
@@ -1344,7 +1378,8 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
             <dl class="kvs">
                 {(!agent).then(|| kv("col.status", state_status(p.state)))}
                 {kv("pcb.how", ui::text(t(if agent { "pcb.via.agent" } else { "pcb.via.ssh" }).to_string()))}
-                {p.receiving.then(|| kv("bkpc.receiving", ui::status(Tone::Info, t("bkpc.receiving").to_string())))}
+                // with rynas-agent its status above already says a backup runs
+                {(p.receiving && !agent).then(|| kv("bkpc.receiving", ui::status(Tone::Info, t("bkpc.receiving").to_string())))}
                 {if agent {
                     let last = p.last_received_ms;
                     view! { {move || (!ctl.paired.get()).then(|| kv("bk.last", ui::text(when(last))))} }.into_any()

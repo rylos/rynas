@@ -40,6 +40,10 @@ mod send;
 #[path = "../../rynas-btrfs/src/send_stream.rs"]
 #[allow(dead_code)]
 mod send_stream;
+// reading ahead between the stages of a stream, shared with rynasd the same way
+#[path = "../../rynas-btrfs/src/readahead.rs"]
+#[allow(dead_code)]
+mod readahead;
 mod state;
 
 use std::collections::BTreeMap;

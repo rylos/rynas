@@ -28,6 +28,7 @@ pub mod btrbk_ssh;
 pub mod domain;
 pub mod ioctl;
 pub mod name;
+pub mod readahead;
 pub mod receive;
 pub mod receive_filter;
 pub mod replication;

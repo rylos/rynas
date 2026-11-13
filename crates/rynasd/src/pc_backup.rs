@@ -257,6 +257,22 @@ fn last_line(text: &str) -> String {
     text.lines().rfind(|l| !l.trim().is_empty() && !l.starts_with("At ") && !l.starts_with("Chroot to ")).unwrap_or("").trim().to_string()
 }
 
+/// `std::io::copy` with 1 MiB reads and writes (fewer, larger writes into a pipe).
+fn copy_big(input: &mut dyn std::io::Read, out: &mut dyn std::io::Write) -> std::io::Result<u64> {
+    let mut buf = vec![0u8; 1 << 20];
+    let mut total = 0u64;
+    loop {
+        let n = match input.read(&mut buf) {
+            Ok(0) => return Ok(total),
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        out.write_all(&buf[..n])?;
+        total += n as u64;
+    }
+}
+
 /// A received snapshot fit to be sent: a read-only subvolume with a received UUID, directly
 /// in the folder (`dir`), its name a snapshot name.
 fn sendable(dir: &std::fs::File, name: &str) -> Result<(), String> {
@@ -684,7 +700,9 @@ impl ReceiveHost for HostReceive {
         let mut child = c.spawn().map_err(|e| format!("systemd-run: {e}"))?;
         let errs = stderr_tail(&mut child);
         let mut stdin = child.stdin.take().ok_or("no stdin")?;
-        let copied = std::io::copy(input, &mut stdin);
+        // 1 MiB pipe and 1 MiB writes (std::io::copy moves 8 KiB at a time)
+        rynas_btrfs::readahead::grow_pipe(std::os::fd::AsRawFd::as_raw_fd(&stdin), 1 << 20);
+        let copied = copy_big(input, &mut stdin);
         // end of stream (or the stream broke: a short stream makes the receive fail)
         drop(stdin);
         let status = child.wait().map_err(|e| e.to_string())?;
@@ -2644,6 +2662,10 @@ pub const RECEIVE_SPACE_EVERY: u64 = 64 << 20;
 pub const RECEIVE_MIN_RATE: u64 = 64 << 10;
 pub const RECEIVE_RATE_GRACE: Duration = Duration::from_secs(15 * 60);
 
+/// The checked stream read ahead of `btrfs receive`: chunks of 1 MiB, 32 of them (32 MiB per
+/// receive, [`MAX_RECEIVES`] at once).
+const RECEIVE_READ_AHEAD: (usize, usize) = (1 << 20, 32);
+
 /// The names of an agent's receive: `snapshot` in btrbk's `long` form, not dated more than
 /// a day ahead, and `parent` (when there is one) of the same subvolume, in any btrbk
 /// timestamp format (a parent can be a copy an earlier btrbk setup sent with `long-iso`).
@@ -2883,7 +2905,9 @@ impl PcBackup {
         use rynas_api_types::pcagent::{AGENT_ZSTD_WINDOW_LOG_MAX, PARENT_MISSING};
         let t = self.agent_target(device, folder)?;
         check_agent_names(&snapshot, parent.as_deref(), rynas_tasks::now_ms())?;
-        let (tx, rx) = tokio::sync::mpsc::channel::<Result<axum::body::Bytes, String>>(16);
+        // room for the network to go on while the NAS side waits (frames of the agent's
+        // chunks, up to 256 KiB each)
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<axum::body::Bytes, String>>(128);
         let pump = tokio::spawn(async move {
             let mut stream = body.into_data_stream();
             loop {
@@ -2967,10 +2991,20 @@ impl PcBackup {
             });
             let limits = Capped { inner: decoded, left: room, space_ok, since_check: 0, total: 0, started: std::time::Instant::now() };
             let expect = rynas_btrfs::send_stream::Expect { name: snapshot.clone(), parent_uuid: parent_ids.as_ref().and_then(|p| p.0.clone()) };
-            let mut guard = rynas_btrfs::send_stream::Guard::new(limits, expect);
-            let res = s.host.receive(&dev, &lock, &staging, &hidden, &mut guard);
+            let guard = rynas_btrfs::send_stream::Guard::new(limits, expect);
+            // decoding and checking go on while btrfs receive writes: RECEIVE_READ_AHEAD read
+            // in advance on a thread of its own (the guard comes back for its findings)
+            let mut ahead = rynas_btrfs::readahead::ReadAhead::new(guard, RECEIVE_READ_AHEAD.0, RECEIVE_READ_AHEAD.1);
+            let res = s.host.receive(&dev, &lock, &staging, &hidden, &mut ahead);
+            // after a good receive the thread has read its stream to the end: the guard comes
+            // back at once; after a failure it is not waited for (it ends with the upload)
+            let guard = match &res {
+                Ok(()) => ahead.finish(),
+                Err(_) => None,
+            };
             // checked under the lock: the staging folder, then the move
             let res = res.and_then(|()| {
+                let guard = guard.ok_or("the stream check stopped")?;
                 if !guard.seen.ended {
                     return Err("the stream did not end".into());
                 }
