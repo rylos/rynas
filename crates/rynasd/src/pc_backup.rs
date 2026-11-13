@@ -363,6 +363,9 @@ const RECEIVE_CAPS: &[&str] = &[
     "CAP_FSETID",
     "CAP_DAC_OVERRIDE",
     "CAP_MKNOD",
+    // file capabilities (`security.capability`, e.g. newgidmap, ping): without it a real
+    // system's root snapshot fails with EPERM (seen on Arch in the B4 VMs)
+    "CAP_SETFCAP",
 ];
 
 /// The sandbox of an agent PC's `btrfs receive` (`docs/research/pc-backup.md` §11.9).
