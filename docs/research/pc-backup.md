@@ -723,6 +723,8 @@ The restore source of §11.4 for both kinds of btrfs folder: PCs of the agent's 
 
 **Open:** a received snapshot's `received_uuid` differing from the NAS copy's is reported, not fatal (the next backup of it is then full); the restore always sends full streams; *system only* is a fixed list of system mount points; the guided layout has no swap partition; a dry run uses up the restore code, as for the file method.
 
+**Browsing in the File app** (2026-11-13): administrators see every PC's folder of received snapshots in the File app under "Backups" (`/@backups/<pc>`), read-only and enforced on the server: no writing route, no job writing into it or removing from it, no write powers for the worker there; files are copied out to a share, downloaded or previewed, root-only content included (the administrator's worker reads with `CAP_DAC_READ_SEARCH`). The `.incoming` staging folder is hidden and snapshot folders are labelled by their date. Details in `../plugins/files.md` ("The PCs' backups").
+
 ### 11.11 B4 results: the bare-metal restore VM matrix (2026-11-13)
 
 Setup (a developer PC, at most 2 VMs of 2 GiB, OVMF, user-mode network): the four source PCs of `~/vm-scratch/vms/b4` (README there), a Debian 12 live VM with an empty target disk, the static musl `rynas-agent` of this commit, and as the NAS rynasd's router with the real `HostReceive` (receive and send units, root) on a 16 GiB loop btrfs, served on loopback (the agent with `--allow-http`, reached at 10.0.2.2). Scripted mode throughout (`restore --method btrfs --mode … --disk /dev/vdb --confirm vdb`, `--dry-run` first); the TUI was not driven.

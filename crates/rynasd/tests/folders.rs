@@ -137,10 +137,21 @@ fn env() -> Env {
         (u == "admin").then(|| vec!["rynas-admin".into()])
     });
     let ops = Arc::new(ops);
+    // the PC backups' receive side, in memory: shares never overlap their folders
+    let pc = rynasd::pc_backup::PcBackup::new(
+        ops.clone(),
+        Arc::new(rynasd::pc_backup::MemoryReceive::new()),
+        Arc::new(MemoryNotifier::default()),
+        dir.path().join("state"),
+        AdminPolicy::new(vec!["rynas-admin".into()], |u| (u == "admin").then(|| vec!["rynas-admin".into()])),
+        "nas".into(),
+    );
+    let _ = ops.pc_backup.set(pc.clone());
     let clock = Arc::new(ManualClock::new(1_800_000_000_000));
     let totp = Arc::new(TotpManager::new(MemoryStorage::default(), clock.clone(), "rynas"));
     let mut st = DaemonState::new(Arc::new(NoAuth), totp, clock);
     st.ops = Some(ops.clone());
+    st.pc_backup = Some(pc);
     st.services = Some(Arc::new(Services {
         ops: ops.clone(),
         users,
@@ -454,4 +465,60 @@ async fn nocow_is_turned_on_for_an_empty_folder_only() {
     assert_eq!(s, StatusCode::ACCEPTED, "{}", String::from_utf8_lossy(&b));
     wait_task(&e, &serde_json::from_slice::<TaskStarted>(&b).unwrap().task_id).await;
     assert!(runs(&e).iter().any(|c| c == "run chattr -C /srv/vol1/cams"));
+}
+
+#[tokio::test]
+async fn shares_and_pc_backup_folders_never_overlap() {
+    use rynas_api_types::pcbackup::{PcIssueCode, PcTarget};
+    use rynas_api_types::TaskStatus;
+    let e = env();
+    e.host.add_dir("/srv/vol1/pc-backups", None);
+    let (s, b) = call(&e, "POST", "/v1/shares", Some(json!({"name": "photos", "path": "/srv/vol1/photos"}))).await;
+    assert_eq!(s, StatusCode::CREATED, "{}", String::from_utf8_lossy(&b));
+    apply(&e);
+    // a PC's folder that is a share, lies inside one or holds one: refused, naming the share
+    for p in ["/srv/vol1/photos", "/srv/vol1/photos/pc", "/srv/vol1"] {
+        let (s, b) = call(&e, "POST", "/v1/pc-backups/targets", Some(json!({"device": "x", "path": p, "agent": true}))).await;
+        let err: ApiError = serde_json::from_slice(&b).unwrap();
+        assert_eq!((s, err.field.as_deref()), (StatusCode::BAD_REQUEST, Some("path")), "{p}: {}", err.message);
+        assert!(err.message.contains("/srv/vol1/photos"), "{}", err.message);
+    }
+    // beside the shares: fine
+    let (s, b) = call(&e, "POST", "/v1/pc-backups/targets", Some(json!({"device": "laptop", "path": "/srv/vol1/pc-backups/laptop", "agent": true}))).await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{}", String::from_utf8_lossy(&b));
+    let t = wait_task(&e, &serde_json::from_slice::<TaskStarted>(&b).unwrap().task_id).await;
+    assert_eq!(t.status, TaskStatus::Ok, "{:?}", t.error);
+    // a share over a PC's folder, inside it or holding it: refused, naming the PC
+    for p in ["/srv/vol1/pc-backups/laptop", "/srv/vol1/pc-backups/laptop/@.20261113T1543", "/srv/vol1/pc-backups"] {
+        let (s, b) = call(&e, "POST", "/v1/shares", Some(json!({"name": "pcs", "path": p}))).await;
+        let err: ApiError = serde_json::from_slice(&b).unwrap();
+        assert_eq!((s, err.field.as_deref()), (StatusCode::BAD_REQUEST, Some("path")), "{p}: {}", err.message);
+        assert!(err.message.contains("laptop"), "{}", err.message);
+    }
+    // nor by moving a share there
+    let (s, b) = call(&e, "PUT", "/v1/shares/photos", Some(json!({"name": "photos", "path": "/srv/vol1/pc-backups"}))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{}", String::from_utf8_lossy(&b));
+    // a share staged some other way (a restored revision, an imported archive): the apply
+    // refuses it, and a link to the PC's folder hides nothing
+    let base = e.config.applied("shares").unwrap().expect("shares applied");
+    let mut doc = base.clone();
+    doc["shares"].as_array_mut().unwrap().push(json!({"name": "old", "path": "/srv/vol1/pc-backups"}));
+    e.config.stage("admin", "shares", Some(doc.clone())).unwrap();
+    let (s, b) = call(&e, "POST", "/v1/config/apply", Some(json!({"comment": "", "keys": ["shares"]}))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{}", String::from_utf8_lossy(&b));
+    assert!(String::from_utf8_lossy(&b).contains("laptop"));
+    // an older install (before rynas refused it): said on the share and on the PC
+    apply(&e);
+    let (s, b) = call(&e, "GET", "/v1/shares/old", None).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    let v: ShareView = serde_json::from_slice(&b).unwrap();
+    let w = v.status.warning_items.iter().find(|w| w.code == ShareWarningCode::PcBackupFolder).expect("the PC's folder is said");
+    assert_eq!((w.args.key.as_deref(), w.args.path.as_deref()), (Some("laptop"), Some("/srv/vol1/pc-backups/laptop")));
+    let (_, b) = call(&e, "GET", "/v1/pc-backups/targets", None).await;
+    let pcs: Vec<PcTarget> = serde_json::from_slice(&b).unwrap();
+    assert!(pcs[0].issues.iter().any(|i| i.code == PcIssueCode::SharedFolder && i.subject.as_deref() == Some("old")), "{:?}", pcs[0].issues);
+    // the share beside it says nothing
+    let (_, b) = call(&e, "GET", "/v1/shares/photos", None).await;
+    let v: ShareView = serde_json::from_slice(&b).unwrap();
+    assert!(!v.status.warning_items.iter().any(|w| w.code == ShareWarningCode::PcBackupFolder));
 }

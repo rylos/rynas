@@ -51,6 +51,9 @@ pub struct Ops {
     pub removable: std::sync::OnceLock<Arc<crate::removable::RemovableSvc>>,
     /// Docker: its stats samples and change hints ride on the task stream (`?docker=1`).
     pub docker: std::sync::OnceLock<Arc<crate::docker::DockerSvc>>,
+    /// The PC backups' receive side: the file manager shows their folders to administrators,
+    /// shares never overlap them.
+    pub pc_backup: std::sync::OnceLock<Arc<crate::pc_backup::PcBackup>>,
 }
 
 /// See [`Ops::after_apply`].
@@ -72,6 +75,7 @@ impl Ops {
             after_apply: None,
             removable: std::sync::OnceLock::new(),
             docker: std::sync::OnceLock::new(),
+            pc_backup: std::sync::OnceLock::new(),
         }
     }
 }
@@ -307,6 +311,12 @@ async fn apply(
     // whatever staged it (a task endpoint, a restore, an archive import, a drift import)
     if let Some(c) = p.changes.iter().find(|c| c.key == SCHEDULER_KEY) {
         root_task_guard(&ops.admins, &user, c.base.as_ref(), c.value.as_ref())?;
+    }
+    // …and never a share over a PC's backups, whatever staged it
+    if let Some(c) = p.changes.iter().find(|c| c.key == rynas_services::SHARES_KEY) {
+        let o = ops.clone();
+        let value = c.value.clone();
+        tokio::task::spawn_blocking(move || crate::pc_backup::shares_guard(&o, value.as_ref())).await.map_err(Error::internal)??;
     }
     let cfg = ops.config.clone();
     let owner = user.clone();

@@ -1857,6 +1857,7 @@ crypt.restarted	Container riavviati.
 crypt.auto_off	Sblocco automatico disattivato: non è stato possibile sigillare la nuova password
 crypt.reveal_text	La chiave di ripristino viene letta dalla cartella con la sua password. Conservala fuori dal NAS.
 crypt.rk_keep	Conservala in un posto sicuro fuori dal NAS: con essa chiunque può impostare una nuova password per questa cartella.
+shares.w.pc_backup_folder	{path} contiene, è o sta dentro la cartella di backup del PC {key}: resta in sola lettura in File finché i backup del PC non passano a una cartella tutta loro.
 shares.w.crypt_locked	{path} è crittografata e bloccata: i client SMB e NFS non possono connettersi; app e container avviati mentre è bloccata vedono una cartella vuota e vanno riavviati dopo lo sblocco.
 err.crypt_wrong_password	Password o chiave di ripristino sbagliata
 err.crypt_busy	La cartella crittografata è in uso.
@@ -4775,7 +4776,6 @@ bk.rules.on_days	Gestita dal PC: nessuno più giovane di {days} giorni
 bk.rules.on_free	Gestita dal PC, come decide il suo btrbk
 bk.alert_off	Disattivato
 bk.alert_days	Dopo {n} giorni
-bk.last	Ultimo ricevuto
 bk.incomplete	Ricezioni interrotte
 bk.key	Chiave
 bk.adopted	Origine
@@ -4790,7 +4790,6 @@ bk.step.line	Riga scritta sul NAS (authorized_keys)
 bk.steps_note	La chiave esegue solo il filtro di rynas: btrfs receive in questa cartella, eliminazione degli snapshot di questo PC secondo le regole sopra e i comandi di sola lettura che servono a btrbk. Niente shell, nessun'altra cartella.
 bk.snapshots	Snapshot ricevuti
 bk.no_snapshots	Ancora niente ricevuto.
-bk.snap.received	Completo
 bk.snap.protected	Tenuto dal NAS
 bk.snap.incomplete	Interrotto
 bk.snap.not_subvolume	Non è un sottovolume
@@ -4807,14 +4806,12 @@ bkpc.bm.serial	N. di serie {serial}
 bkpc.bm.part	Partizione {n}
 bkpc.bm.boot_copies	File di avvio copiati
 bkpc.restore.intro	Per ripristinare, crea un codice di ripristino (monouso, valido un'ora, in sola lettura, solo per questo PC), avvia un qualsiasi Linux live sul PC ed esegui l'agente qui sotto. L'agente riceve gli snapshot scelti in un nuovo filesystem btrfs, oppure aggiunge sottovolumi a quello già presente sul PC.
-bkpc.manual_steps	Configura btrbk a mano
 bkpc.first_run	Primo backup
 bkpc.first_run_intro	Il PC è configurato quando è arrivato il primo snapshot di ogni sottovolume.
 bkpc.first_run_ok	Ricevuto
 bkpc.first_run_wait	In attesa
 bkpc.bm.not_ready	Non pronto
 bkpc.bm.title	Ripristino su un disco vuoto
-bkpc.bm.intro	Se questi snapshot bastano per ricostruire il PC su un disco nuovo: il manifest della struttura che il PC tiene nel suo sottovolume di root, e uno snapshot di ogni sottovolume che elenca.
 bkpc.bm.manifest	Manifest della struttura
 bkpc.bm.loader	Caricatore di avvio
 bkpc.bm.subvolumes	Sottovolumi necessari
@@ -4857,7 +4854,21 @@ pcb.agent.title	rynas-agent
 pcb.agent.unpaired	Nessun rynas-agent è ancora abbinato a questo PC. Crea un codice, installa l'agente sul PC ed esegui il comando di abbinamento: il PC prende il nome di questa cartella.
 pcb.agent.every_h	Ogni {n} h
 pcb.agent.last_run	Sottovolumi dell'ultima esecuzione
-pcb.agent.schedule	Pianificazione
+pcb.st.no_key	In attesa della chiave
+pcb.last_ok_on	Ultimo riuscito {when}
+pcb.last_received_on	Ultima ricezione {when}
+pcb.last_seen_on	Ultimo contatto {when}
+pcb.never	Ancora nessun backup
+pcb.agent_os	{os} {arch} · agent {v}
+pcb.size_help	Informazioni sulle dimensioni
+pcb.n_subvols	{n} sottovolumi
+pcb.n_subvols1	1 sottovolume
+pcb.n_snaps	{n} snapshot
+pcb.n_snaps1	1 snapshot
+pcb.show_all	Mostra tutto ({n})
+pcb.show_fewer	Mostra meno
+pcb.folder_rules	Cartella e regole
+pcb.other_snaps	Altri snapshot
 pcb.agent.sent	Inviati
 pcb.agent.revoked	L'agente di questo PC è stato revocato: non può più inviare. Gli snapshot restano.
 pcb.agent.revoke_text	Il token del PC smette subito di funzionare e il suo agente non può più inviare. La cartella e i suoi snapshot restano.
@@ -4867,7 +4878,6 @@ pca.on_btrfs	PC che mandano snapshot btrfs: {n}.
 pca.on_btrfs_open	Apri la loro scheda
 pca.phase.preparing	Preparazione…
 pca.phase.snapshot	Snapshot…
-pca.phase.uploading	Invio in corso
 pca.phase.finishing	Conclusione…
 pcb.note.full	{name}: copia intera (nessuno snapshot precedente da cui partire)
 pcb.note.incr	{name}: modifiche da {parent}
@@ -4880,7 +4890,6 @@ pcb.f.other_mounts	Altri punti di montaggio non inviati
 pcb.f.other_mounts_help	Uno per riga. Cache, log e dati dei container restano fuori comunque.
 pcb.f.pc_no_btrfs	{pc} — root non su btrfs
 pcb.bm.no_manifest_btrbk	Gli snapshot più recenti non contengono il manifest della struttura (/.rynas/manifest.json). Aggiungi l'ultimo passo di “Configura btrbk a mano” qui sotto: scrive il manifest prima di ogni esecuzione di btrbk.
-pcb.first_run_all	Tutti i sottovolumi ricevuti
 pcb.age.h1	{n} ora
 pcb.age.h	{n} ore
 pcb.age.d1	{n} giorno
@@ -4901,6 +4910,8 @@ bkpc.short.subvolume_late	Un sottovolume si è fermato
 bkpc.short.receive_failed	Ricezione interrotta
 bkpc.short.receive_stuck	Ricezione bloccata
 bkpc.short.low_space	Poco spazio
+bkpc.issue.shared_folder	Questa cartella è la cartella condivisa {subject}, sta al suo interno o la contiene: {subject} resta in sola lettura in File finché i backup del PC non passano a una cartella tutta loro.
+bkpc.short.shared_folder	In una cartella condivisa
 bkpc.f.owner	Chi elimina i vecchi snapshot
 bkpc.owner.nas	Questo NAS
 bkpc.owner.pc	Il PC
@@ -4915,7 +4926,7 @@ bkpc.alert	Avviso se non arriva niente
 bkpc.f.ignored	Sottovolumi che il PC non invia più
 bkpc.f.ignored_help	Nessun avviso per loro e non previsti in una serie completa. I loro snapshot restano.
 bkpc.ret.nas	Gestita dal NAS: conserva {counts}, e tutto ciò che ha meno di {min}
-bkpc.prune	Elimina ora i vecchi snapshot
+bkpc.prune	Elimina i vecchi ora
 bkpc.pruned	Vecchi snapshot eliminati
 bkpc.last_prune	Ultima pulizia
 bkpc.last_prune_text	{when}: {n} eliminati
@@ -4926,12 +4937,9 @@ bkpc.receiving	Ricezione in corso
 bkpc.view	Raggruppa per
 bkpc.view.run	Esecuzione del backup
 bkpc.size_text	{ref} · {excl} propri
-bkpc.sizes	Misura le dimensioni
-bkpc.sizes_done	Dimensioni misurate
 bkpc.sizes_quota	Le dimensioni arrivano in tempo reale dai gruppi di quota del volume.
 bkpc.sizes_note	Dimensione: quanto lo snapshot referenzia (circa quanto trasferisce un ripristino) · quanto contiene solo lui (circa quanto libera eliminarlo da solo). La misura legge gli extent di ogni file a bassa priorità e può richiedere tempo; ogni snapshot viene misurato una volta sola.
 bkpc.snap.parent	Base del prossimo invio
-bkpc.run.full	Serie completa
 bkpc.run.lacks	Manca {names}
 bkpc.delete_snap	Elimina lo snapshot
 bkpc.delete_snap_title	Eliminare {name}?
@@ -4945,6 +4953,12 @@ task.pcbackup.copy_out	Copia da un backup di PC
 task.pcbackup.prune	Eliminazione dei vecchi snapshot di un PC
 task.pcbackup.sizes	Misura degli snapshot di un PC
 task.pcbackup.delete_snapshot	Eliminazione di uno snapshot di un PC
+task.files.copy	Copia di file
+task.files.move	Spostamento di file
+task.files.delete	Eliminazione di file
+task.files.compress	Compressione di file
+task.files.extract	Estrazione di un archivio
+task.files.cleanup	Pulizia dopo un trasferimento
 nev.pcbackup.late.title	Nessun backup da {device} da {days} giorni
 nev.pcbackup.late.title_2	Nessun backup da {device} da {hours} ore
 nev.pcbackup.late.body	Niente ricevuto da {days} giorni (avviso dopo {alert_days}).

@@ -12,6 +12,7 @@ import * as transfers from "./transfers.js";
 import { pickIcon } from "./iconpick.js";
 import { isRemote, connId, editConnection, renameConnection, parseAddress, serverAddress, startPath } from "./conns.js";
 import { APPS, APPS_PATH, setAppFolders, appFolders } from "./appdata.js";
+import { BACKUPS, BACKUPS_PATH, setBackupFolders, backupFolders, isBackupTop, pathLabel } from "./backups.js";
 
 // a shared folder on a removable drive: `removable` from the server, or the
 // volume names of USB and eSATA drives on volumes migrated as they are
@@ -37,6 +38,8 @@ export const sidebarMethods = {
     this.shares = data.shares || [];
     // the apps' folders (administrators, when the Docker setting shows them)
     setAppFolders(data.apps);
+    // the PCs' backups (administrators, when PCs send btrfs snapshots)
+    setBackupFolders(data.backups);
     this.user = data.user || this.user;
     this.volumeNames = data.volumes || {};
     this.hostname = data.hostname || "";
@@ -92,6 +95,10 @@ export const sidebarMethods = {
   /** The last part of a path; a connection's root goes by its name. */
   pathName(path) {
     if (path === APPS_PATH) return t("Dati delle app");
+    if (path === BACKUPS_PATH) return t("Backups");
+    // a PC's snapshot by its date (the tab's tooltip keeps the real path)
+    const snapshot = pathLabel(path);
+    if (snapshot) return snapshot;
     return isRemote(path) && path.split("/").filter(Boolean).length === 1 ? this.connName(path) : baseName(path);
   },
 
@@ -214,7 +221,10 @@ export const sidebarMethods = {
       const there = new Set(this.shares.map((s) => s.name));
       // …or an app's folder no longer shown (the app removed, the setting off)
       const appGone = (p) => !appFolders().length || (p !== APPS_PATH && !appFolders().some((a) => a.name === p.split("/")[2]));
-      const gone = (f) => (isRemote(f.path) ? !this.connOf(f.path) : f.path.split("/")[1] === APPS ? appGone(f.path) : this.shares.length && !there.has(f.path.split("/")[1]));
+      // …or a PC's backup no longer there
+      const backupGone = (p) => !backupFolders().length || (p !== BACKUPS_PATH && !backupFolders().some((b) => b.name === p.split("/")[2]));
+      const top = (f) => f.path.split("/")[1];
+      const gone = (f) => (isRemote(f.path) ? !this.connOf(f.path) : top(f) === APPS ? appGone(f.path) : top(f) === BACKUPS ? backupGone(f.path) : this.shares.length && !there.has(top(f)));
       if (favs.length) html += favs.map((f, i) => item(f.path, f.name || baseName(f.path), f.path.split("/").length === 2 && isRemote(f.path) ? svg("server") : folderGlyphHTML(f.path, baseName(f.path), glyph({ kind: "d", name: baseName(f.path) })), gone(f) ? `<span class="si-sub">${t("non disponibile")}</span>` : "", "nested" + (gone(f) ? "" : this.ejectButton(f.path)), i, gone(f))).join("");
       else html += `<div class="hint" style="padding:2px 10px 6px">${t("Ctrl+D aggiunge la cartella aperta")}</div>`;
     }
@@ -233,7 +243,7 @@ export const sidebarMethods = {
       html += `<div class="side-title vol-title" data-vol="${esc(vol)}" draggable="true"${title !== plain ? ` title="${esc(plain)}"` : ""}><span>${esc(title)}</span>${first.total && vol !== "home" ? `<span title="${t("{f} liberi di {t}", { f: size(first.free), t: size(first.total) })}">${size(first.free)}</span>` : ""}</div>`;
       if (first.total && vol !== "home") html += `<div class="vol-bar ${used > 0.95 ? "full" : used > 0.85 ? "high" : ""}" style="margin:0 10px 6px"><div style="width:${(used * 100).toFixed(1)}%"></div></div>`;
       for (const s of list) {
-        const badges = (s.encrypted ? `<span class="si-lock" title="${t("Cartella crittografata")}">${svg("lock")}</span>` : "") + (s.hidden ? `<span class="si-badge" title="${t("Nascosta in Rete")}">${t("nasc.")}</span>` : "") + this.ejectButton("/" + s.name);
+        const badges = (s.encrypted ? `<span class="si-lock" title="${t("Cartella crittografata")}">${svg("lock")}</span>` : "") + (s.hidden ? `<span class="si-badge" title="${t("Nascosta in Rete")}">${t("nasc.")}</span>` : "") + (s.holds_backup ? `<span class="si-badge" title="${esc(t("Si sovrappone alla cartella dei backup del PC {pc}: in sola lettura finché i backup non hanno una cartella propria", { pc: s.holds_backup }))}">${t("sola lettura")}</span>` : "") + this.ejectButton("/" + s.name);
         html += item("/" + s.name, s.home ? t("Home ({u})", { u: this.user }) : s.name, folderGlyphHTML("/" + s.name, s.name, s.home ? shareGlyph("home") : shareGlyph(s.name)), s.comment ? `<span class="si-sub">${esc(s.comment)}</span>` : "", badges);
       }
     }
@@ -241,6 +251,13 @@ export const sidebarMethods = {
     if (apps.length) {
       html += `<div class="side-title"><span>${t("App")}</span></div>`;
       html += item(APPS_PATH, t("Dati delle app"), svg("box"), `<span class="si-sub">${t("{n} cartelle", { n: apps.length })}</span>`);
+    }
+    const backups = backupFolders();
+    if (backups.length) {
+      // one entry, no section title of its own (it would say "Backups" twice): a rule sets it apart
+      html += `<div class="side-sep"></div>`;
+      // the same icon as its tab
+      html += item(BACKUPS_PATH, t("Backups"), folderGlyphHTML(BACKUPS_PATH, t("Backups"), glyph({ kind: "d", name: t("Backups") })), `<span class="si-sub">${t("sola lettura")}</span>`);
     }
     html += `<div class="side-title conn-title"><span>${t("Connessioni")}</span><button class="side-add" title="${t("Nuova connessione")}">${svg("plus")}</button></div>`;
     if (this.conns.length) {
@@ -417,7 +434,7 @@ export const sidebarMethods = {
       this.isSplit() && { label: t("Apri nell'altro pannello"), icon: "split", action: () => this.other().go(path) },
       share?.recycle && { label: t("Apri il Cestino"), icon: "trash", action: () => this.pane.go(path + "/#recycle") },
       share?.recycle && { label: t("Svuota il Cestino"), icon: "trash", danger: true, action: () => this.emptyBin(path + "/#recycle") },
-      !isRemote(path) && { label: t("Analisi spazio"), icon: "pie", action: () => this.analyseSpace(path) },
+      !isRemote(path) && !isBackupTop(path) && { label: t("Analisi spazio"), icon: "pie", action: () => this.analyseSpace(path) },
       "-",
       fav ? { label: t("Togli dai preferiti"), icon: "star", action: () => this.toggleFavorite(path) } : { label: t("Aggiungi ai preferiti"), icon: "star", action: () => this.toggleFavorite(path) },
       { label: t("Copia percorso"), icon: "link", action: () => copyText(this.displayPath(path)) },

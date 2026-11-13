@@ -127,6 +127,8 @@ pub fn run() -> std::process::ExitCode {
     crate::remote::sftp::log_connections();
     // every local path inside its own share, links included (rynas_files::confine)
     let _jail = Jail::enter();
+    // an administrator's job never writes in a PC's backup folder (confine::refuse_pc_write)
+    confine::set_guard(spec.pc_roots.clone());
     let (spec, refused) = match confine_spec(spec) {
         Ok(confined) => confined,
         Err(e) => {
@@ -543,6 +545,12 @@ impl Engine {
                     self.p.files_done += 1;
                     continue;
                 }
+                // a PC's backup folder, or one that holds it, never moves away
+                if let Err(e) = confine::refuse_pc_write(&src, true) {
+                    self.error(&src, &e);
+                    self.p.files_done += 1;
+                    continue;
+                }
                 if self.snapshot_refused(&src) {
                     continue;
                 }
@@ -612,6 +620,11 @@ impl Engine {
     /// Fails the job at once when the user may not write into `dest`: else
     /// every item would fail on its own, after the whole scan.
     fn can_write(&mut self, dest: &Path) -> bool {
+        // never into a PC's backup folder, whatever path leads there
+        if let Err(e) = confine::refuse_pc_write(dest, false) {
+            self.fail(crate::fsops::io_code(&e), describe(&e));
+            return false;
+        }
         if crate::fsops::access(dest, libc::W_OK | libc::X_OK) {
             return true;
         }
@@ -653,6 +666,13 @@ impl Engine {
                 return Ok(());
             }
         };
+        // the final guard: the folder written in (a folder merged into may be a link or a
+        // mount elsewhere) is never a PC's backup, and a move never takes one away
+        if let Err(e) = confine::refuse_pc_write(dest_dir, false).and_then(|()| if moving { confine::refuse_pc_write(src, true) } else { Ok(()) }) {
+            self.error(src, &e);
+            self.skip_tree(src);
+            return Ok(());
+        }
         let mut target = dest_dir.join(name);
         if top && !moving && target == src {
             // copy onto itself: keep both, the way every file manager does
@@ -785,7 +805,13 @@ impl Engine {
         }
         let created = fs::symlink_metadata(&target).is_err();
         if created {
-            if let Err(e) = fs::create_dir(&target).and_then(|()| confine::made_dir(&target)) {
+            // a private folder (a PC's backup): closed to group and others as its source is
+            // while it fills, then no more owner bits than the source either
+            let private = self.private(src);
+            let made = fs::create_dir(&target).and_then(|()| confine::made_dir(&target)).and_then(|()| {
+                if private { File::open(&target).and_then(|d| keep_private(&d, meta.mode(), Some(meta.gid()), 0o700)) } else { Ok(()) }
+            });
+            if let Err(e) = made {
                 self.write_error(src, &target, &e);
                 self.skip_tree(src);
                 return Ok(());
@@ -804,6 +830,11 @@ impl Engine {
             self.item(&src.join(&child), &target, &child, moving, false)?;
         }
         if created {
+            if self.private(src)
+                && let Err(e) = File::open(&target).and_then(|d| keep_private(&d, meta.mode(), Some(meta.gid()), 0))
+            {
+                self.write_error(src, &target, &e);
+            }
             set_times(&target, meta);
         }
         if moving {
@@ -811,6 +842,11 @@ impl Engine {
             let _ = fs::remove_dir(src);
         }
         Ok(())
+    }
+
+    /// Whether `src` lies in a place whose copies stay as private as it ([`Spec::private_roots`]).
+    fn private(&self, src: &Path) -> bool {
+        self.spec.private_roots.iter().any(|r| src.starts_with(r))
     }
 
     fn walk_counts(path: &Path) -> (u64, u64) {
@@ -912,8 +948,18 @@ impl Engine {
         let _ = fs::remove_file(&part);
         let output = OpenOptions::new().write(true).create_new(true).mode(0o666).open(&part)?;
         confine::check_made(&output, &part)?;
+        // out of a private place (a PC's backup): before a byte is written, no more mode bits
+        // than the source has, but the owner's reading and writing while it fills and is read
+        // back (a verified copy of a 0000 file), narrowed fully once it is whole
+        let private = self.private(src);
+        if private {
+            keep_private(&output, meta.mode(), Some(meta.gid()), 0o600)?;
+        }
         let result = self.fill(&input, &output, meta.len(), &part);
         let result = result.and_then(|()| {
+            if private {
+                keep_private(&output, meta.mode(), Some(meta.gid()), 0)?;
+            }
             set_file_times(&output, meta);
             drop(output);
             fs::rename(&part, target)
@@ -1081,7 +1127,16 @@ impl Engine {
             target = unique_name(&dest, OsStr::new(&name), "");
         }
         let part = dest.join(part_name(target.file_name().unwrap_or_default()));
-        let file = match OpenOptions::new().write(true).create_new(true).mode(0o666).open(&part).and_then(|f| confine::check_made(&f, &part).map(|()| f)) {
+        // an archive of private files (out of a PC's backup) is the owner's alone
+        let private = sources.iter().any(|s| self.private(s));
+        let file = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o666)
+            .open(&part)
+            .and_then(|f| confine::check_made(&f, &part).map(|()| f))
+            .and_then(|f| if private { keep_private(&f, 0o600, None, 0).map(|()| f) } else { Ok(f) })
+        {
             Ok(f) => f,
             Err(e) => {
                 self.fail(crate::fsops::io_code(&e), describe(&e));
@@ -1519,6 +1574,11 @@ impl Engine {
             confine::read_dir(&work.tmp).map(|d| d.flatten().map(|e| (e.path(), work.target.join(e.file_name()))).collect()).unwrap_or_default()
         };
         for (from, to) in moves {
+            // a folder merged into may lead elsewhere: never into a PC's backup
+            if let Err(e) = confine::refuse_pc_write(to.parent().unwrap_or(&work.target), false) {
+                self.error_msg(&to, describe(&e));
+                continue;
+            }
             if fs::symlink_metadata(&from).is_err() {
                 // the tool said fine, yet the item is not there
                 if picked {
@@ -1542,6 +1602,12 @@ impl Engine {
         self.p.files_total = sources.len() as u64;
         for src in sources {
             if self.snapshot_refused(&src) {
+                continue;
+            }
+            // nothing in or above a PC's backup folder goes, whatever path names it
+            if let Err(e) = confine::refuse_pc_write(&src, true) {
+                self.error(&src, &e);
+                self.p.files_done += 1;
                 continue;
             }
             // no shares at all: the user asked to delete for good
@@ -2043,6 +2109,8 @@ fn merge(from: &Path, to: &Path, policy: Policy) -> io::Result<()> {
     let Ok(old) = fs::symlink_metadata(to) else { return fs::rename(from, to) };
     let new = fs::symlink_metadata(from)?;
     if old.is_dir() && new.is_dir() {
+        // an existing folder merged into may be a mount of somewhere else
+        confine::refuse_pc_write(to, false)?;
         for item in confine::read_dir(from)?.flatten() {
             merge(&item.path(), &to.join(item.file_name()), policy)?;
         }
@@ -2096,6 +2164,30 @@ fn set_times(path: &Path, meta: &Metadata) {
     let times = [timespec(meta.atime(), meta.atime_nsec()), timespec(meta.mtime(), meta.mtime_nsec())];
     // SAFETY: a valid C string and two timespecs
     unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), libc::AT_SYMLINK_NOFOLLOW) };
+}
+
+/// Narrows what was just made (`made`, open) to no more mode bits than its source has
+/// (`source_mode`, in group `source_gid`), `keep` bits aside (the owner's, while a folder
+/// fills or a file is verified): whatever the umask or a default ACL of the destination
+/// gave, a copy is never more open than its original. With an ACL the group bits are its
+/// mask, so named entries narrow too. Copies to a server (SFTP, SMB) take the server's
+/// modes: SMB has none, and the file manager's SFTP client sets none.
+fn keep_private(made: &File, source_mode: u32, source_gid: Option<u32>, keep: u32) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let m = made.metadata()?;
+    let now = m.mode() & 0o7777;
+    // a copy in another group than its source's: that group's members never had access, so
+    // it gets no group bits (and none for others), the owner's only
+    let allowed = match source_gid {
+        Some(gid) if gid != m.gid() => source_mode & 0o700,
+        _ => source_mode & 0o777,
+    };
+    // a setgid the folder inherited from its parent stays (new files keep the parent's group)
+    let mode = (now & (allowed | keep) & 0o777) | (now & 0o2000);
+    if mode != now {
+        made.set_permissions(fs::Permissions::from_mode(mode))?;
+    }
+    Ok(())
 }
 
 /// The mount a path lives on: (mount point, filesystem type), longest match.
@@ -2190,6 +2282,140 @@ mod tests {
             assert_eq!(e.p.errors, 1);
             fs::set_permissions(dest.join("a"), fs::Permissions::from_mode(0o755)).unwrap();
         }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn copies_out_of_a_private_place_stay_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("private");
+        let backup = dir.join("pc-backups/laptop");
+        let src = backup.join("@.20261113T1543/etc");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("shadow"), b"root:secret").unwrap();
+        fs::write(src.join("hostname"), b"laptop").unwrap();
+        fs::set_permissions(src.join("shadow"), fs::Permissions::from_mode(0o600)).unwrap();
+        fs::set_permissions(src.join("hostname"), fs::Permissions::from_mode(0o644)).unwrap();
+        fs::set_permissions(&src, fs::Permissions::from_mode(0o750)).unwrap();
+        let mode = |p: &Path| fs::metadata(p).unwrap().mode() & 0o777;
+        let copy = |dest: &Path, private: bool| {
+            fs::create_dir_all(dest).unwrap();
+            let roots: Vec<PathBuf> = if private { vec![backup.clone()] } else { Vec::new() };
+            let spec: Spec = serde_json::from_value(serde_json::json!({ "op": "copy", "sources": [src], "dest": dest, "private_roots": roots })).unwrap();
+            let mut e = engine(spec);
+            assert!(e.run().is_ok());
+            assert_eq!(e.p.errors, 0);
+        };
+        let out = dir.join("out");
+        copy(&out, true);
+        // never more bits than the source: the secret stays the owner's, the folder closed to others
+        assert_eq!(mode(&out.join("etc/shadow")) & !0o600, 0);
+        assert_eq!(mode(&out.join("etc/hostname")) & !0o644, 0);
+        assert_eq!(mode(&out.join("etc")) & !0o750, 0);
+        assert_eq!(fs::read(out.join("etc/shadow")).unwrap(), b"root:secret");
+        // an ordinary copy takes the destination's usual modes (the umask), as before
+        let plain = dir.join("plain");
+        copy(&plain, false);
+        let umask = {
+            // SAFETY: read and put back at once
+            let m = unsafe { libc::umask(0o022) };
+            unsafe { libc::umask(m) };
+            m
+        };
+        assert_eq!(mode(&plain.join("etc/shadow")), 0o666 & !umask);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn private_modes_follow_the_group_the_owner_and_setgid() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("narrow");
+        let mode = |p: &Path| fs::metadata(p).unwrap().mode() & 0o7777;
+        let made = |name: &str, m: u32| {
+            let p = dir.join(name);
+            fs::write(&p, b"x").unwrap();
+            fs::set_permissions(&p, fs::Permissions::from_mode(m)).unwrap();
+            p
+        };
+        let gid = |p: &Path| fs::metadata(p).unwrap().gid();
+        // same group as the source: its group bits stay
+        let p = made("same", 0o664);
+        keep_private(&File::open(&p).unwrap(), 0o640, Some(gid(&p)), 0).unwrap();
+        assert_eq!(mode(&p), 0o640);
+        // another group: the owner's bits only
+        let p = made("other", 0o664);
+        keep_private(&File::open(&p).unwrap(), 0o644, Some(gid(&p).wrapping_add(1)), 0).unwrap();
+        assert_eq!(mode(&p), 0o600);
+        // a source nobody may read (0200, read by the administrator's powers): the copy keeps
+        // the owner's reading and writing while it is verified, then the source's bits
+        let p = made("verified", 0o644);
+        keep_private(&File::open(&p).unwrap(), 0o200, Some(gid(&p)), 0o600).unwrap();
+        assert_eq!(mode(&p), 0o600);
+        assert_eq!(fs::read(&p).unwrap(), b"x");
+        keep_private(&File::open(&p).unwrap(), 0o200, Some(gid(&p)), 0).unwrap();
+        assert_eq!(mode(&p), 0o200);
+        // a folder's setgid (from its parent) stays
+        let d = dir.join("sgid");
+        fs::create_dir(&d).unwrap();
+        fs::set_permissions(&d, fs::Permissions::from_mode(0o2775)).unwrap();
+        if mode(&d) & 0o2000 != 0 {
+            keep_private(&File::open(&d).unwrap(), 0o750, Some(gid(&d)), 0).unwrap();
+            assert_eq!(mode(&d), 0o2750);
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn jobs_never_write_in_a_pc_folder() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = scratch("guard");
+        let src = dir.join("src/photos");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("a.jpg"), b"jpg").unwrap();
+        let dest = dir.join("share");
+        // dest/photos exists: the copy merges into it; it stands for a mount of a PC's folder
+        // (its identity is a guarded one, its path is not)
+        fs::create_dir_all(dest.join("photos")).unwrap();
+        let m = fs::metadata(dest.join("photos")).unwrap();
+        let pc = confine::PcRoot { path: PathBuf::from("/elsewhere/laptop"), dev: m.dev(), ino: m.ino() };
+        let copy = |dest: &Path, op: &str| {
+            confine::set_guard(Some(vec![pc.clone()]));
+            let spec: Spec = serde_json::from_value(serde_json::json!({ "op": op, "sources": [src], "dest": dest })).unwrap();
+            let mut e = engine(spec);
+            let _ = e.run();
+            confine::set_guard(None);
+            e
+        };
+        let e = copy(&dest, "copy");
+        assert!(e.p.errors > 0, "the merge into the guarded folder is refused");
+        assert!(!dest.join("photos/a.jpg").exists());
+        // a destination that is a link to it: the whole job is refused
+        std::os::unix::fs::symlink(dest.join("photos"), dir.join("lnk")).unwrap();
+        let e = copy(&dir.join("lnk"), "copy");
+        assert_eq!(e.fatal.as_ref().map(|f| f.0), Some(c::READ_ONLY));
+        // a deletion of it, or of the folder that holds it
+        let spec: Spec = serde_json::from_value(serde_json::json!({ "op": "delete", "sources": [dest] })).unwrap();
+        confine::set_guard(Some(vec![confine::PcRoot::of(&dest.join("photos")).unwrap()]));
+        let mut e = engine(spec);
+        let _ = e.run();
+        confine::set_guard(None);
+        assert!(dest.join("photos").is_dir() && e.p.errors > 0);
+        // nor moved away by a rename (the fast move inside one volume), itself or its holder
+        let other = dir.join("other");
+        fs::create_dir_all(&other).unwrap();
+        for src in [dest.join("photos"), dest.clone()] {
+            let spec: Spec = serde_json::from_value(serde_json::json!({ "op": "move", "sources": [src], "dest": other })).unwrap();
+            confine::set_guard(Some(vec![confine::PcRoot::of(&dest.join("photos")).unwrap()]));
+            let mut e = engine(spec);
+            let _ = e.run();
+            confine::set_guard(None);
+            assert!(e.p.errors > 0, "{}", src.display());
+            assert!(dest.join("photos").is_dir() && fs::read_dir(&other).unwrap().next().is_none());
+        }
+        // elsewhere, the copy is a copy
+        let e = copy(&other, "copy");
+        assert_eq!(e.p.errors, 0);
+        assert!(other.join("photos/a.jpg").is_file());
         let _ = fs::remove_dir_all(&dir);
     }
 

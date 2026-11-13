@@ -13,6 +13,7 @@ import { isHeic, HEIC_LIMIT, fillHeic } from "./heic.js";
 import { rememberArchive } from "./archive.js";
 import { isRemote } from "./conns.js";
 import { APPS_PATH } from "./appdata.js";
+import { BACKUPS_PATH, entryLabel, pathLabel, isPcFolder, compareSnapshots, isBackupTop, isWholeBackup } from "./backups.js";
 import { host, mount } from "./host.js";
 
 const COLS = {
@@ -93,6 +94,8 @@ export class Pane {
     this.loading = false;
     this.error = null;
     this.writable = false;
+    // nothing may be written here, whoever asks (the listing's `read_only`: a PC's backup)
+    this.readOnly = false;
     this.space = null;
     this.recycle = false;
     this.dirSizes = new Map();
@@ -278,6 +281,7 @@ export class Pane {
           name: s.name, kind: "d", size: 0, mtime: 0, mode: 0o755, path: "/" + s.name, share: s,
         }));
         this.writable = false;
+        this.readOnly = false;
         this.space = null;
         this.archive = null;
         this.remote = null;
@@ -290,8 +294,11 @@ export class Pane {
         if (data.remote?.top) this.entries.forEach((e) => (e.share = { name: e.name, remote: true }));
         // the apps' folders: like shared folders, each made by its app
         if (data.apps) this.entries.forEach((e) => (e.share = { name: e.name, app: true }));
+        // the PCs' backup folders: like shared folders too
+        if (data.backups) this.entries.forEach((e) => (e.share = { name: e.name, backup: true }));
         this.remote = data.remote || null;
         this.writable = data.writable;
+        this.readOnly = !!data.read_only;
         this.space = data.space;
         this.recycle = data.recycle;
         this.archive = null;
@@ -348,8 +355,10 @@ export class Pane {
     }
     const { key, dir } = this.sort;
     const sizeOf = (e) => (isDirLike(e) ? this.dirSizes.get(e.path)?.bytes ?? -1 : e.size);
+    const byName = (a, b) => collator.compare(a.name, b.name);
     const cmp = {
-      name: (a, b) => collator.compare(a.name, b.name),
+      // a PC's snapshots by their time, newest first
+      name: isPcFolder(this.path) ? (a, b) => compareSnapshots(a, b, byName) : byName,
       size: (a, b) => sizeOf(a) - sizeOf(b) || collator.compare(a.name, b.name),
       mtime: (a, b) => a.mtime - b.mtime || collator.compare(a.name, b.name),
       kind: (a, b) => collator.compare(kindLabel(a), kindLabel(b)) || collator.compare(a.name, b.name),
@@ -604,7 +613,7 @@ export class Pane {
     }
     for (const p of parts) {
       acc += "/" + p;
-      const label = acc === APPS_PATH ? t("Dati delle app") : p;
+      const label = acc === APPS_PATH ? t("Dati delle app") : acc === BACKUPS_PATH ? t("Backups") : pathLabel(acc) || p;
       html += `<span class="crumb-sep">${svg("chev")}</span><button class="crumb" data-path="${esc(acc)}">${esc(label)}</button>`;
     }
     this.crumbsEl.innerHTML = html;
@@ -612,8 +621,20 @@ export class Pane {
       b.onclick = () => this.go(b.dataset.path);
       this.app.makeDropTarget(b, () => b.dataset.path);
     });
-    // keep the end in sight when the path is long
-    this.crumbsEl.scrollLeft = this.crumbsEl.scrollWidth;
+    // keep the end in sight when the path is long, and only then: a strip that fits starts at
+    // its beginning; one that does not starts at a crumb, the first one from which the rest
+    // fits (the last one when even it does not), never in the middle of a name. Measured
+    // again once laid out: right after a load it may not be yet.
+    const fit = () => {
+      const el = this.crumbsEl;
+      const over = el.scrollWidth - el.clientWidth;
+      if (over <= 2) return (el.scrollLeft = 0);
+      const left = el.getBoundingClientRect().left - el.scrollLeft + 4;
+      const starts = [...el.querySelectorAll(".crumb")].map((b) => b.getBoundingClientRect().left - left);
+      el.scrollLeft = starts.find((x) => x >= over) ?? starts[starts.length - 1] ?? over;
+    };
+    fit();
+    requestAnimationFrame(fit);
   }
 
   editPath() {
@@ -642,7 +663,9 @@ export class Pane {
     if (this.view === "columns") return [{ key: "name", label: "Nome", width: "minmax(0, 1fr)" }];
     const cols = [{ key: "name", label: "Nome", width: "minmax(160px, 1fr)" }];
     if (this.search) cols.push({ key: "dir", label: "Cartella", width: "minmax(100px, .6fr)", cls: "" });
-    for (const [key, c] of Object.entries(COLS)) if (prefs.columns[key]) cols.push({ key, ...c });
+    // a PC's snapshots on a narrow screen: the room goes to their names, not to permissions
+    const narrowPc = isPcFolder(this.path) && this.el.clientWidth > 0 && this.el.clientWidth < 600;
+    for (const [key, c] of Object.entries(COLS)) if (prefs.columns[key] && !(narrowPc && key === "mode")) cols.push({ key, ...c });
     return cols;
   }
 
@@ -724,6 +747,9 @@ export class Pane {
         // the volume by its name (never its mount path); the home is under "Personal" already
         const share = e.share?.volume && !e.share.home ? `<span class="si-badge" style="margin-left:6px">${esc(this.app.volumeTitle(e.share.volume).title)}</span>` : "";
         const m = this.matches?.get(e.path);
+        // a PC's snapshot by its date, the real name beside it
+        const label = !m && entryLabel(e);
+        if (label) return `<div class="cell name-cell" title="${esc(e.name)}">${iconHTML(e)}<span class="nm ${colorClass(e)}">${esc(label)}</span><span class="nm-real">${esc(e.name)}</span></div>`;
         return `<div class="cell name-cell">${iconHTML(e)}<span class="nm ${colorClass(e)}">${m ? highlight(e.name, m.positions, esc) : esc(e.name)}</span>${link}${share}</div>`;
       }
       case "dir":
@@ -813,7 +839,7 @@ export class Pane {
         else if (isHeic(e.name) && e.size < Math.min(HEIC_LIMIT, imageMax)) thumb += `<img data-heic alt="">`;
         const sub = isDirLike(e) ? "" : size(e.size);
         html += `<div class="${cls}" data-i="${i}" draggable="true" style="left:${8 + c * cw}px;top:${4 + r * this.tileH}px;width:${cw - 6}px;height:${this.tileH - 6}px">
-          <div class="thumb">${thumb}</div><div class="tname ${colorClass(e)}" title="${esc(e.name)}">${esc(e.name)}</div>${sub ? `<div class="tsub">${sub}</div>` : ""}</div>`;
+          <div class="thumb">${thumb}</div><div class="tname ${colorClass(e)}" title="${esc(e.name)}">${esc(entryLabel(e) || e.name)}</div>${sub ? `<div class="tsub">${sub}</div>` : ""}</div>`;
       }
     }
     this.rowsEl.innerHTML = html;
@@ -894,7 +920,7 @@ export class Pane {
           ? `<dt>${t("Dimensione totale")}</dt><dd>${size(bytes)}${partial ? "+" : ""} <span style="color:var(--faint)">(${int(bytes)} B)</span></dd>
              <dt>${t("Contenuto")}</dt><dd>${count(files.length + inside[0], "file", "file", int)}, ${count(inside[1], "cartella", "cartelle", int)}</dd>`
           : `<dt>${t("Dimensione file")}</dt><dd>${size(bytes)}${known.length ? "+" : ""}</dd>`}</dl>
-        ${dirs.length && !done ? `<div class="actions"><button class="btn small calc">${t("Calcola dimensione totale")}</button></div>` : ""}`;
+        ${dirs.length && !done && !isBackupTop(this.path) ? `<div class="actions"><button class="btn small calc">${t("Calcola dimensione totale")}</button></div>` : ""}`;
       $(".calc", this.infoEl)?.addEventListener("click", () => this.app.computeSizes(this, list));
       return;
     }
@@ -905,9 +931,9 @@ export class Pane {
     else if (kind === "image" && e.size < 15 * 1024 * 1024 && !/\.(heic|heif|tiff?)$/i.test(e.name)) preview = `<img src="${api.view(e.path)}" alt="">`;
     else if (isHeic(e.name) && e.size < HEIC_LIMIT) preview += `<img data-heic alt="">`;
     const u = this.dirSizes.get(e.path);
-    const sizeText = isDirLike(e) ? (u ? `${size(u.bytes)}${u.partial ? "+" : ""}` : `<button class="btn small calc">${t("Calcola")}</button>`) : `${size(e.size)} <span style="color:var(--faint)">(${int(e.size)} B)</span>`;
+    const sizeText = isDirLike(e) ? (u ? `${size(u.bytes)}${u.partial ? "+" : ""}` : isWholeBackup(e.path) ? "—" : `<button class="btn small calc">${t("Calcola")}</button>`) : `${size(e.size)} <span style="color:var(--faint)">(${int(e.size)} B)</span>`;
     const pickable = isDirLike(e) && !this.archive && !(isRemote(e.path) && e.path.split("/").length === 2);
-    this.infoEl.innerHTML = `<div class="preview-box ${pickable ? "pick" : ""}"${pickable ? ` title="${t("Cambia icona")}"` : ""}>${preview}</div><h3>${esc(e.name)}</h3><div class="kind">${esc(kindLabel(e))}</div>
+    this.infoEl.innerHTML = `<div class="preview-box ${pickable ? "pick" : ""}"${pickable ? ` title="${t("Cambia icona")}"` : ""}>${preview}</div><h3 title="${esc(e.name)}">${esc(entryLabel(e) || e.name)}</h3><div class="kind">${esc(kindLabel(e))}</div>
       <dl class="facts">
         <dt>${t("Dimensione")}</dt><dd>${sizeText}</dd>
         ${u ? `<dt>${t("Contenuto")}</dt><dd>${count(u.files, "file", "file", int)}, ${count(Math.max(0, u.dirs - 1), "cartella", "cartelle", int)}</dd>` : ""}
@@ -983,16 +1009,19 @@ export class Pane {
   }
 
   /** The other columns: by name, folders first, hidden files as the pane shows them. */
-  sortColumn(entries) {
+  sortColumn(entries, path) {
     const list = prefs.showHidden ? [...entries] : entries.filter((e) => !isHidden(e));
-    return list.sort((a, b) => (prefs.foldersFirst ? (isDirLike(b) ? 1 : 0) - (isDirLike(a) ? 1 : 0) : 0) || collator.compare(a.name, b.name));
+    const byName = (a, b) => collator.compare(a.name, b.name);
+    // a PC's snapshots by their time, newest first, as in the other views
+    const order = isPcFolder(path) ? (a, b) => compareSnapshots(a, b, byName) : byName;
+    return list.sort((a, b) => (prefs.foldersFirst ? (isDirLike(b) ? 1 : 0) - (isDirLike(a) ? 1 : 0) : 0) || order(a, b));
   }
 
   columnHTML(path, entries, on) {
     let html = `<div class="mcol" data-path="${esc(path)}">`;
-    for (const e of this.sortColumn(entries)) {
+    for (const e of this.sortColumn(entries, path)) {
       const dir = isDirLike(e);
-      html += `<div class="mrow${e.path === on ? " on" : ""}${isHidden(e) ? " hidden-file" : ""}${dir ? " dir" : ""}" data-p="${esc(e.path)}" title="${esc(e.name)}">${iconHTML(e)}<span class="nm ${colorClass(e)}">${esc(e.name)}</span>${dir ? `<span class="mchev">${svg("chev")}</span>` : ""}</div>`;
+      html += `<div class="mrow${e.path === on ? " on" : ""}${isHidden(e) ? " hidden-file" : ""}${dir ? " dir" : ""}" data-p="${esc(e.path)}" title="${esc(e.name)}">${iconHTML(e)}<span class="nm ${colorClass(e)}">${esc(entryLabel(e) || e.name)}</span>${dir ? `<span class="mchev">${svg("chev")}</span>` : ""}</div>`;
     }
     return html + `</div>`;
   }

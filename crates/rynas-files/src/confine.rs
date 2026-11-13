@@ -298,20 +298,221 @@ impl Jail {
     }
 }
 
-/// The roots of this thread's jail, for a thread it starts ([`Jail::inherit`]).
+/// The roots of this thread's jail, for a thread it starts ([`Jail::inherit`]), with the PC
+/// backup folders it guards ([`set_guard`]).
 #[derive(Clone)]
-pub struct Roots(Option<Vec<Arc<Root>>>);
+pub struct Roots(Option<Vec<Arc<Root>>>, Guard);
 
 /// The current jail of this thread.
 pub fn current() -> Roots {
-    Roots(JAIL.with(|j| j.borrow().clone()))
+    Roots(JAIL.with(|j| j.borrow().clone()), GUARD.with(|g| g.borrow().clone()))
 }
 
 impl Jail {
     /// The jail of the thread that started this one (the space analysis reads with many).
     pub fn inherit(roots: Roots) -> Jail {
+        GUARD.with(|g| *g.borrow_mut() = roots.1);
         Jail { prev: JAIL.with(|j| std::mem::replace(&mut *j.borrow_mut(), roots.0)) }
     }
+}
+
+/// A PC's backup folder as an administrator's worker guards it: its real path and its
+/// identity (device, inode), so that another path to it (a link, a bind mount, the same
+/// btrfs mounted elsewhere) is known too. Given by rynasd for administrators only (for anyone
+/// else the folders are root's alone).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PcRoot {
+    pub path: PathBuf,
+    pub dev: u64,
+    pub ino: u64,
+}
+
+impl PcRoot {
+    /// The folder at `path` (followed), if it is there.
+    pub fn of(path: &Path) -> Option<PcRoot> {
+        use std::os::unix::fs::MetadataExt;
+        let path = fs::canonicalize(path).ok()?;
+        let m = fs::metadata(&path).ok()?;
+        m.is_dir().then(|| PcRoot { path, dev: m.dev(), ino: m.ino() })
+    }
+}
+
+/// What a thread knows of the PCs' backup folders ([`set_guard`]).
+#[derive(Clone, Default)]
+pub enum Guard {
+    /// Not a guarded worker (an ordinary user's, rynasd, tests): the folders are root's
+    /// alone, the kernel keeps them.
+    #[default]
+    Off,
+    /// The folders, with the identities of every folder above each (what a removal may not
+    /// take away).
+    On(Arc<GuardSet>),
+    /// An administrator's worker that was told nothing: it writes nothing (fail closed).
+    Missing,
+}
+
+pub struct GuardSet {
+    roots: Vec<PcRoot>,
+    /// (device, inode) of each root and every folder above it up to `/`.
+    holders: Vec<(u64, u64)>,
+}
+
+thread_local! {
+    /// The PCs' backup folders this thread never writes in ([`refuse_pc_write`]).
+    static GUARD: RefCell<Guard> = const { RefCell::new(Guard::Off) };
+    /// The identity of the last folder [`refuse_pc_write`] found outside them (a copy
+    /// writes many files in one folder: walked once).
+    static GUARD_OK: RefCell<Option<(u64, u64)>> = const { RefCell::new(None) };
+}
+
+/// The PCs' backup folders this thread guards: nothing is written in them or below them,
+/// whatever path leads there, nor is anything that holds them removed ([`refuse_pc_write`]);
+/// their staging folders are not there for it ([`check`], [`read_dir`]). `None` from
+/// rynasd: an ordinary user's worker, unguarded; but an administrator's worker (it reads
+/// everywhere) that was told nothing writes nothing. Set once per request or job.
+pub fn set_guard(roots: Option<Vec<PcRoot>>) {
+    let g = match roots {
+        Some(roots) => {
+            let mut holders = Vec::new();
+            for r in &roots {
+                holders.extend(ancestors(&r.path).unwrap_or_else(|_| vec![(r.dev, r.ino)]));
+            }
+            Guard::On(Arc::new(GuardSet { roots, holders }))
+        }
+        None if crate::caps::reads_everywhere() => Guard::Missing,
+        None => Guard::Off,
+    };
+    GUARD.with(|cur| *cur.borrow_mut() = g);
+    GUARD_OK.with(|o| *o.borrow_mut() = None);
+}
+
+/// The identities of a folder and of every folder above it up to `/` (`..` one step at a
+/// time: across mounts as the kernel sees them).
+fn ancestors(path: &Path) -> io::Result<Vec<(u64, u64)>> {
+    let mut cur = openat(libc::AT_FDCWD, path.as_os_str(), libc::O_PATH | libc::O_DIRECTORY)?;
+    let mut out = Vec::new();
+    loop {
+        let st = fstat(cur.as_fd())?;
+        out.push((st.st_dev, st.st_ino));
+        let up = openat(cur.as_raw_fd(), OsStr::new(".."), libc::O_PATH | libc::O_DIRECTORY)?;
+        let su = fstat(up.as_fd())?;
+        if (su.st_dev, su.st_ino) == (st.st_dev, st.st_ino) {
+            return Ok(out);
+        }
+        cur = up;
+    }
+}
+
+fn guard() -> Guard {
+    GUARD.with(|g| g.borrow().clone())
+}
+
+/// The guarded folders, none when unguarded.
+fn guarded_roots() -> Arc<GuardSet> {
+    match guard() {
+        Guard::On(set) => set,
+        _ => Arc::new(GuardSet { roots: Vec::new(), holders: Vec::new() }),
+    }
+}
+
+/// The error of a write refused in a PC's backup.
+pub fn pc_backup_refused() -> io::Error {
+    crate::fsops::coded(
+        io::ErrorKind::ReadOnlyFilesystem,
+        error_codes::READ_ONLY,
+        t!("PC backups are read-only: copy the files to a shared folder to change them"),
+    )
+}
+
+/// Refuses to write in `path` when it is, or lies inside, a PC's backup folder: the nearest
+/// folder of it that exists is opened and judged by its real path, then by the identity of
+/// every folder above it up to `/` (`..` one step at a time), so that a link, a bind mount or
+/// another mount of the same filesystem leads nowhere else. `removing`: `path` itself goes
+/// (renamed, moved, deleted), so it may not be, by identity, a PC's folder or one above it.
+/// The identity of the last folder found clear is remembered, so writing many files in one
+/// folder costs one walk. Whatever cannot be decided is refused, always as `read_only`.
+pub fn refuse_pc_write(path: &Path, removing: bool) -> io::Result<()> {
+    let set = match guard() {
+        Guard::Off => return Ok(()),
+        Guard::Missing => return Err(pc_backup_refused()),
+        Guard::On(set) if set.roots.is_empty() => return Ok(()),
+        Guard::On(set) => set,
+    };
+    if removing {
+        match openat(libc::AT_FDCWD, path.as_os_str(), libc::O_PATH | libc::O_NOFOLLOW) {
+            Ok(fd) => {
+                let st = fstat(fd.as_fd()).map_err(|_| pc_backup_refused())?;
+                if set.holders.contains(&(st.st_dev, st.st_ino)) {
+                    return Err(pc_backup_refused());
+                }
+            }
+            // nothing there: nothing taken away
+            Err(e) if e.raw_os_error() == Some(libc::ENOENT) => {}
+            Err(_) => return Err(pc_backup_refused()),
+        }
+    }
+    let dir = if removing { path.parent().unwrap_or(path) } else { path };
+    // the nearest folder that exists (a folder about to be made is judged by its parent)
+    let mut at = dir;
+    let fd = loop {
+        match openat(libc::AT_FDCWD, at.as_os_str(), libc::O_PATH | libc::O_DIRECTORY) {
+            Ok(fd) => break fd,
+            Err(e) if matches!(e.raw_os_error(), Some(libc::ENOENT) | Some(libc::ENOTDIR)) => match at.parent() {
+                Some(p) if !p.as_os_str().is_empty() => at = p,
+                _ => return Err(pc_backup_refused()),
+            },
+            Err(_) => return Err(pc_backup_refused()),
+        }
+    };
+    let st = fstat(fd.as_fd()).map_err(|_| pc_backup_refused())?;
+    let id = (st.st_dev, st.st_ino);
+    if GUARD_OK.with(|o| *o.borrow() == Some(id)) {
+        return Ok(());
+    }
+    match in_pc_folder(fd, &set.roots) {
+        Ok(false) => {
+            GUARD_OK.with(|o| *o.borrow_mut() = Some(id));
+            Ok(())
+        }
+        _ => Err(pc_backup_refused()),
+    }
+}
+
+/// Whether an open folder is, or lies inside, one of `guard`: its real path, then the
+/// identities of it and of every folder above it up to `/`.
+fn in_pc_folder(fd: OwnedFd, guard: &[PcRoot]) -> io::Result<bool> {
+    if let Ok(real) = real_path(fd.as_fd())
+        && guard.iter().any(|g| real.starts_with(&g.path))
+    {
+        return Ok(true);
+    }
+    let mut cur = fd;
+    loop {
+        let st = fstat(cur.as_fd())?;
+        if guard.iter().any(|g| g.dev == st.st_dev && g.ino == st.st_ino) {
+            return Ok(true);
+        }
+        let up = openat(cur.as_raw_fd(), OsStr::new(".."), libc::O_PATH | libc::O_DIRECTORY)?;
+        let su = fstat(up.as_fd())?;
+        // `/`: its `..` is itself
+        if su.st_dev == st.st_dev && su.st_ino == st.st_ino {
+            return Ok(false);
+        }
+        cur = up;
+    }
+}
+
+/// Whether a real path lies in the staging folder of a guarded PC folder: a component named
+/// like it first (cheap), then the folder holding it judged by its path or its identity.
+fn in_staging(real: &Path, guard: &[PcRoot]) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    if guard.is_empty() || !real.components().any(|c| c.as_os_str() == crate::shares::BACKUP_STAGING) {
+        return false;
+    }
+    real.ancestors().filter(|a| a.file_name().is_some_and(|n| n == crate::shares::BACKUP_STAGING)).any(|a| {
+        let Some(holder) = a.parent() else { return false };
+        guard.iter().any(|g| g.path == holder) || fs::metadata(holder).is_ok_and(|m| guard.iter().any(|g| g.dev == m.dev() && g.ino == m.ino()))
+    })
 }
 
 impl Drop for Jail {
@@ -349,11 +550,26 @@ pub fn active() -> bool {
 /// Refuses an open descriptor that is not inside an admitted root (nothing is checked
 /// outside a jail).
 pub fn check(fd: BorrowedFd) -> io::Result<()> {
-    if !active() {
-        return Ok(());
+    checked(fd).map(|_| ())
+}
+
+/// [`check`], and whether the descriptor is a guarded PC folder ([`set_guard`]), whose
+/// staging folder a listing skips. What lies in such a staging folder is refused as not
+/// there, however it was reached (any share, a link inside a snapshot): the descriptor's
+/// real path decides, and its identity for another path to the same folder.
+fn checked(fd: BorrowedFd) -> io::Result<bool> {
+    let set = guarded_roots();
+    let guard = &set.roots;
+    let real = if active() || !guard.is_empty() { Some(real_path(fd)?) } else { None };
+    if active() && root_of(real.as_deref().unwrap_or(Path::new(""))).is_none() {
+        return Err(outside());
     }
-    let real = real_path(fd)?;
-    if root_of(&real).is_some() { Ok(()) } else { Err(outside()) }
+    let Some(real) = real.filter(|_| !guard.is_empty()) else { return Ok(false) };
+    if in_staging(&real, guard) {
+        return Err(io::ErrorKind::NotFound.into());
+    }
+    let st = fstat(fd)?;
+    Ok(guard.iter().any(|g| g.path == real || (g.dev == st.st_dev && g.ino == st.st_ino)))
 }
 
 /// Opens a file to read it, the last component never followed, and checks where it is.
@@ -534,23 +750,33 @@ pub fn child_input(cmd: &mut std::process::Command, file: &File) -> PathBuf {
 /// its descriptor. The entries' paths are below `dir` as given.
 pub fn read_dir(dir: &Path) -> io::Result<ReadDir> {
     let fd = openat(libc::AT_FDCWD, dir.as_os_str(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW)?;
-    check(fd.as_fd())?;
+    let hides_staging = checked(fd.as_fd())?;
     // the magic link reopens this very folder, whatever its name is by now
     let inner = fs::read_dir(fd_path(fd.as_fd()))?;
-    Ok(ReadDir { inner, dir: dir.to_path_buf() })
+    Ok(ReadDir { inner, dir: dir.to_path_buf(), hides_staging })
 }
 
 pub struct ReadDir {
     inner: fs::ReadDir,
     dir: PathBuf,
+    /// The folder is a guarded PC folder ([`set_guard`]): its staging folder is skipped.
+    hides_staging: bool,
 }
 
 impl Iterator for ReadDir {
     type Item = io::Result<DirEntry>;
     fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next().map(|r| r.map(|inner| DirEntry { path: self.dir.join(inner.file_name()), inner }))
+        loop {
+            let item = self.inner.next()?.map(|inner| DirEntry { path: self.dir.join(inner.file_name()), inner });
+            match item {
+                // the top of a PC's backup: rynas' staging folder is not listed
+                Ok(e) if self.hides_staging && e.inner.file_name() == crate::shares::BACKUP_STAGING => continue,
+                other => return Some(other),
+            }
+        }
     }
 }
+
 
 /// An entry of [`read_dir`]: its metadata comes from the folder's descriptor (lstat).
 pub struct DirEntry {
@@ -670,6 +896,70 @@ mod tests {
         assert_eq!(both(&root, "broken", false).unwrap(), docs.join("broken"));
         assert_eq!(both(&root, "loop1", true).unwrap_err().raw_os_error(), Some(libc::ELOOP));
         assert_eq!(both(&root, "a/b/f.txt/x", true).unwrap_err().raw_os_error(), Some(libc::ENOTDIR));
+    }
+
+    #[test]
+    fn writes_never_reach_a_pc_folder_by_any_path() {
+        use std::os::unix::fs::MetadataExt;
+        let t = tempfile::tempdir().unwrap();
+        let share = t.path().join("share");
+        let pc = t.path().join("pcs/laptop");
+        fs::create_dir_all(pc.join("@.20261113T1543/etc")).unwrap();
+        fs::create_dir_all(pc.join(crate::shares::BACKUP_STAGING).join("x")).unwrap();
+        fs::create_dir_all(share.join("docs")).unwrap();
+        symlink(&pc, share.join("to-pc")).unwrap();
+        let real = PcRoot::of(&pc).unwrap();
+        set_guard(Some(vec![real.clone()]));
+        // inside, through a link, a folder not made yet, its staging folder
+        for p in [pc.clone(), pc.join("@.20261113T1543/etc"), share.join("to-pc/@.20261113T1543"), pc.join("new/deeper"), pc.join(".incoming/x")] {
+            assert_eq!(crate::fsops::io_code(&refuse_pc_write(&p, false).unwrap_err()), error_codes::READ_ONLY, "{}", p.display());
+        }
+        assert!(refuse_pc_write(&share.join("docs"), false).is_ok());
+        assert!(refuse_pc_write(&share.join("docs/new"), false).is_ok());
+        // removing: the folder itself or one that holds it, never a sibling
+        assert!(refuse_pc_write(&t.path().join("pcs"), true).is_err());
+        assert!(refuse_pc_write(&pc, true).is_err());
+        assert!(refuse_pc_write(&share.join("docs"), true).is_ok());
+        // another path to the same folder the real path does not show (a bind mount, the
+        // same btrfs mounted elsewhere): its identity is found walking up from a folder in it
+        let m = fs::metadata(&pc).unwrap();
+        set_guard(Some(vec![PcRoot { path: PathBuf::from("/elsewhere/laptop"), dev: m.dev(), ino: m.ino() }]));
+        assert!(refuse_pc_write(&pc.join("@.20261113T1543/etc"), false).is_err());
+        assert!(refuse_pc_write(&share.join("docs"), false).is_ok());
+        // reading: the staging folder is not there by any path, nor listed
+        set_guard(Some(vec![real]));
+        assert_eq!(read_dir(&share.join("to-pc/.incoming")).err().unwrap().kind(), io::ErrorKind::NotFound);
+        for dir in [pc.clone(), share.join("to-pc/.")] {
+            let names: Vec<_> = read_dir(&dir).unwrap().flatten().map(|e| e.file_name()).collect();
+            assert_eq!(names, [OsString::from("@.20261113T1543")], "{}", dir.display());
+        }
+        set_guard(None);
+        assert_eq!(read_dir(&pc).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn removals_never_take_a_pc_folder_away_and_the_guard_fails_closed() {
+        let t = tempfile::tempdir().unwrap();
+        let pc = t.path().join("vol/pcs/laptop");
+        fs::create_dir_all(&pc).unwrap();
+        fs::create_dir_all(t.path().join("vol/other")).unwrap();
+        // another path to the folders above it, its identity the same
+        symlink(t.path().join("vol"), t.path().join("alias")).unwrap();
+        set_guard(Some(vec![PcRoot::of(&pc).unwrap()]));
+        // the folder, or one above it, by any path: refused; a link itself is not them
+        for p in [pc.clone(), t.path().join("vol/pcs"), t.path().join("alias/pcs"), t.path().join("alias/pcs/laptop")] {
+            assert_eq!(crate::fsops::io_code(&refuse_pc_write(&p, true).unwrap_err()), error_codes::READ_ONLY, "{}", p.display());
+        }
+        assert!(refuse_pc_write(&t.path().join("alias"), true).is_ok());
+        assert!(refuse_pc_write(&t.path().join("vol/other"), true).is_ok());
+        assert!(refuse_pc_write(&t.path().join("vol/gone"), true).is_ok());
+        // an administrator's worker told nothing writes nothing
+        GUARD.with(|g| *g.borrow_mut() = Guard::Missing);
+        assert_eq!(crate::fsops::io_code(&refuse_pc_write(&t.path().join("vol/other"), false).unwrap_err()), error_codes::READ_ONLY);
+        // told there are none: free
+        set_guard(Some(Vec::new()));
+        assert!(refuse_pc_write(&pc, false).is_ok());
+        set_guard(None);
     }
 
     #[test]

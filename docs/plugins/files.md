@@ -92,6 +92,81 @@ browser ──HTTPS── rynas-web (user rynas) ──Unix socket── rynasd 
   (`caps::Powers::AppData`, never ambient) and runs under a Landlock ruleset that allows writes
   below those app folders only; no Landlock, no powers. What it makes takes the owner of the
   folder it lands in (`confine::adopt`), existing files keep theirs.
+- **Threat model of the PCs' backups**: what follows keeps the received snapshots safe from
+  accidental writes through the File app and through SMB/NFS shares (a share can never be
+  over a backup); administrators with a shell or root, and rynas' own receive, are out of
+  its scope.
+- **The PCs' backups** (`/@backups/<pc>/…`, administrators only, one "Backups" entry in the
+  sidebar): every folder of btrfs snapshots received from a PC (`rynasd::pc_backup`, agent and
+  btrbk folders alike; `PcBackup::snapshot_folders`, read from the registry, no disk walk) is a
+  **read-only share** `@backups/<pc>` (`Share.read_only`, `Share.backup`), added by
+  `rynasd::files::add_backup_shares` (real folders only, never a link as root). Read-only is the
+  server's:
+  - every writing route (`rynas_files::api::WRITING_ROUTES`) naming such a share is refused
+    with 409 `read_only` by rynasd before any worker and again by the worker
+    (`api::refuse_read_only`); `job_spec` refuses a job whose destination is in one, and a
+    delete or move with a source in one (copy out instead: copies, downloads, previews and
+    thumbnails work, the thumbnail cache lies outside the share);
+  - **the final guard** (the real protection): rynasd gives every administrator's request
+    and job the PC backup folders as (real path, device, inode) (`Context.pc_roots`,
+    `Spec.pc_roots`, from the registry and one stat each; nobody else gets them: the folders
+    are root's alone). Before any write (mkdir, parents included; upload; edit save; rename,
+    its folder and what it takes away; delete; move; the destination of a copy, extract or
+    compress, and every existing folder a copy or extraction merges into) the worker opens
+    the folder written in and refuses with 409 `read_only` when its real path lies in a PC
+    folder or when it, or any folder above it up to `/` (`..` one step at a time), has the
+    identity of one (`confine::refuse_pc_write`); what a removal takes away (rename, move,
+    delete) may not be, by identity, a PC folder or any folder above one. A share that is a
+    link to a backup, a home or an app folder holding one, a bind mount or the same btrfs
+    mounted elsewhere all end there; jobs with a server at the other end guard every local
+    write and removal the same way. Writes only: listings pay nothing; the identity of the
+    last folder found clear is remembered. It fails closed: an administrator's worker (it
+    reads everywhere) told nothing writes nothing, and whatever the guard cannot decide is
+    refused. The manager asks rynasd for the folders each time an administrator's job starts
+    (`Hooks::pc_roots`), so a retried or journaled job is guarded with today's list;
+  - construction checks keep the setup clean, on canonical paths (real path of the deepest
+    existing part, so links hide nothing): rynasd refuses a PC folder (new or adopted) that
+    is, lies inside or holds a share, a user's home or the apps' data (Docker stacks and app
+    data folders) (`pc_backup::share_overlap`, `clash`), and a share created or moved over,
+    inside or above a PC folder (`services::refuse_pc_folder`), and checks the shares again
+    at every apply, however they were staged (`pc_backup::shares_guard`: an edit, a restored
+    revision, an imported archive). An install made before this is said on both sides (PC
+    issue `shared_folder`, share warning `pc_backup_folder`; the PC issue also names a home
+    or an apps' folder over it, looked at anew each time, so moving the homes folder or
+    Docker's folders over a PC folder shows at once) and the share, the home or the app
+    folder stays read-only in the file manager for administrators (`Share.holds_backup`). Two
+    PCs never share a folder either, a link between them included;
+  - copying a file out of a snapshot (`POST /v1/pc-backups/targets/{pc}/copy-out`, run as
+    root) refuses a destination in or above any PC folder (their staging folders included)
+    or in a share that overlaps one;
+  - `/@backups` is not there (404) for anyone without PC folders in their shares;
+  - the staging folder of a receive (`.incoming`, `shares::BACKUP_STAGING` =
+    `pc_backup::STAGING_DIR`) is not there for an administrator's worker by any path: what an
+    opened descriptor really is decides (its real path, or its folder's identity), and
+    listings of a PC folder skip the entry (search, usage, space analysis, zip and tar
+    downloads included);
+  - copies out of a backup stay as private as their originals (`Spec.private_roots`): the
+    worker narrows a copied file, before any byte is written, and a copied folder to no more
+    mode bits than the source had, the owner's only when the copy's group differs from the
+    source's (`keep_private`; with a default ACL the mask narrows; an inherited setgid stays);
+    the owner keeps reading and writing while a file fills and is verified (a 0000 source), a
+    folder while it fills; an archive made from backup files is 0600; ordinary copies keep the
+    destination's usual modes. Copies to a server (SFTP, SMB) take the server's modes;
+  - a PC's whole folder is never measured, analysed or zipped (`usage`, `space`, `download` of
+    `/@backups/<pc>` → 400): it holds every snapshot, mostly the same data again and again.
+
+  Listings there say `writable: false`, `read_only: true` and mark every entry `readonly`
+  (search hits too); `stat` and the editor say `writable: false`. The interface
+  (`files-app/js/backups.js`) hides New folder, Upload, Paste, Cut, Move, Rename, Delete,
+  Compress, Extract here, Edit and Empty the bin, refuses at once a move out of a backup
+  (Alt drop, F6, Shift+F6), hides Compute size, Space analysis and the zip download at `/@backups` and at a PC
+  folder's top, and the network path and smb:// address in `/@backups` and `/@apps` (no SMB
+  shares). Snapshot folders (`<prefix>.YYYYMMDD[THHMM[SS][±hhmm]][_N]`) show by their date
+  first, as the rest of the interface writes dates ("13 nov 2026, 15:43 · @ (radice)",
+  "Nov 13, 2026, 3:43 PM · @home", the PC's clock, `#2` for a second one in the same minute),
+  in the list, grid, columns, info panel, path bar and tab, the real name beside it (hidden
+  below 600 px, with the Permissions column) and as the tooltip, newest first when sorted by
+  name (columns view too).
 - The worker checks itself first (`caps::check_worker`): never root, no capability beyond the set
   of its level (nothing, reading, an administrator's, the apps' data: each holds the one before),
   effective within permitted, nothing but reading ambient, `PR_SET_DUMPABLE=0` (nobody attaches a
@@ -439,7 +514,8 @@ Shapes added to SynoFile's (optional fields, nothing removed): `Share.removable`
 (disk, `sdc`), `device_name` (vendor + model); `JobView.code`, `JobView.task_id`, `JobView.stalled_s`, `JobView.cancelling`;
 `ErrorItem.code`; `whoami.admin`; `Entry.outside`, `Details.outside` (a link out of its share);
 `Spec.roots`, `Spec.app_roots` (worker side); `shares.apps`, `list.apps`, `list.stack`,
-`Share.app` (the apps' data).
+`Share.app` (the apps' data); `shares.backups`, `list.backups`, `list.read_only`,
+`Share.read_only`, `Share.backup` (the PCs' backups).
 
 ### Deviations from SynoFile's contract
 

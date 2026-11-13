@@ -298,13 +298,16 @@ async fn browse_copy_out_usage_and_setup() {
     let t = task(&e, "POST", "/v1/pc-backups/targets/pc/copy-out", Some(json!({"snapshot": s1.name, "path": "Documents", "destination": "/volume1/Restore Here"}))).await;
     assert_eq!(t.status, TaskStatus::Ok, "{:?}", t.error);
     assert_eq!(e.host.copies.lock().unwrap().len(), 1);
-    for dest in ["/volume1/backup/pc/x", "/etc/x", "relative/x"] {
+    // another PC's folder (or its staging folder), or a folder above a PC's folder: refused
+    e.host.folders.lock().unwrap().insert("/volume1/backup/desk".into(), (true, vec![snap("home", 2)]));
+    task(&e, "POST", "/v1/pc-backups/targets", Some(json!({"device": "desk", "path": "/volume1/backup/desk", "adopt": true}))).await;
+    for dest in ["/volume1/backup/pc/x", "/volume1/backup/desk", "/volume1/backup/desk/.incoming/x", "/volume1/backup", "/etc/x", "relative/x"] {
         let (s, b) = call(&e, "POST", "/v1/pc-backups/targets/pc/copy-out", Some(json!({"snapshot": s1.name, "path": "Documents", "destination": dest}))).await;
         assert_eq!((s, err(&b).field.as_deref()), (StatusCode::BAD_REQUEST, Some("destination")), "{dest}");
     }
     let t = task(&e, "POST", "/v1/pc-backups/targets/pc/usage", None).await;
     assert_eq!(t.status, TaskStatus::Ok);
-    assert!(list(&e).await[0].usage.is_some_and(|u| u.total_bytes > 0));
+    assert!(list(&e).await.iter().find(|t| t.device == "pc").unwrap().usage.is_some_and(|u| u.total_bytes > 0));
 
     let (_, b) = call(&e, "GET", "/v1/pc-backups/setup", None).await;
     let s: ReceiveSetup = serde_json::from_slice(&b).unwrap();
@@ -338,6 +341,10 @@ async fn adopt_refuses_homes_and_asks_before_changing_permissions() {
     }
     let (s, b) = call(&e, "POST", "/v1/pc-backups/plan/adopt", Some(json!({"path": "/var/backups/pc"}))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "{}", String::from_utf8_lossy(&b));
+    // a new folder inside a user's home: refused too (the home's user writes there)
+    let (s, b) = call(&e, "POST", "/v1/pc-backups/targets", Some(json!({"device": "x", "path": "/volume1/homes/marco/pc", "agent": true}))).await;
+    assert_eq!((s, err(&b).field.as_deref()), (StatusCode::BAD_REQUEST, Some("path")), "{}", String::from_utf8_lossy(&b));
+    assert!(err(&b).message.contains("home"));
     // owned by marco 0755: the plan shows the change, the create needs the confirmation
     e.host.meta.lock().unwrap().insert("/volume1/backup/pc".into(), (1000, 1000, 0o755));
     let (s, b) = call(&e, "POST", "/v1/pc-backups/plan/adopt", Some(json!({"path": "/volume1/backup/pc"}))).await;

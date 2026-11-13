@@ -27,5 +27,5 @@ export function archiveOf(path) {
 }
 
 export function readOnlyToast() {
-  toast(t("Gli archivi si aprono in sola lettura: per cambiarli, estraili"), { kind: "error" });
+  toast(t("Gli archivi si aprono in sola lettura: per cambiarli, estraili"));
 }

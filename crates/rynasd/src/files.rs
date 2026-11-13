@@ -33,6 +33,8 @@ use futures_util::{Stream, StreamExt};
 use rynas_api_types::error_codes;
 use rynas_api_types::SharesConfig;
 use rynas_files::Context;
+// worker routes that change files (all POST); every other route only reads
+use rynas_files::api::WRITING_ROUTES;
 use rynas_files::identity::User;
 use rynas_files::jobs::manager::{Config as JobsConfig, Control, Hooks, Info, JobTask, Manager, State as JobState};
 use rynas_files::shares::Share;
@@ -80,6 +82,7 @@ impl Files {
             tasks: ops.tasks.clone(),
             handle: tokio::runtime::Handle::current(),
             manager: manager_cell.clone(),
+            ops: ops.clone(),
         });
         let manager = Manager::new(JobsConfig { worker: worker.clone(), journal: state.join("journal"), hooks });
         let _ = manager_cell.set(manager.clone());
@@ -184,6 +187,9 @@ fn shares_for(files: &Files, user: &User, admin: bool) -> Res<(Vec<Share>, BTree
                 encrypted: false,
                 home: false,
                 app: None,
+                read_only: false,
+                backup: None,
+                holds_backup: None,
             }
         })
         .collect();
@@ -236,6 +242,9 @@ fn shares_for(files: &Files, user: &User, admin: bool) -> Res<(Vec<Share>, BTree
         let recycle = doc.smb.homes.enabled && doc.smb.homes.recycle.enabled;
         out.insert(0, Share { name: rynas_files::shares::HOME.into(), path: home, volume, home: true, recycle, ..Default::default() });
     }
+    // and the PCs' backups, read-only whoever asks (every share above, the home and the
+    // apps' folders included, read-only too where it overlaps one)
+    add_backup_shares(&mut out, admin, || files.ops.pc_backup.get().map(|pc| pc.snapshot_folders()).unwrap_or_default());
     Ok((out, volumes))
 }
 
@@ -250,7 +259,6 @@ fn app_shares(files: &Files) -> Vec<Share> {
         return Vec::new();
     }
     let Some(layout) = docker.layout() else { return Vec::new() };
-    let real_dir = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir());
     let mut out = Vec::new();
     let stacks = rynas_docker::under(&docker.root, &layout.stacks());
     let (names, _) = docker.folders();
@@ -291,6 +299,54 @@ fn app_shares(files: &Files) -> Vec<Share> {
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
 }
+
+/// The PCs' backups in an administrator's file manager (`admin`; for anyone else nothing,
+/// and the registry is not even asked): one read-only share `@backups/<device>` per PC
+/// backup folder (device, path), so that no route and no job writes there and the request
+/// workers never get the powers to write there ([`share_roots_of`], `job_spec`); real
+/// folders only (a link is never a root, a folder that is not there is left out). A shared
+/// folder that overlaps a PC's folder (an install from before rynas refused it,
+/// `pc_backup::share_overlap`) turns read-only too, naming the PC (`Share::holds_backup`).
+fn add_backup_shares(out: &mut Vec<Share>, admin: bool, folders: impl FnOnce() -> Vec<(String, String)>) {
+    if !admin {
+        return;
+    }
+    let folders = folders();
+    let plain: Vec<(String, String)> = out.iter().map(|s| (s.name.clone(), s.path.to_string_lossy().into_owned())).collect();
+    for (name, device) in crate::pc_backup::overlapping_shares(&folders, &plain) {
+        if let Some(s) = out.iter_mut().find(|s| s.name == name) {
+            s.read_only = true;
+            s.holds_backup = Some(device);
+        }
+    }
+    let mut backups: Vec<Share> = folders
+        .into_iter()
+        .filter(|(device, path)| !device.is_empty() && !device.contains('/') && Path::new(path).is_absolute() && real_dir(Path::new(path)))
+        .map(|(device, path)| Share {
+            name: format!("{}/{device}", rynas_files::shares::BACKUPS),
+            path: PathBuf::from(path),
+            read_only: true,
+            backup: Some(device),
+            ..Default::default()
+        })
+        .collect();
+    backups.sort_by(|a, b| a.name.cmp(&b.name));
+    out.extend(backups);
+}
+
+/// A folder itself, not a link to one.
+fn real_dir(p: &Path) -> bool {
+    std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir())
+}
+
+/// The PCs' backup folders an administrator's worker guards (`confine::set_guard`): real
+/// path and identity of each, from the registry and one stat each. For anyone else nothing:
+/// the folders are root's alone, the kernel keeps them.
+fn pc_roots(ops: &Ops) -> Vec<rynas_files::confine::PcRoot> {
+    let Some(pc) = ops.pc_backup.get() else { return Vec::new() };
+    pc.snapshot_folders().into_iter().filter_map(|(_, p)| rynas_files::confine::PcRoot::of(Path::new(&p))).collect()
+}
+
 
 /// "/" for the system disk, else the mount point's last component ("/srv/vol1" → "vol1").
 fn default_volume_name(mount: &Path) -> String {
@@ -379,11 +435,10 @@ fn context(files: &Files, w: &Who, conns: bool) -> Res<Context> {
         conns,
         extra: Value::Null,
         thumbs: thumbs_dir(&files.thumbs, &w.user),
+        pc_roots: w.admin.then(|| pc_roots(&files.ops)),
     })
 }
 
-/// Worker routes that change files (all POST); every other route only reads.
-const WRITING_ROUTES: &[&str] = &["mkdir", "rename", "edit/save", "upload", "upload/abort"];
 
 /// The folders a request's worker may change over their owners: the app folder its `path`
 /// or `dir` names (`/@apps/<folder>/…`), for an administrator whose context holds it (the
@@ -439,7 +494,12 @@ fn share_roots_of(ctx: &Context, method: &str, route: &str, query: &HashMap<Stri
         for key in ["path", "dir"] {
             let Some(vpath) = query.get(key) else { continue };
             if let Ok(r) = rynas_files::shares::resolve(&ctx.shares, vpath)
+                // an app's folder takes the apps' powers ([`app_roots_of`]), never these
                 && r.share.app.is_none()
+                // a read-only share (a PC's backup) is never a place to write: the route is
+                // refused before the worker (`refuse_read_only`), and should that check ever
+                // miss, Landlock still keeps the worker from writing there
+                && !r.share.read_only
                 && !roots.contains(&r.share.path)
             {
                 roots.push(r.share.path.clone());
@@ -539,6 +599,8 @@ async fn handle(st: FilesState, req: Request) -> Res<Response> {
             let f = files.clone();
             let answer = off_thread(move || -> Res<Value> {
                 let ctx = context(&f, &w, remote)?;
+                // the worker's final guard (the PCs' folders) is added by the manager when
+                // the job starts (TaskHooks::pc_roots)
                 let spec = rynas_files::api::job_spec(&ctx.shares, &ctx.conns, &job)?;
                 // a job that changes an app's folder: only where the kernel can fence it
                 if w.admin && !spec.app_roots.is_empty() {
@@ -611,6 +673,8 @@ async fn handle(st: FilesState, req: Request) -> Res<Response> {
             };
             let range = parts.headers.get(header::RANGE).and_then(|v| v.to_str().ok()).map(String::from);
             let deadline = if route == "upload" || route == "edit/save" { UPLOAD_DEADLINE } else { HEAD_DEADLINE };
+            // a writing route in a read-only share (a PC's backup): refused before any worker
+            rynas_files::api::refuse_read_only(&ctx.shares, &route, |k| query.get(k).cloned())?;
             let app_roots = app_roots_of(&ctx, method.as_str(), &route, &query)?;
             let share_roots = share_roots_of(&ctx, method.as_str(), &route, &query, &app_roots);
             let wr = WorkerRequest { method, route, query, length, range, ctx };
@@ -832,6 +896,8 @@ struct TaskHooks {
     tasks: rynas_tasks::TaskManager,
     handle: tokio::runtime::Handle,
     manager: Arc<OnceLock<Manager>>,
+    /// The PC backups (`Hooks::pc_roots`).
+    ops: Arc<Ops>,
 }
 
 enum Msg {
@@ -864,6 +930,10 @@ impl JobTask for Task {
 }
 
 impl Hooks for TaskHooks {
+    fn pc_roots(&self) -> Vec<rynas_files::confine::PcRoot> {
+        pc_roots(&self.ops)
+    }
+
     fn job_started(&self, kind: &str, owner: &str) -> Option<Box<dyn JobTask>> {
         // bounded (M2): progress and log lines past it are dropped, never the end
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Msg>(256);
@@ -1019,5 +1089,69 @@ mod tests {
         // anyone else: nothing over owners
         let user = Context { admin: false, ..ctx.clone() };
         assert_eq!(share_roots_of(&user, "POST", "rename", &q("path", "/Photos/a.jpg"), &[]), None);
+    }
+
+    #[test]
+    fn pc_backups_are_read_only_shares_with_no_powers_to_write() {
+        let t = tempfile::tempdir().unwrap();
+        let (laptop, desk, thumbs) = (t.path().join("laptop"), t.path().join("desk"), t.path().join("thumbs"));
+        std::fs::create_dir_all(&laptop).unwrap();
+        std::fs::create_dir_all(t.path().join("real")).unwrap();
+        // a link as the folder of a PC is never a root, a folder that is not there is left out
+        std::os::unix::fs::symlink(t.path().join("real"), &desk).unwrap();
+        let p = |p: &Path| p.to_string_lossy().into_owned();
+        let folders = || -> Vec<(String, String)> {
+            vec![
+            ("laptop".into(), p(&laptop)),
+            ("desk".into(), p(&desk)),
+            ("gone".into(), p(&t.path().join("gone"))),
+            ("a/b".into(), p(&laptop)),
+            ("rel".into(), "relative/path".into()),
+            ]
+        };
+        // a share beside the PCs' folders, and one that holds a PC's folder (an older install)
+        let beside = Share { name: "Docs".into(), path: t.path().join("docs"), ..Default::default() };
+        let holder = Share { name: "Data".into(), path: t.path().to_path_buf(), ..Default::default() };
+        // anyone but an administrator: none, shares untouched, and the list is not even asked
+        let mut user = vec![beside.clone(), holder.clone()];
+        add_backup_shares(&mut user, false, || panic!("asked for a user"));
+        assert_eq!(user.len(), 2);
+        assert!(user.iter().all(|s| !s.read_only));
+        // a home inside a PC's folder, an app's folder holding one: read-only too
+        let home = Share { name: "home".into(), path: laptop.join("marco"), home: true, ..Default::default() };
+        let app = Share {
+            name: format!("{}/backups", rynas_files::shares::APPS),
+            path: t.path().to_path_buf(),
+            app: Some(rynas_files::shares::AppFolder { stack: "backups".into(), app: None }),
+            ..Default::default()
+        };
+        let mut extra = vec![home, app];
+        add_backup_shares(&mut extra, true, folders);
+        assert!(extra[0].read_only && extra[0].holds_backup.as_deref() == Some("laptop"));
+        assert!(extra[1].read_only && extra[1].holds_backup.is_some());
+        let mut shares = vec![beside, holder];
+        add_backup_shares(&mut shares, true, folders);
+        assert_eq!(shares.len(), 3);
+        let s = &shares[2];
+        assert_eq!((s.name.as_str(), s.read_only, s.backup.as_deref(), s.path.as_path()), ("@backups/laptop", true, Some("laptop"), laptop.as_path()));
+        // the share beside them stays writable, the one that holds one turns read-only
+        assert!(!shares[0].read_only && shares[0].holds_backup.is_none());
+        assert!(shares[1].read_only && shares[1].holds_backup.is_some());
+        // rynas' staging folder is the one the File app hides
+        assert_eq!(rynas_files::shares::BACKUP_STAGING, crate::pc_backup::STAGING_DIR);
+        let ctx = Context { shares, admin: true, thumbs: Some(thumbs.clone()), ..Default::default() };
+        let q = |k: &str, v: &str| HashMap::from([(k.to_string(), v.to_string())]);
+        // an administrator's writing route never gets the backup as a root to write in
+        assert_eq!(share_roots_of(&ctx, "POST", "mkdir", &q("path", "/@backups/laptop/x"), &[]), Some(vec![thumbs.clone()]));
+        assert_eq!(share_roots_of(&ctx, "POST", "mkdir", &q("path", "/Data/x"), &[]), Some(vec![thumbs.clone()]));
+        assert!(app_roots_of(&ctx, "POST", "mkdir", &q("path", "/@backups/laptop/x")).unwrap().is_empty());
+        // and the route is refused before the worker: a valid path of the backup, the share
+        // that holds it; the share beside them is not
+        std::fs::create_dir_all(laptop.join("@.20261113T1543")).unwrap();
+        for (key, path) in [("dir", "/@backups/laptop/x"), ("path", "/@backups/laptop/@.20261113T1543"), ("path", "/Data/laptop"), ("path", "/Data")] {
+            let e = rynas_files::api::refuse_read_only(&ctx.shares, "mkdir", |k| (k == key).then(|| path.to_string())).unwrap_err();
+            assert_eq!(e.code, error_codes::READ_ONLY, "{path}");
+        }
+        assert!(rynas_files::api::refuse_read_only(&ctx.shares, "mkdir", |k| (k == "path").then(|| "/Docs".to_string())).is_ok());
     }
 }

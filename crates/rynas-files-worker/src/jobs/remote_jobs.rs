@@ -213,6 +213,7 @@ impl End {
     fn writer(&self, p: &Path) -> io::Result<Box<dyn remote::Writer>> {
         Ok(match self {
             End::Local => {
+                local_guard(p, false)?;
                 let file = OpenOptions::new().write(true).create_new(true).mode(0o666).open(p)?;
                 rynas_files::confine::check_made(&file, p)?;
                 Box::new(LocalWriter { file, behind: WriteBehind::new() })
@@ -223,7 +224,7 @@ impl End {
 
     fn mkdir(&self, p: &Path) -> io::Result<()> {
         match self {
-            End::Local => fs::create_dir(p).and_then(|()| rynas_files::confine::made_dir(p)),
+            End::Local => local_guard(p, false).and_then(|()| fs::create_dir(p)).and_then(|()| rynas_files::confine::made_dir(p)),
             End::Remote(_) => self.call(|fs, again| match fs.mkdir(&parts(p)) {
                 Err(e) if again && e.raw_os_error() == Some(libc::EEXIST) => Ok(()),
                 other => other,
@@ -233,8 +234,8 @@ impl End {
 
     fn remove(&self, p: &Path, dir: bool) -> io::Result<()> {
         match self {
-            End::Local if dir => fs::remove_dir(p),
-            End::Local => fs::remove_file(p),
+            End::Local if dir => local_guard(p, true).and_then(|()| fs::remove_dir(p)),
+            End::Local => local_guard(p, true).and_then(|()| fs::remove_file(p)),
             End::Remote(_) => self.call(|fs, again| match fs.remove(&parts(p), dir) {
                 Err(e) if again && e.raw_os_error() == Some(libc::ENOENT) => Ok(()),
                 other => other,
@@ -245,7 +246,7 @@ impl End {
     /// Never replaces.
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         match self {
-            End::Local => crate::fsops::rename_noreplace(from, to),
+            End::Local => local_guard(from, true).and_then(|()| local_guard(to, false)).and_then(|()| crate::fsops::rename_noreplace(from, to)),
             End::Remote(_) => self.call(|fs, again| match fs.rename(&parts(from), &parts(to)) {
                 // done before the connection broke: the source is gone, the target there
                 Err(e) if again && e.raw_os_error() == Some(libc::ENOENT) && fs.stat(&parts(to)).is_ok() => Ok(()),
@@ -260,7 +261,7 @@ impl End {
     /// server's). `Ok(false)`: this server cannot, nothing changed.
     fn replace(&self, from: &Path, to: &Path) -> io::Result<bool> {
         match self {
-            End::Local => fs::rename(from, to).map(|()| true),
+            End::Local => local_guard(to, false).and_then(|()| fs::rename(from, to)).map(|()| true),
             End::Remote(_) => self.call(|fs, again| match fs.replace(&parts(from), &parts(to)) {
                 Err(e) if again && e.raw_os_error() == Some(libc::ENOENT) && fs.stat(&parts(to)).is_ok() => Ok(true),
                 other => other,
@@ -298,6 +299,17 @@ impl End {
             return candidate;
         }
         (1..).map(|n| dir.join(format!("{stem}{tag} ({n}){ext}"))).find(|p| self.stat(p).is_err()).unwrap()
+    }
+}
+
+/// The final guard of a local write in a job with a server at the other end: `p` is made in
+/// its folder (`removing`: `p` itself goes), never in or above a PC's backup folder
+/// (`confine::refuse_pc_write`).
+fn local_guard(p: &Path, removing: bool) -> io::Result<()> {
+    if removing {
+        rynas_files::confine::refuse_pc_write(p, true)
+    } else {
+        rynas_files::confine::refuse_pc_write(p.parent().unwrap_or(p), false)
     }
 }
 
@@ -431,6 +443,10 @@ impl Engine {
         // what a cancel removes from the server when the engine cannot (`watch_cancel`)
         self.shared.remote.lock().unwrap().connect = ends.dst.connector();
 
+        // a local destination: written as in a local copy, never in a PC's backup folder
+        if !remote::is_remote(&dest) && !self.can_write(&dest) {
+            return Ok(());
+        }
         match ends.dst.stat(&dest) {
             Ok(m) if m.dir => {}
             Ok(_) => {
@@ -1379,6 +1395,34 @@ mod tests {
         assert_eq!(e.p.errors, 1);
         assert_eq!(s.connects.load(Ordering::SeqCst), 1);
         assert!(!dir.path().join(".big.iso.rynas-part").exists());
+    }
+
+    #[test]
+    fn a_download_never_lands_in_a_pc_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let pc = dir.path().join("pcs/laptop");
+        fs::create_dir_all(pc.join("@.20261113T1543")).unwrap();
+        fs::write(pc.join("keep.txt"), b"x").unwrap();
+        let s = server(|_| Faults::default());
+        let ends = from_server(&s);
+        rynas_files::confine::set_guard(Some(vec![rynas_files::confine::PcRoot::of(&pc).unwrap()]));
+        // a file into the PC's folder (or a folder in it): that item refused, nothing made
+        let mut e = engine(&pc);
+        let r = e.r_item(&ends, Path::new("/:c/share/big.iso"), Some(meta(s.data.len())), &pc.join("@.20261113T1543"), "big.iso", false, false);
+        assert!(r.is_ok());
+        assert_eq!(e.p.errors, 1);
+        assert!(!pc.join("@.20261113T1543/big.iso").exists() && !pc.join("@.20261113T1543/.big.iso.rynas-part").exists());
+        // the local operations themselves: no folder made, nothing removed or renamed there
+        for r in [End::Local.mkdir(&pc.join("new")), End::Local.remove(&pc.join("keep.txt"), false), End::Local.rename(&pc.join("keep.txt"), &dir.path().join("out.txt"))] {
+            assert_eq!(crate::fsops::io_code(&r.unwrap_err()), c::READ_ONLY);
+        }
+        assert!(End::Local.remove(&dir.path().join("pcs"), true).is_err(), "the folder that holds it stays");
+        assert!(pc.join("keep.txt").exists() && !pc.join("new").exists());
+        // beside it, the download is a download
+        let mut e = engine(dir.path());
+        assert!(e.r_item(&ends, Path::new("/:c/share/big.iso"), Some(meta(s.data.len())), dir.path(), "big.iso", false, false).is_ok());
+        assert!(dir.path().join("big.iso").is_file());
+        rynas_files::confine::set_guard(None);
     }
 
     #[test]

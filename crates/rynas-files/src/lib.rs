@@ -78,4 +78,9 @@ pub struct Context {
     /// The user's thumbnail cache (made by rynasd, owned by the user, 0700).
     #[serde(default)]
     pub thumbs: Option<PathBuf>,
+    /// The PCs' backup folders an administrator's worker never writes in, whatever path
+    /// leads there ([`confine::set_guard`]); `None` for anyone else (an administrator's worker
+    /// told nothing writes nothing).
+    #[serde(default)]
+    pub pc_roots: Option<Vec<confine::PcRoot>>,
 }

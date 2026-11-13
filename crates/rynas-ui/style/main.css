@@ -1452,6 +1452,11 @@ kbd {
   .app.tasks-open .main { padding-bottom: calc(55vh + var(--clear-bottombar)); }
   .link-card { flex-wrap: wrap; }
   .temp-row { grid-template-columns: 90px 1fr 48px; }
+  /* a PC drawer's snapshots stay one line each: name and state, size, Browse and Delete */
+  .pcb-group .table tr { display: grid; grid-template-columns: minmax(0, 1fr) 7.5rem 72px; align-items: center; gap: 0 var(--s-2); padding-inline: var(--s-3); }
+  .pcb-group .table td { display: block; min-height: 0; text-align: left; }
+  .pcb-group .table td::before { content: none; }
+  .pcb-group .table td.tnum { text-align: right; }
 }
 
 /* ------------------------------------------------------------------ file manager (pages/files.rs) */
@@ -1895,9 +1900,40 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .nowrap { white-space: nowrap; }
 /* a run's progress: bar, then phase · bytes · speed · what is being sent, wrapping as a line */
 .pca-progress { display: flex; flex-direction: column; gap: var(--s-1); min-width: 0; }
-.pca-progress-line { display: flex; flex-wrap: wrap; gap: 0 var(--s-2); min-width: 0; }
-.pca-progress-line > span { overflow-wrap: anywhere; min-width: 0; }
-.pca-progress-line > span:not(:last-child)::after { content: "·"; margin-left: var(--s-2); color: var(--text-subtle); }
+.pca-progress-line, .pcb-meta { display: flex; flex-wrap: wrap; gap: 0 var(--s-2); min-width: 0; }
+.pca-progress-line > span, .pcb-meta > span { overflow-wrap: anywhere; min-width: 0; }
+.pca-progress-line > span:not(:last-child)::after, .pcb-meta > span:not(:last-child)::after { content: "·"; margin-left: var(--s-2); color: var(--text-subtle); }
+/* the btrfs PC drawer: one status card, sections with their actions on the title line,
+   snapshots folded by run or subvolume, the rarely needed parts folded at the end */
+.pcb-status { display: flex; flex-direction: column; gap: var(--s-2); padding: var(--s-3) var(--s-4); border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface-2); min-width: 0; }
+.pcb-status-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-3); min-width: 0; }
+.pcb-meta { margin: 0; color: var(--text-muted); }
+.pcb-status .sec-actions { margin-top: var(--s-1); }
+.pcb-sec-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); margin-top: var(--s-3); min-width: 0; }
+.pcb-sec-actions { margin-left: auto; }
+.pcb-groups { display: flex; flex-direction: column; min-width: 0; }
+.pcb-groups[hidden] { display: none; }
+.pcb-group { border-top: 1px solid var(--border); min-width: 0; }
+.pcb-group:last-child { border-bottom: 1px solid var(--border); }
+.pcb-group > summary, .pcb-fold > summary, .pcb-sub > summary { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-2); padding: var(--s-2) 0; cursor: pointer; list-style: none; min-width: 0; }
+.pcb-group > summary::-webkit-details-marker, .pcb-fold > summary::-webkit-details-marker, .pcb-sub > summary::-webkit-details-marker { display: none; }
+.pcb-group > summary .icon, .pcb-fold > summary .icon, .pcb-sub > summary .icon { flex: none; color: var(--text-subtle); transition: transform var(--t-fast); }
+.pcb-group[open] > summary .icon, .pcb-fold[open] > summary .icon, .pcb-sub[open] > summary .icon { transform: rotate(90deg); }
+.pcb-sub > summary { padding: var(--s-1) 0; font-size: var(--fs-13); font-weight: 500; }
+.pcb-sub[open] > ul { margin-top: var(--s-1); }
+.pcb-group-title { font-weight: 500; overflow-wrap: anywhere; min-width: 0; }
+.pcb-group > .table-wrap { margin-bottom: var(--s-2); }
+/* every group's table has the same columns: fixed widths for the size and the buttons */
+.pcb-group .table { table-layout: fixed; }
+.pcb-group .table th:nth-child(2) { width: 15rem; }
+.pcb-group .table th:nth-child(3) { width: 96px; }
+.pcb-folds { display: flex; flex-direction: column; margin-top: var(--s-3); }
+.pcb-fold { border-top: 1px solid var(--border); min-width: 0; }
+.pcb-fold:last-child { border-bottom: 1px solid var(--border); }
+.pcb-fold-title { font-size: var(--fs-12); font-weight: 600; color: var(--text-subtle); text-transform: uppercase; letter-spacing: .04em; }
+.pcb-fold-reason { flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; }
+.pcb-fold-body { display: flex; flex-direction: column; gap: var(--s-2); padding-bottom: var(--s-3); min-width: 0; }
+.dialog-foot .foot-start { margin-right: auto; }
 /* the PC drawers: headings without the browser's margins, sections a step apart */
 .wide-drawer .dialog-body h4 { margin: 0; }
 .wide-drawer .dialog-body > h3.mini-title:not(:first-child) { margin-top: var(--s-3); }

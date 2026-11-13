@@ -175,6 +175,12 @@ pub trait Hooks: Send + Sync {
     /// A job starts running for `owner`: `kind` is `files.copy`, `files.move`… `None` when
     /// no task could be made (the job runs anyway).
     fn job_started(&self, kind: &str, owner: &str) -> Option<Box<dyn JobTask>>;
+    /// The PCs' backup folders as they are now, for an administrator's job about to start
+    /// (`Spec::pc_roots`): asked at every start, so a retried or journaled job is guarded
+    /// with today's folders.
+    fn pc_roots(&self) -> Vec<crate::confine::PcRoot> {
+        Vec::new()
+    }
 }
 
 /// No tasks (tests).
@@ -654,6 +660,9 @@ impl Manager {
     }
 
     fn spawn(&self, job: &mut Job) -> io::Result<std::process::ChildStdout> {
+        // an administrator's worker is guarded with the PCs' folders of now; anyone else's
+        // never (the kernel keeps root's folders)
+        job.spec.pc_roots = job.admin.then(|| self.inner.cfg.hooks.pc_roots());
         let mut child = start_worker(&self.inner.cfg.worker, &job.user, job.admin, &job.spec)?;
         let stdin = child.stdin.take().ok_or_else(|| io::Error::other("no stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| io::Error::other("no stdout"))?;
@@ -1143,6 +1152,47 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(!m.inner.jobs.lock().unwrap()[0].cleaning);
+    }
+
+    /// The PCs' folders as they are when a job starts: an administrator's job always gets
+    /// them fresh (a stale list from the journal or a retry is replaced), anyone else's none.
+    #[test]
+    fn administrators_jobs_start_with_todays_pc_folders() {
+        struct Pc(PathBuf);
+        impl Hooks for Pc {
+            fn job_started(&self, _: &str, _: &str) -> Option<Box<dyn JobTask>> {
+                None
+            }
+            fn pc_roots(&self) -> Vec<crate::confine::PcRoot> {
+                vec![crate::confine::PcRoot { path: self.0.clone(), dev: 1, ino: 2 }]
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let worker = dir.path().join("worker");
+        let seen = dir.path().join("seen");
+        std::fs::write(&worker, format!("#!/bin/sh\nread spec\necho \"$spec\" >> {}\n", seen.display())).unwrap();
+        std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let m = Manager::new(Config { worker, journal: dir.path().join("journal"), hooks: Arc::new(Pc(PathBuf::from("/srv/vol1/pcs/today"))) });
+        let user = crate::identity::current().expect("the test user has a passwd entry");
+        let info = || Info { sources: vec!["/s/a".into()], dest: Some("/d".into()), permanent: false };
+        // a stale list, as a journaled job or a retry would carry it
+        let mut spec: Spec = serde_json::from_value(json!({ "op": "copy", "sources": [dir.path().join("a")], "dest": dir.path().join("d") })).unwrap();
+        spec.pc_roots = Some(vec![crate::confine::PcRoot { path: "/old".into(), dev: 9, ino: 9 }]);
+        m.submit(user.clone(), true, spec.clone(), info()).unwrap();
+        m.submit(user.clone(), false, spec, info()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let lines = loop {
+            let text = std::fs::read_to_string(&seen).unwrap_or_default();
+            if text.lines().count() >= 2 || Instant::now() > deadline {
+                break text;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let specs: Vec<Spec> = lines.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(specs.len(), 2, "{lines}");
+        let admin = specs.iter().find(|s| s.pc_roots.is_some()).expect("the administrator's job is guarded");
+        assert_eq!(admin.pc_roots.as_ref().unwrap()[0].path, PathBuf::from("/srv/vol1/pcs/today"));
+        assert_eq!(specs.iter().filter(|s| s.pc_roots.is_none()).count(), 1, "the user's job carries none");
     }
 
     #[test]

@@ -22,6 +22,13 @@ pub const RECYCLE: &str = "#recycle";
 /// folder per stack below it, each a share named `@apps/<folder>`. A share name never
 /// starts with `@` (SMB names start with a letter or digit), so nothing clashes.
 pub const APPS: &str = "@apps";
+/// The folder of the PCs' backups (administrators): one folder per PC whose received btrfs
+/// snapshots rynas keeps, each a read-only share named `@backups/<pc>`.
+pub const BACKUPS: &str = "@backups";
+/// The staging folder rynas receives a PC's snapshot into (rynasd's
+/// `pc_backup::STAGING_DIR`): its own and transient, not there for the file manager by any
+/// path (`confine::set_guard`).
+pub const BACKUP_STAGING: &str = ".incoming";
 
 /// What an app data share belongs to.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -33,16 +40,42 @@ pub struct AppFolder {
     pub app: Option<String>,
 }
 
+/// The virtual folders whose shares are named by two components (`@apps/<folder>`,
+/// `@backups/<pc>`): the folder itself only lists them.
+pub const GROUPS: [&str; 2] = [APPS, BACKUPS];
+
+/// The group folder (one of [`GROUPS`]) a virtual path starts with, and whether the path
+/// goes on below it.
+fn group_of(vpath: &str) -> Option<(&'static str, bool)> {
+    let mut parts = vpath.split('/').filter(|p| !p.is_empty());
+    let first = parts.next()?;
+    let group = GROUPS.into_iter().find(|g| *g == first)?;
+    Some((group, parts.next().is_some()))
+}
+
+/// The group folder a virtual path names itself (`/@apps`, `/@backups`), if it does.
+pub fn group_root(vpath: &str) -> Option<&'static str> {
+    group_of(vpath).filter(|(_, below)| !below).map(|(g, _)| g)
+}
+
 /// Whether a virtual path is the app data folder itself (`/@apps`).
 pub fn is_apps_root(vpath: &str) -> bool {
-    let mut parts = vpath.split('/').filter(|p| !p.is_empty());
-    parts.next() == Some(APPS) && parts.next().is_none()
+    group_of(vpath) == Some((APPS, false))
 }
 
 /// Whether a virtual path lies in an app's data folder (`/@apps/<folder>/…`).
 pub fn in_apps(vpath: &str) -> bool {
-    let mut parts = vpath.split('/').filter(|p| !p.is_empty());
-    parts.next() == Some(APPS) && parts.next().is_some()
+    group_of(vpath) == Some((APPS, true))
+}
+
+/// Whether a virtual path is the backups folder itself (`/@backups`).
+pub fn is_backups_root(vpath: &str) -> bool {
+    group_of(vpath) == Some((BACKUPS, false))
+}
+
+/// The name of a group's share below its group folder: `immich` for `@apps/immich`.
+pub fn member_name<'a>(share: &'a Share, group: &str) -> Option<&'a str> {
+    share.name.strip_prefix(group)?.strip_prefix('/')
 }
 
 /// A shared folder as the worker sees it. `path` is the real directory; it never goes to
@@ -78,9 +111,36 @@ pub struct Share {
     /// An app's data folder ([`APPS`]): the stack it belongs to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app: Option<AppFolder>,
+    /// Nothing may be written here, whoever asks: every writing route and every job that
+    /// would write or remove something in it is refused ([`Share::refuse_writes`]), and
+    /// listings say so (`writable: false`, `read_only: true`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_only: bool,
+    /// A PC's backup folder ([`BACKUPS`]): the PC's name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup: Option<String>,
+    /// A shared folder that holds a PC's backup folder, or lies inside one (an install made
+    /// before rynas refused it): the PC's name. The share is then read-only in the file
+    /// manager for administrators, until the backups move to a folder of their own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holds_backup: Option<String>,
 }
 
 impl Share {
+    /// Refused with `read_only` when nothing may be written in this share.
+    pub fn refuse_writes(&self) -> Result<(), ApiError> {
+        if !self.read_only {
+            return Ok(());
+        }
+        Err(ApiError::read_only(if self.backup.is_some() {
+            t!("PC backups are read-only: copy the files to a shared folder to change them")
+        } else if let Some(pc) = &self.holds_backup {
+            t!("this shared folder overlaps the backup folder of {pc}: it is read-only here until the PC's backups move to a folder of their own")
+        } else {
+            t!("this folder is read-only")
+        }))
+    }
+
     /// What the interface gets: everything but the real path.
     pub fn public(&self) -> serde_json::Value {
         let mut v = serde_json::to_value(self).unwrap_or_default();
@@ -128,12 +188,15 @@ pub fn resolve<'a>(shares: &'a [Share], vpath: &str) -> Result<Resolved<'a>, Api
     }
     let mut parts = vpath.split('/').filter(|p| !p.is_empty());
     let first = parts.next().ok_or_else(|| ApiError::invalid("path", "a path starts with a shared folder"))?;
-    // an app's folder is named by two components: `@apps/<folder>`
-    let name = if first == APPS {
-        let folder = parts.next().ok_or_else(|| ApiError::read_only(t!("the app data folder only holds the apps' folders")))?;
-        format!("{APPS}/{folder}")
-    } else {
-        first.to_string()
+    // an app's folder and a PC's backup are named by two components: `@apps/<folder>`
+    let name = match GROUPS.into_iter().find(|g| *g == first) {
+        Some(group) => {
+            let member = parts.next().ok_or_else(|| {
+                ApiError::read_only(if group == APPS { t!("the app data folder only holds the apps' folders") } else { t!("the backups folder only holds the PCs' folders") })
+            })?;
+            format!("{group}/{member}")
+        }
+        None => first.to_string(),
     };
     let share = shares
         .iter()
@@ -209,6 +272,30 @@ mod tests {
         assert!(is_apps_root("/@apps/") && !is_apps_root("/@apps/immich"));
         assert!(in_apps("/@apps/immich/x") && in_apps("//@apps/immich") && !in_apps("/@apps") && !in_apps("/Documents/@apps/x"));
     }
+
+    #[test]
+    fn backup_folders_are_named_by_two_components_and_read_only() {
+        let mut list = shares();
+        list.push(Share { name: format!("{BACKUPS}/laptop"), path: "/srv/vol1/pc-backups/laptop".into(), read_only: true, backup: Some("laptop".into()), ..Default::default() });
+        let r = resolve(&list, "/@backups/laptop/@home.20261113T1543/a.txt").unwrap();
+        assert_eq!(r.real, PathBuf::from("/srv/vol1/pc-backups/laptop/@home.20261113T1543/a.txt"));
+        assert!(resolve(&list, "/@backups/laptop").unwrap().is_root());
+        assert_eq!(resolve(&list, "/@backups").err().unwrap().code, error_codes::READ_ONLY);
+        assert_eq!(resolve(&list, "/@backups/nope/x").err().unwrap().status, 404);
+        assert_eq!(resolve(&list, "/@backups/laptop/../x").err().unwrap().status, 400);
+        assert!(is_backups_root("/@backups/") && !is_backups_root("/@backups/laptop"));
+        assert!(!in_apps("/@backups/laptop/x") && !is_backups_root("/Documents/@backups"));
+        assert_eq!(member_name(r.share, BACKUPS), Some("laptop"));
+        // writes refused in the backup, allowed in a share
+        assert_eq!(r.share.refuse_writes().unwrap_err().code, error_codes::READ_ONLY);
+        assert!(list[0].refuse_writes().is_ok());
+        // the interface learns it is read-only, never where it is
+        let v = r.share.public();
+        assert_eq!((v["read_only"].as_bool(), v["backup"].as_str()), (Some(true), Some("laptop")));
+        assert!(v.get("path").is_none());
+        assert!(list[0].public().get("read_only").is_none());
+    }
+
 
     #[test]
     fn checks_names() {

@@ -38,6 +38,7 @@ fn warning_text(w: &ShareWarning, english: Option<&String>) -> String {
         ShareWarningCode::SnapshotFolderNoJob => "shares.w.snapfolder_no_job",
         ShareWarningCode::SnapshotFolderNfs => "shares.w.snapfolder_nfs",
         ShareWarningCode::CryptLocked => "shares.w.crypt_locked",
+        ShareWarningCode::PcBackupFolder => "shares.w.pc_backup_folder",
         ShareWarningCode::Other => return english.cloned().unwrap_or_default(),
     };
     tf(

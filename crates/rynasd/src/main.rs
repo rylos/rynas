@@ -1093,6 +1093,7 @@ fn main() -> std::io::Result<()> {
             running_hostname(),
         );
         rynasd::pc_backup::spawn_watch(pc_backup.clone());
+        let _ = ops.pc_backup.set(pc_backup.clone());
         state.pc_backup = Some(pc_backup);
         // PC backup, file method (agent, restic repositories per backup group): the same
         // worker launch and worker slots as the NAS backups

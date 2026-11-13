@@ -10,6 +10,7 @@ import { isBrowsable } from "./archive.js";
 import { openMenu, copyText } from "./ui.js";
 import { openSettings } from "./settings.js";
 import { isRemote } from "./conns.js";
+import { isReadOnly, isBackupTop, hasNoSmbPath } from "./backups.js";
 
 export const menuMethods = {
   contextMenu(pane, entry, x, y) {
@@ -19,25 +20,27 @@ export const menuMethods = {
     const canPaste = this.clipboard && !atRoot;
     const remote = isRemote(pane.path);
     if (!entry) {
-      const atRootOrRo = atRoot || !!pane.archive;
+      // an archive, or a read-only folder (a PC's backup): nothing is made or pasted
+      const ro = isReadOnly(pane);
+      const atRootOrRo = atRoot || ro;
       return openMenu(x, y, [
         !atRootOrRo && { label: t("Nuova cartella"), icon: "folderPlus", key: "Ctrl+Shift+N", action: () => this.newFolder(pane) },
         !atRootOrRo && { label: t("Carica file…"), icon: "upload", key: "Ctrl+U", action: () => this.pickUpload("files", pane) },
         !atRootOrRo && { label: t("Carica cartella…"), icon: "upload", action: () => this.pickUpload("folder", pane) },
-        canPaste && !pane.archive && "-",
-        canPaste && !pane.archive && { label: t(this.clipboard.op === "cut" ? "Incolla (sposta {n})" : "Incolla ({n})", { n: this.clipboard.paths.length }), icon: "paste", key: "Ctrl+V", action: () => this.paste(pane) },
-        canPaste && !pane.archive && { label: t(this.clipboard.op === "cut" ? "Incolla con verifica (sposta {n})" : "Incolla con verifica ({n})", { n: this.clipboard.paths.length }), icon: "shield", key: "Ctrl+Shift+V", action: () => this.paste(pane, pane.path, true) },
+        canPaste && !ro && "-",
+        canPaste && !ro && { label: t(this.clipboard.op === "cut" ? "Incolla (sposta {n})" : "Incolla ({n})", { n: this.clipboard.paths.length }), icon: "paste", key: "Ctrl+V", action: () => this.paste(pane) },
+        canPaste && !ro && { label: t(this.clipboard.op === "cut" ? "Incolla con verifica (sposta {n})" : "Incolla con verifica ({n})", { n: this.clipboard.paths.length }), icon: "shield", key: "Ctrl+Shift+V", action: () => this.paste(pane, pane.path, true) },
         "-",
         { label: t("Seleziona tutto"), key: "Ctrl+A", action: () => pane.selectAll() },
         { label: prefs.showHidden ? t("Nascondi i file nascosti") : t("Mostra i file nascosti"), icon: prefs.showHidden ? "eyeOff" : "eye", key: "Ctrl+H", action: () => this.toggleHidden() },
-        { label: t("Calcola dimensione delle cartelle"), icon: "drive", action: () => this.computeSizes(pane, pane.visible) },
-      pane.path !== "/" && !pane.archive && !remote && { label: t("Analisi spazio"), icon: "pie", action: () => this.analyseSpace(pane.path) },
+        !isBackupTop(pane.path) && { label: t("Calcola dimensione delle cartelle"), icon: "drive", action: () => this.computeSizes(pane, pane.visible) },
+      pane.path !== "/" && !pane.archive && !remote && !isBackupTop(pane.path) && { label: t("Analisi spazio"), icon: "pie", action: () => this.analyseSpace(pane.path) },
         "-",
         !atRoot && { label: t("Copia percorso della cartella"), icon: "link", action: () => copyText(this.displayPath(pane.path)) },
         !atRoot && { label: t("Aggiungi ai preferiti"), icon: "star", key: "Ctrl+D", action: () => this.toggleFavorite(pane.path) },
         { label: t("Aggiorna"), icon: "refresh", key: "F5", action: () => pane.reload() },
-        baseName(pane.path) === "#recycle" && !remote && "-",
-        baseName(pane.path) === "#recycle" && !remote && { label: t("Svuota il Cestino"), icon: "trash", danger: true, action: () => this.emptyBin(pane.path) },
+        baseName(pane.path) === "#recycle" && !remote && !isReadOnly(pane) && "-",
+        baseName(pane.path) === "#recycle" && !remote && !isReadOnly(pane) && { label: t("Svuota il Cestino"), icon: "trash", danger: true, action: () => this.emptyBin(pane.path) },
       ]);
     }
     const dir = isDirLike(entry);
@@ -50,8 +53,14 @@ export const menuMethods = {
     const shareObj = share ? this.shares.find((s) => "/" + s.name === entry.path) : null;
     const other = this.other();
     // inside an archive: read-only, and folders come out by copying
-    const ro = !!pane.archive;
-    const enter = !many && !ro && isBrowsable(entry);
+    const arch = !!pane.archive;
+    // …and in a read-only folder (a PC's backup) items are copied out, never changed
+    const ro = isReadOnly(pane);
+    // a PC's whole backup or a whole snapshot: never measured, analysed or zipped from here
+    const whole = isBackupTop(pane.path);
+    // the apps' data and the PCs' backups are no SMB shares
+    const noSmb = hasNoSmbPath(pane.path);
+    const enter = !many && !arch && isBrowsable(entry);
     openMenu(x, y, [
       many ? { title: count(list.length, "elemento selezionato", "elementi selezionati", int) } : null,
       !many && { label: dir || enter ? t("Apri") : t("Anteprima"), icon: dir || enter ? "forward" : "eye", key: dir || enter ? "Invio" : "Spazio", action: () => this.open(pane, entry) },
@@ -59,11 +68,11 @@ export const menuMethods = {
       !many && dir && { label: t("Apri in una nuova scheda"), icon: "plus", key: "Ctrl+Invio", action: () => this.newTab(entry.path) },
       !many && dir && other && { label: t("Apri nell'altro pannello"), icon: "split", action: () => other.go(entry.path) },
       !many && this.editable(pane, entry) && { label: t("Modifica"), icon: "rename", key: "F4", action: () => this.edit(pane, entry) },
-      (!ro || (!many && !dir)) && { label: many || dir ? t("Scarica (.zip)") : t("Scarica"), icon: "download", action: () => this.download(list) },
-      !many && !ro && !remote && isArchive(entry) && "-",
+      (!arch || (!many && !dir)) && !(whole && (many || dir)) && { label: many || dir ? t("Scarica (.zip)") : t("Scarica"), icon: "download", action: () => this.download(list) },
+      !many && !arch && !remote && isArchive(entry) && "-",
       !many && !ro && !remote && isArchive(entry) && { label: t("Estrai in «{x}»", { x: archiveStem(entry.name) }), icon: "archive", action: () => this.extract(pane, entry, "folder") },
       !many && !ro && !remote && isArchive(entry) && { label: t("Estrai qui"), icon: "archive", action: () => this.extract(pane, entry, "here") },
-      !many && !ro && !remote && isArchive(entry) && { label: t("Estrai in…"), icon: "archive", action: () => this.extract(pane, entry, "pick") },
+      !many && !arch && !remote && isArchive(entry) && { label: t("Estrai in…"), icon: "archive", action: () => this.extract(pane, entry, "pick") },
       !share && !ro && !remote && { label: t("Comprimi…"), icon: "archive", action: () => this.compress(pane) },
       "-",
       !share && { label: t("Copia"), icon: "copy", key: "Ctrl+C", action: () => this.setClipboard("copy", pane) },
@@ -80,12 +89,12 @@ export const menuMethods = {
       !share && !bin && !ro && !fixed && pane.recycle && { label: t("Elimina definitivamente"), icon: "trash", key: "Shift+Canc", danger: true, action: () => this.remove(pane, true) },
       !many && entry.full !== undefined && !ro && !remote && { label: t("Svuota il Cestino"), icon: "trash", danger: true, action: () => this.emptyBin(entry.path) },
       "-",
-      dir && { label: t("Calcola dimensione"), icon: "drive", action: () => this.computeSizes(pane, list) },
-      !many && dir && !ro && !remote && { label: t("Analisi spazio"), icon: "pie", action: () => this.analyseSpace(entry.path) },
+      dir && !whole && { label: t("Calcola dimensione"), icon: "drive", action: () => this.computeSizes(pane, list) },
+      !many && dir && !arch && !remote && !whole && { label: t("Analisi spazio"), icon: "pie", action: () => this.analyseSpace(entry.path) },
       !remote && { label: t("Copia percorso"), icon: "link", key: "Ctrl+Shift+C", action: () => this.copyPaths(list, "nas") },
-      !remote && { label: t("Copia percorso di rete (\\\\NAS)"), icon: "link", action: () => this.copyPaths(list, "smb") },
+      !remote && !noSmb && { label: t("Copia percorso di rete (\\\\NAS)"), icon: "link", action: () => this.copyPaths(list, "smb") },
       remote && { label: t("Copia indirizzo"), icon: "link", key: "Ctrl+Shift+C", action: () => this.copyPaths(list, "smb") },
-      (!remote || this.connOf(pane.path)?.kind === "smb") && { label: t("Copia indirizzo smb://"), icon: "link", action: () => this.copyPaths(list, "url") },
+      (!remote || this.connOf(pane.path)?.kind === "smb") && !noSmb && { label: t("Copia indirizzo smb://"), icon: "link", action: () => this.copyPaths(list, "url") },
       !many && dir && { label: t("Aggiungi ai preferiti"), icon: "star", action: () => this.toggleFavorite(entry.path) },
       { label: t("Proprietà"), icon: "info", key: "Ctrl+I", action: () => !prefs.info && this.toggleInfo() },
       !many && shareObj && !shareObj.home && shareObj.volume && !this.removableShare(entry.path) && { label: t("Permessi…"), icon: "shield", action: () => sharePermissions(shareObj) },
@@ -96,7 +105,7 @@ export const menuMethods = {
 
   newMenu(pane, anchor) {
     const r = anchor.getBoundingClientRect();
-    const disabled = pane.path === "/" || !!pane.archive;
+    const disabled = pane.path === "/" || isReadOnly(pane);
     openMenu(r.left, r.bottom + 4, [
       { label: t("Nuova cartella"), icon: "folderPlus", key: "Ctrl+Shift+N", disabled, action: () => this.newFolder(pane) },
       { label: t("Carica file…"), icon: "upload", key: "Ctrl+U", disabled, action: () => this.pickUpload("files", pane) },
@@ -112,8 +121,8 @@ export const menuMethods = {
     openMenu(r.right - 240, r.bottom + 4, [
       { label: t("Seleziona tutto"), key: "Ctrl+A", action: () => pane.selectAll() },
       { label: t("Inverti selezione"), key: "Ctrl+Shift+I", action: () => pane.invertSelection() },
-      this.clipboard && { label: t("Incolla"), icon: "paste", key: "Ctrl+V", action: () => this.paste(pane) },
-      this.clipboard && { label: t("Incolla con verifica"), icon: "shield", key: "Ctrl+Shift+V", action: () => this.paste(pane, pane.path, true) },
+      this.clipboard && !isReadOnly(pane) && { label: t("Incolla"), icon: "paste", key: "Ctrl+V", action: () => this.paste(pane) },
+      this.clipboard && !isReadOnly(pane) && { label: t("Incolla con verifica"), icon: "shield", key: "Ctrl+Shift+V", action: () => this.paste(pane, pane.path, true) },
       "-",
       { title: t("Ordina per") },
       ...[["name", "Nome"], ["size", "Dimensione"], ["mtime", "Modificato"], ["kind", "Tipo"]].map(([k, l]) => ({
@@ -123,8 +132,8 @@ export const menuMethods = {
       { label: (prefs.foldersFirst ? "✓ " : "") + t("Cartelle prima"), action: () => save({ foldersFirst: !prefs.foldersFirst }) },
       "-",
       { label: (prefs.sidebar ? "✓ " : "") + t("Barra laterale"), icon: "sidebar", key: "Ctrl+B", action: () => save({ sidebar: !prefs.sidebar }) },
-      { label: t("Calcola dimensione delle cartelle"), icon: "drive", action: () => this.computeSizes(pane, pane.visible) },
-      pane.path !== "/" && !pane.archive && !isRemote(pane.path) && { label: t("Analisi spazio"), icon: "pie", action: () => this.analyseSpace(pane.path) },
+      !isBackupTop(pane.path) && { label: t("Calcola dimensione delle cartelle"), icon: "drive", action: () => this.computeSizes(pane, pane.visible) },
+      pane.path !== "/" && !pane.archive && !isRemote(pane.path) && !isBackupTop(pane.path) && { label: t("Analisi spazio"), icon: "pie", action: () => this.analyseSpace(pane.path) },
       pane.path !== "/" && { label: fav ? t("Togli dai preferiti") : t("Aggiungi ai preferiti"), icon: "star", key: "Ctrl+D", action: () => this.toggleFavorite(pane.path) },
       "-",
       { label: t("Scorciatoie da tastiera"), icon: "keyboard", key: "?", action: () => openSettings("keys") },

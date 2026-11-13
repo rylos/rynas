@@ -932,6 +932,7 @@ fn share_views(s: &Services, owner: &str) -> Res<Vec<ShareView>> {
     let host = s.shares.host();
     // without the snapshots module (no key) there are no jobs
     let snaps: SnapshotsConfig = docs::<SnapshotsConfig>(&s.ops.config, owner, SNAPSHOTS_KEY).map(|d| d.0).unwrap_or_default();
+    let pc_folders = s.ops.pc_backup.get().map(|pc| pc.snapshot_folders()).unwrap_or_default();
     let view = |sh: &Share, pending| {
         let info = host.probe(&sh.path);
         let mut items = s.shares.warning_items(&eff, sh);
@@ -942,6 +943,11 @@ fn share_views(s: &Services, owner: &str) -> Res<Vec<ShareView>> {
                 code: ShareWarningCode::NocowSnapshots,
                 args: ShareWarningArgs { path: Some(sh.path.clone()), ..Default::default() },
             });
+        }
+        // over a PC's backups (made before rynas refused it): read-only in the file manager
+        for (_, device) in crate::pc_backup::overlapping_shares(&pc_folders, &[(sh.name.clone(), sh.path.clone())]) {
+            let at = pc_folders.iter().find(|(d, _)| *d == device).map(|(_, p)| p.clone());
+            items.push(ShareWarning { code: ShareWarningCode::PcBackupFolder, args: ShareWarningArgs { path: at, key: Some(device), ..Default::default() } });
         }
         ShareView {
             share: sh.clone(),
@@ -985,6 +991,27 @@ fn share_view(s: &Services, owner: &str, name: &str) -> Res<ShareView> {
         .ok_or_else(|| not_found(format!("share {name}")))
 }
 
+/// Refuses a share whose folder `path` is, holds or lies inside a PC's backup folder: the
+/// file manager shows a backup read-only and a share writable, one folder cannot be both
+/// (an empty path, made from the subvolume on apply, is a new folder of its own).
+fn refuse_pc_folder(s: &Services, name: &str, path: &str) -> Res<()> {
+    if path.is_empty() {
+        return Ok(());
+    }
+    let Some(pc) = s.ops.pc_backup.get() else { return Ok(()) };
+    let folders = pc.snapshot_folders();
+    match crate::pc_backup::overlapping_shares(&folders, &[(name.to_string(), path.to_string())]).first() {
+        Some((_, device)) => {
+            let at = folders.iter().find(|(d, _)| d == device).map(|(_, p)| p.as_str()).unwrap_or_default();
+            Err(Error::invalid(
+                "path",
+                format!("share {name}: {path} overlaps {at}, the backup folder of the PC {device}: a shared folder cannot hold a PC's backups nor lie inside them"),
+            ))
+        }
+        None => Ok(()),
+    }
+}
+
 async fn shares_list(State(st): State<SvcState>, h: HeaderMap) -> Res<Json<Vec<ShareView>>> {
     let (s, owner) = (svc(&st)?, user(&h)?);
     Ok(Json(blocking(&s, move |s| share_views(s, &owner)).await?))
@@ -1023,6 +1050,7 @@ async fn share_create(
                     format!("share {} already exists", sh.name),
                 ));
             }
+            refuse_pc_folder(s, &sh.name, &sh.path)?;
             doc.shares.push(sh);
             Ok(())
         })?;
@@ -1052,9 +1080,13 @@ async fn share_put(
                     .find(|x| x.name.eq_ignore_ascii_case(&name))
                     .ok_or_else(|| not_found(format!("share {name}")))?;
                 sh.name = cur.name.clone();
-                // a new path gets a new fsid (unless one is given explicitly)
-                if sh.path != cur.path && sh.nfs.fsid == cur.nfs.fsid {
-                    sh.nfs.fsid.clear();
+                // a new path gets a new fsid (unless one is given explicitly), and never one
+                // over a PC's backups
+                if sh.path != cur.path {
+                    refuse_pc_folder(s, &cur.name, &sh.path)?;
+                    if sh.nfs.fsid == cur.nfs.fsid {
+                        sh.nfs.fsid.clear();
+                    }
                 }
                 *cur = sh;
                 Ok(())

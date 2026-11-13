@@ -10,14 +10,18 @@
 //!   moved here) or btrbk; a new subvolume folder, or an existing folder of received
 //!   snapshots (Check shows what it holds, nothing inside changes). Alert, retention (the
 //!   NAS with GFS counts, or for btrbk the PC within the NAS floor); the btrbk key.
-//! - The drawer: problems; with rynas-agent its status, progress and last run (or the code
-//!   waiting for it, or Make a code), then the folder under its own title; one row of
-//!   buttons (Back up now / Cancel, Measure, Delete old snapshots now, Settings, Remove); the
-//!   agent's runs; for btrbk the folded manual steps (key, `btrbk.conf`, first connection,
-//!   the manifest drop-in; open while they are the only way forward), then the first-backup
-//!   check; "Restore on an empty disk": whether the snapshots are enough (the manifest's
-//!   subvolumes, disks and boot copies), a restore code and the agent's commands; the
-//!   snapshots by subvolume or by run, with sizes, Browse and Delete.
+//! - The drawer, titled "<pc> — <description>": one status card (with rynas-agent its
+//!   status, live progress, last good run, schedule and agent, Back up now / Cancel, or the
+//!   code waiting for it; with btrbk the folder's status and last receive), then one note
+//!   per problem; the snapshots with Measure space (the folder's space and the snapshot
+//!   sizes) and Delete old now on their title line, folded by run (newest first) or by
+//!   subvolume, labelled by the time in their names, with sizes, Browse and Delete; the
+//!   agent's last runs; folded at the end "Restore on an empty disk" (its state and first
+//!   reason on the folded line: the manifest's subvolumes, disks and boot copies, a restore
+//!   code and the agent's commands), "Folder and rules" (path, space, retention, alert, last
+//!   cleanup, key) and for btrbk "Set up the PC" (key, `btrbk.conf`, first connection, the
+//!   manifest drop-in; open while they are the only way forward). Remove, Settings and
+//!   Close in the footer.
 //! - Settings: one dialog per PC: the folder's (also the switch between the senders) and,
 //!   with rynas-agent, its schedule, the subvolumes it leaves out and Revoke.
 //! - Browse: read-only folders inside a snapshot; Copy out puts a file or folder into a NAS
@@ -72,6 +76,138 @@ fn state_status(s: ReceiveState) -> AnyView {
     ui::status(tone, t(k).to_string())
 }
 
+/// The folder's one status, the same words in the list and the drawer: a running backup is
+/// "Backing up" with rynas-agent (the PC drives it) and "Receiving now" with btrbk (the NAS
+/// only receives); a btrbk folder without a key waits for it whatever it holds.
+fn folder_status(p: &PcTarget) -> AnyView {
+    if p.receiving {
+        return ui::status(Tone::Info, t(if p.agent { "pca.st.running" } else { "bkpc.receiving" }).to_string());
+    }
+    if !p.agent && p.public_key.is_empty() {
+        return ui::status(Tone::Warn, t("pcb.st.no_key").to_string());
+    }
+    state_status(p.state)
+}
+
+/// The civil time in a btrbk snapshot name (`<prefix>.YYYYMMDD`, `…THHMM`,
+/// `…THHMMSS±hhmm`, each with an optional `_N`): prefix, year, month, day, hour and minute
+/// when the format has them, and the `_N` suffix. The PC's clock, shown as written (no time
+/// zone conversion). `None` for any other name.
+fn snapshot_stamp(name: &str) -> Option<Stamp<'_>> {
+    let (prefix, ts) = split_long_snapshot(name)?;
+    let (stamp, n) = match ts.split_once('_') {
+        Some((s, n)) => (s, Some(n)),
+        None => (ts, None),
+    };
+    let base = &stamp[..stamp.find(['+', '-']).unwrap_or(stamp.len())];
+    let num = |r: std::ops::Range<usize>| base.get(r).and_then(|s| s.parse::<u32>().ok());
+    let date = [num(0..4)?, num(4..6)?, num(6..8)?];
+    let hm = if base.len() >= 13 { Some((num(9..11)?, num(11..13)?)) } else { None };
+    Some(Stamp { prefix, date, hm, n })
+}
+
+/// The parts of a btrbk snapshot name ([`snapshot_stamp`]).
+#[derive(Debug, PartialEq)]
+struct Stamp<'a> {
+    prefix: &'a str,
+    /// Year, month, day.
+    date: [u32; 3],
+    /// Hour and minute (not in `short` names).
+    hm: Option<(u32, u32)>,
+    /// The `_N` suffix.
+    n: Option<&'a str>,
+}
+
+/// A snapshot name's time in the current language ("13 Nov 2026, 15:43"; the date alone for
+/// btrbk's `short` names), the `_N` suffix as "#N"; `None` when the name is not btrbk's.
+pub(super) fn stamp_text(name: &str) -> Option<String> {
+    let Stamp { date: [y, mo, d], hm, n, .. } = snapshot_stamp(name)?;
+    let text = match hm {
+        Some((h, mi)) => {
+            let at = js_sys::Date::new_with_year_month_day_hr_min(y, mo as i32 - 1, d as i32, h as i32, mi as i32);
+            i18n::datetime(at.get_time() as u64)
+        }
+        None => i18n::date(js_sys::Date::new_with_year_month_day(y, mo as i32 - 1, d as i32).get_time() as u64),
+    };
+    Some(match n {
+        Some(n) => format!("{text} #{n}"),
+        None => text,
+    })
+}
+
+/// A received snapshot as people read it: "@home · 13 Nov 2026, 15:43" (the raw name when it
+/// is not btrbk's).
+pub(super) fn snapshot_label(name: &str) -> String {
+    match (snapshot_stamp(name), stamp_text(name)) {
+        (Some(Stamp { prefix, .. }), Some(when)) => format!("{prefix} · {when}"),
+        _ => name.to_string(),
+    }
+}
+
+/// What a snapshot row of the drawer names: its subvolume (inside a run), its time (inside
+/// a subvolume) or both (the snapshots outside any run).
+#[derive(Clone, Copy, PartialEq)]
+enum Shown {
+    Subvolume,
+    Time,
+    Full,
+}
+
+/// A snapshot's state when it is more than "received": interrupted, not a subvolume, the
+/// base of the next send, kept by the rules.
+fn snapshot_flag(s: &ReceivedSnapshot) -> Option<AnyView> {
+    let (tone, k) = if s.incomplete {
+        (Tone::Warn, "bk.snap.incomplete")
+    } else if s.not_subvolume {
+        (Tone::Err, "bk.snap.not_subvolume")
+    } else if s.parent {
+        (Tone::Info, "bkpc.snap.parent")
+    } else if s.protected {
+        (Tone::Info, "bk.snap.protected")
+    } else {
+        return None;
+    };
+    Some(ui::status(tone, t(k).to_string()))
+}
+
+fn fold(folds: Folds, title: &'static str, open: bool, summary: AnyView, body: AnyView) -> AnyView {
+    view! {
+        <details class="pcb-fold" open=folds.open(title, open) on:toggle=move |ev| folds.toggled(title, &ev)>
+            <summary><Icon icon=icons::CHEVRON_RIGHT size=14 /><span class="pcb-fold-title">{tr(title)}</span>{summary}</summary>
+            <div class="pcb-fold-body">{body}</div>
+        </details>
+    }
+    .into_any()
+}
+
+/// Which folded parts of the drawer are open, by a stable key (a run's timestamp, a
+/// subvolume, a section's title): what the user chose, kept while the PC is read again (a
+/// Measure, a poll rebuilds the drawer's content); a part never touched keeps its default.
+#[derive(Clone, Copy)]
+struct Folds(RwSignal<std::collections::HashMap<String, bool>>);
+
+impl Folds {
+    fn new() -> Self {
+        Folds(RwSignal::new(Default::default()))
+    }
+
+    /// The `open` attribute of the part `key`.
+    fn open(self, key: impl Into<String>, default: bool) -> impl Fn() -> bool + Send + Sync + Copy + 'static {
+        let key = StoredValue::new(key.into());
+        move || self.0.with(|m| key.with_value(|k| m.get(k).copied()).unwrap_or(default))
+    }
+
+    /// A `toggle` event of the part `key`: remember its state.
+    fn toggled(self, key: &str, ev: &web_sys::Event) {
+        let open = event_target::<web_sys::Element>(ev).has_attribute("open");
+        if self.0.with_untracked(|m| m.get(key).copied()) != Some(open) {
+            self.0.update(|m| {
+                m.insert(key.to_string(), open);
+            });
+        }
+    }
+}
+
 fn when(ms: Option<u64>) -> String {
     ms.map(i18n::datetime).unwrap_or_else(|| "—".into())
 }
@@ -119,6 +255,7 @@ fn issue_text(i: &PcIssue) -> String {
         PcIssueCode::ReceiveFailed => "bkpc.issue.receive_failed",
         PcIssueCode::ReceiveStuck => "bkpc.issue.receive_stuck",
         PcIssueCode::LowSpace => "bkpc.issue.low_space",
+        PcIssueCode::SharedFolder => "bkpc.issue.shared_folder",
     };
     let b = |v: Option<u64>| i18n::bytes(v.unwrap_or(0));
     tf(k, &[("subject", subject), ("when", &since), ("free", &b(i.free_bytes)), ("needed", &b(i.needed_bytes))])
@@ -132,6 +269,7 @@ fn issue_short(i: &PcIssue) -> &'static str {
         PcIssueCode::ReceiveFailed => "bkpc.short.receive_failed",
         PcIssueCode::ReceiveStuck => "bkpc.short.receive_stuck",
         PcIssueCode::LowSpace => "bkpc.short.low_space",
+        PcIssueCode::SharedFolder => "bkpc.short.shared_folder",
     }
 }
 
@@ -248,9 +386,9 @@ fn first_run(b: &BareMetal, list: &[ReceivedSnapshot]) -> Option<AnyView> {
         );
     }
     let got = |name: &str| list.iter().any(|x| x.group == name && !x.incomplete && !x.not_subvolume);
-    // everything there: one line, no list
+    // everything there: nothing to say (the status and the snapshots say it)
     if expected.iter().all(|s| got(&s.name)) {
-        return Some(view! { <div>{ui::status(Tone::Ok, t("pcb.first_run_all").to_string())}</div> }.into_any());
+        return None;
     }
     let rows = expected
         .iter()
@@ -445,7 +583,7 @@ pub fn panel(add: RwSignal<Option<bool>>) -> AnyView {
                         let progress = p.agent.then(|| progress_of(&p.device)).flatten();
                         view! {
                             <div class="cell-main">
-                                {if p.receiving || progress.is_some() { ui::status(Tone::Info, t("bkpc.receiving").to_string()) } else { state_status(p.state) }}
+                                {if progress.is_some() { ui::status(Tone::Info, t("pca.st.running").to_string()) } else { folder_status(p) }}
                                 {problem}
                                 {match progress {
                                     Some(pr) => super::agent::progress_view(&pr),
@@ -1128,9 +1266,10 @@ fn settings_dialog(pcs: Pcs, p: PcTarget, agent_dev: Option<PcDevice>) -> AnyVie
 /// the commands to run on the PC from any live Linux; the agent receives the snapshots back
 /// into a new btrfs filesystem (`docs/research/pc-backup.md` §11.2 point 6, §11.10).
 /// `ready`: the snapshots are enough for a full rebuild (otherwise a warning above the button).
-fn restore_part(device: String, ready: bool) -> AnyView {
+/// `code`: the code just made, with the NAS certificate's fingerprint (kept by the drawer,
+/// so reading the PC again does not hide it).
+fn restore_part(device: String, ready: bool, code: RwSignal<Option<(rynas_api_types::pcagent::RestoreCodeCreated, Option<String>)>>) -> AnyView {
     use rynas_api_types::pcagent::{PcBackupOverview, RestoreCodeCreated};
-    let code = RwSignal::new(None::<(RestoreCodeCreated, Option<String>)>);
     let error = RwSignal::new(None::<String>);
     let busy = RwSignal::new(false);
     let dev = StoredValue::new(device);
@@ -1175,10 +1314,35 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
     let ask = RwSignal::new(false);
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
+    // one Measure: the folder's space, then the sizes of the snapshots (unless the quota
+    // groups give them live)
     let measuring = RwSignal::new(false);
     let measure_err = RwSignal::new(None::<String>);
     let measure = move |_| {
-        run(pcs, ("POST", format!("{}/usage", target_url(&dev.get_value())), None), t("bk.measured").to_string(), (measuring, measure_err, None), Callback::new(move |_| detail.reload()));
+        let sizes_too = detail.data.with_untracked(|d| d.as_ref().is_some_and(|d| !d.sizes_from_quota && !d.list.is_empty()));
+        let base = target_url(&dev.get_value());
+        measuring.set(true);
+        measure_err.set(None);
+        spawn_local(async move {
+            let mut r = tasks::run_task(&format!("{base}/usage"), None).await;
+            if sizes_too && matches!(&r, Ok(task) if task.status == TaskStatus::Ok) {
+                r = tasks::run_task(&format!("{base}/sizes"), None).await;
+            }
+            let _ = measuring.try_set(false);
+            match r {
+                Ok(task) if task.status == TaskStatus::Ok => {
+                    toast(Tone::Ok, t("bk.measured").to_string());
+                    pcs.list.reload();
+                    detail.reload();
+                }
+                Ok(task) => {
+                    let _ = measure_err.try_set(Some(tasks::task_error(&task)));
+                }
+                Err(e) => {
+                    let _ = measure_err.try_set(Some(e.text()));
+                }
+            }
+        });
     };
     let remove = Callback::new(move |_| {
         run(pcs, ("DELETE", target_url(&dev.get_value()), None), tf("bk.removed", &[("device", &dev.get_value())]), (busy, error, None), Callback::new(move |_| {
@@ -1186,13 +1350,16 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
             pcs.open.set(None);
         }));
     });
-    // one busy flag and error line for the actions on snapshots (sizes, cleanup, delete)
-    let working = RwSignal::new(false);
-    let work_err = RwSignal::new(None::<String>);
+    let pruning = RwSignal::new(false);
+    let prune_err = RwSignal::new(None::<String>);
     let reload = Callback::new(move |_| detail.reload());
-    let sizes = move |_| run(pcs, ("POST", format!("{}/sizes", target_url(&dev.get_value())), None), t("bkpc.sizes_done").to_string(), (working, work_err, None), reload);
-    let prune = move |_| run(pcs, ("POST", format!("{}/prune", target_url(&dev.get_value())), None), t("bkpc.pruned").to_string(), (working, work_err, None), reload);
-    let by_run = RwSignal::new("subvolume".to_string());
+    let prune = move |_| run(pcs, ("POST", format!("{}/prune", target_url(&dev.get_value())), None), t("bkpc.pruned").to_string(), (pruning, prune_err, None), reload);
+    // the snapshots grouped by run (newest first) or by subvolume; the size note on request
+    let by_run = RwSignal::new("run".to_string());
+    let size_help = RwSignal::new(false);
+    // kept while the PC is read again (a Measure, a poll): what is open, a restore code
+    let folds = Folds::new();
+    let restore_code = RwSignal::new(None);
     let del = RwSignal::new(None::<String>);
     let del_busy = RwSignal::new(false);
     let del_err = RwSignal::new(None::<String>);
@@ -1207,15 +1374,36 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
     let content = move || {
         let Some(d) = detail.data.get() else { return ().into_any() };
         let p = d.target.clone();
-        let p_edit = p.clone();
         let nas = p.retention.owner == RetentionOwner::Nas;
-        let usage = p.usage.map(|u| tf("bk.usage_text", &[("excl", &i18n::bytes(u.exclusive_bytes)), ("total", &i18n::bytes(u.total_bytes)), ("when", &i18n::datetime(u.read_at_ms))])).unwrap_or_else(|| t("bk.usage_none").to_string());
-        let free = p.free_bytes.zip(p.volume_bytes).map(|(f, v)| tf("bkpc.free_text", &[("free", &i18n::bytes(f)), ("total", &i18n::bytes(v))]));
-        let alert = match p.alert_after_hours() {
-            0 => t("bk.alert_off").to_string(),
-            h if h % 24 == 0 => tf("bk.alert_days", &[("n", &(h / 24).to_string())]),
-            h => tf("bkpc.alert_hours", &[("n", &h.to_string())]),
+        let agent = p.agent;
+
+        // ---- the status card: with rynas-agent the agent's (status, progress, schedule,
+        // Back up now / Cancel); with btrbk the folder's status and last receive
+        let status = if agent {
+            let (state, last) = (p.clone(), p.last_received_ms);
+            let folder = ViewFn::from(move || {
+                view! {
+                    {folder_status(&state)}
+                    <span class="small muted">{last.map(|ms| tf("pcb.last_received_on", &[("when", &i18n::datetime(ms))]))}</span>
+                }
+                .into_any()
+            });
+            ctl.status(folder)
+        } else {
+            let last = match p.last_received_ms {
+                Some(ms) => tf("pcb.last_received_on", &[("when", &i18n::datetime(ms))]),
+                None => t("pcb.never").to_string(),
+            };
+            view! {
+                <section class="pcb-status">
+                    <div class="pcb-status-head">{folder_status(&p)}</div>
+                    <p class="pcb-meta small"><span>{last}</span><span>{t("pcb.via.ssh")}</span></p>
+                </section>
+            }
+            .into_any()
         };
+
+        // ---- problems: one note each
         let issues = p
             .issues
             .iter()
@@ -1229,13 +1417,158 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
             })
             .collect_view();
         let b = p.bare_metal.clone();
-        // "no snapshots yet" is said once, by the snapshot list
+        // the first-backup check while subvolumes are still awaited
+        let check = first_run(&b, &d.list);
+
+        // ---- snapshots
+        let snaps: std::collections::HashMap<&str, &ReceivedSnapshot> = d.list.iter().map(|s| (s.name.as_str(), s)).collect();
+        // one row: the label (the subvolume inside a run, the time inside a subvolume, both
+        // among the others), its state when it says more than "received", the size, Browse
+        // and Delete
+        let snap_row = |s: &ReceivedSnapshot, shown: Shown| {
+            let name = s.name.clone();
+            let name_del = s.name.clone();
+            let text = match shown {
+                Shown::Subvolume => s.group.clone(),
+                Shown::Time => stamp_text(&s.name).unwrap_or_else(|| s.name.clone()),
+                Shown::Full => snapshot_label(&s.name),
+            };
+            let label = format!("{}: {}", t("bk.browse"), snapshot_label(&s.name));
+            let label_del = format!("{}: {}", t("bkpc.delete_snap"), snapshot_label(&s.name));
+            let title = format!("{} · {} {}", s.name, t("bk.col.received"), when(s.received_at_ms));
+            let can = s.readonly && !s.not_subvolume;
+            let deletable = !s.parent && !s.not_subvolume && !(s.incomplete && p.receiving);
+            let head = if shown == Shown::Subvolume { "bk.col.subvolume" } else { "bk.col.snapshot" };
+            ui::row(vec![
+                ui::cell(head, "wrap", view! {
+                    <div class="chips"><span class=if shown == Shown::Time { "small bk-wrap" } else { "mono small bk-wrap" } title=title>{text}</span>{snapshot_flag(s)}</div>
+                }.into_any()),
+                ui::text_cell("snap.col.size", "tnum", size_text(s.size)),
+                ui::actions(view! {
+                    <button class="icon-btn sm" title=tr("bk.browse") aria-label=label disabled=!can on:click=move |_| browse.set(Some(name.clone()))><Icon icon=icons::FOLDER_OPEN size=16 /></button>
+                    <button class="icon-btn sm" title=tr("bkpc.delete_snap") aria-label=label_del disabled=!deletable on:click=move |_| { del_err.set(None); del.set(Some(name_del.clone())); }><Icon icon=icons::TRASH_2 size=16 /></button>
+                }.into_any()),
+            ])
+        };
+        // a folded group, open as the user left it (key: the run's timestamp, the subvolume)
+        let group = |key: String, title: AnyView, sub: String, flag: Option<AnyView>, heads: &'static [&'static str], rows: Vec<AnyView>| {
+            let k = StoredValue::new(key.clone());
+            view! {
+                <details class="pcb-group" open=folds.open(key, false) on:toggle=move |ev| k.with_value(|k| folds.toggled(k, &ev))>
+                    <summary><Icon icon=icons::CHEVRON_RIGHT size=14 />{title}<span class="small muted tnum">{sub}</span>{flag}</summary>
+                    {ui::table("bk-snaps", heads, rows)}
+                </details>
+            }
+        };
+        const RUN_HEADS: &[&str] = &["bk.col.subvolume", "snap.col.size", ""];
+        const HEADS: &[&str] = &["bk.col.snapshot", "snap.col.size", ""];
+        // the worst state of a group's snapshots, on its folded line
+        let worst = |items: &[&ReceivedSnapshot]| {
+            if items.iter().any(|s| s.not_subvolume) {
+                Some(ui::status(Tone::Err, t("bk.snap.not_subvolume").to_string()))
+            } else if items.iter().any(|s| s.incomplete) {
+                Some(ui::status(Tone::Warn, t("bk.snap.incomplete").to_string()))
+            } else {
+                None
+            }
+        };
+        let mut runs: Vec<&PcRun> = d.runs.iter().collect();
+        runs.sort_by(|a, b| b.created_ms.cmp(&a.created_ms).then_with(|| b.timestamp.cmp(&a.timestamp)));
+        // what no run holds (not a subvolume, a name btrbk does not give): its own group at
+        // the end of the runs
+        let in_runs: std::collections::HashSet<&str> = runs.iter().flat_map(|r| r.snapshots.iter().map(String::as_str)).collect();
+        let mut others: Vec<&ReceivedSnapshot> = d.list.iter().filter(|s| !in_runs.contains(s.name.as_str())).collect();
+        others.sort_by(|a, b| b.created_ms.cmp(&a.created_ms).then_with(|| a.name.cmp(&b.name)));
+        let other_group = (!others.is_empty()).then(|| {
+            let n = others.len();
+            let sub = tf(if n == 1 { "pcb.n_snaps1" } else { "pcb.n_snaps" }, &[("n", &n.to_string())]);
+            let flag = worst(&others);
+            let rows = others.iter().map(|s| snap_row(s, Shown::Full)).collect();
+            group("other".into(), view! { <span class="pcb-group-title">{tr("pcb.other_snaps")}</span> }.into_any(), sub, flag, HEADS, rows)
+        });
+        let by_runs = runs
+            .into_iter()
+            .map(|r| {
+                let items: Vec<&ReceivedSnapshot> = r.snapshots.iter().filter_map(|n| snaps.get(n.as_str()).copied()).collect();
+                let when_text = stamp_text(&format!("x.{}", r.timestamp)).unwrap_or_else(|| when(r.created_ms));
+                let mut sub = tf(if items.len() == 1 { "pcb.n_subvols1" } else { "pcb.n_subvols" }, &[("n", &items.len().to_string())]);
+                if let Some(x) = r.exclusive_bytes {
+                    sub = format!("{sub} · {}", i18n::bytes(x));
+                }
+                let flag = if r.incomplete {
+                    Some(ui::status(Tone::Warn, t("bk.snap.incomplete").to_string()))
+                } else if !r.lacks.is_empty() {
+                    Some(ui::status(Tone::Info, tf("bkpc.run.lacks", &[("names", &r.lacks.join(", "))])))
+                } else {
+                    None
+                };
+                let rows = items.into_iter().map(|s| snap_row(s, Shown::Subvolume)).collect();
+                group(format!("run:{}", r.timestamp), view! { <span class="pcb-group-title tnum">{when_text}</span> }.into_any(), sub, flag, RUN_HEADS, rows)
+            })
+            .collect_view();
+        let mut names: Vec<&str> = d.list.iter().map(|s| s.group.as_str()).collect();
+        names.sort_unstable();
+        names.dedup();
+        let by_groups = names
+            .into_iter()
+            .map(|g| {
+                let mut items: Vec<&ReceivedSnapshot> = d.list.iter().filter(|s| s.group == g).collect();
+                items.sort_by(|a, b| b.created_ms.cmp(&a.created_ms).then_with(|| b.name.cmp(&a.name)));
+                let n = items.len();
+                let mut sub = tf(if n == 1 { "pcb.n_snaps1" } else { "pcb.n_snaps" }, &[("n", &n.to_string())]);
+                if let Some(t) = items.first().and_then(|s| stamp_text(&s.name)) {
+                    sub = format!("{sub} · {t}");
+                }
+                let flag = worst(&items);
+                let rows = items.into_iter().map(|s| snap_row(s, Shown::Time)).collect();
+                group(format!("sv:{g}"), view! { <span class="pcb-group-title mono">{g.to_string()}</span> }.into_any(), sub, flag, HEADS, rows)
+            })
+            .collect_view();
+        let count = {
+            let mut s = i18n::count(u64::from(p.snapshots));
+            if let Some(u) = p.usage {
+                s = format!("{s} · {}", i18n::bytes(u.exclusive_bytes));
+            }
+            s
+        };
+        let has_snaps = !d.list.is_empty();
+        let size_note = if d.sizes_from_quota { t("bkpc.sizes_quota") } else { t("bkpc.sizes_note") };
+        const VIEWS: &[(&str, &str)] = &[("run", "bkpc.view.run"), ("subvolume", "bk.col.subvolume")];
+        let snapshots = view! {
+            <div class="pcb-sec-head">
+                <h3 class="mini-title">{tr("bk.snapshots")}</h3>
+                <span class="small muted tnum">{count}</span>
+                {has_snaps.then(|| view! {
+                    <button class="icon-btn sm" title=tr("pcb.size_help") aria-label=tr("pcb.size_help") aria-expanded=move || size_help.get().to_string() on:click=move |_| size_help.update(|v| *v = !*v)><Icon icon=icons::INFO size=16 /></button>
+                })}
+                <div class="sec-actions pcb-sec-actions">
+                    <button class="btn ghost sm" disabled=move || measuring.get() on:click=measure>{spinner(measuring)}<Icon icon=icons::DATABASE size=14 />{tr("bk.measure")}</button>
+                    {(nas && has_snaps).then(|| view! { <button class="btn ghost sm" disabled=move || pruning.get() on:click=prune>{spinner(pruning)}<Icon icon=icons::TRASH_2 size=14 />{tr("bkpc.prune")}</button> })}
+                </div>
+            </div>
+            {move || size_help.get().then(|| view! { <p class="small muted">{size_note}</p> })}
+            {form_error(measure_err)}
+            {form_error(prune_err)}
+            {if has_snaps {
+                view! {
+                    {segmented("bkpc.view", VIEWS, by_run.into(), Callback::new(move |v| by_run.set(v)))}
+                    <div class="pcb-groups" hidden=move || by_run.get() != "run">{by_runs}{other_group}</div>
+                    <div class="pcb-groups" hidden=move || by_run.get() != "subvolume">{by_groups}</div>
+                }
+                .into_any()
+            } else {
+                view! { <p class="small muted">{tr("bk.no_snapshots")}</p> }.into_any()
+            }}
+        };
+
+        // ---- restore on an empty disk: the state and its first reason on the folded line
+        // (also "no snapshots yet": closed, the line is all one reads); inside, the other
+        // gaps (the reason "no snapshots" stays on the line alone)
         let shown_gaps: Vec<&BareMetalGap> = b.missing.iter().chain(&b.warnings).filter(|g| g.code != BareMetalCode::NoSnapshots).collect();
-        let has_gaps = !shown_gaps.is_empty();
         // btrbk without a manifest: the drop-in of the manual steps writes it
         let no_manifest = shown_gaps.iter().any(|g| g.code == BareMetalCode::NoManifest);
-        let agent = p.agent;
-        let gaps = shown_gaps.into_iter().map(|g| view! { <li>{gap_text(g, agent)}</li> }).collect_view();
+        let reason = (!b.ready).then(|| b.missing.first().map(|g| gap_text(g, agent))).flatten();
+        let gaps = shown_gaps.iter().map(|g| view! { <li>{gap_text(g, agent)}</li> }).collect_view();
         let layout = (!b.layout.is_empty()).then(|| {
             let whole = rynas_api_types::pcagent::BtrbkLayout { subvolumes: b.layout.clone(), ..Default::default() };
             let items = b.layout.iter().map(|s| {
@@ -1251,187 +1584,103 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
         });
         let disks = (!b.disks.is_empty()).then(|| view! { <h4 class="small"><strong>{tr("bkpc.bm.disks")}</strong></h4><ul class="small bkpc-list">{disk_items(&b.disks)}</ul> });
         let copies = (!b.boot_copies.is_empty()).then(|| view! { <h4 class="small"><strong>{tr("bkpc.bm.boot_copies")}</strong></h4><ul class="small bkpc-list">{boot_copy_items(&b.boot_copies)}</ul> });
-        let bare = view! {
-            <h3 class="mini-title">{tr("bkpc.bm.title")}</h3>
-            <p class="small muted">{tr("bkpc.bm.intro")}</p>
-            <dl class="kvs">
-                {kv("col.status", bm_status(&b))}
-                {b.manifest_snapshot.clone().map(|s| kv("bkpc.bm.manifest", ui::breakable(&s, "mono small")))}
-                {(b.layout.is_empty() && !b.subvolumes.is_empty()).then(|| kv("bkpc.bm.subvolumes", ui::breakable(&b.subvolumes.join(", "), "mono small")))}
-                {b.loader.clone().map(|l| kv("bkpc.bm.loader", ui::text(loader_label(&l))))}
-            </dl>
-            {has_gaps.then(|| view! { <ul class="small bkpc-gaps">{gaps}</ul> })}
-            {layout}
-            {disks}
-            {copies}
-            {(!d.list.is_empty()).then(|| restore_part(dev.get_value(), b.ready))}
-        };
-        let flag = |s: &ReceivedSnapshot| {
-            if s.incomplete {
-                ui::status(Tone::Warn, t("bk.snap.incomplete").to_string())
-            } else if s.not_subvolume {
-                ui::status(Tone::Err, t("bk.snap.not_subvolume").to_string())
-            } else if s.parent {
-                ui::status(Tone::Info, t("bkpc.snap.parent").to_string())
-            } else if s.protected {
-                ui::status(Tone::Info, t("bk.snap.protected").to_string())
-            } else {
-                ui::status(Tone::Ok, t("bk.snap.received").to_string())
+        let facts = b.manifest_snapshot.is_some() || (b.layout.is_empty() && !b.subvolumes.is_empty()) || b.loader.is_some();
+        let restore = fold(
+            folds,
+            "bkpc.bm.title",
+            false,
+            view! { {bm_status(&b)}{reason.map(|r| view! { <span class="small muted pcb-fold-reason">{r}</span> })} }.into_any(),
+            view! {
+                {(!shown_gaps.is_empty()).then(|| view! { <ul class="small bkpc-gaps">{gaps}</ul> })}
+                {facts.then(|| view! {
+                    <dl class="kvs">
+                        {b.manifest_snapshot.clone().map(|s| kv("bkpc.bm.manifest", ui::breakable(&s, "mono small")))}
+                        {(b.layout.is_empty() && !b.subvolumes.is_empty()).then(|| kv("bkpc.bm.subvolumes", ui::breakable(&b.subvolumes.join(", "), "mono small")))}
+                        {b.loader.clone().map(|l| kv("bkpc.bm.loader", ui::text(loader_label(&l))))}
+                    </dl>
+                })}
+                {layout}
+                {disks}
+                {copies}
+                {has_snaps.then(|| restore_part(dev.get_value(), b.ready, restore_code))}
             }
+            .into_any(),
+        );
+
+        // ---- the folder and its rules: settings and facts that rarely change
+        let usage = p.usage.map(|u| tf("bk.usage_text", &[("excl", &i18n::bytes(u.exclusive_bytes)), ("total", &i18n::bytes(u.total_bytes)), ("when", &i18n::datetime(u.read_at_ms))])).unwrap_or_else(|| t("bk.usage_none").to_string());
+        let free = p.free_bytes.zip(p.volume_bytes).map(|(f, v)| tf("bkpc.free_text", &[("free", &i18n::bytes(f)), ("total", &i18n::bytes(v))]));
+        let alert = match p.alert_after_hours() {
+            0 => t("bk.alert_off").to_string(),
+            h if h % 24 == 0 => tf("bk.alert_days", &[("n", &(h / 24).to_string())]),
+            h => tf("bkpc.alert_hours", &[("n", &h.to_string())]),
         };
-        // by subvolume: grouped, newest first inside each
-        let mut list = d.list.clone();
-        list.sort_by(|a, b| a.group.cmp(&b.group).then_with(|| b.created_ms.cmp(&a.created_ms)));
-        let snap_rows = list
-            .iter()
-            .map(|s| {
-                let name = s.name.clone();
-                let name_del = s.name.clone();
-                let label = format!("{}: {}", t("bk.browse"), s.name);
-                let label_del = format!("{}: {}", t("bkpc.delete_snap"), s.name);
-                let can = s.readonly && !s.not_subvolume;
-                let deletable = !s.parent && !s.not_subvolume && !(s.incomplete && p.receiving);
-                ui::row(vec![
-                    ui::cell("bk.col.snapshot", "wrap", ui::breakable(&s.name, "mono small")),
-                    ui::text_cell("bk.col.received", "tnum", when(s.received_at_ms)),
-                    ui::text_cell("snap.col.size", "tnum", size_text(s.size)),
-                    ui::cell("col.status", "", flag(s)),
-                    ui::actions(view! {
-                        <button class="icon-btn sm" title=tr("bk.browse") aria-label=label disabled=!can on:click=move |_| browse.set(Some(name.clone()))><Icon icon=icons::FOLDER_OPEN size=16 /></button>
-                        <button class="icon-btn sm" title=tr("bkpc.delete_snap") aria-label=label_del disabled=!deletable on:click=move |_| { del_err.set(None); del.set(Some(name_del.clone())); }><Icon icon=icons::TRASH_2 size=16 /></button>
-                    }.into_any()),
-                ])
-            })
-            .collect::<Vec<_>>();
-        let run_rows = d
-            .runs
-            .iter()
-            .map(|r| {
-                let groups: Vec<String> = r.snapshots.iter().filter_map(|n| n.rsplit_once('.').map(|x| x.0.to_string())).collect();
-                let size = match (r.referenced_bytes, r.exclusive_bytes) {
-                    (Some(rb), Some(x)) => size_text(Some(SnapshotSize { referenced_bytes: rb, exclusive_bytes: x, ..Default::default() })),
-                    _ => "—".into(),
-                };
-                let st = if r.incomplete {
-                    ui::status(Tone::Warn, t("bk.snap.incomplete").to_string())
-                } else if r.lacks.is_empty() {
-                    ui::status(Tone::Ok, t("bkpc.run.full").to_string())
-                } else {
-                    ui::status(Tone::Info, tf("bkpc.run.lacks", &[("names", &r.lacks.join(", "))]))
-                };
-                ui::row(vec![
-                    ui::text_cell("bkpc.view.run", "tnum", when(r.created_ms)),
-                    ui::cell("bk.col.subvolume", "wrap", ui::breakable(&groups.join(", "), "mono small")),
-                    ui::text_cell("snap.col.size", "tnum", size),
-                    ui::cell("col.status", "wrap", st),
-                ])
-            })
-            .collect::<Vec<_>>();
         let last_prune = p.last_prune.clone().map(|r| match r.error {
             Some(e) => format!("{}: {e}", i18n::datetime(r.at_ms)),
             None => tf("bkpc.last_prune_text", &[("when", &i18n::datetime(r.at_ms)), ("n", &r.deleted.to_string())]),
         });
-        // how the PC is set up: nothing to do by hand with rynas-agent (its part is above);
-        // with btrbk the commands, folded, then the first-backup check
-        let check = first_run(&b, &d.list);
-        // the manual steps open by themselves while they are the only way forward: no key
-        // yet, or no manifest (its drop-in is one of them)
-        let steps_open = (p.public_key.is_empty() && d.list.is_empty()) || no_manifest;
-        let steps = if p.agent {
-            check
-        } else {
+        let folder = fold(
+            folds,
+            "pcb.folder_rules",
+            false,
+            ().into_any(),
+            view! {
+                <dl class="kvs">
+                    {kv("bk.col.folder", ui::breakable(&p.path, "mono"))}
+                    {(p.incomplete > 0).then(|| kv("bk.incomplete", ui::text(i18n::count(u64::from(p.incomplete)))))}
+                    {free.map(|f| kv("bkpc.free", ui::text(f)))}
+                    {kv("bk.col.space", ui::text(usage))}
+                    {kv("bk.f.rules", ui::text(rules_text(&p)))}
+                    {last_prune.filter(|_| nas).map(|l| kv("bkpc.last_prune", ui::text(l)))}
+                    {kv("bkpc.alert", ui::text(alert))}
+                    {p.key_fingerprint.clone().map(|fp| kv("bk.key", ui::breakable(&fp, "mono small")))}
+                    {p.adopted.then(|| kv("bk.adopted", ui::text(t("bk.adopted_yes").to_string())))}
+                </dl>
+            }
+            .into_any(),
+        );
+
+        // ---- btrbk: the manual steps, open while they are the only way forward (no key and
+        // nothing received yet, or no manifest: its drop-in is one of them)
+        let steps = (!agent).then(|| {
+            let open = (p.public_key.is_empty() && d.list.is_empty()) || no_manifest;
             let hook = (!d.manifest_hook.trim().is_empty()).then(|| {
                 view! {
                     <p class="small muted">{tr("pcb.hook_intro")}</p>
                     {code_block("pcb.hook", d.manifest_hook.clone())}
                 }
             });
-            Some(
+            fold(
+                folds,
+                "bk.steps",
+                open,
+                ().into_any(),
                 view! {
-                    <h3 class="mini-title">{tr("bk.steps")}</h3>
                     <p class="small muted">{tr("pcb.ssh_recommend")}</p>
-                    <details class="tls-step" open=steps_open>
-                        <summary>{tr("bkpc.manual_steps")}</summary>
-                        <p class="small muted">{tr("bk.steps_intro")}</p>
-                        {code_block("bk.step.key", d.key_commands.clone())}
-                        {code_block("bk.step.config", d.client_config.clone())}
-                        {code_block("bk.step.test", d.test_commands.clone())}
-                        {d.key_line.clone().and_then(|l| code_block("bk.step.line", l))}
-                        {hook}
-                        <p class="small muted">{tr("bk.steps_note")}</p>
-                    </details>
-                    {check}
+                    <p class="small muted">{tr("bk.steps_intro")}</p>
+                    {code_block("bk.step.key", d.key_commands.clone())}
+                    {code_block("bk.step.config", d.client_config.clone())}
+                    {code_block("bk.step.test", d.test_commands.clone())}
+                    {d.key_line.clone().and_then(|l| code_block("bk.step.line", l))}
+                    {hook}
+                    <p class="small muted">{tr("bk.steps_note")}</p>
                 }
                 .into_any(),
             )
-        };
-        const VIEWS: &[(&str, &str)] = &[("subvolume", "bk.col.subvolume"), ("run", "bkpc.view.run")];
+        });
+
         view! {
-            {(p.public_key.is_empty() && !p.agent).then(|| ui::note(Tone::Warn, icons::KEY, ui::text(t("bk.no_key").to_string())))}
+            {status}
+            {(p.public_key.is_empty() && !agent).then(|| ui::note(Tone::Warn, icons::KEY, ui::text(t("bk.no_key").to_string())))}
             {issues}
-            // with rynas-agent its block first: the PC's status, progress and schedule; the
-            // folder below under its own title (one status, one date, one row of buttons)
-            {agent.then(|| view! {
-                {ctl.status()}
-                <h3 class="mini-title">{tr("bkpc.f.path")}</h3>
-            })}
-            <dl class="kvs">
-                {(!agent).then(|| kv("col.status", state_status(p.state)))}
-                {kv("pcb.how", ui::text(t(if agent { "pcb.via.agent" } else { "pcb.via.ssh" }).to_string()))}
-                // with rynas-agent its status above already says a backup runs
-                {(p.receiving && !agent).then(|| kv("bkpc.receiving", ui::status(Tone::Info, t("bkpc.receiving").to_string())))}
-                {if agent {
-                    let last = p.last_received_ms;
-                    view! { {move || (!ctl.paired.get()).then(|| kv("bk.last", ui::text(when(last))))} }.into_any()
-                } else {
-                    kv("bk.last", ui::text(when(p.last_received_ms)))
-                }}
-                {kv("bk.col.snapshots", ui::text(i18n::count(u64::from(p.snapshots))))}
-                {(p.incomplete > 0).then(|| kv("bk.incomplete", ui::text(i18n::count(u64::from(p.incomplete)))))}
-                {kv("bk.col.folder", ui::breakable(&p.path, "mono"))}
-                {free.map(|f| kv("bkpc.free", ui::text(f)))}
-                {kv("bk.col.space", ui::text(usage))}
-                {kv("bk.f.rules", ui::text(rules_text(&p)))}
-                {last_prune.filter(|_| nas).map(|l| kv("bkpc.last_prune", ui::text(l)))}
-                {kv("bkpc.alert", ui::text(alert))}
-                {p.key_fingerprint.clone().map(|fp| kv("bk.key", ui::breakable(&fp, "mono small")))}
-                {p.adopted.then(|| kv("bk.adopted", ui::text(t("bk.adopted_yes").to_string())))}
-            </dl>
-            {form_error(measure_err)}
-            <div class="sec-actions">
-                {agent.then(|| ctl.buttons())}
-                <button class="btn ghost sm" disabled=move || measuring.get() on:click=measure>{spinner(measuring)}<Icon icon=icons::DATABASE size=14 />{tr("bk.measure")}</button>
-                {nas.then(|| view! { <button class="btn ghost sm" disabled=move || working.get() on:click=prune><Icon icon=icons::TRASH_2 size=14 />{tr("bkpc.prune")}</button> })}
-                <button class="btn ghost sm" on:click=move |_| pcs.edit.set(Some((p_edit.clone(), ctl.detail.data.with_untracked(|d| d.as_ref().map(|d| d.device.clone())))))><Icon icon=icons::SETTINGS size=14 />{tr("bk.settings")}</button>
-                <button class="btn danger sm" on:click=move |_| { error.set(None); ask.set(true); }><Icon icon=icons::TRASH_2 size=14 />{tr("bk.remove")}</button>
-            </div>
+            {check}
+            {snapshots}
             {agent.then(|| ctl.history())}
-            // set up first (the steps and the first-backup check), then what the snapshots
-            // are good for: the restore on an empty disk
-            {steps}
-            {bare}
-            <h3 class="mini-title">{tr("bk.snapshots")}</h3>
-            {if snap_rows.is_empty() {
-                view! { <p class="small muted">{tr("bk.no_snapshots")}</p> }.into_any()
-            } else {
-                view! {
-                    {segmented("bkpc.view", VIEWS, by_run.into(), Callback::new(move |v| by_run.set(v)))}
-                    <p class="small muted">{if d.sizes_from_quota { t("bkpc.sizes_quota") } else { t("bkpc.sizes_note") }}</p>
-                    {(!d.sizes_from_quota).then(|| view! {
-                        <div class="sec-actions">
-                            <button class="btn ghost sm" disabled=move || working.get() on:click=sizes>{spinner(working)}<Icon icon=icons::DATABASE size=14 />{tr("bkpc.sizes")}</button>
-                        </div>
-                    })}
-                    {form_error(work_err)}
-                    <div hidden=move || by_run.get() != "subvolume">
-                        {ui::table("bk-snaps", &["bk.col.snapshot", "bk.col.received", "snap.col.size", "col.status", ""], snap_rows)}
-                    </div>
-                    <div hidden=move || by_run.get() != "run">
-                        {ui::table("bk-runs", &["bkpc.view.run", "bk.col.subvolume", "snap.col.size", "col.status"], run_rows)}
-                    </div>
-                }
-                .into_any()
-            }}
+            <div class="pcb-folds">
+                {restore}
+                {folder}
+                {steps}
+            </div>
         }
         .into_any()
     };
@@ -1456,14 +1705,32 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
         }
         n
     });
+    let settings = move |_| {
+        if let Some(target) = detail.data.with_untracked(|d| d.as_ref().map(|d| d.target.clone())) {
+            pcs.edit.set(Some((target, ctl.detail.data.with_untracked(|a| a.as_ref().map(|a| a.device.clone())))));
+        }
+    };
+    // "<pc> — <description>"
+    let title = Signal::derive(move || {
+        let dev = dev.get_value();
+        detail.data.with(|d| match d.as_ref().map(|d| d.target.description.as_str()) {
+            Some(desc) if !desc.is_empty() => format!("{dev} — {desc}"),
+            _ => dev,
+        })
+    });
     let body = view! { {move || detail.view(8, content)} }.into_any();
-    let foot = view! { <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("close")}</button> }.into_any();
+    let foot = view! {
+        <button type="button" class="btn danger foot-start" on:click=move |_| { error.set(None); ask.set(true); }><Icon icon=icons::TRASH_2 size=16 />{tr("bk.remove")}</button>
+        <button type="button" class="btn ghost" disabled=move || detail.data.with(Option::is_none) on:click=settings><Icon icon=icons::SETTINGS size=16 />{tr("bk.settings")}</button>
+        <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("close")}</button>
+    }
+    .into_any();
     view! {
-        <div class="wide-drawer">{ui::drawer(Signal::stored(device.clone()), close, body, foot)}</div>
+        <div class="wide-drawer">{ui::drawer(title, close, body, foot)}</div>
         {ctl.confirm()}
         {move || ask.get().then(|| ui::confirm(Confirm { busy, error, ..Confirm::new(tf("bk.remove_title", &[("device", &dev.get_value())]), t("bk.remove_text").to_string(), "bk.remove", true, remove, Callback::new(move |_| ask.set(false))) }))}
         {move || browse.get().map(|s| browse_drawer(pcs, dev.get_value(), s, Callback::new(move |_| browse.set(None))))}
-        {move || del.get().map(|n| ui::confirm(Confirm { busy: del_busy, error: del_err, ..Confirm::new(tf("bkpc.delete_snap_title", &[("name", &n)]), t("bkpc.delete_snap_text").to_string(), "bkpc.delete_snap", true, delete_snap, Callback::new(move |_| del.set(None))) }))}
+        {move || del.get().map(|n| ui::confirm(Confirm { busy: del_busy, error: del_err, ..Confirm::new(tf("bkpc.delete_snap_title", &[("name", &snapshot_label(&n))]), t("bkpc.delete_snap_text").to_string(), "bkpc.delete_snap", true, delete_snap, Callback::new(move |_| del.set(None))) }))}
     }
     .into_any()
 }
@@ -1539,7 +1806,7 @@ fn browse_drawer(pcs: Pcs, device: String, snapshot: String, close: Callback<()>
     }
     .into_any();
     let foot = view! { <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("close")}</button> }.into_any();
-    let title = Signal::stored(tf("snap.browse_title", &[("id", &snapshot)]));
+    let title = Signal::stored(tf("snap.browse_title", &[("id", &snapshot_label(&snapshot))]));
     view! { <div class="wide-drawer">{ui::drawer(title, close, body, foot)}</div> }.into_any()
 }
 
@@ -1634,4 +1901,20 @@ fn copy_dialog(pcs: Pcs, base: (String, String), rel: String, close: Callback<()
     }
     .into_any();
     ui::dialog(DlgKind::Normal, Signal::stored(t("bkpc.copy").to_string()), close, body, Some(foot))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn btrbk_names_are_read() {
+        let s = |n| snapshot_stamp(n).map(|s| (s.prefix, s.date, s.hm, s.n));
+        assert_eq!(s("@data.20261112"), Some(("@data", [2026, 11, 12], None, None)));
+        assert_eq!(s("@.20261113T1543"), Some(("@", [2026, 11, 13], Some((15, 43)), None)));
+        assert_eq!(s("@home.20261113T154301+0100_2"), Some(("@home", [2026, 11, 13], Some((15, 43)), Some("2"))));
+        assert_eq!(s("x.20261110T0300"), Some(("x", [2026, 11, 10], Some((3, 0)), None)));
+        assert_eq!(s("not-a-snapshot"), None);
+        assert_eq!(s("@data.2026111"), None);
+    }
 }

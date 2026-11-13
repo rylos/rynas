@@ -263,6 +263,11 @@ pub enum PcIssueCode {
     ReceiveStuck,
     /// The volume has less free space than one more full set of the PC's snapshots.
     LowSpace,
+    /// The PC's folder is a shared folder, a user's home or an apps' data folder, lies
+    /// inside one or holds one (`subject`: the share's name, or the home's or apps' folder),
+    /// made before rynas refused it: that place is read-only in the file manager until the
+    /// PC's backups move to a folder of their own.
+    SharedFolder,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

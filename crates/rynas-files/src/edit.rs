@@ -45,7 +45,8 @@ pub fn body(req: &Request) -> Result<Vec<u8>, ApiError> {
     String::from_utf8(text).map(String::into_bytes).map_err(|_| ApiError::bad_request("UTF-8"))
 }
 
-pub fn open(out: &mut impl Write, path: &Path) -> Result<(), ApiError> {
+/// `read_only`: the file's share takes no writes (`writable: false` whatever the kernel says).
+pub fn open(out: &mut impl Write, path: &Path, read_only: bool) -> Result<(), ApiError> {
     let mut file = crate::confine::open(path)?;
     let meta = file.metadata()?;
     if !meta.is_file() {
@@ -57,7 +58,7 @@ pub fn open(out: &mut impl Write, path: &Path) -> Result<(), ApiError> {
     let mut bytes = Vec::with_capacity(meta.len() as usize);
     Read::by_ref(&mut file).take(MAX).read_to_end(&mut bytes)?;
     let text = as_text(bytes)?;
-    let writable = nix_access(path);
+    let writable = !read_only && nix_access(path);
     reply(out, &json!({ "text": text, "stamp": stamp(&meta), "writable": writable }))
 }
 

@@ -18,16 +18,31 @@ export function h(html) {
 }
 
 // ---- toasts ----
+// the toasts on screen without a button, by kind and text: the same one again only
+// stays longer, it never piles up (a refused paste pressed five times)
+const shown = new Map();
+
 export function toast(message, { kind = "info", action, onAction, timeout = 4200 } = {}) {
+  const key = `${kind}\n${message}`;
+  const same = !action && shown.get(key);
+  if (same) {
+    clearTimeout(same.timer);
+    same.timer = setTimeout(same.close, timeout);
+    return same.close;
+  }
   const icon = kind === "error" ? "alert" : kind === "ok" ? "check" : "info";
   const el = h(`<div class="toast ${kind}">${svg(icon)}<span class="msg">${esc(message)}</span>${action ? `<button>${esc(action)}</button>` : ""}</div>`);
   $("#toasts").append(el);
-  const close = () => el.remove();
+  const close = () => {
+    el.remove();
+    if (shown.get(key)?.close === close) shown.delete(key);
+  };
   if (action) el.querySelector("button").onclick = () => {
     close();
     onAction?.();
   };
-  setTimeout(close, timeout);
+  const timer = setTimeout(close, timeout);
+  if (!action) shown.set(key, { close, timer });
   return close;
 }
 

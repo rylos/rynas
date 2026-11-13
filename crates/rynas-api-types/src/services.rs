@@ -1004,7 +1004,7 @@ pub struct ShareWarningArgs {
     pub path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub volume: Option<String>,
-    /// SMB option name.
+    /// SMB option name; the PC's name for `pc_backup_folder`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
 }
@@ -1059,6 +1059,10 @@ pub enum ShareWarningCode {
     /// The encrypted folder is locked: SMB and NFS clients cannot connect and apps using
     /// `path` see an empty, read-only folder until it is unlocked.
     CryptLocked,
+    /// The share's folder holds, is, or lies inside the backup folder of the PC `key` at
+    /// `path` (made before rynas refused it): the share is read-only in the file manager for
+    /// administrators until the PC's backups move to a folder of their own.
+    PcBackupFolder,
     #[serde(other)]
     Other,
 }

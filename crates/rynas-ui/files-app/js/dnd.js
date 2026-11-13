@@ -8,6 +8,7 @@ import { $, openMenu } from "./ui.js";
 import { upload, fromDataTransfer } from "./uploads.js";
 import { connected } from "./host.js";
 import { changed as appChanged } from "./appdata.js";
+import { atBackups, backupsToast } from "./backups.js";
 
 const shareOf = (path) => path.split("/").filter(Boolean)[0] || "";
 
@@ -55,6 +56,7 @@ export const dndMethods = {
         this.transfer(op, paths, d);
       } else if (ev.dataTransfer.types.includes("Files")) {
         if (archiveOf(d)) return readOnlyToast();
+        if (atBackups(d)) return backupsToast();
         const items = await fromDataTransfer(ev.dataTransfer);
         upload(d, items, () => {
           this.refreshFolders([d]);
@@ -75,12 +77,14 @@ export const dndMethods = {
   },
 
   dropMenu(ev, paths, dest) {
+    // out of a backup (or into one, refused anyway by transfer) nothing moves: it is copied
+    const fixed = atBackups(dest) || paths.some(atBackups);
     openMenu(ev.clientX, ev.clientY, [
       { title: baseName(dest) },
       { label: t("Copia qui"), icon: "copy", action: () => this.transfer("copy", paths, dest) },
-      { label: t("Sposta qui"), icon: "move", action: () => this.transfer("move", paths, dest) },
+      !fixed && { label: t("Sposta qui"), icon: "move", action: () => this.transfer("move", paths, dest) },
       { label: t("Copia qui con verifica"), icon: "shield", action: () => this.transfer("copy", paths, dest, true) },
-      { label: t("Sposta qui con verifica"), icon: "shield", action: () => this.transfer("move", paths, dest, true) },
+      !fixed && { label: t("Sposta qui con verifica"), icon: "shield", action: () => this.transfer("move", paths, dest, true) },
       "-",
       { label: t("Annulla"), icon: "close" },
     ]);

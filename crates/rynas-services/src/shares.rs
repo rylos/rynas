@@ -126,6 +126,10 @@ pub fn warning_text(w: &ShareWarning) -> String {
         ShareWarningCode::NoPermissionsRootOnly => format!(
             "no permissions and {path} belongs to root with no access for others: nobody but root can use this share; give users or groups access in its permissions"
         ),
+        ShareWarningCode::PcBackupFolder => format!(
+            "this folder overlaps {path}, the backup folder of the PC {}: the share is read-only in the file manager until the PC's backups move to a folder of their own",
+            a.key.as_deref().unwrap_or("")
+        ),
         ShareWarningCode::AllDenied => {
             "every entry denies access: nobody can use this share".into()
         }

@@ -90,6 +90,17 @@ pub struct Spec {
     /// written before it: that worker reads only, as it did
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub write_roots: Vec<PathBuf>,
+    /// folders whose copies stay as private as their originals (a PC's backup: keys, the
+    /// system's secrets): a file or folder copied out of them never gets more mode bits than
+    /// its source had, whatever the umask or the destination's default ACL would give
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub private_roots: Vec<PathBuf>,
+    /// the PCs' backup folders the job never writes in, whatever path leads there
+    /// (`crate::confine::set_guard`): set by the manager each time an administrator's job
+    /// starts (`Hooks::pc_roots`, so a retried or journaled job never runs with an old list);
+    /// `None` for anyone else
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pc_roots: Option<Vec<crate::confine::PcRoot>>,
 }
 
 impl Spec {
@@ -241,6 +252,8 @@ mod tests {
             roots: Vec::new(),
             app_roots: Vec::new(),
             write_roots: Vec::new(),
+            private_roots: Vec::new(),
+            pc_roots: None,
         };
         let clean = spec.without_secrets();
         let text = serde_json::to_string(&clean).unwrap();

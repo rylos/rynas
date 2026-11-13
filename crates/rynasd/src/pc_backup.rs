@@ -2169,7 +2169,7 @@ impl PcBackup {
             .sum::<Option<u64>>()
             .filter(|&b| b > 0);
         let alert_hours = alert_hours(t.alert_hours, t.alert_days);
-        let issues = if present {
+        let mut issues = if present {
             issues(&HealthFacts {
                 list: &s.list,
                 expected: &expected,
@@ -2182,6 +2182,15 @@ impl PcBackup {
         } else {
             Vec::new()
         };
+        // a folder that overlaps a shared folder (made before rynas refused it): said, never
+        // left silent; the file manager keeps that share read-only for administrators
+        // the same with a user's home or the apps' data (the homes folder or Docker moved
+        // over it since): asked anew at every look, so a settings change shows at once
+        let folder = [(device.to_string(), t.path.clone())];
+        let others = self.host.home_dirs().into_iter().chain(self.app_dirs()).map(|d| (d.clone(), d));
+        for (share, _) in overlapping_shares(&folder, &self.shares().into_iter().chain(others).collect::<Vec<_>>()) {
+            issues.push(PcIssue { code: PcIssueCode::SharedFolder, subject: Some(share), since_ms: None, free_bytes: None, needed_bytes: None });
+        }
         let state = match (present, s.last_received_ms) {
             (false, _) => ReceiveState::Missing,
             (true, None) => ReceiveState::Waiting,
@@ -2333,7 +2342,8 @@ impl PcBackup {
         for i in &v.issues {
             let subject = i.subject.clone().unwrap_or_default();
             let (k, c, sev, title, body) = match i.code {
-                PcIssueCode::Late => continue,
+                // said on the PC and on the share, no notification of its own
+                PcIssueCode::Late | PcIssueCode::SharedFolder => continue,
                 PcIssueCode::SubvolumeLate => (
                     format!("subvol:{subject}"),
                     "pcbackup.subvolume_late",
@@ -2414,12 +2424,17 @@ impl PcBackup {
 impl PcBackup {
     /// The folders of the shares in the applied configuration (none when unreadable).
     fn share_paths(&self) -> Vec<String> {
+        self.shares().into_iter().map(|(_, p)| p).collect()
+    }
+
+    /// The shares of the applied configuration: (name, folder), none when unreadable.
+    fn shares(&self) -> Vec<(String, String)> {
         self.ops
             .config
             .applied(rynas_services::SHARES_KEY)
             .ok()
             .and_then(|v| crate::services::from_value::<rynas_api_types::SharesConfig>(v).ok())
-            .map(|d| d.shares.into_iter().map(|s| s.path).filter(|p| !p.is_empty()).collect())
+            .map(|d| d.shares.into_iter().filter(|s| !s.path.is_empty()).map(|s| (s.name, s.path)).collect())
             .unwrap_or_default()
     }
 
@@ -2459,15 +2474,55 @@ impl PcBackup {
             )
             .field("device"));
         }
-        let clash = reg.targets.iter().find(|(_, t)| {
-            t.path == path
-                || path.starts_with(&format!("{}/", t.path))
-                || t.path.starts_with(&format!("{path}/"))
-        });
-        if let Some((d, _)) = clash {
+        let others: Vec<(String, String)> = reg.targets.iter().map(|(d, t)| (d.clone(), t.path.clone())).collect();
+        drop(reg);
+        // canonical paths: two PCs never share a place, a link between them included
+        let real = canonical(path);
+        if let Some((d, _)) = others.iter().find(|(_, p)| overlaps(&real, &canonical(p))) {
             return Err(Error::invalid("path", format!("overlaps the folder of {d}")));
         }
+        // a PC's folder never shares its place with a shared folder (the file manager shows
+        // a backup read-only, a share writable: one folder cannot be both)
+        if let Some(m) = share_overlap(path, &self.share_paths()) {
+            return Err(Error::invalid("path", m));
+        }
+        // nor with a user's home or the apps' data (both written by others than rynas)
+        if let Some(h) = self.host.home_dirs().into_iter().find(|h| overlaps(&real, &canonical(h))) {
+            return Err(Error::invalid("path", format!("{h} is a user's home: a PC's backups need a folder of their own, outside every home")));
+        }
+        if let Some(d) = self.app_dirs().into_iter().find(|d| overlaps(&real, &canonical(d))) {
+            return Err(Error::invalid("path", format!("{d} holds the apps' data: a PC's backups need a folder of their own")));
+        }
         Ok(())
+    }
+
+    /// Why a copy out of a snapshot may not land in `dest`: it is, lies in or holds a PC's
+    /// folder (canonical paths: a link changes nothing), or lies in a share that overlaps one.
+    fn copy_out_refusal(&self, dest: &str) -> Option<String> {
+        let real = canonical(dest);
+        let folders = self.snapshot_folders();
+        if let Some((d, _)) = folders.iter().find(|(_, p)| overlaps(&real, &canonical(p))) {
+            return Some(format!("{dest} overlaps the backups of {d}: choose a folder outside every PC's backups"));
+        }
+        let shares = self.shares();
+        overlapping_shares(&folders, &shares).into_iter().find_map(|(name, _)| {
+            let (_, sp) = shares.iter().find(|(n, _)| *n == name)?;
+            within(&real, &canonical(sp)).then(|| format!("the shared folder {name} is read-only: it overlaps a PC's backups"))
+        })
+    }
+
+    /// The folders of the apps' data (the Docker stacks folder, the app data folder of every
+    /// place), when Docker is set up.
+    fn app_dirs(&self) -> Vec<String> {
+        let Some(docker) = self.ops.docker.get() else { return Vec::new() };
+        let mut out = Vec::new();
+        if let Some(layout) = docker.layout() {
+            out.push(rynas_docker::under(&docker.root, &layout.stacks()).to_string_lossy().into_owned());
+        }
+        for (_, dir) in crate::places::host_places() {
+            out.push(rynas_docker::under(&docker.root, &format!("{dir}/docker/appdata")).to_string_lossy().into_owned());
+        }
+        out
     }
 
     /// The folders of every device (the sudoers lines).
@@ -2579,9 +2634,89 @@ fn within(p: &str, base: &str) -> bool {
     p == base || p.starts_with(&format!("{base}/"))
 }
 
+/// Why a PC's backup folder cannot be at `path`: it is a shared folder, lies inside one, or
+/// holds one (`shares`: the shares' folders). A backup is read-only in the file manager and
+/// a share is not; the PC's folder needs a place of its own.
+pub fn share_overlap(path: &str, shares: &[String]) -> Option<String> {
+    let real = canonical(path);
+    let share = shares.iter().find(|s| overlaps(&real, &canonical(s)))?;
+    let share = share.trim_end_matches('/');
+    let path = path.trim_end_matches('/');
+    let (rp, rs) = (real.as_str(), canonical(share));
+    Some(if rp == rs {
+        format!("{share} is a shared folder: a PC's backups need a folder of their own, outside every shared folder")
+    } else if within(rp, &rs) {
+        format!("{path} lies inside the shared folder {share}: a PC's backups need a folder of their own, outside every shared folder")
+    } else {
+        format!("the shared folder {share} lies inside {path}: a PC's backups need a folder of their own, outside every shared folder")
+    })
+}
+
+/// The shares whose folder overlaps a PC's backup folder (a backup made inside a share
+/// before rynas refused it, or a share made over a backup): (share name, PC). Shown as a
+/// problem of the PC and as a warning on the share; the file manager keeps such a share
+/// read-only for administrators.
+pub fn overlapping_shares(folders: &[(String, String)], shares: &[(String, String)]) -> Vec<(String, String)> {
+    let folders: Vec<(&String, String)> = folders.iter().map(|(d, p)| (d, canonical(p))).collect();
+    let mut out = Vec::new();
+    for (name, spath) in shares {
+        if spath.trim_end_matches('/').is_empty() {
+            continue;
+        }
+        let spath = canonical(spath);
+        if let Some((device, _)) = folders.iter().find(|(_, p)| overlaps(p, &spath)) {
+            out.push((name.clone(), (*device).clone()));
+        }
+    }
+    out
+}
+
+/// Refuses to apply a shares value (`new`, however it was staged: an edit, a restored
+/// revision, an imported archive) that puts a share over, inside or above a PC's backup
+/// folder. A share already applied as it is stays (an install from before this rule: said
+/// on the PC and the share, read-only in the file manager).
+pub fn shares_guard(ops: &Ops, new: Option<&serde_json::Value>) -> Res<()> {
+    let (Some(pc), Some(new)) = (ops.pc_backup.get(), new) else { return Ok(()) };
+    let pairs = |v: &serde_json::Value| -> Vec<(String, String)> {
+        crate::services::from_value::<rynas_api_types::SharesConfig>(Some(v.clone()))
+            .map(|d| d.shares.into_iter().map(|s| (s.name, s.path)).collect())
+            .unwrap_or_default()
+    };
+    let applied = ops.config.applied(rynas_services::SHARES_KEY).ok().flatten().map(|v| pairs(&v)).unwrap_or_default();
+    let changed: Vec<(String, String)> = pairs(new).into_iter().filter(|p| !applied.contains(p)).collect();
+    let folders = pc.snapshot_folders();
+    match overlapping_shares(&folders, &changed).first() {
+        Some((name, device)) => Err(Error::invalid(
+            "path",
+            format!("share {name} overlaps the backup folder of the PC {device}: a shared folder cannot hold a PC's backups nor lie inside them"),
+        )),
+        None => Ok(()),
+    }
+}
+
+/// A path as the system resolves it: the real path of its deepest part that exists (links
+/// followed), the rest as given; without a trailing `/`. Overlaps are judged on these, so a
+/// link never hides one.
+pub fn canonical(path: &str) -> String {
+    let p = Path::new(path.trim_end_matches('/'));
+    for a in p.ancestors() {
+        if let Ok(real) = std::fs::canonicalize(a) {
+            let rest = p.strip_prefix(a).unwrap_or(Path::new(""));
+            let full = if rest.as_os_str().is_empty() { real } else { real.join(rest) };
+            return full.to_string_lossy().trim_end_matches('/').to_string();
+        }
+    }
+    path.trim_end_matches('/').to_string()
+}
+
+/// Whether one of two canonical paths is, or lies inside, the other.
+fn overlaps(a: &str, b: &str) -> bool {
+    !a.is_empty() && !b.is_empty() && (within(a, b) || within(b, a))
+}
+
 /// Why an existing folder cannot be adopted: adopting makes the folder itself
-/// `root:rynas-pcbackup 0750`, so a share's folder (or one holding shares), a user's home (or
-/// one holding homes) and system folders are refused.
+/// `root:rynas-pcbackup 0750`, so a share's folder, one inside a share or one holding shares
+/// ([`share_overlap`]), a user's home (or one holding homes) and system folders are refused.
 pub fn adopt_refusal(path: &str, shares: &[String], homes: &[String]) -> Option<String> {
     if let Err(m) = receive::valid_path(path) {
         return Some(m);
@@ -2591,8 +2726,8 @@ pub fn adopt_refusal(path: &str, shares: &[String], homes: &[String]) -> Option<
             return Some(format!("{sys} is a system folder"));
         }
     }
-    if let Some(sh) = shares.iter().find(|s| within(s, path)) {
-        return Some(format!("{sh} is a shared folder: choose a folder inside it"));
+    if let Some(m) = share_overlap(path, shares) {
+        return Some(m);
     }
     if let Some(h) = homes.iter().find(|h| within(h, path)) {
         return Some(format!("{h} is a user's home"));
@@ -3158,6 +3293,12 @@ impl PcBackup {
     /// Every folder: (device, description).
     pub fn target_names(&self) -> Vec<(String, String)> {
         self.reg.lock().unwrap().targets.iter().map(|(d, t)| (d.clone(), t.description.clone())).collect()
+    }
+
+    /// Every folder of received snapshots: (device, path). Read from the registry only (no
+    /// disk access): the file manager shows them to administrators (`@backups/<device>`).
+    pub fn snapshot_folders(&self) -> Vec<(String, String)> {
+        self.reg.lock().unwrap().targets.iter().map(|(d, t)| (d.clone(), t.path.clone())).collect()
     }
 
     /// A restore's view of the folder of `device`: every snapshot with its state and size,
@@ -3838,8 +3979,10 @@ async fn copy_out_post(
     }
     let dest = req.destination.trim().to_string();
     valid_dest(&dest).map_err(|m| Error::invalid("destination", m))?;
-    if dest == t.path || dest.starts_with(&format!("{}/", t.path)) {
-        return Err(Error::invalid("destination", "a folder outside the device's backups"));
+    // never in or above any PC's folder (their staging folders included), whatever path
+    // leads there, nor in a share that overlaps one (read-only in the file manager)
+    if let Some(m) = s.copy_out_refusal(&dest) {
+        return Err(Error::invalid("destination", m));
     }
     let s2 = s.clone();
     let who2 = who.clone();
@@ -4060,6 +4203,31 @@ mod tests {
         // the btrfs root offers the system volume's folder (D-ROOTVOL)
         assert_eq!(btrfs_mounts(mi), ["/srv/data", "/volume1", "/srv/rynas/system"]);
         assert_eq!(btrfs_mounts("1 0 0:1 / / rw - ext4 /dev/sda2 rw\n"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn pc_folders_and_shares_never_overlap() {
+        let shares = vec!["/volume1/Documents".to_string(), "/volume1/media/".to_string()];
+        // a share's folder, one inside a share, one holding a share: refused, naming the share
+        for (path, share) in [("/volume1/Documents", "/volume1/Documents"), ("/volume1/Documents/pc-backups/laptop", "/volume1/Documents"), ("/volume1", "/volume1/Documents"), ("/volume1/media/x", "/volume1/media")] {
+            let m = share_overlap(path, &shares).unwrap_or_else(|| panic!("{path}"));
+            assert!(m.contains(share), "{m}");
+            assert!(adopt_refusal(path, &shares, &[]).is_some(), "{path}");
+        }
+        // beside them, and a sibling with a longer name
+        for path in ["/volume1/pc-backups/laptop", "/volume1/Documents2/pc", "/volume2/x"] {
+            assert!(share_overlap(path, &shares).is_none(), "{path}");
+            assert!(adopt_refusal(path, &shares, &[]).is_none(), "{path}");
+        }
+        // existing installs: which shares overlap which PC folders
+        let folders = vec![("laptop".to_string(), "/volume1/Documents/pc-backups/laptop".to_string()), ("desk".to_string(), "/volume2/pc/desk".to_string())];
+        let named = vec![
+            ("Documents".to_string(), "/volume1/Documents".to_string()),
+            ("Desk".to_string(), "/volume2/pc/desk/@.20261113T1543".to_string()),
+            ("Media".to_string(), "/volume1/media".to_string()),
+            ("Empty".to_string(), String::new()),
+        ];
+        assert_eq!(overlapping_shares(&folders, &named), [("Documents".to_string(), "laptop".to_string()), ("Desk".to_string(), "desk".to_string())]);
     }
 
     fn entry(group: &str, at_s: i64, done: bool) -> Entry {

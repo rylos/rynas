@@ -17,11 +17,12 @@ import { moveFolderIcons } from "./iconpick.js";
 import { mount } from "./host.js";
 import { serverAddress } from "./conns.js";
 import { changed as appChanged } from "./appdata.js";
+import { isReadOnly, readOnlyHere, atBackups, backupsToast, isBackupTop, isWholeBackup } from "./backups.js";
 
 export const actionMethods = {
-  /** A text file the editor opens: not in an archive, 8 MB at most. */
+  /** A text file the editor opens: not in an archive nor a read-only folder, 8 MB at most. */
   editable(pane, entry) {
-    return !pane.archive && entry.kind === "f" && entry.size <= 8 * 1024 * 1024 && previewKind(entry) === "text";
+    return !isReadOnly(pane) && entry.kind === "f" && entry.size <= 8 * 1024 * 1024 && previewKind(entry) === "text";
   },
 
   async edit(pane, entry) {
@@ -42,6 +43,8 @@ export const actionMethods = {
   },
 
   analyseSpace(path) {
+    // a PC's whole backup is never analysed (the server refuses it too)
+    if (isBackupTop(path)) return;
     spaceAnalysis(path, (p) => this.pane.go(p));
   },
 
@@ -61,6 +64,8 @@ export const actionMethods = {
 
   download(entries) {
     if (!entries.length) return;
+    // a PC's whole backup or whole snapshot is not zipped from here
+    if (entries.some((e) => isDirLike(e) && isWholeBackup(e.path))) return;
     // out of an archive only single files: the rest is extracted
     if (archiveOf(entries[0].path) && (entries.length > 1 || isDirLike(entries[0]))) return toast(t("Dentro un archivio si scaricano solo file singoli: per il resto usa «Copia in…»"), { kind: "error" });
     const a = document.createElement("a");
@@ -73,7 +78,7 @@ export const actionMethods = {
   },
 
   compress(pane) {
-    if (pane.archive) return readOnlyToast();
+    if (isReadOnly(pane)) return readOnlyHere(pane);
     const list = pane.targets().filter((e) => !e.share);
     if (!list.length || pane.path === "/") return;
     const base = list.length === 1 ? (isDirLike(list[0]) ? list[0].name : archiveStem(list[0].name)) : baseName(pane.path) || t("Archivio");
@@ -164,7 +169,7 @@ export const actionMethods = {
   },
 
   setClipboard(op, pane) {
-    if (op === "cut" && pane.archive) return readOnlyToast();
+    if (op === "cut" && isReadOnly(pane)) return readOnlyHere(pane);
     // snapshots stay where they are: cutting one copies nothing away
     const list = pane.targets().filter((e) => !e.share && !(op === "cut" && (e.readonly || isProtectedFolder(e) || pane.writable === false)));
     if (!list.length) return;
@@ -187,6 +192,8 @@ export const actionMethods = {
   transfer(op, paths, dest, verify = false) {
     if (!paths.length || !dest || dest === "/") return;
     if (archiveOf(dest)) return readOnlyToast();
+    // a backup takes nothing in and gives nothing away: its files are copied out
+    if (atBackups(dest) || (op === "move" && paths.some(atBackups))) return backupsToast();
     const from = archiveOf(paths[0]);
     if (from) {
       // out of an archive: those items are extracted, never moved
@@ -199,6 +206,8 @@ export const actionMethods = {
   },
 
   async copyTo(pane, op, verify = false) {
+    // nothing moves out of an archive or a backup (F6, Shift+F6): said at once, as for Cut
+    if (op === "move" && isReadOnly(pane)) return readOnlyHere(pane);
     const list = pane.targets().filter((e) => !e.share);
     if (!list.length) return;
     const other = this.other();
@@ -213,12 +222,13 @@ export const actionMethods = {
   toOtherPane(op, verify = false) {
     const other = this.other();
     if (!other) return toast(t("Apri il doppio pannello con F3"));
+    if (op === "move" && isReadOnly(this.pane)) return readOnlyHere(this.pane);
     const list = this.pane.targets().filter((e) => !e.share);
     if (list.length) this.transfer(op, list.map((e) => e.path), other.path, verify);
   },
 
   async remove(pane, permanent = false) {
-    if (pane.archive) return readOnlyToast();
+    if (isReadOnly(pane)) return readOnlyHere(pane);
     // a recycle bin is emptied, not thrown away (Canc on it does nothing)
     const list = pane.targets().filter((e) => !e.share && e.full === undefined && !e.readonly && !isProtectedFolder(e));
     if (!list.length || pane.writable === false) return;
@@ -261,7 +271,7 @@ export const actionMethods = {
   },
 
   async renamePrompt(pane, e) {
-    if (pane.archive) return readOnlyToast();
+    if (isReadOnly(pane)) return readOnlyHere(pane);
     if (e.readonly || isProtectedFolder(e) || pane.writable === false) return;
     const name = await promptBox({
       title: t("Rinomina"),
@@ -289,7 +299,7 @@ export const actionMethods = {
 
   async newFolder(pane = this.pane) {
     if (pane.path === "/") return;
-    if (pane.archive) return readOnlyToast();
+    if (isReadOnly(pane)) return readOnlyHere(pane);
     const name = await promptBox({ title: t("Nuova cartella"), label: t("Nome"), value: t("Nuova cartella"), icon: "folderPlus", ok: t("Crea"), validate: (v) => (!v.trim() || v.includes("/") ? t("Nome non valido") : null) });
     if (!name) return;
     try {
@@ -303,7 +313,8 @@ export const actionMethods = {
   },
 
   async computeSizes(pane, entries) {
-    const dirs = entries.filter(isDirLike);
+    // a PC's whole backup or whole snapshot is not summed up from here
+    const dirs = entries.filter((e) => isDirLike(e) && !isWholeBackup(e.path));
     if (!dirs.length) return;
     toast(t("Calcolo delle dimensioni…"), { timeout: 1500 });
     const queue = [...dirs];
@@ -342,7 +353,7 @@ export const actionMethods = {
 
   pickUpload(kind, pane = this.pane) {
     if (pane.path === "/") return toast(t("Apri prima una cartella condivisa"));
-    if (pane.archive) return readOnlyToast();
+    if (isReadOnly(pane)) return readOnlyHere(pane);
     this.uploadDest = pane.path;
     $(kind === "folder" ? "#upload-folder" : "#upload-files").click();
   },
