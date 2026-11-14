@@ -812,6 +812,22 @@ fn migrated_at_boot(dns_answers: bool) -> T {
 }
 
 #[test]
+fn rollback_timer_firing_early_waits_for_the_deadline() {
+    let t = networkd_box();
+    t.e.stage("admin", "lan1", &st("192.0.2.30/24", Some("192.0.2.254")))
+        .unwrap();
+    let plan =
+        t.e.plan_apply("admin", "admin", "", ip("198.51.100.20"), None, false)
+            .unwrap();
+    t.e.begin(&plan, Some(&new_token()), None, &log).unwrap();
+    // the clock stepped at boot: the timer fires 6 s before the deadline
+    t.os.sleep(Duration::from_secs(114));
+    let r = t.e.rollback(reason::TIMEOUT, &log).unwrap().expect("rolled back");
+    assert_eq!(r.reason, reason::TIMEOUT);
+    assert!(t.e.trial().unwrap().is_none());
+}
+
+#[test]
 fn migration_at_boot_writes_resolv_conf_and_is_kept() {
     let t = migrated_at_boot(true);
     assert!(t.e.rollback(reason::BOOT_CHECK, &log).unwrap().is_none());

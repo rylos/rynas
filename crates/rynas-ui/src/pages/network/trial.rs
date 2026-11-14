@@ -268,7 +268,7 @@ impl Trial {
                     net.reload();
                 }
                 Err(e) if e.status() == 409 && e.code() == rynas_api_types::error_codes::CONFLICT => {
-                    self.error.set(Some(t("net.confirm_conflict").to_string()))
+                    self.error.set(Some(t(if self.expired(net) { "net.confirm_late" } else { "net.confirm_conflict" }).to_string()))
                 }
                 Err(e) if e.code() == rynas_api_types::error_codes::INVALID_VALUE => self.error.set(Some(t("net.confirm_token").to_string())),
                 Err(e) => self.error.set(Some(e.text())),
@@ -287,11 +287,18 @@ impl Trial {
             match r {
                 Ok(_) => net.reload(),
                 Err(e) if e.status() == 409 && e.code() == rynas_api_types::error_codes::CONFLICT => {
-                    self.error.set(Some(t("net.confirm_conflict").to_string()))
+                    self.error.set(Some(t(if self.expired(net) { "net.confirm_late" } else { "net.confirm_conflict" }).to_string()))
                 }
                 Err(e) => self.error.set(Some(e.text())),
             }
         });
+    }
+
+    /// The trial's deadline has passed by the server's clock: no confirmation is accepted now,
+    /// whatever the address.
+    fn expired(self, net: Net) -> bool {
+        let deadline = net.state.data.with_untracked(|s| s.as_ref().and_then(|s| s.trial.as_ref()).map_or(0, |t| t.deadline_ms));
+        deadline > 0 && js_sys::Date::now() + self.skew.get_untracked() > deadline as f64
     }
 
     fn rollback(self, net: Net) {

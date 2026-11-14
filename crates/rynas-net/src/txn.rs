@@ -249,6 +249,8 @@ pub struct Engine {
 
 /// Inventory reads served from memory for this long (guidelines S8).
 pub const INVENTORY_TTL: Duration = Duration::from_secs(2);
+/// How early a rollback timer may fire and still count as the current trial's, not a leftover.
+const EARLY_TIMER_MS: u64 = 60_000;
 
 impl Engine {
     pub fn new(os: Arc<dyn NetOs>, paths: NetPaths) -> Self {
@@ -2336,9 +2338,16 @@ impl Engine {
         };
         let now = self.os.now_ms();
         if (why == reason::TIMEOUT || why == reason::BOOT_CHECK) && now + 5_000 < m.deadline_ms {
-            // a timer left over from an older trial
-            log("the trial's deadline is not reached yet: nothing to do");
-            return Ok(None);
+            let left = m.deadline_ms - now;
+            if left > EARLY_TIMER_MS {
+                // a timer left over from an older trial
+                log("the trial's deadline is not reached yet: nothing to do");
+                return Ok(None);
+            }
+            // the timer counts monotonic time, the deadline is wall-clock: after a clock step at
+            // boot (NTP) the timer fires seconds early and nothing arms it again
+            log(&format!("the timer fired {left} ms before the deadline: waiting"));
+            self.os.sleep(Duration::from_millis(left));
         }
         let target = self.store.revision(m.revision)?.unwrap_or_default();
         // only the timer keeps a migration done at boot; an administrator who asks for the
