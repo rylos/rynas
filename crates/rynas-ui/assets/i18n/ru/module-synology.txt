@@ -1,0 +1,204 @@
+# rynas: Russian translation, Synology module. One key<TAB>text line per entry; see docs/i18n.md
+nt.src.synodeb	Базовая система
+nev.synodeb.unit_failed.title	Сбой службы: {unit}
+nev.synodeb.smart_error.title	SMART {device}: {failtype}
+nev.synodeb.smart_error.title_2	Предупреждение SMART для {device}
+nev.synodeb.smart_error.failtype.health	состояние здоровья неудовлетворительное
+nev.synodeb.smart_error.failtype.failedhealthcheck	не удалось выполнить проверку состояния
+nev.synodeb.smart_error.failtype.currentpendingsector	секторы ожидают переназначения
+nev.synodeb.smart_error.failtype.offlineuncorrectablesector	неисправимые секторы
+nev.synodeb.smart_error.failtype.failedreadsmartdata	не удаётся прочитать данные SMART
+nev.synodeb.smart_error.failtype.emailtest	тестовое сообщение
+nev.synodeb.smart_error.failtype.errorcount	новые ошибки в журнале ошибок
+nev.synodeb.smart_error.failtype.selftest	самотестирование не пройдено
+nev.synodeb.smart_error.failtype.failedopendevice	не удаётся открыть устройство
+nev.synodeb.smart_error.failtype.usage	атрибут использования за пределами нормы
+nev.synodeb.raid_event.title	RAID {array}: {event} ({device})
+nev.synodeb.raid_event.title_2	RAID {array}: {event}
+nev.synodeb.raid_event.event.fail	сбой устройства
+nev.synodeb.raid_event.event.failspare	сбой резервного устройства
+nev.synodeb.raid_event.event.degradedarray	массив деградирован
+nev.synodeb.raid_event.event.devicedisappeared	массив пропал
+nev.synodeb.raid_event.event.sparesmissing	отсутствуют резервные устройства
+nev.synodeb.raid_event.event.movespare	резервное устройство перемещено в другой массив
+nev.synodeb.raid_event.event.spareactive	резервное устройство задействовано
+nev.synodeb.raid_event.event.rebuildfinished	восстановление массива завершено
+nev.synodeb.raid_event.event.rebuildstarted	начато восстановление массива
+nev.synodeb.raid_event.event.testmessage	тестовое сообщение
+nev.synodeb.raid_event.event.newarray	обнаружен новый массив
+nev.synodeb.boot_completed.title	Загрузка завершена после некорректного завершения предыдущей загрузки ({previous_boot})
+nev.synodeb.boot_completed.title_2	Загрузка завершена
+nev.synodeb.boot_completed.body	Ядро {kernel}. Адреса: {addresses}. Системный том: {root}. Сброс сторожевым таймером: {watchdog}.
+nev.synodeb.boot_completed.body_2	Ядро {kernel}. Адреса: {addresses}. Системный том: {root}.
+nev.synodeb.boot_completed.body_3	Ядро {kernel}. Системный том: {root}.
+nev.synodeb.boot_completed.root.ok	исправен
+nev.synodeb.boot_completed.root.degraded	деградирован
+nev.synodeb.boot_completed.root.resync_started	начата ресинхронизация
+nev.synodeb.boot_completed.root.resync_failed	ошибка ресинхронизации
+nev.synodeb.emergency_mode.title	Аварийный режим
+nev.synodeb.emergency_mode.body	Загрузка остановилась в аварийном режиме ({failed}). SSH доступен по адресам {addresses}: войдите, устраните причину (journalctl -xb), затем выполните «sudo systemctl default» или перезагрузите систему. Если учётная запись root заблокирована, systemd повторяет загрузку каждые несколько минут; иначе NAS перезагрузится сам через 10 минут, если не будет входа по SSH.
+nev.synodeb.emergency_mode.body_2	Загрузка остановилась в аварийном режиме (причина неизвестна). SSH доступен по адресам {addresses}: войдите, устраните причину (journalctl -xb), затем выполните «sudo systemctl default» или перезагрузите систему. Если учётная запись root заблокирована, systemd повторяет загрузку каждые несколько минут; иначе NAS перезагрузится сам через 10 минут, если не будет входа по SSH.
+nev.synodeb.emergency_mode.body_3	Загрузка остановилась в аварийном режиме, и ни один сетевой адрес не активен. Устраните причину с консоли (journalctl -xb), затем выполните «sudo systemctl default» или перезагрузите систему.
+nev.synodeb.fan_failure.title	Сбой вентилятора
+nev.synodeb.fan_failure.body	Вентиляторы остановились или не считываются: {fans}.
+nev.synodeb.fan_failure.body_2	Аппаратный контроллер сообщает о сбое: {fan}.
+nev.synodeb.fan_failure.fan.fan	системный вентилятор
+nev.synodeb.fan_failure.fan.cpu_fan	вентилятор CPU
+nev.synodeb.fans_ok.title	Вентиляторы снова работают нормально
+nev.synodeb.thermal_shutdown.title	Отключение при перегреве
+nev.synodeb.thermal_shutdown.body	NAS выключается для защиты оборудования: {reason}.
+nev.synodeb.shutdown.title	Выключение: {button}
+nev.synodeb.shutdown.title_2	Выключение
+nev.synodeb.shutdown.body	Команда: {command}
+nev.synodeb.shutdown.button.power_button	кнопка питания
+nev.synodeb.dom_update_failed.title	Не удалось обновить загрузочный модуль
+nev.synodeb.dom_default_debian.title	DEBIAN снова загрузочная запись по умолчанию
+nev.synodeb.dom_default_debian.body	Резервная запись DEBIAN_OLD больше не содержит ядра: загружается DEBIAN ({kernel}), резервного ядра нет.
+nev.synodeb.kernel_not_tried.title	Новое ядро не опробовано
+nev.synodeb.kernel_not_tried.body	DEBIAN ({kernel}) обновлена, но загрузочной записью по умолчанию остаётся резервная DEBIAN_OLD, поэтому новое ядро не загружается. Чтобы опробовать его: synodeb-dom default debian && reboot
+nev.synodeb.kernel_boot_failed.title	Не удалось загрузить новое ядро
+nev.synodeb.kernel_boot_failed.body	Загрузочный модуль вернулся к DEBIAN_OLD ({running}), и она остаётся записью по умолчанию: новые ядра устанавливаются в DEBIAN, но не загружаются, пока не выполнена команда: synodeb-dom default debian
+nev.synodeb.ups_safe_mode.title	ИБП: безопасный режим
+nev.synodeb.ups_safe_mode.body	Причина: {reason}, заряд батареи {battery}%, время работы {runtime} с. Службы остановлены, тома отключены; NAS перезагрузится при восстановлении питания.
+nev.synodeb.ups_safe_mode.body_2	Причина: {reason}. Службы остановлены, тома отключены; NAS перезагрузится при восстановлении питания.
+nev.synodeb.ups_safe_mode.body_3	Службы остановлены, тома отключены; NAS перезагрузится при восстановлении питания.
+nev.synodeb.ups_safe_mode.reason.lowbatt	низкий заряд батареи
+nev.synodeb.ups_safe_mode.reason.nocomm	нет связи с ИБП
+nev.synodeb.ups_safe_mode.reason.waittimeup	достигнуто максимальное время работы от батареи
+nev.synodeb.ups_safe_mode.reason.fsd	ИБП запросил принудительное выключение
+nev.synodeb.ups_power_restored_reboot.title	ИБП: питание восстановлено
+nev.synodeb.ups_power_restored_reboot.body	Выход из безопасного режима с перезагрузкой.
+nev.synodeb.ups_power_restored.title	ИБП: питание восстановлено
+nev.synodeb.ups_power_restored.body	Заряд батареи {battery}%.
+nev.synodeb.ups_on_battery.title	ИБП работает от батареи
+nev.synodeb.ups_on_battery.body	Заряд батареи {battery}%, время работы {runtime} с.
+nev.synodeb.ups_on_battery.body_2	Заряд батареи {battery}%.
+nev.synodeb.ups_battery_low.title	ИБП: низкий заряд батареи
+nev.synodeb.ups_battery_low.body	Заряд батареи {battery}%, время работы {runtime} с: переход в безопасный режим.
+nev.synodeb.ups_battery_low.body_2	Переход в безопасный режим.
+nev.synodeb.ups_unreachable.title	ИБП недоступен
+nev.synodeb.ups_unreachable.body	Нет связи с {ups} не менее {minutes} мин.
+cfg.key.synology.hw	Настройки оборудования
+syn.tab	Synology
+syn.not_running	synohwd не запущен: состояние неактуально, звуковые сигналы и идентификация недоступны. Настройки по-прежнему можно сохранить; при их применении synohwd перезапускается.
+syn.foreign	В /etc/synohwd.toml есть команды кнопок, которыми rynas не управляет ({cmds}): при применении этих настроек они будут заменены.
+syn.platform	Отсеков: {bays} · вентиляторов: {fans}
+syn.settings	Настройки
+syn.daemon	synohwd
+syn.running	Выполняется
+syn.stopped	Не запущен
+syn.fan_mode	Режим скорости вентиляторов
+syn.fan_low	Тихий
+syn.fan_high	Охлаждение
+syn.fan_full	Полная скорость
+syn.fan_low_help	По умолчанию: вентиляторы следуют температурным кривым и работают тихо.
+syn.fan_high_help	Пороги ниже: вентиляторы ускоряются раньше, и диски работают холоднее.
+syn.fan_full_help	Вентиляторы всегда работают на 99%.
+syn.full_note	У полной скорости нет кривой: вентиляторы работают на 99%. Пороги отключения остаются такими же, как в тихом режиме.
+syn.fan_ok	OK
+syn.fan_stopped	Остановлен
+syn.fan_unknown	Не измерено
+syn.curve	Кривая вентиляторов
+syn.curve_duty	Текущая скорость
+syn.curve_preview	Предпросмотр выбранного режима (ещё не применён).
+syn.cls_disk	Диски
+syn.cls_nvme	NVMe
+syn.cls_cpu	CPU
+syn.cls_nic	Сетевая карта
+syn.fan_period	Регулировать каждые (с)
+syn.fan_period_help	Интервал между двумя регулировками вентиляторов в секундах (5–300).
+syn.fan_min_duty	Минимальная скорость (%)
+syn.fan_min_duty_help	Нижняя граница под кривыми (0–99).
+syn.hysteresis	Гистерезис (°C)
+syn.hysteresis_help	На сколько датчик должен остыть ниже ступени, прежде чем вентиляторы замедлятся (0–20).
+syn.thermal	Отключение при перегреве
+syn.thermal_on	Выключать при перегреве
+syn.thermal_help	synohwd выключает NAS после двух показаний датчика на уровне порога отключения или выше.
+syn.thermal_off	Отключение при перегреве выключено: при сбое вентилятора диски, накопители NVMe и CPU могут перегреться и выйти из строя.
+syn.sensor	Датчик
+syn.now_limit	Сейчас / отключение при
+syn.leds_beeper	Индикаторы и зуммер
+syn.disk_leds	Индикаторы дисков
+syn.disk_leds_help	Зелёный, когда диск установлен, мигает при активности.
+syn.brightness	Яркость индикаторов
+syn.brightness_help	Общая для индикаторов дисков; применяется вместе с другими настройками.
+syn.ledsch	Расписание яркости передних индикаторов
+syn.ledsch_on	Менять яркость по часам
+syn.ledsch_on_help	Если выключено, передние индикаторы всегда горят с обычной яркостью.
+syn.ledsch_normal	Обычная
+syn.ledsch_reduced	Пониженная
+syn.ledsch_off	Выкл.
+syn.ledsch_grid	Уровень передних индикаторов по часам
+syn.ledsch_level	Пониженный уровень
+syn.ledsch_level_help	{lo} — самый тусклый, {normal} — обычный уровень. «Выкл.» в сетке выключает все передние индикаторы.
+syn.ledsch_now	Передние индикаторы сейчас
+syn.ledsch_now_value	{mode}, уровень {level}
+syn.ledsch_scope	Эта микросхема управляет всеми передними индикаторами; яркость индикаторов дисков (выше) применяется поверх: если обе низкие, индикаторы дисков становятся ещё тусклее.
+syn.ledsch_import	Импорт из DSM
+syn.ledsch_import_text	Расписание или строки synoinfo.conf
+syn.ledsch_import_help	Вставьте расписание из 168 символов или строки synoinfo.conf, экспортированного из DSM, с led_brightness_schedule и, если есть, led_brightness_adjusted_level.
+syn.ledsch_found_schedule	Расписание: {summary}
+syn.ledsch_found_level	Пониженный уровень: {level}
+syn.ledsch_level_outside	Пониженный уровень {level} вне диапазона {lo}–{hi} для этой модели: не применён.
+syn.ledsch_err_len	Символов в расписании: {n}, а должно быть ровно 168.
+syn.ledsch_err_char	Недопустимое расписание: символ {pos} — «{ch}», допускаются только 0, 1 и 2.
+syn.ledsch_level_unreadable	Пониженный уровень «{value}» не является числом: не применён.
+syn.ledsch_err_none	Ничего не распознано: вставьте расписание из 168 символов или строку led_brightness_schedule.
+syn.ledsch_apply	Применить к форме
+syn.beep_start	Звуковой сигнал после запуска NAS
+syn.beep_error	Звуковой сигнал при аппаратных ошибках
+syn.beep_error_help	Сбой вентилятора и отключение при перегреве.
+syn.beep_sent	Звуковой сигнал отправлен
+syn.mute	Отключить сигнал тревоги
+syn.mute_help	Сигналы synohwd однократные; отключение звука подтверждает открытые аппаратные уведомления, чтобы напоминания по ним прекратились.
+syn.muted	Сигнал тревоги отключён, подтверждено уведомлений: {n}
+syn.buttons	Кнопки
+syn.power_button	Кнопка питания
+syn.power_button_help	Корректное выключение останавливает задачи и службы по порядку.
+syn.pb_poweroff	Корректно выключить
+syn.btn_log	Только записать в события
+syn.btn_ignore	Игнорировать
+syn.rb_rescue	Восстановление сети (двойное нажатие)
+syn.rescue_help	Нажмите кнопку сброса дважды в течение 10 секунд: сеть вернётся к DHCP с безопасным брандмауэром, и NAS снова станет доступен после ошибочной сетевой настройки. Одиночное нажатие ничего не делает.
+syn.rescue_off	Без восстановления сети NAS с ошибочной сетевой настройкой доступен только через монитор или последовательную консоль.
+syn.power	Питание и диски
+syn.standby	Режим ожидания дисков через (минуты)
+syn.standby_help	Время простоя до остановки дисков в отсеках; 0 — никогда (0–330).
+syn.ac_recovery	Перезапуск после сбоя питания
+syn.ac_recovery_help	Автоматически включаться при восстановлении электропитания.
+syn.wol	Wake-on-LAN
+syn.wol_help	Запуск NAS по magic-пакету через любой порт LAN.
+syn.macs	MAC-адреса для Wake-on-LAN
+syn.no_macs	Порты Ethernet не найдены.
+syn.unsaved	Несохранённые настройки оборудования
+syn.ups_none	Служба ИБП работает, но не сообщает ни об одном ИБП. Подключите ИБП по USB и настройте его в разделе «Настройка ИБП» ниже (synodeb применит настройки).
+syn.ups_down	На порту NUT этого NAS (127.0.0.1:3493) никто не отвечает. Настройте ИБП в разделе «Настройка ИБП» ниже (synodeb применит настройки).
+syn.ups_lb_always	Безопасный режим всегда включается, когда ИБП сообщает о низком заряде батареи (LB) или о критическом состоянии (работа от батареи при низком заряде), в зависимости от того, что наступит раньше. Таймер ниже лишь добавляет более ранний триггер.
+syn.ups_timer	Переходить в безопасный режим после работы от батареи в течение заданного времени
+syn.ups_timer_help	Службы останавливаются, тома отключаются, диски останавливаются; NAS перезапускается после восстановления питания.
+syn.ups_pre_timeout_help	Перед безопасным режимом rynas и другие обработчики завершают работу в течение этого времени (от 10 до 900 с).
+syn.ups_test_lb	Во время проверки низкий заряд батареи всё равно включает безопасный режим.
+syn.ups_deep_text	ИБП работает от батареи почти до полной разрядки, что может занять час. Если батарея достигнет низкого заряда (LB), NAS перейдёт в безопасный режим: запускайте проверку, только когда рядом есть кто-то, кто сможет её остановить.
+syn.upsw_too_old	Эта версия synodeb пока не умеет настраивать другие драйверы ИБП: обновите synodeb, чтобы пользоваться мастером настройки.
+syn.upsw_find_text	Подключите ИБП к этому NAS. Обнаружение выводит список ИБП на USB и по очереди пробует подходящие драйверы NUT, пока один из них не прочитает состояние ИБП; затем synodeb настраивает NUT с выбранным драйвером. Для ИБП с последовательным или сетевым подключением укажите драйвер вручную.
+syn.upsw_commands	synodeb настраивает NUT командами:
+syn.upsn_too_old	В этой версии synodeb ещё нет сетевого сервера ИБП: обновите synodeb до 4.6 или новее, чтобы настроить его здесь.
+syn.upsn_listen	Все адреса NAS (выбор synodeb)
+syn.upsn_allow_help	Один IP-адрес или подсеть на строку (192.168.1.20, 192.168.1.0/24, fd00::/64), не менее одной. Брандмауэр synodeb (собственная таблица nftables) пропускает к порту 3493 только эти узлы.
+syn.upsn_filter	Брандмауэр synodeb
+syn.upsn_filter_inactive	Брандмауэр synodeb для порта 3493 не активен: ограничение разрешённых узлов не действует. Сохраните настройки ещё раз или посмотрите журнал synodeb-ups.
+syn.upsn_unreadable	Не удаётся прочитать состояние сетевого сервера ИБП synodeb (команда synodeb-ups netserver status завершилась с ошибкой или ответила в неизвестном формате): обновите rynas или посмотрите журнал.
+syn.upsn_primary	В synodeb также есть учётная запись {name} (upsmon primary), которую другие NAS Synology ожидают в качестве клиентов ИБП. Задайте её пароль на этом NAS командой `synodeb-ups passwd`.
+syn.upsn_manual	Разрешённые узлы берутся из NETWORK_CLIENTS в /etc/synodeb/ups.conf (заданы вручную). При сохранении здесь создаётся /etc/synodeb/ups-network.conf, который затем имеет приоритет.
+syn.upsn_outside	В synodeb есть учётные записи, заданные вне rynas ({names}): при следующем сохранении здесь они будут удалены.
+syn.upsn_role_monitor_help	Для умного дома и панелей мониторинга: не может входить в систему и выполнять команды. Для чтения значений с разрешённого узла пароль не нужен.
+syn.upsn_user_help	Начинается с a-z, далее a-z, 0-9 и _, не более 32 символов (не monuser и не admin).
+syn.upsn_user_bad	Используйте от 1 до 32 символов: первая — буква a-z, далее a-z, 0-9 и _ (monuser и admin принадлежат synodeb).
+syn.upsn_commands	synodeb применяет это командами:
+syn.reset_on	Восстанавливает сеть
+syn.reset_off	Не восстанавливает сеть
+syn.reset_pending_on	Будет восстанавливать сеть после применения
+syn.reset_pending_off	Перестанет восстанавливать сеть после применения
+syn.reset_text	Нажмите дважды в течение 10 секунд: DHCP и link-local на всех портах, прежние настройки сохраняются как ревизия.
+syn.reset_owner	Задаётся в разделе «Оборудование › Synology».
+syn.reset_owner_link	Открыть «Оборудование»
