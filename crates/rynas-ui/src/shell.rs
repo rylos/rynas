@@ -158,10 +158,15 @@ fn Shell() -> impl IntoView {
     let location = use_location();
     let query = use_query_map();
     pages::files::bridge();
-    // close the drawer after navigating
+    let main = NodeRef::<leptos::html::Main>::new();
+    // close the drawer after navigating; .main scrolls, not the window, so a new page starts
+    // at the top only this way
     Effect::new(move || {
         location.pathname.track();
         ui.drawer_open.set(false);
+        if let Some(m) = main.get_untracked() {
+            m.set_scroll_top(0);
+        }
     });
     // the file manager in a window of its own (`/files…?window`): no bars around it
     let bare = move || location.pathname.with(|p| p == "/files" || p.starts_with("/files/")) && query.with(|q| q.get("window").is_some());
@@ -194,7 +199,7 @@ fn Shell() -> impl IntoView {
             <AppBar />
             <Sidebar />
             <div class="scrim" on:click=move |_| ui.drawer_open.set(false)></div>
-            <main id="main" class="main" tabindex="-1">
+            <main id="main" class="main" tabindex="-1" node_ref=main>
                 <Routes fallback=|| view! { <pages::NotFound /> }>
                     <Route path=path!("/") view=pages::dashboard::Dashboard />
                     <Route path=path!("/storage") view=pages::storage::Storage />
