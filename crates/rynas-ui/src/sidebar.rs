@@ -425,6 +425,8 @@ pub struct NavLayout {
     /// A save is on its way; `again`: the board changed meanwhile, send it after.
     in_flight: StoredValue<bool>,
     again: StoredValue<bool>,
+    /// The layout when the editing started: what Cancel puts back.
+    before: StoredValue<Option<SidebarLayout>>,
 }
 
 thread_local! {
@@ -505,6 +507,7 @@ impl NavLayout {
             epoch: StoredValue::new(0),
             in_flight: StoredValue::new(false),
             again: StoredValue::new(false),
+            before: StoredValue::new(None),
         };
         let _ = window_event_listener(leptos::ev::pagehide, |_| flush_keepalive());
         nav
@@ -558,6 +561,9 @@ impl NavLayout {
     pub fn start_editing(self) {
         if !self.loaded.get_untracked() {
             return;
+        }
+        if !self.editing.get_untracked() {
+            self.before.set_value(Some(self.board.with_untracked(|b| b.layout.clone())));
         }
         self.editing.set(true);
         request_animation_frame(|| {
@@ -664,9 +670,25 @@ impl NavLayout {
         self.save_now();
     }
 
+    /// Ends the editing mode putting back the layout it started from (saved again when the
+    /// editing changed it, Reset included).
+    pub fn cancel(self) {
+        if let Some(before) = self.before.get_value()
+            && self.loaded.get_untracked()
+            && self.board.with_untracked(|b| b.layout != before)
+        {
+            let container = self.container();
+            let back = before.clone();
+            reorder::flip(container, "data-nav", None, move || self.board.set(Board::new(back)));
+            set_pending(Some(before));
+        }
+        self.done();
+    }
+
     /// Ends the editing mode, saving a change still pending; the focus goes back to the
     /// Customize button.
     pub fn done(self) {
+        self.before.set_value(None);
         self.editing.set(false);
         self.generation.update_value(|g| *g += 1);
         self.save_now();
@@ -977,10 +999,13 @@ pub fn EditBar() -> impl IntoView {
                 <Icon icon=icons::PIN size=16 />
                 <span class="btn-label">{tr("nav.pin_page")}</span>
             </button>
+            <button type="button" class="btn ghost" on:click=move |_| nav.reset_ask.set(true)>
+                <Icon icon=icons::ROTATE_CCW size=16 />
+                <span class="btn-label">{tr("reset")}</span>
+            </button>
             <div class="nav-edit-actions">
-                <button type="button" class="btn ghost" on:click=move |_| nav.reset_ask.set(true)>
-                    <Icon icon=icons::ROTATE_CCW size=16 />
-                    <span class="btn-label">{tr("reset")}</span>
+                <button type="button" class="btn" on:click=move |_| nav.cancel()>
+                    {tr("cancel")}
                 </button>
                 <button type="button" class="btn primary" on:click=move |_| nav.done()>
                     <Icon icon=icons::CHECK size=16 />{tr("dash.done")}
