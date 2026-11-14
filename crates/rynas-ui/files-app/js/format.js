@@ -51,8 +51,8 @@ export function setBinary(b) {
 /** Sizes in 1024ⁿ (KiB…) rather than 1000ⁿ (kB…). */
 export const isBinary = () => binary;
 
-const UNITS_BIN = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
-const UNITS_DEC = ["B", "kB", "MB", "GB", "TB", "PB"];
+const UNITS_BIN = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
+const UNITS_DEC = ["B", "kB", "MB", "GB", "TB", "PB", "EB"];
 
 /** Three significant digits (decided on the rounded value), like the core's sig3. */
 const sig3 = (v) => intl().nf[v < 9.995 ? 2 : v < 99.95 ? 1 : 0].format(v);
@@ -92,7 +92,7 @@ export function ezaDate(sec) {
   if (!sec) return "-";
   const d = new Date(sec * 1000);
   const recent = Math.abs(Date.now() - d) < 180 * 86400 * 1000;
-  return dateFormat(recent ? { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" } : { day: "numeric", month: "short", year: "numeric" }).format(d);
+  return dateFormat(recent ? { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" } : { day: "numeric", month: "short", year: "numeric" }).format(d);
 }
 
 /** Date and time with seconds: "13 nov 2026, 17:05:09" / "Nov 13, 2026, 5:05:09 PM". */

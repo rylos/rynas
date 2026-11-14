@@ -124,12 +124,12 @@ fn run_task(url: String, body: Option<String>, ok: String, busy: RwSignal<bool>,
         match r {
             Ok(task) if task.status == TaskStatus::Ok => {
                 toast(Tone::Ok, ok);
-                done.run(());
+                done.try_run(());
             }
             Ok(task) => {
                 let _ = error.try_set(Some(tasks::task_error(&task)));
                 toast(Tone::Err, tasks::task_error(&task));
-                done.run(());
+                done.try_run(());
             }
             Err(e) => {
                 let _ = error.try_set(Some(e.text()));

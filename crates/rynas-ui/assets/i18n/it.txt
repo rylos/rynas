@@ -738,7 +738,7 @@ upsw.nut_src_backports	dai backports di Debian configurati su questo sistema
 upsw.nut_src_rynas	la build di rynas del pacchetto NUT di Debian, scaricata dalla release di rynas se non è già su questo NAS
 upsw.update_nut	Aggiorna NUT alla {v}
 upsw.updating	apt installa i nuovi pacchetti di NUT; i tuoi file di configurazione di NUT restano.
-upsw.updated	NUT {v} è installato: rileva di nuovo l'UPS.
+upsw.updated	NUT {v} è installato: rileva di nuovo l'UPS
 upsw.driver_output	Output del driver
 upsw.no_usb	Nessun UPS trovato su USB. Controlla il cavo, oppure inserisci a mano un UPS seriale o di rete.
 upsw.none_answered	Nessun driver ha letto lo stato dell'UPS. Qui sotto le ultime righe di ogni driver: prova a mano un altro driver o altre opzioni.
@@ -1793,8 +1793,8 @@ shares.nocow_on_title	Senza copy-on-write per {name}?
 shares.nocow_off_title	Di nuovo copy-on-write per {name}?
 shares.nocow_on_text	I nuovi file di questa cartella verranno riscritti sul posto. Possibile solo finché la cartella è vuota.
 shares.nocow_off_text	I file creati da adesso in poi riavranno copy-on-write, checksum e compressione. I file già presenti restano senza copy-on-write finché non vengono copiati.
-shares.nocow_done_on	{name}: i nuovi file vengono scritti senza copy-on-write.
-shares.nocow_done_off	{name}: i nuovi file riavranno il copy-on-write.
+shares.nocow_done_on	{name}: i nuovi file vengono scritti senza copy-on-write
+shares.nocow_done_off	{name}: i nuovi file riavranno il copy-on-write
 shares.nocow_move	La cartella non è vuota? Sposta i file in una cartella nuova
 shares.nocow_move_1	Crea una nuova cartella condivisa con Senza copy-on-write attivo.
 shares.nocow_move_2	Ferma le app e i client che scrivono nella vecchia cartella.
@@ -3343,7 +3343,7 @@ upd.task_running	È in corso un'attività di aggiornamento.
 upd.removals_note	Installare tutto rimuoverebbe: {p}.
 upd.held	Trattenuti
 upd.lists_updated	Ultimo controllo
-upd.read_at	Letto alle
+upd.read_at	Letto il
 upd.install_all	Installa tutto
 upd.install_security	Installa aggiornamenti di sicurezza
 upd.install_selected	Installa selezionati ({n})

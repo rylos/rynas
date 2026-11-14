@@ -101,7 +101,7 @@ pub fn disk_usage(g: &BlockGraph, disk: &str) -> DiskUsage {
             fs_mps.push(mp);
         }
         let named = |fs: &str| match &x.label {
-            Some(l) => format!("{fs} \"{l}\""),
+            Some(l) => format!("{fs} “{l}”"),
             None => fs.to_string(),
         };
         // one entry per filesystem with its main mountpoint ("/" first, else the shortest),
@@ -511,7 +511,7 @@ mod tests {
         );
         assert!(
             sda.used_by
-                .contains(&"btrfs \"vol1\" on /vol1".to_string()),
+                .contains(&"btrfs “vol1” on /vol1".to_string()),
             "{:?}",
             sda.used_by
         );
@@ -550,8 +550,8 @@ mod tests {
         let g = BlockGraph::parse(&json).unwrap();
         let sda = disk_usage(&g, "sda");
         let sdb = disk_usage(&g, "sdb");
-        assert_eq!(sda.used_by, ["swap", "btrfs \"root\" on /", "vfat \"EFI\" on /boot/efi"]);
-        assert_eq!(sdb.used_by, ["swap", "btrfs \"root\" on /", "vfat \"EFI2\""]);
+        assert_eq!(sda.used_by, ["swap", "btrfs “root” on /", "vfat “EFI” on /boot/efi"]);
+        assert_eq!(sdb.used_by, ["swap", "btrfs “root” on /", "vfat “EFI2”"]);
         assert!(sda.in_use && sda.system);
         // the second member holds the root filesystem just as much
         assert!(sdb.in_use && sdb.system);

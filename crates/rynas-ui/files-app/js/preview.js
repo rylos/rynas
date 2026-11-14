@@ -113,7 +113,7 @@ export function quickLook(pane, onDownload) {
         if (files[index] !== e) return;
         if (r.binary) return nothing(e);
         const pre = h(`<pre></pre>`);
-        pre.textContent = r.text + (r.truncated ? `\n\n… ${t("(mostrati i primi 512 KB di {s})", { s: size(r.size) })}` : "");
+        pre.textContent = r.text + (r.truncated ? `\n\n… ${t("(mostrati i primi 512 KiB di {s})", { s: size(r.size) })}` : "");
         body.innerHTML = "";
         body.append(pre);
       } catch (err) {

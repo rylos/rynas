@@ -178,7 +178,7 @@ pub fn panel(header: RwSignal<Option<bool>>, to_btrfs: Callback<()>) -> AnyView 
         if o.settings.folder.is_empty() {
             return view! {
                 <EmptyState icon=icons::MONITOR title=Signal::derive(move || t("pca.setup").to_string()) text=Signal::derive(move || t("pca.setup_text").to_string())>
-                    <div class="sec-actions"><button class="btn primary" on:click=move |_| tab.settings.set(true)><Icon icon=icons::FOLDER size=16 />{tr("pca.choose_folder")}</button></div>
+                    <div class="sec-actions"><button class="btn" on:click=move |_| tab.settings.set(true)><Icon icon=icons::FOLDER size=16 />{tr("pca.choose_folder")}</button></div>
                 </EmptyState>
             }
             .into_any();

@@ -1139,7 +1139,7 @@ dict! { BLOB, LENS, IT;
     "upsw.nut_src_rynas" => "rynas's build of Debian's NUT package, downloaded from the rynas release if it is not already on this NAS", "la build di rynas del pacchetto NUT di Debian, scaricata dalla release di rynas se non è già su questo NAS";
     "upsw.update_nut" => "Update NUT to {v}", "Aggiorna NUT alla {v}";
     "upsw.updating" => "apt installs the new NUT packages; your NUT configuration files are kept.", "apt installa i nuovi pacchetti di NUT; i tuoi file di configurazione di NUT restano.";
-    "upsw.updated" => "NUT {v} is installed: detect the UPS again.", "NUT {v} è installato: rileva di nuovo l'UPS.";
+    "upsw.updated" => "NUT {v} is installed: detect the UPS again", "NUT {v} è installato: rileva di nuovo l'UPS";
     "upsw.driver_output" => "Driver output", "Output del driver";
     "upsw.no_usb" => "No UPS found on USB. Check the cable, or enter a serial or network UPS by hand.", "Nessun UPS trovato su USB. Controlla il cavo, oppure inserisci a mano un UPS seriale o di rete.";
     "upsw.none_answered" => "No driver read the UPS status. The last lines of each driver are below: try another driver or other options by hand.", "Nessun driver ha letto lo stato dell'UPS. Qui sotto le ultime righe di ogni driver: prova a mano un altro driver o altre opzioni.";
@@ -2212,8 +2212,8 @@ dict! { BLOB, LENS, IT;
     "shares.nocow_off_title" => "Copy-on-write again for {name}?", "Di nuovo copy-on-write per {name}?";
     "shares.nocow_on_text" => "New files in this folder will be rewritten in place. Possible only while the folder is empty.", "I nuovi file di questa cartella verranno riscritti sul posto. Possibile solo finché la cartella è vuota.";
     "shares.nocow_off_text" => "Files created from now on get copy-on-write, checksums and compression again. Files already in the folder stay without copy-on-write until they are copied.", "I file creati da adesso in poi riavranno copy-on-write, checksum e compressione. I file già presenti restano senza copy-on-write finché non vengono copiati.";
-    "shares.nocow_done_on" => "{name}: new files are written without copy-on-write.", "{name}: i nuovi file vengono scritti senza copy-on-write.";
-    "shares.nocow_done_off" => "{name}: new files get copy-on-write again.", "{name}: i nuovi file riavranno il copy-on-write.";
+    "shares.nocow_done_on" => "{name}: new files are written without copy-on-write", "{name}: i nuovi file vengono scritti senza copy-on-write";
+    "shares.nocow_done_off" => "{name}: new files get copy-on-write again", "{name}: i nuovi file riavranno il copy-on-write";
     "shares.nocow_move" => "Folder not empty? Move the files into a new folder", "La cartella non è vuota? Sposta i file in una cartella nuova";
     "shares.nocow_move_1" => "Create a new shared folder with No copy-on-write on.", "Crea una nuova cartella condivisa con Senza copy-on-write attivo.";
     "shares.nocow_move_2" => "Stop the apps and clients that write to the old folder.", "Ferma le app e i client che scrivono nella vecchia cartella.";
@@ -3774,7 +3774,7 @@ dict! { BLOB, LENS, IT;
     "upd.removals_note" => "Installing everything would remove: {p}.", "Installare tutto rimuoverebbe: {p}.";
     "upd.held" => "Kept back", "Trattenuti";
     "upd.lists_updated" => "Last checked", "Ultimo controllo";
-    "upd.read_at" => "Read at", "Letto alle";
+    "upd.read_at" => "Read on", "Letto il";
     "upd.install_all" => "Install all", "Installa tutto";
     "upd.install_security" => "Install security updates", "Installa aggiornamenti di sicurezza";
     "upd.install_selected" => "Install selected ({n})", "Installa selezionati ({n})";
@@ -5749,10 +5749,23 @@ fn locale_for(lang: Lang, tags: &[String]) -> String {
         .find(|t| {
             t.len() <= 35
                 && t.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-                && t.split_once('-').is_some_and(|(l, rest)| l.eq_ignore_ascii_case(lang.code()) && !rest.is_empty() && !rest.ends_with('-'))
+                && t.split_once('-').is_some_and(|(l, rest)| l.eq_ignore_ascii_case(lang.code()) && rest.split('-').all(valid_subtag))
         })
         .map(str::to_string)
         .unwrap_or_else(|| default_locale(lang).to_string())
+}
+
+/// A BCP 47 subtag `Intl` accepts after the language: region (`GB`, `419`), script
+/// (`Hans`) or variant (5–8 characters). `en-x` or `en-12` would make `Intl` throw.
+fn valid_subtag(s: &str) -> bool {
+    let alpha = s.chars().all(|c| c.is_ascii_alphabetic());
+    let digits = s.chars().all(|c| c.is_ascii_digit());
+    match s.len() {
+        2 | 4 => alpha,
+        3 => digits,
+        5..=8 => s.chars().all(|c| c.is_ascii_alphanumeric()),
+        _ => false,
+    }
 }
 
 /// The browser's language tags, most preferred first.
@@ -6052,7 +6065,9 @@ pub fn bitrate(bytes_per_s: u64) -> String {
     const U: [&str; 5] = ["bit/s", "kbit/s", "Mbit/s", "Gbit/s", "Tbit/s"];
     let mut v = bytes_per_s as f64 * 8.0;
     let mut i = 0;
-    while v >= 1000.0 && i < U.len() - 1 {
+    // 999.7 kbit/s would print as "1000 kbit/s": step up at what rounds to 1000, like `scaled`.
+    let step = |i: usize| if i == 0 { 1000.0 } else { 999.5 };
+    while v >= step(i) && i < U.len() - 1 {
         v /= 1000.0;
         i += 1;
     }
@@ -6165,6 +6180,9 @@ mod tests {
         assert_eq!(locale_for(Lang::It, &tags(&[])), "it-IT");
         // never a malformed tag
         assert_eq!(locale_for(Lang::En, &tags(&["en-", "en GB", "en-\"x"])), "en-US");
+        assert_eq!(locale_for(Lang::En, &tags(&["en-x", "en-1", "en-abc", "en-12", "en-GB-"])), "en-US");
+        assert_eq!(locale_for(Lang::En, &tags(&["en-419"])), "en-419");
+        assert_eq!(locale_for(Lang::En, &tags(&["en-Latn-GB"])), "en-Latn-GB");
         assert_eq!(HourCycle::from_code("h12"), HourCycle::H12);
         assert_eq!(HourCycle::from_code(""), HourCycle::Auto);
         assert_eq!(HourCycle::from_code(HourCycle::H23.code()), HourCycle::H23);

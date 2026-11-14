@@ -325,7 +325,7 @@ export default {
   "Apri in una nuova scheda del browser": "Open in a new browser tab",
   "Il browser non sa riprodurre questo formato.": "The browser cannot play this format.",
   "Nessuna anteprima per questo tipo di file": "No preview for this kind of file",
-  "(mostrati i primi 512 KB di {s})": "(first 512 KB of {s} shown)",
+  "(mostrati i primi 512 KiB di {s})": "(first 512 KiB of {s} shown)",
   "Aspetto": "Appearance",
   "Comportamento": "Behavior",
   "Scorciatoie": "Shortcuts",

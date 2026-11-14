@@ -196,11 +196,11 @@ pub fn run_and_report(start: impl std::future::Future<Output = Result<String, Ap
         match r {
             Ok(task) if task.status == TaskStatus::Ok => {
                 toast(Tone::Ok, ok);
-                done.run(());
+                done.try_run(());
             }
             Ok(task) => {
                 toast(Tone::Err, task_error(&task));
-                done.run(());
+                done.try_run(());
             }
             Err(e) => {
                 let _ = error.try_set(Some(e.text()));

@@ -11,7 +11,8 @@ import EN from "./lang/en.js";
 // "it-IT"…, from the language and the browser's own tags) and the time format
 // preference on <html data-hour-cycle> ("h23", "h12", absent = the locale's).
 // Without the shell: the same rule from the browser (rynas-ui i18n::locale_for).
-const TAG = /^[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})+$/;
+// Subtags Intl accepts: region (GB, 419), script (Hans), variant (5–8); "en-x" would throw.
+const TAG = /^[A-Za-z]{2,3}(-([A-Za-z]{2}|[0-9]{3}|[A-Za-z]{4}|[A-Za-z0-9]{5,8}))+$/;
 function localeFor(lang) {
   const tags = [...(navigator.languages || []), navigator.language || ""];
   return tags.find((t) => TAG.test(t) && t.split("-")[0].toLowerCase() === lang) || (lang === "it" ? "it-IT" : "en-US");
