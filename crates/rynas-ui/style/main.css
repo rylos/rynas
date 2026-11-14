@@ -491,7 +491,9 @@ kbd {
   margin-top: var(--s-2); padding-left: var(--s-3);
   color: var(--text-subtle); font-size: var(--fs-12); white-space: nowrap;
 }
-.about-text { overflow: hidden; text-overflow: ellipsis; }
+.about-text { display: flex; flex-direction: column; min-width: 0; line-height: 1.3; }
+/* version above, the author's name below and whole (on one line it was cut at "Marco Z…") */
+.about-text > span { overflow: hidden; text-overflow: ellipsis; }
 .app.collapsed .about-text { display: none; }
 .app.collapsed .sidebar-about { padding-left: var(--s-2); }
 .collapse-btn { width: 100%; margin-top: var(--s-2); color: var(--text-subtle); }
@@ -1431,6 +1433,10 @@ kbd {
 }
 @media (max-width: 1023px) {
   .app, .app.collapsed { grid-template-columns: minmax(0, 1fr); }
+  /* phones and tablets: the document scrolls again (the browser's address bar hides, pull to
+     refresh works); the bar stays on top as sticky, the drawer is fixed anyway */
+  .app { height: auto; min-height: 100dvh; grid-template-rows: var(--appbar-h) auto; }
+  .appbar { position: sticky; top: 0; }
   .only-drawer { display: grid; }
   .sidebar {
     position: fixed; top: var(--appbar-h); left: 0; bottom: 0; height: auto;
@@ -1443,14 +1449,14 @@ kbd {
   .app.nav-editing .sidebar { width: min(var(--sb-w-edit), calc(100vw - var(--s-8))); }
   .app.drawer-open .sidebar { transform: none; visibility: visible; transition: transform var(--t-med) var(--ease); }
   .app.collapsed .nav-label { opacity: 1; pointer-events: auto; }
-  .app.collapsed .about-text { display: inline; }
+  .app.collapsed .about-text { display: flex; }
   .app.collapsed .sidebar-about { padding-left: var(--s-3); }
   .app.collapsed .customize-btn { display: grid; }
   .collapse-btn { display: none; }
   .scrim { display: block; position: fixed; inset: var(--appbar-h) 0 0; z-index: 34; background: var(--scrim); opacity: 0; pointer-events: none; transition: opacity var(--t-med); }
   .app.drawer-open .scrim { opacity: 1; pointer-events: auto; }
   .dock, .app.collapsed .dock { left: 0; }
-  .main { padding: var(--s-4) var(--s-4) calc(var(--s-12) + var(--clear-dock)); }
+  .main { overflow: visible; padding: var(--s-4) var(--s-4) calc(var(--s-12) + var(--clear-dock)); }
   .search { width: auto; flex: 1; max-width: 360px; }
   /* tablet: the bar keeps icons only on the right (longer texts in Italian overflowed at 768 px) */
   .conn.live .conn-text, .user-name { display: none; }
@@ -2205,3 +2211,9 @@ body:has(.sysp-overlay), body:has(.sysp-overlay) .main { overflow: hidden; }
 .dd-history li:last-child { border-bottom: 0; }
 .dd-hrow { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
 /* shared folder list: deduplication on, a coloured label like the protocol ones */
+
+/* printing: the whole page, not the visible part of the scrolling main area */
+@media print {
+  .app { height: auto; display: block; }
+  .main { overflow: visible; }
+}

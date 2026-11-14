@@ -166,6 +166,14 @@ fn Shell() -> impl IntoView {
         ui.drawer_open.set(false);
         if let Some(m) = main.get_untracked() {
             m.set_scroll_top(0);
+            // keyboard scrolling (space, Page Down) goes to the page, not to the link clicked
+            // in the sidebar; under 1024 px the document scrolls, so it goes back up too
+            let o = web_sys::FocusOptions::new();
+            o.set_prevent_scroll(true);
+            let _ = m.focus_with_options(&o);
+        }
+        if let Some(w) = web_sys::window() {
+            w.scroll_to_with_x_and_y(0.0, 0.0);
         }
     });
     // the file manager in a window of its own (`/files…?window`): no bars around it
@@ -444,7 +452,10 @@ fn Sidebar() -> impl IntoView {
                 when=move || nav.editing.get()
                 fallback=move || view! {
                     <div class="sidebar-about">
-                        <span class="about-text">{concat!("rynas ", env!("CARGO_PKG_VERSION"), " · Marco Ziliani")}</span>
+                        <span class="about-text">
+                            <span>{concat!("rynas ", env!("CARGO_PKG_VERSION"))}</span>
+                            <span>"Marco Ziliani"</span>
+                        </span>
                         <span class="about-actions">
                             <button
                                 type="button"
