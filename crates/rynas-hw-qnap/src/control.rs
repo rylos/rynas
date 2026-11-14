@@ -339,10 +339,17 @@ impl Controller {
             }
         });
         let m = confirmed.model();
+        // the disks are in their bays from the start; their verdicts come with rynasd's first
+        // storage check (a minute after it starts, none while the inventory fails)
+        let found = crate::provider::disks_in_bays(root, m);
         let bays = m
             .bays
             .iter()
-            .map(|b| BayState { bay: b.bay, device: String::new(), health: HealthVerdict::Unknown })
+            .map(|b| BayState {
+                bay: b.bay,
+                device: found.iter().find(|(n, _)| *n == b.bay).map(|(_, d)| d.clone()).unwrap_or_default(),
+                health: HealthVerdict::Unknown,
+            })
             .collect();
         let mut wrong_direction = Vec::new();
         let mut led_lines = Vec::new();
@@ -1094,6 +1101,38 @@ pub mod tests {
         let f = c.status().features;
         assert!(f.iter().any(|f| f.id == "disk_leds" && f.reason == "not_fitted"));
         assert!(f.iter().any(|f| f.id == "usb_led" && f.reason == "not_fitted"));
+    }
+
+    /// On the HS-251 the BIOS leaves the copy button's line an output, and the case has no
+    /// such button (QNAP's specification lists power and reset only): it is reported as not
+    /// fitted, never `wrong_direction`, and the reset button still works.
+    #[test]
+    fn the_hs251_copy_line_left_an_output_is_not_a_wrong_direction() {
+        let gpio = fake_gpio();
+        let m = &MODELS[0];
+        gpio.set_direction(&chip_label(m.usb_copy_button), m.usb_copy_button.offset, Direction::Output);
+        gpio.set_direction(&chip_label(m.reset_button), m.reset_button.offset, Direction::Input);
+        let (c, ..) = ctl_for(&MODELS[0], &gpio, None);
+        let f = c.status().features;
+        let reason = |id: &str| f.iter().find(|x| x.id == id).map(|x| x.reason.clone());
+        assert_eq!(reason("usb_copy_button").as_deref(), Some("not_fitted"));
+        assert_eq!(reason("reset_button").as_deref(), Some(""));
+        assert!(f.iter().all(|x| x.reason != "wrong_direction"), "{f:?}");
+    }
+
+    /// rynasd's first storage check comes a minute after it starts (and none while the
+    /// inventory fails): the bays' disks are read from sysfs as soon as the controller exists.
+    #[test]
+    fn bays_know_their_disks_before_the_first_storage_check() {
+        let d = tempfile::tempdir().unwrap();
+        fake_hs251(d.path(), Some("f71869a"));
+        crate::model::testing::hs251_disks(d.path());
+        let gpio = fake_gpio();
+        let mut g = gpio.clone();
+        let c = confirm(d.path(), &MODELS[0], &mut g).unwrap();
+        let ctl = Controller::new(c, d.path(), Box::new(gpio), Arc::new(Rec::default()), Box::new(|_| {}), None, None);
+        let bays: Vec<_> = ctl.status().bays.iter().map(|b| (b.bay, b.device.clone())).collect();
+        assert_eq!(bays, vec![(1, "sdb".to_string()), (2, "sda".to_string())]);
     }
 
     #[test]

@@ -134,6 +134,16 @@ mod tests {
         assert_eq!(bay_of(d.path(), &MODELS[0], "sdc"), None);
     }
 
+    /// The real box: WD on `ata1` in bay 2 (right), Seagate on `ata2` in bay 1 (left), the
+    /// USB disk on no bay.
+    #[test]
+    fn bays_of_the_real_hs251() {
+        let d = tempfile::tempdir().unwrap();
+        crate::model::testing::hs251_disks(d.path());
+        assert_eq!(disks_in_bays(d.path(), &MODELS[0]), vec![(1, "sdb".to_string()), (2, "sda".to_string())]);
+        assert_eq!(bay_of(d.path(), &MODELS[0], "sdc"), None);
+    }
+
     #[test]
     fn provider_only_with_the_chip_confirmed() {
         let d = tempfile::tempdir().unwrap();

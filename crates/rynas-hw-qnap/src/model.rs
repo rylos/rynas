@@ -366,6 +366,26 @@ pub mod testing {
             w(root, "sys/class/hwmon/hwmon1/temp3_input", "39000\n");
         }
     }
+
+    /// The disks of the real HS-251 as read on the box on 2026-11-14 (Debian 13): the WD on
+    /// `ata1` (`host0`, `port_no` 1), the Seagate ST4000DM000 on `ata2` (`host1`, `port_no` 2),
+    /// a USB disk on the xHCI controller; `/sys/block/<disk>/device` resolves to these paths.
+    pub fn hs251_disks(root: &Path) {
+        let disks = [
+            ("sda", "0000:00:13.0/ata1/host0/target0:0:0/0:0:0:0"),
+            ("sdb", "0000:00:13.0/ata2/host1/target1:0:0/1:0:0:0"),
+            ("sdc", "0000:00:14.0/usb1/1-4/1-4:1.0/host2/target2:0:0/2:0:0:0"),
+        ];
+        for (name, dev) in disks {
+            let dev = root.join(format!("sys/devices/pci0000:00/{dev}"));
+            std::fs::create_dir_all(&dev).unwrap();
+            std::fs::create_dir_all(root.join(format!("sys/block/{name}"))).unwrap();
+            std::os::unix::fs::symlink(&dev, root.join(format!("sys/block/{name}/device"))).unwrap();
+        }
+        for n in [1, 2] {
+            w(root, &format!("sys/class/ata_port/ata{n}/port_no"), &format!("{n}\n"));
+        }
+    }
 }
 
 #[cfg(test)]
