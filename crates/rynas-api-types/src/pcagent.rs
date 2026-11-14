@@ -25,6 +25,59 @@ pub const MANIFEST_FORMAT: u32 = 1;
 /// rebuildable container storage. The agent skips them; an interface does not count them as
 /// left out ([`Manifest::unsent_mounts`]).
 pub const NOT_SENT_MOUNTS: &[&str] = &["/var/log", "/var/cache", "/var/tmp", "/tmp", "/swap", "/var/swap", "/var/lib/docker", "/var/lib/containers", "/srv/swap"];
+/// The folder of the agent's own snapshots, inside each snapshotted subvolume.
+pub const AGENT_SNAP_DIR: &str = ".rynas-snap";
+
+/// `rel` (a path from a top level or below a mount) holds the components `seq` in a row:
+/// `docker/btrfs` matches `var/lib/docker/btrfs/…` and `home/me/.local/share/docker/btrfs/…`.
+fn has_components(rel: &str, seq: &[&str]) -> bool {
+    // `@docker` (a subvolume of its own, mounted at /var/lib/docker) counts as `docker`
+    let c: Vec<&str> = rel.split('/').map(|x| x.trim_start_matches('@')).collect();
+    c.windows(seq.len()).any(|w| w == seq)
+}
+
+/// Container engines' storage, wherever it is (the system's and rootless engines' under a
+/// home: `~/.local/share/docker/btrfs`, `~/.local/share/containers/storage`), and Incus' and
+/// LXD's storage pools: layers and instances the engine manages, never PC data.
+pub fn container_storage(rel: &str) -> bool {
+    has_components(rel, &["docker", "btrfs"])
+        || has_components(rel, &["containers", "storage"])
+        || has_components(rel, &["incus", "storage-pools"])
+        || has_components(rel, &["lxd", "storage-pools"])
+}
+
+/// Subvolumes (a path from a top level or below a mount) never backed up: snapshot folders
+/// (snapper, btrbk, Timeshift, the agent's own) and container storage.
+pub fn excluded_subvolume(rel: &str) -> bool {
+    let last = rel.rsplit('/').next().unwrap_or(rel);
+    // snapper's folder, and anything inside it
+    rel.split('/').any(|c| c == ".snapshots")
+        || last == AGENT_SNAP_DIR
+        // btrbk's local snapshots (the usual folder names and the agent's default)
+        || rel.split('/').any(|c| c == "btrbk_snapshots" || c == ".btrbk_snapshots")
+        || rel.contains("timeshift-btrfs")
+        || container_storage(rel)
+        || rel.starts_with(AGENT_SNAP_DIR)
+        || rel.contains(&format!("/{AGENT_SNAP_DIR}/"))
+}
+
+/// Why the btrfs method deliberately does not send the subvolume `subvol` (its path from the
+/// top level) mounted at `mount`, a choice the user cannot change (`None`: it is sent). One
+/// rule for the agent's layout and for [`Manifest::unsent_mounts`], so an interface never
+/// calls a PC partly backed up for what is left out on purpose.
+pub fn not_sent_reason(mount: &str, subvol: &str) -> Option<&'static str> {
+    let subvol = subvol.trim_matches('/');
+    let under = |p: &str| mount == p || mount.starts_with(&format!("{p}/"));
+    if NOT_SENT_MOUNTS.iter().any(|p| under(p)) {
+        Some("cache, logs or rebuildable data")
+    } else if mount.rsplit('/').next() == Some(".snapshots") || excluded_subvolume(subvol) {
+        Some("snapshot folder")
+    } else if mount.chars().any(|c| c.is_whitespace() || c == '#' || c == '"' || c == '\'') || subvol.chars().any(char::is_whitespace) {
+        Some("a name btrbk.conf cannot hold")
+    } else {
+        None
+    }
+}
 /// The `Accept` value of the restic REST protocol v2 listings.
 pub const REST_V2: &str = "application/vnd.x.restic.rest.v2";
 /// Longest manifest the NAS keeps (display only).
@@ -1188,7 +1241,7 @@ impl Manifest {
 
     /// The btrfs method: subvolumes of the root filesystem mounted on the PC that the run
     /// writing this manifest does not send, other than those left out on purpose
-    /// ([`NOT_SENT_MOUNTS`], snapshot folders): `(mount point, subvolume path)`, so an
+    /// ([`not_sent_reason`], hidden by a later mount): `(mount point, subvolume path)`, so an
     /// interface never says "up to date" for a PC whose `/home` is not in the backup.
     /// Empty without the btrfs block.
     pub fn unsent_mounts(&self) -> Vec<(String, String)> {
@@ -1202,17 +1255,25 @@ impl Manifest {
             .filter(|s| s.fs_uuid.is_empty() || s.fs_uuid == root.uuid)
             .map(|s| trim(&s.path))
             .collect();
-        let under = |m: &str, p: &str| m == p || m.starts_with(&format!("{p}/"));
         let mut out: Vec<(String, String)> = Vec::new();
-        for m in &root.mounts {
+        for (i, m) in root.mounts.iter().enumerate() {
             let Some(sv) = m.subvol.as_deref().map(trim) else {
                 continue;
             };
-            let on_purpose = NOT_SENT_MOUNTS.iter().any(|p| under(&m.path, p))
-                || m.path.rsplit('/').next() == Some(".snapshots")
-                || sv.split('/').any(|c| matches!(c, ".snapshots" | "btrbk_snapshots" | ".btrbk_snapshots"))
-                || sv.contains("timeshift-btrfs");
-            if sv.is_empty() || on_purpose || sent.contains(&sv) || out.iter().any(|(_, s)| *s == sv) {
+            // a later mount on the same path (of this filesystem or of another) hides this
+            // one: the agent does not send what it cannot reach
+            let shadowed = root.mounts[i + 1..].iter().any(|o| o.path == m.path)
+                || self
+                    .filesystems
+                    .iter()
+                    .filter(|f| !std::ptr::eq(*f, root))
+                    .any(|f| f.mounts.iter().any(|o| o.path == m.path));
+            if sv.is_empty()
+                || shadowed
+                || not_sent_reason(&m.path, &sv).is_some()
+                || sent.contains(&sv)
+                || out.iter().any(|(_, s)| *s == sv)
+            {
                 continue;
             }
             out.push((m.path.clone(), sv));
@@ -1313,6 +1374,53 @@ mod tests {
         assert_eq!(m.unsent_mounts(), vec![("/home".to_string(), "@home".to_string())]);
         m.btrbk = None;
         assert!(m.unsent_mounts().is_empty());
+    }
+
+    #[test]
+    fn unsent_mounts_skip_what_the_agent_never_sends() {
+        let mount = |path: &str, sv: &str| MountEntry { path: path.into(), subvol: Some(sv.into()), options: String::new() };
+        let sub = |path: &str, mount: &str| BtrbkSubvolume { name: path.into(), path: path.into(), mount: mount.into(), ..Default::default() };
+        let m = Manifest {
+            filesystems: vec![
+                Filesystem {
+                    fstype: "btrfs".into(),
+                    uuid: "root".into(),
+                    mounts: vec![
+                        mount("/", "/@"),
+                        // names btrbk.conf cannot hold
+                        mount("/srv/my files", "/@files"),
+                        mount("/srv/a#b", "/@ab"),
+                        mount("/srv/q", "/@with space"),
+                        // container storage and the agent's snapshots
+                        mount("/home/me/.local/share/containers/storage", "/@home/me/.local/share/containers/storage"),
+                        mount("/var/lib/incus", "/@incus/storage-pools/default"),
+                        mount("/x", "/@/.rynas-snap"),
+                        // shadowed: by a later mount of the same filesystem, by another filesystem
+                        mount("/opt", "/@opt-old"),
+                        mount("/opt", "/@opt"),
+                        mount("/data", "/@data-old"),
+                        // really left out
+                        mount("/home", "/@home"),
+                    ],
+                    ..Default::default()
+                },
+                Filesystem { fstype: "ext4".into(), uuid: "other".into(), mounts: vec![MountEntry { path: "/data".into(), subvol: None, options: String::new() }], ..Default::default() },
+            ],
+            btrbk: Some(BtrbkLayout { subvolumes: vec![sub("@", "/"), sub("@opt", "/opt")], ..Default::default() }),
+            ..Default::default()
+        };
+        assert_eq!(m.unsent_mounts(), vec![("/home".to_string(), "@home".to_string())]);
+    }
+
+    #[test]
+    fn not_sent_reasons() {
+        assert_eq!(not_sent_reason("/home", "@home"), None);
+        assert_eq!(not_sent_reason("/var/log", "@log"), Some("cache, logs or rebuildable data"));
+        assert_eq!(not_sent_reason("/var/lib/docker/x", "@x"), Some("cache, logs or rebuildable data"));
+        assert_eq!(not_sent_reason("/.snapshots", "@snapshots"), Some("snapshot folder"));
+        assert_eq!(not_sent_reason("/srv/d", "/@docker/btrfs"), Some("snapshot folder"));
+        assert_eq!(not_sent_reason("/srv/my \"x\"", "@x"), Some("a name btrbk.conf cannot hold"));
+        assert_eq!(not_sent_reason("/srv/x", "@my x"), Some("a name btrbk.conf cannot hold"));
     }
 
     #[test]

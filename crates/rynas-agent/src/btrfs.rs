@@ -6,8 +6,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use rynas_api_types::pcagent::container_storage;
+
 /// The folder of the agent's own snapshots, inside each snapshotted subvolume.
-pub const SNAP_DIR: &str = ".rynas-snap";
+pub const SNAP_DIR: &str = rynas_api_types::pcagent::AGENT_SNAP_DIR;
 
 fn btrfs(args: &[&std::ffi::OsStr]) -> Result<String, String> {
     let o = Command::new("btrfs")
@@ -21,25 +23,6 @@ fn btrfs(args: &[&std::ffi::OsStr]) -> Result<String, String> {
     }
 }
 
-/// `rel` (a path from a top level or below a mount) holds the components `seq` in a row:
-/// `docker/btrfs` matches `var/lib/docker/btrfs/…` and `home/me/.local/share/docker/btrfs/…`.
-fn has_components(rel: &str, seq: &[&str]) -> bool {
-    // `@docker` (a subvolume of its own, mounted at /var/lib/docker) counts as `docker`
-    let c: Vec<&str> = rel.split('/').map(|x| x.trim_start_matches('@')).collect();
-    c.windows(seq.len()).any(|w| w == seq)
-}
-
-/// Container engines' storage, wherever it is (the system's and rootless engines' under a
-/// home: `~/.local/share/docker/btrfs`, `~/.local/share/containers/storage`), and Incus' and
-/// LXD's storage pools: layers and instances the engine manages, never PC data the agent
-/// sends, and never made again by a restore.
-fn container_storage(rel: &str) -> bool {
-    has_components(rel, &["docker", "btrfs"])
-        || has_components(rel, &["containers", "storage"])
-        || has_components(rel, &["incus", "storage-pools"])
-        || has_components(rel, &["lxd", "storage-pools"])
-}
-
 /// Excluded subvolumes a restore makes again, empty (snapper's `.snapshots`, btrbk's
 /// snapshot folders): container engines' storage, Timeshift's and the agent's own snapshots
 /// are not made again.
@@ -50,16 +33,7 @@ pub fn recreated_on_restore(rel: &str) -> bool {
 /// Nested subvolumes never backed up (some are made again empty at restore:
 /// [`recreated_on_restore`]).
 pub fn excluded_subvolume(rel: &str) -> bool {
-    let last = rel.rsplit('/').next().unwrap_or(rel);
-    // snapper's folder, and anything inside it
-    rel.split('/').any(|c| c == ".snapshots")
-        || last == SNAP_DIR
-        // btrbk's local snapshots (the usual folder names and the agent's default)
-        || rel.split('/').any(|c| c == "btrbk_snapshots" || c == ".btrbk_snapshots")
-        || rel.contains("timeshift-btrfs")
-        || container_storage(rel)
-        || rel.starts_with(SNAP_DIR)
-        || rel.contains(&format!("/{SNAP_DIR}/"))
+    rynas_api_types::pcagent::excluded_subvolume(rel)
 }
 
 /// Subvolumes nested below the subvolume mounted at `mount`, as paths relative to it (with

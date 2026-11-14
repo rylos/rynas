@@ -284,16 +284,7 @@ pub fn layout(all: &[Mount]) -> Result<Layout, String> {
             }
             continue;
         }
-        let under = |p: &str| m.path == p || m.path.starts_with(&format!("{p}/"));
-        let skip = if NOT_SENT.iter().any(|p| under(p)) {
-            Some("cache, logs or rebuildable data")
-        } else if basename(&m.path) == ".snapshots" || crate::btrfs::excluded_subvolume(&path) {
-            Some("snapshot folder")
-        } else if m.path.chars().any(|c| c.is_whitespace() || c == '#' || c == '"' || c == '\'') || path.chars().any(char::is_whitespace) {
-            Some("a name btrbk.conf cannot hold")
-        } else {
-            None
-        };
+        let skip = rynas_api_types::pcagent::not_sent_reason(&m.path, &path);
         subs.push(Candidate { path, mount: m.path.clone(), skip, nested_in: None });
     }
     subs.sort_by(|a, b| a.mount.cmp(&b.mount));
