@@ -3,9 +3,9 @@
 | Component | Where | License |
 |---|---|---|
 | [Lucide](https://lucide.dev) icons (lucide-static 1.68.0, only the paths used) | `src/icons.rs` | ISC |
-| [Inter](https://rsms.me/inter/) 4.1, variable, instanced to wght 400–700 / opsz 14, Latin subset | `assets/fonts/inter-latin.woff2` | SIL OFL 1.1 (`assets/fonts/Inter-LICENSE.txt`) |
+| [Inter](https://rsms.me/inter/) 4.1, variable, instanced to wght 400–700 / opsz 14, Latin and Cyrillic subsets | `assets/fonts/inter-latin.woff2`, `assets/fonts/inter-cyrillic.woff2` | SIL OFL 1.1 (`assets/fonts/Inter-LICENSE.txt`) |
 | [qrcodegen](https://github.com/nayuki/QR-Code-generator) 1.8 (Rust crate, compiled in) | QR code of the TOTP enrollment, `src/qr.rs` | MIT |
-| [JetBrains Mono](https://www.jetbrains.com/lp/mono/) 2.304, Regular, Latin subset | `assets/fonts/jbmono-latin.woff2` | SIL OFL 1.1 (`assets/fonts/JetBrainsMono-OFL.txt`) |
+| [JetBrains Mono](https://www.jetbrains.com/lp/mono/) 2.304, Regular, Latin and Cyrillic subsets | `assets/fonts/jbmono-latin.woff2`, `assets/fonts/jbmono-cyrillic.woff2` | SIL OFL 1.1 (`assets/fonts/JetBrainsMono-OFL.txt`) |
 | File manager: the SynoFile interface (same author), ported | `files-app/` | MIT |
 | [CodeMirror](https://codemirror.net) 6 (state, view, commands, search), bundled with esbuild | `files-app/vendor/codemirror/` | MIT (`files-app/vendor/codemirror/LICENSE`) |
 | [libheif-js](https://github.com/catdad-experiments/libheif-js) 1.23.2 (libheif + libde265 in WebAssembly), unmodified | `files-app/vendor/libheif/` | LGPL-3.0 (`files-app/vendor/libheif/LICENSE`) |
@@ -36,5 +36,6 @@ fonttools varLib.instancer InterVariable.ttf wght=400:700 opsz=14 -o inter-inst.
 pyftsubset inter-inst.ttf --unicodes='U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+2000-206F,U+2190-2199,U+2212,U+2215,U+20AC,U+2122,U+25CF,U+25B2,U+2715,U+25CC,U+2318' \
   --layout-features='kern,liga,calt,tnum,cv11,ss03,case' --flavor=woff2 --no-hinting --desubroutinize \
   --output-file=inter-latin.woff2
+# Cyrillic (inter-cyrillic.woff2): the same command with --unicodes='U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116'
 # JetBrains Mono: same unicodes from the wght=400 instance, layout feature kern only
 ```
