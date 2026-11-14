@@ -1326,7 +1326,7 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
         let device = dev.get_value();
 
         // ---- the description under the title, unless it only repeats the PC's name
-        let desc = (!p.description.is_empty() && !p.description.to_lowercase().starts_with(&device.to_lowercase())).then(|| view! { <p class="small muted pcb-desc">{p.description.clone()}</p> });
+        let desc = (!p.description.trim().is_empty() && p.description.trim().to_lowercase() != device.trim().to_lowercase()).then(|| view! { <p class="small muted pcb-desc">{p.description.clone()}</p> });
 
         // ---- the status card: with rynas-agent the agent's (status, progress, schedule,
         // Run now / Cancel); with btrbk the folder's status and last receive

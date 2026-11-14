@@ -36,7 +36,7 @@ export const menuMethods = {
         !isBackupTop(pane.path) && { label: t("files.menus.compute_folder_sizes"), icon: "drive", action: () => this.computeSizes(pane, pane.visible) },
       pane.path !== "/" && !pane.archive && !remote && !isBackupTop(pane.path) && { label: t("files.common.space_analysis"), icon: "pie", action: () => this.analyseSpace(pane.path) },
         "-",
-        !atRoot && { label: t("files.menus.copy_folder_path"), icon: "link", action: () => copyText(this.displayPath(pane.path)) },
+        !atRoot && { label: t("files.menus.copy_folder_path"), icon: "link", action: () => copyText(this.copyPath(pane.path)) },
         !atRoot && { label: t("files.common.add_favorites"), icon: "star", key: "Ctrl+D", action: () => this.toggleFavorite(pane.path) },
         { label: t("files.common.refresh"), icon: "refresh", key: "F5", action: () => pane.reload() },
         baseName(pane.path) === "#recycle" && !remote && !isReadOnly(pane) && "-",

@@ -112,6 +112,13 @@ export const sidebarMethods = {
     return c ? serverAddress(c, path, "smb") : backupsDisplay(path);
   },
 
+  /** A path to copy: the real one ("PC backups/…" is only for reading), a server's own
+   *  address for a remote one. */
+  copyPath(path) {
+    const c = this.connOf(path);
+    return c ? serverAddress(c, path, "smb") : path;
+  },
+
   async addConnection(draft = {}) {
     const saved = await editConnection(draft, this.connKey);
     if (!saved) return null;
@@ -437,7 +444,7 @@ export const sidebarMethods = {
       !isRemote(path) && !isBackupTop(path) && { label: t("files.common.space_analysis"), icon: "pie", action: () => this.analyseSpace(path) },
       "-",
       fav ? { label: t("files.common.remove_favorites"), icon: "star", action: () => this.toggleFavorite(path) } : { label: t("files.common.add_favorites"), icon: "star", action: () => this.toggleFavorite(path) },
-      { label: t("files.common.copy_path"), icon: "link", action: () => copyText(this.displayPath(path)) },
+      { label: t("files.common.copy_path"), icon: "link", action: () => copyText(this.copyPath(path)) },
       !(isRemote(path) && path.split("/").length === 2) && { label: t("files.sidebar.icon"), icon: "palette", action: () => pickIcon({ x, y }, path) },
       share && !share.home && share.volume && !this.removableShare(path) && { label: t("files.sidebar.description"), icon: "rename", action: () => shareDescription(share) },
       share && !share.home && share.volume && !this.removableShare(path) && { label: t("files.common.permissions_menu"), icon: "shield", action: () => sharePermissions(share) },

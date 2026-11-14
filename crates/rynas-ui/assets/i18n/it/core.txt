@@ -4822,8 +4822,6 @@ bkpc.f.keep_help	Per sottovolume, qualunque cosa chieda il PC.
 bk.f.min_age	Non eliminare prima di (giorni)
 bk.f.min_age_help	Uno snapshot più giovane di così resta anche se il PC chiede di eliminarlo.
 bk.f.rules_note	Queste regole proteggono i backup da un PC guasto o in mani sbagliate: un'eliminazione rifiutata compare come errore nel log di btrbk sul PC. Tienile sotto il target_preserve_min del PC per evitare quegli errori.
-bk.f.destination	Copia in
-bk.f.destination_help	Una cartella esistente sul NAS. I file copiati prendono il proprietario di quella cartella; i bit set-user/group-ID e gli attributi di sicurezza vengono tolti. Niente viene sovrascritto.
 bk.adopt.check	Controlla la cartella
 bk.adopt.found	Trovati {n} snapshot ricevuti.
 bk.adopt.none	Nessuno snapshot di btrbk in questa cartella. Si può adottare lo stesso e il PC parte con un invio completo.
@@ -4865,17 +4863,11 @@ bk.step.config	2. btrbk.conf
 bk.step.test	3. Prima connessione e prova
 bk.step.line	Riga scritta sul NAS (authorized_keys)
 bk.steps_note	La chiave esegue solo il filtro di rynas: btrfs receive in questa cartella, eliminazione degli snapshot di questo PC secondo le regole sopra e i comandi di sola lettura che servono a btrbk. Niente shell, nessun'altra cartella.
-bk.snapshots	Snapshot ricevuti
 bk.no_snapshots	Ancora niente ricevuto.
 bk.snap.protected	Tenuto dal NAS
 bk.snap.incomplete	Interrotto
 bk.snap.not_subvolume	Non è un sottovolume
 bk.browse	Sfoglia
-bk.browse_note	Sola lettura: quello che il PC ha inviato, com'era in quel momento.
-bkpc.copy	Copia sul NAS
-bk.copy_this	Copia questa cartella
-bk.copy_text	{path} viene copiato con le sue cartelle nella cartella che scegli.
-bkpc.copied	{path} copiato
 bkpc.col.restore	Ripristino su disco vuoto
 bkpc.bm.ready	Pronto
 bkpc.bm.disks	Dischi
@@ -4937,7 +4929,6 @@ pcb.last_received_on	Ultima ricezione {when}
 pcb.last_seen_on	Ultimo contatto {when}
 pcb.never	Ancora nessun backup
 pcb.agent_os	{os} {arch} · agent {v}
-pcb.size_help	Informazioni sulle dimensioni
 pcb.n_subvols	{n} sottovolumi
 pcb.n_subvols1	1 sottovolume
 pcb.n_snaps	{n} snapshot
@@ -5030,7 +5021,6 @@ bkpc.view.run	Esecuzione del backup
 bkpc.size_text	{ref} · {excl} propri
 bkpc.sizes_quota	Le dimensioni arrivano in tempo reale dai gruppi di quota del volume.
 bkpc.sizes_note	Dimensione: quanto lo snapshot referenzia (circa quanto trasferisce un ripristino) · quanto contiene solo lui (circa quanto libera eliminarlo da solo). La misura legge gli extent di ogni file a bassa priorità e può richiedere tempo; ogni snapshot viene misurato una volta sola.
-bkpc.snap.parent	Base del prossimo invio
 bkpc.run.lacks	Manca {names}
 bkpc.delete_snap	Elimina lo snapshot
 bkpc.delete_snap_title	Eliminare {name}?
