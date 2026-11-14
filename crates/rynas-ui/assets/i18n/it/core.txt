@@ -610,7 +610,8 @@ f.os	Sistema operativo
 f.kernel	Kernel
 f.uptime	Tempo di attività
 f.cpu	Processore
-f.threads	thread
+f.threads.one	{n} thread
+f.threads.other	{n} thread
 f.load	Carico medio
 f.version	Versione rynas
 f.host	Nome host
@@ -638,10 +639,14 @@ h.sub_ok	Nessun problema rilevato
 h.sub_sync	Ridondanza in ricostruzione
 h.sub_warn	Controlla i dettagli in Archiviazione
 v.arrays	Array RAID
-h.disks	Dischi
-h.arrays	Array
-h.volumes	Volumi
-h.asleep	in standby
+h.disks.one	Disco
+h.disks.other	Dischi
+h.arrays.one	Array
+h.arrays.other	Array
+h.volumes.one	Volume
+h.volumes.other	Volumi
+h.asleep.one	{n} in standby
+h.asleep.other	{n} in standby
 h.ok	Tutto lo storage è integro
 h.syncing	Un array RAID è in sincronizzazione
 h.warn	Richiede attenzione
@@ -976,7 +981,8 @@ sto.model	Modello
 sto.serial	Numero di serie
 sto.size	Capacità
 sto.type	Tipo
-sto.members_n	membri
+sto.members.one	{n} disco
+sto.members.other	{n} dischi
 sto.level	Livello
 sto.mount	Punto di montaggio
 sto.fs	File system
@@ -5287,6 +5293,27 @@ dur.m	{m} min
 dur.s	{s} s
 fmt.ago	{time} fa
 fmt.of	{part} di {total}
+fmt.unit.b	B
+fmt.unit.kib	KiB
+fmt.unit.mib	MiB
+fmt.unit.gib	GiB
+fmt.unit.tib	TiB
+fmt.unit.pib	PiB
+fmt.unit.eib	EiB
+fmt.unit.kb	kB
+fmt.unit.mb	MB
+fmt.unit.gb	GB
+fmt.unit.tb	TB
+fmt.unit.pb	PB
+fmt.unit.eb	EB
+fmt.unit.bps	bit/s
+fmt.unit.kbps	kbit/s
+fmt.unit.mbps	Mbit/s
+fmt.unit.gbps	Gbit/s
+fmt.unit.tbps	Tbit/s
+fmt.unit.rpm	giri/min
+fmt.rate	{size}/s
+fmt.rpm	{n} giri/min
 hour_cycle	Formato dell'ora
 hour_cycle.auto	Automatico
 hour_cycle.h23	24 ore

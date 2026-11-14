@@ -26,7 +26,7 @@ fn advice(r: &ZramSettings) -> String {
         "mem.advice",
         &[
             // in the unit of the size field, so the advice can be typed in as it reads
-            ("size", &format!("{} MiB", r.size_mib)),
+            ("size", &format!("{} {}", r.size_mib, crate::i18n::t("fmt.unit.mib"))),
             ("algorithm", &r.algorithm),
             ("swappiness", &r.swappiness.to_string()),
             ("cluster", &r.page_cluster.to_string()),

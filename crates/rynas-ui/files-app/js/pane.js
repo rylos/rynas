@@ -46,13 +46,13 @@ function mediaFacts(m) {
     add(t("files.pane.dimensions"), `${int(m.width)} × ${int(m.height)}${!m.duration && mp >= 1 ? ` <span style="color:var(--faint)">(${num(mp, 1)} MP)</span>` : ""}`);
   }
   if (m.duration) add(t("files.pane.duration"), esc(duration(m.duration * 1000)));
-  if (m.video) add(t("files.common.video"), esc([m.video.codec, m.video.fps && `${num(m.video.fps, 2)} fps`, m.video.hdr].filter(Boolean).join(" · ")));
+  if (m.video) add(t("files.common.video"), esc([m.video.codec, m.video.fps && t("files.pane.fps", { n: num(m.video.fps, 2) }), m.video.hdr].filter(Boolean).join(" · ")));
   if (m.audio) {
     const tracks = m.audioTracks > 1 ? t("files.pane.n_tracks", { n: m.audioTracks }) : "";
-    add(t("files.common.audio"), esc([m.audio.codec, m.audio.rate && `${num(m.audio.rate / 1000, 1)} kHz`, m.audio.channels, tracks].filter(Boolean).join(" · ")));
+    add(t("files.common.audio"), esc([m.audio.codec, m.audio.rate && t("files.pane.khz", { n: num(m.audio.rate / 1000, 1) }), m.audio.channels, tracks].filter(Boolean).join(" · ")));
   }
   if (m.subtitles) add(t("files.pane.subtitles"), int(m.subtitles));
-  if (m.bitrate) add(t("files.pane.bitrate"), `${int(m.bitrate)} kb/s`);
+  if (m.bitrate) add(t("files.pane.bitrate"), esc(t("files.pane.kbps", { n: int(m.bitrate) })));
   add(t("files.pane.camera"), m.camera && esc(m.camera));
   add(t("files.pane.lens"), m.lens && esc(m.lens));
   const shot = [

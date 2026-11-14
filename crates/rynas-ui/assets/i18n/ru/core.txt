@@ -612,7 +612,10 @@ f.os	Операционная система
 f.kernel	Ядро
 f.uptime	Время работы
 f.cpu	Процессор
-f.threads	потоков
+f.threads.one	{n} поток
+f.threads.few	{n} потока
+f.threads.many	{n} потоков
+f.threads.other	{n} потока
 f.load	Средняя нагрузка
 f.version	Версия rynas
 f.host	Имя хоста
@@ -640,10 +643,22 @@ h.sub_ok	Проблем не обнаружено
 h.sub_sync	Идёт восстановление избыточности
 h.sub_warn	Подробности — в разделе «Хранилище»
 v.arrays	RAID-массивы
-h.disks	Диски
-h.arrays	Массивы
-h.volumes	Тома
-h.asleep	в режиме ожидания
+h.disks.one	Диск
+h.disks.few	Диска
+h.disks.many	Дисков
+h.disks.other	Диска
+h.arrays.one	Массив
+h.arrays.few	Массива
+h.arrays.many	Массивов
+h.arrays.other	Массива
+h.volumes.one	Том
+h.volumes.few	Тома
+h.volumes.many	Томов
+h.volumes.other	Тома
+h.asleep.one	{n} спит
+h.asleep.few	{n} спят
+h.asleep.many	{n} спят
+h.asleep.other	{n} спят
 h.ok	Хранилище исправно
 h.syncing	Идёт ресинхронизация RAID-массива
 h.warn	Требуется внимание
@@ -978,7 +993,10 @@ sto.model	Модель
 sto.serial	Серийный номер
 sto.size	Ёмкость
 sto.type	Тип
-sto.members_n	участники
+sto.members.one	{n} диск
+sto.members.few	{n} диска
+sto.members.many	{n} дисков
+sto.members.other	{n} диска
 sto.level	Уровень
 sto.mount	Точка монтирования
 sto.fs	Файловая система
@@ -5299,6 +5317,27 @@ dur.m	{m} мин
 dur.s	{s} с
 fmt.ago	{time} назад
 fmt.of	{part} из {total}
+fmt.unit.b	Б
+fmt.unit.kib	КиБ
+fmt.unit.mib	МиБ
+fmt.unit.gib	ГиБ
+fmt.unit.tib	ТиБ
+fmt.unit.pib	ПиБ
+fmt.unit.eib	ЭиБ
+fmt.unit.kb	кБ
+fmt.unit.mb	МБ
+fmt.unit.gb	ГБ
+fmt.unit.tb	ТБ
+fmt.unit.pb	ПБ
+fmt.unit.eb	ЭБ
+fmt.unit.bps	бит/с
+fmt.unit.kbps	кбит/с
+fmt.unit.mbps	Мбит/с
+fmt.unit.gbps	Гбит/с
+fmt.unit.tbps	Тбит/с
+fmt.unit.rpm	об/мин
+fmt.rate	{size}/с
+fmt.rpm	{n} об/мин
 hour_cycle	Формат времени
 hour_cycle.auto	Автоматически
 hour_cycle.h23	24-часовой

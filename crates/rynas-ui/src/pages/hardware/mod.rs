@@ -167,7 +167,7 @@ fn overview(_active: Signal<bool>) -> AnyView {
                                             <span class="fan-big spin" style:animation-duration=dur><Icon icon=icons::FAN size=32 /></span>
                                             <div>
                                                 <div class="fan-label">{fan_label(&f.label)}</div>
-                                                <div class="fan-rpm tnum">{f.rpm.map(|r| r.to_string()).unwrap_or_else(|| ui::DASH.into())}<span class="kpi-unit">" rpm"</span></div>
+                                                <div class="fan-rpm tnum">{f.rpm.map(|r| r.to_string()).unwrap_or_else(|| ui::DASH.into())}<span class="kpi-unit">" "{crate::i18n::t("fmt.unit.rpm")}</span></div>
                                             </div>
                                             {f.alarm.then(|| view! { <Status tone=Tone::Err text=t("hw.alarm").to_string() /> })}
                                         </div>

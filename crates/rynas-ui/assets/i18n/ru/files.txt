@@ -110,6 +110,23 @@ files.dur.s	{s} с
 files.dur.hm	{h} ч {m} мин
 files.dur.ms	{m} мин {s} с
 files.fmt.of	{part} из {total}
+files.fmt.unit.b	Б
+files.fmt.unit.kib	КиБ
+files.fmt.unit.mib	МиБ
+files.fmt.unit.gib	ГиБ
+files.fmt.unit.tib	ТиБ
+files.fmt.unit.pib	ПиБ
+files.fmt.unit.eib	ЭиБ
+files.fmt.unit.kb	кБ
+files.fmt.unit.mb	МБ
+files.fmt.unit.gb	ГБ
+files.fmt.unit.tb	ТБ
+files.fmt.unit.pb	ПБ
+files.fmt.unit.eb	ЭБ
+files.fmt.rate	{size}/с
+files.pane.fps	{n} кадр/с
+files.pane.khz	{n} кГц
+files.pane.kbps	{n} кбит/с
 files.common.folder	Папка
 files.pane.folders	Папки
 files.common.file	Файл
