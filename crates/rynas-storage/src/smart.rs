@@ -243,7 +243,8 @@ pub fn parse(json: &str, now_ms: u64) -> SmartRead {
         .or_else(|| u64_at(&v, &["ata_smart_error_log", "extended", "count"]));
     if let Some(a9) = info.attributes.iter().find(|a| a.id == 9) {
         let stamps: Vec<u64> = info.self_tests.iter().filter_map(|t| t.lifetime_hours).collect();
-        info.power_on_hours = ata_power_on_hours(info.power_on_hours, a9.raw, &stamps);
+        let seagate = is_seagate(str_at(&v, &["model_name"]), str_at(&v, &["model_family"]));
+        info.power_on_hours = ata_power_on_hours(info.power_on_hours, a9.raw, &stamps, seagate);
     }
 
     // NVMe
@@ -363,20 +364,36 @@ const PLAUSIBLE_HOURS: u64 = 1_000_000;
 /// - a 16-bit counter that wrapped at 65536 (some Seagate drives, e.g. ST4000DM000, reset
 ///   attribute 9 to 0 after 65535 hours). The self-test log stamps each test with the lifetime
 ///   hours, and the drive cannot be younger than its latest test: 65536 is added (the fewest
-///   times) until the count reaches the newest stamp.
-pub fn ata_power_on_hours(reported: Option<u64>, raw: u64, test_stamps: &[u64]) -> Option<u64> {
+///   times) until the count reaches the newest stamp. Only for a Seagate drive (`seagate`)
+///   whose newest test is within a year of 65536 hours, so a refurbished drive with a reset
+///   counter and an older log is left alone.
+pub fn ata_power_on_hours(reported: Option<u64>, raw: u64, test_stamps: &[u64], seagate: bool) -> Option<u64> {
     let mut hours = match reported {
         Some(h) if h <= PLAUSIBLE_HOURS => h,
         _ => Some(raw & 0xFFFF_FFFF).filter(|&h| h <= PLAUSIBLE_HOURS)?,
     };
-    // a counter of 65536 or more is not 16-bit: nothing wrapped
-    if hours < 1 << 16
+    // a counter of 65536 or more is not 16-bit: nothing wrapped. Only the Seagate drives
+    // known to wrap, and only when the newest test ran in the last year before the wrap: a
+    // refurbished drive with attribute 9 reset keeps its old self-test log, and an old test
+    // far from 65536 hours says nothing about a wrap
+    if seagate
+        && hours < 1 << 16
         && let Some(&newest) = test_stamps.iter().max()
         && newest > hours
+        && newest >= WRAP_NEAR_TOP
     {
         hours += (newest - hours).div_ceil(1 << 16) << 16;
     }
     Some(hours)
+}
+
+/// A self-test stamped at or after this many hours (one year before 65536) ran shortly
+/// before a 16-bit power-on counter wraps.
+const WRAP_NEAR_TOP: u64 = (1 << 16) - 8760;
+
+/// Whether smartctl's identity is a Seagate drive (model `ST…` or a Seagate family).
+fn is_seagate(model: Option<&str>, family: Option<&str>) -> bool {
+    model.is_some_and(|m| m.trim_start().starts_with("ST")) || family.is_some_and(|f| f.contains("Seagate"))
 }
 
 /// Parse the output of [`SETTINGS_ARGS`].
@@ -839,17 +856,30 @@ mod tests {
     #[test]
     fn power_on_hours_rules() {
         // a normal drive: tests older than the counter
-        assert_eq!(ata_power_on_hours(Some(31_337), 31_337, &[31_300, 30_900]), Some(31_337));
+        assert_eq!(ata_power_on_hours(Some(31_337), 31_337, &[31_300, 30_900], true), Some(31_337));
         // no self-test log: nothing to compare with
-        assert_eq!(ata_power_on_hours(Some(10_249), 10_249, &[]), Some(10_249));
+        assert_eq!(ata_power_on_hours(Some(10_249), 10_249, &[], true), Some(10_249));
         // the stamp exactly at a multiple: the smallest k reaching it
-        assert_eq!(ata_power_on_hours(Some(0), 0, &[65_535]), Some(65_536));
+        assert_eq!(ata_power_on_hours(Some(0), 0, &[65_535], true), Some(65_536));
         // 32-bit counters never wrap here
-        assert_eq!(ata_power_on_hours(Some(70_000), 70_000, &[65_000]), Some(70_000));
+        assert_eq!(ata_power_on_hours(Some(70_000), 70_000, &[65_000], true), Some(70_000));
+        // a refurbished drive: attribute 9 reset, the old log kept, the last test far from
+        // the top of a 16-bit counter
+        assert_eq!(ata_power_on_hours(Some(120), 120, &[40_000, 39_800], true), Some(120));
+        // not a Seagate: no wrap, even with a test near the top
+        assert_eq!(ata_power_on_hours(Some(120), 120, &[65_000], false), Some(120));
         // smartctl did not report hours: the attribute's low 32 bits
-        assert_eq!(ata_power_on_hours(None, (7 << 32) | 1234, &[]), Some(1234));
+        assert_eq!(ata_power_on_hours(None, (7 << 32) | 1234, &[], true), Some(1234));
         // nothing plausible at all
-        assert_eq!(ata_power_on_hours(None, u64::MAX, &[]), None);
+        assert_eq!(ata_power_on_hours(None, u64::MAX, &[], true), None);
+    }
+
+    #[test]
+    fn seagate_identity() {
+        assert!(is_seagate(Some("ST4000DM000-1F2168"), None));
+        assert!(is_seagate(None, Some("Seagate Desktop HDD.15")));
+        assert!(!is_seagate(Some("WDC WD40EFRX-68N32N0"), Some("Western Digital Red")));
+        assert!(!is_seagate(None, None));
     }
 
     #[test]
