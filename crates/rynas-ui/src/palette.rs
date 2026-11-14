@@ -9,9 +9,13 @@ use crate::icons::{self, Icon};
 use crate::prefs::{Density, ThemePref, use_ui};
 use crate::shell::NAV;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Action {
     Go(&'static str),
+    /// A pinned page of the sidebar (its address).
+    Open(String),
+    EditSidebar,
+    PinPage,
     Theme(ThemePref),
     Density(Density),
     Lang(Lang),
@@ -22,44 +26,59 @@ enum Action {
     SignOut,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Entry {
     key: &'static str,
+    /// The text instead of `key` (a pinned page's name).
+    text: Option<String>,
     icon: &'static str,
     action: Action,
     /// Shortcut hint shown on the right.
     hint: &'static str,
 }
 
+impl Entry {
+    fn label(&self) -> String {
+        self.text.clone().unwrap_or_else(|| t(self.key).to_string())
+    }
+}
+
+/// The icon of the page at `route` in the palette, if it lists it.
+pub fn page_icon(route: &str) -> Option<&'static str> {
+    entries().into_iter().find(|e| matches!(e.action, Action::Go(p) if p == route)).map(|e| e.icon)
+}
+
 fn entries() -> Vec<Entry> {
     let mut v: Vec<Entry> = NAV
         .iter()
-        .map(|n| Entry { key: n.key, icon: n.icon, action: Action::Go(n.path), hint: "" })
+        .map(|n| Entry { text: None, key: n.key, icon: n.icon, action: Action::Go(n.path), hint: "" })
         .collect();
     v.extend([
-        Entry { key: "nav.security", icon: icons::SHIELD_CHECK, action: Action::Go("/security"), hint: "" },
-        Entry { key: "wa.title", icon: icons::SHIELD_CHECK, action: Action::Go("/network/web-access"), hint: "" },
-        Entry { key: "ts.title", icon: icons::LINK, action: Action::Go("/network/remote-access"), hint: "" },
-        Entry { key: "ssh.title", icon: icons::COMMAND, action: Action::Go("/services/ssh"), hint: "" },
-        Entry { key: "mem.title", icon: icons::MEMORY_STICK, action: Action::Go("/system/memory"), hint: "" },
-        Entry { key: "proc.title", icon: icons::ACTIVITY, action: Action::Go("/system/processes"), hint: "" },
-        Entry { key: "cfg.title", icon: icons::HISTORY, action: Action::Go("/system/configuration"), hint: "" },
-        Entry { key: "sch.title", icon: icons::CALENDAR_CLOCK, action: Action::Go("/system/scheduler"), hint: "" },
-        Entry { key: "upd.title", icon: icons::DOWNLOAD, action: Action::Go("/system/updates"), hint: "" },
-        Entry { key: "nt.settings_title", icon: icons::BELL_RING, action: Action::Go("/system/notifications"), hint: "" },
-        Entry { key: "nt.center", icon: icons::BELL, action: Action::Go("/notifications"), hint: "" },
-        Entry { key: "bar.logout", icon: icons::LOG_OUT, action: Action::SignOut, hint: "" },
-        Entry { key: "pal.edit_layout", icon: icons::SETTINGS, action: Action::EditLayout, hint: "" },
-        Entry { key: "pal.notifications", icon: icons::BELL, action: Action::Notifications, hint: "" },
-        Entry { key: "pal.theme_light", icon: icons::SUN, action: Action::Theme(ThemePref::Light), hint: "" },
-        Entry { key: "pal.theme_dark", icon: icons::MOON, action: Action::Theme(ThemePref::Dark), hint: "" },
-        Entry { key: "pal.theme_auto", icon: icons::MONITOR, action: Action::Theme(ThemePref::Auto), hint: "" },
-        Entry { key: "pal.density_comfortable", icon: icons::ROWS_3, action: Action::Density(Density::Comfortable), hint: "" },
-        Entry { key: "pal.density_compact", icon: icons::ROWS_3, action: Action::Density(Density::Compact), hint: "" },
-        Entry { key: "pal.lang_it", icon: icons::LANGUAGES, action: Action::Lang(Lang::It), hint: "" },
-        Entry { key: "pal.lang_en", icon: icons::LANGUAGES, action: Action::Lang(Lang::En), hint: "" },
-        Entry { key: "pal.toggle_sidebar", icon: icons::PANEL_LEFT, action: Action::ToggleSidebar, hint: "" },
-        Entry { key: "pal.toggle_tasks", icon: icons::LIST_CHECKS, action: Action::ToggleTasks, hint: "" },
+        Entry { text: None, key: "nav.security", icon: icons::SHIELD_CHECK, action: Action::Go("/security"), hint: "" },
+        Entry { text: None, key: "wa.title", icon: icons::SHIELD_CHECK, action: Action::Go("/network/web-access"), hint: "" },
+        Entry { text: None, key: "ts.title", icon: icons::LINK, action: Action::Go("/network/remote-access"), hint: "" },
+        Entry { text: None, key: "ssh.title", icon: icons::COMMAND, action: Action::Go("/services/ssh"), hint: "" },
+        Entry { text: None, key: "mem.title", icon: icons::MEMORY_STICK, action: Action::Go("/system/memory"), hint: "" },
+        Entry { text: None, key: "proc.title", icon: icons::ACTIVITY, action: Action::Go("/system/processes"), hint: "" },
+        Entry { text: None, key: "cfg.title", icon: icons::HISTORY, action: Action::Go("/system/configuration"), hint: "" },
+        Entry { text: None, key: "sch.title", icon: icons::CALENDAR_CLOCK, action: Action::Go("/system/scheduler"), hint: "" },
+        Entry { text: None, key: "upd.title", icon: icons::DOWNLOAD, action: Action::Go("/system/updates"), hint: "" },
+        Entry { text: None, key: "nt.settings_title", icon: icons::BELL_RING, action: Action::Go("/system/notifications"), hint: "" },
+        Entry { text: None, key: "nt.center", icon: icons::BELL, action: Action::Go("/notifications"), hint: "" },
+        Entry { text: None, key: "bar.logout", icon: icons::LOG_OUT, action: Action::SignOut, hint: "" },
+        Entry { text: None, key: "pal.edit_layout", icon: icons::SETTINGS, action: Action::EditLayout, hint: "" },
+        Entry { text: None, key: "nav.customize", icon: icons::PENCIL, action: Action::EditSidebar, hint: "" },
+        Entry { text: None, key: "pal.pin_page", icon: icons::PIN, action: Action::PinPage, hint: "" },
+        Entry { text: None, key: "pal.notifications", icon: icons::BELL, action: Action::Notifications, hint: "" },
+        Entry { text: None, key: "pal.theme_light", icon: icons::SUN, action: Action::Theme(ThemePref::Light), hint: "" },
+        Entry { text: None, key: "pal.theme_dark", icon: icons::MOON, action: Action::Theme(ThemePref::Dark), hint: "" },
+        Entry { text: None, key: "pal.theme_auto", icon: icons::MONITOR, action: Action::Theme(ThemePref::Auto), hint: "" },
+        Entry { text: None, key: "pal.density_comfortable", icon: icons::ROWS_3, action: Action::Density(Density::Comfortable), hint: "" },
+        Entry { text: None, key: "pal.density_compact", icon: icons::ROWS_3, action: Action::Density(Density::Compact), hint: "" },
+        Entry { text: None, key: "pal.lang_it", icon: icons::LANGUAGES, action: Action::Lang(Lang::It), hint: "" },
+        Entry { text: None, key: "pal.lang_en", icon: icons::LANGUAGES, action: Action::Lang(Lang::En), hint: "" },
+        Entry { text: None, key: "pal.toggle_sidebar", icon: icons::PANEL_LEFT, action: Action::ToggleSidebar, hint: "" },
+        Entry { text: None, key: "pal.toggle_tasks", icon: icons::LIST_CHECKS, action: Action::ToggleTasks, hint: "" },
     ]);
     v
 }
@@ -105,19 +124,34 @@ pub fn Palette() -> impl IntoView {
     let query = RwSignal::new(String::new());
     let active = RwSignal::new(0usize);
     let input = NodeRef::<Input>::new();
-    let all = StoredValue::new(entries());
+    let nav = crate::sidebar::nav_layout();
+    // the pages and actions, with the pinned pages of the sidebar after the sidebar's pages
+    // (hidden entries stay here: the palette always reaches every page)
+    let all = Signal::derive(move || {
+        let mut v = entries();
+        let pins: Vec<Entry> = nav.board.with(|b| {
+            b.layout
+                .pins
+                .iter()
+                .map(|p| Entry { key: "", text: Some(p.label.clone()), icon: crate::sidebar::pin_icon(&p.icon), action: Action::Open(p.path.clone()), hint: "" })
+                .collect()
+        });
+        let at = NAV.len().min(v.len());
+        v.splice(at..at, pins);
+        v
+    });
 
     let results = Memo::new(move |_| {
         i18n::lang();
         let q = query.get();
-        let mut r: Vec<(i32, usize)> = all.with_value(|es| {
+        let mut r: Vec<(i32, usize)> = all.with(|es| {
             es.iter()
                 .enumerate()
                 .filter(|(_, e)| !matches!(e.action, Action::Go(p) if !crate::shell::nav_shown(p)))
                 .filter_map(|(i, e)| {
-                    let label = t(e.key);
-                    let extra = if matches!(e.action, Action::Go(_)) { t("pal.go") } else { "" };
-                    fuzzy(&q, label).or_else(|| fuzzy(&q, &format!("{extra} {label}"))).map(|s| (s, i))
+                    let label = e.label();
+                    let extra = if matches!(e.action, Action::Go(_) | Action::Open(_)) { t("pal.go") } else { "" };
+                    fuzzy(&q, &label).or_else(|| fuzzy(&q, &format!("{extra} {label}"))).map(|s| (s, i))
                 })
                 .collect()
         });
@@ -145,10 +179,19 @@ pub fn Palette() -> impl IntoView {
     });
 
     let run = move |idx: usize| {
-        let Some(e) = all.with_value(|es| es.get(idx).copied()) else { return };
+        let Some(e) = all.with_untracked(|es| es.get(idx).cloned()) else { return };
         ui.palette_open.set(false);
         match e.action {
             Action::Go(p) => navigate(p, Default::default()),
+            Action::Open(p) => navigate(&p, Default::default()),
+            Action::EditSidebar => {
+                nav.open_editor(ui);
+            }
+            Action::PinPage => {
+                if nav.loaded.get_untracked() {
+                    nav.pin_dialog.set(Some(crate::sidebar::PinOpen::New));
+                }
+            }
             Action::Theme(th) => ui.theme.set(th),
             Action::Density(d) => ui.density.set(d),
             Action::Lang(l) => i18n::set_lang(Some(l)),
@@ -272,8 +315,8 @@ pub fn Palette() -> impl IntoView {
                         rs.into_iter()
                             .enumerate()
                             .map(|(pos, idx)| {
-                                let e = all.with_value(|es| es[idx]);
-                                let is_page = matches!(e.action, Action::Go(_));
+                                let e = all.with_untracked(|es| es[idx].clone());
+                                let is_page = matches!(e.action, Action::Go(_) | Action::Open(_));
                                 let header = (last_group != Some(is_page)).then(|| {
                                     last_group = Some(is_page);
                                     view! { <li class="pal-group" role="presentation">{t(if is_page { "pal.pages" } else { "col.actions" })}</li> }
@@ -289,7 +332,7 @@ pub fn Palette() -> impl IntoView {
                                         on:click=move |_| run.with_value(|f| f(idx))
                                     >
                                         <Icon icon=e.icon size=16 />
-                                        <span class="pal-label">{t(e.key)}</span>
+                                        <span class="pal-label">{e.label()}</span>
                                         {is_page.then(|| view! { <span class="pal-kind"><Icon icon=icons::CHEVRON_RIGHT size=14 /></span> })}
                                         {(!e.hint.is_empty()).then(|| view! { <kbd>{e.hint}</kbd> })}
                                     </li>

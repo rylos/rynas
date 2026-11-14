@@ -535,6 +535,70 @@ dash.size.L	Grande
 dash.moved	{widget}: posizione {pos} di {count}
 dash.all_hidden	Tutti i widget sono nascosti
 dash.all_hidden_text	Scegli Personalizza per mostrarne di nuovo qualcuno.
+nav.customize	Personalizza la barra laterale
+nav.editing	Personalizzazione della barra laterale
+nav.edit_hint	Trascina voci e gruppi per riordinarli, oppure seleziona una maniglia e usa le frecce. Salvato sul NAS per il tuo account.
+nav.hidden	Voci nascoste
+nav.hide	Nascondi
+nav.show	Mostra
+nav.move	Sposta
+nav.unpin	Stacca
+nav.group	Gruppo {n}
+nav.move_group	Sposta il gruppo {n}
+nav.moved	{entry}: gruppo {group}, posizione {pos}
+nav.group_moved	Gruppo spostato in posizione {pos} di {count}
+nav.pin_page	Fissa questa pagina
+nav.pinned_already	Questa pagina è già fissata
+nav.pins_full	Puoi fissare al massimo {n} pagine
+nav.pin_title	Fissa la pagina nella barra laterale
+nav.pin_edit_title	Modifica la pagina fissata
+nav.pin	Fissa
+nav.pin_name	Nome
+nav.pin_name_bad	Inserisci un nome di {n} caratteri al massimo
+nav.pin_path	Pagina
+nav.pin_path_help	L'indirizzo della pagina in rynas, che inizia con /
+nav.pin_path_bad	Inserisci un indirizzo di rynas che inizia con /
+nav.pin_icon	Icona
+nav.reset_ask	Reimpostare la barra laterale?
+nav.reset_text	Torna l'ordine predefinito, le voci nascoste ricompaiono e le pagine fissate vengono rimosse.
+nav.save_failed	Impossibile salvare la barra laterale: {error}
+nav.icon.pin	Puntina
+nav.icon.hard_drive	Disco
+nav.icon.database	Database
+nav.icon.layers	Livelli
+nav.icon.folder	Cartella
+nav.icon.folder_open	Cartella aperta
+nav.icon.share	Condivisione
+nav.icon.camera	Fotocamera
+nav.icon.archive	Archivio
+nav.icon.users	Persone
+nav.icon.user	Persona
+nav.icon.server	Server
+nav.icon.container	Container
+nav.icon.box	Scatola
+nav.icon.puzzle	Tassello
+nav.icon.network	Rete
+nav.icon.link	Collegamento
+nav.icon.cpu	Processore
+nav.icon.memory	Memoria
+nav.icon.activity	Attività
+nav.icon.settings	Ingranaggio
+nav.icon.calendar	Calendario
+nav.icon.clock	Orologio
+nav.icon.history	Cronologia
+nav.icon.download	Download
+nav.icon.bell	Campanella
+nav.icon.shield	Scudo
+nav.icon.key	Chiave
+nav.icon.lock	Lucchetto
+nav.icon.usb	USB
+nav.icon.disc	Disco ottico
+nav.icon.file	Documento
+nav.icon.life_buoy	Salvagente
+nav.icon.power	Accensione
+pal.pin_page	Fissa questa pagina nella barra laterale
+sys.sidebar	Barra laterale
+sys.sidebar_help	Ordine delle voci, voci nascoste e pagine fissate, salvati sul NAS per il tuo account.
 w.system	Sistema
 w.cpu	CPU
 w.memory	Memoria

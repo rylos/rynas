@@ -3,11 +3,15 @@
 //! localStorage (see `layout.rs`). Nothing of the editing machinery is mounted outside
 //! Customize mode: the normal dashboard costs exactly what a static grid costs.
 
+use std::rc::Rc;
+
 use leptos::html::Div;
 use leptos::prelude::*;
 use rynas_api_types::{MetricsSample, ZramDevice};
 use wasm_bindgen::JsCast;
 use web_sys::{HtmlElement, PointerEvent};
+
+use crate::reorder;
 
 use crate::alerts::{self, array_status, fan_label, fs_pct, storage_health};
 use crate::chart::{LiveChart, Series, span_minutes};
@@ -16,7 +20,7 @@ use crate::icons::{self, Icon};
 use crate::layout::{self, Item, Size, W};
 use crate::live::{Live, Res, use_live};
 use crate::prefs::{storage_get, storage_set, use_ui};
-use crate::ui::{EmptyState, Meter, Pending, Skeleton, Status, Tone, WidgetHead, reduced_motion, temp_tone, usage_tone};
+use crate::ui::{EmptyState, Meter, Pending, Skeleton, Status, Tone, WidgetHead, temp_tone, usage_tone};
 
 const LAYOUT_KEY: &str = "rynas.dashboard";
 
@@ -333,159 +337,44 @@ fn CellTools(w: W, board: Board, size: Memo<Size>) -> impl IntoView {
 }
 
 fn focus_handle(w: W) {
-    if let Ok(Some(el)) = document().query_selector(&format!("[data-w='{}'] .drag-handle", w.id()))
-        && let Ok(el) = el.dyn_into::<HtmlElement>()
-    {
-        let _ = el.focus();
-    }
+    reorder::focus_handle("data-w", w.id());
 }
 
 fn grid_el(board: Board) -> Option<HtmlElement> {
     board.grid.get_untracked().map(|d| d.unchecked_into::<HtmlElement>())
 }
 
-fn cells(grid: &HtmlElement) -> Vec<HtmlElement> {
-    let list = grid.children();
-    (0..list.length())
-        .filter_map(|i| list.item(i))
-        .filter_map(|e| e.dyn_into::<HtmlElement>().ok())
-        .filter(|e| e.has_attribute("data-w"))
-        .collect()
-}
-
-/// FLIP: remember where every cell is, apply `mutate`, then animate each cell from its old
-/// place to the new one with `transform` only (no layout work per frame). `skip` is the cell
-/// being dragged, which follows the pointer instead.
+/// FLIP of the grid's cells around `mutate` ([`reorder::flip`]); `skip` is the dragged cell.
 fn flip(board: Board, skip: Option<W>, mutate: impl FnOnce()) {
-    let Some(grid) = grid_el(board) else {
-        mutate();
-        return;
-    };
-    if reduced_motion() {
-        mutate();
-        return;
-    }
-    let g = grid.get_bounding_client_rect();
-    let before: Vec<(String, f64, f64)> = cells(&grid)
-        .iter()
-        .map(|el| {
-            let r = el.get_bounding_client_rect();
-            (el.get_attribute("data-w").unwrap_or_default(), r.left() - g.left(), r.top() - g.top())
-        })
-        .collect();
-    mutate();
-    // the reactive update lands in a microtask, before the next frame: measure there
-    request_animation_frame(move || {
-        let skip = skip.map(W::id);
-        let mut moved = Vec::new();
-        for el in cells(&grid) {
-            let id = el.get_attribute("data-w").unwrap_or_default();
-            if Some(id.as_str()) == skip {
-                continue;
-            }
-            let Some((_, x, y)) = before.iter().find(|b| b.0 == id) else { continue };
-            let (dx, dy) = (x - el.offset_left() as f64, y - el.offset_top() as f64);
-            if dx.abs() < 0.5 && dy.abs() < 0.5 {
-                continue;
-            }
-            let st = el.style();
-            let _ = st.set_property("transition", "none");
-            let _ = st.set_property("transform", &format!("translate({dx}px, {dy}px)"));
-            moved.push(el);
-        }
-        if moved.is_empty() {
-            return;
-        }
-        let _ = grid.offset_height(); // commit the inverted positions
-        for el in moved {
-            let st = el.style();
-            let _ = st.set_property("transition", "transform 260ms var(--ease)");
-            let _ = st.remove_property("transform");
-        }
-    });
+    reorder::flip(grid_el(board), "data-w", skip.map(|w| w.id().to_string()), mutate);
 }
 
-/// Pointer drag of a cell: the cell follows the pointer, the others make room (FLIP) as it
-/// passes over them. Esc cancels. Window listeners exist only while dragging.
+/// Pointer drag of a cell ([`reorder::start_drag`]): the others make room as it passes over
+/// them, Esc puts the layout back.
 fn start_drag(board: Board, w: W, e: PointerEvent) {
     if e.button() != 0 {
         return;
     }
-    e.prevent_default();
-    let Some(grid) = grid_el(board) else { return };
-    let Some(el) = cells(&grid).into_iter().find(|c| c.get_attribute("data-w").as_deref() == Some(w.id())) else { return };
-    let r = el.get_bounding_client_rect();
-    let grab = (e.client_x() as f64 - r.left(), e.client_y() as f64 - r.top());
     let original = board.layout.get_untracked();
-    let pointer = StoredValue::new((e.client_x() as f64, e.client_y() as f64));
-    let last = StoredValue::new((None::<W>, 0.0f64));
-    let _ = el.style().set_property("transition", "none");
     board.dragging.set(Some(w));
-
-    // place the dragged cell under the pointer, relative to its current slot in the grid
-    let follow = {
-        let (grid, el) = (grid.clone(), el.clone());
-        move || {
-            let (x, y) = pointer.get_value();
-            let g = grid.get_bounding_client_rect();
-            let tx = x - grab.0 - (g.left() + el.offset_left() as f64);
-            let ty = y - grab.1 - (g.top() + el.offset_top() as f64);
-            let _ = el.style().set_property("transform", &format!("translate({tx}px, {ty}px) scale(1.02)"));
-        }
-    };
-    let follow = StoredValue::new_local(follow);
-
-    let on_move = window_event_listener(leptos::ev::pointermove, move |e| {
-        let (x, y) = (e.client_x() as f64, e.client_y() as f64);
-        pointer.set_value((x, y));
-        follow.with_value(|f| f());
-        // the dragged cell ignores the pointer (CSS), so this finds what is under it
-        let target = document()
-            .element_from_point(x as f32, y as f32)
-            .and_then(|el| el.closest("[data-w]").ok().flatten())
-            .and_then(|el| el.get_attribute("data-w"))
-            .and_then(|id| layout::ALL.into_iter().find(|w| w.id() == id));
-        let Some(target) = target.filter(|t| *t != w) else { return };
-        let now = js_sys::Date::now();
-        let (prev, at) = last.get_value();
-        if prev == Some(target) && now - at < 400.0 {
-            return;
-        }
-        last.set_value((Some(target), now));
-        flip(board, Some(w), move || {
-            board.layout.update(|l| {
-                layout::move_to(l, w, target);
+    let hooks = reorder::DragHooks {
+        over: Rc::new(move |id: String| {
+            let Some(target) = layout::ALL.into_iter().find(|t| t.id() == id) else { return };
+            flip(board, Some(w), move || {
+                board.layout.update(|l| {
+                    layout::move_to(l, w, target);
+                });
             });
-        });
-        request_animation_frame(move || follow.with_value(|f| f()));
-    });
-
-    let listeners: StoredValue<Vec<WindowListenerHandle>, LocalStorage> = StoredValue::new_local(vec![on_move]);
-    let finish = move |cancel: bool| {
-        listeners.update_value(|v| v.drain(..).for_each(WindowListenerHandle::remove));
-        if cancel {
+        }),
+        cancel: Rc::new(move || {
             let original = original.clone();
             flip(board, Some(w), move || board.layout.set(original));
-        }
-        let _ = el.style().set_property("transition", "transform 220ms var(--ease)");
-        request_animation_frame({
-            let el = el.clone();
-            move || {
-                let _ = el.style().remove_property("transform");
-            }
-        });
-        set_timeout(move || { board.dragging.try_set(None); }, std::time::Duration::from_millis(220));
+        }),
+        end: Rc::new(move || {
+            board.dragging.try_set(None);
+        }),
     };
-    let finish = StoredValue::new_local(finish);
-    let up = window_event_listener(leptos::ev::pointerup, move |_| finish.with_value(|f| f(false)));
-    let cancel = window_event_listener(leptos::ev::pointercancel, move |_| finish.with_value(|f| f(false)));
-    let esc = window_event_listener(leptos::ev::keydown, move |e| {
-        if e.key() == "Escape" {
-            e.prevent_default();
-            finish.with_value(|f| f(true));
-        }
-    });
-    listeners.update_value(|v| v.extend([up, cancel, esc]));
+    reorder::start_drag(grid_el(board), "data-w", w.id().to_string(), e, false, hooks);
 }
 
 // ---------------------------------------------------------------- widgets

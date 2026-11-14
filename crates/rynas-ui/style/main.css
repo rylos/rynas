@@ -89,7 +89,7 @@
 
   /* density: comfortable */
   --row-h: 40px; --input-h: 36px; --ctl-sm: 28px; --card-pad: 16px; --gap: 16px;
-  --appbar-h: 56px; --sb-w: 232px; --sb-w-collapsed: 64px;
+  --appbar-h: 56px; --sb-w: 232px; --sb-w-collapsed: 64px; --sb-w-edit: 304px;
   /* room kept under the content for the fixed dock / bottom bar */
   --clear-dock: 40px; --clear-tasks: 400px; --clear-bottombar: 140px;
   /* optical alignment of an icon with a text line only (never a padding or gap) */
@@ -226,6 +226,8 @@ kbd {
   transition: grid-template-columns var(--t-med) var(--ease);
 }
 .app.collapsed { grid-template-columns: var(--sb-w-collapsed) minmax(0, 1fr); }
+/* customizing the sidebar: wider, so names fit next to the handle and the buttons */
+.app.nav-editing { --sb-w: var(--sb-w-edit); }
 
 .appbar {
   grid-column: 1 / -1;
@@ -406,8 +408,48 @@ kbd {
   overflow: hidden auto;
   z-index: 20;
 }
-.nav { display: flex; flex-direction: column; gap: var(--s-1); flex: 1; }
-.nav li.group { margin-top: var(--s-3); padding-top: var(--s-3); border-top: 1px solid var(--border); }
+/* the container is the offset parent of its rows (FLIP and drag, src/reorder.rs) */
+.nav { position: relative; display: flex; flex-direction: column; gap: var(--s-1); flex: 1; }
+.nav-sep { margin-block: var(--s-2); border-top: 1px solid var(--border); }
+/* editing (src/sidebar.rs): a handle per group, rows with handle and buttons */
+.nav-sep.edit {
+  display: flex; align-items: center; gap: var(--s-2);
+  margin-block: var(--s-2) 0; padding-top: var(--s-1);
+  border-top-style: dashed; border-top-color: var(--border-strong);
+  background: var(--surface-nav);
+}
+.nav.editing .nav-sep.edit:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+.nav-sep-label { font-size: var(--fs-12); font-weight: 600; color: var(--text-subtle); text-transform: uppercase; letter-spacing: .04em; }
+.nav-edit-row { gap: var(--s-2); padding: 0 var(--s-1); color: var(--text); }
+.nav-edit-row:hover { background: transparent; }
+.nav-edit-row .nav-label { flex: 1; min-width: 0; }
+.nav [data-nav].dragging { position: relative; z-index: 2; pointer-events: none; }
+.nav li.dragging .nav-item, .nav-sep.dragging { background: var(--surface); border-radius: var(--r-md); box-shadow: var(--shadow-2); }
+.tool.danger:hover { color: var(--danger); background: color-mix(in oklch, var(--danger) 10%, var(--surface)); }
+.nav-edit {
+  display: flex; flex-direction: column; gap: var(--s-3);
+  margin-top: var(--s-3); padding: var(--s-3); border-radius: var(--r-md);
+  background: color-mix(in oklch, var(--accent) 8%, var(--surface));
+  border: 1px solid color-mix(in oklch, var(--accent) 30%, var(--border));
+  animation: rise var(--t-med) var(--ease);
+}
+.nav-edit .edit-hint { flex: none; font-size: var(--fs-12); }
+.nav-edit > .btn { justify-content: center; }
+.nav-edit-actions { display: flex; gap: var(--s-2); }
+.nav-edit-actions .btn { flex: 1; justify-content: center; }
+.about-actions { display: inline-flex; gap: var(--s-1); }
+.app.collapsed .customize-btn { display: none; }
+.icon-pick { display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--input-h), 1fr)); gap: var(--s-1); }
+.icon-choice {
+  display: grid; place-items: center; height: var(--input-h);
+  border-radius: var(--r-sm); border: 1px solid var(--border);
+  background: var(--surface); color: var(--text-muted);
+  transition: border-color var(--t-fast), color var(--t-fast), background var(--t-fast);
+}
+.icon-choice:hover { color: var(--text); border-color: var(--border-strong); }
+.icon-choice.on { color: var(--accent); border-color: var(--accent); background: color-mix(in oklch, var(--accent) 12%, var(--surface)); }
+.field-actions { display: flex; flex-wrap: wrap; gap: var(--s-2); }
+.bb-label { max-width: 100%; padding-inline: var(--s-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .nav-item {
   position: relative;
   display: flex; align-items: center; gap: var(--s-3);
@@ -1373,10 +1415,12 @@ kbd {
     visibility: hidden;
     box-shadow: var(--shadow-pop);
   }
+  .app.nav-editing .sidebar { width: min(var(--sb-w-edit), calc(100vw - var(--s-8))); }
   .app.drawer-open .sidebar { transform: none; visibility: visible; transition: transform var(--t-med) var(--ease); }
   .app.collapsed .nav-label { opacity: 1; pointer-events: auto; }
   .app.collapsed .about-text { display: inline; }
   .app.collapsed .sidebar-about { padding-left: var(--s-3); }
+  .app.collapsed .customize-btn { display: grid; }
   .collapse-btn { display: none; }
   .scrim { display: block; position: fixed; inset: var(--appbar-h) 0 0; z-index: 34; background: var(--scrim); opacity: 0; pointer-events: none; transition: opacity var(--t-med); }
   .app.drawer-open .scrim { opacity: 1; pointer-events: auto; }
@@ -1411,7 +1455,7 @@ kbd {
     background: var(--glass); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
     border-top: 1px solid var(--border);
   }
-  .bb-item { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--s-1); font-size: var(--fs-12); font-weight: 500; color: var(--text-subtle); }
+  .bb-item { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--s-1); font-size: var(--fs-12); font-weight: 500; color: var(--text-subtle); }
   .bb-item[aria-current="page"] { color: var(--accent); }
   .dock { bottom: calc(56px + env(safe-area-inset-bottom)); }
   .sidebar { bottom: calc(56px + env(safe-area-inset-bottom)); }
@@ -1681,6 +1725,9 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .table tr.muted-row td { color: var(--text-muted); }
 .table td.wrap-cell { white-space: normal; min-width: 240px; }
 .ellipsis-cell { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Task Scheduler at medium widths: the command gives way to a running task's wider status
+   ("In esecuzione") so the table fits its card */
+@media (min-width: 768px) and (max-width: 1279px) { .sch-action .ellipsis-cell { max-width: 160px; } }
 .cell-sub.ellipsis-cell { display: block; }
 .pre-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--fs-13); }
 /* a notification body that is command output (body_format log) */

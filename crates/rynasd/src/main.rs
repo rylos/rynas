@@ -1249,6 +1249,8 @@ fn main() -> std::io::Result<()> {
             rynasd::processes::spawn_trim(p.clone());
             state.processes = Some(Arc::new(rynasd::processes::ProcessesApi { processes: p, ops: ops.clone() }));
         }
+        // preferences of the web interface, per user (the sidebar layout)
+        state.ui_prefs = Some(Arc::new(rynasd::ui_prefs::UiPrefs::new(args.state_dir.join("ui-prefs"))));
         // Tailscale (remote access): status from tailscaled's LocalAPI, tasks for the rest
         {
             let socket = match (&args.tailscale_socket, args.dry_system) {

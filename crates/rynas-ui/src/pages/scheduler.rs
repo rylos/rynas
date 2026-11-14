@@ -818,7 +818,7 @@ fn task_row(
                 </div>
             }
             .into_any()),
-            ui::cell("sch.col.action", "", view! {
+            ui::cell("sch.col.action", "sch-action", view! {
                 <div class="cell-main">
                     <span>{akind}</span>
                     <span class="cell-sub mono ellipsis-cell">{adetail}</span>
@@ -846,15 +846,23 @@ fn task_row(
                     disabled=move || running.get() || st.running || !st.applied || is_managed on:click=run>
                     <Icon icon=icons::PLAY size=16 />
                 </button>
-                // the run going on now (a timer's too): its output as it comes, in the history drawer
-                {st.running.then(|| view! {
-                    <button class="icon-btn sm" title=tr("sch.live") aria-label=ui::verb_name("sch.live", &n6) on:click=move |_| history.set(Some(t_live.clone()))>
-                        <Icon icon=icons::ACTIVITY size=16 />
-                    </button>
-                })}
-                <button class="icon-btn sm" title=tr("sch.history") aria-label=ui::verb_name("sch.history", &n3) on:click=move |_| history.set(Some(t_hist.clone()))>
-                    <Icon icon=icons::HISTORY size=16 />
-                </button>
+                // the same drawer either way: while a run goes on (a timer's too) it opens on its
+                // live output, so the button says that (one button: the row keeps its width)
+                {if st.running {
+                    view! {
+                        <button class="icon-btn sm" title=tr("sch.live") aria-label=ui::verb_name("sch.live", &n6) on:click=move |_| history.set(Some(t_live.clone()))>
+                            <Icon icon=icons::ACTIVITY size=16 />
+                        </button>
+                    }
+                    .into_any()
+                } else {
+                    view! {
+                        <button class="icon-btn sm" title=tr("sch.history") aria-label=ui::verb_name("sch.history", &n3) on:click=move |_| history.set(Some(t_hist.clone()))>
+                            <Icon icon=icons::HISTORY size=16 />
+                        </button>
+                    }
+                    .into_any()
+                }}
                 <button class="icon-btn sm" title=tr("edit") aria-label=format!("{} {}", t("edit"), n4) disabled=deleting || is_managed on:click=move |_| edit.set(Some((task.clone(), false)))>
                     <Icon icon=icons::PENCIL size=16 />
                 </button>

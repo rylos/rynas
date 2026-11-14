@@ -52,6 +52,7 @@ pub mod ssh;
 pub mod system_power;
 pub mod tailscale;
 pub mod tls;
+pub mod ui_prefs;
 pub mod updates;
 pub mod ups;
 pub mod ups_netserver;

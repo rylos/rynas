@@ -24,14 +24,18 @@
       // Signed in last time: ask now for what the first screen needs, while the wasm is on its
       // way (src/api.rs takes these answers instead of asking again). Same requests, same rules:
       // a 401 just means the login screen. The list matches src/live.rs.
+      // The user's sidebar layout (src/sidebar.rs) is asked only once the session's answer is
+      // in and valid: a sixth request in the first wave would take the last of the browser's six
+      // HTTP/1.1 connections (plain-HTTP LAN) from the stylesheet and the wasm, and with an
+      // expired session it would only be a 401.
       var s = null;
       try { s = localStorage.getItem("rynas.sess"); } catch (e) {}
       if (s && window.AbortSignal && AbortSignal.timeout) {
         var early = window.__rynasEarly = {};
-        ["/api/v1/auth/session", "/api/v1/system", "/api/v1/metrics/history?minutes=10", "/api/v1/storage", "/api/v1/hardware"].forEach(function (u) {
+        var ask = function (u) {
           // read to the end here: the timeout covers the body too, and on a slow link the wasm
           // may arrive after it. A failure is null: the page then asks by itself.
-          early[u] = fetch(u, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(30000) })
+          return fetch(u, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(30000) })
             .then(function (r) {
               return r.blob().then(function (b) {
                 var h = new Headers(r.headers);
@@ -40,6 +44,13 @@
               });
             })
             .catch(function () { return null; });
+        };
+        ["/api/v1/auth/session", "/api/v1/system", "/api/v1/metrics/history?minutes=10", "/api/v1/storage", "/api/v1/hardware"].forEach(function (u) {
+          early[u] = ask(u);
+        });
+        var prefs = "/api/v1/prefs/sidebar";
+        early[prefs] = early["/api/v1/auth/session"].then(function (r) {
+          return r && r.ok ? ask(prefs) : null;
         });
       }
     })();

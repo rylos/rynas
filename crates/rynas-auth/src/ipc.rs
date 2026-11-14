@@ -36,6 +36,11 @@ pub const DEFAULT_SOCKET: &str = "/run/rynas/rynasd.sock";
 /// Header with the name of the logged-in user on proxied configuration and task requests.
 pub const USER_HEADER: &str = "x-rynas-user";
 
+/// Header with the realm of the logged-in user (`pam`, `rynas`…), added by `rynas-web` next to
+/// [`USER_HEADER`] on the user's own preferences (`/v1/prefs/…`): two realms may have a user
+/// of the same name, and domain names (`DOMAIN\user`, `user@realm`) are not system names.
+pub const REALM_HEADER: &str = "x-rynas-realm";
+
 /// Header with the local address (`ip:port`) the session's TCP connection arrived on, added
 /// by `rynas-web` to the network endpoints: rynasd derives the management interface from it
 /// and checks that a network confirmation came over the new path.

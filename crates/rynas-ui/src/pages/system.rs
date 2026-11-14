@@ -1,4 +1,5 @@
-//! Sistema: machine facts and interface preferences (theme, density, language, time format).
+//! Sistema: machine facts and interface preferences (theme, density, language, time format,
+//! the sidebar: customize, reset).
 
 use leptos::prelude::*;
 
@@ -25,6 +26,7 @@ fn theme_code(t: ThemePref) -> &'static str {
 #[component]
 pub fn System() -> impl IntoView {
     let ui = use_ui();
+    let nav = crate::sidebar::nav_layout();
     let live = use_live();
     let lang_pref = RwSignal::new(i18n::lang_pref());
     let sys = live.system;
@@ -74,6 +76,18 @@ pub fn System() -> impl IntoView {
                         Signal::derive(move || i18n::hour_cycle().code().to_string()),
                         Callback::new(move |v: String| i18n::set_hour_cycle(HourCycle::from_code(&v))),
                     )}
+                    <div class="field">
+                        <span class="field-label">{tr("sys.sidebar")}</span>
+                        <div class="field-actions">
+                            <button type="button" class="btn ghost" disabled=move || !nav.loaded.get() on:click=move |_| nav.open_editor(ui)>
+                                <Icon icon=icons::PENCIL size=16 />{tr("nav.customize")}
+                            </button>
+                            <button type="button" class="btn ghost" disabled=move || !nav.loaded.get() on:click=move |_| nav.reset_ask.set(true)>
+                                <Icon icon=icons::ROTATE_CCW size=16 />{tr("reset")}
+                            </button>
+                        </div>
+                        <span class="field-help">{tr("sys.sidebar_help")}</span>
+                    </div>
                 </section>
                 <section class="card widget w-6" style="--i:1">
                     <h2 class="section-title">{tr("sys.info")}</h2>

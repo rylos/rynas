@@ -22,7 +22,7 @@ use crate::app::AppState;
 use crate::auth::CurrentSession;
 use crate::conn::{Client, LocalAddr};
 use crate::error::Error;
-use rynas_auth::ipc::{CLIENT_ADDR_HEADER, HOST_HEADER, LOCAL_ADDR_HEADER};
+use rynas_auth::ipc::{CLIENT_ADDR_HEADER, HOST_HEADER, LOCAL_ADDR_HEADER, REALM_HEADER};
 use rynas_auth::session::SessionData;
 
 /// Largest request body forwarded (guidelines M3).
@@ -434,6 +434,23 @@ fn passed_headers() -> [HeaderName; 9] {
         HeaderName::from_static("x-rynas-next-offset"),
         HeaderName::from_static("x-rynas-log-complete"),
     ]
+}
+
+/// The signed-in user's own preferences of the interface (the sidebar layout): every user,
+/// whatever the role, for themselves (rynasd keys them by the forwarded user).
+pub fn own_routes() -> Router<AppState> {
+    Router::new().route("/prefs/sidebar", get(forward_own).put(forward_own).delete(forward_own))
+}
+
+/// The user's own preferences: forwarded with the session's realm too, so rynasd can key
+/// them by realm and name (only rynas-web names the identity, never the client).
+async fn forward_own(
+    State(st): State<AppState>,
+    Extension(CurrentSession(session)): Extension<CurrentSession>,
+    req: Request,
+) -> Response {
+    let extra = vec![(REALM_HEADER, session.user.realm.clone())];
+    forward_with(st, session, req, extra).await
 }
 
 async fn forward(

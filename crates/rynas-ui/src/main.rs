@@ -27,8 +27,10 @@ mod power;
 mod prefs;
 mod qr;
 mod removable;
+mod reorder;
 mod schema_form;
 mod shell;
+mod sidebar;
 mod sshfp;
 #[cfg(test)]
 mod source_check;

@@ -318,6 +318,8 @@ Before adding a text, check the glossary; a new concept gets a row here first.
 | web UI session | sign in / sign out | accedi / esci |
 | hardware source (synohwd, a module) | hardware source | sorgente hardware (never "provider") |
 | beeper | beeper | cicalino |
+| a page as an entry of its own in the sidebar | pin / unpin, pinned page | fissa / stacca, pagina fissata |
+| the side navigation | sidebar | barra laterale |
 
 - Statuses are one word each, the same everywhere: Running "In esecuzione", Healthy "Integro",
   Warning "Avviso", Notice "Informazione", Failing "In avaria", Done "Completato/a", Never run "Mai

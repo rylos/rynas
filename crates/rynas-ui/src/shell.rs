@@ -17,13 +17,17 @@ use crate::notify::{Bell, Notes};
 use crate::pages;
 use crate::palette::Palette;
 use crate::prefs::{ThemePref, Ui, use_ui};
+use crate::sidebar::{NavLayout, nav_layout};
 
+/// A built-in entry of the sidebar. Its place (order and group) comes from the user's layout
+/// (`crate::sidebar`), whose default is `rynas_api_types::ui_prefs::SIDEBAR_DEFAULT`: a new
+/// entry is added there too, with the same `id`.
 pub struct NavItem {
+    /// Stable id of the entry in the saved layouts.
+    pub id: &'static str,
     pub path: &'static str,
     pub key: &'static str,
     pub icon: &'static str,
-    /// Starts a new visual group in the sidebar.
-    pub group: bool,
 }
 
 /// Whether a navigation entry exists now: Docker only while it is installed or being
@@ -33,19 +37,19 @@ pub fn nav_shown(path: &str) -> bool {
 }
 
 pub const NAV: [NavItem; 13] = [
-    NavItem { path: "/", key: "nav.dashboard", icon: icons::LAYOUT_DASHBOARD, group: false },
-    NavItem { path: "/storage", key: "nav.storage", icon: icons::HARD_DRIVE, group: true },
-    NavItem { path: "/files", key: "nav.files", icon: icons::FOLDER, group: false },
-    NavItem { path: "/shares", key: "nav.shares", icon: icons::SHARE_2, group: false },
-    NavItem { path: "/snapshots", key: "nav.snapshots", icon: icons::CAMERA, group: false },
-    NavItem { path: "/backup", key: "nav.backup", icon: icons::ARCHIVE_RESTORE, group: false },
-    NavItem { path: "/users", key: "nav.users", icon: icons::USERS, group: true },
-    NavItem { path: "/services", key: "nav.services", icon: icons::SERVER, group: false },
-    NavItem { path: "/docker", key: "nav.docker", icon: icons::CONTAINER, group: false },
-    NavItem { path: "/apps", key: "nav.apps", icon: icons::PUZZLE, group: false },
-    NavItem { path: "/network", key: "nav.network", icon: icons::NETWORK, group: true },
-    NavItem { path: "/hardware", key: "nav.hardware", icon: icons::CPU, group: false },
-    NavItem { path: "/system", key: "nav.system", icon: icons::SETTINGS, group: false },
+    NavItem { id: "dashboard", path: "/", key: "nav.dashboard", icon: icons::LAYOUT_DASHBOARD },
+    NavItem { id: "storage", path: "/storage", key: "nav.storage", icon: icons::HARD_DRIVE },
+    NavItem { id: "files", path: "/files", key: "nav.files", icon: icons::FOLDER },
+    NavItem { id: "shares", path: "/shares", key: "nav.shares", icon: icons::SHARE_2 },
+    NavItem { id: "snapshots", path: "/snapshots", key: "nav.snapshots", icon: icons::CAMERA },
+    NavItem { id: "backup", path: "/backup", key: "nav.backup", icon: icons::ARCHIVE_RESTORE },
+    NavItem { id: "users", path: "/users", key: "nav.users", icon: icons::USERS },
+    NavItem { id: "services", path: "/services", key: "nav.services", icon: icons::SERVER },
+    NavItem { id: "docker", path: "/docker", key: "nav.docker", icon: icons::CONTAINER },
+    NavItem { id: "apps", path: "/apps", key: "nav.apps", icon: icons::PUZZLE },
+    NavItem { id: "network", path: "/network", key: "nav.network", icon: icons::NETWORK },
+    NavItem { id: "hardware", path: "/hardware", key: "nav.hardware", icon: icons::CPU },
+    NavItem { id: "system", path: "/system", key: "nav.system", icon: icons::SETTINGS },
 ];
 
 #[component]
@@ -59,16 +63,20 @@ pub fn App() -> impl IntoView {
     let config = Config::new();
     live.start();
     provide_context(Notes::new(live));
+    let nav = NavLayout::new();
+    provide_context(nav);
 
     // data and stream follow the session
     Effect::new(move |prev: Option<bool>| {
         let ready = auth.phase.get() == Phase::Ready;
         if ready && prev != Some(true) {
             live.resume();
+            nav.load();
         } else if !ready && prev == Some(true) {
             live.suspend();
             config.clear();
             tasks.clear();
+            nav.clear();
             ui.user_menu_open.set(false);
             ui.palette_open.set(false);
             ui.notif_open.set(false);
@@ -87,6 +95,16 @@ pub fn App() -> impl IntoView {
             e.prevent_default();
             ui.palette_open.update(|o| *o = !*o);
         } else if k == "Escape" {
+            // Esc closes the phone drawer; while customizing it there, it also ends the editing
+            // (not during a drag, which Esc cancels, nor with a dialog of the sidebar open)
+            if ui.drawer_open.get_untracked()
+                && nav.editing.get_untracked()
+                && nav.dragging.get_untracked().is_none()
+                && nav.pin_dialog.with_untracked(Option::is_none)
+                && !nav.reset_ask.get_untracked()
+            {
+                nav.done();
+            }
             ui.drawer_open.set(false);
             ui.user_menu_open.set(false);
             ui.notif_open.set(false);
@@ -147,12 +165,16 @@ fn Shell() -> impl IntoView {
     });
     // the file manager in a window of its own (`/files…?window`): no bars around it
     let bare = move || location.pathname.with(|p| p == "/files" || p.starts_with("/files/")) && query.with(|q| q.get("window").is_some());
+    let nav = nav_layout();
     let app_class = move || {
         let mut c = String::from("app");
         if bare() {
             c.push_str(" bare");
         }
-        if ui.sidebar_collapsed.get() {
+        // the editing mode needs the names: the sidebar opens while it lasts
+        if nav.editing.get() {
+            c.push_str(" nav-editing");
+        } else if ui.sidebar_collapsed.get() {
             c.push_str(" collapsed");
         }
         if ui.drawer_open.get() {
@@ -218,6 +240,8 @@ fn Shell() -> impl IntoView {
         <SessionNotice />
         <crate::toast::Toasts />
         <Palette />
+        <crate::sidebar::PinDialog />
+        <crate::sidebar::ResetAsk />
         <crate::power::PowerHost />
     }
 }
@@ -398,57 +422,63 @@ fn UserMenu() -> impl IntoView {
 #[component]
 fn Sidebar() -> impl IntoView {
     let ui = use_ui();
-    let location = use_location();
+    let nav = nav_layout();
     let collapse_label = move || if ui.sidebar_collapsed.get() { t("nav.expand") } else { t("nav.collapse") };
+    // the sidebar is wider while editing (and open when collapsed): the charts follow
+    Effect::new(move |prev: Option<bool>| {
+        let e = nav.editing.get();
+        if prev.is_some_and(|p| p != e) {
+            ui.relayout_soon();
+        }
+        e
+    });
     view! {
         <nav class="sidebar" aria-label=tr("nav.main")>
-            <ul class="nav">
-                {NAV
-                    .iter()
-                    .map(|item| {
-                        let path = item.path;
-                        let current = move || {
-                            let p = location.pathname.get();
-                            let on = if path == "/" { p == "/" } else { p.starts_with(path) };
-                            on.then_some("page")
-                        };
-                        let key = item.key;
-                        view! {
-                            <li class:group=item.group hidden=move || !nav_shown(path)>
-                                <a class="nav-item" href=path aria-current=current title=move || t(key)>
-                                    <Icon icon=item.icon />
-                                    <span class="nav-label">{move || t(key)}</span>
-                                </a>
-                            </li>
+            <crate::sidebar::NavList />
+            <Show
+                when=move || nav.editing.get()
+                fallback=move || view! {
+                    <div class="sidebar-about">
+                        <span class="about-text">{concat!("rynas ", env!("CARGO_PKG_VERSION"), " · Marco Ziliani")}</span>
+                        <span class="about-actions">
+                            <button
+                                type="button"
+                                class="icon-btn sm about-link customize-btn"
+                                aria-label=tr("nav.customize")
+                                title=tr("nav.customize")
+                                disabled=move || !nav.loaded.get()
+                                on:click=move |_| nav.start_editing()
+                            >
+                                <Icon icon=icons::PENCIL size=16 />
+                            </button>
+                            <a
+                                class="icon-btn sm about-link"
+                                href=env!("CARGO_PKG_REPOSITORY")
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                aria-label=tr("nav.project")
+                                title=tr("nav.project")
+                            >
+                                <Icon icon=icons::GITHUB size=16 />
+                            </a>
+                        </span>
+                    </div>
+                    <button
+                        class="nav-item collapse-btn"
+                        aria-label=collapse_label
+                        title=collapse_label
+                        on:click=move |_| {
+                            ui.sidebar_collapsed.update(|c| *c = !*c);
+                            ui.relayout_soon();
                         }
-                    })
-                    .collect_view()}
-            </ul>
-            <div class="sidebar-about">
-                <span class="about-text">{concat!("rynas ", env!("CARGO_PKG_VERSION"), " · Marco Ziliani")}</span>
-                <a
-                    class="icon-btn sm about-link"
-                    href=env!("CARGO_PKG_REPOSITORY")
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    aria-label=tr("nav.project")
-                    title=tr("nav.project")
-                >
-                    <Icon icon=icons::GITHUB size=16 />
-                </a>
-            </div>
-            <button
-                class="nav-item collapse-btn"
-                aria-label=collapse_label
-                title=collapse_label
-                on:click=move |_| {
-                    ui.sidebar_collapsed.update(|c| *c = !*c);
-                    ui.relayout_soon();
+                    >
+                        <Icon icon=icons::PANEL_LEFT />
+                        <span class="nav-label">{tr("nav.collapse")}</span>
+                    </button>
                 }
             >
-                <Icon icon=icons::PANEL_LEFT />
-                <span class="nav-label">{tr("nav.collapse")}</span>
-            </button>
+                <crate::sidebar::EditBar />
+            </Show>
         </nav>
     }
 }
@@ -456,27 +486,33 @@ fn Sidebar() -> impl IntoView {
 #[component]
 fn BottomBar() -> impl IntoView {
     let ui = use_ui();
+    let nav = nav_layout();
     let location = use_location();
-    let item = move |path: &'static str, key: &'static str, icon: &'static str| {
-        let current = move || {
-            let p = location.pathname.get();
-            (if path == "/" { p == "/" } else { p.starts_with(path) }).then_some("page")
-        };
-        view! {
-            <a class="bb-item" href=path aria-current=current>
-                <Icon icon=icon size=20 />
-                <span>{move || t(key)}</span>
-            </a>
-        }
-    };
+    // the first entries of the user's sidebar, then Menu (the sidebar as a drawer)
+    let ids = Memo::new(move |_| nav.board.with(|b| crate::sidebar::bottom_ids(&b.layout, &crate::sidebar::shown, crate::sidebar::BOTTOM_ENTRIES)));
+    let current = Memo::new(move |_| {
+        let p = location.pathname.get();
+        nav.board.with(|b| crate::sidebar::current(&b.layout, &p, &crate::sidebar::shown))
+    });
     view! {
         <nav class="bottombar" aria-label=tr("nav.main")>
-            {item("/", "nav.dashboard", icons::LAYOUT_DASHBOARD)}
-            {item("/storage", "nav.storage", icons::HARD_DRIVE)}
-            {item("/hardware", "nav.hardware", icons::CPU)}
+            <For each=move || ids.get() key=|id| id.clone() let:id>
+                {
+                    let id = StoredValue::new(id);
+                    let view_of = move || nav.board.with(|b| crate::sidebar::entry(&b.layout, &id.get_value()));
+                    let label = move || view_of().map(|v| v.label()).unwrap_or_default();
+                    let aria_current = move || (current.get().as_deref() == Some(id.get_value().as_str())).then_some("page");
+                    view! {
+                        <a class="bb-item" href=move || view_of().map(|v| v.path).unwrap_or_default() aria-current=aria_current>
+                            {move || view! { <Icon icon=view_of().map_or(icons::PIN, |v| v.icon) size=20 /> }}
+                            <span class="bb-label">{label}</span>
+                        </a>
+                    }
+                }
+            </For>
             <button class="bb-item" on:click=move |_| ui.drawer_open.update(|o| *o = !*o) aria-expanded=move || ui.drawer_open.get().to_string()>
                 <Icon icon=icons::MENU size=20 />
-                <span>{tr("nav.menu")}</span>
+                <span class="bb-label">{tr("nav.menu")}</span>
             </button>
         </nav>
     }

@@ -1712,6 +1712,46 @@ asks every 2 s while the page is visible (a written exception to S1, see D-PROCE
 unit gains `CAP_KILL`, `CAP_SYS_NICE` and `CAP_SYS_PTRACE` (read only: the I/O counters and
 listening ports of every user's processes; Marco 2026-11-11).
 
+## API v1: interface preferences (sidebar layout, issue #11)
+Module `rynasd::ui_prefs`, types and rules in `rynas_api_types::ui_prefs`. Preferences of the
+web interface that follow the account across browsers and devices, kept on the NAS for each
+user: every signed-in user, whatever the role, reads and writes only their own (rynas-web
+forwards the session's user and realm in `x-rynas-user` and `x-rynas-realm`, never the
+client's; the routes sit beside logout and TOTP, outside `require_admin`).
+Not configuration: no pending changes, revisions or `.rynasbak` archive. One file per user,
+`<state_dir>/ui-prefs/<key>/sidebar.json` (0600 in 0700 folders, temporary file + rename),
+`<key>` = SHA-256 hex of the realm and the name (length-prefixed realm), so domain names
+(`DOMAIN\user`, `user@realm`) work and users of the same name in two realms never share a file;
+the default layout is never stored, so later defaults reach users who never changed theirs.
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/api/v1/prefs/sidebar` | — | `SidebarPrefs` {layout: `SidebarLayout`? (null = the default)} |
+| PUT | `/api/v1/prefs/sidebar` | `SidebarLayout` {version 1, groups: [[entry id]], hidden: [id], known: [built-in id], pins: [`SidebarPin` {id, path, label, icon}]} | `SidebarPrefs` (null when the body is the default, which removes the file); 400 `invalid_value` with `field` `version`, `groups`, `hidden`, `known` or `pins`; 413 `payload_too_large` over 16 KiB |
+| DELETE | `/api/v1/prefs/sidebar` | — | 204, back to the default |
+
+Validation (`SidebarLayout::validate`): version 1; 1–16 groups, none empty; every built-in
+entry of this release (`SIDEBAR_DEFAULT`: dashboard, storage, files, shares, snapshots, backup,
+users, services, docker, apps, network, hardware, system) exactly once and nothing unknown;
+`hidden` names placed entries only, each once, `known` built-in ones only; at most 16 pins, each placed
+exactly once, id `p` + 1–8 lowercase letters or digits (unique), name 1–48 characters without
+control characters, icon one of `PIN_ICONS`, path an address of the interface itself (`/` then
+URL characters, a query allowed; no `//host`, scheme, fragment, backslash, `.` or `..` segment,
+encoded dot `%2e` or `/api`). A stored file that no longer validates (written by a newer release before a
+downgrade) is still answered: the interface merges every layout it reads with its own default
+(`ui_prefs::merge`): unknown entries and invalid pins are dropped, a built-in entry missing
+from the layout goes to its default place (after the nearest entry that precedes it in its
+default group, else before the nearest that follows, else as a group of its own) and is shown
+even if listed as hidden when it is newer than the layout (not in `known`). Entries the system
+hides (Docker while it is not installed) stay hidden whatever the layout says.
+
+The interface writes nothing before it has read the user's layout (a failed read is retried
+with backoff and editing waits for it), sends one save at a time (then the latest board),
+drops a load answer that arrives after sign-out, sends a pending change before sign-out and
+with a `keepalive` request on `pagehide`. `index.html` asks for the layout early, but only
+after the session's answer, so it never takes an HTTP/1.1 connection from the stylesheet or
+the wasm.
+
 ## API v1: PC backup, file method (agent, restic repository per backup group)
 Module `rynasd::pc_agent`, types in `rynas_api_types::pcagent`, design in
 `../research/pc-backup.md` §4 (D-PCBACKUP, taken 2026-11-11; groups and the memory budget

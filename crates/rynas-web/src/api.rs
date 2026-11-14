@@ -46,6 +46,8 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/totp/disable", post(auth::totp_disable))
         // the file manager: every signed-in user, as their own Linux user
         .merge(crate::files::routes())
+        // the user's own preferences of the interface (sidebar layout)
+        .merge(crate::proxy::own_routes())
         .merge(admin)
         .layer(middleware::from_fn_with_state(
             state.clone(),

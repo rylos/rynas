@@ -175,7 +175,7 @@ fn admin_read(path: &str) -> bool {
 }
 
 /// Route layer after [`require_session`] on every route except the user's own session
-/// (logout, TOTP): any method other than GET/HEAD/OPTIONS — and the few reads of
+/// (logout, TOTP) and preferences (`/prefs/…`): any method other than GET/HEAD/OPTIONS — and the few reads of
 /// [`admin_read`] — needs the administrator role (403 `forbidden`). Every session is an
 /// administrator today; the guard makes adding other roles safe. A request that reaches it
 /// without a session is refused too.

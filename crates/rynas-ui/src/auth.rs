@@ -160,6 +160,8 @@ impl Auth {
 
     pub fn sign_out(self) {
         spawn_local(async move {
+            // a sidebar change not saved yet goes first, while the session still exists
+            crate::sidebar::flush().await;
             // whatever the answer, the session is over for this tab
             let _ = api::post_empty::<()>("/api/v1/auth/logout", None).await;
             storage_set("rynas.sess", "");
