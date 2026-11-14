@@ -808,6 +808,16 @@ impl Storage {
     /// The tree of an inventory, with the details of the open LUKS mappings.
     pub fn tree_of(&self, inv: &Inventory) -> StorageTree {
         let mut t = inventory::tree(inv);
+        // the inventory measures only the filesystems rynas manages (btrfs): an ext4/xfs volume,
+        // the root among them, read 0 bytes used. Local filesystems, so statvfs cannot hang.
+        for v in &mut t.volumes {
+            if v.used == 0
+                && matches!(v.fstype.as_str(), "ext4" | "xfs")
+                && let Some(s) = v.mountpoint.as_deref().and_then(crate::overview::statvfs)
+            {
+                v.used = s.used;
+            }
+        }
         // details of the open LUKS mappings (device-mapper table only)
         let mut status: HashMap<String, luks::CryptStatus> = HashMap::new();
         for c in luks::containers(&inv.graph) {
