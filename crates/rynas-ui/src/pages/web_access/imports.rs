@@ -284,14 +284,14 @@ fn drawer(imp: Imp, id: String) -> AnyView {
     let foot = ui::close_foot(close);
     view! {
         {ui::drawer(title, close, view! { {body} }.into_any(), foot)}
-        {move || ask.get().then(|| ui::confirm(Confirm { busy, error, ..Confirm::new(t("wa.import.delete").to_string(), t("wa.import.delete_confirm").to_string(), "wa.import.delete", true, remove, Callback::new(move |_| ask.set(false))) }))}
+        {move || ask.get().then(|| ui::confirm(Confirm { busy, error, ..Confirm::new(t("wa.import.delete_title").to_string(), t("wa.import.delete_confirm").to_string(), "wa.import.delete", true, remove, Callback::new(move |_| ask.set(false))) }))}
         {move || ask_accept.get().then(|| {
             let pending = item.with_untracked(|c| c.as_ref().map(|c| c.pending_names.join(", "))).unwrap_or_default();
             ui::confirm(Confirm {
                 busy: accept_busy,
                 error: accept_err,
                 extra: Some(view! { <p class="mono small wa-name">{pending}</p> }.into_any()),
-                ..Confirm::new(t("wa.import.accept").to_string(), t("wa.import.accept_confirm").to_string(), "wa.import.accept", false, accept, Callback::new(move |_| ask_accept.set(false)))
+                ..Confirm::new(t("wa.import.accept_title").to_string(), t("wa.import.accept_confirm").to_string(), "wa.import.accept", false, accept, Callback::new(move |_| ask_accept.set(false)))
             })
         })}
     }

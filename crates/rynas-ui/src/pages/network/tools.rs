@@ -117,7 +117,7 @@ fn restore_dialog(net: Net, r: NetRevision, close: Callback<()>) -> AnyView {
         });
     });
     confirm(Confirm {
-        title: tf("net.restore_rev", &[("rev", &id.to_string())]),
+        title: tf("net.restore_rev_title", &[("rev", &id.to_string())]),
         text: tf("net.restore_text", &[("date", &i18n::datetime(r.ts_ms))]),
         action: "cfg.restore",
         danger: false,

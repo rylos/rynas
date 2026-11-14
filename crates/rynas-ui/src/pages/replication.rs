@@ -253,7 +253,7 @@ fn target_row(
         } else if s.last_ok_ms.is_some() {
             chips.push(ui::status(Tone::Ok, t("repl.ok").to_string()));
         } else {
-            chips.push(ui::status(Tone::Unknown, t("repl.waiting").to_string()));
+            chips.push(ui::status(Tone::Unknown, t("never_run").to_string()));
         }
         if let Some(p) = ui::pending_status(v.pending) {
             chips.push(p);
@@ -313,7 +313,7 @@ fn target_row(
             ui::cell("repl.col.last", "tnum", last),
             ui::cell("col.status", "", status),
             ui::actions(view! {
-                <button class="icon-btn sm" title=tr("repl.run") aria-label=ui::verb_name("repl.run", &v.target.id) disabled=move || !can_run || is_busy() on:click=run>
+                <button class="icon-btn sm" title=tr("run_now") aria-label=ui::verb_name("run_now", &v.target.id) disabled=move || !can_run || is_busy() on:click=run>
                     <Icon icon=icons::PLAY size=16 />
                 </button>
                 <button class="icon-btn sm" title=move || if local { t("repl.replicas") } else { t("repl.replicas_remote") } aria-label=ui::verb_name("repl.replicas", &v.target.id) disabled=!local || !applied on:click=move |_| replicas.set(Some(v1.clone()))>

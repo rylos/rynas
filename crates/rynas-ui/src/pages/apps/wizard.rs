@@ -479,7 +479,7 @@ fn folders(w: W) -> AnyView {
                 {(!d.folders.is_empty()).then(|| view! { <fieldset class="sf-group"><legend class="mini-title">{tr("apps.d.folders")}</legend><p class="small muted">{tr("apps.w.folders_text")}</p><div class="form">{folder_rows}</div></fieldset> })}
                 {has_shares.then(|| view! {
                     <fieldset class="sf-group">
-                        <legend class="mini-title">{tr("apps.d.shares")}</legend>
+                        <legend class="mini-title">{tr("nav.shares")}</legend>
                         <p class="small muted">{tr("apps.w.shares_text")}</p>
                         {move || no_shares.get().then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {tr("apps.w.no_shares_yet")}" "<a href="/shares">{tr("apps.w.to_shares")}</a> }.into_any()))}
                         <div class="form">{share_rows}</div>

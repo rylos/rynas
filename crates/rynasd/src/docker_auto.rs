@@ -542,7 +542,7 @@ pub async fn run_window(s: &Arc<DockerSvc>, end_ms: u64) {
                 if let Waited::TimedOut = wait_finished(s, &id, STACK_DEADLINE).await {
                     // the task hangs past its cancellation: record it here and go on
                     let detail = format!(
-                        "the update did not end within {} minutes and was cancelled",
+                        "the update did not end within {} minutes and was canceled",
                         STACK_DEADLINE.as_secs() / 60
                     );
                     tracing::warn!("docker: automatic update of {}: {detail}", u.stack);
@@ -798,12 +798,12 @@ fn services_of(config: &[(String, Option<String>)], before: &[ServiceImage], ima
 /// itself when pull or up fails), then the health check and a rollback when it fails.
 pub async fn app_update(s: &Arc<DockerSvc>, ctx: &TaskCtx, u: &StackUpdate) -> (AutoOutcome, Option<String>) {
     let Some(apps) = s.apps.get().and_then(|w| w.upgrade()) else {
-        return (AutoOutcome::Failed, Some("the app catalogue is not available".into()));
+        return (AutoOutcome::Failed, Some("the app catalog is not available".into()));
     };
     ctx.log(&format!(
         "automatic update of app {} ({})",
         u.stack,
-        u.change.as_deref().unwrap_or("new catalogue entry")
+        u.change.as_deref().unwrap_or("new catalog entry")
     ));
     let (job, plan): (crate::apps::UpdateJob, AppUpdatePlan) =
         match apps.prepare_update_job(&u.stack, &AppUpdateRequest::default()).await {
@@ -827,7 +827,7 @@ pub async fn app_update(s: &Arc<DockerSvc>, ctx: &TaskCtx, u: &StackUpdate) -> (
     };
     let (v, _) = judge_app(&cand, s.settings().auto_update.of(&u.stack).policy);
     if let Verdict::Hold(r) = v {
-        return (AutoOutcome::Held, Some(format!("the catalogue update is outside the policy ({r:?})")));
+        return (AutoOutcome::Held, Some(format!("the catalog update is outside the policy ({r:?})")));
     }
     let (layout, old) = (job.layout.clone(), job.old.clone());
     let snap = match crate::apps::update_task(s, ctx, job).await {

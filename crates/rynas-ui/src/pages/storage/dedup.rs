@@ -291,7 +291,7 @@ fn card(
             {(running.is_none()).then(|| view! {
                 <dl class="kvs">
                     {window.clone().map(|w| kv_row("dd.window", Signal::stored(w), ""))}
-                    {j.settings.is_some().then(|| kv_row("apps.d.shares", Signal::stored(if enabled.is_empty() { t("dd.none").to_string() } else { enabled.join(", ") }), ""))}
+                    {j.settings.is_some().then(|| kv_row("nav.shares", Signal::stored(if enabled.is_empty() { t("dd.none").to_string() } else { enabled.join(", ") }), ""))}
                     {j.last.as_ref().map(|r| {
                         let (tn, k) = outcome_text(r.outcome);
                         view! { <div class="kv"><dt>{tr("sch.col.last")}</dt><dd class="chips"><Status tone=tn text=t(k).to_string() /><span class="small tnum">{record_line(r)}</span></dd></div> }
@@ -384,7 +384,7 @@ fn run_dialog(j: DedupJobView, kind: DedupKind, modal: RwSignal<Open>, ov: Remot
     view! {
         <Modal title=title on_close=close foot=foot>
             <p class="muted small">{tr(if kind == DedupKind::Run { "dd.run_text" } else { "dd.estimate_text" })}</p>
-            <dl class="kvs">{kv_row("apps.d.shares", Signal::stored(which.join(", ")), "")}</dl>
+            <dl class="kvs">{kv_row("nav.shares", Signal::stored(which.join(", ")), "")}</dl>
             {crate::form::select_field("dd.until_label", Some("dd.until_help"), UNTIL, until.into(), Callback::new(move |v| until.set(v)))}
             {snapshots.then(|| ui::note(Tone::Info, icons::INFO, view! { {tr("dd.snapshots_note")} }.into_any()))}
             {replicated.then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {tr("dd.warn.replicated")} }.into_any()))}
@@ -536,8 +536,8 @@ fn settings_dialog(j: DedupJobView, excluded: Vec<String>, modal: RwSignal<Open>
             </div>
         </Modal>
         // the hash database is not user data: a plain confirmation, no typed name
-        {move || ask_reset.get().then(|| ui::confirm(ui::Confirm { busy, error, ..ui::Confirm::new(t("dd.reset").to_string(), t("dd.reset_text").to_string(), "dd.reset", true, Callback::new(reset), Callback::new(move |_| ask_reset.set(false))) }))}
-        {move || ask_off.get().then(|| ui::confirm(ui::Confirm { busy, error, ..ui::Confirm::new(t("sec.disable").to_string(), tf("dd.turn_off_text", &[("name", &name2.get_value())]), "sec.disable", true, Callback::new(turn_off), Callback::new(move |_| ask_off.set(false))) }))}
+        {move || ask_reset.get().then(|| ui::confirm(ui::Confirm { busy, error, ..ui::Confirm::new(t("dd.reset_title").to_string(), t("dd.reset_text").to_string(), "dd.reset", true, Callback::new(reset), Callback::new(move |_| ask_reset.set(false))) }))}
+        {move || ask_off.get().then(|| ui::confirm(ui::Confirm { busy, error, ..ui::Confirm::new(tf("dd.turn_off_title", &[("name", &name2.get_value())]), tf("dd.turn_off_text", &[("name", &name2.get_value())]), "sec.disable", true, Callback::new(turn_off), Callback::new(move |_| ask_off.set(false))) }))}
     }
     .into_any()
 }

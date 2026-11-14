@@ -708,7 +708,7 @@ fn drawer(tab: Tab, device: String) -> AnyView {
             {form_error(error)}
             <div class="sec-actions">
                 {(!revoked).then(|| view! {
-                    <button class="btn primary sm" disabled=move || busy.get() || running on:click=move |_| command("backup-now")><Icon icon=icons::PLAY size=14 />{tr("pca.backup_now")}</button>
+                    <button class="btn primary sm" disabled=move || busy.get() || running on:click=move |_| command("backup-now")><Icon icon=icons::PLAY size=14 />{tr("run_now")}</button>
                     <button class="btn ghost sm" disabled=move || busy.get() || !running on:click=move |_| command("cancel")><Icon icon=icons::SQUARE size=14 />{tr("pca.cancel")}</button>
                 })}
                 <button class="btn ghost sm" on:click=make_code><Icon icon=icons::LIFE_BUOY size=14 />{tr("pca.restore_code")}</button>
@@ -1007,7 +1007,7 @@ impl AgentCtl {
         view! {
             {move || live().map(|running| view! {
                 <div class="sec-actions">
-                    <button class="btn primary sm" disabled=move || self.busy.get() || running on:click=move |_| self.command("backup-now")><Icon icon=icons::PLAY size=14 />{tr("pca.backup_now")}</button>
+                    <button class="btn primary sm" disabled=move || self.busy.get() || running on:click=move |_| self.command("backup-now")><Icon icon=icons::PLAY size=14 />{tr("run_now")}</button>
                     <button class="btn ghost sm" disabled=move || self.busy.get() || !running on:click=move |_| self.command("cancel")><Icon icon=icons::SQUARE size=14 />{tr("pca.cancel")}</button>
                 </div>
             })}

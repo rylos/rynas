@@ -2948,7 +2948,7 @@ pub async fn check_updates(s: &Arc<DockerSvc>, ctx: &TaskCtx, spread: bool) -> R
         let c = apps.auto_candidates().await;
         for a in &c {
             ctx.log(&format!(
-                "app {}: catalogue update {} → {}",
+                "app {}: catalog update {} → {}",
                 a.stack, a.plan.from_version, a.plan.to_version
             ));
         }

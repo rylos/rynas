@@ -916,7 +916,7 @@ fn route_drawer(id: String, run_now: bool) -> AnyView {
     });
     view! {
         {ui::drawer(title, close, view! { {body} }.into_any(), foot)}
-        {move || removing.get().then(|| ui::confirm(Confirm { busy: rm_busy, error: rm_error, ..Confirm::new(t("wa.route.remove").to_string(), t("wa.route.remove_q").to_string(), "wa.route.remove", true, remove, Callback::new(move |_| removing.set(false))) }))}
+        {move || removing.get().then(|| ui::confirm(Confirm { busy: rm_busy, error: rm_error, ..Confirm::new(t("wa.route.remove_q").to_string(), t("wa.route.remove_text").to_string(), "wa.route.remove", true, remove, Callback::new(move |_| removing.set(false))) }))}
     }
     .into_any()
 }

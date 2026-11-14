@@ -57,7 +57,7 @@ export const finished = (j) => ["done", "failed", "cancelled"].includes(j.state)
 const allFailed = (j) => j.state === "done" && j.progress.errors > 0 && j.progress.errors >= j.progress.files_done;
 const shownState = (j) => (allFailed(j) ? "failed" : j.state);
 // a refused permission: the place is in the path, the remedy in the shared folder's permissions
-const PERM_HINT = "controlla le autorizzazioni della cartella condivisa";
+const PERM_HINT = "controlla i permessi della cartella condivisa";
 // The NAS writes its messages in English, with a code: the code is what is shown, in the
 // interface's language, and the message only where there is no text for the code. "internal"
 // and "invalid_value" cover reasons of their own (a verification that failed, a folder into
@@ -576,7 +576,7 @@ export function openDialog(id) {
 
 function methodLabels() {
   return {
-    clone: t("Reflink btrfs"), copy: t("Copia dati"), flush: t("Scrittura sui dischi del server"), rename: t("Rinomina"), recycle: t("Cestino"), delete: t("Eliminazione"),
+    clone: t("Reflink btrfs"), copy: t("Copia dati"), flush: t("Scrittura sui dischi"), rename: t("Rinomina"), recycle: t("Cestino"), delete: t("Eliminazione"),
     deflate: t("Zip (deflate)"), store: t("Zip senza compressione"), zstd: "tar.zst (zstd)", "7z": "7-Zip", unrar: "unrar", tar: "GNU tar",
   };
 }

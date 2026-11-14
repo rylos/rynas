@@ -446,8 +446,8 @@ async fn cancel_post(State(st): State<SpState>, hd: HeaderMap) -> Res<StatusCode
     let _ = std::fs::remove_file(s.asked_path());
     audit(&who, &format!("{}.cancel", verb(p.action)), "-");
     let title = match p.action {
-        SystemPowerAction::Restart => format!("NAS restart cancelled by {who}"),
-        SystemPowerAction::Shutdown => format!("NAS shut down cancelled by {who}"),
+        SystemPowerAction::Restart => format!("NAS restart canceled by {who}"),
+        SystemPowerAction::Shutdown => format!("NAS shut down canceled by {who}"),
     };
     let mut ev = oneshot(
         NotifyCategory::System,

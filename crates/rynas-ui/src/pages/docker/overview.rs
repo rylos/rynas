@@ -543,7 +543,7 @@ fn migrate_card(settings: Remote<DockerSettingsState>) -> AnyView {
                 .into_any(),
             }}
             {move || ask.get().then(|| ui::confirm(Confirm {
-                    title: t("dk.mig.title").to_string(),
+                    title: t("dk.mig.ask").to_string(),
                     text: tf("dk.mig.confirm", &[("vol", &crate::places::name(&vol.get_untracked()))]),
                     action: "dk.mig.go",
                     danger: false,

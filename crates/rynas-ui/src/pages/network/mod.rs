@@ -280,7 +280,7 @@ fn adopt_dialog(net: Net, close: Callback<()>) -> AnyView {
         });
     });
     confirm(Confirm {
-        title: t("net.adopt_title").to_string(),
+        title: t("net.adopt_ask").to_string(),
         text: t("net.adopt_dialog_text").to_string(),
         action: "net.adopt_go",
         danger: false,

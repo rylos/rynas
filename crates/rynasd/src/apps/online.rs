@@ -184,7 +184,7 @@ fn install(
     running: Version,
 ) -> Result<(Option<u64>, Validated), OnlineError> {
     let io = |what: &str, e: std::io::Error| OnlineError::Io(format!("{what}: {e}"));
-    fs::create_dir_all(dir).map_err(|e| io("create the catalogue folder", e))?;
+    fs::create_dir_all(dir).map_err(|e| io("create the catalog folder", e))?;
     let tmp = dir.join(format!(".new-{}", idx.serial));
     if fs::symlink_metadata(&tmp).is_ok() {
         fs::remove_dir_all(&tmp).map_err(|e| io("remove a leftover", e))?;
@@ -207,7 +207,7 @@ fn install(
         // again at the same serial (the one in use is never replaced by a valid one)
         fs::remove_dir_all(&target).map_err(|e| io("remove a leftover", e))?;
     }
-    fs::rename(&tmp, &target).map_err(|e| io("rename the new catalogue", e))?;
+    fs::rename(&tmp, &target).map_err(|e| io("rename the new catalog", e))?;
     // the same serial again: `previous` stays as it is
     let previous = link_serial(dir, CURRENT)
         .map(|(s, _)| s)
@@ -304,7 +304,7 @@ impl Online {
             fs::rename(&tmp, self.dir.join(STATE))
         };
         if let Err(e) = write() {
-            tracing::warn!("apps: cannot save the online catalogue state: {e}");
+            tracing::warn!("apps: cannot save the online catalog state: {e}");
         }
     }
 
@@ -493,12 +493,12 @@ impl Online {
             st.last_modified = got.last_modified.clone();
         };
         if fresh == Fresh::Same && current == Some(idx.serial) {
-            log("this catalogue is already in use");
+            log("this catalog is already in use");
             remember(&mut self.state.lock().unwrap());
             return Ok(Outcome::Unchanged(idx.serial));
         }
         if fresh == Fresh::Same {
-            log("the catalogue in use is missing or damaged: downloading it again");
+            log("the catalog in use is missing or damaged: downloading it again");
         }
         let url = ol::archive_url(&index_url, &idx.archive, self.allow_http)?;
         log(&format!(
@@ -520,7 +520,7 @@ impl Online {
             log(&format!("{s}: needs a newer rynas, left out"));
         }
         log(&format!(
-            "catalogue {} in use ({} entries)",
+            "catalog {} in use ({} entries)",
             idx.serial,
             validated.apps.len()
         ));
@@ -637,7 +637,7 @@ impl AppsSvc {
         s
     }
 
-    /// One check (automatic or "Check now"): notifies when the new catalogue brings updates
+    /// One check (automatic or "Check now"): notifies when the new catalog brings updates
     /// for installed apps, warns when the site's data is refused.
     /// The callers check [`AppsSvc::online_use`] first (turned off: nothing to do).
     pub async fn check_catalog(
@@ -659,7 +659,7 @@ impl AppsSvc {
                         NotifyCategory::Update,
                         "apps",
                         NOTIFY_KEY,
-                        "Online app catalogue verified again",
+                        "Online app catalog verified again",
                     ),
                     "apps.catalog_ok",
                 ));
@@ -682,7 +682,7 @@ impl AppsSvc {
                             format!("apps:catalog:{serial}"),
                             format!("App updates available: {}", names.join(", ")),
                         );
-                        ev.body = "The app catalogue was updated. Review and update the apps on the Apps & Plugins page (a snapshot is taken first).".into();
+                        ev.body = "The app catalog was updated. Review and update the apps on the Apps and plugins page (a snapshot is taken first).".into();
                         self.docker.notifier.emit(field(
                             field(code(ev, "apps.catalog_updates"), "apps", names.join(", ")),
                             "serial",
@@ -692,16 +692,16 @@ impl AppsSvc {
                 }
             }
             Err(e) if e.is_refusal() => {
-                tracing::warn!("apps: online catalogue refused: {e}");
+                tracing::warn!("apps: online catalog refused: {e}");
                 let mut ev = firing(
                     NotifyCategory::Security,
                     NotifySeverity::Warning,
                     "apps",
                     NOTIFY_KEY,
-                    "Online app catalogue refused",
+                    "Online app catalog refused",
                 );
                 ev.body = format!(
-                    "rynas keeps the catalogue it has. The downloaded catalogue failed verification: {e}"
+                    "rynas keeps the catalog it has. The downloaded catalog failed verification: {e}"
                 );
                 self.docker.notifier.emit(field(
                     field(code(ev, "apps.catalog_refused"), "reason", e),
@@ -709,7 +709,7 @@ impl AppsSvc {
                     e.code(),
                 ));
             }
-            Err(e) => tracing::info!("apps: online catalogue check failed: {e}"),
+            Err(e) => tracing::info!("apps: online catalog check failed: {e}"),
         }
         r
     }
@@ -723,7 +723,7 @@ impl AppsSvc {
             };
             if !o.has_key() {
                 tracing::info!(
-                    "apps: online catalogue disabled: this build has no catalogue signing key (rynas_apps::online::TRUSTED_KEYS)"
+                    "apps: online catalog disabled: this build has no catalog signing key (rynas_apps::online::TRUSTED_KEYS)"
                 );
                 return;
             }
@@ -735,10 +735,10 @@ impl AppsSvc {
                     wait = RETRY;
                     continue;
                 }
-                let log = |l: &str| tracing::debug!("apps: catalogue: {l}");
+                let log = |l: &str| tracing::debug!("apps: catalog: {l}");
                 wait = match a.check_catalog(&log).await {
                     Ok(r) => {
-                        tracing::info!("apps: online catalogue check: {r:?}");
+                        tracing::info!("apps: online catalog check: {r:?}");
                         o.next_due()
                     }
                     // the site was not reachable: sooner than tomorrow

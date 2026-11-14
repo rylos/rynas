@@ -31,7 +31,7 @@ notif.unread	non lette
 notif.since	dalle
 notif.fan_fail	Guasto ventola
 notif.fan_fail_text	{label} non gira o segnala un allarme.
-notif.fan_fail_any	Il provider hardware segnala un guasto alle ventole.
+notif.fan_fail_any	La sorgente hardware segnala un guasto alle ventole.
 notif.temp_warn	Temperatura elevata
 notif.temp_crit	Temperatura critica
 notif.temp_text	{label} è a {value} (soglia {limit}).
@@ -58,7 +58,7 @@ nev.hw.fan_failure.title	Guasto alle ventole
 nev.hw.fan_failure.body	Il controller hardware segnala un guasto alle ventole: controllale prima che i dischi si surriscaldino.
 nev.hw.fans_ok.title	Ventole tornate alla normalità
 nev.hw.monitor_stale.title	Il monitoraggio hardware non si aggiorna
-nev.hw.monitor_stale.body	Il provider hardware ({provider}) non aggiorna il suo stato da {age_s} s: gli allarmi di ventole e temperature non funzionano.
+nev.hw.monitor_stale.body	La sorgente hardware ({provider}) non aggiorna il suo stato da {age_s} s: gli allarmi di ventole e temperature non funzionano.
 nev.hw.monitor_ok.title	Il monitoraggio hardware si aggiorna di nuovo
 nev.hw.temp_high.title	Temperatura {label} {celsius} °C
 nev.hw.temp_high.body	{label} è a {celsius} °C (attenzione {warn_c} °C, critico {crit_c} °C).
@@ -70,13 +70,13 @@ nev.storage.disk_warning.title	Il disco {disk_label} richiede attenzione
 nev.storage.disk_failing.title	Disco {disk_label} in avaria
 nev.storage.disk_ok.title	Disco {disk_label} di nuovo integro
 nev.storage.raid_degraded.title	RAID {array} degradato
-nev.storage.raid_degraded.body	{array} ({level}) è senza ridondanza: mancano {degraded} membri su {raid_disks}, stato "{state}". Membri: {members}.
-nev.storage.raid_degraded.body_2	{array} ({level}) è senza ridondanza: mancano {degraded} membri su {raid_disks}, stato "{state}".
+nev.storage.raid_degraded.body	{array} ({level}) è senza ridondanza: mancano {degraded} membri su {raid_disks}, stato «{state}». Membri: {members}.
+nev.storage.raid_degraded.body_2	{array} ({level}) è senza ridondanza: mancano {degraded} membri su {raid_disks}, stato «{state}».
 nev.storage.raid_failed.title	RAID {array} guasto
-nev.storage.raid_failed.body	{array} ({level}) è guasto: mancano {degraded} membri su {raid_disks}, stato "{state}". Membri: {members}.
-nev.storage.raid_failed.body_2	{array} ({level}) è guasto: mancano {degraded} membri su {raid_disks}, stato "{state}".
+nev.storage.raid_failed.body	{array} ({level}) è guasto: mancano {degraded} membri su {raid_disks}, stato «{state}». Membri: {members}.
+nev.storage.raid_failed.body_2	{array} ({level}) è guasto: mancano {degraded} membri su {raid_disks}, stato «{state}».
 nev.storage.raid_inactive.title	RAID {array} inattivo
-nev.storage.raid_inactive.body	{array} ({level}) non è in funzione, stato "{state}".
+nev.storage.raid_inactive.body	{array} ({level}) non è in funzione, stato «{state}».
 nev.storage.raid_ok.title	RAID {array} di nuovo integro
 nev.storage.btrfs_errors.title	Volume {volume}: errori sul dispositivo {device}
 nev.storage.btrfs_errors.body	Dispositivo {device} del volume {volume}: errori di scrittura {write_io}, lettura {read_io}, flush {flush_io}, corruzione {corruption}, generazione {generation}.
@@ -167,7 +167,7 @@ pal.edit_layout	Personalizza la dashboard
 pal.notifications	Mostra notifiche
 tasks.title	Attività
 tasks.none	Nessuna attività in corso
-tasks.none_text	Le operazioni lunghe come scrub, risincronizzazioni e snapshot compariranno qui con avanzamento e log.
+tasks.none_text	Le operazioni lunghe come pulizie dati, risincronizzazioni e snapshot compariranno qui con avanzamento e log.
 tasks.running_1	1 in corso
 tasks.running_n	{n} in corso
 tasks.last	Ultima
@@ -183,8 +183,8 @@ task.failed	Non riuscita
 tech_details	Dettagli tecnici:
 task.st.ok	OK
 task.st.error	Errore
-task.st.cancelled	Interrotta
-task.st.running	In corso
+task.st.cancelled	Annullata
+task.st.running	In esecuzione
 task.st.queued	In coda
 task.config.apply	Applicazione configurazione
 task.zram.apply	Applicazione impostazioni memoria
@@ -205,7 +205,7 @@ time.defaults	Server predefiniti: {list}.
 time.dhcp	Da DHCP, usati anch'essi: {list}.
 time.dhcp_first	Da DHCP, interrogati per primi: {list}.
 time.dhcp_replaced	I server da DHCP ({list}) non vengono usati finché sono elencati server propri.
-time.servers_ignored	La configurazione del servizio dell'ora non legge la cartella in cui vengono scritti questi server, quindi non sono usati: aggiungici la riga "sourcedir /etc/chrony/sources.d".
+time.servers_ignored	La configurazione del servizio dell'ora non legge la cartella in cui vengono scritti questi server, quindi non sono usati: aggiungici la riga «sourcedir /etc/chrony/sources.d».
 time.other_daemon	La sincronizzazione dell'ora è gestita da un altro servizio, fuori da rynas: le sue impostazioni non si cambiano qui.
 time.also_own	Restano in uso anche i server della configurazione del servizio dell'ora.
 time.will_install	Il servizio dell'ora verrà installato dall'archivio della distribuzione.
@@ -279,7 +279,7 @@ proc.col.name	Nome
 proc.col.user	Utente
 proc.col.cpu	CPU
 proc.col.memory	Memoria
-proc.col.disk	Disco
+proc.col.disk	I/O disco
 proc.read	Lettura
 proc.write	Scrittura
 proc.g.session	Sessione di {user}
@@ -395,19 +395,19 @@ task.config.overwrite	Ripristino file gestiti
 task.storage.volume-create	Creazione volume
 task.storage.volume-grow	Espansione volume
 task.storage.volume-replace	Sostituzione disco
-task.storage.scrub	Pulitura dati
-task.storage.scrub-stop	Arresto pulitura dati
+task.storage.scrub	Pulizia dati
+task.storage.scrub-stop	Arresto della pulizia dati
 task.storage.unlock	Sblocco volume
 task.storage.lock	Blocco volume
 task.storage.subvolume-create	Creazione sottovolume
 task.storage.subvolume-delete	Eliminazione sottovolume
-task.storage.subvolume-settings	Impostazioni sottovolume
+task.storage.subvolume-settings	Modifica impostazioni sottovolume
 task.snapshot.run	Creazione snapshot
 task.snapshot.restore	Ripristino da snapshot
-task.snapshot.rollback	Ritorno a snapshot
+task.snapshot.rollback	Ritorno alla versione precedente
 task.snapshot.delete	Eliminazione snapshot
 task.network.apply	Applicazione impostazioni di rete
-task.network.rollback	Annullamento impostazioni di rete
+task.network.rollback	Ritorno alla versione precedente della rete
 task.network.restore	Ripristino impostazioni di rete
 task.network.rescue	Ripristino di emergenza della rete
 task.network.adopt	Adozione configurazione di rete
@@ -417,21 +417,21 @@ task.smb.recycle-cleanup	Svuotamento cestini
 task.homes.move	Spostamento cartelle home
 task.homes.move-finish	Eliminazione vecchia cartella home
 task.homes.move-undo	Annullamento spostamento home
-task.btrfs.scrub	Pulitura dati
+task.btrfs.scrub	Pulizia dati
 task.smart.test	Test SMART
 back	Indietro
 cancel	Annulla
 pending.applying	Applicazione della configurazione…
-pending.applied	Configurazione applicata.
-pending.failed	Applicazione non riuscita, non è stato cambiato nulla.
+pending.applied	Configurazione applicata
+pending.failed	Applicazione non riuscita, non è stato cambiato nulla
 pending.show_log	Mostra log
 pending.conflict	Conflitto
-pending.conflict_text	Qualcuno ha applicato un valore più recente dopo che hai preparato una modifica segnata come Conflitto. Annulla le modifiche e rifalle.
-pending.discard	Annulla modifiche
-pending.discard_title	Annullare le modifiche in sospeso?
-pending.discard_text	Le {n} modifiche preparate verranno eliminate. La configurazione in uso non viene toccata.
+pending.conflict_text	Qualcuno ha applicato un valore più recente dopo che hai fatto una modifica segnata come «Conflitto». Scarta le modifiche e rifalle.
+pending.discard	Scarta le modifiche
+pending.discard_title	Scartare le modifiche in sospeso?
+pending.discard_text	Le {n} modifiche in sospeso verranno scartate. La configurazione in uso non viene toccata.
 pending.review_title	Modifiche in sospeso
-pending.staged	Preparata il
+pending.staged	Modificata il {when}
 pending.comment	Commento (facoltativo)
 pending.comment_hint	Perché questa modifica? Viene salvato con la revisione.
 diff.empty	vuoto
@@ -451,7 +451,7 @@ cfg.open_text	Ogni applicazione è una revisione che puoi esaminare e ripristina
 cfg.refresh	Aggiorna
 cfg.drift	Modifiche fuori da rynas
 cfg.drift_text	Questi file o impostazioni non corrispondono più a ciò che rynas ha applicato. Importa tiene la versione del sistema come modifica in sospeso; Ripristina riscrive la configurazione applicata.
-cfg.checked	{n} file gestiti controllati.
+cfg.checked	{n} file gestiti controllati
 cfg.no_drift	Tutto corrisponde
 cfg.drift_modified	Modificato
 cfg.drift_missing	Mancante
@@ -481,7 +481,7 @@ cfg.overwrite	Ripristina
 cfg.overwrite_hint	Riscrivi la configurazione applicata, scartando le modifiche fatte fuori da rynas
 cfg.overwrite_title	Ripristinare la configurazione applicata?
 cfg.overwrite_text	Le modifiche fatte fuori da rynas a {key} andranno perse:
-cfg.imported	{key} importato.
+cfg.imported	{key} importato
 cfg.overwritten	{key} riportato alla configurazione applicata.
 cfg.forbidden_import	Solo gli amministratori possono importare questa impostazione.
 cfg.forbidden_overwrite	Solo gli amministratori possono ripristinare questa impostazione.
@@ -499,8 +499,8 @@ cfg.current	Attuale
 cfg.restored_from	ripristina #{n}
 cfg.restore	Ripristina
 cfg.restore_title	Ripristinare questa revisione?
-cfg.restore_text	Le impostazioni della revisione #{n} vengono preparate come modifiche in sospeso. Non cambia nulla finché non le rivedi e applichi.
-cfg.restored	Revisione #{n} preparata.
+cfg.restore_text	Le impostazioni della revisione #{n} diventano modifiche in sospeso. Non cambia nulla finché non le rivedi e applichi.
+cfg.restored	Revisione #{n} aggiunta alle modifiche in sospeso
 cfg.restore_noop	La revisione #{n} corrisponde alla configurazione attuale: niente da ripristinare.
 cfg.files	File scritti
 cfg.key.system.hostname	Nome host
@@ -521,8 +521,8 @@ pending.apply	Applica
 dash.title	Dashboard
 dash.subtitle	Panoramica del sistema in tempo reale
 dash.edit	Personalizza
-dash.done	Fine
-dash.reset	Ripristina layout
+dash.done	Fatto
+dash.reset	Reimposta il layout
 dash.editing	Modifica layout
 dash.edit_hint	Trascina i widget per riordinarli, oppure seleziona una maniglia e usa le frecce. Le modifiche sono salvate in questo browser.
 dash.hidden	Widget nascosti
@@ -595,11 +595,12 @@ hw.events	Eventi
 hw.duty	Velocità ventole
 hw.fan_fail	Rilevato un guasto alle ventole
 hw.alarm	Allarme
-hw.provider	Provider
+hw.provider	Sorgente hardware
+hw.test_beep	Prova il cicalino
 hw.stale	Dati non aggiornati
 hw.updated	Ultimo aggiornamento
-hw.none_title	Nessun provider hardware
-hw.none_text	Questa macchina non espone ventole, LED o alloggiamenti tramite un provider hardware. Le temperature dei sensori restano visibili nella dashboard.
+hw.none_title	Nessuna sorgente hardware
+hw.none_text	Questa macchina non espone ventole, LED o alloggiamenti tramite una sorgente hardware. Le temperature dei sensori restano visibili nella dashboard.
 hw.no_events	Nessun evento recente
 hw.subtitle	Ventole, temperature, LED di stato ed eventi della piattaforma
 led.green	Verde
@@ -622,7 +623,7 @@ hw.bay_no_power	Disco presente, alloggiamento senza alimentazione
 hw.temp_last	Ultima lettura prima dello standby (il disco non viene risvegliato)
 hw.identify	Identifica
 hw.identifying	Lampeggia…
-hw.identify_on	Il LED dell'alloggiamento {n} lampeggia per {s} secondi.
+hw.identify_on	Il LED dell'alloggiamento {n} lampeggia per {s} secondi
 hw.v_range	Tra {min} e {max}.
 reset_button	Pulsante di reset
 ps.help	Regole settimanali che accendono o spengono il NAS. L'accensione usa la sveglia RTC, impostata prima di ogni spegnimento; gli spegnimenti controllano prima il sistema.
@@ -631,8 +632,8 @@ ps.edit	Modifica regola
 ps.none_title	Nessuna pianificazione
 ps.none_text	Aggiungi una regola per accendere o spegnere il NAS in giorni e orari scelti.
 ups.tab	UPS
-task.ups.test	Test batteria UPS
-task.ups.detect	Rilevamento UPS
+task.ups.test	Test della batteria dell'UPS
+task.ups.detect	Rilevamento dell'UPS
 task.ups.install	Installazione di NUT
 task.ups.update-nut	Aggiornamento di NUT
 ups.install	Installa NUT
@@ -645,7 +646,7 @@ ups.st_fsd	Arresto forzato
 ups.st_critical	Critico: a batteria, batteria scarica
 ups.st_low	Batteria scarica
 ups.st_battery	A batteria
-ups.st_replace	Sostituire la batteria
+ups.st_replace	Batteria da sostituire
 ups.st_online	In linea
 ups.st_unknown	Stato sconosciuto
 ups.f_ol	OL · rete elettrica
@@ -668,7 +669,7 @@ ups.load	Carico
 ups.input	Tensione in ingresso
 ups.output	Tensione in uscita
 ups.manufacturer	Produttore
-ups.beeper	Segnale acustico
+ups.beeper	Cicalino
 ups.beeper_on	Attivo
 ups.beeper_off	Disattivato
 ups.beeper_muted	Silenziato
@@ -696,7 +697,7 @@ ups.tr.aborted	Interrotto
 ups.tr.in_progress	Test in corso
 ups.tr.none	Nessun test eseguito
 ups.tr.scheduled	Test programmato
-ups.test_done	Test batteria terminato.
+ups.test_done	Test batteria terminato
 ups.test_unsupported	Questo UPS non offre test della batteria tramite NUT.
 ups.test_online	Un test può partire solo mentre l'UPS è alimentato dalla rete.
 ups.test_lb_nut	Durante un test, la batteria scarica spegne comunque il sistema.
@@ -853,12 +854,11 @@ ps.col_action	Azione
 ps.col_busy	Se occupato
 ps.startup	Accensione
 ps.shutdown	Spegnimento
-ps.every_day	Tutti i giorni
 ps.enabled	Regola attiva
 ps.time_help	Ora locale del NAS.
 ps.checks	Prima di spegnere, controlla
 ps.checks_help	Il NAS è occupato quando uno di questi controlli trova lavoro in corso.
-ps.check_storage	Risincronizzazione RAID o scrub in corso
+ps.check_storage	Risincronizzazione RAID o pulizia dati in corso
 ps.check_tasks	Altre attività in corso (snapshot, backup, applicazione)
 ps.check_smb	Client SMB con file aperti
 ps.when_busy	Se occupato
@@ -979,9 +979,9 @@ plan.w.smr_slow_writes	Dischi SMR ({items}): le scritture prolungate sono lente
 plan.w.single_no_redundancy	Nessuna ridondanza: se il disco si guasta, il volume va perso (un disco mirror si può aggiungere in seguito)
 plan.w.raid0_no_redundancy	RAID 0 non ha ridondanza: un qualsiasi disco guasto fa perdere l'intero volume
 plan.w.raid5_rebuild	RAID 5 con HDD grandi o numerosi: un secondo guasto durante la lunga ricostruzione fa perdere il volume; valuta il RAID 6
-plan.w.encrypted	Crittografato: dopo ogni riavvio il volume resta bloccato finché non lo sblocchi da rynas; conserva la chiave di ripristino e il backup dell'intestazione fuori dal NAS
+plan.w.encrypted	Cifrato: dopo ogni riavvio il volume resta bloccato finché non lo sblocchi da rynas; conserva la chiave di ripristino e il backup dell'intestazione fuori dal NAS
 plan.w.compression_off	Compressione disattivata: zstd livello 1 usa poca CPU e di solito fa risparmiare spazio
-plan.w.ssd_trim_off	SSD con crittografia: il TRIM è disattivato perché rivela quali blocchi sono liberi; attiva 'discard' in crypttab se è accettabile
+plan.w.ssd_trim_off	SSD con cifratura: il TRIM è disattivato perché rivela quali blocchi sono liberi; attiva «discard» in crypttab se è accettabile
 plan.w.disk_larger_than_members	{subject} è più grande dei membri: lo spazio in più resta inutilizzato finché non vengono sostituiti tutti i membri
 plan.w.grow_filesystem_by_hand	Nessun btrfs montato su questo array: espandi il file system a mano
 plan.w.spare_member	{subject} è una riserva: basta rimuoverla
@@ -999,7 +999,7 @@ plan.s.luks_format	Formatta l'array come LUKS2 (Argon2id, 256 MiB di memoria, se
 plan.s.add_recovery_key	Aggiungi una chiave di ripristino (mostrata una volta: salvala prima di proseguire)
 plan.s.backup_luks_header	Salva l'intestazione LUKS (offerta da scaricare, poi rimossa dal NAS)
 plan.s.unlock_volume	Sblocca il nuovo volume
-plan.s.declare_crypttab	Dichiara il volume crittografato, bloccato all'avvio
+plan.s.declare_crypttab	Dichiara il volume cifrato, bloccato all'avvio
 plan.s.create_filesystem	Crea il file system btrfs (dati single, metadati DUP)
 plan.s.mount_at_boot	Monta il volume all'avvio
 plan.s.create_mount_point	Crea il punto di montaggio {subject}
@@ -1038,18 +1038,18 @@ wiz.erase_chip	Verrà cancellato
 wiz.will_erase	I dati esistenti verranno cancellati: {what}
 sto.n_disks	Dischi: {n}
 sto.used_n	Usato: {n}
-sto.encrypted	Crittografato
-sto.encryption	Crittografia
+sto.encrypted	Cifrato
+sto.encryption	Cifratura
 sto.locked	Bloccato
 sto.unlocked	Sbloccato
-sto.locked_text	Volume crittografato: sbloccalo con la passphrase o la chiave di ripristino per usarne i dati.
-sto.crypt_text	Crittografia LUKS2. Conserva la chiave di ripristino e un backup dell'intestazione fuori dal NAS.
+sto.locked_text	Volume cifrato: sbloccalo con la passphrase o la chiave di ripristino per usarne i dati.
+sto.crypt_text	Cifratura LUKS2. Conserva la chiave di ripristino e un backup dell'intestazione fuori dal NAS.
 sto.unlock	Sblocca
 sto.lock	Blocca
 sto.unlock_title	Sblocca {name}
 sto.unlock_text	Il volume viene rimontato e le cartelle condivise su di esso tornano disponibili.
 sto.pass_or_key	Passphrase o chiave di ripristino
-sto.lock_title	Blocca {name}
+sto.lock_title	Bloccare il volume {name}?
 sto.lock_text	Il volume viene smontato e la sua chiave tolta dalla memoria. Cartelle condivise e app su di esso si fermano fino al prossimo sblocco.
 sto.passphrase	Passphrase
 sto.stale	In cache
@@ -1119,7 +1119,7 @@ sto.a_value	Valore
 sto.a_worst	Peggiore
 sto.a_thresh	Soglia
 sto.a_raw	Grezzo
-sto.a_failing	In errore ora
+sto.a_failing	In avaria ora
 sto.a_failed_past	In errore in passato
 sto.a_watch	Da controllare
 sto.a_ok	OK
@@ -1154,7 +1154,7 @@ sto.apm_128	128 · Un po' di risparmio, niente standby deciso dal disco
 sto.apm_127	127 · Il disco può parcheggiare le testine e fermarsi da solo
 sto.apm_1	1 · Massimo risparmio: parcheggi frequenti delle testine, usura il disco
 sto.reset_defaults	Usa predefiniti
-sto.done_ok	Completato.
+sto.done_ok	Completato
 sto.done_err	L'operazione non è riuscita.
 sto.vol_missing	Volume non trovato
 sto.vol_missing_text	Potrebbe essere stato rinominato o rimosso.
@@ -1191,17 +1191,17 @@ sto.started	Avviata
 sto.duration	Durata
 sto.progress	Avanzamento
 sto.scrub_result	Risultato
-sto.scrub_stop	Interrompi pulizia
+sto.scrub_stop	Interrompi la pulizia dati
 run_now	Esegui ora
 sto.scrub_title	Pulizia dati su {name}
-sto.scrub_start	Avvia pulizia
+sto.scrub_start	Avvia la pulizia dati
 sto.md_check	Controlla anche la parità RAID
 sto.review_plan	Rivedi il piano
-sto.hdr_saved	Backup dell'intestazione scaricato. Conservalo fuori dal NAS, poi eliminalo dal server.
-sto.hdr_none	Nessun backup dell'intestazione in attesa sul server (già eliminato o precedente all'ultimo riavvio).
-sto.hdr_deleted	Backup dell'intestazione eliminato dal server.
+sto.hdr_saved	Backup dell'intestazione scaricato. Conservalo fuori dal NAS, poi elimina la copia rimasta sul NAS.
+sto.hdr_none	Nessun backup dell'intestazione in attesa sul NAS (già eliminato o precedente all'ultimo riavvio).
+sto.hdr_deleted	Backup dell'intestazione eliminato dal NAS
 sto.hdr_download	Scarica backup intestazione
-sto.hdr_delete	Elimina dal server
+sto.hdr_delete	Elimina dal NAS
 sto.rk_reveal	Mostra chiave di ripristino
 sto.rk_title	Chiave di ripristino di {name}
 sto.rk_text	La chiave di ripristino apre il volume se la passphrase va persa. Può essere mostrata una sola volta, entro un'ora dalla creazione.
@@ -1210,7 +1210,7 @@ sto.rk_once	È l'unica volta che la chiave viene mostrata. Conservala in un post
 sto.rk_stored	Ho conservato la chiave di ripristino
 sto.copy	Copia
 sto.download	Scarica
-sto.done	Fine
+sto.done	Fatto
 sto.no_free	Nessun disco disponibile: aggiungi un disco non in uso.
 sto.keep_level	Mantieni {l}
 sto.grow_title	Aggiungi dischi a {name}
@@ -1272,7 +1272,7 @@ wiz.label_invalid	Usa da 1 a 16 lettere minuscole, cifre o trattini, iniziando c
 wiz.label_taken	Esiste già un volume con questo nome.
 wiz.compress	Compressione (zstd, livello 1)
 wiz.compress_hint	Risparmia spazio con un costo di CPU quasi nullo; i file già compressi vengono saltati. Si può disattivare per singolo sottovolume.
-wiz.encrypt	Crittografa il volume (LUKS2)
+wiz.encrypt	Cifra il volume (LUKS2)
 wiz.encrypt_hint	Il volume va sbloccato dopo ogni riavvio. Vengono creati una chiave di ripristino e un backup dell'intestazione: conservali entrambi fuori dal NAS.
 wiz.pass_again	Ripeti la passphrase
 wiz.pass_hint	Da 8 a 512 caratteri. Senza di essa (o la chiave di ripristino) i dati non sono leggibili.
@@ -1281,8 +1281,8 @@ wiz.pass_mismatch	Le passphrase non coincidono.
 wiz.erase_title	Tutti i dati su questi dischi verranno cancellati
 wiz.create_go	Cancella i dischi e crea
 wiz.creating	Creazione di {name}
-wiz.created	Volume {name} creato.
-wiz.secure_title	Metti al sicuro la crittografia ora
+wiz.created	Volume {name} creato
+wiz.secure_title	Metti al sicuro la cifratura ora
 wiz.secure_text	Salva fuori dal NAS la chiave di ripristino (mostrata una volta, per un'ora) e il backup dell'intestazione LUKS.
 wiz.open_volume	Apri il volume
 wiz.back_review	Torna al riepilogo
@@ -1325,7 +1325,7 @@ err.invalid_credentials	Nome utente o password errati.
 err.invalid_totp	Codice non valido. Controlla l'ora del dispositivo e prova un codice nuovo.
 err.rate_limited	Troppi tentativi falliti.
 err.auth_unavailable	Il servizio di autenticazione non è disponibile. Controlla che rynasd sia in esecuzione.
-err.network	Server non raggiungibile. Controlla la connessione.
+err.network	NAS non raggiungibile. Controlla la connessione.
 err.csrf	La sessione è cambiata in un'altra scheda. Ricarica la pagina.
 err.backend_unavailable	Il servizio rynas non risponde. Controlla che rynasd sia in esecuzione.
 err.timeout	Il NAS ha impiegato troppo a rispondere.
@@ -1373,7 +1373,7 @@ save	Salva
 create	Crea
 edit	Modifica
 delete	Elimina
-reset	Ripristina
+reset	Reimposta
 off	Disattivato
 advanced	Avanzate
 col.status	Stato
@@ -1381,10 +1381,10 @@ table.no_match	Nessun risultato per la ricerca.
 form.check	Controlla i campi evidenziati.
 form.changed_elsewhere	Queste impostazioni sono state modificate altrove mentre le stavi modificando.
 form.reload	Scarta le mie modifiche e ricarica
-toast.saved_pending	Salvato, in attesa di applicazione
-pending.add	In attesa: nuovo
-pending.change	In attesa: modificato
-pending.delete	In attesa: eliminazione
+toast.saved_pending	Salvato, in sospeso
+pending.add	In sospeso: nuovo
+pending.change	In sospeso: modificato
+pending.delete	In sospeso: eliminazione
 v.account_name	Lettere minuscole, cifre, - e _; inizia con una lettera o _; fino a 32 caratteri.
 v.full_name	Il nome completo non può contenere : o ,
 v.email	Indirizzo email non valido.
@@ -1466,8 +1466,8 @@ homes.kept	Vecchia cartella conservata come {path}
 homes.move	Sposta home
 homes.move_all	Sposta tutte
 homes.move_needs	Attiva le cartelle home su un volume e applica le modifiche per potervi spostare le home. Lo spostamento sul disco di sistema è sempre possibile.
-homes.move_title_one	Spostare la home di {name}
-homes.move_title_all	Spostare le cartelle home
+homes.move_title_one	Sposta la home di {name}
+homes.move_title_all	Sposta le cartelle home
 homes.move_text	Niente si sposta da solo: scegli dove, controlla cosa succede, poi avvia lo spostamento.
 homes.move_steps	I file vengono copiati con permessi, ACL e attributi e verificati; poi l'account punta alla nuova home. La vecchia cartella resta, rinominata, finché non confermi. Nel frattempo l'utente deve restare disconnesso.
 homes.from	Home attuale
@@ -1490,11 +1490,11 @@ homes.finish	Conferma spostamento
 homes.finish_title	Confermare lo spostamento di {name}?
 homes.finish_text	La vecchia cartella {path} viene eliminata definitivamente.
 homes.finish_btn	Elimina vecchia cartella
-homes.finished	Vecchia cartella home di {name} eliminata.
+homes.finished	Vecchia cartella home di {name} eliminata
 homes.undo	Annulla spostamento
 homes.undo_title	Annullare lo spostamento di {name}?
 homes.undo_text	La vecchia cartella torna in {path} e torna a essere la home. La copia resta da parte come cartella nascosta accanto.
-homes.undone	Spostamento di {name} annullato.
+homes.undone	Spostamento di {name} annullato
 homes.b.service_off	le cartelle home su un volume sono disattivate o non ancora applicate
 homes.b.not_local	non è un utente locale (uid {detail})
 homes.b.already_moved	la home è già lì
@@ -1566,7 +1566,7 @@ ids.resumes	Questo completa la modifica di ID precedente di questo account: i fi
 ids.complete_text	Questo account aveva l'ID {id} prima di una modifica precedente: i file che lo hanno ancora possono seguirlo.
 ids.complete	Completa: prendi i file dall'ID {id}
 ids.partial	La verifica si è fermata al limite di tempo: i numeri sono minimi e la modifica passa comunque tutto.
-ids.after	Non vengono cambiati: crontab, unità systemd dell'utente e file fuori da queste cartelle. La modifica gira come attività annullabile; dopo un annullamento il resto si completa da qui.
+ids.after	Non vengono cambiati: le pianificazioni proprie dell'utente (crontab, servizi dell'utente) e i file fuori da queste cartelle. La modifica gira come attività annullabile; dopo un annullamento il resto si completa da qui.
 ids.done	Proprietà cambiata per {name}
 ids.b_not_local	Non è un account locale (1000–59999): root e gli account di sistema non cambiano mai.
 ids.b_unmanaged	Creato fuori da rynas: prima adottalo.
@@ -1585,7 +1585,7 @@ groups.search	Cerca gruppi
 groups.create	Crea gruppo
 groups.edit_title	Modifica gruppo {name}
 groups.empty	Ancora nessun gruppo
-groups.empty_text	I gruppi danno le stesse autorizzazioni a più utenti insieme.
+groups.empty_text	I gruppi danno gli stessi permessi a più utenti insieme.
 groups.name	Nome gruppo
 groups.gid	GID
 smart.col_id	ID
@@ -1594,7 +1594,7 @@ groups.members	Membri
 groups.no_members	Nessun membro
 groups.no_users	Ancora nessun utente.
 groups.delete_title	Eliminare il gruppo {name}?
-groups.delete_text	I membri perdono le autorizzazioni ricevute tramite questo gruppo quando applichi le modifiche. Gli utenti restano.
+groups.delete_text	I membri perdono i permessi ricevuti tramite questo gruppo quando applichi le modifiche. Gli utenti restano.
 pw.new	Nuova password
 pw.confirm	Conferma password
 pw.rules	Da 8 a 256 caratteri, diversa dal nome utente. Una frase lunga è più facile da ricordare e più difficile da indovinare.
@@ -1608,9 +1608,9 @@ pw.s1	Debole
 pw.s2	Discreta
 pw.s3	Buona
 pw.s4	Forte
-pw.done	Password di {name} cambiata.
+pw.done	Password di {name} cambiata
 pw.after_apply	Imposta la password dopo aver applicato le modifiche: prima l'account deve esistere.
-pw.not_applied	Questo utente viene creato quando applichi le modifiche in attesa; imposta la password dopo.
+pw.not_applied	Questo utente viene creato quando applichi le modifiche in sospeso; imposta la password dopo.
 shares.subtitle	Cartelle condivise via SMB e NFS, e chi può aprirle
 shares.search	Cerca cartelle condivise
 shares.create	Crea cartella condivisa
@@ -1633,14 +1633,14 @@ shares.recycle	Cestino
 shares.recycle_days	Attivo · {n} g
 shares.recycle_keep	Attivo · conservato
 shares.subvolume	Sottovolume
-shares.permissions	Autorizzazioni
+shares.permissions	Permessi
 shares.st_ready	Pronta
 shares.st_missing	Cartella assente
 shares.st_on_apply	Creata all'applicazione
 shares.st_warnings	Avvisi
 shares.st_root_only	Solo root
 shares.delete_title	Eliminare la cartella condivisa {name}?
-shares.delete_text	La condivisione e le sue autorizzazioni vengono rimosse quando applichi le modifiche. La cartella e i suoi file restano sul volume: la trovi in Cartelle non condivise.
+shares.delete_text	La cartella condivisa e i suoi permessi vengono rimossi quando applichi le modifiche. La cartella e i suoi file restano sul volume: la trovi in Cartelle non condivise.
 shares.tab_general	Generale
 shares.tab_smb	SMB
 shares.tab_nfs	NFS
@@ -1671,9 +1671,9 @@ shares.retention_help	La pulizia giornaliera rimuove gli elementi più vecchi; 0
 shares.hide_dot	Nascondi i file che iniziano con il punto
 shares.encrypt	Richiedi la crittografia
 shares.shadow	Versioni precedenti
-shares.shadow_help	Mostra gli snapshot nella scheda "Versioni precedenti" di Windows.
+shares.shadow_help	Mostra gli snapshot nella scheda «Versioni precedenti» di Windows.
 shares.snap_prefix	Prefisso del nome degli snapshot
-shares.snap_prefix_help	Vuoto: l'ultima parte del percorso della condivisione.
+shares.snap_prefix_help	Vuoto: l'ultima parte del percorso della cartella condivisa.
 shares.veto	Nomi nascosti e bloccati
 shares.veto_help	Uno schema per riga, per esempio @eaDir.
 shares.extra	Opzioni SMB aggiuntive
@@ -1706,27 +1706,27 @@ perm.ro	Sola lettura
 perm.rw	Lettura e scrittura
 perm.deny	Nessun accesso
 perm.nobody	Nessuno da elencare.
-perm.empty_help	Nessuna autorizzazione impostata: rynas lascia invariate le autorizzazioni attuali della cartella.
+perm.empty_help	Nessun permesso impostato: rynas lascia invariati i permessi attuali della cartella.
 perm.admins	Amministratori di rynas
-perm.root_only_help	Nessuna autorizzazione: la nuova cartella appartiene a root e nessun altro potrà usarla. Dai accesso ad almeno un utente o gruppo.
+perm.root_only_help	Nessun permesso: la nuova cartella appartiene a root e nessun altro potrà usarla. Dai accesso ad almeno un utente o gruppo.
 perm.keep_own	Mantieni i permessi della cartella
-perm.set_now	Imposta le autorizzazioni
-perm.empty_confirm_title	Salvare senza autorizzazioni?
-perm.empty_confirm_text	{path} appartiene a root e non dà accesso a nessun altro: senza autorizzazioni nessuno potrà usarla tranne root, nemmeno via SMB, NFS o dal file manager.
+perm.set_now	Imposta i permessi
+perm.empty_confirm_title	Salvare senza permessi?
+perm.empty_confirm_text	{path} appartiene a root e non dà accesso a nessun altro: senza permessi nessuno potrà usarla tranne root, nemmeno via SMB, NFS o da File.
 perm.empty_confirm_ok	Salva solo per root
 perm.rule_help	Entrano solo gli utenti e i gruppi elencati. Nessun accesso prevale su Lettura e scrittura, che prevale su Sola lettura.
-eff.title	Autorizzazioni effettive
+eff.title	Permessi effettivi
 eff.help	Cosa ottiene davvero un utente o un gruppo, contando i gruppi di cui l'utente fa parte.
 eff.principal	Utente o gruppo
 eff.choose	Scegli…
-eff.unsaved	Mostra le autorizzazioni salvate; salva per verificare le modifiche.
-eff.save_first	Salva la cartella condivisa per verificare le autorizzazioni effettive.
+eff.unsaved	Mostra i permessi salvati; salva per verificare le modifiche.
+eff.save_first	Salva la cartella condivisa per verificare i permessi effettivi.
 eff.none	Nessun accesso (non impostato)
 eff.no_source	Nessuna voce della tabella si applica.
 eff.decisive	Determina il risultato
 eff.rule	Nessun accesso prevale su Lettura e scrittura, che prevale su Sola lettura.
 shares.delete_all	Elimina anche la cartella, i file e gli snapshot
-shares.delete_all_text	La condivisione, la cartella con tutti i file, il cestino e gli snapshot vengono eliminati quando applichi le modifiche.
+shares.delete_all_text	La cartella condivisa, con tutti i file, il cestino e gli snapshot, viene eliminata quando applichi le modifiche.
 shares.delete_all_btn	Elimina tutto
 shares.del_folder	Cartella
 shares.del_space	Spazio liberato
@@ -1736,7 +1736,7 @@ shares.del_recycle_no	Nessuno
 shares.del_used	In uso anche da:
 shares.del_blocked	Ora non si può eliminare:
 shares.del_irreversible	L'operazione è irreversibile: i file e gli snapshot non si potranno recuperare.
-shares.del_no_rollback	La cartella viene eliminata quando applichi le modifiche in sospeso dalla barra, alla fine dell'applicazione. Se un passo successivo fallisce e le impostazioni precedenti vengono ripristinate, la condivisione torna ma i suoi file e snapshot no.
+shares.del_no_rollback	La cartella viene eliminata alla fine, quando applichi le modifiche in sospeso dalla barra. Se un passo successivo fallisce e tornano le impostazioni precedenti, la cartella condivisa torna ma i suoi file e snapshot no.
 shares.del_staged	Salvato: la cartella e i suoi snapshot vengono eliminati quando applichi le modifiche
 shares.size_min	almeno {size}
 shares.use.nfs_export	l'esportazione NFS di {name} (rimossa con la condivisione)
@@ -1758,7 +1758,7 @@ shares.size_measuring	Misurazione in corso…
 shares.size_asleep	Non misurata: i dischi sono in standby
 shares.size_asleep_as_of	Al {when} (i dischi sono in standby)
 shares.size_failed	Dimensione non disponibile
-shares.removed_at	Condivisione rimossa
+shares.removed_at	Cartella condivisa rimossa
 shares.was_shared_as	era condivisa come {name}
 shares.share_again	Condividi di nuovo
 shares.delete_forever	Elimina definitivamente
@@ -1768,13 +1768,13 @@ shares.w.subvolume_on_apply	{path} verrà creata come sottovolume del volume {vo
 shares.w.subvolume_on_apply_nc	{path} verrà creata come sottovolume del volume {volume}, senza compressione, quando applichi le modifiche.
 shares.w.not_subvolume	{path} non è un sottovolume btrfs: snapshot, versioni precedenti e quote ne richiedono uno.
 shares.w.extra_overrides	L'opzione SMB aggiuntiva {key} sostituisce un'impostazione gestita qui.
-shares.w.nfs_uids	NFS si fida degli ID utente dei client: devono usare gli stessi ID di questo server.
+shares.w.nfs_uids	NFS si fida degli ID utente dei client: devono usare gli stessi ID di questo NAS.
 shares.w.nfs_off	NFS è disattivato nelle impostazioni dei servizi file.
 shares.w.smb_off	SMB è disattivato nelle impostazioni dei servizi file.
 shares.w.tm_no_limit	Time Machine senza un limite di dimensione può riempire il volume.
 shares.w.multi_no_nfs	Il profilo multiprotocollo disattiva la cache dei client; è pensato per cartelle esportate anche via NFS.
-shares.w.no_permissions	Nessuna autorizzazione impostata: la cartella mantiene i propri permessi.
-shares.w.root_only	Nessuna autorizzazione e {path} appartiene a root senza accesso per gli altri: nessuno tranne root può usare questa cartella condivisa. Dai accesso a utenti o gruppi nelle sue autorizzazioni.
+shares.w.no_permissions	Nessun permesso impostato: la cartella mantiene i propri permessi.
+shares.w.root_only	Nessun permesso e {path} appartiene a root senza accesso per gli altri: nessuno tranne root può usare questa cartella condivisa. Dai accesso a utenti o gruppi nei suoi permessi.
 shares.w.all_denied	Ogni voce nega l'accesso: nessuno può aprire questa cartella.
 shares.w.snapfolder_no_job	La cartella degli snapshot compare quando questa cartella condivisa ha un job di snapshot.
 shares.w.snapfolder_nfs	I client NFS vedono la cartella degli snapshot solo con Includi i mount annidati attivo (scheda NFS).
@@ -1783,7 +1783,7 @@ shares.nocow_help	Per registrazioni video, database e immagini di macchine virtu
 shares.nocow_help_existing	I file vengono copiati a ogni modifica e protetti da checksum. La scrittura senza copy-on-write si può attivare finché la cartella è vuota.
 shares.nocow_is_on	I nuovi file di questa cartella vengono riscritti sul posto, senza checksum né compressione.
 shares.nocow_cost	Cosa perdono i file di questa cartella:
-shares.nocow_t_sum	i checksum: i dati danneggiati non vengono rilevati dalla verifica (scrub) e un mirror non può ripararli dall'altra copia
+shares.nocow_t_sum	i checksum: i dati danneggiati non vengono rilevati dalla pulizia dati e un mirror non può ripararli dall'altra copia
 shares.nocow_t_comp	la compressione
 shares.nocow_t_snap	spazio con gli snapshot: funzionano ancora, ma ogni blocco riscritto dopo uno snapshot occupa nuovo spazio finché lo snapshot resta
 shares.nocow_snap_hint	I job di snapshot su questa cartella funzionano, ma i dati riscritti occupano spazio: tieni pochi snapshot con una conservazione breve, oppure nessuno.
@@ -1807,16 +1807,16 @@ task.shares.nocow	Modifica del copy-on-write
 err.folder_not_empty	La cartella non è vuota.
 apps.w.nocow_hint	Su btrfs questa cartella viene creata senza copy-on-write: i file vengono riscritti sul posto, senza checksum né compressione.
 task.shares.folder-delete	Eliminazione cartella
-crypt.encrypt	Crittografa questa cartella
-crypt.encrypt_help	I file sono salvati crittografati e leggibili solo mentre la cartella è sbloccata con la sua password. Si sceglie ora: una cartella esistente non si può crittografare dopo.
-crypt.experimental	Sperimentale. Una cartella crittografata:
+crypt.encrypt	Cifra questa cartella
+crypt.encrypt_help	I file sono salvati cifrati e leggibili solo mentre la cartella è sbloccata con la sua password. Si sceglie ora: una cartella esistente non si può cifrare dopo.
+crypt.experimental	Sperimentale. Una cartella cifrata:
 crypt.l_speed	è più lenta di una cartella normale, soprattutto con molti file piccoli;
 crypt.l_space	non guadagna nulla da compressione o deduplicazione;
-crypt.l_snap	mantiene crittografati snapshot, repliche e backup: per ripristinare servono la password o la chiave di ripristino;
+crypt.l_snap	mantiene cifrati snapshot, repliche e backup: per ripristinare servono la password o la chiave di ripristino;
 crypt.l_apps	è una cartella vuota e in sola lettura per SMB, NFS e app mentre è bloccata (dopo ogni riavvio, salvo sblocco automatico); i container avviati nel frattempo vanno riavviati dopo lo sblocco;
-crypt.l_convert	per crittografare file esistenti, copiali al suo interno.
-crypt.created_help	Creata come {path} quando premi Crea, con i dati crittografati in una cartella nascosta accanto.
-crypt.not_installed	Le cartelle crittografate richiedono gocryptfs, un pacchetto dell'archivio Debian.
+crypt.l_convert	per cifrare file esistenti, copiali al suo interno.
+crypt.created_help	Creata come {path} quando premi Crea, con i dati cifrati in una cartella nascosta accanto.
+crypt.not_installed	Le cartelle cifrate richiedono gocryptfs, un pacchetto dell'archivio Debian.
 crypt.install	Installa gocryptfs
 crypt.password	Password della cartella
 crypt.password_help	Da 8 a 256 caratteri. Senza la password o la chiave di ripristino nessuno può leggere i file, rynas compreso.
@@ -1826,43 +1826,43 @@ crypt.auto_help_tpm	La password viene sigillata con il TPM2 di questa macchina e
 crypt.rk_text	La chiave di ripristino imposta una nuova password quando quella attuale va persa; finché conosci la password puoi rivederla dalle impostazioni della cartella. Senza entrambe, i file sono persi per sempre.
 crypt.unlocked	Sbloccata
 crypt.locked	Bloccata
-crypt.missing	Dati crittografati assenti
-crypt.encrypted	crittografata
-crypt.unlock_text	Da sbloccata, i file sono leggibili da SMB, NFS, app e gestore file, con i permessi della cartella.
+crypt.missing	Dati cifrati assenti
+crypt.encrypted	cifrata
+crypt.unlock_text	Da sbloccata, i file sono leggibili da SMB, NFS, app e File, con i permessi della cartella.
 crypt.unlock	Sblocca
-crypt.unlocked_toast	{name} è sbloccata.
+crypt.unlocked_toast	{name} è sbloccata
 crypt.lock_title	Bloccare {name}?
 crypt.lock_text	Le connessioni SMB a questa cartella vengono chiuse, poi viene smontata. Non viene bloccata finché ci sono file aperti o container in esecuzione che la usano: fermali prima. App e container avviati mentre è bloccata vedono una cartella vuota finché non vengono riavviati dopo il prossimo sblocco.
 crypt.lock	Blocca
-crypt.locked_toast	{name} è bloccata.
+crypt.locked_toast	{name} è bloccata
 crypt.busy	La cartella è in uso: chiudi i file aperti e ferma le app che la usano, poi riprova.
-crypt.title	Cartella crittografata
-crypt.existing_help	Snapshot, repliche e backup di questa cartella contengono i suoi dati crittografati, salvati qui:
+crypt.title	Cartella cifrata
+crypt.existing_help	Snapshot, repliche e backup di questa cartella contengono i suoi dati cifrati, salvati qui:
 crypt.pw_title	Password di {name}
 crypt.pw_with	Conferma con
 crypt.pw_current	Password attuale
 crypt.pw_recovery	Chiave di ripristino
 crypt.pw_recovery_help	64 cifre esadecimali, come mostrate alla creazione (trattini e spazi vengono ignorati).
 crypt.pw_change	Cambia password
-crypt.pw_done	{name}: nuova password impostata.
+crypt.pw_done	{name}: nuova password impostata
 crypt.auto_title	Sblocca {name} automaticamente
 crypt.in_use	Ancora in uso
-crypt.too_old	gocryptfs {version} è troppo vecchio: le cartelle crittografate richiedono la versione 2.5 o successiva (inclusa da Debian 13 in poi).
+crypt.too_old	gocryptfs {version} è troppo vecchio: le cartelle cifrate richiedono la versione 2.5 o successiva (inclusa da Debian 13 in poi).
 crypt.rk_later	La cartella è stata creata ma non è stato possibile ottenere la chiave di ripristino: mostrala dalle impostazioni della cartella con la sua password
 crypt.stale_text	Sbloccata. Questi container in esecuzione sono stati avviati mentre la cartella era bloccata e vedono ancora una cartella vuota: riavviali per dar loro i file.
 crypt.later	Più tardi
 crypt.restart	Riavvia i container
-crypt.restarted	Container riavviati.
+crypt.restarted	Container riavviati
 crypt.auto_off	Sblocco automatico disattivato: non è stato possibile sigillare la nuova password
 crypt.reveal_text	La chiave di ripristino viene letta dalla cartella con la sua password. Conservala fuori dal NAS.
 crypt.rk_keep	Conservala in un posto sicuro fuori dal NAS: con essa chiunque può impostare una nuova password per questa cartella.
 shares.w.pc_backup_folder	{path} contiene, è o sta dentro la cartella di backup del PC {key}: resta in sola lettura in File finché i backup del PC non passano a una cartella tutta loro.
-shares.w.crypt_locked	{path} è crittografata e bloccata: i client SMB e NFS non possono connettersi; app e container avviati mentre è bloccata vedono una cartella vuota e vanno riavviati dopo lo sblocco.
+shares.w.crypt_locked	{path} è cifrata e bloccata: i client SMB e NFS non possono connettersi; app e container avviati mentre è bloccata vedono una cartella vuota e vanno riavviati dopo lo sblocco.
 err.crypt_wrong_password	Password o chiave di ripristino sbagliata
-err.crypt_busy	La cartella crittografata è in uso.
+err.crypt_busy	La cartella cifrata è in uso.
 err.crypt_not_installed	gocryptfs non è installato.
 err.ssh_lockout	Con questa modifica nessun amministratore potrebbe più entrare via SSH.
-task.crypt.create	Creazione cartella crittografata
+task.crypt.create	Creazione di una cartella cifrata
 task.crypt.install	Installazione di gocryptfs
 svc.title	Servizi file
 svc.subtitle	Impostazioni SMB e NFS per tutte le cartelle condivise
@@ -1918,10 +1918,9 @@ ssh.trial_other	{user} sta provando nuove impostazioni SSH: tornano indietro da 
 ssh.left_sr	{n} secondi rimasti
 ssh.copy	Copia
 ssh.keep	Mantieni
-ssh.undo	Annulla ora
-ssh.kept	Impostazioni SSH mantenute.
-ssh.undone	Sono tornate le impostazioni SSH precedenti.
-ssh.saved	Impostazioni SSH salvate.
+ssh.kept	Impostazioni SSH mantenute
+ssh.undone	Sono tornate le impostazioni SSH precedenti
+ssh.saved	Impostazioni SSH salvate
 ssh.host_keys	Chiavi dell'host
 ssh.host_keys_help	Alla prima connessione il computer ne mostra una: controlla che corrisponda prima di rispondere sì.
 ssh.no_host_keys	Ancora nessuna chiave dell'host: vengono create all'installazione di openssh-server.
@@ -1949,8 +1948,8 @@ ssh.key_remove	Rimuovi chiave
 ssh.key_new	Chiave pubblica
 ssh.key_new_help	La riga del file .pub, ad es. creata con ssh-keygen -t ed25519.
 ssh.key_add	Aggiungi chiave
-ssh.key_added	Chiave aggiunta.
-ssh.key_removed	Chiave rimossa.
+ssh.key_added	Chiave aggiunta
+ssh.key_removed	Chiave rimossa
 ssh.key_remove_title	Rimuovere la chiave {name}?
 ssh.key_remove_text	Chi usa questa chiave non potrà più entrare come {user}.
 ssh.other_lines	Il file ha anche {n} righe che non sono chiavi (commenti o altre voci): restano come sono e non si gestiscono da qui.
@@ -1991,7 +1990,7 @@ recycle.all	Tutte quelle con il cestino
 recycle.days	Più vecchi di (giorni)
 recycle.days_help	Vuoto: la conservazione di ogni cartella.
 recycle.run	Svuota ora
-recycle.done	Cestini svuotati.
+recycle.done	Cestini svuotati
 nfs.enabled	Attiva NFS
 nfs.enabled_help	NFS 4.1 e 4.2 per client Linux e Unix.
 nfs.v3	Consenti anche NFSv3
@@ -2122,12 +2121,12 @@ nt.f.any_cat	Qualsiasi categoria
 nt.f.unacked	Da vedere
 nt.f.all	Tutte
 nt.f.acked	Viste
-nt.sev.info	Informazione
-nt.sev.notice	Avviso
-nt.sev.warning	Attenzione
+nt.sev.info	Info
+nt.sev.notice	Informazione
+nt.sev.warning	Avviso
 nt.sev.error	Errore
 nt.sev.critical	Critico
-nt.cat.storage	Storage
+nt.cat.storage	Archiviazione
 nt.cat.hardware	Hardware
 nt.cat.ups	UPS
 nt.cat.system	Sistema
@@ -2143,7 +2142,7 @@ nt.key_required	Inserisci una chiave.
 nt.first	Prima volta
 nt.last	Ultima volta
 nt.fields	Campi
-nt.silence_title	Silenzia le notifiche
+nt.silence_title	Silenziare queste notifiche?
 nt.silence_text	Gli eventi con questa chiave restano registrati ma non vengono inviati, e i promemoria si fermano. Vengono silenziati anche gli eventi critici.
 nt.silence_for	Per
 nt.for_1h	1 ora
@@ -2178,7 +2177,7 @@ nt.test_ok	Messaggio di prova inviato a {name} ({ms} ms)
 nt.test_failed	Messaggio di prova a {name} non riuscito:
 nt.enabled	Attiva
 nt.disabled	Disattivata
-nt.failing	In errore
+nt.failing	In avaria
 nt.delivering	Funzionante
 nt.never_used	Non ancora usata
 nt.last_ok	Ultimo invio {when}
@@ -2267,8 +2266,8 @@ nt.v.server	Inserisci l'indirizzo del server.
 nt.v.url	Inserisci l'URL.
 nt.v.targets	Scegli almeno una destinazione.
 sch.title	Attività pianificate
-sch.subtitle	Comandi, script e manutenzione pianificati, eseguiti dai timer di systemd
-sch.open_text	Comandi e script pianificati, scrub, test SMART, pulizia del cestino, con cronologia delle esecuzioni.
+sch.subtitle	Comandi, script e manutenzione pianificati
+sch.open_text	Comandi e script pianificati, pulizie dati, test SMART, pulizia del cestino, con cronologia delle esecuzioni.
 sch.create	Crea attività
 sch.search	Cerca attività
 sch.tab.tasks	Attività
@@ -2310,7 +2309,7 @@ sch.run.timeout	Tempo scaduto
 sch.run.exit	Non riuscita (uscita {code})
 sch.run.signal	Interrotta ({sig})
 sch.delete_title	Eliminare l'attività {name}?
-sch.delete_text	Il timer e le unità vengono rimossi all'applicazione delle modifiche. La cronologia resta.
+sch.delete_text	La sua pianificazione viene rimossa all'applicazione delle modifiche. La cronologia resta.
 sch.delete_job_task	Questa attività appartiene a un job di snapshot, replica o backup, o alla pianificazione di alimentazione: modificala o eliminala lì.
 sch.sec.general	Generale
 sch.sec.action	Azione
@@ -2318,7 +2317,7 @@ sch.sec.schedule	Pianificazione
 sch.sec.notify	Notifiche
 sch.f.name	Nome
 sch.f.id	ID
-sch.f.id_help	Lettere minuscole, cifre e trattini; le unità sono rynas-task-<id>. Non si può cambiare in seguito.
+sch.f.id_help	Lettere minuscole, cifre e trattini. Non si può cambiare in seguito.
 sch.f.description	Descrizione
 sch.f.enabled	Attiva
 sch.f.enabled_help	Un'attività disattivata conserva le impostazioni e si può ancora eseguire a mano.
@@ -2329,9 +2328,9 @@ sch.f.script_help	La riga #! sceglie l'interprete (predefinito /bin/sh). rynas l
 sch.f.user	Esegui come
 sch.f.user_help	root (solo amministratori) o un utente locale.
 sch.f.filesystem	Volume
-sch.f.filesystem_help	Punto di mount del volume btrfs da verificare.
+sch.f.filesystem_help	Punto di mount del volume btrfs su cui eseguire la pulizia dati.
 sch.f.disk	Disco
-sch.f.test	Test
+sch.f.test	Prova
 sch.f.share_help	Vuoto: tutte le cartelle condivise con cestino.
 sch.f.days	Conserva per (giorni)
 sch.f.days_help	Vuoto: la conservazione della cartella.
@@ -2389,7 +2388,7 @@ sch.checking	Verifica…
 sch.act.command	Comando
 sch.act.script	Script
 sch.act.snapshot	Job di snapshot
-sch.act.scrub	Scrub del volume
+sch.act.scrub	Pulizia dati del volume
 sch.act.smart_test	Test SMART
 sch.act.recycle_cleanup	Pulizia del cestino
 sch.act.power_shutdown	Spegnimento pianificato
@@ -2403,7 +2402,7 @@ dd.fs_name	Filesystem {id}
 dd.st.off	Disattivata
 dd.st.on	Attiva
 dd.st.paused	In pausa
-dd.st.running	In corso
+dd.st.running	In esecuzione
 dd.st.estimating	Stima in corso
 dd.st.waiting	In attesa
 dd.engine_missing	Il motore di deduplicazione (oans) non è installato.
@@ -2441,7 +2440,7 @@ dd.out.stopped	Fermata
 dd.out.partial	Parziale
 dd.out.failed	Non riuscita
 dd.out.skipped	Saltata
-dd.block.encrypted	Le cartelle crittografate non si possono deduplicare.
+dd.block.encrypted	Le cartelle cifrate non si possono deduplicare.
 dd.block.nocow	Le cartelle senza copy-on-write non si possono deduplicare.
 dd.block.filesystem	Si possono deduplicare solo cartelle btrfs e XFS.
 dd.block.xfs_no_reflink	Questo filesystem XFS è stato creato senza reflink.
@@ -2456,7 +2455,7 @@ dd.estimate	Stima
 dd.estimate_title	Stima su {name}
 dd.estimate_text	Legge le cartelle e conta i duplicati senza cambiare nulla. Il lavoro viene riusato dalla prima esecuzione.
 dd.run_title	Deduplica {name} ora
-dd.run_text	Parte ora con bassa priorità. Altre attività sul volume (scrub, replica, backup) hanno la precedenza.
+dd.run_text	Parte ora con bassa priorità. Altre attività sul volume (pulizia dati, replica, backup) hanno la precedenza.
 dd.until_label	Fermati
 dd.until_help	Il lavoro fatto resta; la prossima fascia continua.
 dd.until_window	Alla fine della fascia
@@ -2512,6 +2511,8 @@ dd.sz.1m	1 MiB
 dd.sz.4m	4 MiB
 dd.always_excluded	Mai deduplicati
 dd.reset	Azzera l'indice
+dd.reset_title	Azzerare l'indice?
+dd.turn_off_title	Disattivare la deduplicazione di {name}?
 dd.reset_text	L'indice dei dati noti viene eliminato: la prossima esecuzione rilegge tutto. I dati non vengono toccati.
 dd.reset_done	Indice azzerato
 dd.turn_off_text	La deduplicazione di {name} si ferma. Lo spazio già liberato resta libero.
@@ -2550,7 +2551,7 @@ sch.v.days	I giorni devono essere un numero.
 sch.v.delay	Il ritardo deve essere un numero di secondi.
 sch.v.calendar	La pianificazione non è valida.
 snap.title	Snapshot
-snap.subtitle	Copie puntuali delle cartelle condivise, ripristino di file e rollback
+snap.subtitle	Copie puntuali delle cartelle condivise, ripristino di file e ritorno alla versione precedente
 snap.tab.snapshots	Snapshot
 snap.tab.jobs	Job di snapshot
 snap.tab.system	Punti di ripristino del sistema
@@ -2576,7 +2577,7 @@ snap.latest_at	Ultimo {when}
 snap.reason	Motivo: {r}
 snap.why.apt	Prima di modifiche ai pacchetti
 snap.why.manual	Creato a mano
-snap.why.before_rollback	Sistema prima di un rollback
+snap.why.before_rollback	Sistema prima di un ritorno alla versione precedente
 snap.browse	Sfoglia
 snap.browse_title	Sfoglia {id}
 snap.path	Cartella
@@ -2591,28 +2592,28 @@ snap.restore_text	La versione dello snapshot {id} torna nella cartella condivisa
 snap.restore_mode	Dove
 snap.mode.copy	Accanto all'attuale
 snap.mode.replace	Al suo posto
-snap.mode.copy_help	Ripristinato come "nome (restored data)" accanto alla versione attuale.
+snap.mode.copy_help	Ripristinato come «nome (restored data)» accanto alla versione attuale.
 snap.mode.replace_help	La versione attuale viene prima rinominata in nome.rynas-before-restore-<ora>, poi la versione dello snapshot prende il suo posto.
 snap.restored	{path} ripristinato
-snap.rollback	Rollback
-snap.rollback_system	Ripristina il sistema (serve un riavvio)
-snap.rollback_title	Rollback a {id}?
+snap.rollback	Torna alla versione precedente
+snap.rollback_system	Riporta il sistema alla versione precedente (serve un riavvio)
+snap.rollback_title	Tornare allo snapshot {id}?
 snap.rollback_text	L'intera cartella condivisa torna a questo snapshot. Il contenuto attuale viene conservato, rinominato <cartella>.rynas-rollback-<ora>, finché non lo elimini.
 snap.rollback_nfs	I client NFS devono rimontare la cartella dopo l'operazione.
-snap.rolled_back	Rollback a {id} eseguito
-snap.root_title	Ripristinare il sistema a {id}?
+snap.rolled_back	Tornato allo snapshot {id}
+snap.root_title	Riportare il sistema a {id}?
 snap.root_text	Al prossimo riavvio il sistema parte da questo punto di ripristino: pacchetti, kernel e impostazioni tornano a quel momento. Cartelle condivise e volumi dati non vengono toccati.
 snap.root_kernel	Kernel dopo il riavvio
 snap.root_running	Kernel in esecuzione ora
 snap.root_steps	Cosa succede
 snap.root_step1	Il punto di ripristino viene montato in sola lettura e il suo kernel viene controllato.
 snap.root_step2	La voce di avvio viene puntata su quel kernel. Se l'operazione viene rifiutata, non cambia nulla.
-snap.root_step3	Il sistema attuale viene conservato come nuovo punto di ripristino (motivo: before rollback), poi il punto di ripristino diventa il subvolume di sistema (@rootfs).
+snap.root_step3	Il sistema attuale viene conservato come nuovo punto di ripristino («Sistema prima di un ritorno alla versione precedente»), poi il punto di ripristino diventa il sottovolume di sistema (@rootfs).
 snap.root_step4	Riavvii il NAS per avviare il sistema ripristinato.
 snap.root_reboot	Per finire serve un riavvio. Fino ad allora il sistema attuale continua a funzionare.
-snap.root_done	Al prossimo riavvio il sistema parte da {id} (kernel {kernel}). Riavvia ora per completare il ripristino.
+snap.root_done	Al prossimo riavvio il sistema parte da {id} (kernel {kernel}). Riavvia ora per completare il ritorno alla versione precedente.
 snap.root_refused_title	{id} non si può ripristinare da qui
-snap.refusal.no_boot_layer	Questo sistema non si può ripristinare dall'interfaccia web: il punto di ripristino c'è, tornarci è una procedura da console.
+snap.refusal.no_boot_layer	Questo sistema non può tornare alla versione precedente dall'interfaccia web: il punto di ripristino c'è, tornarci è una procedura da console.
 snap.refusal.no_kernel	Il punto di ripristino non contiene un'immagine del kernel.
 snap.refusal.no_modules	Al punto di ripristino mancano i moduli del suo kernel (/lib/modules): non potrebbe avviarsi.
 snap.refusal.not_readonly	Non è uno snapshot in sola lettura.
@@ -2621,11 +2622,10 @@ snap.delete_text	I suoi file non si potranno più ripristinare. L'operazione non
 snap.deleted	Snapshot {id} eliminato
 snap.del.latest	Lo snapshot più recente di un job viene conservato: è la base del successivo
 snap.del.writable	Non è uno snapshot in sola lettura: non viene toccato
-snap.del.not_subvolume	Non è un subvolume: non viene toccato
-snap.jobs_help	Ogni job crea snapshot di una cartella condivisa o di un subvolume secondo la sua pianificazione e conserva snapshot orari, giornalieri, settimanali, mensili e annuali. Una cartella condivisa con SMB ottiene anche le "Versioni precedenti" di Windows.
+snap.del.not_subvolume	Non è un sottovolume: non viene toccato
+snap.jobs_help	Ogni job crea snapshot di una cartella condivisa o di un sottovolume secondo la sua pianificazione e conserva snapshot orari, giornalieri, settimanali, mensili e annuali. Una cartella condivisa con SMB ottiene anche le «Versioni precedenti» di Windows.
 snap.no_jobs	Nessun job di snapshot
 snap.no_jobs_text	Proteggi una cartella condivisa da file eliminati e ransomware con snapshot orari.
-snap.take_now	Crea uno snapshot ora
 snap.show_snapshots	Mostra gli snapshot di questo job
 snap.delete_job	Eliminare il job di snapshot {name}?
 snap.delete_job_text	Con il job se ne vanno la pianificazione e le versioni precedenti SMB. Gli snapshot già su disco restano.
@@ -2647,13 +2647,13 @@ snap.sec.source	Cosa proteggere
 snap.f.name	Nome del job
 snap.f.name_help	È anche il prefisso dei nomi degli snapshot (nome.AAAAMMGGTHHMM). Non si può cambiare in seguito.
 snap.f.source	Origine
-snap.src.path	Percorso del subvolume
+snap.src.path	Percorso del sottovolume
 snap.f.pick_share	Scegli una cartella condivisa
-snap.f.share_help	La sua cartella deve essere un subvolume btrfs.
-snap.f.subvolume	Subvolume
-snap.f.subvolume_help	Percorso assoluto di un subvolume btrfs.
+snap.f.share_help	La sua cartella deve essere un sottovolume btrfs.
+snap.f.subvolume	Sottovolume
+snap.f.subvolume_help	Percorso assoluto di un sottovolume btrfs.
 snap.f.dir	Cartella degli snapshot
-snap.f.dir_help	Sullo stesso volume. Vuoto: .snapshots/<job> accanto al subvolume.
+snap.f.dir_help	Sullo stesso volume. Vuoto: .snapshots/<job> accanto al sottovolume.
 snap.f.enabled	Crea snapshot secondo la pianificazione
 snap.f.enabled_help	Disattivato: gli snapshot si creano solo con Crea uno snapshot ora.
 snap.f.preset	Conserva
@@ -2665,7 +2665,7 @@ snap.f.yearly	Annuali
 snap.f.min	Conserva sempre
 snap.f.min_help	latest, all, o un'età come 1d, 12h, 2w.
 snap.v.name	Usa lettere, cifre, _ e - (al massimo 48), iniziando con una lettera o una cifra.
-snap.v.source	Scegli una cartella condivisa o inserisci il percorso assoluto di un subvolume.
+snap.v.source	Scegli una cartella condivisa o inserisci il percorso assoluto di un sottovolume.
 snap.system_help	Prima che apt installi o aggiorni pacchetti, rynas crea uno snapshot in sola lettura del sistema. Dove l'avvio lo consente, il sistema può tornare a uno di essi dalla lista degli snapshot (kernel compreso, serve un riavvio); altrove è una procedura da console.
 snap.system_enabled	Crea punti di ripristino prima degli aggiornamenti
 snap.system_enabled_help	Richiede un filesystem di root btrfs.
@@ -2696,10 +2696,8 @@ repl.never	Mai
 repl.sent.one	{n} snapshot inviato
 repl.sent.other	{n} snapshot inviati
 repl.off	Disattivata
-repl.failing	Non riuscita
+repl.failing	In avaria
 repl.ok	Replicata
-repl.waiting	Non ancora eseguita
-repl.run	Replica ora
 repl.run_done	Replica completata
 repl.replicas	Repliche
 repl.replicas_remote	Le repliche su un altro server si consultano su quel server
@@ -2722,7 +2720,7 @@ repl.sec.retention	Conservazione sulla destinazione
 repl.sec.transfer	Trasferimento
 repl.f.job_help	Vengono copiati gli snapshot di questo job.
 repl.f.id	Nome della destinazione
-repl.f.id_help	Lettere minuscole, cifre e '-', per esempio hdd o offsite.
+repl.f.id_help	Lettere minuscole, cifre e «-», per esempio hdd o offsite.
 repl.f.kind	Dove
 repl.kind.local	Un altro volume
 repl.kind.ssh	Un altro server (SSH)
@@ -2776,7 +2774,7 @@ repl.warn.not_btrfs	Non su btrfs: la replica richiede una destinazione btrfs.
 repl.warn.same_fs	Sul volume dell'origine: non è una seconda copia.
 repl.warn.not_mounted	Lì non è montato alcun volume: montalo prima del prossimo trasferimento.
 repl.warn.no_host_key	Identità del server non confermata.
-repl.v.id	Usa da 1 a 24 lettere minuscole, cifre e '-'.
+repl.v.id	Usa da 1 a 24 lettere minuscole, cifre e «-».
 repl.v.path	Inserisci il percorso assoluto di una cartella.
 repl.v.host	Inserisci il nome o l'indirizzo del server.
 repl.v.port	Inserisci una porta da 1 a 65535.
@@ -2786,8 +2784,8 @@ bk.title	Backup
 bk.subtitle	Copie cifrate e con versioni di questo NAS altrove, e i backup che i PC tengono qui
 bk.tab.restic	Altro NAS o cloud
 bk.help	Ogni job copia le cartelle scelte in un repository cifrato. Viene inviato solo ciò che è cambiato e ogni esecuzione è una versione ripristinabile. Il repository si apre con restic o rustic su qualsiasi computer, con la sua password.
-bk.create	Nuovo job di backup
-bk.crypt_note	Le cartelle condivise crittografate vengono salvate come dati crittografati (la cartella indicata accanto), bloccate o no: un ripristino restituisce quella cartella, leggibile con la password o la chiave di ripristino della cartella.
+bk.create	Crea job di backup
+bk.crypt_note	Le cartelle condivise cifrate vengono salvate come dati cifrati (la cartella indicata accanto), bloccate o no: un ripristino restituisce quella cartella, leggibile con la password o la chiave di ripristino della cartella.
 bk.empty	Ancora nessun job di backup
 bk.empty_text	Crea un job per copiare cartelle condivise, dati delle app Docker o la configurazione di rynas su un altro NAS, un disco USB o uno spazio cloud.
 bk.no_offsite	Nessun job copia i dati fuori da questo NAS: un incendio o un furto si porterebbero via anche i backup. Aggiungi un job verso un altro NAS o il cloud.
@@ -2813,7 +2811,6 @@ bk.never	Mai eseguito
 bk.paused	In pausa
 bk.versions_n	{n} versioni
 bk.check.bad_at	Verifica non riuscita {when}
-bk.run	Esegui backup ora
 bk.run.started	Backup {name} avviato
 bk.run.ok	Backup {name} completato
 bk.run.failed	Backup {name} non riuscito: {why}
@@ -2913,7 +2910,7 @@ bk.f.keep_monthly	Mensili
 bk.f.keep_yearly	Annuali
 bk.f.smart	Usa i valori consigliati
 bk.f.use_snapshot	Leggi da uno snapshot
-bk.f.use_snapshot_help	Ogni cartella che è un subvolume btrfs viene letta da uno snapshot temporaneo in sola lettura: i file che cambiano durante il backup (database) restano coerenti.
+bk.f.use_snapshot_help	Ogni cartella che è un sottovolume btrfs viene letta da uno snapshot temporaneo in sola lettura: i file che cambiano durante il backup (database) restano coerenti.
 bk.f.stop_stacks	Stack Docker da fermare
 bk.f.stop_stacks_help	Separati da virgole; fermati mentre viene creato lo snapshot (o per tutto il backup senza snapshot), poi riavviati.
 bk.f.excludes	Escludi
@@ -2985,6 +2982,7 @@ net.reason.other	automatico
 net.rolled_back_at	Impostazioni di rete annullate il {date} ({reason}): è di nuovo attiva la revisione #{rev}.
 net.rollback_unverified	Non è stato possibile verificare lo stato ripristinato: controlla le interfacce.
 net.adopt_title	Rete configurata da ifupdown
+net.adopt_ask	Affidare la rete a rynas?
 net.adopt_text	Le porte sono configurate da /etc/network/interfaces e qui sono in sola lettura. Affidale a rynas per modificarle in sicurezza (stessi indirizzi, con prova a tempo).
 net.adopt_btn	Affida a rynas…
 net.adopt_dialog_text	rynas scrive i file di systemd-networkd con gli stessi indirizzi, conserva l'originale come interfaces.rynas-bak e passa da ifupdown a systemd-networkd. I bond vengono migrati; bridge, VLAN e IPv6 statico non ancora.
@@ -2996,10 +2994,10 @@ net.adopt_now_help	La rete si riavvia subito; conferma entro il tempo limite o t
 net.adopt_go	Affida a rynas
 net.adopt_scheduled	Migrazione programmata al prossimo riavvio: {ifaces}.
 net.pending_title	Modifiche di rete non ancora applicate
-net.pending_text	Preparate su {ifaces}. Non cambia nulla finché non le applichi.
+net.pending_text	In sospeso su {ifaces}. Non cambia nulla finché non le applichi.
 net.review_apply	Rivedi e applica…
 net.discard_title	Scartare le modifiche di rete?
-net.discard_text	Le impostazioni preparate di tutte le interfacce vengono eliminate. La rete in uso non cambia.
+net.discard_text	Le impostazioni in sospeso di tutte le interfacce vengono scartate. La rete in uso non cambia.
 net.discarded	Modifiche di rete scartate
 net.apply_title	Applica le impostazioni di rete
 net.timeout	Tempo per confermare
@@ -3024,13 +3022,13 @@ net.trial_who	Avviata da {user} su {ifaces}.
 net.previous	le impostazioni precedenti
 net.left_sr	Circa {n} secondi per confermare.
 net.confirm	Mantieni queste impostazioni
-net.rollback_now	Annulla ora
+rollback_now	Torna alla versione precedente
 net.no_token	Conferma dal browser in cui è stata applicata la modifica, oppure annullala da qui.
-net.confirmed	Impostazioni di rete mantenute: la revisione #{rev} è l'ultima funzionante.
+net.confirmed	Impostazioni di rete mantenute: la revisione #{rev} è l'ultima funzionante
 net.confirm_conflict	La conferma deve arrivare dalla nuova rete: apri il NAS su uno dei nuovi indirizzi qui sotto e conferma da lì.
 net.confirm_token	Questo link di conferma non vale per la prova in corso.
 net.kept	Le nuove impostazioni di rete sono state mantenute.
-net.applied	Impostazioni di rete applicate.
+net.applied	Impostazioni di rete applicate
 net.not_kept	Le nuove impostazioni di rete non sono state mantenute: sono state ripristinate le precedenti.
 net.lost_title	Connessione persa.
 net.lost_text	È normale se l'indirizzo di questa pagina è cambiato. La pagina continua a riprovare da sola; intanto apri il NAS su un nuovo indirizzo e conferma da lì.
@@ -3095,7 +3093,7 @@ net.ro.ifupdown	Configurata da ifupdown (/etc/network/interfaces): usa prima Aff
 net.ro.network_manager	Gestita da NetworkManager: rynas non la modifica.
 net.ro.no_networkd	systemd-networkd non è in esecuzione: rynas configura le interfacce tramite questo servizio.
 net.mgmt_edit	Sei collegato tramite questa interfaccia. La modifica viene provata con conferma a tempo; se cambia l'indirizzo ti ricollegherai a quello nuovo.
-net.has_pending	Questa interfaccia ha già una modifica preparata: la stai modificando.
+net.has_pending	Questa interfaccia ha già una modifica in sospeso: la stai modificando.
 net.sec_ipv4	IPv4
 net.sec_diff	Modifiche
 net.sec_details	Dettagli
@@ -3114,8 +3112,8 @@ net.mtu_help_max	Vuoto: il valore predefinito del driver (di solito 1500). Quest
 net.mtu_default	predefinito
 net.max	max
 net.stage	Prepara modifica
-net.staged	Modifica preparata: applicala dalla pagina Rete
-net.revert	Elimina modifica preparata
+net.staged	Modifica in sospeso: applicala dalla pagina Rete
+net.revert	Scarta la modifica in sospeso
 net.no_changes	Nessuna modifica.
 net.phase_note	Per ora impostazioni IPv6, VLAN e bridge sono in sola lettura.
 net.driver	Driver
@@ -3159,10 +3157,10 @@ net.bh.l2	Livello 2 (MAC)
 net.mixed_speeds	Le porte vanno a velocità diverse. Con la tolleranza ai guasti scegli la più veloce come porta preferita.
 net.v_bond_members	Scegli almeno una porta.
 net.bond_delete	Elimina bond
-net.bond_deleted	Eliminazione preparata: applicala dalla pagina Rete
-net.bond_dropped	Il nuovo bond non è più preparato
+net.bond_deleted	Eliminazione in sospeso: applicala dalla pagina Rete
+net.bond_dropped	Il nuovo bond non è più in sospeso
 net.bond_removed	Da eliminare
-net.bond_removed_text	Questo bond è preparato per l'eliminazione. Quando la applichi, la porta con il suo indirizzo MAC prende le sue impostazioni di indirizzo e le altre porte restano senza IPv4.
+net.bond_removed_text	L'eliminazione di questo bond è in sospeso. Quando la applichi, la porta con il suo indirizzo MAC prende le sue impostazioni di indirizzo e le altre porte restano senza IPv4.
 net.bond_members	Membri: {list}
 net.member_of	Membro di {master}
 net.member_active	attiva
@@ -3182,7 +3180,7 @@ net.v_mtu	MTU fuori dall'intervallo accettato da questa porta.
 net.v_host	Inserisci un nome host o un indirizzo, senza spazi.
 net.v_count	Da 1 a 10.
 net.v_size	Da 0 a 65000 byte.
-net.revs_intro	Ogni modifica conserva una copia della rete precedente. Il ripristino di una revisione viene provato come un'applicazione.
+net.revs_intro	Ogni modifica conserva una copia delle impostazioni di rete precedenti. Il ripristino di una revisione viene provato come ogni altra modifica.
 net.revs_empty	Ancora nessuna revisione
 net.revs_empty_text	Compaiono con la prima modifica applicata.
 net.rk.snapshot	Copia prima di una modifica
@@ -3195,6 +3193,7 @@ net.rev_lkg	Ultima funzionante
 net.rev_good	Funzionante
 net.rev_unconfirmed	Non confermata
 net.restore_rev	Ripristina la revisione #{rev}
+net.restore_rev_title	Ripristinare la revisione #{rev}?
 net.restore_text	Torna la rete del {date} con una prova a tempo: confermala dalla rete ripristinata o viene annullata.
 net.rescue_intro	Vie d'accesso quando l'indirizzo normale non funziona. Restano attive qualunque siano le impostazioni delle interfacce.
 net.mdns	Nome locale (mDNS)
@@ -3281,9 +3280,9 @@ ts.version	Versione installata
 ts.update	{v} disponibile con gli aggiornamenti di sistema
 ts.offline	Non connesso al server di coordinamento.
 ts.health	Tailscale segnala:
-ts.options_title	Opzioni
+ts.options_title	Impostazioni
 ts.opt.accept_routes	Usa le rotte degli altri dispositivi
-ts.opt.accept_routes_help	Spento su un server: una rotta verso la rete di questo NAS attraverso la tailnet può rendere irraggiungibile la rete locale.
+ts.opt.accept_routes_help	Spento di norma: una rotta verso la rete di questo NAS attraverso la tailnet può rendere irraggiungibile la rete locale.
 ts.opt.accept_dns	Usa le impostazioni DNS della tailnet
 ts.opt.accept_dns_help	Spento di norma: il NAS tiene i suoi server DNS locali. Acceso: i nomi della tailnet si risolvono anche sul NAS e la sua configurazione DNS cambia.
 ts.opt.exit_node	Offri questo NAS come nodo di uscita
@@ -3294,16 +3293,16 @@ ts.opt.no_lan	Nessuna sottorete IPv4 trovata sulle interfacce di rete.
 ts.opt.ssh	SSH di Tailscale
 ts.opt.ssh_help	Spento di norma. Acceso: decidono le regole di accesso della tailnet chi può entrare via SSH, non gli account di questo NAS.
 ts.routes_pending	In attesa di approvazione nella console di amministrazione: {routes}
-ts.confirm_title	Cambiare le opzioni di Tailscale?
-ts.confirm_text	La modifica viene provata: se questa pagina non raggiunge di nuovo il NAS entro 90 secondi, tornano da sole le opzioni precedenti.
+ts.confirm_title	Cambiare le impostazioni di Tailscale?
+ts.confirm_text	La modifica viene provata: se questa pagina non raggiunge di nuovo il NAS entro 90 secondi, tornano da sole le impostazioni precedenti.
 ts.via_warning	Questa pagina è aperta tramite Tailscale: questo può chiudere la sessione. Tieni pronto un altro accesso (rete locale, indirizzo di emergenza).
-ts.saved	Opzioni di Tailscale salvate
-ts.confirm_failed	Il NAS non ha potuto confermare la modifica: le opzioni precedenti tornano da sole entro 90 secondi.
-ts.pending_confirm	Una modifica delle opzioni di Tailscale attende conferma: se non viene confermata, le opzioni precedenti tornano entro 90 secondi.
-ts.save_after_confirm	Si possono salvare nuove modifiche quando quella in attesa è confermata o annullata.
+ts.saved	Impostazioni di Tailscale salvate
+ts.confirm_failed	Il NAS non ha potuto confermare la modifica: le impostazioni precedenti tornano da sole entro 90 secondi.
+ts.pending_confirm	Una modifica delle impostazioni di Tailscale attende conferma: se non viene confermata, le impostazioni precedenti tornano entro 90 secondi.
+ts.save_after_confirm	Si possono salvare nuove modifiche quando quella in sospeso è confermata o annullata.
 ts.ch.routes_added	Condividi: {routes}
 ts.ch.routes_removed	Smetti di condividere: {routes}
-ts.keep	Tieni le nuove opzioni
+ts.keep	Tieni le nuove impostazioni
 ts.logout	Esci dalla tailnet
 ts.logout_title	Scollegare questo NAS dalla tailnet?
 ts.logout_text	Il NAS esce dalla tailnet e la sua chiave scade. Per rientrare servono il browser o una nuova chiave di autenticazione.
@@ -3316,20 +3315,20 @@ ts.wa_on	Tailscale è connesso ({name}): «Questa rete e VPN» ammette anche i d
 ts.wa_off	Tailscale non è connesso: «Questa rete e VPN» non ammette dispositivi della tailnet.
 err.tailscale_not_installed	Tailscale non è installato.
 task.tailscale.install	Installazione di Tailscale
-task.tailscale.uninstall	Rimozione di Tailscale
+task.tailscale.uninstall	Disinstallazione di Tailscale
 task.tailscale.login	Accesso a Tailscale
 task.tailscale.logout	Uscita da Tailscale
-task.tailscale.options	Opzioni Tailscale
-task.tailscale.revert	Ripristino opzioni Tailscale
+task.tailscale.options	Modifica delle impostazioni di Tailscale
+task.tailscale.revert	Ritorno alle impostazioni precedenti di Tailscale
 task.updates.check	Controllo aggiornamenti
-task.updates.backports	Impostazione dei backports di Debian
+task.updates.backports	Modifica dell'impostazione dei backports di Debian
 task.updates.install	Installazione aggiornamenti
 task.updates.autoremove	Rimozione pacchetti inutilizzati
-task.updates.changelog	Changelog del pacchetto
+task.updates.changelog	Lettura del changelog di un pacchetto
 upd.title	Aggiornamenti
 upd.subtitle	Pacchetti Debian, aggiornamenti automatici e kernel di avvio.
 upd.open_text	Installa gli aggiornamenti Debian, imposta quelli automatici e controlla il kernel.
-upd.check	Controlla ora
+upd.check	Controlla aggiornamenti
 upd.never	Mai
 upd.no_apt	Nessun gestore di pacchetti
 upd.no_apt_text	apt non è installato su questa macchina.
@@ -3480,7 +3479,7 @@ sto.reason.wear	Resta il {n} della resistenza nominale.
 sto.reason.self_test_failed	Ultimo autotest ({name}): {detail}.
 sto.reason.error_log	{n} errori nel registro errori del disco.
 sto.ack	Segna come visto
-sto.ack_undo	Annulla
+sto.ack_undo	Segna come non visto
 sto.ack_seen	visto il {d}
 sto.ack_hint	L'avviso torna se il conteggio aumenta.
 sto.ack_done	Avvisi segnati come visti
@@ -3573,7 +3572,7 @@ task.docker.stack.restart	Riavvio dello stack
 task.docker.stack.down	Rimozione dei container dello stack
 task.docker.stack.pull	Scaricamento delle immagini dello stack
 task.docker.stack.update	Aggiornamento dello stack
-task.docker.stack.rollback	Ripristino dello stack
+task.docker.stack.rollback	Ritorno alla versione precedente dello stack
 task.docker.stack.remove	Rimozione dello stack
 task.docker.update-check	Controllo aggiornamenti delle immagini
 task.docker.auto-update	Aggiornamento automatico dello stack
@@ -3635,7 +3634,7 @@ dk.task_running	Operazione Docker in corso
 dk.done	{task}: completato
 dk.open_web	Apri
 dk.engine	Motore
-dk.eng.running	Attivo
+dk.eng.running	In esecuzione
 dk.eng.down	Non risponde
 dk.eng.version	Versione
 dk.eng.version_api	{v} (API {api}, API minima dei client {min})
@@ -3690,11 +3689,11 @@ dk.set.pool_invalid	Inserisci una rete come 10.200.0.0/16.
 dk.set.pool_size	Dimensione delle reti (prefisso)
 dk.set.pool_size_help	24 dà a ogni rete 254 indirizzi.
 dk.set.snapshot	Snapshot prima degli aggiornamenti
-dk.set.snapshot_help	Uno snapshot in sola lettura della cartella dello stack, per un ripristino.
+dk.set.snapshot_help	Uno snapshot in sola lettura della cartella dello stack, per tornare alla versione precedente.
 dk.set.stop	Ferma lo stack per lo snapshot
 dk.set.stop_help	Consigliato per i database: i file sono coerenti mentre nessuno scrive.
 dk.set.online_catalog	Scarica gli aggiornamenti del catalogo delle app
-dk.set.files_app_data	Mostra i dati delle app nell'app File
+dk.set.files_app_data	Mostra i dati delle app in File
 dk.set.files_app_data_help	Gli amministratori vedono una cartella per app e possono modificarne i file; i proprietari restano quelli che l'app si aspetta. Una modifica sbagliata può rompere un'app.
 dk.set.online_catalog_help	Una volta al giorno rynas scarica il catalogo firmato delle app, così nuove app e nuove versioni arrivano senza aspettare un aggiornamento di rynas. Un catalogo che non supera la verifica non viene mai usato.
 dk.set.keep	Snapshot conservati per stack
@@ -3703,7 +3702,7 @@ dk.set.full_help	Una notifica quando il filesystem della cartella dei dati è pi
 dk.set.restarts	Riavvii che indicano un ciclo di crash
 dk.set.restarts_help	Una notifica quando un container si riavvia così spesso nell'intervallo qui sotto.
 dk.set.window	Intervallo del ciclo di crash (minuti)
-dk.plan.title	Sposta Docker sul volume
+dk.plan.title	Spostare Docker sul volume?
 dk.plan.text	Applicare il nuovo volume modifica questi file ed esegue questi comandi.
 dk.plan.files	File
 dk.plan.create	Cartelle create
@@ -3711,6 +3710,7 @@ dk.plan.commands	Comandi
 dk.plan.restart	Docker e containerd si riavviano. Le immagini e i container esistenti restano nella vecchia cartella: usa Sposta i dati per portarli con sé.
 dk.plan.go	Salva e applica
 dk.mig.title	Sposta i dati su un volume
+dk.mig.ask	Spostare i dati di Docker?
 dk.mig.text	Copia immagini, container e dati di containerd in <volume>/docker e avvia Docker lì. Le vecchie cartelle restano finché non le elimini.
 dk.mig.volume	Volume di destinazione
 dk.mig.running	{n} container sono in esecuzione: fermali prima, lo spostamento richiede Docker fermo.
@@ -3718,7 +3718,7 @@ dk.mig.go	Sposta i dati
 dk.mig.confirm	Docker si ferma durante la copia e riparte su {vol}.
 dk.vol_free	{free} liberi
 place.system	Sistema
-place.system_note	Il volume di sistema è la cartella {path} sul disco del sistema operativo. Ne condivide lo spazio: se si riempie, il sistema può smettere di funzionare, e un guasto di quel disco si porta via anche questi dati.
+place.system_note	Il volume di sistema è la cartella {path} sul disco di sistema. Ne condivide lo spazio: se si riempie, il sistema può smettere di funzionare, e un guasto di quel disco si porta via anche questi dati.
 place.not_btrfs	Il disco di sistema non è btrfs: viene creata una cartella normale, senza sottovolume, snapshot o NOCOW.
 place.unavailable	{name} non si può usare ora: {why}
 place.unavailable_short	non disponibile
@@ -3751,7 +3751,7 @@ dk.st.exited	Fermo
 dk.st.dead	Bloccato
 dk.st.stopping	In arresto
 dk.st.unknown	Sconosciuto
-dk.h.healthy	In salute
+dk.h.healthy	Integro
 dk.h.starting	In avvio
 dk.h.unhealthy	Non in salute
 dk.a.start	Avvia
@@ -3775,18 +3775,18 @@ dk.log.paused	In pausa
 dk.log.lost	Connessione persa
 dk.log.download	Scarica
 dk.upd.available	Aggiornamento disponibile
-dk.upd.check	Controlla aggiornamenti
 dk.upd.never	Immagini mai controllate
 dk.upd.checked	Controllate {when}
 dk.upd.stack	Immagini più recenti nel registro: {images}
 dk.upd.title	Aggiorna {name}
+dk.upd.ask	Aggiornare {name}?
 dk.upd.text	Scarica le immagini più recenti e ricrea i container. Se l'aggiornamento fallisce, lo stack torna allo snapshot.
 dk.upd.snapshot	Fai prima uno snapshot
-dk.upd.snapshot_help	Serve per il ripristino.
+dk.upd.snapshot_help	Serve per tornare alla versione precedente.
 dk.upd.stop	Ferma lo stack durante lo snapshot
 dk.upd.next	prossimo controllo {when}
 dk.au.title	Aggiornamenti automatici delle immagini
-dk.au.text	Le immagini vengono controllate ogni giorno. Gli stack con gli aggiornamenti automatici vengono aggiornati uno alla volta dentro questa finestra giornaliera: prima lo snapshot, poi il controllo di salute, e il ripristino se la nuova versione non funziona. Attivali per ogni stack in Stack, nei dettagli dello stack.
+dk.au.text	Le immagini vengono controllate ogni giorno. Gli stack con gli aggiornamenti automatici vengono aggiornati uno alla volta dentro questa finestra giornaliera: prima lo snapshot, poi il controllo di salute, e il ritorno alla versione precedente se la nuova non funziona. Attivali per ogni stack in Stack, nei dettagli dello stack.
 dk.au.hour	Inizio della finestra (ora)
 dk.au.minute	Inizio della finestra (minuto)
 dk.au.window	Durata della finestra (minuti)
@@ -3794,7 +3794,7 @@ dk.au.window_help	Gli aggiornamenti partono solo dentro la finestra.
 dk.au.chip	Automatico
 dk.au.stack	Aggiornamenti automatici di questo stack
 dk.au.enable	Aggiorna automaticamente
-dk.au.enable_help	Nella finestra giornaliera: scaricamento, snapshot, avvio, controllo di salute, ripristino se fallisce. Una notifica ti dice com'è andata.
+dk.au.enable_help	Nella finestra giornaliera: scaricamento, snapshot, avvio, controllo di salute, ritorno alla versione precedente se fallisce. Una notifica ti dice com'è andata.
 dk.au.policy	Versioni ammesse
 dk.au.policy_help	Quali salti di versione può fare un aggiornamento automatico. Le versioni di prova e le altre varianti dell'immagine non vengono mai prese.
 dk.au.p_default	Predefinite (catalogo o tag)
@@ -3828,7 +3828,7 @@ dk.g.untracked	Altri progetti compose
 dk.m.rynas	rynas
 dk.m.portainer	Portainer
 dk.m.untracked	Non gestito da rynas
-dk.ss.running	Attivo
+dk.ss.running	In esecuzione
 dk.ss.partial	Attivo in parte
 dk.ss.stopped	Fermo
 dk.ss.down	Non avviato
@@ -3867,7 +3867,7 @@ dk.ad.changed	I file sono cambiati fuori da rynas dall'ultima lettura o scrittur
 dk.ad.ro_note	Portainer gestisce questi file: qui lo stack si può avviare, fermare e riavviare, vederne i file e controllarne le immagini.
 dk.ad.chip	Adottato
 dk.ad.move	Sposta nella cartella stack
-dk.ad.move_title	Sposta {name}
+dk.ad.move_title	Spostare {name}?
 dk.ad.move_text	Lo stack si ferma, l'intera cartella ({from}) viene copiata con i dati in {to}, i bind mount vengono controllati e lo stack riparte. La vecchia cartella resta con un nome .moved finché non la elimini.
 dk.ad.move_free	Spazio libero nella destinazione
 dk.ad.move_copy	Copia
@@ -3892,19 +3892,19 @@ dk.im.import	Importa
 dk.s.containers	Container
 dk.s.no_containers	Nessun container: avvia lo stack con Avvia (up).
 dk.snap.title	Snapshot
-dk.snap.take	Fai uno snapshot
+dk.snap.take	Crea uno snapshot
 dk.snap.taken	Snapshot fatto
 dk.snap.none	Ancora nessuno snapshot: se ne fa uno prima di ogni aggiornamento.
-dk.snap.not_subvolume	La cartella dello stack non è un subvolume btrfs: niente snapshot e niente ripristino.
+dk.snap.not_subvolume	La cartella dello stack non è un sottovolume btrfs: niente snapshot e niente ritorno alla versione precedente.
 dk.snap.r_manual	Fatto a mano
 dk.snap.r_update	Prima di un aggiornamento
 dk.snap.r_pull	Prima di uno scaricamento
-dk.snap.r_rollback	Prima di un ripristino
-dk.snap.rollback	Ripristina
+dk.snap.r_rollback	Prima di un ritorno alla versione precedente
+dk.snap.rollback_title	Tornare allo snapshot del {when}?
 dk.snap.rollback_text	Lo stack viene fermato, la sua cartella torna allo snapshot del {when} con le immagini di allora, poi riparte. Lo stato attuale resta come snapshot.
-dk.snap.delete	Elimina snapshot
-dk.snap.delete_text	Lo snapshot del {when} viene eliminato: non sarà più possibile ripristinarlo.
-dk.rm.title	Rimuovi {name}
+dk.snap.delete	Eliminare lo snapshot del {when}?
+dk.snap.delete_text	Lo snapshot del {when} viene eliminato: non sarà più possibile tornarci.
+dk.rm.title	Rimuovere {name}?
 dk.rm.text	Ferma lo stack e rimuove i suoi container. I volumi con nome restano.
 dk.rm.files	Elimina anche la cartella dello stack (file compose, .env, dati dell'app) e i suoi snapshot
 dk.rm.adopted	La cartella dello stack, i suoi file e i dati dell'app restano dove sono. Per smettere di gestire lo stack senza rimuoverne i container, usa Rilascia.
@@ -3945,7 +3945,7 @@ yes	Sì
 no	No
 task.apps.install	Installazione dell'app
 task.apps.update	Aggiornamento dell'app
-task.apps.rollback	Ripristino dell'app
+task.apps.rollback	Ritorno alla versione precedente dell'app
 task.apps.uninstall	Disinstallazione dell'app
 task.apps.proxy	Spostamento dell'app dietro il proxy
 task.apps.auto-update	Aggiornamento automatico dell'app
@@ -4036,10 +4036,9 @@ apps.d.antifeatures	Cose da sapere
 apps.d.resources	Risorse
 apps.d.ports	Porte
 apps.d.folders	Cartelle dei dati
-apps.d.folders_text	Create nella cartella dello stack dell'app, così le sue istantanee le includono; singole cartelle possono andare su un altro volume.
-apps.d.shares	Cartelle condivise
+apps.d.folders_text	Create nella cartella dello stack dell'app, così i suoi snapshot le includono; singole cartelle possono andare su un altro volume.
 apps.d.secrets	Segreti generati
-apps.d.volumes	Volumi usa e getta (non nelle istantanee)
+apps.d.volumes	Volumi usa e getta (non negli snapshot)
 apps.secret.shown	mostrato una volta dopo l'installazione
 apps.gpu	Grafica
 apps.gpu.optional	Facoltativa, per l'accelerazione
@@ -4156,9 +4155,10 @@ apps.inst.left_text	Questa app è uscita dal catalogo: continua a funzionare, ma
 apps.inst.on_lan	L'app è pubblicata direttamente sulla LAN. Spostala dietro il proxy per raggiungerla solo tramite l'accesso web, con HTTPS.
 apps.inst.catalog	Catalogo
 apps.inst.title	App {name}
-apps.inst.no_snaps	Ancora nessuna istantanea: il primo aggiornamento ne crea una.
+apps.inst.no_snaps	Ancora nessuno snapshot: il primo aggiornamento ne crea uno.
 apps.in_docker	Mostra in Docker
 apps.proxy	Sposta dietro il proxy
+apps.proxy_title	Spostare l'app dietro il proxy?
 apps.proxy_text	La porta web dell'app ascolterà solo sul NAS e l'accesso web darà all'app un proprio indirizzo HTTPS. Lo stack si riavvia.
 apps.w.access_how	Come si raggiunge l'app
 apps.w.access_proxy	Tramite l'accesso web (consigliato)
@@ -4224,7 +4224,7 @@ wa.confirm.expired	Tempo scaduto: si ripristinano le impostazioni precedenti…
 wa.confirm.rollback	Senza conferma le impostazioni precedenti tornano da sole allo scadere del tempo. La porta {port} (l'indirizzo di emergenza) non cambia mai.
 wa.confirm.open	Apri {name}
 wa.confirm.go	Conferma
-wa.confirm.done	Nuovo indirizzo confermato.
+wa.confirm.done	Nuovo indirizzo confermato
 wa.confirm.names_help	Se il nome .local non si apre su questo dispositivo (niente mDNS), usa l'altro: richiede il nome del NAS nel DNS del router.
 wa.confirm.rolled_back	Non confermato in tempo: sono tornate le impostazioni precedenti.
 wa.rolled.title	Modifica annullata
@@ -4236,26 +4236,26 @@ wa.kind.stack	Stack
 wa.kind.custom	Altro dispositivo o servizio
 wa.route.on	Pubblicato
 wa.route.off	Spento
-wa.route.test	Verifica
+wa.route.test	Prova
 wa.route.test_named	Verifica {name}
 wa.route.title	Indirizzo di {name}
 wa.route.gone	Questo indirizzo non esiste più.
 wa.route.names	Nomi
 wa.route.upstream	Inoltrato a
 wa.route.kind	Tipo
-wa.route.login	Login
+wa.route.login	Accesso
 wa.route.headers	Intestazioni di sicurezza
 wa.route.enabled	Indirizzo attivo
 wa.route.enabled_help	Spento: il proxy chiude le connessioni a questo nome; l'app resta in esecuzione.
 wa.route.auth_none	Questa app non ha un login proprio, quindi resta limitata a questa rete.
-wa.add.button	Aggiungi un indirizzo
+wa.add.button	Aggiungi indirizzo
 wa.add.title	Nuovo indirizzo
 wa.add.intro	Inoltra un nome, una porta o entrambi a un altro dispositivo di questa rete o a un servizio non installato da rynas.
 wa.sec.where	Dove risponde
 wa.sec.forward	Inoltro
 wa.f.label	Nome
-wa.f.label_help	Lettere, cifre e '-'. È l'inizio dell'indirizzo, per esempio router-nas.local.
-wa.f.label_bad	Usa da 1 a 40 caratteri a-z, 0-9 e '-', non all'inizio o alla fine.
+wa.f.label_help	Lettere, cifre e «-». È l'inizio dell'indirizzo, per esempio router-nas.local.
+wa.f.label_bad	Usa da 1 a 40 caratteri a-z, 0-9 e «-», non all'inizio o alla fine.
 wa.f.label_required	Inserisci un nome per l'indirizzo.
 wa.f.upstream	Inoltra a
 wa.f.upstream_help	http:// o https://, poi l'indirizzo o il nome del dispositivo, e la sua porta se non è quella standard (80, 443).
@@ -4277,8 +4277,7 @@ wa.f.main_port_help	Spento: l'indirizzo risponde solo sulle sue porte aggiuntive
 wa.f.nas	Anche sui nomi di questo NAS
 wa.f.nas_help	Sulle porte aggiuntive l'indirizzo risponde anche ai nomi del NAS, per esempio https://nas.example.com:8444/.
 wa.route.remove	Rimuovi indirizzo
-wa.route.remove_q	Rimuovere questo indirizzo? Il dispositivo o servizio non viene toccato.
-wa.route.remove_title	Rimuovi questo indirizzo
+wa.route.remove_q	Rimuovere questo indirizzo?
 wa.route.remove_text	Il NAS smette di rispondere a questo indirizzo. Il dispositivo o servizio non viene toccato.
 wa.check.port_listening	Porta aggiuntiva in ascolto
 wa.fix.port_listening	Il proxy non risponde su questa porta. Controlla che nessun altro programma la usi, poi salva di nuovo.
@@ -4355,6 +4354,7 @@ tls.import.private_key	Chiave privata (PEM)
 tls.import.hint	Incolla o carica la catena completa, con il certificato del server per primo, e la sua chiave privata senza password.
 load_file	Carica da un file
 tls.use_local	Usa il certificato locale
+tls.use_local_title	Usare il certificato locale?
 tls.use_local.confirm	Il certificato importato viene messo da parte e torna in uso quello locale, dell'autorità di questo NAS.
 tls.warn.expires_soon	Il certificato scade fra meno di 30 giorni.
 tls.warn.expired	Il certificato è scaduto: i browser lo rifiutano.
@@ -4370,7 +4370,7 @@ wa.fix.domain_dns	Il nome del dominio non punta a questo NAS. Apri il dominio ne
 wa.fix.domain_certificate	Il certificato del dominio manca o non è valido. Apri il dominio nella scheda Domini per vedere perché.
 dom.title	Domini propri
 dom.intro	Ogni app riceve <app>.<dominio> con un certificato riconosciuto di Let's Encrypt, su ogni dispositivo della rete.
-dom.add	Aggiungi un dominio
+dom.add	Aggiungi dominio
 dom.add_go	Aggiungi e applica
 dom.open	Apri
 dom.check_named	Controlla {name}
@@ -4418,6 +4418,7 @@ dom.provider	Provider DNS
 dom.challenge	Convalida
 dom.settings	Impostazioni
 dom.remove	Rimuovi dominio
+dom.remove_title	Rimuovere questo dominio?
 dom.remove_go	Rimuovi
 dom.remove_text	I nomi di questo dominio smettono di funzionare. rynas elimina i record che ha scritto, solo se contengono ancora i suoi valori; la credenziale resta.
 dom.take.title	Prendere in carico {name}?
@@ -4458,17 +4459,17 @@ dom.plan.text	rynas legge il provider (nulla viene scritto) ed elenca i record c
 dom.plan.go	Anteprima delle modifiche DNS
 dom.plan.conflict	Alcuni nomi hanno già record non scritti da rynas. Restano come sono, a meno che tu non spunti Sostituisci.
 dom.cred.title	Credenziali dei provider
-dom.cred.add	Aggiungi una credenziale
+dom.cred.add	Aggiungi credenziale
 dom.cred.edit	Modifica credenziale
 dom.cred.empty	Ancora nessuna: la prima viene creata con un dominio.
 dom.cred.stored	Conservati: {fields}
 dom.cred.no_values	Nessun valore conservato
 dom.cred.used	Domini che la usano: {n}
 dom.cred.in_use	È usata da un dominio
-dom.cred.remove	Rimuovi credenziale
+dom.cred.remove	Rimuovere questa credenziale?
 dom.cred.remove_text	I valori conservati vengono eliminati da questo NAS. Il token resta valido presso il provider: revocalo anche lì.
 dom.cred.label	Nome (facoltativo)
-dom.cred.label_help	Per riconoscerla nell'elenco, per esempio "token per example.com".
+dom.cred.label_help	Per riconoscerla nell'elenco, per esempio «token per example.com».
 dom.cred.keep	Lascia vuoti i campi per tenere i valori conservati; per cambiarli, inseriscili di nuovo tutti.
 dom.cred.pick	Credenziale
 dom.cred.new	Nuova credenziale
@@ -4571,8 +4572,9 @@ wa.import.last_error	Ultimi file rifiutati
 wa.import.kept	Resta in uso il certificato precedente.
 wa.import.imported_at	Importato il
 wa.import.replace	Sostituisci i file
-wa.import.saved	Certificato salvato; il proxy lo usa entro pochi secondi.
+wa.import.saved	Certificato salvato; il proxy lo usa entro pochi secondi
 wa.import.delete	Rimuovi
+wa.import.delete_title	Rimuovere questo certificato?
 wa.import.delete_confirm	I suoi indirizzi tornano al certificato Let's Encrypt o locale.
 wa.import.not_renewed	rynas non rinnova i certificati importati.
 nev.web_access.cert_import_failed.title	I file del certificato per {name} sono stati rifiutati
@@ -4604,6 +4606,7 @@ wa.import.problem.group_missing	Manca il gruppo rynas-cert-drop: nessun account 
 wa.import.pending_names	Nomi del nuovo certificato
 wa.import.current_names	Nomi in uso
 wa.import.accept	Accetta i nuovi nomi
+wa.import.accept_title	Accettare i nuovi nomi?
 wa.import.accept_confirm	Il nuovo certificato prende subito questi indirizzi. Accetta solo se ti aspettavi il cambiamento.
 wa.import.private_ca	Autofirmato o di un'autorità privata: i dispositivi lo riconoscono solo dopo averci installato quell'autorità.
 wa.import.code.account	Sul NAS: l'account di invio (una volta, come root)
@@ -4634,21 +4637,21 @@ docker.install_incomplete	Un'installazione precedente di Docker non è terminata
 docker.install_incomplete_hint	Il completamento li ripara e termina l'installazione.
 docker.install_unfinished	All'installazione di Docker avviata da rynas mancano gli ultimi passi (il blocco della versione o l'account docker-apps).
 docker.install_finish	Completa l'installazione di Docker
-apps.convert	Converti in stack personalizzato…
+apps.convert	Converti in stack personalizzato
 apps.convert_go	Converti
-apps.conv.title	Converti {name} in uno stack personalizzato
+apps.conv.title	Convertire {name} in uno stack personalizzato?
 apps.conv.text	L'app diventa un normale stack compose che gestisci tu.
 apps.conv.p1	Container, dati e file restano come sono; nulla si riavvia.
-apps.conv.p2	Esce da questo elenco: niente più aggiornamenti del catalogo, migrazioni o ripristini dell'app.
-apps.conv.p3	La pagina Docker continua a modificarlo, aggiornarlo e farne istantanee. Da qui non si può annullare.
-apps.conv.done	Convertita in stack personalizzato.
+apps.conv.p2	Esce da questo elenco: niente più aggiornamenti del catalogo, migrazioni o ritorni alla versione precedente dell'app.
+apps.conv.p3	La pagina Docker continua a modificarlo, aggiornarlo e farne snapshot. Da qui non si può annullare.
+apps.conv.done	Convertita in stack personalizzato
 apps.uninstall	Disinstalla…
 apps.uninstall_go	Disinstalla
-apps.un.title	Disinstalla {name}
-apps.un.text	I container vengono rimossi. La cartella dello stack, i dati e le istantanee restano sul disco, così l'app si può riavviare in seguito.
+apps.un.title	Disinstallare {name}?
+apps.un.text	I container vengono rimossi. La cartella dello stack, i dati e gli snapshot restano sul disco, così l'app si può riavviare in seguito.
 apps.un.delete	Elimina anche i dati
-apps.un.delete_text	Elimina la cartella dello stack, le sue istantanee e le cartelle che l'app ha messo altrove. Le cartelle condivise non vengono mai toccate.
-apps.rb.text	L'app torna all'istantanea del {when}: file, dati nella cartella dello stack e versioni delle immagini. Prima viene creata un'istantanea dello stato attuale.
+apps.un.delete_text	Elimina la cartella dello stack, i suoi snapshot e le cartelle che l'app ha messo altrove. Le cartelle condivise non vengono mai toccate.
+apps.rb.text	L'app torna allo snapshot del {when}: file, dati nella cartella dello stack e versioni delle immagini. Prima viene creato uno snapshot dello stato attuale.
 apps.upd.app_version	Versione dell'app
 apps.upd.pkg_version	Pacchetto del catalogo
 apps.upd.images	Modifiche alle immagini
@@ -4656,8 +4659,8 @@ apps.upd.migrations	Migrazioni delle impostazioni
 apps.upd.migrations_text	Le risposte salvate vengono adattate per le versioni {list}.
 apps.upd.answers	Nuove domande
 apps.upd.answers_text	Questa versione chiede valori che l'app prima non aveva.
-apps.upd.snapshot_help	Creato prima di ogni modifica; un aggiornamento fallito ci torna da solo e Ripristina lo riporta in seguito.
-apps.upd.no_snapshot	La cartella dello stack non è un sottovolume btrfs: nessuna istantanea. Un aggiornamento fallito rimette i file precedenti.
+apps.upd.snapshot_help	Creato prima di ogni modifica; un aggiornamento fallito ci torna da solo e «Torna alla versione precedente» lo riporta in seguito.
+apps.upd.no_snapshot	La cartella dello stack non è un sottovolume btrfs: nessuno snapshot. Un aggiornamento fallito rimette i file precedenti.
 apps.upd.up_to_date	L'app è aggiornata.
 apps.upd.downgrade	Il catalogo ha una versione più vecchia di quella installata: l'aggiornamento viene rifiutato.
 apps.upd.none	Tutto è aggiornato
@@ -4678,10 +4681,11 @@ apps.src.expired	Il catalogo online non è stato rinnovato in tempo: rynas conti
 apps.src.error	L'ultimo controllo non è riuscito; il catalogo in uso resta:
 apps.upd.pick	Seleziona
 apps.upd.selected	Aggiorna le selezionate
-apps.upd.many_text	Una dopo l'altra, ciascuna con un'istantanea prima quando la sua cartella lo consente: {names}.
+apps.upd.selected_title	Aggiornare le app selezionate?
+apps.upd.many_text	Una dopo l'altra, ciascuna con uno snapshot prima quando la sua cartella lo consente: {names}.
 apps.upd.skipped	Richiedono risposte, aggiornale una per una: {names}
 apps.upd.failed	Non aggiornate: {names}
-apps.upd.all_done	Le app selezionate sono aggiornate.
+apps.upd.all_done	Le app selezionate sono aggiornate
 apps.chg.added	Aggiunta
 apps.chg.removed	Rimossa
 apps.chg.digest	Immagine ricostruita
@@ -4706,7 +4710,7 @@ bk.tab.pcs	PC: snapshot btrfs
 bk.intro	I PC con btrfs mandano qui snapshot in sola lettura dei loro sottovolumi, solo ciò che è cambiato dall'ultimo. Ogni snapshot è una copia completa del PC che puoi sfogliare. rynas-agent li manda via HTTPS; i PC già configurati con btrbk possono continuare a mandarli via SSH.
 bkpc.empty	Ancora nessun PC
 bkpc.empty_text	Aggiungi un PC: rynas-agent sul PC manda qui i suoi snapshot. Una cartella che contiene già snapshot ricevuti si può adottare.
-bk.add	Aggiungi un PC
+bk.add	Aggiungi PC
 bk.adopt	Adotta una cartella
 bkpc.create	Crea
 bk.open	Apri
@@ -4888,7 +4892,7 @@ pcb.f.not_sent_help	Il PC smette di mandarli e il NAS non li aspetta più. I lor
 pcb.f.other_mounts	Altri punti di montaggio non inviati
 pcb.f.other_mounts_help	Uno per riga. Cache, log e dati dei container restano fuori comunque.
 pcb.f.pc_no_btrfs	{pc} — root non su btrfs
-pcb.bm.no_manifest_btrbk	Gli snapshot più recenti non contengono il manifest della struttura (/.rynas/manifest.json). Aggiungi l'ultimo passo di “Configura btrbk a mano” qui sotto: scrive il manifest prima di ogni esecuzione di btrbk.
+pcb.bm.no_manifest_btrbk	Gli snapshot più recenti non contengono il manifest della struttura (/.rynas/manifest.json). Aggiungi l'ultimo passo di «Configura btrbk a mano» qui sotto: scrive il manifest prima di ogni esecuzione di btrbk.
 pcb.age.h1	{n} ora
 pcb.age.h	{n} ore
 pcb.age.d1	{n} giorno
@@ -4945,7 +4949,7 @@ bkpc.delete_snap_title	Eliminare {name}?
 bkpc.delete_snap_text	Lo snapshot viene eliminato dal NAS e il suo spazio liberato in background. Gli altri snapshot e il prossimo invio incrementale del PC non ne risentono.
 bkpc.deleted_snap	{name} eliminato
 task.pcbackup.create	Aggiunta di una destinazione di backup per PC
-task.pcbackup.update	Impostazioni del backup di un PC
+task.pcbackup.update	Modifica delle impostazioni del backup di un PC
 task.pcbackup.remove	Rimozione di una destinazione di backup per PC
 task.pcbackup.usage	Misura dei backup di un PC
 task.pcbackup.copy_out	Copia da un backup di PC
@@ -5005,8 +5009,8 @@ sysp.op.resync	sincronizzazione
 sysp.op.recovery	ricostruzione
 sysp.op.reshape	rimodellamento
 sysp.op.check	verifica
-sysp.restart_scheduled	Riavvio pianificato.
-sysp.shutdown_scheduled	Spegnimento pianificato.
+sysp.restart_scheduled	Riavvio pianificato
+sysp.shutdown_scheduled	Spegnimento pianificato
 sysp.restart_failed	Il riavvio non è partito.
 sysp.shutdown_failed	Lo spegnimento non è partito.
 sysp.pending_restart	Riavvio pianificato: {at}.
@@ -5129,7 +5133,6 @@ pca.m.thawed	congelato, poi letto in uso
 pca.m.hot	letto in uso
 pca.m.files	file
 pca.m.skipped	escluso
-pca.backup_now	Esegui ora
 pca.cancel	Annulla
 pca.backup_sent	Il PC parte al prossimo contatto
 pca.cancel_sent	Il PC si ferma al prossimo contatto
@@ -5253,9 +5256,9 @@ nev.synodeb.boot_completed.root.degraded	degradato
 nev.synodeb.boot_completed.root.resync_started	risincronizzazione avviata
 nev.synodeb.boot_completed.root.resync_failed	risincronizzazione non riuscita
 nev.synodeb.emergency_mode.title	Modalità di emergenza
-nev.synodeb.emergency_mode.body	L'avvio si è fermato in modalità di emergenza ({failed}). SSH è disponibile su {addresses}: accedi, risolvi la causa (journalctl -xb), poi esegui 'sudo systemctl default' o riavvia. Con l'account root bloccato, systemd riprova l'avvio ogni pochi minuti; altrimenti il NAS si riavvia da solo dopo 10 minuti senza un accesso SSH.
-nev.synodeb.emergency_mode.body_2	L'avvio si è fermato in modalità di emergenza (causa sconosciuta). SSH è disponibile su {addresses}: accedi, risolvi la causa (journalctl -xb), poi esegui 'sudo systemctl default' o riavvia. Con l'account root bloccato, systemd riprova l'avvio ogni pochi minuti; altrimenti il NAS si riavvia da solo dopo 10 minuti senza un accesso SSH.
-nev.synodeb.emergency_mode.body_3	L'avvio si è fermato in modalità di emergenza e non c'è alcun indirizzo di rete. Risolvi la causa da una console (journalctl -xb), poi esegui 'sudo systemctl default' o riavvia.
+nev.synodeb.emergency_mode.body	L'avvio si è fermato in modalità di emergenza ({failed}). SSH è disponibile su {addresses}: accedi, risolvi la causa (journalctl -xb), poi esegui «sudo systemctl default» o riavvia. Con l'account root bloccato, systemd riprova l'avvio ogni pochi minuti; altrimenti il NAS si riavvia da solo dopo 10 minuti senza un accesso SSH.
+nev.synodeb.emergency_mode.body_2	L'avvio si è fermato in modalità di emergenza (causa sconosciuta). SSH è disponibile su {addresses}: accedi, risolvi la causa (journalctl -xb), poi esegui «sudo systemctl default» o riavvia. Con l'account root bloccato, systemd riprova l'avvio ogni pochi minuti; altrimenti il NAS si riavvia da solo dopo 10 minuti senza un accesso SSH.
+nev.synodeb.emergency_mode.body_3	L'avvio si è fermato in modalità di emergenza e non c'è alcun indirizzo di rete. Risolvi la causa da una console (journalctl -xb), poi esegui «sudo systemctl default» o riavvia.
 nev.synodeb.fan_failure.title	Guasto alle ventole
 nev.synodeb.fan_failure.body	Ventola ferma o illeggibile: {fans}.
 nev.synodeb.fan_failure.body_2	Il controller hardware segnala un guasto alla {fan}.
@@ -5297,7 +5300,7 @@ nev.synodeb.ups_unreachable.title	UPS non raggiungibile
 nev.synodeb.ups_unreachable.body	Nessuna comunicazione con {ups} da almeno {minutes} minuti.
 cfg.key.synology.hw	Impostazioni hardware
 syn.tab	Synology
-syn.not_running	synohwd non è in esecuzione: lo stato non è aggiornato e i segnali acustici o l'identificazione non sono disponibili. Le impostazioni si possono comunque preparare; applicarle riavvia synohwd.
+syn.not_running	synohwd non è in esecuzione: lo stato non è aggiornato e i segnali acustici o l'identificazione non sono disponibili. Le impostazioni si possono comunque salvare; applicarle riavvia synohwd.
 syn.foreign	/etc/synohwd.toml contiene comandi dei pulsanti non gestiti da rynas ({cmds}): applicare queste impostazioni li sostituisce.
 syn.platform	{bays} alloggiamenti · {fans} ventole
 syn.settings	Impostazioni
@@ -5358,18 +5361,17 @@ syn.ledsch_found_schedule	Pianificazione: {summary}
 syn.ledsch_found_level	Livello ridotto: {level}
 syn.ledsch_level_outside	Il livello ridotto {level} è fuori da {lo}–{hi} su questo modello: non applicato.
 syn.ledsch_err_len	La pianificazione ha {n} caratteri: devono essere esattamente 168.
-syn.ledsch_err_char	La pianificazione non è valida: il carattere {pos} è “{ch}”, sono ammessi solo 0, 1 e 2.
-syn.ledsch_level_unreadable	Il livello ridotto “{value}” non è un numero: non applicato.
+syn.ledsch_err_char	La pianificazione non è valida: il carattere {pos} è «{ch}», sono ammessi solo 0, 1 e 2.
+syn.ledsch_level_unreadable	Il livello ridotto «{value}» non è un numero: non applicato.
 syn.ledsch_err_none	Niente di riconosciuto: incolla la pianificazione di 168 caratteri o la riga led_brightness_schedule.
 syn.ledsch_apply	Applica al modulo
 syn.beep_start	Segnale acustico all'avvio del NAS
 syn.beep_error	Segnale acustico in caso di errori hardware
 syn.beep_error_help	Guasto delle ventole e spegnimento termico.
-syn.test_beep	Prova segnale acustico
-syn.beep_sent	Segnale acustico inviato.
+syn.beep_sent	Segnale acustico inviato
 syn.mute	Silenzia allarme
 syn.mute_help	I segnali di synohwd sono singoli; silenziare conferma le notifiche hardware aperte e ne ferma i promemoria.
-syn.muted	Allarme silenziato: {n} notifiche confermate.
+syn.muted	Allarme silenziato: {n} notifiche confermate
 syn.buttons	Pulsanti
 syn.power_button	Pulsante di accensione
 syn.power_button_help	Uno spegnimento pulito ferma attività e servizi in ordine.
@@ -5485,7 +5487,6 @@ qnap.buttons_help	Un pulsante non modifica mai impostazioni, password o dischi: 
 qnap.buzzer	Cicalino
 qnap.beep_failure	Suona l'allarme quando un disco si guasta
 qnap.beep_failure_help	Si ripete ogni 5 minuti finché non viene silenziato o il disco non viene sostituito.
-qnap.test_beep	Prova il cicalino
 qnap.beep_sent	Segnale inviato
 qnap.mute	Silenzia l'allarme
 qnap.alarm_on	L'allarme sta suonando

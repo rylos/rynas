@@ -515,7 +515,7 @@ fn review_dialog() -> AnyView {
                                 <h3>{key_label(&ch.key)}</h3>
                                 <span class="mono small muted">{ch.key.clone()}</span>
                                 {ch.conflict.then(|| view! { <Status tone=Tone::Warn text=t("pending.conflict").to_string() /> })}
-                                <span class="small muted review-time">{format!("{} {}", t("pending.staged"), i18n::datetime(ch.staged_ms))}</span>
+                                <span class="small muted review-time">{i18n::tf("pending.staged", &[("when", &i18n::datetime(ch.staged_ms))])}</span>
                             </div>
                             {diff_table(&ch.diff, Some(&ch.key))}
                         </section>

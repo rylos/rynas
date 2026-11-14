@@ -462,7 +462,7 @@ fn scrub_card(v: &Vol, modal: RwSignal<Open>) -> AnyView {
                     {if running {
                         view! { <button class="btn ghost sm" type="button" disabled=move || busy.get() on:click=stop>{spinner(busy)}{tr("sto.scrub_stop")}</button> }.into_any()
                     } else {
-                        view! { <button class="btn ghost sm" type="button" on:click=move |_| modal.set(Open::Scrub)><Icon icon=icons::SHIELD_CHECK size=14 />{tr("run_now")}</button> }.into_any()
+                        view! { <button class="btn ghost sm" type="button" on:click=move |_| modal.set(Open::Scrub)><Icon icon=icons::PLAY size=14 />{tr("run_now")}</button> }.into_any()
                     }}
                 </div>
             })}

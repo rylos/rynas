@@ -1233,7 +1233,7 @@ fn main() -> std::io::Result<()> {
                     loop {
                         t.tick().await;
                         if apps.trim_idle(std::time::Duration::from_secs(600)) {
-                            tracing::debug!("apps: idle catalogue dropped");
+                            tracing::debug!("apps: idle catalog dropped");
                         }
                     }
                 });

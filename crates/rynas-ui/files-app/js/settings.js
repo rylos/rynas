@@ -98,9 +98,9 @@ function body(section) {
 
 export function openSettings(start = "look") {
   const dlg = dialog(`
-    <div class="dlg-head"><div class="dlg-icon">${svg("settings")}</div><h2>${t("Impostazioni del file manager")}</h2><button class="icon-btn x" aria-label="${t("Chiudi")}">${svg("close")}</button></div>
+    <div class="dlg-head"><div class="dlg-icon">${svg("settings")}</div><h2>${t("Impostazioni di File")}</h2><button class="icon-btn x" aria-label="${t("Chiudi")}">${svg("close")}</button></div>
     <div class="settings"><nav>${SECTIONS.map(([k, i, l]) => `<button data-s="${k}">${svg(i)} ${t(l)}</button>`).join("")}</nav><section></section></div>
-    <div class="dlg-foot"><div class="left"><button class="btn ghost reset">${t("Ripristina predefiniti")}</button></div><button class="btn primary ok">${t("Fatto")}</button></div>`, { wide: true });
+    <div class="dlg-foot"><div class="left"><button class="btn ghost reset">${t("Reimposta i predefiniti")}</button></div><button class="btn primary ok">${t("Fatto")}</button></div>`, { wide: true });
   const section = $("section", dlg);
   const show = (s) => {
     dlg.querySelectorAll("nav button").forEach((b) => b.classList.toggle("on", b.dataset.s === s));

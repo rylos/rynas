@@ -101,7 +101,7 @@ export async function call(route, opts = {}) {
     res = await fetch(url(route, params), options);
   } catch (e) {
     if (e?.name === "AbortError") throw e;
-    throw new ApiError(0, t("Server non raggiungibile"), "network");
+    throw new ApiError(0, t("NAS non raggiungibile"), "network");
   }
   let data = null;
   try {

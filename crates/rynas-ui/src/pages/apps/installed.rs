@@ -214,7 +214,7 @@ fn update_many(picked: RwSignal<Vec<String>>, close: Callback<()>) -> AnyView {
             close.run(());
         });
     });
-    ui::confirm(Confirm { busy, error, ..Confirm::new(t("apps.upd.selected").to_string(), tf("apps.upd.many_text", &[("names", &names)]), "apps.update", false, go, close) })
+    ui::confirm(Confirm { busy, error, ..Confirm::new(t("apps.upd.selected_title").to_string(), tf("apps.upd.many_text", &[("names", &names)]), "apps.update", false, go, close) })
 }
 
 // ------------------------------------------------------------------ update dialog
@@ -393,7 +393,7 @@ pub fn drawer(stack: String) -> AnyView {
                 ui::row(vec![
                     ui::cell("dk.col.created", "", view! { <div class="cell-main"><span>{i18n::datetime(sn.created_s.max(0) as u64 * 1000)}</span><span class="cell-sub">{t(reason_key(&sn.reason))}</span></div> }.into_any()),
                     ui::cell("dk.col.images", "wrap", view! { <div class="cell-main">{imgs.into_iter().map(|i| view! { <span class="mono small">{i}</span> }).collect_view()}</div> }.into_any()),
-                    ui::actions(view! { <button class="btn ghost sm" on:click=move |_| ask.set(Some(Ask::Rollback(s.clone())))><Icon icon=icons::ROTATE_CCW size=14 />{tr("dk.snap.rollback")}</button> }.into_any()),
+                    ui::actions(view! { <button class="btn ghost sm" on:click=move |_| ask.set(Some(Ask::Rollback(s.clone())))><Icon icon=icons::ROTATE_CCW size=14 />{tr("snap.rollback")}</button> }.into_any()),
                 ])
             })
             .collect::<Vec<_>>();
@@ -459,7 +459,7 @@ fn ask_dialog(q: Ask, stack: String, ask: RwSignal<Option<Ask>>, close_drawer: C
                 launch(url.clone(), serde_json::to_string(&body).ok(), busy, error, cancel);
             });
             let when = i18n::datetime(sn.created_s.max(0) as u64 * 1000);
-            ui::confirm(Confirm { busy, error, ..Confirm::new(t("dk.snap.rollback").to_string(), tf("apps.rb.text", &[("when", &when)]), "dk.snap.rollback", true, go, cancel) })
+            ui::confirm(Confirm { busy, error, ..Confirm::new(tf("dk.snap.rollback_title", &[("when", &when)]), tf("apps.rb.text", &[("when", &when)]), "snap.rollback", true, go, cancel) })
         }
         Ask::Proxy => {
             let url = inst_url(&stack, "/proxy");
@@ -470,7 +470,7 @@ fn ask_dialog(q: Ask, stack: String, ask: RwSignal<Option<Ask>>, close_drawer: C
                 <p class="small muted">{tr("apps.proxy_more")}" "<a href="/network/web-access">{tr("wa.title")}</a></p>
             }
             .into_any();
-            ui::confirm(Confirm { extra: Some(extra), busy, error, ..Confirm::new(t("apps.proxy").to_string(), t("apps.proxy_text").to_string(), "apps.proxy", false, go, cancel) })
+            ui::confirm(Confirm { extra: Some(extra), busy, error, ..Confirm::new(t("apps.proxy_title").to_string(), t("apps.proxy_text").to_string(), "apps.proxy", false, go, cancel) })
         }
         Ask::Convert => {
             let url = inst_url(&stack, "/convert");

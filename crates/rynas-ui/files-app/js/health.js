@@ -37,13 +37,13 @@ export const healthMethods = {
   },
 
   adminOnly() {
-    this.banner("admin", t("Non hai accesso al file manager: chiedi a un amministratore."));
+    this.banner("admin", t("Non hai accesso a File: chiedi a un amministratore."));
   },
 
   /** The files API does not answer (not installed yet, or down): a banner instead of empty panes. */
   unavailable(e) {
     const why = e?.status === 404 ? t("Il servizio dei file non è installato su questo sistema.") : e?.message || "";
-    this.banner("unavailable", `<span>${esc(t("Il file manager non riesce a parlare con il server."))} ${esc(why)}</span> <button class="btn small retry">${esc(t("Riprova"))}</button>`, true);
+    this.banner("unavailable", `<span>${esc(t("File non riesce a comunicare con il NAS."))} ${esc(why)}</span> <button class="btn small retry">${esc(t("Riprova"))}</button>`, true);
     const retry = $('#banners [data-key="unavailable"] .retry');
     if (retry) retry.onclick = () => this.boot();
   },

@@ -381,7 +381,7 @@ fn move_one(
     }
     if cancelled() {
         return Err(undo_copy(format!(
-            "{name}: cancelled; the copy was removed"
+            "{name}: canceled; the copy was removed"
         )));
     }
     if let Err(e) = switch_to(s, author, &plan, log) {

@@ -237,12 +237,12 @@ export const actionMethods = {
     if (prefs.confirmDelete || !recycle) {
       const names = list.map((e) => `<i class="gi">${glyph(e)}</i>${esc(e.name)}`);
       const ok = await confirmBox({
-        title: recycle ? t("Spostare nel Cestino?") : t("Eliminare definitivamente?"),
+        title: recycle ? t("Spostare nel cestino?") : t("Eliminare definitivamente?"),
         message: recycle
-          ? t("{n} finiranno nel Cestino della cartella condivisa, da dove si possono recuperare.", { n: count(list.length, "elemento", "elementi", int) })
-          : `<b style="color:var(--crit)">${t("{n} verranno eliminati per sempre: non si possono recuperare.", { n: count(list.length, "elemento", "elementi", int) })}</b>${!pane.recycle && !inBin ? "<br>" + t("Il Cestino di questa cartella condivisa è disattivato.") : ""}`,
+          ? t("{n} finiranno nel cestino della cartella condivisa, da dove si possono recuperare.", { n: count(list.length, "elemento", "elementi", int) })
+          : `<b style="color:var(--crit)">${t("{n} verranno eliminati definitivamente: non si possono recuperare.", { n: count(list.length, "elemento", "elementi", int) })}</b>${!pane.recycle && !inBin ? "<br>" + t("Il cestino di questa cartella condivisa è disattivato.") : ""}`,
         items: names,
-        ok: recycle ? t("Sposta nel Cestino") : t("Elimina"),
+        ok: recycle ? t("Sposta nel cestino") : t("Elimina"),
         danger: !recycle,
         icon: "trash",
       });
@@ -259,11 +259,11 @@ export const actionMethods = {
     } catch (err) {
       return errorToast(err);
     }
-    if (!entries.length) return toast(t("Il Cestino è già vuoto"));
+    if (!entries.length) return toast(t("Il cestino è già vuoto"));
     const ok = await confirmBox({
-      title: t("Svuotare il Cestino?"),
-      message: `<b style="color:var(--crit)">${t("{n} verranno eliminati per sempre: non si possono recuperare.", { n: count(entries.length, "elemento", "elementi", int) })}</b>`,
-      ok: t("Svuota il Cestino"),
+      title: t("Svuotare il cestino?"),
+      message: `<b style="color:var(--crit)">${t("{n} verranno eliminati definitivamente: non si possono recuperare.", { n: count(entries.length, "elemento", "elementi", int) })}</b>`,
+      ok: t("Svuota il cestino"),
       danger: true,
       icon: "trash",
     });

@@ -274,6 +274,69 @@ first, reviewed, then used.
   synodeb-ups, synodeb-dom) appear only when that plugin/backend is present on the machine; a generic
   machine sees neither the screen nor a "not a Synology"/"needs synodeb" placeholder.
 
+#### Glossary and text style (G8f)
+Every text of the core, the modules, the File app and the server's event texts uses these words.
+Before adding a text, check the glossary; a new concept gets a row here first.
+
+| Concept | English | Italian |
+|---|---|---|
+| this machine | NAS (never "server") | NAS (mai "server") |
+| a remote host (replication, backup, SMB/SFTP connection) | server | server |
+| the File app | Files | File (never "file manager", "gestore file", "app File") |
+| shared folder (the object) | shared folder | cartella condivisa |
+| network export of it | share (SMB/NFS share) | condivisione |
+| physical device | drive | disco |
+| removable device | removable drive | unità rimovibile |
+| disk of the OS | system disk | disco di sistema |
+| btrfs subvolume | subvolume | sottovolume (never "subvolume") |
+| snapshot | snapshot | snapshot (never "istantanea"; masculine: lo/gli snapshot) |
+| snapshot job | job | job |
+| background operation | task | attività |
+| scheduled command | scheduled task | attività pianificata |
+| replication | replication | replica |
+| get files back | restore | ripristina / ripristino |
+| go back to a version | roll back / rollback | button "Torna alla versione precedente", task "Ritorno alla versione precedente", text "ritorno alla versione precedente" (never "ripristino" or "rollback") |
+| back to defaults | reset | reimposta |
+| out of the configuration, data stays | remove | rimuovi |
+| data destroyed | delete | elimina |
+| destroyed without recycle bin | delete permanently (never "for good") | elimina definitivamente |
+| wipe a drive | erase | cancella |
+| recycle bin | recycle bin (lowercase) | cestino (minuscolo) |
+| changes not applied yet | pending changes (never "staged") | modifiche in sospeso (never "preparate", "in attesa") |
+| make them effective | apply (a verb only, never "the apply") | applica |
+| drop pending or edited changes | discard | scarta ("Scarta le modifiche") |
+| close without doing anything | cancel | annulla (only this meaning) |
+| undo | undo | annulla l'ultima modifica |
+| server-side configuration | settings (Tailscale too, never "options") | impostazioni |
+| browser-side | preferences | preferenze |
+| try a setting | test | prova |
+| check integrity | check | verifica |
+| btrfs/RAID scrub | data scrub | pulizia dati |
+| retention | retention | conservazione |
+| permissions | permissions | permessi (never "autorizzazioni") |
+| encryption at rest (LUKS, encrypted folders) | encrypted / encryption | cifrato / cifratura (crittografia only for SMB and TLS) |
+| web UI session | sign in / sign out | accedi / esci |
+| hardware source (synohwd, a module) | hardware source | sorgente hardware (never "provider") |
+| beeper | beeper | cicalino |
+
+- Statuses are one word each, the same everywhere: Running "In esecuzione", Healthy "Integro",
+  Warning "Avviso", Notice "Informazione", Failing "In avaria", Done "Completato/a", Never run "Mai
+  eseguito/a", Canceled "Annullata".
+- English is **American** (catalog, canceled, color, favorite, behavior, recognized, license, gray,
+  minimize) and in **sentence case**, navigation and page titles included ("Shared folders", "Users
+  and groups", "Apps and plugins").
+- Buttons: Italian imperative ("Crea", "Sposta"), never an infinitive; "Create <object>" for a new
+  thing, "Add <object>" to connect something that exists, no article ("Add PC", "Create backup
+  job"); "Run now" (`run_now`) has the play icon and the subject in the tooltip / `aria-label`
+  (`ui::verb_name`); "Done" is "Fatto"; page forms are [Reset][Save] ("Reimposta", "Salva").
+- Titles: imperative ("Sposta le cartelle home"); a confirmation title is a question ("Delete user
+  {name}?", "Eliminare l'utente {name}?") and never reuses the button's key.
+- Task labels: English imperative ("Install Tailscale", "Roll back a stack"), Italian noun phrase
+  ("Installazione di Tailscale").
+- Success messages (toasts, short outcomes) end without a period.
+- Quotes: “…” in English, «…» in Italian; never straight quotes around words.
+- Technical names stay out of the main text: no "units"/"timers"/"systemd" where "schedule" says it.
+
 ### 2.4 Accessibility
 - G10 MUST: every control has an accessible name (label, `aria-label` via `tr`), focus is visible
   (`:focus-visible` token outline), dialogs trap focus and restore it on close, `Esc` closes overlays.

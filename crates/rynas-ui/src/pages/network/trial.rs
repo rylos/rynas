@@ -484,7 +484,7 @@ pub fn banner(net: Net) -> AnyView {
                         view! { <p class="sec-note"><Icon icon=icons::INFO size=16 />{tr("net.no_token")}</p> }.into_any()
                     }}
                     <button class="btn ghost lg" disabled=move || tl.busy.get() || trial.with(Option::is_none) on:click=move |_| tl.rollback(net)>
-                        <Icon icon=icons::ROTATE_CCW size=18 />{tr("net.rollback_now")}
+                        <Icon icon=icons::ROTATE_CCW size=18 />{tr("rollback_now")}
                     </button>
                 </div>
                 {candidates}

@@ -111,7 +111,7 @@ pub fn panel() -> AnyView {
                 <span class="small muted">{checked}</span>
                 <button class="btn ghost" aria-disabled=move || checking.get().then_some("true")
                     on:click=move |_| if !checking.get_untracked() { act("/api/v1/docker/updates/check".into(), None, checking) }>
-                    {spinner(checking)}<Icon icon=icons::REFRESH_CW size=16 /><span class="btn-label">{tr("dk.upd.check")}</span>
+                    {spinner(checking)}<Icon icon=icons::REFRESH_CW size=16 /><span class="btn-label">{tr("upd.check")}</span>
                 </button>
                 <button class="btn ghost" on:click=move |_| importing.set(true)>
                     <Icon icon=icons::FOLDER_OPEN size=16 /><span class="btn-label">{tr("dk.im.button")}</span>
@@ -262,7 +262,7 @@ fn snapshot_rows(det: &StackDetail, ask: RwSignal<Option<Ask>>) -> AnyView {
                 ui::cell("dk.col.created", "", ui::two_lines(ui::text(i18n::datetime(sn.created_s.max(0) as u64 * 1000)), Some(t(reason_key(&sn.reason)).to_string()), "cell-sub")),
                 ui::cell("dk.col.images", "wrap", view! { <div class="cell-main">{imgs.iter().map(|i| image_ref(i)).collect_view()}</div> }.into_any()),
                 ui::actions(view! {
-                    <button class="btn ghost sm" on:click=move |_| ask.set(Some(Ask::Rollback(a.clone())))><Icon icon=icons::ROTATE_CCW size=14 />{tr("dk.snap.rollback")}</button>
+                    <button class="btn ghost sm" on:click=move |_| ask.set(Some(Ask::Rollback(a.clone())))><Icon icon=icons::ROTATE_CCW size=14 />{tr("snap.rollback")}</button>
                     <button class="icon-btn sm danger" title=tr("delete") aria-label=ui::verb_name("delete", &sn.id) on:click=move |_| ask.set(Some(Ask::DeleteSnapshot(b.clone())))><Icon icon=icons::TRASH_2 size=16 /></button>
                 }.into_any()),
             ])
@@ -472,7 +472,7 @@ fn ask_dialog(a: Ask, name: String, can_snap: bool, adopted: bool, dir: String, 
                 </div>
             }
             .into_any();
-            ui::confirm(Confirm { extra: Some(extra), busy, error, ..Confirm::new(tf("dk.upd.title", &[("name", &name)]), t("dk.upd.text").to_string(), "dk.a.update", false, go, cancel) })
+            ui::confirm(Confirm { extra: Some(extra), busy, error, ..Confirm::new(tf("dk.upd.ask", &[("name", &name)]), t("dk.upd.text").to_string(), "dk.a.update", false, go, cancel) })
         }
         Ask::Remove => {
             let files = RwSignal::new(false);
@@ -512,7 +512,7 @@ fn ask_dialog(a: Ask, name: String, can_snap: bool, adopted: bool, dir: String, 
                 launch(url.clone(), serde_json::to_string(&body).ok(), busy, error, cancel);
             });
             let when = i18n::datetime(sn.created_s.max(0) as u64 * 1000);
-            ui::confirm(Confirm { busy, error, ..Confirm::new(t("dk.snap.rollback").to_string(), tf("dk.snap.rollback_text", &[("when", &when)]), "dk.snap.rollback", true, go, cancel) })
+            ui::confirm(Confirm { busy, error, ..Confirm::new(tf("dk.snap.rollback_title", &[("when", &when)]), tf("dk.snap.rollback_text", &[("when", &when)]), "snap.rollback", true, go, cancel) })
         }
         Ask::DeleteSnapshot(sn) => {
             let url = stack_url(&name, &format!("/snapshots/{}", api::encode(&sn.id)));
@@ -534,7 +534,7 @@ fn ask_dialog(a: Ask, name: String, can_snap: bool, adopted: bool, dir: String, 
                 });
             });
             let when = i18n::datetime(sn.created_s.max(0) as u64 * 1000);
-            ui::confirm(Confirm { busy, error, ..Confirm::new(t("dk.snap.delete").to_string(), tf("dk.snap.delete_text", &[("when", &when)]), "delete", true, go, cancel) })
+            ui::confirm(Confirm { busy, error, ..Confirm::new(tf("dk.snap.delete", &[("when", &when)]), tf("dk.snap.delete_text", &[("when", &when)]), "delete", true, go, cancel) })
         }
     }
 }

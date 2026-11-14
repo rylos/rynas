@@ -224,7 +224,7 @@ fn trial_banner(pg: Page) -> Option<AnyView> {
                         </button>
                     })}
                     <button class="btn ghost lg" disabled=move || busy.get() on:click=undo>
-                        <Icon icon=icons::ROTATE_CCW size=18 />{tr("ssh.undo")}
+                        <Icon icon=icons::ROTATE_CCW size=18 />{tr("rollback_now")}
                     </button>
                 </div>
             </section>

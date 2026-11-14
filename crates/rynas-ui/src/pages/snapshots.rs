@@ -713,9 +713,9 @@ fn job_row(
             .into_any()),
             ui::cell("sch.col.last", "", view! { <div class="chips">{last}{ui::pending_status(v.pending)}</div> }.into_any()),
             ui::actions(view! {
-                <button class="icon-btn sm" title=tr("snap.take_now") aria-label=ui::verb_name("snap.take_now", &n5)
+                <button class="icon-btn sm" title=tr("run_now") aria-label=ui::verb_name("run_now", &n5)
                     disabled=move || running.get() || v.pending == Some(rynas_api_types::PendingOp::Add) on:click=run>
-                    <Icon icon=icons::CAMERA size=16 />
+                    <Icon icon=icons::PLAY size=16 />
                 </button>
                 <button class="icon-btn sm" title=tr("edit") aria-label=format!("{} {}", t("edit"), n6) disabled=deleting on:click=move |_| edit.set(Some(Some(v_edit.clone())))>
                     <Icon icon=icons::PENCIL size=16 />

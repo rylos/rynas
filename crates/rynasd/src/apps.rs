@@ -98,7 +98,7 @@ fn asvc(st: &AppsState) -> Res<Arc<AppsSvc>> {
         Error::new(
             StatusCode::SERVICE_UNAVAILABLE,
             error_codes::BACKEND_UNAVAILABLE,
-            "the app catalogue is not enabled in this rynasd".into(),
+            "the app catalog is not enabled in this rynasd".into(),
         )
     })
 }
@@ -109,7 +109,7 @@ fn admin(s: &AppsSvc, hd: &HeaderMap) -> Res<String> {
     s.docker
         .ops
         .admins
-        .require_admin(&who, "the app catalogue")?;
+        .require_admin(&who, "the app catalog")?;
     Ok(who)
 }
 
@@ -170,7 +170,7 @@ fn load(dir: &Path) -> (Catalog, Vec<CatalogIssue>) {
             issues.push(CatalogIssue {
                 app: "-".into(),
                 file: dir.display().to_string(),
-                message: format!("cannot read the catalogue: {e}"),
+                message: format!("cannot read the catalog: {e}"),
             });
             Vec::new()
         }
@@ -241,7 +241,7 @@ fn load_sources(dir: &Path, online: Option<&online::Active>) -> (Catalog, Vec<Ca
         }
     };
     for i in &issues {
-        tracing::warn!("apps: catalogue entry {}/{}: {}", i.app, i.file, i.message);
+        tracing::warn!("apps: catalog entry {}/{}: {}", i.app, i.file, i.message);
     }
     (cat, issues)
 }
@@ -636,7 +636,7 @@ impl AppsSvc {
                 },
             )),
             _ => Err(Error::not_found(format!(
-                "stack {stack} is not an app of the catalogue (no x-rynas block)"
+                "stack {stack} is not an app of the catalog (no x-rynas block)"
             ))),
         }
     }
@@ -707,7 +707,7 @@ impl AppsSvc {
         let (cat, _) = self.catalog().await;
         let app = cat
             .get(id)
-            .ok_or_else(|| Error::not_found(format!("no app {id} in the catalogue")))?;
+            .ok_or_else(|| Error::not_found(format!("no app {id} in the catalog")))?;
         let disk = self.on_disk();
         let mine: Vec<&OnDisk> = disk.iter().filter(|d| d.meta.app == id).collect();
         let m = &app.manifest;
@@ -861,7 +861,7 @@ impl AppsSvc {
         let (cat, _) = self.catalog().await;
         let app = cat
             .get(id)
-            .ok_or_else(|| Error::not_found(format!("no app {id} in the catalogue")))?;
+            .ok_or_else(|| Error::not_found(format!("no app {id} in the catalog")))?;
         let m = &app.manifest;
         let root = self.docker.root.clone();
         let docker_installed = self.docker.facts(false).await.installed;
@@ -1198,7 +1198,7 @@ impl AppsSvc {
         let (l, d) = self.one_on_disk(stack)?;
         let app = cat.get(&d.meta.app).ok_or_else(|| {
             Error::not_found(format!(
-                "the app {} of stack {stack} is no longer in the catalogue",
+                "the app {} of stack {stack} is no longer in the catalog",
                 d.meta.app
             ))
         })?;
@@ -1451,7 +1451,7 @@ async fn install_task(a: &Arc<AppsSvc>, ctx: &TaskCtx, j: InstallJob) -> Result<
     let (cat, _) = a.catalog().await;
     let app = cat
         .get(&j.app)
-        .ok_or_else(|| format!("{} left the catalogue", j.app))?;
+        .ok_or_else(|| format!("{} left the catalog", j.app))?;
     let provided = a.provided(&j.layout, &j.stack, &j.bind, ids);
     let r = rynas_apps::render::render(app, &cat.source, &provided, &j.request)
         .map_err(|e| e.to_string())?;
@@ -1835,7 +1835,7 @@ async fn icon_get(
     let (cat, _) = a.catalog().await;
     let app = cat
         .get(&id)
-        .ok_or_else(|| Error::not_found(format!("no app {id} in the catalogue")))?;
+        .ok_or_else(|| Error::not_found(format!("no app {id} in the catalog")))?;
     image(&app.icon, MAX_ICON, &hd)
 }
 
@@ -1849,7 +1849,7 @@ async fn screenshot_get(
     let (cat, _) = a.catalog().await;
     let app = cat
         .get(&id)
-        .ok_or_else(|| Error::not_found(format!("no app {id} in the catalogue")))?;
+        .ok_or_else(|| Error::not_found(format!("no app {id} in the catalog")))?;
     // only a file the loader listed: no path from the request reaches the filesystem
     let path = app
         .screenshots
@@ -1941,7 +1941,7 @@ async fn install_post(
     let (cat, _) = a.catalog().await;
     let app = cat
         .get(&id)
-        .ok_or_else(|| Error::not_found(format!("no app {id} in the catalogue")))?;
+        .ok_or_else(|| Error::not_found(format!("no app {id} in the catalog")))?;
     let m = &app.manifest;
     // the task renders again with these secrets and the real docker-apps ids
     let mut request = p.request;
@@ -2080,7 +2080,7 @@ impl AppsSvc {
         let (cat, l, d, plan) = self.update_plan(stack).await?;
         if plan.downgrade {
             return Err(conflict(format!(
-                "the catalogue has {} {}, older than the installed {}",
+                "the catalog has {} {}, older than the installed {}",
                 plan.app, plan.to_version, plan.from_version
             )));
         }
@@ -2345,7 +2345,7 @@ async fn proxy_post(
     let (l, d) = a.one_on_disk(&stack)?;
     let app = cat.get(&d.meta.app).ok_or_else(|| {
         Error::not_found(format!(
-            "the app {} of stack {stack} is no longer in the catalogue",
+            "the app {} of stack {stack} is no longer in the catalog",
             d.meta.app
         ))
     })?;
@@ -2402,11 +2402,11 @@ async fn catalog_check_post(State(st): State<AppsState>, hd: HeaderMap) -> Res<R
     let who = admin(&a, &hd)?;
     if let Some(reason) = a.online_use().reason {
         return Err(conflict(match reason {
-            "off" => "the online catalogue is turned off in the Docker settings",
-            _ => "this build has no catalogue signing key: the online catalogue is off",
+            "off" => "the online catalog is turned off in the Docker settings",
+            _ => "this build has no catalog signing key: the online catalog is off",
         }));
     }
-    audit(&who, "catalog-update", "online catalogue");
+    audit(&who, "catalog-update", "online catalog");
     let a2 = a.clone();
     let id = a
         .docker
@@ -2416,11 +2416,11 @@ async fn catalog_check_post(State(st): State<AppsState>, hd: HeaderMap) -> Res<R
             let log = |l: &str| ctx.log(l);
             match a2.check_catalog(&log).await {
                 Ok(online::Outcome::Updated { serial, .. }) => {
-                    ctx.log(&format!("the catalogue is now serial {serial}"));
+                    ctx.log(&format!("the catalog is now serial {serial}"));
                     Ok(())
                 }
                 Ok(online::Outcome::Unchanged(s)) => {
-                    ctx.log(&format!("no newer catalogue (serial {s})"));
+                    ctx.log(&format!("no newer catalog (serial {s})"));
                     Ok(())
                 }
                 Ok(online::Outcome::NotModified) => Ok(()),

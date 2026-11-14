@@ -957,7 +957,7 @@ fn domain_drawer(id: String, run_now: bool) -> AnyView {
             let text = tf("dom.take.text", &[("name", &c.name), ("now", &c.current.join(", ")), ("wanted", &c.wanted.join(", "))]);
             ui::confirm(Confirm { busy: ask_busy, error: ask_err, ..Confirm::new(tf("dom.take.title", &[("name", &c.name)]), text, "dns.take_over_btn", false, take, Callback::new(move |_| ask_take.set(None))) })
         })}
-        {move || ask_remove.get().then(|| ui::confirm(Confirm { busy: ask_busy, error: ask_err, ..Confirm::new(t("dom.remove").to_string(), t("dom.remove_text").to_string(), "dom.remove_go", true, remove, Callback::new(move |_| ask_remove.set(false))) }))}
+        {move || ask_remove.get().then(|| ui::confirm(Confirm { busy: ask_busy, error: ask_err, ..Confirm::new(t("dom.remove_title").to_string(), t("dom.remove_text").to_string(), "dom.remove_go", true, remove, Callback::new(move |_| ask_remove.set(false))) }))}
     }
     .into_any();
     let title = Signal::derive(move || view_of.with(|v| v.as_ref().map(|v| v.name.clone())).unwrap_or_default());

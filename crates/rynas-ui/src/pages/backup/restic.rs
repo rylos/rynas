@@ -263,7 +263,7 @@ fn job_row(
             }
             .into_any()),
             ui::actions(view! {
-                <button class="icon-btn sm" title=tr("bk.run") aria-label=ui::verb_name("bk.run", &n3)
+                <button class="icon-btn sm" title=tr("run_now") aria-label=ui::verb_name("run_now", &n3)
                     disabled=move || running.get() || not_applied || deleting on:click=run>
                     {crate::form::spinner_icon(running.into(), icons::PLAY)}
                 </button>
@@ -543,7 +543,7 @@ fn job_editor(init: Option<BackupJobView>, shown_password: RwSignal<Option<Strin
         view! {
             {any_crypt.then(|| view! { <p class="field-help">{tr("bk.crypt_note")}</p> })}
             <fieldset class="bk-checks">
-                <legend class="field-label">{tr("apps.d.shares")}</legend>
+                <legend class="field-label">{tr("nav.shares")}</legend>
                 {names.into_iter().map(|(n, p)| {
                     let n2 = n.clone();
                     let checked = move || f.shares.with(|l| l.contains(&n2));

@@ -40,7 +40,7 @@ export const menuMethods = {
         !atRoot && { label: t("Aggiungi ai preferiti"), icon: "star", key: "Ctrl+D", action: () => this.toggleFavorite(pane.path) },
         { label: t("Aggiorna"), icon: "refresh", key: "F5", action: () => pane.reload() },
         baseName(pane.path) === "#recycle" && !remote && !isReadOnly(pane) && "-",
-        baseName(pane.path) === "#recycle" && !remote && !isReadOnly(pane) && { label: t("Svuota il Cestino"), icon: "trash", danger: true, action: () => this.emptyBin(pane.path) },
+        baseName(pane.path) === "#recycle" && !remote && !isReadOnly(pane) && { label: t("Svuota il cestino"), icon: "trash", danger: true, action: () => this.emptyBin(pane.path) },
       ]);
     }
     const dir = isDirLike(entry);
@@ -85,9 +85,9 @@ export const menuMethods = {
       !share && other && { label: t("Scegli cartella…"), icon: "move", action: () => this.copyTo(pane, "copy") },
       "-",
       !many && !share && !ro && !fixed && { label: t("Rinomina"), icon: "rename", key: "F2", action: () => this.renamePrompt(pane, entry) },
-      !share && !bin && !ro && !fixed && { label: pane.recycle && !pane.path.includes("#recycle") ? t("Sposta nel Cestino") : t("Elimina"), icon: "trash", key: "Canc", danger: true, action: () => this.remove(pane) },
+      !share && !bin && !ro && !fixed && { label: pane.recycle && !pane.path.includes("#recycle") ? t("Sposta nel cestino") : t("Elimina"), icon: "trash", key: "Canc", danger: true, action: () => this.remove(pane) },
       !share && !bin && !ro && !fixed && pane.recycle && { label: t("Elimina definitivamente"), icon: "trash", key: "Shift+Canc", danger: true, action: () => this.remove(pane, true) },
-      !many && entry.full !== undefined && !ro && !remote && { label: t("Svuota il Cestino"), icon: "trash", danger: true, action: () => this.emptyBin(entry.path) },
+      !many && entry.full !== undefined && !ro && !remote && { label: t("Svuota il cestino"), icon: "trash", danger: true, action: () => this.emptyBin(entry.path) },
       "-",
       dir && !whole && { label: t("Calcola dimensione"), icon: "drive", action: () => this.computeSizes(pane, list) },
       !many && dir && !arch && !remote && !whole && { label: t("Analisi spazio"), icon: "pie", action: () => this.analyseSpace(entry.path) },

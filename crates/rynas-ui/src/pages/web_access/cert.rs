@@ -138,7 +138,7 @@ pub fn panel() -> AnyView {
             </section>
         </div>
         {move || importing.get().then(|| import_dialog(st, Callback::new(move |_| importing.set(false))))}
-        {move || ask_local.get().then(|| ui::confirm(Confirm { busy, error, ..Confirm::new(t("tls.use_local").to_string(), t("tls.use_local.confirm").to_string(), "tls.use_local", false, to_local, Callback::new(move |_| ask_local.set(false))) }))}
+        {move || ask_local.get().then(|| ui::confirm(Confirm { busy, error, ..Confirm::new(t("tls.use_local_title").to_string(), t("tls.use_local.confirm").to_string(), "tls.use_local", false, to_local, Callback::new(move |_| ask_local.set(false))) }))}
     }
     .into_any()
 }

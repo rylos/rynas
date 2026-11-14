@@ -308,7 +308,7 @@ fn shares_table(d: &AppDetail) -> Option<AnyView> {
             ])
         })
         .collect::<Vec<_>>();
-    (!rows.is_empty()).then(|| view! { <h4 class="mini-title">{tr("apps.d.shares")}</h4>{ui::table("", &["shares.folder", "apps.col.access"], rows)} }.into_any())
+    (!rows.is_empty()).then(|| view! { <h4 class="mini-title">{tr("nav.shares")}</h4>{ui::table("", &["shares.folder", "apps.col.access"], rows)} }.into_any())
 }
 
 fn web_view(d: &AppDetail) -> Option<AnyView> {

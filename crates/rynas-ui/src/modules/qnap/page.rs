@@ -501,7 +501,7 @@ fn buzzer_card(d: RwSignal<QnapSettings>, st: Remote<QnapStatus>) -> AnyView {
                 {move || alarm.get().then(|| status(Tone::Err, t("qnap.alarm_on").to_string()))}
                 <div class="row">
                     <button type="button" class="btn ghost" disabled=move || busy.get() || !buzzer_ok.get() on:click=beep>
-                        {crate::form::spinner(busy)}<Icon icon=icons::BELL_RING size=16 />{tr("qnap.test_beep")}
+                        {crate::form::spinner(busy)}<Icon icon=icons::BELL_RING size=16 />{tr("hw.test_beep")}
                     </button>
                     <button type="button" class="btn ghost" disabled=move || !alarm.get() on:click=mute>{tr("qnap.mute")}</button>
                 </div>

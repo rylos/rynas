@@ -671,7 +671,7 @@ fn leds_card(d: RwSignal<SynologySettings>, running: bool) -> AnyView {
                 {switch("syn.beep_error", Some("syn.beep_error_help"), err, set_err)}
                 <div class="btn-row">
                     <button type="button" class="btn ghost" disabled=move || beeping.get() || !running on:click=beep>
-                        {crate::form::spinner(beeping)}<Icon icon=icons::BELL_RING size=16 />{tr("syn.test_beep")}
+                        {crate::form::spinner(beeping)}<Icon icon=icons::BELL_RING size=16 />{tr("hw.test_beep")}
                     </button>
                     <button type="button" class="btn ghost" disabled=move || muting.get() on:click=mute>
                         {crate::form::spinner(muting)}<Icon icon=icons::BELL_OFF size=16 />{tr("syn.mute")}

@@ -70,7 +70,7 @@ pub fn days_text(days: &[Weekday]) -> String {
     v.sort_unstable();
     v.dedup();
     match v.as_slice() {
-        [0, 1, 2, 3, 4, 5, 6] => t("ps.every_day").to_string(),
+        [0, 1, 2, 3, 4, 5, 6] => t("sch.rep.daily").to_string(),
         [0, 1, 2, 3, 4] => format!("{}–{}", t(DAY_KEYS[0]), t(DAY_KEYS[4])),
         _ => v.iter().map(|&i| t(DAY_KEYS[i as usize])).collect::<Vec<_>>().join(", "),
     }

@@ -243,7 +243,7 @@ export const sidebarMethods = {
       html += `<div class="side-title vol-title" data-vol="${esc(vol)}" draggable="true"${title !== plain ? ` title="${esc(plain)}"` : ""}><span>${esc(title)}</span>${first.total && vol !== "home" ? `<span title="${t("{f} liberi di {t}", { f: size(first.free), t: size(first.total) })}">${size(first.free)}</span>` : ""}</div>`;
       if (first.total && vol !== "home") html += `<div class="vol-bar ${used > 0.95 ? "full" : used > 0.85 ? "high" : ""}" style="margin:0 10px 6px"><div style="width:${(used * 100).toFixed(1)}%"></div></div>`;
       for (const s of list) {
-        const badges = (s.encrypted ? `<span class="si-lock" title="${t("Cartella crittografata")}">${svg("lock")}</span>` : "") + (s.hidden ? `<span class="si-badge" title="${t("Nascosta in Rete")}">${t("nasc.")}</span>` : "") + (s.holds_backup ? `<span class="si-badge" title="${esc(t("Si sovrappone alla cartella dei backup del PC {pc}: in sola lettura finché i backup non hanno una cartella propria", { pc: s.holds_backup }))}">${t("sola lettura")}</span>` : "") + this.ejectButton("/" + s.name);
+        const badges = (s.encrypted ? `<span class="si-lock" title="${t("Cartella cifrata")}">${svg("lock")}</span>` : "") + (s.hidden ? `<span class="si-badge" title="${t("Nascosta in Rete")}">${t("nasc.")}</span>` : "") + (s.holds_backup ? `<span class="si-badge" title="${esc(t("Si sovrappone alla cartella dei backup del PC {pc}: in sola lettura finché i backup non hanno una cartella propria", { pc: s.holds_backup }))}">${t("sola lettura")}</span>` : "") + this.ejectButton("/" + s.name);
         html += item("/" + s.name, s.home ? t("Home ({u})", { u: this.user }) : s.name, folderGlyphHTML("/" + s.name, s.name, s.home ? shareGlyph("home") : shareGlyph(s.name)), s.comment ? `<span class="si-sub">${esc(s.comment)}</span>` : "", badges);
       }
     }
@@ -432,8 +432,8 @@ export const sidebarMethods = {
       { label: t("Apri"), icon: "forward", action: () => this.pane.go(path) },
       { label: t("Apri in una nuova scheda"), icon: "plus", action: () => this.newTab(path) },
       this.isSplit() && { label: t("Apri nell'altro pannello"), icon: "split", action: () => this.other().go(path) },
-      share?.recycle && { label: t("Apri il Cestino"), icon: "trash", action: () => this.pane.go(path + "/#recycle") },
-      share?.recycle && { label: t("Svuota il Cestino"), icon: "trash", danger: true, action: () => this.emptyBin(path + "/#recycle") },
+      share?.recycle && { label: t("Apri il cestino"), icon: "trash", action: () => this.pane.go(path + "/#recycle") },
+      share?.recycle && { label: t("Svuota il cestino"), icon: "trash", danger: true, action: () => this.emptyBin(path + "/#recycle") },
       !isRemote(path) && !isBackupTop(path) && { label: t("Analisi spazio"), icon: "pie", action: () => this.analyseSpace(path) },
       "-",
       fav ? { label: t("Togli dai preferiti"), icon: "star", action: () => this.toggleFavorite(path) } : { label: t("Aggiungi ai preferiti"), icon: "star", action: () => this.toggleFavorite(path) },
