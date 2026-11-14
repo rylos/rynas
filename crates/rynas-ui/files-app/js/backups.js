@@ -110,11 +110,17 @@ export function entryParts(e) {
  * (the folder's own mtime is when the NAS received it, not when the PC took
  * it); null for any other entry.
  */
-export function entryTime(e) {
+export function entryTime(e, short = false) {
   if (e.kind !== "d" || !e.path || !isPcFolder(parentPath(e.path))) return null;
   const p = parseSnapshot(e.name);
   if (!p || p.h === null) return null;
-  return snapshotFormat(true).format(new Date(Date.UTC(p.y, p.mo - 1, p.d, p.h, p.mi)));
+  const d = new Date(Date.UTC(p.y, p.mo - 1, p.d, p.h, p.mi));
+  if (!short) return snapshotFormat(true).format(d);
+  // the list column: as compact as any other entry's date (ezaDate), the name's time kept
+  // as written (UTC: the name has no time zone)
+  const recent = Math.abs(Date.now() - d) < 180 * 86400 * 1000;
+  const opts = recent ? { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" } : { day: "numeric", month: "short", year: "numeric" };
+  return dateFormat({ ...opts, timeZone: "UTC" }).format(d);
 }
 
 /** "/@backups/<pc>/<snapshot>": the top of one snapshot. */

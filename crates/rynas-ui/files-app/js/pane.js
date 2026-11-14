@@ -767,7 +767,7 @@ export class Pane {
       case "mtime": {
         // a PC's snapshot: when the PC took it (the name's time), not when it arrived
         const taken = entryTime(e);
-        if (taken) return `<div class="cell ${c.cls}" title="${esc(taken)}">${esc(taken)}</div>`;
+        if (taken) return `<div class="cell ${c.cls}" title="${esc(taken)}">${esc(entryTime(e, true))}</div>`;
         return `<div class="cell ${c.cls}${prefs.todayHighlight && isToday(e.mtime) ? " today" : ""}" title="${esc(dateTime(e.mtime))}">${esc(prefs.relativeDates ? relative(e.mtime) : ezaDate(e.mtime))}</div>`;
       }
       case "kind":
