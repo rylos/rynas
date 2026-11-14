@@ -518,7 +518,7 @@ kbd {
    and a centring offset rounded down; otherwise 118.33 px columns and a half-pixel shift put
    icons at fractional coordinates, drawn soft */
 @supports (width: round(down, 100%, 12px)) {
-  .page {
+  .page:not(.files-page) {
     --page-w: calc(round(down, min(1600px, 100%) - 11 * var(--gap), 12px) + 11 * var(--gap));
     --page-ml: max(0px, round(down, (100% - var(--page-w)) / 2, 1px));
     width: var(--page-w); max-width: none; margin-left: var(--page-ml); margin-right: 0;
