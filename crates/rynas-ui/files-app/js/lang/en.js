@@ -578,7 +578,7 @@ export default {
   "files.sidebar.apps": "Apps",
   "files.common.app_data": "App data",
   "files.sidebar.n_folders": "{n} folders",
-  "files.common.backups": "Backups",
+  "files.common.backups": "PC backups",
   "files.backups.root": "root",
   "files.sidebar.overlaps_backup_folder_pc_pc": "Overlaps the backup folder of the PC {pc}: read-only until the backups have a folder of their own",
   "files.backups.backups_read_only_change_file": "Backups are read-only: to change a file, copy it to a shared folder",

@@ -90,6 +90,45 @@ export function snapshotLabel(name) {
   return `${when} · ${what}` + (p.n ? ` #${p.n}` : "");
 }
 
+/**
+ * A snapshot in a PC's folder as two parts for a list row: what (the
+ * subvolume, " #2" for another one of the same minute) and when (short date
+ * and time, as the name writes it); null for any other entry.
+ */
+export function entryParts(e) {
+  if (e.kind !== "d" || !e.path || !isPcFolder(parentPath(e.path))) return null;
+  const p = parseSnapshot(e.name);
+  if (!p) return null;
+  const opts = p.h !== null ? { dateStyle: "short", timeStyle: "short", timeZone: "UTC" } : { dateStyle: "short", timeZone: "UTC" };
+  const when = dateFormat(opts).format(new Date(Date.UTC(p.y, p.mo - 1, p.d, p.h ?? 0, p.mi ?? 0)));
+  const what = (p.prefix === "@" ? `@ (${t("files.backups.root")})` : p.prefix) + (p.n ? ` #${p.n}` : "");
+  return { what, when };
+}
+
+/**
+ * The time of a snapshot in a PC's folder, as its Modified column shows it
+ * (the folder's own mtime is when the NAS received it, not when the PC took
+ * it); null for any other entry.
+ */
+export function entryTime(e) {
+  if (e.kind !== "d" || !e.path || !isPcFolder(parentPath(e.path))) return null;
+  const p = parseSnapshot(e.name);
+  if (!p || p.h === null) return null;
+  return snapshotFormat(true).format(new Date(Date.UTC(p.y, p.mo - 1, p.d, p.h, p.mi)));
+}
+
+/** "/@backups/<pc>/<snapshot>": the top of one snapshot. */
+const isSnapshotTop = (path) => atBackups(path) && path.split("/").filter(Boolean).length === 3;
+
+// what rynas and the snapshot tools keep at the top of a PC's subvolume: not the PC's files
+const INTERNAL = new Set([".btrbk_snapshots", "btrbk_snapshots", ".rynas", ".snapshots"]);
+
+/** An entry at the top of a snapshot that is the backup's own bookkeeping, never shown. */
+export const isBackupInternal = (e) => INTERNAL.has(e.name) && isSnapshotTop(parentPath(e.path || ""));
+
+/** A path as people read it: "/@backups/…" under its name ("PC backups/…"). */
+export const backupsDisplay = (path) => (atBackups(path) ? t("files.common.backups") + path.slice(BACKUPS_PATH.length) : path);
+
 /** The label of a path when it is a snapshot in a PC's folder ("/@backups/<pc>/<snapshot>"), else null. */
 export function pathLabel(path) {
   return entryLabel({ kind: "d", name: path.slice(path.lastIndexOf("/") + 1), path });

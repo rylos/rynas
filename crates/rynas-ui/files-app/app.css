@@ -267,8 +267,8 @@ svg.i { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-widt
 .gi { font-family: "eza-icons"; font-style: normal; display: inline-block; width: 1.25em; text-align: center; flex: none; line-height: 1; }
 .no-icons .gi:not(.keep) { display: none; }
 .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* a PC's snapshot shown by its date: the real name after it, muted, the first to shrink */
-.nm-real { color: var(--muted); font-size: .88em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex-shrink: 2; }
+/* a PC's snapshot: its subvolume in bold, then its short date, muted */
+.nm-when { color: var(--muted); font-size: .92em; font-variant-numeric: tabular-nums; }
 .link-target { color: var(--t-cyan); opacity: .8; margin-left: 4px; }
 .rename-input {
   flex: 1; min-width: 0; padding: 1px 6px; border-radius: 5px;
@@ -706,11 +706,6 @@ dialog.xfer { max-width: min(96vw, 520px); }
   .filter-box .mode { display: none; }
   .filter-box:focus-within, .filter-box:has(input:not(:placeholder-shown)) { width: 170px; }
   .filter-box:focus-within input, .filter-box:has(input:not(:placeholder-shown)) input { width: 100%; }
-}
-
-/* narrow: a snapshot's real name stays in its tooltip only */
-@container sf (max-width: 600px) {
-  .nm-real { display: none; }
 }
 
 @container sf (max-width: 760px) {

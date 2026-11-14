@@ -12,7 +12,7 @@ import * as transfers from "./transfers.js";
 import { pickIcon } from "./iconpick.js";
 import { isRemote, connId, editConnection, renameConnection, parseAddress, serverAddress, startPath } from "./conns.js";
 import { APPS, APPS_PATH, setAppFolders, appFolders } from "./appdata.js";
-import { BACKUPS, BACKUPS_PATH, setBackupFolders, backupFolders, isBackupTop, pathLabel } from "./backups.js";
+import { BACKUPS, BACKUPS_PATH, setBackupFolders, backupFolders, isBackupTop, pathLabel, backupsDisplay } from "./backups.js";
 
 // a shared folder on a removable drive: `removable` from the server, or the
 // volume names of USB and eSATA drives on volumes migrated as they are
@@ -109,7 +109,7 @@ export const sidebarMethods = {
   /** A path as people read it: a server's own address for a remote one. */
   displayPath(path) {
     const c = this.connOf(path);
-    return c ? serverAddress(c, path, "smb") : path;
+    return c ? serverAddress(c, path, "smb") : backupsDisplay(path);
   },
 
   async addConnection(draft = {}) {

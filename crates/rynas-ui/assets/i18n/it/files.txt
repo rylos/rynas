@@ -572,7 +572,7 @@ files.err.read_only	Sola lettura
 files.sidebar.apps	App
 files.common.app_data	Dati delle app
 files.sidebar.n_folders	{n} cartelle
-files.common.backups	Backups
+files.common.backups	Backup dei PC
 files.backups.root	radice
 files.sidebar.overlaps_backup_folder_pc_pc	Si sovrappone alla cartella dei backup del PC {pc}: in sola lettura finché i backup non hanno una cartella propria
 files.backups.backups_read_only_change_file	I backup sono in sola lettura: per cambiare un file, copialo in una cartella condivisa

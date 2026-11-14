@@ -13,7 +13,7 @@ import { isHeic, HEIC_LIMIT, fillHeic } from "./heic.js";
 import { rememberArchive } from "./archive.js";
 import { isRemote } from "./conns.js";
 import { APPS_PATH } from "./appdata.js";
-import { BACKUPS_PATH, entryLabel, pathLabel, isPcFolder, compareSnapshots, isBackupTop, isWholeBackup } from "./backups.js";
+import { BACKUPS_PATH, entryLabel, entryParts, entryTime, isBackupInternal, pathLabel, isPcFolder, compareSnapshots, isBackupTop, isWholeBackup } from "./backups.js";
 import { host, mount } from "./host.js";
 
 const COLS = {
@@ -324,7 +324,8 @@ export class Pane {
   // ---------- sorting, filtering ----------
   refilter() {
     const src = this.search ? this.search.results : this.entries;
-    let list = prefs.showHidden ? src : src.filter((e) => !isHidden(e));
+    // a snapshot's own bookkeeping (local snapshots, the manifest) never shows
+    let list = (prefs.showHidden ? src : src.filter((e) => !isHidden(e))).filter((e) => !isBackupInternal(e));
     const query = this.filter.trim();
     this.matches = new Map();
     if (query && this.searchMode) {
@@ -747,9 +748,9 @@ export class Pane {
         // the volume by its name (never its mount path); the home is under "Personal" already
         const share = e.share?.volume && !e.share.home ? `<span class="si-badge" style="margin-left:6px">${esc(this.app.volumeTitle(e.share.volume).title)}</span>` : "";
         const m = this.matches?.get(e.path);
-        // a PC's snapshot by its date, the real name beside it
-        const label = !m && entryLabel(e);
-        if (label) return `<div class="cell name-cell" title="${esc(e.name)}">${iconHTML(e)}<span class="nm ${colorClass(e)}">${esc(label)}</span><span class="nm-real">${esc(e.name)}</span></div>`;
+        // a PC's snapshot: its subvolume, then its short date (the real name in the tooltip)
+        const parts = !m && entryParts(e);
+        if (parts) return `<div class="cell name-cell" title="${esc(e.name)}">${iconHTML(e)}<span class="nm ${colorClass(e)}"><strong>${esc(parts.what)}</strong> <span class="nm-when">${esc(parts.when)}</span></span></div>`;
         return `<div class="cell name-cell">${iconHTML(e)}<span class="nm ${colorClass(e)}">${m ? highlight(e.name, m.positions, esc) : esc(e.name)}</span>${link}${share}</div>`;
       }
       case "dir":
@@ -763,8 +764,12 @@ export class Pane {
         }
         return `<div class="cell ${c.cls}">${this.sizeHTML(e.size)}</div>`;
       }
-      case "mtime":
+      case "mtime": {
+        // a PC's snapshot: when the PC took it (the name's time), not when it arrived
+        const taken = entryTime(e);
+        if (taken) return `<div class="cell ${c.cls}" title="${esc(taken)}">${esc(taken)}</div>`;
         return `<div class="cell ${c.cls}${prefs.todayHighlight && isToday(e.mtime) ? " today" : ""}" title="${esc(dateTime(e.mtime))}">${esc(prefs.relativeDates ? relative(e.mtime) : ezaDate(e.mtime))}</div>`;
+      }
       case "kind":
         return `<div class="cell" style="color:var(--muted)">${esc(kindLabel(e))}</div>`;
     }
@@ -938,7 +943,7 @@ export class Pane {
       <dl class="facts">
         <dt>${t("files.common.size")}</dt><dd>${sizeText}</dd>
         ${u ? `<dt>${t("files.pane.contents")}</dt><dd>${count(u.files, "files.common.count.files", int)}, ${count(Math.max(0, u.dirs - 1), "files.common.count.folders", int)}</dd>` : ""}
-        <dt>${t("files.common.modified")}</dt><dd>${esc(dateTime(e.mtime))}</dd>
+        <dt>${t("files.common.modified")}</dt><dd>${esc(entryTime(e) || dateTime(e.mtime))}</dd>
         <dt>${t("files.common.permissions")}</dt><dd class="pm" style="font-family:var(--mono)">${this.modeHTML(e)}</dd>
         <dt>${t("files.pane.owner")}</dt><dd class="owner">…</dd>
         <dt>${t("files.pane.path")}</dt><dd style="font-family:var(--mono);font-size:11.5px">${esc(this.app.displayPath(e.path))}</dd>
