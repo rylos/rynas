@@ -669,9 +669,21 @@ export class Pane {
     for (const [key, c] of Object.entries(COLS)) {
       if (!prefs.columns[key] || (narrowPc && key === "mode")) continue;
       const w = prefs.colWidths?.[key];
-      cols.push({ key, ...c, width: w ? `${w}px` : c.width, resizable: true });
+      cols.push({ key, ...c, width: w ? `${Math.min(w, this.colMax())}px` : c.width, resizable: true });
     }
     return cols;
+  }
+
+  /**
+   * The widest a resizable column may be: saved widths follow the user to every screen, and on a
+   * phone they must not squeeze the Name column below its minimum (160 px) when all four
+   * columns are at their widest.
+   */
+  colMax() {
+    const w = this.el.clientWidth;
+    if (!w) return 480;
+    // 34 px: the header's padding; 12 px: a gap
+    return Math.max(48, Math.min(480, Math.floor((w - 34 - 160) / Object.keys(COLS).length) - 12));
   }
 
   renderHead() {
@@ -685,7 +697,9 @@ export class Pane {
     this.headEl.innerHTML = cols
       .map((c) => {
         const arrow = this.sort.key === c.key ? `<span class="arrow">${this.sort.dir > 0 ? "▲" : "▼"}</span>` : "";
-        const grip = c.resizable ? `<span class="col-grip" data-r="${c.key}"></span>` : "";
+        const grip = c.resizable
+          ? `<span class="col-grip" data-r="${c.key}" role="separator" aria-orientation="vertical" tabindex="0" aria-valuemin="48" aria-label="${esc(t("files.pane.resize_column", { column: t(c.label) }))}"></span>`
+          : "";
         return `<div data-k="${c.key}" class="${c.key === "size" ? "r" : ""}">${grip}<span class="lbl">${t(c.label)}</span>${arrow}</div>`;
       })
       .join("");
@@ -703,11 +717,48 @@ export class Pane {
    */
   gripColumn(grip, cols) {
     const key = grip.dataset.r;
+    const max = this.colMax();
+    let w = Math.round(grip.parentElement.getBoundingClientRect().width);
+    grip.setAttribute("aria-valuemax", max);
+    grip.setAttribute("aria-valuenow", w);
+    const resize = (nw) => {
+      w = Math.round(Math.min(max, Math.max(48, nw)));
+      grip.setAttribute("aria-valuenow", w);
+      this.template = cols.map((c) => (c.key === key ? `${w}px` : c.width)).join(" ");
+      this.headEl.style.gridTemplateColumns = this.template;
+      this.el.querySelectorAll(".row").forEach((r) => (r.style.gridTemplateColumns = this.template));
+    };
+    const store = () => {
+      if (w !== prefs.colWidths?.[key]) save({ colWidths: { ...prefs.colWidths, [key]: w } });
+    };
     grip.onclick = (e) => e.stopPropagation();
     grip.ondblclick = (e) => {
       e.stopPropagation();
       const { [key]: _, ...rest } = prefs.colWidths || {};
       save({ colWidths: rest });
+    };
+    // the separator is the column's left edge: Left moves it left and widens the column
+    let timer = 0;
+    grip.onkeydown = (e) => {
+      const step = e.shiftKey ? 32 : 8;
+      if (e.key === "ArrowLeft") resize(w + step);
+      else if (e.key === "ArrowRight") resize(w - step);
+      else return;
+      e.preventDefault();
+      e.stopPropagation();
+      clearTimeout(timer);
+      // saving repaints the header: keep the focus on this separator
+      timer = setTimeout(() => {
+        store();
+        this.headEl.querySelector(`.col-grip[data-r="${key}"]`)?.focus();
+      }, 600);
+    };
+    grip.onblur = () => {
+      if (timer) {
+        clearTimeout(timer);
+        timer = 0;
+        store();
+      }
     };
     grip.onpointerdown = (e) => {
       if (e.button !== 0) return;
@@ -715,19 +766,12 @@ export class Pane {
       e.stopPropagation();
       grip.setPointerCapture(e.pointerId);
       const x0 = e.clientX;
-      const w0 = grip.parentElement.getBoundingClientRect().width;
-      let w = w0;
-      const template = () => cols.map((c) => (c.key === key ? `${w}px` : c.width)).join(" ");
-      grip.onpointermove = (ev) => {
-        // the columns are right of the name: dragging the left edge to the left widens it
-        w = Math.round(Math.min(480, Math.max(48, w0 + x0 - ev.clientX)));
-        this.template = template();
-        this.headEl.style.gridTemplateColumns = this.template;
-        this.el.querySelectorAll(".row").forEach((r) => (r.style.gridTemplateColumns = this.template));
-      };
+      const w0 = w;
+      // the columns are right of the name: dragging the left edge to the left widens it
+      grip.onpointermove = (ev) => resize(w0 + x0 - ev.clientX);
       grip.onpointerup = grip.onpointercancel = () => {
         grip.onpointermove = grip.onpointerup = grip.onpointercancel = null;
-        if (w !== w0) save({ colWidths: { ...prefs.colWidths, [key]: w } });
+        if (w !== w0) store();
       };
     };
   }

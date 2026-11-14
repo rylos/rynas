@@ -248,10 +248,11 @@ svg.i { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-widt
    label is clipped */
 .list-head > div { position: relative; align-self: stretch; min-width: 0; overflow: visible; }
 .list-head .lbl { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-/* a column's left edge: drag to resize (the middle of the 12px gap) */
-.list-head .col-grip { position: absolute; left: -9px; top: 0; bottom: 0; width: 6px; cursor: col-resize; touch-action: none; }
+/* a column's left edge: drag (or focus and Left/Right) to resize; a 14 px hit area for touch
+   with a 1 px line in the middle of the 12 px gap */
+.list-head .col-grip { position: absolute; left: -13px; top: 0; bottom: 0; width: 14px; z-index: 1; cursor: col-resize; touch-action: none; outline: none; }
 .list-head .col-grip { background: linear-gradient(var(--border), var(--border)) center / 1px 100% no-repeat; }
-.list-head .col-grip:hover, .list-head .col-grip:active { background: linear-gradient(var(--accent), var(--accent)) center / 2px 100% no-repeat; }
+.list-head .col-grip:hover, .list-head .col-grip:active, .list-head .col-grip:focus-visible { background: linear-gradient(var(--accent), var(--accent)) center / 2px 100% no-repeat; }
 .scroller { flex: 1; overflow: hidden auto; position: relative; outline: none; }
 .scroller:focus-visible { box-shadow: inset 0 0 0 1px var(--accent-soft); }
 .rows { position: relative; }
