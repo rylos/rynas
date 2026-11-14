@@ -1857,6 +1857,7 @@ dict! { BLOB, LENS;
     "sto.readonly" => "Read-only";
     "sto.inherit" => "Volume default";
     "sto.system" => "System";
+    "sto.system_volume" => "System";
     "sto.yes" => "Yes";
     "sto.no" => "No";
     "sto.sub_invalid" => "Use letters, digits, dot, underscore or dash (up to 64), starting with a letter or digit.";

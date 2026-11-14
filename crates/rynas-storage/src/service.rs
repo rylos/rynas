@@ -269,6 +269,7 @@ impl Storage {
             .run_ok("lsblk", LSBLK_ARGS, T_LSBLK)
             .ok_or_else(|| StorageError::Tool("lsblk failed".into()))?;
         let mut g = BlockGraph::parse(&out).map_err(StorageError::Tool)?;
+        host_mountpoints(&mut g, &self.mounts());
         if self.loop_disks {
             g.promote_loops();
         }
@@ -807,6 +808,16 @@ impl Storage {
     /// The tree of an inventory, with the details of the open LUKS mappings.
     pub fn tree_of(&self, inv: &Inventory) -> StorageTree {
         let mut t = inventory::tree(inv);
+        // the inventory measures only the filesystems rynas manages (btrfs): an ext4/xfs volume,
+        // the root among them, read 0 bytes used. Local filesystems, so statvfs cannot hang.
+        for v in &mut t.volumes {
+            if v.used == 0
+                && matches!(v.fstype.as_str(), "ext4" | "xfs")
+                && let Some(s) = v.mountpoint.as_deref().and_then(crate::overview::statvfs)
+            {
+                v.used = s.used;
+            }
+        }
         // details of the open LUKS mappings (device-mapper table only)
         let mut status: HashMap<String, luks::CryptStatus> = HashMap::new();
         for c in luks::containers(&inv.graph) {
@@ -859,8 +870,49 @@ impl Storage {
     }
 }
 
+/// lsblk runs inside rynasd's sandbox and reads its mount table, where `PrivateTmp=` and
+/// `ProtectSystem=` bind the root filesystem on `/var/tmp` and elsewhere: an ext4 root came out
+/// as a volume on `/var/tmp`. The mount points of a device are taken from the host's table
+/// instead: the mounts of its maj:min that show the filesystem's root (a bind of a subfolder is
+/// not where the device is mounted). btrfs keeps lsblk's list: its mounts carry an anonymous
+/// device number, and its subvolumes are told apart elsewhere.
+fn host_mountpoints(g: &mut BlockGraph, mounts: &[Mount]) {
+    if mounts.is_empty() {
+        return;
+    }
+    for d in g.devs.values_mut() {
+        let Some(mm) = d.majmin.as_deref() else { continue };
+        if d.fstype.as_deref() == Some("btrfs") {
+            continue;
+        }
+        let host: Vec<String> = mounts
+            .iter()
+            .filter(|m| m.majmin == mm && m.root == "/")
+            .map(|m| m.mountpoint.clone())
+            .collect();
+        // "[SWAP]" stays
+        d.mountpoints.retain(|m| !m.starts_with('/'));
+        d.mountpoints.extend(host);
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// As on a DS423+ with an ext4 root: lsblk, inside the sandbox, lists the private /var/tmp
+    /// bind first; the host's table has the root on / only.
+    #[test]
+    fn mountpoints_come_from_the_host_table() {
+        let json = r#"{"blockdevices":[{"name":"nvme1n1p2","kname":"nvme1n1p2","path":"/dev/nvme1n1p2","type":"part","fstype":"ext4","fsver":null,"label":null,"uuid":"045d","partlabel":null,"size":1000,"rota":false,"tran":null,"model":null,"serial":null,"wwn":null,"rev":null,"mountpoints":["/var/tmp","/"],"rm":false,"hotplug":false,"maj:min":"259:4"},{"name":"nvme1n1p3","kname":"nvme1n1p3","path":"/dev/nvme1n1p3","type":"part","fstype":"swap","fsver":null,"label":null,"uuid":"s","partlabel":null,"size":10,"rota":false,"tran":null,"model":null,"serial":null,"wwn":null,"rev":null,"mountpoints":["[SWAP]"],"rm":false,"hotplug":false,"maj:min":"259:5"}]}"#;
+        let mut g = BlockGraph::parse(json).unwrap();
+        let host = parse_mountinfo(
+            "1 0 259:4 / / rw - ext4 /dev/nvme1n1p2 rw\n\
+             2 1 259:4 /srv/x /srv/y rw - ext4 /dev/nvme1n1p2 rw\n",
+        );
+        host_mountpoints(&mut g, &host);
+        assert_eq!(g.devs["nvme1n1p2"].mountpoints, ["/"]);
+        assert_eq!(g.devs["nvme1n1p3"].mountpoints, ["[SWAP]"]);
+    }
     use super::*;
     use crate::host::FakeHost;
     use rynas_api_types::storage::{ArrayHealth, HealthVerdict};

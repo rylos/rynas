@@ -1297,6 +1297,7 @@ sto.path	Percorso
 sto.readonly	Sola lettura
 sto.inherit	Predefinita del volume
 sto.system	Sistema
+sto.system_volume	Sistema
 sto.yes	Sì
 sto.no	No
 sto.sub_invalid	Usa lettere, cifre, punto, trattino basso o trattino (fino a 64), iniziando con una lettera o una cifra.
