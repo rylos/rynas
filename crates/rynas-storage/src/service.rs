@@ -890,6 +890,13 @@ fn host_mountpoints(g: &mut BlockGraph, mounts: &[Mount]) {
             .filter(|m| m.majmin == mm && m.root == "/")
             .map(|m| m.mountpoint.clone())
             .collect();
+        if host.is_empty() {
+            // FUSE file systems (ntfs-3g, exfat-fuse on USB disks: fuseblk) are mounted on an
+            // anonymous device number, never this disk's maj:min: keep what lsblk saw, only
+            // where the host has a mount (a bind private to the sandbox is dropped)
+            d.mountpoints.retain(|p| !p.starts_with('/') || mounts.iter().any(|m| &m.mountpoint == p));
+            continue;
+        }
         // "[SWAP]" stays
         d.mountpoints.retain(|m| !m.starts_with('/'));
         d.mountpoints.extend(host);
@@ -912,6 +919,17 @@ mod tests {
         host_mountpoints(&mut g, &host);
         assert_eq!(g.devs["nvme1n1p2"].mountpoints, ["/"]);
         assert_eq!(g.devs["nvme1n1p3"].mountpoints, ["[SWAP]"]);
+    }
+
+    /// A USB disk with ntfs-3g (fuseblk) is mounted on an anonymous device number: it keeps
+    /// the mount lsblk saw when the host has it, and loses one the host does not have.
+    #[test]
+    fn fuse_mounts_keep_their_mountpoint() {
+        let json = r#"{"blockdevices":[{"name":"sdc1","kname":"sdc1","path":"/dev/sdc1","type":"part","fstype":"ntfs","fsver":null,"label":null,"uuid":"u","partlabel":null,"size":1000,"rota":false,"tran":"usb","model":null,"serial":null,"wwn":null,"rev":null,"mountpoints":["/media/usb","/var/tmp/x"],"rm":true,"hotplug":true,"maj:min":"8:33"}]}"#;
+        let mut g = BlockGraph::parse(json).unwrap();
+        let host = parse_mountinfo("1 0 259:4 / / rw - ext4 /dev/nvme1n1p2 rw\n3 1 0:52 / /media/usb rw - fuseblk /dev/sdc1 rw\n");
+        host_mountpoints(&mut g, &host);
+        assert_eq!(g.devs["sdc1"].mountpoints, ["/media/usb"]);
     }
     use super::*;
     use crate::host::FakeHost;
