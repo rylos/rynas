@@ -207,7 +207,7 @@ fn webhook(name: &str, url: &str) -> TargetRequest {
     TargetRequest {
         name: name.into(),
         enabled: true,
-        language: NotifyLanguage::En,
+        language: NotifyLanguage::EN,
         config: TargetConfig::Webhook {
             url: format!("{url}/hook"),
             method: WebhookMethod::Post,
@@ -679,7 +679,7 @@ async fn smtp_delivery() {
         .create_target(&TargetRequest {
             name: "mail".into(),
             enabled: true,
-            language: NotifyLanguage::It,
+            language: NotifyLanguage::new("it").unwrap(),
             config: TargetConfig::Smtp {
                 host: "127.0.0.1".into(),
                 port,
@@ -716,7 +716,7 @@ async fn ntfy_delivery_and_failed_test() {
         .create_target(&TargetRequest {
             name: "phone".into(),
             enabled: true,
-            language: NotifyLanguage::En,
+            language: NotifyLanguage::EN,
             config: TargetConfig::Ntfy {
                 server: http.url.clone(),
                 topic: "nas-alerts".into(),

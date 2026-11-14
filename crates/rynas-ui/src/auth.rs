@@ -400,10 +400,10 @@ pub fn LoginScreen() -> impl IntoView {
             <div class="login-glow" aria-hidden="true"></div>
             <div class="login-tools">
                 <div class="segmented small-seg" role="radiogroup" aria-label=tr("language")>
-                    {[(Lang::En, "EN"), (Lang::It, "IT")]
-                        .into_iter()
+                    {Lang::all()
+                        .map(|l| (l, l.code().to_uppercase()))
                         .map(|(l, label)| view! {
-                            <button role="radio" aria-checked=move || (lang_now() == l).to_string() class:on=move || lang_now() == l on:click=move |_| i18n::set_lang(Some(l))>
+                            <button role="radio" title=l.name() lang=l.code() aria-checked=move || (lang_now() == l).to_string() class:on=move || lang_now() == l on:click=move |_| i18n::set_lang(Some(l))>
                                 {label}
                             </button>
                         })

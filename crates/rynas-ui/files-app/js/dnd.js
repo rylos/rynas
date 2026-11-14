@@ -81,12 +81,12 @@ export const dndMethods = {
     const fixed = atBackups(dest) || paths.some(atBackups);
     openMenu(ev.clientX, ev.clientY, [
       { title: baseName(dest) },
-      { label: t("Copia qui"), icon: "copy", action: () => this.transfer("copy", paths, dest) },
-      !fixed && { label: t("Sposta qui"), icon: "move", action: () => this.transfer("move", paths, dest) },
-      { label: t("Copia qui con verifica"), icon: "shield", action: () => this.transfer("copy", paths, dest, true) },
-      !fixed && { label: t("Sposta qui con verifica"), icon: "shield", action: () => this.transfer("move", paths, dest, true) },
+      { label: t("files.common.copy_here"), icon: "copy", action: () => this.transfer("copy", paths, dest) },
+      !fixed && { label: t("files.common.move_here"), icon: "move", action: () => this.transfer("move", paths, dest) },
+      { label: t("files.dnd.copy_here_verification"), icon: "shield", action: () => this.transfer("copy", paths, dest, true) },
+      !fixed && { label: t("files.dnd.move_here_verification"), icon: "shield", action: () => this.transfer("move", paths, dest, true) },
       "-",
-      { label: t("Annulla"), icon: "close" },
+      { label: t("files.common.cancel"), icon: "close" },
     ]);
   },
 

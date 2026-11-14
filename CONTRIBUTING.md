@@ -6,8 +6,9 @@ Thank you for helping. Bug reports, ideas and pull requests are welcome on
 ## Before you start
 
 - Open an issue first for anything larger than a small fix, so we can agree on the approach.
-- Code, comments, docs and the default UI language are in English; UI texts also need their
-  Italian translation (`crates/rynas-ui/src/i18n.rs` and `crates/rynas-ui/assets/i18n/it.txt`).
+- Code, comments, docs and the default UI language are in English; UI texts also need a line in
+  every translation file (`crates/rynas-ui/assets/i18n/<code>/`): see [docs/i18n.md](docs/i18n.md),
+  also for adding a language.
 - Every feature must work on plain Debian with standard tools; hardware-specific code goes in
   its own module.
 - Run `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace`

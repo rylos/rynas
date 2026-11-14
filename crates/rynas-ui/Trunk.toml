@@ -5,11 +5,20 @@ dist = "dist"
 filehash = true
 minify = "on_release"
 
+# Hooks of one stage run concurrently: each post_build hook touches its own files only
+# (hash-files-app.sh: files-app/ and index.html; i18n-bundle.sh: i18n/).
+
 # the file manager's folder gets a content hash too (immutable caching): see the script
 [[hooks]]
 stage = "post_build"
 command = "sh"
 command_arguments = ["hash-files-app.sh"]
+
+# the translations: one file per language for the wasm (see the script)
+[[hooks]]
+stage = "post_build"
+command = "sh"
+command_arguments = ["i18n-bundle.sh"]
 
 [serve]
 addresses = ["127.0.0.1"]

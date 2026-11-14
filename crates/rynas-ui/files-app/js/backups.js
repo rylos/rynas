@@ -54,7 +54,7 @@ export function readOnlyHere(pane) {
 }
 
 export function backupsToast() {
-  toast(t("I backup sono in sola lettura: per cambiare un file, copialo in una cartella condivisa"));
+  toast(t("files.backups.backups_read_only_change_file"));
 }
 
 // <prefix>.YYYYMMDD[THHMM[SS][±hhmm]][_N]: the names btrbk and rynas-agent give
@@ -86,7 +86,7 @@ export function snapshotLabel(name) {
   const p = parseSnapshot(name);
   if (!p) return null;
   const when = snapshotFormat(p.h !== null).format(new Date(Date.UTC(p.y, p.mo - 1, p.d, p.h ?? 0, p.mi ?? 0)));
-  const what = p.prefix === "@" ? `@ (${t("radice")})` : p.prefix;
+  const what = p.prefix === "@" ? `@ (${t("files.backups.root")})` : p.prefix;
   return `${when} · ${what}` + (p.n ? ` #${p.n}` : "");
 }
 

@@ -67,7 +67,7 @@ export class ApiError extends Error {
 export function errorOf(status, data) {
   const code = (data && typeof data.code === "string" && data.code) || "";
   const server = (data && (data.message || data.error)) || "";
-  return new ApiError(status, errText(code) || server || t("errore {n}", { n: status }), code);
+  return new ApiError(status, errText(code) || server || t("files.api.error_n", { n: status }), code);
 }
 
 /** The real status: real codes from rynas, or the 422 + X-Synofile-Status of SynoFile's CGI. */
@@ -101,7 +101,7 @@ export async function call(route, opts = {}) {
     res = await fetch(url(route, params), options);
   } catch (e) {
     if (e?.name === "AbortError") throw e;
-    throw new ApiError(0, t("NAS non raggiungibile"), "network");
+    throw new ApiError(0, t("files.common.nas_unreachable"), "network");
   }
   let data = null;
   try {

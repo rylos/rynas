@@ -709,9 +709,10 @@ Files page; it needs the files API (`/api/v1/files/*`) from the backend part to 
   --accent-2/--info`), and custom properties inherit through the shadow boundary, so light and
   dark follow the shell with no colour of their own (the editor's code colours and the dark quick
   look overlay keep theirs). `data-theme` on `<html>` is watched for the parts that need it.
-- **Language**: only Italian and English, following `<html lang>` (set by the shell from the
-  user's choice), switched live. The texts system is kept: Italian strings in the code, English in
-  `js/lang/en.js`; the seven other SynoFile tables are not shipped.
+- **Language**: the shell's language (`<html data-lang>`, a code of the language table) and locale
+  (`<html lang>`), switched live. English is the source: stable keys (`files.<area>.<name>`) in the
+  code, their English in `js/lang/en.js`; every other language fetches `/i18n/<code>/files.txt`
+  (docs/i18n.md). SynoFile's other tables are not shipped.
 - **Layout**: `.sf` (the app root) is a size container: SynoFile's breakpoints follow the room
   the shell leaves, not the window, and fixed overlays (context menu, transfers drawer, toasts,
   editor) stay inside the Files page; dialogs are in the top layer as before. The page fills the

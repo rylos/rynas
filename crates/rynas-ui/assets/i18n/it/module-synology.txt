@@ -1,0 +1,204 @@
+# rynas: Italian translation, Synology module. One key<TAB>text line per entry; see docs/i18n.md
+nt.src.synodeb	Sistema di base
+nev.synodeb.unit_failed.title	Servizio non riuscito: {unit}
+nev.synodeb.smart_error.title	SMART {device}: {failtype}
+nev.synodeb.smart_error.title_2	Avviso SMART su {device}
+nev.synodeb.smart_error.failtype.health	stato di salute in avaria
+nev.synodeb.smart_error.failtype.failedhealthcheck	impossibile verificare lo stato di salute
+nev.synodeb.smart_error.failtype.currentpendingsector	settori in attesa di riallocazione
+nev.synodeb.smart_error.failtype.offlineuncorrectablesector	settori non correggibili
+nev.synodeb.smart_error.failtype.failedreadsmartdata	dati SMART illeggibili
+nev.synodeb.smart_error.failtype.emailtest	messaggio di prova
+nev.synodeb.smart_error.failtype.errorcount	nuovi errori nel registro errori
+nev.synodeb.smart_error.failtype.selftest	autotest non superato
+nev.synodeb.smart_error.failtype.failedopendevice	impossibile aprire il dispositivo
+nev.synodeb.smart_error.failtype.usage	attributo di utilizzo in avaria
+nev.synodeb.raid_event.title	RAID {array}: {event} ({device})
+nev.synodeb.raid_event.title_2	RAID {array}: {event}
+nev.synodeb.raid_event.event.fail	dispositivo guasto
+nev.synodeb.raid_event.event.failspare	dispositivo di riserva guasto
+nev.synodeb.raid_event.event.degradedarray	array degradato
+nev.synodeb.raid_event.event.devicedisappeared	array scomparso
+nev.synodeb.raid_event.event.sparesmissing	dispositivi di riserva mancanti
+nev.synodeb.raid_event.event.movespare	riserva spostata in un altro array
+nev.synodeb.raid_event.event.spareactive	dispositivo di riserva ora attivo
+nev.synodeb.raid_event.event.rebuildfinished	ricostruzione completata
+nev.synodeb.raid_event.event.rebuildstarted	ricostruzione avviata
+nev.synodeb.raid_event.event.testmessage	messaggio di prova
+nev.synodeb.raid_event.event.newarray	nuovo array rilevato
+nev.synodeb.boot_completed.title	Avvio completato dopo una chiusura anomala dell'avvio precedente ({previous_boot})
+nev.synodeb.boot_completed.title_2	Avvio completato
+nev.synodeb.boot_completed.body	Kernel {kernel}. Indirizzi: {addresses}. Volume di sistema: {root}. Riavvio forzato dal watchdog {watchdog}.
+nev.synodeb.boot_completed.body_2	Kernel {kernel}. Indirizzi: {addresses}. Volume di sistema: {root}.
+nev.synodeb.boot_completed.body_3	Kernel {kernel}. Volume di sistema: {root}.
+nev.synodeb.boot_completed.root.ok	integro
+nev.synodeb.boot_completed.root.degraded	degradato
+nev.synodeb.boot_completed.root.resync_started	risincronizzazione avviata
+nev.synodeb.boot_completed.root.resync_failed	risincronizzazione non riuscita
+nev.synodeb.emergency_mode.title	Modalità di emergenza
+nev.synodeb.emergency_mode.body	L'avvio si è fermato in modalità di emergenza ({failed}). SSH è disponibile su {addresses}: accedi, risolvi la causa (journalctl -xb), poi esegui «sudo systemctl default» o riavvia. Con l'account root bloccato, systemd riprova l'avvio ogni pochi minuti; altrimenti il NAS si riavvia da solo dopo 10 minuti senza un accesso SSH.
+nev.synodeb.emergency_mode.body_2	L'avvio si è fermato in modalità di emergenza (causa sconosciuta). SSH è disponibile su {addresses}: accedi, risolvi la causa (journalctl -xb), poi esegui «sudo systemctl default» o riavvia. Con l'account root bloccato, systemd riprova l'avvio ogni pochi minuti; altrimenti il NAS si riavvia da solo dopo 10 minuti senza un accesso SSH.
+nev.synodeb.emergency_mode.body_3	L'avvio si è fermato in modalità di emergenza e non c'è alcun indirizzo di rete. Risolvi la causa da una console (journalctl -xb), poi esegui «sudo systemctl default» o riavvia.
+nev.synodeb.fan_failure.title	Guasto alle ventole
+nev.synodeb.fan_failure.body	Ventola ferma o illeggibile: {fans}.
+nev.synodeb.fan_failure.body_2	Il controller hardware segnala un guasto alla {fan}.
+nev.synodeb.fan_failure.fan.fan	ventola di sistema
+nev.synodeb.fan_failure.fan.cpu_fan	ventola della CPU
+nev.synodeb.fans_ok.title	Ventole tornate alla normalità
+nev.synodeb.thermal_shutdown.title	Spegnimento termico
+nev.synodeb.thermal_shutdown.body	Il NAS si spegne per proteggere l'hardware: {reason}.
+nev.synodeb.shutdown.title	Spegnimento: {button}
+nev.synodeb.shutdown.title_2	Spegnimento
+nev.synodeb.shutdown.body	Comando: {command}
+nev.synodeb.shutdown.button.power_button	pulsante di accensione
+nev.synodeb.dom_update_failed.title	Aggiornamento del modulo di avvio non riuscito
+nev.synodeb.dom_default_debian.title	DEBIAN è di nuovo la voce di avvio predefinita
+nev.synodeb.dom_default_debian.body	La voce di riserva DEBIAN_OLD non contiene più un kernel: si avvia DEBIAN ({kernel}), senza un kernel di riserva.
+nev.synodeb.kernel_not_tried.title	Nuovo kernel non provato
+nev.synodeb.kernel_not_tried.body	DEBIAN ({kernel}) è stato aggiornato, ma la voce predefinita è quella di riserva DEBIAN_OLD, quindi il nuovo kernel non viene avviato. Per provarlo: synodeb-dom default debian && reboot
+nev.synodeb.kernel_boot_failed.title	Il nuovo kernel non si è avviato
+nev.synodeb.kernel_boot_failed.body	Il modulo di avvio è tornato a DEBIAN_OLD ({running}), che resta la voce predefinita: i kernel più recenti vengono installati come DEBIAN ma non avviati fino a: synodeb-dom default debian
+nev.synodeb.ups_safe_mode.title	UPS: modalità sicura
+nev.synodeb.ups_safe_mode.body	Motivo: {reason}, batteria {battery}%, autonomia {runtime} s. Servizi fermati, volumi smontati; il NAS si riavvia al ritorno della corrente.
+nev.synodeb.ups_safe_mode.body_2	Motivo: {reason}. Servizi fermati, volumi smontati; il NAS si riavvia al ritorno della corrente.
+nev.synodeb.ups_safe_mode.body_3	Servizi fermati, volumi smontati; il NAS si riavvia al ritorno della corrente.
+nev.synodeb.ups_safe_mode.reason.lowbatt	batteria scarica
+nev.synodeb.ups_safe_mode.reason.nocomm	nessuna comunicazione con l'UPS
+nev.synodeb.ups_safe_mode.reason.waittimeup	tempo massimo a batteria raggiunto
+nev.synodeb.ups_safe_mode.reason.fsd	spegnimento forzato richiesto dall'UPS
+nev.synodeb.ups_power_restored_reboot.title	UPS: corrente ripristinata
+nev.synodeb.ups_power_restored_reboot.body	Uscita dalla modalità sicura con un riavvio.
+nev.synodeb.ups_power_restored.title	UPS: corrente ripristinata
+nev.synodeb.ups_power_restored.body	Batteria {battery}%.
+nev.synodeb.ups_on_battery.title	UPS a batteria
+nev.synodeb.ups_on_battery.body	Batteria {battery}%, autonomia {runtime} s.
+nev.synodeb.ups_on_battery.body_2	Batteria {battery}%.
+nev.synodeb.ups_battery_low.title	UPS: batteria scarica
+nev.synodeb.ups_battery_low.body	Batteria {battery}%, autonomia {runtime} s: avvio della modalità sicura.
+nev.synodeb.ups_battery_low.body_2	Avvio della modalità sicura.
+nev.synodeb.ups_unreachable.title	UPS non raggiungibile
+nev.synodeb.ups_unreachable.body	Nessuna comunicazione con {ups} da almeno {minutes} minuti.
+cfg.key.synology.hw	Impostazioni hardware
+syn.tab	Synology
+syn.not_running	synohwd non è in esecuzione: lo stato non è aggiornato e i segnali acustici o l'identificazione non sono disponibili. Le impostazioni si possono comunque salvare; applicarle riavvia synohwd.
+syn.foreign	/etc/synohwd.toml contiene comandi dei pulsanti non gestiti da rynas ({cmds}): applicare queste impostazioni li sostituisce.
+syn.platform	{bays} alloggiamenti · {fans} ventole
+syn.settings	Impostazioni
+syn.daemon	synohwd
+syn.running	In esecuzione
+syn.stopped	Non in esecuzione
+syn.fan_mode	Modalità velocità ventola
+syn.fan_low	Silenziosa
+syn.fan_high	Raffreddamento
+syn.fan_full	Velocità massima
+syn.fan_low_help	Predefinita: le ventole seguono le curve di temperatura e restano silenziose.
+syn.fan_high_help	Soglie più basse: le ventole accelerano prima e i dischi restano più freschi.
+syn.fan_full_help	Le ventole girano sempre al 99%.
+syn.full_note	La velocità massima non ha una curva: le ventole girano al 99%. Le soglie di spegnimento restano quelle della modalità silenziosa.
+syn.fan_ok	OK
+syn.fan_stopped	Ferma
+syn.fan_unknown	Non misurata
+syn.curve	Curva delle ventole
+syn.curve_duty	Velocità attuale
+syn.curve_preview	Anteprima della modalità selezionata (non ancora applicata).
+syn.cls_disk	Dischi
+syn.cls_nvme	NVMe
+syn.cls_cpu	CPU
+syn.cls_nic	Scheda di rete
+syn.fan_period	Regola ogni (s)
+syn.fan_period_help	Secondi tra due regolazioni delle ventole (5–300).
+syn.fan_min_duty	Velocità minima (%)
+syn.fan_min_duty_help	Minimo sotto le curve (0–99).
+syn.hysteresis	Isteresi (°C)
+syn.hysteresis_help	Di quanto un sensore deve scendere sotto un gradino prima che le ventole rallentino (0–20).
+syn.thermal	Spegnimento termico
+syn.thermal_on	Spegni in caso di surriscaldamento
+syn.thermal_help	synohwd spegne il NAS dopo due letture pari o superiori alla soglia di spegnimento di un sensore.
+syn.thermal_off	Lo spegnimento termico è disattivato: dischi, unità NVMe e CPU possono surriscaldarsi e danneggiarsi se una ventola si guasta.
+syn.sensor	Sensore
+syn.now_limit	Ora / spegnimento a
+syn.leds_beeper	LED e cicalino
+syn.disk_leds	LED dei dischi
+syn.disk_leds_help	Verde con il disco presente, lampeggiante durante l'attività.
+syn.brightness	Luminosità dei LED
+syn.brightness_help	Comune a tutti i LED dei dischi; applicata con le altre impostazioni.
+syn.ledsch	Pianificazione della luminosità dei LED frontali
+syn.ledsch_on	Cambia la luminosità in base all'ora
+syn.ledsch_on_help	Se disattivata, i LED frontali restano sempre al livello normale.
+syn.ledsch_normal	Normale
+syn.ledsch_reduced	Ridotto
+syn.ledsch_off	Spento
+syn.ledsch_grid	Livello dei LED frontali per ora
+syn.ledsch_level	Livello ridotto
+syn.ledsch_level_help	{lo} è il più tenue, {normal} è il livello normale. Spento nella griglia spegne tutti i LED frontali.
+syn.ledsch_now	LED frontali ora
+syn.ledsch_now_value	{mode}, livello {level}
+syn.ledsch_scope	Questo chip regola tutti i LED frontali; la luminosità dei LED dei dischi (sopra) si applica in più: se entrambe sono basse, i LED dei dischi risultano ancora più tenui.
+syn.ledsch_import	Importa da DSM
+syn.ledsch_import_text	Pianificazione o righe di synoinfo.conf
+syn.ledsch_import_help	Incolla la pianificazione di 168 caratteri, oppure le righe di un synoinfo.conf esportato da DSM con led_brightness_schedule e, se c'è, led_brightness_adjusted_level.
+syn.ledsch_found_schedule	Pianificazione: {summary}
+syn.ledsch_found_level	Livello ridotto: {level}
+syn.ledsch_level_outside	Il livello ridotto {level} è fuori da {lo}–{hi} su questo modello: non applicato.
+syn.ledsch_err_len	La pianificazione ha {n} caratteri: devono essere esattamente 168.
+syn.ledsch_err_char	La pianificazione non è valida: il carattere {pos} è «{ch}», sono ammessi solo 0, 1 e 2.
+syn.ledsch_level_unreadable	Il livello ridotto «{value}» non è un numero: non applicato.
+syn.ledsch_err_none	Niente di riconosciuto: incolla la pianificazione di 168 caratteri o la riga led_brightness_schedule.
+syn.ledsch_apply	Applica al modulo
+syn.beep_start	Segnale acustico all'avvio del NAS
+syn.beep_error	Segnale acustico in caso di errori hardware
+syn.beep_error_help	Guasto delle ventole e spegnimento termico.
+syn.beep_sent	Segnale acustico inviato
+syn.mute	Silenzia allarme
+syn.mute_help	I segnali di synohwd sono singoli; silenziare conferma le notifiche hardware aperte e ne ferma i promemoria.
+syn.muted	Allarme silenziato: {n} notifiche confermate
+syn.buttons	Pulsanti
+syn.power_button	Pulsante di accensione
+syn.power_button_help	Uno spegnimento pulito ferma attività e servizi in ordine.
+syn.pb_poweroff	Spegni in modo pulito
+syn.btn_log	Registra solo negli eventi
+syn.btn_ignore	Ignora
+syn.rb_rescue	Ripristino di rete (doppia pressione)
+syn.rescue_help	Premi il pulsante di reset due volte entro 10 secondi: la rete torna in DHCP con un firewall sicuro, così puoi raggiungere di nuovo il NAS dopo un'impostazione di rete sbagliata. Una sola pressione non fa nulla.
+syn.rescue_off	Senza ripristino di rete, un NAS con un'impostazione di rete sbagliata si raggiunge solo con un monitor o una console seriale.
+syn.power	Alimentazione e dischi
+syn.standby	Standby dei dischi dopo (minuti)
+syn.standby_help	Inattività prima che i dischi degli alloggiamenti si fermino; 0 = mai (0–330).
+syn.ac_recovery	Riavvia dopo un'interruzione di corrente
+syn.ac_recovery_help	Riaccendi automaticamente quando torna l'alimentazione.
+syn.wol	Wake-on-LAN
+syn.wol_help	Avvia il NAS con un magic packet su qualsiasi porta LAN.
+syn.macs	Indirizzi MAC per Wake-on-LAN
+syn.no_macs	Nessuna porta Ethernet trovata.
+syn.unsaved	Impostazioni hardware non salvate
+syn.ups_none	Il servizio UPS è attivo ma non segnala alcun UPS. Collega un UPS via USB e configuralo con Configurazione UPS qui sotto (lo applica synodeb).
+syn.ups_down	Nessuna risposta sulla porta NUT di questo NAS (127.0.0.1:3493). Configura l'UPS con Configurazione UPS qui sotto (lo applica synodeb).
+syn.ups_lb_always	La modalità sicura parte sempre quando l'UPS segnala batteria scarica (LB) o è critico (a batteria e batteria scarica), qualunque cosa avvenga prima. Il timer qui sotto aggiunge solo un innesco anticipato.
+syn.ups_timer	Entra in modalità sicura dopo un tempo a batteria
+syn.ups_timer_help	I servizi si fermano, i volumi vengono smontati e i dischi si fermano; il NAS riparte al ritorno della corrente.
+syn.ups_pre_timeout_help	Prima della modalità sicura, rynas e gli altri hook fermano il loro lavoro entro questo tempo (da 10 a 900 s).
+syn.ups_test_lb	Durante un test, la batteria scarica avvia comunque la modalità sicura.
+syn.ups_deep_text	L'UPS funziona a batteria fino a scaricarla quasi del tutto, anche per un'ora. Se la batteria arriva a batteria scarica (LB), il NAS entra in modalità sicura: avvialo solo con qualcuno presente per fermare il test.
+syn.upsw_too_old	Questa versione di synodeb non sa ancora configurare altri driver UPS: aggiorna synodeb per usare la procedura guidata.
+syn.upsw_find_text	Collega l'UPS a questo NAS. Il rilevamento elenca gli UPS su USB e prova uno alla volta i driver NUT adatti finché uno legge lo stato dell'UPS; poi synodeb configura NUT con il driver scelto. Per un UPS seriale o di rete, inserisci il driver a mano.
+syn.upsw_commands	synodeb configura NUT con:
+syn.upsn_too_old	Questa versione di synodeb non ha ancora il server UPS di rete: aggiorna synodeb alla 4.6 o successiva per configurarlo qui.
+syn.upsn_listen	Tutti gli indirizzi del NAS (scelta di synodeb)
+syn.upsn_allow_help	Un indirizzo IP o una sottorete per riga (192.168.1.20, 192.168.1.0/24, fd00::/64), almeno uno. Il firewall di synodeb (la sua tabella nftables) lascia arrivare alla porta 3493 solo questi host.
+syn.upsn_filter	Firewall di synodeb
+syn.upsn_filter_inactive	Il firewall di synodeb per la porta 3493 non è attivo: gli host ammessi non vengono applicati. Salva di nuovo le impostazioni o guarda il registro di synodeb-ups.
+syn.upsn_unreadable	Lo stato del server UPS di rete di synodeb non si può leggere (synodeb-ups netserver status non è riuscito o ha risposto in un formato sconosciuto): aggiorna rynas o guarda il registro.
+syn.upsn_primary	synodeb ha anche l'account {name} (upsmon primario), quello che gli altri NAS Synology si aspettano come client UPS. La sua password si imposta su questo NAS con `synodeb-ups passwd`.
+syn.upsn_manual	Gli host ammessi vengono da NETWORK_CLIENTS in /etc/synodeb/ups.conf (impostato a mano). Salvando qui si crea /etc/synodeb/ups-network.conf, che poi ha la precedenza.
+syn.upsn_outside	synodeb ha account impostati fuori da rynas ({names}): il prossimo salvataggio qui li rimuove.
+syn.upsn_role_monitor_help	Per domotica e pannelli: non può accedere né eseguire comandi. Leggere i valori da un host ammesso non richiede password.
+syn.upsn_user_help	Inizia con a-z, poi a-z, 0-9 e _, al massimo 32 caratteri (non monuser o admin).
+syn.upsn_user_bad	Usa da 1 a 32 caratteri: prima una lettera a-z, poi a-z, 0-9 e _ (monuser e admin sono di synodeb).
+syn.upsn_commands	synodeb lo applica con:
+syn.reset_on	Ripristina la rete
+syn.reset_off	Non ripristina la rete
+syn.reset_pending_on	Ripristinerà la rete dopo l'applicazione
+syn.reset_pending_off	Smetterà di ripristinare la rete dopo l'applicazione
+syn.reset_text	Premilo due volte entro 10 secondi: DHCP e link-local su ogni porta, le impostazioni precedenti conservate come revisione.
+syn.reset_owner	Si imposta in Hardware › Synology.
+syn.reset_owner_link	Apri Hardware

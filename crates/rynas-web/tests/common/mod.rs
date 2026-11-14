@@ -82,6 +82,10 @@ pub fn ui_dir() -> PathBuf {
     )
     .unwrap();
     std::fs::write(d.join("app-0123456789abcdef.js"), "console.log(1)").unwrap();
+    // translations as the build ships them (crates/rynas-ui/i18n-bundle.sh)
+    std::fs::create_dir_all(d.join("i18n/it")).unwrap();
+    std::fs::write(d.join("i18n/it.txt"), "nav.files\tFile\n").unwrap();
+    std::fs::write(d.join("i18n/it/files.txt"), "files.x\tx\n").unwrap();
     d
 }
 

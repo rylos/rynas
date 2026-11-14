@@ -66,6 +66,21 @@ pub fn is_ui_route(path: &str) -> bool {
     path == "/files" || path.starts_with("/files/")
 }
 
+/// Whether a path the UI folder does not have gets the SPA shell (`index.html`): routes of the
+/// interface do; missing assets (a dot in the last segment outside [`is_ui_route`]) and
+/// anything under the folders of plain files (`/i18n/`: a translation that is not there must
+/// not come back as a page with 200) are a 404.
+pub fn is_shell_path(path: &str) -> bool {
+    if path == "/index.html" {
+        return true;
+    }
+    if path.starts_with("/i18n/") || path == "/i18n" {
+        return false;
+    }
+    let last = path.rsplit('/').next().unwrap_or("");
+    !last.contains('.') || is_ui_route(path)
+}
+
 pub fn default_csp() -> String {
     CSP_TEMPLATE.replace("{scripts}", "")
 }
@@ -175,9 +190,7 @@ impl Shell {
 }
 
 async fn index(State(shell): State<Arc<Shell>>, uri: Uri, headers: HeaderMap) -> Response {
-    let path = uri.path();
-    let last = path.rsplit('/').next().unwrap_or("");
-    if path != "/index.html" && last.contains('.') && !is_ui_route(path) {
+    if !is_shell_path(uri.path()) {
         // a missing asset is a 404, not the SPA shell
         return (StatusCode::NOT_FOUND, "not found").into_response();
     }
@@ -288,6 +301,18 @@ mod tests {
         assert!(FILE_VIEW_CSP.contains("frame-ancestors 'self'"));
         assert!(!FILE_VIEW_CSP.contains("script-src"));
         assert!(default_csp().contains("img-src 'self' data: blob:"));
+    }
+
+    #[test]
+    fn missing_translations_are_not_the_shell() {
+        assert!(!is_shell_path("/i18n/de.txt"));
+        assert!(!is_shell_path("/i18n/de/files.txt"));
+        assert!(!is_shell_path("/i18n/de"));
+        assert!(!is_shell_path("/i18n"));
+        assert!(!is_shell_path("/rynas-ui-0123456789abcdef.js"));
+        assert!(is_shell_path("/storage/disks"));
+        assert!(is_shell_path("/files/photos.2024"));
+        assert!(is_shell_path("/index.html"));
     }
 
     #[test]

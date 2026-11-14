@@ -135,12 +135,12 @@ export const tabMethods = {
     el.innerHTML = "";
     for (const tab of this.tabs) {
       const p = tab.pane;
-      const name = this.pathName(p.path) || t("Cartelle condivise");
-      const label = tab.split ? `${name} | ${this.pathName(tab.panes[1 - tab.active].path) || "NAS"}` : name;
+      const name = this.pathName(p.path) || t("files.common.shared_folders");
+      const label = tab.split ? `${name} | ${this.pathName(tab.panes[1 - tab.active].path) || t("files.common.nas")}` : name;
       const b = h(`<div class="tab ${tab === this.current ? "active" : ""}" role="tab" title="${esc(p.path)}" draggable="true">
         <span class="tab-icon">${p.path === "/" ? shareGlyph("homes") : folderGlyphHTML(p.path, name, glyph({ kind: "d", name }))}</span>
         <span class="tab-label">${esc(label)}</span>
-        <button class="tab-close" title="${t("Chiudi scheda")} (Ctrl+W)">${svg("close")}</button></div>`);
+        <button class="tab-close" title="${t("files.common.close_tab")} (Ctrl+W)">${svg("close")}</button></div>`);
       b.onclick = (e) => {
         if (!e.target.closest(".tab-close")) this.switchTab(tab);
       };

@@ -1,0 +1,583 @@
+# rynas: Italian translation, File app. One key<TAB>text line per entry; see docs/i18n.md
+files.conns.login	Accesso
+files.editor.syntax_colors_not_available_reload	Colori della sintassi non disponibili: ricarica la pagina
+files.actions.editor_cannot_opened_reload_page	Impossibile aprire l'editor: ricarica la pagina
+files.conns.starting_folder	Cartella di partenza
+files.sidebar.server_shared_folders	Cartelle condivise del server
+files.conns.server_key_k	Chiave del server: {k}
+files.conns.public_key_add_ssh_authorized	Chiave pubblica da aggiungere a ~/.ssh/authorized_keys sul server
+files.sidebar.connection_deleted	Connessione eliminata
+files.conns.connection_renamed	Connessione rinominata
+files.conns.connecting	Connessione…
+files.sidebar.connections	Connessioni
+files.conns.connected_in_ms_ms_n	Connesso in {ms} ms: {n} elementi in {p}
+files.common.copy_address	Copia indirizzo
+files.conns.create_key	Crea la chiave
+files.conns.domain	Dominio
+files.sidebar.delete_connection	Elimina connessione
+files.sidebar.delete_connection_ask	Eliminare la connessione?
+files.sidebar.name_cannot_empty	Il nome non può essere vuoto
+files.conns.server_address	Indirizzo del server
+files.conns.edit_connection	Modifica connessione
+files.sidebar.edit	Modifica…
+files.conns.no_key_yet_create_copy	Nessuna chiave ancora: creala, poi copiala sul server.
+files.common.name_in_sidebar	Nome nella barra laterale
+files.common.new_connection	Nuova connessione
+files.conns.port	Porta
+files.conns.test	Prova
+files.sidebar.rename_connection	Rinomina connessione
+files.sidebar.rename	Rinomina…
+files.common.save	Salva
+files.sidebar.smb_sftp_servers_server_in	Server SMB o SFTP: \\server nel percorso, o il +
+files.pane.remote_connections_folder_filter_only	Sulle connessioni remote c'è solo il filtro della cartella
+files.conns.user	Utente
+files.conns.forget_changed	dimentica (è cambiata)
+files.conns.e_g_nas_nas_folder	es. nas, \\nas\cartella o sftp://utente@server
+files.conns.optional_e_g_company	facoltativo, es. AZIENDA
+files.conns.saved_leave_empty_keep	salvata: lasciala vuota per tenerla
+files.conns.empty_list_shared_folders	vuoto: l'elenco delle cartelle condivise
+files.conns.empty_user_home	vuoto: la home dell'utente
+files.sidebar.n_leaves_sidebar_saved_password	«{n}» sparisce dalla barra laterale, con la password salvata. I file sul server restano dove sono.
+files.sidebar.move_up	Sposta su
+files.sidebar.move_down	Sposta giù
+files.ui.ok	OK
+files.common.cancel	Annulla
+files.common.close	Chiudi
+files.settings.done	Fatto
+files.actions.create	Crea
+files.common.open	Apri
+files.transfers.details	Dettagli
+files.common.name	Nome
+files.actions.new_name	Nuovo nome
+files.common.invalid_name	Nome non valido
+files.transfers.of_total	di {total}
+files.common.nas	NAS
+files.sidebar.volume	Volume
+files.sidebar.personal	Personale
+files.sidebar.system	Sistema
+files.sidebar.home_u	Home ({u})
+files.sidebar.favorites	Preferiti
+files.common.shared_folders	Cartelle condivise
+files.sidebar.ctrl_d_adds_open_folder	Ctrl+D aggiunge la cartella aperta
+files.sidebar.encrypted_folder	Cartella cifrata
+files.sidebar.not_available	non disponibile
+files.common.space_analysis	Analisi spazio
+files.space.analyzing_p	Analisi di {p}…
+files.space.open_in_list	Apri nella lista
+files.space.incomplete_analysis_time_ran_out	analisi incompleta: tempo scaduto
+files.space.smaller_files	file più piccoli
+files.space.f_files_in_d_folders	{f} file in {d} cartelle, letti in {s} s
+files.space.count.smaller_items.one	{n} elemento più piccolo
+files.space.count.smaller_items.other	{n} elementi più piccoli
+files.space.n_unreadable	{n} non leggibili
+files.sidebar.hidden_on_network	Nascosta in Rete
+files.sidebar.hidden_badge	nasc.
+files.common.count.items.one	{n} elemento
+files.common.count.items.other	{n} elementi
+files.common.count.files.one	{n} file
+files.common.count.files.other	{n} file
+files.uploads.folder_hint	cartella
+files.common.count.folders.one	{n} cartella
+files.common.count.folders.other	{n} cartelle
+files.transfers.count.errors.one	{n} errore
+files.transfers.count.errors.other	{n} errori
+files.pane.count.selected.one	{n} selezionato
+files.pane.count.selected.other	{n} selezionati
+files.common.count.items_selected.one	{n} elemento selezionato
+files.common.count.items_selected.other	{n} elementi selezionati
+files.pane.n_items	{n} elementi
+files.common.n_more	e altri {n}
+files.format.just_now	adesso
+files.fmt.ago	{time} fa
+files.dur.d	{d} g
+files.dur.h	{h} h
+files.dur.m	{m} min
+files.dur.s	{s} s
+files.dur.hm	{h} h {m} min
+files.dur.ms	{m} min {s} s
+files.fmt.of	{part} di {total}
+files.common.folder	Cartella
+files.pane.folders	Cartelle
+files.common.file	File
+files.icons.link_folder	Collegamento a cartella
+files.icons.symbolic_link	Collegamento simbolico
+files.icons.link_out_shared_folder	Collegamento fuori dalla cartella condivisa
+files.icons.special_file	File speciale
+files.icons.executable	Eseguibile
+files.icons.image	Immagine
+files.common.video	Video
+files.common.audio	Audio
+files.icons.lossless_audio	Audio lossless
+files.icons.key_signature	Chiave o firma
+files.icons.document	Documento
+files.common.archive	Archivio
+files.icons.temporary_file	File temporaneo
+files.icons.compiled_file	File compilato
+files.icons.build_file	File di progetto
+files.icons.source_code	Codice sorgente
+files.pane.back	Indietro
+files.pane.forward	Avanti
+files.common.parent_folder	Cartella superiore
+files.common.refresh	Aggiorna
+files.pane.click_empty_space_type_path	Clic sullo spazio vuoto per scrivere un percorso
+files.pane.filter	Filtra
+files.pane.subfolders	sottocartelle
+files.pane.search_every_subfolder_words_in	Cerca in tutte le sottocartelle: parole contenute nel nome, oppure *.mkv
+files.pane.search_in_p	Cerca in {p}
+files.pane.all_folders	tutte le cartelle
+files.common.list	Elenco
+files.pane.grid	Griglia
+files.pane.hidden_files	File nascosti
+files.common.dual_pane	Doppio pannello
+files.common.info_panel	Pannello informazioni
+files.pane.new	Nuovo
+files.pane.more	Altro
+files.common.permissions	Permessi
+files.common.size	Dimensione
+files.common.modified	Modificato
+files.common.type	Tipo
+files.common.columns	Colonne
+files.pane.no_results	Nessun risultato
+files.pane.nothing_matches_filter	Nessun elemento corrisponde al filtro
+files.pane.empty_folder	Cartella vuota
+files.pane.n_hidden	{n} nascosti
+files.pane.searching	ricerca in corso…
+files.pane.n_items_scanned	{n} elementi esaminati
+files.pane.partial_results	risultati parziali
+files.common.f_free_t	{f} liberi di {t}
+files.pane.items	Elementi
+files.pane.free_space	Spazio libero
+files.pane.file_size	Dimensione file
+files.pane.compute_total_size	Calcola dimensione totale
+files.pane.compute	Calcola
+files.pane.contents	Contenuto
+files.pane.owner	Proprietario
+files.pane.path	Percorso
+files.common.download	Scarica
+files.common.preview	Anteprima
+files.common.copy_path	Copia percorso
+files.pane.target	Destinazione
+files.common.close_tab	Chiudi scheda
+files.common.new_tab	Nuova scheda
+files.main.hidden_files_shown	File nascosti visibili
+files.main.hidden_files_not_shown	File nascosti non visibili
+files.common.open_in_new_tab	Apri in una nuova scheda
+files.common.open_in_other_pane	Apri nell'altro pannello
+files.sidebar.open_recycle_bin	Apri il cestino
+files.common.remove_favorites	Togli dai preferiti
+files.common.add_favorites	Aggiungi ai preferiti
+files.sidebar.removed_favorites	Tolta dai preferiti
+files.sidebar.added_favorites	Aggiunta ai preferiti
+files.actions.n_ready_move_paste_ctrl	{n} pronti da spostare: incolla con Ctrl+V
+files.actions.n_ready_copy_paste_ctrl	{n} pronti da copiare: incolla con Ctrl+V
+files.pane.n_move	{n} da spostare
+files.pane.n_copy	{n} da copiare
+files.actions.items_already_in_folder	Gli elementi sono già in questa cartella
+files.actions.folder_cannot_go_inside_itself	Una cartella non può finire dentro sé stessa
+files.actions.move_n	Sposta {n} in…
+files.actions.copy_n	Copia {n} in…
+files.actions.move_n_verification	Sposta con verifica {n} in…
+files.actions.copy_n_verification	Copia con verifica {n} in…
+files.menus.copy_verification	Copia con verifica in…
+files.menus.move_verification	Sposta con verifica in…
+files.common.paste_verification	Incolla con verifica
+files.menus.paste_verification_move_n	Incolla con verifica (sposta {n})
+files.menus.paste_verification_n	Incolla con verifica ({n})
+files.dnd.copy_here_verification	Copia qui con verifica
+files.dnd.move_here_verification	Sposta qui con verifica
+files.transfers.copy_complete_verified	Copia completata e verificata
+files.transfers.move_complete_verified	Spostamento completato e verificato
+files.settings.copy_move_verification	Copia / sposta con verifica
+files.common.move_here	Sposta qui
+files.common.copy_here	Copia qui
+files.actions.open_dual_pane_f3	Apri il doppio pannello con F3
+files.actions.move_recycle_bin	Spostare nel cestino?
+files.actions.delete_permanently	Eliminare definitivamente?
+files.common.empty_recycle_bin	Svuota il cestino
+files.actions.empty_recycle_bin	Svuotare il cestino?
+files.actions.recycle_bin_already_empty	Il cestino è già vuoto
+files.actions.n_deleted_permanently_cannot_restored	{n} verranno eliminati definitivamente: non si possono recuperare.
+files.actions.recycle_bin_shared_folder_off	Il cestino di questa cartella condivisa è disattivato.
+files.common.move_recycle_bin	Sposta nel cestino
+files.common.delete	Elimina
+files.common.delete_permanently	Elimina definitivamente
+files.common.rename	Rinomina
+files.common.new_folder	Nuova cartella
+files.actions.computing_sizes	Calcolo delle dimensioni…
+files.actions.open_shared_folder_first	Apri prima una cartella condivisa
+files.menus.upload_files	Carica file…
+files.menus.upload_folder	Carica cartella…
+files.settings.upload_files	Carica file
+files.menus.paste_move_n	Incolla (sposta {n})
+files.menus.paste_n	Incolla ({n})
+files.common.select_all	Seleziona tutto
+files.menus.hide_hidden_files	Nascondi i file nascosti
+files.common.show_hidden_files	Mostra i file nascosti
+files.menus.compute_folder_sizes	Calcola dimensione delle cartelle
+files.menus.copy_folder_path	Copia percorso della cartella
+files.common.copy	Copia
+files.common.cut	Taglia
+files.menus.paste	Incolla dentro
+files.menus.copy	Copia in…
+files.menus.move	Sposta in…
+files.menus.choose_folder	Scegli cartella…
+files.menus.compute_size	Calcola dimensione
+files.menus.copy_network_path_nas	Copia percorso di rete (\\NAS)
+files.menus.copy_smb_address	Copia indirizzo smb://
+files.menus.properties	Proprietà
+files.common.invert_selection	Inverti selezione
+files.common.paste	Incolla
+files.menus.sort	Ordina per
+files.common.folders_first	Cartelle prima
+files.common.sidebar	Barra laterale
+files.menus.keyboard_shortcuts	Scorciatoie da tastiera
+files.common.settings	Impostazioni
+files.ui.copied_clipboard	Copiato negli appunti
+files.ui.no_subfolders	Nessuna sottocartella
+files.common.loading	Caricamento…
+files.transfers.op.copy	Copia
+files.transfers.copying	Copia in corso
+files.transfers.copy_complete	Copia completata
+files.transfers.moving	Spostamento in corso
+files.transfers.move_complete	Spostamento completato
+files.transfers.move	Spostamento
+files.transfers.deleting	Eliminazione in corso
+files.transfers.deletion_complete	Eliminazione completata
+files.transfers.deletion	Eliminazione
+files.transfers.uploading	Caricamento in corso
+files.transfers.upload_complete	Caricamento completato
+files.transfers.upload	Caricamento
+files.transfers.state.queued	in coda
+files.transfers.state.running	in corso
+files.transfers.state.paused	in pausa
+files.transfers.state.conflict	da decidere
+files.common.state.done	completato
+files.common.state.failed	non riuscito
+files.common.state.canceled	annullato
+files.transfers.scan	Analisi
+files.transfers.phase.verify	Verifica
+files.transfers.done	Fine
+files.transfers.phase.count	Conteggio
+files.transfers.sending	Trasmissione
+files.transfers.op_n	{op} di {n}
+files.transfers.op_x	{op} di «{x}»
+files.transfers.deleted_permanently	eliminazione definitiva
+files.transfers.recycle_bin	Cestino
+files.transfers.computer	questo computer
+files.common.transfers	Trasferimenti
+files.transfers.transfers_n_running_p	Trasferimenti: {n} attivi, {p}%
+files.transfers.no_transfers	Nessun trasferimento
+files.transfers.minimize_keeps_running	Riduci (continua in background)
+files.transfers.legend_speed	velocità
+files.transfers.legend_average	media
+files.transfers.limit	Limite
+files.transfers.none	nessuno
+files.transfers.start_now	Avvia ora
+files.transfers.open_destination	Apri destinazione
+files.transfers.scanning_f_files_b_found	Analisi: {f} file, {b} trovati…
+files.transfers.b_files	{a} di {b} file
+files.transfers.waiting_another_transfer_finish	In attesa che finisca un altro trasferimento
+files.transfers.paused	In pausa
+files.transfers.waiting_choice	In attesa di una tua scelta
+files.transfers.counting_files_folders	Conteggio di file e cartelle…
+files.transfers.n_without_copying_data_reflink	{n} senza copiare dati (reflink o rinomina)
+files.transfers.btrfs_reflink	Reflink btrfs
+files.transfers.data_copy	Copia dati
+files.transfers.speed	Velocità
+files.transfers.average	Media
+files.transfers.peak	Picco
+files.transfers.files_per_second	File al secondo
+files.transfers.elapsed	Trascorso
+files.transfers.remaining	Rimanente
+files.transfers.expected_end	Fine prevista
+files.transfers.method	Metodo
+files.transfers.estimating	calcolo…
+files.transfers.n_s	{n}/s
+files.transfers.method_verify	verifica
+files.transfers.writing_disks	Scrittura sui dischi
+files.transfers.in_d	in {d}
+files.transfers.average_s	media {s}
+files.transfers.n_skipped	{n} saltati
+files.transfers.pause	Pausa
+files.transfers.resume	Riprendi
+files.common.item_name_already_exists	Esiste già un elemento con questo nome
+files.transfers.newer	più recente
+files.transfers.incoming	Da copiare
+files.transfers.in_destination	Nella destinazione
+files.common.overwrite	Sovrascrivi
+files.common.skip	Salta
+files.common.keep_both	Mantieni entrambi
+files.common.overwrite_newer	Sovrascrivi se più recente
+files.transfers.apply_all	Applica a tutti
+files.transfers.keep_both_saves_new_one	«Mantieni entrambi» salva il nuovo come {n}
+files.transfers.axis_progress	asse: avanzamento
+files.transfers.waiting_first_data	in attesa dei primi dati…
+files.transfers.chart_no_data	nessun dato
+files.transfers.chart_no_data_for	nessun dato da {n} s
+files.transfers.no_data_for	Nessun dato da {n} s
+files.transfers.canceling	Annullamento in corso…
+files.transfers.b_verified	verificati {a} di {b}
+files.transfers.axis_time	asse: tempo
+files.uploads.some_items_already_exist	Alcuni elementi esistono già
+files.uploads.destination_folder_already_n_items	Nella cartella di destinazione ci sono già {n} elementi con lo stesso nome:
+files.uploads.already_exists	esiste già
+files.uploads.connection_lost	connessione interrotta
+files.preview.open_in_new_browser_tab	Apri in una nuova scheda del browser
+files.preview.browser_cannot_play_format	Il browser non sa riprodurre questo formato.
+files.preview.no_preview_kind_file	Nessuna anteprima per questo tipo di file
+files.preview.first_512_kib_s_shown	(mostrati i primi 512 KiB di {s})
+files.settings.appearance	Aspetto
+files.settings.behavior	Comportamento
+files.settings.shortcuts	Scorciatoie
+files.settings.reset_defaults	Reimposta i predefiniti
+files.settings.file_icons	Icone dei file
+files.settings.eza_icons_nerd_font_type	Le icone di eza (Nerd Font), per tipo e per nome
+files.settings.name_colors	Colori dei nomi
+files.settings.eza_colors_blue_folders_purple	I colori di eza: cartelle blu, immagini viola, archivi rossi…
+files.settings.system_folders_in_gray	Cartelle di sistema in grigio
+files.settings.recycle_snapshot_recycle_bin_lost	#recycle, #snapshot, $RECYCLE.BIN, lost+found… Un colore dato a mano resta
+files.settings.ll_style_columns	Colonne in stile ll
+files.settings.permissions_sizes_dates_colored_like	Permessi, dimensioni e date colorati come in eza -l
+files.settings.text_size	Dimensione del testo
+files.settings.small	Piccola
+files.common.normal	Normale
+files.settings.large	Grande
+files.settings.row_density	Densità delle righe
+files.settings.compact	Compatta
+files.settings.like_eza_group_directories_first	Come eza --group-directories-first
+files.settings.those_starting_dot_ctrl_h	Quelli che iniziano con un punto (Ctrl+H)
+files.settings.binary_sizes	Dimensioni binarie
+files.settings.kib_mib_gib_1024_instead	KiB, MiB, GiB (1024) invece di kB, MB, GB (1000)
+files.settings.relative_dates	Date relative
+files.settings.relative_dates_hint	«3 h fa» invece di «29 ott 21:45»
+files.settings.permissions_column	Colonna Permessi
+files.settings.size_column	Colonna Dimensione
+files.settings.modified_column	Colonna Modificato
+files.settings.type_column	Colonna Tipo
+files.settings.open_one_click	Apri con un clic
+files.settings.otherwise_double_click	Altrimenti con il doppio clic
+files.settings.vim_keys	Tasti Vim
+files.settings.j_k_move_h_go	j/k per scorrere, h per salire, l per aprire, gg e G
+files.settings.confirm_before_deleting	Conferma prima di eliminare
+files.settings.item_already_exists	Se un elemento esiste già
+files.settings.starting_choice_copies_moves_uploads	La scelta di partenza per copie, spostamenti e caricamenti
+files.settings.ask	Chiedi
+files.common.speed_limit	Limite di velocità
+files.settings.can_changed_during_transfer	Si cambia anche durante il trasferimento
+files.settings.none	Nessuno
+files.settings.open_dialog_on_start	Apri il dialogo all'avvio
+files.settings.otherwise_transfer_starts_in_background	Altrimenti il trasferimento parte in background
+files.settings.browser_notification_end	Notifica del browser alla fine
+files.settings.page_not_in_front	Quando la pagina non è in primo piano
+files.key.ctrl	Ctrl
+files.key.backspace	Backspace
+files.key.insert	Insert
+files.key.tab	Tab
+files.key.shift	Shift
+files.key.alt	Alt
+files.key.enter	Invio
+files.key.space	Spazio
+files.key.del	Canc
+files.key.pgdn	PgGiù
+files.key.pgup	PgSu
+files.key.letters	Lettere
+files.settings.next_tab	Scheda successiva
+files.settings.previous_tab	Scheda precedente
+files.settings.go_tab	Vai alla scheda
+files.settings.reopen_closed_tab	Riapri scheda chiusa
+files.settings.other_pane_dual_pane	Altro pannello (con il doppio pannello)
+files.settings.copy_move_other_pane	Copia / sposta nell'altro pannello
+files.settings.back_forward	Indietro / avanti
+files.settings.quick_look	Anteprima rapida
+files.settings.show_hide_hidden_files	Mostra o nascondi i file nascosti
+files.settings.type_path	Scrivi un percorso
+files.settings.fuzzy_filter_folder	Filtro fuzzy della cartella
+files.settings.search_subfolders	Cerca nelle sottocartelle
+files.settings.copy_cut_paste	Copia / taglia / incolla
+files.settings.select_move_on	Seleziona e vai avanti
+files.settings.jump_name_starting_like	Salta al nome che inizia così
+files.settings.vim_keys_on	Tasti Vim (se attivi)
+files.actions.download_started_zip_archive	Download come archivio .zip avviato
+files.actions.create_archive	Crea un archivio
+files.actions.n_archive_in_same_folder	{n} in un archivio, nella stessa cartella.
+files.actions.format	Formato
+files.actions.zip_opens_anywhere	zip (si apre ovunque)
+files.actions.tar_zst_faster_smaller_keeps	tar.zst (più veloce e compatto, conserva permessi e collegamenti)
+files.actions.archive_name	Nome dell'archivio
+files.common.compression	Compressione
+files.actions.fast	Veloce
+files.actions.none_store_only_fastest	Nessuna (solo archivio, il più veloce)
+files.actions.best_slow	Massima (lenta)
+files.actions.photos_videos_music_archives_stored	Foto, video, musica e archivi vengono solo archiviati: comprimerli di nuovo non fa risparmiare spazio.
+files.actions.photos_videos_music_archives_not	Foto, video, musica e archivi non si riducono, ma zstd li attraversa senza rallentare.
+files.actions.compress	Comprimi
+files.actions.extract_x	Estrai «{x}» in…
+files.common.extract_here	Estrai qui
+files.menus.extract_x	Estrai in «{x}»
+files.menus.extract	Estrai in…
+files.menus.compress	Comprimi…
+files.menus.download_zip	Scarica (.zip)
+files.transfers.compressing	Compressione in corso
+files.transfers.archive_created	Archivio creato
+files.transfers.extracting	Estrazione in corso
+files.transfers.extraction_complete	Estrazione completata
+files.transfers.extraction	Estrazione
+files.transfers.zip_deflate	Zip (deflate)
+files.transfers.zip_no_compression	Zip senza compressione
+files.transfers.archive_password_protected	L'archivio è protetto da password
+files.common.password	Password
+files.transfers.extract	Estrai
+files.preview.zoom_out	Riduci
+files.preview.zoom_in	Ingrandisci
+files.preview.fit_window	Adatta alla finestra
+files.pane.total_size	Dimensione totale
+files.preview.open_folder	Apri come cartella
+files.pane.archive_read_only	Archivio · sola lettura
+files.actions.inside_archive_only_single_files	Dentro un archivio si scaricano solo file singoli: per il resto usa «Copia in…»
+files.archive.archives_open_read_only_change	Gli archivi si aprono in sola lettura: per cambiarli, estraili
+files.common.retry	Riprova
+files.preview.s_unpacked	{s} estratti
+files.settings.on_start_open	All'avvio apri
+files.settings.otherwise_last_ones_used_apply	Altrimenti valgono gli ultimi usati, per tutte
+files.settings.current_folder	Cartella corrente
+files.settings.chosen_folder	Cartella scelta
+files.settings.ctrl_t_tab_bar	Ctrl+T e il + della barra delle schede
+files.settings.highlight_today_dates	Evidenzia le date di oggi
+files.settings.hidden_files_last	File nascosti in fondo
+files.settings.the_chosen_folder	La cartella scelta
+files.settings.last_tabs	Le ultime schede
+files.settings.in_modified_column	Nella colonna Modificato
+files.settings.new_tabs_open_in	Nuove schede in
+files.settings.shown_after_others	Quando sono visibili, dopo gli altri
+files.settings.remember_view_sort_each_folder	Ricorda vista e ordinamento per cartella
+files.settings.choose	Scegli…
+files.settings.use_folder	Usa questa cartella
+files.sidebar.default_order	Ordine predefinito
+files.settings.volume_names	Nomi dei volumi
+files.settings.show_favorites	Mostra i preferiti
+files.settings.favorites_section_sidebar_stay_saved	La sezione Preferiti della barra laterale; restano salvati anche se nascosti
+files.conns.load_file	Carica da file…
+files.conns.loaded_k	Caricata: {k}
+files.conns.private_key_openssh_pem	Chiave privata (OpenSSH o PEM)
+files.conns.my_key	La mia chiave
+files.conns.not_private_key_file_too	Non è una chiave privata: il file è troppo grande
+files.conns.passphrase_key_one	passphrase, se la chiave ne ha una
+files.conns.empty_keep_one_loaded	vuota: tieni quella caricata
+files.pane.change_icon	Cambia icona
+files.iconpick.search_icon	Cerca un'icona…
+files.sidebar.icon	Icona…
+files.iconpick.automatic_icon	Icona automatica
+files.iconpick.no_icon_found	Nessuna icona trovata
+files.iconpick.default	Predefinito
+files.iconpick.folder_only	Solo questa cartella
+files.iconpick.every_n	Tutte le «{n}»
+files.iconpick.red	Rosso
+files.iconpick.yellow	Giallo
+files.iconpick.green	Verde
+files.iconpick.cyan	Azzurro
+files.iconpick.pink	Rosa
+files.iconpick.white	Bianco
+files.iconpick.gray	Grigio
+files.sidebar.transfers_running_on_s_wait	Ci sono trasferimenti in corso su «{s}»: aspetta che finiscano o annullali
+files.sidebar.d_ejected_can_unplugged	«{d}» espulso: si può scollegare
+files.sidebar.eject_d	Espellere «{d}»?
+files.common.eject	Espelli
+files.sidebar.drive_s_not_appear_connected	Il dispositivo di «{s}» non risulta collegato
+files.sidebar.drive_shared_folders_not_available	Le cartelle condivise del dispositivo non saranno disponibili finché non lo ricolleghi.
+files.editor.find_prompt	Cerca: 
+files.editor.ctrl_g_editor_keys	Ctrl+G: i tasti dell'editor
+files.editor.e_overwrite_y_n	{e}. Sovrascriverlo? (s, n)
+files.common.edit	Modifica
+files.editor.not_saved	Non salvato
+files.editor.q_not_found	«{q}» non trovato
+files.editor.save_changes_n_before_closing	Salvare le modifiche a «{n}» prima di chiudere? (s, n, esc)
+files.editor.saving	Salvataggio…
+files.editor.saved_path	Salvato {path}
+files.common.read_only	sola lettura
+files.editor.read_only_don_t_permission	Sola lettura: non hai il permesso di scrivere questo file
+files.editor.go_line_prompt	Vai alla riga: 
+files.editor.word_wrap	A capo automatico
+files.editor.find	Cerca
+files.editor.copy_line	Copia la riga
+files.editor.redo	Ripeti
+files.editor.previous_match	Risultato precedente
+files.editor.next_match	Risultato successivo
+files.editor.keys	Tasti
+files.editor.go_line	Vai alla riga
+files.editor.copy_cut_no_selection_line	Copia, taglia (senza selezione: la riga)
+files.editor.duplicate_line	Duplica la riga
+files.editor.indent_unindent	Rientra, togli rientro
+files.editor.next_previous_match	Risultato successivo / precedente
+files.editor.move_line	Sposta la riga
+files.editor.cut_line	Taglia la riga
+files.health.open_in_separate_window	Apri in una finestra separata
+files.sidebar.description	Descrizione…
+files.common.permissions_menu	Permessi…
+files.api.error_n	errore {n}
+files.health.drop_upload	Rilascia per caricare in
+files.health.clear_finished	Pulisci completati
+files.health.places	Posizioni
+files.pane.dimensions	Dimensioni
+files.pane.duration	Durata
+files.pane.subtitles	Sottotitoli
+files.pane.bitrate	Bitrate
+files.pane.camera	Fotocamera
+files.pane.lens	Obiettivo
+files.pane.exposure	Scatto
+files.pane.date_taken	Data di ripresa
+files.pane.location	Posizione
+files.pane.n_tracks	{n} tracce
+files.settings.list_grid_columns	Elenco / griglia / colonne
+files.actions.n_go_shared_folder_recycle	{n} finiranno nel cestino della cartella condivisa, da dove si possono recuperare.
+files.common.nas_unreachable	NAS non raggiungibile
+files.conns.rynas_key	Chiave di rynas
+files.health.browser_blocked_window_allow_pop	Il browser ha bloccato la finestra: consenti le finestre popup per questo sito
+files.health.transfer_service_not_running_copies	Il servizio dei trasferimenti non è attivo: copie, spostamenti ed eliminazioni non possono partire.
+files.health.no_access_files_ask_administrator	Non hai accesso a File: chiedi a un amministratore.
+files.health.file_service_not_installed_on	Il servizio dei file non è installato su questo sistema.
+files.health.files_cannot_reach_nas	File non riesce a comunicare con il NAS.
+files.health.session_expired_sign_in_again	Sessione scaduta: accedi di nuovo per continuare.
+files.uploads.session_expired	Sessione scaduta
+files.health.tabs	Schede
+files.settings.files_settings	Impostazioni di File
+files.sidebar.cannot_eject_d_e_may	Impossibile espellere «{d}» ({e}): forse è ancora in uso
+files.err.session_expired_sign_in_again	Sessione scaduta: accedi di nuovo
+files.err.session_changed_in_another_tab	La sessione è cambiata in un'altra scheda: ricarica la pagina
+files.err.not_allowed	Non hai il permesso per questa operazione
+files.transfers.permission_denied	Permesso negato
+files.transfers.check_shared_folder_permissions	controlla i permessi della cartella condivisa
+files.err.not_found_may_been_moved	Non trovato: forse è stato spostato o eliminato
+files.err.file_changed_in_meantime	Il file è cambiato nel frattempo
+files.err.busy_try_again_shortly	Occupato: riprova tra poco
+files.err.invalid_value	Valore non valido
+files.err.invalid_request	Richiesta non valida
+files.err.too_large	Troppo grande
+files.err.volume_full	Spazio esaurito sul volume
+files.err.quota_exceeded	Quota superata
+files.err.shared_folder_cannot_moved_renamed	Una cartella condivisa non si può spostare, rinominare o eliminare da qui
+files.err.link_leads_out_shared_folder	Questo collegamento porta fuori dalla cartella condivisa: non viene seguito
+files.err.archive_needs_password	Serve la password dell'archivio
+files.err.program_needed_missing_on_nas	Manca il programma necessario sul NAS
+files.err.remote_server_refused_login	Accesso al server remoto rifiutato
+files.err.remote_server_key_changed	La chiave del server remoto è cambiata
+files.err.format_not_supported	Formato non supportato
+files.err.not_available_on_system	Non disponibile su questo sistema
+files.err.too_many_requests_try_again	Troppe richieste: riprova tra poco
+files.err.not_available_here	Non disponibile qui
+files.err.remote_connection_unreachable	Connessione remota non raggiungibile
+files.err.file_service_not_answer	Il servizio dei file non risponde
+files.err.file_service_did_not_answer	Il servizio dei file non ha risposto in tempo
+files.err.internal_error_on_nas	Errore interno del NAS
+files.err.read_only	Sola lettura
+files.sidebar.apps	App
+files.common.app_data	Dati delle app
+files.sidebar.n_folders	{n} cartelle
+files.common.backups	Backups
+files.backups.root	radice
+files.sidebar.overlaps_backup_folder_pc_pc	Si sovrappone alla cartella dei backup del PC {pc}: in sola lettura finché i backup non hanno una cartella propria
+files.backups.backups_read_only_change_file	I backup sono in sola lettura: per cambiare un file, copialo in una cartella condivisa
+files.appdata.s_may_need_restart_see	L'app {s} potrebbe dover ripartire per vedere la modifica
+files.appdata.restart	Riavvia
+files.appdata.restarting_s	Riavvio di {s} avviato
+files.transfers.interrupted_restart_nas	Interrotto da un riavvio del NAS
+files.transfers.transfer_speed_chart	Grafico della velocità del trasferimento

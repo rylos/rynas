@@ -13,6 +13,8 @@ mod docker;
 mod files_check;
 mod form;
 mod i18n;
+#[cfg(test)]
+mod i18n_check;
 mod icons;
 mod json;
 mod layout;

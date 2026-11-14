@@ -224,13 +224,17 @@ first, reviewed, then used.
 ### 2.3 Text and formatting
 - G7 MUST: no user-visible literal in views; everything through `t`/`tr`/`tf`. Product names and
   key caps (`rynas`, `Ctrl K`, `Esc`) are the only exceptions.
-- G8 MUST: every key has an explicit Italian text (the dictionary macro requires both), and
-  no case transformation of translated text (`to_lowercase()` on `t(..)`): add a separate key.
+- G8 MUST: every key has its English source text in the code (`dict!` tables, the File app's
+  `js/lang/en.js`) and a text in every language of the table (`assets/i18n/languages.txt`), in that
+  language's translation file of the same part (`assets/i18n/<code>/<part>.txt`, docs/i18n.md); the
+  tests `translations_are_complete` and `files_translations_are_complete` list missing and stale
+  keys, placeholders that differ and the plural forms each language needs. No case transformation
+  of translated text (`to_lowercase()` on `t(..)`): add a separate key.
 - G8b MUST: one key per text and one prefix per area. Keys are `<area>.<thing>` (`sto.scrub`,
   `net.dns`, `shares.folder`); words every area uses are bare (`cancel`, `back`, `save`, `edit`,
   `edit_named`, `run_now`, `not_set`) or in a shared group (`col.*` column headers, `health.*`,
   `pending.*`, `task.st.*`, `task.<type>` task names). Before adding a key, search the dictionary for
-  the text. The test `no_duplicate_texts` fails on two keys with the same English and Italian text
+  the text. The test `no_duplicate_texts` fails on two keys with the same text in every language
   of more than one word.
 - G9 MUST: numbers, bytes, rates, percentages, temperatures, durations and **dates** only through
   `i18n.rs` helpers (`num`, `count`, `bytes`, `bytes_si`, `rate`, `bitrate`, `pct`, `celsius`,
@@ -437,12 +441,13 @@ data at 1 MiB): the low KiB is reached only by a stack overflow. JSON goes throu
 only (never `serde_json::from_str` in the UI): one reader frame for every type, and structs read
 as objects only (`json::Objects`), which drops the array path serde derives for each struct.
 
-Only the English texts are compiled into the wasm (2026-11-07): the Italian column of the
-dictionaries is `crates/rynas-ui/assets/i18n/it.txt` (served as `/i18n/it.txt`, `key<TAB>text` lines,
-about 44 KiB brotli; a key the file lacks stays English), written by the test `i18n::tests::italian_file_is_current` (after a text change it fails
-once and rewrites the file: commit it). When the language is Italian, `index.html` starts the
-download while the wasm loads; the boot screen waits for it at most 1.2 s, then the interface
-shows in English and switches to Italian when the file arrives.
+Only the English texts are compiled into the wasm (2026-11-07): every other language is its
+translation files `crates/rynas-ui/assets/i18n/<code>/<part>.txt` (`key<TAB>text` lines, docs/i18n.md;
+a key a file lacks stays English). The build (`i18n-bundle.sh`) joins the parts the wasm reads
+(core and modules) into `/i18n/<code>.txt`, about 85 KiB brotli for Italian; the File app fetches its own
+`/i18n/<code>/files.txt` when it opens. `index.html` starts the download of the language used last
+time (`rynas.lang.texts`) while the wasm loads; the boot screen waits for it at most 1.2 s, then the
+interface shows in English and switches when the file arrives.
 
 ### 3.2 Rules
 - S1 MUST: live data through SSE; polling only for data without an event source, ≥ 5 s, paused when
@@ -556,4 +561,5 @@ for c in rynas-files-worker rynas-backup-worker rynas-agent; do
   cargo test --manifest-path crates/$c/Cargo.toml || break
 done
 ```
-`italian_file_is_current` (rynas-ui) rewrites `assets/i18n/it.txt` when it is stale: run it twice.
+A new or changed English text needs its line in each translation file (`assets/i18n/<code>/`):
+`translations_are_complete` and `files_translations_are_complete` (rynas-ui) list what is missing.

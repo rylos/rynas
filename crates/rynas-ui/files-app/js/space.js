@@ -19,17 +19,17 @@ const MIN_ANGLE = 0.008;
  */
 export function spaceAnalysis(path, onOpen) {
   const dlg = dialog(
-    `<div class="dlg-head"><div class="dlg-icon">${svg("pie")}</div><h2>${t("Analisi spazio")}</h2>
-       <button class="icon-btn sp-close" title="${t("Chiudi")}">${svg("close")}</button></div>
+    `<div class="dlg-head"><div class="dlg-icon">${svg("pie")}</div><h2>${t("files.common.space_analysis")}</h2>
+       <button class="icon-btn sp-close" title="${t("files.common.close")}">${svg("close")}</button></div>
      <div class="sp-crumbs"></div>
      <div class="sp-main">
-       <div class="sp-left"><div class="sp-chart"><div class="sp-wait"><div class="loading-bar"></div><span>${t("Analisi di {p}…", { p: esc(path) })}</span></div></div>
+       <div class="sp-left"><div class="sp-chart"><div class="sp-wait"><div class="loading-bar"></div><span>${t("files.space.analyzing_p", { p: esc(path) })}</span></div></div>
          <div class="sp-label"></div></div>
        <div class="sp-side"><div class="sp-list"></div></div>
      </div>
      <div class="dlg-foot"><span class="left hint sp-stats"></span>
-       <button class="btn sp-refresh">${svg("refresh")}<span>${t("Aggiorna")}</span></button>
-       <button class="btn primary sp-open">${svg("forward")}<span>${t("Apri nella lista")}</span></button></div>`,
+       <button class="btn sp-refresh">${svg("refresh")}<span>${t("files.common.refresh")}</span></button>
+       <button class="btn primary sp-open">${svg("forward")}<span>${t("files.space.open_in_list")}</span></button></div>`,
     { cls: "space" },
   );
   const chart = dlg.querySelector(".sp-chart");
@@ -54,7 +54,7 @@ export function spaceAnalysis(path, onOpen) {
     reading?.abort();
     const mine = (reading = new AbortController());
     label.textContent = "";
-    chart.innerHTML = `<div class="sp-wait"><div class="loading-bar"></div><span>${t("Analisi di {p}…", { p: esc(target) })}</span></div>`;
+    chart.innerHTML = `<div class="sp-wait"><div class="loading-bar"></div><span>${t("files.space.analyzing_p", { p: esc(target) })}</span></div>`;
     stats.textContent = "";
     try {
       const answer = await call("space", { params: { path: target }, signal: mine.signal });
@@ -122,9 +122,9 @@ export function spaceAnalysis(path, onOpen) {
     const centre = (node) => {
       const n = node || view;
       // the name below the chart, where a long one fits; the centre keeps the numbers
-      label.textContent = label.title = n.k === "o" ? t("file più piccoli") : n.n || baseName(here()) || "/";
+      label.textContent = label.title = n.k === "o" ? t("files.space.smaller_files") : n.n || baseName(here()) || "/";
       s.querySelector(".sp-c1").textContent = size(n.s);
-      s.querySelector(".sp-c2").textContent = node && node !== view ? pct(n.s / view.s) : n.f ? count(n.f, "file", "file", int) : "";
+      s.querySelector(".sp-c2").textContent = node && node !== view ? pct(n.s / view.s) : n.f ? count(n.f, "files.common.count.files", int) : "";
     };
     centre();
     s.onmousemove = (e) => {
@@ -153,9 +153,9 @@ export function spaceAnalysis(path, onOpen) {
     drawList();
     const sec = Math.max(data.ms, 100) / 1000;
     stats.innerHTML =
-      t("{f} file in {d} cartelle, letti in {s} s", { f: int(data.root.f), d: int(data.dirs), s: num(sec, 1) }) +
-      (data.partial ? ` · <span class="warn">${t("analisi incompleta: tempo scaduto")}</span>` : "") +
-      (data.unreadable ? ` · ${t("{n} non leggibili", { n: int(data.unreadable) })}` : "");
+      t("files.space.f_files_in_d_folders", { f: int(data.root.f), d: int(data.dirs), s: num(sec, 1) }) +
+      (data.partial ? ` · <span class="warn">${t("files.space.incomplete_analysis_time_ran_out")}</span>` : "") +
+      (data.unreadable ? ` · ${t("files.space.n_unreadable", { n: int(data.unreadable) })}` : "");
   }
 
   function up() {
@@ -192,7 +192,7 @@ export function spaceAnalysis(path, onOpen) {
       .map((c, i) => {
         const entry = { name: c.n, kind: c.k === "d" ? "d" : "f", mode: 0 };
         const icon = c.k === "o" ? `<i class="gi">${svg("more")}</i>` : `<i class="gi ${colorClass(entry)}">${glyph(entry)}</i>`;
-        const name = c.k === "o" ? count(c.f, "elemento più piccolo", "elementi più piccoli", int) : esc(c.n);
+        const name = c.k === "o" ? count(c.f, "files.space.count.smaller_items", int) : esc(c.n);
         const hue = c.k === "o" ? "var(--surface-3)" : `var(${HUES[i % HUES.length]})`;
         return `<div class="sp-row ${c.k === "d" ? "dir" : ""}" data-i="${i}" data-name="${esc(c.n)}">${icon}<span class="nm" title="${esc(c.n)}">${name}</span><span class="sz">${size(c.s)}</span>
           <span class="bar"><i style="width:${((c.s / (view.s || 1)) * 100).toFixed(1)}%;background:${hue}"></i></span></div>`;

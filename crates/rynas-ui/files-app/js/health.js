@@ -16,14 +16,14 @@ export const healthMethods = {
     if ($("#pop-out") || new URLSearchParams(location.search).has("window")) return;
     const b = h(`<button class="icon-btn" id="pop-out"></button>`);
     b.innerHTML = svg("popout");
-    b.title = t("Apri in una finestra separata");
+    b.title = t("files.health.open_in_separate_window");
     b.setAttribute("aria-label", b.title);
     b.onclick = () => {
       const w = Math.min(screen.availWidth, 1400);
       const ht = Math.min(screen.availHeight, 900);
       const path = this.pane?.path && this.pane.path !== "/" ? this.pane.path.split("/").map(encodeURIComponent).join("/") : "";
       const win = window.open(`/files${path}?window`, "rynas-files", `popup,width=${w},height=${ht}`);
-      if (!win) toast(t("Il browser ha bloccato la finestra: consenti le finestre popup per questo sito"), { kind: "error" });
+      if (!win) toast(t("files.health.browser_blocked_window_allow_pop"), { kind: "error" });
       else win.focus();
     };
     $("#open-settings")?.before(b);
@@ -33,17 +33,17 @@ export const healthMethods = {
     this.user = me.user || this.user;
     this.version = me.version;
     // `daemon` false: the transfer service is down (copies, moves, deletions wait)
-    if (me.daemon === false) this.banner("daemon", t("Il servizio dei trasferimenti non è attivo: copie, spostamenti ed eliminazioni non possono partire."));
+    if (me.daemon === false) this.banner("daemon", t("files.health.transfer_service_not_running_copies"));
   },
 
   adminOnly() {
-    this.banner("admin", t("Non hai accesso a File: chiedi a un amministratore."));
+    this.banner("admin", t("files.health.no_access_files_ask_administrator"));
   },
 
   /** The files API does not answer (not installed yet, or down): a banner instead of empty panes. */
   unavailable(e) {
-    const why = e?.status === 404 ? t("Il servizio dei file non è installato su questo sistema.") : e?.message || "";
-    this.banner("unavailable", `<span>${esc(t("File non riesce a comunicare con il NAS."))} ${esc(why)}</span> <button class="btn small retry">${esc(t("Riprova"))}</button>`, true);
+    const why = e?.status === 404 ? t("files.health.file_service_not_installed_on") : e?.message || "";
+    this.banner("unavailable", `<span>${esc(t("files.health.files_cannot_reach_nas"))} ${esc(why)}</span> <button class="btn small retry">${esc(t("files.common.retry"))}</button>`, true);
     const retry = $('#banners [data-key="unavailable"] .retry');
     if (retry) retry.onclick = () => this.boot();
   },
@@ -53,7 +53,7 @@ export const healthMethods = {
    * page. Here only a note, in case the login is dismissed or delayed.
    */
   needLogin() {
-    this.banner("login", t("Sessione scaduta: accedi di nuovo per continuare."));
+    this.banner("login", t("files.health.session_expired_sign_in_again"));
     // a modal <dialog> sits in the browser's top layer, above the shell's login screen:
     // close them (a copy goes on on the server, its dialog opens again from the transfers)
     for (const d of host.root?.querySelectorAll("dialog[open]") || []) d.close();
@@ -94,18 +94,18 @@ export const healthMethods = {
       el.title = text;
       el.setAttribute("aria-label", text);
     };
-    set("#tab-new", (el) => label(el, `${t("Nuova scheda")} (Ctrl+T)`));
-    set("#open-settings", (el) => label(el, `${t("Impostazioni")} (Ctrl+,)`));
-    set("#pop-out", (el) => label(el, t("Apri in una finestra separata")));
-    set("#xfer-btn", (el) => label(el, t("Trasferimenti")));
-    set("#sidebar", (el) => el.setAttribute("aria-label", t("Posizioni")));
-    set("#tabs", (el) => el.setAttribute("aria-label", t("Schede")));
-    set(".drawer-head > span", (el) => (el.textContent = t("Trasferimenti")));
-    set("#xfer-clear", (el) => (el.textContent = t("Pulisci completati")));
-    set("#xfer-drawer-close", (el) => label(el, t("Chiudi")));
+    set("#tab-new", (el) => label(el, `${t("files.common.new_tab")} (Ctrl+T)`));
+    set("#open-settings", (el) => label(el, `${t("files.common.settings")} (Ctrl+,)`));
+    set("#pop-out", (el) => label(el, t("files.health.open_in_separate_window")));
+    set("#xfer-btn", (el) => label(el, t("files.common.transfers")));
+    set("#sidebar", (el) => el.setAttribute("aria-label", t("files.health.places")));
+    set("#tabs", (el) => el.setAttribute("aria-label", t("files.health.tabs")));
+    set(".drawer-head > span", (el) => (el.textContent = t("files.common.transfers")));
+    set("#xfer-clear", (el) => (el.textContent = t("files.health.clear_finished")));
+    set("#xfer-drawer-close", (el) => label(el, t("files.common.close")));
     set("#drop-overlay > div", (el) => {
       const target = $("#drop-target") || h(`<b id="drop-target"></b>`);
-      el.textContent = t("Rilascia per caricare in") + " ";
+      el.textContent = t("files.health.drop_upload") + " ";
       el.append(target);
     });
   },

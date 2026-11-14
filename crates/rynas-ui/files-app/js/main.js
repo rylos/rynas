@@ -191,7 +191,7 @@ class App {
 
   toggleHidden() {
     save({ showHidden: !prefs.showHidden });
-    toast(prefs.showHidden ? t("File nascosti visibili") : t("File nascosti non visibili"), { timeout: 1500 });
+    toast(prefs.showHidden ? t("files.main.hidden_files_shown") : t("files.main.hidden_files_not_shown"), { timeout: 1500 });
   }
 
   toggleInfo() {

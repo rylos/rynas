@@ -3,7 +3,7 @@
 
 import { esc, isDirLike } from "./format.js";
 import { svg, FOLDER_GLYPH, shareGlyph } from "./icons.js";
-import { t } from "./i18n.js";
+import { t, keyText } from "./i18n.js";
 import { api } from "./api.js";
 import { host, mount, realTarget, place, bounds } from "./host.js";
 
@@ -70,7 +70,7 @@ export function openMenu(x, y, items) {
       continue;
     }
     const b = h(
-      `<button class="${item.danger ? "danger" : ""}" ${item.disabled ? "disabled" : ""}>${item.icon ? svg(item.icon) : '<span style="width:16px"></span>'}<span>${esc(item.label)}</span>${item.key ? `<span class="k">${esc(item.key)}</span>` : ""}</button>`,
+      `<button class="${item.danger ? "danger" : ""}" ${item.disabled ? "disabled" : ""}>${item.icon ? svg(item.icon) : '<span style="width:16px"></span>'}<span>${esc(item.label)}</span>${item.key ? `<span class="k">${esc(keyText(item.key))}</span>` : ""}</button>`,
     );
     b.onclick = () => {
       closeMenu();
@@ -129,15 +129,15 @@ export function dialog(html, { wide = false, cls = "" } = {}) {
   return dlg;
 }
 
-export function confirmBox({ title, message, items = [], ok = t("OK"), danger = false, icon = "alert", extra = "" }) {
+export function confirmBox({ title, message, items = [], ok = t("files.ui.ok"), danger = false, icon = "alert", extra = "" }) {
   return new Promise((resolve) => {
     const list = items.length
-      ? `<div class="item-list">${items.slice(0, 50).map((i) => `<div>${i}</div>`).join("")}${items.length > 50 ? `<div>… ${t("e altri {n}", { n: items.length - 50 })}</div>` : ""}</div>`
+      ? `<div class="item-list">${items.slice(0, 50).map((i) => `<div>${i}</div>`).join("")}${items.length > 50 ? `<div>… ${t("files.common.n_more", { n: items.length - 50 })}</div>` : ""}</div>`
       : "";
     const dlg = dialog(`
       <div class="dlg-head"><div class="dlg-icon ${danger ? "danger" : ""}">${svg(icon)}</div><h2>${esc(title)}</h2></div>
       <div class="dlg-body"><p>${message}</p>${list}${extra}</div>
-      <div class="dlg-foot"><button class="btn" value="no">${t("Annulla")}</button><button class="btn ${danger ? "danger" : "primary"}" value="ok">${esc(ok)}</button></div>`);
+      <div class="dlg-foot"><button class="btn" value="no">${t("files.common.cancel")}</button><button class="btn ${danger ? "danger" : "primary"}" value="ok">${esc(ok)}</button></div>`);
     let result = false;
     dlg.querySelectorAll(".dlg-foot button").forEach((b) => (b.onclick = () => {
       result = b.value === "ok";
@@ -148,13 +148,13 @@ export function confirmBox({ title, message, items = [], ok = t("OK"), danger = 
   });
 }
 
-export function promptBox({ title, label, value = "", ok = t("OK"), select, icon = "rename", validate }) {
+export function promptBox({ title, label, value = "", ok = t("files.ui.ok"), select, icon = "rename", validate }) {
   return new Promise((resolve) => {
     const dlg = dialog(`
       <form method="dialog">
         <div class="dlg-head"><div class="dlg-icon">${svg(icon)}</div><h2>${esc(title)}</h2></div>
         <div class="dlg-body"><label class="field"><span>${esc(label)}</span><input type="text" value="${esc(value)}" spellcheck="false" autocomplete="off"></label><div class="hint err"></div></div>
-        <div class="dlg-foot"><button type="button" class="btn cancel">${t("Annulla")}</button><button class="btn primary">${esc(ok)}</button></div>
+        <div class="dlg-foot"><button type="button" class="btn cancel">${t("files.common.cancel")}</button><button class="btn primary">${esc(ok)}</button></div>
       </form>`);
     const input = dlg.querySelector("input");
     const err = dlg.querySelector(".err");
@@ -190,7 +190,7 @@ export function pickFolder({ title, start, ok }) {
       <div class="dlg-body">
         <div class="picker"><div class="picker-path"></div><div class="picker-list"></div></div>
       </div>
-      <div class="dlg-foot"><div class="left"><button class="btn small mk">${svg("folderPlus")} ${t("Nuova cartella")}</button></div><button class="btn cancel">${t("Annulla")}</button><button class="btn primary ok">${esc(ok)}</button></div>`, { cls: "picker-dlg" });
+      <div class="dlg-foot"><div class="left"><button class="btn small mk">${svg("folderPlus")} ${t("files.common.new_folder")}</button></div><button class="btn cancel">${t("files.common.cancel")}</button><button class="btn primary ok">${esc(ok)}</button></div>`, { cls: "picker-dlg" });
     let current = start && start !== "/" ? start : "/";
     let picked = null;
     let result = null;
@@ -201,7 +201,7 @@ export function pickFolder({ title, start, ok }) {
     const showPath = () => {
       const p = picked || current;
       okBtn.disabled = p === "/";
-      pathEl.innerHTML = `${svg("drive")} ${esc(p === "/" ? t("Cartelle condivise") : p)}`;
+      pathEl.innerHTML = `${svg("drive")} ${esc(p === "/" ? t("files.common.shared_folders") : p)}`;
     };
     async function go(path) {
       const mine = ++seq;
@@ -209,7 +209,7 @@ export function pickFolder({ title, start, ok }) {
       picked = null;
       dlg.querySelector(".mk").disabled = path === "/";
       showPath();
-      list.innerHTML = `<div class="hint" style="padding:8px">${t("Caricamento…")}</div>`;
+      list.innerHTML = `<div class="hint" style="padding:8px">${t("files.common.loading")}</div>`;
       try {
         let rows = [];
         if (path === "/") {
@@ -244,13 +244,13 @@ export function pickFolder({ title, start, ok }) {
           };
           list.append(b);
         }
-        if (!rows.length) list.innerHTML = `<div class="hint" style="padding:8px">${t("Nessuna sottocartella")}</div>`;
+        if (!rows.length) list.innerHTML = `<div class="hint" style="padding:8px">${t("files.ui.no_subfolders")}</div>`;
       } catch (e) {
         if (mine === seq) list.innerHTML = `<div class="hint" style="padding:8px;color:var(--crit)">${esc(e.message)}</div>`;
       }
     }
     dlg.querySelector(".mk").onclick = async () => {
-      const name = await promptBox({ title: t("Nuova cartella"), label: t("Nome"), value: t("Nuova cartella"), icon: "folderPlus" });
+      const name = await promptBox({ title: t("files.common.new_folder"), label: t("files.common.name"), value: t("files.common.new_folder"), icon: "folderPlus" });
       if (!name) return;
       try {
         await api.mkdir(current, name);
@@ -280,5 +280,5 @@ export async function copyText(text) {
     document.execCommand("copy");
     ta.remove();
   }
-  toast(t("Copiato negli appunti"), { kind: "ok", timeout: 1800 });
+  toast(t("files.ui.copied_clipboard"), { kind: "ok", timeout: 1800 });
 }

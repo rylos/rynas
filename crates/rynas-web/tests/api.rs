@@ -138,6 +138,22 @@ async fn spa_and_assets() {
         app.get("/missing-asset.js", &anon).await.status,
         StatusCode::NOT_FOUND
     );
+    // translations are plain text; a language the build does not have is a 404, never the
+    // shell (the loaders would read the page as texts)
+    for uri in ["/i18n/it.txt", "/i18n/it/files.txt"] {
+        let r = app.get(uri, &anon).await;
+        assert_eq!(r.status, StatusCode::OK, "{uri}");
+        let ct = r.headers[header::CONTENT_TYPE].to_str().unwrap();
+        assert!(ct.starts_with("text/plain"), "{uri}: {ct}");
+        assert_eq!(r.headers[header::CACHE_CONTROL], "no-cache", "{uri}");
+    }
+    for uri in ["/i18n/de.txt", "/i18n/de/files.txt", "/i18n/de", "/i18n/"] {
+        assert_eq!(
+            app.get(uri, &anon).await.status,
+            StatusCode::NOT_FOUND,
+            "{uri}"
+        );
+    }
 }
 
 #[tokio::test]

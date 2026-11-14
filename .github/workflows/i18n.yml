@@ -1,0 +1,32 @@
+name: Translation checks
+
+on:
+  pull_request:
+    paths:
+      - "crates/rynas-ui/assets/i18n/**"
+      - "crates/rynas-ui/src/**"
+      - "crates/rynas-ui/files-app/**"
+      - "crates/rynas-ui/tests/fixtures/i18n/**"
+      - "crates/rynas-notify/**"
+  push:
+    branches: [main]
+    paths:
+      - "crates/rynas-ui/assets/i18n/**"
+      - "crates/rynas-ui/src/**"
+      - "crates/rynas-ui/files-app/**"
+      - "crates/rynas-notify/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      # every language of assets/i18n/languages.txt: missing and stale keys, placeholders,
+      # plural forms, for the interface, the modules, the File app and the notifications
+      # (docs/i18n.md), plus the other text rules of the interface
+      - run: cargo test -p rynas-ui -p rynas-notify

@@ -649,7 +649,7 @@ mod tests {
             k
         };
         let generic: Vec<&str> = [UpsBackend::Nut, UpsBackend::NotInstalled].into_iter().flat_map(keys).chain(["ups.need_nut", "ups.missing_text", "ups.install", "ups.installed", "task.ups.install", "ups.test_unsupported", "ups.test_lb_nut", "ups.deep_text_nut", "ups.safemode", "ups.schedule_hint"]).collect();
-        for lang in [i18n::Lang::En, i18n::Lang::It] {
+        for lang in i18n::Lang::all() {
             for k in &generic {
                 let s = i18n::text_in(lang, k).unwrap_or_else(|| panic!("missing {k}"));
                 assert!(!s.to_ascii_lowercase().contains("synodeb") && !s.contains("Synology") && !s.contains("DSM"), "{k}: {s}");

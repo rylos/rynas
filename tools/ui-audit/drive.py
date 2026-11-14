@@ -23,6 +23,7 @@ OUT = os.environ.get("AUDIT_OUT", REPO + "/target/ui-audit")
 sys.path.insert(0, HERE)
 import cdp  # noqa: E402
 import run_all  # noqa: E402
+import texts  # noqa: E402
 
 cdp.S = OUT
 cdp.SHOTS = os.path.join(OUT, "shots", "drive")
@@ -30,11 +31,7 @@ os.makedirs(cdp.SHOTS, exist_ok=True)
 cdp.PORT = int(os.environ.get("CDP_PORT", "9440"))
 run_all.BASE = os.environ.get("BASE", "http://127.0.0.1:18600")
 AUDIT_JS = open(HERE + "/audit.js").read()
-SRC = open(REPO + "/crates/rynas-ui/src/i18n.rs").read()
-STR = r'"((?:[^"\\]|\\.)*)"'
-_P = re.findall(STR + r"\s*=>\s*" + STR + r",\s*" + STR + r";", SRC)
-_IT = {it for k, en, it in _P}
-EN_ONLY = sorted({en for k, en, it in _P if en != it and en not in _IT and re.search(r"[A-Za-z]{3}", en) and "{" not in en})
+EN_ONLY = texts.english_only("it")
 
 # window.fetch wrapper: each rule rewrites the JSON of a matching GET answer
 OVERRIDE = """

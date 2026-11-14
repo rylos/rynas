@@ -24,18 +24,18 @@ export function pickIcon(at, path) {
   const has = rules();
   let scope = !has.paths[path] && has.names[name] ? "names" : "paths";
   let query = "";
-  const colorNames = { "": t("Predefinito"), red: t("Rosso"), yellow: t("Giallo"), green: t("Verde"), cyan: t("Azzurro"), purple: t("Rosa"), white: t("Bianco"), gray: t("Grigio") };
+  const colorNames = { "": t("files.iconpick.default"), red: t("files.iconpick.red"), yellow: t("files.iconpick.yellow"), green: t("files.iconpick.green"), cyan: t("files.iconpick.cyan"), purple: t("files.iconpick.pink"), white: t("files.iconpick.white"), gray: t("files.iconpick.gray") };
 
   const el = h(`<div class="icon-pick" role="dialog">
     <div class="ip-head"><span class="ip-name">${esc(name)}</span></div>
     <div class="seg ip-scope">
-      <button type="button" data-scope="paths">${t("Solo questa cartella")}</button>
-      <button type="button" data-scope="names">${t("Tutte le «{n}»", { n: esc(name) })}</button>
+      <button type="button" data-scope="paths">${t("files.iconpick.folder_only")}</button>
+      <button type="button" data-scope="names">${t("files.iconpick.every_n", { n: esc(name) })}</button>
     </div>
-    <input type="search" class="input ip-search" placeholder="${t("Cerca un'icona…")}" spellcheck="false">
+    <input type="search" class="input ip-search" placeholder="${t("files.iconpick.search_icon")}" spellcheck="false">
     <div class="ip-grid"></div>
     <div class="ip-colors">${ICON_COLORS.map((c) => `<button type="button" class="ip-color ${c ? "ic-" + c : "ez-dir"}" data-color="${c}" title="${colorNames[c]}"></button>`).join("")}</div>
-    <div class="ip-foot"><button type="button" class="btn small ip-reset">${t("Icona automatica")}</button><span style="flex:1"></span><button type="button" class="btn small ip-close">${t("Chiudi")}</button></div>
+    <div class="ip-foot"><button type="button" class="btn small ip-reset">${t("files.iconpick.automatic_icon")}</button><span style="flex:1"></span><button type="button" class="btn small ip-close">${t("files.common.close")}</button></div>
   </div>`);
   mount(el);
 
@@ -51,7 +51,7 @@ export function pickIcon(at, path) {
     const list = ICON_CHOICES.filter(([, w]) => words.every((q) => w.includes(q)));
     el.querySelector(".ip-grid").innerHTML = list.length
       ? list.map(([gl, w]) => `<button type="button" class="gi ${c ? "ic-" + c : "ez-dir"} ${gl === g ? "on" : ""}" data-g="${gl}" title="${esc(w)}">${gl}</button>`).join("")
-      : `<div class="hint">${t("Nessuna icona trovata")}</div>`;
+      : `<div class="hint">${t("files.iconpick.no_icon_found")}</div>`;
     el.querySelectorAll(".ip-color").forEach((b) => b.classList.toggle("on", b.dataset.color === c));
     el.querySelector(".ip-reset").disabled = !rule();
   }

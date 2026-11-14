@@ -1,0 +1,86 @@
+# rynas: Italian translation, QNAP module. One key<TAB>text line per entry; see docs/i18n.md
+nt.src.qnap	Pulsanti hardware
+nev.qnap.button_reset.title	Pulsante di reset premuto
+nev.qnap.button_usb_copy.title	Pulsante copia USB premuto
+qnap.tab	Pannello frontale
+qnap.not_verified	La mappatura di LED, pulsanti e cicalino di questo modello deriva dalla configurazione del produttore e non è ancora stata provata su questo hardware. Esegui la prova del primo avvio prima di farvi affidamento.
+qnap.leds	LED
+qnap.led_control	Lascia che rynas comandi i LED
+qnap.led_control_help	Quando è spento non viene scritta alcuna linea dei LED e le linee vengono rilasciate.
+qnap.need_confirm	Disponibile dopo la conferma del modello su questa macchina.
+qnap.mapping	Controllo del primo avvio
+qnap.mapping_text	Il rilevamento automatico non distingue ogni modello: il firmware non lo indica. Dopo aver eseguito la prova del primo avvio su questa macchina, digita il nome del modello stampato sul case per consentire a rynas di scrivere le linee dei LED e l'impostazione di ripristino dell'alimentazione.
+qnap.mapping_type	Digita {model}
+qnap.mapping_confirm	Conferma questo modello
+qnap.mapping_done	Confermato su questa macchina
+qnap.mapping_revoke	Ritira la conferma
+qnap.brightness	Luminosità dei LED frontali
+qnap.bright_100	100 %
+qnap.bright_50	50 %
+qnap.bright_0	0 % (LED spenti)
+qnap.power	Dopo un'interruzione di corrente
+qnap.pr_choice	Al ritorno della corrente
+qnap.pr_last	Ripristina lo stato precedente
+qnap.pr_on	Accendi automaticamente
+qnap.pr_off	Resta spento
+qnap.pr_now	Impostato ora sull'hardware: {mode}
+qnap.pr_unknown	L'hardware contiene un valore senza significato noto
+qnap.pr_help	Letto dall'hardware all'apertura di questa pagina; scritto solo quando premi il pulsante.
+qnap.pr_apply	Scrivi sull'hardware
+qnap.pr_done	Scritto e riletto
+qnap.pr_eup	L'EuP è attivo nel BIOS: questa impostazione non può avere effetto finché non viene disattivato.
+qnap.gpio_inactive	Il dispositivo GPIO del chip non è attivato, quindi i comandi ai LED potrebbero non avere effetto visibile.
+qnap.gpio_activate	Attiva il dispositivo GPIO
+qnap.bay_failed	Disco guasto
+qnap.bay_warning	Avviso disco
+qnap.bay_ok	Nessun guasto segnalato
+qnap.feat_led_brightness	Controllo della luminosità dei LED
+qnap.why_mapping_unconfirmed	Il modello non è stato confermato su questa macchina
+qnap.why_write_failed	Scrittura sulla linea non riuscita; nuovo tentativo in corso
+qnap.led_auto	Segue i dischi
+qnap.led_green	Verde
+qnap.led_green_blink	Verde lampeggiante
+qnap.led_red	Rosso
+qnap.led_red_blink	Rosso lampeggiante
+qnap.led_alternate	Verde e rosso alternati
+qnap.led_off	Spento
+qnap.disk_leds	I LED di errore delle baie seguono i dischi
+qnap.usb_led	LED USB
+qnap.usb_on	Acceso
+qnap.usb_blink	Lampeggiante
+qnap.shown	Mostrato ora
+qnap.shown_none	Non comandato da rynas
+qnap.bays	Baie
+qnap.bay_n	Baia {n}
+qnap.bay_empty	Vuota
+qnap.bay_on	Disco guasto (LED di errore comandato acceso)
+qnap.bay_blink	Avviso disco (LED di errore comandato a lampeggiare)
+qnap.bay_off	Nessun guasto segnalato (LED di errore comandato spento)
+qnap.buttons	Pulsanti
+qnap.usb_copy	Pulsante copia USB
+qnap.btn_log	Elencalo soltanto qui sotto
+qnap.btn_ignore	Non fare nulla
+qnap.buttons_help	Un pulsante non modifica mai impostazioni, password o dischi: può solo essere registrato o inviare una notifica.
+qnap.buzzer	Cicalino
+qnap.beep_failure	Suona l'allarme quando un disco si guasta
+qnap.beep_failure_help	Si ripete ogni 5 minuti finché non viene silenziato o il disco non viene sostituito.
+qnap.beep_sent	Segnale inviato
+qnap.mute	Silenzia l'allarme
+qnap.alarm_on	L'allarme sta suonando
+qnap.events	Pressioni dei pulsanti
+qnap.events_none	Nessuna pressione dall'avvio di rynas
+qnap.held	premuto {s} s
+qnap.features	Cosa funziona su questa macchina
+qnap.feat_status_led	Controllo del LED di stato
+qnap.feat_disk_leds	Controllo dei LED di errore delle baie
+qnap.feat_usb_led	Controllo del LED USB
+qnap.feat_reset_button	Lettura del pulsante di reset
+qnap.feat_usb_copy_button	Lettura del pulsante copia USB
+qnap.feat_buzzer	Suono del cicalino
+qnap.why_driver_missing	Il driver del kernel non è caricato
+qnap.why_wrong_direction	Una linea non è nella direzione attesa: non viene comandata
+qnap.why_led_control_off	Disattivato qui sopra
+qnap.why_no_speaker	Nessun dispositivo PC speaker trovato
+qnap.why_not_fitted	Non presente su questo modello
+qnap.available	Disponibile
+qnap.unsaved	Modifiche non salvate

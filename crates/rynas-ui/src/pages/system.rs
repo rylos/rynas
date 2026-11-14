@@ -3,7 +3,7 @@
 
 use leptos::prelude::*;
 
-use crate::form::segmented;
+use crate::form::{language_select, segmented};
 use crate::i18n::{self, HourCycle, Lang, tr};
 use crate::icons::{self, Icon};
 use crate::live::{Res, use_live};
@@ -12,7 +12,6 @@ use crate::ui::{PageHeader, Pending};
 
 const THEMES: &[(&str, &str)] = &[("auto", "theme.auto"), ("light", "theme.light"), ("dark", "theme.dark")];
 const DENSITIES: &[(&str, &str)] = &[("comfortable", "density.comfortable"), ("compact", "density.compact")];
-const LANGUAGES: &[(&str, &str)] = &[("", "language.auto"), ("it", "lang.it"), ("en", "lang.en")];
 const HOUR_CYCLES: &[(&str, &str)] = &[("", "hour_cycle.auto"), ("h23", "hour_cycle.h23"), ("h12", "hour_cycle.h12")];
 
 fn theme_code(t: ThemePref) -> &'static str {
@@ -56,16 +55,13 @@ pub fn System() -> impl IntoView {
                         Signal::derive(move || (if ui.density.get() == Density::Compact { "compact" } else { "comfortable" }).to_string()),
                         Callback::new(move |v: String| ui.density.set(if v == "compact" { Density::Compact } else { Density::Comfortable })),
                     )}
-                    {segmented(
+                    {language_select(
                         "language",
-                        LANGUAGES,
+                        None,
+                        Some("language.auto"),
                         Signal::derive(move || lang_pref.get().map_or("", Lang::code).to_string()),
                         Callback::new(move |v: String| {
-                            let l = match v.as_str() {
-                                "it" => Some(Lang::It),
-                                "en" => Some(Lang::En),
-                                _ => None,
-                            };
+                            let l = Lang::from_code(&v);
                             lang_pref.set(l);
                             i18n::set_lang(l);
                         }),

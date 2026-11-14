@@ -68,32 +68,32 @@ const fieldsHTML = (c) => `
     <button type="button" data-kind="smb" class="${c.kind !== "sftp" ? "on" : ""}">SMB</button>
     <button type="button" data-kind="sftp" class="${c.kind === "sftp" ? "on" : ""}">SFTP</button>
   </div>
-  <label class="field"><span>${t("Indirizzo del server")}</span><input type="text" name="host" value="${esc(c.host || "")}" placeholder="${t("es. nas, \\\\nas\\cartella o sftp://utente@server")}" spellcheck="false" autocomplete="off"></label>
+  <label class="field"><span>${t("files.conns.server_address")}</span><input type="text" name="host" value="${esc(c.host || "")}" placeholder="${t("files.conns.e_g_nas_nas_folder")}" spellcheck="false" autocomplete="off"></label>
   <div class="conn-row">
-    <label class="field"><span>${t("Nome nella barra laterale")}</span><input type="text" name="name" value="${esc(c.name || "")}" spellcheck="false" autocomplete="off"></label>
-    <label class="field conn-port"><span>${t("Porta")}</span><input type="number" name="port" min="0" max="65535" value="${c.port || ""}" placeholder="${c.kind === "sftp" ? 22 : 445}"></label>
+    <label class="field"><span>${t("files.common.name_in_sidebar")}</span><input type="text" name="name" value="${esc(c.name || "")}" spellcheck="false" autocomplete="off"></label>
+    <label class="field conn-port"><span>${t("files.conns.port")}</span><input type="number" name="port" min="0" max="65535" value="${c.port || ""}" placeholder="${c.kind === "sftp" ? 22 : 445}"></label>
   </div>
-  <label class="field smb-only"><span>${t("Dominio")}</span><input type="text" name="domain" value="${esc(c.domain || "")}" placeholder="${t("facoltativo, es. AZIENDA")}" spellcheck="false" autocomplete="off"></label>
-  <label class="field"><span>${t("Utente")}</span><input type="text" name="user" value="${esc(c.user || "")}" spellcheck="false" autocomplete="off"></label>
-  <div class="field sftp-only"><span>${t("Accesso")}</span>
+  <label class="field smb-only"><span>${t("files.conns.domain")}</span><input type="text" name="domain" value="${esc(c.domain || "")}" placeholder="${t("files.conns.optional_e_g_company")}" spellcheck="false" autocomplete="off"></label>
+  <label class="field"><span>${t("files.conns.user")}</span><input type="text" name="user" value="${esc(c.user || "")}" spellcheck="false" autocomplete="off"></label>
+  <div class="field sftp-only"><span>${t("files.conns.login")}</span>
     <div class="seg conn-auth">
-      <button type="button" data-auth="password" class="${c.auth !== "key" ? "on" : ""}">${t("Password")}</button>
-      <button type="button" data-auth="key" class="${c.auth === "key" ? "on" : ""}">${t("Chiave di rynas")}</button>
-      <button type="button" data-auth="own" class="${c.auth === "own" ? "on" : ""}">${t("La mia chiave")}</button>
+      <button type="button" data-auth="password" class="${c.auth !== "key" ? "on" : ""}">${t("files.common.password")}</button>
+      <button type="button" data-auth="key" class="${c.auth === "key" ? "on" : ""}">${t("files.conns.rynas_key")}</button>
+      <button type="button" data-auth="own" class="${c.auth === "own" ? "on" : ""}">${t("files.conns.my_key")}</button>
     </div>
   </div>
-  <label class="field pw"><span>${t("Password")}</span><input type="password" name="password" value="" placeholder="${c.has_password ? t("salvata: lasciala vuota per tenerla") : ""}" autocomplete="new-password"></label>
-  <div class="field key-box"><span>${t("Chiave pubblica da aggiungere a ~/.ssh/authorized_keys sul server")}</span>
-    <div class="conn-key"><code class="kv"></code><button type="button" class="btn small kcopy">${t("Copia")}</button><button type="button" class="btn small kmake">${t("Crea la chiave")}</button></div>
+  <label class="field pw"><span>${t("files.common.password")}</span><input type="password" name="password" value="" placeholder="${c.has_password ? t("files.conns.saved_leave_empty_keep") : ""}" autocomplete="new-password"></label>
+  <div class="field key-box"><span>${t("files.conns.public_key_add_ssh_authorized")}</span>
+    <div class="conn-key"><code class="kv"></code><button type="button" class="btn small kcopy">${t("files.common.copy")}</button><button type="button" class="btn small kmake">${t("files.conns.create_key")}</button></div>
   </div>
-  <div class="field own-box"><span>${t("Chiave privata (OpenSSH o PEM)")}</span>
-    ${c.key_info ? `<div class="hint conn-keyinfo">${t("Caricata: {k}", { k: esc(c.key_info) })}</div>` : ""}
-    <textarea name="private_key" rows="3" spellcheck="false" autocomplete="off" placeholder="${c.key_info ? t("vuota: tieni quella caricata") : "-----BEGIN OPENSSH PRIVATE KEY-----"}"></textarea>
-    <div class="conn-key"><button type="button" class="btn small kfile">${t("Carica da file…")}</button><input type="file" class="kpick" hidden>
-      <input type="password" name="passphrase" placeholder="${t("passphrase, se la chiave ne ha una")}" autocomplete="new-password"></div>
+  <div class="field own-box"><span>${t("files.conns.private_key_openssh_pem")}</span>
+    ${c.key_info ? `<div class="hint conn-keyinfo">${t("files.conns.loaded_k", { k: esc(c.key_info) })}</div>` : ""}
+    <textarea name="private_key" rows="3" spellcheck="false" autocomplete="off" placeholder="${c.key_info ? t("files.conns.empty_keep_one_loaded") : "-----BEGIN OPENSSH PRIVATE KEY-----"}"></textarea>
+    <div class="conn-key"><button type="button" class="btn small kfile">${t("files.conns.load_file")}</button><input type="file" class="kpick" hidden>
+      <input type="password" name="passphrase" placeholder="${t("files.conns.passphrase_key_one")}" autocomplete="new-password"></div>
   </div>
-  <label class="field"><span>${t("Cartella di partenza")}</span><input type="text" name="path" value="${esc(c.path && c.kind === "sftp" ? "/" + c.path : c.path || "")}" placeholder="${c.kind === "sftp" ? t("vuoto: la home dell'utente") : t("vuoto: l'elenco delle cartelle condivise")}" spellcheck="false" autocomplete="off"></label>
-  ${c.host_key ? `<div class="hint conn-hostkey">${t("Chiave del server: {k}", { k: esc(c.host_key) })} <label><input type="checkbox" name="forget_key"> ${t("dimentica (è cambiata)")}</label></div>` : ""}
+  <label class="field"><span>${t("files.conns.starting_folder")}</span><input type="text" name="path" value="${esc(c.path && c.kind === "sftp" ? "/" + c.path : c.path || "")}" placeholder="${c.kind === "sftp" ? t("files.conns.empty_user_home") : t("files.conns.empty_list_shared_folders")}" spellcheck="false" autocomplete="off"></label>
+  ${c.host_key ? `<div class="hint conn-hostkey">${t("files.conns.server_key_k", { k: esc(c.host_key) })} <label><input type="checkbox" name="forget_key"> ${t("files.conns.forget_changed")}</label></div>` : ""}
   <div class="hint conn-result"></div>`;
 
 /**
@@ -108,9 +108,9 @@ export function editConnection(conn = {}, key = null) {
     let publicKey = key;
     const dlg = dialog(
       `<form method="dialog" class="conn-form">
-        <div class="dlg-head"><div class="dlg-icon">${svg("server")}</div><h2>${isNew ? t("Nuova connessione") : t("Modifica connessione")}</h2></div>
+        <div class="dlg-head"><div class="dlg-icon">${svg("server")}</div><h2>${isNew ? t("files.common.new_connection") : t("files.conns.edit_connection")}</h2></div>
         <div class="dlg-body">${fieldsHTML({ ...conn, kind, auth })}</div>
-        <div class="dlg-foot"><button type="button" class="btn test">${t("Prova")}</button><span style="flex:1"></span><button type="button" class="btn cancel">${t("Annulla")}</button><button class="btn primary">${t("Salva")}</button></div>
+        <div class="dlg-foot"><button type="button" class="btn test">${t("files.conns.test")}</button><span style="flex:1"></span><button type="button" class="btn cancel">${t("files.common.cancel")}</button><button class="btn primary">${t("files.common.save")}</button></div>
       </form>`,
       { cls: "conn-dlg" },
     );
@@ -130,11 +130,11 @@ export function editConnection(conn = {}, key = null) {
       dlg.querySelector(".pw").hidden = byKey || own;
       dlg.querySelector(".key-box").hidden = !byKey;
       dlg.querySelector(".own-box").hidden = !own;
-      dlg.querySelector(".kv").textContent = publicKey || t("Nessuna chiave ancora: creala, poi copiala sul server.");
+      dlg.querySelector(".kv").textContent = publicKey || t("files.conns.no_key_yet_create_copy");
       dlg.querySelector(".kcopy").hidden = !publicKey;
       dlg.querySelector(".kmake").hidden = !!publicKey;
       f("port").placeholder = kind === "sftp" ? "22" : "445";
-      f("path").placeholder = kind === "sftp" ? t("vuoto: la home dell'utente") : t("vuoto: l'elenco delle cartelle condivise");
+      f("path").placeholder = kind === "sftp" ? t("files.conns.empty_user_home") : t("files.conns.empty_list_shared_folders");
     };
     refresh();
 
@@ -146,7 +146,7 @@ export function editConnection(conn = {}, key = null) {
     pick.onchange = async () => {
       const file = pick.files[0];
       if (!file) return;
-      if (file.size > 64 * 1024) return (result.textContent = t("Non è una chiave privata: il file è troppo grande"));
+      if (file.size > 64 * 1024) return (result.textContent = t("files.conns.not_private_key_file_too"));
       f("private_key").value = (await file.text()).trim();
       pick.value = "";
     };
@@ -197,12 +197,12 @@ export function editConnection(conn = {}, key = null) {
 
     dlg.querySelector(".test").onclick = async () => {
       result.style.color = "";
-      result.textContent = t("Connessione…");
+      result.textContent = t("files.conns.connecting");
       busy(true);
       try {
         const r = await api.testConn(payload());
         result.style.color = "var(--ok)";
-        result.textContent = t("Connesso in {ms} ms: {n} elementi in {p}", { ms: r.ms, n: r.items, p: "/" + r.path });
+        result.textContent = t("files.conns.connected_in_ms_ms_n", { ms: r.ms, n: r.items, p: "/" + r.path });
       } catch (e) {
         result.style.color = "var(--crit)";
         result.textContent = e.message;
@@ -231,6 +231,6 @@ export function editConnection(conn = {}, key = null) {
 /** A connection under a new name only. */
 export async function renameConnection(conn, name) {
   const { conn: saved } = await api.saveConn({ ...conn, name, password: "" });
-  toast(t("Connessione rinominata"), { kind: "ok", timeout: 1500 });
+  toast(t("files.conns.connection_renamed"), { kind: "ok", timeout: 1500 });
   return saved;
 }

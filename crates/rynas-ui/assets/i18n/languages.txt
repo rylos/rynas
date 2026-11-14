@@ -1,0 +1,11 @@
+# The languages of the interface: one line per language, fields separated by a TAB:
+#   code (BCP 47 language tag, also the folder of its translation files)
+#   native name (as the language names itself, shown in every language's menus)
+#   default locale (for dates and numbers when the browser names no region of this language)
+#   plural categories of whole numbers (CLDR: zero one two few many other; `other` always),
+#     the forms every `key.<category>` text of the language needs (Intl.PluralRules picks one)
+#   English name (the command palette finds a language by it too)
+# English is the source language, built into the program; every other language has its files
+# in i18n/<code>/ (docs/i18n.md). Adding a language: its files plus one line here.
+en	English	en-US	one other	English
+it	Italiano	it-IT	one other	Italian

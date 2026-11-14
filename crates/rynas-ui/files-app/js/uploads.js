@@ -64,10 +64,10 @@ export function fromInput(files) {
 function askConflicts(taken) {
   return new Promise((resolve) => {
     const dlg = dialog(`
-      <div class="dlg-head"><div class="dlg-icon">${svg("alert")}</div><h2>${t("Alcuni elementi esistono già")}</h2></div>
-      <div class="dlg-body"><p>${t("Nella cartella di destinazione ci sono già {n} elementi con lo stesso nome:", { n: taken.length })}</p>
-        <div class="item-list">${taken.slice(0, 40).map((x) => `<div>${esc(x.name)} <span class="hint">${x.dir ? t("cartella") : size(x.size)}</span></div>`).join("")}</div></div>
-      <div class="dlg-foot"><button class="btn" data-a="cancel">${t("Annulla")}</button><button class="btn" data-a="skip">${t("Salta")}</button><button class="btn" data-a="rename">${t("Mantieni entrambi")}</button><button class="btn primary" data-a="overwrite">${t("Sovrascrivi")}</button></div>`);
+      <div class="dlg-head"><div class="dlg-icon">${svg("alert")}</div><h2>${t("files.uploads.some_items_already_exist")}</h2></div>
+      <div class="dlg-body"><p>${t("files.uploads.destination_folder_already_n_items", { n: taken.length })}</p>
+        <div class="item-list">${taken.slice(0, 40).map((x) => `<div>${esc(x.name)} <span class="hint">${x.dir ? t("files.uploads.folder_hint") : size(x.size)}</span></div>`).join("")}</div></div>
+      <div class="dlg-foot"><button class="btn" data-a="cancel">${t("files.common.cancel")}</button><button class="btn" data-a="skip">${t("files.common.skip")}</button><button class="btn" data-a="rename">${t("files.common.keep_both")}</button><button class="btn primary" data-a="overwrite">${t("files.common.overwrite")}</button></div>`);
     let answer = "cancel";
     dlg.querySelectorAll("[data-a]").forEach((b) => (b.onclick = () => {
       answer = b.dataset.a;
@@ -223,7 +223,7 @@ export async function upload(dest, items, onDone) {
   };
   const sessionGone = () => {
     notifyUnauth();
-    return Object.assign(new Error(t("Sessione scaduta")), { fatal: true });
+    return Object.assign(new Error(t("files.uploads.session_expired")), { fatal: true });
   };
 
   // the folders, before any file; one that fails takes its files with it
@@ -322,7 +322,7 @@ export async function upload(dest, items, onDone) {
       };
       xhr.onerror = () => {
         takeBack();
-        reject(Object.assign(new Error(t("connessione interrotta")), { network: true, offset }));
+        reject(Object.assign(new Error(t("files.uploads.connection_lost")), { network: true, offset }));
       };
       xhr.onabort = () => {
         takeBack();
@@ -428,14 +428,14 @@ export async function upload(dest, items, onDone) {
           else if (!e.abort) {
             const exists = e.status === 409 && e.offset === 0 && policy !== "overwrite" && policy !== "newer";
             if (exists && policy === "skip") outcome = "skipped";
-            else error = exists ? new Error(t("esiste già")) : e;
+            else error = exists ? new Error(t("files.uploads.already_exists")) : e;
           }
         }
       }
     }
     if (cancelled) break;
     if (outcome === "skipped") p.skipped++;
-    else if (outcome !== "done") fail(f.rel, error?.message || t("non riuscito"), error?.code);
+    else if (outcome !== "done") fail(f.rel, error?.message || t("files.common.state.failed"), error?.code);
     // skipped or failed: its bytes count as handled, so the bar and the time left stay true
     p.bytes_done += f.file.size - p.current_done;
     p.current_done = f.file.size;
@@ -445,7 +445,7 @@ export async function upload(dest, items, onDone) {
   settle();
   job.state = failure ? "failed" : cancelled ? "cancelled" : "done";
   job.finished = Date.now();
-  job.msg = failure ? failure.message : cancelled ? t("annullato") : t("completato");
+  job.msg = failure ? failure.message : cancelled ? t("files.common.state.canceled") : t("files.common.state.done");
   job.progress.current = "";
   sample(true);
   updateLocal(job);

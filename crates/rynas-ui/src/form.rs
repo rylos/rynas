@@ -382,6 +382,36 @@ pub fn select_field(
     .into_any()
 }
 
+/// Labelled select of the languages of the table (`i18n::Lang`), each named as it names
+/// itself; `auto` adds a first option with the value "" (an i18n key, e.g. "follow the
+/// browser"). The value is a language code.
+pub fn language_select(label: &'static str, help: Option<&'static str>, auto: Option<&'static str>, value: Signal<String>, set: Callback<String>) -> AnyView {
+    let id = fid();
+    let hid = help.map(|_| format!("{id}h"));
+    let opts: Vec<(&'static str, Option<&'static str>)> =
+        auto.map(|k| ("", Some(k))).into_iter().chain(crate::i18n::Lang::all().map(|l| (l.code(), None))).collect();
+    view! {
+        <div class="field">
+            <label class="field-label" for=id.clone()>{tr(label)}</label>
+            <select id=id class="input" aria-describedby=hid.clone() on:change=move |ev| set.run(event_target_value(&ev))>
+                {opts
+                    .into_iter()
+                    .map(|(v, k)| {
+                        let name = crate::i18n::Lang::from_code(v).map(crate::i18n::Lang::name);
+                        view! {
+                            <option value=v lang=name.map(|_| v) selected=move || value.with(|x| x == v)>
+                                {move || k.map(crate::i18n::t).or(name).unwrap_or_default()}
+                            </option>
+                        }
+                    })
+                    .collect_view()}
+            </select>
+            {help.zip(hid).map(|(h, id)| view! { <span class="field-help" id=id>{tr(h)}</span> })}
+        </div>
+    }
+    .into_any()
+}
+
 /// Labelled segmented control (radio group, arrow keys move the choice); `opts` are
 /// (value, i18n key) pairs.
 pub fn segmented(label: &'static str, opts: &'static [(&'static str, &'static str)], value: Signal<String>, set: Callback<String>) -> AnyView {

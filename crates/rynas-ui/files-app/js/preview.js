@@ -19,14 +19,14 @@ export function quickLook(pane, onDownload) {
   const dlg = h(`<dialog class="quick"><div class="ql">
     <div class="ql-head"><div class="t"><b></b><small></small></div>
       <div class="ql-zoom" hidden>
-        <button class="icon-btn zout" title="${t("Riduci")} (−)">${svg("zoomOut")}</button>
+        <button class="icon-btn zout" title="${t("files.preview.zoom_out")} (−)">${svg("zoomOut")}</button>
         <button class="pct" title="100% (1)"></button>
-        <button class="icon-btn zin" title="${t("Ingrandisci")} (+)">${svg("zoomIn")}</button>
-        <button class="icon-btn zfit" title="${t("Adatta alla finestra")} (0)">${svg("fit")}</button>
+        <button class="icon-btn zin" title="${t("files.preview.zoom_in")} (+)">${svg("zoomIn")}</button>
+        <button class="icon-btn zfit" title="${t("files.preview.fit_window")} (0)">${svg("fit")}</button>
       </div>
-      <button class="icon-btn dl" title="${t("Scarica")}">${svg("download")}</button>
-      <button class="icon-btn open" title="${t("Apri in una nuova scheda del browser")}">${svg("external")}</button>
-      <button class="icon-btn close" title="${t("Chiudi")} (Esc)">${svg("close")}</button></div>
+      <button class="icon-btn dl" title="${t("files.common.download")}">${svg("download")}</button>
+      <button class="icon-btn open" title="${t("files.preview.open_in_new_browser_tab")}">${svg("external")}</button>
+      <button class="icon-btn close" title="${t("files.common.close")} (Esc)">${svg("close")}</button></div>
     <div class="ql-body"></div>
     <button class="ql-nav prev">${svg("back")}</button><button class="ql-nav next">${svg("forward")}</button>
   </div></dialog>`);
@@ -59,7 +59,7 @@ export function quickLook(pane, onDownload) {
     if (kind === "image" && isHeic(e.name)) {
       // the server's thumbnail, if any, while the full photo decodes.
       const img = stage(e.thumb ? api.thumb(e.path, true) : "");
-      if (!e.thumb) body.append(h(`<div class="ql-wait">${t("Caricamento…")}</div>`));
+      if (!e.thumb) body.append(h(`<div class="ql-wait">${t("files.common.loading")}</div>`));
       try {
         const u = await heicURL(e, 4096);
         if (files[index] !== e) return;
@@ -76,12 +76,12 @@ export function quickLook(pane, onDownload) {
       };
     } else if (kind === "video") {
       body.append(h(`<video src="${src}" controls autoplay></video>`));
-      body.querySelector("video").onerror = () => nothing(e, t("Il browser non sa riprodurre questo formato."));
+      body.querySelector("video").onerror = () => nothing(e, t("files.preview.browser_cannot_play_format"));
     } else if (kind === "audio") {
       body.append(h(`<div style="text-align:center">${iconHTML(e, "keep").replace('class="gi', 'style="font-size:96px;display:block;margin-bottom:20px" class="gi')}<audio src="${src}" controls autoplay></audio></div>`));
     } else if (isBrowsable(e) && !pane.archive) {
       // like flea: what is inside, at a glance; Enter opens it as a folder
-      body.append(h(`<div class="ql-wait">${t("Caricamento…")}</div>`));
+      body.append(h(`<div class="ql-wait">${t("files.common.loading")}</div>`));
       try {
         const data = await api.list(e.path);
         if (files[index] !== e) return;
@@ -93,10 +93,10 @@ export function quickLook(pane, onDownload) {
         body.innerHTML = "";
         body.append(h(`<div class="ql-archive">
           <div class="sum">${iconHTML(e, "keep")}<div><b>${esc(e.name)}</b>
-            <span>${esc(count(tot.files || 0, "file", "file", int))} · ${esc(count(tot.dirs || 0, "cartella", "cartelle", int))} · ${esc(t("{s} estratti", { s: size(tot.bytes || 0) }))}</span></div>
-            <button class="btn primary enter">${svg("forward")} ${t("Apri come cartella")}</button></div>
+            <span>${esc(count(tot.files || 0, "files.common.count.files", int))} · ${esc(count(tot.dirs || 0, "files.common.count.folders", int))} · ${esc(t("files.preview.s_unpacked", { s: size(tot.bytes || 0) }))}</span></div>
+            <button class="btn primary enter">${svg("forward")} ${t("files.preview.open_folder")}</button></div>
           <ul>${shown.map((x) => `<li>${iconHTML(x)}<span class="n">${esc(x.name)}</span><span class="s">${x.kind === "d" ? "" : esc(size(x.size))}</span></li>`).join("")}</ul>
-          ${rows.length > shown.length ? `<div class="more">${esc(t("e altri {n}", { n: int(rows.length - shown.length) }))}</div>` : ""}
+          ${rows.length > shown.length ? `<div class="more">${esc(t("files.common.n_more", { n: int(rows.length - shown.length) }))}</div>` : ""}
         </div>`));
         $(".enter", body).onclick = () => {
           dlg.close();
@@ -113,7 +113,7 @@ export function quickLook(pane, onDownload) {
         if (files[index] !== e) return;
         if (r.binary) return nothing(e);
         const pre = h(`<pre></pre>`);
-        pre.textContent = r.text + (r.truncated ? `\n\n… ${t("(mostrati i primi 512 KiB di {s})", { s: size(r.size) })}` : "");
+        pre.textContent = r.text + (r.truncated ? `\n\n… ${t("files.preview.first_512_kib_s_shown", { s: size(r.size) })}` : "");
         body.innerHTML = "";
         body.append(pre);
       } catch (err) {
@@ -125,7 +125,7 @@ export function quickLook(pane, onDownload) {
     viewer?.destroy();
     viewer = null;
     zoomBar.hidden = true;
-    body.innerHTML = `<div class="nopreview">${iconHTML(e, "keep")}<div>${esc(why || t("Nessuna anteprima per questo tipo di file"))}</div></div>`;
+    body.innerHTML = `<div class="nopreview">${iconHTML(e, "keep")}<div>${esc(why || t("files.preview.no_preview_kind_file"))}</div></div>`;
   };
   const move = (d) => {
     const n = index + d;

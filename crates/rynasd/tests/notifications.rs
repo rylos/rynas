@@ -349,7 +349,7 @@ async fn notifications_api() {
     let t2: NotifyTarget = json(&b);
     assert_eq!(
         (t2.name.as_str(), t2.enabled, t2.language),
-        ("hook2", false, NotifyLanguage::It)
+        ("hook2", false, NotifyLanguage::new("it").unwrap())
     );
     assert_eq!(t2.secrets, ["token"]);
     let (s, _, b) = call(&app, "POST", &format!("{turi}/test"), Some("alice"), None).await;

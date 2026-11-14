@@ -125,19 +125,19 @@ export function shareGlyph(name) {
 }
 
 const KINDS = {
-  image: "Immagine", video: "Video", music: "Audio", lossless: "Audio lossless", crypto: "Chiave o firma",
-  document: "Documento", compressed: "Archivio", temp: "File temporaneo", compiled: "File compilato",
-  build: "File di progetto", source: "Codice sorgente",
+  image: "files.icons.image", video: "files.common.video", music: "files.common.audio", lossless: "files.icons.lossless_audio", crypto: "files.icons.key_signature",
+  document: "files.icons.document", compressed: "files.common.archive", temp: "files.icons.temporary_file", compiled: "files.icons.compiled_file",
+  build: "files.icons.build_file", source: "files.icons.source_code",
 };
 
 export function kindLabel(entry) {
-  if (entry.kind === "d") return t("Cartella");
-  if (entry.kind === "l" && entry.outside) return t("Collegamento fuori dalla cartella condivisa");
-  if (entry.kind === "l") return t(entry.link_dir ? "Collegamento a cartella" : "Collegamento simbolico");
-  if (entry.kind === "o") return t("File speciale");
+  if (entry.kind === "d") return t("files.common.folder");
+  if (entry.kind === "l" && entry.outside) return t("files.icons.link_out_shared_folder");
+  if (entry.kind === "l") return t(entry.link_dir ? "files.icons.link_folder" : "files.icons.symbolic_link");
+  if (entry.kind === "o") return t("files.icons.special_file");
   const e = ext(entry.name);
   const type = EZA.nameTypes[entry.name] || EZA.extTypes[EXT_ALIAS[e] || e];
-  const base = t((type && KINDS[type]) || (entry.mode & 0o111 ? "Eseguibile" : "File"));
+  const base = t((type && KINDS[type]) || (entry.mode & 0o111 ? "files.icons.executable" : "files.common.file"));
   return e ? `${base} ${e.toUpperCase()}` : base;
 }
 

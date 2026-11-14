@@ -27,10 +27,10 @@ export const sidebarMethods = {
   /** The name a volume is shown with: the one given to it (the system volume's reserved
    * label "system" translated), else "Volume 1" from its mount; `plain` is the latter. */
   volumeTitle(vol) {
-    if (vol === "home") return { title: t("Personale"), plain: t("Personale") };
-    const plain = vol.replace("volume", t("Volume") + " ").replace("USB", "USB ");
+    if (vol === "home") return { title: t("files.sidebar.personal"), plain: t("files.sidebar.personal") };
+    const plain = vol.replace("volume", t("files.sidebar.volume") + " ").replace("USB", "USB ");
     const given = this.volumeNames?.[vol];
-    if (given === "system") return { title: t("Sistema"), plain: t("Sistema") };
+    if (given === "system") return { title: t("files.sidebar.system"), plain: t("files.sidebar.system") };
     return { title: (prefs.volumeNames && given) || plain, plain };
   },
 
@@ -94,8 +94,8 @@ export const sidebarMethods = {
 
   /** The last part of a path; a connection's root goes by its name. */
   pathName(path) {
-    if (path === APPS_PATH) return t("Dati delle app");
-    if (path === BACKUPS_PATH) return t("Backups");
+    if (path === APPS_PATH) return t("files.common.app_data");
+    if (path === BACKUPS_PATH) return t("files.common.backups");
     // a PC's snapshot by its date (the tab's tooltip keeps the real path)
     const snapshot = pathLabel(path);
     if (snapshot) return snapshot;
@@ -103,7 +103,7 @@ export const sidebarMethods = {
   },
 
   connName(path) {
-    return this.connOf(path)?.name || t("Connessione eliminata");
+    return this.connOf(path)?.name || t("files.sidebar.connection_deleted");
   },
 
   /** A path as people read it: a server's own address for a remote one. */
@@ -125,7 +125,7 @@ export const sidebarMethods = {
   },
 
   async renameConn(conn) {
-    const name = await promptBox({ title: t("Rinomina connessione"), label: t("Nome nella barra laterale"), value: conn.name, ok: t("Rinomina"), validate: (v) => (!v.trim() ? t("Il nome non può essere vuoto") : null) });
+    const name = await promptBox({ title: t("files.sidebar.rename_connection"), label: t("files.common.name_in_sidebar"), value: conn.name, ok: t("files.common.rename"), validate: (v) => (!v.trim() ? t("files.sidebar.name_cannot_empty") : null) });
     if (!name || name.trim() === conn.name) return;
     try {
       await renameConnection(conn, name.trim());
@@ -136,7 +136,7 @@ export const sidebarMethods = {
   },
 
   async deleteConn(conn) {
-    const ok = await confirmBox({ title: t("Eliminare la connessione?"), message: t("«{n}» sparisce dalla barra laterale, con la password salvata. I file sul server restano dove sono.", { n: esc(conn.name) }), ok: t("Elimina"), danger: true });
+    const ok = await confirmBox({ title: t("files.sidebar.delete_connection_ask"), message: t("files.sidebar.n_leaves_sidebar_saved_password", { n: esc(conn.name) }), ok: t("files.common.delete"), danger: true });
     if (!ok) return;
     try {
       await api.deleteConn(conn.id);
@@ -168,20 +168,20 @@ export const sidebarMethods = {
     const fav = (prefs.favorites || []).some((f) => f.path === path);
     openMenu(x, y, [
       { title: conn.host },
-      { label: t("Apri"), icon: "forward", action: () => this.pane.go(path) },
-      { label: t("Apri in una nuova scheda"), icon: "plus", action: () => this.newTab(path) },
-      this.isSplit() && { label: t("Apri nell'altro pannello"), icon: "split", action: () => this.other().go(path) },
-      conn.kind === "smb" && conn.path && { label: t("Cartelle condivise del server"), icon: "server", action: () => this.pane.go("/:" + conn.id) },
+      { label: t("files.common.open"), icon: "forward", action: () => this.pane.go(path) },
+      { label: t("files.common.open_in_new_tab"), icon: "plus", action: () => this.newTab(path) },
+      this.isSplit() && { label: t("files.common.open_in_other_pane"), icon: "split", action: () => this.other().go(path) },
+      conn.kind === "smb" && conn.path && { label: t("files.sidebar.server_shared_folders"), icon: "server", action: () => this.pane.go("/:" + conn.id) },
       "-",
-      { label: t("Rinomina…"), icon: "rename", action: () => this.renameConn(conn) },
-      { label: t("Modifica…"), icon: "settings", action: () => this.editConn(conn) },
-      i > 0 && { label: t("Sposta su"), icon: "up", action: () => this.moveConn(i, i - 1) },
-      i < this.conns.length - 1 && { label: t("Sposta giù"), icon: "up", action: () => this.moveConn(i, i + 1) },
+      { label: t("files.sidebar.rename"), icon: "rename", action: () => this.renameConn(conn) },
+      { label: t("files.sidebar.edit"), icon: "settings", action: () => this.editConn(conn) },
+      i > 0 && { label: t("files.sidebar.move_up"), icon: "up", action: () => this.moveConn(i, i - 1) },
+      i < this.conns.length - 1 && { label: t("files.sidebar.move_down"), icon: "up", action: () => this.moveConn(i, i + 1) },
       "-",
-      fav ? { label: t("Togli dai preferiti"), icon: "star", action: () => this.toggleFavorite(path) } : { label: t("Aggiungi ai preferiti"), icon: "star", action: () => this.toggleFavorite(path) },
-      { label: t("Copia indirizzo"), icon: "link", action: () => copyText(serverAddress(conn, path, "smb")) },
+      fav ? { label: t("files.common.remove_favorites"), icon: "star", action: () => this.toggleFavorite(path) } : { label: t("files.common.add_favorites"), icon: "star", action: () => this.toggleFavorite(path) },
+      { label: t("files.common.copy_address"), icon: "link", action: () => copyText(serverAddress(conn, path, "smb")) },
       "-",
-      { label: t("Elimina connessione"), icon: "trash", danger: true, action: () => this.deleteConn(conn) },
+      { label: t("files.sidebar.delete_connection"), icon: "trash", danger: true, action: () => this.deleteConn(conn) },
     ]);
   },
 
@@ -216,7 +216,7 @@ export const sidebarMethods = {
     let html = "";
     const favs = prefs.favorites || [];
     if (prefs.showFavorites) {
-      html += `<div class="side-title fav-title">${t("Preferiti")}</div>`;
+      html += `<div class="side-title fav-title">${t("files.sidebar.favorites")}</div>`;
       // a favourite on a shared folder that is gone (a USB drive unplugged)
       const there = new Set(this.shares.map((s) => s.name));
       // …or an app's folder no longer shown (the app removed, the setting off)
@@ -225,8 +225,8 @@ export const sidebarMethods = {
       const backupGone = (p) => !backupFolders().length || (p !== BACKUPS_PATH && !backupFolders().some((b) => b.name === p.split("/")[2]));
       const top = (f) => f.path.split("/")[1];
       const gone = (f) => (isRemote(f.path) ? !this.connOf(f.path) : top(f) === APPS ? appGone(f.path) : top(f) === BACKUPS ? backupGone(f.path) : this.shares.length && !there.has(top(f)));
-      if (favs.length) html += favs.map((f, i) => item(f.path, f.name || baseName(f.path), f.path.split("/").length === 2 && isRemote(f.path) ? svg("server") : folderGlyphHTML(f.path, baseName(f.path), glyph({ kind: "d", name: baseName(f.path) })), gone(f) ? `<span class="si-sub">${t("non disponibile")}</span>` : "", "nested" + (gone(f) ? "" : this.ejectButton(f.path)), i, gone(f))).join("");
-      else html += `<div class="hint" style="padding:2px 10px 6px">${t("Ctrl+D aggiunge la cartella aperta")}</div>`;
+      if (favs.length) html += favs.map((f, i) => item(f.path, f.name || baseName(f.path), f.path.split("/").length === 2 && isRemote(f.path) ? svg("server") : folderGlyphHTML(f.path, baseName(f.path), glyph({ kind: "d", name: baseName(f.path) })), gone(f) ? `<span class="si-sub">${t("files.sidebar.not_available")}</span>` : "", "nested" + (gone(f) ? "" : this.ejectButton(f.path)), i, gone(f))).join("");
+      else html += `<div class="hint" style="padding:2px 10px 6px">${t("files.sidebar.ctrl_d_adds_open_folder")}</div>`;
     }
     const volumes = new Map();
     for (const s of this.shares) {
@@ -240,26 +240,26 @@ export const sidebarMethods = {
       const used = first.total ? 1 - first.free / first.total : 0;
       // the name given to the volume, with the plain one as the tooltip
       const { title, plain } = this.volumeTitle(vol);
-      html += `<div class="side-title vol-title" data-vol="${esc(vol)}" draggable="true"${title !== plain ? ` title="${esc(plain)}"` : ""}><span>${esc(title)}</span>${first.total && vol !== "home" ? `<span title="${t("{f} liberi di {t}", { f: size(first.free), t: size(first.total) })}">${size(first.free)}</span>` : ""}</div>`;
+      html += `<div class="side-title vol-title" data-vol="${esc(vol)}" draggable="true"${title !== plain ? ` title="${esc(plain)}"` : ""}><span>${esc(title)}</span>${first.total && vol !== "home" ? `<span title="${t("files.common.f_free_t", { f: size(first.free), t: size(first.total) })}">${size(first.free)}</span>` : ""}</div>`;
       if (first.total && vol !== "home") html += `<div class="vol-bar ${used > 0.95 ? "full" : used > 0.85 ? "high" : ""}" style="margin:0 10px 6px"><div style="width:${(used * 100).toFixed(1)}%"></div></div>`;
       for (const s of list) {
-        const badges = (s.encrypted ? `<span class="si-lock" title="${t("Cartella cifrata")}">${svg("lock")}</span>` : "") + (s.hidden ? `<span class="si-badge" title="${t("Nascosta in Rete")}">${t("nasc.")}</span>` : "") + (s.holds_backup ? `<span class="si-badge" title="${esc(t("Si sovrappone alla cartella dei backup del PC {pc}: in sola lettura finché i backup non hanno una cartella propria", { pc: s.holds_backup }))}">${t("sola lettura")}</span>` : "") + this.ejectButton("/" + s.name);
-        html += item("/" + s.name, s.home ? t("Home ({u})", { u: this.user }) : s.name, folderGlyphHTML("/" + s.name, s.name, s.home ? shareGlyph("home") : shareGlyph(s.name)), s.comment ? `<span class="si-sub">${esc(s.comment)}</span>` : "", badges);
+        const badges = (s.encrypted ? `<span class="si-lock" title="${t("files.sidebar.encrypted_folder")}">${svg("lock")}</span>` : "") + (s.hidden ? `<span class="si-badge" title="${t("files.sidebar.hidden_on_network")}">${t("files.sidebar.hidden_badge")}</span>` : "") + (s.holds_backup ? `<span class="si-badge" title="${esc(t("files.sidebar.overlaps_backup_folder_pc_pc", { pc: s.holds_backup }))}">${t("files.common.read_only")}</span>` : "") + this.ejectButton("/" + s.name);
+        html += item("/" + s.name, s.home ? t("files.sidebar.home_u", { u: this.user }) : s.name, folderGlyphHTML("/" + s.name, s.name, s.home ? shareGlyph("home") : shareGlyph(s.name)), s.comment ? `<span class="si-sub">${esc(s.comment)}</span>` : "", badges);
       }
     }
     const apps = appFolders();
     if (apps.length) {
-      html += `<div class="side-title"><span>${t("App")}</span></div>`;
-      html += item(APPS_PATH, t("Dati delle app"), svg("box"), `<span class="si-sub">${t("{n} cartelle", { n: apps.length })}</span>`);
+      html += `<div class="side-title"><span>${t("files.sidebar.apps")}</span></div>`;
+      html += item(APPS_PATH, t("files.common.app_data"), svg("box"), `<span class="si-sub">${t("files.sidebar.n_folders", { n: apps.length })}</span>`);
     }
     const backups = backupFolders();
     if (backups.length) {
       // one entry, no section title of its own (it would say "Backups" twice): a rule sets it apart
       html += `<div class="side-sep"></div>`;
       // the same icon as its tab
-      html += item(BACKUPS_PATH, t("Backups"), folderGlyphHTML(BACKUPS_PATH, t("Backups"), glyph({ kind: "d", name: t("Backups") })), `<span class="si-sub">${t("sola lettura")}</span>`);
+      html += item(BACKUPS_PATH, t("files.common.backups"), folderGlyphHTML(BACKUPS_PATH, t("files.common.backups"), glyph({ kind: "d", name: t("files.common.backups") })), `<span class="si-sub">${t("files.common.read_only")}</span>`);
     }
-    html += `<div class="side-title conn-title"><span>${t("Connessioni")}</span><button class="side-add" title="${t("Nuova connessione")}">${svg("plus")}</button></div>`;
+    html += `<div class="side-title conn-title"><span>${t("files.sidebar.connections")}</span><button class="side-add" title="${t("files.common.new_connection")}">${svg("plus")}</button></div>`;
     if (this.conns.length) {
       html += this.conns
         .map((c, i) => {
@@ -268,7 +268,7 @@ export const sidebarMethods = {
           return `<button class="side-item ${active ? "active" : ""}" data-path="${esc(path)}" data-conn="${i}" draggable="true"><i class="gi">${svg("server")}</i><span class="si-text"><span class="si-name">${esc(c.name)}</span><span class="si-sub">${esc((c.kind === "sftp" ? "SFTP · " : "") + c.host)}</span></span></button>`;
         })
         .join("");
-    } else html += `<div class="hint" style="padding:2px 10px 6px">${t("Server SMB o SFTP: \\\\server nel percorso, o il +")}</div>`;
+    } else html += `<div class="hint" style="padding:2px 10px 6px">${t("files.sidebar.smb_sftp_servers_server_in")}</div>`;
     el.innerHTML = html;
     el.querySelector(".side-add").onclick = async () => {
       const saved = await this.addConnection();
@@ -371,13 +371,13 @@ export const sidebarMethods = {
       b.oncontextmenu = (e) => {
         e.preventDefault();
         openMenu(e.clientX, e.clientY, [
-          i > 0 && { label: t("Sposta su"), icon: "up", action: () => this.moveVolume(b.dataset.vol, i - 1) },
-          i < titles.length - 1 && { label: t("Sposta giù"), icon: "up", action: () => this.moveVolume(b.dataset.vol, i + 1) },
+          i > 0 && { label: t("files.sidebar.move_up"), icon: "up", action: () => this.moveVolume(b.dataset.vol, i - 1) },
+          i < titles.length - 1 && { label: t("files.sidebar.move_down"), icon: "up", action: () => this.moveVolume(b.dataset.vol, i + 1) },
           (prefs.volumeOrder || []).length > 0 && "-",
-          (prefs.volumeOrder || []).length > 0 && { label: t("Ordine predefinito"), icon: "refresh", action: () => save({ volumeOrder: [] }) },
+          (prefs.volumeOrder || []).length > 0 && { label: t("files.sidebar.default_order"), icon: "refresh", action: () => save({ volumeOrder: [] }) },
           ...(() => {
             const share = this.shares.find((s) => s.volume === b.dataset.vol && isRemovable(s));
-            return share ? ["-", { label: t("Espelli"), icon: "eject", action: () => this.eject(share.name) }] : [];
+            return share ? ["-", { label: t("files.common.eject"), icon: "eject", action: () => this.eject(share.name) }] : [];
           })(),
         ]);
       };
@@ -426,23 +426,23 @@ export const sidebarMethods = {
     const share = this.shares.find((s) => "/" + s.name === path);
     const last = (prefs.favorites || []).length - 1;
     openMenu(x, y, [
-      favIndex !== null && favIndex > 0 && { label: t("Sposta su"), icon: "up", action: () => this.moveFavorite(favIndex, favIndex - 1) },
-      favIndex !== null && favIndex < last && { label: t("Sposta giù"), icon: "up", action: () => this.moveFavorite(favIndex, favIndex + 1) },
+      favIndex !== null && favIndex > 0 && { label: t("files.sidebar.move_up"), icon: "up", action: () => this.moveFavorite(favIndex, favIndex - 1) },
+      favIndex !== null && favIndex < last && { label: t("files.sidebar.move_down"), icon: "up", action: () => this.moveFavorite(favIndex, favIndex + 1) },
       favIndex !== null && (favIndex > 0 || favIndex < last) && "-",
-      { label: t("Apri"), icon: "forward", action: () => this.pane.go(path) },
-      { label: t("Apri in una nuova scheda"), icon: "plus", action: () => this.newTab(path) },
-      this.isSplit() && { label: t("Apri nell'altro pannello"), icon: "split", action: () => this.other().go(path) },
-      share?.recycle && { label: t("Apri il cestino"), icon: "trash", action: () => this.pane.go(path + "/#recycle") },
-      share?.recycle && { label: t("Svuota il cestino"), icon: "trash", danger: true, action: () => this.emptyBin(path + "/#recycle") },
-      !isRemote(path) && !isBackupTop(path) && { label: t("Analisi spazio"), icon: "pie", action: () => this.analyseSpace(path) },
+      { label: t("files.common.open"), icon: "forward", action: () => this.pane.go(path) },
+      { label: t("files.common.open_in_new_tab"), icon: "plus", action: () => this.newTab(path) },
+      this.isSplit() && { label: t("files.common.open_in_other_pane"), icon: "split", action: () => this.other().go(path) },
+      share?.recycle && { label: t("files.sidebar.open_recycle_bin"), icon: "trash", action: () => this.pane.go(path + "/#recycle") },
+      share?.recycle && { label: t("files.common.empty_recycle_bin"), icon: "trash", danger: true, action: () => this.emptyBin(path + "/#recycle") },
+      !isRemote(path) && !isBackupTop(path) && { label: t("files.common.space_analysis"), icon: "pie", action: () => this.analyseSpace(path) },
       "-",
-      fav ? { label: t("Togli dai preferiti"), icon: "star", action: () => this.toggleFavorite(path) } : { label: t("Aggiungi ai preferiti"), icon: "star", action: () => this.toggleFavorite(path) },
-      { label: t("Copia percorso"), icon: "link", action: () => copyText(this.displayPath(path)) },
-      !(isRemote(path) && path.split("/").length === 2) && { label: t("Icona…"), icon: "palette", action: () => pickIcon({ x, y }, path) },
-      share && !share.home && share.volume && !this.removableShare(path) && { label: t("Descrizione…"), icon: "rename", action: () => shareDescription(share) },
-      share && !share.home && share.volume && !this.removableShare(path) && { label: t("Permessi…"), icon: "shield", action: () => sharePermissions(share) },
+      fav ? { label: t("files.common.remove_favorites"), icon: "star", action: () => this.toggleFavorite(path) } : { label: t("files.common.add_favorites"), icon: "star", action: () => this.toggleFavorite(path) },
+      { label: t("files.common.copy_path"), icon: "link", action: () => copyText(this.displayPath(path)) },
+      !(isRemote(path) && path.split("/").length === 2) && { label: t("files.sidebar.icon"), icon: "palette", action: () => pickIcon({ x, y }, path) },
+      share && !share.home && share.volume && !this.removableShare(path) && { label: t("files.sidebar.description"), icon: "rename", action: () => shareDescription(share) },
+      share && !share.home && share.volume && !this.removableShare(path) && { label: t("files.common.permissions_menu"), icon: "shield", action: () => sharePermissions(share) },
       this.removableShare(path) && "-",
-      this.removableShare(path) && { label: t("Espelli"), icon: "eject", action: () => this.eject(this.removableShare(path).name) },
+      this.removableShare(path) && { label: t("files.common.eject"), icon: "eject", action: () => this.eject(this.removableShare(path).name) },
     ]);
   },
 
@@ -455,7 +455,7 @@ export const sidebarMethods = {
 
   ejectButton(path) {
     const share = this.removableShare(path);
-    return share ? `<span class="si-eject" role="button" data-share="${esc(share.name)}" title="${t("Espelli")}">${svg("eject")}</span>` : "";
+    return share ? `<span class="si-eject" role="button" data-share="${esc(share.name)}" title="${t("files.common.eject")}">${svg("eject")}</span>` : "";
   },
 
   /**
@@ -465,29 +465,29 @@ export const sidebarMethods = {
    */
   async eject(shareName) {
     const share = this.shares.find((s) => s.name === shareName);
-    if (!share) return toast(t("Il dispositivo di «{s}» non risulta collegato", { s: shareName }), { kind: "error" });
+    if (!share) return toast(t("files.sidebar.drive_s_not_appear_connected", { s: shareName }), { kind: "error" });
     // the other shared folders of the same drive (`device` from the server, else the volume)
     const same = (s) => (share.device ? s.device === share.device : s.volume === share.volume);
     const names = this.shares.filter((s) => isRemovable(s) && same(s)).map((s) => s.name);
     const inUse = (p) => names.some((n) => p === "/" + n || p?.startsWith("/" + n + "/"));
     if (transfers.all().some((j) => !transfers.finished(j) && [...(j.info.sources || []), j.info.dest].some(inUse))) {
-      return toast(t("Ci sono trasferimenti in corso su «{s}»: aspetta che finiscano o annullali", { s: shareName }), { kind: "error" });
+      return toast(t("files.sidebar.transfers_running_on_s_wait", { s: shareName }), { kind: "error" });
     }
     const title = share.device_name || shareName;
     const ok = await confirmBox({
-      title: t("Espellere «{d}»?", { d: title }),
-      message: t("Le cartelle condivise del dispositivo non saranno disponibili finché non lo ricolleghi."),
+      title: t("files.sidebar.eject_d", { d: title }),
+      message: t("files.sidebar.drive_shared_folders_not_available"),
       items: names.map((n) => `<i class="gi">${shareGlyph(n)}</i>${esc(n)}`),
-      ok: t("Espelli"),
+      ok: t("files.common.eject"),
       icon: "eject",
     });
     if (!ok) return;
     try {
       await api.eject(shareName);
     } catch (e) {
-      return toast(t("Impossibile espellere «{d}» ({e}): forse è ancora in uso", { d: title, e: e.message }), { kind: "error", timeout: 9000 });
+      return toast(t("files.sidebar.cannot_eject_d_e_may", { d: title, e: e.message }), { kind: "error", timeout: 9000 });
     }
-    toast(t("«{d}» espulso: si può scollegare", { d: title }), { kind: "ok" });
+    toast(t("files.sidebar.d_ejected_can_unplugged", { d: title }), { kind: "ok" });
     for (const p of this.allPanes()) if (inUse(p.path)) p.go("/");
     await this.loadShares();
   },
@@ -497,10 +497,10 @@ export const sidebarMethods = {
     let favs = [...(prefs.favorites || [])];
     if (favs.some((f) => f.path === path)) {
       favs = favs.filter((f) => f.path !== path);
-      toast(t("Tolta dai preferiti"), { timeout: 1500 });
+      toast(t("files.sidebar.removed_favorites"), { timeout: 1500 });
     } else {
       favs.push({ path, name: this.pathName(path) });
-      toast(t("Aggiunta ai preferiti"), { kind: "ok", timeout: 1500 });
+      toast(t("files.sidebar.added_favorites"), { kind: "ok", timeout: 1500 });
     }
     save({ favorites: favs });
   },

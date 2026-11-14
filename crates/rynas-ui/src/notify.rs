@@ -460,11 +460,11 @@ mod tests {
     use crate::i18n::{Lang, lookup};
 
     fn it(k: &str) -> Option<&'static str> {
-        lookup(k, Lang::It)
+        lookup(k, Lang::from_code("it").unwrap())
     }
 
     fn en(k: &str) -> Option<&'static str> {
-        lookup(k, Lang::En)
+        lookup(k, Lang::EN)
     }
 
     fn note(code: &str, fields: &[(&str, &str)], format: BodyFormat) -> Notification {

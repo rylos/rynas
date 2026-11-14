@@ -115,7 +115,7 @@ mod tests {
             NetAllowHelp, NetFilter, NetFilterInactive, NetUnreadable, NetPrimary, NetManual, NetOutside, NetRoleMonitorHelp, NetUserHelp, NetUserBad,
             NetCommands,
         ] {
-            assert!(i18n::text_in(Lang::En, ups_key(s)).is_some(), "{s:?}");
+            assert!(i18n::text_in(Lang::EN, ups_key(s)).is_some(), "{s:?}");
         }
         assert!(source_label("smartd").is_none());
         assert!(net_user_ok("pc_1") && !net_user_ok("pc-1") && !net_user_ok("1pc") && !net_user_ok("monuser"));

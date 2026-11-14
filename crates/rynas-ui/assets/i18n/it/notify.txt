@@ -1,0 +1,21 @@
+# rynas: Italian translation, notification messages (channels). One key<TAB>text line per entry; see docs/i18n.md
+notify.notifications	notifiche
+notify.footer	rynas su
+notify.resolved	Risolto
+notify.reminder	Promemoria
+notify.test_title	Notifica di prova
+notify.test_body	Se leggi questo messaggio, il canale funziona.
+notify.severity.info	Info
+notify.severity.notice	Avviso
+notify.severity.warning	Attenzione
+notify.severity.error	Errore
+notify.severity.critical	Critico
+notify.category.storage	Archiviazione
+notify.category.hardware	Hardware
+notify.category.ups	UPS
+notify.category.system	Sistema
+notify.category.security	Sicurezza
+notify.category.update	Aggiornamenti
+notify.category.backup	Backup
+notify.category.app	App
+notify.category.task	Attività

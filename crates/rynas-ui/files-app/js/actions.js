@@ -31,7 +31,7 @@ export const actionMethods = {
       ({ editFile } = await import("./editor.js"));
     } catch {
       // the module is not there any more: an upgrade happened while this tab was open
-      toast(t("Impossibile aprire l'editor: ricarica la pagina"), { kind: "error" });
+      toast(t("files.actions.editor_cannot_opened_reload_page"), { kind: "error" });
       return;
     }
     const saved = await editFile(entry.path, { label: this.displayPath(entry.path) });
@@ -67,46 +67,46 @@ export const actionMethods = {
     // a PC's whole backup or whole snapshot is not zipped from here
     if (entries.some((e) => isDirLike(e) && isWholeBackup(e.path))) return;
     // out of an archive only single files: the rest is extracted
-    if (archiveOf(entries[0].path) && (entries.length > 1 || isDirLike(entries[0]))) return toast(t("Dentro un archivio si scaricano solo file singoli: per il resto usa «Copia in…»"), { kind: "error" });
+    if (archiveOf(entries[0].path) && (entries.length > 1 || isDirLike(entries[0]))) return toast(t("files.actions.inside_archive_only_single_files"), { kind: "error" });
     const a = document.createElement("a");
     a.href = api.download(entries.map((e) => e.path));
     a.download = "";
     mount(a);
     a.click();
     a.remove();
-    if (entries.length > 1 || isDirLike(entries[0])) toast(t("Download come archivio .zip avviato"), { timeout: 2500 });
+    if (entries.length > 1 || isDirLike(entries[0])) toast(t("files.actions.download_started_zip_archive"), { timeout: 2500 });
   },
 
   compress(pane) {
     if (isReadOnly(pane)) return readOnlyHere(pane);
     const list = pane.targets().filter((e) => !e.share);
     if (!list.length || pane.path === "/") return;
-    const base = list.length === 1 ? (isDirLike(list[0]) ? list[0].name : archiveStem(list[0].name)) : baseName(pane.path) || t("Archivio");
+    const base = list.length === 1 ? (isDirLike(list[0]) ? list[0].name : archiveStem(list[0].name)) : baseName(pane.path) || t("files.common.archive");
     // zip opens anywhere; tar.zst (zstd levels 1, 3, 9 on the NAS) is faster and smaller
     // and keeps permissions and links
     const formats = {
       zip: {
         ext: ".zip",
-        levels: [["normal", t("Normale")], ["fast", t("Veloce")], ["store", t("Nessuna (solo archivio, il più veloce)")]],
-        hint: t("Foto, video, musica e archivi vengono solo archiviati: comprimerli di nuovo non fa risparmiare spazio."),
+        levels: [["normal", t("files.common.normal")], ["fast", t("files.actions.fast")], ["store", t("files.actions.none_store_only_fastest")]],
+        hint: t("files.actions.photos_videos_music_archives_stored"),
       },
       "tar.zst": {
         ext: ".tar.zst",
-        levels: [["normal", t("Normale")], ["fast", t("Veloce")], ["best", t("Massima (lenta)")]],
-        hint: t("Foto, video, musica e archivi non si riducono, ma zstd li attraversa senza rallentare."),
+        levels: [["normal", t("files.common.normal")], ["fast", t("files.actions.fast")], ["best", t("files.actions.best_slow")]],
+        hint: t("files.actions.photos_videos_music_archives_not"),
       },
     };
     const dlg = dialog(`<form method="dialog">
-      <div class="dlg-head"><div class="dlg-icon">${svg("archive")}</div><h2>${t("Crea un archivio")}</h2></div>
+      <div class="dlg-head"><div class="dlg-icon">${svg("archive")}</div><h2>${t("files.actions.create_archive")}</h2></div>
       <div class="dlg-body">
-        <p>${t("{n} in un archivio, nella stessa cartella.", { n: count(list.length, "elemento", "elementi", int) })}</p>
-        <label class="field"><span>${t("Formato")}</span><select class="fm">
-          <option value="zip">${t("zip (si apre ovunque)")}</option><option value="tar.zst">${t("tar.zst (più veloce e compatto, conserva permessi e collegamenti)")}</option></select></label>
-        <label class="field"><span>${t("Nome dell'archivio")}</span><input type="text" class="nm" value="${esc(base)}.zip" spellcheck="false"></label><div class="hint err"></div>
-        <label class="field"><span>${t("Compressione")}</span><select class="lv"></select></label>
+        <p>${t("files.actions.n_archive_in_same_folder", { n: count(list.length, "files.common.count.items", int) })}</p>
+        <label class="field"><span>${t("files.actions.format")}</span><select class="fm">
+          <option value="zip">${t("files.actions.zip_opens_anywhere")}</option><option value="tar.zst">${t("files.actions.tar_zst_faster_smaller_keeps")}</option></select></label>
+        <label class="field"><span>${t("files.actions.archive_name")}</span><input type="text" class="nm" value="${esc(base)}.zip" spellcheck="false"></label><div class="hint err"></div>
+        <label class="field"><span>${t("files.common.compression")}</span><select class="lv"></select></label>
         <p class="hint lvhint"></p>
       </div>
-      <div class="dlg-foot"><button type="button" class="btn cancel">${t("Annulla")}</button><button class="btn primary">${t("Comprimi")}</button></div></form>`);
+      <div class="dlg-foot"><button type="button" class="btn cancel">${t("files.common.cancel")}</button><button class="btn primary">${t("files.actions.compress")}</button></div></form>`);
     const input = dlg.querySelector(".nm");
     const fmt = dlg.querySelector(".fm");
     const lv = dlg.querySelector(".lv");
@@ -135,7 +135,7 @@ export const actionMethods = {
       const name = input.value.trim();
       if (!name || name.includes("/") || name === "." || name === "..") {
         e.preventDefault();
-        err.textContent = t("Nome non valido");
+        err.textContent = t("files.common.invalid_name");
         err.style.color = "var(--crit)";
         input.focus();
         return;
@@ -147,7 +147,7 @@ export const actionMethods = {
   async extract(pane, entry, mode) {
     let dest = parentOf(entry.path);
     if (mode === "pick") {
-      dest = await pickFolder({ title: t("Estrai «{x}» in…", { x: entry.name }), start: this.other()?.path || dest, ok: t("Estrai qui") });
+      dest = await pickFolder({ title: t("files.actions.extract_x", { x: entry.name }), start: this.other()?.path || dest, ok: t("files.common.extract_here") });
       if (!dest) return;
     }
     transfers.start({ op: "extract", sources: [entry.path], dest, into_folder: mode !== "here", conflict: mode === "here" ? (prefs.conflict === "ask" ? "rename" : prefs.conflict) : "rename" });
@@ -174,7 +174,7 @@ export const actionMethods = {
     const list = pane.targets().filter((e) => !e.share && !(op === "cut" && (e.readonly || isProtectedFolder(e) || pane.writable === false)));
     if (!list.length) return;
     this.clipboard = { op, paths: list.map((e) => e.path), from: pane.path };
-    toast(t(op === "cut" ? "{n} pronti da spostare: incolla con Ctrl+V" : "{n} pronti da copiare: incolla con Ctrl+V", { n: count(list.length, "elemento", "elementi", int) }), { timeout: 2200 });
+    toast(t(op === "cut" ? "files.actions.n_ready_move_paste_ctrl" : "files.actions.n_ready_copy_paste_ctrl", { n: count(list.length, "files.common.count.items", int) }), { timeout: 2200 });
     this.allPanes().forEach((p) => p.paint());
     pane.renderStatus();
   },
@@ -182,7 +182,7 @@ export const actionMethods = {
   paste(pane = this.pane, dest = pane.path, verify = false) {
     const cb = this.clipboard;
     if (!cb || dest === "/") return;
-    if (cb.op === "cut" && cb.from === dest) return toast(t("Gli elementi sono già in questa cartella"));
+    if (cb.op === "cut" && cb.from === dest) return toast(t("files.actions.items_already_in_folder"));
     this.transfer(cb.op === "cut" ? "move" : "copy", cb.paths, dest, verify);
     if (cb.op === "cut") this.clipboard = null;
     this.allPanes().forEach((p) => p.paint());
@@ -200,7 +200,7 @@ export const actionMethods = {
       if (paths.some((p) => archiveOf(p)?.root !== from.root)) return;
       return transfers.start({ op: "extract", sources: [from.root], members: paths.map((p) => archiveOf(p).inner), dest, conflict: prefs.conflict === "ask" ? "rename" : prefs.conflict });
     }
-    if (paths.some((p) => dest === p || dest.startsWith(p + "/"))) return toast(t("Una cartella non può finire dentro sé stessa"), { kind: "error" });
+    if (paths.some((p) => dest === p || dest.startsWith(p + "/"))) return toast(t("files.actions.folder_cannot_go_inside_itself"), { kind: "error" });
     if (op === "move" && paths.every((p) => parentOf(p) === dest)) return;
     transfers.start({ op, sources: paths, dest, verify });
   },
@@ -212,16 +212,16 @@ export const actionMethods = {
     if (!list.length) return;
     const other = this.other();
     const dest = await pickFolder({
-      title: t(op === "move" ? (verify ? "Sposta con verifica {n} in…" : "Sposta {n} in…") : verify ? "Copia con verifica {n} in…" : "Copia {n} in…", { n: count(list.length, "elemento", "elementi", int) }),
+      title: t(op === "move" ? (verify ? "files.actions.move_n_verification" : "files.actions.move_n") : verify ? "files.actions.copy_n_verification" : "files.actions.copy_n", { n: count(list.length, "files.common.count.items", int) }),
       start: other ? other.path : pane.path,
-      ok: t(op === "move" ? "Sposta qui" : "Copia qui"),
+      ok: t(op === "move" ? "files.common.move_here" : "files.common.copy_here"),
     });
     if (dest) this.transfer(op, list.map((e) => e.path), dest, verify);
   },
 
   toOtherPane(op, verify = false) {
     const other = this.other();
-    if (!other) return toast(t("Apri il doppio pannello con F3"));
+    if (!other) return toast(t("files.actions.open_dual_pane_f3"));
     if (op === "move" && isReadOnly(this.pane)) return readOnlyHere(this.pane);
     const list = this.pane.targets().filter((e) => !e.share);
     if (list.length) this.transfer(op, list.map((e) => e.path), other.path, verify);
@@ -237,12 +237,12 @@ export const actionMethods = {
     if (prefs.confirmDelete || !recycle) {
       const names = list.map((e) => `<i class="gi">${glyph(e)}</i>${esc(e.name)}`);
       const ok = await confirmBox({
-        title: recycle ? t("Spostare nel cestino?") : t("Eliminare definitivamente?"),
+        title: recycle ? t("files.actions.move_recycle_bin") : t("files.actions.delete_permanently"),
         message: recycle
-          ? t("{n} finiranno nel cestino della cartella condivisa, da dove si possono recuperare.", { n: count(list.length, "elemento", "elementi", int) })
-          : `<b style="color:var(--crit)">${t("{n} verranno eliminati definitivamente: non si possono recuperare.", { n: count(list.length, "elemento", "elementi", int) })}</b>${!pane.recycle && !inBin ? "<br>" + t("Il cestino di questa cartella condivisa è disattivato.") : ""}`,
+          ? t("files.actions.n_go_shared_folder_recycle", { n: count(list.length, "files.common.count.items", int) })
+          : `<b style="color:var(--crit)">${t("files.actions.n_deleted_permanently_cannot_restored", { n: count(list.length, "files.common.count.items", int) })}</b>${!pane.recycle && !inBin ? "<br>" + t("files.actions.recycle_bin_shared_folder_off") : ""}`,
         items: names,
-        ok: recycle ? t("Sposta nel cestino") : t("Elimina"),
+        ok: recycle ? t("files.common.move_recycle_bin") : t("files.common.delete"),
         danger: !recycle,
         icon: "trash",
       });
@@ -259,11 +259,11 @@ export const actionMethods = {
     } catch (err) {
       return errorToast(err);
     }
-    if (!entries.length) return toast(t("Il cestino è già vuoto"));
+    if (!entries.length) return toast(t("files.actions.recycle_bin_already_empty"));
     const ok = await confirmBox({
-      title: t("Svuotare il cestino?"),
-      message: `<b style="color:var(--crit)">${t("{n} verranno eliminati definitivamente: non si possono recuperare.", { n: count(entries.length, "elemento", "elementi", int) })}</b>`,
-      ok: t("Svuota il cestino"),
+      title: t("files.actions.empty_recycle_bin"),
+      message: `<b style="color:var(--crit)">${t("files.actions.n_deleted_permanently_cannot_restored", { n: count(entries.length, "files.common.count.items", int) })}</b>`,
+      ok: t("files.common.empty_recycle_bin"),
       danger: true,
       icon: "trash",
     });
@@ -274,15 +274,15 @@ export const actionMethods = {
     if (isReadOnly(pane)) return readOnlyHere(pane);
     if (e.readonly || isProtectedFolder(e) || pane.writable === false) return;
     const name = await promptBox({
-      title: t("Rinomina"),
-      label: t("Nuovo nome"),
+      title: t("files.common.rename"),
+      label: t("files.actions.new_name"),
       value: e.name,
-      ok: t("Rinomina"),
+      ok: t("files.common.rename"),
       select: (v) => {
         const i = v.lastIndexOf(".");
         return [0, isDirLike(e) || i <= 0 ? v.length : i];
       },
-      validate: (v) => (!v.trim() || v.includes("/") ? t("Nome non valido") : null),
+      validate: (v) => (!v.trim() || v.includes("/") ? t("files.common.invalid_name") : null),
     });
     if (!name || name === e.name) return;
     try {
@@ -300,7 +300,7 @@ export const actionMethods = {
   async newFolder(pane = this.pane) {
     if (pane.path === "/") return;
     if (isReadOnly(pane)) return readOnlyHere(pane);
-    const name = await promptBox({ title: t("Nuova cartella"), label: t("Nome"), value: t("Nuova cartella"), icon: "folderPlus", ok: t("Crea"), validate: (v) => (!v.trim() || v.includes("/") ? t("Nome non valido") : null) });
+    const name = await promptBox({ title: t("files.common.new_folder"), label: t("files.common.name"), value: t("files.common.new_folder"), icon: "folderPlus", ok: t("files.actions.create"), validate: (v) => (!v.trim() || v.includes("/") ? t("files.common.invalid_name") : null) });
     if (!name) return;
     try {
       await api.mkdir(pane.path, name);
@@ -316,7 +316,7 @@ export const actionMethods = {
     // a PC's whole backup or whole snapshot is not summed up from here
     const dirs = entries.filter((e) => isDirLike(e) && !isWholeBackup(e.path));
     if (!dirs.length) return;
-    toast(t("Calcolo delle dimensioni…"), { timeout: 1500 });
+    toast(t("files.actions.computing_sizes"), { timeout: 1500 });
     const queue = [...dirs];
     const worker = async () => {
       while (queue.length) {
@@ -352,7 +352,7 @@ export const actionMethods = {
   },
 
   pickUpload(kind, pane = this.pane) {
-    if (pane.path === "/") return toast(t("Apri prima una cartella condivisa"));
+    if (pane.path === "/") return toast(t("files.actions.open_shared_folder_first"));
     if (isReadOnly(pane)) return readOnlyHere(pane);
     this.uploadDest = pane.path;
     $(kind === "folder" ? "#upload-folder" : "#upload-files").click();

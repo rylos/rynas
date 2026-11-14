@@ -89,8 +89,8 @@ export async function changed(...paths) {
     }
     if (!running) continue;
     const name = await displayName(stack, app);
-    toast(t("L'app {s} potrebbe dover ripartire per vedere la modifica", { s: name }), {
-      action: t("Riavvia"),
+    toast(t("files.appdata.s_may_need_restart_see", { s: name }), {
+      action: t("files.appdata.restart"),
       timeout: 12_000,
       onAction: () => restart(stack, name),
     });
@@ -100,7 +100,7 @@ export async function changed(...paths) {
 async function restart(stack, name) {
   try {
     await rynas(`/api/v1/docker/stacks/${encodeURIComponent(stack)}/restart`, "POST");
-    toast(t("Riavvio di {s} avviato", { s: name }), { kind: "ok" });
+    toast(t("files.appdata.restarting_s", { s: name }), { kind: "ok" });
   } catch (e) {
     errorToast(e);
   }

@@ -1,11 +1,15 @@
 //! Checks of the file manager's Web Component (`files-app/`, ported from SynoFile, see
-//! `pages/files.rs`): its texts follow the same rules as the dictionary of `i18n.rs` (both
-//! languages, no other product named: G8, G8c) and its stylesheet the no-sideways-scroll rule (G7).
+//! `pages/files.rs`): its texts follow the same rules as the dictionary of `i18n.rs` (stable
+//! keys, English source, one translation file per language, no other product named: G8, G8c)
+//! and its stylesheet the no-sideways-scroll rule (G7).
 //!
-//! The component's strings are Italian in the code (`t("…")`) with the English in
-//! `files-app/js/lang/en.js`, one `"italiano": "English",` entry per line.
+//! The component's texts are keys in the code (`t("files.<area>.<name>")`, `count(n,
+//! "files.….count.…")` for plural forms, `keyText()` for key names `files.key.*`), English in
+//! `files-app/js/lang/en.js` (one `"key": "English",` entry per line) and every other
+//! language in `assets/i18n/<code>/files.txt` (docs/i18n.md), checked like the core's parts by
+//! `crate::i18n_check`.
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 fn app_dir() -> PathBuf {
@@ -31,23 +35,24 @@ fn sources() -> Vec<(String, String)> {
     out
 }
 
-/// The English table: Italian key → English text (plural tables as their JSON text).
-fn english() -> HashMap<String, String> {
+/// The English table, in its order: key → English text (plain strings only).
+fn english() -> Vec<(String, String)> {
     let text = std::fs::read_to_string(app_dir().join("js/lang/en.js")).expect("en.js");
     let start = text.find("export default {").expect("en.js: export default {") + "export default ".len();
     let end = text.rfind("};").expect("en.js: closing };");
     // the object is JSON but for the trailing commas
     let body = text[start..=end].trim_end_matches([';', '\n']).replace(",\n}", "\n}");
     let map: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&body).expect("en.js is a JSON object with string keys");
-    map.into_iter()
-        .map(|(k, v)| {
-            let s = match v {
-                serde_json::Value::String(s) => s,
-                other => other.to_string(),
-            };
-            (k, s)
+    let mut out: Vec<(String, String)> = map
+        .into_iter()
+        .map(|(k, v)| match v {
+            serde_json::Value::String(s) => (k, s),
+            other => panic!("en.js: {k}: plain strings only (plural forms are key.one / key.other), got {other}"),
         })
-        .collect()
+        .collect();
+    // serde_json keeps no order: the file's own order, for the reports
+    out.sort_by_key(|(k, _)| text.find(&format!("\"{k}\":")).unwrap_or(usize::MAX));
+    out
 }
 
 /// The JS string literal that starts at `s` (just after its opening quote), unescaped.
@@ -67,19 +72,17 @@ fn literal(s: &str) -> Option<String> {
     serde_json::from_str(&format!("\"{}\"", &s[..end?])).ok()
 }
 
-/// Every `t("…")` key of the sources, with the file it is in.
-fn keys() -> Vec<(String, String)> {
+/// Every `"files.…"` string literal of the sources (the keys the code names), with its file.
+fn key_literals() -> Vec<(String, String)> {
     let mut out = Vec::new();
     for (file, text) in sources() {
         let mut rest = text.as_str();
-        while let Some(i) = rest.find("t(\"") {
-            let before = rest[..i].chars().last();
-            rest = &rest[i + 3..];
-            // `t(` itself, not the end of another name (`set(`, `count(`)
-            if before.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '.') {
-                continue;
-            }
-            if let Some(k) = literal(rest) {
+        while let Some(i) = rest.find("\"files.") {
+            rest = &rest[i + 1..];
+            if let Some(k) = literal(rest)
+                && !k.ends_with('.')
+                && k.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '.')
+            {
                 out.push((file.clone(), k));
             }
         }
@@ -87,52 +90,106 @@ fn keys() -> Vec<(String, String)> {
     out
 }
 
-/// The Italian texts of the error table of `i18n.js` (`ERRORS`: API code → text).
-fn error_texts() -> Vec<String> {
-    let text = std::fs::read_to_string(app_dir().join("js/i18n.js")).expect("i18n.js");
-    let start = text.find("const ERRORS = {").expect("ERRORS table");
-    let end = start + text[start..].find("};").expect("end of ERRORS");
-    text[start..end]
-        .lines()
-        .filter_map(|l| l.split_once(": \"").and_then(|(_, v)| literal(v)))
-        .collect()
+/// The base of a plural form key (`files.common.count.items.one` → `files.common.count.items`).
+fn plural_base(key: &str) -> Option<&str> {
+    key.rsplit_once('.').filter(|(_, c)| crate::i18n_check::CATEGORIES.contains(c)).map(|(b, _)| b)
 }
 
+/// Every key the code names is in the English table (a plural text by its base, which has an
+/// `other` form), and every English text is a single line.
 #[test]
-fn files_texts_are_translated() {
+fn files_keys_exist() {
     let en = english();
-    let mut missing: Vec<String> = keys().into_iter().filter(|(_, k)| !en.contains_key(k)).map(|(f, k)| format!("{f}: {k}")).collect();
-    missing.extend(error_texts().into_iter().filter(|k| !en.contains_key(k)).map(|k| format!("i18n.js ERRORS: {k}")));
-    assert!(missing.is_empty(), "texts of the file manager without English: {missing:#?}");
+    let keys: HashSet<&str> = en.iter().map(|(k, _)| k.as_str()).collect();
+    let mut bad: Vec<String> = key_literals()
+        .into_iter()
+        .filter(|(_, k)| !keys.contains(k.as_str()) && !keys.contains(format!("{k}.other").as_str()))
+        .map(|(f, k)| format!("{f}: {k}: not in en.js"))
+        .collect();
+    for (k, v) in &en {
+        if !k.starts_with("files.") {
+            bad.push(format!("en.js: {k}: keys start with files."));
+        }
+        if v.is_empty() || v.contains(['\t', '\n']) {
+            bad.push(format!("en.js: {k}: empty, or a tab or newline in the text"));
+        }
+        if let Some(base) = plural_base(k)
+            && !keys.contains(format!("{base}.other").as_str())
+        {
+            bad.push(format!("en.js: {k}: plural form without `{base}.other`"));
+        }
+    }
+    assert!(bad.is_empty(), "file manager keys: {bad:#?}");
+}
+
+/// Every English text is shown somewhere: its key (or its plural base) is named by the code; the
+/// key names (`files.key.*`) are looked up by `keyText()` in `i18n.js`.
+#[test]
+fn files_english_is_not_stale() {
+    let used: HashSet<String> = key_literals().into_iter().map(|(_, k)| k).collect();
+    let key_text = sources().iter().any(|(f, t)| f == "i18n.js" && t.contains("files.key.${"));
+    let stale: Vec<String> = english()
+        .into_iter()
+        .map(|(k, _)| k)
+        .filter(|k| !used.contains(k) && !plural_base(k).is_some_and(|b| used.contains(b)) && !(key_text && k.starts_with("files.key.")))
+        .collect();
+    assert!(stale.is_empty(), "en.js texts no code shows: {stale:#?}");
+}
+
+/// Every language of the table but English has the File app's file, complete and current
+/// (missing and stale keys, placeholders, plural forms of the language: `i18n_check`).
+#[test]
+fn files_translations_are_complete() {
+    let en = english();
+    let source: Vec<(&str, &str)> = en.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let mut bad = Vec::new();
+    for lang in crate::i18n::languages().iter().skip(1) {
+        match crate::i18n_check::file(&lang.code, "files") {
+            Some(text) => bad.extend(crate::i18n_check::problems("files", lang, &source, &text)),
+            None => bad.push(format!("{}/files.txt: no file", lang.code)),
+        }
+    }
+    assert!(bad.is_empty(), "File app translations: {bad:#?}");
 }
 
 /// The File app writes durations, relative times and ratios with the same unit words and
-/// templates as the core (`i18n::duration`, `elapsed`, `approx`, `ago`, `of`): its Italian key
-/// is the core's Italian text and its English the core's English.
+/// templates as the core (`i18n::duration`, `elapsed`, `approx`, `ago`, `of`): its
+/// `files.dur.*` / `files.fmt.*` texts are the core's `dur.*` / `fmt.*`, in English and in
+/// every translation.
 #[test]
 fn files_formats_match_core() {
-    use crate::i18n::{Lang, text_in};
+    use crate::i18n::{Lang, text_in, translation_lines};
     const PAIRS: &[(&str, &str)] = &[
-        ("dur.d", "{d} g"),
-        ("dur.h", "{h} h"),
-        ("dur.m", "{m} min"),
-        ("dur.s", "{s} s"),
-        ("dur.hm", "{h} h {m} min"),
-        ("dur.ms", "{m} min {s} s"),
-        ("fmt.ago", "{time} fa"),
-        ("fmt.of", "{part} di {total}"),
+        ("dur.d", "files.dur.d"),
+        ("dur.h", "files.dur.h"),
+        ("dur.m", "files.dur.m"),
+        ("dur.s", "files.dur.s"),
+        ("dur.hm", "files.dur.hm"),
+        ("dur.ms", "files.dur.ms"),
+        ("fmt.ago", "files.fmt.ago"),
+        ("fmt.of", "files.fmt.of"),
     ];
-    let en = english();
-    let used: std::collections::HashSet<String> = keys().into_iter().map(|(_, k)| k).collect();
+    let en: std::collections::HashMap<String, String> = english().into_iter().collect();
+    let used: HashSet<String> = key_literals().into_iter().map(|(_, k)| k).collect();
     for (core, files) in PAIRS {
-        assert_eq!(text_in(Lang::It, core), Some(*files), "{core}: Italian differs from the File app");
-        assert_eq!(text_in(Lang::En, core), en.get(*files).map(String::as_str), "{core}: English differs from the File app");
+        assert_eq!(text_in(Lang::EN, core), en.get(*files).map(String::as_str), "{core}: English differs from the File app");
         assert!(used.contains(*files), "{files}: not used by the File app any more");
+    }
+    for lang in crate::i18n::languages().iter().skip(1) {
+        let core_file = crate::i18n_check::file(&lang.code, "core").unwrap_or_default();
+        let files_file = crate::i18n_check::file(&lang.code, "files").unwrap_or_default();
+        let core: std::collections::HashMap<&str, &str> = translation_lines(&core_file).collect();
+        let files: std::collections::HashMap<&str, &str> = translation_lines(&files_file).collect();
+        for (c, f) in PAIRS {
+            if let Some(want) = core.get(c) {
+                assert_eq!(files.get(f), Some(want), "{}: {f} differs from the core's {c}", lang.code);
+            }
+        }
     }
 }
 
-/// G8c and the neutral product rule: no other NAS system or its apps named in any text, Italian
-/// or English (DSM's own folder names such as `@eaDir` are file names, not texts).
+/// G8c and the neutral product rule: no other NAS system or its apps named in any text, English
+/// or translated (DSM's own folder names such as `@eaDir` are file names, not texts).
 #[test]
 fn files_texts_name_no_other_product() {
     const WORDS: &[&str] = &["dsm", "synology", "synofile", "truenas", "unraid", "qnap", "omv"];
@@ -140,9 +197,11 @@ fn files_texts_name_no_other_product() {
         "file station", "package center", "centro pacchetti", "storage manager", "control panel", "pannello di controllo",
         "login portal", "synology photos", "hyper backup",
     ];
-    let mut texts: Vec<(String, String)> = keys();
-    texts.extend(english().into_iter().flat_map(|(k, v)| [("en.js".to_string(), k), ("en.js".to_string(), v)]));
-    texts.extend(error_texts().into_iter().map(|k| ("i18n.js".to_string(), k)));
+    let mut texts: Vec<(String, String)> = english().into_iter().map(|(_, v)| ("en.js".to_string(), v)).collect();
+    for lang in crate::i18n::languages().iter().skip(1) {
+        let file = crate::i18n_check::file(&lang.code, "files").unwrap_or_default();
+        texts.extend(crate::i18n::translation_lines(&file).map(|(_, t)| (format!("{}/files.txt", lang.code), t.to_string())));
+    }
     let mut hits = Vec::new();
     for (file, text) in texts {
         let low = text.to_lowercase();
@@ -154,9 +213,11 @@ fn files_texts_name_no_other_product() {
     assert!(hits.is_empty(), "file manager texts naming another product: {hits:#?}");
 }
 
-/// Only Italian and English: the other SynoFile tables are not shipped (D-LANG2).
+/// English is the only table bundled with the app: the other languages are translation files
+/// (`assets/i18n/<code>/files.txt`), fetched when chosen; the other SynoFile tables are not
+/// shipped (D-LANG2).
 #[test]
-fn files_languages_are_it_and_en() {
+fn files_bundle_only_english() {
     let mut langs: Vec<String> = std::fs::read_dir(app_dir().join("js/lang"))
         .expect("files-app/js/lang")
         .flatten()

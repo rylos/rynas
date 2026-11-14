@@ -1449,7 +1449,13 @@ impl Engine {
         let names = serde_json::to_string(&secrets.keys().collect::<Vec<_>>()).unwrap_or_default();
         let config =
             serde_json::to_string(&req.config).map_err(|e| NotifyError::Invalid(e.to_string()))?;
-        let lang = lang_str(req.language);
+        if !template::known_language(req.language) {
+            return Err(NotifyError::Invalid(format!(
+                "unknown language {}",
+                req.language
+            )));
+        }
+        let lang = req.language.as_str();
         let id = match id {
             Some(id) => {
                 tx.execute(
@@ -1778,16 +1784,7 @@ fn insert_event(
     Ok(tx.last_insert_rowid() as u64)
 }
 
+/// A stored language code; anything unreadable is English (texts fall back to English anyway).
 fn parse_lang(s: &str) -> NotifyLanguage {
-    match s {
-        "it" => NotifyLanguage::It,
-        _ => NotifyLanguage::En,
-    }
-}
-
-fn lang_str(l: NotifyLanguage) -> &'static str {
-    match l {
-        NotifyLanguage::En => "en",
-        NotifyLanguage::It => "it",
-    }
+    NotifyLanguage::new(s).unwrap_or_default()
 }

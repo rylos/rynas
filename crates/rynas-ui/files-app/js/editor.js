@@ -10,7 +10,7 @@ import {
   indentWithTab, copyLineDown, deleteLine, moveLineUp, moveLineDown, selectAll, SearchCursor, bracketMatching,
 } from "../vendor/codemirror/codemirror.js";
 import { api } from "./api.js";
-import { t } from "./i18n.js";
+import { t, keyText } from "./i18n.js";
 import { esc, baseName } from "./format.js";
 import { h, errorToast } from "./ui.js";
 import { svg } from "./icons.js";
@@ -197,17 +197,17 @@ class Editor {
     const text = this.crlf ? data.text.replace(/\r\n/g, "\n") : data.text;
 
     // the toolbar, for the mouse: each button says its key
-    const btn = (act, icon, label, key = "") => `<button type="button" class="ed-btn" data-act="${act}" title="${esc(label)}${key ? ` (${key})` : ""}">${svg(icon)}</button>`;
+    const btn = (act, icon, label, key = "") => `<button type="button" class="ed-btn" data-act="${act}" title="${esc(label)}${key ? ` (${esc(keyText(key))})` : ""}">${svg(icon)}</button>`;
     const sep = `<span class="ed-sep"></span>`;
     this.el = h(`<div class="editor" role="dialog" aria-label="${esc(this.name)}">
       <div class="ed-bar">
-        <button type="button" class="ed-btn wide" data-act="save" title="${t("Salva")} (Ctrl+S)">${svg("save")}<span>${t("Salva")}</span></button>
-        ${sep}${btn("undo", "undo", t("Annulla"), "Ctrl+Z")}${btn("redo", "redo", t("Ripeti"), "Ctrl+Y")}
-        ${sep}${btn("cut", "cut", t("Taglia"), "Ctrl+X")}${btn("copy", "copy", t("Copia"), "Ctrl+C")}
-        ${sep}${btn("find", "search", t("Cerca"), "Ctrl+F")}${btn("prev", "up", t("Risultato precedente"), "Maiusc+F3")}${btn("next", "down", t("Risultato successivo"), "F3")}${btn("line", "hash", t("Vai alla riga"), "Ctrl+L")}
-        ${sep}${btn("wrap", "wrap", t("A capo automatico"))}
+        <button type="button" class="ed-btn wide" data-act="save" title="${t("files.common.save")} (Ctrl+S)">${svg("save")}<span>${t("files.common.save")}</span></button>
+        ${sep}${btn("undo", "undo", t("files.common.cancel"), "Ctrl+Z")}${btn("redo", "redo", t("files.editor.redo"), "Ctrl+Y")}
+        ${sep}${btn("cut", "cut", t("files.common.cut"), "Ctrl+X")}${btn("copy", "copy", t("files.common.copy"), "Ctrl+C")}
+        ${sep}${btn("find", "search", t("files.editor.find"), "Ctrl+F")}${btn("prev", "up", t("files.editor.previous_match"), "Shift+F3")}${btn("next", "down", t("files.editor.next_match"), "F3")}${btn("line", "hash", t("files.editor.go_line"), "Ctrl+L")}
+        ${sep}${btn("wrap", "wrap", t("files.editor.word_wrap"))}
         <span class="ed-title">${esc(this.name)}</span>
-        ${btn("help", "keyboard", t("Tasti"), "Ctrl+G")}${btn("close", "close", t("Chiudi"), "Ctrl+Q")}
+        ${btn("help", "keyboard", t("files.editor.keys"), "Ctrl+G")}${btn("close", "close", t("files.common.close"), "Ctrl+Q")}
       </div>
       <div class="ed-view"></div>
       <div class="ed-status"><span class="l"></span><span class="r"></span></div>
@@ -325,9 +325,9 @@ class Editor {
       loadSyntax(this.type.name)
         .then((def) => this.view.dispatch({ effects: this.colors.reconfigure(syntaxColors(def)) }))
         // the file opens anyway, without colours (an upgrade while this tab was open)
-        .catch(() => this.message(t("Colori della sintassi non disponibili: ricarica la pagina")));
+        .catch(() => this.message(t("files.editor.syntax_colors_not_available_reload")));
     }
-    this.message(this.readOnly ? t("Sola lettura: non hai il permesso di scrivere questo file") : t("Ctrl+G: i tasti dell'editor"));
+    this.message(this.readOnly ? t("files.editor.read_only_don_t_permission") : t("files.editor.ctrl_g_editor_keys"));
     this.view.focus();
   }
 
@@ -340,14 +340,14 @@ class Editor {
     const head = s.selection.main.head;
     const line = s.doc.lineAt(head);
     const col = [...line.text.slice(0, head - line.from)].length + 1;
-    this.status.querySelector(".l").textContent = ` ${this.label} ${this.modified() ? "+" : ""}${this.readOnly ? ` [${t("sola lettura")}]` : ""}`;
+    this.status.querySelector(".l").textContent = ` ${this.label} ${this.modified() ? "+" : ""}${this.readOnly ? ` [${t("files.common.read_only")}]` : ""}`;
     const bar = this.el.querySelector(".ed-bar");
     const sel = s.selection.ranges.some((r) => !r.empty);
     bar.querySelector('[data-act="save"]').disabled = this.readOnly || !this.modified();
     bar.querySelector('[data-act="undo"]').disabled = this.readOnly || !undoDepth(s);
     bar.querySelector('[data-act="redo"]').disabled = this.readOnly || !redoDepth(s);
     bar.querySelector('[data-act="cut"]').disabled = this.readOnly;
-    bar.querySelector('[data-act="copy"]').title = (sel ? t("Copia") : t("Copia la riga")) + " (Ctrl+C)";
+    bar.querySelector('[data-act="copy"]').title = (sel ? t("files.common.copy") : t("files.editor.copy_line")) + " (Ctrl+C)";
     bar.querySelector('[data-act="prev"]').disabled = bar.querySelector('[data-act="next"]').disabled = !this.query;
     bar.querySelector('[data-act="wrap"]').classList.toggle("on", this.wrap);
     this.status.querySelector(".r").textContent = `${line.number}:${col}  │  ${this.type?.ft || "unknown"}  │  utf-8${this.crlf ? " (dos)" : ""} `;
@@ -423,7 +423,7 @@ class Editor {
 
   async findPrompt() {
     const start = this.view.state.selection.main.from;
-    const r = await this.prompt(t("Cerca: "), { value: this.query, onInput: (q) => this.find(q, start, 1) });
+    const r = await this.prompt(t("files.editor.find_prompt"), { value: this.query, onInput: (q) => this.find(q, start, 1) });
     if (r) {
       this.query = r.text;
       this.paintStatus();
@@ -445,7 +445,7 @@ class Editor {
     if (dir > 0) m = all(from, doc.length)[0] || all(0, from)[0];
     else m = all(0, from).pop() || all(from, doc.length).pop();
     if (!m) {
-      this.message(t("«{q}» non trovato", { q: query }), true);
+      this.message(t("files.editor.q_not_found", { q: query }), true);
       return false;
     }
     this.view.dispatch({ selection: EditorSelection.single(m.from, m.to), effects: EditorView.scrollIntoView(m.from, { y: "center" }), userEvent: "select.search" });
@@ -459,7 +459,7 @@ class Editor {
   }
 
   async linePrompt() {
-    const r = await this.prompt(t("Vai alla riga: "));
+    const r = await this.prompt(t("files.editor.go_line_prompt"));
     const n = parseInt(r?.text, 10);
     if (!n) return;
     const doc = this.view.state.doc;
@@ -472,12 +472,12 @@ class Editor {
     if (this.helpEl) return this.closeHelp();
     this.message("");
     const rows = [
-      ["Ctrl+S", t("Salva")], ["Ctrl+Q, Esc", t("Chiudi")], ["Ctrl+F", t("Cerca")], ["F3, Maiusc+F3", t("Risultato successivo / precedente")],
-      ["Ctrl+L", t("Vai alla riga")], ["Ctrl+Z", t("Annulla")], ["Ctrl+Y", t("Ripeti")], ["Ctrl+C, Ctrl+X", t("Copia, taglia (senza selezione: la riga)")],
-      ["Ctrl+V", t("Incolla")], ["Ctrl+D", t("Duplica la riga")], ["Ctrl+K", t("Taglia la riga")], ["Alt+↑, Alt+↓", t("Sposta la riga")],
-      ["Tab, Maiusc+Tab", t("Rientra, togli rientro")], ["Ctrl+A", t("Seleziona tutto")],
+      ["Ctrl+S", t("files.common.save")], ["Ctrl+Q, Esc", t("files.common.close")], ["Ctrl+F", t("files.editor.find")], ["F3, Shift+F3", t("files.editor.next_previous_match")],
+      ["Ctrl+L", t("files.editor.go_line")], ["Ctrl+Z", t("files.common.cancel")], ["Ctrl+Y", t("files.editor.redo")], ["Ctrl+C, Ctrl+X", t("files.editor.copy_cut_no_selection_line")],
+      ["Ctrl+V", t("files.common.paste")], ["Ctrl+D", t("files.editor.duplicate_line")], ["Ctrl+K", t("files.editor.cut_line")], ["Alt+↑, Alt+↓", t("files.editor.move_line")],
+      ["Tab, Shift+Tab", t("files.editor.indent_unindent")], ["Ctrl+A", t("files.common.select_all")],
     ];
-    this.helpEl = h(`<div class="ed-help"><div class="ed-help-title">${t("Tasti")}</div><dl>${rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl></div>`);
+    this.helpEl = h(`<div class="ed-help"><div class="ed-help-title">${t("files.editor.keys")}</div><dl>${rows.map(([k, v]) => `<dt>${esc(keyText(k))}</dt><dd>${esc(v)}</dd>`).join("")}</dl></div>`);
     this.el.append(this.helpEl);
     this.offHelp = (e) => {
       if (e.type === "keydown" ? e.key === "Escape" || (e.key === "g" && e.ctrlKey) : !this.helpEl.contains(realTarget(e)) && !realTarget(e).closest?.('[data-act="help"]')) {
@@ -498,11 +498,11 @@ class Editor {
   }
 
   async save(force = false) {
-    if (this.readOnly) return this.message(t("Sola lettura: non hai il permesso di scrivere questo file"), true);
+    if (this.readOnly) return this.message(t("files.editor.read_only_don_t_permission"), true);
     const doc = this.view.state.doc;
     let text = doc.toString();
     if (this.crlf) text = text.replace(/\n/g, "\r\n");
-    this.message(t("Salvataggio…"));
+    this.message(t("files.editor.saving"));
     try {
       const r = await api.editSave(this.path, text, this.stamp, force);
       this.stamp = r.stamp;
@@ -510,13 +510,13 @@ class Editor {
       this.saved = true;
       this.view.dispatch({ effects: savedNow.of(null) });
       this.paintStatus();
-      this.message(t("Salvato {path}", { path: this.label }));
+      this.message(t("files.editor.saved_path", { path: this.label }));
       return true;
     } catch (e) {
       if (e.status === 409 && !force) {
-        const k = await this.prompt(t("{e}. Sovrascriverlo? (s, n)", { e: e.message }), { keys: ["s", "y", "n"] });
+        const k = await this.prompt(t("files.editor.e_overwrite_y_n", { e: e.message }), { keys: ["s", "y", "n"] });
         if (k === "s" || k === "y") return this.save(true);
-        this.message(t("Non salvato"), true);
+        this.message(t("files.editor.not_saved"), true);
         return false;
       }
       this.message(e.message, true);
@@ -526,7 +526,7 @@ class Editor {
 
   async close() {
     if (this.modified() && !this.readOnly) {
-      const k = await this.prompt(t("Salvare le modifiche a «{n}» prima di chiudere? (s, n, esc)", { n: this.name }), { keys: ["s", "y", "n"] });
+      const k = await this.prompt(t("files.editor.save_changes_n_before_closing", { n: this.name }), { keys: ["s", "y", "n"] });
       if (!k) return;
       if ((k === "s" || k === "y") && !(await this.save())) return;
     }

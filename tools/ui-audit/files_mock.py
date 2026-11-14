@@ -115,7 +115,9 @@ def listing(path):
 
 
 def shares_info():
-    return {"shares": SHARES, "user": "tester", "volumes": {"volume1": "Volume 1"}, "hostname": "rynas-test"}
+    # one PC sending btrfs snapshots: the sidebar shows the Backups entry
+    return {"shares": SHARES, "user": "tester", "volumes": {"volume1": "Volume 1"}, "hostname": "rynas-test",
+            "backups": [{"name": "laptop"}]}
 
 
 def route(name, q):

@@ -15,11 +15,19 @@
       d.setAttribute("data-density", n === "compact" ? "compact" : "comfortable");
       d.style.background = dark ? "#14171c" : "#e6e7ed";
       d.style.colorScheme = dark ? "dark" : "light";
-      // Italian texts are a separate file (src/i18n.rs): fetched while the wasm loads
+      // Texts of a language other than English are a separate file per language (src/i18n.rs):
+      // the one the interface used last time (rynas.lang.texts) is fetched while the wasm loads
       var l = null;
-      try { l = localStorage.getItem("rynas.lang"); } catch (e) {}
-      if (l === "it" || (l !== "en" && /^it/i.test(navigator.language || ""))) {
-        window.__rynasIt = fetch("/i18n/it.txt").then(function (r) { return r.ok ? r.text() : ""; }, function () { return ""; });
+      try {
+        l = localStorage.getItem("rynas.lang.texts");
+        if (l === null) l = localStorage.getItem("rynas.lang");
+      } catch (e) {}
+      if (l === "en") l = null;
+      if (l && /^[A-Za-z0-9-]{1,12}$/.test(l)) {
+        window.__rynasTexts = { code: l, text: fetch("/i18n/" + l + ".txt").then(function (r) {
+          // plain text only: anything else is no texts (English until the next switch)
+          return r.ok && /^text\/plain/.test(r.headers.get("content-type") || "") ? r.text() : "";
+        }, function () { return ""; }) };
       }
       // Signed in last time: ask now for what the first screen needs, while the wasm is on its
       // way (src/api.rs takes these answers instead of asking again). Same requests, same rules:

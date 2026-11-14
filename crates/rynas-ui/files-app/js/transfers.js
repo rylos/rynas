@@ -27,24 +27,24 @@ const seenConflict = new Set();
 const seenFail = new Set();
 
 const OP = {
-  copy: { icon: "copy", running: "Copia in corso", done: "Copia completata", verified: "Copia completata e verificata", noun: "Copia|op" },
-  move: { icon: "move", running: "Spostamento in corso", done: "Spostamento completato", verified: "Spostamento completato e verificato", noun: "Spostamento" },
-  delete: { icon: "trash", running: "Eliminazione in corso", done: "Eliminazione completata", noun: "Eliminazione" },
-  upload: { icon: "upload", running: "Caricamento in corso", done: "Caricamento completato", noun: "Caricamento" },
-  compress: { icon: "archive", running: "Compressione in corso", done: "Archivio creato", noun: "Compressione" },
-  extract: { icon: "archive", running: "Estrazione in corso", done: "Estrazione completata", noun: "Estrazione" },
+  copy: { icon: "copy", running: "files.transfers.copying", done: "files.transfers.copy_complete", verified: "files.transfers.copy_complete_verified", noun: "files.transfers.op.copy" },
+  move: { icon: "move", running: "files.transfers.moving", done: "files.transfers.move_complete", verified: "files.transfers.move_complete_verified", noun: "files.transfers.move" },
+  delete: { icon: "trash", running: "files.transfers.deleting", done: "files.transfers.deletion_complete", noun: "files.transfers.deletion" },
+  upload: { icon: "upload", running: "files.transfers.uploading", done: "files.transfers.upload_complete", noun: "files.transfers.upload" },
+  compress: { icon: "archive", running: "files.transfers.compressing", done: "files.transfers.archive_created", noun: "files.common.compression" },
+  extract: { icon: "archive", running: "files.transfers.extracting", done: "files.transfers.extraction_complete", noun: "files.transfers.extraction" },
 };
 const STATE = {
-  queued: "in coda", running: "in corso", paused: "in pausa", conflict: "da decidere",
-  done: "completato", failed: "non riuscito", cancelled: "annullato",
+  queued: "files.transfers.state.queued", running: "files.transfers.state.running", paused: "files.transfers.state.paused", conflict: "files.transfers.state.conflict",
+  done: "files.common.state.done", failed: "files.common.state.failed", cancelled: "files.common.state.canceled",
 };
 const PHASES = {
-  copy: [["scan", "Analisi"], ["copy", "Copia"], ["verify", "Verifica"], ["end", "Fine"]],
-  move: [["scan", "Analisi"], ["move", "Spostamento"], ["verify", "Verifica"], ["end", "Fine"]],
-  delete: [["scan", "Conteggio"], ["delete", "Eliminazione"], ["end", "Fine"]],
-  upload: [["copy", "Trasmissione"], ["end", "Fine"]],
-  compress: [["scan", "Analisi"], ["compress", "Compressione"], ["end", "Fine"]],
-  extract: [["extract", "Estrazione"], ["end", "Fine"]],
+  copy: [["scan", "files.transfers.scan"], ["copy", "files.common.copy"], ["verify", "files.transfers.phase.verify"], ["end", "files.transfers.done"]],
+  move: [["scan", "files.transfers.scan"], ["move", "files.transfers.move"], ["verify", "files.transfers.phase.verify"], ["end", "files.transfers.done"]],
+  delete: [["scan", "files.transfers.phase.count"], ["delete", "files.transfers.deletion"], ["end", "files.transfers.done"]],
+  upload: [["copy", "files.transfers.sending"], ["end", "files.transfers.done"]],
+  compress: [["scan", "files.transfers.scan"], ["compress", "files.common.compression"], ["end", "files.transfers.done"]],
+  extract: [["extract", "files.transfers.extraction"], ["end", "files.transfers.done"]],
 };
 const LIMITS = [0, 5, 10, 25, 50, 100, 200, 500];
 // speed samples kept per job: past this the older ones are thinned out (the NAS keeps as many)
@@ -57,7 +57,7 @@ export const finished = (j) => ["done", "failed", "cancelled"].includes(j.state)
 const allFailed = (j) => j.state === "done" && j.progress.errors > 0 && j.progress.errors >= j.progress.files_done;
 const shownState = (j) => (allFailed(j) ? "failed" : j.state);
 // a refused permission: the place is in the path, the remedy in the shared folder's permissions
-const PERM_HINT = "controlla i permessi della cartella condivisa";
+const PERM_HINT = "files.transfers.check_shared_folder_permissions";
 // The NAS writes its messages in English, with a code: the code is what is shown, in the
 // interface's language, and the message only where there is no text for the code. "internal"
 // and "invalid_value" cover reasons of their own (a verification that failed, a folder into
@@ -68,9 +68,9 @@ const codeText = (code, msg) => (!OWN_MSG.has(code || "") && errText(code)) || m
 const JOB_CODES = {
   // the state says it already
   cancelled: () => "",
-  interrupted: () => t("Interrotto da un riavvio del NAS"),
+  interrupted: () => t("files.transfers.interrupted_restart_nas"),
 };
-const errorText = (e) => (e.code === "permission_denied" ? `${t("Permesso negato")} · ${t(PERM_HINT)}` : codeText(e.code, e.msg));
+const errorText = (e) => (e.code === "permission_denied" ? `${t("files.transfers.permission_denied")} · ${t(PERM_HINT)}` : codeText(e.code, e.msg));
 // one failed item with where it failed, never a bare reason
 const errorLine = (e) => (!e ? "" : e.path ? `${e.path}: ${errorText(e)}` : errorText(e));
 const firstError = (j) => errorLine(j.errors?.[0]);
@@ -116,17 +116,17 @@ function wake() {
 function title(job) {
   const op = OP[job.op] || OP.copy;
   const n = job.info.sources.length;
-  if (job.op === "upload") return t("{op} di {n}", { op: t(op.noun), n: count(job.progress.files_total || n, "file", "file", int) });
-  if (n === 1) return t("{op} di «{x}»", { op: t(op.noun), x: baseName(job.info.sources[0]) });
-  return t("{op} di {n}", { op: t(op.noun), n: count(n, "elemento", "elementi", int) });
+  if (job.op === "upload") return t("files.transfers.op_n", { op: t(op.noun), n: count(job.progress.files_total || n, "files.common.count.files", int) });
+  if (n === 1) return t("files.transfers.op_x", { op: t(op.noun), x: baseName(job.info.sources[0]) });
+  return t("files.transfers.op_n", { op: t(op.noun), n: count(n, "files.common.count.items", int) });
 }
 
 function route(job) {
   // a remote path reads as the server's own address
   const show = (p) => (p && app?.displayPath ? app.displayPath(p) : p);
   const from = job.info.sources.length ? show(parentOf(job.info.sources[0])) : "";
-  if (job.op === "delete") return { from, to: job.info.permanent ? t("eliminazione definitiva") : t("Cestino") };
-  if (job.op === "upload") return { from: t("questo computer"), to: show(job.info.dest) };
+  if (job.op === "delete") return { from, to: job.info.permanent ? t("files.transfers.deleted_permanently") : t("files.transfers.recycle_bin") };
+  if (job.op === "upload") return { from: t("files.transfers.computer"), to: show(job.info.dest) };
   if (job.op === "extract") return { from: show(job.info.sources[0]), to: show(job.info.dest) };
   return { from, to: show(job.info.dest) };
 }
@@ -346,18 +346,18 @@ function announce(job) {
   const op = OP[job.op] || OP.copy;
   app?.refreshAfter(job);
   if (allFailed(job)) {
-    toast(`${title(job)}: ${firstError(job) || t(STATE.failed)}`, { kind: "error", action: t("Dettagli"), onAction: () => openDialog(job.id), timeout: 9000 });
+    toast(`${title(job)}: ${firstError(job) || t(STATE.failed)}`, { kind: "error", action: t("files.transfers.details"), onAction: () => openDialog(job.id), timeout: 9000 });
   } else if (job.state === "done") {
     const errs = job.progress.errors;
-    toast(`${doneLabel(job, op)}${errs ? " · " + count(errs, "errore", "errori", int) : ""}`, {
+    toast(`${doneLabel(job, op)}${errs ? " · " + count(errs, "files.transfers.count.errors", int) : ""}`, {
       kind: errs ? "error" : "ok",
-      action: job.info.dest ? t("Apri") : t("Dettagli"),
+      action: job.info.dest ? t("files.common.open") : t("files.transfers.details"),
       onAction: () => (job.info.dest ? app.openPath(job.info.dest) : openDialog(job.id)),
     });
   } else if (job.state === "failed" && job.msg === "need_password") {
     openDialog(job.id);
   } else if (job.state === "failed") {
-    toast(`${title(job)}: ${jobMsg(job)}`, { kind: "error", action: t("Dettagli"), onAction: () => openDialog(job.id), timeout: 9000 });
+    toast(`${title(job)}: ${jobMsg(job)}`, { kind: "error", action: t("files.transfers.details"), onAction: () => openDialog(job.id), timeout: 9000 });
   }
   // on another page of the shell: the shell's own toast says it
   if (!connected() && !document.hidden) {
@@ -488,7 +488,7 @@ function renderButton() {
   }
   const pct = total ? done / total : 0;
   $("#xfer-ring").style.strokeDashoffset = String(94.25 * (1 - pct));
-  btn.title = running.length ? t("Trasferimenti: {n} attivi, {p}%", { n: running.length, p: pctText(pct, false) }) : t("Trasferimenti");
+  btn.title = running.length ? t("files.transfers.transfers_n_running_p", { n: running.length, p: pctText(pct, false) }) : t("files.common.transfers");
 }
 
 function toggleDrawer(show) {
@@ -510,7 +510,7 @@ function renderDrawer() {
   const list = [...jobs.values()].sort((a, b) => (active(b) - active(a)) || (b.created || 0) - (a.created || 0));
   const el = $("#xfer-list");
   if (!list.length) {
-    el.innerHTML = `<div class="drawer-empty">${svg("transfers")}<br>${t("Nessun trasferimento")}</div>`;
+    el.innerHTML = `<div class="drawer-empty">${svg("transfers")}<br>${t("files.transfers.no_transfers")}</div>`;
     return;
   }
   // a card with the keyboard focus keeps it across the rebuild
@@ -526,9 +526,9 @@ function renderDrawer() {
     const ended = [job.finished ? clock(job.finished) : "", duration(job.active_ms)].filter(Boolean).join(" · ");
     const meta = active(job)
       ? job.state === "running"
-        ? `<span>${st.byBytes ? of(size(job.progress.bytes_done), size(job.progress.bytes_total)) : of(int(job.progress.files_done), int(job.progress.files_total))}</span><span>${job.cancelling ? t("Annullamento in corso…") : job.stalled_s ? t("Nessun dato da {n} s", { n: int(job.stalled_s) }) : [st.byBytes ? speed(st.now) : "", st.eta != null ? duration(st.eta) : ""].filter(Boolean).join(" · ")}</span>`
+        ? `<span>${st.byBytes ? of(size(job.progress.bytes_done), size(job.progress.bytes_total)) : of(int(job.progress.files_done), int(job.progress.files_total))}</span><span>${job.cancelling ? t("files.transfers.canceling") : job.stalled_s ? t("files.transfers.no_data_for", { n: int(job.stalled_s) }) : [st.byBytes ? speed(st.now) : "", st.eta != null ? duration(st.eta) : ""].filter(Boolean).join(" · ")}</span>`
         : `<span>${t(STATE[job.state])}</span><span>${pctText(st.pct, finished(job))}%</span>`
-      : `<span>${ended}</span><span>${job.progress.errors ? count(job.progress.errors, "errore", "errori", int) : esc(jobMsg(job))}</span>`;
+      : `<span>${ended}</span><span>${job.progress.errors ? count(job.progress.errors, "files.transfers.count.errors", int) : esc(jobMsg(job))}</span>`;
     const card = h(`<div class="jcard" tabindex="0" role="button">
       <div class="jcard-top"><div class="op">${svg(op.icon)}</div>
         <div class="tt"><b>${esc(title(job))}</b><small>${esc(r.from)} → ${esc(r.to || "")}</small></div>
@@ -576,8 +576,8 @@ export function openDialog(id) {
 
 function methodLabels() {
   return {
-    clone: t("Reflink btrfs"), copy: t("Copia dati"), flush: t("Scrittura sui dischi"), rename: t("Rinomina"), recycle: t("Cestino"), delete: t("Eliminazione"),
-    deflate: t("Zip (deflate)"), store: t("Zip senza compressione"), zstd: "tar.zst (zstd)", "7z": "7-Zip", unrar: "unrar", tar: "GNU tar",
+    clone: t("files.transfers.btrfs_reflink"), copy: t("files.transfers.data_copy"), flush: t("files.transfers.writing_disks"), rename: t("files.common.rename"), recycle: t("files.transfers.recycle_bin"), delete: t("files.transfers.deletion"),
+    deflate: t("files.transfers.zip_deflate"), store: t("files.transfers.zip_no_compression"), zstd: "tar.zst (zstd)", "7z": "7-Zip", unrar: "unrar", tar: "GNU tar",
   };
 }
 
@@ -623,7 +623,7 @@ class JobDialog {
       <div class="xf-head"><div class="op">${svg(op.icon)}</div>
         <div class="tt"><h2><span class="ttl" id="${ttl}"></span><span class="chip"></span></h2>
           <div class="route"><span class="from"></span>${svg("forward")}<span class="to"></span></div></div>
-        <button class="icon-btn b-min" title="${t("Riduci (continua in background)")}" aria-label="${t("Riduci (continua in background)")}">${svg("minimize")}</button>
+        <button class="icon-btn b-min" title="${t("files.transfers.minimize_keeps_running")}" aria-label="${t("files.transfers.minimize_keeps_running")}">${svg("minimize")}</button>
       </div>
       <div class="xf-body">
         <div class="xf-steps"></div>
@@ -633,8 +633,8 @@ class JobDialog {
         </div>
         <div class="pbar big main glide" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-labelledby="${ttl}"><div class="fill"></div><div class="verify"></div></div>
         <div class="xf-substate" role="status"><span class="sub-l"></span><span class="sub-r"></span></div>
-        <div class="xf-chart"><canvas role="img" aria-label="${t("Grafico della velocità del trasferimento")}"></canvas>
-          <div class="legend"><span><i style="background:var(--accent)"></i>${t("velocità")}</span><span><i style="background:var(--muted)"></i>${t("media")}</span><button type="button" class="axis-toggle"></button></div>
+        <div class="xf-chart"><canvas role="img" aria-label="${t("files.transfers.transfer_speed_chart")}"></canvas>
+          <div class="legend"><span><i style="background:var(--accent)"></i>${t("files.transfers.legend_speed")}</span><span><i style="background:var(--muted)"></i>${t("files.transfers.legend_average")}</span><button type="button" class="axis-toggle"></button></div>
         </div>
         <div class="xf-stats"></div>
         <div class="xf-current"></div>
@@ -643,13 +643,13 @@ class JobDialog {
         <div class="xf-summary" role="status" hidden></div>
       </div>
       <div class="xf-foot">
-        <div class="left">${svg("zap")}<span>${t("Limite")}</span><select class="limit" aria-label="${t("Limite di velocità")}">${LIMITS.map((l) => `<option value="${l}">${l ? speed(l * 1024 * 1024) : t("nessuno")}</option>`).join("")}</select></div>
-        <button class="btn b-start" hidden>${t("Avvia ora")}</button>
+        <div class="left">${svg("zap")}<span>${t("files.transfers.limit")}</span><select class="limit" aria-label="${t("files.common.speed_limit")}">${LIMITS.map((l) => `<option value="${l}">${l ? speed(l * 1024 * 1024) : t("files.transfers.none")}</option>`).join("")}</select></div>
+        <button class="btn b-start" hidden>${t("files.transfers.start_now")}</button>
         <button class="btn b-pause"></button>
-        <button class="btn b-cancel">${svg("stop")} ${t("Annulla")}</button>
-        <button class="btn b-retry" hidden>${svg("refresh")} ${t("Riprova")}</button>
-        <button class="btn b-open" hidden>${svg("external")} ${t("Apri destinazione")}</button>
-        <button class="btn primary b-close" hidden>${t("Chiudi")}</button>
+        <button class="btn b-cancel">${svg("stop")} ${t("files.common.cancel")}</button>
+        <button class="btn b-retry" hidden>${svg("refresh")} ${t("files.common.retry")}</button>
+        <button class="btn b-open" hidden>${svg("external")} ${t("files.transfers.open_destination")}</button>
+        <button class="btn primary b-close" hidden>${t("files.common.close")}</button>
       </div></dialog>`);
     mount(this.dlg);
     this.dlg.addEventListener("keydown", (e) => e.stopPropagation());
@@ -681,7 +681,7 @@ class JobDialog {
       try {
         localStorage.setItem("rynas.files.axis", this.axis);
       } catch {}
-      $(".axis-toggle", this.dlg).textContent = this.axis === "progress" ? t("asse: avanzamento") : t("asse: tempo");
+      $(".axis-toggle", this.dlg).textContent = this.axis === "progress" ? t("files.transfers.axis_progress") : t("files.transfers.axis_time");
       this.draw();
     };
     // one drawing per frame, however fast the mouse moves
@@ -821,9 +821,9 @@ class JobDialog {
     if (fresh) {
       this.fileKey = fileKey(p);
       const name = baseName(p.current) || p.current;
-      cur.innerHTML = `<div class="row1">${svg(p.phase === "verify" ? "shield" : "file")}<span class="nm">${esc(name)}</span><span class="meth">${esc(p.phase === "verify" ? t("verifica") : methodLabels()[p.method] || "")}</span></div>
+      cur.innerHTML = `<div class="row1">${svg(p.phase === "verify" ? "shield" : "file")}<span class="nm">${esc(name)}</span><span class="meth">${esc(p.phase === "verify" ? t("files.transfers.method_verify") : methodLabels()[p.method] || "")}</span></div>
         <div class="path">${esc(p.current)}</div>
-        ${p.current_size ? `<div class="pbar thin glide ${barClass(job)}"><div class="fill"></div></div><div class="row3"><span class="done">${size(p.current_done)} ${t("di")} ${size(p.current_size)}</span><span class="share">${pctText(fileShare(p), false)}%</span></div>` : ""}`;
+        ${p.current_size ? `<div class="pbar thin glide ${barClass(job)}"><div class="fill"></div></div><div class="row3"><span class="done">${of(size(p.current_done), size(p.current_size))}</span><span class="share">${pctText(fileShare(p), false)}%</span></div>` : ""}`;
     }
     const bar = $(".pbar", cur);
     // one file's share only grows: a value a hair below the last one is a counter read early;
@@ -888,28 +888,28 @@ class JobDialog {
     const pctShown = pctText(st.pct, finished(job));
     $(".pct", d).textContent = pctShown;
     if (st.byBytes) {
-      setHTML($(".bytes", d), `${size(p.bytes_done)} <span>${t("di")} ${size(p.bytes_total)}</span>`);
+      setHTML($(".bytes", d), `${size(p.bytes_done)} <span>${t("files.transfers.of_total", { total: size(p.bytes_total) })}</span>`);
     } else {
-      setHTML($(".bytes", d), `${int(p.files_done)} <span>${t("di")} ${int(p.files_total)}</span>`);
+      setHTML($(".bytes", d), `${int(p.files_done)} <span>${t("files.transfers.of_total", { total: int(p.files_total) })}</span>`);
     }
     $(".files", d).textContent = p.scanning
-      ? t("Analisi: {f} file, {b} trovati…", { f: int(p.files_total), b: size(p.bytes_total) })
+      ? t("files.transfers.scanning_f_files_b_found", { f: int(p.files_total), b: size(p.bytes_total) })
       : st.byBytes
-        ? t("{a} di {b} file", { a: int(p.files_done), b: int(p.files_total) }) + (p.dirs ? " · " + count(p.dirs, "cartella", "cartelle", int) : "")
-        : count(p.files_total, "elemento", "elementi", int);
+        ? t("files.transfers.b_files", { a: int(p.files_done), b: int(p.files_total) }) + (p.dirs ? " · " + count(p.dirs, "files.common.count.folders", int) : "")
+        : count(p.files_total, "files.common.count.items", int);
     const bar = $(".pbar.main", d);
     bar.className = "pbar big main glide " + barClass(job);
     // what a screen reader announces: the number on screen; none while counting
     if (p.scanning) bar.removeAttribute("aria-valuenow");
     else bar.setAttribute("aria-valuenow", String(Math.min(100, Math.floor(st.pct * 100))));
 
-    const subL = job.cancelling ? t("Annullamento in corso…") : job.state === "queued" ? t("In attesa che finisca un altro trasferimento") : job.state === "paused" ? t("In pausa") : job.state === "conflict" ? t("In attesa di una tua scelta") : job.stalled_s ? t("Nessun dato da {n} s", { n: int(job.stalled_s) }) : p.scanning ? t("Conteggio di file e cartelle…") : "";
+    const subL = job.cancelling ? t("files.transfers.canceling") : job.state === "queued" ? t("files.transfers.waiting_another_transfer_finish") : job.state === "paused" ? t("files.transfers.paused") : job.state === "conflict" ? t("files.transfers.waiting_choice") : job.stalled_s ? t("files.transfers.no_data_for", { n: int(job.stalled_s) }) : p.scanning ? t("files.transfers.counting_files_folders") : "";
     $(".sub-l", d).textContent = subL;
     const notes = [];
     // what no verification will read (skipped, renamed) is left out of both numbers
-    if (st.verify && st.byBytes) notes.push(t("verificati {a} di {b}", { a: size(p.verify_bytes), b: size(Math.max(0, p.bytes_total - (p.verify_skip || 0))) }));
-    if (p.instant) notes.push(t("{n} senza copiare dati (reflink o rinomina)", { n: int(p.instant) }));
-    if (p.skipped) notes.push(t("{n} saltati", { n: int(p.skipped) }));
+    if (st.verify && st.byBytes) notes.push(t("files.transfers.b_verified", { a: size(p.verify_bytes), b: size(Math.max(0, p.bytes_total - (p.verify_skip || 0))) }));
+    if (p.instant) notes.push(t("files.transfers.n_without_copying_data_reflink", { n: int(p.instant) }));
+    if (p.skipped) notes.push(t("files.transfers.n_skipped", { n: int(p.skipped) }));
     $(".sub-r", d).textContent = notes.join(" · ");
 
     // stats
@@ -917,14 +917,14 @@ class JobDialog {
     const end = st.eta != null ? Date.now() + st.eta : null;
     const methods = methodLabels();
     const cells = [
-      [t("Velocità"), !running ? "—" : st.byBytes ? speed(st.now) : t("{n}/s", { n: perSecond(st.now) }), true],
-      [t("Media"), st.byBytes ? speed(st.avg) : "—"],
-      [t("Picco"), st.byBytes ? speed(st.peak) : "—"],
-      [t("File al secondo"), st.filesRate ? perSecond(st.filesRate) : "—"],
-      [t("Trascorso"), duration(st.elapsed)],
-      [t("Rimanente"), finished(job) ? "—" : st.eta != null ? "~ " + duration(st.eta) : p.scanning ? t("calcolo…") : "—", true],
-      [t("Fine prevista"), end ? clock(end) : finished(job) && job.finished ? clock(job.finished) : "—"],
-      [t("Metodo"), methods[p.method] || "—"],
+      [t("files.transfers.speed"), !running ? "—" : st.byBytes ? speed(st.now) : t("files.transfers.n_s", { n: perSecond(st.now) }), true],
+      [t("files.transfers.average"), st.byBytes ? speed(st.avg) : "—"],
+      [t("files.transfers.peak"), st.byBytes ? speed(st.peak) : "—"],
+      [t("files.transfers.files_per_second"), st.filesRate ? perSecond(st.filesRate) : "—"],
+      [t("files.transfers.elapsed"), duration(st.elapsed)],
+      [t("files.transfers.remaining"), finished(job) ? "—" : st.eta != null ? "~ " + duration(st.eta) : p.scanning ? t("files.transfers.estimating") : "—", true],
+      [t("files.transfers.expected_end"), end ? clock(end) : finished(job) && job.finished ? clock(job.finished) : "—"],
+      [t("files.transfers.method"), methods[p.method] || "—"],
     ];
     setHTML($(".xf-stats", d), cells.map(([k, v, hl]) => `<div class="stat ${hl ? "hl" : ""}"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join(""));
 
@@ -933,7 +933,7 @@ class JobDialog {
     const fileBar = $(".pbar", cur);
     if (!cur.hidden && fileBar) {
       fileBar.className = "pbar thin glide " + barClass(job);
-      $(".done", cur).textContent = `${size(p.current_done)} ${t("di")} ${size(p.current_size)}`;
+      $(".done", cur).textContent = of(size(p.current_done), size(p.current_size));
       $(".share", cur).textContent = `${pctText(fileShare(p), false)}%`;
     }
 
@@ -951,17 +951,17 @@ class JobDialog {
       sum.hidden = false;
       const ok = job.state === "done" && !p.errors;
       sum.className = "xf-summary " + (ok ? "ok" : job.state === "done" ? "failed" : job.state);
-      const parts = [t("in {d}", { d: duration(job.active_ms) })];
-      if (st.byBytes && st.avg) parts.push(t("media {s}", { s: speed(st.avg) }));
-      parts.push(count(p.files_done, "elemento", "elementi", int));
-      if (p.skipped) parts.push(t("{n} saltati", { n: int(p.skipped) }));
-      if (p.errors) parts.push(count(p.errors, "errore", "errori", int));
+      const parts = [t("files.transfers.in_d", { d: duration(job.active_ms) })];
+      if (st.byBytes && st.avg) parts.push(t("files.transfers.average_s", { s: speed(st.avg) }));
+      parts.push(count(p.files_done, "files.common.count.items", int));
+      if (p.skipped) parts.push(t("files.transfers.n_skipped", { n: int(p.skipped) }));
+      if (p.errors) parts.push(count(p.errors, "files.transfers.count.errors", int));
       if (job.msg === "need_password") {
         sum.className = "xf-summary failed";
         if (!$(".pw", sum)) {
           sum._html = null;
-          sum.innerHTML = `${svg("shield")}<div style="flex:1"><b>${t("L'archivio è protetto da password")}</b>
-            <form class="pw" style="display:flex;gap:8px;margin-top:8px"><input type="password" class="input" style="flex:1" placeholder="${t("Password")}" aria-label="${t("Password")}" autocomplete="off"><button class="btn primary">${t("Estrai")}</button></form></div>`;
+          sum.innerHTML = `${svg("shield")}<div style="flex:1"><b>${t("files.transfers.archive_password_protected")}</b>
+            <form class="pw" style="display:flex;gap:8px;margin-top:8px"><input type="password" class="input" style="flex:1" placeholder="${t("files.common.password")}" aria-label="${t("files.common.password")}" autocomplete="off"><button class="btn primary">${t("files.transfers.extract")}</button></form></div>`;
           const form = $(".pw", sum);
           form.onsubmit = (e) => {
             e.preventDefault();
@@ -984,7 +984,7 @@ class JobDialog {
     const cancel = $(".b-cancel", d);
     // with a question waiting, the answer is what goes on: no pause there
     pause.hidden = finished(job) || job.state === "queued" || job.state === "conflict" || (job.op === "delete" && job.source !== "local");
-    setHTML(pause, job.state === "paused" ? `${svg("play")} ${t("Riprendi")}` : `${svg("pause")} ${t("Pausa")}`);
+    setHTML(pause, job.state === "paused" ? `${svg("play")} ${t("files.transfers.resume")}` : `${svg("pause")} ${t("files.transfers.pause")}`);
     cancel.hidden = finished(job);
     // being cancelled: nothing more to ask of it
     pause.disabled = cancel.disabled = !!job.cancelling;
@@ -1011,7 +1011,7 @@ class JobDialog {
       if (![...sel.options].some((o) => +o.value === mb)) sel.append(h(`<option value="${mb}">${speed(mb * 1024 * 1024)}</option>`));
       sel.value = String(mb);
     }
-    $(".axis-toggle", d).textContent = this.axis === "progress" ? t("asse: avanzamento") : t("asse: tempo");
+    $(".axis-toggle", d).textContent = this.axis === "progress" ? t("files.transfers.axis_progress") : t("files.transfers.axis_time");
     this.chartBox.hidden = job.op === "delete" && !st.byBytes && job.samples.length < 3;
     this.draw();
   }
@@ -1028,20 +1028,20 @@ class JobDialog {
     this.conflictId = c.id;
     box.hidden = false;
     const newer = c.source.mtime > c.target.mtime ? "source" : c.source.mtime < c.target.mtime ? "target" : "";
-    const side = (s, label, which) => `<div><div class="h"><span>${esc(label)}</span>${newer === which ? `<span class="newer">${t("più recente")}</span>` : ""}</div>
-      <div>${s.dir ? t("Cartella") : size(s.size)} ${!s.dir && s.size !== (which === "source" ? c.target.size : c.source.size) ? `<span class="bigger">${(which === "source" ? c.source.size > c.target.size : c.target.size > c.source.size) ? "▲" : "▼"}</span>` : ""}</div>
+    const side = (s, label, which) => `<div><div class="h"><span>${esc(label)}</span>${newer === which ? `<span class="newer">${t("files.transfers.newer")}</span>` : ""}</div>
+      <div>${s.dir ? t("files.common.folder") : size(s.size)} ${!s.dir && s.size !== (which === "source" ? c.target.size : c.source.size) ? `<span class="bigger">${(which === "source" ? c.source.size > c.target.size : c.target.size > c.source.size) ? "▲" : "▼"}</span>` : ""}</div>
       <div style="color:var(--muted)">${esc(dateTime(s.mtime))}</div></div>`;
-    box.innerHTML = `<h3>${svg("alert")} ${t("Esiste già un elemento con questo nome")}</h3>
+    box.innerHTML = `<h3>${svg("alert")} ${t("files.common.item_name_already_exists")}</h3>
       <div class="cname">${esc(c.path)}</div>
-      <div class="cmp">${side(c.source, t("Da copiare"), "source")}${side(c.target, t("Nella destinazione"), "target")}</div>
+      <div class="cmp">${side(c.source, t("files.transfers.incoming"), "source")}${side(c.target, t("files.transfers.in_destination"), "target")}</div>
       <div class="acts">
-        <button class="btn primary" data-a="overwrite">${t("Sovrascrivi")}</button>
-        <button class="btn" data-a="skip">${t("Salta")}</button>
-        <button class="btn" data-a="rename" title="${esc(c.rename_to)}">${t("Mantieni entrambi")}</button>
-        <button class="btn" data-a="newer">${t("Sovrascrivi se più recente")}</button>
-        <label class="check" style="margin-left:auto"><input type="checkbox" class="all"> ${t("Applica a tutti")}</label>
+        <button class="btn primary" data-a="overwrite">${t("files.common.overwrite")}</button>
+        <button class="btn" data-a="skip">${t("files.common.skip")}</button>
+        <button class="btn" data-a="rename" title="${esc(c.rename_to)}">${t("files.common.keep_both")}</button>
+        <button class="btn" data-a="newer">${t("files.common.overwrite_newer")}</button>
+        <label class="check" style="margin-left:auto"><input type="checkbox" class="all"> ${t("files.transfers.apply_all")}</label>
       </div>
-      <div class="hint" style="margin-top:6px">${t("«Mantieni entrambi» salva il nuovo come {n}", { n: `<b>${esc(c.rename_to)}</b>` })}</div>`;
+      <div class="hint" style="margin-top:6px">${t("files.transfers.keep_both_saves_new_one", { n: `<b>${esc(c.rename_to)}</b>` })}</div>`;
     box.querySelectorAll("[data-a]").forEach((b) => (b.onclick = async () => {
       // hidden at once; back if the answer did not get through
       box.hidden = true;
@@ -1065,7 +1065,7 @@ class JobDialog {
     const key = `${errs.length}/${job.progress.errors}`;
     if (this.errorsKey === key) return;
     this.errorsKey = key;
-    $("summary", box).textContent = count(job.progress.errors || errs.length, "errore", "errori", int);
+    $("summary", box).textContent = count(job.progress.errors || errs.length, "files.transfers.count.errors", int);
     $("ul", box).innerHTML = errs.map((e) => `<li><span title="${esc(e.path)}">${esc(e.path)}</span><span title="${esc(e.msg || "")}">${esc(errorText(e))}</span></li>`).join("");
   }
 
@@ -1155,7 +1155,7 @@ class JobDialog {
       g.fillStyle = col("--faint");
       g.font = "12px " + col("--font");
       g.textAlign = "center";
-      g.fillText(!active(job) ? t("nessun dato") : job.stalled_s ? t("nessun dato da {n} s", { n: int(job.stalled_s) }) : t("in attesa dei primi dati…"), W / 2, H / 2 + 6);
+      g.fillText(!active(job) ? t("files.transfers.chart_no_data") : job.stalled_s ? t("files.transfers.chart_no_data_for", { n: int(job.stalled_s) }) : t("files.transfers.waiting_first_data"), W / 2, H / 2 + 6);
       g.textAlign = "start";
       return;
     }
@@ -1297,7 +1297,7 @@ class JobDialog {
       g.fill();
       if (!this.tip) this.tip = this.chartBox.appendChild(h(`<div class="tip"></div>`));
       const pct = st.totalWork ? Math.round((best.w / st.totalWork) * 100) : 0;
-      const text = `${fmtTime(best.t)} · ${st.byBytes ? speed(best.v) : t("{n}/s", { n: perSecond(best.v) })} · ${pct}%`;
+      const text = `${fmtTime(best.t)} · ${st.byBytes ? speed(best.v) : t("files.transfers.n_s", { n: perSecond(best.v) })} · ${pct}%`;
       // measured only when its text changes: a layout read at every mouse move is not free
       if (this.tip.textContent !== text || this.tip.hidden) {
         this.tip.hidden = false;

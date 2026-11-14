@@ -1,0 +1,3 @@
+# A made-up third language for the tests (not shipped): the mechanism works for any line of
+# the table with its files. Polish has four plural forms of whole numbers.
+pl	Polski	pl-PL	one few many other	Polish

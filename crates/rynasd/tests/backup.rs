@@ -80,7 +80,7 @@ fn export_and_import_the_notification_store_and_tasks() {
         e.create_target(&TargetRequest {
             name: "hook".into(),
             enabled: true,
-            language: NotifyLanguage::En,
+            language: NotifyLanguage::EN,
             config: TargetConfig::Webhook {
                 url: "https://example.org/hook".into(),
                 method: WebhookMethod::Post,

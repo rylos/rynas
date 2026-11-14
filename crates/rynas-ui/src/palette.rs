@@ -75,11 +75,11 @@ fn entries() -> Vec<Entry> {
         Entry { text: None, key: "pal.theme_auto", icon: icons::MONITOR, action: Action::Theme(ThemePref::Auto), hint: "" },
         Entry { text: None, key: "pal.density_comfortable", icon: icons::ROWS_3, action: Action::Density(Density::Comfortable), hint: "" },
         Entry { text: None, key: "pal.density_compact", icon: icons::ROWS_3, action: Action::Density(Density::Compact), hint: "" },
-        Entry { text: None, key: "pal.lang_it", icon: icons::LANGUAGES, action: Action::Lang(Lang::It), hint: "" },
-        Entry { text: None, key: "pal.lang_en", icon: icons::LANGUAGES, action: Action::Lang(Lang::En), hint: "" },
         Entry { text: None, key: "pal.toggle_sidebar", icon: icons::PANEL_LEFT, action: Action::ToggleSidebar, hint: "" },
         Entry { text: None, key: "pal.toggle_tasks", icon: icons::LIST_CHECKS, action: Action::ToggleTasks, hint: "" },
     ]);
+    // one entry per language of the table, named as the language names itself
+    v.extend(Lang::all().map(|l| Entry { text: Some(i18n::tf("pal.lang", &[("name", l.name())])), key: "pal.lang", icon: icons::LANGUAGES, action: Action::Lang(l), hint: "" }));
     v
 }
 
@@ -150,7 +150,12 @@ pub fn Palette() -> impl IntoView {
                 .filter(|(_, e)| !matches!(e.action, Action::Go(p) if !crate::shell::nav_shown(p)))
                 .filter_map(|(i, e)| {
                     let label = e.label();
-                    let extra = if matches!(e.action, Action::Go(_) | Action::Open(_)) { t("pal.go") } else { "" };
+                    let extra = match e.action {
+                        Action::Go(_) | Action::Open(_) => t("pal.go").to_string(),
+                        // a language is also found by its English name and code ("italian", "it")
+                        Action::Lang(l) => format!("language {} {}", l.english(), l.code()),
+                        _ => String::new(),
+                    };
                     fuzzy(&q, &label).or_else(|| fuzzy(&q, &format!("{extra} {label}"))).map(|s| (s, i))
                 })
                 .collect()

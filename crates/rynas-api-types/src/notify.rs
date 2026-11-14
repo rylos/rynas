@@ -278,13 +278,78 @@ pub struct AckAllResult {
     pub acked: u64,
 }
 
-/// Language of a target's messages.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum NotifyLanguage {
-    #[default]
-    En,
-    It,
+/// Language of a target's messages: a code of the interface's language table
+/// (`crates/rynas-ui/assets/i18n/languages.txt`, docs/i18n.md), sent as that string
+/// (`"en"`, `"it"`). Messages fall back to English for a language without texts.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NotifyLanguage {
+    code: [u8; NotifyLanguage::MAX],
+    len: u8,
+}
+
+impl NotifyLanguage {
+    /// The longest code (`zh-Hant-TW` is 10).
+    pub const MAX: usize = 12;
+    /// English: the default and the fallback.
+    pub const EN: NotifyLanguage = NotifyLanguage::from_static("en");
+
+    const fn from_static(s: &str) -> NotifyLanguage {
+        let b = s.as_bytes();
+        let mut code = [0u8; Self::MAX];
+        let mut i = 0;
+        while i < b.len() {
+            code[i] = b[i];
+            i += 1;
+        }
+        NotifyLanguage {
+            code,
+            len: b.len() as u8,
+        }
+    }
+
+    /// A language tag of letters, digits and `-` (at most [`Self::MAX`]), else `None`.
+    pub fn new(code: &str) -> Option<NotifyLanguage> {
+        let ok = !code.is_empty()
+            && code.len() <= Self::MAX
+            && code.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-');
+        ok.then(|| Self::from_static(code))
+    }
+
+    pub fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.code[..usize::from(self.len)]).unwrap_or("en")
+    }
+}
+
+impl Default for NotifyLanguage {
+    fn default() -> Self {
+        Self::EN
+    }
+}
+
+impl std::fmt::Debug for NotifyLanguage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "NotifyLanguage({:?})", self.as_str())
+    }
+}
+
+impl std::fmt::Display for NotifyLanguage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl Serialize for NotifyLanguage {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for NotifyLanguage {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = std::borrow::Cow::<'de, str>::deserialize(d)?;
+        NotifyLanguage::new(&s)
+            .ok_or_else(|| serde::de::Error::custom(format!("invalid language code: {s:?}")))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -682,5 +747,20 @@ mod tests {
             event_text("t.f", "title", &fields(&[("type", "x.y")]), &dict, false).as_deref(),
             Some("Failed: x.y")
         );
+    }
+
+    /// A target's language is any code of the table, sent as the plain string; the stored
+    /// "en"/"it" stay valid, a malformed code is refused.
+    #[test]
+    fn language_codes() {
+        assert_eq!(NotifyLanguage::default(), NotifyLanguage::EN);
+        assert_eq!(serde_json::to_string(&NotifyLanguage::EN).unwrap(), "\"en\"");
+        let it: NotifyLanguage = serde_json::from_str("\"it\"").unwrap();
+        assert_eq!(it.as_str(), "it");
+        let pt: NotifyLanguage = serde_json::from_str("\"pt-BR\"").unwrap();
+        assert_eq!(pt.to_string(), "pt-BR");
+        for bad in ["\"\"", "\"e n\"", "\"toolong-language-code\"", "\"it\\n\""] {
+            assert!(serde_json::from_str::<NotifyLanguage>(bad).is_err(), "{bad}");
+        }
     }
 }

@@ -12,6 +12,7 @@ os.makedirs(os.path.join(OUT_DIR, "shots"), exist_ok=True)
 BASE_URL = os.environ.get("BASE", "http://127.0.0.1:18600")
 sys.path.insert(0, HERE)
 import cdp  # noqa: E402
+import texts  # noqa: E402
 import run_all  # noqa: E402
 
 LANG, THEME, PORT = sys.argv[1], sys.argv[2], int(sys.argv[3])
@@ -35,15 +36,9 @@ if "--routes" in sys.argv:
 AUDIT_JS = open(os.path.join(HERE, "audit.js")).read()
 SHOT_DIALOGS = os.environ.get("SHOT_DIALOGS", "1") == "1"
 
-# English texts that differ in Italian (to spot English in Italian mode)
-SRC = open(os.path.join(REPO, "crates/rynas-ui/src/i18n.rs")).read()
-STR = r'"((?:[^"\\]|\\.)*)"'
-_PAIRS = re.findall(STR + r"\s*=>\s*" + STR + r",\s*" + STR + r";", SRC)
-_IT = {it for k, en, it in _PAIRS}
-# an English text that is also the Italian text of another key ("Temperature", "Status") is not
-# a sign of English
-EN_ONLY = sorted({en for k, en, it in _PAIRS
-                  if en != it and en not in _IT and re.search(r"[A-Za-z]{3}", en) and "{" not in en})
+# English texts that differ in the audited language (to spot English in it)
+EN_ONLY = texts.english_only(LANG)
+
 
 SKIP = r"apply|applica|run now|esegui ora|^scrub|avvia scrub|test|prova|refresh|aggiorna|reload|ricarica|discard|scarta|^start|^avvia|^stop|^ferma|sign out|^esci|identify|beep|copy|copia|download|scarica|export|esporta|mark all|segna|retry|riprova|wake|shut ?down|spegn|riavv|reboot|restart|clear|svuota|^cancel|^annulla|^back|^indietro|undo|import|confirm|conferma|generate|genera|reveal|mostra chiave|logout|ping|traceroute|lookup|resolve|risolvi|mount$|^monta|unmount|smonta|lock|unlock|blocca|sblocca|^save|^salva|send|invia|rollback|keep|mantieni|disable|disattiva|enable|attiva|resume|riprendi|pause|sospendi|forget|dimentica"
 

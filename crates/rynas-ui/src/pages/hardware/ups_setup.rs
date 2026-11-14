@@ -747,7 +747,7 @@ mod tests {
         };
         let mut r = UpsDetectReport { candidates: vec![cand(UpsProbeState::NeedsNewerNut), cand(UpsProbeState::Failed)], ..Default::default() };
         assert_eq!(failure_key(&r), Some("upsw.need_newer"));
-        let text = i18n::text_in(i18n::Lang::En, "upsw.need_newer").unwrap();
+        let text = i18n::text_in(i18n::Lang::EN, "upsw.need_newer").unwrap();
         assert!(text.contains("{need}") && text.contains("{have}"));
         r.candidates.remove(0);
         assert_eq!(failure_key(&r), Some("upsw.none_answered"));
@@ -763,7 +763,7 @@ mod tests {
         assert_eq!(newer_key(Some(&up(Some(UpsNutSource::Rynas)))), "upsw.need_newer_update");
         assert_eq!(newer_key(Some(&up(None))), "upsw.need_newer_files");
         for k in ["upsw.need_newer", "upsw.need_newer_update", "upsw.need_newer_files"] {
-            for lang in [i18n::Lang::En, i18n::Lang::It] {
+            for lang in i18n::Lang::all() {
                 let s = i18n::text_in(lang, k).unwrap();
                 assert!(s.contains("{need}") && s.contains("{have}"), "{k}");
                 if k != "upsw.need_newer" {
@@ -771,8 +771,8 @@ mod tests {
                 }
             }
         }
-        assert!(i18n::text_in(i18n::Lang::En, "upsw.need_newer_files").unwrap().contains("{dir}"));
-        assert!(i18n::text_in(i18n::Lang::It, "upsw.need_newer_update").unwrap().contains("{source}"));
+        assert!(i18n::text_in(i18n::Lang::EN, "upsw.need_newer_files").unwrap().contains("{dir}"));
+        assert!(i18n::text_in(i18n::Lang::from_code("it").unwrap(), "upsw.need_newer_update").unwrap().contains("{source}"));
         for k in ["upsw.update_nut", "upsw.updated", "upsw.updating", "upsw.driver_output", "upsw.nut_src_apt", "upsw.nut_src_backports", "upsw.nut_src_rynas", "task.ups.update-nut"] {
             assert!(i18n::try_t(k).is_some(), "{k}");
         }
@@ -797,8 +797,8 @@ mod tests {
     /// module's own texts are `syn.*`, in its table).
     #[test]
     fn neutral_without_a_module() {
-        for lang in [i18n::Lang::En, i18n::Lang::It] {
-            for (k, en, _) in i18n::entries().into_iter().filter(|e| e.0.starts_with("upsw.")) {
+        for lang in i18n::Lang::all() {
+            for (k, en) in i18n::entries().into_iter().filter(|e| e.0.starts_with("upsw.")) {
                 let s = i18n::text_in(lang, k).unwrap_or(en);
                 assert!(!s.to_ascii_lowercase().contains("synodeb"), "{k}: {s}");
                 // backports are named only as the source rynas found configured

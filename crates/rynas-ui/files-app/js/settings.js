@@ -1,32 +1,32 @@
 // The settings dialog: look, list, behaviour, transfers, keys.
 
 import { prefs, save, DEFAULTS } from "./prefs.js";
-import { t } from "./i18n.js";
+import { t, keyText } from "./i18n.js";
 import { svg } from "./icons.js";
 import { dialog, $, h, pickFolder } from "./ui.js";
 import { esc } from "./format.js";
 
 const SECTIONS = [
-  ["look", "palette", "Aspetto"],
-  ["list", "list", "Elenco"],
-  ["behaviour", "settings", "Comportamento"],
-  ["transfers", "transfers", "Trasferimenti"],
-  ["keys", "keyboard", "Scorciatoie"],
+  ["look", "palette", "files.settings.appearance"],
+  ["list", "list", "files.common.list"],
+  ["behaviour", "settings", "files.settings.behavior"],
+  ["transfers", "transfers", "files.common.transfers"],
+  ["keys", "keyboard", "files.settings.shortcuts"],
 ];
 
 export const KEYS = [
-  ["Ctrl+T", "Nuova scheda"], ["Ctrl+W", "Chiudi scheda"], ["Ctrl+Tab / Ctrl+PgGiù", "Scheda successiva"],
-  ["Ctrl+Shift+Tab / Ctrl+PgSu", "Scheda precedente"], ["Alt+1…9", "Vai alla scheda"], ["Ctrl+Shift+T", "Riapri scheda chiusa"],
-  ["F3", "Doppio pannello"], ["Tab", "Altro pannello (con il doppio pannello)"], ["F5 / F6", "Copia / sposta nell'altro pannello"], ["Shift+F5 / Shift+F6", "Copia / sposta con verifica"], ["Ctrl+Shift+V", "Incolla con verifica"],
-  ["Invio", "Apri"], ["Backspace / Alt+↑", "Cartella superiore"], ["Alt+← / Alt+→", "Indietro / avanti"],
-  ["Spazio", "Anteprima rapida"], ["Ctrl+I", "Pannello informazioni"], ["Ctrl+H", "Mostra o nascondi i file nascosti"],
-  ["Ctrl+L", "Scrivi un percorso"], ["/", "Filtro fuzzy della cartella"], ["Ctrl+F", "Cerca nelle sottocartelle"],
-  ["Ctrl+1 / Ctrl+2 / Ctrl+3", "Elenco / griglia / colonne"], ["Ctrl+B", "Barra laterale"], ["Ctrl+R", "Aggiorna"],
-  ["Ctrl+C / Ctrl+X / Ctrl+V", "Copia / taglia / incolla"], ["Ctrl+A", "Seleziona tutto"], ["Ctrl+Shift+I", "Inverti selezione"],
-  ["Insert", "Seleziona e vai avanti"], ["F2", "Rinomina"], ["Ctrl+Shift+N", "Nuova cartella"],
-  ["Canc", "Sposta nel cestino"], ["Shift+Canc", "Elimina definitivamente"], ["Ctrl+D", "Aggiungi ai preferiti"],
-  ["Ctrl+Shift+C", "Copia percorso"], ["Ctrl+U", "Carica file"], ["Ctrl+J", "Trasferimenti"], ["Ctrl+,", "Impostazioni"],
-  ["Lettere", "Salta al nome che inizia così"], ["j k h l, gg, G", "Tasti Vim (se attivi)"],
+  ["Ctrl+T", "files.common.new_tab"], ["Ctrl+W", "files.common.close_tab"], ["Ctrl+Tab / Ctrl+PgDn", "files.settings.next_tab"],
+  ["Ctrl+Shift+Tab / Ctrl+PgUp", "files.settings.previous_tab"], ["Alt+1…9", "files.settings.go_tab"], ["Ctrl+Shift+T", "files.settings.reopen_closed_tab"],
+  ["F3", "files.common.dual_pane"], ["Tab", "files.settings.other_pane_dual_pane"], ["F5 / F6", "files.settings.copy_move_other_pane"], ["Shift+F5 / Shift+F6", "files.settings.copy_move_verification"], ["Ctrl+Shift+V", "files.common.paste_verification"],
+  ["Enter", "files.common.open"], ["Backspace / Alt+↑", "files.common.parent_folder"], ["Alt+← / Alt+→", "files.settings.back_forward"],
+  ["Space", "files.settings.quick_look"], ["Ctrl+I", "files.common.info_panel"], ["Ctrl+H", "files.settings.show_hide_hidden_files"],
+  ["Ctrl+L", "files.settings.type_path"], ["/", "files.settings.fuzzy_filter_folder"], ["Ctrl+F", "files.settings.search_subfolders"],
+  ["Ctrl+1 / Ctrl+2 / Ctrl+3", "files.settings.list_grid_columns"], ["Ctrl+B", "files.common.sidebar"], ["Ctrl+R", "files.common.refresh"],
+  ["Ctrl+C / Ctrl+X / Ctrl+V", "files.settings.copy_cut_paste"], ["Ctrl+A", "files.common.select_all"], ["Ctrl+Shift+I", "files.common.invert_selection"],
+  ["Insert", "files.settings.select_move_on"], ["F2", "files.common.rename"], ["Ctrl+Shift+N", "files.common.new_folder"],
+  ["Del", "files.common.move_recycle_bin"], ["Shift+Del", "files.common.delete_permanently"], ["Ctrl+D", "files.common.add_favorites"],
+  ["Ctrl+Shift+C", "files.common.copy_path"], ["Ctrl+U", "files.settings.upload_files"], ["Ctrl+J", "files.common.transfers"], ["Ctrl+,", "files.common.settings"],
+  ["Letters", "files.settings.jump_name_starting_like"], ["j k h l, gg, G", "files.settings.vim_keys_on"],
 ];
 
 function row(label, hint, control) {
@@ -34,7 +34,7 @@ function row(label, hint, control) {
 }
 const sw = (key) => `<label class="switch"><input type="checkbox" data-k="${key}" ${getK(key) ? "checked" : ""}><span></span></label>`;
 const sel = (key, options) =>
-  `<select class="input" data-k="${key}">${options.map(([v, l]) => `<option value="${v}" ${String(getK(key)) === String(v) ? "selected" : ""}>${t(l)}</option>`).join("")}</select>`;
+  `<select class="input" data-k="${key}">${options.map(([v, l]) => `<option value="${v}" ${String(getK(key)) === String(v) ? "selected" : ""}>${l.startsWith("files.") ? t(l) : esc(l)}</option>`).join("")}</select>`;
 
 function getK(key) {
   return key.split(".").reduce((o, k) => o?.[k], prefs);
@@ -50,47 +50,47 @@ function body(section) {
   switch (section) {
     case "look":
       return (
-        row("Icone dei file", "Le icone di eza (Nerd Font), per tipo e per nome", sw("icons")) +
-        row("Colori dei nomi", "I colori di eza: cartelle blu, immagini viola, archivi rossi…", sw("colors")) +
-        row("Cartelle di sistema in grigio", "#recycle, #snapshot, $RECYCLE.BIN, lost+found… Un colore dato a mano resta", sw("greySystem")) +
-        row("Colonne in stile ll", "Permessi, dimensioni e date colorati come in eza -l", sw("llColumns")) +
-        row("Dimensione del testo", "", sel("size", [["small", "Piccola"], ["normal", "Normale"], ["large", "Grande"]])) +
-        row("Densità delle righe", "", sel("density", [["compact", "Compatta"], ["normal", "Normale"]]))
+        row("files.settings.file_icons", "files.settings.eza_icons_nerd_font_type", sw("icons")) +
+        row("files.settings.name_colors", "files.settings.eza_colors_blue_folders_purple", sw("colors")) +
+        row("files.settings.system_folders_in_gray", "files.settings.recycle_snapshot_recycle_bin_lost", sw("greySystem")) +
+        row("files.settings.ll_style_columns", "files.settings.permissions_sizes_dates_colored_like", sw("llColumns")) +
+        row("files.settings.text_size", "", sel("size", [["small", "files.settings.small"], ["normal", "files.common.normal"], ["large", "files.settings.large"]])) +
+        row("files.settings.row_density", "", sel("density", [["compact", "files.settings.compact"], ["normal", "files.common.normal"]]))
       );
     case "list":
       return (
-        row("Cartelle prima", "Come eza --group-directories-first", sw("foldersFirst")) +
-        row("Mostra i file nascosti", "Quelli che iniziano con un punto (Ctrl+H)", sw("showHidden")) +
-        row("File nascosti in fondo", "Quando sono visibili, dopo gli altri", sw("hiddenLast")) +
-        row("Mostra i preferiti", "La sezione Preferiti della barra laterale; restano salvati anche se nascosti", sw("showFavorites")) +
-        row("Nomi dei volumi", "Quelli dati ai volumi (es. «HDD»), altrimenti «Volume 1»", sw("volumeNames")) +
-        row("Ricorda vista e ordinamento per cartella", "Altrimenti valgono gli ultimi usati, per tutte", sw("perFolder")) +
-        row("Evidenzia le date di oggi", "Nella colonna Modificato", sw("todayHighlight")) +
-        row("Dimensioni binarie", "KiB, MiB, GiB (1024) invece di kB, MB, GB (1000)", sw("binarySizes")) +
-        row("Date relative", "«3 h fa» invece di «29 ott 21:45»", sw("relativeDates")) +
-        row("Colonna Permessi", "", sw("columns.mode")) +
-        row("Colonna Dimensione", "", sw("columns.size")) +
-        row("Colonna Modificato", "", sw("columns.mtime")) +
-        row("Colonna Tipo", "", sw("columns.kind"))
+        row("files.common.folders_first", "files.settings.like_eza_group_directories_first", sw("foldersFirst")) +
+        row("files.common.show_hidden_files", "files.settings.those_starting_dot_ctrl_h", sw("showHidden")) +
+        row("files.settings.hidden_files_last", "files.settings.shown_after_others", sw("hiddenLast")) +
+        row("files.settings.show_favorites", "files.settings.favorites_section_sidebar_stay_saved", sw("showFavorites")) +
+        row("files.settings.volume_names", "Quelli dati ai volumi (es. «HDD»), altrimenti «Volume 1»", sw("volumeNames")) +
+        row("files.settings.remember_view_sort_each_folder", "files.settings.otherwise_last_ones_used_apply", sw("perFolder")) +
+        row("files.settings.highlight_today_dates", "files.settings.in_modified_column", sw("todayHighlight")) +
+        row("files.settings.binary_sizes", "files.settings.kib_mib_gib_1024_instead", sw("binarySizes")) +
+        row("files.settings.relative_dates", "files.settings.relative_dates_hint", sw("relativeDates")) +
+        row("files.settings.permissions_column", "", sw("columns.mode")) +
+        row("files.settings.size_column", "", sw("columns.size")) +
+        row("files.settings.modified_column", "", sw("columns.mtime")) +
+        row("files.settings.type_column", "", sw("columns.kind"))
       );
     case "behaviour":
       return (
-        row("Apri con un clic", "Altrimenti con il doppio clic", sw("singleClick")) +
-        row("Tasti Vim", "j/k per scorrere, h per salire, l per aprire, gg e G", sw("vimKeys")) +
-        row("Conferma prima di eliminare", "", sw("confirmDelete")) +
-        row("All'avvio apri", "", sel("startIn", [["last", "Le ultime schede"], ["shares", "Cartelle condivise"], ["folder", "La cartella scelta"]])) +
-        row("Nuove schede in", "Ctrl+T e il + della barra delle schede", sel("newTabIn", [["current", "Cartella corrente"], ["shares", "Cartelle condivise"], ["folder", "La cartella scelta"]])) +
-        row("Cartella scelta", "", `<button class="btn small pick-start">${prefs.startFolder ? `<span style="font-family:var(--mono)">${esc(prefs.startFolder)}</span>` : t("Scegli…")}</button>`)
+        row("files.settings.open_one_click", "files.settings.otherwise_double_click", sw("singleClick")) +
+        row("files.settings.vim_keys", "files.settings.j_k_move_h_go", sw("vimKeys")) +
+        row("files.settings.confirm_before_deleting", "", sw("confirmDelete")) +
+        row("files.settings.on_start_open", "", sel("startIn", [["last", "files.settings.last_tabs"], ["shares", "files.common.shared_folders"], ["folder", "files.settings.the_chosen_folder"]])) +
+        row("files.settings.new_tabs_open_in", "files.settings.ctrl_t_tab_bar", sel("newTabIn", [["current", "files.settings.current_folder"], ["shares", "files.common.shared_folders"], ["folder", "files.settings.the_chosen_folder"]])) +
+        row("files.settings.chosen_folder", "", `<button class="btn small pick-start">${prefs.startFolder ? `<span style="font-family:var(--mono)">${esc(prefs.startFolder)}</span>` : t("files.settings.choose")}</button>`)
       );
     case "transfers":
       return (
-        row("Se un elemento esiste già", "La scelta di partenza per copie, spostamenti e caricamenti", sel("conflict", [["ask", "Chiedi"], ["rename", "Mantieni entrambi"], ["skip", "Salta"], ["overwrite", "Sovrascrivi"], ["newer", "Sovrascrivi se più recente"]])) +
-        row("Limite di velocità", "Si cambia anche durante il trasferimento", sel("limit", [[0, "Nessuno"], [10, "10 MiB/s"], [25, "25 MiB/s"], [50, "50 MiB/s"], [100, "100 MiB/s"], [200, "200 MiB/s"]])) +
-        row("Apri il dialogo all'avvio", "Altrimenti il trasferimento parte in background", sw("openDialog")) +
-        row("Notifica del browser alla fine", "Quando la pagina non è in primo piano", sw("notify"))
+        row("files.settings.item_already_exists", "files.settings.starting_choice_copies_moves_uploads", sel("conflict", [["ask", "files.settings.ask"], ["rename", "files.common.keep_both"], ["skip", "files.common.skip"], ["overwrite", "files.common.overwrite"], ["newer", "files.common.overwrite_newer"]])) +
+        row("files.common.speed_limit", "files.settings.can_changed_during_transfer", sel("limit", [[0, "files.settings.none"], [10, "10 MiB/s"], [25, "25 MiB/s"], [50, "50 MiB/s"], [100, "100 MiB/s"], [200, "200 MiB/s"]])) +
+        row("files.settings.open_dialog_on_start", "files.settings.otherwise_transfer_starts_in_background", sw("openDialog")) +
+        row("files.settings.browser_notification_end", "files.settings.page_not_in_front", sw("notify"))
       );
     case "keys":
-      return `<table class="keys">${KEYS.map(([k, d]) => `<tr><td>${k.split(" / ").map((x) => x.split("+").map((p) => `<kbd>${t(p)}</kbd>`).join("+")).join(" / ")}</td><td>${t(d)}</td></tr>`).join("")}</table>`;
+      return `<table class="keys">${KEYS.map(([k, d]) => `<tr><td>${keyText(k).split(" / ").map((x) => x.split("+").map((p) => `<kbd>${esc(p)}</kbd>`).join("+")).join(" / ")}</td><td>${t(d)}</td></tr>`).join("")}</table>`;
   }
   return "";
 }
@@ -98,9 +98,9 @@ function body(section) {
 
 export function openSettings(start = "look") {
   const dlg = dialog(`
-    <div class="dlg-head"><div class="dlg-icon">${svg("settings")}</div><h2>${t("Impostazioni di File")}</h2><button class="icon-btn x" aria-label="${t("Chiudi")}">${svg("close")}</button></div>
+    <div class="dlg-head"><div class="dlg-icon">${svg("settings")}</div><h2>${t("files.settings.files_settings")}</h2><button class="icon-btn x" aria-label="${t("files.common.close")}">${svg("close")}</button></div>
     <div class="settings"><nav>${SECTIONS.map(([k, i, l]) => `<button data-s="${k}">${svg(i)} ${t(l)}</button>`).join("")}</nav><section></section></div>
-    <div class="dlg-foot"><div class="left"><button class="btn ghost reset">${t("Reimposta i predefiniti")}</button></div><button class="btn primary ok">${t("Fatto")}</button></div>`, { wide: true });
+    <div class="dlg-foot"><div class="left"><button class="btn ghost reset">${t("files.settings.reset_defaults")}</button></div><button class="btn primary ok">${t("files.settings.done")}</button></div>`, { wide: true });
   const section = $("section", dlg);
   const show = (s) => {
     dlg.querySelectorAll("nav button").forEach((b) => b.classList.toggle("on", b.dataset.s === s));
@@ -115,7 +115,7 @@ export function openSettings(start = "look") {
     const pick = $(".pick-start", section);
     if (pick) {
       pick.onclick = async () => {
-        const path = await pickFolder({ title: t("Cartella scelta"), start: prefs.startFolder || "/", ok: t("Usa questa cartella") });
+        const path = await pickFolder({ title: t("files.settings.chosen_folder"), start: prefs.startFolder || "/", ok: t("files.settings.use_folder") });
         if (!path) return;
         save({ startFolder: path });
         show(s);

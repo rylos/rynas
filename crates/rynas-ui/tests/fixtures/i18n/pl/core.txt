@@ -1,0 +1,7 @@
+# Test fixture: a few Polish texts, the rest falls back to English.
+nav.files	Pliki
+rm.count.one	{n} dysk
+rm.count.few	{n} dyski
+rm.count.many	{n} dysków
+rm.count.other	{n} dysku
+dur.d	{d} d

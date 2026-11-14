@@ -454,7 +454,6 @@ const KINDS: &[(&str, &str)] = &[
     ("webhook", "nt.kind.webhook"),
     ("ui", "nt.kind.ui"),
 ];
-const LANGS: &[(&str, &str)] = &[("en", "lang.en"), ("it", "lang.it")];
 const SECURITY: &[(&str, &str)] = &[("starttls", "nt.sec.starttls"), ("tls", "nt.sec.tls"), ("none", "nt.sec.none")];
 const METHODS: &[(&str, &str)] = &[("post", "nt.m.post"), ("put", "nt.m.put"), ("get", "nt.m.get")];
 
@@ -526,7 +525,9 @@ impl TargetDraft {
             id: Some(t.id),
             name: t.name.clone(),
             enabled: t.enabled,
-            language: if t.language == NotifyLanguage::It { "it" } else { "en" }.into(),
+            // a language the table no longer has: English (the server refuses to save it, and
+            // renders it in English anyway)
+            language: crate::i18n::Lang::from_code(t.language.as_str()).map_or("en", crate::i18n::Lang::code).into(),
             port: "587".into(),
             security: "starttls".into(),
             method: "post".into(),
@@ -678,7 +679,7 @@ impl TargetDraft {
         Ok(TargetRequest {
             name: self.name.trim().into(),
             enabled: self.enabled,
-            language: if self.language == "it" { NotifyLanguage::It } else { NotifyLanguage::En },
+            language: NotifyLanguage::new(&self.language).unwrap_or_default(),
             config: self.config()?,
             secrets,
         })
@@ -1012,7 +1013,7 @@ fn target_editor(init: TargetDraft, targets: Remote<Vec<NotifyTarget>>, close: C
             {text_field("nt.col.name", name, set_name, none, In { maxlength: 64, ..In::default() })}
             <div class="form-row">
                 {select_field("nt.col.kind", None, KINDS, kind_s, set_kind)}
-                {select_field("nt.f.language", Some("nt.f.language_help"), LANGS, lang, set_lang)}
+                {form::language_select("nt.f.language", Some("nt.f.language_help"), None, lang, set_lang)}
             </div>
             {switch("nt.f.enabled", None, enabled, set_enabled)}
             <h3 class="form-section">{tr("nt.f.connection")}</h3>
@@ -1440,7 +1441,7 @@ mod tests {
             id: 7,
             name: "alice phone".into(),
             enabled: true,
-            language: NotifyLanguage::It,
+            language: NotifyLanguage::new("it").unwrap(),
             config,
             secrets: secrets.iter().map(|s| s.to_string()).collect(),
             status: TargetStatus::default(),
@@ -1453,7 +1454,11 @@ mod tests {
         let d = TargetDraft::from_target(&t);
         let r = d.request().unwrap();
         assert_eq!(r.config, t.config);
-        assert_eq!(r.language, NotifyLanguage::It);
+        assert_eq!(r.language, NotifyLanguage::new("it").unwrap());
+        // a language the table no longer has is edited as English, so the target can be saved
+        let mut gone = t.clone();
+        gone.language = NotifyLanguage::new("xx").unwrap();
+        assert_eq!(TargetDraft::from_target(&gone).request().unwrap().language, NotifyLanguage::EN);
         // an untouched secret is kept (absent from the request)
         assert!(r.secrets.is_empty());
         let mut d2 = d.clone();

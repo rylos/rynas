@@ -2,7 +2,7 @@
 // (i18n.js LOCALE, HOUR_CYCLE), with the same rules and unit words as the core's
 // formatting (rynas-ui i18n.rs: bytes, duration, elapsed, ago, of, pct; the test
 // files_formats_match_core keeps the texts equal).
-import { LOCALE, HOUR_CYCLE, t, count } from "./i18n.js";
+import { LOCALE, HOUR_CYCLE, t } from "./i18n.js";
 
 export const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -85,7 +85,7 @@ export function speed(bps) {
 }
 
 /** "X of Y": a part of a whole (core: i18n::of). */
-export const of = (part, total) => t("{part} di {total}", { part, total });
+export const of = (part, total) => t("files.fmt.of", { part, total });
 
 /** The date column: day, month and time this half year, day, month and year before. */
 export function ezaDate(sec) {
@@ -106,22 +106,22 @@ export function clock(ms) {
   return dateFormat({ timeStyle: "short" }).format(new Date(ms));
 }
 
-/** The largest unit of a duration in seconds: "42 s", "5 min", "3 h", "2 g" (core: i18n::approx). */
+/** The largest unit of a duration in seconds: "42 s", "5 min", "3 h", "2 d" (core: i18n::approx). */
 export function approx(secs) {
   const s = Math.max(0, Math.floor(secs));
-  if (s >= 86400) return t("{d} g", { d: int(Math.floor(s / 86400)) });
-  if (s >= 3600) return t("{h} h", { h: Math.floor(s / 3600) });
-  if (s >= 60) return t("{m} min", { m: Math.floor(s / 60) });
-  return t("{s} s", { s });
+  if (s >= 86400) return t("files.dur.d", { d: int(Math.floor(s / 86400)) });
+  if (s >= 3600) return t("files.dur.h", { h: Math.floor(s / 3600) });
+  if (s >= 60) return t("files.dur.m", { m: Math.floor(s / 60) });
+  return t("files.dur.s", { s });
 }
 
-/** "5 min fa" / "5 min ago" (core: i18n::ago). */
-export const ago = (secs) => t("{time} fa", { time: approx(secs) });
+/** "5 min ago" (core: i18n::ago). */
+export const ago = (secs) => t("files.fmt.ago", { time: approx(secs) });
 
 export function relative(sec) {
   if (!sec) return "-";
   const diff = Date.now() / 1000 - sec;
-  if (diff < 60) return t("adesso");
+  if (diff < 60) return t("files.format.just_now");
   if (diff < 86400 * 7) return ago(diff);
   return ezaDate(sec);
 }
@@ -134,9 +134,9 @@ export function duration(ms) {
   s -= h * 3600;
   const m = Math.floor(s / 60);
   s -= m * 60;
-  if (h) return t("{h} h {m} min", { h: int(h), m: pad(m) });
-  if (m) return t("{m} min {s} s", { m, s: pad(s) });
-  return t("{s} s", { s });
+  if (h) return t("files.dur.hm", { h: int(h), m: pad(m) });
+  if (m) return t("files.dur.ms", { m, s: pad(s) });
+  return t("files.dur.s", { s });
 }
 
 const pad = (n) => String(n).padStart(2, "0");
@@ -167,10 +167,6 @@ export function modeString(kind, mode) {
     out += c;
   });
   return out;
-}
-
-export function plural(n, one, many) {
-  return count(n, one, many, int);
 }
 
 export function joinPath(dir, name) {

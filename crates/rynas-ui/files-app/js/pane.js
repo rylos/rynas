@@ -17,10 +17,10 @@ import { BACKUPS_PATH, entryLabel, pathLabel, isPcFolder, compareSnapshots, isBa
 import { host, mount } from "./host.js";
 
 const COLS = {
-  mode: { label: "Permessi", width: "92px", cls: "mono pm" },
-  size: { label: "Dimensione", width: "84px", cls: "r sz" },
-  mtime: { label: "Modificato", width: "128px", cls: "mono dt" },
-  kind: { label: "Tipo", width: "130px", cls: "" },
+  mode: { label: "files.common.permissions", width: "92px", cls: "mono pm" },
+  size: { label: "files.common.size", width: "84px", cls: "r sz" },
+  mtime: { label: "files.common.modified", width: "128px", cls: "mono dt" },
+  kind: { label: "files.common.type", width: "130px", cls: "" },
 };
 
 const isHidden = (e) => e.name.startsWith(".");
@@ -43,30 +43,30 @@ function mediaFacts(m) {
   const add = (label, value) => value && rows.push(`<dt>${label}</dt><dd>${value}</dd>`);
   if (m.width && m.height) {
     const mp = (m.width * m.height) / 1e6;
-    add(t("Dimensioni"), `${int(m.width)} × ${int(m.height)}${!m.duration && mp >= 1 ? ` <span style="color:var(--faint)">(${num(mp, 1)} MP)</span>` : ""}`);
+    add(t("files.pane.dimensions"), `${int(m.width)} × ${int(m.height)}${!m.duration && mp >= 1 ? ` <span style="color:var(--faint)">(${num(mp, 1)} MP)</span>` : ""}`);
   }
-  if (m.duration) add(t("Durata"), esc(duration(m.duration * 1000)));
-  if (m.video) add(t("Video"), esc([m.video.codec, m.video.fps && `${num(m.video.fps, 2)} fps`, m.video.hdr].filter(Boolean).join(" · ")));
+  if (m.duration) add(t("files.pane.duration"), esc(duration(m.duration * 1000)));
+  if (m.video) add(t("files.common.video"), esc([m.video.codec, m.video.fps && `${num(m.video.fps, 2)} fps`, m.video.hdr].filter(Boolean).join(" · ")));
   if (m.audio) {
-    const tracks = m.audioTracks > 1 ? t("{n} tracce", { n: m.audioTracks }) : "";
-    add(t("Audio"), esc([m.audio.codec, m.audio.rate && `${num(m.audio.rate / 1000, 1)} kHz`, m.audio.channels, tracks].filter(Boolean).join(" · ")));
+    const tracks = m.audioTracks > 1 ? t("files.pane.n_tracks", { n: m.audioTracks }) : "";
+    add(t("files.common.audio"), esc([m.audio.codec, m.audio.rate && `${num(m.audio.rate / 1000, 1)} kHz`, m.audio.channels, tracks].filter(Boolean).join(" · ")));
   }
-  if (m.subtitles) add(t("Sottotitoli"), int(m.subtitles));
-  if (m.bitrate) add(t("Bitrate"), `${int(m.bitrate)} kb/s`);
-  add(t("Fotocamera"), m.camera && esc(m.camera));
-  add(t("Obiettivo"), m.lens && esc(m.lens));
+  if (m.subtitles) add(t("files.pane.subtitles"), int(m.subtitles));
+  if (m.bitrate) add(t("files.pane.bitrate"), `${int(m.bitrate)} kb/s`);
+  add(t("files.pane.camera"), m.camera && esc(m.camera));
+  add(t("files.pane.lens"), m.lens && esc(m.lens));
   const shot = [
     m.aperture && `f/${num(m.aperture, 1)}`,
     m.exposure && (m.exposure < 1 ? `1/${Math.round(1 / m.exposure)} s` : `${num(m.exposure, 1)} s`),
     m.iso && `ISO ${int(m.iso)}`,
     m.focal && `${num(m.focal, 1)} mm${m.focal35 && Math.round(m.focal35) !== Math.round(m.focal) ? ` (${int(m.focal35)} mm eq.)` : ""}`,
   ].filter(Boolean);
-  add(t("Scatto"), shot.length && esc(shot.join(" · ")));
-  add(t("Data di ripresa"), m.taken && esc(m.taken));
+  add(t("files.pane.exposure"), shot.length && esc(shot.join(" · ")));
+  add(t("files.pane.date_taken"), m.taken && esc(m.taken));
   if (m.gps) {
     const [lat, lon] = m.gps;
     const url = `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}#map=16/${lat}/${lon}`;
-    add(t("Posizione"), `<a href="${url}" target="_blank" rel="noopener noreferrer">${lat}, ${lon}</a>`);
+    add(t("files.pane.location"), `<a href="${url}" target="_blank" rel="noopener noreferrer">${lat}, ${lon}</a>`);
   }
   return rows.join("");
 }
@@ -118,23 +118,23 @@ export class Pane {
   build() {
     this.el = h(`<section class="pane">
       <div class="toolbar">
-        <button class="icon-btn b-back" title="${t("Indietro")} (Alt+←)">${svg("back")}</button>
-        <button class="icon-btn b-fwd" title="${t("Avanti")} (Alt+→)">${svg("forward")}</button>
-        <button class="icon-btn b-up" title="${t("Cartella superiore")} (Backspace)">${svg("up")}</button>
-        <button class="icon-btn b-refresh" title="${t("Aggiorna")} (F5)">${svg("refresh")}</button>
-        <div class="crumbs" title="${t("Clic sullo spazio vuoto per scrivere un percorso")} (Ctrl+L)"></div>
-        <label class="filter-box">${svg("filter")}<input type="text" spellcheck="false" placeholder="${t("Filtra")}"><span class="mode" title="${t("Cerca in tutte le sottocartelle: parole contenute nel nome, oppure *.mkv")} (Ctrl+F)">${t("sottocartelle")}</span></label>
+        <button class="icon-btn b-back" title="${t("files.pane.back")} (Alt+←)">${svg("back")}</button>
+        <button class="icon-btn b-fwd" title="${t("files.pane.forward")} (Alt+→)">${svg("forward")}</button>
+        <button class="icon-btn b-up" title="${t("files.common.parent_folder")} (Backspace)">${svg("up")}</button>
+        <button class="icon-btn b-refresh" title="${t("files.common.refresh")} (F5)">${svg("refresh")}</button>
+        <div class="crumbs" title="${t("files.pane.click_empty_space_type_path")} (Ctrl+L)"></div>
+        <label class="filter-box">${svg("filter")}<input type="text" spellcheck="false" placeholder="${t("files.pane.filter")}"><span class="mode" title="${t("files.pane.search_every_subfolder_words_in")} (Ctrl+F)">${t("files.pane.subfolders")}</span></label>
         <div class="seg views">
-          <button data-v="list" title="${t("Elenco")} (Ctrl+1)">${svg("list")}</button>
-          <button data-v="grid" title="${t("Griglia")} (Ctrl+2)">${svg("grid")}</button>
-          <button data-v="columns" title="${t("Colonne")} (Ctrl+3)">${svg("columns")}</button>
+          <button data-v="list" title="${t("files.common.list")} (Ctrl+1)">${svg("list")}</button>
+          <button data-v="grid" title="${t("files.pane.grid")} (Ctrl+2)">${svg("grid")}</button>
+          <button data-v="columns" title="${t("files.common.columns")} (Ctrl+3)">${svg("columns")}</button>
         </div>
-        <button class="icon-btn b-hidden" title="${t("File nascosti")} (Ctrl+H)">${svg("eye")}</button>
-        <button class="icon-btn b-split" title="${t("Doppio pannello")} (F3)">${svg("split")}</button>
-        <button class="icon-btn b-info" title="${t("Pannello informazioni")} (Ctrl+I)">${svg("info")}</button>
+        <button class="icon-btn b-hidden" title="${t("files.pane.hidden_files")} (Ctrl+H)">${svg("eye")}</button>
+        <button class="icon-btn b-split" title="${t("files.common.dual_pane")} (F3)">${svg("split")}</button>
+        <button class="icon-btn b-info" title="${t("files.common.info_panel")} (Ctrl+I)">${svg("info")}</button>
         <div class="sep"></div>
-        <button class="icon-btn b-new" title="${t("Nuovo")}">${svg("plus")}</button>
-        <button class="icon-btn b-more" title="${t("Altro")}">${svg("more")}</button>
+        <button class="icon-btn b-new" title="${t("files.pane.new")}">${svg("plus")}</button>
+        <button class="icon-btn b-more" title="${t("files.pane.more")}">${svg("more")}</button>
       </div>
       <div class="pane-main">
         <div class="view" tabindex="-1">
@@ -414,12 +414,12 @@ export class Pane {
 
   setSearchMode(on) {
     if (on && isRemote(this.path)) {
-      toast(t("Sulle connessioni remote c'è solo il filtro della cartella"));
+      toast(t("files.pane.remote_connections_folder_filter_only"));
       on = false;
     }
     this.searchMode = on;
     $(".filter-box .mode", this.el).classList.toggle("on", on);
-    this.filterInput.placeholder = on ? t("Cerca in {p}", { p: baseName(this.path) || t("tutte le cartelle") }) : t("Filtra");
+    this.filterInput.placeholder = on ? t("files.pane.search_in_p", { p: baseName(this.path) || t("files.pane.all_folders") }) : t("files.pane.filter");
     if (!on) {
       this.search?.controller?.abort();
       this.search = null;
@@ -470,7 +470,7 @@ export class Pane {
     if (this.searchMode) {
       this.searchMode = false;
       $(".filter-box .mode", this.el).classList.remove("on");
-      this.filterInput.placeholder = t("Filtra");
+      this.filterInput.placeholder = t("files.pane.filter");
     }
     if (render) {
       this.refilter();
@@ -604,7 +604,7 @@ export class Pane {
 
   renderCrumbs() {
     const parts = this.path.split("/").filter(Boolean);
-    let html = `<button class="crumb" data-path="/"><i class="gi keep">${shareGlyph("homes")}</i>${t("NAS")}</button>`;
+    let html = `<button class="crumb" data-path="/"><i class="gi keep">${shareGlyph("homes")}</i>${t("files.common.nas")}</button>`;
     let acc = "";
     if (isRemote(this.path)) {
       // a connection starts its own trail, under its name
@@ -613,7 +613,7 @@ export class Pane {
     }
     for (const p of parts) {
       acc += "/" + p;
-      const label = acc === APPS_PATH ? t("Dati delle app") : acc === BACKUPS_PATH ? t("Backups") : pathLabel(acc) || p;
+      const label = acc === APPS_PATH ? t("files.common.app_data") : acc === BACKUPS_PATH ? t("files.common.backups") : pathLabel(acc) || p;
       html += `<span class="crumb-sep">${svg("chev")}</span><button class="crumb" data-path="${esc(acc)}">${esc(label)}</button>`;
     }
     this.crumbsEl.innerHTML = html;
@@ -660,9 +660,9 @@ export class Pane {
   }
 
   columns() {
-    if (this.view === "columns") return [{ key: "name", label: "Nome", width: "minmax(0, 1fr)" }];
-    const cols = [{ key: "name", label: "Nome", width: "minmax(160px, 1fr)" }];
-    if (this.search) cols.push({ key: "dir", label: "Cartella", width: "minmax(100px, .6fr)", cls: "" });
+    if (this.view === "columns") return [{ key: "name", label: "files.common.name", width: "minmax(0, 1fr)" }];
+    const cols = [{ key: "name", label: "files.common.name", width: "minmax(160px, 1fr)" }];
+    if (this.search) cols.push({ key: "dir", label: "files.common.folder", width: "minmax(100px, .6fr)", cls: "" });
     // a PC's snapshots on a narrow screen: the room goes to their names, not to permissions
     const narrowPc = isPcFolder(this.path) && this.el.clientWidth > 0 && this.el.clientWidth < 600;
     for (const [key, c] of Object.entries(COLS)) if (prefs.columns[key] && !(narrowPc && key === "mode")) cols.push({ key, ...c });
@@ -699,10 +699,10 @@ export class Pane {
       const msg = this.error
         ? `<div style="color:var(--crit)">${esc(this.error)}</div>`
         : this.search
-          ? t("Nessun risultato")
+          ? t("files.pane.no_results")
           : this.filter
-            ? t("Nessun elemento corrisponde al filtro")
-            : t("Cartella vuota");
+            ? t("files.pane.nothing_matches_filter")
+            : t("files.pane.empty_folder");
       const html = `<div><i class="gi">${glyph({ kind: "d", name: "" })}</i>${msg}</div>`;
       // in columns the message stays in the column of this folder
       if (!empty) (this.view === "columns" ? this.scroller : this.viewEl).append(h(`<div class="empty-state">${html}</div>`));
@@ -855,23 +855,23 @@ export class Pane {
   renderStatus() {
     const n = this.visible.length;
     const selList = this.visible.filter((e) => this.sel.has(e.path));
-    let html = `<span>${count(n, "elemento", "elementi", int)}</span>`;
-    if (this.archive) html += `<span class="ro">${svg("archive")} ${t("Archivio · sola lettura")}</span>`;
+    let html = `<span>${count(n, "files.common.count.items", int)}</span>`;
+    if (this.archive) html += `<span class="ro">${svg("archive")} ${t("files.pane.archive_read_only")}</span>`;
     const hidden = (this.search ? this.search.results : this.entries).filter(isHidden).length;
-    if (!prefs.showHidden && hidden) html += `<span>${t("{n} nascosti", { n: int(hidden) })}</span>`;
+    if (!prefs.showHidden && hidden) html += `<span>${t("files.pane.n_hidden", { n: int(hidden) })}</span>`;
     if (selList.length) {
       const bytes = selList.reduce((a, e) => a + (isDirLike(e) ? this.dirSizes.get(e.path)?.bytes || 0 : e.size), 0);
-      html += `<span><b>${count(selList.length, "selezionato", "selezionati", int)}</b> · ${size(bytes)}</span>`;
+      html += `<span><b>${count(selList.length, "files.pane.count.selected", int)}</b> · ${size(bytes)}</span>`;
     }
     if (this.search) {
-      html += `<span>${this.search.running ? t("ricerca in corso…") : t("{n} elementi esaminati", { n: int(this.search.scanned || 0) })}${this.search.partial ? " · " + t("risultati parziali") : ""}</span>`;
+      html += `<span>${this.search.running ? t("files.pane.searching") : t("files.pane.n_items_scanned", { n: int(this.search.scanned || 0) })}${this.search.partial ? " · " + t("files.pane.partial_results") : ""}</span>`;
     }
     html += `<span class="grow"></span>`;
     const cb = this.app.clipboard;
-    if (cb) html += `<span>${t(cb.op === "cut" ? "{n} da spostare" : "{n} da copiare", { n: int(cb.paths.length) })}</span>`;
+    if (cb) html += `<span>${t(cb.op === "cut" ? "files.pane.n_move" : "files.pane.n_copy", { n: int(cb.paths.length) })}</span>`;
     if (this.space && this.space.total) {
       const used = 1 - this.space.free / this.space.total;
-      html += `<span class="space">${t("{f} liberi di {t}", { f: size(this.space.free), t: size(this.space.total) })}<span class="vol-bar ${used > 0.95 ? "full" : used > 0.85 ? "high" : ""}"><div style="width:${(used * 100).toFixed(1)}%"></div></span></span>`;
+      html += `<span class="space">${t("files.common.f_free_t", { f: size(this.space.free), t: size(this.space.total) })}<span class="vol-bar ${used > 0.95 ? "full" : used > 0.85 ? "high" : ""}"><div style="width:${(used * 100).toFixed(1)}%"></div></span></span>`;
     }
     this.statusEl.innerHTML = html;
   }
@@ -898,11 +898,11 @@ export class Pane {
     // a folder just opened shows itself, not its first item
     const list = this.selected();
     if (!list.length) {
-      const name = (this.path.split("/").length === 2 && isRemote(this.path) ? this.app.connName(this.path) : baseName(this.path)) || t("Cartelle condivise");
+      const name = (this.path.split("/").length === 2 && isRemote(this.path) ? this.app.connName(this.path) : baseName(this.path)) || t("files.common.shared_folders");
       const dirEntry = { name, kind: "d", mode: 0o755, path: this.path };
       const pickable = this.path !== "/" && !this.archive && !(isRemote(this.path) && this.path.split("/").length === 2);
-      this.infoEl.innerHTML = `<div class="preview-box ${pickable ? "pick" : ""}"${pickable ? ` title="${t("Cambia icona")}"` : ""}>${iconHTML(dirEntry, "keep")}</div><h3>${esc(name)}</h3><div class="kind">${t("Cartella")}</div>
-        <dl class="facts"><dt>${t("Elementi")}</dt><dd>${int(this.visible.length)}</dd>${this.space ? `<dt>${t("Spazio libero")}</dt><dd>${size(this.space.free)}</dd>` : ""}</dl>`;
+      this.infoEl.innerHTML = `<div class="preview-box ${pickable ? "pick" : ""}"${pickable ? ` title="${t("files.pane.change_icon")}"` : ""}>${iconHTML(dirEntry, "keep")}</div><h3>${esc(name)}</h3><div class="kind">${t("files.common.folder")}</div>
+        <dl class="facts"><dt>${t("files.pane.items")}</dt><dd>${int(this.visible.length)}</dd>${this.space ? `<dt>${t("files.pane.free_space")}</dt><dd>${size(this.space.free)}</dd>` : ""}</dl>`;
       if (pickable) $(".preview-box", this.infoEl).onclick = (ev) => pickIcon(ev.currentTarget, this.path);
       return;
     }
@@ -915,13 +915,13 @@ export class Pane {
       const bytes = files.reduce((a, e) => a + e.size, 0) + known.reduce((a, u) => a + u.bytes, 0);
       const partial = known.some((u) => u.partial);
       const inside = known.reduce((a, u) => [a[0] + u.files, a[1] + Math.max(0, u.dirs - 1)], [0, 0]);
-      this.infoEl.innerHTML = `<div class="preview-box">${svg("copy", "i")}</div><h3>${count(list.length, "elemento selezionato", "elementi selezionati", int)}</h3>
-        <dl class="facts"><dt>${t("File")}</dt><dd>${int(files.length)}</dd><dt>${t("Cartelle")}</dt><dd>${int(dirs.length)}</dd>
+      this.infoEl.innerHTML = `<div class="preview-box">${svg("copy", "i")}</div><h3>${count(list.length, "files.common.count.items_selected", int)}</h3>
+        <dl class="facts"><dt>${t("files.common.file")}</dt><dd>${int(files.length)}</dd><dt>${t("files.pane.folders")}</dt><dd>${int(dirs.length)}</dd>
         ${dirs.length && done
-          ? `<dt>${t("Dimensione totale")}</dt><dd>${size(bytes)}${partial ? "+" : ""} <span style="color:var(--faint)">(${int(bytes)} B)</span></dd>
-             <dt>${t("Contenuto")}</dt><dd>${count(files.length + inside[0], "file", "file", int)}, ${count(inside[1], "cartella", "cartelle", int)}</dd>`
-          : `<dt>${t("Dimensione file")}</dt><dd>${size(bytes)}${known.length ? "+" : ""}</dd>`}</dl>
-        ${dirs.length && !done && !isBackupTop(this.path) ? `<div class="actions"><button class="btn small calc">${t("Calcola dimensione totale")}</button></div>` : ""}`;
+          ? `<dt>${t("files.pane.total_size")}</dt><dd>${size(bytes)}${partial ? "+" : ""} <span style="color:var(--faint)">(${int(bytes)} B)</span></dd>
+             <dt>${t("files.pane.contents")}</dt><dd>${count(files.length + inside[0], "files.common.count.files", int)}, ${count(inside[1], "files.common.count.folders", int)}</dd>`
+          : `<dt>${t("files.pane.file_size")}</dt><dd>${size(bytes)}${known.length ? "+" : ""}</dd>`}</dl>
+        ${dirs.length && !done && !isBackupTop(this.path) ? `<div class="actions"><button class="btn small calc">${t("files.pane.compute_total_size")}</button></div>` : ""}`;
       $(".calc", this.infoEl)?.addEventListener("click", () => this.app.computeSizes(this, list));
       return;
     }
@@ -932,21 +932,21 @@ export class Pane {
     else if (kind === "image" && e.size < 15 * 1024 * 1024 && !/\.(heic|heif|tiff?)$/i.test(e.name)) preview = `<img src="${api.view(e.path)}" alt="">`;
     else if (isHeic(e.name) && e.size < HEIC_LIMIT) preview += `<img data-heic alt="">`;
     const u = this.dirSizes.get(e.path);
-    const sizeText = isDirLike(e) ? (u ? `${size(u.bytes)}${u.partial ? "+" : ""}` : isWholeBackup(e.path) ? "—" : `<button class="btn small calc">${t("Calcola")}</button>`) : `${size(e.size)} <span style="color:var(--faint)">(${int(e.size)} B)</span>`;
+    const sizeText = isDirLike(e) ? (u ? `${size(u.bytes)}${u.partial ? "+" : ""}` : isWholeBackup(e.path) ? "—" : `<button class="btn small calc">${t("files.pane.compute")}</button>`) : `${size(e.size)} <span style="color:var(--faint)">(${int(e.size)} B)</span>`;
     const pickable = isDirLike(e) && !this.archive && !(isRemote(e.path) && e.path.split("/").length === 2);
-    this.infoEl.innerHTML = `<div class="preview-box ${pickable ? "pick" : ""}"${pickable ? ` title="${t("Cambia icona")}"` : ""}>${preview}</div><h3 title="${esc(e.name)}">${esc(entryLabel(e) || e.name)}</h3><div class="kind">${esc(kindLabel(e))}</div>
+    this.infoEl.innerHTML = `<div class="preview-box ${pickable ? "pick" : ""}"${pickable ? ` title="${t("files.pane.change_icon")}"` : ""}>${preview}</div><h3 title="${esc(e.name)}">${esc(entryLabel(e) || e.name)}</h3><div class="kind">${esc(kindLabel(e))}</div>
       <dl class="facts">
-        <dt>${t("Dimensione")}</dt><dd>${sizeText}</dd>
-        ${u ? `<dt>${t("Contenuto")}</dt><dd>${count(u.files, "file", "file", int)}, ${count(Math.max(0, u.dirs - 1), "cartella", "cartelle", int)}</dd>` : ""}
-        <dt>${t("Modificato")}</dt><dd>${esc(dateTime(e.mtime))}</dd>
-        <dt>${t("Permessi")}</dt><dd class="pm" style="font-family:var(--mono)">${this.modeHTML(e)}</dd>
-        <dt>${t("Proprietario")}</dt><dd class="owner">…</dd>
-        <dt>${t("Percorso")}</dt><dd style="font-family:var(--mono);font-size:11.5px">${esc(this.app.displayPath(e.path))}</dd>
+        <dt>${t("files.common.size")}</dt><dd>${sizeText}</dd>
+        ${u ? `<dt>${t("files.pane.contents")}</dt><dd>${count(u.files, "files.common.count.files", int)}, ${count(Math.max(0, u.dirs - 1), "files.common.count.folders", int)}</dd>` : ""}
+        <dt>${t("files.common.modified")}</dt><dd>${esc(dateTime(e.mtime))}</dd>
+        <dt>${t("files.common.permissions")}</dt><dd class="pm" style="font-family:var(--mono)">${this.modeHTML(e)}</dd>
+        <dt>${t("files.pane.owner")}</dt><dd class="owner">…</dd>
+        <dt>${t("files.pane.path")}</dt><dd style="font-family:var(--mono);font-size:11.5px">${esc(this.app.displayPath(e.path))}</dd>
       </dl>
       <div class="actions">
-        ${isDirLike(e) ? "" : `<button class="btn small dl">${svg("download")} ${t("Scarica")}</button><button class="btn small info-preview">${svg("eye")} ${t("Anteprima")}</button>`}
-        ${this.app.editable(this, e) ? `<button class="btn small info-edit">${svg("rename")} ${t("Modifica")}</button>` : ""}
-        <button class="btn small cp">${svg("link")} ${t("Copia percorso")}</button>
+        ${isDirLike(e) ? "" : `<button class="btn small dl">${svg("download")} ${t("files.common.download")}</button><button class="btn small info-preview">${svg("eye")} ${t("files.common.preview")}</button>`}
+        ${this.app.editable(this, e) ? `<button class="btn small info-edit">${svg("rename")} ${t("files.common.edit")}</button>` : ""}
+        <button class="btn small cp">${svg("link")} ${t("files.common.copy_path")}</button>
       </div>`;
     $(".calc", this.infoEl)?.addEventListener("click", () => this.app.computeSizes(this, [e]));
     if (pickable) $(".preview-box", this.infoEl).onclick = (ev) => pickIcon(ev.currentTarget, e.path);
@@ -965,10 +965,10 @@ export class Pane {
       if (controller.signal.aborted) return;
       if (st.archive) {
         $(".owner", this.infoEl).textContent = "—";
-        $(".facts", this.infoEl).insertAdjacentHTML("beforeend", `<dt>${t("Archivio")}</dt><dd>${esc(st.owner)}</dd>`);
+        $(".facts", this.infoEl).insertAdjacentHTML("beforeend", `<dt>${t("files.common.archive")}</dt><dd>${esc(st.owner)}</dd>`);
       } else if (st.remote) $(".owner", this.infoEl).textContent = st.server;
       else $(".owner", this.infoEl).textContent = `${st.owner} : ${st.group}`;
-      if (st.target) $(".facts", this.infoEl).insertAdjacentHTML("beforeend", `<dt>${t("Destinazione")}</dt><dd style="font-family:var(--mono)">${esc(st.target)}</dd>`);
+      if (st.target) $(".facts", this.infoEl).insertAdjacentHTML("beforeend", `<dt>${t("files.pane.target")}</dt><dd style="font-family:var(--mono)">${esc(st.target)}</dd>`);
       if (!st.archive && !st.remote && isMedia(e)) {
         const m = await api.media(e.path, controller.signal);
         if (controller.signal.aborted) return;
@@ -1103,7 +1103,7 @@ export class Pane {
         return;
       }
       if (seq !== this.nextSeq) return;
-      this.mnextEl.innerHTML = entries.length ? this.columnHTML(e.path, entries, null) : `<div class="mnote">${t("Cartella vuota")}</div>`;
+      this.mnextEl.innerHTML = entries.length ? this.columnHTML(e.path, entries, null) : `<div class="mnote">${t("files.pane.empty_folder")}</div>`;
       const col = $(".mcol", this.mnextEl);
       if (col) this.bindColumn(col);
     } else if (!isDirLike(e) && !prefs.info) {
@@ -1226,7 +1226,7 @@ export class Pane {
       if (fixed) ev.dataTransfer.setData("application/x-rynas-files-fixed", "1");
       ev.dataTransfer.setData("text/plain", paths.join("\n"));
       ev.dataTransfer.effectAllowed = fixed ? "copy" : "copyMove";
-      const ghost = h(`<div style="position:fixed;top:-100px;padding:6px 12px;border-radius:8px;background:var(--accent);color:var(--on-accent);font-weight:600">${esc(paths.length === 1 ? baseName(paths[0]) : t("{n} elementi", { n: paths.length }))}</div>`);
+      const ghost = h(`<div style="position:fixed;top:-100px;padding:6px 12px;border-radius:8px;background:var(--accent);color:var(--on-accent);font-weight:600">${esc(paths.length === 1 ? baseName(paths[0]) : t("files.pane.n_items", { n: paths.length }))}</div>`);
       mount(ghost);
       ev.dataTransfer.setDragImage(ghost, 10, 10);
       setTimeout(() => ghost.remove());
