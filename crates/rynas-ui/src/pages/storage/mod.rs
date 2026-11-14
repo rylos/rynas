@@ -185,6 +185,9 @@ pub struct Vol {
     /// Volume label: route id and the name typed to confirm destructive actions (the
     /// filesystem UUID when there is no label).
     pub id: String,
+    /// What the page shows: the id, or "System" for an unlabelled root filesystem (its id is a
+    /// UUID nobody recognises).
+    pub name: String,
     /// Created the rynas way (md array + valid label): the write actions apply.
     pub managed: bool,
     pub locked: bool,
@@ -246,6 +249,7 @@ pub fn volumes(s: Sto) -> Vec<Vol> {
         let id = md.as_ref().and_then(md_label).unwrap_or_else(|| l.name.clone());
         out.push(Vol {
             managed: md.is_some() && valid_label(&id),
+            name: id.clone(),
             id,
             locked: true,
             encrypted: true,
@@ -264,8 +268,10 @@ fn vol_of_tree(v: &VolumeTree, arrays: &[MdArray], fss: &[BtrfsFilesystem]) -> V
     let (md, disks) = vol_from(&v.layers, arrays);
     let id = v.label.clone().filter(|l| !l.is_empty()).or_else(|| md.as_ref().and_then(md_label)).unwrap_or_else(|| v.id.clone());
     let fs = fss.iter().find(|f| f.uuid == v.id).cloned();
+    let name = if id == v.id && v.mountpoint.as_deref() == Some("/") { t("sto.system_volume").to_string() } else { id.clone() };
     Vol {
         managed: md.is_some() && valid_label(&id) && v.fstype == "btrfs",
+        name,
         id,
         locked: false,
         encrypted: v.encrypted,
@@ -503,7 +509,7 @@ fn vol_card(v: Vol, unlock: RwSignal<Option<String>>) -> AnyView {
             <div class="vol-card locked">
                 <div class="vol-card-top">
                     <span class="w-icon"><Icon icon=icons::KEY size=16 /></span>
-                    <a class="vol-card-name" href=href>{v.id.clone()}</a>
+                    <a class="vol-card-name" href=href>{v.name.clone()}</a>
                     <span class="row-end"><Status tone=Tone::Info text=t("sto.locked").to_string() /></span>
                 </div>
                 <div class="vol-card-tags">{level.map(|l| view! { <span class="chip accent">{l}</span> })}</div>
@@ -531,7 +537,7 @@ fn vol_card(v: Vol, unlock: RwSignal<Option<String>>) -> AnyView {
         <a class=format!("vol-card {}", tone.class()) href=href>
             <div class="vol-card-top">
                 <span class="w-icon"><Icon icon=icons::DATABASE size=16 /></span>
-                <span class="vol-card-name">{v.id.clone()}</span>
+                <span class="vol-card-name">{v.name.clone()}</span>
                 <span class="row-end"><Status tone=tone text=t(key).to_string() /></span>
             </div>
             // level and encryption on their own line: the name and the health pill never wrap

@@ -1291,6 +1291,7 @@ sto.path	Путь
 sto.readonly	Только чтение
 sto.inherit	Как у тома
 sto.system	Системный
+sto.system_volume	Система
 sto.yes	Да
 sto.no	Нет
 sto.sub_invalid	Используйте буквы, цифры, точку, подчёркивание или дефис (до 64 символов), начиная с буквы или цифры.

@@ -314,7 +314,7 @@ fn volume_view(vol: Vol, modal: RwSignal<Open>, selected: RwSignal<Option<String
             <a class="icon-btn" href="/storage" aria-label=tr("sto.back_storage")><Icon icon=icons::ARROW_LEFT size=18 /></a>
             <div class="page-icon"><Icon icon=if vol.locked { icons::KEY } else { icons::DATABASE } size=20 /></div>
             <div class="grow">
-                <h1 class="head-line">{vol.id.clone()}<Status tone=tone text=t(key).to_string() /></h1>
+                <h1 class="head-line">{vol.name.clone()}<Status tone=tone text=t(key).to_string() /></h1>
                 <p class="page-sub">{sub}</p>
             </div>
             {actions.then(|| view! {
