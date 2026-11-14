@@ -793,9 +793,8 @@ export class Pane {
   sizeHTML(bytes) {
     const [n, u, mag] = sizeParts(bytes);
     const k = "bkmgtt"[mag] || "t";
-    // bytes keep their unit: a bare "2" read as a count
-    const unit = u === "B" ? "B" : prefs.binarySizes ? u.replace("iB", "i").replace("B", "") : u;
-    return `<span class="n-${k}">${n}</span><span class="u-${k}">${(prefs.llColumns ? "" : " ") + unit}</span>`;
+    // always "number unit" with the translated unit, bytes included
+    return `<span class="n-${k}">${n}</span> <span class="u-${k}">${u}</span>`;
   }
 
   /** Selection, cursor and cut marks on the nodes already drawn. */

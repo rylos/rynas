@@ -307,7 +307,7 @@ svg.i { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-widt
 .pm .t-s { color: var(--t-purple); }
 .pm .t-n { color: var(--t-gray); font-weight: 700; }
 .sz .n-b, .sz .u-b { color: var(--t-green); }
-.sz .n-k, .sz .u-k { color: var(--t-green); font-weight: 700; }
+.sz .n-k, .sz .u-k { color: var(--t-green); }
 .sz .n-m, .sz .u-m { color: var(--t-yellow); }
 .sz .n-g, .sz .u-g { color: var(--t-red); }
 .sz .n-t, .sz .u-t { color: var(--t-purple); }
