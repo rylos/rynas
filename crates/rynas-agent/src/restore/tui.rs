@@ -53,18 +53,26 @@ fn key() -> Option<(KeyCode, KeyModifiers)> {
 
 fn input(term: &mut DefaultTerminal, title: &str, help: &[String], initial: &str, masked: bool) -> Answer<String> {
     let mut s = initial.to_string();
+    // a masked field is shown only while Tab says so
+    let mut reveal = false;
     loop {
         let _ = term.draw(|f| {
             let [top, field] = Layout::vertical([Constraint::Min(3), Constraint::Length(3)]).areas(f.area());
             let lines: Vec<Line> = help.iter().map(|l| Line::from(l.as_str())).collect();
             f.render_widget(Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }).block(frame_title(title)), top);
-            let shown = if masked { "•".repeat(s.chars().count()) } else { s.clone() };
-            f.render_widget(Paragraph::new(format!("{shown}▏")).block(Block::default().borders(Borders::ALL).title(" Enter: next · Esc: back ")), field);
+            let shown = if masked && !reveal { "•".repeat(s.chars().count()) } else { s.clone() };
+            let keys = match (masked, reveal) {
+                (false, _) => " Enter: next · Esc: back ",
+                (true, false) => " Enter: next · Tab: show · Esc: back ",
+                (true, true) => " Enter: next · Tab: hide · Esc: back ",
+            };
+            f.render_widget(Paragraph::new(format!("{shown}▏")).block(Block::default().borders(Borders::ALL).title(keys)), field);
         });
         match key() {
             Some((KeyCode::Char('c'), m)) if m.contains(KeyModifiers::CONTROL) => return Answer::Quit,
             Some((KeyCode::Enter, _)) => return Answer::Ok(s.trim().to_string()),
             Some((KeyCode::Esc, _)) => return Answer::Back,
+            Some((KeyCode::Tab, _)) if masked => reveal = !reveal,
             Some((KeyCode::Backspace, _)) => {
                 s.pop();
             }
@@ -198,9 +206,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let mut log = exec::Log::new(Box::new(|s| println!("{s}")));
     let format = matches!(job, Job::Format { .. });
     match job {
-        Job::Format { mut src, v, m, p, pass } => {
+        Job::Format { mut src, v, m, p, pass, nvram } => {
             println!("Restoring {} ({}) version {} …", src.device(), src.kind(), v.short_id());
-            let r = exec::execute(src.as_mut(), &v, &m, &p, &exec::Options { passphrase: pass.as_deref(), no_nvram: args.iter().any(|a| a == "--no-nvram") }, &mut log);
+            let r = exec::execute(src.as_mut(), &v, &m, &p, &exec::Options { passphrase: pass.as_deref(), nvram }, &mut log);
             super::finish(src.as_mut(), &v, r, &log)?;
         }
         Job::Add { mut src, v, m, device, restored } => {
@@ -275,7 +283,7 @@ fn btrfs_devices() -> Vec<String> {
 
 enum Job {
     /// Format the target disk and restore.
-    Format { src: Box<dyn RestoreSource>, v: Version, m: Manifest, p: plan::Plan, pass: Option<String> },
+    Format { src: Box<dyn RestoreSource>, v: Version, m: Manifest, p: plan::Plan, pass: Option<String>, nvram: exec::Nvram },
     /// btrfs: add subvolumes into the PC's existing filesystem, nothing formatted.
     Add { src: Box<btrfs::BtrfsSource>, v: Version, m: Manifest, device: String, restored: Vec<String> },
 }
@@ -302,6 +310,8 @@ fn flow(term: &mut DefaultTerminal, args: &[String]) -> Result<Option<Job>, Stri
     let mut override_for: Option<usize> = None;
     let mut target: Option<plan::TargetDisk> = None;
     let mut pass: Option<String> = None;
+    // the EFI boot entry in this machine's firmware: asked on the plan step (`None`: not yet)
+    let mut nvram: Option<exec::Nvram> = None;
     let mut the_plan: Option<plan::Plan> = None;
     let mut error: Option<String> = None;
     let dry = super::flag(args, "--dry-run");
@@ -424,7 +434,7 @@ fn flow(term: &mut DefaultTerminal, args: &[String]) -> Result<Option<Job>, Stri
                     "Single use, valid for one hour, read-only.".into(),
                 ];
                 help.extend(err_lines(&error));
-                let code = step!(input(term, "Restore code", &help, "", false), stage = 3);
+                let code = step!(input(term, "Restore code", &help, "", true), stage = 3);
                 match super::login(Client::new(ep.clone().ok_or(INTERNAL)?, &fp), &code, None) {
                     Ok(s) => {
                         session = Some(s);
@@ -679,7 +689,7 @@ fn flow(term: &mut DefaultTerminal, args: &[String]) -> Result<Option<Job>, Stri
                 let items: Vec<(String, Option<String>)> = disks
                     .iter()
                     .map(|d| {
-                        let same = src_disk.is_some_and(|s| !s.serial.is_empty() && s.serial == d.serial);
+                        let same = src_disk.is_some_and(|s| crate::probe::same_serial(&s.serial, &d.serial));
                         (
                             format!("/dev/{}  {}  {}  {}{}", d.name, d.model, d.serial, gib(d.size_bytes), if same { "  (the PC's own disk)" } else { "" }),
                             // a boot stick or a card reader is never a whole-PC target, and
@@ -740,7 +750,40 @@ fn flow(term: &mut DefaultTerminal, args: &[String]) -> Result<Option<Job>, Stri
             }
             7 => {
                 let (m, p, t) = (planned.as_ref().ok_or(INTERNAL)?, the_plan.as_ref().ok_or(INTERNAL)?, target.as_ref().ok_or(INTERNAL)?);
+                let back = if p.luks.is_empty() { 5 } else { 6 };
+                // an EFI boot entry can only be written from a UEFI live system for a UEFI PC
+                let efi = m.boot.uefi && std::path::Path::new("/sys/firmware/efi").exists();
+                let chosen = match nvram {
+                    Some(n) => n,
+                    None if !efi || dry => exec::Nvram::Auto,
+                    None => {
+                        // yes by default for a disk inside this machine; `--no-nvram` or a USB
+                        // disk (it goes into another PC) make no the default
+                        let yes_first = exec::Nvram::from_args(args) == exec::Nvram::Auto && !exec::usb_disk(&t.name);
+                        let yes = "Yes: add a boot entry to this machine's firmware (NVRAM)".to_string();
+                        let no = "No: the disk goes into another PC (it boots through EFI/BOOT)".to_string();
+                        let items: Vec<(String, Option<String>)> = if yes_first { vec![(yes, None), (no, None)] } else { vec![(no, None), (yes, None)] };
+                        let intro = vec![
+                            "Add a boot entry to this machine's firmware (NVRAM)?".to_string(),
+                            "Choose yes when the restored disk stays in this machine. The removable path EFI/BOOT boots the disk either way.".into(),
+                        ];
+                        let i = step!(choose(term, "Boot entry", &intro, &items), stage = back);
+                        let n = if (i == 0) == yes_first { exec::Nvram::Yes } else { exec::Nvram::No };
+                        nvram = Some(n);
+                        n
+                    }
+                };
                 let mut lines = plan::describe(m, p, use_btrfs);
+                if efi {
+                    lines.push(format!(
+                        "boot entry in this machine's firmware (NVRAM): {}",
+                        match chosen {
+                            exec::Nvram::Yes => "yes",
+                            exec::Nvram::No => "no",
+                            exec::Nvram::Auto => "yes, unless the disk is on USB",
+                        }
+                    ));
+                }
                 let skipped: Vec<String> = match bsrc.as_ref().filter(|_| use_btrfs) {
                     Some(s) => {
                         lines.extend(s.describe());
@@ -751,7 +794,6 @@ fn flow(term: &mut DefaultTerminal, args: &[String]) -> Result<Option<Job>, Stri
                     None => Vec::new(),
                 };
                 lines.extend(m.ready_reasons().into_iter().map(|r| format!("note: {}", ready_text(r))));
-                let back = if p.luks.is_empty() { 5 } else { 6 };
                 if dry {
                     lines.push(String::new());
                     lines.extend(plan::dry_run_rewrites(m, &skipped));
@@ -762,13 +804,14 @@ fn flow(term: &mut DefaultTerminal, args: &[String]) -> Result<Option<Job>, Stri
                 lines.push(String::new());
                 lines.push(format!("/dev/{} ({} {}) WILL BE ERASED. Type its name ({}) to start:", t.name, t.model, t.serial, t.name));
                 lines.extend(err_lines(&error));
-                let typed = step!(input(term, "Plan", &lines, "", false), stage = back);
+                // back: to the boot entry question when it was asked, else the step before
+                let typed = step!(input(term, "Plan", &lines, "", false), if nvram.take().is_none() { stage = back });
                 if typed.trim_start_matches("/dev/") != t.name {
                     error = Some("that is not the disk's name".into());
                     continue;
                 }
                 let src: Box<dyn RestoreSource> = if use_btrfs { Box::new(bsrc.take().ok_or(INTERNAL)?) } else { Box::new(restic_src.take().ok_or(INTERNAL)?) };
-                return Ok(Some(Job::Format { src, v: version.take().ok_or(INTERNAL)?, m: planned.take().ok_or(INTERNAL)?, p: the_plan.take().ok_or(INTERNAL)?, pass: pass.take() }));
+                return Ok(Some(Job::Format { src, v: version.take().ok_or(INTERNAL)?, m: planned.take().ok_or(INTERNAL)?, p: the_plan.take().ok_or(INTERNAL)?, pass: pass.take(), nvram: chosen }));
             }
             _ => return Ok(None),
         }

@@ -184,11 +184,21 @@ pub struct Block {
 }
 
 fn read_trim(p: &Path) -> Option<String> {
-    // some devices pad sysfs strings (serial, model) with NUL or other control bytes
-    std::fs::read_to_string(p)
-        .ok()
-        .map(|s| s.chars().filter(|c| !c.is_control()).collect::<String>().trim().to_string())
-        .filter(|s| !s.is_empty())
+    std::fs::read_to_string(p).ok().map(|s| clean_ident(&s)).filter(|s| !s.is_empty())
+}
+
+/// A sysfs identity string (serial, model) without the NUL or other control
+/// bytes some devices pad it with, trimmed. Manifests written by older agents
+/// still carry the raw string, so both sides of a comparison go through this.
+pub fn clean_ident(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).collect::<String>().trim().to_string()
+}
+
+/// Whether two disk serials name the same disk, ignoring padding; an empty
+/// serial never matches.
+pub fn same_serial(a: &str, b: &str) -> bool {
+    let a = clean_ident(a);
+    !a.is_empty() && a == clean_ident(b)
 }
 
 /// The block device of `maj:min`.
@@ -345,5 +355,15 @@ mod tests {
         assert_eq!((p.uuid.as_str(), p.label.as_str()), ("91BC-A784", "EFI"));
         let none = image(|_| {});
         assert!(probe(none.path()).is_none());
+    }
+
+    #[test]
+    fn serials_match_across_padding() {
+        // a manifest from an older agent keeps the NUL padding
+        assert!(same_serial("S4EVNF0M\u{0}\u{0}\n", "S4EVNF0M"));
+        assert!(same_serial(" WD-123 ", "WD-123"));
+        assert!(!same_serial("", ""));
+        assert!(!same_serial("\u{0}", "\u{0}"));
+        assert!(!same_serial("A", "B"));
     }
 }

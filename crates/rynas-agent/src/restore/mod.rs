@@ -286,7 +286,7 @@ fn run_execute(args: &[String], src: &mut dyn RestoreSource, v: &source::Version
         None => None,
     };
     let mut log = exec::Log::new(Box::new(|s| eprintln!("{s}")));
-    let r = exec::execute(src, v, m, p, &exec::Options { passphrase: pass.as_deref(), no_nvram: flag(args, "--no-nvram") }, &mut log);
+    let r = exec::execute(src, v, m, p, &exec::Options { passphrase: pass.as_deref(), nvram: exec::Nvram::from_args(args) }, &mut log);
     finish(src, v, r, &log)
 }
 

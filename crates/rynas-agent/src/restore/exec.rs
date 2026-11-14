@@ -48,6 +48,53 @@ impl Log {
     }
 }
 
+/// Why a command failed: its stderr, or else how it ended (exit status or signal, a
+/// program killed by SIGILL prints nothing) and the end of its stdout.
+fn failed(prog: &str, o: &std::process::Output) -> String {
+    let err = String::from_utf8_lossy(&o.stderr);
+    if !err.trim().is_empty() {
+        return format!("{prog} failed: {}", err.trim());
+    }
+    format!("{prog} failed: {}{}", ended(o.status), stdout_tail(&String::from_utf8_lossy(&o.stdout)))
+}
+
+/// How a process ended: `exit status N` or `killed by signal N (NAME)`.
+fn ended(s: std::process::ExitStatus) -> String {
+    use std::os::unix::process::ExitStatusExt;
+    match (s.code(), s.signal()) {
+        (Some(c), _) => format!("exit status {c}"),
+        (None, Some(sig)) => {
+            let name = match sig {
+                4 => " (SIGILL: an instruction this CPU does not have)",
+                6 => " (SIGABRT)",
+                7 => " (SIGBUS)",
+                9 => " (SIGKILL)",
+                11 => " (SIGSEGV)",
+                _ => "",
+            };
+            format!("killed by signal {sig}{name}")
+        }
+        _ => "no exit status".into(),
+    }
+}
+
+/// The last lines of a command's stdout, for an error that has no stderr.
+fn stdout_tail(out: &str) -> String {
+    let lines: Vec<&str> = out.lines().filter(|l| !l.trim().is_empty()).collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+    format!("; last output: {}", lines[lines.len().saturating_sub(5)..].join(" | "))
+}
+
+/// Whether the restored system's programs run here (`chroot <target> true`): binaries built
+/// for a newer CPU level (x86-64-v3) die with SIGILL on an older CPU, so nothing of the boot
+/// step can run. `Err` says why.
+fn target_runs(log: &mut Log) -> Result<(), String> {
+    let t = if in_target("/usr/bin/true").exists() { "/usr/bin/true" } else { "/bin/true" };
+    chroot(log, &[t]).map(|_| ())
+}
+
 fn run(log: &mut Log, argv: &[&str]) -> Result<String, String> {
     run_env(log, argv, &[])
 }
@@ -64,7 +111,7 @@ fn run_env(log: &mut Log, argv: &[&str], env: &[(&str, &str)]) -> Result<String,
     let out = String::from_utf8_lossy(&o.stdout).into_owned();
     let err = String::from_utf8_lossy(&o.stderr).into_owned();
     if !o.status.success() {
-        let msg = format!("{} failed: {}", argv[0], err.trim());
+        let msg = failed(argv[0], &o);
         log.line(msg.clone());
         return Err(msg);
     }
@@ -91,7 +138,7 @@ fn run_input(log: &mut Log, argv: &[&str], input: &[u8]) -> Result<(), String> {
     }
     let o = c.wait_with_output().map_err(|e| e.to_string())?;
     if !o.status.success() {
-        let msg = format!("{} failed: {}", argv[0], String::from_utf8_lossy(&o.stderr).trim());
+        let msg = failed(argv[0], &o);
         log.line(msg.clone());
         return Err(msg);
     }
@@ -385,13 +432,31 @@ pub fn kernel_cmdline(m: &Manifest) -> String {
 
 pub struct Options<'a> {
     pub passphrase: Option<&'a str>,
-    /// No EFI boot entry in the firmware of the machine running the restore (`--no-nvram`):
-    /// the disk goes into another PC. Also implied when a target disk is on USB.
-    pub no_nvram: bool,
+    /// An EFI boot entry in the firmware of the machine running the restore.
+    pub nvram: Nvram,
+}
+
+/// Whether the restore writes an EFI boot entry into the firmware (NVRAM) of the machine
+/// running it; the removable path EFI/BOOT boots the disk either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Nvram {
+    /// Yes, unless a target disk is on USB (it goes into another PC).
+    Auto,
+    /// Yes (the TUI's choice).
+    Yes,
+    /// No: the disk goes into another PC (`--no-nvram`, or the TUI's choice).
+    No,
+}
+
+impl Nvram {
+    /// `--no-nvram` on the command line, otherwise [`Nvram::Auto`].
+    pub fn from_args(args: &[String]) -> Nvram {
+        if args.iter().any(|a| a == "--no-nvram") { Nvram::No } else { Nvram::Auto }
+    }
 }
 
 /// `/dev/<name>` hangs off a USB bus.
-fn usb_disk(name: &str) -> bool {
+pub fn usb_disk(name: &str) -> bool {
     std::fs::canonicalize(format!("/sys/block/{name}")).is_ok_and(|p| p.to_string_lossy().contains("/usb"))
 }
 
@@ -592,7 +657,7 @@ fn execute_inner(src: &mut dyn RestoreSource, v: &Version, m: &Manifest, plan: &
         log.line("SELinux enforcing: /.autorelabel set");
     }
     // 8. boot
-    boot(m, plan, log, boot_files, opts.no_nvram)?;
+    boot(m, plan, log, boot_files, opts.nvram)?;
     // 9. log into the target, unmount
     let ts = crate::state::now_ms() / 1000;
     let _ = std::fs::create_dir_all(in_target("/var/log"));
@@ -812,15 +877,24 @@ fn detect_boot(m: &Manifest) -> (InitramfsTool, Loader) {
     (tool, loader)
 }
 
-fn boot(m: &Manifest, plan: &Plan, log: &mut Log, boot_files: bool, no_nvram: bool) -> Result<(), String> {
+fn boot(m: &Manifest, plan: &Plan, log: &mut Log, boot_files: bool, nvram: Nvram) -> Result<(), String> {
     bind_system(log)?;
+    // the data is written: a system whose programs do not run on this CPU keeps it, and
+    // only the boot step is skipped (reported, so no reboot is offered)
+    if let Err(e) = target_runs(log) {
+        log.problem(format!(
+            "the restored system's programs do not run on this CPU (built for a newer CPU level?): boot the restored disk on the PC itself; the boot step (initramfs, boot loader, boot entries) was skipped ({e})"
+        ));
+        return Ok(());
+    }
     // EFI boot entries go into the firmware of the machine running the restore, which is
-    // the restored PC itself except when the disk is on USB or `--no-nvram` says otherwise;
-    // the removable path EFI/BOOT boots it either way
-    let usb = plan.disks.iter().any(|d| usb_disk(&d.target.name));
+    // the restored PC itself except when the disk is on USB or the user said otherwise
+    // (`--no-nvram`, the TUI's choice); the removable path EFI/BOOT boots it either way
+    let usb = nvram == Nvram::Auto && plan.disks.iter().any(|d| usb_disk(&d.target.name));
+    let no_nvram = nvram == Nvram::No;
     let uefi_live = Path::new("/sys/firmware/efi").exists() && !no_nvram && !usb;
     if m.boot.uefi && !uefi_live {
-        let why = if no_nvram { "--no-nvram" } else if usb { "the disk is on USB" } else { "the live system did not boot in UEFI mode" };
+        let why = if no_nvram { "not chosen" } else if usb { "the disk is on USB" } else { "the live system did not boot in UEFI mode" };
         log.line(format!("no EFI boot entry written ({why}): the disk boots through the removable path EFI/BOOT"));
     }
     let (initramfs_tool, loader) = detect_boot(m);
@@ -950,6 +1024,18 @@ mod tests {
         assert_eq!(kernel_cmdline(&m), "root=PARTUUID=x ro quiet");
         m.boot.kernel_cmdline = Some("root=UUID=y rw\n".into());
         assert_eq!(kernel_cmdline(&m), "root=UUID=y rw");
+    }
+
+    #[test]
+    fn a_silent_failure_says_how_it_ended() {
+        let o = Command::new("sh").args(["-c", "echo one; echo two; kill -ILL $$"]).output().unwrap();
+        let m = failed("chroot", &o);
+        assert!(m.contains("killed by signal 4 (SIGILL"), "{m}");
+        assert!(m.ends_with("last output: one | two"), "{m}");
+        let o = Command::new("sh").args(["-c", "exit 3"]).output().unwrap();
+        assert_eq!(failed("x", &o), "x failed: exit status 3");
+        let o = Command::new("sh").args(["-c", "echo bad >&2; exit 1"]).output().unwrap();
+        assert_eq!(failed("x", &o), "x failed: bad");
     }
 
     #[test]
