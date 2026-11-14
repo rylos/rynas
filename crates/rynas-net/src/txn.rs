@@ -2203,7 +2203,10 @@ impl Engine {
         if m.kind != TrialKind::AdoptAtBoot && sha256_hex(token.as_bytes()) != m.token_sha256 {
             return Err(NetError::Invalid("wrong confirmation token".into()));
         }
-        if self.os.now_ms() > m.deadline_ms {
+        // past its deadline the timer would keep a migration done at boot anyway when the network
+        // works: an administrator who confirms it may keep it (and clear a trial whose timer
+        // misfired)
+        if m.kind != TrialKind::AdoptAtBoot && self.os.now_ms() > m.deadline_ms {
             return Err(NetError::Conflict(
                 "too late: the change is being rolled back".into(),
             ));

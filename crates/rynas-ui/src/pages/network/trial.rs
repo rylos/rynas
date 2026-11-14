@@ -63,6 +63,8 @@ pub struct Trial {
     pub outcome: RwSignal<Option<(Tone, String)>>,
     busy: RwSignal<bool>,
     error: RwSignal<Option<String>>,
+    /// The confirmation was refused for its address: ask whether to keep it anyway (`Some(boot)`).
+    ask_force: RwSignal<Option<bool>>,
 }
 
 fn session() -> Option<web_sys::Storage> {
@@ -113,6 +115,7 @@ impl Trial {
             outcome: RwSignal::new(None),
             busy: RwSignal::new(false),
             error: RwSignal::new(None),
+            ask_force: RwSignal::new(None),
             following: RwSignal::new(false),
         }
     }
@@ -253,13 +256,30 @@ impl Trial {
     }
 
     fn confirm(self, net: Net) {
-        let Some(token) = self.token.get_untracked() else { return };
+        self.send(net, false, false)
+    }
+
+    /// Keeps a migration done at boot now: no browser applied it, so there is no token and any
+    /// administrator may confirm it (over an address of the NAS, like every confirmation).
+    fn keep_boot(self, net: Net) {
+        self.send(net, true, false)
+    }
+
+    /// `force`: the administrator already said "keep anyway" (a VPN, another port).
+    fn send(self, net: Net, boot: bool, force: bool) {
+        let token = if boot {
+            String::new()
+        } else {
+            let Some(token) = self.token.get_untracked() else { return };
+            token
+        };
         self.busy.set(true);
         self.error.set(None);
         spawn_local(async move {
-            let r = api::post::<_, NetConfirmed>("/api/v1/network/confirm", Some(&NetConfirmRequest { token })).await;
+            let r = api::post::<_, NetConfirmed>("/api/v1/network/confirm", Some(&NetConfirmRequest { token, force })).await;
             self.busy.set(false);
             match r {
+                Ok(_) if boot => net.reload(),
                 Ok(c) => {
                     self.outcome.set(Some((Tone::Ok, tf("net.confirmed", &[("rev", &c.revision.to_string())]))));
                     if !self.following.get_untracked() {
@@ -268,30 +288,33 @@ impl Trial {
                     net.reload();
                 }
                 Err(e) if e.status() == 409 && e.code() == rynas_api_types::error_codes::CONFLICT => {
-                    self.error.set(Some(t(if self.expired(net) { "net.confirm_late" } else { "net.confirm_conflict" }).to_string()))
+                    // the server keeps a migration done at boot past its deadline, not a normal trial
+                    if !boot && self.expired(net) {
+                        self.error.set(Some(t("net.confirm_late").to_string()))
+                    } else if force {
+                        self.error.set(Some(e.text()))
+                    } else {
+                        self.ask_force.set(Some(boot))
+                    }
                 }
-                Err(e) if e.code() == rynas_api_types::error_codes::INVALID_VALUE => self.error.set(Some(t("net.confirm_token").to_string())),
+                Err(e) if !boot && e.code() == rynas_api_types::error_codes::INVALID_VALUE => self.error.set(Some(t("net.confirm_token").to_string())),
                 Err(e) => self.error.set(Some(e.text())),
             }
         });
     }
 
-    /// Keeps a migration done at boot now: no browser applied it, so there is no token and any
-    /// administrator may confirm it (over an address of the NAS, like every confirmation).
-    fn keep_boot(self, net: Net) {
-        self.busy.set(true);
-        self.error.set(None);
-        spawn_local(async move {
-            let r = api::post::<_, NetConfirmed>("/api/v1/network/confirm", Some(&NetConfirmRequest { token: String::new() })).await;
-            self.busy.set(false);
-            match r {
-                Ok(_) => net.reload(),
-                Err(e) if e.status() == 409 && e.code() == rynas_api_types::error_codes::CONFLICT => {
-                    self.error.set(Some(t(if self.expired(net) { "net.confirm_late" } else { "net.confirm_conflict" }).to_string()))
-                }
-                Err(e) => self.error.set(Some(e.text())),
-            }
-        });
+    /// "This page is not open over the new network: keep anyway?", after a refusal for the address.
+    fn force_dialog(self, net: Net) -> impl IntoView {
+        move || {
+            self.ask_force.get().map(|boot| {
+                let close = Callback::new(move |_| self.ask_force.set(None));
+                let go = Callback::new(move |_| {
+                    self.ask_force.set(None);
+                    self.send(net, boot, true)
+                });
+                ui::confirm(ui::Confirm::new(t("net.force_title").to_string(), t("net.force_text").to_string(), "net.force_keep", false, go, close))
+            })
+        }
     }
 
     /// The trial's deadline has passed by the server's clock: no confirmation is accepted now,
@@ -429,6 +452,7 @@ pub fn banner(net: Net) -> AnyView {
                     <span class="sr-only" aria-live="polite">{move || tf("net.booted_left_sr", &[("n", &spoken.get().to_string())])}</span>
                 </div>
                 {crate::form::form_error(tl.error)}
+                {tl.force_dialog(net)}
                 <div class="net-trial-actions">
                     <button class="btn primary lg" disabled=move || tl.busy.get() on:click=move |_| tl.keep_boot(net)>
                         {crate::form::spinner(tl.busy)}<Icon icon=icons::CHECK size=18 />{tr("net.booted_keep")}
@@ -454,6 +478,7 @@ pub fn banner(net: Net) -> AnyView {
                     </div>
                 </div>
                 {crate::form::form_error(tl.error)}
+                {tl.force_dialog(net)}
                 <div class="card-actions">
                     <button class="btn ghost" disabled=move || tl.busy.get() on:click=move |_| tl.rollback(net)>
                         {crate::form::spinner(tl.busy)}<Icon icon=icons::ROTATE_CCW size=16 />{tr("net.boot_cancel")}
@@ -480,6 +505,7 @@ pub fn banner(net: Net) -> AnyView {
                 {lost}
                 {move || pending_marker().then(|| view! { <p class="sec-note"><span class="btn-spinner"></span>{tr("net.trial_starting")}</p> })}
                 {crate::form::form_error(tl.error)}
+                {tl.force_dialog(net)}
                 <div class="net-trial-actions" hidden=skip>
                     {move || if has_token() {
                         view! {
