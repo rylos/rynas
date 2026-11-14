@@ -221,8 +221,10 @@ kbd {
 .app {
   display: grid;
   grid-template-columns: var(--sb-w) minmax(0, 1fr);
-  grid-template-rows: var(--appbar-h) 1fr;
-  min-height: 100dvh;
+  grid-template-rows: var(--appbar-h) minmax(0, 1fr);
+  /* only .main scrolls: the bars are not sticky and are not repainted while scrolling
+     (sticky bars with backdrop-filter jittered while the document scrolled) */
+  height: 100dvh;
   transition: grid-template-columns var(--t-med) var(--ease);
 }
 .app.collapsed { grid-template-columns: var(--sb-w-collapsed) minmax(0, 1fr); }
@@ -231,7 +233,7 @@ kbd {
 
 .appbar {
   grid-column: 1 / -1;
-  position: sticky; top: 0; z-index: 30;
+  position: relative; z-index: 30;
   display: flex; align-items: center; gap: var(--s-3);
   height: var(--appbar-h);
   padding: 0 var(--s-4);
@@ -399,8 +401,7 @@ kbd {
 
 /* sidebar */
 .sidebar {
-  position: sticky; top: var(--appbar-h);
-  height: calc(100dvh - var(--appbar-h));
+  position: relative; min-height: 0;
   display: flex; flex-direction: column;
   padding: var(--s-3) var(--s-2);
   background: var(--surface-nav);
@@ -484,7 +485,7 @@ kbd {
 .scrim { display: none; }
 
 /* main */
-.main { min-width: 0; padding: var(--s-6) var(--s-6) calc(var(--s-12) + var(--clear-dock)); outline: none; }
+.main { min-width: 0; min-height: 0; overflow: hidden auto; padding: var(--s-6) var(--s-6) calc(var(--s-12) + var(--clear-dock)); outline: none; }
 .page { max-width: 1600px; margin: 0 auto; display: flex; flex-direction: column; gap: var(--gap); animation: page-in var(--t-med) var(--ease); }
 @keyframes page-in { from { opacity: 0; transform: translateY(4px); } }
 .page-head { display: flex; align-items: center; gap: var(--s-3); margin-bottom: var(--s-2); }
@@ -2112,7 +2113,7 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .sysp-icon { display: grid; place-items: center; width: 56px; height: 56px; border-radius: var(--r-pill); color: var(--accent); background: color-mix(in oklch, var(--accent) 14%, var(--surface)); }
 .sysp-pending { background: color-mix(in oklch, var(--info) 14%, var(--surface)); border-top-color: color-mix(in oklch, var(--info) 45%, var(--border)); }
 .sysp-spinner { width: 22px; height: 22px; color: var(--accent); }
-body:has(.sysp-overlay) { overflow: hidden; }
+body:has(.sysp-overlay), body:has(.sysp-overlay) .main { overflow: hidden; }
 /* week grid: 7 × 24 schedule editor and preview (week_grid.rs). Cells are placed by --r (day,
    0 = Monday) and --h (hour): days are rows, or columns when the grid's box is narrow (keep
    559px in step with NARROW_PX). Levels differ by pattern too: solid, stripes, dots, outlined. */
