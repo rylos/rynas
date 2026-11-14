@@ -183,7 +183,7 @@ fn fill_template(template: &str, vals: &[(&str, Option<String>)]) -> Option<Stri
 
 /// Translated SMART health reason (`sto.reason.<code>` with its arguments), the English
 /// message for a code or argument this UI does not know.
-fn reason_text(r: &HealthReason) -> (String, bool) {
+pub(super) fn reason_text(r: &HealthReason) -> (String, bool) {
     let pct = |v: f64| i18n::pct(v);
     let n = r.args.n.map(|v| match r.code.as_str() {
         "temperature" => i18n::celsius(v as f32),
@@ -196,6 +196,23 @@ fn reason_text(r: &HealthReason) -> (String, bool) {
         Some(s) => (s, true),
         None => (r.message.clone(), false),
     }
+}
+
+/// The reasons behind a Warning or Failing verdict, for a disk card: the short line (the worst
+/// reason, then "+N more") and the full list for its tooltip. Reasons marked as seen and
+/// informational ones are left out, as in the verdict; `None` when nothing is left.
+pub(super) fn reason_summary(reasons: &[HealthReason]) -> Option<(String, String)> {
+    let mut open: Vec<&HealthReason> =
+        reasons.iter().filter(|r| r.acknowledged.is_none() && r.severity >= Severity::Warning).collect();
+    // worst first; the server's order within a severity
+    open.sort_by_key(|r| std::cmp::Reverse(r.severity));
+    let texts: Vec<String> = open.iter().map(|r| reason_text(r).0).collect();
+    let first = texts.first()?.trim_end_matches('.').to_string();
+    let short = match texts.len() - 1 {
+        0 => first,
+        more => format!("{first} {}", i18n::tn("sto.h.more", more as u64, &[])),
+    };
+    Some((short, texts.join("\n")))
 }
 
 /// Translated value of a disk check (`sto.cv.<code>`); `None` for a code this UI does not know.

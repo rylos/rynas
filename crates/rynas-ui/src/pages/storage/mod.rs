@@ -620,6 +620,14 @@ fn disk_grid(disks: Vec<DiskSummary>, selected: RwSignal<Option<String>>) -> Any
                 .map(|d| {
                     let (ptone, pkey) = power(d.power_state);
                     let (htone, hkey) = disk_health(&d);
+                    // "Warning · 12 reallocated sectors": the reason on the card, all of them in the tooltip
+                    let reason = matches!(d.health, HealthVerdict::Warning | HealthVerdict::Failing)
+                        .then(|| disks::reason_summary(&d.health_reasons))
+                        .flatten();
+                    let (htext, htitle) = match reason {
+                        Some((short, full)) => (format!("{} · {short}", t(hkey)), Some(full)),
+                        None => (t(hkey).to_string(), None),
+                    };
                     let name = d.name.clone();
                     view! {
                         <button class="disk-card" type="button" on:click=move |_| selected.set(Some(name.clone()))>
@@ -630,7 +638,7 @@ fn disk_grid(disks: Vec<DiskSummary>, selected: RwSignal<Option<String>>) -> Any
                             </div>
                             <div class="small ellipsis" title=d.model.clone()>{d.model.clone()}</div>
                             <div class="disk-card-bottom">
-                                {(d.health != HealthVerdict::Unknown).then(|| view! { <Status tone=htone text=t(hkey).to_string() /> })}
+                                {(d.health != HealthVerdict::Unknown).then(|| view! { <span class="disk-card-health" title=htitle><Status tone=htone text=htext /></span> })}
                                 <Status tone=ptone text=t(pkey).to_string() />
                             </div>
                         </button>

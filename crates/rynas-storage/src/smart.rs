@@ -241,6 +241,10 @@ pub fn parse(json: &str, now_ms: u64) -> SmartRead {
     }
     info.error_log_count = u64_at(&v, &["ata_smart_error_log", "summary", "count"])
         .or_else(|| u64_at(&v, &["ata_smart_error_log", "extended", "count"]));
+    if let Some(a9) = info.attributes.iter().find(|a| a.id == 9) {
+        let stamps: Vec<u64> = info.self_tests.iter().filter_map(|t| t.lifetime_hours).collect();
+        info.power_on_hours = ata_power_on_hours(info.power_on_hours, a9.raw, &stamps);
+    }
 
     // NVMe
     if let Some(h) = v.get("nvme_smart_health_information_log") {
@@ -344,6 +348,35 @@ pub enum SettingsRead {
     },
     /// The disk sleeps (or smartctl failed): nothing was read.
     Skipped,
+}
+
+/// More hours than this (114 years) are not a power-on time: the high bytes of the raw value
+/// hold something else that smartctl did not decode.
+const PLAUSIBLE_HOURS: u64 = 1_000_000;
+
+/// Power-on hours of an ATA drive. `reported` is smartctl's `power_on_time.hours`: attribute 9
+/// already decoded with the drive database's format (`-v 9,msec24hour32`, `minutes`,
+/// `halfminutes`…), so it is trusted unless one of two firmware quirks shows:
+/// - implausibly many hours: a drive unknown to the database that keeps milliseconds or a
+///   vendor field above 32-bit hours (the `msec24hour32` layout) read as plain `raw48`; the low
+///   32 bits of `raw` are the hours;
+/// - a 16-bit counter that wrapped at 65536 (some Seagate drives, e.g. ST4000DM000, reset
+///   attribute 9 to 0 after 65535 hours). The self-test log stamps each test with the lifetime
+///   hours, and the drive cannot be younger than its latest test: 65536 is added (the fewest
+///   times) until the count reaches the newest stamp.
+pub fn ata_power_on_hours(reported: Option<u64>, raw: u64, test_stamps: &[u64]) -> Option<u64> {
+    let mut hours = match reported {
+        Some(h) if h <= PLAUSIBLE_HOURS => h,
+        _ => Some(raw & 0xFFFF_FFFF).filter(|&h| h <= PLAUSIBLE_HOURS)?,
+    };
+    // a counter of 65536 or more is not 16-bit: nothing wrapped
+    if hours < 1 << 16
+        && let Some(&newest) = test_stamps.iter().max()
+        && newest > hours
+    {
+        hours += (newest - hours).div_ceil(1 << 16) << 16;
+    }
+    Some(hours)
 }
 
 /// Parse the output of [`SETTINGS_ARGS`].
@@ -784,6 +817,39 @@ mod tests {
         // CRC errors only: informational
         assert_eq!(v, HealthVerdict::Healthy, "{r:?}");
         assert_eq!(r[0].code, "crc_errors");
+    }
+
+    #[test]
+    fn power_on_hours_wrapped_at_16_bits() {
+        // attribute 9 = 10249, the newest self-test ran at 64898 hours: 10249 + 65536
+        let d = data(include_str!("../tests/fixtures/smartctl-seagate-poh-wrapped.json"));
+        assert_eq!(d.info.power_on_hours, Some(75_785));
+        // over 6 years: the age reason sees the real hours
+        let (_, r) = verdict(&d.info, DiskKind::Hdd);
+        assert!(r.iter().any(|x| x.code == "old_disk"), "{r:?}");
+    }
+
+    #[test]
+    fn power_on_hours_in_low_32_bits() {
+        // milliseconds above 32-bit hours, not decoded by smartctl
+        let d = data(include_str!("../tests/fixtures/smartctl-seagate-poh-raw48.json"));
+        assert_eq!(d.info.power_on_hours, Some(23_456));
+    }
+
+    #[test]
+    fn power_on_hours_rules() {
+        // a normal drive: tests older than the counter
+        assert_eq!(ata_power_on_hours(Some(31_337), 31_337, &[31_300, 30_900]), Some(31_337));
+        // no self-test log: nothing to compare with
+        assert_eq!(ata_power_on_hours(Some(10_249), 10_249, &[]), Some(10_249));
+        // the stamp exactly at a multiple: the smallest k reaching it
+        assert_eq!(ata_power_on_hours(Some(0), 0, &[65_535]), Some(65_536));
+        // 32-bit counters never wrap here
+        assert_eq!(ata_power_on_hours(Some(70_000), 70_000, &[65_000]), Some(70_000));
+        // smartctl did not report hours: the attribute's low 32 bits
+        assert_eq!(ata_power_on_hours(None, (7 << 32) | 1234, &[]), Some(1234));
+        // nothing plausible at all
+        assert_eq!(ata_power_on_hours(None, u64::MAX, &[]), None);
     }
 
     #[test]

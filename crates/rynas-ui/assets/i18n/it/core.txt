@@ -1122,6 +1122,8 @@ sto.h.warning	Avviso
 sto.h.failing	In avaria
 sto.h.no_smart	Non disponibile
 sto.h.no_smart_hint	Questo dispositivo non ha SMART (o l'adattatore USB non lo trasmette): non se ne può leggere lo stato di salute.
+sto.h.more.other	+{n} altri
+sto.h.more.one	+{n} altro
 health.degraded	Degradato
 sto.a.failed	Arrestato
 sto.a.inactive	Inattivo

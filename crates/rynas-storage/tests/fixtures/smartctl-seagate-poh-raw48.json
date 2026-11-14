@@ -1,0 +1,78 @@
+{
+  "json_format_version": [
+    1,
+    0
+  ],
+  "smartctl": {
+    "version": [
+      7,
+      4
+    ],
+    "exit_status": 0
+  },
+  "device": {
+    "name": "/dev/sdb",
+    "type": "sat",
+    "protocol": "ATA"
+  },
+  "model_name": "ST2000DM008-2FR102",
+  "serial_number": "Z000TEST",
+  "smart_support": {
+    "available": true,
+    "enabled": true
+  },
+  "smart_status": {
+    "passed": true
+  },
+  "ata_smart_attributes": {
+    "revision": 10,
+    "table": [
+      {
+        "id": 9,
+        "name": "Power_On_Hours",
+        "value": 26,
+        "worst": 26,
+        "thresh": 0,
+        "when_failed": "",
+        "flags": {
+          "value": 50,
+          "string": "-O--CK ",
+          "prefailure": false
+        },
+        "raw": {
+          "value": 20014547622816,
+          "string": "20014547622816"
+        }
+      }
+    ]
+  },
+  "power_on_time": {
+    "hours": 20014547622816
+  },
+  "power_cycle_count": 120,
+  "temperature": {
+    "current": 33
+  },
+  "ata_smart_self_test_log": {
+    "standard": {
+      "revision": 1,
+      "table": [
+        {
+          "type": {
+            "value": 1,
+            "string": "Short offline"
+          },
+          "status": {
+            "value": 0,
+            "string": "Completed without error",
+            "passed": true
+          },
+          "lifetime_hours": 23400
+        }
+      ],
+      "count": 1,
+      "error_count_total": 0,
+      "error_count_outdated": 0
+    }
+  }
+}

@@ -1680,6 +1680,8 @@ dict! { BLOB, LENS;
     "sto.h.failing" => "Failing";
     "sto.h.no_smart" => "Not available";
     "sto.h.no_smart_hint" => "This device has no SMART (or its USB adapter does not pass it on): its health cannot be read.";
+    "sto.h.more.other" => "+{n} more";
+    "sto.h.more.one" => "+{n} more";
     "health.degraded" => "Degraded";
     "sto.a.failed" => "Crashed";
     "sto.a.inactive" => "Inactive";

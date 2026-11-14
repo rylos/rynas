@@ -908,9 +908,16 @@ kbd {
 .bay-temp.ok { color: var(--led-ok); } .bay-temp.warn { color: var(--led-warn); } .bay-temp.err { color: var(--led-err); }
 
 .disk-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: var(--s-3); }
-.disk-card { display: flex; flex-direction: column; gap: var(--s-2); padding: var(--s-3); border-radius: var(--r-md); border: 1px solid var(--border); background: var(--surface-striped); }
+.disk-card { display: flex; flex-direction: column; gap: var(--s-2); padding: var(--s-3); border-radius: var(--r-md); border: 1px solid var(--border); background: var(--surface-striped); min-width: 0; }
 .disk-card-top, .disk-card-bottom { display: flex; align-items: center; gap: var(--s-2); }
 .disk-card-bottom { justify-content: space-between; }
+/* the card is a grid item (min-width 0 above): the health pill (with its reason) shrinks and ellipsizes
+   instead of widening the card; the power pill keeps its size */
+.disk-card-bottom > .status { flex: none; }
+.disk-card-health { display: flex; min-width: 0; }
+.disk-card-health .status { min-width: 0; max-width: 100%; }
+.disk-card-health .status > svg { flex: none; }
+.disk-card-health .status > span { overflow: hidden; text-overflow: ellipsis; }
 
 .arrays { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: var(--s-3); }
 .array { display: flex; flex-direction: column; gap: var(--s-2); padding: var(--s-3) var(--s-4); border-radius: var(--r-md); border: 1px solid var(--border); border-left: 3px solid var(--tone); background: var(--surface-striped); }

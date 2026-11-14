@@ -1,0 +1,102 @@
+{
+  "json_format_version": [
+    1,
+    0
+  ],
+  "smartctl": {
+    "version": [
+      7,
+      4
+    ],
+    "exit_status": 0
+  },
+  "device": {
+    "name": "/dev/sdb",
+    "type": "sat",
+    "protocol": "ATA"
+  },
+  "model_name": "ST4000DM000-1F2168",
+  "serial_number": "Z000TEST",
+  "smart_support": {
+    "available": true,
+    "enabled": true
+  },
+  "smart_status": {
+    "passed": true
+  },
+  "ata_smart_attributes": {
+    "revision": 10,
+    "table": [
+      {
+        "id": 9,
+        "name": "Power_On_Hours",
+        "value": 26,
+        "worst": 26,
+        "thresh": 0,
+        "when_failed": "",
+        "flags": {
+          "value": 50,
+          "string": "-O--CK ",
+          "prefailure": false
+        },
+        "raw": {
+          "value": 10249,
+          "string": "10249"
+        }
+      }
+    ]
+  },
+  "power_on_time": {
+    "hours": 10249
+  },
+  "power_cycle_count": 120,
+  "temperature": {
+    "current": 33
+  },
+  "ata_smart_self_test_log": {
+    "standard": {
+      "revision": 1,
+      "table": [
+        {
+          "type": {
+            "value": 1,
+            "string": "Short offline"
+          },
+          "status": {
+            "value": 0,
+            "string": "Completed without error",
+            "passed": true
+          },
+          "lifetime_hours": 64898
+        },
+        {
+          "type": {
+            "value": 1,
+            "string": "Short offline"
+          },
+          "status": {
+            "value": 0,
+            "string": "Completed without error",
+            "passed": true
+          },
+          "lifetime_hours": 64730
+        },
+        {
+          "type": {
+            "value": 1,
+            "string": "Short offline"
+          },
+          "status": {
+            "value": 0,
+            "string": "Completed without error",
+            "passed": true
+          },
+          "lifetime_hours": 64562
+        }
+      ],
+      "count": 3,
+      "error_count_total": 0,
+      "error_count_outdated": 0
+    }
+  }
+}
