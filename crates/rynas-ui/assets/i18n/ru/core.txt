@@ -20,7 +20,7 @@ bar.user	Меню учётной записи
 bar.open_menu	Открыть меню
 bar.demo	Демо-данные
 bar.demo_hint	API не отвечает: показаны демо-данные
-bar.live	В реальном времени
+bar.live	Онлайн
 bar.offline	Нет связи
 bar.connecting	Подключение…
 bar.logout	Выйти
@@ -32,7 +32,7 @@ notif.unread	не прочитано
 notif.since	с
 notif.fan_fail	Отказ вентилятора
 notif.fan_fail_text	{label}: вентилятор не вращается или сообщает о тревоге.
-notif.fan_fail_any	Источник оборудования сообщает об отказе вентилятора.
+notif.fan_fail_any	Модуль производителя сообщает об отказе вентилятора.
 notif.temp_warn	Высокая температура
 notif.temp_crit	Критическая температура
 notif.temp_text	{label}: {value} (порог {limit}).
@@ -59,7 +59,7 @@ nev.hw.fan_failure.title	Отказ вентилятора
 nev.hw.fan_failure.body	Контроллер оборудования сообщает об отказе вентилятора: проверьте вентиляторы, пока диски не перегрелись.
 nev.hw.fans_ok.title	Вентиляторы снова в норме
 nev.hw.monitor_stale.title	Монитор оборудования не обновляется
-nev.hw.monitor_stale.body	Источник оборудования ({provider}) не записывал своё состояние {age_s} с: тревоги по вентиляторам и температуре не работают.
+nev.hw.monitor_stale.body	Модуль производителя ({provider}) не записывал своё состояние {age_s} с: тревоги по вентиляторам и температуре не работают.
 nev.hw.monitor_ok.title	Монитор оборудования снова обновляется
 nev.hw.temp_high.title	Температура {label}: {celsius} °C
 nev.hw.temp_high.body	{label}: {celsius} °C (предупреждение — {warn_c} °C, критическая — {crit_c} °C).
@@ -168,7 +168,7 @@ tasks.none	Нет выполняемых задач
 tasks.none_text	Здесь будут появляться длительные операции — проверка данных, ресинхронизация, снимки — с ходом выполнения и журналами.
 tasks.running_1	Выполняется: 1
 tasks.running_n	Выполняется: {n}
-tasks.last	Последние
+tasks.last	Последняя
 tasks.col_task	Задача
 tasks.col_user	Пользователь
 tasks.col_start	Начало
@@ -506,7 +506,7 @@ cfg.key.users	Пользователи и группы
 cfg.key.shares	Общие папки
 cfg.key.homes	Домашние папки пользователей
 cfg.key.snapshots	Снимки
-cfg.key.scheduler	Задачи по расписанию
+cfg.key.scheduler	Планировщик задач
 cfg.key.power.schedule	Расписание питания
 cfg.key.network.rescue	Аварийное восстановление сети
 cfg.key.storage.volumes	Тома
@@ -608,7 +608,7 @@ w.volumes	Тома
 w.health	Состояние хранилища
 w.hardware	Оборудование
 f.model	Модель
-f.os	Операционная система
+f.os	Система
 f.kernel	Ядро
 f.uptime	Время работы
 f.cpu	Процессор
@@ -659,12 +659,12 @@ hw.events	События
 hw.duty	Скорость вентиляторов
 hw.fan_fail	Обнаружен отказ вентилятора
 hw.alarm	Тревога
-hw.provider	Источник оборудования
+hw.provider	Производитель
 hw.test_beep	Проверить зуммер
 hw.stale	Устаревшие данные
 hw.updated	Последнее обновление
-hw.none_title	Нет источника оборудования
-hw.none_text	Это устройство не предоставляет вентиляторы, индикаторы или отсеки дисков через источник оборудования. Температуры датчиков по-прежнему показываются на панели мониторинга.
+hw.none_title	Модуль производителя не найден
+hw.none_text	Это устройство не предоставляет вентиляторы, индикаторы или отсеки дисков через модуль производителя. Температуры датчиков по-прежнему показываются на панели мониторинга.
 hw.no_events	Нет недавних событий
 hw.subtitle	Вентиляторы, температуры, индикатор состояния и события платформы
 led.green	Зелёный
@@ -684,7 +684,7 @@ hw.power_led	Индикатор питания
 hw.led_status_short	Состояние
 hw.led_power_short	Питание
 hw.bay_no_power	Диск установлен, отсек без питания
-hw.temp_last	Последнее показание до перехода в режим ожидания (диск не пробуждается)
+hw.temp_last	Последнее показание перед сном (диск не пробуждается)
 hw.identify	Найти
 hw.identifying	Мигает…
 hw.identify_on	Индикатор отсека {n} мигает (с): {s}
@@ -969,7 +969,7 @@ sto.empty_bay	Пусто
 sto.bays	Отсеки для дисков
 sto.m2	M.2
 sto.m2_slots	Слоты M.2 NVMe
-sto.asleep	Ожидание
+sto.asleep	Сон
 sto.active	Активен
 health.unknown	Неизвестно
 sto.not_powered	Выключен
@@ -1116,10 +1116,10 @@ sto.pass_or_key	Парольная фраза или ключ восстанов
 sto.lock_title	Заблокировать том {name}?
 sto.lock_text	Том будет размонтирован, а его ключ удалён из памяти. Общие папки и приложения на нём перестанут работать до повторной разблокировки.
 sto.passphrase	Парольная фраза
-sto.stale	Из кэша
-sto.stale_hint	Один из дисков ниже находится в режиме ожидания: сведения взяты из последнего чтения, чтобы не пробуждать его.
+sto.stale	Сон
+sto.stale_hint	Один из дисков ниже спит: сведения взяты из последнего чтения, чтобы не будить его.
 sto.scrub_running	Проверка данных
-health.healthy	Исправно
+health.healthy	Исправен
 sto.h.warning	Предупреждение
 sto.h.failing	Неисправен
 sto.h.no_smart	Недоступно
@@ -1151,7 +1151,7 @@ sto.unused	Не используется
 sto.smr_hint	Диск с черепичной записью (SMR): медленная перезапись, восстановление RAID 5/6 может занять несколько дней.
 sto.smart	S.M.A.R.T.
 sto.settings	Настройки
-sto.standby_note	Этот диск находится в режиме ожидания. Его сведения не читаются автоматически, чтобы не пробуждать его.
+sto.standby_note	Этот диск спит. Его сведения не читаются автоматически, чтобы не будить его.
 sto.read_now	Прочитать сейчас
 sto.wwn	WWN
 sto.firmware	Прошивка
@@ -1826,7 +1826,7 @@ shares.size_asleep_as_of	По состоянию на {when} (диски в сп
 shares.size_failed	Размер недоступен
 shares.removed_at	Общая папка убрана
 shares.was_shared_as	была общей папкой {name}
-shares.share_again	Открыть общий доступ снова
+shares.share_again	Открыть общий доступ
 shares.delete_forever	Удалить безвозвратно
 shares.show_snapshots	Показывать снимки в папке
 shares.show_snapshots_help	Папка #snapshot только для чтения в корне общего ресурса, с отдельной папкой для каждого снимка, названной по его дате и времени. Требуется задание снимков для этой общей папки.
@@ -2331,7 +2331,7 @@ nt.v.chat_id	Введите ID чата.
 nt.v.server	Введите адрес сервера.
 nt.v.url	Введите URL.
 nt.v.targets	Выберите хотя бы одного получателя.
-sch.title	Задачи по расписанию
+sch.title	Планировщик задач
 sch.subtitle	Команды, скрипты и обслуживание по расписанию
 sch.open_text	Команды и скрипты по расписанию, проверка данных, тесты SMART, очистка корзины, с историей запусков.
 sch.create	Создать задачу
@@ -2341,7 +2341,7 @@ sch.tab.timers	Системные таймеры
 sch.tab.cron	Записи cron
 sch.empty	Нет задач по расписанию
 sch.empty_text	Запускайте команду или скрипт по расписанию, при загрузке или по требованию и получайте уведомление о сбое.
-sch.col.enabled	Включена
+sch.col.enabled	Вкл.
 sch.col.task	Задача
 sch.col.action	Действие
 sch.col.schedule	Расписание
@@ -2552,7 +2552,7 @@ dd.settings_title	Дедупликация: {name}
 dd.enabled	Запуск по расписанию
 dd.enabled_help	Выкл.: запуск только вручную.
 dd.only_awake	Только если диски уже активны
-dd.only_awake_help	Окно пропускается, чтобы не выводить диски из режима ожидания.
+dd.only_awake_help	Окно пропускается, чтобы не будить спящие диски.
 dd.advanced	Дополнительно
 dd.min_size	Минимальный размер файла
 dd.min_size_help	Файлы меньшего размера пропускаются: они освобождают мало места и часто меняются.
