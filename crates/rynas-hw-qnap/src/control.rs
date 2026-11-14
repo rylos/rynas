@@ -339,18 +339,10 @@ impl Controller {
             }
         });
         let m = confirmed.model();
-        // the disks are in their bays from the start; their verdicts come with rynasd's first
-        // storage check (a minute after it starts, none while the inventory fails)
-        let found = crate::provider::disks_in_bays(root, m);
-        let bays = m
-            .bays
-            .iter()
-            .map(|b| BayState {
-                bay: b.bay,
-                device: found.iter().find(|(n, _)| *n == b.bay).map(|(_, d)| d.clone()).unwrap_or_default(),
-                health: HealthVerdict::Unknown,
-            })
-            .collect();
+        // the disks are in their bays from the start, and a RAID member md marked failed
+        // (/proc/mdstat) is failing from the start too; the other verdicts come with rynasd's
+        // first storage check (a minute after it starts, none while the inventory fails)
+        let bays = crate::disks::bay_states(root, m, &[]);
         let mut wrong_direction = Vec::new();
         let mut led_lines = Vec::new();
         if confirmed.gpio_loaded() {
