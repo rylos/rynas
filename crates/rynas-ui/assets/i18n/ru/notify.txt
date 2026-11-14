@@ -1,0 +1,21 @@
+# rynas: Russian translation, notification messages (channels). One key<TAB>text line per entry; see docs/i18n.md
+notify.notifications	уведомления
+notify.footer	rynas на
+notify.resolved	Решено
+notify.reminder	Напоминание
+notify.test_title	Тестовое уведомление
+notify.test_body	Если вы читаете это сообщение, канал работает.
+notify.severity.info	Информация
+notify.severity.notice	Уведомление
+notify.severity.warning	Предупреждение
+notify.severity.error	Ошибка
+notify.severity.critical	Критично
+notify.category.storage	Хранилище
+notify.category.hardware	Оборудование
+notify.category.ups	ИБП
+notify.category.system	Система
+notify.category.security	Безопасность
+notify.category.update	Обновления
+notify.category.backup	Резервное копирование
+notify.category.app	Приложения
+notify.category.task	Задачи

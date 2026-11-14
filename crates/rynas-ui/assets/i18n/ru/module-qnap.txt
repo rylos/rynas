@@ -1,0 +1,86 @@
+# rynas: Russian translation, QNAP module. One key<TAB>text line per entry; see docs/i18n.md
+nt.src.qnap	Аппаратные кнопки
+nev.qnap.button_reset.title	Нажата кнопка сброса
+nev.qnap.button_usb_copy.title	Нажата кнопка копирования USB
+qnap.tab	Передняя панель
+qnap.not_verified	Соответствие индикаторов, кнопок и зуммера для этой модели взято из конфигурации производителя и ещё не проверено на этом оборудовании. Пройдите проверку при первой загрузке, прежде чем полагаться на него.
+qnap.leds	Индикаторы
+qnap.led_control	Разрешить rynas управлять индикаторами
+qnap.led_control_help	Если выключено, линии индикаторов не записываются и освобождаются.
+qnap.need_confirm	Доступно после подтверждения модели на этой машине.
+qnap.mapping	Проверка при первой загрузке
+qnap.mapping_text	Автоматическое определение не различает все модели: прошивка не сообщает название. После проверки при первой загрузке на этой машине введите название модели, напечатанное на корпусе, чтобы разрешить rynas записывать линии индикаторов и настройку восстановления питания.
+qnap.mapping_type	Введите {model}
+qnap.mapping_confirm	Подтвердить модель
+qnap.mapping_done	Подтверждено на этой машине
+qnap.mapping_revoke	Отозвать подтверждение
+qnap.brightness	Яркость передних индикаторов
+qnap.bright_100	100 %
+qnap.bright_50	50 %
+qnap.bright_0	0 % (индикаторы выключены)
+qnap.power	После отключения питания
+qnap.pr_choice	При восстановлении электропитания
+qnap.pr_last	Восстановить прежнее состояние
+qnap.pr_on	Включаться автоматически
+qnap.pr_off	Оставаться выключенным
+qnap.pr_now	Сейчас в оборудовании: {mode}
+qnap.pr_unknown	В оборудовании записано значение с неизвестным смыслом
+qnap.pr_help	Считывается из оборудования при открытии страницы; записывается только при нажатии кнопки.
+qnap.pr_apply	Записать в оборудование
+qnap.pr_done	Записано и прочитано обратно
+qnap.pr_eup	В BIOS включён EuP: эта настройка не подействует, пока он не будет выключен.
+qnap.gpio_inactive	Устройство GPIO микросхемы не активировано, поэтому команды индикаторов могут не иметь видимого эффекта.
+qnap.gpio_activate	Активировать устройство GPIO
+qnap.bay_failed	Неисправный диск
+qnap.bay_warning	Предупреждение диска
+qnap.bay_ok	Неисправностей нет
+qnap.feat_led_brightness	Управление яркостью индикаторов
+qnap.why_mapping_unconfirmed	Модель не подтверждена на этой машине
+qnap.why_write_failed	Не удалось записать линию; повторная попытка
+qnap.led_auto	По состоянию дисков
+qnap.led_green	Зелёный
+qnap.led_green_blink	Зелёный, мигает
+qnap.led_red	Красный
+qnap.led_red_blink	Красный, мигает
+qnap.led_alternate	Зелёный и красный поочерёдно
+qnap.led_off	Выкл.
+qnap.disk_leds	Индикаторы ошибок отсеков отражают состояние дисков
+qnap.usb_led	Индикатор USB
+qnap.usb_on	Вкл.
+qnap.usb_blink	Мигает
+qnap.shown	Сейчас отображается
+qnap.shown_none	Не управляется rynas
+qnap.bays	Отсеки
+qnap.bay_n	Отсек {n}
+qnap.bay_empty	Пусто
+qnap.bay_on	Неисправный диск (индикатор ошибки включён командой)
+qnap.bay_blink	Предупреждение диска (индикатор ошибки мигает по команде)
+qnap.bay_off	Неисправностей нет (индикатор ошибки выключен командой)
+qnap.buttons	Кнопки
+qnap.usb_copy	Кнопка копирования USB
+qnap.btn_log	Только показать в списке ниже
+qnap.btn_ignore	Ничего не делать
+qnap.buttons_help	Кнопка никогда не меняет настройки, пароли или диски: нажатие можно только записать или отправить уведомление.
+qnap.buzzer	Зуммер
+qnap.beep_failure	Подавать сигнал тревоги при сбое диска
+qnap.beep_failure_help	Повторяется каждые 5 минут, пока сигнал не отключат или диск не заменят.
+qnap.beep_sent	Звуковой сигнал отправлен
+qnap.mute	Отключить сигнал тревоги
+qnap.alarm_on	Звучит сигнал тревоги
+qnap.events	Нажатия кнопок
+qnap.events_none	С момента запуска rynas нажатий не было
+qnap.held	удержание {s} с
+qnap.features	Что работает на этой машине
+qnap.feat_status_led	Управление индикатором состояния
+qnap.feat_disk_leds	Управление индикаторами ошибок отсеков
+qnap.feat_usb_led	Управление индикатором USB
+qnap.feat_reset_button	Чтение кнопки сброса
+qnap.feat_usb_copy_button	Чтение кнопки копирования USB
+qnap.feat_buzzer	Звук зуммера
+qnap.why_driver_missing	Драйвер ядра не загружен
+qnap.why_wrong_direction	Линия настроена не в ожидаемом направлении: управление не выполняется
+qnap.why_led_control_off	Выключено выше
+qnap.why_no_speaker	Устройство PC speaker не найдено
+qnap.why_not_fitted	Отсутствует на этой модели
+qnap.available	Доступно
+qnap.unsaved	Изменения не сохранены
