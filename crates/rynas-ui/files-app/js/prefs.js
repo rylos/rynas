@@ -19,6 +19,7 @@ export const DEFAULTS = {
   binarySizes: true,
   relativeDates: false,
   columns: { mode: true, size: true, mtime: true, kind: false },
+  colWidths: {}, // key → px, set by dragging a column's left edge in the list header
   singleClick: false,
   vimKeys: false,
   confirmDelete: true,

@@ -2,7 +2,7 @@
 // selection, filter and search. A tab holds one pane, or two side by side.
 
 import { api } from "./api.js";
-import { prefs } from "./prefs.js";
+import { prefs, save } from "./prefs.js";
 import { t, count, LOCALE } from "./i18n.js";
 import { esc, size, sizeParts, ezaDate, relative, dateTime, duration, modeString, collator, joinPath, parentOf, baseName, int, isDirLike } from "./format.js";
 import { svg, iconHTML, glyph, colorClass, kindLabel, previewKind, shareGlyph, isProtectedFolder } from "./icons.js";
@@ -666,7 +666,11 @@ export class Pane {
     if (this.search) cols.push({ key: "dir", label: "files.common.folder", width: "minmax(100px, .6fr)", cls: "" });
     // a PC's snapshots on a narrow screen: the room goes to their names, not to permissions
     const narrowPc = isPcFolder(this.path) && this.el.clientWidth > 0 && this.el.clientWidth < 600;
-    for (const [key, c] of Object.entries(COLS)) if (prefs.columns[key] && !(narrowPc && key === "mode")) cols.push({ key, ...c });
+    for (const [key, c] of Object.entries(COLS)) {
+      if (!prefs.columns[key] || (narrowPc && key === "mode")) continue;
+      const w = prefs.colWidths?.[key];
+      cols.push({ key, ...c, width: w ? `${w}px` : c.width, resizable: true });
+    }
     return cols;
   }
 
@@ -681,13 +685,50 @@ export class Pane {
     this.headEl.innerHTML = cols
       .map((c) => {
         const arrow = this.sort.key === c.key ? `<span class="arrow">${this.sort.dir > 0 ? "▲" : "▼"}</span>` : "";
-        return `<div data-k="${c.key}" class="${c.key === "size" ? "r" : ""}">${t(c.label)}${arrow}</div>`;
+        const grip = c.resizable ? `<span class="col-grip" data-r="${c.key}"></span>` : "";
+        return `<div data-k="${c.key}" class="${c.key === "size" ? "r" : ""}">${grip}<span class="lbl">${t(c.label)}</span>${arrow}</div>`;
       })
       .join("");
     this.headEl.querySelectorAll("div").forEach((d) => (d.onclick = () => this.setSort(d.dataset.k)));
+    this.headEl.querySelectorAll(".col-grip").forEach((g) => this.gripColumn(g, cols));
     this.headEl.oncontextmenu = (e) => {
       e.preventDefault();
       this.app.columnsMenu(e.clientX, e.clientY);
+    };
+  }
+
+  /**
+   * A column's left edge in the list header: dragging it sets the column's width (the name
+   * column takes what is left), double-clicking it goes back to the default width.
+   */
+  gripColumn(grip, cols) {
+    const key = grip.dataset.r;
+    grip.onclick = (e) => e.stopPropagation();
+    grip.ondblclick = (e) => {
+      e.stopPropagation();
+      const { [key]: _, ...rest } = prefs.colWidths || {};
+      save({ colWidths: rest });
+    };
+    grip.onpointerdown = (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      grip.setPointerCapture(e.pointerId);
+      const x0 = e.clientX;
+      const w0 = grip.parentElement.getBoundingClientRect().width;
+      let w = w0;
+      const template = () => cols.map((c) => (c.key === key ? `${w}px` : c.width)).join(" ");
+      grip.onpointermove = (ev) => {
+        // the columns are right of the name: dragging the left edge to the left widens it
+        w = Math.round(Math.min(480, Math.max(48, w0 + x0 - ev.clientX)));
+        this.template = template();
+        this.headEl.style.gridTemplateColumns = this.template;
+        this.el.querySelectorAll(".row").forEach((r) => (r.style.gridTemplateColumns = this.template));
+      };
+      grip.onpointerup = grip.onpointercancel = () => {
+        grip.onpointermove = grip.onpointerup = grip.onpointercancel = null;
+        if (w !== w0) save({ colWidths: { ...prefs.colWidths, [key]: w } });
+      };
     };
   }
 

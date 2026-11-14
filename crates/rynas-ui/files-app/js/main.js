@@ -25,7 +25,7 @@ import { changed as appChanged } from "./appdata.js";
 // what each preference redraws when it changes (prefsChanged)
 const QUIET_PREFS = new Set(["tabs", "folderViews", "sort", "view", "sidebar", "singleClick", "vimKeys", "confirmDelete", "conflict", "limit", "openDialog", "notify", "startIn", "newTabIn", "startFolder", "perFolder"]);
 const RESORT_PREFS = new Set(["showHidden", "foldersFirst", "hiddenLast"]);
-const REPAINT_PREFS = new Set(["columns", "binarySizes", "relativeDates", "todayHighlight", "llColumns", "icons", "colors", "size", "density", "folderIcons", "info"]);
+const REPAINT_PREFS = new Set(["columns", "colWidths", "binarySizes", "relativeDates", "todayHighlight", "llColumns", "icons", "colors", "size", "density", "folderIcons", "info"]);
 const SIDEBAR_PREFS = new Set(["favorites", "showFavorites", "volumeNames", "volumeOrder", "folderIcons"]);
 
 class App {

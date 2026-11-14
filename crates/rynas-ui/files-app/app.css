@@ -244,6 +244,14 @@ svg.i { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-widt
 .list-head > div:hover { color: var(--text); }
 .list-head > div.r { justify-content: flex-end; }
 .list-head .arrow { color: var(--accent); }
+/* full header height and no clipping: the grip sits in the gap between columns, only the
+   label is clipped */
+.list-head > div { position: relative; align-self: stretch; min-width: 0; overflow: visible; }
+.list-head .lbl { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+/* a column's left edge: drag to resize (the middle of the 12px gap) */
+.list-head .col-grip { position: absolute; left: -9px; top: 0; bottom: 0; width: 6px; cursor: col-resize; touch-action: none; }
+.list-head .col-grip { background: linear-gradient(var(--border), var(--border)) center / 1px 100% no-repeat; }
+.list-head .col-grip:hover, .list-head .col-grip:active { background: linear-gradient(var(--accent), var(--accent)) center / 2px 100% no-repeat; }
 .scroller { flex: 1; overflow: hidden auto; position: relative; outline: none; }
 .scroller:focus-visible { box-shadow: inset 0 0 0 1px var(--accent-soft); }
 .rows { position: relative; }
