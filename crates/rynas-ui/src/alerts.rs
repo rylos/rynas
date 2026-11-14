@@ -60,7 +60,7 @@ pub fn array_status(a: &RaidArray) -> (Tone, &'static str) {
         (Tone::Err, "health.failed")
     } else if s.contains("resync") || s.contains("recover") || s.contains("check") || s.contains("reshape") {
         (Tone::Info, "health.syncing")
-    } else if s.contains("clean") || s.contains("active") {
+    } else if s.contains("clean") || s.contains("active") || s == "read-auto" || s == "write-pending" {
         (Tone::Ok, "health.healthy")
     } else {
         (Tone::Unknown, "health.unknown")
