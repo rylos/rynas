@@ -19,10 +19,12 @@ Copyright: 2026 Marco Ziliani
 License: Apache-2.0
 
 Files: crates/rynas-ui/assets/fonts/inter-latin.woff2
+       crates/rynas-ui/assets/fonts/inter-cyrillic.woff2
 Copyright: 2016 The Inter Project Authors (https://github.com/rsms/inter)
 License: OFL-1.1
 
 Files: crates/rynas-ui/assets/fonts/jbmono-latin.woff2
+       crates/rynas-ui/assets/fonts/jbmono-cyrillic.woff2
 Copyright: 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono)
 License: OFL-1.1
 
