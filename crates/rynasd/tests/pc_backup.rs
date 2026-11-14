@@ -633,10 +633,23 @@ async fn agent_folder_pairing_listing_and_receive() {
     let p: rynas_api_types::pcagent::PairResponse = serde_json::from_slice(&b).unwrap();
     assert_eq!((p.device.as_str(), p.group.as_str(), p.repo_password.as_str()), ("laptop", "", ""));
     assert_eq!(p.plan.method, rynas_api_types::pcagent::PcMethod::Btrfs);
+    let first = p.token.clone();
+    // paired again (agent reinstalled): same device, new token, the old one stops
+    let (s, b) = call(&e, "POST", "/v1/pcbackup/pairings", Some(json!({"btrfs_target": "laptop"}))).await;
+    assert_eq!(s, StatusCode::CREATED, "{}", String::from_utf8_lossy(&b));
+    let code = serde_json::from_slice::<rynas_api_types::pcagent::PairingCreated>(&b).unwrap().code;
+    let pair = json!({"code": code, "hostname": "new-host"}).to_string().into_bytes();
+    let (s, b) = agent_call(&e, None, "POST", "/v1/pcbackup/agent/pair", pair).await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    let p: rynas_api_types::pcagent::PairResponse = serde_json::from_slice(&b).unwrap();
+    assert_eq!(p.device, "laptop");
     let tok = p.token.clone();
-    // a second PC cannot take the name
-    let (s, _) = call(&e, "POST", "/v1/pcbackup/pairings", Some(json!({"btrfs_target": "laptop"}))).await;
-    assert_eq!(s, StatusCode::CONFLICT);
+    assert_ne!(tok, first);
+    let (s, _) = agent_call(&e, Some(&first), "GET", "/v1/pcbackup/agent/btrfs/snapshots", Vec::new()).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let dev: Value = serde_json::from_slice(&call(&e, "GET", "/v1/pcbackup/devices/laptop", None).await.1).unwrap();
+    assert_eq!(dev["device"]["hostname"], "new-host");
+    assert_eq!(dev["device"]["description"], "desk");
 
     // listing: token needed
     let (s, _) = agent_call(&e, None, "GET", "/v1/pcbackup/agent/btrfs/snapshots", Vec::new()).await;

@@ -187,6 +187,9 @@ pub struct Dev {
     pub versions: u32,
     #[serde(default)]
     pub command: Option<AgentCommand>,
+    /// When `command` was queued: the PC has not taken it while its last contact is older.
+    #[serde(default)]
+    pub command_at_ms: Option<u64>,
     #[serde(default)]
     pub rev: u64,
     #[serde(default)]
@@ -696,6 +699,7 @@ impl PcAgent {
             settings: d.settings.clone(),
             bare_metal: ready_of(d, kit),
             command: d.command.clone(),
+            command_at_ms: d.command_at_ms,
             revoked: d.revoked,
         }
     }
@@ -1120,7 +1124,9 @@ async fn pairing_post(
         if !svc.btrfs_side()?.has_agent_target(t) {
             return Err(Error::invalid("btrfs_target", "no folder for rynas-agent with this name"));
         }
-        if svc.snapshot().devices.contains_key(t) {
+        // a PC of the btrfs method already there may be paired again (agent reinstalled, new
+        // system, lost token): it keeps its folder, history and settings, only the token changes
+        if svc.snapshot().devices.get(t).is_some_and(|d| !d.group.is_empty()) {
             return Err(Error::new(
                 StatusCode::CONFLICT,
                 error_codes::ALREADY_EXISTS,
@@ -1388,6 +1394,7 @@ fn queue(svc: &PcAgent, device: &str, cancel: bool) -> Res<()> {
         } else {
             AgentCommand::BackupNow { id: seq }
         });
+        d.command_at_ms = Some(now_ms());
         d.rev += 1;
         Ok(())
     })?;
@@ -1764,7 +1771,10 @@ async fn plan_get(
             return Err(Error::new(StatusCode::UNAUTHORIZED, error_codes::UNAUTHENTICATED, "revoked".into()));
         }
         let seen = now_ms();
-        if d.last_seen_ms.is_none_or(|t| seen.saturating_sub(t) > 60_000) {
+        // at most once a minute, and at once when a command waits for this contact (the
+        // console shows it pending while the last contact is older than the command)
+        let taking = d.command_at_ms.is_some_and(|c| d.last_seen_ms.is_none_or(|t| t < c));
+        if taking || d.last_seen_ms.is_none_or(|t| seen.saturating_sub(t) > 60_000) {
             svc.touch(|r| {
                 if let Some(x) = r.devices.get_mut(&device) {
                     x.last_seen_ms = Some(seen);

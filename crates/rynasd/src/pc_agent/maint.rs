@@ -400,13 +400,34 @@ fn pair_btrfs(svc: &Arc<PcAgent>, p: &Pairing, target: &str, req: &PairRequest) 
         btrfs_folder: Some(folder),
         ..Default::default()
     };
-    let plan = super::plan_of(&dev);
-    svc.edit(|r| {
-        if r.devices.contains_key(target) {
-            return Err(Error::new(StatusCode::CONFLICT, error_codes::ALREADY_EXISTS, format!("a PC named {target} is already paired")));
+    let plan = svc.edit(|r| {
+        match r.devices.get_mut(target) {
+            // paired again: the same PC (or its new system) takes over its folder, history and
+            // settings with a new token; the old token stops here
+            Some(old) if old.group.is_empty() => {
+                old.hostname = dev.hostname;
+                old.os = dev.os;
+                old.arch = dev.arch;
+                old.agent_version = dev.agent_version;
+                old.machine_id = dev.machine_id;
+                old.root_btrfs = dev.root_btrfs;
+                old.last_seen_ms = dev.last_seen_ms;
+                old.token_sha = dev.token_sha;
+                // bound to the folder the pairing was made for (it may be a new one)
+                old.btrfs_folder = dev.btrfs_folder;
+                old.revoked = false;
+                old.command = None;
+                old.command_at_ms = None;
+                old.rev += 1;
+                Ok(super::plan_of(old))
+            }
+            Some(_) => Err(Error::new(StatusCode::CONFLICT, error_codes::ALREADY_EXISTS, format!("a PC named {target} is already paired"))),
+            None => {
+                let plan = super::plan_of(&dev);
+                r.devices.insert(target.to_string(), dev);
+                Ok(plan)
+            }
         }
-        r.devices.insert(target.to_string(), dev);
-        Ok(())
     })?;
     Ok(PairResponse {
         device: target.to_string(),
