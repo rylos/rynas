@@ -778,14 +778,13 @@ fn migration_at_boot_kept_by_any_admin_without_a_token() {
 }
 
 #[test]
-fn migration_at_boot_kept_over_another_path_after_the_deadline() {
+fn migration_at_boot_kept_after_the_deadline() {
     let t = ifupdown_box();
     let (rev, _) = t.e.adopt_next_boot("admin").unwrap();
     t.e.boot_guard(&log).unwrap();
-    // the timer never fired and the deadline is past; the administrator, over a VPN, keeps it
-    // anyway (force: the console's path)
+    // the deadline is past and the timer has not acted: an administrator may still keep it
     t.os.sleep(Duration::from_secs(600));
-    assert_eq!(t.e.confirm("", Origin::Cli).unwrap(), rev);
+    assert_eq!(t.e.confirm("", Origin::Web(ip("192.0.2.37"))).unwrap(), rev);
     assert!(t.e.trial().unwrap().is_none());
 }
 
@@ -823,8 +822,13 @@ fn migrated_at_boot(dns_answers: bool) -> T {
     t
 }
 
+/// The trial the armed timer names on its command line (`--trial`).
+fn armed_trial(t: &T) -> u64 {
+    t.e.trial().unwrap().unwrap().started_ms
+}
+
 #[test]
-fn rollback_timer_firing_early_waits_for_the_deadline() {
+fn the_timer_of_the_current_trial_goes_on_whatever_the_clock() {
     let t = networkd_box();
     t.e.stage("admin", "lan1", &st("192.0.2.30/24", Some("192.0.2.254")))
         .unwrap();
@@ -832,10 +836,27 @@ fn rollback_timer_firing_early_waits_for_the_deadline() {
         t.e.plan_apply("admin", "admin", "", ip("198.51.100.20"), None, false)
             .unwrap();
     t.e.begin(&plan, Some(&new_token()), None, &log).unwrap();
-    // the clock stepped at boot: the timer fires 6 s before the deadline
-    t.os.sleep(Duration::from_secs(114));
-    let r = t.e.rollback(reason::TIMEOUT, &log).unwrap().expect("rolled back");
+    let trial = armed_trial(&t);
+    // a timer armed for another trial does nothing
+    assert!(t.e.rollback_trial(reason::TIMEOUT, Some(trial + 1), &log).unwrap().is_none());
+    assert!(t.e.trial().unwrap().is_some());
+    // the clock stepped back by more than a minute: the timer fires long "before" the deadline
+    let r = t.e.rollback_trial(reason::TIMEOUT, Some(trial), &log).unwrap().expect("rolled back");
     assert_eq!(r.reason, reason::TIMEOUT);
+    assert!(t.e.trial().unwrap().is_none());
+}
+
+#[test]
+fn the_watchdog_takes_over_a_trial_without_a_timer() {
+    let t = ifupdown_box();
+    t.e.adopt_next_boot("admin").unwrap();
+    t.e.boot_guard(&log).unwrap();
+    assert!(t.e.watchdog(&log).unwrap().contains("in charge"));
+    // the timer fired early and quit (an older version), and the clock still reads before the
+    // deadline: the watchdog does the timer's job
+    t.os.state.lock().unwrap().timer = None;
+    let msg = t.e.watchdog(&log).unwrap();
+    assert!(msg.contains("watchdog did its job"), "{msg}");
     assert!(t.e.trial().unwrap().is_none());
 }
 

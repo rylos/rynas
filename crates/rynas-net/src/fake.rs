@@ -474,7 +474,8 @@ impl NetOs for FakeOs {
                 let lines: Vec<&str> = units
                     .iter()
                     .map(|u| {
-                        if s.active.get(&Self::unit(u)).copied().unwrap_or(false) {
+                        let timer = *u == "rynas-net-rollback.timer" && s.timer.is_some();
+                        if timer || s.active.get(&Self::unit(u)).copied().unwrap_or(false) {
                             "active"
                         } else {
                             "inactive"

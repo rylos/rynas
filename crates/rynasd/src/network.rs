@@ -364,9 +364,7 @@ async fn confirm(
     user(&h)?;
     let req = json_body(body)?;
     let revision = blocking(&n, move |n| {
-        // force: the same trusted path as rynasctl on the console (no address check)
-        let origin = if req.force { Origin::Cli } else { Origin::Web(local) };
-        n.engine.confirm(&req.token, origin)
+        n.engine.confirm(&req.token, Origin::Web(local))
     })
     .await?;
     Ok(Json(NetConfirmed { revision }))

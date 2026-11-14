@@ -543,10 +543,6 @@ pub struct NetApplyStarted {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct NetConfirmRequest {
     pub token: String,
-    /// The administrator chose to keep the change although the request did not come over the new
-    /// network (a VPN, another port): the address check is skipped, the token and deadline apply.
-    #[serde(default)]
-    pub force: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

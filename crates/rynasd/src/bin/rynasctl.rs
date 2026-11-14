@@ -177,6 +177,9 @@ enum NetAction {
         /// `timeout` (the timer), `boot_check` (migration at boot), `manual`.
         #[arg(long, default_value = "manual")]
         reason: String,
+        /// The trial the timer was armed for (its start, in ms): set by the timer itself.
+        #[arg(long)]
+        trial: Option<u64>,
     },
     /// Early boot: undo an interrupted trial, or carry out a migration planned for this boot.
     BootGuard,
@@ -625,13 +628,13 @@ fn net(socket: &PathBuf, state_dir: &std::path::Path, flush: bool, action: NetAc
         let _ = std::io::stdout().flush();
     };
     let result: Result<String, String> = match action {
-        NetAction::Rollback { reason } => {
+        NetAction::Rollback { reason, trial } => {
             use rynas_net::reason as r;
             if ![r::TIMEOUT, r::BOOT_CHECK, r::MANUAL].contains(&reason.as_str()) {
                 eprintln!("rynasctl: unknown reason {reason}");
                 return ExitCode::FAILURE;
             }
-            match e.rollback(&reason, &log) {
+            match e.rollback_trial(&reason, trial, &log) {
                 Ok(Some(r)) if r.verified => Ok(format!(
                     "revision {} restored and verified",
                     r.restored_revision
