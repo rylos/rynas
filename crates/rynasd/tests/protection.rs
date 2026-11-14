@@ -27,6 +27,7 @@ use rynas_tasks::{TaskConfig, TaskManager};
 use rynasd::ops::Ops;
 use rynasd::protection::{Protection, RootBackend};
 use rynasd::roles::AdminPolicy;
+use rynasd::scheduler_live::Demo;
 use rynasd::server::{DaemonState, PeerCred, router};
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -60,6 +61,19 @@ fn env() -> Env {
 }
 
 fn env_with(root_ops: RootBackend, boot: Option<Arc<dyn rynas_btrfs::rootfs::BootSync>>) -> Env {
+    env_inner(root_ops, boot, None)
+}
+
+/// Task runs scripted by `demo` (live output, as on `--dry-system`).
+fn env_live(demo: Arc<Demo>) -> Env {
+    env_inner(RootBackend::None, None, Some(demo))
+}
+
+fn env_inner(
+    root_ops: RootBackend,
+    boot: Option<Arc<dyn rynas_btrfs::rootfs::BootSync>>,
+    demo: Option<Arc<Demo>>,
+) -> Env {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("root");
     std::fs::create_dir_all(&root).unwrap();
@@ -128,6 +142,10 @@ fn env_with(root_ops: RootBackend, boot: Option<Arc<dyn rynas_btrfs::rootfs::Boo
         r.state.lock().unwrap().host_keys = vec!["backup.lan ssh-ed25519 AAAAC3NzaC1lZDI1NTE5".into()];
         r
     });
+    let protection = match demo {
+        Some(d) => protection.with_live_demo(d),
+        None => protection,
+    };
     st.protection = Some(Arc::new(protection));
     Env {
         _dir: dir,
@@ -789,4 +807,184 @@ async fn replica_targets_stage_with_their_job() {
     apply(&e);
     let (_, b) = call(&e, "GET", "/v1/snapshots/replication", None).await;
     assert_eq!(b, b"[]");
+}
+
+/// A manual task "hello" of alice, applied.
+async fn applied_hello(e: &Env) {
+    let hello = json!({"id": "hello", "action": {"kind": "command", "command": "rsync -a --progress /a/ /b/", "user": "alice"},
+        "trigger": {"kind": "manual"}});
+    let (s, b) = call(e, "POST", "/v1/scheduler/tasks", Some(hello)).await;
+    assert_eq!(s, StatusCode::CREATED, "{}", String::from_utf8_lossy(&b));
+    apply(e);
+}
+
+#[tokio::test]
+async fn live_output_follows_a_run_until_it_ends() {
+    let script: Vec<(u64, Vec<u8>)> = vec![
+        (0, b"sending incremental file list".to_vec()),
+        (100, b"     1,024  10%\r    10,240 100% (xfr#1)".to_vec()),
+        (200, b"caf\xe9.png".to_vec()),
+    ];
+    let e = env_live(Arc::new(Demo::with_script(script)));
+    applied_hello(&e).await;
+    // nothing runs: one `end` event and the stream closes (a plain user reads it too, like the
+    // history)
+    let (s, b) = call_as(&e, "bob", "GET", "/v1/scheduler/tasks/hello/live", None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(String::from_utf8_lossy(&b), "event: end\ndata: {\"ran\":false}\n\n");
+    let (s, _) = call(&e, "GET", "/v1/scheduler/tasks/Bad/live", None).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+
+    let (s, _) = call(&e, "POST", "/v1/scheduler/tasks/hello/run", None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (_, b) = call(&e, "GET", "/v1/scheduler/tasks/hello", None).await;
+    assert!(serde_json::from_slice::<TaskView>(&b).unwrap().status.running);
+    // the whole run: `run`, the lines (CR and the replaced byte escaped inside one data line),
+    // then `end`
+    let (s, b) = call_as(&e, "bob", "GET", "/v1/scheduler/tasks/hello/live", None).await;
+    assert_eq!(s, StatusCode::OK);
+    let text = String::from_utf8(b).unwrap();
+    assert!(text.starts_with("event: run\ndata: {\"invocation_id\":\""), "{text}");
+    assert!(text.ends_with("event: end\ndata: {\"ran\":true}\n\n"), "{text}");
+    let mut lines = Vec::new();
+    for frame in text.split("\n\n").filter(|f| f.starts_with("event: lines\n")) {
+        let data: Vec<&str> = frame.lines().filter_map(|l| l.strip_prefix("data: ")).collect();
+        assert_eq!(data.len(), 1, "one data line per event: {frame:?}");
+        lines.extend(serde_json::from_str::<Vec<String>>(data[0]).unwrap());
+    }
+    assert_eq!(
+        lines,
+        ["sending incremental file list", "     1,024  10%\r    10,240 100% (xfr#1)", "caf\u{fffd}.png"]
+    );
+    // the run became a normal history entry
+    let mut runs = Vec::new();
+    for _ in 0..50 {
+        let (_, b) = call(&e, "GET", "/v1/scheduler/tasks/hello/history", None).await;
+        runs = serde_json::from_slice::<Vec<TaskRun>>(&b).unwrap();
+        if runs.first().is_some_and(|r| r.output_bytes > 0) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(runs.len(), 1);
+    assert!(runs[0].ok);
+    let (_, b) = call(&e, "GET", &format!("/v1/scheduler/tasks/hello/history/{}", runs[0].id), None).await;
+    let run: TaskRun = serde_json::from_slice(&b).unwrap();
+    assert!(run.output.unwrap().starts_with("sending incremental file list\n"));
+    let (_, b) = call(&e, "GET", "/v1/scheduler/tasks/hello", None).await;
+    assert!(!serde_json::from_slice::<TaskView>(&b).unwrap().status.running);
+}
+
+/// Processes whose parent is this test process and whose name is `journalctl`, with their
+/// state letter (`Z`: not reaped yet).
+fn journalctl_children() -> Vec<(u32, char)> {
+    let me = std::process::id();
+    let mut out = Vec::new();
+    for e in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let Ok(stat) = std::fs::read_to_string(e.path().join("stat")) else {
+            continue;
+        };
+        // pid (comm) state ppid ...
+        let (Some(open), Some(close)) = (stat.find('('), stat.rfind(')')) else {
+            continue;
+        };
+        let comm = &stat[open + 1..close];
+        let rest: Vec<&str> = stat[close + 1..].split_whitespace().collect();
+        if comm == "journalctl" && rest.get(1).and_then(|p| p.parse::<u32>().ok()) == Some(me) {
+            let pid = stat[..open].trim().parse().unwrap_or(0);
+            out.push((pid, rest[0].chars().next().unwrap_or('?')));
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn closing_the_live_output_kills_journalctl() {
+    use futures_util::StreamExt;
+    if std::process::Command::new("journalctl").arg("--version").output().is_err() {
+        eprintln!("no journalctl here: skipped");
+        return;
+    }
+    let e = env();
+    applied_hello(&e).await;
+    {
+        let mut s = e.probe.state.lock().unwrap();
+        s.running.push("rynas-task-hello.service".into());
+        // an invocation nothing logged under: journalctl waits with --follow
+        s.invocations.insert("rynas-task-hello.service".into(), "0123456789abcdef0123456789abcdef".into());
+        s.starts.insert("rynas-task-hello.service".into(), 1_800_000_000_000);
+    }
+    let req = Request::builder()
+        .uri("/v1/scheduler/tasks/hello/live")
+        .header("x-rynas-user", "bob")
+        .body(Body::empty())
+        .unwrap();
+    let r = e.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(r.headers()[header::CONTENT_TYPE], "text/event-stream");
+    let mut body = r.into_body().into_data_stream();
+    let first = body.next().await.unwrap().unwrap();
+    assert!(String::from_utf8_lossy(&first).starts_with("event: run\n"));
+    // journalctl runs while the stream is open
+    let mut seen = false;
+    for _ in 0..50 {
+        if journalctl_children().iter().any(|(_, st)| *st != 'Z') {
+            seen = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(seen, "journalctl did not start");
+    // the browser goes away: the body is dropped, the child is killed and reaped
+    drop(body);
+    let mut left = journalctl_children();
+    for _ in 0..100 {
+        if left.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        left = journalctl_children();
+    }
+    assert!(left.is_empty(), "journalctl left behind: {left:?}");
+}
+
+#[tokio::test]
+async fn systemd_not_answering_is_not_the_end_of_a_run() {
+    use futures_util::StreamExt;
+    let e = env();
+    applied_hello(&e).await;
+    // at open: `failed`, not "nothing running"
+    e.probe.state.lock().unwrap().current_run_errors = 1;
+    let (s, b) = call_as(&e, "bob", "GET", "/v1/scheduler/tasks/hello/live", None).await;
+    assert_eq!(s, StatusCode::OK);
+    let text = String::from_utf8(b).unwrap();
+    assert!(text.starts_with("event: failed\n"), "{text}");
+    if std::process::Command::new("journalctl").arg("--version").output().is_err() {
+        eprintln!("no journalctl here: the rest is skipped");
+        return;
+    }
+    // while following: failed reads are asked again, the stream ends only when the unit stops
+    {
+        let mut s = e.probe.state.lock().unwrap();
+        s.running.push("rynas-task-hello.service".into());
+        s.invocations.insert("rynas-task-hello.service".into(), "fedcba9876543210fedcba9876543210".into());
+    }
+    let req = Request::builder()
+        .uri("/v1/scheduler/tasks/hello/live")
+        .header("x-rynas-user", "bob")
+        .body(Body::empty())
+        .unwrap();
+    let r = e.app.clone().oneshot(req).await.unwrap();
+    let mut body = r.into_body().into_data_stream();
+    let first = body.next().await.unwrap().unwrap();
+    assert!(String::from_utf8_lossy(&first).starts_with("event: run\n"));
+    e.probe.state.lock().unwrap().current_run_errors = 3;
+    let early = tokio::time::timeout(Duration::from_millis(3500), body.next()).await;
+    assert!(early.is_err(), "the stream ended or sent something while systemd did not answer: {early:?}");
+    e.probe.state.lock().unwrap().running.clear();
+    let mut rest = String::new();
+    while let Ok(Some(Ok(chunk))) = tokio::time::timeout(Duration::from_secs(10), body.next()).await {
+        rest.push_str(&String::from_utf8_lossy(&chunk));
+    }
+    assert!(rest.contains("event: end\ndata: {\"ran\":true}"), "{rest}");
 }

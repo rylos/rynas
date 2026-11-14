@@ -72,6 +72,7 @@ pub fn router(st: ProtState) -> Router {
         .route("/v1/scheduler/tasks/{id}/disable", post(disable))
         .route("/v1/scheduler/tasks/{id}/history", get(history))
         .route("/v1/scheduler/tasks/{id}/history/{n}", get(history_one))
+        .route("/v1/scheduler/tasks/{id}/live", get(live))
         .route("/v1/scheduler/system-timers", get(system_timers))
         .route("/v1/scheduler/cron-entries", get(cron_entries))
         .merge(root_routes())
@@ -477,11 +478,41 @@ async fn run_now(
             .config
             .system()
             .start_unit(&service_name(&id))
-            .map_err(Error::internal)
+            .map_err(Error::internal)?;
+        Ok(id)
     })
-    .await?;
+    .await
+    .map(|id| {
+        // --dry-system: a scripted run stands in for the unit (live output, history)
+        if let Some(d) = &p.live.demo {
+            d.start(p.clone(), &id);
+        }
+    })?;
     p.invalidate();
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Live output of the run going on now (SSE, [`crate::scheduler_live`]): the same read
+/// rights as the history. 429 `rate_limited` over the stream caps.
+async fn live(
+    State(st): State<ProtState>,
+    h: HeaderMap,
+    Path(id): Path<String>,
+) -> Res<Response> {
+    let p = prot(&st)?;
+    check_id(&id)?;
+    // the history needs no user: a caller without one shares a single count
+    let who = user(&h).unwrap_or_default();
+    let slot = p.live.take(&who).ok_or_else(|| {
+        Error::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            error_codes::RATE_LIMITED,
+            "too many live output streams open: close one".into(),
+        )
+    })?;
+    Ok(crate::scheduler_live::stream(p, service_name(&id), slot)
+        .await
+        .into_response())
 }
 
 async fn history(

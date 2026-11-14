@@ -1,6 +1,7 @@
 //! Task Scheduler (D-TASKS; DSM Control Panel › Task Scheduler, OMV Scheduled Jobs): tasks
 //! that rynasd turns into persistent systemd units, with next run, last result, enable/disable,
-//! run now and the run history with its output; a calendar builder with a live preview of the
+//! run now and the run history with its output (and the live output of the run going on now,
+//! [`super::scheduler_live`]); a calendar builder with a live preview of the
 //! next runs (`POST /scheduler/tasks/preview-calendar`); read-only views of the system timers
 //! and crontab entries found on the NAS ("create a task" from a cron line). Writes stage
 //! pending changes (`/config/apply` applies them).
@@ -12,9 +13,10 @@ use leptos::task::spawn_local;
 use rynas_api_types::PendingOp;
 use rynas_api_types::scheduler::{
     CalendarPreview, CalendarPreviewRequest, CalendarSyntax, CronEntry, NotifyPolicy, ScheduledTask, SmartTestKind, SystemTimer, TaskAction,
-    TaskRun, TaskTrigger, TaskView,
+    LiveRun, TaskRun, TaskTrigger, TaskView,
 };
 
+use super::scheduler_live;
 use crate::api;
 use crate::form::{In, area_field, lens, lens_bool, number_field, save_bar, segmented, select_field, switch, tabs, text_field};
 use crate::i18n::{self, t, tf, tr};
@@ -707,7 +709,7 @@ fn tasks_panel(tasks: Remote<Vec<TaskView>>, edit: RwSignal<Option<(ScheduledTas
     view! {
         <div class="toolbar">{crate::form::search_box("sch.search", q)}</div>
         {table}
-        {move || history.get().map(|t| history_drawer(t, Callback::new(move |_| history.set(None))))}
+        {move || history.get().map(|t| history_drawer(t, tasks, Callback::new(move |_| history.set(None))))}
         {deleter}
     }
     .into_any()
@@ -793,8 +795,8 @@ fn task_row(
         }
     });
     let next = st.next_run_ms.map(|m| tf("sch.next", &[("when", &i18n::short_when(m))]));
-    let (t_edit, t_hist) = (task.clone(), task.clone());
-    let (n1, n2, n3, n4, n5) = (name.clone(), name.clone(), name.clone(), name.clone(), name.clone());
+    let (t_edit, t_hist, t_live) = (task.clone(), task.clone(), task.clone());
+    let (n1, n2, n3, n4, n5, n6) = (name.clone(), name.clone(), name.clone(), name.clone(), name.clone(), name.clone());
     let id_d = id.clone();
     ui::row_class(
         vec![
@@ -844,6 +846,12 @@ fn task_row(
                     disabled=move || running.get() || st.running || !st.applied || is_managed on:click=run>
                     <Icon icon=icons::PLAY size=16 />
                 </button>
+                // the run going on now (a timer's too): its output as it comes, in the history drawer
+                {st.running.then(|| view! {
+                    <button class="icon-btn sm" title=tr("sch.live") aria-label=ui::verb_name("sch.live", &n6) on:click=move |_| history.set(Some(t_live.clone()))>
+                        <Icon icon=icons::ACTIVITY size=16 />
+                    </button>
+                })}
                 <button class="icon-btn sm" title=tr("sch.history") aria-label=ui::verb_name("sch.history", &n3) on:click=move |_| history.set(Some(t_hist.clone()))>
                     <Icon icon=icons::HISTORY size=16 />
                 </button>
@@ -1056,7 +1064,7 @@ fn task_editor(init: ScheduledTask, is_new: bool, close: Callback<()>) -> AnyVie
 
 const HISTORY_PAGE: usize = 50;
 
-fn history_drawer(task: ScheduledTask, close: Callback<()>) -> AnyView {
+fn history_drawer(task: ScheduledTask, tasks: Remote<Vec<TaskView>>, close: Callback<()>) -> AnyView {
     let id = task.id.clone();
     let runs = RwSignal::new(None::<Vec<TaskRun>>);
     let err = RwSignal::new(None::<String>);
@@ -1064,6 +1072,12 @@ fn history_drawer(task: ScheduledTask, close: Callback<()>) -> AnyView {
     let selected = RwSignal::new(None::<u64>);
     let output = RwSignal::new(None::<Result<TaskRun, String>>);
     let base = StoredValue::new(format!("/api/v1/scheduler/tasks/{}/history", api::encode(&id)));
+    // the task runs now (the page's list: read every 15 s, and again when a live run ends)
+    let id_r = id.clone();
+    let running = Memo::new(move |_| tasks.data.with(|d| d.iter().flatten().any(|v| v.task.id == id_r && v.status.running)));
+    // the live output is shown (instead of a recorded run): at first when the task runs
+    let live = RwSignal::new(running.get_untracked());
+    let live_run = RwSignal::new(None::<LiveRun>);
     let load = move |before: Option<u64>| {
         let mut url = format!("{}?limit={HISTORY_PAGE}", base.get_value());
         if let Some(b) = before {
@@ -1072,25 +1086,66 @@ fn history_drawer(task: ScheduledTask, close: Callback<()>) -> AnyView {
         spawn_local(async move {
             match api::get::<Vec<TaskRun>>(&url).await {
                 Ok(l) => {
-                    more.set(l.len() >= HISTORY_PAGE);
+                    let _ = more.try_set(l.len() >= HISTORY_PAGE);
                     if before.is_some() {
-                        runs.update(|r| r.get_or_insert_with(Vec::new).extend(l));
+                        runs.try_update(|r| r.get_or_insert_with(Vec::new).extend(l));
                     } else {
-                        if selected.get_untracked().is_none()
+                        if selected.try_get_untracked().flatten().is_none()
+                            && live.try_get_untracked() == Some(false)
                             && let Some(first) = l.first()
                         {
                             open_run(base.get_value(), first.id, selected, output);
                         }
-                        runs.set(Some(l));
+                        let _ = runs.try_set(Some(l));
                     }
-                    err.set(None);
+                    let _ = err.try_set(None);
                 }
                 Err(e) if e.status() == 401 => {}
-                Err(e) => err.set(Some(e.code().to_string())),
+                Err(e) => {
+                    let _ = err.try_set(Some(e.code().to_string()));
+                }
             }
         });
     };
     load(None);
+    // the live run ended: it becomes the newest history entry (recorded by the unit's last
+    // step, its output copied a moment later); nothing was running: the newest entry
+    let after_live = Callback::new(move |ran: bool| {
+        tasks.reload();
+        let inv = live_run.get_untracked().map(|r| r.invocation_id);
+        spawn_local(async move {
+            let url = format!("{}?limit={HISTORY_PAGE}", base.get_value());
+            for attempt in 0..5u32 {
+                if ran {
+                    api::sleep(if attempt == 0 { 1200 } else { 1000 }).await;
+                }
+                let Ok(l) = api::get::<Vec<TaskRun>>(&url).await else { continue };
+                let newest = l.first().cloned();
+                let ready = newest.as_ref().is_some_and(|r| inv.as_deref().is_none_or(|i| r.invocation_id == i) && (r.output_bytes > 0 || attempt >= 3));
+                if ran && !ready && attempt < 4 {
+                    continue;
+                }
+                let _ = more.try_set(l.len() >= HISTORY_PAGE);
+                let _ = runs.try_set(Some(l));
+                if let Some(r) = newest {
+                    if let Ok(full) = api::get::<TaskRun>(&format!("{}/{}", base.get_value(), r.id)).await {
+                        let _ = output.try_set(Some(Ok(full)));
+                    }
+                    let _ = selected.try_set(Some(r.id));
+                }
+                break;
+            }
+            let _ = live.try_set(false);
+        });
+    });
+    let show_live = move |_| {
+        // already shown: setting it again would rebuild the view and restart its stream
+        if live.get_untracked() {
+            return;
+        }
+        selected.set(None);
+        live.set(true);
+    };
     let list = move || {
         if runs.with(Option::is_none) {
             return match err.get() {
@@ -1099,33 +1154,56 @@ fn history_drawer(task: ScheduledTask, close: Callback<()>) -> AnyView {
             };
         }
         let l = runs.get().unwrap_or_default();
-        if l.is_empty() {
+        let now = running.get() || live.get();
+        if l.is_empty() && !now {
             return view! { <EmptyState icon=icons::HISTORY title=Signal::derive(|| t("sch.no_runs").to_string()) text=Signal::derive(|| t("sch.no_runs_text").to_string()) /> }.into_any();
         }
+        // the run going on now, first: its live output
+        let current = now.then(|| {
+            ui::row_flag(
+                vec![
+                    ui::cell("sch.col.started", "tnum", view! { {move || live_run.get().and_then(|r| r.start_ms).map(i18n::datetime).unwrap_or_else(|| ui::DASH.to_string())} }.into_any()),
+                    ui::cell("sch.col.duration", "num tnum", view! { {ui::DASH} }.into_any()),
+                    ui::cell("sch.col.result", "", ui::status(Tone::Info, t("sch.running").to_string())),
+                    ui::actions(view! {
+                        <button class="icon-btn sm" title=tr("sch.live") aria-label=tr("sch.live") aria-pressed=move || live.get().to_string() on:click=show_live>
+                            <Icon icon=icons::ACTIVITY size=16 />
+                        </button>
+                    }
+                    .into_any()),
+                ],
+                "selected",
+                Signal::derive(move || live.get()),
+            )
+        });
+        let rows = current.into_iter().chain(l.into_iter().map(|r| {
+            let rid = r.id;
+            let (tone, text) = run_status(&r);
+            let started = r.start_ms.unwrap_or(r.end_ms);
+            let dur = r.start_ms.map(|s| i18n::elapsed(r.end_ms.saturating_sub(s) / 1000)).unwrap_or_default();
+            let label = format!("{}: {}", t("sch.show_output"), i18n::datetime(started));
+            ui::row_flag(
+                vec![
+                    ui::cell("sch.col.started", "tnum", view! { {i18n::datetime(started)} }.into_any()),
+                    ui::cell("sch.col.duration", "num tnum", view! { {dur} }.into_any()),
+                    ui::cell("sch.col.result", "", view! { {ui::status(tone, text)} }.into_any()),
+                    ui::actions(view! {
+                        <button class="icon-btn sm" title=tr("sch.show_output") aria-label=label aria-pressed=move || (selected.get() == Some(rid)).to_string()
+                            on:click=move |_| {
+                                live.set(false);
+                                open_run(base.get_value(), rid, selected, output);
+                            }>
+                            <Icon icon=icons::FILE_TEXT size=16 />
+                        </button>
+                    }
+                    .into_any()),
+                ],
+                "selected",
+                Signal::derive(move || !live.get() && selected.get() == Some(rid)),
+            )
+        }));
         view! {
-            {ui::table("", &["sch.col.started", "#sch.col.duration", "sch.col.result", ""], l.into_iter().map(|r| {
-                            let rid = r.id;
-                            let (tone, text) = run_status(&r);
-                            let started = r.start_ms.unwrap_or(r.end_ms);
-                            let dur = r.start_ms.map(|s| i18n::elapsed(r.end_ms.saturating_sub(s) / 1000)).unwrap_or_default();
-                            let label = format!("{}: {}", t("sch.show_output"), i18n::datetime(started));
-                            ui::row_flag(
-                                vec![
-                                    ui::cell("sch.col.started", "tnum", view! { {i18n::datetime(started)} }.into_any()),
-                                    ui::cell("sch.col.duration", "num tnum", view! { {dur} }.into_any()),
-                                    ui::cell("sch.col.result", "", view! { {ui::status(tone, text)} }.into_any()),
-                                    ui::actions(view! {
-                                        <button class="icon-btn sm" title=tr("sch.show_output") aria-label=label aria-pressed=move || (selected.get() == Some(rid)).to_string()
-                                            on:click=move |_| open_run(base.get_value(), rid, selected, output)>
-                                            <Icon icon=icons::FILE_TEXT size=16 />
-                                        </button>
-                                    }
-                                    .into_any()),
-                                ],
-                                "selected",
-                                Signal::derive(move || selected.get() == Some(rid)),
-                            )
-                        }).collect::<Vec<_>>())}
+            {ui::table("", &["sch.col.started", "#sch.col.duration", "sch.col.result", ""], rows.collect::<Vec<_>>())}
             <Show when=move || more.get()>
                 <div class="load-more">
                     <button class="btn ghost sm" on:click=move |_| load(runs.with_untracked(|r| r.as_ref().and_then(|l| l.last().map(|x| x.id))))>{tr("nt.load_more")}</button>
@@ -1134,10 +1212,24 @@ fn history_drawer(task: ScheduledTask, close: Callback<()>) -> AnyView {
         }
         .into_any()
     };
+    // the live view is built once per opening (its stream lives with it)
+    let id_l = id.clone();
+    let live_part = move || {
+        live.get().then(|| {
+            view! {
+                <h3 class="mini-title">{tr("sch.live")}{move || live_run.get().and_then(|r| r.start_ms).map(|s| format!(" · {}", i18n::datetime(s)))}</h3>
+                {scheduler_live::live_view(&id_l, Callback::new(move |r| live_run.set(Some(r))), after_live)}
+            }
+        })
+    };
     let out = move || {
+        if live.get() {
+            return None;
+        }
         output.get().map(|o| match o {
             Ok(r) => {
-                let text = r.output.clone().unwrap_or_default();
+                // as a terminal shows it: a carriage return rewrites its line (rsync -P, curl)
+                let text: String = r.output.as_deref().unwrap_or_default().lines().map(|l| scheduler_live::shown_line(l) + "\n").collect();
                 view! {
                     <h3 class="mini-title">{tr("sch.output")}" · "{i18n::datetime(r.start_ms.unwrap_or(r.end_ms))}</h3>
                     {r.output_truncated.then(|| view! { <p class="field-help">{tf("sch.truncated", &[("size", &i18n::bytes(r.output_bytes))])}</p> })}
@@ -1152,7 +1244,7 @@ fn history_drawer(task: ScheduledTask, close: Callback<()>) -> AnyView {
         let n = if task.name.is_empty() { task.id.clone() } else { task.name.clone() };
         Signal::stored(tf("sch.history_title", &[("name", &n)]))
     };
-    let body = view! { {list}{out} }.into_any();
+    let body = view! { {list}{live_part}{out} }.into_any();
     let foot = ui::close_foot(close);
     view! { {ui::drawer_wide(title, close, body, foot)} }.into_any()
 }

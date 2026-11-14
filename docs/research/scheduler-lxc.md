@@ -126,6 +126,12 @@ Task Scheduler                       [+ Create ▾] [Import cron]   Search…
  History  Nov 5 02:31  ✗ exit 23  1m12s  [log]   Nov 4 02:30 ✓ 58s [log]
 ```
 
+**Landed (2026-11-14, issue #12): live output of a running task.** The output of the current
+invocation is streamed from the journal (`_SYSTEMD_INVOCATION_ID=`) as server-sent events while
+the unit runs, timer runs included, and becomes the normal history entry when it ends. Design,
+events, caps and the journald `\r` limitation are in `docs/phase1/plan.md` ("Live output" under
+the Task Scheduler API).
+
 ### 1.7 Phases
 - **Phase 1**: systemd engine, internal tasks (snapshots, scrub, SMART) and user tasks with calendar and boot triggers, run now, history, notifications, admin only, read-only view of cron and system timers.
 - **Phase 2**: shutdown and event triggers, resource limits and sandboxing from the UI, cron conversion, tasks for non-admin users, `LoadCredential`.

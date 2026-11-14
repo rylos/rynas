@@ -872,6 +872,8 @@ fn main() -> std::io::Result<()> {
         } else {
             rynasd::protection::RootBackend::Host
         })
+        // task runs: systemd and the journal, or (--dry-system) scripted runs with live output
+        .with_live_demo_if(args.dry_system)
         .with_replicas(if args.dry_system {
             Arc::new(rynas_btrfs::replication::MemoryReplicas::new())
         } else {

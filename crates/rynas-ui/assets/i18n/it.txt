@@ -2303,6 +2303,16 @@ sch.show_output	Mostra output
 sch.output	Output
 sch.no_output	(nessun output)
 sch.truncated	Dell'output vengono conservati solo gli ultimi {size}.
+sch.live	Output in diretta
+sch.live.follow	Segui
+sch.live.connecting	Connessione
+sch.live.following	In diretta
+sch.live.ended	L'esecuzione è terminata
+sch.live.idle	Nessuna esecuzione in corso
+sch.live.failed	Impossibile leggere l'output: {why}
+sch.live.waiting	In attesa dell'output…
+sch.live.cr_note	Una riga che si riscrive (rsync -P, curl) mostra il suo ultimo stato quando finisce.
+sch.live.dropped	Le righe precedenti non sono mostrate qui: la cronologia conserva la parte finale dell'output.
 sch.run.ok	Riuscita
 sch.run.failed	Non riuscita
 sch.run.timeout	Tempo scaduto

@@ -46,9 +46,48 @@ pub trait SystemdProbe: Send + Sync {
     /// Asks journald to process and write what it received so far (before reading the
     /// output of a run that just ended).
     fn sync_journal(&self) {}
+    /// The invocation of `unit` that runs now (active, activating, deactivating or
+    /// reloading); `Ok(None)` when the unit is not running, `Err` when systemd did not answer
+    /// (the caller asks again later rather than taking it for "stopped").
+    fn current_run(&self, unit: &str) -> Result<Option<CurrentRun>, String>;
+}
+
+/// The running invocation of a unit.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CurrentRun {
+    pub invocation_id: String,
+    /// When its main process started.
+    pub start_ms: Option<u64>,
+}
+
+/// Parses `systemctl show --timestamp=unix -p ActiveState -p InvocationID -p
+/// ExecMainStartTimestamp <unit>`: the current run, if the unit is running and has an
+/// invocation id.
+pub fn parse_current_run(out: &str) -> Option<CurrentRun> {
+    let (mut active, mut id, mut start) = (false, None, None);
+    for line in out.lines() {
+        if let Some(v) = line.strip_prefix("ActiveState=") {
+            active = matches!(v.trim(), "active" | "activating" | "deactivating" | "reloading");
+        } else if let Some(v) = line.strip_prefix("InvocationID=") {
+            id = Some(v.trim().to_string()).filter(|v| crate::live::valid_invocation_id(v));
+        } else if let Some(v) = line.strip_prefix("ExecMainStartTimestamp=") {
+            start = v
+                .trim()
+                .strip_prefix('@')
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|s| s * 1000);
+        }
+    }
+    active.then_some(())?;
+    Some(CurrentRun {
+        invocation_id: id?,
+        start_ms: start,
+    })
 }
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Limit of [`SystemdProbe::current_run`] on the host.
+const CURRENT_RUN_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// The real systemd.
 pub struct HostProbe;
@@ -258,6 +297,32 @@ impl SystemdProbe for HostProbe {
             tracing::debug!("journalctl --sync: {e}");
         }
     }
+
+    fn current_run(&self, unit: &str) -> Result<Option<CurrentRun>, String> {
+        // short: a live output stream asks every second and must not wait long on a busy
+        // systemd (it asks again at the next tick)
+        let o = Cmd::new("systemctl").args([
+            "show",
+            "--no-pager",
+            "--timestamp=unix",
+            "-p",
+            "ActiveState",
+            "-p",
+            "InvocationID",
+            "-p",
+            "ExecMainStartTimestamp",
+            "--",
+            unit,
+        ])
+        .env_clear()
+        .timeout(CURRENT_RUN_TIMEOUT)
+        .output_blocking()
+        .map_err(|e| format!("systemctl show: {e}"))?;
+        if !o.success() {
+            return Err(format!("systemctl show: {}", o.stderr.trim()));
+        }
+        Ok(parse_current_run(&o.stdout))
+    }
 }
 
 /// Tests: canned answers.
@@ -273,6 +338,10 @@ pub struct FakeProbeState {
     pub running: Vec<String>,
     pub journals: HashMap<String, String>,
     pub starts: HashMap<String, u64>,
+    /// Invocation id of each running unit (only units also in `running` count).
+    pub invocations: HashMap<String, String>,
+    /// The next this many `current_run` calls fail.
+    pub current_run_errors: u32,
     /// Expressions reported invalid.
     pub invalid: Vec<String>,
 }
@@ -318,6 +387,21 @@ impl SystemdProbe for FakeProbe {
             max_bytes,
         ))
     }
+
+    fn current_run(&self, unit: &str) -> Result<Option<CurrentRun>, String> {
+        let mut s = self.state.lock().unwrap();
+        if s.current_run_errors > 0 {
+            s.current_run_errors -= 1;
+            return Err("systemd did not answer".into());
+        }
+        if !s.running.iter().any(|u| u == unit) {
+            return Ok(None);
+        }
+        Ok(s.invocations.get(unit).map(|id| CurrentRun {
+            invocation_id: id.clone(),
+            start_ms: s.starts.get(unit).copied(),
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -353,5 +437,16 @@ mod tests {
         assert_eq!(t.text, "line three\n");
         let t = tail("ééééé", 3);
         assert!(t.truncated && t.text.len() <= 3);
+    }
+
+    #[test]
+    fn parses_the_current_run() {
+        let out = "ActiveState=active\nInvocationID=491bde0fd72e4dfda8e2b8739f61bce5\nExecMainStartTimestamp=@1794628353\n";
+        let r = parse_current_run(out).unwrap();
+        assert_eq!(r.invocation_id, "491bde0fd72e4dfda8e2b8739f61bce5");
+        assert_eq!(r.start_ms, Some(1_794_628_353_000));
+        assert!(parse_current_run(&out.replace("=active", "=inactive")).is_none());
+        assert!(parse_current_run("ActiveState=active\nInvocationID=\n").is_none());
+        assert!(parse_current_run("ActiveState=deactivating\nInvocationID=ab12\nExecMainStartTimestamp=\n").is_some_and(|r| r.start_ms.is_none()));
     }
 }

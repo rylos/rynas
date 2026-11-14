@@ -179,6 +179,8 @@ pub fn routes() -> Router<AppState> {
         .route("/scheduler/tasks/{id}/disable", post(forward))
         .route("/scheduler/tasks/{id}/history", get(forward))
         .route("/scheduler/tasks/{id}/history/{n}", get(forward))
+        // live output of the running invocation: SSE, counted like /events (crate::streams)
+        .route("/scheduler/tasks/{id}/live", get(forward))
         .route("/scheduler/system-timers", get(forward))
         .route("/scheduler/cron-entries", get(forward))
         .route("/snapshots", get(forward))

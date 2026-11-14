@@ -44,6 +44,8 @@ pub struct Protection {
     runtime: Mutex<Option<(Instant, u64, Arc<Runtime>)>>,
     /// One runtime read at a time.
     runtime_flight: tokio::sync::Mutex<()>,
+    /// Live output streams of running tasks ([`crate::scheduler_live`]).
+    pub live: Arc<crate::scheduler_live::Live>,
 }
 
 /// What systemd says about the task units now.
@@ -112,6 +114,23 @@ impl Protection {
             replicas: Arc::new(rynas_btrfs::replication::MemoryReplicas::new()),
             runtime: Mutex::new(None),
             runtime_flight: tokio::sync::Mutex::new(()),
+            live: Arc::new(crate::scheduler_live::Live::default()),
+        }
+    }
+
+    /// `--dry-system` (and tests): task runs come from scripted runs, not from systemd and
+    /// the journal ([`crate::scheduler_live::Demo`]).
+    pub fn with_live_demo(mut self, demo: Arc<crate::scheduler_live::Demo>) -> Self {
+        self.live = Arc::new(crate::scheduler_live::Live::default().with_demo(demo));
+        self
+    }
+
+    /// [`Protection::with_live_demo`] with the default script when `dry`.
+    pub fn with_live_demo_if(self, dry: bool) -> Self {
+        if dry {
+            self.with_live_demo(Arc::new(crate::scheduler_live::Demo::default()))
+        } else {
+            self
         }
     }
 
@@ -150,10 +169,13 @@ impl Protection {
                 tracing::warn!("systemd timers: {e}");
                 Vec::new()
             });
-            let running = p.probe.running_tasks().unwrap_or_else(|e| {
+            let mut running = p.probe.running_tasks().unwrap_or_else(|e| {
                 tracing::warn!("systemd units: {e}");
                 Vec::new()
             });
+            if let Some(d) = &p.live.demo {
+                running.extend(d.running());
+            }
             Runtime { timers, running }
         })
         .await

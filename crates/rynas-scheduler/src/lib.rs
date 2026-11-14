@@ -7,6 +7,7 @@
 //! - [`calendar`]: `OnCalendar=` checks, cron conversion, `systemd-analyze` output;
 //! - [`probe`]: read-only systemd questions (timers, journal) behind a trait;
 //! - [`history`]: the run history (SQLite) fed by `rynasctl task-finished`;
+//! - [`live`]: the live output of a running task (journal entries, event data);
 //! - [`cron`]: read-only listing of crontab entries.
 //!
 //! Run notifications (per-task policy) are emitted by rynasd through `rynas_notify::Notifier`.
@@ -15,6 +16,7 @@ pub mod calendar;
 pub mod cron;
 pub mod domain;
 pub mod history;
+pub mod live;
 pub mod probe;
 pub mod units;
 

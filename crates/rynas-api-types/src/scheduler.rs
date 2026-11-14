@@ -229,6 +229,35 @@ pub struct TaskRun {
     pub output: Option<String>,
 }
 
+/// Live output of the running invocation (`GET /api/v1/scheduler/tasks/{id}/live`, SSE):
+/// first event `run`, data [`LiveRun`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct LiveRun {
+    /// systemd invocation id of the run being followed.
+    pub invocation_id: String,
+    #[serde(default)]
+    pub start_ms: Option<u64>,
+}
+
+/// Last event of a live output stream (`end`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct LiveEnd {
+    /// `false`: nothing was running when the stream opened.
+    pub ran: bool,
+}
+
+/// Event names of the live output stream. `lines` carries a JSON array of strings: one
+/// journal entry each (one output line without its newline, carriage returns kept, bytes
+/// that are not UTF-8 replaced by U+FFFD).
+pub mod live_event {
+    pub const RUN: &str = "run";
+    pub const LINES: &str = "lines";
+    pub const END: &str = "end";
+    /// The journal could not be read (data `{"message": …}`); the stream ends after it.
+    /// (Not `error`: that name is the browser's own connection error event.)
+    pub const FAILED: &str = "failed";
+}
+
 /// `POST /api/v1/scheduler/tasks/preview-calendar`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CalendarPreviewRequest {

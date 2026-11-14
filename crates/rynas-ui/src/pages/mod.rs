@@ -9,6 +9,7 @@ pub mod files;
 pub mod hardware;
 pub mod notifications;
 pub mod scheduler;
+pub mod scheduler_live;
 pub mod memory;
 pub mod processes;
 pub mod network;

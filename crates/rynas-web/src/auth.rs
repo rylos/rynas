@@ -109,9 +109,10 @@ fn bad_json(e: JsonRejection) -> Error {
 }
 
 /// Whether a request renews the session's idle timeout: not for event streams (metrics,
-/// tasks, events) nor for requests the client marks as background ([`BACKGROUND_HEADER`]).
+/// tasks, events, the live output of a scheduled task) nor for requests the client marks as
+/// background ([`BACKGROUND_HEADER`]).
 pub fn renews_idle(path: &str, headers: &HeaderMap) -> bool {
-    let stream = path.ends_with("/stream") || path.ends_with("/events");
+    let stream = path.ends_with("/stream") || path.ends_with("/events") || path.ends_with("/live");
     let background = headers
         .get(BACKGROUND_HEADER)
         .is_some_and(|v| v.as_bytes() == b"1");
@@ -454,5 +455,19 @@ mod tests {
             assert_eq!(status(true, Method::GET, p).await, StatusCode::OK);
         }
         assert!(is_admin(Role::Admin));
+    }
+
+    #[test]
+    fn event_streams_do_not_keep_a_session_alive() {
+        let none = HeaderMap::new();
+        for p in ["/api/v1/events", "/api/v1/metrics/stream", "/api/v1/tasks/stream", "/api/v1/scheduler/tasks/backup/live"] {
+            assert!(!renews_idle(p, &none), "{p}");
+        }
+        for p in ["/api/v1/scheduler/tasks/backup/history", "/api/v1/scheduler/tasks", "/api/v1/system"] {
+            assert!(renews_idle(p, &none), "{p}");
+        }
+        let mut bg = HeaderMap::new();
+        bg.insert(BACKGROUND_HEADER, HeaderValue::from_static("1"));
+        assert!(!renews_idle("/api/v1/system", &bg));
     }
 }
