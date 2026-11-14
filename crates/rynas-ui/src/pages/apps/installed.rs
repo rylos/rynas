@@ -10,7 +10,7 @@ use rynas_api_types::docker::{DockerSettingsState, StackSnapshot};
 
 use super::{AppDetail, app_icon, apps, open_href};
 use crate::api;
-use crate::form::{form_error, spinner, switch};
+use crate::form::{SaveBar, save_bar_with, switch};
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::pages::docker::{launch, reason_key, state_pill};
@@ -39,7 +39,7 @@ fn state_view(a: &InstalledApp) -> AnyView {
 
 fn open_link(a: &InstalledApp) -> Option<AnyView> {
     open_href(a).map(|href| {
-        let label = format!("{}: {}", t("dk.open_web"), a.name);
+        let label = ui::verb_name("dk.open_web", &a.name);
         view! { <a class="chip accent" href=href target="_blank" rel="noopener noreferrer" aria-label=label><Icon icon=icons::EXTERNAL_LINK size=12 />{tr("dk.open_web")}</a> }.into_any()
     })
 }
@@ -70,8 +70,8 @@ pub fn panel() -> AnyView {
             .into_iter()
             .map(|x| {
                 let (s1, s2, s3) = (x.stack.clone(), x.stack.clone(), x.stack.clone());
-                let label = format!("{}: {}", t("apps.details"), x.name);
-                let up_label = format!("{}: {}", t("apps.update"), x.name);
+                let label = ui::verb_name("apps.details", &x.name);
+                let up_label = ui::verb_name("apps.update", &x.name);
                 ui::row(vec![
                     ui::cell("apps.col.app", "", view! {
                         <div class="app-row-name">
@@ -82,7 +82,7 @@ pub fn panel() -> AnyView {
                             </div>
                         </div>
                     }.into_any()),
-                    ui::cell("col.status", "", view! { <div class="chips">{state_view(&x)}<span class="small muted tnum">{format!("{} / {}", x.running, x.containers)}</span></div> }.into_any()),
+                    ui::cell("col.status", "", view! { <div class="chips">{state_view(&x)}<span class="small muted tnum">{i18n::of(&x.running.to_string(), &x.containers.to_string())}</span></div> }.into_any()),
                     ui::cell("apps.col.version", "", view! {
                         <div class="cell-main">
                             <span class="tnum">{x.app_version.clone()}</span>
@@ -133,7 +133,7 @@ pub fn updates() -> AnyView {
             .map(|x| {
                 let (s1, s2) = (x.stack.clone(), x.stack.clone());
                 let on = Signal::derive(move || picked.with(|p| p.contains(&s1)));
-                let label = format!("{}: {}", t("apps.upd.pick"), x.name);
+                let label = ui::verb_name("apps.upd.pick", &x.name);
                 ui::row(vec![
                     ui::cell("apps.upd.pick", "", view! {
                         <input type="checkbox" class="row-check" aria-label=label prop:checked=on on:change=move |ev| {
@@ -351,12 +351,12 @@ fn update_dialog(stack: String, close: Callback<()>) -> AnyView {
         let body = AppUpdateRequest { answers, snapshot: Some(snap.get_untracked() && can_snap), stop_first: Some(stop.get_untracked()) };
         launch(inst_url(&n.get_value(), "/update"), serde_json::to_string(&body).ok(), busy, error, close);
     };
-    let foot = view! {
-        {form_error(error)}
-        <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("cancel")}</button>
-        <button type="button" class="btn primary" disabled=move || busy.get() || blocked.get() on:click=go>{spinner(busy)}<Icon icon=icons::DOWNLOAD size=16 />{tr("apps.update")}</button>
-    }
-    .into_any();
+    let foot = save_bar_with(SaveBar {
+        can_save: Signal::derive(move || !blocked.get()),
+        icon: Some(icons::DOWNLOAD),
+        error: Some(error),
+        ..SaveBar::new(busy, "apps.update", close, Callback::new(go))
+    });
     let body = view! { {move || plan.view(6, content)} }.into_any();
     ui::dialog(DlgKind::Wide, Signal::stored(tf("dk.upd.title", &[("name", &stack)])), close, body, Some(foot))
 }
@@ -417,14 +417,13 @@ pub fn drawer(stack: String) -> AnyView {
                 {ui::kv_row("apps.w.folder", Signal::stored(x.stack_dir.clone()), "mono")}
                 {ui::kv_row("apps.inst.catalog", Signal::stored(x.catalog.clone()), "mono")}
                 {x.web_url.clone().map(|u| ui::kv_row("apps.w.address", Signal::stored(u), "mono"))}
-                {ui::kv_row("dk.col.running", Signal::stored(format!("{} / {}", x.running, x.containers)), "tnum")}
+                {ui::kv_row("dk.col.running", Signal::stored(i18n::of(&x.running.to_string(), &x.containers.to_string())), "tnum")}
             </dl>
             <div class="sec-actions">
                 {x.update_available.then(|| view! { <button class="btn primary sm" on:click=move |_| ask.set(Some(Ask::Update))><Icon icon=icons::DOWNLOAD size=14 />{tr("apps.update")}</button> })}
                 {can_proxy.then(|| view! { <button class="btn ghost sm" on:click=move |_| ask.set(Some(Ask::Proxy))><Icon icon=icons::SHIELD_CHECK size=14 />{tr("apps.proxy")}</button> })}
                 <a class="btn ghost sm" href=docker_href><Icon icon=icons::CONTAINER size=14 />{tr("apps.in_docker")}</a>
                 <button class="btn ghost sm" on:click=move |_| ask.set(Some(Ask::Convert))><Icon icon=icons::LAYERS size=14 />{tr("apps.convert")}</button>
-                <button class="btn ghost sm danger-text" on:click=move |_| ask.set(Some(Ask::Uninstall))><Icon icon=icons::TRASH_2 size=14 />{tr("apps.uninstall")}</button>
             </div>
             <div class="mini-title">{tr("dk.snap.title")}</div>
             {if !x.snapshots {
@@ -432,15 +431,18 @@ pub fn drawer(stack: String) -> AnyView {
             } else if has_snaps {
                 ui::table("", &["dk.col.created", "dk.col.images", ""], snaps)
             } else {
-                view! { <p class="muted small">{tr("apps.inst.no_snaps")}</p> }.into_any()
+                ui::empty_line("apps.inst.no_snaps")
             }}
         }
         .into_any()
     };
     let dialogs = move || ask.get().map(|q| ask_dialog(q, n.get_value(), ask, close, d));
     let body = view! { {move || d.view(8, content)} {dialogs} }.into_any();
-    let foot = view! { <button type="button" class="btn primary" on:click=move |_| close.run(())>{tr("close")}</button> }.into_any();
-    ui::drawer(Signal::stored(tf("apps.inst.title", &[("name", &stack)])), close, body, foot)
+    let uninstall = ui::Danger {
+        disabled: Signal::derive(move || !d.ready()),
+        ..ui::Danger::new("apps.uninstall", Callback::new(move |_| ask.set(Some(Ask::Uninstall))))
+    };
+    ui::detail_drawer(Signal::stored(tf("apps.inst.title", &[("name", &stack)])), close, false, body, Some(uninstall), None)
 }
 
 fn ask_dialog(q: Ask, stack: String, ask: RwSignal<Option<Ask>>, close_drawer: Callback<()>, d: Remote<InstalledAppDetail>) -> AnyView {

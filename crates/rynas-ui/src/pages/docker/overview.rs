@@ -37,7 +37,7 @@ pub fn panel() -> AnyView {
             {move || running.get().then(storage_card)}
             {managers_card()}
             <section class="card widget w-12">
-                <WidgetHead icon=icons::SETTINGS_2 title="dk.set.title" />
+                <WidgetHead icon=icons::SETTINGS title="dk.set.title" />
                 <p class="muted small">{tr("dk.set.text")}</p>
                 {move || settings.gate(6).unwrap_or_else(|| {
                     let s = settings.data.get_untracked().unwrap_or_default();
@@ -89,7 +89,7 @@ fn engine_card() -> AnyView {
             </WidgetHead>
             <dl class="kvs">
                 {kv_row("dk.eng.version", f(|s| match (&s.version, &s.api_version) {
-                    (Some(v), Some(a)) => tf("dk.eng.version_api", &[("v", v), ("api", a), ("min", s.min_api_version.as_deref().unwrap_or("—"))]),
+                    (Some(v), Some(a)) => tf("dk.eng.version_api", &[("v", v), ("api", a), ("min", s.min_api_version.as_deref().unwrap_or(ui::DASH))]),
                     (v, _) => opt(v),
                 }), "mono")}
                 {kv_row("dk.eng.source", f(|s| t(source_key(s.source)).to_string()), "")}

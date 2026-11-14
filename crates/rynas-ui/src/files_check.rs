@@ -106,6 +106,31 @@ fn files_texts_are_translated() {
     assert!(missing.is_empty(), "texts of the file manager without English: {missing:#?}");
 }
 
+/// The File app writes durations, relative times and ratios with the same unit words and
+/// templates as the core (`i18n::duration`, `elapsed`, `approx`, `ago`, `of`): its Italian key
+/// is the core's Italian text and its English the core's English.
+#[test]
+fn files_formats_match_core() {
+    use crate::i18n::{Lang, text_in};
+    const PAIRS: &[(&str, &str)] = &[
+        ("dur.d", "{d} g"),
+        ("dur.h", "{h} h"),
+        ("dur.m", "{m} min"),
+        ("dur.s", "{s} s"),
+        ("dur.hm", "{h} h {m} min"),
+        ("dur.ms", "{m} min {s} s"),
+        ("fmt.ago", "{time} fa"),
+        ("fmt.of", "{part} di {total}"),
+    ];
+    let en = english();
+    let used: std::collections::HashSet<String> = keys().into_iter().map(|(_, k)| k).collect();
+    for (core, files) in PAIRS {
+        assert_eq!(text_in(Lang::It, core), Some(*files), "{core}: Italian differs from the File app");
+        assert_eq!(text_in(Lang::En, core), en.get(*files).map(String::as_str), "{core}: English differs from the File app");
+        assert!(used.contains(*files), "{files}: not used by the File app any more");
+    }
+}
+
 /// G8c and the neutral product rule: no other NAS system or its apps named in any text, Italian
 /// or English (DSM's own folder names such as `@eaDir` are file names, not texts).
 #[test]

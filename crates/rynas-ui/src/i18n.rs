@@ -1,14 +1,16 @@
 //! Tiny i18n: English (default, source language and fallback) and Italian, plus
-//! number/byte/duration formatting.
+//! number/byte/date/duration formatting in one locale for the whole interface.
 //!
 //! The language lives in a signal, so `t()` called inside a reactive closure re-renders when the
 //! user switches language. Preference: localStorage `rynas.lang` ("en", "it" or absent = browser:
-//! Italian when the browser asks for it, English otherwise).
+//! Italian when the browser asks for it, English otherwise). The locale (`en-GB`, `en-US`,
+//! `it-IT`…) comes from the language and the browser's own tags ([`locale`]); the time format
+//! preference is localStorage `rynas.hour` ("h23", "h12" or absent = the locale's).
 //!
 //! Italian wording uses the common NAS vocabulary (archiviazione, cartella condivisa, volume,
 //! integro/degradato…); no product or app names of other systems (test `no_other_products`).
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 use leptos::prelude::*;
 
@@ -59,13 +61,24 @@ pub fn init() {
         Some("it") => Lang::It,
         _ => browser_lang(),
     };
+    hour_sig().set(HourCycle::from_code(&storage_get("rynas.hour").unwrap_or_default()));
+    publish(lang);
     sig().set(lang);
-    apply_html_lang(lang);
 }
 
-fn apply_html_lang(lang: Lang) {
+/// Works out the locale of `lang` and publishes it with the time format preference on
+/// `<html lang>` and `<html data-hour-cycle>` (absent = the locale's), where the File app
+/// reads them.
+fn publish(lang: Lang) {
+    let loc = locale_for(lang, &browser_tags());
+    LOCALE.with(|l| *l.borrow_mut() = loc.clone());
     if let Some(el) = document().document_element() {
-        let _ = el.set_attribute("lang", lang.code());
+        // the hour cycle first: the File app follows both on the change of `lang`
+        let _ = match hour_sig().get_untracked() {
+            HourCycle::Auto => el.remove_attribute("data-hour-cycle"),
+            h => el.set_attribute("data-hour-cycle", h.code()),
+        };
+        let _ = el.set_attribute("lang", &loc);
     }
 }
 
@@ -82,8 +95,9 @@ pub fn lang() -> Lang {
 pub fn set_lang(lang: Option<Lang>) {
     let l = lang.unwrap_or_else(browser_lang);
     storage_set("rynas.lang", lang.map(Lang::code).unwrap_or(""));
+    // the locale before the signal: what re-renders formats with the new one
+    publish(l);
     sig().set(l);
-    apply_html_lang(l);
     if l == Lang::It {
         // English meanwhile; the texts switch when the file is there
         load_italian(italian_arrived);
@@ -897,8 +911,8 @@ dict! { BLOB, LENS, IT;
     "cfg.key.network.rescue" => "Network rescue", "Ripristino di emergenza della rete";
     "cfg.key.storage.volumes" => "Volumes", "Volumi";
     "cfg.key.storage.disks" => "Disk settings", "Impostazioni dischi";
-    "pending.changes" => "pending changes", "modifiche in sospeso";
-    "pending.one" => "pending change", "modifica in sospeso";
+    "pending.changes.other" => "pending changes", "modifiche in sospeso";
+    "pending.changes.one" => "pending change", "modifica in sospeso";
     "pending.review" => "Review", "Rivedi";
     "pending.stale" => "The pending changes could not be refreshed: the count may be out of date.", "Impossibile aggiornare le modifiche in sospeso: il numero potrebbe non essere aggiornato.";
     "pending.apply" => "Apply", "Applica";
@@ -984,7 +998,6 @@ dict! { BLOB, LENS, IT;
     "hw.provider" => "Provider", "Provider";
     "hw.stale" => "Stale data", "Dati non aggiornati";
     "hw.updated" => "Last update", "Ultimo aggiornamento";
-    "hw.ago" => "ago", "fa";
     "hw.none_title" => "No hardware provider", "Nessun provider hardware";
     "hw.none_text" => "This machine does not expose fans, LEDs or drive bays through a hardware provider. Sensor temperatures are still shown on the dashboard.", "Questa macchina non espone ventole, LED o alloggiamenti tramite un provider hardware. Le temperature dei sensori restano visibili nella dashboard.";
     "hw.no_events" => "No recent events", "Nessun evento recente";
@@ -1921,8 +1934,8 @@ dict! { BLOB, LENS, IT;
     // Users adopt / UID change
     "users.adopt" => "Adopt", "Adotta";
     "users.adopt_all" => "Adopt all", "Adotta tutti";
-    "users.adopt_banner" => "{n} accounts on this system were created outside rynas. Adopt them to manage their password, groups and access: they are not recreated and their files do not change.", "{n} account di questo sistema sono stati creati fuori da rynas. Adottali per gestirne password, gruppi e accessi: non vengono ricreati e i loro file non cambiano.";
-    "users.adopt_banner_one" => "One account on this system was created outside rynas. Adopt it to manage its password, groups and access: it is not recreated and its files do not change.", "Un account di questo sistema è stato creato fuori da rynas. Adottalo per gestirne password, gruppi e accessi: non viene ricreato e i suoi file non cambiano.";
+    "users.adopt_banner.other" => "{n} accounts on this system were created outside rynas. Adopt them to manage their password, groups and access: they are not recreated and their files do not change.", "{n} account di questo sistema sono stati creati fuori da rynas. Adottali per gestirne password, gruppi e accessi: non vengono ricreati e i loro file non cambiano.";
+    "users.adopt_banner.one" => "One account on this system was created outside rynas. Adopt it to manage its password, groups and access: it is not recreated and its files do not change.", "Un account di questo sistema è stato creato fuori da rynas. Adottalo per gestirne password, gruppi e accessi: non viene ricreato e i suoi file non cambiano.";
     "users.adopted" => "Accounts adopted", "Account adottati";
     "users.unmanaged_note" => "Created outside rynas. Saving adopts the account as it is: it is not recreated and its files do not change.", "Creato fuori da rynas. Salvando, l'account viene adottato così com'è: non viene ricreato e i suoi file non cambiano.";
     "users.uid" => "User ID (UID)", "ID utente (UID)";
@@ -3103,12 +3116,12 @@ dict! { BLOB, LENS, IT;
     "repl.col.last" => "Last transfer", "Ultimo trasferimento";
     "repl.col.replica" => "Replica", "Replica";
     "repl.after_snapshots" => "After each snapshot", "Dopo ogni snapshot";
-    "repl.held_one" => "{n} snapshot kept on the source until the target is reachable again", "{n} snapshot tenuto sull'origine finché la destinazione non torna raggiungibile";
-    "repl.held_many" => "{n} snapshots kept on the source until the target is reachable again", "{n} snapshot tenuti sull'origine finché la destinazione non torna raggiungibile";
+    "repl.held.one" => "{n} snapshot kept on the source until the target is reachable again", "{n} snapshot tenuto sull'origine finché la destinazione non torna raggiungibile";
+    "repl.held.other" => "{n} snapshots kept on the source until the target is reachable again", "{n} snapshot tenuti sull'origine finché la destinazione non torna raggiungibile";
     "repl.key.line_needs_path" => "Fill in the folder on the target above: the authorized_keys line limits the key to that folder.", "Compila sopra la cartella sulla destinazione: la riga di authorized_keys limita la chiave a quella cartella.";
     "repl.never" => "Never", "Mai";
-    "repl.sent_one" => "{n} snapshot sent", "{n} snapshot inviato";
-    "repl.sent_many" => "{n} snapshots sent", "{n} snapshot inviati";
+    "repl.sent.one" => "{n} snapshot sent", "{n} snapshot inviato";
+    "repl.sent.other" => "{n} snapshots sent", "{n} snapshot inviati";
     "repl.off" => "Off", "Disattivata";
     "repl.failing" => "Failing", "Non riuscita";
     "repl.ok" => "Replicated", "Replicata";
@@ -3909,10 +3922,10 @@ dict! { BLOB, LENS, IT;
     "sto.ack_grew" => "Some counts grew since this page was loaded: those still warn", "Alcuni conteggi sono aumentati da quando hai aperto la pagina: quelli restano in avviso";
     // removable drives (app bar menu, Hardware › Removable drives)
     "rm.title" => "Removable drives", "Unità rimovibili";
-    "rm.count_one" => "1 drive", "1 unità";
-    "rm.count" => "{n} drives", "{n} unità";
-    "rm.mounted_one" => "1 mounted", "1 montata";
-    "rm.mounted" => "{n} mounted", "{n} montate";
+    "rm.count.one" => "{n} drive", "{n} unità";
+    "rm.count.other" => "{n} drives", "{n} unità";
+    "rm.mounted.one" => "{n} mounted", "{n} montata";
+    "rm.mounted.other" => "{n} mounted", "{n} montate";
     "rm.empty" => "No removable drives", "Nessuna unità rimovibile";
     "rm.empty_text" => "Plug in a USB drive or an SD card.", "Collega un'unità USB o una scheda SD.";
     "rm.mount_all" => "Mount all", "Monta tutto";
@@ -5634,81 +5647,399 @@ dict! { BLOB, LENS, IT;
     "nev.pcbackup.agent_resumed.body" => "{device} has a new good version.", "{device} ha una nuova versione riuscita.";
     "nev.pcbackup.agent_failed.title" => "The backup of {device} failed", "Il backup di {device} non è riuscito";
     "nev.pcbackup.agent_failed.body" => "See the PC on the Backup page.", "Vedi il PC nella pagina Backup.";
+    // formats: unit words and joining templates (the File app has the same texts, test
+    // `files_formats_match_core`), and the time format preference
+    "dur.dhm" => "{d} d {h} h {m} min", "{d} g {h} h {m} min";
+    "dur.hm" => "{h} h {m} min", "{h} h {m} min";
+    "dur.ms" => "{m} min {s} s", "{m} min {s} s";
+    "dur.d" => "{d} d", "{d} g";
+    "dur.h" => "{h} h", "{h} h";
+    "dur.m" => "{m} min", "{m} min";
+    "dur.s" => "{s} s", "{s} s";
+    "fmt.ago" => "{time} ago", "{time} fa";
+    "fmt.of" => "{part} of {total}", "{part} di {total}";
+    "hour_cycle" => "Time format", "Formato dell'ora";
+    "hour_cycle.auto" => "Automatic", "Automatico";
+    "hour_cycle.h23" => "24-hour", "24 ore";
+    "hour_cycle.h12" => "12-hour", "12 ore";
 }
 
 // ---------------------------------------------------------------- formatting
+//
+// One locale for the whole interface (core, modules and the File app): the interface's language
+// with the region of the browser's own tag when the languages match (`en-GB`, `en-US`, `it-CH`),
+// else `en-US` / `it-IT`. Dates and times add the time format preference (`hourCycle`); numbers
+// take their separators from `Intl.NumberFormat`, plural forms their category from
+// `Intl.PluralRules`. Unit words and joining templates are dictionary keys (`dur.*`, `fmt.*`),
+// the same texts the File app uses (test `files_formats_match_core`).
 
-fn sep() -> char {
-    if lang() == Lang::It { ',' } else { '.' }
+/// The time format preference: the locale's own, or forced 24 / 12 hours.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HourCycle {
+    Auto,
+    H23,
+    H12,
+}
+
+impl HourCycle {
+    /// The `hourCycle` of `Intl.DateTimeFormat` (`""` = the locale's own).
+    pub fn code(self) -> &'static str {
+        match self {
+            HourCycle::Auto => "",
+            HourCycle::H23 => "h23",
+            HourCycle::H12 => "h12",
+        }
+    }
+
+    pub fn from_code(s: &str) -> Self {
+        match s {
+            "h23" => HourCycle::H23,
+            "h12" => HourCycle::H12,
+            _ => HourCycle::Auto,
+        }
+    }
+}
+
+thread_local! {
+    static HOUR: Cell<Option<RwSignal<HourCycle>>> = const { Cell::new(None) };
+    /// The locale of the current language (see [`locale_for`]).
+    static LOCALE: RefCell<String> = RefCell::new(String::from("en-US"));
+    /// Separators and plural rules of the locale, made once per locale.
+    static NUMBERS: RefCell<Option<std::rc::Rc<Numbers>>> = const { RefCell::new(None) };
+}
+
+fn hour_sig() -> RwSignal<HourCycle> {
+    HOUR.with(|c| match c.get() {
+        Some(s) => s,
+        None => {
+            let s = RwSignal::new(HourCycle::Auto);
+            c.set(Some(s));
+            s
+        }
+    })
+}
+
+/// The time format preference: tracked inside reactive closures, like [`lang`].
+pub fn hour_cycle() -> HourCycle {
+    if leptos::reactive::graph::Observer::get().is_some() { hour_sig().get() } else { hour_sig().get_untracked() }
+}
+
+pub fn set_hour_cycle(h: HourCycle) {
+    storage_set("rynas.hour", h.code());
+    hour_sig().set(h);
+    publish(sig().get_untracked());
+}
+
+/// The locale of a language when no browser tag of that language names a region.
+fn default_locale(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "en-US",
+        Lang::It => "it-IT",
+    }
+}
+
+/// The locale for `lang`: the first of the browser's tags (most preferred first) of the same
+/// language that names a region or script (`en-GB`), else the language's default.
+fn locale_for(lang: Lang, tags: &[String]) -> String {
+    tags.iter()
+        .map(|t| t.trim())
+        .find(|t| {
+            t.len() <= 35
+                && t.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                && t.split_once('-').is_some_and(|(l, rest)| l.eq_ignore_ascii_case(lang.code()) && !rest.is_empty() && !rest.ends_with('-'))
+        })
+        .map(str::to_string)
+        .unwrap_or_else(|| default_locale(lang).to_string())
+}
+
+/// The browser's language tags, most preferred first.
+fn browser_tags() -> Vec<String> {
+    let nav = window().navigator();
+    let mut tags: Vec<String> = nav.languages().iter().filter_map(|v| v.as_string()).collect();
+    tags.extend(nav.language());
+    tags
+}
+
+/// The interface's locale (`en-GB`, `it-IT`…), tracked like [`lang`].
+pub fn locale() -> String {
+    let lang = lang();
+    if cfg!(test) {
+        return default_locale(lang).to_string();
+    }
+    LOCALE.with(|l| l.borrow().clone())
+}
+
+/// `Date.toLocaleString` of `ms` in the interface's locale with `opts` (`Intl.DateTimeFormat`
+/// options), plus the time format preference when a time is shown. For pages with their own
+/// options (time zone of the NAS, full date…).
+pub fn date_with(ms: f64, opts: &[(&str, &str)]) -> String {
+    let o = js_sys::Object::new();
+    for (k, v) in opts {
+        let _ = js_sys::Reflect::set(&o, &(*k).into(), &(*v).into());
+    }
+    let h = hour_cycle();
+    if h != HourCycle::Auto && opts.iter().any(|(k, _)| matches!(*k, "timeStyle" | "hour")) {
+        let _ = js_sys::Reflect::set(&o, &"hourCycle".into(), &h.code().into());
+    }
+    js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ms)).to_locale_string(&locale(), &o).as_string().unwrap_or_default()
+}
+
+/// Date and time, e.g. "Nov 5, 2026, 12:54 AM" / "5 nov 2026, 00:54".
+pub fn datetime(ms: u64) -> String {
+    date_with(ms as f64, &[("dateStyle", "medium"), ("timeStyle", "short")])
+}
+
+/// Date, e.g. "Nov 5, 2026" / "5 nov 2026".
+pub fn date(ms: u64) -> String {
+    date_with(ms as f64, &[("dateStyle", "medium")])
+}
+
+/// Time of day for today's moments, date and time otherwise (lists of events).
+pub fn short_when(ms: u64) -> String {
+    let d = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ms as f64));
+    let now = js_sys::Date::new_0();
+    if d.to_date_string() == now.to_date_string() { time_hm(ms as f64) } else { datetime(ms) }
+}
+
+/// Time of day of a moment: "2:05 PM" / "14:05", as the locale and the preference want.
+pub fn time_hm(ms: f64) -> String {
+    date_with(ms, &[("timeStyle", "short")])
+}
+
+/// Milliseconds since the epoch of a date and time read as UTC (proleptic Gregorian).
+fn civil_ms(y: i64, mo: u32, d: u32, h: u32, mi: u32) -> f64 {
+    // days from civil (H. Hinnant)
+    let y = if mo <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = i64::from((mo + 9) % 12);
+    let doy = (153 * mp + 2) / 5 + i64::from(d) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    (days * 86_400_000 + i64::from(h * 60 + mi) * 60_000) as f64
+}
+
+/// A wall-clock time with no date or zone (a stored "07:30") as the interface writes times:
+/// "7:30 AM" / "07:30".
+pub fn hm(h: u32, m: u32) -> String {
+    if cfg!(not(target_arch = "wasm32")) {
+        // off the browser (tests of the pages): the stored form
+        return format!("{:02}:{:02}", h % 24, m % 60);
+    }
+    date_with(civil_ms(2000, 1, 1, h % 24, m % 60), &[("timeZone", "UTC"), ("timeStyle", "short")])
+}
+
+/// [`hm`] of a stored `"HH:MM"` (seconds ignored); anything else comes back as it is.
+pub fn hm_text(s: &str) -> String {
+    match parse_hm(s) {
+        Some((h, m)) => hm(h, m),
+        None => s.to_string(),
+    }
+}
+
+fn parse_hm(s: &str) -> Option<(u32, u32)> {
+    let mut p = s.trim().split(':');
+    let h: u32 = p.next()?.parse().ok()?;
+    let m: u32 = p.next().filter(|m| m.len() == 2)?.parse().ok()?;
+    (h < 24 && m < 60).then_some((h, m))
+}
+
+/// `"YYYY-MM-DD HH:MM[:SS]"` (also with `T`) as (year, month, day, hour, minute).
+fn parse_wall(s: &str) -> Option<(i64, u32, u32, u32, u32)> {
+    let (date, time) = s.trim().split_once([' ', 'T'])?;
+    let mut d = date.split('-');
+    let (y, mo, day): (i64, u32, u32) = (d.next()?.parse().ok()?, d.next()?.parse().ok()?, d.next()?.parse().ok()?);
+    if d.next().is_some() || !(1..=12).contains(&mo) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let (h, m) = parse_hm(time.get(..5)?)?;
+    Some((y, mo, day, h, m))
+}
+
+/// A local wall-clock moment written by the server without a zone ("2026-11-04 08:02:51") as
+/// [`short_when`] writes moments: the time today, date and time otherwise. Shown as written
+/// (no zone conversion); text in any other shape comes back as it is.
+pub fn wall_when(s: &str) -> String {
+    let Some((y, mo, d, h, m)) = parse_wall(s) else { return s.to_string() };
+    let now = js_sys::Date::new_0();
+    if (i64::from(now.get_full_year()), now.get_month() + 1, now.get_date()) == (y, mo, d) {
+        hm(h, m)
+    } else {
+        date_with(civil_ms(y, mo, d, h, m), &[("timeZone", "UTC"), ("dateStyle", "medium"), ("timeStyle", "short")])
+    }
+}
+
+/// The decimal and grouping separators, the percent pattern and the plural rules of a locale.
+struct Numbers {
+    locale: String,
+    decimal: String,
+    group: String,
+    /// Digits a number needs before it is grouped: 4 (`1,000`) or 5 (Italian `1000`, `12.345`).
+    group_from: usize,
+    /// `{}%`, `{} %`, `%{}`…
+    percent: String,
+    #[cfg(target_arch = "wasm32")]
+    plural: js_sys::Intl::PluralRules,
+}
+
+impl Numbers {
+    #[cfg(target_arch = "wasm32")]
+    fn new(locale: String) -> Numbers {
+        let locales = js_sys::Array::of1(&locale.as_str().into());
+        let nf = js_sys::Intl::NumberFormat::new(&locales, &js_sys::Object::new());
+        let (mut decimal, mut group) = (String::from("."), String::from(","));
+        for part in nf.format_to_parts(1_234_567.5).iter() {
+            let get = |k: &str| js_sys::Reflect::get(&part, &k.into()).ok().and_then(|v| v.as_string()).unwrap_or_default();
+            match get("type").as_str() {
+                "decimal" => decimal = get("value"),
+                "group" => group = get("value"),
+                _ => {}
+            }
+        }
+        let fmt = |f: &js_sys::Intl::NumberFormat, v: f64| f.format().call1(f, &wasm_bindgen::JsValue::from_f64(v)).ok().and_then(|s| s.as_string()).unwrap_or_default();
+        let group_from = if fmt(&nf, 1000.0).chars().count() > 4 { 4 } else { 5 };
+        let opts = js_sys::Object::new();
+        let _ = js_sys::Reflect::set(&opts, &"style".into(), &"percent".into());
+        let percent = fmt(&js_sys::Intl::NumberFormat::new(&locales, &opts), 0.5).replacen("50", "{}", 1);
+        let percent = if percent.contains("{}") { percent } else { "{}%".into() };
+        let plural = js_sys::Intl::PluralRules::new(&locales, &js_sys::Object::new());
+        Numbers { locale, decimal, group, group_from, percent, plural }
+    }
+
+    /// Off the browser (tests): the two languages' own separators.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn new(locale: String) -> Numbers {
+        let it = locale.starts_with("it");
+        Numbers {
+            locale,
+            decimal: (if it { "," } else { "." }).into(),
+            group: (if it { "." } else { "," }).into(),
+            group_from: if it { 5 } else { 4 },
+            percent: "{}%".into(),
+        }
+    }
+
+    /// The CLDR plural category of `n`: "one", "few", "many", "other"…
+    #[cfg(target_arch = "wasm32")]
+    fn category(&self, n: u64) -> String {
+        self.plural.select(n as f64).as_string().unwrap_or_else(|| "other".into())
+    }
+
+    /// Off the browser (tests): English and Italian rules.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn category(&self, n: u64) -> String {
+        (if n == 1 { "one" } else { "other" }).into()
+    }
+}
+
+fn numbers() -> std::rc::Rc<Numbers> {
+    let loc = locale();
+    NUMBERS.with(|n| {
+        let mut n = n.borrow_mut();
+        match n.as_ref() {
+            Some(x) if x.locale == loc => x.clone(),
+            _ => {
+                let x = std::rc::Rc::new(Numbers::new(loc));
+                *n = Some(x.clone());
+                x
+            }
+        }
+    })
+}
+
+/// The locale's decimal separator ("." / ",").
+pub fn decimal_sep() -> String {
+    numbers().decimal.clone()
 }
 
 /// Fixed decimals with the locale's decimal separator.
 pub fn num(v: f64, decimals: usize) -> String {
     let s = format!("{v:.decimals$}");
-    if sep() == ',' { s.replace('.', ",") } else { s }
+    let n = numbers();
+    if n.decimal == "." { s } else { s.replace('.', &n.decimal) }
 }
 
-/// A whole count with the locale's thousands separator: 1,234,567 / 1.234.567.
+/// A whole count with the locale's grouping, as `Intl.NumberFormat` writes it: 1,234,567 /
+/// 1.234.567 (Italian groups from five digits: 1000, 12.345).
 pub fn count(n: u64) -> String {
-    group(n, if sep() == ',' { '.' } else { ',' })
+    let x = numbers();
+    if n.to_string().len() < x.group_from { n.to_string() } else { group(n, &x.group) }
 }
 
-fn group(n: u64, mark: char) -> String {
+fn group(n: u64, mark: &str) -> String {
     let d = n.to_string();
-    let mut out = String::with_capacity(d.len() + d.len() / 3);
+    let mut out = String::with_capacity(d.len() + d.len() / 3 * mark.len());
     for (i, c) in d.chars().enumerate() {
         if i > 0 && (d.len() - i).is_multiple_of(3) {
-            out.push(mark);
+            out.push_str(mark);
         }
         out.push(c);
     }
     out
 }
 
-/// Up to 3 significant digits: 1.23, 12.3, 123.
+/// The text of `key` for the count `n`: `key.<category>` for the CLDR plural category of `n` in
+/// the interface's locale (`key.one`, `key.few`, `key.many`…), else `key.other` (required for
+/// every key with forms), else `key` itself. `{n}` becomes the grouped count, then `args` as in
+/// [`tf`].
+pub fn tn(key: &str, n: u64, args: &[(&str, &str)]) -> String {
+    let cat = numbers().category(n);
+    let text = try_t(&format!("{key}.{cat}")).or_else(|| try_t(&format!("{key}.other"))).or_else(|| try_t(key));
+    let mut s = text.map_or_else(|| key.to_string(), str::to_string).replace("{n}", &count(n));
+    for (k, v) in args {
+        s = s.replace(&format!("{{{k}}}"), v);
+    }
+    s
+}
+
+/// Three significant digits: 1.23, 12.3, 123 (decided on the rounded value: 9.996 is "10.0").
 fn sig3(v: f64) -> String {
-    let d = if v >= 100.0 {
-        0
-    } else if v >= 10.0 {
+    let d = if v < 9.995 {
+        2
+    } else if v < 99.95 {
         1
     } else {
-        2
+        0
     };
     num(v, d)
 }
 
-/// 1536 -> "1,50 KiB".
+/// `n` bytes in `units` of `base` with three significant digits: the next unit as soon as the
+/// number would need four digits ("1.00 GiB", never "1022 MiB").
+fn scaled(n: u64, base: f64, units: &[&str]) -> String {
+    if n < 1000 {
+        return format!("{n} {}", units[0]);
+    }
+    let mut v = n as f64;
+    let mut i = 0;
+    while v >= 999.5 && i < units.len() - 1 {
+        v /= base;
+        i += 1;
+    }
+    format!("{} {}", sig3(v), units[i])
+}
+
+/// Binary sizes: 1536 -> "1.50 KiB" (the File app's sizes follow the same rule).
 pub fn bytes(n: u64) -> String {
-    const U: [&str; 7] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
-    if n < 1024 {
-        return format!("{n} B");
-    }
-    let mut v = n as f64;
-    let mut i = 0;
-    while v >= 1024.0 && i < U.len() - 1 {
-        v /= 1024.0;
-        i += 1;
-    }
-    format!("{} {}", sig3(v), U[i])
+    scaled(n, 1024.0, &["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"])
 }
 
-/// Disk sizes the way vendors print them (decimal): 4000787030016 -> "4,0 TB".
+/// Disk sizes the way vendors print them (decimal): 4000787030016 -> "4.00 TB".
 pub fn bytes_si(n: u64) -> String {
-    const U: [&str; 6] = ["B", "kB", "MB", "GB", "TB", "PB"];
-    let mut v = n as f64;
-    let mut i = 0;
-    while v >= 1000.0 && i < U.len() - 1 {
-        v /= 1000.0;
-        i += 1;
-    }
-    if i == 0 {
-        format!("{n} B")
-    } else {
-        format!("{} {}", num(v, if v >= 100.0 { 0 } else { 1 }), U[i])
-    }
+    scaled(n, 1000.0, &["B", "kB", "MB", "GB", "TB", "PB", "EB"])
 }
 
-/// Byte rate: "12,3 MiB/s".
+/// "X of Y" / "X di Y": a part of a whole, for every ratio the interface writes.
+pub fn of(part: &str, total: &str) -> String {
+    tf("fmt.of", &[("part", part), ("total", total)])
+}
+
+/// [`of`] for sizes: "1.50 GiB of 4.00 GiB".
+pub fn bytes_of(part: u64, total: u64) -> String {
+    of(&bytes(part), &bytes(total))
+}
+
+/// Byte rate: "12.3 MiB/s".
 pub fn rate(bps: u64) -> String {
     format!("{}/s", bytes(bps))
 }
@@ -5729,80 +6060,62 @@ pub fn bitrate(bytes_per_s: u64) -> String {
     }
 }
 
-/// Link speed of a port from Mbit/s: "1 Gbit", "2,5 Gbit", "100 Mbit".
+/// Link speed of a port from Mbit/s: "1 Gbit", "2.5 Gbit", "100 Mbit".
 pub fn link_speed(m: u32) -> String {
     if m >= 1000 { format!("{} Gbit", num(m as f64 / 1000.0, if m.is_multiple_of(1000) { 0 } else { 1 })) } else { format!("{m} Mbit") }
 }
 
+/// A percentage of 0–100: one decimal below 10 ("4.5%", "45%").
 pub fn pct(v: f64) -> String {
-    format!("{}%", num(v, if v < 10.0 { 1 } else { 0 }))
+    numbers().percent.replacen("{}", &num(v, if v < 10.0 { 1 } else { 0 }), 1)
 }
 
 pub fn celsius(v: f32) -> String {
     format!("{}°C", num(v as f64, 0))
 }
 
-/// Date and time in the current language, e.g. "Nov 5, 2026, 12:54 AM" / "5 nov 2026, 00:54".
-pub fn datetime(ms: u64) -> String {
-    let d = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ms as f64));
-    let opts = js_sys::Object::new();
-    let _ = js_sys::Reflect::set(&opts, &"dateStyle".into(), &"medium".into());
-    let _ = js_sys::Reflect::set(&opts, &"timeStyle".into(), &"short".into());
-    d.to_locale_string(lang().code(), &opts).as_string().unwrap_or_default()
-}
-
-/// Date in the current language, e.g. "Nov 5, 2026" / "5 nov 2026".
-pub fn date(ms: u64) -> String {
-    let d = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ms as f64));
-    let opts = js_sys::Object::new();
-    let _ = js_sys::Reflect::set(&opts, &"dateStyle".into(), &"medium".into());
-    d.to_locale_date_string(lang().code(), &opts).as_string().unwrap_or_default()
-}
-
-/// Time of day for today's moments, date and time otherwise (lists of events).
-pub fn short_when(ms: u64) -> String {
-    let d = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ms as f64));
-    let now = js_sys::Date::new_0();
-    if d.to_date_string() == now.to_date_string() { time_hm(ms as f64) } else { datetime(ms) }
-}
-
-/// Time of day "14:05" in the current language.
-pub fn time_hm(ms: f64) -> String {
-    let d = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ms));
-    let opts = js_sys::Object::new();
-    let _ = js_sys::Reflect::set(&opts, &"timeStyle".into(), &"short".into());
-    d.to_locale_time_string_with_options(lang().code(), &opts).as_string().unwrap_or_default()
-}
-
-/// Uptime-style duration: "12 g 4 h 7 min" / "12d 4h 7m".
+/// Uptime-style duration: "12 d 4 h 7 min" / "12 g 4 h 7 min", "4 h 7 min", "7 min", "42 s".
 pub fn duration(secs: u64) -> String {
     let (d, h, m) = (secs / 86400, secs % 86400 / 3600, secs % 3600 / 60);
-    let it = lang() == Lang::It;
-    let (ud, uh, um) = if it { (" g", " h", " min") } else { ("d", "h", "m") };
-    if d > 0 {
-        format!("{d}{ud} {h}{uh} {m}{um}")
-    } else if h > 0 {
-        format!("{h}{uh} {m}{um}")
-    } else if m > 0 {
-        format!("{m}{um}")
+    let (d, h, m) = (count(d), h.to_string(), m.to_string());
+    if secs >= 86400 {
+        tf("dur.dhm", &[("d", &d), ("h", &h), ("m", &m)])
+    } else if secs >= 3600 {
+        tf("dur.hm", &[("h", &h), ("m", &m)])
+    } else if secs >= 60 {
+        tf("dur.m", &[("m", &m)])
     } else {
-        format!("{secs} s")
+        tf("dur.s", &[("s", &secs.to_string())])
     }
 }
 
-/// Elapsed time with seconds (task durations): "45 s", "3 min 05 s", "1 h 02 min" /
-/// "45s", "3m 05s", "1h 02m".
+/// Elapsed time with seconds (task durations): "45 s", "3 min 05 s", "1 h 02 min".
 pub fn elapsed(secs: u64) -> String {
     let (h, m, s) = (secs / 3600, secs % 3600 / 60, secs % 60);
-    let it = lang() == Lang::It;
     if h > 0 {
-        if it { format!("{h} h {m:02} min") } else { format!("{h}h {m:02}m") }
+        tf("dur.hm", &[("h", &count(h)), ("m", &format!("{m:02}"))])
     } else if m > 0 {
-        if it { format!("{m} min {s:02} s") } else { format!("{m}m {s:02}s") }
-    } else if it {
-        format!("{s} s")
+        tf("dur.ms", &[("m", &m.to_string()), ("s", &format!("{s:02}"))])
     } else {
-        format!("{s}s")
+        tf("dur.s", &[("s", &s.to_string())])
+    }
+}
+
+/// "5 min ago" / "5 min fa": [`approx`] of the time since a moment.
+pub fn ago(secs: u64) -> String {
+    tf("fmt.ago", &[("time", &approx(secs))])
+}
+
+/// The largest unit of a duration: "42 s", "5 min", "3 h", "2 d" (relative times).
+pub fn approx(secs: u64) -> String {
+    if secs >= 86400 {
+        tf("dur.d", &[("d", &count(secs / 86400))])
+    } else if secs >= 3600 {
+        tf("dur.h", &[("h", &(secs / 3600).to_string())])
+    } else if secs >= 60 {
+        tf("dur.m", &[("m", &(secs / 60).to_string())])
+    } else {
+        tf("dur.s", &[("s", &secs.to_string())])
     }
 }
 
@@ -5811,10 +6124,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn elapsed_en() {
-        assert_eq!(elapsed(7), "7s");
-        assert_eq!(elapsed(185), "3m 05s");
-        assert_eq!(elapsed(3720), "1h 02m");
+    fn elapsed_and_duration() {
+        sig().set(Lang::En);
+        assert_eq!(elapsed(7), "7 s");
+        assert_eq!(elapsed(185), "3 min 05 s");
+        assert_eq!(elapsed(3720), "1 h 02 min");
+        assert_eq!(duration(42), "42 s");
+        assert_eq!(duration(3 * 86400 + 4 * 3600 + 7 * 60), "3 d 4 h 7 min");
+        assert_eq!(ago(300), "5 min ago");
+        assert_eq!(ago(2 * 3600 + 59), "2 h ago");
+        assert_eq!(approx(3 * 86400), "3 d");
+        sig().set(Lang::It);
+        assert_eq!(duration(3 * 86400 + 4 * 3600 + 7 * 60), "3 g 4 h 7 min");
+        assert_eq!(ago(300), "5 min fa");
+        assert_eq!(of("1", "3"), "1 di 3");
+        sig().set(Lang::En);
     }
 
     #[test]
@@ -5827,11 +6151,105 @@ mod tests {
     }
 
     #[test]
+    fn locale_from_language_and_browser() {
+        let tags = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(locale_for(Lang::En, &tags(&["en-GB", "en"])), "en-GB");
+        assert_eq!(locale_for(Lang::En, &tags(&["it-IT", "en-AU"])), "en-AU");
+        assert_eq!(locale_for(Lang::En, &tags(&["en"])), "en-US");
+        assert_eq!(locale_for(Lang::En, &tags(&["it-IT", "it"])), "en-US");
+        assert_eq!(locale_for(Lang::It, &tags(&["it-CH"])), "it-CH");
+        assert_eq!(locale_for(Lang::It, &tags(&["en-GB"])), "it-IT");
+        assert_eq!(locale_for(Lang::It, &tags(&[])), "it-IT");
+        // never a malformed tag
+        assert_eq!(locale_for(Lang::En, &tags(&["en-", "en GB", "en-\"x"])), "en-US");
+        assert_eq!(HourCycle::from_code("h12"), HourCycle::H12);
+        assert_eq!(HourCycle::from_code(""), HourCycle::Auto);
+        assert_eq!(HourCycle::from_code(HourCycle::H23.code()), HourCycle::H23);
+    }
+
+    #[test]
+    fn wall_times_parse() {
+        assert_eq!(parse_wall("2026-11-04 08:02:51"), Some((2026, 11, 4, 8, 2)));
+        assert_eq!(parse_wall("2026-11-04T17:05"), Some((2026, 11, 4, 17, 5)));
+        assert_eq!(parse_wall("2026-13-04 08:02"), None);
+        assert_eq!(parse_wall("yesterday"), None);
+        assert_eq!(parse_hm("07:30"), Some((7, 30)));
+        assert_eq!(parse_hm("7:30:00"), Some((7, 30)));
+        assert_eq!(parse_hm("24:00"), None);
+        assert_eq!(civil_ms(2000, 1, 1, 0, 0), 946_684_800_000.0);
+        assert_eq!(civil_ms(2026, 11, 13, 17, 5), 1_794_589_500_000.0);
+    }
+
+    #[test]
+    fn sizes_have_three_significant_digits() {
+        sig().set(Lang::En);
+        assert_eq!(bytes(999), "999 B");
+        assert_eq!(bytes(1536), "1.50 KiB");
+        assert_eq!(bytes(1022 * 1024 * 1024), "1.00 GiB");
+        assert_eq!(bytes(5_000_000_000), "4.66 GiB");
+        assert_eq!(bytes(100 * 1024 * 1024), "100 MiB");
+        assert_eq!(bytes((9.996 * 1024.0) as u64), "10.0 KiB");
+        assert_eq!(bytes_si(4_000_787_030_016), "4.00 TB");
+        assert_eq!(bytes_si(1500), "1.50 kB");
+        assert_eq!(bytes_of(1536, 4096), "1.50 KiB of 4.00 KiB");
+        sig().set(Lang::It);
+        assert_eq!(bytes(1536), "1,50 KiB");
+        assert_eq!(count(1_234_567), "1.234.567");
+        assert_eq!(count(1000), "1000");
+        assert_eq!(count(12_345), "12.345");
+        assert_eq!(pct(4.5), "4,5%");
+        sig().set(Lang::En);
+        assert_eq!(count(1_234_567), "1,234,567");
+        assert_eq!(count(1000), "1,000");
+        assert_eq!(pct(45.2), "45%");
+    }
+
+    #[test]
+    fn plural_forms() {
+        sig().set(Lang::En);
+        assert_eq!(tn("rm.count", 1, &[]), "1 drive");
+        assert_eq!(tn("rm.count", 1200, &[]), "1,200 drives");
+        assert_eq!(tn("pending.changes", 1, &[]), "pending change");
+        assert_eq!(tn("pending.changes", 0, &[]), "pending changes");
+        sig().set(Lang::It);
+        assert_eq!(tn("repl.sent", 1, &[]), "1 snapshot inviato");
+        assert_eq!(tn("repl.sent", 2, &[]), "2 snapshot inviati");
+        sig().set(Lang::En);
+        // the base key when a text has no forms, the key itself when there is none
+        assert_eq!(tn("nav.files", 3, &[]), "Files");
+        assert_eq!(tn("no.such", 3, &[]), "no.such");
+    }
+
+    /// A text with plural forms has its `other` form (the fallback of every category), and no
+    /// key with forms keeps a `_one` twin of the old scheme.
+    #[test]
+    fn plural_keys_have_other() {
+        const CATS: &[&str] = &["zero", "one", "two", "few", "many"];
+        let keys: std::collections::HashSet<&str> = entries().into_iter().map(|e| e.0).collect();
+        let mut bad = Vec::new();
+        for k in &keys {
+            if let Some((base, cat)) = k.rsplit_once('.')
+                && CATS.contains(&cat)
+                && !keys.contains(format!("{base}.other").as_str())
+            {
+                bad.push(k.to_string());
+            }
+            if let Some(base) = k.strip_suffix(".other")
+                && keys.contains(format!("{base}_one").as_str())
+            {
+                bad.push(format!("{base}_one"));
+            }
+        }
+        assert!(bad.is_empty(), "plural forms without `other`: {bad:?}");
+    }
+
+    #[test]
     fn counts_are_grouped() {
-        assert_eq!(group(0, ','), "0");
-        assert_eq!(group(999, ','), "999");
-        assert_eq!(group(1000, ','), "1,000");
-        assert_eq!(group(1_234_567, '.'), "1.234.567");
+        assert_eq!(group(0, ","), "0");
+        assert_eq!(group(999, ","), "999");
+        assert_eq!(group(1000, ","), "1,000");
+        assert_eq!(group(1_234_567, "."), "1.234.567");
+        assert_eq!(group(1_234_567, "\u{202f}"), "1\u{202f}234\u{202f}567");
     }
 
     #[test]
@@ -5969,7 +6387,9 @@ mod tests {
                     let k = lit.strip_prefix('#').unwrap_or(lit);
                     // configuration keys (`config::keys`) are named by their `cfg.key.*` label
                     let cfg_key = keys.contains(format!("cfg.key.{k}").as_str());
-                    if is_key_shape(k) && !not_a_key(k) && !keys.contains(k) && !cfg_key {
+                    // a text with plural forms (`tn`) is named by its base key
+                    let plural = keys.contains(format!("{k}.other").as_str());
+                    if is_key_shape(k) && !not_a_key(k) && !keys.contains(k) && !cfg_key && !plural {
                         missing.push(format!("{}:{}: {k}", f.display(), n + 1));
                     }
                 }

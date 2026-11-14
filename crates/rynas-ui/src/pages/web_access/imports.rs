@@ -19,12 +19,13 @@ use rynas_api_types::web_access::{CertImportRequest, ImportProblem, ImportSource
 
 use super::cert::{cert_list, pem_field, warning_key};
 use super::domains::cert_status;
-use super::{kv, wa};
+use super::wa;
+use crate::ui::kv;
 use crate::api;
-use crate::form::{In, form_error, spinner, text_field};
+use crate::form::{In, SaveBar, form_error, save_bar_with, spinner, text_field};
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
-use crate::pages::security::copy_button;
+use crate::ui::copy_button;
 use crate::toast::toast;
 use crate::ui::{self, Confirm, DlgKind, Remote, Tone, WidgetHead};
 
@@ -76,9 +77,9 @@ pub fn card(changed: Callback<()>) -> AnyView {
             .map(|c| {
                 let id = c.id.clone();
                 let title = if c.label.is_empty() { c.id.clone() } else { c.label.clone() };
-                let until = c.certificate.as_ref().map(|x| i18n::datetime(x.not_after_ms.max(0) as u64)).unwrap_or_else(|| "—".into());
+                let until = c.certificate.as_ref().map(|x| i18n::datetime(x.not_after_ms.max(0) as u64)).unwrap_or_else(|| ui::DASH.into());
                 let covers = if c.certificate.is_none() {
-                    view! { <span class="muted">"—"</span> }.into_any()
+                    view! { <span class="muted">{ui::DASH}</span> }.into_any()
                 } else if c.covers.is_empty() {
                     view! { <span class="muted small">{tr("wa.import.covers_none")}</span> }.into_any()
                 } else {
@@ -135,14 +136,6 @@ fn problem_text(c: &ImportedCert, p: ImportProblem) -> String {
     }
 }
 
-fn code_block(title: &'static str, text: String) -> AnyView {
-    view! {
-        <h4 class="small"><strong>{tr(title)}</strong></h4>
-        <pre class="app-code">{text.clone()}</pre>
-        <div class="sec-actions">{copy_button("dns.copy", text)}</div>
-    }
-    .into_any()
-}
 
 fn drawer(imp: Imp, id: String) -> AnyView {
     let close = Callback::new(move |_| imp.open.set(None));
@@ -226,7 +219,7 @@ fn drawer(imp: Imp, id: String) -> AnyView {
         });
         let held = (c.problem == Some(ImportProblem::NamesChanged) && !c.pending_names.is_empty()).then(|| view! {
             <dl class="kvs">
-                {kv("wa.import.current_names", if c.names.is_empty() { ui::text("—".into()) } else { names(&c.names) })}
+                {kv("wa.import.current_names", if c.names.is_empty() { ui::text(ui::DASH.into()) } else { names(&c.names) })}
                 {kv("wa.import.pending_names", names(&c.pending_names))}
             </dl>
             <div class="sec-actions">
@@ -253,13 +246,12 @@ fn drawer(imp: Imp, id: String) -> AnyView {
                 <div class="sec-actions">
                     <button class="btn ghost sm" disabled=move || checking.get() on:click=check>{spinner(checking)}<Icon icon=icons::REFRESH_CW size=14 />{tr("wa.import.check_now")}</button>
                 </div>
-                <details class="tls-step">
-                    <summary>{tr("wa.import.folder_ssh")}</summary>
+                {ui::fold(None, "wa.import.folder_ssh", false, None, view! { 
                     <p class="small muted">{tr("wa.import.ssh_note")}</p>
-                    {code_block("wa.import.code.account", account)}
-                    {code_block("wa.import.code.sshd", sshd)}
-                    {code_block("wa.import.code.acme", acme)}
-                </details>
+                    {ui::code_block("wa.import.code.account", account)}
+                    {ui::code_block("wa.import.code.sshd", sshd)}
+                    {ui::code_block("wa.import.code.acme", acme)}
+                 }.into_any())}
             }
         });
         view! {
@@ -270,7 +262,7 @@ fn drawer(imp: Imp, id: String) -> AnyView {
             {last_error}
             <dl class="kvs">
                 {kv("col.status", status_of(&c))}
-                {kv("wa.import.label", ui::text(if c.label.is_empty() { "—".to_string() } else { c.label.clone() }))}
+                {kv("wa.import.label", ui::text(if c.label.is_empty() { ui::DASH.to_string() } else { c.label.clone() }))}
                 {kv("wa.import.id", ui::breakable(&c.id, "mono"))}
                 {c.imported_at_ms.map(|ms| kv("wa.import.imported_at", ui::text(i18n::datetime(ms.max(0) as u64))))}
                 {(!c.names.is_empty() && c.problem != Some(ImportProblem::NamesChanged)).then(|| kv("wa.import.current_names", names(&c.names)))}
@@ -289,7 +281,7 @@ fn drawer(imp: Imp, id: String) -> AnyView {
         .into_any()
     };
     let title = Signal::derive(move || item.with(|c| c.as_ref().map(|c| if c.label.is_empty() { c.id.clone() } else { c.label.clone() })).unwrap_or_default());
-    let foot = view! { <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("close")}</button> }.into_any();
+    let foot = ui::close_foot(close);
     view! {
         {ui::drawer(title, close, view! { {body} }.into_any(), foot)}
         {move || ask.get().then(|| ui::confirm(Confirm { busy, error, ..Confirm::new(t("wa.import.delete").to_string(), t("wa.import.delete_confirm").to_string(), "wa.import.delete", true, remove, Callback::new(move |_| ask.set(false))) }))}
@@ -466,11 +458,7 @@ fn import_dialog(imp: Imp, id: String) -> AnyView {
     let ready = move || {
         !iid.with(|i| i.trim().is_empty()) && (source.with(|s| s == "folder") || (cert.with(|c| !c.trim().is_empty()) && key.with(|k| !k.trim().is_empty())))
     };
-    let foot = view! {
-        <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("cancel")}</button>
-        <button type="button" class="btn primary" disabled=move || busy.get() || !ready() on:click=save>{spinner(busy)}<Icon icon=icons::IMPORT size=16 />{tr("save")}</button>
-    }
-    .into_any();
+    let foot = save_bar_with(SaveBar { can_save: Signal::derive(ready), icon: Some(icons::IMPORT), ..SaveBar::new(busy, "save", close, Callback::new(save)) });
     let title = if replacing { "wa.import.replace" } else { "wa.import.add" };
     ui::dialog(DlgKind::Normal, Signal::derive(move || t(title).to_string()), close, body, Some(foot))
 }

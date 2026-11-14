@@ -41,7 +41,7 @@ pub fn Disks() -> impl IntoView {
                     {move || {
                         let d = rows.get();
                         if d.is_empty() {
-                            view! { <p class="muted">{tr("sto.no_disks")}</p> }.into_any()
+                            ui::empty_line("sto.no_disks")
                         } else {
                             disk_table(d, selected)
                         }
@@ -71,18 +71,18 @@ fn disk_table(disks: Vec<DiskSummary>, selected: RwSignal<Option<String>>) -> An
                                 </button>
                             }
                             .into_any()),
-                            ui::cell("sto.bay", "num", view! { {super::slot_text(&d).unwrap_or_else(|| "—".into())} }.into_any()),
+                            ui::cell("sto.bay", "num", view! { {super::slot_text(&d).unwrap_or_else(|| ui::DASH.into())} }.into_any()),
                             ui::cell("sto.size", "num", view! { {i18n::bytes_si(d.size)} }.into_any()),
                             ui::cell("sto.type", "", view! {
                                 {t(kind_key(d.kind))}
                                 {(!d.transport.is_empty() && !d.transport.eq_ignore_ascii_case(t(kind_key(d.kind)))).then(|| format!(" · {}", d.transport.to_uppercase()))}
-                                {d.smr.then(|| view! { <span class="chip warn-chip" title=t("sto.smr_hint")>"SMR"</span> })}
+                                {d.smr.then(|| view! { <span class="chip warn" title=t("sto.smr_hint")>"SMR"</span> })}
                             }
                             .into_any()),
                             ui::cell("sto.temp_short", "num", match d.temperature_c {
                                 Some(c) => view! { <span class=format!("tone-text {}", temp_tone(&d.name, c).class())>{i18n::celsius(c)}</span> }.into_any(),
                                 // no reading yet: the dash of every other empty cell, not a blank
-                                None => view! { "—" }.into_any(),
+                                None => view! { {ui::DASH} }.into_any(),
                             }),
                             ui::cell("col.status", "", view! { <Status tone=ptone text=t(pkey).to_string() /> }.into_any()),
                             ui::cell("sto.health", "", view! { <span title=no_smart><Status tone=htone text=t(hkey).to_string() /></span> }.into_any()),
@@ -136,34 +136,23 @@ pub fn DiskDrawer(name: String, on_close: Callback<()>) -> impl IntoView {
     let title = Signal::derive(move || {
         summary.with(|d| d.as_ref().map(|d| format!("{} · {}", d.name, d.model))).unwrap_or_else(|| n.get_value())
     });
-    let tab_btn = move |which: Tab, key: &'static str| {
-        view! {
-            <button
-                class="tab"
-                role="tab"
-                type="button"
-                aria-selected=move || (tab.get() == which).to_string()
-                on:click=move |_| tab.set(which)
-            >
-                {tr(key)}
-            </button>
-        }
-    };
+    // the shared tab strip (arrow keys, ids for the panel)
+    const TABS: &[&str] = &["sto.tab.overview", "sto.smart", "sto.settings"];
+    let sel = RwSignal::new(0usize);
+    Effect::new(move |_| tab.set([Tab::Overview, Tab::Smart, Tab::Settings][sel.get().min(2)]));
     view! {
-        <Modal title=title on_close=on_close drawer=true>
-            <div class="tabs" role="tablist">
-                {tab_btn(Tab::Overview, "sto.tab.overview")}
-                {tab_btn(Tab::Smart, "sto.smart")}
-                {tab_btn(Tab::Settings, "sto.settings")}
+        <Modal title=title on_close=on_close drawer=true foot=move || ui::close_foot(on_close)>
+            {crate::form::tabs("disk", TABS, sel, "sto.drive")}
+            <div role="tabpanel" id=move || format!("disk-p{}", sel.get()) aria-labelledby=move || format!("disk-t{}", sel.get())>
+                {move || match summary.get() {
+                    None => ui::empty_line("err.not_found"),
+                    Some(d) => match tab.get() {
+                        Tab::Overview => overview_tab(d, detail, reading, read).into_any(),
+                        Tab::Smart => smart_tab(d, detail, reading, read).into_any(),
+                        Tab::Settings => view! { <SettingsTab name=n.get_value() kind=d.kind detail=detail on_applied=on_applied /> }.into_any(),
+                    },
+                }}
             </div>
-            {move || match summary.get() {
-                None => view! { <p class="muted">{tr("err.not_found")}</p> }.into_any(),
-                Some(d) => match tab.get() {
-                    Tab::Overview => overview_tab(d, detail, reading, read).into_any(),
-                    Tab::Smart => smart_tab(d, detail, reading, read).into_any(),
-                    Tab::Settings => view! { <SettingsTab name=n.get_value() kind=d.kind detail=detail on_applied=on_applied /> }.into_any(),
-                },
-            }}
         </Modal>
     }
 }
@@ -228,7 +217,7 @@ fn value_view(v: Option<CheckValue>, text: Option<String>) -> AnyView {
         // code falls back to the server's English text
         None => {
             let lang = v.is_some().then_some("en");
-            view! { <span class="mono" lang=lang>{text.unwrap_or_else(|| "—".into())}</span> }.into_any()
+            view! { <span class="mono" lang=lang>{text.unwrap_or_else(|| ui::DASH.into())}</span> }.into_any()
         }
     }
 }
@@ -329,7 +318,7 @@ fn overview_tab(
     let (htone, hkey) = disk_health(&d);
     let (ptone, pkey) = power(d.power_state);
     let sleeping = asleep(d.power_state);
-    let opt = |v: Option<String>| Signal::derive(move || v.clone().unwrap_or_else(|| "—".into()));
+    let opt = |v: Option<String>| Signal::derive(move || v.clone().unwrap_or_else(|| ui::DASH.into()));
     let used = if d.used_by.is_empty() { t("sto.unused").to_string() } else { d.used_by.join(", ") };
     view! {
         <div class="drawer-sec">
@@ -340,7 +329,7 @@ fn overview_tab(
                 {d.temperature_c.map(|c| view! {
                     <span class=format!("chip tone-text {}", temp_tone(&d.name, c).class())><Icon icon=icons::THERMOMETER size=12 />{i18n::celsius(c)}</span>
                 })}
-                {d.smr.then(|| view! { <span class="chip warn-chip" title=t("sto.smr_hint")>"SMR"</span> })}
+                {d.smr.then(|| view! { <span class="chip warn" title=t("sto.smr_hint")>"SMR"</span> })}
             </div>
             {(!d.health_reasons.is_empty()).then(|| view! { <HealthReasons name=d.name.clone() reasons=d.health_reasons.clone() /> })}
             {d.smr.then(|| view! { <p class="muted small">{tr("sto.smr_hint")}</p> })}
@@ -358,7 +347,7 @@ fn overview_tab(
                 {kv_row("sto.used_by", Signal::derive(move || used.clone()), "")}
             </dl>
             {move || detail.get().and_then(Result::ok).filter(|d| !d.partitions.is_empty()).map(|dd| view! {
-                <h3 class="drawer-h">{tr("sto.partitions")}</h3>
+                <h3 class="mini-title">{tr("sto.partitions")}</h3>
                 {ui::table("compact", &["sto.name", "#sto.size", "sto.fs", "sto.used_by"], dd.partitions.into_iter().map(|p| ui::row(vec![
                     ui::cell("sto.name", "mono", view! { {p.name} }.into_any()),
                     ui::cell("sto.size", "num", view! { {i18n::bytes_si(p.size)} }.into_any()),
@@ -383,18 +372,18 @@ fn smart_tab(
         None => view! { <Skeleton lines=8 /> }.into_any(),
         Some(Err(code)) => view! { <ErrorBox code=code on_retry=Callback::new(move |_| read()) /> }.into_any(),
         Some(Ok(dd)) => match dd.smart {
-            None => view! { <p class="muted">{tr("sto.no_smart")}</p> }.into_any(),
+            None => ui::empty_line("sto.no_smart"),
             Some(sm) => smart_view(sm),
         },
     }
 }
 
 fn smart_view(sm: SmartInfo) -> AnyView {
-    let opt = |v: Option<String>| Signal::derive(move || v.clone().unwrap_or_else(|| "—".into()));
+    let opt = |v: Option<String>| Signal::derive(move || v.clone().unwrap_or_else(|| ui::DASH.into()));
     let verdict = match sm.passed {
         Some(true) => t("sto.smart_passed").to_string(),
         Some(false) => t("sto.smart_failed").to_string(),
-        None => "—".into(),
+        None => ui::DASH.into(),
     };
     let attrs = sm.attributes.clone();
     let nvme = sm.nvme.clone();
@@ -413,7 +402,7 @@ fn smart_view(sm: SmartInfo) -> AnyView {
                 {kv_row("sto.read_at", Signal::derive(move || i18n::datetime(sm.read_ms)), "")}
             </dl>
             {nvme.map(|nv| view! {
-                <h3 class="drawer-h">{tr("sto.nvme_health")}</h3>
+                <h3 class="mini-title">{tr("sto.nvme_health")}</h3>
                 <dl class="kvs">
                     {kv_row("sto.nv_spare", Signal::derive(move || format!("{} (≥ {})", i18n::pct(nv.available_spare_pct as f64), i18n::pct(nv.available_spare_threshold_pct as f64))), "tnum")}
                     {kv_row("sto.nv_used", Signal::derive(move || i18n::pct(nv.percentage_used as f64)), "tnum")}
@@ -425,7 +414,7 @@ fn smart_view(sm: SmartInfo) -> AnyView {
                 </dl>
             })}
             {(!attrs.is_empty()).then(|| view! {
-                <h3 class="drawer-h">{tr("sto.attributes")}</h3>
+                <h3 class="mini-title">{tr("sto.attributes")}</h3>
                 {ui::table("compact", &["#smart.col_id", "sto.name", "#sto.a_value", "#sto.a_worst", "#sto.a_thresh", "#sto.a_raw", "col.status"], attrs.into_iter().map(|a| {
                                 let (tone, key) = if a.when_failed == "now" {
                                     (Tone::Err, "sto.a_failing")
@@ -451,7 +440,7 @@ fn smart_view(sm: SmartInfo) -> AnyView {
                             }).collect::<Vec<_>>())}
             })}
             {(!tests.is_empty()).then(|| view! {
-                <h3 class="drawer-h">{tr("sto.selftests")}</h3>
+                <h3 class="mini-title">{tr("sto.selftests")}</h3>
                 {ui::table("compact", &["sto.type", "col.status", "#sto.at_hours"], tests.into_iter().map(|s| {
                                 let tone = match s.passed { Some(true) => Tone::Ok, Some(false) => Tone::Err, None => Tone::Unknown };
                                 ui::row(vec![
@@ -582,7 +571,7 @@ fn SettingsTab(
     view! {
         <div class="drawer-sec">
             {move || detail.get().and_then(Result::ok).filter(|d| !d.settings.is_empty()).map(|dd| view! {
-                <h3 class="drawer-h">{tr("sto.recommended")}</h3>
+                <h3 class="mini-title">{tr("sto.recommended")}</h3>
                 <ul class="checks">
                     {dd.settings.into_iter().map(|c| {
                         let (tone, key) = match c.status {
@@ -613,13 +602,13 @@ fn SettingsTab(
                     }).collect_view()}
                 </ul>
             })}
-            <h3 class="drawer-h">{tr("sto.overrides")}</h3>
+            <h3 class="mini-title">{tr("sto.overrides")}</h3>
             {move || match state.get() {
                 None => view! { <Skeleton lines=4 /> }.into_any(),
                 Some(Err(code)) => view! { <ErrorBox code=code on_retry=Callback::new(move |_| load()) /> }.into_any(),
                 Some(Ok(st)) => {
                     let def = st.defaults.clone();
-                    let def_sched = def.scheduler.map(|s| s.as_str().to_string()).unwrap_or_else(|| "—".into());
+                    let def_sched = def.scheduler.map(|s| s.as_str().to_string()).unwrap_or_else(|| ui::DASH.into());
                     // no read-ahead default: the kernel's own value
                     let def_ra = def.read_ahead_kb.map(|v| v.to_string()).unwrap_or_else(|| t("sto.kernel_default").to_string());
                     let cur_standby = standby.get_untracked().parse::<u32>().ok().filter(|s| !STANDBY.contains(s));
@@ -630,7 +619,7 @@ fn SettingsTab(
                             })}
                             <p class="muted small">
                                 {tf("sto.kernel_now", &[
-                                    ("s", &st.current_scheduler.clone().unwrap_or_else(|| "—".into())),
+                                    ("s", &st.current_scheduler.clone().unwrap_or_else(|| ui::DASH.into())),
                                     ("r", &opt_str(st.current_read_ahead_kb)),
                                 ])}
                             </p>
@@ -666,7 +655,7 @@ fn SettingsTab(
                                 </select>
                             </label>
                             {form_error(error)}
-                            <div class="dialog-foot">
+                            <div class="form-actions">
                                 <button class="btn ghost" type="button" disabled=move || busy.get() on:click=move |_| submit(DiskSettings::default())>
                                     <Icon icon=icons::ROTATE_CCW size=14 />{tr("sto.reset_defaults")}
                                 </button>

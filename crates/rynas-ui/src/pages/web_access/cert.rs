@@ -8,7 +8,7 @@ use rynas_api_types::tls::{TlsCertificate, TlsImportRequest, TlsSource, TlsStatu
 use wasm_bindgen::JsCast;
 
 use crate::api;
-use crate::form::{form_error, spinner};
+use crate::form::{SaveBar, form_error, save_bar_with};
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::toast::toast;
@@ -26,9 +26,6 @@ pub(super) fn warning_key(w: TlsWarning) -> &'static str {
     }
 }
 
-fn kv(label: &'static str, value: AnyView) -> AnyView {
-    view! { <div class="kv"><dt>{tr(label)}</dt><dd>{value}</dd></div> }.into_any()
-}
 
 fn mono(s: &str) -> AnyView {
     ui::breakable(s, "mono")
@@ -39,18 +36,18 @@ pub(super) fn cert_list(c: &TlsCertificate) -> AnyView {
     let tone = if days < 0 { Tone::Err } else if days < 30 { Tone::Warn } else { Tone::Ok };
     view! {
         <dl class="kvs">
-            {kv("tls.subject", mono(&c.subject))}
-            {(!c.dns_names.is_empty()).then(|| kv("tls.names", mono(&c.dns_names.join(", "))))}
-            {(!c.ip_addresses.is_empty()).then(|| kv("tls.addresses", mono(&c.ip_addresses.join(", "))))}
-            {kv("tls.issuer", mono(&c.issuer))}
-            {kv("tls.valid_from", ui::text(i18n::datetime(c.not_before_ms.max(0) as u64)))}
-            {kv("tls.valid_until", view! {
+            {ui::kv("tls.subject", mono(&c.subject))}
+            {(!c.dns_names.is_empty()).then(|| ui::kv("tls.names", mono(&c.dns_names.join(", "))))}
+            {(!c.ip_addresses.is_empty()).then(|| ui::kv("tls.addresses", mono(&c.ip_addresses.join(", "))))}
+            {ui::kv("tls.issuer", mono(&c.issuer))}
+            {ui::kv("tls.valid_from", ui::text(i18n::datetime(c.not_before_ms.max(0) as u64)))}
+            {ui::kv("tls.valid_until", view! {
                 <span>{i18n::datetime(c.not_after_ms.max(0) as u64)}" "</span>
                 {ui::status(tone, tf("tls.days_left", &[("n", &days.max(0).to_string())]))}
             }.into_any())}
-            {kv("tls.key_type", ui::text(c.key_type.clone()))}
-            {kv("tls.fingerprint", mono(&c.fingerprint_sha256))}
-            {kv("sto.serial", mono(&c.serial))}
+            {ui::kv("tls.key_type", ui::text(c.key_type.clone()))}
+            {ui::kv("tls.fingerprint", mono(&c.fingerprint_sha256))}
+            {ui::kv("sto.serial", mono(&c.serial))}
         </dl>
     }
     .into_any()
@@ -104,14 +101,14 @@ pub fn panel() -> AnyView {
     let trust = move || {
         st.view(4, move || {
             let Some(ca) = st.data.with(|s| s.as_ref().and_then(|s| s.local_ca.clone())) else {
-                return view! { <p class="muted small">{tr("tls.no_ca")}</p> }.into_any();
+                return ui::empty_line("tls.no_ca");
             };
             view! {
                 <p class="small">{tr("tls.trust_help")}</p>
                 <dl class="kvs">
-                    {kv("tls.subject", mono(&ca.subject))}
-                    {kv("tls.fingerprint", mono(&ca.fingerprint_sha256))}
-                    {kv("tls.valid_until", ui::text(i18n::datetime(ca.not_after_ms.max(0) as u64)))}
+                    {ui::kv("tls.subject", mono(&ca.subject))}
+                    {ui::kv("tls.fingerprint", mono(&ca.fingerprint_sha256))}
+                    {ui::kv("tls.valid_until", ui::text(i18n::datetime(ca.not_after_ms.max(0) as u64)))}
                 </dl>
                 <div class="sec-actions">
                     <a class="btn primary sm" href=format!("{URL}/ca") download="rynas-local-ca.crt"><Icon icon=icons::DOWNLOAD size=14 />{tr("tls.download_ca")}</a>
@@ -149,10 +146,9 @@ pub fn panel() -> AnyView {
 /// One system's steps, folded.
 fn os_steps(title: &'static str, steps: &'static str) -> AnyView {
     view! {
-        <details class="tls-step">
-            <summary>{tr(title)}</summary>
+        {ui::fold(None, title, false, None, view! { 
             <ol class="small app-list">{move || t(steps).split(" | ").map(|s| view! { <li>{s.to_string()}</li> }).collect_view()}</ol>
-        </details>
+         }.into_any())}
     }
     .into_any()
 }
@@ -224,12 +220,10 @@ fn import_dialog(st: Remote<TlsStatus>, close: Callback<()>) -> AnyView {
         {form_error(error)}
     }
     .into_any();
-    let foot = view! {
-        <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("cancel")}</button>
-        <button type="button" class="btn primary" disabled=move || busy.get() || cert.with(|c| c.trim().is_empty()) || key.with(|k| k.trim().is_empty()) on:click=go>
-            {spinner(busy)}<Icon icon=icons::IMPORT size=16 />{tr("tls.import")}
-        </button>
-    }
-    .into_any();
+    let foot = save_bar_with(SaveBar {
+        can_save: Signal::derive(move || !cert.with(|c| c.trim().is_empty()) && !key.with(|k| k.trim().is_empty())),
+        icon: Some(icons::IMPORT),
+        ..SaveBar::new(busy, "tls.import", close, Callback::new(go))
+    });
     ui::dialog(DlgKind::Normal, Signal::derive(|| t("tls.import").to_string()), close, body, Some(foot))
 }

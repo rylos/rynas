@@ -88,16 +88,13 @@ fn load_tone(pct: f32) -> Tone {
 }
 
 fn volts(v: Option<f32>) -> String {
-    v.map(|v| format!("{} V", i18n::num(v as f64, 0))).unwrap_or_else(|| "—".into())
+    v.map(|v| format!("{} V", i18n::num(v as f64, 0))).unwrap_or_else(|| ui::DASH.into())
 }
 
 fn dash(v: Option<String>) -> String {
-    v.unwrap_or_else(|| "—".into())
+    v.unwrap_or_else(|| ui::DASH.into())
 }
 
-fn kv(label: &'static str, value: AnyView) -> AnyView {
-    view! { <div class="kv"><dt>{tr(label)}</dt><dd>{value}</dd></div> }.into_any()
-}
 
 // ------------------------------------------------------------------ panel
 
@@ -244,8 +241,8 @@ fn connected_view(u: RwSignal<Option<UpsStatus>>) -> AnyView {
     let has_load = Memo::new(move |_| load.get().is_some());
     let has_beeper = Memo::new(move |_| beeper.with(Option::is_some));
     let has_date = Memo::new(move |_| battery_date.with(Option::is_some));
-    let charge_text = move || charge.get().map(|c| i18n::pct(c as f64)).unwrap_or_else(|| "—".into());
-    let runtime_text = move || runtime.get().map(i18n::duration).unwrap_or_else(|| "—".into());
+    let charge_text = move || charge.get().map(|c| i18n::pct(c as f64)).unwrap_or_else(|| ui::DASH.into());
+    let runtime_text = move || runtime.get().map(i18n::duration).unwrap_or_else(|| ui::DASH.into());
     let aria = move || format!("{}: {} · {}: {}", t("ups.charge"), charge_text(), t("ups.runtime"), runtime_text());
     let beeper_text = move || {
         beeper
@@ -282,7 +279,7 @@ fn connected_view(u: RwSignal<Option<UpsStatus>>) -> AnyView {
             </div>
             <div class="hw-sum-item">
                 <span class="muted small">{tr("ups.load")}</span>
-                <strong class="tnum">{move || load.get().map(|l| i18n::pct(l as f64)).unwrap_or_else(|| "—".into())}</strong>
+                <strong class="tnum">{move || load.get().map(|l| i18n::pct(l as f64)).unwrap_or_else(|| ui::DASH.into())}</strong>
                 {move || has_load.get().then(|| view! {
                     <Meter pct=Signal::derive(move || load.get().unwrap_or(0.0) as f64) tone=Signal::derive(move || load_tone(load.get().unwrap_or(0.0))) />
                 })}
@@ -297,13 +294,13 @@ fn connected_view(u: RwSignal<Option<UpsStatus>>) -> AnyView {
             </div>
         </div>
         <dl class="kvs">
-            {kv("ups.manufacturer", view! { <span>{move || dash(manufacturer.get())}</span> }.into_any())}
-            {kv("f.model", view! { <span>{move || dash(model.get())}</span> }.into_any())}
-            {kv("sto.serial", view! { <span class="mono">{move || dash(serial.get())}</span> }.into_any())}
-            {move || has_beeper.get().then(|| kv("ups.beeper", view! { <span>{beeper_text}</span> }.into_any()))}
-            {move || has_date.get().then(|| kv("ups.battery_date", view! { <span>{move || battery_date.get().unwrap_or_default()}</span> }.into_any()))}
-            {kv("ups.driver", view! { <span>{move || driver.get()}</span> }.into_any())}
-            {kv("hw.updated", view! { <span>{move || i18n::short_when(read_at.get())}</span> }.into_any())}
+            {ui::kv("ups.manufacturer", view! { <span>{move || dash(manufacturer.get())}</span> }.into_any())}
+            {ui::kv("f.model", view! { <span>{move || dash(model.get())}</span> }.into_any())}
+            {ui::kv("sto.serial", view! { <span class="mono">{move || dash(serial.get())}</span> }.into_any())}
+            {move || has_beeper.get().then(|| ui::kv("ups.beeper", view! { <span>{beeper_text}</span> }.into_any()))}
+            {move || has_date.get().then(|| ui::kv("ups.battery_date", view! { <span>{move || battery_date.get().unwrap_or_default()}</span> }.into_any()))}
+            {ui::kv("ups.driver", view! { <span>{move || driver.get()}</span> }.into_any())}
+            {ui::kv("hw.updated", view! { <span>{move || i18n::short_when(read_at.get())}</span> }.into_any())}
         </dl>
     }
     .into_any()
@@ -510,12 +507,12 @@ fn test_card(settings: Remote<UpsSettingsState>) -> AnyView {
         }
     };
     let can = move || available.get() && online.get() && busy.get().is_none();
-    let spin = move |k: BatteryTest| (busy.get() == Some(k)).then(|| view! { <span class="btn-spinner" aria-hidden="true"></span> });
+    let spin = move |k: BatteryTest| crate::form::spinner_when(Signal::derive(move || busy.get() == Some(k)));
     let schedule = Memo::new(move |_| live.ups.with(|u| u.as_ref().and_then(schedule_command)).filter(|_| available.get()));
     view! {
         <section class="card widget w-6">
             <WidgetHead icon=icons::ACTIVITY title="ups.test" />
-            <dl class="kvs">{kv("ups.last_result", view! { <span>{result}</span> }.into_any())}</dl>
+            <dl class="kvs">{ui::kv("ups.last_result", view! { <span>{result}</span> }.into_any())}</dl>
             {move || (loaded.get() && !available.get()).then(|| view! { {ui::note(Tone::Info, icons::INFO, view! { {t("ups.need_nut")} }.into_any())} })}
             {move || (available.get() && connected.get() && !any.get()).then(|| view! { <p class="sec-note"><Icon icon=icons::INFO size=16 />{t("ups.test_unsupported")}</p> })}
             {move || (any.get() && !online.get()).then(|| view! { <p class="sec-note"><Icon icon=icons::INFO size=16 />{t("ups.test_online")}</p> })}

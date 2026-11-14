@@ -318,13 +318,11 @@ fn import_dialog(d: RwSignal<SynologySettings>, sc: Memo<Option<(u8, u8, u8)>>, 
         <div aria-live="polite">{result}</div>
     }
     .into_any();
-    let foot = view! {
-        <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("cancel")}</button>
-        <button type="button" class="btn primary" disabled=move || !usable() on:click=apply>
-            <Icon icon=icons::IMPORT size=16 />{tr("syn.ledsch_apply")}
-        </button>
-    }
-    .into_any();
+    let foot = crate::form::save_bar_with(crate::form::SaveBar {
+        can_save: Signal::derive(usable),
+        icon: Some(icons::IMPORT),
+        ..crate::form::SaveBar::new(RwSignal::new(false), "syn.ledsch_apply", close, Callback::new(apply))
+    });
     ui::dialog(DlgKind::Normal, Signal::derive(|| t("syn.ledsch_import").to_string()), close, body, Some(foot))
 }
 

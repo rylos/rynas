@@ -209,6 +209,24 @@ pub fn ErrorBox(#[prop(into)] code: Signal<String>, on_retry: Callback<()>) -> i
     }
 }
 
+/// [`ErrorBox`] for a read whose failure is already a message ([`crate::api::ApiErr::text`]:
+/// a plan, a listing asked by hand): the same look and Retry.
+pub fn error_box_text(msg: String, on_retry: Callback<()>) -> AnyView {
+    view! {
+        <div class="error-state" role="alert">
+            <span class="error-icon"><Icon icon=icons::TRIANGLE_ALERT size=22 /></span>
+            <div class="error-body">
+                <strong>{tr("error.load")}</strong>
+                <p class="muted small">{err_view(msg)}</p>
+            </div>
+            <button class="btn ghost sm" on:click=move |_| on_retry.run(())>
+                <Icon icon=icons::REFRESH_CW size=14 />{tr("err.retry")}
+            </button>
+        </div>
+    }
+    .into_any()
+}
+
 /// Skeleton while nothing has arrived, the [`ErrorBox`] once the read failed. The one loading
 /// placeholder of the UI ([`Remote`], [`Pending`], the storage store).
 pub fn loading(err: Signal<Option<String>>, retry: Callback<()>, lines: usize) -> AnyView {
@@ -517,6 +535,9 @@ pub enum DlgKind {
     Wide,
     /// Right-hand side panel, full height (editors).
     Drawer,
+    /// [`DlgKind::Drawer`], 880 px wide (status drawers with tables: PC backups, shares,
+    /// snapshot jobs, browsing a snapshot).
+    WideDrawer,
     /// Centered confirmation (`role="alertdialog"`).
     Alert,
 }
@@ -592,6 +613,7 @@ pub fn dialog(kind: DlgKind, title: Signal<String>, on_close: Callback<()>, body
         DlgKind::Normal => "modal",
         DlgKind::Wide => "modal wide",
         DlgKind::Drawer => "modal drawer",
+        DlgKind::WideDrawer => "modal drawer drawer-wide",
         DlgKind::Alert => "modal alert",
     };
     let label_id = id.clone();
@@ -649,31 +671,86 @@ pub fn focus_invalid() {
     });
 }
 
-/// [`dialog`] as a component (`<Modal title=… on_close=…>…</Modal>`), centered or, with
-/// `drawer`, on the right-hand side.
+/// [`dialog`] as a component (`<Modal title=… on_close=… foot=…>…</Modal>`), centered or,
+/// with `drawer`, on the right-hand side.
 #[component]
 pub fn Modal(
     #[prop(into)] title: Signal<String>,
     on_close: Callback<()>,
     #[prop(optional)] drawer: bool,
-    /// Wider dialog (diffs, logs, plans).
+    /// Wider dialog (diffs, logs, plans); with `drawer`, the wide drawer.
     #[prop(optional)]
     wide: bool,
+    /// The action row (Cancel / the action), outside the scrolling body. Re-run when what
+    /// it reads changes (a dialog with stages shows the buttons of the current one); a row
+    /// with no buttons is hidden.
+    #[prop(optional, into)]
+    foot: Option<ViewFn>,
     children: Children,
 ) -> impl IntoView {
-    let kind = if drawer {
-        DlgKind::Drawer
-    } else if wide {
-        DlgKind::Wide
-    } else {
-        DlgKind::Normal
+    let kind = match (drawer, wide) {
+        (true, true) => DlgKind::WideDrawer,
+        (true, false) => DlgKind::Drawer,
+        (false, true) => DlgKind::Wide,
+        (false, false) => DlgKind::Normal,
     };
-    dialog(kind, title, on_close, children(), None)
+    dialog(kind, title, on_close, children(), foot.map(|f| (move || f.run()).into_any()))
 }
 
 /// Side drawer (an editor): title, scrolling body, the action row at the bottom.
 pub fn drawer(title: Signal<String>, close: Callback<()>, body: AnyView, foot: AnyView) -> AnyView {
     dialog(DlgKind::Drawer, title, close, body, Some(foot))
+}
+
+/// [`drawer`], 880 px wide (status drawers with tables).
+pub fn drawer_wide(title: Signal<String>, close: Callback<()>, body: AnyView, foot: AnyView) -> AnyView {
+    dialog(DlgKind::WideDrawer, title, close, body, Some(foot))
+}
+
+/// The ghost Close button, alone at the bottom right of a dialog that only shows something
+/// (a log, a result, a status drawer without actions). Never primary: nothing is decided.
+pub fn close_foot(close: Callback<()>) -> AnyView {
+    view! { <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("close")}</button> }.into_any()
+}
+
+/// The destructive action of a status drawer (Remove, Delete): left in the footer, away from
+/// the others ([`detail_drawer`]).
+pub struct Danger {
+    /// i18n key of the button.
+    pub label: &'static str,
+    pub icon: &'static str,
+    pub disabled: Signal<bool>,
+    /// Usually opens a [`confirm`].
+    pub on_click: Callback<()>,
+}
+
+impl Danger {
+    /// A Remove/Delete button with the bin icon.
+    pub fn new(label: &'static str, on_click: Callback<()>) -> Self {
+        Danger { label, icon: icons::TRASH_2, disabled: Signal::stored(false), on_click }
+    }
+}
+
+/// The footer of a status drawer, the PC backup drawer's pattern: the danger action on the
+/// left (`foot-start`), the secondary actions (Settings, Edit…) on the right, then Close
+/// (ghost). Actions that act on one section sit on that section's title row, not here.
+pub fn drawer_foot(danger: Option<Danger>, secondary: Option<AnyView>, close: Callback<()>) -> AnyView {
+    let danger = danger.map(|d| {
+        let (go, off) = (d.on_click, d.disabled);
+        view! {
+            <button type="button" class="btn danger foot-start" disabled=move || off.get() on:click=move |_| go.run(())>
+                <Icon icon=d.icon size=16 />{tr(d.label)}
+            </button>
+        }
+    });
+    view! { {danger}{secondary}{close_foot(close)} }.into_any()
+}
+
+/// A status drawer (a PC, a stack, an app, a drive, an interface): status card and sections in
+/// the body, [`drawer_foot`] at the bottom; `wide` for drawers with tables.
+pub fn detail_drawer(title: Signal<String>, close: Callback<()>, wide: bool, body: AnyView, danger: Option<Danger>, secondary: Option<AnyView>) -> AnyView {
+    let kind = if wide { DlgKind::WideDrawer } else { DlgKind::Drawer };
+    dialog(kind, title, close, body, Some(drawer_foot(danger, secondary, close)))
 }
 
 /// What a [`confirm`] dialog asks.
@@ -825,6 +902,182 @@ pub fn Field(label: &'static str, children: Children) -> impl IntoView {
 /// One row of a key/value list (`<dl class="kvs">`), shared by every page.
 pub fn kv_row(label: &'static str, value: Signal<String>, class: &'static str) -> AnyView {
     view! { <div class="kv"><dt>{tr(label)}</dt><dd class=class>{move || value.get()}</dd></div> }.into_any()
+}
+
+/// [`kv_row`] whose value is any view (a status pill, a link, a chip row).
+pub fn kv(label: &'static str, value: AnyView) -> AnyView {
+    view! { <div class="kv"><dt>{tr(label)}</dt><dd>{value}</dd></div> }.into_any()
+}
+
+/// [`kv_row`] of a fixed text (`class`: `mono`, `tnum`, `muted`…).
+pub fn kv_text(label: &'static str, value: String, class: &'static str) -> AnyView {
+    view! { <div class="kv"><dt>{tr(label)}</dt><dd class=class>{value}</dd></div> }.into_any()
+}
+
+/// What a missing value shows (never run, not measured, no address).
+pub const DASH: &str = "—";
+
+/// A date and time ([`crate::i18n::datetime`]), or [`DASH`] when there is none.
+pub fn when(ms: Option<u64>) -> String {
+    ms.map(crate::i18n::datetime).unwrap_or_else(|| DASH.to_string())
+}
+
+/// The one line of a section with nothing in it ("No snapshots yet"): small and muted. A page
+/// or tab with nothing in it is an [`EmptyState`].
+pub fn empty_line(key: &'static str) -> AnyView {
+    view! { <p class="small muted empty-line">{tr(key)}</p> }.into_any()
+}
+
+/// A short tag next to a name (SMR, weak key, erases, inverted), coloured by `tone`. A state
+/// (running, failed) is a [`Status`] pill, not a chip.
+pub fn chip(tone: Tone, content: AnyView) -> AnyView {
+    view! { <span class=format!("chip {}", tone.class())>{content}</span> }.into_any()
+}
+
+/// What an icon-only button does to what: the accessible name and tooltip of a row action,
+/// "<Verb> <name>" ("Delete marco", "Stop portainer").
+pub fn verb_name(verb: &'static str, name: &str) -> String {
+    format!("{} {name}", crate::i18n::t(verb))
+}
+
+/// An icon-only row action. `label` is its tooltip and accessible name ([`verb_name`]);
+/// `danger` for delete/remove (red on hover).
+pub fn icon_btn(icon: &'static str, label: String, danger: bool, disabled: Signal<bool>, on_click: Callback<()>) -> AnyView {
+    view! {
+        <button type="button" class=if danger { "icon-btn sm danger" } else { "icon-btn sm" } title=label.clone() aria-label=label
+            disabled=move || disabled.get() on:click=move |_| on_click.run(())>
+            <Icon icon=icon size=16 />
+        </button>
+    }
+    .into_any()
+}
+
+/// Copy to the clipboard: async Clipboard API when present (secure contexts), else the old
+/// textarea + execCommand path (plain-HTTP LAN addresses).
+pub fn copy_text(text: &str) -> bool {
+    use wasm_bindgen::{JsCast, JsValue};
+    let nav = window().navigator();
+    let has_api = js_sys::Reflect::get(&nav, &JsValue::from_str("clipboard")).is_ok_and(|v| !v.is_undefined());
+    if has_api && window().is_secure_context() {
+        let _ = nav.clipboard().write_text(text);
+        return true;
+    }
+    let doc = document();
+    let Ok(ta) = doc.create_element("textarea") else { return false };
+    let ta: web_sys::HtmlTextAreaElement = ta.unchecked_into();
+    ta.set_value(text);
+    let _ = ta.set_attribute("style", "position:fixed;opacity:0;top:0;left:0");
+    let Some(body) = doc.body() else { return false };
+    let _ = body.append_child(&ta);
+    ta.select();
+    let ok = doc.unchecked_ref::<web_sys::HtmlDocument>().exec_command("copy").unwrap_or(false);
+    ta.remove();
+    ok
+}
+
+/// Copy button with a short "Copied" feedback (one shared instantiation). `label`: i18n key
+/// of its text.
+pub fn copy_button(label: &'static str, text: String) -> AnyView {
+    copy_button_aria(label, None, text)
+}
+
+/// [`copy_button`] with its own accessible name (`aria`), for views with several copy buttons
+/// that would otherwise all read "Copy".
+pub fn copy_button_for(label: &'static str, aria: String, text: String) -> AnyView {
+    copy_button_aria(label, Some(aria), text)
+}
+
+fn copy_button_aria(label: &'static str, aria: Option<String>, text: String) -> AnyView {
+    let copied = RwSignal::new(false);
+    view! {
+        <button class="btn ghost sm" type="button" aria-label=aria on:click=move |_| {
+            if copy_text(&text) {
+                copied.set(true);
+                set_timeout(move || { let _ = copied.try_set(false); }, std::time::Duration::from_millis(1800));
+            }
+        }>
+            {move || view! { <Icon icon=if copied.get() { icons::CHECK } else { icons::COPY } size=14 /> }}
+            {move || if copied.get() { crate::i18n::t("copied") } else { crate::i18n::t(label) }}
+        </button>
+    }
+    .into_any()
+}
+
+/// A titled command or config block with its own Copy button (named after the title for
+/// screen readers); nothing when the text is empty.
+pub fn code_block(title: &'static str, text: String) -> Option<AnyView> {
+    if text.trim().is_empty() {
+        return None;
+    }
+    let aria = crate::i18n::tf("pcb.copy_of", &[("what", crate::i18n::t(title))]);
+    Some(
+        view! {
+            <h4 class="small"><strong>{tr(title)}</strong></h4>
+            <pre class="app-code">{text.clone()}</pre>
+            <div class="sec-actions">{copy_button_for("dns.copy", aria, text)}</div>
+        }
+        .into_any(),
+    )
+}
+
+/// Which [`fold`]s of a view are open, by a stable key (a section's title, a run's
+/// timestamp): what the user chose, kept while the content is built again (a poll, a reload
+/// rebuilds a drawer's body); a fold never touched keeps its default.
+#[derive(Clone, Copy)]
+pub struct Folds(RwSignal<std::collections::HashMap<String, bool>>);
+
+impl Default for Folds {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Folds {
+    pub fn new() -> Self {
+        Folds(RwSignal::new(Default::default()))
+    }
+
+    /// The `open` attribute of the fold `key`.
+    pub fn open(self, key: impl Into<String>, default: bool) -> impl Fn() -> bool + Send + Sync + Copy + 'static {
+        let key = StoredValue::new(key.into());
+        move || self.0.with(|m| key.with_value(|k| m.get(k).copied()).unwrap_or(default))
+    }
+
+    /// A `toggle` event of the fold `key`: remember its state.
+    pub fn toggled(self, key: &str, ev: &web_sys::Event) {
+        let open = event_target::<web_sys::Element>(ev).has_attribute("open");
+        if self.0.with_untracked(|m| m.get(key).copied()) != Some(open) {
+            self.0.update(|m| {
+                m.insert(key.to_string(), open);
+            });
+        }
+    }
+}
+
+/// A folded part of a view (advanced options, history, a log, rare actions): a `<details>`
+/// with a chevron, the title (i18n key) and an optional `summary` after it (a state, a count).
+/// With `folds` the open state survives a rebuild of the content.
+pub fn fold(folds: Option<Folds>, title: &'static str, open: bool, summary: Option<AnyView>, body: AnyView) -> AnyView {
+    let remembered = folds.map(|f| f.open(title, open));
+    let is_open = move || remembered.map(|g| g()).unwrap_or(open);
+    view! {
+        <details class="fold" open=is_open on:toggle=move |ev| if let Some(f) = folds { f.toggled(title, &ev) }>
+            <summary><Icon icon=icons::CHEVRON_RIGHT size=14 /><span class="fold-title">{tr(title)}</span>{summary}</summary>
+            <div class="fold-body">{body}</div>
+        </details>
+    }
+    .into_any()
+}
+
+/// [`fold`] whose title is built (a count: "3 steps", "2 known issues"), with what follows it.
+pub fn fold_with(title: AnyView, open: bool, body: AnyView) -> AnyView {
+    view! {
+        <details class="fold" open=open>
+            <summary><Icon icon=icons::CHEVRON_RIGHT size=14 /><span class="fold-title">{title}</span></summary>
+            <div class="fold-body">{body}</div>
+        </details>
+    }
+    .into_any()
 }
 
 #[cfg(test)]

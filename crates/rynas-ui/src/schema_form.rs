@@ -444,12 +444,7 @@ impl SchemaForm {
                 let main = main.into_iter().map(|k| self.clone().field(k)).collect_view();
                 let adv = (!adv.is_empty()).then(|| {
                     let rows = adv.into_iter().map(|k| self.clone().field(k)).collect_view();
-                    view! {
-                        <details class="sf-adv">
-                            <summary><Icon icon=icons::CHEVRON_RIGHT size=14 />{tr("sf.advanced")}</summary>
-                            <div class="form">{rows}</div>
-                        </details>
-                    }
+                    crate::ui::fold(None, "sf.advanced", false, None, view! { <div class="form">{rows}</div> }.into_any())
                 });
                 view! {
                     <fieldset class="sf-group">

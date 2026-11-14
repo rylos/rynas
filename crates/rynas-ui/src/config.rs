@@ -337,7 +337,7 @@ pub fn key_label(key: &str) -> String {
 /// A JSON value as one short line: strings bare, `—` for none, documents compacted.
 pub fn value_text(v: Option<&Value>) -> String {
     let s = match v {
-        None | Some(Value::Null) => return "—".into(),
+        None | Some(Value::Null) => return crate::ui::DASH.into(),
         Some(Value::String(s)) if s.is_empty() => return format!("({})", t("diff.empty")),
         Some(Value::String(s)) => s.clone(),
         Some(other) => other.to_string(),
@@ -437,7 +437,7 @@ pub fn PendingBar() -> impl IntoView {
                 <Icon icon=icons::FILE_DIFF size=16 />
                 <span class="pending-text">
                     <strong class="tnum">{move || n.get()}</strong>" "
-                    {move || if n.get() == 1 { t("pending.one") } else { t("pending.changes") }}
+                    {move || i18n::tn("pending.changes", n.get() as u64, &[])}
                     <span class="pending-keys">{keys}</span>
                 </span>
                 {move || c.conflicts().then(|| view! { <Status tone=Tone::Warn text=t("pending.conflict").to_string() /> })}

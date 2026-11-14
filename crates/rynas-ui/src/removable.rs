@@ -40,11 +40,11 @@ pub fn drive_icon(d: &RemovableDrive) -> &'static str {
 
 /// "2 drives" / "1 drive".
 fn count_text(n: usize) -> String {
-    if n == 1 { t("rm.count_one").to_string() } else { tf("rm.count", &[("n", &n.to_string())]) }
+    i18n::tn("rm.count", n as u64, &[])
 }
 
 fn mounted_text(n: usize) -> String {
-    if n == 1 { t("rm.mounted_one").to_string() } else { tf("rm.mounted", &[("n", &n.to_string())]) }
+    i18n::tn("rm.mounted", n as u64, &[])
 }
 
 fn remove_hint(m: RemoveMethod) -> &'static str {
@@ -469,7 +469,7 @@ fn volume_row(d: Memo<Option<RemovableDrive>>, name: String, p: Panel) -> AnyVie
             }.into_any());
             out.push(view! {
                 <button class="icon-btn sm" title=tr("rm.copy") aria-label=tr("rm.copy") on:click=move |_| {
-                    if crate::pages::security::copy_text(&mp) {
+                    if crate::ui::copy_text(&mp) {
                         toast(Tone::Ok, t("rm.copied").to_string());
                     }
                 }>

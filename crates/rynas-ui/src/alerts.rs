@@ -170,7 +170,7 @@ pub fn derive(
                     "sync",
                     "notif.array_sync",
                     "notif.array_sync_text",
-                    vec![("pct", a.sync_pct.map(|p| format!("{}%", crate::i18n::num(p as f64, 1))).unwrap_or_else(|| "—".into()))],
+                    vec![("pct", a.sync_pct.map(|p| format!("{}%", crate::i18n::num(p as f64, 1))).unwrap_or_else(|| crate::ui::DASH.into()))],
                 ),
                 _ => continue,
             };

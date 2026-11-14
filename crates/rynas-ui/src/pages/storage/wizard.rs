@@ -254,7 +254,7 @@ pub fn CreateVolume() -> impl IntoView {
                                             {move || hdr_msg.get().map(|m| view! { <p class="muted small" role="status">{m}</p> })}
                                         </div>
                                     })}
-                                    <div class="dialog-foot"><a class="btn primary" href=href>{tr("wiz.open_volume")}</a></div>
+                                    <div class="form-actions"><a class="btn primary" href=href>{tr("wiz.open_volume")}</a></div>
                                 }
                                 .into_any()
                             } else {
@@ -262,7 +262,7 @@ pub fn CreateVolume() -> impl IntoView {
                                 view! {
                                     {ui::note(Tone::Err, icons::CIRCLE_X, view! { {tr("sto.done_err")} }.into_any())}
                                     {(!err.is_empty()).then(|| view! { <p class="form-error"><Icon icon=icons::CIRCLE_X size=16 />{ui::tech_detail(err)}</p> })}
-                                    <div class="dialog-foot">
+                                    <div class="form-actions">
                                         <button class="btn ghost" type="button" on:click=move |_| { stage.set(Stage::Form); plan_final(); }>{tr("wiz.back_review")}</button>
                                     </div>
                                 }
@@ -348,7 +348,7 @@ fn step_level(chosen: RwSignal<Vec<String>>, level: RwSignal<RaidLevel>, plans: 
                                     {move || match plan() {
                                         None => "…".to_string(),
                                         Some(Ok(p)) if p.valid => i18n::bytes(p.usable_bytes),
-                                        Some(_) => "—".to_string(),
+                                        Some(_) => ui::DASH.to_string(),
                                     }}
                                 </span>
                                 <span class="small">{move || plan().and_then(Result::ok).filter(|p| p.valid).map(|p| tolerance_text(p.fault_tolerance))}</span>
@@ -389,7 +389,7 @@ fn step_options(
     pass_err: impl Fn() -> Option<&'static str> + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
     view! {
-        <h2 class="section-title"><Icon icon=icons::SETTINGS_2 size=16 />{tr("wiz.s_options")}</h2>
+        <h2 class="section-title"><Icon icon=icons::SETTINGS size=16 />{tr("wiz.s_options")}</h2>
         <div class="form">
             <label class="field">
                 <span class="field-label">{tr("wiz.label")}</span>

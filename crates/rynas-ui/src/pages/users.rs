@@ -288,7 +288,7 @@ fn adopt_banner(n: usize, url: &'static str) -> Option<AnyView> {
             });
         };
         ui::note(Tone::Info, icons::INFO, view! {
-            <span>{if n == 1 { t("users.adopt_banner_one").to_string() } else { tf("users.adopt_banner", &[("n", &n.to_string())]) }}</span>
+            <span>{crate::i18n::tn("users.adopt_banner", n as u64, &[])}</span>
             <div class="sec-actions">
                 <button type="button" class="btn ghost" disabled=move || busy.get() on:click=go>{crate::form::spinner(busy)}{tr("users.adopt_all")}</button>
             </div>

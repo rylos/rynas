@@ -148,16 +148,11 @@ pub fn panel(active: Signal<bool>) -> AnyView {
             st.reload();
         }
     });
-    if let Ok(h) = set_interval_with_handle(
-        move || {
-            if active.get_untracked() && !document().hidden() && settings.err.with_untracked(Option::is_none) {
-                st.reload();
-            }
-        },
-        POLL,
-    ) {
-        on_cleanup(move || h.clear());
-    }
+    crate::live::poll(POLL, move || {
+        if active.get_untracked() && settings.err.with_untracked(Option::is_none) {
+            st.reload();
+        }
+    });
     (move || {
         if settings.err.with(|e| e.as_deref() == Some("not_found")) {
             return view! {
@@ -403,7 +398,7 @@ fn leds_card(d: RwSignal<QnapSettings>, st: Remote<QnapStatus>) -> AnyView {
     };
     view! {
         <section class="card widget w-6">
-            <WidgetHead icon=icons::SETTINGS_2 title="qnap.leds" />
+            <WidgetHead icon=icons::SETTINGS title="qnap.leds" />
             <div class="form">
                 {move || if confirmed.get() {
                     switch("qnap.led_control", Some("qnap.led_control_help"), control, set_control)
@@ -461,7 +456,7 @@ fn buttons_card(d: RwSignal<QnapSettings>, st: Remote<QnapStatus>) -> AnyView {
     };
     view! {
         <section class="card widget w-6">
-            <WidgetHead icon=icons::SETTINGS_2 title="qnap.buttons" />
+            <WidgetHead icon=icons::SETTINGS title="qnap.buttons" />
             <div class="form">
                 {select_field("reset_button", None, BUTTONS, reset, set_reset)}
                 <Show when=usb_fitted>{select_field("qnap.usb_copy", None, BUTTONS, usb, set_usb)}</Show>
@@ -527,7 +522,7 @@ fn events_card(st: Remote<QnapStatus>) -> AnyView {
             .rev()
             .map(|e| {
                 let name = t(if e.button == "reset" { "reset_button" } else { "qnap.usb_copy" });
-                let held = tf("qnap.held", &[("s", &format!("{:.1}", f64::from(e.held_ms) / 1000.0))]);
+                let held = tf("qnap.held", &[("s", &i18n::num(f64::from(e.held_ms) / 1000.0, 1))]);
                 view! { <p class="small">{i18n::short_when(e.at * 1000)}" · "{name}" · "{held}</p> }
             })
             .collect_view()

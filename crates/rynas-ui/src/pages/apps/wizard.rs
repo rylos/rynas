@@ -473,7 +473,7 @@ fn folders(w: W) -> AnyView {
     view! {
         {ui::note(Tone::Info, icons::FOLDER, view! { {move || tf("apps.w.stack_dir", &[("path", &stack_dir.get())])} }.into_any())}
         {if d.folders.is_empty() && d.shares.is_empty() {
-            view! { <p class="muted small">{tr("apps.w.no_folders")}</p> }.into_any()
+            ui::empty_line("apps.w.no_folders")
         } else {
             view! {
                 {(!d.folders.is_empty()).then(|| view! { <fieldset class="sf-group"><legend class="mini-title">{tr("apps.d.folders")}</legend><p class="small muted">{tr("apps.w.folders_text")}</p><div class="form">{folder_rows}</div></fieldset> })}
@@ -556,7 +556,7 @@ fn network(w: W) -> AnyView {
         view! {
             {if host_network { Some(ui::note(Tone::Info, icons::INFO, ui::text(t("apps.w.host_network").to_string()))) } else { None }}
             {inactive}
-            {if rows.is_empty() { view! { <p class="muted small">{tr("apps.w.no_ports")}</p> }.into_any() } else { ui::table("app-ports", &["apps.col.purpose", "apps.col.port", "apps.col.reach"], rows) }}
+            {if rows.is_empty() { ui::empty_line("apps.w.no_ports") } else { ui::table("app-ports", &["apps.col.purpose", "apps.col.port", "apps.col.reach"], rows) }}
             <div class="sec-actions">
                 <button type="button" class="btn ghost sm" disabled=move || w.planning.get() on:click=move |_| w.replan(None)>{spinner(w.planning)}<Icon icon=icons::REFRESH_CW size=14 />{tr("apps.w.check_again")}</button>
             </div>
@@ -664,14 +664,10 @@ fn review(w: W) -> AnyView {
             })}
             {(!p.images.is_empty()).then(|| view! { <h4 class="mini-title">{tr("dk.col.images")}</h4>{list(p.images.clone())} })}
             {(!p.compose.is_empty()).then(|| view! {
-                <details class="app-preview" open>
-                    <summary>{tr("apps.w.compose")}</summary>
-                    <pre class="app-code" tabindex="0" aria-label=tr("apps.w.compose")>{p.compose.clone()}</pre>
-                </details>
-                <details class="app-preview">
-                    <summary>{tr("apps.w.env")}</summary>
-                    <pre class="app-code" tabindex="0" aria-label=tr("apps.w.env")>{p.env.clone()}</pre>
-                </details>
+                <div class="folds">
+                    {ui::fold(None, "apps.w.compose", true, None, view! { <pre class="app-code" tabindex="0" aria-label=tr("apps.w.compose")>{p.compose.clone()}</pre> }.into_any())}
+                    {ui::fold(None, "apps.w.env", false, None, view! { <pre class="app-code" tabindex="0" aria-label=tr("apps.w.env")>{p.env.clone()}</pre> }.into_any())}
+                </div>
             })}
         }
         .into_any()
@@ -716,7 +712,7 @@ fn running(w: W) -> AnyView {
                                 <span class="cell-sub mono">{x.env.clone()}</span>
                                 <code class="app-secret-value">{x.value.clone()}</code>
                             </div>
-                            {crate::pages::security::copy_button("apps.w.copy", x.value.clone())}
+                            {crate::ui::copy_button("apps.w.copy", x.value.clone())}
                         </div>
                     }).collect_view()}
                 </section>

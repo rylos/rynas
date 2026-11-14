@@ -5,7 +5,7 @@
 
 import { call } from "./api.js";
 import { t, count } from "./i18n.js";
-import { esc, size, int, baseName, joinPath } from "./format.js";
+import { esc, size, int, num, pct, baseName, joinPath } from "./format.js";
 import { svg, glyph, colorClass } from "./icons.js";
 import { dialog, errorToast } from "./ui.js";
 
@@ -153,7 +153,7 @@ export function spaceAnalysis(path, onOpen) {
     drawList();
     const sec = Math.max(data.ms, 100) / 1000;
     stats.innerHTML =
-      t("{f} file in {d} cartelle, letti in {s} s", { f: int(data.root.f), d: int(data.dirs), s: sec.toLocaleString(undefined, { maximumFractionDigits: 1 }) }) +
+      t("{f} file in {d} cartelle, letti in {s} s", { f: int(data.root.f), d: int(data.dirs), s: num(sec, 1) }) +
       (data.partial ? ` · <span class="warn">${t("analisi incompleta: tempo scaduto")}</span>` : "") +
       (data.unreadable ? ` · ${t("{n} non leggibili", { n: int(data.unreadable) })}` : "");
   }
@@ -235,6 +235,3 @@ function arc(r1, r2, a0, a1) {
   return `M${p(r2, a0)}A${r2} ${r2} 0 ${large} 1 ${p(r2, a1)}L${p(r1, a1)}A${r1} ${r1} 0 ${large} 0 ${p(r1, a0)}Z`;
 }
 
-function pct(x) {
-  return (x * 100).toLocaleString(undefined, { maximumFractionDigits: x < 0.1 ? 1 : 0 }) + "%";
-}

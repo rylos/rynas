@@ -189,12 +189,12 @@ pub fn trigger_text(tr: &TaskTrigger) -> String {
             match c.repeat {
                 Repeat::Minutes => tf("sch.desc.minutes", &[("n", &c.every_min.to_string())]),
                 Repeat::Hourly => tf("sch.desc.hourly", &[("m", &format!("{:02}", c.minute))]),
-                Repeat::Daily => tf("sch.desc.daily", &[("time", &c.time)]),
+                Repeat::Daily => tf("sch.desc.daily", &[("time", &i18n::hm_text(&c.time))]),
                 Repeat::Weekly => {
                     let days: Vec<&str> = c.days.iter().map(|d| t(DAY_KEYS[*d as usize - 1])).collect();
-                    tf("sch.desc.weekly", &[("days", &days.join(", ")), ("time", &c.time)])
+                    tf("sch.desc.weekly", &[("days", &days.join(", ")), ("time", &i18n::hm_text(&c.time))])
                 }
-                Repeat::Monthly => tf("sch.desc.monthly", &[("d", &c.dom.to_string()), ("time", &c.time)]),
+                Repeat::Monthly => tf("sch.desc.monthly", &[("d", &c.dom.to_string()), ("time", &i18n::hm_text(&c.time))]),
                 Repeat::Custom | Repeat::Cron => on_calendar.clone(),
             }
         }
@@ -597,16 +597,7 @@ pub fn Scheduler() -> impl IntoView {
     let tab = RwSignal::new(0usize);
     let tasks = Remote::<Vec<TaskView>>::with_config("/api/v1/scheduler/tasks");
     // next runs and running state move by themselves: read again every 15 s while visible
-    if let Ok(h) = set_interval_with_handle(
-        move || {
-            if !document().hidden() && crate::auth::auth().is_ready() {
-                tasks.reload();
-            }
-        },
-        Duration::from_secs(15),
-    ) {
-        on_cleanup(move || h.clear());
-    }
+    crate::live::poll(Duration::from_secs(15), move || tasks.reload());
     let edit = RwSignal::new(None::<(ScheduledTask, bool)>);
     view! {
         <div class="page">
@@ -665,9 +656,8 @@ fn tasks_panel(tasks: Remote<Vec<TaskView>>, edit: RwSignal<Option<(ScheduledTas
         if rows.is_empty() {
             return if needle.is_empty() {
                 view! {
-                    <EmptyState icon=icons::CALENDAR_CLOCK title=Signal::derive(|| t("sch.empty").to_string()) text=Signal::derive(|| t("sch.empty_text").to_string())>
-                        <button class="btn primary" on:click=move |_| edit.set(Some((new_task(), true)))><Icon icon=icons::PLUS size=16 />{tr("sch.create")}</button>
-                    </EmptyState>
+                    // Create is in the page header: not repeated here
+                    <EmptyState icon=icons::CALENDAR_CLOCK title=Signal::derive(|| t("sch.empty").to_string()) text=Signal::derive(|| t("sch.empty_text").to_string()) />
                 }
                 .into_any()
             } else {
@@ -809,7 +799,7 @@ fn task_row(
     ui::row_class(
         vec![
             ui::cell("sch.col.enabled", "switch-col", view! {
-                <input type="checkbox" role="switch" class="switch" aria-label=format!("{}: {}", t("sch.col.enabled"), n1)
+                <input type="checkbox" role="switch" class="switch" aria-label=ui::verb_name("sch.col.enabled", &n1)
                 prop:checked=enabled disabled=move || toggling.get() || deleting || is_managed
                 on:change=move |ev| toggle(event_target_checked(&ev)) />
             }
@@ -850,11 +840,11 @@ fn task_row(
             }
             .into_any()),
             ui::actions(view! {
-                <button class="icon-btn sm" title=tr("run_now") aria-label=format!("{}: {}", t("run_now"), n2)
+                <button class="icon-btn sm" title=tr("run_now") aria-label=ui::verb_name("run_now", &n2)
                     disabled=move || running.get() || st.running || !st.applied || is_managed on:click=run>
                     <Icon icon=icons::PLAY size=16 />
                 </button>
-                <button class="icon-btn sm" title=tr("sch.history") aria-label=format!("{}: {}", t("sch.history"), n3) on:click=move |_| history.set(Some(t_hist.clone()))>
+                <button class="icon-btn sm" title=tr("sch.history") aria-label=ui::verb_name("sch.history", &n3) on:click=move |_| history.set(Some(t_hist.clone()))>
                     <Icon icon=icons::HISTORY size=16 />
                 </button>
                 <button class="icon-btn sm" title=tr("edit") aria-label=format!("{} {}", t("edit"), n4) disabled=deleting || is_managed on:click=move |_| edit.set(Some((task.clone(), false)))>
@@ -1047,14 +1037,13 @@ fn task_editor(init: ScheduledTask, is_new: bool, close: Callback<()>) -> AnyVie
             <h3 class="form-section">{tr("sch.sec.notify")}</h3>
             {select_field("sch.f.notify", None, NOTIFY, notify, set_notify)}
             {switch("sch.f.notify_output", Some("sch.f.notify_output_help"), notify_output, set_notify_output)}
-            <details class="advanced">
-                <summary>{tr("advanced")}</summary>
+            {ui::fold(None, "advanced", false, None, view! { 
                 <div class="form-row three">
                     {number_field("sch.f.timeout", Some("sch.f.timeout_help"), timeout, set_timeout_s, 1, 604800)}
                     {number_field("sch.f.nice", Some("sch.f.nice_help"), nice, set_nice, -20, 19)}
                     {number_field("sch.f.io_weight", Some("sch.f.io_weight_help"), iow, set_iow, 1, 10000)}
                 </div>
-            </details>
+             }.into_any())}
             <button type="submit" hidden=true></button>
         </form>
     }
@@ -1150,7 +1139,7 @@ fn history_drawer(task: ScheduledTask, close: Callback<()>) -> AnyView {
             Ok(r) => {
                 let text = r.output.clone().unwrap_or_default();
                 view! {
-                    <h3 class="drawer-h">{tr("sch.output")}" · "{i18n::datetime(r.start_ms.unwrap_or(r.end_ms))}</h3>
+                    <h3 class="mini-title">{tr("sch.output")}" · "{i18n::datetime(r.start_ms.unwrap_or(r.end_ms))}</h3>
                     {r.output_truncated.then(|| view! { <p class="field-help">{tf("sch.truncated", &[("size", &i18n::bytes(r.output_bytes))])}</p> })}
                     <pre class="log run-log" tabindex="0" aria-label=tr("sch.output")>{if text.is_empty() { t("sch.no_output").to_string() } else { text }}</pre>
                 }
@@ -1164,8 +1153,8 @@ fn history_drawer(task: ScheduledTask, close: Callback<()>) -> AnyView {
         Signal::stored(tf("sch.history_title", &[("name", &n)]))
     };
     let body = view! { {list}{out} }.into_any();
-    let foot = view! { <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("close")}</button> }.into_any();
-    view! { <div class="wide-drawer">{drawer(title, close, body, foot)}</div> }.into_any()
+    let foot = ui::close_foot(close);
+    view! { {ui::drawer_wide(title, close, body, foot)} }.into_any()
 }
 
 fn open_run(base: String, n: u64, selected: RwSignal<Option<u64>>, output: RwSignal<Option<Result<TaskRun, String>>>) {
@@ -1194,8 +1183,8 @@ fn timers_panel() -> AnyView {
                 {ui::table("", &["sch.col.timer", "sch.col.schedule", "sch.col.next", "sch.col.last"], l.into_iter().map(|tm| ui::row(vec![
                                 ui::cell("sch.col.timer", "", view! { <div class="cell-main"><span class="mono">{tm.unit.clone()}</span><span class="cell-sub mono">{tm.activates.clone()}</span></div> }.into_any()),
                                 ui::cell("sch.col.schedule", "mono", view! { {tm.on_calendar.join(" · ")} }.into_any()),
-                                ui::cell("sch.col.next", "tnum", view! { {tm.next_ms.map(i18n::datetime).unwrap_or_else(|| "—".into())} }.into_any()),
-                                ui::cell("sch.col.last", "tnum", view! { {tm.last_ms.map(i18n::datetime).unwrap_or_else(|| "—".into())} }.into_any()),
+                                ui::cell("sch.col.next", "tnum", view! { {ui::when(tm.next_ms)} }.into_any()),
+                                ui::cell("sch.col.last", "tnum", view! { {ui::when(tm.last_ms)} }.into_any()),
                             ])).collect::<Vec<_>>())}
             }
             .into_any()
@@ -1218,7 +1207,7 @@ fn cron_panel(edit: RwSignal<Option<(ScheduledTask, bool)>>) -> AnyView {
                                 let convertible = c.trigger.is_some();
                                 let sched = c.trigger.as_ref().map(trigger_text).unwrap_or_default();
                                 let c2 = c.clone();
-                                let label = format!("{}: {}", t("sch.convert"), c.command);
+                                let label = ui::verb_name("sch.convert", &c.command);
                                 ui::row(vec![
                                     ui::cell("sch.col.source", "mono", view! { {format!("{}:{}", c.source, c.line)} }.into_any()),
                                     ui::cell("sch.col.schedule", "", view! { <div class="cell-main"><span class="mono">{c.schedule.clone()}</span><span class="cell-sub">{sched}</span></div> }.into_any()),

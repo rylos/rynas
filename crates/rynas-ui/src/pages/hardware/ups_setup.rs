@@ -576,10 +576,7 @@ fn results(
                         </p>
                         <p class="ups-cand-opts mono small">{opts}</p>
                         {(!tail.is_empty()).then(|| view! {
-                            <details class="ups-cand-log">
-                                <summary><Icon icon=icons::CHEVRON_RIGHT size=14 />{tr("upsw.driver_output")}</summary>
-                                <div class="pre-text log-text" lang="en">{tail}</div>
-                            </details>
+                            {ui::fold(None, "upsw.driver_output", false, None, view! { <div class="pre-text log-text ups-cand-log" lang="en">{tail}</div> }.into_any())}
                         })}
                     </div>
                 }

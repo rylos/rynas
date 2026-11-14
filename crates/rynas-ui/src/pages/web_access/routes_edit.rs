@@ -10,7 +10,7 @@ use leptos::prelude::*;
 use serde_json::{Value, json};
 
 use super::{access_radios, put, s_at, b_at, save_config, wa, WaState};
-use crate::form::{In, form_error, spinner, switch, text_field};
+use crate::form::{In, SaveBar, form_error, save_bar_with, switch, text_field};
 use crate::i18n::{t, tr};
 use crate::icons;
 use crate::ui::{self, Tone};
@@ -295,11 +295,7 @@ pub fn add_drawer(open: RwSignal<bool>) -> AnyView {
         </form>
     }
     .into_any();
-    let foot = view! {
-        <button type="button" class="btn ghost" disabled=move || busy.get() on:click=move |_| close.run(())>{tr("cancel")}</button>
-        <button type="submit" form=ADD_FORM class="btn primary" disabled=move || busy.get()>{spinner(busy)}{tr("wa.add.button")}</button>
-    }
-    .into_any();
+    let foot = save_bar_with(SaveBar { form: Some(ADD_FORM), ..SaveBar::new(busy, "wa.add.button", close, Callback::new(|_| {})) });
     ui::drawer(Signal::derive(|| t("wa.add.title").to_string()), close, body, foot)
 }
 

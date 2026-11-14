@@ -49,7 +49,7 @@ fn entries() -> Vec<Entry> {
         Entry { key: "nt.settings_title", icon: icons::BELL_RING, action: Action::Go("/system/notifications"), hint: "" },
         Entry { key: "nt.center", icon: icons::BELL, action: Action::Go("/notifications"), hint: "" },
         Entry { key: "bar.logout", icon: icons::LOG_OUT, action: Action::SignOut, hint: "" },
-        Entry { key: "pal.edit_layout", icon: icons::SETTINGS_2, action: Action::EditLayout, hint: "" },
+        Entry { key: "pal.edit_layout", icon: icons::SETTINGS, action: Action::EditLayout, hint: "" },
         Entry { key: "pal.notifications", icon: icons::BELL, action: Action::Notifications, hint: "" },
         Entry { key: "pal.theme_light", icon: icons::SUN, action: Action::Theme(ThemePref::Light), hint: "" },
         Entry { key: "pal.theme_dark", icon: icons::MOON, action: Action::Theme(ThemePref::Dark), hint: "" },

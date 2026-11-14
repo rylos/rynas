@@ -23,12 +23,13 @@ use rynas_api_types::web_access::{
 };
 use serde_json::{Map, Value, json};
 
-use super::{WaState, b_at, kv, put, s_at, save_config, url_links, wa};
+use super::{WaState, b_at, put, s_at, save_config, url_links, wa};
+use crate::ui::kv;
 use crate::api;
-use crate::form::{In, form_error, spinner, switch, text_field};
+use crate::form::{In, SaveBar, form_error, save_bar_with, spinner, switch, text_field};
 use crate::i18n::{self, t, tf, tr, try_t};
 use crate::icons::{self, Icon};
-use crate::pages::security::copy_button;
+use crate::ui::copy_button;
 use crate::ui::{self, Confirm, EmptyState, Remote, Tone, WidgetHead};
 
 const PROVIDERS: &str = "/api/v1/web-access/providers";
@@ -297,7 +298,7 @@ fn domain_list() -> AnyView {
             let open_label = tf("wa.confirm.open", &[("name", &v.name)]);
             ui::row(vec![
                 ui::cell("dom.col.domain", "wrap", ui::two_lines(view! { <strong>{dotted(&v.name)}</strong> }.into_any(), Some(sub), "cell-sub small")),
-                ui::cell("dom.col.cert", "wrap", cert.unwrap_or_else(|| view! { <span class="muted">"—"</span> }.into_any())),
+                ui::cell("dom.col.cert", "wrap", cert.unwrap_or_else(|| view! { <span class="muted">{ui::DASH}</span> }.into_any())),
                 ui::cell("col.status", "wrap", view! {
                     <div class="cell-main wa-stack">
                         {domain_state(v)}
@@ -315,9 +316,8 @@ fn domain_list() -> AnyView {
         {external.then(|| ui::note(Tone::Info, icons::INFO, ui::text(t("dom.external").to_string())))}
         {if rows.is_empty() {
             view! {
-                <EmptyState icon=icons::LINK title=Signal::derive(|| t("dom.empty").to_string()) text=Signal::derive(|| t("dom.empty_text").to_string())>
-                    <button class="btn primary" on:click=move |_| d.open.set(Some((String::new(), false)))><Icon icon=icons::PLUS size=16 />{tr("dom.add")}</button>
-                </EmptyState>
+                // "Add a domain" is in the tab's action row: not repeated here
+                <EmptyState icon=icons::LINK title=Signal::derive(|| t("dom.empty").to_string()) text=Signal::derive(|| t("dom.empty_text").to_string()) />
             }
             .into_any()
         } else {
@@ -411,7 +411,7 @@ fn cred_list() -> AnyView {
     let Some(cfg) = w.state.data.with(|s| s.as_ref().map(WaState::current)) else { return ().into_any() };
     let creds = list(&cfg, "credentials").to_vec();
     if creds.is_empty() {
-        return view! { <p class="small muted">{tr("dom.cred.empty")}</p> }.into_any();
+        return ui::empty_line("dom.cred.empty");
     }
     let ask = RwSignal::new(None::<String>);
     let busy = RwSignal::new(false);
@@ -607,11 +607,7 @@ fn cred_dialog(id: String) -> AnyView {
         }
         .into_any()
     };
-    let foot = view! {
-        <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("cancel")}</button>
-        <button type="button" class="btn primary" disabled=move || busy.get() on:click=go>{spinner(busy)}{tr("save")}</button>
-    }
-    .into_any();
+    let foot = save_bar_with(SaveBar::new(busy, "save", close, Callback::new(go)));
     let title = if is_new { "dom.cred.add" } else { "dom.cred.edit" };
     ui::dialog(ui::DlgKind::Normal, Signal::derive(move || t(title).to_string()), close, view! { {body} }.into_any(), Some(foot))
 }
@@ -650,7 +646,7 @@ enum Take {
 
 fn records_table(changes: Vec<DnsChange>, take: Take) -> AnyView {
     if changes.is_empty() {
-        return view! { <p class="small muted">{tr("dom.rec.none")}</p> }.into_any();
+        return ui::empty_line("dom.rec.none");
     }
     let manual: Vec<&DnsChange> = changes.iter().filter(|c| c.action == DnsAction::Manual).collect();
     let all_manual = manual.iter().map(|c| zone_lines(c)).collect::<Vec<_>>().join("\n");
@@ -661,7 +657,7 @@ fn records_table(changes: Vec<DnsChange>, take: Take) -> AnyView {
         .map(|c| {
             let failed = c.detail.starts_with("failed: ");
             let (tone, k) = if failed { (Tone::Err, "dns.act.failed") } else { action_of(c.action) };
-            let value = if c.wanted.is_empty() { "—".to_string() } else { c.wanted.join(", ") };
+            let value = if c.wanted.is_empty() { ui::DASH.to_string() } else { c.wanted.join(", ") };
             let now = (!c.current.is_empty() && c.current != c.wanted).then(|| c.current.join(", "));
             let why = match c.action {
                 _ if failed => Some("dns.why.failed"),
@@ -722,8 +718,8 @@ fn cert_rows(list: &[CertEntry]) -> Vec<AnyView> {
     list.iter()
         .map(|e| {
             let (tone, k) = cert_status(e.status);
-            let until = e.certificate.as_ref().map(|c| i18n::datetime(c.not_after_ms.max(0) as u64)).unwrap_or_else(|| "—".into());
-            let renew = e.renew_after_ms.map(|ms| i18n::datetime(ms.max(0) as u64)).unwrap_or_else(|| "—".into());
+            let until = e.certificate.as_ref().map(|c| i18n::datetime(c.not_after_ms.max(0) as u64)).unwrap_or_else(|| ui::DASH.into());
+            let renew = e.renew_after_ms.map(|ms| i18n::datetime(ms.max(0) as u64)).unwrap_or_else(|| ui::DASH.into());
             let err = e.last_error.clone().map(|m| view! { <span class="cell-sub small" lang="en">{m}</span> });
             ui::row(vec![
                 ui::cell("cert.col.cert", "wrap", view! {
@@ -792,11 +788,7 @@ fn domain_drawer(id: String, run_now: bool) -> AnyView {
         let title = Signal::derive(|| t("dom.add").to_string());
         let saved = Callback::new(move |nid: String| d.open.set(Some((nid, false))));
         let (form, busy, ready) = domain_form(String::new(), saved);
-        let foot = view! {
-            <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("cancel")}</button>
-            <button type="submit" form=NEW_FORM class="btn primary" disabled=move || busy.get() || !ready.get()>{spinner(busy)}{tr("dom.add_go")}</button>
-        }
-        .into_any();
+        let foot = save_bar_with(SaveBar { can_save: ready, form: Some(NEW_FORM), ..SaveBar::new(busy, "dom.add_go", close, Callback::new(|_| {})) });
         return ui::drawer(title, close, form, foot);
     }
     let w = wa();
@@ -929,7 +921,7 @@ fn domain_drawer(id: String, run_now: bool) -> AnyView {
                             {records_table(r.changes.clone(), Take::Ask(ask_take))}
                             <p class="small muted">{tf("dom.rec.at", &[("when", &i18n::datetime(r.at_ms.max(0) as u64))])}</p>
                         }.into_any(),
-                        None => view! { <p class="small muted">{tr("dom.rec.not_yet_text")}</p> }.into_any(),
+                        None => ui::empty_line("dom.rec.not_yet_text"),
                     }}
                     {form_error(write_err)}
                     <div class="sec-actions">
@@ -937,11 +929,11 @@ fn domain_drawer(id: String, run_now: bool) -> AnyView {
                     </div>
                 }.into_any()
             } else {
-                view! { <p class="small muted">{tr("dom.rec.off_text")}</p> }.into_any()
+                ui::empty_line("dom.rec.off_text")
             }}
             <h3 class="mini-title">{tr("dom.cert.title")}</h3>
             {if certs.is_empty() {
-                view! { <p class="small muted">{tr("dom.cert.none")}</p> }.into_any()
+                ui::empty_line("dom.cert.none")
             } else {
                 ui::table("wa-routes", CERT_HEADS, cert_rows(&certs))
             }}
@@ -958,13 +950,9 @@ fn domain_drawer(id: String, run_now: bool) -> AnyView {
     let saved = Callback::new(|_: String| ());
     let body = view! {
         {status}
-        <details class="tls-step">
-            <summary>{tr("dom.settings")}</summary>
+        {ui::fold(None, "dom.settings", false, None, view! { 
             {domain_form(id, saved).0}
-        </details>
-        <div class="sec-actions">
-            <button class="btn danger sm" on:click=move |_| { ask_err.set(None); ask_remove.set(true); }><Icon icon=icons::TRASH_2 size=14 />{tr("dom.remove")}</button>
-        </div>
+         }.into_any())}
         {move || ask_take.get().map(|c| {
             let text = tf("dom.take.text", &[("name", &c.name), ("now", &c.current.join(", ")), ("wanted", &c.wanted.join(", "))]);
             ui::confirm(Confirm { busy: ask_busy, error: ask_err, ..Confirm::new(tf("dom.take.title", &[("name", &c.name)]), text, "dns.take_over_btn", false, take, Callback::new(move |_| ask_take.set(None))) })
@@ -973,8 +961,11 @@ fn domain_drawer(id: String, run_now: bool) -> AnyView {
     }
     .into_any();
     let title = Signal::derive(move || view_of.with(|v| v.as_ref().map(|v| v.name.clone())).unwrap_or_default());
-    let foot = view! { <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("close")}</button> }.into_any();
-    ui::drawer(title, close, body, foot)
+    let remove_btn = ui::Danger::new("dom.remove", Callback::new(move |_| {
+        ask_err.set(None);
+        ask_remove.set(true);
+    }));
+    ui::detail_drawer(title, close, false, body, Some(remove_btn), None)
 }
 
 // ------------------------------------------------------------------ the domain form

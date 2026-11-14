@@ -60,7 +60,7 @@ fn exists_at(dir: &File, name: &str) -> bool {
     handle_in(dir, OsStr::new(name)).is_ok()
 }
 
-/// `name (restored 2026-11-05 1337).ext`, numbered if taken.
+/// `name (restored 2026-11-05 13.37).ext`, numbered if taken.
 fn restored_name(dir: &File, name: &str, is_file: bool, now_s: i64) -> String {
     let (stem, ext) = match name.rfind('.') {
         Some(i) if is_file && i > 0 => (&name[..i], &name[i..]),

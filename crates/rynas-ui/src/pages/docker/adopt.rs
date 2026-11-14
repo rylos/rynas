@@ -11,7 +11,7 @@ use rynas_api_types::docker::{AdoptPreview, AdoptRequest, AdoptWarning, AdoptedI
 use super::stacks::launch;
 use super::{done_toast, manager_name};
 use crate::api;
-use crate::form::{In, form_error, spinner, switch, text_field};
+use crate::form::{In, SaveBar, form_error, save_bar_with, spinner, switch, text_field};
 use crate::i18n::{t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::tasks::{self, tasks};
@@ -23,7 +23,7 @@ fn url(name: &str, rest: &str) -> String {
 }
 
 fn origin_name(o: Option<ManagerKind>) -> &'static str {
-    o.map(manager_name).unwrap_or("—")
+    o.map(manager_name).unwrap_or(ui::DASH)
 }
 
 /// Profiles typed as `a, b c`.
@@ -60,7 +60,7 @@ fn preview_view(p: &AdoptPreview) -> AnyView {
     view! {
         <dl class="kvs">
             {kv_row("dk.s.folder", Signal::stored(p.dir.clone()), "mono")}
-            {kv_row("dk.s.files", Signal::stored(if p.files.is_empty() { "—".to_string() } else { p.files.join(", ") }), "mono")}
+            {kv_row("dk.s.files", Signal::stored(if p.files.is_empty() { ui::DASH.to_string() } else { p.files.join(", ") }), "mono")}
             {kv_row("dk.ad.env", Signal::stored(env), "mono")}
         </dl>
         {notes}
@@ -228,13 +228,17 @@ pub(super) fn import_dialog(close: Callback<()>) -> AnyView {
     }
     .into_any();
     let can_import = move || !busy.get() && preview.with(Option::is_some) && name.with(|v| valid_stack_name(v));
-    let foot = view! {
-        {form_error(error)}
-        <button type="button" class="btn ghost" disabled=move || busy.get() on:click=move |_| close.run(())>{tr("cancel")}</button>
+    let secondary = view! {
         <button type="button" class="btn ghost" disabled=move || checking.get() || dir.with(|d| d.trim().is_empty()) on:click=move |_| check()>{spinner(checking)}<Icon icon=icons::SEARCH size=16 />{tr("dk.im.check")}</button>
-        <button type="button" class="btn primary" disabled=move || !can_import() on:click=go>{spinner(busy)}<Icon icon=icons::IMPORT size=16 />{tr("dk.im.import")}</button>
     }
     .into_any();
+    let foot = save_bar_with(SaveBar {
+        can_save: Signal::derive(can_import),
+        icon: Some(icons::IMPORT),
+        error: Some(error),
+        secondary: Some(secondary),
+        ..SaveBar::new(busy, "dk.im.import", close, Callback::new(go))
+    });
     ui::dialog(DlgKind::Normal, Signal::stored(t("dk.im.title").to_string()), close, body, Some(foot))
 }
 
@@ -288,7 +292,7 @@ pub(super) fn move_dialog(name: String, dir: String, target: Option<String>, can
         let body = MoveStackRequest { confirm: n2.clone() };
         launch(u.clone(), serde_json::to_string(&body).ok(), busy, error, cancel);
     });
-    let target = target.unwrap_or_else(|| "—".into());
+    let target = target.unwrap_or_else(|| ui::DASH.into());
     let text = tf("dk.ad.move_text", &[("from", &dir), ("to", &target)]);
     let typed = name.clone();
     // what the copy costs, from the mounted file systems: the target's free space and
@@ -302,7 +306,7 @@ pub(super) fn move_dialog(name: String, dir: String, target: Option<String>, can
             let fs_of = |p: &str| fss.iter().filter(|f| p == f.mountpoint || p.starts_with(&format!("{}/", f.mountpoint.trim_end_matches('/')))).max_by_key(|f| f.mountpoint.len()).copied();
             let (src, dst) = (fs_of(&dir), fs_of(&target));
             let reflink = matches!((src, dst), (Some(a), Some(b)) if a.mountpoint == b.mountpoint && a.fstype == "btrfs");
-            let free = dst.map(|f| crate::i18n::bytes(f.avail)).unwrap_or_else(|| "—".into());
+            let free = dst.map(|f| crate::i18n::bytes(f.avail)).unwrap_or_else(|| ui::DASH.into());
             view! {
                 <dl class="kvs">
                     {kv_row("dk.ad.move_free", Signal::stored(free), "tnum")}

@@ -4,8 +4,8 @@
 
 import { api, notifyUnauth } from "./api.js";
 import { prefs } from "./prefs.js";
-import { t, count, errText, LANG, LOCALE } from "./i18n.js";
-import { esc, size, sizeParts, speed, duration, clock, int, baseName, parentOf, dateTime } from "./format.js";
+import { t, count, errText, LOCALE } from "./i18n.js";
+import { esc, size, sizeParts, speed, duration, clock, int, num, of, isBinary, baseName, parentOf, dateTime } from "./format.js";
 import { svg } from "./icons.js";
 import { h, $, toast, errorToast } from "./ui.js";
 import { host, mount, activeElement, connected, emit, realTarget } from "./host.js";
@@ -141,7 +141,7 @@ function pctText(pct, done) {
   const n = Math.min(pct * 100, 99.9);
   const one = n > 0 && n < 10;
   const v = one ? Math.floor(n * 10) / 10 : Math.floor(n);
-  return v.toLocaleString(LANG, { minimumFractionDigits: one ? 1 : 0, maximumFractionDigits: one ? 1 : 0 });
+  return num(v, one ? 1 : 0);
 }
 
 /** A count per second (files): two decimals below 1, one below 10, whole above, in the interface's language. */
@@ -526,7 +526,7 @@ function renderDrawer() {
     const ended = [job.finished ? clock(job.finished) : "", duration(job.active_ms)].filter(Boolean).join(" · ");
     const meta = active(job)
       ? job.state === "running"
-        ? `<span>${st.byBytes ? `${size(job.progress.bytes_done)} / ${size(job.progress.bytes_total)}` : `${int(job.progress.files_done)} / ${int(job.progress.files_total)}`}</span><span>${job.cancelling ? t("Annullamento in corso…") : job.stalled_s ? t("Nessun dato da {n} s", { n: int(job.stalled_s) }) : [st.byBytes ? speed(st.now) : "", st.eta != null ? duration(st.eta) : ""].filter(Boolean).join(" · ")}</span>`
+        ? `<span>${st.byBytes ? of(size(job.progress.bytes_done), size(job.progress.bytes_total)) : of(int(job.progress.files_done), int(job.progress.files_total))}</span><span>${job.cancelling ? t("Annullamento in corso…") : job.stalled_s ? t("Nessun dato da {n} s", { n: int(job.stalled_s) }) : [st.byBytes ? speed(st.now) : "", st.eta != null ? duration(st.eta) : ""].filter(Boolean).join(" · ")}</span>`
         : `<span>${t(STATE[job.state])}</span><span>${pctText(st.pct, finished(job))}%</span>`
       : `<span>${ended}</span><span>${job.progress.errors ? count(job.progress.errors, "errore", "errori", int) : esc(jobMsg(job))}</span>`;
     const card = h(`<div class="jcard" tabindex="0" role="button">
@@ -1433,7 +1433,7 @@ function roundTop(v, bytes = true) {
 /** The unit a speed is shown in (1024ⁿ or 1000ⁿ B/s, as the sizes). */
 function speedUnit(bps) {
   const [, , u] = sizeParts(bps);
-  return (sizeParts(1024)[2] === 1 ? 1024 : 1000) ** u;
+  return (isBinary() ? 1024 : 1000) ** u;
 }
 
 /** A tick label: "100 MiB/s", "2,5 GiB/s" (no forced decimal). */

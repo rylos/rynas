@@ -57,30 +57,6 @@ fn deletion_reason(d: SnapshotDeletion) -> Option<&'static str> {
     }
 }
 
-/// Run a task started by `start` and report its end in a toast; `done` runs afterwards.
-fn follow_toast(start: impl std::future::Future<Output = Result<String, api::ApiErr>> + 'static, ok: String, busy: RwSignal<bool>, error: RwSignal<Option<String>>, done: Callback<()>) {
-    busy.set(true);
-    error.set(None);
-    spawn_local(async move {
-        let r = match start.await {
-            Ok(id) => tasks::follow(&id).await,
-            Err(e) => Err(e),
-        };
-        busy.set(false);
-        match r {
-            Ok(task) if task.status == TaskStatus::Ok => {
-                toast(Tone::Ok, ok);
-                done.run(());
-            }
-            Ok(task) => {
-                error.set(Some(tasks::task_error(&task)));
-                toast(Tone::Err, tasks::task_error(&task));
-                done.run(());
-            }
-            Err(e) => error.set(Some(e.text())),
-        }
-    });
-}
 
 #[component]
 pub fn Snapshots() -> impl IntoView {
@@ -93,16 +69,17 @@ pub fn Snapshots() -> impl IntoView {
     view! {
         <div class="page">
             <PageHeader icon=icons::CAMERA title="snap.title" subtitle="snap.subtitle">
-                // the action of the open tab: replica targets on Replication, jobs elsewhere
-                {move || if tab.get() == 2 {
-                    crate::pages::replication::add_button(jobs, edit_replica)
-                } else {
-                    view! {
+                // the action of the open tab only: jobs on Jobs, replica targets on Replication
+                // (restore points and the system tab create nothing)
+                {move || match tab.get() {
+                    1 => view! {
                         <button class="btn primary" on:click=move |_| edit.set(Some(None))>
                             <Icon icon=icons::PLUS size=16 /><span class="btn-label">{tr("snap.create_job")}</span>
                         </button>
                     }
-                    .into_any()
+                    .into_any(),
+                    2 => crate::pages::replication::add_button(jobs, edit_replica),
+                    _ => ().into_any(),
                 }}
             </PageHeader>
             <section class="card widget w-12">
@@ -207,15 +184,15 @@ fn snapshots_panel(jobs: Remote<Vec<SnapshotJobView>>, system: Remote<SystemSnap
                                 }
                                 .into_any()),
                                 ui::actions(view! {
-                                    <button class="icon-btn sm" title=tr("snap.browse") aria-label=format!("{}: {}", t("snap.browse"), s.id) disabled=!can_browse on:click=move |_| browse.set(Some(s2.clone()))>
+                                    <button class="icon-btn sm" title=tr("snap.browse") aria-label=ui::verb_name("snap.browse", &s.id) disabled=!can_browse on:click=move |_| browse.set(Some(s2.clone()))>
                                         <Icon icon=icons::FOLDER_OPEN size=16 />
                                     </button>
                                     <button class="icon-btn sm" title=move || if is_system { t("snap.rollback_system") } else { t("snap.rollback") }
-                                        aria-label=format!("{}: {}", t("snap.rollback"), s.id) disabled=!can_rollback on:click=move |_| if is_system { open_root(root, s3.clone()) } else { rollback.set(Some(s3.clone())) }>
+                                        aria-label=ui::verb_name("snap.rollback", &s.id) disabled=!can_rollback on:click=move |_| if is_system { open_root(root, s3.clone()) } else { rollback.set(Some(s3.clone())) }>
                                         <Icon icon=icons::ROTATE_CCW size=16 />
                                     </button>
                                     <button class="icon-btn sm danger" title=move || why_not.map(t).unwrap_or_else(|| t("delete"))
-                                        aria-label=format!("{}: {}", t("delete"), s.id) disabled=why_not.is_some() on:click=move |_| del.set(Some(s.clone()))>
+                                        aria-label=ui::verb_name("delete", &s.id) disabled=why_not.is_some() on:click=move |_| del.set(Some(s.clone()))>
                                         <Icon icon=icons::TRASH_2 size=16 />
                                     </button>
                                 }
@@ -244,7 +221,7 @@ fn snapshots_panel(jobs: Remote<Vec<SnapshotJobView>>, system: Remote<SystemSnap
                 on_confirm: Callback::new(move |_| {
                     let body = serde_json::to_string(&RollbackRequest { confirm: id2.clone() }).ok();
                     let url = format!("/api/v1/snapshots/{}/rollback", api::encode(&id2));
-                    follow_toast(
+                    tasks::run_and_report(
                         async move { api::start_task(&url, body).await },
                         tf("snap.rolled_back", &[("id", &id)]),
                         busy,
@@ -277,7 +254,7 @@ fn snapshots_panel(jobs: Remote<Vec<SnapshotJobView>>, system: Remote<SystemSnap
                 error,
                 on_confirm: Callback::new(move |_| {
                     let url = format!("/api/v1/snapshots/{0}?confirm={0}", api::encode(&id));
-                    follow_toast(
+                    tasks::run_and_report(
                         async move { api::delete::<TaskStarted>(&url).await.map(|t| t.task_id) },
                         tf("snap.deleted", &[("id", &id)]),
                         busy,
@@ -344,7 +321,7 @@ fn root_rollback_dialog(s: SnapshotInfo, pv: RollbackPreview, root: RwSignal<Opt
     if !pv.allowed {
         let why = refusal_key(pv.refusal);
         let body = view! { {facts} {ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {tr(why)} }.into_any())} }.into_any();
-        let foot = view! { <button type="button" class="btn primary" data-autofocus="" on:click=move |_| close.run(())>{tr("close")}</button> }.into_any();
+        let foot = ui::close_foot(close);
         return ui::dialog(ui::DlgKind::Normal, Signal::stored(tf("snap.root_refused_title", &[("id", &s.id)])), close, body, Some(foot));
     }
     let busy = RwSignal::new(false);
@@ -503,7 +480,7 @@ fn browse_drawer(s: SnapshotInfo, close: Callback<()>) -> AnyView {
                     let m = if mode.get_untracked() == "replace" { RestoreMode::Replace } else { RestoreMode::Copy };
                     let body = serde_json::to_string(&RestoreRequest { path: rel2.clone(), mode: m }).ok();
                     let url = format!("/api/v1/snapshots/{}/restore", api::encode(&id.get_value()));
-                    follow_toast(async move { api::start_task(&url, body).await }, tf("snap.restored", &[("path", &rel2)]), busy, error, Callback::new(move |_| restore.set(None)));
+                    tasks::run_and_report(async move { api::start_task(&url, body).await }, tf("snap.restored", &[("path", &rel2)]), busy, error, Callback::new(move |_| restore.set(None)));
                 }),
                 on_cancel: cancel,
             })
@@ -523,9 +500,9 @@ fn browse_drawer(s: SnapshotInfo, close: Callback<()>) -> AnyView {
         {restore_dialog}
     }
     .into_any();
-    let foot = view! { <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("close")}</button> }.into_any();
+    let foot = ui::close_foot(close);
     let title = Signal::stored(tf("snap.browse_title", &[("id", &s.id)]));
-    view! { <div class="wide-drawer">{drawer(title, close, body, foot)}</div> }.into_any()
+    view! { {ui::drawer_wide(title, close, body, foot)} }.into_any()
 }
 
 fn entry_row(e: SnapshotEntry, dir: &str, path: RwSignal<String>, restore: RwSignal<Option<(String, bool)>>) -> AnyView {
@@ -539,7 +516,7 @@ fn entry_row(e: SnapshotEntry, dir: &str, path: RwSignal<String>, restore: RwSig
     let rel_open = rel.clone();
     let name = e.name.clone();
     let restorable = matches!(e.kind, EntryKind::Dir | EntryKind::File | EntryKind::Symlink);
-    let label = format!("{}: {}", t("snap.restore"), e.name);
+    let label = ui::verb_name("snap.restore", &e.name);
     ui::row(vec![
         ui::cell("snap.col.name", "", view! {
             <span class="entry-name">
@@ -577,9 +554,8 @@ fn jobs_panel(jobs: Remote<Vec<SnapshotJobView>>, edit: RwSignal<Option<Option<S
         let rows = jobs.data.get().unwrap_or_default();
         if rows.is_empty() {
             return view! {
-                <EmptyState icon=icons::CAMERA title=Signal::derive(|| t("snap.no_jobs").to_string()) text=Signal::derive(|| t("snap.no_jobs_text").to_string())>
-                    <button class="btn primary" on:click=move |_| edit.set(Some(None))><Icon icon=icons::PLUS size=16 />{tr("snap.create_job")}</button>
-                </EmptyState>
+                // Create is in the header: an empty state never repeats the primary action
+                <EmptyState icon=icons::CAMERA title=Signal::derive(|| t("snap.no_jobs").to_string()) text=Signal::derive(|| t("snap.no_jobs_text").to_string()) />
             }
             .into_any();
         }
@@ -703,7 +679,7 @@ fn job_row(
     ui::row_class(
         vec![
             ui::cell("sch.col.enabled", "switch-col", view! {
-                <input type="checkbox" role="switch" class="switch" aria-label=format!("{}: {}", t("sch.col.enabled"), n3)
+                <input type="checkbox" role="switch" class="switch" aria-label=ui::verb_name("sch.col.enabled", &n3)
                 prop:checked=v.enabled disabled=move || toggling.get() || deleting on:change=move |ev| toggle(event_target_checked(&ev)) />
             }
             .into_any()),
@@ -716,7 +692,7 @@ fn job_row(
             .into_any()),
             ui::cell("sch.col.schedule", "", view! {
                 <div class="cell-main">
-                    <span>{v.schedule.as_ref().map(trigger_text).unwrap_or_else(|| "—".into())}</span>
+                    <span>{v.schedule.as_ref().map(trigger_text).unwrap_or_else(|| ui::DASH.into())}</span>
                     <span class="cell-sub tnum">{v.next_run_ms.map(|m| tf("sch.next", &[("when", &i18n::short_when(m))]))}</span>
                 </div>
             }
@@ -737,7 +713,7 @@ fn job_row(
             .into_any()),
             ui::cell("sch.col.last", "", view! { <div class="chips">{last}{ui::pending_status(v.pending)}</div> }.into_any()),
             ui::actions(view! {
-                <button class="icon-btn sm" title=tr("snap.take_now") aria-label=format!("{}: {}", t("snap.take_now"), n5)
+                <button class="icon-btn sm" title=tr("snap.take_now") aria-label=ui::verb_name("snap.take_now", &n5)
                     disabled=move || running.get() || v.pending == Some(rynas_api_types::PendingOp::Add) on:click=run>
                     <Icon icon=icons::CAMERA size=16 />
                 </button>
@@ -926,10 +902,9 @@ fn job_editor(init: Option<SnapshotJobView>, close: Callback<()>) -> AnyView {
             {is_new.then(|| text_field("snap.f.name", name, set_name, name_err, In { mono: true, help: Some("snap.f.name_help"), maxlength: 48, ..In::default() }))}
             {is_new.then(|| segmented("snap.f.source", SOURCES, source.into(), Callback::new(move |v| source.set(v))))}
             {src_fields}
-            <details class="advanced">
-                <summary>{tr("advanced")}</summary>
+            {ui::fold(None, "advanced", false, None, view! { 
                 {text_field("snap.f.dir", sdir, set_sdir, none, In { mono: true, help: Some("snap.f.dir_help"), disabled: !is_new, ..In::default() })}
-            </details>
+             }.into_any())}
             <h3 class="form-section">{tr("sch.sec.schedule")}</h3>
             {switch("snap.f.enabled", Some("snap.f.enabled_help"), on.into(), Callback::new(move |v| on.set(v)))}
             {trig.view(true)}
@@ -1005,12 +980,11 @@ fn system_panel(system: Remote<SystemSnapshots>) -> AnyView {
                 <p class="sec-note"><Icon icon=icons::INFO size=16 />{tr("snap.system_help")}</p>
                 {switch("snap.system_enabled", Some("snap.system_enabled_help"), enabled, set_enabled)}
                 {number_field("snap.system_keep", Some("snap.system_keep_help"), keep, set_keep, 1, 100)}
-                <details class="advanced">
-                    <summary>{tr("advanced")}</summary>
+                {ui::fold(None, "advanced", false, None, view! { 
                     {text_field("snap.f.subvolume", sub, set_sub, none, In { mono: true, ..In::default() })}
                     {text_field("snap.f.dir", dir, set_dir, none, In { mono: true, ..In::default() })}
                     {text_field("snap.system_prefix", prefix, set_prefix, none, In { mono: true, ..In::default() })}
-                </details>
+                 }.into_any())}
                 {stale_notice(draft.stale, Callback::new(move |_| draft.reset()))}
                 {crate::form::form_error(error)}
                 <div class="sec-actions">

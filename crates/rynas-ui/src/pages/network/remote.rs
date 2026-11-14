@@ -58,9 +58,6 @@ fn state_key(s: TailscaleState) -> (Tone, &'static str) {
     }
 }
 
-fn kv(label: &'static str, value: AnyView) -> AnyView {
-    view! { <div class="kv"><dt>{tr(label)}</dt><dd>{value}</dd></div> }.into_any()
-}
 
 fn mono(s: String) -> AnyView {
     view! { <span class="mono">{s}</span> }.into_any()
@@ -288,7 +285,7 @@ fn connected(ts: Ts, s: &TailscaleStatus) -> AnyView {
     let version = match (&s.version, &s.update_available) {
         (Some(v), Some(n)) => format!("{v} · {}", tf("ts.update", &[("v", n)])),
         (Some(v), None) => v.clone(),
-        _ => "—".into(),
+        _ => ui::DASH.into(),
     };
     view! {
         <section class="card widget w-6">
@@ -298,13 +295,13 @@ fn connected(ts: Ts, s: &TailscaleStatus) -> AnyView {
             {soon.map(|ms| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, ui::text(tf("ts.key_soon", &[("date", &i18n::datetime(ms))]))))}
             {(!s.health.is_empty()).then(|| ui::note(Tone::Info, icons::INFO, view! { {tr("ts.health")}" "{ui::tech_detail(s.health.join(" · "))} }.into_any()))}
             <dl class="kvs">
-                {kv("ts.state", ui::status(tone, t(key).to_string()))}
-                {s.dns_name.clone().map(|n| kv("ts.dns_name", mono(n)))}
-                {(!s.addresses.is_empty()).then(|| kv("ts.addresses", view! { <span class="wa-ranges mono small">{s.addresses.iter().map(|a| view! { <span>{ui::breakable(a, "")}</span> }).collect_view()}</span> }.into_any()))}
-                {s.tailnet.clone().map(|n| kv("ts.tailnet", ui::text(n)))}
-                {kv("ts.peers", ui::text(peers))}
-                {kv("ts.key_expiry", ui::text(expiry))}
-                {kv("ts.version", ui::text(version))}
+                {ui::kv("ts.state", ui::status(tone, t(key).to_string()))}
+                {s.dns_name.clone().map(|n| ui::kv("ts.dns_name", mono(n)))}
+                {(!s.addresses.is_empty()).then(|| ui::kv("ts.addresses", view! { <span class="wa-ranges mono small">{s.addresses.iter().map(|a| view! { <span>{ui::breakable(a, "")}</span> }).collect_view()}</span> }.into_any()))}
+                {s.tailnet.clone().map(|n| ui::kv("ts.tailnet", ui::text(n)))}
+                {ui::kv("ts.peers", ui::text(peers))}
+                {ui::kv("ts.key_expiry", ui::text(expiry))}
+                {ui::kv("ts.version", ui::text(version))}
             </dl>
             {actions(ts, s, Part::Logout)}
         </section>

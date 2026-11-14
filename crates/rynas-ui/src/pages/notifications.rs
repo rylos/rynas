@@ -249,9 +249,9 @@ fn center_row(n: Notification, detail: RwSignal<Option<Notification>>, silence: 
     let title = event_title(&n);
     let body = event_body(&n);
     let log = n.body_format == BodyFormat::Log;
-    let open_label = format!("{}: {}", t("nt.details"), title);
-    let ack_label = format!("{}: {}", t("nt.ack"), title);
-    let sil_label = format!("{}: {}", t("nt.silence"), title);
+    let open_label = ui::verb_name("nt.details", &title);
+    let ack_label = ui::verb_name("nt.ack", &title);
+    let sil_label = ui::verb_name("nt.silence", &title);
     let (source, raw_source) = source_label(&n.source);
     ui::row_class(
         vec![
@@ -298,9 +298,6 @@ fn center_row(n: Notification, detail: RwSignal<Option<Notification>>, silence: 
     )
 }
 
-fn kv(label: &'static str, value: String, class: &'static str) -> AnyView {
-    view! { <div class="kv"><dt>{tr(label)}</dt><dd class=class>{value}</dd></div> }.into_any()
-}
 
 fn detail_drawer(n: Notification, close: Callback<()>, silence: RwSignal<Option<String>>) -> AnyView {
     let server = use_notes().server;
@@ -310,23 +307,23 @@ fn detail_drawer(n: Notification, close: Callback<()>, silence: RwSignal<Option<
     let body_text = event_body(&n);
     let log = n.body_format == BodyFormat::Log;
     let mut kvs = vec![
-        kv("nt.col.severity", t(severity_key(n.severity)).to_string(), ""),
-        kv("nt.col.category", t(category_key(n.category)).to_string(), ""),
+        ui::kv_text("nt.col.severity", t(severity_key(n.severity)).to_string(), ""),
+        ui::kv_text("nt.col.category", t(category_key(n.category)).to_string(), ""),
         match source_label(&n.source) {
-            (_, true) => kv("nt.source", n.source.clone(), "mono"),
-            (label, false) => kv("nt.source", format!("{label} · {}", n.source), ""),
+            (_, true) => ui::kv_text("nt.source", n.source.clone(), "mono"),
+            (label, false) => ui::kv_text("nt.source", format!("{label} · {}", n.source), ""),
         },
-        kv("nt.key", n.key.clone(), "mono"),
-        kv("nt.first", i18n::datetime(n.ts_ms), "tnum"),
+        ui::kv_text("nt.key", n.key.clone(), "mono"),
+        ui::kv_text("nt.first", i18n::datetime(n.ts_ms), "tnum"),
     ];
     if n.count > 1 {
-        kvs.push(kv("nt.last", format!("{} · {}", i18n::datetime(n.last_ms), tf("nt.times", &[("n", &n.count.to_string())])), "tnum"));
+        kvs.push(ui::kv_text("nt.last", format!("{} · {}", i18n::datetime(n.last_ms), tf("nt.times", &[("n", &n.count.to_string())])), "tnum"));
     }
     if let Some(r) = n.resolved_ms {
-        kvs.push(kv("nt.resolved", i18n::datetime(r), "tnum"));
+        kvs.push(ui::kv_text("nt.resolved", i18n::datetime(r), "tnum"));
     }
     if let Some(a) = n.acked_ms {
-        kvs.push(kv("nt.acked", format!("{} · {}", i18n::datetime(a), n.acked_by.clone().unwrap_or_default()), "tnum"));
+        kvs.push(ui::kv_text("nt.acked", format!("{} · {}", i18n::datetime(a), n.acked_by.clone().unwrap_or_default()), "tnum"));
     }
     let fields: Vec<AnyView> = n
         .fields
@@ -353,7 +350,7 @@ fn detail_drawer(n: Notification, close: Callback<()>, silence: RwSignal<Option<
         {(!body_text.is_empty()).then(|| view! { <p class=if log { "pre-text log-text" } else { "pre-text" }>{body_text}</p> })}
         {(!actions.is_empty()).then(|| view! { <div class="card-actions">{actions}</div> })}
         <dl class="kvs">{kvs}</dl>
-        {has_fields.then(|| view! { <h3 class="drawer-h">{tr("nt.fields")}</h3><dl class="kvs">{fields}</dl> })}
+        {has_fields.then(|| view! { <h3 class="mini-title">{tr("nt.fields")}</h3><dl class="kvs">{fields}</dl> })}
     }
     .into_any();
     let foot = view! {
@@ -766,9 +763,9 @@ fn targets_panel(targets: Remote<Vec<NotifyTarget>>) -> AnyView {
                                 }
                                 .into_any()),
                                 ui::actions(view! {
-                                    <button class="icon-btn sm" title=tr("nt.test") aria-label=format!("{}: {}", t("nt.test"), name) disabled=move || is_ui || testing.get().is_some()
+                                    <button class="icon-btn sm" title=tr("nt.test") aria-label=ui::verb_name("nt.test", &name) disabled=move || is_ui || testing.get().is_some()
                                         on:click=move |_| test(id, n2.clone())>
-                                        {move || if testing.get() == Some(id) { view! { <span class="btn-spinner" aria-hidden="true"></span> }.into_any() } else { view! { <Icon icon=icons::SEND size=16 /> }.into_any() }}
+                                        {crate::form::spinner_icon(Signal::derive(move || testing.get() == Some(id)), icons::SEND)}
                                     </button>
                                     <button class="icon-btn sm" title=tr("edit") aria-label=format!("{} {}", t("edit"), n3) on:click=move |_| edit.set(Some(d.clone()))>
                                         <Icon icon=icons::PENCIL size=16 />
@@ -1094,7 +1091,7 @@ fn rules_panel(rules: Remote<Vec<NotifyRule>>, targets: Remote<Vec<NotifyTarget>
                                 ui::cell("nt.col.name", "", view! { <button class="link-strong" on:click=move |_| edit.set(Some(r2.clone()))>{name.clone()}</button> }.into_any()),
                                 ui::cell("nt.col.matches", "wrap-cell", view! {
                                     <div class="chips">
-                                        {r.invert.then(|| view! { <span class="chip warn-chip">{tr("nt.inverted")}</span> })}
+                                        {r.invert.then(|| view! { {ui::chip(ui::Tone::Warn, tr("nt.inverted").into_any())} })}
                                         <span class="chip">{format!("≥ {}", t(severity_key(r.min_severity)))}</span>
                                         {if r.categories.is_empty() {
                                             view! { <span class="chip">{tr("nt.f.any_cat")}</span> }.into_any()
@@ -1409,7 +1406,7 @@ fn silences_panel(silences: Remote<Vec<Silence>>) -> AnyView {
                                 ui::cell("nt.col.until", "tnum", view! { {s.until_ms.map(i18n::datetime).unwrap_or_else(|| t("nt.for_ever").to_string())} }.into_any()),
                                 ui::cell("nt.col.created", "tnum", view! { {format!("{} · {}", i18n::short_when(s.created_ms), s.created_by)} }.into_any()),
                                 ui::actions(view! {
-                                    <button class="icon-btn sm danger" title=tr("nt.unsilence") aria-label=format!("{}: {}", t("nt.unsilence"), s.key)
+                                    <button class="icon-btn sm danger" title=tr("nt.unsilence") aria-label=ui::verb_name("nt.unsilence", &s.key)
                                         disabled=move || removing.get().is_some() on:click=move |_| remove(id)>
                                         <Icon icon=icons::TRASH_2 size=16 />
                                     </button>

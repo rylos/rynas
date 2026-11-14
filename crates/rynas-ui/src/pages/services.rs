@@ -149,14 +149,13 @@ fn smb_form(init: SmbSettings, server: Signal<Option<SmbSettings>>, shares: Remo
                 {switch("smb.wsdd", Some("smb.wsdd_help"), wsdd, set_wsdd)}
                 {switch("smb.mdns", Some("smb.mdns_help"), mdns, set_mdns)}
                 {switch("smb.encrypt", Some("smb.encrypt_help"), enc_, set_enc)}
-                <details class="advanced">
-                    <summary>{tr("advanced")}</summary>
+                {ui::fold(None, "advanced", false, None, view! { 
                     <div class="form">
                         {switch("smb.netbios", Some("smb.netbios_help"), nb, set_nb)}
                         {text_field("smb.interfaces", ifs, set_ifs, none, In { help: Some("smb.interfaces_help"), placeholder: "eth0, 192.0.2.10", mono: true, ..In::default() })}
                         {area_field("smb.extra", extra, set_extra, Some("smb.extra_help"), "")}
                     </div>
-                </details>
+                 }.into_any())}
             </div>
             {save_row(busy, dirty, draft.stale, error, reset)}
         </form>

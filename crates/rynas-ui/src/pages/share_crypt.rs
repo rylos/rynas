@@ -14,7 +14,8 @@ use rynas_api_types::{
 use serde_json::json;
 
 use crate::api;
-use crate::form::{In, form_error, segmented, spinner, strength, strength_meter, switch, text_field};
+use crate::form::{In, SaveBar, form_error, save_bar_with, segmented, spinner, strength, strength_meter, switch, text_field};
+use crate::pages::storage::volume::{key_once, key_once_foot};
 use crate::i18n::{t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::toast::toast;
@@ -185,10 +186,11 @@ pub fn RecoveryDialog(name: String, key: String, on_done: Callback<()>) -> impl 
     // the key must not linger in memory after the dialog
     on_cleanup(move || key.set_value(String::new()));
     let file = format!("recovery-key-{name}.txt");
+    let stored = RwSignal::new(false);
     view! {
-        <Modal title=tf("sto.rk_title", &[("name", &name)]) on_close=Callback::new(|_| ())>
+        <Modal title=tf("sto.rk_title", &[("name", &name)]) on_close=Callback::new(|_| ()) foot=move || key_once_foot(stored, on_done)>
             <p class="muted small">{tr("crypt.rk_text")}</p>
-            {super::storage::volume::key_once(key.get_value(), file, "crypt.rk_keep", on_done)}
+            {key_once(key.get_value(), file, "crypt.rk_keep", stored)}
         </Modal>
     }
 }
@@ -296,21 +298,31 @@ fn UnlockDialog(name: String, on_close: Callback<()>, on_done: Callback<Option<S
             }
         });
     };
+    const FORM: &str = "crypt-unlock";
+    let stale_shown = Memo::new(move |_| !stale.with(Vec::is_empty));
+    let foot = move || {
+        if stale_shown.get() {
+            // the folder is open: "Later" leaves the containers as they are
+            view! {
+                <button class="btn ghost" type="button" disabled=move || busy.get() on:click=move |_| on_close.run(())>{tr("crypt.later")}</button>
+                <button class="btn primary" type="button" disabled=move || busy.get() on:click=restart>{spinner(busy)}{tr("crypt.restart")}</button>
+            }
+            .into_any()
+        } else {
+            save_bar_with(SaveBar { can_save: Signal::derive(move || !pass.with(String::is_empty)), form: Some(FORM), ..SaveBar::new(busy, "crypt.unlock", on_close, Callback::new(|_| {})) })
+        }
+    };
     view! {
-        <Modal title=tf("sto.unlock_title", &[("name", &name)]) on_close=on_close>
+        <Modal title=tf("sto.unlock_title", &[("name", &name)]) on_close=on_close foot=foot>
             {move || if stale.with(Vec::is_empty) {
                 view! {
-                    <form class="form" on:submit=submit>
+                    <form class="form" id=FORM on:submit=submit>
                         <p class="muted small">{tr("crypt.unlock_text")}</p>
                         <label class="field">
                             <span class="field-label">{tr("crypt.password")}</span>
                             <input class="input" type="password" autocomplete="current-password" maxlength=INPUT_MAX prop:value=move || pass.get() on:input=move |ev| pass.set(event_target_value(&ev)) />
                         </label>
                         {form_error(error)}
-                        <div class="dialog-foot">
-                            <button class="btn ghost" type="button" on:click=move |_| on_close.run(())>{tr("cancel")}</button>
-                            <button class="btn primary" type="submit" disabled=move || busy.get() || pass.with(String::is_empty)>{spinner(busy)}{tr("crypt.unlock")}</button>
-                        </div>
                     </form>
                 }
                 .into_any()
@@ -320,10 +332,6 @@ fn UnlockDialog(name: String, on_close: Callback<()>, on_done: Callback<Option<S
                         {ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {tr("crypt.stale_text")} }.into_any())}
                         <ul class="nocow-costs">{stale.get().into_iter().map(|c| view! { <li class="mono">{c}</li> }).collect_view()}</ul>
                         {form_error(error)}
-                        <div class="dialog-foot">
-                            <button class="btn ghost" type="button" on:click=move |_| on_close.run(())>{tr("crypt.later")}</button>
-                            <button class="btn primary" type="button" disabled=move || busy.get() on:click=restart>{spinner(busy)}{tr("crypt.restart")}</button>
-                        </div>
                     </div>
                 }
                 .into_any()
@@ -426,9 +434,10 @@ fn PasswordDialog(name: String, on_close: Callback<()>, on_done: Callback<Option
             }
         });
     };
+    const FORM: &str = "crypt-password";
     view! {
-        <Modal title=tf("crypt.pw_title", &[("name", &name)]) on_close=on_close>
-            <form class="form" on:submit=submit>
+        <Modal title=tf("crypt.pw_title", &[("name", &name)]) on_close=on_close foot=move || save_bar_with(SaveBar { form: Some(FORM), ..SaveBar::new(busy, "crypt.pw_change", on_close, Callback::new(|_| {})) })>
+            <form class="form" id=FORM on:submit=submit>
                 {segmented("crypt.pw_with", MODES, mode.into(), Callback::new(move |v| { mode.set(v); cur.set(String::new()); }))}
                 {move || if mode.get() == "recovery" {
                     text_field("crypt.pw_recovery", cur.into(), Callback::new(move |v| cur.set(v)), Signal::derive(|| None), In { mono: true, maxlength: 200, help: Some("crypt.pw_recovery_help"), ..In::default() })
@@ -439,10 +448,6 @@ fn PasswordDialog(name: String, on_close: Callback<()>, on_done: Callback<Option
                 {strength_meter(score)}
                 {text_field("pw.confirm", pw2.into(), Callback::new(move |v| pw2.set(v)), pw2_err, In { kind: "password", autocomplete: "new-password", maxlength: INPUT_MAX, ..In::default() })}
                 {form_error(error)}
-                <div class="dialog-foot">
-                    <button class="btn ghost" type="button" on:click=move |_| on_close.run(())>{tr("cancel")}</button>
-                    <button class="btn primary" type="submit" disabled=move || busy.get()>{spinner(busy)}{tr("crypt.pw_change")}</button>
-                </div>
             </form>
         </Modal>
     }
@@ -482,19 +487,17 @@ fn AutoDialog(name: String, on_close: Callback<()>, on_done: Callback<Option<Sha
             }
         });
     };
+    const FORM: &str = "crypt-auto";
+    let foot = move || save_bar_with(SaveBar { can_save: Signal::derive(move || !pass.with(String::is_empty)), form: Some(FORM), ..SaveBar::new(busy, "sec.activate", on_close, Callback::new(|_| {})) });
     view! {
-        <Modal title=tf("crypt.auto_title", &[("name", &name)]) on_close=on_close>
-            <form class="form" on:submit=submit>
+        <Modal title=tf("crypt.auto_title", &[("name", &name)]) on_close=on_close foot=foot>
+            <form class="form" id=FORM on:submit=submit>
                 {move || auto_help(info.data.with(|i| i.as_ref().is_some_and(|i| i.tpm2)))}
                 <label class="field">
                     <span class="field-label">{tr("crypt.password")}</span>
                     <input class="input" type="password" autocomplete="current-password" maxlength=INPUT_MAX prop:value=move || pass.get() on:input=move |ev| pass.set(event_target_value(&ev)) />
                 </label>
                 {form_error(error)}
-                <div class="dialog-foot">
-                    <button class="btn ghost" type="button" on:click=move |_| on_close.run(())>{tr("cancel")}</button>
-                    <button class="btn primary" type="submit" disabled=move || busy.get() || pass.with(String::is_empty)>{spinner(busy)}{tr("sec.activate")}</button>
-                </div>
             </form>
         </Modal>
     }
@@ -538,26 +541,32 @@ fn RevealDialog(name: String, path: String, on_close: Callback<()>) -> impl Into
         });
     };
     let file = format!("recovery-key-{name}.txt");
+    const FORM: &str = "crypt-reveal";
+    let stored = RwSignal::new(false);
+    let shown = Memo::new(move |_| key.with(Option::is_some));
+    let foot = move || {
+        if shown.get() {
+            key_once_foot(stored, on_close)
+        } else {
+            save_bar_with(SaveBar { can_save: Signal::derive(move || !pass.with(String::is_empty)), form: Some(FORM), ..SaveBar::new(busy, "sto.rk_reveal", on_close, Callback::new(|_| {})) })
+        }
+    };
     view! {
-        <Modal title=tf("sto.rk_title", &[("name", &name)]) on_close=on_close>
+        <Modal title=tf("sto.rk_title", &[("name", &name)]) on_close=on_close foot=foot>
             {move || match key.get() {
                 Some(k) => view! {
                     <p class="muted small">{tr("crypt.rk_text")}</p>
-                    {super::storage::volume::key_once(k, file.clone(), "crypt.rk_keep", on_close)}
+                    {key_once(k, file.clone(), "crypt.rk_keep", stored)}
                 }
                 .into_any(),
                 None => view! {
-                    <form class="form" on:submit=submit>
+                    <form class="form" id=FORM on:submit=submit>
                         <p class="muted small">{tr("crypt.reveal_text")}</p>
                         <label class="field">
                             <span class="field-label">{tr("crypt.password")}</span>
                             <input class="input" type="password" autocomplete="current-password" maxlength=INPUT_MAX prop:value=move || pass.get() on:input=move |ev| pass.set(event_target_value(&ev)) />
                         </label>
                         {form_error(error)}
-                        <div class="dialog-foot">
-                            <button class="btn ghost" type="button" on:click=move |_| on_close.run(())>{tr("cancel")}</button>
-                            <button class="btn primary" type="submit" disabled=move || busy.get() || pass.with(String::is_empty)>{spinner(busy)}{tr("sto.rk_reveal")}</button>
-                        </div>
                     </form>
                 }
                 .into_any(),

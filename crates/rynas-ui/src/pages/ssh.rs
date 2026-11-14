@@ -213,7 +213,7 @@ fn trial_banner(pg: Page) -> Option<AnyView> {
                 {mine.then(|| view! {
                     <div class="repl-copy">
                         <code class="secret mono ssh-cmd">{cmd.clone()}</code>
-                        {crate::pages::security::copy_button("ssh.copy", cmd.clone())}
+                        {crate::ui::copy_button("ssh.copy", cmd.clone())}
                     </div>
                 })}
                 {crate::form::form_error(error)}
@@ -621,11 +621,11 @@ fn keys_card(pg: Page, names: Vec<String>) -> AnyView {
             </div>
             {move || match list.get() {
                 None => view! { <Skeleton lines=2 /> }.into_any(),
-                Some(Err(e)) => ui::note(Tone::Err, icons::CIRCLE_X, ui::err_view(e)),
+                Some(Err(e)) => ui::error_box_text(e, Callback::new(move |_| { list.set(None); load(); })),
                 Some(Ok(l)) => {
                     let others = (l.other_lines > 0).then(|| ui::note(Tone::Info, icons::INFO, ui::text(tf("ssh.other_lines", &[("n", &l.other_lines.to_string())]))));
                     let keys = if l.keys.is_empty() {
-                        view! { <p class="muted">{tr("ssh.no_keys")}</p> }.into_any()
+                        ui::empty_line("ssh.no_keys")
                     } else {
                         let user = l.user.clone();
                         view! {
@@ -641,7 +641,7 @@ fn keys_card(pg: Page, names: Vec<String>) -> AnyView {
                                     view! {
                                         <li class="ssh-key">
                                             <div class="ssh-key-text">
-                                                <span class="cell-main">{title}{k.weak.then(|| view! { " " <span class="chip warn-chip">{tr("ssh.key_weak")}</span> })}</span>
+                                                <span class="cell-main">{title}{k.weak.then(|| view! { " " {ui::chip(ui::Tone::Warn, tr("ssh.key_weak").into_any())} })}</span>
                                                 <span class="cell-sub muted small mono">{sub}</span>
                                             </div>
                                             <button type="button" class="icon-btn sm danger" title=tr("ssh.key_remove") aria-label=label

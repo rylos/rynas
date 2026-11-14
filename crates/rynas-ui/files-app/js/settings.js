@@ -66,7 +66,7 @@ function body(section) {
         row("Nomi dei volumi", "Quelli dati ai volumi (es. «HDD»), altrimenti «Volume 1»", sw("volumeNames")) +
         row("Ricorda vista e ordinamento per cartella", "Altrimenti valgono gli ultimi usati, per tutte", sw("perFolder")) +
         row("Evidenzia le date di oggi", "Nella colonna Modificato", sw("todayHighlight")) +
-        row("Dimensioni binarie", "KiB, MiB, GiB (1024) invece di KB, MB, GB (1000)", sw("binarySizes")) +
+        row("Dimensioni binarie", "KiB, MiB, GiB (1024) invece di kB, MB, GB (1000)", sw("binarySizes")) +
         row("Date relative", "«3 h fa» invece di «29 ott 21:45»", sw("relativeDates")) +
         row("Colonna Permessi", "", sw("columns.mode")) +
         row("Colonna Dimensione", "", sw("columns.size")) +

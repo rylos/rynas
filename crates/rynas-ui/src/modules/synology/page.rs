@@ -23,7 +23,7 @@ use crate::form::{Draft, In, stale_notice, lens, lens_bool, segmented, select_fi
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::pages::dashboard::led_state;
-use crate::pages::security::copy_button;
+use crate::ui::copy_button;
 use crate::toast::{saved_pending, toast};
 use crate::ui::{self, EmptyState, Meter, Remote, Status, Tone, WidgetHead, status};
 
@@ -209,17 +209,12 @@ pub fn panel(active: Signal<bool>) -> AnyView {
             curves.reload();
         }
     });
-    if let Ok(h) = set_interval_with_handle(
-        move || {
-            if active.get_untracked() && !document().hidden() && settings.err.with_untracked(Option::is_none) {
-                st.reload();
-                curves.reload();
-            }
-        },
-        POLL,
-    ) {
-        on_cleanup(move || h.clear());
-    }
+    crate::live::poll(POLL, move || {
+        if active.get_untracked() && settings.err.with_untracked(Option::is_none) {
+            st.reload();
+            curves.reload();
+        }
+    });
     (move || {
         if settings.err.with(|e| e.as_deref() == Some("not_found")) {
             return view! {
@@ -345,8 +340,8 @@ fn summary(st: Remote<SynologyStatus>, platform: SynologyPlatform, pending: Sign
             on_cleanup(move || h.clear());
         }
         let age = move || match written.get() {
-            Some(at) => format!("{} {}", i18n::duration(((now.get() - at).max(0.0) / 1000.0) as u64), t("hw.ago")),
-            None => "—".into(),
+            Some(at) => i18n::ago(((now.get() - at).max(0.0) / 1000.0) as u64),
+            None => ui::DASH.into(),
         };
         let led = Memo::new(move |_| st.data.with(|v| v.as_ref().and_then(|v| v.status_led).map(led_name)));
         let duty = Memo::new(move |_| st.data.with(|v| v.as_ref().and_then(|v| v.fan_duty_pct)));
@@ -367,7 +362,7 @@ fn summary(st: Remote<SynologyStatus>, platform: SynologyPlatform, pending: Sign
                     let (tone, state, colour) = led_state(n);
                     view! { <span class="led-big" title=colour><span class=format!("led-dot {n}") aria-hidden="true"></span><Status tone=tone text=state /></span> }.into_any()
                 }
-                None => view! { <strong>"—"</strong> }.into_any(),
+                None => view! { <strong>{ui::DASH}</strong> }.into_any(),
             }).into_any())}
             {sum_item("hw.duty", view! { <strong class="tnum">{move || pct_text(duty.get())}</strong> }.into_any())}
             {move || boot.get().map(|(tone, key)| sum_item("last_boot", status(tone, t(key).to_string())))}
@@ -402,7 +397,7 @@ fn written_at(st: Remote<SynologyStatus>) -> Memo<Option<f64>> {
 }
 
 fn pct_text(p: Option<u8>) -> String {
-    p.map(|d| format!("{d}%")).unwrap_or_else(|| "—".into())
+    p.map(|d| i18n::pct(f64::from(d))).unwrap_or_else(|| ui::DASH.into())
 }
 
 // ------------------------------------------------------------------ chassis
@@ -527,8 +522,7 @@ fn fans_card(d: RwSignal<SynologySettings>, st: Remote<SynologyStatus>, curves: 
                 <p class="field-help">{mode_help}</p>
                 {st.view(3, live)}
                 {curves.view(4, chart)}
-                <details class="advanced">
-                    <summary>{tr("advanced")}</summary>
+                {ui::fold(None, "advanced", false, None, view! { 
                     <div class="form">
                         <div class="form-row three">
                             {text_field("syn.fan_period", period, set_period, e_period, In { kind: "number", help: Some("syn.fan_period_help"), ..In::default() })}
@@ -536,7 +530,7 @@ fn fans_card(d: RwSignal<SynologySettings>, st: Remote<SynologyStatus>, curves: 
                             {text_field("syn.hysteresis", hyst, set_hyst, e_hyst, In { kind: "number", help: Some("syn.hysteresis_help"), ..In::default() })}
                         </div>
                     </div>
-                </details>
+                 }.into_any())}
             </div>
         </section>
     }
@@ -552,7 +546,7 @@ fn fan_row(st: Remote<SynologyStatus>, n: u32) -> AnyView {
         <li class="fan-row">
             <span class=move || if alarm.get() == FanAlarm::Stopped { "fan-icon alarm" } else { "fan-icon" }><Icon icon=icons::FAN size=16 /></span>
             <span>{move || tf("hw.fan_n", &[("n", &n.to_string())])}</span>
-            <span class="tnum fan-rpm-s">{move || rpm.get().map(|r| format!("{r} rpm")).unwrap_or_else(|| "—".into())}</span>
+            <span class="tnum fan-rpm-s">{move || rpm.get().map(|r| format!("{r} rpm")).unwrap_or_else(|| ui::DASH.into())}</span>
             {move || {
                 let (tone, key) = match alarm.get() {
                     FanAlarm::Ok => (Tone::Ok, "syn.fan_ok"),
@@ -581,7 +575,7 @@ fn thermal_row(rows: Memo<Vec<(SensorClass, Option<f32>, u8)>>, class: SensorCla
         <div class="kv">
             <dt>{tr(class_key(class))}</dt>
             <dd class="tnum">
-                <span class=move || if near.get() { "temp-val err" } else { "muted" }>{move || now.get().map(i18n::celsius).unwrap_or_else(|| "—".into())}</span>
+                <span class=move || if near.get() { "temp-val err" } else { "muted" }>{move || now.get().map(i18n::celsius).unwrap_or_else(|| ui::DASH.into())}</span>
                 " / "
                 <strong>{move || i18n::celsius(f32::from(limit.get()))}</strong>
             </dd>
@@ -697,7 +691,7 @@ fn buttons_card(d: RwSignal<SynologySettings>) -> AnyView {
     let (rb, set_rb) = lens(d, |s| rb_str(s.reset_button).into(), |s, v| s.reset_button = rb_of(&v));
     view! {
         <section class="card widget w-6">
-            <WidgetHead icon=icons::SETTINGS_2 title="syn.buttons" />
+            <WidgetHead icon=icons::SETTINGS title="syn.buttons" />
             <div class="form">
                 {select_field("syn.power_button", Some("syn.power_button_help"), POWER_BUTTON, pb, set_pb)}
                 {select_field("reset_button", None, RESET_BUTTON, rb, set_rb)}
@@ -790,14 +784,14 @@ fn events_card(st: Remote<SynologyStatus>) -> AnyView {
                     <div class="kv"><dt>{tr("ps.prev_clean")}</dt><dd>{move || match boot.get().and_then(|b| b.1) {
                         Some(true) => t("ps.clean_yes"),
                         Some(false) => t("ps.clean_no"),
-                        None => "—",
+                        None => ui::DASH,
                     }}</dd></div>
                 </dl>
             })}
             <ul class="events">
                 {move || none.get().then(|| view! { <li class="muted">{tr("hw.no_events")}</li> })}
                 <For each=move || events.get() key=|e| e.clone() let:e>
-                    <li><span class="mono small muted">{e.0.map(i18n::short_when).unwrap_or_else(|| "—".into())}</span><span lang="en">{e.1}</span></li>
+                    <li><span class="mono small muted">{e.0.map(i18n::short_when).unwrap_or_else(|| ui::DASH.into())}</span><span lang="en">{e.1}</span></li>
                 </For>
             </ul>
         }

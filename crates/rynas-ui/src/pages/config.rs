@@ -37,7 +37,7 @@ fn drift_detail(s: &StateDrift) -> (String, bool) {
         Some(StateDriftCode::Other) | None => return (s.detail.clone(), true),
     };
     let id = a.id.map(|n| n.to_string()).unwrap_or_default();
-    let list = |v: &[String]| if v.is_empty() { "—".to_string() } else { v.join(", ") };
+    let list = |v: &[String]| if v.is_empty() { ui::DASH.to_string() } else { v.join(", ") };
     let (missing, extra) = (list(&a.missing), list(&a.extra));
     let args = [
         ("name", a.name.as_deref().unwrap_or("")),
@@ -145,7 +145,7 @@ fn DriftCard(drift: Remote<DriftReport>) -> impl IntoView {
                         ask.set(true);
                     }
                 }>
-                    {move || is_busy().then(|| view! { <span class="btn-spinner" aria-hidden="true"></span> })}
+                    {crate::form::spinner_when(Signal::derive(is_busy))}
                     <Icon icon=icons::FILE_INPUT size=14 />{tr("cfg.overwrite")}
                 </button>
             </div>
@@ -278,7 +278,7 @@ fn RevisionsCard(revisions: Remote<Vec<RevisionSummary>>) -> impl IntoView {
     let content = move || {
         let list = revisions.data.get().unwrap_or_default();
         if list.is_empty() {
-            return view! { <p class="muted">{tr("cfg.no_revisions")}</p> }.into_any();
+            return ui::empty_line("cfg.no_revisions");
         }
         let latest = list.first().map(|r| r.id);
         let mut rows = Vec::with_capacity(list.len() * 2);
@@ -298,7 +298,7 @@ fn RevisionsCard(revisions: Remote<Vec<RevisionSummary>>) -> impl IntoView {
             if let Some(f) = r.restored_from {
                 chips.push(view! { <span class="chip accent">{tf("cfg.restored_from", &[("n", &f.to_string())])}</span> }.into_any());
             }
-            let comment = if r.comment.is_empty() { "—".to_string() } else { r.comment.clone() };
+            let comment = if r.comment.is_empty() { ui::DASH.to_string() } else { r.comment.clone() };
             let action = view! {
                 <button class="btn ghost sm" disabled=move || restoring.get() on:click=move |_| { target.set(Some(id)); ask.set(true); }>
                     <Icon icon=icons::ROTATE_CCW size=14 />{tr("cfg.restore")}

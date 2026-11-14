@@ -19,7 +19,7 @@ fn use_pill(n: Option<u32>, dangling: bool) -> AnyView {
         Some(n) if n > 0 => ui::status(ui::Tone::Ok, tf("dk.i.used_by", &[("n", &n.to_string())])),
         Some(_) if dangling => ui::status(ui::Tone::Warn, t("dk.i.dangling").to_string()),
         Some(_) => ui::status(ui::Tone::Unknown, t("dk.i.unused").to_string()),
-        None => ui::text("—".into()),
+        None => ui::text(ui::DASH.into()),
     }
 }
 
@@ -41,8 +41,8 @@ fn image_row(i: &ImageSummary) -> AnyView {
 fn volume_row(v: &VolumeSummary) -> AnyView {
     ui::row(vec![
         ui::cell("dk.col.volume", "wrap", ui::two_lines(view! { <span class="mono small">{v.name.clone()}</span> }.into_any(), Some(v.driver.clone()), "cell-sub")),
-        ui::text_cell("dk.col.stack", "", v.stack.clone().unwrap_or_else(|| "—".into())),
-        ui::text_cell("dk.col.size", "num", v.size_bytes.map(i18n::bytes).unwrap_or_else(|| "—".into())),
+        ui::text_cell("dk.col.stack", "", v.stack.clone().unwrap_or_else(|| ui::DASH.into())),
+        ui::text_cell("dk.col.size", "num", v.size_bytes.map(i18n::bytes).unwrap_or_else(|| ui::DASH.into())),
         ui::cell("col.status", "", use_pill(v.in_use, false)),
     ])
 }

@@ -95,9 +95,6 @@ fn ms_text(ms: Option<u64>) -> String {
     ms.map(i18n::datetime).unwrap_or_else(|| t("upd.never").to_string())
 }
 
-fn kv(label: &'static str, value: AnyView) -> AnyView {
-    view! { <div class="kv"><dt>{tr(label)}</dt><dd>{value}</dd></div> }.into_any()
-}
 
 fn pkg_list(names: &[String]) -> AnyView {
     view! { <ul class="upd-list">{names.iter().map(|n| view! { <li class="mono">{n.clone()}</li> }).collect_view()}</ul> }.into_any()
@@ -144,7 +141,7 @@ fn summary_card(st: Remote<UpdatesStatus>, selected: RwSignal<Vec<String>>, ask:
         let removals = (!s.removals.is_empty()).then(|| {
             ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {tf("upd.removals_note", &[("p", &s.removals.join(", "))])} }.into_any())
         });
-        let held = (!s.held.is_empty()).then(|| kv("upd.held", text(s.held.join(", "))));
+        let held = (!s.held.is_empty()).then(|| ui::kv("upd.held", text(s.held.join(", "))));
         let sec_names: Vec<String> = s.packages.iter().filter(|p| p.security).map(|p| p.name.clone()).collect();
         let all_removals = s.removals.clone();
         let auto_rm = s.autoremovable.clone();
@@ -156,8 +153,8 @@ fn summary_card(st: Remote<UpdatesStatus>, selected: RwSignal<Vec<String>>, ask:
             {reboot}
             {removals}
             <dl class="kvs">
-                {kv("upd.lists_updated", text(ms_text(s.lists_updated_ms)))}
-                {kv("upd.read_at", text(i18n::datetime(s.read_at_ms)))}
+                {ui::kv("upd.lists_updated", text(ms_text(s.lists_updated_ms)))}
+                {ui::kv("upd.read_at", text(i18n::datetime(s.read_at_ms)))}
                 {held}
             </dl>
             <div class="card-actions">
@@ -261,7 +258,7 @@ fn packages_card(
                         .into_any(),
                     ),
                     cell("upd.col_pkg", "", view! { <div class="cell-main"><span class="mono">{name.clone()}</span>{kind}</div> }.into_any()),
-                    cell("upd.col_current", "mono small", text(p.current.clone().unwrap_or_else(|| "—".into()))),
+                    cell("upd.col_current", "mono small", text(p.current.clone().unwrap_or_else(|| ui::DASH.into()))),
                     cell("upd.col_new", "mono small", text(p.candidate.clone())),
                     cell("upd.col_origin", "muted small", text(p.origin.clone())),
                     cell(
@@ -343,14 +340,8 @@ fn ask_dialog(a: Ask, ask: RwSignal<Option<Ask>>, start: impl Fn(String, Option<
 
 fn run_dialog(title: String, id: String, run: RwSignal<Run>, st: Remote<UpdatesStatus>) -> AnyView {
     let close = Callback::new(move |_| run.set(None));
-    let body = view! {
-        <TaskRun id=id on_done=Callback::new(move |_| st.reload()) />
-        <div class="dialog-foot">
-            <button type="button" class="btn" on:click=move |_| close.run(())>{tr("close")}</button>
-        </div>
-    }
-    .into_any();
-    ui::dialog(DlgKind::Wide, Signal::stored(title), close, body, None)
+    let body = view! { <TaskRun id=id on_done=Callback::new(move |_| st.reload()) /> }.into_any();
+    ui::dialog(DlgKind::Wide, Signal::stored(title), close, body, Some(ui::close_foot(close)))
 }
 
 // ------------------------------------------------------------------ Debian backports
@@ -557,7 +548,7 @@ fn trial_status(t_: KernelTrial) -> AnyView {
 }
 
 fn boot_kernel(k: &Option<BootKernel>) -> String {
-    k.as_ref().and_then(|k| k.release.clone()).unwrap_or_else(|| "—".into())
+    k.as_ref().and_then(|k| k.release.clone()).unwrap_or_else(|| ui::DASH.into())
 }
 
 fn kernel_card(kernel: Remote<KernelStatus>) -> AnyView {
@@ -587,19 +578,19 @@ fn kernel_card(kernel: Remote<KernelStatus>) -> AnyView {
             {dom.as_ref().and_then(|d| d.outdated.clone()).map(|o| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {t("upd.boot_outdated")}<span class="muted small" lang="en">" "{o}</span> }.into_any()))}
             {k.error.clone().map(|e| ui::note(Tone::Err, icons::CIRCLE_X, view! { {t("upd.boot_error")}<span class="muted small" lang="en">" "{e}</span> }.into_any()))}
             <dl class="kvs">
-                {kv("upd.running_kernel", view! { <span class="mono">{k.running.clone()}</span> }.into_any())}
-                {kv("upd.installed_kernels", view! { <span class="mono">{if k.installed.is_empty() { "—".to_string() } else { k.installed.join(", ") }}</span> }.into_any())}
+                {ui::kv("upd.running_kernel", view! { <span class="mono">{k.running.clone()}</span> }.into_any())}
+                {ui::kv("upd.installed_kernels", view! { <span class="mono">{if k.installed.is_empty() { ui::DASH.to_string() } else { k.installed.join(", ") }}</span> }.into_any())}
                 {dom.map(|d| view! {
-                    {kv("upd.boot_default", view! { <span class="mono">{d.default.clone().unwrap_or_else(|| "—".into())}</span> }.into_any())}
-                    {kv("upd.boot_fallback", view! { <span class="mono">{if d.fallback.is_empty() { "—".to_string() } else { d.fallback.join(" → ") }}</span> }.into_any())}
-                    {kv("upd.boot_entries", view! { <span class="mono">{d.entries.join(", ")}</span> }.into_any())}
-                    {kv("upd.boot_running", view! { <span class="mono">{d.running.clone().unwrap_or_else(|| "—".into())}</span> }.into_any())}
-                    {kv("upd.boot_kernel", view! { <span class="mono">{boot_kernel(&d.kernel)}</span> }.into_any())}
-                    {kv("upd.boot_kernel_old", view! { <span class="mono">{boot_kernel(&d.kernel_old)}</span> }.into_any())}
-                    {kv("upd.trial", trial_status(d.trial))}
-                    {kv("upd.boot_free", text(d.free_bytes.map(i18n::bytes).unwrap_or_else(|| "—".into())))}
+                    {ui::kv("upd.boot_default", view! { <span class="mono">{d.default.clone().unwrap_or_else(|| ui::DASH.into())}</span> }.into_any())}
+                    {ui::kv("upd.boot_fallback", view! { <span class="mono">{if d.fallback.is_empty() { ui::DASH.to_string() } else { d.fallback.join(" → ") }}</span> }.into_any())}
+                    {ui::kv("upd.boot_entries", view! { <span class="mono">{d.entries.join(", ")}</span> }.into_any())}
+                    {ui::kv("upd.boot_running", view! { <span class="mono">{d.running.clone().unwrap_or_else(|| ui::DASH.into())}</span> }.into_any())}
+                    {ui::kv("upd.boot_kernel", view! { <span class="mono">{boot_kernel(&d.kernel)}</span> }.into_any())}
+                    {ui::kv("upd.boot_kernel_old", view! { <span class="mono">{boot_kernel(&d.kernel_old)}</span> }.into_any())}
+                    {ui::kv("upd.trial", trial_status(d.trial))}
+                    {ui::kv("upd.boot_free", text(d.free_bytes.map(i18n::bytes).unwrap_or_else(|| ui::DASH.into())))}
                 })}
-                {kv("upd.read_at", text(ms_text(k.read_at_ms)))}
+                {ui::kv("upd.read_at", text(ms_text(k.read_at_ms)))}
             </dl>
         }
         .into_any()

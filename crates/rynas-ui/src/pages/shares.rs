@@ -21,7 +21,7 @@ use crate::live::use_live;
 use crate::pages::share_crypt;
 use crate::pages::share_folders::{self, Target};
 use crate::toast::{saved_applied, toast};
-use crate::ui::{self, EmptyState, Meter, PageHeader, Remote, Tone, drawer};
+use crate::ui::{self, EmptyState, Meter, PageHeader, Remote, Tone};
 
 /// `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`.
 pub fn valid_share_name(n: &str) -> bool {
@@ -108,12 +108,12 @@ fn size_cell(path: &str, size: Option<ShareSize>, fss: &[rynas_api_types::Filesy
         return match failed {
             Some(e) => view! {
                 <div class="cell-main" title=e>
-                    <span class="muted">"—"</span>
+                    <span class="muted">{ui::DASH}</span>
                     <span class="cell-sub danger-text">{tr("shares.size_failed")}</span>
                 </div>
             }
             .into_any(),
-            None => view! { <span class="muted">"—"</span> }.into_any(),
+            None => view! { <span class="muted">{ui::DASH}</span> }.into_any(),
         };
     };
     let volume = z.volume.as_deref().map(crate::places::name);
@@ -128,7 +128,7 @@ fn size_cell(path: &str, size: Option<ShareSize>, fss: &[rynas_api_types::Filesy
     let Some(bytes) = z.bytes else {
         return view! {
             <div class="cell-main share-size" title=failed.unwrap_or_default()>
-                <span class="muted">"—"</span>
+                <span class="muted">{ui::DASH}</span>
                 <span class="cell-sub">{note.or(volume)}</span>
             </div>
         }
@@ -375,7 +375,7 @@ fn share_row(v: ShareView, size: Option<ShareSize>, size_failed: Option<String>,
                     {s.encrypted.then(|| t("crypt.encrypted"))}
                     {(!v.status.fs_type.is_empty() && !s.encrypted).then(|| format!(" · {}", v.status.fs_type))}
                     {(v.status.nocow == Some(true)).then(|| format!(" · {}", t("shares.nocow")))}
-                    {s.dedup.as_ref().is_some_and(|d| d.enabled).then(|| view! { " "<span class="chip dedup-chip">{tr("dd.short")}</span> })}
+                    {s.dedup.as_ref().is_some_and(|d| d.enabled).then(|| view! { " "{ui::chip(Tone::Info, tr("dd.short").into_any())} })}
                 </span>
             </div>
         }
@@ -665,7 +665,7 @@ fn share_editor(e: ShareEdit, users: Remote<Vec<UserView>>, groups: Remote<Vec<G
             ))
         })
     };
-    view! { <div class="wide-drawer">{drawer(title, close, body, foot)}</div>{reveal}{ask} }.into_any()
+    view! { {ui::drawer_wide(title, close, body, foot)}{reveal}{ask} }.into_any()
 }
 
 /// New subvolume on a rynas volume, or an existing folder.
@@ -738,11 +738,12 @@ fn location_fields(d: RwSignal<Share>, is_new: bool, show: RwSignal<bool>, cf: s
     });
     view! {
         <fieldset class="fieldset">
-            <legend class="field-label">{tr("shares.location")}</legend>
-            <div class="segmented" role="radiogroup" aria-label=tr("shares.location")>
-                <button type="button" role="radio" aria-checked=move || use_sub.get().to_string() class:on=move || use_sub.get() on:click=move |_| set_mode(true)>{tr("shares.loc_subvolume")}</button>
-                <button type="button" role="radio" aria-checked=move || (!use_sub.get()).to_string() class:on=move || !use_sub.get() on:click=move |_| set_mode(false)>{tr("shares.loc_folder")}</button>
-            </div>
+            {crate::form::segmented(
+                "shares.location",
+                &[("sub", "shares.loc_subvolume"), ("folder", "shares.loc_folder")],
+                Signal::derive(move || if use_sub.get() { "sub" } else { "folder" }.to_string()),
+                Callback::new(move |v: String| set_mode(v == "sub")),
+            )}
             {move || if use_sub.get() {
                 let ready = places.data.with(Option::is_some);
                 if !ready {
@@ -837,13 +838,12 @@ fn smb_fields(d: RwSignal<Share>) -> AnyView {
                 {text_field("snap.f.dir", sc_dir, set_sc_dir, sc_err, In { placeholder: "/vol1/.snapshots", mono: true, maxlength: 4096, ..In::default() })}
                 {text_field("shares.snap_prefix", sc_pre, set_sc_pre, none, In { help: Some("shares.snap_prefix_help"), mono: true, maxlength: 64, ..In::default() })}
             </div>
-            <details class="advanced">
-                <summary>{tr("advanced")}</summary>
+            {ui::fold(None, "advanced", false, None, view! { 
                 <div class="form">
                     {area_field("shares.veto", veto, set_veto, Some("shares.veto_help"), "")}
                     {area_field("shares.extra", extra, set_extra, Some("smb.extra_help"), "")}
                 </div>
-            </details>
+             }.into_any())}
         </div>
     }
     .into_any()
@@ -1100,7 +1100,7 @@ fn effective_view(
                                         {ui::status(tone, t(key).to_string())}
                                     </div>
                                     {if p.sources.is_empty() {
-                                        view! { <p class="muted small">{tr("eff.no_source")}</p> }.into_any()
+                                        ui::empty_line("eff.no_source")
                                     } else {
                                         view! {
                                             <ul class="eff-sources">

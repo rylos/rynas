@@ -400,7 +400,7 @@ fn engine_status(e: &ProxyEngine) -> AnyView {
 
 fn url_links(urls: &[String]) -> AnyView {
     if urls.is_empty() {
-        return view! { <span class="muted">"—"</span> }.into_any();
+        return view! { <span class="muted">{ui::DASH}</span> }.into_any();
     }
     view! {
         <span class="wa-urls">
@@ -410,9 +410,6 @@ fn url_links(urls: &[String]) -> AnyView {
     .into_any()
 }
 
-fn kv(label: &'static str, value: AnyView) -> AnyView {
-    view! { <div class="kv"><dt>{tr(label)}</dt><dd>{value}</dd></div> }.into_any()
-}
 
 /// The port of the emergency address (rynas-web's own HTTPS port), from the state.
 pub(super) fn emergency_port() -> u16 {
@@ -454,9 +451,9 @@ fn overview() -> AnyView {
                 {(!e.installed).then(|| ui::note(Tone::Info, icons::INFO, ui::text(t("wa.eng.missing_text").to_string())))}
                 {e.last_error.clone().map(|m| ui::note(Tone::Err, icons::CIRCLE_X, view! { {tr("wa.eng.last_error")}" "{ui::tech_detail(m)} }.into_any()))}
                 <dl class="kvs">
-                    {kv("wa.eng.state", engine_status(&e))}
-                    {e.installed.then(|| kv("wa.eng.sync", ui::text(t(sync_key).to_string())))}
-                    {e.installed.then(|| kv("wa.eng.last_load", ui::text(last.clone())))}
+                    {ui::kv("wa.eng.state", engine_status(&e))}
+                    {e.installed.then(|| ui::kv("wa.eng.sync", ui::text(t(sync_key).to_string())))}
+                    {e.installed.then(|| ui::kv("wa.eng.last_load", ui::text(last.clone())))}
                 </dl>
                 {form_error(error)}
                 <div class="sec-actions">
@@ -475,11 +472,11 @@ fn overview() -> AnyView {
             let https = cur.pointer("/settings/https_port").and_then(Value::as_u64).unwrap_or(443);
             view! {
                 <dl class="kvs">
-                    {kv("wa.ui.urls", if external { ui::text(t("wa.ui.external").to_string()) } else { url_links(&s.ui_urls) })}
-                    {(!external).then(|| kv("wa.ui.access", view! { <span class="chip">{tr(access_key(access))}</span> }.into_any()))}
-                    {(!external).then(|| kv("wa.ui.ports", ui::text(tf("wa.ui.ports_val", &[("https", &https.to_string()), ("http", &cur.pointer("/settings/http_port").and_then(Value::as_u64).unwrap_or(80).to_string())]))))}
-                    {kv("wa.ui.lan", ranges(&s.lan))}
-                    {(!s.vpn.is_empty()).then(|| kv("wa.ui.vpn", ranges(&s.vpn)))}
+                    {ui::kv("wa.ui.urls", if external { ui::text(t("wa.ui.external").to_string()) } else { url_links(&s.ui_urls) })}
+                    {(!external).then(|| ui::kv("wa.ui.access", view! { <span class="chip">{tr(access_key(access))}</span> }.into_any()))}
+                    {(!external).then(|| ui::kv("wa.ui.ports", ui::text(tf("wa.ui.ports_val", &[("https", &https.to_string()), ("http", &cur.pointer("/settings/http_port").and_then(Value::as_u64).unwrap_or(80).to_string())]))))}
+                    {ui::kv("wa.ui.lan", ranges(&s.lan))}
+                    {(!s.vpn.is_empty()).then(|| ui::kv("wa.ui.vpn", ranges(&s.vpn)))}
                 </dl>
                 {crate::pages::network::remote::web_access_note()}
                 {ui::note(Tone::Info, icons::LIFE_BUOY, view! {
@@ -501,7 +498,7 @@ fn overview() -> AnyView {
                 {ui_card}
             </section>
             <section class="card widget w-12">
-                <WidgetHead icon=icons::SETTINGS_2 title="wa.set.title" />
+                <WidgetHead icon=icons::SETTINGS title="wa.set.title" />
                 {move || {
                     // built again when the settings change on the server (a save, a timed
                     // rollback, another administrator), never while only other fields do
@@ -716,13 +713,13 @@ fn routes_panel() -> AnyView {
             {external.then(|| ui::note(Tone::Info, icons::INFO, ui::text(t("wa.routes.external").to_string())))}
             {mdns_note()}
             {(!rows.is_empty()).then(|| view! {
-                <div class="sec-actions"><button class="btn sm" on:click=add><Icon icon=icons::PLUS size=14 />{tr("wa.add.button")}</button></div>
+                <div class="sec-actions"><button class="btn ghost sm" on:click=add><Icon icon=icons::PLUS size=14 />{tr("wa.add.button")}</button></div>
             })}
             {if rows.is_empty() {
                 view! {
                     <EmptyState icon=icons::LINK title=Signal::derive(|| t("wa.routes.empty").to_string()) text=Signal::derive(|| t("wa.routes.empty_text").to_string())>
                         <a class="btn primary" href="/apps">{tr("nav.apps")}</a>
-                        <button class="btn" on:click=add><Icon icon=icons::PLUS size=14 />{tr("wa.add.button")}</button>
+                        <button class="btn ghost" on:click=add><Icon icon=icons::PLUS size=14 />{tr("wa.add.button")}</button>
                     </EmptyState>
                 }
                 .into_any()
@@ -864,13 +861,13 @@ fn route_drawer(id: String, run_now: bool) -> AnyView {
         view! {
             {problems}
             <dl class="kvs">
-                {kv("wa.col.address", url_links(&r.urls))}
-                {kv("wa.route.names", ui::breakable(&if r.names.is_empty() { "—".to_string() } else { r.names.join(", ") }, "mono"))}
-                {kv("wa.route.upstream", ui::breakable(&r.upstream, "mono"))}
-                {kv("wa.route.kind", ui::text(t(kind_key(&s_at(&cfg, "/kind", "app"))).to_string()))}
-                {r.stack.clone().map(|st| kv("dk.ed.name", view! { <a class="mono" href=format!("/docker?stack={}", api::encode(&st))>{st.clone()}</a> }.into_any()))}
-                {kv("wa.route.login", ui::text(t(if auth == "none" { "wa.auth.none" } else { "wa.auth.app" }).to_string()))}
-                {kv("wa.route.headers", ui::text(t(if headers == "relaxed" { "wa.headers.relaxed" } else { "wa.headers.default" }).to_string()))}
+                {ui::kv("wa.col.address", url_links(&r.urls))}
+                {ui::kv("wa.route.names", ui::breakable(&if r.names.is_empty() { ui::DASH.to_string() } else { r.names.join(", ") }, "mono"))}
+                {ui::kv("wa.route.upstream", ui::breakable(&r.upstream, "mono"))}
+                {ui::kv("wa.route.kind", ui::text(t(kind_key(&s_at(&cfg, "/kind", "app"))).to_string()))}
+                {r.stack.clone().map(|st| ui::kv("dk.ed.name", view! { <a class="mono" href=format!("/docker?stack={}", api::encode(&st))>{st.clone()}</a> }.into_any()))}
+                {ui::kv("wa.route.login", ui::text(t(if auth == "none" { "wa.auth.none" } else { "wa.auth.app" }).to_string()))}
+                {ui::kv("wa.route.headers", ui::text(t(if headers == "relaxed" { "wa.headers.relaxed" } else { "wa.headers.default" }).to_string()))}
             </dl>
             <h3 class="mini-title">{tr("wa.col.access")}</h3>
             {access_radios("wa-route-access", access, auth == "none")}
@@ -886,18 +883,16 @@ fn route_drawer(id: String, run_now: bool) -> AnyView {
             </div>
             {form_error(test_err)}
             {move || diag.with(|d| d.as_ref().map(|d| checklist(d, check_key)))}
-            {custom.then(|| view! {
-                <h3 class="mini-title">{tr("wa.route.remove_title")}</h3>
-                <p class="small muted">{tr("wa.route.remove_text")}</p>
-                <div class="sec-actions">
-                    <button type="button" class="btn danger sm" on:click=move |_| removing.set(true)><Icon icon=icons::TRASH_2 size=14 />{tr("wa.route.remove")}</button>
-                </div>
-            })}
         }
         .into_any()
     };
     let title = Signal::derive(move || view_of.with(|r| r.as_ref().map(|r| route_name(w, r))).map(|n| tf("wa.route.title", &[("name", &n)])).unwrap_or_default());
+    // a custom address can be removed (an app's own address goes with the app): left in the
+    // footer, as in every drawer
     let foot = view! {
+        {custom.then(|| view! {
+            <button type="button" class="btn danger foot-start" disabled=move || busy.get() on:click=move |_| removing.set(true)><Icon icon=icons::TRASH_2 size=16 />{tr("wa.route.remove")}</button>
+        })}
         <button type="button" class="btn ghost" disabled=move || busy.get() on:click=move |_| close.run(())>{tr("close")}</button>
         <button type="button" class="btn primary" disabled=move || busy.get() || !dirty.get() || view_of.with(Option::is_none) on:click=save>{spinner(busy)}{tr("save")}</button>
     }

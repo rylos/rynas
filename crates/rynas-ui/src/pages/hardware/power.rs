@@ -10,7 +10,6 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use rynas_api_types::PendingOp;
 use rynas_api_types::power::*;
-use wasm_bindgen::JsValue;
 
 use crate::api;
 use crate::form::{lens, lens_bool, number_field, save_bar, segmented, switch};
@@ -32,7 +31,7 @@ fn week_minutes(r: &PowerRule) -> impl Iterator<Item = u32> + '_ {
 }
 
 fn day_time(m: u32) -> String {
-    format!("{} {:02}:{:02}", t(DAY_KEYS[(m / 1440) as usize % 7]), (m % 1440) / 60, m % 60)
+    format!("{} {}", t(DAY_KEYS[(m / 1440) as usize % 7]), i18n::hm((m % 1440) / 60, m % 60))
 }
 
 /// The first conflict between enabled rules, as the API checks them (`None`: no conflict).
@@ -87,24 +86,6 @@ fn parse_hhmm(v: &str) -> Option<(u8, u8)> {
     (h < 24 && m < 60).then_some((h, m))
 }
 
-/// "today 23:30", "tomorrow 07:00", "Mon 07:00" (within a week), else the date.
-fn when(ms: u64) -> String {
-    let d = js_sys::Date::new(&JsValue::from_f64(ms as f64));
-    let now = js_sys::Date::new_0();
-    let day = |x: &js_sys::Date| (x.get_full_year(), x.get_month(), x.get_date());
-    let tomorrow = js_sys::Date::new(&JsValue::from_f64(now.get_time() + 86_400_000.0));
-    let time = i18n::time_hm(ms as f64);
-    if day(&d) == day(&now) {
-        format!("{} {time}", t("ps.today"))
-    } else if day(&d) == day(&tomorrow) {
-        format!("{} {time}", t("ps.tomorrow"))
-    } else if (ms as f64) - now.get_time() < 6.0 * 86_400_000.0 {
-        // getDay: 0 = Sunday
-        format!("{} {time}", t(DAY_KEYS[(d.get_day() as usize + 6) % 7]))
-    } else {
-        i18n::datetime(ms)
-    }
-}
 
 async fn stage(rules: Vec<PowerRule>) -> Result<(), api::ApiErr> {
     api::put::<_, PowerScheduleState>(URL, &PowerSchedule { rules }).await.map(|_| ())
@@ -231,9 +212,6 @@ fn wake_notes(w: &WakeSupport) -> (Option<AnyView>, Option<AnyView>) {
     (warning, error)
 }
 
-fn kv(label: &'static str, value: AnyView) -> AnyView {
-    view! { <div class="kv"><dt>{tr(label)}</dt><dd>{value}</dd></div> }.into_any()
-}
 
 fn next_card(st: Remote<PowerScheduleState>) -> AnyView {
     let body = move || {
@@ -243,7 +221,7 @@ fn next_card(st: Remote<PowerScheduleState>) -> AnyView {
         let s = st.data.get().unwrap_or_default();
         let n = s.next;
         let next = |ms: Option<u64>, rule: Option<String>| match ms {
-            Some(ms) => view! { <strong class="tnum">{when(ms)}</strong>{rule.map(|r| view! { <span class="muted small mono">" · "{r}</span> })} }.into_any(),
+            Some(ms) => view! { <strong class="tnum">{i18n::short_when(ms)}</strong>{rule.map(|r| view! { <span class="muted small mono">" · "{r}</span> })} }.into_any(),
             None => text(t("ps.none").to_string()),
         };
         let startup = if n.wake.supported { next(n.next_startup_ms, n.next_startup_rule.clone()) } else { status(Tone::Warn, t("ps.wake_unsupported").to_string()) };
@@ -261,11 +239,11 @@ fn next_card(st: Remote<PowerScheduleState>) -> AnyView {
             let clean = match b.previous_shutdown_clean {
                 Some(true) => t("ps.clean_yes"),
                 Some(false) => t("ps.clean_no"),
-                None => "—",
+                None => ui::DASH,
             };
             view! {
-                {kv("last_boot", text(format!("{} · {}", i18n::datetime(b.boot_ms), t(key))))}
-                {kv("ps.prev_clean", text(clean.to_string()))}
+                {ui::kv("last_boot", text(format!("{} · {}", i18n::datetime(b.boot_ms), t(key))))}
+                {ui::kv("ps.prev_clean", text(clean.to_string()))}
             }
         });
         view! {
@@ -277,8 +255,8 @@ fn next_card(st: Remote<PowerScheduleState>) -> AnyView {
             {warning.map(|w| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, w))}
             {arm_error.map(|e| ui::note(Tone::Err, icons::CIRCLE_X, e))}
             <dl class="kvs">
-                {kv("ps.time_zone", text(n.time_zone.clone()))}
-                {kv("ps.wake_alarm", armed)}
+                {ui::kv("ps.time_zone", text(n.time_zone.clone()))}
+                {ui::kv("ps.wake_alarm", armed)}
                 {boot}
             </dl>
         }
@@ -333,7 +311,7 @@ fn rule_row(r: PowerRule, s: &PowerScheduleState, rules: Signal<Vec<PowerRule>>,
             BusyPolicy::Skip => t("ps.busy_skip").to_string(),
             BusyPolicy::Force => t("ps.busy_force").to_string(),
         },
-        _ => "—".to_string(),
+        _ => ui::DASH.to_string(),
     };
     let pend = pending.map(|p| {
         let key = match p {
@@ -343,7 +321,7 @@ fn rule_row(r: PowerRule, s: &PowerScheduleState, rules: Signal<Vec<PowerRule>>,
         };
         status(Tone::Info, t(key).to_string())
     });
-    let label = format!("{} {} {}", t(if r.action == PowerAction::Startup { "ps.startup" } else { "ps.shutdown" }), days_text(&r.days), hhmm(&r));
+    let label = format!("{} {} {}", t(if r.action == PowerAction::Startup { "ps.startup" } else { "ps.shutdown" }), days_text(&r.days), i18n::hm(r.hour.into(), r.minute.into()));
     let enabled = r.enabled;
     let (re, rd) = (r.clone(), r.id.clone());
     row(vec![
@@ -359,7 +337,7 @@ fn rule_row(r: PowerRule, s: &PowerScheduleState, rules: Signal<Vec<PowerRule>>,
         ),
         cell("ps.col_action", "", view! { {action}{pend} }.into_any()),
         cell("sch.f.weekdays", "", text(days_text(&r.days))),
-        cell("sch.f.time", "tnum", text(hhmm(&r))),
+        cell("sch.f.time", "tnum", text(i18n::hm(r.hour.into(), r.minute.into()))),
         cell("ps.col_busy", "muted", text(busy)),
         cell(
             "",

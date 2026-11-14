@@ -15,6 +15,7 @@ use crate::api::{self, ApiErr};
 use crate::auth::auth;
 use crate::i18n::{self, t, tr};
 use crate::icons::{self, Icon};
+use crate::toast::toast;
 use crate::ui::{ErrorBox, Meter, Status, Tone, cell, row_flag, status, table, text};
 
 /// Tasks kept in the panel (newest first): the server keeps 500, the panel shows the latest.
@@ -178,6 +179,36 @@ pub async fn run_task(url: &str, body: Option<String>) -> Result<TaskInfo, ApiEr
     let id = api::start_task(url, body).await?;
     follow(&id).await
 }
+
+/// The one way to start a task from a button and say how it ended: `busy` while it runs, a
+/// refusal (the task never started) in `error` (the dialog's `form_error`, which stays open),
+/// the outcome in a toast (`ok` on success, the task's error otherwise) and then `done`
+/// (close the dialog, reload). Row actions without a dialog show `error` as a toast.
+pub fn run_and_report(start: impl std::future::Future<Output = Result<String, ApiErr>> + 'static, ok: String, busy: RwSignal<bool>, error: RwSignal<Option<String>>, done: Callback<()>) {
+    busy.set(true);
+    error.set(None);
+    leptos::task::spawn_local(async move {
+        let r = match start.await {
+            Ok(id) => follow(&id).await,
+            Err(e) => Err(e),
+        };
+        let _ = busy.try_set(false);
+        match r {
+            Ok(task) if task.status == TaskStatus::Ok => {
+                toast(Tone::Ok, ok);
+                done.run(());
+            }
+            Ok(task) => {
+                toast(Tone::Err, task_error(&task));
+                done.run(());
+            }
+            Err(e) => {
+                let _ = error.try_set(Some(e.text()));
+            }
+        }
+    });
+}
+
 
 /// Translated name of a task type (`task.<type>` in i18n), the type itself when unknown.
 pub fn task_label(kind: &str) -> String {

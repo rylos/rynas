@@ -1135,14 +1135,7 @@ fn short(id: &str) -> &str {
 }
 
 fn bytes(n: u64) -> String {
-    const U: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut v = n as f64;
-    let mut i = 0;
-    while v >= 1024.0 && i < U.len() - 1 {
-        v /= 1024.0;
-        i += 1;
-    }
-    if i == 0 { format!("{n} B") } else { format!("{v:.1} {}", U[i]) }
+    rynas_api_types::units::human_bytes(n)
 }
 
 async fn op(
@@ -2487,7 +2480,7 @@ mod tests {
     #[test]
     fn helpers() {
         assert_eq!(bytes(512), "512 B");
-        assert_eq!(bytes(1536), "1.5 KiB");
+        assert_eq!(bytes(1536), "1.50 KiB");
         assert!(check_snapshot_id("latest").is_ok());
         assert!(check_snapshot_id("0123abcd").is_ok());
         assert!(check_snapshot_id("../x").is_err());

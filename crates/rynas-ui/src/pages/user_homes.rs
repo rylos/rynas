@@ -16,6 +16,7 @@ use crate::form::{Draft, form_error, lens_bool, spinner, stale_notice, switch};
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::toast::{saved_applied, toast};
+use crate::pages::share_folders::size_text;
 use crate::ui::{self, Confirm, DlgKind, Remote, Skeleton, Tone, confirm, dialog};
 
 /// The tab's content.
@@ -335,9 +336,6 @@ fn blocker_text(b: &HomeMoveBlocker) -> String {
     tf(key, &[("detail", &detail)])
 }
 
-fn size_text(bytes: u64, partial: bool) -> String {
-    if partial { tf("shares.size_min", &[("size", &i18n::bytes(bytes))]) } else { i18n::bytes(bytes) }
-}
 
 /// What moving one home does, and what blocks it.
 fn plan_view(p: &HomeMovePlan) -> AnyView {
@@ -467,8 +465,9 @@ pub fn move_dialog(ask: MoveAsk, state: Remote<HomesState>, close: Callback<()>,
         {place_select("homes.dest", Some("homes.dest_help"), opts, to.into(), Callback::new(move |v| to.set(v)))}
         {move || match plans.get() {
             None => view! { <Skeleton lines=6 /> }.into_any(),
-            Some(Err(e)) => ui::note(Tone::Err, icons::CIRCLE_X, view! { <span>{e}</span> }.into_any()),
-            Some(Ok(v)) if v.is_empty() => view! { <p class="muted">{tr("homes.none")}</p> }.into_any(),
+            // Retry: the same destination again (the plan effect re-reads it)
+            Some(Err(e)) => ui::error_box_text(e, Callback::new(move |_| to.update(|_| {}))),
+            Some(Ok(v)) if v.is_empty() => ui::empty_line("homes.none"),
             Some(Ok(v)) => view! {
                 {batch_view(&v).map(|(note, _)| note)}
                 {v.iter().map(plan_view).collect_view()}

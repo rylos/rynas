@@ -1,41 +1,24 @@
-//! Sistema: machine facts and interface preferences (theme, density, language).
+//! Sistema: machine facts and interface preferences (theme, density, language, time format).
 
 use leptos::prelude::*;
 
-use crate::i18n::{self, Lang, t, tr};
+use crate::form::segmented;
+use crate::i18n::{self, HourCycle, Lang, tr};
 use crate::icons::{self, Icon};
 use crate::live::{Res, use_live};
 use crate::prefs::{Density, ThemePref, use_ui};
 use crate::ui::{PageHeader, Pending};
 
-/// Segmented control (radio group).
-fn segmented<T: Copy + PartialEq + Send + Sync + 'static>(
-    label: &'static str,
-    value: Signal<T>,
-    options: Vec<(T, &'static str)>,
-    set: impl Fn(T) + Copy + Send + Sync + 'static,
-) -> impl IntoView {
-    view! {
-        <div class="pref">
-            <span class="pref-label" id=format!("lbl-{label}")>{move || t(label)}</span>
-            <div class="segmented" role="radiogroup" aria-labelledby=format!("lbl-{label}")>
-                {options
-                    .into_iter()
-                    .map(|(v, key)| {
-                        view! {
-                            <button
-                                role="radio"
-                                aria-checked=move || (value.get() == v).to_string()
-                                class:on=move || value.get() == v
-                                on:click=move |_| set(v)
-                            >
-                                {move || t(key)}
-                            </button>
-                        }
-                    })
-                    .collect_view()}
-            </div>
-        </div>
+const THEMES: &[(&str, &str)] = &[("auto", "theme.auto"), ("light", "theme.light"), ("dark", "theme.dark")];
+const DENSITIES: &[(&str, &str)] = &[("comfortable", "density.comfortable"), ("compact", "density.compact")];
+const LANGUAGES: &[(&str, &str)] = &[("", "language.auto"), ("it", "lang.it"), ("en", "lang.en")];
+const HOUR_CYCLES: &[(&str, &str)] = &[("", "hour_cycle.auto"), ("h23", "hour_cycle.h23"), ("h12", "hour_cycle.h12")];
+
+fn theme_code(t: ThemePref) -> &'static str {
+    match t {
+        ThemePref::Auto => "auto",
+        ThemePref::Light => "light",
+        ThemePref::Dark => "dark",
     }
 }
 
@@ -55,24 +38,41 @@ pub fn System() -> impl IntoView {
                     <h2 class="section-title">{tr("sys.prefs")}</h2>
                     {segmented(
                         "bar.theme",
-                        ui.theme.into(),
-                        vec![(ThemePref::Auto, "theme.auto"), (ThemePref::Light, "theme.light"), (ThemePref::Dark, "theme.dark")],
-                        move |v| ui.theme.set(v),
+                        THEMES,
+                        Signal::derive(move || theme_code(ui.theme.get()).to_string()),
+                        Callback::new(move |v: String| {
+                            ui.theme.set(match v.as_str() {
+                                "light" => ThemePref::Light,
+                                "dark" => ThemePref::Dark,
+                                _ => ThemePref::Auto,
+                            })
+                        }),
                     )}
                     {segmented(
                         "density",
-                        ui.density.into(),
-                        vec![(Density::Comfortable, "density.comfortable"), (Density::Compact, "density.compact")],
-                        move |v| ui.density.set(v),
+                        DENSITIES,
+                        Signal::derive(move || (if ui.density.get() == Density::Compact { "compact" } else { "comfortable" }).to_string()),
+                        Callback::new(move |v: String| ui.density.set(if v == "compact" { Density::Compact } else { Density::Comfortable })),
                     )}
                     {segmented(
                         "language",
-                        lang_pref.into(),
-                        vec![(None, "language.auto"), (Some(Lang::It), "lang.it"), (Some(Lang::En), "lang.en")],
-                        move |v| {
-                            lang_pref.set(v);
-                            i18n::set_lang(v);
-                        },
+                        LANGUAGES,
+                        Signal::derive(move || lang_pref.get().map_or("", Lang::code).to_string()),
+                        Callback::new(move |v: String| {
+                            let l = match v.as_str() {
+                                "it" => Some(Lang::It),
+                                "en" => Some(Lang::En),
+                                _ => None,
+                            };
+                            lang_pref.set(l);
+                            i18n::set_lang(l);
+                        }),
+                    )}
+                    {segmented(
+                        "hour_cycle",
+                        HOUR_CYCLES,
+                        Signal::derive(move || i18n::hour_cycle().code().to_string()),
+                        Callback::new(move |v: String| i18n::set_hour_cycle(HourCycle::from_code(&v))),
                     )}
                 </section>
                 <section class="card widget w-6" style="--i:1">

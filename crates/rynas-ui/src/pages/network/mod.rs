@@ -119,9 +119,6 @@ fn on_off(on: bool, key_on: &'static str, key_off: &'static str) -> AnyView {
     if on { ui::status(Tone::Ok, t(key_on).to_string()) } else { ui::status(Tone::Unknown, t(key_off).to_string()) }
 }
 
-fn kv(label: &'static str, value: AnyView) -> AnyView {
-    view! { <div class="kv"><dt>{tr(label)}</dt><dd>{value}</dd></div> }.into_any()
-}
 
 fn overview(net: Net) -> AnyView {
     let summary = move || {
@@ -139,15 +136,15 @@ fn overview(net: Net) -> AnyView {
             Some(m) => view! { <span class="mono">{m.clone()}</span> }.into_any(),
             None => view! { <span class="muted">{tr("net.mgmt_unknown")}</span> }.into_any(),
         };
-        let dash = || "—".to_string();
+        let dash = || ui::DASH.to_string();
         view! {
             <dl class="kvs">
-                {kv("net.hostname", view! { <span class="mono">{s.hostname.clone()}</span> }.into_any())}
-                {kv("net.mgmt", mgmt)}
-                {kv("net.gateway", view! { <span class="mono">{if gateways.is_empty() { dash() } else { gateways.join(", ") }}</span> }.into_any())}
-                {kv("net.dns", view! { <span class="mono">{if s.dns.servers.is_empty() { dash() } else { s.dns.servers.join(", ") }}</span> }.into_any())}
-                {(!s.dns.search.is_empty()).then(|| kv("net.search", view! { <span class="mono">{s.dns.search.join(", ")}</span> }.into_any()))}
-                {kv("net.lkg", match s.lkg_revision {
+                {ui::kv("net.hostname", view! { <span class="mono">{s.hostname.clone()}</span> }.into_any())}
+                {ui::kv("net.mgmt", mgmt)}
+                {ui::kv("net.gateway", view! { <span class="mono">{if gateways.is_empty() { dash() } else { gateways.join(", ") }}</span> }.into_any())}
+                {ui::kv("net.dns", view! { <span class="mono">{if s.dns.servers.is_empty() { dash() } else { s.dns.servers.join(", ") }}</span> }.into_any())}
+                {(!s.dns.search.is_empty()).then(|| ui::kv("net.search", view! { <span class="mono">{s.dns.search.join(", ")}</span> }.into_any()))}
+                {ui::kv("net.lkg", match s.lkg_revision {
                     Some(r) => format!("#{r}").into_any(),
                     None => view! { <span class="muted">{tr("net.lkg_none")}</span> }.into_any(),
                 })}
@@ -162,11 +159,11 @@ fn overview(net: Net) -> AnyView {
         let s = net.state.data.with(|s| s.as_ref().map(|s| s.services.clone())).unwrap_or_default();
         view! {
             <dl class="kvs">
-                {kv("net.svc_networkd", on_off(s.networkd, "net.running", "net.not_running"))}
-                {kv("net.svc_resolved", on_off(s.resolved, "net.running", "net.not_running"))}
-                {kv("net.svc_ifupdown", on_off(s.ifupdown, "net.running", "net.not_running"))}
-                {kv("net.svc_nm", on_off(s.network_manager, "net.running", "net.not_running"))}
-                {kv("net.svc_avahi", on_off(s.avahi, "net.running", "net.not_running"))}
+                {ui::kv("net.svc_networkd", on_off(s.networkd, "net.running", "net.not_running"))}
+                {ui::kv("net.svc_resolved", on_off(s.resolved, "net.running", "net.not_running"))}
+                {ui::kv("net.svc_ifupdown", on_off(s.ifupdown, "net.running", "net.not_running"))}
+                {ui::kv("net.svc_nm", on_off(s.network_manager, "net.running", "net.not_running"))}
+                {ui::kv("net.svc_avahi", on_off(s.avahi, "net.running", "net.not_running"))}
             </dl>
         }
         .into_any()
@@ -535,7 +532,7 @@ pub fn speed_text(i: &NetInterface) -> String {
     match (i.speed_mbps, i.duplex) {
         (Some(m), Some(Duplex::Half)) => format!("{} · {}", i18n::link_speed(m), t("net.half_duplex")),
         (Some(m), _) => i18n::link_speed(m),
-        _ => "—".into(),
+        _ => ui::DASH.into(),
     }
 }
 
@@ -715,13 +712,13 @@ pub fn diff(old: Option<&InterfaceConfig>, new: &InterfaceConfig) -> Vec<DiffLin
 pub fn diff_table(old: Option<&InterfaceConfig>, new: &InterfaceConfig) -> AnyView {
     let lines = diff(old, new);
     if lines.is_empty() {
-        return view! { <p class="muted small">{tr("net.no_changes")}</p> }.into_any();
+        return ui::empty_line("net.no_changes");
     }
     let rows = lines
         .into_iter()
         .map(|(k, a, b)| {
-            let a = if a.is_empty() { "—".to_string() } else { a };
-            let b = if b.is_empty() { "—".to_string() } else { b };
+            let a = if a.is_empty() { ui::DASH.to_string() } else { a };
+            let b = if b.is_empty() { ui::DASH.to_string() } else { b };
             crate::ui::row(vec![
                 crate::ui::cell("diff.field", "", tr(k).into_any()),
                 crate::ui::cell(

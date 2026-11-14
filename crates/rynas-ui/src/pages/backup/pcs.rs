@@ -34,15 +34,14 @@ use rynas_api_types::snapshots::{EntryKind, Retention, RetentionPreset, Snapshot
 use rynas_api_types::TaskStatus;
 
 use crate::api;
-use crate::form::{In, area_field, form_error, number_field, segmented, select_field, spinner, switch, text_field};
+use crate::form::{In, SaveBar, area_field, form_error, number_field, save_bar_with, segmented, select_field, spinner, switch, text_field};
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
-use crate::pages::security::copy_button_for;
 use rynas_api_types::pcagent::{PcDevice, PcMethod};
 use crate::pages::snapshots::{mode_text, retention_text};
 use crate::tasks;
 use crate::toast::toast;
-use crate::ui::{self, Confirm, DlgKind, EmptyState, ErrorBox, Remote, Skeleton, Tone};
+use crate::ui::{self, Confirm, DlgKind, EmptyState, ErrorBox, Folds, Remote, Skeleton, Tone, code_block, kv, when};
 
 const URL: &str = "/api/v1/pc-backups/targets";
 
@@ -171,66 +170,7 @@ fn snapshot_flag(s: &ReceivedSnapshot) -> Option<AnyView> {
 }
 
 fn fold(folds: Folds, title: &'static str, open: bool, summary: AnyView, body: AnyView) -> AnyView {
-    view! {
-        <details class="pcb-fold" open=folds.open(title, open) on:toggle=move |ev| folds.toggled(title, &ev)>
-            <summary><Icon icon=icons::CHEVRON_RIGHT size=14 /><span class="pcb-fold-title">{tr(title)}</span>{summary}</summary>
-            <div class="pcb-fold-body">{body}</div>
-        </details>
-    }
-    .into_any()
-}
-
-/// Which folded parts of the drawer are open, by a stable key (a run's timestamp, a
-/// subvolume, a section's title): what the user chose, kept while the PC is read again (a
-/// Measure, a poll rebuilds the drawer's content); a part never touched keeps its default.
-#[derive(Clone, Copy)]
-struct Folds(RwSignal<std::collections::HashMap<String, bool>>);
-
-impl Folds {
-    fn new() -> Self {
-        Folds(RwSignal::new(Default::default()))
-    }
-
-    /// The `open` attribute of the part `key`.
-    fn open(self, key: impl Into<String>, default: bool) -> impl Fn() -> bool + Send + Sync + Copy + 'static {
-        let key = StoredValue::new(key.into());
-        move || self.0.with(|m| key.with_value(|k| m.get(k).copied()).unwrap_or(default))
-    }
-
-    /// A `toggle` event of the part `key`: remember its state.
-    fn toggled(self, key: &str, ev: &web_sys::Event) {
-        let open = event_target::<web_sys::Element>(ev).has_attribute("open");
-        if self.0.with_untracked(|m| m.get(key).copied()) != Some(open) {
-            self.0.update(|m| {
-                m.insert(key.to_string(), open);
-            });
-        }
-    }
-}
-
-fn when(ms: Option<u64>) -> String {
-    ms.map(i18n::datetime).unwrap_or_else(|| "—".into())
-}
-
-fn kv(label: &'static str, value: AnyView) -> AnyView {
-    view! { <div class="kv"><dt>{tr(label)}</dt><dd>{value}</dd></div> }.into_any()
-}
-
-/// A titled command block with its own Copy button (named after the title for screen
-/// readers); nothing when the text is empty.
-fn code_block(title: &'static str, text: String) -> Option<AnyView> {
-    if text.trim().is_empty() {
-        return None;
-    }
-    let aria = tf("pcb.copy_of", &[("what", t(title))]);
-    Some(
-        view! {
-            <h4 class="small"><strong>{tr(title)}</strong></h4>
-            <pre class="app-code">{text.clone()}</pre>
-            <div class="sec-actions">{copy_button_for("dns.copy", aria, text)}</div>
-        }
-        .into_any(),
-    )
+    ui::fold(Some(folds), title, open, Some(summary), body)
 }
 
 fn problem_text(p: &SetupProblem) -> String {
@@ -410,7 +350,7 @@ fn first_run(b: &BareMetal, list: &[ReceivedSnapshot]) -> Option<AnyView> {
 /// "12.0 GiB · 310 MiB its own".
 fn size_text(z: Option<SnapshotSize>) -> String {
     z.map(|z| tf("bkpc.size_text", &[("ref", &i18n::bytes(z.referenced_bytes)), ("excl", &i18n::bytes(z.exclusive_bytes))]))
-        .unwrap_or_else(|| "—".into())
+        .unwrap_or_else(|| ui::DASH.into())
 }
 
 /// A retention age as written in the settings ("1d", "12h", "2w") in words with the right
@@ -531,22 +471,17 @@ pub fn panel(add: RwSignal<Option<bool>>) -> AnyView {
     // the agents' live progress: both lists read again every 5 s while one PC backs up and
     // the page is visible
     let agents = Remote::<rynas_api_types::pcagent::PcBackupOverview>::new("/api/v1/pcbackup");
-    let ticking = RwSignal::new(false);
-    Effect::new(move |_| {
-        let busy = pcs.list.data.with(|l| l.as_ref().is_some_and(|l| l.iter().any(|p| p.receiving)))
-            || agents.data.with(|o| o.as_ref().is_some_and(|o| o.devices.iter().any(|d| d.state == rynas_api_types::pcagent::PcState::Running)));
-        if busy && !ticking.get_untracked() {
-            ticking.set(true);
-            spawn_local(async move {
-                api::sleep(5000).await;
-                let _ = ticking.try_set(false);
-                if !document().hidden() {
-                    pcs.list.reload();
-                    agents.reload();
-                }
-            });
-        }
-    });
+    crate::live::poll_while(
+        5000,
+        move || {
+            pcs.list.data.with(|l| l.as_ref().is_some_and(|l| l.iter().any(|p| p.receiving)))
+                || agents.data.with(|o| o.as_ref().is_some_and(|o| o.devices.iter().any(|d| d.state == rynas_api_types::pcagent::PcState::Running)))
+        },
+        move || {
+            pcs.list.reload();
+            agents.reload();
+        },
+    );
     let content = move || {
         let Some(list) = pcs.list.data.get() else { return ().into_any() };
         let progress_of = |dev: &str| agents.data.with(|o| o.as_ref().and_then(|o| o.devices.iter().find(|d| d.device == dev && d.settings.method == PcMethod::Btrfs).and_then(|d| d.progress.clone())));
@@ -568,8 +503,8 @@ pub fn panel(add: RwSignal<Option<bool>>) -> AnyView {
                 let groups = p.groups.iter().map(|g| g.name.clone()).collect::<Vec<_>>().join(", ");
                 let via = t(if p.agent { "pcb.via.agent" } else { "pcb.via.ssh" });
                 let sub = Some(if p.description.is_empty() { via.to_string() } else { format!("{} · {via}", p.description) });
-                let space = p.usage.map(|u| i18n::bytes(u.exclusive_bytes)).unwrap_or_else(|| "—".into());
-                let label = format!("{}: {}", t("bk.open"), p.device);
+                let space = p.usage.map(|u| i18n::bytes(u.exclusive_bytes)).unwrap_or_else(|| ui::DASH.into());
+                let label = ui::verb_name("bk.open", &p.device);
                 // the first problem other than "late" (the state already says that)
                 let problem = p.issues.iter().find(|i| i.code != PcIssueCode::Late).map(|i| {
                     let tone = if i.code == PcIssueCode::LowSpace { Tone::Err } else { Tone::Warn };
@@ -1051,11 +986,12 @@ fn add_dialog(pcs: Pcs, adopt_first: bool) -> AnyView {
     }
     .into_any();
     let ready = move || (!device.with(|d| d.trim().is_empty()) || !linked.with(String::is_empty)) && !path.with(|p| p.trim().is_empty()) && (mode.get() == "new" || (preview.with(Option::is_some) && (!needs_perm() || perm_ok.get())));
-    let foot = view! {
-        <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("cancel")}</button>
-        <button type="button" class="btn primary" disabled=move || busy.get() || !ready() on:click=save>{spinner(busy)}<Icon icon=icons::PLUS size=16 />{move || if mode.get() == "adopt" { t("bk.adopt") } else { t("bkpc.create") }}</button>
-    }
-    .into_any();
+    let foot = save_bar_with(SaveBar {
+        can_save: Signal::derive(ready),
+        label: Signal::derive(move || if mode.get() == "adopt" { t("bk.adopt") } else { t("bkpc.create") }.to_string()),
+        icon: Some(icons::PLUS),
+        ..SaveBar::new(busy, "bkpc.create", close, Callback::new(save))
+    });
     ui::dialog(DlgKind::Normal, Signal::derive(move || t("bk.add").to_string()), close, body, Some(foot))
 }
 
@@ -1251,11 +1187,7 @@ fn settings_dialog(pcs: Pcs, p: PcTarget, agent_dev: Option<PcDevice>) -> AnyVie
         {form_error(error)}
     }
     .into_any();
-    let foot = view! {
-        <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("cancel")}</button>
-        <button type="button" class="btn primary" disabled=move || busy.get() on:click=save>{spinner(busy)}{tr("save")}</button>
-    }
-    .into_any();
+    let foot = save_bar_with(SaveBar::new(busy, "save", close, Callback::new(save)));
     ui::dialog(DlgKind::Normal, Signal::stored(tf("bk.settings_title", &[("device", &p.device)])), close, body, Some(foot))
 }
 
@@ -1395,9 +1327,9 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
                 None => t("pcb.never").to_string(),
             };
             view! {
-                <section class="pcb-status">
-                    <div class="pcb-status-head">{folder_status(&p)}</div>
-                    <p class="pcb-meta small"><span>{last}</span><span>{t("pcb.via.ssh")}</span></p>
+                <section class="status-card">
+                    <div class="status-card-head">{folder_status(&p)}</div>
+                    <p class="status-meta small"><span>{last}</span><span>{t("pcb.via.ssh")}</span></p>
                 </section>
             }
             .into_any()
@@ -1446,7 +1378,7 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
                 ui::text_cell("snap.col.size", "tnum", size_text(s.size)),
                 ui::actions(view! {
                     <button class="icon-btn sm" title=tr("bk.browse") aria-label=label disabled=!can on:click=move |_| browse.set(Some(name.clone()))><Icon icon=icons::FOLDER_OPEN size=16 /></button>
-                    <button class="icon-btn sm" title=tr("bkpc.delete_snap") aria-label=label_del disabled=!deletable on:click=move |_| { del_err.set(None); del.set(Some(name_del.clone())); }><Icon icon=icons::TRASH_2 size=16 /></button>
+                    <button class="icon-btn sm danger" title=tr("bkpc.delete_snap") aria-label=label_del disabled=!deletable on:click=move |_| { del_err.set(None); del.set(Some(name_del.clone())); }><Icon icon=icons::TRASH_2 size=16 /></button>
                 }.into_any()),
             ])
         };
@@ -1454,7 +1386,7 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
         let group = |key: String, title: AnyView, sub: String, flag: Option<AnyView>, heads: &'static [&'static str], rows: Vec<AnyView>| {
             let k = StoredValue::new(key.clone());
             view! {
-                <details class="pcb-group" open=folds.open(key, false) on:toggle=move |ev| k.with_value(|k| folds.toggled(k, &ev))>
+                <details class="fold pcb-group" open=folds.open(key, false) on:toggle=move |ev| k.with_value(|k| folds.toggled(k, &ev))>
                     <summary><Icon icon=icons::CHEVRON_RIGHT size=14 />{title}<span class="small muted tnum">{sub}</span>{flag}</summary>
                     {ui::table("bk-snaps", heads, rows)}
                 </details>
@@ -1535,13 +1467,13 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
         let size_note = if d.sizes_from_quota { t("bkpc.sizes_quota") } else { t("bkpc.sizes_note") };
         const VIEWS: &[(&str, &str)] = &[("run", "bkpc.view.run"), ("subvolume", "bk.col.subvolume")];
         let snapshots = view! {
-            <div class="pcb-sec-head">
+            <div class="sec-head">
                 <h3 class="mini-title">{tr("bk.snapshots")}</h3>
                 <span class="small muted tnum">{count}</span>
                 {has_snaps.then(|| view! {
                     <button class="icon-btn sm" title=tr("pcb.size_help") aria-label=tr("pcb.size_help") aria-expanded=move || size_help.get().to_string() on:click=move |_| size_help.update(|v| *v = !*v)><Icon icon=icons::INFO size=16 /></button>
                 })}
-                <div class="sec-actions pcb-sec-actions">
+                <div class="sec-actions sec-head-actions">
                     <button class="btn ghost sm" disabled=move || measuring.get() on:click=measure>{spinner(measuring)}<Icon icon=icons::DATABASE size=14 />{tr("bk.measure")}</button>
                     {(nas && has_snaps).then(|| view! { <button class="btn ghost sm" disabled=move || pruning.get() on:click=prune>{spinner(pruning)}<Icon icon=icons::TRASH_2 size=14 />{tr("bkpc.prune")}</button> })}
                 </div>
@@ -1557,7 +1489,7 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
                 }
                 .into_any()
             } else {
-                view! { <p class="small muted">{tr("bk.no_snapshots")}</p> }.into_any()
+                ui::empty_line("bk.no_snapshots")
             }}
         };
 
@@ -1589,7 +1521,7 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
             folds,
             "bkpc.bm.title",
             false,
-            view! { {bm_status(&b)}{reason.map(|r| view! { <span class="small muted pcb-fold-reason">{r}</span> })} }.into_any(),
+            view! { {bm_status(&b)}{reason.map(|r| view! { <span class="small muted fold-reason">{r}</span> })} }.into_any(),
             view! {
                 {(!shown_gaps.is_empty()).then(|| view! { <ul class="small bkpc-gaps">{gaps}</ul> })}
                 {facts.then(|| view! {
@@ -1676,7 +1608,7 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
             {check}
             {snapshots}
             {agent.then(|| ctl.history())}
-            <div class="pcb-folds">
+            <div class="folds">
                 {restore}
                 {folder}
                 {steps}
@@ -1719,14 +1651,16 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
         })
     });
     let body = view! { {move || detail.view(8, content)} }.into_any();
-    let foot = view! {
-        <button type="button" class="btn danger foot-start" on:click=move |_| { error.set(None); ask.set(true); }><Icon icon=icons::TRASH_2 size=16 />{tr("bk.remove")}</button>
+    let secondary = view! {
         <button type="button" class="btn ghost" disabled=move || detail.data.with(Option::is_none) on:click=settings><Icon icon=icons::SETTINGS size=16 />{tr("bk.settings")}</button>
-        <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("close")}</button>
     }
     .into_any();
+    let remove_btn = ui::Danger::new("bk.remove", Callback::new(move |_| {
+        error.set(None);
+        ask.set(true);
+    }));
     view! {
-        <div class="wide-drawer">{ui::drawer(title, close, body, foot)}</div>
+        {ui::detail_drawer(title, close, true, body, Some(remove_btn), Some(secondary))}
         {ctl.confirm()}
         {move || ask.get().then(|| ui::confirm(Confirm { busy, error, ..Confirm::new(tf("bk.remove_title", &[("device", &dev.get_value())]), t("bk.remove_text").to_string(), "bk.remove", true, remove, Callback::new(move |_| ask.set(false))) }))}
         {move || browse.get().map(|s| browse_drawer(pcs, dev.get_value(), s, Callback::new(move |_| browse.set(None))))}
@@ -1805,9 +1739,9 @@ fn browse_drawer(pcs: Pcs, device: String, snapshot: String, close: Callback<()>
         {move || copy.get().map(|rel| copy_dialog(pcs, base.get_value(), rel, Callback::new(move |_| copy.set(None))))}
     }
     .into_any();
-    let foot = view! { <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("close")}</button> }.into_any();
+    let foot = ui::close_foot(close);
     let title = Signal::stored(tf("snap.browse_title", &[("id", &snapshot_label(&snapshot))]));
-    view! { <div class="wide-drawer">{ui::drawer(title, close, body, foot)}</div> }.into_any()
+    view! { {ui::drawer_wide(title, close, body, foot)} }.into_any()
 }
 
 fn entry_row(e: SnapshotEntry, dir: &str, path: RwSignal<String>, copy: RwSignal<Option<String>>) -> AnyView {
@@ -1821,7 +1755,7 @@ fn entry_row(e: SnapshotEntry, dir: &str, path: RwSignal<String>, copy: RwSignal
     let rel_open = rel.clone();
     let name = e.name.clone();
     let copyable = matches!(e.kind, EntryKind::Dir | EntryKind::File | EntryKind::Symlink);
-    let label = format!("{}: {}", t("bkpc.copy"), e.name);
+    let label = ui::verb_name("bkpc.copy", &e.name);
     ui::row(vec![
         ui::cell("snap.col.name", "", view! {
             <span class="entry-name">
@@ -1895,11 +1829,11 @@ fn copy_dialog(pcs: Pcs, base: (String, String), rel: String, close: Callback<()
         {form_error(error)}
     }
     .into_any();
-    let foot = view! {
-        <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("cancel")}</button>
-        <button type="button" class="btn primary" disabled=move || busy.get() || dest.with(|d| d.trim().is_empty()) on:click=go>{spinner(busy)}<Icon icon=icons::COPY size=16 />{tr("bkpc.copy")}</button>
-    }
-    .into_any();
+    let foot = save_bar_with(SaveBar {
+        can_save: Signal::derive(move || !dest.with(|d| d.trim().is_empty())),
+        icon: Some(icons::COPY),
+        ..SaveBar::new(busy, "bkpc.copy", close, Callback::new(go))
+    });
     ui::dialog(DlgKind::Normal, Signal::stored(t("bkpc.copy").to_string()), close, body, Some(foot))
 }
 

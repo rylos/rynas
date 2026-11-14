@@ -541,7 +541,12 @@ fn shown_value(
     {
         return s.to_string();
     }
-    let decimal = v.split_once('.').is_some_and(|(i, d)| {
+    // a number, or a size the server wrote with `units::human_bytes` ("1.50 GiB")
+    let number = match v.split_once(' ') {
+        Some((n, unit)) if crate::units::is_size_unit(unit) => n,
+        _ => v,
+    };
+    let decimal = number.split_once('.').is_some_and(|(i, d)| {
         let i = i.strip_prefix('-').unwrap_or(i);
         !i.is_empty() && !d.is_empty() && i.bytes().chain(d.bytes()).all(|b| b.is_ascii_digit())
     });
@@ -649,6 +654,17 @@ mod tests {
         assert_eq!(
             event_text("x.y", "body", &f, &dict, false).as_deref(),
             Some("85.3% of 192.0.2.1")
+        );
+        // sizes written by units::human_bytes, not other words after a number
+        let f = fields(&[("pct", "1.50"), ("total", "4.66 GiB")]);
+        assert_eq!(
+            event_text("x.y", "body", &f, &dict, true).as_deref(),
+            Some("1,50% of 4,66 GiB")
+        );
+        let f = fields(&[("pct", "1"), ("total", "2.5 apples")]);
+        assert_eq!(
+            event_text("x.y", "body", &f, &dict, true).as_deref(),
+            Some("1% of 2.5 apples")
         );
         // task types through their names
         assert_eq!(

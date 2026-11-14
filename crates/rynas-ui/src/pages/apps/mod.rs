@@ -316,7 +316,7 @@ pub(super) fn antifeature_chips(list: &[AppAntifeature]) -> AnyView {
         .map(|a| {
             let (k, e) = antifeature_keys(*a);
             view! {
-                <span class="chip warn-chip" title=tr(e) aria-label=move || format!("{}: {}", t(k), t(e))>
+                <span class="chip warn" title=tr(e) aria-label=move || format!("{}: {}", t(k), t(e))>
                     <Icon icon=icons::TRIANGLE_ALERT size=12 />{tr(k)}
                 </span>
             }

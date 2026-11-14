@@ -44,7 +44,7 @@ pub fn featured() -> AnyView {
             <section class="apps-sec">
                 <h3 class="apps-sec-title">{tr("apps.feat.fit")}</h3>
                 <p class="muted small">{ram_line(&c)}</p>
-                {if rec.is_empty() { view! { <p class="muted small">{tr("apps.feat.none")}</p> }.into_any() } else { grid(rec) }}
+                {if rec.is_empty() { ui::empty_line("apps.feat.none") } else { grid(rec) }}
             </section>
             {(!managers.is_empty()).then(|| view! {
                 <section class="apps-sec">
@@ -82,10 +82,7 @@ fn issues(c: &AppCatalog) -> Option<AnyView> {
     (!c.issues.is_empty()).then(|| {
         let rows = c.issues.iter().map(|i| view! { <li><strong>{i.app.clone()}</strong>" · "<span class="mono">{i.file.clone()}</span>" — "<span lang="en">{i.message.clone()}</span></li> }).collect_view();
         view! {
-            <details class="apps-issues">
-                <summary>{tf("apps.issues", &[("n", &c.issues.len().to_string())])}</summary>
-                <ul class="small">{rows}</ul>
-            </details>
+            {ui::fold_with(tf("apps.issues", &[("n", &c.issues.len().to_string())]).into_any(), false, view! { <ul class="small">{rows}</ul> }.into_any())}
         }
         .into_any()
     })
@@ -148,10 +145,10 @@ fn card(c: AppCard) -> AnyView {
     let (id, id2) = (c.id.clone(), c.id.clone());
     let installed = c.installed.first().cloned();
     let block = a.cat.data.with_untracked(|cat| cat.as_ref().and_then(|cat| install_block(&c, cat)));
-    let details_label = format!("{}: {}", t("apps.details"), c.name);
+    let details_label = ui::verb_name("apps.details", &c.name);
     let primary = match installed {
         Some(stack) => view! {
-            <button type="button" class="btn ghost sm" on:click=move |_| a.manage.set(Some(stack.clone()))><Icon icon=icons::SETTINGS_2 size=14 />{tr("apps.manage")}</button>
+            <button type="button" class="btn ghost sm" on:click=move |_| a.manage.set(Some(stack.clone()))><Icon icon=icons::SETTINGS size=14 />{tr("apps.manage")}</button>
         }
         .into_any(),
         None => view! {
@@ -243,9 +240,6 @@ pub(super) fn notes_view(notes: &[rynas_api_types::apps::AppNote]) -> AnyView {
         .into_any()
 }
 
-fn kv(label: &'static str, value: String, class: &'static str) -> AnyView {
-    ui::kv_row(label, Signal::stored(value), class)
-}
 
 fn ports_table(c: &AppCard) -> Option<AnyView> {
     let rows = c
@@ -334,11 +328,11 @@ fn web_view(d: &AppDetail) -> Option<AnyView> {
         view! {
             <h4 class="mini-title">{tr("nt.kind.ui")}</h4>
             <dl class="kvs">
-                {kv("apps.web.port", format!("{port} · {}", w.path), "mono")}
-                {kv("apps.web.auth", t(auth_key(w.auth)).to_string(), "")}
-                {kv("apps.web.public", t(public_key(w.public)).to_string(), "")}
-                {w.body.clone().map(|b| kv("apps.web.body", b, "mono"))}
-                {w.timeout.clone().map(|b| kv("apps.web.timeout", b, "mono"))}
+                {ui::kv_text("apps.web.port", format!("{port} · {}", w.path), "mono")}
+                {ui::kv_text("apps.web.auth", t(auth_key(w.auth)).to_string(), "")}
+                {ui::kv_text("apps.web.public", t(public_key(w.public)).to_string(), "")}
+                {w.body.clone().map(|b| ui::kv_text("apps.web.body", b, "mono"))}
+                {w.timeout.clone().map(|b| ui::kv_text("apps.web.timeout", b, "mono"))}
             </dl>
             {(!feats.is_empty()).then(|| view! { <div class="chips">{feats.into_iter().map(|k| view! { <span class="chip">{tr(k)}</span> }).collect_view()}</div> })}
         }
@@ -367,11 +361,11 @@ fn resources(d: &AppDetail) -> AnyView {
     view! {
         <h4 class="mini-title">{tr("apps.d.resources")}</h4>
         <dl class="kvs">
-            {kv("apps.ram.min", i18n::bytes(u64::from(c.ram_min_mb) * 1024 * 1024), "tnum")}
-            {kv("apps.ram.recommended", i18n::bytes(u64::from(c.ram_recommended_mb) * 1024 * 1024), "tnum")}
-            {gpu.map(|k| kv("apps.gpu", t(k).to_string(), ""))}
-            {(!d.hardware.cpu_features.is_empty()).then(|| kv("apps.cpu", d.hardware.cpu_features.join(", "), "mono"))}
-            {d.host_network.then(|| kv("apps.network", t("apps.host_network").to_string(), ""))}
+            {ui::kv_text("apps.ram.min", i18n::bytes(u64::from(c.ram_min_mb) * 1024 * 1024), "tnum")}
+            {ui::kv_text("apps.ram.recommended", i18n::bytes(u64::from(c.ram_recommended_mb) * 1024 * 1024), "tnum")}
+            {gpu.map(|k| ui::kv_text("apps.gpu", t(k).to_string(), ""))}
+            {(!d.hardware.cpu_features.is_empty()).then(|| ui::kv_text("apps.cpu", d.hardware.cpu_features.join(", "), "mono"))}
+            {d.host_network.then(|| ui::kv_text("apps.network", t("apps.host_network").to_string(), ""))}
         </dl>
     }
     .into_any()
@@ -435,7 +429,7 @@ fn detail_body(d: AppDetail) -> AnyView {
             {shares_table(&d)}
             {name_list("apps.d.secrets", secrets)}
             {name_list("apps.d.volumes", volumes)}
-            {(!d.maintainers.is_empty()).then(|| view! { <dl class="kvs">{kv("apps.maintainers", d.maintainers.join(", "), "")}{kv("apps.d.manager", yes_no(c.manager), "")}</dl> })}
+            {(!d.maintainers.is_empty()).then(|| view! { <dl class="kvs">{ui::kv_text("apps.maintainers", d.maintainers.join(", "), "")}{ui::kv_text("apps.d.manager", yes_no(c.manager), "")}</dl> })}
         </div>
     }
     .into_any()
@@ -507,7 +501,7 @@ pub fn source_panel() -> AnyView {
             Some(n) => tf("apps.src.online", &[("serial", &n.to_string()), ("n", &s.online_apps.to_string())]),
             None => t("apps.src.shipped_only").to_string(),
         };
-        let shipped = s.shipped_serial.map_or_else(|| "—".to_string(), |n| n.to_string());
+        let shipped = s.shipped_serial.map_or_else(|| ui::DASH.to_string(), |n| n.to_string());
         let published = date(&s.published);
         let note = match (s.disabled_reason.as_deref(), s.expired, &s.last_error) {
             (Some("no_key"), ..) => Some(ui::note(Tone::Info, icons::INFO, ui::text(t("apps.src.no_key").to_string()))),

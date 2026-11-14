@@ -15,11 +15,11 @@ use rynas_api_types::dedup::{
 use rynas_api_types::{Share, TaskStatus};
 
 use crate::api;
-use crate::form::{form_error, lens, lens_bool, spinner, switch};
+use crate::form::{SaveBar, form_error, lens, lens_bool, save_bar_with, spinner, switch};
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::toast::toast;
-use crate::ui::{self, Modal, Remote, Status, Tone, WidgetHead, kv_row, typed_confirm};
+use crate::ui::{self, Modal, Remote, Status, Tone, WidgetHead, kv_row};
 use crate::week_grid::{GridLevel, GridTone, summary_text, week_grid};
 
 const URL: &str = "/api/v1/storage/dedup";
@@ -54,25 +54,7 @@ fn job_url(key: &str, what: &str) -> String {
 /// The overview, read again every 3 s while a job runs and after each change.
 pub fn overview() -> Remote<DedupOverview> {
     let r = Remote::<DedupOverview>::with_config(URL);
-    let polling = StoredValue::new(false);
-    Effect::new(move |_| {
-        let busy = r.data.with(|d| d.as_ref().is_some_and(|o| o.jobs.iter().any(|j| j.running.is_some())));
-        if !busy || polling.get_value() {
-            return;
-        }
-        polling.set_value(true);
-        spawn_local(async move {
-            loop {
-                api::sleep(3000).await;
-                let still = r.data.try_with_untracked(|d| d.as_ref().is_some_and(|o| o.jobs.iter().any(|j| j.running.is_some())));
-                if still != Some(true) {
-                    break;
-                }
-                r.reload();
-            }
-            let _ = polling.try_set_value(false);
-        });
-    });
+    crate::live::poll_while(3000, move || r.data.with(|d| d.as_ref().is_some_and(|o| o.jobs.iter().any(|j| j.running.is_some()))), move || r.reload());
     r
 }
 
@@ -397,20 +379,16 @@ fn run_dialog(j: DedupJobView, kind: DedupKind, modal: RwSignal<Open>, ov: Remot
         });
     };
     let title = tf(if kind == DedupKind::Run { "dd.run_title" } else { "dd.estimate_title" }, &[("name", &job_name(&j.key))]);
+    let start = Callback::new(start);
+    let foot = move || save_bar_with(SaveBar::new(busy, if kind == DedupKind::Run { "dd.start" } else { "dd.estimate" }, close, start));
     view! {
-        <Modal title=title on_close=close>
+        <Modal title=title on_close=close foot=foot>
             <p class="muted small">{tr(if kind == DedupKind::Run { "dd.run_text" } else { "dd.estimate_text" })}</p>
             <dl class="kvs">{kv_row("apps.d.shares", Signal::stored(which.join(", ")), "")}</dl>
             {crate::form::select_field("dd.until_label", Some("dd.until_help"), UNTIL, until.into(), Callback::new(move |v| until.set(v)))}
             {snapshots.then(|| ui::note(Tone::Info, icons::INFO, view! { {tr("dd.snapshots_note")} }.into_any()))}
             {replicated.then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {tr("dd.warn.replicated")} }.into_any()))}
             {form_error(error)}
-            <div class="dialog-foot">
-                <button class="btn ghost" type="button" on:click=move |_| close.run(())>{tr("cancel")}</button>
-                <button class="btn primary" type="button" disabled=move || busy.get() on:click=start>
-                    {spinner(busy)}{tr(if kind == DedupKind::Run { "dd.start" } else { "dd.estimate" })}
-                </button>
-            </div>
         </Modal>
     }
     .into_any()
@@ -434,7 +412,6 @@ fn settings_dialog(j: DedupJobView, excluded: Vec<String>, modal: RwSignal<Open>
     let error = RwSignal::new(None::<String>);
     let ask_off = RwSignal::new(false);
     let ask_reset = RwSignal::new(false);
-    let typed = RwSignal::new(String::new());
     let close = Callback::new(move |_| modal.set(Open::None));
     let key = StoredValue::new(j.key.clone());
     let empty_window = Signal::derive(move || !grid.with(|g| g.contains('1')));
@@ -511,9 +488,20 @@ fn settings_dialog(j: DedupJobView, excluded: Vec<String>, modal: RwSignal<Open>
     let (mem, set_mem) = lens(d, |s: &VolumeDedup| s.memory_max_mib.to_string(), |s, v| s.memory_max_mib = v.parse().unwrap_or(s.memory_max_mib));
     let block_changed = Signal::derive(move || first_block.is_some_and(|b| d.with(|s| s.block_size != b)));
     let name = job_name(&j.key);
-    let name2 = name.clone();
+    let name2 = StoredValue::new(name.clone());
+    // turning a job off is the dialog's destructive action: left in the footer
+    let save = Callback::new(save);
+    let foot = move || {
+        let off = (!fresh).then(|| view! {
+            <button class="btn danger foot-start" type="button" disabled=move || busy.get() on:click=move |_| { error.set(None); ask_off.set(true); }>{tr("sec.disable")}</button>
+        });
+        view! {
+            {off}
+            {save_bar_with(SaveBar { can_save: Signal::derive(move || !empty_window.get()), ..SaveBar::new(busy, "save", close, save) })}
+        }
+    };
     view! {
-        <Modal title=tf("dd.settings_title", &[("name", &name)]) on_close=close wide=true>
+        <Modal title=tf("dd.settings_title", &[("name", &name)]) on_close=close wide=true foot=foot>
             <div class="form">
                 {(!fresh).then(|| switch("dd.enabled", Some("dd.enabled_help"), enabled, set_enabled))}
                 <div class="field">
@@ -523,8 +511,7 @@ fn settings_dialog(j: DedupJobView, excluded: Vec<String>, modal: RwSignal<Open>
                 </div>
                 {move || empty_window.get().then(|| view! { <p class="form-error">{tr("dd.window_empty")}</p> })}
                 {switch("dd.only_awake", Some("dd.only_awake_help"), awake, set_awake)}
-                <details class="advanced">
-                    <summary>{tr("dd.advanced")}</summary>
+                {ui::fold(None, "dd.advanced", false, None, view! { 
                     <div class="form">
                         {crate::form::select_field("dd.min_size", Some("dd.min_size_help"), MIN_SIZES, min, set_min)}
                         {crate::form::select_field("dd.block", Some("dd.block_help"), BLOCKS, block, set_block)}
@@ -535,37 +522,22 @@ fn settings_dialog(j: DedupJobView, excluded: Vec<String>, modal: RwSignal<Open>
                         {crate::form::select_field("dd.io", Some("dd.io_help"), THREADS, io, set_io)}
                         {crate::form::select_field("dd.memory", None, MEMORY, mem, set_mem)}
                     </div>
-                </details>
+                 }.into_any())}
                 <div class="field">
                     <span class="field-label">{tr("dd.always_excluded")}</span>
                     <span class="field-help mono wrap-anywhere">{excluded.join("  ")}</span>
                 </div>
                 {(!fresh).then(|| view! {
                     <div class="btn-row">
-                        <button class="btn ghost sm" type="button" on:click=move |_| ask_reset.set(true)>{tr("dd.reset")}</button>
-                        <button class="btn ghost sm danger" type="button" on:click=move |_| ask_off.set(true)>{tr("sec.disable")}</button>
-                    </div>
-                })}
-                {move || ask_reset.get().then(|| view! {
-                    {ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {tr("dd.reset_text")} }.into_any())}
-                    {typed_confirm(key.get_value(), typed)}
-                    <div class="btn-row">
-                        <button class="btn danger sm" type="button" disabled=move || busy.get() || typed.get().trim() != key.get_value() on:click=reset>{spinner(busy)}{tr("dd.reset")}</button>
-                    </div>
-                })}
-                {move || ask_off.get().then(|| view! {
-                    {ui::note(Tone::Info, icons::INFO, view! { {tf("dd.turn_off_text", &[("name", &name2)])} }.into_any())}
-                    <div class="btn-row">
-                        <button class="btn danger sm" type="button" disabled=move || busy.get() on:click=turn_off>{spinner(busy)}{tr("sec.disable")}</button>
+                        <button class="btn ghost sm" type="button" on:click=move |_| { error.set(None); ask_reset.set(true); }>{tr("dd.reset")}</button>
                     </div>
                 })}
                 {form_error(error)}
             </div>
-            <div class="dialog-foot">
-                <button class="btn ghost" type="button" on:click=move |_| close.run(())>{tr("cancel")}</button>
-                <button class="btn primary" type="button" disabled=move || busy.get() || empty_window.get() on:click=save>{spinner(busy)}{tr("save")}</button>
-            </div>
         </Modal>
+        // the hash database is not user data: a plain confirmation, no typed name
+        {move || ask_reset.get().then(|| ui::confirm(ui::Confirm { busy, error, ..ui::Confirm::new(t("dd.reset").to_string(), t("dd.reset_text").to_string(), "dd.reset", true, Callback::new(reset), Callback::new(move |_| ask_reset.set(false))) }))}
+        {move || ask_off.get().then(|| ui::confirm(ui::Confirm { busy, error, ..ui::Confirm::new(t("sec.disable").to_string(), tf("dd.turn_off_text", &[("name", &name2.get_value())]), "sec.disable", true, Callback::new(turn_off), Callback::new(move |_| ask_off.set(false))) }))}
     }
     .into_any()
 }
@@ -574,11 +546,11 @@ fn history_dialog(key: String, modal: RwSignal<Open>) -> AnyView {
     let h = Remote::<Vec<DedupRecord>>::new(job_url(&key, "history"));
     let close = Callback::new(move |_| modal.set(Open::None));
     view! {
-        <Modal title=tf("dd.history_title", &[("name", &job_name(&key))]) on_close=close>
+        <Modal title=tf("dd.history_title", &[("name", &job_name(&key))]) on_close=close foot=move || ui::close_foot(close)>
             {h.view(4, move || {
                 let list = h.data.get().unwrap_or_default();
                 if list.is_empty() {
-                    return view! { <p class="muted">{tr("never_run")}</p> }.into_any();
+                    return ui::empty_line("never_run");
                 }
                 view! {
                     <ul class="plain-list dd-history">
@@ -609,7 +581,6 @@ fn history_dialog(key: String, modal: RwSignal<Open>) -> AnyView {
                 }
                 .into_any()
             })}
-            <div class="dialog-foot"><button class="btn primary" type="button" on:click=move |_| close.run(())>{tr("close")}</button></div>
         </Modal>
     }
     .into_any()

@@ -103,8 +103,43 @@ fn stream_open() -> bool {
 }
 
 /// Periodic work runs only while signed in and the tab is visible.
-fn should_poll() -> bool {
+pub fn should_poll() -> bool {
     auth().is_ready() && !page_hidden()
+}
+
+/// The one timer of a page that reads something again on its own (next runs, a status that
+/// moves): `tick` every `every` while signed in and the tab is visible ([`should_poll`]),
+/// stopped with the page. Data that changes only through the UI is not polled.
+pub fn poll(every: std::time::Duration, tick: impl Fn() + 'static) {
+    if let Ok(h) = set_interval_with_handle(
+        move || {
+            if should_poll() {
+                tick();
+            }
+        },
+        every,
+    ) {
+        on_cleanup(move || h.clear());
+    }
+}
+
+/// Live progress: `reload` every `every_ms` while `busy()` says something runs (a backup, a
+/// receive) and [`should_poll`] holds; nothing while idle. Each round ends by checking `busy`
+/// again (also when the answer did not change), and a change of `busy` starts one.
+pub fn poll_while(every_ms: u32, busy: impl Fn() -> bool + Send + Sync + 'static, reload: impl Fn() + Copy + Send + Sync + 'static) {
+    let ticking = RwSignal::new(false);
+    Effect::new(move |_| {
+        if busy() && !ticking.get() {
+            ticking.set(true);
+            leptos::task::spawn_local(async move {
+                crate::api::sleep(every_ms).await;
+                let _ = ticking.try_set(false);
+                if should_poll() {
+                    reload();
+                }
+            });
+        }
+    });
 }
 
 fn page_hidden() -> bool {

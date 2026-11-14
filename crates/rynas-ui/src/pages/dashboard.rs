@@ -78,7 +78,7 @@ pub fn Dashboard() -> impl IntoView {
                         when=move || edit.get()
                         fallback=move || view! {
                             <button class="btn ghost" on:click=move |_| edit.set(true)>
-                                <Icon icon=icons::SETTINGS_2 size=16 />
+                                <Icon icon=icons::SETTINGS size=16 />
                                 <span class="btn-label">{tr("dash.edit")}</span>
                             </button>
                         }
@@ -583,7 +583,7 @@ fn CpuWidget() -> impl IntoView {
                         <LiveChart
                             series=vec![Series::new("--c1", true, |m: &MetricsSample| m.cpu_pct)]
                             max=100.0
-                            label=|v| format!("{v:.0}%")
+                            label=|v| i18n::pct(f64::from(v))
                             aria=Signal::derive(move || format!("{} {}", t("w.cpu"), i18n::pct(cpu() as f64)))
                         />
                     </div>
@@ -662,7 +662,7 @@ fn MemoryWidget() -> impl IntoView {
                 <Show when=move || { mem().swap_total > 0 }>
                     <div class="sub-row">
                         <span>{tr("m.swap")}</span>
-                        <span class="tnum muted">{move || format!("{} / {}", i18n::bytes(mem().swap_used), i18n::bytes(mem().swap_total))}</span>
+                        <span class="tnum muted">{move || i18n::bytes_of(mem().swap_used, mem().swap_total)}</span>
                     </div>
                     <Meter pct=swap_pct tone=Signal::derive(move || usage_tone(swap_pct.get())) />
                 </Show>
@@ -1074,7 +1074,7 @@ fn HardwareWidget() -> impl IntoView {
                         <div class="fan-row">
                             <span class=if f.alarm { "fan-icon alarm" } else { "fan-icon spin" }><Icon icon=icons::FAN size=16 /></span>
                             <span>{fan_label(&f.label)}</span>
-                            <span class="row-end tnum">{f.rpm.map(|r| format!("{r} rpm")).unwrap_or_else(|| "—".into())}</span>
+                            <span class="row-end tnum">{f.rpm.map(|r| format!("{r} rpm")).unwrap_or_else(|| crate::ui::DASH.into())}</span>
                         </div>
                     }).collect_view()}
                 </div>
@@ -1109,7 +1109,7 @@ fn HardwareWidget() -> impl IntoView {
                         return view! { <li class="muted small">{t("hw.no_events")}</li> }.into_any();
                     }
                     ev.into_iter().rev().take(3).map(|(ts, txt)| view! {
-                        <li><span class="mono small muted">{ts}</span><span>{txt}</span></li>
+                        <li><span class="mono small muted">{i18n::wall_when(&ts)}</span><span>{txt}</span></li>
                     }).collect_view().into_any()
                 }}
             </ul>

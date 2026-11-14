@@ -20,13 +20,13 @@ use rynas_api_types::pcagent::*;
 use rynas_api_types::TaskStatus;
 
 use crate::api;
-use crate::form::{In, area_field, form_error, number_field, segmented, select_field, spinner, text_field};
+use crate::form::{In, SaveBar, area_field, form_error, number_field, save_bar_with, segmented, select_field, spinner, text_field};
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
-use crate::pages::security::{copy_button, copy_button_for};
+use crate::ui::{copy_button, copy_button_for};
 use crate::tasks;
 use crate::toast::toast;
-use crate::ui::{self, Confirm, DlgKind, EmptyState, Remote, Tone};
+use crate::ui::{self, Confirm, DlgKind, EmptyState, Remote, Tone, when};
 
 const URL: &str = "/api/v1/pcbackup";
 
@@ -53,13 +53,7 @@ fn group_url(g: &str) -> String {
     format!("{URL}/groups/{}", api::encode(g))
 }
 
-fn when(ms: Option<u64>) -> String {
-    ms.map(i18n::datetime).unwrap_or_else(|| "—".into())
-}
 
-fn kv(label: &'static str, value: AnyView) -> AnyView {
-    view! { <div class="kv"><dt>{tr(label)}</dt><dd>{value}</dd></div> }.into_any()
-}
 
 pub(super) fn state_view(s: PcState, revoked: bool) -> AnyView {
     if revoked {
@@ -174,20 +168,11 @@ pub fn panel(header: RwSignal<Option<bool>>, to_btrfs: Callback<()>) -> AnyView 
         None => {}
     });
     // live progress: read again every 5 s while a PC backs up and the page is visible
-    let ticking = RwSignal::new(false);
-    Effect::new(move |_| {
-        let running = tab.data.data.with(|d| d.as_ref().is_some_and(|d| d.devices.iter().any(|x| x.state == PcState::Running || x.command.is_some())));
-        if running && !ticking.get_untracked() {
-            ticking.set(true);
-            spawn_local(async move {
-                api::sleep(5000).await;
-                let _ = ticking.try_set(false);
-                if !document().hidden() {
-                    tab.data.reload();
-                }
-            });
-        }
-    });
+    crate::live::poll_while(
+        5000,
+        move || tab.data.data.with(|d| d.as_ref().is_some_and(|d| d.devices.iter().any(|x| x.state == PcState::Running || x.command.is_some()))),
+        move || tab.data.reload(),
+    );
     let content = move || {
         let Some(o) = tab.data.data.get() else { return ().into_any() };
         if o.settings.folder.is_empty() {
@@ -222,7 +207,7 @@ pub fn panel(header: RwSignal<Option<bool>>, to_btrfs: Callback<()>) -> AnyView 
                 .map(|d| {
                     let dev = d.device.clone();
                     let sub = if d.description.is_empty() { Some(d.hostname.clone()) } else { Some(format!("{} · {}", d.description, d.hostname)) };
-                    let label = format!("{}: {}", t("bk.open"), d.device);
+                    let label = ui::verb_name("bk.open", &d.device);
                     let progress = d.progress.as_ref().map(|p| {
                         let pct = (p.bytes_done * 100).checked_div(p.bytes_total).unwrap_or(0);
                         format!("{pct}% · {}/s", i18n::bytes(p.speed_bps))
@@ -251,9 +236,9 @@ pub fn panel(header: RwSignal<Option<bool>>, to_btrfs: Callback<()>) -> AnyView 
             .map(|p| {
                 let id = p.id.clone();
                 let named = if p.description.is_empty() { p.btrfs_target.clone().or_else(|| p.group.clone()).unwrap_or_else(|| i18n::datetime(p.expires_ms)) } else { p.description.clone() };
-                let label = format!("{}: {}", t("pca.pairing_cancel"), named);
+                let label = ui::verb_name("pca.pairing_cancel", &named);
                 ui::row(vec![
-                    ui::text_cell("bk.f.description", "wrap", if p.description.is_empty() { "—".into() } else { p.description.clone() }),
+                    ui::text_cell("bk.f.description", "wrap", if p.description.is_empty() { ui::DASH.into() } else { p.description.clone() }),
                     // a group name in the mono face, "its own group" as plain text
                     ui::text_cell(
                         "pca.col.group",
@@ -308,7 +293,7 @@ fn group_row(tab: Tab, g: PcGroup, budget: u64, all_revoked: bool) -> AnyView {
     // the row is rebuilt by every reload of the tab: what must survive lives in `tab`
     let name = StoredValue::new(g.group.clone());
     let (busy, error, kit, kit_busy, ask_delete) = (tab.g_busy, tab.g_error, tab.kit, tab.g_busy, tab.del_group);
-    let size = if g.settings.quota_gib > 0 { format!("{} / {} GiB", i18n::bytes(g.used_bytes), g.settings.quota_gib) } else { i18n::bytes(g.used_bytes) };
+    let size = if g.settings.quota_gib > 0 { i18n::bytes_of(g.used_bytes, u64::from(g.settings.quota_gib) << 30) } else { i18n::bytes(g.used_bytes) };
     let m = &g.maintenance;
     let over = m.estimate_bytes > budget && budget > 0;
     let maint = view! {
@@ -341,9 +326,9 @@ fn group_row(tab: Tab, g: PcGroup, budget: u64, all_revoked: bool) -> AnyView {
             }
         });
     };
-    let label_m = format!("{}: {}", t("pca.maint.run"), g.group);
-    let label_k = format!("{}: {}", t("pca.kit"), g.group);
-    let label_d = format!("{}: {}", t("pca.group_delete"), g.group);
+    let label_m = ui::verb_name("pca.maint.run", &g.group);
+    let label_k = ui::verb_name("pca.kit", &g.group);
+    let label_d = ui::verb_name("pca.group_delete", &g.group);
     ui::row(vec![
         ui::cell("pca.col.group", "wrap", ui::two_lines(view! { <strong class="mono">{g.group.clone()}</strong> }.into_any(), (!g.settings.description.is_empty()).then(|| g.settings.description.clone()), "cell-sub small")),
         ui::text_cell("pca.col.pcs", "wrap", g.devices.join(", ")),
@@ -352,7 +337,7 @@ fn group_row(tab: Tab, g: PcGroup, budget: u64, all_revoked: bool) -> AnyView {
         ui::actions(view! {
             <button class="icon-btn sm" title=tr("pca.maint.run") aria-label=label_m disabled=move || busy.get() on:click=maintain><Icon icon=icons::REFRESH_CW size=16 /></button>
             <button class="icon-btn sm" title=tr("pca.kit") aria-label=label_k disabled=move || kit_busy.get() on:click=make_kit><Icon icon=icons::KEY size=16 /></button>
-            {all_revoked.then(|| view! { <button class="icon-btn sm" title=tr("pca.group_delete") aria-label=label_d on:click=move |_| { error.set(None); ask_delete.set(Some(name.get_value())); }><Icon icon=icons::TRASH_2 size=16 /></button> })}
+            {all_revoked.then(|| view! { <button class="icon-btn sm danger" title=tr("pca.group_delete") aria-label=label_d on:click=move |_| { error.set(None); ask_delete.set(Some(name.get_value())); }><Icon icon=icons::TRASH_2 size=16 /></button> })}
         }
         .into_any()),
     ])
@@ -371,10 +356,10 @@ fn kit_dialog(k: RecoveryKit, close: Callback<()>) -> AnyView {
     let body = view! {
         {ui::note(Tone::Warn, icons::TRIANGLE_ALERT, ui::text(t("pca.kit_once").to_string()))}
         <dl class="kvs">
-            {kv("pca.col.group", ui::text(k.group.clone()))}
-            {kv("pca.col.pcs", ui::text(k.devices.join(", ")))}
-            {kv("pca.kit.repo", ui::breakable(&k.repository, "mono"))}
-            {kv("pca.kit.password", ui::breakable(&k.password, "mono"))}
+            {ui::kv("pca.col.group", ui::text(k.group.clone()))}
+            {ui::kv("pca.col.pcs", ui::text(k.devices.join(", ")))}
+            {ui::kv("pca.kit.repo", ui::breakable(&k.repository, "mono"))}
+            {ui::kv("pca.kit.password", ui::breakable(&k.password, "mono"))}
         </dl>
         <p class="small muted">{tr("pca.kit_text")}</p>
         <div class="sec-actions">
@@ -383,7 +368,7 @@ fn kit_dialog(k: RecoveryKit, close: Callback<()>) -> AnyView {
         </div>
     }
     .into_any();
-    let foot = view! { <button type="button" class="btn primary" on:click=move |_| close.run(())>{tr("close")}</button> }.into_any();
+    let foot = ui::close_foot(close);
     ui::dialog(DlgKind::Normal, Signal::stored(t("pca.kit").to_string()), close, body, Some(foot))
 }
 
@@ -397,8 +382,8 @@ pub(super) fn pairing_steps(c: &PairingCreated) -> AnyView {
     view! {
         {ui::note(Tone::Ok, icons::CIRCLE_CHECK, ui::text(tf("pca.code_valid", &[("until", &i18n::datetime(c.expires_ms))])))}
         <dl class="kvs">
-            {kv("pca.code", ui::breakable(&c.code, "mono"))}
-            {c.fingerprint.clone().map(|f| kv("pca.fingerprint", ui::breakable(f.as_str(), "mono small")))}
+            {ui::kv("pca.code", ui::breakable(&c.code, "mono"))}
+            {c.fingerprint.clone().map(|f| ui::kv("pca.fingerprint", ui::breakable(f.as_str(), "mono small")))}
         </dl>
         <h4 class="small"><strong>{tr("pca.step.install")}</strong></h4>
         <pre class="app-code">{install.clone()}</pre>
@@ -441,9 +426,9 @@ pub(super) fn restore_code_view(c: &RestoreCodeCreated, fingerprint: Option<Stri
     view! {
         {ui::note(Tone::Ok, icons::LIFE_BUOY, ui::text(tf("pca.restore_code_valid", &[("until", &i18n::datetime(c.expires_ms))])))}
         <dl class="kvs">
-            {kv("pca.restore_code", ui::breakable(&c.code, "mono"))}
-            {fingerprint.clone().map(|f| kv("pca.fingerprint", ui::breakable(&f, "mono small")))}
-            {kv("pca.restore_nas", ui::breakable(&nas, "mono small"))}
+            {ui::kv("pca.restore_code", ui::breakable(&c.code, "mono"))}
+            {fingerprint.clone().map(|f| ui::kv("pca.fingerprint", ui::breakable(&f, "mono small")))}
+            {ui::kv("pca.restore_nas", ui::breakable(&nas, "mono small"))}
         </dl>
         {local.then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, ui::text(tf("pca.restore_nas_local", &[("host", &host)]))))}
         <p class="small muted">{tr("pca.restore_steps")}</p>
@@ -496,7 +481,7 @@ fn pair_dialog(tab: Tab) -> AnyView {
         (mode.get() == "join").then(|| {
             let gs = groups();
             if gs.is_empty() {
-                return view! { <p class="small muted">{tr("pca.no_groups")}</p> }.into_any();
+                return ui::empty_line("pca.no_groups");
             }
             if group.get_untracked().is_empty()
                 && let Some(g) = gs.first()
@@ -612,11 +597,7 @@ fn settings_dialog(tab: Tab) -> AnyView {
         {form_error(error)}
     }
     .into_any();
-    let foot = view! {
-        <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("cancel")}</button>
-        <button type="button" class="btn primary" disabled=move || busy.get() on:click=save>{spinner(busy)}{tr("save")}</button>
-    }
-    .into_any();
+    let foot = save_bar_with(SaveBar::new(busy, "save", close, Callback::new(save)));
     ui::dialog(DlgKind::Normal, Signal::stored(t("pca.settings").to_string()), close, body, Some(foot))
 }
 
@@ -695,7 +676,7 @@ fn drawer(tab: Tab, device: String) -> AnyView {
                     ui::text_cell("pca.col.when", "tnum", i18n::datetime(h.started_ms)),
                     ui::text_cell("pca.col.what", "", what),
                     ui::cell("col.status", "wrap", if h.ok { ui::status(Tone::Ok, t("pca.h.ok").to_string()) } else { view! { <div class="cell-main">{ui::status(Tone::Err, t("pca.st.failed").to_string())}<span class="cell-sub small">{h.error.clone().unwrap_or_default()}</span></div> }.into_any() }),
-                    ui::text_cell("pca.col.added", "num tnum", if h.restore { "—".into() } else { i18n::bytes(h.bytes_added) }),
+                    ui::text_cell("pca.col.added", "num tnum", if h.restore { ui::DASH.into() } else { i18n::bytes(h.bytes_added) }),
                 ])
             })
             .collect::<Vec<_>>();
@@ -705,34 +686,32 @@ fn drawer(tab: Tab, device: String) -> AnyView {
         view! {
             {p.revoked.then(|| ui::note(Tone::Info, icons::LOCK, ui::text(t("pca.revoked_note").to_string())))}
             <dl class="kvs">
-                {kv("col.status", state_view(p.state, p.revoked))}
-                {kv("pca.last_ok", ui::text(when(p.last_ok_ms)))}
-                {kv("pca.col.group", ui::text(p.group.clone()))}
-                {kv("pca.col.versions", ui::text(i18n::count(u64::from(p.versions))))}
-                {kv("pca.col.uploaded", ui::text(i18n::bytes(p.uploaded_bytes)))}
-                {kv("pca.os", ui::text(format!("{} {} · rynas-agent {}", p.os, p.arch, p.agent_version)))}
-                {kv("pca.last_seen", ui::text(when(p.last_seen_ms)))}
-                {kv("bkpc.bm.title", ready)}
-                {last_error.map(|e| kv("pca.last_error", ui::breakable(e.as_str(), "small")))}
-                {run.as_ref().filter(|r| r.changed_count > 0).map(|r| kv("pca.changed", ui::text(tf("pca.changed_n", &[("n", &i18n::count(r.changed_count))]))))}
+                {ui::kv("col.status", state_view(p.state, p.revoked))}
+                {ui::kv("pca.last_ok", ui::text(when(p.last_ok_ms)))}
+                {ui::kv("pca.col.group", ui::text(p.group.clone()))}
+                {ui::kv("pca.col.versions", ui::text(i18n::count(u64::from(p.versions))))}
+                {ui::kv("pca.col.uploaded", ui::text(i18n::bytes(p.uploaded_bytes)))}
+                {ui::kv("pca.os", ui::text(format!("{} {} · rynas-agent {}", p.os, p.arch, p.agent_version)))}
+                {ui::kv("pca.last_seen", ui::text(when(p.last_seen_ms)))}
+                {ui::kv("bkpc.bm.title", ready)}
+                {last_error.map(|e| ui::kv("pca.last_error", ui::breakable(e.as_str(), "small")))}
+                {run.as_ref().filter(|r| r.changed_count > 0).map(|r| ui::kv("pca.changed", ui::text(tf("pca.changed_n", &[("n", &i18n::count(r.changed_count))]))))}
             </dl>
             {progress}
-            {captures.map(|c| view! { <details class="tls-step"><summary>{tr("pca.how_read")}</summary><ul class="small">{c}</ul></details> })}
+            {captures.map(|c| view! { {ui::fold(None, "pca.how_read", false, None, view! { <ul class="small">{c}</ul> }.into_any())} })}
             {run.as_ref().filter(|r| !r.changed_during.is_empty()).map(|r| view! {
-                <details class="tls-step"><summary>{tr("pca.changed")}</summary>
+                {ui::fold(None, "pca.changed", false, None, view! { 
                     <p class="small muted">{tr("pca.changed_note")}</p>
                     <ul class="small mono bk-wrap">{r.changed_during.iter().map(|c| view! { <li>{c.clone()}</li> }).collect_view()}</ul>
-                </details>
+                 }.into_any())}
             })}
             {form_error(error)}
             <div class="sec-actions">
                 {(!revoked).then(|| view! {
                     <button class="btn primary sm" disabled=move || busy.get() || running on:click=move |_| command("backup-now")><Icon icon=icons::PLAY size=14 />{tr("pca.backup_now")}</button>
                     <button class="btn ghost sm" disabled=move || busy.get() || !running on:click=move |_| command("cancel")><Icon icon=icons::SQUARE size=14 />{tr("pca.cancel")}</button>
-                    <button class="btn ghost sm" on:click=move |_| edit.set(true)><Icon icon=icons::SETTINGS size=14 />{tr("bk.settings")}</button>
                 })}
                 <button class="btn ghost sm" on:click=make_code><Icon icon=icons::LIFE_BUOY size=14 />{tr("pca.restore_code")}</button>
-                {(!revoked).then(|| view! { <button class="btn danger sm" on:click=move |_| { error.set(None); ask_revoke.set(true); }><Icon icon=icons::TRASH_2 size=14 />{tr("pca.revoke")}</button> })}
             </div>
             {move || code.get().map(|c| {
                 // a shared group is one repository: its restore key reads every PC in it
@@ -753,11 +732,11 @@ fn drawer(tab: Tab, device: String) -> AnyView {
             {move || versions.view(3, move || {
                 let list = versions.data.get().unwrap_or_default();
                 if list.is_empty() {
-                    return view! { <p class="small muted">{tr("pca.no_versions")}</p> }.into_any();
+                    return ui::empty_line("pca.no_versions");
                 }
                 let rows = list.iter().map(|v| {
                     let id = v.id.clone();
-                    let label = format!("{}: {}", t("bk.browse"), v.id);
+                    let label = ui::verb_name("bk.browse", &v.id);
                     ui::row(vec![
                         ui::text_cell("pca.col.when", "tnum", i18n::datetime(v.time_ms)),
                         ui::text_cell("pca.col.files", "num tnum", v.files.map(i18n::count).unwrap_or_default()),
@@ -776,9 +755,21 @@ fn drawer(tab: Tab, device: String) -> AnyView {
         .into_any()
     };
     let body = view! { {move || detail.view(8, content)} }.into_any();
-    let foot = view! { <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("close")}</button> }.into_any();
+    // a revoked PC (or one not read yet) has nothing to revoke or set
+    let gone = Signal::derive(move || detail.data.with(|d| d.as_ref().is_none_or(|d| d.device.revoked)));
+    let settings = view! {
+        <button type="button" class="btn ghost" disabled=move || gone.get() on:click=move |_| edit.set(true)><Icon icon=icons::SETTINGS size=16 />{tr("bk.settings")}</button>
+    }
+    .into_any();
+    let revoke_btn = ui::Danger {
+        disabled: gone,
+        ..ui::Danger::new("pca.revoke", Callback::new(move |_| {
+            error.set(None);
+            ask_revoke.set(true);
+        }))
+    };
     view! {
-        <div class="wide-drawer">{ui::drawer(Signal::stored(device.clone()), close, body, foot)}</div>
+        {ui::detail_drawer(Signal::stored(device.clone()), close, true, body, Some(revoke_btn), Some(settings))}
         {move || ask_revoke.get().then(|| ui::confirm(Confirm { busy, error, ..Confirm::new(tf("pca.revoke_title", &[("device", &dev.get_value())]), t("pca.revoke_text").to_string(), "pca.revoke", true, revoke, Callback::new(move |_| ask_revoke.set(false))) }))}
         {move || browse.get().map(|v| browse_drawer(dev.get_value(), v, Callback::new(move |_| browse.set(None))))}
     }
@@ -830,20 +821,11 @@ impl AgentCtl {
             captures_open: RwSignal::new(false),
         };
         // live progress: read again every 5 s while the PC backs up and the page is visible
-        let ticking = RwSignal::new(false);
-        Effect::new(move |_| {
-            let running = ctl.detail.data.with(|d| d.as_ref().is_some_and(|d| d.device.state == PcState::Running || d.device.command.is_some()));
-            if running && !ticking.get_untracked() {
-                ticking.set(true);
-                spawn_local(async move {
-                    api::sleep(5000).await;
-                    let _ = ticking.try_set(false);
-                    if !document().hidden() {
-                        ctl.detail.reload();
-                    }
-                });
-            }
-        });
+        crate::live::poll_while(
+            5000,
+            move || ctl.detail.data.with(|d| d.as_ref().is_some_and(|d| d.device.state == PcState::Running || d.device.command.is_some())),
+            move || ctl.detail.reload(),
+        );
         // no agent yet: the codes already made for this folder
         Effect::new(move |_| {
             if ctl.unpaired() {
@@ -992,11 +974,11 @@ impl AgentCtl {
             let seen = matches!(p.state, PcState::Late | PcState::Critical).then(|| tf("pcb.last_seen_on", &[("when", &when(p.last_seen_ms))]));
             view! {
                 {p.revoked.then(|| ui::note(Tone::Info, icons::LOCK, ui::text(t("pcb.agent.revoked").to_string())))}
-                <div class="pcb-status-head">{state_view(p.state, p.revoked)}</div>
+                <div class="status-card-head">{state_view(p.state, p.revoked)}</div>
                 {progress}
                 {last_error.map(|e| ui::note(Tone::Err, icons::TRIANGLE_ALERT, ui::breakable(e.as_str(), "small")))}
-                <p class="pcb-meta small"><span>{last_ok}</span><span>{plan}</span><span>{agent}</span>{seen.map(|s| view! { <span>{s}</span> })}</p>
-                {captures.map(|c| view! { <details class="pcb-sub" open=move || self.captures_open.get() on:toggle=move |ev| {
+                <p class="status-meta small"><span>{last_ok}</span><span>{plan}</span><span>{agent}</span>{seen.map(|s| view! { <span>{s}</span> })}</p>
+                {captures.map(|c| view! { <details class="fold sub" open=move || self.captures_open.get() on:toggle=move |ev| {
                 let open = event_target::<web_sys::Element>(&ev).has_attribute("open");
                 if self.captures_open.get_untracked() != open {
                     self.captures_open.set(open);
@@ -1008,9 +990,9 @@ impl AgentCtl {
         // a memo: the progress polls must not rebuild the whole block twice
         let unpaired = Memo::new(move |_| self.unpaired());
         view! {
-            <section class="pcb-status">
+            <section class="status-card">
                 {move || if unpaired.get() {
-                    view! { <div class="pcb-status-head">{folder.run()}</div>{self.unpaired_view()} }.into_any()
+                    view! { <div class="status-card-head">{folder.run()}</div>{self.unpaired_view()} }.into_any()
                 } else {
                     view! { {self.detail.view(3, content)}{self.buttons()}{form_error(self.error)} }.into_any()
                 }}
@@ -1053,7 +1035,7 @@ impl AgentCtl {
                     })
                     .collect::<Vec<_>>();
                 (!rows.is_empty()).then(|| view! {
-                    <div class="pcb-sec-head"><h3 class="mini-title">{tr("pca.history")}</h3></div>
+                    <div class="sec-head"><h3 class="mini-title">{tr("pca.history")}</h3></div>
                     {ui::table("pca-history", &["pca.col.when", "col.status", "#pcb.agent.sent"], rows)}
                     {(total > SHOWN).then(|| view! {
                         <div class="sec-actions">
@@ -1109,7 +1091,7 @@ pub(super) fn progress_view(pr: &PcProgress) -> AnyView {
         parts.push(t(phase_text(pr.phase)).to_string());
     }
     if pr.bytes_total > 0 {
-        parts.push(format!("{} / {}", i18n::bytes(pr.bytes_done), i18n::bytes(pr.bytes_total)));
+        parts.push(i18n::bytes_of(pr.bytes_done, pr.bytes_total));
     } else if pr.bytes_done > 0 {
         parts.push(i18n::bytes(pr.bytes_done));
     }
@@ -1251,11 +1233,7 @@ fn device_settings(p: PcDevice, saved: Callback<()>, close: Callback<()>) -> Any
         {form_error(error)}
     }
     .into_any();
-    let foot = view! {
-        <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("cancel")}</button>
-        <button type="button" class="btn primary" disabled=move || busy.get() on:click=save>{spinner(busy)}{tr("save")}</button>
-    }
-    .into_any();
+    let foot = save_bar_with(SaveBar::new(busy, "save", close, Callback::new(save)));
     ui::dialog(DlgKind::Normal, Signal::stored(tf("bk.settings_title", &[("device", &p.device)])), close, body, Some(foot))
 }
 
@@ -1315,7 +1293,7 @@ fn browse_drawer(device: String, version: String, close: Callback<()>) -> AnyVie
                 let toggle = move |_| selected.update(|s| if let Some(i) = s.iter().position(|x| *x == p2) { s.remove(i); } else { s.push(p2.clone()); });
                 let name = e.name.clone();
                 let dl = (!is_dir).then(|| link("download", std::slice::from_ref(&p)));
-                let label = format!("{}: {}", t("pca.download"), e.name);
+                let label = ui::verb_name("pca.download", &e.name);
                 ui::row(vec![
                     ui::cell("snap.col.name", "", view! {
                         <span class="entry-name">
@@ -1362,7 +1340,7 @@ fn browse_drawer(device: String, version: String, close: Callback<()>) -> AnyVie
         {move || listing.view(6, entries)}
     }
     .into_any();
-    let foot = view! { <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("close")}</button> }.into_any();
+    let foot = ui::close_foot(close);
     let title = Signal::stored(tf("pca.browse_title", &[("device", &device), ("id", &version[..version.len().min(8)])]));
-    view! { <div class="wide-drawer">{ui::drawer(title, close, body, foot)}</div> }.into_any()
+    view! { {ui::drawer_wide(title, close, body, foot)} }.into_any()
 }

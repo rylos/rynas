@@ -21,10 +21,9 @@ use super::{
     serial_of, stale_notice, sync_row, use_refresh, volumes,
 };
 use crate::api;
-use crate::form::{form_error, spinner};
+use crate::form::{SaveBar, form_error, save_bar_with, spinner};
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
-use crate::pages::security::copy_text;
 use crate::ui::{self, EmptyState, ErrorBox, Meter, Modal, Notice, Skeleton, Status, Tone, WidgetHead, kv_row, typed_confirm, usage_tone};
 
 // ------------------------------------------------------------------ flow: plan → confirm → task
@@ -73,45 +72,102 @@ pub fn start_task(url: String, body: Option<Value>, delete: bool, stage: RwSigna
     });
 }
 
-/// The stages after the form: the plan with its confirmation, the running task, the outcome.
-/// `exec` gets the typed passphrase (empty when none is asked).
-#[allow(clippy::too_many_arguments)]
-fn flow_view(
-    stage: RwSignal<Stage>,
-    confirm_name: Option<String>,
-    need_pass: bool,
-    exec_key: &'static str,
+/// The stages after the form of a storage dialog: the plan with its confirmation, the running
+/// task, the outcome. [`Flow::body`] goes in the dialog's body, [`Flow::foot`] in its action
+/// row (`Modal`'s `foot`), so the buttons stay in sight however long the plan is.
+#[derive(Clone, Copy)]
+pub struct Flow {
+    pub stage: RwSignal<Stage>,
     busy: RwSignal<bool>,
     error: RwSignal<Option<String>>,
+    /// The name typed to confirm a plan that destroys data.
+    typed: RwSignal<String>,
+    pass: RwSignal<String>,
+    confirm_name: StoredValue<Option<String>>,
+    need_pass: bool,
+    exec_key: &'static str,
+    /// Gets the typed passphrase (empty when none is asked).
     exec: Callback<String>,
     on_close: Callback<()>,
-) -> AnyView {
-    let typed = RwSignal::new(String::new());
-    let pass = RwSignal::new(String::new());
-    let s = super::sto();
-    let confirm_name = StoredValue::new(confirm_name);
-    (move || match stage.get() {
-        Stage::Form => ().into_any(),
-        Stage::Plan(p) => {
-            let valid = p.valid;
-            let destructive = p.steps.iter().any(|s| !s.destroys.is_empty());
-            let need_typed = destructive && confirm_name.with_value(Option::is_some);
-            let ok = move || {
-                valid
-                    && (!need_typed || confirm_name.with_value(|n| n.as_deref() == Some(typed.get().trim())))
-                    && (!need_pass || pass.with(|p| p.chars().count() >= 8))
-            };
-            view! {
-                {plan_view(&p)}
-                {(valid && need_typed).then(|| typed_confirm(confirm_name.get_value().unwrap_or_default(), typed))}
-                {(valid && need_pass).then(|| view! {
-                    <label class="field">
-                        <span class="field-label">{tr("sto.passphrase")}</span>
-                        <input class="input" type="password" autocomplete="off" prop:value=move || pass.get() on:input=move |ev| pass.set(event_target_value(&ev)) />
-                    </label>
-                })}
-                {form_error(error)}
-                <div class="dialog-foot">
+}
+
+impl Flow {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        stage: RwSignal<Stage>,
+        confirm_name: Option<String>,
+        need_pass: bool,
+        exec_key: &'static str,
+        busy: RwSignal<bool>,
+        error: RwSignal<Option<String>>,
+        exec: Callback<String>,
+        on_close: Callback<()>,
+    ) -> Self {
+        Flow {
+            stage,
+            busy,
+            error,
+            typed: RwSignal::new(String::new()),
+            pass: RwSignal::new(String::new()),
+            confirm_name: StoredValue::new(confirm_name),
+            need_pass,
+            exec_key,
+            exec,
+            on_close,
+        }
+    }
+
+    fn need_typed(self, p: &StoragePlan) -> bool {
+        p.steps.iter().any(|s| !s.destroys.is_empty()) && self.confirm_name.with_value(Option::is_some)
+    }
+
+    /// The body of the current stage after the form (nothing on the form).
+    pub fn body(self) -> AnyView {
+        let Flow { stage, error, typed, pass, confirm_name, need_pass, .. } = self;
+        let s = super::sto();
+        match stage.get() {
+            Stage::Form => ().into_any(),
+            Stage::Plan(p) => {
+                let need_typed = self.need_typed(&p);
+                view! {
+                    {plan_view(&p)}
+                    {(p.valid && need_typed).then(|| typed_confirm(confirm_name.get_value().unwrap_or_default(), typed))}
+                    {(p.valid && need_pass).then(|| view! {
+                        <label class="field">
+                            <span class="field-label">{tr("sto.passphrase")}</span>
+                            <input class="input" type="password" autocomplete="off" prop:value=move || pass.get() on:input=move |ev| pass.set(event_target_value(&ev)) />
+                        </label>
+                    })}
+                    {form_error(error)}
+                }
+                .into_any()
+            }
+            Stage::Running(id) => view! {
+                <TaskRun id=id on_done=Callback::new(move |t: TaskInfo| {
+                    s.load();
+                    stage.set(Stage::Done(t));
+                }) />
+            }
+            .into_any(),
+            Stage::Done(t) => done_note(&t),
+        }
+    }
+
+    /// The action row of the current stage after the form: Back and the action on the plan,
+    /// nothing while the task runs, Close on the outcome.
+    pub fn foot(self) -> AnyView {
+        let Flow { stage, busy, typed, pass, confirm_name, need_pass, exec_key, exec, on_close, .. } = self;
+        match stage.get() {
+            Stage::Plan(p) => {
+                let valid = p.valid;
+                let destructive = p.steps.iter().any(|s| !s.destroys.is_empty());
+                let need_typed = self.need_typed(&p);
+                let ok = move || {
+                    valid
+                        && (!need_typed || confirm_name.with_value(|n| n.as_deref() == Some(typed.get().trim())))
+                        && (!need_pass || pass.with(|p| p.chars().count() >= 8))
+                };
+                view! {
                     <button class="btn ghost" type="button" on:click=move |_| stage.set(Stage::Form)>{tr("back")}</button>
                     <button
                         class=if destructive { "btn danger" } else { "btn primary" }
@@ -121,30 +177,23 @@ fn flow_view(
                     >
                         {spinner(busy)}{tr(exec_key)}
                     </button>
-                </div>
+                }
+                .into_any()
             }
-            .into_any()
+            Stage::Done(_) => ui::close_foot(on_close),
+            Stage::Form | Stage::Running(_) => ().into_any(),
         }
-        Stage::Running(id) => view! {
-            <TaskRun id=id on_done=Callback::new(move |t: TaskInfo| {
-                s.load();
-                stage.set(Stage::Done(t));
-            }) />
-        }
-        .into_any(),
-        Stage::Done(t) => done_view(&t, on_close),
-    })
-    .into_any()
+    }
 }
 
-fn done_view(t: &TaskInfo, on_close: Callback<()>) -> AnyView {
+/// The outcome of a storage task.
+fn done_note(t: &TaskInfo) -> AnyView {
     let ok = t.status == TaskStatus::Ok;
     let (tone, key) = if ok { (Tone::Ok, "sto.done_ok") } else { (Tone::Err, "sto.done_err") };
     let err = t.error.clone();
     view! {
         {ui::note(tone, tone.icon(), view! { {tr(key)} }.into_any())}
         {err.map(|e| view! { <p class="form-error"><Icon icon=icons::CIRCLE_X size=16 />{ui::tech_detail(e)}</p> })}
-        <div class="dialog-foot"><button class="btn primary" type="button" on:click=move |_| on_close.run(())>{tr("close")}</button></div>
     }
     .into_any()
 }
@@ -308,7 +357,7 @@ fn usage_card(v: &Vol) -> AnyView {
         rynas_api_types::storage::QuotaMode::None => t("sto.off").to_string(),
         rynas_api_types::storage::QuotaMode::Qgroup => "qgroups".into(),
         rynas_api_types::storage::QuotaMode::Squota => "squota".into(),
-        rynas_api_types::storage::QuotaMode::Unknown => "—".into(),
+        rynas_api_types::storage::QuotaMode::Unknown => ui::DASH.into(),
     };
     view! {
         <section class="card widget w-6">
@@ -319,12 +368,12 @@ fn usage_card(v: &Vol) -> AnyView {
             })}
             <dl class="kvs">
                 {kv_row("sto.used", sig(i18n::bytes(v.used)), "tnum")}
-                {kv_row("sto.free", sig(if v.size == 0 { "—".into() } else { i18n::bytes(free) }), "tnum")}
+                {kv_row("sto.free", sig(if v.size == 0 { ui::DASH.into() } else { i18n::bytes(free) }), "tnum")}
                 {kv_row("sto.fs", sig(v.fstype.clone()), "")}
                 {(!profiles.is_empty()).then(|| kv_row("sto.profiles", sig(profiles), ""))}
                 {kv_row("sto.compression", sig(fs.compression.clone().unwrap_or_else(|| t("sto.off").to_string())), "mono")}
                 {v.fs.is_some().then(|| kv_row("sto.quota", sig(quota), ""))}
-                {kv_row("sto.mount", sig(v.mountpoint.clone().unwrap_or_else(|| "—".into())), "mono")}
+                {kv_row("sto.mount", sig(v.mountpoint.clone().unwrap_or_else(|| ui::DASH.into())), "mono")}
             </dl>
         </section>
     }
@@ -402,8 +451,8 @@ fn scrub_card(v: &Vol, modal: RwSignal<Open>) -> AnyView {
             <p class="muted small">{tr("sto.scrub_text")}</p>
             {sc.map(|_| view! {
                 <dl class="kvs">
-                    {kv_row("sto.started", sig(s2.started.clone().unwrap_or_else(|| "—".into())), "")}
-                    {kv_row("sto.duration", sig(s2.duration_s.map(i18n::duration).unwrap_or_else(|| "—".into())), "tnum")}
+                    {kv_row("sto.started", sig(s2.started.clone().unwrap_or_else(|| ui::DASH.into())), "")}
+                    {kv_row("sto.duration", sig(s2.duration_s.map(i18n::duration).unwrap_or_else(|| ui::DASH.into())), "tnum")}
                     {s2.pct.filter(|_| running).map(|p| kv_row("sto.progress", sig(i18n::pct(p as f64)), "tnum"))}
                     {kv_row("sto.scrub_result", sig(s2.error_summary.clone()), "")}
                 </dl>
@@ -514,25 +563,31 @@ pub fn UnlockDialog(id: String, on_close: Callback<()>) -> impl IntoView {
         pass.set(String::new());
     };
     let title = tf("sto.unlock_title", &[("name", &id)]);
+    let flow = Flow::new(stage, None, false, "sto.unlock", busy, error, Callback::new(|_| {}), on_close);
+    const FORM: &str = "sto-unlock";
+    let foot = move || match stage.get() {
+        Stage::Form => save_bar_with(SaveBar {
+            can_save: Signal::derive(move || !pass.with(String::is_empty)),
+            form: Some(FORM),
+            ..SaveBar::new(busy, "sto.unlock", on_close, Callback::new(|_| {}))
+        }),
+        _ => flow.foot(),
+    };
     view! {
-        <Modal title=title on_close=on_close>
+        <Modal title=title on_close=on_close foot=foot>
             {move || match stage.get() {
                 Stage::Form => view! {
-                    <form class="form" on:submit=submit>
+                    <form class="form" id=FORM on:submit=submit>
                         <p class="muted small">{tr("sto.unlock_text")}</p>
                         <label class="field">
                             <span class="field-label">{tr("sto.pass_or_key")}</span>
                             <input class="input" type="password" autocomplete="off" prop:value=move || pass.get() on:input=move |ev| pass.set(event_target_value(&ev)) />
                         </label>
                         {form_error(error)}
-                        <div class="dialog-foot">
-                            <button class="btn ghost" type="button" on:click=move |_| on_close.run(())>{tr("cancel")}</button>
-                            <button class="btn primary" type="submit" disabled=move || busy.get() || pass.with(String::is_empty)>{spinner(busy)}{tr("sto.unlock")}</button>
-                        </div>
                     </form>
                 }
                 .into_any(),
-                _ => flow_view(stage, None, false, "sto.unlock", busy, error, Callback::new(|_| {}), on_close),
+                _ => flow.body(),
             }}
         </Modal>
     }
@@ -544,22 +599,20 @@ fn LockDialog(id: String, on_close: Callback<()>) -> impl IntoView {
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let url = StoredValue::new(vol_url(&id, "lock"));
+    let flow = Flow::new(stage, None, false, "sto.lock", busy, error, Callback::new(|_| {}), on_close);
+    let foot = move || match stage.get() {
+        Stage::Form => save_bar_with(SaveBar::new(busy, "sto.lock", on_close, Callback::new(move |_| start_task(url.get_value(), None, false, stage, busy, error)))),
+        _ => flow.foot(),
+    };
     view! {
-        <Modal title=tf("sto.lock_title", &[("name", &id)]) on_close=on_close>
+        <Modal title=tf("sto.lock_title", &[("name", &id)]) on_close=on_close foot=foot>
             {move || match stage.get() {
                 Stage::Form => view! {
                     <p>{tr("sto.lock_text")}</p>
                     {form_error(error)}
-                    <div class="dialog-foot">
-                        <button class="btn ghost" type="button" on:click=move |_| on_close.run(())>{tr("cancel")}</button>
-                        <button class="btn primary" type="button" disabled=move || busy.get()
-                            on:click=move |_| start_task(url.get_value(), None, false, stage, busy, error)>
-                            {spinner(busy)}{tr("sto.lock")}
-                        </button>
-                    </div>
                 }
                 .into_any(),
-                _ => flow_view(stage, None, false, "sto.lock", busy, error, Callback::new(|_| {}), on_close),
+                _ => flow.body(),
             }}
         </Modal>
     }
@@ -598,52 +651,56 @@ pub fn RevealDialog(id: String, on_close: Callback<()>) -> impl IntoView {
     on_cleanup(move || {
         let _ = key.try_set(None);
     });
+    let stored = RwSignal::new(false);
+    let shown = Memo::new(move |_| key.with(Option::is_some));
+    let foot = move || {
+        if shown.get() {
+            key_once_foot(stored, on_close)
+        } else {
+            save_bar_with(SaveBar {
+                can_save: Signal::derive(move || idv.with_value(|i| typed.get().trim() == i)),
+                ..SaveBar::new(busy, "sto.rk_reveal", on_close, Callback::new(reveal))
+            })
+        }
+    };
     view! {
-        <Modal title=tf("sto.rk_title", &[("name", &id)]) on_close=on_close>
+        <Modal title=tf("sto.rk_title", &[("name", &id)]) on_close=on_close foot=foot>
             {move || match key.get() {
                 None => view! {
                     <p class="muted small">{tr("sto.rk_text")}</p>
                     {typed_confirm(idv.get_value(), typed)}
                     {form_error(error)}
-                    <div class="dialog-foot">
-                        <button class="btn ghost" type="button" on:click=move |_| on_close.run(())>{tr("cancel")}</button>
-                        <button class="btn primary" type="button" disabled=move || busy.get() || idv.with_value(|i| typed.get().trim() != i) on:click=reveal>
-                            {spinner(busy)}{tr("sto.rk_reveal")}
-                        </button>
-                    </div>
                 }
                 .into_any(),
-                Some(k) => key_once(k, format!("recovery-key-{}.txt", idv.get_value()), "sto.rk_once", on_close),
+                Some(k) => key_once(k, format!("recovery-key-{}.txt", idv.get_value()), "sto.rk_once", stored),
             }}
         </Modal>
     }
 }
 
-/// A recovery key shown once: copy, download as `file`, and the "I stored it" check that
-/// must be ticked before `on_done` (also for an encrypted shared folder). `warn`: the i18n key
+/// A recovery key shown once: copy, download as `file`, and the "I stored it" check (`stored`)
+/// that [`key_once_foot`] waits for (also for an encrypted shared folder). `warn`: the i18n key
 /// of the warning above the key.
-pub fn key_once(key: String, file: String, warn: &'static str, on_done: Callback<()>) -> AnyView {
-    let stored = RwSignal::new(false);
-    let copied = RwSignal::new(false);
+pub fn key_once(key: String, file: String, warn: &'static str, stored: RwSignal<bool>) -> AnyView {
     let k2 = key.clone();
     let k3 = key.clone();
     view! {
         {ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {tr(warn)} }.into_any())}
         <code class="secret mono rk">{key}</code>
         <div class="card-actions">
-            <button class="btn ghost sm" type="button" on:click=move |_| { if copy_text(&k2) { copied.set(true); } }>
-                <Icon icon=if copied.get() { icons::CHECK } else { icons::COPY } size=14 />{move || if copied.get() { t("copied") } else { t("sto.copy") }}
-            </button>
+            {ui::copy_button("sto.copy", k2)}
             <button class="btn ghost sm" type="button" on:click=move |_| api::save_text(&file, &k3)>
                 <Icon icon=icons::DOWNLOAD size=14 />{tr("sto.download")}
             </button>
         </div>
         <label class="check"><input type="checkbox" prop:checked=move || stored.get() on:change=move |ev| stored.set(event_target_checked(&ev)) />{tr("sto.rk_stored")}</label>
-        <div class="dialog-foot">
-            <button class="btn primary" type="button" disabled=move || !stored.get() on:click=move |_| on_done.run(())>{tr("sto.done")}</button>
-        </div>
     }
     .into_any()
+}
+
+/// The action row of [`key_once`]: Done, once "I stored it" is ticked.
+pub fn key_once_foot(stored: RwSignal<bool>, on_done: Callback<()>) -> AnyView {
+    view! { <button class="btn primary" type="button" disabled=move || !stored.get() on:click=move |_| on_done.run(())>{tr("sto.done")}</button> }.into_any()
 }
 
 #[component]
@@ -659,8 +716,14 @@ fn ScrubDialog(vol: Vol, on_close: Callback<()>) -> impl IntoView {
         start_task(exec_url.get_value(), Some(json!({"action": "start", "md_check": md_check.get_untracked(), "dry_run": false})), false, stage, busy, error)
     };
     let uuid = StoredValue::new(uuid);
+    let flow = Flow::new(stage, None, false, "sto.scrub_start", busy, error, Callback::new(exec), on_close);
+    let review = move |_| fetch_plan("/api/v1/storage/plan/scrub", json!({"filesystem": uuid.get_value(), "md_check": md_check.get_untracked()}), stage, busy, error);
+    let foot = move || match stage.get() {
+        Stage::Form => save_bar_with(SaveBar::new(busy, "sto.review_plan", on_close, Callback::new(review))),
+        _ => flow.foot(),
+    };
     view! {
-        <Modal title=tf("sto.scrub_title", &[("name", &vol.id)]) on_close=on_close>
+        <Modal title=tf("sto.scrub_title", &[("name", &vol.id)]) on_close=on_close foot=foot>
             {move || match stage.get() {
                 Stage::Form => view! {
                     <p class="muted small">{tr("sto.scrub_text")}</p>
@@ -668,16 +731,9 @@ fn ScrubDialog(vol: Vol, on_close: Callback<()>) -> impl IntoView {
                         <label class="check"><input type="checkbox" prop:checked=move || md_check.get() on:change=move |ev| md_check.set(event_target_checked(&ev)) />{tr("sto.md_check")}</label>
                     })}
                     {form_error(error)}
-                    <div class="dialog-foot">
-                        <button class="btn ghost" type="button" on:click=move |_| on_close.run(())>{tr("cancel")}</button>
-                        <button class="btn primary" type="button" disabled=move || busy.get()
-                            on:click=move |_| fetch_plan("/api/v1/storage/plan/scrub", json!({"filesystem": uuid.get_value(), "md_check": md_check.get_untracked()}), stage, busy, error)>
-                            {spinner(busy)}{tr("sto.review_plan")}
-                        </button>
-                    </div>
                 }
                 .into_any(),
-                _ => flow_view(stage, None, false, "sto.scrub_start", busy, error, Callback::new(exec), on_close),
+                _ => flow.body(),
             }}
         </Modal>
     }
@@ -686,7 +742,7 @@ fn ScrubDialog(vol: Vol, on_close: Callback<()>) -> impl IntoView {
 /// Free disks as a checklist (grow) — shared look with the wizard.
 pub fn disk_checklist(disks: Vec<rynas_api_types::storage::DiskSummary>, chosen: RwSignal<Vec<String>>) -> AnyView {
     if disks.is_empty() {
-        return view! { <p class="muted">{tr("sto.no_free")}</p> }.into_any();
+        return ui::empty_line("sto.no_free");
     }
     view! {
         <ul class="pick-list">
@@ -707,10 +763,10 @@ pub fn disk_checklist(disks: Vec<rynas_api_types::storage::DiskSummary>, chosen:
                                 <span class="strong">{disk_title(&d)}</span>
                                 <span class="muted small mono">{d.serial.clone()}</span>
                             </span>
-                            {d.smr.then(|| view! { <span class="chip warn-chip" title=t("sto.smr_hint")>"SMR"</span> })}
+                            {d.smr.then(|| view! { <span class="chip warn" title=t("sto.smr_hint")>"SMR"</span> })}
                             {(!d.used_by.is_empty()).then(|| {
                                 let what = d.used_by.join(", ");
-                                view! { <span class="chip warn-chip" title=tf("wiz.will_erase", &[("what", &what)])>{tr("wiz.erase_chip")}</span> }
+                                view! { <span class="chip warn" title=tf("wiz.will_erase", &[("what", &what)])>{tr("wiz.erase_chip")}</span> }
                             })}
                             <Status tone=htone text=t(hkey).to_string() />
                         </label>
@@ -782,8 +838,16 @@ fn GrowDialog(vol: Vol, on_close: Callback<()>) -> impl IntoView {
         fetch_plan("/api/v1/storage/plan/grow", body, stage, busy, error);
     };
     let encrypted = vol.encrypted;
+    let flow = Flow::new(stage, Some(id.get_value()), encrypted, "sto.grow", busy, error, Callback::new(exec), on_close);
+    let foot = move || match stage.get() {
+        Stage::Form => save_bar_with(SaveBar {
+            can_save: Signal::derive(move || !chosen.with(Vec::is_empty)),
+            ..SaveBar::new(busy, "sto.review_plan", on_close, Callback::new(review))
+        }),
+        _ => flow.foot(),
+    };
     view! {
-        <Modal title=tf("sto.grow_title", &[("name", &vol.id)]) on_close=on_close wide=true>
+        <Modal title=tf("sto.grow_title", &[("name", &vol.id)]) on_close=on_close wide=true foot=foot>
             {move || match stage.get() {
                 Stage::Form => view! {
                     <p class="muted small">{tr("sto.grow_text")}</p>
@@ -791,22 +855,16 @@ fn GrowDialog(vol: Vol, on_close: Callback<()>) -> impl IntoView {
                     <label class="field">
                         <span class="field-label">{tr("sto.level")}</span>
                         <select class="input" prop:value=move || level.get() on:change=move |ev| level.set(event_target_value(&ev))>
-                            <option value="">{tf("sto.keep_level", &[("l", current.map(|l| t(level_key(l))).unwrap_or("—"))])}</option>
+                            <option value="">{tf("sto.keep_level", &[("l", current.map(|l| t(level_key(l))).unwrap_or(ui::DASH))])}</option>
                             {LEVELS.iter().filter(|l| Some(**l) != current && **l != RaidLevel::Single).map(|l| view! {
                                 <option value=level_str(*l)>{tr(level_key(*l))}</option>
                             }).collect_view()}
                         </select>
                     </label>
                     {form_error(error)}
-                    <div class="dialog-foot">
-                        <button class="btn ghost" type="button" on:click=move |_| on_close.run(())>{tr("cancel")}</button>
-                        <button class="btn primary" type="button" disabled=move || busy.get() || chosen.with(Vec::is_empty) on:click=review>
-                            {spinner(busy)}{tr("sto.review_plan")}
-                        </button>
-                    </div>
                 }
                 .into_any(),
-                _ => flow_view(stage, Some(id.get_value()), encrypted, "sto.grow", busy, error, Callback::new(exec), on_close),
+                _ => flow.body(),
             }}
         </Modal>
     }
@@ -852,8 +910,16 @@ fn ReplaceDialog(vol: Vol, on_close: Callback<()>) -> impl IntoView {
     };
     let members = StoredValue::new(members);
     let free = StoredValue::new(free);
+    let flow = Flow::new(stage, Some(id.get_value()), false, "sto.replace_go", busy, error, Callback::new(exec), on_close);
+    let foot = move || match stage.get() {
+        Stage::Form => save_bar_with(SaveBar {
+            can_save: Signal::derive(move || !new_disk.with(String::is_empty)),
+            ..SaveBar::new(busy, "sto.review_plan", on_close, Callback::new(review))
+        }),
+        _ => flow.foot(),
+    };
     view! {
-        <Modal title=tf("sto.replace_title", &[("name", &vol.id)]) on_close=on_close wide=true>
+        <Modal title=tf("sto.replace_title", &[("name", &vol.id)]) on_close=on_close wide=true foot=foot>
             {move || match stage.get() {
                 Stage::Form => view! {
                     <p class="muted small">{tr("sto.replace_text")}</p>
@@ -875,15 +941,9 @@ fn ReplaceDialog(vol: Vol, on_close: Callback<()>) -> impl IntoView {
                     </label>
                     {free.with_value(Vec::is_empty).then(|| view! { <p class="muted small">{tr("sto.no_free")}</p> })}
                     {form_error(error)}
-                    <div class="dialog-foot">
-                        <button class="btn ghost" type="button" on:click=move |_| on_close.run(())>{tr("cancel")}</button>
-                        <button class="btn primary" type="button" disabled=move || busy.get() || new_disk.with(String::is_empty) on:click=review>
-                            {spinner(busy)}{tr("sto.review_plan")}
-                        </button>
-                    </div>
                 }
                 .into_any(),
-                _ => flow_view(stage, Some(id.get_value()), false, "sto.replace_go", busy, error, Callback::new(exec), on_close),
+                _ => flow.body(),
             }}
         </Modal>
     }
@@ -923,7 +983,7 @@ fn Subvolumes(id: String) -> impl IntoView {
             {move || match list.get() {
                 None => view! { <Skeleton lines=3 /> }.into_any(),
                 Some(Err(code)) => view! { <ErrorBox code=code on_retry=Callback::new(move |_| load()) /> }.into_any(),
-                Some(Ok(v)) if v.is_empty() => view! { <p class="muted">{tr("sto.sub_none")}</p> }.into_any(),
+                Some(Ok(v)) if v.is_empty() => ui::empty_line("sto.sub_none"),
                 Some(Ok(v)) => view! {
                     {ui::table("", &["sto.name", "sto.path", "sto.compression", "sto.readonly", ""], v.into_iter().map(|sv| {
                                     let comp = match sv.compression.as_deref() { None => t("sto.inherit").to_string(), Some("none") => t("sto.off").to_string(), Some(c) => c.to_string() };
@@ -934,10 +994,10 @@ fn Subvolumes(id: String) -> impl IntoView {
                                         ui::cell("sto.path", "mono muted", view! { {sv.path.clone()} }.into_any()),
                                         ui::cell("sto.compression", "", view! { {comp} }.into_any()),
                                         ui::cell("sto.readonly", "", view! { {if sv.readonly { t("sto.yes") } else { t("sto.no") }} }.into_any()),
-                                        ui::cell("", "num row-actions", view! {
+                                        ui::actions(view! {
                                             {(!sv.system).then(|| view! {
-                                                <button class="btn ghost sm" type="button" on:click=move |_| modal.set(SubModal::Edit(e.clone()))>{tr("edit")}</button>
-                                                <button class="btn ghost sm danger-text" type="button" on:click=move |_| modal.set(SubModal::Delete(d.clone()))>{tr("delete")}</button>
+                                                {ui::icon_btn(icons::PENCIL, ui::verb_name("edit", &sv.name), false, Signal::stored(false), Callback::new(move |_| modal.set(SubModal::Edit(e.clone()))))}
+                                                {ui::icon_btn(icons::TRASH_2, ui::verb_name("delete", &sv.name), true, Signal::stored(false), Callback::new(move |_| modal.set(SubModal::Delete(d.clone()))))}
                                             })}
                                         }
                                         .into_any()),
@@ -1005,11 +1065,17 @@ fn SubvolDialog(base: String, edit: Option<SubvolumeInfo>, on_close: Callback<()
         }
     };
     let title = if creating { t("sto.sub_create").to_string() } else { tf("edit_named", &[("name", &name.get_untracked())]) };
+    let flow = Flow::new(stage, None, false, "save", busy, error, Callback::new(|_| {}), on_close);
+    const FORM: &str = "sto-subvol";
+    let foot = move || match stage.get() {
+        Stage::Form => save_bar_with(SaveBar { form: Some(FORM), ..SaveBar::new(busy, if creating { "create" } else { "save" }, on_close, Callback::new(|_| {})) }),
+        _ => flow.foot(),
+    };
     view! {
-        <Modal title=title on_close=on_close>
+        <Modal title=title on_close=on_close foot=foot>
             {move || match stage.get() {
                 Stage::Form => view! {
-                    <form class="form" on:submit=submit>
+                    <form class="form" id=FORM on:submit=submit>
                         <label class="field">
                             <span class="field-label">{tr("sto.name")}</span>
                             <input class="input" disabled=!creating maxlength="64" autocomplete="off" spellcheck="false"
@@ -1027,14 +1093,10 @@ fn SubvolDialog(base: String, edit: Option<SubvolumeInfo>, on_close: Callback<()
                         </div>
                         <label class="check"><input type="checkbox" prop:checked=move || ro.get() on:change=move |ev| ro.set(event_target_checked(&ev)) />{tr("sto.readonly")}</label>
                         {form_error(error)}
-                        <div class="dialog-foot">
-                            <button class="btn ghost" type="button" on:click=move |_| on_close.run(())>{tr("cancel")}</button>
-                            <button class="btn primary" type="submit" disabled=move || busy.get()>{spinner(busy)}{if creating { tr("create")() } else { tr("save")() }}</button>
-                        </div>
                     </form>
                 }
                 .into_any(),
-                _ => flow_view(stage, None, false, "save", busy, error, Callback::new(|_| {}), on_close),
+                _ => flow.body(),
             }}
         </Modal>
     }
@@ -1048,23 +1110,25 @@ fn SubvolDelete(base: String, sub: SubvolumeInfo, on_close: Callback<()>) -> imp
     let typed = RwSignal::new(String::new());
     let name = StoredValue::new(sub.name.clone());
     let url = StoredValue::new(format!("{base}/{0}?confirm={0}", api::encode(&sub.name)));
+    let flow = Flow::new(stage, None, false, "delete", busy, error, Callback::new(|_| {}), on_close);
+    let foot = move || match stage.get() {
+        Stage::Form => save_bar_with(SaveBar {
+            can_save: Signal::derive(move || name.with_value(|n| typed.get().trim() == n)),
+            danger: Signal::stored(true),
+            ..SaveBar::new(busy, "delete", on_close, Callback::new(move |_| start_task(url.get_value(), None, true, stage, busy, error)))
+        }),
+        _ => flow.foot(),
+    };
     view! {
-        <Modal title=tf("sto.sub_delete", &[("name", &sub.name)]) on_close=on_close>
+        <Modal title=tf("sto.sub_delete", &[("name", &sub.name)]) on_close=on_close foot=foot>
             {move || match stage.get() {
                 Stage::Form => view! {
                     {ui::note(Tone::Err, icons::TRIANGLE_ALERT, view! { {tr("sto.sub_delete_text")} }.into_any())}
                     {typed_confirm(name.get_value(), typed)}
                     {form_error(error)}
-                    <div class="dialog-foot">
-                        <button class="btn ghost" type="button" on:click=move |_| on_close.run(())>{tr("cancel")}</button>
-                        <button class="btn danger" type="button" disabled=move || busy.get() || name.with_value(|n| typed.get().trim() != n)
-                            on:click=move |_| start_task(url.get_value(), None, true, stage, busy, error)>
-                            {spinner(busy)}{tr("delete")}
-                        </button>
-                    </div>
                 }
                 .into_any(),
-                _ => flow_view(stage, None, false, "delete", busy, error, Callback::new(|_| {}), on_close),
+                _ => flow.body(),
             }}
         </Modal>
     }
@@ -1116,7 +1180,7 @@ fn StripeCache(id: String) -> impl IntoView {
     };
     view! {
         <section class="card widget w-6">
-            <WidgetHead icon=icons::SETTINGS_2 title="sto.tuning" />
+            <WidgetHead icon=icons::SETTINGS title="sto.tuning" />
             {move || match state.get() {
                 None => view! { <Skeleton lines=3 /> }.into_any(),
                 Some(Err(code)) => view! { <ErrorBox code=code on_retry=Callback::new(move |_| load()) /> }.into_any(),
@@ -1126,7 +1190,7 @@ fn StripeCache(id: String) -> impl IntoView {
                     view! {
                         <p class="muted small">{tr("sto.stripe_text")}</p>
                         <dl class="kvs">
-                            {kv_row("sto.current", sig(st.current_stripe_cache_size.map(|n| n.to_string()).unwrap_or_else(|| "—".into())), "tnum")}
+                            {kv_row("sto.current", sig(st.current_stripe_cache_size.map(|n| n.to_string()).unwrap_or_else(|| ui::DASH.into())), "tnum")}
                             {prop.map(|p| kv_row("sto.proposal", sig(format!("{p} · {}", mem.map(i18n::bytes).unwrap_or_default())), "tnum"))}
                         </dl>
                         {st.pending.is_some().then(|| view! { {ui::note(Tone::Info, icons::HISTORY, view! { {tr("sto.pending_note")} }.into_any())} })}

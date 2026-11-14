@@ -7,6 +7,7 @@ use rynas_api_types::storage::{PlanAction, PlanArgs, PlanStep, PlanWarningCode, 
 
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
+use crate::ui;
 
 /// A translated plan text, or the server's English one (`lang="en"`) when this build has no
 /// key for its code.
@@ -196,12 +197,14 @@ pub fn plan_view(p: &StoragePlan) -> AnyView {
                     }).collect_view()}
                 </dl>
             })}
-            {(n > 0).then(|| view! {
-                <details class="plan-steps-wrap" open=open>
-                    <summary>
-                        {tf("plan.steps", &[("n", &n.to_string())])}
-                        {(erases > 0).then(|| view! { <span class="chip danger-chip"><Icon icon=icons::TRIANGLE_ALERT size=12 />{tr("plan.destructive")}</span> })}
-                    </summary>
+            {(n > 0).then(|| ui::fold_with(
+                view! {
+                    {tf("plan.steps", &[("n", &n.to_string())])}
+                    {(erases > 0).then(|| view! { " "<span class="chip err"><Icon icon=icons::TRIANGLE_ALERT size=12 />{tr("plan.destructive")}</span> })}
+                }
+                .into_any(),
+                open,
+                view! {
                     <ol class="plan-steps">
                         {p.steps.iter().enumerate().map(|(i, s)| view! {
                             <li class:destroy=!s.destroys.is_empty()>
@@ -212,7 +215,7 @@ pub fn plan_view(p: &StoragePlan) -> AnyView {
                                     {(!s.destroys.is_empty()).then(|| view! {
                                         <span class="plan-erase">
                                             {s.destroys.iter().map(|d| view! {
-                                                <span class="chip danger-chip"><Icon icon=icons::TRIANGLE_ALERT size=12 />{tf("plan.erases", &[("dev", d)])}</span>
+                                                <span class="chip err"><Icon icon=icons::TRIANGLE_ALERT size=12 />{tf("plan.erases", &[("dev", d)])}</span>
                                             }).collect_view()}
                                         </span>
                                     })}
@@ -220,8 +223,9 @@ pub fn plan_view(p: &StoragePlan) -> AnyView {
                             </li>
                         }).collect_view()}
                     </ol>
-                </details>
-            })}
+                }
+                .into_any(),
+            ))}
         </div>
     }
     .into_any()

@@ -127,19 +127,19 @@ fn overview(_active: Signal<bool>) -> AnyView {
                                         </span>
                                     }.into_any()
                                 }
-                                None => view! { <span>"—"</span> }.into_any(),
+                                None => view! { <span>{ui::DASH}</span> }.into_any(),
                             }}
                         </div>
                         <div class="hw-sum-item">
                             <span class="muted small">{tr("hw.duty")}</span>
-                            <strong class="tnum">{move || h().fan_duty.map(|d| format!("{d}%")).unwrap_or_else(|| "—".into())}</strong>
+                            <strong class="tnum">{move || h().fan_duty.map(|d| i18n::pct(f64::from(d))).unwrap_or_else(|| ui::DASH.into())}</strong>
                         </div>
                         <div class="hw-sum-item">
                             <span class="muted small">{tr("hw.updated")}</span>
                             {move || {
                                 let age = h().age_s;
                                 let stale = age.is_some_and(|a| a > 30);
-                                let txt = age.map(|a| format!("{} {}", i18n::duration(a), t("hw.ago"))).unwrap_or_else(|| "—".into());
+                                let txt = age.map(i18n::ago).unwrap_or_else(|| ui::DASH.into());
                                 if stale {
                                     view! { <Status tone=Tone::Warn text=format!("{} · {txt}", t("hw.stale")) /> }.into_any()
                                 } else {
@@ -167,7 +167,7 @@ fn overview(_active: Signal<bool>) -> AnyView {
                                             <span class="fan-big spin" style:animation-duration=dur><Icon icon=icons::FAN size=32 /></span>
                                             <div>
                                                 <div class="fan-label">{fan_label(&f.label)}</div>
-                                                <div class="fan-rpm tnum">{f.rpm.map(|r| r.to_string()).unwrap_or_else(|| "—".into())}<span class="kpi-unit">" rpm"</span></div>
+                                                <div class="fan-rpm tnum">{f.rpm.map(|r| r.to_string()).unwrap_or_else(|| ui::DASH.into())}<span class="kpi-unit">" rpm"</span></div>
                                             </div>
                                             {f.alarm.then(|| view! { <Status tone=Tone::Err text=t("hw.alarm").to_string() /> })}
                                         </div>

@@ -21,7 +21,7 @@ use rynas_api_types::scheduler::TaskTrigger;
 use rynas_api_types::{ShareView, TaskStatus};
 
 use crate::api;
-use crate::form::{In, area_field, number_field, save_bar, segmented, select_field, switch, text_field};
+use crate::form::{In, SaveBar, area_field, number_field, save_bar, save_bar_with, segmented, select_field, switch, text_field};
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::pages::scheduler::{TriggerEdit, run_status, trigger_text};
@@ -93,9 +93,8 @@ pub fn panel(edit: RwSignal<Option<Option<BackupJobView>>>) -> AnyView {
         let rows = jobs.data.get().unwrap_or_default();
         if rows.is_empty() {
             return view! {
-                <EmptyState icon=icons::ARCHIVE_RESTORE title=Signal::derive(|| t("bk.empty").to_string()) text=Signal::derive(|| t("bk.empty_text").to_string())>
-                    <button class="btn primary" on:click=move |_| edit.set(Some(None))><Icon icon=icons::PLUS size=16 />{tr("bk.create")}</button>
-                </EmptyState>
+                // Create is in the tab's action row: not repeated here
+                <EmptyState icon=icons::ARCHIVE_RESTORE title=Signal::derive(|| t("bk.empty").to_string()) text=Signal::derive(|| t("bk.empty_text").to_string()) />
             }
             .into_any();
         }
@@ -218,7 +217,7 @@ fn job_row(
         tf(if ok { "wa.test.at" } else { "bk.check.bad_at" }, &[("when", &i18n::short_when(ms))])
     });
     let sources = v.job.sources.iter().map(source_text).collect::<Vec<_>>().join(", ");
-    let size = st.repository_bytes.map(i18n::bytes).unwrap_or_else(|| "—".into());
+    let size = st.repository_bytes.map(i18n::bytes).unwrap_or_else(|| ui::DASH.into());
     let v_edit = v.clone();
     let (n3, n4, n5, n6, n7) = (name.clone(), name.clone(), name.clone(), name.clone(), name.clone());
     ui::row_class(
@@ -239,7 +238,7 @@ fn job_row(
             .into_any()),
             ui::cell("sch.col.schedule", "", view! {
                 <div class="cell-main">
-                    <span>{if v.enabled { v.schedule.as_ref().map(trigger_text).unwrap_or_else(|| "—".into()) } else { t("bk.paused").to_string() }}</span>
+                    <span>{if v.enabled { v.schedule.as_ref().map(trigger_text).unwrap_or_else(|| ui::DASH.into()) } else { t("bk.paused").to_string() }}</span>
                     <span class="cell-sub tnum">{v.next_run_ms.filter(|_| v.enabled).map(|m| tf("sch.next", &[("when", &i18n::short_when(m))]))}</span>
                 </div>
             }
@@ -264,15 +263,15 @@ fn job_row(
             }
             .into_any()),
             ui::actions(view! {
-                <button class="icon-btn sm" title=tr("bk.run") aria-label=format!("{}: {}", t("bk.run"), n3)
+                <button class="icon-btn sm" title=tr("bk.run") aria-label=ui::verb_name("bk.run", &n3)
                     disabled=move || running.get() || not_applied || deleting on:click=run>
-                    {move || if running.get() { view! { <span class="btn-spinner" aria-hidden="true"></span> }.into_any() } else { view! { <Icon icon=icons::PLAY size=16 /> }.into_any() }}
+                    {crate::form::spinner_icon(running.into(), icons::PLAY)}
                 </button>
-                <button class="icon-btn sm" title=tr("bk.versions") aria-label=format!("{}: {}", t("bk.versions"), n4) disabled=not_applied
+                <button class="icon-btn sm" title=tr("bk.versions") aria-label=ui::verb_name("bk.versions", &n4) disabled=not_applied
                     on:click=move |_| versions.set(Some(n4.clone()))>
                     <Icon icon=icons::HISTORY size=16 />
                 </button>
-                <button class="icon-btn sm" title=tr("bk.check") aria-label=format!("{}: {}", t("bk.check"), n5) disabled=move || not_applied || running.get()
+                <button class="icon-btn sm" title=tr("bk.check") aria-label=ui::verb_name("bk.check", &n5) disabled=move || not_applied || running.get()
                     on:click=move |_| check.set(Some(n5.clone()))>
                     <Icon icon=icons::SHIELD_CHECK size=16 />
                 </button>
@@ -584,8 +583,10 @@ fn job_editor(init: Option<BackupJobView>, shown_password: RwSignal<Option<Strin
     };
     let copy_key = move |_| {
         let k = f.public_key.get_untracked();
-        let _ = window().navigator().clipboard().write_text(&k);
-        toast(Tone::Ok, t("bk.copied").to_string());
+        // the shared copy (also on a plain-HTTP LAN address, where the Clipboard API is missing)
+        if ui::copy_text(&k) {
+            toast(Tone::Ok, t("bk.copied").to_string());
+        }
     };
     let secret_help = if has_secret { "bk.f.secret_kept" } else { "bk.f.secret_help" };
     let dest_fields = move || match f.kind.get().as_str() {
@@ -839,8 +840,7 @@ fn job_editor(init: Option<BackupJobView>, shown_password: RwSignal<Option<Strin
             </div>
             <div><button type="button" class="btn ghost sm" on:click=smart>{tr("bk.f.smart")}</button></div>
 
-            <details class="advanced">
-                <summary>{tr("advanced")}</summary>
+            {ui::fold(None, "advanced", false, None, view! { 
                 {switch("bk.f.use_snapshot", Some("bk.f.use_snapshot_help"), f.use_snapshot.into(), Callback::new(move |v| f.use_snapshot.set(v)))}
                 {field("bk.f.stop_stacks", f.stop_stacks, In { mono: true, help: Some("bk.f.stop_stacks_help"), ..In::default() })}
                 {area_field("bk.f.excludes", f.excludes.into(), Callback::new(move |v| f.excludes.set(v)), Some("bk.f.excludes_help"), "*.tmp\n**/cache")}
@@ -851,7 +851,7 @@ fn job_editor(init: Option<BackupJobView>, shown_password: RwSignal<Option<Strin
                     {num("bk.f.read_pct", f.read_pct, 100)}
                 </div>
                 <p class="field-help">{tr("bk.f.maintenance_help")}</p>
-            </details>
+             }.into_any())}
             <button type="submit" hidden=true></button>
         </form>
     }
@@ -865,8 +865,9 @@ fn password_dialog(pw: String, close: Callback<()>) -> AnyView {
     let saved = RwSignal::new(false);
     let p2 = pw.clone();
     let copy = move |_| {
-        let _ = window().navigator().clipboard().write_text(&p2);
-        toast(Tone::Ok, t("bk.copied").to_string());
+        if ui::copy_text(&p2) {
+            toast(Tone::Ok, t("bk.copied").to_string());
+        }
     };
     let p3 = pw.clone();
     let download = move |_| api::save_text("rynas-backup-password.txt", &format!("{}\n\n{p3}\n", t("bk.pw.file_note")));
@@ -932,11 +933,7 @@ fn check_dialog(name: String, jobs: Remote<Vec<BackupJobView>>, close: Callback<
         {crate::form::form_error(error)}
     }
     .into_any();
-    let foot = view! {
-        <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("cancel")}</button>
-        <button type="button" class="btn primary" disabled=move || busy.get() on:click=go>{crate::form::spinner(busy)}{tr("bk.check")}</button>
-    }
-    .into_any();
+    let foot = save_bar_with(SaveBar::new(busy, "bk.check", close, Callback::new(go)));
     dialog(DlgKind::Normal, Signal::derive(move || tf("bk.check.title", &[("name", &name)])), close, body, Some(foot))
 }
 
@@ -1041,8 +1038,8 @@ fn browser(name: String, snap: SnapshotEntry, picked: RwSignal<Vec<String>>, bac
     let (n2, id2) = (name.clone(), snap.id.clone());
     let rows = move || match entries.get() {
         None => view! { <crate::ui::Skeleton lines=5 /> }.into_any(),
-        Some(Err(e)) => ui::err_view(e),
-        Some(Ok(list)) if list.is_empty() => view! { <p class="muted">{tr("snap.empty_dir")}</p> }.into_any(),
+        Some(Err(e)) => ui::error_box_text(e, Callback::new(move |_| path.update(|_| {}))),
+        Some(Ok(list)) if list.is_empty() => ui::empty_line("snap.empty_dir"),
         Some(Ok(list)) => view! {
             <ul class="bk-list">
                 {list.into_iter().map(|e| {
@@ -1054,7 +1051,7 @@ fn browser(name: String, snap: SnapshotEntry, picked: RwSignal<Vec<String>>, bac
                         let url = format!("{}?snapshot={}&path={}", job_url(&n2, "/download"), api::encode(&id2), api::encode(&p));
                         let fname = e.name.clone();
                         view! {
-                            <button class="icon-btn sm" title=tr("bk.download") aria-label=format!("{}: {}", t("bk.download"), e.name)
+                            <button class="icon-btn sm" title=tr("bk.download") aria-label=ui::verb_name("bk.download", &e.name)
                                 on:click=move |_| { let (u, f) = (url.clone(), fname.clone()); spawn_local(async move { if let Err(err) = api::download(&u, &f).await { toast(Tone::Err, err.text()); } }); }>
                                 <Icon icon=icons::DOWNLOAD size=16 />
                             </button>
@@ -1068,7 +1065,7 @@ fn browser(name: String, snap: SnapshotEntry, picked: RwSignal<Vec<String>>, bac
                     });
                     view! {
                         <li class="bk-entry">
-                            <input type="checkbox" aria-label=format!("{}: {}", t("bk.pick"), e.name) prop:checked=checked on:change=move |ev| {
+                            <input type="checkbox" aria-label=ui::verb_name("bk.pick", &e.name) prop:checked=checked on:change=move |ev| {
                                 let on = event_target_checked(&ev);
                                 picked.update(|l| { l.retain(|x| x != &p3); if on { l.push(p3.clone()); } });
                             } />
@@ -1169,12 +1166,11 @@ fn restore_dialog(name: String, snapshot: String, paths: Vec<String>, close: Cal
         {crate::form::form_error(error)}
     }
     .into_any();
-    let foot = view! {
-        <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("cancel")}</button>
-        <button type="button" class=move || if original() { "btn danger" } else { "btn primary" } disabled=move || busy.get() || (original() && !overwrite_ok.get()) on:click=go>
-            {crate::form::spinner(busy)}{move || if original() { t("bk.restore.overwrite") } else { t("bk.restore") }}
-        </button>
-    }
-    .into_any();
+    let foot = save_bar_with(SaveBar {
+        can_save: Signal::derive(move || !(original() && !overwrite_ok.get())),
+        danger: Signal::derive(original),
+        label: Signal::derive(move || if original() { t("bk.restore.overwrite") } else { t("bk.restore") }.to_string()),
+        ..SaveBar::new(busy, "bk.restore", close, Callback::new(go))
+    });
     dialog(DlgKind::Normal, Signal::derive(|| t("bk.restore").to_string()), close, body, Some(foot))
 }

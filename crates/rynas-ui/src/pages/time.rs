@@ -45,11 +45,7 @@ fn wall(ms: f64) -> js_sys::Date {
 }
 
 fn wall_text(ms: f64) -> String {
-    let opts = js_sys::Object::new();
-    for (k, v) in [("timeZone", "UTC"), ("dateStyle", "full"), ("timeStyle", "medium")] {
-        let _ = js_sys::Reflect::set(&opts, &k.into(), &v.into());
-    }
-    wall(ms).to_locale_string(i18n::lang().code(), &opts).as_string().unwrap_or_default()
+    i18n::date_with(ms, &[("timeZone", "UTC"), ("dateStyle", "full"), ("timeStyle", "medium")])
 }
 
 /// `YYYY-MM-DDTHH:MM:SS` for a `datetime-local` input.
@@ -206,7 +202,7 @@ fn form_card(init: ClockState, st: Remote<ClockState>, zones: Remote<Vec<ZoneInf
 }
 
 fn kv(label: &'static str, value: String) -> AnyView {
-    view! { <div class="kv"><dt>{tr(label)}</dt><dd class="tnum">{value}</dd></div> }.into_any()
+    ui::kv_text(label, value, "tnum")
 }
 
 /// The clock now (ticking) and what the time service says.

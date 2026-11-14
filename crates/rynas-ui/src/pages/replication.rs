@@ -68,7 +68,7 @@ fn warning_key(w: ReplicaWarning) -> &'static str {
 }
 
 fn copy_text(s: String) {
-    if crate::pages::security::copy_text(&s) {
+    if crate::ui::copy_text(&s) {
         toast(Tone::Ok, t("repl.copied").to_string());
     }
 }
@@ -81,7 +81,7 @@ fn copy_box(label: &'static str, value: String) -> AnyView {
             <span class="field-label">{tr(label)}</span>
             <div class="repl-copy">
                 <code class="secret mono">{value}</code>
-                <button type="button" class="icon-btn sm" title=tr("repl.copy") aria-label=format!("{}: {}", t("repl.copy"), t(label)) on:click=move |_| copy_text(v2.clone())>
+                <button type="button" class="icon-btn sm" title=tr("repl.copy") aria-label=ui::verb_name("repl.copy", t(label)) on:click=move |_| copy_text(v2.clone())>
                     <Icon icon=icons::COPY size=16 />
                 </button>
             </div>
@@ -235,7 +235,7 @@ fn target_row(
     let last = match s.last_ok_ms {
         Some(ms) => {
             let n = s.transferred.len();
-            let sent = tf(if n == 1 { "repl.sent_one" } else { "repl.sent_many" }, &[("n", &i18n::count(n as u64))]);
+            let sent = i18n::tn("repl.sent", n as u64, &[]);
             let sub = match s.duration_s {
                 Some(d) => format!("{sent} · {}", i18n::duration(d)),
                 None => sent,
@@ -270,7 +270,7 @@ fn target_row(
                 <div class="chips">{chips}</div>
                 {known.map(|h| view! { <span class="cell-sub">{ui::text_code(t(hint_key(h)))}</span> })}
                 {err.map(|e| view! { <span class="cell-sub mono small danger-text bk-wrap">{e}</span> })}
-                {(held > 0).then(|| view! { <span class="cell-sub warn-text">{tf(if held == 1 { "repl.held_one" } else { "repl.held_many" }, &[("n", &i18n::count(u64::from(held)))])}</span> })}
+                {(held > 0).then(|| view! { <span class="cell-sub warn-text">{i18n::tn("repl.held", u64::from(held), &[])}</span> })}
                 {warnings.into_iter().map(|w| view! { <span class="cell-sub warn-text">{tr(warning_key(w))}</span> }).collect_view()}
             </div>
         }
@@ -313,16 +313,16 @@ fn target_row(
             ui::cell("repl.col.last", "tnum", last),
             ui::cell("col.status", "", status),
             ui::actions(view! {
-                <button class="icon-btn sm" title=tr("repl.run") aria-label=format!("{}: {}", t("repl.run"), v.target.id) disabled=move || !can_run || is_busy() on:click=run>
+                <button class="icon-btn sm" title=tr("repl.run") aria-label=ui::verb_name("repl.run", &v.target.id) disabled=move || !can_run || is_busy() on:click=run>
                     <Icon icon=icons::PLAY size=16 />
                 </button>
-                <button class="icon-btn sm" title=move || if local { t("repl.replicas") } else { t("repl.replicas_remote") } aria-label=format!("{}: {}", t("repl.replicas"), v.target.id) disabled=!local || !applied on:click=move |_| replicas.set(Some(v1.clone()))>
+                <button class="icon-btn sm" title=move || if local { t("repl.replicas") } else { t("repl.replicas_remote") } aria-label=ui::verb_name("repl.replicas", &v.target.id) disabled=!local || !applied on:click=move |_| replicas.set(Some(v1.clone()))>
                     <Icon icon=icons::FOLDER_OPEN size=16 />
                 </button>
-                <button class="icon-btn sm" title=tr("edit") aria-label=format!("{}: {}", t("edit"), v.target.id) on:click=move |_| edit.set(Some(Some(v2.clone())))>
+                <button class="icon-btn sm" title=tr("edit") aria-label=ui::verb_name("edit", &v.target.id) on:click=move |_| edit.set(Some(Some(v2.clone())))>
                     <Icon icon=icons::PENCIL size=16 />
                 </button>
-                <button class="icon-btn sm danger" title=tr("delete") aria-label=format!("{}: {}", t("delete"), v.target.id) on:click=move |_| del.set(Some(v3.clone()))>
+                <button class="icon-btn sm danger" title=tr("delete") aria-label=ui::verb_name("delete", &v.target.id) on:click=move |_| del.set(Some(v3.clone()))>
                     <Icon icon=icons::TRASH_2 size=16 />
                 </button>
             }
@@ -727,10 +727,10 @@ fn replicas_drawer(v: ReplicaView, close: Callback<()>) -> AnyView {
                 ui::cell("snap.col.created", "tnum", i18n::datetime(s.created_ms).into_any()),
                 ui::cell("col.status", "", if ok { view! { <span class="chip"><Icon icon=icons::LOCK size=12 />{tr("snap.readonly")}</span> }.into_any() } else { ui::status(Tone::Warn, t("repl.incomplete").to_string()) }),
                 ui::actions(view! {
-                    <button class="icon-btn sm" title=tr("snap.browse") aria-label=format!("{}: {}", t("snap.browse"), s.name) disabled=!ok on:click={ let n = s.name.clone(); move |_| open.set(Some(n.clone())) }>
+                    <button class="icon-btn sm" title=tr("snap.browse") aria-label=ui::verb_name("snap.browse", &s.name) disabled=!ok on:click={ let n = s.name.clone(); move |_| open.set(Some(n.clone())) }>
                         <Icon icon=icons::FOLDER_OPEN size=16 />
                     </button>
-                    <button class="icon-btn sm" title=tr("repl.promote") aria-label=format!("{}: {}", t("repl.promote"), s.name) disabled=!ok on:click=move |_| promote.set(Some(n2.clone()))>
+                    <button class="icon-btn sm" title=tr("repl.promote") aria-label=ui::verb_name("repl.promote", &s.name) disabled=!ok on:click=move |_| promote.set(Some(n2.clone()))>
                         <Icon icon=icons::FOLDER_PLUS size=16 />
                     </button>
                 }
@@ -775,9 +775,9 @@ fn replicas_drawer(v: ReplicaView, close: Callback<()>) -> AnyView {
         {move || open.get().map(|n| browse_replica(base.get_value(), n, Callback::new(move |_| open.set(None))))}
     }
     .into_any();
-    let foot = view! { <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("close")}</button> }.into_any();
+    let foot = ui::close_foot(close);
     let title = Signal::stored(tf("repl.replicas_title", &[("id", &v.target.id), ("job", &v.job)]));
-    view! { <div class="wide-drawer">{drawer(title, close, body, foot)}</div> }.into_any()
+    view! { {ui::drawer_wide(title, close, body, foot)} }.into_any()
 }
 
 fn join(dir: &str, name: &str) -> String {
@@ -809,7 +809,7 @@ fn browse_replica(base: String, name: String, close: Callback<()>) -> AnyView {
                 let rel = join(&dir, &e.name);
                 let is_dir = e.kind == EntryKind::Dir;
                 let (r1, r2) = (rel.clone(), rel);
-                let label = format!("{}: {}", t("snap.restore"), e.name);
+                let label = ui::verb_name("snap.restore", &e.name);
                 ui::row(vec![
                     ui::cell("snap.col.name", "", view! {
                         <span class="entry-name">

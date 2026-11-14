@@ -68,7 +68,7 @@ fn rev_row(net: Net, r: NetRevision, restore: RwSignal<Option<NetRevision>>) -> 
     };
     let label = tf("net.restore_rev", &[("rev", &r.id.to_string())]);
     let r2 = r.clone();
-    let ifaces = if r.interfaces.is_empty() { "—".to_string() } else { r.interfaces.join(", ") };
+    let ifaces = if r.interfaces.is_empty() { ui::DASH.to_string() } else { r.interfaces.join(", ") };
     row(vec![
         cell("cfg.col_rev", "num tnum", format!("#{}", r.id).into_any()),
         cell("cfg.col_date", "", i18n::datetime(r.ts_ms).into_any()),
@@ -163,9 +163,10 @@ pub fn rescue_panel(net: Net) -> AnyView {
             .iter()
             .map(|l| {
                 row(vec![
-                    cell("net.col_iface", "mono", l.interface.clone().into_any()),
-                    cell("net.col_mac", "mono muted", l.mac.clone().into_any()),
-                    cell("net.link_local", "mono", url_of(&l.address).into_any()),
+                    cell("net.col_iface", "", l.interface.clone().into_any()),
+                    cell("net.col_mac", "muted", ui::breakable(&l.mac, "mono")),
+                    // a link-local URL (`http://[fe80::…%enp5s0]:8443/`) is long: it wraps (G7)
+                    cell("net.link_local", "wrap", ui::breakable(&url_of(&l.address), "mono")),
                     cell(
                         "col.status",
                         "",
@@ -182,7 +183,7 @@ pub fn rescue_panel(net: Net) -> AnyView {
                 <section class="net-rescue-sec">
                     <h3 class="form-section"><Icon icon=icons::LIFE_BUOY size=16 />{tr("net.mdns")}</h3>
                     <div class="chips">
-                        <span class="mono strong">{mdns_url}</span>
+                        {ui::breakable(&mdns_url, "mono strong")}
                         {if r.mdns_active { ui::status(Tone::Ok, t("net.avahi_on").to_string()) } else { ui::status(Tone::Warn, t("net.avahi_off").to_string()) }}
                         {r.pending.is_some().then(|| ui::status(Tone::Info, t("pending.change").to_string()))}
                     </div>
@@ -195,7 +196,7 @@ pub fn rescue_panel(net: Net) -> AnyView {
                     <h3 class="form-section"><Icon icon=icons::NETWORK size=16 />{tr("net.ll_title")}</h3>
                     <p class="muted small">{tr("net.ll_text")}</p>
                     {if ll_rows.is_empty() {
-                        view! { <p class="muted small">{tr("net.ll_none")}</p> }.into_any()
+                        ui::empty_line("net.ll_none")
                     } else {
                         table("net-ll", &["net.col_iface", "net.col_mac", "net.link_local", "col.status"], ll_rows)
                     }}

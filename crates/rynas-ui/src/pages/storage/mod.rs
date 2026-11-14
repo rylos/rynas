@@ -168,20 +168,11 @@ pub fn use_refresh() -> Sto {
     s.load();
     OPEN.with(|c| c.set(c.get() + 1));
     let ticks = StoredValue::new(0u32);
-    if let Ok(h) = set_interval_with_handle(
-        move || {
-            if !document().hidden() && crate::auth::auth().is_ready() {
-                ticks.update_value(|t| *t += 1);
-                s.refresh(ticks.get_value().is_multiple_of(10));
-            }
-        },
-        Duration::from_secs(30),
-    ) {
-        on_cleanup(move || {
-            h.clear();
-            OPEN.with(|c| c.set(c.get().saturating_sub(1)));
-        });
-    }
+    crate::live::poll(Duration::from_secs(30), move || {
+        ticks.update_value(|t| *t += 1);
+        s.refresh(ticks.get_value().is_multiple_of(10));
+    });
+    on_cleanup(move || OPEN.with(|c| c.set(c.get().saturating_sub(1))));
     s
 }
 
@@ -552,7 +543,7 @@ fn vol_card(v: Vol, unlock: RwSignal<Option<String>>) -> AnyView {
                 view! {
                     <div class="vol-card-usage">
                         <span class="vol-card-pct tnum">{i18n::pct(pct)}</span>
-                        <span class="muted small tnum">{format!("{} / {}", i18n::bytes(v.used), i18n::bytes(v.size))}</span>
+                        <span class="muted small tnum">{i18n::bytes_of(v.used, v.size)}</span>
                     </div>
                     <Meter pct=pct tone=Signal::derive(move || utone) />
                 }
@@ -620,7 +611,7 @@ fn disk_line(d: &DiskSummary) -> String {
 
 fn disk_grid(disks: Vec<DiskSummary>, selected: RwSignal<Option<String>>) -> AnyView {
     if disks.is_empty() {
-        return view! { <p class="muted">{tr("sto.no_disks")}</p> }.into_any();
+        return ui::empty_line("sto.no_disks");
     }
     view! {
         <div class="disk-grid">

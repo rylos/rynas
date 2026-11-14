@@ -5,7 +5,6 @@ use leptos::html;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use rynas_api_types::{TotpCode, TotpConfirmed, TotpEnrollment};
-use wasm_bindgen::{JsCast, JsValue};
 
 use crate::api;
 use crate::auth::{Phase, auth, countdown, mmss, role_key};
@@ -13,29 +12,8 @@ use crate::form::{form_error, spinner};
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::qr::QrSvg;
-use crate::ui::{self, Field, PageHeader, Status, Tone, WidgetHead, kv_row};
+use crate::ui::{self, Field, PageHeader, Status, Tone, WidgetHead, copy_button, kv_row};
 
-/// Copy to the clipboard: async Clipboard API when present (secure contexts), else the old
-/// textarea + execCommand path (plain-HTTP LAN addresses).
-pub fn copy_text(text: &str) -> bool {
-    let nav = window().navigator();
-    let has_api = js_sys::Reflect::get(&nav, &JsValue::from_str("clipboard")).is_ok_and(|v| !v.is_undefined());
-    if has_api && window().is_secure_context() {
-        let _ = nav.clipboard().write_text(text);
-        return true;
-    }
-    let doc = document();
-    let Ok(ta) = doc.create_element("textarea") else { return false };
-    let ta: web_sys::HtmlTextAreaElement = ta.unchecked_into();
-    ta.set_value(text);
-    let _ = ta.set_attribute("style", "position:fixed;opacity:0;top:0;left:0");
-    let Some(body) = doc.body() else { return false };
-    let _ = body.append_child(&ta);
-    ta.select();
-    let ok = doc.unchecked_ref::<web_sys::HtmlDocument>().exec_command("copy").unwrap_or(false);
-    ta.remove();
-    ok
-}
 
 
 /// "JBSW Y3DP EHPK 3PXP" — easier to type by hand.
@@ -49,39 +27,6 @@ enum Flow {
     Enrolling(TotpEnrollment),
     Codes(Vec<String>),
     Disabling,
-}
-
-/// Copy button with a short "Copied" feedback (one shared instantiation).
-pub fn copy_button(label: &'static str, text: String) -> impl IntoView {
-    let copied = RwSignal::new(false);
-    view! {
-        <button class="btn ghost sm" type="button" on:click=move |_| {
-            if copy_text(&text) {
-                copied.set(true);
-                set_timeout(move || copied.set(false), std::time::Duration::from_millis(1800));
-            }
-        }>
-            {move || view! { <Icon icon=if copied.get() { icons::CHECK } else { icons::COPY } size=14 /> }}
-            {move || if copied.get() { t("copied") } else { t(label) }}
-        </button>
-    }
-}
-
-/// [`copy_button`] with its own accessible name (`aria`), for pages with several copy
-/// buttons that would otherwise all read "Copy".
-pub fn copy_button_for(label: &'static str, aria: String, text: String) -> impl IntoView {
-    let copied = RwSignal::new(false);
-    view! {
-        <button class="btn ghost sm" type="button" aria-label=aria on:click=move |_| {
-            if copy_text(&text) {
-                copied.set(true);
-                set_timeout(move || copied.set(false), std::time::Duration::from_millis(1800));
-            }
-        }>
-            {move || view! { <Icon icon=if copied.get() { icons::CHECK } else { icons::COPY } size=14 /> }}
-            {move || if copied.get() { t("copied") } else { t(label) }}
-        </button>
-    }
 }
 
 #[component]

@@ -7,27 +7,46 @@
 
 import EN from "./lang/en.js";
 
-const shellLang = () => (String(document.documentElement.lang || navigator.language || "en").toLowerCase().startsWith("it") ? "it" : "en");
+// One locale for the whole interface: the shell writes it on <html lang> ("en-GB",
+// "it-IT"…, from the language and the browser's own tags) and the time format
+// preference on <html data-hour-cycle> ("h23", "h12", absent = the locale's).
+// Without the shell: the same rule from the browser (rynas-ui i18n::locale_for).
+const TAG = /^[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})+$/;
+function localeFor(lang) {
+  const tags = [...(navigator.languages || []), navigator.language || ""];
+  return tags.find((t) => TAG.test(t) && t.split("-")[0].toLowerCase() === lang) || (lang === "it" ? "it-IT" : "en-US");
+}
+function shellLocale() {
+  const tag = String(document.documentElement.lang || "");
+  if (TAG.test(tag)) return tag;
+  const lang = String(tag || navigator.language || "en").toLowerCase().startsWith("it") ? "it" : "en";
+  return localeFor(lang);
+}
+const shellHourCycle = () => (["h23", "h12"].includes(document.documentElement.dataset.hourCycle) ? document.documentElement.dataset.hourCycle : "");
 
-/** "it" or "en". */
-export let LANG = shellLang();
-/** For Intl: dates, numbers, sorting. */
-export let LOCALE = LANG === "it" ? "it-IT" : "en-GB";
+/** For Intl: dates, numbers, plural forms, sorting. */
+export let LOCALE = shellLocale();
+/** "it" or "en": the texts' language. */
+export let LANG = LOCALE.toLowerCase().startsWith("it") ? "it" : "en";
+/** The time format preference: "h23", "h12" or "" (the locale's). */
+export let HOUR_CYCLE = shellHourCycle();
 
 const listeners = new Set();
-/** fn(): the shell switched language. */
+/** fn(): the shell switched language, locale or time format. */
 export function onLangChange(fn) {
   listeners.add(fn);
 }
 
 function follow() {
-  const next = shellLang();
-  if (next === LANG) return;
-  LANG = next;
-  LOCALE = LANG === "it" ? "it-IT" : "en-GB";
+  const locale = shellLocale();
+  const hc = shellHourCycle();
+  if (locale === LOCALE && hc === HOUR_CYCLE) return;
+  LOCALE = locale;
+  LANG = LOCALE.toLowerCase().startsWith("it") ? "it" : "en";
+  HOUR_CYCLE = hc;
   listeners.forEach((fn) => fn());
 }
-new MutationObserver(follow).observe(document.documentElement, { attributes: true, attributeFilter: ["lang"] });
+new MutationObserver(follow).observe(document.documentElement, { attributes: true, attributeFilter: ["lang", "data-hour-cycle"] });
 
 /** Kept for the start sequence of main.js: the table is bundled, nothing to load. */
 export async function loadTable() {}
@@ -98,23 +117,31 @@ export function errText(code) {
 /** Every Italian key of the error table (for the tests of the texts). */
 export const ERROR_KEYS = Object.values(ERRORS);
 
-// made once per language: count() runs for every row of the status bar and info panel
+// made once per locale: count() runs for every row of the status bar and info panel
 let rules = null;
 let rulesLocale = null;
 
-/**
- * "1 file" / "3 file", "1 cartella" / "3 cartelle". When Italian uses one
- * word for both, the plural key is `word|pl`.
- */
-export function count(n, one, many, fmt = (x) => x) {
+/** The CLDR plural category of n in the interface's locale: "one", "few", "many", "other"… */
+export function pluralCategory(n) {
   if (rulesLocale !== LOCALE) {
     rules = new Intl.PluralRules(LOCALE);
     rulesLocale = LOCALE;
   }
-  const form = rules.select(n);
-  if (form === "one" || (LANG === "it" && n === 1)) return `${fmt(n)} ${t(one)}`;
+  return rules.select(n);
+}
+
+/**
+ * "1 file" / "3 file", "1 cartella" / "3 cartelle": the form of the CLDR
+ * plural category of n, as the core's tn() picks `key.<category>`. The
+ * Italian code passes its two forms; the English table may give a plain
+ * text or an object of forms ({ one, few, many, other }, other required).
+ * When Italian uses one word for both, the plural key is `word|pl`.
+ */
+export function count(n, one, many, fmt = (x) => x) {
+  const form = pluralCategory(n);
+  if (form === "one") return `${fmt(n)} ${t(one)}`;
   const key = one === many ? `${many}|pl` : many;
   const value = lookup(key);
-  const word = typeof value === "object" ? value[form] || value.other || value.many : value;
+  const word = typeof value === "object" ? value[form] || value.other : value;
   return `${fmt(n)} ${word}`;
 }

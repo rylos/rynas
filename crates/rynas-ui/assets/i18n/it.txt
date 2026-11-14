@@ -513,8 +513,8 @@ cfg.key.power.schedule	Accensione e spegnimento pianificati
 cfg.key.network.rescue	Ripristino di emergenza della rete
 cfg.key.storage.volumes	Volumi
 cfg.key.storage.disks	Impostazioni dischi
-pending.changes	modifiche in sospeso
-pending.one	modifica in sospeso
+pending.changes.other	modifiche in sospeso
+pending.changes.one	modifica in sospeso
 pending.review	Rivedi
 pending.stale	Impossibile aggiornare le modifiche in sospeso: il numero potrebbe non essere aggiornato.
 pending.apply	Applica
@@ -598,7 +598,6 @@ hw.alarm	Allarme
 hw.provider	Provider
 hw.stale	Dati non aggiornati
 hw.updated	Ultimo aggiornamento
-hw.ago	fa
 hw.none_title	Nessun provider hardware
 hw.none_text	Questa macchina non espone ventole, LED o alloggiamenti tramite un provider hardware. Le temperature dei sensori restano visibili nella dashboard.
 hw.no_events	Nessun evento recente
@@ -1520,8 +1519,8 @@ users.home_place_help	La cartella homes di un volume, oppure /home sul disco di 
 users.home_move_help	Scegliendo un altro posto la home si sposta dopo il salvataggio: prima vedi il piano, poi i file vengono copiati e verificati.
 users.adopt	Adotta
 users.adopt_all	Adotta tutti
-users.adopt_banner	{n} account di questo sistema sono stati creati fuori da rynas. Adottali per gestirne password, gruppi e accessi: non vengono ricreati e i loro file non cambiano.
-users.adopt_banner_one	Un account di questo sistema è stato creato fuori da rynas. Adottalo per gestirne password, gruppi e accessi: non viene ricreato e i suoi file non cambiano.
+users.adopt_banner.other	{n} account di questo sistema sono stati creati fuori da rynas. Adottali per gestirne password, gruppi e accessi: non vengono ricreati e i loro file non cambiano.
+users.adopt_banner.one	Un account di questo sistema è stato creato fuori da rynas. Adottalo per gestirne password, gruppi e accessi: non viene ricreato e i suoi file non cambiano.
 users.adopted	Account adottati
 users.unmanaged_note	Creato fuori da rynas. Salvando, l'account viene adottato così com'è: non viene ricreato e i suoi file non cambiano.
 users.uid	ID utente (UID)
@@ -2690,12 +2689,12 @@ repl.col.when	Quando
 repl.col.last	Ultimo trasferimento
 repl.col.replica	Replica
 repl.after_snapshots	Dopo ogni snapshot
-repl.held_one	{n} snapshot tenuto sull'origine finché la destinazione non torna raggiungibile
-repl.held_many	{n} snapshot tenuti sull'origine finché la destinazione non torna raggiungibile
+repl.held.one	{n} snapshot tenuto sull'origine finché la destinazione non torna raggiungibile
+repl.held.other	{n} snapshot tenuti sull'origine finché la destinazione non torna raggiungibile
 repl.key.line_needs_path	Compila sopra la cartella sulla destinazione: la riga di authorized_keys limita la chiave a quella cartella.
 repl.never	Mai
-repl.sent_one	{n} snapshot inviato
-repl.sent_many	{n} snapshot inviati
+repl.sent.one	{n} snapshot inviato
+repl.sent.other	{n} snapshot inviati
 repl.off	Disattivata
 repl.failing	Non riuscita
 repl.ok	Replicata
@@ -3488,10 +3487,10 @@ sto.ack_done	Avvisi segnati come visti
 sto.ack_undone	Gli avvisi contano di nuovo
 sto.ack_grew	Alcuni conteggi sono aumentati da quando hai aperto la pagina: quelli restano in avviso
 rm.title	Unità rimovibili
-rm.count_one	1 unità
-rm.count	{n} unità
-rm.mounted_one	1 montata
-rm.mounted	{n} montate
+rm.count.one	{n} unità
+rm.count.other	{n} unità
+rm.mounted.one	{n} montata
+rm.mounted.other	{n} montate
 rm.empty	Nessuna unità rimovibile
 rm.empty_text	Collega un'unità USB o una scheda SD.
 rm.mount_all	Monta tutto
@@ -5204,6 +5203,19 @@ nev.pcbackup.agent_resumed.title	I backup da {device} arrivano di nuovo
 nev.pcbackup.agent_resumed.body	{device} ha una nuova versione riuscita.
 nev.pcbackup.agent_failed.title	Il backup di {device} non è riuscito
 nev.pcbackup.agent_failed.body	Vedi il PC nella pagina Backup.
+dur.dhm	{d} g {h} h {m} min
+dur.hm	{h} h {m} min
+dur.ms	{m} min {s} s
+dur.d	{d} g
+dur.h	{h} h
+dur.m	{m} min
+dur.s	{s} s
+fmt.ago	{time} fa
+fmt.of	{part} di {total}
+hour_cycle	Formato dell'ora
+hour_cycle.auto	Automatico
+hour_cycle.h23	24 ore
+hour_cycle.h12	12 ore
 nt.src.synodeb	Sistema di base
 nev.synodeb.unit_failed.title	Servizio non riuscito: {unit}
 nev.synodeb.smart_error.title	SMART {device}: {failtype}

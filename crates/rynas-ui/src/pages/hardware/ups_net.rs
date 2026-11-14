@@ -11,11 +11,11 @@ use leptos::task::spawn_local;
 use rynas_api_types::ups::*;
 
 use crate::api;
-use crate::form::{area_field, form_error, segmented, spinner, switch, text_field, In};
+use crate::form::{area_field, form_error, save_bar_with, segmented, switch, text_field, In, SaveBar};
 use crate::i18n::{t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::modules::{self, UpsSlot};
-use crate::pages::security::copy_button;
+use crate::ui::copy_button;
 use crate::toast::saved_applied;
 use crate::ui::{self, Confirm, Modal, Remote, Tone, WidgetHead, confirm, status};
 
@@ -370,7 +370,8 @@ fn settings_dialog(state: Remote<UpsNetServerState>, on_close: Callback<bool>) -
     let allow_text = Signal::derive(move || f.with(|s| s.allow.clone()));
     let nets = StoredValue::new(subnets.clone());
     view! {
-        <Modal title=Signal::stored(t("upsn.settings_title").to_string()) on_close=cancel wide=true>
+        <Modal title=Signal::stored(t("upsn.settings_title").to_string()) on_close=cancel wide=true
+            foot=move || save_bar_with(SaveBar::new(busy, "save", cancel, Callback::new(move |_| submit())))>
             {switch("upsn.enable", Some("upsn.enable_help"), Signal::derive(move || f.with(|s| s.enabled)), Callback::new(move |v| f.update(|s| s.enabled = v)))}
             {module.then(|| view! {
                 <dl class="kvs"><div class="kv"><dt>{tr("smb.interfaces")}</dt><dd class="wrap">{t(modules::ups_key(UpsSlot::NetListen))}</dd></div></dl>
@@ -412,10 +413,6 @@ fn settings_dialog(state: Remote<UpsNetServerState>, on_close: Callback<bool>) -
             </div>
             {move || plan.get().map(|p| plan_view(p, module))}
             {form_error(error)}
-            <div class="dialog-foot">
-                <button type="button" class="btn ghost" disabled=move || busy.get() on:click=move |_| cancel.run(())>{tr("cancel")}</button>
-                <button type="button" class="btn primary" disabled=move || busy.get() on:click=move |_| submit()>{spinner(busy)}{tr("save")}</button>
-            </div>
         </Modal>
     }
     .into_any()
@@ -508,7 +505,8 @@ fn add_dialog(state: Remote<UpsNetServerState>, on_close: Callback<Option<Shown>
     let own = Signal::derive(move || f.with(|a| a.own));
     let none = Signal::stored(None::<String>);
     view! {
-        <Modal title=Signal::stored(t("upsn.add_title").to_string()) on_close=Callback::new(move |_| on_close.run(None))>
+        <Modal title=Signal::stored(t("upsn.add_title").to_string()) on_close=Callback::new(move |_| on_close.run(None))
+            foot=move || save_bar_with(SaveBar::new(busy, "upsn.create", Callback::new(move |_| on_close.run(None)), Callback::new(move |_| submit())))>
             {text_field("username", Signal::derive(move || f.with(|a| a.name.clone())), Callback::new(move |v| f.update(|a| a.name = v)), name_err,
                 In { mono: true, maxlength: 32, help: Some(if module { modules::ups_key(UpsSlot::NetUserHelp) } else { "upsn.user_help" }), placeholder: "homeassistant", ..Default::default() })}
             {segmented("upsn.role", &[("secondary", "upsn.role_secondary"), ("monitor", "upsn.role_monitor")], role, Callback::new(move |v: String| f.update(|a| a.monitor = v == "monitor")))}
@@ -525,10 +523,6 @@ fn add_dialog(state: Remote<UpsNetServerState>, on_close: Callback<Option<Shown>
                     In { kind: "password", mono: true, maxlength: 64, autocomplete: "new-password", help: Some("upsn.password_help"), ..Default::default() })}
             </Show>
             {form_error(error)}
-            <div class="dialog-foot">
-                <button type="button" class="btn ghost" disabled=move || busy.get() on:click=move |_| on_close.run(None)>{tr("cancel")}</button>
-                <button type="button" class="btn primary" disabled=move || busy.get() on:click=move |_| submit()>{spinner(busy)}{tr("upsn.create")}</button>
-            </div>
         </Modal>
     }
     .into_any()
@@ -581,7 +575,7 @@ fn connect_dialog(state: Remote<UpsNetServerState>, s: Shown, on_close: Callback
         }
     };
     view! {
-        <Modal title=Signal::stored(tf("upsn.connect_title", &[("name", &s.name)])) on_close=on_close>
+        <Modal title=Signal::stored(tf("upsn.connect_title", &[("name", &s.name)])) on_close=on_close foot=move || ui::close_foot(on_close)>
             {s.password.clone().map(|pw| view! {
                 {ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! { {t("upsn.shown_once")} }.into_any())}
                 <dl class="kvs">{kv("upsn.password", pw)}</dl>
@@ -604,9 +598,6 @@ fn connect_dialog(state: Remote<UpsNetServerState>, s: Shown, on_close: Callback
             } else {
                 view! { <p class="sec-note"><Icon icon=icons::INFO size=16 />{t("upsn.monitor_note")}</p> }.into_any()
             }}
-            <div class="dialog-foot">
-                <button type="button" class="btn primary" on:click=move |_| on_close.run(())>{tr("close")}</button>
-            </div>
         </Modal>
     }
     .into_any()

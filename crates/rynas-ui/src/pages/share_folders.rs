@@ -68,7 +68,8 @@ fn usage_text(u: &FolderUsage) -> String {
     tf(key, &[("name", &u.name)])
 }
 
-fn size_text(bytes: u64, partial: bool) -> String {
+/// A measured size, "at least …" while the walk did not finish (folders, homes).
+pub(crate) fn size_text(bytes: u64, partial: bool) -> String {
     if partial { tf("shares.size_min", &[("size", &i18n::bytes(bytes))]) } else { i18n::bytes(bytes) }
 }
 
@@ -205,7 +206,7 @@ pub fn delete_dialog(target: Target, close: Callback<()>, done: Callback<()>) ->
         })))}
         {move || remove.get().then(|| match plan.get() {
             None => view! { <Skeleton lines=4 /> }.into_any(),
-            Some(Err(e)) => ui::note(Tone::Err, icons::CIRCLE_X, view! { <span>{e}</span> }.into_any()),
+            Some(Err(e)) => ui::error_box_text(e, Callback::new(move |_| fetch())),
             Some(Ok(p)) => view! { {plan_view(&p)} {p.allowed.then(|| typed_confirm(n_typed.clone(), typed_in))} }.into_any(),
         })}
         {form_error(error)}
@@ -301,7 +302,7 @@ pub fn unshared_section(folders: Remote<Vec<UnsharedFolder>>, share_again: Callb
 fn folder_row(f: UnsharedFolder, sizes: Sizes, share_again: Callback<UnsharedFolder>, del: RwSignal<Option<UnsharedFolder>>) -> AnyView {
     let size = match f.size_bytes {
         Some(b) => size_text(b, f.size_partial),
-        None => "—".to_string(),
+        None => ui::DASH.to_string(),
     };
     // why the size is old or missing: disks asleep, still measuring, failed
     let size_note = match (f.size_standby, f.size_at_ms) {
@@ -311,7 +312,7 @@ fn folder_row(f: UnsharedFolder, sizes: Sizes, share_again: Callback<UnsharedFol
         _ if f.size_bytes.is_none() => sizes.err.get(),
         _ => None,
     };
-    let removed = f.removed_at_ms.map(i18n::datetime).unwrap_or_else(|| "—".into());
+    let removed = ui::when(f.removed_at_ms);
     let was = f.previous.as_ref().map(|s| tf("shares.was_shared_as", &[("name", &s.name)]));
     let (f1, f2) = (f.clone(), f.clone());
     let name = f.name.clone();

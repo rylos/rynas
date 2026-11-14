@@ -122,16 +122,9 @@ fn now_ms() -> u64 {
     rynas_tasks::now_ms()
 }
 
-/// `1.5 GiB`.
+/// `1.50 GiB`: the shared server rule (the interface localizes the decimal mark of the field).
 pub fn human(b: u64) -> String {
-    const U: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
-    let mut v = b as f64;
-    let mut i = 0;
-    while v >= 1024.0 && i < U.len() - 1 {
-        v /= 1024.0;
-        i += 1;
-    }
-    if i == 0 { format!("{b} B") } else { format!("{v:.1} {}", U[i]) }
+    rynas_api_types::units::human_bytes(b)
 }
 
 fn audit(who: &str, what: &str) {

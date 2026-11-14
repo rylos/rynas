@@ -79,7 +79,7 @@ fn status_card(st: Remote<ZramState>) -> AnyView {
             {move || {
                 let list = disks();
                 if list.is_empty() {
-                    return view! { <p class="muted small">{tr("mem.no_disk_swap")}</p> }.into_any();
+                    return ui::empty_line("mem.no_disk_swap");
                 }
                 view! {
                     <dl class="kvs">

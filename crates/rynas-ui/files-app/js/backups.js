@@ -4,7 +4,8 @@
 // only spares the offer of actions that would be refused, and names the
 // snapshots by their date.
 
-import { t, LANG } from "./i18n.js";
+import { t } from "./i18n.js";
+import { dateFormat } from "./format.js";
 import { toast } from "./ui.js";
 import { readOnlyToast } from "./archive.js";
 import { APPS_PATH } from "./appdata.js";
@@ -70,18 +71,11 @@ export function parseSnapshot(name) {
   return { prefix, y: +y, mo: +mo, d: +d, h: h ? +h : null, mi: h ? +mi : null, n: n ? +n : 0, key };
 }
 
-const formats = new Map();
 // as the rest of the interface writes dates and times (rynas-ui i18n::datetime): the
-// language's medium date and short time ("13 nov 2026, 15:43" / "Nov 13, 2026, 3:43 PM")
-function dateFormat(withTime) {
-  const k = `${LANG}|${withTime}`;
-  if (!formats.has(k)) {
-    const style = withTime ? { dateStyle: "medium", timeStyle: "short" } : { dateStyle: "medium" };
-    // UTC on both sides: the date shows as the name writes it
-    formats.set(k, new Intl.DateTimeFormat(LANG, { ...style, timeZone: "UTC" }));
-  }
-  return formats.get(k);
-}
+// locale's medium date and short time with the time format preference
+// ("13 nov 2026, 15:43" / "Nov 13, 2026, 3:43 PM"); UTC on both sides, so the
+// date shows as the name writes it
+const snapshotFormat = (withTime) => dateFormat(withTime ? { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" } : { dateStyle: "medium", timeZone: "UTC" });
 
 /**
  * What a snapshot folder is called on the screen, the date first so that cut
@@ -91,7 +85,7 @@ function dateFormat(withTime) {
 export function snapshotLabel(name) {
   const p = parseSnapshot(name);
   if (!p) return null;
-  const when = dateFormat(p.h !== null).format(new Date(Date.UTC(p.y, p.mo - 1, p.d, p.h ?? 0, p.mi ?? 0)));
+  const when = snapshotFormat(p.h !== null).format(new Date(Date.UTC(p.y, p.mo - 1, p.d, p.h ?? 0, p.mi ?? 0)));
   const what = p.prefix === "@" ? `@ (${t("radice")})` : p.prefix;
   return `${when} · ${what}` + (p.n ? ` #${p.n}` : "");
 }

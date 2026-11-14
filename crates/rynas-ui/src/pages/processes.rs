@@ -269,11 +269,11 @@ fn build(l: &ProcessList, view: &str, sort: &str, q: &str, open: &HashSet<String
 }
 
 fn opt_rate(v: Option<u64>) -> String {
-    v.map_or_else(|| "—".to_string(), i18n::rate)
+    v.map_or_else(|| ui::DASH.to_string(), i18n::rate)
 }
 
 fn cpu_text(v: Option<f32>) -> String {
-    v.map_or_else(|| "—".to_string(), |c| i18n::pct(c as f64))
+    v.map_or_else(|| ui::DASH.to_string(), |c| i18n::pct(c as f64))
 }
 
 /// One reading of the list; false once the page is gone.
@@ -572,7 +572,7 @@ fn detail_drawer(pid: u32, start_ms: u64, data: RwSignal<Option<ProcessList>>, c
         Some(ui::confirm(Confirm { busy, error, ..Confirm::new(title, text, action, danger, go, cancel) }))
     };
 
-    let foot = view! { <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("close")}</button> }.into_any();
+    let foot = ui::close_foot(close);
     view! {
         {ui::drawer(title, close, view! { <div class="drawer-sec">{body}</div> }.into_any(), foot)}
         {confirm_view}
@@ -624,7 +624,7 @@ fn detail_body(
         let now = js_sys::Date::now() as u64;
         i18n::duration(now.saturating_sub(start_ms) / 1000)
     };
-    let opt_bytes = |v: Option<u64>| v.map_or_else(|| "—".to_string(), i18n::bytes);
+    let opt_bytes = |v: Option<u64>| v.map_or_else(|| ui::DASH.to_string(), i18n::bytes);
     let io_text = match d.io_class {
         IoClass::Idle => t("proc.io_idle").to_string(),
         IoClass::Realtime => tf("proc.io_rt", &[("level", &d.io_level.to_string())]),
@@ -637,13 +637,13 @@ fn detail_body(
         {restart}
         <div class="form-row">
             <div>
-                <h3 class="drawer-h">{tr("proc.cpu_graph")}</h3>
+                <h3 class="mini-title">{tr("proc.cpu_graph")}</h3>
                 <div class="chart-wrap">
                     <StillChart colors=&["--c1"] data=cpu_series label=pct_label aria=Signal::derive(move || tf("proc.cpu_aria", &[("v", &live.with(|l| cpu_text(l.as_ref().and_then(|x| x.1.cpu_pct))))])) />
                 </div>
             </div>
             <div>
-                <h3 class="drawer-h">{tr("proc.mem_graph")}</h3>
+                <h3 class="mini-title">{tr("proc.mem_graph")}</h3>
                 <div class="chart-wrap">
                     <StillChart colors=&["--c2"] data=mem_series binary=true label=bytes_label aria=Signal::derive(move || tf("proc.mem_aria", &[("v", &live.with(|l| l.as_ref().map(|x| i18n::bytes(x.1.rss_bytes)).unwrap_or_default()))])) />
                 </div>
@@ -669,11 +669,11 @@ fn detail_body(
             {d.exe.clone().map(|e| kv("proc.f.exe", view! { <span class="mono">{e}</span> }.into_any()))}
             {d.cgroup.clone().map(|c| kv("proc.f.cgroup", view! { <span class="mono">{c}</span> }.into_any()))}
         </dl>
-        <h3 class="drawer-h">{tr("proc.f.cmdline")}</h3>
+        <h3 class="mini-title">{tr("proc.f.cmdline")}</h3>
         <pre class="proc-cmdline mono">{if d.cmdline.is_empty() { format!("[{}]", d.info.name) } else { d.cmdline.clone() }}</pre>
         {(!protected).then(|| priority_form(&d, pid, start_ms, reload))}
         {(!protected).then(|| view! {
-            <h3 class="drawer-h">{tr("proc.stop")}</h3>
+            <h3 class="mini-title">{tr("proc.stop")}</h3>
             <p class="field-help">{tr("proc.stop_help")}</p>
             <div class="sec-actions">
                 <button type="button" class="btn ghost" on:click=move |_| ask.set(Some(Act::Term))><Icon icon=icons::SQUARE size=16 />{tr("proc.term")}</button>
@@ -720,7 +720,7 @@ fn priority_form(d: &ProcessDetail, pid: u32, start_ms: u64, reload: impl Fn() +
         });
     };
     view! {
-        <h3 class="drawer-h">{tr("proc.priority")}</h3>
+        <h3 class="mini-title">{tr("proc.priority")}</h3>
         {custom.map(|c| view! { <p class="field-help">{c}</p> })}
         <div class="form-row">
             {select_field("proc.cpu_prio", None, LEVELS, level.into(), Callback::new(move |v| level.set(v)))}

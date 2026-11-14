@@ -50,8 +50,7 @@ pub fn create_switch(d: RwSignal<Share>) -> AnyView {
 /// needs the apps stopped and twice the space for a while).
 fn move_steps() -> AnyView {
     view! {
-        <details class="advanced">
-            <summary>{tr("shares.nocow_move")}</summary>
+        {ui::fold(None, "shares.nocow_move", false, None, view! { 
             <ol class="steps-list small">
                 <li>{tr("shares.nocow_move_1")}</li>
                 <li>{tr("shares.nocow_move_2")}</li>
@@ -59,7 +58,7 @@ fn move_steps() -> AnyView {
                 <li>{tr("shares.nocow_move_4")}</li>
             </ol>
             <p class="small muted">{tr("shares.nocow_move_space")}</p>
-        </details>
+         }.into_any())}
     }
     .into_any()
 }

@@ -33,6 +33,24 @@ pub fn spinner(busy: RwSignal<bool>) -> impl IntoView {
     move || busy.get().then(|| view! { <span class="btn-spinner" aria-hidden="true"></span> })
 }
 
+/// [`spinner`] for a busy state that is not a signal of its own (one of several actions).
+pub fn spinner_when(on: Signal<bool>) -> AnyView {
+    (move || on.get().then(|| view! { <span class="btn-spinner" aria-hidden="true"></span> })).into_any()
+}
+
+/// The spinner in place of a button's icon while `busy` (Run now, Send a test), the icon
+/// otherwise: the button keeps its size.
+pub fn spinner_icon(busy: Signal<bool>, icon: &'static str) -> AnyView {
+    (move || {
+        if busy.get() {
+            view! { <span class="btn-spinner" aria-hidden="true"></span> }.into_any()
+        } else {
+            view! { <Icon icon=icon size=16 /> }.into_any()
+        }
+    })
+    .into_any()
+}
+
 /// Error box of a form or dialog, announced to screen readers. The message is usually
 /// [`crate::api::ApiErr::text`] (translated text + server detail, see [`crate::ui::err_view`]).
 pub fn form_error(error: RwSignal<Option<String>>) -> impl IntoView {
@@ -512,12 +530,69 @@ pub fn save_bar(
     save: Callback<()>,
     error: RwSignal<Option<String>>,
 ) -> AnyView {
+    save_bar_with(SaveBar { can_save, error: Some(error), ..SaveBar::new(busy, save_label, cancel, save) })
+}
+
+/// What a [`save_bar_with`] shows: [`save_bar`] with an icon on the action, a label that
+/// changes, a secondary button (Validate, Test) and the form error left in the body.
+pub struct SaveBar {
+    pub busy: RwSignal<bool>,
+    /// The action may run (valid input); it is also off while `busy`.
+    pub can_save: Signal<bool>,
+    /// Text of the action button (translated).
+    pub label: Signal<String>,
+    pub icon: Option<&'static str>,
+    /// `danger` instead of `primary` (an action that destroys data).
+    pub danger: Signal<bool>,
+    pub cancel: Callback<()>,
+    pub save: Callback<()>,
+    /// The form error in the footer (always in sight); `None` when the body shows it.
+    pub error: Option<RwSignal<Option<String>>>,
+    /// A ghost button between Cancel and the action (Validate, Test).
+    pub secondary: Option<AnyView>,
+    /// The id of the `<form>` the action submits (Enter in a field submits too); `save` is
+    /// then not called by the button, the form's `on:submit` runs.
+    pub form: Option<&'static str>,
+}
+
+impl SaveBar {
+    /// Cancel and the action `label` (i18n key), always allowed, the error in the body.
+    pub fn new(busy: RwSignal<bool>, label: &'static str, cancel: Callback<()>, save: Callback<()>) -> Self {
+        SaveBar {
+            busy,
+            can_save: Signal::stored(true),
+            label: Signal::derive(move || t(label).to_string()),
+            icon: None,
+            danger: Signal::stored(false),
+            cancel,
+            save,
+            error: None,
+            secondary: None,
+            form: None,
+        }
+    }
+}
+
+/// The action row of every editor and form dialog: the form error (when kept here), Cancel
+/// (ghost, off while the action runs), the secondary button, the action (primary or danger,
+/// with spinner and icon) on the right.
+pub fn save_bar_with(b: SaveBar) -> AnyView {
+    let SaveBar { busy, can_save, label, icon, danger, cancel, save, error, secondary, form } = b;
     view! {
-        {form_error(error)}
-        <button type="button" class="btn ghost" on:click=move |_| cancel.run(())>{tr("cancel")}</button>
-        <button type="button" class="btn primary" disabled=move || busy.get() || !can_save.get() on:click=move |_| save.run(())>
+        {error.map(form_error)}
+        // like a confirmation: the change in flight keeps the dialog (its answer still needs it)
+        <button type="button" class="btn ghost" disabled=move || busy.get() on:click=move |_| cancel.run(())>{tr("cancel")}</button>
+        {secondary}
+        <button
+            type=if form.is_some() { "submit" } else { "button" }
+            form=form
+            class=move || if danger.get() { "btn danger" } else { "btn primary" }
+            disabled=move || busy.get() || !can_save.get()
+            on:click=move |_| if form.is_none() { save.run(()) }
+        >
             {spinner(busy)}
-            {tr(save_label)}
+            {icon.map(|i| view! { <Icon icon=i size=16 /> })}
+            {move || label.get()}
         </button>
     }
     .into_any()

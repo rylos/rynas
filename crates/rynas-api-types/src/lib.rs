@@ -29,6 +29,7 @@ pub mod storage;
 pub mod synology;
 pub mod tailscale;
 pub mod tls;
+pub mod units;
 pub mod updates;
 pub mod ups;
 pub mod validate;

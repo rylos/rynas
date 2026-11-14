@@ -122,8 +122,8 @@ fn row(id: String, cx: Ctx) -> AnyView {
         Some(sv) => format!("{s} › {sv}"),
         None => s,
     });
-    let log_label = format!("{}: {}", t("dk.a.logs"), name);
-    let num = |f: fn((f64, u64)) -> String| move || stat.get().map(f).unwrap_or_else(|| "—".into());
+    let log_label = ui::verb_name("dk.a.logs", &name);
+    let num = |f: fn((f64, u64)) -> String| move || stat.get().map(f).unwrap_or_else(|| ui::DASH.into());
     ui::row_hidden(
         vec![
             ui::cell("dk.col.name", "", ui::two_lines(view! { <strong class="dk-name">{name.clone()}</strong> }.into_any(), sub, "cell-sub")),
@@ -358,7 +358,7 @@ fn logs_drawer(c: ContainerSummary, close: Callback<()>) -> AnyView {
         }>
             <Icon icon=icons::DOWNLOAD size=16 />{tr("dk.log.download")}
         </button>
-        <button type="button" class="btn primary" on:click=move |_| close.run(())>{tr("close")}</button>
+        {ui::close_foot(close)}
     }
     .into_any();
     let title = format!("{} · {}", t("dk.log.title"), c.name);

@@ -161,13 +161,13 @@ first, reviewed, then used.
 | Form field | `form::text_field`, `select_field`, `segmented`, `switch`, `number_field`, `area_field` | label, control, help, error (client rule or `ApiError.field`), `aria-describedby`; the error shows once the field has been left (polite live region) |
 | Settings draft | `form::Draft` + `form::stale_notice` | a settings form built once; a clean draft follows the server, an edited one shows "changed elsewhere — reload" |
 | Status pill | `Status` | tone + icon + text; never hand-written `<span class="status …">` markup |
-| Empty state | `EmptyState` | icon, title, text, optional action |
+| Empty state | `EmptyState` (page or tab), `ui::empty_line` (a section) | icon, title, text; an action only when the page header or tab bar does not already have it (never two primaries for the same thing) |
 | Loading | `Skeleton` | always inside the card it replaces, same height |
 | Fetch + states | `ui::Remote` (`new`, `with_config`), `ui::loading`, `ui::Pending` (shared `live::Res`) | skeleton → content \| `ErrorBox` with Retry; data set only when the answer changed |
-| Error state | `ErrorBox` | code → i18n text, Retry button; replaces the skeleton when a fetch fails |
+| Error state | `ErrorBox` (an error code), `ui::error_box_text` (a message from `ApiErr::text`) | i18n text, Retry button; replaces the skeleton when a fetch fails; never a bare `note(Tone::Err)` or `err_view` for a failed read |
 | Error text | `ApiErr::text()` + `ui::err_view` | translated code; the server's English message only as a smaller detail (`lang="en"`), never the main text |
-| Dialog | `ui::dialog` (`Modal` component, `drawer`) | native `<dialog>` with `showModal` (top layer, inert page, focus to the first field, restore on close, Esc), kinds normal / wide / drawer / alert |
-| Confirmation | `ui::confirm` + `ui::Confirm` | Cancel focused first, busy + error inside, optional extra content, typed word (`ui::typed_confirm`) for destructive actions |
+| Dialog | `ui::dialog` (`Modal` component with `foot`, `drawer`, `drawer_wide`) | native `<dialog>` with `showModal` (top layer, inert page, focus to the first field, restore on close, Esc), kinds normal / wide / drawer / wide drawer (`DlgKind::WideDrawer`, tables) / alert; the buttons always go in the footer (`foot`), never in a hand-written `.dialog-foot` inside the body (test `dialog_buttons_go_in_the_footer`); a dialog with stages computes its footer per stage (`storage::volume::Flow`) |
+| Confirmation | `ui::confirm` + `ui::Confirm` | Cancel focused first, busy + error inside, optional extra content; the title is a question ("Delete user {name}?"), the buttons [Cancel] [the same verb]; type the name (`typed`) only when user data is destroyed for good (rollback, a folder deleted with its data, an app's data), not for removing a configuration, a hash database or one snapshot; no inline "are you sure" rows in forms |
 | Short confirmation | `toast::toast` | finished work ("saved, pending apply", "task finished/failed"); `aria-live="polite"` (assertive for errors), paused on hover/focus |
 | Action outcome | `ui::Notice` | a result the user must read (restore, drift, LUKS header); tone + icon + text, dismissable, `role=status`/`alert` |
 | Static note | `ui::note` | a warning or hint next to what it concerns; not dismissable |
@@ -175,10 +175,28 @@ first, reviewed, then used.
 | Pending changes bar | `config::PendingBar` | data from `/config/pending`; pages call `config::changed()` after staging (row actions, page-level work) |
 | Save of a dialog / editor | `config::apply_now(&[config::keys::…], error)` | after the form's PUT/POST: applies only those keys (A19b), progress in the form's `form_error` box (`config::apply_line`), `toast::saved_applied` and close on success, error + "previous settings back, change stays pending" on failure; the button says **Save**/**Create**, never "Stage" |
 | Chassis drawing | `chassis::chassis` (`src/chassis.rs`) | bays side by side and M.2 slots below, rows keyed by slot with a memo per value (a poll rewrites only what changed); provider parts optional (status LED, identify, disk LEDs off); light and dark `--chassis-*`/`--bay-*`/`--led-*` tokens |
-| Task progress | `tasks::TaskPanel`, `tasks::TaskRun`, `tasks::LogTail` | `task.*` events of `/events`; long actions go through `tasks::run_task` (or `api::start_task` + `tasks::follow`) and report the final state; no page polls a task |
+| Task progress | `tasks::TaskPanel`, `tasks::TaskRun`, `tasks::LogTail`, `tasks::run_and_report` | `task.*` events of `/events`; a button that starts a task uses `tasks::run_and_report` (busy, refusal in the dialog's `form_error`, outcome in a toast, then `done`) or `tasks::run_task` / `api::start_task` + `tasks::follow`; no page polls a task |
+| Status drawer | `ui::detail_drawer` + `ui::Danger` (`ui::drawer_foot` when the footer changes) | the PC backup drawer is the model: one `.status-card` on top (state, `.status-meta` line, the lifecycle actions: Run now/Cancel, Up/Stop…), sections with their own actions on the title row (`.sec-head`), rare parts folded (`ui::fold` in `.folds`), footer = the danger action on the left (`foot-start`), secondary actions (Settings, Edit) on the right, Close (ghost) last |
+| Editor footer | `form::save_bar` / `form::save_bar_with(SaveBar { … })` | the form error (or in the body), Cancel (ghost, off while busy), an optional secondary ghost button (Validate, Test), the action on the right (primary or danger, spinner, optional icon, `form` to submit a `<form>`); never hand-written Cancel/Save rows |
+| Close | `ui::close_foot` | a dialog that only shows something ends with Close, ghost, bottom right; never primary (test `close_is_never_primary`) |
+| Fold | `ui::fold` / `ui::fold_with`, `ui::Folds` | advanced options, history, logs, rarely needed parts; one `.fold` class (chevron + `.fold-title`); `Folds` keeps the open state while a poll rebuilds the content |
+| Tag | `ui::chip(Tone, …)` | a short tag next to a name (SMR, weak key, erases); `.chip.ok/.warn/.err/.info`; a state is a `Status` pill |
+| Key/value | `ui::kv` (any view), `ui::kv_text` (text + class), `ui::kv_row` (signal) | no page-local `fn kv` |
+| Missing value, dates | `ui::DASH`, `ui::when(Option<ms>)` | never a literal "—" |
+| Copy | `ui::copy_button`, `ui::copy_button_for` (own accessible name), `ui::code_block` (titled command + Copy), `ui::copy_text` | works on plain-HTTP LAN addresses (no direct Clipboard API calls) |
+| Row action | `ui::icon_btn` + `ui::verb_name` | icon-only buttons named "<Verb> <name>" (tooltip and `aria-label`), `danger` for delete/remove (test `row_actions_are_named_and_toned`); the row's name is the link that opens its drawer |
+| Spinner | `form::spinner` (a `RwSignal`), `form::spinner_when` (any condition), `form::spinner_icon` (in place of the icon) | no hand-written `.btn-spinner` |
+| Live data | `live::poll(every, tick)`, `live::poll_while(ms, busy, reload)` | only while signed in and the tab is visible (`live::should_poll`), stopped with the page; data that changes only through the UI is not polled |
 
 - G1 MUST: no `inner_html` with markup built from strings, except the static icon SVGs in `icons.rs`.
   Wasm size is handled with shared non-generic helpers, not by bypassing components.
+- G1b MUST: buttons. One primary action per view: page-wide actions in the page header, the
+  action of a tab in that tab's bar (the header shows only the open tab's action), never repeated
+  by an empty state. Destructive actions are `danger` and sit on the left of a footer or as a
+  danger icon in a row. Refresh buttons only where the data is not live, as a ghost icon button
+  in the tab bar. Every button has a variant (`primary`, `ghost`, `danger`); "…" only when a
+  dialog asking for more input follows, never for a plain confirmation. One settings icon
+  (`icons::SETTINGS`).
 - G2 MUST: every page has the same three states: skeleton → content | error state. A failed fetch is
   never silent (`if let Ok(...)` that drops the error is a review blocker in pages).
 
@@ -188,10 +206,10 @@ first, reviewed, then used.
   `awk` out the token block, then `grep -nE '#[0-9a-f]{3,8}|rgba?\('` must be empty). Physical
   hardware drawings (chassis, bay LEDs) use `--chassis-*`/`--led-*` tokens.
 - G4 MUST: font sizes from `--fs-12 … --fs-32` only; spacing from the 4 px scale tokens
-  (`--s-1`=4px, `--s-2`=8px, `--s-3`, `--s-4`, `--s-6`, `--s-8`, `--s-12`); radius `--r-sm|md|lg|pill`.
+  (`--s-1`=4px, `--s-2`=8px, `--s-3`, `--s-4`, `--s-6`, `--s-8`, `--s-12`); radius `--r-xs|sm|md|lg|xl|pill`; control heights `--input-h` / `--ctl-sm` (they follow the density).
   No 2/3/5/6/7/10 px paddings or gaps (`--s-half` = 2 px exists only for the optical alignment of an
   icon with a text line). Checked by the `style_check` tests of rynas-ui (balanced blocks, no colour
-  literal outside the token blocks, no px spacing or font size off the scale, no rule set twice).
+  literal outside the token blocks, no px spacing or font size off the scale, no rule set twice, no literal radius or 36/28 px control height).
 - G5 MUST: icons from the Lucide set in `icons.rs` (Tabler only where Lucide has none); sizes 12/14/16/18/22.
 - G6 MUST: state = icon + text + colour (`Tone`), never colour alone.
 - G7 MUST: nothing scrolls sideways: not the page and not any element inside it (tables, dialogs,
@@ -215,10 +233,35 @@ first, reviewed, then used.
   the text. The test `no_duplicate_texts` fails on two keys with the same English and Italian text
   of more than one word.
 - G9 MUST: numbers, bytes, rates, percentages, temperatures, durations and **dates** only through
-  `i18n.rs` helpers (`num`, `bytes`, `bytes_si`, `rate`, `bitrate`, `pct`, `celsius`, `duration`, and a
-  shared `datetime`/`relative_time` to add). Raw device capacity (disks, arrays) uses `bytes_si` (matches
-  the drive label); filesystem/volume usage and memory use `bytes` (IEC). The same quantity is shown with
-  the same helper on every page.
+  `i18n.rs` helpers (`num`, `count`, `bytes`, `bytes_si`, `rate`, `bitrate`, `pct`, `celsius`,
+  `duration`, `elapsed`, `approx`, `ago`, `datetime`, `date`, `time_hm`, `short_when`, `hm`/`hm_text`,
+  `wall_when`, `date_with`). Raw device capacity (disks, arrays) uses `bytes_si` (matches the drive
+  label); filesystem/volume usage and memory use `bytes` (IEC). The same quantity is shown with the same
+  helper on every page.
+- G9a MUST: one locale for the whole interface (core, modules, File app). `i18n::locale()` is the UI
+  language with the region of the browser's own tag when the languages match (`en-GB`, `en-US`,
+  `it-CH`), else `en-US` / `it-IT`; it is published on `<html lang>`, and the time format preference
+  (System › Preferences, "Time format": automatic / 24-hour / 12-hour = `hourCycle` `h23`/`h12`,
+  localStorage `rynas.hour`) on `<html data-hour-cycle>`. The File app reads both (`i18n.js` `LOCALE`,
+  `HOUR_CYCLE`, `format.js` `dateFormat`); never `Lang::code()`, `undefined` or a hard-coded
+  `"en-GB"` as a locale, never `getHours()` padding by hand. Times typed in forms stay stored as
+  `HH:MM`; they are shown through `i18n::hm`/`hm_text`. Server wall-clock strings without a zone
+  ("2026-11-04 08:02:51") go through `i18n::wall_when`.
+- G9b MUST: separators, percent sign and plural categories come from `Intl` (`Intl.NumberFormat`,
+  `Intl.PluralRules`) for the locale; unit words and joining templates are dictionary keys (`dur.*`,
+  `fmt.ago` "{time} ago", `fmt.of` "{part} of {total}"), never concatenated (`format!("{} {}", d,
+  t("ago"))`) and never chosen by `lang() == Lang::It`. The File app uses the same texts (test
+  `files_formats_match_core`). A ratio is `i18n::of` / `bytes_of` ("1.50 GiB of 4.00 GiB"), not
+  "X / Y".
+- G9c MUST: counted texts use `i18n::tn(key, n, args)`: the form `key.<category>` for the CLDR category
+  of `n` (`key.one`, `key.few`, `key.many`…), `key.other` required (test `plural_keys_have_other`),
+  `{n}` filled with the grouped count; no `if n == 1 { "x_one" }` pairs. The File app's `count()` picks
+  its form by the same category.
+- G9d MUST: sizes have three significant digits and move to the next unit before four digits ("1.00
+  GiB", never "1022 MiB"); decimal units are `kB`, `MB`, `GB`. Server texts (task logs, errors, event
+  fields) use `rynas_api_types::units::human_bytes` (binary units, `.`); the interface localizes the
+  decimal mark of such event fields. Better still, an API or event carries the number and the client
+  formats it.
 
 - G8e MUST: server texts that users read (check notes, recommendations, health reasons, plan
   warnings) travel with a stable code and their values (`note_code`, `CheckValue`,

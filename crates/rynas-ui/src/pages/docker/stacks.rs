@@ -18,7 +18,7 @@ use rynas_api_types::docker::{
 use super::{Busy, act, action_url, container_pill, done_toast, empty, image_ref, manager_key, page, remote, row_btn, update_chip, updatable};
 use crate::api;
 use crate::config::{apply_now, keys};
-use crate::form::{In, code_field, form_error, search_box, select_field, spinner, switch, text_field};
+use crate::form::{In, SaveBar, code_field, form_error, save_bar_with, search_box, select_field, spinner, switch, text_field};
 use crate::toast::saved_applied;
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
@@ -159,7 +159,7 @@ fn row(name: String, cx: Ctx) -> AnyView {
     let can_start = Signal::derive(move || state.with(|s| s.is_some_and(|s| s.0 != StackState::Running)));
     let can_stop = Signal::derive(move || state.with(|s| s.is_some_and(|s| s.2 > 0)));
     let start = if first.editable { "up" } else { "start" };
-    let open_label = format!("{}: {}", t("dk.a.details"), name);
+    let open_label = ui::verb_name("dk.a.details", &name);
     let detail = cx.detail;
     let (n1, n2) = (name.clone(), name.clone());
     ui::row_hidden(
@@ -175,7 +175,7 @@ fn row(name: String, cx: Ctx) -> AnyView {
                     {(unhealthy > 0).then(|| ui::status(Tone::Err, tf("dk.s.unhealthy_n", &[("n", &unhealthy.to_string())])))}
                 </div>
             }.into_any())).into_any()),
-            ui::cell("dk.col.running", "num", (move || state.get().map(|s| format!("{} / {}", s.2, s.3))).into_any()),
+            ui::cell("dk.col.running", "num", (move || state.get().map(|s| i18n::of(&s.2.to_string(), &s.3.to_string()))).into_any()),
             ui::cell("dk.col.images", "wrap", view! {
                 <div class="cell-main">
                     {move || images.with(|l| l.iter().map(|i| image_ref(i)).collect_view())}
@@ -232,7 +232,7 @@ fn bar_btn(icon: &'static str, key: &'static str, busy: RwSignal<bool>, run: Cal
 /// The containers of a stack.
 fn stack_containers(det: &StackDetail) -> AnyView {
     if det.containers.is_empty() {
-        return view! { <p class="muted small">{tr("dk.s.no_containers")}</p> }.into_any();
+        return ui::empty_line("dk.s.no_containers");
     }
     let rows = det
         .containers
@@ -250,7 +250,7 @@ fn stack_containers(det: &StackDetail) -> AnyView {
 /// The snapshots of a rynas stack (rollback, delete).
 fn snapshot_rows(det: &StackDetail, ask: RwSignal<Option<Ask>>) -> AnyView {
     if det.snapshots.is_empty() {
-        return view! { <p class="muted small">{tr("dk.snap.none")}</p> }.into_any();
+        return ui::empty_line("dk.snap.none");
     }
     let rows = det
         .snapshots
@@ -263,7 +263,7 @@ fn snapshot_rows(det: &StackDetail, ask: RwSignal<Option<Ask>>) -> AnyView {
                 ui::cell("dk.col.images", "wrap", view! { <div class="cell-main">{imgs.iter().map(|i| image_ref(i)).collect_view()}</div> }.into_any()),
                 ui::actions(view! {
                     <button class="btn ghost sm" on:click=move |_| ask.set(Some(Ask::Rollback(a.clone())))><Icon icon=icons::ROTATE_CCW size=14 />{tr("dk.snap.rollback")}</button>
-                    <button class="icon-btn sm" title=tr("delete") aria-label=format!("{}: {}", t("delete"), sn.id) on:click=move |_| ask.set(Some(Ask::DeleteSnapshot(b.clone())))><Icon icon=icons::TRASH_2 size=16 /></button>
+                    <button class="icon-btn sm danger" title=tr("delete") aria-label=ui::verb_name("delete", &sn.id) on:click=move |_| ask.set(Some(Ask::DeleteSnapshot(b.clone())))><Icon icon=icons::TRASH_2 size=16 /></button>
                 }.into_any()),
             ])
         })
@@ -271,9 +271,9 @@ fn snapshot_rows(det: &StackDetail, ask: RwSignal<Option<Ask>>) -> AnyView {
     ui::table("", &["dk.col.created", "dk.col.images", ""], rows)
 }
 
-/// The drawer's action bar: built once per stack kind, so a refresh of the details keeps the
-/// buttons (and the focus on them).
-fn action_bar(managed: bool, adoption: Adoption, n: StoredValue<String>, busy: RwSignal<bool>, ask: RwSignal<Option<Ask>>, edit: RwSignal<Option<Option<String>>>) -> AnyView {
+/// The lifecycle actions of the status card: built once per stack kind, so a refresh of the
+/// details keeps the buttons (and the focus on them). Edit and Remove are in the footer.
+fn action_bar(managed: bool, adoption: Adoption, n: StoredValue<String>, busy: RwSignal<bool>, ask: RwSignal<Option<Ask>>) -> AnyView {
     let task = move |action: &'static str| Callback::new(move |_| act(action_url("stacks", &n.get_value(), action), None, busy));
     let idle = RwSignal::new(false);
     let open = move |a: Ask| Callback::new(move |_| ask.set(Some(a.clone())));
@@ -292,9 +292,7 @@ fn action_bar(managed: bool, adoption: Adoption, n: StoredValue<String>, busy: R
                 {bar_btn(icons::DOWNLOAD, "dk.a.pull", busy, task("pull"))}
                 {bar_btn(icons::DOWNLOAD, "dk.a.update", idle, Callback::new(move |_| ask.set(Some(Ask::Update))))}
                 {bar_btn(icons::CIRCLE_X, "dk.a.down", busy, task("down"))}
-                {bar_btn(icons::PENCIL, "dk.a.edit", idle, Callback::new(move |_| edit.set(Some(Some(n.get_value())))))}
                 {adopted}
-                <button class="btn ghost sm danger-text" on:click=move |_| ask.set(Some(Ask::Remove))><Icon icon=icons::TRASH_2 size=14 />{tr("dk.a.remove")}</button>
             </div>
         }
         .into_any()
@@ -368,11 +366,15 @@ fn detail_drawer(name: String, settings: Remote<DockerSettingsState>, edit: RwSi
             summary.with(|s| s.as_ref().map(|s| s.images.iter().filter(|i| upd.with(|u| u.contains(i))).cloned().collect::<Vec<_>>()).unwrap_or_default())
         };
         view! {
-            <div class="chips">
-                <span class="chip">{t(manager_key(manager))}</span>
-                {adopted.then(|| view! { <span class="chip">{tr("dk.ad.chip")}</span> })}
-                {move || summary.with(|s| s.as_ref().map(|s| state_pill(s.state)))}
-            </div>
+            // the status card: state, who manages it, the lifecycle actions
+            <section class="status-card">
+                <div class="status-card-head">
+                    {move || summary.with(|s| s.as_ref().map(|s| state_pill(s.state)))}
+                    <span class="chip">{t(manager_key(manager))}</span>
+                    {adopted.then(|| view! { <span class="chip">{tr("dk.ad.chip")}</span> })}
+                </div>
+                {action_bar(managed, adoption, n, busy, ask)}
+            </section>
             {move || summary.with(|s| s.as_ref().and_then(|s| s.adopted.as_ref().map(super::adopt::adopted_notes)))}
             {move || summary.with(|s| s.as_ref().map(|s| view! {
                 <dl class="kvs">
@@ -382,7 +384,6 @@ fn detail_drawer(name: String, settings: Remote<DockerSettingsState>, edit: RwSi
             }))}
             {(!managed && !adopted).then(|| ui::note(Tone::Info, icons::INFO, ui::text(t(if manager == StackManager::Rynas { "dk.s.no_folder" } else if adoption == Adoption::Candidate { "dk.s.readonly_adopt" } else { "dk.s.readonly" }).to_string())))}
             {move || { let l = new_images(); (!l.is_empty()).then(|| ui::note(Tone::Info, icons::DOWNLOAD, ui::text(tf("dk.upd.stack", &[("images", &l.join(", "))])))) }}
-            {action_bar(managed, adoption, n, busy, ask, edit)}
             {managed.then(|| auto_section(n.get_value(), settings))}
             <div class="mini-title">{tr("dk.s.containers")}</div>
             {move || d.data.with(|d| d.as_ref().map(stack_containers))}
@@ -419,7 +420,20 @@ fn detail_drawer(name: String, settings: Remote<DockerSettingsState>, edit: RwSi
         {dialogs}
     }
     .into_any();
-    let foot = view! { <button type="button" class="btn primary" on:click=move |_| close.run(())>{tr("close")}</button> }.into_any();
+    // a stack rynas manages: Remove left, Edit files right (the PC drawer's footer); the others
+    // only Close
+    let managed = Memo::new(move |_| kind.get().is_some_and(|k| k.0));
+    let foot = (move || {
+        if !managed.get() {
+            return ui::close_foot(close);
+        }
+        let edit_btn = view! {
+            <button type="button" class="btn ghost" on:click=move |_| edit.set(Some(Some(n.get_value())))><Icon icon=icons::PENCIL size=16 />{tr("dk.a.edit")}</button>
+        }
+        .into_any();
+        ui::drawer_foot(Some(ui::Danger::new("dk.a.remove", Callback::new(move |_| ask.set(Some(Ask::Remove))))), Some(edit_btn), close)
+    })
+    .into_any();
     ui::drawer(Signal::stored(tf("dk.s.title", &[("name", &name)])), close, body, foot)
 }
 
@@ -642,7 +656,7 @@ fn validation_view(v: StackValidation) -> AnyView {
         out.push(ui::note(Tone::Err, icons::CIRCLE_X, view! { {t("dk.val.bad")}{v.error.clone().map(ui::tech_detail)} }.into_any()));
         return out.into_any();
     }
-    let summary = tf("dk.val.ok", &[("services", &v.services.join(", ")), ("ports", &if v.ports.is_empty() { "—".to_string() } else { v.ports.join(", ") })]);
+    let summary = tf("dk.val.ok", &[("services", &v.services.join(", ")), ("ports", &if v.ports.is_empty() { ui::DASH.to_string() } else { v.ports.join(", ") })]);
     out.push(ui::note(Tone::Ok, icons::CIRCLE_CHECK, ui::text(summary)));
     if !v.port_conflicts.is_empty() {
         out.push(ui::note(Tone::Warn, icons::TRIANGLE_ALERT, ui::text(tf("dk.val.ports", &[("ports", &v.port_conflicts.join(", "))]))));
@@ -775,13 +789,16 @@ fn editor(name: Option<String>, settings: Remote<DockerSettingsState>, close: Ca
         }
         .into_any()
     };
-    let foot = view! {
-        {form_error(error)}
-        <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("cancel")}</button>
+    let secondary = view! {
         <button type="button" class="btn ghost" disabled=move || checking.get() || !loaded.get() on:click=validate>{spinner(checking)}<Icon icon=icons::CHECK size=16 />{tr("dk.ed.validate")}</button>
-        <button type="button" class="btn primary" disabled=move || !can_save.get() on:click=move |_| save.run(())>{spinner(busy)}{tr(if creating { "create" } else { "save" })}</button>
     }
     .into_any();
+    let foot = save_bar_with(SaveBar {
+        can_save,
+        error: Some(error),
+        secondary: Some(secondary),
+        ..SaveBar::new(busy, if creating { "create" } else { "save" }, close, save)
+    });
     let title = match &name {
         Some(n) => tf("edit_named", &[("name", n)]),
         None => t("dk.s.create").to_string(),

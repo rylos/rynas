@@ -186,11 +186,12 @@ pub fn stamp_seconds(epoch_s: i64) -> String {
     )
 }
 
-/// `YYYY-MM-DD HHMM` in local time (restored copies).
+/// `YYYY-MM-DD HH.MM` in local time (restored copies): readable, and without the `:` that
+/// Windows and macOS clients cannot show in a file name over SMB.
 pub fn human_minute(epoch_s: i64) -> String {
     let t = local_time(epoch_s);
     format!(
-        "{:04}-{:02}-{:02} {:02}{:02}",
+        "{:04}-{:02}-{:02} {:02}.{:02}",
         t.year, t.month, t.day, t.hour, t.minute
     )
 }

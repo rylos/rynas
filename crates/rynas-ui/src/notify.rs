@@ -59,7 +59,7 @@ pub fn severity_key(s: NotifySeverity) -> &'static str {
 // `rynas_api_types::notify::event_text` (the channel templates of rynasd use the same rules)
 
 fn comma() -> bool {
-    i18n::lang() == i18n::Lang::It
+    i18n::decimal_sep() == ","
 }
 
 type Lookup<'a> = &'a dyn Fn(&str) -> Option<&'static str>;

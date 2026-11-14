@@ -2206,15 +2206,9 @@ fn mount_of(mounts: &str, path: &Path) -> Option<(PathBuf, String)> {
         .max_by_key(|(p, _)| p.as_os_str().len())
 }
 
+/// A size in the worker's messages: the shared server rule (`1.50 GiB`, binary units, `.`).
 pub fn human(bytes: u64) -> String {
-    const UNITS: [&str; 6] = ["B", "KB", "MB", "GB", "TB", "PB"];
-    let mut v = bytes as f64;
-    let mut u = 0;
-    while v >= 1024.0 && u < UNITS.len() - 1 {
-        v /= 1024.0;
-        u += 1;
-    }
-    if u == 0 { format!("{bytes} B") } else { format!("{v:.1} {}", UNITS[u]).replace('.', ",") }
+    rynas_api_types::units::human_bytes(bytes)
 }
 
 #[cfg(test)]
@@ -2743,7 +2737,7 @@ mod tests {
     #[test]
     fn human_sizes() {
         assert_eq!(human(512), "512 B");
-        assert_eq!(human(1536), "1,5 KB");
-        assert_eq!(human(5 * 1024 * 1024 * 1024), "5,0 GB");
+        assert_eq!(human(1536), "1.50 KiB");
+        assert_eq!(human(5 * 1024 * 1024 * 1024), "5.00 GiB");
     }
 }

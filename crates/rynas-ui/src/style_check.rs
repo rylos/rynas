@@ -139,6 +139,30 @@ fn spacing_and_type_scale() {
     assert!(bad.is_empty(), "off-scale spacing or font size: {bad:#?}");
 }
 
+/// Radii only from the tokens (`--r-xs` … `--r-xl`, `--r-pill`, or a circle), and the control
+/// heights (36/28 px) only through `--input-h` / `--ctl-sm`, which follow the density setting
+/// (review B.15: 6, 7, 10, 14, 16, 20 px radii and fixed 36/28 px buttons had crept in).
+#[test]
+fn radii_and_control_heights_are_tokens() {
+    // fixed on purpose: phone touch targets and round or decorative marks
+    const FIXED_SIZE: &[&str] = &[".table td.actions .icon-btn", ".search", ".avatar.lg", ".step-num", ".switch", ".w-icon", ".avatar", ".user-btn .avatar"];
+    let mut bad = Vec::new();
+    for (_, sel, body, line) in all_rules() {
+        for (p, v) in decls(&body) {
+            if p == "border-radius" {
+                let ok = v.split_whitespace().all(|part| part == "0" || part == "50%" || part == "inherit" || part.starts_with("var(--r-"));
+                if !ok {
+                    bad.push(format!("line {line}: {sel} {p}: {v}"));
+                }
+            }
+            if (p == "height" || p == "min-height") && (v == "36px" || v == "28px") && !FIXED_SIZE.iter().any(|s| sel.contains(s)) {
+                bad.push(format!("line {line}: {sel} {p}: {v}"));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "literal radius or control height (use --r-* / --input-h / --ctl-sm): {bad:#?}");
+}
+
 #[test]
 fn no_rule_set_twice() {
     let mut seen = std::collections::HashMap::new();

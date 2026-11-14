@@ -25,9 +25,6 @@ fn method_value(m: Ipv4Method) -> &'static str {
     }
 }
 
-fn kv(label: &'static str, value: String, class: &'static str) -> AnyView {
-    view! { <div class="kv"><dt>{tr(label)}</dt><dd class=class>{value}</dd></div> }.into_any()
-}
 
 /// The draft as the user typed it (lists stay text until saved, so a trailing newline or comma
 /// is not eaten while typing).
@@ -113,7 +110,7 @@ fn editor_with(net: Net, i: NetInterface, seed: Option<InterfaceConfig>, close: 
             </div>
         }
         .into_any();
-        let foot = view! { <button type="button" class="btn ghost" on:click=move |_| close.run(())>{tr("close")}</button> }.into_any();
+        let foot = ui::close_foot(close);
         return drawer(Signal::stored(title), close, body, foot);
     }
 
@@ -316,11 +313,11 @@ fn details(i: &NetInterface) -> AnyView {
         view! {
             <h3 class="form-section">{tr("net.sec_applied")}</h3>
             <dl class="kvs">
-                {kv("net.f_method", t(method_key(c.ipv4)).to_string(), "")}
-                {(!addrs.is_empty()).then(|| kv("net.f_addresses", addrs.clone(), "mono"))}
-                {c.gateway.clone().map(|g| kv("net.f_gateway", g, "mono"))}
-                {(!c.dns.is_empty()).then(|| kv("net.dns", c.dns.join(", "), "mono"))}
-                {kv("net.f_mtu", c.mtu.map(|m| m.to_string()).unwrap_or_else(|| t("net.mtu_default").to_string()), "mono")}
+                {ui::kv_text("net.f_method", t(method_key(c.ipv4)).to_string(), "")}
+                {(!addrs.is_empty()).then(|| ui::kv_text("net.f_addresses", addrs.clone(), "mono"))}
+                {c.gateway.clone().map(|g| ui::kv_text("net.f_gateway", g, "mono"))}
+                {(!c.dns.is_empty()).then(|| ui::kv_text("net.dns", c.dns.join(", "), "mono"))}
+                {ui::kv_text("net.f_mtu", c.mtu.map(|m| m.to_string()).unwrap_or_else(|| t("net.mtu_default").to_string()), "mono")}
             </dl>
         }
     });
@@ -351,13 +348,13 @@ fn details(i: &NetInterface) -> AnyView {
             })
             .collect_view();
         let partner = s.lacp_ok.map(|_| match s.partner_mac.as_deref().filter(|m| *m != "00:00:00:00:00:00") {
-            Some(m) => kv("net.lacp_partner", m.to_string(), "mono"),
-            None => kv("net.lacp_partner", t("net.lacp_none").to_string(), ""),
+            Some(m) => ui::kv_text("net.lacp_partner", m.to_string(), "mono"),
+            None => ui::kv_text("net.lacp_partner", t("net.lacp_none").to_string(), ""),
         });
         view! {
             <h3 class="form-section">{tr("net.f_members")}</h3>
             <dl class="kvs">
-                {s.mode.as_deref().map(|m| kv("net.f_bond_mode", t(bond::mode_key(m)).to_string(), ""))}
+                {s.mode.as_deref().map(|m| ui::kv_text("net.f_bond_mode", t(bond::mode_key(m)).to_string(), ""))}
                 {partner}
             </dl>
             <ul class="plain-list net-addr-list">{members}</ul>
@@ -367,32 +364,32 @@ fn details(i: &NetInterface) -> AnyView {
         .ifupdown
         .iter()
         .map(|s| {
-            let mut rows = vec![kv("net.ifu_method", format!("{} {}", s.family, s.method), "mono")];
+            let mut rows = vec![ui::kv_text("net.ifu_method", format!("{} {}", s.family, s.method), "mono")];
             if let Some(a) = &s.address {
-                rows.push(kv("net.f_addresses", a.clone(), "mono"));
+                rows.push(ui::kv_text("net.f_addresses", a.clone(), "mono"));
             }
             if let Some(g) = &s.gateway {
-                rows.push(kv("net.f_gateway", g.clone(), "mono"));
+                rows.push(ui::kv_text("net.f_gateway", g.clone(), "mono"));
             }
             if !s.dns.is_empty() {
-                rows.push(kv("net.dns", s.dns.join(", "), "mono"));
+                rows.push(ui::kv_text("net.dns", s.dns.join(", "), "mono"));
             }
             if let Some(m) = s.mtu {
-                rows.push(kv("net.f_mtu", m.to_string(), "mono"));
+                rows.push(ui::kv_text("net.f_mtu", m.to_string(), "mono"));
             }
             if !s.bond_slaves.is_empty() {
-                rows.push(kv("net.ifu_bond", format!("{} {}", s.bond_slaves.join(", "), s.bond_mode.clone().unwrap_or_default()), "mono"));
+                rows.push(ui::kv_text("net.ifu_bond", format!("{} {}", s.bond_slaves.join(", "), s.bond_mode.clone().unwrap_or_default()), "mono"));
             }
             if !s.bridge_ports.is_empty() {
-                rows.push(kv("net.ifu_bridge", s.bridge_ports.join(", "), "mono"));
+                rows.push(ui::kv_text("net.ifu_bridge", s.bridge_ports.join(", "), "mono"));
             }
             if let Some(v) = &s.vlan_raw_device {
-                rows.push(kv("net.ifu_vlan", v.clone(), "mono"));
+                rows.push(ui::kv_text("net.ifu_vlan", v.clone(), "mono"));
             }
             for o in &s.other {
                 rows.push(view! { <div class="kv"><dt class="mono">{o.name.clone()}</dt><dd class="mono">{o.value.clone()}</dd></div> }.into_any());
             }
-            rows.push(kv("net.ifu_file", s.file.clone(), "mono muted"));
+            rows.push(ui::kv_text("net.ifu_file", s.file.clone(), "mono muted"));
             view! { <dl class="kvs">{rows}</dl> }
         })
         .collect_view();
@@ -400,18 +397,18 @@ fn details(i: &NetInterface) -> AnyView {
         <div class="drawer-sec">
             <dl class="kvs">
                 <div class="kv"><dt>{tr("col.status")}</dt><dd>{ui::status(tone, t(key).to_string())}</dd></div>
-                {kv("net.col_speed", speed_text(i), "tnum")}
-                {kv("net.col_mac", i.mac.clone().unwrap_or_else(|| "—".into()), "mono")}
-                {i.driver.clone().map(|d| kv("net.driver", d, "mono"))}
-                {kv("net.f_mtu", mtu, "mono")}
-                {kv("net.backend", t(backend_key(i.backend)).to_string(), "")}
-                {i.config_file.clone().map(|f| kv("net.config_file", f, "mono muted"))}
-                {i.link_local_v4.clone().map(|a| kv("net.link_local", a, "mono"))}
-                {(!i.dns.is_empty()).then(|| kv("net.dns_live", i.dns.join(", "), "mono"))}
+                {ui::kv_text("net.col_speed", speed_text(i), "tnum")}
+                {ui::kv_text("net.col_mac", i.mac.clone().unwrap_or_else(|| ui::DASH.into()), "mono")}
+                {i.driver.clone().map(|d| ui::kv_text("net.driver", d, "mono"))}
+                {ui::kv_text("net.f_mtu", mtu, "mono")}
+                {ui::kv_text("net.backend", t(backend_key(i.backend)).to_string(), "")}
+                {i.config_file.clone().map(|f| ui::kv_text("net.config_file", f, "mono muted"))}
+                {i.link_local_v4.clone().map(|a| ui::kv_text("net.link_local", a, "mono"))}
+                {(!i.dns.is_empty()).then(|| ui::kv_text("net.dns_live", i.dns.join(", "), "mono"))}
             </dl>
             <h3 class="form-section">{tr("net.col_addresses")}</h3>
             {if i.addresses.is_empty() {
-                view! { <p class="muted small">{tr("net.no_address")}</p> }.into_any()
+                ui::empty_line("net.no_address")
             } else {
                 view! { <ul class="plain-list net-addr-list">{addrs}</ul> }.into_any()
             }}
