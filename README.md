@@ -39,7 +39,7 @@ yours, with or without rynas.
   rynas releases; image updates are checked every day and can be applied automatically, stack
   by stack.
 - **Made for the keyboard.** <kbd>Ctrl</kbd> <kbd>K</kbd> finds any page, setting or action. Light and dark
-  themes, English and Italian.
+  themes, English, Italian and Russian.
 - **Free software, every feature included.** AGPL-3.0, free for everyone, companies included.
 
 ## Features

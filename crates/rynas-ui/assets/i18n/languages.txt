@@ -9,3 +9,4 @@
 # in i18n/<code>/ (docs/i18n.md). Adding a language: its files plus one line here.
 en	English	en-US	one other	English
 it	Italiano	it-IT	one other	Italian
+ru	Русский	ru-RU	one few many other	Russian

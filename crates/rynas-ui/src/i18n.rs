@@ -6802,9 +6802,13 @@ mod tests {
             assert!(!k.contains(['\t', '\n']) && !en.contains('\n'), "tab or newline in {k}");
         }
         for l in Lang::all().skip(1).filter(|l| languages().iter().any(|x| x.code == l.code())) {
-            let bundle: String = PARTS.iter().filter_map(|p| test_file(l.code(), p)).collect();
-            let n = INDEX.with(|idx| idx.install(l, Box::leak(bundle.into_boxed_str())));
-            assert_eq!(n, entries().len(), "{}: texts taken from the bundle", l.code());
+            let bundle: &'static str = Box::leak(PARTS.iter().filter_map(|p| test_file(l.code(), p)).collect::<String>().into_boxed_str());
+            // plural forms that English has no key for (Russian `few`/`many`, …) are taken too
+            let extra = translation_lines(bundle)
+                .filter(|(k, _)| matches!(k.rsplit_once('.').map(|(_, c)| c), Some("zero" | "two" | "few" | "many")))
+                .count();
+            let n = INDEX.with(|idx| idx.install(l, bundle));
+            assert_eq!(n, entries().len() + extra, "{}: texts taken from the bundle", l.code());
         }
         assert_eq!(lookup("nav.files", it()), Some("File"));
     }

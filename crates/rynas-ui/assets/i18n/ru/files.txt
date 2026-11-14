@@ -1,0 +1,597 @@
+# rynas: Russian translation, File app. One key<TAB>text line per entry; see docs/i18n.md
+files.conns.login	Вход
+files.editor.syntax_colors_not_available_reload	Подсветка синтаксиса недоступна: перезагрузите страницу
+files.actions.editor_cannot_opened_reload_page	Не удалось открыть редактор: перезагрузите страницу
+files.conns.starting_folder	Начальная папка
+files.sidebar.server_shared_folders	Общие папки сервера
+files.conns.server_key_k	Ключ сервера: {k}
+files.conns.public_key_add_ssh_authorized	Открытый ключ для добавления в ~/.ssh/authorized_keys на сервере
+files.sidebar.connection_deleted	Подключение удалено
+files.conns.connection_renamed	Подключение переименовано
+files.conns.connecting	Подключение…
+files.sidebar.connections	Подключения
+files.conns.connected_in_ms_ms_n	Подключено за {ms} мс: элементов в {p}: {n}
+files.common.copy_address	Копировать адрес
+files.conns.create_key	Создать ключ
+files.conns.domain	Домен
+files.sidebar.delete_connection	Удалить подключение
+files.sidebar.delete_connection_ask	Удалить подключение?
+files.sidebar.name_cannot_empty	Имя не может быть пустым
+files.conns.server_address	Адрес сервера
+files.conns.edit_connection	Изменить подключение
+files.sidebar.edit	Изменить…
+files.conns.no_key_yet_create_copy	Ключа ещё нет: создайте его, затем скопируйте на сервер.
+files.common.name_in_sidebar	Имя на боковой панели
+files.common.new_connection	Новое подключение
+files.conns.port	Порт
+files.conns.test	Проверить
+files.sidebar.rename_connection	Переименовать подключение
+files.sidebar.rename	Переименовать…
+files.common.save	Сохранить
+files.sidebar.smb_sftp_servers_server_in	Серверы SMB или SFTP: \\server в строке пути или +
+files.pane.remote_connections_folder_filter_only	Для удалённых подключений доступен только фильтр папки
+files.conns.user	Пользователь
+files.conns.forget_changed	забыть (ключ изменился)
+files.conns.e_g_nas_nas_folder	например, nas, \\nas\folder или sftp://user@server
+files.conns.optional_e_g_company	необязательно, например COMPANY
+files.conns.saved_leave_empty_keep	сохранён: оставьте пустым, чтобы не менять
+files.conns.empty_list_shared_folders	пусто: список общих папок
+files.conns.empty_user_home	пусто: домашняя папка пользователя
+files.sidebar.n_leaves_sidebar_saved_password	Подключение «{n}» будет убрано с боковой панели вместе с сохранённым паролем. Файлы на сервере останутся на месте.
+files.sidebar.move_up	Переместить вверх
+files.sidebar.move_down	Переместить вниз
+files.ui.ok	OK
+files.common.cancel	Отмена
+files.common.close	Закрыть
+files.settings.done	Готово
+files.actions.create	Создать
+files.common.open	Открыть
+files.transfers.details	Подробности
+files.common.name	Имя
+files.actions.new_name	Новое имя
+files.common.invalid_name	Недопустимое имя
+files.transfers.of_total	из {total}
+files.common.nas	NAS
+files.sidebar.volume	Том
+files.sidebar.personal	Личное
+files.sidebar.system	Система
+files.sidebar.home_u	Домашняя папка ({u})
+files.sidebar.favorites	Избранное
+files.common.shared_folders	Общие папки
+files.sidebar.ctrl_d_adds_open_folder	Ctrl+D добавляет открытую папку
+files.sidebar.encrypted_folder	Зашифрованная папка
+files.sidebar.not_available	недоступно
+files.common.space_analysis	Анализ места
+files.space.analyzing_p	Анализ {p}…
+files.space.open_in_list	Открыть в списке
+files.space.incomplete_analysis_time_ran_out	анализ неполный: истекло время
+files.space.smaller_files	файлы меньшего размера
+files.space.f_files_in_d_folders	Файлов: {f}, папок: {d}, прочитано за {s} с
+files.space.count.smaller_items.one	{n} элемент меньшего размера
+files.space.count.smaller_items.few	{n} элемента меньшего размера
+files.space.count.smaller_items.many	{n} элементов меньшего размера
+files.space.count.smaller_items.other	{n} элемента меньшего размера
+files.space.n_unreadable	Нечитаемых: {n}
+files.sidebar.hidden_on_network	Скрыта в сети
+files.sidebar.hidden_badge	скр.
+files.common.count.items.one	{n} элемент
+files.common.count.items.few	{n} элемента
+files.common.count.items.many	{n} элементов
+files.common.count.items.other	{n} элемента
+files.common.count.files.one	{n} файл
+files.common.count.files.few	{n} файла
+files.common.count.files.many	{n} файлов
+files.common.count.files.other	{n} файла
+files.uploads.folder_hint	папка
+files.common.count.folders.one	{n} папка
+files.common.count.folders.few	{n} папки
+files.common.count.folders.many	{n} папок
+files.common.count.folders.other	{n} папки
+files.transfers.count.errors.one	{n} ошибка
+files.transfers.count.errors.few	{n} ошибки
+files.transfers.count.errors.many	{n} ошибок
+files.transfers.count.errors.other	{n} ошибки
+files.pane.count.selected.one	Выбрано: {n}
+files.pane.count.selected.few	Выбрано: {n}
+files.pane.count.selected.many	Выбрано: {n}
+files.pane.count.selected.other	Выбрано: {n}
+files.common.count.items_selected.one	Выбран {n} элемент
+files.common.count.items_selected.few	Выбрано {n} элемента
+files.common.count.items_selected.many	Выбрано {n} элементов
+files.common.count.items_selected.other	Выбрано {n} элемента
+files.pane.n_items	Элементов: {n}
+files.common.n_more	и ещё {n}
+files.format.just_now	только что
+files.fmt.ago	{time} назад
+files.dur.d	{d} дн
+files.dur.h	{h} ч
+files.dur.m	{m} мин
+files.dur.s	{s} с
+files.dur.hm	{h} ч {m} мин
+files.dur.ms	{m} мин {s} с
+files.fmt.of	{part} из {total}
+files.common.folder	Папка
+files.pane.folders	Папки
+files.common.file	Файл
+files.icons.link_folder	Ссылка на папку
+files.icons.symbolic_link	Символьная ссылка
+files.icons.link_out_shared_folder	Ссылка за пределы общей папки
+files.icons.special_file	Специальный файл
+files.icons.executable	Исполняемый файл
+files.icons.image	Изображение
+files.common.video	Видео
+files.common.audio	Аудио
+files.icons.lossless_audio	Аудио без потерь
+files.icons.key_signature	Ключ или подпись
+files.icons.document	Документ
+files.common.archive	Архив
+files.icons.temporary_file	Временный файл
+files.icons.compiled_file	Скомпилированный файл
+files.icons.build_file	Файл сборки
+files.icons.source_code	Исходный код
+files.pane.back	Назад
+files.pane.forward	Вперёд
+files.common.parent_folder	Родительская папка
+files.common.refresh	Обновить
+files.pane.click_empty_space_type_path	Щёлкните по пустому месту, чтобы ввести путь
+files.pane.filter	Фильтр
+files.pane.subfolders	вложенные папки
+files.pane.search_every_subfolder_words_in	Поиск во всех вложенных папках: слова из имени или *.mkv
+files.pane.search_in_p	Поиск в {p}
+files.pane.all_folders	все папки
+files.common.list	Список
+files.pane.grid	Сетка
+files.pane.hidden_files	Скрытые файлы
+files.common.dual_pane	Две панели
+files.common.info_panel	Панель сведений
+files.pane.new	Создать
+files.pane.more	Ещё
+files.common.permissions	Права доступа
+files.common.size	Размер
+files.common.modified	Изменён
+files.common.type	Тип
+files.common.columns	Столбцы
+files.pane.no_results	Ничего не найдено
+files.pane.nothing_matches_filter	Ничего не соответствует фильтру
+files.pane.empty_folder	Пустая папка
+files.pane.n_hidden	Скрыто: {n}
+files.pane.searching	поиск…
+files.pane.n_items_scanned	Просмотрено элементов: {n}
+files.pane.partial_results	частичные результаты
+files.common.f_free_t	Свободно {f} из {t}
+files.pane.items	Элементы
+files.pane.free_space	Свободное место
+files.pane.file_size	Размер файла
+files.pane.compute_total_size	Вычислить общий размер
+files.pane.compute	Вычислить
+files.pane.contents	Содержимое
+files.pane.owner	Владелец
+files.pane.path	Путь
+files.common.download	Скачать
+files.common.preview	Предпросмотр
+files.common.copy_path	Копировать путь
+files.pane.target	Цель
+files.common.close_tab	Закрыть вкладку
+files.common.new_tab	Новая вкладка
+files.main.hidden_files_shown	Скрытые файлы показаны
+files.main.hidden_files_not_shown	Скрытые файлы не показаны
+files.common.open_in_new_tab	Открыть в новой вкладке
+files.common.open_in_other_pane	Открыть на другой панели
+files.sidebar.open_recycle_bin	Открыть корзину
+files.common.remove_favorites	Удалить из избранного
+files.common.add_favorites	Добавить в избранное
+files.sidebar.removed_favorites	Удалено из избранного
+files.sidebar.added_favorites	Добавлено в избранное
+files.actions.n_ready_move_paste_ctrl	К перемещению: {n}. Вставьте через Ctrl+V
+files.actions.n_ready_copy_paste_ctrl	К копированию: {n}. Вставьте через Ctrl+V
+files.pane.n_move	К перемещению: {n}
+files.pane.n_copy	К копированию: {n}
+files.actions.items_already_in_folder	Элементы уже находятся в этой папке
+files.actions.folder_cannot_go_inside_itself	Папку нельзя поместить внутрь неё самой
+files.actions.move_n	Переместить {n} в…
+files.actions.copy_n	Копировать {n} в…
+files.actions.move_n_verification	Переместить {n} с проверкой в…
+files.actions.copy_n_verification	Копировать {n} с проверкой в…
+files.menus.copy_verification	Копировать с проверкой в…
+files.menus.move_verification	Переместить с проверкой в…
+files.common.paste_verification	Вставить с проверкой
+files.menus.paste_verification_move_n	Вставить с проверкой (переместить {n})
+files.menus.paste_verification_n	Вставить с проверкой ({n})
+files.dnd.copy_here_verification	Копировать сюда с проверкой
+files.dnd.move_here_verification	Переместить сюда с проверкой
+files.transfers.copy_complete_verified	Копирование завершено и проверено
+files.transfers.move_complete_verified	Перемещение завершено и проверено
+files.settings.copy_move_verification	Копирование / перемещение с проверкой
+files.common.move_here	Переместить сюда
+files.common.copy_here	Копировать сюда
+files.actions.open_dual_pane_f3	Откройте две панели клавишей F3
+files.actions.move_recycle_bin	Переместить в корзину?
+files.actions.delete_permanently	Удалить безвозвратно?
+files.common.empty_recycle_bin	Очистить корзину
+files.actions.empty_recycle_bin	Очистить корзину?
+files.actions.recycle_bin_already_empty	Корзина уже пуста
+files.actions.n_deleted_permanently_cannot_restored	Будут удалены безвозвратно: {n}. Восстановить их будет нельзя.
+files.actions.recycle_bin_shared_folder_off	Корзина этой общей папки отключена.
+files.common.move_recycle_bin	Переместить в корзину
+files.common.delete	Удалить
+files.common.delete_permanently	Удалить безвозвратно
+files.common.rename	Переименовать
+files.common.new_folder	Новая папка
+files.actions.computing_sizes	Вычисление размеров…
+files.actions.open_shared_folder_first	Сначала откройте общую папку
+files.menus.upload_files	Загрузить файлы…
+files.menus.upload_folder	Загрузить папку…
+files.settings.upload_files	Загрузка файлов
+files.menus.paste_move_n	Вставить (переместить {n})
+files.menus.paste_n	Вставить ({n})
+files.common.select_all	Выбрать все
+files.menus.hide_hidden_files	Не показывать скрытые файлы
+files.common.show_hidden_files	Показывать скрытые файлы
+files.menus.compute_folder_sizes	Вычислить размеры папок
+files.menus.copy_folder_path	Копировать путь к папке
+files.common.copy	Копировать
+files.common.cut	Вырезать
+files.menus.paste	Вставить в
+files.menus.copy	Копировать в…
+files.menus.move	Переместить в…
+files.menus.choose_folder	Выбрать папку…
+files.menus.compute_size	Вычислить размер
+files.menus.copy_network_path_nas	Копировать сетевой путь (\\NAS)
+files.menus.copy_smb_address	Копировать адрес smb://
+files.menus.properties	Свойства
+files.common.invert_selection	Инвертировать выделение
+files.common.paste	Вставить
+files.menus.sort	Сортировка
+files.common.folders_first	Сначала папки
+files.common.sidebar	Боковая панель
+files.menus.keyboard_shortcuts	Сочетания клавиш
+files.common.settings	Настройки
+files.ui.copied_clipboard	Скопировано в буфер обмена
+files.ui.no_subfolders	Нет вложенных папок
+files.common.loading	Загрузка…
+files.transfers.op.copy	Копирование
+files.transfers.copying	Копирование
+files.transfers.copy_complete	Копирование завершено
+files.transfers.moving	Перемещение
+files.transfers.move_complete	Перемещение завершено
+files.transfers.move	Перемещение
+files.transfers.deleting	Удаление
+files.transfers.deletion_complete	Удаление завершено
+files.transfers.deletion	Удаление
+files.transfers.uploading	Загрузка
+files.transfers.upload_complete	Загрузка завершена
+files.transfers.upload	Загрузка
+files.transfers.state.queued	в очереди
+files.transfers.state.running	выполняется
+files.transfers.state.paused	приостановлено
+files.transfers.state.conflict	нужно ваше решение
+files.common.state.done	завершено
+files.common.state.failed	ошибка
+files.common.state.canceled	отменено
+files.transfers.scan	Сканирование
+files.transfers.phase.verify	Проверка
+files.transfers.done	Готово
+files.transfers.phase.count	Подсчёт
+files.transfers.sending	Отправка
+files.transfers.op_n	{op}: {n}
+files.transfers.op_x	{op}: «{x}»
+files.transfers.deleted_permanently	удалено безвозвратно
+files.transfers.recycle_bin	Корзина
+files.transfers.computer	этот компьютер
+files.common.transfers	Передачи
+files.transfers.transfers_n_running_p	Передачи: выполняется {n}, {p}%
+files.transfers.no_transfers	Нет передач
+files.transfers.minimize_keeps_running	Свернуть (продолжит работу)
+files.transfers.legend_speed	скорость
+files.transfers.legend_average	среднее
+files.transfers.limit	Ограничение
+files.transfers.none	нет
+files.transfers.start_now	Начать сейчас
+files.transfers.open_destination	Открыть папку назначения
+files.transfers.scanning_f_files_b_found	Сканирование: файлов — {f}, найдено — {b}…
+files.transfers.b_files	Файлов: {a} из {b}
+files.transfers.waiting_another_transfer_finish	Ожидание завершения другой передачи
+files.transfers.paused	Приостановлено
+files.transfers.waiting_choice	Ожидание вашего решения
+files.transfers.counting_files_folders	Подсчёт файлов и папок…
+files.transfers.n_without_copying_data_reflink	Без копирования данных (reflink или переименование): {n}
+files.transfers.btrfs_reflink	btrfs reflink
+files.transfers.data_copy	Копирование данных
+files.transfers.speed	Скорость
+files.transfers.average	Средняя
+files.transfers.peak	Пиковая
+files.transfers.files_per_second	Файлов в секунду
+files.transfers.elapsed	Прошло
+files.transfers.remaining	Осталось
+files.transfers.expected_end	Ожидаемое завершение
+files.transfers.method	Способ
+files.transfers.estimating	оценка…
+files.transfers.n_s	{n}/с
+files.transfers.method_verify	проверка
+files.transfers.writing_disks	Запись на диски
+files.transfers.in_d	через {d}
+files.transfers.average_s	в среднем {s}
+files.transfers.n_skipped	Пропущено: {n}
+files.transfers.pause	Приостановить
+files.transfers.resume	Продолжить
+files.common.item_name_already_exists	Элемент с таким именем уже существует
+files.transfers.newer	новее
+files.transfers.incoming	Новый
+files.transfers.in_destination	В папке назначения
+files.common.overwrite	Перезаписать
+files.common.skip	Пропустить
+files.common.keep_both	Сохранить оба
+files.common.overwrite_newer	Перезаписать, если новее
+files.transfers.apply_all	Применить ко всем
+files.transfers.keep_both_saves_new_one	«Сохранить оба» сохранит новый элемент как {n}
+files.transfers.axis_progress	ось: прогресс
+files.transfers.waiting_first_data	ожидание первых данных…
+files.transfers.chart_no_data	нет данных
+files.transfers.chart_no_data_for	нет данных {n} с
+files.transfers.no_data_for	Нет данных {n} с
+files.transfers.canceling	Отмена…
+files.transfers.b_verified	Проверено: {a} из {b}
+files.transfers.axis_time	ось: время
+files.uploads.some_items_already_exist	Некоторые элементы уже существуют
+files.uploads.destination_folder_already_n_items	В папке назначения уже есть элементы с такими же именами ({n}):
+files.uploads.already_exists	уже существует
+files.uploads.connection_lost	соединение потеряно
+files.preview.open_in_new_browser_tab	Открыть в новой вкладке браузера
+files.preview.browser_cannot_play_format	Браузер не может воспроизвести этот формат.
+files.preview.no_preview_kind_file	Для файлов этого типа нет предпросмотра
+files.preview.first_512_kib_s_shown	(показаны первые 512 КиБ из {s})
+files.settings.appearance	Внешний вид
+files.settings.behavior	Поведение
+files.settings.shortcuts	Сочетания клавиш
+files.settings.reset_defaults	Сбросить по умолчанию
+files.settings.file_icons	Значки файлов
+files.settings.eza_icons_nerd_font_type	Значки eza (Nerd Font) по типу и по имени
+files.settings.name_colors	Цвета имён
+files.settings.eza_colors_blue_folders_purple	Цвета eza: синие папки, фиолетовые изображения, красные архивы…
+files.settings.system_folders_in_gray	Системные папки серым
+files.settings.recycle_snapshot_recycle_bin_lost	#recycle, #snapshot, $RECYCLE.BIN, lost+found… Цвет, заданный вручную, сохраняется
+files.settings.ll_style_columns	Столбцы в стиле ll
+files.settings.permissions_sizes_dates_colored_like	Права доступа, размеры и даты раскрашены как в eza -l
+files.settings.text_size	Размер текста
+files.settings.small	Мелкий
+files.common.normal	Обычный
+files.settings.large	Крупный
+files.settings.row_density	Плотность строк
+files.settings.compact	Компактная
+files.settings.like_eza_group_directories_first	Как eza --group-directories-first
+files.settings.those_starting_dot_ctrl_h	Те, что начинаются с точки (Ctrl+H)
+files.settings.binary_sizes	Двоичные размеры
+files.settings.kib_mib_gib_1024_instead	КиБ, МиБ, ГиБ (1024) вместо КБ, МБ, ГБ (1000)
+files.settings.relative_dates	Относительные даты
+files.settings.relative_dates_hint	«3 ч назад» вместо «29 окт 21:45»
+files.settings.permissions_column	Столбец «Права доступа»
+files.settings.size_column	Столбец «Размер»
+files.settings.modified_column	Столбец «Изменён»
+files.settings.type_column	Столбец «Тип»
+files.settings.open_one_click	Открывать одним щелчком
+files.settings.otherwise_double_click	Иначе двойным щелчком
+files.settings.vim_keys	Клавиши Vim
+files.settings.j_k_move_h_go	j/k — перемещение, h — вверх, l — открыть, gg и G
+files.settings.confirm_before_deleting	Подтверждать удаление
+files.settings.item_already_exists	Если элемент уже существует
+files.settings.starting_choice_copies_moves_uploads	Выбор по умолчанию для копирования, перемещения и загрузки
+files.settings.ask	Спрашивать
+files.common.speed_limit	Ограничение скорости
+files.settings.can_changed_during_transfer	Можно изменить во время передачи
+files.settings.none	Нет
+files.settings.open_dialog_on_start	Открывать окно при запуске
+files.settings.otherwise_transfer_starts_in_background	Иначе передача начнётся в фоне
+files.settings.browser_notification_end	Уведомление браузера по завершении
+files.settings.page_not_in_front	Когда страница не на переднем плане
+files.key.ctrl	Ctrl
+files.key.backspace	Backspace
+files.key.insert	Insert
+files.key.tab	Tab
+files.key.shift	Shift
+files.key.alt	Alt
+files.key.enter	Enter
+files.key.space	Пробел
+files.key.del	Del
+files.key.pgdn	PgDn
+files.key.pgup	PgUp
+files.key.letters	Буквы
+files.settings.next_tab	Следующая вкладка
+files.settings.previous_tab	Предыдущая вкладка
+files.settings.go_tab	Перейти к вкладке
+files.settings.reopen_closed_tab	Открыть закрытую вкладку
+files.settings.other_pane_dual_pane	Другая панель (в режиме двух панелей)
+files.settings.copy_move_other_pane	Копировать / переместить на другую панель
+files.settings.back_forward	Назад / вперёд
+files.settings.quick_look	Быстрый просмотр
+files.settings.show_hide_hidden_files	Показать или скрыть скрытые файлы
+files.settings.type_path	Ввести путь
+files.settings.fuzzy_filter_folder	Нечёткий фильтр по папке
+files.settings.search_subfolders	Поиск во вложенных папках
+files.settings.copy_cut_paste	Копировать / вырезать / вставить
+files.settings.select_move_on	Выбрать и перейти дальше
+files.settings.jump_name_starting_like	Перейти к имени, начинающемуся так
+files.settings.vim_keys_on	Клавиши Vim (если включены)
+files.actions.download_started_zip_archive	Скачивание начато в виде архива .zip
+files.actions.create_archive	Создать архив
+files.actions.n_archive_in_same_folder	Упаковать в архив в той же папке: {n}.
+files.actions.format	Формат
+files.actions.zip_opens_anywhere	zip (открывается везде)
+files.actions.tar_zst_faster_smaller_keeps	tar.zst (быстрее и меньше, сохраняет права доступа и ссылки)
+files.actions.archive_name	Имя архива
+files.common.compression	Сжатие
+files.actions.fast	Быстрое
+files.actions.none_store_only_fastest	Без сжатия (только хранение, быстрее всего)
+files.actions.best_slow	Максимальное (медленно)
+files.actions.photos_videos_music_archives_stored	Фото, видео, музыка и архивы сохраняются как есть: повторное сжатие не экономит место.
+files.actions.photos_videos_music_archives_not	Фото, видео, музыка и архивы не становятся меньше, но zstd обрабатывает их без замедления.
+files.actions.compress	Сжать
+files.actions.extract_x	Извлечь «{x}» в…
+files.common.extract_here	Извлечь сюда
+files.menus.extract_x	Извлечь в «{x}»
+files.menus.extract	Извлечь в…
+files.menus.compress	Сжать…
+files.menus.download_zip	Скачать (.zip)
+files.transfers.compressing	Сжатие
+files.transfers.archive_created	Архив создан
+files.transfers.extracting	Извлечение
+files.transfers.extraction_complete	Извлечение завершено
+files.transfers.extraction	Извлечение
+files.transfers.zip_deflate	Zip (deflate)
+files.transfers.zip_no_compression	Zip без сжатия
+files.transfers.archive_password_protected	Архив защищён паролем
+files.common.password	Пароль
+files.transfers.extract	Извлечь
+files.preview.zoom_out	Уменьшить
+files.preview.zoom_in	Увеличить
+files.preview.fit_window	По размеру окна
+files.pane.total_size	Общий размер
+files.preview.open_folder	Открыть как папку
+files.pane.archive_read_only	Архив · только чтение
+files.actions.inside_archive_only_single_files	Из архива можно скачивать только отдельные файлы: для остального используйте «Копировать в…»
+files.archive.archives_open_read_only_change	Архивы открываются только для чтения: чтобы изменить архив, извлеките его
+files.common.retry	Повторить
+files.preview.s_unpacked	{s} в распакованном виде
+files.settings.on_start_open	При запуске открывать
+files.settings.otherwise_last_ones_used_apply	Иначе ко всем применяются последние использованные
+files.settings.current_folder	Текущая папка
+files.settings.chosen_folder	Выбранная папка
+files.settings.ctrl_t_tab_bar	Ctrl+T и + на панели вкладок
+files.settings.highlight_today_dates	Выделять сегодняшние даты
+files.settings.hidden_files_last	Скрытые файлы в конце
+files.settings.the_chosen_folder	Выбранную папку
+files.settings.last_tabs	Последние вкладки
+files.settings.in_modified_column	В столбце «Изменён»
+files.settings.new_tabs_open_in	Новые вкладки открываются в
+files.settings.shown_after_others	Если показаны — после остальных
+files.settings.remember_view_sort_each_folder	Запоминать вид и сортировку для каждой папки
+files.settings.choose	Выбрать…
+files.settings.use_folder	Использовать эту папку
+files.sidebar.default_order	Порядок по умолчанию
+files.settings.volume_names	Имена томов
+files.settings.show_favorites	Показывать избранное
+files.settings.favorites_section_sidebar_stay_saved	Раздел «Избранное» на боковой панели; пока он скрыт, элементы остаются сохранёнными
+files.conns.load_file	Загрузить из файла…
+files.conns.loaded_k	Загружено: {k}
+files.conns.private_key_openssh_pem	Закрытый ключ (OpenSSH или PEM)
+files.conns.my_key	Мой ключ
+files.conns.not_private_key_file_too	Это не закрытый ключ: файл слишком большой
+files.conns.passphrase_key_one	парольная фраза, если она есть у ключа
+files.conns.empty_keep_one_loaded	пусто: оставить загруженный
+files.pane.change_icon	Изменить значок
+files.iconpick.search_icon	Поиск значка…
+files.sidebar.icon	Значок…
+files.iconpick.automatic_icon	Автоматический значок
+files.iconpick.no_icon_found	Значки не найдены
+files.iconpick.default	По умолчанию
+files.iconpick.folder_only	Только эта папка
+files.iconpick.every_n	Все «{n}»
+files.iconpick.red	Красный
+files.iconpick.yellow	Жёлтый
+files.iconpick.green	Зелёный
+files.iconpick.cyan	Голубой
+files.iconpick.pink	Розовый
+files.iconpick.white	Белый
+files.iconpick.gray	Серый
+files.sidebar.transfers_running_on_s_wait	На «{s}» выполняются передачи: дождитесь их завершения или отмените их
+files.sidebar.d_ejected_can_unplugged	Диск «{d}» извлечён: его можно отключить
+files.sidebar.eject_d	Извлечь «{d}»?
+files.common.eject	Извлечь
+files.sidebar.drive_s_not_appear_connected	Похоже, диск «{s}» не подключён
+files.sidebar.drive_shared_folders_not_available	Общие папки этого диска будут недоступны, пока вы снова его не подключите.
+files.editor.find_prompt	Найти: 
+files.editor.ctrl_g_editor_keys	Ctrl+G: клавиши редактора
+files.editor.e_overwrite_y_n	{e}. Перезаписать? (y, n)
+files.common.edit	Изменить
+files.editor.not_saved	Не сохранено
+files.editor.q_not_found	«{q}» не найдено
+files.editor.save_changes_n_before_closing	Сохранить изменения в «{n}» перед закрытием? (y, n, esc)
+files.editor.saving	Сохранение…
+files.editor.saved_path	Сохранено: {path}
+files.common.read_only	только чтение
+files.editor.read_only_don_t_permission	Только чтение: у вас нет прав на запись в этот файл
+files.editor.go_line_prompt	Перейти к строке: 
+files.editor.word_wrap	Перенос строк
+files.editor.find	Найти
+files.editor.copy_line	Копировать строку
+files.editor.redo	Повторить
+files.editor.previous_match	Предыдущее совпадение
+files.editor.next_match	Следующее совпадение
+files.editor.keys	Клавиши
+files.editor.go_line	Перейти к строке
+files.editor.copy_cut_no_selection_line	Копировать, вырезать (без выделения — строку)
+files.editor.duplicate_line	Дублировать строку
+files.editor.indent_unindent	Увеличить, уменьшить отступ
+files.editor.next_previous_match	Следующее / предыдущее совпадение
+files.editor.move_line	Переместить строку
+files.editor.cut_line	Вырезать строку
+files.health.open_in_separate_window	Открыть в отдельном окне
+files.sidebar.description	Описание…
+files.common.permissions_menu	Права доступа…
+files.api.error_n	ошибка {n}
+files.health.drop_upload	Отпустите, чтобы загрузить в
+files.health.clear_finished	Убрать завершённые
+files.health.places	Места
+files.pane.dimensions	Размеры
+files.pane.duration	Длительность
+files.pane.subtitles	Субтитры
+files.pane.bitrate	Битрейт
+files.pane.camera	Камера
+files.pane.lens	Объектив
+files.pane.exposure	Экспозиция
+files.pane.date_taken	Дата съёмки
+files.pane.location	Место съёмки
+files.pane.n_tracks	Дорожек: {n}
+files.settings.list_grid_columns	Список / сетка / столбцы
+files.actions.n_go_shared_folder_recycle	Будут перемещены в корзину общей папки, откуда их можно восстановить: {n}.
+files.common.nas_unreachable	NAS недоступен
+files.conns.rynas_key	Ключ rynas
+files.health.browser_blocked_window_allow_pop	Браузер заблокировал окно: разрешите всплывающие окна для этого сайта
+files.health.transfer_service_not_running_copies	Служба передачи не запущена: копирование, перемещение и удаление невозможны.
+files.health.no_access_files_ask_administrator	У вас нет доступа к приложению «Файлы»: обратитесь к администратору.
+files.health.file_service_not_installed_on	Файловая служба не установлена в этой системе.
+files.health.files_cannot_reach_nas	Приложению «Файлы» не удаётся связаться с NAS.
+files.health.session_expired_sign_in_again	Сеанс истёк: войдите снова, чтобы продолжить.
+files.uploads.session_expired	Сеанс истёк
+files.health.tabs	Вкладки
+files.settings.files_settings	Настройки приложения «Файлы»
+files.sidebar.cannot_eject_d_e_may	Не удалось извлечь «{d}» ({e}): возможно, он ещё используется
+files.err.session_expired_sign_in_again	Сеанс истёк: войдите снова
+files.err.session_changed_in_another_tab	Сеанс изменился в другой вкладке: перезагрузите страницу
+files.err.not_allowed	У вас нет прав на это действие
+files.transfers.permission_denied	Доступ запрещён
+files.transfers.check_shared_folder_permissions	проверьте права доступа к общей папке
+files.err.not_found_may_been_moved	Не найдено: возможно, объект был перемещён или удалён
+files.err.file_changed_in_meantime	Файл тем временем изменился
+files.err.busy_try_again_shortly	Занято: повторите попытку чуть позже
+files.err.invalid_value	Недопустимое значение
+files.err.invalid_request	Недопустимый запрос
+files.err.too_large	Слишком большой размер
+files.err.volume_full	Том заполнен
+files.err.quota_exceeded	Превышена квота
+files.err.shared_folder_cannot_moved_renamed	Общую папку нельзя переместить, переименовать или удалить отсюда
+files.err.link_leads_out_shared_folder	Ссылка ведёт за пределы общей папки: переход по ней не выполняется
+files.err.archive_needs_password	Для архива нужен пароль
+files.err.program_needed_missing_on_nas	На NAS отсутствует нужная программа
+files.err.remote_server_refused_login	Удалённый сервер отклонил вход
+files.err.remote_server_key_changed	Ключ удалённого сервера изменился
+files.err.format_not_supported	Формат не поддерживается
+files.err.not_available_on_system	Недоступно в этой системе
+files.err.too_many_requests_try_again	Слишком много запросов: повторите попытку чуть позже
+files.err.not_available_here	Здесь недоступно
+files.err.remote_connection_unreachable	Удалённое подключение недоступно
+files.err.file_service_not_answer	Файловая служба не отвечает
+files.err.file_service_did_not_answer	Файловая служба не ответила вовремя
+files.err.internal_error_on_nas	Внутренняя ошибка на NAS
+files.err.read_only	Только чтение
+files.sidebar.apps	Приложения
+files.common.app_data	Данные приложений
+files.sidebar.n_folders	Папок: {n}
+files.common.backups	Резервные копии
+files.backups.root	корень
+files.sidebar.overlaps_backup_folder_pc_pc	Пересекается с папкой резервных копий компьютера {pc}: только чтение, пока у резервных копий не будет своей папки
+files.backups.backups_read_only_change_file	Резервные копии доступны только для чтения: чтобы изменить файл, скопируйте его в общую папку
+files.appdata.s_may_need_restart_see	Чтобы изменение вступило в силу, может потребоваться перезапуск {s}
+files.appdata.restart	Перезапустить
+files.appdata.restarting_s	Перезапуск {s}
+files.transfers.interrupted_restart_nas	Прервано перезапуском NAS
+files.transfers.transfer_speed_chart	График скорости передачи
