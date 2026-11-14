@@ -146,7 +146,7 @@ files.common.dual_pane	Две панели
 files.common.info_panel	Панель сведений
 files.pane.new	Создать
 files.pane.more	Ещё
-files.common.permissions	Права доступа
+files.common.permissions	Права
 files.common.size	Размер
 files.common.modified	Изменён
 files.common.type	Тип
