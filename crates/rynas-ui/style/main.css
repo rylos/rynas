@@ -1482,6 +1482,9 @@ kbd {
   .page-actions .btn { padding: 0 var(--s-3); }
   /* a header whose buttons need their words (two actions that an icon alone would not tell apart) */
   .page-actions .btn-label.keep { position: static; width: auto; height: auto; overflow: visible; clip: auto; }
+  /* their row goes under the title instead of squeezing it */
+  .page-head:has(.btn-label.keep) { flex-wrap: wrap; }
+  .page-head:has(.btn-label.keep) .page-actions { flex-basis: 100%; margin-left: 0; }
   .popover.notif-pop { position: fixed; left: 8px; right: 8px; top: calc(var(--appbar-h) + 6px); width: auto; }
   .pal-foot { display: none; }
   .login { justify-content: flex-start; padding-top: calc(var(--s-12) + var(--s-6)); }

@@ -1682,8 +1682,8 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
                     {kv("bkpc.alert", ui::text(alert))}
                     {p.key_fingerprint.clone().map(|fp| kv("bk.key", ui::breakable(&fp, "mono small")))}
                     {p.adopted.then(|| kv("bk.adopted", ui::text(t("bk.adopted_yes").to_string())))}
-                    {has_snaps.then(|| kv("bkpc.view", segmented("bkpc.view", VIEWS, by_run.into(), Callback::new(move |v| by_run.set(v))).into_any()))}
                 </dl>
+                {has_snaps.then(|| segmented("bkpc.view", VIEWS, by_run.into(), Callback::new(move |v| by_run.set(v))))}
                 {form_error(measure_err)}
                 {form_error(prune_err)}
             }
