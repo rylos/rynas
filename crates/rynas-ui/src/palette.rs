@@ -251,13 +251,16 @@ pub fn Palette() -> impl IntoView {
         }
     };
 
-    // keep the active row visible
+    // keep the active row visible: "nearest" scrolls only when it is not, so the row the mouse
+    // hovers (always visible) never pulls the list back
     Effect::new(move || {
         let a = active.get();
         if ui.palette_open.get_untracked()
             && let Some(el) = document().get_element_by_id(&format!("pal-{a}"))
         {
-            el.scroll_into_view_with_bool(false);
+            let o = web_sys::ScrollIntoViewOptions::new();
+            o.set_block(web_sys::ScrollLogicalPosition::Nearest);
+            el.scroll_into_view_with_scroll_into_view_options(&o);
         }
     });
 
