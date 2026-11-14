@@ -586,7 +586,7 @@ files.err.read_only	Только чтение
 files.sidebar.apps	Приложения
 files.common.app_data	Данные приложений
 files.sidebar.n_folders	Папок: {n}
-files.common.backups	Резервные копии
+files.common.backups	Резервные копии ПК
 files.backups.root	корень
 files.sidebar.overlaps_backup_folder_pc_pc	Пересекается с папкой резервных копий компьютера {pc}: только чтение, пока у резервных копий не будет своей папки
 files.backups.backups_read_only_change_file	Резервные копии доступны только для чтения: чтобы изменить файл, скопируйте его в общую папку
