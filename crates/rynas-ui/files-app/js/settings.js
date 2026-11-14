@@ -85,7 +85,7 @@ function body(section) {
     case "transfers":
       return (
         row("files.settings.item_already_exists", "files.settings.starting_choice_copies_moves_uploads", sel("conflict", [["ask", "files.settings.ask"], ["rename", "files.common.keep_both"], ["skip", "files.common.skip"], ["overwrite", "files.common.overwrite"], ["newer", "files.common.overwrite_newer"]])) +
-        row("files.common.speed_limit", "files.settings.can_changed_during_transfer", sel("limit", [[0, "files.settings.none"], [10, "10 MiB/s"], [25, "25 MiB/s"], [50, "50 MiB/s"], [100, "100 MiB/s"], [200, "200 MiB/s"]])) +
+        row("files.common.speed_limit", "files.settings.can_changed_during_transfer", sel("limit", [[0, "files.settings.none"], ...[10, 25, 50, 100, 200].map((n) => [n, t("files.fmt.rate", { size: `${n} ${t("files.fmt.unit.mib")}` })])])) +
         row("files.settings.open_dialog_on_start", "files.settings.otherwise_transfer_starts_in_background", sw("openDialog")) +
         row("files.settings.browser_notification_end", "files.settings.page_not_in_front", sw("notify"))
       );

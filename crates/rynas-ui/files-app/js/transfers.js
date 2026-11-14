@@ -1440,7 +1440,7 @@ function speedUnit(bps) {
 function tickSpeed(bps) {
   const [, unit] = sizeParts(bps);
   const v = bps / speedUnit(bps);
-  return `${v.toLocaleString(LOCALE, { maximumFractionDigits: 2 })} ${unit}/s`;
+  return t("files.fmt.rate", { size: `${v.toLocaleString(LOCALE, { maximumFractionDigits: 2 })} ${unit}` });
 }
 
 function niceStep(x) {

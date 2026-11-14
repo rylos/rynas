@@ -210,7 +210,7 @@ pub fn panel(header: RwSignal<Option<bool>>, to_btrfs: Callback<()>) -> AnyView 
                     let label = ui::verb_name("bk.open", &d.device);
                     let progress = d.progress.as_ref().map(|p| {
                         let pct = (p.bytes_done * 100).checked_div(p.bytes_total).unwrap_or(0);
-                        format!("{pct}% · {}/s", i18n::bytes(p.speed_bps))
+                        format!("{pct}% · {}", i18n::rate(p.speed_bps))
                     });
                     ui::row(vec![
                         ui::cell("pca.col.pc", "wrap", ui::two_lines(view! { <strong>{d.device.clone()}</strong> }.into_any(), sub, "cell-sub small")),
@@ -1080,7 +1080,7 @@ pub(super) fn progress_view(pr: &PcProgress) -> AnyView {
         parts.push(i18n::bytes(pr.bytes_done));
     }
     if pr.speed_bps > 0 {
-        parts.push(format!("{}/s", i18n::bytes(pr.speed_bps)));
+        parts.push(i18n::rate(pr.speed_bps));
     }
     if let Some(m) = agent_note(pr.btrfs.as_ref(), |s| s.subvolume.as_str(), pr.message.as_deref()) {
         parts.push(m);
