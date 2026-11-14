@@ -28,6 +28,8 @@ const INTERNAL: &str = "internal error of the restore TUI: start it again";
 
 /// Where the NAS' web interface makes a restore code.
 const CODE_WHERE: &str = "Backup → PCs → the PC → Restore code";
+/// Disks smaller than this are not offered as the target (boot sticks, card readers).
+const MIN_TARGET: u64 = 8 << 30;
 
 enum Answer<T> {
     Ok(T),
@@ -197,7 +199,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let format = matches!(job, Job::Format { .. });
     match job {
         Job::Format { mut src, v, m, p, pass } => {
-            println!("Restoring {} ({}) version {} …", src.device(), src.kind(), &v.id[..8.min(v.id.len())]);
+            println!("Restoring {} ({}) version {} …", src.device(), src.kind(), v.short_id());
             let r = exec::execute(src.as_mut(), &v, &m, &p, &exec::Options { passphrase: pass.as_deref(), no_nvram: args.iter().any(|a| a == "--no-nvram") }, &mut log);
             super::finish(src.as_mut(), &v, r, &log)?;
         }
@@ -478,7 +480,7 @@ fn flow(term: &mut DefaultTerminal, args: &[String]) -> Result<Option<Job>, Stri
                 let s = restic_src.as_ref().ok_or(INTERNAL)?;
                 let items: Vec<(String, Option<String>)> = versions
                     .iter()
-                    .map(|v| (format!("{}  {}  {} files  {}", date(v.time_ms), &v.id[..8.min(v.id.len())], v.files, gib(v.bytes)), None))
+                    .map(|v| (format!("{}  {}  {} files  {}", date(v.time_ms), v.short_id(), v.files, gib(v.bytes)), None))
                     .collect();
                 let intro = vec![format!("PC {} ({}): choose the version", s.device(), s.dev.hostname)];
                 let i = step!(choose(term, "Version", &intro, &items), stage = 3);
@@ -680,7 +682,9 @@ fn flow(term: &mut DefaultTerminal, args: &[String]) -> Result<Option<Job>, Stri
                         let same = src_disk.is_some_and(|s| !s.serial.is_empty() && s.serial == d.serial);
                         (
                             format!("/dev/{}  {}  {}  {}{}", d.name, d.model, d.serial, gib(d.size_bytes), if same { "  (the PC's own disk)" } else { "" }),
-                            exec::disk_in_use(&d.name),
+                            // a boot stick or a card reader is never a whole-PC target, and
+                            // must not be the one picked first
+                            exec::disk_in_use(&d.name).or_else(|| (d.size_bytes < MIN_TARGET).then(|| "too small".to_string())),
                         )
                     })
                     .collect();

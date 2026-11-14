@@ -331,7 +331,8 @@ impl<R: Read> Read for Counting<'_, R> {
         if self.last.elapsed() >= std::time::Duration::from_millis(500) {
             self.last = std::time::Instant::now();
             let done = self.base + self.n.get();
-            (self.p)(done, self.total.max(done));
+            // an unknown total stays unknown (0), never "done of done (100%)"
+            (self.p)(done, self.total);
         }
         Ok(k)
     }
@@ -455,10 +456,12 @@ impl BtrfsSource {
     /// and a legacy guided layout fitted to the sector size.
     pub fn planned_manifest(&self, m: &Manifest, sector: u32) -> Manifest {
         let mut m = m.clone();
-        if let Some(b) = self.selection.as_ref().and_then(Selection::referenced).filter(|b| *b > 0)
-            && let Some(f) = m.filesystems.iter_mut().find(|f| f.mounts.iter().any(|x| x.path == "/"))
-        {
-            f.used_bytes = b;
+        if let Some(f) = m.filesystems.iter_mut().find(|f| f.mounts.iter().any(|x| x.path == "/")) {
+            // the PC's used bytes count every subvolume of its filesystem, those left out of
+            // the backup too (/home on its own subvolume can be most of it): when the chosen
+            // snapshots' size is not known (no quota data on the NAS) there is no honest
+            // figure, so no "fits" check, rather than refusing a disk that is large enough
+            f.used_bytes = self.selection.as_ref().and_then(Selection::referenced).filter(|b| *b > 0).unwrap_or(0);
         }
         legacy::refit_guided(&mut m, sector, self.esp_mib);
         m

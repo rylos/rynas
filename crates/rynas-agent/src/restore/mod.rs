@@ -238,7 +238,7 @@ pub fn main(args: &[String]) -> Result<(), String> {
     let mut src = restic::ResticSource::from_session(client, dev);
     let versions = src.versions()?;
     let v = source::pick_version(&versions, &opt(args, "--version").unwrap_or_else(|| "latest".into()), true).ok_or("no such version")?;
-    eprintln!("PC {}: version {} ({} files)", src.device(), &v.id[..8.min(v.id.len())], v.files);
+    eprintln!("PC {}: version {} ({} files)", src.device(), v.short_id(), v.files);
     let m = src.manifest(&v)?;
     let t = scripted_target(args)?;
     let src_disk = source_disk(&m).ok_or("the manifest has no disk with a partition table")?;

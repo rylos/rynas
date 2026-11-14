@@ -157,8 +157,11 @@ fn in_target(p: &str) -> PathBuf {
 
 /// The progress line of the data step.
 fn print_progress(done: u64, total: u64) {
-    if total > 0 {
-        eprint!("\r  {} / {} MiB ({}%)   ", done >> 20, total >> 20, done * 100 / total.max(1));
+    if total > 0 && done <= total {
+        eprint!("\r  {} / {} MiB ({}%)   ", done >> 20, total >> 20, done * 100 / total);
+    } else if done > 0 {
+        // the size is not known (btrfs snapshots without quota data): what came so far
+        eprint!("\r  {} MiB received   ", done >> 20);
     }
 }
 

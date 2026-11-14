@@ -30,6 +30,18 @@ pub struct Version {
     pub files: u64,
 }
 
+impl Version {
+    /// The id as shown: a restic snapshot id (long hex) cut to 8 characters like restic does,
+    /// a btrbk timestamp (20261113T1614) whole.
+    pub fn short_id(&self) -> &str {
+        if self.id.len() > 8 && self.id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            &self.id[..8]
+        } else {
+            &self.id
+        }
+    }
+}
+
 /// The version `want` (`latest`: the newest) of `versions` (newest first); `prefix_ok`: a
 /// restic id may be shortened.
 pub fn pick_version(versions: &[Version], want: &str, prefix_ok: bool) -> Option<Version> {

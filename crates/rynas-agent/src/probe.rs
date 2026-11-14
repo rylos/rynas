@@ -184,7 +184,11 @@ pub struct Block {
 }
 
 fn read_trim(p: &Path) -> Option<String> {
-    std::fs::read_to_string(p).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    // some devices pad sysfs strings (serial, model) with NUL or other control bytes
+    std::fs::read_to_string(p)
+        .ok()
+        .map(|s| s.chars().filter(|c| !c.is_control()).collect::<String>().trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// The block device of `maj:min`.
