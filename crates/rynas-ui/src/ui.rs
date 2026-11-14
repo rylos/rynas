@@ -909,6 +909,20 @@ pub fn kv(label: &'static str, value: AnyView) -> AnyView {
     view! { <div class="kv"><dt>{tr(label)}</dt><dd>{value}</dd></div> }.into_any()
 }
 
+/// A [`kv`] row with an action: the label left, the value and its button right on the same line,
+/// and an optional text below over the whole width, left-aligned (a long rule, a help line).
+/// A long value goes `below` with `value` empty, so it never wraps right-aligned.
+pub fn kv_act(label: &'static str, value: Option<AnyView>, action: Option<AnyView>, below: Option<AnyView>) -> AnyView {
+    view! {
+        <div class="kv kv-act">
+            <dt>{tr(label)}</dt>
+            <dd>{value}{action}</dd>
+            {below.map(|b| view! { <dd class="kv-below">{b}</dd> })}
+        </div>
+    }
+    .into_any()
+}
+
 /// [`kv_row`] of a fixed text (`class`: `mono`, `tnum`, `muted`…).
 pub fn kv_text(label: &'static str, value: String, class: &'static str) -> AnyView {
     view! { <div class="kv"><dt>{tr(label)}</dt><dd class=class>{value}</dd></div> }.into_any()

@@ -4952,7 +4952,6 @@ pcb.restore.file	File e cartelle
 pcb.restore.file_text	Apri il backup più recente in File e copia indietro ciò che ti serve.
 pcb.browse_restore	Sfoglia e ripristina file
 pcb.details	Dettagli
-pcb.st.partial	Backup parziale
 pcb.not_included	Non inclusi nel backup: {list}. Si cambia nelle Impostazioni.
 pcb.resume	Riprendi
 bkpc.restore.make	Crea il codice di ripristino
@@ -5141,6 +5140,12 @@ pca.col.files	File
 pca.col.added	Dati nuovi
 pca.st.running	Backup in corso
 pca.st.late	In ritardo
+pca.st.unreachable	Non raggiungibile
+pca.waiting_pc	In attesa del PC
+pca.starts_on_contact	Il backup parte quando il PC si ricollega
+pca.pair_again	Abbina di nuovo
+pca.pair_again_text	Per un PC su cui hai reinstallato il sistema o l'agente: tiene backup e impostazioni
+pcb.pairing	Abbinamento dell'agente
 pca.st.critical	Molto in ritardo
 pca.st.failed	Non riuscito
 pca.st.revoked	Revocato
@@ -5219,7 +5224,7 @@ pca.m.hot	letto in uso
 pca.m.files	file
 pca.m.skipped	escluso
 pca.cancel	Annulla
-pca.backup_sent	Il PC parte al prossimo contatto
+pca.backup_sent	Richiesta inviata: il backup parte al prossimo contatto del PC
 pca.cancel_sent	Il PC si ferma al prossimo contatto
 pca.restore_code	Codice di ripristino
 pca.restore_code_valid	Codice di ripristino creato: monouso, in sola lettura, valido fino al {until}. Sostituisce i codici creati prima per questo PC, che non funzionano più.

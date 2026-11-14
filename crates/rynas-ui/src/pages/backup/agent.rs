@@ -70,6 +70,42 @@ pub(super) fn state_view(s: PcState, revoked: bool) -> AnyView {
     ui::status(tone, t(k).to_string())
 }
 
+/// The agent asks the NAS for its plan at least every 50 s and the NAS writes the contact once a
+/// minute: about three missed contacts and the PC counts as unreachable (off, asleep, away).
+const UNREACHABLE_AFTER_MS: u64 = 5 * 60_000;
+
+/// The PC has not called for a while (never while a backup runs or once revoked).
+fn unreachable(p: &PcDevice) -> bool {
+    !p.revoked && p.state != PcState::Running && p.last_seen_ms.is_some_and(|t| (js_sys::Date::now() as u64).saturating_sub(t) > UNREACHABLE_AFTER_MS)
+}
+
+/// A command (Run now, Cancel) the PC has not taken yet: queued after its last contact.
+fn command_waiting(p: &PcDevice) -> bool {
+    !p.revoked && p.command.is_some() && p.command_at_ms.is_some_and(|c| p.last_seen_ms.is_none_or(|t| t < c))
+}
+
+/// The one status chip of a PC fed by rynas-agent, the same in the lists and in the drawer:
+/// revoked, a backup running, the last backup failed, unreachable, late or critical unless
+/// paused, paused with the last success, else its state (up to date, waiting). Mounted
+/// subvolumes left out do not change it: that is a choice made in Settings.
+pub(super) fn device_chip(p: &PcDevice) -> AnyView {
+    let paused = p.settings.plan.paused && !p.revoked && p.state != PcState::Running;
+    match p.state {
+        _ if p.revoked => state_view(p.state, true),
+        PcState::Running | PcState::Failed => state_view(p.state, false),
+        _ if unreachable(p) => ui::status(Tone::Warn, format!("{} · {}", t("pca.st.unreachable"), tf("pcb.last_seen_on", &[("when", &when(p.last_seen_ms))]))),
+        PcState::Late | PcState::Critical if !paused => state_view(p.state, false),
+        _ if paused => {
+            let last_ok = match p.last_ok_ms {
+                Some(ms) => tf("pcb.last_ok_on", &[("when", &i18n::datetime(ms))]),
+                None => t("pcb.never").to_string(),
+            };
+            ui::status(Tone::Info, format!("{} · {last_ok}", t("pca.f.paused")))
+        }
+        s => state_view(s, false),
+    }
+}
+
 fn reason_text(r: ReadyReason) -> &'static str {
     match r {
         ReadyReason::NoVersion => "pca.ready.no_version",
@@ -214,7 +250,7 @@ pub fn panel(header: RwSignal<Option<bool>>, to_btrfs: Callback<()>) -> AnyView 
                     });
                     ui::row(vec![
                         ui::cell("pca.col.pc", "wrap", ui::two_lines(view! { <strong>{d.device.clone()}</strong> }.into_any(), sub, "cell-sub small")),
-                        ui::cell("col.status", "wrap", view! { <div class="cell-main">{state_view(d.state, d.revoked)}<span class="cell-sub small">{progress.unwrap_or_else(|| when(d.last_ok_ms))}</span></div> }.into_any()),
+                        ui::cell("col.status", "wrap", view! { <div class="cell-main">{device_chip(d)}<span class="cell-sub small">{progress.unwrap_or_else(|| when(d.last_ok_ms))}</span></div> }.into_any()),
                         ui::text_cell("pca.col.group", "mono small", d.group.clone()),
                         ui::text_cell("pca.col.versions", "num tnum", i18n::count(u64::from(d.versions))),
                         ui::text_cell("pca.col.uploaded", "num tnum", i18n::bytes(d.uploaded_bytes)),
@@ -686,7 +722,7 @@ fn drawer(tab: Tab, device: String) -> AnyView {
         view! {
             {p.revoked.then(|| ui::note(Tone::Info, icons::LOCK, ui::text(t("pca.revoked_note").to_string())))}
             <dl class="kvs">
-                {ui::kv("col.status", state_view(p.state, p.revoked))}
+                {ui::kv("col.status", device_chip(&p))}
                 {ui::kv("pca.last_ok", ui::text(when(p.last_ok_ms)))}
                 {ui::kv("pca.col.group", ui::text(p.group.clone()))}
                 {ui::kv("pca.col.versions", ui::text(i18n::count(u64::from(p.versions))))}
@@ -823,7 +859,7 @@ impl AgentCtl {
         // live progress: read again every 5 s while the PC backs up and the page is visible
         crate::live::poll_while(
             5000,
-            move || ctl.detail.data.with(|d| d.as_ref().is_some_and(|d| d.device.state == PcState::Running || d.device.command.is_some())),
+            move || ctl.detail.data.with(|d| d.as_ref().is_some_and(|d| d.device.state == PcState::Running || command_waiting(&d.device))),
             move || ctl.detail.reload(),
         );
         // no agent yet: the codes already made for this folder
@@ -864,24 +900,65 @@ impl AgentCtl {
     }
 
     /// No agent yet: the code waiting for this PC (with Cancel), or Make a code.
+    /// A pairing code for this PC: the first one, or again for a PC already paired (system or
+    /// agent reinstalled: the NAS keeps its folder, history and settings, the old token stops).
+    pub fn pair_again(self) {
+        let body = PairingRequest { btrfs_target: Some(self.dev.get_value()), ..Default::default() };
+        self.busy.set(true);
+        self.error.set(None);
+        spawn_local(async move {
+            let r = api::post::<_, PairingCreated>(&format!("{URL}/pairings"), Some(&body)).await;
+            let _ = self.busy.try_set(false);
+            match r {
+                Ok(c) => {
+                    self.created.set(Some(c));
+                    self.overview.reload();
+                    // the code and its command show in the status card: bring it into view
+                    if let Ok(Some(card)) = document().query_selector("dialog[open] .status-card") {
+                        card.scroll_into_view();
+                    }
+                }
+                Err(e) => self.error.set(Some(e.text())),
+            }
+        });
+    }
+
+    /// Whether the paired PC does not call any more (see [`unreachable`]), `None` without a
+    /// paired PC; tracked.
+    pub fn away(self) -> Option<bool> {
+        self.detail.data.with(|d| d.as_ref().filter(|d| !d.device.revoked).map(|d| unreachable(&d.device)))
+    }
+
+    /// The code made by Pair again for a paired PC, with its command and Cancel.
+    fn repair_view(self) -> AnyView {
+        view! {
+            {move || self.created.get().map(|c| {
+                let id = c.id.clone();
+                let u = format!("{URL}/pairings/{}", api::encode(&id));
+                view! {
+                    {ui::note(Tone::Info, icons::KEY, ui::text(t("pca.pair_again_text").to_string()))}
+                    {pairing_steps(&c)}
+                    <div class="sec-actions">
+                        <button class="btn ghost sm" on:click=move |_| {
+                            let u = u.clone();
+                            self.error.set(None);
+                            spawn_local(async move {
+                                match api::delete_empty(&u).await {
+                                    Ok(_) => self.created.set(None),
+                                    Err(e) => self.error.set(Some(e.text())),
+                                }
+                            });
+                        }><Icon icon=icons::X size=14 />{tr("pca.pairing_cancel")}</button>
+                    </div>
+                }
+            })}
+        }
+        .into_any()
+    }
+
     fn unpaired_view(self) -> AnyView {
         let dev = self.dev;
-        let pair = move |_| {
-            let body = PairingRequest { btrfs_target: Some(dev.get_value()), ..Default::default() };
-            self.busy.set(true);
-            self.error.set(None);
-            spawn_local(async move {
-                let r = api::post::<_, PairingCreated>(&format!("{URL}/pairings"), Some(&body)).await;
-                let _ = self.busy.try_set(false);
-                match r {
-                    Ok(c) => {
-                        self.created.set(Some(c));
-                        self.overview.reload();
-                    }
-                    Err(e) => self.error.set(Some(e.text())),
-                }
-            });
-        };
+        let pair = move |_| self.pair_again();
         let cancel = move |id: String| {
             let u = format!("{URL}/pairings/{}", api::encode(&id));
             self.error.set(None);
@@ -968,24 +1045,21 @@ impl AgentCtl {
                 Some(ms) => tf("pcb.last_ok_on", &[("when", &i18n::datetime(ms))]),
                 None => t("pcb.never").to_string(),
             };
-            // mounted subvolumes the runs leave out: never a plain "up to date"
+            // mounted subvolumes the runs leave out (a choice in Settings): a plain line, the chip
+            // stays as it is
             let unsent = d.manifest.as_ref().map(|m| m.unsent_mounts()).unwrap_or_default();
             let unsent_note = (!unsent.is_empty() && !p.revoked).then(|| {
                 let list = unsent.iter().map(|(m, s)| format!("{m} ({s})")).collect::<Vec<_>>().join(", ");
-                ui::note(Tone::Warn, icons::TRIANGLE_ALERT, ui::text(tf("pcb.not_included", &[("list", &list)])))
+                ui::note(Tone::Info, icons::INFO, ui::text(tf("pcb.not_included", &[("list", &list)])))
             });
             let paused = p.settings.plan.paused && !p.revoked && p.state != PcState::Running;
-            // one chip: paused carries the last success, a partial backup is never "up to date"
-            let chip = if paused {
-                ui::status(Tone::Info, format!("{} · {last_ok}", t("pca.f.paused")))
-            } else if p.state == PcState::Ok && !unsent.is_empty() && !p.revoked {
-                ui::status(Tone::Warn, t("pcb.st.partial").to_string())
-            } else {
-                state_view(p.state, p.revoked)
-            };
+            let chip = device_chip(&p);
             let resume = paused.then(|| view! { <button type="button" class="link-btn" on:click=move |_| settings.run(())>{tr("pcb.resume")}</button> });
-            let plan = (!paused).then(|| tf("pcb.agent.every_h", &[("n", &p.settings.plan.interval_hours.to_string())]));
-            let last_ok = (!paused).then_some(last_ok);
+            // paused under a stronger chip (failed, unreachable): said on the meta line, with the
+            // last success the paused chip would carry
+            let paused_chip = paused && p.state != PcState::Failed && !unreachable(&p);
+            let plan = if paused { (!paused_chip).then(|| t("pca.f.paused").to_string()) } else { Some(tf("pcb.agent.every_h", &[("n", &p.settings.plan.interval_hours.to_string())])) };
+            let last_ok = (!paused_chip).then_some(last_ok);
             let agent = tf("pcb.agent_os", &[("os", &p.os), ("arch", &p.arch), ("v", &p.agent_version)]);
             // the last contact matters when the PC is late
             let seen = matches!(p.state, PcState::Late | PcState::Critical).then(|| tf("pcb.last_seen_on", &[("when", &when(p.last_seen_ms))]));
@@ -1012,7 +1086,7 @@ impl AgentCtl {
                 {move || if unpaired.get() {
                     view! { <div class="status-card-head">{folder.run()}</div>{self.unpaired_view()} }.into_any()
                 } else {
-                    view! { {self.detail.view(3, content)}{self.buttons()}{form_error(self.error)} }.into_any()
+                    view! { {self.detail.view(3, content)}{self.buttons()}{self.repair_view()}{form_error(self.error)} }.into_any()
                 }}
             </section>
         }
@@ -1022,12 +1096,29 @@ impl AgentCtl {
     /// Run now, at the bottom of the status card, and Cancel while a backup runs (nothing
     /// without a live agent).
     fn buttons(self) -> AnyView {
-        let live = move || self.detail.data.with(|d| d.as_ref().filter(|d| !d.device.revoked).map(|d| d.device.state == PcState::Running));
+        // (running, Run now still waiting for the PC, the PC unreachable)
+        let live = move || {
+            self.detail.data.with(|d| {
+                d.as_ref().filter(|d| !d.device.revoked).map(|d| {
+                    let p = &d.device;
+                    let waiting = command_waiting(p) && matches!(p.command, Some(AgentCommand::BackupNow { .. }));
+                    (p.state == PcState::Running, waiting, unreachable(p))
+                })
+            })
+        };
         view! {
-            {move || live().map(|running| view! {
+            {move || live().map(|(running, waiting, away)| view! {
                 <div class="sec-actions">
-                    <button class="btn primary sm" disabled=move || self.busy.get() || running on:click=move |_| self.command("backup-now")><Icon icon=icons::PLAY size=14 />{tr("run_now")}</button>
+                    {if waiting {
+                        // asked already: the PC takes it at its next contact
+                        view! { <button class="btn primary sm" disabled=true><Icon icon=icons::CLOCK size=14 />{tr("pca.waiting_pc")}</button> }.into_any()
+                    } else {
+                        view! { <button class="btn primary sm" disabled=move || self.busy.get() || running on:click=move |_| self.command("backup-now")><Icon icon=icons::PLAY size=14 />{tr("run_now")}</button> }.into_any()
+                    }}
                     {running.then(|| view! { <button class="btn ghost sm" disabled=move || self.busy.get() on:click=move |_| self.command("cancel")><Icon icon=icons::CIRCLE_STOP size=14 />{tr("pca.cancel")}</button> })}
+                    // gone for long: maybe reinstalled, pair it again (elsewhere in Folder and rules)
+                    {move || (away && self.created.with(Option::is_none)).then(|| view! { <button class="btn ghost sm" disabled=move || self.busy.get() on:click=move |_| self.pair_again()><Icon icon=icons::KEY size=14 />{tr("pca.pair_again")}</button> })}
+                    {(waiting || away).then(|| view! { <span class="small muted">{tr("pca.starts_on_contact")}</span> })}
                 </div>
             })}
         }

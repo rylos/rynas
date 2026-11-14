@@ -496,6 +496,9 @@ pub struct PcDevice {
     pub bare_metal: BareMetalReady,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<AgentCommand>,
+    /// When `command` was queued: still waiting for the PC while `last_seen_ms` is older.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_at_ms: Option<u64>,
     /// Revoked: no token, no key; the versions stay readable until the group is deleted.
     #[serde(default)]
     pub revoked: bool,

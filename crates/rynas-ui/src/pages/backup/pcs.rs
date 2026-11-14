@@ -41,7 +41,7 @@ use rynas_api_types::pcagent::{PcDevice, PcMethod};
 use crate::pages::snapshots::retention_text;
 use crate::tasks;
 use crate::toast::toast;
-use crate::ui::{self, Confirm, DlgKind, EmptyState, Folds, Remote, Tone, code_block, kv, when};
+use crate::ui::{self, Confirm, DlgKind, EmptyState, Folds, Remote, Tone, code_block, kv, kv_act, when};
 
 const URL: &str = "/api/v1/pc-backups/targets";
 /// The file manager's folder of the PCs' backups (`/@backups/<device>/<snapshot>`, read only,
@@ -485,7 +485,8 @@ pub fn panel(add: RwSignal<Option<bool>>) -> AnyView {
     );
     let content = move || {
         let Some(list) = pcs.list.data.get() else { return ().into_any() };
-        let progress_of = |dev: &str| agents.data.with(|o| o.as_ref().and_then(|o| o.devices.iter().find(|d| d.device == dev && d.settings.method == PcMethod::Btrfs).and_then(|d| d.progress.clone())));
+        // the paired PC of a folder fed by rynas-agent (its status and progress)
+        let device_of = |dev: &str| agents.data.with(|o| o.as_ref().and_then(|o| o.devices.iter().find(|d| d.device == dev && d.settings.method == PcMethod::Btrfs).cloned()));
         if list.is_empty() {
             return view! {
                 <EmptyState icon=icons::MONITOR title=Signal::derive(move || t("bkpc.empty").to_string()) text=Signal::derive(move || t("bkpc.empty_text").to_string())>
@@ -517,11 +518,18 @@ pub fn panel(add: RwSignal<Option<bool>>) -> AnyView {
                     ui::cell("bk.col.pc", "wrap", ui::two_lines(view! { <strong>{p.device.clone()}</strong> }.into_any(), sub, "cell-sub small")),
                     ui::cell("bk.col.folder", "wrap", ui::breakable(&p.path, "mono small")),
                     ui::cell("col.status", "wrap", {
-                        // a backup running: its progress instead of the last date
-                        let progress = p.agent.then(|| progress_of(&p.device)).flatten();
+                        // with rynas-agent the PC's chip, the drawer's (agent::device_chip); a
+                        // backup running: its progress instead of the last date
+                        let paired = p.agent.then(|| device_of(&p.device)).flatten();
+                        let progress = paired.as_ref().and_then(|d| d.progress.clone());
+                        let chip = match &paired {
+                            _ if progress.is_some() => ui::status(Tone::Info, t("pca.st.running").to_string()),
+                            Some(d) => super::agent::device_chip(d),
+                            None => folder_status(p),
+                        };
                         view! {
                             <div class="cell-main">
-                                {if progress.is_some() { ui::status(Tone::Info, t("pca.st.running").to_string()) } else { folder_status(p) }}
+                                {chip}
                                 {problem}
                                 {match progress {
                                     Some(pr) => super::agent::progress_view(&pr),
@@ -531,7 +539,8 @@ pub fn panel(add: RwSignal<Option<bool>>) -> AnyView {
                         }
                         .into_any()
                     }),
-                    ui::cell("bk.col.snapshots", "wrap", ui::two_lines(view! { <span class="tnum">{i18n::count(u64::from(p.snapshots))}</span> }.into_any(), (!groups.is_empty()).then_some(groups), "cell-sub small mono")),
+                    // the backups (runs), as the drawer counts them, and the subvolumes they hold
+                    ui::cell("pcb.backups", "wrap", ui::two_lines(view! { <span class="tnum">{i18n::count(u64::from(p.runs))}</span> }.into_any(), (!groups.is_empty()).then_some(groups), "cell-sub small mono")),
                 ];
                 if measured {
                     cells.push(ui::text_cell("bk.col.space", "num tnum", space));
@@ -541,8 +550,8 @@ pub fn panel(add: RwSignal<Option<bool>>) -> AnyView {
                 ui::row(cells)
             })
             .collect::<Vec<_>>();
-        const HEADS: &[&str] = &["bk.col.pc", "bk.col.folder", "col.status", "bk.col.snapshots", "#bk.col.space", "bkpc.col.restore", ""];
-        const HEADS_UNMEASURED: &[&str] = &["bk.col.pc", "bk.col.folder", "col.status", "bk.col.snapshots", "bkpc.col.restore", ""];
+        const HEADS: &[&str] = &["bk.col.pc", "bk.col.folder", "col.status", "pcb.backups", "#bk.col.space", "bkpc.col.restore", ""];
+        const HEADS_UNMEASURED: &[&str] = &["bk.col.pc", "bk.col.folder", "col.status", "pcb.backups", "bkpc.col.restore", ""];
         ui::table("bk-table", if measured { HEADS } else { HEADS_UNMEASURED }, rows)
     };
     view! {
@@ -1412,13 +1421,18 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
                 }.into_any()),
             ])
         };
-        // a folded group, open as the user left it (key: the run's timestamp, the subvolume)
+        // a folded row, open as the user left it (key: the run's timestamp, the subvolume, the
+        // whole PC): its title and facts left, its state and the chevron right, so every row of
+        // the drawer (restore, backups) starts at the same edge as the section headings
         let group = |key: String, title: AnyView, sub: String, flag: Option<AnyView>, body: AnyView| {
             let k = StoredValue::new(key.clone());
             view! {
                 <details class="fold pcb-group" open=folds.open(key, false) on:toggle=move |ev| k.with_value(|k| folds.toggled(k, &ev))>
-                    <summary><Icon icon=icons::CHEVRON_RIGHT size=14 />{title}{flag}<span class="small muted tnum">{sub}</span></summary>
-                    {body}
+                    <summary>
+                        <span class="pcb-row-main">{title}<span class="small muted tnum">{sub}</span></span>
+                        <span class="pcb-row-end">{flag}<Icon icon=icons::CHEVRON_RIGHT size=14 /></span>
+                    </summary>
+                    <div class="pcb-group-body">{body}</div>
                 </details>
             }
         };
@@ -1527,7 +1541,8 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
             .collect_view();
         let count = {
             let n = u64::from(p.snapshots);
-            let mut s = format!("{} · {}", i18n::tn("pcb.n_backups", n_backups as u64, &[]), tf(if n == 1 { "pcb.n_snaps1" } else { "pcb.n_snaps" }, &[("n", &i18n::count(n))]));
+            // the backups held (the list's number too); failed attempts are rows, not backups
+            let mut s = format!("{} · {}", i18n::tn("pcb.n_backups", u64::from(p.runs), &[]), tf(if n == 1 { "pcb.n_snaps1" } else { "pcb.n_snaps" }, &[("n", &i18n::count(n))]));
             if let Some(u) = p.usage {
                 s = format!("{s} · {}", i18n::bytes(u.exclusive_bytes));
             }
@@ -1538,6 +1553,8 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
             <div class="sec-head">
                 <h3 class="mini-title">{tr("pcb.backups")}</h3>
                 <span class="small muted tnum">{count}</span>
+                // grouped by run or by subvolume: on the line of the list it changes
+                {has_snaps.then(|| view! { <div class="sec-head-actions">{segmented("bkpc.view", VIEWS, by_run.into(), Callback::new(move |v| by_run.set(v)))}</div> })}
             </div>
             {if has_snaps || n_backups > 0 {
                 view! {
@@ -1612,11 +1629,12 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
                 .into_any(),
             )
         });
-        let whole = fold(
-            folds,
-            "bkpc.bm.title",
-            false,
-            view! { {bm_status(&b)}{reason.map(|r| view! { <span class="small muted fold-reason">{r}</span> })} }.into_any(),
+        // the whole PC: a row like the backups, its state right, the first reason after the title
+        let whole = group(
+            "bkpc.bm.title".into(),
+            view! { <span class="pcb-group-title">{tr("bkpc.bm.title")}</span> }.into_any(),
+            reason.unwrap_or_default(),
+            Some(bm_status(&b)),
             view! {
                 {has_snaps.then(|| restore_part(device.clone(), b.ready, restore_code))}
                 {disk_lines}
@@ -1624,19 +1642,24 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
             }
             .into_any(),
         );
+        // Restore: two rows, text left and the action right
         let restore = view! {
             <div class="sec-head"><h3 class="mini-title">{tr("pcb.restore")}</h3></div>
-            <div class="pcb-restore-row">
-                <div class="pcb-restore-text">
-                    <strong>{tr("pcb.restore.file")}</strong>
-                    <span class="small muted">{tr("pcb.restore.file_text")}</span>
+            <div class="pcb-groups">
+                <div class="pcb-group pcb-row">
+                    <span class="pcb-row-main">
+                        <span class="pcb-group-title">{tr("pcb.restore.file")}</span>
+                        <span class="small muted">{tr("pcb.restore.file_text")}</span>
+                    </span>
+                    <span class="pcb-row-end">
+                        {match latest {
+                            Some(name) => view! { <a class="btn ghost sm" href=files_href(&name)><Icon icon=icons::FOLDER_OPEN size=14 />{tr("pcb.browse_restore")}</a> }.into_any(),
+                            None => view! { <span class="small muted">{tr("bk.no_snapshots")}</span> }.into_any(),
+                        }}
+                    </span>
                 </div>
-                {match latest {
-                    Some(name) => view! { <a class="btn ghost sm" href=files_href(&name)><Icon icon=icons::FOLDER_OPEN size=14 />{tr("pcb.browse_restore")}</a> }.into_any(),
-                    None => view! { <span class="small muted">{tr("bk.no_snapshots")}</span> }.into_any(),
-                }}
+                {whole}
             </div>
-            <div class="folds">{whole}</div>
         };
 
         // ---- the folder and its rules: settings and facts that rarely change, with their
@@ -1655,40 +1678,32 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
         let size_note = if d.sizes_from_quota { t("bkpc.sizes_quota") } else { t("bkpc.sizes_note") };
         const VIEWS: &[(&str, &str)] = &[("run", "bkpc.view.run"), ("subvolume", "bk.col.subvolume")];
         let rules = rules_text(&p);
-        let folder = fold(
-            folds,
-            "pcb.folder_rules",
-            false,
-            ().into_any(),
-            view! {
-                <dl class="kvs">
-                    {kv("bk.col.folder", ui::breakable(&p.path, "mono"))}
-                    {(p.incomplete > 0).then(|| kv("bk.incomplete", ui::text(i18n::count(u64::from(p.incomplete)))))}
-                    {free.map(|f| kv("bkpc.free", ui::text(f)))}
-                    {kv("bk.col.space", view! {
-                        <div class="kv-act">
-                            <span>{usage}</span>
-                            <button class="btn ghost sm" disabled=move || measuring.get() on:click=measure>{spinner(measuring)}<Icon icon=icons::DATABASE size=14 />{tr("bk.measure")}</button>
-                        </div>
-                        {has_snaps.then(|| view! { <p class="small muted">{size_note}</p> })}
-                    }.into_any())}
-                    {kv("bk.f.rules", view! {
-                        <div class="kv-act">
-                            <span>{rules}</span>
-                            {(nas && has_snaps).then(|| view! { <button class="btn ghost sm" disabled=move || pruning.get() on:click=prune>{spinner(pruning)}<Icon icon=icons::TRASH_2 size=14 />{tr("bkpc.prune")}</button> })}
-                        </div>
-                    }.into_any())}
-                    {last_prune.filter(|_| nas).map(|l| kv("bkpc.last_prune", ui::text(l)))}
-                    {kv("bkpc.alert", ui::text(alert))}
-                    {p.key_fingerprint.clone().map(|fp| kv("bk.key", ui::breakable(&fp, "mono small")))}
-                    {p.adopted.then(|| kv("bk.adopted", ui::text(t("bk.adopted_yes").to_string())))}
-                </dl>
-                {has_snaps.then(|| segmented("bkpc.view", VIEWS, by_run.into(), Callback::new(move |v| by_run.set(v))))}
-                {form_error(measure_err)}
-                {form_error(prune_err)}
-            }
-            .into_any(),
-        );
+        // a section like Restore and Backups: the measure and the prune buttons right on their
+        // row, the long texts below over the whole width
+        let measure_btn = view! { <button class="btn ghost sm" disabled=move || measuring.get() on:click=measure>{spinner(measuring)}<Icon icon=icons::DATABASE size=14 />{tr("bk.measure")}</button> }.into_any();
+        let prune_btn = (nas && has_snaps).then(|| view! { <button class="btn ghost sm" disabled=move || pruning.get() on:click=prune>{spinner(pruning)}<Icon icon=icons::TRASH_2 size=14 />{tr("bkpc.prune")}</button> }.into_any());
+        let folder = view! {
+            <div class="sec-head"><h3 class="mini-title">{tr("pcb.folder_rules")}</h3></div>
+            <dl class="kvs">
+                {kv("bk.col.folder", ui::breakable(&p.path, "mono"))}
+                {(p.incomplete > 0).then(|| kv("bk.incomplete", ui::text(i18n::count(u64::from(p.incomplete)))))}
+                {free.map(|f| kv("bkpc.free", ui::text(f)))}
+                {kv_act("bk.col.space", Some(ui::text(usage)), Some(measure_btn), has_snaps.then(|| view! { <span class="small muted">{size_note}</span> }.into_any()))}
+                {kv_act("bk.f.rules", None, prune_btn, Some(ui::text(rules)))}
+                {last_prune.filter(|_| nas).map(|l| kv("bkpc.last_prune", ui::text(l)))}
+                {kv("bkpc.alert", ui::text(alert))}
+                // a reinstalled PC: a new code that keeps folder, history and settings (in the
+                // status card instead while the PC is unreachable)
+                {agent.then_some(move || (ctl.away() == Some(false)).then(|| {
+                    let again = view! { <button class="btn ghost sm" on:click=move |_| ctl.pair_again()><Icon icon=icons::KEY size=14 />{tr("pca.pair_again")}</button> }.into_any();
+                    kv_act("pcb.pairing", None, Some(again), Some(view! { <span class="small muted">{tr("pca.pair_again_text")}</span> }.into_any()))
+                }))}
+                {p.key_fingerprint.clone().map(|fp| kv("bk.key", ui::breakable(&fp, "mono small")))}
+                {p.adopted.then(|| kv("bk.adopted", ui::text(t("bk.adopted_yes").to_string())))}
+            </dl>
+            {form_error(measure_err)}
+            {form_error(prune_err)}
+        };
 
         // ---- btrbk: the manual steps, open while they are the only way forward (no key and
         // nothing received yet, or no manifest: its drop-in is one of them)
@@ -1727,10 +1742,8 @@ fn drawer(pcs: Pcs, device: String) -> AnyView {
             {check}
             {restore}
             {snapshots}
-            <div class="folds">
-                {folder}
-                {steps}
-            </div>
+            {folder}
+            {steps.map(|s| view! { <div class="folds">{s}</div> })}
         }
         .into_any()
     };

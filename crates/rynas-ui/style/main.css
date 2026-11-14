@@ -1538,7 +1538,7 @@ kbd {
   .link-card { flex-wrap: wrap; }
   .temp-row { grid-template-columns: 90px 1fr 48px; }
   /* a PC drawer's snapshots stay one line each: name and state, size, Browse and Delete */
-  .pcb-group .table tr { display: grid; grid-template-columns: minmax(0, 1fr) 7.5rem 72px; align-items: center; gap: 0 var(--s-2); padding-inline: var(--s-3); }
+  .pcb-group .table tr { display: grid; grid-template-columns: minmax(0, 1fr) 7.5rem 72px; align-items: center; gap: 0 var(--s-2); padding-inline: 0; }
   .pcb-group .table td { display: block; min-height: 0; text-align: left; }
   .pcb-group .table td::before { content: none; }
   .pcb-group .table td.tnum { text-align: right; }
@@ -1995,26 +1995,46 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .status-card .sec-actions { margin-top: var(--s-1); }
 .sec-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); margin-top: var(--s-3); min-width: 0; }
 .sec-head-actions { margin-left: auto; }
+/* a compact control on a section's title line (Group by): its label beside it, not above */
+.sec-head-actions > .field { flex-direction: row; align-items: center; white-space: nowrap; }
+.sec-head-actions .field-label { font-size: var(--fs-12); }
+.sec-head-actions .segmented button { min-height: 0; padding: var(--s-1) var(--s-2); font-size: var(--fs-12); }
+/* a fold inside an open row (Details) reads as a link of that row, not as another section */
+.pcb-group-body .fold-title { font-size: var(--fs-13); font-weight: 500; text-transform: none; letter-spacing: 0; }
 .pcb-groups { display: flex; flex-direction: column; min-width: 0; }
 .pcb-groups[hidden] { display: none; }
 .pcb-group { border-top: 1px solid var(--border); min-width: 0; }
 .pcb-group:last-child { border-bottom: 1px solid var(--border); }
 .pcb-group-title { font-weight: 500; overflow-wrap: anywhere; min-width: 0; }
-.pcb-group > .table-wrap { margin-bottom: var(--s-2); }
+/* the rows of a PC drawer (Restore, Backups): title and facts left from the section's edge,
+   the state or the action and the chevron right */
+/* (details.: above the generic .fold > summary, which wraps) */
+.pcb-row, details.pcb-group > summary { display: flex; flex-wrap: nowrap; align-items: center; justify-content: space-between; gap: var(--s-1) var(--s-3); min-height: var(--row-h); padding: var(--s-2) 0; min-width: 0; }
+.pcb-row-main { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--s-2); flex: 1 1 auto; min-width: 0; }
+.pcb-row-main > span { overflow-wrap: anywhere; min-width: 0; }
+.pcb-row-end { display: flex; align-items: center; gap: var(--s-2); flex: none; }
+.pcb-row-end > .icon { color: var(--text-subtle); transition: transform var(--t-fast); }
+.pcb-group[open] > summary .pcb-row-end > .icon { transform: rotate(90deg); }
+/* an open row: its content on the rows' edge, the table without a frame of its own */
+.pcb-group-body { display: flex; flex-direction: column; gap: var(--s-2); padding-bottom: var(--s-3); min-width: 0; }
+.pcb-group-body .table-wrap { margin: 0; border: 0; border-radius: 0; background: none; }
+.pcb-group-body .table :is(th, td):first-child { padding-left: 0; }
+.pcb-group-body .table :is(th, td):last-child { padding-right: 0; }
+.pcb-group-body .table tr:last-child td { border-bottom: 0; }
 /* every group's table has the same columns: fixed widths for the size and the buttons */
 .pcb-group .table { table-layout: fixed; }
 .pcb-group .table th:nth-child(2) { width: 15rem; }
 .pcb-group .table th:nth-child(3) { width: 96px; }
-.pcb-group > .note { margin: 0 var(--s-3) var(--s-2); }
 .pcb-desc { margin: 0 0 var(--s-2); overflow-wrap: anywhere; }
-/* Restore: "files and folders" with its button, then the whole PC folded */
-.pcb-restore-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--s-2) var(--s-3); padding: var(--s-2) 0; min-width: 0; }
-.pcb-restore-text { display: flex; flex-direction: column; gap: var(--s-1); min-width: 0; flex: 1 1 16rem; }
-.pcb-restore-row + .folds { margin-top: 0; }
-/* a value with its action on the same line (Measure, Delete old now), wrapping when narrow */
-.kv-act { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-3); min-width: 0; }
+/* ui::kv_act: label left, value and its button right on one line, a long text below over the
+   whole width and left-aligned (Space and its help, the deletion rules) */
+.kv.kv-act { flex-wrap: wrap; align-items: center; row-gap: var(--s-1); }
+.kv-act > dd:not(.kv-below) { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--s-1) var(--s-3); margin-left: auto; }
+.kv-act > .kv-below { flex: 1 0 100%; text-align: left; }
 .tip-wrap { display: inline-flex; }
 .status-card-head .link-btn { margin-left: 0; }
+/* a long status (paused or unreachable with its date) wraps inside the card instead of leaving it */
+.status-card-head > .status, .cell-main > .status { height: auto; min-height: 22px; white-space: normal; max-width: 100%; }
 /* ui::fold: a folded part (advanced options, history, a log, rare actions): chevron, title, an
    optional state after it. Inside .folds they are separated by rules; .fold.sub is the small
    one inside a card (the last run's notes). */
@@ -2026,7 +2046,6 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .fold > summary::-webkit-details-marker { display: none; }
 .fold > summary > .icon:first-child { flex: none; color: var(--text-subtle); transition: transform var(--t-fast); }
 .fold[open] > summary > .icon:first-child { transform: rotate(90deg); }
-.fold-reason { flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; }
 .fold-body { display: flex; flex-direction: column; gap: var(--s-2); padding-bottom: var(--s-3); min-width: 0; }
 .fold.sub > summary { padding: var(--s-1) 0; font-size: var(--fs-13); font-weight: 500; }
 .fold.sub[open] > ul { margin-top: var(--s-1); }

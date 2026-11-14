@@ -2231,6 +2231,7 @@ impl PcBackup {
             receiving,
             last_prune: t.last_prune.clone(),
             agent: t.agent,
+            runs: runs.len() as u32,
         };
         View { target, list: s.list, runs, quota: quota.is_some() }
     }

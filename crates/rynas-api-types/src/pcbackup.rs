@@ -415,6 +415,10 @@ pub struct PcTarget {
     /// SSH key, retention always on the NAS.
     #[serde(default)]
     pub agent: bool,
+    /// The backups held: the runs of [`PcTargetDetail::runs`] (snapshots taken together),
+    /// counted the same way in the list and in the drawer.
+    #[serde(default)]
+    pub runs: u32,
 }
 
 impl PcTarget {
