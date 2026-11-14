@@ -950,7 +950,7 @@ impl AgentCtl {
     /// run, the schedule and the agent on one line, the last run's error, its subvolumes
     /// (folded), Back up now / Cancel. With no agent paired under this name: `folder` (the
     /// folder's own status line) and the code waiting for it, or Make a code.
-    pub fn status(self, folder: ViewFn) -> AnyView {
+    pub fn status(self, folder: ViewFn, settings: Callback<()>) -> AnyView {
         let content = move || {
             let Some(d) = self.detail.data.get() else { return ().into_any() };
             let p = d.device.clone();
@@ -968,16 +968,34 @@ impl AgentCtl {
                 Some(ms) => tf("pcb.last_ok_on", &[("when", &i18n::datetime(ms))]),
                 None => t("pcb.never").to_string(),
             };
-            let plan = if p.settings.plan.paused { t("pca.f.paused").to_string() } else { tf("pcb.agent.every_h", &[("n", &p.settings.plan.interval_hours.to_string())]) };
+            // mounted subvolumes the runs leave out: never a plain "up to date"
+            let unsent = d.manifest.as_ref().map(|m| m.unsent_mounts()).unwrap_or_default();
+            let unsent_note = (!unsent.is_empty() && !p.revoked).then(|| {
+                let list = unsent.iter().map(|(m, s)| format!("{m} ({s})")).collect::<Vec<_>>().join(", ");
+                ui::note(Tone::Warn, icons::TRIANGLE_ALERT, ui::text(tf("pcb.not_included", &[("list", &list)])))
+            });
+            let paused = p.settings.plan.paused && !p.revoked && p.state != PcState::Running;
+            // one chip: paused carries the last success, a partial backup is never "up to date"
+            let chip = if paused {
+                ui::status(Tone::Info, format!("{} · {last_ok}", t("pca.f.paused")))
+            } else if p.state == PcState::Ok && !unsent.is_empty() && !p.revoked {
+                ui::status(Tone::Warn, t("pcb.st.partial").to_string())
+            } else {
+                state_view(p.state, p.revoked)
+            };
+            let resume = paused.then(|| view! { <button type="button" class="link-btn" on:click=move |_| settings.run(())>{tr("pcb.resume")}</button> });
+            let plan = (!paused).then(|| tf("pcb.agent.every_h", &[("n", &p.settings.plan.interval_hours.to_string())]));
+            let last_ok = (!paused).then_some(last_ok);
             let agent = tf("pcb.agent_os", &[("os", &p.os), ("arch", &p.arch), ("v", &p.agent_version)]);
             // the last contact matters when the PC is late
             let seen = matches!(p.state, PcState::Late | PcState::Critical).then(|| tf("pcb.last_seen_on", &[("when", &when(p.last_seen_ms))]));
             view! {
                 {p.revoked.then(|| ui::note(Tone::Info, icons::LOCK, ui::text(t("pcb.agent.revoked").to_string())))}
-                <div class="status-card-head">{state_view(p.state, p.revoked)}</div>
+                <div class="status-card-head">{chip}{resume}</div>
                 {progress}
+                {unsent_note}
                 {last_error.map(|e| ui::note(Tone::Err, icons::TRIANGLE_ALERT, ui::breakable(e.as_str(), "small")))}
-                <p class="status-meta small"><span>{last_ok}</span><span>{plan}</span><span>{agent}</span>{seen.map(|s| view! { <span>{s}</span> })}</p>
+                <p class="status-meta small">{last_ok.map(|s| view! { <span>{s}</span> })}{plan.map(|s| view! { <span>{s}</span> })}<span>{agent}</span>{seen.map(|s| view! { <span>{s}</span> })}</p>
                 {captures.map(|c| view! { <details class="fold sub" open=move || self.captures_open.get() on:toggle=move |ev| {
                 let open = event_target::<web_sys::Element>(&ev).has_attribute("open");
                 if self.captures_open.get_untracked() != open {
@@ -1001,50 +1019,16 @@ impl AgentCtl {
         .into_any()
     }
 
-    /// Back up now and Cancel, at the bottom of the status card (nothing without a live agent).
+    /// Run now, at the bottom of the status card, and Cancel while a backup runs (nothing
+    /// without a live agent).
     fn buttons(self) -> AnyView {
         let live = move || self.detail.data.with(|d| d.as_ref().filter(|d| !d.device.revoked).map(|d| d.device.state == PcState::Running));
         view! {
             {move || live().map(|running| view! {
                 <div class="sec-actions">
                     <button class="btn primary sm" disabled=move || self.busy.get() || running on:click=move |_| self.command("backup-now")><Icon icon=icons::PLAY size=14 />{tr("run_now")}</button>
-                    <button class="btn ghost sm" disabled=move || self.busy.get() || !running on:click=move |_| self.command("cancel")><Icon icon=icons::SQUARE size=14 />{tr("pca.cancel")}</button>
+                    {running.then(|| view! { <button class="btn ghost sm" disabled=move || self.busy.get() on:click=move |_| self.command("cancel")><Icon icon=icons::CIRCLE_STOP size=14 />{tr("pca.cancel")}</button> })}
                 </div>
-            })}
-        }
-        .into_any()
-    }
-
-    /// The agent's last runs: the newest five, then all of them on request.
-    pub fn history(self) -> AnyView {
-        const SHOWN: usize = 5;
-        let all = RwSignal::new(false);
-        view! {
-            {move || self.detail.data.with(|d| {
-                let runs: Vec<&PcRun> = d.as_ref()?.history.iter().filter(|h| !h.restore).collect();
-                let total = runs.len();
-                let rows = runs
-                    .into_iter()
-                    .take(if all.get() { total } else { SHOWN })
-                    .map(|h| {
-                        ui::row(vec![
-                            ui::text_cell("pca.col.when", "tnum", i18n::datetime(h.started_ms)),
-                            ui::cell("col.status", "wrap", if h.ok { ui::status(Tone::Ok, t("pca.h.ok").to_string()) } else { view! { <div class="cell-main">{ui::status(Tone::Err, t("pca.st.failed").to_string())}<span class="cell-sub small bk-wrap">{h.error.clone().unwrap_or_default()}</span></div> }.into_any() }),
-                            ui::text_cell("pcb.agent.sent", "num tnum", i18n::bytes(h.bytes_added)),
-                        ])
-                    })
-                    .collect::<Vec<_>>();
-                (!rows.is_empty()).then(|| view! {
-                    <div class="sec-head"><h3 class="mini-title">{tr("pca.history")}</h3></div>
-                    {ui::table("pca-history", &["pca.col.when", "col.status", "#pcb.agent.sent"], rows)}
-                    {(total > SHOWN).then(|| view! {
-                        <div class="sec-actions">
-                            <button class="btn ghost sm" aria-expanded=move || all.get().to_string() on:click=move |_| all.update(|a| *a = !*a)>
-                                {move || if all.get() { t("pcb.show_fewer").to_string() } else { tf("pcb.show_all", &[("n", &total.to_string())]) }}
-                            </button>
-                        </div>
-                    })}
-                })
             })}
         }
         .into_any()

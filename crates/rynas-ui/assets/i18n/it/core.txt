@@ -4780,8 +4780,8 @@ sf.err.pattern	Non è nel formato previsto.
 sf.err.hostname	Inserisci un nome host, ad es. nas.example.lan.
 sf.err.uri	Inserisci un indirizzo che inizia con http:// o https://.
 sf.err.email	Inserisci un indirizzo e-mail.
-bk.tab.pcs	PC: snapshot btrfs
-bk.intro	I PC con btrfs mandano qui snapshot in sola lettura dei loro sottovolumi, solo ciò che è cambiato dall'ultimo. Ogni snapshot è una copia completa del PC che puoi sfogliare. rynas-agent li manda via HTTPS; i PC già configurati con btrbk possono continuare a mandarli via SSH.
+bk.tab.pcs	PC (Linux con btrfs)
+bk.intro	I PC Linux con file system btrfs mandano qui i loro backup, solo ciò che è cambiato dall'ultimo. Ogni backup è una copia completa del PC: sfoglialo per ripristinare un file, oppure ricostruisci l'intero PC su un disco vuoto.
 bkpc.empty	Ancora nessun PC
 bkpc.empty_text	Aggiungi un PC: rynas-agent sul PC manda qui i suoi snapshot. Una cartella che contiene già snapshot ricevuti si può adottare.
 bk.add	Aggiungi PC
@@ -4882,14 +4882,14 @@ bkpc.bm.disks	Dischi
 bkpc.bm.serial	N. di serie {serial}
 bkpc.bm.part	Partizione {n}
 bkpc.bm.boot_copies	File di avvio copiati
-bkpc.restore.intro	Per ripristinare, crea un codice di ripristino (monouso, valido un'ora, in sola lettura, solo per questo PC), avvia un qualsiasi Linux live sul PC ed esegui l'agente qui sotto. L'agente riceve gli snapshot scelti in un nuovo filesystem btrfs, oppure aggiunge sottovolumi a quello già presente sul PC.
+bkpc.restore.intro	Crea il codice (monouso, valido un'ora, in sola lettura, solo per questo PC): qui compare il comando da eseguire sul PC da un qualsiasi Linux live. Mette il backup scelto in un nuovo file system btrfs, oppure aggiunge sottovolumi a quello già presente sul PC.
 bkpc.first_run	Primo backup
 bkpc.first_run_intro	Il PC è configurato quando è arrivato il primo snapshot di ogni sottovolume.
 bkpc.first_run_ok	Ricevuto
 bkpc.first_run_wait	In attesa
 bkpc.bm.not_ready	Non pronto
-bkpc.bm.title	Ripristino su un disco vuoto
-bkpc.bm.manifest	Manifest della struttura
+bkpc.bm.title	L'intero PC (su un disco vuoto)
+bkpc.bm.manifest	Struttura dei dischi
 bkpc.bm.loader	Caricatore di avvio
 bkpc.bm.subvolumes	Sottovolumi necessari
 bkpc.bm.no_snapshots	Ancora nessuno snapshot completo.
@@ -4945,6 +4945,20 @@ pcb.n_snaps1	1 snapshot
 pcb.show_all	Mostra tutto ({n})
 pcb.show_fewer	Mostra meno
 pcb.folder_rules	Cartella e regole
+pcb.backups	Backup
+pcb.n_backups.one	{n} backup
+pcb.n_backups.other	{n} backup
+pcb.sent_size	{size} inviati
+pcb.restore	Ripristino
+pcb.restore.file	File e cartelle
+pcb.restore.file_text	Apri il backup più recente in File e copia indietro ciò che ti serve.
+pcb.browse_restore	Sfoglia e ripristina file
+pcb.details	Dettagli
+pcb.st.partial	Backup parziale
+pcb.not_included	Non inclusi nel backup: {list}. Si cambia nelle Impostazioni.
+pcb.resume	Riprendi
+bkpc.restore.make	Crea il codice di ripristino
+bkpc.snap.parent_tip	Serve per il prossimo backup incrementale
 pcb.other_snaps	Altri snapshot
 pcb.agent.sent	Inviati
 pcb.agent.revoked	L'agente di questo PC è stato revocato: non può più inviare. Gli snapshot restano.
@@ -5109,7 +5123,7 @@ nev.power.manual_shutdown.title	Spegnimento del NAS richiesto da {user}
 nev.power.manual_shutdown.body	{user} spegne il NAS (ritardo {delay_min} min).
 nev.power.manual_cancelled.title	Riavvio o spegnimento annullato da {user}
 nev.power.manual_cancelled.body	Il NAS resta acceso.
-bk.tab.agent	PC: backup dei file
+bk.tab.agent	PC (qualsiasi Linux)
 pca.intro	I PC hanno due metodi. Snapshot btrfs: il NAS riceve gli snapshot del PC (la scheda precedente; la scelta migliore per i PC con btrfs). Backup dei file: rynas-agent su qualsiasi PC Linux manda i suoi file e la disposizione dei dischi in un archivio sul NAS, e lo stesso programma ripristina tutto il PC da un sistema live.
 pca.settings	Impostazioni
 pca.setup	Scegli dove vanno i backup dei PC

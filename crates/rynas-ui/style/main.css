@@ -1480,6 +1480,8 @@ kbd {
   /* icon-only buttons keep their text for screen readers (display: none would leave them nameless) */
   .btn-label, .search-text { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   .page-actions .btn { padding: 0 var(--s-3); }
+  /* a header whose buttons need their words (two actions that an icon alone would not tell apart) */
+  .page-actions .btn-label.keep { position: static; width: auto; height: auto; overflow: visible; clip: auto; }
   .popover.notif-pop { position: fixed; left: 8px; right: 8px; top: calc(var(--appbar-h) + 6px); width: auto; }
   .pal-foot { display: none; }
   .login { justify-content: flex-start; padding-top: calc(var(--s-12) + var(--s-6)); }
@@ -1976,6 +1978,16 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .pcb-group .table { table-layout: fixed; }
 .pcb-group .table th:nth-child(2) { width: 15rem; }
 .pcb-group .table th:nth-child(3) { width: 96px; }
+.pcb-group > .note { margin: 0 var(--s-3) var(--s-2); }
+.pcb-desc { margin: 0 0 var(--s-2); overflow-wrap: anywhere; }
+/* Restore: "files and folders" with its button, then the whole PC folded */
+.pcb-restore-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--s-2) var(--s-3); padding: var(--s-2) 0; min-width: 0; }
+.pcb-restore-text { display: flex; flex-direction: column; gap: var(--s-1); min-width: 0; flex: 1 1 16rem; }
+.pcb-restore-row + .folds { margin-top: 0; }
+/* a value with its action on the same line (Measure, Delete old now), wrapping when narrow */
+.kv-act { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-3); min-width: 0; }
+.tip-wrap { display: inline-flex; }
+.status-card-head .link-btn { margin-left: 0; }
 /* ui::fold: a folded part (advanced options, history, a log, rare actions): chevron, title, an
    optional state after it. Inside .folds they are separated by rules; .fold.sub is the small
    one inside a card (the last run's notes). */

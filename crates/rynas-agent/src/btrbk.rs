@@ -41,7 +41,7 @@ fn strip_comment(line: &str) -> &str {
 
 /// Mount points whose subvolume is cache, logs or other rebuildable data: not sent, recreated
 /// empty by a restore (the manifest lists them as not captured).
-pub const NOT_SENT: &[&str] = &["/var/log", "/var/cache", "/var/tmp", "/tmp", "/swap", "/var/swap", "/var/lib/docker", "/var/lib/containers", "/srv/swap"];
+pub const NOT_SENT: &[&str] = rynas_api_types::pcagent::NOT_SENT_MOUNTS;
 
 // ------------------------------------------------------------------ btrbk.conf
 

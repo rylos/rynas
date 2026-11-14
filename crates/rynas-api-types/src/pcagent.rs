@@ -20,6 +20,11 @@ pub const MANIFEST_PATH: &str = "/.rynas/manifest.json";
 /// The manifest format (one schema for both PC methods: the file method fills
 /// [`Manifest::filesystems`] and friends, the btrfs method adds [`Manifest::btrbk`]).
 pub const MANIFEST_FORMAT: u32 = 1;
+
+/// Mount points (and what lies below them) the btrfs method never sends: caches, logs, swap,
+/// rebuildable container storage. The agent skips them; an interface does not count them as
+/// left out ([`Manifest::unsent_mounts`]).
+pub const NOT_SENT_MOUNTS: &[&str] = &["/var/log", "/var/cache", "/var/tmp", "/tmp", "/swap", "/var/swap", "/var/lib/docker", "/var/lib/containers", "/srv/swap"];
 /// The `Accept` value of the restic REST protocol v2 listings.
 pub const REST_V2: &str = "application/vnd.x.restic.rest.v2";
 /// Longest manifest the NAS keeps (display only).
@@ -1181,6 +1186,40 @@ impl Manifest {
             .find(|f| f.mounts.iter().any(|m| m.path == "/"))
     }
 
+    /// The btrfs method: subvolumes of the root filesystem mounted on the PC that the run
+    /// writing this manifest does not send, other than those left out on purpose
+    /// ([`NOT_SENT_MOUNTS`], snapshot folders): `(mount point, subvolume path)`, so an
+    /// interface never says "up to date" for a PC whose `/home` is not in the backup.
+    /// Empty without the btrfs block.
+    pub fn unsent_mounts(&self) -> Vec<(String, String)> {
+        let (Some(block), Some(root)) = (self.btrbk.as_ref(), self.root()) else {
+            return Vec::new();
+        };
+        let trim = |s: &str| s.trim_matches('/').to_string();
+        let sent: Vec<String> = block
+            .subvolumes
+            .iter()
+            .filter(|s| s.fs_uuid.is_empty() || s.fs_uuid == root.uuid)
+            .map(|s| trim(&s.path))
+            .collect();
+        let under = |m: &str, p: &str| m == p || m.starts_with(&format!("{p}/"));
+        let mut out: Vec<(String, String)> = Vec::new();
+        for m in &root.mounts {
+            let Some(sv) = m.subvol.as_deref().map(trim) else {
+                continue;
+            };
+            let on_purpose = NOT_SENT_MOUNTS.iter().any(|p| under(&m.path, p))
+                || m.path.rsplit('/').next() == Some(".snapshots")
+                || sv.split('/').any(|c| matches!(c, ".snapshots" | "btrbk_snapshots" | ".btrbk_snapshots"))
+                || sv.contains("timeshift-btrfs");
+            if sv.is_empty() || on_purpose || sent.contains(&sv) || out.iter().any(|(_, s)| *s == sv) {
+                continue;
+            }
+            out.push((m.path.clone(), sv));
+        }
+        out
+    }
+
     /// The bare-metal readiness of a version with this manifest (without the NAS-side
     /// reasons: versions, recovery kit, age).
     pub fn ready_reasons(&self) -> Vec<ReadyReason> {
@@ -1256,6 +1295,24 @@ mod tests {
         assert!(!valid_device("-pc"));
         assert!(!valid_device("PC"));
         assert!(!valid_device(&"a".repeat(33)));
+    }
+
+    #[test]
+    fn unsent_mounts_skip_the_sent_and_the_left_out_on_purpose() {
+        let mount = |path: &str, sv: &str| MountEntry { path: path.into(), subvol: Some(sv.into()), options: String::new() };
+        let sub = |name: &str, path: &str, mount: &str| BtrbkSubvolume { name: name.into(), path: path.into(), mount: mount.into(), ..Default::default() };
+        let mut m = Manifest {
+            filesystems: vec![Filesystem {
+                fstype: "btrfs".into(),
+                mounts: vec![mount("/", "/@"), mount("/home", "/@home"), mount("/var/log", "/@log"), mount("/.snapshots", "/@snapshots"), mount("/data", "/@data"), mount("/mnt/pool", "/")],
+                ..Default::default()
+            }],
+            btrbk: Some(BtrbkLayout { subvolumes: vec![sub("@", "@", "/"), sub("@data", "@data", "/data")], ..Default::default() }),
+            ..Default::default()
+        };
+        assert_eq!(m.unsent_mounts(), vec![("/home".to_string(), "@home".to_string())]);
+        m.btrbk = None;
+        assert!(m.unsent_mounts().is_empty());
     }
 
     #[test]

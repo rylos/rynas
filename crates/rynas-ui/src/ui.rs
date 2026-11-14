@@ -738,7 +738,7 @@ pub fn drawer_foot(danger: Option<Danger>, secondary: Option<AnyView>, close: Ca
     let danger = danger.map(|d| {
         let (go, off) = (d.on_click, d.disabled);
         view! {
-            <button type="button" class="btn danger foot-start" disabled=move || off.get() on:click=move |_| go.run(())>
+            <button type="button" class="btn ghost danger-text foot-start" disabled=move || off.get() on:click=move |_| go.run(())>
                 <Icon icon=d.icon size=16 />{tr(d.label)}
             </button>
         }
