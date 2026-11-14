@@ -357,7 +357,7 @@ fn overview_tab(
                 {kv_row("sto.firmware", opt(d.firmware.clone()), "mono")}
                 {kv_row("sto.size", Signal::derive({ let v = i18n::bytes_si(d.size); move || v.clone() }), "tnum")}
                 {kv_row("sto.type", Signal::derive({ let v = format!("{} · {}", t(kind_key(d.kind)), d.transport.to_uppercase()); move || v.clone() }), "")}
-                {kv_row("sto.rpm", opt(d.rotation_rpm.map(|r| format!("{r} rpm"))), "tnum")}
+                {kv_row("sto.rpm", opt(d.rotation_rpm.map(|r| crate::i18n::tf("fmt.rpm", &[("n", &r.to_string())]))), "tnum")}
                 {kv_row("sto.bay", opt(super::slot_text(&d)), "tnum")}
                 {kv_row("sto.poh", opt(d.power_on_hours.map(|h| i18n::duration(h * 3600))), "tnum")}
                 {kv_row("sto.smart_age", opt(d.smart_age_s.map(|a| tf("sto.ago", &[("t", &i18n::duration(a))]))), "")}

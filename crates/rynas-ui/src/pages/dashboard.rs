@@ -412,7 +412,7 @@ fn SystemWidget() -> impl IntoView {
                 <dl class="kvs">
                     {row("f.os", field(|s| s.os.clone()))}
                     {row("f.kernel", view! { <span class="mono">{field(|s| s.kernel.clone())}</span> })}
-                    {row("f.cpu", field(|s| format!("{} · {} {}", s.cpu_model, s.cpu_threads, t("f.threads"))))}
+                    {row("f.cpu", field(|s| format!("{} · {}", s.cpu_model, crate::i18n::tn("f.threads", u64::from(s.cpu_threads), &[]))))}
                     {row("f.uptime", uptime)}
                     {row("f.load", load)}
                     {row("f.version", field(|s| s.rynas_version.clone()))}
@@ -777,17 +777,17 @@ fn HealthWidget() -> impl IntoView {
                 <div class="tiles">
                     <div class="tile">
                         <span class="tile-num tnum">{move || counts.get().map(|c| c.0).unwrap_or(0)}</span>
-                        <span class="tile-label">{tr("h.disks")}</span>
-                        <span class="tile-sub">{move || counts.get().filter(|c| c.1 > 0).map(|c| format!("{} {}", c.1, t("h.asleep"))).unwrap_or_default()}</span>
+                        <span class="tile-label">{move || crate::i18n::tn("h.disks", counts.get().map_or(0, |c| c.0 as u64), &[])}</span>
+                        <span class="tile-sub">{move || counts.get().filter(|c| c.1 > 0).map(|c| crate::i18n::tn("h.asleep", c.1 as u64, &[])).unwrap_or_default()}</span>
                     </div>
                     <div class="tile">
                         <span class="tile-num tnum">{move || counts.get().map(|c| c.2).unwrap_or(0)}</span>
-                        <span class="tile-label">{tr("h.arrays")}</span>
+                        <span class="tile-label">{move || crate::i18n::tn("h.arrays", counts.get().map_or(0, |c| c.2 as u64), &[])}</span>
                         <span class="tile-sub">{move || if counts.get().is_some_and(|c| c.2 == 0) { t("h.no_arrays") } else { "" }}</span>
                     </div>
                     <div class="tile">
                         <span class="tile-num tnum">{move || counts.get().map(|c| c.3).unwrap_or(0)}</span>
-                        <span class="tile-label">{tr("h.volumes")}</span>
+                        <span class="tile-label">{move || crate::i18n::tn("h.volumes", counts.get().map_or(0, |c| c.3 as u64), &[])}</span>
                         <span class="tile-sub"></span>
                     </div>
                 </div>
@@ -894,7 +894,7 @@ fn VolumesWidget() -> impl IntoView {
                                             <div class="raid-top">
                                                 <span class="mono strong">{a.name.clone()}</span>
                                                 <span class="chip accent">{a.level.to_uppercase()}</span>
-                                                <span class="small muted tnum">{format!("{} · {} {}", i18n::bytes_si(a.size), a.members.len(), t("sto.members_n"))}</span>
+                                                <span class="small muted tnum">{format!("{} · {}", i18n::bytes_si(a.size), i18n::tn("sto.members", a.members.len() as u64, &[]))}</span>
                                                 <span class="row-end"><Status tone=tone text=t(key).to_string() /></span>
                                             </div>
                                             {a.sync_pct.map(|p| view! {
@@ -963,7 +963,7 @@ fn HardwareWidget() -> impl IntoView {
                         <div class="fan-row">
                             <span class=if f.alarm { "fan-icon alarm" } else { "fan-icon spin" }><Icon icon=icons::FAN size=16 /></span>
                             <span>{fan_label(&f.label)}</span>
-                            <span class="row-end tnum">{f.rpm.map(|r| format!("{r} rpm")).unwrap_or_else(|| crate::ui::DASH.into())}</span>
+                            <span class="row-end tnum">{f.rpm.map(|r| crate::i18n::tf("fmt.rpm", &[("n", &r.to_string())])).unwrap_or_else(|| crate::ui::DASH.into())}</span>
                         </div>
                     }).collect_view()}
                 </div>

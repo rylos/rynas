@@ -1160,7 +1160,8 @@ dict! { BLOB, LENS;
     "f.kernel" => "Kernel";
     "f.uptime" => "Uptime";
     "f.cpu" => "Processor";
-    "f.threads" => "threads";
+    "f.threads.one" => "{n} thread";
+    "f.threads.other" => "{n} threads";
     "f.load" => "Load average";
     "f.version" => "rynas version";
     "f.host" => "Hostname";
@@ -1188,10 +1189,14 @@ dict! { BLOB, LENS;
     "h.sub_sync" => "Redundancy is being rebuilt";
     "h.sub_warn" => "Check the details in Storage";
     "v.arrays" => "RAID arrays";
-    "h.disks" => "Drives";
-    "h.arrays" => "Arrays";
-    "h.volumes" => "Volumes";
-    "h.asleep" => "in standby";
+    "h.disks.one" => "Drive";
+    "h.disks.other" => "Drives";
+    "h.arrays.one" => "Array";
+    "h.arrays.other" => "Arrays";
+    "h.volumes.one" => "Volume";
+    "h.volumes.other" => "Volumes";
+    "h.asleep.one" => "{n} in standby";
+    "h.asleep.other" => "{n} in standby";
     "h.ok" => "All storage is healthy";
     "h.syncing" => "A RAID array is resyncing";
     "h.warn" => "Attention needed";
@@ -1530,7 +1535,8 @@ dict! { BLOB, LENS;
     "sto.serial" => "Serial number";
     "sto.size" => "Capacity";
     "sto.type" => "Type";
-    "sto.members_n" => "members";
+    "sto.members.one" => "{n} drive";
+    "sto.members.other" => "{n} drives";
     "sto.level" => "Level";
     "sto.mount" => "Mount point";
     "sto.fs" => "File system";
@@ -5890,6 +5896,27 @@ dict! { BLOB, LENS;
     "dur.s" => "{s} s";
     "fmt.ago" => "{time} ago";
     "fmt.of" => "{part} of {total}";
+    "fmt.unit.b" => "B";
+    "fmt.unit.kib" => "KiB";
+    "fmt.unit.mib" => "MiB";
+    "fmt.unit.gib" => "GiB";
+    "fmt.unit.tib" => "TiB";
+    "fmt.unit.pib" => "PiB";
+    "fmt.unit.eib" => "EiB";
+    "fmt.unit.kb" => "kB";
+    "fmt.unit.mb" => "MB";
+    "fmt.unit.gb" => "GB";
+    "fmt.unit.tb" => "TB";
+    "fmt.unit.pb" => "PB";
+    "fmt.unit.eb" => "EB";
+    "fmt.unit.bps" => "bit/s";
+    "fmt.unit.kbps" => "kbit/s";
+    "fmt.unit.mbps" => "Mbit/s";
+    "fmt.unit.gbps" => "Gbit/s";
+    "fmt.unit.tbps" => "Tbit/s";
+    "fmt.unit.rpm" => "rpm";
+    "fmt.rate" => "{size}/s";
+    "fmt.rpm" => "{n} rpm";
     "hour_cycle" => "Time format";
     "hour_cycle.auto" => "Automatic";
     "hour_cycle.h23" => "24-hour";
@@ -6267,12 +6294,12 @@ fn scaled(n: u64, base: f64, units: &[&str]) -> String {
 
 /// Binary sizes: 1536 -> "1.50 KiB" (the File app's sizes follow the same rule).
 pub fn bytes(n: u64) -> String {
-    scaled(n, 1024.0, &["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"])
+    scaled(n, 1024.0, &["fmt.unit.b", "fmt.unit.kib", "fmt.unit.mib", "fmt.unit.gib", "fmt.unit.tib", "fmt.unit.pib", "fmt.unit.eib"].map(t))
 }
 
 /// Disk sizes the way vendors print them (decimal): 4000787030016 -> "4.00 TB".
 pub fn bytes_si(n: u64) -> String {
-    scaled(n, 1000.0, &["B", "kB", "MB", "GB", "TB", "PB", "EB"])
+    scaled(n, 1000.0, &["fmt.unit.b", "fmt.unit.kb", "fmt.unit.mb", "fmt.unit.gb", "fmt.unit.tb", "fmt.unit.pb", "fmt.unit.eb"].map(t))
 }
 
 /// "X of Y" / "X di Y": a part of a whole, for every ratio the interface writes.
@@ -6287,30 +6314,30 @@ pub fn bytes_of(part: u64, total: u64) -> String {
 
 /// Byte rate: "12.3 MiB/s".
 pub fn rate(bps: u64) -> String {
-    format!("{}/s", bytes(bps))
+    tf("fmt.rate", &[("size", &bytes(bps))])
 }
 
 /// Network rate in bits: "940 Mbit/s".
 pub fn bitrate(bytes_per_s: u64) -> String {
-    const U: [&str; 5] = ["bit/s", "kbit/s", "Mbit/s", "Gbit/s", "Tbit/s"];
+    let u = ["fmt.unit.bps", "fmt.unit.kbps", "fmt.unit.mbps", "fmt.unit.gbps", "fmt.unit.tbps"].map(t);
     let mut v = bytes_per_s as f64 * 8.0;
     let mut i = 0;
     // 999.7 kbit/s would print as "1000 kbit/s": step up at what rounds to 1000, like `scaled`.
     let step = |i: usize| if i == 0 { 1000.0 } else { 999.5 };
-    while v >= step(i) && i < U.len() - 1 {
+    while v >= step(i) && i < u.len() - 1 {
         v /= 1000.0;
         i += 1;
     }
     if i == 0 {
-        format!("{} {}", v as u64, U[0])
+        format!("{} {}", v as u64, u[0])
     } else {
-        format!("{} {}", sig3(v), U[i])
+        format!("{} {}", sig3(v), u[i])
     }
 }
 
-/// Link speed of a port from Mbit/s: "1 Gbit", "2.5 Gbit", "100 Mbit".
+/// Link speed of a port from Mbit/s: "1 Gbit/s", "2.5 Gbit/s", "100 Mbit/s".
 pub fn link_speed(m: u32) -> String {
-    if m >= 1000 { format!("{} Gbit", num(m as f64 / 1000.0, if m.is_multiple_of(1000) { 0 } else { 1 })) } else { format!("{m} Mbit") }
+    if m >= 1000 { format!("{} {}", num(m as f64 / 1000.0, if m.is_multiple_of(1000) { 0 } else { 1 }), t("fmt.unit.gbps")) } else { format!("{m} {}", t("fmt.unit.mbps")) }
 }
 
 /// A percentage of 0–100: one decimal below 10 ("4.5%", "45%").

@@ -546,7 +546,7 @@ fn fan_row(st: Remote<SynologyStatus>, n: u32) -> AnyView {
         <li class="fan-row">
             <span class=move || if alarm.get() == FanAlarm::Stopped { "fan-icon alarm" } else { "fan-icon" }><Icon icon=icons::FAN size=16 /></span>
             <span>{move || tf("hw.fan_n", &[("n", &n.to_string())])}</span>
-            <span class="tnum fan-rpm-s">{move || rpm.get().map(|r| format!("{r} rpm")).unwrap_or_else(|| ui::DASH.into())}</span>
+            <span class="tnum fan-rpm-s">{move || rpm.get().map(|r| crate::i18n::tf("fmt.rpm", &[("n", &r.to_string())])).unwrap_or_else(|| ui::DASH.into())}</span>
             {move || {
                 let (tone, key) = match alarm.get() {
                     FanAlarm::Ok => (Tone::Ok, "syn.fan_ok"),

@@ -51,8 +51,8 @@ export function setBinary(b) {
 /** Sizes in 1024ⁿ (KiB…) rather than 1000ⁿ (kB…). */
 export const isBinary = () => binary;
 
-const UNITS_BIN = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
-const UNITS_DEC = ["B", "kB", "MB", "GB", "TB", "PB", "EB"];
+const UNITS_BIN = ["files.fmt.unit.b", "files.fmt.unit.kib", "files.fmt.unit.mib", "files.fmt.unit.gib", "files.fmt.unit.tib", "files.fmt.unit.pib", "files.fmt.unit.eib"];
+const UNITS_DEC = ["files.fmt.unit.b", "files.fmt.unit.kb", "files.fmt.unit.mb", "files.fmt.unit.gb", "files.fmt.unit.tb", "files.fmt.unit.pb", "files.fmt.unit.eb"];
 
 /** Three significant digits (decided on the rounded value), like the core's sig3. */
 const sig3 = (v) => intl().nf[v < 9.995 ? 2 : v < 99.95 ? 1 : 0].format(v);
@@ -63,7 +63,7 @@ const sig3 = (v) => intl().nf[v < 9.995 ? 2 : v < 99.95 ? 1 : 0].format(v);
  */
 export function sizeParts(bytes) {
   const base = binary ? 1024 : 1000;
-  const units = binary ? UNITS_BIN : UNITS_DEC;
+  const units = (binary ? UNITS_BIN : UNITS_DEC).map((k) => t(k));
   const n = bytes || 0;
   if (n < 1000) return [intl().nf[0].format(n), units[0], 0];
   let v = n;
@@ -81,7 +81,7 @@ export function size(bytes) {
 }
 
 export function speed(bps) {
-  return `${size(bps)}/s`;
+  return t("files.fmt.rate", { size: size(bps) });
 }
 
 /** "X of Y": a part of a whole (core: i18n::of). */

@@ -168,6 +168,20 @@ fn files_formats_match_core() {
         ("dur.ms", "files.dur.ms"),
         ("fmt.ago", "files.fmt.ago"),
         ("fmt.of", "files.fmt.of"),
+        ("fmt.rate", "files.fmt.rate"),
+        ("fmt.unit.b", "files.fmt.unit.b"),
+        ("fmt.unit.kib", "files.fmt.unit.kib"),
+        ("fmt.unit.mib", "files.fmt.unit.mib"),
+        ("fmt.unit.gib", "files.fmt.unit.gib"),
+        ("fmt.unit.tib", "files.fmt.unit.tib"),
+        ("fmt.unit.pib", "files.fmt.unit.pib"),
+        ("fmt.unit.eib", "files.fmt.unit.eib"),
+        ("fmt.unit.kb", "files.fmt.unit.kb"),
+        ("fmt.unit.mb", "files.fmt.unit.mb"),
+        ("fmt.unit.gb", "files.fmt.unit.gb"),
+        ("fmt.unit.tb", "files.fmt.unit.tb"),
+        ("fmt.unit.pb", "files.fmt.unit.pb"),
+        ("fmt.unit.eb", "files.fmt.unit.eb"),
     ];
     let en: std::collections::HashMap<String, String> = english().into_iter().collect();
     let used: HashSet<String> = key_literals().into_iter().map(|(_, k)| k).collect();
