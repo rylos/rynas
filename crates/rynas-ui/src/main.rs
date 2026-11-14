@@ -1,5 +1,6 @@
 //! rynas web interface: Leptos CSR shell, built with trunk (see `Trunk.toml`).
 
+mod about;
 mod alerts;
 mod api;
 mod auth;

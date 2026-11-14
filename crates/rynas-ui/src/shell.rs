@@ -436,6 +436,7 @@ fn UserMenu() -> impl IntoView {
 fn Sidebar() -> impl IntoView {
     let ui = use_ui();
     let nav = nav_layout();
+    let about_open = RwSignal::new(false);
     let collapse_label = move || if ui.sidebar_collapsed.get() { t("nav.expand") } else { t("nav.collapse") };
     // the sidebar is wider while editing (and open when collapsed): the charts follow
     Effect::new(move |prev: Option<bool>| {
@@ -452,10 +453,9 @@ fn Sidebar() -> impl IntoView {
                 when=move || nav.editing.get()
                 fallback=move || view! {
                     <div class="sidebar-about">
-                        <span class="about-text">
-                            <span>{concat!("rynas ", env!("CARGO_PKG_VERSION"))}</span>
-                            <span>"Marco Ziliani"</span>
-                        </span>
+                        <button type="button" class="about-text" title=tr("about.title") on:click=move |_| about_open.set(true)>
+                            {concat!("rynas ", env!("CARGO_PKG_VERSION"))}
+                        </button>
                         <span class="about-actions">
                             <button
                                 type="button"
@@ -496,6 +496,9 @@ fn Sidebar() -> impl IntoView {
                 <crate::sidebar::EditBar />
             </Show>
         </nav>
+        <Show when=move || about_open.get()>
+            <crate::about::AboutDialog on_close=Callback::new(move |_| about_open.set(false)) />
+        </Show>
     }
 }
 

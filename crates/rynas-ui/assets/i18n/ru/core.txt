@@ -13,6 +13,15 @@ nav.main	Основная навигация
 nav.collapse	Свернуть боковую панель
 nav.expand	Развернуть боковую панель
 nav.project	Проект на GitHub
+about.title	О rynas
+about.version	Версия {version}
+about.free	Свободное ПО под лицензией GNU AGPL-3.0: бесплатно для всех, включая компании, со всеми функциями.
+about.authors	Авторы
+about.role.author	Автор и сопровождающий
+about.contributors_text	А также все, кто присылает исправления, переводы и идеи на GitHub.
+about.contributors	Участники
+about.issues	Сообщить о проблеме или предложить идею
+about.license	Лицензия (GNU AGPL-3.0)
 nav.notifications	Уведомления
 bar.search	Поиск или выполнение команды…
 bar.theme	Тема

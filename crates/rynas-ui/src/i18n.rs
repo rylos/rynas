@@ -544,6 +544,15 @@ dict! { BLOB, LENS;
     "nav.collapse" => "Collapse sidebar";
     "nav.expand" => "Expand sidebar";
     "nav.project" => "The project on GitHub";
+    "about.title" => "About rynas";
+    "about.version" => "Version {version}";
+    "about.free" => "Free software under the GNU AGPL-3.0: free for everyone, companies included, every feature included.";
+    "about.authors" => "Authors";
+    "about.role.author" => "Author and maintainer";
+    "about.contributors_text" => "And everyone who sends fixes, translations and ideas on GitHub.";
+    "about.contributors" => "Contributors";
+    "about.issues" => "Report a problem or suggest an idea";
+    "about.license" => "License (GNU AGPL-3.0)";
     "nav.notifications" => "Notifications";
     // app bar
     "bar.search" => "Search or run a command…";

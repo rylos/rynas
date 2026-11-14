@@ -13,6 +13,15 @@ nav.main	Navigazione principale
 nav.collapse	Comprimi barra laterale
 nav.expand	Espandi barra laterale
 nav.project	Il progetto su GitHub
+about.title	Informazioni su rynas
+about.version	Versione {version}
+about.free	Software libero con licenza GNU AGPL-3.0: gratis per tutti, aziende comprese, con tutte le funzioni.
+about.authors	Autori
+about.role.author	Autore e manutentore
+about.contributors_text	E tutti quelli che mandano correzioni, traduzioni e idee su GitHub.
+about.contributors	Contributori
+about.issues	Segnala un problema o proponi un'idea
+about.license	Licenza (GNU AGPL-3.0)
 nav.notifications	Notifiche
 bar.search	Cerca o esegui un comando…
 bar.theme	Tema
