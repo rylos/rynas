@@ -607,7 +607,6 @@ fn init_logging() {
     }
 }
 
-/// The listening socket passed by systemd (`rynasd.socket`), if any.
 fn systemd_listener() -> Option<std::os::unix::net::UnixListener> {
     let pid: u32 = std::env::var("LISTEN_PID").ok()?.parse().ok()?;
     let fds: u32 = std::env::var("LISTEN_FDS").ok()?.parse().ok()?;
@@ -620,9 +619,32 @@ fn systemd_listener() -> Option<std::os::unix::net::UnixListener> {
         std::env::remove_var("LISTEN_FDS");
         std::env::remove_var("LISTEN_FDNAMES");
     }
+    // systemd passes the sockets without O_CLOEXEC: every child (mdadm, the file manager
+    // workers running as the signed-in user and the parsers they start) would inherit the
+    // listening socket and could accept() connections meant for rynasd.
+    if let Err(e) = set_cloexec_range(SD_LISTEN_FDS_START, fds) {
+        tracing::error!("cannot set close-on-exec on the sockets from systemd: {e}");
+        std::process::exit(1);
+    }
     // SAFETY: systemd hands over fd 3 (SD_LISTEN_FDS_START) as an open listening socket that
     // nothing else in this process owns.
-    Some(unsafe { std::os::unix::net::UnixListener::from_raw_fd(3) })
+    Some(unsafe { std::os::unix::net::UnixListener::from_raw_fd(SD_LISTEN_FDS_START) })
+}
+
+/// First descriptor systemd passes with socket activation.
+const SD_LISTEN_FDS_START: std::os::fd::RawFd = 3;
+
+/// Sets `FD_CLOEXEC` on the `count` descriptors from `first` (the sockets systemd passed).
+fn set_cloexec_range(first: std::os::fd::RawFd, count: u32) -> nix::Result<()> {
+    use nix::fcntl::{F_GETFD, F_SETFD, FdFlag, fcntl};
+    for fd in first..first.saturating_add(count as std::os::fd::RawFd) {
+        // SAFETY: systemd guarantees the LISTEN_FDS descriptors are open for the whole
+        // process; only their flags are touched, ownership stays where it is.
+        let b = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
+        let flags = FdFlag::from_bits_truncate(fcntl(b, F_GETFD)?);
+        fcntl(b, F_SETFD(flags | FdFlag::FD_CLOEXEC))?;
+    }
+    Ok(())
 }
 
 fn bind_socket(path: &Path, group: &str) -> std::io::Result<std::os::unix::net::UnixListener> {
@@ -1405,4 +1427,35 @@ async fn shutdown_signal() {
         _ = term.recv() => {}
     }
     tracing::info!("shutting down");
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::fd::AsRawFd;
+
+    use nix::fcntl::{F_GETFD, FdFlag, fcntl};
+
+    fn cloexec(fd: &impl std::os::fd::AsFd) -> bool {
+        FdFlag::from_bits_truncate(fcntl(fd, F_GETFD).unwrap()).contains(FdFlag::FD_CLOEXEC)
+    }
+
+    #[test]
+    fn inherited_sockets_get_close_on_exec() {
+        // two descriptors as systemd passes them: without O_CLOEXEC, next to each other
+        let (a, b) = std::os::unix::net::UnixStream::pair().unwrap();
+        for s in [&a, &b] {
+            fcntl(s, nix::fcntl::F_SETFD(FdFlag::empty())).unwrap();
+            assert!(!cloexec(s));
+        }
+        let (lo, hi) = (a.as_raw_fd().min(b.as_raw_fd()), a.as_raw_fd().max(b.as_raw_fd()));
+        if hi == lo + 1 {
+            super::set_cloexec_range(lo, 2).unwrap();
+        } else {
+            super::set_cloexec_range(lo, 1).unwrap();
+            super::set_cloexec_range(hi, 1).unwrap();
+        }
+        assert!(cloexec(&a) && cloexec(&b));
+        // a descriptor that is not open is an error, not a silent success
+        assert!(super::set_cloexec_range(100_000, 1).is_err());
+    }
 }
