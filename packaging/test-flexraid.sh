@@ -21,10 +21,13 @@
 #       (its leftover partitions cleared, then rebuilt on);
 #   6. kill -9 rynasd during a reshape, restart it, complete what is left;
 #   7. a "reboot": arrays stopped, assembled again from mdadm.conf, volume group activated;
+#   7b. a hot replace killed (kill -9 rynasd) during the copy of tier 1: requested again, it
+#       goes on; killed again during the copy of tier 2: complete finishes it (old disk
+#       cleared included);
 #   8. a 2-disk tolerance volume with a three-way RAID1 tier, grown to RAID6;
 #   8b. two of its disks failed and removed (still attached): a new disk rebuilds one slot
-#       (the tiers stay one disk short), then one of the two comes back and the other,
-#       left over, is cleared (by name, checked to be that disk);
+#       (the tiers stay one disk short), then one of the two comes back; the other, left
+#       over, is not erased (the plan warns about it) until a growth names it;
 #   9. an encrypted volume: create, add a disk (LUKS resized), lock, unlock.
 # After every step: the data checksums, no growth left to complete, every tier healthy.
 # At the end the host must have no md array, device-mapper mapping or loop device left.
@@ -536,6 +539,54 @@ start_rynasd
 login
 after "$F1" "raid5x5 raid5x5 raid5x3"
 
+step "7b. hot replace $H with a 3 GiB disk, rynasd killed twice: requested again, then completed"
+new_loop 3G; J=$DEV
+echo "new disk: $J(3G)"
+mapfile -t T < <(tiers_of "$F1")
+# one tier at a time copies slowly, so that rynasd is caught waiting for it
+slow() { echo 1000 >"/sys/block/$1/md/sync_speed_min"; echo 1000 >"/sys/block/$1/md/sync_speed_max"; }
+fast() { echo system >"/sys/block/$1/md/sync_speed_min"; echo system >"/sys/block/$1/md/sync_speed_max"; }
+copying() { # MD: wait until md copies onto a member of it
+    for _ in $(seq 900); do grep -A3 "^$1 " /proc/mdstat | grep -q recovery && return 0; sleep 0.2; done
+    fail "no copy seen on $1"
+}
+kill_rynasd() {
+    kill -9 "$(cat /run/rynas-test/rynasd.pid)"
+    for pid in $(ps -eo pid=,comm= | awk '$2 == "mdadm" {print $1}'); do kill -9 "$pid" 2>/dev/null || true; done
+    echo "  rynasd killed during:"; grep -A3 "^$1 " /proc/mdstat | sed 's/^/    /' || true
+}
+REPLACE_J="{\"old\":\"$H\",\"new_disk\":\"$J\",\"confirm\":\"$F1\",\"serials\":$(serials "$J")}"
+slow "${T[0]}"
+plan /storage/plan/replace "{\"volume\":\"$F1\",\"old\":\"$H\",\"new_disk\":\"$J\"}"
+start POST "/storage/volumes/$F1/replace" "$REPLACE_J"
+copying "${T[0]}"
+kill_rynasd "${T[0]}"
+fast "${T[0]}"; slow "${T[1]}"
+start_rynasd
+login
+sleep 5.5
+api GET /storage/tree
+echo "$BODY" | jq -c --arg l "$F1" '.volumes[] | select(.label == $l) | .flexible.pending'
+echo "$BODY" | jq -e --arg l "$F1" '.volumes[] | select(.label == $l) | .flexible.pending | any(.kind == "change_interrupted")' >/dev/null \
+    || fail "the interrupted replace is not pending"
+# the same request again goes on ($J already holds a member of tier 1)
+plan /storage/plan/replace "{\"volume\":\"$F1\",\"old\":\"$H\",\"new_disk\":\"$J\"}"
+start POST "/storage/volumes/$F1/replace" "$REPLACE_J"
+copying "${T[1]}"
+kill_rynasd "${T[1]}"
+fast "${T[1]}"
+start_rynasd
+login
+flexwait "$F1"
+api POST /storage/plan/complete "{\"volume\":\"$F1\"}"; expect 200 "plan complete"
+echo "$BODY" | jq -r '.steps[] | "  - " + .description'
+[ "$(echo "$BODY" | jq '.steps | length')" -gt 0 ] || fail "nothing to complete after the second kill"
+run POST "/storage/volumes/$F1/complete" '{}' ok
+after "$F1" "raid5x5 raid5x5 raid5x4"
+for md in $(tiers_of "$F1"); do mdadm --detail "/dev/$md" | grep -q "/dev/${H}p" && fail "$H still in $md"; done
+[ "$(lsblk -nro NAME "/dev/$H" | wc -l)" = 1 ] || fail "$H not cleared: $(lsblk -nro NAME "/dev/$H")"
+echo "  $H out of every tier and cleared"
+
 fi
 
 # ===================================================================== scenario 8
@@ -569,11 +620,18 @@ echo "$BODY" | jq -r --arg l "$F2" "$jq_tiers"'[] | "    t\(.index) \(.health) d
 echo "$BODY" | jq -e --arg l "$F2" "$jq_tiers"' | all(.degraded == 1)' >/dev/null || fail "$F2: every tier should miss one disk"
 verify_data "$F2"
 replace "$F2" missing "$K4"
-echo "$PLAN" | jq -e --arg d "$K5" '[.steps[] | select(.destroys == [$d])] | length > 0 and all(.best_effort)' >/dev/null \
-    || fail "the leftover disk $K5 is not cleared best effort"
+echo "$PLAN" | jq -e --arg d "$K5" '.steps | all(.destroys | index($d) | not)' >/dev/null \
+    || fail "the leftover disk $K5 is erased by a replace that does not name it"
+echo "$PLAN" | jq -e --arg d "$K5" '.warning_items | any(.code == "flex_leftover_disk" and .args.subject == $d)' >/dev/null \
+    || fail "no warning about the leftover disk $K5"
 after "$F2" "raid6x5 raid6x4"
-[ "$(lsblk -nro NAME "/dev/$K5" | wc -l)" = 1 ] || fail "$K5 still has partitions: $(lsblk -nro NAME "/dev/$K5")"
-blkid -p "/dev/$K5" && fail "$K5 still has a signature" || echo "  $K5 cleared"
+[ "$(lsblk -nro NAME "/dev/$K5" | wc -l)" -gt 1 ] || fail "$K5 lost its partitions"
+echo "  $K5 left as it was: $(lsblk -nro NAME "/dev/$K5" | tr '\n' ' ')"
+# a growth naming it clears it and uses it
+grow "$F2" "$K5"
+echo "$PLAN" | jq -e --arg d "$K5" '[.steps[] | select(.destroys == [$d])] | length > 0' >/dev/null \
+    || fail "the growth does not clear $K5 first"
+after "$F2" "raid6x6 raid6x5"
 
 fi
 
