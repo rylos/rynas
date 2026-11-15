@@ -194,7 +194,15 @@ export class Pane {
     });
     this.el.addEventListener("mousedown", () => this.app.activate(this), true);
     this.scroller.addEventListener("scroll", () => this.paint());
-    new ResizeObserver(() => this.paint()).observe(this.scroller);
+    // a new width changes the room the saved column widths may take: the header follows
+    new ResizeObserver(() => {
+      const cw = this.el.clientWidth;
+      if (cw !== this.headW && this.view === "list" && Object.keys(prefs.colWidths || {}).length) {
+        this.headW = cw;
+        this.renderHead();
+        this.paint(true);
+      } else this.paint();
+    }).observe(this.scroller);
     this.bindPointer();
     this.bindDrop();
   }
@@ -669,21 +677,30 @@ export class Pane {
     for (const [key, c] of Object.entries(COLS)) {
       if (!prefs.columns[key] || (narrowPc && key === "mode")) continue;
       const w = prefs.colWidths?.[key];
-      cols.push({ key, ...c, width: w ? `${Math.min(w, this.colMax())}px` : c.width, resizable: true });
+      // a saved width is narrowed on a small screen, never below the column's default
+      const fit = w ? Math.min(w, Math.max(this.colMax(key), parseInt(c.width, 10))) : 0;
+      cols.push({ key, ...c, width: fit ? `${fit}px` : c.width, resizable: true });
     }
     return cols;
   }
 
   /**
-   * The widest a resizable column may be: saved widths follow the user to every screen, and on a
-   * phone they must not squeeze the Name column below its minimum (160 px) when all four
-   * columns are at their widest.
+   * The widest the resizable column `key` may be: saved widths follow the user to every screen,
+   * and on a narrow one they must not squeeze the Name column below its minimum (160 px). The
+   * room is what the header has left once Name, the Folder column of a search and the other
+   * shown columns (at their saved or default width) have theirs.
    */
-  colMax() {
+  colMax(key) {
     const w = this.el.clientWidth;
     if (!w) return 480;
-    // 34 px: the header's padding; 12 px: a gap
-    return Math.max(48, Math.min(480, Math.floor((w - 34 - 160) / Object.keys(COLS).length) - 12));
+    // 34 px: the header's padding; 12 px: the gap before each column after Name
+    let room = w - 34 - 160 - 12;
+    if (this.search) room -= 100 + 12;
+    for (const [k, c] of Object.entries(COLS)) {
+      if (k === key || !prefs.columns[k]) continue;
+      room -= (prefs.colWidths?.[k] || parseInt(c.width, 10)) + 12;
+    }
+    return Math.max(48, Math.min(480, room));
   }
 
   renderHead() {
@@ -717,8 +734,9 @@ export class Pane {
    */
   gripColumn(grip, cols) {
     const key = grip.dataset.r;
-    const max = this.colMax();
     let w = Math.round(grip.parentElement.getBoundingClientRect().width);
+    // widening stops at the room left; a column already wider is never snapped narrower
+    const max = Math.max(this.colMax(key), w);
     grip.setAttribute("aria-valuemax", max);
     grip.setAttribute("aria-valuenow", w);
     const resize = (nw) => {

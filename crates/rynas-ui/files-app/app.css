@@ -247,18 +247,16 @@ svg.i { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-widt
   border-bottom: 1px solid var(--border); color: var(--faint);
   font-size: 11px; text-transform: uppercase; letter-spacing: .05em; user-select: none;
 }
-.list-head > div { cursor: pointer; white-space: nowrap; overflow: hidden; display: flex; align-items: center; gap: 4px; }
+.list-head > div { cursor: pointer; white-space: nowrap; display: flex; align-items: center; gap: 4px; position: relative; align-self: stretch; min-width: 0; overflow: visible; }
 .list-head > div:hover { color: var(--text); }
 .list-head > div.r { justify-content: flex-end; }
 .list-head .arrow { color: var(--accent); }
 /* full header height and no clipping: the grip sits in the gap between columns, only the
    label is clipped */
-.list-head > div { position: relative; align-self: stretch; min-width: 0; overflow: visible; }
 .list-head .lbl { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 /* a column's left edge: drag (or focus and Left/Right) to resize; a 14 px hit area for touch
    with a 1 px line in the middle of the 12 px gap */
-.list-head .col-grip { position: absolute; left: -13px; top: 0; bottom: 0; width: 14px; z-index: 1; cursor: col-resize; touch-action: none; outline: none; }
-.list-head .col-grip { background: linear-gradient(var(--border), var(--border)) center / 1px 100% no-repeat; }
+.list-head .col-grip { position: absolute; left: -13px; top: 0; bottom: 0; width: 14px; z-index: 1; cursor: col-resize; touch-action: none; outline: none; background: linear-gradient(var(--border), var(--border)) center / 1px 100% no-repeat; }
 .list-head .col-grip:hover, .list-head .col-grip:active, .list-head .col-grip:focus-visible { background: linear-gradient(var(--accent), var(--accent)) center / 2px 100% no-repeat; }
 .scroller { flex: 1; overflow: hidden auto; position: relative; outline: none; }
 .scroller:focus-visible { box-shadow: inset 0 0 0 1px var(--accent-soft); }

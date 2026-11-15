@@ -1983,7 +1983,7 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .code-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s-2); flex-wrap: wrap; }
 .code-file { cursor: pointer; }
 .code-edit {
-  display: flex; height: calc(var(--rows) * 1.5em + var(--s-4)); min-height: 96px; resize: vertical; overflow: hidden;
+  display: flex; height: calc(var(--rows) * 1.5em + var(--s-4)); height: calc(var(--rows) * round(1.5em, 1px) + var(--s-4)); min-height: 96px; resize: vertical; overflow: hidden;
   font-size: var(--fs-13); font-family: var(--mono); --lh: 1.5; background: var(--bg-sunken); border: 1px solid var(--border-strong); border-radius: var(--r-md);
 }
 .code-edit:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent) 25%, transparent); }
