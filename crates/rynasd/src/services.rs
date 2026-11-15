@@ -1424,6 +1424,7 @@ async fn folders_list(
                 all_shares(s, &owner)?.into_iter().map(|x| x.path).collect();
             paths.extend(homes::homes_folders(s));
             paths.extend(rynas_folders(s, &owner));
+            paths.extend(pc_backup_folders(s));
             let removed = s.shares.removed().list();
             let (snaps, _, _): (SnapshotsConfig, SnapshotsConfig, _) =
                 docs(&s.ops.config, &owner, SNAPSHOTS_KEY)?;
@@ -1562,6 +1563,12 @@ fn unshared_path(s: &Services, owner: &str, r: &FolderRef) -> Res<String> {
             format!("{path} holds Docker and the apps' data: it is not deleted"),
         ));
     }
+    if pc_backup_folders(s).iter().any(|r| folders::is_within(r, &path)) {
+        return Err(conflict(
+            error_codes::CONFLICT,
+            format!("{path} holds the PCs' backups: it is not deleted"),
+        ));
+    }
     if let Some(sh) = all_shares(s, owner)?
         .into_iter()
         .find(|x| folders::is_within(&x.path, &path))
@@ -1572,6 +1579,21 @@ fn unshared_path(s: &Services, owner: &str, r: &FolderRef) -> Res<String> {
         ));
     }
     Ok(path)
+}
+
+/// The folders of the PCs' backups: the btrfs method's (received snapshots, one per PC,
+/// e.g. `/volume1/pc-backups/<pc>`) and the file method's (its folder for new groups and
+/// each group's repository). The top-level folder holding one is in use: never listed as
+/// unshared nor deletable from there (from the registries only, no disk access).
+fn pc_backup_folders(s: &Services) -> Vec<String> {
+    let mut out: Vec<String> = s.ops.pc_backup.get().map(|pc| pc.snapshot_folders().into_iter().map(|(_, p)| p).collect()).unwrap_or_default();
+    if let Some(a) = s.ops.pc_agent.get().and_then(std::sync::Weak::upgrade) {
+        let r = a.snapshot();
+        out.push(r.settings.folder.clone());
+        out.extend(r.groups.values().map(|g| g.repo.clone()));
+    }
+    out.retain(|p| p.starts_with('/'));
+    out
 }
 
 /// Folders rynas itself keeps on the volumes, never "unshared" nor deletable from there:

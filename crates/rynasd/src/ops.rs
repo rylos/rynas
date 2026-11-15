@@ -54,6 +54,9 @@ pub struct Ops {
     /// The PC backups' receive side: the file manager shows their folders to administrators,
     /// shares never overlap them.
     pub pc_backup: std::sync::OnceLock<Arc<crate::pc_backup::PcBackup>>,
+    /// The PC backups' file method (its repositories' folders are in use, like the btrfs
+    /// side's). Weak: the agent side holds these `Ops`.
+    pub pc_agent: std::sync::OnceLock<std::sync::Weak<crate::pc_agent::PcAgent>>,
 }
 
 /// See [`Ops::after_apply`].
@@ -76,6 +79,7 @@ impl Ops {
             removable: std::sync::OnceLock::new(),
             docker: std::sync::OnceLock::new(),
             pc_backup: std::sync::OnceLock::new(),
+            pc_agent: std::sync::OnceLock::new(),
         }
     }
 }

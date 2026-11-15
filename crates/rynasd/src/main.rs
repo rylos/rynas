@@ -1115,6 +1115,7 @@ fn main() -> std::io::Result<()> {
                 agent.bind_btrfs(pb);
             }
             rynasd::pc_agent::maint::spawn_watch(agent.clone());
+            let _ = ops.pc_agent.set(Arc::downgrade(&agent));
             state.pc_agent = Some(agent);
         }
         // the SSH service: the machine, or (--dry-system) a seeded dry root and a stand-in
