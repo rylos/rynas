@@ -11,7 +11,7 @@ use rynas_api_types::storage::{RaidLevel, StoragePlan};
 use serde_json::json;
 
 use crate::tasks::TaskRun;
-use super::plan::{cap_bar, plan_errors, plan_view, plan_warnings, tolerance_text};
+use super::plan::{MIN_TIER, cap_bar, plan_errors, plan_view, plan_warnings, tier_preview, tolerance_text};
 use super::volume::{RevealDialog, Stage, disk_checklist, level_json, start_task};
 use super::{free_disks, level_key, loading, serial_of, use_refresh, valid_label, volumes};
 use crate::api;
@@ -20,7 +20,16 @@ use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::ui::{self, PageHeader, Skeleton, Tone, typed_confirm};
 
-const LEVELS: [RaidLevel; 6] = [RaidLevel::Single, RaidLevel::Raid1, RaidLevel::Raid5, RaidLevel::Raid6, RaidLevel::Raid10, RaidLevel::Raid0];
+const LEVELS: [RaidLevel; 8] = [
+    RaidLevel::Single,
+    RaidLevel::Raid1,
+    RaidLevel::Raid5,
+    RaidLevel::Raid6,
+    RaidLevel::Raid10,
+    RaidLevel::Raid0,
+    RaidLevel::Flex1,
+    RaidLevel::Flex2,
+];
 
 fn allowed(l: RaidLevel, n: usize) -> bool {
     match l {
@@ -56,13 +65,26 @@ fn desc_key(l: RaidLevel) -> &'static str {
 }
 
 /// What most NAS vendors suggest for n drives: a mirror for two, single parity up to four,
-/// double parity beyond (rebuilds of large drives take long).
-fn recommended(n: usize) -> RaidLevel {
-    match n {
-        0 | 1 => RaidLevel::Single,
-        2 => RaidLevel::Raid1,
-        3 | 4 => RaidLevel::Raid5,
-        _ => RaidLevel::Raid6,
+/// double parity beyond (rebuilds of large drives take long). Drives of different sizes get
+/// the flexible RAID with the same tolerance, so their extra space is used too.
+fn recommended(n: usize, mixed: bool) -> RaidLevel {
+    match (n, mixed) {
+        (0 | 1, _) => RaidLevel::Single,
+        (2..=4, true) => RaidLevel::Flex1,
+        (_, true) => RaidLevel::Flex2,
+        (2, false) => RaidLevel::Raid1,
+        (3 | 4, false) => RaidLevel::Raid5,
+        (_, false) => RaidLevel::Raid6,
+    }
+}
+
+/// The chosen drives differ in size by more than one tier step.
+fn mixed_sizes(chosen: &[String]) -> bool {
+    let s = super::sto();
+    let sizes: Vec<u64> = chosen.iter().filter_map(|n| untrack(|| s.disk(n)).map(|d| d.size)).collect();
+    match (sizes.iter().min(), sizes.iter().max()) {
+        (Some(lo), Some(hi)) => hi - lo > MIN_TIER,
+        _ => false,
     }
 }
 
@@ -107,11 +129,17 @@ pub fn CreateVolume() -> impl IntoView {
             "label": label.get_untracked(),
         })
     };
+    // the drives the level was last chosen for: a new selection starts from its recommendation
+    let planned_for = StoredValue::new(None::<Vec<String>>);
     let plan_levels = move || {
-        let n = chosen.with_untracked(Vec::len);
+        let disks = chosen.get_untracked();
+        let n = disks.len();
         let list: Vec<RaidLevel> = LEVELS.into_iter().filter(|l| allowed(*l, n)).collect();
-        if !allowed(level.get_untracked(), n) {
-            level.set(recommended(n));
+        let mut sorted = disks.clone();
+        sorted.sort();
+        if planned_for.get_value().as_ref() != Some(&sorted) || !allowed(level.get_untracked(), n) {
+            level.set(recommended(n, mixed_sizes(&disks)));
+            planned_for.set_value(Some(sorted));
         }
         plans.set(list.iter().map(|l| (*l, None)).collect());
         for l in list {
@@ -323,13 +351,19 @@ fn step_disks(chosen: RwSignal<Vec<String>>) -> impl IntoView {
 
 fn step_level(chosen: RwSignal<Vec<String>>, level: RwSignal<RaidLevel>, plans: RwSignal<Vec<(RaidLevel, PlanRes)>>) -> impl IntoView {
     let n = chosen.with_untracked(Vec::len);
-    let rec = recommended(n);
+    let rec = recommended(n, chosen.with_untracked(|c| mixed_sizes(c)));
     view! {
         <h2 class="section-title"><Icon icon=icons::LAYERS size=16 />{tr("wiz.pick_level")}</h2>
         <div class="level-grid" role="radiogroup" aria-label=tr("sto.level")>
             {LEVELS.into_iter().map(|l| {
                 let ok = allowed(l, n);
                 let plan = move || plans.with(|p| p.iter().find(|(x, _)| *x == l).and_then(|(_, r)| r.clone()));
+                // a flexible RAID: the name, then its tolerance on a line of its own
+                let (name, variant) = match l {
+                    RaidLevel::Flex1 => ("sto.flex", Some("sto.flex_tol1")),
+                    RaidLevel::Flex2 => ("sto.flex", Some("sto.flex_tol2")),
+                    _ => (level_key(l), None),
+                };
                 view! {
                     <button
                         class="level-card"
@@ -340,9 +374,10 @@ fn step_level(chosen: RwSignal<Vec<String>>, level: RwSignal<RaidLevel>, plans: 
                         on:click=move |_| level.set(l)
                     >
                         <span class="level-top">
-                            <strong>{tr(level_key(l))}</strong>
+                            <strong>{tr(name)}</strong>
                             {(ok && l == rec).then(|| view! { <span class="chip accent">{tr("wiz.recommended")}</span> })}
                         </span>
+                        {variant.map(|k| view! { <span class="small strong">{tr(k)}</span> })}
                         <span class="muted small">{tr(desc_key(l))}</span>
                         {if ok {
                             view! {
@@ -365,12 +400,15 @@ fn step_level(chosen: RwSignal<Vec<String>>, level: RwSignal<RaidLevel>, plans: 
         </div>
         {move || {
             let l = level.get();
+            let help = l.is_flexible().then(|| view! { <p class="muted small">{tr("wiz.flex_help")}</p> });
             match plans.with(|p| p.iter().find(|(x, _)| *x == l).and_then(|(_, r)| r.clone())) {
-                None => view! { <Skeleton lines=2 /> }.into_any(),
+                None => view! { {help}<Skeleton lines=2 /> }.into_any(),
                 Some(Err(e)) => view! { <p class="form-error"><Icon icon=icons::CIRCLE_X size=16 /><span>{e}</span></p> }.into_any(),
                 Some(Ok(p)) => view! {
                     <div class="level-detail">
+                        {help}
                         {p.valid.then(|| cap_bar(p.raw_bytes, p.usable_bytes, p.wasted_bytes))}
+                        {p.valid.then(|| tier_preview(&p))}
                         {plan_errors(&p)}
                         {plan_warnings(&p)}
                     </div>

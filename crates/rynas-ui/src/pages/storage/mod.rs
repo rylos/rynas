@@ -23,7 +23,7 @@ use leptos::task::spawn_local;
 use rynas_api_types::{Bay, M2Slot};
 use rynas_api_types::storage::{
     ScrubState,
-    ArrayHealth, BtrfsFilesystem, DiskKind, DiskSummary, HealthVerdict, MdArray, NodeKind, PowerState, RaidLevel, StorageTree,
+    ArrayHealth, BtrfsFilesystem, DiskKind, DiskSummary, FlexLayout, HealthVerdict, MdArray, NodeKind, PowerState, RaidLevel, StorageTree,
     TreeNode, VolumeTree,
 };
 
@@ -197,10 +197,31 @@ pub struct Vol {
     pub size: u64,
     pub used: u64,
     pub health: HealthVerdict,
+    /// The md array below (for a flexible RAID: its lowest tier).
     pub md: Option<MdArray>,
     pub fs: Option<BtrfsFilesystem>,
     /// Whole disks below, by kernel name.
     pub disks: Vec<String>,
+    /// A flexible RAID: its tiers, unused space, unfinished growth.
+    pub flex: Option<FlexLayout>,
+    /// md arrays under an LVM volume: a flexible RAID, also while locked (no layout then).
+    pub tiered: bool,
+}
+
+impl Vol {
+    /// The RAID level in words ("Flexible RAID, 1-drive tolerance", "RAID 5").
+    pub fn level_text(&self) -> Option<String> {
+        match (&self.flex, self.tiered) {
+            (Some(f), _) => Some(t(f.level().map(level_key).unwrap_or("sto.flex")).to_string()),
+            (None, true) => Some(t("sto.flex").to_string()),
+            (None, false) => self.md.as_ref().map(md_level_text),
+        }
+    }
+
+    /// The level for a chip: "Flexible RAID" without the tolerance, which a card has no room for.
+    pub fn level_chip(&self) -> Option<String> {
+        if self.flex.is_some() || self.tiered { Some(t("sto.flex").to_string()) } else { self.level_text() }
+    }
 }
 
 pub fn valid_label(s: &str) -> bool {
@@ -218,21 +239,31 @@ fn walk<'a>(n: &'a TreeNode, out: &mut Vec<&'a TreeNode>) {
     }
 }
 
-/// Label of an md array from its superblock name ("host:vol1" → "vol1").
+/// Label of an md array from its superblock name ("host:vol1" → "vol1"; a flexible RAID
+/// tier "host:vol1_t2" → "vol1").
 fn md_label(a: &MdArray) -> Option<String> {
-    a.md_name.as_deref().map(|n| n.rsplit(':').next().unwrap_or(n).to_string())
+    let n = a.md_name.as_deref()?;
+    let n = n.rsplit(':').next().unwrap_or(n);
+    let base = n
+        .rsplit_once("_t")
+        .filter(|(_, i)| !i.is_empty() && i.bytes().all(|b| b.is_ascii_digit()))
+        .map_or(n, |(b, _)| b);
+    Some(base.to_string())
 }
 
-fn vol_from(layers: &[TreeNode], arrays: &[MdArray]) -> (Option<MdArray>, Vec<String>) {
+/// The md array (the first one found), the whole disks and whether md arrays sit under an
+/// LVM volume (a flexible RAID).
+fn vol_from(layers: &[TreeNode], arrays: &[MdArray]) -> (Option<MdArray>, Vec<String>, bool) {
     let mut nodes = Vec::new();
     for l in layers {
         walk(l, &mut nodes);
     }
     let md = nodes.iter().find(|n| n.kind == NodeKind::Md).and_then(|n| arrays.iter().find(|a| a.name == n.name)).cloned();
+    let tiered = nodes.iter().any(|n| n.kind == NodeKind::Lvm && n.children.iter().any(|c| c.kind == NodeKind::Md));
     let mut disks: Vec<String> = nodes.iter().filter(|n| n.kind == NodeKind::Disk).map(|n| n.name.clone()).collect();
     disks.sort();
     disks.dedup();
-    (md, disks)
+    (md, disks, tiered)
 }
 
 /// The volumes of the inventory (tracked: call inside a reactive closure).
@@ -245,7 +276,7 @@ pub fn volumes(s: Sto) -> Vec<Vol> {
         out.push(vol_of_tree(v, &arrays, &fss));
     }
     for l in &tree.locked {
-        let (md, disks) = vol_from(&l.children, &arrays);
+        let (md, disks, tiered) = vol_from(&l.children, &arrays);
         let id = md.as_ref().and_then(md_label).unwrap_or_else(|| l.name.clone());
         out.push(Vol {
             managed: md.is_some() && valid_label(&id),
@@ -257,6 +288,7 @@ pub fn volumes(s: Sto) -> Vec<Vol> {
             health: l.health,
             md,
             disks,
+            tiered,
             ..Default::default()
         });
     }
@@ -265,12 +297,14 @@ pub fn volumes(s: Sto) -> Vec<Vol> {
 }
 
 fn vol_of_tree(v: &VolumeTree, arrays: &[MdArray], fss: &[BtrfsFilesystem]) -> Vol {
-    let (md, disks) = vol_from(&v.layers, arrays);
+    let (md, disks, tiered) = vol_from(&v.layers, arrays);
     let id = v.label.clone().filter(|l| !l.is_empty()).or_else(|| md.as_ref().and_then(md_label)).unwrap_or_else(|| v.id.clone());
     let fs = fss.iter().find(|f| f.uuid == v.id).cloned();
     let name = if id == v.id && v.mountpoint.as_deref() == Some("/") { t("sto.system_volume").to_string() } else { id.clone() };
+    // a flexible RAID made elsewhere is shown, never changed
+    let flex_ok = v.flexible.as_ref().is_none_or(|f| f.managed);
     Vol {
-        managed: md.is_some() && valid_label(&id) && v.fstype == "btrfs",
+        managed: md.is_some() && valid_label(&id) && v.fstype == "btrfs" && flex_ok,
         name,
         id,
         locked: false,
@@ -283,6 +317,8 @@ fn vol_of_tree(v: &VolumeTree, arrays: &[MdArray], fss: &[BtrfsFilesystem]) -> V
         md,
         fs,
         disks,
+        flex: v.flexible.clone(),
+        tiered: tiered || v.flexible.is_some(),
     }
 }
 
@@ -503,7 +539,7 @@ pub fn Storage() -> impl IntoView {
 
 fn vol_card(v: Vol, unlock: RwSignal<Option<String>>) -> AnyView {
     let (tone, key) = health(v.health);
-    let level = v.md.as_ref().map(md_level_text);
+    let level = v.level_chip();
     let href = format!("/storage/volumes/{}", api::encode(&v.id));
     if v.locked {
         let id = v.id.clone();
@@ -532,7 +568,11 @@ fn vol_card(v: Vol, unlock: RwSignal<Option<String>>) -> AnyView {
     let sized = v.size > 0 && v.size >= v.used;
     let pct = pct_of(v.used, v.size);
     let utone = usage_tone(pct);
-    let sync = v.md.as_ref().and_then(|a| a.sync.clone());
+    // a flexible RAID: the tier being synced (md runs one at a time)
+    let sync = match &v.flex {
+        Some(f) => f.tiers.iter().find_map(|t| t.sync.clone()),
+        None => v.md.as_ref().and_then(|a| a.sync.clone()),
+    };
     let scrub_running = v.fs.as_ref().and_then(|f| f.scrub.as_ref()).is_some_and(|s| s.status == ScrubState::Running);
     let stale = v.fs.as_ref().is_some_and(|f| f.stale) || v.md.as_ref().is_some_and(|a| a.stale);
     view! {

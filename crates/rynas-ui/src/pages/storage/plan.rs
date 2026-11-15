@@ -3,11 +3,11 @@
 //! shown with [`crate::tasks::TaskRun`].
 
 use leptos::prelude::*;
-use rynas_api_types::storage::{PlanAction, PlanArgs, PlanStep, PlanWarningCode, StoragePlan};
+use rynas_api_types::storage::{FlexTier, PlanAction, PlanArgs, PlanStep, PlanWarningCode, StoragePlan};
 
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
-use crate::ui;
+use crate::ui::{self, Status, Tone};
 
 /// A translated plan text, or the server's English one (`lang="en"`) when this build has no
 /// key for its code.
@@ -189,6 +189,7 @@ pub fn plan_view(p: &StoragePlan) -> AnyView {
                 </div>
                 {cap_bar(p.raw_bytes, p.usable_bytes, p.wasted_bytes)}
             })}
+            {p.valid.then(|| tier_preview(p))}
             {(!p.summary.is_empty()).then(|| view! {
                 <dl class="kvs plan-summary">
                     {p.summary.iter().map(|(k, v)| {
@@ -237,4 +238,158 @@ pub fn tolerance_text(n: u32) -> String {
         1 => t("plan.tol1").to_string(),
         n => tf("plan.toln", &[("n", &n.to_string())]),
     }
+}
+
+// ------------------------------------------------------------------ flexible RAID tiers
+
+/// A size difference smaller than this is rounding, not a tier of its own (the planner's
+/// smallest tier): disks that close count as the same size.
+pub const MIN_TIER: u64 = 16 << 30;
+
+/// The colour class of a tier (`c1`…`c5`, repeating), shared by the drive map and the lists.
+fn tier_class(index: u32) -> String {
+    format!("c{}", index.saturating_sub(1) % 5 + 1)
+}
+
+fn tier_level_text(tier: &FlexTier) -> String {
+    match tier.level {
+        Some(l) => t(super::level_key(l)).to_string(),
+        None => t("sto.tier_unused").to_string(),
+    }
+}
+
+/// One bar per drive (as long as the drive, against the largest one), cut into the tiers it
+/// holds, then its unused space. `unused` is the volume's own reckoning (`FlexLayout.unused`);
+/// without it (a plan) the space past the drive's last tier counts when it is a tier step or
+/// more. `extra` adds drives that hold no tier.
+pub fn tier_map(tiers: &[FlexTier], unused: Option<&[(String, u64)]>, extra: &[String]) -> AnyView {
+    let s = super::sto();
+    let mut names: Vec<String> = tiers.iter().flat_map(|x| x.members.iter().cloned()).chain(extra.iter().cloned()).collect();
+    names.sort();
+    names.dedup();
+    struct Row {
+        name: String,
+        size: u64,
+        segs: Vec<(String, u64, String)>,
+    }
+    let rows: Vec<Row> = names
+        .into_iter()
+        .map(|name| {
+            let mut held: Vec<&FlexTier> = tiers.iter().filter(|x| x.members.contains(&name)).collect();
+            held.sort_by_key(|x| x.start);
+            let end = held.iter().map(|x| x.end).max().unwrap_or(0);
+            let size = untrack(|| s.disk(&name)).map(|d| d.size).unwrap_or(end).max(end);
+            let mut segs: Vec<(String, u64, String)> = held
+                .iter()
+                .map(|x| {
+                    let cls = if x.level.is_some() { tier_class(x.index) } else { "waste".to_string() };
+                    let title = format!("{} · {}", tf("sto.tier", &[("n", &x.index.to_string())]), tier_level_text(x));
+                    (cls, x.end.saturating_sub(x.start), title)
+                })
+                .collect();
+            let rest = match unused {
+                Some(u) => u.iter().find(|(d, _)| *d == name).map(|(_, b)| *b).unwrap_or(0),
+                None => size.saturating_sub(end),
+            };
+            if rest >= MIN_TIER {
+                segs.push(("waste".to_string(), rest, format!("{} · {}", t("sto.unused_space"), i18n::bytes_si(rest))));
+            }
+            Row { name, size, segs }
+        })
+        .collect();
+    let max = rows.iter().map(|r| r.size).max().unwrap_or(1).max(1) as f64;
+    let any_unused = rows.iter().any(|r| r.segs.iter().any(|x| x.0 == "waste"));
+    let legend: Vec<(String, String)> = tiers
+        .iter()
+        .filter(|x| x.level.is_some())
+        .map(|x| (tier_class(x.index), format!("{} · {}", tf("sto.tier", &[("n", &x.index.to_string())]), tier_level_text(x))))
+        .collect();
+    view! {
+        <div class="tier-map" role="list" aria-label=tr("sto.tier_map")>
+            {rows.into_iter().map(|r| {
+                let total = r.size.max(1) as f64;
+                let label = format!("{} · {}", r.name, r.segs.iter().map(|x| x.2.clone()).collect::<Vec<_>>().join(", "));
+                view! {
+                    <div class="tier-row" role="listitem">
+                        <span class="tier-disk"><span class="mono strong">{r.name.clone()}</span><span class="muted small tnum">{i18n::bytes_si(r.size)}</span></span>
+                        <span class="tier-track">
+                            <span class="tier-bar" role="img" aria-label=label style:width=format!("{:.2}%", r.size as f64 * 100.0 / max)>
+                                {r.segs.into_iter().map(|(cls, b, title)| view! {
+                                    <span class=format!("tier-seg {cls}") title=title style:width=format!("{:.2}%", b as f64 * 100.0 / total)></span>
+                                }).collect_view()}
+                            </span>
+                        </span>
+                    </div>
+                }
+            }).collect_view()}
+        </div>
+        <div class="cap-legend">
+            {legend.into_iter().map(|(cls, text)| view! { <span class="cap-leg"><span class=format!("dot {cls}")></span>{text}</span> }).collect_view()}
+            {any_unused.then(|| view! { <span class="cap-leg"><span class="dot waste"></span>{tr("sto.unused_space")}</span> })}
+        </div>
+    }
+    .into_any()
+}
+
+/// The tiers as a list: level, drives, usable space; `live` adds the health, the sync progress
+/// and the missing members (a volume's tiers, not a plan's).
+pub fn tier_list(tiers: &[FlexTier], live: bool) -> AnyView {
+    view! {
+        <ul class="tier-list">
+            {tiers.iter().map(|x| {
+                let (tone, key) = super::array_health(x.health);
+                let lost = (x.degraded as usize).max(x.missing.len());
+                let members = format!("{}: {}", i18n::tn("sto.members", x.members.len() as u64, &[]), x.members.join(", "));
+                let sub = match (&x.array, live) {
+                    (Some(a), true) => format!("{members} · {a}"),
+                    _ => members,
+                };
+                view! {
+                    <li class="tier-item">
+                        <div class="tier-head">
+                            <span class=format!("dot {}", if x.level.is_some() { tier_class(x.index) } else { "waste".to_string() })></span>
+                            <strong>{tf("sto.tier", &[("n", &x.index.to_string())])}</strong>
+                            {ui::chip(if x.level.is_some() { Tone::Info } else { Tone::Warn }, view! { {tier_level_text(x)} }.into_any())}
+                            {x.level.is_some().then(|| view! { <span class="muted small tnum">{tf("sto.tier_usable", &[("size", &i18n::bytes(x.usable))])}</span> })}
+                            {live.then(|| view! { <span class="row-end"><Status tone=tone text=t(key).to_string() /></span> })}
+                        </div>
+                        <div class="muted small tier-sub">{sub}</div>
+                        {live.then(|| x.sync.as_ref().map(super::sync_row))}
+                        {(live && lost > 0).then(|| {
+                            let names = if x.missing.is_empty() { String::new() } else { format!(" ({})", x.missing.join(", ")) };
+                            view! { <div class="warn tone-text small"><Icon icon=icons::TRIANGLE_ALERT size=14 />{tf("sto.missing_members", &[("n", &lost.to_string())])}{names}</div> }
+                        })}
+                    </li>
+                }
+            }).collect_view()}
+        </ul>
+    }
+    .into_any()
+}
+
+/// A flexible RAID plan's tiers: the drive map after the change, and the tier lists before and
+/// after it side by side (only after for a new volume). Nothing for other plans.
+pub fn tier_preview(p: &StoragePlan) -> Option<AnyView> {
+    if p.tiers_after.is_empty() {
+        return None;
+    }
+    let before = (!p.tiers_before.is_empty()).then(|| tier_list(&p.tiers_before, false));
+    Some(
+        view! {
+            <div class="tier-preview">
+                {tier_map(&p.tiers_after, None, &[])}
+                {match before {
+                    Some(b) => view! {
+                        <div class="tier-compare">
+                            <div><div class="mini-title">{tr("plan.before")}</div>{b}</div>
+                            <div><div class="mini-title">{tr("plan.after")}</div>{tier_list(&p.tiers_after, false)}</div>
+                        </div>
+                    }
+                    .into_any(),
+                    None => tier_list(&p.tiers_after, false),
+                }}
+            </div>
+        }
+        .into_any(),
+    )
 }

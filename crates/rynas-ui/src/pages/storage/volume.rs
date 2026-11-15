@@ -9,13 +9,14 @@ use leptos::task::spawn_local;
 use leptos_router::hooks::use_params_map;
 use rynas_api_types::storage::{
     ScrubState,
-    MdArray, MemberRole, RaidLevel, RecoveryKey, StoragePlan, SubvolumeInfo, VolumeSettings, VolumeSettingsState,
+    FlexLayout, FlexPending, MdArray, MemberRole, RaidLevel, RecoveryKey, StoragePlan, SubvolumeInfo, VolumeSettings,
+    VolumeSettingsState,
 };
 use rynas_api_types::{TaskInfo, TaskStarted, TaskStatus};
 use serde_json::{Value, json};
 
 use crate::tasks::TaskRun;
-use super::plan::{plan_view};
+use super::plan::{plan_view, tier_list, tier_map, tolerance_text};
 use super::{
     Sto, Vol, array_health, disk_title, free_disks, health, level_key, loading, md_level, md_level_text, pct_of,
     serial_of, stale_notice, sync_row, use_refresh, volumes,
@@ -235,6 +236,7 @@ pub fn VolumePage() -> impl IntoView {
                 subvolumes: v.managed && !v.locked && v.fstype == "btrfs",
                 raid56: v.managed
                     && !v.locked
+                    && !v.tiered
                     && v.md.as_ref().and_then(md_level).is_some_and(|l| matches!(l, RaidLevel::Raid5 | RaidLevel::Raid6)),
             })
         })
@@ -271,6 +273,7 @@ pub fn VolumePage() -> impl IntoView {
                 Open::Scrub => view! { <ScrubDialog vol=current() on_close=close /> }.into_any(),
                 Open::Grow => view! { <GrowDialog vol=current() on_close=close /> }.into_any(),
                 Open::Replace => view! { <ReplaceDialog vol=current() on_close=close /> }.into_any(),
+                Open::Complete => view! { <CompleteDialog vol=current() on_close=close /> }.into_any(),
                 Open::Unlock => view! { <UnlockDialog id=current().id on_close=close /> }.into_any(),
                 Open::Lock => view! { <LockDialog id=current().id on_close=close /> }.into_any(),
                 Open::Reveal => view! { <RevealDialog id=current().id on_close=close /> }.into_any(),
@@ -286,6 +289,8 @@ enum Open {
     Scrub,
     Grow,
     Replace,
+    /// Complete the interrupted growth of a flexible RAID.
+    Complete,
     Unlock,
     Lock,
     Reveal,
@@ -294,7 +299,7 @@ enum Open {
 fn volume_view(vol: Vol, modal: RwSignal<Open>, selected: RwSignal<Option<String>>) -> AnyView {
     let s = super::sto();
     let (tone, key) = health(vol.health);
-    let level = vol.md.as_ref().map(md_level_text);
+    let level = vol.level_text();
     let sub = [
         vol.mountpoint.clone(),
         level.clone(),
@@ -309,6 +314,9 @@ fn volume_view(vol: Vol, modal: RwSignal<Open>, selected: RwSignal<Option<String
     let btn = move |m: Open, icon: &'static str, key: &'static str| {
         view! { <button class="btn ghost" type="button" on:click=move |_| modal.set(m)><Icon icon=icon size=16 /><span class="btn-label">{tr(key)}</span></button> }
     };
+    let flex = vol.flex.clone().filter(|_| !vol.locked);
+    let pending = flex.as_ref().is_some_and(|f| !f.pending.is_empty()) && actions;
+    let blockers = flex.as_ref().map(|f| f.blockers.clone()).unwrap_or_default();
     view! {
         <header class="page-head">
             <a class="icon-btn" href="/storage" aria-label=tr("sto.back_storage")><Icon icon=icons::ARROW_LEFT size=18 /></a>
@@ -327,12 +335,66 @@ fn volume_view(vol: Vol, modal: RwSignal<Open>, selected: RwSignal<Option<String
         </header>
         {stale_notice(s)}
         {(!vol.managed).then(|| view! { {ui::note(Tone::Info, icons::INFO, view! { {tr("sto.unmanaged")} }.into_any())} })}
+        {pending.then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! {
+            <span>{tr("sto.flex_pending")}</span>
+            <button class="btn primary sm row-end" type="button" on:click=move |_| modal.set(Open::Complete)>{tr("sto.complete")}</button>
+        }.into_any()))}
+        {(!blockers.is_empty()).then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! {
+            <span>{tr("sto.flex_blocked")}" "<span lang="en">{blockers.join("; ")}</span></span>
+        }.into_any()))}
         <div class="grid vol-detail">
             {(!vol.locked).then(|| usage_card(&vol))}
-            {vol.md.clone().map(|a| raid_card(a, selected))}
+            {match flex {
+                Some(f) => flex_card(f, vol.disks.clone(), selected),
+                None => vol.md.clone().map(|a| raid_card(a, selected)).into_any(),
+            }}
             {(!vol.locked && vol.fs.is_some()).then(|| scrub_card(&vol, modal))}
             {(!vol.locked && vol.mountpoint.is_some()).then(|| view! { <super::dedup::DedupCard key=vol.id.clone() /> })}
         </div>
+    }
+    .into_any()
+}
+
+/// A flexible RAID: level and size, the drive map, every tier with its health and sync, the
+/// drives (each opens its drawer).
+fn flex_card(f: FlexLayout, disks: Vec<String>, selected: RwSignal<Option<String>>) -> AnyView {
+    let s = super::sto();
+    let (tone, key) = array_health(f.health());
+    let level = t(f.level().map(level_key).unwrap_or("sto.flex")).to_string();
+    let unused: u64 = f.unused.iter().map(|(_, b)| *b).sum();
+    let tiers_n = f.tiers.len() as u64;
+    view! {
+        <section class="card widget w-12">
+            <WidgetHead icon=icons::LAYERS title="sto.raid">
+                {f.stale.then(|| view! { <span class="chip" title=t("sto.stale_hint")><Icon icon=icons::MOON_STAR size=12 />{tr("sto.stale")}</span> })}
+                <Status tone=tone text=t(key).to_string() />
+            </WidgetHead>
+            <dl class="kvs">
+                {kv_row("sto.level", sig(level), "")}
+                {ui::kv_text("plan.tolerance", tolerance_text(f.tolerance), "")}
+                {ui::kv_text("sto.tiers_label", i18n::tn("sto.tiers", tiers_n, &[]), "tnum")}
+                {(f.size > 0).then(|| kv_row("sto.size", sig(i18n::bytes_si(f.size)), "tnum"))}
+                {(unused > 0).then(|| kv_row("sto.unused_space", sig(i18n::bytes_si(unused)), "tnum"))}
+                {kv_row("sto.lvm", sig(format!("{}/{}", f.vg, f.lv)), "mono")}
+            </dl>
+            {tier_map(&f.tiers, Some(&f.unused), &disks)}
+            {tier_list(&f.tiers, true)}
+            <div class="mini-title">{tr("sto.disks")}</div>
+            <ul class="members-list">
+                {disks.into_iter().map(|d| {
+                    let info = untrack(|| s.disk(&d));
+                    let d2 = d.clone();
+                    view! {
+                        <li>
+                            <button class="cell-btn" type="button" on:click=move |_| selected.set(Some(d2.clone()))>
+                                <span class="mono strong">{d.clone()}</span>
+                                <span class="muted small ellipsis">{info.map(|x| disk_title(&x)).unwrap_or_default()}</span>
+                            </button>
+                        </li>
+                    }
+                }).collect_view()}
+            </ul>
+        </section>
     }
     .into_any()
 }
@@ -832,8 +894,14 @@ fn GrowDialog(vol: Vol, on_close: Callback<()>) -> impl IntoView {
         }
         start_task(exec_url.get_value(), Some(body), false, stage, busy, error);
     };
+    // a flexible RAID keeps its tolerance: the drives join its tiers, no level to choose
+    let flex = vol.flex.is_some();
     let review = move |_| {
-        let mut body = json!({ "array": array.get_value(), "disks": chosen.get_untracked() });
+        let mut body = if flex {
+            json!({ "array": "", "volume": id.get_value(), "disks": chosen.get_untracked() })
+        } else {
+            json!({ "array": array.get_value(), "disks": chosen.get_untracked() })
+        };
         if let Some(l) = lvl() {
             body["level"] = level_json(l);
         }
@@ -852,8 +920,9 @@ fn GrowDialog(vol: Vol, on_close: Callback<()>) -> impl IntoView {
         <Modal title=tf("sto.grow_title", &[("name", &vol.id)]) on_close=on_close wide=true foot=foot>
             {move || match stage.get() {
                 Stage::Form => view! {
-                    <p class="muted small">{tr("sto.grow_text")}</p>
+                    <p class="muted small">{tr(if flex { "sto.grow_text_flex" } else { "sto.grow_text" })}</p>
                     {disk_checklist(free_disks(s), chosen)}
+                    {(!flex).then(|| view! {
                     <label class="field">
                         <span class="field-label">{tr("sto.level")}</span>
                         <select class="input" prop:value=move || level.get() on:change=move |ev| level.set(event_target_value(&ev))>
@@ -863,6 +932,7 @@ fn GrowDialog(vol: Vol, on_close: Callback<()>) -> impl IntoView {
                             }).collect_view()}
                         </select>
                     </label>
+                    })}
                     {form_error(error)}
                 }
                 .into_any(),
@@ -879,9 +949,44 @@ fn ReplaceDialog(vol: Vol, on_close: Callback<()>) -> impl IntoView {
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let md = vol.md.clone().unwrap_or_default();
-    let mut members = md.members.clone();
-    members.sort_by_key(|m| m.role != MemberRole::Faulty);
-    let old = RwSignal::new(members.first().map(|m| m.device.clone()).unwrap_or_default());
+    // what can be replaced, (value, label), the likely one first: a flexible RAID by whole
+    // drive (and "missing" for a drive gone from its degraded tiers), an array by member
+    let options: Vec<(String, String)> = match &vol.flex {
+        Some(f) => {
+            let gone: Vec<String> = f.tiers.iter().flat_map(|x| x.missing.iter().cloned()).collect();
+            let mut disks = vol.disks.clone();
+            disks.extend(gone.iter().cloned());
+            disks.sort();
+            disks.dedup();
+            disks.sort_by_key(|d| !gone.contains(d));
+            let mut v: Vec<(String, String)> = disks
+                .into_iter()
+                .map(|d| {
+                    let label = untrack(|| s.disk(&d)).map(|x| disk_title(&x)).unwrap_or_else(|| d.clone());
+                    let label = if gone.contains(&d) { format!("{label} · {}", t("sto.r.faulty")) } else { label };
+                    (d, label)
+                })
+                .collect();
+            if f.tiers.iter().any(|x| x.degraded as usize > x.missing.len()) {
+                v.insert(0, ("missing".to_string(), t("sto.replace_missing").to_string()));
+            }
+            v
+        }
+        None => {
+            let mut members = md.members.clone();
+            members.sort_by_key(|m| m.role != MemberRole::Faulty);
+            members
+                .into_iter()
+                .map(|m| {
+                    let role = format!("{:?}", m.role).to_lowercase();
+                    let label = format!("{} · {}", m.device, i18n::try_t(&format!("sto.r.{role}")).unwrap_or(&role));
+                    (m.device, label)
+                })
+                .collect()
+        }
+    };
+    let flex = vol.flex.is_some();
+    let old = RwSignal::new(options.first().map(|o| o.0.clone()).unwrap_or_default());
     let new_disk = RwSignal::new(String::new());
     let array = StoredValue::new(md.name.clone());
     let exec_url = StoredValue::new(vol_url(&vol.id, "replace"));
@@ -890,32 +995,29 @@ fn ReplaceDialog(vol: Vol, on_close: Callback<()>) -> impl IntoView {
     if let Some(d) = free.first() {
         new_disk.set(d.name.clone());
     }
-    let exec = move |_: String| {
+    let exec = move |pass: String| {
         let nd = new_disk.get_untracked();
-        start_task(
-            exec_url.get_value(),
-            Some(json!({"old": old.get_untracked(), "new_disk": nd, "confirm": id.get_value(), "serials": serials_for(s, std::slice::from_ref(&nd)), "dry_run": false})),
-            false,
-            stage,
-            busy,
-            error,
-        );
+        let mut body = json!({"old": old.get_untracked(), "new_disk": nd, "confirm": id.get_value(), "serials": serials_for(s, std::slice::from_ref(&nd)), "dry_run": false});
+        // an encrypted flexible RAID: a bigger drive grows the encrypted device too
+        if !pass.is_empty() {
+            body["passphrase"] = Value::String(pass);
+        }
+        start_task(exec_url.get_value(), Some(body), false, stage, busy, error);
     };
     let review = move |_| {
-        fetch_plan(
-            "/api/v1/storage/plan/replace",
-            json!({"array": array.get_value(), "old": old.get_untracked(), "new_disk": new_disk.get_untracked()}),
-            stage,
-            busy,
-            error,
-        );
+        let body = if flex {
+            json!({"array": "", "volume": id.get_value(), "old": old.get_untracked(), "new_disk": new_disk.get_untracked()})
+        } else {
+            json!({"array": array.get_value(), "old": old.get_untracked(), "new_disk": new_disk.get_untracked()})
+        };
+        fetch_plan("/api/v1/storage/plan/replace", body, stage, busy, error);
     };
-    let members = StoredValue::new(members);
+    let options = StoredValue::new(options);
     let free = StoredValue::new(free);
-    let flow = Flow::new(stage, Some(id.get_value()), false, "sto.replace_go", busy, error, Callback::new(exec), on_close);
+    let flow = Flow::new(stage, Some(id.get_value()), flex && vol.encrypted, "sto.replace_go", busy, error, Callback::new(exec), on_close);
     let foot = move || match stage.get() {
         Stage::Form => save_bar_with(SaveBar {
-            can_save: Signal::derive(move || !new_disk.with(String::is_empty)),
+            can_save: Signal::derive(move || !new_disk.with(String::is_empty) && !old.with(String::is_empty)),
             ..SaveBar::new(busy, "sto.review_plan", on_close, Callback::new(review))
         }),
         _ => flow.foot(),
@@ -924,15 +1026,11 @@ fn ReplaceDialog(vol: Vol, on_close: Callback<()>) -> impl IntoView {
         <Modal title=tf("sto.replace_title", &[("name", &vol.id)]) on_close=on_close wide=true foot=foot>
             {move || match stage.get() {
                 Stage::Form => view! {
-                    <p class="muted small">{tr("sto.replace_text")}</p>
+                    <p class="muted small">{tr(if flex { "sto.replace_text_flex" } else { "sto.replace_text" })}</p>
                     <label class="field">
                         <span class="field-label">{tr("sto.replace_old")}</span>
                         <select class="input" prop:value=move || old.get() on:change=move |ev| old.set(event_target_value(&ev))>
-                            {members.get_value().into_iter().map(|m| {
-                                let role = format!("{:?}", m.role).to_lowercase();
-                                let label = format!("{} · {}", m.device, i18n::try_t(&format!("sto.r.{role}")).unwrap_or(&role));
-                                view! { <option value=m.device>{label}</option> }
-                            }).collect_view()}
+                            {options.get_value().into_iter().map(|(v, label)| view! { <option value=v>{label}</option> }).collect_view()}
                         </select>
                     </label>
                     <label class="field">
@@ -942,6 +1040,52 @@ fn ReplaceDialog(vol: Vol, on_close: Callback<()>) -> impl IntoView {
                         </select>
                     </label>
                     {free.with_value(Vec::is_empty).then(|| view! { <p class="muted small">{tr("sto.no_free")}</p> })}
+                    {form_error(error)}
+                }
+                .into_any(),
+                _ => flow.body(),
+            }}
+        </Modal>
+    }
+}
+
+/// One unfinished item of a flexible RAID's growth in words.
+fn pending_text(p: &FlexPending) -> String {
+    let code = serde_json::to_string(&p.kind).unwrap_or_default().trim_matches('"').to_string();
+    let text = i18n::try_t(&format!("sto.pend.{code}")).unwrap_or(t("sto.pend.other"));
+    text.replace("{subject}", p.subject.as_deref().unwrap_or(ui::DASH))
+}
+
+/// Complete the interrupted growth of a flexible RAID: what is left, the plan, the task.
+#[component]
+fn CompleteDialog(vol: Vol, on_close: Callback<()>) -> impl IntoView {
+    let stage = RwSignal::new(Stage::Form);
+    let busy = RwSignal::new(false);
+    let error = RwSignal::new(None::<String>);
+    let id = StoredValue::new(vol.id.clone());
+    let pending = vol.flex.as_ref().map(|f| f.pending.clone()).unwrap_or_default();
+    let exec = move |pass: String| {
+        let mut body = json!({"dry_run": false});
+        if !pass.is_empty() {
+            body["passphrase"] = Value::String(pass);
+        }
+        start_task(vol_url(&id.get_value(), "complete"), Some(body), false, stage, busy, error);
+    };
+    let review = move |_| fetch_plan("/api/v1/storage/plan/complete", json!({"volume": id.get_value()}), stage, busy, error);
+    let flow = Flow::new(stage, Some(id.get_value()), vol.encrypted, "sto.complete", busy, error, Callback::new(exec), on_close);
+    let foot = move || match stage.get() {
+        Stage::Form => save_bar_with(SaveBar::new(busy, "sto.review_plan", on_close, Callback::new(review))),
+        _ => flow.foot(),
+    };
+    let pending = StoredValue::new(pending);
+    view! {
+        <Modal title=tf("sto.complete_title", &[("name", &vol.id)]) on_close=on_close wide=true foot=foot>
+            {move || match stage.get() {
+                Stage::Form => view! {
+                    <p class="muted small">{tr("sto.complete_text")}</p>
+                    <ul class="plan-warnings">
+                        {pending.get_value().iter().map(|p| view! { <li class="warn"><Icon icon=icons::TRIANGLE_ALERT size=14 /><span>{pending_text(p)}</span></li> }).collect_view()}
+                    </ul>
                     {form_error(error)}
                 }
                 .into_any(),

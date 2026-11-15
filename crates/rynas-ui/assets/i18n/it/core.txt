@@ -5348,3 +5348,53 @@ hour_cycle	Formato dell'ora
 hour_cycle.auto	Automatico
 hour_cycle.h23	24 ore
 hour_cycle.h12	12 ore
+# flexible RAID
+sto.flex	RAID flessibile
+sto.flex_tol1	Tolleranza 1 disco
+sto.flex_tol2	Tolleranza 2 dischi
+sto.tier	Fascia {n}
+sto.tiers.one	{n} fascia
+sto.tiers.other	{n} fasce
+sto.tiers_label	Fasce
+sto.tier_unused	Non usata: troppo pochi dischi
+sto.tier_usable	{size} utilizzabili
+sto.tier_map	Mappa dei dischi
+sto.unused_space	Spazio inutilizzato
+sto.lvm	Volume LVM
+sto.flex_pending	L'ultima espansione di questo volume si è interrotta: completala per usare tutto lo spazio.
+sto.flex_blocked	rynas non può modificare questo volume ora:
+sto.complete	Completa l'espansione
+sto.complete_title	Completa l'espansione di {name}
+sto.complete_text	Queste parti dell'ultima espansione restano da fare. Il piano fa solo ciò che manca; il volume resta disponibile.
+sto.pend.reshape_interrupted	{subject}: il rimodellamento si è fermato a metà
+sto.pend.resize_pv	{subject}: il volume fisico LVM è più piccolo dell'array
+sto.pend.extend_lv	Il volume logico non usa ancora tutto lo spazio libero
+sto.pend.resize_luks	Il dispositivo cifrato è più piccolo del volume logico
+sto.pend.resize_filesystem	Il file system è più piccolo del suo dispositivo
+sto.pend.tier_not_in_vg	{subject}: l'array della fascia non è nel gruppo di volumi
+sto.pend.tier_not_recorded	{subject}: l'array della fascia non è registrato, quindi non verrebbe assemblato all'avvio
+sto.pend.partition_not_member	{subject}: la partizione non è un membro dell'array della sua fascia
+sto.pend.other	Altro lavoro non finito
+sto.replace_missing	Disco mancante (non più collegato)
+sto.grow_text_flex	I nuovi dischi entrano in ogni fascia per cui sono abbastanza grandi, e i dischi più grandi degli altri possono creare una nuova fascia. Le fasce vengono rimodellate una alla volta e può richiedere molte ore; il volume resta disponibile.
+sto.replace_text_flex	Il nuovo disco prende il posto del vecchio in ogni fascia; un disco più grande entra anche nelle fasce che ora raggiunge.
+wiz.flex_help	Il RAID flessibile usa tutto lo spazio di dischi di dimensioni diverse: ogni gradino di dimensione diventa una fascia protetta e le fasce formano un unico volume. In seguito cresce un disco alla volta, aggiungendo un disco o sostituendone uno con uno più grande.
+plan.s.create_pv	Rendi {subject} un volume fisico LVM
+plan.s.create_vg	Crea il gruppo di volumi {subject} dagli array delle fasce
+plan.s.create_lv	Crea il volume logico {subject} su tutto lo spazio libero
+plan.s.extend_vg	Aggiungi {other} al gruppo di volumi {subject}
+plan.s.resize_pv	Estendi il volume fisico su {subject} alla dimensione dell'array
+plan.s.extend_lv	Estendi il volume logico {subject} sullo spazio libero
+plan.s.bitmap_off	Disattiva la bitmap write-intent di {subject}
+plan.s.bitmap_on	Riattiva la bitmap write-intent di {subject}
+plan.s.add_partition_live	Fai vedere al kernel la nuova partizione {subject}
+plan.w.flex_unused_space	{items}: {size} inutilizzati finché un altro disco non raggiunge la stessa dimensione
+plan.w.flex_long_reshape	Le fasce vengono rimodellate una alla volta: {size} da spostare, circa {n} h in tutto; il volume resta disponibile
+plan.w.flex_reduced_tolerance_window	{subject}: mentre viene rimodellata in RAID 6, questa fascia sopravvive a un solo disco guasto
+plan.e.flex_layout_unsupported	rynas non può modificare questo RAID flessibile: la sua disposizione non rispetta la regola delle fasce, oppure questa modifica non è ancora supportata
+plan.e.flex_growth_pending	L'ultima espansione di questo volume si è interrotta: completala prima
+plan.e.tolerance_change_unsupported	La tolleranza ai guasti di un RAID flessibile non si può cambiare
+plan.before	Prima
+plan.after	Dopo
+plan.w.flex_no_recent_scrub	{subject}: nessuna pulizia dati senza errori negli ultimi {n} giorni; un errore di lettura durante i rimodellamenti è il rischio principale, quindi avvia prima una pulizia dati
+plan.e.scrub_errors	L'ultima pulizia dati ha trovato errori che non ha potuto riparare: un rimodellamento li diffonderebbe, ripristina prima i file danneggiati

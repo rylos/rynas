@@ -831,10 +831,12 @@ pub fn temp_label(id: &str, label: &str) -> String {
     }
 }
 
-/// The mount point of the volume on an array: the file system on the md device, or the
-/// multi-device btrfs whose source is one of its members (the shortest mount point when a
-/// btrfs is mounted more than once).
 fn array_volume(a: &rynas_api_types::RaidArray, fs: &[rynas_api_types::Filesystem]) -> Option<String> {
+    // a flexible RAID is named by its volume label, mounted at /<label>
+    if flexible(a) {
+        let mp = format!("/{}", a.name);
+        return fs.iter().any(|f| f.mountpoint == mp).then_some(mp);
+    }
     let dev = |f: &rynas_api_types::Filesystem| f.source.strip_prefix("/dev/").unwrap_or(&f.source).to_string();
     fs.iter()
         .filter(|f| {
@@ -843,6 +845,26 @@ fn array_volume(a: &rynas_api_types::RaidArray, fs: &[rynas_api_types::Filesyste
         })
         .map(|f| f.mountpoint.clone())
         .min_by_key(String::len)
+}
+
+/// A flexible RAID: its tier arrays grouped into one entry ("flex1"/"flex2").
+fn flexible(a: &rynas_api_types::RaidArray) -> bool {
+    a.level.starts_with("flex") || !a.tiers.is_empty()
+}
+
+/// The level of an array for its chip: "Flexible RAID", else the md or btrfs level ("RAID5").
+fn array_level(a: &rynas_api_types::RaidArray) -> String {
+    if flexible(a) { t("sto.flex").to_string() } else { a.level.to_uppercase() }
+}
+
+/// Size and members of an array: "8.00 TB · 3 drives", plus "· 2 tiers" for a flexible RAID.
+fn array_facts(a: &rynas_api_types::RaidArray) -> String {
+    let mut s = format!("{} · {}", i18n::bytes_si(a.size), i18n::tn("sto.members", a.members.len() as u64, &[]));
+    if !a.tiers.is_empty() {
+        s.push_str(" · ");
+        s.push_str(&i18n::tn("sto.tiers", a.tiers.len() as u64, &[]));
+    }
+    s
 }
 
 /// Volumes (file systems with usage bars) and RAID arrays with state and resync progress.
@@ -910,9 +932,9 @@ fn VolumesWidget() -> impl IntoView {
                                         <li class=format!("raid {}", tone.class())>
                                             <div class="raid-top">
                                                 <span class="mono strong">{vol.clone().unwrap_or_else(|| a.name.clone())}</span>
-                                                {vol.is_some().then(|| view! { <span class="small muted mono">{a.name.clone()}</span> })}
-                                                <span class="chip accent">{a.level.to_uppercase()}</span>
-                                                <span class="small muted tnum">{format!("{} · {}", i18n::bytes_si(a.size), i18n::tn("sto.members", a.members.len() as u64, &[]))}</span>
+                                                {(vol.is_some() && !flexible(a)).then(|| view! { <span class="small muted mono">{a.name.clone()}</span> })}
+                                                <span class="chip accent">{array_level(a)}</span>
+                                                <span class="small muted tnum">{array_facts(a)}</span>
                                                 <span class="row-end"><Status tone=tone text=t(key).to_string() /></span>
                                             </div>
                                             {a.sync_pct.map(|p| view! {
