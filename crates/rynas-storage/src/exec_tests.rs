@@ -388,6 +388,7 @@ async fn grow_waits_for_the_reshape_and_undoes_only_before_the_array_changes() {
             array: "md2".into(),
             disks: vec!["sdf".into()],
             level: None,
+            volume: None,
         },
     );
     assert!(p.valid, "{:?}", p.errors);
@@ -451,6 +452,7 @@ async fn replace_rebuild_waits_until_not_degraded() {
             array: "md2".into(),
             old: "sdc".into(),
             new_disk: "sdf".into(),
+            volume: None,
         },
     );
     assert!(p.valid, "{:?}", p.errors);

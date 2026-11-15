@@ -776,6 +776,7 @@ async fn volume_grow(
         array: md.name.clone(),
         disks: req.disks.clone(),
         level: req.level,
+        volume: None,
     };
     let p = plan::plan_grow(&inv, &preq);
     if !p.valid {
@@ -850,6 +851,7 @@ async fn volume_replace(
         array: md.name.clone(),
         old: req.old.clone(),
         new_disk: req.new_disk.clone(),
+        volume: None,
     };
     let p = plan::plan_replace(&inv, &preq);
     if !p.valid {

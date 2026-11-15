@@ -1049,21 +1049,41 @@ fn yes() -> bool {
 /// level change such as RAID1 → RAID5).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct GrowPlanRequest {
-    /// e.g. "md2".
+    /// e.g. "md2"; empty for a flexible volume (named by `volume`).
+    #[serde(default)]
     pub array: String,
     pub disks: Vec<String>,
+    /// Classic arrays only: a flexible volume keeps its tolerance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub level: Option<RaidLevel>,
+    /// A flexible volume's label: the disks join its tiers (and may make a new top tier).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume: Option<String>,
 }
 
 /// `POST /api/v1/storage/plan/replace`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ReplacePlanRequest {
+    /// e.g. "md2"; empty for a flexible volume (named by `volume`).
+    #[serde(default)]
     pub array: String,
-    /// Member to replace: component ("sdb3") or whole disk ("sdb").
+    /// Member to replace: component ("sdb3") or whole disk ("sdb"); for a flexible volume a
+    /// whole disk, or "missing" for the disk gone from its degraded tiers.
     pub old: String,
     /// New whole disk.
     pub new_disk: String,
+    /// A flexible volume's label: the new disk takes the old one's place in every tier
+    /// (and, when bigger, joins the tiers it now reaches).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume: Option<String>,
+}
+
+/// `POST /api/v1/storage/plan/complete` (and `POST /storage/volumes/{name}/complete` to run
+/// it): what is left of an interrupted growth of a flexible volume (`FlexLayout.pending`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct CompletePlanRequest {
+    /// The flexible volume's label.
+    pub volume: String,
 }
 
 /// `POST /api/v1/storage/plan/scrub`.

@@ -1779,6 +1779,7 @@ mod tests {
                 array: "md2".into(),
                 disks: vec!["sdd".into()],
                 level: None,
+                volume: None,
             },
         );
         assert!(!p.valid);
@@ -1801,6 +1802,7 @@ mod tests {
                 array: "md2".into(),
                 disks: vec!["sdf".into()],
                 level: None,
+                volume: None,
             },
         );
         assert!(p.valid, "{:?}", p.errors);
@@ -1829,6 +1831,7 @@ mod tests {
                 array: "md2".into(),
                 disks: vec!["sdd".into()],
                 level: None,
+                volume: None,
             },
         );
         assert!(
@@ -1843,6 +1846,7 @@ mod tests {
                 array: "md2".into(),
                 disks: vec!["sdf".into()],
                 level: Some(RaidLevel::Raid6),
+                volume: None,
             },
         );
         assert!(p.valid, "{:?}", p.errors);
@@ -1855,6 +1859,7 @@ mod tests {
                 array: "md2".into(),
                 disks: vec!["sdf".into()],
                 level: Some(RaidLevel::Raid10),
+                volume: None,
             },
         );
         assert!(!p.valid);
@@ -1873,6 +1878,7 @@ mod tests {
                 array: "md2".into(),
                 old: "sdc".into(),
                 new_disk: "sdf".into(),
+                volume: None,
             },
         );
         assert!(p.valid, "{:?}", p.errors);
@@ -1905,6 +1911,7 @@ mod tests {
                 array: "md2".into(),
                 old: "sdb1".into(),
                 new_disk: "sdf".into(),
+                volume: None,
             },
         );
         let a = argvs(&p);
@@ -1924,6 +1931,7 @@ mod tests {
                 array: "md2".into(),
                 old: "sdd".into(),
                 new_disk: "sdf".into(),
+                volume: None,
             },
         );
         assert!(p.errors[0].contains("not a member"));
