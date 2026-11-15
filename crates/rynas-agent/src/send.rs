@@ -134,13 +134,16 @@ pub fn nested_candidates(l: &Layout, snap_dirs: &[String], excludes: &[String], 
             let quiet = |left_out: &mut Vec<String>| left_out.push(rel.clone());
             // mounted elsewhere: handled as a mounted subvolume (sent or not); what is
             // nested in it is found from its own mount
-            if l.subvolumes.iter().any(|x| x.path == path) || not_looked_into(&rel, &place) || snap_dirs.iter().any(|d| !d.trim_matches('/').is_empty() && under(d, &place)) || f.received || f.empty {
+            // an empty one the plan names is still the plan's (said as left out, not as an
+            // exclusion that could not be applied)
+            let named = excludes.iter().map(|e| e.trim()).any(|e| e.starts_with('/') && under(e, &place));
+            if l.subvolumes.iter().any(|x| x.path == path) || not_looked_into(&rel, &place) || snap_dirs.iter().any(|d| !d.trim_matches('/').is_empty() && under(d, &place)) || f.received || (f.empty && !named) {
                 quiet(&mut left_out);
                 continue;
             }
             // left out by the plan (its place, or a folder it lies in): kept as a skipped
             // candidate, so the plan knows the exclusion names a subvolume
-            if excludes.iter().map(|e| e.trim()).any(|e| e.starts_with('/') && under(e, &place)) {
+            if named {
                 quiet(&mut left_out);
                 out.push(btrbk::Candidate { path, mount: place, skip: Some("left out by the plan"), nested_in: Some(c.path.clone()) });
                 continue;
@@ -1073,17 +1076,18 @@ mod tests {
                     f("frozen/inner"),
                     f("bad name"),
                 ]),
-                "/home" => Ok(vec![f("games"), f("games/deep"), f("skipme"), f("skipme/below")]),
+                "/home" => Ok(vec![f("games"), f("games/deep"), f("skipme"), f("skipme/below"), Found { empty: true, ..f("build") }]),
                 "/srv/a" => Err("permission denied".into()),
                 _ => Ok(Vec::new()),
             }
         };
-        let excludes = vec!["/home/skipme".to_string()];
+        // an empty subvolume the plan names (a build folder made a subvolume to leave it out)
+        let excludes = vec!["/home/skipme".to_string(), "/home/build".to_string()];
         let (nested, notes) = nested_candidates(&l, &[AGENT_SNAPSHOT_DIR.into()], &excludes, &mount_points, &list);
         let got: Vec<_> = nested.iter().filter(|c| c.skip.is_none()).map(|c| (c.path.as_str(), c.mount.as_str(), c.nested_in.as_deref().unwrap())).collect();
         // the plan's exclusion: kept as a skipped candidate (nothing below it)
         let skipped: Vec<_> = nested.iter().filter(|c| c.skip.is_some()).map(|c| c.mount.as_str()).collect();
-        assert_eq!(skipped, ["/home/skipme"]);
+        assert_eq!(skipped, ["/home/build", "/home/skipme"]);
         assert_eq!(
             got,
             [("@/var/lib/machines", "/var/lib/machines", "@"), ("@home/games", "/home/games", "@home"), ("@home/games/deep", "/home/games/deep", "@home/games")]
