@@ -3,7 +3,7 @@
 //! shown with [`crate::tasks::TaskRun`].
 
 use leptos::prelude::*;
-use rynas_api_types::storage::{FlexTier, PlanAction, PlanArgs, PlanStep, PlanWarningCode, StoragePlan};
+use rynas_api_types::storage::{FlexTier, PlanAction, PlanArgs, PlanStep, PlanStepKind, PlanWarningCode, RaidLevel, StoragePlan};
 
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
@@ -89,7 +89,16 @@ fn warning_texts(p: &StoragePlan) -> Vec<Text> {
 }
 
 fn step_text(s: &PlanStep) -> Text {
-    let translated = s.kind.and_then(|k| coded("plan.s.", code_name(&k), &s.args));
+    let translated = match (s.kind, &s.args) {
+        // a flexible RAID: every tier partition of a new disk in one command, or one tier
+        // partition added to a disk in use
+        (Some(PlanStepKind::CreatePartition), PlanArgs { subject: Some(d), count: Some(n), .. }) => {
+            Some(i18n::tn("plan.s.create_partitions", *n, &[("subject", d)]))
+        }
+        (Some(PlanStepKind::CreatePartition), PlanArgs { other: Some(_), .. }) => coded("plan.s.", "create_tier_partition".into(), &s.args),
+        (Some(k), args) => coded("plan.s.", code_name(&k), args),
+        (None, _) => None,
+    };
     text_or_en(translated, Some(&s.description))
 }
 
@@ -127,9 +136,10 @@ pub fn plan_warnings(p: &StoragePlan) -> Option<AnyView> {
     })
 }
 
-/// Usable / redundancy / unused capacity of the selected disks as one bar with a legend.
 pub fn cap_bar(raw: u64, usable: u64, wasted: u64) -> AnyView {
     let raw_f = raw.max(1) as f64;
+    // everything that is neither usable nor unused: parity or mirrors, and the little the
+    // partitions and RAID metadata take; the three parts add up to the raw size
     let protect = raw.saturating_sub(usable).saturating_sub(wasted);
     let seg = |cls: &'static str, v: u64| {
         view! { <span class=format!("cap-seg {cls}") style:width=format!("{:.2}%", v as f64 * 100.0 / raw_f)></span> }
@@ -137,13 +147,14 @@ pub fn cap_bar(raw: u64, usable: u64, wasted: u64) -> AnyView {
     let leg = |cls: &'static str, key: &'static str, v: String| {
         view! { <span class="cap-leg"><span class=format!("dot {cls}")></span>{tr(key)}<strong class="tnum">{v}</strong></span> }
     };
+    // decimal units like the drive sizes, so the parts add up as shown
     view! {
         <div class="cap">
-            <div class="cap-bar" role="img" aria-label=format!("{} {}", t("plan.usable"), i18n::bytes(usable))>
+            <div class="cap-bar" role="img" aria-label=format!("{} {}", t("plan.usable"), i18n::bytes_si(usable))>
                 {seg("use", usable)}{seg("prot", protect)}{seg("waste", wasted)}
             </div>
             <div class="cap-legend">
-                {leg("use", "plan.usable", i18n::bytes(usable))}
+                {leg("use", "plan.usable", i18n::bytes_si(usable))}
                 {(protect > 0).then(|| leg("prot", "plan.protection", i18n::bytes_si(protect)))}
                 {(wasted > 0).then(|| leg("waste", "plan.wasted", i18n::bytes_si(wasted)))}
             </div>
@@ -179,7 +190,7 @@ pub fn plan_view(p: &StoragePlan) -> AnyView {
             {plan_warnings(p)}
             {(p.valid && has_cap).then(|| view! {
                 <div class="tiles plan-tiles">
-                    <div class="tile"><span class="tile-label">{tr("plan.usable")}</span><span class="tile-num tnum">{i18n::bytes(p.usable_bytes)}</span></div>
+                    <div class="tile"><span class="tile-label">{tr("plan.usable")}</span><span class="tile-num tnum">{i18n::bytes_si(p.usable_bytes)}</span></div>
                     <div class="tile">
                         <span class="tile-label">{tr("plan.tolerance")}</span>
                         <span class="tile-num tnum">{p.fault_tolerance}</span>
@@ -194,13 +205,20 @@ pub fn plan_view(p: &StoragePlan) -> AnyView {
                 <dl class="kvs plan-summary">
                     {p.summary.iter().map(|(k, v)| {
                         let label = i18n::try_t(&format!("plan.k.{k}")).map(str::to_string).unwrap_or_else(|| k.clone());
-                        view! { <div class="kv"><dt>{label}</dt><dd class="mono">{v.clone()}</dd></div> }
+                        // the level in words ("flex1" → "Flexible RAID, 1-drive tolerance")
+                        let level = (k == "level")
+                            .then(|| serde_json::from_value::<RaidLevel>(serde_json::Value::String(v.clone())).ok())
+                            .flatten();
+                        match level {
+                            Some(l) => view! { <div class="kv"><dt>{label}</dt><dd>{tr(super::level_key(l))}</dd></div> }.into_any(),
+                            None => view! { <div class="kv"><dt>{label}</dt><dd class="mono">{v.clone()}</dd></div> }.into_any(),
+                        }
                     }).collect_view()}
                 </dl>
             })}
             {(n > 0).then(|| ui::fold_with(
                 view! {
-                    {tf("plan.steps", &[("n", &n.to_string())])}
+                    {i18n::tn("plan.steps", n as u64, &[])}
                     {(erases > 0).then(|| view! { " "<span class="chip err"><Icon icon=icons::TRIANGLE_ALERT size=12 />{tr("plan.destructive")}</span> })}
                 }
                 .into_any(),
@@ -258,19 +276,22 @@ fn tier_level_text(tier: &FlexTier) -> String {
     }
 }
 
-/// One bar per drive (as long as the drive, against the largest one), cut into the tiers it
-/// holds, then its unused space. `unused` is the volume's own reckoning (`FlexLayout.unused`);
-/// without it (a plan) the space past the drive's last tier counts when it is a tier step or
-/// more. `extra` adds drives that hold no tier.
 pub fn tier_map(tiers: &[FlexTier], unused: Option<&[(String, u64)]>, extra: &[String]) -> AnyView {
     let s = super::sto();
     let mut names: Vec<String> = tiers.iter().flat_map(|x| x.members.iter().cloned()).chain(extra.iter().cloned()).collect();
     names.sort();
     names.dedup();
+    struct Seg {
+        cls: String,
+        bytes: u64,
+        title: String,
+        /// The tier number written on the segment (tiers differ by more than colour).
+        n: Option<u32>,
+    }
     struct Row {
         name: String,
         size: u64,
-        segs: Vec<(String, u64, String)>,
+        segs: Vec<Seg>,
     }
     let rows: Vec<Row> = names
         .into_iter()
@@ -279,12 +300,13 @@ pub fn tier_map(tiers: &[FlexTier], unused: Option<&[(String, u64)]>, extra: &[S
             held.sort_by_key(|x| x.start);
             let end = held.iter().map(|x| x.end).max().unwrap_or(0);
             let size = untrack(|| s.disk(&name)).map(|d| d.size).unwrap_or(end).max(end);
-            let mut segs: Vec<(String, u64, String)> = held
+            let mut segs: Vec<Seg> = held
                 .iter()
-                .map(|x| {
-                    let cls = if x.level.is_some() { tier_class(x.index) } else { "waste".to_string() };
-                    let title = format!("{} · {}", tf("sto.tier", &[("n", &x.index.to_string())]), tier_level_text(x));
-                    (cls, x.end.saturating_sub(x.start), title)
+                .map(|x| Seg {
+                    cls: if x.level.is_some() { tier_class(x.index) } else { "waste".to_string() },
+                    bytes: x.end.saturating_sub(x.start),
+                    title: format!("{} · {}", tf("sto.tier", &[("n", &x.index.to_string())]), tier_level_text(x)),
+                    n: x.level.is_some().then_some(x.index),
                 })
                 .collect();
             let rest = match unused {
@@ -292,30 +314,37 @@ pub fn tier_map(tiers: &[FlexTier], unused: Option<&[(String, u64)]>, extra: &[S
                 None => size.saturating_sub(end),
             };
             if rest >= MIN_TIER {
-                segs.push(("waste".to_string(), rest, format!("{} · {}", t("sto.unused_space"), i18n::bytes_si(rest))));
+                segs.push(Seg {
+                    cls: "waste".to_string(),
+                    bytes: rest,
+                    title: format!("{} · {}", t("sto.unused_space"), i18n::bytes_si(rest)),
+                    n: None,
+                });
             }
             Row { name, size, segs }
         })
         .collect();
     let max = rows.iter().map(|r| r.size).max().unwrap_or(1).max(1) as f64;
-    let any_unused = rows.iter().any(|r| r.segs.iter().any(|x| x.0 == "waste"));
-    let legend: Vec<(String, String)> = tiers
+    let any_unused = rows.iter().any(|r| r.segs.iter().any(|x| x.cls == "waste"));
+    let legend: Vec<(String, u32, String)> = tiers
         .iter()
         .filter(|x| x.level.is_some())
-        .map(|x| (tier_class(x.index), format!("{} · {}", tf("sto.tier", &[("n", &x.index.to_string())]), tier_level_text(x))))
+        .map(|x| (tier_class(x.index), x.index, format!("{} · {}", tf("sto.tier", &[("n", &x.index.to_string())]), tier_level_text(x))))
         .collect();
     view! {
         <div class="tier-map" role="list" aria-label=tr("sto.tier_map")>
             {rows.into_iter().map(|r| {
                 let total = r.size.max(1) as f64;
-                let label = format!("{} · {}", r.name, r.segs.iter().map(|x| x.2.clone()).collect::<Vec<_>>().join(", "));
+                let label = format!("{} · {}", r.name, r.segs.iter().map(|x| x.title.clone()).collect::<Vec<_>>().join(", "));
                 view! {
                     <div class="tier-row" role="listitem">
                         <span class="tier-disk"><span class="mono strong">{r.name.clone()}</span><span class="muted small tnum">{i18n::bytes_si(r.size)}</span></span>
                         <span class="tier-track">
                             <span class="tier-bar" role="img" aria-label=label style:width=format!("{:.2}%", r.size as f64 * 100.0 / max)>
-                                {r.segs.into_iter().map(|(cls, b, title)| view! {
-                                    <span class=format!("tier-seg {cls}") title=title style:width=format!("{:.2}%", b as f64 * 100.0 / total)></span>
+                                {r.segs.into_iter().map(|x| view! {
+                                    <span class=format!("tier-seg {}", x.cls) title=x.title style:width=format!("{:.2}%", x.bytes as f64 * 100.0 / total)>
+                                        {x.n.map(|n| view! { <span class="tier-n" aria-hidden="true">{n}</span> })}
+                                    </span>
                                 }).collect_view()}
                             </span>
                         </span>
@@ -324,7 +353,9 @@ pub fn tier_map(tiers: &[FlexTier], unused: Option<&[(String, u64)]>, extra: &[S
             }).collect_view()}
         </div>
         <div class="cap-legend">
-            {legend.into_iter().map(|(cls, text)| view! { <span class="cap-leg"><span class=format!("dot {cls}")></span>{text}</span> }).collect_view()}
+            {legend.into_iter().map(|(cls, n, text)| view! {
+                <span class="cap-leg"><span class=format!("dot num {cls}") aria-hidden="true">{n}</span>{text}</span>
+            }).collect_view()}
             {any_unused.then(|| view! { <span class="cap-leg"><span class="dot waste"></span>{tr("sto.unused_space")}</span> })}
         </div>
     }
@@ -347,10 +378,14 @@ pub fn tier_list(tiers: &[FlexTier], live: bool) -> AnyView {
                 view! {
                     <li class="tier-item">
                         <div class="tier-head">
-                            <span class=format!("dot {}", if x.level.is_some() { tier_class(x.index) } else { "waste".to_string() })></span>
+                            {if x.level.is_some() {
+                                view! { <span class=format!("dot num {}", tier_class(x.index)) aria-hidden="true">{x.index}</span> }.into_any()
+                            } else {
+                                view! { <span class="dot waste"></span> }.into_any()
+                            }}
                             <strong>{tf("sto.tier", &[("n", &x.index.to_string())])}</strong>
                             {ui::chip(if x.level.is_some() { Tone::Info } else { Tone::Warn }, view! { {tier_level_text(x)} }.into_any())}
-                            {x.level.is_some().then(|| view! { <span class="muted small tnum">{tf("sto.tier_usable", &[("size", &i18n::bytes(x.usable))])}</span> })}
+                            {x.level.is_some().then(|| view! { <span class="muted small tnum">{tf("sto.tier_usable", &[("size", &i18n::bytes_si(x.usable))])}</span> })}
                             {live.then(|| view! { <span class="row-end"><Status tone=tone text=t(key).to_string() /></span> })}
                         </div>
                         <div class="muted small tier-sub">{sub}</div>

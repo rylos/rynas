@@ -831,6 +831,9 @@ pub fn temp_label(id: &str, label: &str) -> String {
     }
 }
 
+/// The mount point of the volume on an array: the file system on the md device, or the
+/// multi-device btrfs whose source is one of its members (the shortest mount point when a
+/// btrfs is mounted more than once); a flexible RAID's volume, `/<label>`, when it is mounted.
 fn array_volume(a: &rynas_api_types::RaidArray, fs: &[rynas_api_types::Filesystem]) -> Option<String> {
     // a flexible RAID is named by its volume label, mounted at /<label>
     if flexible(a) {

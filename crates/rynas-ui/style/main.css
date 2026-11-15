@@ -67,6 +67,9 @@
   --c3: #0f6e9e;
   --c4: #3a8f7f;
   --c5: #df8e1d;
+  /* text on a tier colour (c1-c4 dark in light mode); c5 is light in both themes */
+  --on-tier: #ffffff;
+  --on-tier-5: #1f2328;
   --chart-grid: rgba(52, 59, 88, .12);
   --shadow-1: 0 1px 2px rgba(26, 27, 38, .06), 0 1px 1px rgba(26, 27, 38, .04);
   --shadow-2: 0 4px 16px rgba(26, 27, 38, .08), 0 1px 3px rgba(26, 27, 38, .06);
@@ -149,6 +152,8 @@
   --c3: #56c2e6;
   --c4: #3cc47c;
   --c5: #e7a93a;
+  --on-tier: #14171c;
+  --on-tier-5: #14171c;
   --chart-grid: rgba(228, 231, 236, .08);
   --shadow-1: none;
   --shadow-2: 0 0 0 1px rgba(255, 255, 255, .02);
@@ -548,6 +553,17 @@ kbd {
 .page-head { display: flex; align-items: center; gap: var(--s-3); margin-bottom: var(--s-2); }
 .page-head h1 { font-size: var(--fs-24); letter-spacing: -.015em; }
 .page-sub { color: var(--text-subtle); font-size: var(--fs-13); margin-top: var(--s-1); }
+/* facts of a page head: each wraps to the next line as a whole, a dot after all but the last
+   (a wrapped line never starts with a dot) */
+.sub-parts { display: flex; flex-wrap: wrap; column-gap: .4em; }
+.sub-parts > span { min-width: 0; overflow-wrap: anywhere; }
+.sub-parts > span:not(:last-child)::after { content: "·"; margin-left: .4em; }
+/* a narrow page head with facts: the actions go to a row of their own, the facts get the width */
+@media (max-width: 767px) {
+  .page-head:has(.sub-parts) { flex-wrap: wrap; }
+  .page-head:has(.sub-parts) > .grow { flex: 1 1 calc(100% - 100px); min-width: 0; }
+  .page-head:has(.sub-parts) > .page-actions { margin-left: auto; }
+}
 .page-text { min-width: 0; overflow-wrap: anywhere; }
 .page-actions { flex: none; margin-left: auto; display: flex; align-items: center; gap: var(--s-2); }
 .page-icon {
@@ -1716,8 +1732,12 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
 .tier-row { display: grid; grid-template-columns: minmax(0, 6rem) minmax(0, 1fr); align-items: center; gap: var(--s-3); }
 .tier-disk { display: flex; flex-direction: column; min-width: 0; }
 .tier-track { display: flex; min-width: 0; }
-.tier-bar { display: flex; height: 12px; border-radius: var(--r-pill); overflow: hidden; background: var(--bg); }
-.tier-seg { height: 100%; min-width: 2px; }
+.tier-bar { display: flex; height: 16px; border-radius: var(--r-pill); overflow: hidden; background: var(--bg); }
+.tier-seg { height: 100%; min-width: 2px; display: grid; place-items: center; overflow: hidden; color: var(--on-tier); }
+.tier-seg.c5, .dot.num.c5 { color: var(--on-tier-5); }
+/* the tier number on its segment and in the legend: tiers differ by more than colour */
+.tier-n { font-size: var(--fs-12); font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+.dot.num { display: inline-grid; place-items: center; width: 16px; height: 16px; border-radius: var(--r-xs); font-size: var(--fs-12); font-weight: 700; line-height: 1; color: var(--on-tier); }
 .tier-seg + .tier-seg { border-left: 2px solid var(--surface); }
 .tier-seg.c1 { background: var(--c1); } .tier-seg.c2 { background: var(--c2); } .tier-seg.c3 { background: var(--c3); }
 .tier-seg.c4 { background: var(--c4); } .tier-seg.c5 { background: var(--c5); } .dot.c5 { background: var(--c5); }
@@ -1803,6 +1823,11 @@ select.input { height: var(--input-h); padding-right: var(--s-6); }
   padding: var(--s-2) var(--s-3); border-radius: var(--r-md); border: 1px solid var(--border); background: var(--surface-2); min-width: 0;
 }
 .calc-row.rec { border-color: var(--accent); background: color-mix(in oklch, var(--accent) 7%, var(--surface)); }
+.calc-note { grid-column: 1 / -1; overflow-wrap: anywhere; }
+.calc-sum { display: flex; flex-direction: column; gap: var(--s-1); }
+.calc-best { display: flex; align-items: flex-start; gap: var(--s-2); font-size: var(--fs-13); font-weight: 600; color: var(--accent); overflow-wrap: anywhere; }
+.calc-best svg { flex: none; margin-top: 1px; }
+.calc-more { align-self: flex-start; }
 .calc-name { display: flex; flex-wrap: wrap; align-items: center; gap: 0 var(--s-2); min-width: 0; font-size: var(--fs-13); }
 .calc-name strong, .calc-name .small { overflow-wrap: anywhere; }
 .calc-val { display: flex; flex-direction: column; min-width: 0; font-size: var(--fs-13); overflow-wrap: anywhere; }

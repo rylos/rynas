@@ -712,12 +712,18 @@ pub fn slot_text(d: &DiskSummary) -> Option<String> {
     d.bay.map(|b| b.to_string()).or_else(|| d.m2.map(|m| m2_label(m.number)))
 }
 
-/// One-line description of a disk for pickers: "sdb · HDD · 4.0 TB · WDC WD40EFRX (bay 2)".
+/// One-line description of a disk for pickers: "sdb · HDD · 4.0 TB · WDC WD40EFRX (bay 2)"
+/// (no empty part: a virtual disk without a model ends at its size).
 pub fn disk_title(d: &DiskSummary) -> String {
     let at = match (d.bay, d.m2) {
         (Some(b), _) => format!(" ({} {b})", t("sto.bay")),
         (None, Some(m)) => format!(" ({})", m2_label(m.number)),
         (None, None) => String::new(),
     };
-    format!("{} · {} · {}{at}", d.name, disk_line(d), d.model)
+    let model = d.model.trim();
+    if model.is_empty() {
+        format!("{} · {}{at}", d.name, disk_line(d))
+    } else {
+        format!("{} · {} · {model}{at}", d.name, disk_line(d))
+    }
 }

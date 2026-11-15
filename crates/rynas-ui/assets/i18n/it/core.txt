@@ -1014,13 +1014,14 @@ plan.destructive	Cancella dati
 plan.erases	Cancella {dev}
 plan.protection	Ridondanza
 plan.raw	Capacità grezza
-plan.steps	{n} passaggi
 plan.tol0	Nessun disco può guastarsi
 plan.tol1	Può guastarsi 1 disco
 plan.toln	Possono guastarsi {n} dischi
 plan.tolerance	Tolleranza ai guasti
 plan.usable	Utilizzabile
-plan.wasted	Non utilizzato
+plan.wasted	Inutilizzato
+plan.steps.one	{n} passaggio
+plan.steps.other	{n} passaggi
 plan.k.array	Array
 plan.k.filesystem	File system
 plan.k.filesystem_device	Dispositivo del file system
@@ -1032,6 +1033,9 @@ plan.k.md	Dispositivo RAID
 plan.k.mountpoint	Punto di montaggio
 plan.k.old	Membro sostituito
 plan.k.raid_devices	Membri RAID
+plan.k.vg	Gruppo di volumi
+plan.k.lv	Volume logico
+plan.k.volume	Volume
 plan.e.invalid_label	Nome non valido: usa da 1 a 16 lettere minuscole, cifre o trattini, iniziando con una lettera.
 plan.e.label_taken	Esiste già un volume, un array o un punto di montaggio con questo nome.
 plan.e.disk_selected_twice	{subject}: selezionato due volte
@@ -1077,6 +1081,9 @@ plan.w.scrub_cost	La pulizia dati legge ogni blocco allocato: su grandi volumi H
 plan.s.wipe_signatures	Cancella le firme su {subject}
 plan.s.clear_partition_table	Azzera la tabella delle partizioni di {subject}
 plan.s.create_partition	Crea una partizione RAID su {subject}, lasciando 128 MiB liberi alla fine
+plan.s.create_partitions.one	Crea una partizione RAID su {subject} per la sua fascia
+plan.s.create_partitions.other	Crea {n} partizioni RAID su {subject}, una per fascia
+plan.s.create_tier_partition	Crea la partizione della fascia {other} su {subject} (il disco resta in uso)
 plan.s.wait_udev	Attendi che compaiano le partizioni
 plan.s.create_array	Crea l'array RAID ({level}, dischi: {n})
 plan.s.record_array	Registra l'array perché venga assemblato all'avvio
@@ -1342,7 +1349,9 @@ wiz.next	Avanti
 wiz.pick_disks	Scegli i dischi
 wiz.pick_text	Sono elencati solo i dischi senza dati. Tutto ciò che c'è sui dischi scelti verrà cancellato.
 wiz.in_use	Dischi in uso, non elencati: {n}.
-wiz.selected	Selezionati: {n} · {size} grezzi
+wiz.selected.one	{n} disco selezionato · {size} grezzi
+wiz.selected.other	{n} dischi selezionati · {size} grezzi
+wiz.selected_none	Nessun disco selezionato
 wiz.pick_level	Scegli il livello RAID
 wiz.recommended	Consigliato
 wiz.min_single	Esattamente 1 disco
@@ -1350,15 +1359,14 @@ wiz.min2	Servono almeno 2 dischi
 wiz.min3	Servono almeno 3 dischi
 wiz.min4	Servono almeno 4 dischi
 wiz.lvm_missing	Serve il pacchetto lvm2
-wiz.min_even4	Serve un numero pari di dischi, almeno 4
 wiz.d_single	Un disco, senza ridondanza; un mirror si può aggiungere in seguito.
 wiz.d_raid0	Striping per velocità: un disco guasto fa perdere tutto.
 wiz.d_raid1	Mirror: ogni disco contiene una copia completa.
 wiz.d_raid5	Parità singola: sopravvive a un disco guasto.
 wiz.d_raid6	Doppia parità: sopravvive a due dischi guasti.
 wiz.d_raid10	Mirror in striping: veloce, sopravvive a un guasto per mirror.
-wiz.d_flex1	Dischi di dimensioni diverse, tutto il loro spazio usato: sopravvive a un disco guasto.
-wiz.d_flex2	Dischi di dimensioni diverse, tutto il loro spazio usato: sopravvive a due dischi guasti.
+wiz.d_flex1	Usa lo spazio di dischi di dimensioni diverse; resta inutilizzata solo la parte del disco più grande che nessun altro disco raggiunge. Sopravvive a un disco guasto.
+wiz.d_flex2	Usa lo spazio di dischi di dimensioni diverse; resta inutilizzata solo la parte dei dischi più grandi che nessun altro disco raggiunge. Sopravvive a due dischi guasti.
 wiz.label	Nome del volume
 wiz.label_hint	Montato in {path}.
 wiz.label_invalid	Usa da 1 a 16 lettere minuscole, cifre o trattini, iniziando con una lettera.
@@ -5361,16 +5369,16 @@ sto.tier	Fascia {n}
 sto.tiers.one	{n} fascia
 sto.tiers.other	{n} fasce
 sto.tiers_label	Fasce
-sto.tier_unused	Non usata: troppo pochi dischi
+sto.tier_unused	Inutilizzata: troppo pochi dischi
 sto.tier_usable	{size} utilizzabili
 sto.tier_map	Mappa dei dischi
 sto.unused_space	Spazio inutilizzato
 sto.lvm	Volume LVM
-sto.flex_pending	L'ultima espansione di questo volume si è interrotta: completala per usare tutto lo spazio.
+sto.flex_pending	L'ultima espansione o sostituzione di un disco di questo volume non è finita: completala per recuperare tutta la ridondanza e lo spazio.
 sto.flex_blocked	rynas non può modificare questo volume ora:
-sto.complete	Completa l'espansione
-sto.complete_title	Completa l'espansione di {name}
-sto.complete_text	Queste parti dell'ultima espansione restano da fare. Il piano fa solo ciò che manca; il volume resta disponibile.
+sto.complete	Completa
+sto.complete_title	Completare l'ultima modifica di {name}?
+sto.complete_text	Queste parti dell'ultima espansione o sostituzione di un disco restano da fare. Il piano fa solo ciò che manca; il volume resta disponibile.
 sto.pend.reshape_interrupted	{subject}: il rimodellamento si è fermato a metà
 sto.pend.resize_pv	{subject}: il volume fisico LVM è più piccolo dell'array
 sto.pend.extend_lv	Il volume logico non usa ancora tutto lo spazio libero
@@ -5382,18 +5390,34 @@ sto.pend.partition_not_member	{subject}: la partizione non è un membro dell'arr
 sto.pend.change_interrupted	{subject}: l'ultima espansione o sostituzione di un disco si è fermata prima della fine; completarla riprende da dove si è fermata
 sto.pend.bitmap_off	{subject}: l'array della fascia non ha la bitmap write-intent
 sto.pend.other	Altro lavoro non finito
+sto.block.uneven_slices	le partizioni di {subject} non hanno la stessa posizione e dimensione su tutti i dischi
+sto.block.tiers_overlap	{subject} e {other} si sovrappongono
+sto.block.not_in_lower_tier	non tutti i dischi di {subject} sono in {other}
+sto.block.partition_order	le partizioni su {subject} non sono nell'ordine delle fasce
+sto.block.no_redundancy	una fascia non ha ridondanza
+sto.block.vg_missing_pv	al gruppo di volumi {subject} manca un volume fisico
+sto.type_serial	Digita il numero di serie di {disk} per confermare
 sto.replace_missing	Disco mancante (non più collegato)
 sto.grow_text_flex	I nuovi dischi entrano in ogni fascia per cui sono abbastanza grandi, e i dischi più grandi degli altri possono creare una nuova fascia. Le fasce vengono rimodellate una alla volta e può richiedere molte ore; il volume resta disponibile.
 sto.replace_text_flex	Il nuovo disco prende il posto del vecchio in ogni fascia; un disco più grande entra anche nelle fasce che ora raggiunge.
-wiz.flex_help	Il RAID flessibile usa tutto lo spazio di dischi di dimensioni diverse: ogni gradino di dimensione diventa una fascia protetta e le fasce formano un unico volume. In seguito cresce un disco alla volta, aggiungendo un disco o sostituendone uno con uno più grande.
+wiz.flex_help	Il RAID flessibile usa lo spazio di dischi di dimensioni diverse: ogni gradino di dimensione diventa una fascia protetta e le fasce formano un unico volume. Resta inutilizzata solo la parte del disco più grande che nessun altro disco raggiunge. In seguito cresce un disco alla volta, aggiungendo un disco o sostituendone uno con uno più grande.
 wiz.calc	Calcolatore di capacità
-wiz.calc.text	Inserisci le dimensioni dei dischi, anche di dischi che non hai ancora: ogni livello RAID che accetta quel numero di dischi mostra cosa offre. I numeri vengono dal calcolo con cui rynas crea il volume (partizioni, metadati RAID, LVM), senza crittografia; il file system mostra un po' meno.
+wiz.calc_short	Calcolatore
+wiz.calc.text	Inserisci le dimensioni dei dischi, compresi quelli che non hai ancora: ogni livello RAID che accetta quel numero di dischi mostra il suo spazio utilizzabile. I numeri vengono dal calcolo con cui rynas crea il volume (partizioni, metadati RAID, LVM), senza cifratura; il file system mostra un po' meno.
+wiz.calc.placeholder	Dimensione
+wiz.calc.best	Il migliore per questi dischi: {level} · {tolerance} · {size} utilizzabili
+wiz.calc.none	Con questi dischi non si può creare nessun livello RAID: sono troppo piccoli.
+wiz.calc.raid0_note	Ogni disco viene usato fino alla dimensione del più piccolo.
+wiz.calc.more.one	Mostra {n} altro livello
+wiz.calc.more.other	Mostra altri {n} livelli
+wiz.calc.fewer	Mostra meno livelli
+wiz.same_as_twin	Per ora lo stesso spazio di {level}; cresce quando aggiungi un disco o ne sostituisci uno con uno più grande.
 wiz.calc.drive	Disco {n}
 wiz.calc.size	Dimensione del disco {n}
 wiz.calc.unit	Unità del disco {n}
 wiz.calc.remove	Rimuovi il disco {n}
 wiz.calc.add	Aggiungi un disco da
-wiz.calc.bad	Le dimensioni che non sono un numero di almeno 1 GB sono escluse.
+wiz.calc.bad	Le righe senza una dimensione valida sono escluse: inserisci un numero tra 1 GB e 10 PB.
 wiz.calc.empty	Aggiungi almeno un disco per vedere i livelli RAID.
 wiz.calc.total.one	{n} disco · {size} grezzi
 wiz.calc.total.other	{n} dischi · {size} grezzi

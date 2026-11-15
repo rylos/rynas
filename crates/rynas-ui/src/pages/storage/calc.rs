@@ -10,7 +10,7 @@ use rynas_api_types::storage::RaidLevel;
 
 use super::level_key;
 use super::plan::tolerance_text;
-use super::wizard::{LEVELS, recommended, sizes_mixed};
+use super::wizard::{classic_twin, ordered, recommended, same_as_twin, sizes_mixed};
 use crate::i18n::{self, t, tf, tr};
 use crate::icons::{self, Icon};
 use crate::ui::{self, Modal};
@@ -21,6 +21,8 @@ const PRESETS: [u64; 7] = [1, 2, 4, 8, 12, 16, 20];
 const MAX_DRIVES: usize = 24;
 const TB: f64 = 1e12;
 const GB: f64 = 1e9;
+/// The largest size a row takes: 10 PB.
+const MAX_BYTES: f64 = 1e16;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Unit {
@@ -46,14 +48,67 @@ struct Drive {
     exact: Option<u64>,
 }
 
-/// The size a row stands for: a number (`.` or `,` as decimal separator) of at least 1 GB.
+/// The size a row stands for: a number between 1 GB and 10 PB in the row's unit.
 fn size_of(d: &Drive) -> Option<u64> {
     if let Some(b) = d.exact {
         return Some(b);
     }
-    let v: f64 = d.text.trim().replace(',', ".").parse().ok()?;
+    let mark = if i18n::decimal_mark() == "," { ',' } else { '.' };
+    let v = parse_number(&d.text, mark)?;
     let b = v * d.unit.factor();
-    (b.is_finite() && (GB..=1e16).contains(&b)).then(|| b.round() as u64)
+    (b.is_finite() && (GB..=MAX_BYTES).contains(&b)).then(|| b.round() as u64)
+}
+
+/// A typed number, read without guessing: the locale's decimal mark (`decimal`) or the other
+/// one as decimal separator, except that a separator followed by exactly three digits, in
+/// groups after one to three digits, is a thousands separator when it is not the locale's
+/// decimal mark ("1.000" is 1000 in Italian, "1,000" is 1000 in English; "1.5" and "1,5" are
+/// 1.5 everywhere). Both marks in one number: the last one is the decimal separator. Spaces
+/// (also the narrow ones some locales group with) are ignored; anything else is not a number.
+fn parse_number(text: &str, decimal: char) -> Option<f64> {
+    let s: String = text.chars().filter(|c| !c.is_whitespace() && !matches!(c, '\u{a0}' | '\u{202f}' | '\'')).collect();
+    if s.is_empty() || !s.chars().all(|c| c.is_ascii_digit() || c == '.' || c == ',') {
+        return None;
+    }
+    // digits in groups of three after the first: "1.234.567" split at `sep`
+    let grouped = |s: &str, sep: char| {
+        let mut parts = s.split(sep);
+        let first = parts.next().unwrap_or("");
+        (1..=3).contains(&first.len()) && parts.clone().count() > 0 && parts.all(|p| p.len() == 3)
+    };
+    let digits = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
+    let (int, frac): (String, Option<String>) = match (s.rfind('.'), s.rfind(',')) {
+        (Some(a), Some(b)) => {
+            let (dec_at, group) = if a > b { (a, ',') } else { (b, '.') };
+            let (head, tail) = (&s[..dec_at], &s[dec_at + 1..]);
+            if !grouped(head, group) || !digits(tail) {
+                return None;
+            }
+            (head.replace(group, ""), Some(tail.to_string()))
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            let sep = if s.contains('.') { '.' } else { ',' };
+            if sep != decimal && grouped(&s, sep) {
+                (s.replace(sep, ""), None)
+            } else if s.matches(sep).count() == 1 {
+                let (head, tail) = s.split_once(sep)?;
+                if !digits(head) || !digits(tail) {
+                    return None;
+                }
+                (head.to_string(), Some(tail.to_string()))
+            } else {
+                return None;
+            }
+        }
+        (None, None) => (s.clone(), None),
+    };
+    if !digits(&int) {
+        return None;
+    }
+    match frac {
+        Some(f) => format!("{int}.{f}").parse().ok(),
+        None => int.parse().ok(),
+    }
 }
 
 /// A size as typed: whole numbers bare, otherwise up to two decimals in the user's locale.
@@ -71,8 +126,6 @@ fn level_name(l: RaidLevel) -> (&'static str, Option<&'static str>) {
     }
 }
 
-/// The calculator dialog; `start` are the sizes it opens with (the drives chosen in the
-/// wizard, if any).
 #[component]
 pub fn CapacityCalculator(start: Vec<u64>, on_close: Callback<()>) -> impl IntoView {
     let next_id = StoredValue::new(0u32);
@@ -98,9 +151,19 @@ pub fn CapacityCalculator(start: Vec<u64>, on_close: Callback<()>) -> impl IntoV
             }
         })
     };
+    let remove = move |id: u32| {
+        let at = drives.with_untracked(|v| v.iter().position(|x| x.id == id));
+        drives.update(|v| v.retain(|x| x.id != id));
+        // focus goes to the row now in its place (its remove button), else to the add buttons
+        if let Some(i) = at {
+            request_animation_frame(move || focus_after_remove(i));
+        }
+    };
     let sizes = Memo::new(move |_| drives.with(|v| v.iter().filter_map(size_of).collect::<Vec<u64>>()));
-    let bad = Memo::new(move |_| drives.with(|v| v.iter().any(|d| !d.text.trim().is_empty() && size_of(d).is_none())));
+    // a row without a valid size (empty too) is left out, and says so
+    let bad = Memo::new(move |_| drives.with(|v| v.iter().any(|d| size_of(d).is_none())));
     let full = move || drives.with(Vec::len) >= MAX_DRIVES;
+    let show_all = RwSignal::new(false);
 
     let row = move |d: Drive| {
         let id = d.id;
@@ -113,13 +176,15 @@ pub fn CapacityCalculator(start: Vec<u64>, on_close: Callback<()>) -> impl IntoV
                 }
             })
         };
-        let invalid = move || get().is_some_and(|d| !d.text.trim().is_empty() && size_of(&d).is_none());
+        let invalid = move || get().is_some_and(|d| size_of(&d).is_none());
         view! {
             <li class="calc-drive">
                 <span class="calc-drive-n muted small">{move || tf("wiz.calc.drive", &[("n", &n())])}</span>
                 <input class="input tnum calc-size" inputmode="decimal" autocomplete="off" spellcheck="false"
                     aria-label=move || tf("wiz.calc.size", &[("n", &n())])
                     aria-invalid=move || invalid().to_string()
+                    aria-describedby=move || invalid().then_some("calc-bad")
+                    placeholder=tr("wiz.calc.placeholder")
                     prop:value=move || get().map(|d| d.text).unwrap_or_default()
                     on:input=move |ev| {
                         let text = event_target_value(&ev);
@@ -141,28 +206,65 @@ pub fn CapacityCalculator(start: Vec<u64>, on_close: Callback<()>) -> impl IntoV
                     <option value="gb">{tr("fmt.unit.gb")}</option>
                 </select>
                 {move || ui::icon_btn(icons::TRASH_2, tf("wiz.calc.remove", &[("n", &n())]), true, Signal::stored(false),
-                    Callback::new(move |_| drives.update(|v| v.retain(|x| x.id != id))))}
+                    Callback::new(move |_| remove(id)))}
             </li>
         }
     };
 
-    let results = move || {
+    // the levels these drives take, in the wizard's order (the recommended one first)
+    let levels = Memo::new(move |_| {
         let sizes = sizes.get();
-        if sizes.is_empty() {
-            return view! { <p class="muted small">{tr("wiz.calc.empty")}</p> }.into_any();
-        }
-        let rec = recommended(sizes.len(), sizes_mixed(&sizes));
-        let max = sizes.iter().copied().max().unwrap_or(1).max(1) as f64;
-        let rows: Vec<(RaidLevel, Capacity)> = LEVELS
+        let n = sizes.len();
+        let mixed = sizes_mixed(&sizes);
+        let rows: Vec<(RaidLevel, Capacity)> = ordered(n, mixed)
             .into_iter()
             .filter_map(|l| capacity::volume(l, &sizes, false, MIN_TIER).map(|c| (l, c)))
             .collect();
+        (recommended(n, mixed), rows)
+    });
+    // the line screen readers hear after each change: the drives and the best level
+    let summary = move || {
+        let sizes = sizes.get();
+        if sizes.is_empty() {
+            return None;
+        }
+        let total = i18n::tn("wiz.calc.total", sizes.len() as u64, &[("size", &i18n::bytes_si(sizes.iter().sum()))]);
+        let best = levels.with(|(rec, rows)| {
+            rows.iter().find(|(l, _)| l == rec).map(|(l, c)| {
+                let name = if l.is_flexible() { t("sto.flex") } else { t(level_key(*l)) };
+                tf("wiz.calc.best", &[("level", name), ("tolerance", &tolerance_text(c.tolerance)), ("size", &i18n::bytes_si(c.usable))])
+            })
+        });
+        Some((total, best))
+    };
+
+    let results = move || {
+        let (rec, rows) = levels.get();
+        if rows.is_empty() {
+            let key = if sizes.with(Vec::is_empty) { "wiz.calc.empty" } else { "wiz.calc.none" };
+            return view! { <p class="muted small">{tr(key)}</p> }.into_any();
+        }
+        let n = sizes.with(Vec::len);
+        let mixed = sizes.with(|s| sizes_mixed(s));
+        let max = sizes.with(|s| s.iter().copied().max().unwrap_or(1).max(1)) as f64;
+        let usable_of = |l: RaidLevel| rows.iter().find(|(x, _)| *x == l).map(|(_, c)| c.usable);
+        let hidden = rows.iter().filter(|(l, _)| uncommon(*l, n)).count();
+        let shown: Vec<(RaidLevel, Capacity)> =
+            rows.iter().filter(|(l, _)| show_all.get() || !uncommon(*l, n)).cloned().collect();
+        let notes = |l: RaidLevel, c: &Capacity| -> Option<String> {
+            if let Some(tw) = classic_twin(l, n)
+                && usable_of(tw).is_some_and(|u| same_as_twin(c.usable, u))
+            {
+                return Some(tf("wiz.same_as_twin", &[("level", t(level_key(tw)))]));
+            }
+            (l == RaidLevel::Raid0 && mixed && c.wasted > 0).then(|| t("wiz.calc.raid0_note").to_string())
+        };
         view! {
-            <p class="wiz-sum">{i18n::tn("wiz.calc.total", sizes.len() as u64, &[("size", &i18n::bytes_si(sizes.iter().sum()))])}</p>
             <ul class="calc-list" aria-label=tr("wiz.calc.levels")>
-                {rows.into_iter().map(|(l, c)| {
+                {shown.into_iter().map(|(l, c)| {
                     let (name, variant) = level_name(l);
                     let wasted = if c.wasted > 0 { i18n::bytes_si(c.wasted) } else { ui::DASH.to_string() };
+                    let note = notes(l, &c);
                     view! {
                         <li class="calc-row" class:rec=l == rec>
                             <div class="calc-name">
@@ -181,10 +283,17 @@ pub fn CapacityCalculator(start: Vec<u64>, on_close: Callback<()>) -> impl IntoV
                                     </span>
                                 }).collect_view()}
                             </div>
+                            {note.map(|x| view! { <p class="calc-note muted small">{x}</p> })}
                         </li>
                     }
                 }).collect_view()}
             </ul>
+            {(hidden > 0).then(|| view! {
+                <button type="button" class="btn ghost sm calc-more" aria-expanded=move || show_all.get().to_string()
+                    on:click=move |_| show_all.update(|v| *v = !*v)>
+                    {move || if show_all.get() { t("wiz.calc.fewer").to_string() } else { i18n::tn("wiz.calc.more", hidden as u64, &[]) }}
+                </button>
+            })}
             <div class="cap-legend">
                 <span class="cap-leg"><span class="dot calc-used"></span>{tr("wiz.calc.used")}</span>
                 <span class="cap-leg"><span class="dot waste"></span>{tr("sto.unused_space")}</span>
@@ -211,10 +320,42 @@ pub fn CapacityCalculator(start: Vec<u64>, on_close: Callback<()>) -> impl IntoV
                         }).collect_view()}
                     </div>
                 </div>
-                {move || bad.get().then(|| view! { <p class="small warn-text">{tr("wiz.calc.bad")}</p> })}
+                <p id="calc-bad" class="small warn-text" hidden=move || !bad.get()>{tr("wiz.calc.bad")}</p>
             </div>
-            <div class="calc-out" aria-live="polite">{results}</div>
+            <div class="calc-out">
+                <div class="calc-sum" aria-live="polite" aria-atomic="true">
+                    {move || summary().map(|(total, best)| view! {
+                        <p class="wiz-sum">{total}</p>
+                        {best.map(|b| view! { <p class="calc-best"><Icon icon=icons::CIRCLE_CHECK size=16 /><span>{b}</span></p> })}
+                    })}
+                </div>
+                {results}
+            </div>
         </Modal>
+    }
+}
+
+/// Levels that rarely make sense for this many drives, behind "show all": a mirror of more
+/// than four drives (every drive a full copy).
+fn uncommon(l: RaidLevel, n: usize) -> bool {
+    l == RaidLevel::Raid1 && n > 4
+}
+
+/// After the drive at `index` was removed: focus the remove button of the drive now at that
+/// place (or the last one), else the first enabled add button.
+fn focus_after_remove(index: usize) {
+    use wasm_bindgen::JsCast;
+    let doc = document();
+    let rows = doc.query_selector_all(".calc-drives > li").ok();
+    let len = rows.as_ref().map_or(0, |r| r.length() as usize);
+    let target = if len > 0 {
+        let i = index.min(len - 1);
+        doc.query_selector(&format!(".calc-drives > li:nth-child({}) button", i + 1)).ok().flatten()
+    } else {
+        doc.query_selector(".calc-presets button:not([disabled])").ok().flatten()
+    };
+    if let Some(el) = target.and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok()) {
+        let _ = el.focus();
     }
 }
 
@@ -232,4 +373,32 @@ fn disk_label(c: &Capacity) -> String {
         })
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_number;
+
+    #[test]
+    fn numbers_are_read_without_guessing() {
+        // Italian: comma decimal, a dot before exactly three digits groups thousands
+        assert_eq!(parse_number("1.000", ','), Some(1000.0));
+        assert_eq!(parse_number("12.000.000", ','), Some(12_000_000.0));
+        assert_eq!(parse_number("1,5", ','), Some(1.5));
+        assert_eq!(parse_number("1.5", ','), Some(1.5));
+        assert_eq!(parse_number("1.000,5", ','), Some(1000.5));
+        assert_eq!(parse_number("1 000", ','), Some(1000.0));
+        assert_eq!(parse_number("1\u{202f}000,25", ','), Some(1000.25));
+        // English: dot decimal, a comma before exactly three digits groups thousands
+        assert_eq!(parse_number("1,000", '.'), Some(1000.0));
+        assert_eq!(parse_number("1.000", '.'), Some(1.0));
+        assert_eq!(parse_number("1,5", '.'), Some(1.5));
+        assert_eq!(parse_number("1,000.5", '.'), Some(1000.5));
+        assert_eq!(parse_number("16", '.'), Some(16.0));
+        // not numbers
+        for bad in ["", " ", "abc", "1..0", "1,2,3", "1.000,5.5", "1,00.5", "-4", "1e3", ".", "4,", ",5"] {
+            assert_eq!(parse_number(bad, ','), None, "{bad:?} (it)");
+            assert_eq!(parse_number(bad, '.'), None, "{bad:?} (en)");
+        }
+    }
 }

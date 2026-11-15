@@ -1569,7 +1569,8 @@ dict! { BLOB, LENS;
     "plan.erases" => "Erases {dev}";
     "plan.protection" => "Redundancy";
     "plan.raw" => "Raw capacity";
-    "plan.steps" => "{n} steps";
+    "plan.steps.one" => "{n} step";
+    "plan.steps.other" => "{n} steps";
     "plan.tol0" => "No drive may fail";
     "plan.tol1" => "1 drive may fail";
     "plan.toln" => "{n} drives may fail";
@@ -1587,6 +1588,9 @@ dict! { BLOB, LENS;
     "plan.k.mountpoint" => "Mount point";
     "plan.k.old" => "Replaced member";
     "plan.k.raid_devices" => "RAID members";
+    "plan.k.vg" => "Volume group";
+    "plan.k.lv" => "Logical volume";
+    "plan.k.volume" => "Volume";
     // storage plan texts by code: errors (plan.e.<PlanIssueCode>), warnings
     // (plan.w.<PlanWarningCode>), steps (plan.s.<PlanStepKind>); {subject}, {other}, {items},
     // {size}, {n} and {level} come from the plan
@@ -1635,6 +1639,9 @@ dict! { BLOB, LENS;
     "plan.s.wipe_signatures" => "Erase the signatures on {subject}";
     "plan.s.clear_partition_table" => "Clear the partition table of {subject}";
     "plan.s.create_partition" => "Create one RAID partition on {subject}, leaving 128 MiB free at the end";
+    "plan.s.create_partitions.one" => "Create one RAID partition on {subject} for its tier";
+    "plan.s.create_partitions.other" => "Create {n} RAID partitions on {subject}, one per tier";
+    "plan.s.create_tier_partition" => "Create the tier partition {other} on {subject} (the drive stays in use)";
     "plan.s.wait_udev" => "Wait for the partitions to appear";
     "plan.s.create_array" => "Create the RAID array ({level}, drives: {n})";
     "plan.s.record_array" => "Record the array so it is assembled at boot";
@@ -1754,12 +1761,12 @@ dict! { BLOB, LENS;
     "sto.tier_map" => "Drive map";
     "sto.unused_space" => "Unused space";
     "sto.lvm" => "LVM volume";
-    "sto.flex_pending" => "The last growth of this volume was interrupted: complete it to use all the space.";
+    "sto.flex_pending" => "The last growth or drive replacement of this volume did not finish: complete it to get back all its redundancy and space.";
     "sto.flex_blocked" => "rynas cannot change this volume now:";
-    "sto.complete" => "Complete growth";
-    "sto.complete_title" => "Complete the growth of {name}";
-    "sto.complete_text" => "These parts of the last growth are still to be done. The plan does only what is left; the volume stays online.";
-    "sto.pend.reshape_interrupted" => "{subject}: the reshape stopped half way";
+    "sto.complete" => "Complete";
+    "sto.complete_title" => "Complete the last change to {name}?";
+    "sto.complete_text" => "These parts of the last growth or drive replacement are still to be done. The plan does only what is left; the volume stays online.";
+    "sto.pend.reshape_interrupted" => "{subject}: the reshape stopped halfway";
     "sto.pend.resize_pv" => "{subject}: the LVM physical volume is smaller than the array";
     "sto.pend.extend_lv" => "The logical volume does not use all the free space yet";
     "sto.pend.resize_luks" => "The encrypted device is smaller than the logical volume";
@@ -1770,18 +1777,35 @@ dict! { BLOB, LENS;
     "sto.pend.change_interrupted" => "{subject}: the last growth or drive replacement stopped before the end; completing it goes on from where it stopped";
     "sto.pend.bitmap_off" => "{subject}: the tier array has no write-intent bitmap";
     "sto.pend.other" => "Other unfinished work";
+    // why rynas cannot change a flexible RAID (sto.block.<FlexBlockerKind>)
+    "sto.block.uneven_slices" => "the partitions of {subject} differ in offset or size between the drives";
+    "sto.block.tiers_overlap" => "{subject} and {other} overlap";
+    "sto.block.not_in_lower_tier" => "the drives of {subject} are not all in {other}";
+    "sto.block.partition_order" => "the partitions on {subject} are not in tier order";
+    "sto.block.no_redundancy" => "a tier has no redundancy";
+    "sto.block.vg_missing_pv" => "the volume group {subject} is missing a physical volume";
+    "sto.type_serial" => "Type the serial number of {disk} to confirm";
     "sto.replace_missing" => "Missing drive (no longer connected)";
     "sto.grow_text_flex" => "The new drives join every tier they are large enough for, and drives larger than the others can make a new tier. Tiers are reshaped one at a time, which can take many hours; the volume stays online.";
     "sto.replace_text_flex" => "The new drive takes the old one's place in every tier; a larger drive also joins the tiers it now reaches.";
-    "wiz.flex_help" => "Flexible RAID uses all the space of drives of different sizes: each size step becomes a protected tier, and the tiers form one volume. Later it grows one drive at a time, by adding a drive or replacing one with a larger one.";
+    "wiz.flex_help" => "Flexible RAID uses the space of drives of different sizes: each size step becomes a protected tier, and the tiers form one volume. Only the part of the largest drive that no other drive matches stays unused. Later it grows one drive at a time, by adding a drive or replacing one with a larger one.";
     "wiz.calc" => "Capacity calculator";
-    "wiz.calc.text" => "Type the sizes of the drives, also of drives you don't have yet: every RAID level that takes that many drives shows what it gives. The numbers come from the arithmetic rynas creates the volume with (partitions, RAID metadata, LVM), without encryption; the file system shows a little less.";
+    "wiz.calc_short" => "Calculator";
+    "wiz.calc.text" => "Type the sizes of the drives, including drives you don't have yet: each RAID level that takes that many drives shows its usable space. The numbers come from the arithmetic rynas creates the volume with (partitions, RAID metadata, LVM), without encryption; the file system shows a little less.";
+    "wiz.calc.placeholder" => "Size";
+    "wiz.calc.best" => "Best for these drives: {level} · {tolerance} · {size} usable";
+    "wiz.calc.none" => "No RAID level can be made with these drives: they are too small.";
+    "wiz.calc.raid0_note" => "Every drive is used up to the size of the smallest one.";
+    "wiz.calc.more.one" => "Show {n} more level";
+    "wiz.calc.more.other" => "Show {n} more levels";
+    "wiz.calc.fewer" => "Show fewer levels";
+    "wiz.same_as_twin" => "Same space as {level} now; it grows when you add a drive or replace one with a larger one.";
     "wiz.calc.drive" => "Drive {n}";
     "wiz.calc.size" => "Size of drive {n}";
     "wiz.calc.unit" => "Unit of drive {n}";
     "wiz.calc.remove" => "Remove drive {n}";
     "wiz.calc.add" => "Add a drive of";
-    "wiz.calc.bad" => "Sizes that are not a number of at least 1 GB are left out.";
+    "wiz.calc.bad" => "Rows without a valid size are left out: type a number between 1 GB and 10 PB.";
     "wiz.calc.empty" => "Add at least one drive to see the RAID levels.";
     "wiz.calc.total.one" => "{n} drive · {size} raw";
     "wiz.calc.total.other" => "{n} drives · {size} raw";
@@ -1971,7 +1995,9 @@ dict! { BLOB, LENS;
     "wiz.pick_disks" => "Choose the drives";
     "wiz.pick_text" => "Only drives without data are listed. Everything on the chosen drives will be erased.";
     "wiz.in_use" => "Drives in use, not listed: {n}.";
-    "wiz.selected" => "Selected: {n} · {size} raw";
+    "wiz.selected.one" => "{n} drive selected · {size} raw";
+    "wiz.selected.other" => "{n} drives selected · {size} raw";
+    "wiz.selected_none" => "No drives selected yet";
     "wiz.pick_level" => "Choose the RAID level";
     "wiz.recommended" => "Recommended";
     "wiz.min_single" => "Exactly 1 drive";
@@ -1979,15 +2005,14 @@ dict! { BLOB, LENS;
     "wiz.min3" => "Needs 3 or more drives";
     "wiz.min4" => "Needs 4 or more drives";
     "wiz.lvm_missing" => "Needs the lvm2 package";
-    "wiz.min_even4" => "Needs an even number of drives, 4 or more";
     "wiz.d_single" => "One drive, no redundancy; a mirror can be added later.";
     "wiz.d_raid0" => "Striping for speed: one failed drive loses everything.";
     "wiz.d_raid1" => "Mirror: every drive holds a full copy.";
     "wiz.d_raid5" => "Single parity: survives one failed drive.";
     "wiz.d_raid6" => "Double parity: survives two failed drives.";
     "wiz.d_raid10" => "Striped mirrors: fast, survives one failure per mirror.";
-    "wiz.d_flex1" => "Drives of different sizes, all their space used: survives one failed drive.";
-    "wiz.d_flex2" => "Drives of different sizes, all their space used: survives two failed drives.";
+    "wiz.d_flex1" => "Uses the space of drives of different sizes; only the part of the largest drive with no partner stays unused. Survives one failed drive.";
+    "wiz.d_flex2" => "Uses the space of drives of different sizes; only the part of the largest drives with no partners stays unused. Survives two failed drives.";
     "wiz.label" => "Volume name";
     "wiz.label_hint" => "Mounted at {path}.";
     "wiz.label_invalid" => "Use 1-16 lowercase letters, digits or dashes, starting with a letter.";
@@ -6328,6 +6353,11 @@ pub fn num(v: f64, decimals: usize) -> String {
     let s = format!("{v:.decimals$}");
     let n = numbers();
     if n.decimal == "." { s } else { s.replace('.', &n.decimal) }
+}
+
+/// The decimal mark of the interface's locale ("." or ",").
+pub fn decimal_mark() -> String {
+    numbers().decimal.clone()
 }
 
 /// A whole count with the locale's grouping, as `Intl.NumberFormat` writes it: 1,234,567 /

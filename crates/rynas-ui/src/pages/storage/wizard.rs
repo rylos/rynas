@@ -15,7 +15,7 @@ use rynas_api_types::capacity::MIN_TIER;
 
 use super::calc::CapacityCalculator;
 use super::plan::{cap_bar, plan_errors, plan_view, plan_warnings, tier_preview, tolerance_text};
-use super::volume::{RevealDialog, Stage, disk_checklist, level_json, start_task};
+use super::volume::{RevealDialog, Stage, disk_checklist, erase_box, level_json, start_task};
 use super::{free_disks, level_key, loading, serial_of, use_refresh, valid_label, volumes};
 use crate::api;
 use crate::form::{form_error, spinner};
@@ -44,8 +44,8 @@ fn min_key(l: RaidLevel) -> &'static str {
         RaidLevel::Single => "wiz.min_single",
         RaidLevel::Raid0 | RaidLevel::Raid1 | RaidLevel::Flex1 => "wiz.min2",
         RaidLevel::Raid5 => "wiz.min3",
-        RaidLevel::Raid6 | RaidLevel::Flex2 => "wiz.min4",
-        RaidLevel::Raid10 => "wiz.min_even4",
+        // md's RAID10 takes an odd count too (every block on two drives)
+        RaidLevel::Raid6 | RaidLevel::Raid10 | RaidLevel::Flex2 => "wiz.min4",
     }
 }
 
@@ -74,6 +74,35 @@ pub(super) fn recommended(n: usize, mixed: bool) -> RaidLevel {
         (3 | 4, false) => RaidLevel::Raid5,
         (_, false) => RaidLevel::Raid6,
     }
+}
+
+/// The levels in the order the wizard and the calculator show them: the recommended one first,
+/// then, for drives of different sizes, the other flexible level before the classic ones
+/// (which cut every drive to the smallest); for equal drives the classic levels first.
+pub(super) fn ordered(n: usize, mixed: bool) -> Vec<RaidLevel> {
+    let rec = recommended(n, mixed);
+    let mut v: Vec<RaidLevel> = LEVELS.into_iter().filter(|l| *l != rec).collect();
+    if mixed {
+        v.sort_by_key(|l| !l.is_flexible());
+    }
+    v.insert(0, rec);
+    v
+}
+
+/// The classic level with the same fault tolerance as a flexible one for `n` drives: what the
+/// flexible RAID gives the same space as when the drives are about the same size.
+pub(super) fn classic_twin(l: RaidLevel, n: usize) -> Option<RaidLevel> {
+    match l {
+        RaidLevel::Flex1 if n == 2 => Some(RaidLevel::Raid1),
+        RaidLevel::Flex1 => Some(RaidLevel::Raid5),
+        RaidLevel::Flex2 => Some(RaidLevel::Raid6),
+        _ => None,
+    }
+}
+
+pub(super) fn same_as_twin(flex_usable: u64, twin_usable: u64) -> bool {
+    // within 2 %: the rounding of a few MB of metadata, not a gain worth naming
+    flex_usable <= twin_usable.saturating_add(twin_usable / 50)
 }
 
 /// The plan of level `l` says the server lacks LVM (flexible RAID without lvm2).
@@ -246,7 +275,10 @@ pub fn CreateVolume() -> impl IntoView {
     view! {
         <div class="page">
             <PageHeader icon=icons::PLUS title="sto.create" subtitle="wiz.subtitle">
-                {ui::icon_btn(icons::CALCULATOR, t("wiz.calc").to_string(), false, Signal::stored(false), Callback::new(move |_| calc.set(true)))}
+                // a visible label at every width: an icon alone does not say "calculator"
+                <button class="btn ghost" type="button" on:click=move |_| calc.set(true)>
+                    <Icon icon=icons::CALCULATOR size=16 /><span>{tr("wiz.calc_short")}</span>
+                </button>
                 <a class="btn ghost" href="/storage">{tr("cancel")}</a>
             </PageHeader>
             <Show when=move || s.disks.with(Option::is_some) && s.tree.with(Option::is_some) fallback=move || loading(s, 6)>
@@ -365,19 +397,32 @@ fn step_disks(chosen: RwSignal<Vec<String>>) -> impl IntoView {
         <p class="muted small">{tr("wiz.pick_text")}</p>
         {disk_checklist(free, chosen)}
         {(in_use > 0).then(|| view! { <p class="muted small free-note"><Icon icon=icons::INFO size=14 />{tf("wiz.in_use", &[("n", &in_use.to_string())])}</p> })}
-        <p class="wiz-sum" aria-live="polite">
-            {move || tf("wiz.selected", &[("n", &chosen.with(Vec::len).to_string()), ("size", &i18n::bytes_si(total.get()))])}
+        <p class=move || if chosen.with(Vec::is_empty) { "wiz-sum muted" } else { "wiz-sum" } aria-live="polite">
+            {move || match chosen.with(Vec::len) {
+                0 => t("wiz.selected_none").to_string(),
+                n => i18n::tn("wiz.selected", n as u64, &[("size", &i18n::bytes_si(total.get()))]),
+            }}
         </p>
     }
 }
 
 fn step_level(chosen: RwSignal<Vec<String>>, level: RwSignal<RaidLevel>, plans: RwSignal<Vec<(RaidLevel, PlanRes)>>) -> impl IntoView {
     let n = chosen.with_untracked(Vec::len);
-    let rec = recommended(n, chosen.with_untracked(|c| mixed_sizes(c)));
+    let mixed = chosen.with_untracked(|c| mixed_sizes(c));
+    let rec = recommended(n, mixed);
+    // the recommended level first, the levels these drives cannot take last
+    let mut order = ordered(n, mixed);
+    order.sort_by_key(|l| !allowed(*l, n));
+    let usable_of = move |l: RaidLevel| {
+        plans.with(|p| match p.iter().find(|(x, _)| *x == l) {
+            Some((_, Some(Ok(p)))) if p.valid => Some(p.usable_bytes),
+            _ => None,
+        })
+    };
     view! {
         <h2 class="section-title"><Icon icon=icons::LAYERS size=16 />{tr("wiz.pick_level")}</h2>
         <div class="level-grid" role="radiogroup" aria-label=tr("sto.level")>
-            {LEVELS.into_iter().map(|l| {
+            {order.into_iter().map(|l| {
                 let ok = allowed(l, n);
                 let plan = move || plans.with(|p| p.iter().find(|(x, _)| *x == l).and_then(|(_, r)| r.clone()));
                 // the server cannot make it (flexible RAID without lvm2): greyed with the reason
@@ -395,7 +440,10 @@ fn step_level(chosen: RwSignal<Vec<String>>, level: RwSignal<RaidLevel>, plans: 
                         role="radio"
                         aria-checked=move || (level.get() == l).to_string()
                         disabled=move || !ok || no_lvm()
-                        on:click=move |_| level.set(l)
+                        on:click=move |_| {
+                            level.set(l);
+                            reveal_detail();
+                        }
                     >
                         <span class="level-top">
                             <strong>{tr(name)}</strong>
@@ -412,7 +460,7 @@ fn step_level(chosen: RwSignal<Vec<String>>, level: RwSignal<RaidLevel>, plans: 
                                 <span class="level-num tnum">
                                     {move || match plan() {
                                         None => "…".to_string(),
-                                        Some(Ok(p)) if p.valid => i18n::bytes(p.usable_bytes),
+                                        Some(Ok(p)) if p.valid => i18n::bytes_si(p.usable_bytes),
                                         Some(_) => ui::DASH.to_string(),
                                     }}
                                 </span>
@@ -427,12 +475,21 @@ fn step_level(chosen: RwSignal<Vec<String>>, level: RwSignal<RaidLevel>, plans: 
         {move || {
             let l = level.get();
             let help = l.is_flexible().then(|| view! { <p class="muted small">{tr("wiz.flex_help")}</p> });
+            // a flexible level with no more space than its classic twin yet
+            let twin = classic_twin(l, n).filter(|t| match (usable_of(l), usable_of(*t)) {
+                (Some(f), Some(c)) => same_as_twin(f, c),
+                _ => false,
+            });
+            let twin_note = twin.map(|tw| {
+                ui::note(Tone::Info, icons::INFO, view! { {tf("wiz.same_as_twin", &[("level", t(level_key(tw)))])} }.into_any())
+            });
             match plans.with(|p| p.iter().find(|(x, _)| *x == l).and_then(|(_, r)| r.clone())) {
-                None => view! { {help}<Skeleton lines=2 /> }.into_any(),
-                Some(Err(e)) => view! { <p class="form-error"><Icon icon=icons::CIRCLE_X size=16 /><span>{e}</span></p> }.into_any(),
+                None => view! { <div class="level-detail">{help}<Skeleton lines=2 /></div> }.into_any(),
+                Some(Err(e)) => view! { <div class="level-detail"><p class="form-error"><Icon icon=icons::CIRCLE_X size=16 /><span>{e}</span></p></div> }.into_any(),
                 Some(Ok(p)) => view! {
                     <div class="level-detail">
                         {help}
+                        {twin_note}
                         {p.valid.then(|| cap_bar(p.raw_bytes, p.usable_bytes, p.wasted_bytes))}
                         {p.valid.then(|| tier_preview(&p))}
                         {plan_errors(&p)}
@@ -443,6 +500,22 @@ fn step_level(chosen: RwSignal<Vec<String>>, level: RwSignal<RaidLevel>, plans: 
             }
         }}
     }
+}
+
+/// On a narrow screen the detail of the chosen level is below every card: bring it into view.
+fn reveal_detail() {
+    let w = window();
+    if !w.match_media("(max-width: 767px)").ok().flatten().is_some_and(|m| m.matches()) {
+        return;
+    }
+    // after the detail has been rendered for the new level
+    request_animation_frame(|| {
+        if let Some(el) = document().query_selector(".wizard .level-detail").ok().flatten() {
+            let o = web_sys::ScrollIntoViewOptions::new();
+            o.set_block(web_sys::ScrollLogicalPosition::Start);
+            el.scroll_into_view_with_scroll_into_view_options(&o);
+        }
+    });
 }
 
 fn step_options(
@@ -496,7 +569,6 @@ fn step_review(
     chosen: RwSignal<Vec<String>>,
     retry: impl Fn() + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
-    let s = super::sto();
     view! {
         <h2 class="section-title"><Icon icon=icons::LIST_CHECKS size=16 />{tr("wiz.s_review")}</h2>
         {move || match final_plan.get() {
@@ -507,17 +579,7 @@ fn step_review(
             }
             .into_any(),
             Some(Ok(p)) => view! {
-                {p.valid.then(|| view! {
-                    <div class="erase-box" role="note">
-                        <strong><Icon icon=icons::TRIANGLE_ALERT size=16 />{tr("wiz.erase_title")}</strong>
-                        <ul>
-                            {chosen.get_untracked().into_iter().map(|n| {
-                                let d = untrack(|| s.disk(&n));
-                                view! { <li><span class="mono strong">{n}</span>" "<span class="muted small">{d.map(|d| format!("{} · {} · {}", d.model, d.serial, i18n::bytes_si(d.size))).unwrap_or_default()}</span></li> }
-                            }).collect_view()}
-                        </ul>
-                    </div>
-                })}
+                {p.valid.then(|| erase_box(&chosen.get_untracked()))}
                 {plan_view(&p)}
                 {p.valid.then(|| typed_confirm(label.get_untracked(), typed))}
             }

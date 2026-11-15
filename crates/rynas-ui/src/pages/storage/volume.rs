@@ -8,8 +8,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::hooks::use_params_map;
 use rynas_api_types::storage::{
-    ScrubState,
-    FlexLayout, FlexPending, MdArray, MemberRole, RaidLevel, RecoveryKey, StoragePlan, SubvolumeInfo, VolumeSettings,
+    DiskSummary, FlexBlocker, FlexLayout, FlexPending, MdArray, ScrubState, MemberRole, RaidLevel, RecoveryKey, StoragePlan, SubvolumeInfo, VolumeSettings,
     VolumeSettingsState,
 };
 use rynas_api_types::{TaskInfo, TaskStarted, TaskStatus};
@@ -87,8 +86,14 @@ pub struct Flow {
     confirm_name: StoredValue<Option<String>>,
     need_pass: bool,
     exec_key: &'static str,
-    /// Gets the typed passphrase (empty when none is asked).
-    exec: Callback<String>,
+    /// The disks the form chose (their serials go with the request already): any other disk
+    /// the plan erases is confirmed by typing its serial number.
+    own: Signal<Vec<String>>,
+    /// The serial numbers typed for those other disks: (disk, text).
+    serials: RwSignal<Vec<(String, String)>>,
+    /// Gets the typed passphrase (empty when none is asked) and the serial numbers of the
+    /// other disks the plan erases.
+    exec: Callback<(String, Vec<String>)>,
     on_close: Callback<()>,
 }
 
@@ -101,7 +106,7 @@ impl Flow {
         exec_key: &'static str,
         busy: RwSignal<bool>,
         error: RwSignal<Option<String>>,
-        exec: Callback<String>,
+        exec: Callback<(String, Vec<String>)>,
         on_close: Callback<()>,
     ) -> Self {
         Flow {
@@ -113,25 +118,55 @@ impl Flow {
             confirm_name: StoredValue::new(confirm_name),
             need_pass,
             exec_key,
+            own: Signal::stored(Vec::new()),
+            serials: RwSignal::new(Vec::new()),
             exec,
             on_close,
         }
+    }
+
+    /// The disks the form chose: other disks the plan erases need their serial typed.
+    pub fn with_own(self, own: Signal<Vec<String>>) -> Self {
+        Flow { own, ..self }
     }
 
     fn need_typed(self, p: &StoragePlan) -> bool {
         p.steps.iter().any(|s| !s.destroys.is_empty()) && self.confirm_name.with_value(Option::is_some)
     }
 
+    /// The other disks the plan erases (not chosen in the form), as the inventory has them.
+    fn others(self, p: &StoragePlan) -> Vec<DiskSummary> {
+        if self.confirm_name.with_value(Option::is_none) {
+            return Vec::new();
+        }
+        let s = super::sto();
+        let own = self.own.get_untracked();
+        let mut v: Vec<DiskSummary> = Vec::new();
+        for name in erased_disk_names(p) {
+            if own.contains(&name) || v.iter().any(|d| d.name == name) {
+                continue;
+            }
+            if let Some(d) = untrack(|| s.disk(&name)) {
+                v.push(d);
+            }
+        }
+        v
+    }
+
     /// The body of the current stage after the form (nothing on the form).
     pub fn body(self) -> AnyView {
-        let Flow { stage, error, typed, pass, confirm_name, need_pass, .. } = self;
+        let Flow { stage, error, typed, pass, confirm_name, need_pass, serials, .. } = self;
         let s = super::sto();
         match stage.get() {
             Stage::Form => ().into_any(),
             Stage::Plan(p) => {
                 let need_typed = self.need_typed(&p);
+                let others = self.others(&p);
+                let erased = if need_typed { erased_disk_names(&p) } else { Vec::new() };
                 view! {
                     {plan_view(&p)}
+                    {(p.valid && !erased.is_empty()).then(|| erase_box(&erased))}
+                    {p.valid.then(|| others.into_iter().map(|d| serial_confirm(d, serials)).collect_view())}
                     {(p.valid && need_typed).then(|| typed_confirm(confirm_name.get_value().unwrap_or_default(), typed))}
                     {(p.valid && need_pass).then(|| view! {
                         <label class="field">
@@ -157,16 +192,27 @@ impl Flow {
     /// The action row of the current stage after the form: Back and the action on the plan,
     /// nothing while the task runs, Close on the outcome.
     pub fn foot(self) -> AnyView {
-        let Flow { stage, busy, typed, pass, confirm_name, need_pass, exec_key, exec, on_close, .. } = self;
+        let Flow { stage, busy, typed, pass, confirm_name, need_pass, exec_key, exec, on_close, serials, .. } = self;
         match stage.get() {
             Stage::Plan(p) => {
                 let valid = p.valid;
                 let destructive = p.steps.iter().any(|s| !s.destroys.is_empty());
                 let need_typed = self.need_typed(&p);
+                // (disk, serial) of the other disks the plan erases
+                let others: Vec<(String, String)> = self.others(&p).iter().map(|d| (d.name.clone(), serial_of(d))).collect();
+                let others = StoredValue::new(others);
+                let serials_ok = move || {
+                    others.with_value(|o| {
+                        serials.with(|typed| {
+                            o.iter().all(|(n, want)| typed.iter().any(|(d, t)| d == n && t.trim() == want))
+                        })
+                    })
+                };
                 let ok = move || {
                     valid
                         && (!need_typed || confirm_name.with_value(|n| n.as_deref() == Some(typed.get().trim())))
                         && (!need_pass || pass.with(|p| p.chars().count() >= 8))
+                        && serials_ok()
                 };
                 view! {
                     <button class="btn ghost" type="button" on:click=move |_| stage.set(Stage::Form)>{tr("back")}</button>
@@ -174,7 +220,7 @@ impl Flow {
                         class=if destructive { "btn danger" } else { "btn primary" }
                         type="button"
                         disabled=move || !ok() || busy.get()
-                        on:click=move |_| exec.run(pass.get_untracked())
+                        on:click=move |_| exec.run((pass.get_untracked(), others.with_value(|o| o.iter().map(|(_, s)| s.clone()).collect())))
                     >
                         {spinner(busy)}{tr(exec_key)}
                     </button>
@@ -185,6 +231,76 @@ impl Flow {
             Stage::Form | Stage::Running(_) => ().into_any(),
         }
     }
+}
+
+/// The disks a plan erases (step `destroys` that name a whole disk of the inventory), in plan
+/// order.
+fn erased_disk_names(p: &StoragePlan) -> Vec<String> {
+    let s = super::sto();
+    let mut v: Vec<String> = Vec::new();
+    for d in p.steps.iter().flat_map(|st| st.destroys.iter()) {
+        if !v.contains(d) && untrack(|| s.disk(d)).is_some() {
+            v.push(d.clone());
+        }
+    }
+    v
+}
+
+/// "Everything on these drives will be erased": each drive with model, serial and size (the
+/// parts it has).
+pub fn erase_box(names: &[String]) -> AnyView {
+    let s = super::sto();
+    view! {
+        <div class="erase-box" role="note">
+            <strong><Icon icon=icons::TRIANGLE_ALERT size=16 />{tr("wiz.erase_title")}</strong>
+            <ul>
+                {names.iter().map(|n| {
+                    let d = untrack(|| s.disk(n));
+                    let facts = d.map(|d| {
+                        [d.model.trim().to_string(), d.serial.trim().to_string(), i18n::bytes_si(d.size)]
+                            .into_iter()
+                            .filter(|x| !x.is_empty())
+                            .collect::<Vec<_>>()
+                            .join(" · ")
+                    });
+                    view! { <li><span class="mono strong">{n.clone()}</span>" "<span class="muted small">{facts.unwrap_or_default()}</span></li> }
+                }).collect_view()}
+            </ul>
+        </div>
+    }
+    .into_any()
+}
+
+/// The serial number of a disk the plan erases besides the chosen ones, typed to confirm.
+fn serial_confirm(d: DiskSummary, serials: RwSignal<Vec<(String, String)>>) -> AnyView {
+    let name = d.name.clone();
+    let n2 = name.clone();
+    // a disk without a serial number (a virtual disk) is confirmed by its name
+    let prompt = if d.serial.trim().is_empty() {
+        tf("confirm.type_name", &[("name", &name)])
+    } else {
+        tf("sto.type_serial", &[("disk", &name)])
+    };
+    view! {
+        <label class="field confirm-field">
+            <span class="field-label">{prompt}</span>
+            <input
+                class="input mono"
+                autocomplete="off"
+                autocapitalize="off"
+                spellcheck="false"
+                prop:value=move || serials.with(|v| v.iter().find(|(x, _)| *x == name).map(|(_, t)| t.clone()).unwrap_or_default())
+                on:input=move |ev| {
+                    let text = event_target_value(&ev);
+                    serials.update(|v| {
+                        v.retain(|(x, _)| *x != n2);
+                        v.push((n2.clone(), text));
+                    });
+                }
+            />
+        </label>
+    }
+    .into_any()
 }
 
 /// The outcome of a storage task.
@@ -302,13 +418,13 @@ fn volume_view(vol: Vol, modal: RwSignal<Open>, selected: RwSignal<Option<String
     let level = vol.level_text();
     let sub = [
         vol.mountpoint.clone(),
-        level.clone(),
+        // a non-breaking hyphen: "1‑drive tolerance" stays together on a narrow screen
+        level.clone().map(|l| l.replace('-', "\u{2011}")),
         (vol.size > 0).then(|| if vol.locked { i18n::bytes_si(vol.size) } else { i18n::bytes(vol.size) }),
     ]
     .into_iter()
     .flatten()
-    .collect::<Vec<_>>()
-    .join(" · ");
+    .collect::<Vec<_>>();
     let actions = vol.managed && !vol.locked;
     let has_md = vol.md.is_some();
     let btn = move |m: Open, icon: &'static str, key: &'static str| {
@@ -316,14 +432,15 @@ fn volume_view(vol: Vol, modal: RwSignal<Open>, selected: RwSignal<Option<String
     };
     let flex = vol.flex.clone().filter(|_| !vol.locked);
     let pending = flex.as_ref().is_some_and(|f| !f.pending.is_empty()) && actions;
-    let blockers = flex.as_ref().map(|f| f.blockers.clone()).unwrap_or_default();
+    let blockers = flex.as_ref().map(blocker_texts).unwrap_or_default();
     view! {
         <header class="page-head">
             <a class="icon-btn" href="/storage" aria-label=tr("sto.back_storage")><Icon icon=icons::ARROW_LEFT size=18 /></a>
             <div class="page-icon"><Icon icon=if vol.locked { icons::KEY } else { icons::DATABASE } size=20 /></div>
             <div class="grow">
                 <h1 class="head-line">{vol.name.clone()}<Status tone=tone text=t(key).to_string() /></h1>
-                <p class="page-sub">{sub}</p>
+                // each part wraps as a whole ("1-drive tolerance" never split at its hyphen)
+                <p class="page-sub sub-parts">{sub.into_iter().map(|x| view! { <span>{x}</span> }).collect_view()}</p>
             </div>
             {actions.then(|| view! {
                 <div class="page-actions">
@@ -340,7 +457,13 @@ fn volume_view(vol: Vol, modal: RwSignal<Open>, selected: RwSignal<Option<String
             <button class="btn primary sm row-end" type="button" on:click=move |_| modal.set(Open::Complete)>{tr("sto.complete")}</button>
         }.into_any()))}
         {(!blockers.is_empty()).then(|| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, view! {
-            <span>{tr("sto.flex_blocked")}" "<span lang="en">{blockers.join("; ")}</span></span>
+            <span>
+                {tr("sto.flex_blocked")}" "
+                {blockers.into_iter().enumerate().map(|(i, (text, en))| view! {
+                    {(i > 0).then_some("; ")}
+                    {if en { view! { <span lang="en">{text}</span> }.into_any() } else { view! { <span>{text}</span> }.into_any() }}
+                }).collect_view()}
+            </span>
         }.into_any()))}
         <div class="grid vol-detail">
             {(!vol.locked).then(|| usage_card(&vol))}
@@ -353,6 +476,31 @@ fn volume_view(vol: Vol, modal: RwSignal<Open>, selected: RwSignal<Option<String
         </div>
     }
     .into_any()
+}
+
+/// Why rynas cannot change a flexible RAID, translated from the codes: (text, English). A
+/// server without codes, or a code this build has no text for, gives its English text.
+fn blocker_texts(f: &FlexLayout) -> Vec<(String, bool)> {
+    let coded = f.blocker_items.len() == f.blockers.len();
+    f.blockers
+        .iter()
+        .enumerate()
+        .map(|(i, en)| match f.blocker_items.get(i).filter(|_| coded).and_then(blocker_text) {
+            Some(t) => (t, false),
+            None => (en.clone(), true),
+        })
+        .collect()
+}
+
+fn blocker_text(b: &FlexBlocker) -> Option<String> {
+    let code = serde_json::to_string(&b.kind).ok()?.trim_matches('"').to_string();
+    let mut s = i18n::try_t(&format!("sto.block.{code}"))?.to_string();
+    for (k, v) in [("{subject}", &b.subject), ("{other}", &b.other)] {
+        if s.contains(k) {
+            s = s.replace(k, v.as_deref()?);
+        }
+    }
+    Some(s)
 }
 
 /// A flexible RAID: level and size, the drive map, every tier with its health and sync, the
@@ -774,7 +922,7 @@ fn ScrubDialog(vol: Vol, on_close: Callback<()>) -> impl IntoView {
     let has_md = vol.md.is_some();
     let uuid = vol.fs.as_ref().map(|f| f.uuid.clone()).unwrap_or_default();
     let exec_url = StoredValue::new(vol_url(&vol.id, "scrub"));
-    let exec = move |_: String| {
+    let exec = move |_: (String, Vec<String>)| {
         start_task(exec_url.get_value(), Some(json!({"action": "start", "md_check": md_check.get_untracked(), "dry_run": false})), false, stage, busy, error)
     };
     let uuid = StoredValue::new(uuid);
@@ -881,10 +1029,13 @@ fn GrowDialog(vol: Vol, on_close: Callback<()>) -> impl IntoView {
     let exec_url = StoredValue::new(vol_url(&vol.id, "grow"));
     let id = StoredValue::new(vol.id.clone());
     let lvl = move || level_of(&level.get_untracked());
-    let exec = move |pass: String| {
+    let exec = move |(pass, others): (String, Vec<String>)| {
         let disks = chosen.get_untracked();
+        // the new disks' serials, then those of any other disk the plan erases
+        let mut serials = serials_for(s, &disks);
+        serials.extend(others);
         let mut body = json!({
-            "disks": disks, "confirm": id.get_value(), "serials": serials_for(s, &disks), "dry_run": false,
+            "disks": disks, "confirm": id.get_value(), "serials": serials, "dry_run": false,
         });
         if let Some(l) = lvl() {
             body["level"] = level_json(l);
@@ -908,7 +1059,8 @@ fn GrowDialog(vol: Vol, on_close: Callback<()>) -> impl IntoView {
         fetch_plan("/api/v1/storage/plan/grow", body, stage, busy, error);
     };
     let encrypted = vol.encrypted;
-    let flow = Flow::new(stage, Some(id.get_value()), encrypted, "sto.grow", busy, error, Callback::new(exec), on_close);
+    let flow = Flow::new(stage, Some(id.get_value()), encrypted, "sto.grow", busy, error, Callback::new(exec), on_close)
+        .with_own(chosen.into());
     let foot = move || match stage.get() {
         Stage::Form => save_bar_with(SaveBar {
             can_save: Signal::derive(move || !chosen.with(Vec::is_empty)),
@@ -995,9 +1147,12 @@ fn ReplaceDialog(vol: Vol, on_close: Callback<()>) -> impl IntoView {
     if let Some(d) = free.first() {
         new_disk.set(d.name.clone());
     }
-    let exec = move |pass: String| {
+    let exec = move |(pass, others): (String, Vec<String>)| {
         let nd = new_disk.get_untracked();
-        let mut body = json!({"old": old.get_untracked(), "new_disk": nd, "confirm": id.get_value(), "serials": serials_for(s, std::slice::from_ref(&nd)), "dry_run": false});
+        // the new disk's serial, then the old disk's when the plan clears it
+        let mut serials = serials_for(s, std::slice::from_ref(&nd));
+        serials.extend(others);
+        let mut body = json!({"old": old.get_untracked(), "new_disk": nd, "confirm": id.get_value(), "serials": serials, "dry_run": false});
         // an encrypted flexible RAID: a bigger drive grows the encrypted device too
         if !pass.is_empty() {
             body["passphrase"] = Value::String(pass);
@@ -1014,7 +1169,8 @@ fn ReplaceDialog(vol: Vol, on_close: Callback<()>) -> impl IntoView {
     };
     let options = StoredValue::new(options);
     let free = StoredValue::new(free);
-    let flow = Flow::new(stage, Some(id.get_value()), flex && vol.encrypted, "sto.replace_go", busy, error, Callback::new(exec), on_close);
+    let flow = Flow::new(stage, Some(id.get_value()), flex && vol.encrypted, "sto.replace_go", busy, error, Callback::new(exec), on_close)
+        .with_own(Signal::derive(move || vec![new_disk.get()]));
     let foot = move || match stage.get() {
         Stage::Form => save_bar_with(SaveBar {
             can_save: Signal::derive(move || !new_disk.with(String::is_empty) && !old.with(String::is_empty)),
@@ -1064,7 +1220,7 @@ fn CompleteDialog(vol: Vol, on_close: Callback<()>) -> impl IntoView {
     let error = RwSignal::new(None::<String>);
     let id = StoredValue::new(vol.id.clone());
     let pending = vol.flex.as_ref().map(|f| f.pending.clone()).unwrap_or_default();
-    let exec = move |pass: String| {
+    let exec = move |(pass, _): (String, Vec<String>)| {
         let mut body = json!({"dry_run": false});
         if !pass.is_empty() {
             body["passphrase"] = Value::String(pass);
