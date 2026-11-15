@@ -866,6 +866,10 @@ pub struct AppUpdatePlan {
     pub downgrade: bool,
     /// Versions of the value migrations that will run, in order.
     pub migrations: Vec<String>,
+    /// What those migrations say about the update (catalogue text, English): one-way data
+    /// changes, settings to redo in the app.
+    #[serde(default)]
+    pub notes: Vec<String>,
     pub image_changes: Vec<ImageChange>,
     /// Required form fields the stored values do not answer: send them as
     /// [`AppUpdateRequest::answers`].

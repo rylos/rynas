@@ -349,8 +349,10 @@ impl CatalogApp {
                     {
                         issues.push(id, &rel, format!("targets {} above the entry version {}", m.to, man.version));
                     }
-                    if m.ops.is_empty() {
-                        issues.push(id, &rel, "no ops");
+                    // a migration with no ops only tells (the update dialog shows its
+                    // description): it must then say something
+                    if m.ops.is_empty() && m.description.trim().is_empty() {
+                        issues.push(id, &rel, "no ops and no description");
                     }
                     migrations.push(m);
                 }

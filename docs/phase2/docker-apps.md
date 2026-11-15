@@ -2297,7 +2297,9 @@ and nothing else.
 - **Migrations**: `migrations/<version>.toml` with `to = "<version>"`, `description` and
   `[[ops]]` (`rename {from, to}`, `set {key, value}`, `set_default {key, value}`,
   `delete {key}`, `map {key, values}`), applied in order to the stored `.env` values for every
-  `to` above the installed version, up to the catalogue version.
+  `to` above the installed version, up to the catalogue version. A migration with no ops only tells:
+  its `description` (one-way data changes, settings to redo in the app) is shown as a warning
+  in the update dialog (`AppUpdatePlan.notes`), like every migration's description.
 - **Update plan**: `update_plan(app, installed compose, installed .env)` compares the installed
   `x-rynas` version and images (after migrations and overlay selection) with the catalogue:
   versions, `up_to_date`, `downgrade`, migrations, image changes (`added`, `removed`, `tag`,

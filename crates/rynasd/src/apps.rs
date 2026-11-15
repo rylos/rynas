@@ -1213,6 +1213,13 @@ impl AppsSvc {
             up_to_date: p.up_to_date,
             downgrade: p.downgrade,
             migrations: p.migrations.iter().map(|v| v.to_string()).collect(),
+            notes: app
+                .migrations
+                .iter()
+                .filter(|m| p.migrations.contains(&m.to))
+                .map(|m| m.description.trim().to_string())
+                .filter(|d| !d.is_empty())
+                .collect(),
             image_changes: p
                 .image_changes
                 .iter()

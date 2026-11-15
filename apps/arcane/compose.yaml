@@ -1,7 +1,7 @@
 # Upstream: https://getarcane.app/docs/setup/installation (compose.yaml, step 2)
 services:
   arcane:
-    image: ghcr.io/getarcaneapp/manager:v2.17.3@sha256:2e0dc9f5ef03599181a49baf6470055d82e24d9cb15bbc62498ea642c0f882a7
+    image: ghcr.io/getarcaneapp/manager:v3.0.0@sha256:5641899b379ff20e856efb8e3507f2c871a5ab9282d56854eac7028f256bfce3
     restart: unless-stopped
     cgroup: host
     group_add:
@@ -9,11 +9,11 @@ services:
     ports:
       - "${RYNAS_BIND}:${WEB_PORT}:3552"
     environment:
-      APP_URL: "http://${RYNAS_HOST}:${WEB_PORT}"
+      ARCANE_APP_URL: "http://${RYNAS_HOST}:${WEB_PORT}"
       PUID: "${PUID}"
       PGID: "${PGID}"
-      ENCRYPTION_KEY: "${ENCRYPTION_KEY}"
-      PROJECTS_DIRECTORY: "${RYNAS_STACKS_DIR}"
+      ARCANE_ENCRYPTION_KEY: "${ENCRYPTION_KEY}"
+      ARCANE_PROJECTS_DIRECTORY: "${RYNAS_STACKS_DIR}"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${DATA_FOLDER}:/app/data

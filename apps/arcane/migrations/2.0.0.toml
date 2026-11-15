@@ -1,0 +1,3 @@
+to = "2.0.0"
+description = "Arcane 3 converts its database on the first start: there is no way back to Arcane 2 except the snapshot taken before the update (keep it on). Notifications must be set up again in Arcane (System → Notifications), and remote agents must be enrolled again."
+ops = []

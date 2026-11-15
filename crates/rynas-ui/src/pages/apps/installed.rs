@@ -308,6 +308,7 @@ fn update_dialog(stack: String, close: Callback<()>) -> AnyView {
             </dl>
             <div class="chips"><a class="chip" href=p.changelog_url.clone() target="_blank" rel="noopener noreferrer"><Icon icon=icons::EXTERNAL_LINK size=12 />{tr("apps.changelog")}</a></div>
             {(!changes.is_empty()).then(|| view! { <h4 class="mini-title">{tr("apps.upd.images")}</h4>{ui::table("", &["apps.col.service", "apps.col.change", "apps.col.images"], changes)} })}
+            {p.notes.iter().map(|n| ui::note(Tone::Warn, icons::TRIANGLE_ALERT, ui::text(n.clone()))).collect_view()}
             {(!p.migrations.is_empty()).then(|| view! {
                 <h4 class="mini-title">{tr("apps.upd.migrations")}</h4>
                 <p class="small">{tf("apps.upd.migrations_text", &[("list", &p.migrations.join(", "))])}</p>
