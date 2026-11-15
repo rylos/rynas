@@ -111,9 +111,17 @@ The classic levels (single, RAID 0, 1, 5, 6 and 10) stay available next to it.
     <td align="center"><b>Docker</b>: your stacks, including those made by other tools</td>
     <td align="center"><b>Hardware</b>: fans, temperatures, LEDs and UPS</td>
   </tr>
+  <tr>
+    <td><img src="docs/screenshots/files.png" alt="The file manager with photo thumbnails"></td>
+    <td><img src="docs/screenshots/flexraid.png" alt="A flexible RAID volume and its tiers"></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Files</b>: a full file manager in the browser</td>
+    <td align="center"><b>Flexible RAID</b>: 4 + 8 + 8 TB drives give 12 TB</td>
+  </tr>
 </table>
 
-<sub>The dashboard screenshot uses demo data; the others come from a test instance.</sub>
+<sub>The dashboard, storage and flexible RAID screenshots use demo data; the others come from a test instance.</sub>
 
 ## Got a Synology? Use it with synodeb
 
