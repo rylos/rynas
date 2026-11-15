@@ -47,7 +47,7 @@ pub fn mdadm_uuid(lsblk: &str) -> Option<String> {
 }
 
 /// The name an md array has without its host prefix ("nas:vol2_t1" → "vol2_t1").
-fn short_name(n: &str) -> &str {
+pub(crate) fn short_name(n: &str) -> &str {
     n.rsplit(':').next().unwrap_or(n)
 }
 
@@ -79,7 +79,7 @@ fn tier_level(inv: &Inventory, md: &BlockDev) -> Option<(RaidLevel, u32)> {
 }
 
 /// The kernel name of a physical volume path (`/dev/md126`, or `/dev/md/vol2_t1`).
-fn resolve_pv<'a>(inv: &'a Inventory, path: &str) -> Option<&'a BlockDev> {
+pub(crate) fn resolve_pv<'a>(inv: &'a Inventory, path: &str) -> Option<&'a BlockDev> {
     if let Some(d) = inv.graph.find(path) {
         return Some(d);
     }

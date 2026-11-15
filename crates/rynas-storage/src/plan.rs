@@ -26,33 +26,33 @@ pub const END_RESERVE: u64 = 128 * MIB;
 /// md 1.2 superblock, bitmap and data offset (mdadm reserves room for reshapes). Estimate.
 pub(crate) const MD_OVERHEAD: u64 = 128 * MIB;
 /// LUKS2 header with the default 16 MiB metadata area.
-const LUKS_HEADER: u64 = 16 * MIB;
+pub(crate) const LUKS_HEADER: u64 = 16 * MIB;
 /// Argon2id memory cap (KiB) so a 4 GB NAS does not run out of memory while unlocking.
 pub const PBKDF_MEMORY_KIB: &str = "262144";
 pub const COMPRESSION: &str = "zstd:1";
 
 /// A step's description: what it does and the values it names. The English text is built
 /// from them ([`step_english`]), so `description` and `kind`/`args` always agree.
-struct D(PlanStepKind, PlanArgs);
+pub(crate) struct D(pub(crate) PlanStepKind, pub(crate) PlanArgs);
 
 /// A description without values.
-fn d(kind: PlanStepKind) -> D {
+pub(crate) fn d(kind: PlanStepKind) -> D {
     D(kind, PlanArgs::default())
 }
 
 /// A description about one disk, partition, array or mount point.
-fn d_on(kind: PlanStepKind, subject: &str) -> D {
+pub(crate) fn d_on(kind: PlanStepKind, subject: &str) -> D {
     D(kind, subject_args(subject))
 }
 
-fn subject_args(subject: &str) -> PlanArgs {
+pub(crate) fn subject_args(subject: &str) -> PlanArgs {
     PlanArgs {
         subject: Some(subject.to_string()),
         ..Default::default()
     }
 }
 
-fn step(desc: D, action: PlanAction) -> PlanStep {
+pub(crate) fn step(desc: D, action: PlanAction) -> PlanStep {
     let D(kind, args) = desc;
     PlanStep {
         description: step_english(kind, &args),
@@ -63,7 +63,7 @@ fn step(desc: D, action: PlanAction) -> PlanStep {
     }
 }
 
-fn cmd(desc: D, argv: &[&str]) -> PlanStep {
+pub(crate) fn cmd(desc: D, argv: &[&str]) -> PlanStep {
     step(
         desc,
         PlanAction::Command {
@@ -73,7 +73,7 @@ fn cmd(desc: D, argv: &[&str]) -> PlanStep {
     )
 }
 
-fn cmd_secret(desc: D, argv: &[&str], secret: &str) -> PlanStep {
+pub(crate) fn cmd_secret(desc: D, argv: &[&str], secret: &str) -> PlanStep {
     let mut s = cmd(desc, argv);
     if let PlanAction::Command { stdin, .. } = &mut s.action {
         *stdin = Some(secret.to_string());
@@ -81,12 +81,12 @@ fn cmd_secret(desc: D, argv: &[&str], secret: &str) -> PlanStep {
     s
 }
 
-fn destroying(mut s: PlanStep, devs: &[&str]) -> PlanStep {
+pub(crate) fn destroying(mut s: PlanStep, devs: &[&str]) -> PlanStep {
     s.destroys = devs.iter().map(|d| d.to_string()).collect();
     s
 }
 
-fn config(desc: D, file: &str, entry: &str) -> PlanStep {
+pub(crate) fn config(desc: D, file: &str, entry: &str) -> PlanStep {
     step(
         desc,
         PlanAction::Config {
@@ -96,7 +96,7 @@ fn config(desc: D, file: &str, entry: &str) -> PlanStep {
     )
 }
 
-fn wait(desc: D, condition: &str) -> PlanStep {
+pub(crate) fn wait(desc: D, condition: &str) -> PlanStep {
     step(
         desc,
         PlanAction::Wait {
@@ -116,13 +116,20 @@ fn sysfs(desc: D, path: &str, value: &str) -> PlanStep {
 }
 
 /// English description of a step (task log, CLI); the UI translates `kind` + `args`.
-fn step_english(kind: PlanStepKind, a: &PlanArgs) -> String {
+pub(crate) fn step_english(kind: PlanStepKind, a: &PlanArgs) -> String {
     use PlanStepKind as K;
     let s = a.subject.as_deref().unwrap_or("");
     let text = match kind {
         K::WipeSignatures => return format!("Erase signatures on {s}"),
         K::ClearPartitionTable => return format!("Clear the partition table of {s}"),
         K::CreatePartition => {
+            if let Some(part) = a.other.as_deref() {
+                return format!("Create the tier partition {part} on {s} (the disk stays in use)");
+            }
+            let n = a.count.unwrap_or(1);
+            if n > 1 {
+                return format!("Create {n} Linux RAID partitions on {s}, one per tier");
+            }
             return format!("Create one Linux RAID partition on {s}, 128 MiB left free at the end");
         }
         K::CreateArray => {
@@ -205,13 +212,13 @@ fn step_english(kind: PlanStepKind, a: &PlanArgs) -> String {
 }
 
 /// Records a warning of the plan: its English text and its code with the values it names.
-fn warn(p: &mut StoragePlan, code: PlanWarningCode, args: PlanArgs) {
+pub(crate) fn warn(p: &mut StoragePlan, code: PlanWarningCode, args: PlanArgs) {
     p.warnings.push(warning_english(code, &args));
     p.warning_items.push(PlanWarning { code, args });
 }
 
 /// A warning about one disk, array or device.
-fn warn_on(p: &mut StoragePlan, code: PlanWarningCode, subject: &str) {
+pub(crate) fn warn_on(p: &mut StoragePlan, code: PlanWarningCode, subject: &str) {
     warn(p, code, subject_args(subject));
 }
 
@@ -426,7 +433,7 @@ pub(crate) fn usable_partition(disk_size: u64) -> u64 {
 
 /// Records an error of the plan: its English text and its issue (code, request field and
 /// the object it names).
-fn fail(
+pub(crate) fn fail(
     p: &mut StoragePlan,
     code: PlanIssueCode,
     field: &str,
@@ -443,7 +450,7 @@ fn fail(
 
 /// Problems with using `name` (from the request field `field`) as a fresh disk: errors stop
 /// the plan, warnings are shown.
-fn check_new_disk(
+pub(crate) fn check_new_disk(
     inv: &Inventory,
     name: &str,
     field: &str,
@@ -528,7 +535,7 @@ fn check_new_disk(
     Some(d.clone())
 }
 
-fn finish(mut p: StoragePlan) -> StoragePlan {
+pub(crate) fn finish(mut p: StoragePlan) -> StoragePlan {
     p.valid = p.errors.is_empty();
     if !p.valid {
         p.steps.clear();
@@ -625,16 +632,6 @@ pub fn plan_volume(inv: &Inventory, req: &VolumePlanRequest) -> StoragePlan {
         };
         fail(&mut p, code, "disks", None, e);
     }
-    if req.level.is_flexible() {
-        // the tier planner comes with the write side of flexible RAID
-        fail(
-            &mut p,
-            PlanIssueCode::FlexLayoutUnsupported,
-            "level",
-            None,
-            "flexible RAID volumes cannot be created yet".into(),
-        );
-    }
     let mut chosen: Vec<DiskSummary> = Vec::new();
     for name in &req.disks {
         if let Some(d) = check_new_disk(inv, name, "disks", &mut p) {
@@ -643,6 +640,9 @@ pub fn plan_volume(inv: &Inventory, req: &VolumePlanRequest) -> StoragePlan {
     }
     if chosen.is_empty() {
         return finish(p);
+    }
+    if req.level.is_flexible() {
+        return crate::flex::plan::plan_create(inv, req, p, &chosen);
     }
 
     // capacity
@@ -667,28 +667,11 @@ pub fn plan_volume(inv: &Inventory, req: &VolumePlanRequest) -> StoragePlan {
         };
         warn(&mut p, PlanWarningCode::MixedSizes, args);
     }
-    let kinds: std::collections::HashSet<DiskKind> = chosen.iter().map(|d| d.kind).collect();
-    if kinds.len() > 1 {
-        warn(&mut p, PlanWarningCode::MixedKinds, PlanArgs::default());
-    }
-    let smr: Vec<String> = chosen
-        .iter()
-        .filter(|d| d.smr)
-        .map(|d| d.name.clone())
-        .collect();
-    if !smr.is_empty() {
-        let raid = !matches!(req.level, RaidLevel::Single | RaidLevel::Raid0);
-        let code = if raid {
-            PlanWarningCode::SmrRaid
-        } else {
-            PlanWarningCode::SmrSlowWrites
-        };
-        let args = PlanArgs {
-            items: smr,
-            ..Default::default()
-        };
-        warn(&mut p, code, args);
-    }
+    mix_warnings(
+        &mut p,
+        &chosen,
+        !matches!(req.level, RaidLevel::Single | RaidLevel::Raid0),
+    );
     let level_warning = match req.level {
         RaidLevel::Single => Some(PlanWarningCode::SingleNoRedundancy),
         RaidLevel::Raid0 => Some(PlanWarningCode::Raid0NoRedundancy),
@@ -715,14 +698,6 @@ pub fn plan_volume(inv: &Inventory, req: &VolumePlanRequest) -> StoragePlan {
 
     // steps
     let md = format!("/dev/md/{label}");
-    let mapper_name = format!("rynas-{label}");
-    let mapper = format!("/dev/mapper/{mapper_name}");
-    let mnt = format!("/{label}");
-    let fs_dev = if req.encrypt {
-        mapper.clone()
-    } else {
-        md.clone()
-    };
     let mut steps = Vec::new();
     for d in &chosen {
         partition_steps(&mut steps, &d.name, label);
@@ -773,7 +748,67 @@ pub fn plan_volume(inv: &Inventory, req: &VolumePlanRequest) -> StoragePlan {
         "/etc/mdadm/mdadm.conf",
         &format!("ARRAY {md} metadata=1.2 name=<host>:{label} UUID=<from mdadm --detail --brief>"),
     ));
+    let ssd = chosen.iter().any(|d| d.kind != DiskKind::Hdd);
+    let fs_dev = volume_top(&mut p, &mut steps, label, &md, req.encrypt, req.compress, ssd);
+    p.summary = vec![
+        ("level".into(), level_name(req.level).into()),
+        ("md".into(), md),
+        ("filesystem_device".into(), fs_dev),
+        ("mountpoint".into(), format!("/{label}")),
+    ];
     if req.encrypt {
+        p.summary.push(("mapper".into(), format!("rynas-{label}")));
+    }
+    p.steps = steps;
+    finish(p)
+}
+
+/// Warnings about the disks of a new volume: mixed kinds, SMR disks (`raid`: the volume has
+/// redundancy, so rebuilds matter).
+pub(crate) fn mix_warnings(p: &mut StoragePlan, chosen: &[DiskSummary], raid: bool) {
+    let kinds: std::collections::HashSet<DiskKind> = chosen.iter().map(|d| d.kind).collect();
+    if kinds.len() > 1 {
+        warn(p, PlanWarningCode::MixedKinds, PlanArgs::default());
+    }
+    let smr: Vec<String> = chosen
+        .iter()
+        .filter(|d| d.smr)
+        .map(|d| d.name.clone())
+        .collect();
+    if !smr.is_empty() {
+        let code = if raid {
+            PlanWarningCode::SmrRaid
+        } else {
+            PlanWarningCode::SmrSlowWrites
+        };
+        let args = PlanArgs {
+            items: smr,
+            ..Default::default()
+        };
+        warn(p, code, args);
+    }
+}
+
+/// The steps of a new volume above its block device `base` (the md array, or the logical
+/// volume of a flexible RAID): optional LUKS2, btrfs, the fstab entry, the mount and the
+/// subvolumes. Returns the filesystem device.
+pub(crate) fn volume_top(
+    p: &mut StoragePlan,
+    steps: &mut Vec<PlanStep>,
+    label: &str,
+    base: &str,
+    encrypt: bool,
+    compress: bool,
+    ssd: bool,
+) -> String {
+    let mapper_name = format!("rynas-{label}");
+    let mnt = format!("/{label}");
+    let fs_dev = if encrypt {
+        format!("/dev/mapper/{mapper_name}")
+    } else {
+        base.to_string()
+    };
+    if encrypt {
         steps.push(cmd_secret(
             d(PlanStepKind::LuksFormat),
             &[
@@ -792,7 +827,7 @@ pub fn plan_volume(inv: &Inventory, req: &VolumePlanRequest) -> StoragePlan {
                 &mapper_name,
                 "--key-file",
                 "-",
-                &md,
+                base,
             ],
             "passphrase",
         ));
@@ -802,7 +837,7 @@ pub fn plan_volume(inv: &Inventory, req: &VolumePlanRequest) -> StoragePlan {
                 "systemd-cryptenroll",
                 "--recovery-key",
                 "--unlock-key-file=/dev/stdin",
-                &md,
+                base,
             ],
             "passphrase",
         ));
@@ -811,14 +846,14 @@ pub fn plan_volume(inv: &Inventory, req: &VolumePlanRequest) -> StoragePlan {
             &[
                 "cryptsetup",
                 "luksHeaderBackup",
-                &md,
+                base,
                 "--header-backup-file",
                 &format!("/run/rynas/luks-header-{label}.img"),
             ],
         ));
         steps.push(cmd_secret(
             d(PlanStepKind::UnlockVolume),
-            &["cryptsetup", "open", "--key-file", "-", &md, &mapper_name],
+            &["cryptsetup", "open", "--key-file", "-", base, &mapper_name],
             "passphrase",
         ));
         steps.push(config(
@@ -826,8 +861,8 @@ pub fn plan_volume(inv: &Inventory, req: &VolumePlanRequest) -> StoragePlan {
             "/etc/crypttab",
             &format!("{mapper_name} UUID=<luks uuid> none luks,noauto"),
         ));
-        if chosen.iter().any(|d| d.kind != DiskKind::Hdd) {
-            warn(&mut p, PlanWarningCode::SsdTrimOff, PlanArgs::default());
+        if ssd {
+            warn(p, PlanWarningCode::SsdTrimOff, PlanArgs::default());
         }
     }
     steps.push(cmd(
@@ -849,7 +884,7 @@ pub fn plan_volume(inv: &Inventory, req: &VolumePlanRequest) -> StoragePlan {
         ],
     ));
     let mut opts = "noatime".to_string();
-    if req.compress {
+    if compress {
         opts.push_str(&format!(",compress={COMPRESSION}"));
     }
     // fstab first: systemd mounts the volume from it (a mount made inside rynasd's own
@@ -859,7 +894,7 @@ pub fn plan_volume(inv: &Inventory, req: &VolumePlanRequest) -> StoragePlan {
         "/etc/fstab",
         &format!(
             "UUID=<btrfs uuid> {mnt} btrfs {opts},nofail{} 0 0",
-            if req.encrypt { ",noauto" } else { "" }
+            if encrypt { ",noauto" } else { "" }
         ),
     ));
     steps.push(cmd(
@@ -887,17 +922,7 @@ pub fn plan_volume(inv: &Inventory, req: &VolumePlanRequest) -> StoragePlan {
         d(PlanStepKind::DisableCowCache),
         &["chattr", "+C", &format!("{mnt}/@rynas-cache")],
     ));
-    p.summary = vec![
-        ("level".into(), level_name(req.level).into()),
-        ("md".into(), md),
-        ("filesystem_device".into(), fs_dev),
-        ("mountpoint".into(), mnt),
-    ];
-    if req.encrypt {
-        p.summary.push(("mapper".into(), mapper_name));
-    }
-    p.steps = steps;
-    finish(p)
+    fs_dev
 }
 
 fn find_array<'a>(inv: &'a Inventory, name: &str) -> Option<&'a MdArray> {
@@ -959,6 +984,9 @@ fn member_part_size(inv: &Inventory, a: &MdArray) -> u64 {
 
 /// `POST /api/v1/storage/plan/grow`
 pub fn plan_grow(inv: &Inventory, req: &GrowPlanRequest) -> StoragePlan {
+    if req.volume.is_some() {
+        return crate::flex::plan::plan_grow(inv, req);
+    }
     let mut p = StoragePlan {
         operation: "grow_array".into(),
         ..Default::default()
@@ -1084,6 +1112,15 @@ pub fn plan_grow(inv: &Inventory, req: &GrowPlanRequest) -> StoragePlan {
     );
     let backup = format!("--backup-file=/var/lib/rynas/md-reshape-{}.bak", a.name);
     let raid_devices = format!("--raid-devices={new_n}");
+    let reshape = to != RaidLevel::Raid1;
+    // a write-intent bitmap can block a level change or a reshape: off first, back on after
+    let bitmap = reshape && a.bitmap.as_deref().is_some_and(|b| b != "none");
+    if bitmap {
+        steps.push(cmd(
+            d_on(PlanStepKind::BitmapOff, &a.name),
+            &["mdadm", "--grow", &md, "--bitmap=none"],
+        ));
+    }
     if from == RaidLevel::Raid1 && to == RaidLevel::Raid5 {
         steps.push(cmd(
             d(PlanStepKind::MirrorToRaid5),
@@ -1100,7 +1137,6 @@ pub fn plan_grow(inv: &Inventory, req: &GrowPlanRequest) -> StoragePlan {
         grow.insert(3, level6);
         grow.push(&backup);
     }
-    let reshape = to != RaidLevel::Raid1;
     steps.push(cmd(
         d(if reshape {
             PlanStepKind::Reshape
@@ -1117,6 +1153,12 @@ pub fn plan_grow(inv: &Inventory, req: &GrowPlanRequest) -> StoragePlan {
         }),
         &format!("/sys/block/{}/md/sync_action == idle", a.name),
     ));
+    if bitmap {
+        steps.push(cmd(
+            d_on(PlanStepKind::BitmapOn, &a.name),
+            &["mdadm", "--grow", &md, "--bitmap=internal"],
+        ));
+    }
     if reshape {
         let (mapper, mnt) = stack_above(inv, &a.name);
         if let Some(m) = &mapper {
@@ -1150,6 +1192,9 @@ pub fn plan_grow(inv: &Inventory, req: &GrowPlanRequest) -> StoragePlan {
 
 /// `POST /api/v1/storage/plan/replace`
 pub fn plan_replace(inv: &Inventory, req: &ReplacePlanRequest) -> StoragePlan {
+    if req.volume.is_some() {
+        return crate::flex::plan::plan_replace(inv, req);
+    }
     let mut p = StoragePlan {
         operation: "replace_disk".into(),
         ..Default::default()
@@ -1740,38 +1785,30 @@ mod tests {
         }
     }
 
-    /// Until the tier planner exists, a flexible level is refused with its own issue (and
-    /// the disk count rules of the tolerance still apply).
     #[test]
-    fn flexible_levels_are_refused_for_now() {
+    fn flexible_levels_go_to_the_tier_planner() {
         let inv = nas_inventory();
-        for (level, disks) in [
-            (RaidLevel::Flex1, vec!["sdd", "sde"]),
-            (RaidLevel::Flex2, vec!["sdd", "sde"]),
-        ] {
-            let p = plan_volume(
-                &inv,
-                &VolumePlanRequest {
-                    disks: disks.into_iter().map(String::from).collect(),
-                    level,
-                    encrypt: false,
-                    compress: true,
-                    label: "x".into(),
-                },
-            );
-            assert!(!p.valid && p.steps.is_empty());
-            assert!(
-                p.issues
-                    .iter()
-                    .any(|i| i.code == PlanIssueCode::FlexLayoutUnsupported
-                        && i.field.as_deref() == Some("level")),
-                "{:?}",
-                p.issues
-            );
-            assert_codes_match(&p);
-            let count = p.issues.iter().any(|i| i.code == PlanIssueCode::DiskCount);
-            assert_eq!(count, level == RaidLevel::Flex2, "{level:?}");
-        }
+        let req = |level| VolumePlanRequest {
+            disks: vec!["sdd".into(), "sde".into()],
+            level,
+            encrypt: false,
+            compress: true,
+            label: "x".into(),
+        };
+        // 4 TB + 2 TB at 1-disk tolerance: one 2 TB mirror tier, 2 TB of sdd unused
+        let p = plan_volume(&inv, &req(RaidLevel::Flex1));
+        assert!(p.valid, "{:?}", p.errors);
+        assert_codes_match(&p);
+        assert_eq!(p.tiers_after.len(), 2);
+        assert_eq!(p.tiers_after[0].level, Some(RaidLevel::Raid1));
+        assert_eq!(p.tiers_after[1].level, None);
+        assert!(p.warning_items.iter().any(|w| w.code == PlanWarningCode::FlexUnusedSpace));
+        assert!(argvs(&p).iter().any(|a| a.starts_with("vgcreate rynas_x /dev/md/x_t1")));
+        // 2-disk tolerance needs four disks
+        let p = plan_volume(&inv, &req(RaidLevel::Flex2));
+        assert!(!p.valid && p.steps.is_empty());
+        assert!(p.issues.iter().any(|i| i.code == PlanIssueCode::DiskCount), "{:?}", p.issues);
+        assert_codes_match(&p);
         assert_eq!(level_name(RaidLevel::Flex2), "flex2");
     }
 
@@ -1869,6 +1906,51 @@ mod tests {
             },
         );
         assert!(!p.valid);
+    }
+
+    /// RAID1 → RAID5: the write-intent bitmap goes off before the level change and back on
+    /// once the reshape ended.
+    #[test]
+    fn mirror_to_raid5_turns_the_bitmap_off_first() {
+        let mut inv = nas_inventory();
+        let a = inv.arrays.iter_mut().find(|a| a.name == "md0").unwrap();
+        assert_eq!((a.level.as_str(), a.raid_disks), ("raid1", 2));
+        a.bitmap = Some("internal".into());
+        a.health = ArrayHealth::Healthy;
+        a.sync = None;
+        let mut new = inv.disks.iter().find(|d| d.name == "sda").unwrap().clone();
+        new.name = "sdf".into();
+        new.path = "/dev/sdf".into();
+        inv.disks.push(new);
+        let p = plan_grow(
+            &inv,
+            &GrowPlanRequest {
+                array: "md0".into(),
+                disks: vec!["sdf".into()],
+                level: Some(RaidLevel::Raid5),
+                volume: None,
+            },
+        );
+        assert!(p.valid, "{:?}", p.errors);
+        assert_codes_match(&p);
+        let a = argvs(&p);
+        let pos = |s: &str| a.iter().position(|x| x == s).unwrap_or_else(|| panic!("{s}: {a:?}"));
+        let off = pos("mdadm --grow /dev/md0 --bitmap=none");
+        let level = pos("mdadm --grow /dev/md0 --level=5");
+        let grow = pos("mdadm --grow /dev/md0 --raid-devices=3");
+        let on = pos("mdadm --grow /dev/md0 --bitmap=internal");
+        assert!(off < level && level < grow && grow < on, "{a:?}");
+        let wait = p
+            .steps
+            .iter()
+            .position(|s| s.kind == Some(PlanStepKind::WaitReshape))
+            .unwrap();
+        let on_step = p
+            .steps
+            .iter()
+            .position(|s| s.kind == Some(PlanStepKind::BitmapOn))
+            .unwrap();
+        assert!(wait < on_step);
     }
 
     #[test]

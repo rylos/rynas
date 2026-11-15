@@ -40,7 +40,7 @@ mod exec_tests;
 
 pub use service::Storage;
 
-use rynas_api_types::storage::{BtrfsFilesystem, DiskSummary, FlexLayout, MdArray};
+use rynas_api_types::storage::{BtrfsFilesystem, DiskSummary, FlexLayout, MdArray, VolumeRecord};
 
 /// A consistent snapshot of the storage state, the input of the planner and the tree.
 #[derive(Debug, Clone, Default)]
@@ -57,4 +57,26 @@ pub struct Inventory {
     pub lvm_stale: Vec<String>,
     /// The flexible RAID layouts found ([`flex::detect`]).
     pub flex: Vec<FlexLayout>,
+    /// The volumes rynas recorded (configuration key `storage.volumes`); `None` when the
+    /// caller did not say (the checks against the records are skipped).
+    pub records: Option<Vec<VolumeRecord>>,
+    /// Thinnest flexible RAID tier; 0 means [`flex::tiers::MIN_TIER`] (see
+    /// [`Inventory::min_tier`]).
+    pub min_tier: u64,
+}
+
+impl Inventory {
+    /// Thinnest flexible RAID tier for this inventory (smaller on loop files).
+    pub fn min_tier(&self) -> u64 {
+        if self.min_tier == 0 {
+            flex::tiers::MIN_TIER
+        } else {
+            self.min_tier
+        }
+    }
+
+    /// The record of a volume, when the records are known.
+    pub fn record(&self, label: &str) -> Option<&VolumeRecord> {
+        self.records.as_ref()?.iter().find(|r| r.label == label)
+    }
 }

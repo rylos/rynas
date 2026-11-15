@@ -413,8 +413,10 @@ async fn grow_waits_for_the_reshape_and_undoes_only_before_the_array_changes() {
             "sgdisk --zap-all /dev/sdf",
             "sgdisk --new=1:0:-128M --typecode=1:FD00 --change-name=1:rynas-vol1 /dev/sdf",
             "udevadm settle",
+            "mdadm --grow /dev/md2 --bitmap=none",
             "mdadm /dev/md2 --add /dev/sdf1",
             "mdadm --grow /dev/md2 --raid-devices=4",
+            "mdadm --grow /dev/md2 --bitmap=internal",
             "cryptsetup resize --key-file - rynas-vol1 <stdin>",
             "btrfs filesystem resize max /vol1",
         ]
@@ -587,4 +589,189 @@ fn recovery_key_and_md_uuid_parsing() {
         md_uuid_from_export("MD_LEVEL=raid1\nMD_UUID=a:b:c:d\n").as_deref(),
         Some("a:b:c:d")
     );
+}
+
+// ------------------------------------------------------------------------------- flexible RAID
+
+/// The fixture NAS with two more 8 TB disks: sdd (4 TB) + sdf + sdg make a flexible volume
+/// of two tiers.
+fn flex_create() -> (Inventory, rynas_api_types::storage::StoragePlan, FakeMachine) {
+    let mut inv = nas_inventory();
+    add_disk(&mut inv, "sdf");
+    add_disk(&mut inv, "sdg");
+    let p = plan::plan_volume(
+        &inv,
+        &volume_req(&["sdd", "sdf", "sdg"], RaidLevel::Flex1, false, "flex"),
+    );
+    assert!(p.valid, "{:?}", p.errors);
+    let mut m = FakeMachine::default();
+    m.output(
+        "mdadm --detail --export /dev/md/flex_t1",
+        "MD_UUID=11111111:11111111:11111111:11111111\n",
+    )
+    .output(
+        "mdadm --detail --export /dev/md/flex_t2",
+        "MD_UUID=22222222:22222222:22222222:22222222\n",
+    )
+    .output(
+        "blkid --probe --match-tag UUID --output value /dev/rynas_flex/data",
+        "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n",
+    );
+    (inv, p, m)
+}
+
+#[tokio::test]
+async fn flexible_volume_is_recorded_with_its_tiers() {
+    let (inv, p, m) = flex_create();
+    let disks: Vec<String> = ["sdd", "sdf", "sdg"].iter().map(|s| s.to_string()).collect();
+    let out = create_volume(&m, &inv, &p, RaidLevel::Flex1, &disks, &Secrets::default(), 7)
+        .await
+        .unwrap();
+    let r = &out.record;
+    assert_eq!(r.md_uuid, "");
+    assert_eq!(r.vg.as_deref(), Some("rynas_flex"));
+    assert_eq!(
+        r.tiers.iter().map(|t| (t.index, t.md_uuid.as_str())).collect::<Vec<_>>(),
+        [
+            (1, "11111111:11111111:11111111:11111111"),
+            (2, "22222222:22222222:22222222:22222222")
+        ]
+    );
+    assert_eq!(r.fs_uuid, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+    assert!(matches!(&m.commits.lock().unwrap()[0], VolumeChange::Add(x) if x.tiers.len() == 2));
+}
+
+/// A failure after the logical volume exists undoes in reverse: the logical volume, the
+/// group (deactivated before its arrays stop), the physical volumes, the arrays, then every
+/// partition of every disk.
+#[tokio::test]
+async fn flexible_create_rolls_back_lvm_before_the_arrays() {
+    let (inv, p, mut m) = flex_create();
+    m.fail
+        .insert("mkfs.btrfs".into(), "exit code 1: boom".into());
+    {
+        let mut f = m.files.lock().unwrap();
+        for d in ["/dev/sdd1", "/dev/sdf1", "/dev/sdf2", "/dev/sdg1", "/dev/sdg2"] {
+            f.insert(d.into(), String::new());
+        }
+    }
+    let disks: Vec<String> = ["sdd", "sdf", "sdg"].iter().map(|s| s.to_string()).collect();
+    let e = create_volume(&m, &inv, &p, RaidLevel::Flex1, &disks, &Secrets::default(), 7)
+        .await
+        .unwrap_err();
+    assert!(e.contains("rolled back"), "{e}");
+    let ran = m.ran();
+    let at = ran.iter().position(|l| l.starts_with("mkfs.btrfs")).unwrap();
+    assert_eq!(
+        ran[at + 1..],
+        [
+            "lvremove --yes rynas_flex/data",
+            "vgchange -an rynas_flex",
+            "vgremove --yes rynas_flex",
+            "pvremove --yes /dev/md/flex_t2",
+            "pvremove --yes /dev/md/flex_t1",
+            "mdadm --stop /dev/md/flex_t2",
+            "mdadm --zero-superblock /dev/sdf2",
+            "mdadm --zero-superblock /dev/sdg2",
+            "mdadm --stop /dev/md/flex_t1",
+            "mdadm --zero-superblock /dev/sdd1",
+            "mdadm --zero-superblock /dev/sdf1",
+            "mdadm --zero-superblock /dev/sdg1",
+            "wipefs --all /dev/sdg1",
+            "wipefs --all /dev/sdg2",
+            "sgdisk --zap-all /dev/sdg",
+            "wipefs --all /dev/sdg",
+            "wipefs --all /dev/sdf1",
+            "wipefs --all /dev/sdf2",
+            "sgdisk --zap-all /dev/sdf",
+            "wipefs --all /dev/sdf",
+            "wipefs --all /dev/sdd1",
+            "sgdisk --zap-all /dev/sdd",
+            "wipefs --all /dev/sdd",
+        ]
+    );
+    assert!(m.commits.lock().unwrap().is_empty());
+}
+
+/// A growth that makes a new top tier commits the updated record (the new tier's UUID read
+/// from md) before the tier becomes a physical volume.
+#[tokio::test]
+async fn flexible_growth_commits_the_new_tier_before_pvcreate() {
+    use crate::tests_support::{FlexState, flex_inventory};
+    use rynas_api_types::storage::{TierRecord, VolumeRecord};
+    let mut inv = flex_inventory(FlexState::Healthy, true);
+    let (u1, u2) = (
+        "4f1c2a9e:7b3d5e60:81a2c3d4:e5f60718",
+        "5f1c2a9e:7b3d5e60:81a2c3d4:e5f60718",
+    );
+    inv.arrays.iter_mut().find(|a| a.name == "md126").unwrap().uuid = Some(u1.into());
+    inv.arrays.iter_mut().find(|a| a.name == "md127").unwrap().uuid = Some(u2.into());
+    let record = VolumeRecord {
+        label: "vol2".into(),
+        level: RaidLevel::Flex1,
+        tiers: vec![
+            TierRecord { index: 1, md_uuid: u1.into() },
+            TierRecord { index: 2, md_uuid: u2.into() },
+        ],
+        vg: Some("rynas_vol2".into()),
+        fs_uuid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(),
+        mountpoint: "/vol2".into(),
+        options: "noatime".into(),
+        ..Default::default()
+    };
+    inv.records = Some(vec![record.clone()]);
+    for n in ["sdd", "sde"] {
+        let mut d = inv.disks[0].clone();
+        d.name = n.into();
+        d.path = format!("/dev/{n}");
+        d.size = 12_000_138_625_024;
+        d.used_by.clear();
+        inv.disks.push(d);
+    }
+    inv.flex = crate::flex::detect::detect(&inv, inv.records.as_deref(), crate::flex::tiers::MIN_TIER);
+    let p = plan::plan_grow(
+        &inv,
+        &GrowPlanRequest {
+            array: String::new(),
+            disks: vec!["sdd".into(), "sde".into()],
+            level: None,
+            volume: Some("vol2".into()),
+        },
+    );
+    assert!(p.valid, "{:?}", p.errors);
+    let mut m = FakeMachine::default();
+    m.output(
+        "mdadm --detail --export /dev/md/vol2_t3",
+        "MD_UUID=33333333:33333333:33333333:33333333\n",
+    );
+    {
+        let mut f = m.files.lock().unwrap();
+        for a in ["md126", "md127"] {
+            f.insert(format!("/sys/block/{a}/md/sync_action"), "idle\n".into());
+        }
+    }
+    let disks = vec!["sdd".to_string(), "sde".to_string()];
+    run_plan_with(&m, &inv, &p, &disks, &Secrets::default(), Some(record))
+        .await
+        .unwrap();
+    let ran = m.ran();
+    let create = ran.iter().position(|l| l.starts_with("mdadm --create /dev/md/vol2_t3")).unwrap();
+    let commit = ran.iter().position(|l| l.starts_with("commit Update")).unwrap();
+    let pv = ran.iter().position(|l| l == "pvcreate --yes --force /dev/md/vol2_t3").unwrap();
+    assert!(create < commit && commit < pv, "{ran:?}");
+    {
+        let commits = m.commits.lock().unwrap();
+        let VolumeChange::Update(r) = &commits[0] else { panic!("{commits:?}") };
+        assert_eq!(
+            r.tiers.iter().map(|t| (t.index, t.md_uuid.as_str())).collect::<Vec<_>>(),
+            [(1, u1), (2, u2), (3, "33333333:33333333:33333333:33333333")]
+        );
+    }
+    // a failure once an array changed: nothing is rolled back, the report says so
+    let mut m = FakeMachine::default();
+    m.fail.insert("mdadm --grow".into(), "exit code 1: boom".into());
+    let e = run_plan_with(&m, &inv, &p, &disks, &Secrets::default(), None)
+        .await
+        .unwrap_err();
+    assert!(e.contains("nothing was rolled back"), "{e}");
 }

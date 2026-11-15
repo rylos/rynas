@@ -18,7 +18,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use rynas_api_types::storage::{
-    DiskSummary, PlanAction, PlanStep, RaidLevel, StoragePlan, VolumeRecord,
+    DiskSummary, PlanAction, PlanStep, RaidLevel, StoragePlan, TierRecord, VolumeRecord,
 };
 
 use crate::Inventory;
@@ -70,6 +70,8 @@ pub struct Output {
 pub enum VolumeChange {
     Add(VolumeRecord),
     Remove(String),
+    /// The record of an existing volume changed (a flexible RAID tier was added).
+    Update(VolumeRecord),
 }
 
 /// Everything an operation does to the machine. rynasd implements it on top of a task; the
@@ -323,12 +325,21 @@ async fn run_cmd<M: Machine>(
 /// What creating a volume has done so far, undone in reverse order on failure.
 #[derive(Debug, Clone, PartialEq)]
 enum Undo {
-    /// Partitions written on a disk (dev path, first partition path).
-    Disk(String, String),
+    /// Partitions written on a disk: the disk and every partition the plan makes on it.
+    Disk {
+        dev: String,
+        parts: Vec<String>,
+    },
     Array {
         md: String,
         parts: Vec<String>,
     },
+    /// An LVM physical volume (`pvremove`).
+    Pv(String),
+    /// A volume group: deactivated (before its arrays stop) and removed.
+    Vg(String),
+    /// A logical volume (`vg/lv`).
+    Lv(String),
     Mapper(String),
     File(String),
     Dir(String),
@@ -381,10 +392,26 @@ async fn undo_one<M: Machine>(m: &M, u: &Undo) -> Result<String, String> {
             }
             Ok(format!("stopped {md} and cleared its member superblocks"))
         }
-        Undo::Disk(dev, part) => {
-            if m.exists(part) {
-                // signatures inside the partition (md superblock), then the table itself
-                let _ = run_cmd(m, strs(&["wipefs", "--all", part]), None, false, false).await;
+        Undo::Lv(lv) => {
+            quiet_ok(run_cmd(m, strs(&["lvremove", "--yes", lv]), None, false, false).await)?;
+            Ok(format!("removed the logical volume {lv}"))
+        }
+        Undo::Vg(vg) => {
+            // deactivated first: its arrays cannot stop while it holds them
+            quiet_ok(run_cmd(m, strs(&["vgchange", "-an", vg]), None, false, false).await)?;
+            quiet_ok(run_cmd(m, strs(&["vgremove", "--yes", vg]), None, false, false).await)?;
+            Ok(format!("deactivated and removed the volume group {vg}"))
+        }
+        Undo::Pv(dev) => {
+            quiet_ok(run_cmd(m, strs(&["pvremove", "--yes", dev]), None, false, false).await)?;
+            Ok(format!("removed the physical volume on {dev}"))
+        }
+        Undo::Disk { dev, parts } => {
+            // signatures inside every partition (md superblocks), then the table itself
+            for part in parts {
+                if m.exists(part) {
+                    let _ = run_cmd(m, strs(&["wipefs", "--all", part]), None, false, false).await;
+                }
             }
             quiet_ok(run_cmd(m, strs(&["sgdisk", "--zap-all", dev]), None, false, false).await)?;
             quiet_ok(run_cmd(m, strs(&["wipefs", "--all", dev]), None, false, false).await)?;
@@ -444,6 +471,42 @@ fn summary<'a>(plan: &'a StoragePlan, key: &str) -> Option<&'a str> {
         .map(|(_, v)| v.as_str())
 }
 
+/// The undo entry of a disk the plan partitions: every partition the plan's `sgdisk --new`
+/// steps make on it (a flexible RAID disk has one per tier), else the first one.
+fn disk_undo(plan: &StoragePlan, disk: &str) -> Undo {
+    let dev = format!("/dev/{disk}");
+    let mut parts: Vec<String> = plan
+        .steps
+        .iter()
+        .filter_map(|s| match &s.action {
+            PlanAction::Command { argv, .. }
+                if argv.first().is_some_and(|a| a == "sgdisk") && argv.last() == Some(&dev) =>
+            {
+                Some(argv)
+            }
+            _ => None,
+        })
+        .flat_map(|argv| {
+            argv.iter()
+                .filter_map(|a| a.strip_prefix("--new="))
+                .filter_map(|n| n.split(':').next()?.parse::<u32>().ok())
+                .collect::<Vec<_>>()
+        })
+        .map(|n| format!("/dev/{}", crate::plan::part_name(disk, n)))
+        .collect();
+    if parts.is_empty() {
+        parts.push(format!("/dev/{}", crate::plan::part_name(disk, 1)));
+    }
+    parts.sort();
+    parts.dedup();
+    Undo::Disk { dev, parts }
+}
+
+/// The tier number of a flexible RAID array device (`/dev/md/vol2_t3` → 3).
+fn tier_index(dev: &str) -> Option<u32> {
+    dev.rsplit_once("_t")?.1.parse().ok()
+}
+
 // ------------------------------------------------------------------------------- create
 
 /// What a new volume leaves to its creator.
@@ -486,8 +549,9 @@ pub async fn create_volume<M: Machine>(
             plan.errors.join("; ")
         ));
     }
+    // the device under LUKS/btrfs: the md array, or the logical volume of a flexible RAID
     let (Some(md), Some(fs_dev), Some(mountpoint)) = (
-        summary(plan, "md"),
+        summary(plan, "luks_device").or_else(|| summary(plan, "md")),
         summary(plan, "filesystem_device"),
         summary(plan, "mountpoint"),
     ) else {
@@ -519,6 +583,7 @@ pub async fn create_volume<M: Machine>(
         record: VolumeRecord {
             label: label.clone(),
             level,
+            vg: summary(plan, "vg").map(str::to_string),
             mountpoint: mountpoint.to_string(),
             options,
             created_ms: now_ms,
@@ -583,14 +648,12 @@ pub async fn create_volume<M: Machine>(
         // undo entries that must exist before the command runs
         if prog == "wipefs" && !step.destroys.is_empty() {
             let disk = &step.destroys[0];
+            let dev = format!("/dev/{disk}");
             if !undo
                 .iter()
-                .any(|u| matches!(u, Undo::Disk(d, _) if d == &format!("/dev/{disk}")))
+                .any(|u| matches!(u, Undo::Disk { dev: d, .. } if d == &dev))
             {
-                undo.push(Undo::Disk(
-                    format!("/dev/{disk}"),
-                    format!("/dev/{}", crate::plan::part_name(disk, 1)),
-                ));
+                undo.push(disk_undo(plan, disk));
             }
         }
         if prog == "cryptsetup"
@@ -623,6 +686,7 @@ pub async fn create_volume<M: Machine>(
         let captured: Result<(), String> = async {
             match (prog, sub) {
                 ("mdadm", "--create") => {
+                    let array = argv[2].clone();
                     let parts: Vec<String> = argv
                         .iter()
                         .skip(3)
@@ -630,20 +694,45 @@ pub async fn create_volume<M: Machine>(
                         .cloned()
                         .collect();
                     undo.push(Undo::Array {
-                        md: md.to_string(),
+                        md: array.clone(),
                         parts,
                     });
                     let o = run_cmd(
                         m,
-                        strs(&["mdadm", "--detail", "--export", md]),
+                        strs(&["mdadm", "--detail", "--export", &array]),
                         None,
                         true,
                         true,
                     )
                     .await?;
-                    out.record.md_uuid = md_uuid_from_export(&o.stdout)
+                    let uuid = md_uuid_from_export(&o.stdout)
                         .ok_or("mdadm --detail --export printed no MD_UUID")?;
-                    m.log(&format!("md array UUID {}", out.record.md_uuid));
+                    m.log(&format!("md array UUID {uuid} ({array})"));
+                    if level.is_flexible() {
+                        let index = tier_index(&array)
+                            .ok_or_else(|| format!("{array}: not a tier array"))?;
+                        out.record.tiers.push(TierRecord { index, md_uuid: uuid });
+                        out.record.tiers.sort_by_key(|t| t.index);
+                    } else {
+                        out.record.md_uuid = uuid;
+                    }
+                }
+                ("pvcreate", _) => {
+                    if let Some(d) = argv.last() {
+                        undo.push(Undo::Pv(d.clone()));
+                    }
+                }
+                ("vgcreate", vg) => undo.push(Undo::Vg(vg.to_string())),
+                ("lvcreate", _) => {
+                    let name = argv
+                        .iter()
+                        .skip_while(|a| *a != "-n")
+                        .nth(1)
+                        .cloned()
+                        .unwrap_or_default();
+                    if let Some(vg) = argv.last() {
+                        undo.push(Undo::Lv(format!("{vg}/{name}")));
+                    }
                 }
                 ("cryptsetup", "luksFormat") => {
                     let o =
@@ -781,12 +870,61 @@ pub async fn run_plan<M: Machine>(
     new_disks: &[String],
     secrets: &Secrets,
 ) -> Result<(), String> {
+    run_plan_with(m, inv, plan, new_disks, secrets, None).await
+}
+
+/// The `RecordArray` step of a flexible RAID growth: the tier array's UUID read from md, the
+/// record updated and committed (mdadm.conf, initramfs) before the array joins the volume
+/// group. Returns the new record.
+async fn record_tier<M: Machine>(
+    m: &M,
+    record: &VolumeRecord,
+    entry: &str,
+) -> Result<VolumeRecord, String> {
+    let name = entry.split_whitespace().nth(1).unwrap_or("");
+    let index = tier_index(name).ok_or_else(|| format!("{entry:?}: no tier array named"))?;
+    let device = entry
+        .split_once("--export ")
+        .map(|(_, r)| r.trim_end_matches(['>', ' ']).to_string())
+        .unwrap_or_else(|| name.to_string());
+    let o = run_cmd(
+        m,
+        strs(&["mdadm", "--detail", "--export", &device]),
+        None,
+        true,
+        true,
+    )
+    .await?;
+    let uuid = md_uuid_from_export(&o.stdout).ok_or("mdadm --detail --export printed no MD_UUID")?;
+    let mut r = record.clone();
+    r.tiers.retain(|t| t.index != index);
+    r.tiers.push(TierRecord { index, md_uuid: uuid.clone() });
+    r.tiers.sort_by_key(|t| t.index);
+    m.commit(VolumeChange::Update(r.clone())).await?;
+    m.log(&format!("tier {index} ({device}, UUID {uuid}) recorded"));
+    Ok(r)
+}
+
+/// [`run_plan`] for a flexible RAID volume: its `record` is updated by the `RecordArray`
+/// steps (a new tier is committed before it becomes a physical volume, so the next boot
+/// assembles the whole volume group).
+pub async fn run_plan_with<M: Machine>(
+    m: &M,
+    inv: &Inventory,
+    plan: &StoragePlan,
+    new_disks: &[String],
+    secrets: &Secrets,
+    mut record: Option<VolumeRecord>,
+) -> Result<(), String> {
     if !plan.valid {
         return Err(format!("not a valid plan: {}", plan.errors.join("; ")));
     }
     check_free(m, inv, new_disks)?;
     let scrub = plan.operation == "scrub";
-    let clean = matches!(plan.operation.as_str(), "grow_array" | "replace_disk");
+    let clean = matches!(
+        plan.operation.as_str(),
+        "grow_array" | "replace_disk" | "complete_growth"
+    );
     let mountpoint = summary(plan, "mountpoint").unwrap_or("");
     let total = plan.steps.len();
     let mut undo: Vec<Undo> = Vec::new();
@@ -802,10 +940,16 @@ pub async fn run_plan<M: Machine>(
         m.progress((i * 100 / total) as u8);
         m.log(&format!("[{}/{total}] {}", i + 1, step.description));
         let r: Result<(), String> = match &step.action {
-            PlanAction::Config { file, .. } => {
-                m.log(&format!("{file}: no change"));
-                Ok(())
-            }
+            PlanAction::Config { file, entry } => match &record {
+                Some(r) if file == crate::domain::MDADM_CONF => {
+                    touched_array = true;
+                    record_tier(m, r, entry).await.map(|r| record = Some(r))
+                }
+                _ => {
+                    m.log(&format!("{file}: no change"));
+                    Ok(())
+                }
+            },
             PlanAction::WriteSysfs { path, value } => {
                 touched_array = true;
                 let r = m.write_file(path, value);
@@ -832,17 +976,13 @@ pub async fn run_plan<M: Machine>(
             }
             PlanAction::Command { argv, stdin } => {
                 let prog = argv[0].as_str();
-                if prog == "mdadm"
-                    || (prog == "cryptsetup" && argv.get(1).is_some_and(|s| s == "resize"))
-                {
+                // only the preparation of new disks can be undone (partitions written on a
+                // disk in use for a new tier stay: harmless, and a later plan uses them)
+                if !matches!(prog, "wipefs" | "sgdisk" | "udevadm" | "partx") {
                     touched_array = true;
                 }
                 if prog == "wipefs" && !step.destroys.is_empty() {
-                    let disk = &step.destroys[0];
-                    undo.push(Undo::Disk(
-                        format!("/dev/{disk}"),
-                        format!("/dev/{}", crate::plan::part_name(disk, 1)),
-                    ));
+                    undo.push(disk_undo(plan, &step.destroys[0]));
                 }
                 match stdin.as_deref().map(|n| secrets.get(n)).transpose() {
                     Err(e) => Err(e),

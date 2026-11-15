@@ -11,7 +11,7 @@ use rynas_api_types::storage::{
     HealthAckResult,
     MdArray, NodeKind,
     PowerState, ReplacePlanRequest, ScrubPlanRequest, StoragePlan, StorageTree, Subvolume,
-    TreeNode, VolumePlanRequest,
+    TreeNode, VolumePlanRequest, VolumeRecord,
 };
 
 use crate::Inventory;
@@ -109,6 +109,9 @@ pub struct Storage {
     cache: Mutex<Cache>,
     /// SMART reasons marked as seen, per drive (memory only until opened on a file).
     acks: AckStore,
+    /// The recorded volumes (`storage.volumes`), set by rynasd after each change: the
+    /// flexible RAID detection checks every tier is recorded.
+    records: Mutex<Option<Vec<VolumeRecord>>>,
 }
 
 fn asleep(p: PowerState) -> bool {
@@ -150,7 +153,15 @@ impl Storage {
             min_tier: crate::flex::tiers::MIN_TIER,
             cache: Mutex::new(Cache::default()),
             acks: AckStore::memory(),
+            records: Mutex::new(None),
         }
+    }
+
+    /// The recorded volumes (`storage.volumes`): the next inventory checks the flexible RAID
+    /// tiers against them and hands them to the planners.
+    pub fn set_records(&self, records: Vec<VolumeRecord>) {
+        *self.records.lock().unwrap() = Some(records);
+        self.cache.lock().unwrap().inventory = None;
     }
 
     /// The SMART acknowledgements ([`crate::health_ack`]); rynasd opens them on a file.
@@ -779,8 +790,10 @@ impl Storage {
             lvm,
             lvm_stale,
             flex: Vec::new(),
+            records: self.records.lock().unwrap().clone(),
+            min_tier: self.min_tier,
         };
-        inv.flex = crate::flex::detect::detect(&inv, None, self.min_tier);
+        inv.flex = crate::flex::detect::detect(&inv, inv.records.as_deref(), self.min_tier);
         Ok(inv)
     }
 
