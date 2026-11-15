@@ -57,6 +57,243 @@ fn systemd_running() -> bool {
     Path::new("/run/systemd/system").exists()
 }
 
+// ------------------------------------------------------------------------------- initramfs
+
+const LSINITRAMFS: &str = "/usr/bin/lsinitramfs";
+/// mkinitramfs with `COMPRESS=xz` (`-9e`) runs for minutes on a slow NAS.
+const INITRAMFS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+const LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+/// Unit prefix of the transient units running update-initramfs.
+pub const INITRAMFS_UNIT: &str = "rynas-initramfs";
+/// Copy of the initramfs taken before it is regenerated (below the root).
+const INITRAMFS_BACKUP_DIR: &str = "/var/lib/rynas/initramfs";
+
+/// `update-initramfs` with `args`, outside rynasd's sandbox when systemd runs the machine.
+///
+/// It must never run inside rynasd's unit: `ProtectKernelModules=yes` hides `/lib/modules`
+/// and `/usr/lib/modules` there, and mkinitramfs only warns about the missing directory and
+/// writes an initramfs WITHOUT kernel modules (no ahci, nvme, md, btrfs, ext4) over the one
+/// of the newest kernel (`backup_initramfs=no`): the machine no longer boots. Besides,
+/// `xz -9e` needs ~700 MiB (rynasd's `daemon/` cgroup stops at 256M), `ldconfig -r` uses
+/// `chroot` (outside `@system-service`) and it can take longer than the default timeout. A
+/// transient unit ([`rynas_tasks::Outside`], `rynas-initramfs-*`) runs it in the host's
+/// namespace without those limits; `keep_running`: a half-written initramfs is worse than a
+/// late one. Without systemd (containers, tests) it runs directly.
+fn update_initramfs_cmd(args: &[&str], outside: bool) -> Cmd {
+    if outside {
+        rynas_tasks::Outside::new(INITRAMFS_UNIT, "rynas: update-initramfs (storage)", INITRAMFS_TIMEOUT)
+            .keep_running()
+            .properties(&["Nice=5"])
+            .cmd(std::iter::once(UPDATE_INITRAMFS).chain(args.iter().copied()))
+    } else {
+        Cmd::new(UPDATE_INITRAMFS)
+            .args(args)
+            .env_clear()
+            .timeout(INITRAMFS_TIMEOUT)
+    }
+}
+
+/// Compares kernel releases the way a version sort does: digit runs as numbers, the rest
+/// byte by byte, `~` before anything (`6.12.9` < `6.12.10`, `7.0~rc1` < `7.0`).
+fn cmp_release(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let (mut a, mut b) = (a.as_bytes(), b.as_bytes());
+    let rank = |c: Option<&u8>| match c {
+        Some(b'~') => -1i32,
+        None => 0,
+        Some(c) if c.is_ascii_alphabetic() => i32::from(*c),
+        Some(c) => i32::from(*c) + 256,
+    };
+    loop {
+        // non-digit part
+        while a.first().is_some_and(|c| !c.is_ascii_digit()) || b.first().is_some_and(|c| !c.is_ascii_digit()) {
+            let (ca, cb) = (a.first().filter(|c| !c.is_ascii_digit()), b.first().filter(|c| !c.is_ascii_digit()));
+            match rank(ca).cmp(&rank(cb)) {
+                Ordering::Equal => {}
+                o => return o,
+            }
+            if ca.is_some() {
+                a = &a[1..];
+            }
+            if cb.is_some() {
+                b = &b[1..];
+            }
+        }
+        if a.is_empty() && b.is_empty() {
+            return Ordering::Equal;
+        }
+        // digit part
+        let da = a.iter().take_while(|c| c.is_ascii_digit()).count();
+        let db = b.iter().take_while(|c| c.is_ascii_digit()).count();
+        let trim = |s: &[u8]| -> Vec<u8> { s.iter().skip_while(|c| **c == b'0').copied().collect() };
+        let (na, nb) = (trim(&a[..da]), trim(&b[..db]));
+        match na.len().cmp(&nb.len()).then_with(|| na.cmp(&nb)) {
+            Ordering::Equal => {}
+            o => return o,
+        }
+        a = &a[da..];
+        b = &b[db..];
+    }
+}
+
+/// The newest kernel release with an initramfs in `boot` (`initrd.img-<release>`, a regular
+/// file): the one `update-initramfs -u` regenerates.
+fn newest_initrd(boot: &Path) -> Option<String> {
+    std::fs::read_dir(boot)
+        .ok()?
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            let release = name.strip_prefix("initrd.img-")?;
+            (!release.is_empty() && !release.starts_with('.') && !release.contains('/'))
+                .then(|| release.to_string())
+        })
+        .max_by(|a, b| cmp_release(a, b))
+}
+
+/// Kernel modules (`*.ko`, compressed or not) in the `lsinitramfs` listing `out`.
+fn count_modules(out: &str) -> usize {
+    out.lines()
+        .map(str::trim)
+        .filter(|l| {
+            let l = l.strip_suffix(".xz").or_else(|| l.strip_suffix(".zst")).or_else(|| l.strip_suffix(".gz")).unwrap_or(l);
+            l.ends_with(".ko")
+        })
+        .count()
+}
+
+/// The kernel modules in the initramfs at `path` (absolute, below the root), `None` when it
+/// cannot be listed. lsinitramfs only reads the file and needs no `/lib/modules`.
+fn initrd_modules(ctx: &ApplyCtx, path: &Path) -> Option<usize> {
+    if ctx.root == Path::new("/") && !Path::new(LSINITRAMFS).exists() {
+        return None;
+    }
+    let cmd = Cmd::new(LSINITRAMFS).arg(path).env_clear().timeout(LIST_TIMEOUT);
+    ctx.system.run(&cmd).ok().map(|o| count_modules(&o.stdout))
+}
+
+/// What the module count of an initramfs before and after its regeneration says.
+#[derive(Debug, PartialEq, Eq)]
+enum InitrdCheck {
+    /// It still carries kernel modules (or never had any: everything built in).
+    Fine,
+    /// Nothing to compare with: lsinitramfs is missing or the old file was unreadable.
+    Unverified,
+    /// It lost its modules or became unreadable: put the copy back.
+    Broken(String),
+}
+
+fn check_initrd(before: Option<usize>, after: Option<usize>) -> InitrdCheck {
+    match (before, after) {
+        (_, Some(n)) if n > 0 => InitrdCheck::Fine,
+        (Some(0), Some(0)) => InitrdCheck::Fine,
+        (Some(n), Some(_)) => InitrdCheck::Broken(format!("it has no kernel modules left (it had {n})")),
+        (Some(_), None) => InitrdCheck::Broken("it can no longer be read".into()),
+        (None, _) => InitrdCheck::Unverified,
+    }
+}
+
+/// Puts `backup` back as `target` (a copy next to it, then a rename: the initramfs is
+/// never half-written).
+fn restore_initrd(backup: &Path, target: &Path) -> std::io::Result<()> {
+    let name = target.file_name().and_then(|n| n.to_str()).unwrap_or("initrd.img");
+    let tmp = target.with_file_name(format!(".{name}.rynas-restore"));
+    let r = (|| {
+        std::fs::copy(backup, &tmp)?;
+        std::fs::File::open(&tmp)?.sync_all()?;
+        std::fs::rename(&tmp, target)
+    })();
+    if r.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        // no room for a second copy in /boot: overwrite in place
+        std::fs::copy(backup, target)?;
+        std::fs::File::open(target)?.sync_all()?;
+    }
+    Ok(())
+}
+
+/// Regenerates the initramfs of the newest kernel (it carries a copy of mdadm.conf) and
+/// checks that the new one still has kernel modules; if it lost them, the copy taken before
+/// is put back and the step fails. A failure of update-initramfs itself is only logged.
+fn refresh_initramfs(ctx: &ApplyCtx) -> Result<(), String> {
+    let outside = ctx.root == Path::new("/") && systemd_running();
+    let boot = ctx.path(Path::new("/boot"));
+    let Some(release) = newest_initrd(&boot) else {
+        // no initramfs to protect (update-initramfs -u then has nothing to do either)
+        if let Err(e) = ctx.system.run(&update_initramfs_cmd(&["-u"], outside)) {
+            (ctx.log)(&format!(
+                "storage.volumes: warning: update-initramfs failed ({e}); run `update-initramfs -u` by hand"
+            ));
+        }
+        return Ok(());
+    };
+    let target = boot.join(format!("initrd.img-{release}"));
+    let backup_dir = ctx.path(Path::new(INITRAMFS_BACKUP_DIR));
+    let backup = backup_dir.join(format!("initrd.img-{release}"));
+    let copied = std::fs::create_dir_all(&backup_dir)
+        .and_then(|_| std::fs::copy(&target, &backup))
+        .and_then(|_| std::fs::File::open(&backup)?.sync_all());
+    if let Err(e) = copied {
+        let _ = std::fs::remove_file(&backup);
+        (ctx.log)(&format!(
+            "storage.volumes: warning: cannot copy {} to {} ({e}): the initramfs was not refreshed; run `update-initramfs -u -k {release}` by hand",
+            target.display(),
+            backup.display()
+        ));
+        return Ok(());
+    }
+    let before = initrd_modules(ctx, &target);
+    let run = ctx.system.run(&update_initramfs_cmd(&["-u", "-k", &release], outside));
+    if let Err(e) = &run {
+        if e.contains("timed out") {
+            // the unit keeps running (keep_running): checking or restoring now would race it
+            let _ = std::fs::remove_file(&backup);
+            (ctx.log)(&format!(
+                "storage.volumes: warning: update-initramfs is still running after {} min ({e}); check /boot/initrd.img-{release} with lsinitramfs when it ends",
+                INITRAMFS_TIMEOUT.as_secs() / 60
+            ));
+            return Ok(());
+        }
+        (ctx.log)(&format!(
+            "storage.volumes: warning: update-initramfs failed ({e}); run `update-initramfs -u -k {release}` by hand"
+        ));
+    }
+    let after = initrd_modules(ctx, &target);
+    match check_initrd(before, after) {
+        InitrdCheck::Fine => {
+            let _ = std::fs::remove_file(&backup);
+            Ok(())
+        }
+        InitrdCheck::Unverified => {
+            let _ = std::fs::remove_file(&backup);
+            (ctx.log)(&format!(
+                "storage.volumes: warning: the new initramfs of {release} could not be checked (lsinitramfs missing or failing)"
+            ));
+            Ok(())
+        }
+        InitrdCheck::Broken(why) => match restore_initrd(&backup, &target) {
+            Ok(()) => {
+                let _ = std::fs::remove_file(&backup);
+                let msg = format!(
+                    "the regenerated initramfs of {release} was unusable ({why}): the previous one was put back; the initramfs copy of mdadm.conf is outdated, run `update-initramfs -u -k {release}` from a root shell and check it with lsinitramfs"
+                );
+                (ctx.log)(&format!("storage.volumes: ERROR: {msg}"));
+                Err(msg)
+            }
+            Err(e) => {
+                let msg = format!(
+                    "the regenerated initramfs of {release} is unusable ({why}) and the previous one could not be put back ({e}): copy {} to {} before rebooting, or the machine may not boot",
+                    backup.display(),
+                    target.display()
+                );
+                (ctx.log)(&format!("storage.volumes: ERROR: {msg}"));
+                Err(msg)
+            }
+        },
+    }
+}
+
 // ------------------------------------------------------------------------------- volumes
 
 pub fn parse_volumes(v: Option<&Value>) -> Result<StorageVolumes, String> {
@@ -221,13 +458,10 @@ impl Applier for VolumesDomain {
         }
         (ctx.log)("storage.volumes: arrays changed, refreshing the initramfs");
         // not fatal: data arrays are assembled after the root from /etc/mdadm/mdadm.conf; the
-        // initramfs copy only matters for early assembly. A failure must not undo the volume.
-        if let Err(e) = ctx.system.run(&Cmd::new("update-initramfs").arg("-u")) {
-            (ctx.log)(&format!(
-                "storage.volumes: warning: update-initramfs failed ({e}); run `update-initramfs -u` by hand"
-            ));
-        }
-        Ok(())
+        // initramfs copy only matters for early assembly. A failure must not undo the volume,
+        // but an initramfs left without kernel modules (the machine would not boot) is put
+        // back and fails the step.
+        refresh_initramfs(ctx)
     }
 
     fn reload(&self, _value: Option<&Value>, ctx: &ApplyCtx) -> Result<(), String> {
@@ -692,6 +926,136 @@ mod tests {
         cfg.stage("alice", VOLUMES_KEY, Some(serde_json::to_value(&c).unwrap())).unwrap();
         cfg.apply("alice", "alice", "", &|_| {}, &|| false).unwrap();
         assert_eq!(count(), 1, "unchanged arrays");
+    }
+
+    #[test]
+    fn kernel_release_order_and_newest_initrd() {
+        use std::cmp::Ordering::*;
+        assert_eq!(cmp_release("6.12.9-amd64", "6.12.10-amd64"), Less);
+        assert_eq!(cmp_release("7.3.4-11-synodeb", "7.3.3-10-synodeb"), Greater);
+        assert_eq!(cmp_release("7.0~rc1", "7.0"), Less);
+        assert_eq!(cmp_release("6.1.0-01", "6.1.0-1"), Equal);
+        assert_eq!(cmp_release("6.1.0-1", "6.1.0-1-rt"), Less);
+        let d = tempfile::tempdir().unwrap();
+        for f in ["initrd.img-6.12.9-amd64", "initrd.img-6.12.10-amd64", "config-7.0.0"] {
+            std::fs::write(d.path().join(f), "x").unwrap();
+        }
+        std::os::unix::fs::symlink("initrd.img-6.12.9-amd64", d.path().join("initrd.img-9.9.9")).unwrap();
+        std::os::unix::fs::symlink("initrd.img-6.12.9-amd64", d.path().join("initrd.img")).unwrap();
+        assert_eq!(newest_initrd(d.path()).as_deref(), Some("6.12.10-amd64"));
+        assert_eq!(newest_initrd(&d.path().join("missing")), None);
+    }
+
+    #[test]
+    fn initrd_check_decisions() {
+        let list = "usr/lib/modules/7.3.4/kernel/drivers/ata/ahci.ko.xz\nusr/lib/modules/7.3.4/kernel/fs/btrfs/btrfs.ko\nusr/lib/modules/7.3.4/modules.dep\netc/mdadm/mdadm.conf\n";
+        assert_eq!(count_modules(list), 2);
+        assert_eq!(count_modules("etc/mdadm/mdadm.conf\n"), 0);
+        assert_eq!(check_initrd(Some(55), Some(55)), InitrdCheck::Fine);
+        assert_eq!(check_initrd(Some(55), Some(40)), InitrdCheck::Fine);
+        assert_eq!(check_initrd(None, Some(3)), InitrdCheck::Fine);
+        assert_eq!(check_initrd(Some(0), Some(0)), InitrdCheck::Fine, "everything built in");
+        assert!(matches!(check_initrd(Some(55), Some(0)), InitrdCheck::Broken(_)));
+        assert!(matches!(check_initrd(Some(55), None), InitrdCheck::Broken(_)));
+        assert_eq!(check_initrd(None, None), InitrdCheck::Unverified);
+        assert_eq!(check_initrd(None, Some(0)), InitrdCheck::Unverified);
+    }
+
+    /// update-initramfs writes `produce` into the initramfs; lsinitramfs lists two modules for
+    /// "GOOD" and none for anything else.
+    struct InitrdSystem {
+        root: std::path::PathBuf,
+        produce: &'static str,
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl rynas_config::System for InitrdSystem {
+        fn hostname(&self) -> Result<String, String> {
+            Ok("nas".into())
+        }
+        fn set_hostname(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn reload_or_restart_unit(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn unit_active(&self, _: &str) -> Result<bool, String> {
+            Ok(true)
+        }
+        fn run(&self, cmd: &Cmd) -> Result<rynas_tasks::CmdOutput, String> {
+            let shown = cmd.display();
+            self.calls.lock().unwrap().push(shown.clone());
+            let mut stdout = String::new();
+            if shown.contains("lsinitramfs") {
+                let path = shown.split_whitespace().last().unwrap();
+                if std::fs::read_to_string(path).unwrap_or_default() == "GOOD" {
+                    stdout = "lib/modules/k/ahci.ko.zst\nlib/modules/k/md-mod.ko.zst\n".into();
+                }
+            } else if let Some(k) = shown.split(" -k ").nth(1) {
+                let k = k.split_whitespace().next().unwrap();
+                std::fs::write(self.root.join(format!("boot/initrd.img-{k}")), self.produce).unwrap();
+            }
+            Ok(rynas_tasks::CmdOutput { code: Some(0), stdout, stderr: String::new() })
+        }
+    }
+
+    fn initrd_config(produce: &'static str) -> (tempfile::TempDir, Arc<InitrdSystem>, Config) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(root.join("etc/mdadm")).unwrap();
+        std::fs::create_dir_all(root.join("boot")).unwrap();
+        std::fs::write(root.join("etc/fstab"), "").unwrap();
+        std::fs::write(root.join("boot/initrd.img-6.12.9-amd64"), "GOOD").unwrap();
+        std::fs::write(root.join("boot/initrd.img-6.12.10-amd64"), "GOOD").unwrap();
+        let sys = Arc::new(InitrdSystem { root: root.clone(), produce, calls: Default::default() });
+        let cfg = Config::open(
+            ConfigOptions::new(dir.path().join("state"), &root),
+            sys.clone(),
+            vec![Arc::new(VolumesDomain)],
+        )
+        .unwrap();
+        (dir, sys, cfg)
+    }
+
+    #[test]
+    fn initramfs_refresh_keeps_a_good_initrd() {
+        let (_dir, sys, cfg) = initrd_config("GOOD");
+        let mut c = StorageVolumes::default();
+        c.volumes.push(record("photos", false));
+        cfg.stage("alice", VOLUMES_KEY, Some(serde_json::to_value(&c).unwrap())).unwrap();
+        cfg.apply("alice", "alice", "", &|_| {}, &|| false).unwrap();
+        let calls = sys.calls.lock().unwrap().join("\n");
+        assert!(calls.contains("/usr/sbin/update-initramfs -u -k 6.12.10-amd64"), "{calls}");
+        assert!(!calls.contains("systemd-run"), "tests never leave the root: {calls}");
+        let backup = sys.root.join("var/lib/rynas/initramfs/initrd.img-6.12.10-amd64");
+        assert!(!backup.exists(), "the copy is removed once the new initramfs is checked");
+    }
+
+    #[test]
+    fn initramfs_without_modules_is_put_back_and_fails() {
+        let (_dir, sys, cfg) = initrd_config("EMPTY");
+        let mut c = StorageVolumes::default();
+        c.volumes.push(record("photos", false));
+        cfg.stage("alice", VOLUMES_KEY, Some(serde_json::to_value(&c).unwrap())).unwrap();
+        let e = cfg.apply("alice", "alice", "", &|_| {}, &|| false).unwrap_err();
+        assert!(format!("{e:?}").contains("put back"), "{e:?}");
+        let target = sys.root.join("boot/initrd.img-6.12.10-amd64");
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "GOOD");
+        assert_eq!(std::fs::read_to_string(sys.root.join("boot/initrd.img-6.12.9-amd64")).unwrap(), "GOOD");
+        assert!(!sys.root.join("var/lib/rynas/initramfs/initrd.img-6.12.10-amd64").exists());
+    }
+
+    #[test]
+    fn update_initramfs_runs_outside_the_sandbox() {
+        let c = update_initramfs_cmd(&["-u", "-k", "7.3.4-11-synodeb"], true);
+        let shown = c.display();
+        assert!(shown.starts_with("systemd-run --wait --pipe"), "{shown}");
+        assert!(shown.contains("--unit=rynas-initramfs-"), "{shown}");
+        assert!(!shown.contains("RuntimeMaxSec"), "keep running: {shown}");
+        assert!(shown.ends_with("-- /usr/sbin/update-initramfs -u -k 7.3.4-11-synodeb"), "{shown}");
+        assert!(rynas_tasks::transient_unit(&c, INITRAMFS_UNIT).is_some());
+        let d = update_initramfs_cmd(&["-u"], false);
+        assert_eq!(d.display(), "/usr/sbin/update-initramfs -u");
     }
 
     fn flex_record(label: &str) -> VolumeRecord {

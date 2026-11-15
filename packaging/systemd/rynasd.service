@@ -64,7 +64,10 @@ UMask=0077
 NoNewPrivileges=yes
 # not "full": configuration applies write files in /etc (hostname, hosts, smb.conf...)
 ProtectSystem=yes
-# /boot: update-initramfs after a new md array (mdadm.conf is copied into the initramfs)
+# /boot: the initramfs is regenerated after a new md array (mdadm.conf is copied into it) in
+# a transient unit outside this sandbox (ProtectKernelModules hides /lib/modules here: an
+# initramfs built inside would lack every kernel module); rynasd only puts the previous copy
+# back when the new one lost its modules (crates/rynas-storage/src/domain.rs)
 ReadWritePaths=/boot
 # LVM (flexible RAID volumes: md tiers joined by a volume group) needs no more: its locks
 # (/run/lock/lvm), /run/lvm and its metadata backups (/etc/lvm/archive, /etc/lvm/backup)

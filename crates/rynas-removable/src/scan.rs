@@ -218,6 +218,29 @@ pub const KNOWN_FS: &[&str] = &[
     "udf",
 ];
 
+/// Filesystem drivers built as loadable modules (`CONFIG_<X>=m`) in a kernel's build
+/// options (`/boot/config-<release>`), by the names [`FsSupport::driver`] looks for.
+fn config_fs_modules(config: &str) -> Vec<String> {
+    const OPTIONS: &[(&str, &str)] = &[
+        ("CONFIG_VFAT_FS", "vfat"),
+        ("CONFIG_EXFAT_FS", "exfat"),
+        ("CONFIG_NTFS3_FS", "ntfs3"),
+        ("CONFIG_EXT4_FS", "ext4"),
+        ("CONFIG_EXT2_FS", "ext2"),
+        ("CONFIG_BTRFS_FS", "btrfs"),
+        ("CONFIG_XFS_FS", "xfs"),
+        ("CONFIG_F2FS_FS", "f2fs"),
+        ("CONFIG_HFSPLUS_FS", "hfsplus"),
+        ("CONFIG_ISO9660_FS", "isofs"),
+        ("CONFIG_UDF_FS", "udf"),
+    ];
+    config
+        .lines()
+        .filter_map(|l| l.trim().strip_suffix("=m"))
+        .filter_map(|k| OPTIONS.iter().find(|(o, _)| *o == k).map(|(_, d)| d.to_string()))
+        .collect()
+}
+
 /// The scanner's view of the system: which filesystem drivers exist.
 #[derive(Debug, Clone, Default)]
 pub struct FsSupport {
@@ -242,9 +265,12 @@ impl FsSupport {
         let modules = if release.is_empty() {
             HashSet::new()
         } else {
-            t.list(&format!("/lib/modules/{release}/kernel/fs"))
-                .into_iter()
-                .collect()
+            // rynasd's sandbox (ProtectKernelModules) hides /lib/modules: the kernel's build
+            // options tell which filesystems are loadable modules (mounts run outside it,
+            // where the kernel loads them on demand)
+            let mut m: HashSet<String> = t.list(&format!("/lib/modules/{release}/kernel/fs")).into_iter().collect();
+            m.extend(config_fs_modules(&t.read(&format!("/boot/config-{release}")).unwrap_or_default()));
+            m
         };
         let mut helpers = HashSet::new();
         for dir in ["/sbin", "/usr/sbin", "/bin", "/usr/bin"] {
@@ -797,6 +823,22 @@ mod tests {
         assert_eq!(decode_udev(r"My\x20Stick"), "My Stick");
         assert_eq!(decode_udev(r"a\xzz"), r"a\xzz");
         assert_eq!(decode_mount(r"/media/My\040Stick"), "/media/My Stick");
+    }
+
+    #[test]
+    fn loadable_filesystems_from_the_kernel_config() {
+        let m = config_fs_modules(
+            "CONFIG_EXT4_FS=y\nCONFIG_EXFAT_FS=m\nCONFIG_VFAT_FS=m\n# CONFIG_XFS_FS is not set\nCONFIG_ISO9660_FS=m\nCONFIG_EXFAT_DEFAULT_IOCHARSET=\"utf8\"\n",
+        );
+        assert_eq!(m, ["exfat", "vfat", "isofs"]);
+        let s = FsSupport {
+            kernel: ["ext4".to_string()].into(),
+            modules: m.into_iter().collect(),
+            helpers: Default::default(),
+        };
+        assert_eq!(s.driver("exfat"), Some("exfat"));
+        assert_eq!(s.driver("iso9660"), Some("iso9660"));
+        assert_eq!(s.driver("xfs"), None);
     }
 
     #[test]
