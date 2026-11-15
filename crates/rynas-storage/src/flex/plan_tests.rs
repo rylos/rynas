@@ -727,3 +727,255 @@ fn scrub_dates() {
     assert_eq!(scrub_epoch("Thu Oct 22 15:35:01 2026"), Some(1_792_683_301));
     assert_eq!(scrub_epoch("garbage"), None);
 }
+
+// ------------------------------------------------------------------------------- recoveries
+
+/// The steps clearing a replaced disk name it as erased (the UI warns, the executor checks it
+/// is still that disk) and are best effort; the other steps are neither.
+#[test]
+fn the_replaced_disk_is_erased_best_effort() {
+    let start = created_view(&[("sda", 4), ("sdb", 8), ("sdc", 8)], 1);
+    let mut v = start.clone();
+    v.disks.push(VDisk { name: "sdd".into(), size: 12 * TB, parts: Vec::new() });
+    let g = tiers::replace(&v.shapes(), &v.layout_disks(), "sda", &("sdd".into(), 12 * TB), 1, MIN_TIER).unwrap();
+    let goal = Goal { old: Some("sda".into()), new: vec!["sdd".into()] };
+    let steps = growth_steps(&mut v, &goal, Some(&g.tiers)).unwrap();
+    let n = steps.len();
+    assert_eq!(lines(&steps[n - 2..]), ["mdadm --zero-superblock /dev/sda1", "sgdisk --zap-all /dev/sda"]);
+    for s in &steps[n - 2..] {
+        assert_eq!(s.destroys, ["sda"]);
+        assert!(s.best_effort);
+    }
+    assert!(steps[..n - 2].iter().all(|s| !s.best_effort && !s.destroys.contains(&"sda".to_string())));
+}
+
+/// Replaces "missing" the way plan_replace does: a ghost disk in every degraded tier.
+fn replace_missing(v: &View, new: (&str, u64)) -> (Goal, Vec<Tier>) {
+    let mut shapes = v.shapes();
+    let mut disks = v.layout_disks();
+    let degraded: Vec<u32> = v.tiers.iter().filter(|t| t.created() && t.degraded() > 0).map(|t| t.index).collect();
+    let mut top = crate::plan::PART_START;
+    for t in shapes.iter_mut().filter(|t| degraded.contains(&t.index)) {
+        t.members.push("<missing>".into());
+        top = top.max(t.end);
+    }
+    disks.push(("<missing>".into(), top + END_RESERVE));
+    let g = tiers::replace(&shapes, &disks, "<missing>", &(new.0.into(), new.1), v.tolerance, MIN_TIER).unwrap();
+    (Goal { old: Some(MISSING.into()), new: vec![new.0.into()] }, g.tiers)
+}
+
+/// A 2-disk tolerance tier missing two disks gets one back: the rebuild ends with one slot
+/// still empty, and the wait says so (it would never end waiting for none).
+#[test]
+fn a_rebuild_that_leaves_the_tier_degraded_waits_for_that() {
+    let mut start = created_view(&[("sda", 8), ("sdb", 8), ("sdc", 8), ("sdd", 8)], 2);
+    for t in &mut start.tiers {
+        t.members.retain(|m| m.disk != "sdc" && m.disk != "sdd");
+    }
+    start.disks.retain(|d| d.name != "sdc" && d.name != "sdd");
+    start.disks.push(VDisk { name: "sde".into(), size: 8 * TB, parts: Vec::new() });
+    let (goal, target) = replace_missing(&start, ("sde", 8 * TB));
+    let mut end = start.clone();
+    let steps = growth_steps(&mut end, &goal, Some(&target)).unwrap();
+    kinds_ok(&steps);
+    assert_eq!(
+        lines(&steps)[4..],
+        [
+            "mdadm /dev/md/vol2_t1 --add /dev/sde1",
+            "wait /sys/block/md101/md/sync_action == idle, degraded <= 1",
+        ]
+    );
+    assert_eq!(end.tiers[0].degraded(), 1);
+    converges(&start, &goal, &target, &steps, &end, true);
+    // complete on a degraded tier: an interrupted reshape is continued and waited for with
+    // the slot that stays empty
+    let mut v = created_view(&[("sda", 4), ("sdb", 8), ("sdc", 8)], 1);
+    v.tiers[0].members.retain(|m| m.disk != "sdb");
+    v.disks.retain(|d| d.name != "sdb");
+    v.tiers[0].interrupted = true;
+    let steps = growth_steps(&mut v, &Goal::default(), None).unwrap();
+    assert_eq!(
+        lines(&steps),
+        [
+            "mdadm --grow --continue /dev/md/vol2_t1",
+            "wait /sys/block/md101/md/sync_action == idle, degraded <= 1",
+        ]
+    );
+}
+
+/// A disk that was a member once comes back with its old slices (in no array): added, it is
+/// cleared (its old superblocks first) and used; the volume's own disks never are.
+#[test]
+fn a_disk_with_leftover_slices_is_cleared_and_used() {
+    let start = created_view(&[("sda", 4), ("sdb", 8), ("sdc", 8)], 1);
+    let (b1, b2) = (reach(4 * TB), reach(8 * TB));
+    let mut v = start.clone();
+    v.disks.push(VDisk {
+        name: "sdd".into(),
+        size: 8 * TB,
+        parts: vec![
+            VPart { tier: 1, kname: "sdd1".into(), start: MIB, end: b1 - 64 * MIB, fresh: false },
+            VPart { tier: 2, kname: "sdd2".into(), start: b1 - 64 * MIB, end: b2, fresh: false },
+        ],
+    });
+    let ns = vec![("sdd".to_string(), 8 * TB)];
+    let growth = tiers::grow(&v.shapes(), &v.layout_disks(), &ns, 1, MIN_TIER);
+    let goal = Goal { old: None, new: vec!["sdd".into()] };
+    let begin = v.clone();
+    let steps = growth_steps(&mut v, &goal, Some(&growth.tiers)).unwrap();
+    kinds_ok(&steps);
+    let l = lines(&steps);
+    assert_eq!(
+        l[..5],
+        [
+            "wipefs --all /dev/sdd1".to_string(),
+            "wipefs --all /dev/sdd2".into(),
+            "wipefs --all /dev/sdd".into(),
+            "sgdisk --zap-all /dev/sdd".into(),
+            format!("sgdisk {} {} /dev/sdd", new_arg(1, MIB, b1), new_arg(2, b1, b2)),
+        ]
+    );
+    assert!(steps[..4].iter().all(|s| s.destroys == ["sdd"]));
+    assert!(l.contains(&"mdadm /dev/md/vol2_t1 --add /dev/sdd1".to_string()), "{l:?}");
+    assert!(l.contains(&"mdadm /dev/md/vol2_t2 --add /dev/sdd2".to_string()), "{l:?}");
+    converges(&begin, &goal, &growth.tiers, &steps, &v, true);
+    // a member disk named as new is never cleared
+    let mut w = start.clone();
+    let target: Vec<Tier> = w.shapes();
+    let steps = partition_steps(&mut w, &target, &["sdb".into()]).unwrap();
+    assert!(steps.is_empty(), "{:?}", lines(&steps));
+}
+
+/// "missing": the disk gone and back (its slices in no array) is the new disk: cleared and
+/// rebuilt on; another disk takes its place: it is cleared at the end, once no tier misses
+/// a disk.
+#[test]
+fn replace_missing_with_the_old_disk_still_attached() {
+    let mut start = created_view(&[("sda", 4), ("sdb", 8), ("sdc", 8)], 1);
+    for t in &mut start.tiers {
+        t.members.retain(|m| m.disk != "sdb");
+    }
+    for p in &mut start.disks.iter_mut().find(|d| d.name == "sdb").unwrap().parts {
+        p.fresh = false;
+    }
+    // the same disk back
+    let (goal, target) = replace_missing(&start, ("sdb", 8 * TB));
+    let mut end = start.clone();
+    let steps = growth_steps(&mut end, &goal, Some(&target)).unwrap();
+    let l = lines(&steps);
+    assert_eq!(l[..4], ["wipefs --all /dev/sdb1", "wipefs --all /dev/sdb2", "wipefs --all /dev/sdb", "sgdisk --zap-all /dev/sdb"]);
+    assert!(l.contains(&"mdadm /dev/md/vol2_t1 --add /dev/sdb1".to_string()), "{l:?}");
+    assert!(end.tiers.iter().all(|t| t.degraded() == 0));
+    // another disk
+    let mut v = start.clone();
+    v.disks.push(VDisk { name: "sdd".into(), size: 8 * TB, parts: Vec::new() });
+    let (goal, target) = replace_missing(&v, ("sdd", 8 * TB));
+    let begin = v.clone();
+    let steps = growth_steps(&mut v, &goal, Some(&target)).unwrap();
+    let n = steps.len();
+    assert_eq!(
+        lines(&steps[n - 3..]),
+        ["mdadm --zero-superblock /dev/sdb1", "mdadm --zero-superblock /dev/sdb2", "sgdisk --zap-all /dev/sdb"]
+    );
+    assert!(steps[n - 3..].iter().all(|s| s.destroys == ["sdb"] && s.best_effort));
+    converges(&begin, &goal, &target, &steps, &v, false);
+}
+
+/// A crash between taking the third mirror out and clearing it: complete clears it and goes
+/// on to RAID6 (the rule does not need a tier below: at 2-disk tolerance tier 1 has every
+/// disk, four at least, so only an upper tier is a three-way mirror).
+#[test]
+fn complete_a_three_way_mirror_stopped_after_its_mirror_went_out() {
+    let start = created_view(&[("sda", 4), ("sdb", 8), ("sdc", 8), ("sdd", 8)], 2);
+    let Grown { begin, steps, end, .. } = grow_view(&start, &[("sde", 8)]);
+    let cut = lines(&steps).iter().position(|l| l == "mdadm /dev/md/vol2_t2 --remove /dev/sdd2").unwrap() + 1;
+    let mut crashed = begin.clone();
+    for s in &steps[..cut] {
+        crashed.apply(s);
+    }
+    // the inventory after the crash: the partition still has the superblock
+    for p in crashed.disks.iter_mut().flat_map(|d| d.parts.iter_mut()).filter(|p| p.kname == "sdd2") {
+        p.fresh = false;
+    }
+    let mut w = crashed.clone();
+    let got = growth_steps(&mut w, &Goal::default(), None).unwrap();
+    let l = lines(&got);
+    assert_eq!(
+        l[..3],
+        [
+            "mdadm --zero-superblock /dev/sdd2",
+            "mdadm --grow /dev/md/vol2_t2 --raid-devices=2",
+            "mdadm --grow /dev/md/vol2_t2 --level=5",
+        ]
+    );
+    let t = w.tiers.iter().find(|t| t.index == 2).unwrap();
+    assert_eq!((t.level, t.raid_disks, t.active()), (Some(RaidLevel::Raid6), 4, 4), "{l:?}");
+    assert_eq!(shape(&w), shape(&end));
+    // the same with the superblock already cleared: no rebuild back to three mirrors
+    for p in crashed.disks.iter_mut().flat_map(|d| d.parts.iter_mut()).filter(|p| p.kname == "sdd2") {
+        p.fresh = true;
+    }
+    let mut w = crashed.clone();
+    let l = lines(&growth_steps(&mut w, &Goal::default(), None).unwrap());
+    assert_eq!(l[0], "mdadm --grow /dev/md/vol2_t2 --raid-devices=2", "{l:?}");
+    assert_eq!(shape(&w), shape(&end));
+    // a three-way mirror that lost a mirror with no new partition around is left alone
+    let mut v = start.clone();
+    let t2 = v.tiers.iter_mut().find(|t| t.index == 2).unwrap();
+    t2.members.retain(|m| m.part != "sdd2");
+    for p in v.disks.iter_mut().flat_map(|d| d.parts.iter_mut()).filter(|p| p.kname == "sdd2") {
+        p.fresh = false;
+    }
+    let l = lines(&growth_steps(&mut v, &Goal::default(), None).unwrap());
+    assert!(!l.iter().any(|x| x.contains("--raid-devices=2")), "{l:?}");
+}
+
+/// A new tier is never created over a partition carrying an md superblock.
+#[test]
+fn a_new_tier_refuses_a_partition_with_a_superblock() {
+    let start = created_view(&[("sda", 4), ("sdb", 4), ("sdc", 8), ("sdd", 8)], 2);
+    let (b1, b2) = (reach(4 * TB), reach(8 * TB));
+    let mut v = start.clone();
+    v.disks.iter_mut().find(|d| d.name == "sdc").unwrap().parts.push(VPart {
+        tier: 2,
+        kname: "sdc2".into(),
+        start: b1,
+        end: b2,
+        fresh: false,
+    });
+    v.disks.push(VDisk { name: "sde".into(), size: 12 * TB, parts: Vec::new() });
+    let ns = vec![("sde".to_string(), 12 * TB)];
+    let growth = tiers::grow(&v.shapes(), &v.layout_disks(), &ns, 2, MIN_TIER);
+    let goal = Goal { old: None, new: vec!["sde".into()] };
+    let e = growth_steps(&mut v, &goal, Some(&growth.tiers)).unwrap_err();
+    assert!(e.contains("sdc2: carries an md superblock"), "{e}");
+}
+
+/// A crash while the disks in use got their partitions for a new top tier: completing makes
+/// the missing ones before the array, over every disk the tier was planned on.
+#[test]
+fn complete_the_partitions_of_a_new_tier() {
+    let start = created_view(&[("sda", 4), ("sdc", 4), ("sdd", 8), ("sde", 8)], 2);
+    let Grown { begin, steps, end, .. } = grow_view(&start, &[("sdb", 12)]);
+    let (b1, b2) = (reach(4 * TB), reach(8 * TB));
+    let l = lines(&steps);
+    let cut = l.iter().position(|x| x == "partx --update --nr 2 /dev/sdd").unwrap() + 1;
+    assert!(l[cut].starts_with("sgdisk") && l[cut].ends_with("/dev/sde"), "{l:?}");
+    let mut w = begin.clone();
+    for s in &steps[..cut] {
+        w.apply(s);
+    }
+    let got = growth_steps(&mut w, &Goal::default(), None).unwrap();
+    let g = lines(&got);
+    assert_eq!(
+        g[..3],
+        [
+            format!("sgdisk {} /dev/sde", new_arg(2, b1, b2)),
+            "partx --update --nr 2 /dev/sde".into(),
+            "udevadm settle".into(),
+        ]
+    );
+    let create = g.iter().find(|x| x.starts_with("mdadm --create /dev/md/vol2_t2")).expect("tier 2 created");
+    assert!(create.contains("--level=1 --raid-devices=3") && create.contains("/dev/sde2"), "{create}");
+    assert_eq!(shape(&w), shape(&end));
+}

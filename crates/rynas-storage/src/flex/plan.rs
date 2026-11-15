@@ -104,9 +104,9 @@ pub struct VPart {
     pub kname: String,
     pub start: u64,
     pub end: u64,
-    /// Carries no superblock of the tier's array: never joined, or cleared after a removal.
-    /// Only fresh partitions are added to an array; a stale one (a member taken out, a
-    /// failed disk) is left alone.
+    /// Carries no md superblock: never joined, or cleared after a removal. Only fresh
+    /// partitions are added to an array or make a new one; a stale one (a member taken out,
+    /// a failed disk, a superblock of an array that is not running) is left alone.
     pub fresh: bool,
 }
 
@@ -196,8 +196,18 @@ impl VTier {
         })
     }
 
+    /// The wait for the md operation running: `sync_action` idle, and no more slots empty
+    /// than the step leaves (another disk still missing; none on a healthy tier, the
+    /// executor's default).
     fn wait_condition(&self) -> String {
-        format!("/sys/block/{}/md/sync_action == idle", self.kname)
+        let filled = self.active() + self.count(MemberRole::Rebuilding);
+        let left = self.raid_disks.saturating_sub(filled as u32);
+        let idle = format!("/sys/block/{}/md/sync_action == idle", self.kname);
+        if left == 0 {
+            idle
+        } else {
+            format!("{idle}, degraded <= {left}")
+        }
     }
 
     fn to_api(&self) -> FlexTier {
@@ -432,8 +442,12 @@ impl View {
         v
     }
 
-    /// Tiers whose slices exist above the top tier on enough disks but have no array yet
-    /// (a growth stopped between the partitions and `mdadm --create`) become planned tiers.
+    /// Tiers whose slices exist above the top tier but have no array yet (a growth stopped
+    /// between the partitions and `mdadm --create`) become planned tiers. A crash while the
+    /// disks in use got their partitions one by one leaves some without theirs: the tier is
+    /// planned over every disk of the tier below that reaches its end, as the tier
+    /// calculator made it, and the missing partitions are made again
+    /// ([`growth_steps`] without a target).
     pub fn discover_planned(&mut self) {
         let mut next = self.tiers.iter().map(|t| t.index).max().unwrap_or(0) + 1;
         loop {
@@ -450,12 +464,30 @@ impl View {
             let Some((_, first)) = slices.first() else {
                 break;
             };
-            if slices.len() < tiers::min_members(self.tolerance)
-                || slices.iter().any(|(_, p)| p.start != first.start || p.end != first.end)
-            {
+            if slices.iter().any(|(_, p)| p.start != first.start || p.end != first.end) {
                 break;
             }
-            let planned: Vec<String> = slices.iter().map(|(d, _)| d.clone()).collect();
+            let below = self.tiers.iter().find(|t| t.index + 1 == next);
+            let in_below = |disk: &str| {
+                below.is_some_and(|t| {
+                    t.planned.iter().any(|d| d == disk)
+                        || t.members.iter().any(|m| m.disk == disk && m.role != MemberRole::Faulty)
+                })
+            };
+            let planned: Vec<String> = self
+                .disks
+                .iter()
+                .filter(|d| {
+                    slices.iter().any(|(n, _)| n == &d.name)
+                        || (!d.parts.iter().any(|p| p.tier == next)
+                            && in_below(&d.name)
+                            && tiers::reach(d.size) >= first.end)
+                })
+                .map(|d| d.name.clone())
+                .collect();
+            if planned.len() < tiers::min_members(self.tolerance) {
+                break;
+            }
             self.tiers.push(VTier {
                 index: next,
                 start: first.start,
@@ -493,9 +525,9 @@ impl View {
                     .filter_map(|p| {
                         let tier = p.partlabel.as_deref()?.strip_prefix(&plabel)?.parse().ok()?;
                         let start = p.start?;
-                        let stale = p.fstype.as_deref() == Some("linux_raid_member")
-                            && p.label.as_deref().map(short_name)
-                                == Some(format!("{}_t{tier}", self.label).as_str());
+                        // an md superblock: of the tier's array (a member, or one taken out),
+                        // or of an array that is not running; never added or created over
+                        let stale = p.fstype.as_deref() == Some("linux_raid_member");
                         Some(VPart {
                             tier,
                             kname: p.kname.clone(),
@@ -969,6 +1001,11 @@ fn dev(p: &str) -> String {
 /// Partitions for the tiers each disk is in after the change: a new blank disk gets them
 /// all in one table; a disk in use (or one partly done by an interrupted plan) gets each
 /// missing one alone, announced to the kernel with `partx`.
+///
+/// A new disk with slices of this volume left over (a member once: replaced, or gone and
+/// back, its partitions in no array) is cleared like a blank one, the md superblocks of its
+/// partitions first (the same partitions made again would carry them). A disk holding a
+/// live member is never cleared.
 fn partition_steps(v: &mut View, target: &[Tier], new: &[String]) -> Result<Vec<PlanStep>, String> {
     let mut steps = Vec::new();
     let mut disks: Vec<String> = target.iter().flat_map(|t| t.members.clone()).collect();
@@ -980,19 +1017,25 @@ fn partition_steps(v: &mut View, target: &[Tier], new: &[String]) -> Result<Vec<
             continue;
         };
         let wanted: Vec<&Tier> = target.iter().filter(|t| t.members.contains(&disk)).collect();
-        for t in &wanted {
-            if let Some(p) = vd.parts.iter().find(|p| p.tier == t.index)
-                && (p.start != t.start || p.end != t.end)
-            {
-                return Err(format!(
-                    "{}: its partition for tier {} is not where the tier is",
-                    p.kname, t.index
-                ));
+        let live = v.tiers.iter().any(|t| t.members.iter().any(|m| m.disk == disk));
+        let leftover = new.contains(&disk) && !live && vd.parts.iter().any(|p| !p.fresh);
+        let blank = new.contains(&disk) && (vd.parts.is_empty() || leftover);
+        if !leftover {
+            for t in &wanted {
+                if let Some(p) = vd.parts.iter().find(|p| p.tier == t.index)
+                    && (p.start != t.start || p.end != t.end)
+                {
+                    return Err(format!(
+                        "{}: its partition for tier {} is not where the tier is",
+                        p.kname, t.index
+                    ));
+                }
             }
         }
-        let missing: Vec<&&Tier> = wanted
+        let missing: Vec<&Tier> = wanted
             .iter()
-            .filter(|t| !vd.parts.iter().any(|p| p.tier == t.index))
+            .filter(|t| blank || !vd.parts.iter().any(|p| p.tier == t.index))
+            .copied()
             .collect();
         if missing.is_empty() {
             continue;
@@ -1006,7 +1049,15 @@ fn partition_steps(v: &mut View, target: &[Tier], new: &[String]) -> Result<Vec<
             ]
         };
         let mut batch = Vec::new();
-        if new.contains(&disk) && vd.parts.is_empty() {
+        if blank {
+            if leftover {
+                for p in vd.parts.iter().filter(|p| !p.fresh) {
+                    batch.push(destroying(
+                        run(on(PlanStepKind::WipeSignatures, &p.kname), s(&["wipefs", "--all", &dev(&p.kname)])),
+                        &[&disk],
+                    ));
+                }
+            }
             batch.push(destroying(
                 run(on(PlanStepKind::WipeSignatures, &disk), s(&["wipefs", "--all", &devp])),
                 &[&disk],
@@ -1068,12 +1119,14 @@ fn partition_steps(v: &mut View, target: &[Tier], new: &[String]) -> Result<Vec<
     Ok(steps)
 }
 
-/// The steps of a growth: the partitions `target` asks for, then [`next`] until done.
-/// `v` ends in the predicted state.
+/// The steps of a growth: the partitions `target` asks for (without a target: those a
+/// planned tier still misses), then [`next`] until done. `v` ends in the predicted state.
 pub fn growth_steps(v: &mut View, goal: &Goal, target: Option<&[Tier]>) -> Result<Vec<PlanStep>, String> {
-    let mut steps = Vec::new();
+    let mut steps;
     if let Some(target) = target {
-        // the tiers to create, with their disks
+        // the tiers to create, with their disks (a tier found planned, from an interrupted
+        // growth, takes the target's disks)
+        v.tiers.retain(|x| x.created() || !target.iter().any(|t| t.index == x.index));
         for t in target {
             if !v.tiers.iter().any(|x| x.index == t.index) {
                 v.tiers.push(VTier {
@@ -1091,9 +1144,23 @@ pub fn growth_steps(v: &mut View, goal: &Goal, target: Option<&[Tier]>) -> Resul
         steps = partition_steps(v, target, &goal.new)?;
     } else {
         v.discover_planned();
+        let planned: Vec<Tier> = v
+            .tiers
+            .iter()
+            .filter(|t| !t.created())
+            .map(|t| Tier {
+                index: t.index,
+                start: t.start,
+                end: t.end,
+                members: t.planned.clone(),
+                level: t.level,
+            })
+            .collect();
+        steps = partition_steps(v, &planned, &[])?;
     }
     for _ in 0..1000 {
         let Some(batch) = next(v, goal) else {
+            uncreated(v)?;
             return Ok(steps);
         };
         for st in batch {
@@ -1102,6 +1169,31 @@ pub fn growth_steps(v: &mut View, goal: &Goal, target: Option<&[Tier]>) -> Resul
         }
     }
     Err("the growth plan does not converge (a bug): plan again from the current state".into())
+}
+
+/// A planned tier that no step creates: a partition of it carries an md superblock (of an
+/// array that is not running: `mdadm --create` is never run over it), or is missing.
+fn uncreated(v: &View) -> Result<(), String> {
+    for t in v.tiers.iter().filter(|t| !t.created()) {
+        for d in &t.planned {
+            match v.slice_of(d, t) {
+                None => {
+                    return Err(format!(
+                        "tier {}: {d} has no partition for it; plan again",
+                        t.index
+                    ));
+                }
+                Some(p) if !p.fresh => {
+                    return Err(format!(
+                        "{}: carries an md superblock of an array that is not running; tier {} is not created over it (clear it, or assemble that array, first)",
+                        p.kname, t.index
+                    ));
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The next step(s) the state of `v` calls for, `None` when nothing is left.
@@ -1123,9 +1215,10 @@ pub fn next(v: &View, g: &Goal) -> Option<Vec<PlanStep>> {
         !v.candidates(t, g.old.as_deref()).is_empty() || t.count(MemberRole::Spare) > 0 || replace_pending(t)
     };
 
-    // a write-intent bitmap back on as soon as its tier is done
+    // a write-intent bitmap back on as soon as its tier is done (also on a tier still short
+    // of a disk: the bitmap makes the rebuild of a disk that comes back short)
     for t in created() {
-        if !t.bitmap && idle(t) && t.degraded() == 0 && !change_pending(t) {
+        if !t.bitmap && idle(t) && !change_pending(t) {
             return one(run(
                 on(PlanStepKind::BitmapOn, &t.kname),
                 s(&["mdadm", "--grow", &t.dev, "--bitmap=internal"]),
@@ -1137,7 +1230,7 @@ pub fn next(v: &View, g: &Goal) -> Option<Vec<PlanStep>> {
         let parts: Option<Vec<String>> = t
             .planned
             .iter()
-            .map(|d| v.slice_of(d, t).map(|p| dev(&p.kname)))
+            .map(|d| v.slice_of(d, t).filter(|p| p.fresh).map(|p| dev(&p.kname)))
             .collect();
         let (Some(parts), Some(level)) = (parts, t.level) else {
             continue;
@@ -1242,6 +1335,49 @@ pub fn next(v: &View, g: &Goal) -> Option<Vec<PlanStep>> {
         ));
     }
 
+    // a three-way mirror on its way to RAID6 that lost its third mirror to the plan (a crash
+    // after `--fail`/`--remove`, before `--raid-devices=2`): with that partition and the
+    // new ones it has the four disks of RAID6, which only the conversion gives it, so the
+    // conversion goes on: the partition is cleared, the mirror becomes a 2-disk one (the
+    // joins then take the partition back). A third mirror lost otherwise (three disks, no
+    // new partition) is left to a replace. Its disk must still work in every lower tier.
+    for t in created().filter(|t| {
+        v.tolerance >= 2
+            && t.level == Some(RaidLevel::Raid1)
+            && t.raid_disks == 3
+            && t.members.len() == 2
+            && t.active() == 2
+            && t.sync.is_none()
+            && !t.interrupted
+    }) {
+        let lower: Vec<&VTier> = created().filter(|x| x.index < t.index).collect();
+        let out = v.disks.iter().find_map(|dk| {
+            let p = v.slice_of(&dk.name, t)?;
+            let working = lower.iter().all(|x| {
+                x.members
+                    .iter()
+                    .any(|m| m.disk == dk.name && m.role == MemberRole::Active)
+            });
+            (t.member(&p.kname).is_none() && working && g.old.as_deref() != Some(&dk.name)).then_some(p)
+        });
+        let Some(out) = out else { continue };
+        let others = v.candidates(t, g.old.as_deref()).iter().filter(|p| p.kname != out.kname).count();
+        if t.active() + 1 + others < 4 {
+            continue;
+        }
+        let mut steps = Vec::new();
+        if !out.fresh {
+            steps.push(run(
+                on(PlanStepKind::WipeSignatures, &out.kname),
+                s(&["mdadm", "--zero-superblock", &dev(&out.kname)]),
+            ));
+        }
+        steps.push(run(
+            on(PlanStepKind::Reshape, &t.kname),
+            s(&["mdadm", "--grow", &t.dev, "--raid-devices=2"]),
+        ));
+        return Some(steps);
+    }
     // a mirror taken out on the way to RAID6 and not cleared (a crash in between): its disk
     // still works in every lower tier, so it is cleared and joins again
     for t in created().filter(|t| v.tolerance >= 2 && t.level == Some(RaidLevel::Raid1)) {
@@ -1430,12 +1566,35 @@ pub fn next(v: &View, g: &Goal) -> Option<Vec<PlanStep>> {
     // partitions lose their superblocks (otherwise assembling from mdadm.conf, as the
     // initramfs does, finds an outdated copy of a tier and gives up on the whole array),
     // then its partition table goes (a slice of the volume that is not a member would be
-    // taken for a new disk's partition waiting to join): the disk is free again
-    if let Some(old) = g.old.as_deref()
-        && let Some(dk) = v.disks.iter().find(|d| d.name == old)
-        && !dk.parts.is_empty()
-        && v.tiers.iter().all(|t| t.members.iter().all(|m| m.disk != old))
-    {
+    // taken for a new disk's partition waiting to join): the disk is free again. For a
+    // "missing" disk: a disk with only leftover slices of the volume, once no tier misses a
+    // disk any more (while one does, that disk may still be the one to put back). The steps
+    // erase the disk (the plan names it, the executor checks it is still that disk) and are
+    // best effort: the volume no longer needs the disk, which may be unreadable.
+    let in_no_tier = |name: &str| {
+        v.tiers
+            .iter()
+            .all(|t| t.members.iter().all(|m| m.disk != name) && !t.planned.iter().any(|d| d == name))
+    };
+    let clear: Option<&VDisk> = match g.old.as_deref() {
+        None => None,
+        Some(MISSING) => {
+            let healthy = created().all(|t| t.degraded() == 0);
+            v.disks.iter().find(|dk| {
+                healthy
+                    && !g.new.contains(&dk.name)
+                    && !dk.parts.is_empty()
+                    && dk.parts.iter().all(|p| !p.fresh)
+                    && in_no_tier(&dk.name)
+            })
+        }
+        Some(old) => v
+            .disks
+            .iter()
+            .find(|d| d.name == old && !d.parts.is_empty() && in_no_tier(old)),
+    };
+    if let Some(dk) = clear {
+        let name = dk.name.as_str();
         let mut steps: Vec<PlanStep> = dk
             .parts
             .iter()
@@ -1448,9 +1607,13 @@ pub fn next(v: &View, g: &Goal) -> Option<Vec<PlanStep>> {
             })
             .collect();
         steps.push(run(
-            on(PlanStepKind::ClearPartitionTable, old),
-            s(&["sgdisk", "--zap-all", &dev(old)]),
+            on(PlanStepKind::ClearPartitionTable, name),
+            s(&["sgdisk", "--zap-all", &dev(name)]),
         ));
+        for st in &mut steps {
+            st.destroys = vec![name.to_string()];
+            st.best_effort = true;
+        }
         return Some(steps);
     }
     None

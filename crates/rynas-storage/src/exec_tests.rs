@@ -775,3 +775,107 @@ async fn flexible_growth_commits_the_new_tier_before_pvcreate() {
         .unwrap_err();
     assert!(e.contains("nothing was rolled back"), "{e}");
 }
+
+/// lsblk's answer for a disk of the inventory (serial, WWN and size as lsblk prints them).
+fn lsblk_identity(inv: &Inventory, disk: &str, serial: Option<&str>) -> (String, String) {
+    let d = inv.disks.iter().find(|d| d.name == disk).unwrap();
+    let j = serde_json::json!({"blockdevices": [{
+        "serial": serial.unwrap_or(&d.serial),
+        "wwn": d.wwn,
+        "size": d.size,
+    }]});
+    (
+        format!("lsblk --json --nodeps --bytes --output SERIAL,WWN,SIZE /dev/{disk}"),
+        j.to_string(),
+    )
+}
+
+/// The replaced disk is cleared last, best effort, and only while it is still the disk the
+/// plan was made for.
+#[tokio::test]
+async fn flexible_replace_clears_the_old_disk_only_if_it_is_still_that_disk() {
+    use crate::tests_support::{FlexState, flex_inventory};
+    let mut inv = flex_inventory(FlexState::DiskFaulty, true);
+    let mut d = inv.disks[0].clone();
+    d.name = "sdd".into();
+    d.path = "/dev/sdd".into();
+    d.serial = "NEW-DISK".into();
+    d.size = 8_001_563_222_016;
+    d.used_by.clear();
+    inv.disks.push(d);
+    let p = plan::plan_replace(
+        &inv,
+        &ReplacePlanRequest {
+            array: String::new(),
+            old: "sdb".into(),
+            new_disk: "sdd".into(),
+            volume: Some("vol2".into()),
+        },
+    );
+    assert!(p.valid, "{:?}", p.errors);
+    assert!(p.steps.iter().any(|s| s.best_effort && s.destroys == ["sdb"]));
+    let machine = |serial: Option<&str>| {
+        let mut m = FakeMachine::default();
+        let (line, out) = lsblk_identity(&inv, "sdb", serial);
+        m.output(&line, &out);
+        {
+            let mut f = m.files.lock().unwrap();
+            for a in ["md126", "md127"] {
+                f.insert(format!("/sys/block/{a}/md/sync_action"), "idle\n".into());
+                f.insert(format!("/sys/block/{a}/md/degraded"), "0\n".into());
+            }
+        }
+        m
+    };
+    let disks = vec!["sdd".to_string()];
+    // the same disk: cleared
+    let m = machine(None);
+    run_plan_with(&m, &inv, &p, &disks, &Secrets::default(), None).await.unwrap();
+    let ran = m.ran();
+    let zero = ran.iter().position(|l| l == "mdadm --zero-superblock /dev/sdb1").unwrap();
+    assert!(ran[zero - 1].starts_with("lsblk --json --nodeps"), "{ran:?}");
+    assert_eq!(ran.last().unwrap(), "sgdisk --zap-all /dev/sdb");
+    // another disk under the name by now: left alone, the plan still succeeds
+    let m = machine(Some("SOMEONE-ELSE"));
+    run_plan_with(&m, &inv, &p, &disks, &Secrets::default(), None).await.unwrap();
+    assert!(!m.ran().iter().any(|l| l.contains("/dev/sdb") && !l.starts_with("lsblk") && !l.contains("--remove")), "{:?}", m.ran());
+    assert!(m.logged().contains("is not the disk the plan was made for"), "{}", m.logged());
+    // an unreadable old disk: a warning, the rest of the clearing still runs
+    let mut m = machine(None);
+    m.fail.insert("mdadm --zero-superblock /dev/sdb1".into(), "exit code 1: read error".into());
+    run_plan_with(&m, &inv, &p, &disks, &Secrets::default(), None).await.unwrap();
+    assert!(m.logged().contains("WARNING: exit code 1: read error"), "{}", m.logged());
+    assert_eq!(m.ran().last().unwrap(), "sgdisk --zap-all /dev/sdb");
+    // but a failure of any other step still fails the plan
+    let mut m = machine(None);
+    m.fail.insert("mdadm /dev/md126 --add".into(), "exit code 1: boom".into());
+    assert!(run_plan_with(&m, &inv, &p, &disks, &Secrets::default(), None).await.is_err());
+}
+
+/// A wait names how many slots may stay empty after it: met with that many, at once.
+#[tokio::test]
+async fn a_wait_accepts_the_slots_the_plan_leaves_empty() {
+    use rynas_api_types::storage::{PlanAction, PlanStepKind, StoragePlan};
+    let inv = nas_inventory();
+    let plan = StoragePlan {
+        operation: "complete_growth".into(),
+        valid: true,
+        steps: vec![crate::plan::wait(
+            crate::plan::d(PlanStepKind::WaitRebuild),
+            "/sys/block/md9/md/sync_action == idle, degraded <= 1",
+        )],
+        ..Default::default()
+    };
+    let m = FakeMachine::default();
+    {
+        let mut f = m.files.lock().unwrap();
+        f.insert("/sys/block/md9/md/sync_action".into(), "idle\n".into());
+        f.insert("/sys/block/md9/md/degraded".into(), "1\n".into());
+    }
+    run_plan(&m, &inv, &plan, &[], &Secrets::default()).await.unwrap();
+    let mut bad = plan.clone();
+    bad.steps[0].action = PlanAction::Wait {
+        condition: "/sys/block/md9/md/sync_action == idle, degraded <= x".into(),
+    };
+    assert!(run_plan(&m, &inv, &bad, &[], &Secrets::default()).await.is_err());
+}

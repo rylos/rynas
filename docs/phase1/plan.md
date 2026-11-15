@@ -514,7 +514,10 @@ Types in `rynas_api_types::storage`. Nothing here changes the system: plans only
 `StoragePlan`: `valid`, `errors`, `warnings`, `raw_bytes`, `usable_bytes`, `fault_tolerance`,
 `wasted_bytes`, `summary`, ordered `steps` (`command` with argv and an optional named stdin secret,
 `write_sysfs`, `config` entries owned by rynas-config, `wait`), each step listing the devices it
-destroys. `errors` and `warnings` are English (logs, CLI); the UI translates their coded twins,
+destroys (`best_effort: true`: a failure is a warning in the task log and the plan goes on, e.g.
+clearing a replaced disk; a disk erased that is not one of the request's new disks is checked by
+serial, WWN and size before each step). A `wait` condition `<sysfs attr> == <value>` may end with
+`, degraded <= N`: the md tier may keep N empty slots (another disk still missing). `errors` and `warnings` are English (logs, CLI); the UI translates their coded twins,
 same order: `issues` (`PlanIssue {code, field?, subject?}`) and `warning_items`
 (`PlanWarning {code, args}`). Each step carries `kind` (`PlanStepKind`) and `args` next to its
 English `description`. `PlanArgs` = `subject?`, `other?`, `items[]`, `size_bytes?`, `count?`,

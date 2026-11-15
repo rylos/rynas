@@ -1131,6 +1131,10 @@ pub struct PlanStep {
     /// The step destroys data on these devices.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub destroys: Vec<String>,
+    /// A failure is a warning in the task log and the plan goes on (clearing a replaced disk
+    /// that the volume no longer uses: it may be unreadable, or another disk by now).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub best_effort: bool,
 }
 
 /// Answer of every `POST /api/v1/storage/plan/*`: no side effects, only what would be done.
@@ -1789,6 +1793,7 @@ mod tests {
                     stdin: None,
                 },
                 destroys: vec![],
+                best_effort: false,
             }],
             ..Default::default()
         };

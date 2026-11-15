@@ -229,6 +229,38 @@ pub fn check_free<M: Machine>(m: &M, inv: &Inventory, disks: &[String]) -> Resul
     Ok(())
 }
 
+/// Refuses when the disk now under `want`'s kernel name is another one (serial, WWN or size
+/// differ from the inventory the plan was checked against).
+pub async fn same_disk<M: Machine>(m: &M, want: &DiskSummary) -> Result<(), String> {
+    let dev = format!("/dev/{}", want.name);
+    let o = run_cmd(
+        m,
+        strs(&["lsblk", "--json", "--nodeps", "--bytes", "--output", "SERIAL,WWN,SIZE", &dev]),
+        None,
+        true,
+        true,
+    )
+    .await
+    .map_err(|e| format!("{dev}: cannot tell which disk it is now ({e}): not erased"))?;
+    let v: serde_json::Value = serde_json::from_str(&o.stdout)
+        .map_err(|e| format!("{dev}: lsblk printed no disk ({e}): not erased"))?;
+    let d = &v["blockdevices"][0];
+    let text = |k: &str| d[k].as_str().map(|s| s.trim().to_string()).unwrap_or_default();
+    let size = d["size"]
+        .as_u64()
+        .or_else(|| d["size"].as_str().and_then(|s| s.trim().parse().ok()))
+        .unwrap_or(0);
+    let want_wwn = want.wwn.as_deref().map(str::trim).unwrap_or("");
+    if text("serial") != want.serial.trim() || text("wwn") != want_wwn || size != want.size {
+        return Err(format!(
+            "{dev} is not the disk the plan was made for (serial {:?}, expected {:?}): not erased",
+            text("serial"),
+            want.serial.trim()
+        ));
+    }
+    Ok(())
+}
+
 // ------------------------------------------------------------------------------- helpers
 
 fn timeout_for(argv: &[String]) -> Duration {
@@ -819,6 +851,18 @@ async fn wait_idle<M: Machine>(
     step: usize,
     total: usize,
 ) -> Result<(), String> {
+    // "<attr> == <value>[, degraded <= N]": a tier that stays short of disks after the step
+    // (another disk is still missing) names how many slots may stay empty
+    let (condition, max_degraded) = match condition.split_once(", degraded <= ") {
+        Some((c, n)) => (
+            c,
+            n.trim()
+                .parse::<u32>()
+                .map_err(|_| format!("cannot wait for {condition:?}"))?,
+        ),
+        None if clean => (condition, 0),
+        None => (condition, u32::MAX),
+    };
     let (path, want) = condition
         .split_once(" == ")
         .map(|(p, v)| (p.trim(), v.trim()))
@@ -838,7 +882,7 @@ async fn wait_idle<M: Machine>(
             .unwrap_or(0);
         match now.as_deref() {
             None => return Err(format!("{path} is gone")),
-            Some(v) if v == want && (!clean || degraded == 0) => return Ok(()),
+            Some(v) if v == want && degraded <= max_degraded => return Ok(()),
             Some(v) => {
                 let pct = m.read_file(&format!("{dir}/sync_completed")).and_then(|s| {
                     let (a, b) = s.trim().split_once('/')?;
@@ -981,21 +1025,44 @@ pub async fn run_plan_with<M: Machine>(
                 if !matches!(prog, "wipefs" | "sgdisk" | "udevadm" | "partx") {
                     touched_array = true;
                 }
-                if prog == "wipefs" && !step.destroys.is_empty() {
-                    undo.push(disk_undo(plan, &step.destroys[0]));
-                }
-                match stdin.as_deref().map(|n| secrets.get(n)).transpose() {
-                    Err(e) => Err(e),
-                    Ok(stdin) => {
-                        let argv = mount_argv(m, argv, mountpoint);
-                        match run_cmd(m, argv, stdin, false, true).await {
-                            Err(e) if prog == "udevadm" => {
-                                m.log(&format!("udevadm settle: {e} (ignored)"));
-                                Ok(())
-                            }
-                            r => r.map(|_| ()),
-                        }
+                if prog == "wipefs"
+                    && let Some(disk) = step.destroys.first()
+                {
+                    let dev = format!("/dev/{disk}");
+                    if !undo.iter().any(|u| matches!(u, Undo::Disk { dev: d, .. } if d == &dev)) {
+                        undo.push(disk_undo(plan, disk));
                     }
+                }
+                // a disk erased hours after the plan by its kernel name (the replaced disk,
+                // cleared once out of every tier) must still be the disk the plan was made for
+                let mut r = Ok(());
+                for disk in step.destroys.iter().filter(|d| !new_disks.contains(d)) {
+                    if let Some(want) = inv.disks.iter().find(|x| &x.name == disk) {
+                        r = r.and(same_disk(m, want).await);
+                    }
+                }
+                let r = match r {
+                    Err(e) => Err(e),
+                    Ok(()) => match stdin.as_deref().map(|n| secrets.get(n)).transpose() {
+                        Err(e) => Err(e),
+                        Ok(stdin) => {
+                            let argv = mount_argv(m, argv, mountpoint);
+                            match run_cmd(m, argv, stdin, false, true).await {
+                                Err(e) if prog == "udevadm" => {
+                                    m.log(&format!("udevadm settle: {e} (ignored)"));
+                                    Ok(())
+                                }
+                                r => r.map(|_| ()),
+                            }
+                        }
+                    },
+                };
+                match r {
+                    Err(e) if step.best_effort => {
+                        m.log(&format!("WARNING: {e}; left as it is, the plan goes on"));
+                        Ok(())
+                    }
+                    r => r,
                 }
             }
         };

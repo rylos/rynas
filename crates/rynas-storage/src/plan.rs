@@ -60,6 +60,7 @@ pub(crate) fn step(desc: D, action: PlanAction) -> PlanStep {
         args,
         action,
         destroys: Vec::new(),
+        best_effort: false,
     }
 }
 
