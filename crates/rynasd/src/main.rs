@@ -67,6 +67,10 @@ struct Args {
     /// Tests only: attached loop devices count as disks (write side on loop files).
     #[arg(long, hide = true)]
     storage_loop_disks: bool,
+    /// Tests only, with --storage-loop-disks: thinnest flexible RAID tier in MiB (16384 by
+    /// default; loop files of a few GiB need a smaller one).
+    #[arg(long, hide = true, requires = "storage_loop_disks")]
+    storage_min_tier_mib: Option<u64>,
     /// Screenshots only (with --dry-system): fake removable drives below --hw-root.
     #[arg(long, hide = true)]
     removable_demo: bool,
@@ -769,6 +773,9 @@ fn main() -> std::io::Result<()> {
             tracing::warn!("loop devices count as disks (--storage-loop-disks): tests only");
             let mut s = rynas_storage::Storage::new(Arc::new(rynas_storage::host::SystemHost));
             s.loop_disks = true;
+            if let Some(m) = args.storage_min_tier_mib {
+                s.min_tier = m.max(1) << 20;
+            }
             state.storage = Arc::new(s);
         }
         // SMART warnings marked as seen, per drive: survive restarts
