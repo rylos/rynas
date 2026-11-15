@@ -370,6 +370,8 @@ fn replace_the_4_with_a_12_in_4_8_8() {
             "pvresize /dev/md/vol2_t2".into(),
             "lvextend -l +100%FREE rynas_vol2/data".into(),
             "btrfs filesystem resize max /vol2".into(),
+            "mdadm --zero-superblock /dev/sda1".into(),
+            "sgdisk --zap-all /dev/sda".into(),
         ]
     );
     assert_eq!(steps[6].kind, Some(PlanStepKind::WaitCopy));
@@ -486,6 +488,10 @@ fn replace_a_failed_disk_in_the_model() {
             "mdadm /dev/md/vol2_t2 --add /dev/sdd2",
             "wait /sys/block/md101/md/sync_action == idle",
             "wait /sys/block/md102/md/sync_action == idle",
+            // the failed disk is still attached: its old partitions are cleared last
+            "mdadm --zero-superblock /dev/sdb1",
+            "mdadm --zero-superblock /dev/sdb2",
+            "sgdisk --zap-all /dev/sdb",
         ]
     );
     assert!(end.tiers.iter().all(|t| t.degraded() == 0 && t.members.iter().all(|m| m.disk != "sdb")));
@@ -582,6 +588,9 @@ fn replace_a_failed_disk() {
             "mdadm /dev/md127 --add /dev/sdd2".into(),
             "wait /sys/block/md126/md/sync_action == idle".into(),
             "wait /sys/block/md127/md/sync_action == idle".into(),
+            "mdadm --zero-superblock /dev/sdb1".into(),
+            "mdadm --zero-superblock /dev/sdb2".into(),
+            "sgdisk --zap-all /dev/sdb".into(),
         ]
     );
     assert_eq!(p.steps[5].kind, Some(PlanStepKind::AddForRebuild));

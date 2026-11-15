@@ -541,10 +541,12 @@ impl View {
             .find(|p| p.tier == t.index && p.start == t.start && p.end == t.end)
     }
 
-    /// Fresh slice partitions of tier `t` that are not in its array.
-    fn candidates(&self, t: &VTier) -> Vec<&VPart> {
+    /// Fresh slice partitions of tier `t` that are not in its array, except on the disk
+    /// being replaced (`old`: once cleared, its partitions are fresh too).
+    fn candidates(&self, t: &VTier, old: Option<&str>) -> Vec<&VPart> {
         self.disks
             .iter()
+            .filter(|d| Some(d.name.as_str()) != old)
             .flat_map(|d| d.parts.iter())
             .filter(|p| p.tier == t.index && p.start == t.start && p.end == t.end)
             .filter(|p| p.fresh && t.member(&p.kname).is_none())
@@ -790,6 +792,16 @@ impl View {
                     for x in d.parts.iter_mut().filter(|x| x.kname == p) {
                         x.fresh = true;
                     }
+                }
+                // a disk in no tier (the replaced one) is not part of the layout: a fresh
+                // inventory does not find it under the volume either
+                let disk = self.part_disk(&p);
+                let in_tier = self
+                    .tiers
+                    .iter()
+                    .any(|t| t.planned.contains(&disk) || t.members.iter().any(|m| m.disk == disk));
+                if !in_tier {
+                    self.disks.retain(|d| d.name != disk);
                 }
             }
             ["mdadm", dev, op, rest @ ..] => {
@@ -1108,7 +1120,7 @@ pub fn next(v: &View, g: &Goal) -> Option<Vec<PlanStep>> {
     };
     let idle = |t: &VTier| t.sync.is_none() && !t.interrupted && t.replacing.is_none();
     let change_pending = |t: &VTier| {
-        !v.candidates(t).is_empty() || t.count(MemberRole::Spare) > 0 || replace_pending(t)
+        !v.candidates(t, g.old.as_deref()).is_empty() || t.count(MemberRole::Spare) > 0 || replace_pending(t)
     };
 
     // a write-intent bitmap back on as soon as its tier is done
@@ -1271,7 +1283,7 @@ pub fn next(v: &View, g: &Goal) -> Option<Vec<PlanStep>> {
         }
         let slots = (t.degraded() as usize).saturating_sub(t.count(MemberRole::Rebuilding));
         let cands: Vec<String> = v
-            .candidates(t)
+            .candidates(t, g.old.as_deref())
             .into_iter()
             .take(slots)
             .map(|p| dev(&p.kname))
@@ -1346,7 +1358,7 @@ pub fn next(v: &View, g: &Goal) -> Option<Vec<PlanStep>> {
             };
         }
         // joins
-        let cands: Vec<&VPart> = v.candidates(t);
+        let cands: Vec<&VPart> = v.candidates(t, g.old.as_deref());
         let spares: Vec<&VMember> = t
             .members
             .iter()
@@ -1413,6 +1425,33 @@ pub fn next(v: &View, g: &Goal) -> Option<Vec<PlanStep>> {
             _ => continue,
         };
         return one(step);
+    }
+    // last, the replaced disk when it is still attached and out of every tier: its old tier
+    // partitions lose their superblocks (otherwise assembling from mdadm.conf, as the
+    // initramfs does, finds an outdated copy of a tier and gives up on the whole array),
+    // then its partition table goes (a slice of the volume that is not a member would be
+    // taken for a new disk's partition waiting to join): the disk is free again
+    if let Some(old) = g.old.as_deref()
+        && let Some(dk) = v.disks.iter().find(|d| d.name == old)
+        && !dk.parts.is_empty()
+        && v.tiers.iter().all(|t| t.members.iter().all(|m| m.disk != old))
+    {
+        let mut steps: Vec<PlanStep> = dk
+            .parts
+            .iter()
+            .filter(|p| !p.fresh)
+            .map(|p| {
+                run(
+                    on(PlanStepKind::WipeSignatures, &p.kname),
+                    s(&["mdadm", "--zero-superblock", &dev(&p.kname)]),
+                )
+            })
+            .collect();
+        steps.push(run(
+            on(PlanStepKind::ClearPartitionTable, old),
+            s(&["sgdisk", "--zap-all", &dev(old)]),
+        ));
+        return Some(steps);
     }
     None
 }
