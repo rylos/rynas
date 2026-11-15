@@ -791,12 +791,31 @@ fn main() -> std::io::Result<()> {
         ops.admins = rynasd::roles::AdminPolicy::new(args.admin_groups.clone(), state.groups);
         // applied disk settings: read APM and write cache again (the SMART cache is 10 min)
         let st = state.storage.clone();
+        // the recorded volumes: the flexible RAID detection checks its tiers against them
+        // (kept current after every change of the key, by an apply or a storage task)
+        let records = {
+            let cfg = ops.config.clone();
+            move || {
+                cfg.current(rynas_storage::domain::VOLUMES_KEY)
+                    .ok()
+                    .and_then(|v| rynas_storage::domain::parse_volumes(v.as_ref()).ok())
+                    .map(|d| d.volumes)
+            }
+        };
+        if let Some(r) = records() {
+            state.storage.set_records(r);
+        }
         ops.after_apply = Some(Arc::new(move |keys, log| {
             if keys.iter().any(|k| k == rynas_storage::domain::TUNING_KEY) {
                 let read = st.refresh_disk_settings();
                 if !read.is_empty() {
                     log(&format!("disk settings read again: {}", read.join(", ")));
                 }
+            }
+            if keys.iter().any(|k| k == rynas_storage::domain::VOLUMES_KEY)
+                && let Some(r) = records()
+            {
+                st.set_records(r);
             }
         }));
         let ops = Arc::new(ops);

@@ -213,6 +213,7 @@ pub fn router(state: DaemonState) -> Router {
         .route("/v1/storage/plan/volume", post(plan_volume))
         .route("/v1/storage/plan/grow", post(plan_grow))
         .route("/v1/storage/plan/replace", post(plan_replace))
+        .route("/v1/storage/plan/complete", post(plan_complete))
         .route("/v1/storage/plan/scrub", post(plan_scrub))
         .with_state(state.clone())
         .merge(crate::ops::router(state.ops))
@@ -489,6 +490,18 @@ async fn plan_replace(
 ) -> PlanRes {
     let Json(req) = body?;
     Ok(Json(plan::plan_replace(&*inventory(&st).await?, &req)))
+}
+
+/// What is left of an interrupted growth of a flexible volume.
+async fn plan_complete(
+    State(st): State<DaemonState>,
+    body: Result<Json<rynas_api_types::storage::CompletePlanRequest>, JsonRejection>,
+) -> PlanRes {
+    let Json(req) = body?;
+    Ok(Json(rynas_storage::flex::plan::plan_complete(
+        &*inventory(&st).await?,
+        &req,
+    )))
 }
 
 async fn plan_scrub(

@@ -294,6 +294,43 @@ async fn a_volume_is_created_by_a_task_and_recorded() {
     assert_eq!(rev.comment, "volume backup created");
 }
 
+/// A flexible RAID volume: recorded with one array per tier and its volume group; the plan
+/// of completing a growth answers for it, and refuses a classic volume.
+#[tokio::test]
+async fn a_flexible_volume_is_recorded_with_its_tiers() {
+    let e = env();
+    let body = json!({
+        "disks": ["sdd", "sde"], "level": "flex1", "label": "flex",
+        "confirm": "flex", "serials": ["WD-WX0BBBB4", "ZFL0CCC5"]
+    });
+    let (s, b) = call(&e, "POST", "/v1/storage/volumes", Some(body)).await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{}", String::from_utf8_lossy(&b));
+    let id = serde_json::from_slice::<TaskStarted>(&b).unwrap().task_id;
+    let info = e.ops.tasks.wait(&id).await.unwrap();
+    let log = e.ops.tasks.read_log(&id, 0, 1 << 20).unwrap().text;
+    assert_eq!(info.status, TaskStatus::Ok, "{log}");
+    assert!(log.contains("$ mdadm --create /dev/md/flex_t1"), "{log}");
+    assert!(log.contains("$ vgcreate rynas_flex /dev/md/flex_t1"), "{log}");
+    assert!(log.contains("$ lvcreate --yes -l 100%FREE -n data rynas_flex"), "{log}");
+    let doc: StorageVolumes =
+        serde_json::from_value(e.ops.config.current(VOLUMES_KEY).unwrap().unwrap()).unwrap();
+    let r = &doc.volumes[0];
+    assert_eq!((r.label.as_str(), r.md_uuid.as_str()), ("flex", ""));
+    assert_eq!(r.vg.as_deref(), Some("rynas_flex"));
+    assert_eq!(r.tiers.len(), 1);
+    let mdadm = std::fs::read_to_string(e.root.join("etc/mdadm/mdadm.conf")).unwrap();
+    assert!(mdadm.contains("ARRAY /dev/md/flex_t1 metadata=1.2 UUID="), "{mdadm}");
+
+    // complete: the plan endpoint answers (vol1 is no flexible volume), the task route
+    // refuses a classic volume
+    let (s, b) = call(&e, "POST", "/v1/storage/plan/complete", Some(json!({"volume": "vol1"}))).await;
+    assert_eq!(s, StatusCode::OK);
+    let p: StoragePlan = serde_json::from_slice(&b).unwrap();
+    assert!(!p.valid);
+    let (s, _) = call(&e, "POST", "/v1/storage/volumes/vol1/complete", Some(json!({}))).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+}
+
 #[tokio::test]
 async fn disk_settings_are_staged() {
     let e = env();

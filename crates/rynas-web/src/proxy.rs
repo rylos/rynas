@@ -61,11 +61,13 @@ pub fn routes() -> Router<AppState> {
         .route("/storage/plan/volume", post(forward))
         .route("/storage/plan/grow", post(forward))
         .route("/storage/plan/replace", post(forward))
+        .route("/storage/plan/complete", post(forward))
         .route("/storage/plan/scrub", post(forward))
         // storage write side: plans executed as tasks, LUKS, subvolumes, settings
         .route("/storage/volumes", post(forward))
         .route("/storage/volumes/{name}/grow", post(forward))
         .route("/storage/volumes/{name}/replace", post(forward))
+        .route("/storage/volumes/{name}/complete", post(forward))
         .route("/storage/volumes/{name}/scrub", post(forward))
         .route("/storage/volumes/{name}/unlock", post(forward))
         .route("/storage/volumes/{name}/lock", post(forward))

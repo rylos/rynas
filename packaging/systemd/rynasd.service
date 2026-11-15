@@ -66,6 +66,10 @@ NoNewPrivileges=yes
 ProtectSystem=yes
 # /boot: update-initramfs after a new md array (mdadm.conf is copied into the initramfs)
 ReadWritePaths=/boot
+# LVM (flexible RAID volumes: md tiers joined by a volume group) needs no more: its locks
+# (/run/lock/lvm), /run/lvm and its metadata backups (/etc/lvm/archive, /etc/lvm/backup)
+# stay writable under ProtectSystem=yes, its udev cookies use SysV semaphores (allowed by
+# @system-service, no PrivateIPC), and dm ioctls use CAP_SYS_ADMIN (below).
 # users and shares: useradd/userdel create and remove home directories, and shares (with
 # their ACLs) may live below /home. (ReadWritePaths=/home does not lift ProtectHome=read-only
 # on /home itself.) Homes on a volume (D-HOMES) live below /srv/rynas/homes and the volume

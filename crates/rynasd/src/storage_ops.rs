@@ -22,10 +22,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use rynas_api_types::storage::{
-    ArrayTuning, BtrfsFilesystem, DiskOverride, DiskSettings, DiskSettingsState, DiskSummary,
+    ArrayTuning, BtrfsFilesystem, CompletePlanRequest, DiskOverride, DiskSettings, DiskSettingsState, DiskSummary,
     GrowPlanRequest, HealthAckRequest, HealthAckResult, MdArray, RecoveryKey, ReplacePlanRequest, ScrubAction, ScrubPlanRequest,
     StoragePlan, StorageTuning, StorageVolumes, SubvolumeCreateRequest, SubvolumeInfo,
-    SubvolumeSettings, UnlockRequest, VolumeCreateRequest, VolumeGrowRequest, VolumeRecord,
+    SubvolumeSettings, UnlockRequest, VolumeCompleteRequest, VolumeCreateRequest, VolumeGrowRequest, VolumeRecord,
     VolumeReplaceRequest, VolumeScrubRequest, VolumeSettings, VolumeSettingsState,
 };
 use rynas_api_types::{SharesConfig, TaskStarted, error_codes};
@@ -335,11 +335,24 @@ impl Machine for TaskMachine {
                         doc.volumes.retain(|v| &v.label != l);
                         format!("volume {l} removed (rollback)")
                     }
+                    VolumeChange::Update(r) => {
+                        if !doc.volumes.iter().any(|v| v.label == r.label) {
+                            return Err(format!("volume {} is not recorded", r.label));
+                        }
+                        doc.volumes.retain(|v| v.label != r.label);
+                        doc.volumes.push(r.clone());
+                        format!("volume {} updated (tiers {})", r.label, r.tiers.len())
+                    }
                 };
+                let volumes = doc.volumes.clone();
                 let v = serde_json::to_value(doc).map_err(|e| e.to_string())?;
                 ops.config()
                     .apply_value(&user, VOLUMES_KEY, Some(v), &comment, &|l| ctx.log(l))
-                    .map(|rev| ctx.log(&format!("configuration revision {rev}")))
+                    .map(|rev| {
+                        // the flexible RAID detection checks its tiers against the records
+                        ops.storage.set_records(volumes);
+                        ctx.log(&format!("configuration revision {rev}"))
+                    })
                     .map_err(|e| e.to_string())
             })
             .await
@@ -439,9 +452,12 @@ struct VolumeRef {
     fs: Option<BtrfsFilesystem>,
     /// Open mapping (kernel name of the dm device's mapper name).
     mapper: Option<String>,
-    /// The md array holds a LUKS container (open or not).
+    /// The md array (or the logical volume of a flexible RAID) holds a LUKS container (open
+    /// or not).
     luks: bool,
     record: Option<VolumeRecord>,
+    /// A flexible RAID: md tiers joined by the volume group `rynas_<label>`.
+    flex: bool,
 }
 
 impl VolumeRef {
@@ -483,22 +499,29 @@ fn resolve(inv: &Inventory, doc: &StorageVolumes, label: &str) -> Res<VolumeRef>
                     .is_some_and(|r| a.uuid.as_deref() == Some(r.md_uuid.as_str()))
         })
         .cloned();
-    let (mapper, luks) = match &md {
-        Some(a) => {
-            let above = inv.graph.above(&a.name);
+    let layout = inv
+        .flex
+        .iter()
+        .find(|l| l.vg == rynas_storage::flex::plan::vg_name(label));
+    // the device under LUKS: the md array, or the logical volume of a flexible RAID
+    let base = md.as_ref().map(|a| a.name.clone()).or_else(|| layout.map(|l| l.lv_device.clone()));
+    let (mapper, luks) = match &base {
+        Some(name) => {
+            let above = inv.graph.above(name);
             let mapper = above
                 .iter()
                 .find(|d| d.kind == "crypt")
                 .map(|d| d.name.clone());
             let luks = inv
                 .graph
-                .get(&a.name)
+                .get(name)
                 .is_some_and(|d| d.fstype.as_deref() == Some("crypto_LUKS"));
             (mapper, luks)
         }
         None => (None, false),
     };
-    if fs.is_none() && md.is_none() && record.is_none() {
+    let flex = layout.is_some() || record.as_ref().is_some_and(|r| r.level.is_flexible());
+    if fs.is_none() && md.is_none() && record.is_none() && layout.is_none() {
         return Err(Error::not_found(format!("volume {label}")));
     }
     Ok(VolumeRef {
@@ -508,6 +531,7 @@ fn resolve(inv: &Inventory, doc: &StorageVolumes, label: &str) -> Res<VolumeRef>
         mapper,
         luks: luks || record.as_ref().is_some_and(|r| r.luks_uuid.is_some()),
         record,
+        flex,
     })
 }
 
@@ -551,6 +575,7 @@ pub fn router(st: StoState) -> Router {
         .route("/v1/storage/volumes", post(volume_create))
         .route("/v1/storage/volumes/{name}/grow", post(volume_grow))
         .route("/v1/storage/volumes/{name}/replace", post(volume_replace))
+        .route("/v1/storage/volumes/{name}/complete", post(volume_complete))
         .route("/v1/storage/volumes/{name}/scrub", post(volume_scrub))
         .route("/v1/storage/volumes/{name}/unlock", post(volume_unlock))
         .route("/v1/storage/volumes/{name}/lock", post(volume_lock))
@@ -769,14 +794,24 @@ async fn volume_grow(
     let (s, user) = (sto(&st)?, user(&h)?);
     let mut req = json_body(body)?;
     let (inv, v) = volume(&s, &name, true).await?;
-    let md =
-        v.md.as_ref()
-            .ok_or_else(|| conflict(format!("volume {name} has no md array")))?;
-    let preq = GrowPlanRequest {
-        array: md.name.clone(),
-        disks: req.disks.clone(),
-        level: req.level,
-        volume: None,
+    let preq = if v.flex {
+        // the disks join the tiers they cover (and may make a new top tier)
+        GrowPlanRequest {
+            array: String::new(),
+            disks: req.disks.clone(),
+            level: req.level,
+            volume: Some(name.clone()),
+        }
+    } else {
+        let md =
+            v.md.as_ref()
+                .ok_or_else(|| conflict(format!("volume {name} has no md array")))?;
+        GrowPlanRequest {
+            array: md.name.clone(),
+            disks: req.disks.clone(),
+            level: req.level,
+            volume: None,
+        }
     };
     let p = plan::plan_grow(&inv, &preq);
     if !p.valid {
@@ -788,21 +823,7 @@ async fn volume_grow(
         &disks_of(&inv, &req.disks)?,
         &req.serials,
     )?;
-    let needs_secret = p.steps.iter().any(|s| {
-        matches!(
-            &s.action,
-            rynas_api_types::storage::PlanAction::Command { stdin: Some(_), .. }
-        )
-    });
-    let secrets = match (needs_secret, req.passphrase.take()) {
-        (true, None) => {
-            return Err(Error::invalid(
-                "passphrase",
-                "the volume is encrypted: the passphrase is needed to grow its LUKS mapping",
-            ));
-        }
-        (_, pass) => Secrets::new(pass),
-    };
+    let secrets = secrets_for(&p, req.passphrase.take())?;
     check_free_now(&s, &inv, &req.disks)?;
     let mut keys: Vec<String> = req.disks.iter().map(|d| format!("disk:{d}")).collect();
     keys.push(format!("volume:{name}"));
@@ -813,6 +834,7 @@ async fn volume_grow(
     let ops = s.clone();
     let disks = req.disks.clone();
     let mnt = v.mounted().and_then(|f| f.mountpoint.clone());
+    let flex = v.flex;
     let id = spawn(
         &s,
         "storage.volume-grow",
@@ -829,10 +851,39 @@ async fn volume_grow(
                     fresh.errors.join("; ")
                 ));
             }
-            exec::run_plan(&m, &inv, &fresh, &disks, &secrets).await
+            let record = if flex { record_of(&ops, &name)? } else { None };
+            exec::run_plan_with(&m, &inv, &fresh, &disks, &secrets, record).await
         },
     )?;
     Ok(started(id))
+}
+
+/// The passphrase a plan needs (a step feeds it on standard input: the LUKS mapping of an
+/// encrypted volume grows).
+fn secrets_for(p: &StoragePlan, passphrase: Option<String>) -> Res<Secrets> {
+    let needs = p.steps.iter().any(|s| {
+        matches!(
+            &s.action,
+            rynas_api_types::storage::PlanAction::Command { stdin: Some(_), .. }
+        )
+    });
+    match (needs, passphrase) {
+        (true, None) => Err(Error::invalid(
+            "passphrase",
+            "the volume is encrypted: the passphrase is needed to grow its LUKS mapping",
+        )),
+        (_, pass) => Ok(Secrets::new(pass)),
+    }
+}
+
+/// The record of a flexible volume, which its growth updates tier by tier.
+fn record_of(ops: &StorageOps, label: &str) -> Result<Option<VolumeRecord>, String> {
+    let doc = ops.volumes_doc()?;
+    let r = doc.volumes.into_iter().find(|v| v.label == label);
+    if r.is_none() {
+        return Err(format!("volume {label} is not recorded: its new tiers could not be recorded"));
+    }
+    Ok(r)
 }
 
 async fn volume_replace(
@@ -842,16 +893,26 @@ async fn volume_replace(
     body: Result<Json<VolumeReplaceRequest>, JsonRejection>,
 ) -> Res<Response> {
     let (s, user) = (sto(&st)?, user(&h)?);
-    let req = json_body(body)?;
+    let mut req = json_body(body)?;
     let (inv, v) = volume(&s, &name, true).await?;
-    let md =
-        v.md.as_ref()
-            .ok_or_else(|| conflict(format!("volume {name} has no md array")))?;
-    let preq = ReplacePlanRequest {
-        array: md.name.clone(),
-        old: req.old.clone(),
-        new_disk: req.new_disk.clone(),
-        volume: None,
+    let preq = if v.flex {
+        // the new disk takes the old one's place in every tier ("missing": the disk gone)
+        ReplacePlanRequest {
+            array: String::new(),
+            old: req.old.clone(),
+            new_disk: req.new_disk.clone(),
+            volume: Some(name.clone()),
+        }
+    } else {
+        let md =
+            v.md.as_ref()
+                .ok_or_else(|| conflict(format!("volume {name} has no md array")))?;
+        ReplacePlanRequest {
+            array: md.name.clone(),
+            old: req.old.clone(),
+            new_disk: req.new_disk.clone(),
+            volume: None,
+        }
     };
     let p = plan::plan_replace(&inv, &preq);
     if !p.valid {
@@ -859,6 +920,7 @@ async fn volume_replace(
     }
     let disks = vec![req.new_disk.clone()];
     confirm(&name, &req.confirm, &disks_of(&inv, &disks)?, &req.serials)?;
+    let secrets = secrets_for(&p, req.passphrase.take())?;
     check_free_now(&s, &inv, &disks)?;
     let held = s.reserve(vec![
         format!("disk:{}", req.new_disk),
@@ -869,6 +931,7 @@ async fn volume_replace(
     }
     let ops = s.clone();
     let mnt = v.mounted().and_then(|f| f.mountpoint.clone());
+    let flex = v.flex;
     let id = spawn(
         &s,
         "storage.volume-replace",
@@ -885,7 +948,62 @@ async fn volume_replace(
                     fresh.errors.join("; ")
                 ));
             }
-            exec::run_plan(&m, &inv, &fresh, &disks, &Secrets::default()).await
+            let record = if flex { record_of(&ops, &name)? } else { None };
+            exec::run_plan_with(&m, &inv, &fresh, &disks, &secrets, record).await
+        },
+    )?;
+    Ok(started(id))
+}
+
+/// `POST /storage/volumes/{name}/complete`: what is left of an interrupted growth of a
+/// flexible volume. Nothing is erased (the partitions it uses are the volume's own), so no
+/// typed confirmation.
+async fn volume_complete(
+    State(st): State<StoState>,
+    h: HeaderMap,
+    UrlPath(name): UrlPath<String>,
+    body: Result<Json<VolumeCompleteRequest>, JsonRejection>,
+) -> Res<Response> {
+    let (s, user) = (sto(&st)?, user(&h)?);
+    let mut req = json_body(body)?;
+    let (inv, v) = volume(&s, &name, true).await?;
+    if !v.flex {
+        return Err(conflict(format!("volume {name} is not a flexible RAID")));
+    }
+    let preq = CompletePlanRequest {
+        volume: name.clone(),
+    };
+    let p = rynas_storage::flex::plan::plan_complete(&inv, &preq);
+    if !p.valid {
+        return Err(invalid_plan(&p));
+    }
+    if p.steps.is_empty() {
+        return Err(conflict(format!("volume {name} has nothing left to complete")));
+    }
+    let secrets = secrets_for(&p, req.passphrase.take())?;
+    let held = s.reserve(vec![format!("volume:{name}")])?;
+    if req.dry_run {
+        return Ok(Json(p).into_response());
+    }
+    let ops = s.clone();
+    let mnt = v.mounted().and_then(|f| f.mountpoint.clone());
+    let id = spawn(
+        &s,
+        "storage.volume-complete",
+        &user,
+        held,
+        move |m| async move {
+            let _fs = heavy_on(mnt.as_deref(), "storage.volume-complete").await;
+            let inv = ops.inventory(true).await.map_err(|e| e.2)?;
+            let fresh = rynas_storage::flex::plan::plan_complete(&inv, &preq);
+            if !fresh.valid || fresh.steps != p.steps {
+                return Err(format!(
+                    "the volume changed since the request: {}; plan again",
+                    fresh.errors.join("; ")
+                ));
+            }
+            let record = record_of(&ops, &name)?;
+            exec::run_plan_with(&m, &inv, &fresh, &[], &secrets, record).await
         },
     )?;
     Ok(started(id))
@@ -983,6 +1101,25 @@ fn luks_volume(v: &VolumeRef) -> Res<LuksVolume> {
             "volume {} was not created by rynas: it has no fstab entry to mount it from",
             v.label
         )));
+    }
+    if v.flex {
+        // LUKS sits on the logical volume; LVM activates it once every tier is assembled
+        let device = rynas_storage::flex::plan::lv_path(&v.label);
+        if !Path::new(&device).exists() {
+            return Err(conflict(format!(
+                "the volume group of volume {} is not active (a tier array missing?)",
+                v.label
+            )));
+        }
+        return Ok(LuksVolume {
+            label: v.label.clone(),
+            device,
+            mapper: v
+                .mapper
+                .clone()
+                .unwrap_or_else(|| exec::mapper_name(&v.label)),
+            mountpoint: v.mountpoint(),
+        });
     }
     let device = format!("/dev/md/{}", v.label);
     let device = match (&v.md, Path::new(&device).exists()) {
